@@ -3706,9 +3706,9 @@ SERVICES_MAIN = """
 	// The Sources list shows these in this order after the drives and Link sources:
 	// the computer with rekordbox is a library on the link, so it comes before the services.
 	readonly property var scServices: [
-		{ id: "rekordbox", name: scRekordboxName ? "rekordbox (" + scRekordboxName + ")" : "rekordbox" },
+		{ id: "rekordbox", name: scRekordboxName ? "rekordbox (" + scRekordboxName + ")" : "rekordbox", label: "rekordbox" },
 		{ id: "tidal", name: "TIDAL" },
-		{ id: "netease", name: scT("NetEase Cloud Music") },
+		{ id: "netease", name: scT("NetEase Cloud Music"), label: "网易云音乐" },
 		{ id: "spotify", name: "Spotify" },
 		{ id: "deezer", name: "Deezer" },
 		{ id: "soundcloud", name: "SoundCloud" },
@@ -3962,6 +3962,17 @@ SERVICES_MAIN = """
 		if (shadow) return shadow === "tidal" || scServices.some(v => v.id === shadow) ? scIcon(shadow) : ""
 		const id = scOwnService(deck) || scScope
 		return source === "TIDAL" && id && id !== "tidal" ? scIcon(id) : ""
+	}
+	// #305: a browse row's mark. Engine draws the TIDAL slot's mark on every row the gateway serves (providerIconUri), so a row of another
+	// service says TIDAL. The gateway names a row's own service in its provider label ("Deezer [128 BPM 8A]", labelWithBPM: the same
+	// provider the header's lookup answers with), the row shows that service's mark; a row whose label names none (the services' mixed
+	// lists, a drive row) takes the selected service's, as a deck with no service on record does. Real TIDAL keeps its own mark (the test
+	// scSwapStemmed makes), and so does any mark that is not the slot's. "" keeps stock's mark.
+	function scRowIcon(stock, label) {
+		if (!/tidal/i.test(String(stock || "")) || (scScope === "tidal" && scTidalLoggedIn)) return ""
+		const name = String(label || "").split(" [")[0]
+		const own = scServices.find(v => (v.label || v.name) === name)
+		return own ? (own.id === "tidal" ? "" : scIcon(own.id)) : scSlotIcon("TIDAL", 0)
 	}
 	// Capture manual and auto-detected IANA time zones via stock Planck.timeDateController
 	// signals and persist them through stream-sync (/data/enginex/state/timezone) without
@@ -7884,6 +7895,20 @@ def edits(dev: bool):
         v + "BrowseView/Components/Components/" + ("BrowseViewBpm.qml" if v53() else "Bpm.qml"): [('text: row.modelData.bpm || ""', 'text: row.modelData.bpm || root.scPreview(row.modelData.providerName)[1]')],
         v + "BrowseView/Components/Components/Key.qml": [('text: row.modelData.key || ""', 'text: row.modelData.key || root.scPreview(row.modelData.providerName)[2] || ""')],
         v + "BrowseView/Components/Components/Song.qml": [('title: row.modelData.song || ""', 'title: root.scPlainTitle(row.modelData.song)')],
+        # #305: a streamed row's provider mark is its own service's (scRowIcon), not the slot's TIDAL; a service's own colours, stock's size.
+        v + "BrowseView/Components/Components/ProviderIcon.qml": [(
+            'source: row.modelData.providerIconUri ?? ""\n',
+            'readonly property string scMark: root.scRowIcon(row.modelData.providerIconUri ?? "", row.modelData.providerName || "")\n'
+            "        useOriginal: scMark !== \"\"\n"
+            '        source: scMark !== "" ? scMark : (row.modelData.providerIconUri ?? "")\n',
+        )],
+        # 5.3.0 only: the mark beside an offline TIDAL playlist is the slot's too (the selected service's, as a deck with no service on record).
+        **({v + "BrowseView/Components/BreadcrumbView/BreadcrumbViewListEntryDelegate.qml": [(
+            'source: "qrc:/Skins/UIKit/Icons/SourceTIDAL.png"\n',
+            'readonly property string scMark: root.scSlotIcon("TIDAL", 0)\n'
+            "            useOriginal: scMark !== \"\"\n"
+            '            source: scMark !== "" ? scMark : "qrc:/Skins/UIKit/Icons/SourceTIDAL.png"\n',
+        )]} if v53() else {}),
         # rb-bridge converts rekordbox media at mount. Engine's own slow import of a
         # large library corrupted m.db, so always take the prompt's "Ignore" branch.
         ROOT + "Items/MessageBoxes/RekordBoxImportDialog.qml": [(

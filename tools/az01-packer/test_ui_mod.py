@@ -9458,6 +9458,175 @@ assert.equal(scOwnService(2), 'tidal'); assert.equal(loaded.length, 1);
         self.assertIn("root.scBrand(trackData.streamingSource, trackData.infoFromDeck ? trackData.deckIndex : 0)", info)
         self.assertIn('|| "Local Drive"', info)
 
+    # #305 (5.3.0.6): the browse view's marks. Engine's providerIconUri is the slot's TIDAL mark on every row the gateway serves.
+    ROW = ("Skins/Embedded/Views/BrowseView/Components/Components/ProviderIcon.qml", "Skins/EmbeddedCommon/Views/BrowseView/Components/Components/ProviderIcon.qml")
+    OFFLINE = "Skins/Embedded/Views/BrowseView/Components/BreadcrumbView/BreadcrumbViewListEntryDelegate.qml"
+    SLOT_MARKS = ("qrc:/Skins/UIKit/Icons/SourceTIDAL.png", "qrc:/Skins/UIKit/Icons/SourceTIDALColored.png", "qrc:/streaming/TIDAL/Icon.png", "qrc:/Skins/UIKit/Icons/SourceTidal.png")
+    MARKS = {"deezer": "file:///data/enginex/ui/icons/deezer.png", "spotify": "file:///data/enginex/ui/icons/spotify.png",
+             "applemusic": "file:///data/enginex/ui/icons/applemusic.png", "netease": "file:///data/enginex/ui/icons/netease.png",
+             "soundcloud": "qrc:/Skins/UIKit/Icons/SourceSoundCloudColored.png", "beatport": "qrc:/Skins/UIKit/Icons/SourceBeatport%20LINKColored.png",
+             "rekordbox": "qrc:/Skins/UIKit/Icons/SourceEngineRemoteLibrary.png"}
+
+    def row_prelude(self):
+        """PRELUDE with the pack's own scServices (a stub has no gateway labels)."""
+        literal = re.search(r"readonly property var scServices: (\[.*?\n\t\])", bp.SERVICES_MAIN, re.S).group(1)
+        stub = re.compile(r"const scServices = \[.*?\];\n", re.S)
+        self.assertEqual(len(stub.findall(self.PRELUDE)), 1)
+        return stub.sub(lambda m: "Object.defineProperty(globalThis, 'scServices', {get: () => (" + literal + ")});\n", self.PRELUDE)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
+    def test_each_browse_row_shows_its_own_service_not_the_slots_tidal(self):
+        self.run_node(self.row_prelude() + self.functions("scIcon", "scOwnService", "scSlotIcon", "scRowIcon") + r"""
+const marks = @MARKS@, slot = @SLOT@;
+const labels = {deezer: 'Deezer', spotify: 'Spotify', applemusic: 'Apple Music', netease: '网易云音乐', soundcloud: 'SoundCloud', beatport: 'Beatport', rekordbox: 'rekordbox'};
+// The row's own service decides, with or without the tempo suffix the gateway adds, whatever service or none is selected.
+for (const scope of ['tidal', 'deezer', 'spotify', 'rekordbox', '']) {
+    scScope = scope;
+    for (const [id, label] of Object.entries(labels)) for (const stock of slot) {
+        assert.equal(scRowIcon(stock, label), marks[id], id + ' under ' + scope);
+        assert.equal(scRowIcon(stock, label + ' [128 BPM 8A]'), marks[id], id + ' with tempo under ' + scope);
+        assert.equal(scRowIcon(stock, label + ' [127.5 BPM]'), marks[id], id + ' with a decimal tempo under ' + scope);
+    }
+}
+// rekordbox's name carries the computer's name while one is on the link; its rows' label does not.
+scRekordboxName = 'DJ-MAC'; scScope = 'deezer';
+assert.equal(scRowIcon(slot[0], 'rekordbox [128.5 BPM 8A]'), marks.rekordbox);
+// Two services' rows in one list (the omni-source lists) keep two marks.
+scScope = 'spotify';
+assert.notEqual(scRowIcon(slot[0], 'Deezer [120 BPM]'), scRowIcon(slot[0], 'Beatport [120 BPM]'));
+""".replace("@MARKS@", json.dumps(self.MARKS)).replace("@SLOT@", json.dumps(list(self.SLOT_MARKS))))
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
+    def test_a_row_naming_no_service_takes_the_selected_one_as_the_header_does_and_real_tidal_keeps_its_mark(self):
+        self.run_node(self.row_prelude() + self.functions("scIcon", "scOwnService", "scSlotIcon", "scRowIcon") + r"""
+const slot = @SLOT@, deezer = 'file:///data/enginex/ui/icons/deezer.png';
+// No label, a label of no service (a drive row, a label with only the tempo), an unknown label: the selected service, like a deck with no service on record.
+scScope = 'deezer'; scTidalLoggedIn = false;
+for (const label of ['', undefined, null, 'USB/SD', ' [128 BPM 8A]', 'nope [1 BPM]', 'Deezer Records']) assert.equal(scRowIcon(slot[0], label), deezer, 'label ' + label);
+// Under the TIDAL scope (or none) nothing is on record either way: the stock mark stays.
+for (const scope of ['tidal', '']) { scScope = scope; for (const label of ['', 'USB/SD', 'TIDAL']) assert.equal(scRowIcon(slot[0], label), '', scope + ' ' + label); }
+// Real TIDAL is the scope tidal with an account paired: every row keeps TIDAL's mark, whatever its label says.
+scScope = 'tidal'; scTidalLoggedIn = true;
+for (const label of ['', 'Deezer [128 BPM 8A]', 'Spotify', 'rekordbox']) for (const stock of slot) assert.equal(scRowIcon(stock, label), '', 'real TIDAL ' + label);
+// The pairing alone is not real TIDAL (TIDAL disabled in Sources clears the scope and keeps it), nor is another scope with TIDAL paired.
+scScope = ''; assert.equal(scRowIcon(slot[0], 'Spotify [100 BPM]'), 'file:///data/enginex/ui/icons/spotify.png');
+scScope = 'deezer'; assert.equal(scRowIcon(slot[0], ''), deezer);
+// Only the slot's mark is replaced: Dropbox, a drive, a service's own mark or no mark are stock's, whatever the label and scope.
+scScope = 'deezer'; scTidalLoggedIn = false;
+for (const stock of ['qrc:/streaming/Dropbox/Icon.png', 'qrc:/Skins/UIKit/Icons/SourceSoundCloud.png', 'qrc:/Skins/UIKit/Icons/SourceUSB.png', '', undefined, null])
+    assert.equal(scRowIcon(stock, 'Spotify [100 BPM]'), '', 'stock ' + stock);
+""".replace("@SLOT@", json.dumps(list(self.SLOT_MARKS))))
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the root helpers")
+    def test_a_row_and_a_deck_agree_on_what_real_tidal_is(self):
+        """The row's test is the one scSwapStemmed makes: for every scope and pairing, a row keeps TIDAL's mark exactly when the deck ignores the gateway's answer."""
+        self.run_node(self.row_prelude() + self.functions("scIcon", "scNoteService", "scServiceOf", "scOwnService", "scSlotIcon", "scRowIcon", "scSwapStemmed") + self.LOADING + r"""
+let n = 100;
+for (const scope of ['tidal', 'deezer', 'spotify', '']) for (const paired of [true, false]) {
+    scScope = scope; scTidalLoggedIn = paired;
+    const r = load(1, track(++n)); r.answer(404, {'x-enginex-provider': 'beatport'});
+    const deckIgnoresGateway = scOwnService(1) !== 'beatport'; // the answer counts unless the slot is real TIDAL's
+    const rowKeepsTidal = scRowIcon('qrc:/Skins/UIKit/Icons/SourceTIDAL.png', 'Beatport [120 BPM]') === '';
+    assert.equal(rowKeepsTidal, deckIgnoresGateway, scope + ' paired ' + paired);
+    assert.equal(rowKeepsTidal, scope === 'tidal' && paired, scope + ' paired ' + paired);
+}
+""")
+
+    def test_the_pack_labels_are_the_gateways_labels(self):
+        """scRowIcon reads the label the gateway puts on a row (providerLabels): one list of services, the two spellings that differ named in it."""
+        go = (REPO / "pkg/webui/tidal_gateway.go").read_text(encoding="utf-8")
+        consts = dict(re.findall(r'^\s*(\w+)\s*=\s*"([^"]+)"', (REPO / "pkg/webui/rekordbox_source.go").read_text(encoding="utf-8") + (REPO / "pkg/webui/omnisource.go").read_text(encoding="utf-8"), re.M))
+        body = re.search(r"providerLabels\s*=\s*map\[string\]string\{([^}]*)\}", go).group(1)
+        labels = {}
+        for quoted, ident, label in re.findall(r'(?:"([^"]+)"|(\w+))\s*:\s*"([^"]+)"', body):
+            labels[quoted or consts[ident]] = label
+        self.assertEqual(labels["rekordbox"], "rekordbox")
+        literal = re.search(r"readonly property var scServices: (\[.*?\n\t\])", bp.SERVICES_MAIN, re.S).group(1)
+        for sid, name in re.findall(r'\{ id: "(\w+)", name: ([^\n]*?)(?:, label: "[^"]*")? \}', literal):
+            self.assertIn(sid, labels | {"tidal": "TIDAL"}, sid)
+        pack = {sid: label for sid, label in re.findall(r'id: "(\w+)", name: [^\n]*?label: "([^"]*)"', literal)}
+        for sid, label in labels.items():
+            if sid == "local":
+                continue  # a drive row is no service: it takes the selected one's mark
+            same_name = re.search(r'id: "%s", name: "%s" \}' % (sid, re.escape(label)), literal)
+            self.assertTrue(same_name or pack.get(sid) == label, f"{sid}: pack and gateway disagree on the row label {label!r}")
+
+    def patched_for(self, base, root, rel):
+        qrc = LAB / base / "qrc"
+        if not (qrc / rel).is_file():
+            self.skipTest(f"{qrc / rel} not found")
+        text = (qrc / rel).read_text(encoding="utf-8")
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = root
+            edits = bp.edits(False)
+            for old, new in edits.get(rel, []):
+                text = bp.patch(text, old, new, rel)
+            return text, rel in edits
+        finally:
+            bp.ROOT = old_root
+
+    def test_the_track_rows_mark_is_the_rows_own_service_on_every_base(self):
+        for base, root, rel in (("5.3.0", "Skins/Embedded/", self.ROW[0]), ("5.0.4", "Skins/EmbeddedCommon/", self.ROW[1])):
+            with self.subTest(base=base):
+                text, patched = self.patched_for(base, root, rel)
+                self.assertTrue(patched, "ProviderIcon.qml is patched")
+                self.assertIn('root.scRowIcon(row.modelData.providerIconUri ?? "", row.modelData.providerName || "")', text)
+                self.assertIn('useOriginal: scMark !== ""', text)  # a service's own colours; stock's tinted mark otherwise
+                self.assertIn('source: scMark !== "" ? scMark : (row.modelData.providerIconUri ?? "")', text)  # stock's mark stays for everything else
+                self.assertIn("width: 24", text)  # stock's size and the aspect-ratio height are untouched
+                self.assertIn("height: (src.height / src.width) * width", text)
+
+    def test_the_offline_playlist_mark_follows_the_selected_service_on_530_only(self):
+        text, patched = self.patched_for("5.3.0", "Skins/Embedded/", self.OFFLINE)
+        self.assertTrue(patched)
+        self.assertIn('root.scSlotIcon("TIDAL", 0)', text)
+        self.assertIn('source: scMark !== "" ? scMark : "qrc:/Skins/UIKit/Icons/SourceTIDAL.png"', text)
+        self.assertIn('visible: !delegate.isFetching && delegate.isTidalOfflinePlaylist', text)
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/EmbeddedCommon/"
+            self.assertNotIn(self.OFFLINE.replace("Skins/Embedded/", "Skins/EmbeddedCommon/"), bp.edits(False))  # 5.0.4 has no such mark
+        finally:
+            bp.ROOT = old_root
+
+    # Every file of the browse view that draws a streaming service's mark, and what the pack does about it (#305 inventory).
+    DRAW_SITES = {
+        "Skins/Embedded/Views/BrowseView/Components/Components/ProviderIcon.qml": "row",
+        "Skins/Embedded/Views/BrowseView/Components/BreadcrumbView/BreadcrumbViewListEntryDelegate.qml": "row",
+        "Skins/Embedded/Views/Common/Sidebar/LegacySidebar.qml": "sidebar",
+        "Skins/Embedded/Views/MainView/ArtistSong.qml": "header",
+        "Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/ArtistSong.qml": "header",
+        "Skins/Embedded/Views/BrowserSource/ConnectedSourceDelegate.qml": "source list: the TIDAL row is hidden, each service has its own row",
+        "Skins/Embedded/Views/BrowserSource/AvailableSourceDelegate.qml": "source list: the TIDAL cell is hidden",
+        "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/Entries/StreamingServices.qml": "settings, not the browse view: the TIDAL switch is hidden, each service has its own",
+        "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/Entries/CloudServices.qml": "settings: Dropbox and Engine DJ cloud only",
+        "Skins/UIKit/Compounds/Sidebar.qml": "the OneLibrary view only: a streaming source browses in the legacy view",
+        "Skins/Embedded/Views/RemoteHostScreen/RemoteHostScreenPlaylists.qml": "Engine DJ Remote Library, not the TIDAL slot",
+        "Skins/Embedded/Views/BrowseView/Components/BreadcrumbView/BreadcrumbView.qml": "the header's icon slot (headerIconUrl): only the Remote Library view sets it, no streaming view does",
+    }
+
+    def test_every_place_stock_draws_the_streaming_mark_is_either_replaced_or_accounted_for(self):
+        qrc = LAB / "5.3.0/qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{LAB} 5.3.0 QRC not found")
+        draws = re.compile(r"providerIconUri|SourceTIDAL(?:Colored)?\.png|Icons/Source\$\{|/streaming/\$\{[^}]*\}/Icon\.png|sourceIconUrl|model\.iconUrl|headerIconUrl:")
+        found = {f.relative_to(qrc).as_posix() for f in (qrc / "Skins").rglob("*.qml") if draws.search(f.read_text(encoding="utf-8", errors="replace"))}
+        found -= {p for p in found if p.startswith("Skins/UIKit/Icons/")}
+        self.assertEqual(found, set(self.DRAW_SITES), "a stock file draws the streaming mark that this inventory does not know")
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        for rel, what in self.DRAW_SITES.items():
+            if what in ("row", "header", "sidebar"):
+                text = (qrc / rel).read_text(encoding="utf-8")
+                for old, new in edits.get(rel, []):
+                    text = bp.patch(text, old, new, rel)
+                self.assertRegex(text, r"root\.(scRowIcon|scSlotIcon|scIcon)\(", f"{rel} still draws TIDAL's mark for every service")
+
 
 class ReverseJogWheelTest(unittest.TestCase):
     def test_device_tab_and_jog_wheel_patches_on_530_and_504_compat(self):
