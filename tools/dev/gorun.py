@@ -104,6 +104,7 @@ def main():
     ap.add_argument('pkgs', nargs='+'); ap.add_argument('--seed'); ap.add_argument('--defer'); ap.add_argument('--only')
     ap.add_argument('-p', type=int, default=6, help='go test -p of the unsharded packages'); ap.add_argument('--jobs', type=int, default=8, help='go test processes at once'); ap.add_argument('--no-cache', action='store_true')
     ap.add_argument('--no-race', action='store_true'); ap.add_argument('--timeout', default='30m')
+    ap.add_argument('--no-prebuild', action='store_true', help='do not compile all test binaries once before the tests start')
     ap.add_argument('--rerun', action='store_true', help='run failed tests alone once more; a pass is reported as flaky, not failed')
     ap.add_argument('--json'); ap.add_argument('--top', type=int, default=20); ap.add_argument('--suggest-seed')
     a = ap.parse_args()
@@ -159,7 +160,19 @@ def main():
         job('plain', base + ['-p', str(a.p)] + plain)
     state = {'out': collections.defaultdict(list), 'tests': {}, 'pkgs': {}, 'cached': set(), 'rc': {}, 'err': {}, 'job_secs': {}}
     lock = threading.Lock()
+    prebuild = 0.0
     try:
+        if not a.no_prebuild and jobs:
+            # Compile every test binary once, alone. Otherwise a dozen `go test` processes compile the same packages at the
+            # same time, and tests with a few hundred milliseconds of budget fail on the saturated host.
+            built = [imp for imp in dirs if not only or dirs[imp] in only]
+            t_pre = time.monotonic()
+            wd = os.path.join(tmp, 'prebuild'); os.mkdir(wd); os.chmod(wd, 0o1777)
+            pre = subprocess.run(['go', 'test', '-vet=off', '-run', '^$', '-p', str(max(2, a.jobs))] + ([] if a.no_race else ['-race']) + built,
+                                 env=dict(os.environ, TMPDIR=wd), capture_output=True, text=True)
+            prebuild = time.monotonic() - t_pre
+            if pre.returncode and 'build failed' in pre.stdout + pre.stderr:
+                sys.stdout.write(pre.stdout + pre.stderr)  # the real run below reports it per package as well
         jobs.sort(key=lambda j: (j['label'] != 'plain', -weight.get(j['label'], 0)))  # plain job first, then the heaviest shards
         with ThreadPoolExecutor(max_workers=max(1, min(a.jobs, len(jobs)))) as pool:
             list(pool.map(lambda j: run_job(j, state, lock), jobs))
@@ -191,7 +204,7 @@ def main():
     for (pkg, _), (act, _) in tests.items():
         perpkg[dirs.get(pkg, pkg)][act] += 1
     top = sorted(((e, dirs.get(p, p), t) for (p, t), (act, e) in tests.items() if '/' not in t), reverse=True)
-    res = {'ok': ok, 'wall': round(wall, 1), 'jobs': state['job_secs'], 'run': len(tests), 'lost': lost, 'failed': [f'{dirs.get(p, p)} {t}' for p, t in failed], 'flaky': [{'test': f"{dirs.get(f['pkg'], f['pkg'])} {f['test']}", 'first_failure': f['first_failure']} for f in flaky],
+    res = {'ok': ok, 'wall': round(wall, 1), 'prebuild': round(prebuild, 1), 'jobs': state['job_secs'], 'run': len(tests), 'lost': lost, 'failed': [f'{dirs.get(p, p)} {t}' for p, t in failed], 'flaky': [{'test': f"{dirs.get(f['pkg'], f['pkg'])} {f['test']}", 'first_failure': f['first_failure']} for f in flaky],
            'failed_packages': [dirs.get(p, p) for p in bad_pkgs], 'skipped': skipped, 'deferred': [f'{d} {t}' for d, t in deferred],
            'packages': {dirs.get(p, p): {'secs': v[1], 'cached': p in state['cached'], **dict(perpkg[dirs.get(p, p)])} for p, v in pkgs_res.items()},
            'tests': {f'{d} {t}': e for e, d, t in top}}
@@ -206,7 +219,7 @@ def main():
                           'tests': {t: round(e, 1) for e, dd, t in top if dd == d and e >= 1}}
         pathlib.Path(a.suggest_seed).write_text(json.dumps(sug, indent=1, sort_keys=True))
     nshard = sum(1 for j in jobs if '#' in j['label'])
-    print(f'gorun: {len(tests)} tests in {len(pkgs_res)} packages, {len(skipped)} skipped, {len(deferred)} deferred, '
+    print(f'gorun: {len(tests)} tests in {len(pkgs_res)} packages, prebuild {prebuild:.0f}s, {len(skipped)} skipped, {len(deferred)} deferred, '
           f'{len(failed)} failed, {len(flaky)} flaky (passed on rerun), {nshard} shard processes, {wall:.1f}s -> {"OK" if ok else "FAILED"}')
     for f in flaky:
         print(f"gorun: flaky (failed in the parallel run, passed alone): {dirs.get(f['pkg'], f['pkg'])} {f['test']}")
