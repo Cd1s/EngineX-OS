@@ -371,7 +371,7 @@ func renameStage(dir, stage string) error {
 		return err
 	}
 	cut("publish pending removed")
-	return finishPublish(dir, stateName, stampName, "m.db")
+	return finishPublish(dir, stateName, stampName, "m.db", pendingName)
 }
 
 // liveIdentity names the state of an SQLite file: its size and the change counter that

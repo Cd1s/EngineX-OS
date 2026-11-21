@@ -7,18 +7,21 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 // CopyBridgeStateCompact writes the bridge state file state to dst without the waveform copies
 // earlier builds kept in it and without its free pages (#253): an update copied the whole file
 // first, 2.7 GB on the maintainer's 6000-track stick, at USB speed. A row that holds a waveform
-// becomes a reference that names no file yet, which the import's next pass completes (keepRef in
-// SyncResolved); the display reads the old row until the update is published. Those rows are not
-// read: SQLite reads a blob's overflow pages for any part of it, but not for length(). Their
-// source ID is the track's pdbImportKey in mdb, a consistent copy of the library the state
-// belongs to, when no other bridge track has that key; a row whose key is shared (libraries of
-// early builds) is copied as it is.
-func CopyBridgeStateCompact(ctx context.Context, state, mdb, dst string) error {
+// becomes the reference this build writes: its source ID and the ANLZ files refs names for it, the
+// export's (ExportRefs), from which the display reads the same waveform. Those rows are not read:
+// SQLite reads a blob's overflow pages for any part of it, but not for length(). Their source ID
+// is the track's pdbImportKey in mdb, a consistent copy of the library the state belongs to, when
+// no other bridge track has that key. A row whose key is shared (libraries of early builds) or for
+// which refs names no file is copied as it is: a reference never replaces the only copy of a
+// waveform the display can find (#253 review).
+func CopyBridgeStateCompact(ctx context.Context, state, mdb, dst string, refs map[uint32][]string) error {
 	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -118,8 +121,8 @@ func CopyBridgeStateCompact(ctx context.Context, state, mdb, dst string) error {
 		return fail(err)
 	}
 	for _, b := range bigs {
-		if b.key > 0 && b.key <= 0xffffffff && keys[b.key] == 1 {
-			_, err = tx.ExecContext(ctx, `INSERT INTO main.BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?)`, b.id, packBridgeRef(uint32(b.key), nil), emptyAudio)
+		if files := refs[uint32(b.key)]; b.key > 0 && b.key <= 0xffffffff && keys[b.key] == 1 && len(files) > 0 {
+			_, err = tx.ExecContext(ctx, `INSERT INTO main.BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?)`, b.id, packBridgeRef(uint32(b.key), files), emptyAudio)
 		} else {
 			_, err = tx.ExecContext(ctx, `INSERT INTO main.BridgeAnalysis SELECT * FROM old.BridgeAnalysis WHERE trackId=?`, b.id)
 		}
@@ -139,4 +142,16 @@ func CopyBridgeStateCompact(ctx context.Context, state, mdb, dst string) error {
 		return err
 	}
 	return nil
+}
+
+// ExportRefs are the ANLZ files of the display's detail of each track of l, by its ID, as the
+// export names them: what CopyBridgeStateCompact gives the rows it rewrites.
+func ExportRefs(l *rekordbox.Library) map[uint32][]string {
+	refs := make(map[uint32][]string, len(l.Tracks))
+	for _, t := range l.Tracks {
+		if files := exportDetailFiles(t.AnalysisPath); len(files) > 0 {
+			refs[t.ID] = files
+		}
+	}
+	return refs
 }

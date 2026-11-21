@@ -171,7 +171,7 @@ const quickName = "QUICK"
 // quickInStage is quickUpdate on the stage's copy of the library, without the mount's time limit.
 func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resolver, l *rekordbox.Library, stagedOnly bool, progress func(done, total int)) (enginedb.Result, error) {
 	if _, err := os.Stat(filepath.Join(stage, baseCountsName)); errors.Is(err, os.ErrNotExist) {
-		if err = snapshotLive(ctx, dir, stage); err != nil {
+		if err = snapshotLive(ctx, dir, stage, l); err != nil {
 			return enginedb.Result{}, err
 		}
 	}
@@ -283,8 +283,9 @@ var (
 
 // snapshotLive copies the live library into the stage while Engine may have it open. Engine
 // takes no file locks, so the copy is a plain one, kept only if the library's identity (size,
-// change counter, no journal under way) is the same before and after it.
-func snapshotLive(ctx context.Context, dir, stage string) error {
+// change counter, no journal under way) is the same before and after it. l is the export the
+// update imports.
+func snapshotLive(ctx context.Context, dir, stage string, l *rekordbox.Library) error {
 	live := filepath.Join(dir, "m.db")
 	for try := 0; try < snapshotRetries; try++ {
 		if try > 0 {
@@ -317,7 +318,7 @@ func snapshotLive(ctx context.Context, dir, stage string) error {
 		// The state without the waveform copies of earlier builds and its free pages, built
 		// against the copy just made: a byte copy of it was 2.7 GB on a 6000-track stick (#253).
 		if len(names) > 1 {
-			if err := enginedb.CopyBridgeStateCompact(ctx, filepath.Join(dir, stateName), filepath.Join(stage, "m.db.copy"), filepath.Join(stage, stateName+".copy")); err != nil {
+			if err := enginedb.CopyBridgeStateCompact(ctx, filepath.Join(dir, stateName), filepath.Join(stage, "m.db.copy"), filepath.Join(stage, stateName+".copy"), enginedb.ExportRefs(l)); err != nil {
 				return err
 			}
 		}
@@ -393,7 +394,7 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 				return res, err
 			}
 		}
-		if err = snapshotLive(ctx, dir, stage); err != nil {
+		if err = snapshotLive(ctx, dir, stage, l); err != nil {
 			return enginedb.Result{}, err
 		}
 	}
@@ -514,10 +515,12 @@ func handToMounts(ctx context.Context, r *compat.Resolver, l *rekordbox.Library,
 }
 
 // compactState rewrites the live bridge state without the waveform copies of earlier builds and its
-// free pages, at a mount before Engine sees the volume, when an import pass follows that gives the
-// rows their references (#253). A state below compactStateBytes is left as it is. It never stops
-// the mount: on any error the state stays as it was.
-func compactState(ctx context.Context, dir string) {
+// free pages, at a mount before Engine sees the volume, once the import of l into the library has
+// committed (#253): the rows it rewrites name the ANLZ files of l, which hold the same waveforms,
+// so the library and its state change together and the display loses nothing wherever it is cut
+// (#253 review). A state below compactStateBytes is left as it is. It never stops the mount: on
+// any error the state stays as it was, and a leftover copy goes at the next mount.
+func compactState(ctx context.Context, dir string, l *rekordbox.Library) {
 	state := filepath.Join(dir, stateName)
 	if st, err := os.Stat(state); err != nil || st.Size() < compactStateBytes {
 		return
@@ -533,7 +536,7 @@ func compactState(ctx context.Context, dir string) {
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	start, before := time.Now(), fileBytes(state)
 	tmp := state + ".compact"
-	if err = enginedb.CopyBridgeStateCompact(ctx, state, filepath.Join(dir, "m.db"), tmp); err == nil {
+	if err = enginedb.CopyBridgeStateCompact(ctx, state, filepath.Join(dir, "m.db"), tmp, enginedb.ExportRefs(l)); err == nil {
 		cut("state compacted aside")
 		for _, side := range []string{"-journal", "-wal", "-shm"} {
 			os.Remove(state + side)
@@ -613,17 +616,21 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 	}
 	stamp := readMark(stage, stampName)
 	quick := readMark(stage, quickName) == stamp
+	if quick {
+		// The list alone is published as pending, not imported: the publish moves the mark in
+		// with the library, so no interruption leaves a stamp that says its files were read.
+		if err := os.Rename(filepath.Join(stage, stampName), filepath.Join(stage, pendingName)); err != nil {
+			return enginedb.Result{}, err
+		}
+		cut("list stage pending")
+	}
 	if err := renameStage(dir, stage); err != nil {
 		return enginedb.Result{}, err
 	}
 	if quick {
-		// The list alone: the update that reads the files starts now (completeLater).
+		// The update that reads the files starts now (completeLater).
 		log.Printf("rb-bridge: the re-export's list published; its files are read next")
 		cut("list published")
-		if err := keepPending(dir); err != nil {
-			return enginedb.Result{}, err
-		}
-		cut("list pending")
 		if err := startUpdate(stage, stamp); err != nil {
 			return enginedb.Result{}, err
 		}

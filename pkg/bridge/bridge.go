@@ -603,7 +603,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	canWrite := !full && writable(mount)
 	if canWrite {
 		// A publish an earlier mount did not finish, before anything looks at the library.
-		if err := finishPublish(dir, stateName, stampName, "m.db"); err != nil {
+		if err := finishPublish(dir, stateName, stampName, "m.db", pendingName); err != nil {
 			return enginedb.Result{}, err
 		}
 		pruneRGBOverviews(ctx, dir, filepath.Join(dir, "m.db"), "")
@@ -720,6 +720,16 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	}
 	overviews := enginedb.ReadOverviewProgress(mount) // before this mount's import writes anything
 	if bypass {
+		if canWrite {
+			// Marks of this import that an interruption left after its stamp (#253 review).
+			if readMark(dir, pendingName) == stamp {
+				os.Remove(filepath.Join(dir, pendingName))
+			}
+			if reread != nil {
+				os.Remove(filepath.Join(dir, rereadName))
+			}
+			os.Remove(filepath.Join(dir, stateName+".compact"))
+		}
 		if writable(mount) { // drives imported by an earlier build still get their covers
 			if opts.Deadline.IsZero() {
 				opts.Deadline = time.Now().Add(mountReadBudget)
@@ -753,15 +763,13 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	// only those, the others are known to be imported with theirs.
 	opts.Resume = resume || reread != nil || (!full && !opts.SmartMatch && readMark(dir, pendingName) == stamp)
 	opts.Reread = reread
-	if reread != nil {
-		compactState(inPlace, dir) // the pass below gives its rows their references
-	}
 	result, err = convert(inPlace, mount, opts, pre, budget, mountStart)
 	if late(err) {
 		return background(err)
 	}
 	if err == nil && reread != nil {
 		cut("in place committed")
+		compactState(inPlace, dir, pre.l)
 	}
 	if err == nil && !result.Bypassed {
 		// Only this build has written since the progress was read, and it leaves no overview

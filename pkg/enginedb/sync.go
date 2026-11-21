@@ -585,7 +585,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		return result, err
 	}
 	// needRef are the bridge tracks whose state row names no detail file: no row (the 3 GiB cap
-	// of earlier builds) or one CopyBridgeStateCompact left without its files. length() reads
+	// of earlier builds) or a reference without files. length() reads
 	// no overflow page, so the rows that still hold a waveform are not read (#253).
 	needRef := map[int64]bool{} // true: no row at all
 	if !opts.Fast && !empty {
