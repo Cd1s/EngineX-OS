@@ -336,7 +336,10 @@ rebase_copy() {
         rc=$?
         set -e
     done
-    git -C "$worktree" push origin "HEAD:$b1" >/dev/null
+    if ! git -C "$worktree" push --force origin "HEAD:$b1" >/dev/null; then
+        echo "could not publish rebased copy $b1" >&2
+        return 1
+    fi
     git -C "$worktree" switch --detach "$pre_merge" >/dev/null
     resolved_branch=$b1
 }
