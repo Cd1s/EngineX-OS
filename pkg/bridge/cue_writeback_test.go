@@ -273,6 +273,80 @@ func TestWriteBackCuesPullOutMidWriteLeavesOriginalIntact(t *testing.T) {
 	}
 }
 
+func TestWriteBackCuesFailureBeforeSecondRenameLeavesStickUntouched(t *testing.T) {
+	ctx := context.Background()
+	stick := setupWriteBackStick(t, true)
+	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	injectDeckCueEdit(t, stick)
+
+	paths := []string{
+		filepath.Join(stick, "PIONEER", "USBANLZ", "P001", "ANLZ0000.DAT"),
+		filepath.Join(stick, "PIONEER", "USBANLZ", "P001", "ANLZ0000.EXT"),
+		filepath.Join(stick, "PIONEER", "USBANLZ", "P001", "ANLZ0000.2EX"),
+		filepath.Join(stick, "PIONEER", "rekordbox", "exportLibrary.db"),
+	}
+	before := make(map[string][]byte, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[path] = data
+	}
+
+	mDB := filepath.Join(stick, "Engine Library", "Database2", "m.db")
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mDB}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var engineBefore struct{ genre, comment, label string }
+	if err := db.QueryRow(`SELECT genre, comment, label FROM Track WHERE id=1`).Scan(&engineBefore.genre, &engineBefore.comment, &engineBefore.label); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	calls := 0
+	simErr := errors.New("simulated pull-out after staging")
+	_, err = bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{
+		DateDir:            "2026-11-19",
+		SkipPreparingCheck: true,
+		BeforeRename: func(string) error {
+			calls++
+			if calls == 2 {
+				return simErr
+			}
+			return nil
+		},
+	})
+	if !errors.Is(err, simErr) {
+		t.Fatalf("expected simulated pull-out error, got %v", err)
+	}
+	if calls < 2 {
+		t.Fatalf("BeforeRename calls=%d, want at least 2", calls)
+	}
+	for path, want := range before {
+		got, readErr := os.ReadFile(path)
+		if readErr != nil || !bytes.Equal(got, want) {
+			t.Fatalf("%s changed after aborted write: err=%v", path, readErr)
+		}
+	}
+	var genre, comment, label string
+	db, err = sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mDB}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.QueryRow(`SELECT genre, comment, label FROM Track WHERE id=1`).Scan(&genre, &comment, &label); err != nil {
+		t.Fatal(err)
+	}
+	if genre != engineBefore.genre || comment != engineBefore.comment || label != engineBefore.label {
+		t.Fatalf("Engine database changed unexpectedly: %q/%q/%q", genre, comment, label)
+	}
+}
+
 func TestWriteBackCuesReadsUncheckpointedWAL(t *testing.T) {
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, false)

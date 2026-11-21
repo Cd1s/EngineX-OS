@@ -52,6 +52,7 @@
 - **大型 rekordbox U 盘快速导入**：大容量 rekordbox U 盘插入后几秒内即可使用歌单与 Cue，波形在后台转换并在空闲 30 秒后自动发布（#301）。
 - **Rekordbox 拍线对齐**：为 Pro DJ Link、U 盘与影子轨的 MP3 和 AAC/M4A 统一拍线起点偏移规则，旧转换曲目自动重新对齐一次并保留碟机上的编辑。
 - **rekordbox Cue 写回**：把碟机上修改的 Hot Cue、Memory Cue 与 Loop 写回 rekordbox U 盘，并在 `/.enginex-backup/` 保存备份（`:8080` 网页控制台 `扩展 → 写回 Hot Cue / Loop 到 rekordbox U 盘`，#271）。
+- **曲目资料编辑（计划于 5.3.0.6）**：在碟机曲目详情中用原厂键盘编辑 `Genre`、`Label` 与 `Comment`；排队的改动会在存储设备发布更新后写回 Engine 曲库与 rekordbox 6/7 导出。
 - **U 盘曲库安全保护**：当字符集不匹配等原因导致大量文件名无法读取时，曲库更新不会改动任何数据，并在下次挂载时重试。
 - **通道 FILTER 旋钮 Color FX**：在一体机各通道的 `FILTER` 旋钮上挂载 `Spiral`、`Pitch Echo`、`Slip Roll`、`Dub Echo` 或 `Space`，位于 `配置 → 播放 → 先锋风格效果 (Color FX)`。
 - **Hi-Fi 高频补偿输出**：为一代 SC5000 / SC6000 独立播放器新增可选的高频补偿，默认关闭，位于 `配置 → 播放 → Hi-Fi 高频补偿输出`（#172）。
