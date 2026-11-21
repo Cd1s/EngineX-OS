@@ -1049,7 +1049,10 @@ func (m *Manager) SetModEnabled(id string, enabled bool) error {
 			// A safe-mode quarantine keeps daemons stopped until ResetQuarantine.
 			if action == "stop" || !m.isSafeModeQuarantinedLocked(state) {
 				if err := m.lifecycle(*found, action); err != nil {
-					return err
+					if action == "start" {
+						return err
+					}
+					log.Printf("mods: disable %s: ignoring failed stop: %v", id, err) // a broken script must not keep the mod on
 				}
 			}
 		}
