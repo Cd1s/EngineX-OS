@@ -25,7 +25,8 @@ const (
 )
 
 // Only downloads this pipeline named are ever evicted: Save's and Deemix's <id>.
-var evictable = regexp.MustCompile(`^((netease-|soundcloud-|beatport-)?\d+\.(flac|mp3|mp4)|spotify-[A-Za-z0-9]+\.(ogg|flac|mp3|mp4)|applemusic-(i\.)?[A-Za-z0-9]+\.flac|nas-[0-9a-f]{64}\.[^/]*)$`)
+// subsonic-<id> is the name Subsonic downloads had up to 5.3.0.5; they are nas-<hash> now.
+var evictable = regexp.MustCompile(`^((netease-|soundcloud-|beatport-)?\d+\.(flac|mp3|mp4)|spotify-[A-Za-z0-9]+\.(ogg|flac|mp3|mp4)|applemusic-(i\.)?[A-Za-z0-9]+\.flac|nas-[0-9a-f]{64}\.[^/]*|subsonic-[A-Za-z0-9_-]*\.[^/]*)$`)
 
 var defaultMedia = func() *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
