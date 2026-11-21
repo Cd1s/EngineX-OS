@@ -3994,6 +3994,15 @@ assert.equal(gate("JP07", {{consoleLineView: true, fourDeckWaveform: true, fourD
         # The mixer is followed by signal, never by timer: four Connections, none gated by a Timer, and no Timer names the mask.
         self.assertEqual(len(re.findall(r'Connections \{ target: root\.scConsoleLine \? root\.scTr\("/Engine/Mixer/Channel[1-4]/Line"\) : null', bp.SERVICES_MAIN)), 4)
         self.assertNotRegex(bp.SERVICES_MAIN, r'running:[^\n]*scLineSync')
+        # The handlers read the two properties, not the derived scLineLive: a handler may run before that binding has
+        # caught up with the mask, and the first Line channel (mask 0 -> 8) then started no poll (found in the JC11 sandbox).
+        code = lambda text: "\n".join(l.split("//")[0] for l in text.splitlines())
+        mask_handler = re.search(r"onScLineMaskChanged: \{\n(.*?)\n\t\}", bp.SERVICES_MAIN, re.S).group(1)
+        self.assertIn("if (scConsoleLine && scLineMask !== 0) { scShadowPollAt = 0; scShadowPoll() }", code(mask_handler))
+        self.assertNotIn("scLineLive", code(mask_handler))
+        self.assertNotIn("scLineLive", code(self._qml_fn("scShadowPoll")))
+        self.assertNotIn("scLineLive", code(self._qml_fn("scShadowApplyDisplay")))
+        self.assertNotIn("scLineLive", code(self._qml_fn("scShadowVisible")))
         # Leaving Line stops the timer and aborts the request in flight.
         self.assertRegex(bp.SERVICES_MAIN, r'onScLineLiveChanged: \{\n\t\tif \(scLineLive \|\| scFourDeckRole !== ""\) return\n\t\tscShadowPollTimer\.stop\(\)\n(?:[^\n]*\n)*?\t\tif \(x && x\.readyState > 0 && x\.readyState < 4\) x\.abort\(\)')
 
@@ -4050,13 +4059,13 @@ assert.equal(scShadowData(3), null);
         # With a channel on Line the poll names exactly those channels, from the mask, without reading the mixer.
         self.js(r"""
 scPlayer = false; scFourDeckRole = ''; scShadowPollAt = 0;
-globalThis.scLineLive = true; globalThis.scLineMask = (1 << 2) | (1 << 4);
+globalThis.scConsoleLine = true; globalThis.scLineMask = (1 << 2) | (1 << 4);
 globalThis.scTr = () => { throw Error('the mixer is read by signal, not at each poll'); };
 scShadowPoll();
 assert.equal(requests.length, 1);
 assert.match(requests[0].url, /\/v1\/enginex\/shadow\?ver=0&line=2,4$/);
 // A player (a role, no Line In view) polls as before: no mask in its question.
-requests.length = 0; globalThis.scLineLive = false; globalThis.scLineMask = 0;
+requests.length = 0; globalThis.scConsoleLine = false; globalThis.scLineMask = 0;
 scFourDeckRole = '13'; scPlayer = true; scShadowPollAt = 0; scShadowPollRequest = null;
 globalThis.scTr = () => null;
 scShadowPoll();

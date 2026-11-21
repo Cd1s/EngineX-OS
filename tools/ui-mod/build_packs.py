@@ -939,7 +939,7 @@ SERVICES_MAIN = """
 	// a plain object, so no binding re-evaluates on every long-poll reply.
 	readonly property var scShadowLive: ({seen: 0})
 	// The display renderer draws deck d: a display slot, or an Engine slot it covers while the track is on its way (scShadowCovers).
-	function scShadowVisible(d) { return d >= 1 && d <= 4 && (((scShadowEngineMask >> d) & 1) === 0 || !!scShadowDisplay[d]) && (scDeckLocked(d) || (!!root.scLineLive && ((root.scLineMask >> d) & 1) === 1 && !!scShadowDisplay[d] && !!scShadowDisplay[d].lineIn)) }
+	function scShadowVisible(d) { return d >= 1 && d <= 4 && (((scShadowEngineMask >> d) & 1) === 0 || !!scShadowDisplay[d]) && (scDeckLocked(d) || (!!root.scConsoleLine && ((root.scLineMask >> d) & 1) === 1 && !!scShadowDisplay[d] && !!scShadowDisplay[d].lineIn)) }
 	function scShadowDeckFor(item) {
 		// Stock skins put the deck on different wrappers (deckIndex / deckData / deckView).
 		for (let p = item; p; p = p.parent) {
@@ -1164,7 +1164,7 @@ SERVICES_MAIN = """
 			const old = scShadowData(d)
 			const isLine = !!(e && e.lineIn)
 			// No role: only a console's Line In lane, while its channel is on Line / AUX, is kept.
-			if (!e || (scFourDeckRole === "" && !(isLine && !!root.scLineLive && ((root.scLineMask >> d) & 1) === 1)) || (!isLine && scFourDeckRole.indexOf(String(d)) >= 0) || !(e.key || e.loading)) {
+			if (!e || (scFourDeckRole === "" && !(isLine && !!root.scConsoleLine && ((root.scLineMask >> d) & 1) === 1)) || (!isLine && scFourDeckRole.indexOf(String(d)) >= 0) || !(e.key || e.loading)) {
 				if (old) { if (!next) next = Object.assign({}, scShadowDisplay); delete next[d] }
 				delete scShadowDisplayRequests[d]; delete scShadowGridCache[d]; delete scShadowLiveCueCache[d]
 				continue
@@ -1811,7 +1811,9 @@ SERVICES_MAIN = """
 	onScLineMaskChanged: {
 		scLineTrim()
 		scShadowResponseVersion = "" // the next answer is applied even if stream-sync's picture did not change
-		if (scLineLive) { scShadowPollAt = 0; scShadowPoll() } // the new set of channels goes to stream-sync at once
+		// The new set of channels goes to stream-sync at once. Read from the two properties, not from scLineLive: this
+		// handler may run before that binding has caught up with the mask.
+		if (scConsoleLine && scLineMask !== 0) { scShadowPollAt = 0; scShadowPoll() }
 	}
 	onScLineLiveChanged: {
 		if (scLineLive || scFourDeckRole !== "") return
@@ -2312,7 +2314,7 @@ SERVICES_MAIN = """
 		++scShadowGen
 		scShadowPollAt = Date.now()
 		let scLines = null
-		if (root.scLineLive) { // the console's Line In view: the channels the mixer says are on Line / AUX
+		if (root.scConsoleLine && root.scLineMask !== 0) { // the console's Line In view: the channels the mixer says are on Line / AUX
 			for (let d = 1; d <= 4; d++) if ((root.scLineMask >> d) & 1) (scLines || (scLines = [])).push(d)
 		} else if (typeof root !== "undefined" && root && root.scTr) {
 			for (let d = 1; d <= 4; d++) {
