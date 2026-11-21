@@ -132,8 +132,15 @@ if [ "$runtime" = 1 ]; then
         if command -v rfkill >/dev/null 2>&1; then rfkill unblock wifi || :; fi
         exit 0
     fi
-    # The kernel boots with rfkill.default_state=0, which blocks both radios.
-    if command -v rfkill >/dev/null 2>&1; then rfkill unblock bluetooth wifi || :; fi
+    # The kernel boots with rfkill.default_state=0, which blocks both radios. Bluetooth is always on (#60).
+    # Wi-Fi follows the choice the deck stored (connman keeps it): off before power-off stays off (#326).
+    # radios-begin
+    if command -v rfkill >/dev/null 2>&1; then
+        rfkill unblock bluetooth || :
+        wifi_enable=$(sed -n '/^\[WiFi\]/,/^\[/s/^Enable=//p' "${ENGINEX_CONNMAN_SETTINGS:-/var/lib/connman/settings}" 2>/dev/null | head -n 1)
+        [ "$wifi_enable" = false ] || rfkill unblock wifi || :
+    fi
+    # radios-end
     if command -v az01-ethernet-speed >/dev/null 2>&1; then
         az01-ethernet-speed 1000 || az01-ethernet-speed 100 || :
     fi
