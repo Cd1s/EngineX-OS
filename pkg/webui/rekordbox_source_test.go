@@ -587,9 +587,11 @@ func TestRekordboxShareSettingIsValidatedAndKept(t *testing.T) {
 }
 
 func TestRekordboxSessionsAskAsTheDecksOwnPlayer(t *testing.T) {
-	e := newRbxEnv(t, map[uint32]string{1: "/Users/dj/Music/a.mp3"})
 	oldPlayer := deckPlayer
 	t.Cleanup(func() { deckPlayer = oldPlayer })
+	// Register this restore before newRbxEnv's analysis-job wait so the wait runs first.
+	// The request can enqueue a background prefetch that still reads deckPlayer.
+	e := newRbxEnv(t, map[uint32]string{1: "/Users/dj/Music/a.mp3"})
 	asked := func() []byte {
 		rbxAsked.Lock()
 		defer rbxAsked.Unlock()
