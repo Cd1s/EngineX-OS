@@ -87,7 +87,7 @@ remote_run() {
     escaped=${inner//\\/\\\\}; escaped=${escaped//\'/\'\\\'\'}
     command=". /etc/profile.d/buildtools.sh; flock /var/lock/enginex-heavy.lock sh -c '$escaped'"
     remote_names+=("$name"); remote_hosts+=("$host")
-    REMOTE_BUILD_HOST="$host" "$REMOTE_BUILD_BIN" --name "$name" --clean "$@" -- "$command"
+    REMOTE_BUILD_HOST="$host" "$REMOTE_BUILD_BIN" -C "$worktree" --name "$name" --clean "$@" -- "$command"
     cleanup_remote "$host" "$name"
     unset "remote_names[${#remote_names[@]}-1]" "remote_hosts[${#remote_hosts[@]}-1]"
 }
