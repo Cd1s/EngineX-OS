@@ -292,6 +292,29 @@ func TestFindLANSkipsBusyResponderForIdlePeer(t *testing.T) {
 	}
 }
 
+// selfReachesAsLAN reports whether a connection this host makes to its own address ip
+// arrives with a LAN peer address. A host that rewrites such traffic (a container
+// bridge behind MASQUERADE) fails this, and the LAN-only backend then answers 403.
+func selfReachesAsLAN(ip net.IP) bool {
+	ln, err := net.Listen("tcp4", net.JoinHostPort(ip.String(), "0"))
+	if err != nil {
+		return false
+	}
+	defer ln.Close()
+	c, err := net.DialTimeout("tcp4", ln.Addr().String(), time.Second)
+	if err != nil {
+		return false
+	}
+	defer c.Close()
+	p, err := ln.Accept()
+	if err != nil {
+		return false
+	}
+	defer p.Close()
+	peer, _ := p.RemoteAddr().(*net.TCPAddr)
+	return peer != nil && lanIP(peer.IP)
+}
+
 func TestFindLANRetriesLostWiFiBroadcastAndUsesMDNSARecord(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -401,7 +424,12 @@ func TestFindLANRetriesLostWiFiBroadcastAndUsesMDNSARecord(t *testing.T) {
 
 	// (b) When the mDNS A record falls inside localLANIPv4Nets() (non-loopback local subnet),
 	// a reflected packet from 127.0.0.2 resolves to that local-subnet listener IP.
-	if nets := localLANIPv4Nets(); len(nets) > 0 {
+	nets := localLANIPv4Nets()
+	if len(nets) > 0 && !selfReachesAsLAN(nets[0].IP) {
+		t.Logf("local-subnet part not run: this host rewrites its own connections to %s", nets[0].IP)
+		nets = nil
+	}
+	if len(nets) > 0 {
 		ln, err := net.Listen("tcp4", net.JoinHostPort(nets[0].IP.String(), "0"))
 		if err != nil {
 			t.Fatal(err)
