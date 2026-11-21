@@ -12037,16 +12037,20 @@ assert.deepEqual(writes, ['2:0.5']); assert.equal(armed, 0);
         self.assertNotIn("scBpmRestoreTimer", bp.SMART_SYNC_MAIN)
         self.assertNotIn("0.502", bp.SMART_SYNC_MAIN)
 
-    def test_smart_sync_keeps_its_range_restore_and_calls_the_new_logic_after_it(self):
+    def test_smart_sync_keeps_its_range_restore_and_calls_the_new_logic_after_it(self):  # name kept: the range logic first, the BPM restore after it
         src = bp.SMART_SYNC_MAIN
-        old_else = """				} else {
+        # #316 BH-GF4-12: the restore no longer overwrites a range the DJ set by hand (it was `r.index = savedRangeIndex`, unconditionally);
+        # the BPM restore still comes after the range logic.
+        new_else = """				} else {
 					if (savedRangeIndex >= 0 && r) {
-						r.index = savedRangeIndex
+						const back = handRangeIndex >= 0 ? handRangeIndex : savedRangeIndex
+						if (r.index !== back) r.index = back
 						savedRangeIndex = -1
+						handRangeIndex = -1
 					}
 					root.scUnsyncRestoreBpm(deckIdx)
 				}"""
-        self.assertIn(old_else, src)  # the range restore is untouched, the new call comes after it
+        self.assertIn(new_else, src)
         self.assertIn("if (syncNeed > 0) root.scWidenRange(deckIdx, syncNeed)", src)
         self.assertEqual(src.count("root.scUnsyncRestoreBpm("), 1)
         # no controller module is touched: nothing for the controller engine to latch
@@ -12520,6 +12524,132 @@ console.log(JSON.stringify({withSort, show: !!run(exprs.show, withSort), visible
                     self.assertFalse(plain["show"], f"hasSortMenu={has}: {plain}")
                 # the library lists keep the button they always had
                 self.assertTrue(self.decide(text, False, False, category="Planck")["visible"])
+
+
+class SmartSyncRangeTest(unittest.TestCase):
+    """#316 BH-GF4-12: Sync off returns to the range the DJ set by hand while Sync was on; only an untouched range goes back to the one
+    Smart Sync widened. The pack's own delegate handlers run against a model of the SpeedRange translator."""
+    _block = staticmethod(RestoreBpmOnUnsyncTest._block)
+
+    def script(self, cases, deferred):
+        src = bp.SMART_SYNC_MAIN
+        handlers = {}
+        for name in ("onSyncActiveChanged", "onSyncNeedChanged", "onRangeIndexChanged"):
+            # an old revision has no onRangeIndexChanged: the handler is then absent and the cases fail on behaviour, not on extraction
+            handlers[name] = self._block(src, name + ": {")[1] if (name + ": {") in src else ""
+        return r"""
+const assert = require('node:assert/strict');
+String.prototype.arg = function(v) { return this.replace('%1', v); }; // QML's String.arg
+const DEFERRED = @DEFERRED@;
+const entries = ['4', '8', '10', '20', '50', '100']; // the SC LIVE 4 Engine's own list
+// The SpeedRange translator: writing index notifies rangeIndex's binding at once, or later (a queued notification), the way Engine might.
+let pending = [], scSmartExpect = {};
+const range = {entries, _i: 0, get index() { return this._i; }, set index(v) { this._i = v; if (DEFERRED) pending.push(v); else deck.rangeChanged(); },
+    get string() { return entries[this._i]; }};
+const Planck = {getProperty: () => ({translator: range})};
+const root = {get scSmartExpect() { return scSmartExpect; }, set scSmartExpect(v) { scSmartExpect = v; }, scUnsyncRestoreBpm() {},
+    scWidenRange(d, n) { return scWidenRange(d, n); }};
+const deck = {deckIdx: 2, savedRangeIndex: -1, handRangeIndex: -1, syncActive: false, syncNeed: 0, pRange: {translator: range}, lastSeen: 0,
+    get rangeIndex() { return range._i; }};
+const run = body => new Function('d', 'root', 'Planck', 'with (d) { ' + body + ' }')(deck, root, Planck);
+@NEED@
+@WIDEN@
+deck.rangeChanged = () => { if (deck.rangeIndex !== deck.lastSeen) { deck.lastSeen = deck.rangeIndex; run(@RANGE@); } };
+function flush() { while (pending.length) { pending.shift(); deck.rangeChanged(); } }
+function setSync(on, need) { // QML order: syncActive's handler, then syncNeed's
+    const was = deck.syncActive;
+    deck.syncNeed = need; deck.syncActive = on;
+    if (on !== was) run(@ACTIVE@);
+    run(@NEEDH@);
+    flush();
+}
+function dj(i) { range.index = i; flush(); } // the DJ presses the range button
+function reset(i) { range._i = i; deck.lastSeen = i; deck.savedRangeIndex = -1; deck.handRangeIndex = -1; deck.syncActive = false; deck.syncNeed = 0; scSmartExpect = {}; pending = []; }
+@CASES@
+""".replace("@DEFERRED@", "true" if deferred else "false").replace("@RANGE@", json.dumps(handlers["onRangeIndexChanged"])) \
+           .replace("@ACTIVE@", json.dumps(handlers["onSyncActiveChanged"])).replace("@NEEDH@", json.dumps(handlers["onSyncNeedChanged"])) \
+           .replace("@NEED@", self._block(src, "function scHarmonicSyncNeed(")[0]).replace("@WIDEN@", self._block(src, "function scWidenRange(")[0]) \
+           .replace("@CASES@", cases)
+
+    def run_cases(self, cases):
+        for deferred in (False, True):
+            with self.subTest(queued_notifications=deferred):
+                result = subprocess.run(["node", "-e", self.script(cases, deferred)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the handlers")
+    def test_sync_off_keeps_the_range_the_dj_set_and_restores_an_untouched_one(self):
+        self.run_cases(r"""
+// 4 % deck synced to a master that needs 12 %: Smart Sync widens to 20 %.
+reset(0); setSync(true, 12);
+assert.equal(range.index, 3, 'Smart Sync widened the range');
+setSync(false, 0);
+assert.equal(range.index, 0, 'the DJ did not touch it: back to the range before Smart Sync widened it');
+
+// The DJ changes the range by hand while Sync is on: Sync off leaves it there (this was reset to 4 %).
+reset(0); setSync(true, 12); dj(5);
+setSync(false, 0);
+assert.equal(range.index, 5, 'the DJ set 100 %: it stays');
+reset(0); setSync(true, 12); dj(1);
+setSync(false, 0);
+assert.equal(range.index, 1, 'the DJ set a narrower range than Smart Sync widened: that one stays');
+
+// Smart Sync widens again after the hand setting: Sync off still goes back to what the DJ set.
+reset(0); setSync(true, 5); dj(2); setSync(true, 40);
+assert.equal(range.index, 4, 'Smart Sync widened for the new tempo');
+setSync(false, 0);
+assert.equal(range.index, 2, 'the range the DJ set by hand, not the one Smart Sync widened later');
+
+// The DJ changes it twice: the last one counts.
+reset(0); setSync(true, 12); dj(5); dj(1);
+setSync(false, 0);
+assert.equal(range.index, 1);
+
+// Sync needs no widening and the DJ leaves the range: nothing is written at all.
+reset(2); setSync(true, 0);
+let writes = 0; const set = Object.getOwnPropertyDescriptor(range, 'index').set;
+Object.defineProperty(range, 'index', {get() { return this._i; }, set(v) { writes++; set.call(this, v); }, configurable: true});
+setSync(false, 0);
+assert.equal(writes, 0, 'an untouched range that was never widened is not rewritten');
+Object.defineProperty(range, 'index', {get() { return this._i; }, set, configurable: true});
+
+// A second Sync cycle starts clean: the hand setting of the first is forgotten.
+reset(0); setSync(true, 12); dj(5); setSync(false, 0);
+setSync(true, 12);
+assert.equal(deck.handRangeIndex, -1, 'a new Sync has no hand setting yet');
+setSync(false, 0);
+assert.equal(range.index, 5, 'nothing touched in the second cycle: back to the range it started with (the DJ\'s 100 %)');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the handlers")
+    def test_the_hand_setting_is_told_from_smart_syncs_own_write_in_any_notification_order(self):
+        self.run_cases(r"""
+// Smart Sync's own widening (including the tile's scWidenAll) must never count as the DJ's.
+reset(0); setSync(true, 12);
+assert.equal(deck.handRangeIndex, -1, 'Smart Sync widening is not a hand setting');
+assert.equal(Object.keys(root.scSmartExpect).length, 0, 'the expectation was consumed by its own change');
+root.scWidenRange(2, 60); flush();
+assert.equal(range.index, 5);
+assert.equal(deck.handRangeIndex, -1, 'the tile widening is not a hand setting either');
+// ... and the DJ's change right after is.
+dj(1);
+assert.equal(deck.handRangeIndex, 1);
+// Changes while Sync is off are nobody's business here.
+reset(0); dj(2);
+assert.equal(deck.handRangeIndex, -1, 'no Sync, no hand setting recorded');
+setSync(true, 0); setSync(false, 0);
+assert.equal(range.index, 2, 'Sync on and off without widening leaves the range alone');
+""")
+
+    def test_the_neighbours_are_untouched(self):
+        """Only the range handlers changed: Smart Sync's widening, the tile and the #289 BPM restore keep their text."""
+        src = bp.SMART_SYNC_MAIN
+        for text in ("function scHarmonicSyncNeed(masterBpm, origBpm) {", "function scUnsyncRestoreBpm(d) {", "function scWidenAll() {",
+                     "onSyncNeedChanged: {", "if (syncNeed > 0) root.scWidenRange(deckIdx, syncNeed)", "root.scUnsyncRestoreBpm(deckIdx)"):
+            self.assertIn(text, src, text)
+        self.assertEqual(src.count("root.scUnsyncRestoreBpm("), 1)
+        self.assertIn('objectName: "ControlCenter_SmartSync"', bp.SYNC_TILE)
+        self.assertIn("root.scWidenAll()", bp.SYNC_TILE)
 
 
 if __name__ == "__main__":

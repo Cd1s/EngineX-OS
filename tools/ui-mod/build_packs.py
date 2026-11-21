@@ -6096,8 +6096,9 @@ UPFADER_ECHO_TILE = """
 """
 
 # Smart Sync (5.3.0 only): half/double-time (0.5x, 2x, 0.25x, 4x) harmonic tempo matching.
-# Automatically widens Pitch Range to the smallest step needed for the best harmonic match,
-# and restores the user's original Pitch Range when Sync is turned off.
+# Automatically widens Pitch Range to the smallest step needed for the best harmonic match.
+# When Sync is turned off the deck goes back to the range the DJ set by hand while Sync was on
+# (#316 BH-GF4-12); only when the DJ did not touch it, to the range it had before Smart Sync widened it.
 SMART_SYNC_MAIN = """
 	function scHarmonicSyncNeed(masterBpm, origBpm) {
 		if (origBpm <= 0 || masterBpm <= 0) return 0
@@ -6140,7 +6141,12 @@ SMART_SYNC_MAIN = """
 			readonly property QObjProperty pOrigBpm: Planck.getProperty("/Engine/Deck%1/OriginalBPM".arg(deckIdx))
 			readonly property QObjProperty pMasterBpm: Planck.getProperty("/Engine/Master/MasterTempo")
 			readonly property QObjProperty pRange: Planck.getProperty("/Engine/Deck%1/SpeedRange".arg(deckIdx))
-			property int savedRangeIndex: -1
+			property int savedRangeIndex: -1 // the range when Sync engaged
+			property int handRangeIndex: -1 // the range the DJ set by hand while Sync was on; -1 = not touched
+			readonly property int rangeIndex: {
+				const r = pRange && pRange.translator
+				return r ? r.index : -1
+			}
 			readonly property bool syncActive: {
 				const s = pSync && pSync.translator, l = pLoaded && pLoaded.translator
 				return !!(s && l && s.string !== "Off" && l.state)
@@ -6150,15 +6156,28 @@ SMART_SYNC_MAIN = """
 				if (!s || !l || !o || !m || s.string === "Off" || !l.state || !(o.unnormalized > 0) || !(m.unnormalized > 0)) return 0
 				return root.scHarmonicSyncNeed(m.unnormalized, o.unnormalized)
 			}
+			// Smart Sync names the index it is about to write (scSmartExpect) and its own change is the one that arrives with that value;
+			// any other change while Sync is on is the DJ's. Event only: nothing runs per frame.
+			onRangeIndexChanged: {
+				if (root.scSmartExpect[deckIdx] === rangeIndex) {
+					delete root.scSmartExpect[deckIdx]
+					return
+				}
+				if (syncActive && savedRangeIndex >= 0) handRangeIndex = rangeIndex
+			}
 			onSyncActiveChanged: {
 				const r = pRange && pRange.translator
+				delete root.scSmartExpect[deckIdx]
 				if (syncActive) {
+					handRangeIndex = -1
 					if (savedRangeIndex < 0 && r) savedRangeIndex = r.index
 					if (syncNeed > 0) root.scWidenRange(deckIdx, syncNeed)
 				} else {
 					if (savedRangeIndex >= 0 && r) {
-						r.index = savedRangeIndex
+						const back = handRangeIndex >= 0 ? handRangeIndex : savedRangeIndex
+						if (r.index !== back) r.index = back
 						savedRangeIndex = -1
+						handRangeIndex = -1
 					}
 					root.scUnsyncRestoreBpm(deckIdx)
 				}
@@ -6172,11 +6191,14 @@ SMART_SYNC_MAIN = """
 			}
 		}
 	}
+	property var scSmartExpect: ({}) // deck -> the range index Smart Sync is writing, until its own change arrives (not the DJ's)
 	function scWidenRange(deck, need) {
 		const t = Planck.getProperty("/Engine/Deck%1/SpeedRange".arg(deck)).translator
 		if (!t || need <= parseFloat(t.string)) return
 		const i = t.entries.findIndex(e => parseFloat(e) >= need)
-		t.index = i < 0 ? t.entries.length - 1 : i
+		const target = i < 0 ? t.entries.length - 1 : i
+		scSmartExpect[deck] = target
+		t.index = target
 	}
 	// The Smart Sync tile calls this so a tap takes effect without waiting for a tempo change.
 	function scWidenAll() {
