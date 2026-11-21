@@ -467,6 +467,12 @@ func collectTrackPathCandidates(db *sql.DB, mount string) ([]trackPathCandidate,
 		return nil, nil, nil, err
 	}
 	bridgeManaged, err := bridgeManagedTracks(mount)
+	if err != nil {
+		for _, candidate := range candidates {
+			bridgeManaged[candidate.id] = true
+		}
+		return candidates, existing, bridgeManaged, nil
+	}
 	return candidates, existing, bridgeManaged, err
 }
 
