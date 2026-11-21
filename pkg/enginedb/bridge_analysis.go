@@ -92,8 +92,10 @@ func BridgeDetail(b []byte, root string, limit int) *rekordbox.Analysis {
 			if one, err := rekordbox.ParseAnalysis(data); err == nil {
 				a.Waveforms = append(a.Waveforms, one.Waveforms...)
 			}
-			if displayAnalysisWaveform(a) != nil {
-				return a // a PWV7 found first: the .EXT is not read
+			// Only the section the display reads, as an RBA1 row held it; a PWV7 found first
+			// leaves the .EXT unread.
+			if w := displayAnalysisWaveform(a); w != nil {
+				return &rekordbox.Analysis{Waveforms: []rekordbox.Waveform{*w}}
 			}
 		}
 		return nil
