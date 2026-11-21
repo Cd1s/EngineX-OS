@@ -88,7 +88,7 @@ func isRBA1Blob(b []byte) bool {
 }
 
 func isCompactRBA1Row(sourceJSON, audioJSON []byte) bool {
-	return len(audioJSON) <= 64 && isRBA1Blob(sourceJSON)
+	return len(audioJSON) <= 64 && (isRBA1Blob(sourceJSON) || bytes.HasPrefix(sourceJSON, []byte(refAnalysisMagic)))
 }
 
 func availBytes(dir string) (int64, error) {

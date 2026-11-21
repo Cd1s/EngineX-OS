@@ -8,18 +8,143 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path"
+	"strings"
 	"sync"
+	"syscall"
 
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
-// BridgeAnalysis stores only the source ID and the PWV7 (else PWV5) section
-// consumed by shadow display. RBA1 is a gzip-wrapped binary record: magic,
+// BridgeAnalysis stores the source ID and, in new rows, where the PWV7 (else PWV5) section
+// consumed by shadow display is (RBA2, below). Earlier rows hold the section itself.
+// RBA1 is a gzip-wrapped binary record: magic,
 // little-endian track ID, four-byte waveform tag, entry width, data length,
 // then raw waveform bytes. Other display fields already live in m.db.
 // Earlier plain and gzip-JSON records remain readable through UnpackAnalysis.
 const compactAnalysisMagic = "RBA1"
 const compactAnalysisHeader = 20
+
+// RBA2 keeps the source ID and where the scrolling detail is: the track's own ANLZ files on the
+// volume (.2EX for PWV7, then .EXT for PWV5), as volume-relative paths the import resolved. A
+// copy of the waveform cost about 100 KB a track; the maintainer's 6000-track stick had a
+// 2.7 GB state file, which an update copied whole before its first pass (#253). Not compressed:
+// magic, little-endian track ID, then a little-endian uint16 length and the bytes of each path.
+const refAnalysisMagic = "RBA2"
+
+// maxDetailFile bounds an ANLZ file read for the display: a PWV7 of 2<<20 entries and the rest.
+const maxDetailFile = 16 << 20
+
+func packBridgeRef(id uint32, files []string) []byte {
+	b := binary.LittleEndian.AppendUint32([]byte(refAnalysisMagic), id)
+	for _, f := range files {
+		if len(f) <= 0xffff {
+			b = binary.LittleEndian.AppendUint16(b, uint16(len(f)))
+			b = append(b, f...)
+		}
+	}
+	return b
+}
+
+func unpackBridgeRef(b []byte) (uint32, []string, error) {
+	if len(b) < 8 || string(b[:4]) != refAnalysisMagic {
+		return 0, nil, fmt.Errorf("enginedb: not a detail reference")
+	}
+	id := binary.LittleEndian.Uint32(b[4:])
+	var files []string
+	for rest := b[8:]; len(rest) > 0; {
+		if len(rest) < 2 || int(binary.LittleEndian.Uint16(rest)) > len(rest)-2 {
+			return 0, nil, fmt.Errorf("enginedb: invalid detail reference")
+		}
+		n := int(binary.LittleEndian.Uint16(rest))
+		files, rest = append(files, string(rest[2:2+n])), rest[2+n:]
+	}
+	return id, files, nil
+}
+
+// detailFiles are the analysis files of a track that can hold the display's detail, in the
+// order the display prefers them.
+func detailFiles(files []analysisFile) []string {
+	var out []string
+	for _, ext := range []string{".2EX", ".EXT"} {
+		for _, f := range files {
+			if strings.EqualFold(path.Ext(f.rel), ext) {
+				out = append(out, f.rel)
+			}
+		}
+	}
+	return out
+}
+
+// BridgeDetail is the scrolling detail a BridgeAnalysis column names or holds, as
+// DisplayWaveFromRekordbox reads it: from the track's ANLZ files under root, the volume, for a
+// reference (RBA2), else from the column itself. Nil when there is none or it cannot be read.
+func BridgeDetail(b []byte, root string, limit int) *rekordbox.Analysis {
+	if _, files, err := unpackBridgeRef(b); err == nil {
+		a := &rekordbox.Analysis{}
+		for _, f := range files {
+			data, err := readVolumeFile(root, f, maxDetailFile)
+			if err != nil {
+				continue
+			}
+			if one, err := rekordbox.ParseAnalysis(data); err == nil {
+				a.Waveforms = append(a.Waveforms, one.Waveforms...)
+			}
+			if displayAnalysisWaveform(a) != nil {
+				return a // a PWV7 found first: the .EXT is not read
+			}
+		}
+		return nil
+	}
+	b, err := UnpackAnalysis(b, limit)
+	if err != nil {
+		return nil
+	}
+	var source struct{ Analysis *rekordbox.Analysis }
+	if json.Unmarshal(b, &source) != nil {
+		return nil
+	}
+	return source.Analysis
+}
+
+// readVolumeFile reads rel under root as the resolver finds it (case, NFC, macOS's hidden
+// .PIONEER), refusing traversal and symlinks.
+func readVolumeFile(root, rel string, limit int64) ([]byte, error) {
+	r, err := compat.NewResolver(root)
+	if err != nil {
+		return nil, err
+	}
+	if rel, err = r.Resolve(rel); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(r.FullPath(rel), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() || st.Size() > limit {
+		return nil, fmt.Errorf("not a regular file within %d bytes: %s", limit, rel)
+	}
+	return io.ReadAll(io.LimitReader(f, limit))
+}
+
+// exportDetailFiles are detailFiles as the export names them, before the import resolved them.
+func exportDetailFiles(analysisPath string) []string {
+	if analysisPath == "" {
+		return nil
+	}
+	base, err := compat.CleanRelative(strings.TrimSuffix(analysisPath, path.Ext(analysisPath)))
+	if err != nil {
+		return nil
+	}
+	return []string{base + ".2EX", base + ".EXT"}
+}
 
 var errAnalysisTooLarge = errors.New("enginedb: analysis row too large")
 
@@ -108,7 +233,7 @@ func analysisSourceID(b []byte) (uint32, error) {
 	}
 	var prefix [4]byte
 	n, _ := io.ReadFull(r, prefix[:])
-	if string(prefix[:n]) == compactAnalysisMagic {
+	if string(prefix[:n]) == compactAnalysisMagic || string(prefix[:n]) == refAnalysisMagic {
 		var id uint32
 		err := binary.Read(r, binary.LittleEndian, &id)
 		return id, err
@@ -147,6 +272,19 @@ func UnpackAnalysis(b []byte, limit int) ([]byte, error) {
 	}
 	if len(b) > limit {
 		return nil, errAnalysisTooLarge
+	}
+	if id, files, err := unpackBridgeRef(b); err == nil {
+		// The detail stays in the ANLZ files: BridgeDetail reads it from there.
+		var source struct {
+			Track  struct{ ID uint32 }
+			Detail []string
+		}
+		source.Track.ID, source.Detail = id, files
+		out, err := json.Marshal(source)
+		if len(out) > limit {
+			return nil, errAnalysisTooLarge
+		}
+		return out, err
 	}
 	if bytes.HasPrefix(b, []byte(compactAnalysisMagic)) {
 		return unpackBridgeSource(b, limit)

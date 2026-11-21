@@ -24,6 +24,14 @@ func SetLargeExportForTest() func() {
 	return func() { attemptExportBytes, maxPublishExportBytes = oldAttempt, oldPublish }
 }
 
+// SetUpdateExportForTest makes every export one too large to update while the mount waits; a
+// first import is still published at the mount from the export when that fits (#253).
+func SetUpdateExportForTest() func() {
+	old := attemptExportBytes
+	attemptExportBytes = -1
+	return func() { attemptExportBytes = old }
+}
+
 // SlowExportReadForTest makes each export read take d and shortens the mount
 // read budget to budget, until the returned function restores both.
 func SlowExportReadForTest(d, budget time.Duration) func() {

@@ -49,6 +49,89 @@ func startUpdate(stage, stamp string) error {
 	return syncFile(stage)
 }
 
+// What a quick update costs on an SC5000, the slowest deck, on top of the export read: a track the
+// library holds is looked up and left as it is, a new one is inserted with Engine's indexes and
+// triggers in place (unlike fastPublish's bulk load), and each playlist entry as in fastPublish.
+// Measured native armhf on the aarch64 build host (6031 tracks, 19 985 entries) times 3.
+var (
+	quickPerKnown = 150 * time.Microsecond
+	quickPerNew   = 2 * time.Millisecond
+)
+
+// quickUpdate brings a re-export's playlists and new tracks into the live library while the mount
+// waits, from the export alone, as fastPublish does for a first import (#253). Tracks the library
+// holds keep their rows unread; new tracks come with the export's own cues; tracks the export
+// dropped go. The background update reads the files afterwards. Before, a large export's update
+// only marked its stage here, and the playlists appeared once a remount published the update:
+// 11.5 minutes on the maintainer's 6000-track stick, and not at all while a deck held one of its
+// tracks. limit is the hook's kill; nothing is written when the update would not end before it.
+func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, limit time.Time) (enginedb.Result, error) {
+	ctx, cancel := context.WithDeadline(ctx, limit)
+	defer cancel()
+	if enginedb.LibraryInUse(mount) {
+		return enginedb.Result{}, enginedb.ErrLibraryInUse
+	}
+	known, err := ownedSpellings(dir)
+	if err != nil {
+		return enginedb.Result{}, err
+	}
+	l, stagedOnly, err := readLibrary(ctx, mount)
+	if err != nil {
+		return enginedb.Result{}, err
+	}
+	// The export's spelling of a path is trusted for a new track; one the library holds keeps its
+	// row's, which an import resolved on the volume: a quick update moves no file of it.
+	fresh, entries := 0, 0
+	for i := range l.Tracks {
+		rel, err := compat.CleanRelative(l.Tracks[i].Path)
+		if err != nil {
+			return enginedb.Result{}, err
+		}
+		if stored, ok := known[foldPath(rel)]; ok {
+			l.Tracks[i].Path = "/" + stored
+		} else {
+			fresh++
+		}
+	}
+	for _, p := range l.Playlists {
+		entries += len(p.Tracks)
+	}
+	cost := time.Duration(len(l.Tracks)-fresh)*quickPerKnown + time.Duration(fresh)*quickPerNew + time.Duration(entries)*publishPerEntry + publishMargin
+	if left := time.Until(limit); cost > left {
+		return enginedb.Result{}, fmt.Errorf("%d new tracks and %d playlist entries need about %s, %s left", fresh, entries, cost.Round(time.Second), left.Round(time.Second))
+	}
+	mergeByPath(l)
+	return enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly})
+}
+
+// ownedSpellings maps the folded path of each track the bridge imported to its row's spelling.
+func ownedSpellings(dir string) (map[string]string, error) {
+	known := map[string]string{}
+	p := filepath.Join(dir, stateName)
+	if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+		return known, nil
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}).String())
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT path FROM BridgeState`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var path string
+		if err = rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		rel := strings.TrimPrefix(path, "../")
+		known[foldPath(rel)] = rel
+	}
+	return known, rows.Err()
+}
+
 // snapshotRetries and snapshotWait bound how long the job waits for Engine to stop writing.
 var (
 	snapshotRetries = 10
@@ -81,7 +164,14 @@ func snapshotLive(ctx context.Context, dir, stage string) error {
 		}
 		for _, name := range names {
 			os.Remove(filepath.Join(stage, name+".copy"))
-			if err := copyFile(filepath.Join(dir, name), filepath.Join(stage, name+".copy")); err != nil {
+		}
+		if err := copyFile(live, filepath.Join(stage, "m.db.copy")); err != nil {
+			return err
+		}
+		// The state without the waveform copies of earlier builds and its free pages, built
+		// against the copy just made: a byte copy of it was 2.7 GB on a 6000-track stick (#253).
+		if len(names) > 1 {
+			if err := enginedb.CopyBridgeStateCompact(ctx, filepath.Join(dir, stateName), filepath.Join(stage, "m.db.copy"), filepath.Join(stage, stateName+".copy")); err != nil {
 				return err
 			}
 		}

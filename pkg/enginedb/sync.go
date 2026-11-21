@@ -555,6 +555,36 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	if opts.OnProgress != nil && len(prepared) > 0 {
 		opts.OnProgress(0, len(prepared))
 	}
+	emptyAudio, err := packAnalysis([]byte("{}"))
+	if err != nil {
+		return result, err
+	}
+	// keepRef gives a track this import leaves as it is the reference of this build when its row
+	// has none: no row (the 3 GiB cap of earlier builds) or a compacted one (CompactBridgeState)
+	// that names no file. The row of an earlier build that holds the detail itself is not read.
+	keepRef := func(id int64, source uint32, files []analysisFile, analysisPath string) error {
+		if opts.Fast || id == 0 {
+			return nil
+		}
+		var row sql.NullBool
+		var small []byte
+		e := q.QueryRowContext(ctx, `SELECT 1,CASE WHEN length(sourceJSON)<=4096 THEN sourceJSON END FROM BridgeAnalysis WHERE trackId=?`, id).Scan(&row, &small)
+		if e != nil && !errors.Is(e, sql.ErrNoRows) {
+			return e
+		}
+		if row.Valid && small == nil {
+			return nil
+		}
+		if _, refs, err := unpackBridgeRef(small); row.Valid && (err != nil || len(refs) > 0) {
+			return nil
+		}
+		refs := detailFiles(files)
+		if len(refs) == 0 {
+			refs = exportDetailFiles(analysisPath)
+		}
+		_, e = q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`, id, packBridgeRef(source, refs), emptyAudio)
+		return e
+	}
 	for i, preparedTrack := range prepared {
 		if err = ctx.Err(); err != nil {
 			return result, err
@@ -644,6 +674,11 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 					return result, e
 				}
 			}
+			if previous != "" && !strings.HasPrefix(previous, "fast:") {
+				if e := keepRef(id, original.ID, nil, original.AnalysisPath); e != nil {
+					return result, e
+				}
+			}
 			result.Unchanged++
 			continue
 		}
@@ -653,6 +688,9 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 				if _, e := q.ExecContext(ctx, `UPDATE BridgeState SET fingerprint=? WHERE trackId=?`, "fast:"+t.RecordHash, id); e != nil {
 					return result, e
 				}
+			}
+			if e := keepRef(id, original.ID, files, original.AnalysisPath); e != nil {
+				return result, e
 			}
 			if t.BPM == 0 {
 				effectiveTracks[i].BPM = storedBPM
@@ -666,6 +704,9 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 					return result, e
 				}
 				result.Deferred++
+			}
+			if e := keepRef(id, original.ID, files, original.AnalysisPath); e != nil {
+				return result, e
 			}
 			if t.BPM == 0 {
 				effectiveTracks[i].BPM = storedBPM
@@ -856,10 +897,8 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			if bridgeBytes >= maxBytes {
 				result.AnalysisSkipped++
 			} else {
-				packedSource, e := packBridgeSource(original.ID, a)
-				if e != nil {
-					return result, e
-				}
+				// The detail stays in the track's ANLZ files; the row says which (#253).
+				packedSource := packBridgeRef(original.ID, detailFiles(files))
 				// No consumer reads the old audio-header archive; retain the column/schema.
 				packedAudio, e := packAnalysis([]byte("{}"))
 				if e != nil {

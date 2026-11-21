@@ -633,12 +633,21 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	}
 	// An update a large export needs cannot finish while the mount waits: resolving and reading
 	// the files of a cold stick takes minutes (#301). It goes on in the background on a copy.
+	// Its playlists and new tracks come in now, from the export alone (#253).
 	if !full && !bypass && !opts.SmartMatch && canWrite && opts.Deadline.IsZero() && exportBytes(r, mount) > attemptExportBytes {
-		if err := startUpdate(stage, stamp); err != nil {
+		res, err := quickUpdate(ctx, mount, dir, r, mountStart.Add(maxMountHookBudget))
+		if err != nil {
+			log.Printf("rb-bridge: the re-export's playlists wait for the background update: %v", err)
+			res = enginedb.Result{}
+		} else {
+			log.Printf("rb-bridge: re-export's playlists and %d new tracks in at the mount; grids and waveforms follow", res.Added)
+		}
+		if err = startUpdate(stage, stamp); err != nil {
 			return enginedb.Result{}, err
 		}
 		log.Printf("rb-bridge: update of a large export goes on after the mount")
-		return enginedb.Result{Background: true}, nil
+		res.Background = true
+		return res, nil
 	}
 	// The overviews before anything is read from the export. On a card that also carries
 	// the staged exports of thousands of tracks that read alone outlasts the mount's time:
@@ -886,14 +895,16 @@ func readMark(dir, name string) string {
 	return strings.TrimSpace(string(b))
 }
 
+// foldPath is the resolver's equivalence of paths: case folding and NFC (#6).
+func foldPath(p string) string { return norm.NFC.String(cases.Fold().String(norm.NFC.String(p))) }
+
 // mergeByPath is Reconcile without touching the disk.
 func mergeByPath(l *rekordbox.Library) {
 	byPath := map[string]uint32{}
 	replaced := map[uint32]uint32{}
 	kept := l.Tracks[:0:0]
 	for _, t := range l.Tracks {
-		// Same equivalence as compat's resolver: case folding and NFC (#6).
-		key := norm.NFC.String(cases.Fold().String(norm.NFC.String(t.Path)))
+		key := foldPath(t.Path)
 		if first, ok := byPath[key]; ok {
 			replaced[t.ID] = first
 			continue

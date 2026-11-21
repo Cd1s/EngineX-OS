@@ -892,15 +892,10 @@ func bridgeDisplayWave(ctx context.Context, file, rel string, id int64, rate, du
 	if db.QueryRowContext(ctx, `SELECT substr(a.sourceJSON,1,12582913) FROM BridgeAnalysis a JOIN BridgeState s ON s.trackId=a.trackId WHERE a.trackId=? AND s.path=?`, id, rel).Scan(&b) != nil || len(b) > shadowDisplayLimit {
 		return nil
 	}
-	b, err = enginedb.UnpackAnalysis(b, shadowDisplayLimit)
-	if err != nil {
-		return nil
-	}
-	var source struct{ Analysis *rekordbox.Analysis }
-	if json.Unmarshal(b, &source) != nil {
-		return nil
-	}
-	w := enginedb.DisplayWaveFromRekordbox(source.Analysis, rate)
+	// A row of this build names the track's ANLZ files on the volume (#253); older rows hold
+	// the detail. The volume is the directory above Engine Library.
+	a := enginedb.BridgeDetail(b, filepath.Dir(filepath.Dir(filepath.Dir(file))), shadowDisplayLimit)
+	w := enginedb.DisplayWaveFromRekordbox(a, rate)
 	if w == nil || math.Abs(float64(len(w.Bands)/3)*w.SamplesPerBin/rate*1000-durationMS) > 100 {
 		return nil
 	}

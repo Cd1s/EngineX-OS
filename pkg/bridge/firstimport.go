@@ -230,6 +230,11 @@ func fastPublish(ctx context.Context, mount, dir, stage, stamp string, r *compat
 	if err = publishImport(mount, dir); err != nil {
 		return res, err
 	}
+	if exportBytes(r, mount) > attemptExportBytes {
+		// The next mount would only start the update that reads the files of so large an
+		// export: it starts now, and a remount publishes it (#253).
+		return completeLater(dir, stage, stamp, res)
+	}
 	return res, keepPending(dir)
 }
 
