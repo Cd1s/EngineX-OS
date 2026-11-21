@@ -33,6 +33,7 @@ new_repo() {
     git -C "$TMP/$name" config user.name 'EngineX Agent'
     git -C "$TMP/$name" config user.email enginex-agent@users.noreply.github.com
     mkdir -p "$TMP/$name/docs" "$TMP/$name/pkg/webui" "$TMP/$name/tools/dev"
+    printf 'module example.invalid/test\n\ngo 1.23\n' > "$TMP/$name/go.mod"
     printf '# checklist\n\n| # | Behaviour |\n| --- | --- |\n| 1 | base |\n' > "$TMP/$name/docs/REGRESSION-CHECKLIST.md"
     printf 'base\n' > "$TMP/$name/shared.txt"
     printf 'docs/REGRESSION-CHECKLIST.md merge=union\n' > "$TMP/$name/.gitattributes"
@@ -46,7 +47,7 @@ run_integrate() {
     local repo=$1
     shift
     FAKE_REMOTE_LOG="$TMP/remote.log" PATH="$TMP/bin:$PATH" SSHCTL="$TMP/bin/sshctl" REMOTE_BUILD_BIN="$TMP/bin/remote-build" \
-        INTEGRATE_ALLOW_AUTHORS="${INTEGRATE_ALLOW_AUTHORS:-}" ENGINEX_BUILD_HOSTS=local ENGINEX_SKIP_HOST_PROBE=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$TMP/empty.gitconfig" bash -c 'cd "$1" && exec "$2" "${@:3}" --into agent/5306-integration' bash "$repo" "$ROOT/tools/dev/integrate.sh" "$@"
+        INTEGRATE_ALLOW_AUTHORS="${INTEGRATE_ALLOW_AUTHORS:-}" INTEGRATE_FAST_ONLY="${INTEGRATE_FAST_ONLY:-}" FAKE_FAIL_TARGETED="${FAKE_FAIL_TARGETED:-}" ENGINEX_BUILD_HOSTS=local ENGINEX_SKIP_HOST_PROBE=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$TMP/empty.gitconfig" bash -c 'cd "$1" && exec "$2" "${@:3}" --into agent/5306-integration' bash "$repo" "$ROOT/tools/dev/integrate.sh" "$@"
 }
 
 clean_repo=$(new_repo clean)
@@ -56,7 +57,11 @@ git -C "$clean_repo" add clean.txt && git -C "$clean_repo" commit -qm clean
  git -C "$clean_repo" push -qu origin feature-clean
 before=$(git -C "$clean_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
 run_integrate "$clean_repo" feature-clean
-grep -Fq "go test -race -timeout 30m" "$TMP/remote.log"
+if [[ ${INTEGRATE_FAST_ONLY:-0} == 1 ]]; then
+    [[ ! -e "$TMP/remote.log" ]]
+else
+    grep -Fq "go test -race -timeout 30m" "$TMP/remote.log"
+fi
 after=$(git -C "$clean_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
 [[ $before != "$after" ]]
 git -C "$clean_repo" fetch -q origin agent/5306-integration
@@ -111,7 +116,21 @@ after=$(git -C "$conflict_repo" ls-remote origin refs/heads/agent/5306-integrati
 fail_repo=$(new_repo targeted)
 git -C "$fail_repo" switch -q -c feature-fail
 printf 'package webui\n\nfunc FailingLaneFixture() {}\n' > "$fail_repo/pkg/webui/integrate_fixture.go"
-git -C "$fail_repo" add pkg/webui/integrate_fixture.go && git -C "$fail_repo" commit -qm targeted-failure
+cat > "$fail_repo/pkg/webui/fail_test.go" <<'EOF'
+package webui
+
+import (
+    "os"
+    "testing"
+)
+
+func TestInjectedTargetedFailure(t *testing.T) {
+    if os.Getenv("FAKE_FAIL_TARGETED") == "1" {
+        t.Fatal("injected targeted failure")
+    }
+}
+EOF
+git -C "$fail_repo" add pkg/webui/integrate_fixture.go pkg/webui/fail_test.go && git -C "$fail_repo" commit -qm targeted-failure
  git -C "$fail_repo" push -qu origin feature-fail
 before=$(git -C "$fail_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
 if FAKE_FAIL_TARGETED=1 run_integrate "$fail_repo" feature-fail; then echo 'targeted failure unexpectedly passed' >&2; exit 1; fi

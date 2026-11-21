@@ -222,7 +222,12 @@ targeted_tests() {
     local inner='set -eu'
     for dir in "${go_pkgs[@]}"; do inner+="; go test -race -timeout 30m '$dir'"; done
     for test in "${py_tests[@]}"; do inner+="; python3 '$test'"; done
-    remote_run "$host" "$inner"
+    if [[ ${INTEGRATE_FAST_ONLY:-0} == 1 ]]; then
+        mkdir -p "$ROOT/.gocache"
+        (cd "$worktree" && export GOCACHE="$ROOT/.gocache" && bash -c "$inner")
+    else
+        remote_run "$host" "$inner"
+    fi
 }
 
 resolve_conflicts_both() {
@@ -436,6 +441,14 @@ for branch in "${branches[@]}"; do
         merged+=("$branch via $resolved_branch ($(git -C "$worktree" rev-parse --short "origin/$resolved_branch"))")
     fi
 done
+
+if [[ ${INTEGRATE_FAST_ONLY:-0} == 1 ]]; then
+    identity_gate "origin/$TARGET" HEAD || { echo "batch identity gate refused" >&2; exit 1; }
+    git -C "$worktree" push origin "HEAD:$TARGET" >/dev/null
+    elapsed=$(( $(date +%s) - started ))
+    printf 'Merged %s into %s; fast targeted tests on IN; full suites deferred; elapsed %ss.' "${merged[*]}" "$TARGET" "$elapsed"; if ((${#dropped_hunks[@]})); then printf ' Dropped hunks %s.' "${dropped_hunks[*]}"; fi; if ((${#doc_notes[@]})); then printf ' Doc cache decisions %s.' "${doc_notes[*]}"; fi; printf '\n'
+    exit 0
+fi
 
 full_host=$(pick_host 1)
 full_inner='set -eu; test -z "$(gofmt -l .)"; go vet ./...; go test -race -timeout 30m ./...; idx=$(mktemp); rm -f "$idx"; git init -q; GIT_INDEX_FILE="$idx" git add -A; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/az01-packer; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/splash; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/stems; rm -f "$idx"; rm -rf .git; bash tests/test_rootfs_overlay.sh'
