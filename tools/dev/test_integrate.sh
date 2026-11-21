@@ -35,6 +35,7 @@ new_repo() {
     mkdir -p "$TMP/$name/docs" "$TMP/$name/pkg/webui" "$TMP/$name/tools/dev"
     printf '# checklist\n\n| # | Behaviour |\n| --- | --- |\n| 1 | base |\n' > "$TMP/$name/docs/REGRESSION-CHECKLIST.md"
     printf 'base\n' > "$TMP/$name/shared.txt"
+    printf 'docs/REGRESSION-CHECKLIST.md merge=union\n' > "$TMP/$name/.gitattributes"
     git -C "$TMP/$name" add .
     git -C "$TMP/$name" commit -qm base
     git -C "$TMP/$name" switch -q -c agent/5306-integration
@@ -63,16 +64,21 @@ git -C "$clean_repo" show origin/agent/5306-integration:clean.txt >/dev/null
 duplicate_repo=$(new_repo duplicate)
 git -C "$duplicate_repo" switch -q -c target-rows
 printf '| 2 | target row | row 1 |\n' >> "$duplicate_repo/docs/REGRESSION-CHECKLIST.md"
-git -C "$duplicate_repo" add docs/REGRESSION-CHECKLIST.md && git -C "$duplicate_repo" commit -qm target-row
+printf 'package webui\n\nfunc TargetChecklistFixture() {}\n' > "$duplicate_repo/pkg/webui/target_rows.go"
+git -C "$duplicate_repo" add docs/REGRESSION-CHECKLIST.md pkg/webui/target_rows.go && git -C "$duplicate_repo" commit -qm target-row
 git -C "$duplicate_repo" push -qu origin HEAD:agent/5306-integration
 base=$(git -C "$duplicate_repo" rev-parse HEAD~1)
 git -C "$duplicate_repo" switch -q -c feature-row "$base"
+mkdir -p "$duplicate_repo/pkg/webui"
 printf '| 2 | branch row | row 2 |\n' >> "$duplicate_repo/docs/REGRESSION-CHECKLIST.md"
-git -C "$duplicate_repo" add docs/REGRESSION-CHECKLIST.md && git -C "$duplicate_repo" commit -qm feature-row
+printf 'package webui\n\nfunc BranchChecklistFixture() {}\n' > "$duplicate_repo/pkg/webui/branch_rows.go"
+git -C "$duplicate_repo" add docs/REGRESSION-CHECKLIST.md pkg/webui/branch_rows.go && git -C "$duplicate_repo" commit -qm feature-row
 git -C "$duplicate_repo" push -qu origin feature-row
 run_integrate "$duplicate_repo" feature-row
 git -C "$duplicate_repo" fetch -q origin agent/5306-integration
 git -C "$duplicate_repo" show origin/agent/5306-integration:docs/REGRESSION-CHECKLIST.md | grep -Fq '| 3 | branch row | row 3 |'
+git -C "$duplicate_repo" show origin/agent/5306-integration:pkg/webui/target_rows.go >/dev/null
+git -C "$duplicate_repo" show origin/agent/5306-integration:pkg/webui/branch_rows.go >/dev/null
 
 conflict_repo=$(new_repo conflict)
 git -C "$conflict_repo" switch -q -c target-change
