@@ -338,7 +338,10 @@ int snd_seq_event_output_direct(void *handle, void *ev) {
 
 // led_brightness= changed (poll thread): publish the level; Engine's thread resends the cached RGB
 // SysEx LEDs with its next controller event on each handle (led_catch_up), so the deck dims or
-// brightens without this thread ever writing to Engine's sequencer handle.
+// brightens without this thread ever writing to Engine's sequencer handle. On a deck with no other
+// LED activity that next event is the resend the controller QML starts when the UI pack tells it the
+// new level (/GUI/Scripted/EngineXPadBrightness, #325). The pack publishes it 200 ms after the
+// change, so this 80 ms poll holds the level first: a resend that beat it would go out at the old level.
 static void led_replay(int pct) {
     pthread_mutex_lock(&led_mu);
     __atomic_store_n(&led_pct, pct, __ATOMIC_RELAXED);

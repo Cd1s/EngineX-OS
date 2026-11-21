@@ -1768,6 +1768,84 @@ assert.strictEqual(vfx.enabled, false);
         self.assertIn("if (m <= 3) {\n        target = 1;", hook)
         self.assertIn("if (target < 2) target = 2;", hook)
 
+    def test_pad_brightness_reaches_the_controller_engine_without_its_http_poll(self):
+        # #325: Pad LED Brightness took up to 10 s to reach the pads. The hook dims the pads, but it can only resend the
+        # cached LEDs inside Engine's next LED message, and on an idle deck that message is the controller side's own
+        # resend, which the controller engine started only when its 10 s poll of /v1/enginex/ui saw a new level. The main
+        # UI now publishes the level through /GUI/Scripted/EngineXPadBrightness, like the other settings the controller
+        # engine reads, and the controller reads it on the 500 ms timer it already has.
+        main = bp.SERVICES_MAIN
+        self.assertIn('Planck.createProperty("EngineXPadBrightness", 0.0, 0)', main)
+        self.assertIn("onScLedBrightnessChanged: scPadBrightnessDelay.restart()", main)
+        # 200 ms after the last change: the hook's 80 ms settings poll must hold the level before the controller
+        # resends the LEDs, or that resend would go out at the old level
+        self.assertRegex(main, r"id: scPadBrightnessDelay\s+interval: 200; repeat: false")
+        # nothing new polls: the retry timer runs only until the first publication
+        self.assertIn("interval: 250; running: root.scUiLoaded && !root.scPadBrightnessSynced; repeat: true", main)
+        self.assertEqual(SRC.count("scGlobalConfig.scSyncPadBrightnessFromState()"), 1)
+        # and reacts at once when the property changes (the timer stays as the fallback that fetches a late property)
+        self.assertIn("onScPadBrightnessSignalChanged: scSyncPadBrightnessFromState()", SRC)
+        # the controller engine keeps its two timers (500 ms and 10 s) and the HTTP value only fills in until the property is live
+        self.assertEqual(SRC.count("interval: 500; running: true; repeat: true; triggeredOnStart: true"), 1)
+        self.assertEqual(SRC.count("interval: 10000; running: true; repeat: true; triggeredOnStart: true"), 1)
+        self.assertIn("if (!scGlobalConfig.scPadBrightnessLive && n >= 20 && n <= 100) scGlobalConfig.scPadBrightness = n / 100", SRC)
+        # the hardware pads are still dimmed once, by the hook: the QML hands Engine the stock colour
+        self.assertIn("function scScaled() { return outputColor }", SRC)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_pad_brightness_property_round_trip(self):
+        import ast
+        fn_main = re.search(r"function scSyncPadBrightness\(\)\s*\{[\s\S]*?\n\t\}", bp.SERVICES_MAIN)
+        self.assertIsNotNone(fn_main)
+        lines = SRC.splitlines()
+        start = next(k for k, l in enumerate(lines) if "function scSyncPadBrightnessFromState()" in l)
+        body = []
+        for l in lines[start:]:
+            body.append(ast.literal_eval(l.strip()))
+            if body[-1] == "    }\n":
+                break
+        fn_ctrl = "".join(body)
+        js = f"""
+const assert = require('node:assert/strict');
+const PATH = "/GUI/Scripted/EngineXPadBrightness";
+const shared = {{ [PATH]: 0.0 }};
+globalThis.Planck = {{ getProperty: (p) => ({{ translator: {{
+    get value() {{ return shared[p]; }}, set value(v) {{ shared[p] = Math.fround(v); }} }} }}) }};
+// main UI
+let scLedBrightness = 100, scUiLoaded = false, scPadBrightnessSynced = false;
+const scPadBrightnessProp = Planck.getProperty(PATH);
+{fn_main.group(0)}
+scSyncPadBrightness();
+assert.equal(scPadBrightnessSynced, false);                 // before the UI settings are loaded nothing is published
+assert.equal(shared[PATH], 0);
+scUiLoaded = true; scSyncPadBrightness();
+assert.equal(scPadBrightnessSynced, true);
+assert.equal(shared[PATH], 1);
+for (const n of [60, 40, 80, 20, 100]) {{ scLedBrightness = n; scSyncPadBrightness(); assert.equal(shared[PATH], Math.fround(n / 100)); }}
+scLedBrightness = 5; scSyncPadBrightness(); assert.equal(shared[PATH], Math.fround(0.2));
+scLedBrightness = 100; scSyncPadBrightness(); assert.equal(shared[PATH], 1);
+// controller engine
+const scGlobalConfig = {{ scPadBrightness: 1, scPadBrightnessLive: false, pPadBrightness: null }};
+{fn_ctrl}
+shared[PATH] = 0;                                              // not published yet: the HTTP value stays in charge
+scSyncPadBrightnessFromState();
+assert.equal(scGlobalConfig.scPadBrightnessLive, false);
+assert.equal(scGlobalConfig.scPadBrightness, 1);
+for (const n of [60, 100, 40, 80, 20]) {{
+    shared[PATH] = Math.fround(n / 100);
+    scSyncPadBrightnessFromState();
+    assert.equal(scGlobalConfig.scPadBrightnessLive, true);
+    assert.equal(scGlobalConfig.scPadBrightness, n / 100);   // the exact step, so the pad assignments resend on every change
+}}
+shared[PATH] = Math.fround(0.05);                              // garbage never reaches the pads
+scSyncPadBrightnessFromState();
+assert.equal(scGlobalConfig.scPadBrightness, 0.2);
+console.log("pad brightness property round trip PASS");
+"""
+        res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("round trip PASS", res.stdout)
+
     def test_four_deck_player_board_preserves_stock_player_ui(self):
         # #49: 4-deck mode clears Config.device.isPlayer in C++ so Engine builds the 4-deck
         # layout, while QML restores stock player behaviour on JP07/JP08/JP13/JP14 boards
