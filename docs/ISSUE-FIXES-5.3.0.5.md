@@ -629,3 +629,24 @@ The maintainer confirmed both fixes on two SC5000 decks using deck-push builds. 
 | `EngineX-Installer-5.3.0.5-macos-amd64.zip` | `227b5edeec698005ed46e29358b452f737b356b8ec69d13bd67ececbd783b819` |
 | `EngineX-Installer-5.3.0.5-macos-arm64.zip` | `4cff243e1fb2b4cdec83e83e6dcae01b302670959faa2e138ae75f017214162c` |
 | `EngineX-Installer-5.3.0.5-windows-amd64.zip` | `3bf3b7aab4854fe0e3514cc9c97c0a41de5f2e0b1ad9fc75baca4a87bc71a7ca` |
+
+## Installer re-release over v5.3.0.5-r1 (2026-11-21, #311)
+
+- **Scope**: the four `EngineX-Installer-5.3.0.5-*` archives, `SHA256SUMS.txt` and `SHA256SUMS.txt.sig` on the `v5.3.0.5-r1` Release, replaced with `--clobber`. The 16 `*-Update.img`, the 8 `*-Data-Bundle.tar.gz` and `RELEASE-TAG.txt` are byte-identical to the 2026-11-20 build and the tag name is unchanged, so no deck is offered an update.
+- **Reason**: #311. A PRIME 4 G2 still on stock Engine OS 5.0.3 did not boot after a first USB install with the 5.3.0.5 installer: 2nd-gen EngineX only writes `/data` and needs official 5.3.0 or newer underneath. A 2nd-gen first install (fastboot and Firmware Update Mode) now asks for the version `Settings → About / Update` shows and stops before writing anything below 5.3.0 or when the answer is not a version. Upgrades, `--yes`, uninstall and stock restore are unchanged. The three READMEs and the docs site say the same.
+- **Build commit**: `89597c9f` (`fix(installer): stop a 2nd-gen first install on stock firmware below 5.3.0 (#311)`).
+- **Tests** (build host): `gofmt -l` clean, `go vet ./cmd/enginex-installer`, `go test -race ./cmd/enginex-installer` (new `TestStockBaseOK` and `TestFirstInstallStopsOnAStockBaseBelow530`), `test_docs_audit` and `test_spotify_review` pass.
+- **Build and signing**: the published r1 files were downloaded and checked against the published `SHA256SUMS.txt` and its signature; then only `build-installer.sh` and `sign-release.sh` ran on them. Every manifest line other than the four installers equals the published one, and each of the four installer binaries carries the new prompt.
+- **Gates**: not re-run, because the deck images are unchanged (identical SHA-256 lines).
+- **After upload**: 31 assets; the 29 asset digests equal the signed manifest; `SHA256SUMS.txt` and `.sig` fetched again from `releases/latest` on another host verify with `enginex-sign --verify --tag v5.3.0.5-r1`, and the four installers match it; the four README installer links return 200.
+- **Rollback point**: the 2026-11-20 installers in the table above (built at `1c41b7e9`), manifest `455fd418aee733756f66b7dc6a9139502e257af64bc24bb33425a8815f09b4a6`.
+- **Deck impact**: none; the installer runs on the computer. Not tried on a real 2nd-gen deck (none available).
+
+| File | SHA-256 |
+| --- | --- |
+| `EngineX-Installer-5.3.0.5-linux-amd64.tar.gz` | `7708639ebd47fbfc7590e77a0e8779582587145eed5191cb69e19bba546e71f3` |
+| `EngineX-Installer-5.3.0.5-macos-amd64.zip` | `36d2e5b8e70a725c1b09c150b9a6edb13141eba380e01ee5cb1f4bf6fc50b60e` |
+| `EngineX-Installer-5.3.0.5-macos-arm64.zip` | `a9c43b139b6c15b9fe56f2990c73c3e3384194be62e9b511e69594f5ab62c87f` |
+| `EngineX-Installer-5.3.0.5-windows-amd64.zip` | `a47b64d48d525d465aeb181ddf579b6eabe21f1a819dd7a6a490832443c99dd7` |
+| `SHA256SUMS.txt` | `1a9cddb664a12ce81c6192fb74fd342d4c05a8879f1a6d9e9a5adeab86ee3666` |
+| `SHA256SUMS.txt.sig` | `da5f95351a0f95d27f12254b254d7c9b6567aaa5a960b10b7d1484e4a08c940a` |

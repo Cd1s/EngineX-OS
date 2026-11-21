@@ -2,6 +2,8 @@
 
 Custom system built on the official Engine OS 5.3.0+ base for all 16 Denon DJ, Numark, and Rane standalone units. Build commit: `1c41b7e9bd8b8d5064f0c3f7e1e623949fb51f01`. Release tag: `v5.3.0.5-r1`. Rollback point: tag `v5.3.0.4-r5`.
 
+> **Installers updated on 2026-11-21 (#311)**: the four `EngineX-Installer-5.3.0.5-*` archives, `SHA256SUMS.txt` and `SHA256SUMS.txt.sig` were replaced with installers built at `89597c9f`. The 24 deck files and `RELEASE-TAG.txt` are unchanged, so decks are not offered another update.
+
 > **5.3.0.5 r1 release evidence complete.** The signed table below is from the final output built at `1c41b7e9bd8b8d5064f0c3f7e1e623949fb51f01`. The evidence commit is made on top of `84708831`. The two shadow fixes were confirmed on two SC5000 decks with deck-push builds, including a one-step-per-beat countdown. Other physical-deck checks remain pending. The full change record is `docs/ISSUE-FIXES-5.3.0.5.md`.
 
 - **Online User Guide (English / 简体中文 / 繁體中文)**: [https://enginexdj.com](https://enginexdj.com)
@@ -39,6 +41,7 @@ Custom system built on the official Engine OS 5.3.0+ base for all 16 Denon DJ, N
 - **Hardware, network & settings**: disables Wi-Fi power saving on all decks at boot (#309), persists 2nd-gen root SSH passwords across reboots (#299), uses standard high-quality SBC bitpool on Bluetooth speakers, restores `Shift + View` on controllers, and asks before USB profile import (#234).
 - **Start-up single-drive browse**: automatically browses a deck's only local drive at start-up on all 16 models—including late-mounting drives—instead of stopping on the Sources list. Thanks to @sklempert (#315).
 - **PRIME 4 G2 firmware-update USB mode**: supports the `15e4:d014` USB identity in Firmware Update Mode (#311).
+- **2nd-gen first install checks the stock version**: the installer asks for the version shown in `Settings → About / Update` and stops without writing anything if the deck still runs stock firmware older than 5.3.0, which does not boot after the install (#311).
 - **Clean Pro DJ Link stick eject**: releases the export root and blocks new reads after the first eject attempt, so a stick ejects without repeated `target is busy` failures.
 - **Streamed-track BPM and grid**: the loaded track shows Engine's analysed BPM and grid once loaded; the provider's tempo remains only in the list label.
 - **Copy BPM follows the source**: a streamed shadow copy refreshes a stale cached BPM and shows the source BPM.
@@ -61,7 +64,7 @@ Custom system built on the official Engine OS 5.3.0+ base for all 16 Denon DJ, N
 
 - **Already running EngineX OS 5.3.0.4 or earlier (all 16 models)**: connect to Wi-Fi or Ethernet and tap `Settings → About / Update → Update` (music, library, and settings are kept; 2nd-gen decks on `5.3.0.2` / `5.3.0.3` bridge through `*-Data-Bundle.tar.gz` and unlock `.img` updates; update to 5.3.0.5 first so future updates verify signatures, #239).
 - **First-time install on a first-generation unit** (`SC5000`, `SC5000M`, `SC6000`, `SC6000M`, `PRIME 4`, `PRIME 2`, `PRIME GO`, `Mixstream Pro`): copy your model's `*-Update.img` unrenamed to the root of a FAT32 or exFAT USB drive and select it in `Settings → About / Update → Firmware Update Mode → Options`.
-- **First-time install on a stock second-generation unit** (`SC LIVE 4`, `SC LIVE 2`, `PRIME 4+`, `PRIME GO+`, `Mixstream Pro+`, `Mixstream Pro Go`, `PRIME 4 G2`, `SYSTEM ONE`): update to official Engine OS 5.3.0 first, back up your deck while it is running (USB `/data` flash erases internal music, library, and settings), and run `EngineX-Installer-5.3.0.5-*`.
+- **First-time install on a stock second-generation unit** (`SC LIVE 4`, `SC LIVE 2`, `PRIME 4+`, `PRIME GO+`, `Mixstream Pro+`, `Mixstream Pro Go`, `PRIME 4 G2`, `SYSTEM ONE`): update to official Engine OS 5.3.0 or newer first with Engine DJ's official updater (check `Settings → About / Update`: older stock firmware such as 5.0.x does not boot after the install, and the installer stops below 5.3.0), back up your deck while it is running (USB `/data` flash erases internal music, library, and settings), and run `EngineX-Installer-5.3.0.5-*`.
 - **Going back to stock**: boot a 5.3.0.5 build once, shut down normally, then run `Restore-Official-Firmware.*`.
 
 ---
@@ -96,7 +99,7 @@ Custom system built on the official Engine OS 5.3.0+ base for all 16 Denon DJ, N
 | `SCLIVE2-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `acd8d90cf5051a17ecb40a954ac578b54ef598ae8f56f4f5fdf497db65e03e2d` |
 | `SCLIVE4-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `def34d8578ce191ad0c8b2f6915c99491e70688aa932bbb17345326715cc03fe` |
 | `SYSTEMONE-5.3.0.5-EngineX-OS-Data-Bundle.tar.gz` | `0cde71d401e33f7abe5c82c72e730102d67fa73f006bf3c83dfe7f732f62c623` |
-| `EngineX-Installer-5.3.0.5-linux-amd64.tar.gz` | `185d134add5ba7bac6ffee7d9c46ed20672ec028c9329056f2a800a21a32d58b` |
-| `EngineX-Installer-5.3.0.5-macos-amd64.zip` | `227b5edeec698005ed46e29358b452f737b356b8ec69d13bd67ececbd783b819` |
-| `EngineX-Installer-5.3.0.5-macos-arm64.zip` | `4cff243e1fb2b4cdec83e83e6dcae01b302670959faa2e138ae75f017214162c` |
-| `EngineX-Installer-5.3.0.5-windows-amd64.zip` | `3bf3b7aab4854fe0e3514cc9c97c0a41de5f2e0b1ad9fc75baca4a87bc71a7ca` |
+| `EngineX-Installer-5.3.0.5-linux-amd64.tar.gz` | `7708639ebd47fbfc7590e77a0e8779582587145eed5191cb69e19bba546e71f3` |
+| `EngineX-Installer-5.3.0.5-macos-amd64.zip` | `36d2e5b8e70a725c1b09c150b9a6edb13141eba380e01ee5cb1f4bf6fc50b60e` |
+| `EngineX-Installer-5.3.0.5-macos-arm64.zip` | `a9c43b139b6c15b9fe56f2990c73c3e3384194be62e9b511e69594f5ab62c87f` |
+| `EngineX-Installer-5.3.0.5-windows-amd64.zip` | `a47b64d48d525d465aeb181ddf579b6eabe21f1a819dd7a6a490832443c99dd7` |
