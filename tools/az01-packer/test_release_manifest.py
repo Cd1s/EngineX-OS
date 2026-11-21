@@ -88,8 +88,8 @@ chmod 755 "$2"
 
     def test_plain_tag_and_later_releases_without_bundles(self):
         self.build(tag="v5.3.0.6", version="5.3.0.6", skip=[n for n in release_files("5.3.0.6") if "Data-Bundle" in n])
-        self.assertEqual(self.check(ENGINEX_EXPECT_BUNDLES=0).returncode, 0)
-        self.assertRefused("expected 8 *-Data-Bundle.tar.gz")  # the default is the 5.3.0.4/5.3.0.5 set
+        self.assertEqual(self.check().returncode, 0)
+        self.assertEqual(self.check(ENGINEX_EXPECT_BUNDLES=8).returncode, 1)
 
     def test_a_backup_file_does_not_stand_in_for_the_image(self):
         # The review's reproduction: both files exist, the list names only the backup.
@@ -157,6 +157,13 @@ chmod 755 "$2"
         sign = (REPO / "tools/az01-packer/sign-release.sh").read_text()
         self.assertIn("check-release-manifest.sh", sign)
         self.assertIn('--verify --tag "$TAG"', sign)
+
+    def test_release_scripts_retire_bundles_from_5306(self):
+        rel = (REPO / "tools/az01-packer/build-release.sh").read_text()
+        self.assertIn('EXPECT_BUNDLES=0', rel)
+        self.assertIn('sha256sum *-Update.img RELEASE-TAG.txt > SHA256SUMS.txt', rel)
+        sign = (REPO / "tools/az01-packer/sign-release.sh").read_text()
+        self.assertIn('ENGINEX_EXPECT_BUNDLES=0', sign)
 
 
 if __name__ == "__main__":

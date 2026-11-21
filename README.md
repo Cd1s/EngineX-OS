@@ -196,7 +196,7 @@ Copy the matching `*-Update.img` unrenamed to the root of a FAT32 or exFAT USB d
 
 ### 3. Second-Generation Models — Unified `*-Update.img` & On-Deck OTA
 
-After a 2nd-gen deck has been unlocked once with `EngineX-Installer` (or booted on an existing EngineX install), update it from a FAT32/exFAT USB drive with `*-Update.img` below, or tap **Settings → About / Update → Update** over Wi-Fi/Ethernet (this Release also includes `*-Data-Bundle.tar.gz` one last time so 2nd-gen decks on `5.3.0.2` / `5.3.0.3` can OTA upgrade and unlock `.img` updates; update decks on 5.3.0.4 or earlier to 5.3.0.5 first so future updates verify signatures):
+After a 2nd-gen deck has been unlocked once with `EngineX-Installer` (or booted on an existing EngineX install), update it from a FAT32/exFAT USB drive with `*-Update.img` below, or tap **Settings → About / Update → Update** over Wi-Fi/Ethernet. Releases after the final bridge publish 20 artifacts, consisting of 16 `*-Update.img` files and 4 installers. A deck still on `5.3.0.2` or `5.3.0.3` must first use the bridge release that still includes `*-Data-Bundle.tar.gz` before it can follow the image-only update path:
 
 - **Denon DJ SC LIVE 4**: [`SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img)
 - **Denon DJ SC LIVE 2**: [`SCLIVE2-5.3.0.5-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE2-5.3.0.5-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img)

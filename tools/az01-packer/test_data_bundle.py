@@ -1579,11 +1579,11 @@ pkill() { printf 'pkill %s\\n' "$*" >> "$KILLED"; }
         self.assertIn('/usr/sbin/az01-update preload hook missing', res.stderr)
         self.host_commands.write_text('')
 
-    def test_release_scripts_emit_28_artifacts_and_sha256sums(self):
+    def test_release_scripts_emit_20_artifacts_and_sha256sums(self):
         rel_sh = (HERE / 'build-release.sh').read_text()
-        self.assertIn('-Data-Bundle.tar.gz"', rel_sh)
+        self.assertIn('EXPECT_BUNDLES=0', rel_sh)
         # RELEASE-TAG.txt (#239) is listed too: it is how the signed list names its release tag.
-        self.assertIn('sha256sum *-Update.img *-Data-Bundle.tar.gz RELEASE-TAG.txt > SHA256SUMS.txt', rel_sh)
+        self.assertIn('sha256sum *-Update.img RELEASE-TAG.txt > SHA256SUMS.txt', rel_sh)
 
         out_dir = self.tmp / 'release-out'
         out_dir.mkdir()

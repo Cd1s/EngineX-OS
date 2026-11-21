@@ -16,6 +16,12 @@ case $VERSION in *[!0-9.]*|'') echo "version must be digits and dots" >&2; exit 
 # in here, so they are offered the re-release once and not again after installing it.
 TAG=${RELEASE_TAG:-v$VERSION}
 case $TAG in "v$VERSION"|"v$VERSION-r"[1-9]|"v$VERSION-r"[1-9][0-9]) ;; *) echo "RELEASE_TAG must be v$VERSION or v$VERSION-rN" >&2; exit 2 ;; esac
+# 5.3.0.5 is the final bridge release carrying standalone legacy bundles. The bundle is still
+# built temporarily for every Gen-2 image, but 5.3.0.6 and later releases publish only the image.
+case $VERSION in
+    5.3.0.[0-5]) EXPECT_BUNDLES=8 ;;
+    *) EXPECT_BUNDLES=0 ;;
+esac
 [ ! -e "$OUT" ] || { echo "$OUT exists; refusing to overwrite" >&2; exit 2; }
 [ -z "${LKLFUSE:-}" ] || [ -x "$LKLFUSE" ] || { echo "missing executable LKLFUSE: $LKLFUSE" >&2; exit 2; }
 # A public release is signed (#239) and decks check the signature against the keys embedded in this
@@ -84,7 +90,8 @@ mkdir -p "$STAGE/usr/lib/modules/$krel/extra"
 install -m 0644 "$HFSPLUSX" "$STAGE/usr/lib/modules/$krel/extra/hfsplusx.ko"
 chmod 0644 "$STAGE/usr/share/enginex/"*
 
-# 1b. Second generation: /data bundles. 6 armhf models share the 32-bit suite and hooks, AZ04 (PRIME 4 G2, SYSTEM ONE) needs arm64 ones.
+# 1b. Second generation: the temporary bundle payload for each *-Update.img. 6 armhf models share
+# the 32-bit suite and hooks, AZ04 (PRIME 4 G2, SYSTEM ONE) needs arm64 ones.
 mkdir -p "$WORK/hooks32" "$WORK/hooks64"
 OUT=$WORK/hooks32/libengine-ui-hook.so sh tools/ui-mod/build.sh
 OUT=$WORK/hooks32/libedisksd-hook.so sh tools/edisksd-hook/build.sh
@@ -178,17 +185,25 @@ for f in "$OUT/"*-Update.img; do
     python3 "$ROOT/tools/az01-packer/az01_packer.py" info "$f" > "$OUT/verify/${b%.img}.info.json"
 done
 
-# 5.3.0.5 bridge (#215): keep all eight legacy bundles for older on-deck updaters.
-# This build's updater selects only *-Update.img; retire release bundles in 5.3.0.6.
+# The 5.3.0.5 bridge kept eight legacy bundles for older on-deck updaters. Starting with 5.3.0.6,
+# the generated bundles remain temporary inputs for the image and are not copied into the release.
 for m in SCLIVE4 SCLIVE2 PRIME4PLUS PRIMEGOPLUS MIXSTREAMPROPLUS MIXSTREAMPROGO; do
     python3 tools/az01-packer/build-data-bundle.py "$VERSION" --release-tag "$TAG" --prefix "$m" --suite "$WORK/enginex-suite" \
         --hook "$WORK/hooks32/libengine-ui-hook.so" --fsck-hfsplus "$FSCK" --lklfuse "$LKLFUSE_PATH" --require-lklfuse --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
-    cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
+    if [ "$EXPECT_BUNDLES" -eq 0 ]; then
+        cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
+    else
+        cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
+    fi
 done
 for m in PRIME4G2 SYSTEMONE; do
     python3 tools/az01-packer/build-data-bundle.py "$VERSION" --release-tag "$TAG" --prefix "$m" --suite "$WORK/enginex-suite-arm64" \
         --hook "$WORK/hooks64/libengine-ui-hook.so" --fsck-hfsplus "$WORK/hooks64/fsck.hfsplus" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
-    cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
+    if [ "$EXPECT_BUNDLES" -eq 0 ]; then
+        cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
+    else
+        cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
+    fi
 done
 
 cd "$OUT"
@@ -196,6 +211,10 @@ cd "$OUT"
 # -rN revision, so the signed list names the tag through this file: a deck checks the hash of the tag
 # it is offered against it and refuses a genuine older revision shown under a newer tag (#239).
 printf '%s\n' "$TAG" > RELEASE-TAG.txt
-sha256sum *-Update.img *-Data-Bundle.tar.gz RELEASE-TAG.txt > SHA256SUMS.txt
+if [ "$EXPECT_BUNDLES" -eq 0 ]; then
+    sha256sum *-Update.img RELEASE-TAG.txt > SHA256SUMS.txt
+else
+    sha256sum *-Update.img *-Data-Bundle.tar.gz RELEASE-TAG.txt > SHA256SUMS.txt
+fi
 # Not signed yet: build-installer.sh adds the installers to this list, then sign-release.sh signs it (#239).
 ls -l

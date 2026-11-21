@@ -72,12 +72,12 @@ JC11S fixture 是独立的官方 PRIME4PLUS rootfs，不能用 SC LIVE 4 或 PRI
 
 涉及 Factory Reset、`az01-update --erase-data`、空白 `/data` 首次启动的改动，只在编译机的 `unshare -m` + chroot 沙箱里用解包出的 rootfs 测，**绝不在实机触发**。
 
-## 3. 提交与构建（16 款机型 `*-Update.img` + 8 款二代兼容 `*-Data-Bundle.tar.gz` + 4 平台一键安装器，共 28 个产物）
+## 3. 提交与构建（16 款机型 `*-Update.img` + 4 平台一键安装器，共 20 个产物）
 
 > **二代机分阶段统一迁移规则（#215，维护者确认）**：
 > - **`5.3.0.4`（当前版本）**：同时发布 8 款二代 `*-Update.img` 与 8 款二代 `*-Data-Bundle.tar.gz`（共 **28 个产物**：16 个 `*-Update.img` + 8 个 `*-Data-Bundle.tar.gz` + 4 个 `EngineX-Installer`，连同 `SHA256SUMS.txt` 共上传 29 个文件）。`5.3.0.4` 的 `pkg/webui/update.go` 同时识别两者（优先 `-Update.img`，回退 `-Data-Bundle.tar.gz`），`EngineX-Installer` 默认执行 `[1/2] 一键解锁` + `[2/2] 刷入 *-Update.img`（仍兼容 `.tar.gz`），而仍运行 `5.3.0.2` / 未解锁 `5.3.0.3` 的二代机也能直接通过 Release 中的 `*-Data-Bundle.tar.gz` 在屏幕上无感一键 OTA 升级并自动获得 `.img` 解锁。
 > - **`5.3.0.5`（下一版过渡桥接版本）**：Release 资产最后一次同时保留 `*-Data-Bundle.tar.gz`（供 `5.3.0.2` / `5.3.0.3` / 早期 `5.3.0.4` 二代机一键 OTA 升到 `5.3.0.5`），但 **`5.3.0.5` 自身的 `pkg/webui/update.go` 将切换为仅检测 `*-Update.img`**。
-> - **`5.3.0.6+`（最终完全统一状态）**：从 `build-release.sh` 与 GitHub Release 中彻底退役 `*-Data-Bundle.tar.gz`，全系 16 款机型在 U 盘、屏幕 OTA 与 `EngineX-Installer` 中统一仅使用 `*-Update.img`（届时恢复为 20 个产物）。
+> - **`5.3.0.6+`（最终完全统一状态）**：从 `build-release.sh` 与 GitHub Release 中彻底退役 `*-Data-Bundle.tar.gz`，全系 16 款机型在 U 盘、屏幕 OTA 与 `EngineX-Installer` 中统一仅使用 `*-Update.img`，共 20 个产物。仍运行 `5.3.0.2` / `5.3.0.3` 的二代机必须先使用 `5.3.0.5-r1` 过渡发布，再升级到没有数据包的最新版本。
 
 1. 改动先提交并推送到 `origin/main`，构建必须对应一个已推送的提交。
 2. 用干净目录构建（`remote-build` 同步不会删除远端已删除的文件，旧目录会带上残留）：
@@ -96,7 +96,7 @@ REMOTE_BUILD_HOST=<build host> remote-build --name enginex-release-<短说明> -
 
 **签名（#239，5.3.0.5 起）**：每个 Release 的 `SHA256SUMS.txt` 都用发布密钥（Ed25519）签名，签名文件是 `SHA256SUMS.txt.sig`（对 `SHA256SUMS.txt` 原字节的签名，64 字节的标准 base64 加换行）。
 
-- 签名一定是最后一步：`build-installer.sh` 会重写 `SHA256SUMS.txt`（加入 4 个安装器），所以 `sign-release.sh` 必须在它之后跑。它先跑 `check-release-manifest.sh`：`sha256sum -c` 校验清单；清单每一行都是 `<sha256>  <单个文件名>`，名字完整比对（`X-Update.img.bak` 不算 `X-Update.img`），只允许 `*-Update.img`、`*-Data-Bundle.tar.gz`、`EngineX-Installer-*`、`RELEASE-TAG.txt`，不许重复；目录里每个这类文件都必须在清单里；数量必须是 16 个 `*-Update.img`、8 个 `*-Data-Bundle.tar.gz`、4 个安装器（5.3.0.6 起退役数据包：`ENGINEX_EXPECT_BUNDLES=0`）；文件名里的版本必须与发布 tag 一致。然后拒绝仓库里没有内置公钥的密钥、签名，再用内置公钥并按发布 tag 验一遍。
+- 签名一定是最后一步：`build-installer.sh` 会重写 `SHA256SUMS.txt`（加入 4 个安装器），所以 `sign-release.sh` 必须在它之后跑。它先跑 `check-release-manifest.sh`：`sha256sum -c` 校验清单；清单每一行都是 `<sha256>  <单个文件名>`，名字完整比对（`X-Update.img.bak` 不算 `X-Update.img`），只允许 `*-Update.img`、`*-Data-Bundle.tar.gz`、`EngineX-Installer-*`、`RELEASE-TAG.txt`，不许重复；目录里每个这类文件都必须在清单里；数量必须是 16 个 `*-Update.img`、4 个安装器；5.3.0.6 起 `ENGINEX_EXPECT_BUNDLES=0`，5.3.0.5 及更早版本仍为 8 个数据包；文件名里的版本必须与发布 tag 一致。然后拒绝仓库里没有内置公钥的密钥、签名，再用内置公钥并按发布 tag 验一遍。
 - 发布 tag 绑定：发布文件名只带版本、不带 `-rN`，而 tag 来自没有签名的发布页面，所以清单里有一行 `RELEASE-TAG.txt`，内容是 tag 加换行（`build-release.sh` 写出这个文件，并列入 `SHA256SUMS.txt`）。碟机和安装器核对它看到的 tag 的哈希与清单里这一行是否一致：一份真实签名的 r1 清单放在 r3 的标签下会被拒绝（#239 复核）。碟机还要求这个 tag 比已装版本新，不会回退。
 - 私钥只在编译机上，root 专用（`0600`，PKCS#8 PEM，生成命令 `umask 077 && openssl genpkey -algorithm ed25519 -out /root/.config/enginex/release.key`）；工具从环境变量 `ENGINEX_RELEASE_KEY` 读路径，从不打印密钥内容；不写进仓库、聊天、日志。agent 不接触私钥。
 - 公钥（`openssl pkey -in <私钥> -pubout`）写在 `internal/releasesig/keys.go` 的 `TrustedPublicKeysPEM` 列表里，构建进碟机和安装器（2026-11-13 起已内置发布公钥）。**没有内置公钥时 `build-release.sh`（公开发布，第 3 个参数 `none`）直接停止，门禁也会失败**：否则每台碟机都会拒绝这个版本。
@@ -108,7 +108,7 @@ REMOTE_BUILD_HOST=<build host> remote-build --name enginex-release-<短说明> -
 
 第 3 个参数在公开发布时**必须是 `none`**：公开镜像不能内置任何人的 SSH 公钥（#46）。只有维护者自用的私有镜像才传公钥文件，且私有镜像不能上传到 Release。
 
-输出目录必须不存在、且不在任何 git 工作区里。`5.3.0.4` / `5.3.0.5` 产出 **8 个一代 `*-Update.img`、8 个二代 `*-Update.img`、8 个二代兼容 `*-Data-Bundle.tar.gz`、4 个平台 `EngineX-Installer-<VERSION>-*`、汇总全部 28 个产物的 `SHA256SUMS.txt`，以及它的签名 `SHA256SUMS.txt.sig`**，加上 `RELEASE-TAG.txt`（也在清单里）。上传共 31 个文件：28 个产物 + `RELEASE-TAG.txt` + `SHA256SUMS.txt` + `SHA256SUMS.txt.sig`。
+输出目录必须不存在、且不在任何 git 工作区里。`5.3.0.6+` 产出 **8 个一代 `*-Update.img`、8 个二代 `*-Update.img`、4 个平台 `EngineX-Installer-<VERSION>-*`，共 20 个产物**，汇总到 `SHA256SUMS.txt` 并生成 `SHA256SUMS.txt.sig`，加上 `RELEASE-TAG.txt`（也在清单里）。上传共 23 个文件：20 个产物 + `RELEASE-TAG.txt` + `SHA256SUMS.txt` + `SHA256SUMS.txt.sig`。5.3.0.5 及更早版本仍按上面的历史桥接规则发布 28 个产物。
 
 For 5.3.0.5, run all three build steps in that order: firmware, installer archives, then signing. `sign-release.sh` pins the root-only key path itself; callers do not select another key. `RELEASE-TAG.txt` is written by `build-release.sh` and included in the final signed manifest.
 
@@ -166,10 +166,10 @@ bash tools/az01-packer/release-gate.sh \
 
 ## 5. Tag 与 GitHub Release
 
-在编译机上直接上传全部 31 个文件（28 个产物 + `RELEASE-TAG.txt` + `SHA256SUMS.txt` + `SHA256SUMS.txt.sig`；那边 `gh` 已登录 `Cd1s`，不用把镜像拉回本机）：
+在编译机上直接上传全部 23 个文件（20 个产物 + `RELEASE-TAG.txt` + `SHA256SUMS.txt` + `SHA256SUMS.txt.sig`；那边 `gh` 已登录 `Cd1s`，不用把镜像拉回本机）：
 
 ```sh
-# 资产清单以 SHA256SUMS.txt 为准（5.3.0.4 / 5.3.0.5 共 28 个：16 个 *-Update.img + 8 个 *-Data-Bundle.tar.gz + 4 个 EngineX-Installer-*）
+# 资产清单以 SHA256SUMS.txt 为准（5.3.0.6+ 共 20 个：16 个 *-Update.img + 4 个 EngineX-Installer-*）
 # 新版本
 gh release create v<VERSION> --repo Cd1s/EngineX-OS --title "EngineX OS <VERSION>" \
   --notes-file notes.md --target <提交> --latest \
@@ -179,7 +179,7 @@ gh release upload v<VERSION> --repo Cd1s/EngineX-OS \
   $(awk '{print $2}' SHA256SUMS.txt) SHA256SUMS.txt SHA256SUMS.txt.sig --clobber
 ```
 
-- Release Notes 必须包含完整的 **28 个产物 SHA-256 对照表**（8 款一代 `*-Update.img`、8 款二代 `*-Update.img`、8 款二代过渡兼容 `*-Data-Bundle.tar.gz`、4 平台 `EngineX-Installer`；`5.3.0.6+` 退役 `.tar.gz` 后为 20 个），每次重发都要换成新值。
+- Release Notes 必须包含完整的 **20 个产物 SHA-256 对照表**（8 款一代 `*-Update.img`、8 款二代 `*-Update.img`、4 平台 `EngineX-Installer`）；5.3.0.5 及更早版本的历史桥接发布仍列出 28 个产物，每次重发都要换成新值。
 - tag 指向记录这次发布的提交：`git tag -f v<VERSION> <提交> && git push -f origin v<VERSION>`（同一版本重发时移动 tag）。
 - 新版本要设为 `--latest`，README 与官网 `enginexdj.com` 的 `releases/latest/download/...` 链接才会指向它。
 
@@ -190,9 +190,9 @@ gh release view v<VERSION> --repo Cd1s/EngineX-OS --json assets -q '.assets[] | 
 ```
 
 - 上传后在别处下载 `SHA256SUMS.txt` 和 `.sig`，用 `go run ./cmd/enginex-sign --verify SHA256SUMS.txt` 验一遍（`5.3.0.5` 起）。
-- 每个资产的 digest 与 `SHA256SUMS.txt`、Release Notes 表格、`docs/ISSUE-FIXES-<VERSION>.md` 完全一致（`5.3.0.4` 共 29 个资产；`5.3.0.5` 起 31 个，多出 `RELEASE-TAG.txt` 和 `SHA256SUMS.txt.sig`）。
+- 每个资产的 digest 与 `SHA256SUMS.txt`、Release Notes 表格、`docs/ISSUE-FIXES-<VERSION>.md` 完全一致（5.3.0.6 起共 23 个上传文件，包括 `RELEASE-TAG.txt` 和 `SHA256SUMS.txt.sig`）。
 - 新版本时，抽查 README 与官网 `enginexdj.com` 里的下载链接：`curl -sIL <链接> | grep -i "^HTTP"` 最终是 200。
-- 在 `docs/ISSUE-FIXES-<VERSION>.md` 记录：日期、范围、原因、验证、构建提交、全部 28 个产物 sha256、门禁结果、回滚点（上一次构建的提交）、实机影响。
+- 在 `docs/ISSUE-FIXES-<VERSION>.md` 记录：日期、范围、原因、验证、构建提交、全部 20 个产物 sha256、门禁结果、回滚点（上一次构建的提交）、实机影响。
 - 在本次发布解决或包含的所有关联 GitHub Issues 下逐条留言告知 `v<VERSION>` 已发布、修复点摘要与下载/升级方式。
 
 ## 7. 隐私与版权

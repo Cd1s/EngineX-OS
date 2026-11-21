@@ -196,7 +196,7 @@
 
 ### 3. 二代機——統一 `*-Update.img` 與螢幕線上升級（OTA）
 
-二代機用 `EngineX-Installer` 解鎖一次後（或已安裝舊版 EngineX 開機自動解鎖後），即可將下方 `*-Update.img` 放入 FAT32/exFAT 隨身碟升級，或在連網後點 **設定 → 關於 / 更新 → 更新** 線上升級（本版本 Release 最後一次同時提供 `*-Data-Bundle.tar.gz`，供 `5.3.0.2` / `5.3.0.3` 二代機線上升級並自動解鎖 `.img`；5.3.0.4 及更早版本請先升至 5.3.0.5 以啟用簽章校驗）：
+二代機用 `EngineX-Installer` 解鎖一次後（或已安裝舊版 EngineX 開機自動解鎖後），即可將下方 `*-Update.img` 放入 FAT32/exFAT 隨身碟升級，或在連網後點 **設定 → 關於 / 更新 → 更新** 線上升級。最終發布格式共 20 個產物，包括 16 個 `*-Update.img` 與 4 個安裝器。仍執行 `5.3.0.2` / `5.3.0.3` 的二代機必須先使用仍提供 `*-Data-Bundle.tar.gz` 的過渡版本，再進入只使用映像的升級路徑：
 
 - **Denon DJ SC LIVE 4**：[`SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img)
 - **Denon DJ SC LIVE 2**：[`SCLIVE2-5.3.0.5-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE2-5.3.0.5-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img)

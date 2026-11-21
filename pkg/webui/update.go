@@ -430,12 +430,10 @@ func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
 			}
 			return ""
 		}
-		// Phased Gen-2 *-Update.img migration (#215):
-		//   - 5.3.0.4: checkRelease preferred -Update.img with a legacy bundle fallback.
-		//   - 5.3.0.5 (this bridge build): detect only -Update.img. Releases keep the legacy bundles
-		//     one final time for 5.3.0.2/5.3.0.3/early-5.3.0.4 updaters and installer compatibility.
-		//   - 5.3.0.6+ (final): Retire *-Data-Bundle.tar.gz from build-release.sh and GitHub Releases; all 16 models
-		//     use *-Update.img exclusively for USB, OTA, and EngineX-Installer.
+		// Gen-2 releases have used *-Update.img for the on-deck updater since 5.3.0.5. The 5.3.0.5
+		// bridge kept standalone Data-Bundle archives for older locked decks, while 5.3.0.6+ releases
+		// retire those archives entirely. Locked Gen-2 decks therefore receive no OTA URL until they
+		// have crossed the bridge release and opened the image update path.
 		if !dataBundleBoards[prefix] || !s.isGen2Locked() {
 			v.DownloadURL = find("-Update.img")
 		}

@@ -151,19 +151,31 @@ func releaseServerTag(t *testing.T, b bundleFile, digest string, downloads *int,
 	if digest == "" {
 		digest = "sha256:" + sha(t, b.Path)
 	}
+	imageName := filepath.Base(b.ImagePath)
 	mux.HandleFunc("/repos/Cd1s/EngineX-OS/releases/latest", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"tag_name": tag, "assets": []map[string]string{
-			{"name": "SC5000-" + b.Version + "-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img", "browser_download_url": srv.URL + "/dl/img", "digest": "sha256:00"},
-			{"name": name, "browser_download_url": srv.URL + "/dl/" + name, "digest": digest},
-		}})
+		assets := []map[string]string{{"name": name, "browser_download_url": srv.URL + "/dl/" + name, "digest": digest}}
+		if !legacyBundleAllowed(tag) {
+			assets = append(assets, map[string]string{"name": imageName, "browser_download_url": srv.URL + "/dl/img", "digest": "sha256:" + sha(t, b.ImagePath)})
+		} else {
+			assets = append([]map[string]string{{"name": "SC5000-" + b.Version + "-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img", "browser_download_url": srv.URL + "/dl/img", "digest": "sha256:00"}}, assets...)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"tag_name": tag, "assets": assets})
 	})
 	mux.HandleFunc("/dl/", func(w http.ResponseWriter, r *http.Request) {
 		if downloads != nil {
 			*downloads++
 		}
+		if r.URL.Path == "/dl/img" && !legacyBundleAllowed(tag) {
+			http.ServeFile(w, r, b.ImagePath)
+			return
+		}
 		http.ServeFile(w, r, b.Path)
 	})
-	srv = signedTLS(t, mux, map[string]string{name: sha(t, b.Path)})
+	files := map[string]string{name: sha(t, b.Path)}
+	if !legacyBundleAllowed(tag) {
+		files[imageName] = sha(t, b.ImagePath)
+	}
+	srv = signedTLS(t, mux, files)
 	return srv
 }
 
@@ -1762,24 +1774,24 @@ func TestAZModel(t *testing.T) {
 	}
 }
 
-func TestAZModelLocalBundle(t *testing.T) {
+func TestAZModelLocalImage(t *testing.T) {
 	dir := t.TempDir()
 	o := &options{WorkDir: dir}
 	if _, ok := azModel(o, "", "1cc5:2027"); ok {
 		t.Fatal("empty work dir must not identify a model")
 	}
-	one := filepath.Join(dir, "PRIME4G2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz")
+	one := filepath.Join(dir, "PRIME4G2-5.3.0.3-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img")
 	if err := os.WriteFile(one, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if m, ok := azModel(o, "", "1cc5:2027"); !ok || m.Prefix != "PRIME4G2" {
-		t.Fatalf("one local bundle: got %v %v", m, ok)
+		t.Fatalf("one local image: got %v %v", m, ok)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "SYSTEMONE-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz"), nil, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "SYSTEMONE-5.3.0.3-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := azModel(o, "", "1cc5:2027"); ok {
-		t.Fatal("two local bundles are ambiguous")
+		t.Fatal("two local images are ambiguous")
 	}
 }
 
@@ -2203,6 +2215,34 @@ func TestFetchBundlePrefersGen2UpdateImgForAllPrefixes(t *testing.T) {
 				t.Fatalf("both-assets release: got %q, err %v", got2, err)
 			}
 		})
+	}
+}
+
+func TestFetchBundleDoesNotFallBackToLegacyBundleFor5306(t *testing.T) {
+	const prefix = "SCLIVE4"
+	name := prefix + "-5.3.0.6-EngineX-OS-Data-Bundle.tar.gz"
+	payload := []byte("legacy bundle")
+	sum := sha256.Sum256(payload)
+	var srv *httptest.Server
+	srv = signedTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/dl/"+name {
+			w.Write(payload)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"tag_name": "v5.3.0.6",
+			"assets": []map[string]string{{
+				"name": name, "browser_download_url": srv.URL + "/dl/" + name,
+				"digest": "sha256:" + hex.EncodeToString(sum[:]),
+			}},
+		})
+	}), map[string]string{name: hex.EncodeToString(sum[:])})
+	defer srv.Close()
+	o := testOpts(t)
+	o.defaults()
+	useRelease(o, srv)
+	if _, err := fetchBundle(ctxT(t), o, prefix, t.TempDir()); err == nil || !strings.Contains(err.Error(), "no SCLIVE4-*-EngineX-OS-*-Update.img") {
+		t.Fatalf("legacy 5.3.0.6 bundle was accepted: %v", err)
 	}
 }
 

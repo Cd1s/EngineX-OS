@@ -120,9 +120,15 @@ class Presets(unittest.TestCase):
         for v in ("5.3.0.1", "5.3.0.7", "5.4.1.7"):
             st.render_splash(fake_stock(10), v)
 
+    def test_every_digit_renders(self):
+        for digit in "0123456789":
+            with self.subTest(digit=digit):
+                canvas = st.render_splash(fake_stock(10), f"5.3.0.{digit}")
+                self.assertTrue(any(pixel > 60 for pixel in canvas[727 * W * 4:775 * W * 4]))
+
     def test_unknown_version_glyph(self):
         with self.assertRaises(ValueError):
-            st.render_splash(fake_stock(10), "5.3.2")
+            st.render_splash(fake_stock(10), "5.3.0.a")
         with self.assertRaises(SystemExit):  # no stale default version
             st.main(["render", "--preset", "enginex", "--stock", "x.bin", "--bin", "y.bin"])
 

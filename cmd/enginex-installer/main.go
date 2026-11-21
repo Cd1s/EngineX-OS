@@ -494,6 +494,27 @@ func isGen2BundleName(name, prefix string) bool {
 	return strings.HasPrefix(name, prefix+"-") && strings.HasSuffix(name, bundleSuffix)
 }
 
+func legacyBundleAllowed(version string) bool {
+	version = strings.TrimPrefix(version, "v")
+	if i := strings.Index(version, "-r"); i >= 0 {
+		version = version[:i]
+	}
+	switch version {
+	case "5.3.0.0", "5.3.0.1", "5.3.0.2", "5.3.0.3", "5.3.0.4", "5.3.0.5":
+		return true
+	default:
+		return false
+	}
+}
+
+func packageVersion(name, prefix string) string {
+	rest := strings.TrimPrefix(name, prefix+"-")
+	if i := strings.Index(rest, "-EngineX-OS-"); i >= 0 {
+		return rest[:i]
+	}
+	return ""
+}
+
 type release struct {
 	Tag    string `json:"tag_name"`
 	Assets []struct {
@@ -503,9 +524,9 @@ type release struct {
 	} `json:"assets"`
 }
 
-// fetchBundle prefers this installer's matching signed sibling, else downloads the latest Gen-2 *-Update.img (or legacy Data-Bundle.tar.gz fallback)
-// for prefix into dir and verifies the signed SHA-256 (#215, #239). The bridge installer keeps
-// legacy input compatibility; the 5.3.0.5 on-deck updater discovers only *-Update.img.
+// fetchBundle prefers this installer's matching signed sibling, else downloads the latest Gen-2
+// *-Update.img for prefix into dir and verifies the signed SHA-256 (#215, #239). Explicit
+// --bundle paths still accept the legacy archive format for offline recovery.
 func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, error) {
 	if path, err := ownVersionPackage(o, prefix); path != "" || err != nil {
 		return path, err
@@ -540,11 +561,11 @@ func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, e
 		return "", "", "", false
 	}
 	name, url, digest, ok := pick(func(n string) bool { return isGen2UpdateImgName(n, prefix) })
-	if !ok {
+	if !ok && legacyBundleAllowed(rel.Tag) {
 		name, url, digest, ok = pick(func(n string) bool { return isGen2BundleName(n, prefix) })
 	}
 	if !ok {
-		return "", fmt.Errorf("release %s has no %s-*-EngineX-OS-*-Update.img or %s-*%s", rel.Tag, prefix, prefix, bundleSuffix)
+		return "", fmt.Errorf("release %s has no %s-*-EngineX-OS-*-Update.img", rel.Tag, prefix)
 	}
 	// The release's signed SHA256SUMS.txt is the root of trust (#239): GitHub's digest only has to agree.
 	sums, sig, err := signedSums(ctx, o, &rel)
@@ -723,7 +744,12 @@ func obtainBundle(ctx context.Context, o *options, prefix string) (*bundleInfo, 
 func localBundle(dir, prefix string) string {
 	local, _ := filepath.Glob(filepath.Join(dir, prefix+"-*-EngineX-OS-*-Update.img"))
 	if len(local) == 0 {
-		local, _ = filepath.Glob(filepath.Join(dir, prefix+"-*"+bundleSuffix))
+		archives, _ := filepath.Glob(filepath.Join(dir, prefix+"-*"+bundleSuffix))
+		for _, candidate := range archives {
+			if legacyBundleAllowed(packageVersion(filepath.Base(candidate), prefix)) {
+				local = append(local, candidate)
+			}
+		}
 	}
 	sort.Slice(local, func(i, j int) bool { return mtime(local[i]).After(mtime(local[j])) })
 	if len(local) > 0 {
@@ -756,7 +782,7 @@ func ownVersionPackage(o *options, prefix string) (string, error) {
 			path = filepath.Join(dir, name)
 			break
 		}
-		if name == base+"Data-Bundle.tar.gz" {
+		if legacyBundleAllowed(installerVersion) && name == base+"Data-Bundle.tar.gz" {
 			path = filepath.Join(dir, name)
 		}
 	}
@@ -1563,11 +1589,12 @@ func azResolve(o *options, board, line string) (model, error) {
 	if b := boardCode(board); lanGen2 && (b == "rmz2" || b == "jp24") {
 		return ids[0].m, nil
 	}
-	// A fastboot deck's LAN board alone does not pick mode C (#164); next to a USB name or a bundle it only has to agree.
+	// A fastboot deck's LAN board alone does not pick mode C (#164); next to a USB name or an image it only has to agree.
 	if len(ids) > 0 && !(lanGen2 && len(ids) == 1) {
 		return ids[0].m, nil
 	}
-	// Last resort: exactly one 2nd-gen model's *-Update.img or Data-Bundle.tar.gz already in the work directory.
+	// Last resort: exactly one 2nd-generation package already in the work directory. Legacy bundles
+	// remain discoverable only for bridge-version packages through 5.3.0.5.
 	if o.Bundle == "" && board == "" {
 		var matched model
 		seen := map[string]bool{}
@@ -1577,7 +1604,8 @@ func azResolve(o *options, board, line string) (model, error) {
 				continue
 			}
 			n := e.Name()
-			if m, ok := bundleModel(n); ok && (isGen2UpdateImgName(n, m.Prefix) || isGen2BundleName(n, m.Prefix)) {
+			if m, ok := bundleModel(n); ok && (isGen2UpdateImgName(n, m.Prefix) ||
+				(legacyBundleAllowed(packageVersion(n, m.Prefix)) && isGen2BundleName(n, m.Prefix))) {
 				matched = m
 				seen[m.Prefix] = true
 			}
@@ -1724,7 +1752,7 @@ func run(ctx context.Context, o *options) error {
 }
 
 func registerFlags(fs *flag.FlagSet, o *options) {
-	fs.StringVar(&o.Bundle, "bundle", "", "*-Update.img or Data-Bundle.tar.gz to install (use a signed matching-version package beside this installer when present; otherwise default: latest release; a package in the folder is reused only when its SHA-256 matches)")
+	fs.StringVar(&o.Bundle, "bundle", "", "*-Update.img or legacy Data-Bundle.tar.gz to install (use a signed matching-version package beside this installer when present; otherwise default: latest release; a package in the folder is reused only when its SHA-256 matches)")
 	fs.StringVar(&o.Bundle, "image", "", "alias for -bundle: *-Update.img to install")
 	fs.StringVar(&o.Backup, "userdata-backup", "", "mode B: a backup image of the deck's data partition to inject into (keeps the user's files; if omitted, a fresh partition is created)")
 	fs.StringVar(&o.Key, "key", "", "mode A: SSH private key (default ~/.ssh/id_*; password denon is also tried)")

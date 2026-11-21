@@ -28,6 +28,14 @@ NAMES=$(sed -n 's/^[0-9a-fA-F]\{64\}  \([^ ]\{1,\}\)$/\1/p' "$SUMS")
 
 VERSION=${TAG#v}
 VERSION=${VERSION%-r[0-9]*}
+if [ "${ENGINEX_EXPECT_BUNDLES+x}" = x ]; then
+    EXPECT_BUNDLES=$ENGINEX_EXPECT_BUNDLES
+else
+    case $VERSION in
+        5.3.0.[0-5]) EXPECT_BUNDLES=8 ;;
+        *) EXPECT_BUNDLES=0 ;;
+    esac
+fi
 for n in $NAMES; do
     case $n in
     *-Update.img|*-Data-Bundle.tar.gz)
@@ -45,6 +53,6 @@ for f in "$OUT"/*-Update.img "$OUT"/*-Data-Bundle.tar.gz "$OUT"/EngineX-Installe
 done
 count() { printf '%s\n' "$NAMES" | grep -c -- "$1" || true; }
 [ "$(count '-Update\.img$')" = "${ENGINEX_EXPECT_UPDATE_IMG:-16}" ] || fail "expected ${ENGINEX_EXPECT_UPDATE_IMG:-16} *-Update.img in SHA256SUMS.txt, found $(count '-Update\.img$')"
-[ "$(count '-Data-Bundle\.tar\.gz$')" = "${ENGINEX_EXPECT_BUNDLES:-8}" ] || fail "expected ${ENGINEX_EXPECT_BUNDLES:-8} *-Data-Bundle.tar.gz in SHA256SUMS.txt, found $(count '-Data-Bundle\.tar\.gz$')"
+[ "$(count '-Data-Bundle\.tar\.gz$')" = "$EXPECT_BUNDLES" ] || fail "expected $EXPECT_BUNDLES *-Data-Bundle.tar.gz in SHA256SUMS.txt, found $(count '-Data-Bundle\.tar\.gz$')"
 [ "$(count '^EngineX-Installer-')" = "${ENGINEX_EXPECT_INSTALLERS:-4}" ] || fail "expected ${ENGINEX_EXPECT_INSTALLERS:-4} EngineX-Installer-* in SHA256SUMS.txt, found $(count '^EngineX-Installer-')"
 echo "check-release-manifest: $(printf '%s\n' "$NAMES" | grep -c .) entries for $TAG, complete"

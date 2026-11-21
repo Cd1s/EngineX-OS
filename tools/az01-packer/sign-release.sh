@@ -10,12 +10,20 @@ set -eu
 OUT=$(cd "${1:?release output directory}" && pwd)
 export ENGINEX_RELEASE_KEY=/root/.config/enginex/release.key
 cd "$(dirname "$0")/../.."
+TAG=$(cat "$OUT/RELEASE-TAG.txt")
+if [ "${ENGINEX_EXPECT_BUNDLES+x}" != x ]; then
+    VERSION=${TAG#v}
+    VERSION=${VERSION%-r[0-9]*}
+    case $VERSION in
+        5.3.0.[6-9]*) export ENGINEX_EXPECT_BUNDLES=0 ;;
+        5.3.[1-9]*|5.[4-9]*|[6-9]*) export ENGINEX_EXPECT_BUNDLES=0 ;;
+    esac
+fi
 # The list must describe the files that are about to be uploaded, all of them, and nothing else.
 sh tools/az01-packer/check-release-manifest.sh "$OUT"
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 CGO_ENABLED=0 go build -trimpath -o "$W/enginex-sign" ./cmd/enginex-sign
-TAG=$(cat "$OUT/RELEASE-TAG.txt")
 rm -f "$OUT/SHA256SUMS.txt.sig"
 # Refuses a key that is not embedded in this checkout: decks would reject the release.
 "$W/enginex-sign" "$OUT/SHA256SUMS.txt"
