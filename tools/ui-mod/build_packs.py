@@ -3703,6 +3703,7 @@ SERVICES_MAIN = """
 	property bool scTidalSynthetic: false
 	property string scScope: ""
 	property string scRekordboxName: "" // the computer with rekordbox on Pro DJ Link, while there is one
+	// "Apple Music (EngineX)" is the third-party service on the gateway; Engine's own Apple Music is a row of its own and keeps its name (#323).
 	// The Sources list shows these in this order after the drives and Link sources:
 	// the computer with rekordbox is a library on the link, so it comes before the services.
 	readonly property var scServices: [
@@ -3713,10 +3714,10 @@ SERVICES_MAIN = """
 		{ id: "deezer", name: "Deezer" },
 		{ id: "soundcloud", name: "SoundCloud" },
 		{ id: "beatport", name: "Beatport" },
-		{ id: "applemusic", name: "Apple Music" }
+		{ id: "applemusic", name: "Apple Music (EngineX)" }
 	]
-	// The label the gateway puts on a streamed row (providerLabels in tidal_gateway.go) is the service's name except for these two.
-	readonly property var scRowLabels: ({ "rekordbox": "rekordbox", "网易云音乐": "netease" })
+	// The label the gateway puts on a streamed row (providerLabels in tidal_gateway.go) is the service's name except for these three.
+	readonly property var scRowLabels: ({ "rekordbox": "rekordbox", "网易云音乐": "netease", "Apple Music": "applemusic" })
 	// Keep inactive dictionaries as scalar JSON strings. Only the selected language
 	// becomes a JS object/GC root; retain all spellings for live language switching.
 	readonly property var scDicts: (@DICTS@)
@@ -4457,6 +4458,11 @@ SERVICES_MAIN = """
 	// so its login, pairing and "Connecting to" boxes would only flash up with the
 	// TIDAL name. They stay closed unless TIDAL itself is open.
 	function scQuiet() { return scSources.indexOf("tidal") < 0 || (scScope !== "" && scScope !== "tidal") }
+	// #323: those guards and the scope's logo are for the providers the pack carries or hides (Engine's TIDAL slot, which every EngineX service
+	// rides; SoundCloud and Beatport LINK, which ours replace). Any other provider (Engine's own Apple Music) signs in as stock does, whatever
+	// scope is selected; a provider the dialog does not name stays ours.
+	function scCarries(provider) { return !provider || /^(tidal|soundcloud|beatport)/i.test(String(provider.name)) }
+	function scBranded(provider) { return scCarries(provider) && scScope !== "" && scScope !== "tidal" }
 	function scUnasked(provider) {
 		if (Date.now() - scAskedAt < 120000) return false
 		const c = Planck.librarianController.streamingInterfaceController
@@ -5241,7 +5247,6 @@ SOURCE_ENTER = """
         const row = available ? nav.availableSourceIndex : nav.connectedSourceIndex
         const name = row >= 0 ? String(model.data(model.index(row, 0), root.scSourceNameRole)).trim() : ""
         const streaming = root.scSourceTypeText(model, row) === "Streaming"
-        if (streaming && name === "Apple Music") { root.scOpen("applemusic"); return }
         if (streaming && ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(name) >= 0) {
             if (root.scScope && root.scSources.indexOf(root.scScope) >= 0) root.scOpen(root.scScope)
             return
@@ -5258,7 +5263,7 @@ SOURCE_FOOTER = """
 	readonly property var pScSourceIndex: Planck.getProperty("/Qml/ControlFocus/ScSourceIndex")
 	readonly property var pScSourceSelect: Planck.getProperty("/Qml/ControlFocus/ScSourceSelect")
 	function scHiddenSourceName(name, typeText) {
-		return typeText === "Streaming" && ["TIDAL", "Tidal", "SoundCloud", "Beatport", "Beatport LINK", "Apple Music"].indexOf(String(name || "")) >= 0
+		return typeText === "Streaming" && ["TIDAL", "Tidal", "SoundCloud", "Beatport", "Beatport LINK"].indexOf(String(name || "")) >= 0
 	}
 	// EngineX's internal save drive (engine-ui-guard registers it with -extraDriveDir):
 	// Engine keeps streamed tracks' cues, loops and grids there and has nothing on it
@@ -5491,7 +5496,7 @@ Grid {
 		id: scRepeater
 		model: Planck.librarianController.browserSourceControllerPtr().availableSourceModel()
 		delegate: AvailableSourceDelegate {
-			visible: model.typeText !== "Streaming" || ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK", "Apple Music"].indexOf(model.name) < 0
+			visible: model.typeText !== "Streaming" || ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(model.name) < 0
 			width: availableSource.cellWidth
 			height: availableSource.cellHeight
 			cellContentWidth: availableSource.cellWidth - availableSource.cellPadding * 2
@@ -7761,7 +7766,7 @@ def edits(dev: bool):
         ],
         **({v + "Bluetooth/BluetoothSelect.qml": BLUETOOTH_SELECT} if v53() else {}),
         prefs + "Entries/StreamingServices.qml": [
-            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK", "Apple Music"].indexOf(provider.name) < 0\n'),
+            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(provider.name) < 0\n'),
             ('import "Base"\n', 'import QtQuick.Layouts 1.12\nimport "Base"\n'),
             ('	label: "Streaming"\n', '	label: "Streaming"\n' + STREAM_SWITCHES),
         ],
@@ -7841,26 +7846,26 @@ def edits(dev: bool):
         v + "Streaming/StreamingAcceptDenyDialog.qml": [
             (
                 '						width: 400\n						height: (src.height / src.width) * width\n						color: Style.icon01Color\n						source: service.provider ? `qrc:/streaming/${service.provider.providerType}/Logo.png` : ""\n',
-                '						width: root.scScope && root.scScope !== "tidal" ? 120 : 400\n						height: root.scScope && root.scScope !== "tidal" ? 120 : (src.height / src.width) * width\n						useOriginal: !!(root.scScope && root.scScope !== "tidal")\n						color: Style.icon01Color\n						source: service.provider ? (root.scScope && root.scScope !== "tidal" ? root.scIcon(root.scScope) : `qrc:/streaming/${service.provider.providerType}/Logo.png`) : ""\n',
+                '						width: root.scBranded(service.provider) ? 120 : 400\n						height: root.scBranded(service.provider) ? 120 : (src.height / src.width) * width\n						useOriginal: !!(root.scBranded(service.provider))\n						color: Style.icon01Color\n						source: service.provider ? (root.scBranded(service.provider) ? root.scIcon(root.scScope) : `qrc:/streaming/${service.provider.providerType}/Logo.png`) : ""\n',
             ),
             (
                 '						text: service.provider ? `Connecting to ${service.provider.displayName}` : ""\n',
                 '						text: service.provider ? root.scT("Connecting to") + " " + root.scBrand(service.provider.displayName) : ""\n',
             ),
-            ("function onShowAcceptDenyDialog(provider) {\n", "function onShowAcceptDenyDialog(provider) {\n				if (root.scQuiet() || root.scUnasked(provider)) return\n"),
+            ("function onShowAcceptDenyDialog(provider) {\n", "function onShowAcceptDenyDialog(provider) {\n				if (root.scCarries(provider) && (root.scQuiet() || root.scUnasked(provider))) return\n"),
         ],
         v + "Streaming/StreamingUtilityDialog.qml": [(
             '            color: Style.icon01Color\n'
             '            source: dialog.provider ? "qrc:/streaming/%1/Logo_Horizontal.png".arg(dialog.provider.providerType) : ""\n',
-            '            Layout.preferredWidth: root.scScope && root.scScope !== "tidal" ? 96 : -1\n'
-            '            Layout.preferredHeight: root.scScope && root.scScope !== "tidal" ? 96 : -1\n'
-            '            useOriginal: !!(root.scScope && root.scScope !== "tidal")\n'
+            '            Layout.preferredWidth: root.scBranded(dialog.provider) ? 96 : -1\n'
+            '            Layout.preferredHeight: root.scBranded(dialog.provider) ? 96 : -1\n'
+            '            useOriginal: !!(root.scBranded(dialog.provider))\n'
             '            color: Style.icon01Color\n'
-            '            source: dialog.provider ? (root.scScope && root.scScope !== "tidal" ? root.scIcon(root.scScope) : "qrc:/streaming/%1/Logo_Horizontal.png".arg(dialog.provider.providerType)) : ""\n',
+            '            source: dialog.provider ? (root.scBranded(dialog.provider) ? root.scIcon(root.scScope) : "qrc:/streaming/%1/Logo_Horizontal.png".arg(dialog.provider.providerType)) : ""\n',
         )] if v53() else [
             (
                 '			width: 400\n			height: (src.height / src.width) * width\n			color: Style.icon01Color\n			source: dialog.provider ? "qrc:/streaming/%1/Logo.png".arg(dialog.provider.providerType) : ""\n',
-                '			width: root.scScope && root.scScope !== "tidal" ? 96 : 400\n			height: root.scScope && root.scScope !== "tidal" ? 96 : (src.height / src.width) * width\n			useOriginal: !!(root.scScope && root.scScope !== "tidal")\n			color: Style.icon01Color\n			source: dialog.provider ? (root.scScope && root.scScope !== "tidal" ? root.scIcon(root.scScope) : "qrc:/streaming/%1/Logo.png".arg(dialog.provider.providerType)) : ""\n',
+                '			width: root.scBranded(dialog.provider) ? 96 : 400\n			height: root.scBranded(dialog.provider) ? 96 : (src.height / src.width) * width\n			useOriginal: !!(root.scBranded(dialog.provider))\n			color: Style.icon01Color\n			source: dialog.provider ? (root.scBranded(dialog.provider) ? root.scIcon(root.scScope) : "qrc:/streaming/%1/Logo.png".arg(dialog.provider.providerType)) : ""\n',
             ),
         ],
         v + "Streaming/StreamingLoginDialog.qml": [
@@ -7868,7 +7873,7 @@ def edits(dev: bool):
                 '					text: `Log in to ${loginDialog.provider ? loginDialog.provider.displayName: ""} to access your tracks and playlists`\n',
                 '					text: root.scBrand(`Log in to ${loginDialog.provider ? loginDialog.provider.displayName: ""} to access your tracks and playlists`)\n',
             ),
-            ("function onShowLoginDialog(provider) {\n", "function onShowLoginDialog(provider) {\n			if (root.scQuiet() || root.scUnasked(provider)) return\n"),
+            ("function onShowLoginDialog(provider) {\n", "function onShowLoginDialog(provider) {\n			if (root.scCarries(provider) && (root.scQuiet() || root.scUnasked(provider))) return\n"),
         ],
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbViewContentContainer.qml": [
             (
@@ -10236,11 +10241,11 @@ def legacy_qml_fixes():
         v + "Streaming/StreamingPairingDialog.qml": [(
             "		if(!visible && service.provider && !service.provider.loggedIn) {\n",
             "		if(!visible && service.provider && !service.provider.loggedIn && controller.selectedProvider === service.provider) {\n",
-        ), ("function onShowPairingDialog(provider) {\n", "function onShowPairingDialog(provider) {\n				if (root.scQuiet()) return\n")],
+        ), ("function onShowPairingDialog(provider) {\n", "function onShowPairingDialog(provider) {\n				if (root.scCarries(provider) && root.scQuiet()) return\n")],
         v + "Streaming/StreamingConnectedAccountsDialog.qml": [(
             "function onShowConnectedAccountsDialog(provider, qrCode, displayUrl) {\n",
             "function onShowConnectedAccountsDialog(provider, qrCode, displayUrl) {\n"
-            "				if (root.scQuiet() || root.scUnasked(provider)) return\n",
+            "				if (root.scCarries(provider) && (root.scQuiet() || root.scUnasked(provider))) return\n",
         )],
         # RA001: leaving the Load Playlist menu left the deck picker open.
         v + "SelectPlaylistDeckMenu/SelectPlaylistDeckMenuLayoutBase.qml": [(
