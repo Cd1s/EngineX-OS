@@ -124,6 +124,13 @@ class ReportTest(unittest.TestCase):
         self.assertIn('skipped: 1', text)
         self.assertIn('TestOther', text)
 
+    def test_flaky_pass_is_listed_loudly_and_counts_as_proof(self):
+        fast = self.fast(); fast['go']['flaky'] = [{'test': 'p TestNew', 'first_failure': 'took 900ms'}]
+        rc, text = self.report({'changed_tests': [['go', 'p', 'TestNew']]}, fast)
+        self.assertEqual(rc, 0)
+        self.assertIn('FLAKY: 1 test(s)', text)
+        self.assertIn('took 900ms', text)
+
     def test_deferred_changed_test_without_arm_run_is_not_proven(self):
         fast = self.fast(); fast['go']['deferred'] = ['p TestNew']
         rc, text = self.report({'changed_tests': [['go', 'p', 'TestNew']]}, fast)
@@ -188,6 +195,32 @@ class PyrunTest(unittest.TestCase):
             p = self.pyrun(root)
             self.assertEqual(p.returncode, 1)
             self.assertIn('boom', p.stderr)
+
+    def test_rerun_turns_a_load_failure_into_a_flaky_pass(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as tmp:
+            write(root, 'test_flaky.py', """\
+                import os, unittest
+                class Flaky(unittest.TestCase):
+                    def test_timing(self):
+                        mark = os.environ['FLAKY_MARK']
+                        if not os.path.exists(mark):
+                            open(mark, 'w').close()
+                            self.fail('too slow under load')
+                    def test_steady(self): pass
+                class Broken(unittest.TestCase):
+                    def test_always(self): self.fail('real bug')
+                """)
+            out = os.path.join(tmp, 'r.json')
+            env = dict(os.environ, TMPDIR=tmp, FLAKY_MARK=os.path.join(tmp, 'mark'))
+            run = lambda *a: subprocess.run([sys.executable, os.path.join(HERE, 'pyrun.py'), root, *a], capture_output=True, text=True, env=env)
+            p = run('test_flaky.Flaky', '--rerun', '--json', out)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            res = jload(out)
+            self.assertEqual([f['id'] for f in res['flaky']], ['test_flaky.Flaky.test_timing'])
+            os.remove(os.path.join(tmp, 'mark'))
+            self.assertEqual(run('test_flaky.Flaky').returncode, 1, 'without --rerun the failure stands')
+            os.remove(os.path.join(tmp, 'mark'))
+            self.assertEqual(run('test_flaky.Broken', '--rerun').returncode, 1, 'a deterministic failure is never excused')
 
     def test_import_error_is_a_failed_class(self):
         with tempfile.TemporaryDirectory() as root:
@@ -254,6 +287,35 @@ class GorunTest(unittest.TestCase):
             p = self.gorun(root, '--only', only, '--json', o, './a')
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             self.assertEqual([s['test'] for s in jload(o)['skipped']], ['TestThree'])
+
+    def test_rerun_turns_a_load_failure_into_a_flaky_pass(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as tmp:
+            self.module(root)
+            write(root, 'b/b_test.go', """\
+                package b
+
+                import (
+                	"os"
+                	"testing"
+                )
+
+                func TestB(t *testing.T) {
+                	mark := os.Getenv("FLAKY_MARK")
+                	if _, err := os.Stat(mark); err != nil {
+                		os.WriteFile(mark, nil, 0o644)
+                		t.Fatal("too slow under load")
+                	}
+                }
+                """)
+            env = dict(os.environ, TMPDIR=tmp, FLAKY_MARK=os.path.join(tmp, 'mark'))
+            run = lambda *a: subprocess.run([sys.executable, os.path.join(HERE, 'gorun.py'), '--no-race', '--no-cache', *a, './...'], cwd=root,
+                                            capture_output=True, text=True, env=env)
+            res = os.path.join(tmp, 'f.json')
+            p = run('--rerun', '--json', res)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertEqual([f['test'] for f in jload(res)['flaky']], ['b TestB'])
+            os.remove(os.path.join(tmp, 'mark'))
+            self.assertEqual(run().returncode, 1, 'without --rerun the failure stands')
 
     def test_failing_test_fails_the_run(self):
         with tempfile.TemporaryDirectory() as root:

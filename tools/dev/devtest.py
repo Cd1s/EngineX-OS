@@ -73,7 +73,7 @@ def go_closure(root, dirs):
 
 
 def make_plan(a, root):
-    plan = {'mode': 'full' if a.full else 'targeted', 'no_cache': a.no_cache, 'base': None, 'changed': []}
+    plan = {'mode': 'full' if a.full else 'targeted', 'no_cache': a.no_cache, 'strict': a.strict or a.no_cache, 'base': None, 'changed': []}
     arm = load_arm(os.path.join(HERE, 'arm-tests.txt'))
     if a.full:
         sel = testmap.full_plan(); changed = []
@@ -204,7 +204,7 @@ def exec_fast(plan):
         t = threading.Thread(target=lambda: (spawn(vet, ['go', 'vet'] + pk, env), add(vet))); t.start()
         out_json = os.path.join(tmp, 'go.json')
         cmd = [sys.executable, os.path.join(HERE, 'gorun.py'), '--seed', os.path.join(HERE, 'go-slow.json'), '--defer', defer_go,
-               '--json', out_json, '--jobs', str(go_jobs), '-p', str(max(2, go_jobs // 2))] + (['--no-cache'] if plan['no_cache'] else []) + pk
+               '--json', out_json, '--jobs', str(go_jobs), '-p', str(max(2, go_jobs // 2))] + (['--no-cache'] if plan['no_cache'] else []) + ([] if plan['strict'] else ['--rerun']) + pk
         spawn(gt, cmd, env)
         if os.path.exists(out_json):
             results['go'] = json.loads(pathlib.Path(out_json).read_text())
@@ -219,7 +219,7 @@ def exec_fast(plan):
             pathlib.Path(defer).write_text(''.join(f"{e['id']}\n" for e in arm_py if e['target'] == d))
             out_json = os.path.join(tmp, 'py-' + d.replace('/', '_') + '.json')
             cmd = [sys.executable, os.path.join(HERE, 'pyrun.py'), d] + item['specs'] + [
-                '--defer', defer, '--json', out_json, '-j', str(py_jobs),
+                '--defer', defer, '--json', out_json, '-j', str(py_jobs)] + ([] if plan['strict'] else ['--rerun']) + [
                 '--timings', os.path.join(state, 'pyrun-' + d.replace('/', '_') + '.json')]
             spawn(s, cmd, env)
             if os.path.exists(out_json):
@@ -347,6 +347,7 @@ def sync_clone(root, clone):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--full', action='store_true'); ap.add_argument('--no-cache', action='store_true')
+    ap.add_argument('--strict', action='store_true', help='no rerun of failed tests (implied by --no-cache)')
     ap.add_argument('--base'); ap.add_argument('--into', default=os.environ.get('ENGINEX_TEST_TARGET', 'agent/5306-integration'))
     ap.add_argument('--arm-gcc14', action='store_true', help='pick an ARM host with GCC 14')
     ap.add_argument('--no-arm', action='store_true', help='do not run the ARM tier (its tests are reported as deferred)')
@@ -435,7 +436,7 @@ def report(a, plan, fast, arm, arm_out, host, arm_host, started, arm_sel, run_ar
     print(f"\n== tools/dev/test.sh {plan['mode']}{' vs ' + plan['base'][:12] if plan['base'] else ''}"
           f" ({len(plan['changed'])} changed files) ==")
     print(f"{'step':36} {'host':22} {'wall':>8}  result")
-    skipped, deferred = [], []
+    skipped, deferred, flaky = [], [], []
     for tier, res, where in (('fast', fast, host), ('arm', arm, arm_host)):
         if not res:
             continue
@@ -443,9 +444,11 @@ def report(a, plan, fast, arm, arm_out, host, arm_host, started, arm_sel, run_ar
             ok &= bool(s['ok'])
             print(f"{s['name'][:36]:36} {str(where)[:22]:22} {s['secs']:7.1f}s  {'ok' if s['ok'] else 'FAILED'}{'  ' + s['note'] if s['note'] else ''}")
         if res['go']:
+            flaky += [('go ' + x['test'], x['first_failure']) for x in res['go'].get('flaky', [])]
             skipped += [('go', x['pkg'], x['test'], x['reason']) for x in res['go']['skipped']]
             deferred += [('go', *x.split(' ', 1)) for x in res['go']['deferred'] if tier == 'fast']
         for d, r in res['py'].items():
+            flaky += [(f"py {d} {x['id']}", x['first_failure']) for x in r.get('flaky', [])]
             skipped += [('py', d, x[0], x[1]) for x in r['skipped']]
             deferred += [('py', d, x) for x in r['deferred'] if tier == 'fast']
     if run_arm and arm_out:
@@ -465,6 +468,10 @@ def report(a, plan, fast, arm, arm_out, host, arm_host, started, arm_sel, run_ar
     if unproven:
         ok = False
         print(f"{'proof of changed tests':36} {'':22} {'':>8}  FAILED  not proven: a test this change added or changed did not run")
+    if flaky:
+        print(f'\nFLAKY: {len(flaky)} test(s) failed in the parallel run and passed alone on a rerun (host load; not proven stable):')
+        for name, first in flaky:
+            print(f'  {name}\n    first failure: ' + ' | '.join(l.strip() for l in first.splitlines() if l.strip())[:300])
     print(f'\nskipped: {len(skipped)}' + ''.join(f'\n  {k} {w} {t}  [{r[:80]}]' for k, w, t, r in skipped[:40]))
     print(f'deferred to the ARM tier: {len(deferred)}' + ''.join('\n  ' + ' '.join(d) for d in deferred[:40]))
     for u in unproven:

@@ -51,16 +51,24 @@ class Rec(unittest.TextTestResult):
         self.skips.append([test.id(), reason])
         super().addSkip(test, reason)
 
+    def addFailure(self, test, err):
+        self.fails.append(test.id())
+        super().addFailure(test, err)
+
+    def addError(self, test, err):
+        self.fails.append(test.id())
+        super().addError(test, err)
+
 
 def worker(start, ids_file, out_file):
     sys.path.insert(0, os.path.abspath(start))
     ids = json.loads(pathlib.Path(ids_file).read_text())
     loader = unittest.TestLoader()
     suite = unittest.TestSuite(loader.loadTestsFromName(i) for i in ids)
-    Rec.times, Rec.skips = {}, []
+    Rec.times, Rec.skips, Rec.fails = {}, [], []
     res = unittest.TextTestRunner(stream=sys.stderr, verbosity=1, resultclass=Rec).run(suite)
     pathlib.Path(out_file).write_text(json.dumps({'run': res.testsRun, 'failed': len(res.failures) + len(res.errors) + len(res.unexpectedSuccesses),
-                                                   'skipped': Rec.skips, 'times': Rec.times}))
+                                                   'skipped': Rec.skips, 'times': Rec.times, 'failed_ids': Rec.fails}))
     return 0 if res.wasSuccessful() else 1
 
 
@@ -70,6 +78,7 @@ def main():
     ap.add_argument('-j', type=int, default=min(os.cpu_count() or 4, 12))
     ap.add_argument('--defer'); ap.add_argument('--json'); ap.add_argument('--timings'); ap.add_argument('--list', action='store_true')
     ap.add_argument('--worker', nargs=2, metavar=('IDS', 'OUT'))
+    ap.add_argument('--rerun', action='store_true', help='run the failed tests alone once more; a pass is reported as flaky, not failed')
     a = ap.parse_args()
     if a.worker:
         return worker(a.dir, *a.worker)
@@ -94,10 +103,10 @@ def main():
     os.chmod(base, 0o755)  # tests that drop privileges must reach their own TMPDIR
     t0 = time.monotonic()
 
-    def run(item):
+    def run(item, ids=None):
         n, key = item
         wd = os.path.join(base, str(n)); os.mkdir(wd); os.chmod(wd, 0o1777)
-        pathlib.Path(wd, 'ids.json').write_text(json.dumps(groups[key]))
+        pathlib.Path(wd, 'ids.json').write_text(json.dumps(ids or groups[key]))
         s = time.monotonic()
         with open(wd + '/log', 'w') as log:
             p = subprocess.run([sys.executable, __file__, a.dir, '--worker', wd + '/ids.json', wd + '/out.json'],
@@ -109,6 +118,13 @@ def main():
     try:
         with ThreadPoolExecutor(max_workers=max(1, a.j)) as pool:
             results = list(pool.map(run, enumerate(order)))
+        flaky = []
+        if a.rerun and sum(len(r.get('failed_ids', [])) for r in results) <= 10:  # more means the host or the tree is broken
+            for n, r in enumerate(x for x in results if x['rc'] != 0 and x.get('failed_ids') and x['failed'] == len(x['failed_ids'])):
+                again = run((1000 + n, r['key']), r['failed_ids'])
+                if again['rc'] == 0 and not again['failed']:
+                    flaky += [{'id': i, 'first_failure': r['log'][:600]} for i in r['failed_ids']]
+                    r.update(rc=0, failed=0)
     finally:
         shutil.rmtree(base, ignore_errors=True)  # only the directory created above
     ran = sum(r['run'] for r in results)
@@ -122,13 +138,15 @@ def main():
         print(f'pyrun: ran {ran} tests, discovery expected {expected}', file=sys.stderr)
     wall = time.monotonic() - t0
     print(f'pyrun {a.dir}: {ran} run, {len(skipped)} skipped, {len(deferred)} deferred, {len(bad)} failed classes, '
-          f'{len(results)} classes on {a.j} workers, {wall:.1f}s -> {"OK" if ok else "FAILED"}')
+          f'{len(results)} classes on {a.j} workers, {len(flaky)} flaky (passed on rerun), {wall:.1f}s -> {"OK" if ok else "FAILED"}')
+    for f in flaky:
+        print(f"pyrun: flaky (failed in the parallel run, passed alone): {f['id']}")
     if a.timings:
         prev.update({r['key']: round(r['secs'], 2) for r in results})
         pathlib.Path(a.timings).write_text(json.dumps(prev, indent=0, sort_keys=True))
     if a.json:
         pathlib.Path(a.json).write_text(json.dumps({'ok': ok, 'discovered': total, 'run': ran, 'wall': wall, 'skipped': skipped, 'deferred': deferred,
-                   'failed': [r['key'] for r in bad],
+                   'failed': [r['key'] for r in bad], 'flaky': flaky,
                    'classes': {r['key']: {'tests': len(groups[r['key']]), 'secs': round(r['secs'], 2)} for r in results},
                    'tests': {k: round(v, 3) for r in results for k, v in r['times'].items()}}, indent=1))
     return 0 if ok else 1

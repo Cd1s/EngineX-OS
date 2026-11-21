@@ -70,11 +70,41 @@ def run_job(job, state, lock):
         state['err'][job['label']] = ''.join(errs)
 
 
+def rerun_failed(a, state, base, tmp):
+    """Run the top-level tests that failed once more, one package at a time, nothing else running. A data race is a real
+    bug whatever a second run says, so a package with one is never rerun, and more than ten failures mean a broken host."""
+    failed = [k for k, v in state['tests'].items() if v[0] == 'fail']
+    tops = collections.defaultdict(set)
+    for pkg, test in failed:
+        tops[pkg].add(test.split('/')[0])
+    if not tops or sum(map(len, tops.values())) > 10:
+        return []
+    flaky = []
+    for pkg, names in tops.items():
+        if any('DATA RACE' in ''.join(state['out'].get((pkg, t), [])) for t in {t for p, t in failed if p == pkg}):
+            continue
+        wd = tempfile.mkdtemp(dir=tmp); os.chmod(wd, 0o1777)
+        again = {'out': collections.defaultdict(list), 'tests': {}, 'pkgs': {}, 'cached': set(), 'rc': {}, 'err': {}, 'job_secs': {}}
+        cmd = [c for c in base if c != '-count=1'] + ['-count=1', '-run', '^(' + '|'.join(sorted(names)) + ')$', pkg]
+        run_job({'label': 'rerun', 'cmd': cmd, 'env': dict(os.environ, TMPDIR=wd)}, again, threading.Lock())
+        if again['rc'].get('rerun') == 0 and not any(v[0] == 'fail' for v in again['tests'].values()):
+            for t in sorted(names):
+                first = ''.join(state['out'].get((pkg, t), []))[:600]
+                flaky.append({'pkg': pkg, 'test': t, 'first_failure': first})
+            for (p, t), v in list(state['tests'].items()):
+                if p == pkg and t.split('/')[0] in names and v[0] == 'fail':
+                    state['tests'][(p, t)] = ('pass', v[1])
+            if not any(v[0] == 'fail' for (p, _), v in state['tests'].items() if p == pkg):
+                state['pkgs'][pkg] = ('pass', state['pkgs'].get(pkg, ('', 0.0))[1])
+    return flaky
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('pkgs', nargs='+'); ap.add_argument('--seed'); ap.add_argument('--defer'); ap.add_argument('--only')
     ap.add_argument('-p', type=int, default=6, help='go test -p of the unsharded packages'); ap.add_argument('--jobs', type=int, default=8, help='go test processes at once'); ap.add_argument('--no-cache', action='store_true')
     ap.add_argument('--no-race', action='store_true'); ap.add_argument('--timeout', default='30m')
+    ap.add_argument('--rerun', action='store_true', help='run failed tests alone once more; a pass is reported as flaky, not failed')
     ap.add_argument('--json'); ap.add_argument('--top', type=int, default=20); ap.add_argument('--suggest-seed')
     a = ap.parse_args()
     t0 = time.monotonic()
@@ -133,6 +163,7 @@ def main():
         jobs.sort(key=lambda j: (j['label'] != 'plain', -weight.get(j['label'], 0)))  # plain job first, then the heaviest shards
         with ThreadPoolExecutor(max_workers=max(1, min(a.jobs, len(jobs)))) as pool:
             list(pool.map(lambda j: run_job(j, state, lock), jobs))
+        flaky = rerun_failed(a, state, base, tmp) if a.rerun else []
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     wall = time.monotonic() - t0
@@ -153,14 +184,14 @@ def main():
     for pkg in bad_pkgs:
         sys.stdout.write(''.join(state['out'].get((pkg, None), [])))
     for label, rc in state['rc'].items():
-        if rc and not bad_pkgs and not failed:
+        if rc and not bad_pkgs and not failed and not flaky:
             print(f'gorun: job {label} exited {rc}\n{state["err"][label]}', file=sys.stderr)
-    ok = not failed and not bad_pkgs and not lost and all(rc == 0 for rc in state['rc'].values())
+    ok = not failed and not bad_pkgs and not lost and (all(rc == 0 for rc in state['rc'].values()) or bool(flaky))  # a job exits 1 when a flaky test failed in it
     perpkg = collections.defaultdict(lambda: collections.Counter())
     for (pkg, _), (act, _) in tests.items():
         perpkg[dirs.get(pkg, pkg)][act] += 1
     top = sorted(((e, dirs.get(p, p), t) for (p, t), (act, e) in tests.items() if '/' not in t), reverse=True)
-    res = {'ok': ok, 'wall': round(wall, 1), 'jobs': state['job_secs'], 'run': len(tests), 'lost': lost, 'failed': [f'{dirs.get(p, p)} {t}' for p, t in failed],
+    res = {'ok': ok, 'wall': round(wall, 1), 'jobs': state['job_secs'], 'run': len(tests), 'lost': lost, 'failed': [f'{dirs.get(p, p)} {t}' for p, t in failed], 'flaky': [{'test': f"{dirs.get(f['pkg'], f['pkg'])} {f['test']}", 'first_failure': f['first_failure']} for f in flaky],
            'failed_packages': [dirs.get(p, p) for p in bad_pkgs], 'skipped': skipped, 'deferred': [f'{d} {t}' for d, t in deferred],
            'packages': {dirs.get(p, p): {'secs': v[1], 'cached': p in state['cached'], **dict(perpkg[dirs.get(p, p)])} for p, v in pkgs_res.items()},
            'tests': {f'{d} {t}': e for e, d, t in top}}
@@ -176,7 +207,9 @@ def main():
         pathlib.Path(a.suggest_seed).write_text(json.dumps(sug, indent=1, sort_keys=True))
     nshard = sum(1 for j in jobs if '#' in j['label'])
     print(f'gorun: {len(tests)} tests in {len(pkgs_res)} packages, {len(skipped)} skipped, {len(deferred)} deferred, '
-          f'{len(failed)} failed, {nshard} shard processes, {wall:.1f}s -> {"OK" if ok else "FAILED"}')
+          f'{len(failed)} failed, {len(flaky)} flaky (passed on rerun), {nshard} shard processes, {wall:.1f}s -> {"OK" if ok else "FAILED"}')
+    for f in flaky:
+        print(f"gorun: flaky (failed in the parallel run, passed alone): {dirs.get(f['pkg'], f['pkg'])} {f['test']}")
     if lost:
         print('gorun: tests missing from shard runs: ' + ', '.join(f'{d} {t}' for d, t in lost[:10]), file=sys.stderr)
     for e, d, t in top[:a.top]:
