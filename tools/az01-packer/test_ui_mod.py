@@ -12543,29 +12543,39 @@ const assert = require('node:assert/strict');
 String.prototype.arg = function(v) { return this.replace('%1', v); }; // QML's String.arg
 const DEFERRED = @DEFERRED@;
 const entries = ['4', '8', '10', '20', '50', '100']; // the SC LIVE 4 Engine's own list
-// The SpeedRange translator: writing index notifies rangeIndex's binding at once, or later (a queued notification), the way Engine might.
+// The SpeedRange translators, one per deck: writing index notifies rangeIndex's binding at once, or later (a queued notification), the way Engine might.
 let pending = [], scSmartExpect = {};
-const range = {entries, _i: 0, get index() { return this._i; }, set index(v) { this._i = v; if (DEFERRED) pending.push(v); else deck.rangeChanged(); },
-    get string() { return entries[this._i]; }};
-const Planck = {getProperty: () => ({translator: range})};
+const decks = {};
+const Planck = {getProperty: path => ({translator: decks[+/Deck(\d+)/.exec(path)[1]].range})};
 const root = {get scSmartExpect() { return scSmartExpect; }, set scSmartExpect(v) { scSmartExpect = v; }, scUnsyncRestoreBpm() {},
     scWidenRange(d, n) { return scWidenRange(d, n); }};
-const deck = {deckIdx: 2, savedRangeIndex: -1, handRangeIndex: -1, syncActive: false, syncNeed: 0, pRange: {translator: range}, lastSeen: 0,
-    get rangeIndex() { return range._i; }};
-const run = body => new Function('d', 'root', 'Planck', 'with (d) { ' + body + ' }')(deck, root, Planck);
 @NEED@
 @WIDEN@
-deck.rangeChanged = () => { if (deck.rangeIndex !== deck.lastSeen) { deck.lastSeen = deck.rangeIndex; run(@RANGE@); } };
-function flush() { while (pending.length) { pending.shift(); deck.rangeChanged(); } }
-function setSync(on, need) { // QML order: syncActive's handler, then syncNeed's
-    const was = deck.syncActive;
-    deck.syncNeed = need; deck.syncActive = on;
-    if (on !== was) run(@ACTIVE@);
-    run(@NEEDH@);
-    flush();
+// One deck's delegate (the pack's own handlers) and the controls the cases use on it.
+function makeDeck(idx) {
+    // `floor`: Engine refuses a range narrower than the deck's tempo needs (sandbox, 2026-11-22): a write below it leaves the range as it is.
+    const range = {entries, floor: 0, _i: 0, get index() { return this._i; }, set index(v) { v = Math.max(v, this.floor); if (v === this._i) return; this._i = v; if (DEFERRED) pending.push(deck); else deck.rangeChanged(); },
+        get string() { return entries[this._i]; }};
+    const deck = {deckIdx: idx, savedRangeIndex: -1, handRangeIndex: -1, syncActive: false, syncNeed: 0, pRange: {translator: range}, lastSeen: 0,
+        get rangeIndex() { return range._i; }};
+    decks[idx] = {range, deck};
+    const run = body => new Function('d', 'root', 'Planck', 'with (d) { ' + body + ' }')(deck, root, Planck);
+    deck.rangeChanged = () => { if (deck.rangeIndex !== deck.lastSeen) { deck.lastSeen = deck.rangeIndex; run(@RANGE@); } };
+    return {range, deck, run,
+        setSync(on, need) { // QML order: syncActive's handler, then syncNeed's
+            const was = deck.syncActive;
+            deck.syncNeed = need; deck.syncActive = on;
+            if (on !== was) run(@ACTIVE@);
+            run(@NEEDH@);
+            flush();
+        },
+        dj(i) { range.index = i; flush(); }, // the DJ presses the range button
+        reset(i) { range._i = i; deck.lastSeen = i; deck.savedRangeIndex = -1; deck.handRangeIndex = -1; deck.syncActive = false; deck.syncNeed = 0; scSmartExpect = {}; pending = []; }};
 }
-function dj(i) { range.index = i; flush(); } // the DJ presses the range button
-function reset(i) { range._i = i; deck.lastSeen = i; deck.savedRangeIndex = -1; deck.handRangeIndex = -1; deck.syncActive = false; deck.syncNeed = 0; scSmartExpect = {}; pending = []; }
+function flush() { while (pending.length) pending.shift().rangeChanged(); }
+// Deck 2 under the names the first cases use; deck 1 is `other`.
+const two = makeDeck(2), other = makeDeck(1);
+const range = two.range, deck = two.deck, setSync = two.setSync, dj = two.dj, reset = two.reset;
 @CASES@
 """.replace("@DEFERRED@", "true" if deferred else "false").replace("@RANGE@", json.dumps(handlers["onRangeIndexChanged"])) \
            .replace("@ACTIVE@", json.dumps(handlers["onSyncActiveChanged"])).replace("@NEEDH@", json.dumps(handlers["onSyncNeedChanged"])) \
@@ -12640,6 +12650,113 @@ reset(0); dj(2);
 assert.equal(deck.handRangeIndex, -1, 'no Sync, no hand setting recorded');
 setSync(true, 0); setSync(false, 0);
 assert.equal(range.index, 2, 'Sync on and off without widening leaves the range alone');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the handlers")
+    def test_a_range_change_on_one_synced_deck_while_the_other_deck_takes_master(self):
+        """#316 review: both decks synced, the DJ sets deck 2's range by hand, then MASTER moves to deck 2 (deck 1 now follows and needs
+        a wider range, deck 2 needs none). Each deck keeps its own record: Smart Sync's widening of deck 1 is nobody's hand setting,
+        deck 2 keeps the DJ's range, and Sync off gives each deck its own range back."""
+        self.run_cases(r"""
+reset(0); other.reset(0);
+other.setSync(true, 0);                    // deck 1 leads: it needs nothing
+two.setSync(true, 12);                     // deck 2 follows: Smart Sync widens it to 20 %
+assert.equal(range.index, 3);
+two.dj(5);                                 // the DJ sets deck 2 to 100 %
+assert.equal(deck.handRangeIndex, 5);
+other.setSync(true, 30);                   // MASTER moves to deck 2: deck 1 follows and needs 30 %
+two.setSync(true, 0);                      // deck 2 leads: no need any more
+assert.equal(other.range.index, 4, 'Smart Sync widened deck 1 to 50 %');
+assert.equal(other.deck.handRangeIndex, -1, 'that widening is not a hand setting of deck 1');
+assert.equal(range.index, 5, 'deck 2 keeps the DJ\'s range through the master change');
+assert.equal(deck.handRangeIndex, 5);
+assert.equal(Object.keys(root.scSmartExpect).length, 0, 'no expectation is left over on either deck');
+// the DJ changes deck 1's range right after Smart Sync widened it: that is deck 1's hand setting, deck 2 is not touched
+other.dj(2);
+assert.equal(other.deck.handRangeIndex, 2);
+assert.equal(deck.handRangeIndex, 5);
+other.setSync(false, 0); two.setSync(false, 0);
+assert.equal(other.range.index, 2, 'deck 1: the DJ\'s range');
+assert.equal(range.index, 5, 'deck 2: the DJ\'s range');
+// the other way round: deck 1 untouched goes back to the range it had before it was widened
+reset(0); other.reset(0);
+other.setSync(true, 0); two.setSync(true, 12); two.dj(1);
+other.setSync(true, 30); two.setSync(true, 0);
+other.setSync(false, 0); two.setSync(false, 0);
+assert.equal(other.range.index, 0, 'deck 1: untouched, back to the range before the widening');
+assert.equal(range.index, 1, 'deck 2: the DJ\'s narrower range');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the handlers")
+    def test_a_track_load_between_two_sync_cycles(self):
+        """#316 review: Engine does not touch SpeedRange when a track is loaded (sandbox: no notification at a load, on the loaded deck or on
+        the other one; logs ld2, ld3, ld5), so the range a deck has when a track is loaded is the one it had. A load that ends Sync (the
+        track left, Engine takes Sync off) is a Sync off, and the next Sync on is a new cycle that starts from what the range is then.
+        Here the translator obeys every write; test_a_range_write_engine_refuses_is_not_a_hand_setting has the real Engine's refusal."""
+        self.run_cases(r"""
+// Untouched: cycle one widens and gives back; a new track; cycle two widens for the new track and gives back.
+reset(1); setSync(true, 30);
+assert.equal(range.index, 4);
+setSync(false, 0);                         // the track is unloaded: syncActive goes false
+assert.equal(range.index, 1);
+setSync(true, 12);                         // a new track, Sync on again
+assert.equal(deck.savedRangeIndex, 1, 'the second cycle starts from the range the deck has now');
+assert.equal(range.index, 3);
+setSync(false, 0);
+assert.equal(range.index, 1);
+// The DJ's range of cycle one belongs to that cycle's track only when the DJ gave it up: it stays on the deck, and cycle two starts from it.
+reset(1); setSync(true, 30); dj(5); setSync(false, 0);
+assert.equal(range.index, 5);
+setSync(true, 12);
+assert.equal(deck.savedRangeIndex, 5);
+assert.equal(deck.handRangeIndex, -1, 'a new cycle has no hand setting');
+assert.equal(range.index, 5, '12 % needs no widening on 100 %');
+setSync(false, 0);
+assert.equal(range.index, 5);
+// A load while Sync stays on is no range change at all: nothing is recorded as the DJ's.
+reset(1); setSync(true, 30);
+setSync(true, 14);                         // the loaded track's tempo changes the need; no SpeedRange notification
+assert.equal(deck.handRangeIndex, -1);
+assert.equal(range.index, 4, 'the widened range is not narrowed by the new need');
+setSync(false, 0);
+assert.equal(range.index, 1);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the handlers")
+    def test_a_range_write_engine_refuses_is_not_a_hand_setting(self):
+        """The Engine sandbox (JP07, Engine's own Sync, real tracks; logs ld3, ld5, ld7 of the #316 review): Sync off keeps the synced
+        tempo, and Engine refuses a range narrower than that tempo needs, so the restore write at Sync off leaves the widened range in place
+        (the same on the base). When a track is loaded Engine takes Sync off and puts it on again: the widened range is then the one the next
+        Sync starts from. Nothing of this is recorded as the DJ's: no notification arrives for a refused write, and a range the DJ sets
+        while Sync is off is nobody's business here."""
+        self.run_cases(r"""
+reset(0); setSync(true, 30);
+assert.equal(range.index, 4, 'widened to 50 %');
+range.floor = 4;                           // the synced tempo needs 50 % and keeps needing it after Sync off
+setSync(false, 0);                         // the restore write (8 %) is refused
+assert.equal(range.index, 4, 'Engine kept the range');
+assert.equal(deck.handRangeIndex, -1, 'a refused write is not a hand setting');
+assert.equal(Object.keys(root.scSmartExpect).length, 0);
+// a track is loaded, Sync is on again: the widened range is what this Sync starts from, and nothing is recorded as the DJ's
+setSync(true, 16);
+assert.equal(deck.savedRangeIndex, 4);
+assert.equal(deck.handRangeIndex, -1);
+assert.equal(range.index, 4, 'the new tempo needs 20 %: no widening, no narrowing');
+// the tempo is back at its own BPM: the DJ narrows the range by hand with Sync off, then a new Sync cycle starts from that
+setSync(false, 0); range.floor = 0; dj(1);
+assert.equal(range.index, 1);
+assert.equal(deck.handRangeIndex, -1, 'Sync is off: nothing is recorded');
+setSync(true, 12);
+assert.equal(deck.savedRangeIndex, 1);
+assert.equal(range.index, 3, 'widened to 20 %');
+setSync(false, 0);
+assert.equal(range.index, 1, 'untouched, and the tempo allows it: back to the DJ\'s 8 %');
+// a hand setting that Sync off leaves is never overwritten by the restore of the range Smart Sync widened
+reset(5); setSync(true, 12);               // already wide: nothing to widen
+assert.equal(range.index, 5);
+dj(4);                                     // the DJ narrows it to 50 % by hand
+setSync(false, 0);
+assert.equal(range.index, 4, 'the DJ\'s 50 % stays (the base wrote the old 100 % back)');
 """)
 
     def test_the_neighbours_are_untouched(self):
