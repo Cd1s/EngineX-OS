@@ -215,6 +215,7 @@ func SyncEngineToPioneerExport(root string) error {
 
 		// Older hand-built/test databases may not contain the optional analysis columns.
 		keyColumn, artColumn, bytesColumn, beatHeaderColumn := "NULL", "0", "0", "NULL"
+		genreColumn, commentColumn, labelColumn := "''", "''", "''"
 		if engineColumn(db, "Track", "key") {
 			keyColumn = "key"
 		}
@@ -224,6 +225,15 @@ func SyncEngineToPioneerExport(root string) error {
 		if engineColumn(db, "Track", "fileBytes") {
 			bytesColumn = "COALESCE(fileBytes, 0)"
 		}
+		if engineColumn(db, "Track", "genre") {
+			genreColumn = "COALESCE(genre, '')"
+		}
+		if engineColumn(db, "Track", "comment") {
+			commentColumn = "COALESCE(comment, '')"
+		}
+		if engineColumn(db, "Track", "label") {
+			labelColumn = "COALESCE(label, '')"
+		}
 		if engineColumn(db, "PerformanceData", "beatData") {
 			beatHeaderColumn = "substr((SELECT beatData FROM PerformanceData WHERE trackId=Track.id),1,2097153)"
 		}
@@ -231,7 +241,7 @@ func SyncEngineToPioneerExport(root string) error {
 		if engineColumn(db, "Track", "streamingSource") {
 			whereClause += ` AND COALESCE(streamingSource, '') = ''`
 		}
-		trackRows, err := db.Query(`SELECT id, COALESCE(title, ''), COALESCE(artist, ''), COALESCE(bpm, 0), COALESCE(bpmAnalyzed, 0), COALESCE(length, 0), COALESCE(path, ''), COALESCE(filename, ''), ` + keyColumn + `, ` + artColumn + `, ` + bytesColumn + `, ` + beatHeaderColumn + ` FROM Track` + whereClause + ` ORDER BY id`)
+		trackRows, err := db.Query(`SELECT id, COALESCE(title, ''), COALESCE(artist, ''), COALESCE(bpm, 0), COALESCE(bpmAnalyzed, 0), COALESCE(length, 0), COALESCE(path, ''), COALESCE(filename, ''), ` + keyColumn + `, ` + artColumn + `, ` + bytesColumn + `, ` + beatHeaderColumn + `, ` + genreColumn + `, ` + commentColumn + `, ` + labelColumn + ` FROM Track` + whereClause + ` ORDER BY id`)
 		if err != nil {
 			return fmt.Errorf("query engine tracks: %w", err)
 		}
@@ -252,8 +262,11 @@ func SyncEngineToPioneerExport(root string) error {
 				artID       int64
 				fileSize    int64
 				beatHeader  []byte
+				genre       string
+				comment     string
+				label       string
 			)
-			if err := trackRows.Scan(&id, &title, &artist, &bpmInt, &bpmAnalyzed, &length, &rawPath, &filename, &key, &artID, &fileSize, &beatHeader); err != nil {
+			if err := trackRows.Scan(&id, &title, &artist, &bpmInt, &bpmAnalyzed, &length, &rawPath, &filename, &key, &artID, &fileSize, &beatHeader, &genre, &comment, &label); err != nil {
 				return fmt.Errorf("scan engine track: %w", err)
 			}
 			if id == 0 || strings.TrimSpace(rawPath) == "" {
@@ -330,6 +343,9 @@ func SyncEngineToPioneerExport(root string) error {
 				AnalysisPath: analysisPath,
 				Title:        title,
 				Artist:       artist,
+				Genre:        genre,
+				Comment:      comment,
+				Label:        label,
 				BPM:          effectiveBPM,
 				Duration:     float64(length),
 				SampleRate:   0,
@@ -1603,10 +1619,39 @@ func exportEngineArtwork(db *sql.DB, root string, id int64, resolver *compat.Res
 }
 
 func buildArtistRow(id uint32, name string) []byte {
-	b := make([]byte, 10)
+	encoded := rekordbox.EncodeDeviceSQLString(name)
+	if len(encoded)+10 <= 255 {
+		b := make([]byte, 10)
+		binary.LittleEndian.PutUint32(b[4:], id)
+		b[9] = 10
+		return append(b, encoded...)
+	}
+	b := make([]byte, 12)
+	binary.LittleEndian.PutUint16(b, 4)
 	binary.LittleEndian.PutUint32(b[4:], id)
-	b[9] = 10
+	binary.LittleEndian.PutUint16(b[10:], uint16(len(b)))
+	return append(b, encoded...)
+}
+
+func buildLookupRow(id uint32, name string) []byte {
+	b := make([]byte, 4)
+	binary.LittleEndian.PutUint32(b, id)
 	return append(b, rekordbox.EncodeDeviceSQLString(name)...)
+}
+
+func buildAlbumRow(id uint32, name string) []byte {
+	encoded := rekordbox.EncodeDeviceSQLString(name)
+	if len(encoded)+22 <= 255 {
+		b := make([]byte, 22)
+		binary.LittleEndian.PutUint32(b[12:], id)
+		b[21] = byte(len(b))
+		return append(b, encoded...)
+	}
+	b := make([]byte, 24)
+	binary.LittleEndian.PutUint16(b, 4)
+	binary.LittleEndian.PutUint32(b[12:], id)
+	binary.LittleEndian.PutUint16(b[22:], uint16(len(b)))
+	return append(b, encoded...)
 }
 
 func buildKeyRow(id uint32, name string) []byte {
@@ -1635,7 +1680,16 @@ func buildPlaylistEntryRow(order, trackID, playlistID uint32) []byte {
 	return b
 }
 
-func buildTrackRow(t rekordbox.Track, artistID, keyID uint32) []byte {
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func buildTrackRow(t rekordbox.Track, artistID, composerID, remixerID, albumID, genreID, labelID, keyID uint32) []byte {
 	b := make([]byte, 136)
 	sampleRate := t.SampleRate
 	if sampleRate < 0 {
@@ -1663,15 +1717,22 @@ func buildTrackRow(t rekordbox.Track, artistID, keyID uint32) []byte {
 	if t.ArtworkPath != "" {
 		binary.LittleEndian.PutUint32(b[28:], t.ID)
 	}
+	binary.LittleEndian.PutUint32(b[12:], composerID)
 	binary.LittleEndian.PutUint32(b[32:], keyID)
+	binary.LittleEndian.PutUint32(b[40:], labelID)
+	binary.LittleEndian.PutUint32(b[44:], remixerID)
 	binary.LittleEndian.PutUint32(b[48:], uint32(bitrate))
 	binary.LittleEndian.PutUint32(b[56:], uint32(math.Round(t.BPM*100)))
+	binary.LittleEndian.PutUint32(b[60:], genreID)
+	binary.LittleEndian.PutUint32(b[64:], albumID)
 	binary.LittleEndian.PutUint32(b[68:], artistID)
 	binary.LittleEndian.PutUint32(b[72:], t.ID)
 	binary.LittleEndian.PutUint16(b[80:], uint16(year))
 	binary.LittleEndian.PutUint16(b[82:], uint16(bitDepth))
 	binary.LittleEndian.PutUint16(b[84:], uint16(math.Round(t.Duration)))
-	b[89] = 3
+	if t.Rating >= 0 && t.Rating <= 255 {
+		b[89] = byte(t.Rating)
+	}
 
 	for i := 0; i < 21; i++ {
 		s := ""
@@ -1700,13 +1761,14 @@ func buildPDB(tracks []rekordbox.Track, playlists []rekordbox.Playlist) ([]byte,
 	var artistRows [][]byte
 	var artistNames []string
 	for _, t := range tracks {
-		name := t.Artist
-		if name == "" {
-			name = "Unknown Artist"
-		}
-		if _, exists := artistMap[name]; !exists {
-			artistNames = append(artistNames, name)
-			artistMap[name] = 0
+		for _, name := range []string{t.Artist, t.Composer, t.Remixer} {
+			if name == "" {
+				name = "Unknown Artist"
+			}
+			if _, exists := artistMap[name]; !exists {
+				artistNames = append(artistNames, name)
+				artistMap[name] = 0
+			}
 		}
 	}
 	sort.Strings(artistNames)
@@ -1717,6 +1779,41 @@ func buildPDB(tracks []rekordbox.Track, playlists []rekordbox.Playlist) ([]byte,
 	}
 	if len(artistRows) == 0 {
 		artistRows = append(artistRows, buildArtistRow(1, "Unknown Artist"))
+	}
+
+	lookup := func(values []string) (map[string]uint32, [][]byte) {
+		m := make(map[string]uint32)
+		unique := make([]string, 0, len(values))
+		for _, value := range values {
+			if value != "" && !containsString(unique, value) {
+				unique = append(unique, value)
+			}
+		}
+		sort.Strings(unique)
+		rows := make([][]byte, 0, len(unique))
+		for i, value := range unique {
+			id := uint32(i + 1)
+			m[value] = id
+			rows = append(rows, buildLookupRow(id, value))
+		}
+		return m, rows
+	}
+	genreValues, labelValues, albumValues := []string{}, []string{}, []string{}
+	for _, t := range tracks {
+		genreValues = append(genreValues, t.Genre)
+		labelValues = append(labelValues, t.Label)
+		albumValues = append(albumValues, t.Album)
+	}
+	genreMap, genreRows := lookup(genreValues)
+	labelMap, labelRows := lookup(labelValues)
+	albumMap := make(map[string]uint32)
+	var albumRows [][]byte
+	for _, value := range albumValues {
+		if value == "" || albumMap[value] != 0 {
+			continue
+		}
+		albumMap[value] = uint32(len(albumMap) + 1)
+		albumRows = append(albumRows, buildAlbumRow(albumMap[value], value))
 	}
 
 	keyMap := make(map[string]uint32)
@@ -1750,7 +1847,14 @@ func buildPDB(tracks []rekordbox.Track, playlists []rekordbox.Playlist) ([]byte,
 			aID = 1
 		}
 		kID := keyMap[t.Key]
-		trackRows = append(trackRows, buildTrackRow(t, aID, kID))
+		composer := t.Composer
+		if composer == "" {
+			composer = aName
+		}
+		remixer := t.Remixer
+		composerID := artistMap[composer]
+		remixerID := artistMap[remixer]
+		trackRows = append(trackRows, buildTrackRow(t, aID, composerID, remixerID, albumMap[t.Album], genreMap[t.Genre], labelMap[t.Label], kID))
 	}
 
 	var playlistRows [][]byte
@@ -1777,7 +1881,10 @@ func buildPDB(tracks []rekordbox.Track, playlists []rekordbox.Playlist) ([]byte,
 	}
 	tables := []tableSpec{
 		{0, trackRows},
+		{1, genreRows},
 		{2, artistRows},
+		{3, albumRows},
+		{4, labelRows},
 		{5, keyRows},
 		{7, playlistRows},
 		{8, entryRows},
@@ -1869,6 +1976,13 @@ func buildPDB(tracks []rekordbox.Track, playlists []rekordbox.Playlist) ([]byte,
 		copy(out[i*pageSize:], p)
 	}
 	return out, nil
+}
+
+// BuildPDB serializes a validated library in the classic rekordbox export.pdb
+// format. It is shared by the deck write-back path and the generated Link
+// export path so metadata encoding stays identical.
+func BuildPDB(tracks []rekordbox.Track, playlists []rekordbox.Playlist) ([]byte, error) {
+	return buildPDB(tracks, playlists)
 }
 
 // Where EngineX OS keeps streaming downloads; CDJs see them as /EngineX_Stream/<name>.

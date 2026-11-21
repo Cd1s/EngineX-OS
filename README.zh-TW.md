@@ -52,6 +52,7 @@
 - **大型 rekordbox 隨身碟快速匯入**：大容量 rekordbox 隨身碟插入後幾秒內即可使用歌單與 Cue，波形於背景轉換並在閒置 30 秒後自動發佈（#301）。
 - **Rekordbox 拍線對齊**：為 Pro DJ Link、隨身碟與影子軌的 MP3 與 AAC/M4A 統一拍線起點偏移規則，舊轉換曲目自動重新對齊一次並保留播放機上的編輯。
 - **rekordbox Cue 寫回**：把播放機上修改的 Hot Cue、Memory Cue 與 Loop 寫回 rekordbox 隨身碟，並在 `/.enginex-backup/` 儲存備份（`:8080` 網頁主控台 `擴充 → 寫回 Hot Cue / Loop 到 rekordbox 隨身碟`，#271）。
+- **曲目資料編輯（計畫於 5.3.0.6）**：在播放機曲目詳情中用原廠鍵盤編輯 `Genre`、`Label` 與 `Comment`；佇列中的改動會在儲存裝置發佈更新後寫回 Engine 曲庫與 rekordbox 6/7 匯出。
 - **隨身碟曲庫安全保護**：當字元集不符等原因導致大量檔名無法讀取時，曲庫更新不會改動任何資料，並在下次掛載時重試。
 - **通道 FILTER 旋鈕 Color FX**：在一體機各通道的 `FILTER` 旋鈕上掛載 `Spiral`、`Pitch Echo`、`Slip Roll`、`Dub Echo` 或 `Space`，位於 `設定檔 → 播放 → 先鋒風格效果 (Color FX)`。
 - **Hi-Fi 高頻補償輸出**：為第一代 SC5000 / SC6000 獨立播放機新增可選的高頻補償，預設關閉，位於 `設定檔 → 播放 → Hi-Fi 高頻補償輸出`（#172）。

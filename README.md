@@ -52,6 +52,7 @@ All 16 models use unified `*-Update.img` packages. First-generation units instal
 - **Fast large rekordbox USB import**: large rekordbox sticks open playlists and cues within seconds while waveforms convert in the background and publish automatically after 30 seconds of idle time (#301).
 - **Rekordbox beat grids**: applies one start-offset rule across Pro DJ Link, USB drives, and the shadow lane for MP3 and AAC/M4A, realigning older converted tracks once while keeping deck edits.
 - **Rekordbox cue write-back**: exports Hot Cues, Memory Cues, and Loops edited on the deck back to the rekordbox USB drive with a backup in `/.enginex-backup/` (`:8080` web console `Extras → Write cues back to rekordbox USB`, #271).
+- **Track metadata editing (planned for 5.3.0.6)**: edit `Genre`, `Label`, and `Comment` from deck track details with the stock keyboard; queued edits write back to the Engine library and rekordbox 6/7 exports when the drive is published.
 - **USB library safety**: aborts library updates without changing anything if many file names cannot be read due to a wrong character set, and retries on the next mount.
 - **Channel FILTER Color FX**: assigns `Spiral`, `Pitch Echo`, `Slip Roll`, `Dub Echo`, or `Space` to each channel's `FILTER` knob on all-in-one consoles (`Profile → Playback → Color FX Style`).
 - **Hi-Fi Output**: adds optional high-frequency compensation for 1st-gen SC5000 / SC6000 standalone players, off by default in `Profile → Playback → Hi-Fi Output` (#172).
