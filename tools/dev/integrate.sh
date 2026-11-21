@@ -175,7 +175,7 @@ targeted_tests() {
 
 resolve_checklist_merge() {
     local base=$1 branch=$2 rows=$tmp/checklist.rows files line
-    git -C "$worktree" merge --no-ff --no-edit "origin/$branch" >/dev/null 2>&1 && return 0
+    git -C "$worktree" -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost merge --no-ff --no-edit "origin/$branch" >/dev/null 2>&1 && return 0
     git -C "$worktree" merge --abort >/dev/null 2>&1 || true
     files=$(git -C "$worktree" diff --name-only "$base" "origin/$branch")
     [[ $files == docs/REGRESSION-CHECKLIST.md ]] || return 1
@@ -188,7 +188,7 @@ if not added or any(not re.match(r"\|\s*\d+\s*\|", line) for line in added):
     raise SystemExit(1)
 open(output, "w", encoding="utf-8").write("\n".join(added) + "\n")
 PY
-    git -C "$worktree" merge --no-ff -s ours --no-edit "origin/$branch" >/dev/null
+    git -C "$worktree" -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost merge --no-ff -s ours --no-edit "origin/$branch" >/dev/null
     while IFS= read -r line; do printf '%s\n' "$line" >> "$worktree/docs/REGRESSION-CHECKLIST.md"; done < "$rows"
     git -C "$worktree" add docs/REGRESSION-CHECKLIST.md
     git -C "$worktree" -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
