@@ -101,6 +101,18 @@ Item {
         })
         panel.grabToImage(function(r) { say("picture " + s.id + " " + r.saveToFile("/tmp/browse-" + board + "-" + tag + "-" + s.id + ".png")) })
     }
+    // The rekordbox import banner's counts (scFormatCount), evaluated by this Engine's own QML engine (the same Qt as on a deck).
+    // "after" must give each size once; "before" only records what the base pack gives.
+    function counts() {
+        const want = [[0, "0"], [5, "5"], [999, "999"], [1000, "1,000"], [6031, "6,031"], [19985, "19,985"], [1234567, "1,234,567"]]
+        want.forEach(w => {
+            const got = root.scFormatCount(w[0])
+            say("count " + w[0] + " -> " + got + (got === w[1] ? "" : " (expected " + w[1] + ")"))
+            if (after) expect(got === w[1], "count " + w[0] + " reads " + w[1])
+        })
+        say("Qt " + Qt.version)
+        say("banner " + root.scFormatCount(0) + " / " + root.scFormatCount(6031))
+    }
     function stepsFor() {
         const list = [[500, function() {
             dismiss()
@@ -111,6 +123,7 @@ Item {
             list.push([1100, function() { show(s) }])
             list.push([800, function() { check(s) }])
         })
+        list.push([300, function() { counts() }])
         list.push([300, function() {
             say("failures " + failures)
             console.warn("X166 DONE|" + (failures === 0 ? "PASS" : "FAIL") + "|")

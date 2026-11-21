@@ -4140,10 +4140,13 @@ SERVICES_MAIN = """
 		return !!(root.scBrowseProp && root.scBrowseProp.translator && root.scBrowseProp.translator.state) ||
 			!!(typeof PlanckGUI !== "undefined" && PlanckGUI.views && PlanckGUI.views.sourceScreenView && PlanckGUI.views.sourceScreenView.visible)
 	}
+	// Digits in groups of three. Not a zero-width global replace: Qt 6.7.2's V4 engine puts the separator in twice for that ("6,,031").
 	function scFormatCount(n) {
-		const v = n > 0 ? (n - (n % 1)) : 0
-		const s = "" + v
-		return s.replace(/\\B(?=(\\d{3})+(?!\\d))/g, ",")
+		const s = "" + (n > 0 ? (n - (n % 1)) : 0)
+		if (!/^\\d+$/.test(s)) return s
+		let out = ""
+		for (let i = 0; i < s.length; i++) out += (i > 0 && (s.length - i) % 3 === 0 ? "," : "") + s[i]
+		return out
 	}
 	function scUsbLoadingText() {
 		if (root.scUsbPrepareError) return root.scT(root.scUsbPrepareError)

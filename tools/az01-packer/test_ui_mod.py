@@ -8336,6 +8336,29 @@ class UsbPreparingFeedbackTest(unittest.TestCase):
         if not built:
             self.skipTest(f"{LAB} QRC fixtures not found")
 
+    def count_function(self):
+        return re.search(r'function scFormatCount\(n\) \{.*?\n\t\}', bp.SERVICES_MAIN, re.S).group(0)
+
+    def test_the_count_separator_does_not_rely_on_a_zero_width_global_match(self):
+        """Maintainer's SC5000 (Qt 6.7.2): the rekordbox import banner read "(0 / 6,,031)". V4 puts the separator in twice for a zero-width global
+        replace (V8 does not, so Node cannot show it): the shipped function must not use one (no lookaround, no global replace)."""
+        src = self.count_function()
+        self.assertNotRegex(src, r"\(\?[=!<]", "a lookaround matches at zero width")
+        self.assertNotRegex(src, r"\.replace(All)?\(", "no replace: its global matches are the ones V4 repeats")
+
+    def test_the_count_banner_formats_every_size_once(self):
+        self.assertIsNotNone(shutil.which('node'), 'Node is required for behavioral coverage')
+        script = r"""
+const assert = require('assert/strict');
+""" + self.count_function() + r"""
+for (const [n, want] of [[0, '0'], [5, '5'], [999, '999'], [1000, '1,000'], [6031, '6,031'], [19985, '19,985'], [100000, '100,000'], [1234567, '1,234,567'],
+                         [21352.5, '21,352'], [-4, '0'], [undefined, '0'], [null, '0'], [NaN, '0'], ['1200', '1,200']])
+    assert.equal(scFormatCount(n), want, String(n));
+assert.equal(scFormatCount(1e21), '1e+21', 'no separators inside an exponent');
+"""
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_scapply_clears_omitted_and_false_state(self):
         self.assertIsNotNone(shutil.which('node'), 'Node is required for behavioral coverage')
         apply = re.search(r'function scApply\(v\) \{.*?\n\t\}', bp.SERVICES_MAIN, re.S)
