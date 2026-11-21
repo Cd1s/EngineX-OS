@@ -405,11 +405,13 @@ static int cfx_installed, cfx_style; /* cfx_style: pioneer_fx= in settings.conf,
 static void *cfx_value_original, *cfx_process_original;
 static struct cfx_channel {
     void *node, *spare;    /* ChannelSweepFx at SweepFxControl +0x38 and +0x3c */
-    unsigned knob;         /* float bits, written by setValue's thread */
     struct sc_pfx_instance dsp;
-    /* Knob starts at centre (0.5f): hook_cfx_value claims a channel with a CAS on node and stores knob after it,
-     * so a node the audio thread sees claimed for the first time must read centre, which is stock, never full wet. */
-} cfx_channels[CFX_CHANNELS] = {[0 ... CFX_CHANNELS - 1] = {.knob = 0x3f000000u}};
+} cfx_channels[CFX_CHANNELS];
+/* Each channel's knob (float bits), written by setValue's thread. It starts at centre (0.5f): hook_cfx_value claims
+ * a channel with a CAS on node and stores the knob after it, so a node the audio thread sees claimed for the first
+ * time must read centre, which is stock, never full wet. Kept out of cfx_channels on purpose: one non-zero
+ * initialiser there would move that whole array, delay banks included, from .bss into the file (+16 MB per .so). */
+static unsigned cfx_knobs[CFX_CHANNELS] = {[0 ... CFX_CHANNELS - 1] = 0x3f000000u};
 typedef void (*cfx_value_fn)(void *, float);
 typedef void (*cfx_process_fn)(void *, int, float **, int, float **, int, void *, void *);
 
@@ -428,7 +430,7 @@ static void hook_cfx_value(void *control, float v) {
         void *expected = NULL;
         if (__atomic_load_n(&c->node, __ATOMIC_ACQUIRE) != node &&
             !__atomic_compare_exchange_n(&c->node, &expected, node, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) continue;
-        __atomic_store_n(&c->knob, bits, __ATOMIC_RELEASE);
+        __atomic_store_n(&cfx_knobs[i], bits, __ATOMIC_RELEASE);
         __atomic_store_n(&c->spare, spare, __ATOMIC_RELEASE);
         break;
     }
@@ -437,16 +439,17 @@ static void hook_cfx_value(void *control, float v) {
 /* Audio thread. No lock, allocation or I/O; banks are cleared by the poll worker. */
 static void hook_cfx_process(void *node, int ins, float **in, int outs, float **out, int frames, void *a, void *b) {
     struct cfx_channel *c = NULL;
+    unsigned ci = 0;
     int main = 0;
     for (unsigned i = 0; i < CFX_CHANNELS && !c; ++i) {
-        if (__atomic_load_n(&cfx_channels[i].node, __ATOMIC_ACQUIRE) == node) c = &cfx_channels[i], main = 1;
-        else if (__atomic_load_n(&cfx_channels[i].spare, __ATOMIC_ACQUIRE) == node) c = &cfx_channels[i];
+        if (__atomic_load_n(&cfx_channels[i].node, __ATOMIC_ACQUIRE) == node) c = &cfx_channels[i], ci = i, main = 1;
+        else if (__atomic_load_n(&cfx_channels[i].spare, __ATOMIC_ACQUIRE) == node) c = &cfx_channels[i], ci = i;
     }
     int style = __atomic_load_n(&cfx_style, __ATOMIC_RELAXED);
     int stereo = c && ins == 2 && outs == 2 && in && out && in[0] && in[1] && out[0] && out[1] && frames > 0;
     float amount = 0.0f;
     if (stereo) {
-        unsigned bits = __atomic_load_n(&c->knob, __ATOMIC_ACQUIRE);
+        unsigned bits = __atomic_load_n(&cfx_knobs[ci], __ATOMIC_ACQUIRE);
         float v;
         memcpy(&v, &bits, sizeof v);
         amount = cfx_amount(v);

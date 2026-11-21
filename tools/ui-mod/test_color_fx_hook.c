@@ -137,7 +137,7 @@ int main(void) {
     // First claim: hook_cfx_value claims a channel (CAS on node) and stores the knob after it. In that gap the
     // audio thread sees a claimed node whose knob was never stored: it must read centre (stock), not full wet.
     for (unsigned i = 0; i < CFX_CHANNELS; ++i) {
-        unsigned bits = cfx_channels[i].knob;
+        unsigned bits = cfx_knobs[i];
         float v;
         memcpy(&v, &bits, sizeof v);
         assert(v == 0.5f && cfx_amount(v) == 0);
