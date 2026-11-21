@@ -69,6 +69,13 @@ pick_host() {
     printf '%s\n' "$best"
 }
 
+# The path-to-tests map and both test tiers live in tools/dev/test.sh (the target branch must carry it).
+TEST_CMD=${ENGINEX_TEST_CMD:-$worktree/tools/dev/test.sh}
+run_tests() {
+    [[ -x $TEST_CMD ]] || { echo "tools/dev/test.sh is missing in $TARGET: merge the dev-speed branch first" >&2; return 1; }
+    "$TEST_CMD" --tree "$worktree" --clone "$@"
+}
+
 remote_run() {
     local host=$1 inner=$2
     shift 2
@@ -150,29 +157,6 @@ PY
     fi
 }
 
-targeted_tests() {
-    local host=$1; shift
-    local go_pkgs=() py_tests=() file dir test
-    for file in "$@"; do
-        case $file in
-            go.mod|go.sum) go_pkgs+=(./...) ;;
-            *.go) dir=${file%/*}; [[ $dir == "$file" ]] && dir=.; go_pkgs+=("./$dir") ;;
-            tools/ui-mod/build_packs.py) py_tests+=(tools/az01-packer/test_ui_mod.py tools/az01-packer/test_ui_perf.py) ;;
-            tools/az01-packer/*.py) [[ $file == tools/az01-packer/test_* ]] && py_tests+=("$file") || py_tests+=(tools/az01-packer/test_az01_packer.py) ;;
-            tools/stems/*.py) py_tests+=(tools/stems/test_worker.py) ;;
-            */test_*.py) py_tests+=("$file") ;;
-            test_*.py) py_tests+=("$file") ;;
-        esac
-    done
-    mapfile -t go_pkgs < <(printf '%s\n' "${go_pkgs[@]}" | sort -u | sed '/^$/d')
-    mapfile -t py_tests < <(printf '%s\n' "${py_tests[@]}" | sort -u | sed '/^$/d')
-    ((${#go_pkgs[@]} || ${#py_tests[@]})) || return 0
-    local inner='set -eu'
-    for dir in "${go_pkgs[@]}"; do inner+="; go test -race '$dir'"; done
-    for test in "${py_tests[@]}"; do inner+="; python3 '$test'"; done
-    remote_run "$host" "$inner"
-}
-
 resolve_checklist_merge() {
     local base=$1 branch=$2 rows=$tmp/checklist.rows files line
     git -C "$worktree" merge --no-ff --no-edit "origin/$branch" >/dev/null 2>&1 && return 0
@@ -225,16 +209,14 @@ for branch in "${branches[@]}"; do
     added_lines_check "$base" "origin/$branch" "$worktree"
     added_lines_check "$base" "$pre_merge" "$worktree"
     normalize_checklist "$base" "origin/$branch" "$max_before"
-    mapfile -t touched < <(git -C "$worktree" diff --name-only "$pre_merge" HEAD)
     mapfile -t overlays < <(git -C "$worktree" diff --name-only "$base" "origin/$branch" -- rootfs-overlay | grep '\.so$' || true)
     if ((${#overlays[@]})); then rebuild_overlay "$(pick_host 1)" "${branch//[^A-Za-z0-9._-]/_}-${target_head}" "${overlays[@]}"; fi
-    targeted_tests "$(pick_host 0)" "${touched[@]}"
+    run_tests --base "$pre_merge"
     merged+=("$branch ($(git -C "$worktree" rev-parse --short "origin/$branch"))")
 done
 
-full_host=$(pick_host 1)
-full_inner='set -eu; test -z "$(gofmt -l .)"; go vet ./...; go test -race -timeout 30m ./...; idx=$(mktemp); rm -f "$idx"; git init -q; GIT_INDEX_FILE="$idx" git add -A; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/az01-packer; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/splash; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/stems; rm -f "$idx"; rm -rf .git; bash tests/test_rootfs_overlay.sh'
-remote_run "$full_host" "$full_inner"
+# Full suites: fast tier in the persistent clone (Go's test cache hits for unchanged packages), ARM tier at the same time.
+run_tests --full --arm-gcc14
 git -C "$worktree" push origin "HEAD:$TARGET" >/dev/null
 elapsed=$(( $(date +%s) - started ))
-printf 'Merged %s into %s; targeted tests after each merge; full suites on %s; elapsed %ss.\n' "${merged[*]}" "$TARGET" "$full_host" "$elapsed"
+printf 'Merged %s into %s; targeted tests after each merge, then test.sh --full; elapsed %ss.\n' "${merged[*]}" "$TARGET" "$elapsed"

@@ -1,0 +1,6 @@
+# Tests the x86 fast tier does not run. One entry per line, a reason after `#` is required:
+#   go <package-dir> <TestName|*>        e.g. go internal/stems TestFindLAN
+#   py <dir> <module[.Class[.test]]>     e.g. py tools/az01-packer test_az01_packer.Class.test_x
+#   sh <script>                          a bash test run from the repository root
+# Find entries by running everything on the x86 host: a test that fails or is skipped there but passes on an
+# ARM build host belongs here. Never edit a test to make it pass on x86.

@@ -1,3 +1,16 @@
+---
+paths:
+  - "tools/az01-packer/build-release.sh"
+  - "tools/az01-packer/build-installer.sh"
+  - "tools/az01-packer/sign-release.sh"
+  - "tools/az01-packer/check-release-manifest.sh"
+  - "tools/az01-packer/release-gate.sh"
+  - "tools/az01-packer/gate-record.sh"
+  - "rootfs-overlay/etc/enginex/version.txt"
+  - "docs/release-notes-*.md"
+  - "docs/ISSUE-FIXES-*.md"
+---
+
 # EngineX OS 发版规则（Release Checklist）
 
 任何人或 AI agent 发布 EngineX OS（包括新版本，以及同一版本的修复重发）都按这份清单做，不跳步。`<VERSION>` 指 `5.0.4.x` 这样的版本号，`<OLD>` 指上一个版本号。
@@ -16,6 +29,8 @@
 - **热修复版本**：在已发布版本后加第五段（`5.3.0.1` → `5.3.0.1.1`，tag `v5.3.0.1.1`，标题 `EngineX OS <VERSION> (Hotfix)`），按「新版本」全部步骤做。碟机的 `newerVersion` 逐段比较，前四段相同时段数多者更新，所以已刷 `5.3.0.1` 的机器能收到推送，也不占用 `5.3.0.2`。`az01_packer.py` 的 `VERSION_RE` 最多接受五段，门禁的 `BASE` 取前三段作为官方底包号。
 
 ## 1. 必改文件（三语 README、官网与使用文档、实测截图、版本号）
+
+开发期间不更新官网、三份 README、截图和发版说明；这一整个开发周期欠下的文档（README、官网与使用文档、截图、Release Notes）都在这一步根据已合并的改动一次写完。
 
 | 文件 | 要改的地方 |
 | --- | --- |
@@ -44,10 +59,12 @@ git grep -n "<OLD>" -- README.md README.zh-CN.md README.zh-TW.md rootfs-overlay 
 
 ## 2. 测试（只在编译机上跑，本机不编译）
 
+日常开发用 `tools/dev/test.sh`（快层在 x86 机，ARM 层只跑 armhf 原生测试）；发版候选在编译机上无缓存地全部重跑下面这些。
+
 本项目的编译、单测、门禁、打包与组件实验分析都在**编译机**上做（aarch64，支持 32 位 EL0，碟机的 armhf 程序原生运行）。`remote-build` 默认连的是另一台机器，所以每次都写 `REMOTE_BUILD_HOST=<build host> remote-build ...`（主机别名和 `REMOTE_BUILD_HOST` 的取值见私有开发者手册）。实验与组件结构分析统一使用 **`craft-anything`**（`craft-anything` skill / `craft-anything-cli`）配合 **Gemini 3.8 Flash** 模型（2026-11-13 起，DeepSeek 已无额度）在编译机上进行。机器上的固定材料在 `<firmware-lab>/`：`fw/`（5.0.4 官方底包）、`fw-5.3.0/`、`fw-5.3.0-gen2/`、`5.0.4/qrc`、`5.3.0/qrc`、`5.0.4|5.3.0/tree/usr/Engine/Engine`、`systemone-analysis/`、`deps-sqlite/`（armhf `sqlite3.o`）、`sbin/fsck.hfsplus`、`release-<OLD>/`（上一版 3 个代表 `.img`，供门禁用）。Go 1.27.1 在 `/etc/profile.d/buildtools.sh`。
 
 ```sh
-gofmt -l . && go vet ./... && go test -race ./...
+gofmt -l . && go vet ./... && go test -race -count=1 ./...   # 候选版本不用测试缓存
 bash tests/test_rootfs_overlay.sh                        # 必须用 bash
 JC11S_ROOTFS="${JC11S_ROOTFS:?先设置为官方 PRIME4PLUS-5.3.0 的解包 rootfs}" \
   bash tools/az01-packer/test_sclive4_bootstrap.sh       # SC LIVE 4 + JC11S，两款均须 PASS
