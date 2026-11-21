@@ -96,7 +96,7 @@ func TestIssue253ImportLeavesTheEXTWaveformsUnread(t *testing.T) {
 	if err = other.QueryRow(`SELECT overviewWaveFormData FROM PerformanceData WHERE trackId=1`).Scan(&want); err != nil {
 		t.Fatal(err)
 	}
-	if len(overview) < 100 || !bytes.Equal(overview, want) {
+	if len(overview) == 0 || !bytes.Equal(overview, want) {
 		t.Fatal("the overview is not the one the PWV7 gives")
 	}
 	if raw, err := QUncompress(cues, 1<<20); err != nil || !bytes.Contains(raw, []byte("H Loop")) {

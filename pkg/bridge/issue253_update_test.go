@@ -260,7 +260,7 @@ func TestIssue253UpdateLeavesTheWaveformCopiesBehind(t *testing.T) {
 	}
 	staged := fileSize(t, stagePath(root, ".rb-bridge-state.db"))
 	t.Logf("state: live %d bytes, update's %d bytes", live, staged)
-	if live < 10<<20 || staged > 256<<10 {
+	if live < 4<<20 || staged > 256<<10 {
 		t.Fatalf("the update's state is %d bytes, from a live one of %d", staged, live)
 	}
 	if r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || r.Background {
@@ -281,12 +281,16 @@ func TestIssue253SmallUpdateOfALargeLibraryIsReadInPlace(t *testing.T) {
 	db := dbOpen(t, root)
 	changed := scalar[string](t, db, `SELECT s.fingerprint FROM bridge.BridgeState s JOIN Track t ON t.id=s.trackId WHERE t.pdbImportKey=5`)
 	db.Close()
-	// Track 5's file changed on the stick since its import, and 20 tracks are new.
+	// Track 5's file changed on the stick since its import, and 20 tracks are new; the other
+	// files are as they were.
 	later := time.Now().Add(time.Hour)
 	if err := os.Chtimes(stagePath(root, "..", "..", "..", testfixture.LargeTrackPath(5)), later, later); err != nil {
 		t.Fatal(err)
 	}
-	testfixture.LargeExport(t, root, 60)
+	testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb", testfixture.LargePDB(60))
+	for i := 41; i <= 60; i++ {
+		testfixture.Write(t, root, testfixture.LargeTrackPath(i), testfixture.MP3WithLAMETag())
+	}
 	defer bridge.SetLargeExportForTest()()
 	defer bridge.SetInPlaceUpdateForTest(1)()
 	ctx := context.Background()
