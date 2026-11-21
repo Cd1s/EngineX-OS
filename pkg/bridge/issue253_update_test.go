@@ -384,3 +384,48 @@ func TestIssue253QuickUpdateLeavesAMovedTrackToTheUpdate(t *testing.T) {
 	}
 	issue253DeckEdit(t, db, cues)
 }
+
+// stateBudget is what the bridge state may hold per track: its row, fingerprint, written digest
+// and the reference to its ANLZ files are a few hundred bytes. 5.3.0.5 kept about 100 KB a track
+// (a copy of the PWV7); the maintainer's 6027-track stick had a 2.7 GB state file (#253).
+const stateBudget = 1 << 10
+
+// A large export with four minutes of detail per track stays within the budget, after its import
+// and after an update of a re-export.
+func TestIssue253StateStaysWithinAPerTrackBudget(t *testing.T) {
+	root := t.TempDir()
+	testfixture.LargeExport(t, root, 600)
+	wave := make([]byte, 12+3*36000)
+	binary.BigEndian.PutUint32(wave, 3)
+	binary.BigEndian.PutUint32(wave[4:], 36000)
+	rand.New(rand.NewSource(253)).Read(wave[12:])
+	testfixture.Write(t, root, "PIONEER/USBANLZ/P001/ANLZ0000.2EX", testfixture.PMAI(testfixture.Section("PWV7", 24, wave)))
+	ctx := context.Background()
+	if r, err := bridge.Convert(ctx, root, enginedb.Options{}); err != nil || r.Added != 600 || r.Deferred != 0 {
+		t.Fatalf("import: %+v %v", r, err)
+	}
+	state := stagePath(root, "..", ".rb-bridge-state.db")
+	budget := func(when string, tracks int) {
+		t.Helper()
+		size := fileSize(t, state)
+		t.Logf("%s: state %d bytes, %d a track", when, size, size/int64(tracks))
+		if size > int64(tracks)*stateBudget {
+			t.Fatalf("%s: state %d bytes for %d tracks, budget %d a track", when, size, tracks, stateBudget)
+		}
+	}
+	budget("import", 600)
+	testfixture.LargeExport(t, root, 650)
+	testfixture.Write(t, root, "PIONEER/USBANLZ/P001/ANLZ0000.2EX", testfixture.PMAI(testfixture.Section("PWV7", 24, wave)))
+	defer bridge.SetLargeExportForTest()()
+	if r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !r.Background {
+		t.Fatalf("mount of the re-export: %+v %v", r, err)
+	}
+	if r, err := bridge.ImportInBackground(ctx, root, nil); err != nil || r.Deferred != 0 {
+		t.Fatalf("background update: %+v %v", r, err)
+	}
+	if r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || r.Background {
+		t.Fatalf("publishing mount: %+v %v", r, err)
+	}
+	budget("update", 650)
+	issue253Refs(t, root, 650)
+}

@@ -26,6 +26,12 @@ func TestBridgeDetailsFollowTheReferenceToTheANLZFiles(t *testing.T) {
 	binary.BigEndian.PutUint32(color, 2)
 	binary.BigEndian.PutUint32(color[4:], 600)
 	testfixture.Write(t, root, "PIONEER/USBANLZ/P002/0000ABCE/ANLZ0000.EXT", testfixture.PMAI(testfixture.Section("PWV5", 24, color)))
+	// An invalid PWV7 (one byte an entry) does not displace the .EXT's valid PWV5.
+	bad := make([]byte, 12+600)
+	binary.BigEndian.PutUint32(bad, 1)
+	binary.BigEndian.PutUint32(bad[4:], 600)
+	testfixture.Write(t, root, "PIONEER/USBANLZ/P003/0000ABCF/ANLZ0000.2EX", testfixture.PMAI(testfixture.Section("PWV7", 24, bad)))
+	testfixture.Write(t, root, "PIONEER/USBANLZ/P003/0000ABCF/ANLZ0000.EXT", testfixture.PMAI(testfixture.Section("PWV5", 24, color)))
 	dir := filepath.Join(root, "Engine Library", "Database2")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -57,15 +63,19 @@ func TestBridgeDetailsFollowTheReferenceToTheANLZFiles(t *testing.T) {
 		5: ref(5, "PIONEER/USBANLZ/LINK/0000ABCD/ANLZ0000.2EX"),
 		6: ref(6, "PIONEER/USBANLZ/P009/MISSING/ANLZ0000.2EX"),
 		7: ref(7),
+		8: ref(8, "PIONEER/USBANLZ/P003/0000ABCF/ANLZ0000.2EX", "PIONEER/USBANLZ/P003/0000ABCF/ANLZ0000.EXT"),
 	}
 	for id, b := range rows {
-		if _, err = db.Exec(`INSERT INTO BridgeAnalysis VALUES(?,?); INSERT INTO BridgeState VALUES(?,?)`, id, b, "../Contents/"+string(rune('a'+id))+".mp3", id); err != nil {
+		if _, err = db.Exec(`INSERT INTO BridgeAnalysis VALUES(?,?)`, id, b); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(`INSERT INTO BridgeState VALUES(?,?)`, "../Contents/"+string(rune('a'+id))+".mp3", id); err != nil {
 			t.Fatal(err)
 		}
 	}
 	ctx := context.Background()
 	file := filepath.Join(dir, "m.db")
-	for id, bands := range map[int]int{1: 1800, 2: 1800, 3: 1800} {
+	for id, bands := range map[int]int{1: 1800, 2: 1800, 3: 1800, 8: 1800} {
 		w := bridgeDisplayWave(ctx, file, "../Contents/"+string(rune('a'+id))+".mp3", int64(id), 44100, 4000)
 		if w == nil || len(w.Bands) != bands {
 			t.Fatalf("track %d: detail not read from its ANLZ file: %+v", id, w)

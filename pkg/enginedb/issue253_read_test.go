@@ -60,16 +60,24 @@ func TestIssue253ImportLeavesTheEXTWaveformsUnread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The same export without the extra detail: what the import reads besides it, and the overview
+	// the PWV7 gives.
+	plain := t.TempDir()
+	testfixture.Export(t, plain)
 	before := readChars(t)
+	if _, err = Sync(context.Background(), plain, l, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	base := readChars(t) - before
+	before = readChars(t)
 	if _, err = Sync(context.Background(), root, l, Options{}); err != nil {
 		t.Fatal(err)
 	}
 	read := readChars(t) - before
-	t.Logf("import read %d bytes", read)
-	if read > 2<<20 {
-		t.Fatalf("the import read %d bytes for an export whose .EXT waveforms are 4 MB", read)
+	t.Logf("import read %d bytes, %d without the extra detail", read, base)
+	if read-base > 256<<10 {
+		t.Fatalf("the import read %d bytes more for an export whose .EXT has 4 MB more waveform", read-base)
 	}
-	// What it imported is what the full files give: the cues of the .EXT and the PWV7 overview.
 	db, err := sql.Open("sqlite", filepath.Join(root, "Engine Library/Database2/m.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -77,12 +85,6 @@ func TestIssue253ImportLeavesTheEXTWaveformsUnread(t *testing.T) {
 	defer db.Close()
 	var cues, overview []byte
 	if err = db.QueryRow(`SELECT quickCues,overviewWaveFormData FROM PerformanceData WHERE trackId=1`).Scan(&cues, &overview); err != nil {
-		t.Fatal(err)
-	}
-	// The same export without the extra detail: its overview comes from the same PWV7.
-	plain := t.TempDir()
-	testfixture.Export(t, plain)
-	if _, err = Sync(context.Background(), plain, l, Options{}); err != nil {
 		t.Fatal(err)
 	}
 	other, err := sql.Open("sqlite", filepath.Join(plain, "Engine Library/Database2/m.db"))
