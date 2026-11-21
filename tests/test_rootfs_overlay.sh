@@ -452,7 +452,24 @@ has 'CONNMAN_DISCOVER_RETRIES=5' "$debloat_root/etc/systemd/system/connman.servi
 has '[ntfs3]' "$debloat_root/etc/edisksd/main.conf"
 lacks '[hfsplus]' "$debloat_root/etc/edisksd/main.conf"
 # #60: Bluetooth stays on for every board (JC11, JC16, JP07, JP13); nothing masks it.
-grep -Eq '^ +if command -v rfkill .*; then rfkill unblock bluetooth' "$ROOT/rootfs-overlay/usr/local/bin/enginex-debloat" || fail 'debloat no longer unblocks Bluetooth'
+grep -Eq '^ +rfkill unblock bluetooth \|\| :' "$ROOT/rootfs-overlay/usr/local/bin/enginex-debloat" || fail 'debloat no longer unblocks Bluetooth'
+# #326: Wi-Fi follows the stored choice; Bluetooth is always unblocked.
+radio_tmp=$(mktemp -d)
+mkdir -p "$radio_tmp/bin"
+printf '#!/bin/sh\necho "$*" >> "$RFKILL_LOG"\n' > "$radio_tmp/bin/rfkill"; chmod +x "$radio_tmp/bin/rfkill"
+sed -n '/# radios-begin/,/# radios-end/p' "$ROOT/rootfs-overlay/usr/local/bin/enginex-debloat" > "$radio_tmp/radios.sh"
+grep -q 'rfkill unblock bluetooth' "$radio_tmp/radios.sh" || fail 'radio block markers missing in enginex-debloat'
+radio_case() { # <name> <settings content or "-" for no file> <expected log, one command per line>
+    : > "$radio_tmp/log"; rm -f "$radio_tmp/settings"
+    [ "$2" = - ] || printf '%b' "$2" > "$radio_tmp/settings"
+    PATH="$radio_tmp/bin:$PATH" RFKILL_LOG="$radio_tmp/log" ENGINEX_CONNMAN_SETTINGS="$radio_tmp/settings" sh -eu "$radio_tmp/radios.sh"
+    [ "$(cat "$radio_tmp/log")" = "$(printf '%b' "$3")" ] || fail "#326 radios, case $1: got: $(tr '\n' ';' < "$radio_tmp/log")"
+}
+radio_case 'nothing stored' - 'unblock bluetooth\nunblock wifi'
+radio_case 'stored on' '[WiFi]\nEnable=true\n' 'unblock bluetooth\nunblock wifi'
+radio_case 'stored off' '[global]\nOfflineMode=false\n\n[WiFi]\nEnable=false\nTethering=false\n\n[Wired]\nEnable=true\n' 'unblock bluetooth'
+radio_case 'off belongs to another section' '[Wired]\nEnable=false\n\n[WiFi]\nEnable=true\n' 'unblock bluetooth\nunblock wifi'
+rm -rf "$radio_tmp"
 if grep -rEil 'bluetooth' "$debloat_root/etc/systemd" | grep -q .; then fail 'debloat touches a Bluetooth unit'; fi
 # #298: stock places the IRQs and their threads; debloat's runtime pass must not move them.
 for knob in smp_affinity taskset chrt; do lacks "$knob" "$ROOT/rootfs-overlay/usr/local/bin/enginex-debloat"; done

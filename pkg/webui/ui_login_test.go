@@ -703,11 +703,82 @@ func TestUnblockRadiosLeavesOtherSwitchesAlone(t *testing.T) {
 		os.WriteFile(filepath.Join(root, name, "type"), []byte(kind+"\n"), 0o644)
 		os.WriteFile(filepath.Join(root, name, "soft"), []byte("1"), 0o644)
 	}
-	UnblockRadios(root)
+	UnblockRadios(root, filepath.Join(root, "no-settings"))
 	for name, want := range map[string]string{"rfkill0": "0", "rfkill1": "0", "rfkill2": "1"} {
 		if got, _ := os.ReadFile(filepath.Join(root, name, "soft")); string(got) != want {
 			t.Fatalf("%s: %s", name, got)
 		}
+	}
+}
+
+func TestUnblockRadiosKeepsStoredWiFiChoice(t *testing.T) {
+	cases := []struct {
+		name     string
+		content  string
+		hasFile  bool
+		wantBT   string
+		wantWLAN string
+	}{
+		{
+			name:     "settings file missing",
+			hasFile:  false,
+			wantBT:   "0",
+			wantWLAN: "0",
+		},
+		{
+			name:     "stored on",
+			content:  "[WiFi]\nEnable=true\n",
+			hasFile:  true,
+			wantBT:   "0",
+			wantWLAN: "0",
+		},
+		{
+			name:     "stored off",
+			content:  "[global]\nOfflineMode=false\n\n[WiFi]\nEnable=false\nTethering=false\n\n[Wired]\nEnable=true\n",
+			hasFile:  true,
+			wantBT:   "0",
+			wantWLAN: "1",
+		},
+		{
+			name:     "off belongs to another section",
+			content:  "[Wired]\nEnable=false\n\n[WiFi]\nEnable=true\n",
+			hasFile:  true,
+			wantBT:   "0",
+			wantWLAN: "0",
+		},
+		{
+			name:     "no Enable line",
+			content:  "[WiFi]\nTethering=false\n",
+			hasFile:  true,
+			wantBT:   "0",
+			wantWLAN: "0",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for name, kind := range map[string]string{"rfkill0": "bluetooth", "rfkill1": "wlan"} {
+				os.MkdirAll(filepath.Join(root, name), 0o755)
+				os.WriteFile(filepath.Join(root, name, "type"), []byte(kind+"\n"), 0o644)
+				os.WriteFile(filepath.Join(root, name, "soft"), []byte("1"), 0o644)
+			}
+			settingsPath := filepath.Join(root, "settings")
+			if tc.hasFile {
+				if err := os.WriteFile(settingsPath, []byte(tc.content), 0o644); err != nil {
+					t.Fatalf("write settings: %v", err)
+				}
+			} else {
+				settingsPath = filepath.Join(root, "no-such-settings")
+			}
+			UnblockRadios(root, settingsPath)
+			if got, _ := os.ReadFile(filepath.Join(root, "rfkill0", "soft")); string(got) != tc.wantBT {
+				t.Fatalf("bluetooth soft: got %s, want %s", got, tc.wantBT)
+			}
+			if got, _ := os.ReadFile(filepath.Join(root, "rfkill1", "soft")); string(got) != tc.wantWLAN {
+				t.Fatalf("wlan soft: got %s, want %s", got, tc.wantWLAN)
+			}
+		})
 	}
 }
 

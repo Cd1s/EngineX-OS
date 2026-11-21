@@ -14,10 +14,36 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/wifi"
 )
 
+// wifiStoredOff reports whether the deck's stored choice is "Wi-Fi off": connman keeps it
+// in its settings file when Engine's Wi-Fi switch is used ([WiFi] Enable=false).
+func wifiStoredOff(settings string) bool {
+	data, err := os.ReadFile(settings)
+	if err != nil {
+		return false
+	}
+	inWiFi := false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			inWiFi = line == "[WiFi]"
+			continue
+		}
+		if inWiFi && strings.HasPrefix(line, "Enable=") {
+			return strings.TrimPrefix(line, "Enable=") == "false"
+		}
+	}
+	return false
+}
+
 // UnblockRadios clears rfkill's soft block on Bluetooth and Wi-Fi. The kernel boots
-// with rfkill.default_state=0. This runs from the writable partition, so it also
-// works on a deck whose read-only root still has the older legacy-debloat.
-func UnblockRadios(root string) {
+// with rfkill.default_state=0. The Bluetooth radio is always unblocked (#60): Engine
+// powers the adapter through BlueZ, which cannot clear a soft block, so without this
+// the Bluetooth switch could never be turned on. Whether Bluetooth is on after a boot
+// is Engine's own stored switch (Engine.conf, [Bluetooth] Enabled), which Engine
+// applies at start. Wi-Fi follows connman's stored choice, off stays off (#326). This
+// runs from the writable partition, so it also works on a deck whose read-only root
+// still has the older legacy-debloat.
+func UnblockRadios(root, connmanSettings string) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return
@@ -29,7 +55,14 @@ func UnblockRadios(root string) {
 			continue
 		}
 		switch strings.TrimSpace(string(kind)) {
-		case "bluetooth", "wlan":
+		case "bluetooth":
+			if err := os.WriteFile(filepath.Join(dir, "soft"), []byte("0"), 0o644); err != nil {
+				log.Printf("stream-sync: could not unblock %s: %v", e.Name(), err)
+			}
+		case "wlan":
+			if wifiStoredOff(connmanSettings) {
+				continue
+			}
 			if err := os.WriteFile(filepath.Join(dir, "soft"), []byte("0"), 0o644); err != nil {
 				log.Printf("stream-sync: could not unblock %s: %v", e.Name(), err)
 			}
