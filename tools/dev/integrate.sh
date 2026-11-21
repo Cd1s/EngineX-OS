@@ -10,6 +10,8 @@ TARGET=agent/5306-integration
 SSHCTL=${SSHCTL:-$(command -v sshctl || true)}
 REMOTE_BUILD_BIN=${REMOTE_BUILD_BIN:-$(command -v remote-build || true)}
 HOSTS=${ENGINEX_BUILD_HOSTS:-}
+TRAIN_NAME=$(git -C "$ROOT" config --get user.name || true)
+TRAIN_EMAIL=$(git -C "$ROOT" config --get user.email || true)
 [[ -n "$HOSTS" ]] || { echo "ENGINEX_BUILD_HOSTS is required" >&2; exit 2; }
 [[ -n "$REMOTE_BUILD_BIN" ]] || { echo "remote-build is required" >&2; exit 2; }
 [[ -n "$SSHCTL" ]] || { echo "sshctl is required for host selection and exact workspace cleanup" >&2; exit 2; }
@@ -24,6 +26,26 @@ while (($#)); do
     esac
 done
 [[ ${#branches[@]} -gt 0 ]] || { echo "usage: $0 <branch>... [--into <target>]" >&2; exit 2; }
+
+identity_gate() {
+    local base=$1 head=${2:-} hash author author_email committer_email email
+    if [[ -z "$head" ]]; then
+        [[ "$base" == *@users.noreply.github.com || "$base" == noreply@github.com ]] && return 0
+        [[ -n ${INTEGRATE_ALLOW_AUTHORS:-} && "$base" =~ $INTEGRATE_ALLOW_AUTHORS ]] && return 0
+        echo "identity gate refused the configured train identity; use a GitHub private address or the approved allow variable" >&2
+        return 1
+    fi
+    while IFS=$'\t' read -r hash author author_email committer_email; do
+        for email in "$author_email" "$committer_email"; do
+            [[ "$email" == *@users.noreply.github.com || "$email" == noreply@github.com ]] && continue
+            [[ -n ${INTEGRATE_ALLOW_AUTHORS:-} && "$email" =~ $INTEGRATE_ALLOW_AUTHORS ]] && continue
+            printf 'identity gate refused %s (%s); re-commit under the project identity, or use the approved allow variable for an outside contributor\n' "$hash" "$author" >&2
+            return 1
+        done
+    done < <(git -C "$worktree" log --format='%H%x09%an%x09%ae%x09%ce' "$base..$head")
+}
+
+identity_gate "$TRAIN_EMAIL" || exit 2
 
 IFS=',' read -r -a host_list <<< "${HOSTS// /,}"
 run_id=$(printf '%s-%s-%s' "$(date +%s)" "$$" "${RANDOM:-0}")
@@ -166,7 +188,7 @@ open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 PY
     if ! git -C "$worktree" diff --quiet -- docs/REGRESSION-CHECKLIST.md; then
         git -C "$worktree" add docs/REGRESSION-CHECKLIST.md
-        git -C "$worktree" -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
+        git -C "$worktree" -c user.name="$TRAIN_NAME" -c user.email="$TRAIN_EMAIL" \
             commit -m "chore: normalize regression checklist rows" >/dev/null
     fi
 }
@@ -314,7 +336,7 @@ rebase_copy() {
     git -C "$worktree" switch --detach "origin/$branch" >/dev/null
     git -C "$worktree" switch -C "$b1" "origin/$branch" >/dev/null
     set +e
-    GIT_EDITOR=true git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
+    GIT_EDITOR=true git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name="$TRAIN_NAME" -c user.email="$TRAIN_EMAIL" \
         rebase --onto "$pre_merge" "$base" "$b1" >/dev/null 2>&1
     rc=$?
     set -e
@@ -331,7 +353,7 @@ rebase_copy() {
         fi
         git -C "$worktree" add -A
         set +e
-        GIT_EDITOR=true git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
+        GIT_EDITOR=true git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name="$TRAIN_NAME" -c user.email="$TRAIN_EMAIL" \
             rebase --continue >/dev/null 2>&1
         rc=$?
         set -e
@@ -347,7 +369,7 @@ rebase_copy() {
 merge_branch() {
     local base=$1 branch=$2 pre_merge=$3 slug
     resolved_branch=$branch
-    if git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
+    if git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name="$TRAIN_NAME" -c user.email="$TRAIN_EMAIL" \
         merge --no-ff --no-edit "origin/$branch" >/dev/null 2>&1; then
         return 0
     fi
@@ -360,7 +382,7 @@ merge_branch() {
     slug=${slug//[^A-Za-z0-9._-]/_}
     echo "merge conflict for $branch, rebasing copy agent/5306-${slug}-b1" >&2
     rebase_copy "$base" "$branch" "$pre_merge" "$slug"
-    git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name=enginex-integrate -c user.email=enginex-integrate@localhost \
+    git -C "$worktree" -c merge.conflictStyle=diff3 -c user.name="$TRAIN_NAME" -c user.email="$TRAIN_EMAIL" \
         merge --no-ff --no-edit "origin/$resolved_branch" >/dev/null
 }
 
@@ -389,6 +411,7 @@ merged=()
 for branch in "${branches[@]}"; do
     pre_merge=$(git -C "$worktree" rev-parse HEAD)
     base=$(git -C "$worktree" merge-base HEAD "origin/$branch")
+    identity_gate "$base" "origin/$branch" || { echo "merge refused: $branch" >&2; exit 1; }
     max_before=$(awk -F'|' '/^\|[[:space:]]*[0-9]+[[:space:]]*\|/ {gsub(/[[:space:]]/, "", $2); if ($2 > max) max=$2} END {print max+0}' "$worktree/docs/REGRESSION-CHECKLIST.md")
     merge_branch "$base" "$branch" "$pre_merge" || { echo "merge refused: $branch" >&2; exit 1; }
     added_lines_check "$base" "origin/$branch" "$worktree"
@@ -408,6 +431,7 @@ done
 full_host=$(pick_host 1)
 full_inner='set -eu; test -z "$(gofmt -l .)"; go vet ./...; go test -race -timeout 30m ./...; idx=$(mktemp); rm -f "$idx"; git init -q; GIT_INDEX_FILE="$idx" git add -A; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/az01-packer; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/splash; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/stems; rm -f "$idx"; rm -rf .git; bash tests/test_rootfs_overlay.sh'
 remote_run "$full_host" "$full_inner"
+identity_gate "origin/$TARGET" HEAD || { echo "batch identity gate refused" >&2; exit 1; }
 git -C "$worktree" push origin "HEAD:$TARGET" >/dev/null
 elapsed=$(( $(date +%s) - started ))
 printf 'Merged %s into %s; targeted tests after each merge; full suites on %s; elapsed %ss.' "${merged[*]}" "$TARGET" "$full_host" "$elapsed"; if ((${#dropped_hunks[@]})); then printf ' Dropped hunks %s.' "${dropped_hunks[*]}"; fi; if ((${#doc_notes[@]})); then printf ' Doc cache decisions %s.' "${doc_notes[*]}"; fi; printf '\n'

@@ -30,8 +30,8 @@ new_repo() {
     rm -rf "$TMP/$name" "$TMP/$name.git"
     git init --bare -q "$TMP/$name.git"
     git clone -q "$TMP/$name.git" "$TMP/$name"
-    git -C "$TMP/$name" config user.name test
-    git -C "$TMP/$name" config user.email test@example.invalid
+    git -C "$TMP/$name" config user.name 'EngineX Agent'
+    git -C "$TMP/$name" config user.email enginex-agent@users.noreply.github.com
     mkdir -p "$TMP/$name/docs" "$TMP/$name/pkg/webui" "$TMP/$name/tools/dev"
     printf '# checklist\n\n| # | Behaviour |\n| --- | --- |\n| 1 | base |\n' > "$TMP/$name/docs/REGRESSION-CHECKLIST.md"
     printf 'base\n' > "$TMP/$name/shared.txt"
@@ -46,7 +46,7 @@ run_integrate() {
     local repo=$1
     shift
     FAKE_REMOTE_LOG="$TMP/remote.log" PATH="$TMP/bin:$PATH" SSHCTL="$TMP/bin/sshctl" REMOTE_BUILD_BIN="$TMP/bin/remote-build" \
-        ENGINEX_BUILD_HOSTS=local ENGINEX_SKIP_HOST_PROBE=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$TMP/empty.gitconfig" bash -c 'cd "$1" && exec "$2" "${@:3}" --into agent/5306-integration' bash "$repo" "$ROOT/tools/dev/integrate.sh" "$@"
+        INTEGRATE_ALLOW_AUTHORS="${INTEGRATE_ALLOW_AUTHORS:-}" ENGINEX_BUILD_HOSTS=local ENGINEX_SKIP_HOST_PROBE=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$TMP/empty.gitconfig" bash -c 'cd "$1" && exec "$2" "${@:3}" --into agent/5306-integration' bash "$repo" "$ROOT/tools/dev/integrate.sh" "$@"
 }
 
 clean_repo=$(new_repo clean)
@@ -61,6 +61,18 @@ after=$(git -C "$clean_repo" ls-remote origin refs/heads/agent/5306-integration 
 [[ $before != "$after" ]]
 git -C "$clean_repo" fetch -q origin agent/5306-integration
 git -C "$clean_repo" show origin/agent/5306-integration:clean.txt >/dev/null
+
+identity_repo=$(new_repo identity)
+git -C "$identity_repo" switch -q -c feature-identity
+printf 'outside identity\n' > "$identity_repo/identity.txt"
+git -C "$identity_repo" add identity.txt
+git -C "$identity_repo" -c user.name='Outside Contributor' -c user.email='outside@example.com' commit -qm outside-identity
+git -C "$identity_repo" push -qu origin feature-identity
+before=$(git -C "$identity_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
+if run_integrate "$identity_repo" feature-identity; then echo 'identity gate unexpectedly passed' >&2; exit 1; fi
+after=$(git -C "$identity_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
+[[ $before == "$after" ]]
+INTEGRATE_ALLOW_AUTHORS='outside@example.com' run_integrate "$identity_repo" feature-identity
 
 duplicate_repo=$(new_repo duplicate)
 git -C "$duplicate_repo" switch -q -c target-rows
@@ -105,4 +117,4 @@ before=$(git -C "$fail_repo" ls-remote origin refs/heads/agent/5306-integration 
 if FAKE_FAIL_TARGETED=1 run_integrate "$fail_repo" feature-fail; then echo 'targeted failure unexpectedly passed' >&2; exit 1; fi
 after=$(git -C "$fail_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
 [[ $before == "$after" ]]
-printf 'integrate.sh clean merge, refused conflict, and refused targeted failure tests passed\n'
+printf 'integrate.sh identity gate fail-before/pass-after, clean merge, refused conflict, and refused targeted failure tests passed\n'
