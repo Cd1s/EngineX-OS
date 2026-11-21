@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/url"
 	"os"
@@ -63,6 +64,9 @@ type WriteBackResult struct {
 	FilesUpdated      int    `json:"filesUpdated"`
 	OneLibraryUpdated bool   `json:"oneLibraryUpdated"`
 	BackupDir         string `json:"backupDir,omitempty"`
+	// PhasesMS and BytesWritten are the pass's cost, as its log line gives them (#321).
+	PhasesMS     map[string]int64 `json:"phasesMs,omitempty"`
+	BytesWritten int64            `json:"bytesWritten,omitempty"`
 }
 
 var usbPreparingFlagPath = "/run/enginex-usb-preparing" // the edisksd hook's mark of a conversion at mount (tests move it)
@@ -139,7 +143,38 @@ func mountRootWritable(mount string) bool {
 // ANLZ files (.DAT, .EXT, and .2EX if present) and rekordbox 7 exportLibrary.db
 // (if present). Originals are backed up once under /.enginex-backup/<date>/.
 func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions) (WriteBackResult, error) {
+	var tm passTimes
+	t0 := time.Now()
+	res, err := writeBackCues(ctx, mountPath, opts, &tm)
+	tm.total = time.Since(t0)
+	res.PhasesMS = tm.ms()
+	res.BytesWritten = tm.bytes
+	outcome := "done"
+	if err != nil {
+		outcome = "stopped: " + err.Error()
+	}
+	// One line per pass (#321): what it cost and what it did.
+	log.Printf("rb-bridge: cue write-back of %s %s: %d tracks, %d read, %d changed; ms: candidates %d, key %d, decrypt %d, edit %d, encrypt %d, write %d, total %d; %d files, %d bytes written",
+		mountPath, outcome, res.TracksChecked, res.TracksRead, res.TracksChanged,
+		res.PhasesMS["candidates"], res.PhasesMS["key"], res.PhasesMS["decrypt"], res.PhasesMS["edit"], res.PhasesMS["encrypt"], res.PhasesMS["write"], res.PhasesMS["total"],
+		res.FilesUpdated, res.BytesWritten)
+	return res, err
+}
+
+// passTimes is where a pass spent its time, phase by phase, and what it wrote.
+type passTimes struct {
+	candidates, key, decrypt, edit, encrypt, write, total time.Duration
+	bytes                                                 int64
+}
+
+func (t *passTimes) ms() map[string]int64 {
+	return map[string]int64{"candidates": t.candidates.Milliseconds(), "key": t.key.Milliseconds(), "decrypt": t.decrypt.Milliseconds(),
+		"edit": t.edit.Milliseconds(), "encrypt": t.encrypt.Milliseconds(), "write": t.write.Milliseconds(), "total": t.total.Milliseconds()}
+}
+
+func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions, tm *passTimes) (WriteBackResult, error) {
 	var res WriteBackResult
+	tStart := time.Now()
 	// A record dated in this second or the one before is not trusted, nor made: Engine may
 	// write the row again within the same second, and its date would not move (#321).
 	start := time.Now().Unix()
@@ -176,6 +211,8 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		keys = rekordbox.NewKeyCache()
 		defer keys.Clear()
 	}
+	key0 := keys.DeriveTime()
+	defer func() { tm.key = keys.DeriveTime() - key0 }()
 
 	engineDBDir := filepath.Join(absMount, "Engine Library", "Database2")
 	mDBPath := filepath.Join(engineDBDir, "m.db")
@@ -353,15 +390,19 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		opts.Session.add(confirmed)
 	}
 
+	tm.candidates = time.Since(tStart)
 	if len(dirty) == 0 {
 		record(nil)
 		return res, nil
 	}
 
+	tLib := time.Now()
 	rbLib, oneLibRel, err := readStickRekordboxLibrary(ctx, resolver, absMount, keys)
+	tm.decrypt = time.Since(tLib) - (keys.DeriveTime() - key0) // the export read: decrypt and parse
 	if err != nil {
 		return res, err
 	}
+	tCmp := time.Now()
 	byID := make(map[uint32]rekordbox.Track, len(rbLib.Tracks))
 	byPath := make(map[string]rekordbox.Track, len(rbLib.Tracks))
 	byPathFold := make(map[string]rekordbox.Track, len(rbLib.Tracks))
@@ -425,11 +466,15 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		})
 	}
 	_ = db.Close()
+	tm.edit = time.Since(tCmp) // matching each track and merging its cues with the stick's
 
 	if len(changes) == 0 {
 		record(nil)
 		return res, nil
 	}
+	tWrite := time.Now()
+	var upd rekordbox.UpdateTimes
+	defer func() { tm.write = time.Since(tWrite) - upd.Decrypt - upd.Edit - upd.Encrypt }()
 	if err := settle(); err != nil {
 		return res, err
 	}
@@ -531,12 +576,14 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 			if !changed {
 				continue
 			}
-			if err := ensureFirstOriginalBackup(absMount, backupRoot, dateDir, rel); err != nil {
+			n, err := ensureFirstOriginalBackup(absMount, backupRoot, dateDir, rel)
+			if err != nil {
 				return res, err
 			}
 			if err := stageBytes(fullPath, updated); err != nil {
 				return res, err
 			}
+			tm.bytes += n + int64(len(updated))
 		}
 	}
 
@@ -544,18 +591,27 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	if oneLibRel != "" && (len(oneLibUpdates) > 0 || len(oneLibMetadata) > 0) {
 		oneLibFull = resolver.FullPath(oneLibRel)
 		if _, err := os.Stat(oneLibFull); err == nil {
-			if err := ensureFirstOriginalBackup(absMount, backupRoot, dateDir, oneLibRel); err != nil {
+			n, err := ensureFirstOriginalBackup(absMount, backupRoot, dateDir, oneLibRel)
+			if err != nil {
 				return res, err
 			}
+			tm.bytes += n
 			tmpOut, err := os.CreateTemp(filepath.Dir(oneLibFull), ".enginex-onelib-*.tmp")
 			if err != nil {
 				return res, err
 			}
 			tmpPath := tmpOut.Name()
 			_ = tmpOut.Close()
-			if _, err := rekordbox.UpdateOneLibraryEditsKeys(ctx, oneLibFull, oneLibUpdates, oneLibMetadata, tmpPath, keys); err != nil {
+			upd, err = rekordbox.UpdateOneLibraryEditsKeys(ctx, oneLibFull, oneLibUpdates, oneLibMetadata, tmpPath, keys)
+			tm.decrypt += upd.Decrypt
+			tm.edit += upd.Edit
+			tm.encrypt = upd.Encrypt
+			if err != nil {
 				_ = os.Remove(tmpPath)
 				return res, err
+			}
+			if st, err := os.Stat(tmpPath); err == nil {
+				tm.bytes += st.Size()
 			}
 			staged = append(staged, stagedWrite{dst: oneLibFull, tmp: tmpPath, export: true})
 		}
@@ -565,9 +621,11 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	if oneLibRel == "" && len(pdbMetadata) > 0 {
 		if pdbRel, err := resolver.Resolve("PIONEER/rekordbox/export.pdb"); err == nil {
 			pdbFull := resolver.FullPath(pdbRel)
-			if err := ensureFirstOriginalBackup(absMount, backupRoot, dateDir, pdbRel); err != nil {
+			n, err := ensureFirstOriginalBackup(absMount, backupRoot, dateDir, pdbRel)
+			if err != nil {
 				return res, err
 			}
+			tm.bytes += n
 			tmpOut, err := os.CreateTemp(filepath.Dir(pdbFull), ".enginex-pdb-*.tmp")
 			if err != nil {
 				return res, err
@@ -577,6 +635,9 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 			if err := updatePDBMetadata(ctx, pdbFull, pdbMetadata, tmpPath); err != nil {
 				_ = os.Remove(tmpPath)
 				return res, err
+			}
+			if st, err := os.Stat(tmpPath); err == nil {
+				tm.bytes += st.Size()
 			}
 			staged = append(staged, stagedWrite{dst: pdbFull, tmp: tmpPath, export: true})
 		}
@@ -1130,7 +1191,8 @@ func safeANLZRelPath(p string) (string, error) {
 	return clean, nil
 }
 
-func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) error {
+// ensureFirstOriginalBackup copies the stick's original of relSlash once; it returns the bytes copied.
+func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) (int64, error) {
 	relOS := filepath.FromSlash(relSlash)
 	if entries, err := os.ReadDir(backupRoot); err == nil {
 		for _, ent := range entries {
@@ -1139,24 +1201,24 @@ func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) 
 			}
 			existing := filepath.Join(backupRoot, ent.Name(), relOS)
 			if _, err := os.Stat(existing); err == nil {
-				return nil
+				return 0, nil
 			}
 		}
 	}
 	src := filepath.Join(mountRoot, relOS)
 	dst := filepath.Join(backupRoot, dateDir, relOS)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
+		return 0, err
 	}
 	in, err := os.Open(src)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer in.Close()
 
 	tmp, err := os.CreateTemp(filepath.Dir(dst), ".bak-*.tmp")
 	if err != nil {
-		return err
+		return 0, err
 	}
 	tmpPath := tmp.Name()
 	ok := false
@@ -1166,21 +1228,22 @@ func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) 
 			_ = os.Remove(tmpPath)
 		}
 	}()
-	if _, err := io.Copy(tmp, in); err != nil {
-		return err
+	n, err := io.Copy(tmp, in)
+	if err != nil {
+		return 0, err
 	}
 	if err := tmp.Sync(); err != nil {
-		return err
+		return 0, err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return 0, err
 	}
 	if err := os.Rename(tmpPath, dst); err != nil {
-		return err
+		return 0, err
 	}
 	_ = syncDir(filepath.Dir(dst))
 	ok = true
-	return nil
+	return n, nil
 }
 
 func stageWriteFile(dst string, data []byte) (string, error) {
