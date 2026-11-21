@@ -71,17 +71,18 @@ func LocalRender(in io.Reader, out io.Writer) error {
 	}
 	sep := newSeparator(ch, rate)
 	pcm := make([]byte, maxBlock*ch*4)
+	wire := make([]byte, maxBlock*len(sep.out)*4)
 	// reply hands Engine the queued frames, at most maxBlock of them.
 	reply := func() error {
 		n := min(maxBlock, len(sep.out[0]))
 		w.WriteString("returnFrames=" + strconv.Itoa(n) + "\n\n")
 		for i, plane := range sep.out {
 			for k, v := range plane[:n] {
-				binary.LittleEndian.PutUint32(pcm[k*4:], math.Float32bits(v))
+				binary.LittleEndian.PutUint32(wire[(i*n+k)*4:], math.Float32bits(v))
 			}
-			w.Write(pcm[:n*4])
 			sep.out[i] = plane[n:]
 		}
+		w.Write(wire[:n*len(sep.out)*4])
 		return w.Flush()
 	}
 	for {
