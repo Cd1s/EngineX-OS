@@ -28,7 +28,7 @@ done
 [[ ${#branches[@]} -gt 0 ]] || { echo "usage: $0 <branch>... [--into <target>]" >&2; exit 2; }
 
 identity_gate() {
-    local base=$1 head=${2:-} hash author author_email committer_email email
+    local base=$1 head=${2:-} hash author author_email committer_email email valid bad=0
     if [[ -z "$head" ]]; then
         [[ "$base" == *@users.noreply.github.com || "$base" == noreply@github.com ]] && return 0
         [[ -n ${INTEGRATE_ALLOW_AUTHORS:-} && "$base" =~ $INTEGRATE_ALLOW_AUTHORS ]] && return 0
@@ -36,13 +36,22 @@ identity_gate() {
         return 1
     fi
     while IFS=$'\t' read -r hash author author_email committer_email; do
+        valid=1
         for email in "$author_email" "$committer_email"; do
-            [[ "$email" == *@users.noreply.github.com || "$email" == noreply@github.com ]] && continue
-            [[ -n ${INTEGRATE_ALLOW_AUTHORS:-} && "$email" =~ $INTEGRATE_ALLOW_AUTHORS ]] && continue
-            printf 'identity gate refused %s (%s); re-commit under the project identity, or use the approved allow variable for an outside contributor\n' "$hash" "$author" >&2
-            return 1
+            if [[ "$email" == *@users.noreply.github.com || "$email" == noreply@github.com ]]; then
+                continue
+            fi
+            if [[ -n ${INTEGRATE_ALLOW_AUTHORS:-} && "$email" =~ $INTEGRATE_ALLOW_AUTHORS ]]; then
+                continue
+            fi
+            valid=0
         done
+        if ((valid == 0)); then
+            printf 'identity gate refused %s (%s); re-commit under the project identity, or use the approved allow variable for an outside contributor\n' "$hash" "$author" >&2
+            bad=1
+        fi
     done < <(git -C "$worktree" log --format='%H%x09%an%x09%ae%x09%ce' "$base..$head")
+    return "$bad"
 }
 
 identity_gate "$TRAIN_EMAIL" || exit 2
