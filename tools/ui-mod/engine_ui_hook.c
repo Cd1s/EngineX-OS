@@ -386,7 +386,9 @@ static struct cfx_channel {
     void *node, *spare;    /* ChannelSweepFx at SweepFxControl +0x38 and +0x3c */
     unsigned knob;         /* float bits, written by setValue's thread */
     struct sc_pfx_instance dsp;
-} cfx_channels[CFX_CHANNELS];
+    /* Knob starts at centre (0.5f): hook_cfx_value claims a channel with a CAS on node and stores knob after it,
+     * so a node the audio thread sees claimed for the first time must read centre, which is stock, never full wet. */
+} cfx_channels[CFX_CHANNELS] = {[0 ... CFX_CHANNELS - 1] = {.knob = 0x3f000000u}};
 typedef void (*cfx_value_fn)(void *, float);
 typedef void (*cfx_process_fn)(void *, int, float **, int, float **, int, void *, void *);
 

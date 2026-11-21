@@ -134,6 +134,21 @@ int main(void) {
     for (int k = 0; k < 2; ++k) ctl[k].node = &nodes[2 * k], ctl[k].spare = &nodes[2 * k + 1];
     prepare();
 
+    // First claim: hook_cfx_value claims a channel (CAS on node) and stores the knob after it. In that gap the
+    // audio thread sees a claimed node whose knob was never stored: it must read centre (stock), not full wet.
+    for (unsigned i = 0; i < CFX_CHANNELS; ++i) {
+        unsigned bits = cfx_channels[i].knob;
+        float v;
+        memcpy(&v, &bits, sizeof v);
+        assert(v == 0.5f && cfx_amount(v) == 0);
+    }
+    static char claimed_not_stored;
+    cfx_style = SC_PFX_SPIRAL;
+    __atomic_store_n(&cfx_channels[CFX_CHANNELS - 1].node, (void *)&claimed_not_stored, __ATOMIC_RELEASE);
+    assert(run(&claimed_not_stored, 8).stock && !cfx_channels[CFX_CHANNELS - 1].dsp.current);
+    __atomic_store_n(&cfx_channels[CFX_CHANNELS - 1].node, NULL, __ATOMIC_RELEASE);
+    cfx_style = 0;
+
     assert(cfx_amount(0.5f) == 0 && cfx_amount(0.495f) == 0 && cfx_amount(0.505f) == 0 && cfx_amount(NAN) == 0);
     assert(cfx_amount(0.0f) == 1 && cfx_amount(1.0f) == 1 && cfx_amount(0.6f) > 0 && cfx_amount(0.4f) > 0);
     assert(fabsf(cfx_amount(0.25f) - cfx_amount(0.75f)) < 1e-6f); /* the same turn either way */
