@@ -323,7 +323,10 @@ func snapshotLive(ctx context.Context, dir, stage string, r *compat.Resolver, l 
 			if err != nil {
 				return err
 			}
-			refs := confirmedRefs(r, l, keys, checked)
+			refs, err := confirmedRefs(ctx, r, l, keys, checked)
+			if err != nil {
+				return err
+			}
 			if err = enginedb.CopyBridgeStateCompact(ctx, filepath.Join(dir, stateName), filepath.Join(stage, "m.db.copy"), filepath.Join(stage, stateName+".copy"), refs); err != nil {
 				return err
 			}
@@ -519,7 +522,11 @@ func handToMounts(ctx context.Context, r *compat.Resolver, l *rekordbox.Library,
 		if err != nil {
 			log.Printf("rb-bridge: waveform rows not checked, the remount keeps them: %v", err)
 		}
-		for key := range confirmedRefs(r, l, keys, map[string]bool{}) {
+		refs, err := confirmedRefs(ctx, r, l, keys, map[string]bool{})
+		if err != nil {
+			return enginedb.Result{}, true, err // nothing marked: the next job checks again
+		}
+		for key := range refs {
 			mark.Refs = append(mark.Refs, key)
 		}
 	}
@@ -633,16 +640,23 @@ func rereadRefs(dir, stamp string) map[uint32]bool {
 }
 
 // confirmedRefs are the ANLZ files the export l names for the tracks of keys, whose state rows
-// still hold a waveform, where those files give the display that waveform (enginedb.DetailServes):
-// the reader that serves the detail, without the waveforms' bodies. A track whose files are
-// missing, truncated, renamed or malformed keeps its row (#253 reviews 2 and 3). Only the background job calls it. checked holds the answer for each list of
-// files already looked at.
-func confirmedRefs(r *compat.Resolver, l *rekordbox.Library, keys map[uint32]bool, checked map[string]bool) map[uint32][]string {
+// still hold a copy of the waveform (5.3.0.5's RBA1), where those files give the display that
+// waveform: enginedb.DetailServes, the display's own reading of the files, each read whole. A
+// track whose files are missing, truncated, renamed, malformed or unreadable keeps its copy (#253
+// reviews 2-4). Rows that are references already and tracks without a row are not in keys and are
+// not read. Only the background job calls it; its reads are paced (detailPace). checked holds the
+// answer for each list of files already read. A stop (ctx) returns the error and confirms nothing
+// more: every track not confirmed keeps its copy, and the next job checks it again.
+func confirmedRefs(ctx context.Context, r *compat.Resolver, l *rekordbox.Library, keys map[uint32]bool, checked map[string]bool) (map[uint32][]string, error) {
 	refs := map[uint32][]string{}
 	if len(keys) == 0 {
-		return refs
+		return refs, nil
 	}
 	start, files, read := time.Now(), 0, int64(0)
+	pace := detailPace(ctx)
+	defer func() {
+		log.Printf("rb-bridge: %d of %d waveform copies can become references; ANLZ files read in %s (%d tracks, %d bytes)", len(refs), len(keys), time.Since(start).Round(time.Millisecond), files, read)
+	}()
 	for id, list := range enginedb.ExportRefs(l) {
 		if !keys[id] {
 			continue
@@ -651,16 +665,41 @@ func confirmedRefs(r *compat.Resolver, l *rekordbox.Library, keys map[uint32]boo
 		ok, seen := checked[key]
 		if !seen {
 			var n int64
-			ok, n = enginedb.DetailServes(r, list)
-			checked[key], files, read = ok, files+1, read+n
+			var err error
+			ok, n, err = enginedb.DetailServes(r, list, pace)
+			files, read = files+1, read+n
+			if err != nil {
+				return refs, err
+			}
+			checked[key] = ok
 		}
 		if ok {
 			refs[id] = list
 		}
 	}
-	log.Printf("rb-bridge: %d of %d waveform rows can become references; ANLZ files checked in %s (%d tracks, %d bytes read)", len(refs), len(keys), time.Since(start).Round(time.Millisecond), files, read)
-	return refs
+	return refs, ctx.Err()
 }
+
+// detailPace paces the job's whole reads of ANLZ files (#253 review 4): a deck may be loading or
+// playing a track from the same stick, and the decks' I/O schedulers do not honour the idle class
+// the job runs in. After each read of at most 128 KiB the job sleeps as long as that read took and
+// at least detailReadGap: the stick is free at least half the time, and a deck's request waits
+// behind one such read at most.
+func detailPace(ctx context.Context) enginedb.DetailPause {
+	return func(_ int, took time.Duration) error {
+		t := time.NewTimer(max(took, detailReadGap))
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			return nil
+		}
+	}
+}
+
+// detailReadGap is the least pause after a read of detailPace. A variable only for tests.
+var detailReadGap = 10 * time.Millisecond
 
 // publishUpdate replaces the live library with the complete update in the stage, at a mount
 // before Engine sees the volume, with what Engine wrote since the snapshot. A change Engine made

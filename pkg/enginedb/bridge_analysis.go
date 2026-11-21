@@ -13,10 +13,10 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
-	"golang.org/x/sys/unix"
 )
 
 // BridgeAnalysis stores the source ID and, in new rows, where the PWV7 (else PWV5) section
@@ -81,25 +81,16 @@ func detailFiles(files []analysisFile) []string {
 
 // BridgeDetail is the scrolling detail a BridgeAnalysis column names or holds, as
 // DisplayWaveFromRekordbox reads it: from the track's ANLZ files under root, the volume, for a
-// reference (RBA2), else from the column itself. Nil when there is none or it cannot be read.
+// reference (RBA2, read by detailFrom), else from the column itself. Nil when there is none or it
+// cannot be read.
 func BridgeDetail(b []byte, root string, limit int) *rekordbox.Analysis {
 	if _, files, err := unpackBridgeRef(b); err == nil {
-		a := &rekordbox.Analysis{}
-		for _, f := range files {
-			data, err := readVolumeFile(root, f, maxDetailFile)
-			if err != nil {
-				continue
-			}
-			if one, err := rekordbox.ParseAnalysis(data); err == nil {
-				a.Waveforms = append(a.Waveforms, one.Waveforms...)
-			}
-			// Only the section the display reads, as an RBA1 row held it; a PWV7 found first
-			// leaves the .EXT unread.
-			if w := displayAnalysisWaveform(a); w != nil {
-				return &rekordbox.Analysis{Waveforms: []rekordbox.Waveform{*w}}
-			}
+		r, err := compat.NewResolver(root)
+		if err != nil {
+			return nil
 		}
-		return nil
+		a, _, _ := detailFrom(r, files, nil)
+		return a
 	}
 	b, err := UnpackAnalysis(b, limit)
 	if err != nil {
@@ -112,78 +103,111 @@ func BridgeDetail(b []byte, root string, limit int) *rekordbox.Analysis {
 	return source.Analysis
 }
 
-// DetailServes reports whether a reference naming files gives the display a waveform, as
-// BridgeDetail reads it (#253 reviews 2 and 3): one of the files is, as r resolves it, a regular
-// file within maxDetailFile (no symlink, no traversal) that ParseAnalysis accepts whole, with a
-// waveform displayWaveFits. It reads the file as the import does (rekordbox.ReadAnalysisFile):
-// every section but the waveforms is read and parsed by ParseAnalysis itself, and the waveform
-// sections, whose bodies ParseAnalysis never looks into, by their headers alone; so it refuses a
-// file exactly when BridgeDetail would find no waveform in it, a malformed cue list or grid in
-// front of a valid PWV7 included. A missing, renamed or truncated file fails. read is the bytes
-// read: the headers, and the bodies of the sections that are not waveforms.
-func DetailServes(r *compat.Resolver, files []string) (ok bool, read int64) {
-	for _, f := range files {
-		ok, n := detailFileServes(r, f)
-		read += n
-		if ok {
-			return true, read
-		}
-	}
-	return false, read
+// DetailPause is called after each read of an ANLZ file (n bytes, which took took): the
+// background job paces its reads with it. A non-nil error stops the reading.
+type DetailPause func(n int, took time.Duration) error
+
+// detailReadChunk is the most detailFrom reads at once: with a DetailPause, the longest a read of
+// the job keeps the stick from a deck.
+const detailReadChunk = 128 << 10
+
+// DetailServes reports whether a reference naming files gives the display a waveform: it is
+// BridgeDetail's own reading of them (detailFrom), every file read whole, so a row that holds a
+// waveform becomes a reference only where the display can then read the detail (#253 reviews 2-4).
+// A missing, renamed, truncated, malformed or unreadable file (a read error anywhere in it, a
+// waveform's body or the padding past its end included) does not serve. pause paces the reads;
+// its error (the job stopping) is returned, and nothing is confirmed then. read is the bytes read.
+func DetailServes(r *compat.Resolver, files []string, pause DetailPause) (ok bool, read int64, err error) {
+	a, read, err := detailFrom(r, files, pause)
+	return err == nil && a != nil, read, err
 }
 
-func detailFileServes(r *compat.Resolver, rel string) (bool, int64) {
-	rel, err := r.Resolve(rel)
-	if err != nil {
-		return false, 0
+// detailFrom is the display's detail of a reference: the files, in the order the display prefers
+// them, each resolved by r (case, NFC, macOS's hidden .PIONEER; no traversal, no symlink), a
+// regular file within maxDetailFile, read whole and accepted by ParseAnalysis; the first waveform
+// the display draws (displayAnalysisWaveform) is the detail. Nil when none serves. err is only
+// pause's.
+func detailFrom(r *compat.Resolver, files []string, pause DetailPause) (detail *rekordbox.Analysis, read int64, err error) {
+	a := &rekordbox.Analysis{}
+	for _, f := range files {
+		data, n, err := readDetailFile(r, f, pause)
+		read += n
+		if err != nil {
+			var stop detailStopped
+			if errors.As(err, &stop) {
+				return nil, read, stop.err
+			}
+			continue
+		}
+		if one, err := rekordbox.ParseAnalysis(data); err == nil {
+			a.Waveforms = append(a.Waveforms, one.Waveforms...)
+		}
+		// Only the section the display reads, as an RBA1 row held it; a PWV7 found first
+		// leaves the .EXT unread.
+		if w := displayAnalysisWaveform(a); w != nil {
+			return &rekordbox.Analysis{Waveforms: []rekordbox.Waveform{*w}}, read, nil
+		}
 	}
-	// No access time: on FAT a read otherwise writes the file's directory entry back, one write
-	// a track (measured on the 6031-track stick copy). rb-bridge is root; others open it plainly.
-	f, err := os.OpenFile(r.FullPath(rel), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NOATIME, 0)
+	return nil, read, nil
+}
+
+// detailStopped is the error a DetailPause stopped the reading with.
+type detailStopped struct{ err error }
+
+func (e detailStopped) Error() string { return "enginedb: detail read stopped: " + e.err.Error() }
+
+// detailRead reads the next part of an ANLZ file; a variable only so tests can fail a read.
+var detailRead = func(f *os.File, p []byte) (int, error) { return f.Read(p) }
+
+// readDetailFile reads rel whole, as r resolves it, refusing traversal, symlinks, anything but a
+// regular file and more than maxDetailFile bytes, detailReadChunk at a time.
+func readDetailFile(r *compat.Resolver, rel string, pause DetailPause) (b []byte, read int64, err error) {
+	if rel, err = r.Resolve(rel); err != nil {
+		return nil, 0, err
+	}
+	// No access time: on FAT a read otherwise writes the file's directory entry back (measured,
+	// one write a track on the 6031-track stick copy). rb-bridge is root; others open it plainly.
+	f, err := os.OpenFile(r.FullPath(rel), os.O_RDONLY|syscall.O_NOFOLLOW|openNoAtime, 0)
 	if errors.Is(err, os.ErrPermission) {
 		f, err = os.OpenFile(r.FullPath(rel), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	}
 	if err != nil {
-		return false, 0
-	}
-	defer f.Close()
-	// No readahead: the stick reads the pages of the headers and of the small sections, not
-	// the readahead window over the waveforms (measured 16 KB a track with it on the same copy).
-	_ = unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_RANDOM)
-	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() || st.Size() > maxDetailFile {
-		return false, 0
-	}
-	fits := false
-	a, read, err := rekordbox.ReadAnalysisFile(f, func(string) bool { return true }, func(tag string, width, count uint32) {
-		fits = fits || displayWaveFits(tag, width, uint64(count))
-	})
-	return err == nil && (fits || displayAnalysisWaveform(a) != nil), read
-}
-
-// readVolumeFile reads rel under root as the resolver finds it (case, NFC, macOS's hidden
-// .PIONEER), refusing traversal and symlinks.
-func readVolumeFile(root, rel string, limit int64) ([]byte, error) {
-	r, err := compat.NewResolver(root)
-	if err != nil {
-		return nil, err
-	}
-	if rel, err = r.Resolve(rel); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(r.FullPath(rel), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	if !st.Mode().IsRegular() || st.Size() > limit {
-		return nil, fmt.Errorf("not a regular file within %d bytes: %s", limit, rel)
+	if !st.Mode().IsRegular() || st.Size() > maxDetailFile {
+		return nil, 0, fmt.Errorf("not a regular file within %d bytes: %s", maxDetailFile, rel)
 	}
-	return io.ReadAll(io.LimitReader(f, limit))
+	if pause != nil {
+		noReadahead(f)
+	}
+	b = make([]byte, 0, st.Size())
+	for {
+		if len(b) == cap(b) {
+			if len(b) > maxDetailFile {
+				return nil, read, fmt.Errorf("grew past %d bytes: %s", maxDetailFile, rel)
+			}
+			b = append(b, 0)[:len(b)] // the file grew since its stat
+		}
+		start := time.Now()
+		n, err := detailRead(f, b[len(b):min(cap(b), len(b)+detailReadChunk)])
+		b, read = b[:len(b)+n], read+int64(n)
+		if err == io.EOF {
+			return b, read, nil
+		}
+		if err != nil {
+			return nil, read, err
+		}
+		if pause != nil && n > 0 {
+			if err = pause(n, time.Since(start)); err != nil {
+				return nil, read, detailStopped{err}
+			}
+		}
+	}
 }
 
 // exportDetailFiles are detailFiles as the export names them, before the import resolved them.

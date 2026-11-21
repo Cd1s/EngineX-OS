@@ -944,12 +944,23 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 				if e != nil {
 					return result, e
 				}
-				// Without a .2EX or .EXT the track has no detail to name: a row that still holds
-				// the waveform an earlier import read keeps it (length() reads no overflow page;
-				// #253 review 2).
-				keepWave := ``
-				if len(refs) == 0 {
-					keepWave = ` WHERE length(BridgeAnalysis.sourceJSON)<=` + waveformRowBytes
+				// A row that still holds a copy of the waveform (5.3.0.5's RBA1) becomes the
+				// reference only where the display can read the detail from these files: its own
+				// reading of them, each file read whole (DetailServes; the .2EX this import just read
+				// comes from the page cache). Otherwise, and for a track without a .2EX or .EXT, the
+				// copy stays (#253 reviews 2-4). length() reads no overflow page. Other rows, and a
+				// track without one, have nothing to lose and are not read again.
+				keepWave := ` WHERE length(BridgeAnalysis.sourceJSON)<=` + waveformRowBytes
+				if len(refs) > 0 {
+					var copyRow bool
+					if e = tx.QueryRowContext(ctx, `SELECT length(sourceJSON)>`+waveformRowBytes+` FROM BridgeAnalysis WHERE trackId=?`, id).Scan(&copyRow); e != nil && !errors.Is(e, sql.ErrNoRows) {
+						return result, e
+					}
+					if !copyRow {
+						keepWave = ``
+					} else if ok, _, _ := DetailServes(res, refs, nil); ok {
+						keepWave = ``
+					}
 				}
 				if _, e = q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`+keepWave, id, packedSource, packedAudio); e != nil {
 					return result, e

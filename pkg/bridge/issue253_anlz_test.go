@@ -3,6 +3,7 @@ package bridge_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -101,6 +102,38 @@ func TestIssue253BrokenANLZKeepsItsWaveformRow(t *testing.T) {
 			}
 		}})
 	}
+	// #253 review 4: the files read, but not through the display's reader: a bad page in the
+	// waveform's body, or in the last page (padding past the declared length), of the .2EX and
+	// the .EXT. The import (it reads them itself) accepts them; the display cannot serve them, so
+	// neither the update's compaction nor the next import may turn the copy into a reference.
+	for _, fault := range []string{"waveform body", "last page"} {
+		breaks = append(breaks, struct {
+			name  string
+			apply func(t *testing.T, root string)
+		}{"read error in the " + fault, func(t *testing.T, root string) {
+			bad := map[string][2]int64{}
+			for _, ext := range []string{".2EX", ".EXT"} {
+				p := filepath.Join(root, anlz+ext)
+				b, err := os.ReadFile(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				at := issue253WaveBody(t, b)
+				if fault == "last page" { // FAT padding past the declared length, a page of its own
+					b = append(b, make([]byte, 4096+(4096-len(b)%4096)%4096)...)
+					if err = os.WriteFile(p, b, 0o644); err != nil {
+						t.Fatal(err)
+					}
+					at = int64(len(b) - 4096)
+				}
+				bad[p] = [2]int64{at, at + 1}
+			}
+			t.Cleanup(enginedb.SetDetailReadFailForTest(func(path string, off int64, n int) bool {
+				s, ok := bad[path]
+				return ok && off < s[1] && off+int64(n) > s[0]
+			}))
+		}})
+	}
 	flows := []struct {
 		name     string
 		perTrack int64
@@ -138,4 +171,22 @@ func TestIssue253BrokenANLZKeepsItsWaveformRow(t *testing.T) {
 			})
 		}
 	}
+}
+
+// issue253WaveBody is where the first PWV7 or PWV5 section's entries start in the ANLZ file b.
+func issue253WaveBody(t *testing.T, b []byte) int64 {
+	t.Helper()
+	be := binary.BigEndian
+	for off := int64(be.Uint32(b[4:])); off+12 <= int64(len(b)); {
+		tag, h, n := string(b[off:off+4]), int64(be.Uint32(b[off+4:])), int64(be.Uint32(b[off+8:]))
+		if (tag == "PWV7" || tag == "PWV5") && n > h {
+			return off + h
+		}
+		if n < 12 {
+			break
+		}
+		off += n
+	}
+	t.Fatal("no PWV7 or PWV5 with entries")
+	return 0
 }
