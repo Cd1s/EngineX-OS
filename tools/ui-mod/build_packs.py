@@ -4796,6 +4796,8 @@ SERVICES_MAIN = """
 	property var scStemSeen: null // when and where the rendering track's progress was first seen
 	property string scStemLeft: ""
 	property var scStemFailAt: ({})
+	property bool scStemFull: false // the last Stems tap found a deck free to load but none empty: the swipe's hint says so
+	property var scStemTurns: [] // imports that have their file and wait for the one in progress: functions, oldest first
 	function scStemMark(ids, mark) {
 		const rows = Object.assign({}, scStemRows)
 		for (const id of ids) {
@@ -4956,9 +4958,17 @@ SERVICES_MAIN = """
 		const lib = Planck.librarianController.collectionController
 		const m = /uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)/.exec(lib.getTrackUrisFromUniversalIds([uid]) || "")
 		if (!m) return false
-		const deck = root.scDeckList().slice().reverse().find(d => !root.scDeckLocked(d) && !Planck.getProperty("/Engine/Deck%1/PlayState".arg(d)).translator.state)
-		// Every deck is playing: playback is never interrupted for the import, so
-		// nothing is started. The swipe says so where it would have said "Stems".
+		// The import loads the file on a deck, so it needs one that is neither playing nor
+		// holding a track: a track cued on a paused deck is the DJ's and is never replaced (#316).
+		const loaded = d => { const song = Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(d)); return !!(song && song.translator && song.translator.state) }
+		const idle = () => root.scDeckList().slice().reverse().filter(d => !root.scDeckLocked(d) && !Planck.getProperty("/Engine/Deck%1/PlayState".arg(d)).translator.state)
+		const free = () => idle().find(d => !loaded(d))
+		const deck = free()
+		// Every deck is playing, or every free one holds a track: playback and cued tracks
+		// are never interrupted for the import, so nothing is started. The swipe says so
+		// where it would have said "Stems" (scStemFull: which of the two it was).
+		root.scStemFull = !deck && idle().length > 0
+		if (root.scStemFull) console.warn("EngineX stems step=full")
 		if (!deck) { console.warn("EngineX stems step=busy"); return "busy" }
 		const gid = m[1]
 		root.scStemMark([gid], "wait")
@@ -4974,32 +4984,51 @@ SERVICES_MAIN = """
 				if (!scStemFailed.running) { scStemFailed.interval = 10000; scStemFailed.restart() }
 				return
 			}
-			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) { root.scStemMark([gid], ""); return } // started playing while we waited
 			const reply = JSON.parse(x.responseText)
 			const url = "file://" + encodeURI(reply.path)
-			// Engine imports a file only through a deck load, so load it on an empty deck
-			// and eject it again once the Stems render is queued (scStemUnload).
-			const song = Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(deck))
-			scStemUnload.deck = deck
-			scStemUnload.armed = !(song && song.translator && song.translator.state)
-			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(deck)).translator.url = url
-			// One import at a time: an earlier one this replaces is not rendered.
-			if (scStemImport.running && scStemImport.rows.indexOf(gid) < 0) root.scStemMark(scStemImport.rows, "")
-			scStemImport.rows = [gid, reply.row ? String(reply.row) : ""]
-			root.scStemMark(scStemImport.rows, "wait")
-			scStemImport.url = url
-			scStemImport.path = reply.path
-			scStemImport.tries = 20
-			scStemImport.restart()
+			// One import at a time: the two timers below hold one import's state, so a tap
+			// that finds another one in progress waits for its turn (scStemTurn) and never
+			// overwrites it. Its row keeps saying "wait".
+			root.scStemTurn(function() {
+				// The deck is chosen now: the file took a while to come and the DJ may have
+				// loaded a track on it or started it meanwhile. A track is never replaced.
+				const d = free()
+				if (!d) { root.scStemMark([gid], ""); return }
+				// Engine imports a file only through a deck load, so load it on an empty deck
+				// and eject it again once the Stems render is queued (scStemUnload).
+				scStemUnload.deck = d
+				scStemUnload.armed = true
+				Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(d)).translator.url = url
+				scStemImport.rows = [gid, reply.row ? String(reply.row) : ""]
+				root.scStemMark(scStemImport.rows, "wait")
+				scStemImport.url = url
+				scStemImport.path = reply.path
+				scStemImport.tries = 20
+				scStemImport.restart()
+			})
 		}
 		x.send()
 		return true
+	}
+	// An import has the two timers below to itself from its file load to the eject of its
+	// deck: the next one starts when both have stopped (or at once when neither runs).
+	function scStemTurn(job) {
+		scStemTurns = scStemTurns.concat([job])
+		scStemTurnNext()
+	}
+	function scStemTurnNext() {
+		while (scStemTurns.length && !scStemImport.running && !scStemUnload.running) {
+			const job = scStemTurns[0]
+			scStemTurns = scStemTurns.slice(1)
+			job()
+		}
 	}
 	// The import lands in the internal m.db, but while a streaming collection is open
 	// collectionController is that collection and cannot see it. So the gateway looks
 	// the id up by file name; the controller scan (ids 1-2000) is only the fallback.
 	Timer {
 		id: scStemImport
+		onRunningChanged: if (!running) Qt.callLater(root.scStemTurnNext)
 		property string url: ""
 		property string path: ""
 		property int tries: 0
@@ -5035,9 +5064,10 @@ SERVICES_MAIN = """
 	}
 	// Ejects the deck that scStemStream loaded only to get the file into the library,
 	// but only while it still holds that file and is not playing.
-	// shortcut: one pending import at a time; a second Stems tap re-arms the same deck.
+	// One pending import at a time (scStemTurn): the file, the deck and the name are one import's.
 	Timer {
 		id: scStemUnload
+		onRunningChanged: if (!running) Qt.callLater(root.scStemTurnNext)
 		property int deck: 0
 		property bool armed: false
 		property string name: ""
@@ -8330,7 +8360,7 @@ def edits(dev: bool):
                  "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
                  f"    readonly property list<string> actionLabels: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : scLabel(action.display.label)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
                 (f"    readonly property list<string> actionCommitMessages: {a}.map(action => action.display.commitMessage)\n",
-                 f"    readonly property list<string> actionCommitMessages: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? (scStemBusy ? root.scT(root.scDeckList().length > 2 ? \"All decks are playing. Free one deck, then tap Stems again\" : \"Both decks are playing. Free one deck, then tap Stems again\") : root.scT(\"Stems\")) : scLabel(action.display.commitMessage)).concat(scStem ? [scStemBusy ? root.scT(root.scDeckList().length > 2 ? \"All decks are playing. Free one deck, then tap Stems again\" : \"Both decks are playing. Free one deck, then tap Stems again\") : root.scT(\"Stems\")] : [])\n"),
+                 f"    readonly property list<string> actionCommitMessages: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? (scStemBusy ? root.scT(root.scStemFull ? \"Every deck has a track loaded. Eject one, then tap Stems again\" : root.scDeckList().length > 2 ? \"All decks are playing. Free one deck, then tap Stems again\" : \"Both decks are playing. Free one deck, then tap Stems again\") : root.scT(\"Stems\")) : scLabel(action.display.commitMessage)).concat(scStem ? [scStemBusy ? root.scT(root.scStemFull ? \"Every deck has a track loaded. Eject one, then tap Stems again\" : root.scDeckList().length > 2 ? \"All decks are playing. Free one deck, then tap Stems again\" : \"Both decks are playing. Free one deck, then tap Stems again\") : root.scT(\"Stems\")] : [])\n"),
                 (f"    readonly property list<color> actionColors: {a}.map(action => action.display.color)\n",
                  f"    readonly property list<color> actionColors: {a}.map(action => action.display.color).concat(scStem ? [Style.systemBlue01Color] : [])\n"),
                 (f"        {a}[actionIndex].trigger(row.index)\n",

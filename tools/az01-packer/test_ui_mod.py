@@ -12755,5 +12755,283 @@ class ShadowLayerDeckBindingTest(unittest.TestCase):
         self.assertEqual(layer.count("scShadowDeckFor("), 1)
 
 
+class StemImportDeckTest(unittest.TestCase):
+    """#316 BH-GF2-13: a streamed track's Stems import never replaces a track on a deck, and two quick taps do not share one set of timers.
+
+    scStemStream loads the downloaded file on a deck (Engine imports a file only through a deck load) and ejects it again.
+    It used to take the first deck that was not playing, so a track cued on a paused deck was loaded over; the
+    two timers that hold the import (scStemImport) and the eject (scStemUnload) have one set of properties, so a second
+    tap before the first import ended replaced them: the first track's rows stopped waiting and it was never rendered,
+    and a deck that already held the first temporary file was no longer ejected."""
+    SRC = None
+
+    @staticmethod
+    def block(text, start):
+        """text from the first `{` at or after start to its matching `}`."""
+        i = text.index("{", start)
+        depth = 0
+        for j in range(i, len(text)):
+            depth += (text[j] == "{") - (text[j] == "}")
+            if depth == 0:
+                return text[i:j + 1]
+        raise AssertionError("unclosed block")
+
+    @classmethod
+    def script(cls, scenario, decks="[1, 2]", locked="[]"):
+        main = bp.SERVICES_MAIN
+        fn = lambda name, sig: (re.search(r"function " + name + r"\(" + sig + r"\) \{[\s\S]*?\n\t\}", main) or [""])[0]
+        importer = main.split("id: scStemImport", 1)[1].split("id: scStemUnload", 1)[0]
+        unloader = main.split("id: scStemUnload", 1)[1].split("\tInstantiator {", 1)[0]
+        changed = lambda text: (re.search(r"onRunningChanged: (.*)", text) or [None, ""])[1]
+        render = "function render(id)" + cls.block(importer, importer.index("function render(id)"))
+        trigger = "function()" + cls.block(importer, importer.index("onTriggered:"))
+        unload = "function()" + cls.block(unloader, unloader.index("onTriggered:"))
+        return r"""
+const assert = require('assert');
+String.prototype.arg = function(v) { return this.replace(/%1/g, v); };
+const later = [];
+const Qt = {callLater: f => later.push(f)};
+const flush = () => { while (later.length) later.shift()(); };
+const DECKS = __DECKS__, LOCKED = __LOCKED__;
+const tree = {};
+const deck = d => tree[d] || (tree[d] = {playing: false, loaded: false, uri: ''});
+const loads = [], unloads = [], handed = [], xhrs = [];
+const Planck = {
+    librarianController: {collectionController: {getTrackUrisFromUniversalIds: ids => 'uri=streaming://TIDAL/Track/' + String(ids[0]).replace(/^u/, '')}},
+    getProperty(path) {
+        let m = /^\/Engine\/Deck(\d)\/PlayState$/.exec(path);
+        if (m) return {translator: {get state() { return deck(+m[1]).playing; }}};
+        if ((m = /^\/Engine\/Deck(\d)\/Track\/SongLoaded$/.exec(path))) return {translator: {get state() { return deck(+m[1]).loaded; }}};
+        if ((m = /^\/Engine\/Deck(\d)\/Track\/TrackUri$/.exec(path))) return {translator: {get string() { return deck(+m[1]).uri; }}};
+        if ((m = /^\/Engine\/Deck(\d)\/Track\/Unload$/.exec(path))) return {translator: {set state(v) { if (v) { unloads.push(+m[1]); deck(+m[1]).loaded = false; deck(+m[1]).uri = ''; } }}};
+        if ((m = /^\/Client\/Librarian\/AddToDatabaseAndLoadToDeck(\d)$/.exec(path))) return {translator: {set url(u) { loads.push([+m[1], u]); deck(+m[1]).loaded = true; deck(+m[1]).uri = u; }}};
+        throw new Error('unexpected property ' + path);
+    },
+};
+class XMLHttpRequest { open(m, u) { this.url = u; } send() { xhrs.push(this); } }
+const answer = (i, status, body) => { const x = xhrs[i]; x.readyState = 4; x.status = status; x.responseText = JSON.stringify(body); x.onreadystatechange(); };
+const rowsNow = {};
+let scStemTurns = [];
+const root = {
+    scDeckList: () => DECKS, scDeckLocked: d => LOCKED.indexOf(d) >= 0, scStemFull: false,
+    scStemMark(ids, mark) { for (const id of ids) { if (!id) continue; if (mark) rowsNow[id] = mark; else delete rowsNow[id]; } },
+    scStemHand(id, rows) { handed.push(String(id)); },
+    scStemTurns: [],
+};
+const scStemFailed = {restart() {}};
+function timer(onChanged, extra) {
+    const t = Object.assign({running: false, restart() { this.running = true; }, stop() { if (!this.running) return; this.running = false; if (onChanged) onChanged(false); }}, extra);
+    return t;
+}
+const changed = src => src ? (running => new Function('running', 'Qt', 'root', src)(running, Qt, root)) : null;
+const scStemUnload = timer(changed(__UNLOADCHANGED__), {deck: 0, armed: false, name: '', tries: 0});
+const scStemImport = timer(changed(__IMPORTCHANGED__), {url: '', path: '', tries: 0, trackIds: null, rows: []});
+const compile = (t, src, ...names) => new Function('timer', ...names, 'with (timer) { return (' + src + ') }')(t, ...names.map(n => eval(n)));
+const importRender = compile(scStemImport, __RENDER__, 'root', 'scStemUnload', 'Qt');
+const importTick = compile(scStemImport, __TRIGGER__, 'root', 'Planck', 'XMLHttpRequest');
+const unloadTick = compile(scStemUnload, __UNLOAD__, 'Planck');
+__MARK__
+__STREAM__
+__TURN__
+__TURNNEXT__
+root.scStemTurn = typeof scStemTurn === 'function' ? scStemTurn : undefined;
+root.scStemTurnNext = typeof scStemTurnNext === 'function' ? scStemTurnNext : undefined;
+const stream = uid => scStemStream(uid);
+const tap = uid => stream(uid);
+""".replace("__DECKS__", decks).replace("__LOCKED__", locked) \
+           .replace("__UNLOADCHANGED__", json.dumps(changed(unloader))).replace("__IMPORTCHANGED__", json.dumps(changed(importer))) \
+           .replace("__RENDER__", render).replace("__TRIGGER__", trigger).replace("__UNLOAD__", unload) \
+           .replace("__MARK__", fn("scStemMark", "ids, mark").replace("scStemRows", "rowsNow").replace("scStemFailAt", "failAt")) \
+           .replace("__STREAM__", fn("scStemStream", "uid")).replace("__TURN__", fn("scStemTurn", "job")).replace("__TURNNEXT__", fn("scStemTurnNext", "")) + scenario
+
+    def run_node(self, scenario, **kw):
+        res = subprocess.run(["node", "-e", self.script(scenario, **kw)], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr[-1500:])
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_an_empty_deck_is_used_before_a_deck_with_a_cued_track(self):
+        """Deck 2 holds a cued, paused track and deck 1 is empty: the import goes to deck 1 (it used to take deck 2, the first not playing)."""
+        self.run_node("""
+deck(2).loaded = true; deck(2).uri = 'file:///cued.mp3';
+assert.strictEqual(tap('u11'), true);
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+assert.deepStrictEqual(loads.map(l => l[0]), [1], 'loaded on the empty deck');
+assert.strictEqual(deck(2).uri, 'file:///cued.mp3', 'the cued track is still there');
+assert.strictEqual(root.scStemFull, false);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_no_empty_deck_means_the_tap_says_so_and_starts_nothing(self):
+        """Every deck that is not playing holds a track: busy answer, the swipe's own hint (scStemFull), nothing marked, requested or loaded."""
+        self.run_node("""
+deck(1).playing = true; deck(1).loaded = true;
+deck(2).loaded = true; deck(2).uri = 'file:///cued.mp3';
+assert.strictEqual(tap('u11'), 'busy');
+assert.strictEqual(root.scStemFull, true, 'a deck is free to play but none is empty');
+assert.deepStrictEqual([xhrs.length, loads.length, Object.keys(rowsNow).length], [0, 0, 0]);
+// Both playing: the old answer, with the old hint.
+deck(2).playing = true;
+assert.strictEqual(tap('u11'), 'busy');
+assert.strictEqual(root.scStemFull, false, 'every deck is playing: the "free one deck" hint');
+// A deck is ejected: the next tap goes ahead and the flag is gone.
+deck(2).playing = false; deck(2).loaded = false; deck(2).uri = '';
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(root.scStemFull, false);
+assert.strictEqual(xhrs.length, 1);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_deck_that_got_a_track_while_the_file_came_is_not_loaded_over(self):
+        """The file takes a while: a track loaded on the chosen deck meanwhile is the DJ's, so nothing is loaded and the row stops waiting."""
+        self.run_node("""
+deck(2).playing = true; deck(2).loaded = true;
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(rowsNow['11'], 'wait');
+deck(1).loaded = true; deck(1).uri = 'file:///dj.mp3';
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+assert.deepStrictEqual(loads, [], 'nothing loaded over the DJ\\'s track');
+assert.strictEqual(deck(1).uri, 'file:///dj.mp3');
+assert.strictEqual(rowsNow['11'], undefined, 'the row stops waiting');
+assert.strictEqual(scStemImport.running, false);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_two_quick_taps_are_imported_one_after_the_other(self):
+        """Both files arrive before the first import ended: the second waits for the first one's eject, then both are handed to Engine."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(tap('u22'), true);
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+answer(1, 200, {path: '/data/b.mp3', row: 200});
+flush();
+assert.strictEqual(loads.length, 1, 'only the first file is loaded: the timers are its');
+assert.deepStrictEqual([rowsNow['11'], rowsNow['100'], rowsNow['22']], ['wait', 'wait', 'wait'], 'the second row waits, the first keeps waiting');
+const first = loads[0][0];
+importRender('5');                      // Engine imported the first file
+assert.deepStrictEqual(handed, ['5']);
+flush();
+assert.strictEqual(loads.length, 1, 'the first file is still on its deck: the second goes on after the eject');
+unloadTick();                           // the eject
+assert.deepStrictEqual(unloads, [first]);
+flush();
+assert.strictEqual(loads.length, 2, 'the second file goes now');
+assert.ok(loads[1][1].endsWith('b.mp3'));
+assert.deepStrictEqual([rowsNow['22'], rowsNow['200']], ['wait', 'wait']);
+importRender('6');
+unloadTick();
+flush();
+assert.deepStrictEqual(handed, ['5', '6'], 'both tracks are rendered, in the order of the taps');
+assert.deepStrictEqual(unloads.length, 2, 'both temporary files are ejected');
+assert.deepStrictEqual([deck(1).loaded, deck(2).loaded], [false, false]);
+assert.deepStrictEqual(scStemTurns, []);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_three_taps_on_one_free_deck_all_get_their_turn(self):
+        """One empty deck, three tracks (a multi-selection): each goes through it in turn."""
+        self.run_node("""
+for (const id of ['u11', 'u22', 'u33']) assert.strictEqual(tap(id), true);
+for (let i = 0; i < 3; i++) answer(i, 200, {path: '/data/t' + i + '.mp3', row: 100 + i});
+flush();
+for (let i = 0; i < 3; i++) {
+    assert.strictEqual(loads.length, i + 1, 'the ' + (i + 1) + '. file waits for the eject of the one before');
+    importRender(String(50 + i));
+    flush();
+    unloadTick();
+    flush();
+}
+assert.deepStrictEqual(handed, ['50', '51', '52']);
+assert.strictEqual(unloads.length, 3);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_temporary_track_the_dj_started_stays_and_the_next_import_does_not_replace_it(self):
+        """The eject leaves a deck that is playing: the DJ's now. The next import finds no empty deck and its row stops waiting."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(tap('u22'), true);
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+answer(1, 200, {path: '/data/b.mp3', row: 200});
+importRender('5');
+deck(1).playing = true;                 // the DJ presses play on the imported file
+unloadTick();
+flush();
+assert.deepStrictEqual(unloads, [], 'a playing deck is not ejected');
+assert.strictEqual(loads.length, 1, 'and not loaded over');
+assert.strictEqual(rowsNow['22'], undefined, 'the second row stops waiting');
+assert.deepStrictEqual(scStemTurns, []);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_an_import_that_never_lands_does_not_block_the_next_one(self):
+        """Engine never imports the first file: its rows stop waiting after the tries and the queue goes on."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(tap('u22'), true);
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+answer(1, 200, {path: '/data/b.mp3', row: 200});
+assert.strictEqual(loads.length, 1);
+scStemImport.tries = 0;
+importTick();                           // the last try is used up
+assert.strictEqual(rowsNow['11'], undefined);
+flush();
+assert.strictEqual(scStemUnload.running, false);
+// The first file is still on its deck, as Engine never took it: the second finds no empty deck on a one-deck unit.
+assert.strictEqual(loads.length, 1);
+assert.strictEqual(rowsNow['22'], undefined);
+""", decks="[1]")
+
+    def test_the_hint_for_a_full_set_of_decks_is_in_every_language_and_on_the_swipe(self):
+        """The swipe's message names the situation: 'every deck has a track loaded' only when scStemFull, the old words otherwise."""
+        hint = "Every deck has a track loaded. Eject one, then tap Stems again"
+        rows = {l.split("\t")[0]: l.split("\t") for l in
+                (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
+        self.assertEqual(len(rows[hint]), 4)
+        for text in rows[hint]:
+            self.assertIn("Stems", text)
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        for side in ("Left", "Right"):
+            with self.subTest(side=side):
+                path = "Skins/Embedded/Views/BrowseView/Components/Components/Swipe" + side + "Item.qml"
+                msgs = next(re.search(r"readonly property list<string> actionCommitMessages: (.*)", new).group(1)
+                            for _, new in edits[path] if "actionCommitMessages:" in new)
+                script = """
+const assert = require('assert');
+const msgs = %s;
+function say(full, decks, busy) {
+    const scStemBusy = busy, scLabel = s => s, scStem = true, leftActions = [], rightActions = [];
+    const root = {scT: s => 'T:' + s, scDeckList: () => decks, scStemFull: full};
+    const actionLeft = [], actionRight = [];
+    return eval(msgs)[0];
+}
+assert.strictEqual(say(true, [1, 2], true), 'T:' + %s);
+assert.strictEqual(say(true, [1, 2, 3, 4], true), 'T:' + %s);
+assert.strictEqual(say(false, [1, 2], true), 'T:Both decks are playing. Free one deck, then tap Stems again');
+assert.strictEqual(say(false, [1, 2, 3, 4], true), 'T:All decks are playing. Free one deck, then tap Stems again');
+assert.strictEqual(say(true, [1, 2], false), 'T:Stems', 'no hint without a busy answer');
+""" % (json.dumps(msgs), json.dumps(hint), json.dumps(hint))
+                res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stderr[-1500:])
+
+    def test_the_neighbours_are_untouched(self):
+        """The hand-over to Engine (#271/#273/#305), the eject rules and the busy answer keep their text."""
+        src = bp.SERVICES_MAIN
+        for text in ('if (!deck) { console.warn("EngineX stems step=busy"); return "busy" }',
+                     'scStemImport.rows = [gid, reply.row ? String(reply.row) : ""]',
+                     'root.scStemMark(scStemImport.rows, "wait")',
+                     'if (tries-- <= 0) { root.scStemMark(rows, ""); stop(); return }',
+                     "root.scStemHand(id, rows)",
+                     "if (--tries <= 0 || !armed) { stop(); return }",
+                     'if (u.indexOf(name) < 0) return',
+                     'if (!Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state)',
+                     'Planck.getProperty("/Engine/Deck%1/Track/Unload".arg(deck)).translator.state = true'):
+            self.assertIn(text, src, text)
+
+
 if __name__ == "__main__":
     unittest.main()
