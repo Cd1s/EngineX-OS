@@ -655,6 +655,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 				res, quick = enginedb.Result{}, errors.Is(err, errQuickTooLong)
 			} else {
 				log.Printf("rb-bridge: re-export's playlists and %d new tracks in at the mount; grids and waveforms follow", res.Added)
+				cut("quick update committed")
 			}
 		}
 		if err := startUpdate(stage, stamp); err != nil {
@@ -759,6 +760,9 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	if late(err) {
 		return background(err)
 	}
+	if err == nil && reread != nil {
+		cut("in place committed")
+	}
 	if err == nil && !result.Bypassed {
 		// Only this build has written since the progress was read, and it leaves no overview
 		// without band maxima: the backfill goes on where it was, also with no time left now.
@@ -769,6 +773,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	}
 	if err == nil && result.Deferred > 0 {
 		writeMark(dir, pendingName, stamp)
+		cut("in place deferred")
 		log.Printf("rb-bridge: %d tracks imported without cues; the next mount reads them", result.Deferred)
 		if reread != nil {
 			// Left by a background update: it goes on, and its remount reads the rest.
@@ -778,7 +783,9 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		}
 	} else if err == nil && !result.Bypassed {
 		writeStamp(dir, stamp)
+		cut("in place stamped")
 		os.Remove(filepath.Join(dir, pendingName))
+		cut("in place pending removed")
 		os.Remove(filepath.Join(dir, rereadName))
 	}
 	return result, err

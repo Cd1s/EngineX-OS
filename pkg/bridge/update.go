@@ -34,6 +34,17 @@ const (
 
 func isUpdateStage(stage string) bool { return readMark(stage, kindName) == "update" }
 
+// cutPoint, when set, is called between two writes of an import, an update or a publish that a
+// power cut or the hook's kill can separate (#253 review): a test copies the volume there to see
+// what the next mount makes of it. Nil outside tests.
+var cutPoint func(name string)
+
+func cut(name string) {
+	if cutPoint != nil {
+		cutPoint(name)
+	}
+}
+
 // startUpdate marks the stage of an update of stamp's export; the job copies the library.
 func startUpdate(stage, stamp string) error {
 	if err := dropStage(stage); err != nil {
@@ -45,10 +56,15 @@ func startUpdate(stage, stamp string) error {
 	if err := writeMark(stage, kindName, "update"); err != nil {
 		return err
 	}
+	cut("update stage marked")
 	if err := writeMark(stage, pendingName, stamp); err != nil {
 		return err
 	}
-	return syncFile(stage)
+	if err := syncFile(stage); err != nil {
+		return err
+	}
+	cut("update stage pending")
+	return nil
 }
 
 // What a quick update costs on an SC5000, the slowest deck, on top of the export read: a track the
@@ -169,6 +185,7 @@ func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resol
 	if err != nil {
 		return res, err
 	}
+	cut("stage list committed")
 	if progress != nil {
 		progress(len(l.Tracks), len(l.Tracks))
 	}
@@ -312,6 +329,7 @@ func snapshotLive(ctx context.Context, dir, stage string) error {
 				return err
 			}
 		}
+		cut("snapshot copied")
 		counts, err := enginedb.CountTables(ctx, stage)
 		if err != nil {
 			return err
@@ -325,10 +343,12 @@ func snapshotLive(ctx context.Context, dir, stage string) error {
 		if err = writeMark(stage, baseTimesName, string(b)); err != nil {
 			return err
 		}
+		cut("snapshot times")
 		b, _ = json.Marshal(counts)
 		if err = writeMark(stage, baseCountsName, string(b)); err != nil {
 			return err
 		}
+		cut("snapshot counts")
 		if err = writeMark(stage, baseName, before); err != nil {
 			return err
 		}
@@ -389,6 +409,7 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 		if err != nil {
 			return res, err
 		}
+		cut("stage pass committed")
 		changed = changed || res.Added+res.Updated > 0 || res.PlaylistsChanged
 		if progress != nil {
 			progress(total-res.Deferred, total)
@@ -398,6 +419,7 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 				// Nothing to publish: the live library already is this export's.
 				log.Printf("rb-bridge: update of %s changed nothing", mount)
 				writeStamp(dir, stamp)
+				cut("unchanged update stamped")
 				os.Remove(filepath.Join(dir, pendingName))
 				return enginedb.Result{Bypassed: true}, dropStage(stage)
 			}
@@ -406,6 +428,7 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 		if err = writeMark(stage, resumeName, stamp); err != nil {
 			return res, err
 		}
+		cut("stage resume marked")
 		if left >= 0 && res.Deferred >= left {
 			if window *= 2; window > max(64*importWindow, 10*time.Minute) {
 				return res, fmt.Errorf("update stopped making progress with %d tracks left", res.Deferred)
@@ -473,6 +496,7 @@ func handToMounts(ctx context.Context, r *compat.Resolver, l *rekordbox.Library,
 	if work == 0 {
 		// Nothing to read: the live library already is this export's.
 		writeStamp(dir, stamp)
+		cut("handoff stamped")
 		os.Remove(filepath.Join(dir, pendingName))
 		os.Remove(filepath.Join(dir, rereadName))
 		return enginedb.Result{Bypassed: true}, true, dropStage(stage)
@@ -484,6 +508,7 @@ func handToMounts(ctx context.Context, r *compat.Resolver, l *rekordbox.Library,
 	if err = syncFile(dir); err != nil {
 		return enginedb.Result{}, true, err
 	}
+	cut("reread marked")
 	// Not bypassed: the job remounts the volume, and that mount reads them.
 	return enginedb.Result{Deferred: work}, true, dropStage(stage)
 }
@@ -509,10 +534,12 @@ func compactState(ctx context.Context, dir string) {
 	start, before := time.Now(), fileBytes(state)
 	tmp := state + ".compact"
 	if err = enginedb.CopyBridgeStateCompact(ctx, state, filepath.Join(dir, "m.db"), tmp); err == nil {
+		cut("state compacted aside")
 		for _, side := range []string{"-journal", "-wal", "-shm"} {
 			os.Remove(state + side)
 		}
 		if err = os.Rename(tmp, state); err == nil {
+			cut("state compacted")
 			err = syncFile(dir)
 		}
 	}
@@ -582,6 +609,7 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 			return enginedb.Result{}, err
 		}
 		log.Printf("rb-bridge: Engine's changes since the update started carried over in %s (%d tracks Engine wrote)", time.Since(start).Round(time.Millisecond), written)
+		cut("live changes merged")
 	}
 	stamp := readMark(stage, stampName)
 	quick := readMark(stage, quickName) == stamp
@@ -591,9 +619,11 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 	if quick {
 		// The list alone: the update that reads the files starts now (completeLater).
 		log.Printf("rb-bridge: the re-export's list published; its files are read next")
+		cut("list published")
 		if err := keepPending(dir); err != nil {
 			return enginedb.Result{}, err
 		}
+		cut("list pending")
 		if err := startUpdate(stage, stamp); err != nil {
 			return enginedb.Result{}, err
 		}

@@ -112,3 +112,10 @@ func SetMountWindowForTest(d time.Duration) func() {
 func QuickCostForTest(known, fresh, entries int) (cost, mount time.Duration) {
 	return quickCost(known, fresh, entries), maxMountHookBudget
 }
+
+// SetCutForTest calls f at each point between two writes an interruption can separate (#253).
+func SetCutForTest(f func(name string)) func() {
+	old := cutPoint
+	cutPoint = f
+	return func() { cutPoint = old }
+}

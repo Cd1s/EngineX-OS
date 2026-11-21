@@ -319,6 +319,7 @@ func completeStage(stage, stamp string) error {
 	if err := writeMark(stage, stampName, stamp); err != nil {
 		return err
 	}
+	cut("stage stamped")
 	return os.Remove(filepath.Join(stage, pendingName))
 }
 
@@ -361,12 +362,15 @@ func renameStage(dir, stage string) error {
 	if err := syncFile(stage); err != nil {
 		return err
 	}
+	cut("publish ready")
 	if err := os.Rename(stage, filepath.Join(dir, publishDir)); err != nil {
 		return err
 	}
+	cut("publish moved")
 	if err := os.Remove(filepath.Join(dir, pendingName)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	cut("publish pending removed")
 	return finishPublish(dir, stateName, stampName, "m.db")
 }
 
