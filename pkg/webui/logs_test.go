@@ -99,6 +99,17 @@ func TestRedactLog(t *testing.T) {
 		{"encoded URL password", "fetch https://user:HUNTER%20TWO@cdn.example/f"},
 		{"multiline", "HTTP response\nAuthorization: Basic AUTH_VALUE\n CONTINUATION_VALUE"},
 		{"escaped json", `payload="{\"refresh_token\":\"ESCAPED_VALUE\"}"`},
+		{"prefixed secret_key", "secret_key=abc123"},
+		{"client_secret_post", "client_secret_post=abc123"},
+		{"plural tokens", "tokens=abc123"},
+		{"token_value", "token_value=abc123"},
+		{"access_token_v2", "access_token_v2=abc123"},
+		{"refresh_tokens list", "refresh_tokens: [abc123]"},
+		{"passwordHash", "passwordHash=abc123"},
+		{"user_arl", "user_arl=abc123"},
+		{"arl_value", "arl_value=abc123"},
+		{"dz_arl", "dz_arl=abc123"},
+		{"secretKey", "secretKey=abc123"},
 		{"console code", "url /login CONSOLE_VALUE"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

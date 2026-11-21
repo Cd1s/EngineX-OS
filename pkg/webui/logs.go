@@ -60,7 +60,7 @@ var (
 	// Drop the whole journal message, including multiline/escaped payloads, when
 	// it carries a credential key-value/header or Bearer token. Non-secret prose
 	// ("early", "token refresh failed", "session expired") is preserved.
-	sensitiveLog = regexp.MustCompile(`(?i)(?:(?:[a-z0-9_-]*(?:token|password|passwd|passphrase|pwd|cookie|authorization|credential|signature|jwt|secret|api[ _-]?key|access[ _-]?code|psk|email)|\b(?:deezer[_-]?)?arl|\b(?:music_u|session|sid))\b\\?["']?\s*[:=]\s*\S|\bbearer\s+\S+)`)
+	sensitiveLog = regexp.MustCompile(`(?i)(?:(?:[a-z0-9_-]*(?:token|password|passwd|passphrase|pwd|cookie|authorization|credential|signature|jwt|secret|api[ _-]?key|access[ _-]?code|psk|email)[a-z0-9_-]*|\b(?:[a-z0-9]+[_-])*(?:deezer)?arl(?:[_-][a-z0-9]+)*|\b(?:[a-z0-9]+[_-])*(?:music_u|session|sid)(?:[_-]?id)?)\b\\?["']?\s*[:=]\s*\S|\bbearer\s+\S+)`)
 	emailLog     = regexp.MustCompile(`(?i)\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b`)
 	encodedLog   = regexp.MustCompile(`%[0-9a-fA-F]{2}`)
 	logQuery     = regexp.MustCompile(`([?&][a-zA-Z0-9_.%~-]+=)[^&\s<>"']*`)
