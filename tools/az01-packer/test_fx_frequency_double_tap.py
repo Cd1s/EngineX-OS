@@ -5,6 +5,8 @@ import shutil
 import subprocess
 import unittest
 
+import legacy_names as legacy
+
 SOURCE = Path(__file__).parents[1] / "ui-mod" / "build_packs.py"
 spec = importlib.util.spec_from_file_location("build_packs", SOURCE)
 bp = importlib.util.module_from_spec(spec)
@@ -24,7 +26,7 @@ class FxFrequencyDoubleTapTest(unittest.TestCase):
         self.assertIn('function triggerValueAnimation()', text)
 
     def test_patch_applies_cleanly_to_stock_qml(self):
-        lab = Path("/root/build/sc5000-lab/5.3.0/qrc")
+        lab = Path(legacy.LAB) / "5.3.0" / "qrc"
         if not lab.is_dir():
             self.skipTest("Firmware lab 5.3.0/qrc not available")
 
