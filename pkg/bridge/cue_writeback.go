@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -498,7 +499,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	finished := false
 	defer func() {
 		if finished {
-			_ = os.Remove(filepath.Join(engineDBDir, writeBackMarkName))
+			_ = removeFile(filepath.Join(engineDBDir, writeBackMarkName))
 		}
 	}()
 
@@ -517,7 +518,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	var staged []stagedWrite
 	defer func() {
 		for _, item := range staged {
-			_ = os.Remove(item.tmp)
+			_ = removeFile(item.tmp)
 		}
 	}()
 	stageBytes := func(dst string, data []byte) error {
@@ -611,7 +612,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 			tm.edit += upd.Edit
 			tm.encrypt = upd.Encrypt
 			if err != nil {
-				_ = os.Remove(tmpPath)
+				_ = removeFile(tmpPath)
 				return res, err
 			}
 			if st, err := os.Stat(tmpPath); err == nil {
@@ -638,7 +639,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 			tmpPath := tmpOut.Name()
 			_ = tmpOut.Close()
 			if err := updatePDBMetadata(ctx, pdbFull, pdbMetadata, tmpPath); err != nil {
-				_ = os.Remove(tmpPath)
+				_ = removeFile(tmpPath)
 				return res, err
 			}
 			if st, err := os.Stat(tmpPath); err == nil {
@@ -660,12 +661,12 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		}
 	}
 	exportWritten := false
+	// Every staged file, the ANLZ files, the export and export.pdb, replaces its original the one
+	// way a pull at any moment leaves whole on FAT (replaceFile, #321).
 	for _, item := range staged {
-		if err := os.Rename(item.tmp, item.dst); err != nil {
+		if err := replaceFile(item.tmp, item.dst); err != nil {
 			return res, err
 		}
-		_ = syncDir(filepath.Dir(item.dst))
-		writeBackCut("renamed " + item.dst)
 		res.FilesUpdated++
 		if item.dst == oneLibFull {
 			res.OneLibraryUpdated = true
@@ -729,13 +730,16 @@ func CleanWriteBackLeftovers(mount string) int {
 	n := 0
 	matches, _ := filepath.Glob(filepath.Join(dir, ".enginex-*.tmp")) // the mark's own temp
 	for _, m := range matches {
-		if os.Remove(m) == nil {
+		if removeFile(m) == nil {
 			n++
 		}
 	}
 	mark := filepath.Join(dir, writeBackMarkName)
 	b, err := os.ReadFile(mark)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			_ = moveAside(mark) // unreadable: the next pass writes a new one
+		}
 		return n
 	}
 	for _, rel := range strings.Split(string(b), "\n") {
@@ -746,14 +750,28 @@ func CleanWriteBackLeftovers(mount string) int {
 		for _, pat := range []string{".enginex-*.tmp", ".bak-*.tmp"} {
 			matches, _ := filepath.Glob(filepath.Join(mount, rel, pat))
 			for _, m := range matches {
-				if st, err := os.Lstat(m); err == nil && st.Mode().IsRegular() && os.Remove(m) == nil {
+				if st, err := os.Lstat(m); err == nil && st.Mode().IsRegular() && removeFile(m) == nil {
 					n++
 				}
 			}
 		}
 	}
-	_ = os.Remove(mark)
+	if removeFile(mark) == errUnownedClusters {
+		_ = moveAside(mark)
+	}
 	return n
+}
+
+// moveAside renames path out of the way, in its directory, without freeing its clusters: a
+// file the FAT does not give its clusters, or one that cannot be read (#321). A rename moves
+// only the entry.
+func moveAside(path string) error {
+	aside := filepath.Join(filepath.Dir(path), "."+strings.TrimPrefix(filepath.Base(path), ".")+".enginex-unowned-"+strconv.FormatInt(time.Now().UnixNano(), 10))
+	if err := os.Rename(path, aside); err != nil {
+		return err
+	}
+	log.Printf("rb-bridge: %s does not own its clusters in the FAT or cannot be read; kept aside as %s", path, filepath.Base(aside))
+	return nil
 }
 
 // recordSynced notes in the state what the stick holds of rows (BridgeSynced, #321) and drops
@@ -1234,7 +1252,7 @@ func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) 
 	defer func() {
 		_ = tmp.Close()
 		if !ok {
-			_ = os.Remove(tmpPath)
+			_ = removeFile(tmpPath)
 		}
 	}()
 	n, err := io.Copy(tmp, in)
@@ -1248,10 +1266,9 @@ func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) 
 		return 0, err
 	}
 	writeBackCut("backup temp " + dst)
-	if err := os.Rename(tmpPath, dst); err != nil {
+	if err := replaceFile(tmpPath, dst); err != nil {
 		return 0, err
 	}
-	_ = syncDir(filepath.Dir(dst))
 	writeBackCut("backup " + dst)
 	ok = true
 	return n, nil
@@ -1268,7 +1285,7 @@ func stageWriteFile(dst string, data []byte) (string, error) {
 	defer func() {
 		_ = tmp.Close()
 		if !ok {
-			_ = os.Remove(tmpPath)
+			_ = removeFile(tmpPath)
 		}
 	}()
 	if _, err := tmp.Write(data); err != nil {
@@ -1295,7 +1312,7 @@ func atomicWriteFile(dst string, data []byte, beforeRename func(string) error) e
 	defer func() {
 		_ = tmp.Close()
 		if !ok {
-			_ = os.Remove(tmpPath)
+			_ = removeFile(tmpPath)
 		}
 	}()
 	if _, err := tmp.Write(data); err != nil {
@@ -1313,13 +1330,66 @@ func atomicWriteFile(dst string, data []byte, beforeRename func(string) error) e
 			return err
 		}
 	}
-	if err := os.Rename(tmpPath, dst); err != nil {
+	if err := replaceFile(tmpPath, dst); err != nil {
 		return err
 	}
-	_ = syncDir(dir)
-	writeBackCut("renamed " + dst)
 	ok = true
 	return nil
+}
+
+// replaceFile renames tmp, written and synced, over dst so that a pull at any moment leaves dst
+// whole, old or new (#321, #253 review 3). On FAT a rename frees the replaced file's clusters at
+// once, but the entry that names the new ones reaches the stick only with the renamed inode's
+// writeback (the unmount, or about 30 s later): a pull in between left dst naming freed clusters,
+// and reading it gave EIO (measured by replaying every write of a pass on a FAT32 volume). The
+// replaced file is held open until the directory (the temporary entry gone, dst still naming the
+// old clusters) and then dst itself (naming the new ones) are on the stick, so its clusters are
+// freed only after that.
+func replaceFile(tmp, dst string) error {
+	if unsafeToFree(dst) {
+		if err := moveAside(dst); err != nil { // never freed
+			return err
+		}
+	}
+	held, _ := os.Open(dst)
+	defer func() {
+		if held != nil {
+			_ = held.Close()
+		}
+	}()
+	if err := os.Rename(tmp, dst); err != nil {
+		return err
+	}
+	writeBackCut("replacing " + dst)
+	_ = syncDir(filepath.Dir(dst))
+	_ = syncFile(dst)
+	writeBackCut("renamed " + dst)
+	return nil
+}
+
+// errUnownedClusters: a file whose clusters the FAT does not give it is not removed (unsafeToFree).
+var errUnownedClusters = errors.New("bridge: the file's clusters are not its own in the FAT")
+
+// removeFile removes path so that a pull at any moment leaves either the file or no entry for
+// it (#321). On FAT an unlink frees the clusters and drops the directory entry in two writes, and
+// a sync writes the FAT first: a pull in between left an entry naming free clusters, which reads
+// EIO, and whose next removal or replacement is a file-system error (vfat then remounts the stick
+// read-only by default). Held open, the file keeps its clusters until the directory is synced.
+// A file that already names clusters it does not own is left (errUnownedClusters).
+func removeFile(path string) error {
+	if unsafeToFree(path) {
+		return errUnownedClusters
+	}
+	held, _ := os.Open(path)
+	err := os.Remove(path)
+	if err == nil {
+		_ = syncDir(filepath.Dir(path))
+		writeBackCut("removed " + path)
+	}
+	if held != nil {
+		_ = held.Close()
+	}
+	return err
 }
 
 func syncDir(dir string) error {
