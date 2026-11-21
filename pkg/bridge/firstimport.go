@@ -162,7 +162,7 @@ func firstImportAtMount(ctx context.Context, mount, dir, stamp string, opts *eng
 	if err == nil {
 		mergeByPath(l)
 		o := *opts
-		o.DatabaseDir, o.StagedOnly, o.FastCues = stage, stagedOnly, true
+		o.DatabaseDir, o.StagedOnly, o.FastCues, o.MatchByPath = stage, stagedOnly, true, true
 		if o.Deadline.IsZero() { // reading the export does not spend the file-reading budget
 			o.Deadline = time.Now().Add(min(mountReadBudget, max(time.Until(limit), time.Second)))
 		}
@@ -254,7 +254,7 @@ func buildFast(ctx context.Context, stage string, r *compat.Resolver, l *rekordb
 		return enginedb.Result{}, err
 	}
 	mergeByPath(l)
-	res, err := enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, Bulk: true, DatabaseDir: build, StagedOnly: stagedOnly})
+	res, err := enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, Bulk: true, DatabaseDir: build, StagedOnly: stagedOnly, MatchByPath: true})
 	if err != nil {
 		return res, err
 	}
@@ -469,7 +469,7 @@ func ImportInBackground(ctx context.Context, mount string, progress func(done, t
 		progress(0, total)
 	}
 	for {
-		o := enginedb.Options{DatabaseDir: stage, Resume: true, StagedOnly: stagedOnly, Deadline: time.Now().Add(window)}
+		o := enginedb.Options{DatabaseDir: stage, Resume: true, StagedOnly: stagedOnly, MatchByPath: true, Deadline: time.Now().Add(window)}
 		res, err := enginedb.SyncResolved(ctx, r, l, o)
 		if err != nil {
 			return res, err

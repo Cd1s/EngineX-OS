@@ -54,7 +54,10 @@ var bridgeTables = []string{"BridgeState", "BridgeAnalysis", "BridgePlaylist", "
 type Options struct {
 	// StagedOnly updates remote CDJ sources while retaining previously imported
 	// local sources whose export is absent. Bridge determines this mode.
-	StagedOnly   bool `json:"-"`
+	StagedOnly bool `json:"-"`
+	// MatchByPath lets rb-bridge retain an Engine row when a merged export
+	// changes the source library's numeric ID for the same folded file path.
+	MatchByPath  bool `json:"-"`
 	SmartMatch   bool
 	CurrentTrack uint32
 	// Fast imports only what the export itself holds, opening no audio, analysis
@@ -568,7 +571,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	}
 	mapping := map[uint32]int64{}
 	effectiveTracks := append([]rekordbox.Track(nil), l.Tracks...)
-	owned, err := stageOwnedMoves(ctx, tx, prepared, opts.StagedOnly)
+	owned, err := stageOwnedMovesWithPath(ctx, tx, prepared, opts.StagedOnly, opts.MatchByPath)
 	if err != nil {
 		return result, err
 	}

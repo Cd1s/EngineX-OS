@@ -14,6 +14,8 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 	"github.com/google/uuid"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 type preparedTrack struct {
@@ -211,12 +213,16 @@ func prepareFast(ctx context.Context, res *compat.Resolver, l *rekordbox.Library
 // can retain their Engine IDs without violating Track's immediate UNIQUE(path).
 // Both temporary paths and the final rename are in the import transaction.
 func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, stagedOnly bool) (map[uint32]int64, error) {
+	return stageOwnedMovesWithPath(ctx, tx, prepared, stagedOnly, false)
+}
+
+func stageOwnedMovesWithPath(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, stagedOnly, matchByPath bool) (map[uint32]int64, error) {
 	targets := map[uint32]*preparedTrack{}
 	byPath := map[string]*preparedTrack{}
 	for i := range prepared {
 		p := &prepared[i]
 		targets[p.track.ID] = p
-		byPath["../"+p.rel] = p
+		byPath[bridgePathKey("../"+p.rel)] = p
 	}
 	// Legacy rows can share one import-wide pdbImportKey value. Our saved
 	// source record retains the per-track ID, including across moves/swaps.
@@ -282,13 +288,32 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	}
 	for _, t := range tracks {
 		id, source, oldPath, fp := t.id, t.source, t.oldPath, t.fp
-		if stagedOnly && source < 1<<24 && targets[source] == nil && byPath[oldPath] == nil {
+		pathMatch := byPath[bridgePathKey(oldPath)]
+		if !matchByPath {
+			pathMatch = nil
+		}
+		if sourceTarget := targets[source]; sourceTarget != nil && "../"+sourceTarget.rel != oldPath {
+			// A source ID with a different target path is an intentional move or
+			// swap. Preserve that identity before considering a path match.
+			pathMatch = nil
+		}
+		if stagedOnly && source < 1<<24 && targets[source] == nil && pathMatch == nil {
 			continue // a remote-only import must not identify or remove absent local sources
+		}
+		if pathMatch != nil {
+			var rating sql.NullInt64
+			if err := tx.QueryRowContext(ctx, `SELECT rating FROM Track WHERE id=?`, id).Scan(&rating); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return nil, err
+			}
+			if rating.Valid {
+				pathMatch.track.Rating = int(rating.Int64)
+			}
+			source = pathMatch.track.ID
 		}
 		// Fast/capped or damaged state may have no saved source ID. A unique
 		// owned path still identifies a row whose shared import key does not.
-		if !t.recorded.Valid && (counts[source] > 1 || targets[source] == nil) {
-			if p := byPath[oldPath]; p != nil {
+		if pathMatch == nil && !t.recorded.Valid && (counts[source] > 1 || targets[source] == nil) {
+			if p := byPath[bridgePathKey(oldPath)]; p != nil {
 				source = p.track.ID
 			} else if counts[source] > 1 {
 				return nil, fmt.Errorf("cannot identify bridge track %d with shared source ID %d", id, source)
@@ -351,4 +376,9 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 		}
 	}
 	return owned, nil
+}
+
+func bridgePathKey(p string) string {
+	p = strings.ReplaceAll(p, "\\", "/")
+	return norm.NFC.String(cases.Fold().String(norm.NFC.String(path.Clean(p))))
 }

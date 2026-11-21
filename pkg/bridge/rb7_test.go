@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -211,7 +212,7 @@ func TestExportTieKeepsPDBImport(t *testing.T) {
 				}
 			}
 			res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
-			if err != nil || (mark == "stamp" && !res.Bypassed) {
+			if err != nil || res.Bypassed {
 				t.Fatalf("upgrade mount: %+v %v", res, err)
 			}
 			if got := scalar[string](t, engine, `SELECT path FROM Track WHERE id=? AND pdbImportKey=1`, trackID); got == "" {
@@ -223,7 +224,8 @@ func TestExportTieKeepsPDBImport(t *testing.T) {
 			if n := scalar[int](t, engine, `SELECT count(*) FROM PlaylistEntity WHERE listId=? AND trackId=?`, listID, trackID); n != 1 {
 				t.Fatal("native playlist entry lost")
 			}
-			if got, err := os.ReadFile(stampPath); err != nil || string(got) != oldStamp {
+			wantStamp := strings.TrimSpace(oldStamp) + " union\n"
+			if got, err := os.ReadFile(stampPath); err != nil || string(got) != wantStamp {
 				t.Fatalf("PDB-first stamp changed: %q %v", got, err)
 			}
 			lib, err := bridge.ReadLibrary(ctx, root)

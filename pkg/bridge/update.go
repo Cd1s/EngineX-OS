@@ -110,7 +110,7 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	if left := time.Until(limit); cost > left {
 		return enginedb.Result{}, fmt.Errorf("%w: %d tracks (%d new) and %d playlist entries need about %s, %s left", errQuickTooLong, len(l.Tracks), fresh, entries, cost.Round(time.Second), left.Round(time.Second))
 	}
-	res, err := enginedb.SyncResolved(inner, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly})
+	res, err := enginedb.SyncResolved(inner, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly, MatchByPath: true})
 	if err != nil {
 		return res, quickLate(ctx, err)
 	}
@@ -181,7 +181,7 @@ func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resol
 	if _, err := quickPaths(stage, l); err != nil {
 		return enginedb.Result{}, err
 	}
-	res, err := enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly, DatabaseDir: stage})
+	res, err := enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly, MatchByPath: true, DatabaseDir: stage})
 	if err != nil {
 		return res, err
 	}
@@ -383,6 +383,9 @@ func vacuumInto(ctx context.Context, src, dst string) error {
 func updateInBackground(ctx context.Context, mount, stage, stamp string, r *compat.Resolver, progress func(done, total int)) (enginedb.Result, error) {
 	dir := filepath.Dir(stage)
 	l, stagedOnly, err := readLibrary(ctx, mount)
+	if errors.Is(err, errUnreadableExport) {
+		return enginedb.Result{Bypassed: true}, nil
+	}
 	if err != nil {
 		return enginedb.Result{}, err
 	}

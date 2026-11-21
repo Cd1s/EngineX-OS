@@ -279,7 +279,7 @@ func readStickRekordboxLibrary(ctx context.Context, mountPath string) (*rekordbo
 	if err != nil {
 		return nil, false, err
 	}
-	lib, readable, err := readExportWithResolver(ctx, mountPath, r)
+	lib, readable, _, err := readExportWithResolver(ctx, mountPath, r)
 	if err != nil {
 		if errors.Is(err, errNoLocalExport) {
 			return nil, false, fmt.Errorf("writeback: no rekordbox export found on %s", mountPath)

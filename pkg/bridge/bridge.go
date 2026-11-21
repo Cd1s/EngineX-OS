@@ -29,6 +29,7 @@ import (
 const unix_ST_RDONLY = 0x1
 
 var errNoLocalExport = fmt.Errorf("no local Rekordbox export: %w", os.ErrNotExist)
+var errUnreadableExport = errors.New("rekordbox export is unreadable; existing library kept")
 
 // ReadLibrary reads the drive's own export plus the libraries staged from
 // Pioneer players on the LAN (#59).
@@ -37,7 +38,11 @@ func ReadLibrary(ctx context.Context, mount string) (*rekordbox.Library, error) 
 	return l, err
 }
 func readLibrary(ctx context.Context, mount string) (*rekordbox.Library, bool, error) {
-	l, err := readExport(ctx, mount)
+	r, err := compat.NewResolver(mount)
+	if err != nil {
+		return nil, false, err
+	}
+	l, _, partial, err := readExportWithResolver(ctx, mount, r)
 	stagedOnly := errors.Is(err, errNoLocalExport)
 	if stagedOnly {
 		l = &rekordbox.Library{}
@@ -45,6 +50,9 @@ func readLibrary(ctx context.Context, mount string) (*rekordbox.Library, bool, e
 	}
 	if err != nil {
 		return nil, false, err
+	}
+	if partial && hasLibrary(filepath.Join(mount, "Engine Library", "Database2")) {
+		return nil, false, errUnreadableExport
 	}
 	if l != nil {
 		mergeStaged(mount, l)
@@ -168,23 +176,23 @@ var exportReads atomic.Int64
 var afterExportRead = func() {}
 
 func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
-	exportReads.Add(1)
 	r, e := compat.NewResolver(mount)
 	if e != nil {
 		return nil, e
 	}
-	l, _, e := readExportWithResolver(ctx, mount, r)
+	l, _, _, e := readExportWithResolver(ctx, mount, r)
 	return l, e
 }
 
-func readExportWithResolver(ctx context.Context, mount string, r *compat.Resolver) (*rekordbox.Library, []readableExport, error) {
+func readExportWithResolver(ctx context.Context, mount string, r *compat.Resolver) (*rekordbox.Library, []readableExport, bool, error) {
+	exportReads.Add(1)
 	defer afterExportRead()
 	candidates, e := exportCandidates(r, mount)
 	if e != nil {
-		return nil, nil, e
+		return nil, nil, false, e
 	}
 	if len(candidates) == 0 {
-		return nil, nil, errNoLocalExport
+		return nil, nil, false, errNoLocalExport
 	}
 	var errs []error
 	readable := make([]readableExport, 0, len(candidates))
@@ -201,13 +209,13 @@ func readExportWithResolver(ctx context.Context, mount string, r *compat.Resolve
 			continue
 		}
 		if err := ctx.Err(); err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", c.rel, err))
 		log.Printf("rb-bridge: %s unreadable (%v)", c.rel, err)
 	}
 	if len(readable) == 0 {
-		return nil, nil, errors.Join(errs...)
+		return nil, nil, false, errors.Join(errs...)
 	}
 	merged := mergeReadableExports(readable)
 	parts := make([]string, 0, len(readable))
@@ -215,7 +223,7 @@ func readExportWithResolver(ctx context.Context, mount string, r *compat.Resolve
 		parts = append(parts, fmt.Sprintf("%s tracks=%d playlists=%d", read.candidate.rel, len(read.library.Tracks), len(read.library.Playlists)))
 	}
 	log.Printf("rb-bridge: libraries read: %s", strings.Join(parts, ", "))
-	return merged, readable, nil
+	return merged, readable, len(readable) < len(candidates), nil
 }
 
 func mergeReadableExports(readable []readableExport) *rekordbox.Library {
@@ -459,11 +467,15 @@ func convert(ctx context.Context, mount string, opts *enginedb.Options, pre *pre
 		if errors.Is(e, os.ErrNotExist) {
 			return enginedb.Result{Bypassed: true}, nil
 		}
+		if errors.Is(e, errUnreadableExport) {
+			return enginedb.Result{Bypassed: true}, nil
+		}
 		if e != nil {
 			return enginedb.Result{}, e
 		}
 	}
 	opts.StagedOnly = stagedOnly
+	opts.MatchByPath = true
 	if pre != nil && pre.reconciled {
 		mergeByPath(l)
 	} else if e := ReconcileContext(ctx, r, l); e != nil {
@@ -644,7 +656,11 @@ func exportStamp(r *compat.Resolver, mount string) (string, error) {
 	for i, c := range candidates {
 		parts[i] = fmt.Sprintf("%s %d %d", c.rel, c.size, c.mtime.UnixNano())
 	}
-	return stampVersion + " " + strings.Join(parts, " | ") + stagedStamp(mount), nil
+	stamp := stampVersion + " " + strings.Join(parts, " | ") + stagedStamp(mount)
+	if len(candidates) > 1 {
+		stamp += " union"
+	}
+	return stamp, nil
 }
 
 const (
@@ -757,6 +773,7 @@ func applyPendingAtMount(ctx context.Context, mount string) {
 
 func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, full bool) (enginedb.Result, error) {
 	mountStart := time.Now()
+	opts.MatchByPath = true
 	// The file-reading budget starts once the library is read: decrypting a
 	// OneLibrary must not use up the time meant for cues and waveforms.
 	var budget time.Duration
@@ -827,6 +844,9 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		if readMark(dir, pendingName) != stamp {
 			var err error
 			if res, err = quickUpdate(ctx, mount, dir, r, mountStart.Add(maxMountHookBudget)); err != nil {
+				if errors.Is(err, errUnreadableExport) {
+					return enginedb.Result{Bypassed: true}, nil
+				}
 				log.Printf("rb-bridge: the re-export's playlists wait for the background job: %v", err)
 				res, quick = enginedb.Result{}, errors.Is(err, errQuickTooLong)
 			} else {
@@ -928,6 +948,9 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	}
 	if late(readErr) {
 		return background(readErr)
+	}
+	if errors.Is(readErr, errUnreadableExport) {
+		return enginedb.Result{Bypassed: true}, nil
 	}
 	if readErr != nil {
 		if opts.SmartMatch && errors.Is(readErr, os.ErrNotExist) {
