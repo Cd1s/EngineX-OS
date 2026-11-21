@@ -5,8 +5,8 @@ ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 PRODUCT=${FX_PRODUCT:-JC11}
-# Gen-2 (JP21 JP20 JC11S NH08S NH10, Engine 5.3.0-sclive4): FX_DRIVER runs only; the driver stubs the SoC check.
-case "$PRODUCT" in JP07|JC11|JC16|JP11|NH08|JP21|JP20|JC11S|NH08S|NH10) ;; *) exit 2 ;; esac
+# Gen-2 (JP21 JP20 JC11S JP11S NH08S NH10, Engine 5.3.0-sclive4): FX_DRIVER runs only; the driver stubs the SoC check.
+case "$PRODUCT" in JP07|JC11|JC16|JP11|NH08|JP21|JP20|JC11S|JP11S|NH08S|NH10) ;; *) exit 2 ;; esac
 # FX_DRIVER=<file.c> FX_DRIVER_TAG=<log tag>: run that offline driver alone, without the selector's QML probe.
 DRIVER=${FX_DRIVER:-$REPO/tools/az01-packer/test_fx_selector_native.c}
 W=${FX_SANDBOX_DIR:-/var/tmp/fx-selector-native-$PRODUCT${FX_DRIVER:+-$(basename "$FX_DRIVER" .c)}}
@@ -23,11 +23,12 @@ if [ "${1:-}" != --inner ]; then
         case "$PRODUCT" in
             JC11) m=fw-5.3.0/PRIME4 ;; JC16) m=fw-5.3.0/PRIME2 ;; JP11) m=fw-5.3.0/PRIMEGO ;; NH08) m=fw-5.3.0/MIXSTREAMPRO ;;
             JP21) m=fw-5.3.0/SCLIVE4 ;; JP20) m=fw-5.3.0/SCLIVE2 ;; JC11S) m=fw-5.3.0-gen2/PRIME4PLUS ;;
+            JP11S) if [ -e "${ENGINEX_LAB}/fw-5.3.0-gen2/PRIMEGOPLUS-5.3.0-Update.img" ]; then m=fw-5.3.0-gen2/PRIMEGOPLUS; else m=fw-5.3.0/SCLIVE4; fi ;;
             NH08S) m=fw-5.3.0-gen2/MIXSTREAMPROPLUS ;; NH10) m=fw-5.3.0-gen2/MIXSTREAMPROGO ;; *) m=fw-5.3.0/SC5000 ;;
         esac
         image=${ENGINEX_LAB}/$m-5.3.0-Update.img
         case "$PRODUCT" in
-        JP21|JP20|JC11S|NH08S|NH10) # signed AZ0x container: take its rootfs record, as sclive-aux-sandbox.sh does
+        JP21|JP20|JC11S|JP11S|NH08S|NH10) # signed AZ0x container: take its rootfs record, as sclive-aux-sandbox.sh does
             mkdir -p "$W/image"
             python3 - "$REPO" "$image" "$W/image/rootfs.ext2" <<'PY'
 import gzip, importlib.util, lzma, sys
