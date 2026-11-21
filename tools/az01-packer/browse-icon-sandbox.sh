@@ -126,11 +126,13 @@ cp -a "$W/packs/en" "$R/data/enginex/ui/packs/"
 mkdir -p "$R/data/enginex/ui/packs/en/Skins/Common/Items"
 sed "s/@BOARD@/$board/; s/@TAG@/$expect/; s/@EXPECT@/$expect/" "$REPO/tools/az01-packer/browse-icon-probe.qml" > "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
 printf 'lang=en\n' > "$R/data/enginex/ui/settings.conf"
-chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/$board-dbus.log" 2>&1 || true
+# The host's loader is bound over the rootfs's: its libc goes first, or a rootfs with an older glibc (AZ04) cannot start even env.
+host_libs=LD_LIBRARY_PATH=/usr/lib/$triplet
+env "$host_libs" chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/$board-dbus.log" 2>&1 || true
 # The QML engine that evaluates the probe is the one in this rootfs.
 echo "$board Qt library: $(ls "$R/usr/qt/lib" "$R/usr/lib" 2>/dev/null | grep -m1 -E '^libQt6Core\.so\.[0-9]+\.[0-9]+\.[0-9]+$')"
 engine_rc=0
-timeout --kill-after=5s "${BROWSE_ICON_TIMEOUT:-180}s" chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home LD_LIBRARY_PATH=/usr/lib/$triplet:/usr/lib:/usr/qt/lib \
+timeout --kill-after=5s "${BROWSE_ICON_TIMEOUT:-180}s" env "$host_libs" chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home LD_LIBRARY_PATH=/usr/lib/$triplet:/usr/lib:/usr/qt/lib \
     LD_PRELOAD=$preload SBX_CARD=$board SBX_OUT=4 SBX_IN=2 SBX_CLOCK_HZ=48000 SBX_HEADLESS_VSYNC=1 \
     QT_QPA_PLATFORM=eglfs QT_QPA_EGLFS_INTEGRATION=eglfs_kms LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe LP_NUM_THREADS=2 \
     QML_DISABLE_DISK_CACHE=1 QML_XHR_ALLOW_FILE_READ=1 MALLOC_ARENA_MAX=1 /usr/Engine/Engine -d0 > "$W/$board-engine.log" 2>&1 || engine_rc=$?
