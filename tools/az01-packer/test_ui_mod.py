@@ -11389,6 +11389,7 @@ const root = {{
     scStemFailSweep: () => scStemFailSweep(),
     scStemFailAt,
     scStemPending: () => ({{}}), scStemAsking: {{}}, scStemMax: 8, // what a tap reads before it asks (#316 review): nothing is on its way here
+    scStemAsk: () => 1, scStemAnswered: () => true, // the request's number and its answer (#316 review 2): this one is always the open request
 }};
 {mark_fn}
 {sweep_match.group(0)}
@@ -12932,15 +12933,20 @@ const rowsNow = {};
 let clock = 1000;
 Date.now = () => clock;
 let scStemTurns = [];
+let scStemGen = 0;
 const scStemAsking = {};
 const scStemAskMs = 120000;
 const root = {
-    scDeckList: () => DECKS, scDeckLocked: d => LOCKED.indexOf(d) >= 0, scStemFull: false, scStemWait: false, scStemMax: 8, scStemAsking: scStemAsking,
+    scDeckList: () => DECKS, scDeckLocked: d => LOCKED.indexOf(d) >= 0, scStemFull: false, scStemWait: false, scStemMax: 8, scStemAsking: scStemAsking, scStemGen: 0,
     scStemMark(ids, mark) { for (const id of ids) { if (!id) continue; if (mark) rowsNow[id] = mark; else delete rowsNow[id]; } },
     scStemHand(id, rows) { handed.push(String(id)); },
     scStemTurns: [],
 };
 const scStemFailed = {restart() {}};
+// The request-expiry timer: a single shot that waits for `interval`; advance() moves the clock and fires it when it is due.
+const scStemExpiry = {running: false, interval: 0, due: 0, restart() { this.running = true; this.due = clock + this.interval; }, stop() { this.running = false; }};
+const expiryHandler = __EXPIRYHANDLER__;
+const advance = ms => { clock += ms; while (scStemExpiry.running && clock >= scStemExpiry.due) { scStemExpiry.running = false; expiryHandler(); } };
 function timer(onChanged, extra) {
     const t = Object.assign({running: false, restart() { this.running = true; }, stop() { if (!this.running) return; this.running = false; if (onChanged) onChanged(false); }}, extra);
     return t;
@@ -12952,12 +12958,18 @@ const compile = (t, src, ...names) => new Function('timer', ...names, 'with (tim
 const importRender = compile(scStemImport, __RENDER__, 'root', 'scStemUnload', 'Qt');
 const importTick = compile(scStemImport, __TRIGGER__, 'root', 'Planck', 'XMLHttpRequest');
 const unloadTick = compile(scStemUnload, __UNLOAD__, 'Planck');
-__MARK__
+const scStemMark = (ids, mark) => root.scStemMark(ids, mark);
 __STREAM__
 __TURN__
 __TURNNEXT__
 __PENDING__
+__ASK__
+__ANSWERED__
+__EXPIRE__
 root.scStemPending = typeof scStemPending === 'function' ? scStemPending : () => ({});
+root.scStemAsk = typeof scStemAsk === 'function' ? scStemAsk : undefined;
+root.scStemAnswered = typeof scStemAnswered === 'function' ? scStemAnswered : undefined;
+root.scStemExpire = typeof scStemExpire === 'function' ? scStemExpire : undefined;
 root.scStemTurn = typeof scStemTurn === 'function' ? scStemTurn : undefined;
 root.scStemTurnNext = typeof scStemTurnNext === 'function' ? scStemTurnNext : undefined;
 const stream = uid => scStemStream(uid);
@@ -12965,7 +12977,8 @@ const tap = uid => stream(uid);
 """.replace("__DECKS__", decks).replace("__LOCKED__", locked) \
            .replace("__UNLOADCHANGED__", json.dumps(changed(unloader))).replace("__IMPORTCHANGED__", json.dumps(changed(importer))) \
            .replace("__RENDER__", render).replace("__TRIGGER__", trigger).replace("__UNLOAD__", unload) \
-           .replace("__MARK__", fn("scStemMark", "ids, mark").replace("scStemRows", "rowsNow").replace("scStemFailAt", "failAt")) \
+           .replace("__EXPIRYHANDLER__", "(() => new Function('root', %s)(root))" % json.dumps((re.search(r"id: scStemExpiry\s*\n\s*onTriggered: (.*)", main) or [None, ""])[1]) if re.search(r"id: scStemExpiry", main) else "(() => {})") \
+           .replace("__ASK__", fn("scStemAsk", "gid")).replace("__ANSWERED__", fn("scStemAnswered", "gid, gen")).replace("__EXPIRE__", fn("scStemExpire", "")) \
            .replace("__STREAM__", fn("scStemStream", "uid")).replace("__TURN__", fn("scStemTurn", "gid, run") or fn("scStemTurn", "job")).replace("__TURNNEXT__", fn("scStemTurnNext", "")).replace("__PENDING__", fn("scStemPending", "")) + scenario
 
     def run_node(self, scenario, **kw):
@@ -13202,6 +13215,108 @@ clock += 2;
 assert.strictEqual(tap('u11'), true);
 assert.strictEqual(xhrs.length, 2, 'asked again');
 """, decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_request_that_never_answers_clears_its_row_at_the_expiry(self):
+        """#316 review 2: the row of a request the gateway never answers stops waiting by itself at the expiry, without a second tap."""
+        self.run_node("""
+assert.strictEqual(scStemExpiry.running, false, 'no timer before the first tap');
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(rowsNow['11'], 'wait');
+assert.strictEqual(scStemExpiry.running, true);
+advance(119999);
+assert.strictEqual(rowsNow['11'], 'wait', 'still waiting a moment before the expiry');
+advance(2);
+assert.strictEqual(rowsNow['11'], undefined, 'the row stops waiting by itself');
+assert.deepStrictEqual(root.scStemPending(), {});
+assert.strictEqual(scStemExpiry.running, false, 'no request is open: the timer has stopped');
+assert.strictEqual(tap('u11'), true, 'and the track can be asked for again');
+assert.strictEqual(xhrs.length, 2);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_late_answer_after_the_expiry_adds_nothing(self):
+        """The request was given up and its row cleared: its answer, a success or a failure, changes nothing."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(tap('u22'), true);
+advance(120001);
+answer(0, 200, {path: '/data/a.mp3', row: 100});          // the late success
+answer(1, 502, {});                                        // the late failure
+flush();
+assert.deepStrictEqual(scStemTurns, [], 'nothing queued');
+assert.strictEqual(loads.length, 0, 'nothing loaded');
+assert.strictEqual(rowsNow['11'], undefined);
+assert.strictEqual(rowsNow['22'], undefined, 'a late failure does not mark the row either');
+assert.deepStrictEqual([scStemImport.running, scStemUnload.running, scStemExpiry.running], [false, false, false]);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_late_answer_while_a_second_request_is_open_adds_only_the_second(self):
+        """The first request expired, the user tapped again: whichever answers first, the track is queued exactly once, by the second request."""
+        for late_first in (True, False):
+            with self.subTest(late_answer_first=late_first):
+                self.run_node("""
+const lateFirst = %s;
+assert.strictEqual(tap('u11'), true);                      // request 0
+advance(120001);
+assert.strictEqual(rowsNow['11'], undefined);
+assert.strictEqual(tap('u11'), true);                      // request 1 for the same track
+assert.strictEqual(xhrs.length, 2);
+if (lateFirst) { answer(0, 200, {path: '/data/a.mp3', row: 100}); assert.deepStrictEqual(scStemTurns, []); assert.strictEqual(loads.length, 0, 'the stale answer adds nothing'); }
+answer(1, 200, {path: '/data/a.mp3', row: 100});
+if (!lateFirst) answer(0, 200, {path: '/data/a.mp3', row: 100});
+flush();
+assert.strictEqual(loads.length, 1, 'one entry, the second request\\'s');
+assert.deepStrictEqual(scStemTurns, []);
+importRender('5'); unloadTick(); flush();
+assert.deepStrictEqual(handed, ['5'], 'one render');
+assert.deepStrictEqual(unloads, [1]);
+assert.strictEqual(loads.length, 1, 'nothing queued behind it');
+assert.deepStrictEqual([scStemImport.running, scStemUnload.running, scStemExpiry.running], [false, false, false]);
+""" % ("true" if late_first else "false"), decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_an_answer_just_before_the_expiry_is_taken(self):
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(scStemExpiry.running, true, 'the request is open: the timer waits for its expiry');
+advance(119999);
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+flush();
+assert.strictEqual(loads.length, 1, 'taken');
+assert.strictEqual(scStemExpiry.running, false, 'the only request has answered: the timer has stopped');
+advance(300000);
+assert.strictEqual(rowsNow['11'], 'wait', 'nothing runs later to clear it');
+importRender('5'); unloadTick(); flush();
+assert.deepStrictEqual(handed, ['5']);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_the_expiry_timer_runs_only_while_a_request_is_open(self):
+        """No timer before the first tap, none after the last request has answered (success or failure) or expired."""
+        self.run_node("""
+assert.strictEqual(scStemExpiry.running, false);
+assert.strictEqual(tap('u1'), true);
+assert.strictEqual(tap('u2'), true);
+assert.strictEqual(tap('u3'), true);
+assert.strictEqual(scStemExpiry.running, true);
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+assert.strictEqual(scStemExpiry.running, true, 'two requests are still open');
+answer(1, 502, {});
+assert.strictEqual(scStemExpiry.running, true, 'one is still open');
+advance(60000);
+assert.strictEqual(scStemExpiry.running, true);
+advance(60001);                                           // the third expires
+assert.strictEqual(rowsNow['3'], undefined);
+assert.strictEqual(scStemExpiry.running, false, 'the last open request expired: the timer has stopped');
+assert.strictEqual(tap('u4'), true);
+assert.strictEqual(scStemExpiry.running, true);
+answer(3, 200, {path: '/data/b.mp3', row: 200});
+assert.strictEqual(scStemExpiry.running, false, 'the last request answered: the timer has stopped');
+flush();
+assert.strictEqual(later.length, 0);
+""", decks="[1, 2, 3, 4]")
 
     @unittest.skipUnless(shutil.which("node"), "Node is required")
     def test_a_failed_download_does_not_hold_its_track(self):

@@ -4798,12 +4798,13 @@ SERVICES_MAIN = """
 	property var scStemFailAt: ({})
 	property bool scStemFull: false // the last Stems tap found a deck free to load but none empty: the swipe's hint says so
 	property var scStemTurns: [] // imports that have their file and wait for the one in progress: {gid, run}, oldest first
-	property var scStemAsking: ({}) // track id -> when its tap asked the gateway for the file, until the gateway answers
+	property var scStemAsking: ({}) // track id -> {at, gen} of its open request to the gateway for the file, until it answers or expires
+	property int scStemGen: 0 // the last request's number: an answer counts only for the open request of its track (scStemAnswered)
 	property bool scStemWait: false // the last Stems tap was turned away: this many imports are already on their way
 	// Most tracks on their way through the import at once (asked for, waiting for their turn, importing): a list shows about 6 rows of 92 px
 	// (TrackList.qml), so one screenful selected for Stems fits with room for the import in progress; the next tap says "Please wait...".
 	readonly property int scStemMax: 8
-	readonly property int scStemAskMs: 120000 // a download that never answers stops holding its track after this long
+	readonly property int scStemAskMs: 120000 // a request that never answers is given up after this long: its row stops waiting (scStemExpire)
 	function scStemMark(ids, mark) {
 		const rows = Object.assign({}, scStemRows)
 		for (const id of ids) {
@@ -4986,13 +4987,15 @@ SERVICES_MAIN = """
 		// Too many on their way: the tap starts nothing and the swipe says to wait (the answer is the same "busy" one).
 		root.scStemWait = Object.keys(pending).length >= root.scStemMax
 		if (root.scStemWait) { console.warn("EngineX stems step=queue-full"); return "busy" }
-		root.scStemAsking[gid] = Date.now()
+		const gen = root.scStemAsk(gid)
 		root.scStemMark([gid], "wait")
 		const x = new XMLHttpRequest()
 		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/source?id=" + gid)
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4) return
-			delete root.scStemAsking[gid] // from here on the queue (or nothing, after a failure) holds the track
+			// The request was given up (its row stopped waiting) or a later tap replaced it: this answer is stale. Otherwise the queue (or nothing, after a
+			// failure) holds the track from here on.
+			if (!root.scStemAnswered(gid, gen)) return
 			// The service gave no full file (a NetEase track this account only previews,
 			// no match, no network): say so on the row instead of dropping the tap.
 			if (x.status !== 200) {
@@ -5045,14 +5048,44 @@ SERVICES_MAIN = """
 	// or on a deck waiting for its eject. Read at a tap, so nothing runs while idle.
 	function scStemPending() {
 		const ids = {}, now = Date.now()
-		for (const id of Object.keys(scStemAsking)) {
-			if (now - scStemAsking[id] < scStemAskMs) ids[id] = true
-			else delete scStemAsking[id]
-		}
+		for (const id of Object.keys(scStemAsking)) if (now - scStemAsking[id].at < scStemAskMs) ids[id] = true
 		for (const turn of scStemTurns) ids[turn.gid] = true
 		if (scStemImport.running) ids[scStemImport.rows[0]] = true
 		if (scStemUnload.running) ids[scStemUnload.gid] = true
 		return ids
+	}
+	// The requests to the gateway: a tap opens one for its track (the number says which), the answer closes it. An answer to a request
+	// that was given up or replaced by a later tap is dropped, so a late answer cannot queue the track a second time.
+	function scStemAsk(gid) {
+		const gen = ++scStemGen
+		scStemAsking[gid] = {at: Date.now(), gen: gen}
+		if (!scStemExpiry.running) { scStemExpiry.interval = scStemAskMs; scStemExpiry.restart() }
+		return gen
+	}
+	function scStemAnswered(gid, gen) {
+		const open = scStemAsking[gid]
+		if (!open || open.gen !== gen) return false
+		delete scStemAsking[gid]
+		if (!Object.keys(scStemAsking).length) scStemExpiry.stop()
+		return true
+	}
+	// Gives up the requests that did not answer in time: the row stops waiting. Runs from scStemExpiry, which waits for the oldest open
+	// request and stops itself when none is open, so nothing runs while idle.
+	function scStemExpire() {
+		const now = Date.now()
+		let next = -1
+		for (const gid of Object.keys(scStemAsking)) {
+			const left = scStemAsking[gid].at + scStemAskMs - now
+			if (left <= 0) { delete scStemAsking[gid]; scStemMark([gid], "") }
+			else if (next < 0 || left < next) next = left
+		}
+		if (next < 0) { scStemExpiry.stop(); return }
+		scStemExpiry.interval = next
+		scStemExpiry.restart()
+	}
+	Timer {
+		id: scStemExpiry
+		onTriggered: root.scStemExpire()
 	}
 	// The import lands in the internal m.db, but while a streaming collection is open
 	// collectionController is that collection and cannot see it. So the gateway looks
