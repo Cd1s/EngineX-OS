@@ -377,7 +377,25 @@ static int px_write_ready(const char *path) { return ready_write(path, "armhf-px
  * sandbox: node +0x38 copies input to output at centre, node +0x3c
  * leaves both buffers alone at centre). With a style picked and the knob outside stock's
  * centre band, both nodes skip stock (their centre behaviour) and +0x38 plays the style,
- * as much as the knob is turned. Inside the band, or style Off, stock runs untouched. */
+ * as much as the knob is turned. Inside the band, or style Off, stock runs untouched.
+ *
+ * How the knob reaches the hook: SweepFxStateMapAdaptor's Value observer and setType call setValue
+ * through a guarded direct call (speculative devirtualization against vtable slot 4 of
+ * SweepFxControl), so a jump written over setValue's prologue is never reached on the property path:
+ * that was the 5.3.0.5 bug, the knob played the stock filter whatever style was picked.
+ * install_cfx_scope therefore writes both the prologue jump (direct callers) and slot 4 itself
+ * (5.3.0 0x2b1e488, sclive4 0x2b9e0b0, inside RELRO: mprotect, store, mprotect back), so the
+ * guard misses and the call goes through the slot to hook_cfx_value. Either entry then runs stock's
+ * setValue once, after the hook has noted the knob.
+ *
+ * Cost: audio thread untouched (hook_cfx_process is the same code with or without the slot patch);
+ * browsing none; insert none; control thread one extra indirect call per knob or type event
+ * (one hook entry and one stock execution per channel per event, counted in the FX sandbox).
+ * Why no lighter way: Engine has no per-channel Color FX style and no setting that plays one;
+ * QML only changes what the screen shows, not what ChannelSweepFx does on the audio thread; reading
+ * the knob from the audio thread instead needs a link from the audio node back to its control that
+ * has not been found in the binary, so intercepting setValue is the smallest site that sees every
+ * knob and type event. */
 #define CFX_READY "/run/enginex-colorfx.ready"
 enum { CFX_CHANNELS = 4 };
 static int cfx_installed, cfx_style; /* cfx_style: pioneer_fx= in settings.conf, the channel knobs only */
