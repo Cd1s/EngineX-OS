@@ -133,7 +133,8 @@ func convertLocked(ctx context.Context, mount string, rep *usbLoadingReporter) (
 	done := make(chan struct{})
 	go func() { defer close(done); refresh(convert, rep) }()
 	defer func() { stop(); <-done }()
-	r, err = bridge.ImportInBackground(ctx, mount, func(done, total int) { rep.Report(done, total, true) })
+	// Throttled: the job reports its count as each track goes (#328); refresh writes the latest.
+	r, err = bridge.ImportInBackground(ctx, mount, func(done, total int) { rep.Report(done, total, false) })
 	if err != nil && ctx.Err() == nil {
 		rep.Fail(err)
 	}

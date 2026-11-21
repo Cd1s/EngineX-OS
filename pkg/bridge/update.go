@@ -387,6 +387,30 @@ func vacuumInto(ctx context.Context, src, dst string) error {
 	return syncFile(dst)
 }
 
+// jobProgress reports a background job's tracks done out of the export's to progress: once the
+// export is read, before the long steps (its paths, the snapshot), then as each pass goes (its
+// share of the whole count, enginedb.Options.OnFinished), never fewer than it reported (#328).
+type jobProgress struct {
+	progress     func(done, total int)
+	total, shown int
+}
+
+func newJobProgress(progress func(done, total int), total int) *jobProgress {
+	p := &jobProgress{progress: progress, total: total, shown: -1}
+	p.set(0)
+	return p
+}
+
+func (p *jobProgress) set(done int) {
+	if p.progress == nil || min(done, p.total) <= p.shown {
+		return
+	}
+	p.shown = min(done, p.total)
+	p.progress(p.shown, p.total)
+}
+
+func (p *jobProgress) report(done, _ int) { p.set(done) }
+
 // updateInBackground runs the import passes of an update on the stage's copy of the library.
 func updateInBackground(ctx context.Context, mount, stage, stamp string, r *compat.Resolver, progress func(done, total int)) (enginedb.Result, error) {
 	dir := filepath.Dir(stage)
@@ -394,8 +418,9 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 	if err != nil {
 		return enginedb.Result{}, err
 	}
+	shown := newJobProgress(progress, len(l.Tracks))
 	if readMark(stage, quickName) == stamp {
-		return quickInStage(ctx, dir, stage, stamp, r, l, stagedOnly, progress)
+		return quickInStage(ctx, dir, stage, stamp, r, l, stagedOnly, shown.report)
 	}
 	if err = ReconcileContext(ctx, r, l); err != nil {
 		return enginedb.Result{}, err
@@ -413,22 +438,17 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 		}
 	}
 	total, left, window := len(l.Tracks), -1, importWindow
-	if progress != nil {
-		progress(0, total)
-	}
 	changed := readMark(stage, resumeName) != "" // an earlier pass may have changed it
 	for {
 		o := enginedb.Options{DatabaseDir: stage, StagedOnly: stagedOnly, LegacyOffsets: legacy, LegacyAACOffsets: legacyAAC,
-			Resume: readMark(stage, resumeName) == stamp, Deadline: time.Now().Add(window)}
+			Resume: readMark(stage, resumeName) == stamp, Deadline: time.Now().Add(window), OnFinished: shown.set}
 		res, err := enginedb.SyncResolved(ctx, r, l, o)
 		if err != nil {
 			return res, err
 		}
 		cut("stage pass committed")
 		changed = changed || res.Added+res.Updated > 0 || res.PlaylistsChanged
-		if progress != nil {
-			progress(total-res.Deferred, total)
-		}
+		shown.set(total - res.Deferred)
 		if res.Deferred == 0 {
 			if !changed {
 				// Nothing to publish: the live library already is this export's.

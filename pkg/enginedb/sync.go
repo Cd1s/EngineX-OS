@@ -107,6 +107,10 @@ type Options struct {
 	Now func() time.Time `json:"-"`
 	// OnProgress, if non-nil, reports (done, total) tracks processed during SyncResolved.
 	OnProgress func(done, total int) `json:"-"`
+	// OnFinished, if non-nil, is told as the import goes how many of the tracks it has gone
+	// through it leaves complete, read now or up to date already: a pass's share of the whole
+	// count, which never goes down (#328).
+	OnFinished func(done int) `json:"-"`
 }
 type Result struct {
 	Added, Updated, Unchanged int
@@ -631,6 +635,9 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		if opts.OnProgress != nil {
 			opts.OnProgress(i+1, len(prepared))
 		}
+		if opts.OnFinished != nil {
+			opts.OnFinished(i - result.Deferred)
+		}
 		// Time left after the tracks prepared up front: prepare the next one now.
 		if preparedTrack.late && !opts.Deadline.IsZero() && !past() {
 			if p, e := prepareOne(res, preparedTrack.track, preparedTrack.rel, opts.Deadline, now, true); e == nil {
@@ -991,6 +998,9 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		if e != nil {
 			return result, e
 		}
+	}
+	if opts.OnFinished != nil {
+		opts.OnFinished(len(prepared) - result.Deferred)
 	}
 	recommendations := SmartMatch(effectiveTracks, opts.CurrentTrack)
 	playlistHash := digest(struct {
