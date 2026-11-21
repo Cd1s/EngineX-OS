@@ -14,13 +14,14 @@ import (
 // CopyBridgeStateCompact writes the bridge state file state to dst without the waveform copies
 // earlier builds kept in it and without its free pages (#253): an update copied the whole file
 // first, 2.7 GB on the maintainer's 6000-track stick, at USB speed. A row that holds a waveform
-// becomes the reference this build writes: its source ID and the ANLZ files refs names for it, the
-// export's (ExportRefs), from which the display reads the same waveform. Those rows are not read:
-// SQLite reads a blob's overflow pages for any part of it, but not for length(). Their source ID
-// is the track's pdbImportKey in mdb, a consistent copy of the library the state belongs to, when
-// no other bridge track has that key. A row whose key is shared (libraries of early builds) or for
+// becomes the reference this build writes: its source ID and the ANLZ files refs names for it, which
+// the caller checked to give the display a waveform (DetailServes). Those rows are not read: SQLite
+// reads a blob's overflow pages for any part of it, but not for length(). Their source ID is the
+// track's pdbImportKey in mdb, a consistent copy of the library the state belongs to, when no
+// other bridge track has that key. A row whose key is shared (libraries of early builds) or for
 // which refs names no file is copied as it is: a reference never replaces the only copy of a
-// waveform the display can find (#253 review).
+// waveform the display can find, also when the export names files that are missing, truncated or
+// renamed on the stick (#253 reviews).
 func CopyBridgeStateCompact(ctx context.Context, state, mdb, dst string, refs map[uint32][]string) error {
 	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
 		return err
@@ -78,7 +79,7 @@ func CopyBridgeStateCompact(ctx context.Context, state, mdb, dst string, refs ma
 			return fail(err)
 		}
 	}
-	const small = `length(a.sourceJSON)<=4096`
+	const small = `length(a.sourceJSON)<=` + waveformRowBytes
 	if _, err = tx.ExecContext(ctx, `INSERT INTO main.BridgeAnalysis SELECT a.* FROM old.BridgeAnalysis a WHERE `+small); err != nil {
 		return fail(err)
 	}
@@ -144,8 +145,43 @@ func CopyBridgeStateCompact(ctx context.Context, state, mdb, dst string, refs ma
 	return nil
 }
 
+// waveformRowBytes: a state row longer than this still holds a waveform (RBA1 or JSON); a
+// reference is about 100 bytes.
+const waveformRowBytes = "4096"
+
+// WaveformRowKeys are the pdbImportKeys, in the library mdb, of the tracks whose row in the bridge
+// state file state still holds a waveform: the rows CopyBridgeStateCompact may replace by a
+// reference. Read with length() only, so no waveform is read.
+func WaveformRowKeys(ctx context.Context, state, mdb string) (map[uint32]bool, error) {
+	ro := func(p string) string { return (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro"}).String() }
+	db, err := sql.Open("sqlite", ro(state))
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err = db.ExecContext(ctx, `ATTACH DATABASE ? AS lib`, ro(mdb)); err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT t.pdbImportKey FROM BridgeAnalysis a JOIN lib.Track t ON t.id=a.trackId
+		WHERE length(a.sourceJSON)>`+waveformRowBytes+` AND t.pdbImportKey>0 AND t.pdbImportKey<=4294967295`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	keys := map[uint32]bool{}
+	for rows.Next() {
+		var key int64
+		if err = rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		keys[uint32(key)] = true
+	}
+	return keys, rows.Err()
+}
+
 // ExportRefs are the ANLZ files of the display's detail of each track of l, by its ID, as the
-// export names them: what CopyBridgeStateCompact gives the rows it rewrites.
+// export names them. Unchecked: CopyBridgeStateCompact gets only those DetailServes confirms.
 func ExportRefs(l *rekordbox.Library) map[uint32][]string {
 	refs := make(map[uint32][]string, len(l.Tracks))
 	for _, t := range l.Tracks {

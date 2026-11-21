@@ -937,13 +937,21 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 				result.AnalysisSkipped++
 			} else {
 				// The detail stays in the track's ANLZ files; the row says which (#253).
-				packedSource := packBridgeRef(original.ID, detailFiles(files))
+				refs := detailFiles(files)
+				packedSource := packBridgeRef(original.ID, refs)
 				// No consumer reads the old audio-header archive; retain the column/schema.
 				packedAudio, e := packAnalysis([]byte("{}"))
 				if e != nil {
 					return result, e
 				}
-				if _, e = q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`, id, packedSource, packedAudio); e != nil {
+				// Without a .2EX or .EXT the track has no detail to name: a row that still holds
+				// the waveform an earlier import read keeps it (length() reads no overflow page;
+				// #253 review 2).
+				keepWave := ``
+				if len(refs) == 0 {
+					keepWave = ` WHERE length(BridgeAnalysis.sourceJSON)<=` + waveformRowBytes
+				}
+				if _, e = q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`+keepWave, id, packedSource, packedAudio); e != nil {
 					return result, e
 				}
 			}

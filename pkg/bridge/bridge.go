@@ -769,7 +769,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	}
 	if err == nil && reread != nil {
 		cut("in place committed")
-		compactState(inPlace, dir, pre.l)
+		compactState(inPlace, dir, pre.l, rereadRefs(dir, stamp))
 	}
 	if err == nil && !result.Bypassed {
 		// Only this build has written since the progress was read, and it leaves no overview

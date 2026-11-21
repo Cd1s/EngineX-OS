@@ -16,6 +16,7 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
+	"golang.org/x/sys/unix"
 )
 
 // BridgeAnalysis stores the source ID and, in new rows, where the PWV7 (else PWV5) section
@@ -109,6 +110,81 @@ func BridgeDetail(b []byte, root string, limit int) *rekordbox.Analysis {
 		return nil
 	}
 	return source.Analysis
+}
+
+// DetailServes reports whether a reference naming files gives the display a waveform, as
+// BridgeDetail reads it, without reading any section's body (#253 review 2): one of the files is,
+// as r resolves it, a regular file within maxDetailFile (no symlink, no traversal) whose PMAI
+// header and section headers, up to its first PWV7 (3 bytes an entry) or PWV5 (2 bytes) section,
+// are as ParseAnalysis accepts them, with that section's entries inside the file. A missing,
+// renamed or truncated file fails (rekordbox's header holds the whole length). read is the bytes
+// read: the 12-byte header and 24 bytes a section header.
+func DetailServes(r *compat.Resolver, files []string) (ok bool, read int64) {
+	for _, f := range files {
+		ok, n := detailFileServes(r, f)
+		read += n
+		if ok {
+			return true, read
+		}
+	}
+	return false, read
+}
+
+func detailFileServes(r *compat.Resolver, rel string) (bool, int64) {
+	rel, err := r.Resolve(rel)
+	if err != nil {
+		return false, 0
+	}
+	// No access time: on FAT a read otherwise writes the file's directory entry back, one write
+	// a track (measured on the 6031-track stick copy). rb-bridge is root; others open it plainly.
+	f, err := os.OpenFile(r.FullPath(rel), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NOATIME, 0)
+	if errors.Is(err, os.ErrPermission) {
+		f, err = os.OpenFile(r.FullPath(rel), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	}
+	if err != nil {
+		return false, 0
+	}
+	defer f.Close()
+	// Headers only: no readahead, so the stick reads a page a file, not the readahead window
+	// (measured 16 KB a track with it on the same copy).
+	_ = unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_RANDOM)
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() || st.Size() > maxDetailFile || st.Size() < 12 {
+		return false, 0
+	}
+	var hdr [24]byte
+	read := int64(12)
+	if _, err = f.ReadAt(hdr[:12], 0); err != nil || string(hdr[:4]) != "PMAI" {
+		return false, read
+	}
+	be := binary.BigEndian
+	h, n := int64(be.Uint32(hdr[4:])), int64(be.Uint32(hdr[8:]))
+	if h < 12 || h > n || n > st.Size() {
+		return false, read
+	}
+	for off := h; n-off >= 12; {
+		k := min(int64(len(hdr)), n-off)
+		read += k
+		if _, err = f.ReadAt(hdr[:k], off); err != nil {
+			return false, read
+		}
+		sh, sn := int64(be.Uint32(hdr[4:])), int64(be.Uint32(hdr[8:]))
+		if sh < 12 || sn < sh || sn > n-off {
+			return false, read
+		}
+		if tag := string(hdr[:4]); (tag == "PWV7" || tag == "PWV5") && k >= 24 && sh >= 24 {
+			width, count := uint64(be.Uint32(hdr[12:])), uint64(be.Uint32(hdr[16:]))
+			want := uint64(3)
+			if tag == "PWV5" {
+				want = 2
+			}
+			if width == want && count > 0 && count <= 2<<20 && width*count <= uint64(sn-sh) {
+				return true, read
+			}
+		}
+		off += sn
+	}
+	return false, read
 }
 
 // readVolumeFile reads rel under root as the resolver finds it (case, NFC, macOS's hidden

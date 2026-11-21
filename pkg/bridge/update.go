@@ -171,7 +171,7 @@ const quickName = "QUICK"
 // quickInStage is quickUpdate on the stage's copy of the library, without the mount's time limit.
 func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resolver, l *rekordbox.Library, stagedOnly bool, progress func(done, total int)) (enginedb.Result, error) {
 	if _, err := os.Stat(filepath.Join(stage, baseCountsName)); errors.Is(err, os.ErrNotExist) {
-		if err = snapshotLive(ctx, dir, stage, l); err != nil {
+		if err = snapshotLive(ctx, dir, stage, r, l); err != nil {
 			return enginedb.Result{}, err
 		}
 	}
@@ -284,9 +284,10 @@ var (
 // snapshotLive copies the live library into the stage while Engine may have it open. Engine
 // takes no file locks, so the copy is a plain one, kept only if the library's identity (size,
 // change counter, no journal under way) is the same before and after it. l is the export the
-// update imports.
-func snapshotLive(ctx context.Context, dir, stage string, l *rekordbox.Library) error {
+// update imports, r the volume's resolver.
+func snapshotLive(ctx context.Context, dir, stage string, r *compat.Resolver, l *rekordbox.Library) error {
 	live := filepath.Join(dir, "m.db")
+	checked := map[string]bool{} // the files confirmedRefs looked at, across retries
 	for try := 0; try < snapshotRetries; try++ {
 		if try > 0 {
 			select {
@@ -318,7 +319,12 @@ func snapshotLive(ctx context.Context, dir, stage string, l *rekordbox.Library) 
 		// The state without the waveform copies of earlier builds and its free pages, built
 		// against the copy just made: a byte copy of it was 2.7 GB on a 6000-track stick (#253).
 		if len(names) > 1 {
-			if err := enginedb.CopyBridgeStateCompact(ctx, filepath.Join(dir, stateName), filepath.Join(stage, "m.db.copy"), filepath.Join(stage, stateName+".copy"), enginedb.ExportRefs(l)); err != nil {
+			keys, err := enginedb.WaveformRowKeys(ctx, filepath.Join(dir, stateName), filepath.Join(stage, "m.db.copy"))
+			if err != nil {
+				return err
+			}
+			refs := confirmedRefs(r, l, keys, checked)
+			if err = enginedb.CopyBridgeStateCompact(ctx, filepath.Join(dir, stateName), filepath.Join(stage, "m.db.copy"), filepath.Join(stage, stateName+".copy"), refs); err != nil {
 				return err
 			}
 		}
@@ -394,7 +400,7 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 				return res, err
 			}
 		}
-		if err = snapshotLive(ctx, dir, stage, l); err != nil {
+		if err = snapshotLive(ctx, dir, stage, r, l); err != nil {
 			return enginedb.Result{}, err
 		}
 	}
@@ -457,6 +463,9 @@ const rereadName = ".rb-bridge-reread"
 type rereadMark struct {
 	Stamp string
 	Paths []string
+	// Refs are the tracks whose state rows still holding a waveform the remount's compaction may
+	// replace by references: the job checked their ANLZ files (confirmedRefs).
+	Refs []uint32 `json:",omitempty"`
 }
 
 // handToMounts leaves an update with little to read to the mounts, in place, without a copy of
@@ -502,7 +511,19 @@ func handToMounts(ctx context.Context, r *compat.Resolver, l *rekordbox.Library,
 		os.Remove(filepath.Join(dir, rereadName))
 		return enginedb.Result{Bypassed: true}, true, dropStage(stage)
 	}
-	b, _ := json.Marshal(rereadMark{stamp, reread})
+	mark := rereadMark{Stamp: stamp, Paths: reread}
+	if fileBytes(filepath.Join(dir, stateName)) >= compactStateBytes {
+		// The remount compacts the state: its waveform rows become references only where the
+		// files are there to read (#253 review 2), checked here and not while the mount waits.
+		keys, err := enginedb.WaveformRowKeys(ctx, filepath.Join(dir, stateName), filepath.Join(dir, "m.db"))
+		if err != nil {
+			log.Printf("rb-bridge: waveform rows not checked, the remount keeps them: %v", err)
+		}
+		for key := range confirmedRefs(r, l, keys, map[string]bool{}) {
+			mark.Refs = append(mark.Refs, key)
+		}
+	}
+	b, _ := json.Marshal(mark)
 	if err = os.WriteFile(filepath.Join(dir, rereadName), b, 0o644); err != nil {
 		return enginedb.Result{}, true, err
 	}
@@ -518,9 +539,11 @@ func handToMounts(ctx context.Context, r *compat.Resolver, l *rekordbox.Library,
 // free pages, at a mount before Engine sees the volume, once the import of l into the library has
 // committed (#253): the rows it rewrites name the ANLZ files of l, which hold the same waveforms,
 // so the library and its state change together and the display loses nothing wherever it is cut
-// (#253 review). A state below compactStateBytes is left as it is. It never stops the mount: on
-// any error the state stays as it was, and a leftover copy goes at the next mount.
-func compactState(ctx context.Context, dir string, l *rekordbox.Library) {
+// (#253 review). Only the tracks of keys, whose files the background job checked, get references;
+// the mount reads no ANLZ file (#253 review 2). A state below compactStateBytes is left as it is.
+// It never stops the mount: on any error the state stays as it was, and a leftover copy goes at
+// the next mount.
+func compactState(ctx context.Context, dir string, l *rekordbox.Library, keys map[uint32]bool) {
 	state := filepath.Join(dir, stateName)
 	if st, err := os.Stat(state); err != nil || st.Size() < compactStateBytes {
 		return
@@ -536,7 +559,13 @@ func compactState(ctx context.Context, dir string, l *rekordbox.Library) {
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	start, before := time.Now(), fileBytes(state)
 	tmp := state + ".compact"
-	if err = enginedb.CopyBridgeStateCompact(ctx, state, filepath.Join(dir, "m.db"), tmp, enginedb.ExportRefs(l)); err == nil {
+	refs := enginedb.ExportRefs(l)
+	for id := range refs {
+		if !keys[id] {
+			delete(refs, id)
+		}
+	}
+	if err = enginedb.CopyBridgeStateCompact(ctx, state, filepath.Join(dir, "m.db"), tmp, refs); err == nil {
 		cut("state compacted aside")
 		for _, side := range []string{"-journal", "-wal", "-shm"} {
 			os.Remove(state + side)
@@ -569,6 +598,18 @@ func fileBytes(p string) int64 {
 // readReread is the tracks an update left to the mounts of stamp's export to read again; nil when
 // it left none.
 func readReread(dir, stamp string) map[string]bool {
+	m := rereadOf(dir, stamp)
+	if m == nil {
+		return nil
+	}
+	paths := make(map[string]bool, len(m.Paths))
+	for _, p := range m.Paths {
+		paths[p] = true
+	}
+	return paths
+}
+
+func rereadOf(dir, stamp string) *rereadMark {
 	b, err := os.ReadFile(filepath.Join(dir, rereadName))
 	if err != nil {
 		return nil
@@ -577,11 +618,48 @@ func readReread(dir, stamp string) map[string]bool {
 	if json.Unmarshal(b, &m) != nil || m.Stamp != stamp {
 		return nil
 	}
-	paths := make(map[string]bool, len(m.Paths))
-	for _, p := range m.Paths {
-		paths[p] = true
+	return &m
+}
+
+// rereadRefs are the tracks of the reread mark whose waveform rows may become references.
+func rereadRefs(dir, stamp string) map[uint32]bool {
+	keys := map[uint32]bool{}
+	if m := rereadOf(dir, stamp); m != nil {
+		for _, k := range m.Refs {
+			keys[k] = true
+		}
 	}
-	return paths
+	return keys
+}
+
+// confirmedRefs are the ANLZ files the export l names for the tracks of keys, whose state rows
+// still hold a waveform, where those files give the display that waveform (enginedb.DetailServes):
+// a header check, no section read. A track whose files are missing, truncated or renamed keeps its
+// row (#253 review 2). Only the background job calls it. checked holds the answer for each list of
+// files already looked at.
+func confirmedRefs(r *compat.Resolver, l *rekordbox.Library, keys map[uint32]bool, checked map[string]bool) map[uint32][]string {
+	refs := map[uint32][]string{}
+	if len(keys) == 0 {
+		return refs
+	}
+	start, files, read := time.Now(), 0, int64(0)
+	for id, list := range enginedb.ExportRefs(l) {
+		if !keys[id] {
+			continue
+		}
+		key := strings.Join(list, "\x00")
+		ok, seen := checked[key]
+		if !seen {
+			var n int64
+			ok, n = enginedb.DetailServes(r, list)
+			checked[key], files, read = ok, files+1, read+n
+		}
+		if ok {
+			refs[id] = list
+		}
+	}
+	log.Printf("rb-bridge: %d of %d waveform rows can become references; ANLZ files checked in %s (%d tracks, %d bytes read)", len(refs), len(keys), time.Since(start).Round(time.Millisecond), files, read)
+	return refs
 }
 
 // publishUpdate replaces the live library with the complete update in the stage, at a mount
