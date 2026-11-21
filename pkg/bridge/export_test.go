@@ -107,3 +107,8 @@ func SetMountWindowForTest(d time.Duration) func() {
 	maxMountHookBudget = d
 	return func() { maxMountHookBudget = old }
 }
+
+// QuickCostForTest is the quick update's SC5000 estimate (#253) and the mount's time it must fit.
+func QuickCostForTest(known, fresh, entries int) (cost, mount time.Duration) {
+	return quickCost(known, fresh, entries), maxMountHookBudget
+}

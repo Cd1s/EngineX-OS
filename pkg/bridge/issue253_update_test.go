@@ -126,6 +126,18 @@ func TestIssue253QuickUpdateThatDoesNotFitWritesNothing(t *testing.T) {
 	}
 }
 
+// The quick update's estimate is the SC5000's: the maintainer's 6031-track re-export fits the
+// mount, a 20 000-track one does not. That one's quick update took 6.8 s on the build host (native
+// armhf), about 20 s on the deck, past the hook's kill; the first estimate said 9.8 s.
+func TestIssue253QuickUpdateEstimateIsTheDecks(t *testing.T) {
+	if cost, mount := bridge.QuickCostForTest(6021, 10, 19985); cost > mount-4*time.Second {
+		t.Fatalf("6031-track re-export: %s estimated, the mount has %s and the export read before it", cost, mount)
+	}
+	if cost, mount := bridge.QuickCostForTest(19994, 10, 60000); cost <= mount {
+		t.Fatalf("20 004-track re-export: %s estimated, fits the mount's %s; the deck needs about 20 s", cost, mount)
+	}
+}
+
 // A first import published at the mount from a large export starts the update that reads its
 // files at once: it waited for the next insert.
 func TestIssue253FastPublishStartsTheBackgroundUpdate(t *testing.T) {

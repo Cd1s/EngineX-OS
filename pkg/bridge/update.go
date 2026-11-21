@@ -54,9 +54,12 @@ func startUpdate(stage, stamp string) error {
 // What a quick update costs on an SC5000, the slowest deck, on top of the export read: a track the
 // library holds is looked up and left as it is, a new one is inserted with Engine's indexes and
 // triggers in place (unlike fastPublish's bulk load), and each playlist entry as in fastPublish.
-// Measured native armhf on the aarch64 build host (6031 tracks, 19 985 entries) times 3.
+// Measured native armhf on the aarch64 build host, times 3: a re-export of 20 004 tracks with
+// 60 000 playlist entries took 6.8 s there, 240 µs a known track once the entries are counted.
+// So a 6000-track re-export fits the mount (about 8 s on the deck) and a 20 000-track one does
+// not (about 22 s): its list is built first by the job (quickName).
 var (
-	quickPerKnown = 150 * time.Microsecond
+	quickPerKnown = 750 * time.Microsecond
 	quickPerNew   = 2 * time.Millisecond
 )
 
@@ -87,7 +90,7 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	for _, p := range l.Playlists {
 		entries += len(p.Tracks)
 	}
-	cost := time.Duration(len(l.Tracks)-fresh)*quickPerKnown + time.Duration(fresh)*quickPerNew + time.Duration(entries)*publishPerEntry + publishMargin
+	cost := quickCost(len(l.Tracks)-fresh, fresh, entries)
 	if left := time.Until(limit); cost > left {
 		return enginedb.Result{}, fmt.Errorf("%w: %d tracks (%d new) and %d playlist entries need about %s, %s left", errQuickTooLong, len(l.Tracks), fresh, entries, cost.Round(time.Second), left.Round(time.Second))
 	}
@@ -97,6 +100,12 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	}
 	log.Printf("rb-bridge: quick update of %d tracks (%d new), %d playlist entries in %s (export read %s, estimate %s)", len(l.Tracks), fresh, entries, time.Since(start).Round(time.Millisecond), read.Round(time.Millisecond), cost.Round(time.Millisecond))
 	return res, nil
+}
+
+// quickCost is what a quick update of known and fresh tracks and entries playlist entries costs on
+// an SC5000, after the export is read.
+func quickCost(known, fresh, entries int) time.Duration {
+	return time.Duration(known)*quickPerKnown + time.Duration(fresh)*quickPerNew + time.Duration(entries)*publishPerEntry + publishMargin
 }
 
 var errQuickTooLong = errors.New("the re-export's list does not fit the mount")
