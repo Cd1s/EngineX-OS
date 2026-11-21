@@ -12947,6 +12947,8 @@ const scStemFailed = {restart() {}};
 const scStemExpiry = {running: false, interval: 0, due: 0, restart() { this.running = true; this.due = clock + this.interval; }, stop() { this.running = false; }};
 const expiryHandler = __EXPIRYHANDLER__;
 const advance = ms => { clock += ms; while (scStemExpiry.running && clock >= scStemExpiry.due) { scStemExpiry.running = false; expiryHandler(); } };
+// The deck's clock is corrected: the wall clock moves, the timer (which counts elapsed time) does not notice.
+const jump = ms => { clock += ms; if (scStemExpiry.running) scStemExpiry.due += ms; };
 function timer(onChanged, extra) {
     const t = Object.assign({running: false, restart() { this.running = true; }, stop() { if (!this.running) return; this.running = false; if (onChanged) onChanged(false); }}, extra);
     return t;
@@ -13317,6 +13319,53 @@ assert.strictEqual(scStemExpiry.running, false, 'the last request answered: the 
 flush();
 assert.strictEqual(later.length, 0);
 """, decks="[1, 2, 3, 4]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_clock_set_back_does_not_stretch_the_wait_of_an_open_request(self):
+        """#316 review 3: the deck sets its clock from the network after boot. The request time and the expiry are wall-clock times; the timer
+        counts elapsed time. An hour back while a request is open must not make the row wait an hour: a request has at most one period left,
+        so more means the clock moved back and the deadline is counted again from now (two periods in all)."""
+        self.run_node("""
+clock = 4000000;
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(scStemExpiry.interval, 120000);
+jump(-3600000);                                    // the clock is set an hour back
+advance(120000);                                   // the timer's period is over: it fires
+assert.strictEqual(rowsNow['11'], 'wait', 'the first firing does not give up a request whose time looks an hour away');
+assert.strictEqual(scStemExpiry.running, true);
+assert.strictEqual(scStemExpiry.interval, 120000, 'armed again with one period, not with the length of the jump');
+advance(119999);
+assert.strictEqual(rowsNow['11'], 'wait');
+advance(2);
+assert.strictEqual(rowsNow['11'], undefined, 'one period later the row leaves the waiting state');
+assert.deepStrictEqual(root.scStemPending(), {});
+assert.strictEqual(scStemExpiry.running, false, 'and the timer has stopped');
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_two_requests_one_before_and_one_after_a_clock_set_back_each_leave_on_their_own_bound(self):
+        self.run_node("""
+clock = 4000000;
+assert.strictEqual(tap('u11'), true);              // asked before the jump
+advance(30000);
+jump(-3600000);
+assert.strictEqual(tap('u22'), true);              // asked after it (30 s of the other's period have gone)
+advance(90000);                                    // the timer fires, 120 s after the first request
+assert.strictEqual(rowsNow['11'], 'wait', 'the request from before the jump is counted again from now');
+assert.strictEqual(rowsNow['22'], 'wait', 'the one from after it has 30 s left');
+assert.strictEqual(scStemExpiry.running, true);
+assert.strictEqual(scStemExpiry.interval, 30000, 'armed for the nearer of the two');
+advance(30000);
+assert.strictEqual(rowsNow['22'], undefined, 'the second leaves on its own bound');
+assert.strictEqual(rowsNow['11'], 'wait');
+assert.strictEqual(scStemExpiry.running, true);
+assert.strictEqual(scStemExpiry.interval, 90000, 'the first has the rest of its new period');
+advance(90000);
+assert.strictEqual(rowsNow['11'], undefined, 'the first leaves on its bound: two periods and the 30 s in all, not an hour');
+assert.deepStrictEqual(root.scStemPending(), {});
+assert.deepStrictEqual(Object.keys(scStemAsking), [], 'the table ends empty');
+assert.strictEqual(scStemExpiry.running, false);
+""", decks="[1]")
 
     @unittest.skipUnless(shutil.which("node"), "Node is required")
     def test_a_failed_download_does_not_hold_its_track(self):
