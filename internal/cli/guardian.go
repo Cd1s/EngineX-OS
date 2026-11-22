@@ -191,7 +191,7 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			mountCtx := context.Background()
 			cancelMount := func() {}
 			if *deadline > 0 {
-				remaining := guardianRemaining(commandStart, *deadline) - guardianCleanupReserve
+				remaining := guardianRemaining(commandStart, *deadline)
 				if remaining < 0 {
 					remaining = 0
 				}
