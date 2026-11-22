@@ -170,7 +170,7 @@ func (f *feature) Action(req map[string]any) (any, error) {
 				failed := []string{}
 				// The failed stop may still have stopped the unit; restore it too.
 				for _, restore := range append(append([]string{}, stopped...), unit) {
-					if _, _, c := Systemctl("start", restore); c != 0 {
+					if _, _, c := Systemctl("start", restore); c != 0 || !isActive(restore) { // as Disable checks it
 						failed = append(failed, restore)
 					}
 				}

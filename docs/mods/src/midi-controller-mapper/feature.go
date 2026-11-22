@@ -452,9 +452,10 @@ func (f *mapper) pollBridgeLocked(state object, ack *int64, apply *float64, now 
 				f.latencySamples = append([]float64{}, f.latencySamples[len(f.latencySamples)-500:]...)
 			}
 		}
-		if len(f.inflightBatches) > 64 {
-			clear(f.inflightBatches)
-		}
+	}
+	// Bounded for a caller that never acknowledges, too.
+	if len(f.inflightBatches) > 64 {
+		clear(f.inflightBatches)
 	}
 	if err := f.updateDeckStateLocked(state); err != nil {
 		return nil, err

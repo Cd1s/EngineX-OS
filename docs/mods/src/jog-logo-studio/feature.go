@@ -242,10 +242,14 @@ func (f *feature) apply(req map[string]any) (any, error) {
 				had := exists(target)
 				if had {
 					if err := copyFile(target, backup, true); err != nil {
+						os.Remove(backup) // ours and incomplete: left behind, every later apply refuses it
 						return nil, err
 					}
 				}
 				if err := modkit.SaveJSON(marker, map[string]any{"hadOriginal": had}); err != nil {
+					if had {
+						os.Remove(backup) // no marker names it as ours; logo.png itself is untouched so far
+					}
 					return nil, err
 				}
 			}
