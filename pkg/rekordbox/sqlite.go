@@ -1,8 +1,10 @@
 package rekordbox
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"net/url"
@@ -49,6 +51,19 @@ func ReadSQLite(ctx context.Context, path string, adapter SQLiteAdapter) (*Libra
 
 // ReadSQLiteKeys is ReadSQLite with the SQLCipher keys of kc (#321).
 func ReadSQLiteKeys(ctx context.Context, path string, adapter SQLiteAdapter, kc *KeyCache) (*Library, error) {
+	return readSQLite(ctx, path, adapter, kc, false)
+}
+
+// ReadSQLiteWhole is ReadSQLite of a file that must be whole (#321 review R4): its pages,
+// decrypted for SQLCipher, are a whole number, the count its header gives when the header's count
+// is valid, and SQLite's quick_check finds nothing missing or damaged. ReadSQLite reads only the
+// tables it needs, so a copy cut inside its last page, or by whole pages where the header leaves
+// the count to the file's size, still reads.
+func ReadSQLiteWhole(ctx context.Context, path string) (*Library, error) {
+	return readSQLite(ctx, path, nil, nil, true)
+}
+
+func readSQLite(ctx context.Context, path string, adapter SQLiteAdapter, kc *KeyCache, whole bool) (*Library, error) {
 	abs, e := filepath.Abs(path)
 	if e != nil {
 		return nil, e
@@ -78,6 +93,11 @@ func ReadSQLiteKeys(ctx context.Context, path string, adapter SQLiteAdapter, kc 
 		defer os.Remove(tmpPath)
 		openPath = tmpPath
 	}
+	if whole {
+		if e = sqlitePagesWhole(openPath); e != nil {
+			return nil, e
+		}
+	}
 	u := url.URL{Scheme: "file", Path: openPath}
 	db, e := sql.Open("sqlite", u.String()+"?mode=ro&immutable=1&_pragma=query_only(1)")
 	if e != nil {
@@ -85,6 +105,12 @@ func ReadSQLiteKeys(ctx context.Context, path string, adapter SQLiteAdapter, kc 
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
+	if whole {
+		var check string
+		if e = db.QueryRowContext(ctx, `PRAGMA quick_check`).Scan(&check); e != nil || check != "ok" {
+			return nil, fmt.Errorf("OneLibrary SQLite: quick_check: %q %v", check, e)
+		}
+	}
 	if adapter == nil {
 		adapter = OneLibraryAdapter{}
 	}
@@ -527,4 +553,34 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 		}
 	}
 	return l, nil
+}
+
+// sqlitePagesWhole reports an error when the SQLite file at path is not a whole number of its
+// pages, or not the number of pages its header gives where that count is valid (nonzero, written
+// with the change counter it is valid for).
+func sqlitePagesWhole(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	h := make([]byte, 100)
+	if _, err = f.ReadAt(h, 0); err != nil || string(h[:16]) != "SQLite format 3\x00" {
+		return fmt.Errorf("OneLibrary SQLite: no SQLite header")
+	}
+	ps := int64(binary.BigEndian.Uint16(h[16:]))
+	if ps == 1 {
+		ps = 65536
+	}
+	if ps < 512 || st.Size()%ps != 0 {
+		return fmt.Errorf("OneLibrary SQLite: %d bytes are not whole pages of %d", st.Size(), ps)
+	}
+	if n := int64(binary.BigEndian.Uint32(h[28:])); n != 0 && bytes.Equal(h[24:28], h[92:96]) && n*ps != st.Size() {
+		return fmt.Errorf("OneLibrary SQLite: %d bytes, the header says %d pages of %d", st.Size(), n, ps)
+	}
+	return nil
 }

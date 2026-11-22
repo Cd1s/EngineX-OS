@@ -34,6 +34,12 @@ func unsafeToFree(path string) bool {
 	return checked && !owned
 }
 
+// onExFAT reports whether path is on exFAT (the statfs fatOwned reads).
+func onExFAT(path string) bool {
+	var fs unix.Statfs_t
+	return unix.Statfs(path, &fs) == nil && uint32(fs.Type) == unix.EXFAT_SUPER_MAGIC
+}
+
 // fatOwned reports whether path, on vfat, owns all its clusters in the FAT (fatChainOwned);
 // checked is false off vfat, for an empty file, or where the volume cannot be read.
 func fatOwned(path string) (owned, checked bool) {

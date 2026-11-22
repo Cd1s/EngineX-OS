@@ -4,3 +4,5 @@ package bridge
 
 // unsafeToFree: the FAT is checked on Linux only (#321).
 func unsafeToFree(string) bool { return false }
+
+func onExFAT(string) bool { return false }

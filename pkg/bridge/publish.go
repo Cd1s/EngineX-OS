@@ -6,7 +6,7 @@ package bridge
 //   - publishImport marks the stage complete before renaming the files in, and
 //     finishPublish completes an interrupted publish at the next mount, so the
 //     database and its bridge state never come from different imports;
-//   - lockVolume is the per-volume lock cue write-back takes.
+//   - lockVolume is the per-volume lock cue write-back takes (in /run, not on the stick).
 
 import (
 	"context"
@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"testing"
 
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
@@ -27,8 +28,22 @@ const (
 	publishReady = "READY"
 )
 
-func lockVolume(dir string) (func(), error) {
-	f, err := os.OpenFile(filepath.Join(dir, ".rb-bridge.lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+// lockVolume takes the cue write-back's lock of the volume mounted at mount, which rb-bridge and
+// stream-sync share: a file in /run named after the volume's device and root directory. Never one
+// on the stick: creating it there, before the pass has decided whether the stick's FAT may be
+// written, could take the very cluster a stale entry names (#321 review R4). A test locks beside
+// its stick, in its own temporary directory.
+func lockVolume(mount string) (func(), error) {
+	var st syscall.Stat_t
+	if err := syscall.Stat(mount, &st); err != nil {
+		return nil, err
+	}
+	dir := "/run"
+	if testing.Testing() {
+		dir = filepath.Dir(filepath.Clean(mount))
+	}
+	name := fmt.Sprintf("enginex-rb-writeback-%x-%x.lock", uint64(st.Dev), uint64(st.Ino))
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, err
 	}

@@ -90,3 +90,6 @@ func SetMountWindowForTest(d time.Duration) func() {
 	maxMountHookBudget = d
 	return func() { maxMountHookBudget = old }
 }
+
+// StagedWholeForTest reports whether tmp, a staged copy of dst, would be put back (#321 review R4).
+func StagedWholeForTest(tmp, dst string) bool { return stagedWhole(tmp, dst) }

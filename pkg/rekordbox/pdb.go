@@ -287,6 +287,43 @@ func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
 	return l, nil
 }
 
+// CheckPDBExtent reports an error when the export.pdb at path names a page past its end: the
+// header's next unused page, or a table's empty candidate page (#321 review R4). ParsePDB follows
+// only each table's chain of pages, so a copy cut by the whole pages after them still reads.
+func CheckPDBExtent(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	h := make([]byte, 28)
+	if _, err := f.ReadAt(h, 0); err != nil {
+		return fmt.Errorf("pdb header: %w", err)
+	}
+	ps, nt, next := int64(le.Uint32(h[4:])), int64(le.Uint32(h[8:])), int64(le.Uint32(h[12:]))
+	if ps < 512 || ps > 65536 || st.Size()%ps != 0 || nt > (ps-28)/16 {
+		return fmt.Errorf("rekordbox: invalid page size/table count")
+	}
+	pages := st.Size() / ps
+	if next > pages {
+		return fmt.Errorf("pdb: next unused page %d past the file's %d pages", next, pages)
+	}
+	tables := make([]byte, nt*16)
+	if _, err := f.ReadAt(tables, 28); err != nil {
+		return err
+	}
+	for i := int64(0); i < nt; i++ {
+		if c := int64(le.Uint32(tables[i*16+4:])); c != 0 && c < next && c >= pages {
+			return fmt.Errorf("pdb: table %d's empty candidate page %d past the file's %d pages", i, c, pages)
+		}
+	}
+	return nil
+}
+
 func ReadPDB(path string) (*Library, error) {
 	f, err := os.Open(path)
 	if err != nil {

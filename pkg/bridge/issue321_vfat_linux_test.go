@@ -244,8 +244,18 @@ func vfatRun(t *testing.T, name string, args ...string) string {
 // unmounts and detaches.
 func vfatMount(t *testing.T, img, mnt string) (dev string, unmount func()) {
 	t.Helper()
+	return fsMount(t, "vfat", img, mnt)
+}
+
+// fsMount is vfatMount for a vfat or an exfat image.
+func fsMount(t *testing.T, fsType, img, mnt string) (dev string, unmount func()) {
+	t.Helper()
+	opts := "utf8,flush"
+	if fsType == "exfat" {
+		opts = "rw"
+	}
 	dev = vfatRun(t, "losetup", "-f", "--show", img)
-	if out, err := exec.Command("mount", "-t", "vfat", "-o", "utf8,flush", dev, mnt).CombinedOutput(); err != nil {
+	if out, err := exec.Command("mount", "-t", fsType, "-o", opts, dev, mnt).CombinedOutput(); err != nil {
 		_ = exec.Command("losetup", "-d", dev).Run()
 		t.Fatalf("mount: %v %s", err, out)
 	}
@@ -536,6 +546,216 @@ func issue321StaleStick(t *testing.T, spc int) {
 	unmount()
 	if out, err := exec.Command("fsck.fat", "-n", img).CombinedOutput(); err != nil {
 		t.Fatalf("fsck.fat -n after that pass: %v\n%s", err, out)
+	}
+}
+
+// #321 review R4 (delta review 3, P1-2): the pass decides whether the stick's FAT may be written
+// before it creates anything on it. Its lock was a file on the stick, created first: on a stick's
+// first pass that changed the image the refusal must leave as it was, and on a stick whose root
+// directory cluster was full it took the very cluster a stale entry named, so that entry looked
+// owned, the pass was not refused, and its rename freed a cluster of the root directory. The lock
+// is in /run now (beside the stick in a test). Layouts: a normal root, a full root directory
+// cluster, and the pass's own mark left stale by a cut.
+func TestIssue321ARefusedFirstPassLeavesTheStickAsItWas(t *testing.T) {
+	for _, layout := range []string{"normal root", "full root directory cluster", "a stale mark"} {
+		t.Run(layout, func(t *testing.T) { issue321FirstPassRefused(t, layout) })
+	}
+}
+
+func issue321FirstPassRefused(t *testing.T, layout string) {
+	ctx := context.Background()
+	work := t.TempDir()
+	img, mnt := vfatImageOf(t, work, 64, 8)
+	opts := bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true}
+	stale := "PIONEER/USBANLZ/P001/ANLZ0000.DAT"
+	if layout == "a stale mark" {
+		stale = "Engine Library/Database2/.rb-bridge-writeback"
+	}
+	// A PDB stick converted at its insert, and a deck edit; no write-back pass has run on it.
+	_, unmount := vfatMount(t, img, mnt)
+	issue321Copy(t, setupWriteBackStick(t, false), mnt)
+	if _, err := bridge.Convert(ctx, mnt, enginedb.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	issue321Settle() // the edit dates the row a second after the import
+	injectDeckCueEdit(t, mnt)
+	issue321Settle()
+	if layout == "a stale mark" {
+		if err := os.WriteFile(filepath.Join(mnt, filepath.FromSlash(stale)), []byte("PIONEER/USBANLZ/P001\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unmount()
+	slots := func() (free int, clusters int) { // the root directory's free 32-byte entries
+		v := openFAT32(t, img, false)
+		defer v.close()
+		chain, _ := v.chain(v.rootClus)
+		buf := make([]byte, v.clusterSize())
+		for _, c := range chain {
+			if _, err := v.f.ReadAt(buf, v.clusterOff(c)); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < len(buf); i += 32 {
+				if buf[i] == 0 || buf[i] == 0xe5 {
+					free++
+				}
+			}
+		}
+		return free, len(chain)
+	}
+	if layout == "full root directory cluster" {
+		// Short upper-case names take one entry each: two are left, and the lock's three
+		// (".rb-bridge.lock" and its long name) need a new cluster.
+		free, _ := slots()
+		_, unmount = vfatMount(t, img, mnt)
+		for i := 0; i < free-2; i++ {
+			name := strconv.Itoa(1000 + i)[1:]
+			if err := os.WriteFile(filepath.Join(mnt, "F"+name+".BIN"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		unmount()
+		if free, n := slots(); free != 2 || n != 1 {
+			t.Fatalf("the root directory has %d free entries in %d clusters, want 2 in 1", free, n)
+		}
+	}
+
+	// The cluster a new entry at the root takes next: a run on a copy creates the lock where the
+	// earlier build did (with a byte in it, so that a root with room shows the next free cluster).
+	dry := filepath.Join(work, "dry.img")
+	vfatRun(t, "cp", "--sparse=always", img, dry)
+	_, unmountDry := vfatMount(t, dry, mnt)
+	if err := os.WriteFile(filepath.Join(mnt, ".rb-bridge.lock"), []byte{0}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unmountDry()
+	v := openFAT32(t, dry, false)
+	next := v.lookup(".rb-bridge.lock").start
+	if chain, _ := v.chain(v.rootClus); len(chain) > 1 {
+		next = chain[1] // the root directory's new cluster
+	}
+	v.close()
+	if err := os.Remove(dry); err != nil {
+		t.Fatal(err)
+	}
+
+	// The stale entry a pull during an older build's pass leaves: it names that cluster, which holds
+	// its content and is free in the FAT; it still reads.
+	v = openFAT32(t, img, true)
+	e := v.lookup(stale)
+	if v.next(next) != 0 {
+		t.Fatalf("cluster %d is not free", next)
+	}
+	buf := make([]byte, v.clusterSize())
+	if _, err := v.f.ReadAt(buf, v.clusterOff(e.start)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.f.WriteAt(buf, v.clusterOff(next)); err != nil {
+		t.Fatal(err)
+	}
+	v.setStart(e, next)
+	if v.owned(v.lookup(stale)) {
+		t.Fatalf("%s still owns its clusters", stale)
+	}
+	v.close()
+	before := issue321Hash(t, img)
+	beforeImg := filepath.Join(work, "before.img")
+	vfatRun(t, "cp", "--sparse=always", img, beforeImg)
+
+	_, unmount = vfatMount(t, img, mnt)
+	if _, err := os.ReadFile(filepath.Join(mnt, filepath.FromSlash(stale))); err != nil {
+		t.Fatalf("the stale entry does not read: %v", err)
+	}
+	res, err := bridge.WriteBackCues(ctx, mnt, opts)
+	if !errors.Is(err, bridge.ErrUnownedClustersForTest) || res.FilesUpdated != 0 || !strings.Contains(err.Error(), stale) {
+		t.Errorf("the first pass on a stick with a stale entry: %+v %v, want it refused, naming %s", res, err, stale)
+	}
+	if vfatReadOnly(t, mnt) {
+		t.Error("the stick turned read-only")
+	}
+	unmount()
+	if after := issue321Hash(t, img); after != before {
+		t.Errorf("the stick changed: sha256 %s before the pass, %s after; at %s", before, after, issue321Changed(t, beforeImg, img))
+	}
+	if err = os.Remove(beforeImg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// #321 review R4 (N-2): on exFAT a temporary file a pull cut while it was written can name clusters
+// its allocation never got, and removing it at the next insert turned exFAT read-only (the replay:
+// 1 + 32 and 1 + 80 states of a second pass). There the next insert leaves staged copies where they
+// are; on FAT32 it removes them as before. A pass is caught with its staged copy (the one its mark
+// names) and its mark on the stick (both are put back after it ends, as a pull at that step leaves
+// them), then the next insert.
+func TestIssue321TheNextInsertLeavesStagedCopiesOnExFAT(t *testing.T) {
+	for _, fsType := range []string{"exfat", "vfat"} {
+		t.Run(fsType, func(t *testing.T) {
+			ctx := context.Background()
+			work := t.TempDir()
+			img, mnt := vfatImageOf(t, work, 256, 8)
+			if fsType == "exfat" {
+				if _, err := exec.LookPath("mkfs.exfat"); err != nil {
+					t.Skipf("mkfs.exfat: %v", err)
+				}
+				vfatRun(t, "mkfs.exfat", img)
+			}
+			_, unmount := fsMount(t, fsType, img, mnt)
+			defer unmount()
+			issue321Copy(t, setupWriteBackStick(t, true), mnt)
+			if _, err := bridge.Convert(ctx, mnt, enginedb.Options{}); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(mnt, "Engine Library", "Database2", "m.db")}).String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			issue321Settle()
+			issue321Edit(t, db, 1, "Left 321", 1500)
+			db.Close()
+			issue321Settle()
+			anlz := filepath.Join(mnt, "PIONEER", "USBANLZ", "P001")
+			mark := filepath.Join(mnt, "Engine Library", "Database2", ".rb-bridge-writeback")
+			var markBytes, copyBytes []byte
+			var copyName string
+			restore := bridge.SetWriteBackCutForTest(func(step string) {
+				if step != "temp "+filepath.Join(anlz, "ANLZ0000.EXT") {
+					return
+				}
+				markBytes, _ = os.ReadFile(mark) // it names the staged copy (#321 review R4)
+				for _, line := range strings.Split(string(markBytes), "\n") {
+					if name, ok := strings.CutSuffix(line, " PIONEER/USBANLZ/P001/ANLZ0000.EXT"); ok && strings.HasPrefix(name, "= ") {
+						copyName = filepath.Join(anlz, strings.TrimPrefix(name, "= "))
+						copyBytes, _ = os.ReadFile(copyName)
+					}
+				}
+			})
+			res, err := bridge.WriteBackCues(ctx, mnt, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true})
+			restore()
+			if err != nil || res.FilesUpdated == 0 || copyName == "" || len(markBytes) == 0 {
+				t.Fatalf("pass: %+v %v; staged copy %q, mark %d bytes", res, err, copyName, len(markBytes))
+			}
+			if err = os.WriteFile(mark, markBytes, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(copyName, copyBytes, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			syscall.Sync()
+			bridge.CleanWriteBackLeftovers(mnt) // the next insert
+			_, statErr := os.Stat(copyName)
+			if kept := statErr == nil; kept != (fsType == "exfat") {
+				t.Errorf("on %s the next insert kept the staged copy: %v, want %v", fsType, kept, fsType == "exfat")
+			}
+			if _, err = os.Stat(mark); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the mark is still there: %v", err)
+			}
+			if vfatReadOnly(t, mnt) {
+				t.Error("the stick turned read-only")
+			}
+			issue321ANLZSound(t, mnt)
+			issue321ExportSound(t, mnt)
+		})
 	}
 }
 

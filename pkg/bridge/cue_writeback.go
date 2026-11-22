@@ -10,10 +10,12 @@ import (
 	"io"
 	"log"
 	"math"
+	"math/rand/v2"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -278,6 +280,17 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE type='table' AND name='BridgeWritten'`).Scan(&hasWrittenTable)
 	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE type='table' AND name='BridgeAnalysis'`).Scan(&hasAnalysisTable)
 	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE type='table' AND name='BridgeSynced'`).Scan(&hasSyncedTable)
+	// A file of a cut pass was put back from its first original (CleanWriteBackLeftovers): every
+	// row is read, as if the state had no record, and on "export" the export gets the deck's cues.
+	again := readMark(engineDBDir, writeBackAgainName)
+	if again != "" {
+		hasSyncedTable = 0
+	}
+	dropAgain := func() {
+		if again != "" {
+			_ = removeFile(filepath.Join(engineDBDir, writeBackAgainName))
+		}
+	}
 	tm.firstRecord = hasSyncedTable == 0
 
 	// Only a row whose Track.lastEditTime is not the one BridgeSynced has is read (#321):
@@ -378,9 +391,9 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	// What the pass found the stick holding is kept for the session and written to the state
 	// with a pass that writes the stick anyway, or once on a stick whose state has no record
 	// yet (an earlier build's import): without it every later pass would read every row.
-	record := func(written []int64) {
+	record := func(written []int64) bool {
 		if len(written) == 0 && settle() != nil {
-			return // the read may be torn: nothing it found is kept
+			return false // the read may be torn: nothing it found is kept
 		}
 		kept := confirmed[:0]
 		for _, r := range confirmed {
@@ -403,14 +416,17 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 				}
 			}
 			recordSynced(ctx, stateDBPath, append(rows, confirmed...), written)
-			return
+			return true
 		}
 		opts.Session.add(confirmed)
+		return true
 	}
 
 	tm.candidates = time.Since(tStart)
 	if len(dirty) == 0 {
-		record(nil)
+		if record(nil) {
+			dropAgain()
+		}
 		return res, nil
 	}
 
@@ -446,9 +462,11 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		cuesDiff     bool
 		metadata     rekordbox.Metadata
 		metadataDiff bool
+		exportCues   bool // the deck's cues go to a OneLibrary export the ANLZ files already match (again)
 		seen         syncedRow
 	}
 	var changes []trackChange
+	exportCues := again == "export" && oneLibRel != ""
 
 	for _, cand := range dirty {
 		if err := ctx.Err(); err != nil {
@@ -460,15 +478,15 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 			continue
 		}
 		var nextCues []rekordbox.Cue
-		cuesDiff := false
-		if cand.cues && rbTrack.AnalysisPath != "" {
+		cuesDiff, known := false, cand.cues && rbTrack.AnalysisPath != ""
+		if known {
 			offsetSamples := trackRekordboxOffset(resolver, rbTrack.Path)
 			origCues := readStickTrackCues(resolver, rbTrack)
 			nextCues = mergeEngineCues(origCues, cand.deck, offsetSamples)
 			cuesDiff = !cuesEquivalent(origCues, nextCues)
 		}
 		metadataDiff := cand.metadata != (rekordbox.Metadata{Genre: rbTrack.Genre, Comment: rbTrack.Comment, Label: rbTrack.Label})
-		if !cuesDiff && !metadataDiff {
+		if !cuesDiff && !metadataDiff && !(exportCues && known) {
 			confirmed = append(confirmed, cand.seen)
 			continue
 		}
@@ -480,6 +498,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 			cuesDiff:     cuesDiff,
 			metadata:     cand.metadata,
 			metadataDiff: metadataDiff,
+			exportCues:   exportCues && known,
 			seen:         cand.seen,
 		})
 	}
@@ -487,7 +506,9 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	tm.edit = time.Since(tCmp) // matching each track and merging its cues with the stick's
 
 	if len(changes) == 0 {
-		record(nil)
+		if record(nil) {
+			dropAgain()
+		}
 		return res, nil
 	}
 	tWrite := time.Now()
@@ -533,7 +554,39 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 			return res, fmt.Errorf("%w: %s; the drive needs a disk check on a computer", errUnownedClusters, filepath.ToSlash(rel))
 		}
 	}
-	if err := markWriteBack(engineDBDir, dateDir, tmpDirs, targets[1:]); err != nil {
+	// The first originals' directories are made before the mark (#321 review R4), each on the
+	// stick before the entry that names it: a pull between them left a directory the FAT did not
+	// give its cluster, and reading it later turned vfat read-only.
+	// The FAT goes to the stick with the fsync of a file the pass has not written: one it may
+	// replace, read only (nothing is created on the stick before the mark).
+	backupRoot := filepath.Join(absMount, ".enginex-backup")
+	var flush *os.File
+	for _, rel := range targets[1:] {
+		if flush == nil {
+			if f, err := os.Open(resolver.FullPath(rel)); err == nil {
+				flush = f
+				defer f.Close()
+			}
+		}
+		if !hasFirstBackup(backupRoot, rel) {
+			if err := mkdirOrdered(absMount, filepath.Join(backupRoot, dateDir, filepath.Dir(filepath.FromSlash(rel))), flush); err != nil {
+				return res, err
+			}
+		}
+	}
+	// Each file's staged copy is named in the mark before it is written, so the next mount reads
+	// only that copy (#321 review R4).
+	stagedAs := make(map[string]string, len(targets)-1) // a file's full path → its staged copy's name
+	var pairs [][2]string
+	for _, rel := range targets[1:] {
+		full, kind := resolver.FullPath(rel), "wb"
+		if rel == oneLibRel {
+			kind = "onelib"
+		}
+		stagedAs[full] = newStagedName(filepath.Dir(full), kind)
+		pairs = append(pairs, [2]string{rel, stagedAs[full]})
+	}
+	if err := markWriteBack(engineDBDir, dateDir, tmpDirs, pairs); err != nil {
 		return res, err
 	}
 	finished := false
@@ -543,7 +596,6 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		}
 	}()
 
-	backupRoot := filepath.Join(absMount, ".enginex-backup")
 	oneLibUpdates := make(map[uint32][]rekordbox.Cue, len(changes))
 	oneLibMetadata := make(map[uint32]rekordbox.Metadata, len(changes))
 	pdbMetadata := make(map[uint32]rekordbox.Metadata, len(changes))
@@ -562,7 +614,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		}
 	}()
 	stageBytes := func(dst string, data []byte, export bool) error {
-		tmp, err := stageWriteFile(dst, data)
+		tmp, err := stageWriteFile(dst, stagedAs[dst], data)
 		if err != nil {
 			return err
 		}
@@ -580,6 +632,9 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		if ch.metadataDiff {
 			oneLibMetadata[ch.rbTrackID] = ch.metadata
 			pdbMetadata[ch.rbTrackID] = ch.metadata
+		}
+		if ch.exportCues {
+			oneLibUpdates[ch.rbTrackID] = ch.cues
 		}
 		if !ch.cuesDiff || ch.analysisPath == "" {
 			continue
@@ -641,7 +696,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 				return res, err
 			}
 			tm.bytes += n
-			tmpOut, err := os.CreateTemp(filepath.Dir(oneLibFull), stagedPattern("onelib", oneLibFull))
+			tmpOut, err := os.OpenFile(filepath.Join(filepath.Dir(oneLibFull), stagedAs[oneLibFull]), os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 			if err != nil {
 				return res, err
 			}
@@ -734,7 +789,9 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		writtenIDs = nil
 	}
 	writeBackCut("stamp")
-	record(writtenIDs)
+	if record(writtenIDs) {
+		dropAgain()
+	}
 	writeBackCut("state")
 	finished = true
 	return res, nil
@@ -742,10 +799,18 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 
 // writeBackMarkName lists, one per line, the stick's directories where a write-back in progress
 // may leave a temporary file (.enginex-*.tmp, and .bak-*.tmp under .enginex-backup/<date>/), and,
-// after "= ", the files it may replace.
+// after "= ", each file it may replace with the name of its staged copy beside it: "= <name>
+// <file>" (#321 review R4). A line of another form is ignored, and nothing is removed because of it.
 const writeBackMarkName = ".rb-bridge-writeback"
 
-func markWriteBack(engineDBDir, dateDir string, dirs, targets []string) error {
+// writeBackAgainName, in Engine's library directory, makes the next pass read every row: a file a
+// cut pass was replacing was put back from its first original, so the stick no longer holds what
+// the state says it does. "export" when that file was the export: the next pass then writes the
+// deck's cues of every row it reads into a OneLibrary export, whose cues it otherwise compares with
+// the ANLZ files only (#321 review R4). The next pass that finishes removes it.
+const writeBackAgainName = ".rb-bridge-writeback-again"
+
+func markWriteBack(engineDBDir, dateDir string, dirs []string, targets [][2]string) error {
 	seen := map[string]bool{}
 	var b strings.Builder
 	for _, d := range dirs {
@@ -757,23 +822,65 @@ func markWriteBack(engineDBDir, dateDir string, dirs, targets []string) error {
 		}
 	}
 	for _, t := range targets {
-		b.WriteString("= " + filepath.ToSlash(t) + "\n")
+		b.WriteString("= " + t[1] + " " + filepath.ToSlash(t[0]) + "\n")
 	}
 	return atomicWriteFile(filepath.Join(engineDBDir, writeBackMarkName), []byte(b.String()), nil)
+}
+
+// newStagedName names a staged copy in dir, short as an exFAT entry set is best kept, and new.
+func newStagedName(dir, kind string) string {
+	for {
+		name := ".enginex-" + kind + "-" + strconv.FormatUint(uint64(rand.Uint32()), 10) + ".tmp"
+		if _, err := os.Lstat(filepath.Join(dir, name)); errors.Is(err, os.ErrNotExist) {
+			return name
+		}
+	}
+}
+
+// stagedName reports whether name is a staged copy's name as newStagedName makes them.
+func stagedName(name string) bool {
+	return strings.HasPrefix(name, ".enginex-") && strings.HasSuffix(name, ".tmp") && !strings.ContainsAny(name, `/\`)
+}
+
+// markPath is the path a mark line names under mount, if it is one the clean-up may use: inside
+// the mount and through no symbolic link, which on a writable HFS+ stick could lead outside it
+// (#321 review R4). missing: a file to put back may be missing, its directory may not.
+func markPath(mount, line string, missing bool) (string, bool) {
+	rel := filepath.Clean(filepath.FromSlash(strings.TrimSpace(line)))
+	if rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	p := mount
+	parts := strings.Split(rel, string(filepath.Separator))
+	for i, part := range parts {
+		p = filepath.Join(p, part)
+		st, err := os.Lstat(p)
+		if err != nil {
+			return rel, missing && i == len(parts)-1 && errors.Is(err, os.ErrNotExist)
+		}
+		if st.Mode()&os.ModeSymlink != 0 {
+			return "", false
+		}
+	}
+	return rel, true
 }
 
 // CleanWriteBackLeftovers removes what a write-back cut by a pull left on the stick at mount:
 // a temporary file of its mark, the temporary files in the directories the mark lists, then the
 // mark. Without a mark: one look at Engine's library directory. A file whose clusters the FAT
-// does not give it stays (removeFile); so does a mark that cannot be read. First every file the
-// mark lists is put back if it is missing (putBack); if one cannot be, nothing more is removed.
-// It returns the files removed.
+// does not give it stays (removeFile); so does a mark that cannot be read, and on exFAT every
+// temporary file (#321 review R4). First every file the mark lists is put back if it is missing
+// (putBack); if one cannot be, nothing more is removed. It returns the files removed.
 func CleanWriteBackLeftovers(mount string) int {
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	n := 0
+	// On exFAT a temporary file a pull cut while it was written can name clusters its allocation
+	// does not give it, and removing it turns exFAT read-only (#321 review R4): there they stay.
+	exFAT := sync.OnceValue(func() bool { return onExFAT(mount) })
+	remove := func(m string) bool { return !exFAT() && removeFile(m) == nil }
 	matches, _ := filepath.Glob(filepath.Join(dir, ".enginex-*.tmp")) // the mark's own temp
 	for _, m := range matches {
-		if removeFile(m) == nil {
+		if remove(m) {
 			n++
 		}
 	}
@@ -783,18 +890,34 @@ func CleanWriteBackLeftovers(mount string) int {
 		return n
 	}
 	var dirs []string
-	whole := true
+	whole, again := true, ""
 	for _, line := range strings.Split(string(b), "\n") {
-		target, isTarget := strings.CutPrefix(line, "= ")
-		rel := filepath.Clean(filepath.FromSlash(strings.TrimSpace(target)))
-		if rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			continue
+		rest, isTarget := strings.CutPrefix(line, "= ")
+		name := ""
+		if isTarget {
+			var ok bool
+			if name, rest, ok = strings.Cut(rest, " "); !ok || !stagedName(name) {
+				continue
+			}
 		}
-		if !isTarget {
+		rel, ok := markPath(mount, rest, isTarget)
+		switch {
+		case !ok:
+		case !isTarget:
 			dirs = append(dirs, rel)
-		} else if !putBack(mount, rel) {
-			whole = false
+		default:
+			switch put, original := putBack(mount, rel, name); {
+			case !put:
+				whole = false
+			case original && isExport(rel):
+				again = "export"
+			case original && again == "":
+				again = "rows"
+			}
 		}
+	}
+	if again != "" && readMark(dir, writeBackAgainName) != "export" {
+		_ = writeMark(dir, writeBackAgainName, again)
 	}
 	if !whole {
 		return n // its staged copy and the mark stay for the next mount
@@ -803,7 +926,7 @@ func CleanWriteBackLeftovers(mount string) int {
 		for _, pat := range []string{".enginex-*.tmp", ".bak-*.tmp"} {
 			matches, _ := filepath.Glob(filepath.Join(mount, rel, pat))
 			for _, m := range matches {
-				if st, err := os.Lstat(m); err == nil && st.Mode().IsRegular() && removeFile(m) == nil {
+				if st, err := os.Lstat(m); err == nil && st.Mode().IsRegular() && remove(m) {
 					n++
 				}
 			}
@@ -813,50 +936,54 @@ func CleanWriteBackLeftovers(mount string) int {
 	return n
 }
 
-// stagedPattern names the staged copy of dst (os.CreateTemp), so that the next mount finds it.
-func stagedPattern(kind, dst string) string {
-	return ".enginex-" + kind + "-" + filepath.Base(dst) + "-*.tmp"
-}
-
-// putBack reports whether rel, a file a cut write-back may have replaced, is on the stick, and
-// puts it back first if it is missing. On exFAT a rename over a file rewrites two directory
-// sectors, and a pull between them leaves the file missing; the staged copy then keeps its name,
-// or loses it too when its own entries straddle the sectors (#321 review R3; FAT and HFS+ replace
-// the entry in one write). The staged copy goes back when it reads whole as its kind of file
-// (the pass renames only once every copy is written and synced), otherwise the first original
-// kept under .enginex-backup.
-func putBack(mount, rel string) bool {
-	dst := filepath.Join(mount, rel)
-	if _, err := os.Lstat(dst); !errors.Is(err, os.ErrNotExist) {
+func isExport(rel string) bool {
+	switch strings.ToLower(filepath.Base(rel)) {
+	case "export.pdb", "exportlibrary.db":
 		return true
-	}
-	copies, _ := filepath.Glob(filepath.Join(filepath.Dir(dst), stagedPattern("*", dst)))
-	for _, c := range copies {
-		if stagedWhole(c, dst) && replaceFile(c, dst) == nil {
-			log.Printf("rb-bridge: %s was missing after a cut write-back; its new copy put back", dst)
-			return true
-		}
-	}
-	dates, _ := os.ReadDir(filepath.Join(mount, ".enginex-backup"))
-	for _, d := range dates { // by name: the oldest date, the first original (ensureFirstOriginalBackup)
-		if data, err := os.ReadFile(filepath.Join(mount, ".enginex-backup", d.Name(), rel)); err == nil {
-			if old, err := stageWriteFile(dst, data); err == nil && replaceFile(old, dst) == nil {
-				log.Printf("rb-bridge: %s was missing after a cut write-back; its original put back", dst)
-				return true
-			}
-		}
 	}
 	return false
 }
 
-// stagedWhole reports whether tmp, a staged copy of dst, reads whole as dst's kind of file.
+// putBack reports whether rel, a file a cut write-back may have replaced, is on the stick, and
+// puts it back first if it is missing: its staged copy name, beside it, when that reads whole as
+// its kind of file (the pass renames only once every copy is written and synced), otherwise the
+// first original kept under .enginex-backup (original). Only the copy the mark names is read: one
+// an earlier cut left on exFAT may name clusters it was never given (#321 review R4). On exFAT a
+// rename over a file rewrites two directory sectors, and a pull between them leaves the file
+// missing; the staged copy then keeps its name, or loses it too when its own entries straddle the
+// sectors (#321 review R3; FAT and HFS+ replace the entry in one write).
+func putBack(mount, rel, name string) (put, original bool) {
+	dst := filepath.Join(mount, rel)
+	if _, err := os.Lstat(dst); !errors.Is(err, os.ErrNotExist) {
+		return true, false
+	}
+	c := filepath.Join(filepath.Dir(dst), name)
+	if st, err := os.Lstat(c); err == nil && st.Mode().IsRegular() && stagedWhole(c, dst) && replaceFile(c, dst) == nil {
+		log.Printf("rb-bridge: %s was missing after a cut write-back; its new copy put back", dst)
+		return true, false
+	}
+	dates, _ := os.ReadDir(filepath.Join(mount, ".enginex-backup"))
+	for _, d := range dates { // by name: the oldest date, the first original (ensureFirstOriginalBackup)
+		if data, err := os.ReadFile(filepath.Join(mount, ".enginex-backup", d.Name(), rel)); err == nil {
+			if old, err := stageWriteFile(dst, "", data); err == nil && replaceFile(old, dst) == nil {
+				log.Printf("rb-bridge: %s was missing after a cut write-back; its original put back, the next pass writes the deck's edits again", dst)
+				return true, true
+			}
+		}
+	}
+	return false, false
+}
+
+// stagedWhole reports whether tmp, a staged copy of dst, reads whole as dst's kind of file: an
+// export also has every page its header names (#321 review R4: a copy cut by whole pages, or
+// inside its last one, still read).
 func stagedWhole(tmp, dst string) bool {
 	switch strings.ToLower(filepath.Base(dst)) {
 	case "export.pdb":
 		_, err := rekordbox.ReadPDB(tmp)
-		return err == nil
+		return err == nil && rekordbox.CheckPDBExtent(tmp) == nil
 	case "exportlibrary.db":
-		_, err := rekordbox.ReadSQLite(context.Background(), tmp, nil)
+		_, err := rekordbox.ReadSQLiteWhole(context.Background(), tmp)
 		return err == nil
 	}
 	b, err := os.ReadFile(tmp) // an ANLZ file: its header has its length
@@ -1307,19 +1434,45 @@ func safeANLZRelPath(p string) (string, error) {
 	return clean, nil
 }
 
+// hasFirstBackup reports whether the first original of relSlash is kept under backupRoot (any date).
+func hasFirstBackup(backupRoot, relSlash string) bool {
+	entries, _ := os.ReadDir(backupRoot)
+	for _, ent := range entries {
+		if _, err := os.Stat(filepath.Join(backupRoot, ent.Name(), filepath.FromSlash(relSlash))); ent.IsDir() && err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// mkdirOrdered makes dir and its missing parents under root one at a time. On vfat an fsync writes
+// a file's own entry before the FAT, so the FAT that gives a new directory its cluster goes first
+// with the fsync of a file that has nothing to write (flush, when there is one), then the parent
+// with the entry that names it (#321 review R4).
+func mkdirOrdered(root, dir string, flush *os.File) error {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil {
+		return err
+	}
+	p := root
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if p = filepath.Join(p, part); os.Mkdir(p, 0o755) == nil {
+			if flush != nil {
+				_ = flush.Sync()
+			}
+			_ = syncDir(filepath.Dir(p))
+		} else if st, err := os.Stat(p); err != nil || !st.IsDir() {
+			return fmt.Errorf("writeback: cannot make the backup directory %s", p)
+		}
+	}
+	return nil
+}
+
 // ensureFirstOriginalBackup copies the stick's original of relSlash once; it returns the bytes copied.
 func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) (int64, error) {
 	relOS := filepath.FromSlash(relSlash)
-	if entries, err := os.ReadDir(backupRoot); err == nil {
-		for _, ent := range entries {
-			if !ent.IsDir() {
-				continue
-			}
-			existing := filepath.Join(backupRoot, ent.Name(), relOS)
-			if _, err := os.Stat(existing); err == nil {
-				return 0, nil
-			}
-		}
+	if hasFirstBackup(backupRoot, relSlash) {
+		return 0, nil
 	}
 	src := filepath.Join(mountRoot, relOS)
 	dst := filepath.Join(backupRoot, dateDir, relOS)
@@ -1363,9 +1516,16 @@ func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) 
 	return n, nil
 }
 
-// stageWriteFile writes data, synced, to the staged copy of dst (stagedPattern), beside it.
-func stageWriteFile(dst string, data []byte) (string, error) {
-	tmp, err := os.CreateTemp(filepath.Dir(dst), stagedPattern("wb", dst))
+// stageWriteFile writes data, synced, to the staged copy of dst beside it: a new file called name,
+// or, without a name, one named as os.CreateTemp names them.
+func stageWriteFile(dst, name string, data []byte) (string, error) {
+	var tmp *os.File
+	var err error
+	if name == "" {
+		tmp, err = os.CreateTemp(filepath.Dir(dst), ".enginex-wb-*.tmp")
+	} else {
+		tmp, err = os.OpenFile(filepath.Join(filepath.Dir(dst), name), os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	}
 	if err != nil {
 		return "", err
 	}

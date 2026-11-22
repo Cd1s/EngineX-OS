@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
@@ -372,7 +373,7 @@ func issue321MissingTarget(t *testing.T, oneLib bool) {
 		t.Fatalf("only %d renames: %+v", len(states), states)
 	}
 	for i, st := range states {
-		for _, copyState := range []string{"whole", "without its name", "cut in half"} {
+		for _, copyState := range []string{"whole", "without its name", "cut in half", "whole, beside an earlier cut's copy"} {
 			t.Run(itoa(i)+" "+filepath.Base(st.dst)+" "+copyState, func(t *testing.T) {
 				cut := t.TempDir()
 				issue321Copy(t, filepath.Join(cuts, itoa(i)), cut)
@@ -384,6 +385,18 @@ func issue321MissingTarget(t *testing.T, oneLib bool) {
 						t.Fatal(err)
 					}
 					want = old[st.dst]
+				case "whole, beside an earlier cut's copy":
+					// Left by an earlier cut pass (exFAT keeps them, #321 review R4): of the same kind,
+					// named to sort first, newer, and holding the original. The mark names this pass's
+					// copy, and only that one is put back.
+					earlier := tmp[:strings.LastIndex(tmp, "-")] + "-0.tmp"
+					if err := os.WriteFile(earlier, old[st.dst], 0o644); err != nil {
+						t.Fatal(err)
+					}
+					later := time.Now().Add(time.Hour)
+					if err := os.Chtimes(earlier, later, later); err != nil {
+						t.Fatal(err)
+					}
 				case "cut in half":
 					info, err := os.Stat(tmp)
 					if err != nil {
@@ -419,5 +432,40 @@ func issue321MissingTarget(t *testing.T, oneLib bool) {
 				}
 			})
 		}
+	}
+}
+
+// #321 review R4 (N-1): a pull while a first pass made its backup directories on FAT32 left one
+// whose cluster the FAT did not give it; reading it later (the next insert's clean-up, the next
+// pass's backup lookup) turned vfat read-only. They are now made before the pass's mark, each on
+// the stick before the entry that names it (mkdirOrdered; the order itself is measured by the
+// replay on a real FAT32 volume).
+func TestIssue321BackupDirectoriesAreMadeBeforeTheMark(t *testing.T) {
+	ctx := context.Background()
+	stick := setupWriteBackStick(t, true)
+	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	injectDeckCueEdit(t, stick)
+	dirs := []string{filepath.Join(".enginex-backup", "2026-11-22", "PIONEER", "USBANLZ", "P001"), filepath.Join(".enginex-backup", "2026-11-22", "PIONEER", "rekordbox")}
+	var atMark []string
+	restore := bridge.SetWriteBackCutForTest(func(step string) {
+		if step != "temp "+filepath.Join(stick, "Engine Library", "Database2", ".rb-bridge-writeback") {
+			return
+		}
+		for _, d := range dirs {
+			if st, err := os.Stat(filepath.Join(stick, d)); err != nil || !st.IsDir() {
+				atMark = append(atMark, d)
+			}
+		}
+		atMark = append(atMark, "") // the mark was written
+	})
+	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true})
+	restore()
+	if err != nil || res.FilesUpdated == 0 {
+		t.Fatalf("pass: %+v %v", res, err)
+	}
+	if len(atMark) != 1 {
+		t.Fatalf("when the pass wrote its mark, these backup directories were not made yet: %q (or no mark: %d)", atMark, len(atMark))
 	}
 }
