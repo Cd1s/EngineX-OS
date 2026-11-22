@@ -841,7 +841,7 @@ function run(opts = {}) {
                  isStreamingTrack: !!opts.streaming, streamingProviderName: ''};
     const trackList = {isStemsList: !!opts.stemsList,
                        pCurrentIndex: {translator: {unnormalized: -1}}};
-    const root = {scIsAZ04: !!opts.az04, scScope: opts.scope || '', scT: s => s,
+    const root = {scIsAZ04: !!opts.az04, scScope: opts.scope || '', scTidalLoggedIn: !!opts.tidalLoggedIn, scT: s => s,
                   scStemStream: id => {calls.push(['stream', id]); return !!opts.streaming;}};
     const Style = {systemBlue01Color: 'blue'};
     const actions = (opts.labels || STOCK).map((label, i) => ({
@@ -905,10 +905,14 @@ assert.strictEqual(routed.current, 7);
 const linked = run({link: true, deck: 3, commit: 0});
 assert.deepStrictEqual(linked.labels, ['Deck 3', stock[1]]);
 assert.deepStrictEqual(linked.writes, {'/Client/Librarian/LoadToDeck3': true});
-// #332: Tidal streaming tracks do not offer Stems on either swipe; local tracks in Tidal scope still do.
-const tidalStream = run({streaming: true, scope: 'tidal'});
-assert.deepStrictEqual(tidalStream.labels, stock);
-assert.deepStrictEqual(tidalStream.colors, ['stock0', 'stock1']);
+// #332: Real Tidal streaming tracks do not offer Stems on either swipe; gateway tracks in Tidal scope (no Tidal account) and local tracks still do.
+const realTidal = run({streaming: true, scope: 'tidal', tidalLoggedIn: true});
+assert.deepStrictEqual(realTidal.labels, stock);
+assert.deepStrictEqual(realTidal.colors, ['stock0', 'stock1']);
+
+const gatewayTrackInTidalScope = run({streaming: true, scope: 'tidal', tidalLoggedIn: false, commit: 2});
+assert.deepStrictEqual(gatewayTrackInTidalScope.labels, [...stock, 'Stems']);
+assert.deepStrictEqual(gatewayTrackInTidalScope.calls, [['stream', 99]]);
 
 const tidalLocal = run({streaming: false, scope: 'tidal', commit: 2});
 assert.deepStrictEqual(tidalLocal.labels, [...stock, 'Stems']);
@@ -11905,6 +11909,9 @@ const root = {{
     scStemMark: (ids, mark) => scStemMark(ids, mark),
     scStemFailSweep: () => scStemFailSweep(),
     scNoteService: () => {{}},
+    scStemPending: () => ({{}}),
+    scStemMax: 10,
+    scStemAsk: () => 1,
     get scStemRows() {{ return scStemRows; }},
     scStemFailAt,
 }};
@@ -11916,14 +11923,24 @@ let scStemTotal = 0, scStemDone = 0;
 {stream_fn}
 {swap_fn}
 
-// 1. Tidal scope prevents scStemStream from making requests or marking fail
+// 1. Real Tidal track prevents scStemStream from making requests or marking fail
 assert.equal(scStemStream('u123'), true);
-assert.equal(xhrs.length, 0, 'scStemStream must not send XMLHttpRequest for Tidal track');
-assert.equal(scStemRows['123'], undefined, 'scStemStream must not mark Tidal track');
+assert.equal(xhrs.length, 0, 'scStemStream must not send XMLHttpRequest for real Tidal track');
+assert.equal(scStemRows['123'], undefined, 'scStemStream must not mark real Tidal track');
 
-// 2. Tidal scope prevents scStemState from showing any state
+// Gateway track in Tidal scope (no Tidal account) still requests /v1/enginex/stems/source (#332)
+root.scTidalLoggedIn = false;
+assert.equal(scStemStream('u123'), true);
+assert.equal(xhrs.length, 1, 'scStemStream must send XMLHttpRequest for gateway track in Tidal scope');
+assert.equal(xhrs[0].url, 'http://127.0.0.1:8080/v1/enginex/stems/source?id=123');
+assert.equal(scStemRows['123'], 'wait');
+
+// 2. Real Tidal track prevents scStemState from showing any state; gateway track in Tidal scope keeps state
+root.scTidalLoggedIn = true;
 scStemRows['123'] = 'fail';
-assert.equal(scStemState('u123'), '', 'scStemState must return empty string in Tidal scope');
+assert.equal(scStemState('u123'), '', 'scStemState must return empty string for real Tidal track');
+root.scTidalLoggedIn = false;
+assert.equal(scStemState('u123'), 'fail', 'scStemState returns fail state for gateway track in Tidal scope');
 root.scScope = 'netease';
 assert.equal(scStemState('u123'), 'fail', 'scStemState returns fail state in netease scope');
 
