@@ -841,7 +841,7 @@ function run(opts = {}) {
                  isStreamingTrack: !!opts.streaming, streamingProviderName: ''};
     const trackList = {isStemsList: !!opts.stemsList,
                        pCurrentIndex: {translator: {unnormalized: -1}}};
-    const root = {scIsAZ04: !!opts.az04, scT: s => s,
+    const root = {scIsAZ04: !!opts.az04, scScope: opts.scope || '', scT: s => s,
                   scStemStream: id => {calls.push(['stream', id]); return !!opts.streaming;}};
     const Style = {systemBlue01Color: 'blue'};
     const actions = (opts.labels || STOCK).map((label, i) => ({
@@ -905,6 +905,14 @@ assert.strictEqual(routed.current, 7);
 const linked = run({link: true, deck: 3, commit: 0});
 assert.deepStrictEqual(linked.labels, ['Deck 3', stock[1]]);
 assert.deepStrictEqual(linked.writes, {'/Client/Librarian/LoadToDeck3': true});
+// #332: Tidal streaming tracks do not offer Stems on either swipe; local tracks in Tidal scope still do.
+const tidalStream = run({streaming: true, scope: 'tidal'});
+assert.deepStrictEqual(tidalStream.labels, stock);
+assert.deepStrictEqual(tidalStream.colors, ['stock0', 'stock1']);
+
+const tidalLocal = run({streaming: false, scope: 'tidal', commit: 2});
+assert.deepStrictEqual(tidalLocal.labels, [...stock, 'Stems']);
+assert.deepStrictEqual(tidalLocal.calls, [['stream', 42], ['render', '42']]);
 """
                             stock = [f"Deck {deck}", "Prepare" if side == "left" else "Load"]
                             for key, value in (
@@ -11846,6 +11854,86 @@ assert.deepStrictEqual(evalMenuRoles('Engine Remote Library', false), ['song', '
 assert.deepStrictEqual(evalMenuRoles('EngineRemoteLibrary', true), ['song', 'bpm', 'artist', 'key', 'rating', 'length', 'dateImported', 'playOrder']);
 assert.deepStrictEqual(evalMenuRoles('TIDAL', false), ['song', 'bpm', 'artist', 'key', 'rating', 'length']);
 assert.deepStrictEqual(evalMenuRoles('Spotify', true), ['song', 'bpm', 'artist', 'key', 'rating', 'length', 'playOrder']);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_tidal_stems_prevented_and_failure_cleared_on_load(self):
+        """#332: Tidal tracks never request stems, never display download failure,
+        and any failed streaming row immediately clears when loaded to a deck."""
+        main = bp.SERVICES_MAIN
+        stream_fn = re.search(r"function scStemStream\(uid\) \{[\s\S]*?\n\t\}", main).group(0)
+        state_fn = re.search(r"function scStemState\(uid\) \{[\s\S]*?\n\t\}", main).group(0)
+        mark_fn = re.search(r"function scStemMark\(ids, mark\) \{[\s\S]*?\n\t\}", main).group(0)
+        sweep_fn = re.search(r"function scStemFailSweep\(\) \{[\s\S]*?\n\t\}", main).group(0)
+        swap_fn = re.search(r"function scSwapStemmed\(deck, uri\) \{[\s\S]*?\n\t\}", main).group(0)
+        place_fn = re.search(r"function scStemPlace\(mark, total, done\) \{[\s\S]*?\n\t\}", main).group(0)
+        script = f"""
+const assert = require('assert');
+String.prototype.arg = function(v) {{ return this.replace(/%1/g, v); }};
+let now = 1000;
+Date.now = () => now;
+const xhrs = [];
+class XMLHttpRequest {{
+    open(m, u) {{ this.url = u; }}
+    send() {{ xhrs.push(this); }}
+}}
+let scStemRows = {{}};
+const scStemFailAt = {{}};
+const scStemFailed = {{
+    interval: 10000,
+    running: false,
+    restart() {{ this.running = true; this.due = now + this.interval; }},
+}};
+const Planck = {{
+    librarianController: {{
+        collectionController: {{
+            getTrackUrisFromUniversalIds: ids => 'uri=streaming://TIDAL/Track/' + String(ids[0]).replace(/^u/, ''),
+        }},
+    }},
+    getProperty: () => ({{translator: {{state: false, string: ''}}}}),
+}};
+const root = {{
+    scScope: 'tidal',
+    scTidalLoggedIn: true,
+    scLoadSeq: {{}},
+    scDeckList: () => [1, 2],
+    scDeckLocked: () => false,
+    scStemMark: (ids, mark) => scStemMark(ids, mark),
+    scStemFailSweep: () => scStemFailSweep(),
+    scNoteService: () => {{}},
+    get scStemRows() {{ return scStemRows; }},
+    scStemFailAt,
+}};
+let scStemTotal = 0, scStemDone = 0;
+{place_fn}
+{mark_fn}
+{sweep_fn}
+{state_fn}
+{stream_fn}
+{swap_fn}
+
+// 1. Tidal scope prevents scStemStream from making requests or marking fail
+assert.equal(scStemStream('u123'), true);
+assert.equal(xhrs.length, 0, 'scStemStream must not send XMLHttpRequest for Tidal track');
+assert.equal(scStemRows['123'], undefined, 'scStemStream must not mark Tidal track');
+
+// 2. Tidal scope prevents scStemState from showing any state
+scStemRows['123'] = 'fail';
+assert.equal(scStemState('u123'), '', 'scStemState must return empty string in Tidal scope');
+root.scScope = 'netease';
+assert.equal(scStemState('u123'), 'fail', 'scStemState returns fail state in netease scope');
+
+// 3. Loading a failed track on a deck immediately clears the fail mark (#332)
+scStemFailAt['123'] = now;
+scStemFailed.restart();
+assert.equal(scStemRows['123'], 'fail');
+scSwapStemmed(1, 'streaming://TIDAL/Track/123');
+assert.equal(scStemRows['123'], undefined, 'scSwapStemmed must clear fail mark when song is loaded');
+assert.equal(scStemFailAt['123'], undefined, 'scSwapStemmed must remove failed timestamp');
 """
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)

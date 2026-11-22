@@ -4994,6 +4994,7 @@ SERVICES_MAIN = """
 	}
 	// A track list row's state, by Engine's id for the row.
 	function scStemState(uid) {
+		if (typeof root !== "undefined" && root && root.scScope === "tidal") return ""
 		const rows = scStemRows, total = scStemTotal, done = scStemDone
 		if (!uid || !Object.keys(rows).length) return ""
 		const m = /uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)/.exec(Planck.librarianController.collectionController.getTrackUrisFromUniversalIds([uid]) || "")
@@ -5045,6 +5046,7 @@ SERVICES_MAIN = """
 		const lib = Planck.librarianController.collectionController
 		const m = /uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)/.exec(lib.getTrackUrisFromUniversalIds([uid]) || "")
 		if (!m) return false
+		if (typeof root !== "undefined" && root && root.scScope === "tidal") return true
 		// The service's track id from the row's uri: every row of one track, in any list, has it (the rows' own ids are per list),
 		// so it is the one key of the row marks, the download and the queue.
 		const gid = m[1]
@@ -5264,6 +5266,7 @@ SERVICES_MAIN = """
 		// (TIDAL disabled in Sources keeps the pairing) the gateway can still be what plays, and "tidal" above is only the mark's default.
 		const real = root.scScope === "tidal" && root.scTidalLoggedIn
 		root.scNoteService(deck, m ? slot : "") // the last track's service must not outlive it
+		if (m && typeof root !== "undefined" && root && root.scStemRows && root.scStemRows[m[1]] === "fail") { if (root.scStemMark) root.scStemMark([m[1]], ""); if (root.scStemFailSweep) root.scStemFailSweep() }
 		if (!m) return
 		const x = new XMLHttpRequest()
 		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/local?id=" + m[1])
@@ -8344,7 +8347,7 @@ def edits(dev: bool):
         # Engine offers streamed rows only Prepare; add Stems (see scStemStream).
         out[v + "BrowseView/Components/Components/SwipeLeftItem.qml"] = [
             ("	readonly property list<string> actionLabels: leftActions.map( action => action.display.label )\n",
-             '	readonly property bool scStem: !(typeof root !== "undefined" && root && root.scIsAZ04) && String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/") && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
+             '	readonly property bool scStem: !(typeof root !== "undefined" && root && (root.scIsAZ04 || root.scScope === "tidal")) && String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/") && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
              "	readonly property list<string> actionLabels: leftActions.map( action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : action.display.label ).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
             ("leftActions.map( action => action.display.commitMessage )", "leftActions.map( action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : action.display.commitMessage ).concat(scStem ? [root.scT(\"Stems\")] : [])"),
             ("leftActions.map( action => action.display.color )", "leftActions.map( action => action.display.color ).concat(scStem ? [Style.systemBlue01Color] : [])"),
@@ -8542,7 +8545,7 @@ def edits(dev: bool):
             swipe_edits = [
                 (f"    readonly property list<string> actionLabels: {a}.map(action => action.display.label)\n",
                  '    property bool scStemBusy: false\n'
-                 '    readonly property bool scStem: !(typeof root !== "undefined" && root && root.scIsAZ04) && !(typeof trackList !== "undefined" && trackList && trackList.isStemsList) && !Planck.librarianController.devicesController.isCurrentDeviceNetworkDrive && !!(row.isStreamingTrack || row.streamingProviderName || String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/") || (row.modelData && row.modelData.trackId > 0)) && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
+                 '    readonly property bool scStem: !(typeof root !== "undefined" && root && root.scIsAZ04) && !(typeof trackList !== "undefined" && trackList && trackList.isStemsList) && !Planck.librarianController.devicesController.isCurrentDeviceNetworkDrive && ((row.isStreamingTrack || row.streamingProviderName || String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/")) ? !(typeof root !== "undefined" && root && root.scScope === "tidal") : !!(row.modelData && row.modelData.trackId > 0)) && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
                  f"    readonly property int scDeck: root.scSwipeDeck({right})\n"
                  "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
                  f"    readonly property list<string> actionLabels: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : scLabel(action.display.label)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),

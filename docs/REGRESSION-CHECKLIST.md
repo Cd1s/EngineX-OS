@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (399 Rows)
+## Regression Table (400 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -414,6 +414,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 397 | **Boot safety test isolates rb-bridge and stream-sync inside its temporary root and never calls host /usr/local/bin/rb-bridge** | `tests/test_boot_safety.sh` | Release workflow Step 2 |
 
 | 398 | **Official Mods: club rollback, MIDI poll bound, jog-logo apply** | `agent/5306-hunt-fixes-3` (`cfa6d6be`) | Force a failed service restore, poll without acknowledgements, and fail the first marker write after the original-logo copy: `minimal-club-mode::TestRollbackKeepsStateWhenAStartDoesNotTakeEffect`, `midi-controller-mapper::TestInflightBatchesStayBoundedWithoutAck`, and `jog-logo-studio::TestApplyWorksAgainAfterAFailedMarkerSave`; `paused.json` remains `restore-needed`, inflight batches stay at or below 65, and the original logo has no stale unowned backup | Release workflow Step 2; real-deck mod lifecycle and media-fault recipe |
+| 400 | **Tidal streaming tracks do not offer Stems on either swipe, never request stems/source, and loading a song immediately clears any failed download mark** (#332): real Tidal streams cannot be downloaded or stemmed. The swipe menu on PRIME GO+ (and all models) excludes Tidal streaming tracks from Stems (`root.scScope === "tidal"`), `scStemStream` returns `true` immediately in Tidal scope without firing an XMLHttpRequest that 404s (`step=source-failed status=404`), `scStemState` returns empty string in Tidal scope, and loading a song on a deck (`scSwapStemmed`) immediately clears any `fail` mark and sweep timer instead of leaving the 'Download failed' sign lingering for 10 seconds | #332 | `tools/az01-packer/test_ui_mod.py::PrimeGoSwipeStemsTest`, `tools/az01-packer/test_ui_mod.py::StreamingStemsProgressTest::test_tidal_stems_prevented_and_failure_cleared_on_load` | Real-deck / sandbox: browse Tidal songs, no Stems swipe option appears; loading song clears any failed state |
 
 ## Automated Test Gaps (`[NO AUTOMATED TEST]`)
 
