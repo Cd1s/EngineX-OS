@@ -22,13 +22,15 @@
 #   rem-order              0 bytes free, with a file of every class: all classes are used, the stream cache only as far as needed
 #   rem-upd                rem-order on the first boot after an update: the room made is used to install both
 #   free2 free3            rem-order again: the three runs that time the freeing (steps.tsv, step prepare)
+#   acct                   the guard's sign-in write meets a real ENOSPC: a tmpfs of one page holds the DJ's StreamingAccounts.json,
+#                          so the guard's temporary copy has no room; the file must come out byte for byte as it went in
 # normal runs prepare three times in a row for the timing of the step when there is room.
 set -euo pipefail
 export LC_ALL=C
 SELF=$(realpath "$0")
 REPO=$(cd "$(dirname "$SELF")/../.." && pwd)
 DATA_MIB=512
-SCENARIOS='normal full0 full1m full20m upd0 upd1m upd20m rem-early rem-order rem-upd free2 free3'
+SCENARIOS='normal full0 full1m full20m upd0 upd1m upd20m rem-early rem-order rem-upd free2 free3 acct'
 KIB=1024
 
 if [ "${1:-}" != --inner ]; then
@@ -261,6 +263,16 @@ mkdir -p "$R/run/sshd"
 step sshd-t in_root /usr/sbin/sshd -t -f /usr/share/enginex/sshd_config
 [ "$SCEN" != install ] || printf 'lang=en\n' > "$C/data/enginex/ui/settings.conf"
 step guard-pre in_root /etc/enginex/engine-ui-guard pre
+# #5306, the guard's accounts write (PM-approved patch): it adds the TIDAL entry with `awk > $accounts.tmp` and then `mv`. On a
+# one-page tmpfs that already holds the DJ's file the temporary copy cannot be written (ENOSPC, deterministic, no ext4 timing in it).
+if [ "$SCEN" = acct ]; then
+    mkdir -p "$R/run/acct"
+    mount -t tmpfs -o size=4k tmpfs "$R/run/acct"
+    cp "$C/accounts.seed" "$R/run/acct/StreamingAccounts.json"
+    step guard-pre-acct in_root env ENGINEX_STREAMING_ACCOUNTS=/run/acct/StreamingAccounts.json /etc/enginex/engine-ui-guard pre
+    check "$SCEN: with no room for its temporary copy the guard leaves the DJ's StreamingAccounts.json byte for byte as it was" \
+        cmp "$C/accounts.seed" "$R/run/acct/StreamingAccounts.json"
+fi
 # The suite is unpacked by the first service that starts; the retired database watch exits 0 at once after it.
 step suite-unpack in_root /usr/local/bin/engine-guardian --watch
 
@@ -343,14 +355,7 @@ esac
 engine_conf="$C/data/.config/jp07.user.settings/AIR Music Technology/Engine.conf"
 check "$SCEN: Engine.conf is never cut short (kept as it was, or rewritten whole)" \
     bash -c 'f=$1; [ "$(wc -c < "$f")" -ge "$(cat "$2")" ] && grep -q "^\[TimeDateSettings\]" "$f" && grep -q "^TZEnvVar=" "$f"' x "$engine_conf" "$C/engine-conf.size"
-# The guard's `pre` adds the TIDAL entry for the gateway with `awk ... > $accounts.tmp; mv` and does not look at awk's status:
-# on a disk with no room it can put an empty file in the DJ's place. That line is outside this change (PM decision 5: nothing
-# else in the guard changes); it is reported as KNOWN, not hidden, with the proposed patch in the report.
-if python3 -I -c 'import json,sys; a=json.load(open(sys.argv[1])); sys.exit(0 if "dj-own-token" in a.get("Deezer", "") else 1)' "$C/data/StreamingAccounts.json" 2> /dev/null; then
-    pass "$SCEN: the DJ's streaming sign-ins are still in StreamingAccounts.json after the guard's pre"
-elif [ ! -s "$C/data/StreamingAccounts.json" ] && grep -q 'No space left' "$C/guard-pre.log"; then
-    echo "KNOWN $SCEN: the guard's pre replaced StreamingAccounts.json by an empty file for want of room (engine-ui-guard accounts write; not changed here)" | tee -a "$W/results.txt"
-else
-    fail "$SCEN: the DJ's streaming sign-ins are gone from StreamingAccounts.json"
-fi
+# The guard's `pre` adds the TIDAL entry to the DJ's sign-ins: whatever the disk did, the DJ's entry must still be there.
+check "$SCEN: the DJ's streaming sign-ins are still in StreamingAccounts.json after the guard's pre" \
+    python3 -I -c 'import json,sys; a=json.load(open(sys.argv[1])); sys.exit(0 if "dj-own-token" in a.get("Deezer", "") else 1)' "$C/data/StreamingAccounts.json"
 echo done > "$C/done"

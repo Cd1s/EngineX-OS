@@ -716,6 +716,14 @@ rm -rf "$ENGINEX_UI_DIR" "$guard_run"
 for result in signal core-dump exit-code; do SERVICE_RESULT=$result sh "$GUARD" stop; sh "$GUARD" pre; done
 [[ -e $ENGINEX_UI_DIR/safe-mode && ! -e $guard_run/safe-mode ]] || fail 'with room the safe-mode marker stays where it always was'
 ok 'the guard keeps its failure counter and safe-mode marker in the run-time directory when /data takes no more data (#5306)'
+# #5306 (PM-approved): when the disk takes no data the guard keeps the DJ's sign-ins as they are. Its temporary copy of
+# StreamingAccounts.json cannot be written (EFBIG stands in for ENOSPC; awk then leaves an empty copy and says 0), and the
+# empty copy must not replace the file.
+rm -rf "$ENGINEX_UI_DIR"; printf '{\n    "Deezer": "{\\"accessToken\\":\\"dj-own-token\\"}"\n}\n' > "$ENGINEX_STREAMING_ACCOUNTS"
+cp "$ENGINEX_STREAMING_ACCOUNTS" "$TMP/accounts.seed"
+( trap '' XFSZ; ulimit -f 0; exec sh "$GUARD" pre ) > /dev/null 2>&1 || :
+cmp -s "$TMP/accounts.seed" "$ENGINEX_STREAMING_ACCOUNTS" || fail 'with no room for its temporary copy the guard must keep StreamingAccounts.json as it is'
+ok 'the guard keeps the DJ sign-ins as they are when its temporary copy cannot be written (#5306)'
 rm -rf "$ENGINEX_UI_DIR" "$guard_run"; SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre   # the state the next tests expect
 # BH-GF3-6: the UAC2 gadget offers the computer the sample rate chosen in the Web Console (it was
 # always 48000), also when the gadget already exists; an unsupported rate is refused.
