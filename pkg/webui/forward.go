@@ -13,10 +13,16 @@ import (
 const ForwardAddr = "127.0.0.1:8081"
 
 // lanOnly reports a route that units on the LAN call with no login: a linked player reads this
-// deck's state and the loaded track (/peer/), Spotify's app signs the deck in (/spotify-connect).
+// deck's state and the loaded track (/peer/), Spotify's app signs the deck in (/spotify-connect),
+// a computer listens to the Live Stream (/live.wav and its two companions).
 func lanOnly(p string) bool {
 	clean := path.Clean("/"+p) + "/"
-	return strings.HasPrefix(clean, "/peer/") || strings.HasPrefix(clean, "/spotify-connect/")
+	for _, prefix := range []string{"/peer/", "/spotify-connect/", "/live.wav/", "/live.mp3/", "/live-header.wav/"} {
+		if strings.HasPrefix(clean, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ForwardHandler is the handler for ForwardAddr: the console, behind its login, without the
