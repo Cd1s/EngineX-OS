@@ -24,6 +24,34 @@ spec.loader.exec_module(bp)
 SRC = BUILD_PACKS.read_text()
 
 
+def extract_qml_js_block(text, marker, start=0):
+    """Return the balanced JavaScript block beginning at a QML handler marker."""
+    marker_at = text.index(marker, start)
+    brace_at = text.index("{", marker_at)
+    depth = 0
+    quote = None
+    escaped = False
+    for index in range(brace_at, len(text)):
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in "'\"`":
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace_at:index + 1]
+    raise AssertionError(f"unclosed QML JavaScript block: {marker}")
+
+
 class InternalStreamingStorageTest(unittest.TestCase):
     def test_launch_registers_private_internal_library_without_changing_other_drives(self):
         guard = REPO / "rootfs-overlay/etc/enginex/engine-ui-guard"
@@ -11022,6 +11050,8 @@ assert.deepEqual(
                 self.assertIn("onVisibleChanged: if (!visible) scPendingSeek = -1", tl)
                 self.assertIn("previewItem.scPendingSeek = positionToSet", tl)
                 self.assertIn("Math.max(0, Math.min(1, (mouse.x - albumArtImageItem.width) / barLength))", tl)
+                self.assertIn("overviewItem.mapFromItem(row, mouse.x, mouse.y)", tl)
+                self.assertIn("const inPreviewWaveform = overviewItem.visible", tl)
 
         # Verify the actual JS logic for first tap (start+seek), second tap (seek), album-art tap, and hide.
         js = """
@@ -11036,6 +11066,13 @@ const Planck = {
 };
 const mainInfo = { width: 500 };
 const albumArtImageItem = { width: 100 };
+const overviewItem = {
+    visible: true,
+    width: 400,
+    mapFromItem(_row, x, _y) { return { x: x - 100, y: 10 }; },
+    contains(point) { return point.x >= 0 && point.x <= this.width && point.y >= 0 && point.y <= 100; }
+};
+const row = {};
 const previewItem = {
     isListening: false,
     visible: true,
@@ -11061,14 +11098,18 @@ function handleClick(mouseX, inAlbumArt) {
     if (!inAlbumArt) {
         const barLength = mainInfo.width - albumArtImageItem.width;
         if (barLength > 0) {
-            const positionToSet = Math.max(0, Math.min(1, (mouseX - albumArtImageItem.width) / barLength));
-            if (!previewItem.isListening) {
-                previewItem.scPendingSeek = positionToSet;
-                previewItem.pressed();
-            }
             if (previewItem.isListening) {
+                const positionToSet = Math.max(0, Math.min(1, (mouseX - albumArtImageItem.width) / barLength));
                 previewItem.scPendingSeek = -1;
                 Planck.getProperty("/Client/Librarian/Preview/Position").translator.value = positionToSet;
+            } else {
+                const waveformPoint = overviewItem.mapFromItem(row, mouseX, 10);
+                const inPreviewWaveform = overviewItem.visible && overviewItem.contains(waveformPoint);
+                if (inPreviewWaveform && overviewItem.width > 0) {
+                    const positionToSet = Math.max(0, Math.min(1, waveformPoint.x / overviewItem.width));
+                    previewItem.scPendingSeek = positionToSet;
+                    previewItem.pressed();
+                }
             }
         }
     }
@@ -11106,6 +11147,149 @@ assert.equal(previewItem.scPendingSeek, -1);
 """
         res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
+
+
+    def test_preview_idle_tap_only_starts_on_drawn_waveform_337(self):
+        """#337: execute the generated row handler on both QML base variants."""
+        for version, skin in (("5.3.0", "Embedded"), ("5.0.4", "EmbeddedCommon")):
+            qrc = LAB / version / "qrc"
+            self.assertTrue(qrc.is_dir(), str(qrc))
+            with self.subTest(version=version), tempfile.TemporaryDirectory(prefix=f"preview-waveform-{version}-") as tmp:
+                out = Path(tmp) / "packs"
+                built = subprocess.run(
+                    ["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(built.returncode, 0, built.stderr)
+                track_list = (
+                    out / "en" / f"Skins/{skin}/Views/BrowseView/Components/TrackList.qml"
+                ).read_text(encoding="utf-8")
+                row_marker = "onClicked: mouse => {"
+                if row_marker not in track_list:
+                    row_marker = "onClicked: (mouse) => {"
+                row_handler = extract_qml_js_block(track_list, row_marker)
+                preview_at = track_list.index("id: previewItem")
+                listening_handler = extract_qml_js_block(
+                    track_list, "onIsListeningChanged:", preview_at
+                )
+                visible_match = re.search(
+                    r"onVisibleChanged:\s*(if \(!visible\) scPendingSeek = -1)",
+                    track_list[preview_at:],
+                )
+                self.assertIsNotNone(visible_match)
+                visible_handler = visible_match.group(1)
+                js = f"""
+const assert = require('node:assert/strict');
+let positions = [], pressedCount = 0;
+const isCurrentRow = true;
+const isHybridModeSource = false;
+function mapToItem(_item, x, y) {{ return {{ x, y }}; }}
+const row = {{ offsetX: 0, offsetY: 0, modelData: {{ rowType: 0 }} }};
+const pSongEditMode = {{ translator: {{ state: false }} }};
+const trackList = {{ browseBehaviorIsOpen: true }};
+const PlanckGUI = {{ views: {{ browseViewController: {{ showSingleLibraryView: false }} }} }};
+const HybridModeRowType = {{ Playlist: 1 }};
+const hasChildrenIcon = {{ width: 0, height: 0, mapFromItem() {{ return {{ x: 0, y: 0 }}; }} }};
+const Qt = {{ point: (x, y) => ({{ x, y }}) }};
+const Planck = {{
+    getProperty(path) {{
+        assert.equal(path, "/Client/Librarian/Preview/Position");
+        return {{ translator: {{ set value(v) {{ positions.push(v); }} }} }};
+    }}
+}};
+const mainInfo = {{ width: 600 }};
+const albumArtImageItem = {{
+    width: 100,
+    contains(point) {{ return point.x >= 0 && point.x < this.width && point.y >= 0 && point.y < 100; }}
+}};
+const overviewItem = {{
+    visible: true,
+    x: 200,
+    y: 20,
+    width: 200,
+    height: 60,
+    mapFromItem(source, x, y) {{ return {{ x: x - source.offsetX - this.x, y: y - source.offsetY - this.y }}; }},
+    contains(point) {{ return point.x >= 0 && point.x < this.width && point.y >= 0 && point.y < this.height; }}
+}};
+const previewItem = {{
+    visible: true,
+    isListening: false,
+    scPendingSeek: -1,
+    pressed() {{ pressedCount++; }},
+    onIsListeningChanged() {{ with (this) {{ {listening_handler} }} }}
+}};
+previewItem.onVisibleChanged = function() {{ with (this) {{ {visible_handler} }} }};
+function rowClicked(mouse) {row_handler}
+function reset() {{
+    positions = [];
+    pressedCount = 0;
+    previewItem.isListening = false;
+    previewItem.scPendingSeek = -1;
+    previewItem.visible = true;
+    overviewItem.visible = true;
+    overviewItem.width = 200;
+    overviewItem.height = 60;
+    row.offsetX = 0;
+    row.offsetY = 0;
+}}
+// Title/metadata area stays selection-only while idle.
+reset();
+rowClicked({{ x: 150, y: 50 }});
+assert.equal(pressedCount, 0);
+assert.equal(previewItem.scPendingSeek, -1);
+// The left/top waveform edges are inside. The local x maps to the pending seek.
+reset();
+rowClicked({{ x: 200, y: 20 }});
+assert.equal(pressedCount, 1);
+assert.equal(previewItem.scPendingSeek, 0);
+// A scrolled row still maps through the real row-to-overview transform.
+reset();
+row.offsetX = 17;
+row.offsetY = 9;
+rowClicked({{ x: 317, y: 59 }});
+assert.equal(pressedCount, 1);
+assert.equal(previewItem.scPendingSeek, 0.5);
+// Right/bottom edges and vertical margins are outside the drawn item.
+for (const point of [{{ x: 400, y: 50 }}, {{ x: 300, y: 80 }}, {{ x: 300, y: 19 }}, {{ x: 150, y: 50 }}]) {{
+    reset();
+    rowClicked(point);
+    assert.equal(pressedCount, 0, JSON.stringify(point));
+    assert.equal(previewItem.scPendingSeek, -1, JSON.stringify(point));
+}}
+// Hidden and zero-width overviews cannot start preview.
+for (const state of [{{ visible: false, width: 200 }}, {{ visible: true, width: 0 }}]) {{
+    reset();
+    overviewItem.visible = state.visible;
+    overviewItem.width = state.width;
+    rowClicked({{ x: 300, y: 50 }});
+    assert.equal(pressedCount, 0);
+    assert.equal(previewItem.scPendingSeek, -1);
+}}
+// Cover art keeps its toggle and clears a queued seek.
+reset();
+previewItem.scPendingSeek = 0.5;
+rowClicked({{ x: 50, y: 50 }});
+assert.equal(pressedCount, 1);
+assert.equal(previewItem.scPendingSeek, -1);
+// Listening seek remains row-wide and uses the #270 clamp.
+reset();
+previewItem.isListening = true;
+rowClicked({{ x: 150, y: 50 }});
+assert.equal(pressedCount, 0);
+assert.deepEqual(positions, [0.1]);
+rowClicked({{ x: 900, y: 50 }});
+assert.deepEqual(positions, [0.1, 1]);
+// Pending seek is applied by the generated Preview handler when listening begins.
+reset();
+rowClicked({{ x: 300, y: 50 }});
+assert.equal(previewItem.scPendingSeek, 0.5);
+previewItem.isListening = true;
+previewItem.onIsListeningChanged();
+assert.deepEqual(positions, [0.5]);
+"""
+                result = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class StreamingStemsProgressTest(unittest.TestCase):
