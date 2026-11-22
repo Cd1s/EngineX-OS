@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "boards": ["JP07", "JP08", "JP13", "JP14"],
+  "timing": {"holdMs": 500, "doubleMs": 300, "learnSeconds": 30},
+  "actions": [
+    {"id": "beat_jump_back", "kind": "stock", "root": "track", "path": "BeatJump/JumpBack", "output": "action",
+     "label": {"en": "Beat jump back", "zh-Hans": "向后跳拍", "zh-Hant": "向後跳拍", "es": "Salto de tiempos atrás"}},
+    {"id": "beat_jump_forward", "kind": "stock", "root": "track", "path": "BeatJump/JumpForward", "output": "action",
+     "label": {"en": "Beat jump forward", "zh-Hans": "向前跳拍", "zh-Hant": "向前跳拍", "es": "Salto de tiempos adelante"}},
+    {"id": "loop_halve", "kind": "stock", "root": "track", "path": "LoopHalveDouble", "output": "step", "step": "dec",
+     "label": {"en": "Loop halve", "zh-Hans": "循环减半", "zh-Hant": "循環減半", "es": "Reducir el loop a la mitad"}},
+    {"id": "loop_double", "kind": "stock", "root": "track", "path": "LoopHalveDouble", "output": "step", "step": "inc",
+     "label": {"en": "Loop double", "zh-Hans": "循环加倍", "zh-Hant": "循環加倍", "es": "Duplicar el loop"}},
+    {"id": "censor", "kind": "stock", "root": "censor", "output": "momentary",
+     "label": {"en": "Censor (while held)", "zh-Hans": "Censor（按住期间）", "zh-Hant": "Censor（按住期間）", "es": "Censor (mientras se mantiene)"}},
+    {"id": "key_lock", "kind": "stock", "root": "track", "path": "KeyLock", "output": "toggle",
+     "label": {"en": "Key Lock", "zh-Hans": "Key Lock 调性锁定", "zh-Hant": "Key Lock 調性鎖定", "es": "Key Lock"}},
+    {"id": "slip", "kind": "stock", "root": "track", "path": "SlipMode", "output": "toggle",
+     "label": {"en": "Slip", "zh-Hans": "Slip 滑动模式", "zh-Hant": "Slip 滑動模式", "es": "Slip"}},
+    {"id": "quantize", "kind": "stock", "root": "abs", "path": "/Engine/Master/QuantizeEnabled", "output": "toggle",
+     "label": {"en": "Quantize", "zh-Hans": "Quantize 量化", "zh-Hant": "Quantize 量化", "es": "Quantize"}},
+    {"id": "sync", "kind": "stock", "root": "deck", "path": "Sync", "output": "action",
+     "label": {"en": "Sync", "zh-Hans": "Sync 同步", "zh-Hant": "Sync 同步", "es": "Sync"}},
+    {"id": "waveform_cycle", "kind": "enginex", "root": "abs", "path": "/GUI/Scripted/EngineXMapWaveform", "output": "action",
+     "setting": "waveform",
+     "label": {"en": "Cycle waveform type (Denon, RGB, 3-band)", "zh-Hans": "切换波形类型（Denon、RGB、三频段）", "zh-Hant": "切換波形類型（Denon、RGB、三頻段）", "es": "Cambiar el tipo de forma de onda (Denon, RGB, 3 bandas)"}},
+    {"id": "cue_countdown_toggle", "kind": "enginex", "root": "abs", "path": "/GUI/Scripted/EngineXMapCueCountdown", "output": "action",
+     "setting": "cue_countdown",
+     "label": {"en": "Toggle cue countdown", "zh-Hans": "开关 Cue 倒计时", "zh-Hant": "開關 Cue 倒數", "es": "Activar o desactivar la cuenta atrás de cue"}}
+  ],
+  "modules": {
+    "Shift": {"reserved": true},
+    "Shortcuts": {"reserved": true},
+    "Back": {"reserved": true},
+    "Forward": {"reserved": true},
+    "BrowseEncoder": {"reserved": true},
+    "View": {"reserved": true},
+    "Media": {"reserved": true},
+    "Layer": {"reserved": true},
+    "PadModeSelect": {
+      "scope": "deck",
+      "gestures": {
+        "press": {"status": "stock"},
+        "shift": {"status": "free"},
+        "double": {"status": "free"},
+        "hold": {"status": "free"}
+      }
+    },
+    "Sync": {
+      "scope": "deck",
+      "gestures": {
+        "press": {"status": "stock"},
+        "shift": {"status": "stock"},
+        "double": {"status": "stock"},
+        "hold": {"status": "takeover", "noteProperty": "syncNote", "set": {"syncHoldAction": "Action.None"}}
+      }
+    }
+  }
+}
