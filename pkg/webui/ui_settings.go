@@ -240,6 +240,10 @@ type uiSettings struct {
 	// nothing is loaded, no deck is taken, FourDeckWaveform and the 4-deck role stay ignored on a console.
 	// Off by default, honoured on those four boards only, never copied between units.
 	ConsoleLineView bool `json:"consoleLineView"`
+	// ConsoleDecks (console linking, stage 2, the row Show Console): on SC5000, SC5000M, SC6000 and SC6000M in
+	// the 4-deck layout the decks of a linked console appear in the lanes this player has free, display only.
+	// Off by default, needs FourDeckWaveform, honoured on those four boards only, never copied between units.
+	ConsoleDecks bool `json:"consoleDecks"`
 	// DebugTelemetry logs every shadow deck update and decision (shadow_debug.go).
 	// Development only: off by default, and nothing in the image turns it on.
 	DebugTelemetry bool `json:"debugTelemetry"`
@@ -454,6 +458,8 @@ func (s *Server) loadUI() uiSettings {
 			v.PairedView = val == "1"
 		case "console_line_view":
 			v.ConsoleLineView = val == "1"
+		case "console_decks":
+			v.ConsoleDecks = val == "1"
 		case "four_deck_waveform":
 			if val == "1" || strings.EqualFold(val, "true") {
 				v.FourDeckWaveform = true
@@ -580,6 +586,9 @@ func (s *Server) loadUI() uiSettings {
 	if v.ConsoleLineView && !consoleLineBoards[imagePrefix(deviceCompatible())] {
 		v.ConsoleLineView = false // a stored or copied value means nothing on any other board
 	}
+	if v.ConsoleDecks && (!v.FourDeckWaveform || !playerBoards[imagePrefix(deviceCompatible())]) {
+		v.ConsoleDecks = false // the row belongs to the 4-deck layout of the standalone players; a stray key alone is nothing
+	}
 	if slices.Contains(uiServices, v.Scope) && !slices.Contains(v.Sources, v.Scope) {
 		v.Scope = ""
 	}
@@ -603,6 +612,11 @@ func parseUISources(val string) ([]string, error) {
 }
 
 func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
+	defer func() {
+		if err == nil {
+			s.applyShadowFlags(v)
+		}
+	}()
 	was := false
 	if s.prolinkExport != nil && (v.ProlinkShare != s.loadUI().ProlinkShare || len(exportRequested) > 0 && exportRequested[0]) {
 		was = s.prolinkExport.Status().Enabled
@@ -639,6 +653,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.ConsoleLineView {
 		text += "console_line_view=1\n"
+	}
+	if v.ConsoleDecks && v.FourDeckWaveform {
+		text += "console_decks=1\n"
 	}
 	if v.FourDeckRole != "auto" {
 		text += "four_deck_role=" + v.FourDeckRole + "\n"
@@ -1165,6 +1182,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		v.FourDeckWaveform = b
 		if !b {
 			v.PairedView = false // the paired view is a view of the 4-deck layout
+			v.ConsoleDecks = false
 		}
 	}
 	if q.Has("consoleLineView") {
@@ -1175,6 +1193,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.ConsoleLineView = b && consoleLineBoards[imagePrefix(deviceCompatible())]
+	}
+	if q.Has("consoleDecks") {
+		b, ok := parseBoolParam(q.Get("consoleDecks"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.ConsoleDecks = b && v.FourDeckWaveform && playerBoards[imagePrefix(deviceCompatible())]
 	}
 	if q.Has("pairedView") {
 		b, ok := parseBoolParam(q.Get("pairedView"))

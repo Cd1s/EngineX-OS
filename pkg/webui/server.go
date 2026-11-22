@@ -212,6 +212,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	}
 	s.prolinkExport = prolink.NewExporter(exportCfg)
 	s.closed = make(chan struct{})
+	s.applyShadowFlags(s.loadUI())
 	if isDeckStateDir(cfg.StateDir) { // on the deck, not in tests
 		go serveSpotifyConnectMDNS(s.closed)
 	}
@@ -420,6 +421,7 @@ func (s *Server) tryExport() {
 // Close releases optional network exports, including active dbserver clients.
 func (s *Server) Close() {
 	s.closeOnce.Do(func() { close(s.closed) })
+	s.consoleAskSync(false)
 	s.lanProbeWG.Wait()
 	s.mu.Lock()
 	var closers []interface{ Close() }

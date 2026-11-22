@@ -1017,6 +1017,9 @@ func (s *Server) currentShadowDisplay(r *http.Request) (*shadowDisplayEntry, dec
 		// Compose and HTTP use the same placement, including peer priority and
 		// exact current track keys. An old CDJ URL cannot read a different song.
 		for _, d := range s.shadowCompose(role, time.Now(), lines) {
+			if d.Deck == deck && d.Key == key && d.DisplayOnly && !d.MetadataOnly && d.Console > 0 { // a console's deck on this player
+				return s.consoleDeckEntry(d.Console, time.Now()), d
+			}
 			if d.Deck == deck && d.Key == key && d.DisplayOnly && !d.MetadataOnly {
 				c := &s.shadow.display
 				c.mu.Lock()

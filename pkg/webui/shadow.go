@@ -122,6 +122,9 @@ type deckState struct {
 	// QML of a player.
 	Player int    `json:"player,omitempty"`
 	Model  string `json:"model,omitempty"`
+	// Console (stage 2) is the number of the console deck this lane shows, on a player with the row Show Console
+	// on: the lane is a console's deck, display only, the QML labels it so. 0: an ordinary lane.
+	Console int `json:"console,omitempty"`
 	// ShadowMaster is the sender's shadow deck (a copy of the receiver's deck of
 	// that number) that Engine Link left holding master: the receiver's QML takes
 	// master back to a real deck. On every deck the sender posts; 0: none.
@@ -406,10 +409,21 @@ type shadowState struct {
 	display             shadowDisplayCache
 	sourceDisplay       shadowSourceCache
 	lines               []int // Line/Phono mixer channel inputs on all-in-one consoles
+	// Console linking, stage 2 (shadow_console_send.go). A player: askConsole is the row, consoleDecks the decks a
+	// console sent, by the console's deck number. A console: hears is Line In on, askers the players that asked
+	// (address -> newest ask), askNotify wakes the QML's held request when "somebody asks" flips.
+	askConsole   atomic.Bool
+	hears        atomic.Bool
+	askers       map[string]time.Time
+	askNotify    chan struct{}
+	askConn      *net.UDPConn
+	consoleDecks map[int]peerDeck
+	consoleLane  map[int]int // console deck -> the lane it holds on this player
+	consoleIP    string
 }
 
 func newShadowState() *shadowState {
-	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, copyGens: map[string]string{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn, model: imagePrefix(deviceCompatible())}
+	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, copyGens: map[string]string{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn, model: imagePrefix(deviceCompatible()), askers: map[string]time.Time{}, askNotify: make(chan struct{}), consoleDecks: map[int]peerDeck{}}
 }
 
 // shadow-v3: copies under the old "shadow" were analysed by Engine itself,
@@ -756,6 +770,10 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	claimed := ex.Master && (!s.shadow.ownMaster || masterDeck != s.shadow.ownMasterDeck || pressed) && (masterPlaying || pressed)
 	s.shadow.ownMaster, s.shadow.ownMasterDeck, s.shadow.ownMasterPress = ex.Master, masterDeck, masterPress
 	s.shadow.mu.Unlock()
+	if consoleLineBoards[s.shadow.model] {
+		respond(w, map[string]any{"ok": true}) // a console's decks are a picture for the players that ask: no Pro DJ Link status, no MASTER claim, no loop, no push
+		return
+	}
 	if s.prolinkExport != nil {
 		s.prolinkExport.SetDeck(ex, players...)
 		if claimed {
@@ -804,6 +822,10 @@ func (s *Server) decksAlive(w http.ResponseWriter, r *http.Request) {
 	}
 	sh.ownDecks = decks
 	sh.mu.Unlock()
+	if consoleLineBoards[sh.model] {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if s.prolinkExport != nil {
 		s.prolinkExport.SetDeck(ex, decks...)
 	}
@@ -1045,6 +1067,9 @@ func (s *Server) deckClockGet(w http.ResponseWriter, r *http.Request) {
 // (unicast, under a millisecond on a LAN).
 func (s *Server) shadowPush() {
 	sh := s.shadow
+	if consoleLineBoards[sh.model] {
+		return // a console never pushes: its decks are pulled by the players that asked
+	}
 	sh.mu.Lock()
 	conn, port := sh.conn, sh.pushPort
 	var ips []net.IP
@@ -1247,9 +1272,20 @@ func fnvSum(v string) uint64 { h := fnv.New64a(); h.Write([]byte(v)); return h.S
 // peerDecksGet serves this deck's own decks to the other EngineX player (LAN,
 // read-only: deck state and the loaded track, nothing else).
 func (s *Server) peerDecksGet(w http.ResponseWriter, r *http.Request) {
-	s.shadow.mu.Lock()
-	out := s.shadow.ownForPeer(time.Now())
-	s.shadow.mu.Unlock()
+	sh := s.shadow
+	now := time.Now()
+	sh.mu.Lock()
+	var out []deckState
+	switch {
+	case !consoleLineBoards[sh.model]:
+		out = sh.ownForPeer(now)
+	case sh.hears.Load() && r.URL.Query().Get("console") == "1": // a console with Line In on: its decks go to a player that asks, and to nobody else
+		sh.ask(remoteIP(r), now)
+		if now.Sub(sh.ownAt) < 2*time.Second {
+			out = sh.ownForPeer(now)
+		}
+	}
+	sh.mu.Unlock()
 	respond(w, map[string]any{"decks": out})
 }
 
@@ -1923,6 +1959,17 @@ func (s *Server) shadowCompose(role string, now time.Time, lines ...[]int) []dec
 // shadowComposeMode is shadowCompose for a mode the caller already read, so one
 // answer never mixes two modes.
 func (s *Server) shadowComposeMode(mode, role string, now time.Time, lines ...[]int) []deckState {
+	out := s.shadowComposeModeBase(mode, role, now, lines...)
+	if lanes := s.consoleLanes(role, out, now); len(lanes) > 0 { // the row Show Console: after everyone else is placed
+		for _, l := range lanes {
+			out = append(out, l.d)
+		}
+		slices.SortFunc(out, func(a, b deckState) int { return a.Deck - b.Deck })
+	}
+	return out
+}
+
+func (s *Server) shadowComposeModeBase(mode, role string, now time.Time, lines ...[]int) []deckState {
 	switch mode {
 	case "cdj":
 		return s.shadowComposeDisplay(role, now, lines...)
@@ -2659,6 +2706,9 @@ func (s *Server) shadowLoop() {
 		sh.mu.Unlock()
 		if conn != nil && i%8 == 0 {
 			shadowSendBeacons(conn)
+			if sh.askConsole.Load() {
+				shadowSendAsk(conn)
+			}
 		}
 		s.shadowPollPeers()
 	}
@@ -2668,8 +2718,12 @@ func (s *Server) shadowLoop() {
 // each broadcast-capable IPv4 interface (so eth0 is always discovered even when
 // the default route is on wlan0).
 func shadowSendBeacons(conn *net.UDPConn) {
-	msg := []byte("EngineX-shadow 1")
-	conn.WriteToUDP(msg, &net.UDPAddr{IP: net.IPv4bcast, Port: shadowBeaconPort})
+	shadowBroadcast(conn, []byte("EngineX-shadow 1"), shadowBeaconPort)
+}
+
+// shadowBroadcast sends msg to port on the default route and on each broadcast-capable IPv4 interface.
+func shadowBroadcast(conn *net.UDPConn, msg []byte, port int) {
+	conn.WriteToUDP(msg, &net.UDPAddr{IP: net.IPv4bcast, Port: port})
 	ifs, _ := net.Interfaces()
 	for _, ifi := range ifs {
 		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagBroadcast == 0 || ifi.Flags&net.FlagLoopback != 0 {
@@ -2694,7 +2748,7 @@ func shadowSendBeacons(conn *net.UDPConn) {
 				return nil
 			}}
 			if pc, err := lc.ListenPacket(context.Background(), "udp4", net.JoinHostPort(ip4.String(), "0")); err == nil {
-				_, _ = pc.WriteTo(msg, &net.UDPAddr{IP: bcast, Port: shadowBeaconPort})
+				_, _ = pc.WriteTo(msg, &net.UDPAddr{IP: bcast, Port: port})
 				pc.Close()
 			}
 		}
@@ -2709,6 +2763,9 @@ func (sh *shadowState) receive(b []byte, ip string, now time.Time) {
 		rest, ok := bytes.CutPrefix(b, []byte(shadowDecksMagic))
 		if !ok || json.Unmarshal(rest, &decks) != nil {
 			return
+		}
+		if console, _ := splitConsole(decks); len(console) > 0 {
+			return // a console's decks come by the pull of a player that asked, never as a peer's
 		}
 	}
 	sh.mu.Lock()
@@ -2773,6 +2830,15 @@ func (sh *shadowState) prunePeers(now time.Time) {
 			changed = true
 		}
 	}
+	for n, p := range sh.consoleDecks {
+		if now.Sub(p.at) >= shadowPeerDeckTimeout {
+			delete(sh.consoleDecks, n)
+			changed = true
+		}
+	}
+	if len(sh.consoleDecks) == 0 {
+		sh.consoleIP = ""
+	}
 	for ip, seen := range sh.peers {
 		if now.Sub(seen) >= shadowPeerSeenTimeout {
 			delete(sh.peers, ip)
@@ -2812,8 +2878,13 @@ func (s *Server) shadowPollPeers() {
 	if port == 0 {
 		port = 8080
 	}
+	ask := sh.askConsole.Load() // the row Show Console: this pull is also an ask, which an older unit ignores
 	for _, ip := range ips {
-		resp, err := peerClient.Get("http://" + net.JoinHostPort(ip, strconv.Itoa(port)) + "/peer/decks")
+		u := "http://" + net.JoinHostPort(ip, strconv.Itoa(port)) + "/peer/decks"
+		if ask {
+			u += "?console=1"
+		}
+		resp, err := peerClient.Get(u)
 		if err != nil {
 			continue
 		}
@@ -2826,7 +2897,14 @@ func (s *Server) shadowPollPeers() {
 		now = time.Now()
 		sh.mu.Lock()
 		sh.peers[ip] = now
-		sh.takePeer(ip, body.Decks, now)
+		if console, others := splitConsole(body.Decks); len(console) > 0 {
+			if ask {
+				sh.takeConsole(ip, console, now)
+			}
+			sh.takePeer(ip, others, now)
+		} else {
+			sh.takePeer(ip, body.Decks, now)
+		}
 		sh.mu.Unlock()
 	}
 }
