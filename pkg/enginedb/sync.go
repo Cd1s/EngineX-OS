@@ -107,6 +107,10 @@ type Options struct {
 	Now func() time.Time `json:"-"`
 	// OnProgress, if non-nil, reports (done, total) tracks processed during SyncResolved.
 	OnProgress func(done, total int) `json:"-"`
+	// OnFinished, if non-nil, is told as the import goes how many of the tracks it has gone
+	// through it leaves complete, read now or up to date already: a pass's share of the whole
+	// count, which never goes down (#328).
+	OnFinished func(done int) `json:"-"`
 }
 type Result struct {
 	Added, Updated, Unchanged int
@@ -243,6 +247,9 @@ func open(ctx context.Context, p string, bulk bool) (*sql.DB, *sql.Tx, error) {
 	if _, e = tx.ExecContext(ctx, bridgeWrittenSchema); e != nil {
 		return nil, nil, e
 	}
+	if _, e = tx.ExecContext(ctx, fastBaseSchema); e != nil {
+		return nil, nil, e
+	}
 	// Libraries from earlier builds kept this state in m.db, not yet dropped by Engine.
 	var migratedAnalysis bool
 	for _, table := range bridgeTables {
@@ -280,6 +287,7 @@ func open(ctx context.Context, p string, bulk bool) (*sql.DB, *sql.Tx, error) {
 		`DELETE FROM BridgeState WHERE trackId NOT IN (SELECT id FROM main.Track)`,
 		`DELETE FROM BridgeAnalysis WHERE trackId NOT IN (SELECT id FROM main.Track)`,
 		`DELETE FROM BridgeWritten WHERE trackId NOT IN (SELECT id FROM main.Track)`,
+		`DELETE FROM BridgeFastBase WHERE trackId NOT IN (SELECT id FROM main.Track)`,
 		`DELETE FROM BridgePlaylist WHERE listId NOT IN (SELECT id FROM main.Playlist)`,
 	} {
 		if _, e = tx.ExecContext(ctx, prune); e != nil {
@@ -631,6 +639,9 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		if opts.OnProgress != nil {
 			opts.OnProgress(i+1, len(prepared))
 		}
+		if opts.OnFinished != nil {
+			opts.OnFinished(i - result.Deferred)
+		}
 		// Time left after the tracks prepared up front: prepare the next one now.
 		if preparedTrack.late && !opts.Deadline.IsZero() && !past() {
 			if p, e := prepareOne(res, preparedTrack.track, preparedTrack.rel, opts.Deadline, now, true); e == nil {
@@ -697,6 +708,31 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			if previous != hash && (previous == "" || strings.HasPrefix(previous, "fast:")) {
 				effectiveTracks[i] = t
 				args := []any{int(t.Duration + 0.5), int(t.BPM + 0.5), t.Year, enginePath, path.Base(rel), t.Bitrate, t.BPM, st.Size(), t.Title, t.Artist, t.Album, t.Genre, t.Comment, t.Label, t.Composer, t.Remixer, EngineKey(t.Key), t.Rating, strings.TrimPrefix(strings.ToLower(path.Ext(rel)), "."), int64(t.ID), id}
+				if strings.HasPrefix(previous, "fast:") {
+					// Re-exported while fast: the rating and the grid's BPM the deck changed stay, the
+					// others are the re-export's (fastRowEdits).
+					deck, e := fastRowEdits(ctx, q, id, previous, t, Performance{})
+					if e != nil {
+						return result, e
+					}
+					if deck.m.grid {
+						args[1], args[6] = deck.bpm, deck.bpmA
+					}
+					if deck.m.rating {
+						args[17] = deck.rating
+					}
+					if deck.known {
+						// What the imports left in the row from now on: this rating where the deck
+						// kept the earlier one, the earlier import's cues and loops (not rewritten here).
+						b := deck.base
+						if !deck.m.rating {
+							b.rating = int64(t.Rating)
+						}
+						if e = noteFastBase(ctx, q, id, hash, b); e != nil {
+							return result, e
+						}
+					}
+				}
 				if _, e := q.ExecContext(ctx, `UPDATE Track SET length=?,bpm=?,year=?,path=?,filename=?,bitrate=?,bpmAnalyzed=?,fileBytes=?,title=?,artist=?,album=?,genre=?,comment=?,label=?,composer=?,remixer=?,key=?,rating=?,fileType=?,pdbImportKey=? WHERE id=?`, args...); e != nil {
 					return result, e
 				}
@@ -813,6 +849,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 				perf = Performance{QuickCues: p.QuickCues, Loops: p.Loops, ActiveLoops: p.ActiveLoops}
 			}
 		}
+		fastLeft := fastBase{rating: int64(t.Rating), cues: perf.QuickCues, loops: perf.Loops, active: int64(perf.ActiveLoops)} // what a new fast row gets
 		var artID any
 		var data []byte
 		if art != nil {
@@ -859,6 +896,22 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			artID = n
 		}
 		args := []any{int(t.Duration + 0.5), int(t.BPM + 0.5), t.Year, enginePath, path.Base(rel), t.Bitrate, t.BPM, artID, st.Size(), t.Title, t.Artist, t.Album, t.Genre, t.Comment, t.Label, t.Composer, t.Remixer, EngineKey(t.Key), t.Rating, strings.TrimPrefix(strings.ToLower(path.Ext(rel)), "."), perf.Complete, true, true, int64(t.ID)}
+		// The first full import of a row a fast import left: what the DJ did on it meanwhile stays,
+		// the rest is this record's (fastedits.go), also for a row left for an earlier record. A
+		// row imported without its analysis (degraded) keeps the deck's rating and grid BPM the
+		// same way; its performance data is not written.
+		var deck fastRow
+		if existing && (!fast || degraded) && strings.HasPrefix(previous, "fast:") {
+			if deck, e = fastRowEdits(ctx, q, id, previous, original, perf); e != nil {
+				return result, e
+			}
+			if deck.m.grid {
+				args[1], args[6] = deck.bpm, deck.bpmA
+			}
+			if deck.m.rating {
+				args[18] = deck.rating
+			}
+		}
 		if id == 0 {
 			// A pre-existing native track at the same path is never adopted/overwritten.
 			r, e := q.ExecContext(ctx, `INSERT INTO Track(length,bpm,year,path,filename,bitrate,bpmAnalyzed,albumArtId,fileBytes,title,artist,album,genre,comment,label,composer,remixer,key,rating,fileType,isAnalyzed,isAvailable,isMetadataImported,pdbImportKey,dateCreated,dateAdded) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s'),strftime('%s'))`, args...)
@@ -902,6 +955,19 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			if e != nil {
 				return result, e
 			}
+			w, active := perf, any(perf.ActiveLoops)
+			if deck.m.beats != nil {
+				w.Beats = deck.m.beats
+			}
+			if deck.m.cues != nil {
+				w.QuickCues = deck.m.cues
+			}
+			if deck.m.loops != nil {
+				w.Loops = deck.m.loops
+			}
+			if deck.m.active != nil {
+				active = deck.m.active
+			}
 			if _, e = q.ExecContext(ctx, `UPDATE PerformanceData SET
 				trackData=?1,overviewWaveFormData=?2,
 				beatData=CASE WHEN ?3 AND beatData IS NOT NULL THEN beatData ELSE ?4 END,
@@ -909,7 +975,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 				loops=CASE WHEN ?3 AND loops IS NOT NULL THEN loops ELSE ?6 END,
 				activeOnLoadLoops=CASE WHEN ?3 AND loops IS NOT NULL THEN activeOnLoadLoops ELSE ?7 END,
 				thirdPartySourceId=NULL
-				WHERE trackId=?8`, perf.TrackData, perf.Overview, keep, perf.Beats, perf.QuickCues, perf.Loops, perf.ActiveLoops, id); e != nil {
+				WHERE trackId=?8`, perf.TrackData, perf.Overview, keep, w.Beats, w.QuickCues, w.Loops, active, id); e != nil {
 				return result, e
 			}
 			if e = recordWritten(ctx, q, id, perf); e != nil {
@@ -964,6 +1030,19 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		if e != nil {
 			return result, e
 		}
+		switch {
+		case strings.HasPrefix(hash, "fast:"):
+			// A new fast row: what this import left in it, for its import in full (fastRowEdits).
+			e = noteFastBase(ctx, q, id, hash, fastLeft)
+		case strings.HasPrefix(previous, "fast:"):
+			_, e = q.ExecContext(ctx, `DELETE FROM BridgeFastBase WHERE trackId=?`, id)
+		}
+		if e != nil {
+			return result, e
+		}
+	}
+	if opts.OnFinished != nil {
+		opts.OnFinished(len(prepared) - result.Deferred)
 	}
 	recommendations := SmartMatch(effectiveTracks, opts.CurrentTrack)
 	playlistHash := digest(struct {

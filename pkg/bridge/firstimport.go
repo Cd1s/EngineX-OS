@@ -460,23 +460,19 @@ func ImportInBackground(ctx context.Context, mount string, progress func(done, t
 		}
 		return res, completeStage(stage, stamp)
 	}
+	shown := newJobProgress(progress, len(l.Tracks))
 	if err = ReconcileContext(ctx, r, l); err != nil {
 		return enginedb.Result{}, err
 	}
 	mergeByPath(l)
 	total, left, window := len(l.Tracks), -1, importWindow
-	if progress != nil {
-		progress(0, total)
-	}
 	for {
-		o := enginedb.Options{DatabaseDir: stage, Resume: true, StagedOnly: stagedOnly, Deadline: time.Now().Add(window)}
+		o := enginedb.Options{DatabaseDir: stage, Resume: true, StagedOnly: stagedOnly, Deadline: time.Now().Add(window), OnFinished: shown.set}
 		res, err := enginedb.SyncResolved(ctx, r, l, o)
 		if err != nil {
 			return res, err
 		}
-		if progress != nil {
-			progress(total-res.Deferred, total)
-		}
+		shown.set(total - res.Deferred)
 		if res.Deferred == 0 {
 			return res, completeStage(stage, stamp)
 		}

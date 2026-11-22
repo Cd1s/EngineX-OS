@@ -137,6 +137,14 @@ func mergeLive(ctx context.Context, buildDir, liveDir string, base BaseCounts, t
 			return err
 		}
 	}
+	// What the fast import left in the rows the build reads in full for the first time (#328).
+	fastBase := false
+	if _, err := os.Stat(filepath.Join(buildDir, FastBaseFile)); err == nil {
+		if _, err = db.ExecContext(ctx, `ATTACH DATABASE ? AS fastbase`, ro(filepath.Join(buildDir, FastBaseFile))); err != nil {
+			return err
+		}
+		fastBase = true
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -307,6 +315,12 @@ func mergeLive(ctx context.Context, buildDir, liveDir string, base BaseCounts, t
 			return copyRows("Track", "id", trackEngine, `m.id IN (SELECT id FROM temp.changed)`)
 		},
 		func() error { return carryLiveEdits(ctx, tx) },
+		func() error {
+			if !fastBase {
+				return nil
+			}
+			return carryFastEdits(ctx, tx)
+		},
 		func() error {
 			_, err := tx.ExecContext(ctx, `UPDATE main.Track AS m SET lastEditTime=l.lastEditTime FROM live.Track AS l
 				WHERE l.id=m.id AND m.id IN (SELECT id FROM temp.changed) AND l.lastEditTime>COALESCE(m.lastEditTime,0)`)

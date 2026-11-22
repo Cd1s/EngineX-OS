@@ -26,13 +26,41 @@ import (
 )
 
 const (
-	kindName       = "KIND"        // "update" in the stage of an update
+	kindName       = "KIND"        // "update" in the stage of an update, fastUpdateKind once it holds a copy of fast rows
 	baseCountsName = "BASE.counts" // enginedb.BaseCounts of the snapshot, as JSON
 	baseTimesName  = "BASE.times"  // enginedb.BaseTimes of the snapshot, as JSON
 	resumeName     = "RESUME"      // the stamp, once a pass of the update was committed
 )
 
-func isUpdateStage(stage string) bool { return readMark(stage, kindName) == "update" }
+// fastUpdateKind marks the stage of an update whose copy of the library has fast rows (#328
+// review R2). 5.3.0.5-r1 neither reads the note of what the fast import left in them
+// (enginedb.FastBaseFile) nor keeps the DJ's edits on them when it publishes (its carryLiveEdits
+// leaves fast rows out), so it must neither go on with such a stage nor publish it. It knows the
+// stage of an update only as "update"; a stage of another kind it drops at its mount, and it then
+// starts its own update from the live library, whose copy this build in turn never publishes
+// (fastBaseMissing).
+const fastUpdateKind = "update+fast"
+
+func isUpdateStage(stage string) bool {
+	k := readMark(stage, kindName)
+	return k == "update" || k == fastUpdateKind
+}
+
+// fastBaseMissing reports a snapshot without the note of what the fast import left in the
+// library's fast rows (enginedb.FastBaseFile) while the library has fast rows: a stage of #253's
+// or 5.3.0.5-r1's build, or one whose note was lost. Neither published nor continued, it starts
+// again from a new snapshot: the DJ's edits made on those rows after it could not be told from
+// Engine's, and the publish would put rekordbox's rows over them (#328 review R1); the passes of
+// such a build put rekordbox's rows over those made before it (review R2).
+func fastBaseMissing(dir, stage string) bool {
+	if _, err := os.Stat(filepath.Join(stage, baseCountsName)); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(stage, enginedb.FastBaseFile)); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	return hasFastTracks(dir)
+}
 
 // cutPoint, when set, is called between two writes of an import, an update or a publish that a
 // power cut or the hook's kill can separate (#253 review): a test copies the volume there to see
@@ -293,6 +321,16 @@ var (
 // update imports, r the volume's resolver.
 func snapshotLive(ctx context.Context, dir, stage string, r *compat.Resolver, l *rekordbox.Library) error {
 	live := filepath.Join(dir, "m.db")
+	if hasFastTracks(dir) && readMark(stage, kindName) != fastUpdateKind {
+		// Before anything of the copy is in the stage: no earlier build goes on with it.
+		if err := writeMark(stage, kindName, fastUpdateKind); err != nil {
+			return err
+		}
+		if err := syncFile(stage); err != nil {
+			return err
+		}
+		cut("update stage kept from earlier builds")
+	}
 	checked := map[string]bool{} // the files confirmedRefs looked at, across retries
 	for try := 0; try < snapshotRetries; try++ {
 		if try > 0 {
@@ -346,6 +384,11 @@ func snapshotLive(ctx context.Context, dir, stage string, r *compat.Resolver, l 
 			}
 		}
 		cut("snapshot copied")
+		// What the fast import left in the rows still fast, for the DJ's edits made on them
+		// after this copy (#328): before the counts, which say the snapshot is complete.
+		if err := enginedb.WriteFastBase(ctx, stage, l); err != nil {
+			return err
+		}
 		counts, err := enginedb.CountTables(ctx, stage)
 		if err != nil {
 			return err
@@ -388,6 +431,30 @@ func vacuumInto(ctx context.Context, src, dst string) error {
 	return syncFile(dst)
 }
 
+// jobProgress reports a background job's tracks done out of the export's to progress: once the
+// export is read, before the long steps (its paths, the snapshot), then as each pass goes (its
+// share of the whole count, enginedb.Options.OnFinished), never fewer than it reported (#328).
+type jobProgress struct {
+	progress     func(done, total int)
+	total, shown int
+}
+
+func newJobProgress(progress func(done, total int), total int) *jobProgress {
+	p := &jobProgress{progress: progress, total: total, shown: -1}
+	p.set(0)
+	return p
+}
+
+func (p *jobProgress) set(done int) {
+	if p.progress == nil || min(done, p.total) <= p.shown {
+		return
+	}
+	p.shown = min(done, p.total)
+	p.progress(p.shown, p.total)
+}
+
+func (p *jobProgress) report(done, _ int) { p.set(done) }
+
 // updateInBackground runs the import passes of an update on the stage's copy of the library.
 func updateInBackground(ctx context.Context, mount, stage, stamp string, r *compat.Resolver, progress func(done, total int)) (enginedb.Result, error) {
 	dir := filepath.Dir(stage)
@@ -395,8 +462,18 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 	if err != nil {
 		return enginedb.Result{}, err
 	}
+	shown := newJobProgress(progress, len(l.Tracks))
+	if fastBaseMissing(dir, stage) {
+		// The passes already done are lost, once: the snapshot is taken again.
+		log.Printf("rb-bridge: the update's copy of the library has no note of its fast tracks; it starts again from a new copy")
+		for _, name := range []string{resumeName, baseCountsName} {
+			if err := os.Remove(filepath.Join(stage, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return enginedb.Result{}, err
+			}
+		}
+	}
 	if readMark(stage, quickName) == stamp {
-		return quickInStage(ctx, dir, stage, stamp, r, l, stagedOnly, progress)
+		return quickInStage(ctx, dir, stage, stamp, r, l, stagedOnly, shown.report)
 	}
 	if err = ReconcileContext(ctx, r, l); err != nil {
 		return enginedb.Result{}, err
@@ -414,22 +491,17 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 		}
 	}
 	total, left, window := len(l.Tracks), -1, importWindow
-	if progress != nil {
-		progress(0, total)
-	}
 	changed := readMark(stage, resumeName) != "" // an earlier pass may have changed it
 	for {
 		o := enginedb.Options{DatabaseDir: stage, StagedOnly: stagedOnly, LegacyOffsets: legacy, LegacyAACOffsets: legacyAAC,
-			Resume: readMark(stage, resumeName) == stamp, Deadline: time.Now().Add(window)}
+			Resume: readMark(stage, resumeName) == stamp, Deadline: time.Now().Add(window), OnFinished: shown.set}
 		res, err := enginedb.SyncResolved(ctx, r, l, o)
 		if err != nil {
 			return res, err
 		}
 		cut("stage pass committed")
 		changed = changed || res.Added+res.Updated > 0 || res.PlaylistsChanged
-		if progress != nil {
-			progress(total-res.Deferred, total)
-		}
+		shown.set(total - res.Deferred)
 		if res.Deferred == 0 {
 			if !changed {
 				// Nothing to publish: the live library already is this export's.
@@ -715,6 +787,13 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 		return enginedb.Result{}, enginedb.ErrLibraryInUse
 	}
 	stage := filepath.Join(dir, importStageName)
+	if fastBaseMissing(dir, stage) {
+		// Also when Engine wrote nothing since the snapshot: the passes of an earlier build
+		// (5.3.0.5-r1's update, started at its mount after it dropped this build's stage) put
+		// rekordbox's rows over the DJ's edits the copy has of fast rows (#328 review R2).
+		log.Printf("rb-bridge: update not published: its copy of the library has no note of its fast tracks; it starts again from a new copy")
+		return enginedb.Result{Background: true}, startUpdate(stage, readMark(stage, stampName))
+	}
 	if liveIdentity(filepath.Join(dir, "m.db")) != readMark(stage, baseName) {
 		var base enginedb.BaseCounts
 		if err := json.Unmarshal([]byte(readMark(stage, baseCountsName)), &base); err != nil {
