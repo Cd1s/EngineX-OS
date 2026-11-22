@@ -408,7 +408,8 @@ merge_branch() {
 
 rebuild_overlay() {
     local host=$1 slug=$2; shift 2
-    local artifact="tools/dev/.integrate-artifacts/$slug" inner="set -eu; rm -rf tools/dev/.integrate-artifacts; mkdir -p '$artifact'"
+    local artifact="tools/dev/.integrate-artifacts/$slug" inner
+    inner="set -eu; rm -rf tools/dev/.integrate-artifacts; mkdir -p '$artifact'"
     local file
     for file in "$@"; do
         case $file in
