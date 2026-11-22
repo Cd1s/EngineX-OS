@@ -31,6 +31,9 @@ func copyEncryptedOneLibraryFixture(t *testing.T, dst string) {
 }
 
 func TestExportSelectionMTimeAndFallback(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	for _, name := range []string{"exportLibrary.db", "exportOneLibrary.db"} {
 		for _, diff := range []time.Duration{-6, -5, -3, 0, 3, 5, 6} {
 			t.Run(fmt.Sprintf("%s_%ds", name, int(diff)), func(t *testing.T) {
@@ -161,6 +164,7 @@ func TestExportSelectionMTimeAndFallback(t *testing.T) {
 
 // Upgrading an r5 PDB import must retain its source, deck edits and native lists.
 func TestExportTieKeepsPDBImport(t *testing.T) {
+	t.Parallel()
 	for _, mark := range []string{"stamp", "pending", "state only"} {
 		t.Run(mark, func(t *testing.T) {
 			root := t.TempDir()
@@ -235,6 +239,7 @@ func TestExportTieKeepsPDBImport(t *testing.T) {
 }
 
 func TestFreshExportTieKeepsSQLImport(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	testfixture.Write(t, root, "MUSIC/one.wav", testfixture.WAV(true))
@@ -261,6 +266,7 @@ func TestFreshExportTieKeepsSQLImport(t *testing.T) {
 }
 
 func TestMacHiddenDotPioneerOneLibraryCuesAndIncrementalDelta(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Write(t, root, "MUSIC/one.wav", testfixture.WAV(true))
 	testfixture.Write(t, root, "MUSIC/two.wav", testfixture.WAV(true))

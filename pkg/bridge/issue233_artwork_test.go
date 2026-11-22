@@ -3,6 +3,7 @@ package bridge_test
 import (
 	"encoding/base64"
 	"encoding/binary"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,6 +16,9 @@ import (
 // Stamp bypass must not materialize all cover BLOBs again. The files already
 // exist; loading the 128 MiB payload serves no purpose on this mount.
 func TestIssue233StampBypassDoesNotReloadMigratedArtwork(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, 1)
 	issue233Mount(t, root, enginedb.Options{})

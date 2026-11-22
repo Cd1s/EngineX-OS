@@ -19,6 +19,7 @@ import (
 )
 
 func TestLegacyImportPreservesEngineRowsAndEdits(t *testing.T) {
+	t.Parallel()
 	for _, damagedKey := range []bool{true, false} {
 		t.Run(fmt.Sprintf("shared-import-key=%v", damagedKey), func(t *testing.T) {
 			root := t.TempDir()
@@ -118,6 +119,7 @@ func TestLegacyImportPreservesEngineRowsAndEdits(t *testing.T) {
 }
 
 func TestLegacyImportMissingSourceRecordsUsesOwnedPaths(t *testing.T) {
+	t.Parallel()
 	for _, state := range []string{"missing", "malformed"} {
 		t.Run(state, func(t *testing.T) {
 			root := t.TempDir()

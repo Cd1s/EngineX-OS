@@ -18,6 +18,7 @@ import (
 // export, so on a converted stick they waited for ever. rb-bridge applies them at the mount,
 // also when the export is already imported (stamp bypass).
 func TestConvertAtMountAppliesQueuedEdits(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err != nil {

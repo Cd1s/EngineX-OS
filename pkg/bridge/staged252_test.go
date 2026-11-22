@@ -12,6 +12,7 @@ import (
 )
 
 func TestStaged252HiddenExportMergeAndStamp(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	staged := filepath.Join(root, ".prolink-cache", "CDJ 1 USB")

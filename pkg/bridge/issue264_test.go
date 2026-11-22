@@ -26,6 +26,9 @@ import (
 // 3) opts.Deadline is budgeted specifically for file reading after ReconcileContext.
 // 4) Resume mode guarantees forward progress on every mount.
 func TestIssue264LargeExportWithMissingFilesResumesAndFinishes(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.Export(t, root) // baseline analysis files and artwork
 	if err := os.Remove(filepath.Join(root, "PIONEER/rekordbox/export.pdb")); err != nil {
@@ -154,6 +157,9 @@ INSERT INTO playlist VALUES(1,0,'Issue264 Set',0,1,'');`); err != nil {
 // export reading and reconciliation experience deliberate delay, the file-reading
 // deadline starts after reconciliation and makes positive forward progress.
 func TestIssue264SlowReconcileDoesNotExhaustFileReadingBudget(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.Export(t, root)
 

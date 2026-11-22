@@ -17,6 +17,9 @@ import (
 // hit its size cap. That row must still retain a deck edit through a staged
 // rebuild; the bridge-owned Track/BridgeState identity is sufficient.
 func TestLargeReexportKeepsDeckCueWhenBridgeAnalysisCapped(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := guardStick(t, 20)
 	restoreLarge := bridge.SetLargeExportForTest()
 	defer restoreLarge()

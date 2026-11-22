@@ -38,6 +38,9 @@ func issue301Updated(t *testing.T, n int) (root string, ctx context.Context) {
 }
 
 func TestIssue301UpdateCarriesWhatEngineWroteMeanwhile(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, ctx := issue301Updated(t, 20)
 	live := dbOpen(t, root)
 	id := scalar[int64](t, live, `SELECT id FROM Track WHERE pdbImportKey=3`)
@@ -78,6 +81,9 @@ func TestIssue301UpdateCarriesWhatEngineWroteMeanwhile(t *testing.T) {
 // A playlist Engine added during the update is a change the update cannot take: the live library
 // stays as it is, and the next mount updates it again, in place.
 func TestIssue301UpdateLeavesALibraryEngineChanged(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, ctx := issue301Updated(t, 20)
 	live := dbOpen(t, root)
 	if _, err := live.Exec(`INSERT INTO Playlist(title,parentListId,isPersisted,nextListId) VALUES('Made on the deck',0,1,0)`); err != nil {

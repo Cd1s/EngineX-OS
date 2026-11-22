@@ -23,6 +23,7 @@ import (
 )
 
 func TestNativeTrackConflictIsReferencedNotAdopted(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	convert(t, root, enginedb.Options{})
@@ -49,6 +50,7 @@ func TestNativeTrackConflictIsReferencedNotAdopted(t *testing.T) {
 }
 
 func TestArtworkDeduplicatesWithoutSourceChanges(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	testfixture.Write(t, root, "PIONEER/Artwork/é.jpg", []byte{0xff, 0xd8, 0xff, 0xd9})
@@ -78,6 +80,7 @@ func TestArtworkDeduplicatesWithoutSourceChanges(t *testing.T) {
 }
 
 func TestSourcePathAliasDoesNotOverwriteCues(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	convert(t, root, enginedb.Options{})
@@ -100,6 +103,7 @@ func TestSourcePathAliasDoesNotOverwriteCues(t *testing.T) {
 }
 
 func TestOneLibraryWALIsNeverTouched(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := filepath.Join(root, "PIONEER/rekordbox")
 	if e := os.MkdirAll(dir, 0755); e != nil {
@@ -123,6 +127,7 @@ func TestOneLibraryWALIsNeverTouched(t *testing.T) {
 }
 
 func TestPlaylistNameConflictGetsSuffix(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	convert(t, root, enginedb.Options{})
@@ -144,6 +149,7 @@ func TestPlaylistNameConflictGetsSuffix(t *testing.T) {
 }
 
 func TestConvertSurvivesDuplicateRecordsAndMissingFiles(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	base, e := bridge.ReadLibrary(context.Background(), root)
@@ -173,6 +179,7 @@ func TestConvertSurvivesDuplicateRecordsAndMissingFiles(t *testing.T) {
 // Engine 5.3.0 serves covers to other decks only from a 20-byte BLOB hash and
 // Engine Library/Artwork/<base64url>.jpg; earlier builds wrote a TEXT hash.
 func TestArtworkIsServedToOtherDecks(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	art := []byte{0xff, 0xd8, 0xff, 0xd9}
@@ -227,6 +234,7 @@ func TestArtworkIsServedToOtherDecks(t *testing.T) {
 }
 
 func TestMountImportSkipsAnUnchangedExport(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	first, e := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
@@ -252,6 +260,7 @@ func TestMountImportSkipsAnUnchangedExport(t *testing.T) {
 }
 
 func TestFastImportReadsOnlyTheExport(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	l, e := bridge.ReadLibrary(context.Background(), root)
@@ -286,6 +295,9 @@ func TestFastImportReadsOnlyTheExport(t *testing.T) {
 }
 
 func TestLargeMountIncrementalSyncAddsNewTracksAndPlaylists_GL011(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	dir := filepath.Join(root, "PIONEER/rekordbox")
 	if e := os.MkdirAll(dir, 0755); e != nil {

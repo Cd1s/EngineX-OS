@@ -36,6 +36,9 @@ func heldReplaced(t *testing.T, path string) bool {
 // replaces or removes must stay open, so its clusters stay allocated, until the directory (and
 // the new file) are synced, and be closed after.
 func TestIssue321ReplacedFileStaysAllocatedUntilTheNewEntryIsSynced(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
 	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
@@ -54,7 +57,7 @@ func TestIssue321ReplacedFileStaysAllocatedUntilTheNewEntryIsSynced(t *testing.T
 		}
 		held[filepath.Base(dst)] = heldReplaced(t, dst)
 	})
-	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true})
+	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", SkipPreparingCheck: true})
 	restore()
 	if err != nil || res.FilesUpdated == 0 || !res.OneLibraryUpdated {
 		t.Fatalf("pass: %+v %v", res, err)

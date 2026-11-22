@@ -16,6 +16,7 @@ import (
 )
 
 func TestOneLibraryVendorColumnsAndMountedSync(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	if e := os.Remove(filepath.Join(root, "PIONEER/rekordbox/export.pdb")); e != nil {
@@ -56,6 +57,7 @@ func TestOneLibraryVendorColumnsAndMountedSync(t *testing.T) {
 }
 
 func TestPlaylistAndSmartMatchDelta(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	opts := enginedb.Options{SmartMatch: true, CurrentTrack: 1}
@@ -139,6 +141,7 @@ func TestPlaylistAndSmartMatchDelta(t *testing.T) {
 // by the mount hook and rolled back, playlists included. Its playlists must land
 // at once; the tracks finish, cues and all, on the next mount.
 func TestMountPastItsReadBudgetStillImportsPlaylists(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	stamp := filepath.Join(root, "Engine Library", "Database2", ".rb-bridge-stamp")
@@ -172,6 +175,7 @@ func TestMountPastItsReadBudgetStillImportsPlaylists(t *testing.T) {
 }
 
 func TestWAVContainer32Valid24(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	b := testfixture.WAV(true)
@@ -193,6 +197,7 @@ func TestWAVContainer32Valid24(t *testing.T) {
 }
 
 func TestCF049Bogus500BPMAndGL010InformationGuard(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	l, err := bridge.ReadLibrary(context.Background(), root)

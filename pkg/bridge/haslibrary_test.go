@@ -8,6 +8,7 @@ import (
 )
 
 func TestHasLibrary(t *testing.T) {
+	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "Engine Library", "Database2") // the space needs URI escaping
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -50,6 +51,7 @@ func TestHasLibrary(t *testing.T) {
 }
 
 func TestImportedStampIgnoresSkeleton(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite", filepath.Join(dir, "m.db"))
 	if err != nil {
@@ -72,6 +74,7 @@ func TestImportedStampIgnoresSkeleton(t *testing.T) {
 }
 
 func TestHasPopulatedLibrary(t *testing.T) {
+	t.Parallel()
 	mount := filepath.Join(t.TempDir(), "RB7 STICK")
 	dbDir := filepath.Join(mount, "Engine Library", "Database2")
 	if err := os.MkdirAll(dbDir, 0o755); err != nil {

@@ -14,6 +14,7 @@ import (
 // An export.pdb the CDJ bridge made from the drive's own Engine library (#63) is
 // not imported back into it; once rekordbox rewrites it, it is imported again.
 func TestGeneratedExportIsNotImported(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	pdb := filepath.Join(root, "PIONEER", "rekordbox", "export.pdb")

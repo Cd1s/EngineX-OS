@@ -15,6 +15,7 @@ import (
 )
 
 func TestDeletedSourceReleasesPathAndMembership(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	convert(t, root, enginedb.Options{})
@@ -61,6 +62,7 @@ func TestDeletedSourceReleasesPathAndMembership(t *testing.T) {
 }
 
 func TestMissingBridgePlaylistRebuildAndNullNativeTail(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	convert(t, root, enginedb.Options{})
@@ -82,6 +84,7 @@ func TestMissingBridgePlaylistRebuildAndNullNativeTail(t *testing.T) {
 }
 
 func TestArtworkRejectsDirectoryAndOversizedFile(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"directory", "oversized"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
@@ -118,6 +121,7 @@ func TestArtworkRejectsDirectoryAndOversizedFile(t *testing.T) {
 }
 
 func TestDeletedSourceCleanupRollsBackOnBadAnalysis(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	convert(t, root, enginedb.Options{})
@@ -151,6 +155,7 @@ func TestDeletedSourceCleanupRollsBackOnBadAnalysis(t *testing.T) {
 }
 
 func TestHealedArtworkKeepsBridgeDeduplication(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	f, err := os.Create(filepath.Join(root, "large.png"))
@@ -185,6 +190,7 @@ func TestHealedArtworkKeepsBridgeDeduplication(t *testing.T) {
 }
 
 func TestMultipleNullNativePlaylistTailsPreserveChains(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	convert(t, root, enginedb.Options{})

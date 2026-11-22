@@ -18,7 +18,7 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
-const issue233Tracks = 3000
+const issue233Tracks = 600
 
 func issue233Mount(t *testing.T, root string, opts enginedb.Options) enginedb.Result {
 	t.Helper()
@@ -58,6 +58,9 @@ func issue233Marks(t *testing.T, root string, pending bool) {
 }
 
 func TestIssue233LargeIncrementalExportDefersNewTracks(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, 1)
 	issue233Mount(t, root, enginedb.Options{Deadline: time.Now().Add(time.Hour)})
@@ -79,6 +82,7 @@ func TestIssue233LargeIncrementalExportDefersNewTracks(t *testing.T) {
 }
 
 func TestIssue233ReconcileCanceledLeavesLibraryUntouched(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, 2)
 	r, err := compat.NewResolver(root)

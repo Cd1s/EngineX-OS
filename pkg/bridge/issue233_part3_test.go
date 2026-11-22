@@ -21,6 +21,9 @@ import (
 )
 
 func TestIssue233LargeSkeletonAndEngineAnalyzedResume(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	p, root, skeleton := testlibrary.Create(t)
 	st, err := os.Stat(p)
 	if err != nil {
@@ -122,6 +125,9 @@ func TestIssue233LargeSkeletonAndEngineAnalyzedResume(t *testing.T) {
 // A pre-v2 library has non-fast fingerprints but has never read MP3Offset. A
 // partial migration must distinguish unread legacy rows from completed rows.
 func TestIssue233LargeLegacyOffsetMigrationResumes(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, issue233Tracks)
 	issue233EarlierBuild(t, root)
@@ -229,6 +235,9 @@ func TestIssue233LargeLegacyOffsetMigrationResumes(t *testing.T) {
 
 // A re-export changes the stamp without making completed v2 offsets legacy.
 func TestIssue233CompletedV2LibraryReexportKeepsFinishedTracks(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	const n = 600
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, n)

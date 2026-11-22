@@ -1,9 +1,14 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
@@ -122,3 +127,34 @@ func SetCutForTest(f func(name string)) func() {
 
 // StagedWholeForTest reports whether tmp, a staged copy of dst, would be put back (#321 review R4).
 func StagedWholeForTest(tmp, dst string) bool { return stagedWhole(tmp, dst) }
+
+// InChildForTest runs the calling test in a process of its own and reports true when it did
+// (the caller returns). It is for a test that sets package variables of this package through
+// the hooks above, or reads what is process-wide: the bytes the process has read, the key
+// derivations it has made, the log's writer, its heap. In the child it returns false and the
+// body runs as it always did; the tests of other processes cannot see what it sets, so they
+// run side by side, each in its own process, instead of one after another in this one.
+// BRIDGE_TEST_INPROC=1 runs the body in this process, one test at a time, as before (to profile
+// or debug a test).
+func InChildForTest(t *testing.T) bool {
+	t.Helper()
+	const env = "BRIDGE_TEST_CHILD"
+	if os.Getenv(env) == t.Name() || os.Getenv("BRIDGE_TEST_INPROC") != "" {
+		return false
+	}
+	t.Parallel()
+	args := []string{"-test.run=^" + regexp.QuoteMeta(t.Name()) + "$", "-test.count=1", "-test.v"}
+	if d, ok := t.Deadline(); ok {
+		args = append(args, "-test.timeout="+time.Until(d).Round(time.Second).String())
+	}
+	cmd := exec.Command(os.Args[0], args...)
+	cmd.Env = append(os.Environ(), env+"="+t.Name())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s in its own process: %v\n%s", t.Name(), err, out)
+	}
+	if bytes.Contains(out, []byte("--- SKIP: "+t.Name()+" ")) {
+		t.Skipf("skipped in its own process:\n%s", out)
+	}
+	return true
+}
