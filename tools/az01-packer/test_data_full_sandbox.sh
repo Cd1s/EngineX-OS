@@ -221,7 +221,7 @@ step() { # <name> <command...>: run it, record exit code and wall time
 # systemd's rule for Requires=: the unit starts only when the unit it requires did not fail.
 requires_prepare() { # <unit>: does this unit hard-require enginex-prepare.service?
     cat "$R/usr/lib/systemd/system/$1" "$R/usr/lib/systemd/system/$1.d/"*.conf "$R/etc/systemd/system/$1" 2>/dev/null |
-        sed -n 's/^Requires=//p' | tr ' ' '\n' | grep -qx enginex-prepare.service
+        sed -n 's/^Requires=//p' | tr ' ' '\n' | grep -x enginex-prepare.service > /dev/null   # not -q: pipefail would see its SIGPIPE
 }
 unit_up() { # <unit>: would systemd start it after prepare ended as it did?
     ! requires_prepare "$1" || [ "$RC_prepare" = 0 ]
