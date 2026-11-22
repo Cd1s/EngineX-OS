@@ -88,10 +88,17 @@ type ExportDeck struct {
 // how far into it (0..1). ok is false when it is not a playing master.
 func (d ExportDeck) beatAt(now time.Time) (beat int, frac float64, ok bool) {
 	bpm := d.BPM * (1 + d.Pitch/100)
-	if !d.Master || !d.Playing || bpm <= 0 || d.At.IsZero() || d.Beat < 0 || now.Sub(d.At) > 2*time.Second {
+	since := now.Sub(d.At)
+	if !d.Master || !d.Playing || bpm <= 0 || d.At.IsZero() || d.Beat < 0 || since > 2*time.Second {
 		return 0, 0, false
 	}
-	pos := d.Beat + now.Sub(d.At).Seconds()*bpm/60
+	// The sender reads its tick before it takes the lock: a deck stored in between is
+	// newer than now. It is where it was at At, never before it (a negative beat went
+	// out as beat-in-bar 0).
+	if since < 0 {
+		since = 0
+	}
+	pos := d.Beat + since.Seconds()*bpm/60
 	whole := math.Floor(pos)
 	return int(whole) % 4, pos - whole, true
 }
@@ -99,8 +106,8 @@ func (d ExportDeck) beatAt(now time.Time) (beat int, frac float64, ok bool) {
 // Carried is d read again at now: the beat moved on with the tempo, so a deck
 // that has not changed since At keeps its beat packets (beatAt gives up after 2 s).
 func (d ExportDeck) Carried(now time.Time) ExportDeck {
-	if d.At.IsZero() {
-		return d
+	if d.At.IsZero() || now.Before(d.At) {
+		return d // read before the deck was stored: it is newer than now, leave it
 	}
 	if bpm := d.BPM * (1 + d.Pitch/100); d.Playing && bpm > 0 && d.Beat >= 0 {
 		d.Beat = math.Mod(d.Beat+now.Sub(d.At).Seconds()*bpm/60, 4)

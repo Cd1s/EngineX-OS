@@ -53,3 +53,30 @@ func TestTrimNASHashesProtectsOpenAndDownloadingFiles(t *testing.T) {
 		})
 	}
 }
+
+// Up to 5.3.0.5 Subsonic downloads were named subsonic-<id>: the ones already on a deck
+// must leave with the budget too.
+func TestTrimEvictsLegacySubsonicNames(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, "subsonic-101.mp3")
+	odd := filepath.Join(dir, "subsonic-.mp4")
+	kept := filepath.Join(dir, "nas-"+strings.Repeat("3", 64)+".mp3")
+	foreign := filepath.Join(dir, "subsonic.mp3") // not a name this pipeline gave
+	for _, p := range []string{old, odd, kept, foreign} {
+		if err := os.WriteFile(p, make([]byte, 100), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := &Client{DownloadDir: dir, MaxCache: 1}
+	c.Trim(kept)
+	for _, p := range []string{old, odd} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s not evicted: %v", filepath.Base(p), err)
+		}
+	}
+	for _, p := range []string{kept, foreign} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s deleted: %v", filepath.Base(p), err)
+		}
+	}
+}
