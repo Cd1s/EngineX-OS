@@ -155,7 +155,8 @@ func (m *TunnelManager) InstallPath() string {
 
 func isExecutableFile(p string) bool {
 	st, err := os.Stat(p)
-	return err == nil && st.Mode().IsRegular() && st.Mode()&0o111 != 0
+	// An empty file is what a power cut right after a download can leave under the final name.
+	return err == nil && st.Mode().IsRegular() && st.Mode()&0o111 != 0 && st.Size() > 0
 }
 
 func (m *TunnelManager) findBinary() (string, bool) {
@@ -220,6 +221,9 @@ func (m *TunnelManager) installBinary(ctx context.Context) (string, error) {
 		return "", err
 	}
 	_, copyErr := io.Copy(f, io.LimitReader(resp.Body, 128<<20))
+	if copyErr == nil {
+		copyErr = f.Sync() // the content is on the drive before the rename gives it its name
+	}
 	closeErr := f.Close()
 	if copyErr != nil {
 		_ = os.Remove(tmp)
@@ -428,9 +432,7 @@ func (m *TunnelManager) runLoop(ctx context.Context, myGen uint64, token string,
 		m.publicURL = ""
 		return
 	}
-	if err == nil && m.status == "running" {
-		return
-	}
+	// The helper ended without being asked to, whatever its exit status: its address is dead.
 	m.status = "error"
 	m.publicURL = ""
 	if lastLine != "" {
