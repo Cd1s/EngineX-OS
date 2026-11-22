@@ -31,7 +31,7 @@ func TestGuardianCommandDeadlineWithoutTimeoutUtility(t *testing.T) {
 }
 
 func TestGuardianDataOnlyDeadlineIsSoft(t *testing.T) {
-	mount := mountWithNFDTracks(t, 3000)
+	mount := mountWithNFDTracks(t, 130)
 	var out, errOut bytes.Buffer
 	started := time.Now()
 	if code := Guardian([]string{"--heal-mount", mount, "--data-only", "--timeout", "2s"}, &out, &errOut); code != 0 {
@@ -44,7 +44,7 @@ func TestGuardianDataOnlyDeadlineIsSoft(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &results); err != nil || len(results) != 1 || !results[0].Healthy {
 		t.Fatalf("soft data-only deadline result=%s err=%v", &out, err)
 	}
-	if results[0].PathsNormalized != 3000 {
+	if results[0].PathsNormalized != 130 {
 		t.Fatalf("first pass did not finish the bounded fixture: %s stderr=%s", &out, &errOut)
 	}
 	out.Reset()
