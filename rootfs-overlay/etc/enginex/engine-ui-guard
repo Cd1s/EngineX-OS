@@ -437,12 +437,13 @@ pre|settings)
                 }
             }' "$accounts" > "$accounts.tmp" && mv "$accounts.tmp" "$accounts"
         elif ! grep -q '"TIDAL"' "$accounts" 2>/dev/null; then
-            if grep -q '"' "$accounts" 2>/dev/null; then
-                awk '!d && (i = index($0, "{")) { $0 = substr($0, 1, i) "\n    " ENVIRON["T"] "," substr($0, i + 1); d = 1 } 1' "$accounts" > "$accounts.tmp"
-            else
-                printf '{\n    %s\n}\n' "$T" > "$accounts.tmp"
-            fi
-            mv "$accounts.tmp" "$accounts"
+            {
+                if grep -q '"' "$accounts" 2>/dev/null; then
+                    awk '!d && (i = index($0, "{")) { $0 = substr($0, 1, i) "\n    " ENVIRON["T"] "," substr($0, i + 1); d = 1 } 1' "$accounts" > "$accounts.tmp"
+                else
+                    printf '{\n    %s\n}\n' "$T" > "$accounts.tmp"
+                fi
+            } && [ -s "$accounts.tmp" ] && mv "$accounts.tmp" "$accounts" || rm -f "$accounts.tmp"
         fi
     fi
     fi
