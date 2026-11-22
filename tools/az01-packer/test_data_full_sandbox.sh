@@ -26,13 +26,19 @@
 #                          has room for the file but not for the guard's copy of it): the two branches of the guard (no TIDAL entry:
 #                          add; a TIDAL entry without a token: retoken) with a copy that gets no byte (empty) and one that is cut
 #                          in the middle (cut). The file must come out byte for byte as it went in; acct.tsv has the sizes.
+#   clean                  what the cleanup must never remove, 17 cases on a disk with room: prepare runs with a floor no disk can meet, so
+#                          every candidate is tried. File systems mounted at or below a removable name, links in a removable directory, a
+#                          directory or a link that carries a stream cache name, names with a space or a leading dash, the same names at
+#                          another depth, a link at the legacy data name, an export.pdb that is malformed, empty, absent, unstamped, stale
+#                          or names nothing (every analysis directory stays) and a whole one (the control), a file that cannot be removed.
 # normal runs prepare three times in a row for the timing of the step when there is room.
+# prepare reads the mount table, so it runs with the sandbox's real /proc (the fake one, made for the steps after it, has no mountinfo).
 set -euo pipefail
 export LC_ALL=C
 SELF=$(realpath "$0")
 REPO=$(cd "$(dirname "$SELF")/../.." && pwd)
 DATA_MIB=512
-SCENARIOS='normal full0 full1m full20m upd0 upd1m upd20m rem-early rem-order rem-upd free2 free3 acct'
+SCENARIOS='normal full0 full1m full20m upd0 upd1m upd20m rem-early rem-order rem-upd free2 free3 acct clean'
 KIB=1024
 
 if [ "${1:-}" != --inner ]; then
@@ -132,6 +138,8 @@ seed_timezone() {
 FLOOR_KIB=$(debugfs -R 'cat /usr/libexec/enginex-prepare' "$W/image/rootfs.ext2" 2> /dev/null | sed -n 's/.*ENGINEX_DATA_FLOOR_KIB:-\([0-9]*\)}.*/\1/p' | head -1)
 FLOOR_KIB=${FLOOR_KIB:-73728}
 kib() { head -c "$(( $2 * 1024 ))" /dev/zero > "$C/data/$1"; }   # a file of $2 KiB
+# What the bridge writes right after export.pdb: its size and mtime in nanoseconds (pkg/prolink/engine_bridge.go, pdbStamp).
+export_stamp() { printf '%s:%s000000000' "$(stat -c %s "$1")" "$(stat -c %Y "$1")" > "$(dirname "$1")/.enginex-generated"; }
 aged() { touch -d "@$((1700000000 + $2))" "$C/data/$1"; }       # its age: higher = newer
 seed_removable() {
     local e=enginex mode=$1 i
@@ -149,6 +157,7 @@ seed_removable() {
     printf 'EngineX-boot-report-20261122T020000.000000000Z.txt\n' > "$C/data/$e/ui/boot-report-latest"
     for i in 1 2 3; do kib "$e/prolink-export/PIONEER/USBANLZ/P00$i/ANLZ0000.DAT" 512; aged "$e/prolink-export/PIONEER/USBANLZ/P00$i" $((19 + i)); done
     printf 'PMAI \x00 /PIONEER/USBANLZ/P001/ANLZ0000.DAT \x00 end\n' > "$C/data/$e/prolink-export/PIONEER/rekordbox/export.pdb"
+    export_stamp "$C/data/$e/prolink-export/PIONEER/rekordbox/export.pdb"
     for i in 1 2 3; do kib "$e/Stream/$i.flac" 24576; aged "$e/Stream/$i.flac" $((30 + i)); done
     kib "$e/Stream/keep-me.wav" 4096
     # what must be gone and what must stay, after prepare
@@ -243,11 +252,13 @@ fi
 # Traced (sh -x) to name the failing line; the scenarios that time the freeing run it as systemd does.
 TRACE=-x
 case $SCEN in rem-*|free*) TRACE= ;; esac
+mount -t proc proc "$R/proc"   # over the fake one: prepare reads the mount table
 step prepare in_root /bin/sh $TRACE /usr/libexec/enginex-prepare
 # The control runs the step three more times, untraced: the timing of prepare when there is room, nothing to free.
 if [ "$SCEN" = normal ]; then
     for i in 2 3 4; do step "prepare-$i" in_root /usr/libexec/enginex-prepare; done
 fi
+umount "$R/proc"
 # After prepare: what was made again is gone, in the order of the list and only as far as the floor needs; the rest stays.
 expect_check() {
     local bad=0 f
@@ -261,6 +272,144 @@ case $SCEN in rem-*|free*) check "$SCEN: the files of ours were removed in the o
 # or of the deck's was touched.
 [ "$SCEN" = install ] || check "$SCEN: after prepare nothing of the DJ or of the deck was touched" \
     bash -c 'cd "$1/data" && sha256sum -c --quiet "$1/never.before" > "$1/never.check" 2>&1' x "$C"
+# What the cleanup must never remove. Each case seeds names of its own, runs prepare with a floor no disk can meet (so every
+# candidate is tried, in the order of the list) and the real /proc (prepare reads the mount table), checks, and takes its seeds away.
+# A file system mounted by a case is unmounted before anything under it is removed.
+if [ "$SCEN" = clean ]; then
+    D=$C/data E=$C/data/enginex UNMET_KIB=1000000000
+    LEGACY_LINK=$D/$(basename "$(sed -n "s/^legacy_data='\(.*\)'.*/\1/p" "$REPO/rootfs-overlay/usr/libexec/enginex-migration")")
+    gone() { [ ! -e "$D/$1" ] && [ ! -L "$D/$1" ]; }
+    there() { [ -e "$D/$1" ] || [ -L "$D/$1" ]; }
+    mnt() { mkdir -p "$R/data/$1"; mount -t tmpfs tmpfs "$R/data/$1"; echo mounted > "$R/data/$1/keep"; touch -d @1700000000 "$R/data/$1"; }
+    mnt_ok() { mountpoint -q "$R/data/$1" && [ "$(cat "$R/data/$1/keep")" = mounted ]; }
+    unmnt() { umount "$R/data/$1"; }
+    cleanup_run() { # <case>
+        local v=RC_prepare_${1//-/_}
+        mount -t proc proc "$R/proc"
+        step "prepare-$1" in_root ENGINEX_DATA_FLOOR_KIB=$UNMET_KIB /bin/sh /usr/libexec/enginex-prepare
+        umount "$R/proc"
+        CASE_RC=${!v}
+        check "$SCEN: $1: prepare ends with success" test "$CASE_RC" = 0
+    }
+    # The DJ's directory that links point at, and the export of the cases that name analysis directories
+    mkdir -p "$D/Music/dj-dir" "$E/Stream" "$E/prolink-export/PIONEER/rekordbox"
+    head -c 4096 /dev/urandom > "$D/Music/dj-dir/precious.mp3"
+    dj_sum() { sha256sum "$D/Music/dj-dir/precious.mp3" | cut -d' ' -f1; }
+    DJ0=$(dj_sum)
+    dj_ok() { [ -d "$D/Music/dj-dir" ] && [ "$(dj_sum)" = "$DJ0" ]; }
+    PDB=$E/prolink-export/PIONEER/rekordbox/export.pdb
+    ANLZ=$E/prolink-export/PIONEER/USBANLZ
+    analysis() { local n; for n in "$@"; do mkdir -p "$ANLZ/$n"; head -c 65536 /dev/zero > "$ANLZ/$n/ANLZ0000.DAT"; done; }
+    toy_export() { printf 'PMAI \x00 /PIONEER/USBANLZ/P001/ANLZ0000.DAT \x00 end\n' > "$PDB"; }
+    export_reset() { rm -f -- "$PDB" "$(dirname "$PDB")/.enginex-generated"; rm -rf -- "$ANLZ/P001" "$ANLZ/P002" "$ANLZ/P003"; }
+
+    # 1-4. a file system mounted at a removable name, and one below a removable directory
+    mnt enginex/Stream/1.flac; kib enginex/Stream/2.flac 64
+    cleanup_run mount-stream
+    check "$SCEN: mount-stream: a file system mounted at a stream cache name keeps its mount and its file" mnt_ok enginex/Stream/1.flac
+    check "$SCEN: mount-stream: the cleanup goes on past it, the plain cache file next to it is removed" gone enginex/Stream/2.flac
+    unmnt enginex/Stream/1.flac; rm -rf -- "$E/Stream/1.flac"
+
+    mnt enginex/.prepare.m; mkdir -p "$E/.prepare.s"; kib enginex/.prepare.s/f 64
+    cleanup_run mount-leftover
+    check "$SCEN: mount-leftover: a file system mounted at an interrupted run's directory keeps its mount and its file" mnt_ok enginex/.prepare.m
+    check "$SCEN: mount-leftover: the leftover next to it is removed" gone enginex/.prepare.s
+    unmnt enginex/.prepare.m; rm -rf -- "$E/.prepare.m"
+
+    mkdir -p "$E/ui/qml-cache"; kib enginex/ui/qml-cache/a.qmlc 64; mnt enginex/ui/qml-cache/mnt
+    cleanup_run mount-below-qml
+    check "$SCEN: mount-below-qml: a file system mounted below the QML cache keeps its mount and its file" mnt_ok enginex/ui/qml-cache/mnt
+    check "$SCEN: mount-below-qml: the cache directory with a mount below it stays as a whole" there enginex/ui/qml-cache/a.qmlc
+    unmnt enginex/ui/qml-cache/mnt; rm -rf -- "$E/ui/qml-cache"
+
+    analysis P001 P003; toy_export; export_stamp "$PDB"; mnt enginex/prolink-export/PIONEER/USBANLZ/P002
+    cleanup_run mount-analysis
+    check "$SCEN: mount-analysis: a file system mounted at an unnamed analysis directory keeps its mount and its file" mnt_ok enginex/prolink-export/PIONEER/USBANLZ/P002
+    check "$SCEN: mount-analysis: the unnamed analysis directory next to it is removed, the named one stays" bash -c '! test -e "$1" && test -e "$2"' x "$ANLZ/P003" "$ANLZ/P001"
+    unmnt enginex/prolink-export/PIONEER/USBANLZ/P002; export_reset
+
+    # 5. a link inside a removable directory: the link goes, what it points at stays
+    mkdir -p "$E/.prepare.l"; ln -s /data/Music/dj-dir "$E/.prepare.l/abs"; ln -s ../../Music/dj-dir "$E/.prepare.l/rel"
+    cleanup_run link-in-removable
+    check "$SCEN: link-in-removable: the removable directory is removed" gone enginex/.prepare.l
+    check "$SCEN: link-in-removable: the DJ's directory and its file are as they were" dj_ok
+
+    # 6. a directory and a link that carry a stream cache name: only regular files go, like Trim in deemixclient
+    mkdir -p "$E/Stream/3.flac"; kib enginex/Stream/3.flac/inner 64
+    ln -s ../../Music/dj-dir/precious.mp3 "$E/Stream/4.flac"; kib enginex/Stream/5.flac 64
+    cleanup_run stream-not-regular
+    check "$SCEN: stream-not-regular: a directory with a cache name stays, with what is in it" there enginex/Stream/3.flac/inner
+    check "$SCEN: stream-not-regular: a link with a cache name stays and the DJ's file it points at too" bash -c '[ -L "$1" ]' x "$E/Stream/4.flac"
+    check "$SCEN: stream-not-regular: the DJ's file behind the link is as it was" dj_ok
+    check "$SCEN: stream-not-regular: the regular cache file is removed" gone enginex/Stream/5.flac
+    rm -rf -- "$E/Stream/3.flac"; rm -f -- "$E/Stream/4.flac"
+
+    # 7. names with a space or a leading dash are none of ours
+    kib "enginex/Stream/with space.flac" 64; kib enginex/Stream/-dash.flac 64; kib enginex/Stream/-5.flac 64
+    kib "enginex/Stream/.part-with space" 64; mkdir -p "$E/.prepare.with space"; kib "enginex/.prepare.with space/f" 64; kib enginex/Stream/.part-ok 64
+    cleanup_run odd-names
+    check "$SCEN: odd-names: names with a space or a leading dash stay" bash -c 'cd "$1" && for f in "Stream/with space.flac" Stream/-dash.flac Stream/-5.flac "Stream/.part-with space" ".prepare.with space/f"; do [ -e "$f" ] || { echo "gone: $f"; exit 1; }; done' x "$E"
+    check "$SCEN: odd-names: the plain leftover next to them is removed" gone enginex/Stream/.part-ok
+    rm -rf -- "$E/Stream/with space.flac" "$E/Stream/-dash.flac" "$E/Stream/-5.flac" "$E/Stream/.part-with space" "$E/.prepare.with space"
+
+    # 8. names of our classes at another depth are none of ours either
+    mkdir -p "$D/Music/.prepare.dj" "$E/Stream/Stems/1234" "$E/Stream/sub" "$E/shadow-v3/peer-aa/nested" "$E/logs/sub" "$E/ui/mods-overlay/qml-cache" "$E/bin/sub" "$E/ui/sub" "$E/sub"
+    analysis P001 P002; mkdir -p "$ANLZ/sub/P009"; toy_export; export_stamp "$PDB"
+    deep='Music/.prepare.dj/f Music/9.flac enginex/Stream/Stems/1234/9.flac enginex/Stream/sub/.part-deep enginex/Stream/sub/8.flac
+        enginex/shadow-v3/peer-aa/nested/.fetch-nested enginex/logs/sub/EngineX-boot-report-20261122T010000.000000000Z.txt
+        enginex/prolink-export/PIONEER/USBANLZ/sub/P009/ANLZ0000.DAT enginex/ui/mods-overlay/qml-cache/seed enginex/bin/sub/enginex-suite.9.tmp
+        enginex/ui/sub/.install.deep enginex/sub/.prepare.deep'
+    for f in $deep; do [ -e "$D/$f" ] || kib "$f" 64; done
+    kib enginex/Stream/.part-ctl 64
+    cleanup_run other-depth
+    check "$SCEN: other-depth: removable-looking names one level too deep or in another directory stay" bash -c 'cd "$1" && shift && for f; do [ -e "$f" ] || { echo "gone: $f"; exit 1; }; done' x "$D" $deep
+    check "$SCEN: other-depth: the controls in the right place are removed (plain leftover, unnamed analysis directory)" bash -c '! test -e "$1" && ! test -e "$2"' x "$E/Stream/.part-ctl" "$ANLZ/P002"
+    rm -rf -- "$D/Music/.prepare.dj" "$D/Music/9.flac" "$E/Stream/Stems/1234/9.flac" "$E/Stream/sub" "$E/shadow-v3/peer-aa/nested" "$E/logs/sub" "$E/ui/mods-overlay/qml-cache" "$E/bin/sub" "$E/ui/sub" "$E/sub" "$ANLZ/sub"
+    export_reset
+
+    # 9. the link that keeps the legacy data name alive, pointing at a DJ directory
+    ln -s /data/Music/dj-dir "$LEGACY_LINK"
+    cleanup_run legacy-link
+    check "$SCEN: legacy-link: the link at the legacy data name stays, and so does what it points at" bash -c '[ "$(readlink "$1")" = /data/Music/dj-dir ]' x "$LEGACY_LINK"
+    check "$SCEN: legacy-link: the DJ's directory and its file are as they were" dj_ok
+    rm -f -- "$LEGACY_LINK"
+
+    # 10-16. export.pdb: an unreferenced analysis directory goes only when the export is the whole one the bridge wrote and names some
+    for sub in malformed unstamped stale nonames absent empty whole; do
+        analysis P001 P002; rm -f -- "$PDB" "$(dirname "$PDB")/.enginex-generated"
+        case $sub in
+            malformed) printf 'this is not a rekordbox export\n' > "$PDB"; export_stamp "$PDB" ;;
+            unstamped) toy_export ;;
+            stale) toy_export; export_stamp "$PDB"; printf 'x' >> "$PDB" ;;
+            nonames) printf 'PMAI \x00 no analysis paths in here \x00 end\n' > "$PDB"; export_stamp "$PDB" ;;
+            absent) : ;;
+            empty) : > "$PDB"; export_stamp "$PDB" ;;
+            whole) toy_export; export_stamp "$PDB" ;;
+        esac
+        cleanup_run "export-$sub"
+        case $sub in
+            whole) check "$SCEN: export-$sub: the control: the unnamed analysis directory is removed, the named one stays" \
+                       bash -c '! test -e "$1" && test -e "$2/ANLZ0000.DAT"' x "$ANLZ/P002" "$ANLZ/P001" ;;
+            *) check "$SCEN: export-$sub: both analysis directories stay" bash -c 'test -e "$1/ANLZ0000.DAT" && test -e "$2/ANLZ0000.DAT"' x "$ANLZ/P001" "$ANLZ/P002" ;;
+        esac
+        export_reset
+    done
+
+    # 17. a removal that fails (an immutable file) leaves the file and does not stop the step
+    kib enginex/Stream/.part-imm 64; aged enginex/Stream/.part-imm 0; kib enginex/Stream/.part-ok2 64
+    if chattr +i "$E/Stream/.part-imm" 2> /dev/null; then
+        cleanup_run rm-fails
+        check "$SCEN: rm-fails: the file that cannot be removed stays" there enginex/Stream/.part-imm
+        check "$SCEN: rm-fails: the cleanup goes on, the leftover after it is removed" gone enginex/Stream/.part-ok2
+        chattr -i "$E/Stream/.part-imm"
+    else
+        fail "rm-fails: cannot make a file immutable here"
+    fi
+    rm -f -- "$E/Stream/.part-imm" "$E/Stream/.part-ok2"
+    check "$SCEN: after every case nothing of the DJ or of the deck was touched" \
+        bash -c 'cd "$1/data" && sha256sum -c --quiet "$1/never.before" > "$1/never.check2" 2>&1' x "$C"
+    check "$SCEN: after every case no file system of a case is still mounted below /data/enginex" bash -c '! grep -q "$1/data/enginex/" /proc/self/mountinfo' x "$R"
+fi
 mkdir -p "$R/run/sshd"
 step sshd-t in_root /usr/sbin/sshd -t -f /usr/share/enginex/sshd_config
 [ "$SCEN" != install ] || printf 'lang=en\n' > "$C/data/enginex/ui/settings.conf"

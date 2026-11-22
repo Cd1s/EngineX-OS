@@ -372,6 +372,29 @@ class FilesystemTests(unittest.TestCase):
         path.write_bytes(b'x' * 1024 * kib)
         os.utime(path, (1_700_000_000 + age, 1_700_000_000 + age))
 
+    @staticmethod
+    def _export(pdb, content, stamp=True):
+        """An export.pdb and, as the bridge writes it right after, the marker with its size and mtime (pdbStamp)."""
+        pdb.parent.mkdir(parents=True, exist_ok=True)
+        pdb.write_bytes(content)
+        if stamp:
+            st = pdb.stat()
+            (pdb.parent/'.enginex-generated').write_text(f'{st.st_size}:{st.st_mtime_ns}')
+
+    def _mountinfo(self, *mounted):
+        """A mount table (mountinfo format) that has the root and one tmpfs at each of the paths."""
+        lines = ['1 0 8:1 / / rw - ext4 /dev/root rw']
+        lines += [f'{10 + i} 1 0:{50 + i} / {path} rw - tmpfs tmpfs rw' for i, path in enumerate(mounted)]
+        table = self.root/'mountinfo'
+        table.write_text('\n'.join(lines) + '\n')
+        return {'ENGINEX_MOUNTINFO': str(table)}
+
+    @staticmethod
+    def _cleanup(script, **env):
+        """prepare with a floor no disk meets, so that every candidate of every class is tried."""
+        return subprocess.run(['sh', '-s'], input=script, capture_output=True,
+                              env=dict(os.environ, ENGINEX_DATA_FLOOR_KIB=str(10**9), **env))
+
     def _seed_deck(self, data):
         """One file of every class prepare may remove (returned, in the order of its list) and of every class it never may."""
         e, put = data/'enginex', self._file
@@ -388,8 +411,7 @@ class FilesystemTests(unittest.TestCase):
         anlz = e/'prolink-export/PIONEER/USBANLZ'
         put(anlz/'P001/ANLZ0000.DAT', 128, 20)
         put(anlz/'P002/ANLZ0000.DAT', 128, 21)
-        (e/'prolink-export/PIONEER/rekordbox').mkdir(parents=True)
-        (e/'prolink-export/PIONEER/rekordbox/export.pdb').write_bytes(b'\x00 /PIONEER/USBANLZ/P001/ANLZ0000.DAT \x00')
+        self._export(e/'prolink-export/PIONEER/rekordbox/export.pdb', b'\x00 /PIONEER/USBANLZ/P001/ANLZ0000.DAT \x00')
         streams = [e/'Stream'/n for n in ('1.flac', '2.flac', 'spotify-abc.ogg')]
         for i, path in enumerate(streams):
             put(path, 512, 30 + i)
@@ -450,6 +472,98 @@ class FilesystemTests(unittest.TestCase):
         self.assertFalse(seeded['streams'][0].exists(), 'the oldest download goes first')
         for path, content in before.items():
             self.assertEqual(path.read_bytes(), content, path)
+
+    def test_prepare_cleanup_never_removes_a_mount_point_or_a_directory_with_one_below(self):
+        seed, data, script = self._prepare_lab('mnt')
+        e, put = data/'enginex', self._file
+        anlz = e/'prolink-export/PIONEER/USBANLZ'
+        mounted = [e/'Stream/1.flac', e/'.prepare.m', e/'ui/qml-cache/sub', anlz/'P002']
+        for m in mounted:
+            put(m/'keep', 1)
+        put(e/'ui/qml-cache/a.qmlc', 1)
+        put(anlz/'P003/ANLZ0000.DAT', 1)
+        self._export(e/'prolink-export/PIONEER/rekordbox/export.pdb', b'\x00 /PIONEER/USBANLZ/P001/ANLZ0000.DAT \x00')
+        for plain in (e/'Stream/2.flac', e/'.prepare.s/f'):
+            put(plain, 1)
+        put(data/'Music/dj-dir/precious.mp3', 1)
+        (e/'.prepare.l').mkdir()
+        (e/'.prepare.l/link').symlink_to(data/'Music/dj-dir')
+        p = self._cleanup(script, **self._mountinfo(*mounted))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        for m in mounted:
+            self.assertTrue((m/'keep').exists(), f'{m} is a mount point (or has one below it) and was emptied')
+        self.assertTrue((e/'ui/qml-cache/a.qmlc').exists(), 'a directory with a mount point below it stays as a whole')
+        for plain in (e/'Stream/2.flac', e/'.prepare.s', anlz/'P003', e/'.prepare.l'):
+            self.assertFalse(plain.exists(), f'{plain}: the cleanup goes on past a mount point')
+        self.assertTrue((data/'Music/dj-dir/precious.mp3').exists(), 'a link inside a removable directory is not followed')
+
+    def test_prepare_cleanup_removes_nothing_when_the_mount_table_cannot_be_read(self):
+        seed, data, script = self._prepare_lab('nomounts')
+        seeded = self._seed_deck(data)
+        p = self._cleanup(script, ENGINEX_MOUNTINFO=str(self.root/'no-such-table'))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(b'internal storage is full', p.stderr)
+        for path in seeded['leftovers'] + seeded['qml'] + seeded['reports'] + seeded['anlz'] + seeded['streams']:
+            self.assertTrue(path.exists(), f'{path}: without a mount table nothing is removed')
+
+    def test_prepare_cleanup_of_the_stream_cache_removes_regular_files_only_and_only_our_names(self):
+        seed, data, script = self._prepare_lab('names')
+        e, put = data/'enginex', self._file
+        put(e/'Stream/1.flac/inner', 1)                            # a directory with a cache name
+        put(data/'Music/dj.mp3', 1)
+        (e/'Stream/2.flac').symlink_to(data/'Music/dj.mp3')        # a link with a cache name
+        odd = [e/'Stream/with space.flac', e/'Stream/-dash.flac', e/'Stream/.part-with space', e/'.prepare.with space/f']
+        for path in odd + [e/'Stream/3.flac', e/'Stream/.part-ok']:
+            put(path, 1)
+        p = self._cleanup(script, **self._mountinfo())
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue((e/'Stream/1.flac/inner').exists(), 'only regular files go (Trim in deemixclient)')
+        self.assertTrue((e/'Stream/2.flac').is_symlink() and (data/'Music/dj.mp3').exists())
+        for path in odd:
+            self.assertTrue(path.exists(), f'{path} is none of ours')
+        for path in (e/'Stream/3.flac', e/'Stream/.part-ok'):
+            self.assertFalse(path.exists(), path)
+
+    def test_prepare_cleanup_removes_an_analysis_directory_only_when_the_export_is_whole(self):
+        toy = b'\x00 /PIONEER/USBANLZ/P001/ANLZ0000.DAT \x00'
+        for case in ('malformed', 'unstamped', 'stale', 'nonames', 'absent', 'empty', 'whole'):
+            with self.subTest(case):
+                seed, data, script = self._prepare_lab(f'pdb-{case}')
+                anlz, pdb = data/'enginex/prolink-export/PIONEER/USBANLZ', data/'enginex/prolink-export/PIONEER/rekordbox/export.pdb'
+                for n in ('P001', 'P002'):
+                    self._file(anlz/n/'ANLZ0000.DAT', 1)
+                pdb.parent.mkdir(parents=True)
+                if case == 'malformed':
+                    self._export(pdb, b'this is not a rekordbox export\n')
+                elif case == 'unstamped':
+                    self._export(pdb, toy, stamp=False)
+                elif case == 'stale':
+                    self._export(pdb, toy)
+                    pdb.write_bytes(toy + b'x')                    # the file changed after the bridge stamped it
+                elif case == 'nonames':
+                    self._export(pdb, b'\x00 no analysis paths in here \x00')
+                elif case == 'empty':
+                    self._export(pdb, b'')
+                elif case == 'whole':
+                    self._export(pdb, toy)
+                p = self._cleanup(script, **self._mountinfo())
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertTrue((anlz/'P001').exists(), 'the directory the export names stays')
+                self.assertEqual((anlz/'P002').exists(), case != 'whole', 'only a whole export frees the one it does not name')
+
+    def test_prepare_cleanup_goes_on_when_a_removal_fails(self):
+        seed, data, script = self._prepare_lab('rmfail')
+        e = data/'enginex'
+        self._file(e/'Stream/.part-bad', 1, 1)
+        self._file(e/'Stream/.part-ok', 1, 2)
+        shim = self.root/'rmshim'
+        shim.mkdir()
+        (shim/'rm').write_text('#!/bin/sh\ncase "$*" in *.part-bad*) echo "rm: cannot remove: Operation not permitted" >&2; exit 1 ;; esac\nexec /bin/rm "$@"\n')
+        (shim/'rm').chmod(0o755)
+        p = self._cleanup(script, PATH=f'{shim}:{os.environ["PATH"]}', **self._mountinfo())
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue((e/'Stream/.part-bad').exists())
+        self.assertFalse((e/'Stream/.part-ok').exists(), 'the next candidate is still tried')
 
     def test_prepare_on_a_disk_that_takes_no_data_ends_with_success_and_keeps_every_file(self):
         import io, lzma, tarfile
