@@ -2,11 +2,11 @@
 +         syncHoldAction: Action.None
 -         syncHoldAction: Action.InstantDouble
 +     // EngineX button mapping: begin
-+     // EngineX button mapping: PadModeSelect:30 shift -> waveform_cycle
++     // EngineX button mapping: PadModeSelect:27 shift -> waveform_cycle
 +     ValueNoteAssignment {
-+         objectName: "EngineX Map PadModeSelect:30 shift"
++         objectName: "EngineX Map PadModeSelect:27 shift"
 +         channel: deckConfig.midiChannel
-+         note: 30
++         note: 27
 +         enabled: globalConfig.shift && deckConfig.inDJMode
 +         output: ActionOutput {
 +             target: PropertyTarget {
@@ -70,18 +70,6 @@
 +             }
 +         }
 +     }
-+     // EngineX button mapping: PadModeSelect:27 shift -> censor
-+     ValueNoteAssignment {
-+         objectName: "EngineX Map PadModeSelect:27 shift"
-+         channel: deckConfig.midiChannel
-+         note: 27
-+         enabled: globalConfig.shift && deckConfig.inDJMode
-+         output: ActionOutput {
-+             target: PropertyTarget {
-+                 path: deckConfig.censorIsSilentCue ? deckConfig.activeDeckPath + "SilentCue" : deckConfig.activeDeckTrackPath + "Bleep"
-+             }
-+         }
-+     }
 +     // EngineX button mapping: PadModeSelect:28 shift -> loop_double
 +     ValueNoteAssignment {
 +         objectName: "EngineX Map PadModeSelect:28 shift"
@@ -97,6 +85,19 @@
 +             roundRobin: false
 +             minimum: 1.0
 +             maximum: 0.0
++         }
++     }
++     // EngineX button mapping: PadModeSelect:30 hold -> slip
++     ValueNoteAssignment {
++         objectName: "EngineX Map PadModeSelect:30 hold"
++         channel: deckConfig.midiChannel
++         note: 30
++         enabled: !globalConfig.shift && deckConfig.inDJMode
++         output: ComboActionOutput {
++             holdEnabled: true
++             holdTarget: PropertyTarget {
++                 path: deckConfig.activeDeckTrackPath + "SlipMode"
++             }
 +         }
 +     }
 +     // EngineX button mapping: Sync:20 hold -> cue_countdown_toggle

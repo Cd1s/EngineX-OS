@@ -28,6 +28,11 @@
      "setting": "cue_countdown",
      "label": {"en": "Toggle cue countdown", "zh-Hans": "开关 Cue 倒计时", "zh-Hant": "開關 Cue 倒數", "es": "Activar o desactivar la cuenta atrás de cue"}}
   ],
+  "controls": {
+    "PadModeSelect:30": {
+      "shift": {"status": "taken", "by": "Beat Jump pad mode"}
+    }
+  },
   "modules": {
     "Shift": {"reserved": true},
     "Shortcuts": {"reserved": true},

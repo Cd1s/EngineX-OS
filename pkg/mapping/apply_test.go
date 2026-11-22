@@ -28,7 +28,7 @@ func applyDir(t *testing.T, mappings string) (dir, in, out, file, status string)
 	return
 }
 
-const oneMapping = `[{"board":"JP07","control":"PadModeSelect:30","gesture":"shift","action":"waveform_cycle"}]`
+const oneMapping = `[{"board":"JP07","control":"PadModeSelect:28","gesture":"shift","action":"waveform_cycle"}]`
 
 func TestApplyWritesThePatchedFileAndAStatus(t *testing.T) {
 	_, in, out, file, status := applyDir(t, oneMapping)
@@ -37,7 +37,7 @@ func TestApplyWritesThePatchedFileAndAStatus(t *testing.T) {
 		t.Fatalf("%v %v", ok, err)
 	}
 	b, err := os.ReadFile(out)
-	if err != nil || !strings.Contains(string(b), `objectName: "EngineX Map PadModeSelect:30 shift"`) {
+	if err != nil || !strings.Contains(string(b), `objectName: "EngineX Map PadModeSelect:28 shift"`) {
 		t.Fatalf("%v\n%s", err, b)
 	}
 	st, err := ReadStatus(status)
@@ -65,8 +65,9 @@ func TestApplyWithNoMappingsBindsNothing(t *testing.T) {
 func TestApplyRejectsWhatFailsAndLeavesStockAlone(t *testing.T) {
 	for name, c := range map[string]struct{ mappings, code string }{
 		"an unknown action":   {strings.Replace(oneMapping, "waveform_cycle", "format_disk", 1), ReasonAction},
-		"a reserved control":  {strings.Replace(oneMapping, "PadModeSelect:30", "Shift:26", 1), ReasonReserved},
+		"a reserved control":  {strings.Replace(oneMapping, "PadModeSelect:28", "Shift:26", 1), ReasonReserved},
 		"a file that is junk": {"not json", "json"},
+		"Shift + LOOP":        {strings.Replace(oneMapping, "PadModeSelect:28", "PadModeSelect:30", 1), ReasonTaken},
 	} {
 		_, in, out, file, status := applyDir(t, c.mappings)
 		ok, err := Apply("JP07", in, out, file, status)

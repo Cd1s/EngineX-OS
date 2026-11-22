@@ -42,6 +42,7 @@ const (
 	StatusTakeover = "takeover" // stock uses it, and its binding can be disabled alone
 	StatusStock    = "stock"    // stock uses it and v1 cannot take it
 	StatusReserved = "reserved" // never mappable: Shift and the navigation controls
+	StatusTaken    = "taken"    // an EngineX function owns it (Shift + LOOP: the Beat Jump pad mode)
 )
 
 // Action is one function a mapping can run.
@@ -66,6 +67,7 @@ type Takeover struct {
 // GestureRule is stock's use of one gesture of a module.
 type GestureRule struct {
 	Status string `json:"status"`
+	By     string `json:"by,omitempty"` // for StatusTaken: what owns the gesture
 	Takeover
 }
 
@@ -90,6 +92,9 @@ type Catalogue struct {
 	Timing  Timing                `json:"timing"`
 	Actions []Action              `json:"actions"`
 	Modules map[string]ModuleRule `json:"modules"`
+	// Controls overrides one control's gesture, by inventory id: what EngineX itself puts
+	// on a control (the inventory holds stock's functions only).
+	Controls map[string]map[string]GestureRule `json:"controls"`
 }
 
 // Control is one row of the inventory of a board (tools/mapping/inventory.py).
@@ -236,6 +241,7 @@ const (
 	ReasonControl    = "control"
 	ReasonGesture    = "gesture"
 	ReasonReserved   = "reserved"
+	ReasonTaken      = "taken"
 	ReasonStockUsed  = "stock-used"
 	ReasonNotOffered = "not-offered"
 	ReasonAction     = "action"
@@ -272,6 +278,9 @@ func (c *Catalogue) Offer(board, control, gesture string) Offer {
 	}
 	if rule.Reserved {
 		return Offer{Status: StatusReserved, Reason: ReasonReserved}
+	}
+	if o, ok := c.Controls[control][gesture]; ok && o.Status == StatusTaken {
+		return Offer{Status: StatusTaken, Reason: ReasonTaken}
 	}
 	g, ok := rule.Gestures[gesture]
 	if !ok {
@@ -318,4 +327,12 @@ func (c *Catalogue) ActionIDs() []string {
 
 func (m Mapping) String() string {
 	return strings.Join([]string{m.Board, m.Control, m.Gesture, m.Action}, "/")
+}
+
+// Taken says what owns a gesture of a control that EngineX has taken, if anything.
+func (c *Catalogue) Taken(control, gesture string) (string, bool) {
+	if g, ok := c.Controls[control][gesture]; ok && g.Status == StatusTaken {
+		return g.By, true
+	}
+	return "", false
 }

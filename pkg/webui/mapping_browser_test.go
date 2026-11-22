@@ -32,9 +32,9 @@ func TestMappingPageInABrowser(t *testing.T) {
 	})
 	ts := httptest.NewServer(s)
 	defer ts.Close()
-	// What the controller plays, once per learn: Shift + Loop, then Back (a reserved control), then nothing.
+	// What the controller plays, once per learn: Shift + Roll, then Back (a reserved control), then nothing.
 	script := [][]mapping.Event{
-		{{Note: 26, On: true}, {Note: 30, On: true}, {Note: 30}, {Note: 26}},
+		{{Note: 26, On: true}, {Note: 28, On: true}, {Note: 28}, {Note: 26}},
 		{{Note: 16, On: true}, {Note: 16}},
 	}
 	done := make(chan struct{})

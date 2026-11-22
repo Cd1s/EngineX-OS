@@ -1008,8 +1008,8 @@ if command -v go > /dev/null 2>&1; then
     (cd "$ROOT" && go build -o "$TMP/guard-bin/enginex-suite" ./cmd/enginex-suite)
     printf '#!/bin/sh\nexec %s stream-sync "$@"\n' "$TMP/guard-bin/enginex-suite" > "$TMP/guard-bin/real-stream-sync"
     chmod +x "$TMP/guard-bin/real-stream-sync"
-    printf 'import airAssignments 1.0\nimport QtQuick 2.12\n\nMidiAssignment {\n    GlobalAssignmentConfig {\n        id: globalConfig\n        midiChannel: 0\n    }\n\n    Shift {\n        note: 26\n    }\n\n    DeckAssignmentConfig {\n        id: deckConfig\n        midiChannel: globalConfig.midiChannel\n    }\n\n    PadModeSelect {\n        buttonsModel: ListModel {\n            ListElement {\n                note: 30\n            }\n        }\n    }\n}\n' > "$massign/JP07/JP07_Controller_Assignments.qml"
-    printf '[{"board":"JP07","control":"PadModeSelect:30","gesture":"shift","action":"waveform_cycle"}]\n' > "$TMP/mappings.json"
+    printf 'import airAssignments 1.0\nimport QtQuick 2.12\n\nMidiAssignment {\n    GlobalAssignmentConfig {\n        id: globalConfig\n        midiChannel: 0\n    }\n\n    Shift {\n        note: 26\n    }\n\n    DeckAssignmentConfig {\n        id: deckConfig\n        midiChannel: globalConfig.midiChannel\n    }\n\n    PadModeSelect {\n        buttonsModel: ListModel {\n            ListElement {\n                note: 28\n            }\n        }\n    }\n}\n' > "$massign/JP07/JP07_Controller_Assignments.qml"
+    printf '[{"board":"JP07","control":"PadModeSelect:28","gesture":"shift","action":"waveform_cycle"}]\n' > "$TMP/mappings.json"
     printf 'lang=en\n' > "$TMP/ui-map/settings.conf"
     : > "$GUARD_LOG"; rm -f "$GUARD_LOG.bound"
     ENGINEX_UI_DIR=$TMP/ui-map ENGINEX_ASSIGNMENT_DIR=$massign ENGINEX_ASSIGNMENT_PATCHED=$mpatched \

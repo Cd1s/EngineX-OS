@@ -42,6 +42,7 @@ type mappingControl struct {
 	Note   int                      `json:"note"`
 	Stock  map[string]string        `json:"stock"`
 	Offers map[string]mapping.Offer `json:"offers"`
+	Taken  map[string]string        `json:"taken,omitempty"` // gesture -> the EngineX function that owns it
 }
 
 type mappingAction struct {
@@ -131,6 +132,12 @@ func (s *Server) mappingView() (mappingView, error) {
 			}}
 		for _, g := range mapping.Gestures {
 			ctl.Offers[g] = cat.Offer(board, c.ID, g)
+			if by, ok := cat.Taken(c.ID, g); ok {
+				if ctl.Taken == nil {
+					ctl.Taken = map[string]string{}
+				}
+				ctl.Taken[g] = by
+			}
 		}
 		v.Controls = append(v.Controls, ctl)
 	}

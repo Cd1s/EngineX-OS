@@ -142,14 +142,14 @@ func TestKernelSourceLearnsFromARealSubscription(t *testing.T) {
 		time.Sleep(60 * time.Millisecond)
 		w.note(t, through, evNoteOn, 0, noteShift, 127)
 		time.Sleep(20 * time.Millisecond)
-		w.note(t, through, evNoteOn, 0, noteLoop, 100)
-		w.note(t, through, evNoteOff, 0, noteLoop, 0)
+		w.note(t, through, evNoteOn, 0, noteRoll, 100)
+		w.note(t, through, evNoteOff, 0, noteRoll, 0)
 	}()
 	r, err := learnLoop(context.Background(), src, l, 3*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Gesture != GestureShift || r.Control != "PadModeSelect:30" || !r.Offer.Mappable {
+	if r.Gesture != GestureShift || r.Control != "PadModeSelect:28" || !r.Offer.Mappable {
 		t.Fatalf("%+v", r)
 	}
 	if err := src.Close(); err != nil {

@@ -78,13 +78,13 @@ func TestPickPortChoosesTheBoardsController(t *testing.T) {
 func TestLearnSubscribesReadsOneGestureAndClosesTheSource(t *testing.T) {
 	src := &fakeSource{ports: sc5000Ports, script: []fakeStep{
 		{after: 10 * time.Millisecond, events: []Event{{Note: noteShift, On: true}}},
-		{after: 30 * time.Millisecond, events: []Event{{Note: noteLoop, On: true}}},
+		{after: 30 * time.Millisecond, events: []Event{{Note: noteRoll, On: true}}},
 	}}
 	r, err := Learn(context.Background(), src, "JP07", time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Gesture != GestureShift || r.Control != "PadModeSelect:30" || !r.Offer.Mappable {
+	if r.Gesture != GestureShift || r.Control != "PadModeSelect:28" || !r.Offer.Mappable {
 		t.Fatalf("%+v", r)
 	}
 	if len(src.subscribed) != 1 || src.subscribed[0].Client != 20 {

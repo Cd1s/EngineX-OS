@@ -30,7 +30,7 @@ MidiAssignment {
     PadModeSelect {
         buttonsModel: ListModel {
             ListElement {
-                note: 30
+                note: 28
             }
         }
     }
@@ -42,13 +42,13 @@ func TestStreamSyncMappingGenerateWritesThePatchedFile(t *testing.T) {
 	in, out, file := filepath.Join(dir, "in.qml"), filepath.Join(dir, "out.qml"), filepath.Join(dir, "mappings.json")
 	status := mapping.StatusPath(dir, "JP07")
 	os.WriteFile(in, []byte(mappingStock), 0o644)
-	os.WriteFile(file, []byte(`[{"board":"JP07","control":"PadModeSelect:30","gesture":"shift","action":"waveform_cycle"}]`), 0o644)
+	os.WriteFile(file, []byte(`[{"board":"JP07","control":"PadModeSelect:28","gesture":"shift","action":"waveform_cycle"}]`), 0o644)
 	args := []string{"--mapping-generate", "JP07", "--mapping-in", in, "--mapping-out", out, "--mapping-file", file, "--mapping-status", status}
 	if err := StreamSync(args); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(out)
-	if err != nil || !strings.Contains(string(b), "EngineX Map PadModeSelect:30 shift") {
+	if err != nil || !strings.Contains(string(b), "EngineX Map PadModeSelect:28 shift") {
 		t.Fatalf("%v\n%s", err, b)
 	}
 	if st, _ := mapping.ReadStatus(status); st.State != "applied" {

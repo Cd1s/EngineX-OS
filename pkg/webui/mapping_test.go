@@ -63,7 +63,7 @@ func mapView(t *testing.T, w *httptest.ResponseRecorder) mappingView {
 	return v
 }
 
-const waveformShift = `{"board":"JP07","control":"PadModeSelect:30","gesture":"shift","action":"waveform_cycle"}`
+const waveformShift = `{"board":"JP07","control":"PadModeSelect:28","gesture":"shift","action":"waveform_cycle"}`
 
 func TestMappingPageDataOfAPlayerBoard(t *testing.T) {
 	mappingDeck(t, "JP07")
@@ -75,9 +75,13 @@ func TestMappingPageDataOfAPlayerBoard(t *testing.T) {
 	for _, c := range v.Controls {
 		byID[c.ID] = c
 	}
-	pad := byID["PadModeSelect:30"]
-	if pad.Note != 30 || !pad.Offers["shift"].Mappable || !pad.Offers["hold"].Mappable || pad.Offers["press"].Mappable {
+	pad := byID["PadModeSelect:28"]
+	if pad.Note != 28 || !pad.Offers["shift"].Mappable || !pad.Offers["hold"].Mappable || pad.Offers["press"].Mappable {
 		t.Fatalf("%+v", pad)
+	}
+	loop := byID["PadModeSelect:30"]
+	if loop.Offers["shift"].Mappable || loop.Offers["shift"].Status != mapping.StatusTaken || loop.Taken["shift"] != "Beat Jump pad mode" || !loop.Offers["hold"].Mappable {
+		t.Fatalf("Shift + LOOP is EngineX's: %+v %v", loop.Offers, loop.Taken)
 	}
 	if byID["Back:16"].Offers["press"].Reason != mapping.ReasonReserved || byID["Sync:20"].Offers["hold"].Status != mapping.StatusTakeover {
 		t.Fatalf("%+v %+v", byID["Back:16"], byID["Sync:20"])
@@ -149,7 +153,8 @@ func TestMappingSaveRejectsWhatDoesNotValidateAndKeepsTheFile(t *testing.T) {
 	mapView(t, mapReq(t, s, "POST", "/api/mapping", `{"mappings":[`+waveformShift+`]}`))
 	before, _ := os.ReadFile(file)
 	for name, c := range map[string]struct{ body, code string }{
-		"an unknown action":  {`{"mappings":[{"board":"JP07","control":"PadModeSelect:30","gesture":"shift","action":"reboot"}]}`, "action"},
+		"an unknown action":  {`{"mappings":[{"board":"JP07","control":"PadModeSelect:28","gesture":"shift","action":"reboot"}]}`, "action"},
+		"Shift + LOOP":       {`{"mappings":[{"board":"JP07","control":"PadModeSelect:30","gesture":"shift","action":"sync"}]}`, "taken"},
 		"Shift itself":       {`{"mappings":[{"board":"JP07","control":"Shift:26","gesture":"press","action":"sync"}]}`, "reserved"},
 		"a stock gesture":    {`{"mappings":[{"board":"JP07","control":"PadModeSelect:30","gesture":"press","action":"sync"}]}`, "stock-used"},
 		"the same gesture 2": {`{"mappings":[` + waveformShift + `,` + waveformShift + `]}`, "duplicate"},
@@ -194,7 +199,7 @@ func TestMappingExportAndImportRoundTrip(t *testing.T) {
 	}
 	// an import that does not validate writes nothing
 	before, _ := os.ReadFile(file)
-	for _, body := range []string{`[{"board":"JP07","control":"PadModeSelect:30","gesture":"shift","action":"nope"}]`, `{"board":"JP07"}`, "junk"} {
+	for _, body := range []string{`[{"board":"JP07","control":"PadModeSelect:28","gesture":"shift","action":"nope"}]`, `{"board":"JP07"}`, "junk"} {
 		if w := mapReq(t, s, "POST", "/api/mapping/import", body); w.Code != http.StatusBadRequest {
 			t.Errorf("%q: %d", body, w.Code)
 		}
@@ -341,9 +346,9 @@ func TestMappingLearnReportsOneGestureAndClosesItsSubscription(t *testing.T) {
 		t.Fatalf("a second learn while one runs: %d", w.Code)
 	}
 	src.events <- []mapping.Event{{Note: 26, On: true}}
-	src.events <- []mapping.Event{{Note: 30, On: true}}
+	src.events <- []mapping.Event{{Note: 28, On: true}}
 	v := waitLearn(t, s, "done")
-	if v.Result == nil || v.Result.Gesture != "shift" || v.Result.Control != "PadModeSelect:30" || !v.Result.Offer.Mappable {
+	if v.Result == nil || v.Result.Gesture != "shift" || v.Result.Control != "PadModeSelect:28" || !v.Result.Offer.Mappable {
 		t.Fatalf("%+v", v.Result)
 	}
 	if subs, closed := src.counts(); subs != 1 || closed != 1 || opened != 1 {

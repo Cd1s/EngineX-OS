@@ -55,6 +55,7 @@ const (
 	noteShift   = 26
 	noteHotCue  = 27
 	noteLoop    = 30
+	noteRoll    = 28
 	noteBack    = 16
 	noteSync    = 20
 	noteUnknown = 99
@@ -113,22 +114,33 @@ func TestLearnHoldAtFiveHundredMilliseconds(t *testing.T) {
 }
 
 func TestLearnShiftCombination(t *testing.T) {
-	r, at := run(t, "JP07", []Event{on(0, noteShift), on(150, noteLoop), off(200, noteLoop)})
-	if r == nil || r.Gesture != GestureShift || at != ms(150) || r.Control != "PadModeSelect:30" {
+	r, at := run(t, "JP07", []Event{on(0, noteShift), on(150, noteRoll), off(200, noteRoll)})
+	if r == nil || r.Gesture != GestureShift || at != ms(150) || r.Control != "PadModeSelect:28" {
 		t.Fatalf("%+v at %v", r, at)
 	}
 	if !r.Offer.Mappable {
 		t.Errorf("%+v", r.Offer)
 	}
 	// Shift let go before the button: an ordinary press
-	r, _ = run(t, "JP07", []Event{on(0, noteShift), off(100, noteShift), on(200, noteLoop), off(250, noteLoop)}, 600)
+	r, _ = run(t, "JP07", []Event{on(0, noteShift), off(100, noteShift), on(200, noteRoll), off(250, noteRoll)}, 600)
 	if r == nil || r.Gesture != GesturePress {
 		t.Fatalf("%+v", r)
 	}
 	// Shift pressed after the button went down does not turn the press into a shift gesture
-	r, _ = run(t, "JP07", []Event{on(0, noteLoop), on(50, noteShift), off(80, noteLoop)}, 400)
+	r, _ = run(t, "JP07", []Event{on(0, noteRoll), on(50, noteShift), off(80, noteRoll)}, 400)
 	if r == nil || r.Gesture != GesturePress {
 		t.Fatalf("%+v", r)
+	}
+}
+
+// Shift + LOOP is caught like any gesture and reported as not mappable: EngineX's Beat Jump pad mode owns it.
+func TestLearnReportsShiftLoopAsTakenByTheBeatJumpPadMode(t *testing.T) {
+	r, _ := run(t, "JP13", []Event{on(0, noteShift), on(120, noteLoop), off(160, noteLoop)})
+	if r == nil || r.Gesture != GestureShift || r.Control != "PadModeSelect:30" {
+		t.Fatalf("%+v", r)
+	}
+	if r.Offer.Mappable || r.Offer.Reason != ReasonTaken || r.Offer.Status != StatusTaken {
+		t.Fatalf("%+v", r.Offer)
 	}
 }
 

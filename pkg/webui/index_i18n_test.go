@@ -38,7 +38,7 @@ func TestConsoleIsFullyTranslated(t *testing.T) {
 			used[m[1]] = true
 		}
 	}
-	for _, key := range []string{"jQueued", "jMatching", "jDownloading", "jAnalyzing", "jImporting", "jDone", "jError", "kInternal", "kHd", "kSd", "kUsb", "kDrive", "btMaster", "btBooth", "btHeadphones", "btZone", "btLayerA", "btLayerB", "mapG_press", "mapG_shift", "mapG_double", "mapG_hold", "mapOffer_free", "mapOffer_takeover", "mapWhy_reserved", "mapWhy_stockused", "mapWhy_notoffered", "mapWhy_control", "mapWhy_gesture", "mapWhy_board", "mapWhy_action", "mapWhy_output", "mapWhy_duplicate", "mapWhy_size", "mapWhy_json"} {
+	for _, key := range []string{"jQueued", "jMatching", "jDownloading", "jAnalyzing", "jImporting", "jDone", "jError", "kInternal", "kHd", "kSd", "kUsb", "kDrive", "btMaster", "btBooth", "btHeadphones", "btZone", "btLayerA", "btLayerB", "mapG_press", "mapG_shift", "mapG_double", "mapG_hold", "mapOffer_free", "mapOffer_takeover", "mapWhy_taken", "mapOwn_taken", "mapWhy_reserved", "mapWhy_stockused", "mapWhy_notoffered", "mapWhy_control", "mapWhy_gesture", "mapWhy_board", "mapWhy_action", "mapWhy_output", "mapWhy_duplicate", "mapWhy_size", "mapWhy_json"} {
 		used[key] = true // looked up through a map, not a literal t('...')
 	}
 	if len(used) < 60 {

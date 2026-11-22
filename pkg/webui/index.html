@@ -579,6 +579,8 @@ mapG_double:['Double press','双击','雙擊','Doble pulsación'],
 mapG_hold:['Hold','长按','長按','Mantener'],
 mapOffer_free:['free in stock','原厂未使用','原廠未使用','libre en la original'],
 mapOffer_takeover:['replaces the stock function','替换原厂功能','取代原廠功能','sustituye la función original'],
+mapWhy_taken:['This gesture belongs to EngineX (the Beat Jump pad mode).','这个手势属于 EngineX（Beat Jump 打点模式）。','這個手勢屬於 EngineX（Beat Jump 打點模式）。','Este gesto pertenece a EngineX (el modo de pads Beat Jump).'],
+mapOwn_taken:['EngineX: Beat Jump pad mode','EngineX：Beat Jump 打点模式','EngineX：Beat Jump 打點模式','EngineX: modo de pads Beat Jump'],
 mapWhy_reserved:['Shift and the navigation controls are never mapped.','Shift 和导航按键不能映射。','Shift 和導覽按鍵不能對應。','Shift y los controles de navegación nunca se asignan.'],
 mapWhy_stockused:['Stock already uses this gesture.','原厂已使用这个手势。','原廠已使用這個手勢。','La asignación original ya usa este gesto.'],
 mapWhy_notoffered:['This control is not offered for mapping yet.','这个按键暂不支持映射。','這個按鍵暫不支援對應。','Este control aún no se ofrece para asignar.'],
@@ -845,7 +847,8 @@ function renderMap(v){
  ref.append(head);
  for(const c of v.controls){const tr=document.createElement('tr'),n=document.createElement('td');n.textContent=c.name+' ('+c.note+')';tr.append(n);
   for(const g of MAP_G){const td=document.createElement('td'),o=c.offers[g];td.textContent=c.stock[g]&&c.stock[g]!=='None'?c.stock[g]:'–';
-   if(o.mappable){td.className='free';const own=document.createElement('span');own.className='own';own.textContent=t(`mapOffer_${o.status}`);td.append(own)}else if(o.reason==='reserved')td.className='reserved';tr.append(td)}
+   if(o.status==='taken'){td.className='reserved';const own=document.createElement('span');own.className='own';own.textContent=t('mapOwn_taken');td.append(own)}
+   else if(o.mappable){td.className='free';const own=document.createElement('span');own.className='own';own.textContent=t(`mapOffer_${o.status}`);td.append(own)}else if(o.reason==='reserved')td.className='reserved';tr.append(td)}
   ref.append(tr)}
  $('mapRef').replaceChildren(ref);
  if(v.learn&&v.learn.state==='running'&&!mapLearning){mapLearning=true;mapPoll()}

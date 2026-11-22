@@ -65,6 +65,9 @@ func Validate(m Mapping) error {
 			return reject(m, ReasonControl, "%q is not a button of %s", m.Control, m.Board)
 		case ReasonReserved:
 			return reject(m, ReasonReserved, "%s is Shift or a navigation control and is never mapped", m.Control)
+		case ReasonTaken:
+			by, _ := c.Taken(m.Control, m.Gesture)
+			return reject(m, ReasonTaken, "%s on %s belongs to EngineX's %s", m.Gesture, m.Control, by)
 		case ReasonStockUsed:
 			return reject(m, ReasonStockUsed, "stock uses %s on %s and it cannot be taken without losing another function", m.Gesture, m.Control)
 		default:

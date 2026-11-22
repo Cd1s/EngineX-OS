@@ -68,13 +68,13 @@ MidiAssignment {
 `
 
 var fixtureMappings = []Mapping{
-	{Board: "JP07", Control: "PadModeSelect:30", Gesture: "shift", Action: "waveform_cycle"},
+	{Board: "JP07", Control: "PadModeSelect:27", Gesture: "shift", Action: "waveform_cycle"},
 	{Board: "JP07", Control: "PadModeSelect:27", Gesture: "hold", Action: "beat_jump_forward"},
 	{Board: "JP07", Control: "PadModeSelect:28", Gesture: "double", Action: "sync"},
 	{Board: "JP07", Control: "PadModeSelect:29", Gesture: "shift", Action: "loop_halve"},
 	{Board: "JP07", Control: "PadModeSelect:29", Gesture: "hold", Action: "key_lock"},
-	{Board: "JP07", Control: "PadModeSelect:27", Gesture: "shift", Action: "censor"},
 	{Board: "JP07", Control: "PadModeSelect:28", Gesture: "shift", Action: "loop_double"},
+	{Board: "JP07", Control: "PadModeSelect:30", Gesture: "hold", Action: "slip"},
 	{Board: "JP07", Control: "Sync:20", Gesture: "hold", Action: "cue_countdown_toggle"},
 }
 
@@ -95,9 +95,9 @@ func TestGenerateWritesStockPrimitivesForEachGesture(t *testing.T) {
 		"import InputAssignment 0.1\n",
 		// shift: a plain note assignment, enabled only while Shift is held
 		`    ValueNoteAssignment {
-        objectName: "EngineX Map PadModeSelect:30 shift"
+        objectName: "EngineX Map PadModeSelect:27 shift"
         channel: deckConfig.midiChannel
-        note: 30
+        note: 27
         enabled: globalConfig.shift && deckConfig.inDJMode
         output: ActionOutput {
             target: PropertyTarget {
@@ -144,8 +144,13 @@ func TestGenerateWritesStockPrimitivesForEachGesture(t *testing.T) {
             minimum: 1.0
             maximum: 0.0
 `,
-		// a hold-type target keeps stock's own Censor path
-		`                path: deckConfig.censorIsSilentCue ? deckConfig.activeDeckPath + "SilentCue" : deckConfig.activeDeckTrackPath + "Bleep"
+		// a Slip toggle on a hold, through the combo
+		`        output: ComboActionOutput {
+            holdEnabled: true
+            holdTarget: PropertyTarget {
+                path: deckConfig.activeDeckTrackPath + "SlipMode"
+            }
+        }
 `,
 		// stock's Sync hold is switched off, alone
 		"        syncHoldAction: Action.None\n",
@@ -167,6 +172,27 @@ func TestGenerateWritesStockPrimitivesForEachGesture(t *testing.T) {
 		if strings.Contains(l, "function") {
 			t.Errorf("a function: %q", l)
 		}
+	}
+}
+
+// Censor is a hold-type target: it keeps stock's own path expression and runs from a plain note assignment.
+func TestGenerateCensorKeepsStocksOwnPathAndShiftGuard(t *testing.T) {
+	list := []Mapping{{Board: "JP07", Control: "PadModeSelect:29", Gesture: "shift", Action: "censor"}}
+	out := mustGenerate(t, "JP07", fixtureStock, list)
+	for _, want := range []string{
+		"        enabled: globalConfig.shift && deckConfig.inDJMode\n        output: ActionOutput {\n",
+		`                path: deckConfig.censorIsSilentCue ? deckConfig.activeDeckPath + "SilentCue" : deckConfig.activeDeckTrackPath + "Bleep"` + "\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in\n%s", want, out)
+		}
+	}
+	if err := Check("JP07", []byte(fixtureStock), []byte(out), list); err != nil {
+		t.Fatal(err)
+	}
+	// and a Shift + LOOP mapping never reaches the generator
+	if _, err := Generate("JP07", []byte(fixtureStock), []Mapping{{Board: "JP07", Control: "PadModeSelect:30", Gesture: "shift", Action: "sync"}}); codeOf(t, err) != ReasonTaken {
+		t.Fatalf("%v", err)
 	}
 }
 
@@ -221,7 +247,7 @@ func TestGenerateWithoutMappingsLeavesTheFileAlone(t *testing.T) {
 	if _, err := Generate("JP07", []byte(fixtureStock), nil); !errors.Is(err, ErrNothingToApply) {
 		t.Fatalf("no mappings: %v", err)
 	}
-	other := []Mapping{{Board: "JP13", Control: "PadModeSelect:30", Gesture: "shift", Action: "sync"}}
+	other := []Mapping{{Board: "JP13", Control: "PadModeSelect:28", Gesture: "shift", Action: "sync"}}
 	if _, err := Generate("JP07", []byte(fixtureStock), other); !errors.Is(err, ErrNothingToApply) {
 		t.Fatalf("another board's mappings: %v", err)
 	}
@@ -234,8 +260,8 @@ func TestGenerateRefusesWhatCannotBeDoneExactly(t *testing.T) {
 			t.Errorf("%s: no error", name)
 		}
 	}
-	shift := Mapping{Board: "JP07", Control: "PadModeSelect:30", Gesture: "shift", Action: "sync"}
-	bad("an unknown action", fixtureStock, []Mapping{{Board: "JP07", Control: "PadModeSelect:30", Gesture: "shift", Action: "nope"}})
+	shift := Mapping{Board: "JP07", Control: "PadModeSelect:28", Gesture: "shift", Action: "sync"}
+	bad("an unknown action", fixtureStock, []Mapping{{Board: "JP07", Control: "PadModeSelect:28", Gesture: "shift", Action: "nope"}})
 	bad("a reserved control", fixtureStock, []Mapping{{Board: "JP07", Control: "Shift:26", Gesture: "press", Action: "sync"}})
 	bad("a stock gesture without a switch", fixtureStock, []Mapping{{Board: "JP07", Control: "Sync:20", Gesture: "press", Action: "waveform_cycle"}})
 	bad("the module instance missing from the file", strings.Replace(fixtureStock, "syncNote: 20", "syncNote: 99", 1),
@@ -275,7 +301,9 @@ func TestCheckRejectsAFileThatIsNotStockPlusTheMappings(t *testing.T) {
 		"a changed path": func(s string) string {
 			return strings.Replace(s, `"/GUI/Scripted/EngineXMapWaveform"`, `"/Engine/Deck1/Play"`, 1)
 		},
-		"a changed note":       func(s string) string { return strings.Replace(s, "        note: 30\n", "        note: 26\n", 1) },
+		"a changed note": func(s string) string {
+			return strings.Replace(s, "        note: 27\n        enabled", "        note: 26\n        enabled", 1)
+		},
 		"a deleted stock line": func(s string) string { return strings.Replace(s, "        ledType: LedType.Simple\n", "", 1) },
 		"a changed stock line": func(s string) string { return strings.Replace(s, "note: 26", "note: 27", 1) },
 		"a second import": func(s string) string {

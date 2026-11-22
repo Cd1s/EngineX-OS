@@ -29,13 +29,15 @@ const [base, code, chrome, shots] = process.argv.slice(2);
   const controls = await options('#mapControl');
   assert.ok(controls.includes('PadModeSelect:30') && controls.includes('Sync:20'), controls.join());
   for (const gone of ['Shift:26', 'Back:16', 'Shortcuts:12', 'BrowseEncoder:18', 'Censor:7']) assert.ok(!controls.includes(gone), gone);
-  await page.selectOption('#mapControl', 'PadModeSelect:30');
+  await page.selectOption('#mapControl', 'PadModeSelect:28');
   assert.deepEqual(await options('#mapGesture'), ['shift', 'double', 'hold'], 'a press on a pad-mode button is stock');
+  await page.selectOption('#mapControl', 'PadModeSelect:30');
+  assert.deepEqual(await options('#mapGesture'), ['double', 'hold'], 'Shift + LOOP is the Beat Jump pad mode, EngineX\'s');
   await page.selectOption('#mapControl', 'Sync:20');
   assert.deepEqual(await options('#mapGesture'), ['hold'], 'only the Sync hold can be taken');
 
-  // add: Shift + Loop -> cycle waveform
-  await page.selectOption('#mapControl', 'PadModeSelect:30');
+  // add: Shift + Roll -> cycle waveform
+  await page.selectOption('#mapControl', 'PadModeSelect:28');
   await page.selectOption('#mapGesture', 'shift');
   const shiftActions = await options('#mapAction');
   assert.ok(shiftActions.includes('waveform_cycle') && shiftActions.includes('censor') && shiftActions.includes('loop_halve'));
@@ -46,7 +48,7 @@ const [base, code, chrome, shots] = process.argv.slice(2);
   await page.selectOption('#mapAction', 'waveform_cycle');
   await page.click('#mapAdd');
   await waitText('#mapRows', /Shift \+ press/);
-  assert.match((await rows())[0], /Pad Mode Button 1 \(Loop\).*Shift \+ press.*Cycle waveform type/);
+  assert.match((await rows())[0], /Pad Mode Button 2 \(Roll\).*Shift \+ press.*Cycle waveform type/);
   assert.equal(await page.locator('#mapRestart').isVisible(), true);
   assert.match(await text('#mapNeed'), /apply when Engine restarts/);
   assert.equal((await page.evaluate(() => lastMap.mappings)).length, 1);
@@ -60,18 +62,18 @@ const [base, code, chrome, shots] = process.argv.slice(2);
   await page.click('#mapAdd');
   await waitText('#mapRows', /Cycle waveform/);
 
-  // MIDI learn: the Go side plays Shift + Loop
+  // MIDI learn: the Go side plays Shift + Roll
   await page.click('#mapLearn');
   await waitText('#mapLearnState', /Press the control on the deck/);
   await page.selectOption('#mapControl', 'PadModeSelect:27'); // the page keeps working while it listens
-  await waitText('#mapLearnState', /Caught: Pad Mode Button 1 \(Loop\), Shift \+ press/);
-  assert.equal(await page.inputValue('#mapControl'), 'PadModeSelect:30');
+  await waitText('#mapLearnState', /Caught: Pad Mode Button 2 \(Roll\), Shift \+ press/);
+  assert.equal(await page.inputValue('#mapControl'), 'PadModeSelect:28');
   assert.equal(await page.inputValue('#mapGesture'), 'shift');
   assert.equal(await text('#mapLearn'), 'Learn');
   // a learn of a control that cannot be mapped says why and changes nothing
   await page.click('#mapLearn');
   await waitText('#mapLearnState', /cannot be mapped: Shift and the navigation controls are never mapped/);
-  assert.equal(await page.inputValue('#mapControl'), 'PadModeSelect:30');
+  assert.equal(await page.inputValue('#mapControl'), 'PadModeSelect:28');
   // stopping a learn
   await page.click('#mapLearn');
   await waitText('#mapLearn', /Stop learning/);
@@ -92,8 +94,11 @@ const [base, code, chrome, shots] = process.argv.slice(2);
   // the reference table: all controls, mappable gestures marked
   const ref = await page.$$eval('#mapRef tr', trs => trs.map(tr => [...tr.children].map(c => c.className + '|' + c.textContent)));
   assert.ok(ref.length > 30, 'rows ' + ref.length);
+  const roll = ref.find(r => r[0].includes('Pad Mode Button 2 (Roll)'));
+  assert.ok(roll[2].startsWith('free|') && roll[3].startsWith('free|') && roll[4].startsWith('free|') && !roll[1].startsWith('free|'));
   const loop = ref.find(r => r[0].includes('Pad Mode Button 1 (Loop)'));
-  assert.ok(loop[2].startsWith('free|') && loop[3].startsWith('free|') && loop[4].startsWith('free|') && !loop[1].startsWith('free|'));
+  assert.ok(!loop[2].startsWith('free|') && loop[2].includes('EngineX: Beat Jump pad mode'), 'Shift + LOOP shows who owns it');
+  assert.ok(loop[3].startsWith('free|') && loop[4].startsWith('free|'));
   const back = ref.find(r => r[0].includes('Back'));
   assert.ok(back.slice(1).every(c => !c.startsWith('free|')));
 
@@ -115,7 +120,7 @@ const [base, code, chrome, shots] = process.argv.slice(2);
   await upload('mappings.json', JSON.stringify([
     { board: 'JP07', control: 'PadModeSelect:28', gesture: 'double', action: 'key_lock' },
     { board: 'JP07', control: 'PadModeSelect:29', gesture: 'shift', action: 'loop_double' }]));
-  await waitText('#mapRows', /Roll/);
+  await waitText('#mapRows', /Key Lock/);
   assert.equal((await rows()).length, 2);
   await upload('bad.json', JSON.stringify([{ board: 'JP07', control: 'Shift:26', gesture: 'press', action: 'sync' }]));
   await waitText('#notice', /never mapped/);

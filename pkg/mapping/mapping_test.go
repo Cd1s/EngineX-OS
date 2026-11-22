@@ -17,12 +17,12 @@ func codeOf(t *testing.T, err error) string {
 
 func TestValidateAcceptsAShiftAndAHoldOnAPadModeButton(t *testing.T) {
 	for _, m := range []Mapping{
-		{Board: "JP07", Control: "PadModeSelect:30", Gesture: "shift", Action: "waveform_cycle"},
+		{Board: "JP07", Control: "PadModeSelect:28", Gesture: "shift", Action: "waveform_cycle"},
 		{Board: "JP13", Control: "PadModeSelect:27", Gesture: "hold", Action: "beat_jump_forward"},
 		{Board: "JP08", Control: "PadModeSelect:28", Gesture: "double", Action: "sync"},
 		{Board: "JP14", Control: "PadModeSelect:29", Gesture: "shift", Action: "censor"},
 		{Board: "JP07", Control: "PadModeSelect:29", Gesture: "shift", Action: "loop_halve"},
-		{Board: "JP07", Control: "PadModeSelect:30", Gesture: "shift", Action: "cue_countdown_toggle"},
+		{Board: "JP07", Control: "PadModeSelect:29", Gesture: "shift", Action: "cue_countdown_toggle"},
 	} {
 		if err := Validate(m); err != nil {
 			t.Errorf("%v: %v", m, err)
@@ -60,7 +60,7 @@ func TestValidateNeverMapsShiftAndTheNavigationControls(t *testing.T) {
 }
 
 func TestValidateRejectsWhatIsUnknown(t *testing.T) {
-	base := Mapping{Board: "JP07", Control: "PadModeSelect:30", Gesture: "shift", Action: "waveform_cycle"}
+	base := Mapping{Board: "JP07", Control: "PadModeSelect:28", Gesture: "shift", Action: "waveform_cycle"}
 	for _, c := range []struct {
 		name string
 		edit func(*Mapping)
@@ -86,7 +86,7 @@ func TestValidateChecksTheActionAgainstTheGesture(t *testing.T) {
 	// A combo drives Action and two-state targets; a hold-type or stepped one needs a plain assignment.
 	for _, action := range []string{"censor", "loop_halve", "loop_double"} {
 		for _, g := range []string{"double", "hold"} {
-			err := Validate(Mapping{Board: "JP07", Control: "PadModeSelect:30", Gesture: g, Action: action})
+			err := Validate(Mapping{Board: "JP07", Control: "PadModeSelect:28", Gesture: g, Action: action})
 			if codeOf(t, err) != ReasonOutput {
 				t.Errorf("%s on %s: %v", action, g, err)
 			}
@@ -94,7 +94,7 @@ func TestValidateChecksTheActionAgainstTheGesture(t *testing.T) {
 	}
 	for _, action := range []string{"key_lock", "slip", "quantize", "sync", "beat_jump_back", "waveform_cycle"} {
 		for _, g := range []string{"shift", "double", "hold"} {
-			if err := Validate(Mapping{Board: "JP07", Control: "PadModeSelect:30", Gesture: g, Action: action}); err != nil {
+			if err := Validate(Mapping{Board: "JP07", Control: "PadModeSelect:28", Gesture: g, Action: action}); err != nil {
 				t.Errorf("%s on %s: %v", action, g, err)
 			}
 		}
@@ -103,14 +103,14 @@ func TestValidateChecksTheActionAgainstTheGesture(t *testing.T) {
 
 func TestValidateAllRejectsTheSameGestureTwice(t *testing.T) {
 	list := []Mapping{
-		{Board: "JP07", Control: "PadModeSelect:30", Gesture: "shift", Action: "waveform_cycle"},
-		{Board: "JP07", Control: "PadModeSelect:30", Gesture: "hold", Action: "sync"},
-		{Board: "JP13", Control: "PadModeSelect:30", Gesture: "shift", Action: "sync"}, // another board: fine
+		{Board: "JP07", Control: "PadModeSelect:28", Gesture: "shift", Action: "waveform_cycle"},
+		{Board: "JP07", Control: "PadModeSelect:28", Gesture: "hold", Action: "sync"},
+		{Board: "JP13", Control: "PadModeSelect:28", Gesture: "shift", Action: "sync"}, // another board: fine
 	}
 	if err := ValidateAll(list); err != nil {
 		t.Fatal(err)
 	}
-	list = append(list, Mapping{Board: "JP07", Control: "PadModeSelect:30", Gesture: "shift", Action: "key_lock"})
+	list = append(list, Mapping{Board: "JP07", Control: "PadModeSelect:28", Gesture: "shift", Action: "key_lock"})
 	if c := codeOf(t, ValidateAll(list)); c != ReasonDuplicate {
 		t.Fatalf("code %s", c)
 	}
@@ -193,16 +193,16 @@ func TestEveryModuleRuleNamesRealControlsAndGestures(t *testing.T) {
 }
 
 func TestParseReadsTheFileAndRejectsWhatItDoesNotKnow(t *testing.T) {
-	good := `[{"board":"JP07","control":"PadModeSelect:30","gesture":"shift","action":"waveform_cycle"}]`
+	good := `[{"board":"JP07","control":"PadModeSelect:28","gesture":"shift","action":"waveform_cycle"}]`
 	list, err := Parse(strings.NewReader(good))
 	if err != nil || len(list) != 1 || list[0].Action != "waveform_cycle" {
 		t.Fatalf("%v %v", list, err)
 	}
 	for name, body := range map[string]string{
-		"an unknown field":    `[{"board":"JP07","control":"PadModeSelect:30","gesture":"shift","action":"sync","x":1}]`,
+		"an unknown field":    `[{"board":"JP07","control":"PadModeSelect:28","gesture":"shift","action":"sync","x":1}]`,
 		"an object":           `{"board":"JP07"}`,
 		"two values":          good + good,
-		"an unknown action":   `[{"board":"JP07","control":"PadModeSelect:30","gesture":"shift","action":"nope"}]`,
+		"an unknown action":   `[{"board":"JP07","control":"PadModeSelect:28","gesture":"shift","action":"nope"}]`,
 		"not JSON":            `nope`,
 		"a repeated gesture":  strings.Replace(good, "]", ",", 1) + good[1:],
 		"a number for a name": `[{"board":7}]`,
@@ -222,8 +222,8 @@ func TestParseReadsTheFileAndRejectsWhatItDoesNotKnow(t *testing.T) {
 func TestSaveWritesAtomicallyAndAnEmptyListRemovesTheFile(t *testing.T) {
 	path := t.TempDir() + "/data/mappings.json"
 	list := []Mapping{
-		{Board: "JP07", Control: "PadModeSelect:30", Gesture: "shift", Action: "waveform_cycle"},
-		{Board: "JP07", Control: "PadModeSelect:30", Gesture: "hold", Action: "sync"},
+		{Board: "JP07", Control: "PadModeSelect:28", Gesture: "shift", Action: "waveform_cycle"},
+		{Board: "JP07", Control: "PadModeSelect:28", Gesture: "hold", Action: "sync"},
 	}
 	if err := Save(path, list); err != nil {
 		t.Fatal(err)
@@ -243,5 +243,47 @@ func TestSaveWritesAtomicallyAndAnEmptyListRemovesTheFile(t *testing.T) {
 	}
 	if back, err := Load(path); err != nil || len(back) != 0 {
 		t.Fatalf("%v %v", back, err)
+	}
+}
+
+// Shift + LOOP belongs to EngineX's Beat Jump pad mode (another lane replaces the pad modules in the UI
+// pack): it is taken, on every board, whatever the action, and the way to say so is its own reason.
+func TestValidateRefusesShiftLoopBecauseTheBeatJumpPadModeOwnsIt(t *testing.T) {
+	for _, board := range []string{"JP07", "JP08", "JP13", "JP14"} {
+		for _, action := range []string{"waveform_cycle", "sync", "key_lock", "beat_jump_forward"} {
+			err := Validate(Mapping{Board: board, Control: "PadModeSelect:30", Gesture: "shift", Action: action})
+			if codeOf(t, err) != ReasonTaken || !strings.Contains(err.Error(), "Beat Jump pad mode") {
+				t.Errorf("%s %s: %v", board, action, err)
+			}
+		}
+		if o := Default().Offer(board, "PadModeSelect:30", "shift"); o.Mappable || o.Status != StatusTaken || o.Reason != ReasonTaken {
+			t.Errorf("%s: %+v", board, o)
+		}
+		// only that gesture: the other pad-mode buttons and the other gestures of LOOP are untouched
+		for _, c := range []struct{ control, gesture string }{{"PadModeSelect:30", "hold"}, {"PadModeSelect:30", "double"}, {"PadModeSelect:27", "shift"}, {"PadModeSelect:28", "shift"}, {"PadModeSelect:29", "shift"}} {
+			if !Default().Offer(board, c.control, c.gesture).Mappable {
+				t.Errorf("%s %s %s must stay mappable", board, c.control, c.gesture)
+			}
+		}
+	}
+	if by, ok := Default().Taken("PadModeSelect:30", "shift"); !ok || by != "Beat Jump pad mode" {
+		t.Errorf("%q %v", by, ok)
+	}
+	if _, ok := Default().Taken("PadModeSelect:30", "hold"); ok {
+		t.Error("hold on LOOP is not taken")
+	}
+	// the override names real controls
+	for control, gestures := range Default().Controls {
+		for _, board := range Default().Boards {
+			inv, _ := Board(board)
+			if _, ok := inv.Find(control); !ok {
+				t.Errorf("%s: the catalogue overrides %s, which the board does not have", board, control)
+			}
+		}
+		for g := range gestures {
+			if !validGesture(g) {
+				t.Errorf("%s: gesture %q", control, g)
+			}
+		}
 	}
 }
