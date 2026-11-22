@@ -130,12 +130,15 @@ func TestStaging252ChoosesVolumeWithReserve(t *testing.T) {
 }
 
 func TestStaging252HiddenWritableExport(t *testing.T) {
-	// The production mount filter only accepts /media paths.
-	root, err := os.MkdirTemp("/media", "staging252 space-")
+	// The mount filter only accepts paths below mediaRoot (/media on a deck): point it at a directory of this test.
+	base := t.TempDir()
+	old := mediaRoot
+	mediaRoot = base + string(os.PathSeparator)
+	defer func() { mediaRoot = old }()
+	root, err := os.MkdirTemp(base, "staging252 space-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(root)
 	testfixture.Export(t, root)
 	if err := os.Rename(filepath.Join(root, "PIONEER"), filepath.Join(root, ".PIONEER")); err != nil {
 		t.Fatal(err)

@@ -277,12 +277,15 @@ func localExports() []string {
 	return localExportsFrom(f)
 }
 
+// Drives are mounted below this directory on a deck. A variable so that a test needs no directory of the host.
+var mediaRoot = "/media/"
+
 func localExportsFrom(r io.Reader) []string {
 	var out []string
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
-		if len(fields) < 4 || !strings.HasPrefix(fields[1], "/media/") || !strings.Contains(","+fields[3]+",", ",rw,") {
+		if len(fields) < 4 || !strings.HasPrefix(fields[1], mediaRoot) || !strings.Contains(","+fields[3]+",", ",rw,") {
 			continue
 		}
 		mount := strings.ReplaceAll(fields[1], `\040`, " ")
