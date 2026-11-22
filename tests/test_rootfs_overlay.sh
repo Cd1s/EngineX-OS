@@ -933,6 +933,103 @@ ENGINEX_UI_DIR=$TMP/ui-copy ENGINEX_STATE_DIR=$TMP/copy-state PATH=$TMP/guard-bi
 cmp -s "$TMP/copy-state/before" "$TMP/copy-state/PlanckGuiState.json" || fail 'settings refresh changed safe-mode state'
 [[ ! -s $GUARD_LOG ]] || fail 'settings refresh changed safe-mode assignments'
 ok 'settings copy refresh preserves colors, role, recovery counters and safe-mode state'
+# Button mapping: the guard hands the player's controller file (stock, or the 4-deck copy) to
+# `stream-sync --mapping-generate`, and binds what it wrote. With no mappings.json it never runs;
+# when it writes nothing (rejected or nothing to add) the stock file, or the 4-deck copy, stays.
+cat > "$TMP/guard-bin/stream-sync" <<'MOCK'
+#!/bin/sh
+echo "$*" >> "$GUARD_LOG.sync"
+while [ $# -gt 0 ]; do
+    case $1 in --mapping-in) in=$2; shift ;; --mapping-out) out=$2; shift ;; --mapping-file) file=$2; shift ;; esac
+    shift
+done
+if grep -q reject "$file"; then echo 'mapping rejected' >&2; exit 1; fi
+{ cat "$in"; echo '// EngineX button mapping mock'; } > "$out"
+MOCK
+chmod +x "$TMP/guard-bin/stream-sync"
+massign=$TMP/assign-map; mkdir -p "$massign/JP07" "$TMP/ui-map"
+cp "$assign/JP07/JP07_Controller_Assignments.qml" "$massign/JP07/"
+mpatched=$TMP/map-patched
+map_guard() { # <settings.conf content>; leaves the guard's log in $GUARD_LOG
+    printf '%s\n' "$1" > "$TMP/ui-map/settings.conf"
+    : > "$GUARD_LOG"; rm -f "$GUARD_LOG.bound" "$GUARD_LOG.sync" "$mpatched/JP07_Controller_Assignments.qml"
+    ENGINEX_UI_DIR=$TMP/ui-map ENGINEX_ASSIGNMENT_DIR=$massign ENGINEX_ASSIGNMENT_PATCHED=$mpatched \
+        ENGINEX_STREAM_SYNC=$TMP/guard-bin/stream-sync ENGINEX_MAPPINGS=$TMP/mappings.json \
+        PATH=$TMP/guard-bin:$PATH sh "$GUARD" pre
+}
+rm -f "$TMP/mappings.json"
+map_guard 'lang=en'
+[[ ! -e $GUARD_LOG.sync ]] || fail 'stream-sync ran with no mappings.json'
+if grep -q '^mount --bind' "$GUARD_LOG"; then fail 'no mappings and no 4-deck layout must bind nothing'; fi
+printf '[{"board":"JP07"}]\n' > "$TMP/mappings.json"
+map_guard 'lang=en'
+[[ $(grep -c . "$GUARD_LOG.sync") == 1 ]] || fail 'stream-sync must run once per player controller file'
+has "--mapping-generate JP07 --mapping-in $massign/JP07/JP07_Controller_Assignments.qml" "$GUARD_LOG.sync"
+has "--mapping-status $mpatched/mapping-JP07.json" "$GUARD_LOG.sync"
+[[ $(grep -c '^mount --bind' "$GUARD_LOG") == 1 ]] || fail 'the mapped file is bound once'
+has "mount --bind $mpatched/JP07_Controller_Assignments.qml $massign/JP07/JP07_Controller_Assignments.qml" "$GUARD_LOG"
+has '// EngineX button mapping mock' "$mpatched/JP07_Controller_Assignments.qml"
+lacks '// EngineX button mapping mock' "$massign/JP07/JP07_Controller_Assignments.qml" # stock itself is untouched
+# a stream-sync that writes nothing leaves stock
+printf '[{"board":"JP07","reject":1}]\n' > "$TMP/mappings.json"
+map_guard 'lang=en' 2> "$TMP/map-reject.err"
+has 'was not applied; the stock mapping stays' "$TMP/map-reject.err"
+if grep -q '^mount --bind' "$GUARD_LOG"; then fail 'a rejected mapping must bind nothing'; fi
+# with the 4-deck layout the generator reads the 4-deck copy, and the bound file has both
+printf '[{"board":"JP07"}]\n' > "$TMP/mappings.json"
+map_guard 'four_deck_waveform=1'
+has "--mapping-in $mpatched/JP07_Controller_Assignments.qml" "$GUARD_LOG.sync"
+has 'EngineX #49: 4-deck role' "$mpatched/JP07_Controller_Assignments.qml"
+has '// EngineX button mapping mock' "$mpatched/JP07_Controller_Assignments.qml"
+[[ $(grep -c '^mount --bind' "$GUARD_LOG") == 1 ]] || fail 'the 4-deck copy with the mappings is bound once'
+# a rejected mapping keeps the 4-deck copy
+printf '[{"board":"JP07","reject":1}]\n' > "$TMP/mappings.json"
+map_guard 'four_deck_waveform=1' 2> /dev/null
+has 'EngineX #49: 4-deck role' "$mpatched/JP07_Controller_Assignments.qml"
+lacks '// EngineX button mapping mock' "$mpatched/JP07_Controller_Assignments.qml"
+has "mount --bind $mpatched/JP07_Controller_Assignments.qml" "$GUARD_LOG"
+# safe mode neither generates nor binds; a fallback during the boot undoes the bind
+printf '[{"board":"JP07"}]\n' > "$TMP/mappings.json"
+map_guard 'lang=en'
+ENGINEX_UI_DIR=$TMP/ui-map ENGINEX_ASSIGNMENT_DIR=$massign ENGINEX_ASSIGNMENT_PATCHED=$mpatched PATH=$TMP/guard-bin:$PATH sh "$GUARD" fallback ui-ready-timeout
+has "umount $massign/JP07/JP07_Controller_Assignments.qml" "$GUARD_LOG"
+rm -f "$TMP/ui-map/safe-mode"
+touch "$TMP/ui-map/safe-mode"
+: > "$GUARD_LOG"; rm -f "$GUARD_LOG.sync"
+ENGINEX_UI_DIR=$TMP/ui-map ENGINEX_ASSIGNMENT_DIR=$massign ENGINEX_ASSIGNMENT_PATCHED=$mpatched ENGINEX_STREAM_SYNC=$TMP/guard-bin/stream-sync \
+    ENGINEX_MAPPINGS=$TMP/mappings.json PATH=$TMP/guard-bin:$PATH sh "$GUARD" pre
+[[ ! -e $GUARD_LOG.sync ]] || fail 'safe mode must not generate mappings'
+if grep -q '^mount --bind' "$GUARD_LOG"; then fail 'safe mode must bind nothing'; fi
+rm -f "$TMP/ui-map/safe-mode" "$TMP/mappings.json"
+ok 'button mapping: the guard generates only when mappings.json exists, chains after the 4-deck copy, keeps stock when nothing is written, and safe mode unbinds'
+# The same, with the real stream-sync applet, when Go is available: the file the guard binds
+# passes the generator's own static check and carries the mapping.
+if command -v go > /dev/null 2>&1; then
+    (cd "$ROOT" && go build -o "$TMP/guard-bin/enginex-suite" ./cmd/enginex-suite)
+    printf '#!/bin/sh\nexec %s stream-sync "$@"\n' "$TMP/guard-bin/enginex-suite" > "$TMP/guard-bin/real-stream-sync"
+    chmod +x "$TMP/guard-bin/real-stream-sync"
+    printf 'import airAssignments 1.0\nimport QtQuick 2.12\n\nMidiAssignment {\n    GlobalAssignmentConfig {\n        id: globalConfig\n        midiChannel: 0\n    }\n\n    Shift {\n        note: 26\n    }\n\n    DeckAssignmentConfig {\n        id: deckConfig\n        midiChannel: globalConfig.midiChannel\n    }\n\n    PadModeSelect {\n        buttonsModel: ListModel {\n            ListElement {\n                note: 30\n            }\n        }\n    }\n}\n' > "$massign/JP07/JP07_Controller_Assignments.qml"
+    printf '[{"board":"JP07","control":"PadModeSelect:30","gesture":"shift","action":"waveform_cycle"}]\n' > "$TMP/mappings.json"
+    printf 'lang=en\n' > "$TMP/ui-map/settings.conf"
+    : > "$GUARD_LOG"; rm -f "$GUARD_LOG.bound"
+    ENGINEX_UI_DIR=$TMP/ui-map ENGINEX_ASSIGNMENT_DIR=$massign ENGINEX_ASSIGNMENT_PATCHED=$mpatched \
+        ENGINEX_STREAM_SYNC=$TMP/guard-bin/real-stream-sync ENGINEX_MAPPINGS=$TMP/mappings.json \
+        PATH=$TMP/guard-bin:$PATH sh "$GUARD" pre
+    has 'path: "/GUI/Scripted/EngineXMapWaveform"' "$mpatched/JP07_Controller_Assignments.qml"
+    has 'enabled: globalConfig.shift && deckConfig.inDJMode' "$mpatched/JP07_Controller_Assignments.qml"
+    has '"state":"applied"' "$mpatched/mapping-JP07.json"
+    has "mount --bind $mpatched/JP07_Controller_Assignments.qml $massign/JP07/JP07_Controller_Assignments.qml" "$GUARD_LOG"
+    printf '[{"board":"JP07","control":"Shift:26","gesture":"press","action":"sync"}]\n' > "$TMP/mappings.json"
+    : > "$GUARD_LOG"; rm -f "$GUARD_LOG.bound"
+    ENGINEX_UI_DIR=$TMP/ui-map ENGINEX_ASSIGNMENT_DIR=$massign ENGINEX_ASSIGNMENT_PATCHED=$mpatched \
+        ENGINEX_STREAM_SYNC=$TMP/guard-bin/real-stream-sync ENGINEX_MAPPINGS=$TMP/mappings.json \
+        PATH=$TMP/guard-bin:$PATH sh "$GUARD" pre 2> /dev/null
+    has '"state":"rejected"' "$mpatched/mapping-JP07.json"
+    has '"code":"reserved"' "$mpatched/mapping-JP07.json"
+    if grep -q '^mount --bind' "$GUARD_LOG"; then fail 'a rejected mapping was bound'; fi
+    ok 'button mapping: the real stream-sync generates the bound file and a rejection binds nothing and says why'
+    rm -f "$TMP/mappings.json"
+fi
 unset GUARD_LOG ENGINEX_ASSIGNMENT_DIR ENGINEX_ASSIGNMENT_PATCHED ENGINEX_PLANCK_STATE
 has 'ExecStopPost=-/etc/enginex/engine-ui-guard stop' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf"
 has 'ExecStopPost=-/etc/enginex/engine-ui-guard stop' "$debloat_root/etc/systemd/system/engine.service.d/override.conf"

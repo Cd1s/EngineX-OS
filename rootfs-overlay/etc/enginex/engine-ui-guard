@@ -469,8 +469,15 @@ pre|settings)
     # #263: the motorized players (JP08, JP14) also get their decks named (scDecks): stock
     # ties the motor and the platter's layer to decks 1 and 2, so on 2+4 the platter never
     # turned and its touch reached deck 1, and on 1+3 deck 3 had neither.
+    # Button mapping: the DJ's /data/enginex/mappings.json adds stock primitives (note assignments
+    # with ActionOutput / ComboActionOutput, enabled by globalConfig.shift) to the players' controller
+    # file, on top of the 4-deck copy when there is one, and switches off the stock binding of a taken
+    # gesture. `stream-sync --mapping-generate` checks the result statically and writes it only if it
+    # passes; otherwise nothing is added and stock (or the 4-deck copy) stays. With no mappings.json
+    # nothing runs: not here, and not while playing.
     assign=${ENGINEX_ASSIGNMENT_DIR:-/usr/Engine/AssignmentFiles/PresetAssignmentFiles}
     patched=${ENGINEX_ASSIGNMENT_PATCHED:-/run/enginex-assignments}
+    mappings=${ENGINEX_MAPPINGS:-${ENGINEX_CUSTOM:-/data/enginex}/mappings.json}
     on=; ! grep -qx 'four_deck_waveform=1' "$UI/settings.conf" 2>/dev/null || on=1
     if [ -n "$on" ]; then
         state_dir=${ENGINEX_STATE_DIR:-/data/AppDataUser/AIR Music Technology/Engine/State}
@@ -510,7 +517,9 @@ pre|settings)
         "$assign"/JP07/JP07_Display_Assignments.qml "$assign"/JP13/JP13_Display_Assignments.qml; do
         [ -f "$f" ] || continue
         ! mountpoint -q "$f" || umount "$f" || continue
-        [ -n "$on" ] || continue
+        p=$patched/${f##*/}
+        src=$f
+        if [ -n "$on" ]; then
         cat > "$patched/role.awk" <<'AWK'
 BEGIN {
     group = (role == "24" || role == "2") ? "\"Right\"" : "\"Left\""
@@ -567,9 +576,27 @@ layer {
 }
 { print }
 AWK
-        p=$patched/${f##*/}
         awk -v role="$role" -f "$patched/role.awk" "$f" > "$p"
-        if grep -q 'EngineX #49: 4-deck role' "$p"; then mount --bind "$p" "$f"; else rm -f "$p"; fi
+        if grep -q 'EngineX #49: 4-deck role' "$p"; then src=$p; else rm -f "$p"; fi
+        fi
+        case ${f##*/} in
+        JP0[78]_Controller_Assignments.qml|JP1[34]_Controller_Assignments.qml)
+            board=${f##*/}; board=${board%%_*}
+            if [ -s "$mappings" ]; then
+                mkdir -p "$patched" 2>/dev/null
+                map=$patched/.map-${f##*/}
+                rm -f "$map"
+                mapt=; ! command -v timeout >/dev/null 2>&1 || mapt="timeout 10"
+                $mapt "${ENGINEX_STREAM_SYNC:-/usr/local/bin/stream-sync}" --mapping-generate "$board" --mapping-in "$src" \
+                    --mapping-out "$map" --mapping-file "$mappings" --mapping-status "$patched/mapping-$board.json" ||
+                    echo "EngineX button mapping for $board was not applied; the stock mapping stays" >&2
+                if [ -s "$map" ] && mv -f "$map" "$p"; then src=$p; fi
+                rm -f "$map"
+            else
+                rm -f "$patched/mapping-$board.json"
+            fi ;;
+        esac
+        [ "$src" = "$f" ] || mount --bind "$src" "$f"
     done
     ;;
 post)

@@ -15,6 +15,7 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/pkg/analyzer"
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
+	"github.com/Cd1s/EngineX-OS/pkg/mapping"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
 	"github.com/Cd1s/EngineX-OS/pkg/webui"
@@ -35,6 +36,11 @@ const (
 func StreamSync(args []string) error {
 	fs := flag.NewFlagSet("stream-sync", flag.ContinueOnError)
 	settingsCopyPrestart := fs.Bool("settings-copy-prestart", false, "prepare a confirmed settings import before Engine starts")
+	mappingBoard := fs.String("mapping-generate", "", "board code: add the DJ's button mappings to the assignment file --mapping-in and write --mapping-out, before Engine starts")
+	mappingIn := fs.String("mapping-in", "", "with --mapping-generate: the stock (or 4-deck patched) assignment file")
+	mappingOut := fs.String("mapping-out", "", "with --mapping-generate: where the patched file goes; nothing is written when there is nothing to add or the check fails")
+	mappingFile := fs.String("mapping-file", mapping.FilePath, "with --mapping-generate: the DJ's mappings.json")
+	mappingStatus := fs.String("mapping-status", "", "with --mapping-generate: the status file the console shows")
 	cfg := resourceguard.DefaultConfig()
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -69,6 +75,13 @@ func StreamSync(args []string) error {
 	}
 	if *settingsCopyPrestart {
 		return webui.SettingsCopyBeforeEngine()
+	}
+	if *mappingBoard != "" {
+		if *mappingIn == "" || *mappingOut == "" || *mappingStatus == "" {
+			return fmt.Errorf("--mapping-generate needs --mapping-in, --mapping-out and --mapping-status")
+		}
+		_, err := mapping.Apply(*mappingBoard, *mappingIn, *mappingOut, *mappingFile, *mappingStatus)
+		return err
 	}
 	if *spotifyToken == "" {
 		*spotifyToken = filepath.Join(*state, "spotify-token.json") // follows --state-dir (#31)
