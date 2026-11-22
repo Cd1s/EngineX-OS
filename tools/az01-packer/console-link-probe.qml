@@ -13,6 +13,7 @@ Item {
     property real phaseAt: 0
     property bool logged: false
     property bool shot: false
+    property bool layoutAgain: false
     property bool writeFailed: false
     property int wantMask: 0
     readonly property int settleMs: 8000
@@ -113,7 +114,7 @@ Item {
         log("LAYOUTNOW|" + name + "|" + layoutNames())
     }
     function begin(i) {
-        idx = i; phaseAt = Date.now(); logged = false; shot = false
+        idx = i; phaseAt = Date.now(); logged = false; shot = false; layoutAgain = false
         const ph = plan[i]
         log("BEGIN|" + ph.n + "|" + phaseAt)
         post("http://127.0.0.1:8080/v1/enginex/ui?consoleLineView=" + ph.on)
@@ -137,6 +138,9 @@ Item {
             // When the mixer property does not take a write, the probe plays the mixer's part and keeps the mask.
             if (p.writeFailed && m.scConsoleLine && m.scLineMask !== p.wantMask) m.scLineMask = p.wantMask
             const ph = p.plan[p.idx]
+            // The first phase sets the layout while the view system is still starting up and may lose it: once more, early in every
+            // phase, so that every capture is the same 4 Decks / 4 Waveforms view and only the Line In view differs.
+            if (!p.layoutAgain && el > 3000) { p.layoutAgain = true; p.fourWaveforms() }
             if (!p.logged && el > p.lenMs - 700) {
                 p.logged = true
                 p.state(ph.n)
