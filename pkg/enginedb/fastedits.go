@@ -3,6 +3,7 @@ package enginedb
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"math"
@@ -35,9 +36,9 @@ import (
 // attached (one_offset_rule_test: an MP3 by 2292 samples); it clears the mark either way.
 var engineLoadShifts = []float64{0, 2292}
 
-// FastBaseFile is the stage's note of what the fast import left in its fast rows, by fingerprint,
-// for the publish to tell the DJ's edits made after the snapshot from Engine's (MergeLive). It is
-// in the stage only and goes with it.
+// FastBaseFile is the stage's note of what the fast import left in its fast rows, by track id with
+// a check of the record, for the publish to tell the DJ's edits made after the snapshot from
+// Engine's (MergeLive). It is in the stage only and goes with it.
 const FastBaseFile = "fast-base.db"
 
 // fastBase is what a fast import left in a track's row for an export record: the record's rating,
@@ -329,7 +330,7 @@ func WriteFastBase(ctx context.Context, stage string, l *rekordbox.Library) erro
 	if _, e := os.Stat(state); errors.Is(e, os.ErrNotExist) {
 		return nil
 	}
-	fast, e := fastFingerprints(ctx, state)
+	fast, e := fastRows(ctx, state)
 	if e != nil || len(fast) == 0 {
 		return e
 	}
@@ -344,10 +345,11 @@ func WriteFastBase(ctx context.Context, stage string, l *rekordbox.Library) erro
 		return e
 	}
 	defer tx.Rollback()
-	if _, e = tx.ExecContext(ctx, `CREATE TABLE FastBase(fingerprint TEXT PRIMARY KEY, rating INTEGER NOT NULL, quickCues BLOB, loops BLOB, active INTEGER NOT NULL)`); e != nil {
+	// About 25 bytes a track without cues: the track id is the row id, the record a 64-bit check.
+	if _, e = tx.ExecContext(ctx, `CREATE TABLE FastBase(trackId INTEGER PRIMARY KEY, record INTEGER NOT NULL, rating INTEGER NOT NULL, quickCues BLOB, loops BLOB, active INTEGER NOT NULL)`); e != nil {
 		return e
 	}
-	insert, e := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO FastBase VALUES(?,?,?,?,?)`)
+	insert, e := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO FastBase VALUES(?,?,?,?,?,?)`)
 	if e != nil {
 		return e
 	}
@@ -360,12 +362,15 @@ func WriteFastBase(ctx context.Context, stage string, l *rekordbox.Library) erro
 			t.RecordHash = rekordbox.RecordHash(t)
 		}
 		fp := "fast:" + t.RecordHash
-		if !fast[fp] {
+		ids := fast[fp]
+		if len(ids) == 0 {
 			continue
 		}
 		b := fastBaseOf(t)
-		if _, e = insert.ExecContext(ctx, fp, b.rating, b.cues, b.loops, b.active); e != nil {
-			return e
+		for _, id := range ids {
+			if _, e = insert.ExecContext(ctx, id, recordCheck(fp), b.rating, b.cues, b.loops, b.active); e != nil {
+				return e
+			}
 		}
 	}
 	if e = insert.Close(); e != nil {
@@ -383,25 +388,32 @@ func WriteFastBase(ctx context.Context, stage string, l *rekordbox.Library) erro
 	return os.Rename(tmp, path)
 }
 
-// fastFingerprints are the fingerprints of the fast rows of the state database at path.
-func fastFingerprints(ctx context.Context, path string) (map[string]bool, error) {
+// recordCheck names a fast row's fingerprint in 64 bits.
+func recordCheck(fingerprint string) int64 {
+	h := sha256.Sum256([]byte(fingerprint))
+	return int64(big.Uint64(h[:]))
+}
+
+// fastRows are the track ids of the fast rows of the state database at path, by fingerprint.
+func fastRows(ctx context.Context, path string) (map[string][]int64, error) {
 	db, e := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}).String())
 	if e != nil {
 		return nil, e
 	}
 	defer db.Close()
-	rows, e := db.QueryContext(ctx, `SELECT fingerprint FROM BridgeState WHERE fingerprint LIKE 'fast:%'`)
+	rows, e := db.QueryContext(ctx, `SELECT trackId,fingerprint FROM BridgeState WHERE fingerprint LIKE 'fast:%'`)
 	if e != nil {
 		return nil, e
 	}
 	defer rows.Close()
-	out := map[string]bool{}
+	out := map[string][]int64{}
 	for rows.Next() {
+		var id int64
 		var fp string
-		if e = rows.Scan(&fp); e != nil {
+		if e = rows.Scan(&id, &fp); e != nil {
 			return nil, e
 		}
-		out[fp] = true
+		out[fp] = append(out[fp], id)
 	}
 	return out, rows.Err()
 }
@@ -420,10 +432,10 @@ func syncPath(p string) error {
 // did on it. The build's row (rekordbox's, with what the DJ had done before the snapshot) stands
 // for perf; the stage's FastBaseFile for what the fast import left.
 func carryFastEdits(ctx context.Context, tx *sql.Tx) error {
-	rows, e := tx.QueryContext(ctx, `SELECT m.trackId,l.beatData,l.quickCues,l.loops,l.activeOnLoadLoops,l.thirdPartySourceId,COALESCE(lt.isBeatGridLocked,0),lt.rating,lt.bpm,lt.bpmAnalyzed,
+	rows, e := tx.QueryContext(ctx, `SELECT m.trackId,s.fingerprint,f.record,l.beatData,l.quickCues,l.loops,l.activeOnLoadLoops,l.thirdPartySourceId,COALESCE(lt.isBeatGridLocked,0),lt.rating,lt.bpm,lt.bpmAnalyzed,
 		f.rating,f.quickCues,f.loops,f.active,m.beatData,m.quickCues,m.loops,m.activeOnLoadLoops
 		FROM main.PerformanceData m JOIN live.PerformanceData l ON l.trackId=m.trackId JOIN live.Track lt ON lt.id=m.trackId
-		JOIN livebridge.BridgeState s ON s.trackId=m.trackId JOIN fastbase.FastBase f ON f.fingerprint=s.fingerprint
+		JOIN livebridge.BridgeState s ON s.trackId=m.trackId JOIN fastbase.FastBase f ON f.trackId=m.trackId
 		WHERE m.trackId IN (SELECT id FROM temp.touched) AND m.trackId IN (SELECT id FROM temp.changed)`)
 	if e != nil {
 		return e
@@ -445,10 +457,15 @@ func carryFastEdits(ctx context.Context, tx *sql.Tx) error {
 		var mb, mc, ml []byte
 		var ma sql.NullInt64
 		var bpm, bpmA any
-		if e = rows.Scan(&id, &row.beats, &row.cues, &row.loops, &row.active, &row.mark, &row.locked, &row.rating, &bpm, &bpmA,
+		var fp string
+		var record int64
+		if e = rows.Scan(&id, &fp, &record, &row.beats, &row.cues, &row.loops, &row.active, &row.mark, &row.locked, &row.rating, &bpm, &bpmA,
 			&base.rating, &base.cues, &base.loops, &base.active, &mb, &mc, &ml, &ma); e != nil {
 			rows.Close()
 			return e
+		}
+		if recordCheck(fp) != record {
+			continue // the live row is not the fast row of the record noted (no longer fast, or another export)
 		}
 		m := mergeFast(row, base, Performance{Beats: mb, QuickCues: mc, Loops: ml, ActiveLoops: uint32(ma.Int64)})
 		if !m.deck() && !m.rating {
