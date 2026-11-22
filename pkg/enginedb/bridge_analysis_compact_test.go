@@ -37,7 +37,7 @@ func realisticBridgeAnalysis() *rekordbox.Analysis {
 	return a
 }
 
-func compactTestRow(t *testing.T) ([]byte, []byte, *rekordbox.Analysis) {
+func compactTestRow(t *testing.T) ([]byte, []byte, *rekordbox.Analysis, string) {
 	t.Helper()
 	root := t.TempDir()
 	testfixture.Export(t, root)
@@ -68,18 +68,18 @@ func compactTestRow(t *testing.T) ([]byte, []byte, *rekordbox.Analysis) {
 	if err = db.QueryRow(`SELECT sourceJSON,audioJSON FROM BridgeAnalysis WHERE trackId=1`).Scan(&source, &audio); err != nil {
 		t.Fatal(err)
 	}
-	return source, audio, a
+	return source, audio, a, root
 }
 
 func TestIssue272CompactRowSize(t *testing.T) {
-	source, audio, _ := compactTestRow(t)
+	source, audio, _, _ := compactTestRow(t)
 	if size := len(source) + len(audio); size > 112<<10 {
 		t.Fatalf("realistic row is %d bytes; maximum 112 KiB", size)
 	}
 }
 
 func TestIssue272CompactLibraryFitsCap(t *testing.T) {
-	source, audio, _ := compactTestRow(t)
+	source, audio, _, _ := compactTestRow(t)
 	// Round up the BLOB row to SQLite pages and reserve another page per track
 	// for BridgeState/path/index overhead, plus initial schema/index pages.
 	perTrack := int64((len(source)+len(audio)+128+4095)/4096+1) * 4096
@@ -90,33 +90,37 @@ func TestIssue272CompactLibraryFitsCap(t *testing.T) {
 	t.Logf("row=%d bytes; SQLite projection=%d bytes for 21,352 tracks", len(source)+len(audio), projected)
 }
 
+// Since #253 the row is the source ID and the track's ANLZ files; the display consumer reads the
+// same selected raw waveform from those files.
 func TestIssue272CompactConsumerFields(t *testing.T) {
-	packed, _, a := compactTestRow(t)
+	packed, _, a, root := compactTestRow(t)
 	plain, err := UnpackAnalysis(packed, 64<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
 		Track    rekordbox.Track
+		Detail   []string
 		Analysis *rekordbox.Analysis
 	}
 	if err = json.Unmarshal(plain, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Track.ID != 1 || got.Analysis == nil || len(got.Analysis.Waveforms) != 1 {
+	if got.Track.ID != 1 || got.Analysis != nil || len(got.Detail) != 2 {
 		t.Fatalf("compact consumer schema: %+v", got)
 	}
-	wave := got.Analysis.Waveforms[0]
-	if wave.Tag != "PWV7" || wave.EntryBytes != 3 || !bytes.Equal(wave.Data, a.Waveforms[0].Data) {
+	detail := BridgeDetail(packed, root, 64<<20)
+	wave := displayAnalysisWaveform(detail)
+	if wave == nil || wave.Tag != "PWV7" || wave.EntryBytes != 3 || !bytes.Equal(wave.Data, a.Waveforms[0].Data) {
 		t.Fatal("selected raw waveform changed")
 	}
 	expected := DisplayWaveFromRekordbox(a, 44100)
-	actual := DisplayWaveFromRekordbox(got.Analysis, 44100)
+	actual := DisplayWaveFromRekordbox(detail, 44100)
 	if actual == nil || actual.SamplesPerBin != expected.SamplesPerBin || !bytes.Equal(actual.Bands, expected.Bands) {
 		t.Fatal("display consumer changed")
 	}
-	if got.Track.Title != "" || len(got.Analysis.Unknown) != 0 || len(got.Analysis.Beats) != 0 || len(got.Analysis.Cues) != 0 || got.Analysis.Structure != nil {
-		t.Fatal("unused source archive retained")
+	if got.Track.Title != "" || len(packed) > 128 {
+		t.Fatalf("unused source archive retained: %d bytes", len(packed))
 	}
 }
 

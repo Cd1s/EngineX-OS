@@ -14,8 +14,10 @@ import (
 )
 
 // A 21,352-track FAT32 stick needed a 7.2 GB .rb-bridge-state.db, almost all
-// of it plain JSON in BridgeAnalysis (#272): rows must be stored compressed,
-// and still decode the selected scrolling waveform byte-for-byte.
+// of it plain JSON in BridgeAnalysis (#272): rows must stay small, and the
+// selected scrolling waveform must still decode byte-for-byte. Since #253 a row
+// names the track's ANLZ files instead of holding a compressed copy of the
+// waveform, and the detail decodes from those files.
 func TestBridgeAnalysisRowsAreCompressedAndLossless(t *testing.T) {
 	mount := t.TempDir()
 	testfixture.Export(t, mount)
@@ -36,27 +38,26 @@ func TestBridgeAnalysisRowsAreCompressedAndLossless(t *testing.T) {
 	if err = db.QueryRow(`SELECT sourceJSON, audioJSON FROM BridgeAnalysis WHERE trackId=1`).Scan(&source, &audio); err != nil {
 		t.Fatal(err)
 	}
-	for name, b := range map[string][]byte{"sourceJSON": source, "audioJSON": audio} {
-		if len(b) < 2 || b[0] != 0x1f || b[1] != 0x8b {
-			t.Fatalf("%s stored uncompressed: %.40q", name, b)
-		}
+	if len(audio) < 2 || audio[0] != 0x1f || audio[1] != 0x8b {
+		t.Fatalf("audioJSON stored uncompressed: %.40q", audio)
 	}
 	plain, err := UnpackAnalysis(source, 64<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(source) >= len(plain) {
-		t.Fatalf("compressed row %d bytes, plain %d", len(source), len(plain))
-	}
 	var got struct {
-		Track    rekordbox.Track
-		Analysis *rekordbox.Analysis
+		Track  rekordbox.Track
+		Detail []string
 	}
 	if err = json.Unmarshal(plain, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Track.ID != 1 || got.Analysis == nil || len(got.Analysis.Waveforms) != 1 || got.Analysis.Waveforms[0].Tag != "PWV7" || got.Analysis.Waveforms[0].EntryBytes != 3 || !bytes.Equal(got.Analysis.Waveforms[0].Data, []byte{10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120}) {
-		t.Fatalf("source lost in compression: %+v", got)
+	if got.Track.ID != 1 || len(source) > 128 || len(got.Detail) != 2 || got.Detail[0] != "PIONEER/USBANLZ/P001/ANLZ0000.2EX" || got.Detail[1] != "PIONEER/USBANLZ/P001/ANLZ0000.EXT" {
+		t.Fatalf("source row of %d bytes: %+v", len(source), got)
+	}
+	a := BridgeDetail(source, mount, 64<<20)
+	if w := displayAnalysisWaveform(a); w == nil || w.Tag != "PWV7" || w.EntryBytes != 3 || !bytes.Equal(w.Data, []byte{10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120}) {
+		t.Fatalf("detail not decoded from the ANLZ file: %+v", a)
 	}
 	if b, err := UnpackAnalysis(audio, 1<<20); err != nil || !json.Valid(b) {
 		t.Fatalf("audioJSON: %v %q", err, b)

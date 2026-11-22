@@ -244,6 +244,9 @@ type preread struct {
 	l          *rekordbox.Library
 	stagedOnly bool
 	resolver   *compat.Resolver
+	// reconciled: its tracks the library holds have their rows' paths, and only the others are
+	// looked up, by the import itself (#253). Reconcile looked up every folder of the export.
+	reconciled bool
 }
 
 // convert is Convert with an optional preread library. budget > 0 sets the
@@ -285,7 +288,9 @@ func convert(ctx context.Context, mount string, opts *enginedb.Options, pre *pre
 		}
 	}
 	opts.StagedOnly = stagedOnly
-	if e := ReconcileContext(ctx, r, l); e != nil {
+	if pre != nil && pre.reconciled {
+		mergeByPath(l)
+	} else if e := ReconcileContext(ctx, r, l); e != nil {
 		return enginedb.Result{}, e
 	}
 	if budget > 0 && opts.Deadline.IsZero() {
@@ -598,7 +603,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	canWrite := !full && writable(mount)
 	if canWrite {
 		// A publish an earlier mount did not finish, before anything looks at the library.
-		if err := finishPublish(dir, stateName, stampName, "m.db"); err != nil {
+		if err := finishPublish(dir, stateName, stampName, "m.db", pendingName); err != nil {
 			return enginedb.Result{}, err
 		}
 		pruneRGBOverviews(ctx, dir, filepath.Join(dir, "m.db"), "")
@@ -621,6 +626,11 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	}
 	oldStamp := readMark(dir, stampName)
 	opts.LegacyOffsets, opts.LegacyAACOffsets = legacyGridOptions(oldStamp)
+	// The few tracks a background update left to the mounts to read, in place (#253).
+	var reread map[string]bool
+	if !full && !opts.SmartMatch && canWrite {
+		reread = readReread(dir, stamp)
+	}
 	bypass := !full && !opts.SmartMatch && importedStamp(dir) == stamp
 	// An earlier export-only import still has tracks without their files read.
 	resume := bypass && hasFastTracks(dir)
@@ -633,12 +643,32 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	}
 	// An update a large export needs cannot finish while the mount waits: resolving and reading
 	// the files of a cold stick takes minutes (#301). It goes on in the background on a copy.
-	if !full && !bypass && !opts.SmartMatch && canWrite && opts.Deadline.IsZero() && exportBytes(r, mount) > attemptExportBytes {
+	// Its playlists and new tracks come in now, from the export alone (#253).
+	if !full && !bypass && !opts.SmartMatch && canWrite && opts.Deadline.IsZero() && reread == nil && exportBytes(r, mount) > attemptExportBytes {
+		var res enginedb.Result
+		quick := false
+		// An export whose list is in the library already (.rb-bridge-pending) has only its files left.
+		if readMark(dir, pendingName) != stamp {
+			var err error
+			if res, err = quickUpdate(ctx, mount, dir, r, mountStart.Add(maxMountHookBudget)); err != nil {
+				log.Printf("rb-bridge: the re-export's playlists wait for the background job: %v", err)
+				res, quick = enginedb.Result{}, errors.Is(err, errQuickTooLong)
+			} else {
+				log.Printf("rb-bridge: re-export's playlists and %d new tracks in at the mount; grids and waveforms follow", res.Added)
+				cut("quick update committed")
+			}
+		}
 		if err := startUpdate(stage, stamp); err != nil {
 			return enginedb.Result{}, err
 		}
+		if quick {
+			if err := writeMark(stage, quickName, stamp); err != nil {
+				return enginedb.Result{}, err
+			}
+		}
 		log.Printf("rb-bridge: update of a large export goes on after the mount")
-		return enginedb.Result{Background: true}, nil
+		res.Background = true
+		return res, nil
 	}
 	// The overviews before anything is read from the export. On a card that also carries
 	// the staged exports of thousands of tracks that read alone outlasts the mount's time:
@@ -668,7 +698,16 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		l, stagedOnly, err := readLibrary(inPlace, mount)
 		readErr = err
 		if err == nil {
-			pre = &preread{l, stagedOnly, r}
+			pre = &preread{l: l, stagedOnly: stagedOnly, resolver: r}
+		}
+		// What a background update left to this mount is a few tracks of a large export: the
+		// others keep their rows' paths, unread (#253).
+		if err == nil && reread != nil {
+			var known map[string]string
+			if known, err = ownedSpellings(dir); err == nil {
+				_, err = keepSpellings(l, known)
+			}
+			readErr, pre.reconciled = err, err == nil
 		}
 	}
 	// Start the shared absolute deadline once the library is read. Import and MP3
@@ -681,6 +720,16 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	}
 	overviews := enginedb.ReadOverviewProgress(mount) // before this mount's import writes anything
 	if bypass {
+		if canWrite {
+			// Marks of this import that an interruption left after its stamp (#253 review).
+			if readMark(dir, pendingName) == stamp {
+				os.Remove(filepath.Join(dir, pendingName))
+			}
+			if reread != nil {
+				os.Remove(filepath.Join(dir, rereadName))
+			}
+			os.Remove(filepath.Join(dir, stateName+".compact"))
+		}
 		if writable(mount) { // drives imported by an earlier build still get their covers
 			if opts.Deadline.IsZero() {
 				opts.Deadline = time.Now().Add(mountReadBudget)
@@ -712,10 +761,18 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	}
 	// The same export as a mount that left tracks without their files: read
 	// only those, the others are known to be imported with theirs.
-	opts.Resume = resume || (!full && !opts.SmartMatch && readMark(dir, pendingName) == stamp)
+	opts.Resume = resume || reread != nil || (!full && !opts.SmartMatch && readMark(dir, pendingName) == stamp)
+	opts.Reread = reread
 	result, err = convert(inPlace, mount, opts, pre, budget, mountStart)
 	if late(err) {
 		return background(err)
+	}
+	if err == nil && reread == nil && !result.Bypassed {
+		cut("in place imported") // committed, not yet stamped
+	}
+	if err == nil && reread != nil {
+		cut("in place committed")
+		compactState(inPlace, dir, pre.l, rereadRefs(dir, stamp))
 	}
 	if err == nil && !result.Bypassed {
 		// Only this build has written since the progress was read, and it leaves no overview
@@ -727,10 +784,20 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	}
 	if err == nil && result.Deferred > 0 {
 		writeMark(dir, pendingName, stamp)
+		cut("in place deferred")
 		log.Printf("rb-bridge: %d tracks imported without cues; the next mount reads them", result.Deferred)
+		if reread != nil {
+			// Left by a background update: it goes on, and its remount reads the rest.
+			if err = startUpdate(stage, stamp); err == nil {
+				result.Background = true
+			}
+		}
 	} else if err == nil && !result.Bypassed {
 		writeStamp(dir, stamp)
+		cut("in place stamped")
 		os.Remove(filepath.Join(dir, pendingName))
+		cut("in place pending removed")
+		os.Remove(filepath.Join(dir, rereadName))
 	}
 	return result, err
 }
@@ -886,14 +953,16 @@ func readMark(dir, name string) string {
 	return strings.TrimSpace(string(b))
 }
 
+// foldPath is the resolver's equivalence of paths: case folding and NFC (#6).
+func foldPath(p string) string { return norm.NFC.String(cases.Fold().String(norm.NFC.String(p))) }
+
 // mergeByPath is Reconcile without touching the disk.
 func mergeByPath(l *rekordbox.Library) {
 	byPath := map[string]uint32{}
 	replaced := map[uint32]uint32{}
 	kept := l.Tracks[:0:0]
 	for _, t := range l.Tracks {
-		// Same equivalence as compat's resolver: case folding and NFC (#6).
-		key := norm.NFC.String(cases.Fold().String(norm.NFC.String(t.Path)))
+		key := foldPath(t.Path)
 		if first, ok := byPath[key]; ok {
 			replaced[t.ID] = first
 			continue

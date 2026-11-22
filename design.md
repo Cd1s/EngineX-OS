@@ -72,9 +72,17 @@ the first draft has therefore been removed.
 Persisted Rekordbox detail is available from rb-bridge's separate, read-only
 `.rb-bridge-state.db` / BridgeAnalysis.sourceJSON: PWV7 is three bands at
 150 entries/s; PWV5 is a two-byte RGB/height representation at 150 entries/s.
-New sidecar rows keep only the source track ID and the selected PWV7 (else PWV5)
-section, as raw bytes in a versioned, gzip-wrapped binary record (`RBA1`). Legacy
-plain and gzip-JSON rows remain readable; the 3 GiB sidecar cap remains in force.
+Sidecar rows of 5.3.0.6 keep only the source track ID and the volume paths of the
+track's `.2EX`/`.EXT` (`RBA2`, about 100 bytes); the display reads the PWV7 (else
+PWV5) from those files (#253). Rows of 5.3.0.5 (`RBA1`: the selected section as raw
+bytes, gzip-wrapped) and older plain and gzip-JSON rows remain readable; the 3 GiB
+sidecar cap remains in force. An update rewrites the rows that still hold a waveform
+into references to the export's ANLZ files of the same track, without reading them,
+and only together with the library it belongs to (in place: after the import has
+committed; in the stage: published with it); a row for which the export names no file
+keeps its waveform. A 5.3.0.5 deck cannot decode an `RBA2` row: on that deck the shadow
+lane of those tracks falls back to the overview; imports, cues, deck edits and cue
+write-back are unaffected (checked with the 5.3.0.5 code on a branch-written stick).
 Reuse the existing Rekordbox conversion and keep source Engine grid/cues.
 The sidecar is used only for m.db, matched against BridgeState.path and checked
 against the track duration; a matching stm.db numeric ID is never sufficient.

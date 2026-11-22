@@ -257,19 +257,21 @@ func TestEndToEndPDBAnalysisNFDIncrementalSmartMatch(t *testing.T) {
 		t.Fatal("H or main memory cue missing", cues, main)
 	}
 	var source struct {
-		Track    rekordbox.Track
-		Analysis rekordbox.Analysis
+		Track rekordbox.Track
 	}
-	sourceJSON, e := enginedb.UnpackAnalysis(scalar[[]byte](t, db, `SELECT sourceJSON FROM BridgeAnalysis WHERE trackId=1`), 64<<20)
+	row := scalar[[]byte](t, db, `SELECT sourceJSON FROM BridgeAnalysis WHERE trackId=1`)
+	sourceJSON, e := enginedb.UnpackAnalysis(row, 64<<20)
 	if e != nil {
 		t.Fatal(e)
 	}
 	if e := json.Unmarshal(sourceJSON, &source); e != nil {
 		t.Fatal(e)
 	}
-	// The sidecar keeps only what identity/display readers consume. Cues,
-	// loops and grids above/below remain verified in Engine's PerformanceData.
-	if source.Track.ID != 1 || len(source.Analysis.Waveforms) != 1 || source.Analysis.Waveforms[0].Tag != "PWV7" || source.Analysis.Waveforms[0].EntryBytes != 3 || !bytes.Equal(source.Analysis.Waveforms[0].Data, []byte{10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120}) {
+	// The sidecar keeps only what identity/display readers consume: the source ID and, since
+	// #253, where the detail is. Cues, loops and grids above/below remain verified in Engine's
+	// PerformanceData; the detail decodes byte for byte from the track's ANLZ file.
+	detail := enginedb.BridgeDetail(row, root, 64<<20)
+	if source.Track.ID != 1 || detail == nil || len(detail.Waveforms) != 1 || detail.Waveforms[0].Tag != "PWV7" || detail.Waveforms[0].EntryBytes != 3 || !bytes.Equal(detail.Waveforms[0].Data, []byte{10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120}) {
 		t.Fatal("source identity or display detail lost")
 	}
 	loops := scalar[[]byte](t, db, `SELECT loops FROM PerformanceData WHERE trackId=1`)

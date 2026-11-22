@@ -362,8 +362,9 @@ func TestIssue301LargeFirstImportRepeatMounts253(t *testing.T) {
 	testfixture.LargeExport(t, root, 6000)
 	ctx := context.Background()
 	start, reads := time.Now(), bridge.ExportReadsForTest()
+	// Published at once; the update that reads the files starts with it (#253, 5.3.0.6).
 	r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
-	if err != nil || r.Background || r.Added != 6000 || !r.PlaylistsChanged {
+	if err != nil || !r.Background || r.Added != 6000 || !r.PlaylistsChanged {
 		t.Fatalf("first mount: %+v %v", r, err)
 	}
 	t.Logf("6000-track first mount: %s", time.Since(start))

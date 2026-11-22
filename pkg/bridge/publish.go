@@ -86,6 +86,7 @@ func finishPublish(dir string, names ...string) error {
 		if err := os.Rename(staged, filepath.Join(dir, name)); err != nil {
 			return err
 		}
+		cut("publish " + name)
 	}
 	if err := syncFile(dir); err != nil {
 		return err

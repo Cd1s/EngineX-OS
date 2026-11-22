@@ -24,6 +24,23 @@ func SetLargeExportForTest() func() {
 	return func() { attemptExportBytes, maxPublishExportBytes = oldAttempt, oldPublish }
 }
 
+// SetUpdateExportForTest makes every export one too large to update while the mount waits; a
+// first import is still published at the mount from the export when that fits (#253).
+func SetUpdateExportForTest() func() {
+	old := attemptExportBytes
+	attemptExportBytes = -1
+	return func() { attemptExportBytes = old }
+}
+
+// SetInPlaceUpdateForTest counts each track an update reads as costing perTrack bytes: an update
+// of few tracks is left to the mounts once copying the library costs more (#253). A bridge state
+// from 1 MiB counts as large enough to compact.
+func SetInPlaceUpdateForTest(perTrack int64) func() {
+	old, oldCompact := perTrackReadBytes, compactStateBytes
+	perTrackReadBytes, compactStateBytes = perTrack, 1<<20
+	return func() { perTrackReadBytes, compactStateBytes = old, oldCompact }
+}
+
 // SlowExportReadForTest makes each export read take d and shortens the mount
 // read budget to budget, until the returned function restores both.
 func SlowExportReadForTest(d, budget time.Duration) func() {
@@ -89,4 +106,16 @@ func SetMountWindowForTest(d time.Duration) func() {
 	old := maxMountHookBudget
 	maxMountHookBudget = d
 	return func() { maxMountHookBudget = old }
+}
+
+// QuickCostForTest is the quick update's SC5000 estimate (#253) and the mount's time it must fit.
+func QuickCostForTest(known, fresh, entries int) (cost, mount time.Duration) {
+	return quickCost(known, fresh, entries), maxMountHookBudget
+}
+
+// SetCutForTest calls f at each point between two writes an interruption can separate (#253).
+func SetCutForTest(f func(name string)) func() {
+	old := cutPoint
+	cutPoint = f
+	return func() { cutPoint = old }
 }

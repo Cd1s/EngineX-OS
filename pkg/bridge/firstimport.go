@@ -230,6 +230,11 @@ func fastPublish(ctx context.Context, mount, dir, stage, stamp string, r *compat
 	if err = publishImport(mount, dir); err != nil {
 		return res, err
 	}
+	if exportBytes(r, mount) > attemptExportBytes {
+		// The next mount would only start the update that reads the files of so large an
+		// export: it starts now, and a remount publishes it (#253).
+		return completeLater(dir, stage, stamp, res)
+	}
 	return res, keepPending(dir)
 }
 
@@ -314,6 +319,7 @@ func completeStage(stage, stamp string) error {
 	if err := writeMark(stage, stampName, stamp); err != nil {
 		return err
 	}
+	cut("stage stamped")
 	return os.Remove(filepath.Join(stage, pendingName))
 }
 
@@ -356,13 +362,16 @@ func renameStage(dir, stage string) error {
 	if err := syncFile(stage); err != nil {
 		return err
 	}
+	cut("publish ready")
 	if err := os.Rename(stage, filepath.Join(dir, publishDir)); err != nil {
 		return err
 	}
+	cut("publish moved")
 	if err := os.Remove(filepath.Join(dir, pendingName)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return finishPublish(dir, stateName, stampName, "m.db")
+	cut("publish pending removed")
+	return finishPublish(dir, stateName, stampName, "m.db", pendingName)
 }
 
 // liveIdentity names the state of an SQLite file: its size and the change counter that

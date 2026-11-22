@@ -70,10 +70,7 @@ func displayAnalysisWaveform(a *rekordbox.Analysis) *rekordbox.Waveform {
 	var best *rekordbox.Waveform
 	for i := range a.Waveforms {
 		w := &a.Waveforms[i]
-		if (w.Tag != "PWV7" || w.EntryBytes != 3) && (w.Tag != "PWV5" || w.EntryBytes != 2) {
-			continue
-		}
-		if len(w.Data) == 0 || len(w.Data)%int(w.EntryBytes) != 0 || len(w.Data)/int(w.EntryBytes) > 2<<20 {
+		if w.EntryBytes == 0 || len(w.Data)%int(w.EntryBytes) != 0 || !displayWaveFits(w.Tag, w.EntryBytes, uint64(len(w.Data)/int(w.EntryBytes))) {
 			continue
 		}
 		if best == nil || w.Tag == "PWV7" && best.Tag != "PWV7" {
@@ -81,6 +78,12 @@ func displayAnalysisWaveform(a *rekordbox.Analysis) *rekordbox.Waveform {
 		}
 	}
 	return best
+}
+
+// displayWaveFits is the waveform the display draws: a PWV7 of 3 bytes an entry or a PWV5 of 2,
+// with 1 to 2<<20 entries. DetailServes decides with it from a section's header (#253 review 3).
+func displayWaveFits(tag string, width uint32, count uint64) bool {
+	return (tag == "PWV7" && width == 3 || tag == "PWV5" && width == 2) && count > 0 && count <= 2<<20
 }
 
 func displayFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
