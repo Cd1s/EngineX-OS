@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/docs/mods/src/modkit"
@@ -55,11 +56,50 @@ var Systemctl = func(args ...string) (stdout, stderr string, code int) {
 
 type feature struct {
 	path string
+	mu   sync.Mutex // the start-up re-pause and Action never overlap; Status does not wait
 }
 
-// New returns the Minimal Club Mode feature.
+// New returns the Minimal Club Mode feature. Saved services that systemd started again on
+// reboot are re-paused in the background: `systemctl stop` can outlast the 3 s that
+// start.sh waits for the helper's health check.
 func New(env modkit.Env) (modkit.Feature, error) {
-	return &feature{path: filepath.Join(env.State, "paused.json")}, nil
+	f := &feature{path: filepath.Join(env.State, "paused.json")}
+	f.mu.Lock() // taken here, so an Action that arrives at once waits for the re-pause
+	go func() {
+		defer f.mu.Unlock()
+		_ = f.reapplyPaused()
+	}()
+	return f, nil
+}
+
+func (f *feature) reapplyPaused() error {
+	if _, err := os.Stat(f.path); err != nil {
+		return nil
+	}
+	var snap snapshot
+	if err := modkit.LoadJSON(f.path, &snap); err != nil {
+		return err
+	}
+	if !snap.Active || snap.Phase == "restore-needed" {
+		return nil
+	}
+	for _, unit := range snap.Services {
+		unit = normalizeSavedUnit(unit)
+		if !allowed(unit) {
+			continue
+		}
+		unit = installedUnit(unit)
+		if isActive(unit) {
+			if _, _, code := Systemctl("stop", unit); code != 0 || isActive(unit) {
+				return fmt.Errorf("could not re-pause %s", unit)
+			}
+		}
+	}
+	if snap.Phase != "paused" {
+		snap.Phase = "paused"
+		return modkit.SaveJSON(f.path, snap)
+	}
+	return nil
 }
 
 type snapshot struct {
@@ -92,6 +132,8 @@ func allowed(unit string) bool {
 }
 
 func (f *feature) Action(req map[string]any) (any, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	action, err := modkit.Field(req, "action")
 	if err != nil {
 		return nil, err
@@ -99,6 +141,9 @@ func (f *feature) Action(req map[string]any) (any, error) {
 	switch action {
 	case "enable":
 		if _, err := os.Stat(f.path); err == nil {
+			if err := f.reapplyPaused(); err != nil {
+				return nil, err
+			}
 			return f.Status()
 		}
 		active := []string{}

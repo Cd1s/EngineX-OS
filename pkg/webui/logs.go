@@ -58,8 +58,9 @@ const (
 
 var (
 	// Drop the whole journal message, including multiline/escaped payloads, when
-	// it mentions credentials. This deliberately prefers privacy over detail.
-	sensitiveLog = regexp.MustCompile(`(?i)[a-z0-9_-]*(?:token|arl|password|passwd|passphrase|pwd|cookie|authorization|bearer|credential|signature|jwt|secret|api[ _-]?key|access[ _-]?code|psk|email)[a-z0-9_-]*|\b(?:music_u|session|sid)\b`)
+	// it carries a credential key-value/header or Bearer token. Non-secret prose
+	// ("early", "token refresh failed", "session expired") is preserved.
+	sensitiveLog = regexp.MustCompile(`(?i)(?:(?:[a-z0-9_-]*(?:token|password|passwd|passphrase|pwd|cookie|authorization|credential|signature|jwt|secret|api[ _-]?key|access[ _-]?code|psk|email)[a-z0-9_-]*|\b(?:[a-z0-9]+[_-])*(?:deezer)?arl(?:[_-][a-z0-9]+)*|\b(?:[a-z0-9]+[_-])*(?:music_u|session|sid)(?:[_-]?id)?)\b\\?["']?\s*[:=]\s*\S|\bbearer\s+\S+)`)
 	emailLog     = regexp.MustCompile(`(?i)\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b`)
 	encodedLog   = regexp.MustCompile(`%[0-9a-fA-F]{2}`)
 	logQuery     = regexp.MustCompile(`([?&][a-zA-Z0-9_.%~-]+=)[^&\s<>"']*`)
@@ -190,11 +191,12 @@ func (s *Server) downloadLogs(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
-// readJournal exports the last 30 minutes of units, newest first, within limit bytes.
+// readJournal exports the current boot's units, newest first, within limit bytes
+// (without wall-clock --since/--until filters that drop pre-NTP boot logs).
 func readJournal(ctx context.Context, accessCode string, units []string, lines string, limit int) ([]byte, bool, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	args := []string{"--no-pager", "--quiet", "--all", "--reverse", "--boot", "--since=-30min", "--until=now", lines, "--output=json"}
+	args := []string{"--no-pager", "--quiet", "--all", "--reverse", "--boot", lines, "--output=json"}
 	for _, u := range units {
 		args = append(args, "--unit="+u)
 	}

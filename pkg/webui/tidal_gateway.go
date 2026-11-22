@@ -1619,7 +1619,19 @@ func (g *tidalGateway) favoriteTracks(w http.ResponseWriter, r *http.Request) {
 		case "applemusic":
 			tracks, err = g.browseTracks(r.Context(), scope, v.ID, v.p, providers.AppleMusicLikedID)
 		}
-		if len(tracks) > 0 && len(tracks) <= maxPlaylistTracks {
+		if err != nil && len(tracks) == 0 {
+			status := 502
+			if errors.Is(err, errBrowseTooLarge) {
+				status = 400
+			}
+			fail(w, status, err)
+			return
+		}
+		if len(tracks) > maxPlaylistTracks {
+			fail(w, 400, errors.New("playlist too large"))
+			return
+		}
+		if len(tracks) > 0 {
 			g.s.cfg.BPM.Enrich(r.Context(), tracks)
 			items = g.trackItems(v.ID, false, tracks)
 			if err != nil {
@@ -1674,6 +1686,10 @@ func (g *tidalGateway) favoriteAlbums(w http.ResponseWriter, r *http.Request) {
 		albums, err := n.FavoriteAlbums(r.Context())
 		if err != nil {
 			log.Printf("stream-sync: gateway source failed: %v", err)
+			if len(albums) == 0 {
+				fail(w, 502, err)
+				return
+			}
 		}
 		for _, a := range albums {
 			artists := make([]string, 0, len(a.Artists))
@@ -1691,6 +1707,10 @@ func (g *tidalGateway) favoriteAlbums(w http.ResponseWriter, r *http.Request) {
 			albums, err := am.FavoriteAlbums(r.Context())
 			if err != nil {
 				log.Printf("stream-sync: gateway source failed: %v", err)
+				if len(albums) == 0 {
+					fail(w, 502, err)
+					return
+				}
 			}
 			for _, al := range albums {
 				id := g.addAlbum(albumRef{session: v.ID, provider: "applemusic", listID: al.ListID, guest: v.Guest})

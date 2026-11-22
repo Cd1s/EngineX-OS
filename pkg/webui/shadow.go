@@ -1852,6 +1852,7 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 			s.uiMu.Unlock()
 		}
 		s.shadow.mu.Lock()
+		s.shadow.prunePeers(time.Now())
 		ver = s.shadow.ver
 		lines := slices.Clone(s.shadow.lines)
 		s.shadow.mu.Unlock()
@@ -2735,13 +2736,53 @@ var (
 	peerFileClient = &http.Client{CheckRedirect: noRedirect}
 )
 
+const (
+	shadowPeerDeckTimeout = 4 * time.Second // drop peer decks after 4s without updates (HTTP polls every 250ms, UDP beacons every 2s)
+	shadowPeerSeenTimeout = 6 * time.Second // drop peer IP from poll/push list after 6s without UDP or HTTP contact
+)
+
+// prunePeers drops peers and their decks that have not sent an update within
+// the timeout, waking any long polls if a peer deck was removed.
+// Called with sh.mu held.
+func (sh *shadowState) prunePeers(now time.Time) {
+	changed := false
+	for slot, p := range sh.peerDecks {
+		if now.Sub(p.at) >= shadowPeerDeckTimeout {
+			delete(sh.peerDecks, slot)
+			changed = true
+		}
+	}
+	for ip, seen := range sh.peers {
+		if now.Sub(seen) >= shadowPeerSeenTimeout {
+			delete(sh.peers, ip)
+			delete(sh.peerSeq, ip)
+			delete(sh.peerClock, ip)
+			delete(sh.peerTaken, ip)
+		}
+	}
+	for id, taken := range sh.peerTaken {
+		if now.Sub(taken) >= shadowPeerSeenTimeout {
+			delete(sh.peerTaken, id)
+			delete(sh.peerSeq, id)
+			delete(sh.peerClock, id)
+		}
+	}
+	if changed {
+		sh.ver++
+		close(sh.notify)
+		sh.notify = make(chan struct{})
+	}
+}
+
 // shadowPollPeers reads the other EngineX players' decks.
 func (s *Server) shadowPollPeers() {
 	sh := s.shadow
+	now := time.Now()
 	sh.mu.Lock()
+	sh.prunePeers(now)
 	var ips []string
 	for ip, seen := range sh.peers {
-		if time.Since(seen) < 6*time.Second {
+		if now.Sub(seen) < shadowPeerSeenTimeout {
 			ips = append(ips, ip)
 		}
 	}
@@ -2761,8 +2802,10 @@ func (s *Server) shadowPollPeers() {
 		if err != nil {
 			continue
 		}
+		now = time.Now()
 		sh.mu.Lock()
-		sh.takePeer(ip, body.Decks, time.Now())
+		sh.peers[ip] = now
+		sh.takePeer(ip, body.Decks, now)
 		sh.mu.Unlock()
 	}
 }
