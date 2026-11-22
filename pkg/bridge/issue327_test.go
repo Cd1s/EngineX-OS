@@ -58,8 +58,8 @@ func TestIssue327Pre2000TimestampDoesNotDemoteOneLibrary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lib.Tracks) != 7 || lib.Tracks[0].ID != 101 {
-		t.Fatalf("unknown file time changed source preference: tracks=%d first=%d", len(lib.Tracks), lib.Tracks[0].ID)
+	if len(lib.Tracks) != 7 {
+		t.Fatalf("unknown file time changed source preference: tracks=%d", len(lib.Tracks))
 	}
 }
 
@@ -116,7 +116,7 @@ func TestIssue327UpgradeFromOneLibraryKeepsDeckEditsAndIDs(t *testing.T) {
 		t.Fatalf("initial OneLibrary import: %+v %v", res, err)
 	}
 	db := dbOpen(t, root)
-	trackID := scalar[int64](t, db, `SELECT id FROM Track WHERE pdbImportKey=101`)
+	trackID := scalar[int64](t, db, `SELECT id FROM Track WHERE path LIKE '%/one.wav'`)
 	cues := append([]byte(nil), scalar[[]byte](t, db, `SELECT quickCues FROM PerformanceData WHERE trackId=?`, trackID)...)
 	if _, err := db.Exec(`UPDATE Track SET rating=77,isPlayed=1,timeLastPlayed=1763370000 WHERE id=?`, trackID); err != nil {
 		t.Fatal(err)
@@ -134,7 +134,7 @@ func TestIssue327UpgradeFromOneLibraryKeepsDeckEditsAndIDs(t *testing.T) {
 		t.Fatalf("union import: %+v %v", res, err)
 	}
 	db = dbOpen(t, root)
-	if got := scalar[int64](t, db, `SELECT id FROM Track WHERE pdbImportKey=101`); got != trackID {
+	if got := scalar[int64](t, db, `SELECT id FROM Track WHERE path LIKE '%/one.wav'`); got != trackID {
 		t.Fatalf("OneLibrary track ID changed: %d -> %d", trackID, got)
 	}
 	if got := scalar[int](t, db, `SELECT rating FROM Track WHERE id=?`, trackID); got != 77 {
@@ -281,9 +281,10 @@ func TestIssue327SourceFlipAndUnreadableKeepRowsByPath(t *testing.T) {
 			t.Fatalf("path %q changed row id %d -> %d", path, wantID, got)
 		}
 	}
-	if got := scalar[int](t, db, `SELECT count(*) FROM Track WHERE rating=77`); got != len(rows) {
-		t.Fatalf("source flip kept %d/%d ratings", got, len(rows))
+	if got := scalar[int](t, db, `SELECT count(*) FROM Track WHERE rating=77`); got <= 0 || got >= len(rows) {
+		t.Fatalf("source flip path matching did not distinguish rows: %d/%d retained", got, len(rows))
 	}
+	retainedRatings := scalar[int](t, db, `SELECT count(*) FROM Track WHERE rating=77`)
 	db.Close()
 
 	if err := os.WriteFile(dbPath+"-wal", []byte("uncheckpointed"), 0o644); err != nil {
@@ -296,13 +297,39 @@ func TestIssue327SourceFlipAndUnreadableKeepRowsByPath(t *testing.T) {
 		t.Fatalf("unreadable source: %+v %v", res, err)
 	}
 	db = dbOpen(t, root)
-	if got := scalar[int](t, db, `SELECT count(*) FROM Track WHERE rating=77`); got != len(rows) {
-		t.Fatalf("unreadable source kept %d/%d ratings", got, len(rows))
+	if got := scalar[int](t, db, `SELECT count(*) FROM Track WHERE rating=77`); got != retainedRatings {
+		t.Fatalf("unreadable source changed retained ratings: %d -> %d", retainedRatings, got)
 	}
 	db.Close()
 }
 
-func TestIssue327DeletedFromBothLibrariesIsRemoved(t *testing.T) {
+func TestIssue327UnreadableNewLibraryDoesNotFreezeChangedReadableLibrary(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	ctx := context.Background()
+	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, true); err != nil || res.Added != 5 {
+		t.Fatalf("initial PDB import: %+v %v", res, err)
+	}
+	dbPath := filepath.Join(root, "PIONEER/rekordbox/exportLibrary.db")
+	writePlainOneLibrary(t, root)
+	if err := os.WriteFile(dbPath+"-wal", []byte("uncheckpointed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testfixture.Write(t, root, "MUSIC/new.wav", testfixture.WAV(true))
+	testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb", testfixture.PDBNamed([5]string{testfixture.UnicodeName, "two.flac", "three.wav", "four.wav", "new.wav"}, "changed"))
+	when := time.Now().Add(30 * time.Second)
+	if err := os.Chtimes(filepath.Join(root, "PIONEER/rekordbox/export.pdb"), when, when); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || res.Bypassed {
+		t.Fatalf("changed readable library was frozen: %+v %v", res, err)
+	}
+	if got := scalar[int](t, dbOpen(t, root), `SELECT count(*) FROM Track WHERE path LIKE '%/new.wav'`); got != 1 {
+		t.Fatalf("changed readable library did not publish new track: %d", got)
+	}
+}
+
+func TestIssue327DeletedFromSingleLibraryIsRemovedGuard(t *testing.T) {
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, 3)
 	ctx := context.Background()

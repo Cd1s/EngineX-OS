@@ -150,9 +150,19 @@ func quickPaths(dir string, l *rekordbox.Library) (fresh int, err error) {
 	if err != nil {
 		return 0, err
 	}
+	rowsByPath := make(map[string]uint32, len(rows))
+	for id, p := range rows {
+		rowsByPath[foldPath(filepath.ToSlash(filepath.Clean("/"+p)))] = id
+	}
 	for i := range l.Tracks {
 		if p, ok := rows[l.Tracks[i].ID]; ok {
-			l.Tracks[i].Path = "/" + p
+			storedPath := foldPath(filepath.ToSlash(filepath.Clean("/" + p)))
+			exportPath := foldPath(filepath.ToSlash(filepath.Clean(l.Tracks[i].Path)))
+			if storedPath == exportPath || rowsByPath[exportPath] == l.Tracks[i].ID {
+				l.Tracks[i].Path = "/" + p
+			} else if _, occupied := rowsByPath[exportPath]; !occupied {
+				l.Tracks[i].Path = "/" + p
+			}
 		}
 	}
 	if fresh, err = keepSpellings(l, known); err != nil {
@@ -413,7 +423,7 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 	}
 	changed := readMark(stage, resumeName) != "" // an earlier pass may have changed it
 	for {
-		o := enginedb.Options{DatabaseDir: stage, StagedOnly: stagedOnly, LegacyOffsets: legacy, LegacyAACOffsets: legacyAAC,
+		o := enginedb.Options{DatabaseDir: stage, StagedOnly: stagedOnly, MatchByPath: true, LegacyOffsets: legacy, LegacyAACOffsets: legacyAAC,
 			Resume: readMark(stage, resumeName) == stamp, Deadline: time.Now().Add(window)}
 		res, err := enginedb.SyncResolved(ctx, r, l, o)
 		if err != nil {

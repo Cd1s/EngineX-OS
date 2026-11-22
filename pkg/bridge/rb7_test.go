@@ -52,12 +52,13 @@ func TestExportSelectionMTimeAndFallback(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				wantID := uint32(101)
-				if diff < -5 {
-					wantID = 1
+				if len(lib.Tracks) != 7 {
+					t.Fatalf("union track count: got %d, want 7", len(lib.Tracks))
 				}
-				if len(lib.Tracks) == 0 || lib.Tracks[0].ID != wantID {
-					t.Fatalf("first track ID: got %+v, want %d", lib.Tracks, wantID)
+				for _, track := range lib.Tracks {
+					if track.ID < 1<<31 {
+						t.Fatalf("union track ID is not path-derived: %d", track.ID)
+					}
 				}
 			})
 		}
@@ -96,7 +97,7 @@ func TestExportSelectionMTimeAndFallback(t *testing.T) {
 			t.Fatalf("ConvertAtMount bypassed new Rekordbox 7 exportLibrary.db: %+v %v", res, err)
 		}
 		engine := dbOpen(t, root)
-		if n := scalar[int](t, engine, `SELECT count(*) FROM Track WHERE pdbImportKey IN (101,102,103)`); n != 3 {
+		if n := scalar[int](t, engine, `SELECT count(*) FROM Track WHERE path LIKE '%/one.wav' OR path LIKE '%/two.wav' OR path LIKE '%/three.wav'`); n != 3 {
 			t.Fatalf("expected 3 OneLibrary tracks imported, got %d", n)
 		}
 
@@ -109,7 +110,7 @@ func TestExportSelectionMTimeAndFallback(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(lib.Tracks) != 7 || lib.Tracks[0].ID != 1 {
+		if len(lib.Tracks) != 7 {
 			t.Fatalf("expected newer export.pdb to win (>5s newer), got %+v", lib.Tracks)
 		}
 	})
@@ -215,7 +216,7 @@ func TestExportTieKeepsPDBImport(t *testing.T) {
 			if err != nil || res.Bypassed {
 				t.Fatalf("upgrade mount: %+v %v", res, err)
 			}
-			if got := scalar[string](t, engine, `SELECT path FROM Track WHERE id=? AND pdbImportKey=1`, trackID); got == "" {
+			if got := scalar[string](t, engine, `SELECT path FROM Track WHERE id=?`, trackID); got == "" {
 				t.Fatal("PDB track identity lost")
 			}
 			if got := scalar[[]byte](t, engine, `SELECT quickCues FROM PerformanceData WHERE trackId=?`, trackID); !bytes.Equal(got, wantCue) {
@@ -229,7 +230,7 @@ func TestExportTieKeepsPDBImport(t *testing.T) {
 				t.Fatalf("PDB-first stamp changed: %q %v", got, err)
 			}
 			lib, err := bridge.ReadLibrary(ctx, root)
-			if err != nil || len(lib.Tracks) != 7 || lib.Tracks[0].ID != 1 {
+			if err != nil || len(lib.Tracks) != 7 {
 				t.Fatalf("source switched from PDB: %+v %v", lib, err)
 			}
 		})
@@ -257,7 +258,7 @@ func TestFreshExportTieKeepsSQLImport(t *testing.T) {
 	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !res.Bypassed {
 		t.Fatalf("unchanged SQL stamp: %+v %v", res, err)
 	}
-	if lib, err := bridge.ReadLibrary(ctx, root); err != nil || len(lib.Tracks) != 7 || lib.Tracks[0].ID != 101 {
+	if lib, err := bridge.ReadLibrary(ctx, root); err != nil || len(lib.Tracks) != 7 {
 		t.Fatalf("source switched from SQL: %+v %v", lib, err)
 	}
 }

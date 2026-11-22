@@ -41,11 +41,15 @@ func TestIssue327MergeTracksPlaylistsAndStableIDs(t *testing.T) {
 		t.Fatalf("merged playlists=%d, want 5", len(merged.Playlists))
 	}
 	var conflict, other int
+	parents := map[uint32]string{0: ""}
+	for _, p := range merged.Playlists {
+		parents[p.ID] = p.Name
+	}
 	for _, p := range merged.Playlists {
 		if p.Name == "Mix (Device Library)" {
 			conflict++
 		}
-		if p.Name == "Mix" && p.ParentID != 10 {
+		if p.Name == "Mix" && parents[p.ParentID] == "Other" {
 			other++
 		}
 	}
@@ -65,6 +69,41 @@ func TestIssue327MergeTracksPlaylistsAndStableIDs(t *testing.T) {
 	for i := range merged.Playlists {
 		if merged.Playlists[i].ID != again.Playlists[i].ID {
 			t.Fatalf("playlist %d ID changed: %d -> %d", i, merged.Playlists[i].ID, again.Playlists[i].ID)
+		}
+	}
+}
+
+func TestIssue327OverlappingIDsStayWithTheirPaths(t *testing.T) {
+	first := &rekordbox.Library{Tracks: []rekordbox.Track{
+		{ID: 1, Path: "/Music/one.wav"},
+		{ID: 2, Path: "/Music/two.wav"},
+	}}
+	second := &rekordbox.Library{Tracks: []rekordbox.Track{
+		{ID: 1, Path: "/Music/other.wav"},
+		{ID: 2, Path: "/Music/one.wav"},
+	}}
+	merge := func(readable []readableExport) map[string]uint32 {
+		lib := mergeReadableExports(readable)
+		got := make(map[string]uint32, len(lib.Tracks))
+		for _, track := range lib.Tracks {
+			got[foldPath(track.Path)] = track.ID
+		}
+		return got
+	}
+	a := merge([]readableExport{
+		{candidate: exportCandidate{rel: "PIONEER/rekordbox/exportLibrary.db"}, library: first},
+		{candidate: exportCandidate{rel: "PIONEER/rekordbox/export.pdb", isPDB: true}, library: second},
+	})
+	b := merge([]readableExport{
+		{candidate: exportCandidate{rel: "PIONEER/rekordbox/export.pdb", isPDB: true}, library: second},
+		{candidate: exportCandidate{rel: "PIONEER/rekordbox/exportLibrary.db"}, library: first},
+	})
+	if len(a) != len(b) || len(a) != 3 {
+		t.Fatalf("merged path count changed: %d/%d", len(a), len(b))
+	}
+	for path, id := range a {
+		if b[path] != id {
+			t.Fatalf("path %q changed ID %d -> %d after source flip", path, id, b[path])
 		}
 	}
 }

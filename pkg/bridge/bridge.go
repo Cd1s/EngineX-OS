@@ -31,6 +31,11 @@ const unix_ST_RDONLY = 0x1
 var errNoLocalExport = fmt.Errorf("no local Rekordbox export: %w", os.ErrNotExist)
 var errUnreadableExport = errors.New("rekordbox export is unreadable; existing library kept")
 
+type unreadableExport struct {
+	candidate exportCandidate
+	err       error
+}
+
 // ReadLibrary reads the drive's own export plus the libraries staged from
 // Pioneer players on the LAN (#59).
 func ReadLibrary(ctx context.Context, mount string) (*rekordbox.Library, error) {
@@ -42,17 +47,23 @@ func readLibrary(ctx context.Context, mount string) (*rekordbox.Library, bool, e
 	if err != nil {
 		return nil, false, err
 	}
-	l, _, partial, err := readExportWithResolver(ctx, mount, r)
+	l, _, unreadable, err := readExportWithResolver(ctx, mount, r)
 	stagedOnly := errors.Is(err, errNoLocalExport)
+	if len(unreadable) > 0 && hasLibrary(filepath.Join(mount, "Engine Library", "Database2")) {
+		stamp := importedStamp(filepath.Join(mount, "Engine Library", "Database2"))
+		for _, bad := range unreadable {
+			if stampContainsExport(stamp, bad.candidate.rel) {
+				log.Printf("rb-bridge: existing library kept: %s unreadable", bad.candidate.rel)
+				return nil, false, errUnreadableExport
+			}
+		}
+	}
 	if stagedOnly {
 		l = &rekordbox.Library{}
 		err = nil
 	}
 	if err != nil {
 		return nil, false, err
-	}
-	if partial && hasLibrary(filepath.Join(mount, "Engine Library", "Database2")) {
-		return nil, false, errUnreadableExport
 	}
 	if l != nil {
 		mergeStaged(mount, l)
@@ -184,38 +195,44 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 	return l, e
 }
 
-func readExportWithResolver(ctx context.Context, mount string, r *compat.Resolver) (*rekordbox.Library, []readableExport, bool, error) {
+func readExportWithResolver(ctx context.Context, mount string, r *compat.Resolver) (*rekordbox.Library, []readableExport, []unreadableExport, error) {
 	exportReads.Add(1)
 	defer afterExportRead()
 	candidates, e := exportCandidates(r, mount)
 	if e != nil {
-		return nil, nil, false, e
+		return nil, nil, nil, e
 	}
 	if len(candidates) == 0 {
-		return nil, nil, false, errNoLocalExport
+		return nil, nil, nil, errNoLocalExport
 	}
 	var errs []error
 	readable := make([]readableExport, 0, len(candidates))
+	unreadable := make([]unreadableExport, 0, len(candidates))
 	for _, c := range candidates {
 		var l *rekordbox.Library
 		var err error
 		if c.isPDB {
 			l, err = rekordbox.ReadPDB(c.full)
 		} else {
-			l, err = rekordbox.ReadSQLite(ctx, c.full, nil)
+			if st, statErr := os.Stat(c.full + "-wal"); statErr == nil && st.Size() > 0 {
+				err = errors.New("requires checkpointed export; source sidecar -wal is present")
+			} else {
+				l, err = rekordbox.ReadSQLite(ctx, c.full, nil)
+			}
 		}
 		if err == nil {
 			readable = append(readable, readableExport{candidate: c, library: l})
 			continue
 		}
 		if err := ctx.Err(); err != nil {
-			return nil, nil, false, err
+			return nil, nil, unreadable, err
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", c.rel, err))
+		unreadable = append(unreadable, unreadableExport{candidate: c, err: err})
 		log.Printf("rb-bridge: %s unreadable (%v)", c.rel, err)
 	}
 	if len(readable) == 0 {
-		return nil, nil, false, errors.Join(errs...)
+		return nil, nil, unreadable, errors.Join(errs...)
 	}
 	merged := mergeReadableExports(readable)
 	parts := make([]string, 0, len(readable))
@@ -223,7 +240,7 @@ func readExportWithResolver(ctx context.Context, mount string, r *compat.Resolve
 		parts = append(parts, fmt.Sprintf("%s tracks=%d playlists=%d", read.candidate.rel, len(read.library.Tracks), len(read.library.Playlists)))
 	}
 	log.Printf("rb-bridge: libraries read: %s", strings.Join(parts, ", "))
-	return merged, readable, len(readable) < len(candidates), nil
+	return merged, readable, unreadable, nil
 }
 
 func mergeReadableExports(readable []readableExport) *rekordbox.Library {
@@ -246,12 +263,7 @@ func mergeReadableExports(readable []readableExport) *rekordbox.Library {
 				trackIDs[original.ID] = existing
 				continue
 			}
-			id := original.ID
-			if sourceIndex > 0 {
-				id = stableExportID("track", key, usedTrackIDs)
-			} else if usedTrackIDs[id] {
-				id = stableExportID("track", key, usedTrackIDs)
-			}
+			id := stableExportID("track", key, usedTrackIDs)
 			t.ID = id
 			if id != original.ID {
 				t.RecordHash = rekordbox.RecordHash(t)
@@ -267,7 +279,9 @@ func mergeReadableExports(readable []readableExport) *rekordbox.Library {
 			}
 		}
 		for id, value := range read.library.Keys {
-			out.Keys[id] = value
+			if mapped, ok := trackIDs[id]; ok {
+				out.Keys[mapped] = value
+			}
 		}
 		if sourceIndex == 0 {
 			out.Columns = append(out.Columns, read.library.Columns...)
@@ -304,11 +318,11 @@ func mergeReadableExports(readable []readableExport) *rekordbox.Library {
 					p.Name += " (" + sourceLabel + ")"
 					_ = existingIndex
 				}
-				if sourceIndex > 0 {
-					p.ID = stableExportID("playlist", sourceLabel+"\x00"+key, usedPlaylistIDs)
-				} else if usedPlaylistIDs[p.ID] {
-					p.ID = stableExportID("playlist", key, usedPlaylistIDs)
+				identityKey := key
+				if _, conflict := playlistByKey[key]; conflict {
+					identityKey = sourceLabel + "\x00" + key
 				}
+				p.ID = stableExportID("playlist", identityKey, usedPlaylistIDs)
 				usedPlaylistIDs[p.ID] = true
 				playlistIDs[original.ID] = p.ID
 				if _, ok := playlistByKey[key]; !ok {
@@ -1058,6 +1072,17 @@ func importedStamp(dir string) string {
 	}
 	b, _ := os.ReadFile(filepath.Join(dir, stampName))
 	return strings.TrimSpace(string(b))
+}
+
+func stampContainsExport(stamp, rel string) bool {
+	body := strings.TrimPrefix(strings.TrimSpace(stamp), stampVersion+" ")
+	for _, part := range strings.Split(body, " | ") {
+		fields := strings.Fields(part)
+		if len(fields) > 0 && fields[0] == rel {
+			return true
+		}
+	}
+	return false
 }
 
 // hasLibrary reports an m.db with tracks or playlists, whatever wrote it. Stock Engine leaves a

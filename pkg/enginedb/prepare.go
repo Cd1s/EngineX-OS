@@ -292,7 +292,7 @@ func stageOwnedMovesWithPath(ctx context.Context, tx *sql.Tx, prepared []prepare
 		if !matchByPath {
 			pathMatch = nil
 		}
-		if sourceTarget := targets[source]; sourceTarget != nil && "../"+sourceTarget.rel != oldPath {
+		if sourceTarget := targets[source]; sourceTarget != nil {
 			// A source ID with a different target path is an intentional move or
 			// swap. Preserve that identity before considering a path match.
 			pathMatch = nil
