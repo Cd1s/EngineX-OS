@@ -10482,6 +10482,136 @@ assert.equal(previewItem.scPendingSeek, -1);
         res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
 
+    def test_preview_waveform_tap_seek_confined_to_overview_337(self):
+        """#337: tapping track title/artist/metadata must never trigger preview; only overviewItem triggers preview & seek."""
+        for ver, rel in [
+            ("5.3.0", "Skins/Embedded/Views/BrowseView/Components/TrackList.qml"),
+            ("5.0.4", "Skins/EmbeddedCommon/Views/BrowseView/Components/TrackList.qml"),
+        ]:
+            qrc = LAB / ver / "qrc"
+            if not qrc.is_dir():
+                continue
+            with tempfile.TemporaryDirectory(prefix=f"preview-seek-337-{ver}-") as tmp:
+                res = subprocess.run(
+                    ["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(Path(tmp) / "packs")],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(res.returncode, 0, res.stderr)
+                tl = (Path(tmp) / "packs" / "en" / rel).read_text()
+                self.assertIn("inOverview", tl)
+                self.assertIn("typeof overviewItem", tl)
+
+        js = """
+const assert = require('node:assert/strict');
+let positions = [];
+let pressedCount = 0;
+const Planck = {
+    getProperty(path) {
+        assert.equal(path, "/Client/Librarian/Preview/Position");
+        return { translator: { set value(v) { positions.push(v); } } };
+    }
+};
+const mainInfo = { width: 500 };
+const albumArtImageItem = { width: 100 };
+const overviewItem = {
+    x: 100, y: 35, width: 380, height: 25, visible: true
+};
+function mapToItem(target, mouseX, mouseY) {
+    if (target === overviewItem) {
+        return { x: mouseX - target.x, y: mouseY - target.y };
+    }
+    return { x: mouseX, y: mouseY };
+}
+const previewItem = {
+    isListening: false,
+    visible: true,
+    scPendingSeek: -1,
+    pressed() { pressedCount++; },
+    onIsListeningChanged() {
+        if (this.isListening && this.scPendingSeek >= 0) {
+            const pos = this.scPendingSeek;
+            this.scPendingSeek = -1;
+            Planck.getProperty("/Client/Librarian/Preview/Position").translator.value = pos;
+        }
+    },
+    onVisibleChanged() {
+        if (!this.visible) this.scPendingSeek = -1;
+    }
+};
+function handleClick(mouseX, mouseY, inAlbumArt) {
+    const point = { x: mouseX, y: mouseY };
+    if (point && inAlbumArt) {
+        previewItem.scPendingSeek = -1;
+        previewItem.pressed();
+    } else {
+        const ovPoint = typeof overviewItem !== "undefined" && overviewItem ? mapToItem(overviewItem, mouseX, mouseY) : null;
+        const inOverview = !!(ovPoint && overviewItem.visible && overviewItem.width > 0 &&
+            ovPoint.x >= 0 && ovPoint.x <= overviewItem.width &&
+            ovPoint.y >= -10 && ovPoint.y <= overviewItem.height + 10);
+
+        if (inOverview) {
+            const positionToSet = Math.max(0, Math.min(1, ovPoint.x / overviewItem.width));
+            if (!previewItem.isListening) {
+                previewItem.scPendingSeek = positionToSet;
+                previewItem.pressed();
+            } else {
+                previewItem.scPendingSeek = -1;
+                Planck.getProperty("/Client/Librarian/Preview/Position").translator.value = positionToSet;
+            }
+        } else if (previewItem.isListening && (!overviewItem || !overviewItem.visible)) {
+            const barLength = mainInfo.width - albumArtImageItem.width;
+            if (barLength > 0) {
+                const positionToSet = Math.max(0, Math.min(1, (mouseX - albumArtImageItem.width) / barLength));
+                previewItem.scPendingSeek = -1;
+                Planck.getProperty("/Client/Librarian/Preview/Position").translator.value = positionToSet;
+            }
+        }
+    }
+}
+
+// 1. Tapping metadata / song title area (y=15, above waveform) while idle: must NOT start preview or seek
+handleClick(250, 15, false);
+assert.equal(pressedCount, 0, "tapping title must not trigger preview");
+assert.equal(previewItem.scPendingSeek, -1, "tapping title must not set pending seek");
+assert.deepEqual(positions, [], "no position set");
+
+// 2. Tapping artist area / rating area (x=50, not albumArt) while idle: must NOT start preview
+handleClick(50, 15, false);
+assert.equal(pressedCount, 0);
+assert.equal(previewItem.scPendingSeek, -1);
+
+// 3. Tapping directly on overview waveform at 50% (x=290, y=40, width=380, x offset=100 -> relX=190 -> 0.5):
+// Starts preview and queues pending seek
+handleClick(290, 40, false);
+assert.equal(pressedCount, 1, "overview tap starts preview");
+assert.equal(previewItem.scPendingSeek, 0.5, "pending seek queued at 50%");
+assert.deepEqual(positions, []);
+
+// Engine acknowledges listening
+previewItem.isListening = true;
+previewItem.onIsListeningChanged();
+assert.equal(previewItem.scPendingSeek, -1);
+assert.deepEqual(positions, [0.5]);
+
+// 4. Second tap on overview waveform at 75% while playing: seeks directly without toggling preview
+handleClick(385, 40, false);
+assert.equal(pressedCount, 1, "second tap does not toggle preview");
+assert.deepEqual(positions, [0.5, 0.75]);
+
+// 5. Tapping metadata area while playing: does NOT seek or toggle
+handleClick(250, 15, false);
+assert.equal(pressedCount, 1);
+assert.deepEqual(positions, [0.5, 0.75], "tapping title while playing must not seek");
+
+// 6. Tapping album art toggles preview off
+handleClick(50, 20, true);
+assert.equal(pressedCount, 2, "album art toggles preview");
+previewItem.isListening = false;
+"""
+        res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
 
 class StreamingStemsProgressTest(unittest.TestCase):
     """Left deck, 2026-11-16: Stems tapped on a streamed row, and nothing on
