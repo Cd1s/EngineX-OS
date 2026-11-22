@@ -318,7 +318,9 @@ func mergeLoop(row, base, now []byte) []byte {
 
 // WriteFastBase notes in stage, beside its snapshot, the fastBase of every track of l that the
 // snapshot's state has as a fast row of l's record: the publish needs it for the DJ's edits made
-// on such a row after the snapshot (carryFastEdits). A stage without a state has none.
+// on such a row after the snapshot (carryFastEdits). It is the state's own entry for the row
+// (BridgeFastBase) where it has one, else what the fast import computes from l. A stage without a
+// state has none.
 func WriteFastBase(ctx context.Context, stage string, l *rekordbox.Library) error {
 	path := filepath.Join(stage, FastBaseFile)
 	tmp := path + ".tmp"
@@ -331,7 +333,7 @@ func WriteFastBase(ctx context.Context, stage string, l *rekordbox.Library) erro
 	if _, e := os.Stat(state); errors.Is(e, os.ErrNotExist) {
 		return nil
 	}
-	fast, e := fastRows(ctx, state)
+	fast, stored, e := fastRows(ctx, state)
 	if e != nil || len(fast) == 0 {
 		return e
 	}
@@ -367,8 +369,12 @@ func WriteFastBase(ctx context.Context, stage string, l *rekordbox.Library) erro
 		if len(ids) == 0 {
 			continue
 		}
-		b := fastBaseOf(t)
+		computed := fastBaseOf(t)
 		for _, id := range ids {
+			b := computed
+			if s, ok := stored[id]; ok && s.record == recordCheck(fp) {
+				b = s.fastBase
+			}
 			if _, e = insert.ExecContext(ctx, id, recordCheck(fp), b.rating, b.cues, b.loops, b.active); e != nil {
 				return e
 			}
@@ -395,28 +401,57 @@ func recordCheck(fingerprint string) int64 {
 	return int64(big.Uint64(h[:]))
 }
 
-// fastRows are the track ids of the fast rows of the state database at path, by fingerprint.
-func fastRows(ctx context.Context, path string) (map[string][]int64, error) {
+// storedBase is a BridgeFastBase entry: the base and the check of the fingerprint it is for.
+type storedBase struct {
+	fastBase
+	record int64
+}
+
+// fastRows are the track ids of the fast rows of the state database at path, by fingerprint, and
+// the state's BridgeFastBase entries for them (none in a state of an earlier build).
+func fastRows(ctx context.Context, path string) (map[string][]int64, map[int64]storedBase, error) {
 	db, e := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}).String())
 	if e != nil {
-		return nil, e
+		return nil, nil, e
 	}
 	defer db.Close()
 	rows, e := db.QueryContext(ctx, `SELECT trackId,fingerprint FROM BridgeState WHERE fingerprint LIKE 'fast:%'`)
 	if e != nil {
-		return nil, e
+		return nil, nil, e
 	}
-	defer rows.Close()
 	out := map[string][]int64{}
 	for rows.Next() {
 		var id int64
 		var fp string
 		if e = rows.Scan(&id, &fp); e != nil {
-			return nil, e
+			rows.Close()
+			return nil, nil, e
 		}
 		out[fp] = append(out[fp], id)
 	}
-	return out, rows.Err()
+	rows.Close()
+	if e = rows.Err(); e != nil || len(out) == 0 {
+		return out, nil, e
+	}
+	stored := map[int64]storedBase{}
+	var n int
+	if e = db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='BridgeFastBase'`).Scan(&n); e != nil || n == 0 {
+		return out, stored, e
+	}
+	rows, e = db.QueryContext(ctx, `SELECT f.trackId,f.record,f.rating,f.quickCues,f.loops,f.active FROM BridgeFastBase f JOIN BridgeState s ON s.trackId=f.trackId WHERE s.fingerprint LIKE 'fast:%'`)
+	if e != nil {
+		return nil, nil, e
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var b storedBase
+		if e = rows.Scan(&id, &b.record, &b.rating, &b.cues, &b.loops, &b.active); e != nil {
+			return nil, nil, e
+		}
+		stored[id] = b
+	}
+	return out, stored, rows.Err()
 }
 
 func syncPath(p string) error {
@@ -517,24 +552,58 @@ func carryFastEdits(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// fastRow is what the deck did on a row a fast import left, and the Track values it keeps.
+// fastRow is what the deck did on a row a fast import left, and the Track values it keeps. base is
+// what the imports left in the row, when it is known.
 type fastRow struct {
 	m         fastMerge
 	rating    sql.NullInt64
 	bpm, bpmA any
+	base      fastBase
+	known     bool
 }
 
-// fastRowEdits is mergeFast for track id's row, which a fast import left for export record t
-// (same) or for an earlier export of the track, at its first full import. A row a full import has
-// written (BridgeWritten or BridgeAnalysis: one a fast fingerprint only sends to be read again) is
-// importKeeps' to judge, not this.
+// fastBaseSchema keeps, for each row an import leaves fast, what that import left in it (fastBase),
+// with a check of the fingerprint it left: the row's import in full needs it to tell what the deck
+// changed, also after the stick was re-exported while the row was fast and that record is gone
+// (#328 review R2). An entry whose check is not the row's fingerprint is not the row's.
+const fastBaseSchema = `CREATE TABLE IF NOT EXISTS bridge.BridgeFastBase(trackId INTEGER PRIMARY KEY, record INTEGER NOT NULL, rating INTEGER NOT NULL, quickCues BLOB, loops BLOB, active INTEGER NOT NULL)`
+
+// noteFastBase records b as what the import left in track id's row, which it leaves with fingerprint.
+func noteFastBase(ctx context.Context, q *stmtCache, id int64, fingerprint string, b fastBase) error {
+	_, e := q.ExecContext(ctx, `INSERT OR REPLACE INTO BridgeFastBase(trackId,record,rating,quickCues,loops,active) VALUES(?,?,?,?,?,?)`,
+		id, recordCheck(fingerprint), b.rating, b.cues, b.loops, b.active)
+	return e
+}
+
+// storedFastBase is what noteFastBase recorded for track id's row with fingerprint.
+func storedFastBase(ctx context.Context, q *stmtCache, id int64, fingerprint string) (fastBase, bool, error) {
+	var b fastBase
+	var record int64
+	e := q.QueryRowContext(ctx, `SELECT record,rating,quickCues,loops,active FROM BridgeFastBase WHERE trackId=?`, id).Scan(&record, &b.rating, &b.cues, &b.loops, &b.active)
+	if errors.Is(e, sql.ErrNoRows) {
+		return fastBase{}, false, nil
+	}
+	if e != nil || record != recordCheck(fingerprint) {
+		return fastBase{}, false, e
+	}
+	return b, true, nil
+}
+
+// fastRowEdits is mergeFast for track id's row, which a fast import left with fingerprint previous,
+// for export record t or for an earlier export of the track (re-exported while the row was fast).
+// A row a full import has written (BridgeWritten or BridgeAnalysis: one a fast fingerprint only
+// sends to be read again) is importKeeps' to judge, not this.
 //
-// A row left for an earlier export (the stick re-exported while the row was fast) cannot be
-// judged: what that import wrote is not known (#328 review R1). Nothing the deck can change is
-// overwritten then: its rating, and in a row Engine loaded its grid with the Track's BPM, its cues
-// and loops; one log line names the track. A row Engine never loaded has nothing of the deck's
-// but its rating.
-func fastRowEdits(ctx context.Context, q *stmtCache, id int64, t rekordbox.Track, perf Performance, same bool) (fastRow, error) {
+// What the imports left in the row is the base: BridgeFastBase's entry for previous, or for a row
+// of t that an earlier build left fast without one, what its fast import computed from t. Each
+// field the deck did not change takes t's (perf's); each one it changed stays (#328 review R2,
+// the maintainer's rule).
+//
+// With no base (a row an earlier build left for an earlier export, or its entry lost) nothing the
+// deck can change is overwritten: its rating, and in a row Engine loaded its grid with the Track's
+// BPM, its cues and loops; one log line names the track (#328 review R1). A row Engine never
+// loaded has nothing of the deck's but its rating.
+func fastRowEdits(ctx context.Context, q *stmtCache, id int64, previous string, t rekordbox.Track, perf Performance) (fastRow, error) {
 	var r fastRow
 	var row deckRow
 	var imported bool
@@ -548,8 +617,15 @@ func fastRowEdits(ctx context.Context, q *stmtCache, id int64, t rekordbox.Track
 		}
 		return fastRow{}, e
 	}
-	if r.rating = row.rating; same {
-		r.m = mergeFast(row, fastBaseOf(t), perf)
+	r.rating = row.rating
+	if r.base, r.known, e = storedFastBase(ctx, q, id, previous); e != nil {
+		return fastRow{}, e
+	}
+	if !r.known && previous == "fast:"+t.RecordHash {
+		r.base, r.known = fastBaseOf(t), true
+	}
+	if r.known {
+		r.m = mergeFast(row, r.base, perf)
 		return r, nil
 	}
 	r.m.rating = row.rating.Valid

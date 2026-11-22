@@ -26,19 +26,32 @@ import (
 )
 
 const (
-	kindName       = "KIND"        // "update" in the stage of an update
+	kindName       = "KIND"        // "update" in the stage of an update, fastUpdateKind once it holds a copy of fast rows
 	baseCountsName = "BASE.counts" // enginedb.BaseCounts of the snapshot, as JSON
 	baseTimesName  = "BASE.times"  // enginedb.BaseTimes of the snapshot, as JSON
 	resumeName     = "RESUME"      // the stamp, once a pass of the update was committed
 )
 
-func isUpdateStage(stage string) bool { return readMark(stage, kindName) == "update" }
+// fastUpdateKind marks the stage of an update whose copy of the library has fast rows (#328
+// review R2). 5.3.0.5-r1 neither reads the note of what the fast import left in them
+// (enginedb.FastBaseFile) nor keeps the DJ's edits on them when it publishes (its carryLiveEdits
+// leaves fast rows out), so it must neither go on with such a stage nor publish it. It knows the
+// stage of an update only as "update"; a stage of another kind it drops at its mount, and it then
+// starts its own update from the live library, whose copy this build in turn never publishes
+// (fastBaseMissing).
+const fastUpdateKind = "update+fast"
+
+func isUpdateStage(stage string) bool {
+	k := readMark(stage, kindName)
+	return k == "update" || k == fastUpdateKind
+}
 
 // fastBaseMissing reports a snapshot without the note of what the fast import left in the
 // library's fast rows (enginedb.FastBaseFile) while the library has fast rows: a stage of #253's
 // or 5.3.0.5-r1's build, or one whose note was lost. Neither published nor continued, it starts
 // again from a new snapshot: the DJ's edits made on those rows after it could not be told from
-// Engine's, and the publish would put rekordbox's rows over them (#328 review R1).
+// Engine's, and the publish would put rekordbox's rows over them (#328 review R1); the passes of
+// such a build put rekordbox's rows over those made before it (review R2).
 func fastBaseMissing(dir, stage string) bool {
 	if _, err := os.Stat(filepath.Join(stage, baseCountsName)); err != nil {
 		return false
@@ -302,6 +315,16 @@ var (
 // update imports, r the volume's resolver.
 func snapshotLive(ctx context.Context, dir, stage string, r *compat.Resolver, l *rekordbox.Library) error {
 	live := filepath.Join(dir, "m.db")
+	if hasFastTracks(dir) && readMark(stage, kindName) != fastUpdateKind {
+		// Before anything of the copy is in the stage: no earlier build goes on with it.
+		if err := writeMark(stage, kindName, fastUpdateKind); err != nil {
+			return err
+		}
+		if err := syncFile(stage); err != nil {
+			return err
+		}
+		cut("update stage kept from earlier builds")
+	}
 	checked := map[string]bool{} // the files confirmedRefs looked at, across retries
 	for try := 0; try < snapshotRetries; try++ {
 		if try > 0 {
@@ -758,11 +781,14 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 		return enginedb.Result{}, enginedb.ErrLibraryInUse
 	}
 	stage := filepath.Join(dir, importStageName)
+	if fastBaseMissing(dir, stage) {
+		// Also when Engine wrote nothing since the snapshot: the passes of an earlier build
+		// (5.3.0.5-r1's update, started at its mount after it dropped this build's stage) put
+		// rekordbox's rows over the DJ's edits the copy has of fast rows (#328 review R2).
+		log.Printf("rb-bridge: update not published: its copy of the library has no note of its fast tracks; it starts again from a new copy")
+		return enginedb.Result{Background: true}, startUpdate(stage, readMark(stage, stampName))
+	}
 	if liveIdentity(filepath.Join(dir, "m.db")) != readMark(stage, baseName) {
-		if fastBaseMissing(dir, stage) {
-			log.Printf("rb-bridge: update not published: its copy of the library has no note of its fast tracks; it starts again from a new copy")
-			return enginedb.Result{Background: true}, startUpdate(stage, readMark(stage, stampName))
-		}
 		var base enginedb.BaseCounts
 		if err := json.Unmarshal([]byte(readMark(stage, baseCountsName)), &base); err != nil {
 			return enginedb.Result{}, fmt.Errorf("update stage without its snapshot counts: %w", err)
