@@ -204,3 +204,41 @@ func TestIssue327JournalSidecarUsesTypedFreezePath(t *testing.T) {
 		t.Fatalf("journal sidecar did not use typed freeze path: %+v %v logs=%q", res, err, logs.String())
 	}
 }
+
+func TestIssue327DuplicateSharedSourceChoosesFreeFoldedCandidate(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb", testfixture.PDBNamed([5]string{testfixture.UnicodeName, "two.flac", "three.wav", "THREE.wav", "five.wav"}, "r5"))
+	testfixture.Write(t, root, "MUSIC/THREE.wav", testfixture.WAV(false))
+	ctx := context.Background()
+	library, err := bridge.ReadLibrary(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enginedb.Sync(ctx, root, library, enginedb.Options{MatchByPath: true}); err != nil {
+		t.Fatal(err)
+	}
+	db := dbOpen(t, root)
+	var sourceJSON []byte
+	if err := db.QueryRow(`SELECT sourceJSON FROM bridge.BridgeAnalysis ba JOIN Track t ON t.id=ba.trackId WHERE t.path='../MUSIC/three.wav'`).Scan(&sourceJSON); err != nil {
+		t.Fatal(err)
+	}
+	var secondID int64
+	if err := db.QueryRow(`SELECT t.id FROM Track t WHERE t.path='../MUSIC/THREE.wav'`).Scan(&secondID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE BridgeAnalysis SET sourceJSON=? WHERE trackId=?`, sourceJSON, secondID); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	library, err = bridge.ReadLibrary(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range library.Tracks {
+		library.Tracks[i].ID += 100
+	}
+	if _, err := enginedb.Sync(ctx, root, library, enginedb.Options{}); err != nil {
+		t.Fatalf("shared-source duplicate import: %v", err)
+	}
+}
