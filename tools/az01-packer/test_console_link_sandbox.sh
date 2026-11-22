@@ -125,9 +125,9 @@ else
         mount -t tmpfs tmpfs "$R/data"; mount -t tmpfs tmpfs "$R/run"
         mount --bind "$O/p-code" "$R/sys/firmware/devicetree/base/inmusic,product-code"
         mount --bind "$O/p-compat" "$R/sys/firmware/devicetree/base/compatible"
-        mkdir -p "$R$DATADIR/ui" "$R$DATADIR/Stream" "$R/run/enginex-assignments" "$R/run/sc5000-assignments" "$R/run/enginex"
+        mkdir -p "$R$DATADIR/ui" "$R$DATADIR/Stream" "$R/run/enginex-assignments" "$R/run/enginex"
         head -c 4096 /dev/zero > "$R$DATADIR/Stream/a.mp3" # a file for the decks to name: a deck without one has no Key and no lane
-        echo 34 > "$R/run/enginex-assignments/role"; echo 34 > "$R/run/sc5000-assignments/role"
+        echo 34 > "$R/run/enginex-assignments/role"
         printf "lang=en\nfour_deck_waveform=1\nfour_deck_role=34\nshadow_mode=engine\n" > "$R$DATADIR/ui/settings.conf"
         exec chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home /tmp/stream-sync --deemixd= --disable-guard --listen :8080
     ' _ "$R" "$O" "$DATADIR" > "$O/player-sync.log" 2>&1 &
