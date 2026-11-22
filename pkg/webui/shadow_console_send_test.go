@@ -217,7 +217,9 @@ func TestConsoleAskDatagramWakesTheConsoleAndItAnswersWithABeacon(t *testing.T) 
 	shadowAskPort, shadowBeaconOn = askPort, true
 	defer func() { shadowAskPort, shadowBeaconOn = oldPort, oldBeacon }()
 	c, _ := csConsole(t, true) // its listener is up: Line In is on
+	c.shadow.mu.Lock()         // the listener reads it
 	c.shadow.pushPort = bc.LocalAddr().(*net.UDPAddr).Port
+	c.shadow.mu.Unlock()
 	if c.shadow.askConn == nil {
 		t.Skip("no listener on this host")
 	}
@@ -570,5 +572,26 @@ func TestShowConsoleSettingIsPlayerOnlyNeedsTheLayoutAndDefaultsOff(t *testing.T
 	// And the console's own Line In key is as it was.
 	if copyUIAllowed("consoleLineView") || !copyUIAllowed("fourDeckWaveform") {
 		t.Fatal("the rest of the settings copy was changed")
+	}
+}
+
+// Switching the row off takes the console's lanes away at once, not when the last picture goes stale; switching it on
+// again brings them back at the next pull.
+func TestConsoleLanesGoTheMomentTheRowIsSwitchedOff(t *testing.T) {
+	c, srv := csConsole(t, true)
+	a := csPlayer(t, true, srv)
+	csPost(t, c, 1, 2)
+	a.shadowPollPeers()
+	if got := csLanes(t, a, "34"); got != "1=C1 2=C2 3=own 4=own" {
+		t.Fatalf("row on: %s", got)
+	}
+	a.applyShadowFlags(uiSettings{FourDeckWaveform: true}) // what a save with the row off does
+	if got := csLanes(t, a, "34"); got != "1=- 2=- 3=own 4=own" {
+		t.Fatalf("row switched off, the pictures are still fresh: %s", got)
+	}
+	a.applyShadowFlags(uiSettings{FourDeckWaveform: true, ConsoleDecks: true})
+	a.shadowPollPeers()
+	if got := csLanes(t, a, "34"); got != "1=C1 2=C2 3=own 4=own" {
+		t.Fatalf("row on again: %s", got)
 	}
 }

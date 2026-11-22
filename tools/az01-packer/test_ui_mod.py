@@ -614,7 +614,7 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
             "scCueCountdown": "cueCountdown", "scRemoteLoad": "remoteLoad",
             "scSdHighSpeed": "sdHighSpeed", "scRemoteAccess": "remoteAccess",
             "scRestoreBpmOnUnsync": "restoreBpmOnUnsync",
-            "scHifiOutput": "hifiOutput",
+            "scHifiOutput": "hifiOutput", "scShowConsole": "consoleDecks",
         }
         for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
             qrc = LAB / version / "qrc"
