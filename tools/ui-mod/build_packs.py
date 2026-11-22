@@ -1238,6 +1238,30 @@ SERVICES_MAIN = """
 		prop: root.scViewCycleProperty || null
 		onChanged: root.scViewSelect(root.scViewActive % 5 + 1)
 	}
+	// Button mapping (pkg/mapping): the DJ's mappings.json can put an EngineX action on a control. The on-disk
+	// assignment file sets one of these Action properties from the controller's engine, exactly as the View
+	// button sets EngineXCycleView above; the notifier counts the press and resets the state, and this engine
+	// calls the same local settings API, and scSetWave, as the Settings page does. Nothing polls.
+	readonly property var scMapActionRefs: [
+		Planck.createProperty("EngineXMapWaveform", false, 3),
+		Planck.createProperty("EngineXMapCueCountdown", false, 3)]
+	readonly property var scMapWaveformProperty: scMapActionRefs && Planck.getProperty("/GUI/Scripted/EngineXMapWaveform")
+	readonly property var scMapCueCountdownProperty: scMapActionRefs && Planck.getProperty("/GUI/Scripted/EngineXMapCueCountdown")
+	readonly property var scMapWaveforms: ["denon", "rgb", "3band"]
+	function scMapWaveformNext() {
+		scSetWave(scMapWaveforms[(scMapWaveforms.indexOf(scWave) + 1) % scMapWaveforms.length])
+	}
+	function scMapCueCountdownToggle() {
+		scCall("cueCountdown=" + (scCueCountdown ? 0 : 1))
+	}
+	ActionTranslatorStateChangeNotifier {
+		prop: root.scMapWaveformProperty || null
+		onChanged: root.scMapWaveformNext()
+	}
+	ActionTranslatorStateChangeNotifier {
+		prop: root.scMapCueCountdownProperty || null
+		onChanged: root.scMapCueCountdownToggle()
+	}
 	function scViewControls() {
 		const c = PlanckGUI.views.performanceViewController
 		if (!c || !c.deckController || !c.waveformController) return null
