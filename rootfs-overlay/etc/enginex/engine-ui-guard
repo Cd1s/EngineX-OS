@@ -38,7 +38,7 @@ record() {
     case $1 in boot-failures|boot-window|safe-mode) ;; *) return 1 ;; esac
     mkdir -p "$run_ui" && (umask 077; printf '%s\n' "$2" > "$run_ui/$1")
 }
-state() { cat "$run_ui/$1" 2>/dev/null || cat "$UI/$1" 2>/dev/null; }
+state() { if [ -e "$run_ui/$1" ]; then cat "$run_ui/$1" 2>/dev/null; else cat "$UI/$1" 2>/dev/null; fi; }   # a builtin test, no extra fork
 safe_mode() { [ -e "$UI/safe-mode" ] || [ -e "$run_ui/safe-mode" ]; }
 uptime_seconds() { cut -d. -f1 "${ENGINEX_BOOT_UPTIME:-/proc/uptime}"; }
 # feature_off NAME: the console switched NAME off in hook-disable.conf.
