@@ -227,6 +227,15 @@ func TestSQLCipher4TamperAndBounds(t *testing.T) {
 	if _, err := ReadSQLite(context.Background(), p, nil); err == nil || !errors.Is(err, ErrNotCheckpointed) || !strings.Contains(err.Error(), "sidecar") {
 		t.Fatalf("expected sidecar rejection, got %v", err)
 	}
+	if err := os.Remove(p + "-wal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p+"-journal", []byte("uncheckpointed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadSQLite(context.Background(), p, nil); err == nil || !errors.Is(err, ErrNotCheckpointed) || !strings.Contains(err.Error(), "journal") {
+		t.Fatalf("expected journal rejection, got %v", err)
+	}
 }
 
 func TestOneLibraryFullSchemaCuesAndRecordHash(t *testing.T) {

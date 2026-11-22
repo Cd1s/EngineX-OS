@@ -82,10 +82,12 @@ func TestIssue327StagedLibrariesRetained(t *testing.T) {
 		t.Fatalf("union with staged export: %+v %v", r, err)
 	}
 	db := dbOpen(t, root)
-	if n := scalar[int](t, db, `SELECT count(*) FROM Track WHERE path LIKE '%.prolink-cache/CDJ-3000/%'`); n == 0 {
+	stagedTracks := scalar[int](t, db, `SELECT count(*) FROM Track WHERE path LIKE '%.prolink-cache/CDJ-3000/%'`)
+	stagedPlaylists := scalar[int](t, db, `SELECT count(*) FROM Playlist WHERE title LIKE '[Pro DJ Link: CDJ-3000]%'`)
+	if stagedTracks == 0 {
 		t.Fatal("staged tracks disappeared from union")
 	}
-	if n := scalar[int](t, db, `SELECT count(*) FROM Playlist WHERE title LIKE '[Pro DJ Link: CDJ-3000]%'`); n == 0 {
+	if stagedPlaylists == 0 {
 		t.Fatal("staged playlists disappeared from union")
 	}
 	db.Close()
@@ -96,6 +98,12 @@ func TestIssue327StagedLibrariesRetained(t *testing.T) {
 		t.Fatal(err)
 	}
 	db = dbOpen(t, root)
+	if n := scalar[int](t, db, `SELECT count(*) FROM Track WHERE path LIKE '%.prolink-cache/CDJ-3000/%'`); n != stagedTracks {
+		t.Fatalf("staged-only pass changed staged track set: %d -> %d", stagedTracks, n)
+	}
+	if n := scalar[int](t, db, `SELECT count(*) FROM Playlist WHERE title LIKE '[Pro DJ Link: CDJ-3000]%'`); n != stagedPlaylists {
+		t.Fatalf("staged-only pass changed staged playlist set: %d -> %d", stagedPlaylists, n)
+	}
 	if n := scalar[int](t, db, `SELECT count(*) FROM Track`); n == 0 {
 		t.Fatal("staged-only pass removed all local union rows")
 	}

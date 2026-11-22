@@ -62,3 +62,46 @@ func TestQuickUpdateFoldsSecondaryCaseSpelling(t *testing.T) {
 		t.Fatalf("quick update added %d rows for a secondary case spelling", res.Added)
 	}
 }
+
+func TestQuickStageFoldsSecondaryCaseSpelling(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb", testfixture.LargePDB(4))
+	for i := 1; i <= 4; i++ {
+		testfixture.Write(t, root, testfixture.LargeTrackPath(i), testfixture.MP3WithLAMETag())
+	}
+	pdb := filepath.Join(root, "PIONEER/rekordbox/export.pdb")
+	when := time.Unix(1_730_000_000, 0)
+	if err := os.Chtimes(pdb, when, when); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, true); err != nil || res.Added != 4 {
+		t.Fatalf("initial import: %+v %v", res, err)
+	}
+	data := testfixture.LargePDB(5)
+	testfixture.Write(t, root, testfixture.LargeTrackPath(5), testfixture.MP3WithLAMETag())
+	testfixture.Write(t, root, strings.Replace(testfixture.LargeTrackPath(5), "/Album", "/album", 1), testfixture.MP3WithLAMETag())
+	oldPath := "/" + testfixture.LargeTrackPath(5)
+	newPath := strings.Replace(oldPath, "/Album", "/album", 1)
+	data = bytes.Replace(data, qfU16(oldPath), qfU16(newPath), 1)
+	if err := os.WriteFile(pdb, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(pdb, when.Add(time.Minute), when.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	defer bridge.SetLargeExportForTest()()
+	res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
+	if err != nil || !res.Background {
+		t.Fatalf("staged quick update did not start: %+v %v", res, err)
+	}
+	if _, err := bridge.ImportInBackground(ctx, root, nil); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil {
+		t.Fatalf("staged quick update publish: %+v %v", res, err)
+	}
+	if got := scalar[int](t, dbOpen(t, root), `SELECT count(*) FROM Track`); got != 5 {
+		t.Fatalf("staged quick update rows=%d, want 5", got)
+	}
+}
