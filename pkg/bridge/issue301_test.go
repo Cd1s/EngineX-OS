@@ -208,13 +208,16 @@ func TestIssue301EjectOrKillKeepsTheFinishedPasses(t *testing.T) {
 	before := fileSum(t, live)
 	defer bridge.SetImportWindowForTest(100 * time.Millisecond)()
 
-	// Eject: the job's context ends after some passes.
+	// Eject: the job's context ends after some passes. After a pass has committed past 100
+	// tracks: the job's count also moves within a pass (#328), which the eject rolls back.
 	ejected, eject := context.WithCancel(ctx)
-	_, err = bridge.ImportInBackground(ejected, root, func(d, total int) {
-		if d > 100 { // the track the deck loaded stays Engine's: it counts as done, not as finished
+	restoreCut := bridge.SetCutForTest(func(name string) {
+		if name == "stage pass committed" && finished(t, root) > 100 {
 			eject()
 		}
 	})
+	_, err = bridge.ImportInBackground(ejected, root, nil)
+	restoreCut()
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("ejected job: %v", err)
 	}

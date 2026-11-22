@@ -66,7 +66,7 @@ func fastBaseOf(t rekordbox.Track) fastBase {
 // deckRow is a fast row as the deck left it.
 type deckRow struct {
 	beats, cues, loops []byte
-	active             sql.NullInt64
+	active, mark       sql.NullInt64
 	locked             bool
 	rating             sql.NullInt64
 }
@@ -87,6 +87,11 @@ func (m fastMerge) deck() bool {
 func mergeFast(row deckRow, base fastBase, perf Performance) fastMerge {
 	var m fastMerge
 	m.rating = row.rating.Valid && row.rating.Int64 != base.rating
+	if row.mark.Valid && row.mark.Int64 != 0 {
+		// Engine clears its import mark when it loads the row: never loaded, so nothing of the
+		// deck's in it (a rating can be set in the browser, without a load).
+		return m
+	}
 	if row.beats != nil && (row.locked || !engineOwnGrid(row.beats)) {
 		m.beats, m.grid = row.beats, true
 	}
@@ -415,7 +420,7 @@ func syncPath(p string) error {
 // did on it. The build's row (rekordbox's, with what the DJ had done before the snapshot) stands
 // for perf; the stage's FastBaseFile for what the fast import left.
 func carryFastEdits(ctx context.Context, tx *sql.Tx) error {
-	rows, e := tx.QueryContext(ctx, `SELECT m.trackId,l.beatData,l.quickCues,l.loops,l.activeOnLoadLoops,COALESCE(lt.isBeatGridLocked,0),lt.rating,lt.bpm,lt.bpmAnalyzed,
+	rows, e := tx.QueryContext(ctx, `SELECT m.trackId,l.beatData,l.quickCues,l.loops,l.activeOnLoadLoops,l.thirdPartySourceId,COALESCE(lt.isBeatGridLocked,0),lt.rating,lt.bpm,lt.bpmAnalyzed,
 		f.rating,f.quickCues,f.loops,f.active,m.beatData,m.quickCues,m.loops,m.activeOnLoadLoops
 		FROM main.PerformanceData m JOIN live.PerformanceData l ON l.trackId=m.trackId JOIN live.Track lt ON lt.id=m.trackId
 		JOIN livebridge.BridgeState s ON s.trackId=m.trackId JOIN fastbase.FastBase f ON f.fingerprint=s.fingerprint
@@ -440,7 +445,7 @@ func carryFastEdits(ctx context.Context, tx *sql.Tx) error {
 		var mb, mc, ml []byte
 		var ma sql.NullInt64
 		var bpm, bpmA any
-		if e = rows.Scan(&id, &row.beats, &row.cues, &row.loops, &row.active, &row.locked, &row.rating, &bpm, &bpmA,
+		if e = rows.Scan(&id, &row.beats, &row.cues, &row.loops, &row.active, &row.mark, &row.locked, &row.rating, &bpm, &bpmA,
 			&base.rating, &base.cues, &base.loops, &base.active, &mb, &mc, &ml, &ma); e != nil {
 			rows.Close()
 			return e
@@ -508,10 +513,10 @@ func fastRowEdits(ctx context.Context, q *stmtCache, id int64, t rekordbox.Track
 	var r fastRow
 	var row deckRow
 	var imported bool
-	e := q.QueryRowContext(ctx, `SELECT p.beatData,p.quickCues,p.loops,p.activeOnLoadLoops,COALESCE(t.isBeatGridLocked,0),t.rating,t.bpm,t.bpmAnalyzed,
+	e := q.QueryRowContext(ctx, `SELECT p.beatData,p.quickCues,p.loops,p.activeOnLoadLoops,p.thirdPartySourceId,COALESCE(t.isBeatGridLocked,0),t.rating,t.bpm,t.bpmAnalyzed,
 		EXISTS(SELECT 1 FROM BridgeWritten WHERE trackId=p.trackId) OR EXISTS(SELECT 1 FROM BridgeAnalysis WHERE trackId=p.trackId)
 		FROM PerformanceData p JOIN Track t ON t.id=p.trackId WHERE p.trackId=?`, id).Scan(
-		&row.beats, &row.cues, &row.loops, &row.active, &row.locked, &row.rating, &r.bpm, &r.bpmA, &imported)
+		&row.beats, &row.cues, &row.loops, &row.active, &row.mark, &row.locked, &row.rating, &r.bpm, &r.bpmA, &imported)
 	if e != nil || imported {
 		if errors.Is(e, sql.ErrNoRows) {
 			e = nil
