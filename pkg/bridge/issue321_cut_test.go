@@ -386,9 +386,9 @@ func issue321MissingTarget(t *testing.T, oneLib bool) {
 					}
 					want = old[st.dst]
 				case "whole, beside an earlier cut's copy":
-					// Left by an earlier cut pass (exFAT keeps them, #321 review R4): of the same kind,
-					// named to sort first, newer, and holding the original. The mark names this pass's
-					// copy, and only that one is put back.
+					// Left by an earlier cut pass (one removeFile would not free, or a pass whose
+					// put-back failed): of the same kind, named to sort first, newer, and holding the
+					// original. The mark names this pass's copy, and only that one is put back.
 					earlier := tmp[:strings.LastIndex(tmp, "-")] + "-0.tmp"
 					if err := os.WriteFile(earlier, old[st.dst], 0o644); err != nil {
 						t.Fatal(err)

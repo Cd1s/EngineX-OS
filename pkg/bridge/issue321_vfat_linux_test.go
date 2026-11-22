@@ -682,13 +682,14 @@ func issue321FirstPassRefused(t *testing.T, layout string) {
 	}
 }
 
-// #321 review R4 (N-2): on exFAT a temporary file a pull cut while it was written can name clusters
-// its allocation never got, and removing it at the next insert turned exFAT read-only (the replay:
-// 1 + 32 and 1 + 80 states of a second pass). There the next insert leaves staged copies where they
-// are; on FAT32 it removes them as before. A pass is caught with its staged copy (the one its mark
-// names) and its mark on the stick (both are put back after it ends, as a pull at that step leaves
-// them), then the next insert.
-func TestIssue321TheNextInsertLeavesStagedCopiesOnExFAT(t *testing.T) {
+// #321 review R4b (c′): the next insert removes the staged copies a cut pass left, on exFAT as on
+// FAT32. R4 kept them on exFAT, because removing one whose allocation had not reached the stick
+// turned exFAT read-only; but the next pass was then given the clusters such a copy names, and a
+// disk check cut live files (the replay: 9 + 2 and 1 + 2 states). Each staged file's directory is
+// now synced before the file, so its entry never names clusters the volume does not give it. A
+// pass is caught with its staged copy (the one its mark names) and its mark on the stick (both are
+// put back after it ends, as a pull at that step leaves them), then the next insert.
+func TestIssue321TheNextInsertRemovesStagedCopies(t *testing.T) {
 	for _, fsType := range []string{"exfat", "vfat"} {
 		t.Run(fsType, func(t *testing.T) {
 			ctx := context.Background()
@@ -743,9 +744,8 @@ func TestIssue321TheNextInsertLeavesStagedCopiesOnExFAT(t *testing.T) {
 			}
 			syscall.Sync()
 			bridge.CleanWriteBackLeftovers(mnt) // the next insert
-			_, statErr := os.Stat(copyName)
-			if kept := statErr == nil; kept != (fsType == "exfat") {
-				t.Errorf("on %s the next insert kept the staged copy: %v, want %v", fsType, kept, fsType == "exfat")
+			if _, err = os.Stat(copyName); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("on %s the next insert left the staged copy: %v", fsType, err)
 			}
 			if _, err = os.Stat(mark); !errors.Is(err, os.ErrNotExist) {
 				t.Errorf("the mark is still there: %v", err)

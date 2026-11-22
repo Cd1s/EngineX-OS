@@ -868,19 +868,15 @@ func markPath(mount, line string, missing bool) (string, bool) {
 // CleanWriteBackLeftovers removes what a write-back cut by a pull left on the stick at mount:
 // a temporary file of its mark, the temporary files in the directories the mark lists, then the
 // mark. Without a mark: one look at Engine's library directory. A file whose clusters the FAT
-// does not give it stays (removeFile); so does a mark that cannot be read, and on exFAT every
-// temporary file (#321 review R4). First every file the mark lists is put back if it is missing
-// (putBack); if one cannot be, nothing more is removed. It returns the files removed.
+// does not give it stays (removeFile); so does a mark that cannot be read. First every file the
+// mark lists is put back if it is missing (putBack); if one cannot be, nothing more is removed.
+// It returns the files removed.
 func CleanWriteBackLeftovers(mount string) int {
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	n := 0
-	// On exFAT a temporary file a pull cut while it was written can name clusters its allocation
-	// does not give it, and removing it turns exFAT read-only (#321 review R4): there they stay.
-	exFAT := sync.OnceValue(func() bool { return onExFAT(mount) })
-	remove := func(m string) bool { return !exFAT() && removeFile(m) == nil }
 	matches, _ := filepath.Glob(filepath.Join(dir, ".enginex-*.tmp")) // the mark's own temp
 	for _, m := range matches {
-		if remove(m) {
+		if removeFile(m) == nil {
 			n++
 		}
 	}
@@ -926,7 +922,7 @@ func CleanWriteBackLeftovers(mount string) int {
 		for _, pat := range []string{".enginex-*.tmp", ".bak-*.tmp"} {
 			matches, _ := filepath.Glob(filepath.Join(mount, rel, pat))
 			for _, m := range matches {
-				if st, err := os.Lstat(m); err == nil && st.Mode().IsRegular() && remove(m) {
+				if st, err := os.Lstat(m); err == nil && st.Mode().IsRegular() && removeFile(m) == nil {
 					n++
 				}
 			}
@@ -947,11 +943,11 @@ func isExport(rel string) bool {
 // putBack reports whether rel, a file a cut write-back may have replaced, is on the stick, and
 // puts it back first if it is missing: its staged copy name, beside it, when that reads whole as
 // its kind of file (the pass renames only once every copy is written and synced), otherwise the
-// first original kept under .enginex-backup (original). Only the copy the mark names is read: one
-// an earlier cut left on exFAT may name clusters it was never given (#321 review R4). On exFAT a
-// rename over a file rewrites two directory sectors, and a pull between them leaves the file
-// missing; the staged copy then keeps its name, or loses it too when its own entries straddle the
-// sectors (#321 review R3; FAT and HFS+ replace the entry in one write).
+// first original kept under .enginex-backup (original). Only the copy the mark names is read, never
+// an older one an earlier cut left (#321 review R4). On exFAT a rename over a file rewrites two
+// directory sectors, and a pull between them leaves the file missing; the staged copy then keeps
+// its name, or loses it too when its own entries straddle the sectors (#321 review R3; FAT and
+// HFS+ replace the entry in one write).
 func putBack(mount, rel, name string) (put, original bool) {
 	dst := filepath.Join(mount, rel)
 	if _, err := os.Lstat(dst); !errors.Is(err, os.ErrNotExist) {
@@ -1501,6 +1497,11 @@ func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) 
 	if err != nil {
 		return 0, err
 	}
+	// The directory first: its fsync writes the volume's allocation of the clusters this file was
+	// just given (the exFAT bitmap, the FAT) before the file's own fsync writes the entry that names
+	// them. A pull between the two leaves lost clusters, never an entry naming clusters the volume
+	// does not give it, so the next insert can remove the file (#321 review R4b).
+	_ = syncDir(filepath.Dir(tmpPath))
 	if err := tmp.Sync(); err != nil {
 		return 0, err
 	}
@@ -1540,6 +1541,7 @@ func stageWriteFile(dst, name string, data []byte) (string, error) {
 	if _, err := tmp.Write(data); err != nil {
 		return "", err
 	}
+	_ = syncDir(filepath.Dir(tmpPath)) // the allocation before the entry, as in ensureFirstOriginalBackup
 	if err := tmp.Sync(); err != nil {
 		return "", err
 	}
@@ -1566,6 +1568,7 @@ func atomicWriteFile(dst string, data []byte, beforeRename func(string) error) e
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
+	_ = syncDir(filepath.Dir(tmpPath)) // the allocation before the entry, as in ensureFirstOriginalBackup
 	if err := tmp.Sync(); err != nil {
 		return err
 	}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -205,6 +206,12 @@ func rewriteOneLibrary(ctx context.Context, dbPath, dstPath string, kc *KeyCache
 	}
 	if err := bw.Flush(); err != nil {
 		return err
+	}
+	// The directory first, then the file: the allocation of its clusters reaches the disk before
+	// the entry that names them (#321 review R4b; as bridge's staged copies).
+	if d, err := os.Open(filepath.Dir(out.Name())); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	if err := out.Sync(); err != nil {
 		return err
@@ -607,6 +614,12 @@ func copyFileTo(srcPath, dstPath string) error {
 	}()
 	if _, err := io.Copy(out, in); err != nil {
 		return err
+	}
+	// The directory first, then the file: the allocation of its clusters reaches the disk before
+	// the entry that names them (#321 review R4b; as bridge's staged copies).
+	if d, err := os.Open(filepath.Dir(out.Name())); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	if err := out.Sync(); err != nil {
 		return err
