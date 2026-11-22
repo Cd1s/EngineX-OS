@@ -61,12 +61,15 @@ func TestMoveAndSwapPathsRetainEngineIDs(t *testing.T) {
 	for _, c := range []struct {
 		name        string
 		swap        bool
+		matchByPath bool
 		first, then enginedb.Options
 	}{
-		{"move", false, enginedb.Options{}, enginedb.Options{}},
-		{"swap", true, enginedb.Options{}, enginedb.Options{}},
-		{"full-to-fast move", false, enginedb.Options{}, enginedb.Options{Fast: true}},
-		{"fast-to-fast swap", true, enginedb.Options{Fast: true}, enginedb.Options{Fast: true}},
+		{"move", false, false, enginedb.Options{}, enginedb.Options{}},
+		{"swap", true, false, enginedb.Options{}, enginedb.Options{}},
+		{"full-to-fast move", false, false, enginedb.Options{}, enginedb.Options{Fast: true}},
+		{"fast-to-fast swap", true, false, enginedb.Options{Fast: true}, enginedb.Options{Fast: true}},
+		{"move with path matching", false, true, enginedb.Options{MatchByPath: true}, enginedb.Options{MatchByPath: true}},
+		{"swap with path matching", true, true, enginedb.Options{MatchByPath: true}, enginedb.Options{MatchByPath: true}},
 	} {
 		swap := c.swap
 		t.Run(c.name, func(t *testing.T) {
