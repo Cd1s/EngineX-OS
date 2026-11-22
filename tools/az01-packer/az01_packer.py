@@ -534,37 +534,91 @@ MIGRATE = LEGACY_SHELL + '\nmigrate_data\n'
 PREPARE = b'''#!/bin/sh
 set -eu
 umask 077
+# Internal storage can be full (#5306). One free-space reading decides: below the floor (the UI packs 18 MiB and the
+# suite 25 MiB that a first start after an update unpacks, the 11 MiB of QML byte-code Engine builds again, 16 MiB
+# that ext4 keeps for itself, the rest in KiB), what our own programs make again by themselves goes first, oldest
+# first, until the floor is met.
+# Never touched: the DJ's music, Engine's library and artwork, settings, sign-ins, SSH keys, the HFS+ library
+# generations and their upper directories, staged libraries of other players, Mods and their data.
+floor=${ENGINEX_DATA_FLOOR_KIB:-@FLOOR@}
+free_kib() { set -- $(stat -f -c '%f %S' /data 2>/dev/null); [ $# = 2 ] && echo $(($1 * ($2 / 1024))); }
+room() { kib=$(free_kib) || return 0; [ "$kib" -ge "$floor" ]; }
+reap() { while IFS= read -r path; do room && return 0; rm -rf -- "$path"; done; return 0; }
+make_room() {
+    e=/data/enginex
+    # 1. leftovers of interrupted runs
+    ls -dtr $e/.prepare.* $e/ui/.install.* $e/bin/enginex-suite.*.tmp $e/Stream/.part-* $e/Stream/.deemix-*.part \
+        $e/shadow-v3/*/.fetch-* 2>/dev/null | reap
+    # 2. the private QML byte-code cache (Qt compiles it again)
+    room || rm -rf -- $e/ui/qml-cache
+    # 3. start-up reports beyond the newest three, never the one the marker names
+    room || {
+        latest=$(cat $e/ui/boot-report-latest 2>/dev/null || :)
+        ls -tr $e/logs 2>/dev/null | grep -E '^EngineX-boot-report-[0-9]{8}T[0-9]{6}[.][0-9]{9}Z(-[1-9][0-9]?)?[.]txt$' |
+            awk '{ a[NR] = $0 } END { for (i = 1; i <= NR - 3; i++) print a[i] }' |
+            while IFS= read -r n; do [ "$n" = "$latest" ] || echo "$e/logs/$n"; done | reap
+    }
+    # 4. generated export files the published export no longer names (stream-sync writes them again)
+    pdb=$e/prolink-export/PIONEER/rekordbox/export.pdb
+    room || ! [ -s "$pdb" ] || {
+        named=$(grep -ao '/PIONEER/USBANLZ/P[0-9]*/ANLZ0000[.]DAT' "$pdb" | sed 's|^/PIONEER/USBANLZ/||; s|/.*||' || :)
+        ls -tr $e/prolink-export/PIONEER/USBANLZ 2>/dev/null | grep -E '^P[0-9]+$' |
+            while IFS= read -r n; do case " $(echo $named) " in *" $n "*) ;; *) echo "$e/prolink-export/PIONEER/USBANLZ/$n" ;; esac; done | reap
+    }
+    # 5. the stream download cache: the names and the order Trim in deemixclient uses
+    room || ls -tr $e/Stream 2>/dev/null | grep -E '^((netease-|soundcloud-|beatport-)?[0-9]+[.](flac|mp3|mp4)|spotify-[A-Za-z0-9]+[.](ogg|flac|mp3|mp4)|applemusic-(i[.])?[A-Za-z0-9]+[.]flac|nas-[0-9a-f]{64}[.][^/]*|subsonic-[A-Za-z0-9_-]*[.][^/]*)$' |
+        while IFS= read -r n; do echo "$e/Stream/$n"; done | reap
+}
+low=
+room || { make_room; room || low=${kib:-0}; }
 @MIGRATE@
 for path in /data/enginex /data/enginex/authorized_keys /data/enginex/ssh_host_ed25519_key /data/enginex/ssh_host_ed25519_key.pub; do
     [ ! -L "$path" ] || { echo "Refusing persistent SSH symlink: $path" >&2; exit 1; }
 done
 mkdir -p /data/enginex
 chmod 700 /data/enginex
-work=$(mktemp -d /data/enginex/.prepare.XXXXXX)
-trap 'rm -rf "$work"' 0
+# A write that cannot be finished for want of room keeps the file it would have replaced: the step goes on and says
+# so once at the end. A failure with room left is not ours to swallow: it stays fatal, as before.
+unwritten=
+settle() { # <what> <command...>
+    what=$1; shift
+    "$@" && return 0
+    room && return 1
+    unwritten="${unwritten:+$unwritten, }$what"
+}
+# put <file> <text>: through a temporary file of its own, so a full disk never leaves half a file in the old one's place.
+put() { printf '%s\n' "$2" > "$1.new" && mv -f "$1.new" "$1" || { rm -f "$1.new"; return 1; }; }
+work=$(mktemp -d /data/enginex/.prepare.XXXXXX 2>/dev/null) || work=
+trap '[ -z "$work" ] || rm -rf "$work"' 0
 # Public images seed no key: SSH stays off until the owner adds one (#46).
-if [ ! -e /data/enginex/authorized_keys ] && [ -s /usr/share/enginex/authorized_keys ]; then
-    cp /usr/share/enginex/authorized_keys "$work/authorized_keys"
-    chmod 600 "$work/authorized_keys"
-    mv "$work/authorized_keys" /data/enginex/authorized_keys
-fi
+seed_keys() {
+    [ ! -e /data/enginex/authorized_keys ] && [ -s /usr/share/enginex/authorized_keys ] || return 0
+    [ -n "$work" ] && cp /usr/share/enginex/authorized_keys "$work/authorized_keys" &&
+        chmod 600 "$work/authorized_keys" && mv "$work/authorized_keys" /data/enginex/authorized_keys
+}
 # Public images up to 5.0.4.1 seeded every deck with the maintainer's key.
 retired=@RETIRED@
-if [ -f /data/enginex/authorized_keys ] && [ ! -e /data/enginex/keep-release-key ] &&
-    grep -qF "$retired" /data/enginex/authorized_keys &&
-    ! grep -qsF "$retired" /usr/share/enginex/authorized_keys; then
-    grep -vF "$retired" /data/enginex/authorized_keys > "$work/authorized_keys" || :
-    chmod 600 "$work/authorized_keys"
-    mv "$work/authorized_keys" /data/enginex/authorized_keys
-fi
+retire_key() {
+    [ -f /data/enginex/authorized_keys ] && [ ! -e /data/enginex/keep-release-key ] &&
+        grep -qF "$retired" /data/enginex/authorized_keys &&
+        ! grep -qsF "$retired" /usr/share/enginex/authorized_keys || return 0
+    [ -n "$work" ] || return 1
+    grep -vF "$retired" /data/enginex/authorized_keys > "$work/authorized_keys"
+    # grep says 1 when nothing is left to write, 2 when it could not read or write
+    [ $? -le 1 ] && chmod 600 "$work/authorized_keys" && mv "$work/authorized_keys" /data/enginex/authorized_keys
+}
+host_key() {
+    [ ! -e /data/enginex/ssh_host_ed25519_key ] || return 0
+    [ -n "$work" ] && /usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$work/ssh_host_ed25519_key" &&
+        mv "$work/ssh_host_ed25519_key" /data/enginex/ssh_host_ed25519_key &&
+        mv "$work/ssh_host_ed25519_key.pub" /data/enginex/ssh_host_ed25519_key.pub
+}
+settle 'SSH keys' seed_keys
+settle 'SSH keys' retire_key
 [ ! -f /data/enginex/authorized_keys ] || chmod 600 /data/enginex/authorized_keys
-if [ ! -e /data/enginex/ssh_host_ed25519_key ]; then
-    /usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$work/ssh_host_ed25519_key"
-    mv "$work/ssh_host_ed25519_key" /data/enginex/ssh_host_ed25519_key
-    mv "$work/ssh_host_ed25519_key.pub" /data/enginex/ssh_host_ed25519_key.pub
-fi
-[ -f /data/enginex/ssh_host_ed25519_key ]
-/usr/bin/ssh-keygen -y -P '' -f /data/enginex/ssh_host_ed25519_key >/dev/null
+settle 'SSH host key' host_key
+host_key_ok() { [ -f /data/enginex/ssh_host_ed25519_key ] && /usr/bin/ssh-keygen -y -P '' -f /data/enginex/ssh_host_ed25519_key >/dev/null; }
+settle 'SSH host key' host_key_ok
 
 # A firmware update rewrites / but never /data: install the image's UI packs
 # once per release, before Engine starts (engine.service orders after this unit).
@@ -586,7 +640,7 @@ install_ui() {
     done
     umask 022
     mkdir -p "$ui"
-    stage=$(mktemp -d "$ui/.install.XXXXXX")
+    stage=$(mktemp -d "$ui/.install.XXXXXX") || return 1
     if ! xzcat "$archive" | tar -C "$stage" -xf - || [ ! -d "$stage/packs" ]; then
         rm -rf "$stage"
         return 1
@@ -594,8 +648,12 @@ install_ui() {
     for name in packs icons; do
         [ -d "$stage/$name" ] || continue
         rm -rf "$ui/$name.replaced"
-        [ ! -e "$ui/$name" ] || mv "$ui/$name" "$ui/$name.replaced"
-        mv "$stage/$name" "$ui/$name"
+        [ ! -e "$ui/$name" ] || mv "$ui/$name" "$ui/$name.replaced" || { rm -rf "$stage"; return 1; }
+        mv "$stage/$name" "$ui/$name" || {
+            [ ! -e "$ui/$name.replaced" ] || mv "$ui/$name.replaced" "$ui/$name"
+            rm -rf "$stage"
+            return 1
+        }
         rm -rf "$ui/$name.replaced"
     done
     rm -rf "$stage"
@@ -607,9 +665,8 @@ install_ui() {
     fi
     # A .qmlc cached from the old packs must not be read against the new ones.
     rm -rf "${ENGINEX_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}/.cache/qml"
-    printf '%s\n' "$version" > "$ui/.pack-version"
-    printf '%s\n' "$id" > "$ui/.pack-id"
-    printf '%s\n' "$version" > "${ENGINEX_VERSION_FILE:-/data/enginex/version.txt}"
+    put "$ui/.pack-version" "$version" && put "$ui/.pack-id" "$id" &&
+        put "${ENGINEX_VERSION_FILE:-/data/enginex/version.txt}" "$version"
 }
 
 # Restore the last saved time zone into Engine.conf before Engine starts, without
@@ -697,9 +754,9 @@ write_engine_tz() {
                         print "TZEnvVar=" tz
                     }
                 }
-            ' "$conf" > "$tmp"
+            ' "$conf" > "$tmp" || { rm -f "$tmp"; exit 1; }
         else
-            printf '[TimeDateSettings]\\nTZEnvVar=%s\\n' "$tz" > "$tmp"
+            printf '[TimeDateSettings]\\nTZEnvVar=%s\\n' "$tz" > "$tmp" || { rm -f "$tmp"; exit 1; }
         fi
         if cmp -s "$tmp" "$conf" 2>/dev/null; then
             rm -f "$tmp"
@@ -711,6 +768,7 @@ write_engine_tz() {
 }
 
 restore_timezone() {
+    tz_failed=
     tz_file=${ENGINEX_TZ_STATE_FILE:-/data/enginex/state/timezone}
     [ ! -L /data/enginex/state ] && [ ! -L "$tz_file" ] || { echo "Refusing timezone symlink: $tz_file" >&2; return 1; }
     [ -f "$tz_file" ] || return 0
@@ -722,7 +780,7 @@ restore_timezone() {
     for d in "$cfg_root"/*.user.settings; do
         [ -d "$d" ] || continue
         found=1
-        write_engine_tz "$d" "$tz" "$tz_file"
+        write_engine_tz "$d" "$tz" "$tz_file" || tz_failed=1
     done
     if [ "$found" = 0 ]; then
         pfile=${ENGINEX_PRODUCT_CODE_FILE:-/sys/firmware/devicetree/base/inmusic,product-code}
@@ -730,17 +788,25 @@ restore_timezone() {
             prod=$(tr -d '\\000\\r\\n ' < "$pfile" | tr '[:upper:]' '[:lower:]')
             case $prod in
                 ''|*[!a-z0-9_-]*) ;;
-                *) write_engine_tz "$cfg_root/$prod.user.settings" "$tz" "$tz_file" ;;
+                *) write_engine_tz "$cfg_root/$prod.user.settings" "$tz" "$tz_file" || tz_failed=1 ;;
             esac
         fi
     fi
+    [ -z "$tz_failed" ]
 }
-install_ui || echo "enginex-prepare: UI packs not installed" >&2
-restore_timezone || echo "enginex-prepare: timezone not restored" >&2
+install_ui || { echo "enginex-prepare: UI packs not installed" >&2; room || unwritten="${unwritten:+$unwritten, }UI packs"; }
+restore_timezone || { echo "enginex-prepare: timezone not restored" >&2; room || unwritten="${unwritten:+$unwritten, }time zone"; }
+# The one line for the journal and the start-up report (its journal section carries this unit's lines).
+[ -z "$low" ] || echo "enginex-prepare: internal storage is full ($low KiB free); not written: ${unwritten:-nothing}" >&2
 '''
 # Public half of the key public images up to 5.0.4.1 shipped (#46). Not a secret.
 RETIRED_RELEASE_KEY = b'AAAAC3NzaC1lZDI1NTE5AAAAIC6p0NjBPb0vPCGB3XloshlMtXoYgVc6ig+JQAYnVUSz'
-PREPARE = PREPARE.replace(b'@RETIRED@', RETIRED_RELEASE_KEY).replace(b'@MIGRATE@', MIGRATE.encode())
+# What a first start after an update needs on /data, in KiB (#5306): the UI packs 18,016 KiB and the suite 24,972 KiB it
+# unpacks, the 10,816 KiB of QML byte-code Engine builds again (all measured in the sandbox on the SC5000 image), about
+# 1 MiB of reports and state, and the 16 MiB ext4 keeps for itself that statfs still counts as free: 70 MiB, taken as 72.
+DATA_FLOOR_KIB = 72 * 1024
+PREPARE = (PREPARE.replace(b'@RETIRED@', RETIRED_RELEASE_KEY).replace(b'@MIGRATE@', MIGRATE.encode())
+           .replace(b'@FLOOR@', str(DATA_FLOOR_KIB).encode()))
 
 # Engine 4.3.4 left copies of these in the /etc overlay upper layer; they
 # shadow the 5.0.4 lower /etc (telemetry hosts blocking connman's online check,
@@ -765,8 +831,9 @@ if [ -d "$upper" ]; then
 fi
 mkdir -p /data/enginex
 chmod 700 /data/enginex
-printf '%s\n' "$epoch" > "$marker.tmp"
-mv "$marker.tmp" "$marker"
+# No room for the marker (#5306): the removals above are made again, harmlessly, at the next boot.
+{ printf '%s\n' "$epoch" > "$marker.tmp" && mv "$marker.tmp" "$marker"; } ||
+    { rm -f "$marker.tmp"; echo "enginex-etc-reset: epoch marker not written; internal storage may be full" >&2; }
 '''
 
 

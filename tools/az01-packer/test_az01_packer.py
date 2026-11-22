@@ -341,6 +341,173 @@ class FilesystemTests(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0)
         self.assertEqual(sentinel.read_text(), 'keep')
 
+    # --- #5306: a full /data must not stop prepare ------------------------------------------------------------
+    def _prepare_lab(self, name):
+        """A lab /data, a seed directory and the script with the deck's paths relocated into the lab (as above)."""
+        seed, data, version = self.root/(name+'-seed'), self.root/(name+'-data'), self.root/(name+'-version')
+        seed.mkdir()
+        (seed/'authorized_keys').write_bytes(self.key.with_suffix('.pub').read_bytes())
+        version.write_text('5.0.4.1\n')
+        script = az.PREPARE.replace(b'/data', str(data).encode()).replace(
+            b'/usr/share/enginex', str(seed).encode()).replace(b'/etc/enginex/version.txt', str(version).encode())
+        return seed, data, script
+
+    def _fake_stat(self, data, capacity_kib, log=None):
+        """PATH entry with a `stat -f` of a disk of capacity_kib KiB that holds exactly what is under `data`."""
+        shim = self.root/'shim'
+        shim.mkdir(exist_ok=True)
+        (shim/'stat').write_text(
+            '#!/bin/sh\n'
+            'case $1 in -f)\n'
+            + (f'echo x >> "{log}"\n' if log else '') +
+            f'used=$(du -sk "{data}" | cut -f1)\n'
+            f'echo "$(( ({capacity_kib} - used) / 4 )) 4096" ;;\n'
+            '*) exec /usr/bin/stat "$@" ;; esac\n')
+        (shim/'stat').chmod(0o755)
+        return {'PATH': f'{shim}:{os.environ["PATH"]}'}
+
+    @staticmethod
+    def _file(path, kib, age=0):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'x' * 1024 * kib)
+        os.utime(path, (1_700_000_000 + age, 1_700_000_000 + age))
+
+    def _seed_deck(self, data):
+        """One file of every class prepare may remove (returned, in the order of its list) and of every class it never may."""
+        e, put = data/'enginex', self._file
+        put(e/'.prepare.old'/'f', 64, 1)
+        put(e/'ui/.install.old'/'f', 64, 2)
+        put(e/'bin/enginex-suite.9.tmp', 64, 3)
+        put(e/'Stream/.part-x', 64, 4)
+        put(e/'shadow-v3/peer-aa/.fetch-x', 64, 5)
+        put(e/'ui/qml-cache/a.qmlc', 512, 6)
+        reports = [e/'logs'/f'EngineX-boot-report-20261122T0{i}0000.000000000Z.txt' for i in range(1, 6)]
+        for i, path in enumerate(reports):
+            put(path, 128, 10 + i)
+        (e/'ui/boot-report-latest').write_text(reports[0].name + '\n')    # the marker protects the oldest report
+        anlz = e/'prolink-export/PIONEER/USBANLZ'
+        put(anlz/'P001/ANLZ0000.DAT', 128, 20)
+        put(anlz/'P002/ANLZ0000.DAT', 128, 21)
+        (e/'prolink-export/PIONEER/rekordbox').mkdir(parents=True)
+        (e/'prolink-export/PIONEER/rekordbox/export.pdb').write_bytes(b'\x00 /PIONEER/USBANLZ/P001/ANLZ0000.DAT \x00')
+        streams = [e/'Stream'/n for n in ('1.flac', '2.flac', 'spotify-abc.ogg')]
+        for i, path in enumerate(streams):
+            put(path, 512, 30 + i)
+        never = [
+            e/'Stream/my-own-mix.wav', e/'Stream/Stems/7/stem.flac', data/'Music/dj-track.mp3',
+            data/'AppDataUser/AIR Music Technology/Engine/Engine Library/Database2/m.db',
+            data/'AppDataUser/AIR Music Technology/Engine/Engine Library/Album Art/a.jpg',
+            e/'ui/settings.conf', e/'state/deezer-owner.json', data/'StreamingAccounts.json',
+            e/'hfs-libraries/vol/m.db', e/'hfs-lib/base/upper/m.db', data/'.prolink-cache/Player-1/t.mp3',
+            e/'mods/m/mod.json', e/'mods-state/m/s.json', e/'ui/mods-overlay/T.qml', data/'inMusicTempFiles/copy.flac']
+        for path in never:
+            put(path, 64)
+        (e/'authorized_keys').write_bytes(self.key.with_suffix('.pub').read_bytes())
+        return {'leftovers': [e/'.prepare.old', e/'ui/.install.old', e/'bin/enginex-suite.9.tmp', e/'Stream/.part-x',
+                              e/'shadow-v3/peer-aa/.fetch-x'],
+                'qml': [e/'ui/qml-cache'], 'reports': reports, 'anlz': [anlz/'P001', anlz/'P002'], 'streams': streams,
+                'never': never + [e/'authorized_keys', e/'ui/boot-report-latest']}
+
+    def _used_kib(self, data):
+        return int(subprocess.run(['du', '-sk', str(data)], capture_output=True, text=True).stdout.split()[0])
+
+    def test_prepare_reads_free_space_once_when_there_is_room(self):
+        seed, data, script = self._prepare_lab('room')
+        log = self.root/'stat.log'
+        env = dict(os.environ, **self._fake_stat(data, 10**7, log), ENGINEX_DATA_FLOOR_KIB='1000')
+        for _ in range(2):
+            p = subprocess.run(['sh', '-s'], input=script, capture_output=True, env=env)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertNotIn(b'internal storage', p.stderr)
+        self.assertEqual(len(log.read_text().split()), 2, 'one free-space reading per run')
+
+    def test_prepare_frees_only_what_is_made_again_in_order_and_only_to_the_floor(self):
+        floor = 4096
+        # 0.7 MiB short of the floor: the leftovers (0.3 MiB) are not enough, with the QML cache (0.5 MiB) the floor is met
+        seed, data, script = self._prepare_lab('early')
+        seeded = self._seed_deck(data)
+        env = dict(os.environ, **self._fake_stat(data, self._used_kib(data) + floor - 700), ENGINEX_DATA_FLOOR_KIB=str(floor))
+        p = subprocess.run(['sh', '-s'], input=script, capture_output=True, env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn(b'internal storage', p.stderr)      # the floor was met: nothing to report
+        for path in seeded['leftovers'] + seeded['qml']:
+            self.assertFalse(path.exists(), path)
+        for path in seeded['reports'] + seeded['anlz'] + seeded['streams']:
+            self.assertTrue(path.exists(), path)             # later classes are not touched once the floor is met
+        # 1.1 MiB short: every class before the stream cache is used, the stream cache only as far as the floor needs
+        seed, data, script = self._prepare_lab('order')
+        seeded = self._seed_deck(data)
+        before = {q: q.read_bytes() for q in seeded['never']}
+        env = dict(os.environ, **self._fake_stat(data, self._used_kib(data) + floor - 1204), ENGINEX_DATA_FLOOR_KIB=str(floor))
+        p = subprocess.run(['sh', '-s'], input=script, capture_output=True, env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn(b'internal storage', p.stderr)
+        for path in seeded['leftovers'] + seeded['qml'] + seeded['anlz'][1:] + seeded['reports'][1:2]:
+            self.assertFalse(path.exists(), path)
+        # kept: the newest three reports and the one the marker names, the export's named directory, the newer downloads
+        for path in seeded['reports'][:1] + seeded['reports'][2:] + seeded['anlz'][:1] + seeded['streams'][1:]:
+            self.assertTrue(path.exists(), path)
+        self.assertFalse(seeded['streams'][0].exists(), 'the oldest download goes first')
+        for path, content in before.items():
+            self.assertEqual(path.read_bytes(), content, path)
+
+    def test_prepare_on_a_disk_that_takes_no_data_ends_with_success_and_keeps_every_file(self):
+        import io, lzma, tarfile
+        seed, data, script = self._prepare_lab('full')
+        e = data/'enginex'
+        own = self.key.with_suffix('.pub').read_bytes()
+        old = b'ssh-ed25519 ' + az.RETIRED_RELEASE_KEY + b' release\n'
+        subprocess.run(['sh', '-s'], input=script, check=True, capture_output=True)     # a first boot: host key, own key
+        (e/'authorized_keys').write_bytes(old + own)          # the retired key is to go: a rewrite that cannot be written
+        (e/'ui/packs/en').mkdir(parents=True)
+        (e/'ui/packs/en/Main.qml').write_text('installed')
+        (e/'ui/.pack-version').write_text('5.0.3\n')            # stale packs: an update that cannot be unpacked
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w') as t:
+            info = tarfile.TarInfo('packs/en/Main.qml')
+            info.size = 3
+            t.addfile(info, io.BytesIO(b'new'))
+        (seed/'ui-packs.tar.xz').write_bytes(lzma.compress(buf.getvalue(), check=lzma.CHECK_CRC32))
+        conf = data/'.config/jp07.user.settings/AIR Music Technology/Engine.conf'
+        conf.parent.mkdir(parents=True)
+        conf.write_text('[General]\n' + ''.join(f'Setting{i}=value\n' for i in range(300)) + '[TimeDateSettings]\nTZEnvVar=UTC\n')
+        (e/'state').mkdir()
+        (e/'state/timezone').write_text('Europe/Berlin\n')
+        os.utime(e/'state/timezone', (conf.stat().st_mtime + 120,) * 2)
+        keep = {p: p.read_bytes() for p in (e/'authorized_keys', e/'ssh_host_ed25519_key', e/'ui/packs/en/Main.qml', conf)}
+        zones = self.root/'zoneinfo'
+        (zones/'Europe').mkdir(parents=True)
+        (zones/'Europe/Berlin').write_text('tz')
+        # nothing can be freed (no class has a file), the floor is out of reach, and every write of data fails (EFBIG
+        # stands in for ENOSPC: an empty file can still be made, as on a full ext4)
+        env = dict(os.environ, ENGINEX_DATA_FLOOR_KIB=str(10**9), ENGINEX_ZONEINFO_DIR=str(zones))
+        p = subprocess.run(['sh', '-c', 'trap "" XFSZ; ulimit -f 0; exec sh -s'], input=script, capture_output=True, env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        lines = [l for l in p.stderr.decode().splitlines() if l.startswith('enginex-prepare: internal storage is full')]
+        self.assertEqual(len(lines), 1, p.stderr)
+        for word in ('SSH keys', 'UI packs'):
+            self.assertIn(word, lines[0])
+        for path, content in keep.items():
+            self.assertEqual(path.read_bytes(), content, path)
+        self.assertEqual(sorted(x.name for x in e.glob('.prepare.*')) + sorted(x.name for x in e.glob('*.new')), [])
+        self.assertEqual(list((e/'ui').glob('.install.*')), [])
+        # with room again the same disk is brought up to date
+        p = subprocess.run(['sh', '-s'], input=script, capture_output=True, env=dict(os.environ, ENGINEX_ZONEINFO_DIR=str(zones)))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn(b'internal storage', p.stderr)
+        self.assertEqual((e/'authorized_keys').read_bytes(), own)
+        self.assertEqual((e/'ui/packs/en/Main.qml').read_text(), 'new')
+        self.assertIn('Europe/Berlin', conf.read_text())
+
+    def test_prepare_uses_the_names_the_programs_use(self):
+        # the shell copies of two Go patterns must not drift from the programs that own them
+        fetch = (Path(__file__).resolve().parents[2]/'pkg/deemixclient/fetch.go').read_text()
+        go = re.search(r'var evictable = regexp\.MustCompile\(`([^`]+)`\)', fetch).group(1)
+        self.assertIn(go.replace(r'\d', '[0-9]').replace(r'\.', '[.]'), az.PREPARE.decode())
+        report = (Path(__file__).resolve().parents[2]/'pkg/webui/boot_report.go').read_text()
+        go = re.search(r'var bootReportName = regexp\.MustCompile\(`([^`]+)`\)', report).group(1)
+        self.assertIn(go.replace('(?:', '(').replace(r'\.', '[.]'), az.PREPARE.decode())
+
     def test_public_image_ships_no_key_and_retires_the_old_release_key(self):
         # #46: public images seed no key, sshd needs a non-empty authorized_keys,
         # and the key public images up to 5.0.4.1 seeded is dropped from /data.
@@ -507,6 +674,24 @@ class FilesystemTests(unittest.TestCase):
         refused = subprocess.run(['sh', '-s'], input=script, capture_output=True)
         self.assertNotEqual(refused.returncode, 0)
         self.assertEqual((sentinel/'hosts').read_text(), 'keep')
+
+    def test_etc_reset_on_a_disk_that_takes_no_data_still_ends_with_success(self):
+        # #5306: the removals are made, the epoch marker cannot be written (EFBIG stands in for ENOSPC), the next boot repeats them
+        data = self.root/'data'
+        upper = data/'system/etc/overlay'
+        (upper/'hosts').parent.mkdir(parents=True)
+        (upper/'hosts').write_text('4.3.4')
+        (upper/'keep.conf').write_text('user')
+        script = az.ETC_RESET.replace(b'/data', str(data).encode())
+        p = subprocess.run(['sh', '-c', 'trap "" XFSZ; ulimit -f 0; exec sh -s'], input=script, capture_output=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(b'epoch marker not written', p.stderr)
+        self.assertEqual(sorted(x.name for x in upper.iterdir()), ['keep.conf'])
+        self.assertFalse((data/'enginex/etc-overlay-epoch').exists() and (data/'enginex/etc-overlay-epoch').stat().st_size)
+        self.assertEqual(list((data/'enginex').glob('*.tmp')), [])
+        p = subprocess.run(['sh', '-s'], input=script, capture_output=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue((data/'enginex/etc-overlay-epoch').read_text().strip())
 
     def test_reject_symlink_parent_existing_symlink_and_hardlink(self):
         self.fs.cmd('symlink /alias /usr/Engine/Firmware', True)

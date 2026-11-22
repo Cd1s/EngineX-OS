@@ -487,6 +487,36 @@ for f in "$legacy_suite" "$legacy_suite.id" "$legacy_suite.123.tmp" "$legacy_dee
 done
 [[ -x $suite_dir/enginex-suite && -e $suite_dir/drmgrab ]] || fail 'old-name cleanup removed the new suite or a foreign file'
 ok 'suite unpack removes the binaries an older release unpacked under its old name (#234)'
+# #5306: /data takes no more data. The programs of this image run from memory, what is installed stays as it was,
+# and that is said once. The room a unit cannot get is simulated by a gzip that fails when it is to write into the
+# installed directory (ENOSPC for that directory only: the copy in memory is made on the same host disk).
+ram_dir=$TMP/suite-ram suite_full=$TMP/suite-full
+mkdir -p "$suite_full/bin"
+real_gzip=$(command -v gzip)
+cat > "$suite_full/bin/gzip" <<SH
+#!/bin/sh
+case \$(readlink /proc/\$\$/fd/1) in "$suite_dir"/*) echo 'gzip: write error: No space left on device' >&2; exit 1 ;; esac
+exec $real_gzip "\$@"
+SH
+chmod +x "$suite_full/bin/gzip"
+printf '#!/bin/sh\necho image-4 "$@"\n' | gzip -c > "$suite_share/enginex-suite.gz"
+run_full() { PATH=$suite_full/bin:$PATH ENGINEX_SUITE_RAM_DIR=$ram_dir ENGINEX_SUITE_SHARE=$suite_share ENGINEX_SUITE_DIR=$suite_dir sh "$ROOT/rootfs-overlay/usr/local/bin/enginex-suite-exec" x; }
+installed=$(cat "$suite_dir/enginex-suite"); installed_id=$(cat "$suite_dir/enginex-suite.id")
+[[ $(run_full 2> "$TMP/suite-full.err") == 'image-4 x' ]] || fail 'a suite that cannot be unpacked for want of room must run from memory'
+[[ $(grep -c 'no room on internal storage' "$TMP/suite-full.err") == 1 ]] || fail 'running from memory must be said once'
+[[ $(cat "$suite_dir/enginex-suite") == "$installed" && $(cat "$suite_dir/enginex-suite.id") == "$installed_id" ]] ||
+    fail 'the installed suite must stay as it is when there is no room for the new one'
+[[ -z $(ls "$suite_dir"/enginex-suite.*.tmp 2> /dev/null) ]] || fail 'the failed unpack left its temporary behind'
+[[ $(run_full 2> "$TMP/suite-full2.err") == 'image-4 x' && ! -s $TMP/suite-full2.err ]] || fail 'the next unit starts from the copy in memory, silently, without another write to /data'
+# three services of one boot start at the same moment: one says it, none leaves a temporary, none writes it twice into memory
+ram_dir=$TMP/suite-ram2
+for n in 1 2 3; do run_full 2> "$TMP/suite-par$n.err" > "$TMP/suite-par$n.out" & done
+wait
+[[ $(cat "$TMP"/suite-par?.err | grep -c 'no room on internal storage') == 1 && $(cat "$TMP"/suite-par?.out | grep -c '^image-4 x$') == 3 ]] ||
+    fail 'three simultaneous starts with no room on /data must all run, and say it once'
+[[ -z $(ls "$suite_dir"/enginex-suite.*.tmp 2> /dev/null) ]] || fail 'simultaneous failed unpacks left a temporary behind'
+[[ $(run_suite) == 'image-4 x' && -x $suite_dir/enginex-suite && $(cat "$suite_dir/enginex-suite.id") != "$installed_id" ]] || fail 'with room again the suite is installed as before'
+ok 'a suite that cannot be unpacked for want of room runs from memory, the installed one stays, said once (#5306)'
 
 fixture
 expect_fail env TARGET_CONFIG= TARGET_SYMVERS= bash "$ROOT/kernel-modules/build_modules.sh" modules
@@ -662,6 +692,31 @@ SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre
 rm -f "$ENGINEX_UI_DIR"/*; SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre   # this boot's own clean restart
 [[ ! -e $ENGINEX_UI_DIR/safe-mode && $(cat "$ENGINEX_UI_DIR/boot-count") == 1 ]] || fail 'a clean restart after pre must still reset the state'
 ok 'a second-generation boot keeps the last boot crash and power-cut evidence across the stock Engine handover (BH-F52-4)'
+# #5306: /data refuses the guard's data writes (a full disk still lets an empty file be made, so a crash is still marked).
+# The failure counter and the safe-mode marker are kept in the run-time directory for this boot, with the same meaning.
+# The refusal is simulated by an mv that fails for files in the guard's directory (the guard writes through a temporary).
+guard_full=$TMP/guard-full guard_run=$TMP/guard-run
+mkdir -p "$guard_full/bin"
+real_mv=$(command -v mv)
+cat > "$guard_full/bin/mv" <<SH
+#!/bin/sh
+case "\$*" in *"$ENGINEX_UI_DIR"/*) echo 'mv: no space left on device' >&2; exit 1 ;; esac
+exec $real_mv "\$@"
+SH
+chmod +x "$guard_full/bin/mv"
+gfull() { PATH=$guard_full/bin:$PATH ENGINEX_GUARD_RUN_DIR=$guard_run sh "$GUARD" "$@"; }
+rm -rf "$ENGINEX_UI_DIR" "$guard_run"
+for result in signal core-dump exit-code; do SERVICE_RESULT=$result gfull stop; gfull pre; done
+[[ ! -e $ENGINEX_UI_DIR/safe-mode && ! -e $ENGINEX_UI_DIR/boot-failures ]] || fail 'the test must not reach the persistent place'
+[[ -e $guard_run/safe-mode && $(cat "$guard_run/boot-failures") == 3 ]] || fail 'with /data full the failure counter and the safe-mode marker must be kept in the run-time directory'
+ENGINEX_DEBLOAT=/bin/false gfull runtime || fail 'the next start of this boot must see the run-time safe-mode marker (no runtime step)'
+SERVICE_RESULT=success gfull stop
+[[ ! -e $guard_run/boot-failures && ! -e $guard_run/boot-window ]] || fail 'a clean stop must clear the run-time counter too'
+rm -rf "$ENGINEX_UI_DIR" "$guard_run"
+for result in signal core-dump exit-code; do SERVICE_RESULT=$result sh "$GUARD" stop; sh "$GUARD" pre; done
+[[ -e $ENGINEX_UI_DIR/safe-mode && ! -e $guard_run/safe-mode ]] || fail 'with room the safe-mode marker stays where it always was'
+ok 'the guard keeps its failure counter and safe-mode marker in the run-time directory when /data takes no more data (#5306)'
+rm -rf "$ENGINEX_UI_DIR" "$guard_run"; SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre   # the state the next tests expect
 # BH-GF3-6: the UAC2 gadget offers the computer the sample rate chosen in the Web Console (it was
 # always 48000), also when the gadget already exists; an unsupported rate is refused.
 USB_AUDIO=$ROOT/rootfs-overlay/usr/sbin/enginex-usb-audio

@@ -25,10 +25,21 @@ case $failures in ''|*[!0-9]*|0) failures=3 ;; esac
 [ "${#failures}" -le 3 ] && [ "$failures" -le 100 ] || failures=3
 poll=${ENGINEX_BOOT_POLL_INTERVAL:-1}
 case $poll in .1|0.1|.5|0.5|1|2|5) ;; *) poll=1 ;; esac
+# When /data takes no more data, the failure counter (and its window) and the safe-mode marker are kept in the
+# run-time directory for the rest of this boot, with the same meaning (#5306). That copy is the newer one: it
+# exists only while /data refuses the write, and a write that works again drops it.
+run_ui=${ENGINEX_GUARD_RUN_DIR:-/run/enginex/guard}
 record() {
-    mkdir -p "$UI" || return 1
-    (umask 077; printf '%s\n' "$2" > "$UI/.$1.$$" && mv -f "$UI/.$1.$$" "$UI/$1")
+    if mkdir -p "$UI" && (umask 077; printf '%s\n' "$2" > "$UI/.$1.$$" && mv -f "$UI/.$1.$$" "$UI/$1"); then
+        [ ! -e "$run_ui/$1" ] || rm -f "$run_ui/$1"
+        return 0
+    fi
+    rm -f "$UI/.$1.$$"
+    case $1 in boot-failures|boot-window|safe-mode) ;; *) return 1 ;; esac
+    mkdir -p "$run_ui" && (umask 077; printf '%s\n' "$2" > "$run_ui/$1")
 }
+state() { cat "$run_ui/$1" 2>/dev/null || cat "$UI/$1" 2>/dev/null; }
+safe_mode() { [ -e "$UI/safe-mode" ] || [ -e "$run_ui/safe-mode" ]; }
 uptime_seconds() { cut -d. -f1 "${ENGINEX_BOOT_UPTIME:-/proc/uptime}"; }
 # feature_off NAME: the console switched NAME off in hook-disable.conf.
 feature_off() {
@@ -52,7 +63,7 @@ quarantine() {
 }
 fallback() {
     case $1 in ui-ready-timeout|crash-loop|previous-fallback) ;; *) return 2 ;; esac
-    if [ ! -e "$UI/safe-mode" ]; then
+    if ! safe_mode; then
         record boot-stage "$1"
         record safe-mode "$1" || return 1
         rm -f "$UI/boot-report-latest"
@@ -90,14 +101,14 @@ stick_path() {
 }
 case ${1:-} in
 runtime)
-    [ ! -e "$UI/safe-mode" ] || exit 0
+    ! safe_mode || exit 0
     exec "${ENGINEX_DEBLOAT:-/usr/local/bin/enginex-debloat}" --apply-runtime
     ;;
 service)
     shift
     [ "$#" -gt 0 ] || exit 2
     unset LD_PRELOAD
-    if [ ! -e "$UI/safe-mode" ]; then
+    if ! safe_mode; then
         # Arm recovery before loading anything into the vendor launcher. Its
         # updater children still need the hook on a normal EngineX start.
         begin_attempt
@@ -112,7 +123,7 @@ launch)
     # The previous native process has exited. Apply/undo only an explicitly
     # confirmed transaction before the next Engine reads its settings.
     copy_dir=$(readlink -f "$UI/../settings-copy")
-    if [ ! -e "$UI/safe-mode" ] && [ -n "$copy_dir" ] && [ -f "$copy_dir/operation.json" ]; then
+    if ! safe_mode && [ -n "$copy_dir" ] && [ -f "$copy_dir/operation.json" ]; then
         if ! "${ENGINEX_STREAM_SYNC:-/usr/local/bin/stream-sync}" --settings-copy-prestart; then
             rm -f "$copy_dir/active-drive"
             echo 'EngineX settings preparation failed; import not started' >&2
@@ -122,14 +133,14 @@ launch)
             if [ -f "$copy_dir/active-drive" ]; then "$0" settings; fi
         fi
     fi
-    if [ ! -e "$UI/safe-mode" ] && [ -n "$copy_dir" ] && [ -f "$copy_dir/active-drive" ]; then
+    if ! safe_mode && [ -n "$copy_dir" ] && [ -f "$copy_dir/active-drive" ]; then
         set -- "$@" "-extraDriveDir=$copy_dir/EngineX-Settings"
     fi
     unset LD_PRELOAD
     # The stock engine script can retry without restarting engine.service.
     # Count failures at that boundary too, retaining its exit-code/quit contract.
     [ ! -e "$UI/last-crash" ] || "$0" pre
-    if [ -e "$UI/safe-mode" ]; then
+    if safe_mode; then
         quarantine
         exec "$@"
     fi
@@ -167,7 +178,7 @@ update-file)
     stick_path "${ENGINEX_UPDATE_FILE_PATH:-/tmp/update-file-path}"
     ;;
 ready)
-    [ ! -e "$UI/safe-mode" ] && [ -n "${2:-}" ] && [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$2" ] || exit 1
+    ! safe_mode && [ -n "${2:-}" ] && [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$2" ] || exit 1
     record boot-ready "$2"
     ;;
 progress)
@@ -188,7 +199,7 @@ watch)
         # Builtins only once the UI is ready: this turn runs every second of a session, and its
         # five forks (cut, cat, rm) cost more CPU than any of our daemons.
         IFS= read -r now < "${ENGINEX_BOOT_UPTIME:-/proc/uptime}"; now=${now%%.*}
-        if [ -e "$UI/safe-mode" ]; then
+        if safe_mode; then
             if [ "$now" -ge "$exported" ]; then
                 exported=$((now + 5))
                 if [ -x "$guardian" ]; then
@@ -231,7 +242,7 @@ watch)
     done
     ;;
 pre|settings)
-    if [ "$1" = settings ] && [ -e "$UI/safe-mode" ]; then exit 0; fi
+    if [ "$1" = settings ] && safe_mode; then exit 0; fi
     if [ "$1" = pre ]; then
     mkdir -p "$UI"
     : > "$pre_mark" 2>/dev/null || :
@@ -243,10 +254,10 @@ pre|settings)
     pending=$(cat "$UI/boot-token" 2>/dev/null)
     { [ -e "$UI/last-crash" ] || { [ -n "$pending" ] && [ "$(cat "$UI/boot-ready" 2>/dev/null)" != "$pending" ]; }; } && crashed=1
     now=$(date +%s)
-    started=$(cat "$UI/boot-window" 2>/dev/null)
+    started=$(state boot-window)
     case $started in ''|*[!0-9]*) started=$now ;; esac
     [ "${#started}" -le 12 ] || started=$now
-    count=$(cat "$UI/boot-failures" 2>/dev/null)
+    count=$(state boot-failures)
     case $count in ''|*[!0-9]*) count=0 ;; esac
     [ "${#count}" -le 6 ] || count=0
     if [ "$now" -lt "$started" ] || [ $((now - started)) -gt "$window" ]; then count=0; started=$now; fi
@@ -269,11 +280,11 @@ pre|settings)
     # The hook redirects EngineX's bytecode to its own cache.
     rm -rf "${ENGINEX_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}/.cache/qml"
     # #140: Qt rebuilds EngineX's cache after a crash, power cut or fallback.
-    if [ -n "$dirty" ] || [ "$count" -ge "$failures" ] || [ -e "$UI/safe-mode" ]; then
+    if [ -n "$dirty" ] || [ "$count" -ge "$failures" ] || safe_mode; then
         rm -rf "$UI/qml-cache"
     fi
     if [ "$count" -ge "$failures" ]; then fallback crash-loop; fi
-    if [ -e "$UI/safe-mode" ]; then
+    if safe_mode; then
         quarantine
         # No EngineX database/account/assignment changes on a stock fallback.
         exit 0
@@ -549,13 +560,13 @@ AWK
     done
     ;;
 post)
-    [ ! -e "$UI/safe-mode" ] || exit 0
+    ! safe_mode || exit 0
     # Engine's setup script has just set the GPU to performance. This also covers
     # boot, when a start request would merge with an already running tune job.
     "${ENGINEX_PERF_TUNE:-/usr/local/bin/enginex-perf-tune}" >/dev/null 2>&1
     # Legacy launchers and the release gate call post after spawning Engine.
     # New launchers create this before exec, including internal crash retries.
-    if [ ! -e "$UI/safe-mode" ] && [ ! -s "$UI/boot-token" ]; then begin_attempt; fi
+    if ! safe_mode && [ ! -s "$UI/boot-token" ]; then begin_attempt; fi
     ;;
 stop)
     if [ -e "$pre_mark" ]; then
@@ -563,7 +574,8 @@ stop)
         # systemd sets SERVICE_RESULT=success for a requested stop/restart; a crash
         # (exit-code, signal, core-dump, timeout) keeps counting towards safe-mode.
         if [ "${SERVICE_RESULT:-success}" = success ]; then
-            rm -f "$UI/boot-count" "$UI/boot-token" "$UI/boot-ready" "$UI/last-crash" "$UI/boot-failures" "$UI/boot-window"
+            rm -f "$UI/boot-count" "$UI/boot-token" "$UI/boot-ready" "$UI/last-crash" "$UI/boot-failures" "$UI/boot-window" \
+                "$run_ui/boot-failures" "$run_ui/boot-window"
         else
             mkdir -p "$UI"
             [ -s "$UI/boot-count" ] || echo 1 > "$UI/boot-count"
