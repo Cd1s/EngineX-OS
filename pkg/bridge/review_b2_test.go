@@ -15,6 +15,9 @@ import (
 // bridge state, and the import failed with ENOENT at every insert). The published library has
 // the export's tracks and keeps the stick's own playlist.
 func TestIssue301BackgroundImportOfANativeLibrary(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, db := issue301Stick(t, 20)
 	if _, err := db.Exec(`INSERT INTO Playlist(title,parentListId,isPersisted,nextListId) VALUES('Native set',0,1,0)`); err != nil {
 		t.Fatal(err)

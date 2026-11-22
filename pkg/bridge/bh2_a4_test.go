@@ -13,6 +13,9 @@ import (
 )
 
 func TestSmallLibraryDeferredMountWritesPendingAndResumes(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	dir := filepath.Join(root, "Engine Library", "Database2")

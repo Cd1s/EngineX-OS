@@ -16,6 +16,9 @@ import (
 )
 
 func TestMountImportDoesNotRemoveEngineOpenEmptyDatabase(t *testing.T) {
+	if InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	p := filepath.Join(root, "Engine Library", "Database2", "m.db")
@@ -42,6 +45,7 @@ func TestMountImportDoesNotRemoveEngineOpenEmptyDatabase(t *testing.T) {
 }
 
 func TestMountImportPreservesConcurrentEngineWrite(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"DELETE", "WAL"} {
 		t.Run(mode, func(t *testing.T) {
 			p, root, engine := testlibrary.Create(t)

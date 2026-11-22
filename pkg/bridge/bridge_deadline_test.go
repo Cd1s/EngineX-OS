@@ -11,6 +11,9 @@ import (
 )
 
 func TestConvertAtMountKeepsOverviewDeadlineWhenImportFails(t *testing.T) {
+	if InChildForTest(t) {
+		return
+	}
 	oldHookBudget := maxMountHookBudget
 	maxMountHookBudget = 2 * time.Second
 	t.Cleanup(func() { maxMountHookBudget = oldHookBudget })

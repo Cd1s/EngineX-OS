@@ -393,6 +393,9 @@ func issue321Whole(stick, rel string) bool {
 // The reviewer's two scenarios: 4 KiB and 32 KiB clusters, the stick nearly full, a stale
 // ANLZ0000.DAT and a stale export.pdb.
 func TestIssue321AStickWithStaleEntriesIsNotWrittenUntilADiskCheck(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	for _, tc := range []struct {
 		name string
 		spc  int
@@ -405,7 +408,7 @@ func issue321StaleStick(t *testing.T, spc int) {
 	ctx := context.Background()
 	work := t.TempDir()
 	img, mnt := vfatImageOf(t, work, 64, spc)
-	opts := bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true}
+	opts := bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", SkipPreparingCheck: true}
 	const cue, genre = "Stale 321", "Stale Genre 321"
 	targets := []string{"PIONEER/USBANLZ/P001/ANLZ0000.DAT", "PIONEER/rekordbox/export.pdb"}
 
@@ -557,6 +560,9 @@ func issue321StaleStick(t *testing.T, spc int) {
 // is in /run now (beside the stick in a test). Layouts: a normal root, a full root directory
 // cluster, and the pass's own mark left stale by a cut.
 func TestIssue321ARefusedFirstPassLeavesTheStickAsItWas(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	for _, layout := range []string{"normal root", "full root directory cluster", "a stale mark"} {
 		t.Run(layout, func(t *testing.T) { issue321FirstPassRefused(t, layout) })
 	}
@@ -566,7 +572,7 @@ func issue321FirstPassRefused(t *testing.T, layout string) {
 	ctx := context.Background()
 	work := t.TempDir()
 	img, mnt := vfatImageOf(t, work, 64, 8)
-	opts := bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true}
+	opts := bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", SkipPreparingCheck: true}
 	stale := "PIONEER/USBANLZ/P001/ANLZ0000.DAT"
 	if layout == "a stale mark" {
 		stale = "Engine Library/Database2/.rb-bridge-writeback"
@@ -690,6 +696,9 @@ func issue321FirstPassRefused(t *testing.T, layout string) {
 // pass is caught with its staged copy (the one its mark names) and its mark on the stick (both are
 // put back after it ends, as a pull at that step leaves them), then the next insert.
 func TestIssue321TheNextInsertRemovesStagedCopies(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	for _, fsType := range []string{"exfat", "vfat"} {
 		t.Run(fsType, func(t *testing.T) {
 			ctx := context.Background()
@@ -731,7 +740,7 @@ func TestIssue321TheNextInsertRemovesStagedCopies(t *testing.T) {
 					}
 				}
 			})
-			res, err := bridge.WriteBackCues(ctx, mnt, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true})
+			res, err := bridge.WriteBackCues(ctx, mnt, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", SkipPreparingCheck: true})
 			restore()
 			if err != nil || res.FilesUpdated == 0 || copyName == "" || len(markBytes) == 0 {
 				t.Fatalf("pass: %+v %v; staged copy %q, mark %d bytes", res, err, copyName, len(markBytes))
@@ -766,6 +775,9 @@ func TestIssue321TheNextInsertRemovesStagedCopies(t *testing.T) {
 // (the pass holds the stick's lock file open), visibly (EBUSY); the hook then clears its
 // rb-ejected mark, and the watcher writes the stick again; a second Eject unmounts it.
 func TestIssue321EjectDuringTheFinalPassFailsVisiblyAndTheNextOneWorks(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	ctx := context.Background()
 	img, mnt := vfatImage(t, t.TempDir())
 	src := setupWriteBackStick(t, true)

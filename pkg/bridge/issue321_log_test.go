@@ -42,6 +42,9 @@ var issue321Line = regexp.MustCompile(`rb-bridge: cue write-back of \S+ done: (\
 
 // #321: every pass logs one line with the time of each phase, what it read and what it wrote.
 func TestIssue321OneLogLinePerPass(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
 	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
@@ -51,7 +54,7 @@ func TestIssue321OneLogLinePerPass(t *testing.T) {
 	log.SetOutput(&out)
 	defer log.SetOutput(os.Stderr)
 	injectDeckCueEdit(t, stick)
-	if _, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true}); err != nil {
+	if _, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", SkipPreparingCheck: true}); err != nil {
 		t.Fatal(err)
 	}
 	lines := out.lines("cue write-back of")
@@ -62,7 +65,7 @@ func TestIssue321OneLogLinePerPass(t *testing.T) {
 	if m == nil || m[1] != "2" || m[3] != "1" || m[5] == "0" || m[6] == "0" {
 		t.Fatalf("pass that wrote a track and the export: %q", lines[0])
 	}
-	if _, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true}); err != nil {
+	if _, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", SkipPreparingCheck: true}); err != nil {
 		t.Fatal(err)
 	}
 	lines = out.lines("cue write-back of")
@@ -80,7 +83,7 @@ func TestIssue321OneLogLinePerPass(t *testing.T) {
 		t.Fatal(err)
 	}
 	sdb.Close()
-	if _, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", OnEject: true}); err != nil {
+	if _, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", OnEject: true}); err != nil {
 		t.Fatal(err)
 	}
 	lines = out.lines("cue write-back of")

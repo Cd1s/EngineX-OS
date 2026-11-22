@@ -146,10 +146,13 @@ func issue321Read(res bridge.WriteBackResult) int {
 }
 
 func TestIssue321UntouchedTracksAreNotRead(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	const n = 40
 	stick, db := issue321Stick(t, n)
 	issue321Bloat(t, db)
-	res, read := issue321Pass(t, stick, bridge.WriteBackOptions{})
+	res, read := issue321Pass(t, stick, bridge.WriteBackOptions{Keys: testKeys})
 	if res.TracksChecked != n || res.TracksChanged != 0 {
 		t.Fatalf("untouched stick: %+v", res)
 	}
@@ -163,11 +166,14 @@ func TestIssue321UntouchedTracksAreNotRead(t *testing.T) {
 }
 
 func TestIssue321EditIsFoundAndOnlyItIsRead(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	const n = 40
 	stick, db := issue321Stick(t, n)
 	issue321Bloat(t, db)
 	issue321Edit(t, db, 7, "Deck 321", 1000)
-	res, read := issue321Pass(t, stick, bridge.WriteBackOptions{})
+	res, read := issue321Pass(t, stick, bridge.WriteBackOptions{Keys: testKeys})
 	if res.TracksChanged != 1 || issue321Read(res) != 1 || !issue321ANLZHas(t, stick, "Deck 321") {
 		t.Fatalf("edit of track 7 not written back: %+v", res)
 	}
@@ -176,12 +182,12 @@ func TestIssue321EditIsFoundAndOnlyItIsRead(t *testing.T) {
 	}
 	// Written: the next pass writes nothing (it reads at most the edited row, which the pass
 	// that wrote it read in the second of the edit), and a later edit of the track is found.
-	if res, _ = issue321Pass(t, stick, bridge.WriteBackOptions{}); issue321Read(res) > 1 || res.TracksChanged != 0 {
+	if res, _ = issue321Pass(t, stick, bridge.WriteBackOptions{Keys: testKeys}); issue321Read(res) > 1 || res.TracksChanged != 0 {
 		t.Fatalf("second pass after the write: %+v", res)
 	}
 	issue321Settle()
 	issue321Edit(t, db, 7, "Deck 321 again", 2000)
-	if res, _ = issue321Pass(t, stick, bridge.WriteBackOptions{}); res.TracksChanged != 1 || !issue321ANLZHas(t, stick, "Deck 321 again") {
+	if res, _ = issue321Pass(t, stick, bridge.WriteBackOptions{Keys: testKeys}); res.TracksChanged != 1 || !issue321ANLZHas(t, stick, "Deck 321 again") {
 		t.Fatalf("second edit of track 7 not written back: %+v", res)
 	}
 }
@@ -189,16 +195,19 @@ func TestIssue321EditIsFoundAndOnlyItIsRead(t *testing.T) {
 // A track edited before a pull is found at the next pass: nothing is recorded until the stick
 // holds the edit, neither when the stick went before any pass nor when it went in the middle.
 func TestIssue321EditBeforeAPullIsFoundAtTheNextPass(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	stick, db := issue321Stick(t, 12)
 	issue321Edit(t, db, 3, "Before pull", 1500)
 	pulled := errors.New("stick pulled")
-	res, err := bridge.WriteBackCues(context.Background(), stick, bridge.WriteBackOptions{SkipPreparingCheck: true, DateDir: "2026-11-22",
+	res, err := bridge.WriteBackCues(context.Background(), stick, bridge.WriteBackOptions{Keys: testKeys, SkipPreparingCheck: true, DateDir: "2026-11-22",
 		BeforeRename: func(string) error { return pulled }})
 	if !errors.Is(err, pulled) || issue321ANLZHas(t, stick, "Before pull") {
 		t.Fatalf("cut pass: %+v %v", res, err)
 	}
 	// The next mount: a new caller, no session.
-	if res, _ = issue321Pass(t, stick, bridge.WriteBackOptions{}); res.TracksChanged != 1 || !issue321ANLZHas(t, stick, "Before pull") {
+	if res, _ = issue321Pass(t, stick, bridge.WriteBackOptions{Keys: testKeys}); res.TracksChanged != 1 || !issue321ANLZHas(t, stick, "Before pull") {
 		t.Fatalf("edit made before the pull was not found: %+v", res)
 	}
 }

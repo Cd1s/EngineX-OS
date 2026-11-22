@@ -14,7 +14,6 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
-	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 // #321 review R4b (c′): every file a pass writes on the stick to rename or remove later (a staged
@@ -26,6 +25,9 @@ import (
 // their clusters and a disk check cut live files). A first pass on a OneLibrary stick runs under
 // strace in a child process; the order of its fsync calls is checked.
 func TestIssue321AStagedFilesDirectoryIsSyncedBeforeTheFile(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	if os.Getenv("ISSUE321_R4B_CHILD") == "1" {
 		issue321FirstPassOnOneLibrary(t)
 		return
@@ -116,7 +118,7 @@ func issue321FirstPassOnOneLibrary(t *testing.T) {
 	issue321Settle()
 	issue321Edit(t, db, 1, "Order 321", 1000)
 	issue321Settle()
-	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{}, Keys: rekordbox.NewKeyCache(), Settled: func() error { return nil }})
+	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{}, Keys: testKeys, Settled: func() error { return nil }})
 	if err != nil || res.FilesUpdated == 0 || !res.OneLibraryUpdated || res.BackupDir == "" {
 		t.Fatalf("first pass: %+v %v", res, err)
 	}

@@ -13,6 +13,7 @@ import (
 )
 
 func TestUppercasePDB(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	old := filepath.Join(root, "PIONEER/rekordbox")
@@ -29,6 +30,7 @@ func TestUppercasePDB(t *testing.T) {
 }
 
 func TestSmartMatchUsesCachedAnalysisBPM(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	l, e := bridge.ReadLibrary(context.Background(), root)
@@ -56,6 +58,7 @@ func TestSmartMatchUsesCachedAnalysisBPM(t *testing.T) {
 }
 
 func TestMoveAndSwapPathsRetainEngineIDs(t *testing.T) {
+	t.Parallel()
 	// #4: the fast (mount-time) import must finish staged moves too, after a
 	// full import and after a fast one.
 	for _, c := range []struct {
@@ -111,6 +114,7 @@ func TestMoveAndSwapPathsRetainEngineIDs(t *testing.T) {
 }
 
 func TestFailedImportRollsBackBridgeSchema(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	convert(t, root, enginedb.Options{})
@@ -139,6 +143,7 @@ CREATE TRIGGER fail_import BEFORE INSERT ON PlaylistEntity BEGIN SELECT RAISE(AB
 // Engine drops unknown tables from m.db on attach, then resets again on every
 // attach if they return, so m.db must stay free of them across repeat imports.
 func TestEngineSchemaResetKeepsBridgeState(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	convert(t, root, enginedb.Options{})
@@ -165,6 +170,7 @@ func TestEngineSchemaResetKeepsBridgeState(t *testing.T) {
 // Engine may recreate imported playlists under new ids. The next import must
 // refill them instead of adding "(rekordbox)" copies.
 func TestRebuiltPlaylistIsAdoptedNotDuplicated(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	convert(t, root, enginedb.Options{})
@@ -196,6 +202,7 @@ DROP TABLE saved;`); e != nil {
 // #5: an interrupted publish is completed by the next run, so m.db and the
 // bridge state never come from different imports; stale sidecars are dropped.
 func TestInterruptedFastPublishIsCompleted(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	stage := filepath.Join(dir, ".rb-bridge-publish")
 	os.Mkdir(stage, 0o755)
@@ -229,6 +236,7 @@ func TestInterruptedFastPublishIsCompleted(t *testing.T) {
 
 // #6: the fast import stores the spelling on the volume, not the export's.
 func TestFastImportResolvesTheVolumeSpelling(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	if err := os.Rename(filepath.Join(root, "MUSIC/three.wav"), filepath.Join(root, "MUSIC/Three.WAV")); err != nil {

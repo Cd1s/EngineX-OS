@@ -208,6 +208,7 @@ func lockGrid(t *testing.T, root string) {
 }
 
 func TestOneOffsetRuleUSBRowMatchesLink(t *testing.T) {
+	t.Parallel()
 	root := ruleStick(t)
 	ruleConvert(t, root, enginedb.Options{})
 	off := ruleOffset(t, root)
@@ -221,6 +222,7 @@ func TestOneOffsetRuleUSBRowMatchesLink(t *testing.T) {
 // A library an older build completed with the frame-plus-delay offset, its rows never
 // loaded: the next mount reads it again once.
 func TestOneOffsetRuleCompletedLibraryIsReadAgainOnce(t *testing.T) {
+	t.Parallel()
 	root := ruleStick(t)
 	ruleConvert(t, root, enginedb.Options{})
 	off := ruleOffset(t, root)
@@ -241,6 +243,7 @@ func TestOneOffsetRuleCompletedLibraryIsReadAgainOnce(t *testing.T) {
 // the row; a stock player, Engine DJ on a computer, a linked deck reading the stick over
 // the network and a read-only stick cannot.
 func TestOneOffsetRuleConvertedRowHasNoMark(t *testing.T) {
+	t.Parallel()
 	root := ruleStick(t)
 	ruleConvert(t, root, enginedb.Options{})
 	if readRuleRow(t, root).marked {
@@ -252,6 +255,7 @@ func TestOneOffsetRuleConvertedRowHasNoMark(t *testing.T) {
 // file's offset, so the cues are at rekordbox's raw position and carry the import mark, the
 // one case where Engine's own correction is the only one. The full import replaces both.
 func TestOneOffsetRuleFastImportCuesAreRawAndMarked(t *testing.T) {
+	t.Parallel()
 	root := ruleStick(t)
 	l, err := bridge.ReadLibrary(context.Background(), root)
 	if err != nil {
@@ -285,6 +289,7 @@ func TestOneOffsetRuleFastImportCuesAreRawAndMarked(t *testing.T) {
 // the MP3 offset existed, loaded without Engine's own correction), raw - 2292 (the same,
 // loaded with it) and raw - 2257 (converted with the frame-plus-delay offset).
 func TestOneOffsetRuleFrozenRowsAreConvertedAgainOnce(t *testing.T) {
+	t.Parallel()
 	for _, old := range []int{0, 2292, 2257} {
 		root := ruleStick(t)
 		ruleConvert(t, root, enginedb.Options{})
@@ -313,6 +318,7 @@ func TestOneOffsetRuleFrozenRowsAreConvertedAgainOnce(t *testing.T) {
 }
 
 func TestOneOffsetRuleDeckEditsStay(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name                       string
 		lock                       bool
@@ -368,6 +374,7 @@ func TestOneOffsetRuleDeckEditsStay(t *testing.T) {
 // The M4A of the 2026-11-18 report: converted before the AAC priming was read (grid at the
 // raw rekordbox position), loaded on a deck, then mounted by a build that reads it.
 func TestOneOffsetRuleFrozenAACRowGetsThePriming(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	rel := testfixture.AACExport(t, root)
 	audio := filepath.Join(root, rel)
@@ -405,6 +412,9 @@ func TestOneOffsetRuleFrozenAACRowGetsThePriming(t *testing.T) {
 // It carried the whole live row, so a row Engine had loaded came back at the older import's
 // position whatever the build had made of it.
 func TestOneOffsetRuleStagedUpdateCorrectsARowEngineHasLoaded(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := ruleStick(t)
 	ruleConvert(t, root, enginedb.Options{})
 	off := ruleOffset(t, root)

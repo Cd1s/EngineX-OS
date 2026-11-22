@@ -14,6 +14,7 @@ import (
 // #53: one unreadable file used to fail the whole first import and leave an
 // empty m.db, which Engine showed as an empty library with no rekordbox prompt.
 func TestIssue53OneBadTrackKeepsTheRest(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	testfixture.Write(t, root, "MUSIC/three.wav", []byte("not a wav file at all"))
@@ -44,6 +45,7 @@ func TestIssue53OneBadTrackKeepsTheRest(t *testing.T) {
 }
 
 func TestIssue53FailedFirstImportLeavesNoLibrary(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	testfixture.Write(t, root, "Engine Library/Database2/m.db", nil)
@@ -60,6 +62,7 @@ func TestIssue53FailedFirstImportLeavesNoLibrary(t *testing.T) {
 // A stock Engine that saw a rekordbox stick leaves a skeleton m.db with an empty
 // Track table; that is not a library, so the export is still converted.
 func TestEmptySkeletonMDBIsConverted(t *testing.T) {
+	t.Parallel()
 	donor := t.TempDir()
 	testfixture.Export(t, donor)
 	first, err := bridge.ConvertAtMount(context.Background(), donor, enginedb.Options{}, false)

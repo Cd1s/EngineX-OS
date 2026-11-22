@@ -16,6 +16,7 @@ import (
 )
 
 func TestIssue272LegacyCappedStateDBShrinksAndBackfills(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	const totalTracks = 40
 	const legacyKept = 25

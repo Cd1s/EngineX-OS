@@ -28,7 +28,7 @@ func guardStick(t *testing.T, n int) string {
 	_, root, skeleton := testlibrary.Create(t)
 	skeleton.Close()
 	testfixture.LargeExport(t, root, n)
-	if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, true); err != nil {
+	if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{Deadline: time.Now().Add(time.Hour)}, true); err != nil {
 		t.Fatal(err)
 	}
 	if tracks, _ := guardCounts(t, root); tracks != n {
@@ -93,6 +93,9 @@ func guardHide(t *testing.T, root string, n, count int) (restore func()) {
 
 // A tenth of the stick: 71 of 600 tracks the export lists and the library has imported.
 func TestUpdateKeepsTheTracksWhoseFilesCannotBeFound(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	const n, unreadable = 600, 71
 	root := guardStick(t, n)
 	_, entries := guardCounts(t, root)
@@ -168,6 +171,9 @@ func TestUpdateKeepsTheTracksWhoseFilesCannotBeFound(t *testing.T) {
 // between its first and its second remount): its tracks have no grid yet and nothing of the
 // deck's, and are kept all the same.
 func TestUpdateKeepsTheTracksOfAStickListedFromItsExport(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	const n, unreadable = 100, 30
 	_, root, skeleton := testlibrary.Create(t)
 	skeleton.Close()
@@ -211,6 +217,9 @@ func TestUpdateKeepsTheTracksOfAStickListedFromItsExport(t *testing.T) {
 // Neighbours that stay as they were: files deleted from the stick after the export, few or
 // many, tracks deleted in rekordbox, and tracks whose files were never on the stick.
 func TestUpdateStillRemovesWhatIsGone(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	const n = 100
 	ctx := context.Background()
 	updated := func(what, root string, want int) {

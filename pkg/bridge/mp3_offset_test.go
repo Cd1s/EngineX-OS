@@ -143,6 +143,7 @@ func makeWAVWithSampleRate(sr int) []byte {
 // classes at both 44.1 kHz and 48 kHz, real file sample-rate authority over a
 // mismatched export rate, and one-shot re-conversion of already-imported sticks.
 func TestIssue178MP3OffsetClassesAndExistingLibraryResync(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 
 	// 8 tracks: 4 classes at 44.1 kHz + 4 classes at 48 kHz.

@@ -97,6 +97,7 @@ func seedEngineXMP3GridAtMount(t *testing.T, opts enginedb.Options) (string, fun
 }
 
 func TestConvertAtMountFixesEngineXMP3Grids(t *testing.T) {
+	t.Parallel()
 	root, readBeat0 := seedEngineXMP3GridAtMount(t, enginedb.Options{})
 
 	// Next mount hits the rekordbox stamp bypass yet still fixes the EngineX MP3 row.
@@ -120,6 +121,9 @@ func TestConvertAtMountFixesEngineXMP3Grids(t *testing.T) {
 
 // #246: the MP3 grid pass must share the conversion's read deadline.
 func TestConvertAtMountMP3GridsShareReadBudget(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, readBeat0 := seedEngineXMP3GridAtMount(t, enginedb.Options{Fast: true})
 	if err := os.Remove(filepath.Join(root, "Engine Library/Database2/.rb-bridge-stamp")); err != nil {
 		t.Fatal(err)

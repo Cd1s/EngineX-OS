@@ -23,6 +23,7 @@ import (
 // chains that its header names. Every 512-byte cut of each must be refused, and the whole file
 // taken.
 func TestIssue321AStagedCopyCutAnywhereIsNotPutBack(t *testing.T) {
+	t.Parallel()
 	plain, err := os.ReadFile(filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary_decrypted.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -117,13 +118,16 @@ func issue321WithHistory(t *testing.T, plain []byte) []byte {
 // ANLZ files only, and those already held them, so a OneLibrary export put back from its original
 // kept the original's cues for good (rekordbox showed them, a CDJ reading .EXT the deck's).
 func TestIssue321AnExportPutBackFromItsOriginalIsWrittenAgain(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
 	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
 		t.Fatal(err)
 	}
 	opts := func() bridge.WriteBackOptions {
-		return bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{}, Keys: rekordbox.NewKeyCache(), Settled: func() error { return nil }}
+		return bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{}, Keys: testKeys, Settled: func() error { return nil }}
 	}
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(stick, "Engine Library", "Database2", "m.db")}).String())
 	if err != nil {
@@ -173,7 +177,7 @@ func TestIssue321AnExportPutBackFromItsOriginalIsWrittenAgain(t *testing.T) {
 	if res, err = bridge.WriteBackCues(ctx, cut, opts()); err != nil {
 		t.Fatalf("the pass after the insert: %+v %v", res, err)
 	}
-	l, err := rekordbox.ReadSQLite(ctx, export, nil)
+	l, err := rekordbox.ReadSQLiteKeys(ctx, export, nil, testKeys)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,6 +202,7 @@ func TestIssue321AnExportPutBackFromItsOriginalIsWrittenAgain(t *testing.T) {
 // directory can be a symbolic link; a line through one must not lead the clean-up or the put-back
 // outside the mount.
 func TestIssue321AMarkLineThroughASymbolicLinkStaysInsideTheMount(t *testing.T) {
+	t.Parallel()
 	stick, outside := t.TempDir(), t.TempDir()
 	db2 := filepath.Join(stick, "Engine Library", "Database2")
 	for _, d := range []string{db2, filepath.Join(stick, "PIONEER")} {

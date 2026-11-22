@@ -136,6 +136,7 @@ func entityChain(t *testing.T, db *sql.DB, list int64) []int64 {
 }
 
 func TestEndToEndPDBAnalysisNFDIncrementalSmartMatch(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	before := snapshot(t, filepath.Join(root, "PIONEER"))
@@ -329,6 +330,7 @@ func TestEndToEndPDBAnalysisNFDIncrementalSmartMatch(t *testing.T) {
 }
 
 func TestEngineOnlyBypassAndProtectedSource(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Write(t, root, "Engine Library/Database2/m.db", []byte("native engine library"))
 	before := snapshot(t, root)
@@ -370,6 +372,7 @@ func TestEngineOnlyBypassAndProtectedSource(t *testing.T) {
 }
 
 func TestFailedUpdateRollsBack(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	convert(t, root, enginedb.Options{})
@@ -395,6 +398,7 @@ func TestFailedUpdateRollsBack(t *testing.T) {
 }
 
 func TestSQLiteIntelligentAndNativeRows(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Write(t, root, "MUSIC/a.wav", testfixture.WAV(true))
 	p := filepath.Join(root, "PIONEER/rekordbox/exportLibrary.db")
@@ -440,6 +444,7 @@ func TestSQLiteIntelligentAndNativeRows(t *testing.T) {
 }
 
 func TestErrorMessages(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	_, e := bridge.Convert(context.Background(), root, enginedb.Options{SmartMatch: true, CurrentTrack: 99})

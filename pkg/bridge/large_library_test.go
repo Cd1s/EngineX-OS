@@ -19,6 +19,9 @@ import (
 // the first mount and stamped as imported, so its hot cues, memory cues,
 // loops, beat grids and waveforms were never read on any later mount.
 func TestLargeLibraryGetsItsCuesLoopsAndGridOnTheNextMount(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	const n = largeTracks
 	root := largeExport(t)
 	stamp := filepath.Join(root, "Engine Library/Database2/.rb-bridge-stamp")
@@ -98,6 +101,9 @@ INSERT INTO playlist VALUES(1,0,'Big Set',0,1,'');`); err != nil {
 // A stick that an earlier build stamped right after the export-only import is
 // finished too, instead of being skipped for good.
 func TestLargeLibraryResumesAndHealsAnOldStamp(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := largeExport(t)
 	ctx := context.Background()
 	far := enginedb.Options{Deadline: time.Now().Add(time.Hour)}
