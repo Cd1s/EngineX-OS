@@ -10,6 +10,7 @@ cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || :; done; wait 2>/
 trap cleanup EXIT
 mkdir -p "$W/bin"
 export BOOT_TEST_LOG=$W/systemctl.log ENGINEX_ENGINE_GUARDIAN=$W/bin/guardian
+export BOOT_TEST_RB_BRIDGE_LOG=$W/rb-bridge.log ENGINEX_RB_BRIDGE=$W/bin/rb-bridge ENGINEX_STREAM_SYNC=$W/bin/forbidden
 export ENGINEX_PERF_TUNE=/bin/true
 export ENGINEX_BOOT_TIMEOUT=2 ENGINEX_BOOT_POLL_INTERVAL=.1 ENGINEX_UI_HOOK=/nonexistent/test-only-hook.so
 cat > "$W/bin/systemctl" <<'SH'
@@ -20,6 +21,10 @@ SH
 cat > "$W/bin/guardian" <<'SH'
 #!/bin/sh
 exit 0
+SH
+cat > "$W/bin/rb-bridge" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$BOOT_TEST_RB_BRIDGE_LOG"
 SH
 cat > "$W/bin/engine" <<'SH'
 #!/bin/sh
@@ -210,3 +215,11 @@ echo 'PASS compatibility UI paths stay inside the test root'
 if grep -Eq 'erase-data|FactoryReset|reboot' "$BOOT_TEST_LOG"; then fail 'destructive action'; fi
 [ "$(stat -c %Y "$host_mark" 2>/dev/null || echo absent)" = "$host_mark_before" ] || fail 'the test wrote the host mark /run/enginex-engine-guard.pre'
 [ ! -e "$BOOT_TEST_FORBIDDEN_LOG" ] || fail 'test attempted host process or mount control'
+[ -s "$BOOT_TEST_RB_BRIDGE_LOG" ] || fail 'rb-bridge stand-in was not called (ENGINEX_RB_BRIDGE ignored)'
+while IFS= read -r call; do
+    case $call in
+        "--prune-rgb-overviews $W/"*"/Engine Library/Database2") ;;
+        *) fail "rb-bridge call escaped test root: $call" ;;
+    esac
+done < "$BOOT_TEST_RB_BRIDGE_LOG"
+echo 'PASS rb-bridge calls stayed inside the test root and stream-sync stayed unused'

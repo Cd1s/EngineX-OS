@@ -113,7 +113,7 @@ launch)
     # confirmed transaction before the next Engine reads its settings.
     copy_dir=$(readlink -f "$UI/../settings-copy")
     if [ ! -e "$UI/safe-mode" ] && [ -n "$copy_dir" ] && [ -f "$copy_dir/operation.json" ]; then
-        if ! /usr/local/bin/stream-sync --settings-copy-prestart; then
+        if ! "${ENGINEX_STREAM_SYNC:-/usr/local/bin/stream-sync}" --settings-copy-prestart; then
             rm -f "$copy_dir/active-drive"
             echo 'EngineX settings preparation failed; import not started' >&2
         else
@@ -280,7 +280,7 @@ pre|settings)
     else
         # Engine's RGB overview files that are not their track's own (an old replay's 3-band
         # bytes, empty ones, another track's) go before Engine reads them; it builds them again.
-        /usr/local/bin/rb-bridge --prune-rgb-overviews "${ENGINEX_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}/Engine Library/Database2" 2>&1 || :
+        "${ENGINEX_RB_BRIDGE:-/usr/local/bin/rb-bridge}" --prune-rgb-overviews "${ENGINEX_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}/Engine Library/Database2" 2>&1 || :
         overlay=$UI/mods-overlay
         if [ ! -d "$overlay" ] && [ -d "$primary_ui/mods-overlay" ]; then
             overlay=$primary_ui/mods-overlay

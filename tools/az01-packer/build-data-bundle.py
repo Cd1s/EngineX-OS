@@ -345,6 +345,8 @@ After=enginex-stream-sync.service
 UnsetEnvironment=LD_PRELOAD
 Environment="ENGINEX_UI_HOOK=$lib_hook"
 Environment="ENGINEX_ENGINE_GUARDIAN=$bin_dir/engine-guardian"
+Environment="ENGINEX_RB_BRIDGE=$bin_dir/rb-bridge"
+Environment="ENGINEX_STREAM_SYNC=$bin_dir/stream-sync"
 ExecStart=
 ExecStart=$bin_dir/engine-ui-guard service /usr/Engine/Scripts/runengine
 Environment="QT_LOGGING_CONF=/data/logging.ini"
