@@ -126,6 +126,9 @@ func (s *Server) shadowDebugGet(w http.ResponseWriter, r *http.Request) {
 	slices.SortFunc(decks, func(a, b peer) int { return a.Deck - b.Deck })
 	out := map[string]any{"enabled": sh.dbg.on.Load(), "ver": sh.ver, "own": slices.Clone(sh.own), "ownAgeMs": now.Sub(sh.ownAt).Milliseconds(),
 		"peers": peers, "peerDecks": decks, "peerSeq": maps.Clone(sh.peerSeq), "files": maps.Clone(sh.files), "running": sh.running}
+	// Console linking, stage 2: a console's listener and who asks; a player's row and the console decks it holds.
+	out["console"] = map[string]any{"hears": sh.hears.Load(), "listening": sh.askConn != nil, "asked": sh.askedNow(now), "askers": len(sh.askers),
+		"row": sh.askConsole.Load(), "decks": len(sh.consoleDecks)}
 	sh.mu.Unlock()
 	sh.display.mu.Lock()
 	ready, busy, detail := 0, 0, 0

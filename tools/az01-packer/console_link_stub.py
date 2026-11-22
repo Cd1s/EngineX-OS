@@ -2,7 +2,11 @@
 """Stand-in for stream-sync in test_console_link_sandbox.sh (stub mode): serves what the console's QML asks for
 and counts every request by kind. The Line In view's answer is built the way the real one is: the linked units present,
 in ascending player number, on the channels the QML names in ?line=, each with its player number and model; the
-answer is held 1 s while nothing changes (stream-sync's quiet poll). usage: console_link_stub.py <stats.jsonl>"""
+answer is held 1 s while nothing changes (stream-sync's quiet poll). usage: console_link_stub.py <stats.jsonl> [stage1|send|player]
+send (console linking, stage 2, the console side): also answers the console QML's held request
+(GET /v1/enginex/consolesend?asked=N, held up to 25 s until "somebody asks" differs from N; POST /ctl?asked=0|1 sets it)
+and counts it. player: this process stands in for a player's stream-sync (the JC11 Engine's QML is told it is a player in
+the 4-deck layout): with the row on (POST /ctl?row=1) its lane answer shows two console decks on the free lanes 3 and 4."""
 import collections
 import http.server
 import json
@@ -15,12 +19,13 @@ import urllib.parse
 import zlib
 
 stats_file = sys.argv[1]
+MODE = sys.argv[2] if len(sys.argv) > 2 else "stage1"
 UNITS = [  # the linked units: player one is an SC6000, player two a CDJ-3000
     {"player": 1, "model": "SC6000", "title": "Linked player one", "artist": "SC6000 deck 1", "bpm": 126.0, "color": (74, 120, 255, 255)},
     {"player": 2, "model": "CDJ-3000", "title": "Linked player two", "artist": "CDJ-3000", "bpm": 124.0, "color": (255, 150, 40, 255)},
     {"player": 3, "model": "SC5000", "title": "Linked player three", "artist": "SC5000 deck 3", "bpm": 128.0, "color": (90, 220, 120, 255)},
 ]
-state = {"consoleLineView": False, "units": 2, "cdjoff": False}  # units: how many of the linked units are on the network (the probe sets it per phase: POST /ctl?units=N&cdjoff=0|1: with 1 the only unit is the CDJ, Pro DJ Link off)
+state = {"consoleLineView": False, "units": 2, "cdjoff": False, "asked": False, "row": False}  # units: how many of the linked units are on the network (the probe sets it per phase: POST /ctl?units=N&cdjoff=0|1: with 1 the only unit is the CDJ, Pro DJ Link off)
 counts = collections.Counter()
 lock = threading.Lock()
 version = {"n": 1, "sig": ""}
@@ -67,7 +72,20 @@ def lanes(lines):
     return out
 
 
+def consoleLanes():
+    """Two decks of a console on a player's free lanes 3 and 4, as the player's stream-sync answers with the row on."""
+    now = int(time.time() * 1000)
+    out = []
+    for n, lane in ((1, 3), (2, 4)):
+        out.append({"deck": lane, "key": "console-%d" % n, "title": "Console deck %d" % n, "artist": "PRIME 4", "bpm": 126.0 + n, "console": n, "model": "PRIME4",
+                    "displayOnly": True, "displayDetail": True, "playing": True, "positionMs": 20000 * n, "durationMs": 240000, "at": now, "link": "{console}"})
+    return out
+
+
 def ui():
+    if MODE == "player":
+        return {"version": "5.3.0.6", "player": True, "fourDeckWaveform": True, "fourDeckRole": "12", "fourDeckRoleActive": "12", "pairedView": False,
+                "shadowMode": "auto", "sources": ["tidal"], "consoleDecks": state["row"], "consoleLineView": False}
     return {"version": "5.3.0.6", "player": False, "fourDeckWaveform": False, "fourDeckRole": "auto", "pairedView": False,
             "shadowMode": "auto", "sources": ["tidal"], "consoleLineView": state["consoleLineView"]}
 
@@ -94,6 +112,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(ui())
         if u.path == "/v1/enginex/views":
             return self.reply({"active": 1, "views": {}})
+        if u.path == "/v1/enginex/consolesend":
+            believed = q.get("asked", ["0"])[0] == "1"
+            end = time.time() + 25
+            while time.time() < end and state["asked"] == believed:
+                time.sleep(0.1)
+            return self.reply({"asked": state["asked"]})
+        if u.path == "/v1/enginex/shadow" and MODE == "player":
+            decks = consoleLanes() if state["row"] else []
+            time.sleep(0.25)
+            return self.reply({"role": "12", "decks": decks, "ver": 1 + len(decks), "debug": False, "displayOnly": False})
         if u.path == "/v1/enginex/shadow":
             lines = [int(c) for c in q.get("line", [""])[0].split(",") if c.strip().isdigit()]
             with lock:
@@ -115,7 +143,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             key = q.get("key", [""])[0]
             with lock:
                 counts["display of " + key] += 1
-            player = int(key.split("-")[1]) if key.startswith("peer-") else 1
+            player = int(key.split("-")[1]) if key.startswith(("peer-", "console-")) else 1
             base = "http://127.0.0.1:8080/tile.png?player=%d" % player
             unit = next((x for x in UNITS if x["player"] == player), UNITS[0])
             return self.reply({"key": key, "title": unit["title"], "artist": unit["artist"], "bpm": unit["bpm"], "keyName": "8A", "sampleRate": 44100,
@@ -142,7 +170,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             q = urllib.parse.parse_qs(u.query)
             state["units"] = max(0, min(len(UNITS), int(q.get("units", ["2"])[0])))
             state["cdjoff"] = q.get("cdjoff", ["0"])[0] == "1"
-            return self.reply({"units": state["units"], "cdjoff": state["cdjoff"]})
+            state["asked"] = q.get("asked", ["0"])[0] == "1"
+            state["row"] = q.get("row", ["0"])[0] == "1"
+            return self.reply({"units": state["units"], "cdjoff": state["cdjoff"], "asked": state["asked"], "row": state["row"]})
         if u.path == "/v1/enginex/ui":
             for k, v in urllib.parse.parse_qs(u.query).items():
                 if k == "consoleLineView":
