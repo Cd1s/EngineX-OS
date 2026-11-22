@@ -1,0 +1,115 @@
++ import InputAssignment 0.1
++         syncHoldAction: Action.None
+-         syncHoldAction: Action.InstantDouble
++     // EngineX button mapping: begin
++     // EngineX button mapping: PadModeSelect:30 shift -> waveform_cycle
++     ValueNoteAssignment {
++         objectName: "EngineX Map PadModeSelect:30 shift"
++         channel: deckConfig.midiChannel
++         note: 30
++         enabled: globalConfig.shift && deckConfig.inDJMode
++         output: ActionOutput {
++             target: PropertyTarget {
++                 path: "/GUI/Scripted/EngineXMapWaveform"
++             }
++         }
++     }
++     // EngineX button mapping: PadModeSelect:27 hold -> beat_jump_forward
++     ValueNoteAssignment {
++         objectName: "EngineX Map PadModeSelect:27 hold"
++         channel: deckConfig.midiChannel
++         note: 27
++         enabled: !globalConfig.shift && deckConfig.inDJMode
++         output: ComboActionOutput {
++             holdEnabled: true
++             holdTarget: PropertyTarget {
++                 path: deckConfig.activeDeckTrackPath + "BeatJump/JumpForward"
++             }
++         }
++     }
++     // EngineX button mapping: PadModeSelect:28 double -> sync
++     ValueNoteAssignment {
++         objectName: "EngineX Map PadModeSelect:28 double"
++         channel: deckConfig.midiChannel
++         note: 28
++         enabled: !globalConfig.shift && deckConfig.inDJMode
++         output: ComboActionOutput {
++             doubleEnabled: true
++             doubleTarget: PropertyTarget {
++                 path: deckConfig.activeDeckPath + "Sync"
++             }
++         }
++     }
++     // EngineX button mapping: PadModeSelect:29 shift -> loop_halve
++     ValueNoteAssignment {
++         objectName: "EngineX Map PadModeSelect:29 shift"
++         channel: deckConfig.midiChannel
++         note: 29
++         enabled: globalConfig.shift && deckConfig.inDJMode
++         output: IncDecValueOutput {
++             target: PropertyTarget {
++                 path: deckConfig.activeDeckTrackPath + "LoopHalveDouble"
++             }
++             changeAmount: 0.1
++             increaseValue: false
++             roundRobin: false
++             minimum: 0.0
++             maximum: 1.0
++         }
++     }
++     // EngineX button mapping: PadModeSelect:29 hold -> key_lock
++     ValueNoteAssignment {
++         objectName: "EngineX Map PadModeSelect:29 hold"
++         channel: deckConfig.midiChannel
++         note: 29
++         enabled: !globalConfig.shift && deckConfig.inDJMode
++         output: ComboActionOutput {
++             holdEnabled: true
++             holdTarget: PropertyTarget {
++                 path: deckConfig.activeDeckTrackPath + "KeyLock"
++             }
++         }
++     }
++     // EngineX button mapping: PadModeSelect:27 shift -> censor
++     ValueNoteAssignment {
++         objectName: "EngineX Map PadModeSelect:27 shift"
++         channel: deckConfig.midiChannel
++         note: 27
++         enabled: globalConfig.shift && deckConfig.inDJMode
++         output: ActionOutput {
++             target: PropertyTarget {
++                 path: deckConfig.censorIsSilentCue ? deckConfig.activeDeckPath + "SilentCue" : deckConfig.activeDeckTrackPath + "Bleep"
++             }
++         }
++     }
++     // EngineX button mapping: PadModeSelect:28 shift -> loop_double
++     ValueNoteAssignment {
++         objectName: "EngineX Map PadModeSelect:28 shift"
++         channel: deckConfig.midiChannel
++         note: 28
++         enabled: globalConfig.shift && deckConfig.inDJMode
++         output: IncDecValueOutput {
++             target: PropertyTarget {
++                 path: deckConfig.activeDeckTrackPath + "LoopHalveDouble"
++             }
++             changeAmount: 0.1
++             increaseValue: true
++             roundRobin: false
++             minimum: 1.0
++             maximum: 0.0
++         }
++     }
++     // EngineX button mapping: Sync:20 hold -> cue_countdown_toggle
++     ValueNoteAssignment {
++         objectName: "EngineX Map Sync:20 hold"
++         channel: deckConfig.midiChannel
++         note: 20
++         enabled: !globalConfig.shift && deckConfig.inDJMode
++         output: ComboActionOutput {
++             holdEnabled: true
++             holdTarget: PropertyTarget {
++                 path: "/GUI/Scripted/EngineXMapCueCountdown"
++             }
++         }
++     }
++     // EngineX button mapping: end
