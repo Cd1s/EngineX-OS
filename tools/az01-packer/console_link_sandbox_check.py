@@ -92,8 +92,13 @@ def totals(rows):
     c = rows[-1]["counts"]
     keys = 5
     d, t = c.get("GET /v1/enginex/shadow/display", 0), c.get("GET /tile.png", 0)
+    asked = sorted((k[len("display of "):], v) for k, v in c.items() if k.startswith("display of "))
+    print("display assets asked for, by key: %s" % asked)
     check(d == keys, "the whole run asked for the display of %d lane keys, once each, and none for the metadata-only CDJ lane (%d requests)" % (keys, d))
-    check(0 < t <= 4 * keys, "the whole run fetched at most four pictures per lane key (%d tile requests for %d keys)" % (t, keys))
+    # A lane's picture is its overview and its tile; the picture item asks again when its lane is built again (a channel that
+    # went back to Engine and came back), so the bound is loose on purpose: the rows of the stub run say that none is fetched
+    # while a lane stays (the last 10 s of every phase fetch no tile at all).
+    check(0 < t <= 6 * keys, "the whole run fetched at most six pictures per lane key (%d tile requests for %d keys)" % (t, keys))
     check(c.get("POST /v1/enginex/decks", 0) == 0 and c.get("POST /v1/enginex/decks/alive", 0) == 0, "the whole run: the console posted no deck")
 
 

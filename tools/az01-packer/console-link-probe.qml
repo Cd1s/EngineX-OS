@@ -74,7 +74,12 @@ Item {
         const m = eMain && eMain.scViewControls ? eMain.scViewControls() : null
         return m && m.deckCount && m.waveformCount ? m.deckCount.currentName + "/" + m.waveformCount.currentName : "none"
     }
-    function post(url) { const x = new XMLHttpRequest(); x.open("POST", url); x.send() }
+    function post(url, done) {
+        const x = new XMLHttpRequest()
+        x.open("POST", url)
+        if (done) x.onreadystatechange = function() { if (x.readyState === 4) done() }
+        x.send()
+    }
     function setLines(list) {
         let mask = 0
         for (let d = 1; d <= 4; d++) {
@@ -128,12 +133,14 @@ Item {
         log("LAYOUTNOW|" + name + "|" + layoutNames())
         log("BUSY|" + name + "|" + JSON.stringify(busyTexts()))
     }
-    function begin(i) {
-        idx = i; phaseAt = Date.now(); logged = false; shot = false; layoutAt = 3000
+    property int pendingPhase: -1
+    // The stub's answer is set before the channels change: a poll caused by the channel change must meet the units of
+    // this phase, or it shows (and fetches the picture of) a unit that is only there for the phase before. A real
+    // stream-sync answers /ctl with 404, which is as good as an answer; the timer covers a server that does not.
+    function applyPhase(i) {
+        if (pendingPhase !== i || idx !== i) return
+        pendingPhase = -1
         const ph = plan[i]
-        log("BEGIN|" + ph.n + "|" + phaseAt)
-        post("http://127.0.0.1:8080/v1/enginex/ui?consoleLineView=" + ph.on)
-        post("http://127.0.0.1:8080/ctl?units=" + ph.units + "&cdjoff=" + (ph.cdjoff || 0)) // stub only: how many linked units are on the network in this phase
         setLines(ph.line)
         if (writeFailed && eMain.scConsoleLine) eMain.scLineMask = wantMask
         // A channel that went back to its Engine input has let go of its lane in this very turn, before any poll.
@@ -141,6 +148,16 @@ Item {
         // Stock's own Layout choice, set again at every phase in case the view system put its saved layout back.
         if (ph.line.length > 0 || i === 0) { const ok = fourWaveforms(); log("LAYOUT|" + ph.n + "|" + (ok ? "set_" + layoutNames() : "not_available")) }
     }
+    function begin(i) {
+        idx = i; phaseAt = Date.now(); logged = false; shot = false; layoutAt = 3000
+        const ph = plan[i]
+        log("BEGIN|" + ph.n + "|" + phaseAt)
+        post("http://127.0.0.1:8080/v1/enginex/ui?consoleLineView=" + ph.on)
+        pendingPhase = i
+        applyTimer.restart()
+        post("http://127.0.0.1:8080/ctl?units=" + ph.units + "&cdjoff=" + (ph.cdjoff || 0), function() { p.applyPhase(i) }) // stub only: the linked units on the network in this phase
+    }
+    Timer { id: applyTimer; interval: 1500; repeat: false; onTriggered: p.applyPhase(p.pendingPhase) }
     Timer {
         interval: 250; running: true; repeat: true
         onTriggered: {

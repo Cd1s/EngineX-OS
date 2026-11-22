@@ -113,6 +113,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply({"role": "line", "decks": decks, "ver": version["n"], "debug": False, "displayOnly": True}, headers)
         if u.path == "/v1/enginex/shadow/display":
             key = q.get("key", [""])[0]
+            with lock:
+                counts["display of " + key] += 1
             player = int(key.split("-")[1]) if key.startswith("peer-") else 1
             base = "http://127.0.0.1:8080/tile.png?player=%d" % player
             unit = next((x for x in UNITS if x["player"] == player), UNITS[0])
