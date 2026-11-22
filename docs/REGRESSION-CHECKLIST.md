@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (397 Rows)
+## Regression Table (398 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -411,6 +411,8 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 | 396 | **Second-generation engine-ui-guard runs bundle rb-bridge (pre) and stream-sync (launch) via engine.service.d/99-enginex.conf instead of missing /usr/local/bin paths** | `tools/az01-packer/test_data_bundle.py::DataBundleTest::test_234_boot_activate_over_an_older_releases_run`, `tests/test_rootfs_overlay.sh`, Gen-2 SCLIVE4/AZ04 sandbox | Release workflow Step 2 and Gen-2 bootstrap sandbox; real Gen-2 deck check |
 | 397 | **Boot safety test isolates rb-bridge and stream-sync inside its temporary root and never calls host /usr/local/bin/rb-bridge** | `tests/test_boot_safety.sh` | Release workflow Step 2 |
+
+| 398 | **Official Mods: club rollback, MIDI poll bound, jog-logo apply** | `agent/5306-hunt-fixes-3` (`cfa6d6be`) | Force a failed service restore, poll without acknowledgements, and fail the first marker write after the original-logo copy: `minimal-club-mode::TestRollbackKeepsStateWhenAStartDoesNotTakeEffect`, `midi-controller-mapper::TestInflightBatchesStayBoundedWithoutAck`, and `jog-logo-studio::TestApplyWorksAgainAfterAFailedMarkerSave`; `paused.json` remains `restore-needed`, inflight batches stay at or below 65, and the original logo has no stale unowned backup | Release workflow Step 2; real-deck mod lifecycle and media-fault recipe |
 
 ## Automated Test Gaps (`[NO AUTOMATED TEST]`)
 
