@@ -23,6 +23,9 @@ import (
 // turn never publishes (fastBaseMissing). This build still goes on with its own stage and
 // publishes it with the DJ's edits; a stage without fast rows keeps the kind r1 reads.
 func TestIssue328BStageOfFastRowsIsNotOneTheReleasedBuildTakes(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	for _, src := range []struct {
 		name   string
 		oneLib bool
@@ -100,6 +103,9 @@ func TestIssue328BStageOfFastRowsIsNotOneTheReleasedBuildTakes(t *testing.T) {
 // import computes from that record, as before review R2: the DJ's edits stay and the rest is
 // rekordbox's.
 func TestIssue328BFastRowsOfAnEarlierBuildWithoutTheirNote(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	for _, src := range []struct {
 		name   string
 		oneLib bool
@@ -147,6 +153,9 @@ func TestIssue328BFastRowsOfAnEarlierBuildWithoutTheirNote(t *testing.T) {
 // own update stands in for r1's: the note removed, the kind r1 writes, and in the copy the rating
 // and the grid lock r1's passes put back.
 func TestIssue328BStageOfAnEarlierBuildIsNotPublishedOverEditsInItsCopy(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	for _, src := range []struct {
 		name   string
 		oneLib bool
@@ -193,6 +202,9 @@ func TestIssue328BStageOfAnEarlierBuildIsNotPublishedOverEditsInItsCopy(t *testi
 // The note of what the import left in a fast row (BridgeFastBase) goes with the row: a track the
 // deck deleted while it was fast takes its note with it, as the state's other tables do.
 func TestIssue328BNoteOfAFastRowGoesWithItsTrack(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, issue328Tracks)
 	defer bridge.SetUpdateExportForTest()()
@@ -219,6 +231,9 @@ func TestIssue328BNoteOfAFastRowGoesWithItsTrack(t *testing.T) {
 // and the row's note goes (it is not fast any more). Before, such an import wrote the export's
 // rating and BPM over the deck's (found on the real stick copies, #328 review R2).
 func TestIssue328BDegradedFullImportKeepsTheDeckRating(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	for _, src := range []struct {
 		name   string
 		oneLib bool

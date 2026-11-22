@@ -270,6 +270,9 @@ func issue328Before(t *testing.T, root string) map[int]issue328Row {
 // the update finished, then the DJ's edits; pulled: the update was cut after its first pass (the
 // stick pulled), the edits made, and the stick inserted again.
 func TestIssue328AStageWithoutItsFastBaseIsNotPublishedOverTheDJsEdits(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	for _, src := range []struct {
 		name   string
 		oneLib bool
@@ -328,6 +331,9 @@ func TestIssue328AStageWithoutItsFastBaseIsNotPublishedOverTheDJsEdits(t *testin
 }
 
 func TestIssue328AReExportWhileFastKeepsTheDJsEdits(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	for _, src := range []struct {
 		name   string
 		oneLib bool
@@ -359,6 +365,9 @@ func TestIssue328AReExportWhileFastKeepsTheDJsEdits(t *testing.T) {
 // 77: R1 left them 0 on both export shapes. "twice": the stick pulled after the mount of the
 // re-export and exported once more (1 and 12 rated 55) before the update read it.
 func TestIssue328BReExportTakesTheRatingsTheDeckDidNotChange(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	for _, src := range []struct {
 		name   string
 		oneLib bool

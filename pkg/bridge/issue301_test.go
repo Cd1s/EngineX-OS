@@ -85,10 +85,13 @@ func warmSQLite(t *testing.T) {
 	})
 }
 
+// The mount window of this test is 200 ms, as it always was: the product gives a mount 14 s and
+// this test squeezes them to see the import go on in the background. A second process busy beside
+// it takes the window (the snapshot of the library fails with "context deadline exceeded"), warm
+// or not, as soon as the host is loaded. So it does not run beside others: it runs in this
+// process, serial, in the quiet first part of the run (parallel tests start only after the serial
+// ones are over), after a warm-up.
 func TestIssue301FirstImportPastTheMountWindowFinishesInTheBackground(t *testing.T) {
-	if bridge.InChildForTest(t) {
-		return
-	}
 	warmSQLite(t)
 	root, skeleton := issue301Stick(t, issue301Tracks)
 	live := filepath.Join(root, "Engine Library", "Database2", "m.db")

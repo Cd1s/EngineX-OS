@@ -59,6 +59,9 @@ func issue253DeckEdit(t *testing.T, db *sql.DB, cues []byte) {
 }
 
 func TestIssue253ReexportShowsItsPlaylistsAndNewTracksAtTheMount(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, cues := issue253Converted(t, 40)
 	testfixture.LargeExport(t, root, 60) // re-exported with 20 new tracks, all in its playlist
 	restore := bridge.SetLargeExportForTest()
@@ -106,6 +109,9 @@ func TestIssue253ReexportShowsItsPlaylistsAndNewTracksAtTheMount(t *testing.T) {
 // A quick update that would not end before the hook's kill writes nothing: the update goes on in
 // the background as before, and the library stays as it was until it is published.
 func TestIssue253QuickUpdateThatDoesNotFitWritesNothing(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, cues := issue253Converted(t, 40)
 	before := fileSum(t, stagePath(root, "..", "m.db"))
 	testfixture.LargeExport(t, root, 60)
@@ -130,6 +136,7 @@ func TestIssue253QuickUpdateThatDoesNotFitWritesNothing(t *testing.T) {
 // mount, a 20 000-track one does not. That one's quick update took 6.8 s on the build host (native
 // armhf), about 20 s on the deck, past the hook's kill; the first estimate said 9.8 s.
 func TestIssue253QuickUpdateEstimateIsTheDecks(t *testing.T) {
+	t.Parallel()
 	if cost, mount := bridge.QuickCostForTest(6021, 10, 19985); cost > mount-4*time.Second {
 		t.Fatalf("6031-track re-export: %s estimated, the mount has %s and the export read before it", cost, mount)
 	}
@@ -141,6 +148,9 @@ func TestIssue253QuickUpdateEstimateIsTheDecks(t *testing.T) {
 // A first import published at the mount from a large export starts the update that reads its
 // files at once: it waited for the next insert.
 func TestIssue253FastPublishStartsTheBackgroundUpdate(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, 40)
 	defer bridge.SetUpdateExportForTest()()
@@ -257,6 +267,9 @@ func fileSize(t *testing.T, p string) int64 {
 // their free pages, and does not read them: the publish has a reference to the track's ANLZ files
 // for every track, with its source ID.
 func TestIssue253UpdateLeavesTheWaveformCopiesBehind(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, cues := issue253Converted(t, 40)
 	issue253OldRows(t, root)
 	live := fileSize(t, stagePath(root, "..", ".rb-bridge-state.db"))
@@ -288,6 +301,9 @@ func TestIssue253UpdateLeavesTheWaveformCopiesBehind(t *testing.T) {
 // the background job's remount is: the job copies nothing and writes neither database, it only
 // checks every track's files. The quick update at the mount brought the playlists before.
 func TestIssue253SmallUpdateOfALargeLibraryIsReadInPlace(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, cues := issue253Converted(t, 40)
 	issue253OldRows(t, root)
 	db := dbOpen(t, root)
@@ -352,6 +368,9 @@ func TestIssue253SmallUpdateOfALargeLibraryIsReadInPlace(t *testing.T) {
 // A track the re-export moved keeps its row and what a deck did to it: the quick update leaves the
 // row where it is, and the update moves it with its files read, as an import that owns it.
 func TestIssue253QuickUpdateLeavesAMovedTrackToTheUpdate(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, cues := issue253Converted(t, 40)
 	testfixture.LargeExport(t, root, 60)
 	// rekordbox moved track 3's file: same length, so only the path string changes in the export.
@@ -409,6 +428,9 @@ const stateBudget = 1 << 10
 // A large export with four minutes of detail per track stays within the budget, after its import
 // and after an update of a re-export.
 func TestIssue253StateStaysWithinAPerTrackBudget(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, 600)
 	wave := make([]byte, 12+3*36000)
@@ -450,6 +472,9 @@ func TestIssue253StateStaysWithinAPerTrackBudget(t *testing.T) {
 // first by the background job, alone, and published by the remount; the update that reads the
 // files starts with that publish. Its playlists wait for one remount, not for every file.
 func TestIssue253ReexportTooLargeForTheMountPublishesItsListFirst(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, cues := issue253Converted(t, 40)
 	testfixture.LargeExport(t, root, 60)
 	defer bridge.SetLargeExportForTest()()

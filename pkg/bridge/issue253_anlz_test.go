@@ -129,45 +129,41 @@ func TestIssue253BrokenANLZKeepsItsWaveformRow(t *testing.T) {
 		{"staged", 1 << 40}, // the job's stage, with its compact copy of the state
 	}
 	for _, f := range flows {
-		// A group for each flow: the two hooks it sets are process-wide, so they are set once for
-		// the group and put back when its breaks, which run side by side, are over (Cleanup waits
-		// for the parallel subtests; a defer would not). The subtests are the same, with the
-		// same names, bodies and assertions: flow/break.
-		t.Run(f.name, func(t *testing.T) {
-			t.Cleanup(bridge.SetLargeExportForTest())
-			t.Cleanup(bridge.SetInPlaceUpdateForTest(f.perTrack))
-			for _, br := range breaks {
-				t.Run(br.name, func(t *testing.T) {
-					t.Parallel()
-					root, cues := issue253Converted(t, 40)
-					issue253OldRows(t, root)
-					issue253Waveforms(t, root, 40, "before")
-					// The re-export adds 20 tracks; the stick's ANLZ files are broken.
-					testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb", testfixture.LargePDB(60))
-					for i := 41; i <= 60; i++ {
-						testfixture.Write(t, root, testfixture.LargeTrackPath(i), testfixture.MP3WithLAMETag())
-					}
-					printBefore := issue253Print(t, root, 1)
-					br.apply(t, root)
-					cutConverge(t, root)
-					issue253Waveforms(t, root, 40, "after the update")
-					if issue253Print(t, root, 1) == printBefore {
-						t.Fatal("the update did not read track 1 again: its copy was not put through the import")
-					}
-					// The next import, one that reads every track.
-					if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, true); err != nil {
-						t.Fatalf("next import: %v", err)
-					}
-					issue253Waveforms(t, root, 40, "after the next import")
-					db := dbOpen(t, root)
-					issue253DeckEdit(t, db, cues)
-					if n := scalar[int](t, db, `SELECT count(*) FROM Track WHERE pdbImportKey>0`); n != 60 {
-						t.Fatalf("%d of 60 tracks", n)
-					}
-					db.Close()
-				})
-			}
-		})
+		for _, br := range breaks {
+			t.Run(f.name+"/"+br.name, func(t *testing.T) {
+				if bridge.InChildForTest(t) {
+					return
+				}
+				t.Cleanup(bridge.SetLargeExportForTest())
+				t.Cleanup(bridge.SetInPlaceUpdateForTest(f.perTrack))
+				root, cues := issue253Converted(t, 40)
+				issue253OldRows(t, root)
+				issue253Waveforms(t, root, 40, "before")
+				// The re-export adds 20 tracks; the stick's ANLZ files are broken.
+				testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb", testfixture.LargePDB(60))
+				for i := 41; i <= 60; i++ {
+					testfixture.Write(t, root, testfixture.LargeTrackPath(i), testfixture.MP3WithLAMETag())
+				}
+				printBefore := issue253Print(t, root, 1)
+				br.apply(t, root)
+				cutConverge(t, root)
+				issue253Waveforms(t, root, 40, "after the update")
+				if issue253Print(t, root, 1) == printBefore {
+					t.Fatal("the update did not read track 1 again: its copy was not put through the import")
+				}
+				// The next import, one that reads every track.
+				if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, true); err != nil {
+					t.Fatalf("next import: %v", err)
+				}
+				issue253Waveforms(t, root, 40, "after the next import")
+				db := dbOpen(t, root)
+				issue253DeckEdit(t, db, cues)
+				if n := scalar[int](t, db, `SELECT count(*) FROM Track WHERE pdbImportKey>0`); n != 60 {
+					t.Fatalf("%d of 60 tracks", n)
+				}
+				db.Close()
+			})
+		}
 	}
 }
 
