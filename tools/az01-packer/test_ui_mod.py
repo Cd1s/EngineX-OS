@@ -11388,6 +11388,8 @@ const root = {{
     scStemMark: (ids, mark) => scStemMark(ids, mark),
     scStemFailSweep: () => scStemFailSweep(),
     scStemFailAt,
+    scStemPending: () => ({{}}), scStemAsking: {{}}, scStemMax: 8, // what a tap reads before it asks (#316 review): nothing is on its way here
+    scStemAsk: () => 1, scStemAnswered: () => true, // the request's number and its answer (#316 review 2): this one is always the open request
 }};
 {mark_fn}
 {sweep_match.group(0)}
@@ -12037,16 +12039,20 @@ assert.deepEqual(writes, ['2:0.5']); assert.equal(armed, 0);
         self.assertNotIn("scBpmRestoreTimer", bp.SMART_SYNC_MAIN)
         self.assertNotIn("0.502", bp.SMART_SYNC_MAIN)
 
-    def test_smart_sync_keeps_its_range_restore_and_calls_the_new_logic_after_it(self):
+    def test_smart_sync_keeps_its_range_restore_and_calls_the_new_logic_after_it(self):  # name kept: the range logic first, the BPM restore after it
         src = bp.SMART_SYNC_MAIN
-        old_else = """				} else {
+        # #316 BH-GF4-12: the restore no longer overwrites a range the DJ set by hand (it was `r.index = savedRangeIndex`, unconditionally);
+        # the BPM restore still comes after the range logic.
+        new_else = """				} else {
 					if (savedRangeIndex >= 0 && r) {
-						r.index = savedRangeIndex
+						const back = handRangeIndex >= 0 ? handRangeIndex : savedRangeIndex
+						if (r.index !== back) r.index = back
 						savedRangeIndex = -1
+						handRangeIndex = -1
 					}
 					root.scUnsyncRestoreBpm(deckIdx)
 				}"""
-        self.assertIn(old_else, src)  # the range restore is untouched, the new call comes after it
+        self.assertIn(new_else, src)
         self.assertIn("if (syncNeed > 0) root.scWidenRange(deckIdx, syncNeed)", src)
         self.assertEqual(src.count("root.scUnsyncRestoreBpm("), 1)
         # no controller module is touched: nothing for the controller engine to latch
@@ -12455,6 +12461,1033 @@ scScope = 'tidal'; assert.equal(scBranded(prov('TIDAL')), false);
 scScope = ''; assert.equal(scBranded(prov('TIDAL')), false);
 """
             self.run_node(script)
+
+
+class StreamingSortButtonTest(unittest.TestCase):
+    """#316 BH-GF4-11: the sort button shows on a streaming list on every model, whatever Engine's hasSortMenu says."""
+    BASES = EnginesOwnAppleMusicTest.BASES
+    edits_of = EnginesOwnAppleMusicTest.edits_of
+    patched = EnginesOwnAppleMusicTest.patched
+    run_node = StreamingSlotIconTest.run_node
+    SORT_MENU = "BrowseView/Components/SortMenu/SortMenu.qml"
+
+    @staticmethod
+    def expressions(text):
+        """The three bindings that decide whether the button shows, as JavaScript: the row's visible, showButton and isStreamingProviderWithSort."""
+        visible = re.search(r"\n[ \t]+visible:(.*?)\n[ \t]+property\s+(?:AbstractCollectionController|var)\s+collectionController", text, re.S)
+        with_sort = re.search(r"readonly property bool isStreamingProviderWithSort:(.*?)\n[ \t]*\n", text, re.S)
+        show = re.search(r"readonly property bool showButton:(.*?)\n[ \t]*\n", text, re.S)
+        if not (visible and with_sort and show):
+            raise AssertionError("SortMenu.qml: a sort binding was not found")
+        return {"visible": visible[1], "withSort": with_sort[1], "show": show[1]}
+
+    def decide(self, text, streaming, has_sort_menu, category="Streaming"):
+        """Evaluate the file's own bindings for a collection and an Engine; no other kind of list is in play."""
+        script = r"""
+const exprs = @EXPRS@;
+const flags = ['Craylist', 'Smartlist', 'Preparelist', 'Historylist', 'FileSystem', 'Stemslist', 'WholeDevice', 'WholeDatabase', 'StreamingPlaylist'];
+const collectionController = {isCurrentCollectionStreaming: @STREAMING@, isShowingSearchResult: false};
+for (const f of flags) collectionController['isCurrentCollection' + f] = false;
+const Planck = {getProperty: () => ({translator: {string: @CATEGORY@}}),
+    librarianController: {streamingInterfaceController: {hasSortMenu: @HAS@}}};
+const CollectionCategoryPlanck = 'Planck', CollectionCategoryOfflineLibrary = 'OfflineLibrary';
+const run = (e, extra) => new Function('collectionController', 'Planck', 'CollectionCategoryPlanck', 'CollectionCategoryOfflineLibrary', 'isStreamingProviderWithSort', 'return (' + e + ')')(
+    collectionController, Planck, CollectionCategoryPlanck, CollectionCategoryOfflineLibrary, extra);
+const withSort = !!run(exprs.withSort);
+console.log(JSON.stringify({withSort, show: !!run(exprs.show, withSort), visible: !!run(exprs.visible, withSort)}));
+""".replace("@EXPRS@", json.dumps(self.expressions(text))).replace("@STREAMING@", json.dumps(streaming)).replace("@HAS@", json.dumps(has_sort_menu)).replace("@CATEGORY@", json.dumps(category))
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to evaluate the bindings")
+    def test_stock_hides_the_sort_button_on_streaming_lists_when_engine_has_no_sort_menu(self):
+        """The premise: stock gates the button on hasSortMenu, which Engine reports false on the decks tried (SC LIVE 4 and a first-generation Engine)."""
+        for base, root in self.BASES:
+            with self.subTest(base=base):
+                stock = LAB / base / "qrc" / (root + "Views/" + self.SORT_MENU)
+                if not stock.is_file():
+                    self.skipTest(f"{stock} not found")
+                text = stock.read_text(encoding="utf-8")
+                hidden = self.decide(text, True, False)
+                self.assertFalse(hidden["show"] or hidden["visible"], hidden)
+                self.assertTrue(self.decide(text, True, True)["show"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to evaluate the bindings")
+    def test_the_pack_shows_the_sort_button_on_every_streaming_list_whatever_engine_reports(self):
+        for base, root in self.BASES:
+            with self.subTest(base=base):
+                text = self.patched(base, root, self.SORT_MENU)
+                for has in (False, True):
+                    shown = self.decide(text, True, has)
+                    self.assertTrue(shown["withSort"] and shown["show"] and shown["visible"], f"hasSortMenu={has}: {shown}")
+                    # a list that is not streaming keeps stock's rules: no button for it
+                    plain = self.decide(text, False, has, category="Library")
+                    self.assertFalse(plain["show"], f"hasSortMenu={has}: {plain}")
+                # the library lists keep the button they always had
+                self.assertTrue(self.decide(text, False, False, category="Planck")["visible"])
+
+
+class SmartSyncRangeTest(unittest.TestCase):
+    """#316 BH-GF4-12: Sync off returns to the range the DJ set by hand while Sync was on; only an untouched range goes back to the one
+    Smart Sync widened. The pack's own delegate handlers run against a model of the SpeedRange translator."""
+    _block = staticmethod(RestoreBpmOnUnsyncTest._block)
+
+    def script(self, cases, deferred):
+        src = bp.SMART_SYNC_MAIN
+        handlers = {}
+        for name in ("onSyncActiveChanged", "onSyncNeedChanged", "onRangeIndexChanged"):
+            # an old revision has no onRangeIndexChanged: the handler is then absent and the cases fail on behaviour, not on extraction
+            handlers[name] = self._block(src, name + ": {")[1] if (name + ": {") in src else ""
+        return r"""
+const assert = require('node:assert/strict');
+String.prototype.arg = function(v) { return this.replace('%1', v); }; // QML's String.arg
+const DEFERRED = @DEFERRED@;
+const entries = ['4', '8', '10', '20', '50', '100']; // the SC LIVE 4 Engine's own list
+// The SpeedRange translators, one per deck: writing index notifies rangeIndex's binding at once, or later (a queued notification), the way Engine might.
+let pending = [], scSmartExpect = {};
+const decks = {};
+const Planck = {getProperty: path => ({translator: decks[+/Deck(\d+)/.exec(path)[1]].range})};
+const root = {get scSmartExpect() { return scSmartExpect; }, set scSmartExpect(v) { scSmartExpect = v; }, scUnsyncRestoreBpm() {},
+    scWidenRange(d, n) { return scWidenRange(d, n); }};
+@NEED@
+@WIDEN@
+// One deck's delegate (the pack's own handlers) and the controls the cases use on it.
+function makeDeck(idx) {
+    // `floor`: Engine refuses a range narrower than the deck's tempo needs (sandbox, 2026-11-22): a write below it leaves the range as it is.
+    const range = {entries, floor: 0, _i: 0, get index() { return this._i; }, set index(v) { v = Math.max(v, this.floor); if (v === this._i) return; this._i = v; if (DEFERRED) pending.push(deck); else deck.rangeChanged(); },
+        get string() { return entries[this._i]; }};
+    const deck = {deckIdx: idx, savedRangeIndex: -1, handRangeIndex: -1, syncActive: false, syncNeed: 0, pRange: {translator: range}, lastSeen: 0,
+        get rangeIndex() { return range._i; }};
+    decks[idx] = {range, deck};
+    const run = body => new Function('d', 'root', 'Planck', 'with (d) { ' + body + ' }')(deck, root, Planck);
+    deck.rangeChanged = () => { if (deck.rangeIndex !== deck.lastSeen) { deck.lastSeen = deck.rangeIndex; run(@RANGE@); } };
+    return {range, deck, run,
+        setSync(on, need) { // QML order: syncActive's handler, then syncNeed's
+            const was = deck.syncActive;
+            deck.syncNeed = need; deck.syncActive = on;
+            if (on !== was) run(@ACTIVE@);
+            run(@NEEDH@);
+            flush();
+        },
+        dj(i) { range.index = i; flush(); }, // the DJ presses the range button
+        reset(i) { range._i = i; deck.lastSeen = i; deck.savedRangeIndex = -1; deck.handRangeIndex = -1; deck.syncActive = false; deck.syncNeed = 0; scSmartExpect = {}; pending = []; }};
+}
+function flush() { while (pending.length) pending.shift().rangeChanged(); }
+// Deck 2 under the names the first cases use; deck 1 is `other`.
+const two = makeDeck(2), other = makeDeck(1);
+const range = two.range, deck = two.deck, setSync = two.setSync, dj = two.dj, reset = two.reset;
+@CASES@
+""".replace("@DEFERRED@", "true" if deferred else "false").replace("@RANGE@", json.dumps(handlers["onRangeIndexChanged"])) \
+           .replace("@ACTIVE@", json.dumps(handlers["onSyncActiveChanged"])).replace("@NEEDH@", json.dumps(handlers["onSyncNeedChanged"])) \
+           .replace("@NEED@", self._block(src, "function scHarmonicSyncNeed(")[0]).replace("@WIDEN@", self._block(src, "function scWidenRange(")[0]) \
+           .replace("@CASES@", cases)
+
+    def run_cases(self, cases):
+        for deferred in (False, True):
+            with self.subTest(queued_notifications=deferred):
+                result = subprocess.run(["node", "-e", self.script(cases, deferred)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the handlers")
+    def test_sync_off_keeps_the_range_the_dj_set_and_restores_an_untouched_one(self):
+        self.run_cases(r"""
+// 4 % deck synced to a master that needs 12 %: Smart Sync widens to 20 %.
+reset(0); setSync(true, 12);
+assert.equal(range.index, 3, 'Smart Sync widened the range');
+setSync(false, 0);
+assert.equal(range.index, 0, 'the DJ did not touch it: back to the range before Smart Sync widened it');
+
+// The DJ changes the range by hand while Sync is on: Sync off leaves it there (this was reset to 4 %).
+reset(0); setSync(true, 12); dj(5);
+setSync(false, 0);
+assert.equal(range.index, 5, 'the DJ set 100 %: it stays');
+reset(0); setSync(true, 12); dj(1);
+setSync(false, 0);
+assert.equal(range.index, 1, 'the DJ set a narrower range than Smart Sync widened: that one stays');
+
+// Smart Sync widens again after the hand setting: Sync off still goes back to what the DJ set.
+reset(0); setSync(true, 5); dj(2); setSync(true, 40);
+assert.equal(range.index, 4, 'Smart Sync widened for the new tempo');
+setSync(false, 0);
+assert.equal(range.index, 2, 'the range the DJ set by hand, not the one Smart Sync widened later');
+
+// The DJ changes it twice: the last one counts.
+reset(0); setSync(true, 12); dj(5); dj(1);
+setSync(false, 0);
+assert.equal(range.index, 1);
+
+// Sync needs no widening and the DJ leaves the range: nothing is written at all.
+reset(2); setSync(true, 0);
+let writes = 0; const set = Object.getOwnPropertyDescriptor(range, 'index').set;
+Object.defineProperty(range, 'index', {get() { return this._i; }, set(v) { writes++; set.call(this, v); }, configurable: true});
+setSync(false, 0);
+assert.equal(writes, 0, 'an untouched range that was never widened is not rewritten');
+Object.defineProperty(range, 'index', {get() { return this._i; }, set, configurable: true});
+
+// A second Sync cycle starts clean: the hand setting of the first is forgotten.
+reset(0); setSync(true, 12); dj(5); setSync(false, 0);
+setSync(true, 12);
+assert.equal(deck.handRangeIndex, -1, 'a new Sync has no hand setting yet');
+setSync(false, 0);
+assert.equal(range.index, 5, 'nothing touched in the second cycle: back to the range it started with (the DJ\'s 100 %)');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the handlers")
+    def test_the_hand_setting_is_told_from_smart_syncs_own_write_in_any_notification_order(self):
+        self.run_cases(r"""
+// Smart Sync's own widening (including the tile's scWidenAll) must never count as the DJ's.
+reset(0); setSync(true, 12);
+assert.equal(deck.handRangeIndex, -1, 'Smart Sync widening is not a hand setting');
+assert.equal(Object.keys(root.scSmartExpect).length, 0, 'the expectation was consumed by its own change');
+root.scWidenRange(2, 60); flush();
+assert.equal(range.index, 5);
+assert.equal(deck.handRangeIndex, -1, 'the tile widening is not a hand setting either');
+// ... and the DJ's change right after is.
+dj(1);
+assert.equal(deck.handRangeIndex, 1);
+// Changes while Sync is off are nobody's business here.
+reset(0); dj(2);
+assert.equal(deck.handRangeIndex, -1, 'no Sync, no hand setting recorded');
+setSync(true, 0); setSync(false, 0);
+assert.equal(range.index, 2, 'Sync on and off without widening leaves the range alone');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the handlers")
+    def test_a_range_change_on_one_synced_deck_while_the_other_deck_takes_master(self):
+        """#316 review: both decks synced, the DJ sets deck 2's range by hand, then MASTER moves to deck 2 (deck 1 now follows and needs
+        a wider range, deck 2 needs none). Each deck keeps its own record: Smart Sync's widening of deck 1 is nobody's hand setting,
+        deck 2 keeps the DJ's range, and Sync off gives each deck its own range back."""
+        self.run_cases(r"""
+reset(0); other.reset(0);
+other.setSync(true, 0);                    // deck 1 leads: it needs nothing
+two.setSync(true, 12);                     // deck 2 follows: Smart Sync widens it to 20 %
+assert.equal(range.index, 3);
+two.dj(5);                                 // the DJ sets deck 2 to 100 %
+assert.equal(deck.handRangeIndex, 5);
+other.setSync(true, 30);                   // MASTER moves to deck 2: deck 1 follows and needs 30 %
+two.setSync(true, 0);                      // deck 2 leads: no need any more
+assert.equal(other.range.index, 4, 'Smart Sync widened deck 1 to 50 %');
+assert.equal(other.deck.handRangeIndex, -1, 'that widening is not a hand setting of deck 1');
+assert.equal(range.index, 5, 'deck 2 keeps the DJ\'s range through the master change');
+assert.equal(deck.handRangeIndex, 5);
+assert.equal(Object.keys(root.scSmartExpect).length, 0, 'no expectation is left over on either deck');
+// the DJ changes deck 1's range right after Smart Sync widened it: that is deck 1's hand setting, deck 2 is not touched
+other.dj(2);
+assert.equal(other.deck.handRangeIndex, 2);
+assert.equal(deck.handRangeIndex, 5);
+other.setSync(false, 0); two.setSync(false, 0);
+assert.equal(other.range.index, 2, 'deck 1: the DJ\'s range');
+assert.equal(range.index, 5, 'deck 2: the DJ\'s range');
+// the other way round: deck 1 untouched goes back to the range it had before it was widened
+reset(0); other.reset(0);
+other.setSync(true, 0); two.setSync(true, 12); two.dj(1);
+other.setSync(true, 30); two.setSync(true, 0);
+other.setSync(false, 0); two.setSync(false, 0);
+assert.equal(other.range.index, 0, 'deck 1: untouched, back to the range before the widening');
+assert.equal(range.index, 1, 'deck 2: the DJ\'s narrower range');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the handlers")
+    def test_a_track_load_between_two_sync_cycles(self):
+        """#316 review: Engine does not touch SpeedRange when a track is loaded (sandbox: no notification at a load, on the loaded deck or on
+        the other one; logs ld2, ld3, ld5), so the range a deck has when a track is loaded is the one it had. A load that ends Sync (the
+        track left, Engine takes Sync off) is a Sync off, and the next Sync on is a new cycle that starts from what the range is then.
+        Here the translator obeys every write; test_a_range_write_engine_refuses_is_not_a_hand_setting has the real Engine's refusal."""
+        self.run_cases(r"""
+// Untouched: cycle one widens and gives back; a new track; cycle two widens for the new track and gives back.
+reset(1); setSync(true, 30);
+assert.equal(range.index, 4);
+setSync(false, 0);                         // the track is unloaded: syncActive goes false
+assert.equal(range.index, 1);
+setSync(true, 12);                         // a new track, Sync on again
+assert.equal(deck.savedRangeIndex, 1, 'the second cycle starts from the range the deck has now');
+assert.equal(range.index, 3);
+setSync(false, 0);
+assert.equal(range.index, 1);
+// The DJ's range of cycle one belongs to that cycle's track only when the DJ gave it up: it stays on the deck, and cycle two starts from it.
+reset(1); setSync(true, 30); dj(5); setSync(false, 0);
+assert.equal(range.index, 5);
+setSync(true, 12);
+assert.equal(deck.savedRangeIndex, 5);
+assert.equal(deck.handRangeIndex, -1, 'a new cycle has no hand setting');
+assert.equal(range.index, 5, '12 % needs no widening on 100 %');
+setSync(false, 0);
+assert.equal(range.index, 5);
+// A load while Sync stays on is no range change at all: nothing is recorded as the DJ's.
+reset(1); setSync(true, 30);
+setSync(true, 14);                         // the loaded track's tempo changes the need; no SpeedRange notification
+assert.equal(deck.handRangeIndex, -1);
+assert.equal(range.index, 4, 'the widened range is not narrowed by the new need');
+setSync(false, 0);
+assert.equal(range.index, 1);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the handlers")
+    def test_a_range_write_engine_refuses_is_not_a_hand_setting(self):
+        """The Engine sandbox (JP07, Engine's own Sync, real tracks; logs ld3, ld5, ld7 of the #316 review): Sync off keeps the synced
+        tempo, and Engine refuses a range narrower than that tempo needs, so the restore write at Sync off leaves the widened range in place
+        (the same on the base). When a track is loaded Engine takes Sync off and puts it on again: the widened range is then the one the next
+        Sync starts from. Nothing of this is recorded as the DJ's: no notification arrives for a refused write, and a range the DJ sets
+        while Sync is off is nobody's business here."""
+        self.run_cases(r"""
+reset(0); setSync(true, 30);
+assert.equal(range.index, 4, 'widened to 50 %');
+range.floor = 4;                           // the synced tempo needs 50 % and keeps needing it after Sync off
+setSync(false, 0);                         // the restore write (8 %) is refused
+assert.equal(range.index, 4, 'Engine kept the range');
+assert.equal(deck.handRangeIndex, -1, 'a refused write is not a hand setting');
+assert.equal(Object.keys(root.scSmartExpect).length, 0);
+// a track is loaded, Sync is on again: the widened range is what this Sync starts from, and nothing is recorded as the DJ's
+setSync(true, 16);
+assert.equal(deck.savedRangeIndex, 4);
+assert.equal(deck.handRangeIndex, -1);
+assert.equal(range.index, 4, 'the new tempo needs 20 %: no widening, no narrowing');
+// the tempo is back at its own BPM: the DJ narrows the range by hand with Sync off, then a new Sync cycle starts from that
+setSync(false, 0); range.floor = 0; dj(1);
+assert.equal(range.index, 1);
+assert.equal(deck.handRangeIndex, -1, 'Sync is off: nothing is recorded');
+setSync(true, 12);
+assert.equal(deck.savedRangeIndex, 1);
+assert.equal(range.index, 3, 'widened to 20 %');
+setSync(false, 0);
+assert.equal(range.index, 1, 'untouched, and the tempo allows it: back to the DJ\'s 8 %');
+// a hand setting that Sync off leaves is never overwritten by the restore of the range Smart Sync widened
+reset(5); setSync(true, 12);               // already wide: nothing to widen
+assert.equal(range.index, 5);
+dj(4);                                     // the DJ narrows it to 50 % by hand
+setSync(false, 0);
+assert.equal(range.index, 4, 'the DJ\'s 50 % stays (the base wrote the old 100 % back)');
+""")
+
+    def test_the_neighbours_are_untouched(self):
+        """Only the range handlers changed: Smart Sync's widening, the tile and the #289 BPM restore keep their text."""
+        src = bp.SMART_SYNC_MAIN
+        for text in ("function scHarmonicSyncNeed(masterBpm, origBpm) {", "function scUnsyncRestoreBpm(d) {", "function scWidenAll() {",
+                     "onSyncNeedChanged: {", "if (syncNeed > 0) root.scWidenRange(deckIdx, syncNeed)", "root.scUnsyncRestoreBpm(deckIdx)"):
+            self.assertIn(text, src, text)
+        self.assertEqual(src.count("root.scUnsyncRestoreBpm("), 1)
+        self.assertIn('objectName: "ControlCenter_SmartSync"', bp.SYNC_TILE)
+        self.assertIn("root.scWidenAll()", bp.SYNC_TILE)
+
+
+class ServiceIconTextureTest(unittest.TestCase):
+    """#316 BH-GF3-18: the service icons the pack draws bigger than Engine's own do not share Engine's texture for the same file.
+
+    Qt hands every Image that loads the same file with the same size the same texture. Engine's Settings > Services draws
+    the icons without mipmaps, the pack's Sources footer (48 px) and login panel (88 px) asked for mipmaps on that same
+    texture, and Qt logged "QSGPlainTexture: Mipmap settings changed without having image data available" when they met.
+    An Image with `cache: false` loads its own pixmap, so the two settings never meet."""
+    ICONS = (("login panel", "LOGIN_DIALOG", "width: 88; height: 88"), ("Sources footer", "SOURCE_FOOTER", "width: 48; height: 48"))
+
+    @staticmethod
+    def image_with(text, size):
+        """The Image { } block of the service icon (found by its size), as its property lines."""
+        found = [m.group(1) for m in re.finditer(r"\n[ \t]*Image \{\n((?:[ \t]+[^\n]*\n)*?)[ \t]*\}", text) if size in m.group(1)]
+        assert len(found) == 1, (size, len(found))
+        return [line.split("//")[0].strip() for line in found[0].splitlines()]
+
+    def test_the_icons_keep_their_mipmaps_and_get_their_own_texture(self):
+        for name, constant, size in self.ICONS:
+            with self.subTest(icon=name):
+                props = self.image_with(getattr(bp, constant), size)
+                self.assertIn("mipmap: true", props, "the icon stays smooth when it is drawn smaller than the file")
+                self.assertIn("cache: false", props, "its own pixmap: no shared texture to change the mipmap setting of")
+                self.assertTrue(any(p.startswith("source: ") and "root.scIcon(" in p for p in props), "still the same icon")
+
+    def test_the_login_qr_keeps_its_own_texture_too(self):
+        """The QR code beside the icon was already uncached: the one place the rule was known."""
+        self.assertRegex(bp.LOGIN_DIALOG, r"Image \{[^}]*cache: false[^}]*\}")
+
+    def test_no_other_pack_image_asks_for_mipmaps(self):
+        """Every `mipmap: true` in the builder is one of the two icons above; a new one would meet Engine's texture the same way."""
+        src = (REPO / "tools/ui-mod/build_packs.py").read_text(encoding="utf-8")
+        self.assertEqual(src.count("mipmap: true"), len(self.ICONS))
+
+
+class ShadowLayerDeckBindingTest(unittest.TestCase):
+    """#316 BH-GF3-16: the shadow layer's `deck` is evaluated only once the layer is complete, in the files the report names.
+
+    Already fixed by 7e89da1c (merged with 043fa15c): walking the ancestors' deckIndex/deckData while the layer's own parent and
+    the stock wrappers were still being set up made Qt log `Binding loop detected for property "deck"`. Only the text of the
+    SHADOW_LAYER constant was pinned; this pins what the shipped files get, for the three files the report names."""
+    FILES = (("Skins/EngineOS/UI/CompositeControls/DeckPerformanceData/DeckPerformanceDataContent.qml", "performance"),
+             ("Skins/EngineOS/UI/CompositeControls/DeckTrackData/SplitMainDeckTrackDataContent.qml", "track"),
+             ("Skins/EngineOS/UI/CompositeControls/DeckTrackData/GroupedMainDeckTrackDataContent.qml", "track"))
+
+    @staticmethod
+    def problems(patched, kind):
+        """What is wrong with the layer a stock file got (empty list: nothing)."""
+        found = []
+        head = 'objectName: "EngineX_Shadow_%s"' % kind
+        if patched.count(head) != 1:
+            return ["%d layers named EngineX_Shadow_%s" % (patched.count(head), kind)]
+        layer = patched[patched.index(head):]
+        if patched.count("scShadowDeckFor(") != 1:
+            found.append("scShadowDeckFor is called %d times, not once" % patched.count("scShadowDeckFor("))
+        deck = re.search(r"readonly property int deck: ([^\n]*)", layer)
+        ready = re.search(r"property bool scReady: false", layer)
+        done = re.search(r"Component\.onCompleted: \{ scReady = true;", layer)
+        if not deck or not deck.group(1).startswith("scReady && "):
+            found.append("deck does not wait for scReady")
+        if not ready or not done:
+            found.append("scReady is not declared false and set when the layer is complete")
+        elif deck and ready.start() > layer.index(deck.group(0)):
+            found.append("scReady is declared after deck")
+        return found
+
+    def stock(self, rel):
+        qrc = LAB / "5.3.0/qrc"
+        if not (qrc / rel).is_file():
+            self.skipTest(f"{qrc / rel} not found")
+        return (qrc / rel).read_text(encoding="utf-8")
+
+    def test_the_three_files_the_report_names_get_a_layer_that_waits_for_construction(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            for rel, kind in self.FILES:
+                with self.subTest(file=rel.rsplit("/", 1)[1]):
+                    self.assertIn(rel, bp.shadow_targets(LAB / "5.3.0/qrc") if (LAB / "5.3.0/qrc").is_dir() else {rel: kind})
+                    self.assertEqual(self.problems(bp.shadow_layer(self.stock(rel), kind), kind), [])
+        finally:
+            bp.ROOT = old_root
+
+    def test_the_check_sees_the_old_layer(self):
+        """Control: the layer of the base before 7e89da1c (deck bound straight away) is reported, in the same files."""
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            for rel, kind in self.FILES:
+                with self.subTest(file=rel.rsplit("/", 1)[1]):
+                    patched = bp.shadow_layer(self.stock(rel), kind)
+                    old = patched.replace("readonly property int deck: scReady && ", "readonly property int deck: ")
+                    self.assertNotEqual(old, patched)
+                    self.assertIn("deck does not wait for scReady", self.problems(old, kind))
+        finally:
+            bp.ROOT = old_root
+
+    def test_the_layer_text_waits_in_every_pack_variant(self):
+        """No stock file needed: the constant every layer is made from."""
+        layer = bp.SHADOW_LAYER
+        self.assertLess(layer.index("property bool scReady: false"), layer.index("readonly property int deck: scReady && "))
+        self.assertEqual(layer.count("scShadowDeckFor("), 1)
+
+
+class StemImportDeckTest(unittest.TestCase):
+    """#316 BH-GF2-13: a streamed track's Stems import never replaces a track on a deck, and two quick taps do not share one set of timers.
+
+    scStemStream loads the downloaded file on a deck (Engine imports a file only through a deck load) and ejects it again.
+    It used to take the first deck that was not playing, so a track cued on a paused deck was loaded over; the
+    two timers that hold the import (scStemImport) and the eject (scStemUnload) have one set of properties, so a second
+    tap before the first import ended replaced them: the first track's rows stopped waiting and it was never rendered,
+    and a deck that already held the first temporary file was no longer ejected."""
+    SRC = None
+
+    @staticmethod
+    def block(text, start):
+        """text from the first `{` at or after start to its matching `}`."""
+        i = text.index("{", start)
+        depth = 0
+        for j in range(i, len(text)):
+            depth += (text[j] == "{") - (text[j] == "}")
+            if depth == 0:
+                return text[i:j + 1]
+        raise AssertionError("unclosed block")
+
+    @classmethod
+    def script(cls, scenario, decks="[1, 2]", locked="[]"):
+        main = bp.SERVICES_MAIN
+        fn = lambda name, sig: (re.search(r"function " + name + r"\(" + sig + r"\) \{[\s\S]*?\n\t\}", main) or [""])[0]
+        importer = main.split("id: scStemImport", 1)[1].split("id: scStemUnload", 1)[0]
+        unloader = main.split("id: scStemUnload", 1)[1].split("\tInstantiator {", 1)[0]
+        changed = lambda text: (re.search(r"onRunningChanged: (.*)", text) or [None, ""])[1]
+        render = "function render(id)" + cls.block(importer, importer.index("function render(id)"))
+        trigger = "function()" + cls.block(importer, importer.index("onTriggered:"))
+        unload = "function()" + cls.block(unloader, unloader.index("onTriggered:"))
+        return r"""
+const assert = require('assert');
+String.prototype.arg = function(v) { return this.replace(/%1/g, v); };
+const later = [];
+const Qt = {callLater: f => later.push(f)};
+const flush = () => { while (later.length) later.shift()(); };
+const DECKS = __DECKS__, LOCKED = __LOCKED__;
+const tree = {};
+const deck = d => tree[d] || (tree[d] = {playing: false, loaded: false, uri: ''});
+const loads = [], unloads = [], handed = [], xhrs = [];
+const Planck = {
+    librarianController: {collectionController: {getTrackUrisFromUniversalIds: ids => 'uri=streaming://TIDAL/Track/' + String(ids[0]).replace(/^[a-z]/, '')}},
+    getProperty(path) {
+        let m = /^\/Engine\/Deck(\d)\/PlayState$/.exec(path);
+        if (m) return {translator: {get state() { return deck(+m[1]).playing; }}};
+        if ((m = /^\/Engine\/Deck(\d)\/Track\/SongLoaded$/.exec(path))) return {translator: {get state() { return deck(+m[1]).loaded; }}};
+        if ((m = /^\/Engine\/Deck(\d)\/Track\/TrackUri$/.exec(path))) return {translator: {get string() { return deck(+m[1]).uri; }}};
+        if ((m = /^\/Engine\/Deck(\d)\/Track\/Unload$/.exec(path))) return {translator: {set state(v) { if (v) { unloads.push(+m[1]); deck(+m[1]).loaded = false; deck(+m[1]).uri = ''; } }}};
+        if ((m = /^\/Client\/Librarian\/AddToDatabaseAndLoadToDeck(\d)$/.exec(path))) return {translator: {set url(u) { loads.push([+m[1], u]); deck(+m[1]).loaded = true; deck(+m[1]).uri = u; }}};
+        throw new Error('unexpected property ' + path);
+    },
+};
+class XMLHttpRequest { open(m, u) { this.url = u; } send() { xhrs.push(this); } }
+const answer = (i, status, body) => { const x = xhrs[i]; x.readyState = 4; x.status = status; x.responseText = JSON.stringify(body); x.onreadystatechange(); };
+const rowsNow = {};
+let clock = 1000;
+Date.now = () => clock;
+let scStemTurns = [];
+let scStemGen = 0;
+const scStemAsking = {};
+const scStemAskMs = 120000;
+const root = {
+    scDeckList: () => DECKS, scDeckLocked: d => LOCKED.indexOf(d) >= 0, scStemFull: false, scStemWait: false, scStemMax: 8, scStemAsking: scStemAsking, scStemGen: 0,
+    scStemMark(ids, mark) { for (const id of ids) { if (!id) continue; if (mark) rowsNow[id] = mark; else delete rowsNow[id]; } },
+    scStemHand(id, rows) { handed.push(String(id)); },
+    scStemTurns: [],
+};
+const scStemFailed = {restart() {}};
+// The request-expiry timer: a single shot that waits for `interval`; advance() moves the clock and fires it when it is due.
+const scStemExpiry = {running: false, interval: 0, due: 0, restart() { this.running = true; this.due = clock + this.interval; }, stop() { this.running = false; }};
+const expiryHandler = __EXPIRYHANDLER__;
+const advance = ms => { clock += ms; while (scStemExpiry.running && clock >= scStemExpiry.due) { scStemExpiry.running = false; expiryHandler(); } };
+// The deck's clock is corrected: the wall clock moves, the timer (which counts elapsed time) does not notice.
+const jump = ms => { clock += ms; if (scStemExpiry.running) scStemExpiry.due += ms; };
+function timer(onChanged, extra) {
+    const t = Object.assign({running: false, restart() { this.running = true; }, stop() { if (!this.running) return; this.running = false; if (onChanged) onChanged(false); }}, extra);
+    return t;
+}
+const changed = src => src ? (running => new Function('running', 'Qt', 'root', src)(running, Qt, root)) : null;
+const scStemUnload = timer(changed(__UNLOADCHANGED__), {deck: 0, armed: false, name: '', tries: 0});
+const scStemImport = timer(changed(__IMPORTCHANGED__), {url: '', path: '', tries: 0, trackIds: null, rows: []});
+const compile = (t, src, ...names) => new Function('timer', ...names, 'with (timer) { return (' + src + ') }')(t, ...names.map(n => eval(n)));
+const importRender = compile(scStemImport, __RENDER__, 'root', 'scStemUnload', 'Qt');
+const importTick = compile(scStemImport, __TRIGGER__, 'root', 'Planck', 'XMLHttpRequest');
+const unloadTick = compile(scStemUnload, __UNLOAD__, 'Planck');
+const scStemMark = (ids, mark) => root.scStemMark(ids, mark);
+__STREAM__
+__TURN__
+__TURNNEXT__
+__PENDING__
+__ASK__
+__ANSWERED__
+__EXPIRE__
+root.scStemPending = typeof scStemPending === 'function' ? scStemPending : () => ({});
+root.scStemAsk = typeof scStemAsk === 'function' ? scStemAsk : undefined;
+root.scStemAnswered = typeof scStemAnswered === 'function' ? scStemAnswered : undefined;
+root.scStemExpire = typeof scStemExpire === 'function' ? scStemExpire : undefined;
+root.scStemTurn = typeof scStemTurn === 'function' ? scStemTurn : undefined;
+root.scStemTurnNext = typeof scStemTurnNext === 'function' ? scStemTurnNext : undefined;
+const stream = uid => scStemStream(uid);
+const tap = uid => stream(uid);
+""".replace("__DECKS__", decks).replace("__LOCKED__", locked) \
+           .replace("__UNLOADCHANGED__", json.dumps(changed(unloader))).replace("__IMPORTCHANGED__", json.dumps(changed(importer))) \
+           .replace("__RENDER__", render).replace("__TRIGGER__", trigger).replace("__UNLOAD__", unload) \
+           .replace("__EXPIRYHANDLER__", "(() => new Function('root', %s)(root))" % json.dumps((re.search(r"id: scStemExpiry\s*\n\s*onTriggered: (.*)", main) or [None, ""])[1]) if re.search(r"id: scStemExpiry", main) else "(() => {})") \
+           .replace("__ASK__", fn("scStemAsk", "gid")).replace("__ANSWERED__", fn("scStemAnswered", "gid, gen")).replace("__EXPIRE__", fn("scStemExpire", "")) \
+           .replace("__STREAM__", fn("scStemStream", "uid")).replace("__TURN__", fn("scStemTurn", "gid, run") or fn("scStemTurn", "job")).replace("__TURNNEXT__", fn("scStemTurnNext", "")).replace("__PENDING__", fn("scStemPending", "")) + scenario
+
+    def run_node(self, scenario, **kw):
+        res = subprocess.run(["node", "-e", self.script(scenario, **kw)], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr[-1500:])
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_an_empty_deck_is_used_before_a_deck_with_a_cued_track(self):
+        """Deck 2 holds a cued, paused track and deck 1 is empty: the import goes to deck 1 (it used to take deck 2, the first not playing)."""
+        self.run_node("""
+deck(2).loaded = true; deck(2).uri = 'file:///cued.mp3';
+assert.strictEqual(tap('u11'), true);
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+assert.deepStrictEqual(loads.map(l => l[0]), [1], 'loaded on the empty deck');
+assert.strictEqual(deck(2).uri, 'file:///cued.mp3', 'the cued track is still there');
+assert.strictEqual(root.scStemFull, false);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_no_empty_deck_means_the_tap_says_so_and_starts_nothing(self):
+        """Every deck that is not playing holds a track: busy answer, the swipe's own hint (scStemFull), nothing marked, requested or loaded."""
+        self.run_node("""
+deck(1).playing = true; deck(1).loaded = true;
+deck(2).loaded = true; deck(2).uri = 'file:///cued.mp3';
+assert.strictEqual(tap('u11'), 'busy');
+assert.strictEqual(root.scStemFull, true, 'a deck is free to play but none is empty');
+assert.deepStrictEqual([xhrs.length, loads.length, Object.keys(rowsNow).length], [0, 0, 0]);
+// Both playing: the old answer, with the old hint.
+deck(2).playing = true;
+assert.strictEqual(tap('u11'), 'busy');
+assert.strictEqual(root.scStemFull, false, 'every deck is playing: the "free one deck" hint');
+// A deck is ejected: the next tap goes ahead and the flag is gone.
+deck(2).playing = false; deck(2).loaded = false; deck(2).uri = '';
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(root.scStemFull, false);
+assert.strictEqual(xhrs.length, 1);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_deck_that_got_a_track_while_the_file_came_is_not_loaded_over(self):
+        """The file takes a while: a track loaded on the chosen deck meanwhile is the DJ's, so nothing is loaded and the row stops waiting."""
+        self.run_node("""
+deck(2).playing = true; deck(2).loaded = true;
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(rowsNow['11'], 'wait');
+deck(1).loaded = true; deck(1).uri = 'file:///dj.mp3';
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+assert.deepStrictEqual(loads, [], 'nothing loaded over the DJ\\'s track');
+assert.strictEqual(deck(1).uri, 'file:///dj.mp3');
+assert.strictEqual(rowsNow['11'], undefined, 'the row stops waiting');
+assert.strictEqual(scStemImport.running, false);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_two_quick_taps_are_imported_one_after_the_other(self):
+        """Both files arrive before the first import ended: the second waits for the first one's eject, then both are handed to Engine."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(tap('u22'), true);
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+answer(1, 200, {path: '/data/b.mp3', row: 200});
+flush();
+assert.strictEqual(loads.length, 1, 'only the first file is loaded: the timers are its');
+assert.deepStrictEqual([rowsNow['11'], rowsNow['100'], rowsNow['22']], ['wait', 'wait', 'wait'], 'the second row waits, the first keeps waiting');
+const first = loads[0][0];
+importRender('5');                      // Engine imported the first file
+assert.deepStrictEqual(handed, ['5']);
+flush();
+assert.strictEqual(loads.length, 1, 'the first file is still on its deck: the second goes on after the eject');
+unloadTick();                           // the eject
+assert.deepStrictEqual(unloads, [first]);
+flush();
+assert.strictEqual(loads.length, 2, 'the second file goes now');
+assert.ok(loads[1][1].endsWith('b.mp3'));
+assert.deepStrictEqual([rowsNow['22'], rowsNow['200']], ['wait', 'wait']);
+importRender('6');
+unloadTick();
+flush();
+assert.deepStrictEqual(handed, ['5', '6'], 'both tracks are rendered, in the order of the taps');
+assert.deepStrictEqual(unloads.length, 2, 'both temporary files are ejected');
+assert.deepStrictEqual([deck(1).loaded, deck(2).loaded], [false, false]);
+assert.deepStrictEqual(scStemTurns, []);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_three_taps_on_one_free_deck_all_get_their_turn(self):
+        """One empty deck, three tracks (a multi-selection): each goes through it in turn."""
+        self.run_node("""
+for (const id of ['u11', 'u22', 'u33']) assert.strictEqual(tap(id), true);
+for (let i = 0; i < 3; i++) answer(i, 200, {path: '/data/t' + i + '.mp3', row: 100 + i});
+flush();
+for (let i = 0; i < 3; i++) {
+    assert.strictEqual(loads.length, i + 1, 'the ' + (i + 1) + '. file waits for the eject of the one before');
+    importRender(String(50 + i));
+    flush();
+    unloadTick();
+    flush();
+}
+assert.deepStrictEqual(handed, ['50', '51', '52']);
+assert.strictEqual(unloads.length, 3);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_temporary_track_the_dj_started_stays_and_the_next_import_does_not_replace_it(self):
+        """The eject leaves a deck that is playing: the DJ's now. The next import finds no empty deck and its row stops waiting."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(tap('u22'), true);
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+answer(1, 200, {path: '/data/b.mp3', row: 200});
+importRender('5');
+deck(1).playing = true;                 // the DJ presses play on the imported file
+unloadTick();
+flush();
+assert.deepStrictEqual(unloads, [], 'a playing deck is not ejected');
+assert.strictEqual(loads.length, 1, 'and not loaded over');
+assert.strictEqual(rowsNow['22'], undefined, 'the second row stops waiting');
+assert.deepStrictEqual(scStemTurns, []);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_an_import_that_never_lands_does_not_block_the_next_one(self):
+        """Engine never imports the first file: its rows stop waiting after the tries and the queue goes on."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(tap('u22'), true);
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+answer(1, 200, {path: '/data/b.mp3', row: 200});
+assert.strictEqual(loads.length, 1);
+scStemImport.tries = 0;
+importTick();                           // the last try is used up
+assert.strictEqual(rowsNow['11'], undefined);
+flush();
+assert.strictEqual(scStemUnload.running, false);
+// The first file is still on its deck, as Engine never took it: the second finds no empty deck on a one-deck unit.
+assert.strictEqual(loads.length, 1);
+assert.strictEqual(rowsNow['22'], undefined);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_the_same_row_tapped_twice_is_imported_once(self):
+        """#316 review: every tap on a row used to ask again and queue one more import of the same track. The key is the service's
+        track id (the row's own id is per list): a second row of the same track, in another list, is the same entry."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(tap('u11'), true);           // the same row again
+assert.strictEqual(tap('r11'), true);           // the same track, another list's row (another id for Engine)
+assert.strictEqual(xhrs.length, 1, 'the later taps ask for nothing');
+assert.strictEqual(rowsNow['11'], 'wait', 'the row keeps showing where it is');
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+flush();
+assert.strictEqual(scStemTurns.length, 0);
+assert.strictEqual(loads.length, 1);
+importRender('5'); unloadTick(); flush();
+assert.deepStrictEqual(handed, ['5'], 'one render for one track');
+assert.deepStrictEqual(unloads, [1]);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_track_that_is_queued_or_importing_is_not_taken_again(self):
+        """Queued, importing, or on a deck waiting for its eject: a tap adds nothing. Once it is over, the track can be tapped again."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(tap('u22'), true);
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+answer(1, 200, {path: '/data/b.mp3', row: 200});
+flush();
+assert.strictEqual(scStemTurns.length, 1, 'u22 waits for its turn');
+const asked = xhrs.length;
+assert.strictEqual(tap('u22'), true, 'queued');
+assert.strictEqual(tap('u11'), true, 'importing');
+assert.strictEqual(xhrs.length, asked);
+assert.strictEqual(scStemTurns.length, 1, 'the queue did not grow');
+importRender('5'); flush();                      // imported, the temporary file is still on its deck
+assert.strictEqual(tap('u11'), true, 'on its deck, waiting for the eject');
+assert.strictEqual(xhrs.length, asked);
+unloadTick(); flush();                           // ejected: the second track goes
+importRender('6'); unloadTick(); flush();
+assert.deepStrictEqual(handed, ['5', '6']);
+assert.deepStrictEqual(scStemTurns, []);
+// all over: the same track can be asked for again
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(xhrs.length, asked + 1);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_burst_beyond_the_bound_is_turned_away_and_the_rest_runs_in_order(self):
+        """Eight distinct tracks at most are on their way (asked for, queued, importing). The ninth tap starts nothing, gives the hint
+        ("Please wait...", not the deck hint) and marks no row; the earlier ones run in order and the queue never grows past the bound."""
+        self.run_node("""
+const longest = () => Math.max(...[scStemTurns.length]);
+let most = 0;
+const watch = () => { most = Math.max(most, scStemTurns.length); };
+for (let i = 1; i <= 8; i++) assert.strictEqual(tap('u' + i), true, 'tap ' + i);
+assert.strictEqual(xhrs.length, 8);
+for (let i = 9; i <= 12; i++) {
+    assert.strictEqual(tap('u' + i), 'busy', 'tap ' + i + ' is turned away');
+    assert.strictEqual(root.scStemWait, true, 'the swipe says to wait');
+    assert.strictEqual(root.scStemFull, false, 'not the deck hint');
+    assert.strictEqual(rowsNow[String(i)], undefined, 'no row is marked');
+}
+assert.strictEqual(xhrs.length, 8, 'nothing was asked for');
+assert.strictEqual(tap('u3'), true, 'a track that is already on its way is not turned away');
+assert.strictEqual(root.scStemWait, false);
+for (let i = 0; i < 8; i++) { answer(i, 200, {path: '/data/t' + i + '.mp3', row: 100 + i}); watch(); }
+flush(); watch();
+assert.ok(most <= 8, 'the queue held ' + most);
+assert.strictEqual(tap('u13'), 'busy', 'still eight on their way');
+for (let i = 0; i < 8; i++) {
+    assert.strictEqual(loads.length, i + 1, 'the ' + (i + 1) + '. file goes after the one before');
+    importRender(String(50 + i)); flush(); watch();
+    unloadTick(); flush(); watch();
+}
+assert.deepStrictEqual(handed, ['50', '51', '52', '53', '54', '55', '56', '57'], 'in the order of the taps');
+assert.ok(most <= 8);
+// the queue has drained: nothing runs, nothing waits, and a tap goes ahead again
+assert.deepStrictEqual(scStemTurns, []);
+assert.deepStrictEqual([scStemImport.running, scStemUnload.running, later.length], [false, false, 0]);
+assert.deepStrictEqual(root.scStemPending(), {});
+assert.deepStrictEqual(Object.keys(scStemAsking), []);
+assert.strictEqual(tap('u13'), true);
+assert.strictEqual(root.scStemWait, false);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_download_that_never_answers_stops_holding_its_track(self):
+        """No answer for two minutes: the track can be asked for again (the row would have waited for ever otherwise)."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+clock += 119999;
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(xhrs.length, 1, 'still held');
+clock += 2;
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(xhrs.length, 2, 'asked again');
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_request_that_never_answers_clears_its_row_at_the_expiry(self):
+        """#316 review 2: the row of a request the gateway never answers stops waiting by itself at the expiry, without a second tap."""
+        self.run_node("""
+assert.strictEqual(scStemExpiry.running, false, 'no timer before the first tap');
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(rowsNow['11'], 'wait');
+assert.strictEqual(scStemExpiry.running, true);
+advance(119999);
+assert.strictEqual(rowsNow['11'], 'wait', 'still waiting a moment before the expiry');
+advance(2);
+assert.strictEqual(rowsNow['11'], undefined, 'the row stops waiting by itself');
+assert.deepStrictEqual(root.scStemPending(), {});
+assert.strictEqual(scStemExpiry.running, false, 'no request is open: the timer has stopped');
+assert.strictEqual(tap('u11'), true, 'and the track can be asked for again');
+assert.strictEqual(xhrs.length, 2);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_late_answer_after_the_expiry_adds_nothing(self):
+        """The request was given up and its row cleared: its answer, a success or a failure, changes nothing."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(tap('u22'), true);
+advance(120001);
+answer(0, 200, {path: '/data/a.mp3', row: 100});          // the late success
+answer(1, 502, {});                                        // the late failure
+flush();
+assert.deepStrictEqual(scStemTurns, [], 'nothing queued');
+assert.strictEqual(loads.length, 0, 'nothing loaded');
+assert.strictEqual(rowsNow['11'], undefined);
+assert.strictEqual(rowsNow['22'], undefined, 'a late failure does not mark the row either');
+assert.deepStrictEqual([scStemImport.running, scStemUnload.running, scStemExpiry.running], [false, false, false]);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_late_answer_while_a_second_request_is_open_adds_only_the_second(self):
+        """The first request expired, the user tapped again: whichever answers first, the track is queued exactly once, by the second request."""
+        for late_first in (True, False):
+            with self.subTest(late_answer_first=late_first):
+                self.run_node("""
+const lateFirst = %s;
+assert.strictEqual(tap('u11'), true);                      // request 0
+advance(120001);
+assert.strictEqual(rowsNow['11'], undefined);
+assert.strictEqual(tap('u11'), true);                      // request 1 for the same track
+assert.strictEqual(xhrs.length, 2);
+if (lateFirst) { answer(0, 200, {path: '/data/a.mp3', row: 100}); assert.deepStrictEqual(scStemTurns, []); assert.strictEqual(loads.length, 0, 'the stale answer adds nothing'); }
+answer(1, 200, {path: '/data/a.mp3', row: 100});
+if (!lateFirst) answer(0, 200, {path: '/data/a.mp3', row: 100});
+flush();
+assert.strictEqual(loads.length, 1, 'one entry, the second request\\'s');
+assert.deepStrictEqual(scStemTurns, []);
+importRender('5'); unloadTick(); flush();
+assert.deepStrictEqual(handed, ['5'], 'one render');
+assert.deepStrictEqual(unloads, [1]);
+assert.strictEqual(loads.length, 1, 'nothing queued behind it');
+assert.deepStrictEqual([scStemImport.running, scStemUnload.running, scStemExpiry.running], [false, false, false]);
+""" % ("true" if late_first else "false"), decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_an_answer_just_before_the_expiry_is_taken(self):
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(scStemExpiry.running, true, 'the request is open: the timer waits for its expiry');
+advance(119999);
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+flush();
+assert.strictEqual(loads.length, 1, 'taken');
+assert.strictEqual(scStemExpiry.running, false, 'the only request has answered: the timer has stopped');
+advance(300000);
+assert.strictEqual(rowsNow['11'], 'wait', 'nothing runs later to clear it');
+importRender('5'); unloadTick(); flush();
+assert.deepStrictEqual(handed, ['5']);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_the_expiry_timer_runs_only_while_a_request_is_open(self):
+        """No timer before the first tap, none after the last request has answered (success or failure) or expired."""
+        self.run_node("""
+assert.strictEqual(scStemExpiry.running, false);
+assert.strictEqual(tap('u1'), true);
+assert.strictEqual(tap('u2'), true);
+assert.strictEqual(tap('u3'), true);
+assert.strictEqual(scStemExpiry.running, true);
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+assert.strictEqual(scStemExpiry.running, true, 'two requests are still open');
+answer(1, 502, {});
+assert.strictEqual(scStemExpiry.running, true, 'one is still open');
+advance(60000);
+assert.strictEqual(scStemExpiry.running, true);
+advance(60001);                                           // the third expires
+assert.strictEqual(rowsNow['3'], undefined);
+assert.strictEqual(scStemExpiry.running, false, 'the last open request expired: the timer has stopped');
+assert.strictEqual(tap('u4'), true);
+assert.strictEqual(scStemExpiry.running, true);
+answer(3, 200, {path: '/data/b.mp3', row: 200});
+assert.strictEqual(scStemExpiry.running, false, 'the last request answered: the timer has stopped');
+flush();
+assert.strictEqual(later.length, 0);
+""", decks="[1, 2, 3, 4]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_clock_set_back_does_not_stretch_the_wait_of_an_open_request(self):
+        """#316 review 3: the deck sets its clock from the network after boot. The request time and the expiry are wall-clock times; the timer
+        counts elapsed time. An hour back while a request is open must not make the row wait an hour: a request has at most one period left,
+        so more means the clock moved back and the deadline is counted again from now (two periods in all)."""
+        self.run_node("""
+clock = 4000000;
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(scStemExpiry.interval, 120000);
+jump(-3600000);                                    // the clock is set an hour back
+advance(120000);                                   // the timer's period is over: it fires
+assert.strictEqual(rowsNow['11'], 'wait', 'the first firing does not give up a request whose time looks an hour away');
+assert.strictEqual(scStemExpiry.running, true);
+assert.strictEqual(scStemExpiry.interval, 120000, 'armed again with one period, not with the length of the jump');
+advance(119999);
+assert.strictEqual(rowsNow['11'], 'wait');
+advance(2);
+assert.strictEqual(rowsNow['11'], undefined, 'one period later the row leaves the waiting state');
+assert.deepStrictEqual(root.scStemPending(), {});
+assert.strictEqual(scStemExpiry.running, false, 'and the timer has stopped');
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_two_requests_one_before_and_one_after_a_clock_set_back_each_leave_on_their_own_bound(self):
+        self.run_node("""
+clock = 4000000;
+assert.strictEqual(tap('u11'), true);              // asked before the jump
+advance(30000);
+jump(-3600000);
+assert.strictEqual(tap('u22'), true);              // asked after it (30 s of the other's period have gone)
+advance(90000);                                    // the timer fires, 120 s after the first request
+assert.strictEqual(rowsNow['11'], 'wait', 'the request from before the jump is counted again from now');
+assert.strictEqual(rowsNow['22'], 'wait', 'the one from after it has 30 s left');
+assert.strictEqual(scStemExpiry.running, true);
+assert.strictEqual(scStemExpiry.interval, 30000, 'armed for the nearer of the two');
+advance(30000);
+assert.strictEqual(rowsNow['22'], undefined, 'the second leaves on its own bound');
+assert.strictEqual(rowsNow['11'], 'wait');
+assert.strictEqual(scStemExpiry.running, true);
+assert.strictEqual(scStemExpiry.interval, 90000, 'the first has the rest of its new period');
+advance(90000);
+assert.strictEqual(rowsNow['11'], undefined, 'the first leaves on its bound: two periods and the 30 s in all, not an hour');
+assert.deepStrictEqual(root.scStemPending(), {});
+assert.deepStrictEqual(Object.keys(scStemAsking), [], 'the table ends empty');
+assert.strictEqual(scStemExpiry.running, false);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_second_clock_correction_gives_the_request_up_instead_of_rebasing_it_again(self):
+        """#316 review 4: a request whose time looks more than one period away is counted again from now, once. Found that way again before
+        it expires (the clock was set back again), it is given up at once, so the wait is at most two periods whatever the clock does."""
+        self.run_node("""
+clock = 10000000;
+assert.strictEqual(tap('u11'), true);
+jump(-3600000);                                    // the clock is set an hour back
+advance(120000);                                   // the timer fires: the request is counted again from now
+assert.strictEqual(rowsNow['11'], 'wait');
+assert.strictEqual(scStemExpiry.running, true);
+assert.strictEqual(scStemExpiry.interval, 120000, 'armed again with one period');
+jump(-3600000);                                    // and set back again before it expires
+advance(120000);                                   // the timer fires again
+assert.strictEqual(rowsNow['11'], undefined, 'the second correction gives the request up: the row has left the waiting state');
+assert.deepStrictEqual(Object.keys(scStemAsking), [], 'the table is empty');
+assert.deepStrictEqual(root.scStemPending(), {});
+assert.strictEqual(scStemExpiry.running, false, 'and the timer has stopped');
+// a late answer to the request that was given up adds nothing
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+flush();
+assert.strictEqual(loads.length, 0);
+assert.deepStrictEqual(scStemTurns, []);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_failed_download_does_not_hold_its_track(self):
+        """A failed answer frees the track at once: the row says so for a while and a new tap asks again."""
+        self.run_node("""
+assert.strictEqual(tap('u11'), true);
+answer(0, 502, {});
+assert.deepStrictEqual(root.scStemPending(), {});
+assert.strictEqual(tap('u11'), true);
+assert.strictEqual(xhrs.length, 2);
+""", decks="[1]")
+
+    def test_the_hint_for_too_many_imports_is_an_existing_string(self):
+        """No new string: 'Please wait...' (the table has it, four languages) shows on the swipe when the tap was turned away for the queue."""
+        hint = "Please wait..."
+        rows = {l.split("\t")[0]: l.split("\t") for l in
+                (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
+        self.assertEqual(len(rows[hint]), 4)
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        for side in ("Left", "Right"):
+            with self.subTest(side=side):
+                path = "Skins/Embedded/Views/BrowseView/Components/Components/Swipe" + side + "Item.qml"
+                msgs = next(re.search(r"readonly property list<string> actionCommitMessages: (.*)", new).group(1)
+                            for _, new in edits[path] if "actionCommitMessages:" in new)
+                script = """
+const assert = require('assert');
+const msgs = %s;
+function say(wait, full, decks, busy) {
+    const scStemBusy = busy, scLabel = s => s, scStem = true, leftActions = [], rightActions = [];
+    const root = {scT: s => 'T:' + s, scDeckList: () => decks, scStemFull: full, scStemWait: wait};
+    return eval(msgs)[0];
+}
+assert.strictEqual(say(true, false, [1, 2], true), 'T:Please wait...');
+assert.strictEqual(say(true, false, [1, 2, 3, 4], true), 'T:Please wait...');
+assert.strictEqual(say(false, true, [1, 2], true), 'T:Every deck has a track loaded. Eject one, then tap Stems again');
+assert.strictEqual(say(false, false, [1, 2], true), 'T:Both decks are playing. Free one deck, then tap Stems again');
+assert.strictEqual(say(false, false, [1, 2, 3, 4], true), 'T:All decks are playing. Free one deck, then tap Stems again');
+assert.strictEqual(say(true, false, [1, 2], false), 'T:Stems', 'no hint without a busy answer');
+""" % json.dumps(msgs)
+                res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stderr[-1500:])
+
+    def test_the_hint_for_a_full_set_of_decks_is_in_every_language_and_on_the_swipe(self):
+        """The swipe's message names the situation: 'every deck has a track loaded' only when scStemFull, the old words otherwise."""
+        hint = "Every deck has a track loaded. Eject one, then tap Stems again"
+        rows = {l.split("\t")[0]: l.split("\t") for l in
+                (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
+        self.assertEqual(len(rows[hint]), 4)
+        for text in rows[hint]:
+            self.assertIn("Stems", text)
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        for side in ("Left", "Right"):
+            with self.subTest(side=side):
+                path = "Skins/Embedded/Views/BrowseView/Components/Components/Swipe" + side + "Item.qml"
+                msgs = next(re.search(r"readonly property list<string> actionCommitMessages: (.*)", new).group(1)
+                            for _, new in edits[path] if "actionCommitMessages:" in new)
+                script = """
+const assert = require('assert');
+const msgs = %s;
+function say(full, decks, busy) {
+    const scStemBusy = busy, scLabel = s => s, scStem = true, leftActions = [], rightActions = [];
+    const root = {scT: s => 'T:' + s, scDeckList: () => decks, scStemFull: full};
+    const actionLeft = [], actionRight = [];
+    return eval(msgs)[0];
+}
+assert.strictEqual(say(true, [1, 2], true), 'T:' + %s);
+assert.strictEqual(say(true, [1, 2, 3, 4], true), 'T:' + %s);
+assert.strictEqual(say(false, [1, 2], true), 'T:Both decks are playing. Free one deck, then tap Stems again');
+assert.strictEqual(say(false, [1, 2, 3, 4], true), 'T:All decks are playing. Free one deck, then tap Stems again');
+assert.strictEqual(say(true, [1, 2], false), 'T:Stems', 'no hint without a busy answer');
+""" % (json.dumps(msgs), json.dumps(hint), json.dumps(hint))
+                res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stderr[-1500:])
+
+    def test_the_neighbours_are_untouched(self):
+        """The hand-over to Engine (#271/#273/#305), the eject rules and the busy answer keep their text."""
+        src = bp.SERVICES_MAIN
+        for text in ('if (!deck) { console.warn("EngineX stems step=busy"); return "busy" }',
+                     'scStemImport.rows = [gid, reply.row ? String(reply.row) : ""]',
+                     'root.scStemMark(scStemImport.rows, "wait")',
+                     'if (tries-- <= 0) { root.scStemMark(rows, ""); stop(); return }',
+                     "root.scStemHand(id, rows)",
+                     "if (--tries <= 0 || !armed) { stop(); return }",
+                     'if (u.indexOf(name) < 0) return',
+                     'if (!Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state)',
+                     'Planck.getProperty("/Engine/Deck%1/Track/Unload".arg(deck)).translator.state = true'):
+            self.assertIn(text, src, text)
 
 
 if __name__ == "__main__":

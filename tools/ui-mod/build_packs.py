@@ -4796,6 +4796,15 @@ SERVICES_MAIN = """
 	property var scStemSeen: null // when and where the rendering track's progress was first seen
 	property string scStemLeft: ""
 	property var scStemFailAt: ({})
+	property bool scStemFull: false // the last Stems tap found a deck free to load but none empty: the swipe's hint says so
+	property var scStemTurns: [] // imports that have their file and wait for the one in progress: {gid, run}, oldest first
+	property var scStemAsking: ({}) // track id -> {at, gen} of its open request to the gateway for the file, until it answers or expires
+	property int scStemGen: 0 // the last request's number: an answer counts only for the open request of its track (scStemAnswered)
+	property bool scStemWait: false // the last Stems tap was turned away: this many imports are already on their way
+	// Most tracks on their way through the import at once (asked for, waiting for their turn, importing): a list shows about 6 rows of 92 px
+	// (TrackList.qml), so one screenful selected for Stems fits with room for the import in progress; the next tap says "Please wait...".
+	readonly property int scStemMax: 8
+	readonly property int scStemAskMs: 120000 // a request that never answers is given up after this long: its row stops waiting (scStemExpire)
 	function scStemMark(ids, mark) {
 		const rows = Object.assign({}, scStemRows)
 		for (const id of ids) {
@@ -4956,16 +4965,37 @@ SERVICES_MAIN = """
 		const lib = Planck.librarianController.collectionController
 		const m = /uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)/.exec(lib.getTrackUrisFromUniversalIds([uid]) || "")
 		if (!m) return false
-		const deck = root.scDeckList().slice().reverse().find(d => !root.scDeckLocked(d) && !Planck.getProperty("/Engine/Deck%1/PlayState".arg(d)).translator.state)
-		// Every deck is playing: playback is never interrupted for the import, so
-		// nothing is started. The swipe says so where it would have said "Stems".
-		if (!deck) { console.warn("EngineX stems step=busy"); return "busy" }
+		// The service's track id from the row's uri: every row of one track, in any list, has it (the rows' own ids are per list),
+		// so it is the one key of the row marks, the download and the queue.
 		const gid = m[1]
+		root.scStemWait = false
+		// A track that is already on its way is not taken a second time: the row keeps showing where it is.
+		const pending = root.scStemPending()
+		if (pending[gid]) return true
+		// The import loads the file on a deck, so it needs one that is neither playing nor
+		// holding a track: a track cued on a paused deck is the DJ's and is never replaced (#316).
+		const loaded = d => { const song = Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(d)); return !!(song && song.translator && song.translator.state) }
+		const idle = () => root.scDeckList().slice().reverse().filter(d => !root.scDeckLocked(d) && !Planck.getProperty("/Engine/Deck%1/PlayState".arg(d)).translator.state)
+		const free = () => idle().find(d => !loaded(d))
+		const deck = free()
+		// Every deck is playing, or every free one holds a track: playback and cued tracks
+		// are never interrupted for the import, so nothing is started. The swipe says so
+		// where it would have said "Stems" (scStemFull: which of the two it was).
+		root.scStemFull = !deck && idle().length > 0
+		if (root.scStemFull) console.warn("EngineX stems step=full")
+		if (!deck) { console.warn("EngineX stems step=busy"); return "busy" }
+		// Too many on their way: the tap starts nothing and the swipe says to wait (the answer is the same "busy" one).
+		root.scStemWait = Object.keys(pending).length >= root.scStemMax
+		if (root.scStemWait) { console.warn("EngineX stems step=queue-full"); return "busy" }
+		const gen = root.scStemAsk(gid)
 		root.scStemMark([gid], "wait")
 		const x = new XMLHttpRequest()
 		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/source?id=" + gid)
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4) return
+			// The request was given up (its row stopped waiting) or a later tap replaced it: this answer is stale. Otherwise the queue (or nothing, after a
+			// failure) holds the track from here on.
+			if (!root.scStemAnswered(gid, gen)) return
 			// The service gave no full file (a NetEase track this account only previews,
 			// no match, no network): say so on the row instead of dropping the tap.
 			if (x.status !== 200) {
@@ -4974,32 +5004,104 @@ SERVICES_MAIN = """
 				if (!scStemFailed.running) { scStemFailed.interval = 10000; scStemFailed.restart() }
 				return
 			}
-			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) { root.scStemMark([gid], ""); return } // started playing while we waited
 			const reply = JSON.parse(x.responseText)
 			const url = "file://" + encodeURI(reply.path)
-			// Engine imports a file only through a deck load, so load it on an empty deck
-			// and eject it again once the Stems render is queued (scStemUnload).
-			const song = Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(deck))
-			scStemUnload.deck = deck
-			scStemUnload.armed = !(song && song.translator && song.translator.state)
-			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(deck)).translator.url = url
-			// One import at a time: an earlier one this replaces is not rendered.
-			if (scStemImport.running && scStemImport.rows.indexOf(gid) < 0) root.scStemMark(scStemImport.rows, "")
-			scStemImport.rows = [gid, reply.row ? String(reply.row) : ""]
-			root.scStemMark(scStemImport.rows, "wait")
-			scStemImport.url = url
-			scStemImport.path = reply.path
-			scStemImport.tries = 20
-			scStemImport.restart()
+			// One import at a time: the two timers below hold one import's state, so a tap
+			// that finds another one in progress waits for its turn (scStemTurn) and never
+			// overwrites it. Its row keeps saying "wait".
+			root.scStemTurn(gid, function() {
+				// The deck is chosen now: the file took a while to come and the DJ may have
+				// loaded a track on it or started it meanwhile. A track is never replaced.
+				const d = free()
+				if (!d) { root.scStemMark([gid], ""); return }
+				// Engine imports a file only through a deck load, so load it on an empty deck
+				// and eject it again once the Stems render is queued (scStemUnload).
+				scStemUnload.deck = d
+				scStemUnload.gid = gid
+				scStemUnload.armed = true
+				Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(d)).translator.url = url
+				scStemImport.rows = [gid, reply.row ? String(reply.row) : ""]
+				root.scStemMark(scStemImport.rows, "wait")
+				scStemImport.url = url
+				scStemImport.path = reply.path
+				scStemImport.tries = 20
+				scStemImport.restart()
+			})
 		}
 		x.send()
 		return true
+	}
+	// An import has the two timers below to itself from its file load to the eject of its
+	// deck: the next one starts when both have stopped (or at once when neither runs).
+	function scStemTurn(gid, run) {
+		scStemTurns = scStemTurns.concat([{gid: gid, run: run}])
+		scStemTurnNext()
+	}
+	function scStemTurnNext() {
+		while (scStemTurns.length && !scStemImport.running && !scStemUnload.running) {
+			const job = scStemTurns[0]
+			scStemTurns = scStemTurns.slice(1)
+			job.run()
+		}
+	}
+	// The distinct tracks on their way through the import, by track id: asked for (the download), waiting for their turn, importing,
+	// or on a deck waiting for its eject. Read at a tap, so nothing runs while idle.
+	function scStemPending() {
+		const ids = {}, now = Date.now()
+		for (const id of Object.keys(scStemAsking)) if (now - scStemAsking[id].at < scStemAskMs) ids[id] = true
+		for (const turn of scStemTurns) ids[turn.gid] = true
+		if (scStemImport.running) ids[scStemImport.rows[0]] = true
+		if (scStemUnload.running) ids[scStemUnload.gid] = true
+		return ids
+	}
+	// The requests to the gateway: a tap opens one for its track (the number says which), the answer closes it. An answer to a request
+	// that was given up or replaced by a later tap is dropped, so a late answer cannot queue the track a second time.
+	function scStemAsk(gid) {
+		const gen = ++scStemGen
+		scStemAsking[gid] = {at: Date.now(), gen: gen}
+		if (!scStemExpiry.running) { scStemExpiry.interval = scStemAskMs; scStemExpiry.restart() }
+		return gen
+	}
+	function scStemAnswered(gid, gen) {
+		const open = scStemAsking[gid]
+		if (!open || open.gen !== gen) return false
+		delete scStemAsking[gid]
+		if (!Object.keys(scStemAsking).length) scStemExpiry.stop()
+		return true
+	}
+	// Gives up the requests that did not answer in time: the row stops waiting. Runs from scStemExpiry, which waits for the oldest open
+	// request and stops itself when none is open, so nothing runs while idle. The deck sets its clock from the network after boot: a request
+	// can never have more than one period left, so more means the clock was set back and its deadline is counted again from now, once. Found
+	// that way a second time it is given up at once. The wait is then at most two periods of the timer's own time, whatever the clock does,
+	// and the timer is never armed for the length of a jump.
+	function scStemExpire() {
+		const now = Date.now()
+		let next = -1
+		for (const gid of Object.keys(scStemAsking)) {
+			const open = scStemAsking[gid]
+			if (open.at + scStemAskMs - now > scStemAskMs) {
+				if (open.rebased) { delete scStemAsking[gid]; scStemMark([gid], ""); continue }
+				open.at = now
+				open.rebased = true
+			}
+			const left = open.at + scStemAskMs - now
+			if (left <= 0) { delete scStemAsking[gid]; scStemMark([gid], "") }
+			else if (next < 0 || left < next) next = left
+		}
+		if (next < 0) { scStemExpiry.stop(); return }
+		scStemExpiry.interval = next
+		scStemExpiry.restart()
+	}
+	Timer {
+		id: scStemExpiry
+		onTriggered: root.scStemExpire()
 	}
 	// The import lands in the internal m.db, but while a streaming collection is open
 	// collectionController is that collection and cannot see it. So the gateway looks
 	// the id up by file name; the controller scan (ids 1-2000) is only the fallback.
 	Timer {
 		id: scStemImport
+		onRunningChanged: if (!running) Qt.callLater(root.scStemTurnNext)
 		property string url: ""
 		property string path: ""
 		property int tries: 0
@@ -5035,10 +5137,12 @@ SERVICES_MAIN = """
 	}
 	// Ejects the deck that scStemStream loaded only to get the file into the library,
 	// but only while it still holds that file and is not playing.
-	// shortcut: one pending import at a time; a second Stems tap re-arms the same deck.
+	// One pending import at a time (scStemTurn): the file, the deck and the name are one import's.
 	Timer {
 		id: scStemUnload
+		onRunningChanged: if (!running) Qt.callLater(root.scStemTurnNext)
 		property int deck: 0
+		property string gid: ""
 		property bool armed: false
 		property string name: ""
 		property int tries: 0
@@ -5194,6 +5298,7 @@ LOGIN_DIALOG = """
 					x: 620; y: 70
 					width: 88; height: 88
 					mipmap: true
+					cache: false // #316: not the texture Engine's own icons share (their mipmap setting differs)
 					source: root.scLogin ? root.scIcon(root.scLogin) : ""
 				}
 				Text {
@@ -5444,6 +5549,7 @@ SOURCE_FOOTER = """
 					anchors.verticalCenter: parent.verticalCenter
 					width: 48; height: 48
 					mipmap: true
+					cache: false // #316: not the texture Engine's own icons share (their mipmap setting differs)
 					source: root.scIcon(modelData.id)
 				}
 				Text {
@@ -6096,8 +6202,9 @@ UPFADER_ECHO_TILE = """
 """
 
 # Smart Sync (5.3.0 only): half/double-time (0.5x, 2x, 0.25x, 4x) harmonic tempo matching.
-# Automatically widens Pitch Range to the smallest step needed for the best harmonic match,
-# and restores the user's original Pitch Range when Sync is turned off.
+# Automatically widens Pitch Range to the smallest step needed for the best harmonic match.
+# When Sync is turned off the deck goes back to the range the DJ set by hand while Sync was on
+# (#316 BH-GF4-12); only when the DJ did not touch it, to the range it had before Smart Sync widened it.
 SMART_SYNC_MAIN = """
 	function scHarmonicSyncNeed(masterBpm, origBpm) {
 		if (origBpm <= 0 || masterBpm <= 0) return 0
@@ -6140,7 +6247,12 @@ SMART_SYNC_MAIN = """
 			readonly property QObjProperty pOrigBpm: Planck.getProperty("/Engine/Deck%1/OriginalBPM".arg(deckIdx))
 			readonly property QObjProperty pMasterBpm: Planck.getProperty("/Engine/Master/MasterTempo")
 			readonly property QObjProperty pRange: Planck.getProperty("/Engine/Deck%1/SpeedRange".arg(deckIdx))
-			property int savedRangeIndex: -1
+			property int savedRangeIndex: -1 // the range when Sync engaged
+			property int handRangeIndex: -1 // the range the DJ set by hand while Sync was on; -1 = not touched
+			readonly property int rangeIndex: {
+				const r = pRange && pRange.translator
+				return r ? r.index : -1
+			}
 			readonly property bool syncActive: {
 				const s = pSync && pSync.translator, l = pLoaded && pLoaded.translator
 				return !!(s && l && s.string !== "Off" && l.state)
@@ -6150,15 +6262,28 @@ SMART_SYNC_MAIN = """
 				if (!s || !l || !o || !m || s.string === "Off" || !l.state || !(o.unnormalized > 0) || !(m.unnormalized > 0)) return 0
 				return root.scHarmonicSyncNeed(m.unnormalized, o.unnormalized)
 			}
+			// Smart Sync names the index it is about to write (scSmartExpect) and its own change is the one that arrives with that value;
+			// any other change while Sync is on is the DJ's. Event only: nothing runs per frame.
+			onRangeIndexChanged: {
+				if (root.scSmartExpect[deckIdx] === rangeIndex) {
+					delete root.scSmartExpect[deckIdx]
+					return
+				}
+				if (syncActive && savedRangeIndex >= 0) handRangeIndex = rangeIndex
+			}
 			onSyncActiveChanged: {
 				const r = pRange && pRange.translator
+				delete root.scSmartExpect[deckIdx]
 				if (syncActive) {
+					handRangeIndex = -1
 					if (savedRangeIndex < 0 && r) savedRangeIndex = r.index
 					if (syncNeed > 0) root.scWidenRange(deckIdx, syncNeed)
 				} else {
 					if (savedRangeIndex >= 0 && r) {
-						r.index = savedRangeIndex
+						const back = handRangeIndex >= 0 ? handRangeIndex : savedRangeIndex
+						if (r.index !== back) r.index = back
 						savedRangeIndex = -1
+						handRangeIndex = -1
 					}
 					root.scUnsyncRestoreBpm(deckIdx)
 				}
@@ -6172,11 +6297,14 @@ SMART_SYNC_MAIN = """
 			}
 		}
 	}
+	property var scSmartExpect: ({}) // deck -> the range index Smart Sync is writing, until its own change arrives (not the DJ's)
 	function scWidenRange(deck, need) {
 		const t = Planck.getProperty("/Engine/Deck%1/SpeedRange".arg(deck)).translator
 		if (!t || need <= parseFloat(t.string)) return
 		const i = t.entries.findIndex(e => parseFloat(e) >= need)
-		t.index = i < 0 ? t.entries.length - 1 : i
+		const target = i < 0 ? t.entries.length - 1 : i
+		scSmartExpect[deck] = target
+		t.index = target
 	}
 	// The Smart Sync tile calls this so a tap takes effect without waiting for a tempo change.
 	function scWidenAll() {
@@ -8306,7 +8434,7 @@ def edits(dev: bool):
                  "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
                  f"    readonly property list<string> actionLabels: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : scLabel(action.display.label)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
                 (f"    readonly property list<string> actionCommitMessages: {a}.map(action => action.display.commitMessage)\n",
-                 f"    readonly property list<string> actionCommitMessages: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? (scStemBusy ? root.scT(root.scDeckList().length > 2 ? \"All decks are playing. Free one deck, then tap Stems again\" : \"Both decks are playing. Free one deck, then tap Stems again\") : root.scT(\"Stems\")) : scLabel(action.display.commitMessage)).concat(scStem ? [scStemBusy ? root.scT(root.scDeckList().length > 2 ? \"All decks are playing. Free one deck, then tap Stems again\" : \"Both decks are playing. Free one deck, then tap Stems again\") : root.scT(\"Stems\")] : [])\n"),
+                 f"    readonly property list<string> actionCommitMessages: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? (scStemBusy ? root.scT(root.scStemWait ? \"Please wait...\" : root.scStemFull ? \"Every deck has a track loaded. Eject one, then tap Stems again\" : root.scDeckList().length > 2 ? \"All decks are playing. Free one deck, then tap Stems again\" : \"Both decks are playing. Free one deck, then tap Stems again\") : root.scT(\"Stems\")) : scLabel(action.display.commitMessage)).concat(scStem ? [scStemBusy ? root.scT(root.scStemWait ? \"Please wait...\" : root.scStemFull ? \"Every deck has a track loaded. Eject one, then tap Stems again\" : root.scDeckList().length > 2 ? \"All decks are playing. Free one deck, then tap Stems again\" : \"Both decks are playing. Free one deck, then tap Stems again\") : root.scT(\"Stems\")] : [])\n"),
                 (f"    readonly property list<color> actionColors: {a}.map(action => action.display.color)\n",
                  f"    readonly property list<color> actionColors: {a}.map(action => action.display.color).concat(scStem ? [Style.systemBlue01Color] : [])\n"),
                 (f"        {a}[actionIndex].trigger(row.index)\n",
