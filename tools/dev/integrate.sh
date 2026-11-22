@@ -413,8 +413,8 @@ rebuild_overlay() {
     local file
     for file in "$@"; do
         case $file in
-            rootfs-overlay/*libengine-ui-hook.so) inner+="; OUT='$artifact/libengine-ui-hook.so' sh tools/ui-mod/build.sh" ;;
-            rootfs-overlay/*libedisksd-hook.so) inner+="; OUT='$artifact/libedisksd-hook.so' sh tools/edisksd-hook/build.sh" ;;
+            rootfs-overlay/*libengine-ui-hook.so) inner+="; OUT='../../$artifact/libengine-ui-hook.so' sh tools/ui-mod/build.sh" ;;
+            rootfs-overlay/*libedisksd-hook.so) inner+="; OUT='../../$artifact/libedisksd-hook.so' sh tools/edisksd-hook/build.sh" ;;
             *) echo "no rebuild recipe for prebuilt object: $file" >&2; return 1 ;;
         esac
     done
