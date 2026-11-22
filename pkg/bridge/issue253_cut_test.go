@@ -216,6 +216,8 @@ func copyTree(t *testing.T, src, dst string) {
 type cutFlow struct {
 	settings func() func()
 	steps    []string // "mount" or "job"
+	// after, if set, checks the volume at each cut and after the next mounts.
+	after func(t *testing.T, root, when string)
 }
 
 func cutStick(t *testing.T) (root string, deck cutDeck) {
@@ -256,6 +258,9 @@ func (f cutFlow) test(t *testing.T) {
 	f.run(ref)
 	restore()
 	cutConverge(t, ref)
+	if f.after != nil {
+		f.after(t, ref, "uncut")
+	}
 	want := cutResult(t, ref)
 	if len(points) == 0 {
 		t.Fatal("the update passed no cut point")
@@ -290,9 +295,15 @@ func (f cutFlow) test(t *testing.T) {
 			copyTree(t, cutAt, lib)
 			cutLibrary(t, root, "at the cut")
 			deck.check(t, root, "at the cut")
+			if f.after != nil {
+				f.after(t, root, "at the cut")
+			}
 			cutConverge(t, root)
 			cutLibrary(t, root, "after the next mounts")
 			deck.check(t, root, "after the next mounts")
+			if f.after != nil {
+				f.after(t, root, "after the next mounts")
+			}
 			got := cutResult(t, root)
 			if got.tracks != want.tracks || got.lists != want.lists || got.entries != want.entries || got.grids != want.grids || got.stamp != want.stamp {
 				t.Fatalf("after the next mounts: %d tracks, %d playlists, %d entries, %d grids, stamp %q; uncut: %d, %d, %d, %d, %q",
@@ -340,5 +351,24 @@ func TestIssue253CutListFirstUpdate(t *testing.T) {
 			return func() { c(); b(); a() }
 		},
 		steps: []string{"mount", "job", "mount", "job", "mount"},
+	}.test(t)
+}
+
+// A small export's update, read in place by the mount with no background job (#253 review 5):
+// track 5's file changed, so the import reads it again; it keeps its waveform copy (nothing
+// confirms the files here, and the import never decides it), at every cut and in the end.
+func TestIssue253CutMountOnlyUpdate(t *testing.T) {
+	cutFlow{
+		settings: func() func() { return func() {} },
+		steps:    []string{"mount"},
+		after: func(t *testing.T, root, when string) {
+			t.Helper()
+			db := dbOpen(t, root)
+			defer db.Close()
+			b := scalar[[]byte](t, db, `SELECT a.sourceJSON FROM bridge.BridgeAnalysis a JOIN Track t ON t.id=a.trackId WHERE t.pdbImportKey=5`)
+			if len(b) <= 4096 || enginedb.BridgeDetail(b, root, 16<<20) == nil {
+				t.Fatalf("%s: track 5's state row (%d bytes) is not its waveform copy", when, len(b))
+			}
+		},
 	}.test(t)
 }

@@ -275,13 +275,13 @@ func ReadAnalysisSkipping(path string, skip func(tag string) bool) (*Analysis, e
 	}
 	defer f.Close()
 	// An import keeps every PWV7 it meets (only the .2EX normally has one).
-	a, _, e := ReadAnalysisFile(f, func(tag string) bool { return tag != "PWV7" && skip(tag) }, nil)
+	a, _, e := ReadAnalysisFile(f, func(tag string) bool { return tag != "PWV7" && skip(tag) })
 	return a, e
 }
 
-// ReadAnalysisFile is ReadAnalysisSkipping on an open file; skipped is told the tag, entry width
-// and count of each waveform section left out. read is the bytes read from the file.
-func ReadAnalysisFile(f *os.File, skip func(tag string) bool, skipped func(tag string, width, count uint32)) (a *Analysis, read int64, e error) {
+// ReadAnalysisFile is ReadAnalysisSkipping on an open file; read is the bytes read from it. Only the
+// import uses it: whether the display can read a file is decided by reading it whole (#253 review 4).
+func ReadAnalysisFile(f *os.File, skip func(tag string) bool) (a *Analysis, read int64, e error) {
 	st, e := f.Stat()
 	if e != nil {
 		return nil, 0, e
@@ -315,7 +315,6 @@ func ReadAnalysisFile(f *os.File, skip func(tag string) bool, skipped func(tag s
 	if _, e = f.ReadAt(b, 0); e != nil {
 		return nil, read, e
 	}
-	var left []func()
 	hdr := make([]byte, 24)
 	for off := h; off < n; {
 		if n-off < 12 {
@@ -331,10 +330,7 @@ func ReadAnalysisFile(f *os.File, skip func(tag string) bool, skipped func(tag s
 		if sh < 12 || sn < sh || sn > n-off {
 			return whole()
 		}
-		if width, count, ok := WaveformShape(tag, hdr[:k], sh, sn); ok && isWaveform(tag) && skip(tag) {
-			if skipped != nil {
-				left = append(left, func() { skipped(tag, width, count) })
-			}
+		if _, _, ok := WaveformShape(tag, hdr[:k], sh, sn); ok && isWaveform(tag) && skip(tag) {
 			off += sn
 			continue
 		}
@@ -349,9 +345,6 @@ func ReadAnalysisFile(f *os.File, skip func(tag string) bool, skipped func(tag s
 	be.PutUint32(b[8:], uint32(len(b)))
 	if a, e = ParseAnalysis(b); e != nil {
 		return nil, read, e
-	}
-	for _, l := range left { // only for a file ParseAnalysis accepts
-		l()
 	}
 	return a, read, nil
 }

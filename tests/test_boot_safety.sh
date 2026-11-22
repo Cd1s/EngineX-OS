@@ -10,6 +10,7 @@ cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || :; done; wait 2>/
 trap cleanup EXIT
 mkdir -p "$W/bin"
 export BOOT_TEST_LOG=$W/systemctl.log ENGINEX_ENGINE_GUARDIAN=$W/bin/guardian
+export BOOT_TEST_RB_BRIDGE_LOG=$W/rb-bridge.log ENGINEX_RB_BRIDGE=$W/bin/rb-bridge ENGINEX_STREAM_SYNC=$W/bin/forbidden
 export ENGINEX_PERF_TUNE=/bin/true
 export ENGINEX_BOOT_TIMEOUT=2 ENGINEX_BOOT_POLL_INTERVAL=.1 ENGINEX_UI_HOOK=/nonexistent/test-only-hook.so
 cat > "$W/bin/systemctl" <<'SH'
@@ -20,6 +21,10 @@ SH
 cat > "$W/bin/guardian" <<'SH'
 #!/bin/sh
 exit 0
+SH
+cat > "$W/bin/rb-bridge" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$BOOT_TEST_RB_BRIDGE_LOG"
 SH
 cat > "$W/bin/engine" <<'SH'
 #!/bin/sh
@@ -46,6 +51,9 @@ chmod +x "$W/bin/forbidden"
 for tool in pkill killall reboot az01-update mount umount; do ln -s forbidden "$W/bin/$tool"; done
 export BOOT_TEST_FORBIDDEN_LOG=$W/forbidden.log
 export PATH=$W/bin:$PATH
+# The guard's own mark must stay inside the test root: the build host is not a deck.
+host_mark=/run/enginex-engine-guard.pre
+host_mark_before=$(stat -c %Y "$host_mark" 2>/dev/null || echo absent)
 fail() { echo "FAIL $*" >&2; exit 1; }
 has_file() { for _ in {1..70}; do [ ! -e "$1" ] || return 0; sleep .1; done; fail "missing $1"; }
 has_text() { for _ in {1..70}; do grep -q -- "$1" "$2" 2>/dev/null && return 0; sleep .1; done; fail "missing $1 in $2"; }
@@ -56,6 +64,7 @@ fixture() {
     export ENGINEX_ASSIGNMENT_DIR=$W/$1-assignments ENGINEX_ASSIGNMENT_PATCHED=$W/$1-patched
     export ENGINEX_CUSTOM=$W/$1-custom
     export ENGINEX_STATE_DIR=$W/$1-state ENGINEX_PLANCK_STATE=$W/$1-planck.json
+    export ENGINEX_GUARD_PRE_MARK=$W/$1-pre-mark
     mkdir -p "$ENGINEX_UI_DIR"
     : > "$BOOT_TEST_LOG"
 }
@@ -165,6 +174,23 @@ if sh "$GUARD" runtime; then fail 'normal start lost its runtime preparation'; f
 rm "$ENGINEX_DEBLOAT"
 unset ENGINEX_DEBLOAT
 
+fixture runtime-broken
+export ENGINEX_DEBLOAT=$W/bin/broken-runtime
+printf '#!/bin/sh\nexit 99\n' > "$ENGINEX_DEBLOAT"
+chmod +x "$ENGINEX_DEBLOAT"
+for n in 1 2 3; do
+    sh "$GUARD" pre
+    if sh "$GUARD" runtime; then fail 'a broken runtime step was not reported'; fi
+    SERVICE_RESULT=exit-code sh "$GUARD" stop
+    [ ! -e "$ENGINEX_UI_DIR/safe-mode" ] || fail "stock fallback after only $n failed starts"
+done
+sh "$GUARD" pre
+[ -e "$ENGINEX_UI_DIR/safe-mode" ] || fail 'a runtime step that fails at every start never reaches the stock fallback'
+sh "$GUARD" runtime || fail 'the stock fallback still ran the broken runtime step'
+rm "$ENGINEX_DEBLOAT"
+unset ENGINEX_DEBLOAT
+echo 'PASS a runtime step that fails at every start falls back to stock on the fourth start'
+
 fixture expired
 echo 2 > "$ENGINEX_UI_DIR/boot-failures"
 echo $(( $(date +%s) - 301 )) > "$ENGINEX_UI_DIR/boot-window"
@@ -187,4 +213,13 @@ for ui in "$ENGINEX_PRIMARY_UI_DIR" "$ENGINEX_UI_DIR"; do
 done
 echo 'PASS compatibility UI paths stay inside the test root'
 if grep -Eq 'erase-data|FactoryReset|reboot' "$BOOT_TEST_LOG"; then fail 'destructive action'; fi
+[ "$(stat -c %Y "$host_mark" 2>/dev/null || echo absent)" = "$host_mark_before" ] || fail 'the test wrote the host mark /run/enginex-engine-guard.pre'
 [ ! -e "$BOOT_TEST_FORBIDDEN_LOG" ] || fail 'test attempted host process or mount control'
+[ -s "$BOOT_TEST_RB_BRIDGE_LOG" ] || fail 'rb-bridge stand-in was not called (ENGINEX_RB_BRIDGE ignored)'
+while IFS= read -r call; do
+    case $call in
+        "--prune-rgb-overviews $W/"*"/Engine Library/Database2") ;;
+        *) fail "rb-bridge call escaped test root: $call" ;;
+    esac
+done < "$BOOT_TEST_RB_BRIDGE_LOG"
+echo 'PASS rb-bridge calls stayed inside the test root and stream-sync stayed unused'

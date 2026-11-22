@@ -25,7 +25,16 @@ const (
 )
 
 // Only downloads this pipeline named are ever evicted: Save's and Deemix's <id>.
-var evictable = regexp.MustCompile(`^((netease-|soundcloud-|beatport-)?\d+\.(flac|mp3|mp4)|spotify-[A-Za-z0-9]+\.(ogg|flac|mp3|mp4)|applemusic-(i\.)?[A-Za-z0-9]+\.flac|nas-[0-9a-f]{64}\.[^/]*)$`)
+// subsonic-<id> is the name Subsonic downloads had up to 5.3.0.5; they are nas-<hash> now.
+var evictable = regexp.MustCompile(`^((netease-|soundcloud-|beatport-)?\d+\.(flac|mp3|mp4)|spotify-[A-Za-z0-9]+\.(ogg|flac|mp3|mp4)|applemusic-(i\.)?[A-Za-z0-9]+\.flac|nas-[0-9a-f]{64}\.[^/]*|subsonic-[A-Za-z0-9_-]*\.[^/]*)$`)
+
+// A cache name is one plain file name. It is built from a track ID that came from outside,
+// so a name with a path in it is never joined to the cache directory.
+var errBadName = errors.New("audio: invalid file name")
+
+func badName(name string) bool {
+	return name == "" || filepath.Base(name) != name || strings.HasPrefix(name, ".")
+}
 
 var defaultMedia = func() *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
@@ -88,6 +97,9 @@ func (c *Client) Cached(name string) *Download {
 }
 
 func (c *Client) cachedLookup(name string) *Download {
+	if badName(name) {
+		return nil
+	}
 	for _, ext := range []string{".flac", ".mp3"} {
 		if dl, err := c.accept(filepath.Join(c.DownloadDir, name+ext)); err == nil {
 			return dl
@@ -127,6 +139,9 @@ func isMP4(path string) bool {
 // SaveParts joins the segments of one stream into name.ext, keeping what is checked
 // to be whole audio. Long DJ sets come this way, so a segment gets a few attempts.
 func (c *Client) SaveParts(ctx context.Context, name, ext string, urls []string) (*Download, error) {
+	if badName(name) {
+		return nil, errBadName
+	}
 	if ext != "mp3" && ext != "mp4" {
 		return nil, errors.New("audio: unsupported format")
 	}
@@ -331,6 +346,9 @@ func (c *Client) fetchSplit(ctx context.Context, f io.Writer, address string) er
 // parallel byte ranges. WAV and AIFF are re-encoded to FLAC with the same samples.
 // The caller decides whether MP3 is acceptable; this keeps whichever arrived.
 func (c *Client) SaveSplit(ctx context.Context, name, address string) (*Download, error) {
+	if badName(name) {
+		return nil, errBadName
+	}
 	if err := os.MkdirAll(c.DownloadDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -381,6 +399,9 @@ func (c *Client) RemoveStaleParts() {
 // Save stores the audio at address as name.flac or name.mp3, after checking what
 // actually arrived. Addresses can carry access tokens, so errors never quote them.
 func (c *Client) Save(ctx context.Context, name, address string) (*Download, error) {
+	if badName(name) {
+		return nil, errBadName
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
 	if err != nil || (req.URL.Scheme != "http" && req.URL.Scheme != "https") {
 		return nil, errors.New("audio: invalid address")

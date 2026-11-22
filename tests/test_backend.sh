@@ -2,7 +2,13 @@
 # Deployment tests run with private mounts; no host service is changed.
 set -euo pipefail
 if [[ ${1:-} != --private ]]; then
-  exec unshare -m -n --propagation private bash "$0" --private
+  ENGINEX_OUTER_MNTNS=$(readlink /proc/self/ns/mnt) exec unshare -m -n --propagation private bash "$0" --private
+fi
+# --private is the re-exec above. Passed by hand it skips the unshare, and the mounts below would cover
+# /etc, /var/lib and /opt of the host itself: refuse unless the mount namespace really changed.
+if [[ -z ${ENGINEX_OUTER_MNTNS:-} || $(readlink /proc/self/ns/mnt) == "$ENGINEX_OUTER_MNTNS" ]]; then
+  echo "test_backend.sh: --private is this script's own re-exec flag; run the script without arguments" >&2
+  exit 2
 fi
 repo=$(cd "$(dirname "$0")/.." && pwd)
 ip link set lo up
@@ -210,6 +216,11 @@ grep -Fq 'whl/cpu torch torchaudio' /data/pip-calls
 grep -qx 'install demucs' /data/pip-calls
 grep -q -- '-python /opt/enginex-stems/venv/bin/python3 -backend demucs$' "$dropin"
 grep -qx 'Environment=TORCH_HOME=/var/lib/enginex-stems/cache' "$dropin"
+cpu_threads=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+case "$cpu_threads" in ''|*[!0-9]*) cpu_threads=1 ;; esac
+[ "$cpu_threads" -lt 1 ] && cpu_threads=1
+[ "$cpu_threads" -gt 8 ] && cpu_threads=8
+grep -qx "Environment=STEMS_TORCH_THREADS=$cpu_threads" "$dropin"
 grep -q 'get_model("htdemucs")' "$dropin"
 if grep -Eq '^(PrivateDevices|DeviceAllow|SupplementaryGroups)=' "$dropin"; then
   echo 'CPU drop-in changed GPU sandbox settings' >&2; exit 1

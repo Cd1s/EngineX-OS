@@ -845,6 +845,9 @@ func (d *Discovery) Observe(device Device) Device {
 				if len(device.Beats) == 0 {
 					device.Beats = cached.beats
 				}
+				if len(device.fullBeats) == 0 && cached.analysis != nil {
+					device.fullBeats = cached.analysis.Beats
+				}
 				if device.DurationMS == 0 {
 					device.DurationMS = cached.durationMS
 				}

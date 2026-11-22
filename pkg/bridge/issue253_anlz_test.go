@@ -101,6 +101,26 @@ func TestIssue253BrokenANLZKeepsItsWaveformRow(t *testing.T) {
 			}
 		}})
 	}
+	// #253 review 5: files the import reads but the display does not: the .2EX and the .EXT padded
+	// past the 16 MiB the display reads (the import reads a .2EX of up to 128 MiB, and the .EXT's
+	// headers). The import reads the track again and leaves its copy in place, and the background
+	// check refuses the files, so the copy stays. A read error at a page is the same case: see
+	// pkg/enginedb's TestIssue253GateReadsTheFileAsTheDisplayDoes and the dm-error run of review 4.
+	breaks = append(breaks, struct {
+		name  string
+		apply func(t *testing.T, root string)
+	}{"larger than the display reads", func(t *testing.T, root string) {
+		for _, ext := range []string{".2EX", ".EXT"} {
+			p := filepath.Join(root, anlz+ext)
+			b, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(p, append(b, make([]byte, 17<<20)...), 0o644); err != nil { // padding past the declared length
+				t.Fatal(err)
+			}
+		}
+	}})
 	flows := []struct {
 		name     string
 		perTrack int64
@@ -119,11 +139,15 @@ func TestIssue253BrokenANLZKeepsItsWaveformRow(t *testing.T) {
 				for i := 41; i <= 60; i++ {
 					testfixture.Write(t, root, testfixture.LargeTrackPath(i), testfixture.MP3WithLAMETag())
 				}
+				printBefore := issue253Print(t, root, 1)
 				br.apply(t, root)
 				defer bridge.SetLargeExportForTest()()
 				defer bridge.SetInPlaceUpdateForTest(f.perTrack)()
 				cutConverge(t, root)
 				issue253Waveforms(t, root, 40, "after the update")
+				if issue253Print(t, root, 1) == printBefore {
+					t.Fatal("the update did not read track 1 again: its copy was not put through the import")
+				}
 				// The next import, one that reads every track.
 				if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, true); err != nil {
 					t.Fatalf("next import: %v", err)
@@ -138,4 +162,13 @@ func TestIssue253BrokenANLZKeepsItsWaveformRow(t *testing.T) {
 			})
 		}
 	}
+}
+
+// issue253Print is the fingerprint of the track with the import key in the state: the import writes a
+// new one when it reads the track again.
+func issue253Print(t *testing.T, root string, key int) string {
+	t.Helper()
+	db := dbOpen(t, root)
+	defer db.Close()
+	return scalar[string](t, db, `SELECT s.fingerprint FROM bridge.BridgeState s JOIN Track t ON t.id=s.trackId WHERE t.pdbImportKey=?`, key)
 }

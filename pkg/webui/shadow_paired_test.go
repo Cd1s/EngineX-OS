@@ -75,8 +75,9 @@ func TestPairedViewSetting(t *testing.T) {
 // shadow path (Engine, auto, CDJ display), an empty active deck included, and a
 // layer switch alone wakes the long poll (a new version).
 func TestShadowPeerActiveLayer(t *testing.T) {
+	roleBefore := fourDeckRolePath
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
-	defer func() { fourDeckRolePath = "/run/enginex-assignments/role" }()
+	defer func() { fourDeckRolePath = roleBefore }()
 	os.WriteFile(fourDeckRolePath, []byte("13\n"), 0o644)
 	for _, mode := range []string{"engine", "auto", "cdj"} {
 		t.Run(mode, func(t *testing.T) {

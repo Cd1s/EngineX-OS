@@ -11,6 +11,11 @@ KEY=${3:?one SSH public key for a private build, or "none" for public releases (
 FSCK=${4:?static ARMv7 fsck.hfsplus}
 OUT=${5:?new output directory outside any git worktree}
 case $VERSION in *[!0-9.]*|'') echo "version must be digits and dots" >&2; exit 2 ;; esac
+ONLY_GROUP=${ONLY_GROUP:-}
+case $ONLY_GROUP in
+    ''|SC5000) ;;
+    *) echo "ONLY_GROUP must be SC5000 when set" >&2; exit 2 ;;
+esac
 # The tag of the GitHub Release this build is for. A same-version re-release keeps <version>
 # and sets RELEASE_TAG=v<version>-rN: decks compare the tag of a release with the one baked
 # in here, so they are offered the re-release once and not again after installing it.
@@ -85,6 +90,8 @@ install -m 0644 "$HFSPLUSX" "$STAGE/usr/lib/modules/$krel/extra/hfsplusx.ko"
 chmod 0644 "$STAGE/usr/share/enginex/"*
 
 # 1b. Second generation: /data bundles. 6 armhf models share the 32-bit suite and hooks, AZ04 (PRIME 4 G2, SYSTEM ONE) needs arm64 ones.
+# A SC5000-only test build stops before these artifacts, which keeps the deck-test loop fast.
+if [ -z "$ONLY_GROUP" ]; then
 mkdir -p "$WORK/hooks32" "$WORK/hooks64"
 OUT=$WORK/hooks32/libengine-ui-hook.so sh tools/ui-mod/build.sh
 OUT=$WORK/hooks32/libedisksd-hook.so sh tools/edisksd-hook/build.sh
@@ -130,6 +137,7 @@ if [ -z "$FSCK64_PATH" ]; then
     FSCK64_PATH=$WORK/hfs64-out/sbin/fsck.hfsplus
 fi
 install -m 0755 "$FSCK64_PATH" "$WORK/hooks64/fsck.hfsplus"
+fi
 
 # 1c. EngineX boot splash (#118, #226). The firmware splash partition shows before Linux starts,
 # and every update rewrites it, so an image carrying the stock one puts the stock picture back on
@@ -160,16 +168,20 @@ build() { # <official image prefix> <model prefix> <release name>...
     done
     rm -f "$WORK/$base.img"
 }
-build SC5000 SC5000 Denon-SC5000-Prime-JP07 SC5000M Denon-SC5000M-Prime-JP08 PRIMEGO Denon-PRIME-GO-JP11 &
-p1=$!
-build SC6000 SC6000 Denon-SC6000-Prime-JP13 SC6000M Denon-SC6000M-Prime-JP14 &
-p2=$!
-build PRIME4 PRIME4 Denon-PRIME-4-JC11 PRIME2 Denon-PRIME-2-JC16 MIXSTREAMPRO Numark-Mixstream-Pro-NH08 &
-p3=$!
-# One wait per job: "wait a b c" only reports c, so set -e would miss a failed group.
-wait "$p1"
-wait "$p2"
-wait "$p3"
+if [ -z "$ONLY_GROUP" ]; then
+    build SC5000 SC5000 Denon-SC5000-Prime-JP07 SC5000M Denon-SC5000M-Prime-JP08 PRIMEGO Denon-PRIME-GO-JP11 &
+    p1=$!
+    build SC6000 SC6000 Denon-SC6000-Prime-JP13 SC6000M Denon-SC6000M-Prime-JP14 &
+    p2=$!
+    build PRIME4 PRIME4 Denon-PRIME-4-JC11 PRIME2 Denon-PRIME-2-JC16 MIXSTREAMPRO Numark-Mixstream-Pro-NH08 &
+    p3=$!
+    # One wait per job: "wait a b c" only reports c, so set -e would miss a failed group.
+    wait "$p1"
+    wait "$p2"
+    wait "$p3"
+else
+    build SC5000 SC5000 Denon-SC5000-Prime-JP07 SC5000M Denon-SC5000M-Prime-JP08 PRIMEGO Denon-PRIME-GO-JP11
+fi
 
 # 3. Verify every 1st-gen AZ01 image as a container again, then copy 2nd-gen images and record checksums.
 mkdir "$OUT/verify"
@@ -178,24 +190,30 @@ for f in "$OUT/"*-Update.img; do
     python3 "$ROOT/tools/az01-packer/az01_packer.py" info "$f" > "$OUT/verify/${b%.img}.info.json"
 done
 
-# 5.3.0.5 bridge (#215): keep all eight legacy bundles for older on-deck updaters.
-# This build's updater selects only *-Update.img; retire release bundles in 5.3.0.6.
-for m in SCLIVE4 SCLIVE2 PRIME4PLUS PRIMEGOPLUS MIXSTREAMPROPLUS MIXSTREAMPROGO; do
-    python3 tools/az01-packer/build-data-bundle.py "$VERSION" --release-tag "$TAG" --prefix "$m" --suite "$WORK/enginex-suite" \
-        --hook "$WORK/hooks32/libengine-ui-hook.so" --fsck-hfsplus "$FSCK" --lklfuse "$LKLFUSE_PATH" --require-lklfuse --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
-    cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
-done
-for m in PRIME4G2 SYSTEMONE; do
-    python3 tools/az01-packer/build-data-bundle.py "$VERSION" --release-tag "$TAG" --prefix "$m" --suite "$WORK/enginex-suite-arm64" \
-        --hook "$WORK/hooks64/libengine-ui-hook.so" --fsck-hfsplus "$WORK/hooks64/fsck.hfsplus" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
-    cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
-done
+if [ -z "$ONLY_GROUP" ]; then
+    # 5.3.0.5 bridge (#215): keep all eight legacy bundles for older on-deck updaters.
+    # This build's updater selects only *-Update.img; retire release bundles in 5.3.0.6.
+    for m in SCLIVE4 SCLIVE2 PRIME4PLUS PRIMEGOPLUS MIXSTREAMPROPLUS MIXSTREAMPROGO; do
+        python3 tools/az01-packer/build-data-bundle.py "$VERSION" --release-tag "$TAG" --prefix "$m" --suite "$WORK/enginex-suite" \
+            --hook "$WORK/hooks32/libengine-ui-hook.so" --fsck-hfsplus "$FSCK" --lklfuse "$LKLFUSE_PATH" --require-lklfuse --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
+        cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
+    done
+    for m in PRIME4G2 SYSTEMONE; do
+        python3 tools/az01-packer/build-data-bundle.py "$VERSION" --release-tag "$TAG" --prefix "$m" --suite "$WORK/enginex-suite-arm64" \
+            --hook "$WORK/hooks64/libengine-ui-hook.so" --fsck-hfsplus "$WORK/hooks64/fsck.hfsplus" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
+        cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
+    done
+fi
 
 cd "$OUT"
 # RELEASE-TAG.txt is the release tag and a newline. Release file names carry the version but not the
 # -rN revision, so the signed list names the tag through this file: a deck checks the hash of the tag
 # it is offered against it and refuses a genuine older revision shown under a newer tag (#239).
 printf '%s\n' "$TAG" > RELEASE-TAG.txt
-sha256sum *-Update.img *-Data-Bundle.tar.gz RELEASE-TAG.txt > SHA256SUMS.txt
+if [ -z "$ONLY_GROUP" ]; then
+    sha256sum *-Update.img *-Data-Bundle.tar.gz RELEASE-TAG.txt > SHA256SUMS.txt
+else
+    sha256sum *-Update.img RELEASE-TAG.txt > SHA256SUMS.txt
+fi
 # Not signed yet: build-installer.sh adds the installers to this list, then sign-release.sh signs it (#239).
 ls -l

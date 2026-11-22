@@ -61,6 +61,8 @@ type Client struct {
 
 	mu       sync.Mutex
 	lastUsed map[string]time.Time
+	// One LinkAs at a time: two callers for one name share the temporary name.
+	linkMu sync.Mutex
 }
 type QueueStatus struct {
 	ID       string  `json:"id"`
@@ -234,7 +236,7 @@ func (c *Client) Download(ctx context.Context, t providers.Track, progress func(
 // name.flac/.mp3, never the shared <Deezer ID> file (a hard link, so a track that
 // Deezer already holds costs no space or time, and trimming one name keeps the other).
 func (c *Client) DownloadAs(ctx context.Context, t providers.Track, name string, progress func(QueueStatus)) (*Download, error) {
-	if name == "" || filepath.Base(name) != name || strings.HasPrefix(name, ".") {
+	if badName(name) {
 		return nil, errors.New("deemix: invalid file name")
 	}
 	if dl := c.Cached(name); dl != nil && (strings.HasPrefix(name, "spotify-") || dl.Quality.Lossless || !c.Lossless()) {
@@ -250,13 +252,15 @@ func (c *Client) DownloadAs(ctx context.Context, t providers.Track, name string,
 // LinkAs gives the file of src a second name, name.flac/.mp3 (a hard link, or a
 // copy where links are not possible).
 func (c *Client) LinkAs(src *Download, name string) (*Download, error) {
-	if name == "" || filepath.Base(name) != name || strings.HasPrefix(name, ".") {
+	if badName(name) {
 		return nil, errors.New("deemix: invalid file name")
 	}
 	dst := filepath.Join(c.DownloadDir, name+filepath.Ext(src.Path))
 	if dst == src.Path {
 		return src, nil
 	}
+	c.linkMu.Lock()
+	defer c.linkMu.Unlock()
 	tmp := filepath.Join(c.DownloadDir, ".part-as-"+name)
 	os.Remove(tmp)
 	if err := os.Link(src.Path, tmp); err != nil {

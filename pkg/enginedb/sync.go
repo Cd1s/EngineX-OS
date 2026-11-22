@@ -949,13 +949,13 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 				if e != nil {
 					return result, e
 				}
-				// Without a .2EX or .EXT the track has no detail to name: a row that still holds
-				// the waveform an earlier import read keeps it (length() reads no overflow page;
-				// #253 review 2).
-				keepWave := ``
-				if len(refs) == 0 {
-					keepWave = ` WHERE length(BridgeAnalysis.sourceJSON)<=` + waveformRowBytes
-				}
+				// A row that still holds a copy of the waveform (5.3.0.5's RBA1) keeps it: the
+				// import never decides that the display can read these files instead, and reads
+				// none of them for it (#253 review 5: not under the bridge lock, not in this
+				// transaction, not at a mount). Only the background job's paced check turns a copy
+				// into a reference, once it has read the files as the display does (confirmedRefs).
+				// length() reads no overflow page.
+				keepWave := ` WHERE length(BridgeAnalysis.sourceJSON)<=` + waveformRowBytes
 				if _, e = q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`+keepWave, id, packedSource, packedAudio); e != nil {
 					return result, e
 				}

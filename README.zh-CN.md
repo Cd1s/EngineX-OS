@@ -38,7 +38,7 @@
 - **7 大流媒体音源**：音源菜单内置 TIDAL、网易云音乐、Spotify、Deezer、SoundCloud、Beatport、Apple Music，支持手机扫码登录、FLAC / 320 kbps 音质切换（`设置 → 服务 → 流媒体音质`）、分平台本地缓存，以及跨音源联合搜索 `配置 → 曲库 → OmniSource（在流媒体中显示 U 盘/SD）`。
 - **Rekordbox U 盘直读与 Pro DJ Link**：直读 rekordbox 5/6/7 导出的 U 盘（支持 `FAT32`、`exFAT`、`NTFS` 与 Mac `HFS+` 读写；不支持 `APFS`）中的歌单、Hot Cue、Memory Cue、Loop 与拍线。`设置 → 服务 → Pro DJ Link` 支持与 CDJ 及电脑 rekordbox 7（`Export` 模式开启 `LINK`）互联、共享 USB/SD、交接 `MASTER`，并在影子轨或 `线路输入`（`Line In`）通道显示 CDJ 波形。
 - **联机视图、波形样式与四语界面**：`布局 → ENGINEX 视图预设 → 联机视图` 让独立播放器在 `原厂`、`双碟机配对` 与 `4 轨` 之间切换（4 轨一体机可在 `原厂` 与 `4 轨` 之间切换），提供 5 组保存视图（`视图 1`–`视图 5`）、`界面缩放`、`热标拍数倒数`、`Denon` / `RGB` / `3-Band` 波形（`配置 → 显示 → 波形样式`），以及简体中文、繁體中文、English、Español 免重启切换（`设置 → 设备 → 语言`）。
-- **音频保护、一体机效果与 Web 控制台**：内置 `0dB 防破音软限幅`、`自动增益`、一代独立播放器 `Hi-Fi 高频补偿输出`（`配置 → 播放 → Hi-Fi 高频补偿输出`）、`推子回音`、`PRIME 4` `(PX)` 硬件效果、通道 `FILTER` 旋钮效果 `配置 → 播放 → 先锋风格效果 (Color FX)`、`先锋效果延时模式 (PX)`、控制中心智能同步、1 Gbps 千兆有线网络，以及 `:8080` 网页控制台（传歌、重定位、WAV `直播推流` 与 Mod 插件中心）。
+- **音频保护、一体机效果与 Web 控制台**：内置 `0dB 防破音软限幅`、`自动增益`、一代独立播放器 `Hi-Fi 高频补偿输出`（`配置 → 播放 → Hi-Fi 高频补偿输出`）、`推子回音`、`PRIME 4` `(PX)` 硬件效果、通道 `FILTER` 旋钮效果 `配置 → 播放 → 先锋风格效果 (Color FX)`、一体机上双击效果的 `Frequency` 条回到 `All Bands`、`先锋效果延时模式 (PX)`、控制中心智能同步、1 Gbps 千兆有线网络，以及 `:8080` 网页控制台（传歌、重定位、WAV `直播推流` 与 Mod 插件中心）。
 
 ---
 
@@ -52,6 +52,7 @@
 - **大型 rekordbox U 盘快速导入**：大容量 rekordbox U 盘插入后几秒内即可使用歌单与 Cue，波形在后台转换并在空闲 30 秒后自动发布（#301）。
 - **Rekordbox 拍线对齐**：为 Pro DJ Link、U 盘与影子轨的 MP3 和 AAC/M4A 统一拍线起点偏移规则，旧转换曲目自动重新对齐一次并保留碟机上的编辑。
 - **rekordbox Cue 写回**：把碟机上修改的 Hot Cue、Memory Cue 与 Loop 写回 rekordbox U 盘，并在 `/.enginex-backup/` 保存备份（`:8080` 网页控制台 `扩展 → 写回 Hot Cue / Loop 到 rekordbox U 盘`，#271）。
+- **曲目资料编辑（计划于 5.3.0.6）**：在碟机曲目详情中用原厂键盘编辑 `Genre`、`Label` 与 `Comment`；排队的改动会在存储设备发布更新后写回 Engine 曲库与 rekordbox 6/7 导出。
 - **U 盘曲库安全保护**：当字符集不匹配等原因导致大量文件名无法读取时，曲库更新不会改动任何数据，并在下次挂载时重试。
 - **通道 FILTER 旋钮 Color FX**：在一体机各通道的 `FILTER` 旋钮上挂载 `Spiral`、`Pitch Echo`、`Slip Roll`、`Dub Echo` 或 `Space`，位于 `配置 → 播放 → 先锋风格效果 (Color FX)`。
 - **Hi-Fi 高频补偿输出**：为一代 SC5000 / SC6000 独立播放器新增可选的高频补偿，默认关闭，位于 `配置 → 播放 → Hi-Fi 高频补偿输出`（#172）。

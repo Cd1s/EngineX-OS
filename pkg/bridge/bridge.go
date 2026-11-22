@@ -1004,6 +1004,9 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	if late(err) {
 		return background(err)
 	}
+	if err == nil && reread == nil && !result.Bypassed {
+		cut("in place imported") // committed, not yet stamped
+	}
 	if err == nil && reread != nil {
 		cut("in place committed")
 		compactState(inPlace, dir, pre.l, rereadRefs(dir, stamp))

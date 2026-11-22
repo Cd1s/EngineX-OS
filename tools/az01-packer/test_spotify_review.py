@@ -68,16 +68,18 @@ connectedSource.scHiddenSource=scHiddenSource; connectedSource.model=model; cons
 for(const name of names) {
  for(const typeText of ['Storage','Remote Library','Cloud','Streaming']) {
   const row={name,typeText}; rows=[row];
-  assert.equal(scHiddenSourceName(name,typeText),typeText==='Streaming',name+' / '+typeText);
+  // #323: the Apple Music row of the stock list is stock again: listed and entered like any other stock row.
+  const ours=typeText==='Streaming' && name!=='Apple Music';
+  assert.equal(scHiddenSourceName(name,typeText),ours,name+' / '+typeText);
   const model=row;
-  assert.equal(HEIGHT,typeText==='Streaming'?0:108,name+' height / '+typeText);
-  assert.equal(VISIBLE,typeText!=='Streaming',name+' visible / '+typeText);
-  assert.equal(AVAILABLE,typeText!=='Streaming',name+' available / '+typeText);
+  assert.equal(HEIGHT,ours?0:108,name+' height / '+typeText);
+  assert.equal(VISIBLE,!ours,name+' visible / '+typeText);
+  assert.equal(AVAILABLE,!ours,name+' available / '+typeText);
   const list=scEntries();
-  assert.equal(list.length,typeText==='Streaming'?0:2,name+' keyboard list / '+typeText);
+  assert.equal(list.length,ours?0:2,name+' keyboard list / '+typeText);
   opened=[];entered=0;scSourceEnter();
-  assert.equal(entered,typeText==='Streaming'?0:1,name+' enter / '+typeText);
-  if(name==='Apple Music' && typeText==='Streaming') assert.deepEqual(opened,['applemusic']);
+  assert.equal(entered,ours?0:1,name+' enter / '+typeText);
+  if(name==='Apple Music' && typeText==='Streaming') assert.deepEqual(opened,[]);
  }
 }
 '''.replace("KIND", kind).replace("HIDDEN", hidden).replace("ENTRIES", entries).replace("ENTER", enter).replace("HEIGHT", height).replace("VISIBLE", visible).replace("AVAILABLE", available)

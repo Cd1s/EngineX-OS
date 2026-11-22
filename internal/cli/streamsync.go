@@ -84,7 +84,7 @@ func StreamSync(args []string) error {
 	}
 	// CPU-heavy Go workers, runtime/GC helpers and HTTP threads share the same
 	// background affinity. Never set affinity for Engine/ALSA/Qt processes here.
-	webui.UnblockRadios("/sys/class/rfkill")
+	webui.UnblockRadios("/sys/class/rfkill", "/var/lib/connman/settings")
 	runtime.GOMAXPROCS(1)
 	guard := resourceguard.New(cfg)
 	reports, err := guard.ApplyToProcess(0)
@@ -94,6 +94,8 @@ func StreamSync(args []string) error {
 	for _, r := range reports {
 		log.Printf("stream-sync guard: %s", r.String())
 	}
+	// After the guard, so its busctl calls stay on the background CPUs like the rest.
+	go webui.BluetoothOffAsStored(context.Background())
 	if *pid > 0 {
 		if reports, err = guard.ApplyToProcess(*pid); err != nil {
 			return err

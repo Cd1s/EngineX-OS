@@ -3,7 +3,6 @@ package rekordbox
 import (
 	"bytes"
 	"context"
-	"errors"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -13,6 +12,7 @@ import (
 	"crypto/sha512"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"

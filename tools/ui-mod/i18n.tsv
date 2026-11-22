@@ -34,6 +34,7 @@ Close	关闭	關閉	Cerrar
 Cloud	云端	雲端	Nube
 Collection	曲库	曲庫	Colección
 Comment	备注	備註	Comentario
+Edit %1	编辑 %1	編輯 %1	Editar %1
 Computer Mode	电脑模式	電腦模式	Modo ordenador
 Confirm	确认	確認	Confirmar
 Connect New Sources	连接新来源	連接新來源	Conectar nuevas fuentes
@@ -99,6 +100,8 @@ Key Sync Mode	调性同步模式	調性同步模式	Modo Key Sync
 LOG IN	登录	登入	INICIAR SESIÓN
 LOG OUT	退出登录	登出	CERRAR SESIÓN
 Label	厂牌	廠牌	Sello
+Metadata edit was not saved	元数据修改未保存	中繼資料修改未儲存	No se guardó la edición de metadatos
+Queued until the drive is inserted	已排队，插入磁盘后写入	已排隊，插入磁碟後寫入	En cola hasta insertar la unidad
 Large	大	大	Grande
 Legal	法律信息	法律資訊	Legal
 Lighting	灯光	燈光	Iluminación
@@ -353,6 +356,7 @@ For high-quality stems, that computer needs the htdemucs model.	如需高音质�
 <1 min	不到 1 分钟	不到 1 分鐘	<1 min
 Both decks are playing. Free one deck, then tap Stems again	两台都在播放，空出一台再点 Stems	兩台都在播放，空出一台再點 Stems	Los dos decks están sonando. Libera uno y vuelve a pulsar Stems
 All decks are playing. Free one deck, then tap Stems again	所有碟机都在播放，空出一台再点 Stems	所有碟機都在播放，空出一台再點 Stems	Todos los decks están sonando. Libera uno y vuelve a pulsar Stems
+Every deck has a track loaded. Eject one, then tap Stems again	每台碟机都已载入曲目，卸载一首再点 Stems	每台碟機都已載入曲目，卸載一首再點 Stems	Todos los decks tienen una pista cargada. Expulsa una y vuelve a pulsar Stems
 Download failed	下载失败	下載失敗	Descarga fallida
 Stem	分轨 Stems	分軌 Stems	Separar
 Cue Countdown	热标拍数倒数	熱標拍數倒數	Cuenta atrás de Cue
@@ -370,6 +374,7 @@ All CDJ Mode: no track is loaded for any source (CDJ / Pro DJ Link view)	全部 
 All Engine Mode	全部 Engine 模式	全部 Engine 模式	Modo todo Engine
 All CDJ Mode	全部 CDJ 模式	全部 CDJ 模式	Modo todo CDJ
 All Engine Mode: no CDJ waveform on Line In	全部 Engine 模式下 Line In 不显示 CDJ 波形	全部 Engine 模式下 Line In 不顯示 CDJ 波形	Modo todo Engine: sin forma de onda de CDJ en la entrada de línea
+Pro DJ Link is off: no CDJ waveform	Pro DJ Link 未开启：不显示 CDJ 波形	Pro DJ Link 未開啟：不顯示 CDJ 波形	Pro DJ Link desactivado: sin forma de onda de CDJ
 Downloading	正在下载	正在下載	Descargando
 Loading	正在加载	正在載入	Cargando
 Waiting for source analysis	等待源碟机分析波形	等待來源碟機分析波形	Esperando el análisis de la fuente
@@ -631,6 +636,8 @@ No paired player	未连接配对碟机	未連接配對碟機	Sin reproductor emp
 Linked View	联机视图	聯機視圖	Vista vinculada
 Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout	单层 / 双层：Shift + Layer，或 布局 > 演出布局 > 碟机排列	單層 / 雙層：Shift + Layer，或 版面 > 演出配置 > 碟機排列	Simple / Doble: Shift + Layer, o Disposición > DISPOSICIÓN DE ACTUACIÓN > Disposición de decks
 Stock	原厂	原廠	Original
+Linked player	联机碟机	聯機碟機	Reproductor vinculado
+Line In: a linked player is shown on a channel while its input is Line or AUX; nothing is loaded and no deck is taken	线路输入：通道输入为 Line 或 AUX 时，该通道显示联机的碟机；不载入任何曲目，也不占用碟机	線路輸入：通道輸入為 Line 或 AUX 時，該通道顯示聯機的碟機；不載入任何曲目，也不佔用碟機	Entrada de línea: un reproductor vinculado se muestra en un canal mientras su entrada es Line o AUX; no se carga nada ni se ocupa ningún deck
 Preparing USB…	正在准备 USB…	正在準備 USB…	Preparando el USB…
 Loading USB…	U盘载入中…	隨身碟載入中…	Cargando USB…
 Loading SD card…	SD 卡载入中…	SD 卡載入中…	Cargando tarjeta SD…

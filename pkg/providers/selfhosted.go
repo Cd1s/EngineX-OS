@@ -376,7 +376,8 @@ func checkSubsonicMediaError(resp *http.Response) error {
 }
 
 func (p *SelfHostedProvider) subsonicDownloadTrack(ctx context.Context, trackID, destDir string) (string, error) {
-	if _, err := validateBaseURL("subsonic", p.cfg.URL); err != nil {
+	baseU, err := validateBaseURL("subsonic", p.cfg.URL)
+	if err != nil {
 		return "", err
 	}
 	// First try /rest/download.view?id=<id>
@@ -429,7 +430,9 @@ func (p *SelfHostedProvider) subsonicDownloadTrack(ctx context.Context, trackID,
 		ext = ".mp3"
 	}
 
-	filename := fmt.Sprintf("subsonic-%s%s", sanitizeFilename(trackID), ext)
+	// The same flat hashed name as WebDAV, Plex and SMB: the cache budget evicts only those,
+	// and two IDs or two servers never share a file.
+	filename := nasCacheFilename(baseU, strings.TrimRight(baseU.Path, "/")+"\x00subsonic\x00"+trackID, ext)
 	return saveStreamToFile(destDir, filename, resp.Body)
 }
 
@@ -1145,16 +1148,6 @@ func extFromContentType(ct string) string {
 	default:
 		return ""
 	}
-}
-
-func sanitizeFilename(s string) string {
-	s = strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			return r
-		}
-		return '_'
-	}, s)
-	return strings.Trim(s, "_")
 }
 
 func saveStreamToFile(destDir, filename string, r io.Reader) (string, error) {

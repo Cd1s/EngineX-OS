@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -343,5 +344,58 @@ func TestGatewayPartial248CompleteLikesIgnorePlaylistDirectoryFailure(t *testing
 	var page struct{ Items []map[string]any }
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Items) != 3 || page.Items[2]["title"] != "three" {
 		t.Fatalf("complete liked songs falsely marked incomplete: %d %s", w.Code, w.Body.String())
+	}
+}
+
+type failLikes248Provider struct{ partial248Provider }
+
+func (p *failLikes248Provider) Tracks(context.Context, string) ([]providers.Track, error) {
+	return nil, p.cause
+}
+
+func TestFavoriteTracksAndAlbumsReturnErrorOnUpstreamFailure(t *testing.T) {
+	// 1. favoriteTracks when upstream fails with 0 tracks must return 502 (not 200 empty).
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("scope=spotify\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{UIDir: dir, StateDir: t.TempDir(), Factory: func(string, bool, string) (providers.Provider, error) { return nil, errors.New("unconfigured") }}, nil)
+	defer s.Close()
+	s.sessions["owner"] = &Session{
+		ID:       "owner",
+		Provider: "spotify",
+		Ready:    true,
+		p:        &failLikes248Provider{partial248Provider{provider: "spotify", cause: errors.New("upstream 502")}},
+		expires:  time.Now().Add(time.Hour),
+	}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/v1/users/1/favorites/tracks", nil)
+	r.RemoteAddr = "127.0.0.1:1234"
+	s.tidal.ServeHTTP(w, r)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("favoriteTracks upstream failure: got HTTP %d %s, want 502", w.Code, w.Body.String())
+	}
+
+	// 2. favoriteAlbums when NetEase upstream fails must return 502 (not 200 empty).
+	if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("scope=netease\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+	s.sessions["ne"] = &Session{
+		ID:       "ne",
+		Provider: "netease",
+		Ready:    true,
+		p:        &providers.Netease{BaseURL: upstream.URL, Cookie: "MUSIC_U=test"},
+		expires:  time.Now().Add(time.Hour),
+	}
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest("GET", "/v1/users/1/favorites/albums", nil)
+	r.RemoteAddr = "127.0.0.1:1234"
+	s.tidal.ServeHTTP(w, r)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("favoriteAlbums upstream failure: got HTTP %d %s, want 502", w.Code, w.Body.String())
 	}
 }

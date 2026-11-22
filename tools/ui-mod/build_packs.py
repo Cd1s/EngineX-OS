@@ -810,7 +810,7 @@ SERVICES_MAIN = """
 	// at.feedAt), not carried to now here: stream-sync dates the record by that clock, so
 	// a busy GUI thread does not move the line. Sent when it changes, and every 250 ms.
 	function scShadowFeed(d, e, at, rate) {
-		const bit = 1 << d, fed = root.scPausedShadowFollow && !!at && at.ready && at.sampleRate > 0 && isFinite(at.feedMs) && rate > 0
+		const bit = 1 << d, fed = root.scPausedShadowFollow && !!at && at.ready && at.sourcePlaying && !at.scratch && at.sampleRate > 0 && isFinite(at.feedMs) && rate > 0
 		if (((scShadowFeedPlaying & bit) !== 0) !== fed) scShadowFeedPlaying ^= bit
 		if (!root.scPausedShadowFollow) return
 		const sr = at && at.ready ? at.sampleRate : 0, now = Date.now()
@@ -939,7 +939,7 @@ SERVICES_MAIN = """
 	// a plain object, so no binding re-evaluates on every long-poll reply.
 	readonly property var scShadowLive: ({seen: 0})
 	// The display renderer draws deck d: a display slot, or an Engine slot it covers while the track is on its way (scShadowCovers).
-	function scShadowVisible(d) { return d >= 1 && d <= 4 && (((scShadowEngineMask >> d) & 1) === 0 || !!scShadowDisplay[d]) && scDeckLocked(d) }
+	function scShadowVisible(d) { return d >= 1 && d <= 4 && (((scShadowEngineMask >> d) & 1) === 0 || !!scShadowDisplay[d]) && (scDeckLocked(d) || (!!root.scConsoleLine && ((root.scLineMask >> d) & 1) === 1 && !!scShadowDisplay[d] && !!scShadowDisplay[d].lineIn)) }
 	function scShadowDeckFor(item) {
 		// Stock skins put the deck on different wrappers (deckIndex / deckData / deckView).
 		for (let p = item; p; p = p.parent) {
@@ -1079,11 +1079,11 @@ SERVICES_MAIN = """
 	}
 	Timer {
 		interval: 200; repeat: true
-		running: root.scFourDeckRole !== "" && root.scShadowEngineMask !== 30 && root.scShadowAnyPlaying(root.scShadowDisplay)
+		running: (root.scFourDeckRole !== "" || root.scLineLive) && root.scShadowEngineMask !== 30 && root.scShadowAnyPlaying(root.scShadowDisplay)
 		onTriggered: root.scShadowFrame = (root.scShadowFrame + 1) & 0xffff
 	}
 	Timer {
-		interval: 500; repeat: true; running: root.scFourDeckRole !== "" && root.scShadowEngineMask !== 30
+		interval: 500; repeat: true; running: (root.scFourDeckRole !== "" || root.scLineLive) && root.scShadowEngineMask !== 30
 		onTriggered: {
 			for (let d = 1; d <= 4; d++) {
 				const s = root.scShadowData(d)
@@ -1146,7 +1146,8 @@ SERVICES_MAIN = """
 			s.lead !== (e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master) || s.sync !== !!e.sync || s.keylock !== !!e.keylock ||
 			s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) || s.range !== (Number(e.range) || 0) ||
 			s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail || s.progress !== (Number(e.progress) || 0) || s.error !== (e.error || "") ||
-			s.engine !== !!e.engine || s.copying !== !!e.copying || s.durationMs !== (Number(e.durationMs) || 0) || s.fallback !== (e.fallback || "")) return false
+			s.engine !== !!e.engine || s.copying !== !!e.copying || s.durationMs !== (Number(e.durationMs) || 0) || s.fallback !== (e.fallback || "") ||
+			s.player !== (Number(e.player) || 0) || s.model !== (e.model || "")) return false
 		if (Array.isArray(e.cues)) {
 			const a = s.liveCues, b = e.cues
 			if (!Array.isArray(a) || a.length !== b.length) return false
@@ -1162,7 +1163,8 @@ SERVICES_MAIN = """
 			for (let i = 0; i < decks.length; i++) if (Number(decks[i].deck) === d) { e = decks[i]; break }
 			const old = scShadowData(d)
 			const isLine = !!(e && e.lineIn)
-			if (!e || scFourDeckRole === "" || (!isLine && scFourDeckRole.indexOf(String(d)) >= 0) || !(e.key || e.loading)) {
+			// No role: only a console's Line In lane, while its channel is on Line / AUX, is kept.
+			if (!e || (scFourDeckRole === "" && !(isLine && !!root.scConsoleLine && ((root.scLineMask >> d) & 1) === 1)) || (!isLine && scFourDeckRole.indexOf(String(d)) >= 0) || !(e.key || e.loading)) {
 				if (old) { if (!next) next = Object.assign({}, scShadowDisplay); delete next[d] }
 				delete scShadowDisplayRequests[d]; delete scShadowGridCache[d]; delete scShadowLiveCueCache[d]
 				continue
@@ -1185,7 +1187,7 @@ SERVICES_MAIN = """
 			if (fromCover) { delete scShadowDisplayRequests[d]; delete scShadowDisplayText[d] }
 			const sample = {key: key, name: e.name || "", title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
 				playing: !!e.playing, scratch: !!e.scratch, stale: !!e.stale, metadataOnly: !!e.metadataOnly, positionMs: pos, at: at,
-				pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
+				pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine, player: Number(e.player) || 0, model: e.model || "",
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master,
 				lead: e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master, sync: !!e.sync, keylock: !!e.keylock,
 				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, currentBpm: Number(e.currentBpm) || 0, range: Number(e.range) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
@@ -1777,7 +1779,58 @@ SERVICES_MAIN = """
 	}
 	Timer {
 		id: scShadowPollTimer
-		onTriggered: if (root.scFourDeckRole !== "") root.scShadowPoll()
+		onTriggered: if (root.scFourDeckRole !== "" || root.scLineLive) root.scShadowPoll()
+	}
+	// Console linking, stage 1 (console_line_view): a linked player or CDJ is shown on a mixer channel
+	// while that channel's input is Line / AUX. Display only: no Engine deck is loaded, nothing is sent,
+	// scFourDeckRole stays empty on a console, and a channel on its Engine input is never touched. Off,
+	// or on with no channel on Line / AUX, nothing here runs: no timer, no request, no stream-sync loop.
+	property bool scConsoleLine: false // the saved switch, honoured on the four consoles only
+	readonly property bool scConsoleLineBoard: ["JC11", "JC11S", "JP21", "JP24"].indexOf(scBoard) >= 0
+	property int scLineMask: 0 // bit N: channel N's input is Line / AUX, as the mixer says (a signal, never polled)
+	readonly property bool scLineLive: scConsoleLine && scLineMask !== 0
+	function scLineSync() {
+		let m = 0
+		if (scConsoleLine) for (let d = 1; d <= 4; d++) { const p = scTr(scShadowLinePaths[d - 1]); if (p && p.state) m |= 1 << d }
+		if (m !== scLineMask) scLineMask = m
+	}
+	// A channel back on its Engine input lets go of its lane at once, not at the next poll.
+	function scLineTrim() {
+		let next = null
+		for (let d = 1; d <= 4; d++) {
+			const old = scShadowDisplay[d]
+			if (old && old.lineIn && ((scLineMask >> d) & 1) === 0) {
+				if (!next) next = Object.assign({}, scShadowDisplay)
+				delete next[d]
+				delete scShadowDisplayRequests[d]; delete scShadowGridCache[d]; delete scShadowLiveCueCache[d]
+			}
+		}
+		if (next) scShadowDisplay = next
+	}
+	onScConsoleLineChanged: scLineSync()
+	onScLineMaskChanged: {
+		scLineTrim()
+		scShadowResponseVersion = "" // the next answer is applied even if stream-sync's picture did not change
+		// The new set of channels goes to stream-sync at once. Read from the two properties, not from scLineLive: this
+		// handler may run before that binding has caught up with the mask.
+		if (scConsoleLine && scLineMask !== 0) { scShadowPollAt = 0; scShadowPoll() }
+	}
+	onScLineLiveChanged: {
+		if (scLineLive || scFourDeckRole !== "") return
+		scShadowPollTimer.stop()
+		const x = scShadowPollRequest
+		if (x && x.readyState > 0 && x.readyState < 4) x.abort()
+	}
+	Connections { target: root.scConsoleLine ? root.scTr("/Engine/Mixer/Channel1/Line") : null; ignoreUnknownSignals: true; function onStateChanged() { root.scLineSync() } }
+	Connections { target: root.scConsoleLine ? root.scTr("/Engine/Mixer/Channel2/Line") : null; ignoreUnknownSignals: true; function onStateChanged() { root.scLineSync() } }
+	Connections { target: root.scConsoleLine ? root.scTr("/Engine/Mixer/Channel3/Line") : null; ignoreUnknownSignals: true; function onStateChanged() { root.scLineSync() } }
+	Connections { target: root.scConsoleLine ? root.scTr("/Engine/Mixer/Channel4/Line") : null; ignoreUnknownSignals: true; function onStateChanged() { root.scLineSync() } }
+	// This unit's Engine Link player number, for its post: a console orders the units it shows by it. Read
+	// when the role is known and again if the number changes; the sampler only copies it.
+	readonly property int scOwnPlayer: {
+		const t = scFourDeckRole !== "" ? scTr("/Client/Preferences/Player") : null
+		const n = t ? parseInt(t.string) : 0
+		return n >= 1 && n <= 8 ? n : 0
 	}
 	property bool scShadowCdjMaster: false // a CDJ on a shadow deck holds master
 	// Engine Link hands master to a deck that still plays when the master stops, and
@@ -2144,6 +2197,7 @@ SERVICES_MAIN = """
 			o.phaseMeter = !!pm && !!pm.enabled; o.phaseActive = !!pm && !!pm.active; o.aligned = !!pm && !!pm.isAligned
 			o.phase = o.aligned || !pm ? 0 : Math.round((Number(pm.phaseOffset) || 0) * 50) / 50
 			o.active = d === scShadowActiveDeck // on this unit's active layer (#201)
+			o.player = root.scOwnPlayer || undefined // a console showing this unit on a Line channel orders by it; absent when unknown
 			o.range = s.range; o.keylock = s.keylock // the peer's shadow deck shows the same range and key lock
 			o.service = s.net && root.scOwnService ? root.scOwnService(d) : "" // #305: the peer's shadow header shows this track's service mark
 			// What this deck's header and overview show beside the track; the peer's shadow deck shows them, its copy takes none.
@@ -2260,7 +2314,9 @@ SERVICES_MAIN = """
 		++scShadowGen
 		scShadowPollAt = Date.now()
 		let scLines = null
-		if (typeof root !== "undefined" && root && root.scTr) {
+		if (root.scConsoleLine && root.scLineMask !== 0) { // the console's Line In view: the channels the mixer says are on Line / AUX
+			for (let d = 1; d <= 4; d++) if ((root.scLineMask >> d) & 1) (scLines || (scLines = [])).push(d)
+		} else if (typeof root !== "undefined" && root && root.scTr) {
 			for (let d = 1; d <= 4; d++) {
 				try {
 					const p = root.scTr(root.scShadowLinePaths[d - 1])
@@ -2315,7 +2371,7 @@ SERVICES_MAIN = """
 				const h = head[d] = {master: typeof e.lead === "boolean" ? e.lead : e.master, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
 					loop: !!e.loop, keyOffset: e.keyOffset || 0, stems: !!e.stems, slip: e.slip || 0, service: e.service || ""}
 				// The source's phase meter; a CDJ or an older sender sends none and the copy's own stays.
-				if (typeof e.aligned === "boolean") { h.aligned = e.aligned; h.phaseActive = !!e.phaseActive; h.phaseMeter = !!e.phaseMeter; h.phase = Number(e.phase) || 0 }
+				if (typeof e.aligned === "boolean") { h.aligned = e.aligned; h.phaseActive = !!e.phaseActive; h.phaseMeter = !!e.phaseMeter; if (typeof e.phase === "number") h.phase = e.phase }
 			}
 			// The last track is still on the deck (the next one's copy on its way, the peer gone): its
 			// header stays until it is unloaded. Without it the header read the copy's file name and key.
@@ -3549,6 +3605,29 @@ SERVICES_MAIN = """
 		interval: 250; running: root.scUiLoaded && !root.scBpmDecimalsSynced; repeat: true; triggeredOnStart: true
 		onTriggered: root.scSyncBpmDecimals()
 	}
+	// #325: the controller engine reads Pad LED Brightness from /GUI/Scripted/EngineXPadBrightness (its 500 ms
+	// timer), so the pads follow the picker within a fraction of a second, not after its 10 s HTTP poll. The level
+	// is published 200 ms after the last change (restarted by each pick): the hook's 80 ms settings poll must hold
+	// the level before the controller resends the LEDs, or that resend would go out at the old one. 0 = not yet.
+	property bool scPadBrightnessSynced: false
+	readonly property var scPadBrightnessPropRef: Planck.createProperty("EngineXPadBrightness", 0.0, 0)
+	readonly property var scPadBrightnessProp: scPadBrightnessPropRef && Planck.getProperty("/GUI/Scripted/EngineXPadBrightness")
+	function scSyncPadBrightness() {
+		const p = scPadBrightnessProp && scPadBrightnessProp.translator ? scPadBrightnessProp : Planck.getProperty("/GUI/Scripted/EngineXPadBrightness")
+		if (!p || !p.translator || !scUiLoaded) { scPadBrightnessSynced = false; return }
+		p.translator.value = Math.max(20, Math.min(100, scLedBrightness)) / 100
+		scPadBrightnessSynced = true
+	}
+	onScLedBrightnessChanged: scPadBrightnessDelay.restart()
+	Timer {
+		id: scPadBrightnessDelay
+		interval: 200; repeat: false
+		onTriggered: root.scSyncPadBrightness()
+	}
+	Timer {
+		interval: 250; running: root.scUiLoaded && !root.scPadBrightnessSynced; repeat: true; triggeredOnStart: true
+		onTriggered: root.scSyncPadBrightness()
+	}
 	property var scMixstreamFx: ["Echo", "Flanger", "Delay", "Phaser"]
 	property bool scMixstreamSweepOpen: false
 	property string scPioneerFx: "off"
@@ -3703,6 +3782,7 @@ SERVICES_MAIN = """
 	property bool scTidalSynthetic: false
 	property string scScope: ""
 	property string scRekordboxName: "" // the computer with rekordbox on Pro DJ Link, while there is one
+	// "Apple Music (EngineX)" is the third-party service on the gateway; Engine's own Apple Music is a row of its own and keeps its name (#323).
 	// The Sources list shows these in this order after the drives and Link sources:
 	// the computer with rekordbox is a library on the link, so it comes before the services.
 	readonly property var scServices: [
@@ -3713,8 +3793,10 @@ SERVICES_MAIN = """
 		{ id: "deezer", name: "Deezer" },
 		{ id: "soundcloud", name: "SoundCloud" },
 		{ id: "beatport", name: "Beatport" },
-		{ id: "applemusic", name: "Apple Music" }
+		{ id: "applemusic", name: "Apple Music (EngineX)" }
 	]
+	// The label the gateway puts on a streamed row (providerLabels in tidal_gateway.go) is the service's name except for these three.
+	readonly property var scRowLabels: ({ "rekordbox": "rekordbox", "网易云音乐": "netease", "Apple Music": "applemusic" })
 	// Keep inactive dictionaries as scalar JSON strings. Only the selected language
 	// becomes a JS object/GC root; retain all spellings for live language switching.
 	readonly property var scDicts: (@DICTS@)
@@ -3963,6 +4045,17 @@ SERVICES_MAIN = """
 		const id = scOwnService(deck) || scScope
 		return source === "TIDAL" && id && id !== "tidal" ? scIcon(id) : ""
 	}
+	// #305: a browse row's mark. Engine draws the TIDAL slot's mark on every row the gateway serves (providerIconUri), so a row of another
+	// service says TIDAL. The gateway names a row's own service in its provider label ("Deezer [128 BPM 8A]", labelWithBPM: the same
+	// provider the header's lookup answers with), the row shows that service's mark; a row whose label names none (the services' mixed
+	// lists, a drive row) takes the selected service's, as a deck with no service on record does. Real TIDAL keeps its own mark (the test
+	// scSwapStemmed makes), and so does any mark that is not the slot's. "" keeps stock's mark.
+	function scRowIcon(stock, label) {
+		if (!/tidal/i.test(String(stock || "")) || (scScope === "tidal" && scTidalLoggedIn)) return ""
+		const name = String(label || "").split(" [")[0]
+		const own = scRowLabels.hasOwnProperty(name) ? scRowLabels[name] : (scServices.find(v => v.name === name) || {}).id
+		return own ? (own === "tidal" ? "" : scIcon(own)) : scSlotIcon("TIDAL", 0)
+	}
 	// Capture manual and auto-detected IANA time zones via stock Planck.timeDateController
 	// signals and persist them through stream-sync (/data/enginex/state/timezone) without
 	// interposing setenv/unsetenv in Engine. Treat UTC as an unsolicited fallback only
@@ -4129,10 +4222,13 @@ SERVICES_MAIN = """
 		return !!(root.scBrowseProp && root.scBrowseProp.translator && root.scBrowseProp.translator.state) ||
 			!!(typeof PlanckGUI !== "undefined" && PlanckGUI.views && PlanckGUI.views.sourceScreenView && PlanckGUI.views.sourceScreenView.visible)
 	}
+	// Digits in groups of three. Not a zero-width global replace: Qt 6.7.2's V4 engine puts the separator in twice for that ("6,,031").
 	function scFormatCount(n) {
-		const v = n > 0 ? (n - (n % 1)) : 0
-		const s = "" + v
-		return s.replace(/\\B(?=(\\d{3})+(?!\\d))/g, ",")
+		const s = "" + (n > 0 ? (n - (n % 1)) : 0)
+		if (!/^\\d+$/.test(s)) return s
+		let out = ""
+		for (let i = 0; i < s.length; i++) out += (i > 0 && (s.length - i) % 3 === 0 ? "," : "") + s[i]
+		return out
 	}
 	function scUsbLoadingText() {
 		if (root.scUsbPrepareError) return root.scT(root.scUsbPrepareError)
@@ -4222,6 +4318,7 @@ SERVICES_MAIN = """
 		scFourDeckRole = scIsPlayerBoard && v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
 		scFourDeckOn = scIsPlayerBoard && !!v.fourDeckWaveform
 		scPairedSetting = scIsPlayerBoard && !!v.fourDeckWaveform && !!v.pairedView
+		scConsoleLine = scConsoleLineBoard && !!v.consoleLineView
 		scFourDeckRoleSetting = v.fourDeckRole || "auto"
 		scShadowMode = v.shadowMode || "auto"
 		scKeepPlayhead(v.playhead || 0)
@@ -4441,6 +4538,11 @@ SERVICES_MAIN = """
 	// so its login, pairing and "Connecting to" boxes would only flash up with the
 	// TIDAL name. They stay closed unless TIDAL itself is open.
 	function scQuiet() { return scSources.indexOf("tidal") < 0 || (scScope !== "" && scScope !== "tidal") }
+	// #323: those guards and the scope's logo are for the providers the pack carries or hides (Engine's TIDAL slot, which every EngineX service
+	// rides; SoundCloud and Beatport LINK, which ours replace). Any other provider (Engine's own Apple Music) signs in as stock does, whatever
+	// scope is selected; a provider the dialog does not name stays ours.
+	function scCarries(provider) { return !provider || /^(tidal|soundcloud|beatport)/i.test(String(provider.name)) }
+	function scBranded(provider) { return scCarries(provider) && scScope !== "" && scScope !== "tidal" }
 	function scUnasked(provider) {
 		if (Date.now() - scAskedAt < 120000) return false
 		const c = Planck.librarianController.streamingInterfaceController
@@ -4774,6 +4876,15 @@ SERVICES_MAIN = """
 	property var scStemSeen: null // when and where the rendering track's progress was first seen
 	property string scStemLeft: ""
 	property var scStemFailAt: ({})
+	property bool scStemFull: false // the last Stems tap found a deck free to load but none empty: the swipe's hint says so
+	property var scStemTurns: [] // imports that have their file and wait for the one in progress: {gid, run}, oldest first
+	property var scStemAsking: ({}) // track id -> {at, gen} of its open request to the gateway for the file, until it answers or expires
+	property int scStemGen: 0 // the last request's number: an answer counts only for the open request of its track (scStemAnswered)
+	property bool scStemWait: false // the last Stems tap was turned away: this many imports are already on their way
+	// Most tracks on their way through the import at once (asked for, waiting for their turn, importing): a list shows about 6 rows of 92 px
+	// (TrackList.qml), so one screenful selected for Stems fits with room for the import in progress; the next tap says "Please wait...".
+	readonly property int scStemMax: 8
+	readonly property int scStemAskMs: 120000 // a request that never answers is given up after this long: its row stops waiting (scStemExpire)
 	function scStemMark(ids, mark) {
 		const rows = Object.assign({}, scStemRows)
 		for (const id of ids) {
@@ -4934,16 +5045,37 @@ SERVICES_MAIN = """
 		const lib = Planck.librarianController.collectionController
 		const m = /uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)/.exec(lib.getTrackUrisFromUniversalIds([uid]) || "")
 		if (!m) return false
-		const deck = root.scDeckList().slice().reverse().find(d => !root.scDeckLocked(d) && !Planck.getProperty("/Engine/Deck%1/PlayState".arg(d)).translator.state)
-		// Every deck is playing: playback is never interrupted for the import, so
-		// nothing is started. The swipe says so where it would have said "Stems".
-		if (!deck) { console.warn("EngineX stems step=busy"); return "busy" }
+		// The service's track id from the row's uri: every row of one track, in any list, has it (the rows' own ids are per list),
+		// so it is the one key of the row marks, the download and the queue.
 		const gid = m[1]
+		root.scStemWait = false
+		// A track that is already on its way is not taken a second time: the row keeps showing where it is.
+		const pending = root.scStemPending()
+		if (pending[gid]) return true
+		// The import loads the file on a deck, so it needs one that is neither playing nor
+		// holding a track: a track cued on a paused deck is the DJ's and is never replaced (#316).
+		const loaded = d => { const song = Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(d)); return !!(song && song.translator && song.translator.state) }
+		const idle = () => root.scDeckList().slice().reverse().filter(d => !root.scDeckLocked(d) && !Planck.getProperty("/Engine/Deck%1/PlayState".arg(d)).translator.state)
+		const free = () => idle().find(d => !loaded(d))
+		const deck = free()
+		// Every deck is playing, or every free one holds a track: playback and cued tracks
+		// are never interrupted for the import, so nothing is started. The swipe says so
+		// where it would have said "Stems" (scStemFull: which of the two it was).
+		root.scStemFull = !deck && idle().length > 0
+		if (root.scStemFull) console.warn("EngineX stems step=full")
+		if (!deck) { console.warn("EngineX stems step=busy"); return "busy" }
+		// Too many on their way: the tap starts nothing and the swipe says to wait (the answer is the same "busy" one).
+		root.scStemWait = Object.keys(pending).length >= root.scStemMax
+		if (root.scStemWait) { console.warn("EngineX stems step=queue-full"); return "busy" }
+		const gen = root.scStemAsk(gid)
 		root.scStemMark([gid], "wait")
 		const x = new XMLHttpRequest()
 		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/source?id=" + gid)
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4) return
+			// The request was given up (its row stopped waiting) or a later tap replaced it: this answer is stale. Otherwise the queue (or nothing, after a
+			// failure) holds the track from here on.
+			if (!root.scStemAnswered(gid, gen)) return
 			// The service gave no full file (a NetEase track this account only previews,
 			// no match, no network): say so on the row instead of dropping the tap.
 			if (x.status !== 200) {
@@ -4952,32 +5084,104 @@ SERVICES_MAIN = """
 				if (!scStemFailed.running) { scStemFailed.interval = 10000; scStemFailed.restart() }
 				return
 			}
-			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) { root.scStemMark([gid], ""); return } // started playing while we waited
 			const reply = JSON.parse(x.responseText)
 			const url = "file://" + encodeURI(reply.path)
-			// Engine imports a file only through a deck load, so load it on an empty deck
-			// and eject it again once the Stems render is queued (scStemUnload).
-			const song = Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(deck))
-			scStemUnload.deck = deck
-			scStemUnload.armed = !(song && song.translator && song.translator.state)
-			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(deck)).translator.url = url
-			// One import at a time: an earlier one this replaces is not rendered.
-			if (scStemImport.running && scStemImport.rows.indexOf(gid) < 0) root.scStemMark(scStemImport.rows, "")
-			scStemImport.rows = [gid, reply.row ? String(reply.row) : ""]
-			root.scStemMark(scStemImport.rows, "wait")
-			scStemImport.url = url
-			scStemImport.path = reply.path
-			scStemImport.tries = 20
-			scStemImport.restart()
+			// One import at a time: the two timers below hold one import's state, so a tap
+			// that finds another one in progress waits for its turn (scStemTurn) and never
+			// overwrites it. Its row keeps saying "wait".
+			root.scStemTurn(gid, function() {
+				// The deck is chosen now: the file took a while to come and the DJ may have
+				// loaded a track on it or started it meanwhile. A track is never replaced.
+				const d = free()
+				if (!d) { root.scStemMark([gid], ""); return }
+				// Engine imports a file only through a deck load, so load it on an empty deck
+				// and eject it again once the Stems render is queued (scStemUnload).
+				scStemUnload.deck = d
+				scStemUnload.gid = gid
+				scStemUnload.armed = true
+				Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(d)).translator.url = url
+				scStemImport.rows = [gid, reply.row ? String(reply.row) : ""]
+				root.scStemMark(scStemImport.rows, "wait")
+				scStemImport.url = url
+				scStemImport.path = reply.path
+				scStemImport.tries = 20
+				scStemImport.restart()
+			})
 		}
 		x.send()
 		return true
+	}
+	// An import has the two timers below to itself from its file load to the eject of its
+	// deck: the next one starts when both have stopped (or at once when neither runs).
+	function scStemTurn(gid, run) {
+		scStemTurns = scStemTurns.concat([{gid: gid, run: run}])
+		scStemTurnNext()
+	}
+	function scStemTurnNext() {
+		while (scStemTurns.length && !scStemImport.running && !scStemUnload.running) {
+			const job = scStemTurns[0]
+			scStemTurns = scStemTurns.slice(1)
+			job.run()
+		}
+	}
+	// The distinct tracks on their way through the import, by track id: asked for (the download), waiting for their turn, importing,
+	// or on a deck waiting for its eject. Read at a tap, so nothing runs while idle.
+	function scStemPending() {
+		const ids = {}, now = Date.now()
+		for (const id of Object.keys(scStemAsking)) if (now - scStemAsking[id].at < scStemAskMs) ids[id] = true
+		for (const turn of scStemTurns) ids[turn.gid] = true
+		if (scStemImport.running) ids[scStemImport.rows[0]] = true
+		if (scStemUnload.running) ids[scStemUnload.gid] = true
+		return ids
+	}
+	// The requests to the gateway: a tap opens one for its track (the number says which), the answer closes it. An answer to a request
+	// that was given up or replaced by a later tap is dropped, so a late answer cannot queue the track a second time.
+	function scStemAsk(gid) {
+		const gen = ++scStemGen
+		scStemAsking[gid] = {at: Date.now(), gen: gen}
+		if (!scStemExpiry.running) { scStemExpiry.interval = scStemAskMs; scStemExpiry.restart() }
+		return gen
+	}
+	function scStemAnswered(gid, gen) {
+		const open = scStemAsking[gid]
+		if (!open || open.gen !== gen) return false
+		delete scStemAsking[gid]
+		if (!Object.keys(scStemAsking).length) scStemExpiry.stop()
+		return true
+	}
+	// Gives up the requests that did not answer in time: the row stops waiting. Runs from scStemExpiry, which waits for the oldest open
+	// request and stops itself when none is open, so nothing runs while idle. The deck sets its clock from the network after boot: a request
+	// can never have more than one period left, so more means the clock was set back and its deadline is counted again from now, once. Found
+	// that way a second time it is given up at once. The wait is then at most two periods of the timer's own time, whatever the clock does,
+	// and the timer is never armed for the length of a jump.
+	function scStemExpire() {
+		const now = Date.now()
+		let next = -1
+		for (const gid of Object.keys(scStemAsking)) {
+			const open = scStemAsking[gid]
+			if (open.at + scStemAskMs - now > scStemAskMs) {
+				if (open.rebased) { delete scStemAsking[gid]; scStemMark([gid], ""); continue }
+				open.at = now
+				open.rebased = true
+			}
+			const left = open.at + scStemAskMs - now
+			if (left <= 0) { delete scStemAsking[gid]; scStemMark([gid], "") }
+			else if (next < 0 || left < next) next = left
+		}
+		if (next < 0) { scStemExpiry.stop(); return }
+		scStemExpiry.interval = next
+		scStemExpiry.restart()
+	}
+	Timer {
+		id: scStemExpiry
+		onTriggered: root.scStemExpire()
 	}
 	// The import lands in the internal m.db, but while a streaming collection is open
 	// collectionController is that collection and cannot see it. So the gateway looks
 	// the id up by file name; the controller scan (ids 1-2000) is only the fallback.
 	Timer {
 		id: scStemImport
+		onRunningChanged: if (!running) Qt.callLater(root.scStemTurnNext)
 		property string url: ""
 		property string path: ""
 		property int tries: 0
@@ -5013,10 +5217,12 @@ SERVICES_MAIN = """
 	}
 	// Ejects the deck that scStemStream loaded only to get the file into the library,
 	// but only while it still holds that file and is not playing.
-	// shortcut: one pending import at a time; a second Stems tap re-arms the same deck.
+	// One pending import at a time (scStemTurn): the file, the deck and the name are one import's.
 	Timer {
 		id: scStemUnload
+		onRunningChanged: if (!running) Qt.callLater(root.scStemTurnNext)
 		property int deck: 0
+		property string gid: ""
 		property bool armed: false
 		property string name: ""
 		property int tries: 0
@@ -5172,6 +5378,7 @@ LOGIN_DIALOG = """
 					x: 620; y: 70
 					width: 88; height: 88
 					mipmap: true
+					cache: false // #316: not the texture Engine's own icons share (their mipmap setting differs)
 					source: root.scLogin ? root.scIcon(root.scLogin) : ""
 				}
 				Text {
@@ -5225,7 +5432,6 @@ SOURCE_ENTER = """
         const row = available ? nav.availableSourceIndex : nav.connectedSourceIndex
         const name = row >= 0 ? String(model.data(model.index(row, 0), root.scSourceNameRole)).trim() : ""
         const streaming = root.scSourceTypeText(model, row) === "Streaming"
-        if (streaming && name === "Apple Music") { root.scOpen("applemusic"); return }
         if (streaming && ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(name) >= 0) {
             if (root.scScope && root.scSources.indexOf(root.scScope) >= 0) root.scOpen(root.scScope)
             return
@@ -5242,7 +5448,7 @@ SOURCE_FOOTER = """
 	readonly property var pScSourceIndex: Planck.getProperty("/Qml/ControlFocus/ScSourceIndex")
 	readonly property var pScSourceSelect: Planck.getProperty("/Qml/ControlFocus/ScSourceSelect")
 	function scHiddenSourceName(name, typeText) {
-		return typeText === "Streaming" && ["TIDAL", "Tidal", "SoundCloud", "Beatport", "Beatport LINK", "Apple Music"].indexOf(String(name || "")) >= 0
+		return typeText === "Streaming" && ["TIDAL", "Tidal", "SoundCloud", "Beatport", "Beatport LINK"].indexOf(String(name || "")) >= 0
 	}
 	// EngineX's internal save drive (engine-ui-guard registers it with -extraDriveDir):
 	// Engine keeps streamed tracks' cues, loops and grids there and has nothing on it
@@ -5423,6 +5629,7 @@ SOURCE_FOOTER = """
 					anchors.verticalCenter: parent.verticalCenter
 					width: 48; height: 48
 					mipmap: true
+					cache: false // #316: not the texture Engine's own icons share (their mipmap setting differs)
 					source: root.scIcon(modelData.id)
 				}
 				Text {
@@ -5475,7 +5682,7 @@ Grid {
 		id: scRepeater
 		model: Planck.librarianController.browserSourceControllerPtr().availableSourceModel()
 		delegate: AvailableSourceDelegate {
-			visible: model.typeText !== "Streaming" || ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK", "Apple Music"].indexOf(model.name) < 0
+			visible: model.typeText !== "Streaming" || ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(model.name) < 0
 			width: availableSource.cellWidth
 			height: availableSource.cellHeight
 			cellContentWidth: availableSource.cellWidth - availableSource.cellPadding * 2
@@ -5883,11 +6090,34 @@ FOUR_DECK_ENTRIES = """
 """
 
 # #99 Layout Manager: what a View 1..5 keeps besides the stock layout (scViewSnapshot).
+# Console linking, stage 1: on the four consoles one row, Stock / Line In, live (no Engine restart: the QML
+# follows the setting at once). The 4-deck rows above stay player-only, so this row is placed after them.
+CONSOLE_LINE_ENTRIES = """
+		EntryBase.ListEntry { // a linked player on a channel while its input is Line / AUX (console_line_view)
+			id: scConsoleLineEntry
+			text: "Linked View"
+			entryWidth: 176
+			visible: root.scConsoleLineBoard
+			readonly property int at: root.scConsoleLine ? 1 : 0
+			values: ["Stock", "Line In"]
+			currentValue: values[at]
+			onSelected: function(index) { if (index !== at) root.scCall("consoleLineView=" + index) }
+		},
+		@HEADLINE@ {
+			visible: root.scConsoleLineBoard
+			leftPadding: 24; rightPadding: 24
+			wrapMode: Text.WordWrap
+			Layout.preferredHeight: implicitHeight
+			color: "#9a9a9a"
+			text: "Line In: a linked player is shown on a channel while its input is Line or AUX; nothing is loaded and no deck is taken"
+		},
+"""
+
 VIEW_ENTRIES = """
 		@HEADLINE@ {
 			text: "ENGINEX VIEW PRESET"
 		},
-""" + CUE_COUNTDOWN_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES
+""" + CUE_COUNTDOWN_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES + CONSOLE_LINE_ENTRIES
 
 # #78: a deck in a booth can be switched off without reaching for the recessed rear
 # button. Engine's own quit path: the "Turn Off" confirmation, recording and library
@@ -6075,8 +6305,9 @@ UPFADER_ECHO_TILE = """
 """
 
 # Smart Sync (5.3.0 only): half/double-time (0.5x, 2x, 0.25x, 4x) harmonic tempo matching.
-# Automatically widens Pitch Range to the smallest step needed for the best harmonic match,
-# and restores the user's original Pitch Range when Sync is turned off.
+# Automatically widens Pitch Range to the smallest step needed for the best harmonic match.
+# When Sync is turned off the deck goes back to the range the DJ set by hand while Sync was on
+# (#316 BH-GF4-12); only when the DJ did not touch it, to the range it had before Smart Sync widened it.
 SMART_SYNC_MAIN = """
 	function scHarmonicSyncNeed(masterBpm, origBpm) {
 		if (origBpm <= 0 || masterBpm <= 0) return 0
@@ -6119,7 +6350,12 @@ SMART_SYNC_MAIN = """
 			readonly property QObjProperty pOrigBpm: Planck.getProperty("/Engine/Deck%1/OriginalBPM".arg(deckIdx))
 			readonly property QObjProperty pMasterBpm: Planck.getProperty("/Engine/Master/MasterTempo")
 			readonly property QObjProperty pRange: Planck.getProperty("/Engine/Deck%1/SpeedRange".arg(deckIdx))
-			property int savedRangeIndex: -1
+			property int savedRangeIndex: -1 // the range when Sync engaged
+			property int handRangeIndex: -1 // the range the DJ set by hand while Sync was on; -1 = not touched
+			readonly property int rangeIndex: {
+				const r = pRange && pRange.translator
+				return r ? r.index : -1
+			}
 			readonly property bool syncActive: {
 				const s = pSync && pSync.translator, l = pLoaded && pLoaded.translator
 				return !!(s && l && s.string !== "Off" && l.state)
@@ -6129,15 +6365,28 @@ SMART_SYNC_MAIN = """
 				if (!s || !l || !o || !m || s.string === "Off" || !l.state || !(o.unnormalized > 0) || !(m.unnormalized > 0)) return 0
 				return root.scHarmonicSyncNeed(m.unnormalized, o.unnormalized)
 			}
+			// Smart Sync names the index it is about to write (scSmartExpect) and its own change is the one that arrives with that value;
+			// any other change while Sync is on is the DJ's. Event only: nothing runs per frame.
+			onRangeIndexChanged: {
+				if (root.scSmartExpect[deckIdx] === rangeIndex) {
+					delete root.scSmartExpect[deckIdx]
+					return
+				}
+				if (syncActive && savedRangeIndex >= 0) handRangeIndex = rangeIndex
+			}
 			onSyncActiveChanged: {
 				const r = pRange && pRange.translator
+				delete root.scSmartExpect[deckIdx]
 				if (syncActive) {
+					handRangeIndex = -1
 					if (savedRangeIndex < 0 && r) savedRangeIndex = r.index
 					if (syncNeed > 0) root.scWidenRange(deckIdx, syncNeed)
 				} else {
 					if (savedRangeIndex >= 0 && r) {
-						r.index = savedRangeIndex
+						const back = handRangeIndex >= 0 ? handRangeIndex : savedRangeIndex
+						if (r.index !== back) r.index = back
 						savedRangeIndex = -1
+						handRangeIndex = -1
 					}
 					root.scUnsyncRestoreBpm(deckIdx)
 				}
@@ -6151,11 +6400,14 @@ SMART_SYNC_MAIN = """
 			}
 		}
 	}
+	property var scSmartExpect: ({}) // deck -> the range index Smart Sync is writing, until its own change arrives (not the DJ's)
 	function scWidenRange(deck, need) {
 		const t = Planck.getProperty("/Engine/Deck%1/SpeedRange".arg(deck)).translator
 		if (!t || need <= parseFloat(t.string)) return
 		const i = t.entries.findIndex(e => parseFloat(e) >= need)
-		t.index = i < 0 ? t.entries.length - 1 : i
+		const target = i < 0 ? t.entries.length - 1 : i
+		scSmartExpect[deck] = target
+		t.index = target
 	}
 	// The Smart Sync tile calls this so a tap takes effect without waiting for a tempo change.
 	function scWidenAll() {
@@ -7318,7 +7570,8 @@ SHADOW_BUSY = r"""
             id: scBusy
             // Auto mode, a CDJ this renderer draws because Engine cannot have its file
             // (sample.fallback, cdjFallback in stream-sync): the same line says why, for
-            // 8 s per track, and for as long as the lane has no waveform to draw.
+            // 8 s per track, and for as long as the lane has no waveform to draw. A console's
+            // Line In lane with a CDJ and this unit's Pro DJ Link switch off says "prolink-off".
             readonly property string why: scDisplay.busyState === 0 && scDisplay.live && scDisplay.sample && !scDisplay.sample.stale && scDisplay.sample.fallback || ""
             readonly property string whyKey: why === "" ? "" : why + scDisplay.sample.key
             property string told: ""
@@ -7338,9 +7591,18 @@ SHADOW_BUSY = r"""
                     anchors.verticalCenter: parent.verticalCenter
                     color: Style.font02Color; font: Style.fontH1
                     readonly property int retried: scDisplay.busyState > 3 || ["network", "timeout"].indexOf(scBusy.why) >= 0 ? 1 : 0
-                    text: (["Downloading", "Loading", "Waiting for source analysis", "File unavailable.", "Failed to open file within appropriate time.", "Could not load via network."][scDisplay.busyState - 1] || {streaming: "Streaming: no file to copy from CDJ.", link: "rekordbox Link: no file to copy from CDJ.", media: "CD or 2nd USB: no file to copy from CDJ.", network: "Could not load via network.", timeout: "Failed to open file within appropriate time."}[scBusy.why] || " ") + [" ", " " + "Retrying…"][retried]
+                    text: (["Downloading", "Loading", "Waiting for source analysis", "File unavailable.", "Failed to open file within appropriate time.", "Could not load via network."][scDisplay.busyState - 1] || {streaming: "Streaming: no file to copy from CDJ.", link: "rekordbox Link: no file to copy from CDJ.", media: "CD or 2nd USB: no file to copy from CDJ.", network: "Could not load via network.", timeout: "Failed to open file within appropriate time.", "prolink-off": "Pro DJ Link is off: no CDJ waveform"}[scBusy.why] || " ") + [" ", " " + "Retrying…"][retried]
                 }
             } }
+        }
+        // Console linking, stage 1: which unit a Line In lane shows (its player number, and its model when known).
+        Text {
+            objectName: "EngineX_Shadow_Unit"
+            textFormat: Text.PlainText
+            x: 8; y: 2
+            visible: scDisplay.live && !!scDisplay.sample && !!scDisplay.sample.lineIn && scDisplay.sample.player > 0
+            color: Style.font02Color; font: Style.fontH5
+            text: "Linked player" + " " + (scDisplay.sample ? scDisplay.sample.player : 0) + (scDisplay.sample && scDisplay.sample.model ? " · " + scDisplay.sample.model : "")
         }
 """
 
@@ -7745,7 +8007,7 @@ def edits(dev: bool):
         ],
         **({v + "Bluetooth/BluetoothSelect.qml": BLUETOOTH_SELECT} if v53() else {}),
         prefs + "Entries/StreamingServices.qml": [
-            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK", "Apple Music"].indexOf(provider.name) < 0\n'),
+            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(provider.name) < 0\n'),
             ('import "Base"\n', 'import QtQuick.Layouts 1.12\nimport "Base"\n'),
             ('	label: "Streaming"\n', '	label: "Streaming"\n' + STREAM_SWITCHES),
         ],
@@ -7825,26 +8087,26 @@ def edits(dev: bool):
         v + "Streaming/StreamingAcceptDenyDialog.qml": [
             (
                 '						width: 400\n						height: (src.height / src.width) * width\n						color: Style.icon01Color\n						source: service.provider ? `qrc:/streaming/${service.provider.providerType}/Logo.png` : ""\n',
-                '						width: root.scScope && root.scScope !== "tidal" ? 120 : 400\n						height: root.scScope && root.scScope !== "tidal" ? 120 : (src.height / src.width) * width\n						useOriginal: !!(root.scScope && root.scScope !== "tidal")\n						color: Style.icon01Color\n						source: service.provider ? (root.scScope && root.scScope !== "tidal" ? root.scIcon(root.scScope) : `qrc:/streaming/${service.provider.providerType}/Logo.png`) : ""\n',
+                '						width: root.scBranded(service.provider) ? 120 : 400\n						height: root.scBranded(service.provider) ? 120 : (src.height / src.width) * width\n						useOriginal: !!(root.scBranded(service.provider))\n						color: Style.icon01Color\n						source: service.provider ? (root.scBranded(service.provider) ? root.scIcon(root.scScope) : `qrc:/streaming/${service.provider.providerType}/Logo.png`) : ""\n',
             ),
             (
                 '						text: service.provider ? `Connecting to ${service.provider.displayName}` : ""\n',
                 '						text: service.provider ? root.scT("Connecting to") + " " + root.scBrand(service.provider.displayName) : ""\n',
             ),
-            ("function onShowAcceptDenyDialog(provider) {\n", "function onShowAcceptDenyDialog(provider) {\n				if (root.scQuiet() || root.scUnasked(provider)) return\n"),
+            ("function onShowAcceptDenyDialog(provider) {\n", "function onShowAcceptDenyDialog(provider) {\n				if (root.scCarries(provider) && (root.scQuiet() || root.scUnasked(provider))) return\n"),
         ],
         v + "Streaming/StreamingUtilityDialog.qml": [(
             '            color: Style.icon01Color\n'
             '            source: dialog.provider ? "qrc:/streaming/%1/Logo_Horizontal.png".arg(dialog.provider.providerType) : ""\n',
-            '            Layout.preferredWidth: root.scScope && root.scScope !== "tidal" ? 96 : -1\n'
-            '            Layout.preferredHeight: root.scScope && root.scScope !== "tidal" ? 96 : -1\n'
-            '            useOriginal: !!(root.scScope && root.scScope !== "tidal")\n'
+            '            Layout.preferredWidth: root.scBranded(dialog.provider) ? 96 : -1\n'
+            '            Layout.preferredHeight: root.scBranded(dialog.provider) ? 96 : -1\n'
+            '            useOriginal: !!(root.scBranded(dialog.provider))\n'
             '            color: Style.icon01Color\n'
-            '            source: dialog.provider ? (root.scScope && root.scScope !== "tidal" ? root.scIcon(root.scScope) : "qrc:/streaming/%1/Logo_Horizontal.png".arg(dialog.provider.providerType)) : ""\n',
+            '            source: dialog.provider ? (root.scBranded(dialog.provider) ? root.scIcon(root.scScope) : "qrc:/streaming/%1/Logo_Horizontal.png".arg(dialog.provider.providerType)) : ""\n',
         )] if v53() else [
             (
                 '			width: 400\n			height: (src.height / src.width) * width\n			color: Style.icon01Color\n			source: dialog.provider ? "qrc:/streaming/%1/Logo.png".arg(dialog.provider.providerType) : ""\n',
-                '			width: root.scScope && root.scScope !== "tidal" ? 96 : 400\n			height: root.scScope && root.scScope !== "tidal" ? 96 : (src.height / src.width) * width\n			useOriginal: !!(root.scScope && root.scScope !== "tidal")\n			color: Style.icon01Color\n			source: dialog.provider ? (root.scScope && root.scScope !== "tidal" ? root.scIcon(root.scScope) : "qrc:/streaming/%1/Logo.png".arg(dialog.provider.providerType)) : ""\n',
+                '			width: root.scBranded(dialog.provider) ? 96 : 400\n			height: root.scBranded(dialog.provider) ? 96 : (src.height / src.width) * width\n			useOriginal: !!(root.scBranded(dialog.provider))\n			color: Style.icon01Color\n			source: dialog.provider ? (root.scBranded(dialog.provider) ? root.scIcon(root.scScope) : "qrc:/streaming/%1/Logo.png".arg(dialog.provider.providerType)) : ""\n',
             ),
         ],
         v + "Streaming/StreamingLoginDialog.qml": [
@@ -7852,7 +8114,7 @@ def edits(dev: bool):
                 '					text: `Log in to ${loginDialog.provider ? loginDialog.provider.displayName: ""} to access your tracks and playlists`\n',
                 '					text: root.scBrand(`Log in to ${loginDialog.provider ? loginDialog.provider.displayName: ""} to access your tracks and playlists`)\n',
             ),
-            ("function onShowLoginDialog(provider) {\n", "function onShowLoginDialog(provider) {\n			if (root.scQuiet() || root.scUnasked(provider)) return\n"),
+            ("function onShowLoginDialog(provider) {\n", "function onShowLoginDialog(provider) {\n			if (root.scCarries(provider) && (root.scQuiet() || root.scUnasked(provider))) return\n"),
         ],
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbViewContentContainer.qml": [
             (
@@ -7884,6 +8146,20 @@ def edits(dev: bool):
         v + "BrowseView/Components/Components/" + ("BrowseViewBpm.qml" if v53() else "Bpm.qml"): [('text: row.modelData.bpm || ""', 'text: row.modelData.bpm || root.scPreview(row.modelData.providerName)[1]')],
         v + "BrowseView/Components/Components/Key.qml": [('text: row.modelData.key || ""', 'text: row.modelData.key || root.scPreview(row.modelData.providerName)[2] || ""')],
         v + "BrowseView/Components/Components/Song.qml": [('title: row.modelData.song || ""', 'title: root.scPlainTitle(row.modelData.song)')],
+        # #305: a streamed row's provider mark is its own service's (scRowIcon), not the slot's TIDAL; a service's own colours, stock's size.
+        v + "BrowseView/Components/Components/ProviderIcon.qml": [(
+            'source: row.modelData.providerIconUri ?? ""\n',
+            'readonly property string scMark: root.scRowIcon(row.modelData.providerIconUri ?? "", row.modelData.providerName || "")\n'
+            "        useOriginal: scMark !== \"\"\n"
+            '        source: scMark !== "" ? scMark : (row.modelData.providerIconUri ?? "")\n',
+        )],
+        # 5.3.0 only: the mark beside an offline TIDAL playlist is the slot's too (the selected service's, as a deck with no service on record).
+        **({v + "BrowseView/Components/BreadcrumbView/BreadcrumbViewListEntryDelegate.qml": [(
+            'source: "qrc:/Skins/UIKit/Icons/SourceTIDAL.png"\n',
+            'readonly property string scMark: root.scSlotIcon("TIDAL", 0)\n'
+            "            useOriginal: scMark !== \"\"\n"
+            '            source: scMark !== "" ? scMark : "qrc:/Skins/UIKit/Icons/SourceTIDAL.png"\n',
+        )]} if v53() else {}),
         # rb-bridge converts rekordbox media at mount. Engine's own slow import of a
         # large library corrupted m.db, so always take the prompt's "Ignore" branch.
         ROOT + "Items/MessageBoxes/RekordBoxImportDialog.qml": [(
@@ -8271,7 +8547,7 @@ def edits(dev: bool):
                  "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
                  f"    readonly property list<string> actionLabels: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : scLabel(action.display.label)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
                 (f"    readonly property list<string> actionCommitMessages: {a}.map(action => action.display.commitMessage)\n",
-                 f"    readonly property list<string> actionCommitMessages: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? (scStemBusy ? root.scT(root.scDeckList().length > 2 ? \"All decks are playing. Free one deck, then tap Stems again\" : \"Both decks are playing. Free one deck, then tap Stems again\") : root.scT(\"Stems\")) : scLabel(action.display.commitMessage)).concat(scStem ? [scStemBusy ? root.scT(root.scDeckList().length > 2 ? \"All decks are playing. Free one deck, then tap Stems again\" : \"Both decks are playing. Free one deck, then tap Stems again\") : root.scT(\"Stems\")] : [])\n"),
+                 f"    readonly property list<string> actionCommitMessages: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? (scStemBusy ? root.scT(root.scStemWait ? \"Please wait...\" : root.scStemFull ? \"Every deck has a track loaded. Eject one, then tap Stems again\" : root.scDeckList().length > 2 ? \"All decks are playing. Free one deck, then tap Stems again\" : \"Both decks are playing. Free one deck, then tap Stems again\") : root.scT(\"Stems\")) : scLabel(action.display.commitMessage)).concat(scStem ? [scStemBusy ? root.scT(root.scStemWait ? \"Please wait...\" : root.scStemFull ? \"Every deck has a track loaded. Eject one, then tap Stems again\" : root.scDeckList().length > 2 ? \"All decks are playing. Free one deck, then tap Stems again\" : \"Both decks are playing. Free one deck, then tap Stems again\") : root.scT(\"Stems\")] : [])\n"),
                 (f"    readonly property list<color> actionColors: {a}.map(action => action.display.color)\n",
                  f"    readonly property list<color> actionColors: {a}.map(action => action.display.color).concat(scStem ? [Style.systemBlue01Color] : [])\n"),
                 (f"        {a}[actionIndex].trigger(row.index)\n",
@@ -8625,6 +8901,10 @@ def edits(dev: bool):
             '    id: scGlobalConfig\n'
             '    objectName: "Global Assignment Config"\n'
             '    property real scPadBrightness: 1\n'
+            '    property bool scPadBrightnessLive: false\n'
+            '    property var pPadBrightness: Planck.getProperty("/GUI/Scripted/EngineXPadBrightness")\n'
+            '    readonly property real scPadBrightnessSignal: pPadBrightness && pPadBrightness.translator ? pPadBrightness.translator.value : 0\n'
+            '    onScPadBrightnessSignalChanged: scSyncPadBrightnessFromState()\n'
             '    property bool scSwapLoopOrder: false\n'
             '    property bool scPitchBendBeatJump: false\n'
             '    property var pRestoreBpm: Planck.getProperty("/GUI/Scripted/EngineXRestoreBpm")\n'
@@ -8650,6 +8930,15 @@ def edits(dev: bool):
             '        const t = scGlobalConfig.pBpmDecimals && scGlobalConfig.pBpmDecimals.translator\n'
             '        return (t && t.value > 0) ? (t.value >= 0.75 ? 2 : 1) : scGlobalConfig.scBpmDecimals\n'
             '    }\n'
+            '    function scSyncPadBrightnessFromState() {\n'
+            '        if (!scGlobalConfig.pPadBrightness || !scGlobalConfig.pPadBrightness.translator)\n'
+            '            scGlobalConfig.pPadBrightness = Planck.getProperty("/GUI/Scripted/EngineXPadBrightness")\n'
+            '        const t = scGlobalConfig.pPadBrightness && scGlobalConfig.pPadBrightness.translator\n'
+            '        const n = t ? Math.round(t.value * 100) : 0\n'
+            '        if (n < 20 || n > 100) return\n'
+            '        scGlobalConfig.scPadBrightnessLive = true\n'
+            '        scGlobalConfig.scPadBrightness = n / 100\n'
+            '    }\n'
             '    function scSyncReverseJogFromState() {\n'
             '        if (!scGlobalConfig.pReverseJogLeft || !scGlobalConfig.pReverseJogLeft.translator)\n'
             '            scGlobalConfig.pReverseJogLeft = Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft")\n'
@@ -8669,7 +8958,10 @@ def edits(dev: bool):
             '    }\n'
             '    Timer {\n'
             '        interval: 500; running: true; repeat: true; triggeredOnStart: true\n'
-            '        onTriggered: scGlobalConfig.scSyncReverseJogFromState()\n'
+            '        onTriggered: {\n'
+            '            scGlobalConfig.scSyncReverseJogFromState()\n'
+            '            scGlobalConfig.scSyncPadBrightnessFromState()\n'
+            '        }\n'
             '    }\n'
             '    Timer {\n'
             '        interval: 10000; running: true; repeat: true; triggeredOnStart: true\n'
@@ -8680,7 +8972,7 @@ def edits(dev: bool):
             '                try {\n'
             '                    const j = JSON.parse(x.responseText)\n'
             '                    const n = parseInt(j.ledBrightness)\n'
-            '                    if (n >= 20 && n <= 100) scGlobalConfig.scPadBrightness = n / 100\n'
+            '                    if (!scGlobalConfig.scPadBrightnessLive && n >= 20 && n <= 100) scGlobalConfig.scPadBrightness = n / 100\n'
             '                    scGlobalConfig.scSwapLoopOrder = !!j.swapLoopOrder\n'
             '                    scGlobalConfig.scReverseJogLeft = !!j.jogInvertLeft\n'
             '                    scGlobalConfig.scReverseJogRight = !!j.jogInvertRight\n'
@@ -9710,10 +10002,141 @@ def edits(dev: bool):
     )])
     if v53():
         # #305: Track Info's Source line names the service, not TIDAL (scBrand swaps the word; a deck's own track says which).
-        out.setdefault(ROOT + "Items/TrackInfo.qml", []).extend([(
-            'text: trackData.streamingSource || "Local Drive"\n',
+        out.setdefault(ROOT + "Items/TrackInfo.qml", []).extend([
+            ('import "img"\n', 'import "img"\nimport "MessageBoxes"\n'),
+            ('    readonly property TrackInfoViewControllerInterface trackData: PlanckGUI.views.trackInfoViewController\n',
+             '''    readonly property TrackInfoViewControllerInterface trackData: PlanckGUI.views.trackInfoViewController
+    property string scGenre: String(trackData.genre || "")
+    property string scComment: String(trackData.comment || "")
+    property string scLabel: String(trackData.label || "")
+    property string scEditField: ""
+    property string scMetadataStatus: ""
+    readonly property QObjProperty scDeckTrackUri: trackData.infoFromDeck && trackData.deckIndex > 0
+        ? Planck.getProperty("/Engine/Deck%1/Track/TrackUri".arg(trackData.deckIndex)) : null
+    readonly property QObjProperty scDeckTrackNetworkPath: trackData.infoFromDeck && trackData.deckIndex > 0
+        ? Planck.getProperty("/Engine/Deck%1/Track/TrackNetworkPath".arg(trackData.deckIndex)) : null
+    readonly property QObjProperty scDeckTrackId: trackData.infoFromDeck && trackData.deckIndex > 0
+        ? Planck.getProperty("/Engine/Deck%1/Track/TrackId".arg(trackData.deckIndex)) : null
+    readonly property bool scMetadataEditable: trackData.infoFromDeck && trackData.deckIndex > 0
+
+    function scTranslatorString(prop) {
+        return prop && prop.translator ? String(prop.translator.string || "") : ""
+    }
+
+    function scTranslatorNumber(prop) {
+        if (!prop || !prop.translator) return 0
+        return Number(prop.translator.value || prop.translator.unnormalized || 0) || 0
+    }
+
+    function scOpenMetadata(field, value) {
+        if (!scMetadataEditable) return
+        scEditField = field
+        scMetadataDialog.field.title = root.scT("Edit %1").arg(field)
+        scMetadataDialog.field.label = root.scT(field)
+        scMetadataDialog.field.text = value
+        scMetadataDialog.field.placeholder = value
+        root.openDialogComponent(scMetadataDialog)
+    }
+
+    function scWriteStockMetadata(field, value) {
+        if (!scMetadataEditable) return false
+        try {
+            const prop = Planck.getProperty(`/Engine/Deck${trackData.deckIndex}/Track/${field}`)
+            if (!prop || !prop.translator) return false
+            prop.translator.string = String(value)
+            return true
+        } catch (e) {
+            return false
+        }
+    }
+
+    function scMetadataDrive() {
+        let value = scTranslatorString(scDeckTrackNetworkPath) || scTranslatorString(scDeckTrackUri)
+        try { value = decodeURIComponent(value) } catch (e) {}
+        const match = /(?:^|\\/)media\\/([^/]+)/.exec(value)
+        return match ? match[1] : ""
+    }
+
+    function scCommitMetadata(field, value) {
+        const next = {genre: scGenre, comment: scComment, label: scLabel}
+        next[field.toLowerCase()] = String(value)
+        const previous = {genre: scGenre, comment: scComment, label: scLabel}
+        const stockWrite = scWriteStockMetadata(field, value)
+        scGenre = next.genre
+        scComment = next.comment
+        scLabel = next.label
+        const req = new XMLHttpRequest()
+        req.onreadystatechange = function() {
+            if (req.readyState !== 4) return
+            if (req.status !== 200) {
+                if (!stockWrite) {
+                    scGenre = previous.genre
+                    scComment = previous.comment
+                    scLabel = previous.label
+                }
+                scMetadataStatus = stockWrite ? root.scT("Queued until the drive is inserted") : root.scT("Metadata edit was not saved")
+                return
+            }
+            const reply = JSON.parse(req.responseText)
+            scGenre = String(reply.genre || "")
+            scComment = String(reply.comment || "")
+            scLabel = String(reply.label || "")
+            scMetadataStatus = reply.pending ? root.scT("Queued until the drive is inserted") : ""
+        }
+        req.open("POST", "http://127.0.0.1:8080/v1/enginex/track-metadata")
+        req.setRequestHeader("Content-Type", "application/json")
+        req.send(JSON.stringify({
+            drive: scMetadataDrive(),
+            trackId: scTranslatorNumber(scDeckTrackId),
+            trackUri: scTranslatorString(scDeckTrackUri),
+            trackNetworkPath: scTranslatorString(scDeckTrackNetworkPath),
+            stockEdit: stockWrite,
+            genre: next.genre,
+            comment: next.comment,
+            label: next.label
+        }))
+    }
+
+    readonly property Component scMetadataDialog: TextInputDialog {
+        id: scMetadataDialog
+        field.doneButtonTitle: root.scT("Done")
+        field.cancelButtonTitle: root.scT("Cancel")
+        onDone: text => trackInfo.scCommitMetadata(trackInfo.scEditField, text)
+    }
+'''),
+            ('        if (showTrackInfoFromDeck) {\n            trackData.currentRating = trackData.rawRating\n',
+             '        if (showTrackInfoFromDeck) {\n'
+             '            scGenre = String(trackData.genre || "")\n'
+             '            scComment = String(trackData.comment || "")\n'
+             '            scLabel = String(trackData.label || "")\n'
+             '            scMetadataStatus = ""\n'
+             '            trackData.currentRating = trackData.rawRating\n'),
+            ('            Qt.callLater(() => {\n                trackData.updateRating()\n            })\n',
+             '            Qt.callLater(() => {\n'
+             '                scGenre = String(trackData.genre || "")\n'
+             '                scComment = String(trackData.comment || "")\n'
+             '                scLabel = String(trackData.label || "")\n'
+             '                scMetadataStatus = ""\n'
+             '                trackData.updateRating()\n'
+             '            })\n'),
+            ('text: trackData.streamingSource || "Local Drive"\n',
             'text: (typeof root !== "undefined" && root && root.scBrand ? root.scBrand(trackData.streamingSource, trackData.infoFromDeck ? trackData.deckIndex : 0) : trackData.streamingSource) || "Local Drive"\n',
-        )])
+            ),
+            ('                        text: trackData.genre || " -"\n',
+             '                        text: trackInfo.scGenre || " -"\n'
+             '                        MouseArea { objectName: "TrackInfo_EditGenre"; anchors.fill: parent; enabled: trackInfo.scMetadataEditable; onClicked: trackInfo.scOpenMetadata("Genre", trackInfo.scGenre) }\n',
+            ),
+            ('                        text: trackData.label || " -"\n',
+             '                        text: trackInfo.scLabel || " -"\n'
+             '                        MouseArea { objectName: "TrackInfo_EditLabel"; anchors.fill: parent; enabled: trackInfo.scMetadataEditable; onClicked: trackInfo.scOpenMetadata("Label", trackInfo.scLabel) }\n',
+            ),
+            ('                        text: "Comment"\n',
+             '                        text: trackInfo.scMetadataStatus || "Comment"\n',
+            ),
+            ('                        text: trackData.comment || " -"\n',
+             '                        text: trackInfo.scComment || " -"\n'
+             '                        MouseArea { objectName: "TrackInfo_EditComment"; anchors.fill: parent; enabled: trackInfo.scMetadataEditable; onClicked: trackInfo.scOpenMetadata("Comment", trackInfo.scComment) }\n',
+            )])
     if v53():
         # Stock's pulsing Stems icon in the browse status bar says a render is
         # running whatever list is open. Stock shows it on units with side
@@ -9748,6 +10171,30 @@ def edits(dev: bool):
         out.setdefault(v + "Profiles/ProfilesStreamingProviderPairingContent.qml", []).extend([
             ('visible: profilesLoginContent.provider && profilesLoginContent.provider.supportLegacyPairing',
              'visible: profilesLoginContent.provider && (profilesLoginContent.provider.supportLegacyPairing || (String(provider.name).toUpperCase() === "TIDAL" && !root.scQuiet() && root.scScope === "tidal"))'),
+        ])
+        out.setdefault(ROOT + "Views/MainView/Fx/DJFxParameter.qml", []).extend([
+            ('    LabelWithLED {\n        id: header',
+             '    function triggerValueAnimation() {\n        animation.restart()\n    }\n\n    LabelWithLED {\n        id: header'),
+        ])
+        out.setdefault(ROOT + "Views/MainView/Fx/DJFxProgressParameter.qml", []).extend([
+            ('        onMoved: parameter.value = value',
+             '''        onMoved: parameter.value = value
+
+        function resetToCenter() {
+            if (!isTouchable || !bipolar || !parameter) return
+            const center = slider.from + (slider.to - slider.from) * 0.5
+            slider.value = center
+            parameter.value = center
+            if (typeof parent.triggerValueAnimation === "function") {
+                parent.triggerValueAnimation()
+            }
+        }
+
+        TapHandler {
+            objectName: "DJFx_Parameter_DoubleTap"
+            enabled: isTouchable && bipolar
+            onDoubleTapped: slider.resetToCenter()
+        }'''),
         ])
         out.setdefault(ROOT + "Views/MainView/Fx/DJFxSpinner.qml", []).extend([
             ('                objectName: "DJFx_Beats_Decrease_Button"', '                objectName: "DJFx_Beats_Decrease_Button"\n                text: spinner.scMsActive ? "−" : ""'),
@@ -10051,11 +10498,11 @@ def legacy_qml_fixes():
         v + "Streaming/StreamingPairingDialog.qml": [(
             "		if(!visible && service.provider && !service.provider.loggedIn) {\n",
             "		if(!visible && service.provider && !service.provider.loggedIn && controller.selectedProvider === service.provider) {\n",
-        ), ("function onShowPairingDialog(provider) {\n", "function onShowPairingDialog(provider) {\n				if (root.scQuiet()) return\n")],
+        ), ("function onShowPairingDialog(provider) {\n", "function onShowPairingDialog(provider) {\n				if (root.scCarries(provider) && root.scQuiet()) return\n")],
         v + "Streaming/StreamingConnectedAccountsDialog.qml": [(
             "function onShowConnectedAccountsDialog(provider, qrCode, displayUrl) {\n",
             "function onShowConnectedAccountsDialog(provider, qrCode, displayUrl) {\n"
-            "				if (root.scQuiet() || root.scUnasked(provider)) return\n",
+            "				if (root.scCarries(provider) && (root.scQuiet() || root.scUnasked(provider))) return\n",
         )],
         # RA001: leaving the Load Playlist menu left the deck picker open.
         v + "SelectPlaylistDeckMenu/SelectPlaylistDeckMenuLayoutBase.qml": [(

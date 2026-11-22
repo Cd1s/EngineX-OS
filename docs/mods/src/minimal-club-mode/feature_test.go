@@ -2,8 +2,10 @@ package clubmode
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/docs/mods/src/modkit"
 )
@@ -159,5 +161,122 @@ func TestDisableRestoresLegacySavedUnits(t *testing.T) {
 				t.Fatalf("the pause is still saved")
 			}
 		})
+	}
+}
+
+func TestRebootRePausesServicesAndAllowsReEnable(t *testing.T) {
+	old := Systemctl
+	defer func() { Systemctl = old }()
+	live := map[string]bool{Services[0]: true}
+	Systemctl = func(args ...string) (string, string, int) {
+		unit := args[1]
+		switch args[0] {
+		case "show":
+			return "loaded\n", "", 0
+		case "is-active":
+			if live[unit] {
+				return "active\n", "", 0
+			}
+			return "inactive\n", "", 3
+		case "stop":
+			delete(live, unit)
+		case "start":
+			live[unit] = true
+		}
+		return "", "", 0
+	}
+
+	state := t.TempDir()
+	f, err := New(modkit.Env{State: state})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.(*feature).Action(map[string]any{"action": "enable"}); err != nil {
+		t.Fatal(err)
+	}
+	if live[Services[0]] {
+		t.Fatalf("service still active after enable")
+	}
+
+	// Simulate a normal reboot: systemd starts the service again and the mod helper restarts.
+	live[Services[0]] = true
+	f2, err := New(modkit.Env{State: state})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ff2 := f2.(*feature)
+	ff2.mu.Lock() // wait for the start-up re-pause
+	ff2.mu.Unlock()
+	if live[Services[0]] {
+		t.Fatalf("service still active after reboot while club mode is active")
+	}
+	st, err := f2.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active, _ := st.(map[string]any)["active"].(bool); !active {
+		t.Fatalf("expected active=true after reboot, got %v", st)
+	}
+
+	// If the service was started externally while paused.json exists, enable re-pauses it.
+	live[Services[0]] = true
+	if _, err := f2.(*feature).Action(map[string]any{"action": "enable"}); err != nil {
+		t.Fatal(err)
+	}
+	if live[Services[0]] {
+		t.Fatalf("service still active after re-enable")
+	}
+}
+
+func TestNewDoesNotWaitForSystemctlStop(t *testing.T) {
+	old := Systemctl
+	defer func() { Systemctl = old }()
+	entered, release := make(chan struct{}), make(chan struct{})
+	stopped := false
+	Systemctl = func(args ...string) (string, string, int) {
+		switch args[0] {
+		case "show":
+			return "loaded\n", "", 0
+		case "is-active":
+			if stopped {
+				return "inactive\n", "", 3
+			}
+			return "active\n", "", 0
+		case "stop":
+			close(entered)
+			<-release // a slow `systemctl stop`
+			stopped = true
+		}
+		return "", "", 0
+	}
+	state := t.TempDir()
+	if err := modkit.SaveJSON(filepath.Join(state, "paused.json"), snapshot{Active: true, Services: []string{Services[0]}, Phase: "paused"}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan modkit.Feature, 1)
+	go func() {
+		f, _ := New(modkit.Env{State: state})
+		done <- f
+	}()
+	var f modkit.Feature
+	select {
+	case f = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("New waited for systemctl stop: the helper's health check would time out")
+	}
+	<-entered             // the re-pause is running in the background
+	st, err := f.Status() // the health check: must answer while the stop is still running
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active, _ := st.(map[string]any)["active"].(bool); !active {
+		t.Fatalf("status while re-pausing: %v", st)
+	}
+	close(release)
+	ff := f.(*feature)
+	ff.mu.Lock() // wait for the re-pause to finish
+	ff.mu.Unlock()
+	if !stopped {
+		t.Fatal("the saved service was not stopped")
 	}
 }

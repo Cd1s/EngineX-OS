@@ -684,7 +684,11 @@ func confirmedRefs(r *compat.Resolver, l *rekordbox.Library, keys map[uint32]boo
 		ok, seen := checked[key]
 		if !seen {
 			var n int64
-			ok, n = enginedb.DetailServes(r, list)
+			var err error
+			ok, n, err = enginedb.DetailServes(r, list, nil)
+			if err != nil {
+				ok = false
+			}
 			checked[key], files, read = ok, files+1, read+n
 		}
 		if ok {

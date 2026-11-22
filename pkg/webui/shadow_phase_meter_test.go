@@ -36,7 +36,7 @@ func TestShadowPhaseMeterRidesThePeerPicture(t *testing.T) {
 		"aligned":     func(n *deckState) { n.Aligned = &f },
 		"phaseActive": func(n *deckState) { n.PhaseActive = &f },
 		"phaseMeter":  func(n *deckState) { n.PhaseMeter = &f },
-		"phase":       func(n *deckState) { n.Phase = -0.1 },
+		"phase":       func(n *deckState) { p := -0.1; n.Phase = &p },
 	} {
 		n := d
 		change(&n)
@@ -53,5 +53,19 @@ func TestShadowPhaseMeterRidesThePeerPicture(t *testing.T) {
 	}
 	if b, _ := json.Marshal(legacy); strings.Contains(string(b), "aligned") || strings.Contains(string(b), "phase") {
 		t.Fatalf("unset fields must stay off the wire: %s", b)
+	}
+}
+
+func TestShadowPhaseZeroIsSentOnTheWire(t *testing.T) {
+	var d deckState
+	if err := json.Unmarshal([]byte(`{"deck":2,"playing":false,"positionMs":1000,"aligned":true,"phaseActive":true,"phaseMeter":true,"phase":0}`), &d); err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"phase":0`) {
+		t.Fatalf(`aligned sender with phase 0 must put "phase":0 on the wire, got: %s`, out)
 	}
 }

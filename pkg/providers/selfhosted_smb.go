@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -30,7 +31,18 @@ func (p *SelfHostedProvider) smbReadDir(ctx context.Context, dir string) ([]os.F
 		return nil, err
 	}
 	defer c.Close()
-	return c.Share.ReadDir(path.Join(c.Root, rel))
+	return smbListing(func() ([]os.FileInfo, error) { return c.Share.ReadDir(path.Join(c.Root, rel)) })
+}
+
+// go-smb2 v1.1.0 reads past the end of a malformed directory listing and panics (GO-2026-5051, no fixed
+// release): a faulty NAS must give an error for that folder, not stop the program. The connection is per call.
+func smbListing(read func() ([]os.FileInfo, error)) (entries []os.FileInfo, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			entries, err = nil, fmt.Errorf("smb: malformed directory listing: %v", r)
+		}
+	}()
+	return read()
 }
 
 func (p *SelfHostedProvider) smbTrack(dir string, info os.FileInfo) Track {

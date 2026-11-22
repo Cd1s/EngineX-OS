@@ -31,9 +31,19 @@ type PendingCue struct {
 	PositionMS *float64 `json:"positionMs,omitempty"`
 }
 
+// PendingTrackMetadata is a complete metadata edit for one Engine track.
+// Empty strings are meaningful: they clear the corresponding field.
+type PendingTrackMetadata struct {
+	TrackID int64  `json:"trackId"`
+	Genre   string `json:"genre"`
+	Comment string `json:"comment"`
+	Label   string `json:"label"`
+}
+
 type Pending struct {
-	Relocate []Move       `json:"relocate,omitempty"`
-	HotCues  []PendingCue `json:"hotCues,omitempty"`
+	Relocate      []Move                 `json:"relocate,omitempty"`
+	HotCues       []PendingCue           `json:"hotCues,omitempty"`
+	TrackMetadata []PendingTrackMetadata `json:"trackMetadata,omitempty"`
 }
 
 var pendingMu sync.Mutex
@@ -51,6 +61,42 @@ func readPending(path string) (Pending, error) {
 	return p, json.Unmarshal(b, &p)
 }
 
+func writePending(path string, p Pending) error {
+	b, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".enginex-pending-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	ok := false
+	defer func() {
+		_ = tmp.Close()
+		if !ok {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(b); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	ok = true
+	return nil
+}
+
 // QueuePending adds edits to the drive's queue. root holds "Engine Library".
 func QueuePending(root string, add func(*Pending)) error {
 	pendingMu.Lock()
@@ -64,26 +110,7 @@ func QueuePending(root string, add func(*Pending)) error {
 		return fmt.Errorf("pending edits unreadable: %w", err)
 	}
 	add(&p)
-	b, err := json.MarshalIndent(p, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".enginex-pending-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err = tmp.Write(b); err == nil {
-		err = tmp.Sync()
-	}
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil {
-		_ = os.Chmod(tmp.Name(), 0o644)
-		err = os.Rename(tmp.Name(), path)
-	}
-	return err
+	return writePending(path, p)
 }
 
 // ApplyPending writes the queued edits into m.db and removes the queue. A
@@ -131,6 +158,7 @@ func ApplyPending(ctx context.Context, root string) (int, error) {
 	}
 	defer tx.Rollback()
 	n := 0
+	remaining := Pending{}
 	for _, m := range p.Relocate {
 		if _, err := os.Stat(filepath.Join(root, "Engine Library", filepath.FromSlash(m.NewPath))); err != nil {
 			continue
@@ -148,10 +176,27 @@ func ApplyPending(ctx context.Context, root string) (int, error) {
 			n++
 		}
 	}
+	for _, m := range p.TrackMetadata {
+		r, err := tx.ExecContext(ctx, `UPDATE Track SET genre=?, comment=?, label=? WHERE id=?`, m.Genre, m.Comment, m.Label, m.TrackID)
+		if err != nil {
+			return 0, err
+		}
+		if k, _ := r.RowsAffected(); k == 1 {
+			n++
+		} else {
+			remaining.TrackMetadata = append(remaining.TrackMetadata, m)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	return n, os.Remove(path)
+	if len(remaining.Relocate) == 0 && len(remaining.HotCues) == 0 && len(remaining.TrackMetadata) == 0 {
+		return n, os.Remove(path)
+	}
+	if err := writePending(path, remaining); err != nil {
+		return n, err
+	}
+	return n, nil
 }
 
 type sqlExecQuerier interface {

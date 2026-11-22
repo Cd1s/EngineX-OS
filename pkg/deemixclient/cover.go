@@ -279,6 +279,9 @@ func insertFLACPicture(in io.Reader, out io.Writer, cover []byte, mime string) e
 	return err
 }
 
+// maxID3Tag is the largest ID3v2 tag the deck reads into memory (the format allows 256 MiB).
+const maxID3Tag = 16 << 20
+
 type id3Tag struct {
 	version byte
 	frames  []byte
@@ -293,6 +296,11 @@ func readID3(r io.Reader) (id3Tag, []byte, error) {
 		return id3Tag{}, nil, errors.New("cover: unsupported ID3 tag")
 	}
 	size := int(h[6]&0x7f)<<21 | int(h[7]&0x7f)<<14 | int(h[8]&0x7f)<<7 | int(h[9]&0x7f)
+	// The size is the file's own claim: refuse an absurd one before allocating for it. The
+	// callers then leave the file as it is.
+	if size > maxID3Tag {
+		return id3Tag{}, nil, errors.New("cover: ID3 tag too large")
+	}
 	frames := make([]byte, size)
 	if _, err := io.ReadFull(r, frames); err != nil {
 		return id3Tag{}, nil, err

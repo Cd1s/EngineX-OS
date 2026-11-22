@@ -1072,6 +1072,12 @@ exec REAL "$@"
         drop = (units / 'engine.service.d/99-enginex.conf').read_text()
         self.assertNotIn((legacy.PROJECT), drop.replace((legacy.DATA_DIR), ''))
         self.assertIn('Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-deemixd.service', drop)
+        for var, prog in (
+            ('ENGINEX_ENGINE_GUARDIAN', 'engine-guardian'),
+            ('ENGINEX_RB_BRIDGE', 'rb-bridge'),
+            ('ENGINEX_STREAM_SYNC', 'stream-sync'),
+        ):
+            self.assertIn(f'Environment="{var}={dest}/bundle/bin/{prog}"', drop)
         # Downgrade restoration is retired; no leave script is emitted.
         self.assertFalse((run_dir / 'enginex/leave.sh').exists())
         # A second run (the next boot) has nothing old left to stop.

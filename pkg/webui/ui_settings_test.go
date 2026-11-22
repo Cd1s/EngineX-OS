@@ -575,8 +575,9 @@ func TestFourDeckRole(t *testing.T) {
 		t.Fatalf("bad role accepted: %d", code)
 	}
 	// The UI locks loading by the role the guard applied (auto resolved), with 4 decks on.
+	roleBefore := fourDeckRolePath
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
-	defer func() { fourDeckRolePath = "/run/enginex-assignments/role" }()
+	defer func() { fourDeckRolePath = roleBefore }()
 	os.WriteFile(fourDeckRolePath, []byte("13\n"), 0o644)
 	if _, v := uiPost(t, srv.URL, "fourDeckWaveform=1"); v.FourDeckRoleActive != "13" {
 		t.Fatalf("active role: %q", v.FourDeckRoleActive)
