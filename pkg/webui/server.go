@@ -442,6 +442,9 @@ func (s *Server) Close() {
 	delete(postedDevices, s)
 	prolinkMu.Unlock()
 	s.closeBroadcast()
+	if m, ok := tunnelManagers.LoadAndDelete(s); ok {
+		m.(*TunnelManager).Stop() // its helper process does not outlive the server
+	}
 	s.stopHTTPS(true)
 	s.httpsWG.Wait()
 }
