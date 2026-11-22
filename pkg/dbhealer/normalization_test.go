@@ -179,6 +179,7 @@ func TestNormalizeTrackPathPreservesLastEditTime(t *testing.T) {
 		{2, "NULL", nil},
 		{3, "?", "2024-01-15 10:20:30"},
 		{4, "?", ""},
+		{5, "X''", nil},
 	}
 	for _, row := range rows {
 		old := filepath.ToSlash(filepath.Join("..", "Music", "Cafe"+string(rune(0x0301))+"-"+strconv.Itoa(row.id)+".mp3"))
@@ -192,6 +193,10 @@ func TestNormalizeTrackPathPreservesLastEditTime(t *testing.T) {
 		}
 		query := `INSERT INTO Track(id,path,filename,lastEditTime,fileBytes,isAnalyzed) VALUES(?,?,?,` + row.valueSQL + `,1,1)`
 		if row.valueSQL == "NULL" {
+			if _, err := db.Exec(query, row.id, old, filepath.Base(old)); err != nil {
+				t.Fatal(err)
+			}
+		} else if row.valueSQL == "X''" {
 			if _, err := db.Exec(query, row.id, old, filepath.Base(old)); err != nil {
 				t.Fatal(err)
 			}
@@ -332,11 +337,27 @@ func TestHealMountDataOnlyStopsAtContextDeadline(t *testing.T) {
 	if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
 		t.Fatal(err)
 	}
-	if infoID != 1 {
-		t.Fatalf("base heal was rolled back, Information.id=%d", infoID)
+	if infoID != 99 {
+		t.Fatalf("base heal ran during a soft path stop, Information.id=%d", infoID)
 	}
 	got, err = HealMountDataOnly(root, 0)
 	if err != nil || !got.Healthy || got.PathsNormalized != 66 {
 		t.Fatalf("second pass did not finish remaining rows: %+v %v", got, err)
+	}
+	if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
+		t.Fatal(err)
+	}
+	if infoID != 99 {
+		t.Fatalf("base heal ran while finishing paths, Information.id=%d", infoID)
+	}
+	got, err = HealMountDataOnly(root, 0)
+	if err != nil || !got.Healthy {
+		t.Fatalf("completion insert failed to run base heal: %+v %v", got, err)
+	}
+	if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
+		t.Fatal(err)
+	}
+	if infoID != 1 {
+		t.Fatalf("completion insert did not run base heal, Information.id=%d", infoID)
 	}
 }

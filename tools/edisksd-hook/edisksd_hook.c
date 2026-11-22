@@ -111,6 +111,9 @@ static int64_t guardian_soft_budget_ms(int64_t left) {
     int64_t soft = left > INT64_C(4000) ? left - GUARDIAN_SOFT_MARGIN_MS : (left * 3) / 4;
     return soft < INT64_C(500) ? INT64_C(500) : soft;
 }
+static int guardian_window_available(int64_t left) {
+    return left >= INT64_C(1000);
+}
 
 // Check EVERY component. A missing final component is allowed only when the
 // caller is about to create it in an already checked, trusted parent.
@@ -849,7 +852,11 @@ static int run(char *const argv[],int64_t deadline) {
     if(!pid){setpgid(0,0);unsetenv("LD_PRELOAD");setenv("PATH","/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",1);execv(argv[0],argv);_exit(127);}
     setpgid(pid,pid);
     for(;;){int status;pid_t r=waitpid(pid,&status,WNOHANG);
-        if(r==pid){if(WIFEXITED(status)&&!WEXITSTATUS(status))return 0;errno=EIO;return -1;}
+        if(r==pid){
+            if(WIFEXITED(status)&&!WEXITSTATUS(status))return 0;
+            if(WIFEXITED(status)&&WEXITSTATUS(status)==124){errno=ETIMEDOUT;return -1;}
+            errno=EIO;return -1;
+        }
         if(r<0&&errno!=EINTR)return -1;
         if(budget(deadline)){kill(-pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}errno=ETIMEDOUT;return -1;}usleep(20000);
     }
@@ -1854,10 +1861,11 @@ static int after_mount_at(const char *mount_path,const char *label_target,const 
     if(heal) {
 		char timeout[32];
 		int64_t left=deadline-now_ms();
-		if(left<1)left=1;
-		snprintf(timeout,sizeof timeout,"%lldms",(long long)guardian_soft_budget_ms(left));
-		char *const a[]={(char *)GUARDIAN_PATH,"--heal-mount",(char *)mount_path,"--data-only","--timeout",timeout,NULL};
-        if(run(a,deadline)){if(errno==ETIMEDOUT)done=TIMED_OUT;note("guardian failed on",label_target,errno);}
+		if(guardian_window_available(left)) {
+			snprintf(timeout,sizeof timeout,"%lldms",(long long)guardian_soft_budget_ms(left));
+			char *const a[]={(char *)GUARDIAN_PATH,"--heal-mount",(char *)mount_path,"--data-only","--timeout",timeout,NULL};
+			if(run(a,deadline)){if(errno==ETIMEDOUT)done=TIMED_OUT;note("guardian failed on",label_target,errno);}
+		}
         done|=HEALED;
     }
     if(hfs_ro&&mode==MOUNT_PRE) { // the persistent library stays; the private view goes

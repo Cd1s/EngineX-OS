@@ -90,9 +90,13 @@ func Guardian(args []string, out, errOut io.Writer) int {
 	var hardTimer *time.Timer
 	if *deadline > 0 {
 		// Vendor images need not ship a timeout executable or BusyBox applet.
-		// This deadline starts at process entry and remains the hard upper bound
-		// for every caller, including data-only mount heals.
-		hardTimer = time.AfterFunc(time.Until(commandStart.Add(*deadline+guardianCleanupReserve)), func() { os.Exit(124) })
+		hardBudget := *deadline
+		if *dataOnly {
+			hardBudget += guardianCleanupReserve + time.Second
+		}
+		// Data-only callers need a hard-stop cushion so the hook deadline wins
+		// the race. Other callers keep their exact historical timeout.
+		hardTimer = time.AfterFunc(time.Until(commandStart.Add(hardBudget)), func() { os.Exit(124) })
 		defer hardTimer.Stop()
 	}
 	if *checkCopy != "" {
@@ -207,7 +211,7 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			cancelMount()
 			if err == nil && !budgetExpired {
 				remaining := guardianRemaining(commandStart, *deadline)
-				if *deadline == 0 || remaining > guardianCleanupReserve {
+				if *deadline == 0 || remaining >= 500*time.Millisecond {
 					runMP3Fix(remaining, *dataOnly)
 				}
 			}

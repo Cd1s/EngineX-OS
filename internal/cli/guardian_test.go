@@ -80,6 +80,19 @@ func TestGuardianRefusesLibraryInUse(t *testing.T) {
 	}
 }
 
+func TestGuardianDataOnlyRunsMP3WithinSmallBudget(t *testing.T) {
+	mount := filepath.Join(t.TempDir(), "USB")
+	seedPreR4MP3Mount(t, mount)
+	var out, errOut bytes.Buffer
+	if code := Guardian([]string{"--heal-mount", mount, "--data-only", "--timeout", "2s"}, &out, &errOut); code != 0 {
+		t.Fatalf("small-budget data-only code=%d out=%s err=%s", code, &out, &errOut)
+	}
+	var results []guardianResult
+	if err := json.Unmarshal(out.Bytes(), &results); err != nil || len(results) != 1 || results[0].MP3Grids == nil || results[0].MP3Grids.Corrected != 1 {
+		t.Fatalf("small-budget MP3 fix was skipped: %s err=%v", &out, err)
+	}
+}
+
 func mountFixture(t *testing.T) string {
 	t.Helper()
 	mount := filepath.Join(t.TempDir(), "USB with spaces")

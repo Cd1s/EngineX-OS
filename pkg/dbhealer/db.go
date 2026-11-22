@@ -259,14 +259,36 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		return r, err
 	}
 	fixed := r.ReserveFixed
-	r, err = heal(db, dataOnly)
-	r.ReserveFixed = fixed
+	pathsBefore := r.PathsNormalized
+	remaining, err := normalizeTrackPaths(ctx, db, mount, &r)
 	if err != nil {
+		// A path-pass database error means the library may be damaged. Run the
+		// existing base heal so it remains the recovery path for corruption.
+		pathsFixed := r.PathsNormalized
+		r, healErr := heal(db, dataOnly)
+		r.ReserveFixed = fixed
+		r.PathsNormalized = pathsFixed
 		_ = db.Close()
 		r.Mount = mount
+		if healErr != nil {
+			return r, healErr
+		}
 		return r, err
 	}
-	remaining, err := normalizeTrackPaths(ctx, db, mount, &r)
+	if ctx.Err() != nil || r.PathsNormalized != pathsBefore {
+		r.Healthy = true
+		closeErr := db.Close()
+		r.Mount = mount
+		log.Printf("dbhealer: mount %s normalized %d track paths, %d remaining", mount, r.PathsNormalized, remaining)
+		if closeErr != nil {
+			return r, closeErr
+		}
+		return r, nil
+	}
+	pathsFixed := r.PathsNormalized
+	r, err = heal(db, dataOnly)
+	r.ReserveFixed = fixed
+	r.PathsNormalized = pathsFixed
 	if err != nil {
 		_ = db.Close()
 		r.Mount = mount
@@ -277,9 +299,6 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 	log.Printf("dbhealer: mount %s normalized %d track paths, %d remaining", mount, r.PathsNormalized, remaining)
 	if closeErr != nil {
 		return r, closeErr
-	}
-	if ctx.Err() != nil {
-		return r, nil
 	}
 	history := filepath.Join(filepath.Dir(path), "hm.db")
 	if _, e := os.Stat(history); e == nil {
@@ -475,6 +494,8 @@ func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Repor
 				if err = tx.QueryRow(`SELECT typeof(lastEditTime), CASE typeof(lastEditTime) WHEN 'text' THEN CAST(lastEditTime AS BLOB) ELSE lastEditTime END FROM Track WHERE id=? AND path=?`, candidate.id, candidate.path).Scan(&lastEditType, &lastEditTime); err == nil {
 					if b, ok := lastEditTime.([]byte); ok && lastEditType == "text" {
 						lastEditTime = string(b)
+					} else if b, ok := lastEditTime.([]byte); ok && lastEditType == "blob" && b == nil {
+						lastEditTime = []byte{}
 					}
 					if _, err = tx.Exec(`UPDATE Track SET path=?, filename=? WHERE id=? AND path=?`, candidate.nfcPath, newFilename, candidate.id, candidate.path); err == nil {
 						_, err = tx.Exec(`UPDATE Track SET lastEditTime=? WHERE id=?`, lastEditTime, candidate.id)
