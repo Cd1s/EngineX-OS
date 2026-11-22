@@ -72,7 +72,7 @@ type deckState struct {
 	MetadataOnly bool    `json:"metadataOnly,omitempty"` // CDJ state has no peer display asset endpoint
 	LineIn       bool    `json:"lineIn,omitempty"`       // all-in-one console: shadow source mapped to Line In channel
 	DisplayOnly  bool    `json:"displayOnly,omitempty"`  // this slot goes to the display renderer; Engine must not load it
-	Fallback     string  `json:"fallback,omitempty"`     // auto mode, a CDJ on the display renderer: why Engine cannot have its file (cdjFallback); the QML says so on the lane
+	Fallback     string  `json:"fallback,omitempty"`     // a CDJ on the display renderer: why Engine cannot have its file (cdjFallback, auto mode), or on a console's Line In lane why it has no waveform (cdjProlinkOff); the QML says so on the lane
 	Playing      bool    `json:"playing"`
 	PositionMS   float64 `json:"positionMs"`
 	Pitch        float64 `json:"pitch"` // percent
@@ -1974,7 +1974,8 @@ func cdjFallback(dev prolink.Device, host net.IP, failed string) string {
 // shadowLegacy is the Engine path. With all (Engine mode) every CDJ takes it.
 // Without (auto mode), display names the CDJ decks left to the display renderer
 // and why (cdjFallback; no reason on a console's Line In channel, lineIn, where
-// only that renderer draws), out of the decks free for CDJs.
+// only that renderer draws; its one reason, cdjProlinkOff, is set by consoleLineLanes),
+// out of the decks free for CDJs.
 func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]int) (out []deckState, free []int, lineIn bool, display map[int]string) {
 	devices := s.mergedDevices()
 	// The exporter's lock is taken before ours, never under it: closing the

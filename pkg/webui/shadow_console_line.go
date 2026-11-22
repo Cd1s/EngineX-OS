@@ -109,6 +109,14 @@ func (s *Server) consoleLineUnits(now time.Time) ([]consoleUnit, []prolink.Devic
 	return units, devices
 }
 
+// cdjProlinkOff is the one reason a console's Line In lane gives (deckState.Fallback, which the lane's
+// busy line shows while there is no waveform to draw): a CDJ is on the lane, it has a track, and this
+// unit's Pro DJ Link switch is off, so the display cache never fetches the CDJ's analysis. The switch
+// decides whether this unit takes part in Pro DJ Link at all; a display option does not override it.
+// The reasons of cdjFallback (link, media, streaming, network) stay unset on a Line In lane: they
+// explain a load that does not exist there.
+const cdjProlinkOff = "prolink-off"
+
 // consoleLineLanes puts the units, in that order, on the channels that are on Line / AUX,
 // in ascending channel order. A channel not on Line gets nothing; more units than channels:
 // the ones with the lowest numbers are shown.
@@ -126,7 +134,11 @@ func (s *Server) consoleLineLanes(now time.Time, lines []int) []consoleLane {
 		}
 		var l consoleLane
 		if u.cdj {
-			l.d, l.e = s.cdjDisplayDeck(u.dev, lines[i], true, "", devices, now)
+			why := ""
+			if u.dev.TrackID != 0 && !s.loadUI().ProlinkShare {
+				why = cdjProlinkOff // nothing to explain on a CDJ with no track
+			}
+			l.d, l.e = s.cdjDisplayDeck(u.dev, lines[i], true, why, devices, now)
 			l.d.Player, l.d.Model = int(u.dev.Number), u.dev.Name
 		} else {
 			l.d, l.e = s.peerDisplayDeck(u.peer, lines[i], now)

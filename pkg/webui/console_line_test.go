@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 )
 
@@ -210,15 +211,17 @@ func clConsole(t *testing.T, board string, on bool) (*Server, *httptest.Server) 
 }
 
 type clLane struct {
-	Deck        int
-	Title       string
-	Player      int
-	Model       string
-	LineIn      bool
-	DisplayOnly bool
-	Key         string
-	Path        string
-	Net         string
+	Deck         int
+	Title        string
+	Player       int
+	Model        string
+	LineIn       bool
+	DisplayOnly  bool
+	Key          string
+	Path         string
+	Net          string
+	Fallback     string
+	MetadataOnly bool
 }
 
 func clShadow(t *testing.T, srv *httptest.Server, line string) (map[string]any, []clLane) {
@@ -481,6 +484,126 @@ func TestConsoleLineDisplayEndpointsServeTheLane(t *testing.T) {
 	// Off: the same request is refused again.
 	os.WriteFile(filepath.Join(s.uiDir(), "settings.conf"), []byte("prolink_share=1\n"), 0o600)
 	get("/v1/enginex/shadow/display"+q, 404)
+}
+
+// A CDJ on a Line In lane needs this unit's Pro DJ Link switch (prolink_share) for its waveform: the
+// display cache never fetches a CDJ's analysis with the switch off, and it must not, the switch decides
+// whether this unit takes part in Pro DJ Link at all. The lane says so in its fallback, the existing
+// reason field the QML shows on the lane's busy line for as long as it has no waveform to draw.
+func TestConsoleLineCDJLaneSaysWhyWhenProlinkIsOff(t *testing.T) {
+	cache, dev := cachedDisplayCDJ(t)
+	clSetBoard(t, "jc11")
+	s := displayCDJServer(t, cache, dev)
+	settings := func(conf string) { os.WriteFile(filepath.Join(s.uiDir(), "settings.conf"), []byte(conf), 0o600) }
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	lane := func() clLane {
+		t.Helper()
+		_, lanes := clShadow(t, srv, "3")
+		if len(lanes) != 1 || lanes[0].Deck != 3 || !lanes[0].LineIn || !lanes[0].DisplayOnly {
+			t.Fatalf("CDJ on Line channel 3: %+v", lanes)
+		}
+		return lanes[0]
+	}
+	entries := func() int {
+		s.shadow.display.mu.Lock()
+		defer s.shadow.display.mu.Unlock()
+		return len(s.shadow.display.entries)
+	}
+
+	settings("console_line_view=1\n") // Pro DJ Link off, the default
+	off := lane()
+	if off.Fallback != "prolink-off" || !off.MetadataOnly || off.Path != "" || off.Net != "" {
+		t.Fatalf("switch off: the lane must say why and carry no waveform: %+v", off)
+	}
+	if n := entries(); n != 0 {
+		t.Fatalf("switch off: %d display assets claimed for a CDJ, the cache must not be asked", n)
+	}
+	resp, err := http.Get(srv.URL + "/v1/enginex/shadow/display?deck=3&key=" + url.QueryEscape(off.Key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("switch off: the lane's display asset is %d, want 404", resp.StatusCode)
+	}
+	if n := entries(); n != 0 {
+		t.Fatalf("switch off: %d display assets claimed by the display request", n)
+	}
+	assertNoShadowAudioFetch(t, s)
+
+	// No track on the CDJ: nothing to explain.
+	empty := dev
+	empty.TrackID = 0
+	prolinkMu.Lock()
+	postedDevices[s] = map[string]prolink.Device{deviceKey(empty): empty}
+	prolinkMu.Unlock()
+	if l := lane(); l.Fallback != "" {
+		t.Fatalf("a CDJ with no track: %+v", l)
+	}
+	prolinkMu.Lock()
+	postedDevices[s] = map[string]prolink.Device{deviceKey(dev): dev}
+	prolinkMu.Unlock()
+
+	// Pro DJ Link on: the waveform is there, no reason (TestConsoleLineDisplayEndpointsServeTheLane serves it).
+	settings("console_line_view=1\nprolink_share=1\n")
+	if on := lane(); on.Fallback != "" || on.MetadataOnly || !strings.HasPrefix(on.Key, "cdj:") {
+		t.Fatalf("switch on: %+v", on)
+	}
+	if n := entries(); n == 0 {
+		t.Fatal("switch on: the display cache was not asked")
+	}
+	// Back off: the reason returns at once, the key changes with the cache version.
+	settings("console_line_view=1\n")
+	if again := lane(); again.Fallback != "prolink-off" || !again.MetadataOnly {
+		t.Fatalf("switched off again: %+v", again)
+	}
+}
+
+// The reason is the Line In lane's own: no player-side composition, in any mode, with the switch off
+// or on, ever sets it, and the reasons of cdjFallback never reach a Line In lane.
+func TestProlinkOffReasonIsOnlyOnAConsoleLineInLane(t *testing.T) {
+	usb := t.TempDir()
+	testfixture.Export(t, usb)
+	s, cdj, _ := autoCDJ(t, usb) // a player (JP07) next to a CDJ; Pro DJ Link is off
+	for _, slot := range []byte{9, 4, 1, 3} {
+		cdj(slot, 2)
+		for name, out := range map[string][]deckState{
+			"auto":   s.shadowCompose("13", time.Now()),
+			"engine": s.shadowComposeLegacy("13", time.Now()),
+			"cdj":    s.shadowComposeDisplay("13", time.Now()),
+		} {
+			for _, d := range out {
+				if d.Fallback == "prolink-off" {
+					t.Fatalf("slot %d, %s mode, a player's lane: %+v", slot, name, d)
+				}
+			}
+		}
+	}
+	// A console with the setting off is stock: nothing of the Line In view.
+	cache, dev := cachedDisplayCDJ(t)
+	clSetBoard(t, "jc11")
+	c := displayCDJServer(t, cache, dev)
+	os.WriteFile(filepath.Join(c.uiDir(), "settings.conf"), []byte("lang=en\n"), 0o600)
+	srv := httptest.NewServer(c)
+	defer srv.Close()
+	if _, lanes := clShadow(t, srv, "3"); len(lanes) != 0 {
+		t.Fatalf("a console with the setting off answers lanes: %+v", lanes)
+	}
+	// And on a Line In lane no cdjFallback reason ever shows, with the switch on or off.
+	for _, conf := range []string{"console_line_view=1\n", "console_line_view=1\nprolink_share=1\n"} {
+		os.WriteFile(filepath.Join(c.uiDir(), "settings.conf"), []byte(conf), 0o600)
+		for _, slot := range []byte{9, 4, 1, 3} {
+			d := dev
+			d.SourceSlot = slot
+			prolinkMu.Lock()
+			postedDevices[c] = map[string]prolink.Device{deviceKey(d): d}
+			prolinkMu.Unlock()
+			if _, lanes := clShadow(t, srv, "3"); len(lanes) != 1 || (lanes[0].Fallback != "" && lanes[0].Fallback != "prolink-off") {
+				t.Fatalf("%q slot %d: %+v", conf, slot, lanes)
+			}
+		}
+	}
 }
 
 // The post carries the player number (read once by the QML), and stream-sync adds the
