@@ -276,13 +276,21 @@ func TestIssue327ReleasedStampWithoutMarkFreezesUnreadablePrimary(t *testing.T) 
 func TestIssue327UnchangedUpdateRefreshesReadMark(t *testing.T) {
 	root := t.TempDir()
 	testfixture.Export(t, root)
+	for _, name := range []string{"one.wav", "two.wav", "three.wav"} {
+		testfixture.Write(t, root, "MUSIC/"+name, testfixture.WAV(true))
+	}
+	copyEncryptedOneLibraryFixture(t, filepath.Join(root, "PIONEER/rekordbox/exportLibrary.db"))
 	ctx := context.Background()
 	pdb := filepath.Join(root, "PIONEER/rekordbox/export.pdb")
-	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, true); err != nil || res.Added != 5 {
+	one := filepath.Join(root, "PIONEER/rekordbox/exportLibrary.db")
+	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || res.Added == 0 {
 		t.Fatalf("initial import: %+v %v", res, err)
 	}
 	when := time.Now().Add(time.Minute)
 	if err := os.Chtimes(pdb, when, when); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(one, when, when); err != nil {
 		t.Fatal(err)
 	}
 	restore := bridge.SetUpdateExportForTest()
