@@ -28,7 +28,7 @@ func guardStick(t *testing.T, n int) string {
 	_, root, skeleton := testlibrary.Create(t)
 	skeleton.Close()
 	testfixture.LargeExport(t, root, n)
-	if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{Deadline: time.Now().Add(time.Hour)}, true); err != nil {
+	if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, true); err != nil {
 		t.Fatal(err)
 	}
 	if tracks, _ := guardCounts(t, root); tracks != n {
