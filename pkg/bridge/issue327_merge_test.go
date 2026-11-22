@@ -8,7 +8,7 @@ import (
 
 func TestIssue327MergeTracksPlaylistsAndStableIDs(t *testing.T) {
 	primary := &rekordbox.Library{
-		Tracks: []rekordbox.Track{{ID: 101, Path: "/Music/A.wav"}},
+		Tracks: []rekordbox.Track{{ID: 101, Path: "/Music/A.wav", RecordHash: "preferred-record"}},
 		Playlists: []rekordbox.Playlist{
 			{ID: 10, Name: "Folder", Folder: true},
 			{ID: 11, ParentID: 10, Name: "Mix", Tracks: []uint32{101}},
@@ -36,6 +36,9 @@ func TestIssue327MergeTracksPlaylistsAndStableIDs(t *testing.T) {
 	}
 	if len(merged.Tracks) != 2 {
 		t.Fatalf("merged tracks=%d, want 2", len(merged.Tracks))
+	}
+	if merged.Tracks[0].ID != 101 || merged.Tracks[0].RecordHash != "preferred-record" {
+		t.Fatalf("preferred record identity changed: id=%d hash=%q", merged.Tracks[0].ID, merged.Tracks[0].RecordHash)
 	}
 	if len(merged.Playlists) != 5 {
 		t.Fatalf("merged playlists=%d, want 5", len(merged.Playlists))

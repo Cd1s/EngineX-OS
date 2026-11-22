@@ -86,19 +86,23 @@ var (
 // only marked its stage here, and the playlists appeared once a remount published the update:
 // 11.5 minutes on the maintainer's 6000-track stick, and not at all while a deck held one of its
 // tracks. limit is the hook's kill; nothing is written when the update would not end before it.
-func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, limit time.Time, flip bool) (enginedb.Result, error) {
+func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, limit time.Time, stamp string) (enginedb.Result, error) {
 	inner, cancel := context.WithDeadline(ctx, limit)
 	defer cancel()
 	if enginedb.LibraryInUse(mount) {
 		return enginedb.Result{}, enginedb.ErrLibraryInUse
 	}
 	start := time.Now()
-	l, stagedOnly, err := readLibrary(inner, mount)
+	l, stagedOnly, readRels, err := readLibraryDetailed(inner, mount)
 	if err != nil {
 		return enginedb.Result{}, quickLate(ctx, err)
 	}
+	if err = ReconcileContext(inner, r, l); err != nil {
+		return enginedb.Result{}, quickLate(ctx, err)
+	}
+	pathFirst := pathFirstFor(readMark(dir, stampName), readMark(dir, readName), readRels, stamp)
 	read := time.Since(start)
-	fresh, err := quickPaths(dir, l, flip)
+	fresh, err := quickPaths(dir, l, pathFirst)
 	if err != nil {
 		return enginedb.Result{}, err
 	}
@@ -110,7 +114,7 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	if left := time.Until(limit); cost > left {
 		return enginedb.Result{}, fmt.Errorf("%w: %d tracks (%d new) and %d playlist entries need about %s, %s left", errQuickTooLong, len(l.Tracks), fresh, entries, cost.Round(time.Second), left.Round(time.Second))
 	}
-	res, err := enginedb.SyncResolved(inner, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly, MatchByPath: true, PathFirst: flip})
+	res, err := enginedb.SyncResolved(inner, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly, MatchByPath: true, PathFirst: pathFirst})
 	if err != nil {
 		return res, quickLate(ctx, err)
 	}
@@ -190,6 +194,9 @@ func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resol
 	}
 	if progress != nil {
 		progress(0, len(l.Tracks))
+	}
+	if err := ReconcileContext(ctx, r, l); err != nil {
+		return enginedb.Result{}, err
 	}
 	if _, err := quickPaths(stage, l, flip); err != nil {
 		return enginedb.Result{}, err
@@ -406,7 +413,7 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 		return enginedb.Result{}, err
 	}
 	if readMark(stage, quickName) == stamp {
-		return quickInStage(ctx, dir, stage, stamp, r, l, stagedOnly, primaryFlipped(readMark(dir, stampName), stamp), readRels, progress)
+		return quickInStage(ctx, dir, stage, stamp, r, l, stagedOnly, pathFirstFor(readMark(dir, stampName), readMark(dir, readName), readRels, stamp), readRels, progress)
 	}
 	if err = ReconcileContext(ctx, r, l); err != nil {
 		return enginedb.Result{}, err
@@ -415,7 +422,7 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 	legacy, legacyAAC := legacyGridOptions(old)
 	if _, err := os.Stat(filepath.Join(stage, baseCountsName)); errors.Is(err, os.ErrNotExist) {
 		if !stagedOnly && !legacy {
-			if res, handed, err := handToMounts(ctx, r, l, dir, stage, stamp); handed {
+			if res, handed, err := handToMounts(ctx, r, l, dir, stage, stamp, readRels); handed {
 				return res, err
 			}
 		}
@@ -429,7 +436,7 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 	}
 	changed := readMark(stage, resumeName) != "" // an earlier pass may have changed it
 	for {
-		o := enginedb.Options{DatabaseDir: stage, StagedOnly: stagedOnly, MatchByPath: true, PathFirst: primaryFlipped(readMark(dir, stampName), stamp), LegacyOffsets: legacy, LegacyAACOffsets: legacyAAC,
+		o := enginedb.Options{DatabaseDir: stage, StagedOnly: stagedOnly, MatchByPath: true, PathFirst: pathFirstFor(readMark(dir, stampName), readMark(dir, readName), readRels, stamp), LegacyOffsets: legacy, LegacyAACOffsets: legacyAAC,
 			Resume: readMark(stage, resumeName) == stamp, Deadline: time.Now().Add(window)}
 		res, err := enginedb.SyncResolved(ctx, r, l, o)
 		if err != nil {
@@ -444,7 +451,9 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 			if !changed {
 				// Nothing to publish: the live library already is this export's.
 				log.Printf("rb-bridge: update of %s changed nothing", mount)
-				writeStamp(dir, stamp)
+				if err := writeImportState(dir, stamp, readRels); err != nil {
+					return enginedb.Result{}, err
+				}
 				cut("unchanged update stamped")
 				os.Remove(filepath.Join(dir, pendingName))
 				return enginedb.Result{Bypassed: true}, dropStage(stage)
@@ -495,7 +504,7 @@ type rereadMark struct {
 // what is left is the files of a few tracks. The background job then only checks every track's
 // files, reading nothing into a database, and its remount reads those few in place before Engine
 // sees the volume. handed is false when the update needs its stage after all.
-func handToMounts(ctx context.Context, r *compat.Resolver, l *rekordbox.Library, dir, stage, stamp string) (res enginedb.Result, handed bool, err error) {
+func handToMounts(ctx context.Context, r *compat.Resolver, l *rekordbox.Library, dir, stage, stamp string, readRels []string) (res enginedb.Result, handed bool, err error) {
 	st, err := os.Stat(filepath.Join(dir, "m.db"))
 	if err != nil || st.Size() <= int64(inPlaceUpdateTracks)*perTrackReadBytes {
 		return enginedb.Result{}, false, nil // a copy of so small a library costs less
@@ -527,7 +536,9 @@ func handToMounts(ctx context.Context, r *compat.Resolver, l *rekordbox.Library,
 	}
 	if work == 0 {
 		// Nothing to read: the live library already is this export's.
-		writeStamp(dir, stamp)
+		if err := writeImportState(dir, stamp, readRels); err != nil {
+			return enginedb.Result{}, true, err
+		}
 		cut("handoff stamped")
 		os.Remove(filepath.Join(dir, pendingName))
 		os.Remove(filepath.Join(dir, rereadName))

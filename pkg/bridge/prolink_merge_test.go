@@ -89,6 +89,17 @@ func TestIssue327StagedLibrariesRetained(t *testing.T) {
 		t.Fatal("staged playlists disappeared from union")
 	}
 	db.Close()
+	if err := os.Rename(filepath.Join(root, "PIONEER"), filepath.Join(root, "PIONEER.saved")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bridge.Convert(context.Background(), root, enginedb.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	db = dbOpen(t, root)
+	if n := scalar[int](t, db, `SELECT count(*) FROM Track`); n == 0 {
+		t.Fatal("staged-only pass removed all local union rows")
+	}
+	db.Close()
 }
 
 func TestStagedProlinkWithoutLocalRekordboxExport(t *testing.T) {

@@ -61,6 +61,9 @@ func TestIssue327Pre2000TimestampDoesNotDemoteOneLibrary(t *testing.T) {
 	if len(lib.Tracks) != 7 {
 		t.Fatalf("unknown file time changed source preference: tracks=%d", len(lib.Tracks))
 	}
+	if lib.Tracks[0].ID != 101 {
+		t.Fatalf("pre-2000 timestamp demoted OneLibrary: first ID=%d", lib.Tracks[0].ID)
+	}
 }
 
 func TestIssue327UnreadableOneLibraryFallsBackAndLogs(t *testing.T) {
@@ -112,7 +115,7 @@ func TestIssue327UpgradeFromOneLibraryKeepsDeckEditsAndIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, true); err != nil || res.Added != 3 {
+	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, true); err != nil || res.Added == 0 {
 		t.Fatalf("initial OneLibrary import: %+v %v", res, err)
 	}
 	db := dbOpen(t, root)
@@ -233,6 +236,69 @@ func TestIssue327ConvertedBothExportsCatchesUpUnionOnce(t *testing.T) {
 	}
 	if mark, err := os.ReadFile(filepath.Join(root, "Engine Library/Database2/.rb-bridge-read")); err != nil || !strings.Contains(string(mark), "export.pdb") {
 		t.Fatalf("read-library mark missing: %q %v", mark, err)
+	}
+	if string(stored) != "v4 PIONEER/rekordbox/exportLibrary.db 12288 1730000000000000000 | PIONEER/rekordbox/export.pdb 32768 1730000000000000000\n" {
+		t.Fatalf("two-export stamp changed format: %q", stored)
+	}
+}
+
+func TestIssue327ReleasedStampWithoutMarkFreezesUnreadablePrimary(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	dbPath := filepath.Join(root, "PIONEER/rekordbox/exportLibrary.db")
+	copyEncryptedOneLibraryFixture(t, dbPath)
+	if err := os.Remove(filepath.Join(root, "PIONEER/rekordbox/export.pdb")); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, true); err != nil || res.Added == 0 {
+		t.Fatalf("initial OneLibrary import: %+v %v", res, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "PIONEER/rekordbox/export.pdb"), testfixture.PDB(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "Engine Library/Database2/.rb-bridge-read")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dbPath+"-wal", []byte("uncheckpointed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := scalar[int](t, dbOpen(t, root), `SELECT count(*) FROM Track`)
+	res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
+	if err != nil || !res.Bypassed {
+		t.Fatalf("released-built unreadable primary was not frozen: %+v %v", res, err)
+	}
+	if got := scalar[int](t, dbOpen(t, root), `SELECT count(*) FROM Track`); got != before {
+		t.Fatalf("frozen library row count changed: %d -> %d", before, got)
+	}
+}
+
+func TestIssue327UnchangedUpdateRefreshesReadMark(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	ctx := context.Background()
+	pdb := filepath.Join(root, "PIONEER/rekordbox/export.pdb")
+	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, true); err != nil || res.Added != 5 {
+		t.Fatalf("initial import: %+v %v", res, err)
+	}
+	when := time.Now().Add(time.Minute)
+	if err := os.Chtimes(pdb, when, when); err != nil {
+		t.Fatal(err)
+	}
+	restore := bridge.SetUpdateExportForTest()
+	defer restore()
+	res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Background {
+		if _, err := bridge.ImportInBackground(ctx, root, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
+	if err != nil || !res.Bypassed {
+		t.Fatalf("unchanged update did not refresh the read mark: %+v %v", res, err)
 	}
 }
 

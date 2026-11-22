@@ -3,6 +3,7 @@ package rekordbox
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
@@ -14,6 +15,8 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+var ErrNotCheckpointed = errors.New("rekordbox export is not checkpointed")
 
 // Public rekordbox 62-entry cue color-code palette (indices 1..62, documented by
 // Deep Symmetry / Beat Link CueList.findRekordboxColor).
@@ -57,7 +60,7 @@ func ReadSQLite(ctx context.Context, path string, adapter SQLiteAdapter) (*Libra
 			return nil, err
 		}
 		if err == nil && (!st.Mode().IsRegular() || st.Size() > 0) {
-			return nil, fmt.Errorf("OneLibrary: requires checkpointed export; source sidecar %s is present", suffix)
+			return nil, fmt.Errorf("%w: OneLibrary: source sidecar %s is present", ErrNotCheckpointed, suffix)
 		}
 	}
 	openPath := abs

@@ -59,9 +59,13 @@ func readLibraryDetailed(ctx context.Context, mount string) (*rekordbox.Library,
 		stamp := importedStamp(dir)
 		readMarkValue := readMark(dir, readName)
 		for _, bad := range unreadable {
-			if readLibrariesStamp(readMarkValue) == stamp && readLibrariesContains(readMarkValue, bad.candidate.rel) {
+			builtFrom := readLibrariesStamp(readMarkValue) == stamp && readLibrariesContains(readMarkValue, bad.candidate.rel)
+			if readMarkValue == "" && primaryOfStamp(stamp) == bad.candidate.rel {
+				builtFrom = true
+			}
+			if builtFrom {
 				log.Printf("rb-bridge: existing library kept: %s unreadable", bad.candidate.rel)
-				if strings.Contains(bad.err.Error(), "sidecar -wal") {
+				if errors.Is(bad.err, rekordbox.ErrNotCheckpointed) {
 					return nil, false, nil, errUnreadableExport
 				}
 				return nil, false, nil, fmt.Errorf("existing library kept: %s unreadable: %w", bad.candidate.rel, bad.err)
@@ -229,7 +233,7 @@ func readExportWithResolver(ctx context.Context, mount string, r *compat.Resolve
 			l, err = rekordbox.ReadPDB(c.full)
 		} else {
 			if st, statErr := os.Stat(c.full + "-wal"); statErr == nil && st.Size() > 0 {
-				err = errors.New("requires checkpointed export; source sidecar -wal is present")
+				err = fmt.Errorf("%w: source sidecar -wal is present", rekordbox.ErrNotCheckpointed)
 			} else {
 				l, err = rekordbox.ReadSQLite(ctx, c.full, nil)
 			}
@@ -876,7 +880,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		// An export whose list is in the library already (.rb-bridge-pending) has only its files left.
 		if readMark(dir, pendingName) != stamp {
 			var err error
-			if res, err = quickUpdate(ctx, mount, dir, r, mountStart.Add(maxMountHookBudget), primaryFlipped(oldStamp, stamp)); err != nil {
+			if res, err = quickUpdate(ctx, mount, dir, r, mountStart.Add(maxMountHookBudget), stamp); err != nil {
 				if errors.Is(err, errUnreadableExport) {
 					return enginedb.Result{Bypassed: true}, nil
 				}
@@ -928,6 +932,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		readErr = err
 		if err == nil {
 			pre = &preread{l: l, stagedOnly: stagedOnly, readRels: readRels, resolver: r}
+			opts.PathFirst = pathFirstFor(oldStamp, readLibrariesMarkValue, readRels, stamp)
 		}
 		// What a background update left to this mount is a few tracks of a large export: the
 		// others keep their rows' paths, unread (#253).
@@ -1022,9 +1027,10 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 			}
 		}
 	} else if err == nil && !result.Bypassed {
-		writeStamp(dir, stamp)
 		if pre != nil {
-			_ = writeMark(dir, readName, readLibrariesMark(stamp, pre.readRels))
+			_ = writeImportState(dir, stamp, pre.readRels)
+		} else {
+			writeStamp(dir, stamp)
 		}
 		cut("in place stamped")
 		os.Remove(filepath.Join(dir, pendingName))
@@ -1104,9 +1110,25 @@ func primaryOfStamp(stamp string) string {
 	return f[0]
 }
 
-func primaryFlipped(old, cur string) bool {
-	o, c := primaryOfStamp(old), primaryOfStamp(cur)
-	return o != "" && c != "" && o != c
+func pathFirstFor(oldStamp, oldMark string, currentRels []string, currentStamp string) bool {
+	if len(currentRels) == 0 {
+		return false
+	}
+	if oldMark == "" {
+		return stampHasMultipleExports(oldStamp) || primaryOfStamp(oldStamp) != currentRels[0]
+	}
+	lines := strings.Split(strings.TrimSpace(oldMark), "\n")
+	oldFirst := ""
+	for _, line := range lines[1:] {
+		if strings.TrimSpace(line) != "" {
+			oldFirst = strings.TrimSpace(line)
+			break
+		}
+	}
+	if oldFirst == "" {
+		oldFirst = primaryOfStamp(oldStamp)
+	}
+	return oldFirst != currentRels[0] || primaryOfStamp(oldStamp) != currentRels[0] && oldStamp != currentStamp
 }
 
 func readLibrariesMark(stamp string, rels []string) string {
@@ -1218,6 +1240,13 @@ func HasPopulatedLibrary(mount string) bool {
 }
 
 func writeStamp(dir, stamp string) { _ = writeMark(dir, stampName, stamp) }
+
+func writeImportState(dir, stamp string, rels []string) error {
+	if err := writeMark(dir, readName, readLibrariesMark(stamp, rels)); err != nil {
+		return err
+	}
+	return writeMark(dir, stampName, stamp)
+}
 
 func writeMark(dir, name, stamp string) error {
 	err := os.WriteFile(filepath.Join(dir, name), []byte(stamp+"\n"), 0o644)

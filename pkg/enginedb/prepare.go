@@ -352,8 +352,20 @@ func stageOwnedMovesWithPath(ctx context.Context, tx *sql.Tx, prepared []prepare
 			continue
 		}
 		if _, duplicate := owned[source]; duplicate {
-			rows.Close()
-			return nil, fmt.Errorf("ambiguous bridge source ID %d", source)
+			// Two incoming rows can fold to one path on a case-insensitive volume. Keep
+			// their deterministic candidate order and assign the next unused candidate
+			// so an edited row is never lost and the import does not loop forever.
+			for _, candidate := range byPath[bridgePathKey(oldPath)] {
+				if _, taken := owned[candidate.track.ID]; taken {
+					continue
+				}
+				source = candidate.track.ID
+				break
+			}
+			if _, duplicate = owned[source]; duplicate {
+				rows.Close()
+				return nil, fmt.Errorf("ambiguous bridge source ID %d", source)
+			}
 		}
 		owned[source] = id
 		// An unreadable re-export must not park a completed row and lose its

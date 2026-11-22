@@ -3,6 +3,7 @@ package rekordbox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -223,7 +224,7 @@ func TestSQLCipher4TamperAndBounds(t *testing.T) {
 	if err := os.WriteFile(p+"-wal", []byte("uncheckpointed"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadSQLite(context.Background(), p, nil); err == nil || !strings.Contains(err.Error(), "sidecar") {
+	if _, err := ReadSQLite(context.Background(), p, nil); err == nil || !errors.Is(err, ErrNotCheckpointed) || !strings.Contains(err.Error(), "sidecar") {
 		t.Fatalf("expected sidecar rejection, got %v", err)
 	}
 }
