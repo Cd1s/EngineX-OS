@@ -312,7 +312,9 @@ func (g *tidalGateway) rbxTracks(w http.ResponseWriter, r *http.Request, ref pla
 	prefetch := g.rbxBrowse.begin()
 	rows, first, err := g.rbxRows(r.Context(), ip, list)
 	if err != nil && len(rows) == 0 {
-		fail(w, 502, errors.New(g.s.rbxText("unreadable")))
+		openErr := errors.New(g.s.rbxText("unreadable"))
+		g.logPlaylistOpenFailure(r, http.StatusBadGateway, ref.list.ID, &ref, openErr)
+		fail(w, http.StatusBadGateway, openErr)
 		return
 	}
 	refs := make([]trackRef, len(rows))
