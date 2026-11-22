@@ -34,25 +34,25 @@ func TestGuardianDataOnlyDeadlineIsSoft(t *testing.T) {
 	mount := mountWithNFDTracks(t, 130)
 	var out, errOut bytes.Buffer
 	started := time.Now()
-	if code := Guardian([]string{"--heal-mount", mount, "--data-only", "--timeout", "2s"}, &out, &errOut); code != 0 {
+	if code := Guardian([]string{"--heal-mount", mount, "--data-only", "--timeout", "10ms"}, &out, &errOut); code != 0 {
 		t.Fatalf("soft data-only deadline code=%d out=%s err=%s", code, &out, &errOut)
 	}
-	if elapsed := time.Since(started); elapsed >= 3*time.Second {
+	if elapsed := time.Since(started); elapsed >= time.Second {
 		t.Fatalf("soft deadline did not return promptly: %s", elapsed)
 	}
 	var results []guardianResult
 	if err := json.Unmarshal(out.Bytes(), &results); err != nil || len(results) != 1 || !results[0].Healthy {
 		t.Fatalf("soft data-only deadline result=%s err=%v", &out, err)
 	}
-	if results[0].PathsNormalized != 130 {
-		t.Fatalf("first pass did not finish the bounded fixture: %s stderr=%s", &out, &errOut)
+	if results[0].PathsNormalized >= 130 || results[0].MP3Grids != nil {
+		t.Fatalf("first pass did not stop inside the soft budget: %s stderr=%s", &out, &errOut)
 	}
 	out.Reset()
 	if code := Guardian([]string{"--heal-mount", mount, "--data-only", "--timeout", "10s"}, &out, &errOut); code != 0 {
 		t.Fatalf("second pass code=%d out=%s err=%s", code, &out, &errOut)
 	}
-	if err := json.Unmarshal(out.Bytes(), &results); err != nil || len(results) != 1 || results[0].PathsNormalized != 0 {
-		t.Fatalf("second pass was not idempotent: %s", &out)
+	if err := json.Unmarshal(out.Bytes(), &results); err != nil || len(results) != 1 || results[0].PathsNormalized == 0 {
+		t.Fatalf("second pass did not finish remaining rows: %s", &out)
 	}
 }
 
