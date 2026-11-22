@@ -442,6 +442,9 @@ func (s *Server) Close() {
 	delete(postedDevices, s)
 	prolinkMu.Unlock()
 	s.closeBroadcast()
+	if m, ok := tunnelManagers.LoadAndDelete(s); ok {
+		m.(*TunnelManager).Stop() // its helper process does not outlive the server
+	}
 	s.stopHTTPS(true)
 	s.httpsWG.Wait()
 }
@@ -678,6 +681,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	if isTidal(r.URL.Path) {
 		s.tidal.ServeHTTP(w, r)
+		return
+	}
+	if lanOnly(r.URL.Path) && relayedFromOutside(r) {
+		http.NotFound(w, r) // a tunnel set up to reach this listener: its callers are not on the LAN
 		return
 	}
 	if r.Method != "GET" && r.Method != "HEAD" {
