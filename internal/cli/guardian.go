@@ -44,7 +44,7 @@ func mp3GridBudget(deadline time.Duration, mountOnly bool) time.Duration {
 	}
 }
 
-const guardianCleanupReserve = 250 * time.Millisecond
+const guardianCleanupReserve = 3 * time.Second
 
 func guardianRemaining(start time.Time, deadline time.Duration) time.Duration {
 	if deadline <= 0 {
@@ -92,7 +92,7 @@ func Guardian(args []string, out, errOut io.Writer) int {
 		// Vendor images need not ship a timeout executable or BusyBox applet.
 		// This deadline starts at process entry and remains the hard upper bound
 		// for every caller, including data-only mount heals.
-		hardTimer = time.AfterFunc(time.Until(commandStart.Add(*deadline)), func() { os.Exit(124) })
+		hardTimer = time.AfterFunc(time.Until(commandStart.Add(*deadline+guardianCleanupReserve)), func() { os.Exit(124) })
 		defer hardTimer.Stop()
 	}
 	if *checkCopy != "" {

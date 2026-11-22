@@ -57,6 +57,9 @@ func TestHealMountDataOnlyNormalizesMissingNFDPaths(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes) VALUES(?,?,?,?)`, 7, collisionNFC, filepath.Base(collisionNFC), 32); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`CREATE TRIGGER collision_guard_probe BEFORE UPDATE OF path ON Track WHEN OLD.id=6 AND NEW.path='../Music/Collisioné.mp3' BEGIN SELECT RAISE(ABORT,'collision guard probe'); END`); err != nil {
+		t.Fatal(err)
+	}
 	duplicateA := "../Music/Doublee\u0301\u0323.mp3"
 	duplicateB := "../Music/Doublee\u0323\u0301.mp3"
 	duplicateNFC := "../Music/Doubleẹ́.mp3"
