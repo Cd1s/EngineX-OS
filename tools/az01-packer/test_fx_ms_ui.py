@@ -107,7 +107,7 @@ assert.equal(scFxTimeMode,'beats'); assert.equal(scFxTimeMs,500);
         props = {}
         for line in bp.SERVICES_MAIN.splitlines():
             m = re.match(r"\s*readonly property \w+ (sc\w+):\s*(.+)$", line)
-            if m and m.group(1) in ("scBoard", "scIsPlayerBoard", "scHasMixer", "scHasStemsEq", "scHasPxDelay", "scTransitionFxView", "scHasHardwareFaderFxButtons"):
+            if m and m.group(1) in ("scBoard", "scIsPlayerBoard", "scConsoleLineBoard", "scHasMixer", "scHasStemsEq", "scHasPxDelay", "scTransitionFxView", "scHasHardwareFaderFxButtons"):
                 props[m.group(1)] = m.group(2).strip()
         m_tile = re.search(r"readonly property bool scHasStockTransitionTile:\s*([\s\S]*?:\s*false)", bp.SERVICES_MAIN)
         props["scHasStockTransitionTile"] = " ".join(m_tile.group(1).split())
@@ -359,7 +359,7 @@ assert.deepEqual(faderWrites, [['reverse', true], ['position', 38]]);
         props = {}
         for line in bp.SERVICES_MAIN.splitlines():
             m = re.match(r"\s*readonly property \w+ (sc\w+):\s*(.+)$", line)
-            if m and m.group(1) in ("scBoard", "scIsPlayerBoard", "scHasMixer", "scHasStemsEq", "scTransitionFxView"):
+            if m and m.group(1) in ("scBoard", "scIsPlayerBoard", "scConsoleLineBoard", "scHasMixer", "scHasStemsEq", "scTransitionFxView"):
                 props[m.group(1)] = m.group(2).strip()
         stems_handler = re.search(r"onScStemsEqModeChanged:\s*\{([\s\S]*?)\n\t\}", bp.SERVICES_MAIN).group(1)
         helpers = "\n".join(function(bp.SERVICES_MAIN, n) for n in ("scFxMsInteger", "scFxMsApply", "scParseSettingsConf", "scSyncStemsEqChannel", "scWatchStemsEq", "scApply"))
