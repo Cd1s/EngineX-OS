@@ -9714,7 +9714,9 @@ assert.equal(effective(false, false, ""), false);
             gcfg = (out / "en" / "ControlSurfaceModules/ControlSurfaceModules/GlobalAssignmentConfig.qml").read_text(encoding="utf-8")
             self.assertIn("function scSyncReverseJogFromState()", gcfg)
             self.assertIn("running: true; repeat: true; triggeredOnStart: true", gcfg)
-            self.assertIn("onTriggered: scGlobalConfig.scSyncReverseJogFromState()", gcfg)
+            # #325: the same 500 ms timer also brings the pad LED brightness, so its handler is a block
+            # that starts with the reverse-jog sync.
+            self.assertRegex(gcfg, r"onTriggered: \{\s*scGlobalConfig\.scSyncReverseJogFromState\(\)")
             self.assertNotIn("readonly property bool scReverseJogLeftEffective:", gcfg)
 
             if shutil.which("node"):
