@@ -1,6 +1,8 @@
 package mapping
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,9 +16,19 @@ type Status struct {
 	State    string `json:"state"` // applied | rejected | none
 	Board    string `json:"board"`
 	Mappings int    `json:"mappings,omitempty"`
+	Digest   string `json:"digest,omitempty"` // of the mappings that were applied: the console tells a changed file from it
 	Code     string `json:"code,omitempty"`   // the Reason of a rejection the console can translate
 	Reason   string `json:"reason,omitempty"` // the message, for the log and for what has no code
 	Time     string `json:"time"`
+}
+
+// Digest identifies a list of mappings; an empty list has none.
+func Digest(list []Mapping) string {
+	if len(list) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(Marshal(list))
+	return hex.EncodeToString(sum[:])
 }
 
 // StatusPath is the status file of a board next to the patched assignment files.
@@ -113,6 +125,6 @@ func Apply(board, in, out, file, statusPath string) (bool, error) {
 	if err := writeAtomic(out, patched); err != nil {
 		return reject(err)
 	}
-	record(Status{State: "applied", Mappings: len(mine)})
+	record(Status{State: "applied", Mappings: len(mine), Digest: Digest(mine)})
 	return true, nil
 }

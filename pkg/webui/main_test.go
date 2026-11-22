@@ -29,6 +29,8 @@ func TestMain(m *testing.M) {
 	tlsPersistDir = at("data", "enginex-absent")
 	deviceCompatiblePath = at("sys", "compatible-absent")
 	fourDeckRolePath = at("run", "enginex-assignments", "role")
+	mappingsPath = at("data", "enginex", "mappings.json")
+	mappingStatusDir = at("run", "enginex-assignments")
 	samplerDataDir = at("data", "enginex", "samples")
 	rbxAnalysisDir = at("run", "enginex-rbx-analysis-v3")
 	// The update keeps updateReserve free for Engine; the tests run on whatever disk the host has.

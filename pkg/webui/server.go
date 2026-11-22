@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/mapping"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 	"github.com/skip2/go-qrcode"
@@ -82,6 +83,10 @@ type Config struct {
 	MediaRoot string
 	// RestartEngine replaces "systemctl restart engine.service" in tests.
 	RestartEngine func() error
+	// MappingSource opens the read-only ALSA sequencer client MIDI learn uses; tests give a fake.
+	MappingSource func() (mapping.Source, error)
+	// MappingLearnWindow overrides the 30 s learn window in tests.
+	MappingLearnWindow time.Duration
 	// SDHighSpeedRunDir overrides /run/enginex for SD high-speed state in tests.
 	SDHighSpeedRunDir string
 	// ApplySDHighSpeed overrides invoking enginex-sd-highspeed in tests.
@@ -113,6 +118,7 @@ type Server struct {
 	copyReceived  *copyBundle
 	logsMu        sync.Mutex
 	fxMu          sync.Mutex // transient FX commands never hold the settings lock
+	mapLearn      mapLearn   // the one running MIDI learn (button mapping)
 	stemsMu       sync.Mutex // streaming-stems.json
 	stemsImportMu sync.Mutex // one streamed row at a time is named, recorded and swept
 	rbxPresenceMu sync.Mutex
@@ -315,6 +321,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /v1/enginex/hotcues", s.handleHotCues)
 	s.mux.HandleFunc("POST /v1/enginex/hotcues", s.handleHotCues)
 	s.mux.HandleFunc("POST /v1/enginex/track-metadata", s.handleTrackMetadata)
+	s.registerMappingRoutes()
 	s.mux.HandleFunc("GET /api/hook-features", s.handleHookFeatures)
 	s.mux.HandleFunc("POST /api/hook-features", s.handleHookFeatures)
 	s.mux.HandleFunc("GET /api/ssh", s.handleSSH)
@@ -423,6 +430,7 @@ func (s *Server) tryExport() {
 // Close releases optional network exports, including active dbserver clients.
 func (s *Server) Close() {
 	s.closeOnce.Do(func() { close(s.closed) })
+	s.stopMappingLearn() // a learn never outlives the server: its subscription goes with it
 	s.consoleAskSync(false)
 	s.lanProbeWG.Wait()
 	s.mu.Lock()
