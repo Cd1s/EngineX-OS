@@ -127,8 +127,9 @@ func TestShadowDeckFromPeer(t *testing.T) {
 	bs.shadow.dataRoot = t.TempDir()
 	b := httptest.NewServer(bs)
 	defer b.Close()
+	roleBefore := fourDeckRolePath
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
-	defer func() { fourDeckRolePath = "/run/enginex-assignments/role" }()
+	defer func() { fourDeckRolePath = roleBefore }()
 	os.WriteFile(fourDeckRolePath, []byte("13\n"), 0o644)
 	if role, decks := shadowGetJSON(t, b.URL+"/v1/enginex/shadow"); role != "" || len(decks) != 0 {
 		t.Fatalf("shadow without the 4-deck layout: %q %+v", role, decks)
@@ -257,8 +258,9 @@ func TestShadowSharedUSBAndEngineCache(t *testing.T) {
 	b.shadow.dataRoot, b.shadow.mediaRoot = t.TempDir(), t.TempDir()
 	server := httptest.NewServer(b)
 	defer server.Close()
+	roleBefore := fourDeckRolePath
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
-	defer func() { fourDeckRolePath = "/run/enginex-assignments/role" }()
+	defer func() { fourDeckRolePath = roleBefore }()
 	if err := os.WriteFile(fourDeckRolePath, []byte("24\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -321,8 +323,9 @@ func TestShadowDeckFromCDJ(t *testing.T) {
 	s := New(Config{UIDir: dir, StateDir: t.TempDir()}, nil)
 	srv := httptest.NewServer(s)
 	defer srv.Close()
+	roleBefore := fourDeckRolePath
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
-	defer func() { fourDeckRolePath = "/run/enginex-assignments/role" }()
+	defer func() { fourDeckRolePath = roleBefore }()
 	os.WriteFile(fourDeckRolePath, []byte("24\n"), 0o644)
 	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowMode=engine")
 	dev := `{"address":"127.0.0.1","name":"CDJ-3000","number":3,"playing":true,"play_position_ms":5000,"pitch":-1.5,"master":true,"sync":true}`
@@ -596,8 +599,9 @@ func TestShadowUDPPushWakesLongPoll(t *testing.T) {
 	bs := New(Config{UIDir: filepath.Join(dirB, "ui"), StateDir: t.TempDir()}, nil)
 	b := httptest.NewServer(bs)
 	defer b.Close()
+	roleBefore := fourDeckRolePath
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
-	defer func() { fourDeckRolePath = "/run/enginex-assignments/role" }()
+	defer func() { fourDeckRolePath = roleBefore }()
 	os.WriteFile(fourDeckRolePath, []byte("13\n"), 0o644)
 	os.MkdirAll(filepath.Join(dirB, "ui"), 0o755)
 	uiPost(t, b.URL, "fourDeckWaveform=1&shadowMode=engine")

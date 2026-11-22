@@ -65,6 +65,10 @@ type LoopToPadResponse struct {
 	DurationSec float64 `json:"durationSec"`
 }
 
+// samplerDataDir is where a loop cut from a track on the internal drive is saved. A variable so that
+// the tests keep off the machine they run on (TestMain).
+var samplerDataDir = "/data/enginex/samples"
+
 func (s *Server) samplesDir() string {
 	if s.cfg.StateDir != "" {
 		return filepath.Join(s.cfg.StateDir, "samples")
@@ -97,7 +101,7 @@ func (s *Server) determineSampleOutputPath(trackPath string, deck, pad int) stri
 	}
 
 	// Candidate 2: standard EngineX samples directory
-	enginexDir := "/data/enginex/samples"
+	enginexDir := samplerDataDir
 	if err := os.MkdirAll(enginexDir, 0o755); err == nil {
 		testFile := filepath.Join(enginexDir, ".writable_test")
 		if err := os.WriteFile(testFile, []byte("ok"), 0o644); err == nil {
