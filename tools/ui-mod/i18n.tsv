@@ -375,6 +375,9 @@ All Engine Mode	全部 Engine 模式	全部 Engine 模式	Modo todo Engine
 All CDJ Mode	全部 CDJ 模式	全部 CDJ 模式	Modo todo CDJ
 All Engine Mode: no CDJ waveform on Line In	全部 Engine 模式下 Line In 不显示 CDJ 波形	全部 Engine 模式下 Line In 不顯示 CDJ 波形	Modo todo Engine: sin forma de onda de CDJ en la entrada de línea
 Pro DJ Link is off: no CDJ waveform	Pro DJ Link 未开启：不显示 CDJ 波形	Pro DJ Link 未開啟：不顯示 CDJ 波形	Pro DJ Link desactivado: sin forma de onda de CDJ
+Show Console	显示一体机	顯示一體機	Mostrar consola
+Show Console: the loaded decks of a linked console appear in this player's free lanes; display only	显示一体机：联机一体机已载入曲目的碟轨，会显示在本机空闲的波形区；仅显示，不会载入	顯示一體機：聯機一體機已載入曲目的碟軌，會顯示在本機空閒的波形區；僅顯示，不會載入	Mostrar consola: los decks cargados de una consola vinculada aparecen en los carriles libres de este reproductor; solo visualización
+Console deck	一体机碟轨	一體機碟軌	Deck de consola
 Downloading	正在下载	正在下載	Descargando
 Loading	正在加载	正在載入	Cargando
 Waiting for source analysis	等待源碟机分析波形	等待來源碟機分析波形	Esperando el análisis de la fuente

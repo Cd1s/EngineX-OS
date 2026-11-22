@@ -1147,7 +1147,7 @@ SERVICES_MAIN = """
 			s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) || s.range !== (Number(e.range) || 0) ||
 			s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail || s.progress !== (Number(e.progress) || 0) || s.error !== (e.error || "") ||
 			s.engine !== !!e.engine || s.copying !== !!e.copying || s.durationMs !== (Number(e.durationMs) || 0) || s.fallback !== (e.fallback || "") ||
-			s.player !== (Number(e.player) || 0) || s.model !== (e.model || "")) return false
+			s.player !== (Number(e.player) || 0) || s.model !== (e.model || "") || s.console !== (Number(e.console) || 0)) return false
 		if (Array.isArray(e.cues)) {
 			const a = s.liveCues, b = e.cues
 			if (!Array.isArray(a) || a.length !== b.length) return false
@@ -1187,7 +1187,7 @@ SERVICES_MAIN = """
 			if (fromCover) { delete scShadowDisplayRequests[d]; delete scShadowDisplayText[d] }
 			const sample = {key: key, name: e.name || "", title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
 				playing: !!e.playing, scratch: !!e.scratch, stale: !!e.stale, metadataOnly: !!e.metadataOnly, positionMs: pos, at: at,
-				pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine, player: Number(e.player) || 0, model: e.model || "",
+				pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine, player: Number(e.player) || 0, model: e.model || "", console: Number(e.console) || 0,
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master,
 				lead: e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master, sync: !!e.sync, keylock: !!e.keylock,
 				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, currentBpm: Number(e.currentBpm) || 0, range: Number(e.range) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
@@ -1767,7 +1767,7 @@ SERVICES_MAIN = """
 	Timer {
 		id: scShadowTickTimer
 		interval: 40; repeat: true
-		running: root.scFourDeckRole !== ""
+		running: root.scFourDeckRole !== "" || (root.scConsoleLine && root.scConsoleAsked)
 		onTriggered: root.scShadowTick()
 	}
 	property real scShadowBusyAt: 0
@@ -1786,6 +1786,7 @@ SERVICES_MAIN = """
 	// scFourDeckRole stays empty on a console, and a channel on its Engine input is never touched. Off,
 	// or on with no channel on Line / AUX, nothing here runs: no timer, no request, no stream-sync loop.
 	property bool scConsoleLine: false // the saved switch, honoured on the four consoles only
+	property bool scShowConsole: false // a player: the row Show Console (stage 2)
 	readonly property bool scConsoleLineBoard: ["JC11", "JC11S", "JP21", "JP24"].indexOf(scBoard) >= 0
 	property int scLineMask: 0 // bit N: channel N's input is Line / AUX, as the mixer says (a signal, never polled)
 	readonly property bool scLineLive: scConsoleLine && scLineMask !== 0
@@ -1807,13 +1808,23 @@ SERVICES_MAIN = """
 		}
 		if (next) scShadowDisplay = next
 	}
-	onScConsoleLineChanged: scLineSync()
+	onScConsoleLineChanged: {
+		scLineSync()
+		if (scConsoleLine) scConsoleAskPoll()
+		else {
+			scConsoleAskTimer.stop()
+			const x = scConsoleAskRequest
+			if (x && x.readyState > 0 && x.readyState < 4) x.abort()
+			scConsoleAsked = false
+		}
+	}
 	onScLineMaskChanged: {
 		scLineTrim()
 		scShadowResponseVersion = "" // the next answer is applied even if stream-sync's picture did not change
 		// The new set of channels goes to stream-sync at once. Read from the two properties, not from scLineLive: this
 		// handler may run before that binding has caught up with the mask.
 		if (scConsoleLine && scLineMask !== 0) { scShadowPollAt = 0; scShadowPoll() }
+		if (scConsoleLine && scConsoleAsked) scShadowWake() // a channel on Line leaves the next post: within one tick
 	}
 	onScLineLiveChanged: {
 		if (scLineLive || scFourDeckRole !== "") return
@@ -1825,6 +1836,39 @@ SERVICES_MAIN = """
 	Connections { target: root.scConsoleLine ? root.scTr("/Engine/Mixer/Channel2/Line") : null; ignoreUnknownSignals: true; function onStateChanged() { root.scLineSync() } }
 	Connections { target: root.scConsoleLine ? root.scTr("/Engine/Mixer/Channel3/Line") : null; ignoreUnknownSignals: true; function onStateChanged() { root.scLineSync() } }
 	Connections { target: root.scConsoleLine ? root.scTr("/Engine/Mixer/Channel4/Line") : null; ignoreUnknownSignals: true; function onStateChanged() { root.scLineSync() } }
+	// Console linking, stage 2: a linked player can show this console's decks. The console samples and posts them
+	// only while stream-sync says a player asks (a held request, below), with Line In on. Without an asker nothing
+	// of this runs: no sampler, no post, one held request to this unit's own stream-sync, answered at most every 25 s.
+	// What is sent: the decks of the channels on their own input (not Line / AUX) that have a track.
+	property bool scConsoleAsked: false
+	property var scConsoleAskRequest: null
+	function scConsoleAskPoll() {
+		if (!scConsoleLine) return
+		let x = scConsoleAskRequest
+		if (x && x.readyState > 0 && x.readyState < 4) return
+		x = scConsoleAskRequest = new XMLHttpRequest()
+		x.open("GET", "http://127.0.0.1:8080/v1/enginex/consolesend?asked=" + (scConsoleAsked ? 1 : 0))
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4 || root.scConsoleAskRequest !== x || !root.scConsoleLine) return
+			let ok = false
+			if (x.status === 200) {
+				try { const a = !!JSON.parse(x.responseText).asked; ok = true; if (a !== root.scConsoleAsked) root.scConsoleAsked = a } catch (err) { ok = false }
+			}
+			// The next one carries what we believe now, so stream-sync holds it: no loop. A failure waits.
+			if (ok) root.scConsoleAskPoll(); else scConsoleAskTimer.restart()
+		}
+		x.send()
+	}
+	Timer { id: scConsoleAskTimer; interval: 5000; onTriggered: root.scConsoleAskPoll() }
+	onScConsoleAskedChanged: {
+		scShadowSent = []; scShadowMine = []; scShadowOwn.length = 0; scShadowPostFull = true; scShadowPostPending = true
+		if (scConsoleAsked) scShadowWake()
+	}
+	function scConsoleSendDecks() {
+		const out = []
+		for (let d = 1; d <= 4; d++) if (((scLineMask >> d) & 1) === 0 && scShadowProperties(d).loaded.state) out.push(d)
+		return out
+	}
 	// This unit's Engine Link player number, for its post: a console orders the units it shows by it. Read
 	// when the role is known and again if the number changes; the sampler only copies it.
 	readonly property int scOwnPlayer: {
@@ -1952,10 +1996,17 @@ SERVICES_MAIN = """
 	}
 	function scShadowTick() {
 		const now = Date.now()
-		if (now - scShadowPollAt > 3000) scShadowPoll()
-		scShadowLine(now)
-		scShadowLandingTick(now)
-		if (scShadowRoleDirty) {
+		const consoleSend = scFourDeckRole === "" // no role: only a console in stage 2, while a player asks
+		if (!consoleSend) {
+			if (now - scShadowPollAt > 3000) scShadowPoll()
+			scShadowLine(now)
+			scShadowLandingTick(now)
+		}
+		if (consoleSend) {
+			const own = scConsoleSendDecks()
+			if (own.join() !== scShadowMine.join()) { scShadowMine = own; scShadowOwn.length = own.length; scShadowPostPending = true; scShadowPostFull = true }
+			scShadowMineRole = "console"
+		} else if (scShadowRoleDirty) {
 			scShadowRoleDirty = false
 			scShadowMineRole = scFourDeckRole
 			scShadowMine = scFourDeckRole.split("").map(c => parseInt(c))
@@ -2112,10 +2163,10 @@ SERVICES_MAIN = """
 		for (let d = 1; d <= 4 && root.scPlayer && !scShadowDisplayOnly; d++) if (mine.indexOf(d) < 0 && (scShadowAt[d] || scShadowEmptyObject).link && scShadowProperties(d).master.state) lead = d
 		if (lead !== scShadowLead) { scShadowLead = lead; edge = true }
 		// #201: a Layer press moves the other player's paired view at once.
-		const layer = root.scTr(scLayerPath(scShadowMineRole))
-		const active = mine.length ? mine[layer && layer.index === 1 ? mine.length - 1 : 0] : 0
+		const layer = consoleSend ? null : root.scTr(scLayerPath(scShadowMineRole))
+		const active = mine.length && !consoleSend ? mine[layer && layer.index === 1 ? mine.length - 1 : 0] : 0
 		if (active !== scShadowActiveDeck) { scShadowActiveDeck = active; edge = true }
-		scShadowMasterBack(mine, now)
+		if (!consoleSend) scShadowMasterBack(mine, now)
 		// Every edge (play, CUE, jump, pitch, master, sync, track) posts at once. The
 		// heartbeat only proves liveness (Go marks a peer stale after 2 s) and corrects
 		// the peer's extrapolation, which runs on the exact pitch: 500 ms keeps 1.5 s of
@@ -2147,7 +2198,7 @@ SERVICES_MAIN = """
 			if (mine.indexOf(d) < 0) shadowLead = true
 			else localMaster = true
 		}
-		if (net && !shadowLead && !scShadowCdjMaster && !localMaster) {
+		if (net && !shadowLead && !scShadowCdjMaster && !localMaster && scFourDeckRole !== "") {
 			for (let i = 0; i < mine.length; i++) if (scShadowPrev[mine[i]].playing) { lead = mine[i]; break }
 			if (!lead) lead = mine[0]
 		}
@@ -4319,6 +4370,7 @@ SERVICES_MAIN = """
 		scFourDeckOn = scIsPlayerBoard && !!v.fourDeckWaveform
 		scPairedSetting = scIsPlayerBoard && !!v.fourDeckWaveform && !!v.pairedView
 		scConsoleLine = scConsoleLineBoard && !!v.consoleLineView
+		scShowConsole = scIsPlayerBoard && !!v.consoleDecks
 		scFourDeckRoleSetting = v.fourDeckRole || "auto"
 		scShadowMode = v.shadowMode || "auto"
 		scKeepPlayhead(v.playhead || 0)
@@ -6113,11 +6165,24 @@ CONSOLE_LINE_ENTRIES = """
 		},
 """
 
+# Console linking, stage 2: on a standalone player in the 4-deck layout, the decks of a linked console appear in
+# the lanes this player has free (console_decks). Off by default; the console sends only to a player that asks.
+CONSOLE_DECKS_ENTRIES = switch_entry("Show Console", "scShowConsole", "consoleDecks", '\t\t\tvisible: root.scIsPlayerBoard && root.scFourDeckOn\n') + """
+		@HEADLINE@ {
+			visible: root.scIsPlayerBoard && root.scFourDeckOn
+			leftPadding: 24; rightPadding: 24
+			wrapMode: Text.WordWrap
+			Layout.preferredHeight: implicitHeight
+			color: "#9a9a9a"
+			text: "Show Console: the loaded decks of a linked console appear in this player's free lanes; display only"
+		},
+"""
+
 VIEW_ENTRIES = """
 		@HEADLINE@ {
 			text: "ENGINEX VIEW PRESET"
 		},
-""" + CUE_COUNTDOWN_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES + CONSOLE_LINE_ENTRIES
+""" + CUE_COUNTDOWN_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES + CONSOLE_LINE_ENTRIES + CONSOLE_DECKS_ENTRIES
 
 # #78: a deck in a booth can be switched off without reaching for the recessed rear
 # button. Engine's own quit path: the "Turn Off" confirmation, recording and library
@@ -7603,6 +7668,15 @@ SHADOW_BUSY = r"""
             visible: scDisplay.live && !!scDisplay.sample && !!scDisplay.sample.lineIn && scDisplay.sample.player > 0
             color: Style.font02Color; font: Style.fontH5
             text: "Linked player" + " " + (scDisplay.sample ? scDisplay.sample.player : 0) + (scDisplay.sample && scDisplay.sample.model ? " · " + scDisplay.sample.model : "")
+        }
+        // Console linking, stage 2: a lane that shows a deck of the linked console (a player with the row Show Console).
+        Text {
+            objectName: "EngineX_Shadow_Console"
+            textFormat: Text.PlainText
+            x: 8; y: 2
+            visible: scDisplay.live && !!scDisplay.sample && scDisplay.sample.console > 0
+            color: Style.font02Color; font: Style.fontH5
+            text: "Console deck" + " " + (scDisplay.sample ? scDisplay.sample.console : 0) + (scDisplay.sample && scDisplay.sample.model ? " · " + ({PRIME4: "PRIME 4", PRIME4PLUS: "PRIME 4+", SCLIVE4: "SC LIVE 4", PRIME4G2: "PRIME 4 G2"}[scDisplay.sample.model] || scDisplay.sample.model) : "")
         }
 """
 
