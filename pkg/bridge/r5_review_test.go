@@ -1,10 +1,13 @@
 package bridge_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,17 +32,19 @@ func TestIssue327StaleReadMarkFreezesUnreadablePrimary(t *testing.T) {
 	if err := os.WriteFile(pdb, testfixture.PDBNamed([5]string{testfixture.UnicodeName, "two.flac", "three.wav", "four.wav", "five.wav"}, "r5"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chtimes(pdb, when, when); err != nil {
+	if err := os.Chtimes(pdb, when.Add(30*time.Second), when.Add(30*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
 	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || res.Added == 0 {
 		t.Fatalf("initial union import: %+v %v", res, err)
 	}
-	before := scalar[int](t, dbOpen(t, root), `SELECT count(*) FROM Track`)
-	if err := os.Chtimes(one, when.Add(2*time.Minute), when.Add(2*time.Minute)); err != nil {
+	db := dbOpen(t, root)
+	if _, err := db.Exec(`UPDATE Track SET rating=77`); err != nil {
 		t.Fatal(err)
 	}
+	before := scalar[int](t, db, `SELECT count(*) FROM Track`)
+	db.Close()
 	oneStat, err := os.Stat(one)
 	if err != nil {
 		t.Fatal(err)
@@ -48,19 +53,48 @@ func TestIssue327StaleReadMarkFreezesUnreadablePrimary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	oldStamp := fmt.Sprintf("v4 PIONEER/rekordbox/export.pdb %d %d | PIONEER/rekordbox/exportLibrary.db %d %d", pdbStat.Size(), pdbStat.ModTime().UnixNano(), oneStat.Size(), oneStat.ModTime().UnixNano())
+	dir := filepath.Join(root, "Engine Library/Database2")
+	if err := os.WriteFile(filepath.Join(dir, ".rb-bridge-stamp"), []byte(oldStamp+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".rb-bridge-read"), []byte(oldStamp+"\nPIONEER/rekordbox/export.pdb\nPIONEER/rekordbox/exportLibrary.db\n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(one, when.Add(2*time.Minute), when.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	oneStat, err = os.Stat(one)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pdbStat, err = os.Stat(pdb)
+	if err != nil {
+		t.Fatal(err)
+	}
 	newStamp := fmt.Sprintf("v4 PIONEER/rekordbox/exportLibrary.db %d %d | PIONEER/rekordbox/export.pdb %d %d", oneStat.Size(), oneStat.ModTime().UnixNano(), pdbStat.Size(), pdbStat.ModTime().UnixNano())
-	if err := os.WriteFile(filepath.Join(root, "Engine Library/Database2/.rb-bridge-stamp"), []byte(newStamp+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".rb-bridge-stamp"), []byte(newStamp+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(one+"-wal", []byte("stale"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	var logs bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&logs)
 	res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
+	log.SetOutput(oldWriter)
 	if err != nil || !res.Bypassed {
 		t.Fatalf("stale mark did not freeze unreadable primary: %+v %v", res, err)
 	}
+	if !strings.Contains(logs.String(), "existing library kept") {
+		t.Fatalf("stale unreadable primary was not journaled: %q", logs.String())
+	}
 	if got := scalar[int](t, dbOpen(t, root), `SELECT count(*) FROM Track`); got != before {
 		t.Fatalf("stale mark changed rows: %d -> %d", before, got)
+	}
+	if got := scalar[int](t, dbOpen(t, root), `SELECT count(*) FROM Track WHERE rating=77`); got != before {
+		t.Fatalf("stale mark changed ratings: %d -> %d", before, got)
 	}
 }
 
