@@ -499,6 +499,35 @@ class FilesystemTests(unittest.TestCase):
         self.assertEqual((e/'ui/packs/en/Main.qml').read_text(), 'new')
         self.assertIn('Europe/Berlin', conf.read_text())
 
+    def test_prepare_keeps_engine_conf_when_awk_cuts_its_output_and_still_says_0(self):
+        # #5306: BusyBox awk reported 0 for output it could not write; the empty copy then replaced the DJ's Engine.conf
+        seed, data, script = self._prepare_lab('awk')
+        conf = data/'.config/jp07.user.settings/AIR Music Technology/Engine.conf'
+        conf.parent.mkdir(parents=True)
+        conf.write_text('[General]\n' + ''.join(f'Setting{i}=value\n' for i in range(300)) + '[TimeDateSettings]\nTZEnvVar=UTC\n')
+        (data/'enginex/state').mkdir(parents=True)
+        (data/'enginex/state/timezone').write_text('Europe/Berlin\n')
+        os.utime(data/'enginex/state/timezone', (conf.stat().st_mtime + 120,) * 2)
+        zones = self.root/'zoneinfo'
+        (zones/'Europe').mkdir(parents=True)
+        (zones/'Europe/Berlin').write_text('tz')
+        shim = self.root/'shim-awk'
+        shim.mkdir()
+        (shim/'awk').write_text('#!/bin/sh\ncase "$1$2" in -vtz=*) exit 0 ;; esac\nexec /usr/bin/awk "$@"\n')
+        (shim/'awk').chmod(0o755)
+        before = conf.read_bytes()
+        env = dict(os.environ, PATH=f'{shim}:{os.environ["PATH"]}', ENGINEX_ZONEINFO_DIR=str(zones))
+        p = subprocess.run(['sh', '-s'], input=script, capture_output=True, env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(conf.read_bytes(), before)
+        self.assertEqual(list(conf.parent.glob('*.tmp.*')), [])
+        self.assertIn(b'timezone not restored', p.stderr)
+        # the same disk with a working awk is brought up to date
+        p = subprocess.run(['sh', '-s'], input=script, capture_output=True, env=dict(os.environ, ENGINEX_ZONEINFO_DIR=str(zones)))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn('TZEnvVar=Europe/Berlin\n', conf.read_text())
+        self.assertIn('Setting299=value\n', conf.read_text())
+
     def test_prepare_uses_the_names_the_programs_use(self):
         # the shell copies of two Go patterns must not drift from the programs that own them
         fetch = (Path(__file__).resolve().parents[2]/'pkg/deemixclient/fetch.go').read_text()

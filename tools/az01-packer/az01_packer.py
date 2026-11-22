@@ -579,12 +579,19 @@ mkdir -p /data/enginex
 chmod 700 /data/enginex
 # A write that cannot be finished for want of room keeps the file it would have replaced: the step goes on and says
 # so once at the end. A failure with room left is not ours to swallow: it stays fatal, as before.
+# On a full ext4 the status of a write cannot be trusted (BusyBox awk says 0 when its output was cut, and ext4 then renames
+# the empty copy over the original), so with the floor out of reach nothing is replaced at all: `hold` says so up front.
 unwritten=
+unwritten_add() { case ", $unwritten, " in *", $1, "*) ;; *) unwritten="${unwritten:+$unwritten, }$1" ;; esac; }
+hold() { # <what>: the floor could not be met, so this write is not tried
+    [ -n "$low" ] || return 1
+    unwritten_add "$1"
+}
 settle() { # <what> <command...>
     what=$1; shift
     "$@" && return 0
     room && return 1
-    unwritten="${unwritten:+$unwritten, }$what"
+    unwritten_add "$what"
 }
 # put <file> <text>: through a temporary file of its own, so a full disk never leaves half a file in the old one's place.
 put() { printf '%s\n' "$2" > "$1.new" && mv -f "$1.new" "$1" || { rm -f "$1.new"; return 1; }; }
@@ -593,6 +600,7 @@ trap '[ -z "$work" ] || rm -rf "$work"' 0
 # Public images seed no key: SSH stays off until the owner adds one (#46).
 seed_keys() {
     [ ! -e /data/enginex/authorized_keys ] && [ -s /usr/share/enginex/authorized_keys ] || return 0
+    ! hold 'SSH keys' || return 0
     [ -n "$work" ] && cp /usr/share/enginex/authorized_keys "$work/authorized_keys" &&
         chmod 600 "$work/authorized_keys" && mv "$work/authorized_keys" /data/enginex/authorized_keys
 }
@@ -602,6 +610,7 @@ retire_key() {
     [ -f /data/enginex/authorized_keys ] && [ ! -e /data/enginex/keep-release-key ] &&
         grep -qF "$retired" /data/enginex/authorized_keys &&
         ! grep -qsF "$retired" /usr/share/enginex/authorized_keys || return 0
+    ! hold 'SSH keys' || return 0
     [ -n "$work" ] || return 1
     grep -vF "$retired" /data/enginex/authorized_keys > "$work/authorized_keys"
     # grep says 1 when nothing is left to write, 2 when it could not read or write
@@ -609,6 +618,7 @@ retire_key() {
 }
 host_key() {
     [ ! -e /data/enginex/ssh_host_ed25519_key ] || return 0
+    ! hold 'SSH host key' || return 0
     [ -n "$work" ] && /usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$work/ssh_host_ed25519_key" &&
         mv "$work/ssh_host_ed25519_key" /data/enginex/ssh_host_ed25519_key &&
         mv "$work/ssh_host_ed25519_key.pub" /data/enginex/ssh_host_ed25519_key.pub
@@ -638,6 +648,7 @@ install_ui() {
     for path in "$ui" "$ui/packs" "$ui/icons"; do
         [ ! -L "$path" ] || { echo "Refusing UI symlink: $path" >&2; return 1; }
     done
+    ! hold 'UI packs' || return 0
     umask 022
     mkdir -p "$ui"
     stage=$(mktemp -d "$ui/.install.XXXXXX") || return 1
@@ -728,6 +739,7 @@ write_engine_tz() {
         [ ! -L "$chk" ] || { echo "Refusing Engine.conf symlink: $chk" >&2; return 1; }
     done
     should_restore_tz "$conf" "$tz_file" || return 0
+    ! hold 'time zone' || return 0
     (
         umask 022
         mkdir -p "$air_dir"
@@ -755,6 +767,8 @@ write_engine_tz() {
                     }
                 }
             ' "$conf" > "$tmp" || { rm -f "$tmp"; exit 1; }
+            # awk says 0 for output it could not write: the copy keeps every line of the original or it is not used
+            [ "$(wc -l < "$tmp")" -ge "$(wc -l < "$conf")" ] || { rm -f "$tmp"; exit 1; }
         else
             printf '[TimeDateSettings]\\nTZEnvVar=%s\\n' "$tz" > "$tmp" || { rm -f "$tmp"; exit 1; }
         fi
@@ -794,8 +808,8 @@ restore_timezone() {
     fi
     [ -z "$tz_failed" ]
 }
-install_ui || { echo "enginex-prepare: UI packs not installed" >&2; room || unwritten="${unwritten:+$unwritten, }UI packs"; }
-restore_timezone || { echo "enginex-prepare: timezone not restored" >&2; room || unwritten="${unwritten:+$unwritten, }time zone"; }
+install_ui || { echo "enginex-prepare: UI packs not installed" >&2; room || unwritten_add 'UI packs'; }
+restore_timezone || { echo "enginex-prepare: timezone not restored" >&2; room || unwritten_add 'time zone'; }
 # The one line for the journal and the start-up report (its journal section carries this unit's lines).
 [ -z "$low" ] || echo "enginex-prepare: internal storage is full ($low KiB free); not written: ${unwritten:-nothing}" >&2
 '''
