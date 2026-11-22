@@ -410,16 +410,16 @@ rebuild_overlay() {
     local host=$1 slug=$2; shift 2
     local artifact="tools/dev/.integrate-artifacts/$slug" inner
     inner="set -eu; rm -rf tools/dev/.integrate-artifacts; mkdir -p '$artifact'"
-    local file
+    local file fetch_name=
     for file in "$@"; do
         case $file in
-            rootfs-overlay/*libengine-ui-hook.so) inner+="; OUT='../../$artifact/libengine-ui-hook.so' sh tools/ui-mod/build.sh" ;;
-            rootfs-overlay/*libedisksd-hook.so) inner+="; OUT='../../$artifact/libedisksd-hook.so' sh tools/edisksd-hook/build.sh" ;;
+            rootfs-overlay/*libengine-ui-hook.so) inner+="; OUT='../../$artifact/libengine-ui-hook.so' sh tools/ui-mod/build.sh"; fetch_name=libengine-ui-hook.so ;;
+            rootfs-overlay/*libedisksd-hook.so) inner+="; OUT='../../$artifact/libedisksd-hook.so' sh tools/edisksd-hook/build.sh"; fetch_name=libedisksd-hook.so ;;
             *) echo "no rebuild recipe for prebuilt object: $file" >&2; return 1 ;;
         esac
     done
     mkdir -p "$tmp/artifacts/$slug"
-    remote_run "$host" "$inner" --fetch "$artifact:$tmp/artifacts/$slug"
+    remote_run "$host" "$inner" --fetch "$artifact/$fetch_name:$tmp/artifacts/$slug"
     for file in "$@"; do
         case $file in
             rootfs-overlay/*libengine-ui-hook.so) cmp -s "$worktree/$file" "$tmp/artifacts/$slug/libengine-ui-hook.so" || { echo "prebuilt hook is out of sync: $file" >&2; return 1; } ;;
