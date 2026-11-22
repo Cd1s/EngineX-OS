@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"fmt"
 	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"os"
 	"path/filepath"
@@ -31,7 +32,13 @@ func TestMain(m *testing.M) {
 	samplerDataDir = at("data", "enginex", "samples")
 	// The update keeps updateReserve free for Engine; the tests run on whatever disk the host has.
 	freeBytes = func(string) (int64, bool) { return 1 << 40, true }
+	role := fourDeckRolePath
 	code := m.Run()
+	if code == 0 && fourDeckRolePath != role {
+		// A test that sets the path must put the old value back, not the deck's real path.
+		fmt.Fprintln(os.Stderr, "a test left fourDeckRolePath at", fourDeckRolePath)
+		code = 1
+	}
 	os.RemoveAll(dir)
 	os.Exit(code)
 }
