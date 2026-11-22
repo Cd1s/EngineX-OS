@@ -427,7 +427,15 @@ pre|settings)
         esac
     fi
     if ! feature_off gateway && ! feature_off sso && ! grep -qx 'scope=tidal' "$UI/settings.conf" 2>/dev/null; then
-        if grep -Eq '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null && ! grep -E '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null | grep -q 'accessToken'; then
+        # The DJ's sign-ins are replaced only by a whole copy. The copy is written next to the file, and it counts as whole when it
+        # is not empty and has exactly as many bytes as a second run of the same generator writes into a pipe: a write that stops
+        # (no room) leaves a prefix of the output, which is always shorter, whatever the byte it stops at, and an awk that says 0
+        # for output it could not write (BusyBox) is caught the same way. The second run is on this rewrite path only.
+        accounts_swap() { # <generator>: a function that writes the new file to stdout
+            "$1" > "$accounts.tmp" && [ -s "$accounts.tmp" ] && [ "$("$1" | wc -c)" -eq "$(wc -c < "$accounts.tmp")" ] &&
+                mv "$accounts.tmp" "$accounts" || rm -f "$accounts.tmp"
+        }
+        accounts_retoken() {
             awk '{
                 if ($0 ~ /"TIDAL"[[:space:]]*:/ && $0 !~ /accessToken/) {
                     comma = ($0 ~ /,[[:space:]]*$/) ? "," : ""
@@ -435,15 +443,19 @@ pre|settings)
                 } else {
                     print
                 }
-            }' "$accounts" > "$accounts.tmp" && mv "$accounts.tmp" "$accounts"
+            }' "$accounts"
+        }
+        accounts_add() {
+            if grep -q '"' "$accounts" 2>/dev/null; then
+                awk '!d && (i = index($0, "{")) { $0 = substr($0, 1, i) "\n    " ENVIRON["T"] "," substr($0, i + 1); d = 1 } 1' "$accounts"
+            else
+                printf '{\n    %s\n}\n' "$T"
+            fi
+        }
+        if grep -Eq '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null && ! grep -E '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null | grep -q 'accessToken'; then
+            accounts_swap accounts_retoken
         elif ! grep -q '"TIDAL"' "$accounts" 2>/dev/null; then
-            {
-                if grep -q '"' "$accounts" 2>/dev/null; then
-                    awk '!d && (i = index($0, "{")) { $0 = substr($0, 1, i) "\n    " ENVIRON["T"] "," substr($0, i + 1); d = 1 } 1' "$accounts" > "$accounts.tmp"
-                else
-                    printf '{\n    %s\n}\n' "$T" > "$accounts.tmp"
-                fi
-            } && [ -s "$accounts.tmp" ] && mv "$accounts.tmp" "$accounts" || rm -f "$accounts.tmp"
+            accounts_swap accounts_add
         fi
     fi
     fi
