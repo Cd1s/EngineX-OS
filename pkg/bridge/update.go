@@ -97,6 +97,9 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	if err != nil {
 		return enginedb.Result{}, quickLate(ctx, err)
 	}
+	if err = ReconcileContext(inner, r, l); err != nil {
+		return enginedb.Result{}, quickLate(ctx, err)
+	}
 	read := time.Since(start)
 	fresh, err := quickPaths(dir, l)
 	if err != nil {
@@ -177,6 +180,9 @@ func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resol
 	}
 	if progress != nil {
 		progress(0, len(l.Tracks))
+	}
+	if err := ReconcileContext(ctx, r, l); err != nil {
+		return enginedb.Result{}, err
 	}
 	if _, err := quickPaths(stage, l); err != nil {
 		return enginedb.Result{}, err
