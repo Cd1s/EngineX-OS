@@ -31,14 +31,28 @@ func TestGuardianCommandDeadlineWithoutTimeoutUtility(t *testing.T) {
 }
 
 func TestGuardianDataOnlyDeadlineIsSoft(t *testing.T) {
-	mount := mountFixture(t)
+	mount := mountWithNFDTracks(t, 3000)
 	var out, errOut bytes.Buffer
-	if code := Guardian([]string{"--heal-mount", mount, "--data-only", "--timeout", "1ns"}, &out, &errOut); code != 0 {
+	started := time.Now()
+	if code := Guardian([]string{"--heal-mount", mount, "--data-only", "--timeout", "2s"}, &out, &errOut); code != 0 {
 		t.Fatalf("soft data-only deadline code=%d out=%s err=%s", code, &out, &errOut)
+	}
+	if elapsed := time.Since(started); elapsed >= 3*time.Second {
+		t.Fatalf("soft deadline did not return promptly: %s", elapsed)
 	}
 	var results []guardianResult
 	if err := json.Unmarshal(out.Bytes(), &results); err != nil || len(results) != 1 || !results[0].Healthy {
 		t.Fatalf("soft data-only deadline result=%s err=%v", &out, err)
+	}
+	if results[0].PathsNormalized != 3000 {
+		t.Fatalf("first pass did not finish the bounded fixture: %s stderr=%s", &out, &errOut)
+	}
+	out.Reset()
+	if code := Guardian([]string{"--heal-mount", mount, "--data-only", "--timeout", "10s"}, &out, &errOut); code != 0 {
+		t.Fatalf("second pass code=%d out=%s err=%s", code, &out, &errOut)
+	}
+	if err := json.Unmarshal(out.Bytes(), &results); err != nil || len(results) != 1 || results[0].PathsNormalized != 0 {
+		t.Fatalf("second pass was not idempotent: %s", &out)
 	}
 }
 
@@ -89,6 +103,35 @@ func mountFixture(t *testing.T) string {
 		t.Fatal(err)
 	}
 	db.Close()
+	return mount
+}
+
+func mountWithNFDTracks(t *testing.T, count int) string {
+	t.Helper()
+	mount := mountFixture(t)
+	path := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE Track SET isAnalyzed=0 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	for id := 2; id <= count+1; id++ {
+		old := filepath.ToSlash(filepath.Join("..", "Music", "Cafe\u0301", fmt.Sprintf("track-%04d.mp3", id)))
+		new := filepath.ToSlash(filepath.Join("..", "Music", "Café", fmt.Sprintf("track-%04d.mp3", id)))
+		actual := filepath.Join(mount, "Engine Library", filepath.FromSlash(new))
+		if err := os.MkdirAll(filepath.Dir(actual), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(actual, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes,isAnalyzed) VALUES(?,?,?,?,0)`, id, old, filepath.Base(old), 1); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return mount
 }
 func TestCLIHealAndStatusJSON(t *testing.T) {

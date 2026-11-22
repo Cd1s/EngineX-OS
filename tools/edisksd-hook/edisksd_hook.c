@@ -61,6 +61,7 @@
 #endif
 #define HFSPLUS_MAGIC 0x482b
 #define HOOK_BUDGET_MS INT64_C(20000)
+#define GUARDIAN_SOFT_MARGIN_MS INT64_C(3000) // measured 1.12 s worst-case from soft expiry to child reap on armhf, 20 ms polling
 #define MAX_VIEW_ENTRIES 4096
 #define VIEW_MAGIC UINT64_C(0x5343484653563031)
 struct libmnt_context;
@@ -105,6 +106,10 @@ static int64_t now_ms(void) {
 static int budget(int64_t deadline) {
     if (now_ms() >= deadline) { errno=ETIMEDOUT; return -1; }
     return 0;
+}
+static int64_t guardian_soft_budget_ms(int64_t left) {
+    int64_t soft = left > INT64_C(4000) ? left - GUARDIAN_SOFT_MARGIN_MS : (left * 3) / 4;
+    return soft < INT64_C(500) ? INT64_C(500) : soft;
 }
 
 // Check EVERY component. A missing final component is allowed only when the
@@ -1850,7 +1855,7 @@ static int after_mount_at(const char *mount_path,const char *label_target,const 
 		char timeout[32];
 		int64_t left=deadline-now_ms();
 		if(left<1)left=1;
-		snprintf(timeout,sizeof timeout,"%lldms",(long long)left);
+		snprintf(timeout,sizeof timeout,"%lldms",(long long)guardian_soft_budget_ms(left));
 		char *const a[]={(char *)GUARDIAN_PATH,"--heal-mount",(char *)mount_path,"--data-only","--timeout",timeout,NULL};
         if(run(a,deadline)){if(errno==ETIMEDOUT)done=TIMED_OUT;note("guardian failed on",label_target,errno);}
         done|=HEALED;

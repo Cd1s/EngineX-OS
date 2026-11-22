@@ -48,7 +48,7 @@ func TestHealMountDataOnlyNormalizesMissingNFDPaths(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	collisionPath := "../Music/Collision\u0301.mp3"
+	collisionPath := "../Music/Collisione\u0301.mp3"
 	collisionNFC := "../Music/Collisioné.mp3"
 	write(collisionNFC)
 	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes) VALUES(?,?,?,?)`, 6, collisionPath, filepath.Base(collisionPath), 32); err != nil {
@@ -79,6 +79,15 @@ func TestHealMountDataOnlyNormalizesMissingNFDPaths(t *testing.T) {
 	streamingPath := "../Music/Cafe\u0301-stream.mp3"
 	write("../Music/Café-stream.mp3")
 	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,streamingSource) VALUES(103,?,?,?)`, streamingPath, filepath.Base(streamingPath), "tidal"); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := "../Music/Sym linke\u0301.mp3"
+	symlinkNFC := "../Music/Sym linké.mp3"
+	write("../Music/symlink-target.mp3")
+	if err := os.Symlink("symlink-target.mp3", filepath.Join(root, "Engine Library", filepath.FromSlash(symlinkNFC))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes) VALUES(104,?,?,1)`, symlinkPath, filepath.Base(symlinkPath)); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
@@ -148,32 +157,66 @@ func TestHealMountDataOnlyNormalizesMissingNFDPaths(t *testing.T) {
 	if norm.NFC.String(gotStreamingPath) == gotStreamingPath {
 		t.Fatal("streaming path unexpectedly normalized")
 	}
+	if err := check.QueryRow(`SELECT path FROM Track WHERE id=104`).Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	if path != symlinkPath {
+		t.Fatalf("symlink target was treated as a regular file: %q", path)
+	}
 }
 
 func TestNormalizeTrackPathPreservesLastEditTime(t *testing.T) {
 	_, root, db := testlibrary.Create(t)
-	old := "../Music/Cafe\u0301.mp3"
-	new := "../Music/Café.mp3"
-	path := filepath.Join(root, "Engine Library", filepath.FromSlash(new))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
+	rows := []struct {
+		id       int
+		valueSQL string
+		valueArg any
+	}{
+		{1, "?", int64(1700000000)},
+		{2, "NULL", nil},
+		{3, "?", "2024-01-15 10:20:30"},
+		{4, "?", ""},
 	}
-	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, row := range rows {
+		old := filepath.ToSlash(filepath.Join("..", "Music", "Cafe"+string(rune(0x0301))+"-"+strconv.Itoa(row.id)+".mp3"))
+		new := filepath.ToSlash(filepath.Join("..", "Music", "Café-"+strconv.Itoa(row.id)+".mp3"))
+		path := filepath.Join(root, "Engine Library", filepath.FromSlash(new))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		query := `INSERT INTO Track(id,path,filename,lastEditTime,fileBytes,isAnalyzed) VALUES(?,?,?,` + row.valueSQL + `,1,1)`
+		if row.valueSQL == "NULL" {
+			if _, err := db.Exec(query, row.id, old, filepath.Base(old)); err != nil {
+				t.Fatal(err)
+			}
+		} else if _, err := db.Exec(query, row.id, old, filepath.Base(old), row.valueArg); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,lastEditTime,fileBytes,isAnalyzed) VALUES(1,?,?,?,?,1)`, old, filepath.Base(old), 1700000000, 1); err != nil {
-		t.Fatal(err)
+	type storedValue struct{ typ, hex string }
+	before := map[int]storedValue{}
+	for _, row := range rows {
+		var v storedValue
+		if err := db.QueryRow(`SELECT typeof(lastEditTime), hex(CAST(lastEditTime AS BLOB)) FROM Track WHERE id=?`, row.id).Scan(&v.typ, &v.hex); err != nil {
+			t.Fatal(err)
+		}
+		before[row.id] = v
 	}
 	var report Report
 	if _, err := normalizeTrackPaths(context.Background(), db, root, &report); err != nil {
 		t.Fatal(err)
 	}
-	var edited int64
-	if err := db.QueryRow(`SELECT lastEditTime FROM Track WHERE id=1`).Scan(&edited); err != nil {
-		t.Fatal(err)
-	}
-	if edited != 1700000000 {
-		t.Fatalf("normalization changed lastEditTime: %d", edited)
+	for _, row := range rows {
+		var after storedValue
+		if err := db.QueryRow(`SELECT typeof(lastEditTime), hex(CAST(lastEditTime AS BLOB)) FROM Track WHERE id=?`, row.id).Scan(&after.typ, &after.hex); err != nil {
+			t.Fatal(err)
+		}
+		if after != before[row.id] {
+			t.Fatalf("track %d lastEditTime changed from %+v to %+v", row.id, before[row.id], after)
+		}
 	}
 }
 
@@ -199,7 +242,7 @@ func TestHealMountDataOnlyRefusesLibraryInUse(t *testing.T) {
 
 func TestTrackPathRejectsMountRoot(t *testing.T) {
 	root := t.TempDir()
-	for _, path := range []string{".", "../../outside.mp3", "/tmp/outside.mp3"} {
+	for _, path := range []string{".", "..", "../Café/..", "../../outside.mp3", "/tmp/outside.mp3"} {
 		if got, ok := trackPath(root, path); ok || got != "" {
 			t.Fatalf("trackPath(%q)=%q,%v, want rejection", path, got, ok)
 		}

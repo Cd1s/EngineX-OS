@@ -278,8 +278,14 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 	if closeErr != nil {
 		return r, closeErr
 	}
+	if ctx.Err() != nil {
+		return r, nil
+	}
 	history := filepath.Join(filepath.Dir(path), "hm.db")
 	if _, e := os.Stat(history); e == nil {
+		if ctx.Err() != nil {
+			return r, nil
+		}
 		historyRW, e := writable(history)
 		if e != nil {
 			return r, e
@@ -464,14 +470,14 @@ func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Repor
 			if oldFilename == newFilename {
 				_, err = tx.Exec(`UPDATE Track SET path=? WHERE id=? AND path=?`, candidate.nfcPath, candidate.id, candidate.path)
 			} else {
-				var lastEditTime sql.NullInt64
-				if err = tx.QueryRow(`SELECT lastEditTime FROM Track WHERE id=? AND path=?`, candidate.id, candidate.path).Scan(&lastEditTime); err == nil {
+				var lastEditType string
+				var lastEditTime any
+				if err = tx.QueryRow(`SELECT typeof(lastEditTime), CASE typeof(lastEditTime) WHEN 'text' THEN CAST(lastEditTime AS BLOB) ELSE lastEditTime END FROM Track WHERE id=? AND path=?`, candidate.id, candidate.path).Scan(&lastEditType, &lastEditTime); err == nil {
+					if b, ok := lastEditTime.([]byte); ok && lastEditType == "text" {
+						lastEditTime = string(b)
+					}
 					if _, err = tx.Exec(`UPDATE Track SET path=?, filename=? WHERE id=? AND path=?`, candidate.nfcPath, newFilename, candidate.id, candidate.path); err == nil {
-						var restore any
-						if lastEditTime.Valid {
-							restore = lastEditTime.Int64
-						}
-						_, err = tx.Exec(`UPDATE Track SET lastEditTime=? WHERE id=?`, restore, candidate.id)
+						_, err = tx.Exec(`UPDATE Track SET lastEditTime=? WHERE id=?`, lastEditTime, candidate.id)
 					}
 				}
 			}

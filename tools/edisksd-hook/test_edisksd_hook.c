@@ -1009,7 +1009,7 @@ static void test_heal_before_visible(const char *root) {
     snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
     struct libmnt_context c={.target=target,.source="/dev/sdu1"};
     assert(!mnt_context_mount(&c)&&c.status==1);
-    snprintf(expect,sizeof expect,"private --heal-mount %s --data-only\n",target);expect_file(log,expect);
+    snprintf(expect,sizeof expect,"private --heal-mount %s --data-only",target);expect_guardian(log,expect);
     join(p,target,"Engine Library/Database2/m.db");expect_file(p,"healed\n");
     assert(count_mounts(target)==1);assert(!umount2(target,UMOUNT_NOFOLLOW));unlink(log);
     // A stick without an Engine database is not healed.
@@ -1021,7 +1021,7 @@ static void test_heal_before_visible(const char *root) {
     join(p,hfs,"Engine Library/Database2/m.db");write_file(p,"made on the Mac\n");
     snprintf(test_disk,sizeof test_disk,"%s",hfs);test_disk_ro=1;snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);c.status=0;
     unsigned views_before=count_views();
-    assert(!mnt_context_mount(&c)&&c.status==1);expect_file(log,expect);
+    assert(!mnt_context_mount(&c)&&c.status==1);expect_guardian(log,expect);
     join(p,target,"Engine Library/Database2/m.db");expect_file(p,"healed\n");
     join(p,hfs,"Engine Library/Database2/m.db");expect_file(p,"made on the Mac\n");
     assert(count_views()==views_before+1);
@@ -1029,10 +1029,10 @@ static void test_heal_before_visible(const char *root) {
     // A heal that runs out of its whole window: killed once, then skipped, never after the visible mount.
     snprintf(script,sizeof script,"#!/bin/sh\necho \"$*\" >> '%s'\nsleep 5\n",log);write_file(test_guardian_system,script);
     snprintf(test_disk,sizeof test_disk,"%s",disk);
-    snprintf(expect,sizeof expect,"--heal-mount %s --data-only\n",target);
+    snprintf(expect,sizeof expect,"--heal-mount %s --data-only",target);
     for(int i=0;i<2;i++) {
         int64_t t0=now_ms();c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
-        assert(now_ms()-t0<(i?1000:3500));expect_file(log,expect);
+        assert(now_ms()-t0<(i?1000:3500));expect_guardian(log,expect);
         assert(!umount2(target,UMOUNT_NOFOLLOW));
     }
     unlink(log);unsetenv("EDISKSD_TEST_PID");

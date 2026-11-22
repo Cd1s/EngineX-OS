@@ -44,12 +44,22 @@ func mp3GridBudget(deadline time.Duration, mountOnly bool) time.Duration {
 	}
 }
 
+const guardianCleanupReserve = 250 * time.Millisecond
+
+func guardianRemaining(start time.Time, deadline time.Duration) time.Duration {
+	if deadline <= 0 {
+		return 0
+	}
+	return time.Until(start.Add(deadline))
+}
+
 // Guardian heals or inspects Engine OS 5.0.4 libraries once and prints JSON.
 //
 // --watch is retired for the reason rb-bridge's is: healing a library Engine
 // has open races Engine's own writes. Repairs run from the mount hook, before
 // Engine attaches. Old units still pass --watch, so it exits at once.
 func Guardian(args []string, out, errOut io.Writer) int {
+	commandStart := time.Now()
 	fs := flag.NewFlagSet("engine-guardian", flag.ContinueOnError)
 	fs.SetOutput(errOut)
 	mount := fs.String("heal-mount", "", "mounted volume containing Engine Library/Database2")
@@ -77,11 +87,13 @@ func Guardian(args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(errOut, "timeout must not be negative")
 		return 2
 	}
-	if *deadline > 0 && !*dataOnly {
+	var hardTimer *time.Timer
+	if *deadline > 0 {
 		// Vendor images need not ship a timeout executable or BusyBox applet.
-		// This CLI-only deadline also bounds a locked repair before Engine starts.
-		timer := time.AfterFunc(*deadline, func() { os.Exit(124) })
-		defer timer.Stop()
+		// This deadline starts at process entry and remains the hard upper bound
+		// for every caller, including data-only mount heals.
+		hardTimer = time.AfterFunc(time.Until(commandStart.Add(*deadline)), func() { os.Exit(124) })
+		defer hardTimer.Stop()
 	}
 	if *checkCopy != "" {
 		if fs.NArg() != 0 || *mount != "" || *status || *dataOnly || *reserve || *fixGrids || *bootReport {
@@ -126,9 +138,12 @@ func Guardian(args []string, out, errOut io.Writer) int {
 		var r dbhealer.Report
 		var mp3Report *enginedb.MP3GridReport
 		var err error
-		runMP3Fix := func(mountOnly bool) {
+		runMP3Fix := func(budget time.Duration, mountOnly bool) {
+			if budget < 0 {
+				return
+			}
 			mr, ferr := enginedb.FixMP3Grids(context.Background(), m, enginedb.MP3GridOptions{
-				Budget: mp3GridBudget(*deadline, mountOnly),
+				Budget: mp3GridBudget(budget, mountOnly),
 			})
 			mp3Report = &mr
 			if ferr != nil {
@@ -146,7 +161,7 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			r.ReserveFixed, err = dbhealer.NormalizeDatabase2(filepath.Join(m, "Engine Library", "Database2"))
 			r.Healthy = err == nil
 			if err == nil && *fixGrids {
-				runMP3Fix(false)
+				runMP3Fix(guardianRemaining(commandStart, *deadline), false)
 			}
 		case *fixGrids && !*dataOnly:
 			r.Mount, r.CheckedAt = m, time.Now().UTC()
@@ -176,16 +191,25 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			mountCtx := context.Background()
 			cancelMount := func() {}
 			if *deadline > 0 {
-				mountCtx, cancelMount = context.WithTimeout(context.Background(), *deadline)
+				remaining := guardianRemaining(commandStart, *deadline) - guardianCleanupReserve
+				if remaining < 0 {
+					remaining = 0
+				}
+				mountCtx, cancelMount = context.WithTimeout(context.Background(), remaining)
 			}
+			budgetExpired := false
 			if *dataOnly {
 				r, err = dbhealer.HealMountDataOnlyContext(mountCtx, m, *sessions)
+				budgetExpired = mountCtx.Err() != nil
 			} else {
 				r, err = dbhealer.HealMount(m, *sessions)
 			}
 			cancelMount()
-			if err == nil {
-				runMP3Fix(*dataOnly)
+			if err == nil && !budgetExpired {
+				remaining := guardianRemaining(commandStart, *deadline)
+				if *deadline == 0 || remaining > guardianCleanupReserve {
+					runMP3Fix(remaining, *dataOnly)
+				}
 			}
 		}
 		if err == nil && !*status {
