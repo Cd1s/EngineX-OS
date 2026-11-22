@@ -939,7 +939,7 @@ SERVICES_MAIN = """
 	// a plain object, so no binding re-evaluates on every long-poll reply.
 	readonly property var scShadowLive: ({seen: 0})
 	// The display renderer draws deck d: a display slot, or an Engine slot it covers while the track is on its way (scShadowCovers).
-	function scShadowVisible(d) { return d >= 1 && d <= 4 && (((scShadowEngineMask >> d) & 1) === 0 || !!scShadowDisplay[d]) && scDeckLocked(d) }
+	function scShadowVisible(d) { return d >= 1 && d <= 4 && (((scShadowEngineMask >> d) & 1) === 0 || !!scShadowDisplay[d]) && (scDeckLocked(d) || (!!root.scConsoleLine && ((root.scLineMask >> d) & 1) === 1 && !!scShadowDisplay[d] && !!scShadowDisplay[d].lineIn)) }
 	function scShadowDeckFor(item) {
 		// Stock skins put the deck on different wrappers (deckIndex / deckData / deckView).
 		for (let p = item; p; p = p.parent) {
@@ -1079,11 +1079,11 @@ SERVICES_MAIN = """
 	}
 	Timer {
 		interval: 200; repeat: true
-		running: root.scFourDeckRole !== "" && root.scShadowEngineMask !== 30 && root.scShadowAnyPlaying(root.scShadowDisplay)
+		running: (root.scFourDeckRole !== "" || root.scLineLive) && root.scShadowEngineMask !== 30 && root.scShadowAnyPlaying(root.scShadowDisplay)
 		onTriggered: root.scShadowFrame = (root.scShadowFrame + 1) & 0xffff
 	}
 	Timer {
-		interval: 500; repeat: true; running: root.scFourDeckRole !== "" && root.scShadowEngineMask !== 30
+		interval: 500; repeat: true; running: (root.scFourDeckRole !== "" || root.scLineLive) && root.scShadowEngineMask !== 30
 		onTriggered: {
 			for (let d = 1; d <= 4; d++) {
 				const s = root.scShadowData(d)
@@ -1146,7 +1146,8 @@ SERVICES_MAIN = """
 			s.lead !== (e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master) || s.sync !== !!e.sync || s.keylock !== !!e.keylock ||
 			s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) || s.range !== (Number(e.range) || 0) ||
 			s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail || s.progress !== (Number(e.progress) || 0) || s.error !== (e.error || "") ||
-			s.engine !== !!e.engine || s.copying !== !!e.copying || s.durationMs !== (Number(e.durationMs) || 0) || s.fallback !== (e.fallback || "")) return false
+			s.engine !== !!e.engine || s.copying !== !!e.copying || s.durationMs !== (Number(e.durationMs) || 0) || s.fallback !== (e.fallback || "") ||
+			s.player !== (Number(e.player) || 0) || s.model !== (e.model || "")) return false
 		if (Array.isArray(e.cues)) {
 			const a = s.liveCues, b = e.cues
 			if (!Array.isArray(a) || a.length !== b.length) return false
@@ -1162,7 +1163,8 @@ SERVICES_MAIN = """
 			for (let i = 0; i < decks.length; i++) if (Number(decks[i].deck) === d) { e = decks[i]; break }
 			const old = scShadowData(d)
 			const isLine = !!(e && e.lineIn)
-			if (!e || scFourDeckRole === "" || (!isLine && scFourDeckRole.indexOf(String(d)) >= 0) || !(e.key || e.loading)) {
+			// No role: only a console's Line In lane, while its channel is on Line / AUX, is kept.
+			if (!e || (scFourDeckRole === "" && !(isLine && !!root.scConsoleLine && ((root.scLineMask >> d) & 1) === 1)) || (!isLine && scFourDeckRole.indexOf(String(d)) >= 0) || !(e.key || e.loading)) {
 				if (old) { if (!next) next = Object.assign({}, scShadowDisplay); delete next[d] }
 				delete scShadowDisplayRequests[d]; delete scShadowGridCache[d]; delete scShadowLiveCueCache[d]
 				continue
@@ -1185,7 +1187,7 @@ SERVICES_MAIN = """
 			if (fromCover) { delete scShadowDisplayRequests[d]; delete scShadowDisplayText[d] }
 			const sample = {key: key, name: e.name || "", title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
 				playing: !!e.playing, scratch: !!e.scratch, stale: !!e.stale, metadataOnly: !!e.metadataOnly, positionMs: pos, at: at,
-				pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
+				pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine, player: Number(e.player) || 0, model: e.model || "",
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master,
 				lead: e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master, sync: !!e.sync, keylock: !!e.keylock,
 				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, currentBpm: Number(e.currentBpm) || 0, range: Number(e.range) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
@@ -1777,7 +1779,58 @@ SERVICES_MAIN = """
 	}
 	Timer {
 		id: scShadowPollTimer
-		onTriggered: if (root.scFourDeckRole !== "") root.scShadowPoll()
+		onTriggered: if (root.scFourDeckRole !== "" || root.scLineLive) root.scShadowPoll()
+	}
+	// Console linking, stage 1 (console_line_view): a linked player or CDJ is shown on a mixer channel
+	// while that channel's input is Line / AUX. Display only: no Engine deck is loaded, nothing is sent,
+	// scFourDeckRole stays empty on a console, and a channel on its Engine input is never touched. Off,
+	// or on with no channel on Line / AUX, nothing here runs: no timer, no request, no stream-sync loop.
+	property bool scConsoleLine: false // the saved switch, honoured on the four consoles only
+	readonly property bool scConsoleLineBoard: ["JC11", "JC11S", "JP21", "JP24"].indexOf(scBoard) >= 0
+	property int scLineMask: 0 // bit N: channel N's input is Line / AUX, as the mixer says (a signal, never polled)
+	readonly property bool scLineLive: scConsoleLine && scLineMask !== 0
+	function scLineSync() {
+		let m = 0
+		if (scConsoleLine) for (let d = 1; d <= 4; d++) { const p = scTr(scShadowLinePaths[d - 1]); if (p && p.state) m |= 1 << d }
+		if (m !== scLineMask) scLineMask = m
+	}
+	// A channel back on its Engine input lets go of its lane at once, not at the next poll.
+	function scLineTrim() {
+		let next = null
+		for (let d = 1; d <= 4; d++) {
+			const old = scShadowDisplay[d]
+			if (old && old.lineIn && ((scLineMask >> d) & 1) === 0) {
+				if (!next) next = Object.assign({}, scShadowDisplay)
+				delete next[d]
+				delete scShadowDisplayRequests[d]; delete scShadowGridCache[d]; delete scShadowLiveCueCache[d]
+			}
+		}
+		if (next) scShadowDisplay = next
+	}
+	onScConsoleLineChanged: scLineSync()
+	onScLineMaskChanged: {
+		scLineTrim()
+		scShadowResponseVersion = "" // the next answer is applied even if stream-sync's picture did not change
+		// The new set of channels goes to stream-sync at once. Read from the two properties, not from scLineLive: this
+		// handler may run before that binding has caught up with the mask.
+		if (scConsoleLine && scLineMask !== 0) { scShadowPollAt = 0; scShadowPoll() }
+	}
+	onScLineLiveChanged: {
+		if (scLineLive || scFourDeckRole !== "") return
+		scShadowPollTimer.stop()
+		const x = scShadowPollRequest
+		if (x && x.readyState > 0 && x.readyState < 4) x.abort()
+	}
+	Connections { target: root.scConsoleLine ? root.scTr("/Engine/Mixer/Channel1/Line") : null; ignoreUnknownSignals: true; function onStateChanged() { root.scLineSync() } }
+	Connections { target: root.scConsoleLine ? root.scTr("/Engine/Mixer/Channel2/Line") : null; ignoreUnknownSignals: true; function onStateChanged() { root.scLineSync() } }
+	Connections { target: root.scConsoleLine ? root.scTr("/Engine/Mixer/Channel3/Line") : null; ignoreUnknownSignals: true; function onStateChanged() { root.scLineSync() } }
+	Connections { target: root.scConsoleLine ? root.scTr("/Engine/Mixer/Channel4/Line") : null; ignoreUnknownSignals: true; function onStateChanged() { root.scLineSync() } }
+	// This unit's Engine Link player number, for its post: a console orders the units it shows by it. Read
+	// when the role is known and again if the number changes; the sampler only copies it.
+	readonly property int scOwnPlayer: {
+		const t = scFourDeckRole !== "" ? scTr("/Client/Preferences/Player") : null
+		const n = t ? parseInt(t.string) : 0
+		return n >= 1 && n <= 8 ? n : 0
 	}
 	property bool scShadowCdjMaster: false // a CDJ on a shadow deck holds master
 	// Engine Link hands master to a deck that still plays when the master stops, and
@@ -2144,6 +2197,7 @@ SERVICES_MAIN = """
 			o.phaseMeter = !!pm && !!pm.enabled; o.phaseActive = !!pm && !!pm.active; o.aligned = !!pm && !!pm.isAligned
 			o.phase = o.aligned || !pm ? 0 : Math.round((Number(pm.phaseOffset) || 0) * 50) / 50
 			o.active = d === scShadowActiveDeck // on this unit's active layer (#201)
+			o.player = root.scOwnPlayer || undefined // a console showing this unit on a Line channel orders by it; absent when unknown
 			o.range = s.range; o.keylock = s.keylock // the peer's shadow deck shows the same range and key lock
 			o.service = s.net && root.scOwnService ? root.scOwnService(d) : "" // #305: the peer's shadow header shows this track's service mark
 			// What this deck's header and overview show beside the track; the peer's shadow deck shows them, its copy takes none.
@@ -2260,7 +2314,9 @@ SERVICES_MAIN = """
 		++scShadowGen
 		scShadowPollAt = Date.now()
 		let scLines = null
-		if (typeof root !== "undefined" && root && root.scTr) {
+		if (root.scConsoleLine && root.scLineMask !== 0) { // the console's Line In view: the channels the mixer says are on Line / AUX
+			for (let d = 1; d <= 4; d++) if ((root.scLineMask >> d) & 1) (scLines || (scLines = [])).push(d)
+		} else if (typeof root !== "undefined" && root && root.scTr) {
 			for (let d = 1; d <= 4; d++) {
 				try {
 					const p = root.scTr(root.scShadowLinePaths[d - 1])
@@ -4262,6 +4318,7 @@ SERVICES_MAIN = """
 		scFourDeckRole = scIsPlayerBoard && v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
 		scFourDeckOn = scIsPlayerBoard && !!v.fourDeckWaveform
 		scPairedSetting = scIsPlayerBoard && !!v.fourDeckWaveform && !!v.pairedView
+		scConsoleLine = scConsoleLineBoard && !!v.consoleLineView
 		scFourDeckRoleSetting = v.fourDeckRole || "auto"
 		scShadowMode = v.shadowMode || "auto"
 		scKeepPlayhead(v.playhead || 0)
@@ -6033,11 +6090,34 @@ FOUR_DECK_ENTRIES = """
 """
 
 # #99 Layout Manager: what a View 1..5 keeps besides the stock layout (scViewSnapshot).
+# Console linking, stage 1: on the four consoles one row, Stock / Line In, live (no Engine restart: the QML
+# follows the setting at once). The 4-deck rows above stay player-only, so this row is placed after them.
+CONSOLE_LINE_ENTRIES = """
+		EntryBase.ListEntry { // a linked player on a channel while its input is Line / AUX (console_line_view)
+			id: scConsoleLineEntry
+			text: "Linked View"
+			entryWidth: 176
+			visible: root.scConsoleLineBoard
+			readonly property int at: root.scConsoleLine ? 1 : 0
+			values: ["Stock", "Line In"]
+			currentValue: values[at]
+			onSelected: function(index) { if (index !== at) root.scCall("consoleLineView=" + index) }
+		},
+		@HEADLINE@ {
+			visible: root.scConsoleLineBoard
+			leftPadding: 24; rightPadding: 24
+			wrapMode: Text.WordWrap
+			Layout.preferredHeight: implicitHeight
+			color: "#9a9a9a"
+			text: "Line In: a linked player is shown on a channel while its input is Line or AUX; nothing is loaded and no deck is taken"
+		},
+"""
+
 VIEW_ENTRIES = """
 		@HEADLINE@ {
 			text: "ENGINEX VIEW PRESET"
 		},
-""" + CUE_COUNTDOWN_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES
+""" + CUE_COUNTDOWN_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES + CONSOLE_LINE_ENTRIES
 
 # #78: a deck in a booth can be switched off without reaching for the recessed rear
 # button. Engine's own quit path: the "Turn Off" confirmation, recording and library
@@ -7490,7 +7570,8 @@ SHADOW_BUSY = r"""
             id: scBusy
             // Auto mode, a CDJ this renderer draws because Engine cannot have its file
             // (sample.fallback, cdjFallback in stream-sync): the same line says why, for
-            // 8 s per track, and for as long as the lane has no waveform to draw.
+            // 8 s per track, and for as long as the lane has no waveform to draw. A console's
+            // Line In lane with a CDJ and this unit's Pro DJ Link switch off says "prolink-off".
             readonly property string why: scDisplay.busyState === 0 && scDisplay.live && scDisplay.sample && !scDisplay.sample.stale && scDisplay.sample.fallback || ""
             readonly property string whyKey: why === "" ? "" : why + scDisplay.sample.key
             property string told: ""
@@ -7510,9 +7591,18 @@ SHADOW_BUSY = r"""
                     anchors.verticalCenter: parent.verticalCenter
                     color: Style.font02Color; font: Style.fontH1
                     readonly property int retried: scDisplay.busyState > 3 || ["network", "timeout"].indexOf(scBusy.why) >= 0 ? 1 : 0
-                    text: (["Downloading", "Loading", "Waiting for source analysis", "File unavailable.", "Failed to open file within appropriate time.", "Could not load via network."][scDisplay.busyState - 1] || {streaming: "Streaming: no file to copy from CDJ.", link: "rekordbox Link: no file to copy from CDJ.", media: "CD or 2nd USB: no file to copy from CDJ.", network: "Could not load via network.", timeout: "Failed to open file within appropriate time."}[scBusy.why] || " ") + [" ", " " + "Retrying…"][retried]
+                    text: (["Downloading", "Loading", "Waiting for source analysis", "File unavailable.", "Failed to open file within appropriate time.", "Could not load via network."][scDisplay.busyState - 1] || {streaming: "Streaming: no file to copy from CDJ.", link: "rekordbox Link: no file to copy from CDJ.", media: "CD or 2nd USB: no file to copy from CDJ.", network: "Could not load via network.", timeout: "Failed to open file within appropriate time.", "prolink-off": "Pro DJ Link is off: no CDJ waveform"}[scBusy.why] || " ") + [" ", " " + "Retrying…"][retried]
                 }
             } }
+        }
+        // Console linking, stage 1: which unit a Line In lane shows (its player number, and its model when known).
+        Text {
+            objectName: "EngineX_Shadow_Unit"
+            textFormat: Text.PlainText
+            x: 8; y: 2
+            visible: scDisplay.live && !!scDisplay.sample && !!scDisplay.sample.lineIn && scDisplay.sample.player > 0
+            color: Style.font02Color; font: Style.fontH5
+            text: "Linked player" + " " + (scDisplay.sample ? scDisplay.sample.player : 0) + (scDisplay.sample && scDisplay.sample.model ? " · " + scDisplay.sample.model : "")
         }
 """
 

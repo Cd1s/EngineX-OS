@@ -72,7 +72,7 @@ type deckState struct {
 	MetadataOnly bool    `json:"metadataOnly,omitempty"` // CDJ state has no peer display asset endpoint
 	LineIn       bool    `json:"lineIn,omitempty"`       // all-in-one console: shadow source mapped to Line In channel
 	DisplayOnly  bool    `json:"displayOnly,omitempty"`  // this slot goes to the display renderer; Engine must not load it
-	Fallback     string  `json:"fallback,omitempty"`     // auto mode, a CDJ on the display renderer: why Engine cannot have its file (cdjFallback); the QML says so on the lane
+	Fallback     string  `json:"fallback,omitempty"`     // a CDJ on the display renderer: why Engine cannot have its file (cdjFallback, auto mode), or on a console's Line In lane why it has no waveform (cdjProlinkOff); the QML says so on the lane
 	Playing      bool    `json:"playing"`
 	PositionMS   float64 `json:"positionMs"`
 	Pitch        float64 `json:"pitch"` // percent
@@ -115,6 +115,13 @@ type deckState struct {
 	// Active: this deck is on the sender's active layer (its Layer A/B), what the
 	// paired 2-deck view (#201) shows of that player. An empty deck says it too.
 	Active bool `json:"active,omitempty"`
+	// Player is the sender's Engine Link player number, posted by the QML (read once, not per tick), and
+	// Model its board's image prefix, added by stream-sync from the board it runs on. A console showing a
+	// linked unit on a Line / AUX channel orders the units by Player and labels the lane with both. Absent
+	// from a CDJ (its number and name come from Pro DJ Link) and from an older sender. Never sent on to the
+	// QML of a player.
+	Player int    `json:"player,omitempty"`
+	Model  string `json:"model,omitempty"`
 	// ShadowMaster is the sender's shadow deck (a copy of the receiver's deck of
 	// that number) that Engine Link left holding master: the receiver's QML takes
 	// master back to a real deck. On every deck the sender posts; 0: none.
@@ -381,8 +388,9 @@ type shadowState struct {
 	used           map[string]time.Time // when a shadow deck last wanted a copy
 	polled         time.Time
 	running        bool
-	peerPort       int // tests only; 0 is 8080
-	pushPort       int // tests only; 0 is shadowBeaconPort
+	peerPort       int    // tests only; 0 is 8080
+	pushPort       int    // tests only; 0 is shadowBeaconPort
+	model          string // this board's image prefix, read once: the Model of every deck it sends
 
 	dataRoot, mediaRoot string
 	beacon              bool
@@ -401,7 +409,7 @@ type shadowState struct {
 }
 
 func newShadowState() *shadowState {
-	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, copyGens: map[string]string{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
+	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, copyGens: map[string]string{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn, model: imagePrefix(deviceCompatible())}
 }
 
 // shadow-v3: copies under the old "shadow" were analysed by Engine itself,
@@ -841,6 +849,7 @@ func (sh *shadowState) ownForPeer(now time.Time) []deckState {
 				}
 			}
 			d.At, d.Sent = 0, now.UnixMilli()
+			d.Model = sh.model
 			out = append(out, d)
 		}
 	}
@@ -1832,8 +1841,12 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	v := s.loadUI()
 	s.uiMu.Unlock()
-	role := s.activeRole(v)
 	debug := s.shadow.dbg.set(v.DebugTelemetry || shadowDebugFlagged())
+	if v.ConsoleLineView { // console linking, stage 1: the Line In view answers on its own, whatever role is stored
+		s.consoleLineGet(w, r, debug)
+		return
+	}
+	role := s.activeRole(v)
 	query := r.URL.Query()
 	seen, seenErr := strconv.ParseUint(query.Get("ver"), 10, 64)
 	out := []deckState{}
@@ -1962,7 +1975,8 @@ func cdjFallback(dev prolink.Device, host net.IP, failed string) string {
 // shadowLegacy is the Engine path. With all (Engine mode) every CDJ takes it.
 // Without (auto mode), display names the CDJ decks left to the display renderer
 // and why (cdjFallback; no reason on a console's Line In channel, lineIn, where
-// only that renderer draws), out of the decks free for CDJs.
+// only that renderer draws; its one reason, cdjProlinkOff, is set by consoleLineLanes),
+// out of the decks free for CDJs.
 func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]int) (out []deckState, free []int, lineIn bool, display map[int]string) {
 	devices := s.mergedDevices()
 	// The exporter's lock is taken before ours, never under it: closing the
@@ -2030,6 +2044,7 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 			continue
 		}
 		d := p.deckState
+		d.Player, d.Model = 0, "" // only a console's Line In lane uses them
 		d.Src = 0
 		if d.Deck != deck {
 			d.Src = d.Deck
@@ -2149,12 +2164,8 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 	return out, free, lineIn, display
 }
 
-// cdjDecks puts the CDJs on the free shadow decks: on their own player number
-// when it is free, the rest on what is left, Deck 2 first. A lone CDJ next to
-// a 1+3 player then shows beside Deck 1 also in the 2-waveform layout.
-// On an all-in-one console with Line channels, CDJs are mapped to the Line
-// channels in player-number order.
-func cdjDecks(devices []prolink.Device, free []int, now time.Time, lines ...[]int) map[int]prolink.Device {
+// liveCDJs are the CDJs that stand for a player now, by player number.
+func liveCDJs(devices []prolink.Device, now time.Time) []prolink.Device {
 	// A CDJ that changed its number keeps its old entry for a few seconds, which
 	// became a second (master) CDJ. An all-in-one (XDJ-XZ, XDJ-AZ) is several
 	// players on one address, all sending every 200 ms or so. So keep only the
@@ -2176,6 +2187,16 @@ func cdjDecks(devices []prolink.Device, free []int, now time.Time, lines ...[]in
 		}
 	}
 	slices.SortFunc(cdjs, func(a, b prolink.Device) int { return int(a.Number) - int(b.Number) })
+	return cdjs
+}
+
+// cdjDecks puts the CDJs on the free shadow decks: on their own player number
+// when it is free, the rest on what is left, Deck 2 first. A lone CDJ next to
+// a 1+3 player then shows beside Deck 1 also in the 2-waveform layout.
+// On an all-in-one console with Line channels, CDJs are mapped to the Line
+// channels in player-number order.
+func cdjDecks(devices []prolink.Device, free []int, now time.Time, lines ...[]int) map[int]prolink.Device {
+	cdjs := liveCDJs(devices, now)
 	out := map[int]prolink.Device{}
 	if len(lines) > 0 && len(lines[0]) > 0 {
 		lineSlots := slices.Clone(lines[0])
