@@ -13368,6 +13368,31 @@ assert.strictEqual(scStemExpiry.running, false);
 """, decks="[1]")
 
     @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_a_second_clock_correction_gives_the_request_up_instead_of_rebasing_it_again(self):
+        """#316 review 4: a request whose time looks more than one period away is counted again from now, once. Found that way again before
+        it expires (the clock was set back again), it is given up at once, so the wait is at most two periods whatever the clock does."""
+        self.run_node("""
+clock = 10000000;
+assert.strictEqual(tap('u11'), true);
+jump(-3600000);                                    // the clock is set an hour back
+advance(120000);                                   // the timer fires: the request is counted again from now
+assert.strictEqual(rowsNow['11'], 'wait');
+assert.strictEqual(scStemExpiry.running, true);
+assert.strictEqual(scStemExpiry.interval, 120000, 'armed again with one period');
+jump(-3600000);                                    // and set back again before it expires
+advance(120000);                                   // the timer fires again
+assert.strictEqual(rowsNow['11'], undefined, 'the second correction gives the request up: the row has left the waiting state');
+assert.deepStrictEqual(Object.keys(scStemAsking), [], 'the table is empty');
+assert.deepStrictEqual(root.scStemPending(), {});
+assert.strictEqual(scStemExpiry.running, false, 'and the timer has stopped');
+// a late answer to the request that was given up adds nothing
+answer(0, 200, {path: '/data/a.mp3', row: 100});
+flush();
+assert.strictEqual(loads.length, 0);
+assert.deepStrictEqual(scStemTurns, []);
+""", decks="[1]")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
     def test_a_failed_download_does_not_hold_its_track(self):
         """A failed answer frees the track at once: the row says so for a while and a new tap asks again."""
         self.run_node("""

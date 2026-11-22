@@ -5071,14 +5071,19 @@ SERVICES_MAIN = """
 	}
 	// Gives up the requests that did not answer in time: the row stops waiting. Runs from scStemExpiry, which waits for the oldest open
 	// request and stops itself when none is open, so nothing runs while idle. The deck sets its clock from the network after boot: a request
-	// can never have more than one period left, so more means the clock was set back and its deadline is counted again from now. The wait is
-	// then at most two periods, and the timer cannot be re-armed for the length of the jump.
+	// can never have more than one period left, so more means the clock was set back and its deadline is counted again from now, once. Found
+	// that way a second time it is given up at once. The wait is then at most two periods of the timer's own time, whatever the clock does,
+	// and the timer is never armed for the length of a jump.
 	function scStemExpire() {
 		const now = Date.now()
 		let next = -1
 		for (const gid of Object.keys(scStemAsking)) {
 			const open = scStemAsking[gid]
-			if (open.at + scStemAskMs - now > scStemAskMs) open.at = now
+			if (open.at + scStemAskMs - now > scStemAskMs) {
+				if (open.rebased) { delete scStemAsking[gid]; scStemMark([gid], ""); continue }
+				open.at = now
+				open.rebased = true
+			}
 			const left = open.at + scStemAskMs - now
 			if (left <= 0) { delete scStemAsking[gid]; scStemMark([gid], "") }
 			else if (next < 0 || left < next) next = left
