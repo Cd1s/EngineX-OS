@@ -18,7 +18,9 @@ Item {
     property int wantMask: 0
     readonly property int settleMs: 8000
     readonly property int lenMs: 18000
-    readonly property var plan: [
+    readonly property string planName: "@PLAN@" // stage1, send (console, stage 2) or player (a player's lanes, stage 2): set when the script copies this file
+    readonly property var plan: planName === "send" ? planSend : planName === "player" ? planPlayer : planStage1
+    readonly property var planStage1: [
         {n: "off", on: 0, line: [], units: 2, shot: true},
         {n: "on-noline", on: 1, line: [], units: 2, shot: false},
         {n: "on-line3", on: 1, line: [3], units: 1, shot: true},
@@ -28,6 +30,22 @@ Item {
         {n: "cdj-prolink-off", on: 1, line: [3], units: 1, cdjoff: 1, shot: true},
         {n: "release-all", on: 1, line: [], units: 3, shot: false},
         {n: "off-again", on: 0, line: [], units: 3, shot: false}
+    ]
+    // Stage 2, the console (a stub answers the held request: it says whether a player asks): Stock, Line In with nobody asking, a
+    // player asks, nobody asks again, Stock again (the answer says "asks" but the QML must not even look).
+    readonly property var planSend: [
+        {n: "x-off", on: 0, line: [], units: 0, asked: 0, shot: false},
+        {n: "x-idle", on: 1, line: [], units: 0, asked: 0, shot: false},
+        {n: "x-asked", on: 1, line: [], units: 0, asked: 1, shot: false},
+        {n: "x-quiet", on: 1, line: [], units: 0, asked: 0, shot: false},
+        {n: "x-off-again", on: 0, line: [], units: 0, asked: 1, shot: false}
+    ]
+    // Stage 2, a player's lanes: this Engine is told it is a player in the 4-deck layout (role 1+2, lanes 3 and 4 free); the stub, as
+    // the player's stream-sync, shows two console decks there with the row on.
+    readonly property var planPlayer: [
+        {n: "p-row-off", on: 0, line: [], units: 0, row: 0, shot: true},
+        {n: "p-row-on", on: 0, line: [], units: 0, row: 1, shot: true},
+        {n: "p-row-off-again", on: 0, line: [], units: 0, row: 0, shot: false}
     ]
     function log(msg) { console.warn("CLPHASE|" + String(msg).replace(/ /g, "_")) } // the engine log keeps a message only up to its first space
     function findMain(o) {
@@ -132,6 +150,12 @@ Item {
         log("HYBRID|" + name + "|" + (Config.device.hasHybridMode ? 1 : 0))
         log("LAYOUTNOW|" + name + "|" + layoutNames())
         log("BUSY|" + name + "|" + JSON.stringify(busyTexts()))
+        log("S2|" + name + "|asked=" + (m.scConsoleAsked ? 1 : 0) + "|line=" + (m.scConsoleLine ? 1 : 0) + "|row=" + (m.scShowConsole ? 1 : 0) + "|role=" + (m.scFourDeckRole || "-"))
+        const cl = []
+        collect(m.Window.window ? m.Window.window.contentItem : null, "EngineX_Shadow_Console", cl)
+        const consoleTexts = []
+        for (const l of cl) if (l.visible) consoleTexts.push(l.text)
+        log("CONSOLELABELS|" + name + "|" + JSON.stringify(consoleTexts))
     }
     property int pendingPhase: -1
     // The stub's answer is set before the channels change: a poll caused by the channel change must meet the units of
@@ -155,7 +179,7 @@ Item {
         post("http://127.0.0.1:8080/v1/enginex/ui?consoleLineView=" + ph.on)
         pendingPhase = i
         applyTimer.restart()
-        post("http://127.0.0.1:8080/ctl?units=" + ph.units + "&cdjoff=" + (ph.cdjoff || 0), function() { p.applyPhase(i) }) // stub only: the linked units on the network in this phase
+        post("http://127.0.0.1:8080/ctl?units=" + ph.units + "&cdjoff=" + (ph.cdjoff || 0) + "&asked=" + (ph.asked || 0) + "&row=" + (ph.row || 0), function() { p.applyPhase(i) }) // stub only: the linked units on the network in this phase
     }
     Timer { id: applyTimer; interval: 1500; repeat: false; onTriggered: p.applyPhase(p.pendingPhase) }
     Timer {

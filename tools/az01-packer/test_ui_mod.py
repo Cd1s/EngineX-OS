@@ -614,7 +614,7 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
             "scCueCountdown": "cueCountdown", "scRemoteLoad": "remoteLoad",
             "scSdHighSpeed": "sdHighSpeed", "scRemoteAccess": "remoteAccess",
             "scRestoreBpmOnUnsync": "restoreBpmOnUnsync",
-            "scHifiOutput": "hifiOutput",
+            "scHifiOutput": "hifiOutput", "scShowConsole": "consoleDecks",
         }
         for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
             qrc = LAB / version / "qrc"
@@ -4067,8 +4067,9 @@ assert.equal(gate("JP07", {{consoleLineView: true, fourDeckWaveform: true, fourD
         self.assertIn('onTriggered: if (root.scFourDeckRole !== "" || root.scLineLive) root.scShadowPoll()', bp.SERVICES_MAIN)
         self.assertIn("readonly property bool scLineLive: scConsoleLine && scLineMask !== 0", bp.SERVICES_MAIN)
         self.assertIn('running: (root.scFourDeckRole !== "" || root.scLineLive) && root.scShadowEngineMask !== 30', bp.SERVICES_MAIN)
-        # The sampler (the only sender) still runs on a role alone: a console never has one, so it never sends.
-        self.assertRegex(bp.SERVICES_MAIN, r'id: scShadowTickTimer\n\t\tinterval: 40; repeat: true\n\t\trunning: root\.scFourDeckRole !== ""\n')
+        # The sampler (the only sender) runs on a role, or, stage 2, on a console only while Line In is on and a player asks
+        # (test_the_console_sampler_does_not_run_without_an_asker): with Line In on and nobody asking it never sends.
+        self.assertRegex(bp.SERVICES_MAIN, r'id: scShadowTickTimer\n\t\tinterval: 40; repeat: true\n\t\trunning: root\.scFourDeckRole !== "" \|\| \(root\.scConsoleLine && root\.scConsoleAsked\)\n')
         # The mixer is followed by signal, never by timer: four Connections, none gated by a Timer, and no Timer names the mask.
         self.assertEqual(len(re.findall(r'Connections \{ target: root\.scConsoleLine \? root\.scTr\("/Engine/Mixer/Channel[1-4]/Line"\) : null', bp.SERVICES_MAIN)), 4)
         self.assertNotRegex(bp.SERVICES_MAIN, r'running:[^\n]*scLineSync')
@@ -4248,6 +4249,97 @@ assert.equal(JSON.stringify([{deck: 1, player: 3 || undefined}]), '[{"deck":1,"p
                 main = (Path(tmp) / "packs" / lang / "Skins/Embedded/EmbeddedMain.qml").read_text(encoding="utf-8")
                 for text in ([self.PROLINK_OFF] + list(rows[self.PROLINK_OFF].values())):
                     self.assertIn(text, main, (lang, text))
+
+    # Console linking, stage 2: a player can show the decks of a linked console in its free lanes (the row Show Console,
+    # default off); the console samples and posts only while a player asks and Line In is on.
+    def test_show_console_is_a_player_row_default_off_and_the_lane_says_it_is_the_consoles(self):
+        entries = bp.CONSOLE_DECKS_ENTRIES
+        self.assertIn('text: "Show Console"', entries)
+        self.assertEqual(entries.count("visible: root.scIsPlayerBoard && root.scFourDeckOn"), 2)  # the row and its hint, nothing else
+        self.assertIn('root.scCall("consoleDecks=" + (root.scShowConsole ? 0 : 1))', entries)
+        self.assertNotIn("scRestartCall", entries)  # live: stream-sync reads the flag, the QML follows each answer
+        self.assertIn(bp.CONSOLE_DECKS_ENTRIES, bp.VIEW_ENTRIES)  # in the Layout tab, after the console's own row
+        self.assertIn("property bool scShowConsole: false", bp.SERVICES_MAIN)  # default off
+        self.assertIn("scShowConsole = scIsPlayerBoard && !!v.consoleDecks\n", bp.SERVICES_MAIN)  # a console never has it on
+        rows = bp.load_dict()
+        for en in ("Show Console", "Show Console: the loaded decks of a linked console appear in this player's free lanes; display only", "Console deck"):
+            self.assertIn(en, rows, en)
+            for lang in ("zh-Hans", "zh-Hant", "es"):
+                self.assertTrue(rows[en][lang].strip(), (en, lang))
+        # The label of a lane that shows a console's deck: only for such a lane, in every language through the lookup.
+        self.assertIn('objectName: "EngineX_Shadow_Console"', bp.SHADOW_BUSY)
+        self.assertIn("visible: scDisplay.live && !!scDisplay.sample && scDisplay.sample.console > 0", bp.SHADOW_BUSY)
+        line = next(l for l in bp.SHADOW_BUSY.splitlines() if l.strip().startswith('text: "Console deck"'))
+        for lang in ("zh-Hans", "zh-Hant", "es"):
+            text = bp.translate(line, {en: t[lang] for en, t in rows.items()}, set(), live=True)
+            self.assertIn('Math.scI18n.t(%s)' % json.dumps(rows["Console deck"][lang], ensure_ascii=False), text, lang)
+        self.assertIn("console: Number(e.console) || 0", bp.SERVICES_MAIN)  # the sample carries it ...
+        self.assertIn('s.console !== (Number(e.console) || 0)', bp.SERVICES_MAIN)  # ... and a renumbered lane is a new sample
+
+    def test_the_console_sampler_does_not_run_without_an_asker(self):
+        # The timer is the only start of the sampler without a role: Line In on AND a player asking.
+        self.assertIn('running: root.scFourDeckRole !== "" || (root.scConsoleLine && root.scConsoleAsked)', bp.SERVICES_MAIN)
+        timer = re.search(r"Timer \{\n\t\tid: scShadowTickTimer\n(.*?)\n\t\}", bp.SERVICES_MAIN, re.S).group(1)
+        self.assertEqual(timer.count("running:"), 1)
+        # The held request to stream-sync starts with Line In and ends with it; a failure waits 5 s, an answer re-arms with what we believe.
+        poll = self._qml_fn("scConsoleAskPoll")
+        self.assertIn("if (!scConsoleLine) return", poll)
+        self.assertIn('"http://127.0.0.1:8080/v1/enginex/consolesend?asked=" + (scConsoleAsked ? 1 : 0)', poll)
+        handler = re.search(r"onScConsoleLineChanged: \{(.*?)\n\t\}", bp.SERVICES_MAIN, re.S).group(1)
+        self.assertIn("if (scConsoleLine) scConsoleAskPoll()", handler)
+        self.assertIn("scConsoleAsked = false", handler)
+        self.assertIn("x.abort()", handler)
+        # The player side of it never starts anything: a player has no Line In and no asker.
+        self.assertNotIn("scConsoleAskPoll", self._qml_fn("scShadowPoll"))
+        self.js(self._qml_fn("scConsoleAskPoll") + r"""
+globalThis.scConsoleLine = false; globalThis.scConsoleAsked = false; globalThis.scConsoleAskRequest = null;
+globalThis.scConsoleAskTimer = {restarts: 0, restart() { this.restarts++; }};
+const reqs = [];
+globalThis.XMLHttpRequest = class { constructor() { reqs.push(this); this.readyState = 1; } open(m, url) { this.url = url; assert.equal(m, 'GET'); } send() {}
+    answer(status, data) { this.status = status; this.responseText = JSON.stringify(data); this.readyState = 4; this.onreadystatechange(); } };
+scConsoleAskPoll(); assert.equal(reqs.length, 0, 'Line In off: no request');
+scConsoleLine = true; scConsoleAskPoll(); assert.equal(reqs.length, 1); assert(reqs[0].url.endsWith('asked=0'));
+scConsoleAskPoll(); assert.equal(reqs.length, 1, 'one held request at a time');
+reqs[0].answer(200, {asked: true}); assert.equal(scConsoleAsked, true); assert.equal(reqs.length, 2); assert(reqs[1].url.endsWith('asked=1'), 'the next carries what we believe');
+reqs[1].answer(200, {asked: false}); assert.equal(scConsoleAsked, false); assert.equal(reqs.length, 3);
+reqs[2].answer(500, {}); assert.equal(reqs.length, 3, 'a failure does not loop'); assert.equal(scConsoleAskTimer.restarts, 1);
+scConsoleLine = false; reqs[2].readyState = 4; // Line In went off while it was out: its answer is dropped
+""")
+
+    def test_the_console_samples_only_decks_on_their_own_input_that_have_a_track(self):
+        fns = self._qml_fn("scConsoleSendDecks")
+        self.js(fns + r"""
+// A console (no role), Line In on, a player asking: its sampler is running. Channel 3 is on Line.
+scPlayer = false; scFourDeckRole = '';
+globalThis.scConsoleLine = true; globalThis.scConsoleAsked = true; globalThis.scLineMask = 1 << 3;
+const loaded = {1: true, 2: false, 3: true, 4: true};
+let bodies = [], pings = 0, layerReads = 0;
+globalThis.XMLHttpRequest = class { constructor() { this.readyState = 0; } open(m, url) { this.url = url; this.readyState = 1; }
+    send(body) { if (this.url.endsWith('/alive')) pings++; else bodies.push(JSON.parse(body)); this.readyState = 4; this.status = 200; } };
+globalThis.scShadowPoll = () => { throw Error('the console sampler must not start the Line In poll'); };
+globalThis.scShadowLine = () => { throw Error('lane work of a player'); };
+globalThis.scShadowLandingTick = () => { throw Error('lane work of a player'); };
+globalThis.scShadowMasterBack = () => { throw Error('a console has no shadow copy to take MASTER back from'); };
+globalThis.scTr = path => {
+    if (path.indexOf('/GUI/Decks/') === 0) layerReads++;
+    const m = /^[/]Engine[/]Deck([1-4])[/]/.exec(path);
+    return { value: path.endsWith('/SampleRate') ? 48000 : 0, unnormalized: 0, color: '#ffffff', index: 0,
+        get state() { return !!m && path.endsWith('/SongLoaded') && loaded[m[1]]; },
+        get string() { return m && path.endsWith('/TrackUri') && loaded[m[1]] ? 'file:///d' + m[1] + '.mp3' : ''; } };
+};
+const tick = () => { now += 40; scShadowTick(); };
+const decks = () => bodies[bodies.length - 1].map(o => o.deck);
+tick(); assert.deepEqual(decks(), [1, 4], 'deck 2 has no track, channel 3 is on Line');
+// Channel 4 goes to Line: the next tick leaves the deck out of the post.
+scLineMask |= 1 << 4; tick(); assert.deepEqual(decks(), [1], 'a channel switched to Line stops being sent within one update');
+// Channel 3 back on its own input: its deck is sent again; deck 2 loads a track.
+scLineMask = 0; loaded[2] = true; tick(); assert.deepEqual(decks(), [1, 2, 3, 4]);
+// Nothing on any deck: an empty post, so the players let go.
+for (const d of [1, 2, 3, 4]) loaded[d] = false; tick(); assert.deepEqual(decks(), []);
+assert.equal(layerReads, 0, 'a console has no layer to read');
+assert(bodies.every(b => b.every(o => o.player === undefined || o.player === 0)), 'a console has no player number');
+""")
+
 
 
 class UiModBuildTest(unittest.TestCase):
