@@ -12,6 +12,29 @@
 
 ---
 
+## 5.3.0.5 r2 (2026-11-22)
+
+- **Scope**: Re-release 5.3.0.5 as `v5.3.0.5-r2` so decks on 5.3.0.5 r1 or older receive the two fixes below. The version remains `5.3.0.5`; no README, website, screenshot or splash changes are included.
+- **Fixes**:
+  - Remote console: the remote address now serves the console pages only. LAN-only unit routes remain on the local network, and tunnel-helper state is cleared when the helper exits, is empty or is closed.
+  - Second-generation startup guards now use the bundle's own `rb-bridge` and `stream-sync` paths, so settings-copy import and stale RGB overview cleanup run on those decks.
+- **Cause**: The remote listener previously forwarded routes intended for local-unit callers, while tunnel lifecycle edge cases could retain stale helper state. Gen-2 bundles place these programs beside `engine-ui-guard`, but the guard used fixed first-generation paths under `/usr/local/bin`.
+- **Commits**:
+  - `fa84a8bc` cherry-pick of `b9224716`
+  - `55baf0e1` cherry-pick of `4b0ca20f`
+  - `369682d0` cherry-pick of `0199e920`
+  - `4343ed31` cherry-pick of `29401b09`
+  - `<DOCS_COMMIT>` release documentation and checklist rows
+- **Build commit**: `<BUILD_COMMIT>`
+- **SHA-256 manifest**: `<SHA256_TABLE>`
+- **Tests and gates**: `<GATES>`
+- **Rollback point**: `147e37fb` (`v5.3.0.5-r1`)
+
+| File | SHA-256 |
+| --- | --- |
+| `<ARTIFACT>` | `<SHA256>` |
+
+
 ## 1. Issue 与 PR 修复总表（v5.3.0.4-r5 → v5.3.0.5）
 
 | Issue / PR | 模块 | 原因与修法摘要 | 验证与回归测试 |
@@ -629,6 +652,8 @@ The maintainer confirmed both fixes on two SC5000 decks using deck-push builds. 
 | `EngineX-Installer-5.3.0.5-macos-amd64.zip` | `227b5edeec698005ed46e29358b452f737b356b8ec69d13bd67ececbd783b819` |
 | `EngineX-Installer-5.3.0.5-macos-arm64.zip` | `4cff243e1fb2b4cdec83e83e6dcae01b302670959faa2e138ae75f017214162c` |
 | `EngineX-Installer-5.3.0.5-windows-amd64.zip` | `3bf3b7aab4854fe0e3514cc9c97c0a41de5f2e0b1ad9fc75baca4a87bc71a7ca` |
+
+
 
 ## Installer re-release over v5.3.0.5-r1 (2026-11-21, #311)
 
