@@ -278,3 +278,146 @@ func TestIssue321WatcherPassCutAtEveryWriteStepOfExportPDB(t *testing.T) {
 		})
 	}
 }
+
+// #321 review R3 (P2-1): exFAT renames a file over another in two directory sectors (the target's
+// entry removed, the staged copy's rewritten under the target's name), so a pull between them
+// left the target missing, and the next mount's cleanup removed the only new copy. At every rename
+// of a pass, on a OneLibrary stick and on an export.pdb one, the states such a pull leaves are made:
+// the target gone and its staged copy whole; or without its name (its own entries straddled the
+// two sectors: the replay on a real exFAT volume found it under a cut name); or cut in half (a copy
+// cut while written: the pass never renames before every copy is synced, so this does not happen,
+// but the cleanup must not trust it). The next mount puts the target back, the staged copy or else
+// the first original kept under .enginex-backup, and leaves no temporary file; the next pass
+// brings the edits.
+func TestIssue321ARenameCutThatLeftATargetMissingIsPutBack(t *testing.T) {
+	for _, oneLib := range []bool{true, false} {
+		name := "export.pdb"
+		if oneLib {
+			name = "OneLibrary"
+		}
+		t.Run(name, func(t *testing.T) { issue321MissingTarget(t, oneLib) })
+	}
+}
+
+func issue321MissingTarget(t *testing.T, oneLib bool) {
+	ctx := context.Background()
+	stick := setupWriteBackStick(t, oneLib)
+	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	const cue, genre = "Missing 321", "Missing Genre 321"
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(stick, "Engine Library", "Database2", "m.db")}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue321Settle()
+	issue321Edit(t, db, 1, cue, 1000)
+	if _, err = db.Exec(`UPDATE Track SET genre=? WHERE pdbImportKey=1`, genre); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	issue321Settle()
+	read := func(t *testing.T, root, rel string) []byte {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("%s: %v", rel, err)
+		}
+		return b
+	}
+
+	cuts := t.TempDir()
+	type state struct{ dst, staged string } // relative to the stick
+	var states []state
+	old := map[string][]byte{}
+	seen := map[string]bool{}
+	staged := map[string]string{}
+	restore := bridge.SetWriteBackCutForTest(func(step string) {
+		if dst, ok := strings.CutPrefix(step, "temp "); ok { // the copy just staged for dst
+			matches, _ := filepath.Glob(filepath.Join(filepath.Dir(dst), ".enginex-*.tmp"))
+			for _, m := range matches {
+				if !seen[m] {
+					seen[m], staged[dst] = true, m
+				}
+			}
+		}
+		dst, ok := strings.CutPrefix(step, "replacing ")
+		rel, _ := filepath.Rel(stick, dst)
+		if !ok || staged[dst] == "" || !strings.HasPrefix(rel, "PIONEER") {
+			return
+		}
+		cut := filepath.Join(cuts, itoa(len(states)))
+		issue321Copy(t, stick, cut)
+		st := state{dst: rel}
+		st.staged, _ = filepath.Rel(stick, staged[dst])
+		// exFAT's first sector of the rename: the target's entry gone, the staged copy's not renamed.
+		if err := os.Rename(filepath.Join(cut, rel), filepath.Join(cut, st.staged)); err != nil {
+			t.Fatal(err)
+		}
+		states = append(states, st)
+	})
+	for _, rel := range []string{"PIONEER/USBANLZ/P001/ANLZ0000.DAT", "PIONEER/USBANLZ/P001/ANLZ0000.EXT", "PIONEER/USBANLZ/P001/ANLZ0000.2EX", "PIONEER/rekordbox/exportLibrary.db", "PIONEER/rekordbox/export.pdb"} {
+		if b, err := os.ReadFile(filepath.Join(stick, rel)); err == nil {
+			old[filepath.FromSlash(rel)] = b
+		}
+	}
+	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{},
+		Keys: rekordbox.NewKeyCache(), Settled: func() error { return nil }})
+	restore()
+	if err != nil || res.TracksChanged != 1 || res.OneLibraryUpdated != oneLib {
+		t.Fatalf("uncut pass: %+v %v", res, err)
+	}
+	// The three ANLZ files and the export (exportLibrary.db or export.pdb).
+	if len(states) < 3 {
+		t.Fatalf("only %d renames: %+v", len(states), states)
+	}
+	for i, st := range states {
+		for _, copyState := range []string{"whole", "without its name", "cut in half"} {
+			t.Run(itoa(i)+" "+filepath.Base(st.dst)+" "+copyState, func(t *testing.T) {
+				cut := t.TempDir()
+				issue321Copy(t, filepath.Join(cuts, itoa(i)), cut)
+				want := read(t, stick, st.dst) // the new copy, else the first original
+				tmp := filepath.Join(cut, st.staged)
+				switch copyState {
+				case "without its name":
+					if err := os.Rename(tmp, filepath.Join(filepath.Dir(tmp), ".enginex-wb-")); err != nil {
+						t.Fatal(err)
+					}
+					want = old[st.dst]
+				case "cut in half":
+					info, err := os.Stat(tmp)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err = os.Truncate(tmp, info.Size()/2); err != nil {
+						t.Fatal(err)
+					}
+					want = old[st.dst]
+				}
+				bridge.CleanWriteBackLeftovers(cut) // the next mount
+				if got := read(t, cut, st.dst); !bytes.Equal(got, want) {
+					t.Fatalf("%s after the next mount: %d bytes, not the %d of the copy it should have put back", st.dst, len(got), len(want))
+				}
+				if left := issue321Temps(t, cut); len(left) != 0 {
+					t.Fatalf("left after the next mount: %q", left)
+				}
+				issue321ANLZSound(t, cut)
+				if oneLib {
+					issue321ExportSound(t, cut)
+				} else {
+					issue321PDBGenre(t, cut, 1)
+				}
+				res, err := bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true})
+				if err != nil || !issue321ANLZHas(t, cut, cue) || (!oneLib && issue321PDBGenre(t, cut, 1) != genre) {
+					t.Fatalf("the next pass did not bring the edits: %+v %v", res, err)
+				}
+				if oneLib {
+					issue321ExportSound(t, cut)
+				}
+				if res, err = bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true}); err != nil || res.TracksChanged != 0 {
+					t.Fatalf("the pass after does not converge: %+v %v", res, err)
+				}
+			})
+		}
+	}
+}

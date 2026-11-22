@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -497,19 +496,11 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	if err := settle(); err != nil {
 		return res, err
 	}
-	// Whether each file this pass may replace owns its clusters in the FAT is decided before the
-	// pass allocates anything on the stick, its mark included (#321 review R2, replaceFile): a
-	// file allocated first can take the clusters a stale entry still names, and that entry then
-	// looks like their owner.
-	unowned := map[string]bool{}
-	decide := func(path string) {
-		if _, done := unowned[path]; !done {
-			unowned[path] = unsafeToFree(path)
-		}
-	}
 	// Where this pass may leave a temporary file if the stick goes in the middle: the next
 	// mount removes them (CleanWriteBackLeftovers). The mark goes once everything is written.
 	var tmpDirs []string
+	// The files this pass may replace, the export always, and its mark.
+	targets := []string{filepath.Join("Engine Library", "Database2", writeBackMarkName)}
 	for _, ch := range changes {
 		tmpDirs = append(tmpDirs, filepath.Dir(filepath.FromSlash(strings.TrimPrefix(ch.analysisPath, "/"))))
 		if !ch.cuesDiff || ch.analysisPath == "" {
@@ -518,7 +509,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		if cleanAnlz, err := safeANLZRelPath(ch.analysisPath); err == nil {
 			for _, ext := range []string{".DAT", ".EXT", ".2EX"} {
 				if rel, ok := resolveANLZVariant(resolver, strings.TrimSuffix(cleanAnlz, filepath.Ext(cleanAnlz)), ext); ok {
-					decide(resolver.FullPath(rel))
+					targets = append(targets, rel)
 				}
 			}
 		}
@@ -526,13 +517,23 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	pdbRel := ""
 	if oneLibRel != "" {
 		tmpDirs = append(tmpDirs, filepath.Dir(filepath.FromSlash(oneLibRel)))
-		decide(resolver.FullPath(oneLibRel))
+		targets = append(targets, oneLibRel)
 	} else if rel, err := resolver.Resolve("PIONEER/rekordbox/export.pdb"); err == nil {
 		pdbRel = rel
 		tmpDirs = append(tmpDirs, filepath.Dir(filepath.FromSlash(pdbRel))) // its metadata (#314)
-		decide(resolver.FullPath(pdbRel))
+		targets = append(targets, pdbRel)
 	}
-	if err := markWriteBack(engineDBDir, dateDir, tmpDirs); err != nil {
+	// A stick where one of them names clusters the FAT does not give it (a pull during an older
+	// build's write-back) is not written at all (#321 review R3): any cluster this pass took could
+	// be one that entry names, and a computer's disk check then cuts whichever file it reaches
+	// second, export.pdb included. Decided before the pass allocates anything; the edits stay in
+	// Engine's library until the stick has had a disk check.
+	for _, rel := range targets {
+		if unsafeToFree(resolver.FullPath(rel)) {
+			return res, fmt.Errorf("%w: %s; the drive needs a disk check on a computer", errUnownedClusters, filepath.ToSlash(rel))
+		}
+	}
+	if err := markWriteBack(engineDBDir, dateDir, tmpDirs, targets[1:]); err != nil {
 		return res, err
 	}
 	finished := false
@@ -554,16 +555,14 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		tmp    string
 		export bool // the export, whose stamp the bridge keeps
 	}
-	// staged holds the files not yet renamed: once renamed, an item's temporary name is gone, or
-	// names an old entry kept aside (replaceUnowned), which is never removed.
-	var staged []stagedWrite
+	var staged []stagedWrite // not yet renamed
 	defer func() {
 		for _, item := range staged {
 			_ = removeFile(item.tmp)
 		}
 	}()
 	stageBytes := func(dst string, data []byte, export bool) error {
-		tmp, err := stageWriteFile(dst, data, unowned[dst])
+		tmp, err := stageWriteFile(dst, data)
 		if err != nil {
 			return err
 		}
@@ -642,7 +641,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 				return res, err
 			}
 			tm.bytes += n
-			tmpOut, err := newTemp(oneLibFull, ".enginex-onelib-*.tmp", unowned[oneLibFull])
+			tmpOut, err := os.CreateTemp(filepath.Dir(oneLibFull), stagedPattern("onelib", oneLibFull))
 			if err != nil {
 				return res, err
 			}
@@ -701,7 +700,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	// way a pull at any moment leaves whole on FAT (replaceFile, #321).
 	for len(staged) > 0 {
 		item := staged[0]
-		if err := replaceFile(item.tmp, item.dst, unowned[item.dst]); err != nil {
+		if err := replaceFile(item.tmp, item.dst); err != nil {
 			return res, err
 		}
 		staged = staged[1:]
@@ -742,10 +741,11 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 }
 
 // writeBackMarkName lists, one per line, the stick's directories where a write-back in progress
-// may leave a temporary file (.enginex-*.tmp, and .bak-*.tmp under .enginex-backup/<date>/).
+// may leave a temporary file (.enginex-*.tmp, and .bak-*.tmp under .enginex-backup/<date>/), and,
+// after "= ", the files it may replace.
 const writeBackMarkName = ".rb-bridge-writeback"
 
-func markWriteBack(engineDBDir, dateDir string, dirs []string) error {
+func markWriteBack(engineDBDir, dateDir string, dirs, targets []string) error {
 	seen := map[string]bool{}
 	var b strings.Builder
 	for _, d := range dirs {
@@ -756,12 +756,18 @@ func markWriteBack(engineDBDir, dateDir string, dirs []string) error {
 			}
 		}
 	}
+	for _, t := range targets {
+		b.WriteString("= " + filepath.ToSlash(t) + "\n")
+	}
 	return atomicWriteFile(filepath.Join(engineDBDir, writeBackMarkName), []byte(b.String()), nil)
 }
 
 // CleanWriteBackLeftovers removes what a write-back cut by a pull left on the stick at mount:
 // a temporary file of its mark, the temporary files in the directories the mark lists, then the
-// mark. Without a mark: one look at Engine's library directory. It returns the files removed.
+// mark. Without a mark: one look at Engine's library directory. A file whose clusters the FAT
+// does not give it stays (removeFile); so does a mark that cannot be read. First every file the
+// mark lists is put back if it is missing (putBack); if one cannot be, nothing more is removed.
+// It returns the files removed.
 func CleanWriteBackLeftovers(mount string) int {
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	n := 0
@@ -774,16 +780,26 @@ func CleanWriteBackLeftovers(mount string) int {
 	mark := filepath.Join(dir, writeBackMarkName)
 	b, err := os.ReadFile(mark)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			_ = moveAside(mark) // unreadable: the next pass writes a new one
-		}
 		return n
 	}
-	for _, rel := range strings.Split(string(b), "\n") {
-		rel = filepath.Clean(filepath.FromSlash(strings.TrimSpace(rel)))
+	var dirs []string
+	whole := true
+	for _, line := range strings.Split(string(b), "\n") {
+		target, isTarget := strings.CutPrefix(line, "= ")
+		rel := filepath.Clean(filepath.FromSlash(strings.TrimSpace(target)))
 		if rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			continue
 		}
+		if !isTarget {
+			dirs = append(dirs, rel)
+		} else if !putBack(mount, rel) {
+			whole = false
+		}
+	}
+	if !whole {
+		return n // its staged copy and the mark stay for the next mount
+	}
+	for _, rel := range dirs {
 		for _, pat := range []string{".enginex-*.tmp", ".bak-*.tmp"} {
 			matches, _ := filepath.Glob(filepath.Join(mount, rel, pat))
 			for _, m := range matches {
@@ -793,30 +809,61 @@ func CleanWriteBackLeftovers(mount string) int {
 			}
 		}
 	}
-	if removeFile(mark) == errUnownedClusters {
-		_ = moveAside(mark)
-	}
+	_ = removeFile(mark)
 	return n
 }
 
-// moveAside renames path out of the way, in its directory, without freeing its clusters: a
-// file the FAT does not give its clusters, or one that cannot be read (#321). A rename moves
-// only the entry. Such entries are never removed: freeing their clusters is the corruption they
-// would cause; only fsck can repair them.
-func moveAside(path string) error {
-	aside := asideName(path)
-	if err := os.Rename(path, aside); err != nil {
-		return err
-	}
-	_ = syncDir(filepath.Dir(aside))
-	log.Printf("rb-bridge: %s does not own its clusters in the FAT or cannot be read; kept aside as %s", path, filepath.Base(aside))
-	return nil
+// stagedPattern names the staged copy of dst (os.CreateTemp), so that the next mount finds it.
+func stagedPattern(kind, dst string) string {
+	return ".enginex-" + kind + "-" + filepath.Base(dst) + "-*.tmp"
 }
 
-// asideName is a new name, beside path, for an entry kept aside (moveAside). CleanWriteBackLeftovers
-// matches none of them.
-func asideName(path string) string {
-	return filepath.Join(filepath.Dir(path), "."+strings.TrimPrefix(filepath.Base(path), ".")+".enginex-unowned-"+strconv.FormatInt(time.Now().UnixNano(), 10))
+// putBack reports whether rel, a file a cut write-back may have replaced, is on the stick, and
+// puts it back first if it is missing. On exFAT a rename over a file rewrites two directory
+// sectors, and a pull between them leaves the file missing; the staged copy then keeps its name,
+// or loses it too when its own entries straddle the sectors (#321 review R3; FAT and HFS+ replace
+// the entry in one write). The staged copy goes back when it reads whole as its kind of file
+// (the pass renames only once every copy is written and synced), otherwise the first original
+// kept under .enginex-backup.
+func putBack(mount, rel string) bool {
+	dst := filepath.Join(mount, rel)
+	if _, err := os.Lstat(dst); !errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	copies, _ := filepath.Glob(filepath.Join(filepath.Dir(dst), stagedPattern("*", dst)))
+	for _, c := range copies {
+		if stagedWhole(c, dst) && replaceFile(c, dst) == nil {
+			log.Printf("rb-bridge: %s was missing after a cut write-back; its new copy put back", dst)
+			return true
+		}
+	}
+	dates, _ := os.ReadDir(filepath.Join(mount, ".enginex-backup"))
+	for _, d := range dates { // by name: the oldest date, the first original (ensureFirstOriginalBackup)
+		if data, err := os.ReadFile(filepath.Join(mount, ".enginex-backup", d.Name(), rel)); err == nil {
+			if old, err := stageWriteFile(dst, data); err == nil && replaceFile(old, dst) == nil {
+				log.Printf("rb-bridge: %s was missing after a cut write-back; its original put back", dst)
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// stagedWhole reports whether tmp, a staged copy of dst, reads whole as dst's kind of file.
+func stagedWhole(tmp, dst string) bool {
+	switch strings.ToLower(filepath.Base(dst)) {
+	case "export.pdb":
+		_, err := rekordbox.ReadPDB(tmp)
+		return err == nil
+	case "exportlibrary.db":
+		_, err := rekordbox.ReadSQLite(context.Background(), tmp, nil)
+		return err == nil
+	}
+	b, err := os.ReadFile(tmp) // an ANLZ file: its header has its length
+	if err == nil {
+		_, err = rekordbox.ParseAnalysis(b)
+	}
+	return err == nil
 }
 
 // recordSynced notes in the state what the stick holds of rows (BridgeSynced, #321) and drops
@@ -1285,8 +1332,7 @@ func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) 
 	}
 	defer in.Close()
 
-	unowned := unsafeToFree(dst) // before the temporary file takes any cluster (replaceFile)
-	tmp, err := newTemp(dst, ".bak-*.tmp", unowned)
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".bak-*.tmp")
 	if err != nil {
 		return 0, err
 	}
@@ -1309,7 +1355,7 @@ func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) 
 		return 0, err
 	}
 	writeBackCut("backup temp " + dst)
-	if err := replaceFile(tmpPath, dst, unowned); err != nil {
+	if err := replaceFile(tmpPath, dst); err != nil {
 		return 0, err
 	}
 	writeBackCut("backup " + dst)
@@ -1317,8 +1363,9 @@ func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) 
 	return n, nil
 }
 
-func stageWriteFile(dst string, data []byte, unowned bool) (string, error) {
-	tmp, err := newTemp(dst, ".enginex-wb-*.tmp", unowned)
+// stageWriteFile writes data, synced, to the staged copy of dst (stagedPattern), beside it.
+func stageWriteFile(dst string, data []byte) (string, error) {
+	tmp, err := os.CreateTemp(filepath.Dir(dst), stagedPattern("wb", dst))
 	if err != nil {
 		return "", err
 	}
@@ -1344,8 +1391,7 @@ func stageWriteFile(dst string, data []byte, unowned bool) (string, error) {
 }
 
 func atomicWriteFile(dst string, data []byte, beforeRename func(string) error) error {
-	unowned := unsafeToFree(dst) // before the temporary file takes any cluster (replaceFile)
-	tmp, err := newTemp(dst, ".enginex-wb-*.tmp", unowned)
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".enginex-wb-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -1372,7 +1418,7 @@ func atomicWriteFile(dst string, data []byte, beforeRename func(string) error) e
 			return err
 		}
 	}
-	if err := replaceFile(tmpPath, dst, unowned); err != nil {
+	if err := replaceFile(tmpPath, dst); err != nil {
 		return err
 	}
 	ok = true
@@ -1388,16 +1434,9 @@ func atomicWriteFile(dst string, data []byte, beforeRename func(string) error) e
 // old clusters) and then dst itself (naming the new ones) are on the stick, so its clusters are
 // freed only after that.
 //
-// unowned is unsafeToFree(dst) as the caller found it before it allocated anything on the volume
-// for this write (#321 review R2): a file allocated first, the temporary one included, can take
-// the very clusters a stale entry of dst still names, and dst then looks like their owner; closing
-// the held entry would free the new file's clusters. What this cannot see: two entries that name
-// one intact chain (a cross-link left by a pull or another system) look owned, and replacing or
-// removing either frees the chain the other still names. Only fsck can repair that.
-func replaceFile(tmp, dst string, unowned bool) error {
-	if unowned {
-		return replaceUnowned(tmp, dst)
-	}
+// dst must own its clusters in the FAT: the pass checks every file it replaces, and its mark,
+// before it allocates anything (unsafeToFree, #321 review R3); the other files replaced are new.
+func replaceFile(tmp, dst string) error {
 	held, _ := os.Open(dst)
 	defer func() {
 		if held != nil {
@@ -1414,40 +1453,8 @@ func replaceFile(tmp, dst string, unowned bool) error {
 	return nil
 }
 
-// replaceUnowned puts tmp under dst's name without ever freeing the clusters dst names: the FAT
-// does not give them to it, and freeing them is what vfat calls corruption. tmp was created under
-// a name of an entry kept aside (newTemp), and the two entries swap names in one step (renameat2
-// RENAME_EXCHANGE, vfat since Linux 6.0; the decks run 6.18): the old entry is then kept aside,
-// which frees nothing. A pull at any moment leaves dst under its name, old or new, and no entry
-// the next mount removes (CleanWriteBackLeftovers matches no aside name), so the old entry's
-// clusters are never freed, even when a file of this pass took them (#321 review R2): the two
-// then name one chain, and the aside one is never removed. Without the exchange (a kernel before
-// 6.0) dst is not replaced (errUnownedClusters): renaming it aside first would leave no file
-// under its name until the second rename.
-func replaceUnowned(tmp, dst string) error {
-	if err := exchange(tmp, dst); err != nil {
-		return fmt.Errorf("%w: %s not replaced: %v", errUnownedClusters, dst, err)
-	}
-	writeBackCut("replacing " + dst)
-	_ = syncDir(filepath.Dir(dst))
-	_ = syncFile(dst)
-	writeBackCut("renamed " + dst)
-	log.Printf("rb-bridge: %s did not own its clusters in the FAT; replaced, the old entry kept aside as %s", dst, filepath.Base(tmp))
-	return nil
-}
-
-// newTemp creates the file that is to replace dst, in dst's directory: under a temporary name
-// (pattern, as os.CreateTemp) that the next mount removes if a pull cuts the write, or, when dst
-// does not own its clusters (unowned, replaceUnowned), under the name its old entry keeps once
-// replaced.
-func newTemp(dst, pattern string, unowned bool) (*os.File, error) {
-	if !unowned {
-		return os.CreateTemp(filepath.Dir(dst), pattern)
-	}
-	return os.OpenFile(asideName(dst), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
-}
-
-// errUnownedClusters: a file whose clusters the FAT does not give it is not removed (unsafeToFree).
+// errUnownedClusters: a file whose clusters the FAT does not give it is not removed, and a pass
+// that would replace one does not write the stick (unsafeToFree).
 var errUnownedClusters = errors.New("bridge: the file's clusters are not its own in the FAT")
 
 // removeFile removes path so that a pull at any moment leaves either the file or no entry for

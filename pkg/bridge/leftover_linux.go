@@ -26,9 +26,9 @@ const fibmap = 1
 // "Owned" means an intact chain of the file's length, not an unshared one: no other entry is
 // looked at. So the answer holds only if it is taken before anything is allocated on the volume
 // (a new file can take the clusters a stale entry names, and the entry then looks like their
-// owner; replaceFile's callers decide first, #321 review R2), and two entries that name one intact
-// chain (a cross-link left by a pull or another system) both look owned: freeing either frees the
-// other's clusters. Only fsck can repair a cross-link.
+// owner: the pass decides first, and then does not write such a stick, #321 review R3), and two
+// entries that name one intact chain (a cross-link left by a pull or another system) both look
+// owned: freeing either frees the other's clusters. Only fsck can repair a cross-link.
 func unsafeToFree(path string) bool {
 	owned, checked := fatOwned(path)
 	return checked && !owned
@@ -60,12 +60,6 @@ func fatOwned(path string) (owned, checked bool) {
 	}
 	defer dev.Close()
 	return fatChainOwned(dev, int64(block), st.Size)
-}
-
-// exchange swaps the entries named a and b in one step (renameat2 RENAME_EXCHANGE): vfat has it
-// since Linux 6.0.
-func exchange(a, b string) error {
-	return unix.Renameat2(unix.AT_FDCWD, a, unix.AT_FDCWD, b, unix.RENAME_EXCHANGE)
 }
 
 func blockDevice(dev uint64) (*os.File, error) {

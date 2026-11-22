@@ -242,6 +242,8 @@ func (w *CueWatcher) run(ctx context.Context, st *cueStick, done chan struct{}) 
 		retry = true
 	case errors.Is(err, os.ErrNotExist):
 		// no library or no state yet: the import's publication remounts the stick
+	case errors.Is(err, errUnownedClusters):
+		// the stick needs a disk check: the pass's own line says so (#321 review R3)
 	default:
 		w.logf("rb-bridge: cue write-back on %s: %v", st.mount, err)
 	}

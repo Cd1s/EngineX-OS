@@ -5,13 +5,17 @@ package bridge_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -21,19 +25,17 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
-// #321 review R2, on a real FAT32 volume (a loop device; root only). A pull during an older
+// #321 review R3, on a real FAT32 volume (a loop device; root only). A pull during an older
 // build's write-back can leave an ANLZ file or the export naming clusters the FAT has freed, the
-// old content still in them. The next file written may take exactly those clusters. When a pass
-// then replaces such a file it must still see that the file does not own them: deciding after
-// its own temporary file took them, the pass found the file owning a whole chain, held it, and
-// its close freed the chain the new file had just been given. The new ANLZ file and the new
-// export then named free clusters, and the next file written overwrote them.
-//
-// The volume is built so that the temporary file of each replaced file takes the clusters of its
-// stale entry: a first run on a copy of the volume finds where the pass writes each new file, and
-// the stale entry is made to name those clusters, which hold its content and are free in the FAT.
+// old content still in them. A pass that allocates anything on such a stick can take those
+// clusters: R2 kept the stale entries aside and wrote the new files, a new export.pdb took the
+// cluster the stale ANLZ0000.DAT named, and a computer's disk check (fsck.fat -a, which reaches
+// USBANLZ before rekordbox) cut that export.pdb to 0 bytes. The deck's edit it held was recorded
+// as written and never written again. Now such a stick is not written at all: the edits stay
+// pending in Engine's library, and the first pass after a disk check writes them.
 
 // fat32Image reads and patches a FAT32 image (or reads a loop device): enough to find an entry by
 // path, follow its chain and point an entry at other clusters.
@@ -192,6 +194,43 @@ func (v *fat32Image) owned(e fat32Entry) bool {
 	return end && int64(len(c)) == (e.size+v.clusterSize()-1)/v.clusterSize()
 }
 
+// setStart points the entry at e.off to cluster c.
+func (v *fat32Image) setStart(e fat32Entry, c int64) {
+	var s [4]byte
+	binary.LittleEndian.PutUint16(s[0:], uint16(c>>16))
+	binary.LittleEndian.PutUint16(s[2:], uint16(c))
+	if _, err := v.f.WriteAt(s[0:2], e.off+20); err != nil {
+		v.t.Fatal(err)
+	}
+	if _, err := v.f.WriteAt(s[2:4], e.off+26); err != nil {
+		v.t.Fatal(err)
+	}
+}
+
+// free marks cluster c free in every FAT.
+func (v *fat32Image) free(c int64) {
+	for i := int64(0); i < v.nfats; i++ {
+		if _, err := v.f.WriteAt(make([]byte, 4), (v.rsvd+i*v.fatSz)*v.bps+c*4); err != nil {
+			v.t.Fatal(err)
+		}
+	}
+}
+
+// countFree writes the number of free clusters into FSInfo, as vfat counts them.
+func (v *fat32Image) countFree() {
+	n := uint32(0)
+	for c := int64(2); c < v.clusters; c++ {
+		if v.next(c) == 0 {
+			n++
+		}
+	}
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], n)
+	if _, err := v.f.WriteAt(b[:], v.fsinfo*v.bps+488); err != nil {
+		v.t.Fatal(err)
+	}
+}
+
 func vfatRun(t *testing.T, name string, args ...string) string {
 	t.Helper()
 	out, err := exec.Command(name, args...).CombinedOutput()
@@ -242,6 +281,12 @@ func vfatReadOnly(t *testing.T, mnt string) bool {
 // directory to mount it on; it skips unless this runs as root with loop devices and the tools.
 func vfatImage(t *testing.T, work string) (img, mnt string) {
 	t.Helper()
+	return vfatImageOf(t, work, 2112, 64)
+}
+
+// vfatImageOf is vfatImage with mb MiB and spc sectors of 512 bytes per cluster.
+func vfatImageOf(t *testing.T, work string, mb int64, spc int) (img, mnt string) {
+	t.Helper()
 	if os.Geteuid() != 0 {
 		t.Skip("needs root for a loop device")
 	}
@@ -261,162 +306,237 @@ func vfatImage(t *testing.T, work string) (img, mnt string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.Truncate(2112 << 20); err != nil {
+	if err = f.Truncate(mb << 20); err != nil {
 		t.Fatal(err)
 	}
 	f.Close()
-	vfatRun(t, "mkfs.fat", "-F", "32", "-s", "64", "-S", "512", img)
+	vfatRun(t, "mkfs.fat", "-F", "32", "-s", strconv.Itoa(spc), "-S", "512", img)
 	return img, mnt
 }
 
-func TestIssue321StaleEntriesOnARealFATVolumeKeepTheirClusters(t *testing.T) {
+func issue321Hash(t *testing.T, path string) string {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err = io.Copy(h, f); err != nil {
+		t.Fatal(err)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// issue321Changed says where image b differs from image a: the boot sector, FSInfo, the FATs, or a
+// cluster (the first 16 places).
+func issue321Changed(t *testing.T, a, b string) string {
+	t.Helper()
+	out, _ := exec.Command("cmp", "-l", a, b).Output()
+	v := openFAT32(t, b, false)
+	defer v.close()
+	var where []string
+	last := ""
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f := strings.Fields(l)
+		if len(f) != 3 {
+			continue
+		}
+		off, _ := strconv.ParseInt(f[0], 10, 64)
+		off--
+		sec := off / v.bps
+		w := ""
+		switch {
+		case sec == 0 || sec == 6:
+			w = "boot sector"
+		case sec == v.fsinfo || sec == v.fsinfo+6:
+			w = "FSInfo"
+		case sec < v.rsvd:
+			w = "reserved sector " + strconv.FormatInt(sec, 10)
+		case sec < v.data:
+			w = "FAT entry " + strconv.FormatInt((off-v.rsvd*v.bps)%(v.fatSz*v.bps)/4, 10)
+		default:
+			w = "cluster " + strconv.FormatInt((sec-v.data)/v.spc+2, 10) + " byte " + strconv.FormatInt(off%v.clusterSize(), 10)
+		}
+		if w != last && len(where) < 16 {
+			where = append(where, w+" ("+f[1]+"->"+f[2]+")")
+		}
+		last = w
+	}
+	return strings.Join(where, ", ")
+}
+
+// issue321Whole reports whether the stick's file rel reads whole as its kind of file.
+func issue321Whole(stick, rel string) bool {
+	p := filepath.Join(stick, filepath.FromSlash(rel))
+	if strings.HasSuffix(rel, ".pdb") {
+		_, err := rekordbox.ReadPDB(p)
+		return err == nil
+	}
+	b, err := os.ReadFile(p)
+	if err == nil {
+		_, err = rekordbox.ParseAnalysis(b)
+	}
+	return err == nil
+}
+
+// The reviewer's two scenarios: 4 KiB and 32 KiB clusters, the stick nearly full, a stale
+// ANLZ0000.DAT and a stale export.pdb.
+func TestIssue321AStickWithStaleEntriesIsNotWrittenUntilADiskCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		spc  int
+	}{{"4KiB clusters", 8}, {"32KiB clusters", 64}} {
+		t.Run(tc.name, func(t *testing.T) { issue321StaleStick(t, tc.spc) })
+	}
+}
+
+func issue321StaleStick(t *testing.T, spc int) {
 	ctx := context.Background()
 	work := t.TempDir()
-	// 32 KiB clusters: each file below fits one cluster before and after the pass, so a stale
-	// entry names a chain as long as the new file's.
-	img, mnt := vfatImage(t, work)
-	dry := filepath.Join(work, "dry.img")
-	var err error
+	img, mnt := vfatImageOf(t, work, 64, spc)
+	opts := bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true}
+	const cue, genre = "Stale 321", "Stale Genre 321"
+	targets := []string{"PIONEER/USBANLZ/P001/ANLZ0000.DAT", "PIONEER/rekordbox/export.pdb"}
 
-	// The stick: converted, a deck edit written back once (its backups made), then a second edit.
-	src := setupWriteBackStick(t, true)
+	// A stick without OneLibrary (its metadata goes to export.pdb, #314), converted, a deck edit
+	// written back once (the stick an older build wrote); then the DJ sets a hot cue and a genre,
+	// and the stick is nearly full (2 MiB left).
+	src := setupWriteBackStick(t, false)
 	_, unmount := vfatMount(t, img, mnt)
 	issue321Copy(t, src, mnt)
-	if _, err = bridge.Convert(ctx, mnt, enginedb.Options{}); err != nil {
+	if _, err := bridge.Convert(ctx, mnt, enginedb.Options{}); err != nil {
 		t.Fatal(err)
 	}
 	injectDeckCueEdit(t, mnt)
-	opts := bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true}
 	if res, err := bridge.WriteBackCues(ctx, mnt, opts); err != nil || res.FilesUpdated == 0 {
 		t.Fatalf("first pass: %+v %v", res, err)
 	}
-	issue321Settle()
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(mnt, "Engine Library", "Database2", "m.db")}).String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	issue321Edit(t, db, 1, "Stale 321", 1500)
+	issue321Settle()
+	issue321Edit(t, db, 1, cue, 1500)
+	if _, err = db.Exec(`UPDATE Track SET genre=? WHERE pdbImportKey=1`, genre); err != nil {
+		t.Fatal(err)
+	}
 	db.Close()
 	issue321Settle()
+	var vfs syscall.Statfs_t
+	if err = syscall.Statfs(mnt, &vfs); err != nil {
+		t.Fatal(err)
+	}
+	fill, err := os.Create(filepath.Join(mnt, "FILL.BIN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = fill.Truncate(int64(vfs.Bavail)*int64(vfs.Bsize) - 2<<20); err != nil {
+		t.Fatal(err)
+	}
+	fill.Close()
 	unmount()
 
-	targets := []string{"PIONEER/USBANLZ/P001/ANLZ0000.DAT", "PIONEER/rekordbox/exportLibrary.db"}
 	// Where the pass writes each new file: a run on a copy.
+	dry := filepath.Join(work, "dry.img")
 	vfatRun(t, "cp", "--sparse=always", img, dry)
 	_, unmountDry := vfatMount(t, dry, mnt)
-	if res, err := bridge.WriteBackCues(ctx, mnt, opts); err != nil || res.TracksChanged != 1 || !res.OneLibraryUpdated {
+	if res, err := bridge.WriteBackCues(ctx, mnt, opts); err != nil || res.FilesUpdated == 0 {
 		t.Fatalf("pass on the copy: %+v %v", res, err)
 	}
-	syscall.Sync()
 	unmountDry()
-	written := map[string]fat32Entry{}
-	writtenTo := map[string][]int64{}
 	v := openFAT32(t, dry, false)
-	for _, rel := range targets {
-		written[rel] = v.lookup(rel)
-		writtenTo[rel], _ = v.chain(written[rel].start)
-	}
+	pdbAt := v.lookup(targets[1]).start
 	v.close()
+	if err = os.Remove(dry); err != nil {
+		t.Fatal(err)
+	}
 
-	// Each target's entry names, instead of its chain, the clusters the pass will write its new
-	// file to: free in the FAT, holding the target's content (as a pull leaves a replaced file).
+	// The stale entries a pull during an older build's pass leaves: ANLZ0000.DAT names the cluster
+	// where the pass writes the new export.pdb, which holds its content and is free in the FAT (its
+	// own cluster stays allocated, named by nothing); export.pdb's last cluster is free in the FAT.
+	// Both still read.
 	v = openFAT32(t, img, true)
-	cs := v.clusterSize()
+	dat := v.lookup(targets[0])
+	if v.next(pdbAt) != 0 {
+		t.Fatalf("cluster %d, where the pass writes export.pdb, is not free", pdbAt)
+	}
+	buf := make([]byte, v.clusterSize())
+	if _, err = v.f.ReadAt(buf, v.clusterOff(dat.start)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = v.f.WriteAt(buf, v.clusterOff(pdbAt)); err != nil {
+		t.Fatal(err)
+	}
+	v.setStart(dat, pdbAt)
+	pdbChain, _ := v.chain(v.lookup(targets[1]).start)
+	v.free(pdbChain[len(pdbChain)-1])
+	v.countFree()
 	for _, rel := range targets {
-		e, w := v.lookup(rel), written[rel]
-		if (e.size+cs-1)/cs != (w.size+cs-1)/cs {
-			t.Fatalf("%s: %d bytes before the pass, %d after: not the same number of clusters", rel, e.size, w.size)
-		}
-		old, _ := v.chain(e.start)
-		if len(old) != len(writtenTo[rel]) {
-			t.Fatalf("%s: a chain of %d clusters, the pass writes %d", rel, len(old), len(writtenTo[rel]))
-		}
-		for i, c := range old {
-			to := writtenTo[rel][i]
-			if v.next(to) != 0 {
-				t.Fatalf("%s: cluster %d, where the pass writes, is not free", rel, to)
-			}
-			buf := make([]byte, cs)
-			if _, err := v.f.ReadAt(buf, v.clusterOff(c)); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := v.f.WriteAt(buf, v.clusterOff(to)); err != nil {
-				t.Fatal(err)
-			}
-		}
-		var s [4]byte
-		binary.LittleEndian.PutUint16(s[0:], uint16(w.start>>16))
-		binary.LittleEndian.PutUint16(s[2:], uint16(w.start))
-		if _, err := v.f.WriteAt(s[0:2], e.off+20); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := v.f.WriteAt(s[2:4], e.off+26); err != nil {
-			t.Fatal(err)
-		}
 		if v.owned(v.lookup(rel)) {
 			t.Fatalf("%s still owns its clusters", rel)
 		}
 	}
 	v.close()
+	before := issue321Hash(t, img)
+	beforeImg := filepath.Join(work, "before.img")
+	vfatRun(t, "cp", "--sparse=always", img, beforeImg)
 
-	dev, unmount := vfatMount(t, img, mnt)
-	issue321ExportSound(t, mnt) // the stale entries still read
-	res, err := bridge.WriteBackCues(ctx, mnt, opts)
-	if err != nil || res.TracksChanged != 1 || !res.OneLibraryUpdated {
-		t.Fatalf("pass: %+v %v", res, err)
-	}
-	syscall.Sync()
-	if vfatReadOnly(t, mnt) {
-		t.Fatal("the pass made vfat remount the stick read-only (a FAT error)")
-	}
-	content := map[string][]byte{}
-	v = openFAT32(t, dev, false)
+	// The pass is refused before it allocates anything: the stick is what it was, and read-write.
+	_, unmount = vfatMount(t, img, mnt)
 	for _, rel := range targets {
-		if e := v.lookup(rel); !v.owned(e) {
-			t.Errorf("%s: after the pass it names clusters the FAT does not give it (from %d, %d bytes): the next file written takes them", rel, e.start, e.size)
+		if !issue321Whole(mnt, rel) {
+			t.Fatalf("%s: the stale entry does not read", rel)
 		}
-		if content[rel], err = os.ReadFile(filepath.Join(mnt, filepath.FromSlash(rel))); err != nil {
+	}
+	res, err := bridge.WriteBackCues(ctx, mnt, opts)
+	if !errors.Is(err, bridge.ErrUnownedClustersForTest) || res.FilesUpdated != 0 ||
+		!strings.Contains(err.Error(), targets[0]) || !strings.Contains(err.Error(), "the drive needs a disk check on a computer") {
+		t.Errorf("the pass on a stick with stale entries: %+v %v, want it refused, naming %s and the disk check", res, err, targets[0])
+	}
+	if vfatReadOnly(t, mnt) {
+		t.Error("the stick turned read-only")
+	}
+	unmount()
+	if after := issue321Hash(t, img); after != before {
+		t.Errorf("the stick changed: sha256 %s before the pass, %s after; at %s", before, after, issue321Changed(t, beforeImg, img))
+	}
+	if err = os.Remove(beforeImg); err != nil {
+		t.Fatal(err)
+	}
+
+	// A computer's disk check, as Windows or macOS repair a stick (fsck.fat -a). It cuts each file
+	// whose entry names a free cluster: rekordbox exports again what it cut. Then the first pass
+	// writes the edits, which stayed pending, and the volume is clean.
+	out, _ := exec.Command("fsck.fat", "-a", img).CombinedOutput()
+	t.Logf("fsck.fat -a:\n%s", out)
+	_, unmount = vfatMount(t, img, mnt)
+	for _, rel := range targets {
+		st, err := os.Stat(filepath.Join(mnt, filepath.FromSlash(rel)))
+		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	v.close()
-	if !issue321ANLZHas(t, mnt, "Stale 321") {
-		t.Fatal("the edit is not on the stick")
-	}
-	// The next mount's cleanup frees nothing of it either.
-	bridge.CleanWriteBackLeftovers(mnt)
-	syscall.Sync()
-	if vfatReadOnly(t, mnt) {
-		t.Fatal("the next mount's cleanup made vfat remount the stick read-only")
-	}
-	unmount()
-
-	// What the deck reads next: a file written after the pass, its allocation starting where the
-	// stale entries pointed, must not land in the new files.
-	v = openFAT32(t, img, true)
-	low := written[targets[0]].start
-	for _, rel := range targets {
-		low = min(low, written[rel].start)
-	}
-	var hint [4]byte
-	binary.LittleEndian.PutUint32(hint[:], uint32(low-1))
-	if _, err := v.f.WriteAt(hint[:], v.fsinfo*v.bps+492); err != nil {
-		t.Fatal(err)
-	}
-	v.close()
-	_, unmount = vfatMount(t, img, mnt)
-	if err = os.WriteFile(filepath.Join(mnt, "after.bin"), bytes.Repeat([]byte{0xa5}, int(8*cs)), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	unmount()
-	_, _ = vfatMount(t, img, mnt)
-	for _, rel := range targets {
-		got, err := os.ReadFile(filepath.Join(mnt, filepath.FromSlash(rel)))
-		if err != nil || !bytes.Equal(got, content[rel]) {
-			t.Fatalf("%s: overwritten by the next file written (read error %v): the pass freed its clusters", rel, err)
+		whole := issue321Whole(mnt, rel)
+		t.Logf("%s after the disk check: %d bytes, reads whole: %v", rel, st.Size(), whole)
+		if !whole {
+			b, err := os.ReadFile(filepath.Join(src, filepath.FromSlash(rel)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(filepath.Join(mnt, filepath.FromSlash(rel)), b, 0o644); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
-	issue321ExportSound(t, mnt)
+	res, err = bridge.WriteBackCues(ctx, mnt, opts)
+	if err != nil || !issue321ANLZHas(t, mnt, cue) || issue321PDBGenre(t, mnt, 1) != genre {
+		t.Fatalf("the first pass after the disk check: %+v %v: the edits are not on the stick", res, err)
+	}
+	issue321ANLZSound(t, mnt)
+	unmount()
+	if out, err := exec.Command("fsck.fat", "-n", img).CombinedOutput(); err != nil {
+		t.Fatalf("fsck.fat -n after that pass: %v\n%s", err, out)
+	}
 }
 
 // #321 review R2 (P2-3), the Eject's overrun on a real FAT volume: the hook's Eject marks the

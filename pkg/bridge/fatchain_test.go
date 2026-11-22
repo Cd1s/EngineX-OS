@@ -70,7 +70,7 @@ func TestIssue321FATChainOwned(t *testing.T) {
 	}{
 		{"FAT32, three clusters", true, 8, 1 << 20, map[int64]uint32{15: 16, 16: 40, 40: eoc32}, 15, 3*4096 - 100, true},
 		// mkfs -F 32 on a small volume: FAT32 with fewer than 65525 clusters (Linux goes by the
-		// BPB, not the count). Read as FAT16 it looked unowned and a healthy file was set aside.
+		// BPB, not the count). Read as FAT16 it looked unowned: a healthy stick would not be written.
 		{"FAT32 with few clusters", true, 64, 1 << 20, map[int64]uint32{15: 16, 16: 17, 17: eoc32}, 15, 86386, true},
 		{"a free cluster in the chain", true, 8, 1 << 20, map[int64]uint32{15: 16, 16: 0}, 15, 3 * 4096, false},
 		{"its first cluster free (an entry ahead of its chain)", true, 64, 1 << 20, map[int64]uint32{}, 15, 5000, false},

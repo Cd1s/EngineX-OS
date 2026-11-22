@@ -33,6 +33,9 @@ func SetCueRunDirForTest(dir string) func() {
 // ErrNotQuietForTest is the error of a pass whose read overlapped a write by Engine.
 var ErrNotQuietForTest = errNotQuiet
 
+// ErrUnownedClustersForTest is the error of a pass refused on a stick whose FAT is damaged.
+var ErrUnownedClustersForTest = errUnownedClusters
+
 // EjectingNameForTest is the name of the edisksd hook's Eject mark of mount that stays until the
 // next mount (pkg/prolink EjectingMark).
 func EjectingNameForTest(mount string) string {
