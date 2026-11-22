@@ -15,6 +15,7 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 func copyEncryptedOneLibraryFixture(t *testing.T, dst string) {
@@ -55,10 +56,19 @@ func TestExportSelectionMTimeAndFallback(t *testing.T) {
 				if len(lib.Tracks) != 7 {
 					t.Fatalf("union track count: got %d, want 7", len(lib.Tracks))
 				}
-				for _, track := range lib.Tracks {
-					if track.ID < 1<<31 {
-						t.Fatalf("union track ID is not path-derived: %d", track.ID)
+				var shared *rekordbox.Track
+				for i := range lib.Tracks {
+					if strings.EqualFold(lib.Tracks[i].Path, "/MUSIC/three.wav") {
+						shared = &lib.Tracks[i]
 					}
+				}
+				wantPDB := diff < -5
+				wantID := uint32(103)
+				if wantPDB {
+					wantID = 3
+				}
+				if shared == nil || shared.ID != wantID {
+					t.Fatalf("preferred source mismatch: pdb=%v sharedID=%d want=%d", wantPDB, shared.ID, wantID)
 				}
 			})
 		}
@@ -225,7 +235,7 @@ func TestExportTieKeepsPDBImport(t *testing.T) {
 			if n := scalar[int](t, engine, `SELECT count(*) FROM PlaylistEntity WHERE listId=? AND trackId=?`, listID, trackID); n != 1 {
 				t.Fatal("native playlist entry lost")
 			}
-			wantStamp := strings.TrimSpace(oldStamp) + " union\n"
+			wantStamp := strings.TrimSpace(oldStamp) + "\n"
 			if got, err := os.ReadFile(stampPath); err != nil || string(got) != wantStamp {
 				t.Fatalf("PDB-first stamp changed: %q %v", got, err)
 			}

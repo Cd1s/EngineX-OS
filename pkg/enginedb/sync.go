@@ -57,7 +57,9 @@ type Options struct {
 	StagedOnly bool `json:"-"`
 	// MatchByPath lets rb-bridge retain an Engine row when a merged export
 	// changes the source library's numeric ID for the same folded file path.
-	MatchByPath  bool `json:"-"`
+	MatchByPath bool `json:"-"`
+	// PathFirst uses the folded path before source ID when the preferred export changed.
+	PathFirst    bool `json:"-"`
 	SmartMatch   bool
 	CurrentTrack uint32
 	// Fast imports only what the export itself holds, opening no audio, analysis
@@ -571,7 +573,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	}
 	mapping := map[uint32]int64{}
 	effectiveTracks := append([]rekordbox.Track(nil), l.Tracks...)
-	owned, err := stageOwnedMovesWithPath(ctx, tx, prepared, opts.StagedOnly, opts.MatchByPath)
+	owned, err := stageOwnedMovesWithPath(ctx, tx, prepared, opts.StagedOnly, opts.MatchByPath, opts.PathFirst)
 	if err != nil {
 		return result, err
 	}
@@ -987,7 +989,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	var actualPlaylists, validPlaylists int
 	countQuery := `SELECT count(*),count(p.id) FROM BridgePlaylist b LEFT JOIN Playlist p ON p.id=b.listId`
 	if opts.StagedOnly {
-		countQuery += ` WHERE b.sourceId>=16777216`
+		countQuery += ` WHERE b.sourceId>=16777216 AND b.sourceId<2147483648`
 		if opts.SmartMatch {
 			countQuery += ` OR b.sourceId=-1`
 		}
@@ -1076,7 +1078,7 @@ func writePlaylists(ctx context.Context, q *stmtCache, l *rekordbox.Library, opt
 	owned := `SELECT listId FROM BridgePlaylist`
 	predicate := ""
 	if opts.StagedOnly {
-		predicate = ` WHERE sourceId>=16777216`
+		predicate = ` WHERE sourceId>=16777216 AND sourceId<2147483648`
 		if opts.SmartMatch {
 			predicate += ` OR sourceId=-1`
 		}

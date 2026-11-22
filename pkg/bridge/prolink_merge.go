@@ -68,13 +68,13 @@ func mergeStaged(mount string, l *rekordbox.Library) {
 	}
 	var sortOrder uint32
 	for _, t := range l.Tracks {
-		if t.ID>>stagedIDBits != 0 {
+		if t.ID>>stagedIDBits != 0 && t.ID < 1<<31 {
 			log.Printf("rb-bridge: track id %d too large to add Pro DJ Link libraries", t.ID)
 			return
 		}
 	}
 	for _, p := range l.Playlists {
-		if p.ID>>stagedIDBits != 0 {
+		if p.ID>>stagedIDBits != 0 && p.ID < 1<<31 {
 			log.Printf("rb-bridge: playlist id %d too large to add Pro DJ Link libraries", p.ID)
 			return
 		}

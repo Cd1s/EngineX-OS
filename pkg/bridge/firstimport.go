@@ -142,13 +142,13 @@ func firstImportAtMount(ctx context.Context, mount, dir, stamp string, opts *eng
 		log.Printf("rb-bridge: first import of a large export goes on after the mount")
 		return enginedb.Result{Background: true}, nil
 	}
-	l, stagedOnly, err := readLibrary(ctx, mount)
+	l, stagedOnly, readRels, err := readLibraryDetailed(ctx, mount)
 	if err == nil && (len(l.Tracks) > fastImportTracks || opts.Deadline.IsZero() && size > attemptExportBytes) {
 		if !fastPublishFits(l, time.Until(limit)) {
 			log.Printf("rb-bridge: first import of %d tracks goes on after the mount", len(l.Tracks))
 			return enginedb.Result{Background: true}, nil
 		}
-		res, err := fastPublish(ctx, mount, dir, stage, stamp, r, l, stagedOnly)
+		res, err := fastPublish(ctx, mount, dir, stage, stamp, r, l, stagedOnly, readRels)
 		if ctx.Err() != nil && err != nil {
 			log.Printf("rb-bridge: first import goes on after the mount: %v", err)
 			return enginedb.Result{Background: true}, nil
@@ -183,7 +183,10 @@ func firstImportAtMount(ctx context.Context, mount, dir, stamp string, opts *eng
 	if res.Deferred > 0 {
 		log.Printf("rb-bridge: first import published with %d of %d tracks without grids yet", res.Deferred, len(l.Tracks))
 	}
-	if err = completeStage(stage, stamp); err == nil {
+	if err = writeMark(stage, readName, readLibrariesMark(stamp, readRels)); err == nil {
+		err = completeStage(stage, stamp)
+	}
+	if err == nil {
 		err = publishImport(mount, dir)
 	}
 	if err == nil && res.Deferred > 0 {
@@ -218,9 +221,12 @@ func completeLater(dir, stage, stamp string, res enginedb.Result) (enginedb.Resu
 // export alone (#301): paths as the export spells them, cues from its own database, no file
 // read, loaded in bulk. Grids, waveforms, artwork and the exact cue positions come with the
 // full import a later mount runs on the "fast:" tracks.
-func fastPublish(ctx context.Context, mount, dir, stage, stamp string, r *compat.Resolver, l *rekordbox.Library, stagedOnly bool) (enginedb.Result, error) {
+func fastPublish(ctx context.Context, mount, dir, stage, stamp string, r *compat.Resolver, l *rekordbox.Library, stagedOnly bool, readRels []string) (enginedb.Result, error) {
 	res, err := buildFast(ctx, stage, r, l, stagedOnly)
 	if err != nil {
+		return res, err
+	}
+	if err = writeMark(stage, readName, readLibrariesMark(stamp, readRels)); err != nil {
 		return res, err
 	}
 	if err = completeStage(stage, stamp); err != nil {
@@ -371,7 +377,7 @@ func renameStage(dir, stage string) error {
 		return err
 	}
 	cut("publish pending removed")
-	return finishPublish(dir, stateName, stampName, "m.db", pendingName)
+	return finishPublish(dir, stateName, stampName, readName, "m.db", pendingName)
 }
 
 // liveIdentity names the state of an SQLite file: its size and the change counter that

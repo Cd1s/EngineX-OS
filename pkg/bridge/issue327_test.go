@@ -197,15 +197,11 @@ func TestIssue327ConvertedBothExportsCatchesUpUnionOnce(t *testing.T) {
 	if err := os.Chtimes(pdbPath, when, when); err != nil {
 		t.Fatal(err)
 	}
-	pdbStat, err := os.Stat(pdbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
 	dbStat, err := os.Stat(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stamp := fmt.Sprintf("v4 PIONEER/rekordbox/export.pdb %d %d | PIONEER/rekordbox/exportLibrary.db %d %d\n", pdbStat.Size(), pdbStat.ModTime().UnixNano(), dbStat.Size(), dbStat.ModTime().UnixNano())
+	stamp := fmt.Sprintf("v4 PIONEER/rekordbox/exportLibrary.db %d %d\n", dbStat.Size(), dbStat.ModTime().UnixNano())
 	if err := os.WriteFile(filepath.Join(root, "Engine Library/Database2/.rb-bridge-stamp"), []byte(stamp), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -230,6 +226,13 @@ func TestIssue327ConvertedBothExportsCatchesUpUnionOnce(t *testing.T) {
 	db.Close()
 	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !res.Bypassed {
 		t.Fatalf("second catch-up insert: %+v %v", res, err)
+	}
+	stored, err := os.ReadFile(filepath.Join(root, "Engine Library/Database2/.rb-bridge-stamp"))
+	if err != nil || strings.Contains(string(stored), " union") {
+		t.Fatalf("released-compatible stamp changed: %q %v", stored, err)
+	}
+	if mark, err := os.ReadFile(filepath.Join(root, "Engine Library/Database2/.rb-bridge-read")); err != nil || !strings.Contains(string(mark), "export.pdb") {
+		t.Fatalf("read-library mark missing: %q %v", mark, err)
 	}
 }
 
@@ -281,8 +284,8 @@ func TestIssue327SourceFlipAndUnreadableKeepRowsByPath(t *testing.T) {
 			t.Fatalf("path %q changed row id %d -> %d", path, wantID, got)
 		}
 	}
-	if got := scalar[int](t, db, `SELECT count(*) FROM Track WHERE rating=77`); got <= 0 || got >= len(rows) {
-		t.Fatalf("source flip path matching did not distinguish rows: %d/%d retained", got, len(rows))
+	if got := scalar[int](t, db, `SELECT count(*) FROM Track WHERE rating=77`); got != len(rows) {
+		t.Fatalf("source flip path matching lost ratings: %d/%d retained", got, len(rows))
 	}
 	retainedRatings := scalar[int](t, db, `SELECT count(*) FROM Track WHERE rating=77`)
 	db.Close()

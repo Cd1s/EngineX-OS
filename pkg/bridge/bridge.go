@@ -43,18 +43,28 @@ func ReadLibrary(ctx context.Context, mount string) (*rekordbox.Library, error) 
 	return l, err
 }
 func readLibrary(ctx context.Context, mount string) (*rekordbox.Library, bool, error) {
+	l, staged, _, err := readLibraryDetailed(ctx, mount)
+	return l, staged, err
+}
+
+func readLibraryDetailed(ctx context.Context, mount string) (*rekordbox.Library, bool, []string, error) {
 	r, err := compat.NewResolver(mount)
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
-	l, _, unreadable, err := readExportWithResolver(ctx, mount, r)
+	l, readable, unreadable, err := readExportWithResolver(ctx, mount, r)
 	stagedOnly := errors.Is(err, errNoLocalExport)
 	if len(unreadable) > 0 && hasLibrary(filepath.Join(mount, "Engine Library", "Database2")) {
-		stamp := importedStamp(filepath.Join(mount, "Engine Library", "Database2"))
+		dir := filepath.Join(mount, "Engine Library", "Database2")
+		stamp := importedStamp(dir)
+		readMarkValue := readMark(dir, readName)
 		for _, bad := range unreadable {
-			if stampContainsExport(stamp, bad.candidate.rel) {
+			if readLibrariesStamp(readMarkValue) == stamp && readLibrariesContains(readMarkValue, bad.candidate.rel) {
 				log.Printf("rb-bridge: existing library kept: %s unreadable", bad.candidate.rel)
-				return nil, false, errUnreadableExport
+				if strings.Contains(bad.err.Error(), "sidecar -wal") {
+					return nil, false, nil, errUnreadableExport
+				}
+				return nil, false, nil, fmt.Errorf("existing library kept: %s unreadable: %w", bad.candidate.rel, bad.err)
 			}
 		}
 	}
@@ -63,15 +73,19 @@ func readLibrary(ctx context.Context, mount string) (*rekordbox.Library, bool, e
 		err = nil
 	}
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	if l != nil {
 		mergeStaged(mount, l)
 	}
 	if stagedOnly && len(l.Tracks) == 0 && len(l.Playlists) == 0 {
-		return nil, false, os.ErrNotExist
+		return nil, false, nil, os.ErrNotExist
 	}
-	return l, stagedOnly, nil
+	rels := make([]string, 0, len(readable))
+	for _, read := range readable {
+		rels = append(rels, read.candidate.rel)
+	}
+	return l, stagedOnly, rels, nil
 }
 
 const exportNewerMargin = 5 * time.Second
@@ -263,7 +277,12 @@ func mergeReadableExports(readable []readableExport) *rekordbox.Library {
 				trackIDs[original.ID] = existing
 				continue
 			}
-			id := stableExportID("track", key, usedTrackIDs)
+			id := original.ID
+			if sourceIndex > 0 {
+				id = stableExportID("track", key, usedTrackIDs)
+			} else if usedTrackIDs[id] {
+				id = stableExportID("track", key, usedTrackIDs)
+			}
 			t.ID = id
 			if id != original.ID {
 				t.RecordHash = rekordbox.RecordHash(t)
@@ -318,11 +337,11 @@ func mergeReadableExports(readable []readableExport) *rekordbox.Library {
 					p.Name += " (" + sourceLabel + ")"
 					_ = existingIndex
 				}
-				identityKey := key
-				if _, conflict := playlistByKey[key]; conflict {
-					identityKey = sourceLabel + "\x00" + key
+				if sourceIndex > 0 {
+					p.ID = stableExportID("playlist", sourceLabel+"\x00"+key, usedPlaylistIDs)
+				} else if usedPlaylistIDs[p.ID] {
+					p.ID = stableExportID("playlist", key, usedPlaylistIDs)
 				}
-				p.ID = stableExportID("playlist", identityKey, usedPlaylistIDs)
 				usedPlaylistIDs[p.ID] = true
 				playlistIDs[original.ID] = p.ID
 				if _, ok := playlistByKey[key]; !ok {
@@ -441,6 +460,7 @@ func Convert(ctx context.Context, mount string, opts enginedb.Options) (enginedb
 type preread struct {
 	l          *rekordbox.Library
 	stagedOnly bool
+	readRels   []string
 	resolver   *compat.Resolver
 	// reconciled: its tracks the library holds have their rows' paths, and only the others are
 	// looked up, by the import itself (#253). Reconcile looked up every folder of the export.
@@ -670,15 +690,12 @@ func exportStamp(r *compat.Resolver, mount string) (string, error) {
 	for i, c := range candidates {
 		parts[i] = fmt.Sprintf("%s %d %d", c.rel, c.size, c.mtime.UnixNano())
 	}
-	stamp := stampVersion + " " + strings.Join(parts, " | ") + stagedStamp(mount)
-	if len(candidates) > 1 {
-		stamp += " union"
-	}
-	return stamp, nil
+	return stampVersion + " " + strings.Join(parts, " | ") + stagedStamp(mount), nil
 }
 
 const (
 	stampName = ".rb-bridge-stamp"
+	readName  = ".rb-bridge-read"
 	// pendingName holds the stamp of an export whose import left tracks without
 	// their files read; the next mount of the same export resumes it.
 	pendingName  = ".rb-bridge-pending"
@@ -810,7 +827,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	canWrite := !full && writable(mount)
 	if canWrite {
 		// A publish an earlier mount did not finish, before anything looks at the library.
-		if err := finishPublish(dir, stateName, stampName, "m.db", pendingName); err != nil {
+		if err := finishPublish(dir, stateName, stampName, readName, "m.db", pendingName); err != nil {
 			return enginedb.Result{}, err
 		}
 		pruneRGBOverviews(ctx, dir, filepath.Join(dir, "m.db"), "")
@@ -838,7 +855,9 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	if !full && !opts.SmartMatch && canWrite {
 		reread = readReread(dir, stamp)
 	}
-	bypass := !full && !opts.SmartMatch && importedStamp(dir) == stamp
+	readLibrariesMarkValue := readMark(dir, readName)
+	bypass := !full && !opts.SmartMatch && importedStamp(dir) == stamp &&
+		((readLibrariesMarkValue == "" && !stampHasMultipleExports(stamp)) || readLibrariesStamp(readLibrariesMarkValue) == stamp)
 	// An earlier export-only import still has tracks without their files read.
 	resume := bypass && hasFastTracks(dir)
 	bypass = bypass && !resume
@@ -857,7 +876,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		// An export whose list is in the library already (.rb-bridge-pending) has only its files left.
 		if readMark(dir, pendingName) != stamp {
 			var err error
-			if res, err = quickUpdate(ctx, mount, dir, r, mountStart.Add(maxMountHookBudget)); err != nil {
+			if res, err = quickUpdate(ctx, mount, dir, r, mountStart.Add(maxMountHookBudget), primaryFlipped(oldStamp, stamp)); err != nil {
 				if errors.Is(err, errUnreadableExport) {
 					return enginedb.Result{Bypassed: true}, nil
 				}
@@ -905,10 +924,10 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	defer stop()
 	if !full && !bypass {
 		// Parsing/decrypting the export does not spend the file-reading budget.
-		l, stagedOnly, err := readLibrary(inPlace, mount)
+		l, stagedOnly, readRels, err := readLibraryDetailed(inPlace, mount)
 		readErr = err
 		if err == nil {
-			pre = &preread{l: l, stagedOnly: stagedOnly, resolver: r}
+			pre = &preread{l: l, stagedOnly: stagedOnly, readRels: readRels, resolver: r}
 		}
 		// What a background update left to this mount is a few tracks of a large export: the
 		// others keep their rows' paths, unread (#253).
@@ -1004,6 +1023,9 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		}
 	} else if err == nil && !result.Bypassed {
 		writeStamp(dir, stamp)
+		if pre != nil {
+			_ = writeMark(dir, readName, readLibrariesMark(stamp, pre.readRels))
+		}
 		cut("in place stamped")
 		os.Remove(filepath.Join(dir, pendingName))
 		cut("in place pending removed")
@@ -1072,6 +1094,45 @@ func importedStamp(dir string) string {
 	}
 	b, _ := os.ReadFile(filepath.Join(dir, stampName))
 	return strings.TrimSpace(string(b))
+}
+
+func primaryOfStamp(stamp string) string {
+	f := strings.Fields(strings.TrimPrefix(strings.TrimSpace(stamp), stampVersion+" "))
+	if len(f) == 0 {
+		return ""
+	}
+	return f[0]
+}
+
+func primaryFlipped(old, cur string) bool {
+	o, c := primaryOfStamp(old), primaryOfStamp(cur)
+	return o != "" && c != "" && o != c
+}
+
+func readLibrariesMark(stamp string, rels []string) string {
+	return stamp + "\n" + strings.Join(rels, "\n") + "\n"
+}
+
+func readLibrariesStamp(mark string) string {
+	if i := strings.IndexByte(mark, '\n'); i >= 0 {
+		return strings.TrimSpace(mark[:i])
+	}
+	return strings.TrimSpace(mark)
+}
+
+func readLibrariesContains(mark, rel string) bool {
+	lines := strings.Split(mark, "\n")
+	for _, line := range lines[1:] {
+		if strings.TrimSpace(line) == rel {
+			return true
+		}
+	}
+	return false
+}
+
+func stampHasMultipleExports(stamp string) bool {
+	body := strings.TrimPrefix(strings.TrimSpace(stamp), stampVersion+" ")
+	return strings.Contains(body, " | ")
 }
 
 func stampContainsExport(stamp, rel string) bool {
@@ -1174,7 +1235,8 @@ func readMark(dir, name string) string {
 	return strings.TrimSpace(string(b))
 }
 
-// foldPath is the resolver's equivalence of paths: case folding and NFC (#6).
+// foldPath is the export-merge equivalence of paths: case folding and NFC (#6).
+// enginedb keeps its own bridgePathKey because it also cleans database-relative paths.
 func foldPath(p string) string { return norm.NFC.String(cases.Fold().String(norm.NFC.String(p))) }
 
 // mergeByPath is Reconcile without touching the disk.

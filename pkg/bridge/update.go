@@ -86,7 +86,7 @@ var (
 // only marked its stage here, and the playlists appeared once a remount published the update:
 // 11.5 minutes on the maintainer's 6000-track stick, and not at all while a deck held one of its
 // tracks. limit is the hook's kill; nothing is written when the update would not end before it.
-func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, limit time.Time) (enginedb.Result, error) {
+func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, limit time.Time, flip bool) (enginedb.Result, error) {
 	inner, cancel := context.WithDeadline(ctx, limit)
 	defer cancel()
 	if enginedb.LibraryInUse(mount) {
@@ -98,7 +98,7 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 		return enginedb.Result{}, quickLate(ctx, err)
 	}
 	read := time.Since(start)
-	fresh, err := quickPaths(dir, l)
+	fresh, err := quickPaths(dir, l, flip)
 	if err != nil {
 		return enginedb.Result{}, err
 	}
@@ -110,7 +110,7 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	if left := time.Until(limit); cost > left {
 		return enginedb.Result{}, fmt.Errorf("%w: %d tracks (%d new) and %d playlist entries need about %s, %s left", errQuickTooLong, len(l.Tracks), fresh, entries, cost.Round(time.Second), left.Round(time.Second))
 	}
-	res, err := enginedb.SyncResolved(inner, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly, MatchByPath: true})
+	res, err := enginedb.SyncResolved(inner, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly, MatchByPath: true, PathFirst: flip})
 	if err != nil {
 		return res, quickLate(ctx, err)
 	}
@@ -141,7 +141,7 @@ func quickLate(ctx context.Context, err error) error {
 // moved its file: a quick update moves no row. A row it moved would be imported as new from the
 // export alone and then no longer count as the import's, and the update would replace what a deck
 // changed on it; the update moves it with its files read.
-func quickPaths(dir string, l *rekordbox.Library) (fresh int, err error) {
+func quickPaths(dir string, l *rekordbox.Library, flip bool) (fresh int, err error) {
 	known, err := ownedSpellings(dir)
 	if err != nil {
 		return 0, err
@@ -155,6 +155,9 @@ func quickPaths(dir string, l *rekordbox.Library) (fresh int, err error) {
 		rowsByPath[foldPath(filepath.ToSlash(filepath.Clean("/"+p)))] = id
 	}
 	for i := range l.Tracks {
+		if flip {
+			break
+		}
 		if p, ok := rows[l.Tracks[i].ID]; ok {
 			storedPath := foldPath(filepath.ToSlash(filepath.Clean("/" + p)))
 			exportPath := foldPath(filepath.ToSlash(filepath.Clean(l.Tracks[i].Path)))
@@ -179,7 +182,7 @@ func quickPaths(dir string, l *rekordbox.Library) (fresh int, err error) {
 const quickName = "QUICK"
 
 // quickInStage is quickUpdate on the stage's copy of the library, without the mount's time limit.
-func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resolver, l *rekordbox.Library, stagedOnly bool, progress func(done, total int)) (enginedb.Result, error) {
+func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resolver, l *rekordbox.Library, stagedOnly, flip bool, readRels []string, progress func(done, total int)) (enginedb.Result, error) {
 	if _, err := os.Stat(filepath.Join(stage, baseCountsName)); errors.Is(err, os.ErrNotExist) {
 		if err = snapshotLive(ctx, dir, stage, r, l); err != nil {
 			return enginedb.Result{}, err
@@ -188,10 +191,10 @@ func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resol
 	if progress != nil {
 		progress(0, len(l.Tracks))
 	}
-	if _, err := quickPaths(stage, l); err != nil {
+	if _, err := quickPaths(stage, l, flip); err != nil {
 		return enginedb.Result{}, err
 	}
-	res, err := enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly, MatchByPath: true, DatabaseDir: stage})
+	res, err := enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly, MatchByPath: true, PathFirst: flip, DatabaseDir: stage})
 	if err != nil {
 		return res, err
 	}
@@ -200,6 +203,9 @@ func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resol
 		progress(len(l.Tracks), len(l.Tracks))
 	}
 	log.Printf("rb-bridge: the re-export's list is ready (%d new tracks); a remount publishes it before its files are read", res.Added)
+	if err := writeMark(stage, readName, readLibrariesMark(stamp, readRels)); err != nil {
+		return res, err
+	}
 	return res, completeStage(stage, stamp)
 }
 
@@ -392,7 +398,7 @@ func vacuumInto(ctx context.Context, src, dst string) error {
 // updateInBackground runs the import passes of an update on the stage's copy of the library.
 func updateInBackground(ctx context.Context, mount, stage, stamp string, r *compat.Resolver, progress func(done, total int)) (enginedb.Result, error) {
 	dir := filepath.Dir(stage)
-	l, stagedOnly, err := readLibrary(ctx, mount)
+	l, stagedOnly, readRels, err := readLibraryDetailed(ctx, mount)
 	if errors.Is(err, errUnreadableExport) {
 		return enginedb.Result{Bypassed: true}, nil
 	}
@@ -400,7 +406,7 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 		return enginedb.Result{}, err
 	}
 	if readMark(stage, quickName) == stamp {
-		return quickInStage(ctx, dir, stage, stamp, r, l, stagedOnly, progress)
+		return quickInStage(ctx, dir, stage, stamp, r, l, stagedOnly, primaryFlipped(readMark(dir, stampName), stamp), readRels, progress)
 	}
 	if err = ReconcileContext(ctx, r, l); err != nil {
 		return enginedb.Result{}, err
@@ -423,7 +429,7 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 	}
 	changed := readMark(stage, resumeName) != "" // an earlier pass may have changed it
 	for {
-		o := enginedb.Options{DatabaseDir: stage, StagedOnly: stagedOnly, MatchByPath: true, LegacyOffsets: legacy, LegacyAACOffsets: legacyAAC,
+		o := enginedb.Options{DatabaseDir: stage, StagedOnly: stagedOnly, MatchByPath: true, PathFirst: primaryFlipped(readMark(dir, stampName), stamp), LegacyOffsets: legacy, LegacyAACOffsets: legacyAAC,
 			Resume: readMark(stage, resumeName) == stamp, Deadline: time.Now().Add(window)}
 		res, err := enginedb.SyncResolved(ctx, r, l, o)
 		if err != nil {
@@ -442,6 +448,9 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 				cut("unchanged update stamped")
 				os.Remove(filepath.Join(dir, pendingName))
 				return enginedb.Result{Bypassed: true}, dropStage(stage)
+			}
+			if err := writeMark(stage, readName, readLibrariesMark(stamp, readRels)); err != nil {
+				return res, err
 			}
 			return res, completeStage(stage, stamp)
 		}

@@ -101,10 +101,11 @@ func TestIssue327OverlappingIDsStayWithTheirPaths(t *testing.T) {
 	if len(a) != len(b) || len(a) != 3 {
 		t.Fatalf("merged path count changed: %d/%d", len(a), len(b))
 	}
-	for path, id := range a {
-		if b[path] != id {
-			t.Fatalf("path %q changed ID %d -> %d after source flip", path, id, b[path])
-		}
+	if a["/music/one.wav"] != 1 || a["/music/two.wav"] != 2 || a["/music/other.wav"] < 1<<31 {
+		t.Fatalf("preferred first IDs=%v", a)
+	}
+	if b["/music/other.wav"] != 1 || b["/music/one.wav"] != 2 || b["/music/two.wav"] < 1<<31 {
+		t.Fatalf("preferred second IDs=%v", b)
 	}
 }
 

@@ -213,10 +213,10 @@ func prepareFast(ctx context.Context, res *compat.Resolver, l *rekordbox.Library
 // can retain their Engine IDs without violating Track's immediate UNIQUE(path).
 // Both temporary paths and the final rename are in the import transaction.
 func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, stagedOnly bool) (map[uint32]int64, error) {
-	return stageOwnedMovesWithPath(ctx, tx, prepared, stagedOnly, false)
+	return stageOwnedMovesWithPath(ctx, tx, prepared, stagedOnly, false, false)
 }
 
-func stageOwnedMovesWithPath(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, stagedOnly, matchByPath bool) (map[uint32]int64, error) {
+func stageOwnedMovesWithPath(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, stagedOnly, matchByPath, pathFirst bool) (map[uint32]int64, error) {
 	targets := map[uint32]*preparedTrack{}
 	byPath := map[string]*preparedTrack{}
 	for i := range prepared {
@@ -286,16 +286,28 @@ func stageOwnedMovesWithPath(ctx context.Context, tx *sql.Tx, prepared []prepare
 	for _, t := range tracks {
 		counts[t.source]++
 	}
+	claimed := map[uint32]bool{}
+	if matchByPath && pathFirst {
+		for _, t := range tracks {
+			if p := byPath[bridgePathKey(t.oldPath)]; p != nil {
+				claimed[p.track.ID] = true
+			}
+		}
+	}
 	for _, t := range tracks {
 		id, source, oldPath, fp := t.id, t.source, t.oldPath, t.fp
 		pathMatch := byPath[bridgePathKey(oldPath)]
 		if !matchByPath {
 			pathMatch = nil
 		}
-		if sourceTarget := targets[source]; sourceTarget != nil {
-			// A source ID with a different target path is an intentional move or
-			// swap. Preserve that identity before considering a path match.
+		if sourceTarget := targets[source]; sourceTarget != nil && !pathFirst {
+			// In ordinary imports, a source ID with a different target path is an intentional
+			// move or swap. Preserve that identity before considering a path match.
 			pathMatch = nil
+		}
+		if pathFirst && pathMatch == nil && claimed[source] {
+			removed = append(removed, id)
+			continue
 		}
 		if stagedOnly && source < 1<<24 && targets[source] == nil && pathMatch == nil {
 			continue // a remote-only import must not identify or remove absent local sources
@@ -321,7 +333,7 @@ func stageOwnedMovesWithPath(ctx context.Context, tx *sql.Tx, prepared []prepare
 		}
 		p, ok := targets[source]
 		if !ok {
-			if stagedOnly && source < 1<<24 {
+			if stagedOnly && (source < 1<<24 || source >= 1<<31) {
 				continue
 			}
 			removed = append(removed, id)

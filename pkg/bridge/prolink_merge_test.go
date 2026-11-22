@@ -68,6 +68,29 @@ func TestStagedProlinkLibraryImportsUnderItsFolder(t *testing.T) {
 	}
 }
 
+func TestIssue327StagedLibrariesRetained(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	copyEncryptedOneLibraryFixture(t, filepath.Join(root, "PIONEER/rekordbox/exportLibrary.db"))
+	staged := filepath.Join(root, ".prolink-cache", "CDJ-3000")
+	for _, name := range []string{"staged-one.wav", "staged-two.wav", "staged-three.wav"} {
+		testfixture.Write(t, staged, "MUSIC/"+name, testfixture.WAV(true))
+	}
+	testfixture.Write(t, staged, "PIONEER/rekordbox/export.pdb", testfixture.PDBNamed([5]string{"staged-one.wav", "staged-two.wav", "staged-three.wav", "staged-four.wav", "staged-five.wav"}, "staged"))
+	ctx := context.Background()
+	if r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, true); err != nil || r.Bypassed {
+		t.Fatalf("union with staged export: %+v %v", r, err)
+	}
+	db := dbOpen(t, root)
+	if n := scalar[int](t, db, `SELECT count(*) FROM Track WHERE path LIKE '%.prolink-cache/CDJ-3000/%'`); n == 0 {
+		t.Fatal("staged tracks disappeared from union")
+	}
+	if n := scalar[int](t, db, `SELECT count(*) FROM Playlist WHERE title LIKE '[Pro DJ Link: CDJ-3000]%'`); n == 0 {
+		t.Fatal("staged playlists disappeared from union")
+	}
+	db.Close()
+}
+
 func TestStagedProlinkWithoutLocalRekordboxExport(t *testing.T) {
 	for _, mode := range []string{"empty", "pioneer-directory", "native-engine"} {
 		t.Run(mode, func(t *testing.T) {
