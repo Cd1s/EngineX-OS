@@ -7,8 +7,9 @@ import (
 )
 
 // The routes that other units on the LAN call without a login (a linked player reads this deck's
-// state and the loaded track's audio; Spotify's own app signs the deck in) are not served through
-// the remote console listener: its callers come from outside the deck.
+// state and the loaded track's audio; Spotify's own app signs the deck in; a computer listens to the
+// Live Stream) are not served through the remote console listener: its callers come from outside the
+// deck.
 func TestRemoteConsoleForwardHasNoLANRoutes(t *testing.T) {
 	s, _ := newTestServer(t)
 	forward := httptest.NewServer(s.ForwardHandler()) // a loopback listener, as the tunnel reaches it
@@ -38,9 +39,13 @@ func TestRemoteConsoleForwardHasNoLANRoutes(t *testing.T) {
 		"/peer/decks", "//peer/decks", "/x/../peer/decks", "/%70eer/decks", "/peer",
 		"/peer/decks/1/audio?key=k", "/peer/decks/1/perf?key=k", "/peer/decks/1/display?key=k",
 		"/spotify-connect", "/spotify-connect?action=getInfo", "//spotify-connect",
+		"/./peer/decks", "/peer/./decks", "/%2e/peer/decks", "/peer/decks/", "/peer/decks;x",
+		"/live.wav", "/live.wav?format=pcm", "//live.wav", "/x/../live.wav", "/live.mp3", "/live-header.wav",
 	} {
-		if got := do("GET", forward.URL+p); got != http.StatusNotFound {
-			t.Errorf("forwarded GET %s: %d, want 404", p, got)
+		for _, method := range []string{"GET", "HEAD", "OPTIONS"} {
+			if got := do(method, forward.URL+p); got != http.StatusNotFound {
+				t.Errorf("forwarded %s %s: %d, want 404", method, p, got)
+			}
 		}
 	}
 	for _, p := range []string{"/peer/settings-copy/request", "/spotify-connect"} {
@@ -56,13 +61,23 @@ func TestRemoteConsoleForwardHasNoLANRoutes(t *testing.T) {
 	if got := do("GET", lan.URL+"/spotify-connect"); got != http.StatusOK {
 		t.Errorf("LAN GET /spotify-connect: %d, want 200", got)
 	}
+	// The Live Stream is off in this test: on the LAN its route answers for itself (503), it is not hidden.
+	if got := do("GET", lan.URL+"/live.wav"); got != http.StatusServiceUnavailable {
+		t.Errorf("LAN GET /live.wav with the Live Stream off: %d, want 503", got)
+	}
+	if got := do("GET", lan.URL+"/live-header.wav"); got != http.StatusOK {
+		t.Errorf("LAN GET /live-header.wav: %d, want 200", got)
+	}
 	// A tunnel set up to reach the LAN listener itself: the headers its edge adds mark the caller
 	// as from outside, as they already do for the deck-local gateway.
 	for _, h := range []string{"Cf-Connecting-Ip", "Cf-Ray", "Cdn-Loop", "Tailscale-User-Login"} {
-		for _, p := range []string{"/peer/decks", "/peer/decks/1/audio?key=k", "/spotify-connect"} {
+		for _, p := range []string{"/peer/decks", "/peer/decks/1/audio?key=k", "/spotify-connect", "/live.wav", "/live-header.wav"} {
 			if got := do("GET", lan.URL+p, h); got != http.StatusNotFound {
 				t.Errorf("LAN listener, GET %s carrying %s: %d, want 404", p, h, got)
 			}
+		}
+		if got := do("POST", lan.URL+"/spotify-connect", h); got != http.StatusNotFound {
+			t.Errorf("LAN listener, POST /spotify-connect carrying %s: %d, want 404", h, got)
 		}
 	}
 	// The console itself is still there, behind its login.

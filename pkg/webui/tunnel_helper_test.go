@@ -72,6 +72,9 @@ func TestTunnelHelperThatEndsByItselfIsNotShownAsRunning(t *testing.T) {
 	if st.Status != "error" || st.PublicURL != "" || s.PublicTunnelURL() != "" {
 		t.Fatalf("the helper ended by itself: status %q, address %q; want an error and no address", st.Status, st.PublicURL)
 	}
+	if st.Error == "" || strings.Contains(st.Error, "trycloudflare") {
+		t.Fatalf("the helper ended by itself with status 0: the console shows %q as the reason, want a text that says it ended (not its own address line)", st.Error)
+	}
 }
 
 // What a power cut right after an earlier download can leave: the helper's name, executable, no

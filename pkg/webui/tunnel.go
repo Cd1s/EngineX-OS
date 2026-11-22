@@ -435,12 +435,12 @@ func (m *TunnelManager) runLoop(ctx context.Context, myGen uint64, token string,
 	// The helper ended without being asked to, whatever its exit status: its address is dead.
 	m.status = "error"
 	m.publicURL = ""
-	if lastLine != "" {
+	if err == nil {
+		m.lastErr = "cloudflared exited unexpectedly" // after a clean exit its last line is no error text (often its own address)
+	} else if lastLine != "" {
 		m.lastErr = lastLine
-	} else if err != nil {
-		m.lastErr = err.Error()
 	} else {
-		m.lastErr = "cloudflared exited unexpectedly"
+		m.lastErr = err.Error()
 	}
 }
 
