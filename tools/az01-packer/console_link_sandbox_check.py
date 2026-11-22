@@ -78,8 +78,8 @@ if mode != "shots":
     check(s4.get("vis") == "0010", "release4: channel 3 keeps its lane (vis=%s)" % s4.get("vis"))
     check(s3.get("tm") != base and rep(s234.get("tm")) == rep(s3.get("tm")), "on-line3 and on-line234: the same poll and display timers run, one or three lanes (%s and %s against %s when idle)" % (s3.get("tm"), s234.get("tm"), base))
 check(all(shots.get(n) for n in ("off", "on-line3", "on-line34")), "one capture per state saved (%s)" % shots)
-check(all(state.get(n, {}).get("layout") == "4_Decks/4_Waveforms" for n in ("on-line3", "on-line34", "on-line234")),
-      "the performance view shows four decks and four waveforms while a lane is shown (%s)" % {n: state.get(n, {}).get("layout") for n in ("on-line3", "on-line34", "on-line234")})
+check(all(state.get(n, {}).get("layout") == "4_Decks/4_Waveforms" for n in names),
+      "the performance view shows four decks and four waveforms in every phase, so the captures differ only by the Line In view (%s)" % {n: state.get(n, {}).get("layout") for n in names})
 
 def totals(rows):
     """Over the whole run, pictures are fetched once per lane key that is shown, never again while it stays: the plan shows five
