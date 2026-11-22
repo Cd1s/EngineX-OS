@@ -20,7 +20,7 @@ UNITS = [  # the linked units: player one is an SC6000, player two a CDJ-3000
     {"player": 2, "model": "CDJ-3000", "title": "Linked player two", "artist": "CDJ-3000", "bpm": 124.0, "color": (255, 150, 40, 255)},
     {"player": 3, "model": "SC5000", "title": "Linked player three", "artist": "SC5000 deck 3", "bpm": 128.0, "color": (90, 220, 120, 255)},
 ]
-state = {"consoleLineView": False, "units": 2}  # units: how many of the linked units are on the network (the probe sets it per phase: POST /ctl?units=N)
+state = {"consoleLineView": False, "units": 2, "cdjoff": False}  # units: how many of the linked units are on the network (the probe sets it per phase: POST /ctl?units=N&cdjoff=0|1: with 1 the only unit is the CDJ, Pro DJ Link off)
 counts = collections.Counter()
 lock = threading.Lock()
 version = {"n": 1, "sig": ""}
@@ -50,6 +50,13 @@ TILES = {u["player"]: tile(u["color"]) for u in UNITS}
 def lanes(lines):
     now = int(time.time() * 1000)
     out = []
+    if state["cdjoff"]:  # the only unit present is the CDJ and this unit's Pro DJ Link switch is off: metadata only, with the reason
+        u = UNITS[1]
+        for ch in sorted(lines)[:1]:
+            out.append({"deck": ch, "key": "cdj:127.0.0.1:%d:3:7:" % u["player"], "title": u["title"], "artist": u["artist"], "bpm": u["bpm"],
+                        "lineIn": True, "displayOnly": True, "displayDetail": False, "metadataOnly": True, "playing": True, "fallback": "prolink-off",
+                        "positionMs": 20000, "durationMs": 240000, "at": now, "player": u["player"], "model": u["model"]})
+        return out
     for i, ch in enumerate(sorted(lines)):
         if i >= state["units"]:
             break
@@ -101,8 +108,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 version["n"] += 1
             if q.get("ver", [""])[0] == str(version["n"]):
                 time.sleep(1.0)  # stream-sync holds an unchanged answer for its quiet poll
-            return self.reply({"role": "line", "decks": decks, "ver": version["n"], "debug": False, "displayOnly": True},
-                              {"X-Shadow-State": "%d:%d" % (version["n"], hash(sig) & 0xFFFFFF)})
+            # stream-sync leaves the header out when a lane is metadata only (a CDJ): such an answer always reaches the QML
+            headers = {} if any(d["metadataOnly"] for d in decks) else {"X-Shadow-State": "%d:%d" % (version["n"], hash(sig) & 0xFFFFFF)}
+            return self.reply({"role": "line", "decks": decks, "ver": version["n"], "debug": False, "displayOnly": True}, headers)
         if u.path == "/v1/enginex/shadow/display":
             key = q.get("key", [""])[0]
             player = int(key.split("-")[1]) if key.startswith("peer-") else 1
@@ -129,8 +137,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with lock:
             counts["POST " + u.path] += 1
         if u.path == "/ctl":
-            state["units"] = max(0, min(len(UNITS), int(urllib.parse.parse_qs(u.query).get("units", ["2"])[0])))
-            return self.reply({"units": state["units"]})
+            q = urllib.parse.parse_qs(u.query)
+            state["units"] = max(0, min(len(UNITS), int(q.get("units", ["2"])[0])))
+            state["cdjoff"] = q.get("cdjoff", ["0"])[0] == "1"
+            return self.reply({"units": state["units"], "cdjoff": state["cdjoff"]})
         if u.path == "/v1/enginex/ui":
             for k, v in urllib.parse.parse_qs(u.query).items():
                 if k == "consoleLineView":

@@ -14,7 +14,7 @@ import urllib.request
 
 BASE = "http://127.0.0.1:8080"
 DATA = "enginex"  # the directory under /data that holds Stream/a.mp3 in the player's namespace
-LINES = {"off": "", "on-noline": "", "on-line3": "3", "on-line34": "3,4", "release4": "3", "on-line234": "2,3,4", "release-all": "", "off-again": ""}
+LINES = {"off": "", "on-noline": "", "on-line3": "3", "on-line34": "3,4", "release4": "3", "on-line234": "2,3,4", "cdj-prolink-off": "3", "release-all": "", "off-again": ""}
 LEN_MS, SAMPLE_AT_MS = 18000, 15500
 
 

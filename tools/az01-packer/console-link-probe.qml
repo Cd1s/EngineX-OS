@@ -25,6 +25,7 @@ Item {
         {n: "on-line34", on: 1, line: [3, 4], units: 2, shot: true},
         {n: "release4", on: 1, line: [3], units: 2, shot: false},
         {n: "on-line234", on: 1, line: [2, 3, 4], units: 3, shot: false},
+        {n: "cdj-prolink-off", on: 1, line: [3], units: 1, cdjoff: 1, shot: true},
         {n: "release-all", on: 1, line: [], units: 3, shot: false},
         {n: "off-again", on: 0, line: [], units: 3, shot: false}
     ]
@@ -87,6 +88,19 @@ Item {
         wantMask = mask
         log("LINEWRITE|" + (writeFailed ? "the mixer property would not take the write: the probe sets scLineMask" : "mixer property written, the QML follows its signal"))
     }
+    // The busy line of every visible lane (the reason a lane gives while it has no waveform to draw).
+    function busyTexts() {
+        const rows = [], out = []
+        collect(eMain.Window.window ? eMain.Window.window.contentItem : null, "EngineX_Shadow_Busy", rows)
+        for (const r of rows) {
+            if (!r.visible) continue
+            for (let i = 0; i < r.children.length; i++) {
+                const c = r.children[i]
+                if (typeof c.text === "string" && c.text.trim() !== "") out.push(c.text.trim())
+            }
+        }
+        return out
+    }
     function timers() {
         const out = []
         const m = eMain
@@ -112,13 +126,14 @@ Item {
         log("LABELS|" + name + "|" + JSON.stringify(texts))
         log("HYBRID|" + name + "|" + (Config.device.hasHybridMode ? 1 : 0))
         log("LAYOUTNOW|" + name + "|" + layoutNames())
+        log("BUSY|" + name + "|" + JSON.stringify(busyTexts()))
     }
     function begin(i) {
         idx = i; phaseAt = Date.now(); logged = false; shot = false; layoutAt = 3000
         const ph = plan[i]
         log("BEGIN|" + ph.n + "|" + phaseAt)
         post("http://127.0.0.1:8080/v1/enginex/ui?consoleLineView=" + ph.on)
-        post("http://127.0.0.1:8080/ctl?units=" + ph.units) // stub only: how many linked units are on the network in this phase
+        post("http://127.0.0.1:8080/ctl?units=" + ph.units + "&cdjoff=" + (ph.cdjoff || 0)) // stub only: how many linked units are on the network in this phase
         setLines(ph.line)
         if (writeFailed && eMain.scConsoleLine) eMain.scLineMask = wantMask
         // A channel that went back to its Engine input has let go of its lane in this very turn, before any poll.

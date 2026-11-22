@@ -37,6 +37,8 @@ for m in re.finditer(r"CLPHASE\|([^ ]*)", log):
         state.setdefault(parts[1], {})["tm"] = parts[2]
     elif parts[0] == "LABELS":
         state.setdefault(parts[1], {})["labels"] = parts[2]
+    elif parts[0] == "BUSY":
+        state.setdefault(parts[1], {})["busy"] = parts[2]
     elif parts[0] == "LAYOUTNOW":
         state.setdefault(parts[1], {})["layout"] = parts[2]
     elif parts[0] == "HYBRID":
@@ -45,7 +47,7 @@ for m in re.finditer(r"CLPHASE\|([^ ]*)", log):
         shots[parts[1]] = parts[2] == "true"
     elif parts[0] == "LINEWRITE":
         print("probe: " + parts[1].replace("_", " "))
-names = ["off", "on-noline", "on-line3", "on-line34", "release4", "on-line234", "release-all", "off-again"]
+names = ["off", "on-noline", "on-line3", "on-line34", "release4", "on-line234", "cdj-prolink-off", "release-all", "off-again"]
 check(all(n in begin for n in names), "every phase began (%s)" % ",".join(n for n in names if n in begin))
 check(all(n in state for n in names), "every phase reported its state")
 print("stock hasHybridMode on this board: %s (stock's LoadToDeckFilter refuses a load onto a Line channel only without it)" % state.get("off", {}).get("hybrid"))
@@ -74,10 +76,13 @@ if mode != "shots":
     check(s34.get("mask") == "24" and s34.get("vis") == want34, "on-line34: mask 24, a lane for each of the %d unit(s) (vis=%s)" % (units, s34.get("vis")))
     want234 = "0111" if units == 2 else "0100"  # three units on the stub's network: channels 2, 3 and 4 all show one; the pair run has one
     check(s234.get("mask") == "28" and s234.get("vis") == want234, "on-line234: mask 28, a lane for each of the %d unit(s) present, none locked, all loadable (vis=%s lk=%s ld=%s)" % (3 if units == 2 else 1, s234.get("vis"), s234.get("lk"), s234.get("ld")))
+    scdj = state.get("cdj-prolink-off", {})
+    check(scdj.get("mask") == "8" and scdj.get("live") == "1" and scdj.get("vis") == "0010" and scdj.get("lk") == "0000" and scdj.get("ld") == "1111",
+          "cdj-prolink-off: a CDJ on channel 3 with Pro DJ Link off is still a lane, and still nothing is locked (vis=%s lk=%s ld=%s)" % (scdj.get("vis"), scdj.get("lk"), scdj.get("ld")))
     check(state.get("release4-now", {}).get("vis") == "0010", "release4: channel 4's lane is gone in the same turn as the channel change (vis=%s)" % state.get("release4-now", {}).get("vis"))
     check(s4.get("vis") == "0010", "release4: channel 3 keeps its lane (vis=%s)" % s4.get("vis"))
     check(s3.get("tm") != base and rep(s234.get("tm")) == rep(s3.get("tm")), "on-line3 and on-line234: the same poll and display timers run, one or three lanes (%s and %s against %s when idle)" % (s3.get("tm"), s234.get("tm"), base))
-check(all(shots.get(n) for n in ("off", "on-line3", "on-line34")), "one capture per state saved (%s)" % shots)
+check(all(shots.get(n) for n in ("off", "on-line3", "on-line34", "cdj-prolink-off")), "one capture per state saved (%s)" % shots)
 check(all(state.get(n, {}).get("layout") == "4_Decks/4_Waveforms" for n in names),
       "the performance view shows four decks and four waveforms in every phase, so the captures differ only by the Line In view (%s)" % {n: state.get(n, {}).get("layout") for n in names})
 
@@ -87,16 +92,21 @@ def totals(rows):
     c = rows[-1]["counts"]
     keys = 5
     d, t = c.get("GET /v1/enginex/shadow/display", 0), c.get("GET /tile.png", 0)
-    check(d == keys, "the whole run asked for the display of %d lane keys, once each (%d requests)" % (keys, d))
+    check(d == keys, "the whole run asked for the display of %d lane keys, once each, and none for the metadata-only CDJ lane (%d requests)" % (keys, d))
     check(0 < t <= 4 * keys, "the whole run fetched at most four pictures per lane key (%d tile requests for %d keys)" % (t, keys))
     check(c.get("POST /v1/enginex/decks", 0) == 0 and c.get("POST /v1/enginex/decks/alive", 0) == 0, "the whole run: the console posted no deck")
 
 
 if mode == "shots":
-    lab = {n: state.get(n, {}).get("labels", "") for n in ("on-line3", "on-line34", "on-line234")}
+    lab = {n: state.get(n, {}).get("labels", "") for n in ("on-line3", "on-line34", "on-line234", "cdj-prolink-off")}
     check("Linked_player_1_" in lab["on-line3"], "on-line3: the lane on channel 3 is drawn and labelled (%s)" % lab["on-line3"])
     check("Linked_player_1_" in lab["on-line34"] and "Linked_player_2_" in lab["on-line34"], "on-line34: both lanes are drawn and labelled (%s)" % lab["on-line34"])
     check(all(("Linked_player_%d_" % n) in lab["on-line234"] for n in (1, 2, 3)), "on-line234: three lanes are drawn, each says its unit (%s)" % lab["on-line234"])
+    # The reason a CDJ lane gives while it has no waveform to draw: the unit's Pro DJ Link switch is off. Said on that lane only.
+    why = "Pro_DJ_Link_is_off:_no_CDJ_waveform"
+    check("Linked_player_2_" in lab["cdj-prolink-off"] and "CDJ-3000" in lab["cdj-prolink-off"] and why in state.get("cdj-prolink-off", {}).get("busy", ""),
+          "cdj-prolink-off: the CDJ lane is drawn, labelled, and its busy line says why (labels %s, busy %s)" % (lab["cdj-prolink-off"], state.get("cdj-prolink-off", {}).get("busy")))
+    check(all(why not in state.get(n, {}).get("busy", "") for n in names if n != "cdj-prolink-off"), "no other phase shows that reason")
     totals([json.loads(l) for l in (run / "stats.jsonl").read_text().splitlines() if l.strip()])
 elif mode == "stub":
     rows = [json.loads(l) for l in (run / "stats.jsonl").read_text().splitlines() if l.strip()]
@@ -122,7 +132,7 @@ elif mode == "stub":
     zero = KINDS[:5]
     for n in IDLE:
         check(all(rate.get(n, {}).get(k, 1) == 0 for k in zero), "%s: no shadow, display, tile or deck request at all" % n)
-    for n, want in (("on-line3", "lines 3"), ("on-line34", "lines 3,4"), ("release4", "lines 3"), ("on-line234", "lines 2,3,4")):
+    for n, want in (("on-line3", "lines 3"), ("on-line34", "lines 3,4"), ("release4", "lines 3"), ("on-line234", "lines 2,3,4"), ("cdj-prolink-off", "lines 3")):
         r = rate.get(n, {})
         check(30 <= r.get("GET /v1/enginex/shadow", 0) <= 150, "%s: one display poll loop, about one request a second (%d a minute)" % (n, r.get("GET /v1/enginex/shadow", 0)))
         check(r.get("POST /v1/enginex/decks", 1) == 0 and r.get("POST /v1/enginex/decks/alive", 1) == 0, "%s: the console sends no deck" % n)

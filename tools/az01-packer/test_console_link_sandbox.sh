@@ -11,11 +11,12 @@ ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
 #         its own network namespace on a veth: the deck loop and UDP 50199 per phase, what the console's stream-sync would answer,
 #         and that the player sees no console deck
 #   shots the stub again, drawn by eglfs at 1280x800 on the host's DRM device (as tools/shadow-twin does): the three captures,
-#         the lanes drawn on channels 2-4 with their labels, and the totals of pictures fetched (software rendering is slow, so no
+#         the lanes drawn on channels 2-4 with their labels, the reason line of a CDJ lane with Pro DJ Link off, and the totals of pictures fetched (software rendering is slow, so no
 #         per-minute rate is taken from this run; the offscreen window is 800x800, a layout without a waveform area, so labels are
 #         asserted only here); skipped without /dev/dri/card0
-# All run console-link-probe.qml in the console's Engine, which walks eight phases (off, on, no Line channel, channel 3 on
-# Line, channels 3 and 4, channel 4 released, channels 2-4 with three linked units, all released, off) and logs what the QML holds; console_link_sandbox_check.py
+# All run console-link-probe.qml in the console's Engine, which walks nine phases (off, on, no Line channel, channel 3 on
+# Line, channels 3 and 4, channel 4 released, channels 2-4 with three linked units, a CDJ on channel 3 with Pro DJ Link off, all
+# released, off) and logs what the QML holds; console_link_sandbox_check.py
 # asserts it. Captures of three states end up in $W/shots/shots. `--clean` removes this script's own directory (checked first).
 # The Go suite and the stub need nothing from the host but python3; test_prime4_views_sandbox.sh covers the 4-deck gates on a console.
 set -euo pipefail
@@ -140,7 +141,7 @@ for _ in range(100):
     except OSError: time.sleep(0.1)
 PY
 if [ "$mode" = pair ]; then
-    nsenter -t "$HOLD" -n python3 -I "$HERE/console_link_pair_driver.py" player 230 > "$O/player.log" 2>&1 &
+    nsenter -t "$HOLD" -n python3 -I "$HERE/console_link_pair_driver.py" player 290 > "$O/player.log" 2>&1 &
     pids+=($!)
     python3 -I "$HERE/console_link_pair_driver.py" sample "$O/engine.log" > "$O/sample.log" 2>&1 &
     pids+=($!)
@@ -149,7 +150,7 @@ set +e
 run_engine() { # <platform>: eglfs draws at 1280x800 on the host's DRM device (as the twin does), offscreen needs none
     local env=(QT_QPA_PLATFORM=$1)
     [ "$1" = eglfs ] && env+=(QT_QPA_EGLFS_INTEGRATION=eglfs_kms)
-    timeout --kill-after=5s 240s "${CHR[@]}" LD_LIBRARY_PATH=/usr/qt/lib LD_PRELOAD=/tmp/libengine-ui-hook.so "${env[@]}" \
+    timeout --kill-after=5s 300s "${CHR[@]}" LD_LIBRARY_PATH=/usr/qt/lib LD_PRELOAD=/tmp/libengine-ui-hook.so "${env[@]}" \
         QML_IMPORT_PATH=/tmp/fx-qml-imports QML2_IMPORT_PATH=/tmp/fx-qml-imports QML_DISABLE_DISK_CACHE=1 MALLOC_ARENA_MAX=1 /usr/Engine/Engine -d0 > "$O/engine.log" 2>&1
     echo "engine rc=$? mode=$mode platform=$1 uiroot=$UIROOT"
 }
