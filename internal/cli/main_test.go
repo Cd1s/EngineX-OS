@@ -16,6 +16,8 @@ func TestMain(m *testing.M) {
 	}
 	ejectMarkDir = dir
 	importLock = filepath.Join(dir, "enginex-rb-import.lock")
+	// The drive status file as well: a test that does not set this variable itself would use the deck's own path.
+	os.Setenv("ENGINEX_USB_PREPARING_PATH", filepath.Join(dir, "enginex-usb-preparing"))
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
