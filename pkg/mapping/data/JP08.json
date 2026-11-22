@@ -73,7 +73,7 @@
    "channel": 0,
    "number": 17,
    "press": "Browse Forward / Enter folder (Forward)",
-   "shift_press": "Shift: None (e.g. Quantize)",
+   "shift_press": "Browse Forward (Shift changes nothing)",
    "long_press": "None",
    "double_press": "None",
    "turn": "None",

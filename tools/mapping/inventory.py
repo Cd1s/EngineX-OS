@@ -741,7 +741,8 @@ def build_board_inventory(board_name, board_dir, qrc_dir):
                         "channel": ch,
                         "number": n,
                         "press": "Browse Forward / Enter folder (Forward)",
-                        "shift_press": f"Shift: {s_action} (e.g. Quantize)",
+                        # Forward.qml: only shiftAction Quantize changes what Shift does.
+                        "shift_press": "Quantize on/off" if s_action == "Quantize" else "Browse Forward (Shift changes nothing)",
                         "long_press": "None",
                         "double_press": "None",
                         "turn": "None",

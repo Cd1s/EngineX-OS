@@ -32,6 +32,7 @@ small,.sub{display:block;color:var(--dim);font-size:13px;line-height:1.45}.in>sm
 .sw input:checked+span{background:var(--accent);border-color:var(--accent)}.sw input:checked+span::after{transform:translateX(20px);background:var(--ink)}.sw input:focus-visible+span{outline:2px solid var(--accent);outline-offset:2px}.sw input:disabled+span{opacity:.45}
 .setting .why{color:var(--warn)}.tag{font:600 10.5px var(--mono);letter-spacing:.06em;text-transform:uppercase;padding:2px 6px;border-radius:4px;border:1px solid #7a6124;color:var(--warn);margin-left:8px;vertical-align:middle;display:inline-block;white-space:nowrap}
 .rows{display:grid;gap:8px;max-height:46vh;overflow:auto;margin-top:8px}.rows:empty{margin:0}.row{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:9px 12px;background:var(--raise);border:1px solid var(--line);border-radius:8px}.row span{flex:1;overflow-wrap:anywhere}
+#mapControl{flex:2 1 260px}.mapref{max-height:60vh;overflow:auto;margin-top:8px}.mapref table{width:100%;border-collapse:collapse;font-size:12.5px}.mapref th,.mapref td{padding:6px 8px;border-top:1px solid var(--line);text-align:left;vertical-align:top;overflow-wrap:anywhere}.mapref th{color:var(--dim);font-weight:600;position:sticky;top:0;background:var(--card,#14181e)}.mapref td.free{background:rgba(46,230,214,.12)}.mapref td.reserved{color:var(--dim)}.mapref .own{display:block;color:var(--accent);margin-top:3px}
 .store{height:6px;border-radius:99px;background:#242a33;overflow:hidden;margin:4px 0}.store i{display:block;height:100%;background:var(--accent)}.store.full i{background:#f59e0b}
 #dropZone,#modDrop{display:grid;place-items:center;gap:6px;padding:24px 14px;border:1.5px dashed var(--edge);border-radius:10px;text-align:center;cursor:pointer;margin:10px 0 8px;transition:border-color .15s,background-color .15s}#dropZone:hover,#dropZone.over,#modDrop:hover{border-color:var(--accent);background:rgba(46,230,214,.05)}#dropZone .big{font-size:26px;line-height:1;color:var(--accent)}
 progress{width:100%;height:6px;border:0;border-radius:99px;overflow:hidden;accent-color:var(--accent);appearance:none}progress::-webkit-progress-bar{background:#242a33}progress::-webkit-progress-value{background:var(--accent)}progress::-moz-progress-bar{background:var(--accent)}
@@ -54,7 +55,7 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
  <span class="spacer"></span>
  <div class="langs" role="group" aria-label="Language"><button data-lang="en">EN</button><button data-lang="zh-Hans">简体中文</button><button data-lang="zh-Hant">繁體中文</button><button data-lang="es">ES</button></div>
 </header>
-<nav class="nav" data-i18n-aria="navAria"><a href="#s-music" data-i18n="navMusic"></a><a href="#s-files" data-i18n="navFiles"></a><a href="#s-deck" data-i18n="navDeck"></a><a href="#s-remote" data-i18n="navRemote"></a><a href="#s-more" data-i18n="navMore"></a></nav>
+<nav class="nav" data-i18n-aria="navAria"><a href="#s-music" data-i18n="navMusic"></a><a href="#s-files" data-i18n="navFiles"></a><a href="#s-deck" data-i18n="navDeck"></a><a href="#s-buttons" data-i18n="navButtons"></a><a href="#s-remote" data-i18n="navRemote"></a><a href="#s-more" data-i18n="navMore"></a></nav>
 <div class="wrap">
 <p id="bootFallback" role="status" hidden></p>
 <section class="sec" id="s-music"><h2 class="sech" data-i18n="navMusic"></h2>
@@ -179,6 +180,25 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <div class="setting"><div class="txt"><b data-i18n="verboseLog"></b><span class="sub" data-i18n="verboseLogSub"></span></div><label class="sw"><input type="checkbox" data-toggle="verboseLog"><span></span></label><a class="btn" href="/api/logs" download="enginex-logs.txt" data-i18n="downloadLogs"></a></div>
   <div id="bootRetryActions" hidden><button class="btn" id="bootRetry" data-i18n="bootRetry"></button> <a class="btn" href="/api/boot-report" download data-i18n="bootReport"></a></div>
  </section>
+</div>
+</div>
+</section>
+<section class="sec" id="s-buttons"><h2 class="sech" data-i18n="navButtons"></h2>
+<div class="grid">
+<div class="col">
+<section class="card" id="mapCard"><h3><span data-i18n="mapTitle"></span></h3><small data-i18n="mapHint"></small>
+<p id="mapUnsupported" hidden></p>
+<div id="mapBody" hidden>
+<div class="setting" id="mapStatus"><div class="txt"><b id="mapState"></b><span class="sub why" id="mapNeed"></span></div><button class="btn primary" id="mapRestart" data-i18n="mapRestart" hidden></button></div>
+<div id="mapRows" class="rows"></div>
+<div class="bar"><select id="mapControl" data-i18n-aria="mapControl"></select><select id="mapGesture" data-i18n-aria="mapGesture"></select><select id="mapAction" data-i18n-aria="mapAction"></select></div>
+<div class="bar"><button class="btn" id="mapLearn" data-i18n="mapLearn"></button><button class="btn primary" id="mapAdd" data-i18n="mapAdd"></button></div>
+<small id="mapLearnState"></small><small data-i18n="mapStillNote"></small>
+<div class="bar"><a class="btn" id="mapExport" href="/api/mapping/export" download="mappings.json" data-i18n="mapExport"></a><label class="btn" for="mapImportFile"><span data-i18n="mapImport"></span><input id="mapImportFile" type="file" accept=".json,application/json" hidden></label></div>
+</div></section>
+</div>
+<div class="col">
+<details class="card" id="mapRefCard" hidden><summary><span data-i18n="mapRef"></span></summary><div class="in"><small data-i18n="mapRefHint"></small><div id="mapRef" class="mapref"></div></div></details>
 </div>
 </div>
 </section>
@@ -521,7 +541,55 @@ rbWbTitle:['Write cues back to rekordbox USB','写回 Hot Cue / Loop 到 rekordb
 rbWbHint:['Writes deck Hot Cues, Memory Cues, and Loops back to the stick for CDJs and rekordbox 7 (backups in /.enginex-backup/). Before re-exporting from rekordbox, run Import from Device in rekordbox.','将碟机新增的 Hot Cue、Memory Cue 和 Loop 写回 U 盘，供先锋 CDJ 和 rekordbox 7 读取（备份在 /.enginex-backup/）。下次在电脑导出覆盖前，请先在 rekordbox 中执行“从设备导入”。','將碟機新增的 Hot Cue、Memory Cue 和 Loop 寫回隨身碟，供先鋒 CDJ 和 rekordbox 7 讀取（備份於 /.enginex-backup/）。下次在電腦匯出覆蓋前，請先在 rekordbox 中執行「從裝置匯入」。','Escribe Hot Cues, Memory Cues y Loops del deck al USB para CDJ y rekordbox 7 (copias en /.enginex-backup/). Antes de volver a exportar en rekordbox, usa Importar desde dispositivo.'],
 rbWbBtn:['Write back cues','写回 Cue / Loop','寫回 Cue / Loop','Escribir cues'],
 rbWbDone:['Updated {0} track(s), {1} file(s). Backup: {2}','已更新 {0} 首曲目、{1} 个文件。备份：{2}','已更新 {0} 首曲目、{1} 個檔案。備份：{2}','Actualizadas {0} pista(s), {1} archivo(s). Copia: {2}'],
-rbWbNone:['All cues on this stick are already up to date ({0} checked).','该 U 盘上的 Cue 均已最新（已检查 {0} 首）。','該隨身碟上的 Cue 皆已是最新（已檢查 {0} 首）。','Todos los cues del USB ya están al día ({0} revisadas).']
+rbWbNone:['All cues on this stick are already up to date ({0} checked).','该 U 盘上的 Cue 均已最新（已检查 {0} 首）。','該隨身碟上的 Cue 皆已是最新（已檢查 {0} 首）。','Todos los cues del USB ya están al día ({0} revisadas).'],
+navButtons:['Buttons','按键','按鍵','Botones'],
+mapTitle:['Button mapping','按键映射','按鍵對應','Asignación de botones'],
+mapHint:['Choose a control and a gesture, then the function it should run. Your mappings are added to the stock assignment when Engine starts, so nothing extra runs while you play.','选一个按键和一种手势，再选它要执行的功能。映射会在 Engine 启动时加入原厂按键配置，演奏时不会多占任何资源。','選一個按鍵和一種手勢，再選它要執行的功能。對應會在 Engine 啟動時加入原廠按鍵配置，演奏時不會多佔任何資源。','Elige un control y un gesto, y luego la función que debe ejecutar. Tus asignaciones se añaden a la asignación original cuando Engine arranca, así que no se ejecuta nada extra mientras tocas.'],
+mapUnsupported:['Button mapping is available on the SC5000, SC5000M, SC6000 and SC6000M players.','按键映射适用于 SC5000、SC5000M、SC6000 和 SC6000M 播放器。','按鍵對應適用於 SC5000、SC5000M、SC6000 和 SC6000M 播放器。','La asignación de botones está disponible en los reproductores SC5000, SC5000M, SC6000 y SC6000M.'],
+mapS_none:['No mappings are applied.','没有已应用的映射。','沒有已套用的對應。','No hay asignaciones aplicadas.'],
+mapS_applied:['{0} mapping(s) applied since Engine started.','Engine 启动后已应用 {0} 条映射。','Engine 啟動後已套用 {0} 筆對應。','{0} asignación(es) aplicada(s) desde que arrancó Engine.'],
+mapS_rejected:['Not applied, the stock mapping stays: {0}','未应用，保持原厂映射：{0}','未套用，維持原廠對應：{0}','No se aplicó, se mantiene la asignación original: {0}'],
+mapS_safe:['Safe mode is on: Engine runs the stock mapping.','安全模式已开启：Engine 使用原厂映射。','安全模式已開啟：Engine 使用原廠對應。','Modo seguro activado: Engine usa la asignación original.'],
+mapRestartNeeded:['The saved mappings apply when Engine restarts.','已保存的映射会在 Engine 重启后生效。','已儲存的對應會在 Engine 重新啟動後生效。','Las asignaciones guardadas se aplican cuando Engine se reinicia.'],
+mapRestart:['Restart Engine to apply','重启 Engine 以应用','重新啟動 Engine 以套用','Reiniciar Engine para aplicar'],
+mapRestartAsk:['Restart Engine now? Playback stops while it restarts.','现在重启 Engine？重启期间会停止播放。','現在重新啟動 Engine？重新啟動期間會停止播放。','¿Reiniciar Engine ahora? La reproducción se detiene mientras se reinicia.'],
+mapRestarting:['Engine is restarting…','Engine 正在重启……','Engine 正在重新啟動……','Engine se está reiniciando…'],
+mapNone:['No mappings yet.','还没有映射。','尚無對應。','Aún no hay asignaciones.'],
+mapControl:['Control','按键','按鍵','Control'],
+mapGesture:['Gesture','手势','手勢','Gesto'],
+mapAction:['Function','功能','功能','Función'],
+mapAdd:['Add mapping','添加映射','新增對應','Añadir asignación'],
+mapRemove:['Remove','删除','刪除','Quitar'],
+mapLearn:['Learn','识别','辨識','Aprender'],
+mapLearnStop:['Stop learning','停止识别','停止辨識','Detener'],
+mapLearning:['Press the control on the deck now (hold Shift for a Shift gesture)… {0} s','现在按下碟机上的按键（Shift 手势请按住 Shift）…… {0} 秒','現在按下碟機上的按鍵（Shift 手勢請按住 Shift）…… {0} 秒','Pulsa ahora el control del deck (mantén Shift para un gesto con Shift)… {0} s'],
+mapLearned:['Caught: {0}, {1}','已识别：{0}，{1}','已辨識：{0}，{1}','Detectado: {0}, {1}'],
+mapLearnTimeout:['Nothing was pressed within 30 seconds.','30 秒内没有检测到按键。','30 秒內沒有偵測到按鍵。','No se pulsó nada en 30 segundos.'],
+mapLearnUnknown:['That control is not one the mapping knows (note {0}).','映射不识别这个按键（音符 {0}）。','對應不識別這個按鍵（音符 {0}）。','La asignación no reconoce ese control (nota {0}).'],
+mapNotMappable:['This gesture cannot be mapped: {0}','这个手势不能映射：{0}','這個手勢不能對應：{0}','Este gesto no se puede asignar: {0}'],
+mapStillNote:['A control that already does something on a press keeps doing it: a double press or a hold adds your function on top.','按下时已有功能的按键仍会执行原功能：双击或长按只是在其上追加你的功能。','按下時已有功能的按鍵仍會執行原功能：雙擊或長按只是在其上追加你的功能。','Un control que ya hace algo al pulsarlo lo sigue haciendo: la doble pulsación o mantener añade tu función encima.'],
+mapExport:['Export mappings.json','导出 mappings.json','匯出 mappings.json','Exportar mappings.json'],
+mapImport:['Import mappings.json','导入 mappings.json','匯入 mappings.json','Importar mappings.json'],
+mapImported:['Mappings imported. Restart Engine to apply them.','映射已导入。重启 Engine 后生效。','對應已匯入。重新啟動 Engine 後生效。','Asignaciones importadas. Reinicia Engine para aplicarlas.'],
+mapRef:['What every control does','每个按键的功能','每個按鍵的功能','Qué hace cada control'],
+mapRefHint:['Stock functions as read from the stock assignment (in English). A highlighted gesture can be mapped; the others are used by stock or reserved.','原厂功能，取自原厂按键配置（英文）。高亮的手势可以映射，其余已被原厂占用或保留。','原廠功能，取自原廠按鍵配置（英文）。標示的手勢可以對應，其餘已被原廠佔用或保留。','Funciones originales leídas de la asignación original (en inglés). Un gesto resaltado se puede asignar; los demás los usa la asignación original o están reservados.'],
+mapG_press:['Press','按一下','按一下','Pulsar'],
+mapG_shift:['Shift + press','Shift + 按','Shift + 按','Shift + pulsar'],
+mapG_double:['Double press','双击','雙擊','Doble pulsación'],
+mapG_hold:['Hold','长按','長按','Mantener'],
+mapOffer_free:['free in stock','原厂未使用','原廠未使用','libre en la original'],
+mapOffer_takeover:['replaces the stock function','替换原厂功能','取代原廠功能','sustituye la función original'],
+mapWhy_reserved:['Shift and the navigation controls are never mapped.','Shift 和导航按键不能映射。','Shift 和導覽按鍵不能對應。','Shift y los controles de navegación nunca se asignan.'],
+mapWhy_stockused:['Stock already uses this gesture.','原厂已使用这个手势。','原廠已使用這個手勢。','La asignación original ya usa este gesto.'],
+mapWhy_notoffered:['This control is not offered for mapping yet.','这个按键暂不支持映射。','這個按鍵暫不支援對應。','Este control aún no se ofrece para asignar.'],
+mapWhy_control:['This is not a button of this deck.','这不是这台碟机的按键。','這不是這台碟機的按鍵。','Este no es un botón de este deck.'],
+mapWhy_gesture:['Unknown gesture.','未知的手势。','未知的手勢。','Gesto desconocido.'],
+mapWhy_board:['This deck is not a supported player.','这台碟机不是支持的播放器。','這台碟機不是支援的播放器。','Este deck no es un reproductor compatible.'],
+mapWhy_action:['Unknown function.','未知的功能。','未知的功能。','Función desconocida.'],
+mapWhy_output:['This function cannot run from a double press or a hold.','这个功能不能用双击或长按触发。','這個功能不能用雙擊或長按觸發。','Esta función no se puede lanzar con doble pulsación ni al mantener.'],
+mapWhy_duplicate:['This gesture is already mapped.','这个手势已经映射过了。','這個手勢已經對應過了。','Este gesto ya está asignado.'],
+mapWhy_size:['The file is too large.','文件太大。','檔案太大。','El archivo es demasiado grande.'],
+mapWhy_json:['The file is not a valid list of mappings.','文件不是有效的映射列表。','檔案不是有效的對應清單。','El archivo no es una lista válida de asignaciones.'],
 };
 const LANGS=['en','zh-Hans','zh-Hant','es'];
 // ?lang= (a shared link) wins, then the saved choice, then the browser; the deck's language once known.
@@ -534,7 +602,7 @@ function applyLang(){document.documentElement.lang={en:'en','zh-Hans':'zh-CN','z
  for(const e of document.querySelectorAll('[data-i18n-aria]'))e.setAttribute('aria-label',t(e.dataset.i18nAria));
  for(const e of document.querySelectorAll('[data-i18n-alt]'))e.alt=t(e.dataset.i18nAlt);
  for(const b of document.querySelectorAll('[data-lang]'))b.classList.toggle('on',b.dataset.lang===lang)}
-function setLang(l,save){if(!LANGS.includes(l))return;lang=l;if(save)localStorage.setItem('enginex-console-lang',l);applyLang();if(lastUI)showUI(lastUI);renderSessions();renderDrives();renderTracklists();if(redrawList)redrawList();if(lastMods)renderMods(lastMods);if(lastJobs)renderJobs(lastJobs,true);action(async()=>{await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showAppleMusic();await showBpm();await showNAS();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showHF().catch(()=>{});await showGen2().catch(()=>{})})}
+function setLang(l,save){if(!LANGS.includes(l))return;lang=l;if(save)localStorage.setItem('enginex-console-lang',l);applyLang();if(lastUI)showUI(lastUI);renderSessions();renderDrives();renderTracklists();if(redrawList)redrawList();if(lastMods)renderMods(lastMods);if(lastMap)renderMap(lastMap);if(lastJobs)renderJobs(lastJobs,true);action(async()=>{await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showAppleMusic();await showBpm();await showNAS();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showHF().catch(()=>{});await showGen2().catch(()=>{})})}
 for(const b of document.querySelectorAll('[data-lang]'))b.onclick=()=>setLang(b.dataset.lang,true);
 async function showNAS(){const v=await api('nas');$('nasProtocol').value=v.protocol||'webdav';const u=v.url?new URL(v.url):null;$('nasHost').value=u?u.protocol+'//'+u.hostname:'';$('nasPort').value=u?.port||'';$('nasPath').value=u?decodeURIComponent(u.pathname):'';$('nasUser').value=v.username||'';$('nasPassword').value='';$('nasPassword').placeholder=t('nasPassword')+((v.hasPassword||v.hasToken)?' ●●●':'');$('nasState').textContent=t(v.enabled?'nasSaved':'nasOff')}
 async function saveNAS(){const protocol=$('nasProtocol').value,host=$('nasHost').value.trim(),u=new URL(host.includes('://')?host:(protocol==='smb'?'smb://':'http://')+host);u.port=$('nasPort').value;u.pathname=$('nasPath').value.trim();const b={protocol,url:u.href,username:$('nasUser').value.trim(),enabled:true};if($('nasPassword').value)b[protocol==='plex'?'token':'password']=$('nasPassword').value;try{await post('nas',b)}finally{$('nasPassword').value=''}await showNAS()}
@@ -745,5 +813,69 @@ $('modFile').onchange=e=>{const f=e.target.files[0];e.target.value='';action(()=
 $('modDrop').ondragover=e=>{e.preventDefault();$('modDrop').style.borderColor='var(--accent)'};$('modDrop').ondragleave=()=>{$('modDrop').style.borderColor=''};
 $('modDrop').ondrop=e=>{e.preventDefault();$('modDrop').style.borderColor='';const f=e.dataTransfer.files[0];action(()=>modUpload(f))};
 applyLang();renderSessions();renderDrives();renderTracklists();
-action(async()=>{const v=await api('ui');if(!localStorage.getItem('enginex-console-lang')&&LANGS.includes(v.language))setLang(v.language,false);showUI(v);await showDrives();await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showAppleMusic();await showBt().catch(()=>{});await showBpm();await showNAS();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showHF().catch(()=>{});await showGen2().catch(()=>{});await showMods().catch(()=>{});await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(()=>{})},2000);
+// Button mapping: controls and gestures to functions; applied when Engine starts (the guard), learned from the deck's own MIDI.
+let lastMap=null,mapLearnTimer=null,mapLearning=false;
+const MAP_G=['press','shift','double','hold'];
+function mapWhy(code,msg){const k='mapWhy_'+String(code||'').replace(/-/g,'');return T[k]?t(k):(msg||code||'')}
+async function mapCall(path,opts={}){const r=await fetch('/api/'+path,{...opts,headers:{'Content-Type':'application/json'}});const v=await r.json();if(!r.ok)throw Error(mapWhy(v.code,v.error||r.status));return v}
+const mapLabel=a=>a.label[lang]||a.label.en;
+const mapCtl=id=>lastMap&&lastMap.controls.find(c=>c.id===id);
+const mapAct=id=>lastMap&&lastMap.actions.find(a=>a.id===id);
+const mapMine=()=>lastMap.mappings.filter(m=>m.board===lastMap.board);
+function mapFill(sel,items){const keep=sel.value;sel.replaceChildren(...items.map(([v,text])=>{const o=document.createElement('option');o.value=v;o.textContent=text;return o}));if(items.some(([v])=>v===keep))sel.value=keep}
+function mapControlChanged(){const c=mapCtl($('mapControl').value);mapFill($('mapGesture'),c?MAP_G.filter(g=>c.offers[g].mappable).map(g=>[g,t(`mapG_${g}`)]):[]);mapGestureChanged()}
+function mapGestureChanged(){const g=$('mapGesture').value;mapFill($('mapAction'),(lastMap.actions||[]).filter(a=>a.gestures.includes(g)).map(a=>[a.id,mapLabel(a)]))}
+function renderMap(v){
+ lastMap=v;
+ $('mapUnsupported').hidden=v.supported;$('mapUnsupported').textContent=t('mapUnsupported');
+ $('mapBody').hidden=!v.supported;$('mapRefCard').hidden=!v.supported;
+ if(!v.supported)return;
+ const st=v.status;
+ $('mapState').textContent=st.state==='applied'?t('mapS_applied',st.mappings):st.state==='rejected'?t('mapS_rejected',mapWhy(st.code,st.reason)):st.state==='safe-mode'?t('mapS_safe'):t('mapS_none');
+ $('mapNeed').textContent=v.restartNeeded?t('mapRestartNeeded'):'';$('mapRestart').hidden=!v.restartNeeded;
+ const rows=$('mapRows');rows.replaceChildren();
+ for(const m of mapMine()){const c=mapCtl(m.control),a=mapAct(m.action),row=document.createElement('div'),text=document.createElement('span'),del=document.createElement('button');
+  row.className='row';text.textContent=(c?c.name:m.control)+' · '+t(`mapG_${m.gesture}`)+' → '+(a?mapLabel(a):m.action);
+  del.className='btn';del.textContent=t('mapRemove');del.onclick=()=>action(()=>mapSave(lastMap.mappings.filter(x=>x!==m)));row.append(text,del);rows.append(row)}
+ if(!rows.children.length){const e=document.createElement('small');e.textContent=t('mapNone');rows.append(e)}
+ mapFill($('mapControl'),v.controls.filter(c=>MAP_G.some(g=>c.offers[g].mappable)).map(c=>[c.id,c.name+' ('+c.note+')']));
+ mapControlChanged();
+ const ref=document.createElement('table'),head=document.createElement('tr');
+ for(const h of [t('mapControl'),...MAP_G.map(g=>t(`mapG_${g}`))]){const th=document.createElement('th');th.textContent=h;head.append(th)}
+ ref.append(head);
+ for(const c of v.controls){const tr=document.createElement('tr'),n=document.createElement('td');n.textContent=c.name+' ('+c.note+')';tr.append(n);
+  for(const g of MAP_G){const td=document.createElement('td'),o=c.offers[g];td.textContent=c.stock[g]&&c.stock[g]!=='None'?c.stock[g]:'–';
+   if(o.mappable){td.className='free';const own=document.createElement('span');own.className='own';own.textContent=t(`mapOffer_${o.status}`);td.append(own)}else if(o.reason==='reserved')td.className='reserved';tr.append(td)}
+  ref.append(tr)}
+ $('mapRef').replaceChildren(ref);
+ if(v.learn&&v.learn.state==='running'&&!mapLearning){mapLearning=true;mapPoll()}
+}
+async function showMap(){renderMap(await mapCall('mapping'))}
+async function mapSave(list){renderMap(await mapCall('mapping',{method:'POST',body:JSON.stringify({mappings:list})}));notice(t('mapRestartNeeded'))}
+function mapLearnEnd(){mapLearning=false;clearTimeout(mapLearnTimer);$('mapLearn').textContent=t('mapLearn')}
+function mapPoll(){$('mapLearn').textContent=t('mapLearnStop');clearTimeout(mapLearnTimer);mapLearnTimer=setTimeout(()=>action(async()=>{if(!mapLearning)return;const l=await mapCall('mapping/learn');
+ if(l.state==='running'){$('mapLearnState').textContent=t('mapLearning',l.secondsLeft||0);mapPoll();return}
+ mapLearnEnd();
+ if(l.state==='timeout')$('mapLearnState').textContent=t('mapLearnTimeout');
+ else if(l.state==='error')$('mapLearnState').textContent=l.error||'';
+ else if(l.state==='done'&&l.result)mapLearned(l.result);
+ else $('mapLearnState').textContent='';
+}),400)}
+function mapLearned(r){const c=mapCtl(r.control);
+ if(!c){$('mapLearnState').textContent=t('mapLearnUnknown',r.note);return}
+ const text=t('mapLearned',c.name,t(`mapG_${r.gesture}`));
+ if(!r.offer.mappable){$('mapLearnState').textContent=text+' · '+t('mapNotMappable',mapWhy(r.offer.reason));return}
+ $('mapControl').value=r.control;mapControlChanged();$('mapGesture').value=r.gesture;mapGestureChanged();$('mapLearnState').textContent=text}
+$('mapControl').onchange=mapControlChanged;
+$('mapGesture').onchange=mapGestureChanged;
+$('mapLearn').onclick=()=>action(async()=>{
+ if(mapLearning){mapLearnEnd();$('mapLearnState').textContent='';await mapCall('mapping/learn',{method:'DELETE'});return}
+ $('mapLearnState').textContent=t('mapLearning',lastMap.timing.learnSeconds);mapLearning=true;
+ try{await mapCall('mapping/learn',{method:'POST'});mapPoll()}catch(e){mapLearnEnd();$('mapLearnState').textContent='';throw e}});
+$('mapAdd').onclick=()=>action(async()=>{const m={board:lastMap.board,control:$('mapControl').value,gesture:$('mapGesture').value,action:$('mapAction').value};
+ if(!m.control||!m.gesture||!m.action)return;
+ await mapSave(lastMap.mappings.filter(x=>!(x.board===m.board&&x.control===m.control&&x.gesture===m.gesture)).concat([m]))});
+$('mapRestart').onclick=()=>action(async()=>{if(!confirm(t('mapRestartAsk')))return;await mapCall('mapping/restart',{method:'POST'});notice(t('mapRestarting'))});
+$('mapImportFile').onchange=e=>action(async()=>{const f=e.target.files[0];e.target.value='';if(!f)return;renderMap(await mapCall('mapping/import',{method:'POST',body:await f.text()}));notice(t('mapImported'))});
+action(async()=>{const v=await api('ui');if(!localStorage.getItem('enginex-console-lang')&&LANGS.includes(v.language))setLang(v.language,false);showUI(v);await showDrives();await showRelay();await showTunnel().catch(()=>{});await showSpotify();await showAppleMusic();await showBt().catch(()=>{});await showBpm();await showNAS();await showBroadcast();await showTailscale().catch(()=>{});await showSSH().catch(()=>{});await showHF().catch(()=>{});await showMap().catch(()=>{});await showGen2().catch(()=>{});await showMods().catch(()=>{});await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(()=>{})},2000);
 </script></html>

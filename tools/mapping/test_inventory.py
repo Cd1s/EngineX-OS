@@ -127,6 +127,19 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(a, f.read())
         self.assertEqual(first["board"], "JPXX")
 
+    def test_forward_shift_is_forward_unless_the_module_says_quantize(self):
+        # Forward.qml: `shiftAction === Action.Quantize && shift` picks the Quantize path, else Forward.
+        plain = SAMPLE.replace("    Censor {", "    Forward {\n        note: 17\n    }\n\n    Censor {")
+        with open(os.path.join(self.assign, "JPXX", "JPXX_Controller_Assignments.qml"), "w") as f:
+            f.write(plain)
+        row = {c["id"]: c for c in self.controls()["controls"]}["Forward:17"]
+        self.assertEqual(row["shift_press"], "Browse Forward (Shift changes nothing)")
+        quant = plain.replace("        note: 17\n", "        note: 17\n        shiftAction: Action.Quantize\n")
+        with open(os.path.join(self.assign, "JPXX", "JPXX_Controller_Assignments.qml"), "w") as f:
+            f.write(quant)
+        row = {c["id"]: c for c in self.controls()["controls"]}["Forward:17"]
+        self.assertEqual(row["shift_press"], "Quantize on/off")
+
     def test_markdown_only_on_request(self):
         run_inventory(self.assign, self.qrc, self.out, "JPXX")
         self.assertFalse(os.path.exists(os.path.join(self.out, "JPXX.md")))
