@@ -211,6 +211,26 @@ func TestBootReportUnsupportedRenameKeepsUserFiles(t *testing.T) {
 	}
 }
 
+// When internal storage is full, the prepare step says so in one line. That line is in the journal of
+// enginex-prepare.service, which the start-up report carries; the report's redaction must keep it.
+func TestBootReportKeepsThePrepareStepsFullStorageLine(t *testing.T) {
+	source, err := os.ReadFile("../../tools/az01-packer/az01_packer.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(source, []byte("enginex-prepare: internal storage is full (")) {
+		t.Fatal("the prepare script no longer writes the full-storage line this test follows")
+	}
+	line := "enginex-prepare: internal storage is full (12288 KiB free); not written: SSH keys, UI packs, time zone"
+	raw, err := json.Marshal(map[string]string{"_SYSTEMD_UNIT": "enginex-prepare.service", "MESSAGE": line})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bootJournal(raw, nil); got != "enginex-prepare.service: "+line+"\n" {
+		t.Fatalf("the start-up report must carry the full-storage line unchanged, got %q", got)
+	}
+}
+
 func TestBootKernelRecordsDiscardSecretsAndLeadingFragments(t *testing.T) {
 	body := bootKernelRecords("truncated-sensitive-value\n[ 1.000] usb SerialNumber: device-identity\ncontinuation-identity\n[ 2.000] safe kernel event\n", nil)
 	for _, value := range []string{"truncated-sensitive-value", "device-identity", "continuation-identity"} {

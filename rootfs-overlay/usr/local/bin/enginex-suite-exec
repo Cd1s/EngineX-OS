@@ -9,8 +9,9 @@ APPLET="$1"
 shift
 SHARE=${ENGINEX_SUITE_SHARE:-/usr/share/enginex}
 TARGET_DIR=${ENGINEX_SUITE_DIR:-/data/enginex/bin}
+RAM_DIR=${ENGINEX_SUITE_RAM_DIR:-/tmp/enginex-bin}
 if ! mkdir -p "$TARGET_DIR" 2>/dev/null || [ ! -w "$TARGET_DIR" ]; then
-    TARGET_DIR="/tmp/enginex-bin"
+    TARGET_DIR=$RAM_DIR
     mkdir -p "$TARGET_DIR"
 fi
 BIN="$TARGET_DIR/enginex-suite"
@@ -26,26 +27,48 @@ decompress() {
 # and a binary deployed by hand stays until the next image brings a new archive.
 ID=$(sha256sum < "$ARCHIVE" | cut -d' ' -f1)
 stale() { [ ! -x "$BIN" ] || [ "$(cat "$BIN.id" 2>/dev/null)" != "$ID" ]; }
-if stale; then
-    exec 9>"$TARGET_DIR/.unpack.lock"
-    flock 9
-    if stale; then
-        TMP="$BIN.$$.tmp"
-        trap 'rm -f "$TMP"' EXIT
-        decompress "$ARCHIVE" > "$TMP"
-        chmod 0755 "$TMP"
-        mv -f "$TMP" "$BIN"
-        trap - EXIT
-        printf '%s\n' "$ID" > "$BIN.id"
+# unpack <dir> [say]: put the archive's suite into <dir> under its lock, or fail without touching what is installed
+# there (no lock, no room): the temporary is removed, the old binary and its id stay. When /data refuses, the marker in
+# memory tells every later start of this boot not to try again; /tmp is memory, so the next boot tries /data.
+no_room=$RAM_DIR/.no-room
+unpack() (
+    exec 9>"$1/.unpack.lock" || exit 1
+    flock 9 || exit 1
+    BIN="$1/enginex-suite"
+    stale || exit 0
+    [ "$1" = "$RAM_DIR" ] || [ ! -e "$no_room" ] || exit 1
+    tmp="$BIN.$$.tmp"
+    trap 'rm -f "$tmp"' EXIT
+    if ! { decompress "$ARCHIVE" > "$tmp" && chmod 0755 "$tmp" && mv -f "$tmp" "$BIN" && printf '%s\n' "$ID" > "$BIN.id"; }; then
+        [ "$1" = "$RAM_DIR" ] || { mkdir -p "$RAM_DIR" && : > "$no_room"; }
+        exit 1
     fi
-    # Earlier releases leaked one empty temporary per failed start and left
-    # standalone binaries and hand-made backups that this suite replaces (#44).
-    # Releases before 5.3.0.5 unpacked the same suite as enginex-suite (#234).
-    rm -f "$TARGET_DIR"/enginex-suite.*.tmp "$TARGET_DIR"/*.pre-* "$TARGET_DIR"/*.prev \
-        "$TARGET_DIR"/*.o55prev "$TARGET_DIR/enginex-deemixd" "$TARGET_DIR/stems-processor" \
-        "$TARGET_DIR/$legacy_suite" "$TARGET_DIR/$legacy_suite.id" "$TARGET_DIR"/"$legacy_suite".*.tmp \
-        "$TARGET_DIR/$legacy_deemix"
-    # The service must not keep holding the unpack lock.
-    exec 9>&-
+    [ -z "${2:-}" ] || echo "enginex-suite-exec: no room on internal storage; the programs run from memory this boot" >&2
+)
+if stale; then
+    fallback=
+    if [ "$TARGET_DIR" != "$RAM_DIR" ] && [ -e "$no_room" ]; then
+        fallback=1
+    elif unpack "$TARGET_DIR"; then
+        # Earlier releases leaked one empty temporary per failed start and left
+        # standalone binaries and hand-made backups that this suite replaces (#44).
+        # Releases before 5.3.0.5 unpacked the same suite as enginex-suite (#234).
+        rm -f "$TARGET_DIR"/enginex-suite.*.tmp "$TARGET_DIR"/*.pre-* "$TARGET_DIR"/*.prev \
+            "$TARGET_DIR"/*.o55prev "$TARGET_DIR/enginex-deemixd" "$TARGET_DIR/stems-processor" \
+            "$TARGET_DIR/$legacy_suite" "$TARGET_DIR/$legacy_suite.id" "$TARGET_DIR"/"$legacy_suite".*.tmp \
+            "$TARGET_DIR/$legacy_deemix"
+    elif [ "$TARGET_DIR" != "$RAM_DIR" ]; then
+        fallback=1
+    else
+        echo "enginex-suite-exec: cannot unpack the programs" >&2
+        exit 1
+    fi
+    if [ -n "$fallback" ]; then
+        # /data has no room: the installed programs stay as they are, this image's suite runs from memory. The one
+        # start that unpacks it says so; the services that start next find it current and stay quiet.
+        TARGET_DIR=$RAM_DIR BIN="$RAM_DIR/enginex-suite"
+        mkdir -p "$TARGET_DIR"
+        unpack "$TARGET_DIR" say
+    fi
 fi
 exec "$BIN" "$APPLET" "$@"

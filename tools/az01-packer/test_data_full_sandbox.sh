@@ -1,0 +1,536 @@
+#!/bin/bash
+# A deck whose internal storage (/data) is full still starts everything. Real-image test, root on an ARM
+# build host, never on a deck. Start it under the host's heavy lock, exactly like this:
+#   flock /var/lock/enginex-heavy.lock bash tools/az01-packer/test_data_full_sandbox.sh <candidate JP07 image> <new work directory>
+# The work directory must not exist. Everything runs in private mount, network and pid namespaces; the "internal
+# storage" is an ext4 loop file of its own in the work directory, so the host's /data is never touched.
+#
+# Per scenario the deck's boot order runs on the real rootfs of the image (set-up code shared with
+# boot-safety-sandbox.sh in sandbox-root.sh): etc-reset, prepare, the suite unpack, the guard's pre step, our SSH
+# check, and the services stream-sync, enginex-deemixd, rb-bridge and the boot watch. systemd is not available in the
+# sandbox, so the unit graph is read from the image's own unit files: a unit whose Requires= names enginex-prepare
+# starts only when prepare ended with success, exactly as systemd decides it. Every step's exit code and wall time go
+# to <work>/steps.tsv, what is up to <work>/up.tsv, and <work>/results.txt gets one PASS or FAIL line per check.
+# The exit code is 0 only when every check passed.
+#
+# Scenarios (what ext4 can still allocate on /data before prepare; the DJ's own files fill the rest; the KiB that
+# statfs reports, and prepare reads, are in steps.tsv and are higher by the 16 MiB ext4 keeps for itself):
+#   normal           plenty of room (the control: whatever starts here must start in every other scenario)
+#   full0 full1m full20m   0 bytes, 1 MiB, 20 MiB free; nothing of ours to remove; the install is up to date
+#   upd0 upd1m upd20m      the same, on the first boot after an update: UI packs and suite are stale
+#   rem-early              0 bytes free, with files of ours that are made again: the floor is met by the first two classes
+#   rem-order              0 bytes free, with a file of every class: all classes are used, the stream cache only as far as needed
+#   rem-upd                rem-order on the first boot after an update: the room made is used to install both
+#   free2 free3            rem-order again: the three runs that time the freeing (steps.tsv, step prepare)
+#   acct                   the guard's sign-in write meets a real ENOSPC, four ways (a tmpfs holds the DJ's StreamingAccounts.json and
+#                          has room for the file but not for the guard's copy of it): the two branches of the guard (no TIDAL entry:
+#                          add; a TIDAL entry without a token: retoken) with a copy that gets no byte (empty) and one that is cut
+#                          in the middle (cut). The file must come out byte for byte as it went in; acct.tsv has the sizes.
+#   clean                  what the cleanup must never remove, 17 cases on a disk with room: prepare runs with a floor no disk can meet, so
+#                          every candidate is tried. File systems mounted at or below a removable name, links in a removable directory, a
+#                          directory or a link that carries a stream cache name, names with a space or a leading dash, the same names at
+#                          another depth, a link at the legacy data name, an export.pdb that is malformed, empty, absent, unstamped, stale
+#                          or names nothing (every analysis directory stays) and a whole one (the control), a file that cannot be removed.
+# normal runs prepare three times in a row for the timing of the step when there is room.
+# prepare reads the mount table, so it runs with the sandbox's real /proc (the fake one, made for the steps after it, has no mountinfo).
+set -euo pipefail
+export LC_ALL=C
+SELF=$(realpath "$0")
+REPO=$(cd "$(dirname "$SELF")/../.." && pwd)
+DATA_MIB=512
+SCENARIOS='normal full0 full1m full20m upd0 upd1m upd20m rem-early rem-order rem-upd free2 free3 acct clean'
+KIB=1024
+
+if [ "${1:-}" != --inner ]; then
+    [ "$#" = 2 ] && [ "$(id -u)" = 0 ] || { echo "usage: $0 <JP07 image> <new work directory>" >&2; exit 2; }
+    image=$(realpath "$1")
+    export W=$(realpath -m "$2")
+    [ ! -e "$W" ] || { echo 'Use a new work directory' >&2; exit 2; }
+    case $(basename "$image") in *-JP07-Update.img) export PRODUCT=JP07 ;; *) echo 'a JP07 image please' >&2; exit 2 ;; esac
+    mkdir -p "$W"
+    python3 -I "$REPO/tools/az01-packer/az01_packer.py" unpack "$image" --output "$W/image" > "$W/unpack.json"
+    ssh-keygen -q -t ed25519 -N '' -f "$W/id" -C data-full-test
+    : > "$W/steps.tsv"; : > "$W/up.tsv"; : > "$W/results.txt"
+    unshare -m --propagation private -n -p -f --kill-child "$SELF" --inner install
+    for scenario in $SCENARIOS; do
+        unshare -m --propagation private -n -p -f --kill-child "$SELF" --inner "$scenario"
+    done
+    printf '%s\n' '--- steps: scenario, KiB free before, step, exit code, ms' && cat "$W/steps.tsv"
+    printf '%s\n' '--- what is up: scenario, unit or service, state, detail' && cat "$W/up.tsv"
+    cat "$W/results.txt"
+    ! grep -q '^FAIL' "$W/results.txt"
+    exit
+fi
+
+SCEN=$2
+C=$W/$SCEN
+R=$C/root
+mkdir -p "$R" "$C/data"
+pass() { echo "PASS $SCEN: $*" | tee -a "$W/results.txt"; }
+fail() { echo "FAIL $SCEN: $*" | tee -a "$W/results.txt"; }
+check() { local name=$1; shift; if "$@" > /dev/null 2>&1; then pass "$name"; else fail "$name"; fi; }
+free_bytes() { stat -f -c '%f %S' "$C/data" | awk '{print $1*$2}'; }   # statfs, as prepare reads it
+
+# --- /data: an ext4 loop file. The install is made once, on an empty file system, by the first scenario.
+if [ "$SCEN" = install ]; then
+    truncate -s "${DATA_MIB}M" "$C/data.img"
+    mkfs.ext4 -q -F -O encrypt -L az01-data "$C/data.img"   # the deck's own options (az0x-data-mkfs): 5% stay reserved for root
+else
+    cp --sparse=always "$W/install/data.img" "$C/data.img"
+fi
+mount -o loop "$C/data.img" "$C/data"
+
+# Files of the DJ and of the deck that nothing of ours may ever remove. One of every class that must never be touched.
+NEVER='Music/dj-collection.bin
+Music/dj-chosen-track.mp3
+enginex/Stream/Stems/1234/stem-kept.flac
+enginex/Stream/my-own-recording.wav
+AppDataUser/AIR Music Technology/Engine/Engine Library/Database2/m.db
+AppDataUser/AIR Music Technology/Engine/Engine Library/Album Art/00/cover.jpg
+inMusicTempFiles/engine-copy.flac
+enginex/ui/settings.conf
+enginex/ui-scale.env
+enginex/state/deezer-owner.json
+enginex/hfs-libraries/vol-1/Engine Library/Database2/m.db
+enginex/hfs-lib/base-1/upper/Database2/m.db
+enginex/hfs-lib/base-1/work/keep
+.prolink-cache/Player-1/folder/track.mp3
+enginex/mods/test-mod/mod.json
+enginex/mods-state/test-mod/state.json
+enginex/ui/mods-overlay/Test.qml
+enginex/ui/mods-state.json
+enginex/tailscale/config.json
+enginex/hook-disable.conf'
+seed_never() {
+    local f
+    while IFS= read -r f; do
+        mkdir -p "$(dirname "$C/data/$f")"
+        case $f in
+            Music/dj-collection.bin) : ;;  # the ballast below
+            *.conf|*.env|*.json|*.qml) printf 'seed %s\n' "$f" > "$C/data/$f" ;;
+            *) head -c 4096 /dev/urandom > "$C/data/$f" ;;
+        esac
+    done <<< "$NEVER"
+}
+never_sums() { (cd "$C/data" && while IFS= read -r f; do [ "$f" = Music/dj-collection.bin ] || sha256sum -- "$f"; done <<< "$NEVER"); }
+
+# The sign-ins of Engine's streaming accounts: the guard's pre step edits this file (it adds a TIDAL entry for the
+# gateway), so it is checked for what it must still hold, not for a hash.
+seed_accounts() {
+    printf '{\n    "Deezer": "{\\"provider\\":\\"Deezer\\",\\"accessToken\\":\\"dj-own-token\\"}"\n}\n' > "$C/data/StreamingAccounts.json"
+    cp "$C/data/StreamingAccounts.json" "$C/accounts.seed"
+}
+
+# Engine.conf with a time zone that the deck's saved zone is newer than: prepare rewrites it when it can (restore_timezone).
+seed_timezone() {
+    local dir="$C/data/.config/jp07.user.settings/AIR Music Technology"
+    mkdir -p "$dir" "$C/data/enginex/state"
+    { printf '[General]\n'; for i in $(seq 1 600); do printf 'Setting%d=%s\n' "$i" "$(head -c 24 /dev/zero | tr '\0' x)"; done
+      printf '[TimeDateSettings]\nTZEnvVar=UTC\n'; } > "$dir/Engine.conf"
+    printf 'Europe/Berlin\n' > "$C/data/enginex/state/timezone"
+    touch -d '2 minutes' "$C/data/enginex/state/timezone"
+    sha256sum "$dir/Engine.conf" | cut -d' ' -f1 > "$C/engine-conf.sha"
+    wc -c < "$dir/Engine.conf" > "$C/engine-conf.size"
+}
+
+# Files of ours that are made again by themselves, one of every class prepare may remove, in the order it frees them.
+# $1 early: the QML cache alone is large enough to meet the floor after the leftovers.
+FLOOR_KIB=$(debugfs -R 'cat /usr/libexec/enginex-prepare' "$W/image/rootfs.ext2" 2> /dev/null | sed -n 's/.*ENGINEX_DATA_FLOOR_KIB:-\([0-9]*\)}.*/\1/p' | head -1)
+FLOOR_KIB=${FLOOR_KIB:-73728}
+kib() { head -c "$(( $2 * 1024 ))" /dev/zero > "$C/data/$1"; }   # a file of $2 KiB
+# What the bridge writes right after export.pdb: its size and mtime in nanoseconds (pkg/prolink/engine_bridge.go, pdbStamp).
+export_stamp() { printf '%s:%s000000000' "$(stat -c %s "$1")" "$(stat -c %Y "$1")" > "$(dirname "$1")/.enginex-generated"; }
+aged() { touch -d "@$((1700000000 + $2))" "$C/data/$1"; }       # its age: higher = newer
+seed_removable() {
+    local e=enginex mode=$1 i
+    mkdir -p "$C/data/$e"/{.prepare.old,ui/.install.old,bin,Stream,shadow-v3/peer-aa,ui/qml-cache,logs,prolink-export/PIONEER/{USBANLZ/P001,USBANLZ/P002,USBANLZ/P003,rekordbox}}
+    kib "$e/.prepare.old/f" 512; aged "$e/.prepare.old/f" 1; aged "$e/.prepare.old" 1
+    kib "$e/ui/.install.old/f" 512; aged "$e/ui/.install.old/f" 2; aged "$e/ui/.install.old" 2
+    kib "$e/bin/enginex-suite.1.tmp" 512; aged "$e/bin/enginex-suite.1.tmp" 3
+    kib "$e/Stream/.part-x" 512; aged "$e/Stream/.part-x" 4
+    kib "$e/Stream/.deemix-1-a.part" 512; aged "$e/Stream/.deemix-1-a.part" 5
+    kib "$e/shadow-v3/peer-aa/.fetch-x" 512; aged "$e/shadow-v3/peer-aa/.fetch-x" 6
+    if [ "$mode" = rem-early ]; then kib "$e/ui/qml-cache/seed.qmlc" $((FLOOR_KIB - 8 * 1024)); else kib "$e/ui/qml-cache/seed.qmlc" 8192; fi
+    for i in 1 2 3 4 5 6 7; do
+        kib "$e/logs/EngineX-boot-report-20261122T0${i}0000.000000000Z.txt" 512; aged "$e/logs/EngineX-boot-report-20261122T0${i}0000.000000000Z.txt" $((10 + i))
+    done
+    printf 'EngineX-boot-report-20261122T020000.000000000Z.txt\n' > "$C/data/$e/ui/boot-report-latest"
+    for i in 1 2 3; do kib "$e/prolink-export/PIONEER/USBANLZ/P00$i/ANLZ0000.DAT" 512; aged "$e/prolink-export/PIONEER/USBANLZ/P00$i" $((19 + i)); done
+    printf 'PMAI \x00 /PIONEER/USBANLZ/P001/ANLZ0000.DAT \x00 end\n' > "$C/data/$e/prolink-export/PIONEER/rekordbox/export.pdb"
+    export_stamp "$C/data/$e/prolink-export/PIONEER/rekordbox/export.pdb"
+    for i in 1 2 3; do kib "$e/Stream/$i.flac" 24576; aged "$e/Stream/$i.flac" $((30 + i)); done
+    kib "$e/Stream/keep-me.wav" 4096
+    # what must be gone and what must stay, after prepare
+    : > "$C/expect.gone"; : > "$C/expect.kept"
+    printf '%s\n' "$e/.prepare.old" "$e/ui/.install.old" "$e/bin/enginex-suite.1.tmp" "$e/Stream/.part-x" "$e/Stream/.deemix-1-a.part" \
+        "$e/shadow-v3/peer-aa/.fetch-x" "$e/ui/qml-cache" >> "$C/expect.gone"
+    if [ "$mode" = rem-early ]; then
+        printf '%s\n' "$e/logs/EngineX-boot-report-20261122T010000.000000000Z.txt" "$e/prolink-export/PIONEER/USBANLZ/P002" \
+            "$e/Stream/1.flac" "$e/Stream/2.flac" >> "$C/expect.kept"
+    else
+        printf '%s\n' "$e/logs/EngineX-boot-report-20261122T010000.000000000Z.txt" "$e/logs/EngineX-boot-report-20261122T030000.000000000Z.txt" \
+            "$e/logs/EngineX-boot-report-20261122T040000.000000000Z.txt" "$e/prolink-export/PIONEER/USBANLZ/P002" \
+            "$e/prolink-export/PIONEER/USBANLZ/P003" "$e/Stream/1.flac" "$e/Stream/2.flac" >> "$C/expect.gone"
+    fi
+    printf '%s\n' "$e/logs/EngineX-boot-report-20261122T020000.000000000Z.txt" "$e/logs/EngineX-boot-report-20261122T050000.000000000Z.txt" \
+        "$e/logs/EngineX-boot-report-20261122T060000.000000000Z.txt" "$e/logs/EngineX-boot-report-20261122T070000.000000000Z.txt" \
+        "$e/prolink-export/PIONEER/USBANLZ/P001" "$e/Stream/3.flac" "$e/Stream/keep-me.wav" >> "$C/expect.kept"
+}
+# The first boot after an update: neither the suite nor the UI packs installed match the image.
+seed_stale() {
+    printf 'stale\n' > "$C/data/enginex/bin/enginex-suite.id"
+    rm -f "$C/data/enginex/ui/.pack-id" "$C/data/enginex/etc-overlay-epoch"   # a new image: the /etc reset has real work too
+}
+
+# The DJ's own music takes every block ext4 will give; then $1 bytes are given back. Allocated, not written: ext4
+# counts the pages it still has to write back as free space, so a write loop stops with room to spare. ext4 also
+# keeps up to 16 MiB (its reserved clusters) back for itself that statfs still reports as free: at "0 bytes" the
+# number prepare reads is about that much, and nothing can be allocated.
+fill_to() {
+    local want=$1 f="$C/data/Music/dj-collection.bin" n
+    mkdir -p "$C/data/Music"
+    : > "$f"
+    n=$(( $(free_bytes) / 4096 * 4096 ))
+    while [ "$n" -ge 4096 ]; do
+        fallocate -o "$(stat -c %s "$f")" -l "$n" "$f" 2> /dev/null || n=$(( n / 2 / 4096 * 4096 ))
+    done
+    [ "$want" = 0 ] || truncate -s "$(( $(stat -c %s "$f") - want ))" "$f"
+    sync
+}
+
+case $SCEN in
+    install) ;;
+    *)
+        seed_never; seed_accounts; seed_timezone
+        case $SCEN in full*|upd*) rm -rf "$C/data/enginex/ui/qml-cache" ;; esac   # nothing of ours to remove
+        case $SCEN in upd*|rem-upd) seed_stale ;; esac
+        case $SCEN in rem-*|free*) seed_removable "$SCEN" ;; esac
+        case $SCEN in
+            full0|upd0|rem-*|free*) fill_to 0 ;;
+            full1m|upd1m) fill_to $((1024 * 1024)) ;;
+            full20m|upd20m) fill_to $((20 * 1024 * 1024)) ;;
+        esac ;;
+esac
+FREE0=$(free_bytes)
+sync
+case $SCEN in upd*) (cd "$C/data/enginex" && find bin ui/packs ui/icons -type f -print0 | sort -z | xargs -0 sha256sum > "$C/installed.before") ;; esac
+debugfs -R 'cat /usr/share/enginex/enginex-suite.xz' "$W/image/rootfs.ext2" 2> /dev/null | sha256sum | cut -d' ' -f1 > "$C/suite.id"
+never_sums > "$C/never.before" 2>/dev/null || :
+find "$C/data" -path "$C/data/Music" -prune -o -type f -print0 | sort -z | xargs -0 -r sha256sum > "$C/data.before"
+
+mkdir -p "$C/usb" "$C/late"
+. "$(dirname "$SELF")/sandbox-root.sh"
+wait_for() { local end=$((SECONDS + $1)); shift; until "$@"; do [ "$SECONDS" -lt "$end" ] || return 1; sleep .5; done; }
+
+step() { # <name> <command...>: run it, record exit code and wall time
+    local name=$1 t0 t1 rc=0
+    shift
+    t0=$(date +%s%N)
+    "$@" > "$C/$name.log" 2>&1 || rc=$?
+    t1=$(date +%s%N)
+    printf '%s\t%s\t%s\t%s\t%s\n' "$SCEN" "$((FREE0 / 1024))" "$name" "$rc" "$(( (t1 - t0) / 1000000 ))" >> "$W/steps.tsv"
+    eval "RC_${name//-/_}=$rc"
+    return 0
+}
+# systemd's rule for Requires=: the unit starts only when the unit it requires did not fail.
+requires_prepare() { # <unit>: does this unit hard-require enginex-prepare.service?
+    { cat "$R/usr/lib/systemd/system/$1" "$R/usr/lib/systemd/system/$1.d/"*.conf "$R/etc/systemd/system/$1" 2>/dev/null || :; } |
+        sed -n 's/^Requires=//p' | tr ' ' '\n' | grep -x enginex-prepare.service > /dev/null   # pipefail: neither cat of a missing file nor grep -q may decide
+}
+unit_up() { # <unit>: would systemd start it after prepare ended as it did?
+    ! requires_prepare "$1" || [ "$RC_prepare" = 0 ]
+}
+up() { printf '%s\t%s\t%s\t%s\n' "$SCEN" "$1" "$2" "${3:-}" >> "$W/up.tsv"; }
+unit_exec() { sed -n 's/^ExecStart=-\{0,1\}//p' "$R/etc/systemd/system/$1" "$R/usr/lib/systemd/system/$1" 2> /dev/null | tail -1; }
+
+RC_prepare=
+step etc-reset in_root /usr/libexec/enginex-etc-reset
+if [ "$SCEN" = install ]; then
+    mkdir -p -m 700 "$C/data/enginex"
+    cp "$W/id.pub" "$C/data/enginex/authorized_keys"
+fi
+# Traced (sh -x) to name the failing line; the scenarios that time the freeing run it as systemd does.
+TRACE=-x
+case $SCEN in rem-*|free*) TRACE= ;; esac
+mount -t proc proc "$R/proc"   # over the fake one: prepare reads the mount table
+step prepare in_root /bin/sh $TRACE /usr/libexec/enginex-prepare
+# The control runs the step three more times, untraced: the timing of prepare when there is room, nothing to free.
+if [ "$SCEN" = normal ]; then
+    for i in 2 3 4; do step "prepare-$i" in_root /usr/libexec/enginex-prepare; done
+fi
+umount "$R/proc"
+# After prepare: what was made again is gone, in the order of the list and only as far as the floor needs; the rest stays.
+expect_check() {
+    local bad=0 f
+    while IFS= read -r f; do [ ! -e "$C/data/$f" ] || { echo "still there: $f"; bad=1; }; done < "$C/expect.gone"
+    while IFS= read -r f; do [ -e "$C/data/$f" ] || { echo "gone: $f"; bad=1; }; done < "$C/expect.kept"
+    return $bad
+}
+case $SCEN in rem-*|free*) check "$SCEN: the files of ours were removed in the order of the list, only as far as the floor needs" expect_check ;; esac
+[ "$SCEN" = install ] || check "$SCEN: after prepare the DJ's streaming sign-ins are byte for byte as they were" cmp "$C/accounts.seed" "$C/data/StreamingAccounts.json"
+# Right after prepare, before any service runs (stream-sync cleans some files of its own later): nothing of the DJ's
+# or of the deck's was touched.
+[ "$SCEN" = install ] || check "$SCEN: after prepare nothing of the DJ or of the deck was touched" \
+    bash -c 'cd "$1/data" && sha256sum -c --quiet "$1/never.before" > "$1/never.check" 2>&1' x "$C"
+# What the cleanup must never remove. Each case seeds names of its own, runs prepare with a floor no disk can meet (so every
+# candidate is tried, in the order of the list) and the real /proc (prepare reads the mount table), checks, and takes its seeds away.
+# A file system mounted by a case is unmounted before anything under it is removed.
+if [ "$SCEN" = clean ]; then
+    D=$C/data E=$C/data/enginex UNMET_KIB=1000000000
+    LEGACY_LINK=$D/$(basename "$(sed -n "s/^legacy_data='\(.*\)'.*/\1/p" "$REPO/rootfs-overlay/usr/libexec/enginex-migration")")
+    gone() { [ ! -e "$D/$1" ] && [ ! -L "$D/$1" ]; }
+    there() { [ -e "$D/$1" ] || [ -L "$D/$1" ]; }
+    mnt() { mkdir -p "$R/data/$1"; mount -t tmpfs tmpfs "$R/data/$1"; echo mounted > "$R/data/$1/keep"; touch -d @1700000000 "$R/data/$1"; }
+    mnt_ok() { mountpoint -q "$R/data/$1" && [ "$(cat "$R/data/$1/keep")" = mounted ]; }
+    unmnt() { umount "$R/data/$1"; }
+    cleanup_run() { # <case>
+        local v=RC_prepare_${1//-/_}
+        mount -t proc proc "$R/proc"
+        step "prepare-$1" in_root ENGINEX_DATA_FLOOR_KIB=$UNMET_KIB /bin/sh /usr/libexec/enginex-prepare
+        umount "$R/proc"
+        CASE_RC=${!v}
+        check "$SCEN: $1: prepare ends with success" test "$CASE_RC" = 0
+    }
+    # The DJ's directory that links point at, and the export of the cases that name analysis directories
+    mkdir -p "$D/Music/dj-dir" "$E/Stream" "$E/prolink-export/PIONEER/rekordbox"
+    head -c 4096 /dev/urandom > "$D/Music/dj-dir/precious.mp3"
+    dj_sum() { sha256sum "$D/Music/dj-dir/precious.mp3" | cut -d' ' -f1; }
+    DJ0=$(dj_sum)
+    dj_ok() { [ -d "$D/Music/dj-dir" ] && [ "$(dj_sum)" = "$DJ0" ]; }
+    PDB=$E/prolink-export/PIONEER/rekordbox/export.pdb
+    ANLZ=$E/prolink-export/PIONEER/USBANLZ
+    analysis() { local n; for n in "$@"; do mkdir -p "$ANLZ/$n"; head -c 65536 /dev/zero > "$ANLZ/$n/ANLZ0000.DAT"; done; }
+    toy_export() { printf 'PMAI \x00 /PIONEER/USBANLZ/P001/ANLZ0000.DAT \x00 end\n' > "$PDB"; }
+    export_reset() { rm -f -- "$PDB" "$(dirname "$PDB")/.enginex-generated"; rm -rf -- "$ANLZ/P001" "$ANLZ/P002" "$ANLZ/P003"; }
+
+    # 1-4. a file system mounted at a removable name, and one below a removable directory
+    mnt enginex/Stream/1.flac; kib enginex/Stream/2.flac 64
+    cleanup_run mount-stream
+    check "$SCEN: mount-stream: a file system mounted at a stream cache name keeps its mount and its file" mnt_ok enginex/Stream/1.flac
+    check "$SCEN: mount-stream: the cleanup goes on past it, the plain cache file next to it is removed" gone enginex/Stream/2.flac
+    unmnt enginex/Stream/1.flac; rm -rf -- "$E/Stream/1.flac"
+
+    mnt enginex/.prepare.m; mkdir -p "$E/.prepare.s"; kib enginex/.prepare.s/f 64
+    cleanup_run mount-leftover
+    check "$SCEN: mount-leftover: a file system mounted at an interrupted run's directory keeps its mount and its file" mnt_ok enginex/.prepare.m
+    check "$SCEN: mount-leftover: the leftover next to it is removed" gone enginex/.prepare.s
+    unmnt enginex/.prepare.m; rm -rf -- "$E/.prepare.m"
+
+    mkdir -p "$E/ui/qml-cache"; kib enginex/ui/qml-cache/a.qmlc 64; mnt enginex/ui/qml-cache/mnt
+    cleanup_run mount-below-qml
+    check "$SCEN: mount-below-qml: a file system mounted below the QML cache keeps its mount and its file" mnt_ok enginex/ui/qml-cache/mnt
+    check "$SCEN: mount-below-qml: the cache directory with a mount below it stays as a whole" there enginex/ui/qml-cache/a.qmlc
+    unmnt enginex/ui/qml-cache/mnt; rm -rf -- "$E/ui/qml-cache"
+
+    analysis P001 P003; toy_export; export_stamp "$PDB"; mnt enginex/prolink-export/PIONEER/USBANLZ/P002
+    cleanup_run mount-analysis
+    check "$SCEN: mount-analysis: a file system mounted at an unnamed analysis directory keeps its mount and its file" mnt_ok enginex/prolink-export/PIONEER/USBANLZ/P002
+    check "$SCEN: mount-analysis: the unnamed analysis directory next to it is removed, the named one stays" bash -c '! test -e "$1" && test -e "$2"' x "$ANLZ/P003" "$ANLZ/P001"
+    unmnt enginex/prolink-export/PIONEER/USBANLZ/P002; export_reset
+
+    # 5. a link inside a removable directory: the link goes, what it points at stays
+    mkdir -p "$E/.prepare.l"; ln -s /data/Music/dj-dir "$E/.prepare.l/abs"; ln -s ../../Music/dj-dir "$E/.prepare.l/rel"
+    cleanup_run link-in-removable
+    check "$SCEN: link-in-removable: the removable directory is removed" gone enginex/.prepare.l
+    check "$SCEN: link-in-removable: the DJ's directory and its file are as they were" dj_ok
+
+    # 6. a directory and a link that carry a stream cache name: only regular files go, like Trim in deemixclient
+    mkdir -p "$E/Stream/3.flac"; kib enginex/Stream/3.flac/inner 64
+    ln -s ../../Music/dj-dir/precious.mp3 "$E/Stream/4.flac"; kib enginex/Stream/5.flac 64
+    cleanup_run stream-not-regular
+    check "$SCEN: stream-not-regular: a directory with a cache name stays, with what is in it" there enginex/Stream/3.flac/inner
+    check "$SCEN: stream-not-regular: a link with a cache name stays and the DJ's file it points at too" bash -c '[ -L "$1" ]' x "$E/Stream/4.flac"
+    check "$SCEN: stream-not-regular: the DJ's file behind the link is as it was" dj_ok
+    check "$SCEN: stream-not-regular: the regular cache file is removed" gone enginex/Stream/5.flac
+    rm -rf -- "$E/Stream/3.flac"; rm -f -- "$E/Stream/4.flac"
+
+    # 7. names with a space or a leading dash are none of ours
+    kib "enginex/Stream/with space.flac" 64; kib enginex/Stream/-dash.flac 64; kib enginex/Stream/-5.flac 64
+    kib "enginex/Stream/.part-with space" 64; mkdir -p "$E/.prepare.with space"; kib "enginex/.prepare.with space/f" 64; kib enginex/Stream/.part-ok 64
+    cleanup_run odd-names
+    check "$SCEN: odd-names: names with a space or a leading dash stay" bash -c 'cd "$1" && for f in "Stream/with space.flac" Stream/-dash.flac Stream/-5.flac "Stream/.part-with space" ".prepare.with space/f"; do [ -e "$f" ] || { echo "gone: $f"; exit 1; }; done' x "$E"
+    check "$SCEN: odd-names: the plain leftover next to them is removed" gone enginex/Stream/.part-ok
+    rm -rf -- "$E/Stream/with space.flac" "$E/Stream/-dash.flac" "$E/Stream/-5.flac" "$E/Stream/.part-with space" "$E/.prepare.with space"
+
+    # 8. names of our classes at another depth are none of ours either
+    mkdir -p "$D/Music/.prepare.dj" "$E/Stream/Stems/1234" "$E/Stream/sub" "$E/shadow-v3/peer-aa/nested" "$E/logs/sub" "$E/ui/mods-overlay/qml-cache" "$E/bin/sub" "$E/ui/sub" "$E/sub"
+    analysis P001 P002; mkdir -p "$ANLZ/sub/P009"; toy_export; export_stamp "$PDB"
+    deep='Music/.prepare.dj/f Music/9.flac enginex/Stream/Stems/1234/9.flac enginex/Stream/sub/.part-deep enginex/Stream/sub/8.flac
+        enginex/shadow-v3/peer-aa/nested/.fetch-nested enginex/logs/sub/EngineX-boot-report-20261122T010000.000000000Z.txt
+        enginex/prolink-export/PIONEER/USBANLZ/sub/P009/ANLZ0000.DAT enginex/ui/mods-overlay/qml-cache/seed enginex/bin/sub/enginex-suite.9.tmp
+        enginex/ui/sub/.install.deep enginex/sub/.prepare.deep'
+    for f in $deep; do [ -e "$D/$f" ] || kib "$f" 64; done
+    kib enginex/Stream/.part-ctl 64
+    cleanup_run other-depth
+    check "$SCEN: other-depth: removable-looking names one level too deep or in another directory stay" bash -c 'cd "$1" && shift && for f; do [ -e "$f" ] || { echo "gone: $f"; exit 1; }; done' x "$D" $deep
+    check "$SCEN: other-depth: the controls in the right place are removed (plain leftover, unnamed analysis directory)" bash -c '! test -e "$1" && ! test -e "$2"' x "$E/Stream/.part-ctl" "$ANLZ/P002"
+    rm -rf -- "$D/Music/.prepare.dj" "$D/Music/9.flac" "$E/Stream/Stems/1234/9.flac" "$E/Stream/sub" "$E/shadow-v3/peer-aa/nested" "$E/logs/sub" "$E/ui/mods-overlay/qml-cache" "$E/bin/sub" "$E/ui/sub" "$E/sub" "$ANLZ/sub"
+    export_reset
+
+    # 9. the link that keeps the legacy data name alive, pointing at a DJ directory
+    ln -s /data/Music/dj-dir "$LEGACY_LINK"
+    cleanup_run legacy-link
+    check "$SCEN: legacy-link: the link at the legacy data name stays, and so does what it points at" bash -c '[ "$(readlink "$1")" = /data/Music/dj-dir ]' x "$LEGACY_LINK"
+    check "$SCEN: legacy-link: the DJ's directory and its file are as they were" dj_ok
+    rm -f -- "$LEGACY_LINK"
+
+    # 10-16. export.pdb: an unreferenced analysis directory goes only when the export is the whole one the bridge wrote and names some
+    for sub in malformed unstamped stale nonames absent empty whole; do
+        analysis P001 P002; rm -f -- "$PDB" "$(dirname "$PDB")/.enginex-generated"
+        case $sub in
+            malformed) printf 'this is not a rekordbox export\n' > "$PDB" ;;
+            unstamped) toy_export ;;
+            stale) toy_export; export_stamp "$PDB"; printf 'x' >> "$PDB" ;;
+            nonames) printf 'PMAI \x00 no analysis paths in here \x00 end\n' > "$PDB"; export_stamp "$PDB" ;;
+            absent) : ;;
+            empty) : > "$PDB"; export_stamp "$PDB" ;;
+            whole) toy_export; export_stamp "$PDB" ;;
+        esac
+        cleanup_run "export-$sub"
+        case $sub in
+            whole) check "$SCEN: export-$sub: the control: the unnamed analysis directory is removed, the named one stays" \
+                       bash -c '! test -e "$1" && test -e "$2/ANLZ0000.DAT"' x "$ANLZ/P002" "$ANLZ/P001" ;;
+            *) check "$SCEN: export-$sub: both analysis directories stay" bash -c 'test -e "$1/ANLZ0000.DAT" && test -e "$2/ANLZ0000.DAT"' x "$ANLZ/P001" "$ANLZ/P002" ;;
+        esac
+        export_reset
+    done
+
+    # 17. a removal that fails (an immutable file) leaves the file and does not stop the step
+    kib enginex/Stream/.part-imm 64; aged enginex/Stream/.part-imm 0; kib enginex/Stream/.part-ok2 64
+    if chattr +i "$E/Stream/.part-imm" 2> /dev/null; then
+        cleanup_run rm-fails
+        check "$SCEN: rm-fails: the file that cannot be removed stays" there enginex/Stream/.part-imm
+        check "$SCEN: rm-fails: the cleanup goes on, the leftover after it is removed" gone enginex/Stream/.part-ok2
+        chattr -i "$E/Stream/.part-imm"
+    else
+        fail "rm-fails: cannot make a file immutable here"
+    fi
+    rm -f -- "$E/Stream/.part-imm" "$E/Stream/.part-ok2"
+    check "$SCEN: after every case nothing of the DJ or of the deck was touched" \
+        bash -c 'cd "$1/data" && sha256sum -c --quiet "$1/never.before" > "$1/never.check2" 2>&1' x "$C"
+    check "$SCEN: after every case no file system of a case is still mounted below /data/enginex" bash -c '! grep -q "$1/data/enginex/" /proc/self/mountinfo' x "$R"
+fi
+mkdir -p "$R/run/sshd"
+step sshd-t in_root /usr/sbin/sshd -t -f /usr/share/enginex/sshd_config
+[ "$SCEN" != install ] || printf 'lang=en\n' > "$C/data/enginex/ui/settings.conf"
+step guard-pre in_root /etc/enginex/engine-ui-guard pre
+# The guard's accounts write meets a real ENOSPC (deterministic, no ext4 timing in it). empty: a one-page tmpfs holds a small
+# file, so the copy gets no byte. cut: a three-page tmpfs holds a file of two pages (the DJ's own entry last), one page is left,
+# so the copy is cut after 4096 bytes. add: the file has no TIDAL entry; retoken: it has one without a token.
+acct_seed() { # <add|retoken> <small|large> <file>
+    {
+        printf '{\n'
+        [ "$1" != retoken ] || printf '    "TIDAL": "{\\"provider\\":\\"TIDAL\\",\\"providerType\\":\\"TIDAL\\"}",\n'
+        if [ "$2" = large ]; then
+            for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18; do
+                printf '    "Filler%s": "{\\"provider\\":\\"Filler\\",\\"note\\":\\"%0250d\\"}",\n' "$i" 0
+            done
+        fi
+        printf '    "Deezer": "{\\"provider\\":\\"Deezer\\",\\"accessToken\\":\\"dj-own-token\\"}"\n}\n'
+    } > "$3"
+}
+if [ "$SCEN" = acct ]; then
+    : > "$W/acct.tsv"
+    for sub in empty-add empty-retoken cut-add cut-retoken; do
+        mode=${sub%%-*} kind=${sub#*-}
+        mount_dir=$R/run/acct-$sub
+        size=4k weight=small
+        [ "$mode" != cut ] || { size=12k; weight=large; }
+        mkdir -p "$mount_dir"
+        mount -t tmpfs -o size=$size tmpfs "$mount_dir"
+        acct_seed "$kind" "$weight" "$C/accounts-$sub.seed"
+        cp "$C/accounts-$sub.seed" "$mount_dir/StreamingAccounts.json"
+        step "guard-pre-$sub" in_root env ENGINEX_STREAMING_ACCOUNTS=/run/acct-$sub/StreamingAccounts.json /etc/enginex/engine-ui-guard pre
+        printf '%s\t%s\t%s\n' "$sub" "$(wc -c < "$C/accounts-$sub.seed")" "$(wc -c < "$mount_dir/StreamingAccounts.json")" >> "$W/acct.tsv"
+        check "$SCEN: $sub: the guard leaves the DJ's StreamingAccounts.json byte for byte as it was" \
+            cmp "$C/accounts-$sub.seed" "$mount_dir/StreamingAccounts.json"
+        check "$SCEN: $sub: the guard's temporary copy is removed" test ! -e "$mount_dir/StreamingAccounts.json.tmp"
+        umount "$mount_dir"
+    done
+fi
+# The suite is unpacked by the first service that starts; the retired database watch exits 0 at once after it.
+step suite-unpack in_root /usr/local/bin/engine-guardian --watch
+
+sandbox_proc
+in_root /usr/bin/dbus-daemon --system --fork --nopidfile > "$C/dbus.log" 2>&1 || :
+
+# The units of the image: our target, our SSH, and the services of the suite.
+for unit in enginex.target enginex-sshd.service; do
+    if unit_up "$unit"; then up "$unit" up; else up "$unit" DOWN 'Requires=enginex-prepare.service failed'; fi
+done
+pids=()
+if unit_up enginex-sshd.service && [ -s "$C/data/enginex/authorized_keys" ]; then
+    # shellcheck disable=SC2046
+    in_root $(unit_exec enginex-sshd.service) > "$C/sshd.log" 2>&1 & pids+=($!)
+    if wait_for 10 ssh -q -i "$W/id" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes root@127.0.0.1 true; then
+        up ssh-login up
+    else
+        up ssh-login DOWN 'sshd does not accept the key'
+    fi
+else
+    up ssh-login DOWN 'unit not started'
+fi
+# shellcheck disable=SC2046
+in_root $(unit_exec stream-sync.service) > "$C/stream-sync.log" 2>&1 & pids+=($!)
+# shellcheck disable=SC2046
+in_root $(unit_exec enginex-deemixd.service) > "$C/deemixd.log" 2>&1 & pids+=($!)
+# shellcheck disable=SC2046
+in_root $(unit_exec rb-bridge.service) > "$C/rb-bridge.log" 2>&1 & rb=$! pids+=($!)
+in_root ENGINEX_BOOT_POLL_INTERVAL=1 /etc/enginex/engine-ui-guard watch > "$C/guardian.log" 2>&1 & guard=$! pids+=($!)
+if wait_for 25 curl -sf -o /dev/null http://127.0.0.1:8080/boot-status; then up web-console up; else up web-console DOWN "$(tail -1 "$C/stream-sync.log" | cut -c1-120)"; fi
+if wait_for 10 curl -sf -o /dev/null http://127.0.0.1:6595/healthz; then up deemixd up; else up deemixd DOWN "$(tail -1 "$C/deemixd.log" | cut -c1-120)"; fi
+sleep 3
+if kill -0 "$rb" 2> /dev/null; then up rb-bridge up; else up rb-bridge DOWN "$(tail -1 "$C/rb-bridge.log" | cut -c1-120)"; fi
+if kill -0 "$guard" 2> /dev/null; then up boot-watch up; else up boot-watch DOWN "$(tail -1 "$C/guardian.log" | cut -c1-120)"; fi
+if [ "$SCEN" = install ]; then
+    chroot "$R" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        HOME=/tmp/home QT_QPA_PLATFORM=offscreen LD_LIBRARY_PATH=/usr/qt/lib MALLOC_ARENA_MAX=1 \
+        ENGINEX_UI_HOOK=/etc/enginex/libengine-ui-hook.so /etc/enginex/engine-ui-guard launch /usr/Engine/Engine -d0 > "$C/engine.log" 2>&1 &
+    pids+=($!)
+    wait_for 60 bash -c 'test -s "$1/boot-ready" && cmp -s "$1/boot-token" "$1/boot-ready"' x "$C/data/enginex/ui" || echo 'engine did not report ready' >> "$W/measure.txt"
+    sleep 5
+    {
+        echo "qml-cache: $(du -sk "$C/data/enginex/ui/qml-cache" | cut -f1) KiB in $(find "$C/data/enginex/ui/qml-cache" -type f | wc -l) files"
+        echo "ui packs: $(du -sk "$C/data/enginex/ui/packs" "$C/data/enginex/ui/icons" | awk '{s += $1} END {print s}') KiB"
+        echo "bin: $(du -sk "$C/data/enginex/bin" | cut -f1) KiB"
+        echo "enginex dir: $(du -sk "$C/data/enginex" | cut -f1) KiB, whole /data: $(du -sk "$C/data" | cut -f1) KiB"
+    } >> "$W/measure.txt"
+fi
+up free-after "$(( $(free_bytes) / 1024 )) KiB"
+for p in "${pids[@]}"; do kill -TERM "$p" 2> /dev/null || :; done
+sleep 1
+for p in "${pids[@]}"; do kill -KILL "$p" 2> /dev/null || :; done
+sync
+
+# --- what the scenario leaves behind
+[ "$SCEN" = install ] && {
+    in_root SERVICE_RESULT=success /etc/enginex/engine-ui-guard stop > /dev/null 2>&1 || :
+    umount -R "$R" 2> /dev/null || umount -l "$R" || :
+    umount "$C/data" 2> /dev/null || umount -l "$C/data" || :
+    exit 0
+}
+# --- what must hold after the boot order: every scenario starts everything, with or without room
+check "$SCEN: prepare ends with success" test "$RC_prepare" = 0
+check "$SCEN: our target, our SSH unit and its key login, the web console, the downloader, the bridge and the boot watch are up" \
+    awk -F '\t' -v s="$SCEN" '$1 == s && $3 == "DOWN" { bad = 1 } END { exit bad }' "$W/up.tsv"
+lines=$(grep -c '^enginex-prepare: internal storage is full' "$C/prepare.log" || :)
+case $SCEN in
+    full*|upd*) check "$SCEN: one line says that internal storage is full (journal and start-up report)" test "$lines" = 1 ;;
+    *) check "$SCEN: no such line while the floor is met" test "$lines" = 0 ;;
+esac
+case $SCEN in
+    upd*)  # no room for the update: the installed programs and UI packs stay as they are, the suite runs from memory, said once
+        check "$SCEN: the installed suite and UI packs are untouched" bash -c 'cd "$1/data/enginex" && sha256sum -c --quiet "$1/installed.before" > /dev/null' x "$C"
+        check "$SCEN: the programs run from memory and that is said once" test "$(cat "$C"/*.log | grep -c 'enginex-suite-exec: no room on internal storage')" = 1
+        check "$SCEN: no temporary of the unpack is left on /data" bash -c '! ls "$1"/data/enginex/bin/enginex-suite.*.tmp 2> /dev/null | grep -q .' x "$C" ;;
+    rem-upd)
+        check "$SCEN: the room made was used: the suite and the UI packs of the image are installed" \
+            bash -c 'cd "$1/data/enginex" && [ "$(cat bin/enginex-suite.id)" = "$(cat "$2")" ] && [ -s ui/.pack-id ]' x "$C" "$C/suite.id" ;;
+esac
+engine_conf="$C/data/.config/jp07.user.settings/AIR Music Technology/Engine.conf"
+check "$SCEN: Engine.conf is never cut short (kept as it was, or rewritten whole)" \
+    bash -c 'f=$1; [ "$(wc -c < "$f")" -ge "$(cat "$2")" ] && grep -q "^\[TimeDateSettings\]" "$f" && grep -q "^TZEnvVar=" "$f"' x "$engine_conf" "$C/engine-conf.size"
+# The guard's `pre` adds the TIDAL entry to the DJ's sign-ins: whatever the disk did, the DJ's entry must still be there.
+check "$SCEN: the DJ's streaming sign-ins are still in StreamingAccounts.json after the guard's pre" \
+    python3 -I -c 'import json,sys; a=json.load(open(sys.argv[1])); sys.exit(0 if "dj-own-token" in a.get("Deezer", "") else 1)' "$C/data/StreamingAccounts.json"
+echo done > "$C/done"
