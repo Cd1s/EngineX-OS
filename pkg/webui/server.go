@@ -679,6 +679,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.tidal.ServeHTTP(w, r)
 		return
 	}
+	if lanOnly(r.URL.Path) && relayedFromOutside(r) {
+		http.NotFound(w, r) // a tunnel set up to reach this listener: its callers are not on the LAN
+		return
+	}
 	if r.Method != "GET" && r.Method != "HEAD" {
 		// Phone pages carry a one-time token instead of a cookie, and iOS web
 		// views send "Origin: null". The console cookie is SameSite=Strict, so a
