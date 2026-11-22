@@ -128,14 +128,22 @@ func SetCutForTest(f func(name string)) func() {
 // StagedWholeForTest reports whether tmp, a staged copy of dst, would be put back (#321 review R4).
 func StagedWholeForTest(tmp, dst string) bool { return stagedWhole(tmp, dst) }
 
-// InChildForTest runs the calling test in a process of its own and reports true when it did
-// (the caller returns). It is for a test that sets package variables of this package through
-// the hooks above, or reads what is process-wide: the bytes the process has read, the key
-// derivations it has made, the log's writer, its heap. In the child it returns false and the
-// body runs as it always did; the tests of other processes cannot see what it sets, so they
-// run side by side, each in its own process, instead of one after another in this one.
-// BRIDGE_TEST_INPROC=1 runs the body in this process, one test at a time, as before (to profile
-// or debug a test).
+// InChildForTest runs the calling test in a process of its own and reports true when it did (the
+// caller returns); in the child it returns false and the body runs as it always did.
+//
+// Why it exists. `go test -race ./pkg/bridge/...` took 18 minutes because the package's tests ran
+// one after another in one process. Many of them cannot share a process: they set a package
+// variable through the For-test hooks above (the large-export threshold, the read and mount
+// windows, the write-back cut), or they read what is process-wide (the bytes the process has
+// read, the key derivations it has made, the log's writer, its heap). Run in the same process,
+// two of them see each other's hooks. In a process each, the body, its hooks and its assertions
+// are unchanged and nothing else can see them, so these tests run side by side, each parent
+// being a parallel test that waits for its child. Tests that set and read nothing of the kind
+// call t.Parallel() directly.
+//
+// BRIDGE_TEST_INPROC=1 runs every test in this process, one at a time, as before this helper
+// (to profile a test, to debug it, or to collect coverage: the parent's -coverprofile does not see
+// what a child executes). The child's output is shown only when it fails; a skip is a skip.
 func InChildForTest(t *testing.T) bool {
 	t.Helper()
 	const env = "BRIDGE_TEST_CHILD"

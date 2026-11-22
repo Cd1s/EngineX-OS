@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
@@ -80,8 +79,6 @@ INSERT INTO playlist VALUES(1,0,'Issue272 Set',0,1,'');`); err != nil {
 	}
 
 	// Mount 2: Full in-place resume with MaxBridgeStateBytes cap.
-	// The caller's own budget: a slow or busy host must not turn the resume into a background job.
-	opts.Deadline = time.Now().Add(time.Hour)
 	r2, err := bridge.ConvertAtMount(ctx, root, opts, true)
 	if err != nil {
 		t.Fatalf("mount 2 full resume: %v", err)

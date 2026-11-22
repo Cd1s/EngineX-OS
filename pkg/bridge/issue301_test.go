@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -66,10 +67,29 @@ func finished(t *testing.T, root string) int {
 	return n
 }
 
+// warmSQLite does once in this process what a mount's first use of SQLite costs (the driver's
+// start-up, the first statements parsed, the first files opened), so that a test whose mount
+// window is a few hundred milliseconds does not spend it on a cold process. It sets no hook and
+// changes no time the product is given.
+var warmOnce sync.Once
+
+func warmSQLite(t *testing.T) {
+	t.Helper()
+	warmOnce.Do(func() {
+		_, root, skeleton := testlibrary.Create(t)
+		skeleton.Close()
+		testfixture.LargeExport(t, root, 2)
+		if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err != nil {
+			t.Fatalf("warm-up mount: %v", err)
+		}
+	})
+}
+
 func TestIssue301FirstImportPastTheMountWindowFinishesInTheBackground(t *testing.T) {
 	if bridge.InChildForTest(t) {
 		return
 	}
+	warmSQLite(t)
 	root, skeleton := issue301Stick(t, issue301Tracks)
 	live := filepath.Join(root, "Engine Library", "Database2", "m.db")
 	var uuid string
@@ -84,11 +104,9 @@ func TestIssue301FirstImportPastTheMountWindowFinishesInTheBackground(t *testing
 	before := fileSum(t, live)
 	ctx := context.Background()
 
-	// The mount's time runs out while the export is read. The window has to outlast what a
-	// mount spends before the read (the library's copy, a process's first use of SQLite), on
-	// a busy host and under -race too: the read is slow by a longer time still.
-	restoreRead := bridge.SlowExportReadForTest(3*time.Second, 8*time.Second)
-	restoreWindow := bridge.SetMountWindowForTest(2 * time.Second)
+	// The mount's time runs out while the export is read.
+	restoreRead := bridge.SlowExportReadForTest(300*time.Millisecond, time.Second)
+	restoreWindow := bridge.SetMountWindowForTest(200 * time.Millisecond)
 	r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false)
 	if err != nil || !r.Background {
 		t.Fatalf("first mount: %+v %v", r, err)
