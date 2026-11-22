@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"log"
 	"math"
 	"net/url"
 	"os"
@@ -523,10 +524,17 @@ type fastRow struct {
 	bpm, bpmA any
 }
 
-// fastRowEdits is mergeFast for track id's row, which a fast import left for export record t,
-// at its first full import. A row a full import has written (BridgeWritten or BridgeAnalysis:
-// one a fast fingerprint only sends to be read again) is importKeeps' to judge, not this.
-func fastRowEdits(ctx context.Context, q *stmtCache, id int64, t rekordbox.Track, perf Performance) (fastRow, error) {
+// fastRowEdits is mergeFast for track id's row, which a fast import left for export record t
+// (same) or for an earlier export of the track, at its first full import. A row a full import has
+// written (BridgeWritten or BridgeAnalysis: one a fast fingerprint only sends to be read again) is
+// importKeeps' to judge, not this.
+//
+// A row left for an earlier export (the stick re-exported while the row was fast) cannot be
+// judged: what that import wrote is not known (#328 review R1). Nothing the deck can change is
+// overwritten then: its rating, and in a row Engine loaded its grid with the Track's BPM, its cues
+// and loops; one log line names the track. A row Engine never loaded has nothing of the deck's
+// but its rating.
+func fastRowEdits(ctx context.Context, q *stmtCache, id int64, t rekordbox.Track, perf Performance, same bool) (fastRow, error) {
 	var r fastRow
 	var row deckRow
 	var imported bool
@@ -540,6 +548,22 @@ func fastRowEdits(ctx context.Context, q *stmtCache, id int64, t rekordbox.Track
 		}
 		return fastRow{}, e
 	}
-	r.m, r.rating = mergeFast(row, fastBaseOf(t), perf), row.rating
+	if r.rating = row.rating; same {
+		r.m = mergeFast(row, fastBaseOf(t), perf)
+		return r, nil
+	}
+	r.m.rating = row.rating.Valid
+	if !row.mark.Valid || row.mark.Int64 == 0 {
+		r.m.cues, r.m.loops = row.cues, row.loops
+		if row.active.Valid {
+			r.m.active = row.active.Int64
+		}
+		if row.beats != nil && (row.locked || !engineOwnGrid(row.beats)) {
+			r.m.beats, r.m.grid = row.beats, true // Engine's own analysis is not the deck's: rekordbox's grid
+		}
+	}
+	if r.m.deck() || row.rating.Valid && row.rating.Int64 != int64(t.Rating) {
+		log.Printf("rb-bridge: track %d changed in the export before its row was read in full: what the deck has of it stays", id)
+	}
 	return r, nil
 }

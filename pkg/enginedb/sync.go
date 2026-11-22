@@ -704,6 +704,19 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			if previous != hash && (previous == "" || strings.HasPrefix(previous, "fast:")) {
 				effectiveTracks[i] = t
 				args := []any{int(t.Duration + 0.5), int(t.BPM + 0.5), t.Year, enginePath, path.Base(rel), t.Bitrate, t.BPM, st.Size(), t.Title, t.Artist, t.Album, t.Genre, t.Comment, t.Label, t.Composer, t.Remixer, EngineKey(t.Key), t.Rating, strings.TrimPrefix(strings.ToLower(path.Ext(rel)), "."), int64(t.ID), id}
+				if strings.HasPrefix(previous, "fast:") {
+					// Re-exported while fast: the deck's rating, and its grid's BPM, stay (fastRowEdits).
+					deck, e := fastRowEdits(ctx, q, id, t, Performance{}, false)
+					if e != nil {
+						return result, e
+					}
+					if deck.m.grid {
+						args[1], args[6] = deck.bpm, deck.bpmA
+					}
+					if deck.m.rating {
+						args[17] = deck.rating
+					}
+				}
 				if _, e := q.ExecContext(ctx, `UPDATE Track SET length=?,bpm=?,year=?,path=?,filename=?,bitrate=?,bpmAnalyzed=?,fileBytes=?,title=?,artist=?,album=?,genre=?,comment=?,label=?,composer=?,remixer=?,key=?,rating=?,fileType=?,pdbImportKey=? WHERE id=?`, args...); e != nil {
 					return result, e
 				}
@@ -866,11 +879,11 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			artID = n
 		}
 		args := []any{int(t.Duration + 0.5), int(t.BPM + 0.5), t.Year, enginePath, path.Base(rel), t.Bitrate, t.BPM, artID, st.Size(), t.Title, t.Artist, t.Album, t.Genre, t.Comment, t.Label, t.Composer, t.Remixer, EngineKey(t.Key), t.Rating, strings.TrimPrefix(strings.ToLower(path.Ext(rel)), "."), perf.Complete, true, true, int64(t.ID)}
-		// The first full import of a row a fast import left for this record: what the DJ did on
-		// it meanwhile stays (fastedits.go). Only for this record: the rating it wrote is its.
+		// The first full import of a row a fast import left: what the DJ did on it meanwhile stays
+		// (fastedits.go); for an earlier record of the track, all the deck has of it.
 		var deck fastRow
-		if existing && !fast && previous == "fast:"+original.RecordHash {
-			if deck, e = fastRowEdits(ctx, q, id, original, perf); e != nil {
+		if existing && !fast && strings.HasPrefix(previous, "fast:") {
+			if deck, e = fastRowEdits(ctx, q, id, original, perf, previous == "fast:"+original.RecordHash); e != nil {
 				return result, e
 			}
 			if deck.m.grid {

@@ -34,6 +34,21 @@ const (
 
 func isUpdateStage(stage string) bool { return readMark(stage, kindName) == "update" }
 
+// fastBaseMissing reports a snapshot without the note of what the fast import left in the
+// library's fast rows (enginedb.FastBaseFile) while the library has fast rows: a stage of #253's
+// or 5.3.0.5-r1's build, or one whose note was lost. Neither published nor continued, it starts
+// again from a new snapshot: the DJ's edits made on those rows after it could not be told from
+// Engine's, and the publish would put rekordbox's rows over them (#328 review R1).
+func fastBaseMissing(dir, stage string) bool {
+	if _, err := os.Stat(filepath.Join(stage, baseCountsName)); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(stage, enginedb.FastBaseFile)); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	return hasFastTracks(dir)
+}
+
 // cutPoint, when set, is called between two writes of an import, an update or a publish that a
 // power cut or the hook's kill can separate (#253 review): a test copies the volume there to see
 // what the next mount makes of it. Nil outside tests.
@@ -419,6 +434,15 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 		return enginedb.Result{}, err
 	}
 	shown := newJobProgress(progress, len(l.Tracks))
+	if fastBaseMissing(dir, stage) {
+		// The passes already done are lost, once: the snapshot is taken again.
+		log.Printf("rb-bridge: the update's copy of the library has no note of its fast tracks; it starts again from a new copy")
+		for _, name := range []string{resumeName, baseCountsName} {
+			if err := os.Remove(filepath.Join(stage, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return enginedb.Result{}, err
+			}
+		}
+	}
 	if readMark(stage, quickName) == stamp {
 		return quickInStage(ctx, dir, stage, stamp, r, l, stagedOnly, shown.report)
 	}
@@ -735,6 +759,10 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 	}
 	stage := filepath.Join(dir, importStageName)
 	if liveIdentity(filepath.Join(dir, "m.db")) != readMark(stage, baseName) {
+		if fastBaseMissing(dir, stage) {
+			log.Printf("rb-bridge: update not published: its copy of the library has no note of its fast tracks; it starts again from a new copy")
+			return enginedb.Result{Background: true}, startUpdate(stage, readMark(stage, stampName))
+		}
 		var base enginedb.BaseCounts
 		if err := json.Unmarshal([]byte(readMark(stage, baseCountsName)), &base); err != nil {
 			return enginedb.Result{}, fmt.Errorf("update stage without its snapshot counts: %w", err)
