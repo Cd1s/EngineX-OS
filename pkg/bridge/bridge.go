@@ -879,6 +879,16 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		if candidates, candidateErr := exportCandidates(r, mount); candidateErr == nil {
 			markComplete = true
 			for _, candidate := range candidates {
+				unreadable := false
+				for _, suffix := range []string{"-wal", "-journal"} {
+					if sidecar, sidecarErr := os.Stat(candidate.full + suffix); sidecarErr == nil && sidecar.Size() > 0 {
+						unreadable = true
+						break
+					}
+				}
+				if unreadable {
+					continue
+				}
 				if !readLibrariesContains(readLibrariesMarkValue, candidate.rel) {
 					markComplete = false
 					break

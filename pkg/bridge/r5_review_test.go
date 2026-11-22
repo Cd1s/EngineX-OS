@@ -102,6 +102,40 @@ func TestIssue327ReadableLibraryReturningIsImportedWithoutExportChange(t *testin
 	}
 }
 
+func TestIssue327PersistentUnreadableLibraryKeepsFastBypass(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	for _, name := range []string{"one.wav", "two.wav", "three.wav"} {
+		testfixture.Write(t, root, "MUSIC/"+name, testfixture.WAV(true))
+	}
+	one := filepath.Join(root, "PIONEER/rekordbox/exportLibrary.db")
+	copyEncryptedOneLibraryFixture(t, one)
+	if err := os.WriteFile(one+"-wal", []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pdb := filepath.Join(root, "PIONEER/rekordbox/export.pdb")
+	when := time.Unix(1_730_000_000, 0)
+	if err := os.Chtimes(one, when, when); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(pdb, when.Add(30*time.Second), when.Add(30*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || res.Added == 0 {
+		t.Fatalf("initial Device Library import: %+v %v", res, err)
+	}
+	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !res.Bypassed {
+		t.Fatalf("persistent unreadable library lost the fast bypass: %+v %v", res, err)
+	}
+	if err := os.Remove(one + "-wal"); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || res.Bypassed {
+		t.Fatalf("library recovery was bypassed: %+v %v", res, err)
+	}
+}
+
 func TestIssue327DuplicateFoldedCandidatesKeepBothEngineRows(t *testing.T) {
 	root := t.TempDir()
 	testfixture.Export(t, root)
