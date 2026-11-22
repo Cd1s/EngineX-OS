@@ -534,7 +534,7 @@ class FilesystemTests(unittest.TestCase):
                     self._file(anlz/n/'ANLZ0000.DAT', 1)
                 pdb.parent.mkdir(parents=True)
                 if case == 'malformed':
-                    self._export(pdb, b'this is not a rekordbox export\n')
+                    self._export(pdb, b'this is not a rekordbox export\n', stamp=False)
                 elif case == 'unstamped':
                     self._export(pdb, toy, stamp=False)
                 elif case == 'stale':

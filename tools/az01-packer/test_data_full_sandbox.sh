@@ -378,7 +378,7 @@ if [ "$SCEN" = clean ]; then
     for sub in malformed unstamped stale nonames absent empty whole; do
         analysis P001 P002; rm -f -- "$PDB" "$(dirname "$PDB")/.enginex-generated"
         case $sub in
-            malformed) printf 'this is not a rekordbox export\n' > "$PDB"; export_stamp "$PDB" ;;
+            malformed) printf 'this is not a rekordbox export\n' > "$PDB" ;;
             unstamped) toy_export ;;
             stale) toy_export; export_stamp "$PDB"; printf 'x' >> "$PDB" ;;
             nonames) printf 'PMAI \x00 no analysis paths in here \x00 end\n' > "$PDB"; export_stamp "$PDB" ;;
