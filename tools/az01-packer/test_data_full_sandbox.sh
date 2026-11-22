@@ -1,5 +1,5 @@
 #!/bin/bash
-# A deck whose internal storage (/data) is full still starts everything (#5306). Real-image test, root on an ARM
+# A deck whose internal storage (/data) is full still starts everything. Real-image test, root on an ARM
 # build host, never on a deck. Start it under the host's heavy lock, exactly like this:
 #   flock /var/lock/enginex-heavy.lock bash tools/az01-packer/test_data_full_sandbox.sh <candidate JP07 image> <new work directory>
 # The work directory must not exist. Everything runs in private mount, network and pid namespaces; the "internal

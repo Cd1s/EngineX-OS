@@ -487,7 +487,7 @@ for f in "$legacy_suite" "$legacy_suite.id" "$legacy_suite.123.tmp" "$legacy_dee
 done
 [[ -x $suite_dir/enginex-suite && -e $suite_dir/drmgrab ]] || fail 'old-name cleanup removed the new suite or a foreign file'
 ok 'suite unpack removes the binaries an older release unpacked under its old name (#234)'
-# #5306: /data takes no more data. The programs of this image run from memory, what is installed stays as it was,
+# /data takes no more data. The programs of this image run from memory, what is installed stays as it was,
 # and that is said once. The room a unit cannot get is simulated by a gzip that fails when it is to write into the
 # installed directory (ENOSPC for that directory only: the copy in memory is made on the same host disk).
 ram_dir=$TMP/suite-ram suite_full=$TMP/suite-full
@@ -516,7 +516,7 @@ wait
     fail 'three simultaneous starts with no room on /data must all run, and say it once'
 [[ -z $(ls "$suite_dir"/enginex-suite.*.tmp 2> /dev/null) ]] || fail 'simultaneous failed unpacks left a temporary behind'
 [[ $(run_suite) == 'image-4 x' && -x $suite_dir/enginex-suite && $(cat "$suite_dir/enginex-suite.id") != "$installed_id" ]] || fail 'with room again the suite is installed as before'
-ok 'a suite that cannot be unpacked for want of room runs from memory, the installed one stays, said once (#5306)'
+ok 'a suite that cannot be unpacked for want of room runs from memory, the installed one stays, said once'
 
 fixture
 expect_fail env TARGET_CONFIG= TARGET_SYMVERS= bash "$ROOT/kernel-modules/build_modules.sh" modules
@@ -692,7 +692,7 @@ SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre
 rm -f "$ENGINEX_UI_DIR"/*; SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre   # this boot's own clean restart
 [[ ! -e $ENGINEX_UI_DIR/safe-mode && $(cat "$ENGINEX_UI_DIR/boot-count") == 1 ]] || fail 'a clean restart after pre must still reset the state'
 ok 'a second-generation boot keeps the last boot crash and power-cut evidence across the stock Engine handover (BH-F52-4)'
-# #5306: /data refuses the guard's data writes (a full disk still lets an empty file be made, so a crash is still marked).
+# /data refuses the guard's data writes (a full disk still lets an empty file be made, so a crash is still marked).
 # The failure counter and the safe-mode marker are kept in the run-time directory for this boot, with the same meaning.
 # The refusal is simulated by an mv that fails for files in the guard's directory (the guard writes through a temporary).
 guard_full=$TMP/guard-full guard_run=$TMP/guard-run
@@ -715,7 +715,7 @@ SERVICE_RESULT=success gfull stop
 rm -rf "$ENGINEX_UI_DIR" "$guard_run"
 for result in signal core-dump exit-code; do SERVICE_RESULT=$result sh "$GUARD" stop; sh "$GUARD" pre; done
 [[ -e $ENGINEX_UI_DIR/safe-mode && ! -e $guard_run/safe-mode ]] || fail 'with room the safe-mode marker stays where it always was'
-ok 'the guard keeps its failure counter and safe-mode marker in the run-time directory when /data takes no more data (#5306)'
+ok 'the guard keeps its failure counter and safe-mode marker in the run-time directory when /data takes no more data'
 # The DJ's sign-ins in StreamingAccounts.json are replaced only by a whole copy. A write that cannot be finished is simulated by
 # a file size limit (EFBIG stands in for ENOSPC): 0 leaves an empty copy, 3 KiB a copy cut after 3072 bytes. Both branches of the
 # guard: no TIDAL entry (add) and a TIDAL entry without a token (retoken). BusyBox awk says 0 for output it could not write; an

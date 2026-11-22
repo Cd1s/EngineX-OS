@@ -211,7 +211,7 @@ func TestBootReportUnsupportedRenameKeepsUserFiles(t *testing.T) {
 	}
 }
 
-// #5306: when internal storage is full, the prepare step says so in one line. That line is in the journal of
+// When internal storage is full, the prepare step says so in one line. That line is in the journal of
 // enginex-prepare.service, which the start-up report carries; the report's redaction must keep it.
 func TestBootReportKeepsThePrepareStepsFullStorageLine(t *testing.T) {
 	source, err := os.ReadFile("../../tools/az01-packer/az01_packer.py")

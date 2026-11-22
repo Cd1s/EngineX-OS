@@ -534,7 +534,7 @@ MIGRATE = LEGACY_SHELL + '\nmigrate_data\n'
 PREPARE = b'''#!/bin/sh
 set -eu
 umask 077
-# Internal storage can be full (#5306). One free-space reading decides: below the floor (the UI packs 18 MiB and the
+# Internal storage can be full. One free-space reading decides: below the floor (the UI packs 18 MiB and the
 # suite 25 MiB that a first start after an update unpacks, the 11 MiB of QML byte-code Engine builds again, 16 MiB
 # that ext4 keeps for itself, the rest in KiB), what our own programs make again by themselves goes first, oldest
 # first, until the floor is met.
@@ -815,7 +815,7 @@ restore_timezone || { echo "enginex-prepare: timezone not restored" >&2; room ||
 '''
 # Public half of the key public images up to 5.0.4.1 shipped (#46). Not a secret.
 RETIRED_RELEASE_KEY = b'AAAAC3NzaC1lZDI1NTE5AAAAIC6p0NjBPb0vPCGB3XloshlMtXoYgVc6ig+JQAYnVUSz'
-# What a first start after an update needs on /data, in KiB (#5306): the UI packs 18,016 KiB and the suite 24,972 KiB it
+# What a first start after an update needs on /data, in KiB: the UI packs 18,016 KiB and the suite 24,972 KiB it
 # unpacks, the 10,816 KiB of QML byte-code Engine builds again (all measured in the sandbox on the SC5000 image), about
 # 1 MiB of reports and state, and the 16 MiB ext4 keeps for itself that statfs still counts as free: 70 MiB, taken as 72.
 DATA_FLOOR_KIB = 72 * 1024
@@ -845,7 +845,7 @@ if [ -d "$upper" ]; then
 fi
 mkdir -p /data/enginex
 chmod 700 /data/enginex
-# No room for the marker (#5306): the removals above are made again, harmlessly, at the next boot.
+# No room for the marker: the removals above are made again, harmlessly, at the next boot.
 { printf '%s\n' "$epoch" > "$marker.tmp" && mv "$marker.tmp" "$marker"; } ||
     { rm -f "$marker.tmp"; echo "enginex-etc-reset: epoch marker not written; internal storage may be full" >&2; }
 '''

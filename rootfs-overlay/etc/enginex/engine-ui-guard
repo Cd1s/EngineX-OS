@@ -26,7 +26,7 @@ case $failures in ''|*[!0-9]*|0) failures=3 ;; esac
 poll=${ENGINEX_BOOT_POLL_INTERVAL:-1}
 case $poll in .1|0.1|.5|0.5|1|2|5) ;; *) poll=1 ;; esac
 # When /data takes no more data, the failure counter (and its window) and the safe-mode marker are kept in the
-# run-time directory for the rest of this boot, with the same meaning (#5306). That copy is the newer one: it
+# run-time directory for the rest of this boot, with the same meaning. That copy is the newer one: it
 # exists only while /data refuses the write, and a write that works again drops it.
 run_ui=${ENGINEX_GUARD_RUN_DIR:-/run/enginex/guard}
 record() {

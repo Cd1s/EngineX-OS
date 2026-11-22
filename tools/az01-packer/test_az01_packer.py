@@ -341,7 +341,7 @@ class FilesystemTests(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0)
         self.assertEqual(sentinel.read_text(), 'keep')
 
-    # --- #5306: a full /data must not stop prepare ------------------------------------------------------------
+    # --- a full /data must not stop prepare ------------------------------------------------------------
     def _prepare_lab(self, name):
         """A lab /data, a seed directory and the script with the deck's paths relocated into the lab (as above)."""
         seed, data, version = self.root/(name+'-seed'), self.root/(name+'-data'), self.root/(name+'-version')
@@ -500,7 +500,7 @@ class FilesystemTests(unittest.TestCase):
         self.assertIn('Europe/Berlin', conf.read_text())
 
     def test_prepare_keeps_engine_conf_when_awk_cuts_its_output_and_still_says_0(self):
-        # #5306: BusyBox awk reported 0 for output it could not write; the empty copy then replaced the DJ's Engine.conf
+        # BusyBox awk reported 0 for output it could not write; the empty copy then replaced the DJ's Engine.conf
         seed, data, script = self._prepare_lab('awk')
         conf = data/'.config/jp07.user.settings/AIR Music Technology/Engine.conf'
         conf.parent.mkdir(parents=True)
@@ -705,7 +705,7 @@ class FilesystemTests(unittest.TestCase):
         self.assertEqual((sentinel/'hosts').read_text(), 'keep')
 
     def test_etc_reset_on_a_disk_that_takes_no_data_still_ends_with_success(self):
-        # #5306: the removals are made, the epoch marker cannot be written (EFBIG stands in for ENOSPC), the next boot repeats them
+        # The removals are made, the epoch marker cannot be written (EFBIG stands in for ENOSPC), the next boot repeats them
         data = self.root/'data'
         upper = data/'system/etc/overlay'
         (upper/'hosts').parent.mkdir(parents=True)

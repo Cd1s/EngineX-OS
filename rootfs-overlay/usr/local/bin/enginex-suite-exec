@@ -29,7 +29,7 @@ ID=$(sha256sum < "$ARCHIVE" | cut -d' ' -f1)
 stale() { [ ! -x "$BIN" ] || [ "$(cat "$BIN.id" 2>/dev/null)" != "$ID" ]; }
 # unpack <dir> [say]: put the archive's suite into <dir> under its lock, or fail without touching what is installed
 # there (no lock, no room): the temporary is removed, the old binary and its id stay. When /data refuses, the marker in
-# memory tells every later start of this boot not to try again (#5306); /tmp is memory, so the next boot tries /data.
+# memory tells every later start of this boot not to try again; /tmp is memory, so the next boot tries /data.
 no_room=$RAM_DIR/.no-room
 unpack() (
     exec 9>"$1/.unpack.lock" || exit 1
