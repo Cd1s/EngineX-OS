@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"golang.org/x/text/unicode/norm"
 
@@ -347,17 +348,85 @@ func TestHealMountDataOnlyStopsAtContextDeadline(t *testing.T) {
 	if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
 		t.Fatal(err)
 	}
-	if infoID != 99 {
-		t.Fatalf("base heal ran while finishing paths, Information.id=%d", infoID)
+	if infoID != 1 {
+		t.Fatalf("fast path completion did not run base heal, Information.id=%d", infoID)
 	}
-	got, err = HealMountDataOnly(root, 0)
-	if err != nil || !got.Healthy {
-		t.Fatalf("completion insert failed to run base heal: %+v %v", got, err)
+}
+
+func TestHealMountDataOnlyFastPathStillRunsBaseHeal(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	for i := 1; i <= 3; i++ {
+		old := "../Music/Cafe\u0301/track-" + strconv.Itoa(i) + ".mp3"
+		new := "../Music/Café/track-" + strconv.Itoa(i) + ".mp3"
+		actual := filepath.Join(root, "Engine Library", filepath.FromSlash(new))
+		if err := os.MkdirAll(filepath.Dir(actual), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(actual, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes) VALUES(?,?,?,1)`, i, old, filepath.Base(old)); err != nil {
+			t.Fatal(err)
+		}
 	}
+	if _, err := db.Exec(`UPDATE Information SET id=99`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	got, err := HealMountDataOnly(root, 0)
+	if err != nil || !got.Healthy || got.PathsNormalized != 3 {
+		t.Fatalf("fast path/base heal failed: %+v %v", got, err)
+	}
+	check, err := sql.Open("sqlite", filepath.Join(root, "Engine Library", "Database2", "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var infoID int
 	if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
 		t.Fatal(err)
 	}
 	if infoID != 1 {
-		t.Fatalf("completion insert did not run base heal, Information.id=%d", infoID)
+		t.Fatalf("base heal was skipped on a fast path pass, Information.id=%d", infoID)
+	}
+}
+
+func TestHealMountDataOnlySlowPathDefersBaseHeal(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	for i := 1; i <= 64; i++ {
+		old := "../Music/Cafe\u0301/track-" + strconv.Itoa(i) + ".mp3"
+		new := "../Music/Café/track-" + strconv.Itoa(i) + ".mp3"
+		actual := filepath.Join(root, "Engine Library", filepath.FromSlash(new))
+		if err := os.MkdirAll(filepath.Dir(actual), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(actual, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes) VALUES(?,?,?,1)`, i, old, filepath.Base(old)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE Information SET id=99`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	normalizeTrackPathBatch = func() { time.Sleep(time.Second) }
+	defer func() { normalizeTrackPathBatch = nil }()
+	got, err := HealMountDataOnly(root, 0)
+	if err != nil || !got.Healthy || got.PathsNormalized != 64 {
+		t.Fatalf("slow path pass failed: %+v %v", got, err)
+	}
+	check, err := sql.Open("sqlite", filepath.Join(root, "Engine Library", "Database2", "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var infoID int
+	if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
+		t.Fatal(err)
+	}
+	if infoID != 99 {
+		t.Fatalf("slow path pass unexpectedly ran base heal, Information.id=%d", infoID)
 	}
 }

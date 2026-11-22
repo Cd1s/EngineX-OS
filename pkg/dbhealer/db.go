@@ -260,6 +260,7 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 	}
 	fixed := r.ReserveFixed
 	pathsBefore := r.PathsNormalized
+	pathStart := time.Now()
 	remaining, err := normalizeTrackPaths(ctx, db, mount, &r)
 	if err != nil {
 		// A path-pass database error means the library may be damaged. Run the
@@ -275,7 +276,7 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		}
 		return r, err
 	}
-	if ctx.Err() != nil || r.PathsNormalized != pathsBefore {
+	if ctx.Err() != nil || (r.PathsNormalized != pathsBefore && time.Since(pathStart) >= time.Second) {
 		r.Healthy = true
 		closeErr := db.Close()
 		r.Mount = mount
