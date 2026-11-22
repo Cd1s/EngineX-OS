@@ -2,10 +2,12 @@ package webui
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +21,35 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
+
+type omniPlaylistProvider struct {
+	provider string
+	name     string
+}
+
+func (p omniPlaylistProvider) Playlists(context.Context) ([]providers.Playlist, error) {
+	id := "own"
+	if p.provider == "soundcloud" {
+		id = "likes"
+	} else if p.provider == "spotify" {
+		id = "liked"
+	}
+	return []providers.Playlist{{ID: id, Title: p.name, Count: 1}}, nil
+}
+
+func (p omniPlaylistProvider) Tracks(context.Context, string) ([]providers.Track, error) {
+	return []providers.Track{{ID: p.provider + "-track", Title: p.name + " track", Provider: p.provider}}, nil
+}
+
+type omniFailingDeezer struct{}
+
+func (omniFailingDeezer) Playlists(context.Context) ([]providers.Playlist, error) {
+	return nil, fmt.Errorf("deezer: set a public user ID or open a playlist ID")
+}
+
+func (omniFailingDeezer) Tracks(context.Context, string) ([]providers.Track, error) {
+	return nil, fmt.Errorf("deezer: set a public user ID or open a playlist ID")
+}
 
 type omniTrack struct {
 	ID    int64  `json:"id"`
@@ -190,6 +221,121 @@ func TestOmniSourceOtherScopesKeepOtherServicePlaylists(t *testing.T) {
 	tidalGet(t, base, "/v1/playlists/"+friendUUID+"/tracks", 200, &tracks)
 	if got, _ := titles(t, tracks.Items); len(got) != 1 || got[0] != "Song" {
 		t.Fatalf("secondary service tracks: %v", got)
+	}
+}
+
+func carrierProvider(t *testing.T, scope string) providers.Provider {
+	t.Helper()
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if scope == "soundcloud" {
+			switch r.URL.Path {
+			case "/me/playlists", "/me/likes/playlists":
+				fmt.Fprint(w, `{"collection":[{"id":101,"title":"Own","track_count":1}]}`)
+			case "/me/likes/tracks", "/playlists/101/tracks":
+				fmt.Fprint(w, `{"collection":[{"id":201,"title":"Own Track","user":{"username":"Artist"},"duration":8000}]}`)
+			default:
+				http.NotFound(w, r)
+			}
+			return
+		}
+		switch r.URL.Path {
+		case "/me/tracks":
+			fmt.Fprint(w, `{"items":[{"track":{"id":"liked-track","name":"Own Track","artists":[{"name":"Artist"}],"duration_ms":8000,"album":{"name":"Album"}}}],"next":null,"total":1}`)
+		case "/me/playlists":
+			fmt.Fprint(w, `{"items":[{"id":"own","name":"Own","tracks":{"total":1}}],"next":null,"total":1}`)
+		case "/playlists/own/items":
+			fmt.Fprint(w, `{"items":[{"track":{"id":"own-track","name":"Own Track","artists":[{"name":"Artist"}],"duration_ms":8000,"album":{"name":"Album"}}}],"next":null,"total":1}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(backend.Close)
+	if scope == "soundcloud" {
+		return &providers.SoundCloud{BaseURL: backend.URL, ClientID: "client", Secret: "secret", Token: "token", HTTP: backend.Client()}
+	}
+	return &providers.Spotify{BaseURL: backend.URL, Token: providers.Token{AccessToken: "token"}, HTTP: backend.Client()}
+}
+
+func TestOmniSourceCarrierOpenSequence(t *testing.T) {
+	_, root, _ := omniDrive(t)
+	nasBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/rest/getPlaylists.view" {
+			fmt.Fprint(w, `{"subsonic-response":{"status":"ok","version":"1.16.1","playlists":{"playlist":[{"id":"nas-list","name":"NAS List","songCount":1}]}}}`)
+			return
+		}
+		if r.URL.Path == "/rest/getPlaylist.view" {
+			fmt.Fprint(w, `{"subsonic-response":{"status":"ok","version":"1.16.1","playlist":{"id":"nas-list","name":"NAS List","songCount":1,"entry":[{"id":"nas-track","title":"NAS track","artist":"NAS","suffix":"mp3","duration":8}]}}}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer nasBackend.Close()
+
+	for _, scope := range []string{"soundcloud", "spotify"} {
+		for _, omni := range []bool{false, true} {
+			t.Run(scope+fmt.Sprintf("/omni=%t", omni), func(t *testing.T) {
+				s, base := omniServerScope(t, root, omni, scope)
+				if err := providers.SaveJSON(s.nasConfigPath(), providers.NASConfig{Protocol: "subsonic", URL: nasBackend.URL, Enabled: true}); err != nil {
+					t.Fatal(err)
+				}
+				s.mu.Lock()
+				s.sessions["own"] = &Session{ID: "own", Provider: scope, Ready: true, p: carrierProvider(t, scope), expires: time.Now().Add(time.Hour)}
+				merged := map[string]string{"soundcloud": "spotify", "spotify": "soundcloud"}[scope]
+				s.sessions["merged"] = &Session{ID: "merged", Provider: merged, Ready: true, p: omniPlaylistProvider{provider: merged, name: "Merged"}, expires: time.Now().Add(time.Hour)}
+				s.sessions["broken-deezer"] = &Session{ID: "broken-deezer", Provider: "deezer", Ready: true, p: omniFailingDeezer{}, expires: time.Now().Add(time.Hour)}
+				s.mu.Unlock()
+
+				if code, _ := uiPost(t, base, "scope="+scope); code != http.StatusOK {
+					t.Fatalf("carrier open status=%d", code)
+				}
+				var first, second tidalList
+				tidalGet(t, base, "/v1/users/1/playlists?limit=10&offset=0", 200, &first)
+				tidalGet(t, base, "/v1/users/1/playlists?limit=10&offset=10", 200, &second)
+				if len(first.Items) == 0 {
+					t.Fatalf("carrier first listing empty, second page has %d", len(second.Items))
+				}
+				if !omni {
+					var own tidalPlaylist
+					for _, raw := range first.Items {
+						json.Unmarshal(raw, &own)
+						if own.Title == "Own" {
+							var tracks tidalList
+							tidalGet(t, base, "/v1/playlists/"+own.UUID+"/tracks", 200, &tracks)
+							tidalGet(t, base, "/v1/playlists/"+own.UUID+"/items?limit=10&offset=0", 200, &tracks)
+							if len(tracks.Items) != 1 {
+								t.Fatalf("off own tracks=%d", len(tracks.Items))
+							}
+							t.Logf("Own: %d tracks", len(tracks.Items))
+							break
+						}
+					}
+					return
+				}
+				want := map[string]int{"Own": 1, "[" + map[string]string{"soundcloud": "Spotify", "spotify": "SoundCloud"}[scope] + "] Merged": 1, "[USB: " + filepath.Base(root) + "] Club": 2, "[NAS] NAS List": 1}
+				for title, count := range want {
+					var id string
+					for _, raw := range first.Items {
+						var p tidalPlaylist
+						json.Unmarshal(raw, &p)
+						if p.Title == title {
+							id = p.UUID
+						}
+					}
+					if id == "" {
+						t.Fatalf("carrier listing missing %q", title)
+					}
+					var tracks tidalList
+					tidalGet(t, base, "/v1/playlists/"+id+"/tracks", 200, &tracks)
+					tidalGet(t, base, "/v1/playlists/"+id+"/items?limit=10&offset=0", 200, &tracks)
+					if len(tracks.Items) != count {
+						t.Fatalf("carrier open %q tracks=%d want=%d", title, len(tracks.Items), count)
+					}
+					t.Logf("%s: %d tracks", title, len(tracks.Items))
+				}
+			})
+		}
 	}
 }
 

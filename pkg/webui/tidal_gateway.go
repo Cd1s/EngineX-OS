@@ -1204,10 +1204,50 @@ func (g *tidalGateway) playlist(w http.ResponseWriter, r *http.Request) {
 	}
 	ref, ok := g.list(id)
 	if !ok {
-		fail(w, 404, errors.New("playlist not found"))
+		err := errors.New("playlist not found")
+		g.logPlaylistOpenFailure(r, http.StatusNotFound, id, nil, err)
+		fail(w, http.StatusNotFound, err)
 		return
 	}
 	respond(w, g.refJSON(id, ref))
+}
+
+func playlistOpenSession(ref *playlistRef) string {
+	if ref == nil || ref.session == "" {
+		return "none"
+	}
+	if ref.guest {
+		return "guest"
+	}
+	return "owner"
+}
+
+func playlistOpenSourceID(ref *playlistRef) string {
+	if ref == nil {
+		return "unresolved"
+	}
+	id := ref.list.ID
+	if ref.provider != localProvider {
+		return id
+	}
+	parts := strings.Split(id, "\x00")
+	if len(parts) == 1 {
+		return "local"
+	}
+	switch parts[0] {
+	case "nas", "mount", "djay":
+		return parts[0] + ":" + parts[len(parts)-1]
+	default:
+		return "usb:" + parts[len(parts)-1]
+	}
+}
+
+func (g *tidalGateway) logPlaylistOpenFailure(r *http.Request, status int, id string, ref *playlistRef, err error) {
+	provider := "unresolved"
+	if ref != nil {
+		provider = ref.provider
+	}
+	log.Printf("stream-sync: playlist open failed route=%s status=%d scope=%s playlist=%s provider=%s session=%s source_id=%s error=%v", r.URL.Path, status, g.s.scope(), id, provider, playlistOpenSession(ref), playlistOpenSourceID(ref), err)
 }
 func (g *tidalGateway) trackJSON(id int64, t providers.Track) map[string]any {
 	// Engine shows the BPM it is given for the track and builds its grid on it. A service's
@@ -1486,7 +1526,9 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 	}
 	ref, ok := g.list(id)
 	if !ok {
-		fail(w, 404, errors.New("playlist not found"))
+		err := errors.New("playlist not found")
+		g.logPlaylistOpenFailure(r, http.StatusNotFound, id, nil, err)
+		fail(w, http.StatusNotFound, err)
 		return
 	}
 	if ref.provider == listNoticeProvider {
@@ -1525,7 +1567,8 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 	if ref.provider == localProvider {
 		refs, err := g.s.driveListTracks(r.Context(), ref.list.ID)
 		if err != nil {
-			fail(w, 404, err)
+			g.logPlaylistOpenFailure(r, http.StatusNotFound, id, &ref, err)
+			fail(w, http.StatusNotFound, err)
 			return
 		}
 		localTracks := make([]providers.Track, len(refs))
@@ -1547,7 +1590,9 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 	if ref.session == "" && ref.provider == "soundcloud" {
 		sc := g.s.ownerSoundCloud()
 		if sc == nil {
-			fail(w, 404, errors.New("soundcloud: not connected"))
+			err := errors.New("soundcloud: not connected")
+			g.logPlaylistOpenFailure(r, http.StatusNotFound, id, &ref, err)
+			fail(w, http.StatusNotFound, err)
 			return
 		}
 		p = sc
@@ -1561,7 +1606,9 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if v == nil {
-			fail(w, 404, errors.New("login expired; sign in again at "+lanHost()+":8080"))
+			err := errors.New("login expired; sign in again at " + lanHost() + ":8080")
+			g.logPlaylistOpenFailure(r, http.StatusNotFound, id, &ref, err)
+			fail(w, http.StatusNotFound, err)
 			return
 		}
 		p, guest, session = v.p, v.Guest, v.ID
@@ -1572,11 +1619,14 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errBrowseTooLarge) {
 			status = 400
 		}
+		g.logPlaylistOpenFailure(r, status, id, &ref, err)
 		fail(w, status, err)
 		return
 	}
 	if len(tracks) > maxPlaylistTracks {
-		fail(w, 400, errors.New("playlist too large"))
+		err := errors.New("playlist too large")
+		g.logPlaylistOpenFailure(r, http.StatusBadRequest, id, &ref, err)
+		fail(w, http.StatusBadRequest, err)
 		return
 	}
 	g.s.cfg.BPM.Enrich(r.Context(), tracks)
