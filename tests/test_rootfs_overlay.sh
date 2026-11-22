@@ -716,14 +716,31 @@ rm -rf "$ENGINEX_UI_DIR" "$guard_run"
 for result in signal core-dump exit-code; do SERVICE_RESULT=$result sh "$GUARD" stop; sh "$GUARD" pre; done
 [[ -e $ENGINEX_UI_DIR/safe-mode && ! -e $guard_run/safe-mode ]] || fail 'with room the safe-mode marker stays where it always was'
 ok 'the guard keeps its failure counter and safe-mode marker in the run-time directory when /data takes no more data (#5306)'
-# #5306 (PM-approved): when the disk takes no data the guard keeps the DJ's sign-ins as they are. Its temporary copy of
-# StreamingAccounts.json cannot be written (EFBIG stands in for ENOSPC; awk then leaves an empty copy and says 0), and the
-# empty copy must not replace the file.
-rm -rf "$ENGINEX_UI_DIR"; printf '{\n    "Deezer": "{\\"accessToken\\":\\"dj-own-token\\"}"\n}\n' > "$ENGINEX_STREAMING_ACCOUNTS"
-cp "$ENGINEX_STREAMING_ACCOUNTS" "$TMP/accounts.seed"
-( trap '' XFSZ; ulimit -f 0; exec sh "$GUARD" pre ) > /dev/null 2>&1 || :
-cmp -s "$TMP/accounts.seed" "$ENGINEX_STREAMING_ACCOUNTS" || fail 'with no room for its temporary copy the guard must keep StreamingAccounts.json as it is'
-ok 'the guard keeps the DJ sign-ins as they are when its temporary copy cannot be written (#5306)'
+# The DJ's sign-ins in StreamingAccounts.json are replaced only by a whole copy. A write that cannot be finished is simulated by
+# a file size limit (EFBIG stands in for ENOSPC): 0 leaves an empty copy, 3 KiB a copy cut after 3072 bytes. Both branches of the
+# guard: no TIDAL entry (add) and a TIDAL entry without a token (retoken). BusyBox awk says 0 for output it could not write; an
+# awk that does the same stands in for it. The DJ's own entry is the last one, so a cut copy has lost it.
+acct_seed() { # <add|retoken>
+    {
+        printf '{\n'
+        [[ $1 != retoken ]] || printf '    "TIDAL": "{\\"provider\\":\\"TIDAL\\",\\"providerType\\":\\"TIDAL\\"}",\n'
+        for i in $(seq 1 18); do printf '    "Filler%s": "{\\"note\\":\\"%0250d\\"}",\n' "$i" 0; done
+        printf '    "Deezer": "{\\"accessToken\\":\\"dj-own-token\\"}"\n}\n'
+    } > "$ENGINEX_STREAMING_ACCOUNTS"
+}
+mkdir -p "$TMP/awk-says-0"
+real_awk=$(command -v awk)
+printf '#!/bin/sh\n%s "$@"\nexit 0\n' "$real_awk" > "$TMP/awk-says-0/awk"; chmod +x "$TMP/awk-says-0/awk"
+for kind in add retoken; do
+    for limit in 0 3; do
+        rm -rf "$ENGINEX_UI_DIR"; acct_seed "$kind"; cp "$ENGINEX_STREAMING_ACCOUNTS" "$TMP/accounts.seed"
+        ( trap '' XFSZ; ulimit -f "$limit"; PATH=$TMP/awk-says-0:$PATH exec sh "$GUARD" pre ) > /dev/null 2>&1 || :
+        cmp -s "$TMP/accounts.seed" "$ENGINEX_STREAMING_ACCOUNTS" ||
+            fail "the guard must keep StreamingAccounts.json as it is when its copy is not whole (branch $kind, size limit $limit KiB)"
+        [[ ! -e $ENGINEX_STREAMING_ACCOUNTS.tmp ]] || fail "the guard left its temporary copy (branch $kind, size limit $limit KiB)"
+    done
+done
+ok 'the guard replaces the DJ sign-ins only with a whole copy: an empty or a cut copy leaves them as they are, in both branches'
 rm -rf "$ENGINEX_UI_DIR" "$guard_run"; SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre   # the state the next tests expect
 # BH-GF3-6: the UAC2 gadget offers the computer the sample rate chosen in the Web Console (it was
 # always 48000), also when the gadget already exists; an unsupported rate is refused.

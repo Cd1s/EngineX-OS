@@ -22,8 +22,10 @@
 #   rem-order              0 bytes free, with a file of every class: all classes are used, the stream cache only as far as needed
 #   rem-upd                rem-order on the first boot after an update: the room made is used to install both
 #   free2 free3            rem-order again: the three runs that time the freeing (steps.tsv, step prepare)
-#   acct                   the guard's sign-in write meets a real ENOSPC: a tmpfs of one page holds the DJ's StreamingAccounts.json,
-#                          so the guard's temporary copy has no room; the file must come out byte for byte as it went in
+#   acct                   the guard's sign-in write meets a real ENOSPC, four ways (a tmpfs holds the DJ's StreamingAccounts.json and
+#                          has room for the file but not for the guard's copy of it): the two branches of the guard (no TIDAL entry:
+#                          add; a TIDAL entry without a token: retoken) with a copy that gets no byte (empty) and one that is cut
+#                          in the middle (cut). The file must come out byte for byte as it went in; acct.tsv has the sizes.
 # normal runs prepare three times in a row for the timing of the step when there is room.
 set -euo pipefail
 export LC_ALL=C
@@ -72,7 +74,7 @@ else
 fi
 mount -o loop "$C/data.img" "$C/data"
 
-# Files of the DJ and of the deck that nothing of ours may ever remove. One of every class of the PM list.
+# Files of the DJ and of the deck that nothing of ours may ever remove. One of every class that must never be touched.
 NEVER='Music/dj-collection.bin
 Music/dj-chosen-track.mp3
 enginex/Stream/Stems/1234/stem-kept.flac
@@ -125,7 +127,7 @@ seed_timezone() {
     wc -c < "$dir/Engine.conf" > "$C/engine-conf.size"
 }
 
-# Files of ours that are made again by themselves, one of every class of the PM list, in the order prepare frees them.
+# Files of ours that are made again by themselves, one of every class prepare may remove, in the order it frees them.
 # $1 early: the QML cache alone is large enough to meet the floor after the leftovers.
 FLOOR_KIB=$(debugfs -R 'cat /usr/libexec/enginex-prepare' "$W/image/rootfs.ext2" 2> /dev/null | sed -n 's/.*ENGINEX_DATA_FLOOR_KIB:-\([0-9]*\)}.*/\1/p' | head -1)
 FLOOR_KIB=${FLOOR_KIB:-73728}
@@ -263,15 +265,39 @@ mkdir -p "$R/run/sshd"
 step sshd-t in_root /usr/sbin/sshd -t -f /usr/share/enginex/sshd_config
 [ "$SCEN" != install ] || printf 'lang=en\n' > "$C/data/enginex/ui/settings.conf"
 step guard-pre in_root /etc/enginex/engine-ui-guard pre
-# #5306, the guard's accounts write (PM-approved patch): it adds the TIDAL entry with `awk > $accounts.tmp` and then `mv`. On a
-# one-page tmpfs that already holds the DJ's file the temporary copy cannot be written (ENOSPC, deterministic, no ext4 timing in it).
+# The guard's accounts write meets a real ENOSPC (deterministic, no ext4 timing in it). empty: a one-page tmpfs holds a small
+# file, so the copy gets no byte. cut: a three-page tmpfs holds a file of two pages (the DJ's own entry last), one page is left,
+# so the copy is cut after 4096 bytes. add: the file has no TIDAL entry; retoken: it has one without a token.
+acct_seed() { # <add|retoken> <small|large> <file>
+    {
+        printf '{\n'
+        [ "$1" != retoken ] || printf '    "TIDAL": "{\\"provider\\":\\"TIDAL\\",\\"providerType\\":\\"TIDAL\\"}",\n'
+        if [ "$2" = large ]; then
+            for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18; do
+                printf '    "Filler%s": "{\\"provider\\":\\"Filler\\",\\"note\\":\\"%0250d\\"}",\n' "$i" 0
+            done
+        fi
+        printf '    "Deezer": "{\\"provider\\":\\"Deezer\\",\\"accessToken\\":\\"dj-own-token\\"}"\n}\n'
+    } > "$3"
+}
 if [ "$SCEN" = acct ]; then
-    mkdir -p "$R/run/acct"
-    mount -t tmpfs -o size=4k tmpfs "$R/run/acct"
-    cp "$C/accounts.seed" "$R/run/acct/StreamingAccounts.json"
-    step guard-pre-acct in_root env ENGINEX_STREAMING_ACCOUNTS=/run/acct/StreamingAccounts.json /etc/enginex/engine-ui-guard pre
-    check "$SCEN: with no room for its temporary copy the guard leaves the DJ's StreamingAccounts.json byte for byte as it was" \
-        cmp "$C/accounts.seed" "$R/run/acct/StreamingAccounts.json"
+    : > "$W/acct.tsv"
+    for sub in empty-add empty-retoken cut-add cut-retoken; do
+        mode=${sub%%-*} kind=${sub#*-}
+        mount_dir=$R/run/acct-$sub
+        size=4k weight=small
+        [ "$mode" != cut ] || { size=12k; weight=large; }
+        mkdir -p "$mount_dir"
+        mount -t tmpfs -o size=$size tmpfs "$mount_dir"
+        acct_seed "$kind" "$weight" "$C/accounts-$sub.seed"
+        cp "$C/accounts-$sub.seed" "$mount_dir/StreamingAccounts.json"
+        step "guard-pre-$sub" in_root env ENGINEX_STREAMING_ACCOUNTS=/run/acct-$sub/StreamingAccounts.json /etc/enginex/engine-ui-guard pre
+        printf '%s\t%s\t%s\n' "$sub" "$(wc -c < "$C/accounts-$sub.seed")" "$(wc -c < "$mount_dir/StreamingAccounts.json")" >> "$W/acct.tsv"
+        check "$SCEN: $sub: the guard leaves the DJ's StreamingAccounts.json byte for byte as it was" \
+            cmp "$C/accounts-$sub.seed" "$mount_dir/StreamingAccounts.json"
+        check "$SCEN: $sub: the guard's temporary copy is removed" test ! -e "$mount_dir/StreamingAccounts.json.tmp"
+        umount "$mount_dir"
+    done
 fi
 # The suite is unpacked by the first service that starts; the retired database watch exits 0 at once after it.
 step suite-unpack in_root /usr/local/bin/engine-guardian --watch
