@@ -3549,6 +3549,29 @@ SERVICES_MAIN = """
 		interval: 250; running: root.scUiLoaded && !root.scBpmDecimalsSynced; repeat: true; triggeredOnStart: true
 		onTriggered: root.scSyncBpmDecimals()
 	}
+	// #325: the controller engine reads Pad LED Brightness from /GUI/Scripted/EngineXPadBrightness (its 500 ms
+	// timer), so the pads follow the picker within a fraction of a second, not after its 10 s HTTP poll. The level
+	// is published 200 ms after the last change (restarted by each pick): the hook's 80 ms settings poll must hold
+	// the level before the controller resends the LEDs, or that resend would go out at the old one. 0 = not yet.
+	property bool scPadBrightnessSynced: false
+	readonly property var scPadBrightnessPropRef: Planck.createProperty("EngineXPadBrightness", 0.0, 0)
+	readonly property var scPadBrightnessProp: scPadBrightnessPropRef && Planck.getProperty("/GUI/Scripted/EngineXPadBrightness")
+	function scSyncPadBrightness() {
+		const p = scPadBrightnessProp && scPadBrightnessProp.translator ? scPadBrightnessProp : Planck.getProperty("/GUI/Scripted/EngineXPadBrightness")
+		if (!p || !p.translator || !scUiLoaded) { scPadBrightnessSynced = false; return }
+		p.translator.value = Math.max(20, Math.min(100, scLedBrightness)) / 100
+		scPadBrightnessSynced = true
+	}
+	onScLedBrightnessChanged: scPadBrightnessDelay.restart()
+	Timer {
+		id: scPadBrightnessDelay
+		interval: 200; repeat: false
+		onTriggered: root.scSyncPadBrightness()
+	}
+	Timer {
+		interval: 250; running: root.scUiLoaded && !root.scPadBrightnessSynced; repeat: true; triggeredOnStart: true
+		onTriggered: root.scSyncPadBrightness()
+	}
 	property var scMixstreamFx: ["Echo", "Flanger", "Delay", "Phaser"]
 	property bool scMixstreamSweepOpen: false
 	property string scPioneerFx: "off"
@@ -8788,6 +8811,10 @@ def edits(dev: bool):
             '    id: scGlobalConfig\n'
             '    objectName: "Global Assignment Config"\n'
             '    property real scPadBrightness: 1\n'
+            '    property bool scPadBrightnessLive: false\n'
+            '    property var pPadBrightness: Planck.getProperty("/GUI/Scripted/EngineXPadBrightness")\n'
+            '    readonly property real scPadBrightnessSignal: pPadBrightness && pPadBrightness.translator ? pPadBrightness.translator.value : 0\n'
+            '    onScPadBrightnessSignalChanged: scSyncPadBrightnessFromState()\n'
             '    property bool scSwapLoopOrder: false\n'
             '    property bool scPitchBendBeatJump: false\n'
             '    property var pRestoreBpm: Planck.getProperty("/GUI/Scripted/EngineXRestoreBpm")\n'
@@ -8813,6 +8840,15 @@ def edits(dev: bool):
             '        const t = scGlobalConfig.pBpmDecimals && scGlobalConfig.pBpmDecimals.translator\n'
             '        return (t && t.value > 0) ? (t.value >= 0.75 ? 2 : 1) : scGlobalConfig.scBpmDecimals\n'
             '    }\n'
+            '    function scSyncPadBrightnessFromState() {\n'
+            '        if (!scGlobalConfig.pPadBrightness || !scGlobalConfig.pPadBrightness.translator)\n'
+            '            scGlobalConfig.pPadBrightness = Planck.getProperty("/GUI/Scripted/EngineXPadBrightness")\n'
+            '        const t = scGlobalConfig.pPadBrightness && scGlobalConfig.pPadBrightness.translator\n'
+            '        const n = t ? Math.round(t.value * 100) : 0\n'
+            '        if (n < 20 || n > 100) return\n'
+            '        scGlobalConfig.scPadBrightnessLive = true\n'
+            '        scGlobalConfig.scPadBrightness = n / 100\n'
+            '    }\n'
             '    function scSyncReverseJogFromState() {\n'
             '        if (!scGlobalConfig.pReverseJogLeft || !scGlobalConfig.pReverseJogLeft.translator)\n'
             '            scGlobalConfig.pReverseJogLeft = Planck.getProperty("/GUI/Scripted/EngineXJogInvertLeft")\n'
@@ -8832,7 +8868,10 @@ def edits(dev: bool):
             '    }\n'
             '    Timer {\n'
             '        interval: 500; running: true; repeat: true; triggeredOnStart: true\n'
-            '        onTriggered: scGlobalConfig.scSyncReverseJogFromState()\n'
+            '        onTriggered: {\n'
+            '            scGlobalConfig.scSyncReverseJogFromState()\n'
+            '            scGlobalConfig.scSyncPadBrightnessFromState()\n'
+            '        }\n'
             '    }\n'
             '    Timer {\n'
             '        interval: 10000; running: true; repeat: true; triggeredOnStart: true\n'
@@ -8843,7 +8882,7 @@ def edits(dev: bool):
             '                try {\n'
             '                    const j = JSON.parse(x.responseText)\n'
             '                    const n = parseInt(j.ledBrightness)\n'
-            '                    if (n >= 20 && n <= 100) scGlobalConfig.scPadBrightness = n / 100\n'
+            '                    if (!scGlobalConfig.scPadBrightnessLive && n >= 20 && n <= 100) scGlobalConfig.scPadBrightness = n / 100\n'
             '                    scGlobalConfig.scSwapLoopOrder = !!j.swapLoopOrder\n'
             '                    scGlobalConfig.scReverseJogLeft = !!j.jogInvertLeft\n'
             '                    scGlobalConfig.scReverseJogRight = !!j.jogInvertRight\n'

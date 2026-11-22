@@ -5,8 +5,8 @@ ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 PRODUCT=${FX_PRODUCT:-JC11}
-# Gen-2 (JP21 JP20 JC11S NH08S NH10, Engine 5.3.0-sclive4): FX_DRIVER runs only; the driver stubs the SoC check.
-case "$PRODUCT" in JP07|JC11|JC16|JP11|NH08|JP21|JP20|JC11S|NH08S|NH10) ;; *) exit 2 ;; esac
+# Gen-2 (JP21 JP20 JC11S JP11S NH08S NH10, Engine 5.3.0-sclive4): FX_DRIVER runs only; the driver stubs the SoC check.
+case "$PRODUCT" in JP07|JC11|JC16|JP11|NH08|JP21|JP20|JC11S|JP11S|NH08S|NH10) ;; *) exit 2 ;; esac
 # FX_DRIVER=<file.c> FX_DRIVER_TAG=<log tag>: run that offline driver alone, without the selector's QML probe.
 DRIVER=${FX_DRIVER:-$REPO/tools/az01-packer/test_fx_selector_native.c}
 W=${FX_SANDBOX_DIR:-/var/tmp/fx-selector-native-$PRODUCT${FX_DRIVER:+-$(basename "$FX_DRIVER" .c)}}
@@ -23,11 +23,12 @@ if [ "${1:-}" != --inner ]; then
         case "$PRODUCT" in
             JC11) m=fw-5.3.0/PRIME4 ;; JC16) m=fw-5.3.0/PRIME2 ;; JP11) m=fw-5.3.0/PRIMEGO ;; NH08) m=fw-5.3.0/MIXSTREAMPRO ;;
             JP21) m=fw-5.3.0/SCLIVE4 ;; JP20) m=fw-5.3.0/SCLIVE2 ;; JC11S) m=fw-5.3.0-gen2/PRIME4PLUS ;;
+            JP11S) if [ -e "${ENGINEX_LAB}/fw-5.3.0-gen2/PRIMEGOPLUS-5.3.0-Update.img" ]; then m=fw-5.3.0-gen2/PRIMEGOPLUS; else m=fw-5.3.0/SCLIVE4; fi ;;
             NH08S) m=fw-5.3.0-gen2/MIXSTREAMPROPLUS ;; NH10) m=fw-5.3.0-gen2/MIXSTREAMPROGO ;; *) m=fw-5.3.0/SC5000 ;;
         esac
         image=${ENGINEX_LAB}/$m-5.3.0-Update.img
         case "$PRODUCT" in
-        JP21|JP20|JC11S|NH08S|NH10) # signed AZ0x container: take its rootfs record, as sclive-aux-sandbox.sh does
+        JP21|JP20|JC11S|JP11S|NH08S|NH10) # signed AZ0x container: take its rootfs record, as sclive-aux-sandbox.sh does
             mkdir -p "$W/image"
             python3 - "$REPO" "$image" "$W/image/rootfs.ext2" <<'PY'
 import gzip, importlib.util, lzma, sys
@@ -77,9 +78,12 @@ cp "${FX_HOOK:-$REPO/rootfs-overlay/etc/enginex/libengine-ui-hook.so}" "$R/etc/e
 cp "$W/libfx-native-test.so" "$R/tmp/libfx-native-test.so"
 cp -a "$W/packs/en" "$R/data/enginex/ui/packs/"
 mkdir -p "$R/data/enginex/ui/packs/en/Skins/Common/Items"
-cp "$REPO/tools/az01-packer/fx-selector-probe.qml" "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
-if [ -n "${FX_DRIVER:-}" ]; then
+if [ -n "${FX_QML_PROBE:-}" ]; then
+    cp "$FX_QML_PROBE" "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
+elif [ -n "${FX_DRIVER:-}" ]; then
     printf 'import QtQuick 2.12\nItem {}\n' > "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
+else
+    cp "$REPO/tools/az01-packer/fx-selector-probe.qml" "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml"
 fi
 if [ "${FX_CONFIG_ONLY:-0}" = 1 ]; then
     cat > "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml" <<'QML'
@@ -110,7 +114,7 @@ printf '%s\n' "$engine_rc" > "$W/engine-exit.txt"
 if [ -f "$R/tmp/fx-ms-spinner.png" ]; then cp "$R/tmp/fx-ms-spinner.png" "$W/fx-ms-spinner.png"; fi
 case "$engine_rc" in 0|124|137) ;; *) echo "Engine exited $engine_rc" >&2; exit 1 ;; esac
 if [ -n "${FX_DRIVER:-}" ]; then
-    grep -a "^${FX_DRIVER_TAG:?} " "$W/engine.log" | cut -c1-200
+    grep -a -E "^${FX_DRIVER_TAG:?} |${FX_DRIVER_TAG}_QML|engine-ui-hook: Color FX" "$W/engine.log" | cut -c1-200
     grep -aq "^$FX_DRIVER_TAG done|PASS" "$W/engine.log"
     ! grep -aq "^$FX_DRIVER_TAG FAIL" "$W/engine.log"
     exit

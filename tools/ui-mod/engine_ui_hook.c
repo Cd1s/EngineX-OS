@@ -338,7 +338,10 @@ int snd_seq_event_output_direct(void *handle, void *ev) {
 
 // led_brightness= changed (poll thread): publish the level; Engine's thread resends the cached RGB
 // SysEx LEDs with its next controller event on each handle (led_catch_up), so the deck dims or
-// brightens without this thread ever writing to Engine's sequencer handle.
+// brightens without this thread ever writing to Engine's sequencer handle. On a deck with no other
+// LED activity that next event is the resend the controller QML starts when the UI pack tells it the
+// new level (/GUI/Scripted/EngineXPadBrightness, #325). The pack publishes it 200 ms after the
+// change, so this 80 ms poll holds the level first: a resend that beat it would go out at the old level.
 static void led_replay(int pct) {
     pthread_mutex_lock(&led_mu);
     __atomic_store_n(&led_pct, pct, __ATOMIC_RELAXED);
@@ -377,16 +380,38 @@ static int px_write_ready(const char *path) { return ready_write(path, "armhf-px
  * sandbox: node +0x38 copies input to output at centre, node +0x3c
  * leaves both buffers alone at centre). With a style picked and the knob outside stock's
  * centre band, both nodes skip stock (their centre behaviour) and +0x38 plays the style,
- * as much as the knob is turned. Inside the band, or style Off, stock runs untouched. */
+ * as much as the knob is turned. Inside the band, or style Off, stock runs untouched.
+ *
+ * How the knob reaches the hook: SweepFxStateMapAdaptor's Value observer and setType call setValue
+ * through a guarded direct call (speculative devirtualization against vtable slot 4 of
+ * SweepFxControl), so a jump written over setValue's prologue is never reached on the property path:
+ * that was the 5.3.0.5 bug, the knob played the stock filter whatever style was picked.
+ * install_cfx_scope therefore writes both the prologue jump (direct callers) and slot 4 itself
+ * (5.3.0 0x2b1e488, sclive4 0x2b9e0b0, inside RELRO: mprotect, store, mprotect back), so the
+ * guard misses and the call goes through the slot to hook_cfx_value. Either entry then runs stock's
+ * setValue once, after the hook has noted the knob.
+ *
+ * Cost: audio thread untouched (hook_cfx_process is the same code with or without the slot patch);
+ * browsing none; insert none; control thread one extra indirect call per knob or type event
+ * (one hook entry and one stock execution per channel per event, counted in the FX sandbox).
+ * Why no lighter way: Engine has no per-channel Color FX style and no setting that plays one;
+ * QML only changes what the screen shows, not what ChannelSweepFx does on the audio thread; reading
+ * the knob from the audio thread instead needs a link from the audio node back to its control that
+ * has not been found in the binary, so intercepting setValue is the smallest site that sees every
+ * knob and type event. */
 #define CFX_READY "/run/enginex-colorfx.ready"
 enum { CFX_CHANNELS = 4 };
 static int cfx_installed, cfx_style; /* cfx_style: pioneer_fx= in settings.conf, the channel knobs only */
 static void *cfx_value_original, *cfx_process_original;
 static struct cfx_channel {
     void *node, *spare;    /* ChannelSweepFx at SweepFxControl +0x38 and +0x3c */
-    unsigned knob;         /* float bits, written by setValue's thread */
     struct sc_pfx_instance dsp;
 } cfx_channels[CFX_CHANNELS];
+/* Each channel's knob (float bits), written by setValue's thread. It starts at centre (0.5f): hook_cfx_value claims
+ * a channel with a CAS on node and stores the knob after it, so a node the audio thread sees claimed for the first
+ * time must read centre, which is stock, never full wet. Kept out of cfx_channels on purpose: one non-zero
+ * initialiser there would move that whole array, delay banks included, from .bss into the file (+16 MB per .so). */
+static unsigned cfx_knobs[CFX_CHANNELS] = {[0 ... CFX_CHANNELS - 1] = 0x3f000000u};
 typedef void (*cfx_value_fn)(void *, float);
 typedef void (*cfx_process_fn)(void *, int, float **, int, float **, int, void *, void *);
 
@@ -405,7 +430,7 @@ static void hook_cfx_value(void *control, float v) {
         void *expected = NULL;
         if (__atomic_load_n(&c->node, __ATOMIC_ACQUIRE) != node &&
             !__atomic_compare_exchange_n(&c->node, &expected, node, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) continue;
-        __atomic_store_n(&c->knob, bits, __ATOMIC_RELEASE);
+        __atomic_store_n(&cfx_knobs[i], bits, __ATOMIC_RELEASE);
         __atomic_store_n(&c->spare, spare, __ATOMIC_RELEASE);
         break;
     }
@@ -414,16 +439,17 @@ static void hook_cfx_value(void *control, float v) {
 /* Audio thread. No lock, allocation or I/O; banks are cleared by the poll worker. */
 static void hook_cfx_process(void *node, int ins, float **in, int outs, float **out, int frames, void *a, void *b) {
     struct cfx_channel *c = NULL;
+    unsigned ci = 0;
     int main = 0;
     for (unsigned i = 0; i < CFX_CHANNELS && !c; ++i) {
-        if (__atomic_load_n(&cfx_channels[i].node, __ATOMIC_ACQUIRE) == node) c = &cfx_channels[i], main = 1;
-        else if (__atomic_load_n(&cfx_channels[i].spare, __ATOMIC_ACQUIRE) == node) c = &cfx_channels[i];
+        if (__atomic_load_n(&cfx_channels[i].node, __ATOMIC_ACQUIRE) == node) c = &cfx_channels[i], ci = i, main = 1;
+        else if (__atomic_load_n(&cfx_channels[i].spare, __ATOMIC_ACQUIRE) == node) c = &cfx_channels[i], ci = i;
     }
     int style = __atomic_load_n(&cfx_style, __ATOMIC_RELAXED);
     int stereo = c && ins == 2 && outs == 2 && in && out && in[0] && in[1] && out[0] && out[1] && frames > 0;
     float amount = 0.0f;
     if (stereo) {
-        unsigned bits = __atomic_load_n(&c->knob, __ATOMIC_ACQUIRE);
+        unsigned bits = __atomic_load_n(&cfx_knobs[ci], __ATOMIC_ACQUIRE);
         float v;
         memcpy(&v, &bits, sizeof v);
         amount = cfx_amount(v);
@@ -1794,14 +1820,19 @@ static int install_px_scope(uintptr_t base, size_t page, const char *version) {
     return 1;
 }
 static int install_cfx_scope(uintptr_t base, size_t page, const char *version) {
-    uintptr_t value, process;
-    if (!strcmp(version, "5.3.0")) value = base + 0xd8ba3c, process = base + 0xec127c;
-    else if (!strcmp(version, "5.3.0-sclive4")) value = base + 0xd9619c, process = base + 0xecdbd4;
+    uintptr_t value, value_slot, process;
+    if (!strcmp(version, "5.3.0")) value = base + 0xd8ba3c, value_slot = base + 0x2b1e488, process = base + 0xec127c;
+    else if (!strcmp(version, "5.3.0-sclive4")) value = base + 0xd9619c, value_slot = base + 0x2b9e0b0, process = base + 0xecdbd4;
     else return 0;
     if (player_board()) return 0; /* players have no Sweep FX */
     static const uint32_t value_prefix[] = {0xe52d400c, 0xe98d4800};   // str r4,[sp,#-12]!; stmib sp,{fp,lr}
     static const uint32_t process_prefix[] = {0xe16d42f4, 0xe1cd60f8}; // strd r4,[sp,#-36]!; strd r6,[sp,#8]
     if (memcmp((void *)value, value_prefix, 8) || memcmp((void *)process, process_prefix, 8)) return 0;
+    if (*(uintptr_t *)value_slot != value) {
+        /* Nothing is patched and no ready marker is written: stock Sweep FX, no Color FX Style row. */
+        fprintf(stderr, "engine-ui-hook: Color FX slot 4 mismatch, not installed\n");
+        return 0;
+    }
     /* Before the UI can ask: on PRIME 4, pkg/webui drops a stored style when PX is ready alone. */
     if (!ready_write(CFX_READY, "armhf-cfx-v1\n")) return 0;
     uint32_t value_code[] = {value_prefix[0], value_prefix[1], 0xe51ff004, (uint32_t)(value + 8)};
@@ -1811,6 +1842,9 @@ static int install_cfx_scope(uintptr_t base, size_t page, const char *version) {
     uint32_t value_jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_cfx_value};
     uint32_t process_jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_cfx_process};
     patch_bytes(HF_DSP_GUARDS, value, value_jump, sizeof value_jump, page);
+    /* SweepFxStateMapAdaptor's Value observer and setType speculatively devirtualize setValue
+     * against vtable slot 4: overwrite that slot so the guard misses and calls hook_cfx_value. */
+    patch_pointer(HF_DSP_GUARDS, (uintptr_t *)value_slot, (uintptr_t)hook_cfx_value, page);
     patch_bytes(HF_DSP_GUARDS, process, process_jump, sizeof process_jump, page);
     fprintf(stderr, "engine-ui-hook: Color FX channel knobs installed\n");
     return 1;
