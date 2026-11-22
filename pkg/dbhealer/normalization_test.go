@@ -169,6 +169,98 @@ func TestHealMountDataOnlyNormalizesMissingNFDPaths(t *testing.T) {
 	}
 }
 
+func TestHealMountDataOnlyNormalizesUnicodePathAndFilename(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	write := func(rel string) {
+		path := filepath.Join(root, "Engine Library", filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name    string
+		changed bool
+	}{
+		{name: "Tiếng Việt", changed: true},
+		{name: "한글 노래", changed: true},
+		{name: "ガラスの靴", changed: true},
+		{name: "Йошкар", changed: true},
+		{name: "Ελλάδα", changed: true},
+		{name: "أغنية", changed: true},
+		{name: "İstanbul", changed: true},
+		{name: "Łódź", changed: true},
+		{name: "Café", changed: true},
+		{name: "中文歌曲", changed: false},
+		{name: "เพลงไทย", changed: false},
+		{name: "さくら", changed: false},
+		{name: "English", changed: false},
+	}
+	for i, tc := range cases {
+		nfdName := norm.NFD.String(tc.name)
+		if tc.changed == (nfdName == tc.name) {
+			t.Fatalf("case %q has unexpected NFD/NFC relation", tc.name)
+		}
+		nfcPath := filepath.ToSlash(filepath.Join("..", "Music", tc.name, tc.name+".mp3"))
+		nfdPath := filepath.ToSlash(filepath.Join("..", "Music", nfdName, nfdName+".mp3"))
+		write(nfcPath)
+		storedPath := nfcPath
+		if tc.changed {
+			storedPath = nfdPath
+		}
+		if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes) VALUES(?,?,?,1)`, i+1, storedPath, filepath.Base(storedPath)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	limitName := "Limit Café"
+	limitNFCPath := filepath.ToSlash(filepath.Join("..", "Music", limitName, limitName+".mp3"))
+	limitNFDPath := norm.NFD.String(limitNFCPath)
+	write(limitNFDPath)
+	limitID := len(cases) + 1
+	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes) VALUES(?,?,?,1)`, limitID, limitNFCPath, filepath.Base(limitNFCPath)); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	got, err := HealMountDataOnly(root, 0)
+	if err != nil {
+		t.Fatalf("heal: %+v %v", got, err)
+	}
+	wantNormalized := 0
+	for _, tc := range cases {
+		if tc.changed {
+			wantNormalized++
+		}
+	}
+	if got.PathsNormalized != wantNormalized {
+		t.Fatalf("paths normalized=%d, want %d: %+v", got.PathsNormalized, wantNormalized, got)
+	}
+	check, err := sql.Open("sqlite", filepath.Join(root, "Engine Library", "Database2", "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	for i, tc := range cases {
+		var path, filename string
+		if err := check.QueryRow(`SELECT path,filename FROM Track WHERE id=?`, i+1).Scan(&path, &filename); err != nil {
+			t.Fatal(err)
+		}
+		wantPath := filepath.ToSlash(filepath.Join("..", "Music", tc.name, tc.name+".mp3"))
+		if path != wantPath || filename != filepath.Base(wantPath) {
+			t.Errorf("track %d %q path=%q filename=%q, want %q/%q", i+1, tc.name, path, filename, wantPath, filepath.Base(wantPath))
+		}
+	}
+	var limitPath, limitFilename string
+	if err := check.QueryRow(`SELECT path,filename FROM Track WHERE id=?`, limitID).Scan(&limitPath, &limitFilename); err != nil {
+		t.Fatal(err)
+	}
+	if limitPath != limitNFCPath || limitFilename != filepath.Base(limitNFCPath) {
+		t.Fatalf("NFC library path was rewritten: %q/%q", limitPath, limitFilename)
+	}
+}
+
 func TestNormalizeTrackPathPreservesLastEditTime(t *testing.T) {
 	_, root, db := testlibrary.Create(t)
 	rows := []struct {
