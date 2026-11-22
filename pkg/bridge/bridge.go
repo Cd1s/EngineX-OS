@@ -57,10 +57,18 @@ func readLibraryDetailed(ctx context.Context, mount string) (*rekordbox.Library,
 	if len(unreadable) > 0 && hasLibrary(filepath.Join(mount, "Engine Library", "Database2")) {
 		dir := filepath.Join(mount, "Engine Library", "Database2")
 		stamp := importedStamp(dir)
+		if current, stampErr := exportStamp(r, mount); stampErr == nil && current != "" {
+			stamp = current
+		}
 		readMarkValue := readMark(dir, readName)
+		markCurrent := readLibrariesStamp(readMarkValue) == stamp
 		for _, bad := range unreadable {
-			builtFrom := readLibrariesStamp(readMarkValue) == stamp && readLibrariesContains(readMarkValue, bad.candidate.rel)
-			if readMarkValue == "" && primaryOfStamp(stamp) == bad.candidate.rel {
+			// A released deck has no read mark. If it later rewrites the stamp,
+			// the stale mark still identifies the export that supplied the rows.
+			// A current mark must win over stamp order because a current import can
+			// have seen a different readable subset.
+			builtFrom := markCurrent && readLibrariesContains(readMarkValue, bad.candidate.rel)
+			if !markCurrent && primaryOfStamp(stamp) == bad.candidate.rel {
 				builtFrom = true
 			}
 			if builtFrom {
@@ -267,7 +275,11 @@ func mergeReadableExports(readable []readableExport) *rekordbox.Library {
 	}
 	out := &rekordbox.Library{Artwork: map[uint32]string{}, Keys: map[uint32]string{}}
 	usedTrackIDs := map[uint32]bool{}
-	byPath := map[string]uint32{}
+	type pathOwner struct {
+		id     uint32
+		source int
+	}
+	byPath := map[string]pathOwner{}
 	usedPlaylistIDs := map[uint32]bool{}
 	playlistByKey := map[string]int{}
 
@@ -277,8 +289,8 @@ func mergeReadableExports(readable []readableExport) *rekordbox.Library {
 		for _, original := range read.library.Tracks {
 			t := original
 			key := foldPath(t.Path)
-			if existing, ok := byPath[key]; ok {
-				trackIDs[original.ID] = existing
+			if existing, ok := byPath[key]; ok && existing.source != sourceIndex {
+				trackIDs[original.ID] = existing.id
 				continue
 			}
 			id := original.ID
@@ -292,7 +304,9 @@ func mergeReadableExports(readable []readableExport) *rekordbox.Library {
 				t.RecordHash = rekordbox.RecordHash(t)
 			}
 			usedTrackIDs[id] = true
-			byPath[key] = id
+			if _, exists := byPath[key]; !exists {
+				byPath[key] = pathOwner{id: id, source: sourceIndex}
+			}
 			trackIDs[original.ID] = id
 			out.Tracks = append(out.Tracks, t)
 		}
@@ -860,8 +874,20 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		reread = readReread(dir, stamp)
 	}
 	readLibrariesMarkValue := readMark(dir, readName)
+	markComplete := false
+	if readLibrariesStamp(readLibrariesMarkValue) == stamp {
+		if candidates, candidateErr := exportCandidates(r, mount); candidateErr == nil {
+			markComplete = true
+			for _, candidate := range candidates {
+				if !readLibrariesContains(readLibrariesMarkValue, candidate.rel) {
+					markComplete = false
+					break
+				}
+			}
+		}
+	}
 	bypass := !full && !opts.SmartMatch && importedStamp(dir) == stamp &&
-		((readLibrariesMarkValue == "" && !stampHasMultipleExports(stamp)) || readLibrariesStamp(readLibrariesMarkValue) == stamp)
+		((readLibrariesMarkValue == "" && !stampHasMultipleExports(stamp)) || markComplete)
 	// An earlier export-only import still has tracks without their files read.
 	resume := bypass && hasFastTracks(dir)
 	bypass = bypass && !resume
@@ -1248,6 +1274,7 @@ func writeImportState(dir, stamp string, rels []string) error {
 	if err := writeMark(dir, readName, readLibrariesMark(stamp, rels)); err != nil {
 		return err
 	}
+	cut("read mark written")
 	return writeMark(dir, stampName, stamp)
 }
 

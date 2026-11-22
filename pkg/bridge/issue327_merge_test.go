@@ -122,3 +122,23 @@ func TestIssue327OneLibraryMergeIsUnchanged(t *testing.T) {
 		t.Fatal("single-library import was changed")
 	}
 }
+
+func TestIssue327MergeKeepsCaseDistinctRecordsFromOneLibrary(t *testing.T) {
+	first := &rekordbox.Library{Tracks: []rekordbox.Track{
+		{ID: 60, Path: "/Music/Case/Song.mp3"},
+		{ID: 61, Path: "/Music/case/Song.mp3"},
+	}}
+	second := &rekordbox.Library{Tracks: []rekordbox.Track{
+		{ID: 7, Path: "/Music/case/Song.mp3"},
+	}}
+	merged := mergeReadableExports([]readableExport{
+		{candidate: exportCandidate{rel: "PIONEER/rekordbox/exportLibrary.db"}, library: first},
+		{candidate: exportCandidate{rel: "PIONEER/rekordbox/export.pdb", isPDB: true}, library: second},
+	})
+	if len(merged.Tracks) != 2 {
+		t.Fatalf("case-distinct first-library records collapsed: %d", len(merged.Tracks))
+	}
+	if merged.Tracks[0].ID != 60 || merged.Tracks[1].ID != 61 {
+		t.Fatalf("first-library IDs changed: %d,%d", merged.Tracks[0].ID, merged.Tracks[1].ID)
+	}
+}

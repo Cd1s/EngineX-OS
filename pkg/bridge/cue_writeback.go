@@ -82,35 +82,54 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		return res, fmt.Errorf("writeback: bridge state not found: %w", err)
 	}
 
-	rbLib, oneLibOK, err := readStickRekordboxLibrary(ctx, absMount)
+	rbLib, oneLibOK, readable, err := readStickRekordboxLibrary(ctx, absMount)
 	if err != nil {
 		return res, err
 	}
 	byID := make(map[uint32]rekordbox.Track, len(rbLib.Tracks))
 	byPath := make(map[string]rekordbox.Track, len(rbLib.Tracks))
+	byExactPath := make(map[string]rekordbox.Track, len(rbLib.Tracks))
 	for _, tr := range rbLib.Tracks {
 		byID[tr.ID] = tr
 		if tr.Path != "" {
-			byPath[bridgeTrackPathKey(tr.Path)] = tr
+			exact := bridgeTrackExactPathKey(tr.Path)
+			if _, exists := byExactPath[exact]; !exists {
+				byExactPath[exact] = tr
+			}
+			key := bridgeTrackPathKey(tr.Path)
+			if _, exists := byPath[key]; !exists {
+				byPath[key] = tr
+			}
 		}
 	}
 	oneLibraryIDs := map[string]uint32{}
 	oneLibraryMetadataByPath := map[string]rekordbox.Metadata{}
-	if oneLibOK {
-		oneLibPath := filepath.Join(absMount, "PIONEER", "rekordbox", "exportLibrary.db")
-		if oneLib, err := rekordbox.ReadSQLite(ctx, oneLibPath, nil); err == nil {
-			for _, tr := range oneLib.Tracks {
-				oneLibraryIDs[bridgeTrackPathKey(tr.Path)] = tr.ID
-				oneLibraryMetadataByPath[bridgeTrackPathKey(tr.Path)] = rekordbox.Metadata{Genre: tr.Genre, Comment: tr.Comment, Label: tr.Label}
+	for _, read := range readable {
+		if read.candidate.isPDB {
+			continue
+		}
+		for _, tr := range read.library.Tracks {
+			key := bridgeTrackPathKey(tr.Path)
+			if _, exists := oneLibraryIDs[key]; exists {
+				continue
 			}
+			oneLibraryIDs[key] = tr.ID
+			oneLibraryMetadataByPath[key] = rekordbox.Metadata{Genre: tr.Genre, Comment: tr.Comment, Label: tr.Label}
 		}
 	}
 	pdbLibraryIDs := map[string]uint32{}
 	pdbMetadataByPath := map[string]rekordbox.Metadata{}
-	if pdb, err := rekordbox.ReadPDB(filepath.Join(absMount, "PIONEER", "rekordbox", "export.pdb")); err == nil {
-		for _, tr := range pdb.Tracks {
-			pdbLibraryIDs[bridgeTrackPathKey(tr.Path)] = tr.ID
-			pdbMetadataByPath[bridgeTrackPathKey(tr.Path)] = rekordbox.Metadata{Genre: tr.Genre, Comment: tr.Comment, Label: tr.Label}
+	for _, read := range readable {
+		if !read.candidate.isPDB {
+			continue
+		}
+		for _, tr := range read.library.Tracks {
+			key := bridgeTrackPathKey(tr.Path)
+			if _, exists := pdbLibraryIDs[key]; exists {
+				continue
+			}
+			pdbLibraryIDs[key] = tr.ID
+			pdbMetadataByPath[key] = rekordbox.Metadata{Genre: tr.Genre, Comment: tr.Comment, Label: tr.Label}
 		}
 	}
 
@@ -171,7 +190,14 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		}
 		res.TracksChecked++
 
-		rbTrack, ok := resolveRekordboxTrack(srcJSON, enginePath, byID, byPath)
+		lookupByID := byID
+		if !oneLibOK {
+			// A stored OneLibrary source ID can collide with a Device Library
+			// ID when the former is unreadable. The row path is authoritative
+			// for this write-back pass.
+			lookupByID = nil
+		}
+		rbTrack, ok := resolveRekordboxTrack(srcJSON, enginePath, lookupByID, byExactPath, byPath)
 		if !ok || rbTrack.ID == 0 {
 			continue
 		}
@@ -364,27 +390,27 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	return res, nil
 }
 
-func readStickRekordboxLibrary(ctx context.Context, mountPath string) (*rekordbox.Library, bool, error) {
+func readStickRekordboxLibrary(ctx context.Context, mountPath string) (*rekordbox.Library, bool, []readableExport, error) {
 	r, err := compat.NewResolver(mountPath)
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	lib, readable, _, err := readExportWithResolver(ctx, mountPath, r)
 	if err != nil {
 		if errors.Is(err, errNoLocalExport) {
-			return nil, false, fmt.Errorf("writeback: no rekordbox export found on %s", mountPath)
+			return nil, false, nil, fmt.Errorf("writeback: no rekordbox export found on %s", mountPath)
 		}
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	for _, read := range readable {
 		if !read.candidate.isPDB {
-			return lib, true, nil
+			return lib, true, readable, nil
 		}
 	}
-	return lib, false, nil
+	return lib, false, readable, nil
 }
 
-func resolveRekordboxTrack(srcJSON []byte, enginePath string, byID map[uint32]rekordbox.Track, byPath map[string]rekordbox.Track) (rekordbox.Track, bool) {
+func resolveRekordboxTrack(srcJSON []byte, enginePath string, byID map[uint32]rekordbox.Track, byExactPath, byPath map[string]rekordbox.Track) (rekordbox.Track, bool) {
 	if len(srcJSON) > 0 {
 		if raw, err := enginedb.UnpackAnalysis(srcJSON, 64<<20); err == nil {
 			var decoded struct {
@@ -400,6 +426,9 @@ func resolveRekordboxTrack(srcJSON []byte, enginePath string, byID map[uint32]re
 		}
 	}
 	norm := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(enginePath)), "../")
+	if tr, ok := byExactPath[bridgeTrackExactPathKey(norm)]; ok {
+		return tr, true
+	}
 	if tr, ok := byPath[bridgeTrackPathKey(norm)]; ok {
 		return tr, true
 	}
@@ -408,6 +437,10 @@ func resolveRekordboxTrack(srcJSON []byte, enginePath string, byID map[uint32]re
 
 func bridgeTrackPathKey(p string) string {
 	return foldPath(strings.TrimPrefix(filepath.ToSlash(filepath.Clean(p)), "/"))
+}
+
+func bridgeTrackExactPathKey(p string) string {
+	return strings.TrimPrefix(filepath.ToSlash(filepath.Clean(p)), "/")
 }
 
 func readStickTrackCues(mountPath, analysisPath string) []rekordbox.Cue {

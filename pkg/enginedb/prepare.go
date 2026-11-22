@@ -325,6 +325,22 @@ func stageOwnedMovesWithPath(ctx context.Context, tx *sql.Tx, prepared []prepare
 			continue // a remote-only import must not identify or remove absent local sources
 		}
 		if pathMatch != nil {
+			// A folded path can have more than one export record on a
+			// case-sensitive volume. Pick the first unused candidate before
+			// carrying the Engine row's edits onto it.
+			if _, taken := owned[pathMatch.track.ID]; taken {
+				pathMatch = nil
+				for _, candidate := range byPath[bridgePathKey(oldPath)] {
+					if _, taken := owned[candidate.track.ID]; !taken {
+						pathMatch = candidate
+						break
+					}
+				}
+				if pathMatch == nil {
+					rows.Close()
+					return nil, fmt.Errorf("ambiguous bridge source ID %d", source)
+				}
+			}
 			var rating sql.NullInt64
 			if err := tx.QueryRowContext(ctx, `SELECT rating FROM Track WHERE id=?`, id).Scan(&rating); err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return nil, err
