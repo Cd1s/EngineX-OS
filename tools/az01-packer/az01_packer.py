@@ -543,31 +543,54 @@ umask 077
 floor=${ENGINEX_DATA_FLOOR_KIB:-@FLOOR@}
 free_kib() { set -- $(stat -f -c '%f %S' /data 2>/dev/null); [ $# = 2 ] && echo $(($1 * ($2 / 1024))); }
 room() { kib=$(free_kib) || return 0; [ "$kib" -ge "$floor" ]; }
-reap() { while IFS= read -r path; do room && return 0; rm -rf -- "$path"; done; return 0; }
+# Only what is ours is removed, and only when nothing else hangs on it: a name with no character outside the alphabet our own
+# names have (mountinfo writes the others as escapes), not a link, no mount point on it or below it (rm -rf would empty a
+# mounted file system before it failed). One mount table is read for all of them, only on this path. A removal that fails
+# leaves the file and the step goes on.
+mounted() { printf '%s\\n' "$mounts" | awk -v p="$1" '$0 == p || index($0, p "/") == 1 { f = 1 } END { exit !f }'; }
+reap() { # <tree|file>: the paths on stdin, oldest first, each removed while the floor is out of reach
+    while IFS= read -r path; do
+        room && return 0
+        case $path in *[!A-Za-z0-9._/-]*) continue ;; esac
+        [ ! -L "$path" ] || continue
+        ! mounted "$path" || continue
+        if [ "$1" = file ]; then [ ! -f "$path" ] || rm -f -- "$path" || :; else rm -rf -- "$path" || :; fi
+    done
+    return 0
+}
 make_room() {
     e=/data/enginex
+    # No mount table, no removal: a mounted file system must never be emptied.
+    mounts=$(awk '{ print $5 }' "${ENGINEX_MOUNTINFO:-/proc/self/mountinfo}" 2>/dev/null) || :
+    [ -n "$mounts" ] || return 0
     # 1. leftovers of interrupted runs
     ls -dtr $e/.prepare.* $e/ui/.install.* $e/bin/enginex-suite.*.tmp $e/Stream/.part-* $e/Stream/.deemix-*.part \
-        $e/shadow-v3/*/.fetch-* 2>/dev/null | reap
+        $e/shadow-v3/*/.fetch-* 2>/dev/null | reap tree
     # 2. the private QML byte-code cache (Qt compiles it again)
-    room || rm -rf -- $e/ui/qml-cache
+    echo $e/ui/qml-cache | reap tree
     # 3. start-up reports beyond the newest three, never the one the marker names
     room || {
         latest=$(cat $e/ui/boot-report-latest 2>/dev/null || :)
         ls -tr $e/logs 2>/dev/null | grep -E '^EngineX-boot-report-[0-9]{8}T[0-9]{6}[.][0-9]{9}Z(-[1-9][0-9]?)?[.]txt$' |
             awk '{ a[NR] = $0 } END { for (i = 1; i <= NR - 3; i++) print a[i] }' |
-            while IFS= read -r n; do [ "$n" = "$latest" ] || echo "$e/logs/$n"; done | reap
+            while IFS= read -r n; do [ "$n" = "$latest" ] || echo "$e/logs/$n"; done | reap file
     }
-    # 4. generated export files the published export no longer names (stream-sync writes them again)
-    pdb=$e/prolink-export/PIONEER/rekordbox/export.pdb
-    room || ! [ -s "$pdb" ] || {
-        named=$(grep -ao '/PIONEER/USBANLZ/P[0-9]*/ANLZ0000[.]DAT' "$pdb" | sed 's|^/PIONEER/USBANLZ/||; s|/.*||' || :)
-        ls -tr $e/prolink-export/PIONEER/USBANLZ 2>/dev/null | grep -E '^P[0-9]+$' |
-            while IFS= read -r n; do case " $(echo $named) " in *" $n "*) ;; *) echo "$e/prolink-export/PIONEER/USBANLZ/$n" ;; esac; done | reap
+    # 4. generated export files the published export no longer names (stream-sync writes them again). Only when that export is the
+    # whole file the bridge wrote and still names some: the marker it writes right after holds the file's size and mtime
+    # (a truncated, replaced or foreign file does not match it), and a name found proves the paths can be read. Else every one stays.
+    room || {
+        p=$e/prolink-export/PIONEER
+        stamp=$(cat $p/rekordbox/.enginex-generated 2>/dev/null || :)
+        ns=${stamp#*:}
+        named=
+        [ -n "$stamp" ] && [ "${stamp%%:*}:${ns%?????????}" = "$(stat -c '%s:%Y' $p/rekordbox/export.pdb 2>/dev/null)" ] &&
+            named=$(grep -ao '/PIONEER/USBANLZ/P[0-9]*/ANLZ0000[.]DAT' $p/rekordbox/export.pdb | sed 's|^/PIONEER/USBANLZ/||; s|/.*||' || :)
+        [ -z "$named" ] || ls -tr $p/USBANLZ 2>/dev/null | grep -E '^P[0-9]+$' |
+            while IFS= read -r n; do case " $(echo $named) " in *" $n "*) ;; *) echo "$p/USBANLZ/$n" ;; esac; done | reap tree
     }
-    # 5. the stream download cache: the names and the order Trim in deemixclient uses
+    # 5. the stream download cache: the names, the order and the regular files only that Trim in deemixclient uses
     room || ls -tr $e/Stream 2>/dev/null | grep -E '^((netease-|soundcloud-|beatport-)?[0-9]+[.](flac|mp3|mp4)|spotify-[A-Za-z0-9]+[.](ogg|flac|mp3|mp4)|applemusic-(i[.])?[A-Za-z0-9]+[.]flac|nas-[0-9a-f]{64}[.][^/]*|subsonic-[A-Za-z0-9_-]*[.][^/]*)$' |
-        while IFS= read -r n; do echo "$e/Stream/$n"; done | reap
+        while IFS= read -r n; do echo "$e/Stream/$n"; done | reap file
 }
 low=
 room || { make_room; room || low=${kib:-0}; }
