@@ -408,7 +408,7 @@ merge_branch() {
 
 rebuild_overlay() {
     local host=$1 slug=$2; shift 2
-    local artifact="tools/dev/.integrate-artifacts/$slug" inner='set -eu; rm -rf tools/dev/.integrate-artifacts; mkdir -p tools/dev/.integrate-artifacts'
+    local artifact="tools/dev/.integrate-artifacts/$slug" inner="set -eu; rm -rf tools/dev/.integrate-artifacts; mkdir -p '$artifact'"
     local file
     for file in "$@"; do
         case $file in
@@ -421,8 +421,8 @@ rebuild_overlay() {
     remote_run "$host" "$inner" --fetch "$artifact:$tmp/artifacts/$slug"
     for file in "$@"; do
         case $file in
-            rootfs-overlay/*libengine-ui-hook.so) cmp -s "$ROOT/rootfs-overlay/etc/enginex/libengine-ui-hook.so" "$tmp/artifacts/$slug/libengine-ui-hook.so" || { echo "prebuilt hook is out of sync: $file" >&2; return 1; } ;;
-            rootfs-overlay/*libedisksd-hook.so) cmp -s "$ROOT/rootfs-overlay/etc/enginex/libedisksd-hook.so" "$tmp/artifacts/$slug/libedisksd-hook.so" || { echo "prebuilt hook is out of sync: $file" >&2; return 1; } ;;
+            rootfs-overlay/*libengine-ui-hook.so) cmp -s "$worktree/$file" "$tmp/artifacts/$slug/libengine-ui-hook.so" || { echo "prebuilt hook is out of sync: $file" >&2; return 1; } ;;
+            rootfs-overlay/*libedisksd-hook.so) cmp -s "$worktree/$file" "$tmp/artifacts/$slug/libedisksd-hook.so" || { echo "prebuilt hook is out of sync: $file" >&2; return 1; } ;;
         esac
     done
 }
