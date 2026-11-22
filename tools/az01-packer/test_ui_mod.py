@@ -4109,6 +4109,68 @@ assert.equal(JSON.stringify([{deck: 1, player: undefined}]), '[{"deck":1}]');
 assert.equal(JSON.stringify([{deck: 1, player: 3 || undefined}]), '[{"deck":1,"player":3}]');
 """)
 
+    # A CDJ on a console's Line In lane, this unit's Pro DJ Link switch off: stream-sync sets the fallback
+    # "prolink-off" (TestConsoleLineCDJLaneSaysWhyWhenProlinkIsOff) and the lane's busy line, which shows a
+    # reason for as long as the lane has no waveform to draw, says so. Nothing else about that line changes.
+    PROLINK_OFF = "Pro DJ Link is off: no CDJ waveform"
+    OLD_REASONS = ('{streaming: "Streaming: no file to copy from CDJ.", link: "rekordbox Link: no file to copy from CDJ.", '
+                   'media: "CD or 2nd USB: no file to copy from CDJ.", network: "Could not load via network.", '
+                   'timeout: "Failed to open file within appropriate time."')
+
+    def _busy_text_line(self):
+        return next(l for l in bp.SHADOW_BUSY.splitlines() if l.strip().startswith("text: (["))
+
+    @unittest.skipUnless(shutil.which("node"), "node needed to evaluate the lane's reason expression")
+    def test_the_busy_line_says_why_a_console_cdj_has_no_waveform_when_prolink_is_off(self):
+        line = self._busy_text_line()
+        self.assertIn(self.OLD_REASONS, line)  # the five old reasons, word for word and in their order
+        expr = line.strip()[len("text: "):]
+
+        def shown(why):
+            js = "const scDisplay = {busyState: 0}; const scBusy = {why: %s}; const retried = 0; console.log(JSON.stringify(%s))" % (json.dumps(why), expr)
+            return json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
+
+        self.assertEqual(shown("prolink-off"), self.PROLINK_OFF + " ")
+        for code, text in (("streaming", "Streaming: no file to copy from CDJ."), ("link", "rekordbox Link: no file to copy from CDJ."),
+                           ("media", "CD or 2nd USB: no file to copy from CDJ."), ("network", "Could not load via network."),
+                           ("timeout", "Failed to open file within appropriate time.")):
+            self.assertEqual(shown(code), text + " ", code)
+        self.assertEqual(shown(""), "  ")  # no reason: the blank it always was
+        # The code is not a retry, and the line's gate is the one it always had: busyState 0, a live fresh sample with a fallback.
+        self.assertIn('readonly property int retried: scDisplay.busyState > 3 || ["network", "timeout"].indexOf(scBusy.why) >= 0 ? 1 : 0', bp.SHADOW_BUSY)
+        self.assertIn('readonly property string why: scDisplay.busyState === 0 && scDisplay.live && scDisplay.sample && !scDisplay.sample.stale && scDisplay.sample.fallback || ""', bp.SHADOW_BUSY)
+
+    def test_the_prolink_off_reason_has_its_four_columns_and_a_run_time_lookup(self):
+        rows = bp.load_dict()
+        self.assertEqual(rows[self.PROLINK_OFF], {"zh-Hans": "Pro DJ Link 未开启：不显示 CDJ 波形", "zh-Hant": "Pro DJ Link 未開啟：不顯示 CDJ 波形",
+                                                 "es": "Pro DJ Link desactivado: sin forma de onda de CDJ"})
+        line = self._busy_text_line()
+        for lang in ("zh-Hans", "zh-Hant", "es"):
+            text = bp.translate(line, {en: t[lang] for en, t in rows.items()}, set(), live=True)
+            own = rows[self.PROLINK_OFF][lang]
+            self.assertIn('"prolink-off": (Math.scI18n ? Math.scI18n.t(%s) : %s)' % (json.dumps(own, ensure_ascii=False), json.dumps(own, ensure_ascii=False)), text, lang)
+            self.assertNotIn("Pro DJ Link is off", text, lang)  # no English left in a translated pack
+        # The English pack keeps the text as it is; the code is never translated.
+        en = bp.translate(line, {k: k for k in rows}, set(), live=True)
+        self.assertIn('"prolink-off": (Math.scI18n ? Math.scI18n.t("%s") : "%s")' % (self.PROLINK_OFF, self.PROLINK_OFF), en)
+
+    def test_the_prolink_off_reason_is_in_every_built_pack_behind_the_run_time_lookup(self):
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found")
+        rows = bp.load_dict()
+        with tempfile.TemporaryDirectory(prefix="ui-prolink-off-") as tmp:
+            res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(Path(tmp) / "packs")], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            for lang in ("en", "zh-Hans", "zh-Hant", "es"):
+                lane = (Path(tmp) / "packs" / lang / "Skins/Embedded/Views/Common/Waveform/Waveform.qml").read_text(encoding="utf-8")
+                own = rows[self.PROLINK_OFF][lang] if lang != "en" else self.PROLINK_OFF
+                self.assertIn('"prolink-off": (Math.scI18n ? Math.scI18n.t(%s) : %s)' % (json.dumps(own, ensure_ascii=False), json.dumps(own, ensure_ascii=False)), lane, lang)
+                # The dictionary the run-time lookup reads has the text in every language.
+                main = (Path(tmp) / "packs" / lang / "Skins/Embedded/EmbeddedMain.qml").read_text(encoding="utf-8")
+                for text in ([self.PROLINK_OFF] + list(rows[self.PROLINK_OFF].values())):
+                    self.assertIn(text, main, (lang, text))
+
 
 class UiModBuildTest(unittest.TestCase):
     def test_crossfader_reverse_uses_the_stock_switch_in_all_languages(self):

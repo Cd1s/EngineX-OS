@@ -7414,7 +7414,8 @@ SHADOW_BUSY = r"""
             id: scBusy
             // Auto mode, a CDJ this renderer draws because Engine cannot have its file
             // (sample.fallback, cdjFallback in stream-sync): the same line says why, for
-            // 8 s per track, and for as long as the lane has no waveform to draw.
+            // 8 s per track, and for as long as the lane has no waveform to draw. A console's
+            // Line In lane with a CDJ and this unit's Pro DJ Link switch off says "prolink-off".
             readonly property string why: scDisplay.busyState === 0 && scDisplay.live && scDisplay.sample && !scDisplay.sample.stale && scDisplay.sample.fallback || ""
             readonly property string whyKey: why === "" ? "" : why + scDisplay.sample.key
             property string told: ""
@@ -7434,7 +7435,7 @@ SHADOW_BUSY = r"""
                     anchors.verticalCenter: parent.verticalCenter
                     color: Style.font02Color; font: Style.fontH1
                     readonly property int retried: scDisplay.busyState > 3 || ["network", "timeout"].indexOf(scBusy.why) >= 0 ? 1 : 0
-                    text: (["Downloading", "Loading", "Waiting for source analysis", "File unavailable.", "Failed to open file within appropriate time.", "Could not load via network."][scDisplay.busyState - 1] || {streaming: "Streaming: no file to copy from CDJ.", link: "rekordbox Link: no file to copy from CDJ.", media: "CD or 2nd USB: no file to copy from CDJ.", network: "Could not load via network.", timeout: "Failed to open file within appropriate time."}[scBusy.why] || " ") + [" ", " " + "Retrying…"][retried]
+                    text: (["Downloading", "Loading", "Waiting for source analysis", "File unavailable.", "Failed to open file within appropriate time.", "Could not load via network."][scDisplay.busyState - 1] || {streaming: "Streaming: no file to copy from CDJ.", link: "rekordbox Link: no file to copy from CDJ.", media: "CD or 2nd USB: no file to copy from CDJ.", network: "Could not load via network.", timeout: "Failed to open file within appropriate time.", "prolink-off": "Pro DJ Link is off: no CDJ waveform"}[scBusy.why] || " ") + [" ", " " + "Retrying…"][retried]
                 }
             } }
         }
