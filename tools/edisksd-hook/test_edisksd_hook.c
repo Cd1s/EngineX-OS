@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 static char test_media[PATH_MAX],test_library[PATH_MAX],test_legacy_library[PATH_MAX],test_runtime[PATH_MAX],test_utab[PATH_MAX];
 static char test_prepare_state[PATH_MAX];
@@ -241,6 +242,18 @@ static void write_file(const char *path,const char *text) {
 static void expect_file(const char *path,const char *text) {
     char buf[256];int fd=open(path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);assert(fd>=0);
     ssize_t n=read(fd,buf,sizeof buf);assert(n==(ssize_t)strlen(text)&&!memcmp(buf,text,(size_t)n));close(fd);
+}
+static void expect_guardian(const char *path,const char *prefix) {
+    char buf[256];int fd=open(path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);assert(fd>=0);
+    ssize_t n=read(fd,buf,sizeof buf-1);assert(n>0);buf[n]=0;close(fd);
+    assert(!strncmp(buf,prefix,strlen(prefix)));
+    char *p=strstr(buf," --timeout ");assert(p);
+    char *end=NULL;long long ms=strtoll(p+11,&end,10);assert(ms>0&&end&&strcmp(end,"ms\n")==0);
+}
+static void test_guardian_window_floor(void) {
+    assert(!guardian_window_available(999));
+    assert(guardian_window_available(1000));
+    puts("guardian soft window floor skips exhausted starts: PASS");
 }
 static void test_paths_and_copy(const char *root) {
     char volume_path[PATH_MAX],lib[PATH_MAX],outside[PATH_MAX],src[PATH_MAX],dst[PATH_MAX],p[PATH_MAX];
@@ -890,8 +903,8 @@ static void test_guardian_from_the_data_bundle(const char *root) {
         snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
         struct libmnt_context c={.target=target,.source="/dev/sdx1"};
         assert(!mnt_context_mount(&c)&&c.status==1);
-        snprintf(want,sizeof want,"%s --heal-mount %s --data-only\n",rootfs?"system":"bundle",target);
-        expect_file(log,want);assert(!unlink(log));
+        snprintf(want,sizeof want,"%s --heal-mount %s --data-only",rootfs?"system":"bundle",target);
+        expect_guardian(log,want);assert(!unlink(log));
         assert(!umount2(target,UMOUNT_NOFOLLOW));
     }
     // BH2-A1-7: the same stick after a player left its settings folder on it is still healed, not converted.
@@ -899,7 +912,7 @@ static void test_guardian_from_the_data_bundle(const char *root) {
     join(test_rb_bridge,root,"heal-bridge");snprintf(script,sizeof script,"#!/bin/sh\necho \"bridge $*\" >> '%s'\n",log);write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
     struct libmnt_context settings={.target=target,.source="/dev/sdx1"};
     assert(!mnt_context_mount(&settings)&&settings.status==1);
-    snprintf(want,sizeof want,"system --heal-mount %s --data-only\n",target);expect_file(log,want);
+    snprintf(want,sizeof want,"system --heal-mount %s --data-only",target);expect_guardian(log,want);
     assert(!umount2(target,UMOUNT_NOFOLLOW));
     test_guardian_system[0]=test_guardian_bundle[0]=0;
     puts("REAL PRIVATE NAMESPACE BH2-A1-1: an Engine stick is healed by the data bundle's engine-guardian where the rootfs has none, by the rootfs's where it has; BH2-A1-7: also with a player's settings folder on it: PASS");
@@ -1104,7 +1117,7 @@ static void test_heal_before_visible(const char *root) {
     snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
     struct libmnt_context c={.target=target,.source="/dev/sdu1"};
     assert(!mnt_context_mount(&c)&&c.status==1);
-    snprintf(expect,sizeof expect,"private --heal-mount %s --data-only\n",target);expect_file(log,expect);
+    snprintf(expect,sizeof expect,"private --heal-mount %s --data-only",target);expect_guardian(log,expect);
     join(p,target,"Engine Library/Database2/m.db");expect_file(p,"healed\n");
     assert(count_mounts(target)==1);assert(!umount2(target,UMOUNT_NOFOLLOW));unlink(log);
     // A stick without an Engine database is not healed.
@@ -1116,18 +1129,28 @@ static void test_heal_before_visible(const char *root) {
     join(p,hfs,"Engine Library/Database2/m.db");write_file(p,"made on the Mac\n");
     snprintf(test_disk,sizeof test_disk,"%s",hfs);test_disk_ro=1;snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);c.status=0;
     unsigned views_before=count_views();
-    assert(!mnt_context_mount(&c)&&c.status==1);expect_file(log,expect);
+    assert(!mnt_context_mount(&c)&&c.status==1);expect_guardian(log,expect);
     join(p,target,"Engine Library/Database2/m.db");expect_file(p,"healed\n");
     join(p,hfs,"Engine Library/Database2/m.db");expect_file(p,"made on the Mac\n");
     assert(count_views()==views_before+1);
     assert(!unmount_dispatch(&c,real_unmount));test_hfs_target[0]=0;test_disk_ro=0;unlink(log);
+    // A guardian that enforces its own hard timeout must still create the
+    // slow marker, even when it exits before the hook's poll sees ETIMEDOUT.
+    char exit_marker[PATH_MAX];
+    if(!heal_marker(disk,exit_marker))unlink(exit_marker);
+	snprintf(script,sizeof script,"#!/bin/sh\necho \"$*\" >> '%s'\nexit 124\n",log);write_file(test_guardian_system,script);
+    snprintf(test_disk,sizeof test_disk,"%s",disk);c.status=0;
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    snprintf(expect,sizeof expect,"--heal-mount %s --data-only",target);expect_guardian(log,expect);
+    if(heal_marker(disk,exit_marker)||access(exit_marker,F_OK)!=0)abort();
+    assert(!umount2(target,UMOUNT_NOFOLLOW));unlink(log);unlink(exit_marker);
     // A heal that runs out of its whole window: killed once, then skipped, never after the visible mount.
     snprintf(script,sizeof script,"#!/bin/sh\necho \"$*\" >> '%s'\nsleep 5\n",log);write_file(test_guardian_system,script);
     snprintf(test_disk,sizeof test_disk,"%s",disk);
-    snprintf(expect,sizeof expect,"--heal-mount %s --data-only\n",target);
+    snprintf(expect,sizeof expect,"--heal-mount %s --data-only",target);
     for(int i=0;i<2;i++) {
         int64_t t0=now_ms();c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
-        assert(now_ms()-t0<(i?1000:3500));expect_file(log,expect);
+        assert(now_ms()-t0<(i?1000:3500));expect_guardian(log,expect);
         assert(!umount2(target,UMOUNT_NOFOLLOW));
     }
     unlink(log);unsetenv("EDISKSD_TEST_PID");
@@ -2351,7 +2374,7 @@ int main(int argc,char **argv) {
     join(test_prepare_state,root,"run/enginex-usb-preparing");char prep_run[PATH_MAX];join(prep_run,root,"run");assert(!make_dirs(prep_run));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
-    assert(!make_dirs(test_media));test_paths_and_copy(root);test_eject_stops_the_background_import(root);test_eject_runs_cue_writeback(root);test_eject_writeback_overrun(root);test_only_an_eject_marks_the_stick(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
+    assert(!make_dirs(test_media));test_guardian_window_floor();test_paths_and_copy(root);test_eject_stops_the_background_import(root);test_eject_runs_cue_writeback(root);test_eject_writeback_overrun(root);test_only_an_eject_marks_the_stick(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
     if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_hfs_gen2_lkl_policy(root,argv[0]);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_removal_detaches_a_view_in_use(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);test_hfs_view_scale_and_47879b10_253(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);

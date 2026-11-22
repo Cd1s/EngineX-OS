@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -43,12 +44,22 @@ func mp3GridBudget(deadline time.Duration, mountOnly bool) time.Duration {
 	}
 }
 
+const guardianCleanupReserve = 3 * time.Second
+
+func guardianRemaining(start time.Time, deadline time.Duration) time.Duration {
+	if deadline <= 0 {
+		return 0
+	}
+	return time.Until(start.Add(deadline))
+}
+
 // Guardian heals or inspects Engine OS 5.0.4 libraries once and prints JSON.
 //
 // --watch is retired for the reason rb-bridge's is: healing a library Engine
 // has open races Engine's own writes. Repairs run from the mount hook, before
 // Engine attaches. Old units still pass --watch, so it exits at once.
 func Guardian(args []string, out, errOut io.Writer) int {
+	commandStart := time.Now()
 	fs := flag.NewFlagSet("engine-guardian", flag.ContinueOnError)
 	fs.SetOutput(errOut)
 	mount := fs.String("heal-mount", "", "mounted volume containing Engine Library/Database2")
@@ -76,11 +87,17 @@ func Guardian(args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(errOut, "timeout must not be negative")
 		return 2
 	}
+	var hardTimer *time.Timer
 	if *deadline > 0 {
 		// Vendor images need not ship a timeout executable or BusyBox applet.
-		// This CLI-only deadline also bounds a locked repair before Engine starts.
-		timer := time.AfterFunc(*deadline, func() { os.Exit(124) })
-		defer timer.Stop()
+		hardBudget := *deadline
+		if *dataOnly {
+			hardBudget += guardianCleanupReserve + time.Second
+		}
+		// Data-only callers need a hard-stop cushion so the hook deadline wins
+		// the race. Other callers keep their exact historical timeout.
+		hardTimer = time.AfterFunc(time.Until(commandStart.Add(hardBudget)), func() { os.Exit(124) })
+		defer hardTimer.Stop()
 	}
 	if *checkCopy != "" {
 		if fs.NArg() != 0 || *mount != "" || *status || *dataOnly || *reserve || *fixGrids || *bootReport {
@@ -125,9 +142,12 @@ func Guardian(args []string, out, errOut io.Writer) int {
 		var r dbhealer.Report
 		var mp3Report *enginedb.MP3GridReport
 		var err error
-		runMP3Fix := func(mountOnly bool) {
+		runMP3Fix := func(budget time.Duration, mountOnly bool) {
+			if budget < 0 {
+				return
+			}
 			mr, ferr := enginedb.FixMP3Grids(context.Background(), m, enginedb.MP3GridOptions{
-				Budget: mp3GridBudget(*deadline, mountOnly),
+				Budget: mp3GridBudget(budget, mountOnly),
 			})
 			mp3Report = &mr
 			if ferr != nil {
@@ -145,7 +165,7 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			r.ReserveFixed, err = dbhealer.NormalizeDatabase2(filepath.Join(m, "Engine Library", "Database2"))
 			r.Healthy = err == nil
 			if err == nil && *fixGrids {
-				runMP3Fix(false)
+				runMP3Fix(guardianRemaining(commandStart, *deadline), false)
 			}
 		case *fixGrids && !*dataOnly:
 			r.Mount, r.CheckedAt = m, time.Now().UTC()
@@ -159,18 +179,41 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			// Edits the Web Console queued while Engine had this library open
 			// (Relocate, Hot Cues): this runs from the mount hook before Engine
 			// opens it again.
+			if enginedb.LibraryInUse(m) {
+				r.Mount, r.CheckedAt, err = m, time.Now().UTC(), enginedb.ErrLibraryInUse
+				break
+			}
 			if n, perr := enginedb.ApplyPending(context.Background(), m); perr != nil {
+				if errors.Is(perr, enginedb.ErrLibraryInUse) {
+					r.Mount, r.CheckedAt, err = m, time.Now().UTC(), perr
+					break
+				}
 				fmt.Fprintln(errOut, "engine-guardian: queued library edits not applied:", perr)
 			} else if n > 0 {
 				fmt.Fprintf(errOut, "engine-guardian: applied %d queued library edits\n", n)
 			}
+			mountCtx := context.Background()
+			cancelMount := func() {}
+			if *deadline > 0 {
+				remaining := guardianRemaining(commandStart, *deadline)
+				if remaining < 0 {
+					remaining = 0
+				}
+				mountCtx, cancelMount = context.WithTimeout(context.Background(), remaining)
+			}
+			budgetExpired := false
 			if *dataOnly {
-				r, err = dbhealer.HealMountDataOnly(m, *sessions)
+				r, err = dbhealer.HealMountDataOnlyContext(mountCtx, m, *sessions)
+				budgetExpired = mountCtx.Err() != nil
 			} else {
 				r, err = dbhealer.HealMount(m, *sessions)
 			}
-			if err == nil {
-				runMP3Fix(*dataOnly)
+			cancelMount()
+			if err == nil && !budgetExpired {
+				remaining := guardianRemaining(commandStart, *deadline)
+				if *deadline == 0 || remaining >= 500*time.Millisecond {
+					runMP3Fix(remaining, *dataOnly)
+				}
 			}
 		}
 		if err == nil && !*status {
