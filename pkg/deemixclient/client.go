@@ -61,6 +61,8 @@ type Client struct {
 
 	mu       sync.Mutex
 	lastUsed map[string]time.Time
+	// One LinkAs at a time: two callers for one name share the temporary name.
+	linkMu sync.Mutex
 }
 type QueueStatus struct {
 	ID       string  `json:"id"`
@@ -257,6 +259,8 @@ func (c *Client) LinkAs(src *Download, name string) (*Download, error) {
 	if dst == src.Path {
 		return src, nil
 	}
+	c.linkMu.Lock()
+	defer c.linkMu.Unlock()
 	tmp := filepath.Join(c.DownloadDir, ".part-as-"+name)
 	os.Remove(tmp)
 	if err := os.Link(src.Path, tmp); err != nil {

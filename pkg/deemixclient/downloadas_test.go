@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -28,5 +29,40 @@ func TestDownloadAsKeepsAnIndependentName(t *testing.T) {
 	}
 	if _, err := c.DownloadAs(context.Background(), providers.Track{ID: "123", Provider: "deezer"}, "../x", nil); err == nil {
 		t.Fatal("path in name accepted")
+	}
+}
+
+// Two callers giving one file the same second name at the same moment (a queued job and a deck load of the
+// same track) both succeed: they share the temporary name, and one used to remove the other's link.
+func TestLinkAsTwoCallersForOneName(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "123.flac")
+	if err := os.Rename(writeFLAC(t, dir), file); err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{DownloadDir: dir}
+	src := &Download{Path: file}
+	const callers = 20
+	var start, done sync.WaitGroup
+	start.Add(1)
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		done.Add(1)
+		go func() {
+			defer done.Done()
+			start.Wait()
+			if _, err := c.LinkAs(src, "soundcloud-77"); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	start.Done()
+	done.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("LinkAs: %v", err)
+	}
+	if c.Cached("soundcloud-77") == nil || c.Cached("123") == nil {
+		t.Fatal("both names must stay cached")
 	}
 }
