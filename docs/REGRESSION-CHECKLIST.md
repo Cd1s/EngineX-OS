@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (389 Rows)
+## Regression Table (390 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -436,3 +436,4 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 387 | **The CLI package's tests keep the drive status file and their test drive off the build host's `/run` and `/media`** (host trace, 2026-11-22) | `internal/cli::TestDriveStatusStaysOffTheHost`, `internal/cli::TestLocalExportsFollowMediaRoot` | Release workflow Step 2 |
 | 388 | **A set-up step that fails at every start of the player still ends in the stock fallback (fourth start), and the boot test keeps its mark off the host** (deck-side audit, 2026-11-22) | `tests/test_boot_safety.sh` (`runtime-broken` case, host-mark check) | Release workflow Step 2 |
 | 389 | **A malformed SMB directory listing from a NAS is an error for that folder, not a crash** (GO-2026-5051, static checks 2026-11-22) | `pkg/providers::TestSMBListingTurnsALibraryPanicIntoAnError`, `pkg/providers::TestSMBListingPassesAGoodReplyThrough` | Release workflow Step 2 |
+| 390 | **Two callers giving one cached file the same second name at the same moment both succeed** (bug hunt, 2026-11-22) | `pkg/deemixclient::TestLinkAsTwoCallersForOneName` | Release workflow Step 2 |
