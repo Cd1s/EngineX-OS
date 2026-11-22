@@ -117,7 +117,7 @@ func TestFailedImportRollsBackBridgeSchema(t *testing.T) {
 	db := dbOpen(t, root)
 	// Existing tracks are now native; they are referenced, and the import then
 	// fails late while writing playlist entries.
-	if _, e := db.Exec(`DROP TABLE BridgeState;DROP TABLE BridgeAnalysis;DROP TABLE BridgePlaylist;DROP TABLE BridgeLibrary;DROP TABLE BridgeWritten;DROP TABLE BridgeFastBase;
+	if _, e := db.Exec(`DROP TABLE BridgeState;DROP TABLE BridgeAnalysis;DROP TABLE BridgePlaylist;DROP TABLE BridgeLibrary;DROP TABLE BridgeWritten;DROP TABLE BridgeFastBase;DROP TABLE BridgeSynced;
 CREATE TRIGGER fail_import BEFORE INSERT ON PlaylistEntity BEGIN SELECT RAISE(ABORT,'injected'); END;`); e != nil {
 		t.Fatal(e)
 	}

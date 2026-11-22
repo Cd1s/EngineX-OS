@@ -35,8 +35,12 @@ func BuildCueSections(cues []Cue, extended bool) [][]byte {
 		if extended {
 			countAt = 4
 		} else {
-			be.PutUint16(payload[4:], 0xffff)
-			be.PutUint32(payload[8:], uint32(len(selected)))
+			be.PutUint16(payload[4:], 0)
+			memCount := uint32(0xffffffff)
+			if kind == 0 && len(selected) > 0 {
+				memCount = uint32(len(selected))
+			}
+			be.PutUint32(payload[8:], memCount)
 		}
 		be.PutUint16(payload[countAt:], uint16(len(selected)))
 
@@ -53,10 +57,10 @@ func BuildCueSections(cues []Cue, extended bool) [][]byte {
 				be.PutUint32(p[4:], 28)
 				be.PutUint32(p[8:], 56)
 				be.PutUint32(p[12:], c.HotCue)
-				if c.Active {
+				if c.Loop && c.Active {
 					be.PutUint32(p[16:], 4)
 				}
-				be.PutUint32(p[20:], 0x100000)
+				be.PutUint32(p[20:], 0x10000)
 				first, last := uint16(i-1), uint16(i+1)
 				if i == 0 {
 					first = 0xffff
@@ -89,8 +93,16 @@ func BuildCueSections(cues []Cue, extended bool) [][]byte {
 			p[19] = 0xe8
 			be.PutUint32(p[20:], c.TimeMS)
 			be.PutUint32(p[24:], end)
-			p[28] = c.ColorID
-			p[29] = 1
+			if c.HotCue == 0 {
+				colorID := c.ColorID
+				if colorID == 0 && c.Color != [4]byte{} {
+					colorID = NearestMemoryColorID(c.Color)
+				}
+				if colorID > 8 {
+					colorID = 0
+				}
+				p[28] = colorID
+			}
 			be.PutUint16(p[36:], c.LoopNumerator)
 			be.PutUint16(p[38:], c.LoopDenominator)
 			be.PutUint32(p[40:], uint32(2*len(label)))
@@ -98,12 +110,19 @@ func BuildCueSections(cues []Cue, extended bool) [][]byte {
 				be.PutUint16(p[44+2*j:], v)
 			}
 			q := 44 + 2*len(label)
-			colorCode := c.ColorCode
-			if colorCode == 0 && c.Color != [4]byte{} {
-				colorCode = NearestCueColorCode(c.Color)
+			if c.HotCue > 0 {
+				colorCode := c.ColorCode
+				rgb := c.Color
+				if colorCode == 0 && rgb != [4]byte{} {
+					colorCode = NearestCueColorCode(rgb)
+				}
+				if rgb == [4]byte{} && colorCode > 0 && int(colorCode) <= len(rekordboxCuePalette) {
+					pal := rekordboxCuePalette[colorCode-1]
+					rgb = [4]byte{255, pal[0], pal[1], pal[2]}
+				}
+				p[q] = colorCode
+				copy(p[q+1:], rgb[1:])
 			}
-			p[q] = colorCode
-			copy(p[q+1:], c.Color[1:])
 			payload = append(payload, p...)
 		}
 
@@ -160,7 +179,13 @@ func RewriteANLZCues(raw []byte, cues []Cue, extended bool, onlyIfCueSectionPres
 		return raw, false, nil
 	}
 
-	newCueSecs := BuildCueSections(cues, extended)
+	// Real rekordbox .EXT files carry both PCOB (which holds the active-loop
+	// status flag) and PCO2 (which holds comments, hot cues D..H, and colors).
+	var newCueSecs [][]byte
+	newCueSecs = append(newCueSecs, BuildCueSections(cues, false)...)
+	if extended {
+		newCueSecs = append(newCueSecs, BuildCueSections(cues, true)...)
+	}
 	var ordered [][]byte
 	if insertAt < 0 {
 		ordered = append(ordered, kept...)

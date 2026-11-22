@@ -2496,6 +2496,22 @@ static int unmount_view(struct libmnt_context *ctx,struct owned_view *v,int (*re
  failed: // edisksd reports only what this returns (mnt_context_get_excode): -1 read "Operation not permitted"
     mnt_context_set_syscall_status(ctx,-(saved?saved:EBUSY));errno=saved?saved:EBUSY;return rc?rc:-errno;
 }
+#ifndef WRITEBACK_TIMEOUT_MS
+#define WRITEBACK_TIMEOUT_MS 12000
+#endif
+// #321: write modified Engine Hot Cues / Loops back to a writable rekordbox stick
+// on a normal Eject before the volume is unmounted. Never runs on pull/lazy detach
+// or read-only HFS+ overlay views, and failures never block unmount.
+static void writeback_cues_on_eject(const char *target) {
+    struct statvfs v;
+    if(statvfs(target,&v)||(v.f_flag&ST_RDONLY))return;
+    char state[PATH_MAX];
+    if(path_join(state,sizeof state,target,"Engine Library/Database2/.rb-bridge-state.db")||safe_path(state,0))return;
+    if(!has_export(target))return;
+    const char *rb=RB_BRIDGE_PATH();
+    char *const a[]={(char *)rb,"--mount-path",(char *)target,"--writeback-cues","--on-eject",NULL};
+    if(run(a,now_ms()+WRITEBACK_TIMEOUT_MS))note("cue write-back failed on",target,errno);
+}
 static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt_context *)) {
     const char *target=mnt_context_get_target(ctx);
     if(!volume(target))return real(ctx);
@@ -2516,6 +2532,9 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
     // conversion holds for up to its whole budget (BH-O55-3).
     struct hfs_gen2_mount gen2_rec;
     if(!hfs_gen2_find_record(target,&gen2_rec)) {
+        if(eager&&!target_err&&!hfs_gen2_source_pulled(&gen2_rec)&&hfs_gen2_pid_alive((pid_t)gen2_rec.pid,gen2_rec.pid_starttime)) {
+            writeback_cues_on_eject(target);
+        }
         in_hook=1;
         int rc=hfs_gen2_unmount(ctx,&gen2_rec,real);
         int saved=errno;if(eager&&rc)clear_eject(EJECTED,target);in_hook=0;errno=saved;return rc;
@@ -2525,6 +2544,7 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
     if(!v) {
         if(HFS_RW_MOUNTED(target)) {
             if(HFS_DEV_PRESENT(target,mnt_context_get_source(ctx))) {
+                if(eager)writeback_cues_on_eject(target);
                 int fd=open(target,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
                 if(fd>=0){syncfs(fd);close(fd);}
                 int (*set_lazy)(struct libmnt_context *,int)=REAL_MNT_CONTEXT_ENABLE_LAZY();
@@ -2536,6 +2556,8 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
             } else {
                 note("device gone, keeping lazy unmount for rw HFS+ volume",target,0);
             }
+        } else if(eager) {
+            writeback_cues_on_eject(target);
         }
         in_hook=1;int rc=real(ctx),saved=errno;if(eager&&(rc||mnt_context_get_status(ctx)!=1))clear_eject(EJECTED,target);in_hook=0;errno=saved;return rc;
     }

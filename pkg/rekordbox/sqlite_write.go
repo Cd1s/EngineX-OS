@@ -8,8 +8,42 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 )
+
+var rekordboxMemoryColors = [8][3]byte{
+	{255, 0, 127}, // 1 Pink
+	{255, 0, 0},   // 2 Red
+	{255, 127, 0}, // 3 Orange
+	{255, 255, 0}, // 4 Yellow
+	{0, 255, 0},   // 5 Green
+	{0, 255, 255}, // 6 Aqua
+	{0, 0, 255},   // 7 Blue
+	{127, 0, 255}, // 8 Purple
+}
+
+// NearestMemoryColorID maps an RGB color to the closest 1-based index in
+// rekordbox's 8-entry memory cue color table (1..8). Returns 0 if rgb is zero.
+func NearestMemoryColorID(rgb [4]byte) byte {
+	if rgb == [4]byte{} {
+		return 0
+	}
+	best, distance := byte(1), int(^uint(0)>>1)
+	for i, p := range rekordboxMemoryColors {
+		d := 0
+		for j := range p {
+			delta := int(p[j]) - int(rgb[j+1])
+			d += delta * delta
+		}
+		if d < distance {
+			best, distance = byte(i+1), d
+		}
+	}
+	return best
+}
 
 // NearestCueColorCode maps an RGB color to the closest 1-based index in
 // rekordboxCuePalette (1..62). Returns 0 if rgb has no alpha/color set.
@@ -35,10 +69,28 @@ func NearestCueColorCode(rgb [4]byte) byte {
 // database (SQLCipher 4 encrypted or plaintext SQLite) for the specified
 // content_id -> cues map, writing the resulting database to dstPath.
 func UpdateOneLibraryCues(ctx context.Context, dbPath string, updates map[uint32][]Cue, dstPath string) error {
+	_, err := UpdateOneLibraryCuesKeys(ctx, dbPath, updates, dstPath, nil)
+	return err
+}
+
+// UpdateTimes is where UpdateOneLibraryCuesKeys spent its time (#321 log line).
+type UpdateTimes struct {
+	Decrypt, Edit, Encrypt time.Duration
+}
+
+// UpdateOneLibraryCuesKeys is UpdateOneLibraryCues with the SQLCipher keys of kc: with the
+// keys a caller already holds, the decrypt and the encrypt derive nothing (#321).
+func UpdateOneLibraryCuesKeys(ctx context.Context, dbPath string, updates map[uint32][]Cue, dstPath string, kc *KeyCache) (UpdateTimes, error) {
+	var tm UpdateTimes
+	err := updateOneLibraryCues(ctx, dbPath, updates, dstPath, kc, &tm)
+	return tm, err
+}
+
+func updateOneLibraryCues(ctx context.Context, dbPath string, updates map[uint32][]Cue, dstPath string, kc *KeyCache, tm *UpdateTimes) error {
 	if len(updates) == 0 {
 		return nil
 	}
-	return rewriteOneLibrary(ctx, dbPath, dstPath, func(plainPath string) error {
+	return rewriteOneLibrary(ctx, dbPath, dstPath, kc, tm, func(plainPath string) error {
 		return applyCueUpdatesSQLite(ctx, plainPath, updates)
 	})
 }
@@ -49,7 +101,7 @@ func UpdateOneLibraryMetadata(ctx context.Context, dbPath string, updates map[ui
 	if len(updates) == 0 {
 		return nil
 	}
-	return rewriteOneLibrary(ctx, dbPath, dstPath, func(plainPath string) error {
+	return rewriteOneLibrary(ctx, dbPath, dstPath, nil, &UpdateTimes{}, func(plainPath string) error {
 		return applyMetadataUpdatesSQLite(ctx, plainPath, updates)
 	})
 }
@@ -57,10 +109,18 @@ func UpdateOneLibraryMetadata(ctx context.Context, dbPath string, updates map[ui
 // UpdateOneLibraryEdits applies cue and metadata updates to one decrypted or
 // copied SQLite working file before writing the final export.
 func UpdateOneLibraryEdits(ctx context.Context, dbPath string, cues map[uint32][]Cue, metadata map[uint32]Metadata, dstPath string) error {
+	_, err := UpdateOneLibraryEditsKeys(ctx, dbPath, cues, metadata, dstPath, nil)
+	return err
+}
+
+// UpdateOneLibraryEditsKeys is UpdateOneLibraryEdits with the SQLCipher keys of kc, as
+// UpdateOneLibraryCuesKeys (#321), and where it spent its time.
+func UpdateOneLibraryEditsKeys(ctx context.Context, dbPath string, cues map[uint32][]Cue, metadata map[uint32]Metadata, dstPath string, kc *KeyCache) (UpdateTimes, error) {
+	var tm UpdateTimes
 	if len(cues) == 0 && len(metadata) == 0 {
-		return nil
+		return tm, nil
 	}
-	return rewriteOneLibrary(ctx, dbPath, dstPath, func(plainPath string) error {
+	err := rewriteOneLibrary(ctx, dbPath, dstPath, kc, &tm, func(plainPath string) error {
 		if len(cues) > 0 {
 			if err := applyCueUpdatesSQLite(ctx, plainPath, cues); err != nil {
 				return err
@@ -73,9 +133,12 @@ func UpdateOneLibraryEdits(ctx context.Context, dbPath string, cues map[uint32][
 		}
 		return nil
 	})
+	return tm, err
 }
 
-func rewriteOneLibrary(ctx context.Context, dbPath, dstPath string, apply func(string) error) error {
+// rewriteOneLibrary decrypts (or copies) the export at dbPath, applies apply to the plain
+// copy and writes the result to dstPath, with the keys of kc (nil: derived) and its times in tm.
+func rewriteOneLibrary(ctx context.Context, dbPath, dstPath string, kc *KeyCache, tm *UpdateTimes, apply func(string) error) error {
 	encrypted, err := isEncryptedSQLite(dbPath)
 	if err != nil {
 		return err
@@ -88,10 +151,12 @@ func rewriteOneLibrary(ctx context.Context, dbPath, dstPath string, apply func(s
 		if err != nil {
 			return err
 		}
-		plainPath, err = decryptSQLCipher4ToTemp(ctx, dbPath, []byte(oneLibraryPassphrase))
+		t0 := time.Now()
+		plainPath, err = decryptSQLCipher4ToTempKeys(ctx, dbPath, []byte(oneLibraryPassphrase), kc)
 		if err != nil {
 			return err
 		}
+		tm.Decrypt = time.Since(t0)
 		defer os.Remove(plainPath)
 	} else {
 		// Work on a temp copy so dbPath is never mutated in place.
@@ -103,9 +168,11 @@ func rewriteOneLibrary(ctx context.Context, dbPath, dstPath string, apply func(s
 		plainPath = tmpPlain
 	}
 
+	t0 := time.Now()
 	if err := apply(plainPath); err != nil {
 		return err
 	}
+	tm.Edit = time.Since(t0)
 
 	if !encrypted {
 		return copyFileTo(plainPath, dstPath)
@@ -131,12 +198,20 @@ func rewriteOneLibrary(ctx context.Context, dbPath, dstPath string, apply func(s
 			_ = os.Remove(dstPath)
 		}
 	}()
+	t0 = time.Now()
+	defer func() { tm.Encrypt = time.Since(t0) }()
 	bw := bufio.NewWriterSize(out, 64*1024)
-	if err := EncryptSQLCipher4(ctx, io.LimitReader(in, st.Size()), st.Size(), bw, salt, []byte(oneLibraryPassphrase)); err != nil {
+	if err := encryptSQLCipher4(ctx, io.LimitReader(in, st.Size()), st.Size(), bw, salt, []byte(oneLibraryPassphrase), kc); err != nil {
 		return err
 	}
 	if err := bw.Flush(); err != nil {
 		return err
+	}
+	// The directory first, then the file: the allocation of its clusters reaches the disk before
+	// the entry that names them (#321 review R4b; as bridge's staged copies).
+	if d, err := os.Open(filepath.Dir(out.Name())); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	if err := out.Sync(); err != nil {
 		return err
@@ -165,7 +240,41 @@ func applyCueUpdatesSQLite(ctx context.Context, plainPath string, updates map[ui
 	if err != nil {
 		return err
 	}
+	contentCols, _ := tableColumns(ctx, db, "content")
 	hasBeatLoop := cols["beatloopnumerator"] && cols["beatloopdenominator"]
+	has150FPS := cols["in150framepersec"] && cols["out150framepersec"]
+
+	colNames := []string{"content_id", "kind", "colorTableIndex", "cueComment", "isActiveLoop"}
+	if hasBeatLoop {
+		colNames = append(colNames, "beatLoopNumerator", "beatLoopDenominator")
+	}
+	colNames = append(colNames, "inUsec", "outUsec")
+	if has150FPS {
+		colNames = append(colNames, "in150FramePerSec", "out150FramePerSec")
+	}
+	placeholders := make([]string, len(colNames))
+	for i := range placeholders {
+		placeholders[i] = "?"
+	}
+	insertSQL := fmt.Sprintf("INSERT INTO cue(%s) VALUES(%s)", strings.Join(colNames, ", "), strings.Join(placeholders, ", "))
+
+	var contentSets []string
+	if contentCols["hasmodified"] {
+		contentSets = append(contentSets, "hasModified = 1")
+	}
+	if contentCols["cueupdatecount"] {
+		contentSets = append(contentSets, "cueUpdateCount = COALESCE(cueUpdateCount, 0) + 1")
+	}
+	contentUpdateSQL := ""
+	if len(contentSets) > 0 && contentCols["content_id"] {
+		contentUpdateSQL = "UPDATE content SET " + strings.Join(contentSets, ", ") + " WHERE content_id = ?"
+	}
+
+	contentIDs := make([]uint32, 0, len(updates))
+	for id := range updates {
+		contentIDs = append(contentIDs, id)
+	}
+	sort.Slice(contentIDs, func(i, j int) bool { return contentIDs[i] < contentIDs[j] })
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -173,38 +282,67 @@ func applyCueUpdatesSQLite(ctx context.Context, plainPath string, updates map[ui
 	}
 	defer tx.Rollback()
 
-	for contentID, cues := range updates {
+	for _, contentID := range contentIDs {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM cue WHERE content_id = ?`, contentID); err != nil {
 			return fmt.Errorf("onelibrary: delete cues for %d: %w", contentID, err)
 		}
+		cues := make([]Cue, len(updates[contentID]))
+		copy(cues, updates[contentID])
+		sort.SliceStable(cues, func(i, j int) bool {
+			if cues[i].HotCue != cues[j].HotCue {
+				return cues[i].HotCue < cues[j].HotCue
+			}
+			if cues[i].TimeMS != cues[j].TimeMS {
+				return cues[i].TimeMS < cues[j].TimeMS
+			}
+			if cues[i].Loop != cues[j].Loop {
+				return !cues[i].Loop
+			}
+			return cues[i].EndMS < cues[j].EndMS
+		})
 		for _, c := range cues {
-			colorIdx := int(c.ColorCode)
-			if colorIdx == 0 && c.Color != [4]byte{} {
-				colorIdx = int(NearestCueColorCode(c.Color))
+			var colorIdx int
+			if c.HotCue == 0 {
+				colorIdx = int(c.ColorID)
+				if colorIdx == 0 && c.Color != [4]byte{} {
+					colorIdx = int(NearestMemoryColorID(c.Color))
+				}
+				if colorIdx > 8 {
+					colorIdx = 0
+				}
+			} else {
+				colorIdx = int(c.ColorCode)
+				if colorIdx == 0 && c.Color != [4]byte{} {
+					colorIdx = int(NearestCueColorCode(c.Color))
+				}
 			}
 			active := 0
-			if c.Active {
+			if c.Loop && c.Active {
 				active = 1
 			}
 			inUsec := int64(c.TimeMS) * 1000
-			outUsec := int64(0)
+			outUsec := int64(-1)
+			in150 := (int64(c.TimeMS)*150 + 500) / 1000
+			out150 := int64(-1)
 			if c.Loop && c.EndMS > c.TimeMS {
 				outUsec = int64(c.EndMS) * 1000
+				out150 = (int64(c.EndMS)*150 + 500) / 1000
 			}
+			args := []any{contentID, c.HotCue, colorIdx, c.Name, active}
 			if hasBeatLoop {
-				if _, err := tx.ExecContext(ctx,
-					`INSERT INTO cue(content_id, kind, colorTableIndex, cueComment, isActiveLoop, beatLoopNumerator, beatLoopDenominator, inUsec, outUsec) VALUES(?,?,?,?,?,?,?,?,?)`,
-					contentID, c.HotCue, colorIdx, c.Name, active, c.LoopNumerator, c.LoopDenominator, inUsec, outUsec,
-				); err != nil {
-					return fmt.Errorf("onelibrary: insert cue for %d: %w", contentID, err)
-				}
-			} else {
-				if _, err := tx.ExecContext(ctx,
-					`INSERT INTO cue(content_id, kind, colorTableIndex, cueComment, isActiveLoop, inUsec, outUsec) VALUES(?,?,?,?,?,?,?)`,
-					contentID, c.HotCue, colorIdx, c.Name, active, inUsec, outUsec,
-				); err != nil {
-					return fmt.Errorf("onelibrary: insert cue for %d: %w", contentID, err)
-				}
+				args = append(args, c.LoopNumerator, c.LoopDenominator)
+			}
+			args = append(args, inUsec, outUsec)
+			if has150FPS {
+				args = append(args, in150, out150)
+			}
+			if _, err := tx.ExecContext(ctx, insertSQL, args...); err != nil {
+				return fmt.Errorf("onelibrary: insert cue for %d: %w", contentID, err)
+			}
+		}
+		if contentUpdateSQL != "" {
+			if _, err := tx.ExecContext(ctx, contentUpdateSQL, contentID); err != nil {
+				return fmt.Errorf("onelibrary: update content change tracking for %d: %w", contentID, err)
 			}
 		}
 	}
@@ -404,10 +542,10 @@ func sqliteTableColumnsTx(ctx context.Context, tx *sql.Tx, table string) (map[st
 	return cols, rows.Err()
 }
 
-func cueTableColumns(ctx context.Context, db *sql.DB) (map[string]bool, error) {
-	rows, err := db.QueryContext(ctx, `PRAGMA table_info(cue)`)
+func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
-		return nil, fmt.Errorf("onelibrary: inspect cue table: %w", err)
+		return nil, fmt.Errorf("onelibrary: inspect %s table: %w", table, err)
 	}
 	defer rows.Close()
 	cols := map[string]bool{}
@@ -423,6 +561,14 @@ func cueTableColumns(ctx context.Context, db *sql.DB) (map[string]bool, error) {
 		cols[strings.ToLower(name)] = true
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return cols, nil
+}
+
+func cueTableColumns(ctx context.Context, db *sql.DB) (map[string]bool, error) {
+	cols, err := tableColumns(ctx, db, "cue")
+	if err != nil {
 		return nil, err
 	}
 	if !cols["content_id"] || !cols["kind"] || !cols["inusec"] {
@@ -468,6 +614,12 @@ func copyFileTo(srcPath, dstPath string) error {
 	}()
 	if _, err := io.Copy(out, in); err != nil {
 		return err
+	}
+	// The directory first, then the file: the allocation of its clusters reaches the disk before
+	// the entry that names them (#321 review R4b; as bridge's staged copies).
+	if d, err := os.Open(filepath.Dir(out.Name())); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	if err := out.Sync(); err != nil {
 		return err

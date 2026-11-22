@@ -185,6 +185,172 @@ func ParseDisplayCuesAndLoops(track, cues, loops []byte) ([]DisplayCue, []Displa
 	return outCues, outLoops, nil
 }
 
+// DeckHotCue holds one Engine Hot Cue pad (Slot 0..7 -> Rekordbox Hot Cue A..H = 1..8)
+// in decoded samples along with its label and RGBA color.
+type DeckHotCue struct {
+	Slot    int
+	Samples float64
+	Name    string
+	Color   [4]byte
+}
+
+// DeckLoop holds one Engine Saved Loop slot (Slot 0..7) in decoded samples.
+type DeckLoop struct {
+	Slot         int
+	StartSamples float64
+	EndSamples   float64
+	Name         string
+	Color        [4]byte
+	Active       bool
+}
+
+// DeckCues is the exact slot-indexed cue/loop state parsed from a PerformanceData row.
+type DeckCues struct {
+	SampleRate  float64
+	SampleCount float64
+	HotCues     [8]*DeckHotCue
+	Loops       [8]*DeckLoop
+	MainCue     float64 // >= 0 when set, -1 when unset
+}
+
+// HasAnyLoop reports whether an Engine PerformanceData.loops blob contains at least one set loop.
+func HasAnyLoop(raw []byte) bool {
+	if len(raw) < 8 || raw[0] > 8 {
+		return false
+	}
+	for _, b := range raw[1:8] {
+		if b != 0 {
+			return false
+		}
+	}
+	off := 8
+	for range raw[0] {
+		if off >= len(raw) {
+			return false
+		}
+		n := int(raw[off])
+		off++
+		if len(raw)-off < n+22 {
+			return false
+		}
+		off += n
+		if raw[off+16] == 1 && raw[off+17] == 1 {
+			return true
+		}
+		off += 22
+	}
+	return false
+}
+
+// ParseDeckCuesAndLoops parses exact slot-indexed Hot Cues, Saved Loops, and active-loop
+// bits from Engine PerformanceData blobs, preserving decoded sample positions and RGBA colors.
+func ParseDeckCuesAndLoops(track, cues, loops []byte, activeOnLoadLoops int64) (DeckCues, error) {
+	var out DeckCues
+	out.MainCue = -1
+	raw, err := QUncompress(track, 4096)
+	if err != nil {
+		return out, err
+	}
+	if len(raw) != 44 && len(raw) != 68 {
+		return out, fmt.Errorf("display: unknown trackData length")
+	}
+	rate := displayFloat(raw, big)
+	samples := big.Uint64(raw[8:])
+	if !displayFinite(rate) || rate < 8000 || rate > 384000 || samples == 0 || samples > uint64(rate*86400) {
+		return out, fmt.Errorf("display: invalid trackData")
+	}
+	out.SampleRate = rate
+	out.SampleCount = float64(samples)
+
+	if len(cues) != 0 {
+		qraw, err := QUncompress(cues, 64<<10)
+		if err != nil {
+			return out, err
+		}
+		if len(qraw) < 8 || big.Uint64(qraw) > 8 {
+			return out, fmt.Errorf("display: invalid cue count")
+		}
+		off := 8
+		count := int(big.Uint64(qraw))
+		for slot := 0; slot < count; slot++ {
+			name, err := displayLabel(qraw, &off, 12)
+			if err != nil {
+				return out, err
+			}
+			p := displayFloat(qraw[off:], big)
+			if !displayFinite(p) || p > out.SampleCount {
+				return out, fmt.Errorf("display: invalid cue position")
+			}
+			if p != -1 {
+				col := [4]byte{qraw[off+8], qraw[off+9], qraw[off+10], qraw[off+11]}
+				if col != ([4]byte{}) && col[0] == 0 {
+					col[0] = 255
+				}
+				out.HotCues[slot] = &DeckHotCue{
+					Slot:    slot,
+					Samples: math.Max(p, 0),
+					Name:    name,
+					Color:   col,
+				}
+			}
+			off += 12
+		}
+		if len(qraw)-off < 17 {
+			return out, fmt.Errorf("display: missing main cue")
+		}
+		p := displayFloat(qraw[off:], big)
+		if !displayFinite(p) || p > out.SampleCount {
+			return out, fmt.Errorf("display: invalid main cue")
+		}
+		if p >= 0 {
+			out.MainCue = p
+		}
+	}
+
+	if len(loops) != 0 {
+		if len(loops) < 8 || loops[0] > 8 {
+			return out, fmt.Errorf("display: invalid loops")
+		}
+		for _, b := range loops[1:8] {
+			if b != 0 {
+				return out, fmt.Errorf("display: unknown loop version")
+			}
+		}
+		off := 8
+		for slot := 0; slot < int(loops[0]); slot++ {
+			name, err := displayLabel(loops, &off, 22)
+			if err != nil {
+				return out, err
+			}
+			a, b := displayFloat(loops[off:], little), displayFloat(loops[off+8:], little)
+			if loops[off+16] > 1 || loops[off+17] > 1 || !displayFinite(a) || !displayFinite(b) {
+				return out, fmt.Errorf("display: invalid loop flags/position")
+			}
+			if loops[off+16] == 1 && loops[off+17] == 1 {
+				if b <= a || b > out.SampleCount {
+					return out, fmt.Errorf("display: invalid loop range")
+				}
+				if b > 0 {
+					col := [4]byte{loops[off+18], loops[off+19], loops[off+20], loops[off+21]}
+					if col != ([4]byte{}) && col[0] == 0 {
+						col[0] = 255
+					}
+					out.Loops[slot] = &DeckLoop{
+						Slot:         slot,
+						StartSamples: math.Max(a, 0),
+						EndSamples:   b,
+						Name:         name,
+						Color:        col,
+						Active:       activeOnLoadLoops > 0 && (activeOnLoadLoops&(1<<uint(slot))) != 0,
+					}
+				}
+			}
+			off += 22
+		}
+	}
+	return out, nil
+}
+
 // displayDecoderTrim is more than a decoder takes off a track: an M4A's priming is under
 // 16384 samples (compat), an MP3's delay and padding under 4096 each beside one frame.
 const displayDecoderTrim = 16384

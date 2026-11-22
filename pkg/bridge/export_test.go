@@ -119,3 +119,6 @@ func SetCutForTest(f func(name string)) func() {
 	cutPoint = f
 	return func() { cutPoint = old }
 }
+
+// StagedWholeForTest reports whether tmp, a staged copy of dst, would be put back (#321 review R4).
+func StagedWholeForTest(tmp, dst string) bool { return stagedWhole(tmp, dst) }
