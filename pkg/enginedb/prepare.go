@@ -218,11 +218,23 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 
 func stageOwnedMovesWithPath(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, stagedOnly, matchByPath, pathFirst bool) (map[uint32]int64, error) {
 	targets := map[uint32]*preparedTrack{}
-	byPath := map[string]*preparedTrack{}
+	byPath := map[string][]*preparedTrack{}
 	for i := range prepared {
 		p := &prepared[i]
 		targets[p.track.ID] = p
-		byPath[bridgePathKey("../"+p.rel)] = p
+		key := bridgePathKey("../" + p.rel)
+		byPath[key] = append(byPath[key], p)
+	}
+	choosePath := func(key string, source uint32) *preparedTrack {
+		for _, p := range byPath[key] {
+			if p.track.ID == source {
+				return p
+			}
+		}
+		if len(byPath[key]) == 0 {
+			return nil
+		}
+		return byPath[key][0]
 	}
 	// Legacy rows can share one import-wide pdbImportKey value. Our saved
 	// source record retains the per-track ID, including across moves/swaps.
@@ -289,14 +301,14 @@ func stageOwnedMovesWithPath(ctx context.Context, tx *sql.Tx, prepared []prepare
 	claimed := map[uint32]bool{}
 	if matchByPath && pathFirst {
 		for _, t := range tracks {
-			if p := byPath[bridgePathKey(t.oldPath)]; p != nil {
+			if p := choosePath(bridgePathKey(t.oldPath), t.source); p != nil {
 				claimed[p.track.ID] = true
 			}
 		}
 	}
 	for _, t := range tracks {
 		id, source, oldPath, fp := t.id, t.source, t.oldPath, t.fp
-		pathMatch := byPath[bridgePathKey(oldPath)]
+		pathMatch := choosePath(bridgePathKey(oldPath), source)
 		if !matchByPath {
 			pathMatch = nil
 		}
@@ -325,7 +337,7 @@ func stageOwnedMovesWithPath(ctx context.Context, tx *sql.Tx, prepared []prepare
 		// Fast/capped or damaged state may have no saved source ID. A unique
 		// owned path still identifies a row whose shared import key does not.
 		if pathMatch == nil && !t.recorded.Valid && (counts[source] > 1 || targets[source] == nil) {
-			if p := byPath[bridgePathKey(oldPath)]; p != nil {
+			if p := choosePath(bridgePathKey(oldPath), source); p != nil {
 				source = p.track.ID
 			} else if counts[source] > 1 {
 				return nil, fmt.Errorf("cannot identify bridge track %d with shared source ID %d", id, source)
