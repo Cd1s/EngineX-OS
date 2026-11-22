@@ -28,6 +28,7 @@ func TestMain(m *testing.M) {
 	tlsPersistDir = at("data", "enginex-absent")
 	deviceCompatiblePath = at("sys", "compatible-absent")
 	fourDeckRolePath = at("run", "enginex-assignments", "role")
+	samplerDataDir = at("data", "enginex", "samples")
 	// The update keeps updateReserve free for Engine; the tests run on whatever disk the host has.
 	freeBytes = func(string) (int64, bool) { return 1 << 40, true }
 	code := m.Run()
