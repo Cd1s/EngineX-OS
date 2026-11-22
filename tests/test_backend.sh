@@ -2,7 +2,13 @@
 # Deployment tests run with private mounts; no host service is changed.
 set -euo pipefail
 if [[ ${1:-} != --private ]]; then
-  exec unshare -m -n --propagation private bash "$0" --private
+  ENGINEX_OUTER_MNTNS=$(readlink /proc/self/ns/mnt) exec unshare -m -n --propagation private bash "$0" --private
+fi
+# --private is the re-exec above. Passed by hand it skips the unshare, and the mounts below would cover
+# /etc, /var/lib and /opt of the host itself: refuse unless the mount namespace really changed.
+if [[ -z ${ENGINEX_OUTER_MNTNS:-} || $(readlink /proc/self/ns/mnt) == "$ENGINEX_OUTER_MNTNS" ]]; then
+  echo "test_backend.sh: --private is this script's own re-exec flag; run the script without arguments" >&2
+  exit 2
 fi
 repo=$(cd "$(dirname "$0")/.." && pwd)
 ip link set lo up
