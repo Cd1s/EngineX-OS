@@ -25,7 +25,7 @@ ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
 #                   nobody asking, it posts nothing and runs no sampler; asked, it samples and posts; nobody asks again: it stops
 #   playershots     the same Engine told it is a player in the 4-deck layout (role 1+2), the stub answering as the player's stream-sync:
 #                   with the row off no lane is the console's, with the row on lanes 3 and 4 show two console decks, drawn and
-#                   labelled (eglfs, two captures; skipped without /dev/dri/card0)
+#                   labelled (eglfs, two captures in $W/playershots/shots; skipped without /dev/dri/card0)
 #   sendpair        real stream-syncs, a console (JC11) and a player (JP13) in its own namespace, drivers in place of the two QMLs:
 #                   the whole life of the row (off, on, a channel on Line, off, the player gone, Line In off)
 #   sendoldplayer   the same with the player of 5.3.0.5-r1 (the binary built from commit OLD_REV below): it must get what it always

@@ -133,8 +133,8 @@ else:
         check(any(d.get("row") for d in debug.values()), "the row was on at some phase end, so the pulls with console=1 really went to the old console")
         check("ERR" not in player_log, "no error in the player's driver")
     else:
-        check(not old_player or all(not ls for n in names for _, ls in consoles(n)), "the player of 5.3.0.5-r1 never gets a console lane")
         if old_player:
+            check(all(not ls for n in names for _, ls in consoles(n)), "the player of 5.3.0.5-r1 never gets a console lane")
             # A second, new player asks (the driver "asker"): the console sends, and the old player, which pulls without console=1,
             # is never given a deck. With Line In off the console listens to nobody.
             cs = {n: samples.get(n, {}) for n in names}
