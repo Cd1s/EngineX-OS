@@ -388,6 +388,66 @@ printf 'echo sibling\nexit 0\n' > "$TMP/bundle/bin/enginex-migration"
 [[ $(ENGINEX_MIGRATION=$TMP/none sh "$TMP/bundle/bin/engine-ui-guard") == sibling ]] || fail 'a Gen-2 bundle guard must find the migration script beside it'
 ok 'device scripts run under /bin/sh; engine-ui-guard finds the migration script at /usr/libexec (Gen-1) or beside itself (Gen-2 bundle)'
 
+# Gen-2 bundles put rb-bridge and stream-sync in bin/ beside engine-ui-guard and pass them through
+# the engine.service drop-in; pre and launch must invoke those bundle programs, not /usr/local/bin.
+bg="$TMP/bundle-guard"
+mkdir -p "$bg/bin" "$bg/ui" "$bg/settings-copy" "$bg/data/Engine Library/Database2"
+cp "$ROOT/rootfs-overlay/etc/enginex/engine-ui-guard" "$bg/bin/"
+cp "$ROOT/rootfs-overlay/usr/libexec/enginex-migration" "$bg/bin/"
+cat > "$bg/bin/rb-bridge" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$BUNDLE_GUARD_RB_LOG"
+SH
+cat > "$bg/bin/stream-sync" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$BUNDLE_GUARD_SS_LOG"
+SH
+printf '#!/bin/sh\nexit 0\n' > "$bg/bin/engine-guardian"
+chmod +x "$bg/bin/"*
+printf '{"id":"test","action":"apply"}\n' > "$bg/settings-copy/operation.json"
+env BUNDLE_GUARD_RB_LOG="$bg/rb-bridge.log" \
+    ENGINEX_MIGRATION="$TMP/none" \
+    ENGINEX_UI_DIR="$bg/ui" \
+    ENGINEX_PRIMARY_UI_DIR="$bg/ui" \
+    ENGINEX_LEGACY_UI_DIR="$bg/legacy" \
+    ENGINEX_ENGINE_DATA_DIR="$bg/data" \
+    ENGINEX_STREAMING_ACCOUNTS="$bg/accounts.json" \
+    ENGINEX_QUIT_REASON_FILE="$bg/reason" \
+    ENGINEX_ASSIGNMENT_DIR="$bg/assignments" \
+    ENGINEX_ASSIGNMENT_PATCHED="$bg/patched" \
+    ENGINEX_CUSTOM="$bg/custom" \
+    ENGINEX_STATE_DIR="$bg/state" \
+    ENGINEX_PLANCK_STATE="$bg/planck.json" \
+    ENGINEX_GUARD_PRE_MARK="$bg/pre-mark" \
+    ENGINEX_ENGINE_GUARDIAN="$bg/bin/engine-guardian" \
+    ENGINEX_RB_BRIDGE="$bg/bin/rb-bridge" \
+    ENGINEX_STREAM_SYNC="$bg/bin/stream-sync" \
+    sh "$bg/bin/engine-ui-guard" pre >/dev/null 2>&1
+[[ -s $bg/rb-bridge.log && $(cat "$bg/rb-bridge.log") == "--prune-rgb-overviews $bg/data/Engine Library/Database2" ]] ||
+    fail 'a Gen-2 bundle guard pre must invoke ENGINEX_RB_BRIDGE with the library Database2 path'
+env BUNDLE_GUARD_SS_LOG="$bg/stream-sync.log" \
+    ENGINEX_MIGRATION="$TMP/none" \
+    ENGINEX_UI_DIR="$bg/ui" \
+    ENGINEX_PRIMARY_UI_DIR="$bg/ui" \
+    ENGINEX_LEGACY_UI_DIR="$bg/legacy" \
+    ENGINEX_ENGINE_DATA_DIR="$bg/data" \
+    ENGINEX_STREAMING_ACCOUNTS="$bg/accounts.json" \
+    ENGINEX_QUIT_REASON_FILE="$bg/reason" \
+    ENGINEX_ASSIGNMENT_DIR="$bg/assignments" \
+    ENGINEX_ASSIGNMENT_PATCHED="$bg/patched" \
+    ENGINEX_CUSTOM="$bg/custom" \
+    ENGINEX_STATE_DIR="$bg/state" \
+    ENGINEX_PLANCK_STATE="$bg/planck.json" \
+    ENGINEX_GUARD_PRE_MARK="$bg/pre-mark" \
+    ENGINEX_UI_HOOK=/nonexistent/test-only-hook.so \
+    ENGINEX_ENGINE_GUARDIAN="$bg/bin/engine-guardian" \
+    ENGINEX_RB_BRIDGE="$bg/bin/rb-bridge" \
+    ENGINEX_STREAM_SYNC="$bg/bin/stream-sync" \
+    sh "$bg/bin/engine-ui-guard" launch /bin/true >/dev/null 2>&1
+[[ -s $bg/stream-sync.log && $(cat "$bg/stream-sync.log") == "--settings-copy-prestart" ]] ||
+    fail 'a Gen-2 bundle guard launch must invoke ENGINEX_STREAM_SYNC for --settings-copy-prestart'
+ok 'Gen-2 bundle engine-ui-guard invokes ENGINEX_RB_BRIDGE in pre and ENGINEX_STREAM_SYNC in launch'
+
 # #309: copying the full overlay must leave a stock iw and its full command set in charge.
 iw_root=$TMP/iw-stock
 mkdir -p "$iw_root/usr/sbin"
