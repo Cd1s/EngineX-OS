@@ -99,16 +99,16 @@ func mergeFast(row deckRow, base fastBase, perf Performance) fastMerge {
 	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 {
 		return m // a blob not in Engine's layout: rekordbox's, as before #328
 	}
-	// The fast import's cues are in the row only if one of them still is: a track listed fast
-	// without them (an in-place import out of time) has none, and Engine's empty slots must not
-	// read as the DJ deleting what was never there. A DJ who deleted every one of them gets
-	// rekordbox's back, as before #328.
+	// The fast import's cues are in the row only if one of them still is where it put it: a
+	// track listed fast without them (an in-place import out of time) has none, and Engine's
+	// empty slots must not read as the DJ deleting what was never there. A DJ who deleted every
+	// one of them gets rekordbox's back, as before #328.
 	seen := false
 	for i := range rowCues {
-		seen = seen || !emptyCue(baseCues[i]) && !emptyCue(rowCues[i]) && sameCue(rowCues[i], baseCues[i])
+		seen = seen || !emptyCue(baseCues[i]) && !emptyCue(rowCues[i]) && shiftedBy(cuePos(baseCues[i]), cuePos(rowCues[i]))
 	}
 	for i := range rowLoops {
-		seen = seen || i < len(baseLoops) && !emptyLoop(baseLoops[i]) && !emptyLoop(rowLoops[i]) && sameLoop(rowLoops[i], baseLoops[i])
+		seen = seen || i < len(baseLoops) && !emptyLoop(baseLoops[i]) && !emptyLoop(rowLoops[i]) && sameLoopAt(rowLoops[i], baseLoops[i])
 	}
 	baseActive := base.active
 	if !seen {
@@ -119,10 +119,8 @@ func mergeFast(row deckRow, base fastBase, perf Performance) fastMerge {
 		changed := false
 		cues.Write(cueCount)
 		for i := range rowCues {
-			slot := newCues[i]
-			if !sameCue(rowCues[i], baseCues[i]) && !(emptyCue(rowCues[i]) && emptyCue(newCues[i])) {
-				slot, changed = rowCues[i], changed || !bytes.Equal(rowCues[i], newCues[i])
-			}
+			slot := mergeCue(rowCues[i], baseCues[i], newCues[i])
+			changed = changed || !bytes.Equal(slot, newCues[i])
 			cues.Write(slot)
 		}
 		trailer := newTrailer
@@ -150,10 +148,10 @@ func mergeFast(row deckRow, base fastBase, perf Performance) fastMerge {
 		if i < len(baseLoops) {
 			b = baseLoops[i]
 		}
+		slot = mergeLoop(rowLoops[i], b, newLoops[i])
 		switch {
-		case !sameLoop(rowLoops[i], b) && !(emptyLoop(rowLoops[i]) && emptyLoop(newLoops[i])):
-			slot = rowLoops[i] // the DJ's loop, and whether it is active on load
-			active = active&^bit | row.active.Int64&bit
+		case !bytes.Equal(slot, newLoops[i]) && !(emptyLoop(slot) && emptyLoop(newLoops[i])):
+			active = active&^bit | row.active.Int64&bit // the DJ's loop, and whether it is active on load
 		case !emptyLoop(rowLoops[i]) && row.active.Int64&bit != baseActive&bit:
 			active = active&^bit | row.active.Int64&bit // only switched on or off at the deck
 		}
@@ -231,16 +229,25 @@ func cuePos(slot []byte) float64 {
 
 func emptyCue(slot []byte) bool { return slot == nil || cuePos(slot) < 0 }
 
-// sameCue reports whether a row's hot cue slot still is base's: both empty, the same, or the same
-// moved by Engine's correction of a marked row.
-func sameCue(row, base []byte) bool {
-	if emptyCue(row) || emptyCue(base) {
-		return emptyCue(row) && emptyCue(base)
+// mergeCue is a hot cue slot after the full import: rekordbox's (now) where the row still holds
+// what the fast import put in it (base), or that moved by Engine's own correction; the DJ's where
+// the DJ set, moved or deleted it; the DJ's name and colour at rekordbox's position where the DJ
+// renamed or recoloured it without moving it.
+func mergeCue(row, base, now []byte) []byte {
+	switch {
+	case emptyCue(row) && (emptyCue(base) || emptyCue(now)):
+		return now
+	case emptyCue(row) || emptyCue(base) || !shiftedBy(cuePos(base), cuePos(row)):
+		return row // deleted, set, or moved at the deck
+	case bytes.Equal(row[:len(row)-12], base[:len(base)-12]) && bytes.Equal(row[len(row)-4:], base[len(base)-4:]) || emptyCue(now):
+		if emptyCue(now) {
+			return row
+		}
+		return now
 	}
-	if len(row) != len(base) || !bytes.Equal(row[:len(row)-12], base[:len(base)-12]) || !bytes.Equal(row[len(row)-4:], base[len(base)-4:]) {
-		return false
-	}
-	return shiftedBy(cuePos(base), cuePos(row))
+	out := append([]byte(nil), row...)
+	copy(out[len(out)-12:len(out)-4], now[len(now)-12:len(now)-4])
+	return out
 }
 
 // sameMainCue: the main cue of a row's trailer still is base's.
@@ -271,14 +278,9 @@ func emptyLoop(slot []byte) bool {
 	return start < 0 && end < 0 || set[0] == 0 && set[1] == 0
 }
 
-// sameLoop is sameCue for a saved loop slot: start and end moved by the same correction.
-func sameLoop(row, base []byte) bool {
-	if emptyLoop(row) || emptyLoop(base) {
-		return emptyLoop(row) && emptyLoop(base)
-	}
-	if len(row) != len(base) || !bytes.Equal(row[:len(row)-22], base[:len(base)-22]) || !bytes.Equal(row[len(row)-6:], base[len(base)-6:]) {
-		return false
-	}
+// sameLoopAt: a row's loop slot still starts and ends where base's does, or moved by Engine's
+// own correction.
+func sameLoopAt(row, base []byte) bool {
 	rs, re, _ := loopAt(row)
 	bs, be, _ := loopAt(base)
 	for _, s := range engineLoadShifts {
@@ -287,6 +289,24 @@ func sameLoop(row, base []byte) bool {
 		}
 	}
 	return false
+}
+
+// mergeLoop is mergeCue for a saved loop slot: start and end, the set flags and the colour.
+func mergeLoop(row, base, now []byte) []byte {
+	switch {
+	case emptyLoop(row) && (emptyLoop(base) || emptyLoop(now)):
+		return now
+	case emptyLoop(row) || emptyLoop(base) || !sameLoopAt(row, base):
+		return row
+	case bytes.Equal(row[:len(row)-22], base[:len(base)-22]) && bytes.Equal(row[len(row)-6:], base[len(base)-6:]) || emptyLoop(now):
+		if emptyLoop(now) {
+			return row
+		}
+		return now
+	}
+	out := append([]byte(nil), row...)
+	copy(out[len(out)-22:len(out)-6], now[len(now)-22:len(now)-6])
+	return out
 }
 
 // WriteFastBase notes in stage, beside its snapshot, the fastBase of every track of l that the
