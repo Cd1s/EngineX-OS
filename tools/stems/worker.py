@@ -300,6 +300,54 @@ def resolve_backend(name):
 _model = None
 
 
+def _env_float(name, default, minimum, maximum):
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return min(maximum, max(minimum, value))
+
+
+def _env_int(name, default, minimum, maximum):
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return min(maximum, max(minimum, value))
+
+
+def _cpu_thread_default():
+    try:
+        available = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        available = os.cpu_count() or 1
+    return min(8, max(1, available))
+
+
+def _omp_thread_default():
+    raw = os.environ.get('OMP_NUM_THREADS', '')
+    try:
+        return int(raw.split(',', 1)[0].strip())
+    except (TypeError, ValueError):
+        return _cpu_thread_default()
+
+
+def configure_torch_threads(torch):
+    stems_threads = os.environ.get('STEMS_TORCH_THREADS')
+    if stems_threads is not None and stems_threads.strip():
+        default = _omp_thread_default() if 'OMP_NUM_THREADS' in os.environ else _cpu_thread_default()
+        torch.set_num_threads(_env_int('STEMS_TORCH_THREADS', default, 1, 128))
+    elif 'OMP_NUM_THREADS' in os.environ:
+        threads = min(128, max(1, _omp_thread_default()))
+        torch.set_num_threads(threads)
+    interop = _env_int('STEMS_TORCH_INTEROP_THREADS', 0, 0, 128)
+    if interop:
+        try:
+            torch.set_num_interop_threads(interop)
+        except RuntimeError:
+            pass
+
+
 def load_demucs():
     """Returns separate(x (channels, n) float32, rate) -> (4, channels, n)."""
     global _model
@@ -310,10 +358,14 @@ def load_demucs():
     from julius import resample_frac
     device = ('cuda' if torch.cuda.is_available() else
               'mps' if torch.backends.mps.is_available() else 'cpu')
+    configure_torch_threads(torch)
     if _model is None:
         _model = get_model('htdemucs').to(device).eval()
     model = _model
     order = [model.sources.index(s) for s in ('vocals', 'bass', 'drums')]
+    default_overlap = 0.1 if device == 'cpu' else 0.25
+    demucs_overlap = _env_float('STEMS_DEMUCS_OVERLAP', default_overlap, 0.0, 0.5)
+    demucs_shifts = _env_int('STEMS_DEMUCS_SHIFTS', 1, 1, 5)
 
     def separate(x, rate):
         channels, n = x.shape
@@ -324,7 +376,9 @@ def load_demucs():
         if rate != model.samplerate:
             mix = resample_frac(mix, rate, model.samplerate)
         with torch.no_grad():
-            y = apply_model(model, mix[None], device=device, split=True, overlap=0.25, progress=False)[0][order]
+            y = apply_model(model, mix[None], device=device, split=True,
+                            overlap=demucs_overlap, shifts=demucs_shifts,
+                            progress=False)[0][order]
         if rate != model.samplerate:
             y = resample_frac(y, model.samplerate, rate)
         y = y.cpu().numpy().astype(np.float32)[..., :n]
@@ -343,9 +397,11 @@ class DemucsSeparator:
 
     def __init__(self, channels, sample_rate, separate=None, chunk=CHUNK, overlap=OVERLAP):
         self.channels, self.rate = channels, sample_rate
+        self.separate = separate or load_demucs()
+        chunk = _env_float('STEMS_DEMUCS_CHUNK', chunk, 1.0, 60.0)
+        overlap = _env_float('STEMS_DEMUCS_CROSSFADE', overlap, 0.0, chunk / 2)
         self.size = max(2, int(chunk*sample_rate))
         self.overlap = min(int(overlap*sample_rate), self.size//2)
-        self.separate = separate or load_demucs()
         self.fade = ((np.arange(self.overlap)+0.5)/max(self.overlap, 1)).astype(np.float32)
         self.pending = np.zeros((channels, 0), np.float32)
         self.tail = None

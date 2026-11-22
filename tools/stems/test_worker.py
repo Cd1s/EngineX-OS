@@ -8,12 +8,50 @@ import unittest
 from unittest import mock
 import numpy as np
 import worker
-from worker import DemucsSeparator, Input, Separator, header_read, resolve_backend, serve
+from worker import (DemucsSeparator, Input, Separator, configure_torch_threads,
+                    header_read, resolve_backend, serve)
 from render import run
 
 WORKER_PY = str(Path(__file__).with_name('worker.py'))
 
 class WorkerTests(unittest.TestCase):
+    def test_cpu_thread_setting_honours_explicit_and_omp_limits(self):
+        class FakeTorch:
+            def __init__(self):
+                self.calls = []
+
+            def set_num_threads(self, value):
+                self.calls.append(('threads', value))
+
+            def set_num_interop_threads(self, value):
+                self.calls.append(('interop', value))
+
+        with mock.patch.dict(os.environ, {'OMP_NUM_THREADS': '4'}, clear=True):
+            torch = FakeTorch()
+            configure_torch_threads(torch)
+            self.assertEqual(torch.calls, [('threads', 4)])
+        with mock.patch.object(worker.os, 'sched_getaffinity', return_value=set(range(16))):
+            for env, want in (
+                ({'OMP_NUM_THREADS': '4,2'}, 4),
+                ({'OMP_NUM_THREADS': 'abc'}, 8),
+                ({'OMP_NUM_THREADS': '4.0'}, 8),
+                ({'STEMS_TORCH_THREADS': '', 'OMP_NUM_THREADS': '5'}, 5),
+            ):
+                with self.subTest(env=env):
+                    with mock.patch.dict(os.environ, env, clear=True):
+                        torch = FakeTorch()
+                        configure_torch_threads(torch)
+                        self.assertEqual(torch.calls, [('threads', want)])
+        with mock.patch.dict(os.environ, {}, clear=True):
+            torch = FakeTorch()
+            configure_torch_threads(torch)
+            self.assertEqual(torch.calls, [])
+        with mock.patch.dict(os.environ, {'STEMS_TORCH_THREADS': '8',
+                                          'STEMS_TORCH_INTEROP_THREADS': '2'}, clear=True):
+            torch = FakeTorch()
+            configure_torch_threads(torch)
+            self.assertEqual(torch.calls, [('threads', 8), ('interop', 2)])
+
     def test_reconstruction_and_frame_accounting(self):
         rng=np.random.default_rng(6596)
         for channels in (1,2):
