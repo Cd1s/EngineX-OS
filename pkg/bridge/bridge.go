@@ -177,6 +177,7 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 		return nil, errNoLocalExport
 	}
 	var errs []error
+	var libraries []*rekordbox.Library
 	for i, c := range candidates {
 		var l *rekordbox.Library
 		var err error
@@ -186,7 +187,8 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 			l, err = rekordbox.ReadSQLiteKeys(ctx, c.full, nil, exportKeys)
 		}
 		if err == nil {
-			return l, nil
+			libraries = append(libraries, l)
+			continue
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -196,7 +198,160 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 			log.Printf("rb-bridge: %s unreadable (%v); falling back to %s", c.rel, err, candidates[i+1].rel)
 		}
 	}
+	if len(libraries) > 0 {
+		return mergeExportLibraries(libraries...), nil
+	}
 	return nil, errors.Join(errs...)
+}
+
+// mergeExportLibraries combines the PDB and OneLibrary views of one stick. The first library
+// retains its track and playlist IDs where possible, which keeps an existing source's Engine
+// identity stable. Duplicate tracks are matched by folded path. A playlist with more entries
+// supplies the initial order, then entries unique to the other source are appended.
+func mergeExportLibraries(libraries ...*rekordbox.Library) *rekordbox.Library {
+	if len(libraries) == 0 {
+		return &rekordbox.Library{}
+	}
+	merged := &rekordbox.Library{}
+	pathIDs := map[string]uint32{}
+	usedTrackIDs := map[uint32]bool{}
+	nextTrackID := uint32(1)
+	playlistKeys := map[string]uint32{}
+	usedPlaylistIDs := map[uint32]bool{}
+	nextPlaylistID := uint32(1)
+
+	for _, library := range libraries {
+		trackIDs := map[uint32]uint32{}
+		for _, track := range library.Tracks {
+			sourceID := track.ID
+			key := foldPath(track.Path)
+			if id, ok := pathIDs[key]; ok {
+				trackIDs[sourceID] = id
+				continue
+			}
+			id := track.ID
+			if usedTrackIDs[id] {
+				for usedTrackIDs[nextTrackID] {
+					nextTrackID++
+				}
+				id = nextTrackID
+			}
+			usedTrackIDs[id] = true
+			if id >= nextTrackID {
+				nextTrackID = id + 1
+			}
+			track.ID = id
+			pathIDs[key] = id
+			trackIDs[sourceID] = id
+			merged.Tracks = append(merged.Tracks, track)
+		}
+
+		parents := map[uint32]rekordbox.Playlist{}
+		for _, playlist := range library.Playlists {
+			parents[playlist.ID] = playlist
+		}
+		playlistIDs := map[uint32]uint32{}
+		for _, playlist := range library.Playlists {
+			parentKey := exportPlaylistPath(parents, playlist.ParentID)
+			key := fmt.Sprintf("%t\x00%s\x00%s", playlist.Folder, parentKey, playlist.Name)
+			id, exists := playlistKeys[key]
+			if !exists {
+				id = playlist.ID
+				if usedPlaylistIDs[id] {
+					for usedPlaylistIDs[nextPlaylistID] {
+						nextPlaylistID++
+					}
+					id = nextPlaylistID
+				}
+				usedPlaylistIDs[id] = true
+				if id >= nextPlaylistID {
+					nextPlaylistID = id + 1
+				}
+				playlistKeys[key] = id
+				merged.Playlists = append(merged.Playlists, rekordbox.Playlist{ID: id, ParentID: 0, SortOrder: playlist.SortOrder, Name: playlist.Name, Folder: playlist.Folder, Intelligent: playlist.Intelligent, Rules: playlist.Rules})
+			}
+			playlistIDs[playlist.ID] = id
+		}
+		for _, playlist := range library.Playlists {
+			dstID := playlistIDs[playlist.ID]
+			parentKey := exportPlaylistPath(parents, playlist.ParentID)
+			var dst *rekordbox.Playlist
+			for j := range merged.Playlists {
+				if merged.Playlists[j].ID == dstID {
+					dst = &merged.Playlists[j]
+					break
+				}
+			}
+			if dst == nil {
+				continue
+			}
+			if playlist.ParentID != 0 {
+				parentPlaylist := parents[playlist.ParentID]
+				parentParentKey := exportPlaylistPath(parents, parentPlaylist.ParentID)
+				parentKey = fmt.Sprintf("%t\x00%s\x00%s", parentPlaylist.Folder, parentParentKey, parentPlaylist.Name)
+				dst.ParentID = playlistKeys[parentKey]
+			}
+			if playlist.Folder {
+				continue
+			}
+			incoming := make([]uint32, 0, len(playlist.Tracks))
+			for _, trackID := range playlist.Tracks {
+				if id, ok := trackIDs[trackID]; ok {
+					incoming = append(incoming, id)
+				}
+			}
+			if len(incoming) > len(dst.Tracks) {
+				dst.Tracks, incoming = incoming, dst.Tracks
+			}
+			seen := map[uint32]bool{}
+			for _, id := range dst.Tracks {
+				seen[id] = true
+			}
+			for _, id := range incoming {
+				if !seen[id] {
+					dst.Tracks = append(dst.Tracks, id)
+					seen[id] = true
+				}
+			}
+		}
+	}
+	for i := range merged.Playlists {
+		if merged.Playlists[i].ParentID == 0 {
+			continue
+		}
+		if !usedPlaylistIDs[merged.Playlists[i].ParentID] {
+			merged.Playlists[i].ParentID = 0
+		}
+	}
+	for _, library := range libraries {
+		for id, artwork := range library.Artwork {
+			if merged.Artwork == nil {
+				merged.Artwork = map[uint32]string{}
+			}
+			if _, ok := merged.Artwork[id]; !ok {
+				merged.Artwork[id] = artwork
+			}
+		}
+	}
+	return merged
+}
+
+func exportPlaylistPath(playlists map[uint32]rekordbox.Playlist, id uint32) string {
+	var parts []string
+	seen := map[uint32]bool{}
+	for id != 0 && !seen[id] {
+		seen[id] = true
+		playlist, ok := playlists[id]
+		if !ok {
+			break
+		}
+		parts = append(parts, playlist.Name)
+		id = playlist.ParentID
+	}
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	return strings.Join(parts, "/")
 }
 
 // ensureWritableEngineLibrary mounts an ext4-backed overlay onto "<mount>/Engine Library"
