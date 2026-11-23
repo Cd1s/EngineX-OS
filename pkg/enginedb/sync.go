@@ -119,6 +119,9 @@ type Options struct {
 	// PriorityPaths are Engine-relative track paths ("../...") to prepare and
 	// import ahead of all other pending tracks in this pass.
 	PriorityPaths []string `json:"-"`
+	// SortByPath orders non-priority pending tracks by normalized volume-relative
+	// path so directory walks and ANLZ sibling reads stay sequential on FAT media.
+	SortByPath bool `json:"-"`
 	// MaxTracks, when positive, caps the number of pending tracks prepared and
 	// imported in this single SyncResolved transaction; remaining pending tracks
 	// are left deferred for the next batch.
@@ -127,6 +130,10 @@ type Options struct {
 	// one track has been prepared/read; returning true stops the current batch
 	// early so the caller can commit and service urgent priority work.
 	ShouldYield func() bool `json:"-"`
+	// ReadChunk and ReadPause pace background ANLZ file reads while a deck is
+	// active (zero/nil reads at full speed).
+	ReadChunk int         `json:"-"`
+	ReadPause DetailPause `json:"-"`
 }
 type Result struct {
 	Added, Updated, Unchanged int
@@ -405,8 +412,25 @@ func sourceFiles(res *compat.Resolver, t rekordbox.Track) ([]analysisFile, *anal
 	return files, art, nil
 }
 
+func readAnalysisPaced(full string, skip func(tag string) bool, chunk int, pause DetailPause) (*rekordbox.Analysis, error) {
+	f, err := openReadNoAtime(full)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if pause != nil {
+		noReadahead(f)
+	}
+	var effSkip func(string) bool
+	if skip != nil {
+		effSkip = func(tag string) bool { return tag != "PWV7" && skip(tag) }
+	}
+	a, _, err := rekordbox.ReadAnalysisFilePaced(f, effSkip, chunk, pause)
+	return a, err
+}
+
 // readSources reads a track's ANLZ files and, unless skipAudio, its audio header.
-func readSources(res *compat.Resolver, p preparedTrack, full string, skipAudio bool) (*rekordbox.Analysis, compat.AudioInfo, error) {
+func readSources(res *compat.Resolver, p preparedTrack, full string, skipAudio bool, chunk int, pause DetailPause) (*rekordbox.Analysis, compat.AudioInfo, error) {
 	// A valid PWV7 in the .2EX supplies the scrolling detail and 3-band overview;
 	// PWV6 in the same .2EX supplies the RGB mini waveform. Skip .EXT/.DAT
 	// waveform bodies when both are present, or read only PWV4 from .EXT when
@@ -416,7 +440,7 @@ func readSources(res *compat.Resolver, p preparedTrack, full string, skipAudio b
 	hasPWV7, hasRGB := false, false
 	for i, f := range p.files {
 		if strings.EqualFold(path.Ext(f.rel), ".2EX") {
-			aa, e := rekordbox.ReadAnalysis(res.FullPath(f.rel))
+			aa, e := readAnalysisPaced(res.FullPath(f.rel), nil, chunk, pause)
 			if e != nil {
 				return nil, compat.AudioInfo{}, e
 			}
@@ -439,7 +463,7 @@ func readSources(res *compat.Resolver, p preparedTrack, full string, skipAudio b
 		aa := parsed[i]
 		if aa == nil {
 			var e error
-			if aa, e = rekordbox.ReadAnalysisSkipping(res.FullPath(f.rel), skip); e != nil {
+			if aa, e = readAnalysisPaced(res.FullPath(f.rel), skip, chunk, pause); e != nil {
 				return nil, compat.AudioInfo{}, e
 			}
 		}
@@ -537,7 +561,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			return result, err
 		}
 	} else if !opts.Resume {
-		if prepared, err = prepareTracksOpts(ctx, res, l, cutoff, now, nil, opts.PriorityPaths, opts.MaxTracks, opts.ShouldYield); err != nil {
+		if prepared, err = prepareTracksOpts(ctx, res, l, cutoff, now, nil, opts.PriorityPaths, opts.SortByPath, opts.MaxTracks, opts.ShouldYield); err != nil {
 			return result, err
 		}
 	}
@@ -597,7 +621,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		for p := range opts.Reread {
 			delete(done, p)
 		}
-		if prepared, err = prepareTracksOpts(ctx, res, l, cutoff, now, done, opts.PriorityPaths, opts.MaxTracks, opts.ShouldYield); err != nil {
+		if prepared, err = prepareTracksOpts(ctx, res, l, cutoff, now, done, opts.PriorityPaths, opts.SortByPath, opts.MaxTracks, opts.ShouldYield); err != nil {
 			return result, err
 		}
 	}
@@ -681,8 +705,9 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		if opts.OnFinished != nil {
 			opts.OnFinished(i - result.Deferred)
 		}
-		// Time left after the tracks prepared up front: prepare the next one now.
-		if preparedTrack.late && !opts.Deadline.IsZero() && !past() &&
+		// Time or batch capacity left after the tracks prepared up front: prepare the next one now.
+		if preparedTrack.late && preparedTrack.audioErr == nil &&
+			((!opts.Deadline.IsZero() && !past()) || (opts.Deadline.IsZero() && opts.MaxTracks > 0)) &&
 			(opts.MaxTracks <= 0 || read < opts.MaxTracks) &&
 			(opts.ShouldYield == nil || !opts.ShouldYield()) {
 			if p, e := prepareOne(res, preparedTrack.track, preparedTrack.rel, opts.Deadline, now, true); e == nil {
@@ -837,7 +862,10 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			degraded, fast, art = true, true, nil
 		}
 		preparedTrack.files = files
-		a, audio, e := readSources(res, preparedTrack, full, fast)
+		a, audio, e := readSources(res, preparedTrack, full, fast, opts.ReadChunk, opts.ReadPause)
+		if e != nil && (errors.Is(e, context.Canceled) || errors.Is(e, context.DeadlineExceeded)) {
+			return result, e
+		}
 		if e == nil {
 			e = preparedTrack.broken
 		}

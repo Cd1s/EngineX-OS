@@ -37,9 +37,43 @@ const (
 	beforeImportName = "m.db.before-import"
 )
 
-// importWindow is one background pass, the most a kill, an eject or a power cut can cost.
+// defaultImportWindow is the default background pass duration; tests may override importWindow.
+const defaultImportWindow = 30 * time.Second
+
+// importWindow is one background pass when a test overrides it, or the upper bound for paced passes.
 // A variable only for tests.
-var importWindow = 30 * time.Second
+var importWindow = defaultImportWindow
+
+// Idle background fills commit one SQLite transaction per idleBatchTracks with full-speed
+// path-sorted reads; active-deck passes yield with smaller batches and 64 KiB + 20 ms pacing.
+var (
+	idleBatchTracks    = 256
+	playingBatchTracks = 8
+	playingPassWindow  = 5 * time.Second
+)
+
+func backgroundPassOptions(ctx context.Context, mount string, pri *priorityTracker, window time.Duration, base enginedb.Options) (enginedb.Options, bool) {
+	active := IsDeckActive()
+	base.SortByPath = true
+	if active {
+		base.MaxTracks = playingBatchTracks
+		base.Deadline = time.Now().Add(min(window, playingPassWindow))
+		base.ReadChunk = enginedb.PlayingReadChunk
+		base.ReadPause = playingDetailPace(ctx)
+		base.ShouldYield = func() bool { return pri.hasPending(mount) }
+		return base, true
+	}
+	base.MaxTracks = idleBatchTracks
+	if importWindow != defaultImportWindow {
+		base.Deadline = time.Now().Add(window)
+	} else {
+		base.Deadline = time.Time{}
+	}
+	base.ReadChunk = 0
+	base.ReadPause = nil
+	base.ShouldYield = func() bool { return pri.hasPending(mount) || IsDeckActive() }
+	return base, false
+}
 
 // Past this much export, a full first import cannot finish while the mount waits: a USB stick
 // reads the files of about 12 tracks a second (6000 in 8 minutes), and resolving a cold
@@ -475,14 +509,12 @@ func ImportInBackground(ctx context.Context, mount string, progress func(done, t
 				return enginedb.Result{}, perr
 			}
 		}
-		o := enginedb.Options{
+		o, wasActive := backgroundPassOptions(ctx, mount, pri, window, enginedb.Options{
 			DatabaseDir: stage,
 			Resume:      true,
 			StagedOnly:  stagedOnly,
-			Deadline:    time.Now().Add(window),
 			OnFinished:  shown.set,
-			ShouldYield: func() bool { return pri.hasPending(mount) },
-		}
+		})
 		res, err := enginedb.SyncResolved(ctx, r, l, o)
 		if err != nil {
 			return res, err
@@ -499,7 +531,7 @@ func ImportInBackground(ctx context.Context, mount string, progress func(done, t
 		// A pass whose window went on what every pass costs (the finished tracks' lookups, a
 		// track Engine owns) gets a longer one.
 		if left >= 0 && res.Deferred >= left {
-			if pri.hasPending(mount) {
+			if pri.hasPending(mount) || (!wasActive && IsDeckActive()) {
 				continue
 			}
 			if window *= 2; window > max(64*importWindow, 10*time.Minute) {

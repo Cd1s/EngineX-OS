@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -645,16 +646,14 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 			}
 			resuming = true
 		}
-		o := enginedb.Options{
+		o, wasActive := backgroundPassOptions(ctx, mount, pri, window, enginedb.Options{
 			DatabaseDir:      stage,
 			StagedOnly:       stagedOnly,
 			LegacyOffsets:    legacy,
 			LegacyAACOffsets: legacyAAC,
 			Resume:           resuming,
-			Deadline:         time.Now().Add(window),
 			OnFinished:       shown.set,
-			ShouldYield:      func() bool { return pri.hasPending(mount) },
-		}
+		})
 		res, err := enginedb.SyncResolved(ctx, r, l, o)
 		if err != nil {
 			return res, err
@@ -684,7 +683,7 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 		}
 		cut("stage resume marked")
 		if left >= 0 && res.Deferred >= left {
-			if pri.hasPending(mount) {
+			if pri.hasPending(mount) || (!wasActive && IsDeckActive()) {
 				continue
 			}
 			if window *= 2; window > max(64*importWindow, 10*time.Minute) {
@@ -904,28 +903,47 @@ func confirmedRefs(ctx context.Context, r *compat.Resolver, l *rekordbox.Library
 		return refs, nil
 	}
 	start, files, read := time.Now(), 0, int64(0)
-	pace := detailPace(ctx)
+	playingPace := playingDetailPace(ctx)
 	defer func() {
 		log.Printf("rb-bridge: %d of %d waveform copies can become references; ANLZ files read in %s (%d tracks, %d bytes)", len(refs), len(keys), time.Since(start).Round(time.Millisecond), files, read)
 	}()
-	for id, list := range enginedb.ExportRefs(l) {
-		if !keys[id] {
+	exportRefs := enginedb.ExportRefs(l)
+	type refJob struct {
+		id   uint32
+		list []string
+		key  string
+	}
+	jobs := make([]refJob, 0, len(keys))
+	for id, list := range exportRefs {
+		if !keys[id] || len(list) == 0 {
 			continue
 		}
-		key := strings.Join(list, "\x00")
-		ok, seen := checked[key]
+		jobs = append(jobs, refJob{id: id, list: list, key: strings.Join(list, "\x00")})
+	}
+	sort.Slice(jobs, func(i, j int) bool {
+		if jobs[i].key != jobs[j].key {
+			return jobs[i].key < jobs[j].key
+		}
+		return jobs[i].id < jobs[j].id
+	})
+	for _, job := range jobs {
+		ok, seen := checked[job.key]
 		if !seen {
 			var n int64
 			var err error
-			ok, n, err = enginedb.DetailServes(r, list, pace)
+			if IsDeckActive() {
+				ok, n, err = enginedb.DetailServesWithChunk(r, job.list, enginedb.PlayingReadChunk, playingPace)
+			} else {
+				ok, n, err = enginedb.DetailServes(r, job.list, nil)
+			}
 			files, read = files+1, read+n
 			if err != nil {
 				return refs, err
 			}
-			checked[key] = ok
+			checked[job.key] = ok
 		}
 		if ok {
-			refs[id] = list
+			refs[job.id] = job.list
 		}
 	}
 	return refs, ctx.Err()
@@ -937,8 +955,18 @@ func confirmedRefs(ctx context.Context, r *compat.Resolver, l *rekordbox.Library
 // at least detailReadGap: the stick is free at least half the time, and a deck's request waits
 // behind one such read at most.
 func detailPace(ctx context.Context) enginedb.DetailPause {
+	return detailPaceWithGap(ctx, &detailReadGap)
+}
+
+// playingDetailPace paces background ANLZ reads with 64 KiB chunks and at least playingReadGap
+// (20 ms) while a deck is playing, cue-previewing, or scratching.
+func playingDetailPace(ctx context.Context) enginedb.DetailPause {
+	return detailPaceWithGap(ctx, &playingReadGap)
+}
+
+func detailPaceWithGap(ctx context.Context, gap *time.Duration) enginedb.DetailPause {
 	return func(_ int, took time.Duration) error {
-		t := time.NewTimer(max(took, detailReadGap))
+		t := time.NewTimer(max(took, *gap))
 		defer t.Stop()
 		select {
 		case <-ctx.Done():
@@ -949,8 +977,11 @@ func detailPace(ctx context.Context) enginedb.DetailPause {
 	}
 }
 
-// detailReadGap is the least pause after a read of detailPace. A variable only for tests.
-var detailReadGap = 10 * time.Millisecond
+// detailReadGap and playingReadGap are minimum pauses after paced reads. Variables for tests.
+var (
+	detailReadGap  = 10 * time.Millisecond
+	playingReadGap = 20 * time.Millisecond
+)
 
 // publishUpdate replaces the live library with the complete update in the stage, at a mount
 // before Engine sees the volume, with what Engine wrote since the snapshot. A change Engine made

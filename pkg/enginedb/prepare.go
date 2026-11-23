@@ -1,12 +1,14 @@
 package enginedb
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -39,10 +41,37 @@ var (
 )
 
 // orderTracksForPrepare puts tracks matching priorityPaths first (in priority
-// order) without mutating l.Tracks.
-func orderTracksForPrepare(tracks []rekordbox.Track, priorityPaths []string) []rekordbox.Track {
-	if len(priorityPaths) == 0 || len(tracks) <= 1 {
+// order) and, when sortByPath is true, sorts the remaining tracks by
+// normalized volume-relative path without mutating l.Tracks.
+func orderTracksForPrepare(tracks []rekordbox.Track, priorityPaths []string, sortByPath bool) []rekordbox.Track {
+	if len(tracks) <= 1 || (len(priorityPaths) == 0 && !sortByPath) {
 		return tracks
+	}
+	sortPath := func(s []rekordbox.Track) {
+		if !sortByPath || len(s) <= 1 {
+			return
+		}
+		type keyed struct {
+			track rekordbox.Track
+			key   string
+		}
+		items := make([]keyed, len(s))
+		for i, t := range s {
+			guess, err := compat.CleanRelative(t.Path)
+			if err != nil {
+				guess = t.Path
+			}
+			items[i] = keyed{track: t, key: foldPreparedPath(guess)}
+		}
+		slices.SortFunc(items, func(a, b keyed) int {
+			if c := cmp.Compare(a.key, b.key); c != 0 {
+				return c
+			}
+			return cmp.Compare(a.track.ID, b.track.ID)
+		})
+		for i, it := range items {
+			s[i] = it.track
+		}
 	}
 	rank := make(map[string]int, len(priorityPaths))
 	for _, p := range priorityPaths {
@@ -57,7 +86,9 @@ func orderTracksForPrepare(tracks []rekordbox.Track, priorityPaths []string) []r
 		}
 	}
 	if len(rank) == 0 {
-		return tracks
+		out := append([]rekordbox.Track(nil), tracks...)
+		sortPath(out)
+		return out
 	}
 	buckets := make([][]rekordbox.Track, len(rank))
 	rest := make([]rekordbox.Track, 0, len(tracks))
@@ -73,8 +104,9 @@ func orderTracksForPrepare(tracks []rekordbox.Track, priorityPaths []string) []r
 		}
 		rest = append(rest, t)
 	}
+	sortPath(rest)
 	if matched == 0 {
-		return tracks
+		return rest
 	}
 	ordered := make([]rekordbox.Track, 0, len(tracks))
 	for _, b := range buckets {
@@ -91,11 +123,11 @@ func orderTracksForPrepare(tracks []rekordbox.Track, priorityPaths []string) []r
 // thousands of tracks used up the whole mount budget, and Sync then deferred
 // every track on every mount (r3 review).
 func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, cutoff time.Time, now func() time.Time, done map[string]string) ([]preparedTrack, error) {
-	return prepareTracksOpts(ctx, res, l, cutoff, now, done, nil, 0, nil)
+	return prepareTracksOpts(ctx, res, l, cutoff, now, done, nil, false, 0, nil)
 }
 
-func prepareTracksOpts(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, cutoff time.Time, now func() time.Time, done map[string]string, priorityPaths []string, maxTracks int, shouldYield func() bool) ([]preparedTrack, error) {
-	tracks := orderTracksForPrepare(l.Tracks, priorityPaths)
+func prepareTracksOpts(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, cutoff time.Time, now func() time.Time, done map[string]string, priorityPaths []string, sortByPath bool, maxTracks int, shouldYield func() bool) ([]preparedTrack, error) {
+	tracks := orderTracksForPrepare(l.Tracks, priorityPaths, sortByPath)
 	prepared := make([]preparedTrack, 0, len(tracks))
 	paths := map[string]uint32{}
 	ready, late := 0, false
