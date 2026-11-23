@@ -286,13 +286,39 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	for _, t := range tracks {
 		counts[t.source]++
 	}
+	sourceOldPath := map[uint32]string{}
+	for _, t := range tracks {
+		if _, exists := sourceOldPath[t.source]; !exists {
+			sourceOldPath[t.source] = t.oldPath
+		}
+	}
 	for _, t := range tracks {
 		id, source, oldPath, fp := t.id, t.source, t.oldPath, t.fp
 		pathTarget := byPath[foldPreparedPath(oldPath)]
 		if pathTarget != nil {
+			var nativeRefs int
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM PlaylistEntity e WHERE e.trackId=? AND (e.databaseUuid IS NULL OR e.databaseUuid='' OR e.databaseUuid=(SELECT uuid FROM Information)) AND NOT EXISTS (SELECT 1 FROM BridgePlaylist b WHERE b.listId=e.listId)`, existingByPath[foldPreparedPath(oldPath)]).Scan(&nativeRefs); err != nil {
+				return nil, err
+			}
+			if nativeRefs > 0 {
+				// A native Engine playlist owns this row. Reusing it for a different
+				// export source would silently retarget the DJ's membership.
+				pathTarget = nil
+			}
+		}
+		pathCycle := false
+		if pathTarget != nil {
 			// The export's normalized path is the identity. A re-export can shift
 			// its numeric ID, so a saved source ID never moves this row elsewhere.
-			source = pathTarget.track.ID
+			candidate := pathTarget.track.ID
+			if otherOldPath, ok := sourceOldPath[candidate]; ok {
+				if back := byPath[foldPreparedPath(otherOldPath)]; back != nil && back.track.ID == source {
+					pathCycle = true
+				}
+			}
+			if !pathCycle {
+				source = candidate
+			}
 		}
 		if stagedOnly && source < 1<<24 && targets[source] == nil && pathTarget == nil {
 			continue // a remote-only import must not identify or remove absent local sources
@@ -320,7 +346,7 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 		}
 		owned[source] = id
 		targetPath := foldPreparedPath("../" + p.rel)
-		if other, ok := existingByPath[targetPath]; ok && other != id {
+		if other, ok := existingByPath[targetPath]; ok && other != id && !pathCycle && pathTarget == nil {
 			return nil, fmt.Errorf("track %d would move onto path already owned by track %d", id, other)
 		}
 		// An unreadable re-export must not park a completed row and lose its

@@ -219,6 +219,9 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 	if secondaryIndex < 0 || absDuration(candidates[0].mtime.Sub(candidates[secondaryIndex].mtime)) > exportNewerMargin {
 		return primary, nil
 	}
+	if candidates[0].isPDB || !encryptedSQLiteFile(candidates[secondaryIndex].full) {
+		return primary, nil
+	}
 	secondary, err := read(candidates[secondaryIndex])
 	if err != nil {
 		log.Printf("rb-bridge: %s unreadable (%v); using %s", candidates[secondaryIndex].rel, err, candidates[0].rel)

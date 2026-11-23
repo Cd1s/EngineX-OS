@@ -131,6 +131,18 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	if err != nil {
 		return enginedb.Result{}, err
 	}
+	// A quick update publishes the list before it reads files. Keep a row whose
+	// export spelling moved on its existing path until the staged full pass can
+	// verify the move by path and carry the deck's edits across.
+	ownedForQuick, err := ownedPaths(dir)
+	if err != nil {
+		return enginedb.Result{}, err
+	}
+	for i := range l.Tracks {
+		if oldPath, ok := ownedForQuick[l.Tracks[i].ID]; ok && foldPath(oldPath) != foldPath(l.Tracks[i].Path) {
+			l.Tracks[i].Path = "/" + oldPath
+		}
+	}
 	owned, err := ownedPaths(dir)
 	if err != nil {
 		return enginedb.Result{}, err
