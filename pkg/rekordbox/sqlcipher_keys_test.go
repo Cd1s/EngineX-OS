@@ -39,7 +39,25 @@ func TestKeyCacheInvalidatesWrongSharedKeyAfterPageOneCheck(t *testing.T) {
 func TestKeyCacheSharesDerivedKeyAcrossCacheInstances(t *testing.T) {
 	if os.Getenv("KEYCACHE_HELPER") != "" {
 		cache := NewKeyCache()
-		if _, err := cache.get([]byte("0123456789abcdef"), []byte("shared-cache-test")); err != nil {
+		plain, err := os.Open(filepath.Join("testdata", "sqlcipher4_onelibrary_decrypted.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer plain.Close()
+		st, err := plain.Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := os.CreateTemp(t.TempDir(), "encrypted-*.db")
+		if err != nil {
+			t.Fatal(err)
+		}
+		salt := []byte("0123456789abcdef")
+		if err := encryptSQLCipher4(context.Background(), plain, st.Size(), out, salt, []byte(oneLibraryPassphrase), cache); err != nil {
+			out.Close()
+			t.Fatal(err)
+		}
+		if err := out.Close(); err != nil {
 			t.Fatal(err)
 		}
 		fmt.Printf("derivations=%d\n", KeyDerivations())

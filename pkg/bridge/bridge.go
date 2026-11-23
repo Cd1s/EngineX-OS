@@ -440,7 +440,7 @@ func exportPlaylistPath(playlists map[uint32]rekordbox.Playlist, id uint32) stri
 	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
 		parts[i], parts[j] = parts[j], parts[i]
 	}
-	return strings.Join(parts, "/")
+	return strings.Join(parts, "\x00")
 }
 
 // ensureWritableEngineLibrary mounts an ext4-backed overlay onto "<mount>/Engine Library"

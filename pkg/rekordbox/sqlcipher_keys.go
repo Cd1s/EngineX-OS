@@ -146,9 +146,6 @@ func (c *KeyCache) get(salt, passphrase []byte) (*cipherKeys, error) {
 		}
 		c.keys[id] = k
 		c.derived += time.Since(t0)
-		if c.shared != "" {
-			c.writeShared(salt, passphrase, k)
-		}
 	}
 	return k, nil
 }

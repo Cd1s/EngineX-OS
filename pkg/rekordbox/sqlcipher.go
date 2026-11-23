@@ -161,10 +161,6 @@ func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 			}
 			return fmt.Errorf("sqlcipher: page %d HMAC verification failed", pgno)
 		}
-		if pgno == 1 && kc != nil {
-			kc.writeShared(salt, passphrase, keys)
-		}
-
 		clear(outPage[:])
 		cipher.NewCBCDecrypter(block, inPage[usableEnd:ivEnd]).CryptBlocks(outPage[off:usableEnd], inPage[off:usableEnd])
 
@@ -180,6 +176,9 @@ func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 
 		if _, err := w.Write(outPage[:]); err != nil {
 			return fmt.Errorf("sqlcipher: write page %d: %w", pgno, err)
+		}
+		if pgno == 1 && kc != nil {
+			kc.writeShared(salt, passphrase, keys)
 		}
 	}
 	return nil
@@ -414,6 +413,9 @@ func encryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 
 		if _, err := w.Write(outPage[:]); err != nil {
 			return fmt.Errorf("sqlcipher: write page %d: %w", pgno, err)
+		}
+		if pgno == 1 && kc != nil {
+			kc.writeShared(salt, passphrase, keys)
 		}
 	}
 	return nil
