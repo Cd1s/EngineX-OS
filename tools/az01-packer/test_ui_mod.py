@@ -13340,6 +13340,44 @@ console.log('ok');
 """)
         self.assertIn("ok", out)
 
+    def test_boards_that_are_not_players_do_not_look_up_the_beat_jump_property(self):
+        # The main UI creates /GUI/Scripted/EngineXBeatJumpPads on the four players only. The controller's 500 ms timer
+        # (shared with the jog and pad brightness syncs) must not ask Engine's C++ for it every time on the others.
+        out = self.run_pads(r"""
+const g = @GLOBALSRC@;
+const lookups = [];
+const getProperty = Planck.getProperty;
+Planck.getProperty = path => { lookups.push(path); return getProperty(path) };
+const initial = () => fn(gScopes, 'function () { return (' + g.initial + ') }')();
+for (const name of ['JP11', 'JC11', 'JC16', 'NH08', 'JP20', 'JP21', 'JC11S', 'JP11S', 'NH08S', 'NH10', 'JP24', 'RMZ2', 'JC20']) {
+    board.name = name;
+    lookups.length = 0;
+    assert.equal(initial(), null, name + ' starts without the property');
+    globalConfig.pBeatJumpPads = null;
+    for (let tick = 0; tick < 4; tick++) globalConfig.scSyncBeatJumpPadsFromState();
+    assert.deepEqual(lookups, [], name + ' makes no lookup');
+    assert.equal(globalConfig.pBeatJumpPads, null, name);
+    assert.equal(globalConfig.scBeatJumpPadsState, 0, name);
+    assert.equal(globalConfig.scBeatJumpPads, false, name);
+}
+// The four players still look it up, again while it has no translator (start-up order), and read it.
+for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) {
+    board.name = name;
+    lookups.length = 0;
+    assert.equal(initial().path, '/GUI/Scripted/EngineXBeatJumpPads', name);
+    globalConfig.pBeatJumpPads = { translator: null }; globalConfig.scBeatJumpPadsState = 0;
+    translator('/GUI/Scripted/EngineXBeatJumpPads')._v = 0.5;
+    globalConfig.scSyncBeatJumpPadsFromState();
+    assert.ok(lookups.length >= 1, name + ' looks the property up');
+    assert.equal(globalConfig.scBeatJumpPadsState, 0.5, name);
+    assert.equal(globalConfig.scBeatJumpPads, false, name);
+    lookups.length = 0; globalConfig.scSyncBeatJumpPadsFromState();
+    assert.deepEqual(lookups, [], name + ' keeps the translator once it has it');
+}
+console.log('ok');
+""".replace("@GLOBALSRC@", json.dumps({"initial": self.binding(self.gen["GlobalAssignmentConfig.qml"], "pBeatJumpPads")})))
+        self.assertIn("ok", out)
+
     def mode_parts(self, gen=True):
         p = self.gen["PadModeSelect.qml"] if gen else self.stock["PadModeSelect.qml"]
         parts = {"single": "function " + p[p.index("singleAction: function ()") + len("singleAction: function "):][:2]
