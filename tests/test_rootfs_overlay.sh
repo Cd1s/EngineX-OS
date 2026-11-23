@@ -939,11 +939,13 @@ ok 'settings copy refresh preserves colors, role, recovery counters and safe-mod
 cat > "$TMP/guard-bin/stream-sync" <<'MOCK'
 #!/bin/sh
 echo "$*" >> "$GUARD_LOG.sync"
+board=$2
 while [ $# -gt 0 ]; do
     case $1 in --mapping-in) in=$2; shift ;; --mapping-out) out=$2; shift ;; --mapping-file) file=$2; shift ;; esac
     shift
 done
 if grep -q reject "$file"; then echo 'mapping rejected' >&2; exit 1; fi
+if ! grep -q '"board":"'$board'"' "$file"; then exit 0; fi
 { cat "$in"; echo '// EngineX button mapping mock'; } > "$out"
 MOCK
 chmod +x "$TMP/guard-bin/stream-sync"
@@ -972,6 +974,18 @@ has '// EngineX button mapping mock' "$mpatched/.map-JP07_Controller_Assignments
 has 'MidiAssignment {' "$mpatched/.base-JP07_Controller_Assignments.qml"
 lacks '// EngineX button mapping mock' "$mpatched/.base-JP07_Controller_Assignments.qml"
 lacks '// EngineX button mapping mock' "$massign/JP07/JP07_Controller_Assignments.qml" # stock itself is untouched
+# Removing one board while another remains mapped removes only that board's base.
+mkdir -p "$massign/JP08"
+cp "$assign/JP07/JP07_Controller_Assignments.qml" "$massign/JP08/JP08_Controller_Assignments.qml"
+printf '[{"board":"JP07"},{"board":"JP08"}]\n' > "$TMP/mappings.json"
+map_guard 'lang=en'
+has 'MidiAssignment {' "$mpatched/.base-JP07_Controller_Assignments.qml"
+has 'MidiAssignment {' "$mpatched/.base-JP08_Controller_Assignments.qml"
+printf '[{"board":"JP08"}]\n' > "$TMP/mappings.json"
+map_guard 'lang=en'
+[[ ! -e "$mpatched/.base-JP07_Controller_Assignments.qml" ]] || fail 'partial board removal kept JP07 base'
+has 'MidiAssignment {' "$mpatched/.base-JP08_Controller_Assignments.qml"
+rm -rf "$massign/JP08"
 # a stream-sync that writes nothing leaves stock
 printf '[{"board":"JP07","reject":1}]\n' > "$TMP/mappings.json"
 map_guard 'lang=en' 2> "$TMP/map-reject.err"
@@ -1071,6 +1085,35 @@ kill "$map_watch"; wait "$map_watch" || :
 [[ ! -e "$TMP/.mapping-rejected-JP07" ]] || fail 'another board parse error triggered JP07 recovery'
 if grep -q '^restart --no-block engine.service$' "$GUARD_LOG"; then fail 'another board parse error restarted Engine'; fi
 ok 'button mapping: both real Engine parse/load forms are detected and another board is ignored'
+# Exercise the matcher with Debian awk and busybox awk.
+: > "$TMP/migration"
+for awk_mode in debian busybox; do
+    awk_bin=$TMP/awk-$awk_mode; mkdir -p "$awk_bin"
+    if [ "$awk_mode" = debian ]; then ln -s /usr/bin/awk "$awk_bin/awk"; else
+        cat > "$awk_bin/awk" <<'AWK'
+#!/bin/sh
+exec /usr/bin/busybox awk "$@"
+AWK
+        chmod +x "$awk_bin/awk"
+    fi
+    cat > "$TMP/engine-multi.log" <<'LOG'
+Failed loading assignment:
+-> "qrc:/airAssignments/InputAssignment/ComboActionOutput.qml:5: first error"
+-> "file:///usr/Engine/AssignmentFiles/PresetAssignmentFiles/JP07/JP07_Controller_Assignments.qml:12: second error"
+LOG
+    ENGINEX_GUARD_SOURCE_ONLY=1 ENGINEX_MIGRATION=$TMP/migration ENGINEX_ENGINE_LOG=$TMP/engine-multi.log PATH=$awk_bin:$PATH \
+        sh -c '. "$1"; mapping_log_has_parse_failure JP07 /usr/Engine/AssignmentFiles/PresetAssignmentFiles/JP07/JP07_Controller_Assignments.qml' sh "$GUARD" ||
+        fail "$awk_mode awk missed the second arrow error"
+    cat > "$TMP/engine-no-arrow.log" <<'LOG'
+Failed loading assignment:
+info: JP07_Controller_Assignments.qml: loaded ok
+LOG
+    if ENGINEX_GUARD_SOURCE_ONLY=1 ENGINEX_MIGRATION=$TMP/migration ENGINEX_ENGINE_LOG=$TMP/engine-no-arrow.log PATH=$awk_bin:$PATH \
+        sh -c '. "$1"; mapping_log_has_parse_failure JP07 /usr/Engine/AssignmentFiles/PresetAssignmentFiles/JP07/JP07_Controller_Assignments.qml' sh "$GUARD"; then
+        fail "$awk_mode awk kept pending after a non-arrow line"
+    fi
+done
+ok 'button mapping: multi-error and no-arrow matcher cases pass under Debian and busybox awk'
 # In a ready steady-state watch pass, no cat command is forked.
 rm -f "$TMP/mappings.json" "$TMP/.mapping-rejected-JP07"
 map_guard 'lang=en'
@@ -1090,9 +1133,34 @@ sleep .3
 kill "$map_watch"; wait "$map_watch" || :
 [[ ! -s "$TMP/cat.log" ]] || fail 'ready watch loop forked cat commands'
 ok 'button mapping: ready watch steady state stays zero-fork'
-has '_SYSTEMD_INVOCATION_ID=' "$GUARD"
-if grep -q 'journalctl --boot 0' "$GUARD"; then fail 'mapping log lookup must be scoped to the current Engine invocation'; fi
-ok 'button mapping: parse log lookup is scoped to the current Engine invocation'
+mkdir -p "$TMP/invocation-bin"
+cat > "$TMP/invocation-bin/systemctl" <<'SYS'
+#!/bin/sh
+case $1 in
+show) printf 'invocation-test\n' ;;
+is-system-running) printf 'running\n' ;;
+esac
+SYS
+cat > "$TMP/invocation-bin/journalctl" <<'JOURNAL'
+#!/bin/sh
+printf '%s\n' "$*" > "$JOURNAL_ARGS"
+exit 1
+JOURNAL
+chmod +x "$TMP/invocation-bin/systemctl" "$TMP/invocation-bin/journalctl"
+: > "$TMP/journal-args"
+printf '[{"board":"JP07"}]\n' > "$TMP/mappings.json"
+map_guard 'lang=en'
+printf 'mapping-token-invocation\n' > "$TMP/ui-map/boot-token"
+printf 'mapping-token-invocation\n' > "$TMP/ui-map/boot-ready"
+: > "$GUARD_LOG"
+JOURNAL_ARGS=$TMP/journal-args ENGINEX_UI_DIR=$TMP/ui-map ENGINEX_BOOT_UPTIME=$TMP/boot-uptime ENGINEX_BOOT_POLL_INTERVAL=.1 \
+    ENGINEX_ASSIGNMENT_DIR=$massign ENGINEX_ASSIGNMENT_PATCHED=$mpatched ENGINEX_MAPPINGS=$TMP/mappings.json \
+    PATH=$TMP/invocation-bin:$PATH sh "$GUARD" watch > "$TMP/invocation-watch.log" 2>&1 & map_watch=$!
+sleep .3
+kill "$map_watch"; wait "$map_watch" || :
+has '_SYSTEMD_INVOCATION_ID=invocation-test' "$TMP/journal-args"
+lacks '--boot 0' "$TMP/journal-args"
+ok 'button mapping: invocation filter is passed to journalctl'
 # The same, with the real stream-sync applet, when Go is available: the file the guard binds
 # passes the generator's own static check and carries the mapping.
 if command -v go > /dev/null 2>&1; then

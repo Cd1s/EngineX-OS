@@ -86,8 +86,11 @@ mapping_log_has_parse_failure() {
             if (index(lower, "parsing failed") && index($0, name)) found = 1
             if (index(lower, "failed loading assignment:")) { pending = 1; next }
             if (pending) {
-                if (index($0, name ":")) found = 1
-                if (index($0, "->")) pending = 0
+                if (index($0, "->")) {
+                    if (index($0, name ":")) found = 1
+                } else {
+                    pending = 0
+                }
             }
         }
         END { exit found ? 0 : 1 }'
@@ -173,6 +176,9 @@ stick_path() {
         done
     done
 }
+if [ "${ENGINEX_GUARD_SOURCE_ONLY:-}" = 1 ]; then
+    return 0 2>/dev/null || exit 0
+fi
 case ${1:-} in
 runtime)
     ! safe_mode || exit 0
@@ -698,6 +704,8 @@ AWK
                         rm -f "$map" "$base" "$patched/mapping-$board.json"
                         echo "EngineX button mapping for $board was not applied; the base assignment could not be saved" >&2
                     fi
+                else
+                    rm -f "$patched/.base-${f##*/}"
                 fi
             else
                 rm -f "$patched/mapping-$board.json" "$patched/.map-${f##*/}" "$patched/.base-${f##*/}"
