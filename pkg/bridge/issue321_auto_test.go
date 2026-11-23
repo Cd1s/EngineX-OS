@@ -26,7 +26,7 @@ func issue321Stick(t *testing.T, n int) (string, *sql.DB) {
 	t.Helper()
 	stick := t.TempDir()
 	testfixture.LargeExport(t, stick, n)
-	if _, err := bridge.Convert(context.Background(), stick, enginedb.Options{}); err != nil {
+	if _, err := bridge.ConvertAtMount(context.Background(), stick, enginedb.Options{}, true); err != nil {
 		t.Fatalf("Convert: %v", err)
 	}
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(stick, "Engine Library", "Database2", "m.db")}).String())

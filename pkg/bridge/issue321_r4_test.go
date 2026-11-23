@@ -123,7 +123,7 @@ func TestIssue321AnExportPutBackFromItsOriginalIsWrittenAgain(t *testing.T) {
 	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
 		t.Fatal(err)
 	}
 	opts := func() bridge.WriteBackOptions {

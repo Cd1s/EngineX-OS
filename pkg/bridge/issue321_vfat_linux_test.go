@@ -418,7 +418,7 @@ func issue321StaleStick(t *testing.T, spc int) {
 	src := setupWriteBackStick(t, false)
 	_, unmount := vfatMount(t, img, mnt)
 	issue321Copy(t, src, mnt)
-	if _, err := bridge.Convert(ctx, mnt, enginedb.Options{}); err != nil {
+	if _, err := bridge.ConvertAtMount(ctx, mnt, enginedb.Options{}, true); err != nil {
 		t.Fatal(err)
 	}
 	injectDeckCueEdit(t, mnt)
@@ -580,7 +580,7 @@ func issue321FirstPassRefused(t *testing.T, layout string) {
 	// A PDB stick converted at its insert, and a deck edit; no write-back pass has run on it.
 	_, unmount := vfatMount(t, img, mnt)
 	issue321Copy(t, setupWriteBackStick(t, false), mnt)
-	if _, err := bridge.Convert(ctx, mnt, enginedb.Options{}); err != nil {
+	if _, err := bridge.ConvertAtMount(ctx, mnt, enginedb.Options{}, true); err != nil {
 		t.Fatal(err)
 	}
 	issue321Settle() // the edit dates the row a second after the import
@@ -713,7 +713,7 @@ func TestIssue321TheNextInsertRemovesStagedCopies(t *testing.T) {
 			_, unmount := fsMount(t, fsType, img, mnt)
 			defer unmount()
 			issue321Copy(t, setupWriteBackStick(t, true), mnt)
-			if _, err := bridge.Convert(ctx, mnt, enginedb.Options{}); err != nil {
+			if _, err := bridge.ConvertAtMount(ctx, mnt, enginedb.Options{}, true); err != nil {
 				t.Fatal(err)
 			}
 			db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(mnt, "Engine Library", "Database2", "m.db")}).String())
@@ -783,7 +783,7 @@ func TestIssue321EjectDuringTheFinalPassFailsVisiblyAndTheNextOneWorks(t *testin
 	src := setupWriteBackStick(t, true)
 	_, unmount := vfatMount(t, img, mnt)
 	issue321Copy(t, src, mnt)
-	if _, err := bridge.Convert(ctx, mnt, enginedb.Options{}); err != nil {
+	if _, err := bridge.ConvertAtMount(ctx, mnt, enginedb.Options{}, true); err != nil {
 		t.Fatal(err)
 	}
 	run := t.TempDir()

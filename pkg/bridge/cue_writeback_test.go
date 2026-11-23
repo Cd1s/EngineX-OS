@@ -135,7 +135,7 @@ func TestWriteBackTrackMetadataToPDBAndOneLibrary(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stick := setupWriteBackStick(t, tc.withOneLib)
-			if _, err := bridge.Convert(context.Background(), stick, enginedb.Options{}); err != nil {
+			if _, err := bridge.ConvertAtMount(context.Background(), stick, enginedb.Options{}, true); err != nil {
 				t.Fatal(err)
 			}
 			injectDeckMetadataEdit(t, stick)
@@ -194,7 +194,7 @@ func TestWriteBackCuesEndToEndAndBridgeFastReinsert(t *testing.T) {
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
 
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
 		t.Fatalf("initial Convert: %v", err)
 	}
 	injectDeckCueEdit(t, stick)
@@ -278,7 +278,7 @@ func TestWriteBackCuesPullOutMidWriteLeavesOriginalIntact(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
 		t.Fatal(err)
 	}
 	injectDeckCueEdit(t, stick)
@@ -310,7 +310,7 @@ func TestWriteBackCuesFailureBeforeSecondRenameLeavesStickUntouched(t *testing.T
 	t.Parallel()
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
 		t.Fatal(err)
 	}
 	injectDeckCueEdit(t, stick)
@@ -386,7 +386,7 @@ func TestWriteBackCuesReadsUncheckpointedWAL(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, false)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -439,7 +439,7 @@ func TestWriteBackCuesFallsBackToPDBWhenOneLibUnreadable(t *testing.T) {
 	if err := os.WriteFile(oneLibPath, []byte("not-a-sqlcipher-db"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
 		t.Fatalf("Convert with corrupt exportLibrary.db: %v", err)
 	}
 	injectDeckCueEdit(t, stick)
