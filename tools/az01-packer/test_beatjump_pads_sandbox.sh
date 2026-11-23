@@ -3,10 +3,12 @@
 # nothing and unlit) through the pack's real controller-side QML, in each board's own stock Engine natively on the build
 # host: beatjump-pads-probe.qml instantiates the generated GlobalAssignmentConfig, PadModeSelect, ActionPads and its RGB
 # pad LEDs as the players' assignment files do and drives them through ValueNoteAssignment.onNote, as MIDI notes do.
-# It checks entry, the two jumps on the real /Engine/Deck<N>/Track/BeatJump properties, pads 3-8 and Shift + pad,
-# a pad held into the mode, leaving by any unshifted pad mode button (its stock action still runs), padsEnabled, the
-# LEDs, Layer B / 4-deck decks keeping their own mode, and the setting from the main UI. On every other board
-# Shift + LOOP and the pads stay stock.
+# The mode is off by default (the players have physical Beat Jump buttons): the probe first checks that Shift + LOOP and
+# the pads are stock, then turns the mode on the way the main UI does (/GUI/Scripted/EngineXBeatJumpPads = 1.0) before it
+# tests anything else. It checks entry, the two jumps on the real /Engine/Deck<N>/Track/BeatJump properties, pads 3-8
+# and Shift + pad, a pad held into the mode, leaving by any unshifted pad mode button (its stock action still runs),
+# padsEnabled, the LEDs, Layer B / 4-deck decks keeping their own mode, and the setting Off and On again from the main
+# UI. On every other board Shift + LOOP and the pads stay stock, also with the setting On.
 #   bash tools/az01-packer/test_beatjump_pads_sandbox.sh <new-private-dir> [BOARD ...]
 #   (default: JP07 JP08 JP13 JP14, and JP11 JC11 NH08 JP21 as all-in-ones)
 # Same sandbox as test_controller_qml_compile.sh (CQC_BUILDER works here too); run it in your own mount namespace

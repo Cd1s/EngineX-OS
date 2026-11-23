@@ -120,6 +120,7 @@ Rectangle {
     readonly property string hotCue1: "/Engine/Deck1/PadModeButton0Pressed"
     function jumps() { return count(jumpBack1) + count(jumpForward1) + count(jumpBack2) + count(jumpBack3) + count(jumpForward3) }
     property int jumpsBefore: 0
+    property int shiftLoopBefore: 0
     property int callsBefore: 0
 
     Component.onCompleted: {
@@ -134,7 +135,9 @@ Rectangle {
                     check(!!o && !!o.scStock && typeof o.scStock.setValue === "function", "pad " + n + " keeps the stock ActionOutput")
                     o.scStock = recorder(n)
                 }
-                check(globalConfig.scBeatJumpPads === player, "setting " + globalConfig.scBeatJumpPads + " by default (player " + player + ")")
+                // The mode is off by default on the four players too (they have physical Beat Jump buttons): nothing below
+                // enters it until the setting is turned on, as the main UI does through /GUI/Scripted/EngineXBeatJumpPads.
+                check(globalConfig.scBeatJumpPads === false && globalConfig.scBeatJumpDecks === 0, "setting " + globalConfig.scBeatJumpPads + " by default (player " + player + ")")
             },
             function() {
                 // Stock pads: press and release reach the stock output, nothing jumps.
@@ -143,18 +146,36 @@ Rectangle {
                 const c = lastCalls(4)
                 check(calls.length - callsBefore === 4 && c[0].value > 0 && c[1].value === 0 && c[2].shift && c[3].value === 0 && jumps() === jumpsBefore,
                       "stock pads: press, release, Shift + pad (delete) reach the stock output")
+                mode(1, true) // Shift + LOOP, the mode still off
+            },
+            function() {
+                // Off by default, on every board: Shift + LOOP is the stock PadModeButton1ShiftPressed and the pads stay stock.
+                check(count(shiftLoop1) === 1 && globalConfig.scBeatJumpDecks === 0 && !modeSelect.scBeatJumpOn && !pads.scBeatJumpOn,
+                      "default Off: Shift + LOOP stays stock (PadModeButton1ShiftPressed " + count(shiftLoop1) + ")")
+                callsBefore = calls.length; jumpsBefore = jumps()
+                for (let n = 1; n <= Config.device.hardwarePadsCount; n++) { press(n); release(n) }
+                check(calls.length - callsBefore === 2 * Config.device.hardwarePadsCount && jumps() === jumpsBefore, "default Off: pads stay stock after Shift + LOOP")
+                // Turn the mode on, as the main UI does once its settings are loaded (players only; 1.0 is On). The
+                // controller's 500 ms timer reads it, so the next step waits.
+                Planck.createProperty("EngineXBeatJumpPads", 0.0, 0)
+                Planck.getProperty("/GUI/Scripted/EngineXBeatJumpPads").translator.value = 1.0
+            },
+            function() {},
+            function() {
+                check(globalConfig.scBeatJumpPads === player, "setting On (1.0) reaches the controller: " + globalConfig.scBeatJumpPads + " (player " + player + ")")
+                shiftLoopBefore = count(shiftLoop1)
                 mode(1, true) // Shift + LOOP
             },
             function() {
                 if (!player) {
-                    check(count(shiftLoop1) === 1 && globalConfig.scBeatJumpDecks === 0, "Shift + LOOP stays stock (PadModeButton1ShiftPressed " + count(shiftLoop1) + ")")
+                    check(count(shiftLoop1) === shiftLoopBefore + 1 && globalConfig.scBeatJumpDecks === 0, "Shift + LOOP stays stock (PadModeButton1ShiftPressed " + count(shiftLoop1) + ")")
                     callsBefore = calls.length; jumpsBefore = jumps()
                     for (let n = 1; n <= Config.device.hardwarePadsCount; n++) { press(n); release(n) }
                     check(calls.length - callsBefore === 2 * Config.device.hardwarePadsCount && jumps() === jumpsBefore, "pads stay stock after Shift + LOOP")
                     done = true
                     return
                 }
-                check(count(shiftLoop1) === 0 && deckBit(1) && modeSelect.scBeatJumpOn && pads.scBeatJumpOn, "Shift + LOOP enters the Beat Jump pad mode on Deck1, stock Shift + LOOP not triggered")
+                check(count(shiftLoop1) === shiftLoopBefore && deckBit(1) && modeSelect.scBeatJumpOn && pads.scBeatJumpOn, "setting On: Shift + LOOP enters the Beat Jump pad mode on Deck1, stock Shift + LOOP not triggered")
                 jumpsBefore = jumps(); callsBefore = calls.length
                 press(1)
             },
@@ -243,7 +264,6 @@ Rectangle {
                 mode(1, true)
                 check(deckBit(1), "Shift + LOOP enters again")
                 // The setting from the main UI: Off.
-                const r = Planck.createProperty("EngineXBeatJumpPads", 0.0, 0)
                 Planck.getProperty("/GUI/Scripted/EngineXBeatJumpPads").translator.value = 0.5
             },
             function() {},

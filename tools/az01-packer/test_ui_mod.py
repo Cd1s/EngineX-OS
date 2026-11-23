@@ -13053,7 +13053,7 @@ const ctx = { Planck, Config, device, deckConfig, LedType: { None: 0, Simple: 1,
 // GlobalAssignmentConfig, as generated: its Beat Jump part and the palette of the stock file.
 const G = @GLOBAL@;
 const globalConfig = { get shift() { return device.shift }, get leftParameter() { return device.leftParameter },
-    scBeatJumpPadsState: 0, scBeatJumpPadsPolled: true, scBeatJumpDecks: 0, pBeatJumpPads: Planck.getProperty('/GUI/Scripted/EngineXBeatJumpPads') };
+    scBeatJumpPadsState: eval(G.state), scBeatJumpPadsPolled: eval(G.polled), scBeatJumpDecks: 0, pBeatJumpPads: Planck.getProperty('/GUI/Scripted/EngineXBeatJumpPads') };
 for (const [k, v] of Object.entries(G.palette)) globalConfig[k] = v;
 const gScopes = [globalConfig, Object.assign({ scGlobalConfig: globalConfig }, ctx)];
 getter(globalConfig, 'scBeatJumpPlayer', gScopes, G.player);
@@ -13070,7 +13070,9 @@ ctx.util = util;
     def global_parts(self):
         g = self.gen["GlobalAssignmentConfig.qml"]
         palette = dict(re.findall(r'readonly property color (\w+): "(#[0-9A-Fa-f]{6}|black)"', self.stock["GlobalAssignmentConfig.qml"]))
+        # state and polled are the generated start values: no setting published, no poll answer yet.
         return {"palette": palette, "player": self.binding(g, "scBeatJumpPlayer"), "pads": self.binding(g, "scBeatJumpPads"),
+                "state": self.binding(g, "scBeatJumpPadsState"), "polled": self.binding(g, "scBeatJumpPadsPolled"),
                 "onPads": self.binding(g, "onScBeatJumpPadsChanged"),
                 "functions": [{"name": n, "src": self.function(g, n)} for n in ("scBeatJumpBit", "scSetBeatJump", "scSyncBeatJumpPadsFromState")]}
 
@@ -13141,16 +13143,18 @@ function sequence() {
 
     def test_outside_the_mode_every_pad_does_what_stock_does(self):
         # Same gestures through the stock ActionOutput directly (stock ActionPads.qml) and through the generated
-        # wrapper, on a player with the setting On and on an all-in-one: the writes are identical.
+        # wrapper, on a player (the setting Off, its default, and On with no deck in the mode) and on an all-in-one:
+        # the writes are identical.
         stock = json.loads(self.run_pads(self.STOCK_SEQUENCE + "console.log(JSON.stringify(sequence()))", gen=False))
         self.assertIn("/Engine/Deck1/Pads/Pad1/Action value=1", stock[0])
         self.assertIn("/Engine/Deck1/Pads/Pad1/Action value=0", stock[0])
         self.assertIn("/Engine/Deck1/Pads/Pad4/ShiftAction state=true", stock[2])
         for name in ("JP07", "JP14", "JP11", "JC11", "NH08", "JP21", "JC20"):
-            with self.subTest(board=name):
-                got = json.loads(self.run_pads(f"board.name = {json.dumps(name)};\n" + self.STOCK_SEQUENCE
-                                               + "console.log(JSON.stringify(sequence()))"))
-                self.assertEqual(got, stock)
+            for state in (0, 1):
+                with self.subTest(board=name, published=state):
+                    got = json.loads(self.run_pads(f"board.name = {json.dumps(name)}; globalConfig.scBeatJumpPadsState = {state}; settle();\n"
+                                                   + self.STOCK_SEQUENCE + "console.log(JSON.stringify(sequence()))"))
+                    self.assertEqual(got, stock)
 
     def test_beat_jump_pads_on_the_four_players(self):
         out = self.run_pads(r"""
@@ -13159,7 +13163,12 @@ const BJ = (path, kind) => '/Engine/Deck' + path + '/Track/BeatJump/' + kind + '
 const tap = action => [action + ' value=1', action + ' value=0', action + ' value=0'];
 for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) {
     board.name = name; globalConfig.scBeatJumpDecks = 0; settle();
-    assert.equal(globalConfig.scBeatJumpPads, true, name + ': on by default');
+    // Off by default (test_beat_jump_pads_are_off_by_default_on_the_four_players): the main UI publishes 1.0 once it is turned on.
+    assert.equal(globalConfig.scBeatJumpPads, false, name + ': off before it is turned on');
+    globalConfig.scSetBeatJump(deckConfig.activeDeckPath, true);
+    assert.equal(globalConfig.scBeatJumpDecks, 0, name + ': nothing enters the mode while it is off');
+    globalConfig.scBeatJumpPadsState = 1; settle();
+    assert.equal(globalConfig.scBeatJumpPads, true, name + ': turned on');
     globalConfig.scSetBeatJump(deckConfig.activeDeckPath, true);
     assert.equal(module.scBeatJumpOn, true);
     writes = []; press(1); release(1);
@@ -13194,17 +13203,18 @@ for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) {
     assert.deepEqual(writes, ['/Engine/Deck1/Pads/Pad6/Action value=0'], name + ' release after leaving goes to stock, as a stock mode change does');
     // The setting Off clears the mode.
     globalConfig.scSetBeatJump('/Engine/Deck1/', true);
-    globalConfig.scBeatJumpPadsPolled = false; settle();
+    globalConfig.scBeatJumpPadsState = 0.5; settle();
     assert.equal(globalConfig.scBeatJumpDecks, 0); assert.equal(module.scBeatJumpOn, false);
-    globalConfig.scBeatJumpPadsPolled = true; settle();
+    globalConfig.scBeatJumpPadsState = eval(G.state); settle();
 }
-// Not on any other board.
+// Not on any other board, whatever the setting says.
 for (const name of ['JP11', 'JC11', 'JC16', 'NH08', 'JP20', 'JP21', 'JC11S', 'JP11S', 'NH08S', 'NH10', 'JP24', 'RMZ2', 'JC20']) {
-    board.name = name; settle();
+    board.name = name; globalConfig.scBeatJumpPadsState = 1; globalConfig.scBeatJumpPadsPolled = true; settle();
     globalConfig.scSetBeatJump('/Engine/Deck1/', true);
     assert.equal(globalConfig.scBeatJumpDecks, 0, name);
     assert.equal(module.scBeatJumpOn, false, name);
 }
+globalConfig.scBeatJumpPadsState = eval(G.state); globalConfig.scBeatJumpPadsPolled = eval(G.polled);
 // The setting: the main UI's value wins over the poll; 0 means "not published yet".
 board.name = 'JP07';
 for (const [state, polled, want] of [[0, true, true], [0, false, false], [0.5, true, false], [1, false, true]]) {
@@ -13218,6 +13228,91 @@ translator('/GUI/Scripted/EngineXBeatJumpPads')._v = 0.5;
 globalConfig.scSyncBeatJumpPadsFromState();
 assert.equal(globalConfig.scBeatJumpPadsState, 0.5);
 assert.equal(globalConfig.scBeatJumpPads, false);
+console.log('ok');
+""")
+        self.assertIn("ok", out)
+
+    def test_beat_jump_pads_are_off_by_default_on_the_four_players(self):
+        # The players have physical Beat Jump buttons: with nothing published and no poll answer (the generated start
+        # values) Shift + LOOP, the pads and every LED are what stock does, on SC5000, SC5000M, SC6000 and SC6000M.
+        g = self.gen["GlobalAssignmentConfig.qml"]
+        self.assertEqual(self.binding(g, "scBeatJumpPadsState"), "0")
+        self.assertEqual(self.binding(g, "scBeatJumpPadsPolled"), "false")
+        out = self.run_pads(r"""
+for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) {
+    board.name = name; settle();
+    assert.equal(globalConfig.scBeatJumpPlayer, true, name);
+    assert.equal(globalConfig.scBeatJumpPads, false, name + ': off by default');
+    globalConfig.scSetBeatJump('/Engine/Deck1/', true); // nothing can enter the mode
+    assert.equal(globalConfig.scBeatJumpDecks, 0, name);
+    assert.equal(module.scBeatJumpOn, false, name);
+}
+console.log('ok');
+""")
+        self.assertIn("ok", out)
+        stock = json.loads(self.run_pads(self.STOCK_SEQUENCE + "console.log(JSON.stringify(sequence()))", gen=False))
+        for name in ("JP07", "JP08", "JP13", "JP14"):
+            with self.subTest(board=name):
+                got = json.loads(self.run_pads(f"board.name = {json.dumps(name)}; settle();\n" + self.STOCK_SEQUENCE
+                                               + "console.log(JSON.stringify(sequence()))"))
+                self.assertEqual(got, stock)  # every pad gesture reaches the stock output unchanged
+        stock = json.loads(self.run_modes(self.STOCK_MODES + "console.log(JSON.stringify(sequence()))", gen=False))
+        for name in ("JP07", "JP08", "JP13", "JP14"):
+            with self.subTest(board=name, part="pad mode buttons"):
+                got = json.loads(self.run_modes(f"board.name = {json.dumps(name)}; settle();\n" + self.STOCK_MODES
+                                                + "console.log(JSON.stringify(sequence()))"))
+                self.assertEqual(got, stock)  # including Shift + LOOP: PadModeButton1ShiftPressed, lit, flash and colour
+        for name in ("JP07", "JP08", "JP13", "JP14"):
+            with self.subTest(board=name, part="pad LEDs"):
+                stock_leds = json.loads(self.node(self.LEDS + "console.log(JSON.stringify(deckStates()))",
+                                                  GLOBAL=self.global_parts(), LEDS=self.led_parts(False)))
+                got_leds = json.loads(self.node(self.LEDS + f"board.name = {json.dumps(name)}; settle();\n"
+                                                + "globalConfig.scSetBeatJump('/Engine/Deck1/', true);\n"
+                                                + "assert.equal(globalConfig.scBeatJumpDecks, 0, 'nothing enters the mode');\n"
+                                                + "console.log(JSON.stringify(deckStates()))",
+                                                GLOBAL=self.global_parts(), LEDS=self.led_parts()))
+                self.assertEqual(got_leds, stock_leds)
+
+    def test_turning_the_beat_jump_mode_on_on_the_four_players(self):
+        # Turned on, by the main UI's published 1.0 or by the 10 s poll before the main UI has published, Shift + LOOP
+        # enters the mode and pad 1 / pad 2 jump back / forward; the published value wins over the poll, and 0.5 is Off.
+        enter = r"""
+const enterShiftLoop = () => { writes = []; pressMode(1, true); return writes.slice() };
+for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) {
+    board.name = name; globalConfig.scBeatJumpDecks = 0; deckConfig.activeDeckPath = '/Engine/Deck1/';
+    engineButtons(0); settle();
+    assert.deepEqual(enterShiftLoop(), ['/Engine/Deck1/PadModeButton1ShiftPressed trigger'], name + ': stock while off');
+    assert.equal(globalConfig.scBeatJumpDecks, 0, name);
+    for (const [label, state, polled, on] of [['published On', 1, false, true], ['polled On', 0, true, true],
+                                              ['published Off beats polled On', 0.5, true, false], ['polled Off', 0, false, false]]) {
+        globalConfig.scBeatJumpPadsState = state; globalConfig.scBeatJumpPadsPolled = polled; settle();
+        assert.equal(globalConfig.scBeatJumpPads, on, name + ' ' + label);
+        const got = enterShiftLoop();
+        assert.deepEqual(got, on ? [] : ['/Engine/Deck1/PadModeButton1ShiftPressed trigger'], name + ' ' + label);
+        assert.equal(globalConfig.scBeatJumpDecks, on ? 1 << 1 : 0, name + ' ' + label);
+        assert.equal(module.scBeatJumpOn, on, name + ' ' + label);
+        globalConfig.scSetBeatJump('/Engine/Deck1/', false);
+    }
+    globalConfig.scBeatJumpPadsState = eval(G.state); globalConfig.scBeatJumpPadsPolled = eval(G.polled); settle();
+}
+console.log('ok');
+"""
+        self.assertIn("ok", self.run_modes(enter))
+        out = self.run_pads(r"""
+const BJ = (kind) => '/Engine/Deck1/Track/BeatJump/' + kind + ' state=true';
+for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) {
+    board.name = name; globalConfig.scBeatJumpDecks = 0; settle();
+    writes = []; press(1); release(1); press(2); release(2);
+    assert.ok(writes.every(w => w.includes('/Pads/Pad')), name + ' off: pads write the stock pad actions ' + writes);
+    globalConfig.scBeatJumpPadsState = 1; settle();
+    globalConfig.scSetBeatJump('/Engine/Deck1/', true); // what Shift + LOOP does
+    writes = []; press(1); release(1);
+    assert.deepEqual(writes, [BJ('JumpBack')], name + ' pad 1');
+    writes = []; press(2); release(2);
+    assert.deepEqual(writes, [BJ('JumpForward')], name + ' pad 2');
+    globalConfig.scBeatJumpPadsState = eval(G.state); settle();
+    assert.equal(module.scBeatJumpOn, false, name + ' back to the default');
+}
 console.log('ok');
 """)
         self.assertIn("ok", out)
@@ -13270,14 +13365,15 @@ const savedView = extra => Object.assign({ scWave: 'denon', scUIScale: '100', sc
 
     def test_a_saved_view_leaves_the_players_beat_jump_setting_alone(self):
         # Released 5.3.0.5 wrote scBeatJumpPads: false into every player's views.json (its snapshot saved the property,
-        # which was never on). The setting is on by default on the players now: restoring such a view, at boot or with
-        # Shift + VIEW, must not turn it off.
+        # which was never on). A DJ who turned the players' mode on (the default is Off) keeps it: restoring such a view,
+        # at boot or with Shift + VIEW, must not turn it off. The default Off stays Off whatever a view says, even one
+        # saved On, so a view never turns the mode on either.
         out = self.run_views(r"""
 const old = { active: 1, views: { 1: savedView({ scBeatJumpPads: false, scUIScale: '90' }), 2: savedView({ scBeatJumpPads: false, scUIScale: '110' }),
     3: savedView({ scBeatJumpPads: false }), 4: savedView({ scBeatJumpPads: true }), 5: savedView({ scBeatJumpPads: false }) } };
 for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) for (const scPlayer of [false, true]) {
     const label = name + (scPlayer ? ' (4 Decks)' : '');
-    const b = viewBoard(name, scPlayer, true, JSON.parse(JSON.stringify(old.views)));
+    const b = viewBoard(name, scPlayer, true, JSON.parse(JSON.stringify(old.views))); // the DJ turned the mode on
     assert.equal(b.root.scIsPlayerBoard, true, label);
     // Boot: the restore timer applies the active view.
     assert.equal(b.root.scViewApplySlot(1), true, label);
@@ -13290,6 +13386,17 @@ for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) for (const scPlayer of [fal
         assert.equal(b.root.scViewActive, n, label);
         assert.ok(!b.calls.some(q => q.includes('beatJumpPads')), label + ' view ' + n + ': ' + b.calls);
         assert.equal(b.root.scBeatJumpPads, true, label + ' view ' + n);
+    }
+    // The default, Off, stays Off at boot and through every view, including view 4 which holds On.
+    const d = viewBoard(name, scPlayer, false, JSON.parse(JSON.stringify(old.views)));
+    assert.equal(d.root.scViewApplySlot(1), true, label);
+    assert.deepEqual(d.calls, ['uiScale=90'], label + ' default Off: the view restores its other settings only');
+    assert.equal(d.root.scBeatJumpPads, false, label + ' default Off, boot');
+    for (const n of [2, 3, 4, 5, 1, 2, 4]) {
+        d.calls.length = 0;
+        d.root.scViewSelect(n);
+        assert.ok(!d.calls.some(q => q.includes('beatJumpPads')), label + ' default Off, view ' + n + ': ' + d.calls);
+        assert.equal(d.root.scBeatJumpPads, false, label + ' default Off, view ' + n);
     }
     // Off stays off, On stays on, whatever a view says.
     for (const setting of [false, true]) {
@@ -13445,19 +13552,22 @@ function sequence() {
         stock = json.loads(self.run_modes(self.STOCK_MODES + "console.log(JSON.stringify(sequence()))", gen=False))
         self.assertIn("/Engine/Deck1/PadModeButton1ShiftPressed trigger", stock)
         for name in ("JP07", "JP11", "JC11", "NH08", "JP21", "JC20"):
-            with self.subTest(board=name):
-                # Outside the mode: lit, flash, colour and every press as stock.
-                got = json.loads(self.run_modes(f"board.name = {json.dumps(name)};\n" + self.STOCK_MODES
-                                                + "console.log(JSON.stringify(sequence()))"))
-                if name == "JP07":
-                    # Shift + LOOP enters the mode there instead of PadModeButton1ShiftPressed; the rest is stock.
-                    self.assertNotIn("/Engine/Deck1/PadModeButton1ShiftPressed trigger", got)
-                    self.assertEqual([g for g in got if g], [s for s in stock if s and "PadModeButton1ShiftPressed" not in s])
-                else:
-                    self.assertEqual(got, stock)
+            for state in (0, 1):
+                with self.subTest(board=name, published=state):
+                    # Outside the mode: lit, flash, colour and every press as stock.
+                    got = json.loads(self.run_modes(f"board.name = {json.dumps(name)}; globalConfig.scBeatJumpPadsState = {state}; settle();\n"
+                                                    + self.STOCK_MODES + "console.log(JSON.stringify(sequence()))"))
+                    if name == "JP07" and state == 1:
+                        # Turned on, Shift + LOOP enters the mode there instead of PadModeButton1ShiftPressed; the rest is stock.
+                        self.assertNotIn("/Engine/Deck1/PadModeButton1ShiftPressed trigger", got)
+                        self.assertEqual([g for g in got if g], [s for s in stock if s and "PadModeButton1ShiftPressed" not in s])
+                    else:
+                        # Off (the default on every board) or not a player (whatever is published): all stock.
+                        self.assertEqual(got, stock)
         out = self.run_modes(r"""
 for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) {
-    board.name = name; globalConfig.scBeatJumpDecks = 0; settle(); deckConfig.activeDeckPath = '/Engine/Deck1/';
+    board.name = name; globalConfig.scBeatJumpDecks = 0; deckConfig.activeDeckPath = '/Engine/Deck1/';
+    globalConfig.scBeatJumpPadsState = 1; settle(); // turned on: it is off by default
     engineButtons(0);
     writes = []; pressMode(1, true);
     assert.deepEqual(writes, [], name + ': Shift + LOOP triggers nothing stock');
@@ -13488,7 +13598,7 @@ for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) {
     writes = []; pressMode(1, true);
     assert.deepEqual(writes, ['/Engine/Deck1/PadModeButton1ShiftPressed trigger'], name + ' setting Off');
     assert.equal(globalConfig.scBeatJumpDecks, 0);
-    globalConfig.scBeatJumpPadsState = 0; settle();
+    globalConfig.scBeatJumpPadsState = eval(G.state); settle();
 }
 console.log('ok');
 """)
@@ -13551,20 +13661,23 @@ function deckStates() {
         for name in ("JP07", "JP11", "JC11", "NH08"):
             with self.subTest(board=name):
                 got = json.loads(self.node(self.LEDS + f"board.name = {json.dumps(name)};\n"
+                                           + "globalConfig.scBeatJumpPadsState = 1; settle();\n"  # turned on: Deck2 can be in the mode
                                            + "globalConfig.scSetBeatJump('/Engine/Deck2/', true);\n"
                                            + "console.log(JSON.stringify(deckStates()))",
                                            GLOBAL=self.global_parts(), LEDS=self.led_parts()))
                 self.assertEqual(got, stock)  # stock colours outside the mode (also with another deck in it)
         out = self.node(self.LEDS + r"""
 for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) {
-    board.name = name; settle();
+    board.name = name; globalConfig.scBeatJumpPadsState = 1; settle(); // turned on: it is off by default
     globalConfig.scSetBeatJump('/Engine/Deck1/', true);
+    assert.equal(globalConfig.scBeatJumpDecks, 1 << 1, name);
     for (const state of deckStates()) {
         const enabled = state.split(':')[0].endsWith('true');
         const want = enabled ? ['#4B88E1', '#47C957', 'black', 'black', 'black', 'black', 'black', 'black'] : Array(8).fill('black');
         assert.equal(state.split(': ')[1], want.join(' '), name + ' ' + state);
     }
     globalConfig.scSetBeatJump('/Engine/Deck1/', false);
+    globalConfig.scBeatJumpPadsState = eval(G.state); settle();
 }
 console.log('ok');
 """, GLOBAL=self.global_parts(), LEDS=self.led_parts())
@@ -13581,9 +13694,11 @@ console.log('ok');
         self.assertIn('visible: root.scIsMixstream\n', entries.split("Pitch Bend")[1])  # the Mixstream rows stay Mixstream-only
         sync = self.function(main, "scSyncBeatJumpPads")
         parse = self.function(main, "scParseSettingsConf")
-        # Offline settings.conf: On on the players unless beat_jump_pads=0 (set before the key loop).
-        self.assertLess(parse.index("root.scBeatJumpPads = root.scIsPlayerBoard"), parse.index("for (const line of"))
+        # Offline settings.conf: Off on every board, the players included, unless beat_jump_pads=1 (set before the key loop).
+        self.assertLess(parse.index("root.scBeatJumpPads = false"), parse.index("for (const line of"))
+        self.assertNotIn("root.scBeatJumpPads = root.scIsPlayerBoard", parse)
         self.assertIn('else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"', parse)
+        self.assertIn("\tproperty bool scBeatJumpPads: false\n", main)
         self.assertIn("scIsPlayerBoard && Planck.createProperty(\"EngineXBeatJumpPads\", 0.0, 0)", main)
         out = self.node(r"""
 const root = { scIsPlayerBoard: true, scUiLoaded: false, scBeatJumpPads: false, scBeatJumpPadsSynced: false };
@@ -13598,6 +13713,35 @@ root.scBeatJumpPads = false; sync(); assert.equal(value.v, 0.5);
 root.scIsPlayerBoard = false; value.v = 0; root.scBeatJumpPads = true; sync(); assert.equal(value.v, 0, 'all-in-ones publish nothing');
 console.log('ok');
 """, GLOBAL=self.global_parts(), SYNC=sync)
+        self.assertIn("ok", out)
+
+
+    def test_main_ui_default_and_saved_value_of_the_beat_jump_setting(self):
+        # The generated scParseSettingsConf, as the main UI runs it on every board: no value is Off (the four players
+        # have physical Beat Jump buttons; Mixstream's on-screen bank has always started Off), a saved
+        # beat_jump_pads=1 is On, anything else is Off, and a value that was On goes back to Off when the key is gone.
+        parse = self.function(self.main, "scParseSettingsConf")
+        out = self.node(r"""
+const parse = @PARSE@;
+const player = @PLAYER@;
+function run(boardName, text, before) {
+    const root = { scBoard: boardName, scPlayer: false, scBeatJumpPads: !!before, scViewPrefs: [] };
+    getter(root, 'scIsPlayerBoard', [root], player);
+    const scope = { root, scCueCountdown: false, scBpmDecimals: 2, scTracklistWaveform: false, scFxMsInteger: () => 500, scFxMsApply() {} };
+    fn([scope], parse)(text);
+    return root.scBeatJumpPads;
+}
+for (const name of ['JP07', 'JP08', 'JP13', 'JP14', 'NH08', 'NH08S', 'NH10', 'JP11', 'JC11', 'JP21', 'JP24']) {
+    assert.equal(run(name, ''), false, name + ': no settings.conf');
+    assert.equal(run(name, 'led_brightness=60\n'), false, name + ': no key');
+    assert.equal(run(name, 'beat_jump_pads=0\n'), false, name + ': 0');
+    assert.equal(run(name, 'beat_jump_pads=\n'), false, name + ': empty');
+    assert.equal(run(name, 'beat_jump_pads=1\n'), true, name + ': saved On');
+    assert.equal(run(name, 'ui_scale=100\nbeat_jump_pads=1\nled_brightness=60\n'), true, name + ': saved On among other keys');
+    assert.equal(run(name, '', true), false, name + ': the key is gone');
+}
+console.log('ok');
+""", GLOBAL=self.global_parts(), PARSE=parse, PLAYER=self.binding(self.main, "scIsPlayerBoard"))
         self.assertIn("ok", out)
 
 

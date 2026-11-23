@@ -4524,7 +4524,7 @@ SERVICES_MAIN = """
 		root.scReverseJogRight = false
 		root.scSdHighSpeed = false
 		root.scHifiOutput = false
-		root.scBeatJumpPads = root.scIsPlayerBoard // the players' Beat Jump pad mode is on unless beat_jump_pads=0
+		root.scBeatJumpPads = false // off unless beat_jump_pads=1, on the four players too (they have physical Beat Jump buttons)
 		let restoreBpm = false // assigned once below: no Off/On blink on the controller's centre LED
 		for (const line of (text || "").split("\\n")) {
 			const eq = line.indexOf("=")
@@ -5934,7 +5934,8 @@ def mixstream_fx_entries():
 \t\t\t}},""")
     return "\n".join(out) + "\n"
 
-# Beat Jump Pad Bank: Mixstream's on-screen bank; on the four players Shift + LOOP's pad mode (on by default).
+# Beat Jump Pad Bank: Mixstream's on-screen bank; on the four players Shift + LOOP's pad mode. Off by default on both
+# (the players have physical Beat Jump buttons); the row stays visible so a DJ can turn it on.
 BEAT_JUMP_ENTRIES = (switch_entry("Beat Jump Pad Bank", "scBeatJumpPads", "beatJumpPads", "\t\t\tvisible: root.scIsMixstream || root.scIsPlayerBoard\n")
     + switch_entry("Pitch Bend → Beat Jump", "scPitchBendBeatJump", "pitchBendBeatJump", "\t\t\tvisible: root.scIsMixstream\n")
     + mixstream_fx_entries()
@@ -9014,11 +9015,11 @@ def edits(dev: bool):
             '    // Beat Jump pad mode on the four players (Shift + LOOP): bit n is set while /Engine/Deck<n>/ is in it.\n'
             '    // Controller engine only: an Engine restart clears it; per deck: a Layer or 4-deck switch keeps it.\n'
             '    // The setting comes from /GUI/Scripted/EngineXBeatJumpPads (0 not published yet, 0.5 Off, 1 On; the 500 ms\n'
-            '    // timer reads it) or else the 10 s HTTP poll; it is On by default on these boards.\n'
+            '    // timer reads it) or else the 10 s HTTP poll; it is Off by default on these boards (they have physical Beat Jump buttons).\n'
             '    readonly property bool scBeatJumpPlayer: ["JP07", "JP08", "JP13", "JP14"].indexOf(String(Config.device.name)) >= 0\n'
             '    property var pBeatJumpPads: scBeatJumpPlayer ? Planck.getProperty("/GUI/Scripted/EngineXBeatJumpPads") : null\n'
             '    property real scBeatJumpPadsState: 0\n'
-            '    property bool scBeatJumpPadsPolled: true\n'
+            '    property bool scBeatJumpPadsPolled: false\n'
             '    readonly property bool scBeatJumpPads: scBeatJumpPlayer && (scBeatJumpPadsState > 0 ? scBeatJumpPadsState > 0.75 : scBeatJumpPadsPolled)\n'
             '    property int scBeatJumpDecks: 0\n'
             '    onScBeatJumpPadsChanged: if (!scBeatJumpPads) scBeatJumpDecks = 0\n'
