@@ -1,27 +1,34 @@
 package rekordbox
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestKeyCacheSharesDerivedKeyAcrossCacheInstances(t *testing.T) {
+	if os.Getenv("KEYCACHE_HELPER") != "" {
+		cache := NewKeyCache()
+		if _, err := cache.get([]byte("0123456789abcdef"), []byte("shared-cache-test")); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Printf("derivations=%d\n", KeyDerivations())
+		return
+	}
 	dir := t.TempDir()
-	t.Setenv("ENGINEX_RB_SHARED_KEY_CACHE", dir)
-	salt := []byte("0123456789abcdef")
-	passphrase := []byte("shared-cache-test")
-	before := KeyDerivations()
-	first := NewKeyCache()
-	if _, err := first.get(salt, passphrase); err != nil {
-		t.Fatal(err)
-	}
-	second := NewKeyCache()
-	if _, err := second.get(salt, passphrase); err != nil {
-		t.Fatal(err)
-	}
-	if got := KeyDerivations() - before; got != 1 {
-		t.Fatalf("derived %d keys, want one shared derivation", got)
+	for i, want := range []string{"derivations=1", "derivations=0"} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestKeyCacheSharesDerivedKeyAcrossCacheInstances$", "-test.v")
+		cmd.Env = append(os.Environ(), "KEYCACHE_HELPER=1", "ENGINEX_RB_SHARED_KEY_CACHE="+dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helper %d: %v\n%s", i+1, err, out)
+		}
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("helper %d output=%q, want %q", i+1, out, want)
+		}
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -30,8 +37,11 @@ func TestKeyCacheSharesDerivedKeyAcrossCacheInstances(t *testing.T) {
 	var keyPath string
 	for _, entry := range entries {
 		if filepath.Ext(entry.Name()) == "" {
-			keyPath = filepath.Join(dir, entry.Name())
-			break
+			candidate := filepath.Join(dir, entry.Name())
+			if st, statErr := os.Stat(candidate); statErr == nil && st.Size() == 64 {
+				keyPath = candidate
+				break
+			}
 		}
 	}
 	if keyPath == "" {
