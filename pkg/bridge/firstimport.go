@@ -468,8 +468,21 @@ func ImportInBackground(ctx context.Context, mount string, progress func(done, t
 	}
 	mergeByPath(l)
 	total, left, window := len(l.Tracks), -1, importWindow
+	pri := newPriorityTracker()
 	for {
-		o := enginedb.Options{DatabaseDir: stage, Resume: true, StagedOnly: stagedOnly, Deadline: time.Now().Add(window), OnFinished: shown.set}
+		if _, perr := pri.service(ctx, mount, stage, stamp, r, l, stagedOnly, false, false, true, shown.set); perr != nil {
+			if ctx.Err() != nil || !errors.Is(perr, enginedb.ErrLibraryInUse) {
+				return enginedb.Result{}, perr
+			}
+		}
+		o := enginedb.Options{
+			DatabaseDir: stage,
+			Resume:      true,
+			StagedOnly:  stagedOnly,
+			Deadline:    time.Now().Add(window),
+			OnFinished:  shown.set,
+			ShouldYield: func() bool { return pri.hasPending(mount) },
+		}
 		res, err := enginedb.SyncResolved(ctx, r, l, o)
 		if err != nil {
 			return res, err
@@ -481,6 +494,9 @@ func ImportInBackground(ctx context.Context, mount string, progress func(done, t
 		// A pass whose window went on what every pass costs (the finished tracks' lookups, a
 		// track Engine owns) gets a longer one.
 		if left >= 0 && res.Deferred >= left {
+			if pri.hasPending(mount) {
+				continue
+			}
 			if window *= 2; window > max(64*importWindow, 10*time.Minute) {
 				return res, fmt.Errorf("first import stopped making progress with %d tracks left", res.Deferred)
 			}

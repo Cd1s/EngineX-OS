@@ -5306,6 +5306,19 @@ SERVICES_MAIN = """
 			onUriChanged: root.scSwapStemmed(deckIdx, uri)
 		}
 	}
+	property var scPriorityXhr: null
+	property string scPriorityLast: ""
+	function scPrioritizeTrack(path, source) {
+		if (!path || path.indexOf("/media/") !== 0) return
+		const key = source + ":" + path
+		if (key === scPriorityLast) return
+		scPriorityLast = key
+		if (!scPriorityXhr) scPriorityXhr = new XMLHttpRequest()
+		if (scPriorityXhr.readyState > 0 && scPriorityXhr.readyState < 4) scPriorityXhr.abort()
+		scPriorityXhr.open("POST", "http://127.0.0.1:8080/v1/enginex/rekordbox/priority")
+		scPriorityXhr.setRequestHeader("Content-Type", "application/json")
+		scPriorityXhr.send(JSON.stringify({ path: path, source: source }))
+	}
 	// A streamed row with a stemmed local copy (the services' own Stems lists)
 	// is swapped for that copy as it loads, so the deck has its Stems. Engine's
 	// own import finds the track it already imported; a playing deck is left alone.
@@ -10417,6 +10430,9 @@ def legacy_qml_fixes():
                 "                        id: previewItem\n"
                 "                        property real scPendingSeek: -1\n"
                 "                        onIsListeningChanged: {\n"
+                "                            if (isListening && typeof root !== \"undefined\" && root.scPrioritizeTrack && row.absolutePath) {\n"
+                "                                root.scPrioritizeTrack(row.absolutePath, \"preview\")\n"
+                "                            }\n"
                 "                            if (isListening && scPendingSeek >= 0) {\n"
                 "                                const pos = scPendingSeek\n"
                 "                                scPendingSeek = -1\n"
@@ -10429,6 +10445,9 @@ def legacy_qml_fixes():
                 "\t\t\t\t\t\tid: previewItem\n"
                 "\t\t\t\t\t\tproperty real scPendingSeek: -1\n"
                 "\t\t\t\t\t\tonIsListeningChanged: {\n"
+                "\t\t\t\t\t\t\tif (isListening && typeof root !== \"undefined\" && root.scPrioritizeTrack && row.absolutePath) {\n"
+                "\t\t\t\t\t\t\t\troot.scPrioritizeTrack(row.absolutePath, \"preview\")\n"
+                "\t\t\t\t\t\t\t}\n"
                 "\t\t\t\t\t\t\tif (isListening && scPendingSeek >= 0) {\n"
                 "\t\t\t\t\t\t\t\tconst pos = scPendingSeek\n"
                 "\t\t\t\t\t\t\t\tscPendingSeek = -1\n"
@@ -10437,6 +10456,58 @@ def legacy_qml_fixes():
                 "\t\t\t\t\t\t}\n"
                 "\t\t\t\t\t\tonVisibleChanged: if (!visible) scPendingSeek = -1\n"
                 "\t\t\t\t\t}\n",
+            ),
+            (
+                "                onIsCurrentRowChanged: {\n"
+                "                    if (!isCurrentRow) {\n"
+                "                        clickedOnce = false\n"
+                "                        return\n"
+                "                    } else if (!pressed) {\n"
+                "                        clickedOnce = true\n"
+                "                    }\n\n"
+                "                    PlanckGUI.views.trackLoadOverlayView.setSelectedTrackStreamingFlags(streamingFlags)\n"
+                "                    Planck.librarianController.trackLoadArbitrator.selectedTrackChanged(\n"
+                "                        isStreamingTrack,\n"
+                "                        streamingProviderName\n"
+                "                    )\n"
+                "                }\n" if v53() else
+                "\t\t\t\tonIsCurrentRowChanged: {\n"
+                "\t\t\t\t\tif(!isCurrentRow) {\n"
+                "\t\t\t\t\t\treturn\n"
+                "\t\t\t\t\t}\n\n"
+                "\t\t\t\t\tPlanck.librarianController.trackLoadArbitrator.selectedTrackChanged(\n"
+                "\t\t\t\t\t\tisStreamingTrack,\n"
+                "\t\t\t\t\t\tstreamingProviderName\n"
+                "\t\t\t\t\t)\n"
+                "\t\t\t\t}\n",
+                "                onIsCurrentRowChanged: {\n"
+                "                    if (!isCurrentRow) {\n"
+                "                        clickedOnce = false\n"
+                "                        return\n"
+                "                    } else if (!pressed) {\n"
+                "                        clickedOnce = true\n"
+                "                    }\n\n"
+                "                    PlanckGUI.views.trackLoadOverlayView.setSelectedTrackStreamingFlags(streamingFlags)\n"
+                "                    Planck.librarianController.trackLoadArbitrator.selectedTrackChanged(\n"
+                "                        isStreamingTrack,\n"
+                "                        streamingProviderName\n"
+                "                    )\n"
+                "                    if (typeof root !== \"undefined\" && root.scPrioritizeTrack && row.absolutePath) {\n"
+                "                        root.scPrioritizeTrack(row.absolutePath, \"focus\")\n"
+                "                    }\n"
+                "                }\n" if v53() else
+                "\t\t\t\tonIsCurrentRowChanged: {\n"
+                "\t\t\t\t\tif(!isCurrentRow) {\n"
+                "\t\t\t\t\t\treturn\n"
+                "\t\t\t\t\t}\n\n"
+                "\t\t\t\t\tPlanck.librarianController.trackLoadArbitrator.selectedTrackChanged(\n"
+                "\t\t\t\t\t\tisStreamingTrack,\n"
+                "\t\t\t\t\t\tstreamingProviderName\n"
+                "\t\t\t\t\t)\n"
+                "\t\t\t\t\tif (typeof root !== \"undefined\" && root.scPrioritizeTrack && row.absolutePath) {\n"
+                "\t\t\t\t\t\troot.scPrioritizeTrack(row.absolutePath, \"focus\")\n"
+                "\t\t\t\t\t}\n"
+                "\t\t\t\t}\n",
             ),
             (
                 "                        if (point && inAlbumArt) {\n"

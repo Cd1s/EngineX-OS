@@ -38,17 +38,68 @@ var (
 	audioHeader = compat.AudioHeader
 )
 
+// orderTracksForPrepare puts tracks matching priorityPaths first (in priority
+// order) without mutating l.Tracks.
+func orderTracksForPrepare(tracks []rekordbox.Track, priorityPaths []string) []rekordbox.Track {
+	if len(priorityPaths) == 0 || len(tracks) <= 1 {
+		return tracks
+	}
+	rank := make(map[string]int, len(priorityPaths))
+	for _, p := range priorityPaths {
+		norm := strings.TrimPrefix(strings.ReplaceAll(strings.TrimSpace(p), "\\", "/"), "../")
+		norm = strings.TrimLeft(path.Clean("/"+norm), "/")
+		if norm == "" || norm == "." {
+			continue
+		}
+		k := foldPreparedPath("../" + norm)
+		if _, exists := rank[k]; !exists {
+			rank[k] = len(rank)
+		}
+	}
+	if len(rank) == 0 {
+		return tracks
+	}
+	buckets := make([][]rekordbox.Track, len(rank))
+	rest := make([]rekordbox.Track, 0, len(tracks))
+	matched := 0
+	for _, t := range tracks {
+		guess, err := compat.CleanRelative(t.Path)
+		if err == nil {
+			if idx, ok := rank[foldPreparedPath("../"+guess)]; ok {
+				buckets[idx] = append(buckets[idx], t)
+				matched++
+				continue
+			}
+		}
+		rest = append(rest, t)
+	}
+	if matched == 0 {
+		return tracks
+	}
+	ordered := make([]rekordbox.Track, 0, len(tracks))
+	for _, b := range buckets {
+		ordered = append(ordered, b...)
+	}
+	return append(ordered, rest...)
+}
+
 // prepareTracks stats and fingerprints every track. A track whose Engine path is
 // in done keeps that fingerprint unread, so the import leaves it unchanged.
-// Past cutoff (zero: none) the tracks left are not stat'ed or opened but marked
-// late, after at least one track has been prepared: on a slow stick the stats
-// and MP3 header reads of thousands of tracks used up the whole mount budget,
-// and Sync then deferred every track on every mount (r3 review).
+// Past cutoff (zero: none), maxTracks (zero: unlimited), or shouldYield, the
+// tracks left are not stat'ed or opened but marked late, after at least one
+// track has been prepared: on a slow stick the stats and MP3 header reads of
+// thousands of tracks used up the whole mount budget, and Sync then deferred
+// every track on every mount (r3 review).
 func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, cutoff time.Time, now func() time.Time, done map[string]string) ([]preparedTrack, error) {
-	prepared := make([]preparedTrack, 0, len(l.Tracks))
+	return prepareTracksOpts(ctx, res, l, cutoff, now, done, nil, 0, nil)
+}
+
+func prepareTracksOpts(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, cutoff time.Time, now func() time.Time, done map[string]string, priorityPaths []string, maxTracks int, shouldYield func() bool) ([]preparedTrack, error) {
+	tracks := orderTracksForPrepare(l.Tracks, priorityPaths)
+	prepared := make([]preparedTrack, 0, len(tracks))
 	paths := map[string]uint32{}
 	ready, late := 0, false
-	for _, t := range l.Tracks {
+	for _, t := range tracks {
 		if e := ctx.Err(); e != nil {
 			return nil, e
 		}
@@ -93,8 +144,16 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 			prepared = append(prepared, p)
 			continue
 		}
-		// Once past the cut-off, every track left is late: no clock reading per track.
-		if late = late || ready > 0 && !cutoff.IsZero() && now().After(cutoff); late {
+		// Once past the cut-off, maxTracks, or an incoming yield signal, every
+		// track left is late: no clock reading per track.
+		if !late && ready > 0 {
+			if (!cutoff.IsZero() && now().After(cutoff)) ||
+				(maxTracks > 0 && ready >= maxTracks) ||
+				(shouldYield != nil && shouldYield()) {
+				late = true
+			}
+		}
+		if late {
 			prepared = append(prepared, preparedTrack{track: t, rel: rel, hash: "fast:" + t.RecordHash, info: exportFileInfo{size: t.FileSize}, late: true})
 			continue
 		}

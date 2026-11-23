@@ -631,9 +631,30 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 	}
 	total, left, window := len(l.Tracks), -1, importWindow
 	changed := readMark(stage, resumeName) != "" // an earlier pass may have changed it
+	pri := newPriorityTracker()
 	for {
-		o := enginedb.Options{DatabaseDir: stage, StagedOnly: stagedOnly, LegacyOffsets: legacy, LegacyAACOffsets: legacyAAC,
-			Resume: readMark(stage, resumeName) == stamp, Deadline: time.Now().Add(window), OnFinished: shown.set}
+		resuming := readMark(stage, resumeName) == stamp
+		if priChanged, perr := pri.service(ctx, mount, stage, stamp, r, l, stagedOnly, legacy, legacyAAC, resuming, shown.set); perr != nil {
+			if ctx.Err() != nil || !errors.Is(perr, enginedb.ErrLibraryInUse) {
+				return enginedb.Result{}, perr
+			}
+		} else if priChanged {
+			changed = true
+			if err = writeMark(stage, resumeName, stamp); err != nil {
+				return enginedb.Result{}, err
+			}
+			resuming = true
+		}
+		o := enginedb.Options{
+			DatabaseDir:      stage,
+			StagedOnly:       stagedOnly,
+			LegacyOffsets:    legacy,
+			LegacyAACOffsets: legacyAAC,
+			Resume:           resuming,
+			Deadline:         time.Now().Add(window),
+			OnFinished:       shown.set,
+			ShouldYield:      func() bool { return pri.hasPending(mount) },
+		}
 		res, err := enginedb.SyncResolved(ctx, r, l, o)
 		if err != nil {
 			return res, err
@@ -657,6 +678,9 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 		}
 		cut("stage resume marked")
 		if left >= 0 && res.Deferred >= left {
+			if pri.hasPending(mount) {
+				continue
+			}
 			if window *= 2; window > max(64*importWindow, 10*time.Minute) {
 				return res, fmt.Errorf("update stopped making progress with %d tracks left", res.Deferred)
 			}

@@ -116,6 +116,17 @@ type Options struct {
 	// through it leaves complete, read now or up to date already: a pass's share of the whole
 	// count, which never goes down (#328).
 	OnFinished func(done int) `json:"-"`
+	// PriorityPaths are Engine-relative track paths ("../...") to prepare and
+	// import ahead of all other pending tracks in this pass.
+	PriorityPaths []string `json:"-"`
+	// MaxTracks, when positive, caps the number of pending tracks prepared and
+	// imported in this single SyncResolved transaction; remaining pending tracks
+	// are left deferred for the next batch.
+	MaxTracks int `json:"-"`
+	// ShouldYield, when non-nil, is polled between pending tracks once at least
+	// one track has been prepared/read; returning true stops the current batch
+	// early so the caller can commit and service urgent priority work.
+	ShouldYield func() bool `json:"-"`
 }
 type Result struct {
 	Added, Updated, Unchanged int
@@ -515,7 +526,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			return result, err
 		}
 	} else if !opts.Resume {
-		if prepared, err = prepareTracks(ctx, res, l, cutoff, now, nil); err != nil {
+		if prepared, err = prepareTracksOpts(ctx, res, l, cutoff, now, nil, opts.PriorityPaths, opts.MaxTracks, opts.ShouldYield); err != nil {
 			return result, err
 		}
 	}
@@ -575,7 +586,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		for p := range opts.Reread {
 			delete(done, p)
 		}
-		if prepared, err = prepareTracks(ctx, res, l, cutoff, now, done); err != nil {
+		if prepared, err = prepareTracksOpts(ctx, res, l, cutoff, now, done, opts.PriorityPaths, opts.MaxTracks, opts.ShouldYield); err != nil {
 			return result, err
 		}
 	}
@@ -584,7 +595,10 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		return result, err
 	}
 	mapping := map[uint32]int64{}
-	effectiveTracks := append([]rekordbox.Track(nil), l.Tracks...)
+	effectiveTracks := make([]rekordbox.Track, len(prepared))
+	for i, p := range prepared {
+		effectiveTracks[i] = p.track
+	}
 	owned, err := stageOwnedMoves(ctx, tx, prepared, opts.StagedOnly)
 	if err != nil {
 		return result, err
@@ -652,7 +666,9 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			opts.OnFinished(i - result.Deferred)
 		}
 		// Time left after the tracks prepared up front: prepare the next one now.
-		if preparedTrack.late && !opts.Deadline.IsZero() && !past() {
+		if preparedTrack.late && !opts.Deadline.IsZero() && !past() &&
+			(opts.MaxTracks <= 0 || read < opts.MaxTracks) &&
+			(opts.ShouldYield == nil || !opts.ShouldYield()) {
 			if p, e := prepareOne(res, preparedTrack.track, preparedTrack.rel, opts.Deadline, now, true); e == nil {
 				preparedTrack = p
 			}
@@ -680,7 +696,8 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		}
 		legacyOffsets := opts.LegacyOffsets || opts.LegacyAACOffsets && compat.IsMP4AudioPath(rel)
 		fast := opts.Fast
-		if !fast && (preparedTrack.late || (previous != hash && past() && (read > 0 || (!inTime && !opts.Resume)))) {
+		limitReached := (opts.MaxTracks > 0 && read >= opts.MaxTracks) || (read > 0 && opts.ShouldYield != nil && opts.ShouldYield())
+		if !fast && (preparedTrack.late || (previous != hash && ((past() && (read > 0 || (!inTime && !opts.Resume))) || limitReached))) {
 			// A "fast:" fingerprint makes the next full import read this track.
 			fast, files, art, hash = true, nil, nil, "fast:"+t.RecordHash
 			// A completed v2 row keeps its fingerprint and deck edits on re-export.

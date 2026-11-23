@@ -770,6 +770,7 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	claimed := ex.Master && (!s.shadow.ownMaster || masterDeck != s.shadow.ownMasterDeck || pressed) && (masterPlaying || pressed)
 	s.shadow.ownMaster, s.shadow.ownMasterDeck, s.shadow.ownMasterPress = ex.Master, masterDeck, masterPress
 	s.shadow.mu.Unlock()
+	s.noteDeckPriority(own, time.Now())
 	if consoleLineBoards[s.shadow.model] {
 		respond(w, map[string]any{"ok": true}) // a console's decks are a picture for the players that ask: no Pro DJ Link status, no MASTER claim, no loop, no push
 		return
@@ -821,7 +822,9 @@ func (s *Server) decksAlive(w http.ResponseWriter, r *http.Request) {
 		decks[i] = d.Carried(now)
 	}
 	sh.ownDecks = decks
+	ownCopy := append([]deckState(nil), sh.own...)
 	sh.mu.Unlock()
+	s.noteDeckPriority(ownCopy, now)
 	if consoleLineBoards[sh.model] {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -941,6 +944,7 @@ func (s *Server) deckClockPost(w http.ResponseWriter, r *http.Request) {
 	sh.clockDecks = clean
 	sh.clockAt = now
 	sh.mu.Unlock()
+	s.noteDeckPriority(clean, now)
 	respond(w, map[string]any{"ok": true})
 }
 
