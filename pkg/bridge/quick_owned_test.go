@@ -28,3 +28,24 @@ func TestReconcileOwnedContextDoesNotWalkKnownTrackDirectories(t *testing.T) {
 		t.Fatalf("known track changed: %+v", l.Tracks)
 	}
 }
+
+func TestReconcileOwnedContextRejectsMismatchedIDOwnership(t *testing.T) {
+	root := t.TempDir()
+	r, err := compat.NewResolver(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := &rekordbox.Library{Tracks: []rekordbox.Track{
+		{ID: 7, Path: "Contents/new.mp3"},
+		{ID: 8, Path: "Contents/old.mp3"},
+	}}
+	err = ReconcileOwnedContext(context.Background(), r, l,
+		map[uint32]string{7: "Contents/old.mp3", 8: "Contents/old.mp3"},
+		map[string]string{"contents/new.mp3": "Contents/new.mp3", "contents/old.mp3": "Contents/old.mp3"})
+	if err != nil {
+		t.Fatalf("mismatched ownership was resolved from disk: %v", err)
+	}
+	if len(l.Tracks) != 2 || l.Tracks[0].Path != "Contents/new.mp3" {
+		t.Fatalf("track identity changed: %+v", l.Tracks)
+	}
+}

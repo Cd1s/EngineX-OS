@@ -51,7 +51,7 @@ func TestWriteBackStampReason(t *testing.T) {
 	for _, tc := range []struct {
 		name, imported, want string
 	}{
-		{"missing", "", ""},
+		{"missing", "", "Engine library import stamp is missing"},
 		{"old", "v3 export", "Engine library import stamp is older than v4"},
 		{"mismatch", "v4 other", "Engine library import stamp does not match the current rekordbox export"},
 		{"match", current, ""},
@@ -61,5 +61,15 @@ func TestWriteBackStampReason(t *testing.T) {
 				t.Fatalf("reason=%q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestImportedRecordChangedTreatsOpaqueFingerprintAsChanged(t *testing.T) {
+	track := rekordbox.Track{RecordHash: "record-hash"}
+	if !importedRecordChanged("0123456789abcdef", track) {
+		t.Fatal("opaque legacy fingerprint was treated as the current export record")
+	}
+	if importedRecordChanged("fast:record-hash", track) {
+		t.Fatal("fast fingerprint should not be treated as an imported record baseline")
 	}
 }

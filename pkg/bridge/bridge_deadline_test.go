@@ -43,9 +43,8 @@ func TestPruneRGBOverviewsRespectsMountBudget(t *testing.T) {
 	maxMountHookBudget = 14 * time.Second
 	t.Cleanup(func() { maxMountHookBudget, quickMountReserve = old, oldReserve })
 	got := mountPruneDeadline(start, time.Time{})
-	want := start.Add(7 * time.Second)
-	if !got.Equal(want) {
-		t.Fatalf("prune deadline=%v, want %v", got, want)
+	if got.After(start.Add(2 * time.Second)) {
+		t.Fatalf("prune deadline=%v, exceeds the two-second mount sub-budget", got)
 	}
 }
 

@@ -53,6 +53,22 @@ func TestMergeExportLibrariesUsesTheRicherPlaylistAndUnionsTracks(t *testing.T) 
 	}
 }
 
+func TestMergeExportLibrariesKeepsSecondaryTrackIDStable(t *testing.T) {
+	primary := &rekordbox.Library{Tracks: []rekordbox.Track{{ID: 1, Path: "Contents/a.mp3"}}}
+	secondary := &rekordbox.Library{Tracks: []rekordbox.Track{{ID: 1, Path: "Contents/b.mp3"}}}
+	first := mergeExportLibraries(primary, secondary)
+	second := mergeExportLibraries(primary, secondary)
+	if len(first.Tracks) != 2 || len(second.Tracks) != 2 {
+		t.Fatalf("merged tracks=%d/%d, want 2/2", len(first.Tracks), len(second.Tracks))
+	}
+	if first.Tracks[1].ID != second.Tracks[1].ID {
+		t.Fatalf("secondary track ID moved from %d to %d", first.Tracks[1].ID, second.Tracks[1].ID)
+	}
+	if first.Tracks[1].ID < 1<<24 {
+		t.Fatalf("secondary track ID %d overlaps the source ID namespace", first.Tracks[1].ID)
+	}
+}
+
 func TestDualExportDropsGhostEmptyRootPlaylistsAbsentFromPDB(t *testing.T) {
 	one := &rekordbox.Library{Playlists: []rekordbox.Playlist{
 		{ID: 1, Name: "ghost"},
