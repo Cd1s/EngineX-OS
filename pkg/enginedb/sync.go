@@ -757,7 +757,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			// reference it from imported playlists, but never adopt or rewrite it.
 			if trackByPath == nil {
 				trackByPath = make(map[string]int64, len(prepared))
-				trows, terr := tx.QueryContext(ctx, `SELECT path, id FROM Track`)
+				trows, terr := tx.QueryContext(ctx, `SELECT path, id FROM Track WHERE path IS NOT NULL`)
 				if terr != nil {
 					return result, terr
 				}

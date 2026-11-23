@@ -317,7 +317,7 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	}
 	// Legacy rows can share one import-wide pdbImportKey value. Our saved
 	// source record retains the per-track ID, including across moves/swaps.
-	rows, e := tx.QueryContext(ctx, `SELECT s.trackId,t.pdbImportKey,s.path,s.fingerprint,COALESCE(t.bpmAnalyzed,0) FROM BridgeState s JOIN Track t ON t.id=s.trackId`)
+	rows, e := tx.QueryContext(ctx, `SELECT s.trackId,COALESCE(t.pdbImportKey,0),s.path,s.fingerprint,COALESCE(t.bpmAnalyzed,0) FROM BridgeState s JOIN Track t ON t.id=s.trackId`)
 	if e != nil {
 		return nil, nil, nil, e
 	}

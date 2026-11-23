@@ -92,3 +92,41 @@ func TestReexportRemovedTrackReusedSourceIDKeepsSurvivingEngineID(t *testing.T) 
 		})
 	}
 }
+
+func TestSyncToleratesNullTrackPathRow(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	mp3 := testfixture.MP3WithLAMETag()
+	testfixture.Write(t, root, "Contents/A/one.mp3", mp3)
+	testfixture.Write(t, root, "Contents/B/two.mp3", mp3)
+	testfixture.Write(t, root, "PIONEER/USBANLZ/P001/ANLZ0000.DAT", testfixture.DAT())
+	testfixture.Write(t, root, "PIONEER/USBANLZ/P001/ANLZ0000.EXT", testfixture.EXT())
+	testfixture.Write(t, root, "PIONEER/USBANLZ/P001/ANLZ0000.2EX", testfixture.EX2())
+
+	ctx := context.Background()
+	lib1 := &rekordbox.Library{
+		Tracks: []rekordbox.Track{
+			{ID: 1, Title: "One", Path: "/Contents/A/one.mp3", AnalysisPath: "/PIONEER/USBANLZ/P001/ANLZ0000.DAT", SampleRate: 44100, Duration: 12, BPM: 120},
+		},
+	}
+	if _, err := enginedb.Sync(ctx, root, lib1, enginedb.Options{}); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(root, "Engine Library", "Database2", "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO Track(path, filename) VALUES(NULL, 'cloud-only')`); err != nil {
+		t.Fatalf("insert NULL path track: %v", err)
+	}
+	lib2 := &rekordbox.Library{
+		Tracks: []rekordbox.Track{
+			lib1.Tracks[0],
+			{ID: 2, Title: "Two", Path: "/Contents/B/two.mp3", AnalysisPath: "/PIONEER/USBANLZ/P001/ANLZ0000.DAT", SampleRate: 44100, Duration: 12, BPM: 124},
+		},
+	}
+	if _, err := enginedb.Sync(ctx, root, lib2, enginedb.Options{}); err != nil {
+		t.Fatalf("sync with NULL Track.path failed: %v", err)
+	}
+}
