@@ -215,6 +215,34 @@ func TestIssue321FinalPassReusesTheWatchersKeys(t *testing.T) {
 	}
 }
 
+func TestIssue321AnalysisOnlyChangeSkipsExportDecrypt(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
+	stick := setupWriteBackStick(t, true)
+	if _, err := convertWriteBackAtTest(context.Background(), stick); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(stick, "Engine Library", "Database2", "m.db")}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE Track SET bpmAnalyzed=bpmAnalyzed+1 WHERE pdbImportKey=1`); err != nil {
+		t.Fatal(err)
+	}
+	keys := rekordbox.NewKeyCache()
+	defer keys.Clear()
+	d0 := rekordbox.KeyDerivations()
+	res, err := bridge.WriteBackCues(context.Background(), stick, bridge.WriteBackOptions{Keys: keys, SkipPreparingCheck: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TracksChanged != 0 || rekordbox.KeyDerivations()-d0 != 0 {
+		t.Fatalf("analysis-only change caused export work: %+v derivations=%d", res, rekordbox.KeyDerivations()-d0)
+	}
+}
+
 // What a cut write-back leaves goes at the next mount: the watcher's attach.
 func TestIssue321LeftoversGoAtTheNextMount(t *testing.T) {
 	if bridge.InChildForTest(t) {

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -159,6 +160,11 @@ var exportReads atomic.Int64
 // salt and passphrase, so a rewritten export with a new salt derives its own key.
 var exportKeys = rekordbox.NewKeyCache()
 
+var exportLibraryCache = struct {
+	sync.Mutex
+	entries map[string]*rekordbox.Library
+}{entries: make(map[string]*rekordbox.Library)}
+
 // afterExportRead runs after each export read; tests use it to stretch the read.
 var afterExportRead = func() {}
 
@@ -177,10 +183,29 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 		return nil, errNoLocalExport
 	}
 	read := func(c exportCandidate) (*rekordbox.Library, error) {
-		if c.isPDB {
-			return rekordbox.ReadPDB(c.full)
+		key := fmt.Sprintf("%s %d %d", c.rel, c.size, c.mtime.UnixNano())
+		exportLibraryCache.Lock()
+		if cached := exportLibraryCache.entries[key]; cached != nil {
+			copy := cloneLibrary(cached)
+			exportLibraryCache.Unlock()
+			return copy, nil
 		}
-		return rekordbox.ReadSQLiteKeys(ctx, c.full, nil, exportKeys)
+		exportLibraryCache.Unlock()
+
+		var library *rekordbox.Library
+		var err error
+		if c.isPDB {
+			library, err = rekordbox.ReadPDB(c.full)
+		} else {
+			library, err = rekordbox.ReadSQLiteKeys(ctx, c.full, nil, exportKeys)
+		}
+		if err != nil {
+			return nil, err
+		}
+		exportLibraryCache.Lock()
+		exportLibraryCache.entries[key] = cloneLibrary(library)
+		exportLibraryCache.Unlock()
+		return library, nil
 	}
 	primary, err := read(candidates[0])
 	if err != nil {
@@ -214,6 +239,32 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 		return filterGhostEmptyRootPlaylists(primary, evidence), nil
 	}
 	return primary, nil
+}
+
+func cloneLibrary(in *rekordbox.Library) *rekordbox.Library {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Tracks = append([]rekordbox.Track(nil), in.Tracks...)
+	out.Playlists = make([]rekordbox.Playlist, len(in.Playlists))
+	for i, playlist := range in.Playlists {
+		out.Playlists[i] = playlist
+		out.Playlists[i].Tracks = append([]uint32(nil), playlist.Tracks...)
+	}
+	if in.Artwork != nil {
+		out.Artwork = make(map[uint32]string, len(in.Artwork))
+		for id, artwork := range in.Artwork {
+			out.Artwork[id] = artwork
+		}
+	}
+	if in.Keys != nil {
+		out.Keys = make(map[uint32]string, len(in.Keys))
+		for id, key := range in.Keys {
+			out.Keys[id] = key
+		}
+	}
+	return &out
 }
 
 // filterGhostEmptyRootPlaylists removes the empty root leaves that rekordbox 7
