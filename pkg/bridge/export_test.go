@@ -164,7 +164,10 @@ func InChildForTest(t *testing.T) bool {
 		if remaining <= 0 {
 			t.Fatalf("parent test deadline has expired")
 		}
-		childTimeout := remaining - 2*time.Second
+		childTimeout := remaining / 2
+		if remaining > 4*time.Second {
+			childTimeout = remaining - 2*time.Second
+		}
 		if childTimeout <= 0 {
 			childTimeout = remaining / 2
 		}
@@ -172,7 +175,14 @@ func InChildForTest(t *testing.T) bool {
 			childTimeout = time.Nanosecond
 		}
 		args = append(args, "-test.timeout="+childTimeout.String())
-		ctx, cancel = context.WithDeadline(context.Background(), d)
+		contextMargin := remaining / 4
+		if contextMargin > 500*time.Millisecond {
+			contextMargin = 500 * time.Millisecond
+		}
+		if contextMargin <= 0 {
+			contextMargin = time.Nanosecond
+		}
+		ctx, cancel = context.WithDeadline(context.Background(), d.Add(-contextMargin))
 	}
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], args...)

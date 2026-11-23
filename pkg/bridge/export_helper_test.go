@@ -54,12 +54,12 @@ func TestInChildForTestPattern(t *testing.T) {
 			}
 			appendHelperProbeLine(t, marker, t.Name())
 		})
-		t.Run("xmidy", func(t *testing.T) {
-			t.Run("xleaf", func(t *testing.T) {
-				if os.Getenv("BRIDGE_TEST_CHILD") != "" {
-					appendHelperProbeLine(t, marker, "unexpected:"+t.Name())
-				}
-			})
+	})
+	t.Run("xmidy", func(t *testing.T) {
+		t.Run("xleaf", func(t *testing.T) {
+			if os.Getenv("BRIDGE_TEST_CHILD") != "" {
+				appendHelperProbeLine(t, marker, "unexpected:"+t.Name())
+			}
 		})
 	})
 }
@@ -130,9 +130,9 @@ func TestInChildForTestSkipVisibility(t *testing.T) {
 			t.Fatalf("skip probe: %v\n%s", err, out)
 		}
 		for _, name := range []string{
-			"TestInChildForTestSkipVisibility/target/skip_one",
-			"TestInChildForTestSkipVisibility/target/skip_two",
-			"TestInChildForTestSkipVisibility/top_skip",
+			"--- SKIP: TestInChildForTestSkipVisibility/target/skip_one",
+			"--- SKIP: TestInChildForTestSkipVisibility/target/skip_two",
+			"--- SKIP: TestInChildForTestSkipVisibility/top_skip",
 		} {
 			if !strings.Contains(string(out), name) {
 				t.Fatalf("skip output lacks %q\n%s", name, out)
