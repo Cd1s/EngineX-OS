@@ -139,15 +139,16 @@ func TestDeletedSourceCleanupRollsBackOnBadAnalysis(t *testing.T) {
 			}
 		}
 	}
-	// A corrupt analysis no longer fails the import (#53); a failing insert still must.
+	// The export's normalized path owns the existing row. A source-ID-only insert
+	// failure must not be used to bypass path identity or delete the row.
 	if _, err = db.Exec(`CREATE TRIGGER fail BEFORE INSERT ON Track WHEN NEW.pdbImportKey=100 BEGIN SELECT RAISE(ABORT,'fail'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = enginedb.Sync(context.Background(), root, l, enginedb.Options{}); err == nil {
-		t.Fatal("failed insert accepted")
+	if _, err = enginedb.Sync(context.Background(), root, l, enginedb.Options{}); err != nil {
+		t.Fatal("path identity should reuse the existing row:", err)
 	}
-	if n := scalar[int](t, db, `SELECT count(*) FROM Track WHERE pdbImportKey=?`, removed); n != 1 {
-		t.Fatal("deletion escaped rolled-back transaction")
+	if n := scalar[int](t, db, `SELECT count(*) FROM Track`); n != 5 {
+		t.Fatal("path-owned rows changed", n)
 	}
 	if n := scalar[int](t, db, `SELECT count(*) FROM BridgeState`); n != 5 {
 		t.Fatal("ownership lost on rollback", n)

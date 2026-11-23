@@ -497,6 +497,13 @@ func TestWriteBackCuesDotPioneerMacOSStickAndExactPadSlots(t *testing.T) {
 	if err := os.WriteFile(oneLibPath, export, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if pdbInfo, err := os.Stat(filepath.Join(stick, ".PIONEER", "rekordbox", "export.pdb")); err == nil {
+		if err := os.Chtimes(oneLibPath, pdbInfo.ModTime().Add(10*time.Second), pdbInfo.ModTime().Add(10*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		t.Fatal(err)
+	}
 
 	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatalf("ConvertAtMount(.PIONEER): %v", err)

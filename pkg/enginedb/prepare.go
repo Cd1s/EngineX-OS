@@ -346,6 +346,9 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 			continue
 		}
 		if _, duplicate := owned[source]; duplicate {
+			if other, exists := existingByPath[foldPreparedPath("../"+p.rel)]; exists && other != id {
+				return nil, fmt.Errorf("tracks %d and %d resolve to the same audio path %q", id, other, p.rel)
+			}
 			rows.Close()
 			return nil, fmt.Errorf("ambiguous bridge source ID %d", source)
 		}
