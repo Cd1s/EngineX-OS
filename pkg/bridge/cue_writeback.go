@@ -452,7 +452,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	}
 
 	tLib := time.Now()
-	rbLib, oneLibRel, err := readStickRekordboxLibrary(ctx, resolver, absMount, keys)
+	rbLib, oneLibRel, err := readStickRekordboxLibrary(ctx, resolver, absMount, keys, preStamp)
 	tm.decrypt = time.Since(tLib) - (keys.DeriveTime() - key0) // the export read: decrypt and parse
 	if err != nil {
 		return res, err
@@ -1074,7 +1074,25 @@ func recordSynced(ctx context.Context, stateDBPath string, rows []syncedRow, wri
 	_ = tx.Commit()
 }
 
-func readStickRekordboxLibrary(ctx context.Context, r *compat.Resolver, mountPath string, keys *rekordbox.KeyCache) (*rekordbox.Library, string, error) {
+var writeBackExportCache = struct {
+	sync.Mutex
+	entries map[string]writeBackExport
+}{entries: make(map[string]writeBackExport)}
+
+type writeBackExport struct {
+	library   *rekordbox.Library
+	oneLibRel string
+}
+
+func readStickRekordboxLibrary(ctx context.Context, r *compat.Resolver, mountPath string, keys *rekordbox.KeyCache, stamp string) (*rekordbox.Library, string, error) {
+	writeBackExportCache.Lock()
+	if cached, ok := writeBackExportCache.entries[stamp]; ok {
+		library, oneLibRel := cloneLibrary(cached.library), cached.oneLibRel
+		writeBackExportCache.Unlock()
+		return library, oneLibRel, nil
+	}
+	writeBackExportCache.Unlock()
+
 	var errs []error
 	candidates, err := exportCandidates(r, mountPath)
 	if err != nil {
@@ -1089,8 +1107,14 @@ func readStickRekordboxLibrary(ctx context.Context, r *compat.Resolver, mountPat
 		}
 		if err == nil {
 			if candidate.isPDB {
+				writeBackExportCache.Lock()
+				writeBackExportCache.entries[stamp] = writeBackExport{library: cloneLibrary(lib)}
+				writeBackExportCache.Unlock()
 				return lib, "", nil
 			}
+			writeBackExportCache.Lock()
+			writeBackExportCache.entries[stamp] = writeBackExport{library: cloneLibrary(lib), oneLibRel: candidate.rel}
+			writeBackExportCache.Unlock()
 			return lib, candidate.rel, nil
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", candidate.rel, err))
