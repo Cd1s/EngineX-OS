@@ -51,7 +51,7 @@ func TestWriteBackStampReason(t *testing.T) {
 	for _, tc := range []struct {
 		name, imported, want string
 	}{
-		{"missing", "", "Engine library has no import stamp"},
+		{"missing", "", ""},
 		{"old", "v3 export", "Engine library import stamp is older than v4"},
 		{"mismatch", "v4 other", "Engine library import stamp does not match the current rekordbox export"},
 		{"match", current, ""},

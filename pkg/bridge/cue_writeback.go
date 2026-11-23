@@ -1097,7 +1097,9 @@ func readStickRekordboxLibrary(ctx context.Context, r *compat.Resolver, mountPat
 
 func writeBackStampReason(imported, current string) string {
 	if imported == "" {
-		return "Engine library has no import stamp"
+		// Libraries made by the pre-stamp bridge have no marker. Keep their existing
+		// write-back path working until the first successful pass records v4 state.
+		return ""
 	}
 	if !strings.HasPrefix(imported, stampVersion+" ") {
 		return "Engine library import stamp is older than v4"

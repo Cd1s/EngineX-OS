@@ -21,7 +21,7 @@ func TestIssue321OneKeyDerivationPerRun(t *testing.T) {
 	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatalf("Convert: %v", err)
 	}
 	injectDeckCueEdit(t, stick)

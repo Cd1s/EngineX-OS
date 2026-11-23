@@ -139,7 +139,7 @@ func TestIssue321WatcherPassCutAtEveryWriteStep(t *testing.T) {
 	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(stick, "Engine Library", "Database2", "m.db")}).String())
@@ -236,7 +236,7 @@ func TestIssue321WatcherPassCutAtEveryWriteStepOfExportPDB(t *testing.T) {
 	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, false)
-	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 	oldGenre := issue321PDBGenre(t, stick, 1)
@@ -331,7 +331,7 @@ func TestIssue321ARenameCutThatLeftATargetMissingIsPutBack(t *testing.T) {
 func issue321MissingTarget(t *testing.T, oneLib bool) {
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, oneLib)
-	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 	const cue, genre = "Missing 321", "Missing Genre 321"
@@ -475,7 +475,7 @@ func TestIssue321BackupDirectoriesAreMadeBeforeTheMark(t *testing.T) {
 	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 	injectDeckCueEdit(t, stick)

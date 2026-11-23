@@ -107,7 +107,7 @@ func TestIssue321AStagedFilesDirectoryIsSyncedBeforeTheFile(t *testing.T) {
 func issue321FirstPassOnOneLibrary(t *testing.T) {
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(stick, "Engine Library", "Database2", "m.db")}).String())
