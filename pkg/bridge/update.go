@@ -125,13 +125,21 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	if err != nil {
 		return enginedb.Result{}, quickLate(ctx, err)
 	}
-	if err = ReconcileContext(inner, r, l); err != nil {
-		return enginedb.Result{}, quickLate(ctx, err)
-	}
 	read := time.Since(start)
 	fresh, err := quickPaths(dir, l)
 	if err != nil {
 		return enginedb.Result{}, err
+	}
+	owned, err := ownedPaths(dir)
+	if err != nil {
+		return enginedb.Result{}, err
+	}
+	spellings, err := ownedSpellings(dir)
+	if err != nil {
+		return enginedb.Result{}, err
+	}
+	if err = ReconcileOwnedContext(inner, r, l, owned, spellings); err != nil {
+		return enginedb.Result{}, quickLate(ctx, err)
 	}
 	entries := 0
 	for _, p := range l.Playlists {
@@ -209,10 +217,18 @@ func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resol
 	if progress != nil {
 		progress(0, len(l.Tracks))
 	}
-	if err := ReconcileContext(ctx, r, l); err != nil {
+	if _, err := quickPaths(stage, l); err != nil {
 		return enginedb.Result{}, err
 	}
-	if _, err := quickPaths(stage, l); err != nil {
+	owned, err := ownedPaths(stage)
+	if err != nil {
+		return enginedb.Result{}, err
+	}
+	spellings, err := ownedSpellings(stage)
+	if err != nil {
+		return enginedb.Result{}, err
+	}
+	if err := ReconcileOwnedContext(ctx, r, l, owned, spellings); err != nil {
 		return enginedb.Result{}, err
 	}
 	databaseDir, cleanup, err := privateStageDatabase(stage)

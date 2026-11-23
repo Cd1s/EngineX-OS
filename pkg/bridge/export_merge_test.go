@@ -52,3 +52,32 @@ func TestMergeExportLibrariesUsesTheRicherPlaylistAndUnionsTracks(t *testing.T) 
 		t.Fatalf("same folder got different parent IDs: %d and %d", byName["Mix"].ParentID, byName["Only"].ParentID)
 	}
 }
+
+func TestDualExportDropsGhostEmptyRootPlaylistsAbsentFromPDB(t *testing.T) {
+	one := &rekordbox.Library{Playlists: []rekordbox.Playlist{
+		{ID: 1, Name: "ghost"},
+		{ID: 2, Name: "real", Tracks: []uint32{1}},
+		{ID: 3, Name: "unique"},
+		{ID: 4, Name: "folder", Folder: true},
+		{ID: 5, ParentID: 4, Name: "ghost", Tracks: []uint32{1}},
+	}}
+	pdb := &rekordbox.Library{Playlists: []rekordbox.Playlist{{ID: 10, Name: "other"}}}
+	filtered := filterGhostEmptyRootPlaylists(one, pdb)
+	merged := mergeExportLibraries(filtered, pdb)
+	for _, p := range merged.Playlists {
+		if p.Name == "ghost" && p.ParentID == 0 && !p.Folder {
+			t.Fatal("empty root ghost playlist survived")
+		}
+	}
+	for _, name := range []string{"real", "unique", "folder", "other"} {
+		found := false
+		for _, p := range merged.Playlists {
+			if p.Name == name {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("playlist %q was dropped", name)
+		}
+	}
+}
