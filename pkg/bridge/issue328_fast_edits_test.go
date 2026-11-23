@@ -410,6 +410,9 @@ func issue328RunWith(t *testing.T, cues int, pulled bool, deck func(t *testing.T
 }
 
 func TestIssue328DeckEditsOnFastRowsSurviveTheFirstFullImport(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	for _, src := range []struct {
 		name   string
 		oneLib bool
@@ -541,6 +544,9 @@ func issue328Hex(t *testing.T, s *string) []byte {
 // own correction) is rekordbox's after the first full import, byte for byte; what the DJ did with
 // Engine's controls stays.
 func TestIssue328EngineOwnRowsOfARealEngine(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	all := issue328EngineRows(t)
 	for _, src := range []struct {
 		name string

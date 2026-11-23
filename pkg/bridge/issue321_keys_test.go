@@ -16,6 +16,9 @@ import (
 // #321: a write-back run derives the exportLibrary.db keys (PBKDF2, 256 000 rounds) once for
 // its read, decrypt and encrypt; a long-lived caller that keeps them derives none on its next run.
 func TestIssue321OneKeyDerivationPerRun(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
 	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
@@ -30,7 +33,7 @@ func TestIssue321OneKeyDerivationPerRun(t *testing.T) {
 	if n := rekordbox.KeyDerivations() - d0; n != 1 {
 		t.Fatalf("one run derived the keys %d times, want 1", n)
 	}
-	lib, err := rekordbox.ReadSQLite(ctx, filepath.Join(stick, "PIONEER", "rekordbox", "exportLibrary.db"), nil)
+	lib, err := rekordbox.ReadSQLiteKeys(ctx, filepath.Join(stick, "PIONEER", "rekordbox", "exportLibrary.db"), nil, testKeys)
 	if err != nil || len(lib.Tracks) != 2 {
 		t.Fatalf("exportLibrary.db after the run: %v", err)
 	}

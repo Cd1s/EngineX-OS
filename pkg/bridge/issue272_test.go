@@ -23,6 +23,9 @@ import (
 // 3) Result.AnalysisSkipped reflects omitted shadow rows.
 // 4) Multi-mount resume continues forward progress and completes.
 func TestIssue272BridgeAnalysisCappedAndResumed(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	if err := os.Remove(filepath.Join(root, "PIONEER/rekordbox/export.pdb")); err != nil {

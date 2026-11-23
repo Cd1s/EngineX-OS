@@ -18,6 +18,9 @@ import (
 // a stalled stick blocks I/O) held the watcher of every other stick too. It runs beside the loop
 // now, and only that stick's own passes wait for it.
 func TestIssue321AStickThatHangsAtInsertHoldsOnlyItself(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	hung, _ := issue321Stick(t, 4)
 	stick, db := issue321Stick(t, 4)
 	fifo := filepath.Join(hung, "Engine Library", "Database2", ".enginex-wb-9.tmp")

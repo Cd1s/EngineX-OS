@@ -11,6 +11,9 @@ import (
 )
 
 func TestLargePDBRepeatMountTimings253(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, 6000)
 	start := time.Now()
@@ -31,6 +34,9 @@ func TestLargePDBRepeatMountTimings253(t *testing.T) {
 }
 
 func TestDefaultMountCompressionThroughputDelta(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, 6000)
 	ctx := context.Background()

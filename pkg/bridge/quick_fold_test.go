@@ -23,6 +23,9 @@ func qfU16(s string) []byte {
 }
 
 func TestQuickUpdateFoldsSecondaryCaseSpelling(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb", testfixture.LargePDB(4))
 	for i := 1; i <= 4; i++ {

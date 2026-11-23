@@ -57,6 +57,7 @@ func (v *fatVolume) firstSector(c int64) int64 {
 // #321: a leftover or a replaced file is freed only when the FAT gives it all its clusters;
 // vfat calls freeing a free cluster corruption and remounts the stick read-only.
 func TestIssue321FATChainOwned(t *testing.T) {
+	t.Parallel()
 	const eoc32, eoc16 = 0x0fffffff, 0xffff
 	cases := []struct {
 		name  string

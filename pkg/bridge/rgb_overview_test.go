@@ -45,6 +45,7 @@ func rgbBridgeLibrary(t *testing.T, path string, tracks map[int64]string, overvi
 // a mount removes what an earlier build left stale (real stick 2026-11-19: Fons et Origo drew
 // Centauri's mini overview; 140 empty files drew black).
 func TestPublishRemovesRGBOverviewsOfAnotherTrack(t *testing.T) {
+	t.Parallel()
 	var raw bytes.Buffer
 	binary.Write(&raw, binary.BigEndian, [2]uint64{1024, 1024})
 	binary.Write(&raw, binary.BigEndian, float64(17803))

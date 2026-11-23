@@ -19,6 +19,9 @@ import (
 // OneLibrary, decrypted) the export twice, and the file-reading budget started
 // before the first read, so a slow read left tracks without cues.
 func TestMountReadsTheExportOnceAndBudgetsAfterIt(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	l, err := bridge.ReadLibrary(context.Background(), root)
@@ -50,6 +53,7 @@ func TestMountReadsTheExportOnceAndBudgetsAfterIt(t *testing.T) {
 
 // Prefer the richer export on timestamp ties, retaining genuinely newer PDBs.
 func TestExportSelectionFreshness(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name       string
 		oneLibDiff time.Duration
@@ -90,6 +94,7 @@ func TestExportSelectionFreshness(t *testing.T) {
 // A drive with only export.pdb keeps the stamp format of dc4d52d, so sticks
 // imported by earlier builds are not imported again.
 func TestSingleExportStampUnchanged(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err != nil {
@@ -124,6 +129,7 @@ func writePlainOneLibrary(t *testing.T, root string) {
 // r2 review: a failed mount removed .rb-bridge.lock even while another
 // rb-bridge held it, so a third one could lock a new file and run beside it.
 func TestCleanupKeepsALockHeldByAnotherBridge(t *testing.T) {
+	t.Parallel()
 	for _, held := range []bool{true, false} {
 		root := t.TempDir()
 		testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb", []byte("not a pdb"))

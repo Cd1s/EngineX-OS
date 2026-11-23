@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
@@ -24,30 +25,67 @@ import (
 // once for every test of this package.
 const oneLibraryKey = "r8gddnr4k847830ar6cqzbkk0el6qytmb3trbbx805jm74vez64i5o8fnrqryqls"
 
+// testKeys keeps the SQLCipher keys of this test process. Every fixture here is encrypted with
+// oneLibraryKey and the salt of testdata/sqlcipher4_onelibrary.db, so the 256 000-round
+// derivation (a second or more under -race) is made once, not once per read and write.
+var testKeys = rekordbox.NewKeyCache()
+
+var (
+	oneLibraryMu       sync.Mutex
+	oneLibraryFixtures = map[string][]byte{}
+)
+
+// encryptedOneLibrary is the OneLibrary test database with statements applied, encrypted with
+// SQLCipher 4. Each variant is built once per test process (its encryption derives the key);
+// every test writes its own copy of the bytes to its own stick and reads and writes only that.
+func encryptedOneLibrary(t *testing.T, variant, statements string, args ...any) []byte {
+	t.Helper()
+	oneLibraryMu.Lock()
+	defer oneLibraryMu.Unlock()
+	if b, ok := oneLibraryFixtures[variant]; ok {
+		return b
+	}
+	srcPlain := filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary_decrypted.db")
+	srcEnc := filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary.db")
+	salt, err := rekordbox.ReadSQLCipherSalt(srcEnc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpPlain := filepath.Join(t.TempDir(), "onelib-plain.db")
+	rawPlain, err := os.ReadFile(srcPlain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tmpPlain, rawPlain, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: tmpPlain}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(statements, args...)
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := os.ReadFile(tmpPlain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var enc bytes.Buffer
+	if err = rekordbox.EncryptSQLCipher4(context.Background(), bytes.NewReader(plain), int64(len(plain)), &enc, salt, []byte(oneLibraryKey)); err != nil {
+		t.Fatal(err)
+	}
+	oneLibraryFixtures[variant] = enc.Bytes()
+	return oneLibraryFixtures[variant]
+}
+
 func setupWriteBackStick(t *testing.T, withOneLibrary bool) string {
 	t.Helper()
 	stick := t.TempDir()
 	testfixture.LargeExport(t, stick, 2)
 	if withOneLibrary {
-		srcPlain := filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary_decrypted.db")
-		srcEnc := filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary.db")
-		salt, err := rekordbox.ReadSQLCipherSalt(srcEnc)
-		if err != nil {
-			t.Fatal(err)
-		}
-		tmpPlain := filepath.Join(t.TempDir(), "onelib-plain.db")
-		rawPlain, err := os.ReadFile(srcPlain)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(tmpPlain, rawPlain, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: tmpPlain}).String())
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = db.Exec(`
+		export := encryptedOneLibrary(t, "classic", `
 			PRAGMA journal_mode=DELETE;
 			ALTER TABLE content ADD COLUMN analysisDataFilePath varchar;
 			ALTER TABLE content ADD COLUMN genre_id INTEGER;
@@ -62,26 +100,7 @@ func setupWriteBackStick(t *testing.T, withOneLibrary bool) string {
 				(1, 'Track 1', 12800, 4, ?, 44100, 'Old Comment', '/PIONEER/USBANLZ/P001/ANLZ0000.DAT', 20, 30),
 				(2, 'Track 2', 12400, 4, ?, 44100, '', '/PIONEER/USBANLZ/P001/ANLZ0000.DAT', 20, 30);
 		`, "/"+testfixture.LargeTrackPath(1), "/"+testfixture.LargeTrackPath(2))
-		_ = db.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		in, err := os.Open(tmpPlain)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer in.Close()
-		st, err := in.Stat()
-		if err != nil {
-			t.Fatal(err)
-		}
-		out, err := os.Create(filepath.Join(stick, "PIONEER", "rekordbox", "exportLibrary.db"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		err = rekordbox.EncryptSQLCipher4(context.Background(), in, st.Size(), out, salt, []byte(oneLibraryKey))
-		_ = out.Close()
-		if err != nil {
+		if err := os.WriteFile(filepath.Join(stick, "PIONEER", "rekordbox", "exportLibrary.db"), export, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -104,6 +123,9 @@ func injectDeckMetadataEdit(t *testing.T, stick string) {
 }
 
 func TestWriteBackTrackMetadataToPDBAndOneLibrary(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	for _, tc := range []struct {
 		name       string
 		withOneLib bool
@@ -117,7 +139,7 @@ func TestWriteBackTrackMetadataToPDBAndOneLibrary(t *testing.T) {
 				t.Fatal(err)
 			}
 			injectDeckMetadataEdit(t, stick)
-			res, err := bridge.WriteBackCues(context.Background(), stick, bridge.WriteBackOptions{DateDir: "2026-11-19", SkipPreparingCheck: true})
+			res, err := bridge.WriteBackCues(context.Background(), stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-19", SkipPreparingCheck: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -126,7 +148,7 @@ func TestWriteBackTrackMetadataToPDBAndOneLibrary(t *testing.T) {
 			}
 			var lib *rekordbox.Library
 			if tc.withOneLib {
-				lib, err = rekordbox.ReadSQLite(context.Background(), filepath.Join(stick, "PIONEER/rekordbox/exportLibrary.db"), nil)
+				lib, err = rekordbox.ReadSQLiteKeys(context.Background(), filepath.Join(stick, "PIONEER/rekordbox/exportLibrary.db"), nil, testKeys)
 			} else {
 				lib, err = rekordbox.ReadPDB(filepath.Join(stick, "PIONEER/rekordbox/export.pdb"))
 			}
@@ -166,6 +188,9 @@ func injectDeckCueEdit(t *testing.T, stick string) {
 }
 
 func TestWriteBackCuesEndToEndAndBridgeFastReinsert(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
 
@@ -180,7 +205,7 @@ func TestWriteBackCuesEndToEndAndBridgeFastReinsert(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-16", SkipPreparingCheck: true})
+	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-16", SkipPreparingCheck: true})
 	if err != nil {
 		t.Fatalf("WriteBackCues: %v", err)
 	}
@@ -201,7 +226,7 @@ func TestWriteBackCuesEndToEndAndBridgeFastReinsert(t *testing.T) {
 	}
 
 	// Second run with no new edits is a no-op (TracksChanged == 0).
-	res2, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-17", SkipPreparingCheck: true})
+	res2, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-17", SkipPreparingCheck: true})
 	if err != nil {
 		t.Fatalf("second WriteBackCues: %v", err)
 	}
@@ -250,6 +275,7 @@ func TestWriteBackCuesEndToEndAndBridgeFastReinsert(t *testing.T) {
 }
 
 func TestWriteBackCuesPullOutMidWriteLeavesOriginalIntact(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
 	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
@@ -264,6 +290,7 @@ func TestWriteBackCuesPullOutMidWriteLeavesOriginalIntact(t *testing.T) {
 	}
 	simErr := errors.New("simulated pull-out")
 	_, err = bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{
+		Keys:               testKeys,
 		DateDir:            "2026-11-16",
 		SkipPreparingCheck: true,
 		BeforeRename: func(dst string) error {
@@ -280,6 +307,7 @@ func TestWriteBackCuesPullOutMidWriteLeavesOriginalIntact(t *testing.T) {
 }
 
 func TestWriteBackCuesFailureBeforeSecondRenameLeavesStickUntouched(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
 	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
@@ -317,6 +345,7 @@ func TestWriteBackCuesFailureBeforeSecondRenameLeavesStickUntouched(t *testing.T
 	calls := 0
 	simErr := errors.New("simulated pull-out after staging")
 	_, err = bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{
+		Keys:               testKeys,
 		DateDir:            "2026-11-19",
 		SkipPreparingCheck: true,
 		BeforeRename: func(string) error {
@@ -354,6 +383,7 @@ func TestWriteBackCuesFailureBeforeSecondRenameLeavesStickUntouched(t *testing.T
 }
 
 func TestWriteBackCuesReadsUncheckpointedWAL(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, false)
 	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
@@ -387,6 +417,7 @@ func TestWriteBackCuesReadsUncheckpointedWAL(t *testing.T) {
 	defer db.Close()
 
 	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{
+		Keys:               testKeys,
 		DateDir:            "2026-11-17",
 		SkipPreparingCheck: true,
 	})
@@ -399,6 +430,7 @@ func TestWriteBackCuesReadsUncheckpointedWAL(t *testing.T) {
 }
 
 func TestWriteBackCuesFallsBackToPDBWhenOneLibUnreadable(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, false)
 	// Write a corrupt exportLibrary.db alongside the valid export.pdb.
@@ -413,6 +445,7 @@ func TestWriteBackCuesFallsBackToPDBWhenOneLibUnreadable(t *testing.T) {
 	injectDeckCueEdit(t, stick)
 
 	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{
+		Keys:               testKeys,
 		DateDir:            "2026-11-17",
 		SkipPreparingCheck: true,
 	})
@@ -425,6 +458,9 @@ func TestWriteBackCuesFallsBackToPDBWhenOneLibUnreadable(t *testing.T) {
 }
 
 func TestWriteBackCuesDotPioneerMacOSStickAndExactPadSlots(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	ctx := context.Background()
 	stick := t.TempDir()
 	testfixture.LargeExport(t, stick, 2)
@@ -435,25 +471,8 @@ func TestWriteBackCuesDotPioneerMacOSStickAndExactPadSlots(t *testing.T) {
 	if err := os.Rename(filepath.Join(stick, "PIONEER"), filepath.Join(stick, ".PIONEER")); err != nil {
 		t.Fatal(err)
 	}
-	srcPlain := filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary_decrypted.db")
-	srcEnc := filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary.db")
-	salt, err := rekordbox.ReadSQLCipherSalt(srcEnc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpPlain := filepath.Join(t.TempDir(), "rb7-macos.db")
-	rawPlain, err := os.ReadFile(srcPlain)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(tmpPlain, rawPlain, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: tmpPlain}).String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = db.Exec(`
+	oneLibPath := filepath.Join(stick, ".PIONEER", "rekordbox", "exportLibrary.db")
+	export := encryptedOneLibrary(t, "macos", `
 		PRAGMA journal_mode=DELETE;
 		ALTER TABLE content ADD COLUMN analysisDataFilePath varchar;
 		ALTER TABLE content ADD COLUMN hasModified integer;
@@ -466,29 +485,7 @@ func TestWriteBackCuesDotPioneerMacOSStickAndExactPadSlots(t *testing.T) {
 			(1, 'Track 1', 12800, 4, ?, 44100, '', '/.PIONEER/USBANLZ/P001/ANLZ0000.DAT', 0, NULL),
 			(2, 'Track 2', 12400, 4, ?, 44100, '', '/.PIONEER/USBANLZ/P001/ANLZ0000.DAT', 0, NULL);
 	`, "/"+testfixture.LargeTrackPath(1), "/"+testfixture.LargeTrackPath(2))
-	_ = db.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	in, err := os.Open(tmpPlain)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st, err := in.Stat()
-	if err != nil {
-		_ = in.Close()
-		t.Fatal(err)
-	}
-	oneLibPath := filepath.Join(stick, ".PIONEER", "rekordbox", "exportLibrary.db")
-	out, err := os.Create(oneLibPath)
-	if err != nil {
-		_ = in.Close()
-		t.Fatal(err)
-	}
-	err = rekordbox.EncryptSQLCipher4(ctx, in, st.Size(), out, salt, []byte(oneLibraryKey))
-	_ = out.Close()
-	_ = in.Close()
-	if err != nil {
+	if err := os.WriteFile(oneLibPath, export, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -532,7 +529,7 @@ func TestWriteBackCuesDotPioneerMacOSStickAndExactPadSlots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-21", SkipPreparingCheck: true})
+	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-21", SkipPreparingCheck: true})
 	if err != nil {
 		t.Fatalf("WriteBackCues(.PIONEER): %v", err)
 	}
@@ -584,7 +581,7 @@ func TestWriteBackCuesDotPioneerMacOSStickAndExactPadSlots(t *testing.T) {
 	}
 
 	// Verify exportLibrary.db has exact cues and round-trips through ReadSQLite.
-	lib, err := rekordbox.ReadSQLite(ctx, oneLibPath, nil)
+	lib, err := rekordbox.ReadSQLiteKeys(ctx, oneLibPath, nil, testKeys)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,7 +616,7 @@ func TestWriteBackCuesDotPioneerMacOSStickAndExactPadSlots(t *testing.T) {
 	}
 
 	// Second write-back with no new edits must be a no-op.
-	res2, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true})
+	res2, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", SkipPreparingCheck: true})
 	if err != nil {
 		t.Fatalf("second WriteBackCues: %v", err)
 	}
@@ -629,6 +626,7 @@ func TestWriteBackCuesDotPioneerMacOSStickAndExactPadSlots(t *testing.T) {
 }
 
 func TestWriteBackCuesRestoresMP3RekordboxOffsetAndSkipsUntouched(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	stick := t.TempDir()
 	const trackRel = "Contents/mp3/offset.mp3"
@@ -692,7 +690,7 @@ func TestWriteBackCuesRestoresMP3RekordboxOffsetAndSkipsUntouched(t *testing.T) 
 	_, _ = sdb.Exec(`DELETE FROM BridgeWritten`)
 	_ = sdb.Close()
 
-	resUntouched, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-21", SkipPreparingCheck: true})
+	resUntouched, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-21", SkipPreparingCheck: true})
 	if err != nil {
 		t.Fatalf("WriteBackCues untouched MP3: %v", err)
 	}
@@ -726,7 +724,7 @@ func TestWriteBackCuesRestoresMP3RekordboxOffsetAndSkipsUntouched(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	resEdit, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-21", SkipPreparingCheck: true})
+	resEdit, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-21", SkipPreparingCheck: true})
 	if err != nil {
 		t.Fatalf("WriteBackCues edited MP3: %v", err)
 	}
@@ -753,6 +751,7 @@ func TestWriteBackCuesRestoresMP3RekordboxOffsetAndSkipsUntouched(t *testing.T) 
 }
 
 func TestWriteBackCuesDetectsActiveLoopDeactivation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	stick := t.TempDir()
 	testfixture.Export(t, stick)
@@ -796,7 +795,7 @@ func TestWriteBackCuesDetectsActiveLoopDeactivation(t *testing.T) {
 	}
 	_ = mdb.Close()
 
-	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-21", SkipPreparingCheck: true})
+	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-21", SkipPreparingCheck: true})
 	if err != nil {
 		t.Fatalf("WriteBackCues: %v", err)
 	}
@@ -823,6 +822,7 @@ func TestWriteBackCuesDetectsActiveLoopDeactivation(t *testing.T) {
 }
 
 func TestWriteBackCuesRoundTripAddThenDelete(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	stick := t.TempDir()
 	testfixture.Export(t, stick)
@@ -856,7 +856,7 @@ func TestWriteBackCuesRoundTripAddThenDelete(t *testing.T) {
 	}
 	_ = mdb.Close()
 
-	res1, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-21", OnEject: true})
+	res1, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-21", OnEject: true})
 	if err != nil || res1.TracksChanged != 1 {
 		t.Fatalf("session 1 WriteBackCues: res=%+v err=%v", res1, err)
 	}
@@ -873,7 +873,7 @@ func TestWriteBackCuesRoundTripAddThenDelete(t *testing.T) {
 	}
 	_ = mdb2.Close()
 
-	res2, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-21", OnEject: true})
+	res2, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-21", OnEject: true})
 	if err != nil || res2.TracksChanged != 1 {
 		t.Fatalf("session 2 delete WriteBackCues: expected deletion to be written back, got res=%+v err=%v", res2, err)
 	}

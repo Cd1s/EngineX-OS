@@ -16,6 +16,7 @@ import (
 // #59: a library staged from a Pioneer player lands under its own root folder,
 // plays from the staged copy, and never breaks the drive's own import.
 func TestStagedProlinkLibraryImportsUnderItsFolder(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	name := "CDJ-3000 2 USB"
@@ -69,6 +70,7 @@ func TestStagedProlinkLibraryImportsUnderItsFolder(t *testing.T) {
 }
 
 func TestStagedProlinkWithoutLocalRekordboxExport(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"empty", "pioneer-directory", "native-engine"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
@@ -131,6 +133,7 @@ func TestStagedProlinkWithoutLocalRekordboxExport(t *testing.T) {
 }
 
 func TestStagedOnlyRetainsPreviouslyImportedLocalSource(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	staged := filepath.Join(root, ".prolink-cache", "CDJ-3000")
@@ -177,6 +180,7 @@ func TestStagedOnlyRetainsPreviouslyImportedLocalSource(t *testing.T) {
 }
 
 func TestMalformedLocalExportDoesNotFallBackToStaged(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	testfixture.Export(t, filepath.Join(root, ".prolink-cache", "CDJ-3000"))
 	testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb", []byte("broken local source"))

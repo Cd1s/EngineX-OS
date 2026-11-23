@@ -15,6 +15,7 @@ import (
 )
 
 func TestAACImportPreservesExportTiming(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name            string
 		fixture         func([]byte) []byte
@@ -54,6 +55,7 @@ func TestAACImportPreservesExportTiming(t *testing.T) {
 }
 
 func TestAACGridMigratesAnUnchangedV2Export(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	rel := testfixture.AACExport(t, root)
 	audio := filepath.Join(root, rel)

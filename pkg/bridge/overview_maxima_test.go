@@ -104,6 +104,7 @@ func recordPlace(t *testing.T, root string, track int64) {
 // A stick an earlier build imported has overviews without the band maxima Engine scales
 // by. The stamp bypass completes them, once.
 func TestStampBypassCompletesOldOverviewsOnce(t *testing.T) {
+	t.Parallel()
 	root, db, want := oldOverviews(t, 1)
 	if r := issue233Mount(t, root, enginedb.Options{}); !r.Bypassed || !completed(t, db, "PerformanceData", want) || !overviewMarked(root) {
 		t.Fatalf("old overview not completed on the bypass: %+v", r)
@@ -119,6 +120,7 @@ func TestStampBypassCompletesOldOverviewsOnce(t *testing.T) {
 // completed library was final, so they stayed a third of the height. That import wrote
 // rb-bridge's own database: the mark no longer stands, and the next insert completes them.
 func TestImportByAnEarlierBuildIsCompletedAtTheNextInsert(t *testing.T) {
+	t.Parallel()
 	root, db, want := oldOverviews(t, 2)
 	if issue233Mount(t, root, enginedb.Options{}); !completed(t, db, "PerformanceData", want) || !overviewMarked(root) {
 		t.Fatal("the library was not completed and marked")
@@ -140,6 +142,7 @@ func TestImportByAnEarlierBuildIsCompletedAtTheNextInsert(t *testing.T) {
 // completed before it is still complete after it, and is not read through again: on a
 // large library that holds the mount up.
 func TestOwnImportDoesNotScanACompletedLibraryAgain(t *testing.T) {
+	t.Parallel()
 	root, db, want := oldOverviews(t, 1)
 	if issue233Mount(t, root, enginedb.Options{}); !completed(t, db, "PerformanceData", want) || !overviewMarked(root) {
 		t.Fatal("the library was not completed and marked")
@@ -157,6 +160,9 @@ func TestOwnImportDoesNotScanACompletedLibraryAgain(t *testing.T) {
 // A scan the mount's time cut short leaves the library unmarked, and the next insert goes
 // on with it.
 func TestOverviewBackfillCutShortGoesOnAtTheNextInsert(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, db, want := oldOverviews(t, 2)
 	restore := bridge.SlowExportReadForTest(0, time.Nanosecond)
 	r := issue233Mount(t, root, enginedb.Options{})
@@ -173,6 +179,7 @@ func TestOverviewBackfillCutShortGoesOnAtTheNextInsert(t *testing.T) {
 // path, not the bypass. The tracks an earlier build had finished kept their zero maxima
 // until the stick was inserted once more.
 func TestResumedImportCompletesOldOverviews(t *testing.T) {
+	t.Parallel()
 	root, db, want := oldOverviews(t, 2)
 	if _, err := db.Exec(`UPDATE bridge.BridgeState SET fingerprint='fast:'||fingerprint WHERE trackId=(SELECT max(trackId) FROM bridge.BridgeState)`); err != nil {
 		t.Fatal(err)
@@ -188,6 +195,7 @@ func TestResumedImportCompletesOldOverviews(t *testing.T) {
 // Review of 3a88aeb: a read error that ended the scan early was ignored, so part of the
 // library was completed, marked as done and never finished.
 func TestOverviewBackfillStopsOnReadError(t *testing.T) {
+	t.Parallel()
 	root, db, want := oldOverviews(t, 2)
 	exec := func(q string) {
 		t.Helper()
@@ -218,6 +226,7 @@ CREATE TRIGGER ViewUpdate INSTEAD OF UPDATE ON PerformanceData BEGIN UPDATE Real
 // finished part took the mount's time never got further. A mount goes on after the track
 // the last one recorded,
 func TestOverviewBackfillGoesOnAfterTheRecordedTrack(t *testing.T) {
+	t.Parallel()
 	root, db, want := oldOverviews(t, 2)
 	first, second := int64(math.MaxInt64), int64(0)
 	for id := range want {
@@ -235,6 +244,9 @@ func TestOverviewBackfillGoesOnAfterTheRecordedTrack(t *testing.T) {
 // and this build's own import in between keeps the place, also on a mount that has no
 // time left for the backfill itself.
 func TestOwnImportKeepsThePlaceOfTheBackfill(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, db, want := oldOverviews(t, 2)
 	first, second := int64(math.MaxInt64), int64(0)
 	for id := range want {
@@ -269,6 +281,9 @@ func TestOwnImportKeepsThePlaceOfTheBackfill(t *testing.T) {
 // library as done, with an earlier build's overview before the place still without its
 // band maxima. (The reviewer's test, with SQLite's own persistent journal.)
 func TestOwnImportDoesNotVouchForAPlaceRecordedWithoutAGeneration(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, db, want := oldOverviews(t, 2)
 	first := int64(math.MaxInt64)
 	for id := range want {
@@ -347,6 +362,7 @@ func TestOwnImportDoesNotVouchForAPlaceRecordedWithoutAGeneration(t *testing.T) 
 // the rows with that mark. It reads every overview, and what the narrower scan recorded
 // (the generation alone, with no "2:" before it) does not count as done.
 func TestBackfillCompletesTheTracksEngineHasLoaded(t *testing.T) {
+	t.Parallel()
 	root, db, want := oldOverviews(t, 3)
 	loaded := int64(math.MaxInt64)
 	for id := range want {
@@ -380,6 +396,7 @@ func TestBackfillCompletesTheTracksEngineHasLoaded(t *testing.T) {
 // and every track on the card kept its small overview. The overviews no longer wait for
 // the import: here the export has changed and cannot be read, so the import ends early.
 func TestOverviewsDoNotWaitForAnImportThatDoesNotFinish(t *testing.T) {
+	t.Parallel()
 	root, db, want := oldOverviews(t, 2)
 	testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb", []byte("an export that is not one"))
 	if r, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err == nil {
@@ -397,6 +414,9 @@ func TestOverviewsDoNotWaitForAnImportThatDoesNotFinish(t *testing.T) {
 // first had them complete 0.6 s after the same mount. The test above did not show it: its
 // export fails at once, and a fast-failing read is not a slow read.
 func TestOverviewsDoNotWaitForAnExportThatIsStillBeingRead(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, db, want := oldOverviews(t, 2)
 	later := time.Now().Add(time.Minute) // written again since the import: this mount reads it
 	if err := os.Chtimes(filepath.Join(root, "PIONEER/rekordbox/export.pdb"), later, later); err != nil {

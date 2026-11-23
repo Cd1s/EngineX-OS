@@ -18,6 +18,9 @@ import (
 // minutes on a large stick. Now the job reports 0 of the export's tracks once the export is read,
 // before those long steps, and each pass's share as it goes; never fewer than before.
 func TestIssue328BackgroundJobCountsThroughout(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, issue328Tracks)
 	defer bridge.SetUpdateExportForTest()()

@@ -131,6 +131,11 @@ func TestIssue253BrokenANLZKeepsItsWaveformRow(t *testing.T) {
 	for _, f := range flows {
 		for _, br := range breaks {
 			t.Run(f.name+"/"+br.name, func(t *testing.T) {
+				if bridge.InChildForTest(t) {
+					return
+				}
+				t.Cleanup(bridge.SetLargeExportForTest())
+				t.Cleanup(bridge.SetInPlaceUpdateForTest(f.perTrack))
 				root, cues := issue253Converted(t, 40)
 				issue253OldRows(t, root)
 				issue253Waveforms(t, root, 40, "before")
@@ -141,8 +146,6 @@ func TestIssue253BrokenANLZKeepsItsWaveformRow(t *testing.T) {
 				}
 				printBefore := issue253Print(t, root, 1)
 				br.apply(t, root)
-				defer bridge.SetLargeExportForTest()()
-				defer bridge.SetInPlaceUpdateForTest(f.perTrack)()
 				cutConverge(t, root)
 				issue253Waveforms(t, root, 40, "after the update")
 				if issue253Print(t, root, 1) == printBefore {

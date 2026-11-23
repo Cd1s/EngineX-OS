@@ -97,6 +97,9 @@ func publishMount(t *testing.T, root string) string {
 }
 
 func TestUpdatePublishComparesOnlyTheTracksEngineWrote(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	const n = 20
 	root := publishStick(t, n, 1700000000, 7) // a library of long ago
 
@@ -160,6 +163,9 @@ func TestUpdatePublishComparesOnlyTheTracksEngineWrote(t *testing.T) {
 // A library without Engine's trigger has no dates to go by: every track is compared, as
 // before, and a deck's edit is carried whatever its track's date says.
 func TestUpdatePublishComparesEveryTrackOfALibraryWithoutDates(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	const n = 20
 	root := publishStick(t, n, 1700000000, 0)
 	live := dbOpen(t, root)
@@ -186,6 +192,9 @@ func TestUpdatePublishComparesEveryTrackOfALibraryWithoutDates(t *testing.T) {
 // was written where the time was right). Dates in the clock's future are dates like any
 // other: only the track the deck wrote is compared, not all of them.
 func TestUpdatePublishOnADeckWhoseClockIsBehindTheLibrary(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	const n, future = 20, int64(4102444800) // 2100-01-01
 	root := publishStick(t, n, future, 0)
 	live := dbOpen(t, root)

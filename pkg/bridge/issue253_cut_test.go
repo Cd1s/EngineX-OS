@@ -321,6 +321,9 @@ func (f cutFlow) test(t *testing.T) {
 // Few tracks to read: the quick update at the mount, the job's hand-off, the remount reading them
 // in place and compacting the state.
 func TestIssue253CutInPlaceUpdate(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	cutFlow{
 		settings: func() func() {
 			a, b := bridge.SetLargeExportForTest(), bridge.SetInPlaceUpdateForTest(1)
@@ -333,6 +336,9 @@ func TestIssue253CutInPlaceUpdate(t *testing.T) {
 // More to read than the mounts take: the quick update, the job's stage with its compact state
 // copy, the remount publishing it.
 func TestIssue253CutStagedUpdate(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	cutFlow{
 		settings: func() func() {
 			a, b := bridge.SetLargeExportForTest(), bridge.SetInPlaceUpdateForTest(1<<40)
@@ -345,6 +351,9 @@ func TestIssue253CutStagedUpdate(t *testing.T) {
 // A list too long for the mount: the job builds it first, a remount publishes it, then the update
 // that reads the files.
 func TestIssue253CutListFirstUpdate(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	cutFlow{
 		settings: func() func() {
 			a, b, c := bridge.SetLargeExportForTest(), bridge.SetInPlaceUpdateForTest(1), bridge.SetMountWindowForTest(time.Second)
@@ -358,6 +367,9 @@ func TestIssue253CutListFirstUpdate(t *testing.T) {
 // track 5's file changed, so the import reads it again; it keeps its waveform copy (nothing
 // confirms the files here, and the import never decides it), at every cut and in the end.
 func TestIssue253CutMountOnlyUpdate(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	cutFlow{
 		settings: func() func() { return func() {} },
 		steps:    []string{"mount"},

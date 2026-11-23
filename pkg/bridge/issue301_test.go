@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -66,7 +67,32 @@ func finished(t *testing.T, root string) int {
 	return n
 }
 
+// warmSQLite does once in this process what a mount's first use of SQLite costs (the driver's
+// start-up, the first statements parsed, the first files opened), so that a test whose mount
+// window is a few hundred milliseconds does not spend it on a cold process. It sets no hook and
+// changes no time the product is given.
+var warmOnce sync.Once
+
+func warmSQLite(t *testing.T) {
+	t.Helper()
+	warmOnce.Do(func() {
+		_, root, skeleton := testlibrary.Create(t)
+		skeleton.Close()
+		testfixture.LargeExport(t, root, 2)
+		if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err != nil {
+			t.Fatalf("warm-up mount: %v", err)
+		}
+	})
+}
+
+// The mount window of this test is 200 ms, as it always was: the product gives a mount 14 s and
+// this test squeezes them to see the import go on in the background. A second process busy beside
+// it takes the window (the snapshot of the library fails with "context deadline exceeded"), warm
+// or not, as soon as the host is loaded. So it does not run beside others: it runs in this
+// process, serial, in the quiet first part of the run (parallel tests start only after the serial
+// ones are over), after a warm-up.
 func TestIssue301FirstImportPastTheMountWindowFinishesInTheBackground(t *testing.T) {
+	warmSQLite(t)
 	root, skeleton := issue301Stick(t, issue301Tracks)
 	live := filepath.Join(root, "Engine Library", "Database2", "m.db")
 	var uuid string
@@ -185,6 +211,9 @@ func TestIssue301FirstImportPastTheMountWindowFinishesInTheBackground(t *testing
 // An eject stops the job: what its passes committed stays, and the next job goes on from there.
 // A kill (or a power cut) is the same, with the pass under way rolled back by SQLite.
 func TestIssue301EjectOrKillKeepsTheFinishedPasses(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	if os.Getenv("ISSUE301_CHILD") != "" {
 		return
 	}
@@ -294,6 +323,9 @@ func TestIssue301Child(t *testing.T) {
 // Engine adds a track to its skeleton for each one the DJ loads while the import runs. That
 // skeleton is kept beside the published library, not lost.
 func TestIssue301SkeletonChangedDuringTheImportIsKept(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, skeleton := issue301Stick(t, 20)
 	ctx := context.Background()
 	defer bridge.SetLargeExportForTest()()
@@ -333,6 +365,9 @@ func TestIssue301SkeletonChangedDuringTheImportIsKept(t *testing.T) {
 // A stick that got a library of its own (here: copied from a computer) while a first import
 // waited in its stage: the library is imported into in place and the stage goes.
 func TestIssue301StageDroppedForALibraryOfItsOwn(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	root, skeleton := issue301Stick(t, 20)
 	ctx := context.Background()
 	restore := bridge.SetLargeExportForTest()
@@ -360,6 +395,8 @@ func TestIssue301StageDroppedForALibraryOfItsOwn(t *testing.T) {
 // #253 with a large first import: a 6000-track stick is published from its export at the first
 // mount, and later mounts return at once, without reading the export, while the update that
 // reads its files goes on (#301).
+// It runs in the first, quiet part of the run, in this process: the mount's own 14 s have to fit
+// the read and the publish of 6000 tracks, which a busy host does not give.
 func TestIssue301LargeFirstImportRepeatMounts253(t *testing.T) {
 	root := t.TempDir()
 	testfixture.LargeExport(t, root, 6000)

@@ -73,6 +73,9 @@ func copyRows(t *testing.T, root string) int {
 }
 
 func TestIssue253MountReadsNoANLZFileForTheWaveformCopies(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	anlzDir := filepath.Join("PIONEER", "USBANLZ", "P001")
 	// reanalysed is what rekordbox leaves after analysing every track again: the same files,
 	// written later, so the import reads each track again.

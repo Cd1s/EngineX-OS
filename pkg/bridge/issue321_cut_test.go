@@ -3,6 +3,7 @@ package bridge_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"io"
 	"io/fs"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,6 +66,13 @@ func issue321Temps(t *testing.T, root string) []string {
 	return out
 }
 
+// issue321Sound is the exportLibrary.db files that decrypted and passed the integrity check: the
+// check is a function of the file's bytes, so one that was seen whole is not decrypted again.
+var (
+	issue321SoundMu sync.Mutex
+	issue321Sound   = map[[sha256.Size]byte]bool{}
+)
+
 func issue321ExportSound(t *testing.T, stick string) {
 	t.Helper()
 	p := filepath.Join(stick, "PIONEER", "rekordbox", "exportLibrary.db")
@@ -71,24 +80,33 @@ func issue321ExportSound(t *testing.T, stick string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var plain bytes.Buffer
-	if err = rekordbox.DecryptSQLCipher4(context.Background(), bytes.NewReader(raw), int64(len(raw)), &plain, []byte(oneLibraryKey)); err != nil {
-		t.Fatalf("exportLibrary.db does not decrypt: %v", err)
+	sum := sha256.Sum256(raw)
+	issue321SoundMu.Lock()
+	seen := issue321Sound[sum]
+	issue321SoundMu.Unlock()
+	if !seen {
+		var plain bytes.Buffer
+		if err = rekordbox.DecryptSQLCipher4(context.Background(), bytes.NewReader(raw), int64(len(raw)), &plain, []byte(oneLibraryKey)); err != nil {
+			t.Fatalf("exportLibrary.db does not decrypt: %v", err)
+		}
+		f := filepath.Join(t.TempDir(), "plain.db")
+		if err = os.WriteFile(f, plain.Bytes(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: f, RawQuery: "mode=ro"}).String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		var ok string
+		if err = db.QueryRow(`PRAGMA integrity_check`).Scan(&ok); err != nil || ok != "ok" {
+			t.Fatalf("exportLibrary.db integrity: %q %v", ok, err)
+		}
+		issue321SoundMu.Lock()
+		issue321Sound[sum] = true
+		issue321SoundMu.Unlock()
 	}
-	f := filepath.Join(t.TempDir(), "plain.db")
-	if err = os.WriteFile(f, plain.Bytes(), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: f, RawQuery: "mode=ro"}).String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	var ok string
-	if err = db.QueryRow(`PRAGMA integrity_check`).Scan(&ok); err != nil || ok != "ok" {
-		t.Fatalf("exportLibrary.db integrity: %q %v", ok, err)
-	}
-	if _, err = rekordbox.ReadSQLite(context.Background(), p, nil); err != nil {
+	if _, err = rekordbox.ReadSQLiteKeys(context.Background(), p, nil, testKeys); err != nil {
 		t.Fatalf("exportLibrary.db does not read: %v", err)
 	}
 }
@@ -116,6 +134,9 @@ func issue321ANLZSound(t *testing.T, stick string) {
 }
 
 func TestIssue321WatcherPassCutAtEveryWriteStep(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
 	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
@@ -138,8 +159,7 @@ func TestIssue321WatcherPassCutAtEveryWriteStep(t *testing.T) {
 		steps = append(steps, step)
 	})
 	var s bridge.CueSession
-	keys := rekordbox.NewKeyCache()
-	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &s, Keys: keys,
+	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &s, Keys: testKeys,
 		Settled: func() error { return nil }})
 	restore()
 	if err != nil || res.TracksChanged != 1 || !res.OneLibraryUpdated {
@@ -152,6 +172,7 @@ func TestIssue321WatcherPassCutAtEveryWriteStep(t *testing.T) {
 	for i, step := range steps {
 		cut := filepath.Join(cuts, strings.Repeat("0", 3-len(itoa(i)))+itoa(i))
 		t.Run(itoa(i)+" "+filepath.Base(step), func(t *testing.T) {
+			t.Parallel()                                // its own copy of the cut stick; the cut hook was put back above
 			for _, tmp := range issue321Temps(t, cut) { // a pull in the middle of writing it
 				if st, err := os.Stat(tmp); err == nil {
 					_ = os.Truncate(tmp, st.Size()/2)
@@ -163,13 +184,13 @@ func TestIssue321WatcherPassCutAtEveryWriteStep(t *testing.T) {
 			}
 			issue321ExportSound(t, cut)
 			issue321ANLZSound(t, cut)
-			res, err := bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true})
+			res, err := bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", SkipPreparingCheck: true})
 			if err != nil || !issue321ANLZHas(t, cut, "Cut 321") {
 				t.Fatalf("cut at %q: the next pass did not bring the edit: %+v %v", step, res, err)
 			}
 			issue321ExportSound(t, cut)
 			issue321ANLZSound(t, cut)
-			if res, err = bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true}); err != nil || res.TracksChanged != 0 {
+			if res, err = bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", SkipPreparingCheck: true}); err != nil || res.TracksChanged != 0 {
 				t.Fatalf("cut at %q: the pass after does not converge: %+v %v", step, res, err)
 			}
 		})
@@ -210,6 +231,9 @@ func issue321PDBGenre(t *testing.T, stick string, id uint32) string {
 // export.pdb (#314). The pass that writes it is cut at every write step as above: export.pdb reads
 // whole with the old or the new genre, and the next pass brings both edits.
 func TestIssue321WatcherPassCutAtEveryWriteStepOfExportPDB(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, false)
 	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
@@ -237,7 +261,7 @@ func TestIssue321WatcherPassCutAtEveryWriteStepOfExportPDB(t *testing.T) {
 		steps = append(steps, step)
 	})
 	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{},
-		Keys: rekordbox.NewKeyCache(), Settled: func() error { return nil }})
+		Keys: testKeys, Settled: func() error { return nil }})
 	restore()
 	if err != nil || res.TracksChanged != 1 || res.OneLibraryUpdated || issue321PDBGenre(t, stick, 1) != newGenre {
 		t.Fatalf("uncut pass: %+v %v", res, err)
@@ -255,6 +279,7 @@ func TestIssue321WatcherPassCutAtEveryWriteStepOfExportPDB(t *testing.T) {
 	for i, step := range steps {
 		cut := filepath.Join(cuts, strings.Repeat("0", 3-len(itoa(i)))+itoa(i))
 		t.Run(itoa(i)+" "+filepath.Base(step), func(t *testing.T) {
+			t.Parallel()                                // its own copy of the cut stick; the cut hook was put back above
 			for _, tmp := range issue321Temps(t, cut) { // a pull in the middle of writing it
 				if st, err := os.Stat(tmp); err == nil {
 					_ = os.Truncate(tmp, st.Size()/2)
@@ -268,12 +293,12 @@ func TestIssue321WatcherPassCutAtEveryWriteStepOfExportPDB(t *testing.T) {
 				t.Fatalf("cut at %q: export.pdb's genre is %q, neither the old %q nor the new", step, g, oldGenre)
 			}
 			issue321ANLZSound(t, cut)
-			res, err := bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true})
+			res, err := bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", SkipPreparingCheck: true})
 			if err != nil || !issue321ANLZHas(t, cut, "Cut 321") || issue321PDBGenre(t, cut, 1) != newGenre {
 				t.Fatalf("cut at %q: the next pass did not bring the edits: %+v %v", step, res, err)
 			}
 			issue321ANLZSound(t, cut)
-			if res, err = bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true}); err != nil || res.TracksChanged != 0 {
+			if res, err = bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", SkipPreparingCheck: true}); err != nil || res.TracksChanged != 0 {
 				t.Fatalf("cut at %q: the pass after does not converge: %+v %v", step, res, err)
 			}
 		})
@@ -291,6 +316,9 @@ func TestIssue321WatcherPassCutAtEveryWriteStepOfExportPDB(t *testing.T) {
 // the first original kept under .enginex-backup, and leaves no temporary file; the next pass
 // brings the edits.
 func TestIssue321ARenameCutThatLeftATargetMissingIsPutBack(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	for _, oneLib := range []bool{true, false} {
 		name := "export.pdb"
 		if oneLib {
@@ -363,7 +391,7 @@ func issue321MissingTarget(t *testing.T, oneLib bool) {
 		}
 	}
 	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{},
-		Keys: rekordbox.NewKeyCache(), Settled: func() error { return nil }})
+		Keys: testKeys, Settled: func() error { return nil }})
 	restore()
 	if err != nil || res.TracksChanged != 1 || res.OneLibraryUpdated != oneLib {
 		t.Fatalf("uncut pass: %+v %v", res, err)
@@ -375,6 +403,7 @@ func issue321MissingTarget(t *testing.T, oneLib bool) {
 	for i, st := range states {
 		for _, copyState := range []string{"whole", "without its name", "cut in half", "whole, beside an earlier cut's copy"} {
 			t.Run(itoa(i)+" "+filepath.Base(st.dst)+" "+copyState, func(t *testing.T) {
+				t.Parallel() // its own copy of the cut stick; the cut hook was put back above
 				cut := t.TempDir()
 				issue321Copy(t, filepath.Join(cuts, itoa(i)), cut)
 				want := read(t, stick, st.dst) // the new copy, else the first original
@@ -420,14 +449,14 @@ func issue321MissingTarget(t *testing.T, oneLib bool) {
 				} else {
 					issue321PDBGenre(t, cut, 1)
 				}
-				res, err := bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true})
+				res, err := bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", SkipPreparingCheck: true})
 				if err != nil || !issue321ANLZHas(t, cut, cue) || (!oneLib && issue321PDBGenre(t, cut, 1) != genre) {
 					t.Fatalf("the next pass did not bring the edits: %+v %v", res, err)
 				}
 				if oneLib {
 					issue321ExportSound(t, cut)
 				}
-				if res, err = bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true}); err != nil || res.TracksChanged != 0 {
+				if res, err = bridge.WriteBackCues(ctx, cut, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", SkipPreparingCheck: true}); err != nil || res.TracksChanged != 0 {
 					t.Fatalf("the pass after does not converge: %+v %v", res, err)
 				}
 			})
@@ -441,6 +470,9 @@ func issue321MissingTarget(t *testing.T, oneLib bool) {
 // the stick before the entry that names it (mkdirOrdered; the order itself is measured by the
 // replay on a real FAT32 volume).
 func TestIssue321BackupDirectoriesAreMadeBeforeTheMark(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
 	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
@@ -460,7 +492,7 @@ func TestIssue321BackupDirectoriesAreMadeBeforeTheMark(t *testing.T) {
 		}
 		atMark = append(atMark, "") // the mark was written
 	})
-	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", SkipPreparingCheck: true})
+	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", SkipPreparingCheck: true})
 	restore()
 	if err != nil || res.FilesUpdated == 0 {
 		t.Fatalf("pass: %+v %v", res, err)

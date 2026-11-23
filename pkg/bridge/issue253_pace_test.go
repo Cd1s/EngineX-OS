@@ -15,6 +15,9 @@ import (
 // paced: after each read it waits as long as the read took and at least detailReadGap. A stop of
 // the job confirms nothing more, and the tracks not confirmed keep their copies.
 func TestIssue253ChecksArePacedAndStopCleanly(t *testing.T) {
+	if InChildForTest(t) {
+		return
+	}
 	defer func(old time.Duration) { detailReadGap = old }(detailReadGap)
 	detailReadGap = 20 * time.Millisecond
 	ctx := context.Background()

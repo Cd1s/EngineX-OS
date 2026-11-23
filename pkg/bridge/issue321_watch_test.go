@@ -56,6 +56,9 @@ func issue321WaitANLZ(t *testing.T, stick, name string, within time.Duration) ti
 }
 
 func TestIssue321WatcherWritesAQuietTimeAfterEnginesLastWrite(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	stick, db := issue321Stick(t, 8)
 	_, passes, stop := issue321Watch(t, stick, 600*time.Millisecond, time.Second)
 	defer stop()
@@ -84,6 +87,9 @@ func TestIssue321WatcherWritesAQuietTimeAfterEnginesLastWrite(t *testing.T) {
 // Engine writes m.db while the pass reads it: nothing the read found is kept or written, and the
 // pass that follows the write writes what Engine wrote last.
 func TestIssue321WatcherDropsAReadThatOverlapsAWrite(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	stick, db := issue321Stick(t, 8)
 	t.Cleanup(bridge.SetCueRunDirForTest(t.TempDir()))
 	w := bridge.CueWatcherForTest([]string{stick}, 400*time.Millisecond, time.Second)
@@ -129,6 +135,9 @@ func TestIssue321WatcherDropsAReadThatOverlapsAWrite(t *testing.T) {
 // No pass while the hook converts a stick at mount (/run/enginex-usb-preparing) or while an
 // Eject is under way (its mark): the conversion's end is retried, the Eject's final pass writes.
 func TestIssue321WatcherWaitsForAConversionAndLeavesAnEjectToItsPass(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	stick, db := issue321Stick(t, 8)
 	run := t.TempDir()
 	t.Cleanup(bridge.SetCueRunDirForTest(run))
@@ -173,6 +182,9 @@ func TestIssue321WatcherWaitsForAConversionAndLeavesAnEjectToItsPass(t *testing.
 // The Eject's final pass uses the keys the watcher derived for the stick: no derivation inside
 // the hook's 12 s; and it stops a pass in progress first.
 func TestIssue321FinalPassReusesTheWatchersKeys(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
 	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
@@ -206,6 +218,9 @@ func TestIssue321FinalPassReusesTheWatchersKeys(t *testing.T) {
 
 // What a cut write-back leaves goes at the next mount: the watcher's attach.
 func TestIssue321LeftoversGoAtTheNextMount(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	stick, _ := issue321Stick(t, 4)
 	dir := filepath.Join(stick, "Engine Library", "Database2")
 	anlz := filepath.Join(stick, "PIONEER", "USBANLZ", "P001")
