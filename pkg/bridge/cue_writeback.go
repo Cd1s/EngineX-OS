@@ -261,7 +261,8 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		return res, fmt.Errorf("writeback: no rekordbox export found on %s", absMount)
 	}
 	preStamp, _ := exportStamp(resolver, absMount)
-	if reason := writeBackStampReason(readMark(engineDBDir, stampName), preStamp); reason != "" {
+	again := readMark(engineDBDir, writeBackAgainName)
+	if reason := writeBackStampReason(readMark(engineDBDir, stampName), preStamp); reason != "" && again == "" {
 		tm.skipReason = reason
 		return res, nil
 	}
@@ -292,7 +293,6 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE type='table' AND name='BridgeSynced'`).Scan(&hasSyncedTable)
 	// A file of a cut pass was put back from its first original (CleanWriteBackLeftovers): every
 	// row is read, as if the state had no record, and on "export" the export gets the deck's cues.
-	again := readMark(engineDBDir, writeBackAgainName)
 	if again != "" {
 		hasSyncedTable = 0
 	}
@@ -395,8 +395,8 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		// digest. Their cues are not read again; their metadata (#314) is compared with the
 		// export's. Tracks with loops are still inspected because activeOnLoadLoops is outside
 		// the digest.
-		if len(trackData) > 0 && !(len(writtenDigest) > 0 && activeLoops == 0 && !enginedb.HasAnyLoop(loopsBlob) &&
-			bytes.Equal(writtenDigest, enginedb.WrittenDigest(beatData, quickCues, loopsBlob))) {
+		if len(trackData) > 0 && (tm.firstRecord || !(len(writtenDigest) > 0 && activeLoops == 0 && !enginedb.HasAnyLoop(loopsBlob) &&
+			bytes.Equal(writtenDigest, enginedb.WrittenDigest(beatData, quickCues, loopsBlob)))) {
 			if deck, err := enginedb.ParseDeckCuesAndLoops(trackData, quickCues, loopsBlob, activeLoops); err == nil {
 				d.deck, d.cues = deck, true
 			}
