@@ -40,6 +40,9 @@ func writeEncryptedExport(t *testing.T, path, plainPath string, salt []byte) {
 }
 
 func TestMountCachesRekordbox7ExportKeysBySalt(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
 	plainPath := filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary_decrypted.db")
 	root := t.TempDir()
 	first := filepath.Join(root, "PIONEER", "rekordbox", "exportLibrary.db")

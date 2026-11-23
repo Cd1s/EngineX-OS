@@ -292,19 +292,34 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 			sourceOldPath[t.source] = t.oldPath
 		}
 	}
+	var nativeTrackIDs map[int64]bool
+	if len(tracks) > 0 {
+		nrows, nerr := tx.QueryContext(ctx, `SELECT DISTINCT e.trackId FROM PlaylistEntity e WHERE e.trackId IS NOT NULL AND (e.databaseUuid IS NULL OR e.databaseUuid='' OR e.databaseUuid=(SELECT uuid FROM Information)) AND NOT EXISTS (SELECT 1 FROM BridgePlaylist b WHERE b.listId=e.listId)`)
+		if nerr != nil {
+			return nil, nerr
+		}
+		nativeTrackIDs = map[int64]bool{}
+		for nrows.Next() {
+			var tid int64
+			if err := nrows.Scan(&tid); err != nil {
+				nrows.Close()
+				return nil, err
+			}
+			nativeTrackIDs[tid] = true
+		}
+		if err := nrows.Err(); err != nil {
+			nrows.Close()
+			return nil, err
+		}
+		nrows.Close()
+	}
 	for _, t := range tracks {
 		id, source, oldPath, fp := t.id, t.source, t.oldPath, t.fp
 		pathTarget := byPath[foldPreparedPath(oldPath)]
-		if pathTarget != nil {
-			var nativeRefs int
-			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM PlaylistEntity e WHERE e.trackId=? AND (e.databaseUuid IS NULL OR e.databaseUuid='' OR e.databaseUuid=(SELECT uuid FROM Information)) AND NOT EXISTS (SELECT 1 FROM BridgePlaylist b WHERE b.listId=e.listId)`, existingByPath[foldPreparedPath(oldPath)]).Scan(&nativeRefs); err != nil {
-				return nil, err
-			}
-			if nativeRefs > 0 {
-				// A native Engine playlist owns this row. Reusing it for a different
-				// export source would silently retarget the DJ's membership.
-				pathTarget = nil
-			}
+		if pathTarget != nil && nativeTrackIDs[existingByPath[foldPreparedPath(oldPath)]] {
+			// A native Engine playlist owns this row. Reusing it for a different
+			// export source would silently retarget the DJ's membership.
+			pathTarget = nil
 		}
 		pathCycle := false
 		if pathTarget != nil {

@@ -38,6 +38,7 @@ func TestConvertAtMountKeepsOverviewDeadlineWhenImportFails(t *testing.T) {
 }
 
 func TestPruneRGBOverviewsRespectsMountBudget(t *testing.T) {
+	t.Parallel()
 	_, root, _ := testlibrary.Create(t)
 	dir := filepath.Join(root, "Engine Library", "Database2")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
@@ -54,6 +55,9 @@ func TestPruneRGBOverviewsRespectsMountBudget(t *testing.T) {
 }
 
 func TestConvertAtMountHandsOffBeforeHookKillWhenPruneConsumesBudget(t *testing.T) {
+	if InChildForTest(t) {
+		return
+	}
 	_, root, _ := testlibrary.Create(t)
 	testfixture.Export(t, root)
 	oldBudget, oldReserve := maxMountHookBudget, quickMountReserve

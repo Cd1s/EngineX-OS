@@ -540,10 +540,14 @@ func issue321StaleStick(t *testing.T, spc int) {
 			}
 		}
 	}
+	// Flush and unmount the repaired filesystem before taking the baseline image hash so dirty
+	// page-cache writes from recreating cut files are not attributed to the refused pass below.
+	unmount()
 	// The v4 export stamp no longer matches after fsck repaired the export. The new write-back
 	// rule therefore refuses this recovery pass, leaving the pending Engine edits for a fresh
 	// conversion instead of applying them to a repaired but different export.
 	afterRepair := issue321Hash(t, img)
+	_, unmount = vfatMount(t, img, mnt)
 	res, err = bridge.WriteBackCues(ctx, mnt, opts)
 	if err != nil || res.FilesUpdated != 0 || res.TracksChanged != 0 || res.OneLibraryUpdated {
 		t.Fatalf("the first pass after the disk check: %+v %v, want stamp-mismatch refusal", res, err)
