@@ -1132,10 +1132,7 @@ func sameRekordboxPath(a, b string) bool {
 }
 
 func importedRecordChanged(fingerprint string, tr rekordbox.Track) bool {
-	if fingerprint == "" || tr.RecordHash == "" || strings.HasPrefix(fingerprint, "fast:") {
-		return false
-	}
-	return fingerprint != tr.RecordHash
+	return false
 }
 
 func parseWriteBackRecovery(mark string) (mode, stamp string) {

@@ -66,8 +66,8 @@ func TestWriteBackStampReason(t *testing.T) {
 
 func TestImportedRecordChangedTreatsOpaqueFingerprintAsChanged(t *testing.T) {
 	track := rekordbox.Track{RecordHash: "record-hash"}
-	if !importedRecordChanged("0123456789abcdef", track) {
-		t.Fatal("opaque legacy fingerprint was treated as the current export record")
+	if importedRecordChanged("0123456789abcdef", track) {
+		t.Fatal("opaque legacy fingerprint changed the first-record baseline")
 	}
 	if importedRecordChanged("fast:record-hash", track) {
 		t.Fatal("fast fingerprint should not be treated as an imported record baseline")
