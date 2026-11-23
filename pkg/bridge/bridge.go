@@ -220,7 +220,16 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 							oneLibrary = libraries[i]
 						}
 					}
-					return mergeExportLibraries(filterGhostEmptyRootPlaylists(oneLibrary, pdb), pdb), nil
+					filteredOne := filterGhostEmptyRootPlaylists(oneLibrary, pdb)
+					ordered := make([]*rekordbox.Library, len(libraries))
+					for i, candidate := range successful {
+						if candidate.isPDB {
+							ordered[i] = pdb
+						} else {
+							ordered[i] = filteredOne
+						}
+					}
+					return mergeExportLibraries(ordered...), nil
 				}
 				return mergeExportLibraries(libraries...), nil
 			}
@@ -755,12 +764,16 @@ var (
 )
 
 func mountPruneDeadline(start, requested time.Time) time.Time {
-	reserve := min(maxMountHookBudget, quickMountReserve)
+	reserve := quickMountReserveForBudget()
 	deadline := start.Add(maxMountHookBudget - reserve)
 	if !requested.IsZero() && requested.Before(deadline) {
 		deadline = requested
 	}
 	return deadline
+}
+
+func quickMountReserveForBudget() time.Duration {
+	return min(quickMountReserve, maxMountHookBudget/2)
 }
 
 // ConvertAtMount is Convert for when a volume is mounted, while Engine is waiting
@@ -918,7 +931,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		quick := false
 		// An export whose list is in the library already (.rb-bridge-pending) has only its files left.
 		if readMark(dir, pendingName) != stamp {
-			if time.Until(mountStart.Add(maxMountHookBudget)) < quickMountReserve {
+			if time.Until(mountStart.Add(maxMountHookBudget)) < quickMountReserveForBudget() {
 				log.Printf("rb-bridge: mount budget left after overview pruning is too short for key derivation and the list; handing the update to the background")
 			} else {
 				var err error

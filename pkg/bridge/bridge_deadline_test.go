@@ -43,21 +43,21 @@ func TestPruneRGBOverviewsRespectsMountBudget(t *testing.T) {
 	maxMountHookBudget = 14 * time.Second
 	t.Cleanup(func() { maxMountHookBudget, quickMountReserve = old, oldReserve })
 	got := mountPruneDeadline(start, time.Time{})
-	want := start.Add(6 * time.Second)
+	want := start.Add(7 * time.Second)
 	if !got.Equal(want) {
 		t.Fatalf("prune deadline=%v, want %v", got, want)
 	}
 }
 
 func TestConvertAtMountHandsOffBeforeHookKillWhenPruneConsumesBudget(t *testing.T) {
-	start := time.Now()
+	start := time.Now().Add(-1500 * time.Millisecond)
 	old := maxMountHookBudget
 	maxMountHookBudget = 2 * time.Second
 	t.Cleanup(func() { maxMountHookBudget = old })
-	if left := time.Until(start.Add(maxMountHookBudget)); left >= quickMountReserve {
-		t.Fatalf("test setup left %s, want less than reserve %s", left, quickMountReserve)
+	if left := time.Until(start.Add(maxMountHookBudget)); left >= quickMountReserveForBudget() {
+		t.Fatalf("test setup left %s, want less than reserve %s", left, quickMountReserveForBudget())
 	}
-	if deadline := mountPruneDeadline(start, time.Time{}); !deadline.Equal(start) {
-		t.Fatalf("prune deadline=%v, want immediate handoff at %v", deadline, start)
+	if deadline := mountPruneDeadline(start, time.Time{}); !deadline.Before(time.Now()) {
+		t.Fatalf("prune deadline=%v, want an expired deadline after the budget was consumed", deadline)
 	}
 }
