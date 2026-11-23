@@ -35,3 +35,29 @@ func TestConvertAtMountKeepsOverviewDeadlineWhenImportFails(t *testing.T) {
 		t.Fatalf("deadline outside the shared mount budget: %v", opts.Deadline)
 	}
 }
+
+func TestPruneRGBOverviewsRespectsMountBudget(t *testing.T) {
+	start := time.Unix(100, 0)
+	old, oldReserve := maxMountHookBudget, quickMountReserve
+	quickMountReserve = 8 * time.Second
+	maxMountHookBudget = 14 * time.Second
+	t.Cleanup(func() { maxMountHookBudget, quickMountReserve = old, oldReserve })
+	got := mountPruneDeadline(start, time.Time{})
+	want := start.Add(7 * time.Second)
+	if !got.Equal(want) {
+		t.Fatalf("prune deadline=%v, want %v", got, want)
+	}
+}
+
+func TestConvertAtMountHandsOffBeforeHookKillWhenPruneConsumesBudget(t *testing.T) {
+	start := time.Now().Add(-1500 * time.Millisecond)
+	old := maxMountHookBudget
+	maxMountHookBudget = 2 * time.Second
+	t.Cleanup(func() { maxMountHookBudget = old })
+	if left := time.Until(start.Add(maxMountHookBudget)); left >= quickMountReserveForBudget() {
+		t.Fatalf("test setup left %s, want less than reserve %s", left, quickMountReserveForBudget())
+	}
+	if deadline := mountPruneDeadline(start, time.Time{}); !deadline.Before(time.Now()) {
+		t.Fatalf("prune deadline=%v, want an expired deadline after the budget was consumed", deadline)
+	}
+}
