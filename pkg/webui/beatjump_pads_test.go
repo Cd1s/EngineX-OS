@@ -2,6 +2,7 @@ package webui
 
 import (
 	"encoding/json"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,9 +22,10 @@ func bjBoard(t *testing.T, dt string) {
 	}
 }
 
-// The players' Beat Jump pad mode (Shift + LOOP) is on by default on the four players only; Off survives a
-// restart there as beat_jump_pads=0, and no other board gets a new line.
-func TestBeatJumpPadsOnByDefaultOnTheFourPlayersOnly(t *testing.T) {
+// The Beat Jump pad mode (Shift + LOOP) of the four players is off by default, like Mixstream's on-screen bank (the
+// players have physical Beat Jump buttons): no board starts with it on and none writes a line for the default.
+// Only beat_jump_pads=1 turns it on, and that comes back after a restart.
+func TestBeatJumpPadsOffByDefaultOnEveryBoard(t *testing.T) {
 	for _, tc := range []struct {
 		dt, board string
 		player    bool
@@ -35,27 +37,26 @@ func TestBeatJumpPadsOnByDefaultOnTheFourPlayersOnly(t *testing.T) {
 			bjBoard(t, tc.dt)
 			s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 			t.Cleanup(s.Close)
-			if s.board != tc.board {
-				t.Fatalf("board %q, want %q", s.board, tc.board)
+			if s.board != tc.board || playerBoards[s.board] != tc.player {
+				t.Fatalf("board %q (player %v), want %q (player %v)", s.board, playerBoards[s.board], tc.board, tc.player)
 			}
 			s.uiMu.Lock()
 			defer s.uiMu.Unlock()
-			v := s.loadUI()
-			if v.BeatJumpPads != tc.player {
-				t.Fatalf("default beatJumpPads=%v, want %v", v.BeatJumpPads, tc.player)
-			}
 			conf := filepath.Join(s.uiDir(), "settings.conf")
-			v.BeatJumpPads = false
+			// No settings.conf at all: off.
+			v := s.loadUI()
+			if v.BeatJumpPads {
+				t.Fatal("beatJumpPads is on by default")
+			}
+			// Saving the default writes no beat_jump_pads line (a missing key is off), and it loads off again.
 			if err := s.saveUI(v); err != nil {
 				t.Fatal(err)
 			}
 			b, _ := os.ReadFile(conf)
-			if strings.Contains(string(b), "beat_jump_pads=0\n") != tc.player || strings.Contains(string(b), "beat_jump_pads=1") {
-				t.Fatalf("Off saved as:\n%s", b)
+			if strings.Contains(string(b), "beat_jump_pads") || s.loadUI().BeatJumpPads {
+				t.Fatalf("the default saved as:\n%s", b)
 			}
-			if s.loadUI().BeatJumpPads {
-				t.Fatal("Off came back On")
-			}
+			// On is saved as beat_jump_pads=1 and survives a reload; Off removes the line again.
 			v.BeatJumpPads = true
 			if err := s.saveUI(v); err != nil {
 				t.Fatal(err)
@@ -63,6 +64,86 @@ func TestBeatJumpPadsOnByDefaultOnTheFourPlayersOnly(t *testing.T) {
 			b, _ = os.ReadFile(conf)
 			if !strings.Contains(string(b), "beat_jump_pads=1\n") || strings.Contains(string(b), "beat_jump_pads=0") || !s.loadUI().BeatJumpPads {
 				t.Fatalf("On saved as:\n%s", b)
+			}
+			v.BeatJumpPads = false
+			if err := s.saveUI(v); err != nil {
+				t.Fatal(err)
+			}
+			b, _ = os.ReadFile(conf)
+			if strings.Contains(string(b), "beat_jump_pads") || s.loadUI().BeatJumpPads {
+				t.Fatalf("Off saved as:\n%s", b)
+			}
+		})
+	}
+}
+
+// A player with a saved beat_jump_pads=1 starts with the mode on; no value, 0 and anything else stay off. The same
+// file means the same on every board (the key has no board test), so Mixstream's bank is unchanged.
+func TestBeatJumpPadsSavedValueTurnsItOn(t *testing.T) {
+	for _, tc := range []struct {
+		dt, board string
+	}{
+		{"jp07", "SC5000"}, {"jp08", "SC5000M"}, {"jp13", "SC6000"}, {"jp14", "SC6000M"}, {"nh08", "MIXSTREAMPRO"},
+	} {
+		t.Run(tc.board, func(t *testing.T) {
+			bjBoard(t, tc.dt)
+			s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+			t.Cleanup(s.Close)
+			s.uiMu.Lock()
+			defer s.uiMu.Unlock()
+			conf := filepath.Join(s.uiDir(), "settings.conf")
+			if err := os.MkdirAll(filepath.Dir(conf), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for text, want := range map[string]bool{
+				"beat_jump_pads=1\n": true, "led_brightness=60\nbeat_jump_pads=1\n": true, "beat_jump_pads=true\n": true,
+				"beat_jump_pads=0\n": false, "beat_jump_pads=\n": false, "led_brightness=60\n": false, "": false,
+			} {
+				if err := os.WriteFile(conf, []byte(text), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if got := s.loadUI().BeatJumpPads; got != want {
+					t.Errorf("settings.conf %q: beatJumpPads=%v, want %v", text, got, want)
+				}
+			}
+		})
+	}
+}
+
+// Turning the mode on from the console or the deck's Settings (POST beatJumpPads=1) on a player is saved as
+// beat_jump_pads=1, shows in the settings the controller polls, and is still on in a new process; turning it off again
+// leaves the file without the key.
+func TestBeatJumpPadsTurnedOnOnAPlayer(t *testing.T) {
+	for _, dt := range []string{"jp07", "jp08", "jp13", "jp14"} {
+		t.Run(dt, func(t *testing.T) {
+			bjBoard(t, dt)
+			cfg := Config{UIDir: t.TempDir(), StateDir: t.TempDir()}
+			srv := httptest.NewServer(New(cfg, nil))
+			defer srv.Close()
+			if code, v := uiPost(t, srv.URL, "ledBrightness=100"); code != 200 || v.BeatJumpPads || !v.Player {
+				t.Fatalf("default: code=%d player=%v beatJumpPads=%v", code, v.Player, v.BeatJumpPads)
+			}
+			if code, v := uiPost(t, srv.URL, "beatJumpPads=1"); code != 200 || !v.BeatJumpPads {
+				t.Fatalf("turned on: code=%d beatJumpPads=%v", code, v.BeatJumpPads)
+			}
+			b, _ := os.ReadFile(filepath.Join(cfg.UIDir, "settings.conf"))
+			if !strings.Contains(string(b), "beat_jump_pads=1\n") {
+				t.Fatalf("On saved as:\n%s", b)
+			}
+			again := New(cfg, nil)
+			t.Cleanup(again.Close)
+			again.uiMu.Lock()
+			on := again.loadUI().BeatJumpPads
+			again.uiMu.Unlock()
+			if !on {
+				t.Fatal("On did not survive a restart")
+			}
+			if code, v := uiPost(t, srv.URL, "beatJumpPads=0"); code != 200 || v.BeatJumpPads {
+				t.Fatalf("turned off: code=%d beatJumpPads=%v", code, v.BeatJumpPads)
+			}
+			b, _ = os.ReadFile(filepath.Join(cfg.UIDir, "settings.conf"))
+			if strings.Contains(string(b), "beat_jump_pads") {
+				t.Fatalf("Off saved as:\n%s", b)
 			}
 		})
 	}
@@ -81,7 +162,7 @@ func TestLoadUIUsesTheBoardReadAtStart(t *testing.T) {
 	s.uiMu.Lock()
 	v := s.loadUI()
 	s.uiMu.Unlock()
-	if s.board != "SC5000" || !v.BeatJumpPads {
+	if s.board != "SC5000" || v.BeatJumpPads {
 		t.Fatalf("board %q beatJumpPads %v: loadUI read the device tree again", s.board, v.BeatJumpPads)
 	}
 }
@@ -102,8 +183,9 @@ func TestSettingsCopyBeatJumpPadsBetweenPlayers(t *testing.T) {
 			t.Fatalf("%s: got %v skipped %v err %v", board, got.BeatJumpPads, skipped, err)
 		}
 	}
-	// The export of a player keeps its value (also the default On).
-	if string(copyUIExport(uiSettings{BeatJumpPads: true})["beatJumpPads"]) != "true" {
+	// The export of a player keeps its value, On and Off.
+	if string(copyUIExport(uiSettings{BeatJumpPads: true})["beatJumpPads"]) != "true" ||
+		string(copyUIExport(uiSettings{})["beatJumpPads"]) != "false" {
 		t.Fatal("beatJumpPads not exported")
 	}
 }
