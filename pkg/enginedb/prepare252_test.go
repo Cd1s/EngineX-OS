@@ -305,7 +305,14 @@ func TestPrepare252UnreadableDirectoryCannotHideSymlink(t *testing.T) {
 		}
 		cmd := exec.Command(exe, "-test.run=^TestPrepare252UnreadableDirectoryCannotHideSymlink$")
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "TMPDIR="+tmpDir)
+		cmd.Env = make([]string, 0, len(os.Environ())+1)
+		for _, value := range os.Environ() {
+			if strings.HasPrefix(value, "TMPDIR=") || strings.HasPrefix(value, "GOTMPDIR=") || strings.HasPrefix(value, "GOCACHE=") {
+				continue
+			}
+			cmd.Env = append(cmd.Env, value)
+		}
+		cmd.Env = append(cmd.Env, "TMPDIR="+tmpDir)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65534, Gid: 65534}}
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("unprivileged boundary: %v\n%s", err, out)
