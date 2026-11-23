@@ -424,6 +424,22 @@ func issue321StaleStick(t *testing.T, spc int, cutPDB bool) {
 	// written back once (the stick an older build wrote); then the DJ sets a hot cue and a genre,
 	// and the stick is nearly full (2 MiB left).
 	src := setupWriteBackStick(t, false)
+	mp3s, err := filepath.Glob(filepath.Join(src, "Contents", "*", "*", "*.mp3"))
+	if err != nil || len(mp3s) == 0 {
+		t.Fatalf("fixture mp3s: %v %v", mp3s, err)
+	}
+	for _, p := range mp3s {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Give the header fixture's Xing tag ~10.4 s of frames (matching LargePDB's 8 s track)
+		// so a 1.5 s/3 s deck cue remains within SampleCount after ConvertAtMount re-imports.
+		binary.BigEndian.PutUint32(b[44:48], 400)
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	_, unmount := vfatMount(t, img, mnt)
 	issue321Copy(t, src, mnt)
 	if _, err := convertWriteBackAtTest(ctx, mnt); err != nil {
