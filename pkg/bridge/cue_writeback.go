@@ -25,6 +25,8 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 // WriteBackOptions configures direct stick cue/loop write-back.
@@ -460,7 +462,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		if tr.Path != "" {
 			norm := normalizeRekordboxPath(tr.Path)
 			byPath[norm] = tr
-			byPathFold[strings.ToLower(norm)] = tr
+			byPathFold[cases.Fold().String(norm)] = tr
 		}
 	}
 
@@ -1116,12 +1118,12 @@ func normalizeRekordboxPath(p string) string {
 	for strings.HasPrefix(p, "../") {
 		p = strings.TrimPrefix(p, "../")
 	}
-	return path.Clean(p)
+	return norm.NFC.String(path.Clean(p))
 }
 
 func sameRekordboxPath(a, b string) bool {
 	a, b = normalizeRekordboxPath(a), normalizeRekordboxPath(b)
-	return a != "." && a != "" && a == b
+	return a != "." && a != "" && cases.Fold().String(a) == cases.Fold().String(b)
 }
 
 func importedRecordChanged(fingerprint string, tr rekordbox.Track) bool {
@@ -1146,7 +1148,7 @@ func resolveRekordboxTrack(
 	if tr, ok := byPath[norm]; ok {
 		return tr, true
 	}
-	if tr, ok := byPathFold[strings.ToLower(norm)]; ok {
+	if tr, ok := byPathFold[cases.Fold().String(norm)]; ok {
 		return tr, true
 	}
 	if pdbImportKey > 0 && pdbImportKey <= math.MaxUint32 {
