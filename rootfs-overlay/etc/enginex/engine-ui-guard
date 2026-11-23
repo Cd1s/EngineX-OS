@@ -47,7 +47,10 @@ feature_off() {
     [ -f "$conf" ] && sed 's/#.*//' "$conf" | tr ',\t\r ' '\n\n\n\n' | grep -qx "$1"
 }
 mapping_marker() {
-    printf '%s/.mapping-rejected-%s' "${ENGINEX_ASSIGNMENT_PATCHED:-/run/enginex-assignments}" "$1"
+    mappings=${ENGINEX_MAPPINGS:-${ENGINEX_CUSTOM:-/data/enginex}/mappings.json}
+    dir=${mappings%/*}
+    [ "$dir" = "$mappings" ] && dir=.
+    printf '%s/.mapping-rejected-%s' "$dir" "$1"
 }
 mapping_log_has_parse_failure() {
     board=$1

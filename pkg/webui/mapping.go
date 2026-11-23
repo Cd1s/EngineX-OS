@@ -233,7 +233,9 @@ func (s *Server) saveMappings(list []mapping.Mapping) error {
 		return err
 	}
 	for _, board := range mapping.Default().Boards {
-		_ = os.Remove(filepath.Join(mappingStatusDir, ".mapping-rejected-"+board))
+		name := ".mapping-rejected-" + board
+		_ = os.Remove(filepath.Join(filepath.Dir(mappingsPath), name))
+		_ = os.Remove(filepath.Join(mappingStatusDir, name))
 	}
 	log.Printf("stream-sync: button mappings saved: %d", len(list))
 	return nil

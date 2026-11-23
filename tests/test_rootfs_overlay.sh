@@ -1006,7 +1006,7 @@ ok 'button mapping: the guard generates only when mappings.json exists, chains a
 # A parser failure after a mapped start must remove only the mapped bind, retain the #49 copy,
 # restart Engine once, and latch the rejection until the user saves mappings again.
 printf '[{"board":"JP07"}]\n' > "$TMP/mappings.json"
-rm -f "$mpatched/.mapping-rejected-JP07"
+rm -f "$TMP/.mapping-rejected-JP07"
 map_guard 'four_deck_waveform=1'
 cat > "$TMP/engine-mapping.log" <<'LOG'
 Engine: Parsing failed for JP07_Controller_Assignments.qml
@@ -1025,7 +1025,7 @@ has "mount --bind $mpatched/JP07_Controller_Assignments.qml $massign/JP07/JP07_C
 [[ $(grep -c '^restart --no-block engine.service$' "$GUARD_LOG") == 1 ]] || fail 'a parser failure restarts Engine once'
 has '"state":"rejected"' "$mpatched/mapping-JP07.json"
 has '"code":"engine-parse"' "$mpatched/mapping-JP07.json"
-[[ -e "$mpatched/.mapping-rejected-JP07" ]] || fail 'a parser failure leaves a rejection latch'
+[[ -e "$TMP/.mapping-rejected-JP07" ]] || fail 'a parser failure leaves a rejection latch'
 : > "$GUARD_LOG"; rm -f "$GUARD_LOG.sync"
 map_guard 'four_deck_waveform=1'
 [[ ! -e "$GUARD_LOG.sync" ]] || fail 'a rejected mapping is not rebound before a save'
@@ -1035,7 +1035,7 @@ ok 'button mapping: a post-start parser failure unbinds the mapped copy, restore
 # The same, with the real stream-sync applet, when Go is available: the file the guard binds
 # passes the generator's own static check and carries the mapping.
 if command -v go > /dev/null 2>&1; then
-    rm -f "$mpatched/.mapping-rejected-JP07"
+    rm -f "$TMP/.mapping-rejected-JP07"
     (cd "$ROOT" && go build -o "$TMP/guard-bin/enginex-suite" ./cmd/enginex-suite)
     printf '#!/bin/sh\nexec %s stream-sync "$@"\n' "$TMP/guard-bin/enginex-suite" > "$TMP/guard-bin/real-stream-sync"
     chmod +x "$TMP/guard-bin/real-stream-sync"

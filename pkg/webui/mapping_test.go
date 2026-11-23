@@ -182,12 +182,18 @@ func TestMappingSaveRejectsWhatDoesNotValidateAndKeepsTheFile(t *testing.T) {
 }
 
 func TestMappingSaveClearsEngineParseRejectionLatch(t *testing.T) {
-	_, statusDir := mappingDeck(t, "JP07")
-	marker := filepath.Join(statusDir, ".mapping-rejected-JP07")
-	if err := os.MkdirAll(statusDir, 0o755); err != nil {
+	file, statusDir := mappingDeck(t, "JP07")
+	marker := filepath.Join(filepath.Dir(file), ".mapping-rejected-JP07")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(statusDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(statusDir, ".mapping-rejected-JP07"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	s := mappingServer(t, Config{})
