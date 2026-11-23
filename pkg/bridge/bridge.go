@@ -155,6 +155,10 @@ func exportCandidates(r *compat.Resolver, mount string) ([]exportCandidate, erro
 // exportReads counts reads of a drive's own export (each may decrypt a OneLibrary).
 var exportReads atomic.Int64
 
+// exportKeys keeps SQLCipher keys for rekordbox 7 exports in memory. KeyCache keys entries by
+// salt and passphrase, so a rewritten export with a new salt derives its own key.
+var exportKeys = rekordbox.NewKeyCache()
+
 // afterExportRead runs after each export read; tests use it to stretch the read.
 var afterExportRead = func() {}
 
@@ -179,7 +183,7 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 		if c.isPDB {
 			l, err = rekordbox.ReadPDB(c.full)
 		} else {
-			l, err = rekordbox.ReadSQLite(ctx, c.full, nil)
+			l, err = rekordbox.ReadSQLiteKeys(ctx, c.full, nil, exportKeys)
 		}
 		if err == nil {
 			return l, nil
