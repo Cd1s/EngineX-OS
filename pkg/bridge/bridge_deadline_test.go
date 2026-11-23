@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -37,26 +38,30 @@ func TestConvertAtMountKeepsOverviewDeadlineWhenImportFails(t *testing.T) {
 }
 
 func TestPruneRGBOverviewsRespectsMountBudget(t *testing.T) {
-	start := time.Unix(100, 0)
-	old, oldReserve := maxMountHookBudget, quickMountReserve
-	quickMountReserve = 8 * time.Second
-	maxMountHookBudget = 14 * time.Second
-	t.Cleanup(func() { maxMountHookBudget, quickMountReserve = old, oldReserve })
-	got := mountPruneDeadline(start, time.Time{})
-	if got.After(start.Add(2 * time.Second)) {
-		t.Fatalf("prune deadline=%v, exceeds the two-second mount sub-budget", got)
+	_, root, _ := testlibrary.Create(t)
+	dir := filepath.Join(root, "Engine Library", "Database2")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	start := time.Now()
+	pruneRGBOverviews(ctx, dir, filepath.Join(dir, "m.db"), "")
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("expired prune context ran for %s", elapsed)
+	}
+	deadline := mountPruneDeadline(time.Now(), time.Time{})
+	if time.Until(deadline) > mountPruneBudget {
+		t.Fatalf("prune deadline exceeds sub-budget: %v", deadline)
 	}
 }
 
 func TestConvertAtMountHandsOffBeforeHookKillWhenPruneConsumesBudget(t *testing.T) {
-	start := time.Now().Add(-1500 * time.Millisecond)
-	old := maxMountHookBudget
-	maxMountHookBudget = 2 * time.Second
-	t.Cleanup(func() { maxMountHookBudget = old })
-	if left := time.Until(start.Add(maxMountHookBudget)); left >= quickMountReserveForBudget() {
-		t.Fatalf("test setup left %s, want less than reserve %s", left, quickMountReserveForBudget())
-	}
-	if deadline := mountPruneDeadline(start, time.Time{}); !deadline.Before(time.Now()) {
-		t.Fatalf("prune deadline=%v, want an expired deadline after the budget was consumed", deadline)
+	_, root, _ := testlibrary.Create(t)
+	testfixture.Export(t, root)
+	oldBudget, oldReserve := maxMountHookBudget, quickMountReserve
+	maxMountHookBudget, quickMountReserve = time.Second, time.Second
+	t.Cleanup(func() { maxMountHookBudget, quickMountReserve = oldBudget, oldReserve })
+	start := time.Now()
+	_, _ = convertAtMount(context.Background(), root, &enginedb.Options{}, false)
+	if elapsed := time.Since(start); elapsed > maxMountHookBudget+500*time.Millisecond {
+		t.Fatalf("mount path exceeded its deadline: %s", elapsed)
 	}
 }
