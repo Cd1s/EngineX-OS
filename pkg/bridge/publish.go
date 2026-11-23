@@ -129,9 +129,23 @@ func syncFile(path string) error {
 	return f.Sync()
 }
 
+func validRGBOverviewFile(path string) bool {
+	st, err := os.Lstat(path)
+	if err != nil || !st.Mode().IsRegular() || st.Size() <= 8 || st.Size() > 1<<20 {
+		return false
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	raw, err := enginedb.QUncompress(b, 1<<20)
+	return err == nil && enginedb.ValidRGBOverview(raw)
+}
+
 // publishOverviewData atomically moves staged OverviewData/<uuid>/*.rgb files
-// into dir/OverviewData/<uuid>/ before m.db is published. It is idempotent so
-// an interrupted publish resumes cleanly on the next mount.
+// into dir/OverviewData/<uuid>/ before m.db is published, without replacing an
+// already-valid Engine RGB sidecar at the destination. It is idempotent so an
+// interrupted publish resumes cleanly on the next mount.
 func publishOverviewData(stage, dir string) ([]int64, error) {
 	srcRoot := filepath.Join(stage, "OverviewData")
 	uuids, err := os.ReadDir(srcRoot)
@@ -165,7 +179,18 @@ func publishOverviewData(stage, dir string) ([]int64, error) {
 			if !strings.HasSuffix(name, ".rgb") || !f.Type().IsRegular() {
 				continue
 			}
-			if err := os.Rename(filepath.Join(srcDir, name), filepath.Join(dstDir, name)); err != nil {
+			srcPath := filepath.Join(srcDir, name)
+			dstPath := filepath.Join(dstDir, name)
+			if validRGBOverviewFile(dstPath) {
+				if err := os.Remove(srcPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return movedIDs, err
+				}
+				if id, perr := strconv.ParseInt(strings.TrimSuffix(name, ".rgb"), 10, 64); perr == nil && id > 0 {
+					movedIDs = append(movedIDs, id)
+				}
+				continue
+			}
+			if err := os.Rename(srcPath, dstPath); err != nil {
 				return movedIDs, err
 			}
 			if id, perr := strconv.ParseInt(strings.TrimSuffix(name, ".rgb"), 10, 64); perr == nil && id > 0 {
