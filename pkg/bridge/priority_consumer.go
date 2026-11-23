@@ -182,6 +182,7 @@ func (pt *priorityTracker) service(
 			}
 		}
 		if len(acked) > 0 {
+			mirrorPrioritizedRGB(ctx, stage, acked, after)
 			log.Printf("rb-bridge: prioritized %d track(s) (seq=%d) in %s", len(acked), maxSeq, time.Since(start).Round(time.Millisecond))
 		}
 	}
@@ -241,4 +242,72 @@ func (pt *priorityTracker) service(
 		pt.lastAckSeq = maxSeq
 	}
 	return changed, nil
+}
+
+// mirrorPrioritizedRGB atomically mirrors newly generated stage .rgb overview
+// sidecars into the live Database2/OverviewData/<uuid>/ directory when live m.db
+// shares the stage's Information.uuid and track mapping (read-only immutable
+// check; zero SQLite locks or writes on live m.db).
+func mirrorPrioritizedRGB(ctx context.Context, stage string, acked []PriorityItem, after map[string]stageTrackStatus) {
+	liveDir := filepath.Dir(stage)
+	if liveDir == stage {
+		return
+	}
+	stageMDB := filepath.Join(stage, "m.db")
+	liveMDB := filepath.Join(liveDir, "m.db")
+	if _, err := os.Stat(liveMDB); err != nil {
+		return
+	}
+	sDB, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: stageMDB, RawQuery: "mode=ro&_pragma=busy_timeout(1000)"}).String())
+	if err != nil {
+		return
+	}
+	defer sDB.Close()
+	var stageUUID string
+	if err := sDB.QueryRowContext(ctx, `SELECT uuid FROM Information WHERE id = 1`).Scan(&stageUUID); err != nil || stageUUID == "" {
+		return
+	}
+	lDB, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: liveMDB, RawQuery: "mode=ro&immutable=1"}).String())
+	if err != nil {
+		return
+	}
+	defer lDB.Close()
+	var liveUUID string
+	if err := lDB.QueryRowContext(ctx, `SELECT uuid FROM Information WHERE id = 1`).Scan(&liveUUID); err != nil || liveUUID != stageUUID {
+		return
+	}
+	rows, err := lDB.QueryContext(ctx, `SELECT id, path FROM Track WHERE path IS NOT NULL`)
+	if err != nil {
+		return
+	}
+	liveIDByFold := map[string]int64{}
+	for rows.Next() {
+		var id int64
+		var p string
+		if rows.Scan(&id, &p) == nil && p != "" {
+			liveIDByFold[foldPriorityPath(p)] = id
+		}
+	}
+	_ = rows.Close()
+	for _, it := range acked {
+		key := foldPriorityPath(it.Path)
+		st, ok := after[key]
+		if !ok || st.trackID <= 0 {
+			continue
+		}
+		liveID, ok := liveIDByFold[key]
+		if !ok || liveID <= 0 {
+			continue
+		}
+		srcRGB := filepath.Join(stage, "OverviewData", stageUUID, fmt.Sprintf("%d.rgb", st.trackID))
+		data, err := os.ReadFile(srcRGB)
+		if err != nil || len(data) <= 12 {
+			continue
+		}
+		dstRGB := filepath.Join(liveDir, "OverviewData", liveUUID, fmt.Sprintf("%d.rgb", liveID))
+		if fi, err := os.Stat(dstRGB); err == nil && fi.Size() > 12 {
+			continue
+		}
+		_ = enginedb.WriteRGBOverviewAtomic(liveDir, liveUUID, liveID, data)
+	}
 }

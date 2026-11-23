@@ -1138,6 +1138,9 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 			}
 		}
 	} else if err == nil && !result.Bypassed {
+		if oldStamp != "" && oldStamp != stamp {
+			_ = enginedb.InvalidateUnsyncedEdits(ctx, dir)
+		}
 		writeStamp(dir, stamp)
 		cut("in place stamped")
 		os.Remove(filepath.Join(dir, pendingName))

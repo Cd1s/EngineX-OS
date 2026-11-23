@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -203,6 +204,28 @@ func TestImportInBackgroundConsumesAndAcksPriority(t *testing.T) {
 	}
 	if res.Deferred != 0 {
 		t.Fatalf("ImportInBackground left %d tracks deferred", res.Deferred)
+	}
+	// Before publishing the stage at remount, the prioritized track's .rgb overview
+	// must already be mirrored into the live Database2/OverviewData/<uuid>/ directory.
+	liveDir := filepath.Join(root, "Engine Library", "Database2")
+	ldb, err := sql.Open("sqlite", filepath.Join(liveDir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var liveUUID string
+	var liveTrackID int64
+	if err := ldb.QueryRow(`SELECT uuid FROM Information WHERE id = 1`).Scan(&liveUUID); err != nil {
+		ldb.Close()
+		t.Fatal(err)
+	}
+	if err := ldb.QueryRow(`SELECT id FROM Track WHERE path = ?`, "../"+targetRel).Scan(&liveTrackID); err != nil {
+		ldb.Close()
+		t.Fatal(err)
+	}
+	ldb.Close()
+	mirroredRGB := filepath.Join(liveDir, "OverviewData", liveUUID, strconv.FormatInt(liveTrackID, 10)+".rgb")
+	if fi, err := os.Stat(mirroredRGB); err != nil || fi.Size() <= 12 {
+		t.Fatalf("expected prioritized live .rgb before stage publish at %s: fi=%v err=%v", mirroredRGB, fi, err)
 	}
 	// Publish the finished stage and confirm target track is analyzed.
 	if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err != nil {

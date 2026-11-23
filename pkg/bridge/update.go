@@ -687,6 +687,7 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 			if !changed {
 				// Nothing to publish: the live library already is this export's.
 				log.Printf("rb-bridge: update of %s changed nothing", mount)
+				_ = enginedb.InvalidateUnsyncedEdits(ctx, dir)
 				writeStamp(dir, stamp)
 				cut("unchanged update stamped")
 				os.Remove(filepath.Join(dir, pendingName))
@@ -774,6 +775,7 @@ func handToMounts(ctx context.Context, r *compat.Resolver, l *rekordbox.Library,
 	}
 	if work == 0 {
 		// Nothing to read: the live library already is this export's.
+		_ = enginedb.InvalidateUnsyncedEdits(ctx, dir)
 		writeStamp(dir, stamp)
 		cut("handoff stamped")
 		os.Remove(filepath.Join(dir, pendingName))
@@ -1052,6 +1054,7 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 		}
 		cut("list stage pending")
 	}
+	_ = enginedb.InvalidateUnsyncedEdits(ctx, stage)
 	if err := renameStage(dir, stage); err != nil {
 		return enginedb.Result{}, err
 	}

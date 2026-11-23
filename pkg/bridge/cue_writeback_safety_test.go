@@ -2,8 +2,12 @@ package bridge
 
 import (
 	"context"
+	"database/sql"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
@@ -71,5 +75,126 @@ func TestImportedRecordChangedTreatsOpaqueFingerprintAsChanged(t *testing.T) {
 	}
 	if importedRecordChanged("fast:record-hash", track) {
 		t.Fatal("fast fingerprint should not be treated as an imported record baseline")
+	}
+}
+
+func TestMergeEngineCuesClampAtZeroPreserved(t *testing.T) {
+	// MP3 at 44.1 kHz with 1105-sample Rekordbox offset (~25 ms): an original cue at 7 ms
+	// clamps to Samples=0 on import and must stay 7 ms (cuesEquivalent) on write-back.
+	orig := []rekordbox.Cue{
+		{HotCue: 1, TimeMS: 7, Extended: true},
+		{HotCue: 2, TimeMS: 10, EndMS: 2000, Loop: true, Extended: true},
+	}
+	deck := enginedb.DeckCues{SampleRate: 44100, SampleCount: 44100 * 60}
+	deck.HotCues[0] = &enginedb.DeckHotCue{Samples: 0, Color: engineDefaultHotCueColor}
+	deck.HotCues[1] = &enginedb.DeckHotCue{Samples: 0, Color: engineDefaultLoopColor}
+	deck.Loops[1] = &enginedb.DeckLoop{StartSamples: 0, EndSamples: 2.0*44100 - 1105, Color: engineDefaultLoopColor}
+	got := mergeEngineCues(orig, deck, 1105)
+	if !cuesEquivalent(orig, got) {
+		t.Fatalf("clamp-at-zero cues drifted on write-back: orig=%+v got=%+v", orig, got)
+	}
+}
+
+func TestTrackRekordboxOffsetRejectsUnreadableMP3AndMP4(t *testing.T) {
+	root := t.TempDir()
+	mp3Path := filepath.Join(root, "Contents", "bad.mp3")
+	m4aPath := filepath.Join(root, "Contents", "truncated.m4a")
+	if err := os.MkdirAll(filepath.Dir(mp3Path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mp3Path, []byte("ID3\x04\x00\x00\x7f\x7f\x7f\x7fnot-valid-frames"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m4aPath, []byte("\x00\x00\x00\x14ftypM4A \x00\x00\x00\x00M4A "), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := compat.NewResolver(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off, ok := trackRekordboxOffset(r, "/Contents/bad.mp3"); ok || off != 0 {
+		t.Fatalf("corrupt MP3 returned ok=%v off=%v, want ok=false", ok, off)
+	}
+	if off, ok := trackRekordboxOffset(r, "/Contents/truncated.m4a"); ok || off != 0 {
+		t.Fatalf("moov-less M4A returned ok=%v off=%v, want ok=false", ok, off)
+	}
+}
+
+func TestMergeEngineCuesPreservesLegacyMP3OffsetDrift(t *testing.T) {
+	red := [4]byte{255, 255, 0, 23}
+	orig := []rekordbox.Cue{{HotCue: 1, TimeMS: 116089, Color: red, ColorCode: 1, Extended: true}}
+	// Engine fast-row load shifted unnamed MP3 cue by -2292 samples -> -27 ms after +1105 offset.
+	deck := enginedb.DeckCues{SampleRate: 44100, SampleCount: 44100 * 300}
+	deck.HotCues[0] = &enginedb.DeckHotCue{Samples: 5117232.9, Name: "", Color: red}
+	got := mergeEngineCuesOpts(orig, deck, 1105, true)
+	if !cuesEquivalent(orig, got) {
+		t.Fatalf("legacy MP3 unnamed offset drift triggered false diff: orig=%+v got=%+v", orig, got)
+	}
+	// A deck-placed cue ("Cue 1") at the same position is NOT suppressed.
+	deck.HotCues[0].Name = "Cue 1"
+	gotNamed := mergeEngineCuesOpts(orig, deck, 1105, true)
+	if cuesEquivalent(orig, gotNamed) {
+		t.Fatalf("deck-named Cue 1 was unexpectedly suppressed: %+v", gotNamed)
+	}
+}
+
+func TestStripShiftedForeignCuesPreservesOwnDeckCues(t *testing.T) {
+	root := t.TempDir()
+	r, err := compat.NewResolver(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	own := rekordbox.Track{ID: 5909, Path: "/Contents/Own.mp3", AnalysisPath: "/PIONEER/USBANLZ/P01/0001/ANLZ0000.DAT"}
+	foreign := rekordbox.Track{
+		ID:           5945,
+		Path:         "/Contents/Foreign.mp3",
+		AnalysisPath: "/PIONEER/USBANLZ/P02/0002/ANLZ0000.DAT",
+		Cues: []rekordbox.Cue{
+			{HotCue: 1, TimeMS: 86},
+			{HotCue: 2, TimeMS: 270087},
+		},
+	}
+	deck := enginedb.DeckCues{SampleRate: 44100, SampleCount: 44100 * 344}
+	deck.HotCues[0] = &enginedb.DeckHotCue{Samples: 3792.6, Name: "", Color: engineDefaultHotCueColor}
+	deck.HotCues[1] = &enginedb.DeckHotCue{Samples: 11910836.7, Name: "", Color: engineDefaultHotCueColor}
+	deck.HotCues[6] = &enginedb.DeckHotCue{Samples: 582605.1, Name: "Cue 7", Color: [4]byte{255, 0, 168, 169}}
+
+	cleaned := stripShiftedForeignCues(r, deck, false, 5945, "../Contents/Own.mp3", own, nil, 1105, map[uint32]rekordbox.Track{5909: own, 5945: foreign})
+	if cleaned.HotCues[0] != nil || cleaned.HotCues[1] != nil {
+		t.Fatalf("foreign shifted-ID cues were not stripped: %+v %+v", cleaned.HotCues[0], cleaned.HotCues[1])
+	}
+	if cleaned.HotCues[6] == nil || cleaned.HotCues[6].Name != "Cue 7" {
+		t.Fatalf("own deck Cue 7 was lost: %+v", cleaned.HotCues[6])
+	}
+}
+
+func TestInvalidateUnsyncedEditsKeepsWrittenAndDropsEdited(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, stateName)
+	sdb, err := sql.Open("sqlite", statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sdb.Exec(`CREATE TABLE BridgeWritten(trackId INTEGER PRIMARY KEY, digest BLOB NOT NULL);
+		CREATE TABLE BridgeSynced(trackId INTEGER PRIMARY KEY, lastEditTime INTEGER NOT NULL, digest BLOB NOT NULL);
+		INSERT INTO BridgeWritten(trackId, digest) VALUES(1, X'AA');
+		INSERT INTO BridgeSynced(trackId, lastEditTime, digest) VALUES(1, 100, X'01'), (2, 100, X'02');`); err != nil {
+		sdb.Close()
+		t.Fatal(err)
+	}
+	sdb.Close()
+	if err := enginedb.InvalidateUnsyncedEdits(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	sdb, err = sql.Open("sqlite", statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sdb.Close()
+	var c1, c2 int
+	_ = sdb.QueryRow(`SELECT count(*) FROM BridgeSynced WHERE trackId = 1`).Scan(&c1)
+	_ = sdb.QueryRow(`SELECT count(*) FROM BridgeSynced WHERE trackId = 2`).Scan(&c2)
+	if c1 != 1 || c2 != 0 {
+		t.Fatalf("BridgeSynced after InvalidateUnsyncedEdits: written=%d (want 1) un-written=%d (want 0)", c1, c2)
 	}
 }

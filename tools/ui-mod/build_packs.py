@@ -1706,7 +1706,9 @@ SERVICES_MAIN = """
 			current: root.scTr(prefix + "/CurrentBPM") || scShadowEmptyObject,
 			beat: root.scTr(prefix + "/BeatNumber") || scShadowEmptyObject,
 			position: root.scTr(prefix + "/Track/TrackPosition") || scShadowEmptyObject,
-			rate: root.scTr(prefix + "/Track/SampleRate") || scShadowEmptyObject
+			rate: root.scTr(prefix + "/Track/SampleRate") || scShadowEmptyObject,
+			touch: root.scTr(prefix + "/ExternalScratchWheelTouch") || scShadowEmptyObject,
+			platter: root.scTr(prefix + "/PlatterUserAction") || scShadowEmptyObject
 		}
 		scDeckClockProps[d] = g
 		return g
@@ -1734,21 +1736,22 @@ SERVICES_MAIN = """
 			const prevPos = scDeckClockPrevPos[d]
 			const prevCue = !!scDeckClockPrevCue[d]
 			const cue = !ps && sameTrack && !!g.cueLED.state && prevPos !== undefined && (posMs > prevPos + 0.5 || prevCue)
+			const scratch = loaded && (!!g.touch.state || !!g.platter.state || (!ps && !cue && sameTrack && prevPos !== undefined && Math.abs(posMs - prevPos) > 5 && Math.abs(posMs - prevPos) < 2000))
 			scDeckClockPrevLoaded[d] = loaded
 			scDeckClockPrevLen[d] = trackLen
 			scDeckClockPrevPos[d] = posMs
 			scDeckClockPrevCue[d] = cue
 			const playing = ps || cue
-			if (playing) anyPlaying = true
+			if (playing || scratch) anyPlaying = true
 			const master = !!g.master.state
 			const bpm = g.original.unnormalized || 0
 			const currentBpm = g.current.unnormalized || 0
 			const beat = g.beat.unnormalized || 0
 			const o = out[count] || (out[count] = {})
-			o.deck = d; o.playing = playing; o.cue = cue; o.master = master; o.lead = master
+			o.deck = d; o.playing = playing; o.cue = cue; o.scratch = scratch; o.master = master; o.lead = master
 			o.bpm = bpm; o.currentBpm = currentBpm; o.beat = beat; o.positionMs = posMs; o.at = now
 			count++
-			sig += d + ":" + (playing ? 1 : 0) + ":" + (master ? 1 : 0) + ":" + Math.round(currentBpm * 100) + ":" + Math.round(beat * 1000) + ";"
+			sig += d + ":" + (playing ? 1 : 0) + ":" + (scratch ? 1 : 0) + ":" + (master ? 1 : 0) + ":" + Math.round(currentBpm * 100) + ":" + Math.round(beat * 1000) + ";"
 		}
 		out.length = count
 		const rate = anyPlaying ? 100 : 500
@@ -5308,16 +5311,21 @@ SERVICES_MAIN = """
 	}
 	property var scPriorityXhr: null
 	property string scPriorityLast: ""
-	function scPrioritizeTrack(path, source) {
-		if (!path || path.indexOf("/media/") !== 0) return
-		const key = source + ":" + path
+	function scPrioritizeTrack(path, source, deck, net) {
+		if (path && path.indexOf("file:///media/") === 0) {
+			try { path = decodeURIComponent(path.slice(7)) } catch (e) { path = path.slice(7) }
+		}
+		const hasPath = !!path && path.indexOf("/media/") === 0
+		const hasNet = !hasPath && !!net && net.indexOf("net://") === 0
+		if (!hasPath && !hasNet) return
+		const key = source + ":" + (deck || 0) + ":" + (hasPath ? path : net)
 		if (key === scPriorityLast) return
 		scPriorityLast = key
 		if (!scPriorityXhr) scPriorityXhr = new XMLHttpRequest()
 		if (scPriorityXhr.readyState > 0 && scPriorityXhr.readyState < 4) scPriorityXhr.abort()
 		scPriorityXhr.open("POST", "http://127.0.0.1:8080/v1/enginex/rekordbox/priority")
 		scPriorityXhr.setRequestHeader("Content-Type", "application/json")
-		scPriorityXhr.send(JSON.stringify({ path: path, source: source }))
+		scPriorityXhr.send(JSON.stringify({ path: hasPath ? path : "", net: hasNet ? net : "", source: source, deck: deck || 0 }))
 	}
 	// A streamed row with a stemmed local copy (the services' own Stems lists)
 	// is swapped for that copy as it loads, so the deck has its Stems. Engine's
@@ -5332,7 +5340,13 @@ SERVICES_MAIN = """
 		const real = root.scScope === "tidal" && root.scTidalLoggedIn
 		root.scNoteService(deck, m ? slot : "") // the last track's service must not outlive it
 		if (m && typeof root !== "undefined" && root && root.scStemRows && root.scStemRows[m[1]] === "fail") { if (root.scStemMark) root.scStemMark([m[1]], ""); if (root.scStemFailSweep) root.scStemFailSweep() }
-		if (!m) return
+		if (!m) {
+			if (uri && root.scFourDeckRole === "") {
+				const np = Planck.getProperty("/Engine/Deck%1/Track/TrackNetworkPath".arg(deck))
+				root.scPrioritizeTrack(uri, "deck", deck, np && np.translator ? np.translator.string : "")
+			}
+			return
+		}
 		const x = new XMLHttpRequest()
 		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/local?id=" + m[1])
 		x.onreadystatechange = function() {

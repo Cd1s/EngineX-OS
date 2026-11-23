@@ -8191,6 +8191,14 @@ assert.equal(posts[posts.length - 1][0].playing, false);
 const beforeLookups = lookups;
 scDeckClockTick();
 assert.equal(lookups, beforeLookups);
+// Paused platter touch reports scratch:true and wakes interval to 100 ms without setting playing:true.
+props["/Engine/Deck1/ExternalScratchWheelTouch"] = { state: true };
+scDeckClockProps = {};
+scDeckClockProbeAt = {};
+scDeckClockTick();
+assert.equal(posts[posts.length - 1][0].scratch, true);
+assert.equal(posts[posts.length - 1][0].playing, false);
+assert.equal(scDeckClockTimer.interval, 100);
 '''
             res = subprocess.run(["node"], input=script, text=True, capture_output=True)
             self.assertEqual(res.returncode, 0, res.stderr)

@@ -370,10 +370,11 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 
 	type dirtyTrack struct {
 		candidateTrack
-		deck     enginedb.DeckCues
-		cues     bool // the deck's cues may differ from the stick's
-		metadata rekordbox.Metadata
-		seen     syncedRow
+		deck       enginedb.DeckCues
+		cues       bool // the deck's cues may differ from the stick's
+		hasWritten bool
+		metadata   rekordbox.Metadata
+		seen       syncedRow
 	}
 	var dirty []dirtyTrack
 	var confirmed []syncedRow // rows the stick holds as they are now
@@ -396,7 +397,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 			confirmed = append(confirmed, seen)
 			continue
 		}
-		d := dirtyTrack{candidateTrack: c, metadata: md, seen: seen}
+		d := dirtyTrack{candidateTrack: c, hasWritten: len(writtenDigest) > 0, metadata: md, seen: seen}
 		// Fast path: tracks untouched since the last import stay at their BridgeWritten
 		// digest. Their cues are not read again; their metadata (#314) is compared with the
 		// export's. Tracks with loops are still inspected because activeOnLoadLoops is outside
@@ -501,10 +502,16 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		var nextCues []rekordbox.Cue
 		cuesDiff, known := false, cand.cues && rbTrack.AnalysisPath != ""
 		if known {
-			offsetSamples := trackRekordboxOffset(resolver, rbTrack.Path)
-			origCues := readStickTrackCues(resolver, rbTrack)
-			nextCues = mergeEngineCues(origCues, cand.deck, offsetSamples)
-			cuesDiff = !cuesEquivalent(origCues, nextCues)
+			offsetSamples, ok := trackRekordboxOffset(resolver, rbTrack.Path)
+			if !ok {
+				known = false
+			} else {
+				origCues := readStickTrackCues(resolver, rbTrack)
+				deck := stripShiftedForeignCues(resolver, cand.deck, cand.hasWritten, cand.pdbImportKey, cand.enginePath, rbTrack, origCues, offsetSamples, byID)
+				legacyMP3 := !cand.hasWritten && strings.HasSuffix(strings.ToLower(rbTrack.Path), ".mp3")
+				nextCues = mergeEngineCuesOpts(origCues, deck, offsetSamples, legacyMP3)
+				cuesDiff = !cuesEquivalent(origCues, nextCues)
+			}
 		}
 		metadataDiff := cand.metadata != (rekordbox.Metadata{Genre: rbTrack.Genre, Comment: rbTrack.Comment, Label: rbTrack.Label})
 		if tm.firstRecord && importedRecordChanged(cand.fingerprint, rbTrack) {
@@ -1256,19 +1263,92 @@ func resolveRekordboxTrack(
 	return rekordbox.Track{}, false
 }
 
-func trackRekordboxOffset(r *compat.Resolver, trackPath string) float64 {
+func trackRekordboxOffset(r *compat.Resolver, trackPath string) (float64, bool) {
 	if trackPath == "" {
-		return 0
+		return 0, false
 	}
 	rel, err := r.Resolve(trackPath)
 	if err != nil {
-		return 0
+		return 0, false
 	}
 	info, err := compat.AudioHeader(r.FullPath(rel))
 	if err != nil {
-		return 0
+		return 0, false
 	}
-	return float64(info.RekordboxOffset())
+	lower := strings.ToLower(rel)
+	if (strings.HasSuffix(lower, ".mp3") || compat.IsMP4AudioPath(lower)) && info.SampleRate <= 0 {
+		return 0, false
+	}
+	return float64(info.RekordboxOffset()), true
+}
+
+func stripShiftedForeignCues(
+	resolver *compat.Resolver,
+	deck enginedb.DeckCues,
+	hasWritten bool,
+	pdbImportKey int64,
+	enginePath string,
+	rbTrack rekordbox.Track,
+	origCues []rekordbox.Cue,
+	offsetSamples float64,
+	byID map[uint32]rekordbox.Track,
+) enginedb.DeckCues {
+	if hasWritten || pdbImportKey <= 0 || pdbImportKey > math.MaxUint32 || deck.SampleRate <= 0 {
+		return deck
+	}
+	fk := uint32(pdbImportKey)
+	if fk == rbTrack.ID {
+		return deck
+	}
+	foreign, ok := byID[fk]
+	if !ok || foreign.ID == 0 || foreign.AnalysisPath == "" || sameRekordboxPath(foreign.Path, enginePath) {
+		return deck
+	}
+	foreignCues := readStickTrackCues(resolver, foreign)
+	if len(foreignCues) == 0 {
+		return deck
+	}
+	origHot := make(map[uint32]rekordbox.Cue, 8)
+	for _, oc := range origCues {
+		if oc.HotCue > 0 {
+			origHot[oc.HotCue] = oc
+		}
+	}
+	foreignHot := make(map[uint32]rekordbox.Cue, 8)
+	for _, fc := range foreignCues {
+		if fc.HotCue > 0 {
+			foreignHot[fc.HotCue] = fc
+		}
+	}
+	foreignOff, hasForeignOff := trackRekordboxOffset(resolver, foreign.Path)
+	for s := 0; s < 8; s++ {
+		hc := deck.HotCues[s]
+		if hc == nil || hc.Name != "" {
+			continue
+		}
+		pad := uint32(s + 1)
+		if _, existsInOrig := origHot[pad]; existsInOrig {
+			continue
+		}
+		fc, existsInForeign := foreignHot[pad]
+		if !existsInForeign || fc.Loop != (deck.Loops[s] != nil) {
+			continue
+		}
+		msRaw := uint32(math.Round(max(0.0, hc.Samples) * 1000.0 / deck.SampleRate))
+		msOwn := uint32(math.Round(max(0.0, hc.Samples+offsetSamples) * 1000.0 / deck.SampleRate))
+		matched := absDiffU32(fc.TimeMS, msRaw) <= 60 || absDiffU32(fc.TimeMS, msOwn) <= 60
+		if !matched && hasForeignOff {
+			msForeign := uint32(math.Round(max(0.0, hc.Samples+foreignOff) * 1000.0 / deck.SampleRate))
+			matched = absDiffU32(fc.TimeMS, msForeign) <= 60
+		}
+		if matched {
+			deck.HotCues[s] = nil
+			if fc.Loop {
+				deck.Loops[s] = nil
+			}
+		}
+	}
+	return deck
 }
 
 var (
@@ -1360,6 +1440,10 @@ func pdbMetadataBytes(ctx context.Context, path string, updates map[uint32]rekor
 }
 
 func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offsetSamples float64) []rekordbox.Cue {
+	return mergeEngineCuesOpts(orig, deck, offsetSamples, false)
+}
+
+func mergeEngineCuesOpts(orig []rekordbox.Cue, deck enginedb.DeckCues, offsetSamples float64, legacyMP3 bool) []rekordbox.Cue {
 	origHot := make(map[uint32]rekordbox.Cue, 8)
 	var origMemPoints []rekordbox.Cue
 	var origMemLoops []rekordbox.Cue
@@ -1417,12 +1501,17 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offsetSamples
 			}
 			code := rekordbox.NearestCueColorCode(rgb)
 			var loopNum, loopDen uint16
-			if oc, ok := origHot[pad]; ok && oc.Loop && absDiffU32(oc.TimeMS, startMS) <= 2 && absDiffU32(oc.EndMS, endMS) <= 2 {
-				loopNum, loopDen = oc.LoopNumerator, oc.LoopDenominator
-				if preserveUncolouredColor(oc, rgb, startMS, endMS, true) {
-					rgb, code = [4]byte{}, 0
-				} else if oc.Color == rgb && oc.ColorCode != 0 {
-					code = oc.ColorCode
+			if oc, ok := origHot[pad]; ok && oc.Loop {
+				if hc.Samples <= 0.5 && float64(oc.TimeMS)*deck.SampleRate/1000.0 <= offsetSamples+0.5 && absDiffU32(oc.EndMS, endMS) <= 2 && oc.TimeMS < endMS {
+					startMS = oc.TimeMS
+				}
+				if absDiffU32(oc.TimeMS, startMS) <= 2 && absDiffU32(oc.EndMS, endMS) <= 2 {
+					loopNum, loopDen = oc.LoopNumerator, oc.LoopDenominator
+					if preserveUncolouredColor(oc, rgb, startMS, endMS, true) {
+						rgb, code = [4]byte{}, 0
+					} else if oc.Color == rgb && oc.ColorCode != 0 {
+						code = oc.ColorCode
+					}
 				}
 			}
 			out = append(out, rekordbox.Cue{
@@ -1444,6 +1533,11 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offsetSamples
 		rgb := hc.Color
 		code := rekordbox.NearestCueColorCode(rgb)
 		if oc, ok := origHot[pad]; ok && !oc.Loop {
+			if hc.Samples <= 0.5 && float64(oc.TimeMS)*deck.SampleRate/1000.0 <= offsetSamples+0.5 {
+				startMS = oc.TimeMS
+			} else if legacyMP3 && hc.Name == "" && oc.Name == "" && (oc.Color == rgb || (uncolouredCue(oc) && rgb == engineDefaultHotCueColor)) && absDiffU32(oc.TimeMS, startMS) <= 60 {
+				startMS = oc.TimeMS
+			}
 			if preserveUncolouredColor(oc, rgb, startMS, 0, false) {
 				rgb, code = [4]byte{}, 0
 			} else if oc.Color == rgb && oc.ColorCode != 0 {
@@ -1482,6 +1576,9 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offsetSamples
 		var memColor [4]byte
 		var memColorCode byte
 		for _, oc := range origMemLoops {
+			if lp.StartSamples <= 0.5 && float64(oc.TimeMS)*deck.SampleRate/1000.0 <= offsetSamples+0.5 && absDiffU32(oc.EndMS, endMS) <= 2 && oc.TimeMS < endMS {
+				startMS = oc.TimeMS
+			}
 			if absDiffU32(oc.TimeMS, startMS) <= 2 && absDiffU32(oc.EndMS, endMS) <= 2 {
 				loopNum, loopDen = oc.LoopNumerator, oc.LoopDenominator
 				if preserveUncolouredColor(oc, lp.Color, startMS, endMS, true) {
