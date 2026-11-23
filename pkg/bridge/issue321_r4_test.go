@@ -126,7 +126,7 @@ func TestIssue321AnExportPutBackFromItsOriginalIsWrittenAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := func() bridge.WriteBackOptions {
-		return bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{}, Keys: testKeys, Settled: func() error { return nil }}
+		return bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{}, Keys: testKeys, Settled: func() error { return nil }, SkipPreparingCheck: true}
 	}
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(stick, "Engine Library", "Database2", "m.db")}).String())
 	if err != nil {

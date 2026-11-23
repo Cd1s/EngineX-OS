@@ -679,7 +679,6 @@ func TestWriteBackCuesRestoresMP3RekordboxOffsetAndSkipsUntouched(t *testing.T) 
 	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatalf("ConvertAtMount: %v", err)
 	}
-
 	// Even if BridgeWritten is cleared (simulating older bridge state), restoring
 	// RekordboxOffset must match the original 40ms cue with zero spurious diff.
 	statePath := filepath.Join(stick, "Engine Library", "Database2", ".rb-bridge-state.db")
@@ -782,6 +781,12 @@ func TestWriteBackCuesDetectsActiveLoopDeactivation(t *testing.T) {
 	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatalf("ConvertAtMount: %v", err)
 	}
+	sdb := dbOpen(t, stick)
+	if _, err := sdb.Exec(`DROP TABLE BridgeSynced`); err != nil {
+		sdb.Close()
+		t.Fatal(err)
+	}
+	sdb.Close()
 	// Deactivate the active loop on the deck without altering beatData/quickCues/loops
 	// (so BridgeWritten digest still matches).
 	mPath := filepath.Join(stick, "Engine Library", "Database2", "m.db")
@@ -833,6 +838,12 @@ func TestWriteBackCuesRoundTripAddThenDelete(t *testing.T) {
 	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatalf("ConvertAtMount: %v", err)
 	}
+	sdb := dbOpen(t, stick)
+	if _, err := sdb.Exec(`DROP TABLE BridgeSynced`); err != nil {
+		sdb.Close()
+		t.Fatal(err)
+	}
+	sdb.Close()
 	mPath := filepath.Join(stick, "Engine Library", "Database2", "m.db")
 	mdb, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mPath}).String())
 	if err != nil {

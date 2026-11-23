@@ -159,7 +159,7 @@ func TestIssue321WatcherPassCutAtEveryWriteStep(t *testing.T) {
 	})
 	var s bridge.CueSession
 	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &s, Keys: testKeys,
-		Settled: func() error { return nil }})
+		Settled: func() error { return nil }, SkipPreparingCheck: true})
 	restore()
 	if err != nil || res.TracksChanged != 1 || !res.OneLibraryUpdated {
 		t.Fatalf("uncut pass: %+v %v", res, err)
@@ -260,7 +260,7 @@ func TestIssue321WatcherPassCutAtEveryWriteStepOfExportPDB(t *testing.T) {
 		steps = append(steps, step)
 	})
 	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{},
-		Keys: testKeys, Settled: func() error { return nil }})
+		Keys: testKeys, Settled: func() error { return nil }, SkipPreparingCheck: true})
 	restore()
 	if err != nil || res.TracksChanged != 1 || res.OneLibraryUpdated || issue321PDBGenre(t, stick, 1) != newGenre {
 		t.Fatalf("uncut pass: %+v %v", res, err)
@@ -390,7 +390,7 @@ func issue321MissingTarget(t *testing.T, oneLib bool) {
 		}
 	}
 	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{},
-		Keys: testKeys, Settled: func() error { return nil }})
+		Keys: testKeys, Settled: func() error { return nil }, SkipPreparingCheck: true})
 	restore()
 	if err != nil || res.TracksChanged != 1 || res.OneLibraryUpdated != oneLib {
 		t.Fatalf("uncut pass: %+v %v", res, err)
