@@ -329,6 +329,11 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 			if p := pathTarget; p != nil {
 				source = p.track.ID
 			} else if counts[source] > 1 {
+				if target := targets[source]; target != nil {
+					if other, exists := existingByPath[foldPreparedPath("../"+target.rel)]; exists && other != id {
+						return nil, fmt.Errorf("tracks %d and %d resolve to the same audio path %q", id, other, target.rel)
+					}
+				}
 				return nil, fmt.Errorf("cannot identify bridge track %d with shared source ID %d", id, source)
 			}
 		}
