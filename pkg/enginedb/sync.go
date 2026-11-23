@@ -303,6 +303,7 @@ func open(ctx context.Context, p string, bulk bool) (*sql.DB, *sql.Tx, error) {
 	for _, index := range []string{
 		`CREATE INDEX IF NOT EXISTS index_PlaylistEntity_trackId ON PlaylistEntity(trackId)`,
 		`CREATE INDEX IF NOT EXISTS bridge.index_BridgeState_trackId ON BridgeState(trackId)`,
+		`CREATE INDEX IF NOT EXISTS bridge.index_BridgeState_fast ON BridgeState(trackId) WHERE substr(fingerprint,1,5)='fast:'`,
 	} {
 		if _, e = tx.ExecContext(ctx, index); e != nil {
 			return nil, nil, e
@@ -934,7 +935,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			}
 		} else if opts.FastCues && len(t.Cues) > 0 && !existing {
 			// Positions without the audio header's start offset: the full import corrects them.
-			if p, e := EncodePerformance(t, &rekordbox.Analysis{Cues: t.Cues}); e == nil {
+			if p, e := encodeCuesOnly(t, t.Cues); e == nil {
 				perf = Performance{QuickCues: p.QuickCues, Loops: p.Loops, ActiveLoops: p.ActiveLoops}
 			}
 		}
@@ -1003,23 +1004,34 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		}
 		if id == 0 {
 			// A pre-existing native track at the same path is never adopted/overwritten.
-			r, e := q.ExecContext(ctx, `INSERT INTO Track(length,bpm,year,path,filename,bitrate,bpmAnalyzed,albumArtId,fileBytes,title,artist,album,genre,comment,label,composer,remixer,key,rating,fileType,isAnalyzed,isAvailable,isMetadataImported,pdbImportKey,dateCreated,dateAdded) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s'),strftime('%s'))`, args...)
-			if e != nil {
-				return result, fmt.Errorf("insert track %d: %w", t.ID, e)
+			var batchedTrack bool
+			if bulk != nil && empty {
+				if _, dup := bulk.seenPaths[enginePath]; !dup {
+					bulk.seenPaths[enginePath] = struct{}{}
+					bulk.nextTrack++
+					id = bulk.nextTrack
+					bulk.addTrack(id, args)
+					batchedTrack = true
+				} else if e := bulk.flushTracks(ctx, q); e != nil {
+					return result, e
+				}
 			}
-			id, e = r.LastInsertId()
-			if e != nil {
-				return result, e
+			if !batchedTrack {
+				r, e := q.ExecContext(ctx, `INSERT INTO Track(length,bpm,year,path,filename,bitrate,bpmAnalyzed,albumArtId,fileBytes,title,artist,album,genre,comment,label,composer,remixer,key,rating,fileType,isAnalyzed,isAvailable,isMetadataImported,pdbImportKey,dateCreated,dateAdded) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s'),strftime('%s'))`, args...)
+				if e != nil {
+					return result, fmt.Errorf("insert track %d: %w", t.ID, e)
+				}
+				id, e = r.LastInsertId()
+				if e != nil {
+					return result, e
+				}
 			}
 			if bulk != nil { // what the dropped factory trigger does, with a Fast import's cues at once
 				var source, active any
 				if perf.QuickCues != nil && fast {
 					source, active = 1, perf.ActiveLoops
 				}
-				if _, e = q.ExecContext(ctx, `INSERT INTO PerformanceData(trackId,quickCues,loops,activeOnLoadLoops,thirdPartySourceId) VALUES(?,?,?,?,?)`,
-					id, perf.QuickCues, perf.Loops, active, source); e != nil {
-					return result, e
-				}
+				bulk.addPerf(id, perf.QuickCues, perf.Loops, active, source)
 				if fast {
 					perf.QuickCues = nil // written
 				}
@@ -1118,6 +1130,8 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		}
 		if existing {
 			_, e = q.ExecContext(ctx, `UPDATE BridgeState SET path=?,fingerprint=? WHERE trackId=?`, enginePath, hash, id)
+		} else if bulk != nil {
+			bulk.addState(enginePath, id, hash)
 		} else {
 			_, e = q.ExecContext(ctx, `INSERT INTO BridgeState(path,trackId,fingerprint) VALUES(?,?,?)`, enginePath, id, hash)
 		}
@@ -1125,6 +1139,8 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			return result, e
 		}
 		switch {
+		case strings.HasPrefix(hash, "fast:") && bulk != nil:
+			bulk.addFastBase(id, hash, fastLeft)
 		case strings.HasPrefix(hash, "fast:"):
 			// A new fast row: what this import left in it, for its import in full (fastRowEdits).
 			e = noteFastBase(ctx, q, id, hash, fastLeft)
@@ -1133,6 +1149,16 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		}
 		if e != nil {
 			return result, e
+		}
+		if bulk != nil {
+			if e = bulk.maybeFlushTracks(ctx, q); e != nil {
+				return result, e
+			}
+		}
+	}
+	if bulk != nil {
+		if err = bulk.flushTracks(ctx, q); err != nil {
+			return result, err
 		}
 	}
 	if opts.OnFinished != nil {

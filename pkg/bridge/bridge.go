@@ -1200,7 +1200,7 @@ func hasFastTracks(dir string) bool {
 	}
 	defer db.Close()
 	var fast int
-	err = db.QueryRow(`SELECT EXISTS(SELECT 1 FROM BridgeState WHERE fingerprint LIKE 'fast:%')`).Scan(&fast)
+	err = db.QueryRow(`SELECT EXISTS(SELECT 1 FROM BridgeState WHERE substr(fingerprint,1,5)='fast:')`).Scan(&fast)
 	return err == nil && fast == 1
 }
 

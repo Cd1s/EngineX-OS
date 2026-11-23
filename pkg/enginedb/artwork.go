@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
@@ -24,7 +25,10 @@ import (
 // serve covers to other decks over Engine Link, only for a 20-byte BLOB hash
 // (the raw SHA-1), reading Engine Library/Artwork/<base64url(hash)>.jpg. A
 // 40-character TEXT hash yields nothing, so remote decks show no cover.
-const artworkDir = "Engine Library/Artwork"
+const (
+	artworkDir               = "Engine Library/Artwork"
+	selectAlbumArtIndexQuery = "SELECT id, hash FROM AlbumArt ORDER BY hash"
+)
 
 // putArtwork writes data as the file Engine looks up for sum, unless it exists.
 func putArtwork(dir string, sum, data []byte) error {
@@ -100,35 +104,55 @@ func migrateArtwork(ctx context.Context, tx *sql.Tx, dir string, deadline time.T
 			return 0, nil
 		}
 	}
-	var last int64
-	for {
+	type artCandidate struct {
+		id  int64
+		raw any
+	}
+	// Scan index_AlbumArt_hash as a covering index in one pass so stamp-bypassed
+	// cold mounts never walk scattered AlbumArt table pages containing JPEG blobs.
+	rows, e := tx.QueryContext(ctx, selectAlbumArtIndexQuery)
+	if e != nil {
+		return 0, e
+	}
+	var need []artCandidate
+	for rows.Next() {
+		var c artCandidate
+		if e = rows.Scan(&c.id, &c.raw); e != nil {
+			rows.Close()
+			return 0, e
+		}
+		if b, ok := c.raw.([]byte); ok && len(b) == 20 && exists[base64.RawURLEncoding.EncodeToString(b)+".jpg"] {
+			continue
+		}
+		need = append(need, c)
+	}
+	if e = rows.Err(); e != nil {
+		rows.Close()
+		return 0, e
+	}
+	rows.Close()
+	if len(need) == 0 {
+		return 0, nil
+	}
+	sort.Slice(need, func(i, j int) bool { return need[i].id < need[j].id })
+	for _, c := range need {
 		if err := ctx.Err(); err != nil {
 			return migrated, err
 		}
 		if past() {
 			return migrated, nil
 		}
-		var id int64
-		var raw any
-		// Read metadata first: already migrated covers must not load every
-		// albumArt BLOB again on every Sync or stamp-bypassed mount.
-		e := tx.QueryRowContext(ctx, `SELECT id,hash FROM AlbumArt WHERE id>? AND albumArt IS NOT NULL ORDER BY id LIMIT 1`, last).Scan(&id, &raw)
-		if e == sql.ErrNoRows {
-			return migrated, nil
+		id, raw := c.id, c.raw
+		var data []byte
+		e := tx.QueryRowContext(ctx, `SELECT albumArt FROM AlbumArt WHERE id=? AND albumArt IS NOT NULL`, id).Scan(&data)
+		if errors.Is(e, sql.ErrNoRows) {
+			continue
 		}
 		if e != nil {
 			return migrated, e
 		}
-		last = id
-		if b, ok := raw.([]byte); ok && len(b) == 20 && exists[base64.RawURLEncoding.EncodeToString(b)+".jpg"] {
-			continue
-		}
 		if past() {
 			return migrated, nil
-		}
-		var data []byte
-		if e = tx.QueryRowContext(ctx, `SELECT albumArt FROM AlbumArt WHERE id=?`, id).Scan(&data); e != nil {
-			return migrated, e
 		}
 		var sum []byte
 		if b, ok := raw.([]byte); ok && len(b) == 20 {
@@ -151,6 +175,7 @@ func migrateArtwork(ctx context.Context, tx *sql.Tx, dir string, deadline time.T
 		}
 		migrated++
 	}
+	return migrated, nil
 }
 
 // MigrateArtwork upgrades the library under mount in place. Engine must not
@@ -178,7 +203,7 @@ func MigrateArtworkBefore(ctx context.Context, mount string, deadline time.Time)
 	}
 	defer tx.Rollback()
 	n, err := migrateArtwork(ctx, tx, dir, deadline, time.Now)
-	if err != nil {
+	if err != nil || n == 0 {
 		return 0, err
 	}
 	return n, tx.Commit()

@@ -165,10 +165,12 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	if left := time.Until(limit); cost > left {
 		return enginedb.Result{}, fmt.Errorf("%w: %d tracks (%d new) and %d playlist entries need about %s, %s left", errQuickTooLong, len(l.Tracks), fresh, entries, cost.Round(time.Second), left.Round(time.Second))
 	}
+	overviews := enginedb.ReadOverviewProgress(mount)
 	res, err := enginedb.SyncResolved(inner, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly})
 	if err != nil {
 		return res, quickLate(ctx, err)
 	}
+	_ = overviews.Keep(mount)
 	log.Printf("rb-bridge: quick update of %d tracks (%d new), %d playlist entries in %s (export read %s, estimate %s)", len(l.Tracks), fresh, entries, time.Since(start).Round(time.Millisecond), read.Round(time.Millisecond), cost.Round(time.Millisecond))
 	return res, nil
 }
@@ -579,19 +581,21 @@ func vacuumInto(ctx context.Context, src, dst string) error {
 }
 
 func vacuumStageMDB(ctx context.Context, stage string) {
-	mDB := filepath.Join(stage, "m.db")
-	tmp := mDB + ".compact"
-	_ = os.Remove(tmp)
-	if err := vacuumInto(ctx, mDB, tmp); err != nil {
+	for _, name := range []string{"m.db", stateName} {
+		p := filepath.Join(stage, name)
+		tmp := p + ".compact"
 		_ = os.Remove(tmp)
-		return
-	}
-	for _, side := range []string{"-journal", "-wal", "-shm"} {
-		_ = os.Remove(mDB + side)
-	}
-	if err := os.Rename(tmp, mDB); err != nil {
-		_ = os.Remove(tmp)
-		return
+		if err := vacuumInto(ctx, p, tmp); err != nil {
+			_ = os.Remove(tmp)
+			continue
+		}
+		for _, side := range []string{"-journal", "-wal", "-shm"} {
+			_ = os.Remove(p + side)
+		}
+		if err := os.Rename(tmp, p); err != nil {
+			_ = os.Remove(tmp)
+			continue
+		}
 	}
 	_ = syncFile(stage)
 }
@@ -1068,10 +1072,12 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 		}
 		cut("list stage pending")
 	}
+	overviews := enginedb.ReadOverviewProgress(mount)
 	_ = enginedb.InvalidateUnsyncedEdits(ctx, stage)
 	if err := renameStage(dir, stage); err != nil {
 		return enginedb.Result{}, err
 	}
+	_ = overviews.Keep(mount)
 	if quick {
 		// The update that reads the files starts now (completeLater).
 		log.Printf("rb-bridge: the re-export's list published; its files are read next")

@@ -58,7 +58,7 @@ func fastBaseOf(t rekordbox.Track) fastBase {
 		if t.BPM >= 499.5 {
 			t.BPM = 0
 		}
-		if p, e := EncodePerformance(t, &rekordbox.Analysis{Cues: t.Cues}); e == nil {
+		if p, e := encodeCuesOnly(t, t.Cues); e == nil {
 			b.cues, b.loops, b.active = p.QuickCues, p.Loops, int64(p.ActiveLoops)
 		}
 	}

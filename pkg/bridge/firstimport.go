@@ -136,8 +136,14 @@ func firstImportAtMount(ctx context.Context, mount, dir, stamp string, opts *eng
 	stage := filepath.Join(dir, importStageName)
 	switch {
 	case readMark(stage, stampName) == stamp:
+		freshBase := readMark(stage, baseName) == "absent"
 		if err := publishImport(mount, dir); err != nil {
 			return enginedb.Result{}, err
+		}
+		if freshBase {
+			_ = enginedb.MarkOverviewProgressDone(mount)
+		} else {
+			completeOverviews(ctx, mount, mountStart.Add(maxMountHookBudget))
 		}
 		log.Printf("rb-bridge: first import published")
 		return completeLater(dir, stage, stamp, enginedb.Result{PlaylistsChanged: true})
@@ -260,9 +266,15 @@ func fastPublish(ctx context.Context, mount, dir, stage, stamp string, r *compat
 	if err = completeStage(stage, stamp); err != nil {
 		return res, err
 	}
+	freshBase := readMark(stage, baseName) == "absent"
 	log.Printf("rb-bridge: first import of %d tracks published from the export; grids and waveforms follow", res.Added)
 	if err = publishImport(mount, dir); err != nil {
 		return res, err
+	}
+	if freshBase {
+		_ = enginedb.MarkOverviewProgressDone(mount)
+	} else {
+		completeOverviews(ctx, mount, time.Now().Add(time.Second))
 	}
 	if exportBytes(r, mount) > attemptExportBytes {
 		// The next mount would only start the update that reads the files of so large an
