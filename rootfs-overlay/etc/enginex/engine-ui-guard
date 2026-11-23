@@ -52,6 +52,17 @@ mapping_marker() {
     [ "$dir" = "$mappings" ] && dir=.
     printf '%s/.mapping-rejected-%s' "$dir" "$1"
 }
+write_mapping_base() {
+    src=$1
+    base=$2
+    tmp=$base.$$
+    rm -f "$tmp"
+    if cat "$src" > "$tmp" && mv -f "$tmp" "$base"; then
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
 mapping_engine_log() {
     log=${ENGINEX_ENGINE_LOG:-}
     if [ -n "$log" ] && [ -r "$log" ]; then
@@ -91,8 +102,8 @@ mark_mapping_parse_rejected() {
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     result=$(printf '{"state":"rejected","board":"%s","code":"engine-parse","reason":"Engine rejected %s: parsing failed","time":"%s"}\n' \
         "$board" "${file##*/}" "$now")
-    printf '%s' "$result" > "$marker" 2>/dev/null || :
-    printf '%s' "$result" > "$status" 2>/dev/null || :
+    printf '%s\n' "$result" > "$marker" 2>/dev/null || :
+    printf '%s\n' "$result" > "$status" 2>/dev/null || :
 }
 unbind_mapping_after_parse_failure() {
     board=$1
@@ -105,6 +116,7 @@ unbind_mapping_after_parse_failure() {
     if [ -s "$base" ] && grep -q 'EngineX #49: 4-deck role' "$base" 2>/dev/null; then
         mount --bind "$base" "$file" || :
     fi
+    rm -f "$patched/.base-${file##*/}"
     mark_mapping_parse_rejected "$board" "$file"
 }
 quarantine() {
@@ -120,6 +132,7 @@ quarantine() {
     for f in "$assign"/JP0[78]/*Assignments.qml "$assign"/JP1[34]/*Assignments.qml; do
         [ -f "$patched/${f##*/}" ] || [ -f "$patched/.map-${f##*/}" ] || continue
         ! mountpoint -q "$f" || umount "$f" || :
+        rm -f "$patched/.base-${f##*/}"
     done
 }
 fallback() {
@@ -677,9 +690,17 @@ AWK
                         --mapping-out "$map" --mapping-file "$mappings" --mapping-status "$patched/mapping-$board.json" ||
                         echo "EngineX button mapping for $board was not applied; the stock mapping stays" >&2
                 fi
-                if [ -s "$map" ]; then src=$map; fi
+                if [ -s "$map" ]; then
+                    base=$patched/.base-${f##*/}
+                    if write_mapping_base "$src" "$base"; then
+                        src=$map
+                    else
+                        rm -f "$map" "$base" "$patched/mapping-$board.json"
+                        echo "EngineX button mapping for $board was not applied; the base assignment could not be saved" >&2
+                    fi
+                fi
             else
-                rm -f "$patched/mapping-$board.json" "$patched/.map-${f##*/}"
+                rm -f "$patched/mapping-$board.json" "$patched/.map-${f##*/}" "$patched/.base-${f##*/}"
             fi ;;
         esac
         [ "$src" = "$f" ] || mount --bind "$src" "$f"

@@ -19,11 +19,12 @@ import (
 func mappingDeck(t *testing.T, board string) (mappings, statusDir string) {
 	t.Helper()
 	dir := t.TempDir()
-	oldM, oldS, oldC, oldA := mappingsPath, mappingStatusDir, deviceCompatiblePath, mapping.AssignmentDir
+	oldM, oldS, oldC, oldA, oldB := mappingsPath, mappingStatusDir, deviceCompatiblePath, mapping.AssignmentDir, mapping.BaseAssignmentDir
 	mappingsPath = filepath.Join(dir, "data", "mappings.json")
 	mappingStatusDir = filepath.Join(dir, "run")
 	deviceCompatiblePath = filepath.Join(dir, "compatible")
 	mapping.AssignmentDir = filepath.Join(dir, "assignments")
+	mapping.BaseAssignmentDir = filepath.Join(dir, "base")
 	fixture := []byte(`import airAssignments 1.0
 
 MidiAssignment {
@@ -55,7 +56,7 @@ MidiAssignment {
 		}
 	}
 	t.Cleanup(func() {
-		mappingsPath, mappingStatusDir, deviceCompatiblePath, mapping.AssignmentDir = oldM, oldS, oldC, oldA
+		mappingsPath, mappingStatusDir, deviceCompatiblePath, mapping.AssignmentDir, mapping.BaseAssignmentDir = oldM, oldS, oldC, oldA, oldB
 	})
 	if board != "" {
 		if err := os.WriteFile(deviceCompatiblePath, []byte("inmusic,"+strings.ToLower(board)+"\x00inmusic,rk3288\x00"), 0o644); err != nil {
@@ -227,6 +228,40 @@ func TestMappingSaveRejectsWhenTheStockAssignmentCannotGenerate(t *testing.T) {
 	}
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Fatalf("rejected save wrote mappings.json: %v", err)
+	}
+}
+
+func TestMappingSaveAndImportUseTheUnmappedBaseAfterARejectedBind(t *testing.T) {
+	file, _ := mappingDeck(t, "JP07")
+	stock := filepath.Join(mapping.AssignmentDir, "JP07", "JP07_Controller_Assignments.qml")
+	base := filepath.Join(mapping.BaseAssignmentDir, ".base-JP07_Controller_Assignments.qml")
+	stockBytes, err := os.ReadFile(stock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stock, []byte("Item {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(base), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(base, stockBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := mappingServer(t, Config{})
+	first := `{"mappings":[` + waveformShift + `]}`
+	if w := mapReq(t, s, "POST", "/api/mapping", first); w.Code != http.StatusOK {
+		t.Fatalf("first save: %d %s", w.Code, w.Body.String())
+	}
+	second := `{"mappings":[` + waveformShift + `,{"board":"JP07","control":"PadModeSelect:27","gesture":"hold","action":"sync"}]}`
+	if w := mapReq(t, s, "POST", "/api/mapping", second); w.Code != http.StatusOK {
+		t.Fatalf("second save: %d %s", w.Code, w.Body.String())
+	}
+	if w := mapReq(t, s, "POST", "/api/mapping/import", second[12:len(second)-1]); w.Code != http.StatusOK {
+		t.Fatalf("import after save: %d %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Fatalf("mapping file missing: %v", err)
 	}
 }
 

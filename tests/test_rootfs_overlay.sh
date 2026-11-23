@@ -969,6 +969,8 @@ has "--mapping-status $mpatched/mapping-JP07.json" "$GUARD_LOG.sync"
 [[ $(grep -c '^mount --bind' "$GUARD_LOG") == 1 ]] || fail 'the mapped file is bound once'
 has "mount --bind $mpatched/.map-JP07_Controller_Assignments.qml $massign/JP07/JP07_Controller_Assignments.qml" "$GUARD_LOG"
 has '// EngineX button mapping mock' "$mpatched/.map-JP07_Controller_Assignments.qml"
+has 'MidiAssignment {' "$mpatched/.base-JP07_Controller_Assignments.qml"
+lacks '// EngineX button mapping mock' "$mpatched/.base-JP07_Controller_Assignments.qml"
 lacks '// EngineX button mapping mock' "$massign/JP07/JP07_Controller_Assignments.qml" # stock itself is untouched
 # a stream-sync that writes nothing leaves stock
 printf '[{"board":"JP07","reject":1}]\n' > "$TMP/mappings.json"
@@ -982,6 +984,8 @@ has "--mapping-in $mpatched/JP07_Controller_Assignments.qml" "$GUARD_LOG.sync"
 has 'EngineX #49: 4-deck role' "$mpatched/JP07_Controller_Assignments.qml"
 has '// EngineX button mapping mock' "$mpatched/.map-JP07_Controller_Assignments.qml"
 lacks '// EngineX button mapping mock' "$mpatched/JP07_Controller_Assignments.qml"
+has 'EngineX #49: 4-deck role' "$mpatched/.base-JP07_Controller_Assignments.qml"
+lacks '// EngineX button mapping mock' "$mpatched/.base-JP07_Controller_Assignments.qml"
 [[ $(grep -c '^mount --bind' "$GUARD_LOG") == 1 ]] || fail 'the 4-deck copy with the mappings is bound once'
 # a rejected mapping keeps the 4-deck copy
 printf '[{"board":"JP07","reject":1}]\n' > "$TMP/mappings.json"
@@ -1031,6 +1035,7 @@ has '"code":"engine-parse"' "$mpatched/mapping-JP07.json"
 map_guard 'four_deck_waveform=1'
 [[ ! -e "$GUARD_LOG.sync" ]] || fail 'a rejected mapping is not rebound before a save'
 has "mount --bind $mpatched/JP07_Controller_Assignments.qml $massign/JP07/JP07_Controller_Assignments.qml" "$GUARD_LOG"
+[[ ! -e "$mpatched/.base-JP07_Controller_Assignments.qml" ]] || fail 'parse recovery kept the mapped base'
 lacks '// EngineX button mapping mock' "$mpatched/JP07_Controller_Assignments.qml"
 ok 'button mapping: a post-start parser failure unbinds the mapped copy, restores the 4-deck copy, reports rejection, restarts once, and latches until save'
 # The QQmlComponent load-error form is also detected, while another board's error is ignored.

@@ -220,9 +220,10 @@ func TestParseReadsTheFileAndRejectsWhatItDoesNotKnow(t *testing.T) {
 }
 
 func TestSaveRejectsWhenTheGeneratorCannotApplyTheStockFile(t *testing.T) {
-	oldDir := AssignmentDir
+	oldDir, oldBase := AssignmentDir, BaseAssignmentDir
 	AssignmentDir = t.TempDir()
-	t.Cleanup(func() { AssignmentDir = oldDir })
+	BaseAssignmentDir = t.TempDir()
+	t.Cleanup(func() { AssignmentDir, BaseAssignmentDir = oldDir, oldBase })
 	stock := filepath.Join(AssignmentDir, "JP07", "JP07_Controller_Assignments.qml")
 	if err := os.MkdirAll(filepath.Dir(stock), 0o755); err != nil {
 		t.Fatal(err)
@@ -236,10 +237,34 @@ func TestSaveRejectsWhenTheGeneratorCannotApplyTheStockFile(t *testing.T) {
 	}
 }
 
+func TestSaveUsesTheUnmappedBaseWhenItExists(t *testing.T) {
+	oldDir, oldBase := AssignmentDir, BaseAssignmentDir
+	AssignmentDir, BaseAssignmentDir = t.TempDir(), t.TempDir()
+	t.Cleanup(func() { AssignmentDir, BaseAssignmentDir = oldDir, oldBase })
+	stock := filepath.Join(AssignmentDir, "JP07", "JP07_Controller_Assignments.qml")
+	base := filepath.Join(BaseAssignmentDir, ".base-JP07_Controller_Assignments.qml")
+	if err := os.MkdirAll(filepath.Dir(stock), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(base), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stock, []byte("Item {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(base, []byte(fixtureStock), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(filepath.Join(t.TempDir(), "mappings.json"), []Mapping{{Board: "JP07", Control: "PadModeSelect:28", Gesture: "shift", Action: "sync"}}); err != nil {
+		t.Fatalf("Save with base: %v", err)
+	}
+}
+
 func TestSaveWritesAtomicallyAndAnEmptyListRemovesTheFile(t *testing.T) {
-	oldDir := AssignmentDir
+	oldDir, oldBase := AssignmentDir, BaseAssignmentDir
 	AssignmentDir = t.TempDir()
-	t.Cleanup(func() { AssignmentDir = oldDir })
+	BaseAssignmentDir = t.TempDir()
+	t.Cleanup(func() { AssignmentDir, BaseAssignmentDir = oldDir, oldBase })
 	stock := filepath.Join(AssignmentDir, "JP07", "JP07_Controller_Assignments.qml")
 	if err := os.MkdirAll(filepath.Dir(stock), 0o755); err != nil {
 		t.Fatal(err)

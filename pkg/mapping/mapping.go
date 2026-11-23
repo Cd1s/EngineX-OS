@@ -23,6 +23,10 @@ const FilePath = "/data/enginex/mappings.json"
 // Tests replace it with a fixture tree.
 var AssignmentDir = "/usr/Engine/AssignmentFiles/PresetAssignmentFiles"
 
+// BaseAssignmentDir holds the unmapped assignment base kept by engine-ui-guard.
+// Tests replace it with a fixture directory.
+var BaseAssignmentDir = "/run/enginex-assignments"
+
 // Mapping is one entry of mappings.json: this gesture on this control runs this action.
 type Mapping struct {
 	Board   string `json:"board"`
@@ -191,8 +195,13 @@ func validateForSave(list []Mapping) error {
 		if len(mine) == 0 {
 			continue
 		}
-		stockPath := filepath.Join(AssignmentDir, board, board+"_Controller_Assignments.qml")
-		stock, err := os.ReadFile(stockPath)
+		name := board + "_Controller_Assignments.qml"
+		basePath := filepath.Join(BaseAssignmentDir, ".base-"+name)
+		stockPath := filepath.Join(AssignmentDir, board, name)
+		stock, err := os.ReadFile(basePath)
+		if errors.Is(err, os.ErrNotExist) {
+			stock, err = os.ReadFile(stockPath)
+		}
 		if err != nil {
 			return &Error{Code: "generate", Message: fmt.Sprintf("cannot validate %s against the stock assignment: %v", board, err)}
 		}
