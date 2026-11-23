@@ -14324,7 +14324,7 @@ for (let pad = 0; pad < 8; pad++) {
 const assert = require('node:assert/strict');
 const stockCalls = [], jumps = [];
 const stockActionOutput = { setValue: (...args) => stockCalls.push(args) };
-const actionPad = { padIndex: 3 };
+const actionPad = { padIndex: 1 };
 const globalConfig = { shift: false };
 const module = { scBeatJumpActive: false, scBeatJumpPad: n => jumps.push(n) };
 SET_VALUE
@@ -14345,7 +14345,10 @@ setValue(0, 1.0, true);
 setValue(0, 0.0, false);
 globalConfig.shift = true;
 setValue(0, 1.0, true);
-assert.deepEqual(jumps, [2], 'Beat Jump mode fires only the unshifted press');
+assert.deepEqual(jumps, [0], 'Beat Jump mode fires pad 1 only');
+actionPad.padIndex = 3;
+setValue(0, 1.0, true);
+assert.deepEqual(jumps, [0], 'Beat Jump mode ignores pads 3 through 8');
 """.replace("SET_VALUE", set_value)
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -9332,7 +9332,7 @@ def edits(dev: bool):
             "    property int displayOffset: deckConfig.name === \"Right\" ? 8 : 0\n",
             "    property int displayOffset: deckConfig.name === \"Right\" ? 8 : 0\n"
             "    readonly property bool scBeatJumpActive: typeof globalConfig !== \"undefined\" && globalConfig && globalConfig.isPlayer && !!globalConfig.scBeatJumpPads && globalConfig.scBeatJumpMode(deckConfig.activeDeckPath)\n"
-            "    readonly property var scBeatJumpActions: [\"JumpBack\", \"JumpForward\", \"BeatJumpHalve\", \"BeatJumpDouble\"]\n"
+            "    readonly property var scBeatJumpActions: [\"JumpBack\", \"JumpForward\"]\n"
             "    function scBeatJumpPad(index) {\n"
             "        const action = scBeatJumpActions[index]\n"
             "        if (!action) return\n"
@@ -9725,8 +9725,8 @@ def edits(dev: bool):
                 "    onColor: {\n",
                 "    onColor: {\n"
                 "        if (deckConfig.padsMode === \"BEAT_JUMP\" && deckConfig.padsEnabled && typeof globalConfig !== \"undefined\" && globalConfig && globalConfig.scBeatJumpPads) {\n"
-                "            if (index === 0 || index === 2) return globalConfig.systemBlueLedColor\n"
-                "            if (index === 1 || index === 3) return globalConfig.padsModeSelectedAltColor\n"
+                "            if (index === 0) return globalConfig.systemBlueLedColor\n"
+                "            if (index === 1) return globalConfig.padsModeSelectedAltColor\n"
                 "            return globalConfig.padDisabledColor\n"
                 "        }\n"
             ),
