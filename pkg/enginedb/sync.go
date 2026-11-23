@@ -634,7 +634,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	for i, p := range prepared {
 		effectiveTracks[i] = p.track
 	}
-	owned, err := stageOwnedMoves(ctx, tx, prepared, opts.StagedOnly)
+	owned, stateByID, stateByPath, err := stageOwnedMoves(ctx, tx, prepared, opts.StagedOnly)
 	if err != nil {
 		return result, err
 	}
@@ -650,13 +650,15 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	if err != nil {
 		return result, err
 	}
-	// needRef are the bridge tracks whose state row names no detail file: no row (the 3 GiB cap
-	// of earlier builds) or a reference without files. length() reads
-	// no overflow page, so the rows that still hold a waveform are not read (#253).
+	// needRef are the completed bridge tracks whose state row names no detail file: no row
+	// (the 3 GiB cap of earlier builds) or a reference without files. length() reads no
+	// overflow page, so rows that still hold a waveform are not read (#253). Filtering out
+	// "fast:" rows avoids joining thousands of pending rows on every resumed batch.
 	needRef := map[int64]bool{} // true: no row at all
-	if !opts.Fast && !empty {
+	if !opts.Fast && !empty && len(stateByID) > 0 {
 		rows, e := tx.QueryContext(ctx, `SELECT s.trackId,a.trackId IS NULL FROM BridgeState s LEFT JOIN BridgeAnalysis a ON a.trackId=s.trackId
-			WHERE a.trackId IS NULL OR length(a.sourceJSON)=8 AND substr(a.sourceJSON,1,4)=CAST('RBA2' AS BLOB)`)
+			WHERE s.fingerprint <> '' AND substr(s.fingerprint,1,5) <> 'fast:'
+				AND (a.trackId IS NULL OR (length(a.sourceJSON)=8 AND substr(a.sourceJSON,1,4)=CAST('RBA2' AS BLOB)))`)
 		if e != nil {
 			return result, e
 		}
@@ -690,6 +692,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		_, e := q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`, id, packBridgeRef(source, refs), emptyAudio)
 		return e
 	}
+	var trackByPath map[string]int64
 	type pendingRGBOverview struct {
 		id   int64
 		blob []byte
@@ -725,14 +728,14 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		switch ownedID := owned[t.ID]; {
 		case empty: // no row to find
 		case ownedID != 0:
-			e := q.QueryRowContext(ctx, `SELECT s.trackId,s.fingerprint,COALESCE(t.bpmAnalyzed,0) FROM BridgeState s JOIN Track t ON t.id=s.trackId WHERE s.trackId=?`, ownedID).Scan(&id, &previous, &storedBPM)
-			if e != nil {
-				return result, e
+			row, ok := stateByID[ownedID]
+			if !ok {
+				return result, sql.ErrNoRows
 			}
+			id, previous, storedBPM = row.id, row.fp, row.storedBPM
 		default:
-			e := q.QueryRowContext(ctx, `SELECT s.trackId,s.fingerprint,COALESCE(t.bpmAnalyzed,0) FROM BridgeState s JOIN Track t ON t.id=s.trackId WHERE s.path=?`, enginePath).Scan(&id, &previous, &storedBPM)
-			if e != nil && !errors.Is(e, sql.ErrNoRows) {
-				return result, e
+			if row, ok := stateByPath[enginePath]; ok {
+				id, previous, storedBPM = row.id, row.fp, row.storedBPM
 			}
 		}
 		legacyOffsets := opts.LegacyOffsets || opts.LegacyAACOffsets && compat.IsMP4AudioPath(rel)
@@ -752,15 +755,31 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		if !existing && !empty {
 			// Engine (or its desktop app) already owns a track at this path:
 			// reference it from imported playlists, but never adopt or rewrite it.
-			var native int64
-			e := q.QueryRowContext(ctx, `SELECT id FROM Track WHERE path=?`, enginePath).Scan(&native)
-			if e == nil {
+			if trackByPath == nil {
+				trackByPath = make(map[string]int64, len(prepared))
+				trows, terr := tx.QueryContext(ctx, `SELECT path, id FROM Track`)
+				if terr != nil {
+					return result, terr
+				}
+				for trows.Next() {
+					var p string
+					var tid int64
+					if terr = trows.Scan(&p, &tid); terr != nil {
+						trows.Close()
+						return result, terr
+					}
+					trackByPath[p] = tid
+				}
+				terr = trows.Err()
+				trows.Close()
+				if terr != nil {
+					return result, terr
+				}
+			}
+			if native, ok := trackByPath[enginePath]; ok {
 				mapping[t.ID] = native
 				result.Unchanged++
 				continue
-			}
-			if !errors.Is(e, sql.ErrNoRows) {
-				return result, e
 			}
 		}
 		mapping[t.ID] = id

@@ -3,9 +3,11 @@ package bridge
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
@@ -160,10 +162,44 @@ var exportReads atomic.Int64
 // salt and passphrase, so a rewritten export with a new salt derives its own key.
 var exportKeys = rekordbox.NewKeyCache()
 
+const exportLibraryCacheLimit = 4
+
 var exportLibraryCache = struct {
 	sync.Mutex
 	entries map[string]*rekordbox.Library
 }{entries: make(map[string]*rekordbox.Library)}
+
+func exportCacheKey(c exportCandidate) string {
+	f, err := os.Open(c.full)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	var dev, ino uint64
+	if st, err := f.Stat(); err == nil {
+		if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+			dev, ino = uint64(sys.Dev), uint64(sys.Ino)
+		}
+	}
+	h := sha256.New()
+	if c.size <= 64<<10 {
+		if _, err := io.Copy(h, f); err != nil {
+			return ""
+		}
+	} else {
+		var buf [4096]byte
+		for _, off := range []int64{0, max(int64(0), c.size/2-2048), max(int64(0), c.size-4096)} {
+			n, rerr := f.ReadAt(buf[:], off)
+			if n > 0 {
+				h.Write(buf[:n])
+			}
+			if rerr != nil && !errors.Is(rerr, io.EOF) {
+				return ""
+			}
+		}
+	}
+	return fmt.Sprintf("%s %d:%d %d %d %x", c.full, dev, ino, c.size, c.mtime.UnixNano(), h.Sum(nil)[:16])
+}
 
 // afterExportRead runs after each export read; tests use it to stretch the read.
 var afterExportRead = func() {}
@@ -183,14 +219,16 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 		return nil, errNoLocalExport
 	}
 	read := func(c exportCandidate) (*rekordbox.Library, error) {
-		key := fmt.Sprintf("%s %d %d", c.rel, c.size, c.mtime.UnixNano())
-		exportLibraryCache.Lock()
-		if cached := exportLibraryCache.entries[key]; cached != nil {
-			copy := cloneLibrary(cached)
+		key := exportCacheKey(c)
+		if key != "" {
+			exportLibraryCache.Lock()
+			if cached := exportLibraryCache.entries[key]; cached != nil {
+				copy := cloneLibrary(cached)
+				exportLibraryCache.Unlock()
+				return copy, nil
+			}
 			exportLibraryCache.Unlock()
-			return copy, nil
 		}
-		exportLibraryCache.Unlock()
 
 		var library *rekordbox.Library
 		var err error
@@ -202,9 +240,14 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 		if err != nil {
 			return nil, err
 		}
-		exportLibraryCache.Lock()
-		exportLibraryCache.entries[key] = cloneLibrary(library)
-		exportLibraryCache.Unlock()
+		if key != "" {
+			exportLibraryCache.Lock()
+			if len(exportLibraryCache.entries) >= exportLibraryCacheLimit {
+				clear(exportLibraryCache.entries)
+			}
+			exportLibraryCache.entries[key] = cloneLibrary(library)
+			exportLibraryCache.Unlock()
+		}
 		return library, nil
 	}
 	primary, err := read(candidates[0])
