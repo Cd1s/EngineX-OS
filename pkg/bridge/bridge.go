@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
@@ -178,6 +179,7 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 	}
 	var errs []error
 	var libraries []*rekordbox.Library
+	var successful []exportCandidate
 	for i, c := range candidates {
 		var l *rekordbox.Library
 		var err error
@@ -188,6 +190,7 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 		}
 		if err == nil {
 			libraries = append(libraries, l)
+			successful = append(successful, c)
 			continue
 		}
 		if err := ctx.Err(); err != nil {
@@ -199,9 +202,34 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 		}
 	}
 	if len(libraries) > 0 {
-		return mergeExportLibraries(libraries...), nil
+		if len(libraries) > 1 && successful[0].isPDB != successful[1].isPDB {
+			if successful[0].isPDB && successful[0].mtime.Sub(successful[1].mtime) > exportNewerMargin {
+				return libraries[0], nil
+			}
+			encrypted := successful[0]
+			if encrypted.isPDB {
+				encrypted = successful[1]
+			}
+			if encryptedSQLiteFile(encrypted.full) {
+				return mergeExportLibraries(libraries...), nil
+			}
+		}
+		return libraries[0], nil
 	}
 	return nil, errors.Join(errs...)
+}
+
+func encryptedSQLiteFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var header [16]byte
+	if _, err = io.ReadFull(f, header[:]); err != nil {
+		return false
+	}
+	return string(header[:]) != "SQLite format 3\x00"
 }
 
 // mergeExportLibraries combines the PDB and OneLibrary views of one stick. The first library
