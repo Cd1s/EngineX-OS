@@ -540,12 +540,18 @@ func issue321StaleStick(t *testing.T, spc int) {
 			}
 		}
 	}
+	// The v4 export stamp no longer matches after fsck repaired the export. The new write-back
+	// rule therefore refuses this recovery pass, leaving the pending Engine edits for a fresh
+	// conversion instead of applying them to a repaired but different export.
+	afterRepair := issue321Hash(t, img)
 	res, err = bridge.WriteBackCues(ctx, mnt, opts)
-	if err != nil || !issue321ANLZHas(t, mnt, cue) || issue321PDBGenre(t, mnt, 1) != genre {
-		t.Fatalf("the first pass after the disk check: %+v %v: the edits are not on the stick", res, err)
+	if err != nil || res.FilesUpdated != 0 || res.TracksChanged != 0 || res.OneLibraryUpdated {
+		t.Fatalf("the first pass after the disk check: %+v %v, want stamp-mismatch refusal", res, err)
 	}
-	issue321ANLZSound(t, mnt)
 	unmount()
+	if after := issue321Hash(t, img); after != afterRepair {
+		t.Fatalf("the refused pass changed the repaired stick: sha256 %s before, %s after", afterRepair, after)
+	}
 	if out, err := exec.Command("fsck.fat", "-n", img).CombinedOutput(); err != nil {
 		t.Fatalf("fsck.fat -n after that pass: %v\n%s", err, out)
 	}
