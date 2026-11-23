@@ -578,6 +578,24 @@ func vacuumInto(ctx context.Context, src, dst string) error {
 	return syncFile(dst)
 }
 
+func vacuumStageMDB(ctx context.Context, stage string) {
+	mDB := filepath.Join(stage, "m.db")
+	tmp := mDB + ".compact"
+	_ = os.Remove(tmp)
+	if err := vacuumInto(ctx, mDB, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+	for _, side := range []string{"-journal", "-wal", "-shm"} {
+		_ = os.Remove(mDB + side)
+	}
+	if err := os.Rename(tmp, mDB); err != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+	_ = syncFile(stage)
+}
+
 // jobProgress reports a background job's tracks done out of the export's to progress: once the
 // export is read, before the long steps (its paths, the snapshot), then as each pass goes (its
 // share of the whole count, enginedb.Options.OnFinished), never fewer than it reported (#328).
@@ -638,6 +656,7 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 		}
 	}
 	total, left, window := len(l.Tracks), -1, importWindow
+	stageUpdated := 0
 	changed := readMark(stage, resumeName) != "" // an earlier pass may have changed it
 	pri := newPriorityTracker()
 	for {
@@ -666,9 +685,13 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 			return res, err
 		}
 		cut("stage pass committed")
+		stageUpdated += res.Added + res.Updated
 		changed = changed || res.Added+res.Updated > 0 || res.PlaylistsChanged
 		shown.set(total - res.Deferred)
 		if res.Deferred == 0 {
+			if stageUpdated >= 256 {
+				vacuumStageMDB(ctx, stage)
+			}
 			if n, rerr := enginedb.BackfillStageRGBOverviews(ctx, r, l, stage, dir); rerr != nil {
 				log.Printf("rb-bridge: stage RGB overview backfill skipped: %v", rerr)
 			} else if n > 0 {

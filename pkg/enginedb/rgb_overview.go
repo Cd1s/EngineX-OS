@@ -412,6 +412,16 @@ func RecordVerifiedRGBOverviews(ctx context.Context, dir, library string, ids []
 	}
 }
 
+// RefreshRGBVerifiedStat updates the cached m.db size and mtime in .rb-bridge-rgb-verified
+// after a stage publish that moved no new .rgb files.
+func RefreshRGBVerifiedStat(dir, library string) {
+	c, ok := loadRGBVerifiedCacheFull(dir)
+	if !ok || len(c.Files) == 0 {
+		return
+	}
+	saveRGBVerifiedCache(dir, library, c.UUID, c.Files)
+}
+
 // CountMissingRGBOverviews returns how many analyzed tracks in dir/m.db lack a
 // non-empty OverviewData/<uuid>/<id>.rgb file, using directory metadata only.
 func CountMissingRGBOverviews(ctx context.Context, dir string) (int, error) {

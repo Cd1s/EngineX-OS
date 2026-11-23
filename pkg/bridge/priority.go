@@ -231,6 +231,14 @@ func (q *PriorityQueue) Enqueue(mount, enginePath, source string, deck int) (uin
 	rec := q.volumes[vk]
 	if rec == nil {
 		rec = &PriorityRecord{Dev: vk.dev, Ino: vk.ino}
+		var diskRec PriorityRecord
+		if readPrivateJSON(priorityRecordPath(vk), &diskRec) == nil && diskRec.Seq > q.seq {
+			q.seq = diskRec.Seq
+		}
+		var diskAck PriorityAck
+		if readPrivateJSON(priorityAckPath(vk), &diskAck) == nil && diskAck.AckSeq > q.seq {
+			q.seq = diskAck.AckSeq
+		}
 		q.volumes[vk] = rec
 	}
 	// Coalesce repeated identical head edges without churning seq or disk.

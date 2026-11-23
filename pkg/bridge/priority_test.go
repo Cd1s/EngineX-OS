@@ -235,4 +235,14 @@ func TestImportInBackgroundConsumesAndAcksPriority(t *testing.T) {
 	if ack.AckSeq < seq {
 		t.Fatalf("priority ack seq=%d, want >= %d", ack.AckSeq, seq)
 	}
+	// A restarted PriorityQueue (or a new vfat stick sharing dev/ino=1) must advance
+	// seq past any existing on-disk AckSeq instead of dropping new priority items.
+	restarted := bridge.NewPriorityQueue()
+	seq2, err := restarted.Enqueue(root, "../"+targetRel, "deck", 1)
+	if err != nil || seq2 <= ack.AckSeq {
+		t.Fatalf("restarted PriorityQueue seq=%d err=%v, want > ackSeq %d", seq2, err, ack.AckSeq)
+	}
+	if pending, _ := bridge.PendingPriority(root); len(pending) != 1 || pending[0].Seq != seq2 {
+		t.Fatalf("expected pending item after queue restart, got %+v", pending)
+	}
 }

@@ -114,6 +114,8 @@ func finishPublish(dir string, names ...string) error {
 	}
 	if len(movedRGB) > 0 {
 		enginedb.RecordVerifiedRGBOverviews(context.Background(), dir, filepath.Join(dir, "m.db"), movedRGB)
+	} else {
+		enginedb.RefreshRGBVerifiedStat(dir, filepath.Join(dir, "m.db"))
 	}
 	return os.RemoveAll(stage)
 }
