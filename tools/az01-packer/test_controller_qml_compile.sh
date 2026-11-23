@@ -14,6 +14,10 @@
 # everything the stock files compile, and every file it replaces.
 #   bash tools/az01-packer/test_controller_qml_compile.sh <new-private-dir> [BOARD ...]   (default: all 14 boards)
 # CQC_BUILDER=<build_packs.py> builds the pack with another revision's builder (copy its tools/ui-mod next to it).
+# CQC_PROBE=<file.qml> CQC_TAG=<tag> [CQC_ARMS=pack] runs another root probe in the same sandbox instead (for example
+# test_beatjump_pads_sandbox.sh): it passes when the log has "<tag> DONE|PASS|<board>-<arm>|". Arm "stock" runs
+# without the pack's controller files; arm "fourdeck" (players only) turns on the hook's 4-deck layout (decks 1 and 3,
+# Config.device.isPlayer cleared, as the 4 Decks and Paired Player layouts run).
 # Run it inside your own mount namespace (unshare -m --propagation private) under the build host's heavy-job lock.
 . "${ENGINEX_MIGRATION:-$(git rev-parse --show-toplevel)/rootfs-overlay/usr/libexec/enginex-migration}"
 ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
@@ -78,7 +82,7 @@ PY
     arm-linux-gnueabihf-gcc -O2 -Wall -Wextra -Werror -shared -fPIC -o "$W/identity.so" "$REPO/tools/az01-packer/cc-fit-identity.c"
     fail=0
     for board in "${boards[@]}"; do
-        for arm in stock pack; do
+        for arm in ${CQC_ARMS:-stock pack}; do
             unshare -m -n -p -f --kill-child bash "$0" "$W" --inner "$board" "$arm" || fail=1
         done
     done
@@ -88,6 +92,7 @@ fi
 board=${3:?board required}
 arm=${4:?arm required}
 read -r kind image < <(image_of "$board")
+if [ "$arm" = fourdeck ] && ! [[ " JP07 JP08 JP13 JP14 " == *" $board "* ]]; then echo "$board fourdeck: not a player, skipped"; exit 0; fi
 R=$W/$board-$arm-root
 lower=$(echo "$board" | tr A-Z a-z)
 mount --make-rprivate /
@@ -116,7 +121,7 @@ printf '0-3\n' > "$R/proc/irq/41/smp_affinity_list"
 cp "$REPO/rootfs-overlay/etc/enginex/libengine-ui-hook.so" "$R/tmp/libengine-ui-hook.so"
 preload=/tmp/libengine-ui-hook.so
 [ "$kind" = gen2 ] && { cp "$W/identity.so" "$R/tmp/identity.so"; preload=/tmp/identity.so:/tmp/libengine-ui-hook.so; }
-if [ "$arm" = pack ]; then cp -a "$W/packs/en" "$R/data/enginex/ui/packs/en"; else cp -a "$W/stock-en" "$R/data/enginex/ui/packs/en"; fi
+if [ "$arm" = stock ]; then cp -a "$W/stock-en" "$R/data/enginex/ui/packs/en"; else cp -a "$W/packs/en" "$R/data/enginex/ui/packs/en"; fi
 # The AZ04 boards' files (byte-identical QML base), compiled here because the AZ04 Engine does not start in a chroot.
 az04=$LAB/systemone-analysis/rootfs/usr/Engine/AssignmentFiles
 if [ -d "$az04" ]; then
@@ -129,7 +134,7 @@ urls=$W/$board-$arm-urls.txt
 (cd "$R" && find usr/Engine/AssignmentFiles tmp/az04-assignments -name '*.qml' 2>/dev/null | LC_ALL=C sort | sed 's|^|file:///|') >> "$urls"
 probe="$R/data/enginex/ui/packs/en/Skins/Embedded/main.qml"
 mkdir -p "$(dirname "$probe")"
-python3 -I - "$REPO/tools/az01-packer/controller-qml-compile-probe.qml" "$probe" "$board-$arm" "$urls" <<'PY'
+python3 -I - "${CQC_PROBE:-$REPO/tools/az01-packer/controller-qml-compile-probe.qml}" "$probe" "$board-$arm" "$urls" <<'PY'
 import json, sys
 src, out, board, urls = sys.argv[1:]
 text = open(src, encoding="utf-8").read()
@@ -137,6 +142,7 @@ text = text.replace("@BOARD@", board).replace("@URLS@", json.dumps(open(urls, en
 open(out, "w", encoding="utf-8").write(text)
 PY
 printf 'lang=en\n' > "$R/data/enginex/ui/settings.conf"
+[ "$arm" != fourdeck ] || printf 'four_deck_waveform=1\nfour_deck_role=13\n' >> "$R/data/enginex/ui/settings.conf"
 chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/$board-$arm-dbus.log" 2>&1 || true
 log=$W/$board-$arm-engine.log
 engine_rc=0
@@ -147,6 +153,15 @@ timeout --kill-after=5s "${CQC_TIMEOUT:-90}s" chroot "$R" /usr/bin/env -i PATH=/
     /usr/Engine/Engine -d0 > "$log" 2>&1 || engine_rc=$?
 cp "$R/tmp/engine-quit-reason" "$W/$board-$arm-quit-reason" 2>/dev/null || true
 grep -aq "engine-ui-hook: Engine " "$log" || { echo "$board $arm: the hook did not start (Engine exit $engine_rc)" >&2; exit 1; }
+if [ -n "${CQC_PROBE:-}" ]; then
+    tag=${CQC_TAG:?CQC_TAG names the log tag of the probe}
+    grep -a -o -E "$tag (PASS|FAIL|DONE)\|.*" "$log" | sed 's/ *\[20[0-9T:.Z-]*\].*//' || true
+    # A ReferenceError in a pack file is a misnamed id or property: print them all.
+    grep -a -E '^\[W\] qrc:/.*(ReferenceError|is not a function)' "$log" | sed 's/ *\[20[0-9T:.Z-]*\].*//' | sort -u | head -n 20 || true
+    grep -aq "$tag DONE|PASS|$board-$arm|" "$log" || { echo "$board $arm: $tag probe failed (Engine exit $engine_rc)" >&2; exit 1; }
+    echo "$board $tag PASS"
+    exit 0
+fi
 total=$(wc -l < "$urls")
 grep -aq "CQC DONE|$board-$arm|" "$log" || {
     grep -a -A2 -E '^\[W\] (qrc|file):/' "$log" | sed 's/ *\[20[0-9T:.Z-]*\].*//' | head -n 12 >&2

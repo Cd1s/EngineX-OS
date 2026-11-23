@@ -382,6 +382,8 @@ func (s *Server) loadUI() uiSettings {
 		TracklistWaveform: true, CueCountdown: true, BpmDecimals: 2,
 		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
 		FxTimeMode: "beats", FxTimeMs: 500, MixstreamFx: slices.Clone(uiMixstreamFxDefaults),
+		// The four players' Beat Jump pad mode (Shift + LOOP) is on unless beat_jump_pads=0.
+		BeatJumpPads: playerBoards[s.board],
 	}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
@@ -737,6 +739,8 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.BeatJumpPads {
 		text += "beat_jump_pads=1\n"
+	} else if playerBoards[s.board] {
+		text += "beat_jump_pads=0\n" // on by default there
 	}
 	if v.PitchBendBeatJump {
 		text += "pitch_bend_beat_jump=1\n"

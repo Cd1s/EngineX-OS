@@ -28,10 +28,14 @@ func TestSettingsCopyAllowlistAndModel(t *testing.T) {
 	if got.FourDeckRole != "24" || got.Scope != "deezer" || got.MasterLimiter || got.Waveform != "rgb" || !got.SdHighSpeed {
 		t.Fatalf("copy lost identity/local values or false/default settings: %+v", got)
 	}
-	for _, key := range []string{"upfaderEcho", "stemsEqMode", "beatJumpPads"} {
+	for _, key := range []string{"upfaderEcho", "stemsEqMode"} {
 		if !slices.Contains(skipped, key) {
 			t.Errorf("missing model skip %s: %v", key, skipped)
 		}
+	}
+	// The players' Beat Jump pad mode (Shift + LOOP) is copied between players (TestSettingsCopyBeatJumpPadsBetweenPlayers).
+	if slices.Contains(skipped, "beatJumpPads") || !got.BeatJumpPads {
+		t.Errorf("SC5000 skipped beatJumpPads: %v", skipped)
 	}
 	if slices.Contains(skipped, "sdHighSpeed") {
 		t.Errorf("sdHighSpeed unexpectedly skipped on RK3288 board: %v", skipped)
