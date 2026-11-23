@@ -13416,9 +13416,10 @@ console.log('ok');
 
     def test_main_ui_setting_and_its_controller_bridge(self):
         main = self.main
-        # One handler per signal: a second onScBeatJumpPadsChanged made EmbeddedMain fail to compile (80b1edfc).
+        # One handler per signal on root: a second onScBeatJumpPadsChanged made EmbeddedMain fail to compile (80b1edfc).
         self.assertEqual(main.count("onScBeatJumpPadsChanged:"), 1)
-        self.assertIn("onScBeatJumpPadsChanged: { scViewDirty = true; scSyncBeatJumpPads() }", main)
+        self.assertIn("\tonScBeatJumpPadsChanged: scViewDirty = true\n", main)
+        self.assertIn("\tConnections {\n\t\ttarget: root\n\t\tfunction onScBeatJumpPadsChanged() { root.scSyncBeatJumpPads() }\n\t}\n", main)
         entries = bp.BEAT_JUMP_ENTRIES
         self.assertIn('text: "Beat Jump Pad Bank"\n\t\t\tvisible: root.scIsMixstream || root.scIsPlayerBoard\n', entries)
         self.assertIn('visible: root.scIsMixstream\n', entries.split("Pitch Bend")[1])  # the Mixstream rows stay Mixstream-only

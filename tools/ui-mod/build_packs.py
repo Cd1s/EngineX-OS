@@ -1427,7 +1427,7 @@ SERVICES_MAIN = """
 	onScTracklistWaveformChanged: scViewDirty = true
 	onScDualColumnChanged: scViewDirty = true
 	onScCueCountdownChanged: scViewDirty = true
-	onScBeatJumpPadsChanged: { scViewDirty = true; scSyncBeatJumpPads() }
+	onScBeatJumpPadsChanged: scViewDirty = true
 	onScSwapLoopOrderChanged: scViewDirty = true
 	function scViewHook() {
 		const m = scViewControls()
@@ -3639,6 +3639,11 @@ SERVICES_MAIN = """
 	Timer {
 		interval: 250; running: root.scIsPlayerBoard && root.scUiLoaded && !root.scBeatJumpPadsSynced; repeat: true; triggeredOnStart: true
 		onTriggered: root.scSyncBeatJumpPads()
+	}
+	// Root keeps its one onScBeatJumpPadsChanged handler (views); a second one on root does not compile.
+	Connections {
+		target: root
+		function onScBeatJumpPadsChanged() { root.scSyncBeatJumpPads() }
 	}
 	property bool scPitchBendBeatJump: false
 	property bool scRestoreBpmOnUnsync: false
