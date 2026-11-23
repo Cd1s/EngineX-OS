@@ -92,8 +92,8 @@ func TestGoldenPatchedFilesOfTheLabTrees(t *testing.T) {
 					removed = append(removed, l)
 				}
 			}
-			// Stock bindings intact: the one line that goes is the Sync hold the mapping took.
-			if len(removed) != 1 || removed[0] != "-         syncHoldAction: Action.InstantDouble" {
+			// The v1 catalogue only adds free pad-mode gestures, so stock bindings stay intact.
+			if len(removed) != 0 {
 				t.Errorf("stock lines removed: %q", removed)
 			}
 			text := strings.Join(diff, "\n") + "\n"
@@ -129,6 +129,32 @@ func TestGoldenPatchedFilesOfTheLabTrees(t *testing.T) {
 
 // Every element and property the generator writes exists in the 5.3.0 qrc: assignment files are
 // not loaded off the deck, so the real component files are the evidence.
+func TestEveryOfferedGestureGeneratesForEveryLabBoard(t *testing.T) {
+	cat := Default()
+	for _, board := range cat.Boards {
+		t.Run(board, func(t *testing.T) {
+			inv, ok := Board(board)
+			if !ok {
+				t.Fatal("missing inventory")
+			}
+			var list []Mapping
+			for _, control := range inv.Controls {
+				for _, gesture := range Gestures {
+					if cat.Offer(board, control.ID, gesture).Mappable {
+						list = append(list, Mapping{Board: board, Control: control.ID, Gesture: gesture, Action: "sync"})
+					}
+				}
+			}
+			if len(list) == 0 {
+				t.Fatal("no offered gestures")
+			}
+			if _, err := Generate(board, stockFile(t, board), list); err != nil {
+				t.Fatalf("offered gestures must generate: %v", err)
+			}
+		})
+	}
+}
+
 func TestGeneratedElementsExistInTheQrc(t *testing.T) {
 	root := lab(t)
 	qrc := filepath.Join(root, "qrc")

@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -198,6 +200,11 @@ func (s *Server) handleMapping(w http.ResponseWriter, r *http.Request) {
 			mappingFail(w, http.StatusBadRequest, errors.New("invalid JSON request"))
 			return
 		}
+		var extra any
+		if err := d.Decode(&extra); err != io.EOF {
+			mappingFail(w, http.StatusBadRequest, errors.New("invalid JSON request"))
+			return
+		}
 		if err := s.saveMappings(in.Mappings); err != nil {
 			mappingFail(w, statusOfMappingError(err), err)
 			return
@@ -224,6 +231,9 @@ func (s *Server) saveMappings(list []mapping.Mapping) error {
 	defer s.uiMu.Unlock()
 	if err := mapping.Save(mappingsPath, list); err != nil {
 		return err
+	}
+	for _, board := range mapping.Default().Boards {
+		_ = os.Remove(filepath.Join(mappingStatusDir, ".mapping-rejected-"+board))
 	}
 	log.Printf("stream-sync: button mappings saved: %d", len(list))
 	return nil
@@ -366,7 +376,7 @@ func (s *Server) stopMappingLearn() {
 	}
 	l.mu.Lock()
 	if l.state != "done" {
-		l.state, l.result = "idle", nil
+		l.state, l.result, l.err = "idle", nil, ""
 	}
 	l.mu.Unlock()
 }

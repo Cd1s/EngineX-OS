@@ -121,7 +121,7 @@ func block(r resolved) string {
 		min, max := "0.0", "1.0"
 		up := "false"
 		if r.Action.Step == "inc" {
-			min, max, up = "1.0", "0.0", "true"
+			up = "true"
 		}
 		b.WriteString("        output: IncDecValueOutput {\n")
 		b.WriteString("            target: PropertyTarget {\n")

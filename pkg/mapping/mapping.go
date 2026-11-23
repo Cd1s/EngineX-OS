@@ -129,8 +129,12 @@ func Parse(r io.Reader) ([]Mapping, error) {
 	if err := dec.Decode(&list); err != nil {
 		return nil, &Error{Code: "json", Message: "mappings.json is not a list of {board, control, gesture, action}: " + err.Error()}
 	}
-	if dec.More() {
-		return nil, &Error{Code: "json", Message: "mappings.json has more than one JSON value"}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, &Error{Code: "json", Message: "mappings.json has more than one JSON value"}
+		}
+		return nil, &Error{Code: "json", Message: "mappings.json has trailing data: " + err.Error()}
 	}
 	if list == nil {
 		list = []Mapping{}

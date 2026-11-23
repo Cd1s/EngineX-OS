@@ -57,7 +57,7 @@
         "press": {"status": "stock"},
         "shift": {"status": "stock"},
         "double": {"status": "stock"},
-        "hold": {"status": "takeover", "noteProperty": "syncNote", "set": {"syncHoldAction": "Action.None"}}
+        "hold": {"status": "stock"}
       }
     }
   }

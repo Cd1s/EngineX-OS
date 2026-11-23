@@ -75,7 +75,6 @@ var fixtureMappings = []Mapping{
 	{Board: "JP07", Control: "PadModeSelect:29", Gesture: "hold", Action: "key_lock"},
 	{Board: "JP07", Control: "PadModeSelect:28", Gesture: "shift", Action: "loop_double"},
 	{Board: "JP07", Control: "PadModeSelect:30", Gesture: "hold", Action: "slip"},
-	{Board: "JP07", Control: "Sync:20", Gesture: "hold", Action: "cue_countdown_toggle"},
 }
 
 func mustGenerate(t *testing.T, board, stock string, list []Mapping) string {
@@ -141,8 +140,8 @@ func TestGenerateWritesStockPrimitivesForEachGesture(t *testing.T) {
 `,
 		`            increaseValue: true
             roundRobin: false
-            minimum: 1.0
-            maximum: 0.0
+            minimum: 0.0
+            maximum: 1.0
 `,
 		// a Slip toggle on a hold, through the combo
 		`        output: ComboActionOutput {
@@ -152,15 +151,10 @@ func TestGenerateWritesStockPrimitivesForEachGesture(t *testing.T) {
             }
         }
 `,
-		// stock's Sync hold is switched off, alone
-		"        syncHoldAction: Action.None\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing:\n%s\nin:\n%s", want, out)
 		}
-	}
-	if strings.Contains(out, "InstantDouble") {
-		t.Error("stock's Sync hold binding is still there")
 	}
 	if n := strings.Count(out, "import InputAssignment 0.1"); n != 1 {
 		t.Errorf("%d InputAssignment imports", n)
@@ -207,8 +201,6 @@ func TestGenerateKeepsEveryStockBindingExceptTheTakenGesture(t *testing.T) {
 		case strings.Contains(l, "EngineX button mapping: end"):
 			in = false
 		case in, l == "import InputAssignment 0.1":
-		case l == "        syncHoldAction: Action.None":
-			rest = append(rest, "        syncHoldAction: Action.InstantDouble")
 		default:
 			rest = append(rest, l)
 		}
@@ -264,22 +256,11 @@ func TestGenerateRefusesWhatCannotBeDoneExactly(t *testing.T) {
 	bad("an unknown action", fixtureStock, []Mapping{{Board: "JP07", Control: "PadModeSelect:28", Gesture: "shift", Action: "nope"}})
 	bad("a reserved control", fixtureStock, []Mapping{{Board: "JP07", Control: "Shift:26", Gesture: "press", Action: "sync"}})
 	bad("a stock gesture without a switch", fixtureStock, []Mapping{{Board: "JP07", Control: "Sync:20", Gesture: "press", Action: "waveform_cycle"}})
-	bad("the module instance missing from the file", strings.Replace(fixtureStock, "syncNote: 20", "syncNote: 99", 1),
+	bad("a Sync hold without a switch", fixtureStock,
 		[]Mapping{{Board: "JP07", Control: "Sync:20", Gesture: "hold", Action: "waveform_cycle"}})
 	bad("a file that is not an assignment file", "Item {}\n", []Mapping{shift})
 	out := mustGenerate(t, "JP07", fixtureStock, []Mapping{shift})
 	bad("a file that was generated before", out, []Mapping{shift})
-}
-
-func TestGenerateAddsTheSwitchLineWhenTheInstanceDoesNotSpellItOut(t *testing.T) {
-	stock := strings.Replace(fixtureStock, "        syncHoldAction: Action.InstantDouble\n", "", 1)
-	out := mustGenerate(t, "JP07", stock, []Mapping{{Board: "JP07", Control: "Sync:20", Gesture: "hold", Action: "sync"}})
-	if !strings.Contains(out, "        syncNote: 20\n        syncHoldAction: Action.None\n        masterNote: 21\n") {
-		t.Fatalf("the property goes right after the note line:\n%s", out)
-	}
-	if err := Check("JP07", []byte(stock), []byte(out), []Mapping{{Board: "JP07", Control: "Sync:20", Gesture: "hold", Action: "sync"}}); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestCheckRejectsAFileThatIsNotStockPlusTheMappings(t *testing.T) {
@@ -322,12 +303,6 @@ func TestCheckRejectsAFileThatIsNotStockPlusTheMappings(t *testing.T) {
 			cut := s[b : e+len("    // EngineX button mapping: end\n")]
 			s = strings.Replace(s, cut, "", 1)
 			return strings.Replace(s, "        id: globalConfig\n", "        id: globalConfig\n"+cut, 1)
-		},
-		"a real Sync hold left in": func(s string) string {
-			return strings.Replace(s, "syncHoldAction: Action.None", "syncHoldAction: Action.InstantDouble", 1)
-		},
-		"a taken property changed alone": func(s string) string {
-			return strings.Replace(s, "syncHoldAction: Action.None", "syncHoldAction: Action.KeySync", 1)
 		},
 	} {
 		err := Check("JP07", []byte(fixtureStock), []byte(edit(good)), list)

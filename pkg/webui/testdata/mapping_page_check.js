@@ -18,6 +18,11 @@ const [base, code, chrome, shots] = process.argv.slice(2);
   const text = sel => page.locator(sel).innerText();
   const options = sel => page.$$eval(sel + ' option', os => os.map(o => o.value));
   const rows = () => page.$$eval('#mapRows .row', rs => rs.map(r => r.innerText));
+  let pagehideDelete = false;
+  await page.route(base + '/api/mapping/learn', async route => {
+    if (route.request().method() === 'DELETE') pagehideDelete = true;
+    await route.continue();
+  });
   const waitText = (sel, re) => page.waitForFunction(([s, r]) => new RegExp(r).test(document.querySelector(s).innerText), [sel, re.source], { timeout: 8000 });
 
   await page.evaluate(() => showMap());
@@ -27,14 +32,12 @@ const [base, code, chrome, shots] = process.argv.slice(2);
 
   // the control list offers only controls with a gesture to take; Shift and navigation are not among them
   const controls = await options('#mapControl');
-  assert.ok(controls.includes('PadModeSelect:30') && controls.includes('Sync:20'), controls.join());
+  assert.ok(controls.includes('PadModeSelect:30') && !controls.includes('Sync:20'), controls.join());
   for (const gone of ['Shift:26', 'Back:16', 'Shortcuts:12', 'BrowseEncoder:18', 'Censor:7']) assert.ok(!controls.includes(gone), gone);
   await page.selectOption('#mapControl', 'PadModeSelect:28');
   assert.deepEqual(await options('#mapGesture'), ['shift', 'double', 'hold'], 'a press on a pad-mode button is stock');
   await page.selectOption('#mapControl', 'PadModeSelect:30');
   assert.deepEqual(await options('#mapGesture'), ['double', 'hold'], 'Shift + LOOP is the Beat Jump pad mode, EngineX\'s');
-  await page.selectOption('#mapControl', 'Sync:20');
-  assert.deepEqual(await options('#mapGesture'), ['hold'], 'only the Sync hold can be taken');
 
   // add: Shift + Roll -> cycle waveform
   await page.selectOption('#mapControl', 'PadModeSelect:28');
@@ -77,8 +80,11 @@ const [base, code, chrome, shots] = process.argv.slice(2);
   // stopping a learn
   await page.click('#mapLearn');
   await waitText('#mapLearn', /Stop learning/);
+  await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
+  for (let i = 0; i < 20 && !pagehideDelete; i++) await new Promise(r => setTimeout(r, 25));
   await page.click('#mapLearn');
   await waitText('#mapLearn', /^Learn$/);
+  assert.equal(pagehideDelete, true, 'closing the page cancels MIDI learn');
 
   // a second mapping, then remove the first
   await page.selectOption('#mapControl', 'PadModeSelect:27');

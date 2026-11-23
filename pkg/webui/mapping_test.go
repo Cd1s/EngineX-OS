@@ -83,7 +83,7 @@ func TestMappingPageDataOfAPlayerBoard(t *testing.T) {
 	if loop.Offers["shift"].Mappable || loop.Offers["shift"].Status != mapping.StatusTaken || loop.Taken["shift"] != "Beat Jump pad mode" || !loop.Offers["hold"].Mappable {
 		t.Fatalf("Shift + LOOP is EngineX's: %+v %v", loop.Offers, loop.Taken)
 	}
-	if byID["Back:16"].Offers["press"].Reason != mapping.ReasonReserved || byID["Sync:20"].Offers["hold"].Status != mapping.StatusTakeover {
+	if byID["Back:16"].Offers["press"].Reason != mapping.ReasonReserved || byID["Sync:20"].Offers["hold"].Mappable || byID["Sync:20"].Offers["hold"].Reason != mapping.ReasonStockUsed {
 		t.Fatalf("%+v %+v", byID["Back:16"], byID["Sync:20"])
 	}
 	if pad.Stock["press"] == "" || pad.Stock["shift"] == "" {
@@ -160,6 +160,7 @@ func TestMappingSaveRejectsWhatDoesNotValidateAndKeepsTheFile(t *testing.T) {
 		"the same gesture 2": {`{"mappings":[` + waveformShift + `,` + waveformShift + `]}`, "duplicate"},
 		"an unknown field":   {`{"mappings":[],"x":1}`, ""},
 		"not JSON":           {`nope`, ""},
+		"trailing JSON":      {`{"mappings":[]} {}`, ""},
 	} {
 		w := mapReq(t, s, "POST", "/api/mapping", c.body)
 		if w.Code != http.StatusBadRequest {
@@ -177,6 +178,22 @@ func TestMappingSaveRejectsWhatDoesNotValidateAndKeepsTheFile(t *testing.T) {
 	}
 	if w := mapReq(t, s, "POST", "/api/mapping", strings.Repeat(" ", mapping.MaxFileBytes+10)); w.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversized: %d", w.Code)
+	}
+}
+
+func TestMappingSaveClearsEngineParseRejectionLatch(t *testing.T) {
+	_, statusDir := mappingDeck(t, "JP07")
+	marker := filepath.Join(statusDir, ".mapping-rejected-JP07")
+	if err := os.MkdirAll(statusDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := mappingServer(t, Config{})
+	mapView(t, mapReq(t, s, "POST", "/api/mapping", `{"mappings":[`+waveformShift+`]}`))
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("save did not clear rejection latch: %v", err)
 	}
 }
 
@@ -410,6 +427,10 @@ func TestMappingLearnSaysWhenTheSequencerCannotBeOpened(t *testing.T) {
 	}
 	if v := learnState(t, s); v.State != "error" || !strings.Contains(v.Error, "ALSA") {
 		t.Fatalf("%+v", v)
+	}
+	mapReq(t, s, "DELETE", "/api/mapping/learn", "")
+	if v := learnState(t, s); v.State != "idle" || v.Error != "" {
+		t.Fatalf("cancel clears the old learn error: %+v", v)
 	}
 	// no controller port: the learn fails with a reason and the source is closed
 	src := &learnSource{events: make(chan []mapping.Event), ports: []mapping.Port{{Client: 14, ClientName: "Midi Through"}}}

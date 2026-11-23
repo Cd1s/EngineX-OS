@@ -82,17 +82,7 @@ func TestApplyRejectsWhatFailsAndLeavesStockAlone(t *testing.T) {
 			t.Errorf("%s: %+v", name, st)
 		}
 	}
-	// a stock file the takeover cannot be applied to: rejected by the generator, not bound
-	_, in, out, file, status := applyDir(t, `[{"board":"JP07","control":"Sync:20","gesture":"hold","action":"sync"}]`)
-	if err := os.WriteFile(in, []byte(strings.Replace(fixtureStock, "syncNote: 20", "syncNote: 21", 1)), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if ok, err := Apply("JP07", in, out, file, status); err == nil || ok {
-		t.Fatalf("%v %v", ok, err)
-	}
-	if st, _ := ReadStatus(status); st.State != "rejected" || !strings.Contains(st.Reason, "cannot disable") {
-		t.Fatalf("%+v", st)
-	}
+
 }
 
 func TestReadStatusOfAMissingFile(t *testing.T) {

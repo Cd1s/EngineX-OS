@@ -30,16 +30,14 @@ func TestValidateAcceptsAShiftAndAHoldOnAPadModeButton(t *testing.T) {
 	}
 }
 
-func TestValidateTakesAStockGestureOnlyWhereItCanBeDisabledAlone(t *testing.T) {
-	// Stock's Sync hold (Instant Double, 2 s) is a module property; its binding can go alone.
-	if err := Validate(Mapping{Board: "JP07", Control: "Sync:20", Gesture: "hold", Action: "waveform_cycle"}); err != nil {
-		t.Fatal(err)
-	}
-	// Its press and shift fire stock functions that have no switch of their own.
-	for _, g := range []string{"press", "shift", "double"} {
-		err := Validate(Mapping{Board: "JP07", Control: "Sync:20", Gesture: g, Action: "waveform_cycle"})
-		if codeOf(t, err) != ReasonStockUsed {
-			t.Errorf("Sync %s: %v", g, err)
+func TestValidateTakesOnlyGesturesTheGeneratorCanApply(t *testing.T) {
+	// Sync owns both Sync:20 and Master:21, and v1 has no Sync takeover.
+	for _, control := range []string{"Sync:20", "Sync:21"} {
+		for _, g := range Gestures {
+			err := Validate(Mapping{Board: "JP07", Control: control, Gesture: g, Action: "waveform_cycle"})
+			if codeOf(t, err) != ReasonStockUsed {
+				t.Errorf("%s %s: %v", control, g, err)
+			}
 		}
 	}
 	// A press on a pad-mode button is the pad mode itself.
@@ -201,7 +199,7 @@ func TestParseReadsTheFileAndRejectsWhatItDoesNotKnow(t *testing.T) {
 	for name, body := range map[string]string{
 		"an unknown field":    `[{"board":"JP07","control":"PadModeSelect:28","gesture":"shift","action":"sync","x":1}]`,
 		"an object":           `{"board":"JP07"}`,
-		"two values":          good + good,
+		"two values":          good + "[]",
 		"an unknown action":   `[{"board":"JP07","control":"PadModeSelect:28","gesture":"shift","action":"nope"}]`,
 		"not JSON":            `nope`,
 		"a repeated gesture":  strings.Replace(good, "]", ",", 1) + good[1:],

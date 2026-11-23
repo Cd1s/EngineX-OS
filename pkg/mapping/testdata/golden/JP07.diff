@@ -1,6 +1,4 @@
 + import InputAssignment 0.1
-+         syncHoldAction: Action.None
--         syncHoldAction: Action.InstantDouble
 +     // EngineX button mapping: begin
 +     // EngineX button mapping: PadModeSelect:27 shift -> waveform_cycle
 +     ValueNoteAssignment {
@@ -83,8 +81,8 @@
 +             changeAmount: 0.1
 +             increaseValue: true
 +             roundRobin: false
-+             minimum: 1.0
-+             maximum: 0.0
++             minimum: 0.0
++             maximum: 1.0
 +         }
 +     }
 +     // EngineX button mapping: PadModeSelect:30 hold -> slip
@@ -97,19 +95,6 @@
 +             holdEnabled: true
 +             holdTarget: PropertyTarget {
 +                 path: deckConfig.activeDeckTrackPath + "SlipMode"
-+             }
-+         }
-+     }
-+     // EngineX button mapping: Sync:20 hold -> cue_countdown_toggle
-+     ValueNoteAssignment {
-+         objectName: "EngineX Map Sync:20 hold"
-+         channel: deckConfig.midiChannel
-+         note: 20
-+         enabled: !globalConfig.shift && deckConfig.inDJMode
-+         output: ComboActionOutput {
-+             holdEnabled: true
-+             holdTarget: PropertyTarget {
-+                 path: "/GUI/Scripted/EngineXMapCueCountdown"
 +             }
 +         }
 +     }

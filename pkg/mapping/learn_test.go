@@ -163,8 +163,8 @@ func TestLearnNamesTheControlAndWhatCannotBeMapped(t *testing.T) {
 	if r == nil || r.Control != "Sync:20" || r.Gesture != GestureHold {
 		t.Fatalf("%+v", r)
 	}
-	if !r.Offer.Mappable || r.Offer.Status != StatusTakeover {
-		t.Errorf("stock's Sync hold can be taken: %+v", r.Offer)
+	if r.Offer.Mappable || r.Offer.Reason != ReasonStockUsed {
+		t.Errorf("stock's Sync hold cannot be taken: %+v", r.Offer)
 	}
 }
 
