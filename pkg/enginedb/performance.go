@@ -550,7 +550,7 @@ func WaveRGB(w rekordbox.Waveform, i int) [3]byte {
 	}
 	p := w.Data[int(offset):]
 	switch w.Tag {
-	case "PWV7":
+	case "PWV7", "PWV6":
 		if w.EntryBytes >= 3 {
 			return [3]byte{p[0], p[1], p[2]}
 		}

@@ -663,6 +663,12 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 		changed = changed || res.Added+res.Updated > 0 || res.PlaylistsChanged
 		shown.set(total - res.Deferred)
 		if res.Deferred == 0 {
+			if n, rerr := enginedb.BackfillStageRGBOverviews(ctx, r, l, stage, dir); rerr != nil {
+				log.Printf("rb-bridge: stage RGB overview backfill skipped: %v", rerr)
+			} else if n > 0 {
+				log.Printf("rb-bridge: generated %d missing stage RGB overviews", n)
+				changed = true
+			}
 			if !changed {
 				// Nothing to publish: the live library already is this export's.
 				log.Printf("rb-bridge: update of %s changed nothing", mount)
@@ -745,6 +751,10 @@ func handToMounts(ctx context.Context, r *compat.Resolver, l *rekordbox.Library,
 	work := len(reread) + added
 	log.Printf("rb-bridge: update checked in %s: %d tracks to read again, %d to add", time.Since(start).Round(time.Millisecond), len(reread), added)
 	if work > inPlaceUpdateTracks || int64(work)*perTrackReadBytes >= st.Size() {
+		return enginedb.Result{}, false, nil
+	}
+	if missingRGB, rerr := enginedb.CountMissingRGBOverviews(ctx, dir); rerr == nil && missingRGB > 0 {
+		log.Printf("rb-bridge: %d analyzed tracks missing RGB overviews; update goes on in its stage", missingRGB)
 		return enginedb.Result{}, false, nil
 	}
 	if work == 0 {

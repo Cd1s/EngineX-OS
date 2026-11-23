@@ -184,7 +184,7 @@ func (a *Analysis) section(tag string, s []byte, h int) error {
 			}
 			a.mergeCue(c)
 		}
-	case "PWV3", "PWV5", "PWV7", "PWV4", "PWAV", "PWV2":
+	case "PWV3", "PWV5", "PWV7", "PWV4", "PWV6", "PWAV", "PWV2":
 		width, count, ok := WaveformShape(tag, s, int64(h), int64(len(s)))
 		if !ok {
 			return bad()
@@ -351,7 +351,7 @@ func ReadAnalysisFile(f *os.File, skip func(tag string) bool) (a *Analysis, read
 
 func isWaveform(tag string) bool {
 	switch tag {
-	case "PWV3", "PWV5", "PWV7", "PWV4", "PWAV", "PWV2":
+	case "PWV3", "PWV5", "PWV7", "PWV4", "PWV6", "PWAV", "PWV2":
 		return true
 	}
 	return false
@@ -365,7 +365,9 @@ func WaveformShape(tag string, hdr []byte, h, n int64) (width, count uint32, ok 
 		return 0, 0, false
 	}
 	width, count = 1, be.Uint32(hdr[12:])
-	if tag == "PWV3" || tag == "PWV4" || tag == "PWV5" || tag == "PWV7" {
+	if tag == "PWV6" {
+		width, count = be.Uint32(hdr[12:]), be.Uint32(hdr[16:])
+	} else if tag == "PWV3" || tag == "PWV4" || tag == "PWV5" || tag == "PWV7" {
 		if n < 24 || len(hdr) < 24 {
 			return 0, 0, false
 		}

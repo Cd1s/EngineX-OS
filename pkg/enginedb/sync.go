@@ -407,10 +407,13 @@ func sourceFiles(res *compat.Resolver, t rekordbox.Track) ([]analysisFile, *anal
 
 // readSources reads a track's ANLZ files and, unless skipAudio, its audio header.
 func readSources(res *compat.Resolver, p preparedTrack, full string, skipAudio bool) (*rekordbox.Analysis, compat.AudioInfo, error) {
-	// A valid PWV7 in the .2EX is the only waveform the import (its overview and peaks) and the
-	// display use: the other files' waveform sections are then not read (#253).
+	// A valid PWV7 in the .2EX supplies the scrolling detail and 3-band overview;
+	// PWV6 in the same .2EX supplies the RGB mini waveform. Skip .EXT/.DAT
+	// waveform bodies when both are present, or read only PWV4 from .EXT when
+	// .2EX lacks PWV6 (#253).
 	parsed := make([]*rekordbox.Analysis, len(p.files))
 	skip := func(string) bool { return false }
+	hasPWV7, hasRGB := false, false
 	for i, f := range p.files {
 		if strings.EqualFold(path.Ext(f.rel), ".2EX") {
 			aa, e := rekordbox.ReadAnalysis(res.FullPath(f.rel))
@@ -418,10 +421,18 @@ func readSources(res *compat.Resolver, p preparedTrack, full string, skipAudio b
 				return nil, compat.AudioInfo{}, e
 			}
 			if w := displayAnalysisWaveform(aa); w != nil && w.Tag == "PWV7" {
-				skip = func(string) bool { return true }
+				hasPWV7 = true
+			}
+			if hasColorOverviewWaveform(aa) {
+				hasRGB = true
 			}
 			parsed[i] = aa
 		}
+	}
+	if hasPWV7 && hasRGB {
+		skip = func(string) bool { return true }
+	} else if hasPWV7 {
+		skip = func(tag string) bool { return tag != "PWV4" }
 	}
 	a := &rekordbox.Analysis{}
 	for i, f := range p.files {
@@ -655,6 +666,11 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		_, e := q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`, id, packBridgeRef(source, refs), emptyAudio)
 		return e
 	}
+	type pendingRGBOverview struct {
+		id   int64
+		blob []byte
+	}
+	var pendingRGB []pendingRGBOverview
 	for i, preparedTrack := range prepared {
 		if err = ctx.Err(); err != nil {
 			return result, err
@@ -1007,6 +1023,11 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			if e = recordWritten(ctx, q, id, perf); e != nil {
 				return result, e
 			}
+			if perf.Overview != nil {
+				if rgbBlob, rerr := EncodeRGBOverview(t, a, perf.Overview); rerr == nil {
+					pendingRGB = append(pendingRGB, pendingRGBOverview{id: id, blob: rgbBlob})
+				}
+			}
 		} else if perf.QuickCues != nil {
 			if _, e = q.ExecContext(ctx, `UPDATE PerformanceData SET quickCues=?,loops=?,activeOnLoadLoops=?,thirdPartySourceId=1 WHERE trackId=?`, perf.QuickCues, perf.Loops, perf.ActiveLoops, id); e != nil {
 				return result, e
@@ -1146,7 +1167,15 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	if OpenElsewhere(filepath.Join(dir, "m.db")) != 0 {
 		return result, ErrLibraryInUse
 	}
-	if err = tx.Commit(); err == nil && opts.Bulk {
+	if err = tx.Commit(); err != nil {
+		return result, err
+	}
+	for _, rgb := range pendingRGB {
+		if werr := WriteRGBOverviewAtomic(dir, databaseUUID, rgb.id, rgb.blob); werr != nil {
+			log.Printf("rb-bridge: RGB overview for track %d not written: %v", rgb.id, werr)
+		}
+	}
+	if opts.Bulk {
 		if err = syncFilePath(filepath.Join(dir, "m.db")); err == nil {
 			err = syncFilePath(filepath.Join(dir, stateFile))
 		}
