@@ -789,7 +789,11 @@ func TestWriteBackCuesDetectsActiveLoopDeactivation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mdb.Exec(`UPDATE PerformanceData SET activeOnLoadLoops = 0 WHERE trackId = 1; UPDATE Track SET lastEditTime = lastEditTime + 2 WHERE id = 1`); err != nil {
+	if _, err := mdb.Exec(`UPDATE PerformanceData SET activeOnLoadLoops = 0 WHERE trackId = 1`); err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	if _, err := mdb.Exec(`UPDATE Track SET lastEditTime = lastEditTime + 2 WHERE id = 1`); err != nil {
 		_ = mdb.Close()
 		t.Fatal(err)
 	}
