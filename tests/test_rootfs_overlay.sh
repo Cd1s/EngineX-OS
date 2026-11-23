@@ -1009,7 +1009,8 @@ printf '[{"board":"JP07"}]\n' > "$TMP/mappings.json"
 rm -f "$TMP/.mapping-rejected-JP07"
 map_guard 'four_deck_waveform=1'
 cat > "$TMP/engine-mapping.log" <<'LOG'
-Engine: Parsing failed for JP07_Controller_Assignments.qml
+Parsing failed: objectName is invalid
+Failed parsing QUrl("file:///usr/Engine/AssignmentFiles/PresetAssignmentFiles/JP07/JP07_Controller_Assignments.qml")
 LOG
 printf '100.0 0.0\n' > "$TMP/boot-uptime"
 printf 'mapping-token\n' > "$TMP/ui-map/boot-token"
@@ -1032,6 +1033,61 @@ map_guard 'four_deck_waveform=1'
 has "mount --bind $mpatched/JP07_Controller_Assignments.qml $massign/JP07/JP07_Controller_Assignments.qml" "$GUARD_LOG"
 lacks '// EngineX button mapping mock' "$mpatched/JP07_Controller_Assignments.qml"
 ok 'button mapping: a post-start parser failure unbinds the mapped copy, restores the 4-deck copy, reports rejection, restarts once, and latches until save'
+# The QQmlComponent load-error form is also detected, while another board's error is ignored.
+rm -f "$TMP/.mapping-rejected-JP07"
+map_guard 'four_deck_waveform=1'
+cat > "$TMP/engine-mapping.log" <<'LOG'
+Failed loading assignment:
+-> "file:///usr/Engine/AssignmentFiles/PresetAssignmentFiles/JP07/JP07_Controller_Assignments.qml:12: invalid property"
+LOG
+printf 'mapping-token-2\n' > "$TMP/ui-map/boot-token"
+printf 'mapping-token-2\n' > "$TMP/ui-map/boot-ready"
+: > "$GUARD_LOG"
+ENGINEX_UI_DIR=$TMP/ui-map ENGINEX_BOOT_UPTIME=$TMP/boot-uptime ENGINEX_BOOT_POLL_INTERVAL=.1 \
+    ENGINEX_ENGINE_LOG=$TMP/engine-mapping.log ENGINEX_ASSIGNMENT_DIR=$massign ENGINEX_ASSIGNMENT_PATCHED=$mpatched \
+    ENGINEX_MAPPINGS=$TMP/mappings.json GUARD_STATE=running PATH=$TMP/guard-bin:$PATH sh "$GUARD" watch > "$TMP/map-watch-2.log" 2>&1 & map_watch=$!
+sleep .3
+kill "$map_watch"; wait "$map_watch" || :
+[[ -e "$TMP/.mapping-rejected-JP07" ]] || fail 'the QQmlComponent load-error form was not detected'
+[[ $(grep -c '^restart --no-block engine.service$' "$GUARD_LOG") == 1 ]] || fail 'the load-error form restarts Engine once'
+rm -f "$TMP/.mapping-rejected-JP07"
+map_guard 'four_deck_waveform=1'
+cat > "$TMP/engine-mapping.log" <<'LOG'
+Failed parsing QUrl("file:///usr/Engine/AssignmentFiles/PresetAssignmentFiles/JP08/JP08_Controller_Assignments.qml")
+LOG
+printf 'mapping-token-3\n' > "$TMP/ui-map/boot-token"
+printf 'mapping-token-3\n' > "$TMP/ui-map/boot-ready"
+: > "$GUARD_LOG"
+ENGINEX_UI_DIR=$TMP/ui-map ENGINEX_BOOT_UPTIME=$TMP/boot-uptime ENGINEX_BOOT_POLL_INTERVAL=.1 \
+    ENGINEX_ENGINE_LOG=$TMP/engine-mapping.log ENGINEX_ASSIGNMENT_DIR=$massign ENGINEX_ASSIGNMENT_PATCHED=$mpatched \
+    ENGINEX_MAPPINGS=$TMP/mappings.json GUARD_STATE=running PATH=$TMP/guard-bin:$PATH sh "$GUARD" watch > "$TMP/map-watch-3.log" 2>&1 & map_watch=$!
+sleep .3
+kill "$map_watch"; wait "$map_watch" || :
+[[ ! -e "$TMP/.mapping-rejected-JP07" ]] || fail 'another board parse error triggered JP07 recovery'
+if grep -q '^restart --no-block engine.service$' "$GUARD_LOG"; then fail 'another board parse error restarted Engine'; fi
+ok 'button mapping: both real Engine parse/load forms are detected and another board is ignored'
+# In a ready steady-state watch pass, no cat command is forked.
+rm -f "$TMP/mappings.json" "$TMP/.mapping-rejected-JP07"
+map_guard 'lang=en'
+printf 'mapping-token-steady\n' > "$TMP/ui-map/boot-token"
+printf 'mapping-token-steady\n' > "$TMP/ui-map/boot-ready"
+cat > "$TMP/guard-bin/cat" <<'CAT'
+#!/bin/sh
+printf 'cat\n' >> "$CAT_LOG"
+exec /bin/cat "$@"
+CAT
+chmod +x "$TMP/guard-bin/cat"
+: > "$TMP/cat.log"
+ENGINEX_UI_DIR=$TMP/ui-map ENGINEX_BOOT_UPTIME=$TMP/boot-uptime ENGINEX_BOOT_POLL_INTERVAL=.1 \
+    CAT_LOG=$TMP/cat.log ENGINEX_ASSIGNMENT_DIR=$massign ENGINEX_ASSIGNMENT_PATCHED=$mpatched \
+    PATH=$TMP/guard-bin:$PATH sh "$GUARD" watch > "$TMP/map-watch-steady.log" 2>&1 & map_watch=$!
+sleep .3
+kill "$map_watch"; wait "$map_watch" || :
+[[ ! -s "$TMP/cat.log" ]] || fail 'ready watch loop forked cat commands'
+ok 'button mapping: ready watch steady state stays zero-fork'
+has '_SYSTEMD_INVOCATION_ID=' "$GUARD"
+if grep -q 'journalctl --boot 0' "$GUARD"; then fail 'mapping log lookup must be scoped to the current Engine invocation'; fi
+ok 'button mapping: parse log lookup is scoped to the current Engine invocation'
 # The same, with the real stream-sync applet, when Go is available: the file the guard binds
 # passes the generator's own static check and carries the mapping.
 if command -v go > /dev/null 2>&1; then

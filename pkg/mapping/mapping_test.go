@@ -2,6 +2,8 @@ package mapping
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -217,7 +219,34 @@ func TestParseReadsTheFileAndRejectsWhatItDoesNotKnow(t *testing.T) {
 	}
 }
 
+func TestSaveRejectsWhenTheGeneratorCannotApplyTheStockFile(t *testing.T) {
+	oldDir := AssignmentDir
+	AssignmentDir = t.TempDir()
+	t.Cleanup(func() { AssignmentDir = oldDir })
+	stock := filepath.Join(AssignmentDir, "JP07", "JP07_Controller_Assignments.qml")
+	if err := os.MkdirAll(filepath.Dir(stock), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stock, []byte("Item {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := Save(filepath.Join(t.TempDir(), "mappings.json"), []Mapping{{Board: "JP07", Control: "PadModeSelect:28", Gesture: "shift", Action: "sync"}})
+	if codeOf(t, err) != "generate" || !strings.Contains(err.Error(), "not a stock assignment") {
+		t.Fatalf("Save error = %v", err)
+	}
+}
+
 func TestSaveWritesAtomicallyAndAnEmptyListRemovesTheFile(t *testing.T) {
+	oldDir := AssignmentDir
+	AssignmentDir = t.TempDir()
+	t.Cleanup(func() { AssignmentDir = oldDir })
+	stock := filepath.Join(AssignmentDir, "JP07", "JP07_Controller_Assignments.qml")
+	if err := os.MkdirAll(filepath.Dir(stock), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stock, []byte(fixtureStock), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	path := t.TempDir() + "/data/mappings.json"
 	list := []Mapping{
 		{Board: "JP07", Control: "PadModeSelect:28", Gesture: "shift", Action: "waveform_cycle"},

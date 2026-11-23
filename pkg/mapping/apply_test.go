@@ -85,6 +85,19 @@ func TestApplyRejectsWhatFailsAndLeavesStockAlone(t *testing.T) {
 
 }
 
+func TestApplyRejectsAValidMappingWhenTheStockFileCannotGenerate(t *testing.T) {
+	_, in, out, file, status := applyDir(t, oneMapping)
+	if err := os.WriteFile(in, []byte("Item {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := Apply("JP07", in, out, file, status); ok || err == nil || !strings.Contains(err.Error(), "not a stock assignment") {
+		t.Fatalf("Apply = %v, %v", ok, err)
+	}
+	if st, _ := ReadStatus(status); st.State != "rejected" || !strings.Contains(st.Reason, "not a stock assignment") {
+		t.Fatalf("%+v", st)
+	}
+}
+
 func TestReadStatusOfAMissingFile(t *testing.T) {
 	if st, err := ReadStatus(filepath.Join(t.TempDir(), "none.json")); err != nil || st.State != "" {
 		t.Fatalf("%+v %v", st, err)

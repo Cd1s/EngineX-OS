@@ -52,17 +52,34 @@ mapping_marker() {
     [ "$dir" = "$mappings" ] && dir=.
     printf '%s/.mapping-rejected-%s' "$dir" "$1"
 }
-mapping_log_has_parse_failure() {
-    board=$1
-    file=$2
+mapping_engine_log() {
     log=${ENGINEX_ENGINE_LOG:-}
     if [ -n "$log" ] && [ -r "$log" ]; then
-        grep -iE 'parsing failed|failed to parse' "$log" 2>/dev/null | grep -Fq "${file##*/}"
-        return $?
+        cat "$log"
+        return 0
     fi
     command -v journalctl >/dev/null 2>&1 || return 1
-    journalctl --boot 0 --unit=engine.service --no-pager --quiet 2>/dev/null |
-        grep -iE 'parsing failed|failed to parse' | grep -Fq "${file##*/}"
+    invocation=${ENGINEX_ENGINE_INVOCATION_ID:-}
+    [ -n "$invocation" ] || invocation=$(systemctl show -p InvocationID --value engine.service 2>/dev/null)
+    [ -n "$invocation" ] || return 1
+    journalctl --unit=engine.service "_SYSTEMD_INVOCATION_ID=$invocation" --no-pager --quiet 2>/dev/null
+}
+mapping_log_has_parse_failure() {
+    file=$2
+    name=${file##*/}
+    mapping_engine_log | awk -v name="$name" '
+        BEGIN { pending = 0; found = 0 }
+        {
+            lower = tolower($0)
+            if (index(lower, "failed parsing") && index($0, name)) found = 1
+            if (index(lower, "parsing failed") && index($0, name)) found = 1
+            if (index(lower, "failed loading assignment:")) { pending = 1; next }
+            if (pending) {
+                if (index($0, name ":")) found = 1
+                if (index($0, "->")) pending = 0
+            }
+        }
+        END { exit found ? 0 : 1 }'
 }
 mark_mapping_parse_rejected() {
     board=$1
@@ -71,10 +88,11 @@ mark_mapping_parse_rejected() {
     status=$patched/mapping-$board.json
     marker=$(mapping_marker "$board")
     mkdir -p "$patched" 2>/dev/null || :
-    : > "$marker" 2>/dev/null || :
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    printf '{"state":"rejected","board":"%s","code":"engine-parse","reason":"Engine rejected %s: parsing failed","time":"%s"}\n' \
-        "$board" "${file##*/}" "$now" > "$status" 2>/dev/null || :
+    result=$(printf '{"state":"rejected","board":"%s","code":"engine-parse","reason":"Engine rejected %s: parsing failed","time":"%s"}\n' \
+        "$board" "${file##*/}" "$now")
+    printf '%s' "$result" > "$marker" 2>/dev/null || :
+    printf '%s' "$result" > "$status" 2>/dev/null || :
 }
 unbind_mapping_after_parse_failure() {
     board=$1
@@ -82,6 +100,7 @@ unbind_mapping_after_parse_failure() {
     patched=${ENGINEX_ASSIGNMENT_PATCHED:-/run/enginex-assignments}
     base=$patched/${file##*/}
     ! mountpoint -q "$file" || umount "$file" || :
+    rm -f "$patched/.map-${file##*/}"
     # Keep the #49/#263 role copy as the fallback assignment.
     if [ -s "$base" ] && grep -q 'EngineX #49: 4-deck role' "$base" 2>/dev/null; then
         mount --bind "$base" "$file" || :
@@ -235,7 +254,7 @@ fallback)
 watch)
     # This replaces the retired database watch in the existing guardian unit.
     # It never opens a library. Progress means completed work, not a heartbeat.
-    seen= progress= since=$(uptime_seconds) exported=0 mapping_checked=0 mapping_restart=0
+    seen= progress= since=$(uptime_seconds) exported=0 checked_token=
     trap 'exit 0' TERM INT HUP
     while :; do
         # Builtins only once the UI is ready: this turn runs every second of a session, and its
@@ -256,8 +275,9 @@ watch)
                 [ ! -e "$UI/boot-count" ] || rm -f "$UI/boot-count"
                 IFS= read -r stage 2>/dev/null < "$UI/boot-stage"
                 [ "$stage" = ui-ready ] || record boot-stage ui-ready
-                if [ "$token" = "$(cat "$UI/boot-ready" 2>/dev/null)" ] && [ "$mapping_checked" -eq 0 ]; then
-                    mapping_checked=1
+                if [ "$checked_token" != "$token" ]; then
+                    checked_token=$token
+                    need_restart=0
                     assign=${ENGINEX_ASSIGNMENT_DIR:-/usr/Engine/AssignmentFiles/PresetAssignmentFiles}
                     patched=${ENGINEX_ASSIGNMENT_PATCHED:-/run/enginex-assignments}
                     for f in "$assign"/JP07/JP07_Controller_Assignments.qml "$assign"/JP08/JP08_Controller_Assignments.qml \
@@ -266,20 +286,19 @@ watch)
                         board=${f##*/}; board=${board%%_*}
                         map=$patched/.map-${f##*/}
                         [ -s "$map" ] || continue
-                        [ -e "$(mapping_marker "$board")" ] ||
-                            mapping_log_has_parse_failure "$board" "$f" || continue
+                        [ ! -e "$(mapping_marker "$board")" ] || continue
+                        mapping_log_has_parse_failure "$board" "$f" || continue
                         unbind_mapping_after_parse_failure "$board" "$f"
-                        mapping_restart=1
+                        need_restart=1
                     done
-                    if [ "$mapping_restart" -eq 1 ] && [ "$(systemctl is-system-running 2>/dev/null)" != stopping ]; then
+                    if [ "$need_restart" -eq 1 ] && [ "$(systemctl is-system-running 2>/dev/null)" != stopping ]; then
                         systemctl reset-failed engine.service >/dev/null 2>&1 || :
                         systemctl restart --no-block engine.service >/dev/null 2>&1 || :
-                        mapping_restart=2
                     fi
                 fi
             elif [ -n "$token" ]; then
                 if [ "$token" != "$seen" ]; then
-                    seen=$token; progress=; since=$now; mapping_checked=0
+                    seen=$token; progress=; since=$now
                 fi
                 current=$(cat "$UI/boot-progress" 2>/dev/null)
                 case $current in
@@ -649,7 +668,10 @@ AWK
                 mkdir -p "$patched" 2>/dev/null
                 map=$patched/.map-${f##*/}
                 rm -f "$map"
-                if [ ! -e "$(mapping_marker "$board")" ]; then
+                marker=$(mapping_marker "$board")
+                if [ -e "$marker" ]; then
+                    [ -s "$marker" ] && cat "$marker" > "$patched/mapping-$board.json" || :
+                else
                     mapt=; ! command -v timeout >/dev/null 2>&1 || mapt="timeout 10"
                     $mapt "${ENGINEX_STREAM_SYNC:-/usr/local/bin/stream-sync}" --mapping-generate "$board" --mapping-in "$src" \
                         --mapping-out "$map" --mapping-file "$mappings" --mapping-status "$patched/mapping-$board.json" ||

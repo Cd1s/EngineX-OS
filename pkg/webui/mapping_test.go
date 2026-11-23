@@ -19,11 +19,44 @@ import (
 func mappingDeck(t *testing.T, board string) (mappings, statusDir string) {
 	t.Helper()
 	dir := t.TempDir()
-	oldM, oldS, oldC := mappingsPath, mappingStatusDir, deviceCompatiblePath
+	oldM, oldS, oldC, oldA := mappingsPath, mappingStatusDir, deviceCompatiblePath, mapping.AssignmentDir
 	mappingsPath = filepath.Join(dir, "data", "mappings.json")
 	mappingStatusDir = filepath.Join(dir, "run")
 	deviceCompatiblePath = filepath.Join(dir, "compatible")
-	t.Cleanup(func() { mappingsPath, mappingStatusDir, deviceCompatiblePath = oldM, oldS, oldC })
+	mapping.AssignmentDir = filepath.Join(dir, "assignments")
+	fixture := []byte(`import airAssignments 1.0
+
+MidiAssignment {
+    GlobalAssignmentConfig {
+        id: globalConfig
+        midiChannel: 0
+    }
+    DeckAssignmentConfig {
+        id: deckConfig
+        midiChannel: globalConfig.midiChannel
+    }
+    PadModeSelect {
+        buttonsModel: ListModel {
+            ListElement { note: 27 }
+            ListElement { note: 28 }
+            ListElement { note: 29 }
+            ListElement { note: 30 }
+        }
+    }
+}
+`)
+	for _, b := range []string{"JP07", "JP08", "JP13", "JP14"} {
+		path := filepath.Join(mapping.AssignmentDir, b, b+"_Controller_Assignments.qml")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, fixture, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		mappingsPath, mappingStatusDir, deviceCompatiblePath, mapping.AssignmentDir = oldM, oldS, oldC, oldA
+	})
 	if board != "" {
 		if err := os.WriteFile(deviceCompatiblePath, []byte("inmusic,"+strings.ToLower(board)+"\x00inmusic,rk3288\x00"), 0o644); err != nil {
 			t.Fatal(err)
@@ -178,6 +211,22 @@ func TestMappingSaveRejectsWhatDoesNotValidateAndKeepsTheFile(t *testing.T) {
 	}
 	if w := mapReq(t, s, "POST", "/api/mapping", strings.Repeat(" ", mapping.MaxFileBytes+10)); w.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversized: %d", w.Code)
+	}
+}
+
+func TestMappingSaveRejectsWhenTheStockAssignmentCannotGenerate(t *testing.T) {
+	file, _ := mappingDeck(t, "JP07")
+	stock := filepath.Join(mapping.AssignmentDir, "JP07", "JP07_Controller_Assignments.qml")
+	if err := os.WriteFile(stock, []byte("Item {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := mappingServer(t, Config{})
+	w := mapReq(t, s, "POST", "/api/mapping", `{"mappings":[`+waveformShift+`]}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "not a stock assignment") {
+		t.Fatalf("save response %d %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("rejected save wrote mappings.json: %v", err)
 	}
 }
 

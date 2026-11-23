@@ -19,6 +19,10 @@ const (
 // FilePath is where the DJ's mappings live on the deck.
 const FilePath = "/data/enginex/mappings.json"
 
+// AssignmentDir is the stock assignment tree used to validate a saved mapping.
+// Tests replace it with a fixture tree.
+var AssignmentDir = "/usr/Engine/AssignmentFiles/PresetAssignmentFiles"
+
 // Mapping is one entry of mappings.json: this gesture on this control runs this action.
 type Mapping struct {
 	Board   string `json:"board"`
@@ -178,9 +182,30 @@ func Marshal(list []Mapping) []byte {
 	return b.Bytes()
 }
 
-// Save validates and writes mappings.json atomically.
-func Save(path string, list []Mapping) error {
+func validateForSave(list []Mapping) error {
 	if err := ValidateAll(list); err != nil {
+		return err
+	}
+	for _, board := range Default().Boards {
+		mine := ForBoard(list, board)
+		if len(mine) == 0 {
+			continue
+		}
+		stockPath := filepath.Join(AssignmentDir, board, board+"_Controller_Assignments.qml")
+		stock, err := os.ReadFile(stockPath)
+		if err != nil {
+			return &Error{Code: "generate", Message: fmt.Sprintf("cannot validate %s against the stock assignment: %v", board, err)}
+		}
+		if _, err := Generate(board, stock, mine); err != nil {
+			return &Error{Code: "generate", Message: fmt.Sprintf("mapping for %s cannot be applied: %v", board, err)}
+		}
+	}
+	return nil
+}
+
+// Save validates against the stock assignment files and writes mappings.json atomically.
+func Save(path string, list []Mapping) error {
+	if err := validateForSave(list); err != nil {
 		return err
 	}
 	if len(list) == 0 {
