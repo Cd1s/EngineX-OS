@@ -13222,6 +13222,124 @@ console.log('ok');
 """)
         self.assertIn("ok", out)
 
+    def view_parts(self):
+        """The main UI's saved-view code as generated: the pref list and the functions that save, restore and switch views."""
+        names = ("scViewControls", "scViewSnapshot", "scViewApply", "scViewApplySlot", "scViewOf", "scViewStore", "scViewSave", "scViewSelect")
+        return {"prefs": self.binding(self.main, "scViewPrefs"), "player": self.binding(self.main, "scIsPlayerBoard"),
+                "functions": [{"name": n, "src": self.function(self.main, n)} for n in names]}
+
+    # The generated view code on one board. `scCall` is what the main UI's setting calls reach stream-sync through: it
+    # sets the root property the way /v1/enginex/ui?<key>=<value> comes back (the real round trip is the 4 s restore
+    # timer in EmbeddedMain.qml; the pref list is the generated one, so a pref without a mapping fails here).
+    VIEWS = r"""
+const V = @VIEW@;
+const viewPrefs = eval(V.prefs);
+function viewBoard(boardName, scPlayer, setting, views) {
+    const posts = [], calls = [];
+    const root = { scBoard: boardName, scPlayer, scFourDeckRole: '', scPairedOn: false, scViews: views || {}, scViewActive: 1,
+        scViewQuiet: 0, scViewLast: '', scViewDirty: false, scWave: 'denon', scUIScale: '100', scTracklistWaveform: false,
+        scDualColumn: false, scCueCountdown: false, scBeatJumpPads: setting, scSwapLoopOrder: false, scViewPrefs: viewPrefs };
+    const vsc = { currentView: 0, resetToDefault() {} };
+    const settings = Object.fromEntries(['deckStyle', 'deckLayout', 'deckCount', 'waveformCount', 'waveformOrientation'].map(k =>
+        [k, { settingNames: ['Normal'], currentName: 'Normal', setCurrentIndex() {} }]));
+    const c = { libraryView: { visibleSettingValue: false }, viewStateController: vsc,
+        deckController: { albumArtVisible: false, deckStyleSetting: settings.deckStyle, deckCountSetting: settings.deckCount },
+        waveformController: { waveformCountSetting: settings.waveformCount, waveformOrientationSetting: settings.waveformOrientation },
+        layoutController: { layoutSetting: settings.deckLayout } };
+    const vctx = { root, Date, console, PlanckGUI: { views: { performanceViewController: c, isPortrait: false } },
+        Planck: { getProperty: () => null }, encodeURIComponent,
+        XMLHttpRequest: function () { this.open = () => {}; this.send = data => posts.push(JSON.parse(data)); },
+        scCall(query) {
+            calls.push(query);
+            for (const [key, value] of new URLSearchParams(query)) {
+                const pref = viewPrefs.find(p => p[1] === key);
+                assert.ok(pref, query);
+                root[pref[0]] = typeof root[pref[0]] === 'boolean' ? value === '1' : value;
+            }
+        } };
+    getter(root, 'scIsPlayerBoard', [root, vctx], V.player);
+    for (const f of V.functions) root[f.name] = fn([root, vctx], f.src);
+    return { root, calls, posts };
+}
+const savedView = extra => Object.assign({ scWave: 'denon', scUIScale: '100', scTracklistWaveform: false, scDualColumn: false,
+    scCueCountdown: false, scSwapLoopOrder: false }, extra);
+"""
+
+    def run_views(self, body):
+        return self.node(self.VIEWS + body, GLOBAL=self.global_parts(), VIEW=self.view_parts())
+
+    def test_a_saved_view_leaves_the_players_beat_jump_setting_alone(self):
+        # Released 5.3.0.5 wrote scBeatJumpPads: false into every player's views.json (its snapshot saved the property,
+        # which was never on). The setting is on by default on the players now: restoring such a view, at boot or with
+        # Shift + VIEW, must not turn it off.
+        out = self.run_views(r"""
+const old = { active: 1, views: { 1: savedView({ scBeatJumpPads: false, scUIScale: '90' }), 2: savedView({ scBeatJumpPads: false, scUIScale: '110' }),
+    3: savedView({ scBeatJumpPads: false }), 4: savedView({ scBeatJumpPads: true }), 5: savedView({ scBeatJumpPads: false }) } };
+for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) for (const scPlayer of [false, true]) {
+    const label = name + (scPlayer ? ' (4 Decks)' : '');
+    const b = viewBoard(name, scPlayer, true, JSON.parse(JSON.stringify(old.views)));
+    assert.equal(b.root.scIsPlayerBoard, true, label);
+    // Boot: the restore timer applies the active view.
+    assert.equal(b.root.scViewApplySlot(1), true, label);
+    assert.deepEqual(b.calls, ['uiScale=90'], label + ': the view still restores its other settings, not the Beat Jump one');
+    assert.equal(b.root.scBeatJumpPads, true, label + ' boot');
+    // Shift + VIEW through every saved view (scViewSelect is what the View button's notifier runs).
+    for (const n of [2, 3, 4, 5, 1, 2]) {
+        b.calls.length = 0;
+        b.root.scViewSelect(n);
+        assert.equal(b.root.scViewActive, n, label);
+        assert.ok(!b.calls.some(q => q.includes('beatJumpPads')), label + ' view ' + n + ': ' + b.calls);
+        assert.equal(b.root.scBeatJumpPads, true, label + ' view ' + n);
+    }
+    // Off stays off, On stays on, whatever a view says.
+    for (const setting of [false, true]) {
+        const s = viewBoard(name, scPlayer, setting, JSON.parse(JSON.stringify(old.views)));
+        for (const n of [1, 2, 3, 4, 5]) s.root.scViewApplySlot(n);
+        assert.equal(s.root.scBeatJumpPads, setting, label + ' setting ' + setting);
+        assert.ok(!s.calls.some(q => q.includes('beatJumpPads')), label);
+        // Nor does it enter the saved views: a snapshot and Save View leave the key out, the other settings stay in.
+        const snap = s.root.scViewSnapshot();
+        assert.ok(!('scBeatJumpPads' in snap), label + ' snapshot');
+        assert.deepEqual(Object.keys(snap).filter(k => viewPrefs.some(p => p[0] === k)).sort(),
+            viewPrefs.map(p => p[0]).filter(k => k !== 'scBeatJumpPads').sort(), label + ' the other prefs are kept');
+        s.root.scViewSave();
+        assert.ok(!('scBeatJumpPads' in s.posts.at(-1).views['1']), label + ' saved view');
+    }
+}
+console.log('ok');
+""")
+        self.assertIn("ok", out)
+
+    def test_mixstream_views_keep_their_beat_jump_bank(self):
+        # #166: on the Mixstream the on-screen Beat Jump Pad Bank is part of a view, as before.
+        out = self.run_views(r"""
+for (const name of ['NH08', 'NH08S', 'NH10']) {
+    const b = viewBoard(name, false, false, { 1: savedView({ scBeatJumpPads: true }), 2: savedView({ scBeatJumpPads: false }) });
+    assert.equal(b.root.scIsPlayerBoard, false, name);
+    assert.equal(b.root.scViewApplySlot(1), true, name);
+    assert.deepEqual(b.calls, ['beatJumpPads=1'], name + ' boot');
+    assert.equal(b.root.scBeatJumpPads, true, name);
+    b.calls.length = 0;
+    b.root.scViewSelect(2);
+    assert.deepEqual(b.calls, ['beatJumpPads=0'], name + ' next view');
+    assert.equal(b.root.scBeatJumpPads, false, name);
+    b.root.scBeatJumpPads = true;
+    assert.equal(b.root.scViewSnapshot().scBeatJumpPads, true, name + ' snapshot');
+    b.root.scViewSave();
+    assert.equal(b.posts.at(-1).views['2'].scBeatJumpPads, true, name + ' saved view');
+}
+// Every other all-in-one: the pref is applied and saved as for any other setting.
+for (const name of ['JC11', 'JC16', 'JP11', 'JP21', 'JC11S', 'JP24', 'RMZ2']) {
+    const b = viewBoard(name, false, true, { 1: savedView({ scBeatJumpPads: false }) });
+    assert.equal(b.root.scIsPlayerBoard, false, name);
+    b.root.scViewApplySlot(1);
+    assert.deepEqual(b.calls, ['beatJumpPads=0'], name);
+    assert.equal(b.root.scViewSnapshot().scBeatJumpPads, false, name);
+}
+console.log('ok');
+""")
+        self.assertIn("ok", out)
+
     def mode_parts(self, gen=True):
         p = self.gen["PadModeSelect.qml"] if gen else self.stock["PadModeSelect.qml"]
         parts = {"single": "function " + p[p.index("singleAction: function ()") + len("singleAction: function "):][:2]

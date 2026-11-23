@@ -1257,7 +1257,10 @@ SERVICES_MAIN = """
 		}
 		if (c.libraryView) s.library = !!c.libraryView.visibleSettingValue
 		if (PlanckGUI.views.isPortrait) s.albumArt = !!c.deckController.albumArtVisible
-		for (const [k] of scViewPrefs) s[k] = typeof root[k] === "boolean" ? root[k] : String(root[k])
+		for (const [k] of scViewPrefs) {
+			if (k === "scBeatJumpPads" && scIsPlayerBoard) continue // on the players the setting is not part of a view (5.3.0.5 saved it Off)
+			s[k] = typeof root[k] === "boolean" ? root[k] : String(root[k])
+		}
 		return s
 	}
 	// EngineX settings a view keeps too: [snapshot key = root property, /v1/enginex/ui query].
@@ -1279,6 +1282,7 @@ SERVICES_MAIN = """
 		if (typeof s.albumArt === "boolean" && PlanckGUI.views.isPortrait && !!c.deckController.albumArtVisible !== s.albumArt) c.deckController.onDisplayAlbumArtClicked()
 		const q = [] // a view saved before these keys keeps the current settings
 		for (const [k, key] of scViewPrefs) {
+			if (k === "scBeatJumpPads" && scIsPlayerBoard) continue // a view saved by 5.3.0.5 holds it Off: it must not turn the mode off
 			const want = s[k]
 			if (typeof want === "boolean" && want !== !!root[k]) q.push(key + "=" + (want ? 1 : 0))
 			else if (typeof want === "string" && want !== String(root[k])) q.push(key + "=" + encodeURIComponent(want))
