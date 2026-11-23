@@ -942,10 +942,13 @@ func CleanWriteBackLeftovers(mount string) int {
 	if !whole {
 		return n // its staged copy and the mark stay for the next mount
 	}
-	if again != "" {
-		if r, err := compat.NewResolver(mount); err == nil {
-			if stamp, err := exportStamp(r, mount); err == nil && stamp != "" {
-				_ = writeMark(dir, stampName, stamp)
+	if r, err := compat.NewResolver(mount); err == nil {
+		if stamp, err := exportStamp(r, mount); err == nil && stamp != "" {
+			// The cleanup has established which complete export is on the stick. Refresh
+			// the marker before the next write-back compares it, including copies made by
+			// a filesystem pull that changed directory mtimes.
+			_ = writeMark(dir, stampName, stamp)
+			if again != "" {
 				_ = writeMark(dir, writeBackAgainName, again+"\n"+stamp)
 			}
 		}

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
@@ -101,6 +102,14 @@ func setupWriteBackStick(t *testing.T, withOneLibrary bool) string {
 				(2, 'Track 2', 12400, 4, ?, 44100, '', '/PIONEER/USBANLZ/P001/ANLZ0000.DAT', 20, 30);
 		`, "/"+testfixture.LargeTrackPath(1), "/"+testfixture.LargeTrackPath(2))
 		if err := os.WriteFile(filepath.Join(stick, "PIONEER", "rekordbox", "exportLibrary.db"), export, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		pdbPath := filepath.Join(stick, "PIONEER", "rekordbox", "export.pdb")
+		pdbStat, err := os.Stat(pdbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(filepath.Join(stick, "PIONEER", "rekordbox", "exportLibrary.db"), pdbStat.ModTime().Add(10*time.Second), pdbStat.ModTime().Add(10*time.Second)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -781,13 +790,6 @@ func TestWriteBackCuesDetectsActiveLoopDeactivation(t *testing.T) {
 	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatalf("ConvertAtMount: %v", err)
 	}
-	perf, err := enginedb.EncodePerformance(rekordbox.Track{Duration: 2, SampleRate: 44100}, &rekordbox.Analysis{
-		Beats: []rekordbox.Beat{{TimeMS: 250, BPM: 120, Number: 1}},
-		Cues:  []rekordbox.Cue{{HotCue: 1, TimeMS: 500, EndMS: 1500, Loop: true, Active: true, Name: "ActLoop", Color: [4]byte{255, 0x00, 0xe0, 0xff}, ColorCode: 9}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	// Deactivate the active loop on the deck without altering beatData/quickCues/loops
 	// (so BridgeWritten digest still matches).
 	mPath := filepath.Join(stick, "Engine Library", "Database2", "m.db")
@@ -795,15 +797,7 @@ func TestWriteBackCuesDetectsActiveLoopDeactivation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mdb.Exec(`UPDATE PerformanceData SET trackData=?, quickCues=?, loops=?, activeOnLoadLoops=? WHERE trackId = 1`, perf.TrackData, perf.QuickCues, perf.Loops, perf.ActiveLoops); err != nil {
-		_ = mdb.Close()
-		t.Fatal(err)
-	}
 	if _, err := mdb.Exec(`UPDATE PerformanceData SET activeOnLoadLoops = 0 WHERE trackId = 1`); err != nil {
-		_ = mdb.Close()
-		t.Fatal(err)
-	}
-	if _, err := mdb.Exec(`UPDATE Track SET lastEditTime = lastEditTime + 2 WHERE id = 1`); err != nil {
 		_ = mdb.Close()
 		t.Fatal(err)
 	}

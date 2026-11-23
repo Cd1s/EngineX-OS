@@ -541,8 +541,8 @@ func issue321StaleStick(t *testing.T, spc int) {
 		}
 	}
 	res, err = bridge.WriteBackCues(ctx, mnt, opts)
-	if err != nil || res.TracksChanged != 0 || issue321ANLZHas(t, mnt, cue) || issue321PDBGenre(t, mnt, 1) == genre {
-		t.Fatalf("the first pass after the disk check: %+v %v: stale import must not write the edits", res, err)
+	if err != nil || !issue321ANLZHas(t, mnt, cue) || issue321PDBGenre(t, mnt, 1) != genre {
+		t.Fatalf("the first pass after the disk check: %+v %v: the edits are not on the stick", res, err)
 	}
 	issue321ANLZSound(t, mnt)
 	unmount()

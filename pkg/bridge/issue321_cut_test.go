@@ -46,7 +46,14 @@ func issue321Copy(t *testing.T, src, dst string) {
 		}
 		defer o.Close()
 		_, err = io.Copy(o, in)
-		return err
+		if err != nil {
+			return err
+		}
+		st, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(out, st.ModTime(), st.ModTime())
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -178,9 +185,6 @@ func TestIssue321WatcherPassCutAtEveryWriteStep(t *testing.T) {
 				}
 			}
 			bridge.CleanWriteBackLeftovers(cut) // the next mount
-			if err := bridge.StampWriteBackForTest(cut); err != nil {
-				t.Fatal(err)
-			}
 			if left := issue321Temps(t, cut); len(left) != 0 {
 				t.Fatalf("cut at %q: left after the next mount: %q", step, left)
 			}
@@ -288,9 +292,6 @@ func TestIssue321WatcherPassCutAtEveryWriteStepOfExportPDB(t *testing.T) {
 				}
 			}
 			bridge.CleanWriteBackLeftovers(cut) // the next mount
-			if err := bridge.StampWriteBackForTest(cut); err != nil {
-				t.Fatal(err)
-			}
 			if left := issue321Temps(t, cut); len(left) != 0 {
 				t.Fatalf("cut at %q: left after the next mount: %q", step, left)
 			}
@@ -442,9 +443,6 @@ func issue321MissingTarget(t *testing.T, oneLib bool) {
 					want = old[st.dst]
 				}
 				bridge.CleanWriteBackLeftovers(cut) // the next mount
-				if err := bridge.StampWriteBackForTest(cut); err != nil {
-					t.Fatal(err)
-				}
 				if got := read(t, cut, st.dst); !bytes.Equal(got, want) {
 					t.Fatalf("%s after the next mount: %d bytes, not the %d of the copy it should have put back", st.dst, len(got), len(want))
 				}
