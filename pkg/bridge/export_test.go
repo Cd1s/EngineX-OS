@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -151,15 +152,41 @@ func InChildForTest(t *testing.T) bool {
 		return false
 	}
 	t.Parallel()
-	args := []string{"-test.run=^" + regexp.QuoteMeta(t.Name()) + "$", "-test.count=1", "-test.v"}
-	if d, ok := t.Deadline(); ok {
-		args = append(args, "-test.timeout="+time.Until(d).Round(time.Second).String())
+	parts := strings.Split(t.Name(), "/")
+	for i, part := range parts {
+		parts[i] = "^" + regexp.QuoteMeta(part) + "$"
 	}
-	cmd := exec.Command(os.Args[0], args...)
+	args := []string{"-test.run=" + strings.Join(parts, "/"), "-test.count=1", "-test.v"}
+	ctx := context.Background()
+	cancel := func() {}
+	if d, ok := t.Deadline(); ok {
+		remaining := time.Until(d)
+		if remaining <= 0 {
+			t.Fatalf("parent test deadline has expired")
+		}
+		childTimeout := remaining - 2*time.Second
+		if childTimeout <= 0 {
+			childTimeout = remaining / 2
+		}
+		if childTimeout <= 0 {
+			childTimeout = time.Nanosecond
+		}
+		args = append(args, "-test.timeout="+childTimeout.String())
+		ctx, cancel = context.WithDeadline(context.Background(), d)
+	}
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], args...)
+	cmd.WaitDelay = time.Second
 	cmd.Env = append(os.Environ(), env+"="+t.Name())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s in its own process: %v\n%s", t.Name(), err, out)
+	}
+	for _, line := range bytes.Split(out, []byte{'\n'}) {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("--- SKIP: ")) {
+			t.Log(string(line))
+		}
 	}
 	if bytes.Contains(out, []byte("--- SKIP: "+t.Name()+" ")) {
 		t.Skipf("skipped in its own process:\n%s", out)
