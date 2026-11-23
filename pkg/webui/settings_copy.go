@@ -60,7 +60,7 @@ func copyUISupported(key, board string) bool {
 	case "stemsEqMode":
 		return c.StemsEq
 	case "beatJumpPads":
-		return c.BeatJumpPads
+		return c.BeatJumpPads || playerBoards[board] // Mixstream's on-screen bank; the players' Shift + LOOP pad mode
 	case "pairedView", "hifiOutput":
 		return playerBoards[board]
 	case "fourDeckWaveform", "shadowMode":

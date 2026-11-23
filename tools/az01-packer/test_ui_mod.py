@@ -12938,6 +12938,669 @@ assert.equal(p8.state().offset, 0);
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+@unittest.skipUnless(shutil.which("node"), "Node runs the generated handlers")
+class PlayerBeatJumpPadModeTest(unittest.TestCase):
+    """The four players' Beat Jump pad mode (Shift + LOOP; pad 1 stock JumpBack, pad 2 stock JumpForward, pads 3-8
+    nothing and unlit), run in Node from the files build_packs.py writes, against the stock qrc's own ActionOutput and
+    ColorOutputAssignment logic. QML name lookup (own properties, then ids, then the context) is modelled with nested
+    JavaScript scopes. Outside the mode every pad, LED and pad mode button must do exactly what stock does.
+    test_controller_qml_compile.sh compiles these files in the Engine; test_beatjump_pads_sandbox.sh runs them there."""
+
+    QRC = LAB / "5.3.0/qrc"
+    CS = "ControlSurfaceModules/ControlSurfaceModules/"
+
+    @classmethod
+    def setUpClass(cls):
+        if not (cls.QRC / cls.CS / "ActionPads.qml").is_file():
+            raise unittest.SkipTest("requires the stock 5.3.0 QML (build host)")
+        cls._tmp = tempfile.mkdtemp(prefix="beatjump-v2-pack-")
+        out = Path(cls._tmp) / "packs"
+        subprocess.run([sys.executable, str(BUILD_PACKS), "--qrc", str(cls.QRC), "--out", str(out)], check=True,
+                       stdout=subprocess.DEVNULL)
+        cls.gen = {name: (out / "en" / cls.CS / name).read_text(encoding="utf-8")
+                   for name in ("ActionPads.qml", "PadModeSelect.qml", "GlobalAssignmentConfig.qml", "private/ActionPadRGBLed.qml")}
+        cls.gen["ColorOutputAssignment.qml"] = (out / "en/airAssignments/OutputAssignment/ColorOutputAssignment.qml").read_text(encoding="utf-8")
+        cls.main = (out / "en/Skins/Embedded/EmbeddedMain.qml").read_text(encoding="utf-8")
+        cls.stock = {name: (cls.QRC / cls.CS / name).read_text(encoding="utf-8")
+                     for name in ("ActionPads.qml", "PadModeSelect.qml", "GlobalAssignmentConfig.qml", "private/ActionPadRGBLed.qml")}
+        cls.stock_action_output = (cls.QRC / "airAssignments/InputAssignment/ActionOutput.qml").read_text(encoding="utf-8")
+        cls.stock_color_output = (cls.QRC / "airAssignments/OutputAssignment/ColorOutputAssignment.qml").read_text(encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(getattr(cls, "_tmp", ""), ignore_errors=True)
+
+    @staticmethod
+    def binding(text, name):
+        """The expression bound to property (or handler) `name`, with its continuation lines."""
+        lines = text.split("\n")
+        pat = re.compile(r"^(\s*)(?:readonly\s+)?(?:property\s+[\w<>.]+\s+)?" + re.escape(name) + r":\s*(.*)$")
+        for i, line in enumerate(lines):
+            m = pat.match(line)
+            if not m:
+                continue
+            indent, expr = len(m.group(1)), [m.group(2).strip()]
+            if expr[0] == "{":
+                return extract_qml_js_block(text, line.strip(), text.index(line))
+            for nxt in lines[i + 1:]:
+                s = nxt.strip()
+                more = expr[-1].endswith(("&&", "||", "?", ":", "+", "(", "[", ",")) or s.startswith(("?", ":", "&&", "||", ".", ")", "]"))
+                if s and (len(nxt) - len(nxt.lstrip()) > indent or more):
+                    expr.append(s)
+                else:
+                    break
+            return " ".join(expr).rstrip(";").rstrip()
+        raise AssertionError(f"no binding {name}")
+
+    @staticmethod
+    def function(text, name, start=0):
+        at = text.index("function " + name + "(", start)
+        return text[at:text.index("{", at)] + extract_qml_js_block(text, "function " + name + "(", at)
+
+    def node(self, body, **parts):
+        js = self.PRELUDE + body
+        for key, value in parts.items():
+            js = js.replace("@" + key + "@", json.dumps(value))
+        result = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout
+
+    PRELUDE = r"""
+const assert = require('node:assert/strict');
+String.prototype.arg = function (v) { // QML's String.arg: the lowest %n
+    const ns = (this.match(/%\d+/g) || []).map(s => +s.slice(1));
+    return ns.length ? this.split('%' + Math.min(...ns)).join(String(v)) : String(this);
+};
+let clock = 100000;
+Date.now = () => (clock += 1000); // no two presses inside the stock double-tap windows
+// fn(scopes, src): a QML function or binding evaluated with QML's lookup order, scopes[0] first.
+function fn(scopes, src) {
+    let code = 'return (' + src.replace(/^function\s+\w+/, 'function') + ')';
+    for (let i = 0; i < scopes.length; i++) code = 'with (s' + i + ') { ' + code + ' }';
+    return new Function(...scopes.map((_, i) => 's' + i), code)(...scopes);
+}
+function getter(obj, name, scopes, expr) {
+    const block = expr.trim().startsWith('{');
+    const f = fn(scopes, block ? 'function () { return eval(' + JSON.stringify(expr) + ') }' : 'function () { return (' + expr + ') }');
+    Object.defineProperty(obj, name, { get: f, configurable: true, enumerable: true });
+}
+let writes = [];
+const translators = {};
+// Translator types as Engine 5.3.0 reports them (sandbox, JP07): Pads/PadN/Action is a HoldAction, ShiftAction,
+// BeatJump/JumpBack|JumpForward and PadModeButtonN(Shift)Pressed are Actions.
+function translator(path) {
+    if (translators[path]) return translators[path];
+    const kind = /\/Pads\/Pad\d+\/Action$/.test(path) ? 'HoldAction'
+        : /(ShiftAction|BeatJump\/Jump(Back|Forward)|PadModeButton\d+(Shift)?Pressed)$/.test(path) ? 'Action'
+        : /ActiveOnLoad$/.test(path) ? 'TwoStateValue' : 'Other';
+    const t = { valueType: kind, editable: true, color: '#000000', _s: false, _v: 0, toString() { return 'T(' + path + ')' },
+        get state() { return this._s }, set state(v) { this._s = v; writes.push(path + ' state=' + v) },
+        get value() { return this._v }, set value(v) { this._v = v; writes.push(path + ' value=' + v) },
+        trigger() { writes.push(path + ' trigger') } };
+    return translators[path] = t;
+}
+const Planck = { getProperty: path => ({ path, translator: translator(path) }) };
+const board = { name: 'JP07' };
+const Config = { device: { get name() { return board.name }, hardwarePadsCount: 8, hasSWBankButton: false, isPlayer: true, rgbPadOffColor: '#101010' } };
+const device = { shift: false, leftParameter: false };
+const deckConfig = { name: '', midiChannel: 0, activeDeckPath: '/Engine/Deck1/', get activeDeckTrackPath() { return this.activeDeckPath + 'Track/' },
+    padsEnabled: true, performanceModesEnabled: true, inDJMode: true, padsMode: 'CUES', padsModeIsStems: false, padsModeIsSlicer: false,
+    padsModeIsSlicerContinuous: false, padsModeIsAutoLoop: false, padsModeIsLoop: false, padsModeIsSampler: false,
+    playerGridEditActive: false, tempoSyncedFlashState: false, pTempoSyncedFlashState: { translator: { value: 0 } },
+    pPadIndexOffset: { translator: { unnormalized: 0 } }, padIndexOffset: 0, pPadsView: null };
+const ctx = { Planck, Config, device, deckConfig, LedType: { None: 0, Simple: 1, RGB: 2 }, Qt: { darker: (c, f) => 'darker(' + c + ',' + f + ')' } };
+
+// GlobalAssignmentConfig, as generated: its Beat Jump part and the palette of the stock file.
+const G = @GLOBAL@;
+const globalConfig = { get shift() { return device.shift }, get leftParameter() { return device.leftParameter },
+    scBeatJumpPadsState: 0, scBeatJumpPadsPolled: true, scBeatJumpDecks: 0, pBeatJumpPads: Planck.getProperty('/GUI/Scripted/EngineXBeatJumpPads') };
+for (const [k, v] of Object.entries(G.palette)) globalConfig[k] = v;
+const gScopes = [globalConfig, Object.assign({ scGlobalConfig: globalConfig }, ctx)];
+getter(globalConfig, 'scBeatJumpPlayer', gScopes, G.player);
+getter(globalConfig, 'scBeatJumpPads', gScopes, G.pads);
+for (const f of G.functions) globalConfig[f.name] = fn(gScopes, f.src);
+let lastPads = globalConfig.scBeatJumpPads;
+const onPadsChanged = fn(gScopes, 'function () { ' + G.onPads + ' }');
+function settle() { const now = globalConfig.scBeatJumpPads; if (now !== lastPads) { lastPads = now; onPadsChanged() } }
+ctx.globalConfig = globalConfig;
+const util = { assertLedType: () => true, ledTypeToString: t => ['None', 'Simple', 'RGB'][t] };
+ctx.util = util;
+"""
+
+    def global_parts(self):
+        g = self.gen["GlobalAssignmentConfig.qml"]
+        palette = dict(re.findall(r'readonly property color (\w+): "(#[0-9A-Fa-f]{6}|black)"', self.stock["GlobalAssignmentConfig.qml"]))
+        return {"palette": palette, "player": self.binding(g, "scBeatJumpPlayer"), "pads": self.binding(g, "scBeatJumpPads"),
+                "onPads": self.binding(g, "onScBeatJumpPadsChanged"),
+                "functions": [{"name": n, "src": self.function(g, n)} for n in ("scBeatJumpBit", "scSetBeatJump", "scSyncBeatJumpPadsFromState")]}
+
+    def pads_parts(self, gen=True):
+        """ActionPads: the module's Beat Jump part, the per-pad output and the stock ActionOutput of the qrc."""
+        a = self.gen["ActionPads.qml"] if gen else self.stock["ActionPads.qml"]
+        ao = self.stock_action_output
+        parts = {"actionOutput": [self.function(ao, n) for n in ("hold", "setValue", "storePropertyPath", "resetStoredPropertyValue")]}
+        if gen:
+            out = a[a.index("output: QtObject {"):]
+            parts.update(on=self.binding(a, "scBeatJumpOn"), press=self.function(a, "scBeatJumpPress"),
+                         setValue=self.function(out, "setValue"), path=self.binding(out[out.index("scStock: ActionOutput"):], "path"))
+        else:
+            out = a[a.index("output: ActionOutput {"):]
+            parts.update(path=self.binding(out, "path"))
+        return parts
+
+    PADS = r"""
+const P = @PADS@;
+function actionOutput(pathOf) {
+    const target = { get path() { return pathOf() }, get(channel, value) { return Planck.getProperty(this.path).translator },
+        getPropertyPath() { return this.path } };
+    const o = { target, behaviour: 0, alwaysTrigger: false, debug: false, privatePart: { enabledTargets: {}, heldPropertyPath: '' },
+        force: { auto: 0, action: 1, hold: 2, twoState: 3 } };
+    for (const src of P.actionOutput) o[src.match(/^function (\w+)/)[1]] = fn([o, ctx], src);
+    return o;
+}
+const module = {};
+if (P.on) {
+    getter(module, 'scBeatJumpOn', [module, ctx], P.on);
+    module.scBeatJumpPress = fn([module, ctx], P.press);
+}
+const pads = [];
+for (let n = 1; n <= 8; n++) {
+    const actionPad = { padIndex: n, get path() { return deckConfig.activeDeckPath + 'Pads/Pad' + n + '/' },
+        get pathActiveOnLoad() { return deckConfig.activeDeckPath + 'Track/LoopRegion' + n + 'ActiveOnLoad' } };
+    const ids = { module, actionPad };
+    const pathOf = fn([{}, ids, ctx], 'function () { return (' + P.path + ') }');
+    let output;
+    if (P.setValue) {
+        output = { scStock: actionOutput(pathOf), scStockHeld: false };
+        output.setValue = fn([output, ids, ctx], P.setValue);
+    } else output = actionOutput(pathOf);
+    pads.push({ output, onNote(channel, value) { output.setValue(channel, value, deckConfig.padsEnabled, 0) } });
+}
+const press = (n, v = 1.0) => pads[n - 1].onNote(0, v), release = n => pads[n - 1].onNote(0, 0.0);
+"""
+
+    def run_pads(self, body, gen=True):
+        return self.node(self.PADS + body, GLOBAL=self.global_parts(), PADS=self.pads_parts(gen))
+
+    # Every pad gesture of the stock modes, recorded as the writes it makes.
+    STOCK_SEQUENCE = r"""
+function sequence() {
+    const log = [];
+    const step = (label, f) => { writes = []; f(); log.push(label + ': ' + writes.join(', ')) };
+    step('hot cue tap', () => { press(1); release(1) });
+    step('hot cue hold', () => { press(2); press(3); release(2); release(3) });
+    step('shift delete', () => { device.shift = true; press(4); release(4); device.shift = false });
+    step('parameter + pad', () => { device.leftParameter = true; press(5); release(5); device.leftParameter = false });
+    step('soft press', () => { press(6, 1 / 127); release(6) });
+    step('disabled while held', () => { press(7); deckConfig.padsEnabled = false; release(7); press(8); release(8); deckConfig.padsEnabled = true });
+    for (const view of ['LOOPS', 'ROLL', 'SLICER']) step(view, () => { deckConfig.padsMode = view; press(1); release(1); press(8); release(8) });
+    deckConfig.padsMode = 'CUES';
+    return log;
+}
+"""
+
+    def test_outside_the_mode_every_pad_does_what_stock_does(self):
+        # Same gestures through the stock ActionOutput directly (stock ActionPads.qml) and through the generated
+        # wrapper, on a player with the setting On and on an all-in-one: the writes are identical.
+        stock = json.loads(self.run_pads(self.STOCK_SEQUENCE + "console.log(JSON.stringify(sequence()))", gen=False))
+        self.assertIn("/Engine/Deck1/Pads/Pad1/Action value=1", stock[0])
+        self.assertIn("/Engine/Deck1/Pads/Pad1/Action value=0", stock[0])
+        self.assertIn("/Engine/Deck1/Pads/Pad4/ShiftAction state=true", stock[2])
+        for name in ("JP07", "JP14", "JP11", "JC11", "NH08", "JP21", "JC20"):
+            with self.subTest(board=name):
+                got = json.loads(self.run_pads(f"board.name = {json.dumps(name)};\n" + self.STOCK_SEQUENCE
+                                               + "console.log(JSON.stringify(sequence()))"))
+                self.assertEqual(got, stock)
+
+    def test_beat_jump_pads_on_the_four_players(self):
+        out = self.run_pads(r"""
+const BJ = (path, kind) => '/Engine/Deck' + path + '/Track/BeatJump/' + kind + ' state=true';
+// A stock HOLD pad: press writes 1; release resets the held path and writes 0 (ActionOutput.qml).
+const tap = action => [action + ' value=1', action + ' value=0', action + ' value=0'];
+for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) {
+    board.name = name; globalConfig.scBeatJumpDecks = 0; settle();
+    assert.equal(globalConfig.scBeatJumpPads, true, name + ': on by default');
+    globalConfig.scSetBeatJump(deckConfig.activeDeckPath, true);
+    assert.equal(module.scBeatJumpOn, true);
+    writes = []; press(1); release(1);
+    assert.deepEqual(writes, [BJ(1, 'JumpBack')], name + ' pad 1');
+    writes = []; press(2); release(2);
+    assert.deepEqual(writes, [BJ(1, 'JumpForward')], name + ' pad 2');
+    writes = []; for (let n = 3; n <= 8; n++) { press(n); release(n) }
+    assert.deepEqual(writes, [], name + ' pads 3-8 write nothing');
+    writes = []; device.shift = true; for (let n = 1; n <= 8; n++) { press(n); release(n) } device.shift = false;
+    assert.deepEqual(writes, [], name + ' Shift + pad writes nothing (no cue delete)');
+    writes = []; deckConfig.padsEnabled = false; press(1); release(1); deckConfig.padsEnabled = true;
+    assert.deepEqual(writes, [], name + ' pads disabled');
+    translator('/Engine/Deck1/Track/BeatJump/JumpBack').editable = false;
+    writes = []; press(1); release(1);
+    assert.deepEqual(writes, [], name + ' JumpBack not editable (no track): as the stock Beat Jump button');
+    translator('/Engine/Deck1/Track/BeatJump/JumpBack').editable = true;
+    // Layer B / 4 decks: the other deck is stock, this one keeps its mode.
+    for (const other of ['/Engine/Deck2/', '/Engine/Deck3/']) {
+        deckConfig.activeDeckPath = other;
+        writes = []; press(1); release(1);
+        assert.deepEqual(writes, tap(other + 'Pads/Pad1/Action'), name + ' ' + other);
+    }
+    deckConfig.activeDeckPath = '/Engine/Deck1/';
+    writes = []; press(2);
+    assert.deepEqual(writes, [BJ(1, 'JumpForward')], name + ' back on Deck1');
+    release(2);
+    // A pad held when the mode starts is released through the stock output; one pressed in the mode is not.
+    globalConfig.scSetBeatJump('/Engine/Deck1/', false);
+    writes = []; press(5); globalConfig.scSetBeatJump('/Engine/Deck1/', true); release(5);
+    assert.deepEqual(writes, tap('/Engine/Deck1/Pads/Pad5/Action'), name + ' held pad');
+    writes = []; press(6); globalConfig.scSetBeatJump('/Engine/Deck1/', false); release(6);
+    assert.deepEqual(writes, ['/Engine/Deck1/Pads/Pad6/Action value=0'], name + ' release after leaving goes to stock, as a stock mode change does');
+    // The setting Off clears the mode.
+    globalConfig.scSetBeatJump('/Engine/Deck1/', true);
+    globalConfig.scBeatJumpPadsPolled = false; settle();
+    assert.equal(globalConfig.scBeatJumpDecks, 0); assert.equal(module.scBeatJumpOn, false);
+    globalConfig.scBeatJumpPadsPolled = true; settle();
+}
+// Not on any other board.
+for (const name of ['JP11', 'JC11', 'JC16', 'NH08', 'JP20', 'JP21', 'JC11S', 'JP11S', 'NH08S', 'NH10', 'JP24', 'RMZ2', 'JC20']) {
+    board.name = name; settle();
+    globalConfig.scSetBeatJump('/Engine/Deck1/', true);
+    assert.equal(globalConfig.scBeatJumpDecks, 0, name);
+    assert.equal(module.scBeatJumpOn, false, name);
+}
+// The setting: the main UI's value wins over the poll; 0 means "not published yet".
+board.name = 'JP07';
+for (const [state, polled, want] of [[0, true, true], [0, false, false], [0.5, true, false], [1, false, true]]) {
+    globalConfig.scBeatJumpPadsState = state; globalConfig.scBeatJumpPadsPolled = polled;
+    assert.equal(globalConfig.scBeatJumpPads, want, state + '/' + polled);
+}
+// The 500 ms sync reads a translator published after the controller first looked (start-up order).
+globalConfig.pBeatJumpPads = { translator: null };
+globalConfig.scBeatJumpPadsState = 0;
+translator('/GUI/Scripted/EngineXBeatJumpPads')._v = 0.5;
+globalConfig.scSyncBeatJumpPadsFromState();
+assert.equal(globalConfig.scBeatJumpPadsState, 0.5);
+assert.equal(globalConfig.scBeatJumpPads, false);
+console.log('ok');
+""")
+        self.assertIn("ok", out)
+
+    def view_parts(self):
+        """The main UI's saved-view code as generated: the pref list and the functions that save, restore and switch views."""
+        names = ("scViewControls", "scViewSnapshot", "scViewApply", "scViewApplySlot", "scViewOf", "scViewStore", "scViewSave", "scViewSelect")
+        return {"prefs": self.binding(self.main, "scViewPrefs"), "player": self.binding(self.main, "scIsPlayerBoard"),
+                "functions": [{"name": n, "src": self.function(self.main, n)} for n in names]}
+
+    # The generated view code on one board. `scCall` is what the main UI's setting calls reach stream-sync through: it
+    # sets the root property the way /v1/enginex/ui?<key>=<value> comes back (the real round trip is the 4 s restore
+    # timer in EmbeddedMain.qml; the pref list is the generated one, so a pref without a mapping fails here).
+    VIEWS = r"""
+const V = @VIEW@;
+const viewPrefs = eval(V.prefs);
+function viewBoard(boardName, scPlayer, setting, views) {
+    const posts = [], calls = [];
+    const root = { scBoard: boardName, scPlayer, scFourDeckRole: '', scPairedOn: false, scViews: views || {}, scViewActive: 1,
+        scViewQuiet: 0, scViewLast: '', scViewDirty: false, scWave: 'denon', scUIScale: '100', scTracklistWaveform: false,
+        scDualColumn: false, scCueCountdown: false, scBeatJumpPads: setting, scSwapLoopOrder: false, scViewPrefs: viewPrefs };
+    const vsc = { currentView: 0, resetToDefault() {} };
+    const settings = Object.fromEntries(['deckStyle', 'deckLayout', 'deckCount', 'waveformCount', 'waveformOrientation'].map(k =>
+        [k, { settingNames: ['Normal'], currentName: 'Normal', setCurrentIndex() {} }]));
+    const c = { libraryView: { visibleSettingValue: false }, viewStateController: vsc,
+        deckController: { albumArtVisible: false, deckStyleSetting: settings.deckStyle, deckCountSetting: settings.deckCount },
+        waveformController: { waveformCountSetting: settings.waveformCount, waveformOrientationSetting: settings.waveformOrientation },
+        layoutController: { layoutSetting: settings.deckLayout } };
+    const vctx = { root, Date, console, PlanckGUI: { views: { performanceViewController: c, isPortrait: false } },
+        Planck: { getProperty: () => null }, encodeURIComponent,
+        XMLHttpRequest: function () { this.open = () => {}; this.send = data => posts.push(JSON.parse(data)); },
+        scCall(query) {
+            calls.push(query);
+            for (const [key, value] of new URLSearchParams(query)) {
+                const pref = viewPrefs.find(p => p[1] === key);
+                assert.ok(pref, query);
+                root[pref[0]] = typeof root[pref[0]] === 'boolean' ? value === '1' : value;
+            }
+        } };
+    getter(root, 'scIsPlayerBoard', [root, vctx], V.player);
+    for (const f of V.functions) root[f.name] = fn([root, vctx], f.src);
+    return { root, calls, posts };
+}
+const savedView = extra => Object.assign({ scWave: 'denon', scUIScale: '100', scTracklistWaveform: false, scDualColumn: false,
+    scCueCountdown: false, scSwapLoopOrder: false }, extra);
+"""
+
+    def run_views(self, body):
+        return self.node(self.VIEWS + body, GLOBAL=self.global_parts(), VIEW=self.view_parts())
+
+    def test_a_saved_view_leaves_the_players_beat_jump_setting_alone(self):
+        # Released 5.3.0.5 wrote scBeatJumpPads: false into every player's views.json (its snapshot saved the property,
+        # which was never on). The setting is on by default on the players now: restoring such a view, at boot or with
+        # Shift + VIEW, must not turn it off.
+        out = self.run_views(r"""
+const old = { active: 1, views: { 1: savedView({ scBeatJumpPads: false, scUIScale: '90' }), 2: savedView({ scBeatJumpPads: false, scUIScale: '110' }),
+    3: savedView({ scBeatJumpPads: false }), 4: savedView({ scBeatJumpPads: true }), 5: savedView({ scBeatJumpPads: false }) } };
+for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) for (const scPlayer of [false, true]) {
+    const label = name + (scPlayer ? ' (4 Decks)' : '');
+    const b = viewBoard(name, scPlayer, true, JSON.parse(JSON.stringify(old.views)));
+    assert.equal(b.root.scIsPlayerBoard, true, label);
+    // Boot: the restore timer applies the active view.
+    assert.equal(b.root.scViewApplySlot(1), true, label);
+    assert.deepEqual(b.calls, ['uiScale=90'], label + ': the view still restores its other settings, not the Beat Jump one');
+    assert.equal(b.root.scBeatJumpPads, true, label + ' boot');
+    // Shift + VIEW through every saved view (scViewSelect is what the View button's notifier runs).
+    for (const n of [2, 3, 4, 5, 1, 2]) {
+        b.calls.length = 0;
+        b.root.scViewSelect(n);
+        assert.equal(b.root.scViewActive, n, label);
+        assert.ok(!b.calls.some(q => q.includes('beatJumpPads')), label + ' view ' + n + ': ' + b.calls);
+        assert.equal(b.root.scBeatJumpPads, true, label + ' view ' + n);
+    }
+    // Off stays off, On stays on, whatever a view says.
+    for (const setting of [false, true]) {
+        const s = viewBoard(name, scPlayer, setting, JSON.parse(JSON.stringify(old.views)));
+        for (const n of [1, 2, 3, 4, 5]) s.root.scViewApplySlot(n);
+        assert.equal(s.root.scBeatJumpPads, setting, label + ' setting ' + setting);
+        assert.ok(!s.calls.some(q => q.includes('beatJumpPads')), label);
+        // Nor does it enter the saved views: a snapshot and Save View leave the key out, the other settings stay in.
+        const snap = s.root.scViewSnapshot();
+        assert.ok(!('scBeatJumpPads' in snap), label + ' snapshot');
+        assert.deepEqual(Object.keys(snap).filter(k => viewPrefs.some(p => p[0] === k)).sort(),
+            viewPrefs.map(p => p[0]).filter(k => k !== 'scBeatJumpPads').sort(), label + ' the other prefs are kept');
+        s.root.scViewSave();
+        assert.ok(!('scBeatJumpPads' in s.posts.at(-1).views['1']), label + ' saved view');
+    }
+}
+console.log('ok');
+""")
+        self.assertIn("ok", out)
+
+    def test_mixstream_views_keep_their_beat_jump_bank(self):
+        # #166: on the Mixstream the on-screen Beat Jump Pad Bank is part of a view, as before.
+        out = self.run_views(r"""
+for (const name of ['NH08', 'NH08S', 'NH10']) {
+    const b = viewBoard(name, false, false, { 1: savedView({ scBeatJumpPads: true }), 2: savedView({ scBeatJumpPads: false }) });
+    assert.equal(b.root.scIsPlayerBoard, false, name);
+    assert.equal(b.root.scViewApplySlot(1), true, name);
+    assert.deepEqual(b.calls, ['beatJumpPads=1'], name + ' boot');
+    assert.equal(b.root.scBeatJumpPads, true, name);
+    b.calls.length = 0;
+    b.root.scViewSelect(2);
+    assert.deepEqual(b.calls, ['beatJumpPads=0'], name + ' next view');
+    assert.equal(b.root.scBeatJumpPads, false, name);
+    b.root.scBeatJumpPads = true;
+    assert.equal(b.root.scViewSnapshot().scBeatJumpPads, true, name + ' snapshot');
+    b.root.scViewSave();
+    assert.equal(b.posts.at(-1).views['2'].scBeatJumpPads, true, name + ' saved view');
+}
+// Every other all-in-one: the pref is applied and saved as for any other setting.
+for (const name of ['JC11', 'JC16', 'JP11', 'JP21', 'JC11S', 'JP24', 'RMZ2']) {
+    const b = viewBoard(name, false, true, { 1: savedView({ scBeatJumpPads: false }) });
+    assert.equal(b.root.scIsPlayerBoard, false, name);
+    b.root.scViewApplySlot(1);
+    assert.deepEqual(b.calls, ['beatJumpPads=0'], name);
+    assert.equal(b.root.scViewSnapshot().scBeatJumpPads, false, name);
+}
+console.log('ok');
+""")
+        self.assertIn("ok", out)
+
+    def test_boards_that_are_not_players_do_not_look_up_the_beat_jump_property(self):
+        # The main UI creates /GUI/Scripted/EngineXBeatJumpPads on the four players only. The controller's 500 ms timer
+        # (shared with the jog and pad brightness syncs) must not ask Engine's C++ for it every time on the others.
+        out = self.run_pads(r"""
+const g = @GLOBALSRC@;
+const lookups = [];
+const getProperty = Planck.getProperty;
+Planck.getProperty = path => { lookups.push(path); return getProperty(path) };
+const initial = () => fn(gScopes, 'function () { return (' + g.initial + ') }')();
+for (const name of ['JP11', 'JC11', 'JC16', 'NH08', 'JP20', 'JP21', 'JC11S', 'JP11S', 'NH08S', 'NH10', 'JP24', 'RMZ2', 'JC20']) {
+    board.name = name;
+    lookups.length = 0;
+    assert.equal(initial(), null, name + ' starts without the property');
+    globalConfig.pBeatJumpPads = null;
+    for (let tick = 0; tick < 4; tick++) globalConfig.scSyncBeatJumpPadsFromState();
+    assert.deepEqual(lookups, [], name + ' makes no lookup');
+    assert.equal(globalConfig.pBeatJumpPads, null, name);
+    assert.equal(globalConfig.scBeatJumpPadsState, 0, name);
+    assert.equal(globalConfig.scBeatJumpPads, false, name);
+}
+// The four players still look it up, again while it has no translator (start-up order), and read it.
+for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) {
+    board.name = name;
+    lookups.length = 0;
+    assert.equal(initial().path, '/GUI/Scripted/EngineXBeatJumpPads', name);
+    globalConfig.pBeatJumpPads = { translator: null }; globalConfig.scBeatJumpPadsState = 0;
+    translator('/GUI/Scripted/EngineXBeatJumpPads')._v = 0.5;
+    globalConfig.scSyncBeatJumpPadsFromState();
+    assert.ok(lookups.length >= 1, name + ' looks the property up');
+    assert.equal(globalConfig.scBeatJumpPadsState, 0.5, name);
+    assert.equal(globalConfig.scBeatJumpPads, false, name);
+    lookups.length = 0; globalConfig.scSyncBeatJumpPadsFromState();
+    assert.deepEqual(lookups, [], name + ' keeps the translator once it has it');
+}
+console.log('ok');
+""".replace("@GLOBALSRC@", json.dumps({"initial": self.binding(self.gen["GlobalAssignmentConfig.qml"], "pBeatJumpPads")})))
+        self.assertIn("ok", out)
+
+    def mode_parts(self, gen=True):
+        p = self.gen["PadModeSelect.qml"] if gen else self.stock["PadModeSelect.qml"]
+        parts = {"single": "function " + p[p.index("singleAction: function ()") + len("singleAction: function "):][:2]
+                 + extract_qml_js_block(p, "singleAction: function ()"),
+                 "lit": self.binding(p, "lit"), "flash": self.binding(p, "flash"), "color": self.binding(p, "color"),
+                 "rgb": extract_qml_js_block(p, "onColor: {")}
+        if gen:
+            parts.update(on=self.binding(p, "scBeatJumpOn"), loopColor=self.binding(p, "scLoopColorProp"),
+                         four=self.binding(p, "scFourPad"), reset=self.function(p, "scResetStemsPage"))
+        return parts
+
+    MODES = r"""
+const M = @MODES@;
+const module = {};
+if (M.on) {
+    getter(module, 'scBeatJumpOn', [module, ctx], M.on);
+    getter(module, 'scLoopColorProp', [module, ctx], M.loopColor);
+    getter(module, 'scFourPad', [module, ctx], M.four);
+    module.scResetStemsPage = fn([module, ctx], M.reset);
+}
+const buttons = [];
+for (let i = 0; i < 4; i++) {
+    const model = { index: i };
+    const button = { scStemsLatchedAt: 0, scExitedStemsAt: 0, pLit: Planck.getProperty('/Engine/Deck1/PadModeButton' + i + 'Lit'),
+        pFlash: Planck.getProperty('/Engine/Deck1/PadModeButton' + i + 'Flash'), pColor: Planck.getProperty('/Engine/Deck1/PadModeButton' + i + 'Color') };
+    for (const k of ['pLit', 'pFlash', 'pColor'])
+        Object.defineProperty(button, k, { get: () => Planck.getProperty(deckConfig.activeDeckPath + 'PadModeButton' + i + k.slice(1)), enumerable: true });
+    const scopes = [button, { module, button, model }, ctx];
+    for (const k of ['lit', 'flash', 'color']) getter(button, k, scopes, M[k]);
+    const led = { get offColor() { return 'black' } };
+    getter(led, 'color', [led, { module, button, model }, ctx], M.rgb);
+    button.led = led;
+    button.single = fn(scopes, M.single);
+    buttons.push(button);
+}
+const pressMode = (i, shift) => { device.shift = !!shift; buttons[i].single(); device.shift = false };
+function engineButtons(selected) {
+    // As Engine sets them (sandbox, JP07): the selected button lit #47c957, the others "Dim" #6f6f6f.
+    for (const path of ['/Engine/Deck1/', '/Engine/Deck2/', '/Engine/Deck3/'])
+        for (let i = 0; i < 4; i++) {
+            translator(path + 'PadModeButton' + i + 'Lit')._s = i === selected;
+            translator(path + 'PadModeButton' + i + 'Color').color = i === selected ? '#47c957' : '#6f6f6f';
+            translator(path + 'PadModeButton' + i + 'Flash')._s = false;
+        }
+}
+"""
+
+    def run_modes(self, body, gen=True):
+        return self.node(self.MODES + body, GLOBAL=self.global_parts(), MODES=self.mode_parts(gen))
+
+    STOCK_MODES = r"""
+function sequence() {
+    const log = [];
+    for (const selected of [0, 1, 2, 3]) {
+        engineButtons(selected);
+        translator('/Engine/Deck1/PadModeButton2Flash')._s = selected === 1;
+        log.push(buttons.map(b => [b.lit, b.flash, String(b.color), String(b.led.color)].join('/')).join(' '));
+    }
+    for (const [i, shift] of [[0, false], [1, false], [1, true], [2, true], [3, false]]) { writes = []; pressMode(i, shift); log.push(writes.join(', ')) }
+    return log;
+}
+"""
+
+    def test_pad_mode_buttons_enter_and_leave_on_the_players_only(self):
+        stock = json.loads(self.run_modes(self.STOCK_MODES + "console.log(JSON.stringify(sequence()))", gen=False))
+        self.assertIn("/Engine/Deck1/PadModeButton1ShiftPressed trigger", stock)
+        for name in ("JP07", "JP11", "JC11", "NH08", "JP21", "JC20"):
+            with self.subTest(board=name):
+                # Outside the mode: lit, flash, colour and every press as stock.
+                got = json.loads(self.run_modes(f"board.name = {json.dumps(name)};\n" + self.STOCK_MODES
+                                                + "console.log(JSON.stringify(sequence()))"))
+                if name == "JP07":
+                    # Shift + LOOP enters the mode there instead of PadModeButton1ShiftPressed; the rest is stock.
+                    self.assertNotIn("/Engine/Deck1/PadModeButton1ShiftPressed trigger", got)
+                    self.assertEqual([g for g in got if g], [s for s in stock if s and "PadModeButton1ShiftPressed" not in s])
+                else:
+                    self.assertEqual(got, stock)
+        out = self.run_modes(r"""
+for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) {
+    board.name = name; globalConfig.scBeatJumpDecks = 0; settle(); deckConfig.activeDeckPath = '/Engine/Deck1/';
+    engineButtons(0);
+    writes = []; pressMode(1, true);
+    assert.deepEqual(writes, [], name + ': Shift + LOOP triggers nothing stock');
+    assert.equal(globalConfig.scBeatJumpDecks, 1 << 1);
+    // LEDs: LOOP lit in Engine's selected-LOOP colour, HOT CUE (selected underneath) dimmed like an unselected button.
+    assert.deepEqual(buttons.map(b => [b.lit, b.flash, String(b.color)]),
+        [[false, false, '#6f6f6f'], [true, false, '#47C957'], [false, false, '#6f6f6f'], [false, false, '#6f6f6f']], name);
+    // Layer B / 4 decks keep their own: Deck3 stock, Deck1 still in the mode.
+    deckConfig.activeDeckPath = '/Engine/Deck3/';
+    assert.equal(module.scBeatJumpOn, false);
+    assert.equal(buttons[0].lit, true);
+    writes = []; pressMode(1, true);
+    assert.equal(globalConfig.scBeatJumpDecks, (1 << 1) | (1 << 3));
+    deckConfig.activeDeckPath = '/Engine/Deck1/';
+    assert.equal(module.scBeatJumpOn, true);
+    // Any unshifted pad mode button leaves the mode of this deck only, then runs its stock action.
+    for (const i of [0, 1, 2, 3]) {
+        globalConfig.scSetBeatJump('/Engine/Deck1/', true);
+        writes = []; pressMode(i, false);
+        assert.equal(module.scBeatJumpOn, false, name + ' button ' + i);
+        assert.equal(globalConfig.scBeatJumpDecks, 1 << 3, name + ' Deck3 kept');
+        assert.ok(writes.includes('/Engine/Deck1/PadModeButton' + i + 'Pressed trigger'), name + ' ' + writes);
+    }
+    // Shift + the other pad mode buttons stay stock.
+    for (const i of [0, 2, 3]) { writes = []; pressMode(i, true); assert.deepEqual(writes, ['/Engine/Deck1/PadModeButton' + i + 'ShiftPressed trigger']) }
+    // Setting Off: Shift + LOOP is stock again.
+    globalConfig.scBeatJumpPadsState = 0.5; settle();
+    writes = []; pressMode(1, true);
+    assert.deepEqual(writes, ['/Engine/Deck1/PadModeButton1ShiftPressed trigger'], name + ' setting Off');
+    assert.equal(globalConfig.scBeatJumpDecks, 0);
+    globalConfig.scBeatJumpPadsState = 0; settle();
+}
+console.log('ok');
+""")
+        self.assertIn("ok", out)
+
+    def led_parts(self, gen=True):
+        led = self.gen["private/ActionPadRGBLed.qml"] if gen else self.stock["private/ActionPadRGBLed.qml"]
+        coa = self.gen["ColorOutputAssignment.qml"] if gen else self.stock_color_output
+        names = ["listenToEditable", "listenToFlash", "pState", "pColor", "pAction", "colorOverride", "padState", "onColor", "offColor",
+                 "pFlashState", "pBackgroundActive", "pPadFlashState", "samplerIndex", "pSamplerFlash", "padPath", "padIndex", "enabled"]
+        parts = {k: self.binding(led, k) for k in names}
+        if gen:
+            parts.update(on=self.binding(led, "scBeatJumpOn"), color=self.binding(led, "scBeatJumpColor"))
+        parts["private"] = {k: self.binding(coa, k) for k in ("activeState", "isPressed", "isEditable", "flashActive", "inColor", "outputColor")}
+        return parts
+
+    LEDS = r"""
+const L = @LEDS@;
+function ledFor(index) {
+    const led = { index, note: 32 + index, usePressed: false, pressedColor: 'white', flashToColor: 'white' };
+    const scopes = [led, ctx];
+    for (const [k, v] of Object.entries(L)) if (!['private', 'on', 'color'].includes(k)) getter(led, k, scopes, v);
+    if (L.on) { getter(led, 'scBeatJumpOn', scopes, L.on); getter(led, 'scBeatJumpColor', scopes, L.color) }
+    getter(led, 'pPressed', scopes, 'pAction');
+    getter(led, 'pEditable', scopes, 'pAction');
+    const privatePart = {};
+    for (const [k, v] of Object.entries(L.private)) getter(privatePart, k, [privatePart, led, ctx], v);
+    led.output = () => String(privatePart.outputColor);
+    return led;
+}
+const leds = [0, 1, 2, 3, 4, 5, 6, 7].map(ledFor);
+function deckStates() {
+    // Pad states as stock modes set them: colours, on/off, editable, flash, background (saved loops).
+    const log = [];
+    for (const [view, flags] of [['CUES', {}], ['LOOPS', { padsModeIsLoop: true }], ['AUTO', { padsModeIsAutoLoop: true }],
+                                 ['ROLL', {}], ['SLICER', { padsModeIsSlicer: true, padsModeIsSlicerContinuous: true }], ['STEMS', { padsModeIsStems: true }]])
+        for (const enabled of [true, false]) {
+            Object.assign(deckConfig, { padsMode: view, padsModeIsLoop: false, padsModeIsAutoLoop: false, padsModeIsSlicer: false,
+                padsModeIsSlicerContinuous: false, padsModeIsStems: false, padsEnabled: enabled }, flags);
+            for (let n = 1; n <= 8; n++) {
+                const p = '/Engine/Deck1/Pads/Pad' + n + '/';
+                translator(p + 'Color').color = ['#ff0000', '#00ff00', '#0000ff', '#ffff00'][n % 4];
+                translator(p + 'State')._s = n % 2 === 0;
+                translator(p + 'Action').editable = n !== 3;
+                translator(p + 'Flash')._v = n === 5 ? 1 : 0;
+                translator(p + 'BackgroundActive')._s = n === 6;
+            }
+            log.push(view + '/' + enabled + ': ' + leds.map(l => l.output()).join(' '));
+        }
+    Object.assign(deckConfig, { padsMode: 'CUES', padsModeIsLoop: false, padsModeIsAutoLoop: false, padsModeIsSlicer: false,
+        padsModeIsSlicerContinuous: false, padsModeIsStems: false, padsEnabled: true });
+    return log;
+}
+"""
+
+    def test_pad_leds(self):
+        stock = json.loads(self.node(self.LEDS + "console.log(JSON.stringify(deckStates()))",
+                                     GLOBAL=self.global_parts(), LEDS=self.led_parts(False)))
+        self.assertEqual(len(set(stock)), len(stock))
+        for name in ("JP07", "JP11", "JC11", "NH08"):
+            with self.subTest(board=name):
+                got = json.loads(self.node(self.LEDS + f"board.name = {json.dumps(name)};\n"
+                                           + "globalConfig.scSetBeatJump('/Engine/Deck2/', true);\n"
+                                           + "console.log(JSON.stringify(deckStates()))",
+                                           GLOBAL=self.global_parts(), LEDS=self.led_parts()))
+                self.assertEqual(got, stock)  # stock colours outside the mode (also with another deck in it)
+        out = self.node(self.LEDS + r"""
+for (const name of ['JP07', 'JP08', 'JP13', 'JP14']) {
+    board.name = name; settle();
+    globalConfig.scSetBeatJump('/Engine/Deck1/', true);
+    for (const state of deckStates()) {
+        const enabled = state.split(':')[0].endsWith('true');
+        const want = enabled ? ['#4B88E1', '#47C957', 'black', 'black', 'black', 'black', 'black', 'black'] : Array(8).fill('black');
+        assert.equal(state.split(': ')[1], want.join(' '), name + ' ' + state);
+    }
+    globalConfig.scSetBeatJump('/Engine/Deck1/', false);
+}
+console.log('ok');
+""", GLOBAL=self.global_parts(), LEDS=self.led_parts())
+        self.assertIn("ok", out)
+
+    def test_main_ui_setting_and_its_controller_bridge(self):
+        main = self.main
+        # One handler per signal on root: a second onScBeatJumpPadsChanged made EmbeddedMain fail to compile (80b1edfc).
+        self.assertEqual(main.count("onScBeatJumpPadsChanged:"), 1)
+        self.assertIn("\tonScBeatJumpPadsChanged: scViewDirty = true\n", main)
+        self.assertIn("\tConnections {\n\t\ttarget: root\n\t\tfunction onScBeatJumpPadsChanged() { root.scSyncBeatJumpPads() }\n\t}\n", main)
+        entries = bp.BEAT_JUMP_ENTRIES
+        self.assertIn('text: "Beat Jump Pad Bank"\n\t\t\tvisible: root.scIsMixstream || root.scIsPlayerBoard\n', entries)
+        self.assertIn('visible: root.scIsMixstream\n', entries.split("Pitch Bend")[1])  # the Mixstream rows stay Mixstream-only
+        sync = self.function(main, "scSyncBeatJumpPads")
+        parse = self.function(main, "scParseSettingsConf")
+        # Offline settings.conf: On on the players unless beat_jump_pads=0 (set before the key loop).
+        self.assertLess(parse.index("root.scBeatJumpPads = root.scIsPlayerBoard"), parse.index("for (const line of"))
+        self.assertIn('else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"', parse)
+        self.assertIn("scIsPlayerBoard && Planck.createProperty(\"EngineXBeatJumpPads\", 0.0, 0)", main)
+        out = self.node(r"""
+const root = { scIsPlayerBoard: true, scUiLoaded: false, scBeatJumpPads: false, scBeatJumpPadsSynced: false };
+const value = { v: 0 };
+const prop = { translator: { set value(x) { value.v = x }, get value() { return value.v } } };
+root.scBeatJumpPadsProp = prop;
+const sync = fn([root, { Planck: { getProperty: () => prop }, root }], @SYNC@);
+root.scBeatJumpPads = true; sync();
+assert.equal(value.v, 0, 'nothing before the settings are loaded'); assert.equal(root.scBeatJumpPadsSynced, false);
+root.scUiLoaded = true; sync(); assert.equal(value.v, 1); assert.equal(root.scBeatJumpPadsSynced, true);
+root.scBeatJumpPads = false; sync(); assert.equal(value.v, 0.5);
+root.scIsPlayerBoard = false; value.v = 0; root.scBeatJumpPads = true; sync(); assert.equal(value.v, 0, 'all-in-ones publish nothing');
+console.log('ok');
+""", GLOBAL=self.global_parts(), SYNC=sync)
+        self.assertIn("ok", out)
+
+
 class EnginesOwnAppleMusicTest(unittest.TestCase):
     """#323 (5.3.0.6): Engine's own Apple Music row is Engine's again; EngineX's reads "Apple Music (EngineX)"."""
     BASES = (("5.3.0", "Skins/Embedded/"), ("5.0.4", "Skins/EmbeddedCommon/"))

@@ -1257,7 +1257,10 @@ SERVICES_MAIN = """
 		}
 		if (c.libraryView) s.library = !!c.libraryView.visibleSettingValue
 		if (PlanckGUI.views.isPortrait) s.albumArt = !!c.deckController.albumArtVisible
-		for (const [k] of scViewPrefs) s[k] = typeof root[k] === "boolean" ? root[k] : String(root[k])
+		for (const [k] of scViewPrefs) {
+			if (k === "scBeatJumpPads" && scIsPlayerBoard) continue // on the players the setting is not part of a view (5.3.0.5 saved it Off)
+			s[k] = typeof root[k] === "boolean" ? root[k] : String(root[k])
+		}
 		return s
 	}
 	// EngineX settings a view keeps too: [snapshot key = root property, /v1/enginex/ui query].
@@ -1279,6 +1282,7 @@ SERVICES_MAIN = """
 		if (typeof s.albumArt === "boolean" && PlanckGUI.views.isPortrait && !!c.deckController.albumArtVisible !== s.albumArt) c.deckController.onDisplayAlbumArtClicked()
 		const q = [] // a view saved before these keys keeps the current settings
 		for (const [k, key] of scViewPrefs) {
+			if (k === "scBeatJumpPads" && scIsPlayerBoard) continue // a view saved by 5.3.0.5 holds it Off: it must not turn the mode off
 			const want = s[k]
 			if (typeof want === "boolean" && want !== !!root[k]) q.push(key + "=" + (want ? 1 : 0))
 			else if (typeof want === "string" && want !== String(root[k])) q.push(key + "=" + encodeURIComponent(want))
@@ -3624,6 +3628,27 @@ SERVICES_MAIN = """
 		}
 	}
 	property bool scBeatJumpPads: false
+	// The four players' Beat Jump pad mode (Shift + LOOP) reads this setting in the controller engine from
+	// /GUI/Scripted/EngineXBeatJumpPads (0.5 Off, 1 On; 0 until the settings are loaded): a change is instant there.
+	property bool scBeatJumpPadsSynced: false
+	readonly property var scBeatJumpPadsPropRef: scIsPlayerBoard && Planck.createProperty("EngineXBeatJumpPads", 0.0, 0)
+	readonly property var scBeatJumpPadsProp: scBeatJumpPadsPropRef && Planck.getProperty("/GUI/Scripted/EngineXBeatJumpPads")
+	function scSyncBeatJumpPads() {
+		if (!scIsPlayerBoard) return
+		const p = scBeatJumpPadsProp && scBeatJumpPadsProp.translator ? scBeatJumpPadsProp : Planck.getProperty("/GUI/Scripted/EngineXBeatJumpPads")
+		if (!p || !p.translator || !scUiLoaded) { scBeatJumpPadsSynced = false; return }
+		p.translator.value = scBeatJumpPads ? 1.0 : 0.5
+		scBeatJumpPadsSynced = true
+	}
+	Timer {
+		interval: 250; running: root.scIsPlayerBoard && root.scUiLoaded && !root.scBeatJumpPadsSynced; repeat: true; triggeredOnStart: true
+		onTriggered: root.scSyncBeatJumpPads()
+	}
+	// Root keeps its one onScBeatJumpPadsChanged handler (views); a second one on root does not compile.
+	Connections {
+		target: root
+		function onScBeatJumpPadsChanged() { root.scSyncBeatJumpPads() }
+	}
 	property bool scPitchBendBeatJump: false
 	property bool scRestoreBpmOnUnsync: false
 	// #289: the controller engine reads the setting from /GUI/Scripted/EngineXRestoreBpm (its
@@ -4499,6 +4524,7 @@ SERVICES_MAIN = """
 		root.scReverseJogRight = false
 		root.scSdHighSpeed = false
 		root.scHifiOutput = false
+		root.scBeatJumpPads = root.scIsPlayerBoard // the players' Beat Jump pad mode is on unless beat_jump_pads=0
 		let restoreBpm = false // assigned once below: no Off/On blink on the controller's centre LED
 		for (const line of (text || "").split("\\n")) {
 			const eq = line.indexOf("=")
@@ -5908,7 +5934,8 @@ def mixstream_fx_entries():
 \t\t\t}},""")
     return "\n".join(out) + "\n"
 
-BEAT_JUMP_ENTRIES = (switch_entry("Beat Jump Pad Bank", "scBeatJumpPads", "beatJumpPads", "\t\t\tvisible: root.scIsMixstream\n")
+# Beat Jump Pad Bank: Mixstream's on-screen bank; on the four players Shift + LOOP's pad mode (on by default).
+BEAT_JUMP_ENTRIES = (switch_entry("Beat Jump Pad Bank", "scBeatJumpPads", "beatJumpPads", "\t\t\tvisible: root.scIsMixstream || root.scIsPlayerBoard\n")
     + switch_entry("Pitch Bend → Beat Jump", "scPitchBendBeatJump", "pitchBendBeatJump", "\t\t\tvisible: root.scIsMixstream\n")
     + mixstream_fx_entries()
     + switch_entry("Swap Loop / Beat Jump", "scSwapLoopOrder", "swapLoopOrder", "\t\t\tvisible: root.scHasAutoLoopKnob\n"))
@@ -8984,6 +9011,34 @@ def edits(dev: bool):
             '    onScPadBrightnessSignalChanged: scSyncPadBrightnessFromState()\n'
             '    property bool scSwapLoopOrder: false\n'
             '    property bool scPitchBendBeatJump: false\n'
+            '    // Beat Jump pad mode on the four players (Shift + LOOP): bit n is set while /Engine/Deck<n>/ is in it.\n'
+            '    // Controller engine only: an Engine restart clears it; per deck: a Layer or 4-deck switch keeps it.\n'
+            '    // The setting comes from /GUI/Scripted/EngineXBeatJumpPads (0 not published yet, 0.5 Off, 1 On; the 500 ms\n'
+            '    // timer reads it) or else the 10 s HTTP poll; it is On by default on these boards.\n'
+            '    readonly property bool scBeatJumpPlayer: ["JP07", "JP08", "JP13", "JP14"].indexOf(String(Config.device.name)) >= 0\n'
+            '    property var pBeatJumpPads: scBeatJumpPlayer ? Planck.getProperty("/GUI/Scripted/EngineXBeatJumpPads") : null\n'
+            '    property real scBeatJumpPadsState: 0\n'
+            '    property bool scBeatJumpPadsPolled: true\n'
+            '    readonly property bool scBeatJumpPads: scBeatJumpPlayer && (scBeatJumpPadsState > 0 ? scBeatJumpPadsState > 0.75 : scBeatJumpPadsPolled)\n'
+            '    property int scBeatJumpDecks: 0\n'
+            '    onScBeatJumpPadsChanged: if (!scBeatJumpPads) scBeatJumpDecks = 0\n'
+            '    function scBeatJumpBit(deckPath) {\n'
+            '        const m = /^\\/Engine\\/Deck([1-4])\\//.exec(String(deckPath || ""))\n'
+            '        return m ? 1 << parseInt(m[1]) : 0\n'
+            '    }\n'
+            '    function scSetBeatJump(deckPath, on) {\n'
+            '        const bit = scBeatJumpBit(deckPath)\n'
+            '        const next = on && scBeatJumpPads ? (scBeatJumpDecks | bit) : (scBeatJumpDecks & ~bit)\n'
+            '        if (next !== scBeatJumpDecks) scBeatJumpDecks = next\n'
+            '    }\n'
+            '    function scSyncBeatJumpPadsFromState() {\n'
+            '        if (!scGlobalConfig.scBeatJumpPlayer) return // the main UI creates the property on the players only\n'
+            '        if (!scGlobalConfig.pBeatJumpPads || !scGlobalConfig.pBeatJumpPads.translator)\n'
+            '            scGlobalConfig.pBeatJumpPads = Planck.getProperty("/GUI/Scripted/EngineXBeatJumpPads")\n'
+            '        const t = scGlobalConfig.pBeatJumpPads && scGlobalConfig.pBeatJumpPads.translator\n'
+            '        const v = t ? t.value : 0\n'
+            '        if (v !== scGlobalConfig.scBeatJumpPadsState) scGlobalConfig.scBeatJumpPadsState = v\n'
+            '    }\n'
             '    property var pRestoreBpm: Planck.getProperty("/GUI/Scripted/EngineXRestoreBpm")\n'
             '    readonly property bool scRestoreBpmOnUnsync: !!(pRestoreBpm && pRestoreBpm.translator && pRestoreBpm.translator.state)\n'
             '    property int scBpmDecimals: 2\n'
@@ -9038,6 +9093,7 @@ def edits(dev: bool):
             '        onTriggered: {\n'
             '            scGlobalConfig.scSyncReverseJogFromState()\n'
             '            scGlobalConfig.scSyncPadBrightnessFromState()\n'
+            '            scGlobalConfig.scSyncBeatJumpPadsFromState()\n'
             '        }\n'
             '    }\n'
             '    Timer {\n'
@@ -9054,6 +9110,7 @@ def edits(dev: bool):
             '                    scGlobalConfig.scReverseJogLeft = !!j.jogInvertLeft\n'
             '                    scGlobalConfig.scReverseJogRight = !!j.jogInvertRight\n'
             '                    scGlobalConfig.scPitchBendBeatJump = !!j.pitchBendBeatJump\n'
+            '                    if (j.beatJumpPads !== undefined) scGlobalConfig.scBeatJumpPadsPolled = !!j.beatJumpPads\n'
             '                    if (j.bpmDecimals !== undefined)\n'
             '                        scGlobalConfig.scBpmDecimals = parseInt(j.bpmDecimals) === 1 ? 1 : 2\n'
             '                    if (Array.isArray(j.mixstreamFx) && j.mixstreamFx.length === 4)\n'
@@ -9193,6 +9250,10 @@ def edits(dev: bool):
         scaled["ControlSurfaceModules/ControlSurfaceModules/PadModeSelect.qml"] = [(
             "    property int ledType: LedType.None\n",
             "    property int ledType: LedType.None\n"
+            "    // Beat Jump pad mode (SC5000 / SC5000M / SC6000 / SC6000M, globalConfig.scBeatJumpPads): LOOP lit, the others\n"
+            "    // unlit in the colour Engine gives an unselected mode button (LOOP's own while LOOP is unselected).\n"
+            "    readonly property bool scBeatJumpOn: typeof globalConfig !== \"undefined\" && !!globalConfig && !!globalConfig.scBeatJumpPads && (globalConfig.scBeatJumpDecks & globalConfig.scBeatJumpBit(deckConfig.activeDeckPath)) !== 0\n"
+            "    readonly property var scLoopColorProp: Planck.getProperty(deckConfig.activeDeckPath + \"PadModeButton1Color\")\n"
             "    // 4-pad models without a software Bank button (NH08/NH08S/NH10/JP11): STEMS only uses pads 1-4;\n"
             "    // keep IndexOffset at 0 so entering or tapping CUE never flips to a blank page 2.\n"
             "    readonly property bool scFourPad: typeof Config !== \"undefined\" && Config && Config.device && Config.device.hardwarePadsCount > 0 && Config.device.hardwarePadsCount <= 4 && !Config.device.hasSWBankButton\n"
@@ -9209,6 +9270,16 @@ def edits(dev: bool):
             "        function onPadIndexOffsetChanged() { module.scResetStemsPage() }\n"
             "    }\n",
         ), (
+            "            readonly property bool lit: pLit.translator && pLit.translator.state\n"
+            "            readonly property bool flash: pFlash.translator && pFlash.translator.state\n"
+            "            readonly property color color: pColor.translator && pColor.translator.color\n",
+            "            readonly property bool lit: module.scBeatJumpOn ? model.index === 1 : pLit.translator && pLit.translator.state\n"
+            "            readonly property bool flash: !module.scBeatJumpOn && pFlash.translator && pFlash.translator.state\n"
+            "            readonly property color color: !module.scBeatJumpOn ? pColor.translator && pColor.translator.color\n"
+            "                : model.index === 1 ? globalConfig.padsModeSelectedAltColor\n"
+            "                : pLit.translator && pLit.translator.state && module.scLoopColorProp && module.scLoopColorProp.translator\n"
+            "                    ? module.scLoopColorProp.translator.color : pColor.translator && pColor.translator.color\n",
+        ), (
             "            ValueNoteAssignment {\n"
             "                id: padModeSelect\n",
             "            property double scStemsLatchedAt: 0\n"
@@ -9216,12 +9287,22 @@ def edits(dev: bool):
             "            ValueNoteAssignment {\n"
             "                id: padModeSelect\n",
         ), (
+            "                        if (globalConfig.shift) {\n"
+            "                            Planck.getProperty(\n",
+            "                        if (globalConfig.shift) {\n"
+            "                            if (model.index === 1 && globalConfig.scBeatJumpPads) {\n"
+            "                                globalConfig.scSetBeatJump(deckConfig.activeDeckPath, true)\n"
+            "                                return\n"
+            "                            }\n"
+            "                            Planck.getProperty(\n",
+        ), (
             "                        } else {\n"
             "                            Planck.getProperty(\n"
             "                                `${deckConfig.activeDeckPath}PadModeButton${model.index}Pressed`\n"
             "                            ).translator.trigger()\n"
             "                        }\n",
             "                        } else {\n"
+            "                            if (module.scBeatJumpOn) globalConfig.scSetBeatJump(deckConfig.activeDeckPath, false)\n"
             "                            const now = Date.now()\n"
             "                            if (model.index === 0 && module.scFourPad && !deckConfig.padsModeIsStems && now - button.scExitedStemsAt < 350) {\n"
             "                                button.scExitedStemsAt = 0\n"
@@ -9255,6 +9336,47 @@ def edits(dev: bool):
             "                                button.scStemsLatchedAt = now\n"
             "                            }\n"
             "                        }\n",
+        )]
+        scaled["ControlSurfaceModules/ControlSurfaceModules/ActionPads.qml"] = [(
+            "    property int displayOffset: deckConfig.name === \"Right\" ? 8 : 0\n",
+            "    property int displayOffset: deckConfig.name === \"Right\" ? 8 : 0\n"
+            "    // Beat Jump pad mode (players, Shift + LOOP): pad 1 is the stock JumpBack and pad 2 the stock JumpForward, on the\n"
+            "    // deck's own beat jump length (the stock Beat Jump buttons' properties); pads 3-8 and Shift + pad do nothing.\n"
+            "    readonly property bool scBeatJumpOn: typeof globalConfig !== \"undefined\" && !!globalConfig && !!globalConfig.scBeatJumpPads && (globalConfig.scBeatJumpDecks & globalConfig.scBeatJumpBit(deckConfig.activeDeckPath)) !== 0\n"
+            "    function scBeatJumpPress(padIndex) {\n"
+            "        const action = [\"JumpBack\", \"JumpForward\"][padIndex - 1]\n"
+            "        const p = action ? Planck.getProperty(deckConfig.activeDeckTrackPath + \"BeatJump/\" + action) : null\n"
+            "        const t = p && p.translator\n"
+            "        if (t && t.editable !== false) t.state = true\n"
+            "    }\n",
+        ), (
+            "                output: ActionOutput {\n"
+            "                    target: PropertyTarget {\n"
+            "                        path: globalConfig.leftParameter\n"
+            "                            ? actionPad.pathActiveOnLoad\n"
+            "                            : actionPad.path + (globalConfig.shift ? \"ShiftAction\" : \"Action\")\n"
+            "                    }\n"
+            "                }\n",
+            "                output: QtObject {\n"
+            "                    // Outside the Beat Jump mode every message goes to the stock ActionOutput, untouched. A pad held\n"
+            "                    // when the mode starts is released through it.\n"
+            "                    property QtObject scStock: ActionOutput {\n"
+            "                        target: PropertyTarget {\n"
+            "                            path: globalConfig.leftParameter\n"
+            "                                ? actionPad.pathActiveOnLoad\n"
+            "                                : actionPad.path + (globalConfig.shift ? \"ShiftAction\" : \"Action\")\n"
+            "                        }\n"
+            "                    }\n"
+            "                    property bool scStockHeld: false\n"
+            "                    function setValue(channel, value, assignmentEnabled, timestamp) {\n"
+            "                        if (module.scBeatJumpOn && !(scStockHeld && !(value > 0))) {\n"
+            "                            if (assignmentEnabled && value > 0 && !globalConfig.shift) module.scBeatJumpPress(actionPad.padIndex)\n"
+            "                            return\n"
+            "                        }\n"
+            "                        scStockHeld = value > 0\n"
+            "                        scStock.setValue(channel, value, assignmentEnabled, timestamp)\n"
+            "                    }\n"
+            "                }\n",
         )]
         # Keep the stock two-item BeatJump layout. The forward target lives
         # inside the size field, so it cannot widen AutoLoop / BeatJump / LEAD.
@@ -9602,7 +9724,22 @@ def edits(dev: bool):
             ("                text: bpmInfoView && bpmInfoView.bpmFractionalText\n",
              '                text: bpmInfo.scBpm2 ? "." + bpmInfo.scBpm2[1] : bpmInfoView && bpmInfoView.bpmFractionalText\n'),
         ]
-        scaled["ControlSurfaceModules/ControlSurfaceModules/private/ActionPadRGBLed.qml"] =[("    enabled: deckConfig.inDJMode\n", "    enabled: deckConfig.inDJMode\n" + pad_brt)]
+        scaled["ControlSurfaceModules/ControlSurfaceModules/private/ActionPadRGBLed.qml"] = [
+            ("    enabled: deckConfig.inDJMode\n", "    enabled: deckConfig.inDJMode\n" + pad_brt),
+            # Beat Jump pad mode (players): the stock colours of the palette, through the same brightness path.
+            ("    readonly property int padIndex: index + 1\n",
+             "    readonly property int padIndex: index + 1\n"
+             "    readonly property bool scBeatJumpOn: typeof globalConfig !== \"undefined\" && !!globalConfig && !!globalConfig.scBeatJumpPads && (globalConfig.scBeatJumpDecks & globalConfig.scBeatJumpBit(deckConfig.activeDeckPath)) !== 0\n"
+             "    readonly property color scBeatJumpColor: !deckConfig.padsEnabled || index > 1 ? globalConfig.padDisabledColor\n"
+             "        : index === 0 ? globalConfig.systemBlueLedColor : globalConfig.padsModeSelectedAltColor\n"),
+            ("    listenToEditable: true\n", "    listenToEditable: !scBeatJumpOn\n"),
+            ("    listenToFlash: deckConfig.inDJMode\n", "    listenToFlash: deckConfig.inDJMode && !scBeatJumpOn\n"),
+            ("    pState: Planck.getProperty(padPath + \"State\")\n", "    pState: scBeatJumpOn ? null : Planck.getProperty(padPath + \"State\")\n"),
+            ("    pColor: deckConfig.padsEnabled && !colorOverride && !deckConfig.padsModeIsSlicer\n",
+             "    pColor: !scBeatJumpOn && deckConfig.padsEnabled && !colorOverride && !deckConfig.padsModeIsSlicer\n"),
+            ("    onColor: {\n        if (deckConfig.padsEnabled) {\n",
+             "    onColor: {\n        if (scBeatJumpOn) {\n            scBeatJumpColor\n        } else if (deckConfig.padsEnabled) {\n"),
+        ]
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/QuadPadRGBLed.qml"] = [("    idx: note\n", "    idx: note\n" + pad_brt)]
         scaled["airAssignments/OutputAssignment/ColorOutputAssignment.qml"] = [
             ("	property bool debug: false;\n",

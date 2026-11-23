@@ -139,6 +139,9 @@ type Server struct {
 	appleMusicHelperTokenCleared bool
 	shadow                       *shadowState // #49 shadow decks
 	remote                       *remoteLoader
+	// board is this deck's image prefix (SC5000, PRIME4, ...; "" off a deck), read once in New: the
+	// device tree never changes while running, and background loadUI calls must not read it again.
+	board string
 
 	automixMu sync.Mutex
 	automix   *AutomixManager
@@ -173,7 +176,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.shadow = newShadowState()
 	s.remote = newRemoteLoader(time.Now)
 	// The board never changes while running: read it once.
-	s.remote.setBoard(imagePrefix(deviceCompatible()))
+	s.board = imagePrefix(deviceCompatible())
+	s.remote.setBoard(s.board)
 	if isDeckStateDir(cfg.StateDir) { // on the deck, not in tests
 		go ensureSpotifyConnectService("/etc/avahi/services")
 	}
