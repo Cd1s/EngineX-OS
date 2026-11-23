@@ -503,12 +503,9 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		metadataDiff := cand.metadata != (rekordbox.Metadata{Genre: rbTrack.Genre, Comment: rbTrack.Comment, Label: rbTrack.Label})
 		if tm.firstRecord && importedRecordChanged(cand.fingerprint, rbTrack) {
 			// An older state has no BridgeSynced baseline. A changed export record explains
-			// metadata differences already present in the Engine library. Preserve a real
-			// deck cue edit when the imported performance digest proves the row changed.
+			// metadata differences already present in the Engine library. Cue/loop edits have
+			// their own Engine performance baseline and remain eligible for write-back.
 			metadataDiff = false
-			if !cand.cues {
-				cuesDiff = false
-			}
 		}
 		if !cuesDiff && !metadataDiff && !(exportCues && known) {
 			confirmed = append(confirmed, cand.seen)
