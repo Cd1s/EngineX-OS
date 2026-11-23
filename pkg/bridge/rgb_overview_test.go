@@ -90,3 +90,62 @@ func TestPublishRemovesRGBOverviewsOfAnotherTrack(t *testing.T) {
 		t.Fatal("an empty RGB overview stayed")
 	}
 }
+
+func TestRenameStagePreservesValidDestinationRGB(t *testing.T) {
+	t.Parallel()
+	makeRGB := func(marker byte) []byte {
+		var raw bytes.Buffer
+		binary.Write(&raw, binary.BigEndian, [2]uint64{1024, 1024})
+		binary.Write(&raw, binary.BigEndian, float64(17803))
+		raw.Write(bytes.Repeat([]byte{marker}, 1024*3+3))
+		comp, err := enginedb.QCompress(raw.Bytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return comp
+	}
+	stored := makeRGB(0)
+	engineA := makeRGB(0x20)
+	engineB := makeRGB(0x30)
+	staged := makeRGB(0x55)
+
+	dir := filepath.Join(t.TempDir(), "Engine Library", "Database2")
+	stage := filepath.Join(dir, importStageName)
+	rgbBridgeLibrary(t, filepath.Join(dir, "m.db"), map[int64]string{1: "../A.flac", 2: "../B.flac", 3: "../D.flac"}, stored)
+	rgbBridgeLibrary(t, filepath.Join(stage, "m.db"), map[int64]string{1: "../A.flac", 2: "../C.flac", 3: "../D.flac"}, stored)
+
+	dst := func(id string) string { return filepath.Join(dir, "OverviewData", "stick-uuid", id+".rgb") }
+	src := func(id string) string { return filepath.Join(stage, "OverviewData", "stick-uuid", id+".rgb") }
+	if err := os.MkdirAll(filepath.Dir(dst("1")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(src("1")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst("1"), engineA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst("2"), engineB, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst("3"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"1", "2", "3"} {
+		if err := os.WriteFile(src(id), staged, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := renameStage(dir, stage); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(dst("1")); err != nil || !bytes.Equal(got, engineA) {
+		t.Fatalf("track 1 valid destination RGB was replaced: err=%v", err)
+	}
+	if got, err := os.ReadFile(dst("2")); err != nil || !bytes.Equal(got, staged) {
+		t.Fatalf("track 2 moved track did not publish staged RGB: err=%v", err)
+	}
+	if got, err := os.ReadFile(dst("3")); err != nil || !bytes.Equal(got, staged) {
+		t.Fatalf("track 3 empty destination RGB was not repaired: err=%v", err)
+	}
+}
