@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
-	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
 type issue321Log struct {
