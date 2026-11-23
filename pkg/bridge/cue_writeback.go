@@ -13,6 +13,7 @@ import (
 	"math/rand/v2"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -171,6 +172,10 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	if tm.firstRecord {
 		kind += ", first record of the stick"
 	}
+	if tm.skipReason != "" {
+		log.Printf("rb-bridge: cue write-back skipped on %s: %s", mountPath, tm.skipReason)
+		return res, err
+	}
 	// One line per pass (#321): what it cost and what it did.
 	log.Printf("rb-bridge: cue write-back of %s %s: %d tracks, %d read, %d changed; ms: candidates %d, key %d, decrypt %d, edit %d, encrypt %d, write %d, total %d; %d files, %d bytes written; pass: %s",
 		mountPath, outcome, res.TracksChecked, res.TracksRead, res.TracksChanged,
@@ -184,6 +189,7 @@ type passTimes struct {
 	candidates, key, decrypt, edit, encrypt, write, total time.Duration
 	bytes                                                 int64
 	firstRecord                                           bool // no BridgeSynced yet: every row is read
+	skipReason                                            string
 }
 
 func (t *passTimes) ms() map[string]int64 {
@@ -255,6 +261,10 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		return res, fmt.Errorf("writeback: no rekordbox export found on %s", absMount)
 	}
 	preStamp, _ := exportStamp(resolver, absMount)
+	if reason := writeBackStampReason(readMark(engineDBDir, stampName), preStamp); reason != "" {
+		tm.skipReason = reason
+		return res, nil
+	}
 
 	mURI := url.URL{Scheme: "file", Path: mDBPath, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
 	settle := func() error { return nil }
@@ -299,9 +309,13 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	query := `SELECT bs.path, bs.trackId, COALESCE(t.pdbImportKey, 0), COALESCE(t.lastEditTime, 0), NULL, NULL
 		FROM bridge.BridgeState bs JOIN Track t ON t.id = bs.trackId`
 	if hasSyncedTable > 0 {
-		query = `SELECT bs.path, bs.trackId, COALESCE(t.pdbImportKey, 0), COALESCE(t.lastEditTime, 0), sy.lastEditTime, sy.digest
+		query = `SELECT bs.path, bs.trackId, COALESCE(t.pdbImportKey, 0), COALESCE(t.lastEditTime, 0), sy.lastEditTime, sy.digest, bs.fingerprint
 			FROM bridge.BridgeState bs JOIN Track t ON t.id = bs.trackId
 			LEFT JOIN bridge.BridgeSynced sy ON sy.trackId = bs.trackId`
+	}
+	if hasSyncedTable == 0 {
+		query = `SELECT bs.path, bs.trackId, COALESCE(t.pdbImportKey, 0), COALESCE(t.lastEditTime, 0), NULL, NULL, bs.fingerprint
+			FROM bridge.BridgeState bs JOIN Track t ON t.id = bs.trackId`
 	}
 	written := `NULL`
 	if hasWrittenTable > 0 {
@@ -320,6 +334,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		engineID     int64
 		pdbImportKey int64
 		edit         any
+		fingerprint  string
 	}
 	var reads []candidateTrack
 	rows, err := db.QueryContext(ctx, query)
@@ -332,7 +347,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		var c candidateTrack
 		var syncedEdit any
 		var syncedDigest []byte
-		if err := rows.Scan(&c.enginePath, &c.engineID, &c.pdbImportKey, &c.edit, &syncedEdit, &syncedDigest); err != nil {
+		if err := rows.Scan(&c.enginePath, &c.engineID, &c.pdbImportKey, &c.edit, &syncedEdit, &syncedDigest, &c.fingerprint); err != nil {
 			return res, err
 		}
 		res.TracksChecked++
@@ -443,7 +458,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	for _, tr := range rbLib.Tracks {
 		byID[tr.ID] = tr
 		if tr.Path != "" {
-			norm := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(tr.Path)), "/")
+			norm := normalizeRekordboxPath(tr.Path)
 			byPath[norm] = tr
 			byPathFold[strings.ToLower(norm)] = tr
 		}
@@ -486,6 +501,15 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 			cuesDiff = !cuesEquivalent(origCues, nextCues)
 		}
 		metadataDiff := cand.metadata != (rekordbox.Metadata{Genre: rbTrack.Genre, Comment: rbTrack.Comment, Label: rbTrack.Label})
+		if tm.firstRecord && importedRecordChanged(cand.fingerprint, rbTrack) {
+			// An older state has no BridgeSynced baseline. A changed export record explains
+			// metadata differences already present in the Engine library. Preserve a real
+			// deck cue edit when the imported performance digest proves the row changed.
+			metadataDiff = false
+			if !cand.cues {
+				cuesDiff = false
+			}
+		}
 		if !cuesDiff && !metadataDiff && !(exportCues && known) {
 			confirmed = append(confirmed, cand.seen)
 			continue
@@ -1071,6 +1095,44 @@ func readStickRekordboxLibrary(ctx context.Context, r *compat.Resolver, mountPat
 	return nil, "", fmt.Errorf("writeback: no rekordbox export found on %s", mountPath)
 }
 
+func writeBackStampReason(imported, current string) string {
+	if imported == "" {
+		return "Engine library has no import stamp"
+	}
+	if !strings.HasPrefix(imported, stampVersion+" ") {
+		return "Engine library import stamp is older than v4"
+	}
+	if current == "" {
+		return "current rekordbox export has no stamp"
+	}
+	if imported != current {
+		return "Engine library import stamp does not match the current rekordbox export"
+	}
+	return ""
+}
+
+func normalizeRekordboxPath(p string) string {
+	p = strings.ReplaceAll(p, "\\", "/")
+	p = strings.TrimLeft(p, "/")
+	for strings.HasPrefix(p, "../") {
+		p = strings.TrimPrefix(p, "../")
+	}
+	return path.Clean(p)
+}
+
+func sameRekordboxPath(a, b string) bool {
+	a, b = normalizeRekordboxPath(a), normalizeRekordboxPath(b)
+	return a != "." && a != "" && a == b
+}
+
+func importedRecordChanged(fingerprint string, tr rekordbox.Track) bool {
+	if tr.RecordHash == "" {
+		return false
+	}
+	source, _, ok := strings.Cut(fingerprint, ":")
+	return ok && source != "" && source != tr.RecordHash
+}
+
 func resolveRekordboxTrack(
 	ctx context.Context,
 	db *sql.DB,
@@ -1081,17 +1143,19 @@ func resolveRekordboxTrack(
 	byPath map[string]rekordbox.Track,
 	byPathFold map[string]rekordbox.Track,
 ) (rekordbox.Track, bool) {
-	if pdbImportKey > 0 && pdbImportKey <= math.MaxUint32 {
-		if tr, ok := byID[uint32(pdbImportKey)]; ok {
-			return tr, true
-		}
-	}
-	norm := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(enginePath)), "../")
+	norm := normalizeRekordboxPath(enginePath)
 	if tr, ok := byPath[norm]; ok {
 		return tr, true
 	}
 	if tr, ok := byPathFold[strings.ToLower(norm)]; ok {
 		return tr, true
+	}
+	if pdbImportKey > 0 && pdbImportKey <= math.MaxUint32 {
+		if tr, ok := byID[uint32(pdbImportKey)]; ok {
+			if sameRekordboxPath(tr.Path, enginePath) {
+				return tr, true
+			}
+		}
 	}
 	if hasAnalysis {
 		var srcJSON []byte
@@ -1103,7 +1167,7 @@ func resolveRekordboxTrack(
 					}
 				}
 				if json.Unmarshal(raw, &decoded) == nil && decoded.Track.ID != 0 {
-					if tr, ok := byID[decoded.Track.ID]; ok {
+					if tr, ok := byID[decoded.Track.ID]; ok && sameRekordboxPath(tr.Path, enginePath) {
 						return tr, true
 					}
 				}
@@ -1126,6 +1190,31 @@ func trackRekordboxOffset(r *compat.Resolver, trackPath string) float64 {
 		return 0
 	}
 	return float64(info.RekordboxOffset())
+}
+
+var (
+	engineDefaultHotCueColor = [4]byte{255, 0, 255, 0}
+	engineDefaultLoopColor   = [4]byte{255, 255, 127, 0}
+)
+
+func uncolouredCue(c rekordbox.Cue) bool {
+	return c.Color == ([4]byte{}) && c.ColorCode == 0 && c.ColorID == 0
+}
+
+func preserveUncolouredColor(orig rekordbox.Cue, color [4]byte, startMS, endMS uint32, loop bool) bool {
+	if !uncolouredCue(orig) || absDiffU32(orig.TimeMS, startMS) > 2 {
+		return false
+	}
+	if loop && (!orig.Loop || absDiffU32(orig.EndMS, endMS) > 2) {
+		return false
+	}
+	if !loop && orig.Loop {
+		return false
+	}
+	if loop {
+		return color == engineDefaultLoopColor
+	}
+	return color == engineDefaultHotCueColor
 }
 
 func resolveANLZVariant(r *compat.Resolver, baseRel, ext string) (string, bool) {
@@ -1251,7 +1340,9 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offsetSamples
 			var loopNum, loopDen uint16
 			if oc, ok := origHot[pad]; ok && oc.Loop && absDiffU32(oc.TimeMS, startMS) <= 2 && absDiffU32(oc.EndMS, endMS) <= 2 {
 				loopNum, loopDen = oc.LoopNumerator, oc.LoopDenominator
-				if oc.Color == rgb && oc.ColorCode != 0 {
+				if preserveUncolouredColor(oc, rgb, startMS, endMS, true) {
+					rgb, code = [4]byte{}, 0
+				} else if oc.Color == rgb && oc.ColorCode != 0 {
 					code = oc.ColorCode
 				}
 			}
@@ -1273,8 +1364,12 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offsetSamples
 
 		rgb := hc.Color
 		code := rekordbox.NearestCueColorCode(rgb)
-		if oc, ok := origHot[pad]; ok && !oc.Loop && oc.Color == rgb && oc.ColorCode != 0 {
-			code = oc.ColorCode
+		if oc, ok := origHot[pad]; ok && !oc.Loop {
+			if preserveUncolouredColor(oc, rgb, startMS, 0, false) {
+				rgb, code = [4]byte{}, 0
+			} else if oc.Color == rgb && oc.ColorCode != 0 {
+				code = oc.ColorCode
+			}
 		}
 		out = append(out, rekordbox.Cue{
 			HotCue:    pad,
@@ -1310,7 +1405,11 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offsetSamples
 		for _, oc := range origMemLoops {
 			if absDiffU32(oc.TimeMS, startMS) <= 2 && absDiffU32(oc.EndMS, endMS) <= 2 {
 				loopNum, loopDen = oc.LoopNumerator, oc.LoopDenominator
-				if oc.ColorID != 0 && oc.ColorID <= 8 {
+				if preserveUncolouredColor(oc, lp.Color, startMS, endMS, true) {
+					colorID = 0
+					memColor = [4]byte{}
+					memColorCode = 0
+				} else if oc.ColorID != 0 && oc.ColorID <= 8 {
 					colorID = oc.ColorID
 				} else if oc.ColorID == 0 && oc.Color != ([4]byte{}) && oc.Color == lp.Color {
 					colorID = 0
