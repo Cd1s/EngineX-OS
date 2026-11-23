@@ -894,7 +894,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			wantBoard: "SC5000",
 			player:    true,
 			caps: uiCapabilities{
-				Mixer: false, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
+				Mixer: false, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: true,
 				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: false, SDHighSpeed: true,
 			},
 		},
@@ -954,7 +954,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			wantBoard: "SC5000M",
 			player:    true,
 			caps: uiCapabilities{
-				Mixer: false, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
+				Mixer: false, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: true,
 				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: false, RemoteStems: true, JogWheel: false, SDHighSpeed: true,
 			},
 		},
@@ -1008,6 +1008,39 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 	}
 	if !strings.Contains(indexHTML, "v.buildTag") {
 		t.Fatal("web console missing buildTag display")
+	}
+}
+
+func TestBeatJumpPadsPlayerDefaultAndOffPersistence(t *testing.T) {
+	oldCompat := deviceCompatiblePath
+	defer func() { deviceCompatiblePath = oldCompat }()
+	compat := filepath.Join(t.TempDir(), "compatible")
+	if err := os.WriteFile(compat, []byte("inmusic,jp07\x00rockchip,rk3288\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deviceCompatiblePath = compat
+	dir := t.TempDir()
+	cfg := Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}
+	srv := httptest.NewServer(New(cfg, nil))
+	defer srv.Close()
+	if code, v := uiPost(t, srv.URL, ""); code != 200 || !v.BeatJumpPads {
+		t.Fatalf("SC5000 default: code=%d beatJumpPads=%v", code, v.BeatJumpPads)
+	}
+	if code, v := uiPost(t, srv.URL, "beatJumpPads=0"); code != 200 || v.BeatJumpPads {
+		t.Fatalf("SC5000 disable: code=%d beatJumpPads=%v", code, v.BeatJumpPads)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(splitLines(b), "beat_jump_pads=0") {
+		t.Fatalf("SC5000 disable was not persisted: %s", b)
+	}
+	srv.Close()
+	again := httptest.NewServer(New(cfg, nil))
+	defer again.Close()
+	if code, v := uiPost(t, again.URL, ""); code != 200 || v.BeatJumpPads {
+		t.Fatalf("SC5000 disabled value did not survive restart: code=%d beatJumpPads=%v", code, v.BeatJumpPads)
 	}
 }
 

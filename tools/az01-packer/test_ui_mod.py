@@ -12839,7 +12839,11 @@ Date.now = () => now;
 function runDevice(padsCount) {
     let view = 'CUES', offset = 0, triggers = [];
     const Config = { device: { hardwarePadsCount: padsCount, hasSWBankButton: false } };
-    const globalConfig = { shift: false };
+    const globalConfig = {
+        shift: false, isPlayer: false, scBeatJumpPads: false,
+        scBeatJumpMode: () => false,
+        scSetBeatJumpMode: () => {},
+    };
     const module = {};
     const button = { scStemsLatchedAt: 0, scExitedStemsAt: 0 };
     const model = { index: 0 };
@@ -14181,6 +14185,208 @@ assert.strictEqual(say(true, [1, 2], false), 'T:Stems', 'no hint without a busy 
                      'Planck.getProperty("/Engine/Deck%1/Track/Unload".arg(deck)).translator.state = true'):
             self.assertIn(text, src, text)
 
+
+class BeatJumpPadModeTest(unittest.TestCase):
+    """Beat Jump pads use the free Shift+LOOP gesture and preserve stock pad behavior."""
+
+    _generated_pack_dir = None
+
+    @staticmethod
+    def _block(text, start):
+        i = text.index(start)
+        j = text.index("{", i)
+        depth = 0
+        for k in range(j, len(text)):
+            depth += (text[k] == "{") - (text[k] == "}")
+            if depth == 0:
+                return text[i:k + 1]
+        raise AssertionError(start)
+
+    @staticmethod
+    def _patched(relative, stock):
+        if stock:
+            if BeatJumpPadModeTest._generated_pack_dir is None:
+                out = Path(tempfile.mkdtemp(prefix="beatjump-pack-"))
+                built = subprocess.run(
+                    [sys.executable, str(BUILD_PACKS), "--qrc", str(LAB / "5.3.0/qrc"), "--out", str(out)],
+                    capture_output=True,
+                    text=True,
+                )
+                if built.returncode != 0:
+                    raise AssertionError(built.stderr or built.stdout)
+                BeatJumpPadModeTest._generated_pack_dir = out
+            generated = BeatJumpPadModeTest._generated_pack_dir / "en" / relative
+            if generated.is_file():
+                return generated.read_text(encoding="utf-8")
+        previous = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            patches = bp.edits(False)[relative]
+        finally:
+            bp.ROOT = previous
+        text = (LAB / "5.3.0/qrc/" / relative).read_text(encoding="utf-8") if stock else ""
+        for old, new in patches:
+            if text.count(old) != 1:
+                raise AssertionError(old[:80])
+            text = text.replace(old, new, 1)
+        return text
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for Beat Jump pad handlers")
+    def test_shift_loop_enters_mode_and_stock_paths_remain(self):
+        qml = self._patched(
+            "ControlSurfaceModules/ControlSurfaceModules/PadModeSelect.qml", True
+        )
+        single = self._block(qml, "singleAction: function ()")
+        script = r"""
+const assert = require('node:assert/strict');
+function press(shift, enabled, index, initialView) {
+    let view = initialView, triggers = [];
+    let mode = initialView === 'BEAT_JUMP';
+    const globalConfig = {
+        shift, scBeatJumpPads: enabled, isPlayer: true,
+        scBeatJumpMode: () => mode,
+        scSetBeatJumpMode: (_, value) => { mode = !!value; },
+    };
+    const module = { scFourPad: false, get scBeatJumpActive() { return mode; } };
+    const model = { index };
+    const button = { scStemsLatchedAt: 0, scExitedStemsAt: 0 };
+    const deckConfig = {
+        activeDeckPath: '/Engine/Deck1/',
+        padsModeIsStems: false,
+        get padsMode() { return view; },
+        pPadsView: { translator: { set string(v) { view = v; } } },
+        pPadIndexOffset: { translator: { unnormalized: 0 } },
+    };
+    const Planck = { getProperty(path) { return { translator: { trigger() { triggers.push(path); } } }; } };
+    SINGLE
+    singleAction();
+    return { view, mode, triggers };
+}
+let r = press(true, true, 1, 'AUTO');
+assert.equal(r.view, 'AUTO');
+assert.equal(r.mode, true);
+assert.deepEqual(r.triggers, []);
+r = press(true, false, 1, 'AUTO');
+assert.deepEqual(r.triggers, ['/Engine/Deck1/PadModeButton1ShiftPressed']);
+r = press(false, true, 1, 'BEAT_JUMP');
+assert.deepEqual(r.triggers, ['/Engine/Deck1/PadModeButton1Pressed']);
+r = press(true, true, 0, 'CUES');
+assert.deepEqual(r.triggers, ['/Engine/Deck1/PadModeButton0ShiftPressed']);
+function pressMixstream() {
+    return press.call(null, true, true, 1, 'AUTO');
+}
+        """.replace("SINGLE", single.replace("singleAction: function ()", "const singleAction = function ()"))
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for ActionPads handlers")
+    def test_pads_use_stock_beat_jump_actions(self):
+        qml = self._patched(
+            "ControlSurfaceModules/ControlSurfaceModules/ActionPads.qml", True
+        )
+        helper = self._block(qml, "function scBeatJumpPad(")
+        actions = re.search(r"scBeatJumpActions: \[([^]]+)\]", qml)
+        self.assertIsNotNone(actions)
+        script = r"""
+const assert = require('node:assert/strict');
+let writes = [];
+const deckConfig = { activeDeckTrackPath: '/Engine/Deck1/Track/' };
+const props = {};
+function prop(path) {
+    if (!props[path]) {
+        props[path] = { translator: { set state(v) { writes.push([path, v]); } } };
+    }
+    return props[path];
+}
+const Planck = { getProperty: prop };
+const scBeatJumpActions = [ACTION_VALUES];
+HELPER
+for (let pad = 0; pad < 8; pad++) {
+    writes = [];
+    scBeatJumpPad(pad);
+    const action = scBeatJumpActions[pad];
+    if (action) {
+        assert.deepEqual(writes, [['/Engine/Deck1/Track/BeatJump/' + action, true]]);
+    } else {
+        assert.deepEqual(writes, []);
+    }
+}
+""".replace("ACTION_VALUES", actions.group(1)).replace("HELPER", helper)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+    @unittest.skipUnless(shutil.which("node"), "Node is required for ActionPads handlers")
+    def test_action_pad_set_value_preserves_stock_press_release_and_beat_jump(self):
+        qml = self._patched(
+            "ControlSurfaceModules/ControlSurfaceModules/ActionPads.qml", True
+        )
+        set_value = self._block(qml, "function setValue(channel, value, assignmentEnabled)")
+        script = r"""
+const assert = require('node:assert/strict');
+const stockCalls = [], jumps = [];
+const stockActionOutput = { setValue: (...args) => stockCalls.push(args) };
+const actionPad = { padIndex: 3 };
+const globalConfig = { shift: false };
+const module = { scBeatJumpActive: false, scBeatJumpPad: n => jumps.push(n) };
+SET_VALUE
+function expectStock(label, shift, calls) {
+    stockCalls.length = 0;
+    globalConfig.shift = shift;
+    for (const args of calls) setValue(...args);
+    assert.deepEqual(stockCalls, calls, label + ' must reach ActionOutput');
+}
+expectStock('HOT CUE tap', false, [[0, 1.0, true], [0, 0.0, false]]);
+expectStock('HOT CUE hold', false, [[0, 1.0, true], [0, 1.0, true], [0, 0.0, false]]);
+expectStock('HOT CUE Shift+pad delete', true, [[0, 1.0, true]]);
+expectStock('ROLL hold/release', false, [[0, 1.0, true], [0, 1.0, true], [0, 0.0, false]]);
+expectStock('SLICER press/release', false, [[0, 1.0, true], [0, 0.0, false]]);
+module.scBeatJumpActive = true;
+globalConfig.shift = false;
+setValue(0, 1.0, true);
+setValue(0, 0.0, false);
+globalConfig.shift = true;
+setValue(0, 1.0, true);
+assert.deepEqual(jumps, [2], 'Beat Jump mode fires only the unshifted press');
+""".replace("SET_VALUE", set_value)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_player_mode_is_per_deck_and_does_not_write_stock_pad_view(self):
+        pad_mode = self._patched(
+            "ControlSurfaceModules/ControlSurfaceModules/PadModeSelect.qml", True
+        )
+        action_pads = self._patched(
+            "ControlSurfaceModules/ControlSurfaceModules/ActionPads.qml", True
+        )
+        self.assertIn("EngineXBeatJumpModeDeck", bp.SERVICES_MAIN)
+        self.assertIn("globalConfig.scBeatJumpMode(deckConfig.activeDeckPath)", pad_mode)
+        self.assertIn("globalConfig.scSetBeatJumpMode(deckConfig.activeDeckPath, true)", pad_mode)
+        self.assertNotIn('pPadsView.translator.string = "BEAT_JUMP"', pad_mode)
+        self.assertIn("globalConfig.isPlayer &&", action_pads)
+
+    def test_indicator_and_led_guards_are_visible_and_mode_specific(self):
+        previous = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            pads_edits = bp.edits(False)["Skins/Embedded/Items/Pads/Pads.qml"]
+        finally:
+            bp.ROOT = previous
+        pads = (LAB / "5.3.0/qrc/Skins/Embedded/Items/Pads/Pads.qml").read_text(encoding="utf-8")
+        for old, new in pads_edits:
+            pads = pads.replace(old, new, 1)
+        led = self._patched(
+            "ControlSurfaceModules/ControlSurfaceModules/private/ActionPadRGBLed.qml", True
+        )
+        self.assertIn("padViewDeckModeSelect.showModeSelectUI || pads.scBeatJumpActive", pads)
+        self.assertIn("BeatJumpPadModeIndicator", pads)
+        self.assertIn("deckConfig.padsEnabled &&", led)
+        self.assertIn('deckConfig.padsMode === "BEAT_JUMP" ? null', led)
+
+    def test_web_console_keeps_mixstream_rows_off_players(self):
+        html = (REPO / "pkg/webui/index.html").read_text(encoding="utf-8")
+        self.assertIn("const isMixstream=!!caps.beatJumpPads&&!v.player;", html)
+
+    def test_player_default_is_on_when_settings_file_has_no_key(self):
+        self.assertIn("root.scBeatJumpPads = root.scIsPlayerBoard", bp.SERVICES_MAIN)
 
 if __name__ == "__main__":
     unittest.main()

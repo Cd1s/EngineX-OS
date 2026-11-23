@@ -653,7 +653,7 @@ function showUI(v){lastUI=v;
  jLeftTitle.dataset.i18n=hasDualJog?'tJogInvertLeft':'tJogInvert';
  jLeftTitle.textContent=hasDualJog?t('tJogInvertLeft'):t('tJogInvert');
  jRight.closest('.setting').hidden=!hasDualJog;
- const isMixstream=!!caps.beatJumpPads;
+ const isMixstream=!!caps.beatJumpPads&&!v.player;
  tg('pitchBendBeatJump').closest('.setting').hidden=!isMixstream;
  const fxList=Array.isArray(v.mixstreamFx)&&v.mixstreamFx.length===4?v.mixstreamFx:['Echo','Flanger','Delay','Phaser'];
  for(let i=1;i<=4;i++){const el=$('mixstreamFx'+i);el.closest('.setting').hidden=!isMixstream;el.value=fxList[i-1]||'Echo'}

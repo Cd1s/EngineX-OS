@@ -106,7 +106,7 @@ func boardCapabilities(board string) uiCapabilities {
 		Mixer:         !isPlayer,
 		FourDeck:      fourDeckBoards[board],
 		AutoLoopKnob:  !isMixstream,
-		BeatJumpPads:  isMixstream,
+		BeatJumpPads:  isPlayer || isMixstream,
 		TrackSkipKeys: !noTrackSkipKeyBoards[board],
 		StemsEq:       !isPlayer && board != "PRIME4G2",
 		LineInAux:     board == "SCLIVE4",
@@ -382,6 +382,7 @@ func (s *Server) loadUI() uiSettings {
 		TracklistWaveform: true, CueCountdown: true, BpmDecimals: 2,
 		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
 		FxTimeMode: "beats", FxTimeMs: 500, MixstreamFx: slices.Clone(uiMixstreamFxDefaults),
+		BeatJumpPads: playerBoards[imagePrefix(deviceCompatible())],
 	}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
@@ -735,8 +736,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.StemsEqMode {
 		text += "stems_eq_mode=1\n"
 	}
-	if v.BeatJumpPads {
-		text += "beat_jump_pads=1\n"
+	defaultBeatJumpPads := playerBoards[imagePrefix(deviceCompatible())]
+	if v.BeatJumpPads != defaultBeatJumpPads {
+		text += "beat_jump_pads=" + map[bool]string{true: "1", false: "0"}[v.BeatJumpPads] + "\n"
 	}
 	if v.PitchBendBeatJump {
 		text += "pitch_bend_beat_jump=1\n"
