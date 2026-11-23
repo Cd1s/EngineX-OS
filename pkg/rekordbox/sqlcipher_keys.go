@@ -102,8 +102,14 @@ func (c *KeyCache) get(salt, passphrase []byte) (*cipherKeys, error) {
 		var err error
 		lock, err = os.OpenFile(filepath.Join(c.shared, sharedKeyName(salt, passphrase)+".lock"), os.O_RDWR|os.O_CREATE, 0o600)
 		if err == nil {
-			if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+			if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 				lock.Close()
+				lock = nil
+			}
+		}
+		if lock != nil {
+			if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+				_ = lock.Close()
 				lock = nil
 			}
 		}
@@ -158,7 +164,11 @@ func (c *KeyCache) readShared(salt, passphrase []byte) (*cipherKeys, bool) {
 	if c == nil || c.shared == "" {
 		return nil, false
 	}
-	b, err := os.ReadFile(filepath.Join(c.shared, sharedKeyName(salt, passphrase)))
+	path := filepath.Join(c.shared, sharedKeyName(salt, passphrase))
+	if st, err := os.Lstat(path); err != nil || !st.Mode().IsRegular() || st.Mode()&os.ModeSymlink != 0 {
+		return nil, false
+	}
+	b, err := os.ReadFile(path)
 	if err != nil || len(b) != 64 {
 		return nil, false
 	}
@@ -169,17 +179,57 @@ func (c *KeyCache) writeShared(salt, passphrase []byte, k *cipherKeys) {
 	if c == nil || c.shared == "" || k == nil {
 		return
 	}
+	if st, err := os.Lstat(c.shared); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return
+	}
 	path := filepath.Join(c.shared, sharedKeyName(salt, passphrase))
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if st, err := os.Lstat(path); err == nil && st.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	tmpPath := filepath.Join(c.shared, fmt.Sprintf(".%s.%d.tmp", sharedKeyName(salt, passphrase), os.Getpid()))
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return
 	}
+	ok := false
+	defer func() {
+		_ = f.Close()
+		if !ok {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 	var b [64]byte
 	copy(b[:32], k.enc)
 	copy(b[32:], k.mac)
-	_, _ = f.Write(b[:])
-	_ = f.Sync()
-	_ = f.Close()
+	if n, err := f.Write(b[:]); err != nil || n != len(b) || f.Sync() != nil || f.Close() != nil {
+		return
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return
+	}
+	ok = true
+	if dir, err := os.Open(c.shared); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+}
+
+func (c *KeyCache) invalidate(salt, passphrase []byte) {
+	if c == nil {
+		return
+	}
+	id := string(salt) + "\x00" + string(passphrase)
+	if k, ok := c.keys[id]; ok {
+		clear(k.enc)
+		clear(k.mac)
+		delete(c.keys, id)
+	}
+	if c.shared != "" {
+		path := filepath.Join(c.shared, sharedKeyName(salt, passphrase))
+		if st, err := os.Lstat(path); err == nil && st.Mode().IsRegular() && st.Mode()&os.ModeSymlink == 0 {
+			_ = os.Remove(path)
+		}
+	}
 }
 
 // done clears keys that no cache keeps.

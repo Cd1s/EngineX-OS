@@ -263,9 +263,13 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		return res, fmt.Errorf("writeback: no rekordbox export found on %s", absMount)
 	}
 	preStamp, _ := exportStamp(resolver, absMount)
-	again := readMark(engineDBDir, writeBackAgainName)
-	if reason := writeBackStampReason(readMark(engineDBDir, stampName), preStamp); reason != "" && again == "" {
+	againMode, againStamp := parseWriteBackRecovery(readMark(engineDBDir, writeBackAgainName))
+	if reason := writeBackStampReason(readMark(engineDBDir, stampName), preStamp); reason != "" {
 		tm.skipReason = reason
+		return res, nil
+	}
+	if againMode != "" && (againStamp == "" || againStamp != preStamp) {
+		tm.skipReason = "recovery marker does not match the current rekordbox export"
 		return res, nil
 	}
 
@@ -295,11 +299,11 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE type='table' AND name='BridgeSynced'`).Scan(&hasSyncedTable)
 	// A file of a cut pass was put back from its first original (CleanWriteBackLeftovers): every
 	// row is read, as if the state had no record, and on "export" the export gets the deck's cues.
-	if again != "" {
+	if againMode != "" {
 		hasSyncedTable = 0
 	}
 	dropAgain := func() {
-		if again != "" {
+		if againMode != "" {
 			_ = removeFile(filepath.Join(engineDBDir, writeBackAgainName))
 		}
 	}
@@ -483,7 +487,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		seen         syncedRow
 	}
 	var changes []trackChange
-	exportCues := again == "export" && oneLibRel != ""
+	exportCues := againMode == "export" && oneLibRel != ""
 
 	for _, cand := range dirty {
 		if err := ctx.Err(); err != nil {
@@ -794,10 +798,10 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	// of re-importing the whole stick.
 	if exportWritten && preStamp != "" {
 		if postStamp, err := exportStamp(resolver, absMount); err == nil && postStamp != "" {
-			if readMark(engineDBDir, stampName) == preStamp {
+			if againMode != "" || readMark(engineDBDir, stampName) == preStamp {
 				_ = writeMark(engineDBDir, stampName, postStamp)
 			}
-			if readMark(engineDBDir, pendingName) == preStamp {
+			if againMode != "" || readMark(engineDBDir, pendingName) == preStamp {
 				_ = writeMark(engineDBDir, pendingName, postStamp)
 			}
 		}
@@ -935,11 +939,16 @@ func CleanWriteBackLeftovers(mount string) int {
 			}
 		}
 	}
-	if again != "" && readMark(dir, writeBackAgainName) != "export" {
-		_ = writeMark(dir, writeBackAgainName, again)
-	}
 	if !whole {
 		return n // its staged copy and the mark stay for the next mount
+	}
+	if again != "" {
+		if r, err := compat.NewResolver(mount); err == nil {
+			if stamp, err := exportStamp(r, mount); err == nil && stamp != "" {
+				_ = writeMark(dir, stampName, stamp)
+				_ = writeMark(dir, writeBackAgainName, again+"\n"+stamp)
+			}
+		}
 	}
 	for _, rel := range dirs {
 		for _, pat := range []string{".enginex-*.tmp", ".bak-*.tmp"} {
@@ -1064,29 +1073,24 @@ func recordSynced(ctx context.Context, stateDBPath string, rows []syncedRow, wri
 
 func readStickRekordboxLibrary(ctx context.Context, r *compat.Resolver, mountPath string, keys *rekordbox.KeyCache) (*rekordbox.Library, string, error) {
 	var errs []error
-	for _, p := range []string{"PIONEER/rekordbox/exportLibrary.db", "PIONEER/rekordbox/exportOneLibrary.db"} {
-		rel, err := r.Resolve(p)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			errs = append(errs, err)
-			continue
-		}
-		lib, err := rekordbox.ReadSQLiteKeys(ctx, r.FullPath(rel), nil, keys)
-		if err == nil {
-			return lib, rel, nil
-		}
-		errs = append(errs, err)
+	candidates, err := exportCandidates(r, mountPath)
+	if err != nil {
+		return nil, "", err
 	}
-	if rel, err := r.Resolve("PIONEER/rekordbox/export.pdb"); err == nil {
-		lib, err := rekordbox.ReadPDB(r.FullPath(rel))
-		if err == nil {
-			return lib, "", nil
+	for _, candidate := range candidates {
+		var lib *rekordbox.Library
+		if candidate.isPDB {
+			lib, err = rekordbox.ReadPDB(candidate.full)
+		} else {
+			lib, err = rekordbox.ReadSQLiteKeys(ctx, candidate.full, nil, keys)
 		}
-		errs = append(errs, err)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, err)
+		if err == nil {
+			if candidate.isPDB {
+				return lib, "", nil
+			}
+			return lib, candidate.rel, nil
+		}
+		errs = append(errs, fmt.Errorf("%s: %w", candidate.rel, err))
 	}
 	if len(errs) > 0 {
 		return nil, "", errors.Join(errs...)
@@ -1096,9 +1100,7 @@ func readStickRekordboxLibrary(ctx context.Context, r *compat.Resolver, mountPat
 
 func writeBackStampReason(imported, current string) string {
 	if imported == "" {
-		// Libraries made by the pre-stamp bridge have no marker. Keep their existing
-		// write-back path working until the first successful pass records v4 state.
-		return ""
+		return "Engine library import stamp is missing"
 	}
 	if !strings.HasPrefix(imported, stampVersion+" ") {
 		return "Engine library import stamp is older than v4"
@@ -1127,11 +1129,18 @@ func sameRekordboxPath(a, b string) bool {
 }
 
 func importedRecordChanged(fingerprint string, tr rekordbox.Track) bool {
-	if tr.RecordHash == "" {
+	if fingerprint == "" || tr.RecordHash == "" || strings.HasPrefix(fingerprint, "fast:") {
 		return false
 	}
-	source, _, ok := strings.Cut(fingerprint, ":")
-	return ok && source != "" && source != tr.RecordHash
+	return fingerprint != tr.RecordHash
+}
+
+func parseWriteBackRecovery(mark string) (mode, stamp string) {
+	parts := strings.SplitN(strings.TrimSpace(mark), "\n", 2)
+	if len(parts) != 2 || (parts[0] != "export" && parts[0] != "rows") {
+		return "", ""
+	}
+	return parts[0], strings.TrimSpace(parts[1])
 }
 
 func resolveRekordboxTrack(

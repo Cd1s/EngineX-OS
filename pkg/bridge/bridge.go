@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"net/url"
@@ -177,66 +178,56 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 	if len(candidates) == 0 {
 		return nil, errNoLocalExport
 	}
-	var errs []error
-	var libraries []*rekordbox.Library
-	var successful []exportCandidate
-	for i, c := range candidates {
-		var l *rekordbox.Library
-		var err error
+	read := func(c exportCandidate) (*rekordbox.Library, error) {
 		if c.isPDB {
-			l, err = rekordbox.ReadPDB(c.full)
-		} else {
-			l, err = rekordbox.ReadSQLiteKeys(ctx, c.full, nil, exportKeys)
+			return rekordbox.ReadPDB(c.full)
 		}
-		if err == nil {
-			libraries = append(libraries, l)
-			successful = append(successful, c)
-			continue
+		return rekordbox.ReadSQLiteKeys(ctx, c.full, nil, exportKeys)
+	}
+	primary, err := read(candidates[0])
+	if err != nil {
+		var errs []error
+		errs = append(errs, fmt.Errorf("%s: %w", candidates[0].rel, err))
+		for i := 1; i < len(candidates); i++ {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			fallback, fallbackErr := read(candidates[i])
+			if fallbackErr == nil {
+				log.Printf("rb-bridge: %s unreadable (%v); using %s", candidates[0].rel, err, candidates[i].rel)
+				return fallback, nil
+			}
+			errs = append(errs, fmt.Errorf("%s: %w", candidates[i].rel, fallbackErr))
 		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		errs = append(errs, fmt.Errorf("%s: %w", c.rel, err))
-		if i+1 < len(candidates) {
-			log.Printf("rb-bridge: %s unreadable (%v); falling back to %s", c.rel, err, candidates[i+1].rel)
+		return nil, errors.Join(errs...)
+	}
+	if len(candidates) == 1 {
+		return primary, nil
+	}
+	// A source that is more than the export margin older is a different export. Do not
+	// decrypt or merge it after the selected source has been read.
+	if absDuration(candidates[0].mtime.Sub(candidates[1].mtime)) > exportNewerMargin {
+		return primary, nil
+	}
+	var secondaryIndex = -1
+	for i := 1; i < len(candidates); i++ {
+		if candidates[i].isPDB != candidates[0].isPDB {
+			secondaryIndex = i
+			break
 		}
 	}
-	if len(libraries) > 0 {
-		if len(libraries) > 1 && successful[0].isPDB != successful[1].isPDB {
-			if successful[0].isPDB && successful[0].mtime.Sub(successful[1].mtime) > exportNewerMargin {
-				return libraries[0], nil
-			}
-			encrypted := successful[0]
-			if encrypted.isPDB {
-				encrypted = successful[1]
-			}
-			if encryptedSQLiteFile(encrypted.full) {
-				if len(successful) == 2 && absDuration(successful[0].mtime.Sub(successful[1].mtime)) <= exportNewerMargin {
-					var oneLibrary, pdb *rekordbox.Library
-					for i, candidate := range successful {
-						if candidate.isPDB {
-							pdb = libraries[i]
-						} else {
-							oneLibrary = libraries[i]
-						}
-					}
-					filteredOne := filterGhostEmptyRootPlaylists(oneLibrary, pdb)
-					ordered := make([]*rekordbox.Library, len(libraries))
-					for i, candidate := range successful {
-						if candidate.isPDB {
-							ordered[i] = pdb
-						} else {
-							ordered[i] = filteredOne
-						}
-					}
-					return mergeExportLibraries(ordered...), nil
-				}
-				return mergeExportLibraries(libraries...), nil
-			}
-		}
-		return libraries[0], nil
+	if secondaryIndex < 0 || absDuration(candidates[0].mtime.Sub(candidates[secondaryIndex].mtime)) > exportNewerMargin {
+		return primary, nil
 	}
-	return nil, errors.Join(errs...)
+	secondary, err := read(candidates[secondaryIndex])
+	if err != nil {
+		log.Printf("rb-bridge: %s unreadable (%v); using %s", candidates[secondaryIndex].rel, err, candidates[0].rel)
+		return primary, nil
+	}
+	if candidates[0].isPDB {
+		return mergeExportLibraries(secondary, primary), nil
+	}
+	return mergeExportLibraries(filterGhostEmptyRootPlaylists(primary, secondary), secondary), nil
 }
 
 func absDuration(d time.Duration) time.Duration {
@@ -304,7 +295,7 @@ func mergeExportLibraries(libraries ...*rekordbox.Library) *rekordbox.Library {
 	usedPlaylistIDs := map[uint32]bool{}
 	nextPlaylistID := uint32(1)
 
-	for _, library := range libraries {
+	for libraryIndex, library := range libraries {
 		trackIDs := map[uint32]uint32{}
 		for _, track := range library.Tracks {
 			sourceID := track.ID
@@ -314,7 +305,15 @@ func mergeExportLibraries(libraries ...*rekordbox.Library) *rekordbox.Library {
 				continue
 			}
 			id := track.ID
-			if usedTrackIDs[id] {
+			if libraryIndex > 0 {
+				id = stableSecondaryTrackID(track.Path)
+				for usedTrackIDs[id] {
+					id++
+					if id < 1<<31 {
+						id = 1 << 31
+					}
+				}
+			} else if usedTrackIDs[id] {
 				for usedTrackIDs[nextTrackID] {
 					nextTrackID++
 				}
@@ -418,6 +417,12 @@ func mergeExportLibraries(libraries ...*rekordbox.Library) *rekordbox.Library {
 		}
 	}
 	return merged
+}
+
+func stableSecondaryTrackID(trackPath string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(foldPath(trackPath)))
+	return 1<<31 | h.Sum32()&0x7fffffff
 }
 
 func exportPlaylistPath(playlists map[uint32]rekordbox.Playlist, id uint32) string {
@@ -582,16 +587,21 @@ func reconcileContext(ctx context.Context, r *compat.Resolver, l *rekordbox.Libr
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		rel, known := ownedPaths[t.ID]
+		var rel string
+		var known bool
 		var err error
-		if !known && ownedSpellings != nil {
-			var clean string
-			clean, err = compat.CleanRelative(t.Path)
-			if err != nil {
-				kept = append(kept, t)
-				continue
-			}
+		clean, cleanErr := compat.CleanRelative(t.Path)
+		if cleanErr != nil {
+			kept = append(kept, t)
+			continue
+		}
+		if ownedSpellings != nil {
 			rel, known = ownedSpellings[foldPath(clean)]
+		}
+		if !known {
+			if candidate, ok := ownedPaths[t.ID]; ok && foldPath(candidate) == foldPath(clean) {
+				rel, known = candidate, true
+			}
 		}
 		if !known {
 			rel, err = r.ResolveContext(ctx, t.Path)
@@ -758,6 +768,7 @@ var (
 	mountReadBudget    = 8 * time.Second
 	maxMountHookBudget = 14 * time.Second
 	quickMountReserve  = 8 * time.Second
+	mountPruneBudget   = 2 * time.Second
 	// An update in place still running this long after the mount stops before the hook's kill
 	// and goes on in the background (#301): the kill threw it away, at every insert.
 	mountGiveUp = 17 * time.Second
@@ -765,7 +776,7 @@ var (
 
 func mountPruneDeadline(start, requested time.Time) time.Time {
 	reserve := quickMountReserveForBudget()
-	deadline := start.Add(maxMountHookBudget - reserve)
+	deadline := start.Add(min(maxMountHookBudget-reserve, mountPruneBudget))
 	if !requested.IsZero() && requested.Before(deadline) {
 		deadline = requested
 	}
@@ -933,6 +944,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		if readMark(dir, pendingName) != stamp {
 			if time.Until(mountStart.Add(maxMountHookBudget)) < quickMountReserveForBudget() {
 				log.Printf("rb-bridge: mount budget left after overview pruning is too short for key derivation and the list; handing the update to the background")
+				quick = true
 			} else {
 				var err error
 				if res, err = quickUpdate(ctx, mount, dir, r, mountStart.Add(maxMountHookBudget)); err != nil {
@@ -1018,7 +1030,8 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		}
 		if writable(mount) { // drives imported by an earlier build still get their covers
 			if opts.Deadline.IsZero() {
-				opts.Deadline = time.Now().Add(mountReadBudget)
+				remaining := maxMountHookBudget - time.Since(mountStart)
+				opts.Deadline = mountStart.Add(min(mountReadBudget, max(remaining, time.Second)))
 			}
 			_, _ = enginedb.MigrateArtworkBefore(ctx, mount, opts.Deadline)
 			completeOverviews(ctx, mount, opts.Deadline)

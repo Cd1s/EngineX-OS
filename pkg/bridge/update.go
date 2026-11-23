@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -190,7 +191,15 @@ func quickPaths(dir string, l *rekordbox.Library) (fresh int, err error) {
 		return 0, err
 	}
 	for i := range l.Tracks {
-		if p, ok := rows[l.Tracks[i].ID]; ok {
+		clean, cleanErr := compat.CleanRelative(l.Tracks[i].Path)
+		if cleanErr != nil {
+			return 0, cleanErr
+		}
+		if p, ok := known[foldPath(clean)]; ok {
+			l.Tracks[i].Path = "/" + p
+			continue
+		}
+		if p, ok := rows[l.Tracks[i].ID]; ok && foldPath(p) == foldPath(clean) {
 			l.Tracks[i].Path = "/" + p
 		}
 	}
@@ -252,7 +261,37 @@ func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resol
 }
 
 func privateStageDatabase(stage string) (string, func(), error) {
-	dir, err := os.MkdirTemp("", "enginex-rb-quick-")
+	root := os.Getenv("ENGINEX_RB_STAGE_DIR")
+	if root == "" {
+		if st, err := os.Stat("/data/enginex"); err == nil && st.IsDir() {
+			root = "/data/enginex/tmp"
+		} else {
+			root = "/var/tmp/enginex-rb-stage"
+		}
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", func() {}, err
+	}
+	if st, err := os.Lstat(root); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return "", func() {}, fmt.Errorf("quick stage directory is not a private directory: %s", root)
+	}
+	for _, stale := range globQuickStages(root) {
+		_ = os.RemoveAll(stale)
+	}
+	need := int64(64 << 20)
+	for _, name := range []string{"m.db", stateName} {
+		if st, err := os.Stat(filepath.Join(stage, name)); err == nil {
+			need += st.Size()
+		}
+	}
+	var fs syscall.Statfs_t
+	if err := syscall.Statfs(root, &fs); err != nil {
+		return "", func() {}, err
+	}
+	if fs.Bavail*uint64(fs.Bsize) < uint64(need) {
+		return "", func() {}, fmt.Errorf("quick stage directory has insufficient free space")
+	}
+	dir, err := os.MkdirTemp(root, fmt.Sprintf("enginex-rb-quick-%d-", os.Getpid()))
 	if err != nil {
 		return "", func() {}, err
 	}
@@ -271,6 +310,23 @@ func privateStageDatabase(stage string) (string, func(), error) {
 		}
 	}
 	return dir, cleanup, nil
+}
+
+func globQuickStages(root string) []string {
+	paths, _ := filepath.Glob(filepath.Join(root, "enginex-rb-quick-*-*"))
+	var stale []string
+	for _, p := range paths {
+		name := filepath.Base(p)
+		parts := strings.Split(name, "-")
+		if len(parts) < 4 {
+			continue
+		}
+		pid, err := strconv.Atoi(parts[3])
+		if err == nil && pid > 0 && pid != os.Getpid() && syscall.Kill(pid, 0) == syscall.ESRCH {
+			stale = append(stale, p)
+		}
+	}
+	return stale
 }
 
 func publishPrivateStageDatabase(stage, databaseDir string) error {

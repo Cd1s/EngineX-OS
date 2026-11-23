@@ -1,6 +1,7 @@
 package rekordbox
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +9,32 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestKeyCacheInvalidatesWrongSharedKeyAfterPageOneCheck(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ENGINEX_RB_SHARED_KEY_CACHE", dir)
+	path := filepath.Join("testdata", "sqlcipher4_onelibrary.db")
+	salt, err := ReadSQLCipherSalt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := sharedKeyName(salt, []byte(oneLibraryPassphrase))
+	wrong := make([]byte, 64)
+	if err := os.WriteFile(filepath.Join(dir, name), wrong, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cache := NewKeyCache()
+	if _, err := ReadSQLiteKeys(context.Background(), path, nil, cache); err != nil {
+		t.Fatalf("read with a corrupt shared key: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) == string(wrong) {
+		t.Fatal("corrupt shared key was retained after page-one verification")
+	}
+}
 
 func TestKeyCacheSharesDerivedKeyAcrossCacheInstances(t *testing.T) {
 	if os.Getenv("KEYCACHE_HELPER") != "" {

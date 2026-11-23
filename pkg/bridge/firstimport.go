@@ -355,7 +355,9 @@ func publishImport(mount, dir string) error {
 func renameStage(dir, stage string) error {
 	// Engine's RGB overview files are keyed by track id: one the published library gives
 	// another track goes now, while the library they were written against is still here.
-	pruneRGBOverviews(context.Background(), dir, filepath.Join(stage, "m.db"), filepath.Join(dir, "m.db"))
+	pruneCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	pruneRGBOverviews(pruneCtx, dir, filepath.Join(stage, "m.db"), filepath.Join(dir, "m.db"))
+	cancel()
 	if err := os.WriteFile(filepath.Join(stage, publishReady), nil, 0o644); err != nil {
 		return err
 	}

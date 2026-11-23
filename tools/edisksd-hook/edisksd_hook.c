@@ -1857,7 +1857,7 @@ static int after_mount_at(const char *mount_path,const char *label_target,const 
     }
     release_post(); // the visible tree is final; a bridge or guardian run below must not hold edisksd's monitor
     int done=0;
-    if(pioneer&&mode!=MOUNT_POST){const char *rb=RB_BRIDGE_PATH();char *const a[]={(char *)rb,"--mount-path",(char *)mount_path,NULL};if(!run(a,deadline))done=CONVERTED;else{int is_sd=(label_target&&strstr(label_target,"mmcblk"))||(src&&strstr(src,"mmcblk"));if(errno==ETIMEDOUT){done=TIMED_OUT;set_preparing_error(label_target,src,is_sd?"SD card conversion timed out":"USB conversion timed out");}else{set_preparing_error(label_target,src,is_sd?"SD card conversion failed":"USB conversion failed");}note("bridge failed on",label_target,errno);}}
+    if(pioneer&&mode!=MOUNT_POST){const char *rb=RB_BRIDGE_PATH();char remaining[32];int64_t left=deadline-now_ms();snprintf(remaining,sizeof remaining,"%lld",(long long)(left>0?left:1));setenv("ENGINEX_HOOK_REMAINING_MS",remaining,1);char *const a[]={(char *)rb,"--mount-path",(char *)mount_path,NULL};int bridge_rc=run(a,deadline);unsetenv("ENGINEX_HOOK_REMAINING_MS");if(!bridge_rc)done=CONVERTED;else{int is_sd=(label_target&&strstr(label_target,"mmcblk"))||(src&&strstr(src,"mmcblk"));if(errno==ETIMEDOUT){done=TIMED_OUT;set_preparing_error(label_target,src,is_sd?"SD card conversion timed out":"USB conversion timed out");note("bridge timed out on",label_target,errno);}else{set_preparing_error(label_target,src,is_sd?"SD card conversion failed":"USB conversion failed");note("bridge failed on",label_target,errno);}}}
     if(heal) {
 		char timeout[32];
 		int64_t left=deadline-now_ms();

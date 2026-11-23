@@ -216,7 +216,7 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	for i := range prepared {
 		p := &prepared[i]
 		targets[p.track.ID] = p
-		byPath["../"+p.rel] = p
+		byPath[foldPreparedPath("../"+p.rel)] = p
 	}
 	// Legacy rows can share one import-wide pdbImportKey value. Our saved
 	// source record retains the per-track ID, including across moves/swaps.
@@ -239,6 +239,7 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	}
 	var tracks []ownedTrack
 	counts := map[uint32]int{}
+	existingByPath := map[string]int64{}
 	for rows.Next() {
 		var t ownedTrack
 		if e = rows.Scan(&t.id, &t.source, &t.oldPath, &t.fp); e != nil {
@@ -247,6 +248,11 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 		}
 		tracks = append(tracks, t)
 		counts[t.source]++
+		key := foldPreparedPath(t.oldPath)
+		if other, ok := existingByPath[key]; ok && other != t.id {
+			return nil, fmt.Errorf("owned tracks %d and %d share audio path %q", other, t.id, t.oldPath)
+		}
+		existingByPath[key] = t.id
 	}
 	e = rows.Err()
 	rows.Close()
@@ -282,13 +288,19 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	}
 	for _, t := range tracks {
 		id, source, oldPath, fp := t.id, t.source, t.oldPath, t.fp
-		if stagedOnly && source < 1<<24 && targets[source] == nil && byPath[oldPath] == nil {
+		pathTarget := byPath[foldPreparedPath(oldPath)]
+		if pathTarget != nil {
+			// The export's normalized path is the identity. A re-export can shift
+			// its numeric ID, so a saved source ID never moves this row elsewhere.
+			source = pathTarget.track.ID
+		}
+		if stagedOnly && source < 1<<24 && targets[source] == nil && pathTarget == nil {
 			continue // a remote-only import must not identify or remove absent local sources
 		}
 		// Fast/capped or damaged state may have no saved source ID. A unique
 		// owned path still identifies a row whose shared import key does not.
 		if !t.recorded.Valid && (counts[source] > 1 || targets[source] == nil) {
-			if p := byPath[oldPath]; p != nil {
+			if p := pathTarget; p != nil {
 				source = p.track.ID
 			} else if counts[source] > 1 {
 				return nil, fmt.Errorf("cannot identify bridge track %d with shared source ID %d", id, source)
@@ -307,6 +319,10 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 			return nil, fmt.Errorf("ambiguous bridge source ID %d", source)
 		}
 		owned[source] = id
+		targetPath := foldPreparedPath("../" + p.rel)
+		if other, ok := existingByPath[targetPath]; ok && other != id {
+			return nil, fmt.Errorf("track %d would move onto path already owned by track %d", id, other)
+		}
 		// An unreadable re-export must not park a completed row and lose its
 		// fingerprint (and deck edits). Its source ID identifies the old row.
 		if p.late && p.audioErr != nil && fp != "" && !strings.HasPrefix(fp, "fast:") {
@@ -351,4 +367,8 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 		}
 	}
 	return owned, nil
+}
+
+func foldPreparedPath(p string) string {
+	return strings.ToLower(path.Clean(strings.ReplaceAll(p, "\\", "/")))
 }
