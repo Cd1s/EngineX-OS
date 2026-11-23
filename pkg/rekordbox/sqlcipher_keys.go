@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -37,7 +38,7 @@ func NewKeyCache() *KeyCache {
 		if err := os.MkdirAll(sharedDir, 0o700); err == nil && os.Chmod(sharedDir, 0o700) == nil {
 			c.shared = sharedDir
 		}
-	} else if flag.Lookup("test.v") == nil && os.Geteuid() == 0 {
+	} else if flag.Lookup("test.v") == nil && !strings.HasSuffix(filepath.Base(os.Args[0]), ".test") && os.Geteuid() == 0 {
 		const dir = "/run/enginex-rb-keys"
 		if err := os.MkdirAll(dir, 0o700); err == nil && os.Chmod(dir, 0o700) == nil {
 			c.shared = dir
