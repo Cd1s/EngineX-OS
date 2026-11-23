@@ -797,6 +797,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	// our write-back, so re-inserting into EngineX fast-bypasses instead
 	// of re-importing the whole stick.
 	if exportWritten && preStamp != "" {
+		evictWriteBackExportCache(preStamp)
 		if postStamp, err := exportStamp(resolver, absMount); err == nil && postStamp != "" {
 			if againMode != "" || readMark(engineDBDir, stampName) == preStamp {
 				_ = writeMark(engineDBDir, stampName, postStamp)
@@ -1074,8 +1075,11 @@ func recordSynced(ctx context.Context, stateDBPath string, rows []syncedRow, wri
 	_ = tx.Commit()
 }
 
+const maxWriteBackExportCache = 4
+
 var writeBackExportCache = struct {
 	sync.Mutex
+	order   []string
 	entries map[string]writeBackExport
 }{entries: make(map[string]writeBackExport)}
 
@@ -1084,14 +1088,59 @@ type writeBackExport struct {
 	oneLibRel string
 }
 
-func readStickRekordboxLibrary(ctx context.Context, r *compat.Resolver, mountPath string, keys *rekordbox.KeyCache, stamp string) (*rekordbox.Library, string, error) {
+func getWriteBackExportCache(stamp string) (*rekordbox.Library, string, bool) {
+	if stamp == "" {
+		return nil, "", false
+	}
 	writeBackExportCache.Lock()
-	if cached, ok := writeBackExportCache.entries[stamp]; ok {
-		library, oneLibRel := cloneLibrary(cached.library), cached.oneLibRel
-		writeBackExportCache.Unlock()
+	defer writeBackExportCache.Unlock()
+	cached, ok := writeBackExportCache.entries[stamp]
+	if !ok {
+		return nil, "", false
+	}
+	return cloneLibrary(cached.library), cached.oneLibRel, true
+}
+
+func putWriteBackExportCache(stamp string, lib *rekordbox.Library, oneLibRel string) {
+	if stamp == "" || lib == nil {
+		return
+	}
+	writeBackExportCache.Lock()
+	defer writeBackExportCache.Unlock()
+	if _, exists := writeBackExportCache.entries[stamp]; !exists {
+		writeBackExportCache.order = append(writeBackExportCache.order, stamp)
+		for len(writeBackExportCache.order) > maxWriteBackExportCache {
+			oldest := writeBackExportCache.order[0]
+			writeBackExportCache.order = writeBackExportCache.order[1:]
+			delete(writeBackExportCache.entries, oldest)
+		}
+	}
+	writeBackExportCache.entries[stamp] = writeBackExport{library: cloneLibrary(lib), oneLibRel: oneLibRel}
+}
+
+func evictWriteBackExportCache(stamp string) {
+	if stamp == "" {
+		return
+	}
+	writeBackExportCache.Lock()
+	defer writeBackExportCache.Unlock()
+	if _, exists := writeBackExportCache.entries[stamp]; !exists {
+		return
+	}
+	delete(writeBackExportCache.entries, stamp)
+	kept := writeBackExportCache.order[:0]
+	for _, s := range writeBackExportCache.order {
+		if s != stamp {
+			kept = append(kept, s)
+		}
+	}
+	writeBackExportCache.order = kept
+}
+
+func readStickRekordboxLibrary(ctx context.Context, r *compat.Resolver, mountPath string, keys *rekordbox.KeyCache, stamp string) (*rekordbox.Library, string, error) {
+	if library, oneLibRel, ok := getWriteBackExportCache(stamp); ok {
 		return library, oneLibRel, nil
 	}
-	writeBackExportCache.Unlock()
 
 	var errs []error
 	candidates, err := exportCandidates(r, mountPath)
@@ -1107,14 +1156,10 @@ func readStickRekordboxLibrary(ctx context.Context, r *compat.Resolver, mountPat
 		}
 		if err == nil {
 			if candidate.isPDB {
-				writeBackExportCache.Lock()
-				writeBackExportCache.entries[stamp] = writeBackExport{library: cloneLibrary(lib)}
-				writeBackExportCache.Unlock()
+				putWriteBackExportCache(stamp, lib, "")
 				return lib, "", nil
 			}
-			writeBackExportCache.Lock()
-			writeBackExportCache.entries[stamp] = writeBackExport{library: cloneLibrary(lib), oneLibRel: candidate.rel}
-			writeBackExportCache.Unlock()
+			putWriteBackExportCache(stamp, lib, candidate.rel)
 			return lib, candidate.rel, nil
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", candidate.rel, err))

@@ -93,12 +93,21 @@ func recordWritten(ctx context.Context, q *stmtCache, id int64, perf Performance
 	return e
 }
 
-// SyncedDigest names what the deck can change in a row and the stick's rekordbox files hold:
-// its grid, cues, loops, which saved loop is active on load (#321), and the track's genre,
-// comment and label (#314).
-func SyncedDigest(beats, cues, loops []byte, activeOnLoadLoops int64, genre, comment, label string) []byte {
+// SyncedDigest names what the deck can change in a row and cue write-back writes
+// back to the stick's rekordbox files: cues, loops, activeOnLoadLoops (#321), and
+// genre, comment, and label (#314). Beat-grid / analysis-only updates (beatData,
+// trackData, overviewWaveFormData) are intentionally excluded so analysis passes
+// do not trigger needless OneLibrary decryption.
+func SyncedDigest(_ []byte, cues, loops []byte, activeOnLoadLoops int64, genre, comment, label string) []byte {
 	h := sha256.New()
-	h.Write(writtenDigest(beats, cues, loops))
+	rawCues, err := QUncompress(cues, 8<<20)
+	if err != nil {
+		rawCues = cues
+	}
+	_ = binary.Write(h, big, uint64(len(rawCues)))
+	h.Write(rawCues)
+	_ = binary.Write(h, big, uint64(len(loops)))
+	h.Write(loops)
 	_ = binary.Write(h, big, activeOnLoadLoops)
 	for _, s := range []string{genre, comment, label} {
 		_ = binary.Write(h, big, uint32(len(s)))

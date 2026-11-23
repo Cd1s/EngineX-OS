@@ -132,18 +132,12 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	if err != nil {
 		return enginedb.Result{}, err
 	}
-	// A quick update publishes the list before it reads files. Keep a row whose
-	// export spelling moved on its existing path until the staged full pass can
-	// verify the move by path and carry the deck's edits across.
-	ownedForQuick, err := ownedPaths(dir)
-	if err != nil {
-		return enginedb.Result{}, err
-	}
-	for i := range l.Tracks {
-		if oldPath, ok := ownedForQuick[l.Tracks[i].ID]; ok && foldPath(oldPath) != foldPath(l.Tracks[i].Path) {
-			l.Tracks[i].Path = "/" + oldPath
-		}
-	}
+	// A quick update publishes the list before it reads files. Only keep a row
+	// whose file genuinely moved (its source ID is owned, its new path is not
+	// already owned by another track, and its old path is absent from the new
+	// export) on its existing path until the staged full pass verifies the move.
+	// When a re-export shifts or renumbers source IDs, normalized path identity
+	// always wins so Engine track IDs and RGB overviews stay stable.
 	owned, err := ownedPaths(dir)
 	if err != nil {
 		return enginedb.Result{}, err
@@ -151,6 +145,28 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	spellings, err := ownedSpellings(dir)
 	if err != nil {
 		return enginedb.Result{}, err
+	}
+	exportFolded := make(map[string]bool, len(l.Tracks))
+	for i := range l.Tracks {
+		if clean, cerr := compat.CleanRelative(l.Tracks[i].Path); cerr == nil {
+			exportFolded[foldPath(clean)] = true
+		}
+	}
+	for i := range l.Tracks {
+		clean, cerr := compat.CleanRelative(l.Tracks[i].Path)
+		if cerr != nil {
+			continue
+		}
+		curFold := foldPath(clean)
+		if _, alreadyOwned := spellings[curFold]; alreadyOwned {
+			continue
+		}
+		if oldPath, ok := owned[l.Tracks[i].ID]; ok {
+			oldFold := foldPath(oldPath)
+			if oldFold != curFold && !exportFolded[oldFold] {
+				l.Tracks[i].Path = "/" + oldPath
+			}
+		}
 	}
 	if err = ReconcileOwnedContext(inner, r, l, owned, spellings); err != nil {
 		return enginedb.Result{}, quickLate(ctx, err)
