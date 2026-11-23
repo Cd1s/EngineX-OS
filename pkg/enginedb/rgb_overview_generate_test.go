@@ -193,4 +193,27 @@ func TestRGBVerifiedCacheAndCountMissing(t *testing.T) {
 	if _, err := os.Stat(p2); !os.IsNotExist(err) {
 		t.Fatal("empty file survived cached prune")
 	}
+	// Verify MDBSize/MDBModTime fast path: even if m.db contents are corrupted in-place
+	// with preserved size and mtime, pruneRGBVerifiedFast verifies directory metadata
+	// without opening SQLite or reading PerformanceData pages.
+	st, err := os.Stat(libPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origMDB, err := os.ReadFile(libPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(libPath, bytes.Repeat([]byte("X"), len(origMDB)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(libPath, st.ModTime(), st.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := PruneRGBOverviews(ctx, dir, libPath, ""); err != nil || removed != 0 {
+		t.Fatalf("fast stat-matched prune opened m.db or failed: removed=%d err=%v", removed, err)
+	}
+	if err := os.WriteFile(libPath, origMDB, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }

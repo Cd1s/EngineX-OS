@@ -23,34 +23,60 @@ import (
 const rgbVerifiedName = ".rb-bridge-rgb-verified"
 
 type rgbVerifiedEntry struct {
-	Size        int64  `json:"s"`
-	ModTime     int64  `json:"m"`
-	Path        string `json:"p"`
-	OverviewLen int    `json:"o"`
+	Size    int64  `json:"s"`
+	ModTime int64  `json:"m"`
+	Path    string `json:"p"`
 }
 
 type rgbVerifiedCache struct {
-	UUID  string                     `json:"uuid"`
-	Files map[int64]rgbVerifiedEntry `json:"files"`
+	UUID       string                     `json:"uuid"`
+	MDBSize    int64                      `json:"ms,omitempty"`
+	MDBModTime int64                      `json:"mm,omitempty"`
+	Files      map[int64]rgbVerifiedEntry `json:"files"`
+}
+
+func loadRGBVerifiedCacheFull(dir string) (rgbVerifiedCache, bool) {
+	b, err := os.ReadFile(filepath.Join(dir, rgbVerifiedName))
+	if err != nil {
+		return rgbVerifiedCache{}, false
+	}
+	var c rgbVerifiedCache
+	if err := json.Unmarshal(b, &c); err != nil || c.UUID == "" || strings.ContainsAny(c.UUID, `/\`) || c.UUID == "." || c.UUID == ".." || c.Files == nil {
+		return rgbVerifiedCache{}, false
+	}
+	return c, true
 }
 
 func loadRGBVerifiedCache(dir, uuid string) map[int64]rgbVerifiedEntry {
-	b, err := os.ReadFile(filepath.Join(dir, rgbVerifiedName))
-	if err != nil {
-		return map[int64]rgbVerifiedEntry{}
-	}
-	var c rgbVerifiedCache
-	if err := json.Unmarshal(b, &c); err != nil || c.UUID != uuid || c.Files == nil {
+	c, ok := loadRGBVerifiedCacheFull(dir)
+	if !ok || c.UUID != uuid {
 		return map[int64]rgbVerifiedEntry{}
 	}
 	return c.Files
 }
 
-func saveRGBVerifiedCache(dir, uuid string, files map[int64]rgbVerifiedEntry) {
+func cleanMDBStat(library string) (size, modTime int64, ok bool) {
+	if library == "" {
+		return 0, 0, false
+	}
+	for _, side := range []string{"-wal", "-journal"} {
+		if st, err := os.Stat(library + side); err == nil && st.Size() > 0 {
+			return 0, 0, false
+		}
+	}
+	st, err := os.Stat(library)
+	if err != nil || !st.Mode().IsRegular() {
+		return 0, 0, false
+	}
+	return st.Size(), st.ModTime().UnixNano(), true
+}
+
+func saveRGBVerifiedCache(dir, library, uuid string, files map[int64]rgbVerifiedEntry) {
 	if uuid == "" || dir == "" {
 		return
 	}
-	b, err := json.Marshal(rgbVerifiedCache{UUID: uuid, Files: files})
+	ms, mm, _ := cleanMDBStat(library)
+	b, err := json.Marshal(rgbVerifiedCache{UUID: uuid, MDBSize: ms, MDBModTime: mm, Files: files})
 	if err != nil {
 		return
 	}
@@ -83,13 +109,11 @@ func saveRGBVerifiedCache(dir, uuid string, files map[int64]rgbVerifiedEntry) {
 }
 
 type rgbTrackMeta struct {
-	path        string
-	overviewLen int
+	path string
 }
 
 func loadRGBTrackMeta(ctx context.Context, db *sql.DB) (map[int64]rgbTrackMeta, error) {
-	rows, err := db.QueryContext(ctx, `SELECT t.id, COALESCE(t.path,''), COALESCE(length(p.overviewWaveFormData), 0)
-		FROM Track t LEFT JOIN PerformanceData p ON p.trackId = t.id`)
+	rows, err := db.QueryContext(ctx, `SELECT id, COALESCE(path,'') FROM Track`)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +122,7 @@ func loadRGBTrackMeta(ctx context.Context, db *sql.DB) (map[int64]rgbTrackMeta, 
 	for rows.Next() {
 		var id int64
 		var m rgbTrackMeta
-		if err := rows.Scan(&id, &m.path, &m.overviewLen); err != nil {
+		if err := rows.Scan(&id, &m.path); err != nil {
 			return nil, err
 		}
 		out[id] = m
@@ -136,7 +160,72 @@ func loadTrackPaths(ctx context.Context, db *sql.DB) (map[int64]string, error) {
 // library is the m.db the volume has once this mount is done; previous, when not "",
 // the m.db Engine wrote the files against (a publish replaces it): a file whose id
 // names another audio file in library than in previous goes.
+func pruneRGBVerifiedFast(ctx context.Context, dir, library string) (removed int, handled bool, err error) {
+	ms, mm, ok := cleanMDBStat(library)
+	if !ok || ms <= 0 {
+		return 0, false, nil
+	}
+	c, ok := loadRGBVerifiedCacheFull(dir)
+	if !ok || c.MDBSize != ms || c.MDBModTime != mm {
+		return 0, false, nil
+	}
+	root := filepath.Join(dir, "OverviewData", c.UUID)
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, true, nil
+	}
+	if err != nil {
+		return 0, false, nil
+	}
+	dirty := false
+	seen := make(map[int64]bool, len(entries))
+	for _, e := range entries {
+		name := e.Name()
+		id, perr := strconv.ParseInt(strings.TrimSuffix(name, ".rgb"), 10, 64)
+		if !strings.HasSuffix(name, ".rgb") || perr != nil || id <= 0 || !e.Type().IsRegular() {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return removed, true, err
+		}
+		seen[id] = true
+		p := filepath.Join(root, name)
+		fi, infoErr := e.Info()
+		if infoErr != nil {
+			return removed, false, nil
+		}
+		if fi.Size() <= 8 {
+			if rerr := os.Remove(p); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+				return removed, true, rerr
+			}
+			delete(c.Files, id)
+			dirty = true
+			removed++
+			continue
+		}
+		prev, exists := c.Files[id]
+		if !exists || prev.Size != fi.Size() || prev.ModTime != fi.ModTime().UnixNano() {
+			return removed, false, nil
+		}
+	}
+	for id := range c.Files {
+		if !seen[id] {
+			delete(c.Files, id)
+			dirty = true
+		}
+	}
+	if dirty {
+		saveRGBVerifiedCache(dir, library, c.UUID, c.Files)
+	}
+	return removed, true, nil
+}
+
 func PruneRGBOverviews(ctx context.Context, dir, library, previous string) (int, error) {
+	if previous == "" {
+		if removed, ok, err := pruneRGBVerifiedFast(ctx, dir, library); ok {
+			return removed, err
+		}
+	}
 	db, err := openReadOnly(library)
 	if err != nil {
 		return 0, err
@@ -234,7 +323,7 @@ func PruneRGBOverviews(ctx context.Context, dir, library, previous string) (int,
 			continue
 		}
 		if infoErr == nil {
-			if prev, ok := verified[id]; ok && prev.Size == fi.Size() && prev.ModTime == fi.ModTime().UnixNano() && prev.Path == meta.path && prev.OverviewLen == meta.overviewLen {
+			if prev, ok := verified[id]; ok && prev.Size == fi.Size() && prev.ModTime == fi.ModTime().UnixNano() && prev.Path == meta.path {
 				continue
 			}
 		}
@@ -251,10 +340,9 @@ func PruneRGBOverviews(ctx context.Context, dir, library, previous string) (int,
 			removed++
 		} else if infoErr == nil {
 			verified[id] = rgbVerifiedEntry{
-				Size:        fi.Size(),
-				ModTime:     fi.ModTime().UnixNano(),
-				Path:        meta.path,
-				OverviewLen: meta.overviewLen,
+				Size:    fi.Size(),
+				ModTime: fi.ModTime().UnixNano(),
+				Path:    meta.path,
 			}
 			dirty = true
 		}
@@ -266,9 +354,11 @@ func PruneRGBOverviews(ctx context.Context, dir, library, previous string) (int,
 				dirty = true
 			}
 		}
-	}
-	if dirty && len(verified) > 0 {
-		saveRGBVerifiedCache(dir, uuid, verified)
+		if len(verified) > 0 {
+			saveRGBVerifiedCache(dir, library, uuid, verified)
+		}
+	} else if dirty && len(verified) > 0 {
+		saveRGBVerifiedCache(dir, library, uuid, verified)
 	}
 	return removed, runErr
 }
@@ -308,18 +398,17 @@ func RecordVerifiedRGBOverviews(ctx context.Context, dir, library string, ids []
 			continue
 		}
 		entry := rgbVerifiedEntry{
-			Size:        fi.Size(),
-			ModTime:     fi.ModTime().UnixNano(),
-			Path:        meta.path,
-			OverviewLen: meta.overviewLen,
+			Size:    fi.Size(),
+			ModTime: fi.ModTime().UnixNano(),
+			Path:    meta.path,
 		}
 		if prev, exists := verified[id]; !exists || prev != entry {
 			verified[id] = entry
 			changed = true
 		}
 	}
-	if changed {
-		saveRGBVerifiedCache(dir, uuid, verified)
+	if changed || len(verified) > 0 {
+		saveRGBVerifiedCache(dir, library, uuid, verified)
 	}
 }
 

@@ -363,8 +363,13 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 		// A unique source ID and matching owned path already establish identity.
 		// Read saved waveforms only to recover an ambiguous/moved source, not
 		// on every insert of a partially prepared large library (#253).
-		if p := targets[t.source]; p != nil && counts[t.source] == 1 && "../"+p.rel == t.oldPath {
-			continue
+		if counts[t.source] == 1 && t.source > 0 {
+			if p := targets[t.source]; p != nil && "../"+p.rel == t.oldPath {
+				continue
+			}
+			if byPath[foldPreparedPath(t.oldPath)] != nil {
+				continue
+			}
 		}
 		needAnalysis = append(needAnalysis, i)
 	}

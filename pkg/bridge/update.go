@@ -128,21 +128,7 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 		return enginedb.Result{}, quickLate(ctx, err)
 	}
 	read := time.Since(start)
-	fresh, err := quickPaths(dir, l)
-	if err != nil {
-		return enginedb.Result{}, err
-	}
-	// A quick update publishes the list before it reads files. Only keep a row
-	// whose file genuinely moved (its source ID is owned, its new path is not
-	// already owned by another track, and its old path is absent from the new
-	// export) on its existing path until the staged full pass verifies the move.
-	// When a re-export shifts or renumbers source IDs, normalized path identity
-	// always wins so Engine track IDs and RGB overviews stay stable.
-	owned, err := ownedPaths(dir)
-	if err != nil {
-		return enginedb.Result{}, err
-	}
-	spellings, err := ownedSpellings(dir)
+	fresh, owned, spellings, err := quickPathsWithOwned(dir, l)
 	if err != nil {
 		return enginedb.Result{}, err
 	}
@@ -211,18 +197,23 @@ func quickLate(ctx context.Context, err error) error {
 // export alone and then no longer count as the import's, and the update would replace what a deck
 // changed on it; the update moves it with its files read.
 func quickPaths(dir string, l *rekordbox.Library) (fresh int, err error) {
-	known, err := ownedSpellings(dir)
+	fresh, _, _, err = quickPathsWithOwned(dir, l)
+	return fresh, err
+}
+
+func quickPathsWithOwned(dir string, l *rekordbox.Library) (fresh int, rows map[uint32]string, known map[string]string, err error) {
+	known, err = ownedSpellings(dir)
 	if err != nil {
-		return 0, err
+		return 0, nil, nil, err
 	}
-	rows, err := ownedPaths(dir)
+	rows, err = ownedPaths(dir)
 	if err != nil {
-		return 0, err
+		return 0, nil, nil, err
 	}
 	for i := range l.Tracks {
 		clean, cleanErr := compat.CleanRelative(l.Tracks[i].Path)
 		if cleanErr != nil {
-			return 0, cleanErr
+			return 0, nil, nil, cleanErr
 		}
 		if p, ok := known[foldPath(clean)]; ok {
 			l.Tracks[i].Path = "/" + p
@@ -233,10 +224,10 @@ func quickPaths(dir string, l *rekordbox.Library) (fresh int, err error) {
 		}
 	}
 	if fresh, err = keepSpellings(l, known); err != nil {
-		return 0, err
+		return 0, nil, nil, err
 	}
 	mergeByPath(l)
-	return fresh, nil
+	return fresh, rows, known, nil
 }
 
 // quickName marks the stage of an update whose list did not fit the mount (a 20 000-track
