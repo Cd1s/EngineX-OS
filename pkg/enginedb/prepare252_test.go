@@ -288,6 +288,13 @@ func TestPrepare252UnreadableDirectoryCannotHideSymlink(t *testing.T) {
 		if err = os.Chmod(dir, 0755); err != nil {
 			t.Fatal(err)
 		}
+		tmpDir := filepath.Join(dir, "tmp")
+		if err = os.Mkdir(tmpDir, 0777); err != nil {
+			t.Fatal(err)
+		}
+		if err = os.Chmod(tmpDir, 0777); err != nil {
+			t.Fatal(err)
+		}
 		binary, err := os.ReadFile(os.Args[0])
 		if err != nil {
 			t.Fatal(err)
@@ -298,6 +305,7 @@ func TestPrepare252UnreadableDirectoryCannotHideSymlink(t *testing.T) {
 		}
 		cmd := exec.Command(exe, "-test.run=^TestPrepare252UnreadableDirectoryCannotHideSymlink$")
 		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "TMPDIR="+tmpDir)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65534, Gid: 65534}}
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("unprivileged boundary: %v\n%s", err, out)
