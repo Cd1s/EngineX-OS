@@ -215,8 +215,16 @@ func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resol
 	if _, err := quickPaths(stage, l); err != nil {
 		return enginedb.Result{}, err
 	}
-	res, err := enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly, DatabaseDir: stage})
+	databaseDir, cleanup, err := privateStageDatabase(stage)
 	if err != nil {
+		return enginedb.Result{}, err
+	}
+	defer cleanup()
+	res, err := enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly, DatabaseDir: databaseDir, Bulk: true})
+	if err != nil {
+		return res, err
+	}
+	if err = publishPrivateStageDatabase(stage, databaseDir); err != nil {
 		return res, err
 	}
 	cut("stage list committed")
@@ -225,6 +233,53 @@ func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resol
 	}
 	log.Printf("rb-bridge: the re-export's list is ready (%d new tracks); a remount publishes it before its files are read", res.Added)
 	return res, completeStage(stage, stamp)
+}
+
+func privateStageDatabase(stage string) (string, func(), error) {
+	dir, err := os.MkdirTemp("", "enginex-rb-quick-")
+	if err != nil {
+		return "", func() {}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	for _, name := range []string{"m.db", stateName} {
+		src := filepath.Join(stage, name)
+		if _, err := os.Stat(src); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			cleanup()
+			return "", func() {}, err
+		}
+		if err := copyFile(src, filepath.Join(dir, name)); err != nil {
+			cleanup()
+			return "", func() {}, err
+		}
+	}
+	return dir, cleanup, nil
+}
+
+func publishPrivateStageDatabase(stage, databaseDir string) error {
+	for _, name := range []string{"m.db", stateName} {
+		src := filepath.Join(databaseDir, name)
+		if _, err := os.Stat(src); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		tmp := filepath.Join(stage, ".enginex-quick-"+name+".tmp")
+		if err := copyFile(src, tmp); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		if err := syncFile(tmp); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		if err := os.Rename(tmp, filepath.Join(stage, name)); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+	}
+	return syncFile(stage)
 }
 
 // keepSpellings gives the tracks of l that the library holds their rows' spelling of their path,
