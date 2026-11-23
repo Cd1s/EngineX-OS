@@ -6,8 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"hash/fnv"
-	"io"
 	"log"
 	"net/url"
 	"os"
@@ -201,43 +199,21 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 		}
 		return nil, errors.Join(errs...)
 	}
-	if len(candidates) == 1 {
-		return primary, nil
-	}
-	// A source that is more than the export margin older is a different export. Do not
-	// decrypt or merge it after the selected source has been read.
-	if absDuration(candidates[0].mtime.Sub(candidates[1].mtime)) > exportNewerMargin {
-		return primary, nil
-	}
-	var secondaryIndex = -1
-	for i := 1; i < len(candidates); i++ {
-		if candidates[i].isPDB != candidates[0].isPDB {
-			secondaryIndex = i
-			break
-		}
-	}
-	if secondaryIndex < 0 || absDuration(candidates[0].mtime.Sub(candidates[secondaryIndex].mtime)) > exportNewerMargin {
-		return primary, nil
-	}
-	if candidates[0].isPDB || !encryptedSQLiteFile(candidates[secondaryIndex].full) {
-		return primary, nil
-	}
-	secondary, err := read(candidates[secondaryIndex])
-	if err != nil {
-		log.Printf("rb-bridge: %s unreadable (%v); using %s", candidates[secondaryIndex].rel, err, candidates[0].rel)
-		return primary, nil
-	}
 	if candidates[0].isPDB {
-		return mergeExportLibraries(secondary, primary), nil
+		return primary, nil
 	}
-	return mergeExportLibraries(filterGhostEmptyRootPlaylists(primary, secondary), secondary), nil
-}
-
-func absDuration(d time.Duration) time.Duration {
-	if d < 0 {
-		return -d
+	for _, candidate := range candidates[1:] {
+		if !candidate.isPDB {
+			continue
+		}
+		evidence, evidenceErr := read(candidate)
+		if evidenceErr != nil {
+			log.Printf("rb-bridge: %s unreadable; using %s for the selected export: %v", candidate.rel, candidates[0].rel, evidenceErr)
+			return primary, nil
+		}
+		return filterGhostEmptyRootPlaylists(primary, evidence), nil
 	}
-	return d
+	return primary, nil
 }
 
 // filterGhostEmptyRootPlaylists removes the empty root leaves that rekordbox 7
@@ -269,19 +245,6 @@ func filterGhostEmptyRootPlaylists(oneLibrary, pdb *rekordbox.Library) *rekordbo
 	return &filtered
 }
 
-func encryptedSQLiteFile(path string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	var header [16]byte
-	if _, err = io.ReadFull(f, header[:]); err != nil {
-		return false
-	}
-	return string(header[:]) != "SQLite format 3\x00"
-}
-
 // mergeExportLibraries combines the PDB and OneLibrary views of one stick. The first library
 // retains its track and playlist IDs where possible, which keeps an existing source's Engine
 // identity stable. Duplicate tracks are matched by folded path. A playlist with more entries
@@ -298,7 +261,7 @@ func mergeExportLibraries(libraries ...*rekordbox.Library) *rekordbox.Library {
 	usedPlaylistIDs := map[uint32]bool{}
 	nextPlaylistID := uint32(1)
 
-	for libraryIndex, library := range libraries {
+	for _, library := range libraries {
 		trackIDs := map[uint32]uint32{}
 		for _, track := range library.Tracks {
 			sourceID := track.ID
@@ -308,15 +271,7 @@ func mergeExportLibraries(libraries ...*rekordbox.Library) *rekordbox.Library {
 				continue
 			}
 			id := track.ID
-			if libraryIndex > 0 {
-				id = stableSecondaryTrackID(track.Path)
-				for usedTrackIDs[id] {
-					id++
-					if id < 1<<31 {
-						id = 1 << 31
-					}
-				}
-			} else if usedTrackIDs[id] {
+			if usedTrackIDs[id] {
 				for usedTrackIDs[nextTrackID] {
 					nextTrackID++
 				}
@@ -420,12 +375,6 @@ func mergeExportLibraries(libraries ...*rekordbox.Library) *rekordbox.Library {
 		}
 	}
 	return merged
-}
-
-func stableSecondaryTrackID(trackPath string) uint32 {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(foldPath(trackPath)))
-	return 1<<31 | h.Sum32()&0x7fffffff
 }
 
 func exportPlaylistPath(playlists map[uint32]rekordbox.Playlist, id uint32) string {

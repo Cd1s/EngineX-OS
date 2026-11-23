@@ -64,8 +64,8 @@ func TestMergeExportLibrariesKeepsSecondaryTrackIDStable(t *testing.T) {
 	if first.Tracks[1].ID != second.Tracks[1].ID {
 		t.Fatalf("secondary track ID moved from %d to %d", first.Tracks[1].ID, second.Tracks[1].ID)
 	}
-	if first.Tracks[1].ID < 1<<24 {
-		t.Fatalf("secondary track ID %d overlaps the source ID namespace", first.Tracks[1].ID)
+	if first.Tracks[1].ID >= 1<<24 {
+		t.Fatalf("secondary track ID %d uses the removed high namespace", first.Tracks[1].ID)
 	}
 }
 
