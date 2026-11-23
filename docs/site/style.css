@@ -105,9 +105,9 @@ tr:last-child td{border-bottom:0}
 td code,.models td:first-child{white-space:nowrap}
 .tag{display:inline-block;font-size:12px;line-height:20px;border-radius:999px;padding:0 9px;white-space:nowrap}
 .tag.gen1{color:var(--ac);background:var(--ac-soft)}
-.tag.gen2{color:var(--ok);background:var(--ok-soft)}
+.tag.gen2,.tag.gen2_64{color:var(--ok);background:var(--ok-soft)}
 .dl{font:13px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap}
-.chips{display:inline-flex;gap:2px;margin:6px 0 4px;padding:3px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r)}
+.chips{display:inline-flex;flex-wrap:wrap;gap:2px;margin:6px 0 4px;padding:3px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r)}
 .chips button{background:none;color:var(--dim);border:0;border-radius:6px;padding:4px 12px;font:inherit;font-size:13px;cursor:pointer}
 .chips button:hover{color:var(--tx)}
 .chips button.on{background:var(--bg);color:var(--tx);font-weight:500;box-shadow:0 1px 2px rgba(0,0,0,.12)}

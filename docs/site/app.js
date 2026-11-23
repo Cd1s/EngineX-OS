@@ -2,9 +2,9 @@
 (function () {
   const D = window.DOCS;
   const UI = {
-    s: { lang: "s", search: "搜索文档…", heroT: "EngineX OS 使用文档", heroP: "16 款 Denon DJ / Numark / Rane 独立设备的安装、功能与排障指南。", model: "机型", board: "板号", type: "类型", file: "下载", all: "全部", gen1: "一代 · .img", gen2: "二代 · .img", none: "没有匹配的内容", top: "本页目录", hits: "条匹配", img: ".img 刷机包", bundle: "解锁直刷 .img", tHome: "首页", tDocs: "使用文档", tDl: "下载", tMods: "Mod 社区", mMenu: "章节目录", mJump: "跳转章节…" },
-    t: { lang: "t", search: "搜尋文件…", heroT: "EngineX OS 使用文件", heroP: "16 款 Denon DJ / Numark / Rane 獨立設備的安裝、功能與排障指南。", model: "機型", board: "板號", type: "類型", file: "下載", all: "全部", gen1: "一代 · .img", gen2: "二代 · .img", none: "沒有符合的內容", top: "本頁目錄", hits: "筆符合", img: ".img 刷機包", bundle: "解鎖直刷 .img", tHome: "首頁", tDocs: "使用文件", tDl: "下載", tMods: "Mod 社群", mMenu: "章節目錄", mJump: "跳轉章節…" },
-    e: { lang: "e", search: "Search the docs…", heroT: "EngineX OS Documentation", heroP: "Install, use and troubleshoot all 16 Denon DJ / Numark / Rane standalone units.", model: "Model", board: "Board", type: "Type", file: "Download", all: "All", gen1: "Gen 1 · .img", gen2: "Gen 2 · .img", none: "Nothing matches", top: "On this page", hits: "matches", img: ".img image", bundle: "Unlock + .img", tHome: "Home", tDocs: "Docs", tDl: "Downloads", tMods: "Mod Hub", mMenu: "Chapters", mJump: "Jump to section…" },
+    s: { lang: "s", search: "搜索文档…", heroT: "EngineX OS 使用文档", heroP: "16 款 Denon DJ / Numark / Rane 独立设备的安装、功能与排障指南。", model: "机型", board: "板号", type: "类型", file: "下载", all: "全部", gen1: "一代 · 32 位", gen2: "二代 · 32 位", gen2_64: "二代 · 64 位", none: "没有匹配的内容", top: "本页目录", hits: "条匹配", img: ".img 刷机包", bundle: "解锁直刷 .img", tHome: "首页", tDocs: "使用文档", tDl: "下载", tMods: "Mod 社区", mMenu: "章节目录", mJump: "跳转章节…" },
+    t: { lang: "t", search: "搜尋文件…", heroT: "EngineX OS 使用文件", heroP: "16 款 Denon DJ / Numark / Rane 獨立設備的安裝、功能與排障指南。", model: "機型", board: "板號", type: "類型", file: "下載", all: "全部", gen1: "一代 · 32 位元", gen2: "二代 · 32 位元", gen2_64: "二代 · 64 位元", none: "沒有符合的內容", top: "本頁目錄", hits: "筆符合", img: ".img 刷機包", bundle: "解鎖直刷 .img", tHome: "首頁", tDocs: "使用文件", tDl: "下載", tMods: "Mod 社群", mMenu: "章節目錄", mJump: "跳轉章節…" },
+    e: { lang: "e", search: "Search the docs…", heroT: "EngineX OS Documentation", heroP: "Install, use and troubleshoot all 16 Denon DJ / Numark / Rane standalone units.", model: "Model", board: "Board", type: "Type", file: "Download", all: "All", gen1: "Gen 1 · 32-bit", gen2: "Gen 2 · 32-bit", gen2_64: "Gen 2 · 64-bit", none: "Nothing matches", top: "On this page", hits: "matches", img: ".img image", bundle: "Unlock + .img", tHome: "Home", tDocs: "Docs", tDl: "Downloads", tMods: "Mod Hub", mMenu: "Chapters", mJump: "Jump to section…" },
   };
   const NOTE_T = { warn: "WARNING", new: "NEW" };
   const SHOT_DIR = { s: "zh-CN", t: "zh-TW", e: "en" };
@@ -44,7 +44,7 @@
       }
       case "table": return `<div class="tbl blk"><table><thead><tr>${b.head.map((h) => `<th>${T(h)}</th>`).join("")}</tr></thead><tbody>${b.rows.map((r) => `<tr>${r.map((c) => `<td>${T(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
       case "models": {
-        const chips = ["all", "gen1", "gen2"].map((g) => `<button data-gen="${g}" class="${gen === g ? "on" : ""}">${u[g]}</button>`).join("");
+        const chips = ["all", "gen1", "gen2", "gen2_64"].map((g) => `<button data-gen="${g}" class="${gen === g ? "on" : ""}">${u[g]}</button>`).join("");
         const rows = D.models.filter((m) => gen === "all" || m.gen === gen).map((m) =>
           `<tr><td><b>${esc(m.name)}</b></td><td><code>${m.board}</code></td><td><span class="tag ${m.gen}">${m.gen === "gen1" ? u.img : u.bundle}</span></td><td><a class="dl" href="${m.url}">${esc(m.file)}</a></td></tr>`).join("");
         return `<div class="blk"><div class="chips">${chips}</div><div class="tbl models"><table><thead><tr><th>${u.model}</th><th>${u.board}</th><th>${u.type}</th><th>${u.file}</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;

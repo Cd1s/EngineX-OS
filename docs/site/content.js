@@ -9,7 +9,7 @@
   const TAG = "v5.3.0.5";
   const BASE = "https://github.com/Cd1s/EngineX-OS/releases/latest/download/";
 
-  // 全系 16 款机型（8 款一代机 + 8 款二代机）统一发布 *-Update.img
+  // 全系 16 款机型（8 款一代机 32 位 + 6 款二代机 32 位 + 2 款二代机 64 位）统一发布 *-Update.img
   const MODELS = [
     ["SC5000", "Denon DJ SC5000 Prime", "JP07", "gen1", `SC5000-${V}-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`],
     ["SC5000M", "Denon DJ SC5000M Prime", "JP08", "gen1", `SC5000M-${V}-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`],
@@ -25,8 +25,8 @@
     ["PRIME GO+", "Denon DJ PRIME GO+", "JP11S", "gen2", `PRIMEGOPLUS-${V}-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img`],
     ["Mixstream Pro+", "Numark Mixstream Pro+", "NH08S", "gen2", `MIXSTREAMPROPLUS-${V}-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img`],
     ["Mixstream Pro Go", "Numark Mixstream Pro Go", "NH10", "gen2", `MIXSTREAMPROGO-${V}-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img`],
-    ["PRIME 4 G2", "Denon DJ PRIME 4 G2", "JP24", "gen2", `PRIME4G2-${V}-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img`],
-    ["SYSTEM ONE", "Rane SYSTEM ONE", "RMZ2", "gen2", `SYSTEMONE-${V}-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img`],
+    ["PRIME 4 G2", "Denon DJ PRIME 4 G2", "JP24", "gen2_64", `PRIME4G2-${V}-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img`],
+    ["SYSTEM ONE", "Rane SYSTEM ONE", "RMZ2", "gen2_64", `SYSTEMONE-${V}-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img`],
   ].map(([short, name, board, gen, file]) => ({ short, name, board, gen, file, url: BASE + file }));
 
   const INSTALLERS = [
@@ -46,8 +46,8 @@
         { k: "p", x: L(`EngineX OS ${VL} 基于官方 Engine OS 5.3.0+ 构建，支持 Denon DJ、Numark 与 Rane 16 款独立设备，界面与操控方式保持原厂一致。`, `EngineX OS ${VL} 基於官方 Engine OS 5.3.0+ 打造，支援 Denon DJ、Numark 與 Rane 16 款獨立設備，介面與操控方式維持原廠一致。`, `EngineX OS ${VL} is built on official Engine OS 5.3.0+ for all 16 Denon DJ, Numark and Rane standalone units while keeping the stock UI and controls.`) },
         { k: "h", id: "which", x: L("按机型选择安装包", "依機型選擇安裝包", "Choose your download"), nav: L("选择安装包", "選擇安裝包", "Choose download") },
         { k: "ul", x: [
-          L("**一代机（8 款）**：SC5000 / SC5000M / SC6000 / SC6000M / PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro 下载下方对应机型的 `*-Update.img`，放进 U 盘直接刷机。", "**一代機（8 款）**：SC5000 / SC5000M / SC6000 / SC6000M / PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro 下載下方對應機型的 `*-Update.img`，放進隨身碟直接刷機。", "**First generation (8 models)**: SC5000 / SC5000M / SC6000 / SC6000M / PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro download their `*-Update.img` below and flash directly from a USB stick."),
-          L("**二代机（8 款）**：SC LIVE 4 / 2、PRIME 4+、PRIME GO+、Mixstream Pro+ / Pro Go、PRIME 4 G2、SYSTEM ONE 原厂机首次用电脑运行一次 `EngineX-Installer` 解锁并刷入；此后直接用对应机型的 `*-Update.img` 插 U 盘或在屏幕 `设置 → 关于 / 更新` 在线升级。", "**二代機（8 款）**：SC LIVE 4 / 2、PRIME 4+、PRIME GO+、Mixstream Pro+ / Pro Go、PRIME 4 G2、SYSTEM ONE 原廠機首次用電腦執行一次 `EngineX-Installer` 解鎖並刷入；此後直接用對應機型的 `*-Update.img` 插隨身碟或於螢幕 `設定 → 關於 / 更新` 線上升級。", "**Second generation (8 models)**: SC LIVE 4 / 2, PRIME 4+, PRIME GO+, Mixstream Pro+ / Pro Go, PRIME 4 G2, SYSTEM ONE run `EngineX-Installer` from a computer once on a stock unit; every later update installs from a USB stick with `*-Update.img` or under `Settings → About / Update`."),
+          L("**一代机（8 款，32 位 ARM）**：SC5000 / SC5000M / SC6000 / SC6000M / PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro 下载下方对应机型的 `*-Update.img`，放进 U 盘直接刷机。", "**一代機（8 款，32 位元 ARM）**：SC5000 / SC5000M / SC6000 / SC6000M / PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro 下載下方對應機型的 `*-Update.img`，放進隨身碟直接刷機。", "**First generation (8 models, 32-bit ARM)**: SC5000 / SC5000M / SC6000 / SC6000M / PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro download their `*-Update.img` below and flash directly from a USB stick."),
+          L("**二代机（8 款）**：32 位 ARM 的 SC LIVE 4 / 2、PRIME 4+、PRIME GO+、Mixstream Pro+ / Pro Go（6 款）与 64 位 ARM64 的 PRIME 4 G2、SYSTEM ONE（2 款），原厂机首次用电脑运行一次 `EngineX-Installer` 解锁并刷入；此后直接用对应机型的 `*-Update.img` 插 U 盘或在屏幕 `设置 → 关于 / 更新` 在线升级。", "**二代機（8 款）**：32 位元 ARM 的 SC LIVE 4 / 2、PRIME 4+、PRIME GO+、Mixstream Pro+ / Pro Go（6 款）與 64 位元 ARM64 的 PRIME 4 G2、SYSTEM ONE（2 款），原廠機首次用電腦執行一次 `EngineX-Installer` 解鎖並刷入；此後直接用對應機型的 `*-Update.img` 插隨身碟或於螢幕 `設定 → 關於 / 更新` 線上升級。", "**Second generation (8 models)**: the 32-bit ARM SC LIVE 4 / 2, PRIME 4+, PRIME GO+, Mixstream Pro+ / Pro Go (6 models) and the 64-bit ARM64 PRIME 4 G2 and SYSTEM ONE (2 models) run `EngineX-Installer` from a computer once on a stock unit; every later update installs from a USB stick with `*-Update.img` or under `Settings → About / Update`."),
           L("**自动识别机型**：若不确定型号，直接运行下一章的 `EngineX-Installer`，工具会自动识别机型并下载匹配镜像。", "**自動辨識機型**：若不確定型號，直接執行下一章的 `EngineX-Installer`，工具會自動辨識機型並下載相符映像。", "**Model detection**: if you are unsure of the model, run `EngineX-Installer` (next section) to detect your deck and download the matching image."),
         ] },
         { k: "note", tone: "warn", x: L("请严格核对机型前缀（例如区分一代 `PRIME4` 与二代 `PRIME4PLUS`），切勿混刷其他机型的镜像；未解锁的原厂二代机无法直接用 U 盘刷入，需先按下一章用 `EngineX-Installer` 完成首次安装。", "請嚴格核對機型前綴（例如區分一代 `PRIME4` 與二代 `PRIME4PLUS`），切勿混刷其他機型的映像；未解鎖的原廠二代機無法直接以隨身碟刷入，需先依下一章以 `EngineX-Installer` 完成首次安裝。", "Match your exact model prefix (for example `PRIME4` vs `PRIME4PLUS`) and never use another model's image; a stock 2nd-gen unit must complete its first install with `EngineX-Installer` before USB updates work.") },
@@ -556,7 +556,7 @@
   const HOME = {
     badge: L(`基于 Engine OS 5.3.0+ 的定制固件 · v${VL}`, `基於 Engine OS 5.3.0+ 的客製韌體 · v${VL}`, `Engine OS 5.3.0+ custom firmware · v${VL}`),
     title: L("面向 Denon DJ、Numark 与 Rane 一体机的增强型系统", "面向 Denon DJ、Numark 與 Rane 一體機的增強型系統", "Enhanced System for Denon DJ, Numark & Rane Standalone Hardware"),
-    sub: L("基于官方 Engine OS 5.3.0 构建，界面与操作保持原厂。提供流媒体直连与扫码登录、机内 4 轨 Stems、Rekordbox 直读与 CDJ-3000 互联（测试版）、四轨同屏波形和 21 项实时 DSP 防护，支持一代与二代共 16 款机型。", "基於官方 Engine OS 5.3.0 打造，介面與操作維持原廠。提供串流直連與掃碼登入、機內 4 軌 Stems、Rekordbox 直讀與 CDJ-3000 互聯（測試版）、四軌同屏波形與 21 項即時 DSP 防護，支援一代與二代共 16 款機型。", "Built on official Engine OS 5.3.0 with the stock UI and controls. Adds direct streaming with QR login, on-board 4-stem separation, Rekordbox direct-read and CDJ-3000 linking (beta), a 4-deck waveform view and 21 real-time DSP guards across 16 first- and second-generation models."),
+    sub: L("基于官方 Engine OS 5.3.0 构建，界面与操作保持原厂。提供流媒体直连与扫码登录、机内 4 轨 Stems、Rekordbox 直读与 CDJ-3000 互联（测试版）、四轨同屏波形和 21 项实时 DSP 防护，支持一代（32 位）与二代（32 / 64 位）共 16 款机型。", "基於官方 Engine OS 5.3.0 打造，介面與操作維持原廠。提供串流直連與掃碼登入、機內 4 軌 Stems、Rekordbox 直讀與 CDJ-3000 互聯（測試版）、四軌同屏波形與 21 項即時 DSP 防護，支援一代（32 位元）與二代（32 / 64 位元）共 16 款機型。", "Built on official Engine OS 5.3.0 with the stock UI and controls. Adds direct streaming with QR login, on-board 4-stem separation, Rekordbox direct-read and CDJ-3000 linking (beta), a 4-deck waveform view and 21 real-time DSP guards across 16 models: first generation (32-bit) and second generation (32- and 64-bit)."),
     cta: {
       docs: L("浏览使用文档", "瀏覽使用文件", "Read the Docs"),
       dl: L(`下载固件与安装器 v${VL}`, `下載韌體與安裝器 v${VL}`, `Download v${VL}`),
