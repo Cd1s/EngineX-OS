@@ -781,11 +781,22 @@ func TestWriteBackCuesDetectsActiveLoopDeactivation(t *testing.T) {
 	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatalf("ConvertAtMount: %v", err)
 	}
+	perf, err := enginedb.EncodePerformance(rekordbox.Track{Duration: 2, SampleRate: 44100}, &rekordbox.Analysis{
+		Beats: []rekordbox.Beat{{TimeMS: 250, BPM: 120, Number: 1}},
+		Cues:  []rekordbox.Cue{{HotCue: 1, TimeMS: 500, EndMS: 1500, Loop: true, Active: true, Name: "ActLoop", Color: [4]byte{255, 0x00, 0xe0, 0xff}, ColorCode: 9}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Deactivate the active loop on the deck without altering beatData/quickCues/loops
 	// (so BridgeWritten digest still matches).
 	mPath := filepath.Join(stick, "Engine Library", "Database2", "m.db")
 	mdb, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mPath}).String())
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mdb.Exec(`UPDATE PerformanceData SET trackData=?, quickCues=?, loops=?, activeOnLoadLoops=? WHERE trackId = 1`, perf.TrackData, perf.QuickCues, perf.Loops, perf.ActiveLoops); err != nil {
+		_ = mdb.Close()
 		t.Fatal(err)
 	}
 	if _, err := mdb.Exec(`UPDATE PerformanceData SET activeOnLoadLoops = 0 WHERE trackId = 1`); err != nil {
