@@ -580,24 +580,147 @@ func vacuumInto(ctx context.Context, src, dst string) error {
 	return syncFile(dst)
 }
 
-func vacuumStageMDB(ctx context.Context, stage string) {
+var (
+	stageCompactTimeout = 20 * time.Second
+	stageCompactPoll    = 50 * time.Millisecond
+)
+
+func finishStageCompact(stage string) error {
 	for _, name := range []string{"m.db", stateName} {
-		p := filepath.Join(stage, name)
-		tmp := p + ".compact"
-		_ = os.Remove(tmp)
-		if err := vacuumInto(ctx, p, tmp); err != nil {
-			_ = os.Remove(tmp)
-			continue
-		}
-		for _, side := range []string{"-journal", "-wal", "-shm"} {
-			_ = os.Remove(p + side)
-		}
-		if err := os.Rename(tmp, p); err != nil {
-			_ = os.Remove(tmp)
-			continue
+		if err := finishStageCompactFile(stage, name); err != nil {
+			return err
 		}
 	}
-	_ = syncFile(stage)
+	return nil
+}
+
+func finishStageCompactFile(stage, name string) error {
+	p := filepath.Join(stage, name)
+	tmp := p + ".compact"
+	ready := p + ".compact.ready"
+	if _, err := os.Stat(ready); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if rerr := os.Remove(tmp); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+				return rerr
+			}
+			return nil
+		}
+		return err
+	}
+	if _, err := os.Stat(tmp); err == nil {
+		if err := os.Rename(tmp, p); err != nil {
+			return err
+		}
+		if err := syncFile(stage); err != nil {
+			return err
+		}
+		cut("compact replaced " + name)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, side := range []string{"-journal", "-wal", "-shm"} {
+		if err := os.Remove(p + side); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	cut("compact sidecars removed " + name)
+	if err := os.Remove(ready); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncFile(stage)
+}
+
+func vacuumStageMDB(ctx context.Context, stage string) {
+	if err := finishStageCompact(stage); err != nil {
+		return
+	}
+	if ctx.Err() != nil || IsDeckActive() {
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, stageCompactTimeout)
+	defer cancel()
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		t := time.NewTicker(stageCompactPoll)
+		defer t.Stop()
+		for {
+			select {
+			case <-stopWatch:
+				return
+			case <-cctx.Done():
+				return
+			case <-t.C:
+				if IsDeckActive() {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	for _, name := range []string{"m.db", stateName} {
+		if cctx.Err() != nil || IsDeckActive() {
+			return
+		}
+		if !vacuumStageFile(cctx, stage, name) {
+			if cctx.Err() != nil || IsDeckActive() {
+				return
+			}
+		}
+	}
+}
+
+func vacuumStageFile(ctx context.Context, stage, name string) bool {
+	p := filepath.Join(stage, name)
+	if _, err := os.Stat(p); err != nil {
+		return false
+	}
+	tmp := p + ".compact"
+	ready := p + ".compact.ready"
+	_ = os.Remove(ready)
+	_ = os.Remove(tmp)
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: p, RawQuery: "_pragma=busy_timeout(5000)"}).String())
+	if err != nil {
+		return false
+	}
+	db.SetMaxOpenConns(1)
+	_, _ = db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+	if ctx.Err() != nil || IsDeckActive() {
+		_ = db.Close()
+		_ = os.Remove(tmp)
+		return false
+	}
+	_, err = db.ExecContext(ctx, `VACUUM INTO ?`, tmp)
+	_ = db.Close()
+	if err != nil || ctx.Err() != nil || IsDeckActive() {
+		_ = os.Remove(tmp)
+		return false
+	}
+	if err := syncFile(tmp); err != nil {
+		_ = os.Remove(tmp)
+		return false
+	}
+	cut("compact vacuumed " + name)
+	if ctx.Err() != nil || IsDeckActive() {
+		_ = os.Remove(tmp)
+		return false
+	}
+	if err := os.WriteFile(ready, []byte("1\n"), 0o644); err != nil {
+		_ = os.Remove(tmp)
+		return false
+	}
+	if err := syncFile(ready); err != nil {
+		_ = os.Remove(ready)
+		_ = os.Remove(tmp)
+		return false
+	}
+	if err := syncFile(stage); err != nil {
+		_ = os.Remove(ready)
+		_ = os.Remove(tmp)
+		return false
+	}
+	cut("compact ready " + name)
+	return finishStageCompactFile(stage, name) == nil
 }
 
 // jobProgress reports a background job's tracks done out of the export's to progress: once the
@@ -1097,6 +1220,7 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 // may be out of date, and a remount too many only waits. True when it cannot tell.
 func LibraryHasFile(mount, name string) bool {
 	dir := filepath.Join(mount, "Engine Library", "Database2")
+	_ = finishStageCompact(filepath.Join(dir, importStageName))
 	for _, p := range []string{filepath.Join(dir, importStageName, "m.db"), filepath.Join(dir, "m.db")} {
 		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
 			continue

@@ -399,6 +399,9 @@ func publishImport(mount, dir string) error {
 // renameStage moves a complete stage into place: READY first, then finishPublish moves the
 // state, the stamp and m.db, and completes a publish an interruption cut short at the next mount.
 func renameStage(dir, stage string) error {
+	if err := finishStageCompact(stage); err != nil {
+		return err
+	}
 	// Engine's RGB overview files are keyed by track id: one the published library gives
 	// another track goes now, while the library they were written against is still here.
 	pruneCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -476,6 +479,9 @@ func ImportInBackground(ctx context.Context, mount string, progress func(done, t
 		return enginedb.Result{}, err
 	}
 	stage := filepath.Join(mount, "Engine Library", "Database2", importStageName)
+	if err = finishStageCompact(stage); err != nil {
+		return enginedb.Result{}, err
+	}
 	if stamp == "" || readMark(stage, stampName) == stamp {
 		return enginedb.Result{Bypassed: stamp == ""}, nil
 	}
