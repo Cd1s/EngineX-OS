@@ -13720,7 +13720,8 @@ console.log('ok');
         # The generated scParseSettingsConf, as the main UI runs it on every board: no value is Off (the four players
         # have physical Beat Jump buttons; Mixstream's on-screen bank has always started Off), a saved
         # beat_jump_pads=1 is On, anything else is Off, and a value that was On goes back to Off when the key is gone.
-        parse = self.function(self.main, "scParseSettingsConf")
+        # (self.function() cannot take this one: a comment inside it holds an apostrophe, which its brace scanner reads as a quote.)
+        parse = re.search(r"function scParseSettingsConf\(text\)\s*\{[\s\S]*?\n\t\}", self.main).group(0)
         out = self.node(r"""
 const parse = @PARSE@;
 const player = @PLAYER@;
