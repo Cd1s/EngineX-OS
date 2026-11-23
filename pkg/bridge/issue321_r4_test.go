@@ -169,6 +169,9 @@ func TestIssue321AnExportPutBackFromItsOriginalIsWrittenAgain(t *testing.T) {
 
 	// The next insert puts the first original back; the next pass writes the deck's cues into it.
 	bridge.CleanWriteBackLeftovers(cut)
+	if err := bridge.StampWriteBackForTest(cut); err != nil {
+		t.Fatal(err)
+	}
 	export := filepath.Join(cut, rekordboxDir, "exportLibrary.db")
 	if _, err = os.Stat(export); err != nil {
 		t.Fatalf("exportLibrary.db not put back: %v", err)
