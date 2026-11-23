@@ -789,7 +789,7 @@ func TestWriteBackCuesDetectsActiveLoopDeactivation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mdb.Exec(`UPDATE PerformanceData SET activeOnLoadLoops = 0 WHERE trackId = 1`); err != nil {
+	if _, err := mdb.Exec(`UPDATE PerformanceData SET activeOnLoadLoops = 0 WHERE trackId = 1; UPDATE Track SET lastEditTime = lastEditTime + 2 WHERE id = 1`); err != nil {
 		_ = mdb.Close()
 		t.Fatal(err)
 	}
@@ -854,6 +854,10 @@ func TestWriteBackCuesRoundTripAddThenDelete(t *testing.T) {
 		_ = mdb.Close()
 		t.Fatal(err)
 	}
+	if _, err := mdb.Exec(`UPDATE Track SET lastEditTime = lastEditTime + 2 WHERE id = 1`); err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
 	_ = mdb.Close()
 
 	res1, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-21", OnEject: true})
@@ -868,6 +872,10 @@ func TestWriteBackCuesRoundTripAddThenDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := mdb2.Exec(`UPDATE PerformanceData SET quickCues = ? WHERE trackId = 1`, origQuick); err != nil {
+		_ = mdb2.Close()
+		t.Fatal(err)
+	}
+	if _, err := mdb2.Exec(`UPDATE Track SET lastEditTime = lastEditTime + 2 WHERE id = 1`); err != nil {
 		_ = mdb2.Close()
 		t.Fatal(err)
 	}
