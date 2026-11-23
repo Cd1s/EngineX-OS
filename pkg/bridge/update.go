@@ -943,6 +943,9 @@ func confirmedRefs(ctx context.Context, r *compat.Resolver, l *rekordbox.Library
 		return jobs[i].id < jobs[j].id
 	})
 	for _, job := range jobs {
+		if err := ctx.Err(); err != nil {
+			return refs, err
+		}
 		ok, seen := checked[job.key]
 		if !seen {
 			var n int64
@@ -954,6 +957,9 @@ func confirmedRefs(ctx context.Context, r *compat.Resolver, l *rekordbox.Library
 			}
 			files, read = files+1, read+n
 			if err != nil {
+				return refs, err
+			}
+			if err := ctx.Err(); err != nil {
 				return refs, err
 			}
 			checked[job.key] = ok
