@@ -96,6 +96,18 @@ func recordWritten(ctx context.Context, q *stmtCache, id int64, perf Performance
 	return e
 }
 
+func recordWrittenDirect(ctx context.Context, q *stmtCache, id int64, perf Performance, genre, comment, label string) error {
+	digest := writtenDigest(perf.Beats, perf.QuickCues, perf.Loops)
+	if _, e := q.ExecContext(ctx, `INSERT OR REPLACE INTO BridgeWritten(trackId,digest) VALUES(?,?)`, id, digest); e != nil {
+		return e
+	}
+	if _, e := q.ExecContext(ctx, `INSERT OR REPLACE INTO BridgeSynced(trackId,lastEditTime,digest) VALUES(?,0,?)`, id, SyncedDigest(perf.Beats, perf.QuickCues, perf.Loops, int64(perf.ActiveLoops), genre, comment, label)); e != nil {
+		return e
+	}
+	_, e := q.ExecContext(ctx, `INSERT OR IGNORE INTO temp.synced_now(id) VALUES(?)`, id)
+	return e
+}
+
 // SyncedDigest names what the deck can change in a row and cue write-back writes
 // back to the stick's rekordbox files: cues, loops, activeOnLoadLoops (#321), and
 // genre, comment, and label (#314). Beat-grid / analysis-only updates (beatData,

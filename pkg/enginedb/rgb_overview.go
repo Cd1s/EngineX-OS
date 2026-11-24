@@ -858,18 +858,61 @@ func BackfillStageRGBOverviews(ctx context.Context, res *compat.Resolver, l *rek
 		return 0, errors.New("rgb overview: bad library uuid")
 	}
 
+	stagedOK := map[string]bool{}
+	if entries, rerr := os.ReadDir(filepath.Join(stageDir, "OverviewData", uuid)); rerr == nil {
+		for _, ent := range entries {
+			if !ent.Type().IsRegular() || !strings.HasSuffix(ent.Name(), ".rgb") {
+				continue
+			}
+			if info, ierr := ent.Info(); ierr == nil && info.Mode().IsRegular() && info.Size() > 8 {
+				stagedOK[ent.Name()] = true
+			}
+		}
+	}
+
+	rows, err := db.QueryContext(ctx, `SELECT t.id, COALESCE(t.path,'')
+		FROM Track t
+		JOIN PerformanceData p ON p.trackId = t.id
+		WHERE t.isAnalyzed = 1 AND p.overviewWaveFormData IS NOT NULL`)
+	if err != nil {
+		return 0, err
+	}
+	type candidate struct {
+		id   int64
+		path string
+	}
+	var cands []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.id, &c.path); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if stagedOK[strconv.FormatInt(c.id, 10)+".rgb"] {
+			continue
+		}
+		cands = append(cands, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(cands) == 0 {
+		return 0, nil
+	}
+
 	livePaths := map[int64]string{}
 	if liveDir != "" && liveDir != stageDir {
 		if ldb, lerr := openReadOnly(filepath.Join(liveDir, "m.db")); lerr == nil {
-			if rows, rerr := ldb.QueryContext(ctx, `SELECT id, COALESCE(path,'') FROM Track`); rerr == nil {
-				for rows.Next() {
+			if lrows, rerr := ldb.QueryContext(ctx, `SELECT id, COALESCE(path,'') FROM Track`); rerr == nil {
+				for lrows.Next() {
 					var id int64
 					var p string
-					if rows.Scan(&id, &p) == nil {
+					if lrows.Scan(&id, &p) == nil {
 						livePaths[id] = p
 					}
 				}
-				rows.Close()
+				lrows.Close()
 			}
 			ldb.Close()
 		}
@@ -880,32 +923,6 @@ func BackfillStageRGBOverviews(ctx context.Context, res *compat.Resolver, l *rek
 		if rel, e := compat.CleanRelative(tr.Path); e == nil {
 			byFold[foldPreparedPath("../"+rel)] = tr
 		}
-	}
-
-	rows, err := db.QueryContext(ctx, `SELECT t.id, COALESCE(t.path,''), p.overviewWaveFormData
-		FROM Track t
-		JOIN PerformanceData p ON p.trackId = t.id
-		WHERE t.isAnalyzed = 1 AND p.overviewWaveFormData IS NOT NULL`)
-	if err != nil {
-		return 0, err
-	}
-	type candidate struct {
-		id       int64
-		path     string
-		overview []byte
-	}
-	var cands []candidate
-	for rows.Next() {
-		var c candidate
-		if err := rows.Scan(&c.id, &c.path, &c.overview); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		cands = append(cands, c)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return 0, err
 	}
 
 	written := 0
@@ -930,11 +947,15 @@ func BackfillStageRGBOverviews(ctx context.Context, res *compat.Resolver, l *rek
 		if !ok || tr.AnalysisPath == "" {
 			continue
 		}
+		var overview []byte
+		if err := db.QueryRowContext(ctx, `SELECT overviewWaveFormData FROM PerformanceData WHERE trackId = ?`, c.id).Scan(&overview); err != nil || len(overview) == 0 {
+			continue
+		}
 		a, aerr := readColorOverviewAnalysis(res, tr.AnalysisPath)
 		if aerr != nil {
 			continue
 		}
-		blob, eerr := EncodeRGBOverview(tr, a, c.overview)
+		blob, eerr := EncodeRGBOverview(tr, a, overview)
 		if eerr != nil {
 			continue
 		}

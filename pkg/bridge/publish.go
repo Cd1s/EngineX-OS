@@ -165,12 +165,46 @@ func publishOverviewData(stage, dir string) ([]int64, error) {
 			continue
 		}
 		srcDir := filepath.Join(srcRoot, uuid)
-		dstDir := filepath.Join(dir, "OverviewData", uuid)
-		if err := os.MkdirAll(dstDir, 0o755); err != nil {
-			return movedIDs, err
-		}
+		dstParent := filepath.Join(dir, "OverviewData")
+		dstDir := filepath.Join(dstParent, uuid)
 		files, err := os.ReadDir(srcDir)
 		if err != nil {
+			return movedIDs, err
+		}
+		dstEntries, dstErr := os.ReadDir(dstDir)
+		if errors.Is(dstErr, os.ErrNotExist) && len(files) > 0 {
+			allRGB := true
+			if st, lerr := os.Lstat(srcDir); lerr != nil || !st.IsDir() {
+				allRGB = false
+			}
+			for _, f := range files {
+				if !strings.HasSuffix(f.Name(), ".rgb") || !f.Type().IsRegular() {
+					allRGB = false
+					break
+				}
+			}
+			if allRGB {
+				if err := os.MkdirAll(dstParent, 0o755); err != nil {
+					return movedIDs, err
+				}
+				if err := os.Rename(srcDir, dstDir); err == nil {
+					for _, f := range files {
+						if id, perr := strconv.ParseInt(strings.TrimSuffix(f.Name(), ".rgb"), 10, 64); perr == nil && id > 0 {
+							movedIDs = append(movedIDs, id)
+						}
+					}
+					if err := syncFile(dstParent); err != nil {
+						return movedIDs, err
+					}
+					continue
+				}
+			}
+		}
+		dstHave := make(map[string]bool, len(dstEntries))
+		for _, de := range dstEntries {
+			dstHave[de.Name()] = true
+		}
+		if err := os.MkdirAll(dstDir, 0o755); err != nil {
 			return movedIDs, err
 		}
 		moved := 0
@@ -181,7 +215,7 @@ func publishOverviewData(stage, dir string) ([]int64, error) {
 			}
 			srcPath := filepath.Join(srcDir, name)
 			dstPath := filepath.Join(dstDir, name)
-			if validRGBOverviewFile(dstPath) {
+			if (dstErr != nil || dstHave[name]) && validRGBOverviewFile(dstPath) {
 				if err := os.Remove(srcPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 					return movedIDs, err
 				}

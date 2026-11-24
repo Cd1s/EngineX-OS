@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -411,4 +412,31 @@ func TestPrepare252CaseDifferencesBoundWorkAndMakeProgress(t *testing.T) {
 		}
 	}
 	t.Fatal("repeated mounts never finished")
+}
+
+func TestFoldPreparedPathFastPathMatchesReference(t *testing.T) {
+	cases := []string{
+		"",
+		".",
+		"..",
+		"/",
+		"//",
+		"../Contents/Artist/Album/Track.mp3",
+		"../../Contents/ARTIST/ALBUM/TRACK.WAV",
+		"../contents/artist/album/track.flac",
+		"../Contents/Artist//Track.mp3",
+		"../Contents/Artist/./Track.mp3",
+		"../Contents/Artist/../Other/Track.mp3",
+		"../Contents/Artist/Track.mp3/",
+		`..\Contents\Artist\Track.mp3`,
+		"../Contents/Café/Ümlaut.mp3",
+		"/Contents/Artist/Track.mp3",
+		"/../Contents/Artist/Track.mp3",
+	}
+	for _, tc := range cases {
+		want := strings.ToLower(path.Clean(strings.ReplaceAll(tc, "\\", "/")))
+		if got := foldPreparedPath(tc); got != want {
+			t.Fatalf("foldPreparedPath(%q) = %q, want %q", tc, got, want)
+		}
+	}
 }

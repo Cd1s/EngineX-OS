@@ -539,7 +539,9 @@ func ImportInBackground(ctx context.Context, mount string, progress func(done, t
 		}
 		shown.set(total - res.Deferred)
 		if res.Deferred == 0 {
-			vacuumStageMDB(ctx, stage)
+			if total >= idleBatchTracks {
+				vacuumStageMDB(ctx, stage)
+			}
 			if n, rerr := enginedb.BackfillStageRGBOverviews(ctx, r, l, stage, filepath.Dir(stage)); rerr != nil {
 				log.Printf("rb-bridge: stage RGB overview backfill skipped: %v", rerr)
 			} else if n > 0 {

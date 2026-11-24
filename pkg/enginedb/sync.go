@@ -182,6 +182,10 @@ func playedIndicator() int64 {
 // open keeps schema initialization in the same transaction as the import. bulk is
 // Options.Bulk: journals in memory and no syncs, for a private build only.
 func open(ctx context.Context, p string, bulk bool) (*sql.DB, *sql.Tx, error) {
+	return openMode(ctx, p, bulk, false)
+}
+
+func openMode(ctx context.Context, p string, bulk bool, trustedStageResume bool) (*sql.DB, *sql.Tx, error) {
 	state := filepath.Join(filepath.Dir(p), stateFile)
 	for _, file := range []string{p, state} {
 		for _, suffix := range []string{"", "-journal", "-wal", "-shm"} {
@@ -223,6 +227,27 @@ func open(ctx context.Context, p string, bulk bool) (*sql.DB, *sql.Tx, error) {
 	tx, e = db.BeginTx(ctx, nil)
 	if e != nil {
 		return nil, nil, e
+	}
+	if trustedStageResume && !bulk {
+		var infoCount, schemaVer, bridgeTablesCount int
+		var infoUUID string
+		var played int64
+		var bridgeVer string
+		if qerr := tx.QueryRowContext(ctx, `SELECT
+			(SELECT count(*) FROM main.Information),
+			COALESCE((SELECT schemaVersionMajor*10000+schemaVersionMinor*100+schemaVersionPatch FROM main.Information WHERE id=1), 0),
+			COALESCE((SELECT trim(uuid) FROM main.Information WHERE id=1), ''),
+			COALESCE((SELECT currentPlayedIndiciator FROM main.Information WHERE id=1), 0),
+			COALESCE((SELECT value FROM bridge.BridgeLibrary WHERE key='version'), ''),
+			(SELECT count(*) FROM bridge.sqlite_master WHERE type='table' AND name IN ('BridgeState','BridgeAnalysis','BridgeWritten','BridgeFastBase','BridgeSynced'))`).Scan(
+			&infoCount, &schemaVer, &infoUUID, &played, &bridgeVer, &bridgeTablesCount); qerr == nil &&
+			infoCount == 1 && schemaVer == 30002 && infoUUID != "" && played != 0 && bridgeVer == "1" && bridgeTablesCount == 5 {
+			if _, e = tx.ExecContext(ctx, `CREATE TEMP TABLE IF NOT EXISTS synced_now(id INTEGER PRIMARY KEY); DELETE FROM temp.synced_now`); e != nil {
+				return nil, nil, e
+			}
+			success = true
+			return db, tx, nil
+		}
 	}
 	var count int
 	if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&count); e != nil {
@@ -278,18 +303,24 @@ func open(ctx context.Context, p string, bulk bool) (*sql.DB, *sql.Tx, error) {
 	}
 	// Libraries from earlier builds kept this state in m.db, not yet dropped by Engine.
 	var migratedAnalysis bool
-	for _, table := range bridgeTables {
-		if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM main.sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); e != nil {
-			return nil, nil, e
-		}
-		if n == 0 {
-			continue
-		}
-		if table == "BridgeAnalysis" {
-			migratedAnalysis = true
-		}
-		if _, e = tx.ExecContext(ctx, fmt.Sprintf(`INSERT OR REPLACE INTO bridge.%[1]s SELECT * FROM main.%[1]s; DROP TABLE main.%[1]s`, table)); e != nil {
-			return nil, nil, e
+	var legacyTables int
+	if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM main.sqlite_master WHERE type='table' AND name IN ('BridgeState','BridgeAnalysis','BridgePlaylist','BridgeLibrary')`).Scan(&legacyTables); e != nil {
+		return nil, nil, e
+	}
+	if legacyTables > 0 {
+		for _, table := range bridgeTables {
+			if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM main.sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); e != nil {
+				return nil, nil, e
+			}
+			if n == 0 {
+				continue
+			}
+			if table == "BridgeAnalysis" {
+				migratedAnalysis = true
+			}
+			if _, e = tx.ExecContext(ctx, fmt.Sprintf(`INSERT OR REPLACE INTO bridge.%[1]s SELECT * FROM main.%[1]s; DROP TABLE main.%[1]s`, table)); e != nil {
+				return nil, nil, e
+			}
 		}
 	}
 	if _, e = tx.ExecContext(ctx, `INSERT OR IGNORE INTO BridgeLibrary(key,value) VALUES('version','1')`); e != nil {
@@ -310,15 +341,29 @@ func open(ctx context.Context, p string, bulk bool) (*sql.DB, *sql.Tx, error) {
 		}
 	}
 	// The state file has no foreign keys into m.db: forget what Engine has deleted.
-	for _, prune := range []string{
-		`DELETE FROM BridgeState WHERE trackId NOT IN (SELECT id FROM main.Track)`,
-		`DELETE FROM BridgeAnalysis WHERE trackId NOT IN (SELECT id FROM main.Track)`,
-		`DELETE FROM BridgeWritten WHERE trackId NOT IN (SELECT id FROM main.Track)`,
-		`DELETE FROM BridgeFastBase WHERE trackId NOT IN (SELECT id FROM main.Track)`,
-		`DELETE FROM BridgeSynced WHERE trackId NOT IN (SELECT id FROM main.Track)`,
-		`DELETE FROM BridgePlaylist WHERE listId NOT IN (SELECT id FROM main.Playlist)`,
-	} {
-		if _, e = tx.ExecContext(ctx, prune); e != nil {
+	if !createdBridge || migratedAnalysis {
+		var hasTracks, hasPlaylists bool
+		if e = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM main.Track), EXISTS(SELECT 1 FROM main.Playlist)`).Scan(&hasTracks, &hasPlaylists); e != nil {
+			return nil, nil, e
+		}
+		for _, tbl := range []string{"BridgeState", "BridgeAnalysis", "BridgeWritten", "BridgeFastBase", "BridgeSynced"} {
+			var q string
+			if hasTracks {
+				q = fmt.Sprintf(`DELETE FROM %[1]s WHERE trackId IS NOT NULL AND NOT EXISTS (SELECT 1 FROM main.Track WHERE id=%[1]s.trackId)`, tbl)
+			} else {
+				q = `DELETE FROM ` + tbl
+			}
+			if _, e = tx.ExecContext(ctx, q); e != nil {
+				return nil, nil, e
+			}
+		}
+		var pq string
+		if hasPlaylists {
+			pq = `DELETE FROM BridgePlaylist WHERE listId IS NOT NULL AND NOT EXISTS (SELECT 1 FROM main.Playlist WHERE id=BridgePlaylist.listId)`
+		} else {
+			pq = `DELETE FROM BridgePlaylist`
+		}
+		if _, e = tx.ExecContext(ctx, pq); e != nil {
 			return nil, nil, e
 		}
 	}
@@ -562,7 +607,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			return result, err
 		}
 	} else if !opts.Resume {
-		if prepared, err = prepareTracksOpts(ctx, res, l, cutoff, now, nil, opts.PriorityPaths, opts.SortByPath, opts.MaxTracks, opts.ShouldYield); err != nil {
+		if prepared, err = prepareTracksOpts(ctx, res, l, cutoff, now, nil, nil, opts.PriorityPaths, opts.SortByPath, opts.MaxTracks, opts.ShouldYield); err != nil {
 			return result, err
 		}
 	}
@@ -587,13 +632,14 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	// Preparation can outlast the mount hook's window before Engine opens the
 	// library. Check the actual output, including an explicit DatabaseDir.
-	if OpenElsewhere(filepath.Join(dir, "m.db")) != 0 {
+	privateStage := opts.DatabaseDir != "" && filepath.Base(dir) == ".rb-bridge-import"
+	if !privateStage && OpenElsewhere(filepath.Join(dir, "m.db")) != 0 {
 		return result, ErrLibraryInUse
 	}
 	if opts.Bulk && opts.DatabaseDir == "" {
 		return result, errors.New("enginedb: a bulk import needs a private DatabaseDir")
 	}
-	db, tx, err := open(ctx, filepath.Join(dir, "m.db"), opts.Bulk)
+	db, tx, err := openMode(ctx, filepath.Join(dir, "m.db"), opts.Bulk, privateStage && opts.Resume)
 	if err != nil {
 		return result, err
 	}
@@ -614,17 +660,31 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			return result, err
 		}
 	}
+	var preloadedOwned []ownedTrackRow
 	if opts.Resume && !opts.Fast {
-		done, e := finishedFingerprints(ctx, tx)
-		if e != nil {
-			return result, e
+		var done map[string]string
+		var pending map[string]bool
+		preloadedOwned, done, pending, err = readOwnedRows(ctx, tx)
+		if err != nil {
+			return result, err
 		}
 		for p := range opts.Reread {
 			delete(done, p)
 		}
-		if prepared, err = prepareTracksOpts(ctx, res, l, cutoff, now, done, opts.PriorityPaths, opts.SortByPath, opts.MaxTracks, opts.ShouldYield); err != nil {
+		if prepared, err = prepareTracksOpts(ctx, res, l, cutoff, now, done, pending, opts.PriorityPaths, opts.SortByPath, opts.MaxTracks, opts.ShouldYield); err != nil {
 			return result, err
 		}
+	}
+	var yielded bool
+	shouldStop := func() bool {
+		if opts.MaxTracks > 0 && read >= opts.MaxTracks {
+			return true
+		}
+		if read > 0 && opts.ShouldYield != nil {
+			yielded = yielded || opts.ShouldYield()
+			return yielded
+		}
+		return false
 	}
 	var databaseUUID string
 	if err = q.QueryRowContext(ctx, `SELECT uuid FROM Information`).Scan(&databaseUUID); err != nil {
@@ -635,7 +695,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	for i, p := range prepared {
 		effectiveTracks[i] = p.track
 	}
-	owned, stateByID, stateByPath, err := stageOwnedMoves(ctx, tx, prepared, opts.StagedOnly)
+	owned, stateByID, stateByPath, err := stageOwnedMovesRows(ctx, tx, prepared, opts.StagedOnly, preloadedOwned)
 	if err != nil {
 		return result, err
 	}
@@ -656,7 +716,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	// overflow page, so rows that still hold a waveform are not read (#253). Filtering out
 	// "fast:" rows avoids joining thousands of pending rows on every resumed batch.
 	needRef := map[int64]bool{} // true: no row at all
-	if !opts.Fast && !empty && len(stateByID) > 0 {
+	if !opts.Fast && !empty && len(stateByID) > 0 && !(privateStage && opts.Resume) {
 		rows, e := tx.QueryContext(ctx, `SELECT s.trackId,a.trackId IS NULL FROM BridgeState s LEFT JOIN BridgeAnalysis a ON a.trackId=s.trackId
 			WHERE s.fingerprint <> '' AND substr(s.fingerprint,1,5) <> 'fast:'
 				AND (a.trackId IS NULL OR (length(a.sourceJSON)=8 AND substr(a.sourceJSON,1,4)=CAST('RBA2' AS BLOB)))`)
@@ -699,6 +759,29 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		blob []byte
 	}
 	var pendingRGB []pendingRGBOverview
+	maxBridgeBytes := opts.MaxBridgeStateBytes
+	if maxBridgeBytes <= 0 {
+		maxBridgeBytes = defaultMaxBridgeStateBytes
+	}
+	var bridgePageSize, cachedBridgeBytes int64
+	bridgeCheckCountdown := 0
+	_ = tx.QueryRowContext(ctx, `PRAGMA bridge.page_size`).Scan(&bridgePageSize)
+	currentBridgeBytes := func() int64 {
+		if bridgeCheckCountdown > 0 {
+			bridgeCheckCountdown--
+			return cachedBridgeBytes
+		}
+		var pages int64
+		if bridgePageSize > 0 && tx.QueryRowContext(ctx, `PRAGMA bridge.page_count`).Scan(&pages) == nil && pages > 0 {
+			cachedBridgeBytes = pages * bridgePageSize
+		} else if st, serr := os.Stat(filepath.Join(dir, stateFile)); serr == nil {
+			cachedBridgeBytes = st.Size()
+		}
+		if maxBridgeBytes-cachedBridgeBytes >= 4<<20 {
+			bridgeCheckCountdown = 63
+		}
+		return cachedBridgeBytes
+	}
 	for i, preparedTrack := range prepared {
 		if err = ctx.Err(); err != nil {
 			return result, err
@@ -741,8 +824,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		}
 		legacyOffsets := opts.LegacyOffsets || opts.LegacyAACOffsets && compat.IsMP4AudioPath(rel)
 		fast := opts.Fast
-		limitReached := (opts.MaxTracks > 0 && read >= opts.MaxTracks) || (read > 0 && opts.ShouldYield != nil && opts.ShouldYield())
-		if !fast && (preparedTrack.late || (previous != hash && ((past() && (read > 0 || (!inTime && !opts.Resume))) || limitReached))) {
+		if !fast && (preparedTrack.late || (previous != hash && ((past() && (read > 0 || (!inTime && !opts.Resume))) || shouldStop()))) {
 			// A "fast:" fingerprint makes the next full import read this track.
 			fast, files, art, hash = true, nil, nil, "fast:"+t.RecordHash
 			// A completed v2 row keeps its fingerprint and deck edits on re-export.
@@ -1039,7 +1121,19 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			result.Added++
 		} else {
 			args = append(args, id)
-			_, e = q.ExecContext(ctx, `UPDATE Track SET length=?,bpm=?,year=?,path=?,filename=?,bitrate=?,bpmAnalyzed=?,albumArtId=?,fileBytes=?,title=?,artist=?,album=?,genre=?,comment=?,label=?,composer=?,remixer=?,key=?,rating=?,fileType=?,isAnalyzed=?,isAvailable=?,isMetadataImported=?,pdbImportKey=? WHERE id=?`, args...)
+			resExec, uerr := q.ExecContext(ctx, `UPDATE Track SET isAnalyzed=?21 WHERE id=?25 AND length IS ?1 AND bpm IS ?2 AND year IS ?3 AND path IS ?4 AND filename IS ?5 AND bitrate IS ?6 AND bpmAnalyzed IS ?7 AND albumArtId IS ?8 AND fileBytes IS ?9 AND title IS ?10 AND artist IS ?11 AND album IS ?12 AND genre IS ?13 AND comment IS ?14 AND label IS ?15 AND composer IS ?16 AND remixer IS ?17 AND key IS ?18 AND rating IS ?19 AND fileType IS ?20 AND isAvailable IS ?22 AND isMetadataImported IS ?23 AND pdbImportKey IS ?24`, args...)
+			e = uerr
+			if e == nil {
+				if n, rerr := resExec.RowsAffected(); rerr != nil || n == 0 {
+					resExec, uerr = q.ExecContext(ctx, `UPDATE Track SET length=?1,bpm=?2,bitrate=?6,bpmAnalyzed=?7,albumArtId=?8,fileBytes=?9,rating=?19,isAnalyzed=?21,isAvailable=?22,isMetadataImported=?23 WHERE id=?25 AND year IS ?3 AND path IS ?4 AND filename IS ?5 AND title IS ?10 AND artist IS ?11 AND album IS ?12 AND genre IS ?13 AND comment IS ?14 AND label IS ?15 AND composer IS ?16 AND remixer IS ?17 AND key IS ?18 AND fileType IS ?20 AND pdbImportKey IS ?24`, args...)
+					e = uerr
+					if e == nil {
+						if n2, rerr2 := resExec.RowsAffected(); rerr2 != nil || n2 == 0 {
+							_, e = q.ExecContext(ctx, `UPDATE Track SET length=?,bpm=?,year=?,path=?,filename=?,bitrate=?,bpmAnalyzed=?,albumArtId=?,fileBytes=?,title=?,artist=?,album=?,genre=?,comment=?,label=?,composer=?,remixer=?,key=?,rating=?,fileType=?,isAnalyzed=?,isAvailable=?,isMetadataImported=?,pdbImportKey=? WHERE id=?`, args...)
+						}
+					}
+				}
+			}
 			if e != nil {
 				return result, e
 			}
@@ -1052,9 +1146,11 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			// What the deck changed in a row stays; the rest is this import's (realign.go).
 			// No import mark: the positions hold the file's offset already, and Engine adds
 			// its own rekordbox correction to a marked row it loads with a decoder attached.
-			keep, e := importKeeps(ctx, q, id, perf)
-			if e != nil {
-				return result, e
+			var keep bool
+			if existing && !strings.HasPrefix(previous, "fast:") {
+				if keep, e = importKeeps(ctx, q, id, perf); e != nil {
+					return result, e
+				}
 			}
 			w, active := perf, any(perf.ActiveLoops)
 			if deck.m.beats != nil {
@@ -1079,7 +1175,12 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 				WHERE trackId=?8`, perf.TrackData, perf.Overview, keep, w.Beats, w.QuickCues, w.Loops, active, id); e != nil {
 				return result, e
 			}
-			if e = recordWritten(ctx, q, id, perf); e != nil {
+			if !keep && !deck.m.deck() {
+				e = recordWrittenDirect(ctx, q, id, perf, t.Genre, t.Comment, t.Label)
+			} else {
+				e = recordWritten(ctx, q, id, perf)
+			}
+			if e != nil {
 				return result, e
 			}
 			if perf.Overview != nil {
@@ -1093,29 +1194,12 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			}
 		}
 		if !fast {
-			var bridgeBytes int64
-			var pages, pSize int64
-			if tx.QueryRowContext(ctx, `PRAGMA bridge.page_count`).Scan(&pages) == nil &&
-				tx.QueryRowContext(ctx, `PRAGMA bridge.page_size`).Scan(&pSize) == nil && pages > 0 && pSize > 0 {
-				bridgeBytes = pages * pSize
-			} else if st, err := os.Stat(filepath.Join(dir, stateFile)); err == nil {
-				bridgeBytes = st.Size()
-			}
-			maxBytes := opts.MaxBridgeStateBytes
-			if maxBytes <= 0 {
-				maxBytes = defaultMaxBridgeStateBytes
-			}
-			if bridgeBytes >= maxBytes {
+			if currentBridgeBytes() >= maxBridgeBytes {
 				result.AnalysisSkipped++
 			} else {
 				// The detail stays in the track's ANLZ files; the row says which (#253).
 				refs := detailFiles(files)
 				packedSource := packBridgeRef(original.ID, refs)
-				// No consumer reads the old audio-header archive; retain the column/schema.
-				packedAudio, e := packAnalysis([]byte("{}"))
-				if e != nil {
-					return result, e
-				}
 				// A row that still holds a copy of the waveform (5.3.0.5's RBA1) keeps it: the
 				// import never decides that the display can read these files instead, and reads
 				// none of them for it (#253 review 5: not under the bridge lock, not in this
@@ -1123,7 +1207,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 				// into a reference, once it has read the files as the display does (confirmedRefs).
 				// length() reads no overflow page.
 				keepWave := ` WHERE length(BridgeAnalysis.sourceJSON)<=` + waveformRowBytes
-				if _, e = q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`+keepWave, id, packedSource, packedAudio); e != nil {
+				if _, e = q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`+keepWave, id, packedSource, emptyAudio); e != nil {
 					return result, e
 				}
 			}
@@ -1219,7 +1303,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	}
 	// A staged move that no branch completed would commit an unloadable path (#4).
 	var pending int
-	if err = q.QueryRowContext(ctx, `SELECT count(*) FROM Track WHERE path LIKE '.rb-bridge-pending-%'`).Scan(&pending); err != nil {
+	if err = q.QueryRowContext(ctx, `SELECT count(*) FROM Track WHERE path GLOB '.rb-bridge-pending-*'`).Scan(&pending); err != nil {
 		return result, err
 	}
 	if pending > 0 {
@@ -1237,7 +1321,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	}
 	// Resume prepares unfinished files inside this transaction. Engine may
 	// have opened the library since the pre-write check; roll back in that case.
-	if OpenElsewhere(filepath.Join(dir, "m.db")) != 0 {
+	if !privateStage && OpenElsewhere(filepath.Join(dir, "m.db")) != 0 {
 		return result, ErrLibraryInUse
 	}
 	if err = tx.Commit(); err != nil {
@@ -1464,18 +1548,28 @@ func entityTracks(tracks []uint32, mapping map[uint32]int64) ([]int64, error) {
 // finishedFingerprints maps the Engine path of every bridge-owned track that
 // was imported with its files to its fingerprint.
 func finishedFingerprints(ctx context.Context, tx *sql.Tx) (map[string]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT path,fingerprint FROM BridgeState WHERE fingerprint<>'' AND fingerprint NOT LIKE 'fast:%'`)
+	done, _, err := stateFingerprints(ctx, tx)
+	return done, err
+}
+
+func stateFingerprints(ctx context.Context, tx *sql.Tx) (map[string]string, map[string]bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT path,fingerprint FROM BridgeState WHERE fingerprint<>''`)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	done := map[string]string{}
+	pending := map[string]bool{}
 	for rows.Next() {
 		var p, fp string
 		if err = rows.Scan(&p, &fp); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		done[p] = fp
+		if strings.HasPrefix(fp, "fast:") {
+			pending[p] = true
+		} else {
+			done[p] = fp
+		}
 	}
-	return done, rows.Err()
+	return done, pending, rows.Err()
 }

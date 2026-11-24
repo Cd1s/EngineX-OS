@@ -11,7 +11,6 @@ import (
 	"os"
 	"path"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -266,19 +265,26 @@ func exportDetailFiles(analysisPath string) []string {
 
 var errAnalysisTooLarge = errors.New("enginedb: analysis row too large")
 
-var analysisWriters = sync.Pool{New: func() any {
-	// BestSpeed is a fixed valid level; keep its workspace across columns/rows.
-	w, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
-	return w
-}}
+var analysisWriters = make(chan *gzip.Writer, 16)
 
 func packAnalysis(b []byte) ([]byte, error) { return packAnalysisParts(b) }
 
 func packAnalysisParts(parts ...[]byte) ([]byte, error) {
 	var buf bytes.Buffer
-	w := analysisWriters.Get().(*gzip.Writer)
-	w.Reset(&buf)
-	defer func() { w.Reset(io.Discard); analysisWriters.Put(w) }()
+	var w *gzip.Writer
+	select {
+	case w = <-analysisWriters:
+		w.Reset(&buf)
+	default:
+		w, _ = gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+	}
+	defer func() {
+		w.Reset(io.Discard)
+		select {
+		case analysisWriters <- w:
+		default:
+		}
+	}()
 	for _, part := range parts {
 		if _, err := w.Write(part); err != nil {
 			return nil, err
