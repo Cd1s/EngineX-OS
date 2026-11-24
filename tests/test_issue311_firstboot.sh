@@ -112,6 +112,28 @@ run_profile() {
     cat "$journal"
 }
 
+run_crash_loop() {
+    local base=$WORK/crash-loop ui=$WORK/crash-loop-ui
+    mkdir -p "$ui" "$base/engine" "$base/state" "$base/assignments" "$base/custom"
+    export ISSUE311_JOURNAL=$WORK/crash-loop-journal
+    export ENGINEX_UI_DIR=$ui ENGINEX_PRIMARY_UI_DIR=$ui ENGINEX_LEGACY_UI_DIR=$base/legacy
+    export ENGINEX_ENGINE_DATA_DIR=$base/engine ENGINEX_GUARD_PRE_MARK=$base/pre-mark
+    export ENGINEX_ENGINE_GUARDIAN=$WORK/true-helper ENGINEX_RB_BRIDGE=$WORK/true-helper
+    export ENGINEX_STREAM_SYNC=$WORK/true-helper ENGINEX_PERF_TUNE=$WORK/true-helper
+    export ENGINEX_ASSIGNMENT_DIR=$base/assignments ENGINEX_ASSIGNMENT_PATCHED=$base/patched
+    export ENGINEX_CUSTOM=$base/custom ENGINEX_STATE_DIR=$base/state
+    export ENGINEX_QUIT_REASON_FILE=$base/quit-reason
+    : > "$ISSUE311_JOURNAL"
+    for _ in 1 2 3; do
+        rm -f "$ENGINEX_QUIT_REASON_FILE"
+        sh "$GUARD" pre
+        SERVICE_RESULT=signal EXIT_CODE=exited EXIT_STATUS=17 sh "$GUARD" stop
+    done
+    sh "$GUARD" pre
+    grep -qx crash-loop "$ui/safe-mode"
+    printf 'PASS real crash loop still enters crash-loop fallback\n'
+}
+
 check_asset PRIME4G2-5.3.0.5-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img
 check_asset SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img
 check_asset SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img
@@ -119,3 +141,4 @@ check_asset SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img
 run_profile az04 "$ASSETS/PRIME4G2-5.3.0.5-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img" 1
 run_profile gen2-armhf "$ASSETS/SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img" 1
 run_profile gen1-sc5000 "$ASSETS/SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img" 0
+run_crash_loop
