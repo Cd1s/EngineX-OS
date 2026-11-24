@@ -55,7 +55,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 		if unsafeToFree(t.full) {
 			return fmt.Errorf("%w: %s; the drive needs a disk check on a computer", errUnownedClusters, t.rel)
 		}
-		t.tmp = newStagedName(filepath.Dir(t.full), stagedKind[t.kind])
+		t.tmp = newStagedName(stagedKind[t.kind])
 		targets = append(targets, t)
 		return nil
 	}
@@ -243,14 +243,8 @@ func hasFirstBackup(root, rel string) bool {
 	return false
 }
 
-func newStagedName(dir, kind string) string {
-	for {
-		name := fmt.Sprintf(".enginex-%s-%d.tmp", kind, rand.Uint32())
-		if _, err := os.Lstat(filepath.Join(dir, name)); errors.Is(err, os.ErrNotExist) {
-			return name
-		}
-	}
-}
+// newStagedName is a new staged copy's name; createStaged refuses one that exists.
+func newStagedName(kind string) string { return fmt.Sprintf(".enginex-%s-%d.tmp", kind, rand.Uint64()) }
 
 func stagedName(name string) bool {
 	return strings.HasPrefix(name, ".enginex-") && strings.HasSuffix(name, ".tmp") && !strings.ContainsAny(name, `/\\`)
@@ -410,7 +404,7 @@ func putBack(mount, rel, name string) bool {
 		if !entry.IsDir() || err != nil {
 			continue
 		}
-		f, err := createStaged(filepath.Join(filepath.Dir(dst), newStagedName(filepath.Dir(dst), "restore")))
+		f, err := createStaged(filepath.Join(filepath.Dir(dst), newStagedName("restore")))
 		if err == nil {
 			_, err = writeSynced(f, bytes.NewReader(data))
 		}

@@ -13,8 +13,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 const CueQuiet = 5 * time.Second
@@ -45,7 +43,6 @@ type CueWatcher struct {
 
 type cueStick struct {
 	session CueSession
-	keys    *rekordbox.KeyCache
 	events  atomic.Uint64 // changes of m.db seen: a pass that saw one during its read is dropped
 	state   string        // quietState at the last poll
 	due     time.Time     // when the next pass starts; zero: none is due
@@ -100,7 +97,7 @@ func (w *CueWatcher) rescan() {
 	}
 	for mount := range now {
 		if w.sticks[mount] == nil {
-			w.sticks[mount] = &cueStick{keys: newKeyCache(), state: quietState(mount)}
+			w.sticks[mount] = &cueStick{session: CueSession{keys: newKeyCache()}, state: quietState(mount)}
 			go func() {
 				if n := CleanWriteBackLeftovers(mount); n > 0 {
 					log.Printf("rb-bridge: removed %d temporary files a cut write-back left on %s", n, mount)
@@ -125,7 +122,7 @@ func (w *CueWatcher) forget(keep map[string]bool) {
 	}
 	w.mu.Unlock()
 	for _, st := range gone {
-		st.keys.Clear()
+		st.session.keys.Clear()
 	}
 }
 
@@ -152,7 +149,7 @@ func (w *CueWatcher) run(ctx context.Context, mount string, st *cueStick, done c
 	retry := cueEjecting(mount) || journalBusy(mount)
 	if !retry {
 		ev0, q0 := st.events.Load(), quietState(mount)
-		_, err := w.pass(ctx, mount, WriteBackOptions{Session: &st.session, Keys: st.keys, Settled: func() error {
+		_, err := w.pass(ctx, mount, WriteBackOptions{Session: &st.session, Settled: func() error {
 			time.Sleep(100 * time.Millisecond)
 			if st.events.Load() != ev0 || quietState(mount) != q0 || cueEjecting(mount) {
 				return errNotQuiet
@@ -195,7 +192,7 @@ func (w *CueWatcher) exclusive(ctx context.Context, mount string, opts WriteBack
 			done = make(chan struct{})
 			st.running, st.due = done, time.Time{}
 			w.mu.Unlock()
-			opts.Session, opts.Keys = &st.session, st.keys
+			opts.Session = &st.session
 			res, err := w.pass(ctx, mount, opts)
 			w.mu.Lock()
 			close(done)

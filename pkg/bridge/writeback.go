@@ -41,7 +41,6 @@ type WriteBackOptions struct {
 	OnEject            bool
 	BeforeRename       func(dst string) error // tests: a pull after staging
 	Session            *CueSession
-	Keys               *rekordbox.KeyCache
 	Settled            func() error // the watcher's: an error when m.db changed while it was read
 }
 
@@ -65,11 +64,12 @@ type noted struct {
 	digest []byte
 }
 
-// CueSession keeps, for a watcher, the rows its passes found in sync without reading the export.
-// They reach the snapshot with the next pass that saves it.
+// CueSession keeps, for a watcher, the rows its passes found in sync without reading the export
+// (they reach the snapshot with the next pass that saves it), and the stick's OneLibrary keys.
 type CueSession struct {
 	mu   sync.Mutex
 	rows map[string]noted
+	keys *rekordbox.KeyCache
 }
 
 func (s *CueSession) has(key string, edit int64) bool {
@@ -281,7 +281,7 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 		return "", fmt.Errorf("%w: %w", errVolumeBusy, err)
 	}
 	defer unlock()
-	if p.keys = p.opts.Keys; p.keys == nil {
+	if p.keys = p.opts.Session.keys; p.keys == nil {
 		p.keys = newKeyCache()
 		defer p.keys.Clear()
 	}
