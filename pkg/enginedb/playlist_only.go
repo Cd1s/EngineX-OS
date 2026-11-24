@@ -19,6 +19,7 @@ import (
 // PlaylistOnlyResult counts the imported playlist rows changed by a list-only update.
 type PlaylistOnlyResult struct {
 	Added, Updated, Removed int
+	TrackIDsStable          bool
 }
 
 var ErrPlaylistTrackSetChanged = errors.New("rekordbox track set changed")
@@ -71,7 +72,7 @@ func SyncPlaylistsOnly(ctx context.Context, mount string, l *rekordbox.Library) 
 	if err = tx.QueryRowContext(ctx, `SELECT uuid FROM Information`).Scan(&databaseUUID); err != nil {
 		return result, err
 	}
-	trackIDs, err := playlistTrackMapping(ctx, tx, l.Tracks)
+	trackIDs, idsStable, err := playlistTrackMapping(ctx, tx, l.Tracks)
 	if err != nil {
 		return result, err
 	}
@@ -201,6 +202,7 @@ func SyncPlaylistsOnly(ctx context.Context, mount string, l *rekordbox.Library) 
 	if err = tx.Commit(); err != nil {
 		return result, err
 	}
+	result.TrackIDsStable = idsStable
 	return result, nil
 }
 
@@ -208,48 +210,55 @@ func playlistTitleMatches(current, source string) bool {
 	return current == source || strings.HasPrefix(current, source+" (rekordbox")
 }
 
-func playlistTrackMapping(ctx context.Context, tx *sql.Tx, tracks []rekordbox.Track) (map[uint32]int64, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id,path FROM Track WHERE path IS NOT NULL AND path<>''`)
+func playlistTrackMapping(ctx context.Context, tx *sql.Tx, tracks []rekordbox.Track) (map[uint32]int64, bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id,path,pdbImportKey FROM Track WHERE path IS NOT NULL AND path<>''`)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	byPath := make(map[string]int64)
+	byPathSource := make(map[string]uint32)
 	for rows.Next() {
 		var path string
 		var id int64
-		if err = rows.Scan(&id, &path); err != nil {
-			return nil, err
+		var source uint32
+		if err = rows.Scan(&id, &path, &source); err != nil {
+			return nil, false, err
 		}
 		clean := strings.TrimPrefix(path, "../")
 		if rel, cleanErr := compat.CleanRelative(clean); cleanErr == nil {
 			byPath[foldPlaylistPath(rel)] = id
+			byPathSource[foldPlaylistPath(rel)] = source
 		}
 	}
 	if err = rows.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	mapping := make(map[uint32]int64, len(tracks))
 	used := make(map[int64]struct{}, len(tracks))
+	idsStable := true
 	for _, track := range tracks {
 		clean, cleanErr := compat.CleanRelative(track.Path)
 		if cleanErr != nil {
-			return nil, cleanErr
+			return nil, false, cleanErr
 		}
 		id, ok := byPath[foldPlaylistPath(clean)]
 		if !ok {
-			return nil, ErrPlaylistTrackSetChanged
+			return nil, false, ErrPlaylistTrackSetChanged
 		}
 		if _, duplicate := used[id]; duplicate {
-			return nil, ErrPlaylistTrackSetChanged
+			return nil, false, ErrPlaylistTrackSetChanged
 		}
 		used[id] = struct{}{}
 		mapping[track.ID] = id
+		if byPathSource[foldPlaylistPath(clean)] != track.ID {
+			idsStable = false
+		}
 	}
 	if len(mapping) != len(tracks) {
-		return nil, ErrPlaylistTrackSetChanged
+		return nil, false, ErrPlaylistTrackSetChanged
 	}
-	return mapping, nil
+	return mapping, idsStable, nil
 }
 
 func foldPlaylistPath(path string) string {

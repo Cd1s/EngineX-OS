@@ -138,7 +138,7 @@ func quickUpdate(ctx context.Context, mount, dir, stamp string, r *compat.Resolv
 	playlist, syncErr := enginedb.SyncPlaylistsOnly(inner, mount, l)
 	if syncErr == nil {
 		changed := playlist.Added + playlist.Updated + playlist.Removed
-		if changed == 0 {
+		if changed == 0 || (!playlist.TrackIDsStable && (playlist.Updated > 0 || playlist.Removed > 0)) {
 			syncErr = enginedb.ErrPlaylistTrackSetChanged
 		} else {
 			log.Printf("rb-bridge: mount phase=playlist-transaction ms=%d", (time.Since(start) - readElapsed).Milliseconds())
