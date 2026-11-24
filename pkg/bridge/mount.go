@@ -74,16 +74,6 @@ func init() {
 	rbstate.UnsafeToFree = unsafeToFree
 }
 
-// priorityKeys are the tracks a deck loaded or the DJ looked at, the newest request first.
-func priorityKeys(mount string) []string {
-	items, _ := PendingPriority(mount)
-	keys := make([]string, 0, len(items))
-	for i := len(items) - 1; i >= 0; i-- {
-		keys = append(keys, items[i].Path)
-	}
-	return keys
-}
-
 // steps times a window and writes one journal line a step, so the next insert on a deck shows
 // where the time goes.
 type steps struct {
@@ -357,7 +347,9 @@ func addSmartMatch(v *View, ref uint32) error {
 // track after another by path cost a read each.
 func (w *window) inApplyOrder(keys []string) []string {
 	first := map[string]int{}
-	for i, p := range priorityKeys(w.mount) {
+	items, _ := PendingPriority(w.mount)
+	for i := len(items) - 1; i >= 0; i-- {
+		p := items[i].Path
 		if _, ok := first[rbstate.FoldPath(p)]; !ok {
 			first[rbstate.FoldPath(p)] = i + 1
 		}

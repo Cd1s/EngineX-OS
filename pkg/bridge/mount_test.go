@@ -761,7 +761,7 @@ func TestMountRenumberedReexportWritesNoRowAndRefreshesRefs(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := Diff(view, w.snap)
-	if !p.Empty() {
+	if len(p.AddTracks)+len(p.UpdateTracks)+len(p.Moves)+len(p.RemoveTracks)+len(p.PutLists)+len(p.RemoveLists) != 0 {
 		t.Fatalf("a renumbering re-export has a plan: %+v", p)
 	}
 	if err = w.apply(p); err != nil {
