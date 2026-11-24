@@ -19,8 +19,8 @@ const p3OneLibraryPassphrase = "r8gddnr4k847830ar6cqzbkk0el6qytmb3trbbx805jm74ve
 
 func p3EncryptedOneLibrary(t *testing.T, mount string) {
 	t.Helper()
-	plainSource := filepath.Join("..", "..", "rekordbox", "testdata", "sqlcipher4_onelibrary_decrypted.db")
-	encryptedSource := filepath.Join("..", "..", "rekordbox", "testdata", "sqlcipher4_onelibrary.db")
+	plainSource := filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary_decrypted.db")
+	encryptedSource := filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary.db")
 	plainPath := filepath.Join(t.TempDir(), "onelibrary.db")
 	raw, err := os.ReadFile(plainSource)
 	if err != nil {

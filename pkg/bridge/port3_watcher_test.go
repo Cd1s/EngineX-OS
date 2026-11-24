@@ -95,6 +95,11 @@ func TestP3WatcherDefersConversionAndFinalPassWritesEjectEdit(t *testing.T) {
 	}
 	db = p3OpenDB(t, mount)
 	p3DeckCue(t, db, p3FirstTrackID(t, db), "at eject", 1, 1400)
+	// Engine's trigger dates a row to the second, and p3DeckCue adds a fixed 7: two edits within
+	// one second would carry the same time, which a deck's 5 s quiet period rules out.
+	if _, err := db.Exec(`UPDATE Track SET lastEditTime=lastEditTime+100 WHERE id=?`, p3FirstTrackID(t, db)); err != nil {
+		t.Fatal(err)
+	}
 	_ = db.Close()
 	time.Sleep(350 * time.Millisecond)
 	if p3AnalysisHas(t, mount, "at eject") {
