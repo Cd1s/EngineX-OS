@@ -402,8 +402,54 @@ func openTrackFile(full string) (*os.File, error) {
 	return f, err
 }
 
-// DetailFiles are the ANLZ files of a built track (the snapshot's Track.Built.ANLZ) that serve
-// the scrolling detail waveform, the one DetailOf reads first in front.
+// DetailOf is the scrolling detail waveform of a track for the shadow display: the first of files
+// (volume-relative, DetailFiles' order) that resolves under root to a regular file within 16 MiB
+// and holds a waveform the display draws. Nil when none does.
+func DetailOf(root string, files []string) *rekordbox.Analysis {
+	if len(files) == 0 {
+		return nil
+	}
+	r, err := compat.NewResolver(root)
+	if err != nil {
+		return nil
+	}
+	a := &rekordbox.Analysis{}
+	for _, rel := range files {
+		if data, err := readDetailFile(r, rel); err == nil {
+			if one, err := rekordbox.ParseAnalysis(data); err == nil {
+				a.Waveforms = append(a.Waveforms, one.Waveforms...)
+			}
+		}
+		if w := displayAnalysisWaveform(a); w != nil { // a PWV7 found first leaves the .EXT unread
+			return &rekordbox.Analysis{Waveforms: []rekordbox.Waveform{*w}}
+		}
+	}
+	return nil
+}
+
+func readDetailFile(r *compat.Resolver, rel string) ([]byte, error) {
+	const maxDetailFile = 16 << 20 // a PWV7 of 2<<20 entries and the rest
+	rel, err := r.Resolve(rel)
+	if err != nil {
+		return nil, err
+	}
+	f, err := openTrackFile(r.FullPath(rel))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() || st.Size() > maxDetailFile {
+		return nil, fmt.Errorf("not a regular file within %d bytes: %s", maxDetailFile, rel)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxDetailFile+1))
+	if err == nil && len(b) > maxDetailFile {
+		err = fmt.Errorf("grew past %d bytes: %s", maxDetailFile, rel)
+	}
+	return b, err
+}
+
+// DetailFiles are the ANLZ files of a built track (Track.Built.ANLZ) that serve the detail
+// waveform, in the order DetailOf reads them.
 func DetailFiles(files []rbstate.FileSig) []string {
 	var out []string
 	for _, ext := range []string{".2EX", ".EXT"} {

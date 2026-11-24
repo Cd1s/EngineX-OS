@@ -103,7 +103,7 @@ func TestPruneRGBOverviewsRemovesOtherTracksAndEmptyOnes(t *testing.T) {
 		writeRGB(t, dir, "lib-uuid", "4.rgb", rgbTestOverview(t, 17803)), // no track 4
 		writeRGB(t, dir, "lib-uuid", "7.rgb", replayed),                  // the old replay's: the row's own bins
 	}
-	n, err := PruneRGBOverviews(context.Background(), dir, lib, "")
+	n, err := PruneRGBOverviews(context.Background(), dir, lib)
 	if err != nil || n != len(gone) {
 		t.Fatalf("removed %d, %v; want %d", n, err, len(gone))
 	}
@@ -118,30 +118,7 @@ func TestPruneRGBOverviewsRemovesOtherTracksAndEmptyOnes(t *testing.T) {
 		}
 	}
 	// Nothing left to do: the next mount removes nothing.
-	if n, err = PruneRGBOverviews(context.Background(), dir, lib, ""); err != nil || n != 0 {
+	if n, err = PruneRGBOverviews(context.Background(), dir, lib); err != nil || n != 0 {
 		t.Fatalf("second pass removed %d, %v", n, err)
-	}
-}
-
-// A publish whose library gives an id another audio file: its RGB overview goes even when
-// both tracks are the same length; the ids that keep their file keep theirs.
-func TestPruneRGBOverviewsAgainstThePreviousLibrary(t *testing.T) {
-	dir := t.TempDir()
-	same := rgbTestOverview(t, 17803)
-	live, stage := filepath.Join(dir, "m.db"), filepath.Join(dir, "stage", "m.db")
-	rgbTestLibrary(t, live, map[int64]string{7: "../A.flac", 8: "../B.flac", 9: "../Link.flac"}, map[int64][]byte{7: same, 8: same, 9: same})
-	rgbTestLibrary(t, stage, map[int64]string{7: "../A.flac", 8: "../C.flac"}, map[int64][]byte{7: same, 8: same})
-	own := rgbTestOverviewBins(t, 17803, 0x20) // Engine's RGB analysis, not the stored bins
-	kept := writeRGB(t, dir, "lib-uuid", "7.rgb", own)
-	moved := writeRGB(t, dir, "lib-uuid", "8.rgb", own)
-	n, err := PruneRGBOverviews(context.Background(), dir, stage, live)
-	if err != nil || n != 1 {
-		t.Fatalf("removed %d, %v; want 1", n, err)
-	}
-	if _, err := os.Stat(kept); err != nil {
-		t.Fatal("the id that kept its file lost its overview")
-	}
-	if _, err := os.Stat(moved); !os.IsNotExist(err) {
-		t.Fatal("the overview of B stayed under the id C has now")
 	}
 }
