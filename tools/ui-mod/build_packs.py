@@ -926,6 +926,7 @@ SERVICES_MAIN = """
 		return true
 	}
 	property string scShadowMode: "auto" // from /v1/enginex/ui: auto (each slot by its source), engine or cdj (every source down one path)
+	property string scRbLibraryView: "folders" // folders, merged, device, onelibrary
 	property int scShadowLineMask: 0 // Engine mode on a console: bit N = a CDJ is on Deck N's Line In, where only the display renderer draws its waveform
 	property bool scShadowDisplayOnly: true // the /shadow response is authoritative; missing means the safe default. What a deck without its own displayOnly follows
 	property int scShadowEngineMask: 0 // per slot: bit N = Deck N goes through Engine (load, seek, speed); clear = the display renderer draws it and Engine is left alone
@@ -4401,6 +4402,7 @@ SERVICES_MAIN = """
 		scShowConsole = scIsPlayerBoard && !!v.consoleDecks
 		scFourDeckRoleSetting = v.fourDeckRole || "auto"
 		scShadowMode = v.shadowMode || "auto"
+		scRbLibraryView = v.rbLibraryView || "folders"
 		scKeepPlayhead(v.playhead || 0)
 		if (v.sources && !scSameItems(scSources, v.sources)) scSources = v.sources
 		if (v.loggedIn && !scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
@@ -4523,6 +4525,7 @@ SERVICES_MAIN = """
 		scCueCountdown = true // default on: only an explicit cue_countdown=0 turns it off
 		scBpmDecimals = 2
 		scTracklistWaveform = true
+		root.scRbLibraryView = "folders"
 		root.scReverseJogLeft = false
 		root.scReverseJogRight = false
 		root.scSdHighSpeed = false
@@ -4536,6 +4539,7 @@ SERVICES_MAIN = """
 			const val = line.slice(eq + 1).trim()
 			if (key === "browser_dual_column") root.scDualColumn = val === "1"
 			else if (key === "tracklist_waveform") root.scTracklistWaveform = val !== "0" && val !== "false"
+			else if (key === "rb_library_view") root.scRbLibraryView = (val === "folders" || val === "merged" || val === "device" || val === "onelibrary") ? val : "folders"
 			else if (key === "cue_countdown") root.scCueCountdown = val !== "0"
 			else if (key === "bpm_decimals") root.scBpmDecimals = val === "1" ? 1 : 2
 			else if (key === "sync_guard_pct") root.scSyncGuardPct = parseInt(val) || 0
@@ -5982,7 +5986,29 @@ DUAL_COLUMN_ENTRY = switch_entry("Dual-Column Browser", "scDualColumn", "browser
 
 TRACKLIST_WAVEFORM_ENTRY = switch_entry("Tracklist Waveform", "scTracklistWaveform", "tracklistWaveform")
 
-LIBRARY_ENTRIES = switch_entry("OmniSource (Drives in Streaming)", "scOmniSource", "omniSource") + TRACKLIST_WAVEFORM_ENTRY
+RB_LIBRARY_VIEW_ENTRY = """
+			EntryBase.ListEntry {
+				id: scRbLibraryViewEntry
+				readonly property var ids: ["folders", "merged", "device", "onelibrary"]
+				readonly property int at: Math.max(0, ids.indexOf(root.scRbLibraryView))
+				text: "rekordbox Library View"
+				entryWidth: 176
+				values: ["Three Folders", "Merged", "Device Library", "OneLibrary"]
+				currentValue: values[at]
+				onSelected: function(index) { if (index !== at) root.scCall("rbLibraryView=" + ids[index]) }
+			},
+			Text {
+				Layout.fillWidth: true
+				Layout.preferredHeight: implicitHeight
+				leftPadding: 24; rightPadding: 24
+				wrapMode: Text.WordWrap
+				color: "#9a9a9a"
+				font.pixelSize: 16
+				text: "Applies at next insert"
+			},
+"""
+
+LIBRARY_ENTRIES = switch_entry("OmniSource (Drives in Streaming)", "scOmniSource", "omniSource") + TRACKLIST_WAVEFORM_ENTRY + RB_LIBRARY_VIEW_ENTRY
 
 CUE_COUNTDOWN_ENTRY = switch_entry("Cue Countdown", "scCueCountdown", "cueCountdown")
 

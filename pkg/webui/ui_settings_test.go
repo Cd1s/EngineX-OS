@@ -711,14 +711,14 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 		t.Fatal("DebugTelemetry must default to false")
 	}
 	if v.StreamSortRole != "default" || v.StreamSortOrder != "asc" || v.BrowserDualColumn != false ||
-		!v.TracklistWaveform ||
+		!v.TracklistWaveform || v.RbLibraryView != "folders" ||
 		v.SyncGuardPct != 0 || v.SwapLoopOrder != false || v.LedBrightness != 100 || !v.CueCountdown ||
 		v.StemsEqMode != false || v.BeatJumpPads != false || v.PioneerFx != "off" {
 		t.Fatalf("unexpected defaults: %+v", v)
 	}
 
 	// 2. Update via POST /api/ui with query params and Bearer token
-	updateParams := "streamSortRole=bpm&streamSortOrder=desc&browserDualColumn=1&tracklistWaveform=0&cueCountdown=0&syncGuardPct=15&swapLoopOrder=1&ledBrightness=60&stemsEqMode=1&beatJumpPads=1&pioneerFx=spiral"
+	updateParams := "streamSortRole=bpm&streamSortOrder=desc&browserDualColumn=1&tracklistWaveform=0&rbLibraryView=onelibrary&cueCountdown=0&syncGuardPct=15&swapLoopOrder=1&ledBrightness=60&stemsEqMode=1&beatJumpPads=1&pioneerFx=spiral"
 	postReq, _ := http.NewRequest("POST", srv.URL+"/api/ui?"+updateParams, nil)
 	postReq.Header.Set("Authorization", "Bearer "+token)
 	postResp, err := client.Do(postReq)
@@ -732,7 +732,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	var updated uiSettings
 	json.NewDecoder(postResp.Body).Decode(&updated)
 	if updated.StreamSortRole != "bpm" || updated.StreamSortOrder != "desc" || !updated.BrowserDualColumn || updated.CueCountdown ||
-		updated.TracklistWaveform ||
+		updated.TracklistWaveform || updated.RbLibraryView != "onelibrary" ||
 		updated.SyncGuardPct != 15 || !updated.SwapLoopOrder || updated.LedBrightness != 60 ||
 		!updated.StemsEqMode || !updated.BeatJumpPads || updated.PioneerFx != "spiral" {
 		t.Fatalf("updated values mismatch: %+v", updated)
@@ -749,7 +749,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	var fetched uiSettings
 	json.NewDecoder(getResp.Body).Decode(&fetched)
 	if fetched.StreamSortRole != "bpm" || fetched.StreamSortOrder != "desc" || !fetched.BrowserDualColumn ||
-		fetched.TracklistWaveform ||
+		fetched.TracklistWaveform || fetched.RbLibraryView != "onelibrary" ||
 		fetched.SyncGuardPct != 15 || !fetched.SwapLoopOrder || fetched.LedBrightness != 60 ||
 		!fetched.StemsEqMode || !fetched.BeatJumpPads || fetched.PioneerFx != "spiral" {
 		t.Fatalf("fetched values mismatch: %+v", fetched)
@@ -766,6 +766,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 		"stream_sort_order=desc",
 		"browser_dual_column=1",
 		"tracklist_waveform=0",
+		"rb_library_view=onelibrary",
 		"sync_guard_pct=15",
 		"swap_loop_order=1",
 		"led_brightness=60",
@@ -791,7 +792,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	var reloaded uiSettings
 	json.NewDecoder(resp2.Body).Decode(&reloaded)
 	if reloaded.StreamSortRole != "bpm" || reloaded.StreamSortOrder != "desc" || !reloaded.BrowserDualColumn || reloaded.CueCountdown ||
-		reloaded.TracklistWaveform ||
+		reloaded.TracklistWaveform || reloaded.RbLibraryView != "onelibrary" ||
 		reloaded.SyncGuardPct != 15 || !reloaded.SwapLoopOrder || reloaded.LedBrightness != 60 ||
 		!reloaded.StemsEqMode || !reloaded.BeatJumpPads || reloaded.PioneerFx != "spiral" {
 		t.Fatalf("reloaded values mismatch: %+v", reloaded)
@@ -801,6 +802,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	badCases := []string{
 		"streamSortRole=invalid",
 		"streamSortOrder=invalid",
+		"rbLibraryView=invalid",
 		"browserDualColumn=maybe",
 		"tracklistWaveform=maybe",
 		"cueCountdown=maybe",
@@ -1739,5 +1741,66 @@ func TestScopeRejectsDisabledOrUnloggedAndPreservesUnchangedConf(t *testing.T) {
 	defer srvARL.Close()
 	if code, v := uiPost(t, srvARL.URL, "sources=deezer&scope=deezer"); code != 200 || v.Scope != "deezer" || !slices.Contains(v.LoggedIn, "deezer") {
 		t.Fatalf("ARL-only deezer scope: code=%d scope=%q loggedIn=%v", code, v.Scope, v.LoggedIn)
+	}
+}
+
+func TestRbLibraryViewAndMergedFolderTitle(t *testing.T) {
+	// Verify MergedFolderTitle returns expected localizations and falls back to English.
+	cases := map[string]string{
+		"en":      "Merged Library",
+		"zh-Hans": "合并曲库",
+		"zh-Hant": "合併曲庫",
+		"es":      "Biblioteca combinada",
+		"fr":      "Merged Library",
+		"":        "Merged Library",
+	}
+	for lang, want := range cases {
+		if got := MergedFolderTitle(lang); got != want {
+			t.Fatalf("MergedFolderTitle(%q) = %q, want %q", lang, got, want)
+		}
+	}
+
+	dir := t.TempDir()
+	cfg := Config{AccessToken: "tok", UIDir: dir, StateDir: dir}
+	s := New(cfg, nil)
+	t.Cleanup(s.Close)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+
+	// Default when settings.conf has no rb_library_view key is "folders".
+	if v := s.loadUI(); v.RbLibraryView != "folders" {
+		t.Fatalf("default RbLibraryView = %q, want folders", v.RbLibraryView)
+	}
+
+	// Cycle through all valid values and verify persistence and default omission.
+	for _, val := range []string{"merged", "device", "onelibrary", "folders"} {
+		code, updated := uiPost(t, srv.URL, "rbLibraryView="+val)
+		if code != 200 || updated.RbLibraryView != val {
+			t.Fatalf("POST rbLibraryView=%s: code=%d got=%q", val, code, updated.RbLibraryView)
+		}
+		conf, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if val == "folders" {
+			if strings.Contains(string(conf), "rb_library_view=") {
+				t.Fatalf("default folders should be omitted from settings.conf, got:\n%s", conf)
+			}
+		} else {
+			if !strings.Contains(string(conf), "rb_library_view="+val) {
+				t.Fatalf("settings.conf missing rb_library_view=%s:\n%s", val, conf)
+			}
+		}
+		if reloaded := s.loadUI(); reloaded.RbLibraryView != val {
+			t.Fatalf("loadUI after %s = %q, want %q", val, reloaded.RbLibraryView, val)
+		}
+	}
+
+	// Invalid value in settings.conf falls back to "folders".
+	if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("rb_library_view=bogus\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if v := s.loadUI(); v.RbLibraryView != "folders" {
+		t.Fatalf("invalid settings.conf value gave %q, want folders", v.RbLibraryView)
 	}
 }

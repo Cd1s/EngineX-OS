@@ -253,6 +253,7 @@ type uiSettings struct {
 	StreamSortOrder   string `json:"streamSortOrder,omitempty"`
 	BrowserDualColumn bool   `json:"browserDualColumn"`
 	TracklistWaveform bool   `json:"tracklistWaveform"`
+	RbLibraryView     string `json:"rbLibraryView"`
 	CueCountdown      bool   `json:"cueCountdown"`
 	BpmDecimals       int    `json:"bpmDecimals"`
 	SyncGuardPct      int    `json:"syncGuardPct"`
@@ -379,7 +380,7 @@ func (s *Server) loadUI() uiSettings {
 	known, saved, shadowModeSet := uiServicesBeforeKnown, false, false
 	v := uiSettings{
 		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, NeteaseMode: neteaseOfficial, SpotifySource: "auto", GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ShadowMode: "auto", ProlinkWaveform: true,
-		TracklistWaveform: true, CueCountdown: true, BpmDecimals: 2,
+		TracklistWaveform: true, RbLibraryView: "folders", CueCountdown: true, BpmDecimals: 2,
 		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
 		FxTimeMode: "beats", FxTimeMs: 500, MixstreamFx: slices.Clone(uiMixstreamFxDefaults),
 		// BeatJumpPads is off by default on every board, the four players' Shift + LOOP pad mode included (they have
@@ -519,6 +520,10 @@ func (s *Server) loadUI() uiSettings {
 				v.TracklistWaveform = false
 			} else if val == "1" || strings.EqualFold(val, "true") {
 				v.TracklistWaveform = true
+			}
+		case "rb_library_view":
+			if slices.Contains(uiRbLibraryViews, val) {
+				v.RbLibraryView = val
 			}
 		case "bt_out":
 			if n, err := strconv.Atoi(val); err == nil && n >= 0 && n < 5 {
@@ -718,6 +723,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if !v.TracklistWaveform {
 		text += "tracklist_waveform=0\n"
+	}
+	if slices.Contains(uiRbLibraryViews, v.RbLibraryView) && v.RbLibraryView != "folders" {
+		text += "rb_library_view=" + v.RbLibraryView + "\n"
 	}
 	if v.BtOut > 0 && v.BtOut < 5 {
 		text += "bt_out=" + strconv.Itoa(v.BtOut) + "\n"
@@ -1134,7 +1142,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("spotifySource", q.Get("spotifySource"), uiSpotifySources) || bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiScopes) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) || bad("fxTimeMode", q.Get("fxTimeMode"), uiFxTimeModes) {
+	if bad("spotifySource", q.Get("spotifySource"), uiSpotifySources) || bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiScopes) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) || bad("fxTimeMode", q.Get("fxTimeMode"), uiFxTimeModes) || bad("rbLibraryView", q.Get("rbLibraryView"), uiRbLibraryViews) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
@@ -1167,6 +1175,9 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Has("shadowMode") {
 		v.ShadowMode = q.Get("shadowMode")
+	}
+	if q.Has("rbLibraryView") {
+		v.RbLibraryView = q.Get("rbLibraryView")
 	}
 	if q.Has("verboseLog") {
 		b, ok := parseBoolParam(q.Get("verboseLog"))

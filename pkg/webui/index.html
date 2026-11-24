@@ -172,6 +172,7 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
  <section class="card">
   <h3><span data-i18n="deckSys"></span></h3>
   <div class="setting"><div class="txt"><b data-i18n="tOmni"></b><span class="sub" data-i18n="sOmni"></span></div><label class="sw"><input type="checkbox" data-toggle="omniSource"><span></span></label></div>
+  <div class="setting"><div class="txt"><b data-i18n="tRbLibraryView"></b><span class="sub" data-i18n="sRbLibraryView"></span></div><select id="rbLibraryView" data-i18n-aria="tRbLibraryView"><option value="folders" data-i18n="rbViewFolders"></option><option value="merged" data-i18n="rbViewMerged"></option><option value="device" data-i18n="rbViewDevice"></option><option value="onelibrary" data-i18n="rbViewOneLibrary"></option></select></div>
   <div class="setting"><div class="txt"><b data-i18n="tShare"></b><span class="sub" data-i18n="sShare"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkShare"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tRbxShare"></b><span class="sub" data-i18n="sRbxShare"></span></div><input id="rbxShare" data-i18n-ph="phRbxShare" autocomplete="off" spellcheck="false"></div>
   <div class="setting"><div class="txt"><b data-i18n="tHttps"></b><span class="sub" data-i18n="sHttps"></span></div><label class="sw"><input type="checkbox" data-toggle="consoleHttps"><span></span></label></div>
@@ -335,6 +336,12 @@ btLayerA:['Layer A','Layer A','Layer A','Capa A'],
 btLayerB:['Layer B','Layer B','Layer B','Capa B'],
 tOmni:['OmniSource','OmniSource 全源同屏混排','OmniSource 全源同屏混排','OmniSource'],
 sOmni:['Show USB / SD drives next to streaming in one browser and search','在流媒体浏览和搜索里同时显示 U 盘 / SD 卡','在串流瀏覽和搜尋裡同時顯示隨身碟 / SD 卡','Muestra las unidades USB / SD junto al streaming en un mismo explorador y búsqueda'],
+tRbLibraryView:['rekordbox Library View','rekordbox 曲库视图','rekordbox 曲庫檢視','Vista de biblioteca rekordbox'],
+sRbLibraryView:['Root playlist view for USB drives with both Device Library and OneLibrary (applies at next insert)','同时包含 Device Library 与 OneLibrary 的 U 盘根目录视图（将在下次插入时生效）','同時包含 Device Library 與 OneLibrary 的隨身碟根目錄檢視（將在下次插入時生效）','Vista raíz de listas para unidades USB con Device Library y OneLibrary (se aplicará al volver a insertar)'],
+rbViewFolders:['Three Folders','三个文件夹','三個資料夾','Tres carpetas'],
+rbViewMerged:['Merged','合并曲库','合併曲庫','Combinada'],
+rbViewDevice:['Device Library','Device Library','Device Library','Device Library'],
+rbViewOneLibrary:['OneLibrary','OneLibrary','OneLibrary','OneLibrary'],
 tShare:['Pro DJ Link','Pro DJ Link','Pro DJ Link','Pro DJ Link'],
 sShare:['Connect with CDJs and rekordbox on the network and share this deck’s USB/SD (export to CDJ is Beta)','连接局域网内的 CDJ 和 rekordbox，并共享本机 USB/SD（导出至 CDJ 为测试版）','連接區域網路內的 CDJ 和 rekordbox，並分享本機 USB/SD（匯出至 CDJ 為測試版）','Conecta con los CDJ y rekordbox de la red y comparte el USB/SD de este deck (exportar a CDJ es Beta)'],
 tRbxShare:['rekordbox music folder','rekordbox 音乐文件夹','rekordbox 音樂資料夾','Carpeta de música de rekordbox'],
@@ -550,6 +557,7 @@ async function showAppleMusic(){const v=await api('applemusic');setVal('amUrl',v
 $('amHelperQRBox').ontoggle=()=>{if($('amHelperQRBox').open){clearTimeout(amPollTimer);amPollTimer=setTimeout(()=>showAppleMusic().catch(()=>{}),2500)}};
 async function saveAppleMusic(){await api('applemusic',{method:'POST',body:JSON.stringify({helperUrl:$('amUrl').value.trim(),helperLoginUrl:$('amLoginUrl').value.trim(),helperToken:$('amToken').value,clearToken:$('amClearToken').checked})});$('amToken').value='';$('amClearToken').checked=false;$('amHelperQR').removeAttribute('src');await showAppleMusic()}
 $('spotifySource').onchange=()=>action(async()=>{showUI(await api('ui?'+new URLSearchParams({spotifySource:$('spotifySource').value}),{method:'POST'}))});
+$('rbLibraryView').onchange=()=>action(async()=>{showUI(await api('ui?'+new URLSearchParams({rbLibraryView:$('rbLibraryView').value}),{method:'POST'}))});
 $('amLoginForm').onsubmit=e=>{e.preventDefault();action(async()=>{try{await api('applemusic/login',{method:'POST',body:JSON.stringify({username:$('amUsername').value.trim(),password:$('amPassword').value})})}finally{$('amPassword').value=''}await showAppleMusic()})};
 $('am2FAForm').onsubmit=e=>{e.preventDefault();action(async()=>{try{await api('applemusic/2fa',{method:'POST',body:JSON.stringify({code:$('amCode').value.trim()})})}finally{$('amCode').value=''}await showAppleMusic()})};
 async function saveRelay(){const b={relayUrl:$('relayUrl').value.trim()};const p=$('relayPassword').value;if(p)b.deemixPassword=p;await api('relay',{method:'POST',body:JSON.stringify(b)});$('relayPassword').value='';await showRelay()}
@@ -642,6 +650,7 @@ function showUI(v){lastUI=v;
  for(const e of document.querySelectorAll('[data-toggle]'))e.checked=!!v[e.dataset.toggle];
  const tg=k=>document.querySelector('[data-toggle="'+k+'"]');
  setVal('spotifySource',v.spotifySource||'auto');
+ setVal('rbLibraryView',v.rbLibraryView||'folders');
  const caps=v.capabilities||{},off=Array.isArray(v.featuresOff)?v.featuresOff:[];
  tg('upfaderEcho').closest('.setting').hidden=caps.mixer!==undefined?!caps.mixer:!!v.player; // #52: players have no channel faders
  tg('hifiOutput').closest('.setting').hidden=(v.board?!v.player:false)||off.includes('dsp-guards')||off.includes('hifi-output');
