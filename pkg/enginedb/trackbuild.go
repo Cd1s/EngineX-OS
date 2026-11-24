@@ -145,12 +145,11 @@ func statCover(ctx context.Context, res *compat.Resolver, artworkPath string) (r
 	return sig, err
 }
 
-// stopped reports a cancellation, also when a file error wraps it.
+// stopped reports a cancellation or a Pause's stop, also when a file error wraps it.
 func stopped(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.As(err, new(buildStopped))
 }
 
-// buildStopped is the error a ReadOptions.Pause stopped the build with.
 type buildStopped struct{ err error }
 
 func (e buildStopped) Error() string { return "enginedb: track build stopped: " + e.err.Error() }

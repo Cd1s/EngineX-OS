@@ -40,7 +40,6 @@ type TrackRow struct {
 	Track rekordbox.Track // the export's fields; Cues are the export's own cue rows, if it has any
 }
 
-// ListRow is a playlist or folder to put into the library.
 type ListRow struct {
 	Title  string
 	Parent int64 // Playlist.id of its folder, 0 at the root
@@ -143,20 +142,16 @@ func (l *Library) init(ctx context.Context) error {
 	return nil
 }
 
-// UUID is the library's Information.uuid.
 func (l *Library) UUID() string { return l.uuid }
 
-// Close closes the database.
 func (l *Library) Close() error { return l.db.Close() }
 
-// Counts are the library's tracks and lists, for the mount path's decision whether the stick
-// has a library to keep.
+// Counts are the library's tracks and lists: whether the stick has a library to keep.
 func (l *Library) Counts(ctx context.Context) (tracks, lists int, err error) {
 	err = l.db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM Track),(SELECT count(*) FROM Playlist)`).Scan(&tracks, &lists)
 	return tracks, lists, err
 }
 
-// Batch is one transaction on the library.
 type Batch struct {
 	l          *Library
 	tx         *sql.Tx
@@ -170,10 +165,10 @@ type Batch struct {
 	commitID   int64
 }
 
-// CommitID is what the library's CommitID returns once this batch is committed.
+// CommitID is the library's CommitID once this batch is committed.
 func (b *Batch) CommitID() int64 { return b.commitID }
 
-// CommitID names the bridge's last committed transaction on the library.
+// CommitID names the bridge's last committed transaction: Information.lastRekordBoxLibraryImportReadCounter (design §5).
 func (l *Library) CommitID(ctx context.Context) (int64, error) {
 	var id sql.NullInt64
 	err := l.db.QueryRowContext(ctx, `SELECT lastRekordBoxLibraryImportReadCounter FROM Information`).Scan(&id)
@@ -187,8 +182,7 @@ type Row struct {
 	Edit int64  // lastEditTime
 }
 
-// TrackIndex is every row of the library by the key of its path. It reads the index of the
-// unique path constraint, not the rows.
+// TrackIndex is every row by the key of its path (read from the unique path index, not the rows).
 func (l *Library) TrackIndex(ctx context.Context) (map[string]Row, error) {
 	rows, err := l.db.QueryContext(ctx, `SELECT id,path,COALESCE(lastEditTime,0) FROM Track WHERE path IS NOT NULL`)
 	if err != nil {
@@ -206,7 +200,6 @@ func (l *Library) TrackIndex(ctx context.Context) (map[string]Row, error) {
 	return out, rows.Err()
 }
 
-// ListIDs is the set of the library's Playlist IDs.
 func (l *Library) ListIDs(ctx context.Context) (map[int64]bool, error) {
 	rows, err := l.db.QueryContext(ctx, `SELECT id FROM Playlist`)
 	if err != nil {
@@ -232,9 +225,7 @@ func (l *Library) Begin(ctx context.Context) (*Batch, error) {
 		return nil, err
 	}
 	b := &Batch{l: l, tx: tx, stmts: map[string]*sql.Stmt{}, now: time.Now().Unix()}
-	// Every transaction of the bridge moves Engine's own counter of rekordbox imports, as earlier
-	// builds did at each import. The window notes the value its commit leaves, and so can tell
-	// after a cut whether that commit happened (CommitID).
+	// Every transaction moves Engine's counter of rekordbox imports: the commit ID (design §5).
 	if err = tx.QueryRowContext(ctx, `UPDATE Information SET lastRekordBoxLibraryImportReadCounter=COALESCE(lastRekordBoxLibraryImportReadCounter,0)+1 RETURNING lastRekordBoxLibraryImportReadCounter`).Scan(&b.commitID); err != nil {
 		tx.Rollback()
 		return nil, err
@@ -311,13 +302,11 @@ func (b *Batch) closeStmts() {
 	b.stmts = nil
 }
 
-// Rollback drops the batch.
 func (b *Batch) Rollback() {
 	b.closeStmts()
 	b.tx.Rollback()
 }
 
-// Commit ends the batch.
 func (b *Batch) Commit(ctx context.Context) error {
 	if b.l.bulk {
 		if _, err := b.tx.ExecContext(ctx, `UPDATE Track SET originTrackId=id,originDatabaseUuid=(SELECT uuid FROM Information)
@@ -735,9 +724,7 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 		}
 		return staged, PerfSame, facts(false)
 	case prev.State == rbstate.PerfDeck || (prev.Written != nil && !bytes.Equal(have, prev.Written)):
-		// The deck's since the bridge wrote it. What is still the import's in it, an older import's
-		// positions under another offset rule, moves to this import's (realignKept, the rows real
-		// decks had loaded before #178); what the deck changed stays where it is.
+		// The deck's since the bridge wrote it (realignKept, #178).
 		beats, cues, loops, _ := realignKept(row.beats, row.cues, row.loops, p, row.locked)
 		_, err = b.exec(ctx, `UPDATE PerformanceData SET trackData=?1,overviewWaveFormData=?2,beatData=COALESCE(?3,?6),quickCues=COALESCE(?4,?7),
 			loops=COALESCE(?5,?8),thirdPartySourceId=NULL WHERE trackId=?9`, p.TrackData, p.Overview, beats, cues, loops, p.Beats, p.QuickCues, p.Loops, id)
@@ -885,8 +872,7 @@ func safeFile(p string) error {
 	return nil
 }
 
-// playedIndicator returns the positive random 63-bit value Engine stores in
-// Information.currentPlayedIndiciator.
+// playedIndicator is a positive random 63-bit Information.currentPlayedIndiciator.
 func playedIndicator() int64 {
 	id := uuid.New()
 	return int64(binary.BigEndian.Uint64(id[:8])>>1) | 1
