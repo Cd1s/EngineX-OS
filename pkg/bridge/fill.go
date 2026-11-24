@@ -485,8 +485,11 @@ func (f *filler) servePriority() error {
 
 // publish reports whether the stage holds a record a window would apply: of the view's current
 // row hash and rules, for a track the bridge writes, not applied yet. The same set as the
-// remount asked for last time on this volume is not published again: the window did not take
-// it, and a remount would only reload the library.
+// remount asked for last time on this volume is not published again when the window it caused
+// did nothing: a remount would only reload the library. A window that spent its time giving
+// rows the export's fields did something: the rows still waiting are part of the sum (replica,
+// KDATA: the take-over's second window updated 5,524 rows and applied nothing, and the job
+// asked for no further window, so cue write-back stayed locked out).
 func (f *filler) publish() bool {
 	var keys []string
 	for key, e := range f.entries {
@@ -508,7 +511,7 @@ func (f *filler) publish() bool {
 		e := f.entries[k]
 		fmt.Fprintf(h, "%s\x00%v\x00%v\x00", k, e.Sig.Audio, e.Sig.ANLZ)
 	}
-	sum := f.snap.LibraryUUID + " " + hex.EncodeToString(h.Sum(nil))
+	sum := fmt.Sprintf("%s %s %d", f.snap.LibraryUUID, hex.EncodeToString(h.Sum(nil)), f.snap.Pending.Rows)
 	vk, err := volumeIdentity(f.mount)
 	if err != nil {
 		return true

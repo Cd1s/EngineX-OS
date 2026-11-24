@@ -254,6 +254,19 @@ func TestFillSkipsWhatIsStagedOrBuilt(t *testing.T) {
 	if again.Staged+again.Degraded != 0 || again.Publish {
 		t.Fatalf("second job, nothing applied meanwhile: %+v (the same records do not ask for another remount)", again)
 	}
+	// A window that had time only for rows' fields did something: the job asks for the next one,
+	// once (the take-over of a large library spends its second window on the rows).
+	writeSnapshot(t, root, func(s *rbstate.Snapshot) { s.Pending.Rows = 4 })
+	if res := mustFill(t, root, FillOptions{Stage: st}); res.Staged+res.Degraded != 0 || !res.Publish {
+		t.Fatalf("job after a window that updated rows only: %+v", res)
+	}
+	if res := mustFill(t, root, FillOptions{Stage: st}); res.Publish {
+		t.Fatalf("job after a window that did nothing: %+v", res)
+	}
+	writeSnapshot(t, root, func(s *rbstate.Snapshot) { s.Pending.Rows = 0 })
+	if res := mustFill(t, root, FillOptions{Stage: st}); !res.Publish {
+		t.Fatalf("job after the window that finished the rows: %+v", res)
+	}
 	applyStage(t, root, st)
 	// With the stamp verified the built tracks are not looked at: not even a missing file shows.
 	// The degraded track is (a file that is fixed is found without a re-export); it is unchanged.
