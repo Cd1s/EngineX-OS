@@ -21,31 +21,20 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
-// The background job, `rb-bridge --import-path` (design §1.5). It builds each track's performance
-// data from the stick's ANLZ files and audio headers into the stage on /data, writes the .rgb
-// mini waveform of each finished track into the live OverviewData (never over a valid one), and
-// says whether a remount should let a window apply what it staged. It never opens m.db, never
-// writes the snapshot and writes nothing else on the stick.
+// The background job (design §1.5): performance data from the stick's ANLZ files and audio
+// headers into the stage on /data, and the .rgb file of each finished track into the live
+// OverviewData (never over a valid one). It never opens m.db and writes nothing else on the stick.
 
-// FillOptions are FillInBackground's options.
 type FillOptions struct {
-	// Progress is told how many of the view's tracks have been compared so far, out of how many;
-	// the count never goes down (#328).
-	Progress func(done, total int)
-	// Stage is where the records go; nil opens the stage of the snapshot's library.
-	Stage *rbstate.Stage
+	Progress func(done, total int) // tracks compared so far; never goes down (#328)
+	Stage    *rbstate.Stage        // nil: the stage of the snapshot's library
 }
 
-// FillResult is what one run of the job did.
 type FillResult struct {
 	Staged, Degraded, Missing int
-	// Unread tracks could not be built now (a file that cannot be read, a path the volume
-	// refuses): they are logged and looked at again by the next job.
-	Unread int
-	// Left is the tracks not compared yet when ctx ended.
-	Left int
-	// Publish: the stage holds something a window would apply. The caller asks for the remount.
-	Publish bool
+	Unread                    int  // could not be built now; logged, and the next job tries again
+	Left                      int  // not compared when ctx ended
+	Publish                   bool // the stage holds something a window would apply: ask for the remount
 }
 
 // putStaged is Stage.Put; a variable for tests of a full /data.
@@ -54,26 +43,43 @@ var putStaged = (*rbstate.Stage).Put
 // fillLockWait is how long the job waits for a window to release the volume.
 var fillLockWait = 2 * time.Minute
 
-// fillTrack is a track of the view as the job needs it.
 type fillTrack struct {
 	key   string
 	track rekordbox.Track
 	hash  string // the view's hash of the export fields: Sig.Row
 }
 
-// fillView is the exports as the job needs them.
 type fillView struct {
 	stamp  string
 	tracks []fillTrack
 }
 
-// FillInBackground is `rb-bridge --import-path`. Order of work: the tracks in the priority queue,
-// then every track whose signature differs from Track.Built or whose Perf is PerfNone, sorted by
-// path. For each it stats the audio file, the ANLZ files and the cover, skips the track when the
-// snapshot or the stage has that signature already, and otherwise builds it and puts it in the
-// stage. When every track of the export's stamp has been compared it calls MarkVerified. Once
-// the stage verified a stamp, a later job does not stat the tracks the snapshot has built for
-// it. It yields to a playing deck (pace.go).
+// readFillView reads the exports as a window would (FindSources, ReadSources, the staged CDJ
+// libraries, BuildView) into the view's tracks and the stamp; a variable for tests.
+var readFillView = func(ctx context.Context, r *compat.Resolver, mount, layout string) (*fillView, error) {
+	files, err := FindSources(r, mount)
+	if err != nil {
+		return nil, err
+	}
+	libs, _, err := ReadSources(ctx, r, mount, files, nil)
+	if err != nil {
+		return nil, err
+	}
+	v, err := BuildView(append(libs, readStaged(mount)...), layout, "")
+	if err != nil {
+		return nil, err
+	}
+	out := &fillView{stamp: rbstate.Stamp(layout, files, stagedStamp(mount)), tracks: make([]fillTrack, len(v.Tracks))}
+	for i, t := range v.Tracks {
+		out.tracks[i] = fillTrack{key: t.Key, track: t.Track, hash: t.Hash}
+	}
+	return out, nil
+}
+
+// FillInBackground is `rb-bridge --import-path`: the priority queue first, then the view's
+// tracks by path. Each is stat'ed and built into the stage unless the snapshot or the stage has
+// its signature; once the stage verified the stamp, built and staged tracks are not stat'ed
+// again. All compared: MarkVerified. It yields to a playing deck (pace.go).
 func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillResult, error) {
 	var res FillResult
 	start := time.Now()
@@ -82,7 +88,7 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		return res, err
 	}
 	dbDir := filepath.Join(mount, "Engine Library", "Database2")
-	// A window of this mount may still run: its lock is the job's start signal (design §1.5).
+	// A window of this mount may still run (design §1.5).
 	unlock, err := rbstate.LockVolume(mount, fillLockWait)
 	if err != nil {
 		return res, fmt.Errorf("volume lock: %w", err)
@@ -137,9 +143,7 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	if err == nil && f.done == f.total {
 		err = f.refuseUnreadable()
 	}
-	if errors.Is(err, rbstate.ErrStageFull) {
-		// /data is at its floor: what is staged is published, a window applies and drops it, and
-		// the next job goes on.
+	if errors.Is(err, rbstate.ErrStageFull) { // what is staged is published; a window drops it
 		log.Printf("rb-bridge: fill of %s stopped: %v", mount, err)
 		err = nil
 	}
@@ -183,16 +187,15 @@ type filler struct {
 	res      FillResult
 	progress func(done, total int)
 	rgbDir   string
-	// the priority queue
+	// the priority queue: the last sequence served, and tries of a path that cannot be staged
 	lastAckSeq uint64
 	retries    map[string]int
 }
 
-// stageSyncEvery is how many records go into the stage between syncs of its index.
-const stageSyncEvery = 16
-
-// maxPriorityRetries is how often a prioritized path that cannot be staged is tried.
-const maxPriorityRetries = 3
+const (
+	stageSyncEvery     = 16 // records between syncs of the stage's index
+	maxPriorityRetries = 3
+)
 
 func (f *filler) report() {
 	if f.progress != nil && (f.done > f.shown || f.shown == 0) {
@@ -224,8 +227,8 @@ func (f *filler) run(order []int) error {
 	return nil
 }
 
-// fill compares one track with the snapshot and the stage and stages it when it must. ok is
-// false when it could not be built now. The error is a stop (ctx) or a stage that cannot take it.
+// fill stages one track unless the snapshot or the stage has it. ok is false when it could not
+// be built now; the error is a stop or a stage that cannot take it.
 func (f *filler) fill(i int) (ok bool, err error) {
 	vt := &f.view.tracks[i]
 	defer func() {
@@ -242,14 +245,11 @@ func (f *filler) fill(i int) (ok bool, err error) {
 	snapTrack := f.snap.Tracks[vt.key]
 	if f.quick && snapTrack != nil && (snapTrack.Perf == rbstate.PerfApplied || snapTrack.Perf == rbstate.PerfDeck) &&
 		snapTrack.Built.Rules == rbstate.Rules && snapTrack.Built.Row == vt.hash {
-		// Built for this export and verified: not looked at again. A missing or degraded track
-		// is stat'ed by every job, so a file put back or fixed is found without a re-export.
+		// Verified and built: not stat'ed. Missing and degraded tracks are, so a fixed file is found.
 		return true, nil
 	}
 	if e := f.entries[vt.key]; f.quick && e != nil && !e.Missing && e.Degraded == "" && e.Sig.Rules == rbstate.Rules && e.Sig.Row == vt.hash {
-		// Staged for this export and verified, waiting for a window: not stat'ed again either. A
-		// large library reaches Engine over many windows, and the job between two of them would
-		// stat every waiting track again (replica, KDATA: 155 s a round for 5,500 tracks).
+		// Verified and staged, waiting for a window: not stat'ed either (KDATA: 155 s a round for 5,500).
 		return true, nil
 	}
 	opts, playing := f.pace.readOptions()
@@ -298,19 +298,16 @@ func (f *filler) fill(i int) (ok bool, err error) {
 	return true, nil
 }
 
-// ErrFilesUnreadable: many tracks of the export have no file under their name, and files no
-// track of the export leads to lie where those names should be: the mount does not give the
-// names as the export wrote them (real stick, 2026-11-19: a mount without UTF-8 names made 707
-// tracks look deleted). Nothing is removed and the next job looks again.
+// ErrFilesUnreadable: many tracks have no file under their name and unclaimed files lie where
+// those names should be: the mount does not give the names as the export wrote them (real stick
+// 2026-11-19: a mount without UTF-8 names made 707 tracks look deleted). Nothing is removed.
 var ErrFilesUnreadable = errors.New("files of the export are on the drive under names that cannot be read")
 
-// unreadableLimit is how many such tracks a job lets pass as deleted: 2 % of the export's
-// tracks, at most 50 and at least 5.
+// unreadableLimit is how many such tracks pass as deleted: 2 %, at least 5, at most 50.
 func unreadableLimit(tracks int) int { return min(50, max(5, tracks/50)) }
 
-// refuseUnreadable takes the Missing records back out of the stage when too many of them are
-// files the mount merely cannot name. Files deleted by hand, however many, stay Missing: the
-// window removes their rows.
+// refuseUnreadable drops the Missing records when too many are files the mount cannot name.
+// Files deleted by hand, however many, stay Missing: the window removes their rows.
 func (f *filler) refuseUnreadable() error {
 	kept := map[string]bool{}
 	var gone, keys []string
@@ -341,11 +338,10 @@ func (f *filler) refuseUnreadable() error {
 	return fmt.Errorf("%w: %d of %d tracks", ErrFilesUnreadable, hidden, len(f.view.tracks))
 }
 
-// hiddenTracks counts the tracks of gone (export paths without a file) whose file is probably
-// there under another name: where the lookup stopped lies an entry no found track (kept, by
-// volume path) leads to, of the same kind: a folder with a file somewhere in it for a folder
-// (deleting an album's files by hand leaves empty folders), a file with the same extension for
-// a file.
+// hiddenTracks counts the tracks of gone (paths without a file) whose file is probably there
+// under another name: where the lookup stopped lies an entry no found track (kept) leads to, of
+// the same kind: a folder holding a file (an album deleted by hand leaves empty folders), or a
+// file with the same extension.
 func hiddenTracks(r *compat.Resolver, kept map[string]bool, gone []string) int {
 	claimed := map[string]map[string]bool{}
 	for rel := range kept {
@@ -425,8 +421,7 @@ func (f *filler) unread(vt *fillTrack, err error) (bool, error) {
 	return false, nil
 }
 
-// writeRGB puts a finished track's mini waveform where Engine reads it, unless a valid one is
-// there (Engine's own, or one written before).
+// writeRGB puts a finished track's mini waveform where Engine reads it, unless a valid one is there.
 func (f *filler) writeRGB(id int64, rgb []byte) {
 	dst := filepath.Join(f.rgbDir, "OverviewData", f.snap.LibraryUUID, strconv.FormatInt(id, 10)+".rgb")
 	if b, err := os.ReadFile(dst); err == nil {
@@ -439,8 +434,8 @@ func (f *filler) writeRGB(id int64, rgb []byte) {
 	}
 }
 
-// servePriority stages the tracks of the priority queue first and acknowledges them. A path
-// the view does not have, or a track that cannot be built, is tried maxPriorityRetries times.
+// servePriority stages the queue's tracks and acknowledges them. A path the view does not have,
+// or a track that cannot be built, is tried maxPriorityRetries times.
 func (f *filler) servePriority() error {
 	pending, maxSeq := PendingPriority(f.mount)
 	var acked []PriorityItem
@@ -489,13 +484,10 @@ func (f *filler) servePriority() error {
 	return nil
 }
 
-// publish reports whether the stage holds a record a window would apply: of the view's current
-// row hash and rules, for a track the bridge writes, not applied yet. The same set as the
-// remount asked for last time on this volume is not published again when the window it caused
-// did nothing: a remount would only reload the library. A window that spent its time giving
-// rows the export's fields did something: the rows still waiting are part of the sum (replica,
-// KDATA: the take-over's second window updated 5,524 rows and applied nothing, and the job
-// asked for no further window, so cue write-back stayed locked out).
+// publish reports whether the stage holds a record a window would apply. The set the last
+// remount was asked for is not asked for again (that window did nothing with it), unless rows
+// were still waiting: they are part of the sum (KDATA: a take-over window updated 5,524 rows and
+// applied nothing, and without another window cue write-back stayed locked out).
 func (f *filler) publish() bool {
 	var keys []string
 	for key, e := range f.entries {
@@ -522,40 +514,13 @@ func (f *filler) publish() bool {
 	if err != nil {
 		return true
 	}
-	mark := publishMarkPath(vk)
+	mark := volumeFile("rb-publish", vk, "")
 	if b, err := os.ReadFile(mark); err == nil && string(b) == sum {
 		log.Printf("rb-bridge: the stage holds %d tracks the last window did not apply; no remount for them", len(keys))
 		return false
 	}
-	if err := writePrivateJSONRaw(mark, []byte(sum)); err != nil {
+	if err := writePrivate(mark, []byte(sum)); err != nil {
 		log.Printf("rb-bridge: publish mark not written: %v", err)
 	}
 	return true
-}
-
-func publishMarkPath(v volumeKey) string {
-	return filepath.Join(priorityRoot(), fmt.Sprintf("rb-publish-%x-%x", v.dev, v.ino))
-}
-
-// writePrivateJSONRaw writes data atomically with mode 0600, like writePrivateJSON.
-func writePrivateJSONRaw(dst string, data []byte) error {
-	dir := filepath.Dir(dst)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".rb-pub-*")
-	if err != nil {
-		return err
-	}
-	_, err = tmp.Write(data)
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil {
-		err = os.Rename(tmp.Name(), dst)
-	}
-	if err != nil {
-		_ = os.Remove(tmp.Name())
-	}
-	return err
 }
