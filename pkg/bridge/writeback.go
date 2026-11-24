@@ -580,7 +580,11 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 		// A candidate already differs in the digest of the deck-editable fields. Parse its
 		// performance data whenever it has track data so a deletion or active-loop change can
 		// be compared with the ANLZ even when the imported baseline is unchanged.
-		needsCue := len(row.trackData) > 0
+		// Rows that still hold the import's written digest need no ANLZ read. A missing
+		// baseline, a changed written digest, or a previously noted row that differs now
+		// covers cue deletion and active-on-load deactivation (port3 regressions).
+		needsCue := len(row.trackData) > 0 && (len(row.track.Written) == 0 ||
+			!bytes.Equal(row.writtenDigest, row.track.Written) || row.track.Synced != nil)
 		if needsCue && len(row.trackData) > 0 && primary.AnalysisPath != "" {
 			deck, err := enginedb.ParseDeckCuesAndLoops(row.trackData, row.quickCues, row.loops, row.activeLoops)
 			if err == nil {
