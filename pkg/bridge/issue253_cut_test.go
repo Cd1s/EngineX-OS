@@ -275,15 +275,24 @@ func (f cutFlow) test(t *testing.T) {
 			lib := filepath.Join(root, "Engine Library")
 			cutAt := t.TempDir()
 			count, taken := 0, false
+			type cutStop struct{}
 			restore := bridge.SetCutForTest(func(p string) {
 				if p == name {
 					if count++; count == nth {
 						copyTree(t, lib, cutAt)
 						taken = true
+						panic(cutStop{})
 					}
 				}
 			})
-			f.run(root)
+			func() {
+				defer func() {
+					if r := recover(); r != nil && r != (cutStop{}) {
+						panic(r)
+					}
+				}()
+				f.run(root)
+			}()
 			restore()
 			if !taken {
 				t.Fatalf("the update did not pass %q #%d again", name, nth)

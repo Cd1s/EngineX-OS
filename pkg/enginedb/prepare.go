@@ -123,13 +123,13 @@ func orderTracksForPrepare(tracks []rekordbox.Track, priorityPaths []string, sor
 // thousands of tracks used up the whole mount budget, and Sync then deferred
 // every track on every mount (r3 review).
 func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, cutoff time.Time, now func() time.Time, done map[string]string) ([]preparedTrack, error) {
-	return prepareTracksOpts(ctx, res, l, cutoff, now, done, nil, false, 0, nil)
+	return prepareTracksOpts(ctx, res, l, cutoff, now, done, nil, nil, false, 0, nil)
 }
 
-func prepareTracksOpts(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, cutoff time.Time, now func() time.Time, done map[string]string, priorityPaths []string, sortByPath bool, maxTracks int, shouldYield func() bool) ([]preparedTrack, error) {
+func prepareTracksOpts(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, cutoff time.Time, now func() time.Time, done map[string]string, pending map[string]bool, priorityPaths []string, sortByPath bool, maxTracks int, shouldYield func() bool) ([]preparedTrack, error) {
 	tracks := orderTracksForPrepare(l.Tracks, priorityPaths, sortByPath)
 	prepared := make([]preparedTrack, 0, len(tracks))
-	paths := map[string]uint32{}
+	paths := make(map[string]uint32, len(tracks))
 	ready, late := 0, false
 	for _, t := range tracks {
 		if e := ctx.Err(); e != nil {
@@ -151,6 +151,14 @@ func prepareTracksOpts(ctx context.Context, res *compat.Resolver, l *rekordbox.L
 				prepared = append(prepared, preparedTrack{track: t, rel: guess, hash: fp, info: exportFileInfo{size: t.FileSize}})
 				continue
 			}
+		}
+		if late && pending["../"+guess] {
+			if other, ok := paths[guess]; ok {
+				return nil, fmt.Errorf("tracks %d and %d resolve to the same audio path %q", other, t.ID, guess)
+			}
+			paths[guess] = t.ID
+			prepared = append(prepared, preparedTrack{track: t, rel: guess, hash: "fast:" + t.RecordHash, info: exportFileInfo{size: t.FileSize}, late: true})
+			continue
 		}
 		var p preparedTrack
 		rel, e := res.ResolveContext(ctx, t.Path)
@@ -304,22 +312,59 @@ type existingState struct {
 	storedBPM float64
 }
 
+type ownedTrackRow struct {
+	id                  int64
+	source              uint32
+	oldPath, fp, folded string
+	storedBPM           float64
+	recorded            sql.NullInt64
+}
+
+func readOwnedRows(ctx context.Context, tx *sql.Tx) ([]ownedTrackRow, map[string]string, map[string]bool, error) {
+	rows, e := tx.QueryContext(ctx, `SELECT s.trackId,COALESCE(t.pdbImportKey,0),s.path,s.fingerprint,COALESCE(t.bpmAnalyzed,0) FROM BridgeState s JOIN Track t ON t.id=s.trackId`)
+	if e != nil {
+		return nil, nil, nil, e
+	}
+	var tracks []ownedTrackRow
+	done := map[string]string{}
+	pending := map[string]bool{}
+	for rows.Next() {
+		var t ownedTrackRow
+		if e = rows.Scan(&t.id, &t.source, &t.oldPath, &t.fp, &t.storedBPM); e != nil {
+			rows.Close()
+			return nil, nil, nil, e
+		}
+		tracks = append(tracks, t)
+		if t.fp != "" {
+			if strings.HasPrefix(t.fp, "fast:") {
+				pending[t.oldPath] = true
+			} else {
+				done[t.oldPath] = t.fp
+			}
+		}
+	}
+	e = rows.Err()
+	rows.Close()
+	if e != nil {
+		return nil, nil, nil, e
+	}
+	return tracks, done, pending, nil
+}
+
 // Stage every moved owned row first, so even two source tracks swapping paths
 // can retain their Engine IDs without violating Track's immediate UNIQUE(path).
 // Both temporary paths and the final rename are in the import transaction.
 func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, stagedOnly bool) (map[uint32]int64, map[int64]existingState, map[string]existingState, error) {
-	targets := map[uint32]*preparedTrack{}
-	byPath := map[string]*preparedTrack{}
+	return stageOwnedMovesRows(ctx, tx, prepared, stagedOnly, nil)
+}
+
+func stageOwnedMovesRows(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, stagedOnly bool, preloaded []ownedTrackRow) (map[uint32]int64, map[int64]existingState, map[string]existingState, error) {
+	targets := make(map[uint32]*preparedTrack, len(prepared))
+	byPath := make(map[string]*preparedTrack, len(prepared))
 	for i := range prepared {
 		p := &prepared[i]
 		targets[p.track.ID] = p
 		byPath[foldPreparedPath("../"+p.rel)] = p
-	}
-	// Legacy rows can share one import-wide pdbImportKey value. Our saved
-	// source record retains the per-track ID, including across moves/swaps.
-	rows, e := tx.QueryContext(ctx, `SELECT s.trackId,COALESCE(t.pdbImportKey,0),s.path,s.fingerprint,COALESCE(t.bpmAnalyzed,0) FROM BridgeState s JOIN Track t ON t.id=s.trackId`)
-	if e != nil {
-		return nil, nil, nil, e
 	}
 	type move struct {
 		id     int64
@@ -327,35 +372,78 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	}
 	var moves []move
 	var removed []int64
-	owned := map[uint32]int64{}
-	type ownedTrack struct {
-		id          int64
-		source      uint32
-		oldPath, fp string
-		storedBPM   float64
-		recorded    sql.NullInt64
-	}
-	var tracks []ownedTrack
-	counts := map[uint32]int{}
-	existingByPath := map[string]int64{}
-	for rows.Next() {
-		var t ownedTrack
-		if e = rows.Scan(&t.id, &t.source, &t.oldPath, &t.fp, &t.storedBPM); e != nil {
-			rows.Close()
+	owned := make(map[uint32]int64, len(prepared))
+	var e error
+	var tracks []ownedTrackRow
+	counts := make(map[uint32]int, len(prepared))
+	existingByPath := make(map[string]int64, len(prepared))
+	if preloaded != nil {
+		tracks = preloaded
+		for i := range tracks {
+			t := &tracks[i]
+			t.folded = foldPreparedPath(t.oldPath)
+			counts[t.source]++
+			if other, ok := existingByPath[t.folded]; ok && other != t.id {
+				return nil, nil, nil, fmt.Errorf("owned tracks %d and %d share audio path %q", other, t.id, t.oldPath)
+			}
+			existingByPath[t.folded] = t.id
+		}
+	} else {
+		// Legacy rows can share one import-wide pdbImportKey value. Our saved
+		// source record retains the per-track ID, including across moves/swaps.
+		rows, e := tx.QueryContext(ctx, `SELECT s.trackId,COALESCE(t.pdbImportKey,0),s.path,s.fingerprint,COALESCE(t.bpmAnalyzed,0) FROM BridgeState s JOIN Track t ON t.id=s.trackId`)
+		if e != nil {
 			return nil, nil, nil, e
 		}
-		tracks = append(tracks, t)
-		counts[t.source]++
-		key := foldPreparedPath(t.oldPath)
-		if other, ok := existingByPath[key]; ok && other != t.id {
-			return nil, nil, nil, fmt.Errorf("owned tracks %d and %d share audio path %q", other, t.id, t.oldPath)
+		tracks = make([]ownedTrackRow, 0, len(prepared))
+		for rows.Next() {
+			var t ownedTrackRow
+			if e = rows.Scan(&t.id, &t.source, &t.oldPath, &t.fp, &t.storedBPM); e != nil {
+				rows.Close()
+				return nil, nil, nil, e
+			}
+			t.folded = foldPreparedPath(t.oldPath)
+			tracks = append(tracks, t)
+			counts[t.source]++
+			if other, ok := existingByPath[t.folded]; ok && other != t.id {
+				rows.Close()
+				return nil, nil, nil, fmt.Errorf("owned tracks %d and %d share audio path %q", other, t.id, t.oldPath)
+			}
+			existingByPath[t.folded] = t.id
 		}
-		existingByPath[key] = t.id
+		e = rows.Err()
+		rows.Close()
+		if e != nil {
+			return nil, nil, nil, e
+		}
 	}
-	e = rows.Err()
-	rows.Close()
-	if e != nil {
-		return nil, nil, nil, e
+	allStationary := true
+	for i := range tracks {
+		t := &tracks[i]
+		p := targets[t.source]
+		if t.source == 0 || counts[t.source] != 1 || p == nil || "../"+p.rel != t.oldPath || byPath[t.folded] != p || (p.late && p.audioErr != nil && t.fp != "" && !strings.HasPrefix(t.fp, "fast:")) {
+			allStationary = false
+			break
+		}
+	}
+	if allStationary {
+		paths := make(map[string]uint32, len(prepared))
+		for _, p := range prepared {
+			source, target := p.track.ID, "../"+p.rel
+			if other, ok := paths[target]; ok {
+				return nil, nil, nil, fmt.Errorf("tracks %d and %d resolve to the same audio path %q", other, source, strings.TrimPrefix(target, "../"))
+			}
+			paths[target] = source
+		}
+		stateByID := make(map[int64]existingState, len(tracks))
+		stateByPath := make(map[string]existingState, len(tracks))
+		for _, t := range tracks {
+			owned[t.source] = t.id
+			st := existingState{id: t.id, fp: t.fp, storedBPM: t.storedBPM}
+			stateByID[t.id] = st
+			stateByPath[t.oldPath] = st
+		}
+		return owned, stateByID, stateByPath, nil
 	}
 	var needAnalysis []int
 	for i := range tracks {
@@ -367,7 +455,7 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 			if p := targets[t.source]; p != nil && "../"+p.rel == t.oldPath {
 				continue
 			}
-			if byPath[foldPreparedPath(t.oldPath)] != nil {
+			if byPath[t.folded] != nil {
 				continue
 			}
 		}
@@ -418,10 +506,10 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	for _, t := range tracks {
 		counts[t.source]++
 	}
-	sourceOldPath := map[uint32]string{}
+	sourceOldFolded := make(map[uint32]string, len(tracks))
 	for _, t := range tracks {
-		if _, exists := sourceOldPath[t.source]; !exists {
-			sourceOldPath[t.source] = t.oldPath
+		if _, exists := sourceOldFolded[t.source]; !exists {
+			sourceOldFolded[t.source] = t.folded
 		}
 	}
 	var nativeTrackIDs map[int64]bool
@@ -455,18 +543,18 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 	pathTargets := make([]*preparedTrack, len(tracks))
 	pathCycles := make([]bool, len(tracks))
 	for i, t := range tracks {
-		raw := byPath[foldPreparedPath(t.oldPath)]
+		raw := byPath[t.folded]
 		rawPathTargets[i] = raw
 		pt := raw
-		if pt != nil && nativeTrackIDs[existingByPath[foldPreparedPath(t.oldPath)]] {
+		if pt != nil && nativeTrackIDs[existingByPath[t.folded]] {
 			// A native Engine playlist owns this row. Reusing it for a different
 			// export source would silently retarget the DJ's membership.
 			pt = nil
 		}
 		if pt != nil {
 			candidate := pt.track.ID
-			if otherOldPath, ok := sourceOldPath[candidate]; ok {
-				if back := byPath[foldPreparedPath(otherOldPath)]; back != nil && back.track.ID == t.source {
+			if otherFolded, ok := sourceOldFolded[candidate]; ok {
+				if back := byPath[otherFolded]; back != nil && back.track.ID == t.source {
 					pathCycles[i] = true
 				}
 			}
@@ -627,5 +715,62 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack, 
 }
 
 func foldPreparedPath(p string) string {
+	if p != "" && (len(p) == 1 || p[len(p)-1] != '/') {
+		clean := true
+		hasUpper := false
+		rooted := p[0] == '/'
+		seenNormal := false
+		segStart := 0
+		if rooted {
+			segStart = 1
+		}
+		for i := segStart; i <= len(p); i++ {
+			if i < len(p) {
+				c := p[i]
+				if c == '\\' || c >= 0x80 {
+					clean = false
+					break
+				}
+				if c >= 'A' && c <= 'Z' {
+					hasUpper = true
+				}
+				if c != '/' {
+					continue
+				}
+			}
+			seg := p[segStart:i]
+			if seg == "" {
+				if !rooted || len(p) != 1 {
+					clean = false
+					break
+				}
+			} else if seg == "." {
+				clean = false
+				break
+			} else if seg == ".." {
+				if rooted || seenNormal {
+					clean = false
+					break
+				}
+			} else {
+				seenNormal = true
+			}
+			segStart = i + 1
+		}
+		if clean {
+			if !hasUpper {
+				return p
+			}
+			b := make([]byte, len(p))
+			for i := 0; i < len(p); i++ {
+				c := p[i]
+				if c >= 'A' && c <= 'Z' {
+					c += 'a' - 'A'
+				}
+				b[i] = c
+			}
+			return string(b)
+		}
+	}
 	return strings.ToLower(path.Clean(strings.ReplaceAll(p, "\\", "/")))
 }

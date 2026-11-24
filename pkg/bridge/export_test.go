@@ -96,12 +96,21 @@ func ImportLikeEarlierBuildsForTest(ctx context.Context, mount string, opts engi
 		return enginedb.Result{}, err
 	}
 	mergeByPath(l)
+	dir := filepath.Join(mount, "Engine Library", "Database2")
 	opts.StagedOnly, opts.Fast = stagedOnly, len(l.Tracks) > 500
-	res, err := enginedb.SyncResolved(ctx, r, l, opts)
+	runOpts := opts
+	if runOpts.Fast && runOpts.DatabaseDir == "" {
+		if _, statErr := os.Stat(filepath.Join(dir, "m.db")); os.IsNotExist(statErr) {
+			if safeDir, sErr := compat.SafeOutputDir(mount, "Engine Library/Database2"); sErr == nil {
+				runOpts.DatabaseDir = safeDir
+				runOpts.Bulk = true
+			}
+		}
+	}
+	res, err := enginedb.SyncResolved(ctx, r, l, runOpts)
 	if err != nil {
 		return res, err
 	}
-	dir := filepath.Join(mount, "Engine Library", "Database2")
 	if opts.Fast || res.Deferred > 0 {
 		return res, writeMark(dir, pendingName, stamp)
 	}
