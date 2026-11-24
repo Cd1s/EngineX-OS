@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -180,6 +181,14 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		log.Printf("rb-bridge: %d files of a write-back pass that was cut short put right", n)
 	}
 
+	// The snapshot is megabytes on the stick: its read overlaps the exports' read and decryption
+	// (I/O wait beside CPU work). Not when a cut window left a next snapshot: open settles it first.
+	load := sync.OnceValues(func() (*rbstate.Snapshot, error) { return rbstate.Load(dir) })
+	if headErr == nil && errors.Is(nextErr, os.ErrNotExist) {
+		go load()
+	}
+
+	derived := rekordbox.KeyDerivations()
 	libs, failed, err := ReadSources(ctx, r, mount, files, nil)
 	if err != nil && staged == "" {
 		return res, err
@@ -193,7 +202,12 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		}
 		return MountResult{Bypassed: true}, nil
 	}
-	st.done("read", "%d libraries, %d unreadable", len(libs), len(failed))
+	// A OneLibrary key not in the cache costs seconds on a deck: the line says which it was.
+	key := "cached"
+	if rekordbox.KeyDerivations() > derived {
+		key = "derived"
+	}
+	st.done("read", "%d libraries, %d unreadable, key %s", len(libs), len(failed), key)
 	view, err := BuildView(libs, layout, readSetting(o.Settings, "lang"))
 	if err != nil {
 		return res, err
@@ -206,7 +220,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	}
 	st.done("view", "%d tracks, %d lists", len(view.Tracks), len(view.Lists))
 
-	w := &window{ctx: ctx, mount: mount, dir: dir, view: view, st: st, o: o, res: &res,
+	w := &window{ctx: ctx, mount: mount, dir: dir, view: view, st: st, o: o, res: &res, load: load,
 		partial: len(failed) > 0, linkOnly: len(files) == 0}
 	if err = w.run(); err != nil {
 		return res, err
