@@ -34,6 +34,17 @@ type window struct {
 	index map[string]enginedb.Row // every row of the library by key
 	head  rbstate.Header          // the snapshot's header as the stick has it
 	dirty bool                    // tracks or lists changed outside a commit
+	took  laps                    // where the time of the commits and of the staged step went
+}
+
+// laps are the parts of a window's commits and of its staged step, for the journal.
+type laps struct{ read, rows, save, commit, promote, rgb, drop time.Duration }
+
+// lap adds the time since *t to d and moves *t on.
+func lap(d *time.Duration, t *time.Time) {
+	now := time.Now()
+	*d += now.Sub(*t)
+	*t = now
 }
 
 // cut, in tests, is called between two writes that a power cut or the hook's kill can separate.
@@ -217,20 +228,24 @@ func (w *window) noteSync(b *enginedb.Batch, t *rbstate.Track, written bool) err
 
 // commit saves the next snapshot, runs the commit and promotes the snapshot (design section 5).
 func (w *window) commit(id int64, do func() error) error {
+	t := time.Now()
 	w.count()
-	w.snap.Applied, w.snap.Commit = time.Now().Unix(), id
+	w.snap.Applied, w.snap.Commit = t.Unix(), id
 	if err := w.snap.SaveNext(w.dir); err != nil {
 		return err
 	}
+	lap(&w.took.save, &t)
 	cut("next saved")
 	if err := do(); err != nil {
 		_ = rbstate.DropNext(w.dir)
 		return err
 	}
+	lap(&w.took.commit, &t)
 	cut("committed")
 	if err := rbstate.Promote(w.dir); err != nil {
 		return err
 	}
+	lap(&w.took.promote, &t)
 	cut("promoted")
 	w.saved()
 	return nil
@@ -598,6 +613,8 @@ func (w *window) applyStaged() error {
 		key := keys[i]
 		e, t := entries[key], w.snap.Tracks[key]
 		vt, _ := w.view.Track(key)
+		at := time.Now()
+		defer lap(&w.took.rows, &at)
 		if t != nil && t.EngineID == 0 && t.Perf == rbstate.PerfMissing && !e.Missing {
 			// The file is back: the row the diff no longer asks for comes with its data.
 			ids, native, err := b.InsertTracks(w.ctx, []enginedb.TrackRow{{Rel: vt.Rel, Track: vt.Track}})
@@ -627,6 +644,7 @@ func (w *window) applyStaged() error {
 			return nil
 		}
 		full, err := stage.Read(e)
+		lap(&w.took.read, &at)
 		if errors.Is(err, os.ErrNotExist) {
 			stale = append(stale, key) // its files are not whole: the job stages it again
 			return nil
@@ -667,11 +685,14 @@ func (w *window) applyStaged() error {
 		done = append(done, key)
 		return w.noteSync(b, t, true)
 	}, func(at int) error {
+		t := time.Now()
 		for id, body := range overviews {
 			writeOverview(w.dir, w.lib.UUID(), id, body)
 		}
 		clear(overviews)
+		lap(&w.took.rgb, &t)
 		err := stage.Drop(done...)
+		lap(&w.took.drop, &t)
 		dropped, done = dropped+len(done), done[:0]
 		if w.o.Progress != nil {
 			w.o.Progress(at, len(keys))
@@ -691,6 +712,11 @@ func (w *window) applyStaged() error {
 	w.res.Applied = applied
 	w.res.Removed += gone
 	w.st.done("staged", "%d applied (%d kept the deck's edits, %d without analysis), %d rows of missing files removed, %d of %d staged left", applied, kept, degraded, gone, max(len(keys)-applied-gone, 0), len(keys))
+	if k := &w.took; applied > 0 {
+		ms := func(d time.Duration) int64 { return d.Milliseconds() }
+		log.Printf("rb-bridge: mount staged parts: stage read %d ms, rows %d ms, list waveforms %d ms, stage drop %d ms; all commits of the window: snapshot %d ms, commit %d ms, promote %d ms",
+			ms(k.read), ms(k.rows), ms(k.rgb), ms(k.drop), ms(k.save), ms(k.commit), ms(k.promote))
+	}
 	return nil
 }
 
