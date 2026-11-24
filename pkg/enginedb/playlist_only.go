@@ -38,6 +38,9 @@ func SyncPlaylistsOnly(ctx context.Context, mount string, l *rekordbox.Library) 
 	if err != nil {
 		return result, err
 	}
+	if _, err = os.Stat(filepath.Join(dir, ".rb-bridge-state.db")); errors.Is(err, os.ErrNotExist) {
+		return result, ErrPlaylistTrackSetChanged
+	}
 	if OpenElsewhere(filepath.Join(dir, "m.db")) != 0 {
 		return result, ErrLibraryInUse
 	}

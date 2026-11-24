@@ -138,15 +138,19 @@ func quickUpdate(ctx context.Context, mount, dir, stamp string, r *compat.Resolv
 	playlist, syncErr := enginedb.SyncPlaylistsOnly(inner, mount, l)
 	if syncErr == nil {
 		changed := playlist.Added + playlist.Updated + playlist.Removed
-		log.Printf("rb-bridge: mount phase=playlist-transaction ms=%d", (time.Since(start) - readElapsed).Milliseconds())
-		log.Printf("rb-bridge: playlist-only update changed %d lists in %s (export read %s)", changed, time.Since(start).Round(time.Millisecond), read.Round(time.Millisecond))
-		if err := writeMark(dir, stampName, stamp); err != nil {
-			return enginedb.Result{}, false, err
+		if changed == 0 {
+			syncErr = enginedb.ErrPlaylistTrackSetChanged
+		} else {
+			log.Printf("rb-bridge: mount phase=playlist-transaction ms=%d", (time.Since(start) - readElapsed).Milliseconds())
+			log.Printf("rb-bridge: playlist-only update changed %d lists in %s (export read %s)", changed, time.Since(start).Round(time.Millisecond), read.Round(time.Millisecond))
+			if err := writeMark(dir, stampName, stamp); err != nil {
+				return enginedb.Result{}, false, err
+			}
+			_ = os.Remove(filepath.Join(dir, pendingName))
+			return enginedb.Result{PlaylistsChanged: changed > 0}, true, nil
 		}
-		_ = os.Remove(filepath.Join(dir, pendingName))
-		return enginedb.Result{PlaylistsChanged: changed > 0}, true, nil
 	}
-	if !errors.Is(syncErr, enginedb.ErrPlaylistTrackSetChanged) {
+	if !errors.Is(syncErr, enginedb.ErrPlaylistTrackSetChanged) && !strings.Contains(syncErr.Error(), "no such table") {
 		return enginedb.Result{}, false, syncErr
 	}
 	quickPathsStart := time.Now()
