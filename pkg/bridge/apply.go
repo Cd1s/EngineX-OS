@@ -664,7 +664,7 @@ func (w *window) applyStaged() error {
 	if err != nil {
 		return err
 	}
-	if w.snap.Pending.Verify && verified == w.view.Stamp && !w.partial {
+	if w.snap.Pending.Verify && verified == w.view.Stamp {
 		w.snap.Pending.Verify = false
 	}
 	var keys, stale, missing []string
