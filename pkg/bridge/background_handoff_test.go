@@ -1,8 +1,12 @@
 package bridge
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
+
+	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
 func TestStartUpdateRequestsBackgroundBeforeSlowWork(t *testing.T) {
@@ -19,6 +23,37 @@ func TestStartUpdateRequestsBackgroundBeforeSlowWork(t *testing.T) {
 	want := filepath.Dir(filepath.Dir(filepath.Dir(stage)))
 	if got != want {
 		t.Fatalf("background mount %q, want %q", got, want)
+	}
+}
+
+func TestCutStageCanBeFinishedAndPublishedAfterMountKill(t *testing.T) {
+	root := t.TempDir()
+	testfixture.LargeExport(t, root, 20)
+	if _, err := ConvertAtMount(context.Background(), root, enginedb.Options{}, true); err != nil {
+		t.Fatal(err)
+	}
+	testfixture.LargeExport(t, root, 21)
+	defer SetLargeExportForTest()()
+	type killed struct{}
+	restoreCut := SetCutForTest(func(name string) {
+		if name == "update stage marked" {
+			panic(killed{})
+		}
+	})
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("mount path was not stopped at the hand-off cut")
+			}
+		}()
+		_, _ = ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
+	}()
+	restoreCut()
+	if _, err := ImportInBackground(context.Background(), root, nil); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err != nil || !result.PlaylistsChanged {
+		t.Fatalf("published result: %+v %v", result, err)
 	}
 }
 

@@ -58,6 +58,14 @@ var startImport = func(mount string) error {
 	return nil
 }
 
+var stopImport = func(mount string) error {
+	out, err := exec.Command("systemctl", "stop", "--no-block", importUnit(mount)).CombinedOutput()
+	if err != nil && !strings.Contains(string(out), "not loaded") && !strings.Contains(string(out), "not found") {
+		return fmt.Errorf("background import stop failed: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // importLock lets one job run at a time, whatever the number of sticks.
 var importLock = "/run/enginex-rb-import.lock"
 

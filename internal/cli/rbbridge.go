@@ -144,6 +144,15 @@ func RBBridge(args []string, stdout io.Writer) error {
 			backgroundStarted = true
 			return startImport(mount)
 		}
+		cancelStarter := func() {
+			if !backgroundStarted {
+				return
+			}
+			if stopErr := stopImport(*mount); stopErr != nil {
+				log.Printf("rb-bridge: speculative background import stop failed: %v", stopErr)
+			}
+			backgroundStarted = false
+		}
 		restoreStarter := bridge.SetBackgroundStarter(starter)
 		defer restoreStarter()
 		opts := enginedb.Options{
@@ -161,9 +170,11 @@ func RBBridge(args []string, stdout io.Writer) error {
 			err = starter(*mount)
 		}
 		if err == nil && !r.Background {
+			cancelStarter()
 			rep.Done()
 		}
 		if err != nil {
+			cancelStarter()
 			rep.Fail(err)
 			return err
 		}
