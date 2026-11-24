@@ -15,7 +15,7 @@ trap 'find "$WORK" -depth -delete' EXIT
 
 check_asset() {
     local name=$1
-    awk -v want="$name" '$2 == want { print; found=1 } END { exit !found }' "$MANIFEST" | sha256sum -c
+    (cd "$ASSETS" && awk -v want="$name" '$2 == want { print; found=1 } END { exit !found }' "$MANIFEST" | sha256sum -c)
 }
 
 check_gen2_image() {
