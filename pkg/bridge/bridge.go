@@ -1017,7 +1017,7 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 			} else {
 				var err error
 				var playlistOnly bool
-				if res, playlistOnly, err = quickUpdate(ctx, mount, dir, r, mountStart.Add(maxMountHookBudget)); err != nil {
+				if res, playlistOnly, err = quickUpdate(ctx, mount, dir, stamp, r, mountStart.Add(maxMountHookBudget)); err != nil {
 					log.Printf("rb-bridge: the re-export's playlists wait for the background job: %v", err)
 					res, quick = enginedb.Result{}, errors.Is(err, errQuickTooLong)
 				} else if playlistOnly {

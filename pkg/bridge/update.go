@@ -118,7 +118,7 @@ var (
 // only marked its stage here, and the playlists appeared once a remount published the update:
 // 11.5 minutes on the maintainer's 6000-track stick, and not at all while a deck held one of its
 // tracks. limit is the hook's kill; nothing is written when the update would not end before it.
-func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, limit time.Time) (enginedb.Result, bool, error) {
+func quickUpdate(ctx context.Context, mount, dir, stamp string, r *compat.Resolver, limit time.Time) (enginedb.Result, bool, error) {
 	inner, cancel := context.WithDeadline(ctx, limit)
 	defer cancel()
 	if enginedb.LibraryInUse(mount) {
@@ -137,6 +137,10 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 		changed := playlist.Added + playlist.Updated + playlist.Removed
 		log.Printf("rb-bridge: mount phase=playlist-transaction ms=%d", (time.Since(start) - readElapsed).Milliseconds())
 		log.Printf("rb-bridge: playlist-only update changed %d lists in %s (export read %s)", changed, time.Since(start).Round(time.Millisecond), read.Round(time.Millisecond))
+		if err := writeMark(dir, stampName, stamp); err != nil {
+			return enginedb.Result{}, false, err
+		}
+		_ = os.Remove(filepath.Join(dir, pendingName))
 		return enginedb.Result{PlaylistsChanged: changed > 0}, true, nil
 	}
 	if !errors.Is(syncErr, enginedb.ErrPlaylistTrackSetChanged) {
