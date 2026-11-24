@@ -23,8 +23,6 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/unicode/norm"
 	_ "modernc.org/sqlite"
 )
 
@@ -116,20 +114,6 @@ func (s *CueSession) add(rows []syncedRow) {
 	}
 }
 
-func (s *CueSession) take() []syncedRow {
-	if s == nil {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]syncedRow, 0, len(s.rows))
-	for _, r := range s.rows {
-		out = append(out, r)
-	}
-	s.rows = nil
-	return out
-}
-
 // State is the import stamp used by the write-back gate.
 type State struct {
 	Header  rbstate.Header
@@ -175,14 +159,6 @@ func ImportState(mount string) (State, error) {
 	return out, nil
 }
 
-func snapshotStagedPart(stamp string) string {
-	const marker = " | staged "
-	if i := strings.Index(stamp, marker); i >= 0 {
-		return stamp[i+len(marker):]
-	}
-	return ""
-}
-
 // NoteWriteBack refreshes the snapshot after files were written. The caller holds LockVolume.
 func NoteWriteBack(mount string, written map[string][]rbstate.FileSig) error {
 	abs, err := filepath.Abs(mount)
@@ -211,37 +187,6 @@ func NoteWriteBack(mount string, written map[string][]rbstate.FileSig) error {
 	snap.Header.Stamp = rbstate.Stamp(snap.Header.Layout, sources, stagedStamp(abs))
 	snap.Header.Applied = time.Now().Unix()
 	return snap.Save(dbDir)
-}
-
-type exportFile struct {
-	Kind rbstate.LibraryKind
-	Rel  string
-	Full string
-	Sig  rbstate.FileSig
-}
-
-func discoverExports(mount string) ([]exportFile, error) {
-	r, err := compat.NewResolver(mount)
-	if err != nil {
-		return nil, err
-	}
-	var out []exportFile
-	files, err := FindSources(r, mount)
-	if err != nil {
-		return nil, err
-	}
-	for _, sig := range files {
-		rel := sig.Rel
-		st, e := os.Stat(r.FullPath(rel))
-		if e != nil {
-			if errors.Is(e, os.ErrNotExist) {
-				continue
-			}
-			return nil, e
-		}
-		out = append(out, exportFile{Kind: KindOf(rel), Rel: rel, Full: r.FullPath(rel), Sig: rbstate.FileSig{Rel: rel, Size: st.Size(), MTimeNS: st.ModTime().UnixNano()}})
-	}
-	return out, nil
 }
 
 func mountRootWritable(mount string) bool {
@@ -606,7 +551,7 @@ func saveSynced(dbDir string, rows []syncedRow) error {
 	return rbstate.ReplaceFile(path, append(b, '\n'))
 }
 
-func readNeededLibraries(ctx context.Context, mount, stamp string, rows []dbCandidate, keys *rekordbox.KeyCache, decrypt *time.Duration) (map[rbstate.LibraryKind]sourceLibrary, error) {
+func readNeededLibraries(ctx context.Context, mount, stamp string, rows []dbCandidate, keys *rekordbox.KeyCache, decrypt *time.Duration) (map[rbstate.LibraryKind]SourceLibrary, error) {
 	needed := map[rbstate.LibraryKind]bool{}
 	for _, row := range rows {
 		for _, ref := range row.track.Refs {
@@ -614,86 +559,53 @@ func readNeededLibraries(ctx context.Context, mount, stamp string, rows []dbCand
 		}
 	}
 	if len(needed) == 0 {
-		return map[rbstate.LibraryKind]sourceLibrary{}, nil
+		return map[rbstate.LibraryKind]SourceLibrary{}, nil
 	}
 	if cached, ok := getWriteBackExportCache(stamp); ok {
 		return cached, nil
 	}
-	files, err := discoverExports(mount)
+	resolver, err := compat.NewResolver(mount)
 	if err != nil {
 		return nil, err
 	}
-	out := map[rbstate.LibraryKind]sourceLibrary{}
-	var errs []error
-	for _, f := range files {
-		if !needed[f.Kind] {
-			continue
-		}
-		started := time.Now()
-		var lib *rekordbox.Library
-		if f.Kind == rbstate.DeviceLibrary {
-			lib, err = rekordbox.ReadPDB(f.Full)
-		} else {
-			lib, err = rekordbox.ReadSQLiteKeys(ctx, f.Full, nil, keys)
-		}
-		*decrypt += time.Since(started)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", f.Rel, err))
-			continue
-		}
-		out[f.Kind] = sourceLibrary{Kind: f.Kind, Rel: f.Rel, Full: f.Full, Lib: lib}
+	files, err := FindSources(resolver, mount)
+	if err != nil {
+		return nil, err
 	}
-	if len(out) == 0 && len(errs) > 0 {
-		return nil, errors.Join(errs...)
+	started := time.Now()
+	read, failed, err := ReadSources(ctx, resolver, mount, files, keys)
+	*decrypt += time.Since(started)
+	if err != nil {
+		return nil, err
+	}
+	_ = failed
+	out := map[rbstate.LibraryKind]SourceLibrary{}
+	for _, lib := range read {
+		if needed[lib.Kind] {
+			out[lib.Kind] = lib
+		}
 	}
 	putWriteBackExportCache(stamp, out)
 	return out, nil
 }
 
-type sourceLibrary struct {
-	Kind rbstate.LibraryKind
-	Rel  string
-	Full string
-	Lib  *rekordbox.Library
-}
-
 var writeBackExportCache = struct {
 	sync.Mutex
-	entries map[string]map[rbstate.LibraryKind]sourceLibrary
+	entries map[string]map[rbstate.LibraryKind]SourceLibrary
 	order   []string
-}{entries: map[string]map[rbstate.LibraryKind]sourceLibrary{}}
+}{entries: map[string]map[rbstate.LibraryKind]SourceLibrary{}}
 
-func cloneLibrary(in *rekordbox.Library) *rekordbox.Library {
-	if in == nil {
-		return nil
-	}
-	b, err := json.Marshal(in)
-	if err != nil {
-		return in
-	}
-	var out rekordbox.Library
-	if json.Unmarshal(b, &out) != nil {
-		return in
-	}
-	return &out
-}
-
-func getWriteBackExportCache(stamp string) (map[rbstate.LibraryKind]sourceLibrary, bool) {
+func getWriteBackExportCache(stamp string) (map[rbstate.LibraryKind]SourceLibrary, bool) {
 	writeBackExportCache.Lock()
 	defer writeBackExportCache.Unlock()
 	got, ok := writeBackExportCache.entries[stamp]
 	if !ok {
 		return nil, false
 	}
-	out := map[rbstate.LibraryKind]sourceLibrary{}
-	for k, v := range got {
-		v.Lib = cloneLibrary(v.Lib)
-		out[k] = v
-	}
-	return out, true
+	return got, true
 }
 
-func putWriteBackExportCache(stamp string, libs map[rbstate.LibraryKind]sourceLibrary) {
+func putWriteBackExportCache(stamp string, libs map[rbstate.LibraryKind]SourceLibrary) {
 	if stamp == "" || len(libs) == 0 {
 		return
 	}
@@ -702,12 +614,7 @@ func putWriteBackExportCache(stamp string, libs map[rbstate.LibraryKind]sourceLi
 	if _, ok := writeBackExportCache.entries[stamp]; !ok {
 		writeBackExportCache.order = append(writeBackExportCache.order, stamp)
 	}
-	copyMap := map[rbstate.LibraryKind]sourceLibrary{}
-	for k, v := range libs {
-		v.Lib = cloneLibrary(v.Lib)
-		copyMap[k] = v
-	}
-	writeBackExportCache.entries[stamp] = copyMap
+	writeBackExportCache.entries[stamp] = libs
 	for len(writeBackExportCache.order) > 4 {
 		old := writeBackExportCache.order[0]
 		writeBackExportCache.order = writeBackExportCache.order[1:]
@@ -727,7 +634,7 @@ func evictWriteBackExportCache(stamp string) {
 	}
 }
 
-func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbstate.LibraryKind]sourceLibrary, rows []dbCandidate) ([]trackChange, map[string]bool, error) {
+func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbstate.LibraryKind]SourceLibrary, rows []dbCandidate) ([]trackChange, map[string]bool, error) {
 	var changes []trackChange
 	matched := make(map[string]bool, len(rows))
 	for _, row := range rows {
@@ -836,16 +743,6 @@ func resolveANLZVariant(r *compat.Resolver, baseRel, ext string) (string, bool) 
 	return "", false
 }
 
-func readStickTrackCues(r *compat.Resolver, tr rekordbox.Track) []rekordbox.Cue {
-	fromANLZ := readANLZCues(r, tr.AnalysisPath)
-	if len(tr.Cues) == 0 {
-		return fromANLZ
-	}
-	merged := &rekordbox.Analysis{Cues: fromANLZ}
-	merged.Merge(&rekordbox.Analysis{Cues: tr.Cues})
-	return merged.Cues
-}
-
 func readANLZCues(r *compat.Resolver, analysisPath string) []rekordbox.Cue {
 	clean, err := safeANLZRelPath(analysisPath)
 	if err != nil {
@@ -875,20 +772,6 @@ func readANLZCues(r *compat.Resolver, analysisPath string) []rekordbox.Cue {
 		return nil
 	}
 	return merged.Cues
-}
-
-func normalizeRekordboxPath(p string) string {
-	p = strings.ReplaceAll(p, "\\", "/")
-	p = strings.TrimLeft(p, "/")
-	for strings.HasPrefix(p, "../") {
-		p = strings.TrimPrefix(p, "../")
-	}
-	return norm.NFC.String(filepath.ToSlash(filepath.Clean(p)))
-}
-
-func sameRekordboxPath(a, b string) bool {
-	a, b = normalizeRekordboxPath(a), normalizeRekordboxPath(b)
-	return a != "." && a != "" && cases.Fold().String(a) == cases.Fold().String(b)
 }
 
 func pdbMetadataBytes(ctx context.Context, path string, updates map[uint32]rekordbox.Metadata) ([]byte, error) {

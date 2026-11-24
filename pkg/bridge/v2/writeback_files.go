@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -18,8 +17,7 @@ import (
 )
 
 const (
-	writeBackMarkName  = ".rb-bridge-writeback"
-	writeBackAgainName = ".rb-bridge-writeback-again"
+	writeBackMarkName = ".rb-bridge-writeback"
 )
 
 func init() {
@@ -39,7 +37,7 @@ type stagedWrite struct {
 	exportKind rbstate.LibraryKind
 }
 
-func prepareWritePlan(mount string, resolver *compat.Resolver, changes []trackChange, libs map[rbstate.LibraryKind]sourceLibrary, dateDir string) (writePlan, error) {
+func prepareWritePlan(mount string, resolver *compat.Resolver, changes []trackChange, libs map[rbstate.LibraryKind]SourceLibrary, dateDir string) (writePlan, error) {
 	plan := writePlan{stagedAs: map[string]string{}, anlzByKey: map[string][]string{}}
 	seenTarget := map[string]bool{}
 	seenDir := map[string]bool{}
@@ -90,14 +88,14 @@ func prepareWritePlan(mount string, resolver *compat.Resolver, changes []trackCh
 		}
 		if ch.metadata[rbstate.DeviceLibrary] {
 			if src, ok := libs[rbstate.DeviceLibrary]; ok {
-				if err := addTarget(src.Rel, "pdb", rbstate.DeviceLibrary); err != nil {
+				if err := addTarget(src.File.Rel, "pdb", rbstate.DeviceLibrary); err != nil {
 					return writePlan{}, err
 				}
 			}
 		}
 		if ch.refs[rbstate.OneLibrary].ID != 0 && (ch.metadata[rbstate.OneLibrary] || ch.cuesDiff) {
 			if src, ok := libs[rbstate.OneLibrary]; ok {
-				if err := addTarget(src.Rel, "onelib", rbstate.OneLibrary); err != nil {
+				if err := addTarget(src.File.Rel, "onelib", rbstate.OneLibrary); err != nil {
 					return writePlan{}, err
 				}
 			}
@@ -126,7 +124,7 @@ func prepareWritePlan(mount string, resolver *compat.Resolver, changes []trackCh
 	return plan, nil
 }
 
-func stageChanges(ctx context.Context, mount string, resolver *compat.Resolver, backupRoot, dateDir string, changes []trackChange, libs map[rbstate.LibraryKind]sourceLibrary, plan writePlan, keys *rekordbox.KeyCache, tm *passTimes) ([]stagedWrite, map[string][]rbstate.FileSig, error) {
+func stageChanges(ctx context.Context, mount string, resolver *compat.Resolver, backupRoot, dateDir string, changes []trackChange, libs map[rbstate.LibraryKind]SourceLibrary, plan writePlan, keys *rekordbox.KeyCache, tm *passTimes) ([]stagedWrite, map[string][]rbstate.FileSig, error) {
 	var staged []stagedWrite
 	written := map[string][]rbstate.FileSig{}
 	stageBytes := func(dst string, data []byte, kind rbstate.LibraryKind) error {
@@ -206,19 +204,21 @@ func stageChanges(ctx context.Context, mount string, resolver *compat.Resolver, 
 		}
 	}
 	if src, ok := libs[rbstate.OneLibrary]; ok && (len(oneCues) > 0 || len(oneMeta) > 0) {
-		n, err := ensureFirstOriginalBackup(mount, backupRoot, dateDir, src.Rel)
+		rel := src.File.Rel
+		full := resolver.FullPath(rel)
+		n, err := ensureFirstOriginalBackup(mount, backupRoot, dateDir, rel)
 		if err != nil {
 			return nil, nil, err
 		}
 		tm.bytes += n
-		tmpPath := filepath.Join(filepath.Dir(src.Full), plan.stagedAs[src.Full])
+		tmpPath := filepath.Join(filepath.Dir(full), plan.stagedAs[full])
 		out, err := os.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 		if err != nil {
 			return nil, nil, err
 		}
 		_ = out.Close()
 		started := time.Now()
-		upd, err := rekordbox.UpdateOneLibraryEditsKeys(ctx, src.Full, oneCues, oneMeta, tmpPath, keys)
+		upd, err := rekordbox.UpdateOneLibraryEditsKeys(ctx, full, oneCues, oneMeta, tmpPath, keys)
 		tm.decrypt += upd.Decrypt
 		tm.edit += upd.Edit
 		tm.encrypt += upd.Encrypt
@@ -230,20 +230,22 @@ func stageChanges(ctx context.Context, mount string, resolver *compat.Resolver, 
 		if st, err := os.Stat(tmpPath); err == nil {
 			tm.bytes += st.Size()
 		}
-		writeBackCut("temp " + src.Full)
-		staged = append(staged, stagedWrite{dst: src.Full, tmp: tmpPath, exportKind: rbstate.OneLibrary})
+		writeBackCut("temp " + full)
+		staged = append(staged, stagedWrite{dst: full, tmp: tmpPath, exportKind: rbstate.OneLibrary})
 	}
 	if src, ok := libs[rbstate.DeviceLibrary]; ok && len(pdbMeta) > 0 {
-		n, err := ensureFirstOriginalBackup(mount, backupRoot, dateDir, src.Rel)
+		rel := src.File.Rel
+		full := resolver.FullPath(rel)
+		n, err := ensureFirstOriginalBackup(mount, backupRoot, dateDir, rel)
 		if err != nil {
 			return nil, nil, err
 		}
 		tm.bytes += n
-		data, err := pdbMetadataBytes(ctx, src.Full, pdbMeta)
+		data, err := pdbMetadataBytes(ctx, full, pdbMeta)
 		if err != nil {
 			return nil, nil, err
 		}
-		if err := stageBytes(src.Full, data, rbstate.DeviceLibrary); err != nil {
+		if err := stageBytes(full, data, rbstate.DeviceLibrary); err != nil {
 			return nil, nil, err
 		}
 		tm.bytes += int64(len(data))
@@ -279,7 +281,7 @@ func markWriteBack(engineDBDir, dateDir string, dirs []string, targets [][2]stri
 	for _, target := range targets {
 		b.WriteString("= " + target[1] + " " + filepath.ToSlash(target[0]) + "\n")
 	}
-	return atomicWriteFile(filepath.Join(engineDBDir, writeBackMarkName), []byte(b.String()), nil)
+	return rbstate.ReplaceFile(filepath.Join(engineDBDir, writeBackMarkName), []byte(b.String()))
 }
 
 func markPath(mount, line string, missing bool) (string, bool) {
@@ -299,41 +301,6 @@ func markPath(mount, line string, missing bool) (string, bool) {
 		}
 	}
 	return rel, true
-}
-
-func atomicWriteFile(dst string, data []byte, beforeRename func(string) error) error {
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".enginex-wb-*.tmp")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	ok := false
-	defer func() {
-		_ = tmp.Close()
-		if !ok {
-			_ = rbstate.RemoveFile(name)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	writeBackCut("temp " + dst)
-	if beforeRename != nil {
-		if err := beforeRename(dst); err != nil {
-			return err
-		}
-	}
-	if err := replaceFile(name, dst); err != nil {
-		return err
-	}
-	ok = true
-	return nil
 }
 
 func stageWriteFile(dst, name string, data []byte) (string, error) {
@@ -374,8 +341,8 @@ func replaceFile(tmp, dst string) error {
 		return err
 	}
 	writeBackCut("replacing " + dst)
-	_ = syncDir(filepath.Dir(dst))
-	_ = syncFile(dst)
+	_ = syncPath(filepath.Dir(dst))
+	_ = syncPath(dst)
 	writeBackCut("renamed " + dst)
 	return nil
 }
@@ -402,7 +369,7 @@ func mkdirOrdered(root, dir string, flush *os.File) error {
 			if flush != nil {
 				_ = flush.Sync()
 			}
-			_ = syncDir(filepath.Dir(p))
+			_ = syncPath(filepath.Dir(p))
 		} else if st, statErr := os.Stat(p); statErr != nil || !st.IsDir() {
 			return err
 		}
@@ -410,27 +377,13 @@ func mkdirOrdered(root, dir string, flush *os.File) error {
 	return nil
 }
 
-func syncDir(dir string) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return f.Sync()
-}
-
-func syncFile(path string) error {
+func syncPath(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	return f.Sync()
-}
-
-func isExport(rel string) bool {
-	base := strings.ToLower(filepath.Base(rel))
-	return base == "export.pdb" || base == "exportlibrary.db"
 }
 
 func stagedWhole(tmp, dst string) bool {
@@ -482,13 +435,6 @@ func putBack(mount, rel, name string) (bool, bool) {
 func CleanWriteBackLeftovers(mount string) int {
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	n := rbstate.CleanTemps(dir)
-	if matches, err := filepath.Glob(filepath.Join(dir, ".enginex-wb-*.tmp")); err == nil {
-		for _, path := range matches {
-			if removeFile(path) == nil {
-				n++
-			}
-		}
-	}
 	mark := filepath.Join(dir, writeBackMarkName)
 	data, err := os.ReadFile(mark)
 	if err != nil {
@@ -534,5 +480,3 @@ func CleanWriteBackLeftovers(mount string) int {
 	_ = removeFile(mark)
 	return n
 }
-
-var _ = io.EOF

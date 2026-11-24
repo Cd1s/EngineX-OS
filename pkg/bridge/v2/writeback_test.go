@@ -58,7 +58,7 @@ func TestBuildChangesRequiresSnapshotPathIdentity(t *testing.T) {
 		metadata:      rekordbox.Metadata{Genre: "new"},
 		writtenDigest: []byte{1},
 	}
-	libs := map[rbstate.LibraryKind]sourceLibrary{rbstate.DeviceLibrary: {
+	libs := map[rbstate.LibraryKind]SourceLibrary{rbstate.DeviceLibrary: {
 		Kind: rbstate.DeviceLibrary,
 		Lib:  &rekordbox.Library{Tracks: []rekordbox.Track{{ID: 7, Path: "Contents/other.mp3", Genre: "old"}}},
 	}}
@@ -69,7 +69,7 @@ func TestBuildChangesRequiresSnapshotPathIdentity(t *testing.T) {
 	if len(changes) != 0 {
 		t.Fatalf("matched a different path by source id: %+v", changes)
 	}
-	libs[rbstate.DeviceLibrary] = sourceLibrary{Kind: rbstate.DeviceLibrary, Lib: &rekordbox.Library{Tracks: []rekordbox.Track{{ID: 7, Path: "Contents/track.mp3", Genre: "old"}}}}
+	libs[rbstate.DeviceLibrary] = SourceLibrary{Kind: rbstate.DeviceLibrary, Lib: &rekordbox.Library{Tracks: []rekordbox.Track{{ID: 7, Path: "Contents/track.mp3", Genre: "old"}}}}
 	changes, _, err = buildChanges(context.Background(), nil, libs, []dbCandidate{row})
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +85,7 @@ func TestBuildChangesDoesNotConfirmMissingSourceReference(t *testing.T) {
 		track:         &rbstate.Track{Key: rbstate.FoldPath("Contents/track.mp3"), Refs: []rbstate.SourceRef{{Kind: rbstate.OneLibrary, ID: 9}}},
 		writtenDigest: []byte{1},
 	}
-	changes, matched, err := buildChanges(context.Background(), nil, map[rbstate.LibraryKind]sourceLibrary{}, []dbCandidate{row})
+	changes, matched, err := buildChanges(context.Background(), nil, map[rbstate.LibraryKind]SourceLibrary{}, []dbCandidate{row})
 	if err != nil {
 		t.Fatal(err)
 	}
