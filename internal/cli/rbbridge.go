@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	bridgev2 "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
 	"github.com/Cd1s/EngineX-OS/pkg/djay"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
@@ -130,25 +131,36 @@ func RBBridge(args []string, stdout io.Writer) error {
 		_ = syncDjayLibrary(*mount)
 		rep := newDriveReporter(*mount)
 		rep.Start()
-		opts := enginedb.Options{
-			SmartMatch:   *smart != 0,
-			CurrentTrack: uint32(*smart),
-			OnProgress:   func(done, total int) { rep.Report(done, total, false) },
+		started := false
+		opts := bridgev2.MountOptions{
+			Full:       *full,
+			SmartMatch: uint32(*smart),
+			Settings:   *uiSettings,
+			Publish:    takePublishMark(*mount),
+			Progress:   func(done, total int) { rep.Report(done, total, false) },
+			// Before the window does anything that can take long: a window the hook kills has
+			// still left the job running (the 2026-11-24 deck test).
+			StartBackground: func() error {
+				if started {
+					return nil
+				}
+				started = true
+				return startImport(*mount) // it reports from here on
+			},
 		}
+		// The hook says how long it lets this run live: the only clock the window plans with.
 		if raw := os.Getenv("ENGINEX_HOOK_REMAINING_MS"); raw != "" {
 			if ms, parseErr := strconv.ParseInt(raw, 10, 64); parseErr == nil && ms > 0 {
 				opts.Deadline = time.Now().Add(time.Duration(ms) * time.Millisecond)
 			}
 		}
-		r, err := bridge.ConvertAtMount(ctx, *mount, opts, *full)
-		if err == nil && r.Background {
-			err = startImport(*mount) // it reports from here on
-		} else if err == nil {
-			rep.Done()
-		}
+		r, err := bridgev2.ConvertAtMount(ctx, *mount, opts)
 		if err != nil {
 			rep.Fail(err)
 			return err
+		}
+		if !r.Background {
+			rep.Done()
 		}
 		emit(r)
 	}

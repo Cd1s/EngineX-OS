@@ -64,11 +64,19 @@ var (
 	lockWait = 2 * time.Second
 )
 
-// Hooks the other parts of the bridge fill in (write-back's leftovers, the priority queue).
-var (
-	cleanWriteBack = func(mount string) int { return 0 }
-	priorityKeys   = func(mount string) []string { return nil }
-)
+// cleanWriteBack puts back what a cut write-back pass left on the stick; the write-back part of
+// the package sets it.
+var cleanWriteBack = func(mount string) int { return 0 }
+
+// priorityKeys are the tracks a deck loaded or the DJ looked at, the newest request first.
+func priorityKeys(mount string) []string {
+	items, _ := PendingPriority(mount)
+	keys := make([]string, 0, len(items))
+	for i := len(items) - 1; i >= 0; i-- {
+		keys = append(keys, items[i].Path)
+	}
+	return keys
+}
 
 // ErrFilesUnreadable: many tracks of the export have no file under their name. Nothing is
 // removed and the library stays as it is (real stick, 2026-11-19: a mount without UTF-8 names

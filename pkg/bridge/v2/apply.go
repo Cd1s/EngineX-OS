@@ -603,6 +603,7 @@ func (w *window) applyStaged() error {
 	// at once is the second, and then nothing is removed.
 	if len(missing) > unreadableLimit(len(w.view.Tracks)) {
 		log.Printf("rb-bridge: NOT REMOVED: %d of the export's %d tracks have no file under their name on the drive; the library stays as it is", len(missing), len(w.view.Tracks))
+		stale = append(stale, missing...) // looked at again by the next job, on the next mount's names
 		missing = nil
 	}
 	keys = sortedByPriority(w.mount, append(keys, missing...))

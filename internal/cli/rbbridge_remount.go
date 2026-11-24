@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	bridgev2 "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
 	"golang.org/x/sys/unix"
 )
 
@@ -208,6 +208,25 @@ func remountUnit(mount string) string {
 	return fmt.Sprintf("enginex-rb-remount-%016x.service", h.Sum64())
 }
 
+// publishMark says that the next mount of the volume is the remount the background job asked
+// for: nobody waits for the stick, so that window spends all its time on staged data.
+func publishMark(mount string) string {
+	h := fnv.New64a()
+	h.Write([]byte(mount))
+	return filepath.Join(ejectMarkDir, fmt.Sprintf("enginex-rb-publish-%016x", h.Sum64()))
+}
+
+// takePublishMark reports and removes a fresh publish mark of mount.
+func takePublishMark(mount string) bool {
+	p := publishMark(mount)
+	st, err := os.Lstat(p)
+	if err != nil {
+		return false
+	}
+	_ = os.Remove(p)
+	return st.Mode().IsRegular() && time.Since(st.ModTime()) < 2*remountLimit
+}
+
 // startRemount starts --remount in a unit of its own: the hook stops the import job at the remove.
 var startRemount = func(mount string) error {
 	exe, err := os.Executable()
@@ -284,6 +303,7 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 	}
 	rep.Publishing()
 	start := time.Now()
+	_ = os.WriteFile(publishMark(mount), nil, 0o600)
 	if err = os.WriteFile(uevent, []byte("remove"), 0); err != nil {
 		return fmt.Errorf("remove %s: %w", dev, err)
 	}
@@ -432,7 +452,7 @@ func deckHolds(mount string) bool {
 			case strings.HasPrefix(target, mount+"/") && audioExt[strings.ToLower(filepath.Ext(target))]:
 				return true
 			case strings.HasPrefix(target, engineCopies):
-				if _, name, ok := strings.Cut(filepath.Base(target), "_"); ok && bridge.LibraryHasFile(mount, name) {
+				if _, name, ok := strings.Cut(filepath.Base(target), "_"); ok && bridgev2.LibraryHasFile(mount, name) {
 					return true
 				}
 			}
