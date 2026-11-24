@@ -117,7 +117,7 @@ func TestIssue253QuickUpdateThatDoesNotFitWritesNothing(t *testing.T) {
 	testfixture.LargeExport(t, root, 60)
 	restore := bridge.SetLargeExportForTest()
 	defer restore()
-	defer bridge.SetMountWindowForTest(time.Second)()
+	defer bridge.SetQuickUpdatePerTrackForTest(time.Second)()
 	r, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
 	if err != nil || !r.Background || r.Added != 0 {
 		t.Fatalf("mount: %+v %v", r, err)
@@ -478,7 +478,7 @@ func TestIssue253ReexportTooLargeForTheMountPublishesItsListFirst(t *testing.T) 
 	root, cues := issue253Converted(t, 40)
 	testfixture.LargeExport(t, root, 60)
 	defer bridge.SetLargeExportForTest()()
-	defer bridge.SetMountWindowForTest(time.Second)()
+	defer bridge.SetQuickUpdatePerTrackForTest(time.Second)()
 	ctx := context.Background()
 	if r, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !r.Background || r.Added != 0 {
 		t.Fatalf("mount of the re-export: %+v %v", r, err)

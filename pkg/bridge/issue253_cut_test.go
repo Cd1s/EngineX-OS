@@ -356,11 +356,48 @@ func TestIssue253CutListFirstUpdate(t *testing.T) {
 	}
 	cutFlow{
 		settings: func() func() {
-			a, b, c := bridge.SetLargeExportForTest(), bridge.SetInPlaceUpdateForTest(1), bridge.SetMountWindowForTest(time.Second)
+			a, b, c := bridge.SetLargeExportForTest(), bridge.SetInPlaceUpdateForTest(1), bridge.SetQuickUpdatePerTrackForTest(time.Second)
 			return func() { c(); b(); a() }
 		},
 		steps: []string{"mount", "job", "mount", "job", "mount"},
 	}.test(t)
+}
+
+func TestIssue253ListFirstCutPointsStayDeterministicUnderSlowReads(t *testing.T) {
+	if bridge.InChildForTest(t) {
+		return
+	}
+	defer bridge.SetLargeExportForTest()()
+	defer bridge.SetInPlaceUpdateForTest(1)()
+	defer bridge.SetQuickUpdatePerTrackForTest(time.Second)()
+
+	runOnce := func(slow bool) []string {
+		root, _ := cutStick(t)
+		var pts []string
+		restoreCut := bridge.SetCutForTest(func(name string) { pts = append(pts, name) })
+		defer restoreCut()
+		var restoreSlow func()
+		if slow {
+			restoreSlow = bridge.SlowExportReadForTest(1200*time.Millisecond, 8*time.Second)
+			defer restoreSlow()
+		}
+		cutFlow{steps: []string{"mount", "job", "mount", "job", "mount"}}.run(root)
+		return pts
+	}
+
+	fastPts := runOnce(false)
+	slowPts := runOnce(true)
+	if len(fastPts) != len(slowPts) {
+		t.Fatalf("cut sequence changed under slow reads: fast=%v slow=%v", fastPts, slowPts)
+	}
+	for i := range fastPts {
+		if fastPts[i] != slowPts[i] {
+			t.Fatalf("cut #%d changed under slow reads: fast=%q slow=%q (all fast=%v slow=%v)", i, fastPts[i], slowPts[i], fastPts, slowPts)
+		}
+	}
+	if len(fastPts) < 3 || fastPts[len(fastPts)-2] != "in place stamped" || fastPts[len(fastPts)-1] != "in place pending removed" {
+		t.Fatalf("unexpected terminal cut points: %v", fastPts)
+	}
 }
 
 // A small export's update, read in place by the mount with no background job (#253 review 5):

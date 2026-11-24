@@ -47,6 +47,15 @@ func SetInPlaceUpdateForTest(perTrack int64) func() {
 	return func() { perTrackReadBytes, compactStateBytes = old, oldCompact }
 }
 
+// SetQuickUpdatePerTrackForTest counts each known track in quickCost as costing perTrack so a
+// small fixture deterministically takes the list-first update path without shrinking the mount's
+// wall-clock file-reading deadline on later in-place mounts.
+func SetQuickUpdatePerTrackForTest(perTrack time.Duration) func() {
+	old := quickPerKnown
+	quickPerKnown = perTrack
+	return func() { quickPerKnown = old }
+}
+
 // SlowExportReadForTest makes each export read take d and shortens the mount
 // read budget to budget, until the returned function restores both.
 func SlowExportReadForTest(d, budget time.Duration) func() {
