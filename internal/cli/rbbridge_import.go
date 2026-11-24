@@ -61,6 +61,56 @@ var startImport = func(mount string) error {
 // importLock lets one job run at a time, whatever the number of sticks.
 var importLock = "/run/enginex-rb-import.lock"
 
+const mountHandoffName = ".rb-bridge-mount.lock"
+
+func mountHandoffPath(mount string) string {
+	return filepath.Join(mount, "Engine Library", "Database2", mountHandoffName)
+}
+
+// holdMountHandoff keeps the mount-path conversion ahead of its detached worker.
+// The kernel releases the lock when edisksd kills the mount process, which is the
+// hand-off needed when ConvertAtMount never gets to return Result.Background.
+func holdMountHandoff(mount string) (func(), error) {
+	dir := filepath.Dir(mountHandoffPath(mount))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(mountHandoffPath(mount), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
+}
+
+func waitMountHandoff(ctx context.Context, mount string) error {
+	f, err := os.OpenFile(mountHandoffPath(mount), os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	for {
+		if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
 // runImportJob is --import-path: wait for the visible mount, finish the import, then show
 // that the library is ready until the volume is ejected.
 func runImportJob(ctx context.Context, mount string) error {
@@ -70,6 +120,9 @@ func runImportJob(ctx context.Context, mount string) error {
 	// Started from the hook's private namespace, before the visible mount.
 	if err := pollUntil(ctx, 2*time.Minute, func() bool { return mounted(mount) }); err != nil {
 		return fmt.Errorf("%s not mounted: %w", mount, err)
+	}
+	if err := waitMountHandoff(ctx, mount); err != nil {
+		return err
 	}
 	// A lazy unmount leaves the stick writable while it can be pulled: stop with it.
 	ctx, cancel := context.WithCancel(ctx)

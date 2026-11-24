@@ -817,8 +817,26 @@ var (
 	mountPruneBudget   = 2 * time.Second
 	// An update in place still running this long after the mount stops before the hook's kill
 	// and goes on in the background (#301): the kill threw it away, at every insert.
-	mountGiveUp = 17 * time.Second
+	mountGiveUp       = 17 * time.Second
+	backgroundStarter func(string) error
 )
+
+// SetBackgroundStarter installs the process-level hand-off used by rb-bridge to
+// start the detached import worker before a mount-path conversion can hit the
+// edisksd deadline. The callback is nil in library-only callers and tests.
+func SetBackgroundStarter(start func(string) error) func() {
+	old := backgroundStarter
+	backgroundStarter = start
+	return func() { backgroundStarter = old }
+}
+
+func requestBackground(stage string) error {
+	if backgroundStarter == nil {
+		return nil
+	}
+	mount := filepath.Dir(filepath.Dir(filepath.Dir(stage)))
+	return backgroundStarter(mount)
+}
 
 func mountPruneDeadline(start, requested time.Time) time.Time {
 	reserve := quickMountReserveForBudget()
@@ -986,6 +1004,9 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 	if !full && !bypass && !opts.SmartMatch && canWrite && opts.Deadline.IsZero() && reread == nil && exportBytes(r, mount) > attemptExportBytes {
 		var res enginedb.Result
 		quick := false
+		if err := startUpdate(stage, stamp); err != nil {
+			return enginedb.Result{}, err
+		}
 		// An export whose list is in the library already (.rb-bridge-pending) has only its files left.
 		if readMark(dir, pendingName) != stamp {
 			if time.Until(mountStart.Add(maxMountHookBudget)) < quickMountReserveForBudget() {
@@ -1001,9 +1022,6 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 					cut("quick update committed")
 				}
 			}
-		}
-		if err := startUpdate(stage, stamp); err != nil {
-			return enginedb.Result{}, err
 		}
 		if quick {
 			if err := writeMark(stage, quickName, stamp); err != nil {

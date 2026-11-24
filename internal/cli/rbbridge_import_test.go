@@ -96,6 +96,36 @@ func TestImportJobWaitsForTheVisibleMount(t *testing.T) {
 	}
 }
 
+func TestImportJobWaitsForMountPathHandoff(t *testing.T) {
+	root := t.TempDir()
+	release, err := holdMountHandoff(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	oldMounted := mounted
+	mounted = func(string) bool { return true }
+	defer func() { mounted = oldMounted }()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- waitMountHandoff(ctx, root) }()
+	select {
+	case err := <-done:
+		t.Fatalf("worker passed the mount handoff while conversion held it: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker did not pass the handoff after the mount lock was released")
+	}
+}
+
 func TestImportStatusWaitingStaysUntilDone(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "preparing")
 	rep := newUSBLoadingReporter(path, "usb")

@@ -358,7 +358,10 @@ func newStage(ctx context.Context, dir, stage, stamp string) error {
 	if err := writeMark(stage, pendingName, stamp); err != nil { // the stage is this export's from here on
 		return err
 	}
-	return syncFile(stage)
+	if err := syncFile(stage); err != nil {
+		return err
+	}
+	return requestBackground(stage)
 }
 
 func completeStage(stage, stamp string) error {

@@ -94,7 +94,7 @@ func startUpdate(stage, stamp string) error {
 		return err
 	}
 	cut("update stage pending")
-	return nil
+	return requestBackground(stage)
 }
 
 // What a quick update costs on an SC5000, the slowest deck, on top of the export read: a track the

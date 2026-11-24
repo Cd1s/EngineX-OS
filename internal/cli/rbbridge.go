@@ -130,6 +130,22 @@ func RBBridge(args []string, stdout io.Writer) error {
 		_ = syncDjayLibrary(*mount)
 		rep := newDriveReporter(*mount)
 		rep.Start()
+		releaseHandoff, handoffErr := holdMountHandoff(*mount)
+		if handoffErr != nil {
+			rep.Fail(handoffErr)
+			return handoffErr
+		}
+		defer releaseHandoff()
+		backgroundStarted := false
+		starter := func(mount string) error {
+			if backgroundStarted {
+				return nil
+			}
+			backgroundStarted = true
+			return startImport(mount)
+		}
+		restoreStarter := bridge.SetBackgroundStarter(starter)
+		defer restoreStarter()
 		opts := enginedb.Options{
 			SmartMatch:   *smart != 0,
 			CurrentTrack: uint32(*smart),
@@ -141,9 +157,10 @@ func RBBridge(args []string, stdout io.Writer) error {
 			}
 		}
 		r, err := bridge.ConvertAtMount(ctx, *mount, opts, *full)
-		if err == nil && r.Background {
-			err = startImport(*mount) // it reports from here on
-		} else if err == nil {
+		if err == nil && r.Background && !backgroundStarted {
+			err = starter(*mount)
+		}
+		if err == nil && !r.Background {
 			rep.Done()
 		}
 		if err != nil {
