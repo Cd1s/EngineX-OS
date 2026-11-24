@@ -237,8 +237,10 @@ func (f *filler) fill(i int) (ok bool, err error) {
 		}
 	}()
 	snapTrack := f.snap.Tracks[vt.key]
-	if f.quick && snapTrack != nil && snapTrack.Perf != rbstate.PerfNone &&
+	if f.quick && snapTrack != nil && (snapTrack.Perf == rbstate.PerfApplied || snapTrack.Perf == rbstate.PerfDeck) &&
 		snapTrack.Built.Rules == rbstate.Rules && snapTrack.Built.Row == vt.hash {
+		// Built for this export and verified: not looked at again. A missing or degraded track
+		// is stat'ed by every job, so a file put back or fixed is found without a re-export.
 		return true, nil
 	}
 	opts, playing := f.pace.readOptions()

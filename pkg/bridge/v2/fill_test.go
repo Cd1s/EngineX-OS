@@ -255,16 +255,21 @@ func TestFillSkipsWhatIsStagedOrBuilt(t *testing.T) {
 	}
 	applyStage(t, root, st)
 	// With the stamp verified the built tracks are not looked at: not even a missing file shows.
-	hidden := filepath.Join(t.TempDir(), "Contents")
-	if err := os.Rename(filepath.Join(root, "Contents"), hidden); err != nil {
-		t.Fatal(err)
+	// The degraded track is (a file that is fixed is found without a re-export); it is unchanged.
+	hidden := t.TempDir()
+	for _, i := range []int{1, 2, 4, 5, 6} {
+		if err := os.Rename(filepath.Join(root, testfixture.LargeTrackPath(i)), filepath.Join(hidden, strconv.Itoa(i))); err != nil {
+			t.Fatal(err)
+		}
 	}
 	third := mustFill(t, root, FillOptions{Stage: st})
 	if third.Staged+third.Degraded+third.Missing+third.Unread != 0 || third.Publish {
 		t.Fatalf("job after the window applied everything: %+v", third)
 	}
-	if err := os.Rename(hidden, filepath.Join(root, "Contents")); err != nil {
-		t.Fatal(err)
+	for _, i := range []int{1, 2, 4, 5, 6} {
+		if err := os.Rename(filepath.Join(hidden, strconv.Itoa(i)), filepath.Join(root, testfixture.LargeTrackPath(i))); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// A re-export (new stamp) is compared track by track: nothing changed, nothing is built,
 	// the degraded track included.
@@ -643,5 +648,38 @@ func TestFillStopsAtAFullStageAndPublishesWhatItHas(t *testing.T) {
 	applyStage(t, root, st)
 	if res = mustFill(t, root, FillOptions{Stage: st}); res.Staged != 4 || res.Left != 0 || st.Verified() != snap.Stamp {
 		t.Fatalf("after the window: %+v", res)
+	}
+}
+
+// A file that was missing comes back without a re-export: the next job finds it, though the
+// stage has verified the stamp. Built tracks are still not stat'ed.
+func TestFillFindsAMissingFileThatCameBack(t *testing.T) {
+	t.Parallel()
+	root, snap := fillStick(t, 3)
+	gone := filepath.Join(root, testfixture.LargeTrackPath(2))
+	saved, err := os.ReadFile(gone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(gone); err != nil {
+		t.Fatal(err)
+	}
+	st := stageOf(t, snap)
+	if res := mustFill(t, root, FillOptions{Stage: st}); res.Missing != 1 || res.Staged != 2 {
+		t.Fatalf("first job: %+v", res)
+	}
+	applyStage(t, root, st)
+	s := loadSnapshot(t, root)
+	key := rbstate.FoldPath(testfixture.LargeTrackPath(2))
+	s.Tracks[key].Perf, s.Tracks[key].EngineID = rbstate.PerfMissing, 0 // as the window leaves it
+	if err = s.Save(dbDirOf(root)); err != nil {
+		t.Fatal(err)
+	}
+	if res := mustFill(t, root, FillOptions{Stage: st}); res.Staged+res.Missing != 0 || res.Publish {
+		t.Fatalf("still missing: %+v", res)
+	}
+	testfixture.Write(t, root, testfixture.LargeTrackPath(2), saved)
+	if res := mustFill(t, root, FillOptions{Stage: st}); res.Staged != 1 || !res.Publish {
+		t.Fatalf("the file came back: %+v", res)
 	}
 }
