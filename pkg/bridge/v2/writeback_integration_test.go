@@ -20,6 +20,13 @@ func TestWriteBackUsesSnapshotPathAndSkipsTheSecondPass(t *testing.T) {
 	mount := t.TempDir()
 	testfixture.Export(t, mount)
 	bridgetest.Import(t, mount)
+	// #321: after a complete import no row has been written since the window noted it. The
+	// first pass reads none of them (on a deck, reading 2,420 rows took the eject pass 11 s of
+	// its 12) and leaves every file of the stick as it is.
+	untouched, err := bridge.WriteBackCues(context.Background(), mount, bridge.WriteBackOptions{SkipPreparingCheck: true})
+	if err != nil || untouched.TracksChecked != 5 || untouched.TracksRead != 0 || untouched.FilesUpdated != 0 || untouched.PhasesMS["decrypt"] != 0 {
+		t.Fatalf("pass over an untouched import: %+v %v", untouched, err)
+	}
 
 	resolver, err := compat.NewResolver(mount)
 	if err != nil {
@@ -65,13 +72,19 @@ func TestWriteBackUsesSnapshotPathAndSkipsTheSecondPass(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
+	// Engine's trigger has dated the row; the DJ's edit comes seconds after the import, not in
+	// the second the window wrote the row.
+	if _, err := db.Exec(`UPDATE Track SET lastEditTime=lastEditTime+7 WHERE id=?`, engineID); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
 	_ = db.Close()
 
 	first, err := bridge.WriteBackCues(context.Background(), mount, bridge.WriteBackOptions{SkipPreparingCheck: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.TracksChanged != 1 || first.FilesUpdated == 0 {
+	if first.TracksChanged != 1 || first.TracksRead != 1 || first.FilesUpdated == 0 {
 		t.Fatalf("first pass: %+v", first)
 	}
 	second, err := bridge.WriteBackCues(context.Background(), mount, bridge.WriteBackOptions{SkipPreparingCheck: true})

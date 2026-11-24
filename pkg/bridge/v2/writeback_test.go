@@ -1,9 +1,9 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,8 +46,8 @@ func TestWriteBackGateRejectsPendingImport(t *testing.T) {
 	if res.FilesUpdated != 0 || res.TracksChanged != 0 {
 		t.Fatalf("pending gate wrote files: %+v", res)
 	}
-	if _, err := os.Stat(filepath.Join(dbDir, rbstate.SyncedName)); !os.IsNotExist(err) {
-		t.Fatalf("pending gate created synced state: %v", err)
+	if entries, _ := os.ReadDir(dbDir); len(entries) != 1 {
+		t.Fatalf("the refused pass left files beside the snapshot: %v", entries)
 	}
 }
 
@@ -94,6 +94,9 @@ func TestBuildChangesDoesNotConfirmMissingSourceReference(t *testing.T) {
 	}
 }
 
+// A row Engine wrote without changing its cues, loops or tags (an analysis, a grid, a rating) is
+// read, and that is all: the export is not opened (here it is not even a library), nothing is
+// written. A row whose lastEditTime is the one the snapshot noted is not read at all.
 func TestWriteBackAnalysisOnlyPassSkipsExportRead(t *testing.T) {
 	root := t.TempDir()
 	dbDir := filepath.Join(root, "Engine Library", "Database2")
@@ -108,41 +111,62 @@ func TestWriteBackAnalysisOnlyPassSkipsExportRead(t *testing.T) {
 	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	mDB := filepath.Join(dbDir, "m.db")
-	db, err := sql.Open("sqlite", mDB)
+	db, err := sql.Open("sqlite", filepath.Join(dbDir, "m.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.Exec(`CREATE TABLE Track(id INTEGER PRIMARY KEY, path TEXT, lastEditTime INTEGER, genre TEXT, comment TEXT, label TEXT); CREATE TABLE PerformanceData(trackId INTEGER PRIMARY KEY, beatData BLOB, trackData BLOB, quickCues BLOB, loops BLOB, activeOnLoadLoops INTEGER); INSERT INTO Track VALUES(1,'../Contents/track.mp3',1,'','',''); INSERT INTO PerformanceData VALUES(1,NULL,NULL,NULL,NULL,0);`)
+	defer db.Close()
+	_, err = db.Exec(`CREATE TABLE Track(id INTEGER PRIMARY KEY, path TEXT, lastEditTime INTEGER, genre TEXT, comment TEXT, label TEXT); CREATE TABLE PerformanceData(trackId INTEGER PRIMARY KEY, beatData BLOB, trackData BLOB, quickCues BLOB, loops BLOB, activeOnLoadLoops INTEGER); INSERT INTO Track VALUES(1,'../Contents/track.mp3',2,'','',''); INSERT INTO PerformanceData VALUES(1,NULL,NULL,NULL,NULL,0);`)
 	if err != nil {
-		db.Close()
 		t.Fatal(err)
 	}
-	_ = db.Close()
 	info, err := os.Stat(export)
 	if err != nil {
 		t.Fatal(err)
 	}
-	written := enginedb.WrittenDigest(nil, nil, nil)
-	syncDigest := enginedb.SyncedDigest(nil, nil, nil, 0, "", "", "")
+	key := rbstate.FoldPath("Contents/track.mp3")
 	snap := rbstate.New("uuid")
 	snap.Header.Layout = rbstate.LayoutFolders
 	snap.Header.Sources = []rbstate.FileSig{{Rel: "PIONEER/rekordbox/export.pdb", Size: info.Size(), MTimeNS: info.ModTime().UnixNano()}}
 	snap.Header.Stamp = rbstate.Stamp(snap.Header.Layout, snap.Header.Sources, "")
-	snap.Tracks[rbstate.FoldPath("Contents/track.mp3")] = &rbstate.Track{Key: rbstate.FoldPath("Contents/track.mp3"), Rel: "Contents/track.mp3", EngineID: 1, Written: written, Refs: []rbstate.SourceRef{{Kind: rbstate.DeviceLibrary, ID: 1}}}
+	snap.Tracks[key] = &rbstate.Track{Key: key, Rel: "Contents/track.mp3", EngineID: 1, Written: enginedb.WrittenDigest(nil, nil, nil),
+		Edit: 1, Synced: enginedb.SyncedDigest(nil, nil, nil, 0, "", "", ""), Refs: []rbstate.SourceRef{{Kind: rbstate.DeviceLibrary, ID: 1}}}
 	if err := snap.Save(dbDir); err != nil {
 		t.Fatal(err)
 	}
-	state := syncedState{Version: 1, Rows: map[string]syncedStateRecord{rbstate.FoldPath("Contents/track.mp3"): {EngineID: 1, Edit: "1", Digest: syncDigest}}}
-	b, _ := json.Marshal(state)
-	if err := os.WriteFile(filepath.Join(dbDir, rbstate.SyncedName), append(b, '\n'), 0o644); err != nil {
+	saved, _ := os.ReadFile(filepath.Join(dbDir, rbstate.SnapshotName))
+	session := &CueSession{}
+	pass := func() WriteBackResult {
+		t.Helper()
+		res, err := WriteBackCues(context.Background(), root, WriteBackOptions{Session: session})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.TracksChecked != 1 || res.FilesUpdated != 0 || res.PhasesMS["decrypt"] != 0 {
+			t.Fatalf("the pass opened the export or wrote: %+v", res)
+		}
+		if now, _ := os.ReadFile(filepath.Join(dbDir, rbstate.SnapshotName)); !bytes.Equal(now, saved) {
+			t.Fatal("a pass that read no export wrote the snapshot")
+		}
+		return res
+	}
+	// Engine wrote the row (its time moved, 1 to 2) and left cues, loops and tags alone.
+	if res := pass(); res.TracksRead != 1 {
+		t.Fatalf("the written row was not read: %+v", res)
+	}
+	// The watcher remembers that: its next pass does not read the row again.
+	if res := pass(); res.TracksRead != 0 {
+		t.Fatalf("a row found in sync was read again: %+v", res)
+	}
+	// A pass of another process has the snapshot alone: it reads the row once more, no more.
+	session = nil
+	if res := pass(); res.TracksRead != 1 {
+		t.Fatalf("pass without a session: %+v", res)
+	}
+	if _, err = db.Exec(`UPDATE Track SET lastEditTime=1`); err != nil {
 		t.Fatal(err)
 	}
-	res, err := WriteBackCues(context.Background(), root, WriteBackOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.TracksRead != 0 || res.FilesUpdated != 0 || res.PhasesMS["decrypt"] != 0 {
-		t.Fatalf("analysis-only pass read or decrypted export: %+v", res)
+	if res := pass(); res.TracksRead != 0 {
+		t.Fatalf("an untouched row was read: %+v", res)
 	}
 }

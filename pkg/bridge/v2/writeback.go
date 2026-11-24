@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"net/url"
 	"os"
@@ -77,20 +77,21 @@ func (t *passTimes) ms() map[string]int64 {
 	}
 }
 
-// CueSession keeps rows read by a watcher between quiet passes.
-type CueSession struct {
-	mu   sync.Mutex
-	rows map[string]syncedRow
-}
-
-type syncedRow struct {
-	key    string
-	id     int64
-	edit   string
+// noted is a row as a pass found it in sync with the stick's export: its lastEditTime and
+// SyncedDigest (rbstate.Track.Edit and Synced).
+type noted struct {
+	edit   int64
 	digest []byte
 }
 
-func (s *CueSession) has(key, edit string) bool {
+// CueSession keeps, for a watcher, the rows its passes read and found in sync without reading
+// the export. They reach the snapshot with the next pass that saves it.
+type CueSession struct {
+	mu   sync.Mutex
+	rows map[string]noted
+}
+
+func (s *CueSession) has(key string, edit int64) bool {
 	if s == nil {
 		return false
 	}
@@ -100,18 +101,32 @@ func (s *CueSession) has(key, edit string) bool {
 	return ok && r.edit == edit
 }
 
-func (s *CueSession) add(rows []syncedRow) {
+// add keeps rows; take returns everything kept, with rows over it, and forgets it.
+func (s *CueSession) add(rows map[string]noted) {
 	if s == nil || len(rows) == 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.rows == nil {
-		s.rows = make(map[string]syncedRow)
+		s.rows = map[string]noted{}
 	}
-	for _, r := range rows {
-		s.rows[r.key] = r
+	maps.Copy(s.rows, rows)
+}
+
+func (s *CueSession) take(rows map[string]noted) map[string]noted {
+	if s == nil {
+		return rows
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.rows
+	if out == nil {
+		out = map[string]noted{}
+	}
+	maps.Copy(out, rows)
+	s.rows = nil
+	return out
 }
 
 // State is the import stamp used by the write-back gate.
@@ -159,8 +174,10 @@ func ImportState(mount string) (State, error) {
 	return out, nil
 }
 
-// NoteWriteBack refreshes the snapshot after files were written. The caller holds LockVolume.
-func NoteWriteBack(mount string, written map[string][]rbstate.FileSig) error {
+// NoteWriteBack refreshes the snapshot after a pass that read the export: the ANLZ files it
+// wrote, the rows it found or brought in sync, and the export files as they are now, so the
+// next insert does not take the pass's own writes for a re-export. The caller holds LockVolume.
+func NoteWriteBack(mount string, written map[string][]rbstate.FileSig, rows map[string]noted) error {
 	abs, err := filepath.Abs(mount)
 	if err != nil {
 		return err
@@ -173,6 +190,11 @@ func NoteWriteBack(mount string, written map[string][]rbstate.FileSig) error {
 	for key, sigs := range written {
 		if t, ok := snap.Tracks[rbstate.FoldPath(key)]; ok {
 			t.Built.ANLZ = append([]rbstate.FileSig(nil), sigs...)
+		}
+	}
+	for key, n := range rows {
+		if t, ok := snap.Tracks[key]; ok {
+			t.Edit, t.Synced = n.edit, n.digest
 		}
 	}
 	resolver, err := compat.NewResolver(abs)
@@ -224,15 +246,15 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 }
 
 type dbCandidate struct {
-	key, enginePath, edit string
-	engineID              int64
-	track                 *rbstate.Track
-	beatData, trackData   []byte
-	quickCues, loops      []byte
-	activeLoops           int64
-	metadata              rekordbox.Metadata
-	writtenDigest         []byte
-	syncedDigest          []byte
+	key, enginePath     string
+	engineID            int64
+	track               *rbstate.Track
+	beatData, trackData []byte
+	quickCues, loops    []byte
+	activeLoops         int64
+	metadata            rekordbox.Metadata
+	writtenDigest       []byte
+	now                 noted // the row as this pass read it
 }
 
 type trackChange struct {
@@ -242,7 +264,6 @@ type trackChange struct {
 	analysis  string
 	cuesDiff  bool
 	metadata  map[rbstate.LibraryKind]bool
-	seen      syncedRow
 }
 
 func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions, tm *passTimes) (WriteBackResult, error) {
@@ -321,21 +342,20 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	db.SetMaxOpenConns(1)
 
 	tmStart := time.Now()
-	candidates, confirmed, err := readCandidates(ctx, db, snapshot, opts, filepath.Join(engineDir, rbstate.SyncedName))
+	candidates, err := readCandidates(ctx, db, snapshot, opts.Session)
 	if err != nil {
 		return res, err
 	}
 	res.TracksChecked = candidates.checked
 	res.TracksRead = candidates.read
 	tm.candidates = time.Since(tmStart)
+	insync := candidates.insync
 	if len(candidates.rows) == 0 {
+		// Nothing to compare with the export: no file of the stick is read or written.
 		if settle() != nil {
 			return res, errNotQuiet
 		}
-		if err := saveSynced(engineDir, append(confirmed, candidates.confirmed...)); err != nil {
-			return res, err
-		}
-		opts.Session.add(append(confirmed, candidates.confirmed...))
+		opts.Session.add(insync)
 		return res, nil
 	}
 
@@ -347,19 +367,17 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	if err != nil {
 		return res, err
 	}
-	if len(changes) == 0 {
-		if settle() != nil {
-			return res, errNotQuiet
-		}
-		all := confirmedRows(confirmed, candidates.confirmed, candidates.rows, nil, matched)
-		if err := saveSynced(engineDir, all); err != nil {
-			return res, err
-		}
-		opts.Session.add(all)
-		return res, nil
-	}
 	if err := settle(); err != nil {
 		return res, err
+	}
+	// A row compared with every library that holds it is in sync once this pass is done.
+	for _, row := range candidates.rows {
+		if matched[row.key] {
+			insync[row.key] = row.now
+		}
+	}
+	if len(changes) == 0 {
+		return res, NoteWriteBack(absMount, nil, opts.Session.take(insync))
 	}
 
 	dateDir := opts.DateDir
@@ -418,14 +436,9 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		written[key] = sigs
 	}
 	evictWriteBackExportCache(importState.Current)
-	if err := NoteWriteBack(absMount, written); err != nil {
+	if err := NoteWriteBack(absMount, written, opts.Session.take(insync)); err != nil {
 		return res, err
 	}
-	all := confirmedRows(confirmed, candidates.confirmed, candidates.rows, changes, matched)
-	if err := saveSynced(engineDir, all); err != nil {
-		return res, err
-	}
-	opts.Session.add(all)
 	writeBackCut("state")
 	finished = true
 	res.TracksChanged = len(changes)
@@ -433,122 +446,70 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 }
 
 type candidateSet struct {
-	rows      []dbCandidate
-	confirmed []syncedRow
-	checked   int
-	read      int
+	rows    []dbCandidate    // differ from what the stick is known to hold: compared with the export
+	insync  map[string]noted // read, and still what the stick holds
+	checked int
+	read    int
 }
 
-func confirmedRows(existing, session []syncedRow, rows []dbCandidate, changes []trackChange, matched map[string]bool) []syncedRow {
-	all := append(append([]syncedRow{}, existing...), session...)
-	changed := make(map[string]bool, len(changes))
-	for _, ch := range changes {
-		changed[ch.candidate.key] = true
+// readCandidates finds the rows a pass has to compare with the export. A row whose
+// lastEditTime is the one the snapshot noted is not read at all (#321: Engine's triggers date
+// every write of a row's cues, loops and tags, so the scan reads Track and never the
+// PerformanceData pages of an untouched track). A row that was written but whose cues, loops
+// and tags are the ones noted (an analysis, a grid, a rating) is read and needs no export.
+func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, session *CueSession) (candidateSet, error) {
+	out := candidateSet{insync: map[string]noted{}}
+	type moved struct {
+		id   int64
+		path string
+		edit int64
+		t    *rbstate.Track
 	}
-	for _, row := range rows {
-		if matched[row.key] && !changed[row.key] {
-			all = append(all, syncedRow{key: row.key, id: row.engineID, edit: row.edit, digest: row.syncedDigest})
-		}
-	}
-	for _, ch := range changes {
-		all = append(all, ch.seen)
-	}
-	return all
-}
-
-func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, opts WriteBackOptions, syncedPath string) (candidateSet, []syncedRow, error) {
-	var out candidateSet
-	state, _ := loadSynced(syncedPath)
-	rows, err := db.QueryContext(ctx, `SELECT t.id, COALESCE(t.path,''), COALESCE(t.lastEditTime,0), COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,''),
-		p.beatData, p.trackData, p.quickCues, p.loops, COALESCE(p.activeOnLoadLoops,0)
-		FROM Track t LEFT JOIN PerformanceData p ON p.trackId=t.id WHERE t.path IS NOT NULL`)
+	var reads []moved
+	rows, err := db.QueryContext(ctx, `SELECT id, COALESCE(path,''), COALESCE(lastEditTime,0) FROM Track WHERE path IS NOT NULL`)
 	if err != nil {
-		return out, nil, err
+		return out, err
 	}
-	defer rows.Close()
 	for rows.Next() {
-		var id int64
-		var path, edit string
-		var md rekordbox.Metadata
-		var beatData, trackData, quickCues, loops []byte
-		var active int64
-		if err := rows.Scan(&id, &path, &edit, &md.Genre, &md.Comment, &md.Label, &beatData, &trackData, &quickCues, &loops, &active); err != nil {
-			return out, nil, err
+		var m moved
+		if err = rows.Scan(&m.id, &m.path, &m.edit); err != nil {
+			rows.Close()
+			return out, err
 		}
-		tr, ok := snap.TrackAt(path)
-		if !ok || tr == nil || tr.Native {
+		tr, ok := snap.TrackAt(m.path)
+		if !ok || tr.Native || tr.EngineID != m.id {
 			continue
 		}
 		out.checked++
-		digest := enginedb.WrittenDigest(beatData, quickCues, loops)
-		syncDigest := enginedb.SyncedDigest(beatData, quickCues, loops, active, md.Genre, md.Comment, md.Label)
-		key := tr.Key
-		sr, found := state.Rows[key]
-		if !found && state.Rows != nil {
-			sr, found = state.Rows[rbstate.FoldPath(path)]
+		if m.edit != tr.Edit && !session.has(tr.Key, m.edit) {
+			m.t = tr
+			reads = append(reads, m)
 		}
-		if found && sr.Edit == edit && bytes.Equal(sr.Digest, syncDigest) || opts.Session.has(key, edit) {
-			out.confirmed = append(out.confirmed, syncedRow{key: key, id: id, edit: edit, digest: syncDigest})
-			continue
-		}
-		out.read++
-		if len(tr.Written) > 0 && bytes.Equal(digest, tr.Written) && found && bytes.Equal(sr.Digest, syncDigest) {
-			continue
-		}
-		out.rows = append(out.rows, dbCandidate{key: key, enginePath: path, edit: edit, engineID: id, track: tr, beatData: beatData, trackData: trackData, quickCues: quickCues, loops: loops, activeLoops: active, metadata: md, writtenDigest: digest, syncedDigest: syncDigest})
 	}
-	if err := rows.Err(); err != nil {
-		return out, nil, err
-	}
-	sort.Slice(out.rows, func(i, j int) bool { return out.rows[i].key < out.rows[j].key })
-	return out, out.confirmed, nil
-}
-
-// syncedState is deliberately independent of m.db. A torn or missing file is treated as an
-// empty baseline and is rebuilt after a complete pass.
-type syncedState struct {
-	Version int                          `json:"version"`
-	Rows    map[string]syncedStateRecord `json:"rows"`
-}
-
-type syncedStateRecord struct {
-	EngineID int64  `json:"id"`
-	Edit     string `json:"edit"`
-	Digest   []byte `json:"digest"`
-}
-
-func loadSynced(path string) (syncedState, error) {
-	out := syncedState{Version: 1, Rows: map[string]syncedStateRecord{}}
-	if path == "" {
-		return out, nil
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return out, nil
-		}
+	if err = rows.Close(); err != nil {
 		return out, err
 	}
-	if json.Unmarshal(b, &out) != nil || out.Version != 1 || out.Rows == nil {
-		return syncedState{Version: 1, Rows: map[string]syncedStateRecord{}}, nil
+	for _, m := range reads {
+		c := dbCandidate{key: m.t.Key, enginePath: m.path, engineID: m.id, track: m.t}
+		err = db.QueryRowContext(ctx, `SELECT COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,''), p.beatData, p.trackData, p.quickCues, p.loops, COALESCE(p.activeOnLoadLoops,0)
+			FROM Track t LEFT JOIN PerformanceData p ON p.trackId=t.id WHERE t.id=?`, m.id).Scan(&c.metadata.Genre, &c.metadata.Comment, &c.metadata.Label, &c.beatData, &c.trackData, &c.quickCues, &c.loops, &c.activeLoops)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return out, err
+		}
+		out.read++
+		c.now = noted{m.edit, enginedb.SyncedDigest(nil, c.quickCues, c.loops, c.activeLoops, c.metadata.Genre, c.metadata.Comment, c.metadata.Label)}
+		if m.t.Synced != nil && bytes.Equal(m.t.Synced, c.now.digest) {
+			out.insync[c.key] = c.now
+			continue
+		}
+		c.writtenDigest = enginedb.WrittenDigest(c.beatData, c.quickCues, c.loops)
+		out.rows = append(out.rows, c)
 	}
+	sort.Slice(out.rows, func(i, j int) bool { return out.rows[i].key < out.rows[j].key })
 	return out, nil
-}
-
-func saveSynced(dbDir string, rows []syncedRow) error {
-	path := filepath.Join(dbDir, rbstate.SyncedName)
-	state, _ := loadSynced(path)
-	if state.Rows == nil {
-		state.Rows = map[string]syncedStateRecord{}
-	}
-	for _, r := range rows {
-		state.Rows[r.key] = syncedStateRecord{EngineID: r.id, Edit: r.edit, Digest: append([]byte(nil), r.digest...)}
-	}
-	b, err := json.Marshal(state)
-	if err != nil {
-		return err
-	}
-	return rbstate.ReplaceFile(path, append(b, '\n'))
 }
 
 func readNeededLibraries(ctx context.Context, mount, stamp string, rows []dbCandidate, keys *rekordbox.KeyCache, decrypt *time.Duration) (map[rbstate.LibraryKind]SourceLibrary, error) {
@@ -665,7 +626,7 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 			continue
 		}
 		matched[row.key] = true
-		change := trackChange{candidate: row, refs: refs, metadata: metadata, seen: syncedRow{key: row.key, id: row.engineID, edit: row.edit, digest: row.syncedDigest}}
+		change := trackChange{candidate: row, refs: refs, metadata: metadata}
 		needsCue := len(row.track.Written) == 0 || !bytes.Equal(row.writtenDigest, row.track.Written)
 		if needsCue && len(row.trackData) > 0 && primary.AnalysisPath != "" {
 			deck, err := enginedb.ParseDeckCuesAndLoops(row.trackData, row.quickCues, row.loops, row.activeLoops)

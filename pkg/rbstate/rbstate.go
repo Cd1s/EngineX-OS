@@ -18,8 +18,6 @@ import (
 const (
 	// SnapshotName is the snapshot's file name in Engine Library/Database2.
 	SnapshotName = ".rb-bridge-snapshot"
-	// SyncedName is cue write-back's own state file in the same directory.
-	SyncedName = ".rb-bridge-synced"
 	// Rules is part of every stamp and track signature: raising it stages every track again.
 	// 5 is the first snapshot build; it follows the stamp versions v2-v4 of earlier builds.
 	Rules = 5
@@ -127,8 +125,13 @@ type Track struct {
 	Rating   int         `json:"rt,omitempty"`  // the rating the bridge last wrote: another one in the row is the deck's
 	Perf     PerfState   `json:"perf,omitempty"`
 	Built    TrackSig    `json:"built"`
-	Written  []byte      `json:"wr,omitempty"`  // digest of grid, cues and loops as the bridge last wrote them
-	Native   bool        `json:"nat,omitempty"` // an Engine-made row: lists refer to it, the bridge never writes it
+	Written  []byte      `json:"wr,omitempty"` // digest of grid, cues and loops as the bridge last wrote them
+	// Write-back's record of the row: the digest of its cues, loops and editable tags that the
+	// stick's export holds, and the row's lastEditTime when that was noted. A row whose time has
+	// not moved is not read; one whose digest has not changed needs no export read.
+	Synced []byte `json:"sy,omitempty"`
+	Edit   int64  `json:"ed,omitempty"`
+	Native bool   `json:"nat,omitempty"` // an Engine-made row: lists refer to it, the bridge never writes it
 }
 
 // List is one playlist or folder of the view.

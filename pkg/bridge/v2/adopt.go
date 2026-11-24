@@ -47,7 +47,12 @@ func adopt(ctx context.Context, dir, uuid string) (*rbstate.Snapshot, error) {
 	if has("BridgeWritten") {
 		written = `(SELECT digest FROM bridge.BridgeWritten w WHERE w.trackId=s.trackId)`
 	}
-	rows, err := db.QueryContext(ctx, `SELECT s.path,s.trackId,s.fingerprint,`+written+` FROM bridge.BridgeState s JOIN Track t ON t.id=s.trackId WHERE t.path=s.path`)
+	// The older build's write-back record has the same two values per row as the snapshot.
+	synced := `0,NULL`
+	if has("BridgeSynced") {
+		synced = `(SELECT CAST(y.lastEditTime AS INTEGER) FROM bridge.BridgeSynced y WHERE y.trackId=s.trackId),(SELECT y.digest FROM bridge.BridgeSynced y WHERE y.trackId=s.trackId)`
+	}
+	rows, err := db.QueryContext(ctx, `SELECT s.path,s.trackId,s.fingerprint,`+written+`,`+synced+` FROM bridge.BridgeState s JOIN Track t ON t.id=s.trackId WHERE t.path=s.path`)
 	if err != nil {
 		return nil, err
 	}
@@ -55,14 +60,15 @@ func adopt(ctx context.Context, dir, uuid string) (*rbstate.Snapshot, error) {
 	for rows.Next() {
 		var p, fingerprint string
 		var id int64
-		var digest []byte
-		if err = rows.Scan(&p, &id, &fingerprint, &digest); err != nil {
+		var digest, syncedDigest []byte
+		var edit sql.NullInt64
+		if err = rows.Scan(&p, &id, &fingerprint, &digest, &edit, &syncedDigest); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		rel := strings.TrimPrefix(p, "../")
 		complete := fingerprint != "" && !strings.HasPrefix(fingerprint, "fast:")
-		t := &rbstate.Track{Key: rbstate.FoldPath(rel), EngineID: id, Rel: rel, Resolved: complete, Rating: -1, Written: digest}
+		t := &rbstate.Track{Key: rbstate.FoldPath(rel), EngineID: id, Rel: rel, Resolved: complete, Rating: -1, Written: digest, Edit: edit.Int64, Synced: syncedDigest}
 		if complete && digest == nil {
 			unknown = append(unknown, t)
 		}

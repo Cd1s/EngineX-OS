@@ -182,12 +182,13 @@ func (l *Library) CommitID(ctx context.Context) (int64, error) {
 type Row struct {
 	ID   int64
 	Path string // as stored, "../…"
+	Edit int64  // lastEditTime
 }
 
 // TrackIndex is every row of the library by the key of its path. It reads the index of the
 // unique path constraint, not the rows.
 func (l *Library) TrackIndex(ctx context.Context) (map[string]Row, error) {
-	rows, err := l.db.QueryContext(ctx, `SELECT id,path FROM Track WHERE path IS NOT NULL`)
+	rows, err := l.db.QueryContext(ctx, `SELECT id,path,COALESCE(lastEditTime,0) FROM Track WHERE path IS NOT NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +196,7 @@ func (l *Library) TrackIndex(ctx context.Context) (map[string]Row, error) {
 	out := map[string]Row{}
 	for rows.Next() {
 		var r Row
-		if err = rows.Scan(&r.ID, &r.Path); err != nil {
+		if err = rows.Scan(&r.ID, &r.Path, &r.Edit); err != nil {
 			return nil, err
 		}
 		out[rbstate.FoldPath(r.Path)] = r
@@ -825,13 +826,21 @@ func (b *Batch) PutArtwork(ctx context.Context, id int64, image []byte) error {
 	return err
 }
 
-// RowDigest is the digest of the grid, cues and loops a row holds now.
-func (b *Batch) RowDigest(ctx context.Context, id int64) ([]byte, error) {
-	var beats, cues, loops []byte
-	if err := b.tx.QueryRowContext(ctx, `SELECT beatData,quickCues,loops FROM PerformanceData WHERE trackId=?`, id).Scan(&beats, &cues, &loops); err != nil {
-		return nil, err
+// Synced is what cue write-back compares a row by: its lastEditTime (Engine's triggers move it
+// with every write of the row) and SyncedDigest of its cues, loops and editable tags.
+func (b *Batch) Synced(ctx context.Context, id int64) (edit int64, digest []byte, err error) {
+	var cues, loops []byte
+	var active int64
+	var genre, comment, label string
+	st, err := b.stmt(ctx, `SELECT COALESCE(t.lastEditTime,0),p.quickCues,p.loops,COALESCE(p.activeOnLoadLoops,0),COALESCE(t.genre,''),COALESCE(t.comment,''),COALESCE(t.label,'')
+		FROM Track t LEFT JOIN PerformanceData p ON p.trackId=t.id WHERE t.id=?`)
+	if err != nil {
+		return 0, nil, err
 	}
-	return writtenDigest(beats, cues, loops), nil
+	if err = st.QueryRowContext(ctx, id).Scan(&edit, &cues, &loops, &active, &genre, &comment, &label); err != nil {
+		return 0, nil, err
+	}
+	return edit, SyncedDigest(nil, cues, loops, active, genre, comment, label), nil
 }
 
 // BuildLibrary writes a new library file in dir from the export alone: the rows and their

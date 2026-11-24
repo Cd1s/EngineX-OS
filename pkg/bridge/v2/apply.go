@@ -187,6 +187,23 @@ func (w *window) note(vt *ViewTrack, id int64, native bool) {
 	w.snap.Tracks[vt.Key] = &rbstate.Track{Key: vt.Key, EngineID: id, Rel: vt.Rel, Refs: vt.Refs, Row: vt.Hash, Rating: vt.Track.Rating, Native: native}
 }
 
+// noteSync records, after the window wrote a row from the export, that the stick's export holds
+// what the row holds: cue write-back then has nothing to read in it. Not when Engine or the deck
+// wrote the row since the bridge last noted it: write-back has to look at that row.
+func (w *window) noteSync(b *enginedb.Batch, t *rbstate.Track) error {
+	row := w.index[t.Key]
+	if t.Native || t.Perf == rbstate.PerfDeck || row.Edit != t.Edit {
+		return nil
+	}
+	edit, digest, err := b.Synced(w.ctx, t.EngineID)
+	if err != nil {
+		return err
+	}
+	t.Edit, t.Synced, row.Edit = edit, digest, edit
+	w.index[t.Key] = row
+	return nil
+}
+
 // cut, in tests, is called between two writes that a power cut or the hook's kill can separate.
 var cut = func(step string) {}
 
@@ -492,6 +509,9 @@ func (w *window) apply(p *Plan) error {
 			return err
 		}
 		t.Row, t.Rating, t.Refs = vt.Hash, vt.Track.Rating, vt.Refs
+		if err = w.noteSync(b, t); err != nil {
+			return err
+		}
 		w.res.Updated++
 	}
 	// New rows, a hundred at a time while the window has time for them and the lists after them.
@@ -510,6 +530,9 @@ func (w *window) apply(p *Plan) error {
 			vt := &w.view.Tracks[vi]
 			w.note(vt, ids[i], native[i])
 			w.index[vt.Key] = enginedb.Row{ID: ids[i], Path: "../" + vt.Rel}
+			if err = w.noteSync(b, s.Tracks[vt.Key]); err != nil {
+				return err
+			}
 			if !native[i] {
 				w.res.Added++
 			}
@@ -661,6 +684,7 @@ func (w *window) applyStaged() error {
 					return err
 				}
 				w.note(vt, ids[0], native[0])
+				w.index[key] = enginedb.Row{ID: ids[0], Path: "../" + vt.Rel}
 				if t = w.snap.Tracks[key]; t.Native {
 					done = append(done, key)
 					continue
@@ -688,7 +712,7 @@ func (w *window) applyStaged() error {
 				degraded++
 			} else {
 				perf := enginedb.Performance{TrackData: full.Perf.TrackData, Overview: full.Perf.Overview, Beats: full.Perf.Beats,
-					QuickCues: full.Perf.QuickCues, Loops: full.Perf.Loops, ActiveLoops: full.Perf.ActiveLoops, Complete: full.Perf.Complete}
+					QuickCues: full.Perf.QuickCues, Loops: full.Perf.Loops, ActiveLoops: full.Perf.ActiveLoops, Complete: full.Perf.Complete, Digest: e.Digest}
 				digest, outcome, err := b.ApplyPerformance(w.ctx, t.EngineID, perf, full.Facts, enginedb.PerfPrev{State: t.Perf, Written: t.Written}, vt.Track)
 				if err != nil {
 					b.Rollback()
@@ -707,6 +731,10 @@ func (w *window) applyStaged() error {
 				if err = b.PutArtwork(w.ctx, t.EngineID, full.Art); err != nil {
 					log.Printf("rb-bridge: cover of track %d not written: %v", t.EngineID, err)
 				}
+			}
+			if err = w.noteSync(b, t); err != nil {
+				b.Rollback()
+				return err
 			}
 			applied++
 			done = append(done, key)
