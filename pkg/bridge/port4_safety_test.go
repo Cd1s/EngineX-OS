@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,7 +138,7 @@ func TestPort4CutPassRecoversAndConverges(t *testing.T) {
 		t.Fatalf("publishing window: %+v %v", res.Pending, err)
 	}
 	db := p4DB(t, mount)
-	id := p4TrackID(t, db)
+	id := uint32(p4TrackID(t, db))
 	if _, err := db.Exec(`UPDATE Track SET genre='cut genre' WHERE id=?`, id); err != nil {
 		t.Fatal(err)
 	}
@@ -162,25 +163,97 @@ func TestPort4CutPassRecoversAndConverges(t *testing.T) {
 	for i, step := range snapshots {
 		t.Run(strings.TrimSpace(filepath.Base(step)), func(t *testing.T) {
 			cut := filepath.Join(cutDir, string(rune('0'+i)))
+			for _, tmp := range p4CutTemps(t, cut) {
+				st, err := os.Stat(tmp)
+				if err == nil {
+					if err := os.Truncate(tmp, st.Size()/2); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			CleanWriteBackLeftovers(cut)
-			for _, rel := range []string{"PIONEER/USBANLZ/P001/ANLZ0000.DAT", "PIONEER/USBANLZ/P001/ANLZ0000.EXT", "PIONEER/USBANLZ/P001/ANLZ0000.2EX"} {
-				b, err := os.ReadFile(filepath.Join(cut, rel))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := rekordbox.ParseAnalysis(b); err != nil {
-					t.Fatalf("cut at %q left unreadable %s: %v", step, rel, err)
-				}
+			if left := p4CutTemps(t, cut); len(left) != 0 {
+				t.Fatalf("cut at %q left temporary files: %q", step, left)
+			}
+			if _, err := rekordbox.ReadPDB(filepath.Join(cut, "PIONEER", "rekordbox", "export.pdb")); err != nil {
+				t.Fatalf("cut at %q left unreadable export.pdb: %v", step, err)
+			}
+			if n := p4ParseANLZ(t, cut); n == 0 {
+				t.Fatalf("cut at %q left no readable ANLZ files", step)
+			}
+			if _, err := ConvertAtMount(context.Background(), cut, MountOptions{}); err != nil {
+				t.Fatalf("cut at %q mount window: %v", step, err)
+			}
+			if _, err := FillInBackground(context.Background(), cut, FillOptions{}); err != nil {
+				t.Fatalf("cut at %q background fill: %v", step, err)
+			}
+			if res, err := ConvertAtMount(context.Background(), cut, MountOptions{Publish: true}); err != nil || (!res.Pending.None() && !res.Bypassed) {
+				t.Fatalf("cut at %q publish: %+v %v", step, res.Pending, err)
 			}
 			pass, err := WriteBackCues(context.Background(), cut, WriteBackOptions{SkipPreparingCheck: true})
-			if err != nil {
-				t.Fatal(err)
+			if err != nil || p4PDBGenre(t, cut, id) != "cut genre" {
+				t.Fatalf("cut at %q did not retain the metadata edit: %+v %v", step, pass, err)
 			}
-			if pass.TracksChanged != 1 || pass.FilesUpdated == 0 {
-				t.Fatalf("cut at %q did not recover the pending edit: %+v", step, pass)
+			if n := p4ParseANLZ(t, cut); n == 0 {
+				t.Fatalf("cut at %q left no readable ANLZ files after write-back", step)
+			}
+			second, err := WriteBackCues(context.Background(), cut, WriteBackOptions{SkipPreparingCheck: true})
+			if err != nil || second.TracksChanged != 0 {
+				t.Fatalf("cut at %q did not converge: %+v %v", step, second, err)
 			}
 		})
 	}
+}
+
+func p4CutTemps(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if (strings.HasPrefix(name, ".enginex-") || strings.HasPrefix(name, ".bak-")) && strings.HasSuffix(name, ".tmp") {
+			out = append(out, path)
+		}
+		return nil
+	})
+	return out
+}
+
+func p4PDBGenre(t *testing.T, mount string, id uint32) string {
+	t.Helper()
+	lib, err := rekordbox.ReadPDB(filepath.Join(mount, "PIONEER", "rekordbox", "export.pdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, track := range lib.Tracks {
+		if track.ID == id {
+			return track.Genre
+		}
+	}
+	t.Fatalf("export.pdb has no track %d", id)
+	return ""
+}
+
+func p4ParseANLZ(t *testing.T, mount string) int {
+	t.Helper()
+	n := 0
+	_ = filepath.WalkDir(filepath.Join(mount, "PIONEER", "USBANLZ"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || strings.HasPrefix(d.Name(), ".") {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rekordbox.ParseAnalysis(raw); err != nil {
+			t.Fatalf("ANLZ %s: %v", path, err)
+		}
+		n++
+		return nil
+	})
+	return n
 }
 
 func TestPort4ReplacedFilesStayHeldUntilRenameSync(t *testing.T) {
