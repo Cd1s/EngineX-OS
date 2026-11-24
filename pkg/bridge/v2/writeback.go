@@ -453,7 +453,7 @@ type candidateSet struct {
 }
 
 // readCandidates finds the rows a pass has to compare with the export. A row whose
-// lastEditTime is the one the snapshot noted is not read at all (#321: Engine's triggers date
+// lastEditTime is the one the snapshot noted with its digest is not read at all (#321: Engine's triggers date
 // every write of a row's cues, loops and tags, so the scan reads Track and never the
 // PerformanceData pages of an untouched track). A row that was written but whose cues, loops
 // and tags are the ones noted (an analysis, a grid, a rating) is read and needs no export.
@@ -481,7 +481,7 @@ func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, ses
 			continue
 		}
 		out.checked++
-		if m.edit != tr.Edit && !session.has(tr.Key, m.edit) {
+		if (m.edit != tr.Edit || tr.Synced == nil) && !session.has(tr.Key, m.edit) {
 			m.t = tr
 			reads = append(reads, m)
 		}

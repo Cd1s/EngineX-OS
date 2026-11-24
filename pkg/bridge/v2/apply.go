@@ -187,17 +187,23 @@ func (w *window) note(vt *ViewTrack, id int64, native bool) {
 	w.snap.Tracks[vt.Key] = &rbstate.Track{Key: vt.Key, EngineID: id, Rel: vt.Rel, Refs: vt.Refs, Row: vt.Hash, Rating: vt.Track.Rating, Native: native}
 }
 
-// noteSync records, after the window wrote a row from the export, that the stick's export holds
-// what the row holds: cue write-back then has nothing to read in it. Not when Engine or the deck
-// wrote the row since the bridge last noted it: write-back has to look at that row.
+// noteSync records a row's lastEditTime after the window wrote it, and with it the digest
+// cue write-back compares by when the stick's export holds what the row holds now: nobody but
+// the bridge has written the row since it was last noted, and nothing of the deck's was kept in
+// it. Write-back then never reads the row. Without the digest it reads the row and compares it
+// with the export.
 func (w *window) noteSync(b *enginedb.Batch, t *rbstate.Track) error {
-	row := w.index[t.Key]
-	if t.Native || t.Perf == rbstate.PerfDeck || row.Edit != t.Edit {
+	if t.Native {
 		return nil
 	}
+	row := w.index[t.Key]
+	insync := row.Edit == t.Edit && t.Perf != rbstate.PerfDeck
 	edit, digest, err := b.Synced(w.ctx, t.EngineID)
 	if err != nil {
 		return err
+	}
+	if !insync {
+		digest = nil
 	}
 	t.Edit, t.Synced, row.Edit = edit, digest, edit
 	w.index[t.Key] = row

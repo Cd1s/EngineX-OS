@@ -207,6 +207,24 @@ func TestPort1LegacyTakeoverPreservesDeckEdits(t *testing.T) {
 	if again := mountNow(t, mount, MountOptions{}); !again.Bypassed {
 		t.Fatalf("completed takeover is not bypassed: %+v", again)
 	}
+	// Cue write-back after the take-over reads the rows the deck changed and no other: the
+	// window vouched for the two it wrote in full, and a pass notes the rest once compared.
+	vouched := 0
+	for _, tr := range snapshot(t, mount).Tracks {
+		if tr.Synced != nil {
+			vouched++
+		}
+	}
+	if vouched != 2 {
+		t.Fatalf("the window vouched for %d rows, want the 2 the deck had not changed", vouched)
+	}
+	pass, err := WriteBackCues(context.Background(), mount, WriteBackOptions{SkipPreparingCheck: true})
+	if err != nil || pass.TracksChecked != 10 || pass.TracksRead != 8 {
+		t.Fatalf("first pass after the take-over: %+v %v", pass, err)
+	}
+	if pass, err = WriteBackCues(context.Background(), mount, WriteBackOptions{SkipPreparingCheck: true}); err != nil || pass.TracksRead != 0 {
+		t.Fatalf("second pass: %+v %v", pass, err)
+	}
 }
 
 func TestPort1LegacyTakeoverUsesOwnedPathsWithMalformedAnalysis(t *testing.T) {
