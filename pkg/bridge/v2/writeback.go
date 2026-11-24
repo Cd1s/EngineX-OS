@@ -21,7 +21,6 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
-	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 	"golang.org/x/text/cases"
@@ -151,20 +150,21 @@ func ImportState(mount string) (State, error) {
 	if err != nil {
 		return out, err
 	}
-	files, err := discoverExports(abs)
+	resolver, err := compat.NewResolver(abs)
 	if err != nil {
 		return out, err
 	}
-	sources := make([]rbstate.FileSig, 0, len(files))
-	for _, f := range files {
-		sources = append(sources, f.Sig)
+	sigs, err := FindSources(resolver, abs)
+	if err != nil {
+		return out, err
 	}
+	sources := append([]rbstate.FileSig(nil), sigs...)
 	out.Header = h
-	out.Current = rbstate.Stamp(h.Layout, sources, stagedStamp(h.Stamp))
+	out.Current = rbstate.Stamp(h.Layout, sources, stagedStamp(abs))
 	return out, nil
 }
 
-func stagedStamp(stamp string) string {
+func snapshotStagedPart(stamp string) string {
 	const marker = " | staged "
 	if i := strings.Index(stamp, marker); i >= 0 {
 		return stamp[i+len(marker):]
@@ -188,16 +188,16 @@ func NoteWriteBack(mount string, written map[string][]rbstate.FileSig) error {
 			t.Built.ANLZ = append([]rbstate.FileSig(nil), sigs...)
 		}
 	}
-	files, err := discoverExports(abs)
+	resolver, err := compat.NewResolver(abs)
 	if err != nil {
 		return err
 	}
-	sources := make([]rbstate.FileSig, 0, len(files))
-	for _, f := range files {
-		sources = append(sources, f.Sig)
+	sources, err := FindSources(resolver, abs)
+	if err != nil {
+		return err
 	}
 	snap.Header.Sources = sources
-	snap.Header.Stamp = rbstate.Stamp(snap.Header.Layout, sources, stagedStamp(snap.Header.Stamp))
+	snap.Header.Stamp = rbstate.Stamp(snap.Header.Layout, sources, stagedStamp(abs))
 	snap.Header.Applied = time.Now().Unix()
 	return snap.Save(dbDir)
 }
@@ -214,25 +214,13 @@ func discoverExports(mount string) ([]exportFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	paths := []struct {
-		kind rbstate.LibraryKind
-		path string
-	}{
-		{rbstate.DeviceLibrary, "PIONEER/rekordbox/export.pdb"},
-		{rbstate.OneLibrary, "PIONEER/rekordbox/exportLibrary.db"},
-	}
 	var out []exportFile
-	for _, want := range paths {
-		if want.kind == rbstate.DeviceLibrary && prolink.GeneratedExport(mount) {
-			continue
-		}
-		rel, e := r.Resolve(want.path)
-		if errors.Is(e, os.ErrNotExist) {
-			continue
-		}
-		if e != nil {
-			return nil, e
-		}
+	files, err := FindSources(r, mount)
+	if err != nil {
+		return nil, err
+	}
+	for _, sig := range files {
+		rel := sig.Rel
 		st, e := os.Stat(r.FullPath(rel))
 		if e != nil {
 			if errors.Is(e, os.ErrNotExist) {
@@ -240,7 +228,7 @@ func discoverExports(mount string) ([]exportFile, error) {
 			}
 			return nil, e
 		}
-		out = append(out, exportFile{Kind: want.kind, Rel: rel, Full: r.FullPath(rel), Sig: rbstate.FileSig{Rel: rel, Size: st.Size(), MTimeNS: st.ModTime().UnixNano()}})
+		out = append(out, exportFile{Kind: KindOf(rel), Rel: rel, Full: r.FullPath(rel), Sig: rbstate.FileSig{Rel: rel, Size: st.Size(), MTimeNS: st.ModTime().UnixNano()}})
 	}
 	return out, nil
 }
