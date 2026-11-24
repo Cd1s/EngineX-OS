@@ -136,6 +136,7 @@ var (
 	uiUIScales            = []int{110, 105, 100, 95, 90, 85, 80, 75}
 	uiPioneerFxModes      = []string{"off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"}
 	uiShadowModes         = []string{"auto", "engine", "cdj"}
+	uiRbLibraryViews      = []string{"folders", "merged", "device", "onelibrary"}
 	uiFxTimeModes         = []string{"beats", "ms"}
 	uiMixstreamFxDefaults = []string{"Echo", "Flanger", "Delay", "Phaser"}
 	uiMixstreamFxChoices  = []string{"Echo", "Flanger", "Delay", "Phaser"}
