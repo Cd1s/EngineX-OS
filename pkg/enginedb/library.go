@@ -660,7 +660,8 @@ type PerfPrev struct {
 //   - the row was filled from the export alone and Engine or the DJ has worked on it since: the
 //     DJ's hot cues, loops, adjusted main cue, locked or adjusted grid and rating stay, the rest
 //     is the staged data's (the field rule of #328, mergeFast);
-//   - the deck changed a row the bridge had written in full: its grid, cues and loops stay, the
+//   - the deck changed a row the bridge had written in full: its grid, cues and loops stay
+//     (positions an older import left under another offset rule are moved to this one's), the
 //     waveforms and track data are the staged ones.
 func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f rbstate.Facts, prev PerfPrev, export rekordbox.Track) (digest []byte, outcome Outcome, err error) {
 	var row deckRow
@@ -700,9 +701,12 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 		}
 		return staged, PerfSame, facts(false)
 	case prev.State == rbstate.PerfDeck || (prev.Written != nil && !bytes.Equal(have, prev.Written)):
-		// The deck's since the bridge wrote it: only what a deck cannot edit is refreshed.
-		_, err = b.exec(ctx, `UPDATE PerformanceData SET trackData=?1,overviewWaveFormData=?2,beatData=COALESCE(beatData,?3),quickCues=COALESCE(quickCues,?4),
-			loops=COALESCE(loops,?5),thirdPartySourceId=NULL WHERE trackId=?6`, p.TrackData, p.Overview, p.Beats, p.QuickCues, p.Loops, id)
+		// The deck's since the bridge wrote it. What is still the import's in it, an older import's
+		// positions under another offset rule, moves to this import's (realignKept, the rows real
+		// decks had loaded before #178); what the deck changed stays where it is.
+		beats, cues, loops, _ := realignKept(row.beats, row.cues, row.loops, p, row.locked)
+		_, err = b.exec(ctx, `UPDATE PerformanceData SET trackData=?1,overviewWaveFormData=?2,beatData=COALESCE(?3,?6),quickCues=COALESCE(?4,?7),
+			loops=COALESCE(?5,?8),thirdPartySourceId=NULL WHERE trackId=?9`, p.TrackData, p.Overview, beats, cues, loops, p.Beats, p.QuickCues, p.Loops, id)
 		if err != nil {
 			return nil, 0, err
 		}
