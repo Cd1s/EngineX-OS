@@ -660,6 +660,8 @@ func (w *window) applyStaged() error {
 	if err != nil {
 		return err
 	}
+	// The stage covers the readable portion of a partial source set. Its stamp still
+	// names every export file, so write-back can use the sources that were read.
 	if w.snap.Pending.Verify && verified == w.view.Stamp {
 		w.snap.Pending.Verify = false
 	}
