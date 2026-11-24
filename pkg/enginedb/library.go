@@ -24,10 +24,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// Library is a stick's m.db opened by the rekordbox bridge for one mount window, before Engine
-// sees the stick. It is the only code of the bridge that writes m.db: rows and lists from the
-// export, staged performance data, covers. Everything it writes is keyed by Engine's own IDs,
-// which the bridge's snapshot keeps; nothing of the bridge is stored in m.db.
+// Library is a stick's m.db opened for one mount window, before Engine sees the stick: the only
+// writer of m.db in the bridge (design §1.4). Rows are keyed by Engine's own IDs, which the
+// snapshot keeps; nothing of the bridge is stored in m.db.
 type Library struct {
 	db   *sql.DB
 	dir  string
@@ -58,9 +57,8 @@ const (
 	PerfKept                       // the deck's grid, cues and loops stay; waveforms and track data were written
 )
 
-// OpenLibrary opens dir/m.db for a window, creating it with Engine's schema when the stick has
-// none. It returns ErrLibraryInUse when another process has the file open: Engine never sees
-// what another process writes to a library it has open, and writes its own pages over it.
+// OpenLibrary opens dir/m.db for a window, made with Engine's schema when there is none.
+// ErrLibraryInUse: another process has it open (Engine would write its own pages over ours).
 func OpenLibrary(ctx context.Context, dir string) (*Library, error) {
 	return openLibrary(ctx, dir, false, "")
 }
@@ -355,11 +353,10 @@ func (b *Batch) trackArgs(r *TrackRow) []any {
 		strings.TrimPrefix(strings.ToLower(path.Ext(r.Rel)), "."), int64(t.ID), b.now, b.now}
 }
 
-// InsertTracks adds rows for tracks the library does not have. A track whose path an
-// Engine-made row already holds is not added: native[i] is set and ids[i] is that row, which
-// lists may refer to and the bridge never writes (#252). A new row starts with the export's
-// own cue rows, marked as imported, so that a track loaded before its analysis is staged
-// already has its hot cues; Engine analyses such a row itself at its first load.
+// InsertTracks adds rows. A path an Engine-made row holds is not added: native[i] is set and
+// ids[i] is that row, which lists may name and the bridge never writes (#252). A new row starts
+// with the export's own cue rows, marked as imported, so a track loaded before it is staged has
+// its hot cues (Engine analyses it at that load).
 func (b *Batch) InsertTracks(ctx context.Context, rows []TrackRow) (ids []int64, native []bool, err error) {
 	ids, native = make([]int64, len(rows)), make([]bool, len(rows))
 	if b.l.bulk {
@@ -426,14 +423,11 @@ func (b *Batch) insertTracksBulk(ctx context.Context, rows []TrackRow, ids []int
 	return flush()
 }
 
-// UpdateTrack gives the row the export's fields again after the export changed them, and says
-// whether the row held anything else. Length, BPM, bitrate and size are the export's only until
-// the track's own data is applied (ApplyPerformance puts what the audio header and the grid
-// say): an analysed row keeps them. A row that holds everything already is not written: a
-// write costs the reads of the row's index pages and fires Engine's triggers, 31 ms a row on a
-// cold stick with a 313 MB library, which the take-over of an older build's 5,940 rows could
-// not pay inside its windows. The rating stays the deck's when the deck changed it: oldRating
-// is what the bridge last wrote (negative when that is not known: the export's rating is taken).
+// UpdateTrack gives the row the export's fields and says whether it held anything else. An
+// analysed row keeps its own length, BPM, bitrate and size (ApplyPerformance's). A row that holds
+// it all already is not written: a write fires Engine's triggers, 31 ms a row on a cold stick
+// with a 313 MB library (64b0ea95). The rating stays the deck's when the deck changed it:
+// oldRating is what the bridge last wrote (negative: unknown, the export's is taken).
 func (b *Batch) UpdateTrack(ctx context.Context, id int64, r TrackRow, oldRating int) (changed bool, err error) {
 	a := b.trackArgs(&r)
 	const (
@@ -500,12 +494,9 @@ func (b *Batch) uniqueTitle(ctx context.Context, name string, parent, self int64
 	}
 }
 
-// InsertList adds a list, at the root or in a folder the bridge made. Engine's triggers link it
-// into its folder's chain in front of Before.
-//
-// Engine's trigger that marks a new list's folders as persisted is suspended for the batch: it
-// walks every list of the library for each insert (506 lists of a real stick took 12 s at deck
-// speed, the first insert was killed), and the bridge's folders are persisted when they are made.
+// InsertList adds a list; Engine's triggers link it into its folder in front of Before. Engine's
+// trigger that marks a new list's folders persisted is suspended for the batch: it walks every
+// list at each insert (506 lists took 12 s at deck speed), and the bridge's folders are persisted.
 func (b *Batch) InsertList(ctx context.Context, row ListRow) (int64, error) {
 	if !b.lists {
 		if err := b.suspend(ctx, `type='trigger' AND name='trigger_after_insert_isPersist'`); err != nil {
@@ -538,25 +529,12 @@ func (b *Batch) FindList(ctx context.Context, title string, parent int64) (int64
 // OrderLists chains the given lists of one folder in this order. Lists of the folder that are
 // not named (Engine's own) keep their order and follow them.
 func (b *Batch) OrderLists(ctx context.Context, parent int64, ids []int64) error {
-	rows, err := b.tx.QueryContext(ctx, `SELECT id,COALESCE(nextListId,0) FROM Playlist WHERE parentListId=? ORDER BY id`, parent)
-	if err != nil {
-		return err
-	}
-	var nodes []nativeChildNode
 	named := make(map[int64]bool, len(ids))
 	for _, id := range ids {
 		named[id] = true
 	}
-	for rows.Next() {
-		var n nativeChildNode
-		if err = rows.Scan(&n.id, &n.next); err != nil {
-			rows.Close()
-			return err
-		}
-		n.owned = named[n.id]
-		nodes = append(nodes, n)
-	}
-	if err = rows.Close(); err != nil {
+	nodes, err := b.children(ctx, parent, func(id int64) bool { return named[id] })
+	if err != nil {
 		return err
 	}
 	have := make(map[int64]bool, len(nodes))
@@ -588,6 +566,25 @@ func (b *Batch) OrderLists(ctx context.Context, parent int64, ids []int64) error
 		}
 	}
 	return nil
+}
+
+// children are a folder's lists by ID; owned marks the bridge's.
+func (b *Batch) children(ctx context.Context, parent int64, owned func(int64) bool) ([]nativeChildNode, error) {
+	rows, err := b.tx.QueryContext(ctx, `SELECT id,COALESCE(title,''),COALESCE(nextListId,0) FROM Playlist WHERE parentListId=? ORDER BY id`, parent)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var nodes []nativeChildNode
+	for rows.Next() {
+		var n nativeChildNode
+		if err = rows.Scan(&n.id, &n.title, &n.next); err != nil {
+			return nil, err
+		}
+		n.owned = owned(n.id)
+		nodes = append(nodes, n)
+	}
+	return nodes, rows.Err()
 }
 
 // SetEntries makes a list hold exactly these tracks, in this order.
@@ -630,25 +627,12 @@ func (b *Batch) SetEntries(ctx context.Context, list int64, tracks []int64) erro
 	return flush()
 }
 
-// DeleteList removes a list the bridge owns. Lists inside it that are Engine's own (owned says
-// which IDs are the bridge's) move to the root first, in their order, renamed "<name> (n)" when
-// the root has that name already: the bridge never deletes a list the DJ made on a deck (#252).
+// DeleteList removes a list the bridge owns. Engine's own lists inside it (not owned) move to the
+// root first, in their order, as "<name> (n)" when the root has the name: the bridge never
+// deletes a list the DJ made on a deck (#252).
 func (b *Batch) DeleteList(ctx context.Context, id int64, owned func(int64) bool) error {
-	rows, err := b.tx.QueryContext(ctx, `SELECT id,COALESCE(title,''),COALESCE(nextListId,0) FROM Playlist WHERE parentListId=? ORDER BY id`, id)
+	nodes, err := b.children(ctx, id, owned)
 	if err != nil {
-		return err
-	}
-	var nodes []nativeChildNode
-	for rows.Next() {
-		var n nativeChildNode
-		if err = rows.Scan(&n.id, &n.title, &n.next); err != nil {
-			rows.Close()
-			return err
-		}
-		n.owned = owned(n.id)
-		nodes = append(nodes, n)
-	}
-	if err = rows.Close(); err != nil {
 		return err
 	}
 	for _, n := range nodes {
@@ -694,18 +678,15 @@ type PerfPrev struct {
 	Written []byte // the digest of what the bridge last wrote, nil for a row only the export filled
 }
 
-// ApplyPerformance writes a track's staged performance data to its row unless the deck has
-// changed the row since the bridge wrote it. It returns the digest of grid, cues and loops the
-// bridge has written (nil when the row is the deck's from now on) and what it did:
-//
+// ApplyPerformance writes a track's staged data unless the deck changed the row since the bridge
+// wrote it, and returns the digest of the grid, cues and loops the bridge wrote (nil: the row is
+// the deck's from now on) and what it did. Four cases:
 //   - the row holds the staged data already (a window cut after its commit): nothing is written;
 //   - the row holds what the bridge wrote before: all of it is replaced;
-//   - the row was filled from the export alone and Engine or the DJ has worked on it since: the
-//     DJ's hot cues, loops, adjusted main cue, locked or adjusted grid and rating stay, the rest
-//     is the staged data's (the field rule of #328, mergeFast);
-//   - the deck changed a row the bridge had written in full: its grid, cues and loops stay
-//     (positions an older import left under another offset rule are moved to this one's), the
-//     waveforms and track data are the staged ones.
+//   - the export alone filled the row and the deck worked on it since: the DJ's hot cues, loops,
+//     adjusted main cue, locked or adjusted grid and rating stay (#328, mergeFast);
+//   - the deck changed a row the bridge wrote in full: its grid, cues and loops stay, moved from
+//     an older offset rule to this one (#178, realignKept); waveforms and track data are staged.
 func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f rbstate.Facts, prev PerfPrev, export rekordbox.Track) (digest []byte, outcome Outcome, err error) {
 	var row deckRow
 	var trackData, overview []byte
@@ -719,15 +700,14 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 	}
 	staged := p.Digest
 	if staged == nil {
-		staged = writtenDigest(p.Beats, p.QuickCues, p.Loops)
+		staged = WrittenDigest(p.Beats, p.QuickCues, p.Loops)
 	}
-	// The row's own digest unpacks its grid and cues, a third of a window's CPU on a deck: it is
-	// worked out only for a row that can hold something else than the staged data or the
-	// export's cue rows (the bridge wrote it before, or it has a grid).
+	// The row's own digest (a third of a window's CPU on a deck) only for a row that can hold
+	// something else than the staged data or the export's cue rows.
 	same := bytes.Equal(row.beats, p.Beats) && bytes.Equal(row.cues, p.QuickCues) && bytes.Equal(row.loops, p.Loops)
 	var have []byte
 	if !same && (prev.Written != nil || row.beats != nil) {
-		have = writtenDigest(row.beats, row.cues, row.loops)
+		have = WrittenDigest(row.beats, row.cues, row.loops)
 		same = bytes.Equal(have, staged)
 	}
 	bpm := f.BPM
@@ -775,21 +755,18 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 	}
 	// A row the export alone filled: rekordbox's analysis, with what the DJ did on it meanwhile.
 	m := mergeFast(row, fastBaseOf(export), p)
-	w, active := p, any(p.ActiveLoops)
-	if m.beats != nil {
-		w.Beats = m.beats
+	or := func(deck, staged []byte) []byte {
+		if deck != nil {
+			return deck
+		}
+		return staged
 	}
-	if m.cues != nil {
-		w.QuickCues = m.cues
-	}
-	if m.loops != nil {
-		w.Loops = m.loops
-	}
+	active := any(p.ActiveLoops)
 	if m.active != nil {
 		active = m.active
 	}
 	if _, err = b.exec(ctx, `UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,beatData=?,quickCues=?,loops=?,activeOnLoadLoops=?,thirdPartySourceId=NULL WHERE trackId=?`,
-		p.TrackData, p.Overview, w.Beats, w.QuickCues, w.Loops, active, id); err != nil {
+		p.TrackData, p.Overview, or(m.beats, p.Beats), or(m.cues, p.QuickCues), or(m.loops, p.Loops), active, id); err != nil {
 		return nil, 0, err
 	}
 	if err = facts(m.grid); err != nil {
@@ -801,9 +778,8 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 	return staged, PerfWritten, nil
 }
 
-// PutArtwork gives a track its cover: the AlbumArt row (shared by tracks with the same image)
-// and the file in Engine Library/Artwork that Engine serves to other decks. A batch looks each
-// image up once: an album's tracks share one cover.
+// PutArtwork gives a track its cover: the AlbumArt row, shared by the tracks of one image (a batch
+// looks each up once), and the Engine Library/Artwork file Engine serves to other decks.
 func (b *Batch) PutArtwork(ctx context.Context, id int64, image []byte) error {
 	if len(image) == 0 {
 		return errors.New("empty cover")
@@ -855,11 +831,9 @@ func (b *Batch) Synced(ctx context.Context, id int64) (edit int64, digest []byte
 	return edit, SyncedDigest(nil, cues, loops, active, genre, comment, label), nil
 }
 
-// BuildLibrary writes a new library file in dir from the export alone: the rows and their
-// export cue rows, then fn's lists. It loads without Engine's secondary indexes and rebuilds
-// them at the end, with its journal in memory and no sync until the file is complete: the
-// caller builds beside the stick's library and renames the finished file into place.
-// libraryID is the UUID of the empty skeleton it replaces, "" for a new one.
+// BuildLibrary writes a new library in dir (beside the stick's; the caller renames it into place)
+// from the rows and lists' lists: without Engine's secondary indexes until the end, the journal
+// in memory, one sync. libraryID is the UUID of the skeleton it replaces, "" for a new one.
 func BuildLibrary(ctx context.Context, dir, libraryID string, rows []TrackRow, lists func(b *Batch, ids []int64) error) (ids []int64, libraryUUID string, commitID int64, err error) {
 	l, err := openLibrary(ctx, dir, true, libraryID)
 	if err != nil {

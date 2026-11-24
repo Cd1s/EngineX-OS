@@ -8,38 +8,31 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
-// A track a fast import listed (fingerprint "fast:" + the export record's hash) has no analysis
-// until its first full import, minutes later on a large stick (#301). A deck that loads it
-// meanwhile has Engine analyse it, and the DJ may edit it then: set, move, rename, recolour or
-// delete hot cues, save loops, adjust or lock the grid, rate it (#328). The full import gives
-// the row rekordbox's analysis and keeps what the DJ did, field by field, against what the fast
-// import left in the row (fastBase):
-//
-//   - hot cue and saved loop slots, one by one: a slot that still holds what the fast import
-//     wrote, or the same moved by Engine's own correction of a marked row, or that is empty on
-//     both, is rekordbox's; any other is the DJ's. A loop's active-on-load bit goes with its slot.
-//   - the main cue: the DJ's when Engine says it was adjusted (the flag after the hot cues).
-//   - the grid: the DJ's when it is locked or its adjusted grid is not Engine's own analysed one
-//     (the rule of realignKept), with the Track's BPM; Engine's own analysis is replaced.
-//   - the rating: the DJ's when it is not the one the fast import wrote.
-//
-// What the DJ kept is a deck edit from then on: the row is not what the import wrote, so it has
-// no BridgeWritten digest, and the next import keeps it (importKeeps) as it keeps any deck edit.
+// The row rule of #328. A row the export alone filled (InsertTracks: its cue rows, no analysis)
+// may be loaded before its staged data is applied: Engine analyses it, and the DJ may set, move,
+// rename, recolour or delete hot cues, save loops, adjust or lock the grid, rate it. Applying the
+// staged data keeps what the DJ did, field by field, against what the insert left (fastBase):
+//   - hot cue and loop slots one by one: a slot that still holds the insert's (also as moved by
+//     Engine's correction of a marked row), or is empty on both, is rekordbox's; any other the
+//     DJ's, a loop with its active-on-load bit;
+//   - the main cue: the DJ's when Engine flags it adjusted;
+//   - the grid: the DJ's when locked or adjusted (realignKept's rule), with the Track's BPM;
+//   - the rating: the DJ's when it is not the insert's.
+// What the DJ kept is a deck edit from then on: the row gets no Written digest.
 
-// engineLoadShifts are what Engine 5.3.0 moves a marked row by when it loads it with a decoder
-// attached (one_offset_rule_test: an MP3 by 2292 samples); it clears the mark either way.
+// engineLoadShifts: Engine 5.3.0 moves a marked row when it loads it with a decoder (an MP3 by
+// 2292 samples) and clears the mark.
 var engineLoadShifts = []float64{0, 2292}
 
-// fastBase is what a fast import left in a track's row for an export record: the record's rating,
-// and a OneLibrary export's hot cues, loops and active-on-load loops without the file's offset,
-// with Engine's mark.
+// fastBase is what the insert left in a row: the export's rating, and a OneLibrary export's hot
+// cues, loops and active-on-load loops without the file's offset, with Engine's mark.
 type fastBase struct {
 	rating      int64
 	cues, loops []byte
 	active      int64
 }
 
-// fastBaseOf is the fastBase of export track t, as the fast import computes it (sync.go).
+// fastBaseOf is the fastBase of export track t, as InsertTracks writes it.
 func fastBaseOf(t rekordbox.Track) fastBase {
 	b := fastBase{rating: int64(t.Rating)}
 	if len(t.Cues) > 0 {
@@ -61,8 +54,7 @@ type deckRow struct {
 	rating             sql.NullInt64
 }
 
-// fastMerge is the row the full import leaves: perf's, with what the DJ did kept. A nil field
-// is perf's.
+// fastMerge is what the DJ did, kept over perf; a nil field is perf's.
 type fastMerge struct {
 	beats, cues, loops []byte
 	active             any
@@ -94,10 +86,8 @@ func mergeFast(row deckRow, base fastBase, perf Performance) fastMerge {
 	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 {
 		return m // a blob not in Engine's layout: rekordbox's, as before #328
 	}
-	// The fast import's cues are in the row only if one of them still is where it put it: a
-	// track listed fast without them (an in-place import out of time) has none, and Engine's
-	// empty slots must not read as the DJ deleting what was never there. A DJ who deleted every
-	// one of them gets rekordbox's back, as before #328.
+	// The insert's cues count only if one still is where it put it: Engine's empty slots must not
+	// read as the DJ deleting what was never there (a DJ who deleted all gets rekordbox's back).
 	seen := false
 	for i := range rowCues {
 		seen = seen || !emptyCue(baseCues[i]) && !emptyCue(rowCues[i]) && shiftedBy(cuePos(baseCues[i]), cuePos(rowCues[i]))
@@ -224,10 +214,9 @@ func cuePos(slot []byte) float64 {
 
 func emptyCue(slot []byte) bool { return slot == nil || cuePos(slot) < 0 }
 
-// mergeCue is a hot cue slot after the full import: rekordbox's (now) where the row still holds
-// what the fast import put in it (base), or that moved by Engine's own correction; the DJ's where
-// the DJ set, moved or deleted it; the DJ's name and colour at rekordbox's position where the DJ
-// renamed or recoloured it without moving it.
+// mergeCue is a hot cue slot: rekordbox's (now) where the row holds the insert's (base), also as
+// moved by Engine's correction; the DJ's where the DJ set, moved or deleted it; the DJ's name and
+// colour at rekordbox's position where the DJ only renamed or recoloured it.
 func mergeCue(row, base, now []byte) []byte {
 	switch {
 	case emptyCue(row) && (emptyCue(base) || emptyCue(now)):

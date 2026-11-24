@@ -282,7 +282,7 @@ func BuildTrack(res *compat.Resolver, t rekordbox.Track, src TrackSources, read 
 	}
 	out.Perf = rbstate.Perf{TrackData: perf.TrackData, Overview: perf.Overview, Beats: perf.Beats,
 		QuickCues: perf.QuickCues, Loops: perf.Loops, ActiveLoops: perf.ActiveLoops, Complete: perf.Complete}
-	out.Digest = writtenDigest(perf.Beats, perf.QuickCues, perf.Loops)
+	out.Digest = WrittenDigest(perf.Beats, perf.QuickCues, perf.Loops)
 	if perf.Overview != nil {
 		if rgb, err := EncodeRGBOverview(t, a, perf.Overview); err == nil {
 			out.RGB = rgb
