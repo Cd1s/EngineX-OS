@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"github.com/Cd1s/EngineX-OS/pkg/bridge/v2/bridgetest"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge/bridgetest"
 	"os"
 	"path/filepath"
 	"strings"

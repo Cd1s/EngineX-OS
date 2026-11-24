@@ -3,7 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/Cd1s/EngineX-OS/pkg/bridge/v2/bridgetest"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge/bridgetest"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"

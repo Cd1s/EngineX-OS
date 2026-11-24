@@ -213,3 +213,9 @@ func TestExtractEmbeddedArtwork(t *testing.T) {
 		t.Errorf("expected error for missing file")
 	}
 }
+
+// ExtractEmbeddedArtwork is the cover inside an audio file, read at full speed: what the
+// extractors' own tests call (the job reads it paced, embeddedCover).
+func ExtractEmbeddedArtwork(audioPath string) ([]byte, error) {
+	return embeddedCover(audioPath, ReadOptions{})
+}

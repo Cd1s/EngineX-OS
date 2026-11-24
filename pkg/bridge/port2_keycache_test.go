@@ -40,7 +40,7 @@ func p2WriteEncryptedExport(t *testing.T, dst, plainPath string, salt []byte) {
 }
 
 func TestPort2ReadSourcesCachesOneLibraryKeysBySalt(t *testing.T) {
-	plainPath := filepath.Join("..", "..", "rekordbox", "testdata", "sqlcipher4_onelibrary_decrypted.db")
+	plainPath := filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary_decrypted.db")
 	mount := t.TempDir()
 	first := filepath.Join(mount, "PIONEER/rekordbox/exportLibrary.db")
 	second := filepath.Join(mount, "PIONEER/rekordbox/exportLibrary.new.db")

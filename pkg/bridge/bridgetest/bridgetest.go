@@ -5,7 +5,7 @@ import (
 	"context"
 	"testing"
 
-	bridge "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 )
 
 // Import converts the export on mount the way a deck does over an insert: the mount window,

@@ -3,7 +3,6 @@ package enginedb
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/binary"
 	"math"
 	"os"
@@ -128,92 +127,5 @@ func TestEncodeRGBOverviewPWV6AndPWV4FormatAndPruneSafe(t *testing.T) {
 				t.Fatalf("generated RGB overview missing or empty: st=%v err=%v", st, err)
 			}
 		})
-	}
-}
-
-func TestRGBVerifiedCacheAndCountMissing(t *testing.T) {
-	dir := t.TempDir()
-	libPath := filepath.Join(dir, "m.db")
-	db, err := sql.Open("sqlite", libPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, q := range []string{
-		`CREATE TABLE Information (uuid TEXT)`, `INSERT INTO Information VALUES ('lib-uuid')`,
-		`CREATE TABLE Track (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, isAnalyzed INTEGER)`,
-		`CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, overviewWaveFormData BLOB)`,
-	} {
-		if _, err := db.Exec(q); err != nil {
-			t.Fatal(err)
-		}
-	}
-	ov := rgbTestOverview(t, 17803)
-	for id, p := range map[int64]string{1: "../A.mp3", 2: "../B.mp3"} {
-		if _, err := db.Exec(`INSERT INTO Track(id, path, isAnalyzed) VALUES (?, ?, 1)`, id, p); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db.Exec(`INSERT INTO PerformanceData VALUES (?, ?)`, id, ov); err != nil {
-			t.Fatal(err)
-		}
-	}
-	db.Close()
-
-	ctx := context.Background()
-	if missing, err := CountMissingRGBOverviews(ctx, dir); err != nil || missing != 2 {
-		t.Fatalf("initial missing=%d err=%v, want 2", missing, err)
-	}
-	valid := rgbTestOverviewBins(t, 17803, 0x20)
-	if err := WriteRGBOverviewAtomic(dir, "lib-uuid", 1, valid); err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteRGBOverviewAtomic(dir, "lib-uuid", 2, valid); err != nil {
-		t.Fatal(err)
-	}
-	if missing, err := CountMissingRGBOverviews(ctx, dir); err != nil || missing != 0 {
-		t.Fatalf("after write missing=%d err=%v, want 0", missing, err)
-	}
-	RecordVerifiedRGBOverviews(ctx, dir, libPath, []int64{1, 2})
-	if _, err := os.Stat(filepath.Join(dir, rgbVerifiedName)); err != nil {
-		t.Fatalf("verified cache not written: %v", err)
-	}
-	// Prune must keep both cached files, then immediately remove track 2 if it turns empty.
-	if removed, err := PruneRGBOverviews(ctx, dir, libPath, ""); err != nil || removed != 0 {
-		t.Fatalf("cached prune removed=%d err=%v, want 0", removed, err)
-	}
-	p2 := filepath.Join(dir, "OverviewData", "lib-uuid", "2.rgb")
-	if err := os.WriteFile(p2, []byte{0, 0, 0, 0}, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if missing, err := CountMissingRGBOverviews(ctx, dir); err != nil || missing != 1 {
-		t.Fatalf("with 4-byte file missing=%d err=%v, want 1", missing, err)
-	}
-	if removed, err := PruneRGBOverviews(ctx, dir, libPath, ""); err != nil || removed != 1 {
-		t.Fatalf("empty file prune removed=%d err=%v, want 1", removed, err)
-	}
-	if _, err := os.Stat(p2); !os.IsNotExist(err) {
-		t.Fatal("empty file survived cached prune")
-	}
-	// Verify MDBSize/MDBModTime fast path: even if m.db contents are corrupted in-place
-	// with preserved size and mtime, pruneRGBVerifiedFast verifies directory metadata
-	// without opening SQLite or reading PerformanceData pages.
-	st, err := os.Stat(libPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	origMDB, err := os.ReadFile(libPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(libPath, bytes.Repeat([]byte("X"), len(origMDB)), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(libPath, st.ModTime(), st.ModTime()); err != nil {
-		t.Fatal(err)
-	}
-	if removed, err := PruneRGBOverviews(ctx, dir, libPath, ""); err != nil || removed != 0 {
-		t.Fatalf("fast stat-matched prune opened m.db or failed: removed=%d err=%v", removed, err)
-	}
-	if err := os.WriteFile(libPath, origMDB, 0o644); err != nil {
-		t.Fatal(err)
 	}
 }

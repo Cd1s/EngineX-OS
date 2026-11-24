@@ -3,18 +3,19 @@ package webui
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
-// #253: a state row of 5.3.0.6 names the track's ANLZ files on the stick instead of holding a copy
-// of the waveform; the display reads the PWV7 (else the PWV5) from there, as the resolver finds the
-// file, and keeps the library, path and duration guards.
+// #253: the bridge's snapshot names a track's ANLZ files on the stick; the display reads the PWV7
+// (else the PWV5) from there, as the resolver finds the file, and keeps the library, path, row
+// and duration guards. Replaces the tests of the older builds' state rows (inline copies,
+// compact rows, references), which are gone with the state database.
 func TestBridgeDetailsFollowTheReferenceToTheANLZFiles(t *testing.T) {
 	root := t.TempDir()
 	wave := make([]byte, 12+3*600)
@@ -36,42 +37,31 @@ func TestBridgeDetailsFollowTheReferenceToTheANLZFiles(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dir, ".rb-bridge-state.db"))
-	if err != nil {
+	if err := os.Symlink(filepath.Join(root, "PIONEER/USBANLZ/P001"), filepath.Join(root, "PIONEER/USBANLZ/LINK")); err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	if _, err = db.Exec(`CREATE TABLE BridgeAnalysis(trackId INTEGER PRIMARY KEY, sourceJSON BLOB); CREATE TABLE BridgeState(path TEXT PRIMARY KEY, trackId INTEGER)`); err != nil {
-		t.Fatal(err)
+	// The bridge's snapshot names each track's ANLZ files (Track.Built.ANLZ).
+	rows := map[int][]string{
+		1: {"PIONEER/USBANLZ/P001/0000ABCD/ANLZ0000.EXT", "PIONEER/USBANLZ/P001/0000ABCD/ANLZ0000.2EX"},
+		2: {"pioneer/usbanlz/p001/0000abcd/anlz0000.2ex"}, // the export's spelling, not the volume's
+		3: {"PIONEER/USBANLZ/P002/0000ABCE/ANLZ0000.EXT", "PIONEER/USBANLZ/P002/0000ABCE/ANLZ0000.2EX"},
+		4: {"../../PIONEER/USBANLZ/P001/0000ABCD/ANLZ0000.2EX"},
+		5: {"PIONEER/USBANLZ/LINK/0000ABCD/ANLZ0000.2EX"},
+		6: {"PIONEER/USBANLZ/P009/MISSING/ANLZ0000.2EX"},
+		7: nil,
+		8: {"PIONEER/USBANLZ/P003/0000ABCF/ANLZ0000.EXT", "PIONEER/USBANLZ/P003/0000ABCF/ANLZ0000.2EX"},
 	}
-	ref := func(id uint32, files ...string) []byte {
-		b := binary.LittleEndian.AppendUint32([]byte("RBA2"), id)
+	snap := rbstate.New("uuid")
+	for id, files := range rows {
+		rel := "Contents/" + string(rune('a'+id)) + ".mp3"
+		tr := &rbstate.Track{Key: rbstate.FoldPath(rel), EngineID: int64(id), Rel: rel}
 		for _, f := range files {
-			b = binary.LittleEndian.AppendUint16(b, uint16(len(f)))
-			b = append(b, f...)
+			tr.Built.ANLZ = append(tr.Built.ANLZ, rbstate.FileSig{Rel: f})
 		}
-		return b
+		snap.Tracks[tr.Key] = tr
 	}
-	if err = os.Symlink(filepath.Join(root, "PIONEER/USBANLZ/P001"), filepath.Join(root, "PIONEER/USBANLZ/LINK")); err != nil {
+	if err := snap.Save(dir); err != nil {
 		t.Fatal(err)
-	}
-	rows := map[int][]byte{
-		1: ref(1, "PIONEER/USBANLZ/P001/0000ABCD/ANLZ0000.2EX", "PIONEER/USBANLZ/P001/0000ABCD/ANLZ0000.EXT"),
-		2: ref(2, "pioneer/usbanlz/p001/0000abcd/anlz0000.2ex"), // the export's spelling, not the volume's
-		3: ref(3, "PIONEER/USBANLZ/P002/0000ABCE/ANLZ0000.2EX", "PIONEER/USBANLZ/P002/0000ABCE/ANLZ0000.EXT"),
-		4: ref(4, "../../PIONEER/USBANLZ/P001/0000ABCD/ANLZ0000.2EX"),
-		5: ref(5, "PIONEER/USBANLZ/LINK/0000ABCD/ANLZ0000.2EX"),
-		6: ref(6, "PIONEER/USBANLZ/P009/MISSING/ANLZ0000.2EX"),
-		7: ref(7),
-		8: ref(8, "PIONEER/USBANLZ/P003/0000ABCF/ANLZ0000.2EX", "PIONEER/USBANLZ/P003/0000ABCF/ANLZ0000.EXT"),
-	}
-	for id, b := range rows {
-		if _, err = db.Exec(`INSERT INTO BridgeAnalysis VALUES(?,?)`, id, b); err != nil {
-			t.Fatal(err)
-		}
-		if _, err = db.Exec(`INSERT INTO BridgeState VALUES(?,?)`, "../Contents/"+string(rune('a'+id))+".mp3", id); err != nil {
-			t.Fatal(err)
-		}
 	}
 	ctx := context.Background()
 	file := filepath.Join(dir, "m.db")
@@ -92,7 +82,8 @@ func TestBridgeDetailsFollowTheReferenceToTheANLZFiles(t *testing.T) {
 	for _, tc := range []struct {
 		file, rel string
 		duration  float64
-	}{{filepath.Join(dir, "stm.db"), "../Contents/b.mp3", 4000}, {file, "../Contents/c.mp3", 4000}, {file, "../Contents/b.mp3", 4500}} {
+	}{{filepath.Join(dir, "stm.db"), "../Contents/b.mp3", 4000}, {file, "../Contents/other.mp3", 4000}, {file, "../Contents/c.mp3", 4000}, {file, "../Contents/b.mp3", 4500}} {
+		// Another library's database, a path the bridge does not own, another row's ID, another length.
 		if bridgeDisplayWave(ctx, tc.file, tc.rel, 1, 44100, tc.duration) != nil {
 			t.Fatalf("guard lost: %+v", tc)
 		}

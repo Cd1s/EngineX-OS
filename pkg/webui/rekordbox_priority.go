@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	bridge "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 )
 
 func (s *Server) rbPriorityQueue() *bridge.PriorityQueue {

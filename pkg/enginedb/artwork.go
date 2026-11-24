@@ -2,33 +2,21 @@ package enginedb
 
 import (
 	"bytes"
-	"context"
-	"crypto/sha1"
-	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"image/jpeg"
 	"image/png"
 	"io"
-	"log"
-	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
-	"time"
-
-	"github.com/Cd1s/EngineX-OS/pkg/compat"
 )
 
 // Engine 5.3.0 answers GET_ALBUM_ART(hash) and GET_ALBUM_ART_SIZE(hash), which
 // serve covers to other decks over Engine Link, only for a 20-byte BLOB hash
 // (the raw SHA-1), reading Engine Library/Artwork/<base64url(hash)>.jpg. A
 // 40-character TEXT hash yields nothing, so remote decks show no cover.
-const (
-	artworkDir               = "Engine Library/Artwork"
-	selectAlbumArtIndexQuery = "SELECT id, hash FROM AlbumArt ORDER BY hash"
-)
+const artworkDir = "Engine Library/Artwork"
 
 // putArtwork writes data as the file Engine looks up for sum, unless it exists.
 func putArtwork(dir string, sum, data []byte) error {
@@ -58,155 +46,6 @@ func putArtwork(dir string, sum, data []byte) error {
 		return e
 	}
 	return os.Rename(p+".tmp", p)
-}
-
-// migrateArtwork turns earlier builds' TEXT hashes into BLOB hashes plus an
-// Artwork file. A row whose file cannot be written keeps its TEXT hash, so
-// the next run retries it.
-func migrateArtwork(ctx context.Context, tx *sql.Tx, dir string, deadline time.Time, now func() time.Time) (migrated int, err error) {
-	past := func() bool { return !deadline.IsZero() && !now().Before(deadline) }
-	if past() {
-		return 0, nil
-	}
-	// Index existing regular files once, instead of an Lstat per cover. Read
-	// bounded batches so cancellation or a mount's read budget stops the scan.
-	f, err := os.Open(dir)
-	if err != nil {
-		if ctx.Err() != nil {
-			return 0, ctx.Err()
-		}
-		log.Printf("rb-bridge: artwork directory scan skipped: %v", err)
-		return 0, nil
-	}
-	defer f.Close()
-	exists := map[string]bool{}
-	for {
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
-		if past() {
-			return 0, nil
-		}
-		entries, e := f.ReadDir(128)
-		for _, ent := range entries {
-			if ent.Type().IsRegular() {
-				exists[ent.Name()] = true
-			}
-		}
-		if e == io.EOF {
-			break
-		}
-		if e != nil {
-			if ctx.Err() != nil {
-				return 0, ctx.Err()
-			}
-			log.Printf("rb-bridge: artwork directory scan skipped: %v", e)
-			return 0, nil
-		}
-	}
-	type artCandidate struct {
-		id  int64
-		raw any
-	}
-	// Scan index_AlbumArt_hash as a covering index in one pass so stamp-bypassed
-	// cold mounts never walk scattered AlbumArt table pages containing JPEG blobs.
-	rows, e := tx.QueryContext(ctx, selectAlbumArtIndexQuery)
-	if e != nil {
-		return 0, e
-	}
-	var need []artCandidate
-	for rows.Next() {
-		var c artCandidate
-		if e = rows.Scan(&c.id, &c.raw); e != nil {
-			rows.Close()
-			return 0, e
-		}
-		if b, ok := c.raw.([]byte); ok && len(b) == 20 && exists[base64.RawURLEncoding.EncodeToString(b)+".jpg"] {
-			continue
-		}
-		need = append(need, c)
-	}
-	if e = rows.Err(); e != nil {
-		rows.Close()
-		return 0, e
-	}
-	rows.Close()
-	if len(need) == 0 {
-		return 0, nil
-	}
-	sort.Slice(need, func(i, j int) bool { return need[i].id < need[j].id })
-	for _, c := range need {
-		if err := ctx.Err(); err != nil {
-			return migrated, err
-		}
-		if past() {
-			return migrated, nil
-		}
-		id, raw := c.id, c.raw
-		var data []byte
-		e := tx.QueryRowContext(ctx, `SELECT albumArt FROM AlbumArt WHERE id=? AND albumArt IS NOT NULL`, id).Scan(&data)
-		if errors.Is(e, sql.ErrNoRows) {
-			continue
-		}
-		if e != nil {
-			return migrated, e
-		}
-		if past() {
-			return migrated, nil
-		}
-		var sum []byte
-		if b, ok := raw.([]byte); ok && len(b) == 20 {
-			sum = b
-		} else {
-			// Anything else (TEXT hex, wrong length) is rehashed from the image itself.
-			h := sha1.Sum(data)
-			sum = h[:]
-		}
-		if e = putArtwork(dir, sum, data); e != nil {
-			log.Printf("rb-bridge: artwork %d left as is: %v", id, e)
-			continue
-		}
-		exists[base64.RawURLEncoding.EncodeToString(sum)+".jpg"] = true
-		if b, ok := raw.([]byte); ok && bytes.Equal(b, sum) {
-			continue
-		}
-		if _, e = tx.ExecContext(ctx, `UPDATE AlbumArt SET hash=? WHERE id=?`, sum, id); e != nil {
-			return migrated, e
-		}
-		migrated++
-	}
-	return migrated, nil
-}
-
-// MigrateArtwork upgrades the library under mount in place. Engine must not
-// have m.db open: bridge only ever writes it before Engine attaches the volume.
-func MigrateArtwork(ctx context.Context, mount string) (int, error) {
-	return MigrateArtworkBefore(ctx, mount, time.Time{})
-}
-
-// MigrateArtworkBefore upgrades covers until deadline, committing progress for
-// the next mount. A zero deadline allows a complete explicit migration.
-func MigrateArtworkBefore(ctx context.Context, mount string, deadline time.Time) (int, error) {
-	dir, err := compat.SafeOutputDir(mount, artworkDir)
-	if err != nil {
-		return 0, err
-	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(mount, "Engine Library/Database2/m.db")}).String()+"?_pragma=busy_timeout(5000)")
-	if err != nil {
-		return 0, err
-	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	n, err := migrateArtwork(ctx, tx, dir, deadline, time.Now)
-	if err != nil || n == 0 {
-		return 0, err
-	}
-	return n, tx.Commit()
 }
 
 var (
@@ -241,67 +80,6 @@ func findImageOffset(b []byte) int {
 		return pIdx
 	}
 	return -1
-}
-
-// ExtractEmbeddedArtwork extracts embedded cover artwork from an audio file (MP3 ID3v2 APIC,
-// FLAC METADATA_BLOCK_PICTURE, or MP4/M4A covr->data atoms), verifying PNG or JPEG headers.
-func ExtractEmbeddedArtwork(audioPath string) ([]byte, error) {
-	f, err := os.Open(audioPath)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	hdr := make([]byte, 12)
-	n, err := f.ReadAt(hdr, 0)
-	if err != nil && err != io.EOF {
-		return nil, err
-	}
-	if n < 4 {
-		return nil, ErrNoArtwork
-	}
-
-	if string(hdr[:3]) == "ID3" {
-		if _, err := f.Seek(0, io.SeekStart); err == nil {
-			if art, err := extractMP3Artwork(f); err == nil {
-				return art, nil
-			}
-		}
-	}
-	if string(hdr[:4]) == "fLaC" {
-		if _, err := f.Seek(0, io.SeekStart); err == nil {
-			if art, err := extractFLACArtwork(f); err == nil {
-				return art, nil
-			}
-		}
-	}
-	if (n >= 8 && (string(hdr[4:8]) == "ftyp" || string(hdr[4:8]) == "moov")) ||
-		filepath.Ext(audioPath) == ".m4a" || filepath.Ext(audioPath) == ".mp4" {
-		if _, err := f.Seek(0, io.SeekStart); err == nil {
-			if art, err := extractMP4Artwork(f); err == nil {
-				return art, nil
-			}
-		}
-	}
-
-	// General fallbacks in case header check was indeterminate
-	if _, err := f.Seek(0, io.SeekStart); err == nil {
-		if art, err := extractMP3Artwork(f); err == nil {
-			return art, nil
-		}
-	}
-	if _, err := f.Seek(0, io.SeekStart); err == nil {
-		if art, err := extractFLACArtwork(f); err == nil {
-			return art, nil
-		}
-	}
-	if _, err := f.Seek(0, io.SeekStart); err == nil {
-		if art, err := extractMP4Artwork(f); err == nil {
-			return art, nil
-		}
-	}
-
-	return nil, ErrNoArtwork
 }
 
 // maxArtworkBytes bounds what one file's tag or cover atom may make us read: a 10-byte header must

@@ -3,7 +3,7 @@ package webui
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/Cd1s/EngineX-OS/pkg/bridge/v2/bridgetest"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge/bridgetest"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +14,6 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
-	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
 func TestHandleRekordboxWriteback(t *testing.T) {
@@ -42,10 +41,10 @@ func TestHandleRekordboxWriteback(t *testing.T) {
 		t.Fatalf("missing drive status=%d, want 404", w.Code)
 	}
 
-	// Unstamped library (no v4 mount stamp) must be skipped safely.
+	// A library whose import is not complete (rows only, the job has not run) is skipped safely.
 	stick := filepath.Join(mediaRoot, "USB1")
 	testfixture.LargeExport(t, stick, 1)
-	if _, err := bridge.Convert(t.Context(), stick, enginedb.Options{}); err != nil {
+	if _, err := bridge.ConvertAtMount(t.Context(), stick, bridge.MountOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	w = httptest.NewRecorder()

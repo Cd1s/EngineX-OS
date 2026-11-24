@@ -5,13 +5,17 @@ import (
 	"context"
 	"crypto/sha1"
 	"database/sql"
+	_ "embed"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
@@ -513,20 +517,6 @@ func (b *Batch) FindList(ctx context.Context, title string, parent int64) (int64
 	return id, err
 }
 
-// RenameList gives a list the export's title again.
-func (b *Batch) RenameList(ctx context.Context, id int64, name string) error {
-	var parent int64
-	if err := b.tx.QueryRowContext(ctx, `SELECT COALESCE(parentListId,0) FROM Playlist WHERE id=?`, id).Scan(&parent); err != nil {
-		return err
-	}
-	title, err := b.uniqueTitle(ctx, name, parent, id)
-	if err != nil {
-		return err
-	}
-	_, err = b.exec(ctx, `UPDATE Playlist SET title=? WHERE id=? AND title IS NOT ?`, title, id, title)
-	return err
-}
-
 // OrderLists chains the given lists of one folder in this order. Lists of the folder that are
 // not named (Engine's own) keep their order and follow them.
 func (b *Batch) OrderLists(ctx context.Context, parent int64, ids []int64) error {
@@ -817,6 +807,10 @@ func (b *Batch) PutArtwork(ctx context.Context, id int64, image []byte) error {
 		if err != nil {
 			return err
 		}
+		// An earlier build's row has the hash as text, which Engine Link does not serve.
+		if _, err = b.exec(ctx, `UPDATE AlbumArt SET hash=? WHERE id=? AND typeof(hash)='text'`, sum, art); err != nil {
+			return err
+		}
 		if b.covers == nil {
 			b.covers = map[[sha1.Size]byte]int64{}
 		}
@@ -876,4 +870,41 @@ func BuildLibrary(ctx context.Context, dir, libraryID string, rows []TrackRow, l
 		return nil, "", 0, err
 	}
 	return ids, l.uuid, commitID, syncFilePath(filepath.Join(dir, "m.db"))
+}
+
+//go:embed schema.sql
+var schema string
+
+// safeFile refuses redirection into PIONEER through symlinks or hard links.
+func safeFile(p string) error {
+	st, err := os.Lstat(p)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("unsafe database file %s", p)
+	}
+	if s, ok := st.Sys().(*syscall.Stat_t); ok && s.Nlink != 1 {
+		return fmt.Errorf("hard-linked database file %s", p)
+	}
+	return nil
+}
+
+// playedIndicator returns the positive random 63-bit value Engine stores in
+// Information.currentPlayedIndiciator.
+func playedIndicator() int64 {
+	id := uuid.New()
+	return int64(binary.BigEndian.Uint64(id[:8])>>1) | 1
+}
+
+func syncFilePath(p string) error {
+	f, err := os.Open(p)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }

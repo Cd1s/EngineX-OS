@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	bridgev2 "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"golang.org/x/sys/unix"
 )
 
@@ -452,7 +452,7 @@ func deckHolds(mount string) bool {
 			case strings.HasPrefix(target, mount+"/") && audioExt[strings.ToLower(filepath.Ext(target))]:
 				return true
 			case strings.HasPrefix(target, engineCopies):
-				if _, name, ok := strings.Cut(filepath.Base(target), "_"); ok && bridgev2.LibraryHasFile(mount, name) {
+				if _, name, ok := strings.Cut(filepath.Base(target), "_"); ok && bridge.LibraryHasFile(mount, name) {
 					return true
 				}
 			}

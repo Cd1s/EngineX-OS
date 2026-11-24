@@ -3,7 +3,6 @@ package webui
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -23,7 +22,6 @@ import (
 	"unicode/utf16"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
-	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
@@ -725,18 +723,6 @@ func (l rb7Link) CuesExtended(uint32) ([]byte, error) {
 	return b, nil
 }
 
-// The maintainer's test 2026-11-18: a Link load had a misplaced grid, no hot cues, and Engine
-// analysed it again, where the same track from a rekordbox USB stick (rb-bridge) loads with
-// its grid and cues at once. A Link load of a track leaves for Engine the bytes rb-bridge
-// writes for that track from its export, and the same Track flag.
-// "mp3 info" (2026-11-19): an Info frame with a LAME extension, the class of the maintainer's
-// library, where the stick's grid was 1152 samples before the Link grid of the same file.
-func TestRekordboxLinkAnalysisIsRbBridgesForTheSameTrack(t *testing.T) {
-	for _, format := range []string{"mp3", "mp3 info", "aac"} {
-		t.Run(format, func(t *testing.T) { assertLinkMatchesBridge(t, format) })
-	}
-}
-
 func TestRbxApplyHeaderUsesInfoLinkTimeline(t *testing.T) {
 	var tr rekordbox.Track
 	rbxApplyHeader(&tr, compat.AudioInfo{
@@ -747,112 +733,6 @@ func TestRbxApplyHeaderUsesInfoLinkTimeline(t *testing.T) {
 	})
 	if tr.StartOffsetSamples != 1105 {
 		t.Fatalf("Link MP3 offset = %d, want 1105", tr.StartOffsetSamples)
-	}
-}
-
-func assertLinkMatchesBridge(t *testing.T, format string) {
-	t.Helper()
-	root := t.TempDir()
-	var file []byte
-	rel := testfixture.LargeTrackPath(1)
-	if format == "aac" {
-		rel, file = testfixture.AACExport(t, root), testfixture.AACWithPriming()
-	} else {
-		testfixture.LargeExport(t, root, 1)
-		// Make the file larger than the NFS prefix; keep Xing's counts valid.
-		file = testfixture.MP3WithLAMETag()
-		if format == "mp3 info" {
-			copy(file[36:], "Info")
-		}
-		file = append(file, bytes.Repeat(file[417:834], 100)...)
-		binary.BigEndian.PutUint32(file[44:], 102)
-		binary.BigEndian.PutUint32(file[48:], uint32(len(file)))
-		testfixture.Write(t, root, rel, file)
-	}
-	if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", filepath.Join(root, "Engine Library", "Database2", "m.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := make([][]byte, 5)
-	var analysed int
-	var locked sql.NullBool
-	err = db.QueryRow(`SELECT p.trackData, p.overviewWaveFormData, p.beatData, p.quickCues, p.loops, t.isAnalyzed, t.isBeatGridLocked FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.pdbImportKey = 1`).
-		Scan(&want[0], &want[1], &want[2], &want[3], &want[4], &analysed, &locked)
-	db.Close()
-	if err != nil || analysed != 1 || locked.Bool || len(want[2]) == 0 || len(want[3]) == 0 {
-		t.Fatalf("rb-bridge's row: %v analysed=%d locked=%v", err, analysed, locked)
-	}
-	lib, err := rekordbox.ReadPDB(filepath.Join(root, "PIONEER/rekordbox/export.pdb"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	a := &rekordbox.Analysis{}
-	for _, f := range [][]byte{testfixture.DAT(), testfixture.EXT(), testfixture.EX2()} {
-		s, err := rekordbox.ParseAnalysis(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		a.Merge(s)
-	}
-	var one rekordbox.Track
-	for _, tr := range lib.Tracks {
-		if tr.ID == 1 {
-			one = tr
-		}
-	}
-	paths := map[uint32]string{1: "/" + rel}
-	e := newRbxEnv(t, paths)
-	nfs := &prolink.NFSServer{Root: root}
-	if err := nfs.Listen("127.0.0.1:0"); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(nfs.Close)
-	oldExport := rbxExport
-	t.Cleanup(func() { rbxExport = oldExport })
-	rbxExport = "/C/" // the simulated NFS server exports its root as a Pioneer slot
-	rbxNFS = func(ip net.IP) *prolink.NFSClient {
-		return &prolink.NFSClient{IP: ip, Portmap: nfs.PortmapPort(), Timeout: time.Second}
-	}
-	prefix, audio, err := rbxNFS(net.IPv4(127, 0, 0, 1)).FetchPrefix(t.Context(), rbxExport, paths[1], 32<<10)
-	if err != nil || audio.Size != uint32(len(file)) || !bytes.Equal(prefix, file[:32<<10]) {
-		t.Fatalf("NFS prefix: %d of %d bytes: %v", len(prefix), audio.Size, err)
-	}
-	link := rb7Link{fakeRbxLink{paths}, one, a, map[string][]byte{"DAT": testfixture.DAT(), "EXT": testfixture.EXT(), "2EX": testfixture.EX2()}}
-	dialRekordbox = func(context.Context, net.IP, byte) (rbxLink, error) { return link, nil }
-	old := rbxAnalysisDir
-	rbxAnalysisDir = t.TempDir()
-	t.Cleanup(func() { rbxAnalysisDir = old })
-	t.Cleanup(rbxAnalysisJobs.Wait)
-	ids, _ := e.trackIDs(t, "Tracks")
-	b, err := os.ReadFile(rbxAnalysisPath(ids["First"]))
-	if err != nil {
-		t.Fatalf("analysis not ready when Engine receives the list: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(rbxAnalysisDir, ".loading")); err != nil {
-		t.Fatalf("hook was not enabled before list response: %v", err)
-	}
-	if b[len(b)-1] != byte(analysed) {
-		t.Errorf("Link analysed flag %d differs from rb-bridge's %d", b[len(b)-1], analysed)
-	}
-	got := rbxBlobs(b)
-	if len(got) != 5 {
-		t.Fatalf("no analysis left for the hook: %d blobs", len(got))
-	}
-	for i, name := range []string{"trackData", "overviewWaveFormData", "beatData", "quickCues", "loops"} {
-		if !bytes.Equal(got[i], want[i]) {
-			t.Errorf("%s differs from rb-bridge's: %d bytes, rb-bridge %d", name, len(got[i]), len(want[i]))
-		}
-	}
-	replay, err := os.ReadFile(rbxAnalysisPath(ids["First"]) + ".perf")
-	if err != nil {
-		t.Fatal(err)
-	}
-	expectedReplay, err := perfFromBlobs(one.BPM, want[0], want[2], want[1])
-	if err != nil || !bytes.Equal(replay, expectedReplay) {
-		t.Fatalf("download analysis replay differs from USB performance: %v", err)
 	}
 }
 

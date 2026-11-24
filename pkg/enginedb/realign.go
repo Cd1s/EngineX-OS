@@ -2,14 +2,9 @@ package enginedb
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/binary"
 	"math"
-	"net/url"
-	"os"
-	"path/filepath"
 )
 
 // A row Engine has loaded keeps its grid, cues and loops at the next import (sync.go): they
@@ -45,69 +40,6 @@ func writtenDigest(beats, cues, loops []byte) []byte {
 	return h.Sum(nil)[:16]
 }
 
-// importKeeps reports whether track id's row holds something the import has to keep: Engine
-// or the deck has written it since an import did. What it keeps of the import's is moved to
-// perf's positions first.
-func importKeeps(ctx context.Context, q *stmtCache, id int64, perf Performance) (bool, error) {
-	var beats, cues, loops, written []byte
-	var mark sql.NullInt64
-	var imported, locked bool
-	// BridgeAnalysis is optional when the state database is capped. A completed
-	// BridgeState row still identifies an imported row whose deck edits must
-	// survive a rebuild; a fast row is intentionally excluded until its first
-	// full import supplies the source performance.
-	e := q.QueryRowContext(ctx, `SELECT p.beatData,p.quickCues,p.loops,p.thirdPartySourceId,COALESCE(t.isBeatGridLocked,0),
-		EXISTS(SELECT 1 FROM BridgeState WHERE trackId=p.trackId AND fingerprint NOT LIKE 'fast:%'),(SELECT digest FROM BridgeWritten WHERE trackId=p.trackId)
-		FROM PerformanceData p JOIN Track t ON t.id=p.trackId WHERE p.trackId=?`, id).Scan(&beats, &cues, &loops, &mark, &locked, &imported, &written)
-	if e != nil || !imported {
-		return false, e
-	}
-	if written != nil && bytes.Equal(written, writtenDigest(beats, cues, loops)) || written == nil && mark.Valid {
-		return false, nil
-	}
-	if b, c, l, changed := realignKept(beats, cues, loops, perf, locked); changed {
-		_, e = q.ExecContext(ctx, `UPDATE PerformanceData SET beatData=?,quickCues=?,loops=? WHERE trackId=?`, b, c, l, id)
-	}
-	return true, e
-}
-
-// recordWritten notes that track id's row is what the import leaves in it, or that it is not.
-// A row that is the import's is what the stick's rekordbox files hold (BridgeSynced, #321); the
-// date goes in when the import commits (temp.synced_now). One the deck changed is not.
-func recordWritten(ctx context.Context, q *stmtCache, id int64, perf Performance) error {
-	var beats, cues, loops []byte
-	var active sql.NullInt64
-	var genre, comment, label string
-	e := q.QueryRowContext(ctx, `SELECT p.beatData,p.quickCues,p.loops,p.activeOnLoadLoops,COALESCE(t.genre,''),COALESCE(t.comment,''),COALESCE(t.label,'')
-		FROM PerformanceData p JOIN Track t ON t.id=p.trackId WHERE p.trackId=?`, id).Scan(&beats, &cues, &loops, &active, &genre, &comment, &label)
-	if e != nil {
-		return e
-	}
-	if digest := writtenDigest(beats, cues, loops); bytes.Equal(digest, writtenDigest(perf.Beats, perf.QuickCues, perf.Loops)) {
-		if _, e = q.ExecContext(ctx, `INSERT OR REPLACE INTO BridgeWritten(trackId,digest) VALUES(?,?)`, id, digest); e == nil {
-			_, e = q.ExecContext(ctx, `INSERT OR REPLACE INTO BridgeSynced(trackId,lastEditTime,digest) VALUES(?,0,?)`, id, SyncedDigest(beats, cues, loops, active.Int64, genre, comment, label))
-		}
-		if e == nil {
-			_, e = q.ExecContext(ctx, `INSERT OR IGNORE INTO temp.synced_now(id) VALUES(?)`, id)
-		}
-	} else if _, e = q.ExecContext(ctx, `DELETE FROM BridgeWritten WHERE trackId=?`, id); e == nil {
-		_, e = q.ExecContext(ctx, `DELETE FROM BridgeSynced WHERE trackId=?`, id)
-	}
-	return e
-}
-
-func recordWrittenDirect(ctx context.Context, q *stmtCache, id int64, perf Performance, genre, comment, label string) error {
-	digest := writtenDigest(perf.Beats, perf.QuickCues, perf.Loops)
-	if _, e := q.ExecContext(ctx, `INSERT OR REPLACE INTO BridgeWritten(trackId,digest) VALUES(?,?)`, id, digest); e != nil {
-		return e
-	}
-	if _, e := q.ExecContext(ctx, `INSERT OR REPLACE INTO BridgeSynced(trackId,lastEditTime,digest) VALUES(?,0,?)`, id, SyncedDigest(perf.Beats, perf.QuickCues, perf.Loops, int64(perf.ActiveLoops), genre, comment, label)); e != nil {
-		return e
-	}
-	_, e := q.ExecContext(ctx, `INSERT OR IGNORE INTO temp.synced_now(id) VALUES(?)`, id)
-	return e
-}
-
 // SyncedDigest names what the deck can change in a row and cue write-back writes
 // back to the stick's rekordbox files: cues, loops, activeOnLoadLoops (#321), and
 // genre, comment, and label (#314). Beat-grid / analysis-only updates (beatData,
@@ -129,88 +61,6 @@ func SyncedDigest(_ []byte, cues, loops []byte, activeOnLoadLoops int64, genre, 
 		h.Write([]byte(s))
 	}
 	return h.Sum(nil)[:16]
-}
-
-// carryLiveEdits is importKeeps for a build that replaces the live library (merge.go): what
-// Engine or the deck wrote to the live row of a track the build has imported again goes
-// into the build's row, moved to the build's positions like any row an import keeps.
-// Only the tracks Engine has written since the snapshot (temp.touched): the build was made
-// from the snapshot's row of every other track and has kept what that row held already.
-func carryLiveEdits(ctx context.Context, tx *sql.Tx) error {
-	if _, e := tx.ExecContext(ctx, bridgeWrittenSchema+`; `+BridgeSyncedSchema); e != nil {
-		return e
-	}
-	digest, n := `NULL`, 0 // the live library's state may be an earlier build's
-	if e := tx.QueryRowContext(ctx, `SELECT count(*) FROM livebridge.sqlite_master WHERE name='BridgeWritten'`).Scan(&n); e != nil {
-		return e
-	}
-	if n > 0 {
-		digest = `(SELECT digest FROM livebridge.BridgeWritten WHERE trackId=m.trackId)`
-	}
-	// A completed BridgeState row is enough here: temp.changed contains only rows
-	// the import owns. BridgeAnalysis may be absent when the state database hit
-	// its size cap, but fast rows must wait for their first full import.
-	rows, e := tx.QueryContext(ctx, `SELECT m.trackId,l.beatData,l.quickCues,l.loops,l.activeOnLoadLoops,l.thirdPartySourceId,`+digest+`,
-		m.beatData,m.quickCues,m.loops,m.activeOnLoadLoops,COALESCE(t.isBeatGridLocked,0)
-		FROM main.PerformanceData m JOIN live.PerformanceData l ON l.trackId=m.trackId JOIN live.Track t ON t.id=m.trackId
-		WHERE m.trackId IN (SELECT id FROM temp.touched) AND m.trackId IN (SELECT id FROM temp.changed)
-		AND EXISTS (SELECT 1 FROM livebridge.BridgeState s WHERE s.trackId=m.trackId AND s.fingerprint NOT LIKE 'fast:%')`)
-	if e != nil {
-		return e
-	}
-	type edit struct {
-		id                 int64
-		beats, cues, loops []byte
-		active             any
-		build              []byte
-	}
-	var edits []edit
-	for rows.Next() {
-		var id int64
-		var lb, lc, ll, written, mb, mc, ml []byte
-		var la, ma any
-		var mark sql.NullInt64
-		var locked bool
-		if e = rows.Scan(&id, &lb, &lc, &ll, &la, &mark, &written, &mb, &mc, &ml, &ma, &locked); e != nil {
-			rows.Close()
-			return e
-		}
-		untouched := written == nil && mark.Valid || written != nil && bytes.Equal(written, writtenDigest(lb, lc, ll))
-		if untouched || lb == nil && lc == nil && ll == nil {
-			continue
-		}
-		b, c, l, _ := realignKept(lb, lc, ll, Performance{Beats: mb, QuickCues: mc, Loops: ml}, locked)
-		if lb == nil {
-			b = mb
-		}
-		if lc == nil {
-			c = mc
-		}
-		if ll == nil {
-			l, la = ml, ma
-		}
-		edits = append(edits, edit{id, b, c, l, la, writtenDigest(mb, mc, ml)})
-	}
-	rows.Close()
-	if e = rows.Err(); e != nil {
-		return e
-	}
-	for _, x := range edits {
-		if _, e = tx.ExecContext(ctx, `UPDATE main.PerformanceData SET beatData=?,quickCues=?,loops=?,activeOnLoadLoops=?,thirdPartySourceId=NULL WHERE trackId=?`,
-			x.beats, x.cues, x.loops, x.active, x.id); e != nil {
-			return e
-		}
-		if !bytes.Equal(x.build, writtenDigest(x.beats, x.cues, x.loops)) {
-			if _, e = tx.ExecContext(ctx, `DELETE FROM bridge.BridgeWritten WHERE trackId=?`, x.id); e != nil {
-				return e
-			}
-		}
-		// The live row's edits may not be on the stick yet: the write-back reads it again.
-		if _, e = tx.ExecContext(ctx, `DELETE FROM bridge.BridgeSynced WHERE trackId=?`, x.id); e != nil {
-			return e
-		}
-	}
-	return nil
 }
 
 // realignKept returns the row's three blobs moved to perf's positions. The row's default
@@ -331,84 +181,4 @@ func loopPositions(blob []byte) ([]int, bool) {
 		off += 22
 	}
 	return at, off == len(blob)
-}
-
-// InvalidateUnsyncedEdits drops BridgeSynced baselines for rows that no longer
-// match BridgeWritten when a library transitions to a different export stamp.
-// Untouched rows whose PerformanceData still matches BridgeWritten keep their
-// BridgeSynced baseline so subsequent analysis-only passes perform zero decrypts.
-func InvalidateUnsyncedEdits(ctx context.Context, dbDir string) error {
-	statePath := filepath.Join(dbDir, ".rb-bridge-state.db")
-	if _, err := os.Stat(statePath); err != nil {
-		return nil
-	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: statePath, RawQuery: "_pragma=busy_timeout(5000)"}).String())
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
-
-	var hasSynced, hasWritten int
-	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='BridgeSynced'`).Scan(&hasSynced)
-	if hasSynced == 0 {
-		return nil
-	}
-	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='BridgeWritten'`).Scan(&hasWritten)
-	if hasWritten == 0 {
-		_, err = db.ExecContext(ctx, `DELETE FROM BridgeSynced`)
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM BridgeSynced WHERE NOT EXISTS (SELECT 1 FROM BridgeWritten bw WHERE bw.trackId = BridgeSynced.trackId)`); err != nil {
-		return err
-	}
-
-	mPath := filepath.Join(dbDir, "m.db")
-	if _, err := os.Stat(mPath); err != nil {
-		return nil
-	}
-	mdb, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mPath, RawQuery: "mode=ro&immutable=1"}).String())
-	if err != nil {
-		return nil
-	}
-	defer mdb.Close()
-	mdb.SetMaxOpenConns(1)
-	stateRO := (&url.URL{Scheme: "file", Path: statePath, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}).String()
-	if _, err := mdb.ExecContext(ctx, `ATTACH DATABASE ? AS b`, stateRO); err != nil {
-		return nil
-	}
-	rows, err := mdb.QueryContext(ctx, `SELECT p.trackId, p.beatData, p.quickCues, p.loops, COALESCE(p.activeOnLoadLoops, 0), bw.digest
-		FROM b.BridgeSynced sy
-		JOIN b.BridgeWritten bw ON bw.trackId = sy.trackId
-		JOIN Track t ON t.id = sy.trackId
-		JOIN PerformanceData p ON p.trackId = sy.trackId
-		WHERE COALESCE(t.lastEditTime, 0) != 0`)
-	if err != nil {
-		return nil
-	}
-	var staleIDs []int64
-	for rows.Next() {
-		var id, active int64
-		var beats, cues, loops, wDigest []byte
-		if rows.Scan(&id, &beats, &cues, &loops, &active, &wDigest) != nil {
-			continue
-		}
-		if !bytes.Equal(wDigest, writtenDigest(beats, cues, loops)) || (HasAnyLoop(loops) && active != 0) {
-			staleIDs = append(staleIDs, id)
-		}
-	}
-	_ = rows.Close()
-	if len(staleIDs) == 0 {
-		return nil
-	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, id := range staleIDs {
-		_, _ = tx.ExecContext(ctx, `DELETE FROM BridgeSynced WHERE trackId = ?`, id)
-		_, _ = tx.ExecContext(ctx, `DELETE FROM BridgeWritten WHERE trackId = ?`, id)
-	}
-	return tx.Commit()
 }

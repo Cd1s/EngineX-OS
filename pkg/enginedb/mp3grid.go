@@ -157,34 +157,12 @@ func writeMP3GridCursor(path string, c mp3GridCursor) error {
 	return err
 }
 
-func bridgeOwnedTracks(ctx context.Context, dbDir string) map[int64]bool {
-	// The rekordbox bridge's snapshot; an earlier build's state database for a library no mount
-	// has taken over yet.
+// bridgeOwnedTracks are the rows the rekordbox bridge wrote, by its snapshot beside m.db.
+func bridgeOwnedTracks(dbDir string) map[int64]bool {
 	if snap, err := rbstate.Load(dbDir); err == nil {
 		return snap.EngineIDs()
 	}
-	statePath := filepath.Join(dbDir, stateFile)
-	if st, err := os.Stat(statePath); err != nil || !st.Mode().IsRegular() || safeFile(statePath) != nil {
-		return nil
-	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: statePath}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(1000)")
-	if err != nil {
-		return nil
-	}
-	defer db.Close()
-	rows, err := db.QueryContext(ctx, `SELECT trackId FROM BridgeState`)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	owned := map[int64]bool{}
-	for rows.Next() {
-		var id int64
-		if rows.Scan(&id) == nil {
-			owned[id] = true
-		}
-	}
-	return owned
+	return nil
 }
 
 func resolveTrackAudioPath(root, rootReal, trackPath string) (string, error) {
@@ -577,7 +555,7 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 			}
 		}
 		if !bridgeLoaded {
-			bridgeOwned = bridgeOwnedTracks(ctx, dbDir)
+			bridgeOwned = bridgeOwnedTracks(dbDir)
 			bridgeLoaded = true
 		}
 		for _, c := range page {

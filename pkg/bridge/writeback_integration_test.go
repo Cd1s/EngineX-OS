@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
-	bridge "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
-	"github.com/Cd1s/EngineX-OS/pkg/bridge/v2/bridgetest"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge/bridgetest"
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"

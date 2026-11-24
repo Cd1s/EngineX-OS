@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
-	"github.com/Cd1s/EngineX-OS/pkg/bridge/v2/bridgetest"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge/bridgetest"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )

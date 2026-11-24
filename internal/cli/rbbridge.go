@@ -22,7 +22,7 @@ import (
 	"syscall"
 	"time"
 
-	bridgev2 "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/djay"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
@@ -44,7 +44,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 	link := fs.Bool("prolink", false, "listen for Rekordbox / Pro DJ Link announcements and player status")
 	bind := fs.String("bind", "0.0.0.0", "IPv4 address for Pro DJ Link listeners")
 	full := fs.Bool("full", false, "with --mount-path: read every file for cues and waveforms, even if unchanged")
-	migrateArt := fs.Bool("migrate-artwork", false, "with --mount-path: only give an existing library the cover files Engine Link needs; Engine must not have the volume open")
+	migrateArt := fs.Bool("migrate-artwork", false, "retired; exits at once (a mount gives covers the hash Engine Link serves)")
 	writebackCues := fs.Bool("writeback-cues", false, "with --mount-path: write modified Engine Hot Cues, Memory Cues, and Loops back to the Rekordbox stick")
 	onEject := fs.Bool("on-eject", false, "with --writeback-cues: invoked by the eject hook before unmounting")
 	smart := fs.Uint("smart-match", 0, "optional recommendation playlist relative to this Rekordbox track ID")
@@ -103,10 +103,8 @@ func RBBridge(args []string, stdout io.Writer) error {
 	var mu sync.Mutex
 	enc := json.NewEncoder(stdout)
 	emit := func(v any) { mu.Lock(); defer mu.Unlock(); _ = enc.Encode(v) }
-	if *mount != "" && *migrateArt {
-		n, err := enginedb.MigrateArtwork(ctx, *mount)
-		emit(map[string]int{"ArtworkMigrated": n})
-		return err
+	if *migrateArt {
+		return nil
 	}
 	if *mount != "" && *writebackCues {
 		if *onEject {
@@ -119,7 +117,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 				return nil
 			}
 		}
-		r, err := bridgev2.WriteBackCues(ctx, *mount, bridgev2.WriteBackOptions{OnEject: *onEject})
+		r, err := bridge.WriteBackCues(ctx, *mount, bridge.WriteBackOptions{OnEject: *onEject})
 		if err != nil {
 			return err
 		}
@@ -131,7 +129,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 		rep := newDriveReporter(*mount)
 		rep.Start()
 		started := false
-		opts := bridgev2.MountOptions{
+		opts := bridge.MountOptions{
 			Full:       *full,
 			SmartMatch: uint32(*smart),
 			Settings:   *uiSettings,
@@ -153,7 +151,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 				opts.Deadline = time.Now().Add(time.Duration(ms) * time.Millisecond)
 			}
 		}
-		r, err := bridgev2.ConvertAtMount(ctx, *mount, opts)
+		r, err := bridge.ConvertAtMount(ctx, *mount, opts)
 		if err != nil {
 			rep.Fail(err)
 			return err

@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	bridgev2 "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 )
 
 func (s *Server) handleRekordboxWriteback(w http.ResponseWriter, r *http.Request) {
@@ -34,14 +34,14 @@ func (s *Server) handleRekordboxWriteback(w http.ResponseWriter, r *http.Request
 	// skips the check for a conversion at mount, so only the deck itself asks for it; a request
 	// from elsewhere gets a plain pass (#321 review R2).
 	final := r.URL.Query().Get("final") == "1" && writeBackFromDeck(r)
-	var res bridgev2.WriteBackResult
+	var res bridge.WriteBackResult
 	switch cw := s.cueWatch.Load(); {
 	case cw != nil && final:
 		res, err = cw.Final(r.Context(), target)
 	case cw != nil:
 		res, err = cw.Pass(r.Context(), target)
 	default:
-		res, err = bridgev2.WriteBackCues(r.Context(), target, bridgev2.WriteBackOptions{OnEject: final})
+		res, err = bridge.WriteBackCues(r.Context(), target, bridge.WriteBackOptions{OnEject: final})
 	}
 	if err != nil {
 		fail(w, http.StatusBadRequest, err)
@@ -61,7 +61,7 @@ func writeBackFromDeck(r *http.Request) bool {
 // WatchCues writes a deck's cue edits back to the rekordbox sticks under the media root by
 // itself, until ctx ends (#321, bridge.CueWatcher).
 func (s *Server) WatchCues(ctx context.Context) {
-	w := bridgev2.NewCueWatcher(s.mediaRoot())
+	w := bridge.NewCueWatcher(s.mediaRoot())
 	s.cueWatch.Store(w)
 	defer s.cueWatch.Store(nil)
 	if err := w.Run(ctx); err != nil {

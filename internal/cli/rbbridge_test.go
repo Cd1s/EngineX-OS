@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/Cd1s/EngineX-OS/pkg/bridge/v2/bridgetest"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge/bridgetest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
-	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 )
 
@@ -54,13 +54,13 @@ func TestRBBridgeRetiredWatchExitsAtOnce(t *testing.T) {
 func TestRBBridgeUnchangedExportSkipsTheVolume(t *testing.T) {
 	root := t.TempDir()
 	testfixture.Export(t, root)
-	run := func() enginedb.Result {
+	run := func() bridge.MountResult {
 		t.Helper()
 		var out bytes.Buffer
 		if err := RBBridge([]string{"--mount-path", root}, &out); err != nil {
 			t.Fatal(err)
 		}
-		var r enginedb.Result
+		var r bridge.MountResult
 		if err := json.Unmarshal(out.Bytes(), &r); err != nil {
 			t.Fatalf("%q: %v", &out, err)
 		}

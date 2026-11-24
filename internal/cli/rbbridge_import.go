@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	bridgev2 "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
@@ -104,7 +104,7 @@ func runImportJob(ctx context.Context, mount string) error {
 		rep.Done()
 		return nil
 	}
-	if err != nil && !(errors.Is(err, bridgev2.ErrFilesUnreadable) && r.Publish) {
+	if err != nil && !(errors.Is(err, bridge.ErrFilesUnreadable) && r.Publish) {
 		return err // rep.Fail kept the error for the browser; the next import's Start clears it
 	}
 	if !r.Publish {
@@ -127,7 +127,7 @@ func runImportJob(ctx context.Context, mount string) error {
 // convertLocked runs the fill under the global lock and releases it as soon as the fill ends:
 // a finished stick waiting for its remount never holds another's fill. started is false when it
 // never got the lock (the stick went first).
-func convertLocked(ctx context.Context, mount string, rep *usbLoadingReporter) (r bridgev2.FillResult, started bool, err error) {
+func convertLocked(ctx context.Context, mount string, rep *usbLoadingReporter) (r bridge.FillResult, started bool, err error) {
 	lock, err := os.OpenFile(importLock, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return r, true, err
@@ -143,7 +143,7 @@ func convertLocked(ctx context.Context, mount string, rep *usbLoadingReporter) (
 	go func() { defer close(done); refresh(convert, rep) }()
 	defer func() { stop(); <-done }()
 	// Throttled: the job reports its count as each track goes (#328); refresh writes the latest.
-	r, err = bridgev2.FillInBackground(ctx, mount, bridgev2.FillOptions{Progress: func(done, total int) { rep.Report(done, total, false) }})
+	r, err = bridge.FillInBackground(ctx, mount, bridge.FillOptions{Progress: func(done, total int) { rep.Report(done, total, false) }})
 	if err != nil && ctx.Err() == nil && !errors.Is(err, rbstate.ErrNoSnapshot) {
 		rep.Fail(err)
 	}

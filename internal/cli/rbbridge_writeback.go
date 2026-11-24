@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
-	bridgev2 "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 )
 
 // The Eject's cue write-back (#321): the edisksd hook runs rb-bridge --writeback-cues --on-eject
@@ -29,7 +29,7 @@ var (
 
 // finalWriteBack asks stream-sync for the Eject's pass of mount. ok is false when stream-sync
 // did not take it, and rb-bridge does the pass itself.
-func finalWriteBack(ctx context.Context, mount string) (r bridgev2.WriteBackResult, err error, ok bool) {
+func finalWriteBack(ctx context.Context, mount string) (r bridge.WriteBackResult, err error, ok bool) {
 	abs, err := filepath.Abs(mount)
 	if err != nil || filepath.Dir(abs) != filepath.Clean(writeBackMedia) {
 		return r, nil, false

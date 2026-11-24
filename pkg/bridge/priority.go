@@ -1,5 +1,9 @@
 package bridge
 
+// The priority queue and the deck-activity file, as stream-sync writes them and the background
+// job reads them (design §1.5: kept as they are). Moved from pkg/bridge/priority.go; keys are
+// rbstate.FoldPath now, which folds a path the way the old foldPath did.
+
 import (
 	"encoding/json"
 	"errors"
@@ -12,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
 const (
@@ -128,7 +134,7 @@ func normalizePriorityEnginePath(p string) string {
 }
 
 func foldPriorityPath(p string) string {
-	return foldPath(strings.TrimPrefix(normalizePriorityEnginePath(p), "../"))
+	return rbstate.FoldPath(strings.TrimPrefix(normalizePriorityEnginePath(p), "../"))
 }
 
 func writePrivateJSON(dst string, v any) error {
@@ -287,6 +293,7 @@ func (q *PriorityQueue) RemoveVolumeID(dev, ino uint64) {
 	q.mu.Unlock()
 	_ = os.Remove(priorityRecordPath(vk))
 	_ = os.Remove(priorityAckPath(vk))
+	_ = os.Remove(publishMarkPath(vk))
 }
 
 // UpdateDeckActivity updates the global deck-activity state file. Active edges

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
-	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
@@ -38,7 +38,7 @@ func TestMountPathStartsTheBackgroundImport(t *testing.T) {
 	if err := RBBridge([]string{"--mount-path", root}, &out); err != nil {
 		t.Fatal(err)
 	}
-	var r enginedb.Result
+	var r bridge.MountResult
 	if err := json.Unmarshal(out.Bytes(), &r); err != nil || !r.Background {
 		t.Fatalf("result %q %v", &out, err)
 	}

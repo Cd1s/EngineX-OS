@@ -20,7 +20,7 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
-	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge/bridgetest"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
@@ -220,9 +220,12 @@ func TestSimCDJ3000ServerToDenon(t *testing.T) {
 	if count, err := prolink.Stage(t.Context(), client, "/C/", staged, 1<<26); err != nil || count < 8 {
 		t.Fatalf("stage: %d %v", count, err)
 	}
-	if r, err := bridge.ConvertAtMount(t.Context(), denon, enginedb.Options{}, true); err != nil || r.Added != 5 {
+	// The window gives the staged tracks rows; the background job and the window of its remount
+	// give them the CDJ's analysis.
+	if r, err := bridge.ConvertAtMount(t.Context(), denon, bridge.MountOptions{Full: true}); err != nil || r.Added != 5 {
 		t.Fatalf("bridge: %+v %v", r, err)
 	}
+	bridgetest.Import(t, denon)
 	db, err := sql.Open("sqlite", filepath.Join(denon, "Engine Library/Database2/m.db"))
 	if err != nil {
 		t.Fatal(err)

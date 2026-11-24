@@ -5,17 +5,12 @@ import (
 	"bytes"
 	"cmp"
 	"compress/zlib"
-	"context"
-	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"math"
-	"net/url"
-	"path/filepath"
 	"slices"
-	"time"
 	"unicode/utf8"
 
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
@@ -105,20 +100,6 @@ func label(b *bytes.Buffer, s string) { // Engine uses an 8-bit UTF-8 byte lengt
 	b.WriteString(s)
 }
 
-// EncodePerformance never synthesizes cues. Missing hot slots have position -1;
-// the first memory cue is used as main cue. Engine's native quickCues has
-// exactly eight slots; appending memory cues would produce an unsupported blob.
-// beatPositions returns each beat's sample offset. PQTZ times are whole
-// milliseconds, so using them directly gives a 130 BPM track spacings of 461 and
-// 462 ms, and Engine's per-beat BPM then jumps between 130.15 and 129.87. Beats in
-// a constant-BPM run are instead placed at one exact step from the run's first
-// beat. The step is 60/BPM unless the 0.01-precision BPM would leave the last beat
-// over 1 ms from its exported time; a long run then uses the step between its end
-// times, because at 130 BPM that rounding alone can reach 18 ms over 1000 beats.
-func beatPositions(beats []rekordbox.Beat, sampleRate float64) []float64 {
-	return beatPositionsWithOffset(beats, sampleRate, 0)
-}
-
 func beatPositionsWithOffset(beats []rekordbox.Beat, sampleRate, offsetSamples float64) []float64 {
 	positions := make([]float64, len(beats))
 	for start := 0; start < len(beats); {
@@ -187,10 +168,6 @@ func TrackDataPeaks(track, overview []byte) []byte {
 	return out
 }
 
-// overviewBatch is how many overviews FillOverviewMaxima reads and commits at a time. A
-// variable only for tests.
-var overviewBatch = 256
-
 // OverviewMaxima returns raw overviewWaveFormData with its 3-byte band-maxima
 // trailer populated if the trailer was zero and the waveform has non-zero bins.
 func OverviewMaxima(raw []byte) []byte {
@@ -212,98 +189,6 @@ func OverviewMaxima(raw []byte) []byte {
 	copy(out, raw)
 	copy(out[len(out)-3:], maxima[:])
 	return out
-}
-
-// FillOverviewMaxima completes the overviews that end in a zero triple where Engine expects
-// each band's maximum, the value it scales that band by. An earlier build imported them so,
-// and they stay so in a row Engine has written again: once it has loaded a track it writes
-// the row back with the overview as it read it and without the mark of an import
-// (thirdPartySourceId), so that mark does not say which rows are meant. Engine's own
-// analysis ends in the maxima, and an overview that is all zero stays as it is.
-// It commits a batch at a time and stops at deadline (zero: none): the mount hook kills
-// rb-bridge when its time is up. After each batch it records how far it has come
-// (OverviewProgress), and the next mount goes on from there: a library whose finished
-// part alone takes a mount's time to read would never be finished otherwise. done reports
-// that it has been through every overview.
-func FillOverviewMaxima(ctx context.Context, mount string, deadline time.Time) (done bool, err error) {
-	return fillOverviewMaxima(ctx, mount, deadline, time.Now)
-}
-
-func fillOverviewMaxima(ctx context.Context, mount string, deadline time.Time, now func() time.Time) (bool, error) {
-	progress := ReadOverviewProgress(mount)
-	if progress.done {
-		return true, nil
-	}
-	dbPath := filepath.Join(mount, "Engine Library", "Database2", "m.db")
-	if err := safeFile(dbPath); err != nil {
-		return false, err
-	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: dbPath}).String()+"?_pragma=busy_timeout(5000)")
-	if err != nil {
-		return false, err
-	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
-	for {
-		if !deadline.IsZero() && !now().Before(deadline) {
-			return false, nil
-		}
-		n, last, err := fillOverviewBatch(ctx, db, progress.after)
-		if err != nil {
-			return false, err
-		}
-		// Only what is committed counts: killed before the next line, the next mount reads
-		// this batch once more and finds it complete.
-		progress.after, progress.done = last, n < overviewBatch
-		if err := progress.Keep(mount); err != nil || progress.done {
-			return progress.done, err
-		}
-	}
-}
-
-// fillOverviewBatch completes the next overviewBatch overviews past the track after, and
-// returns how many it read and the last track among them.
-func fillOverviewBatch(ctx context.Context, db *sql.DB, after int64) (n int, last int64, err error) {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, 0, err
-	}
-	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT trackId, overviewWaveFormData FROM PerformanceData WHERE trackId>? ORDER BY trackId LIMIT ?`, after, overviewBatch)
-	if err != nil {
-		return 0, 0, err
-	}
-	defer rows.Close()
-	fixed := map[int64][]byte{}
-	for rows.Next() {
-		var blob []byte
-		if err := rows.Scan(&last, &blob); err != nil {
-			return 0, 0, err
-		}
-		n++
-		raw, err := QUncompress(blob, 8<<20)
-		if err != nil || len(raw) < 27 || len(raw)%3 != 0 {
-			continue
-		}
-		updated := OverviewMaxima(raw)
-		if &updated[0] != &raw[0] {
-			if fixed[last], err = QCompress(updated); err != nil {
-				return 0, 0, err
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return 0, 0, err
-	}
-	if err := rows.Close(); err != nil {
-		return 0, 0, err
-	}
-	for id, blob := range fixed {
-		if _, err := tx.ExecContext(ctx, `UPDATE PerformanceData SET overviewWaveFormData=? WHERE trackId=?`, blob, id); err != nil {
-			return 0, 0, err
-		}
-	}
-	return n, last, tx.Commit()
 }
 
 func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, error) {
