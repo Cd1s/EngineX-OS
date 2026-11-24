@@ -620,3 +620,28 @@ func TestPacerPausesOnlyAfterTheStick(t *testing.T) {
 		t.Fatal("no deck playing, yet paced")
 	}
 }
+
+// With /data at the stage's floor the job stops, says what it staged so a window applies and
+// drops it, and does not fail: the next job goes on.
+func TestFillStopsAtAFullStageAndPublishesWhatItHas(t *testing.T) {
+	root, snap := fillStick(t, 6)
+	st := stageOf(t, snap)
+	old := putStaged
+	defer func() { putStaged = old }()
+	puts := 0
+	putStaged = func(s *rbstate.Stage, rec *rbstate.Staged) error {
+		if puts++; puts > 2 {
+			return rbstate.ErrStageFull
+		}
+		return old(s, rec)
+	}
+	res := mustFill(t, root, FillOptions{Stage: st})
+	if res.Staged != 2 || res.Left != 4 || !res.Publish || st.Verified() != "" {
+		t.Fatalf("full stage: %+v, verified %q", res, st.Verified())
+	}
+	putStaged = old
+	applyStage(t, root, st)
+	if res = mustFill(t, root, FillOptions{Stage: st}); res.Staged != 4 || res.Left != 0 || st.Verified() != snap.Stamp {
+		t.Fatalf("after the window: %+v", res)
+	}
+}

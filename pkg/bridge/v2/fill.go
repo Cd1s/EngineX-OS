@@ -48,6 +48,9 @@ type FillResult struct {
 	Publish bool
 }
 
+// putStaged is Stage.Put; a variable for tests of a full /data.
+var putStaged = (*rbstate.Stage).Put
+
 // fillLockWait is how long the job waits for a window to release the volume.
 var fillLockWait = 2 * time.Minute
 
@@ -131,6 +134,12 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	})
 	f.report()
 	err = f.run(order)
+	if errors.Is(err, rbstate.ErrStageFull) {
+		// /data is at its floor: what is staged is published, a window applies and drops it, and
+		// the next job goes on.
+		log.Printf("rb-bridge: fill of %s stopped: %v", mount, err)
+		err = nil
+	}
 	res = f.res
 	res.Left = f.total - f.done
 	if syncErr := stage.Sync(); err == nil {
@@ -253,7 +262,7 @@ func (f *filler) fill(i int) (ok bool, err error) {
 		return f.unread(vt, err)
 	}
 	rec.Key, rec.Sig.Row = vt.key, vt.hash
-	if err = f.stage.Put(rec); err != nil {
+	if err = putStaged(f.stage, rec); err != nil {
 		return false, fmt.Errorf("stage %s: %w", vt.key, err)
 	}
 	if f.puts++; f.puts%stageSyncEvery == 0 {
