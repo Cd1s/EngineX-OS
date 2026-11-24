@@ -416,9 +416,9 @@ func bigPWV7(t *testing.T, root string) {
 // TestConfirmedRefsSkipsPacingWhenIdleAndPacesWhenPlaying.
 func TestFillYieldsToAPlayingDeck(t *testing.T) {
 	defer SetPriorityDirForTest(t.TempDir())()
-	old := playingReadGap
-	playingReadGap = 10 * time.Millisecond
-	defer func() { playingReadGap = old }()
+	old, oldCache := playingReadGap, fromCache
+	playingReadGap, fromCache = 10*time.Millisecond, 0 // the fixture's reads come from memory: count them all
+	defer func() { playingReadGap, fromCache = old, oldCache }()
 	run := func(active bool) time.Duration {
 		root, snap := fillStick(t, 1)
 		bigPWV7(t, root)
@@ -448,9 +448,9 @@ func TestFillYieldsToAPlayingDeck(t *testing.T) {
 // and TestIssue328BackgroundJobCountsThroughout.
 func TestFillStopsCleanlyAndGoesOnLater(t *testing.T) {
 	defer SetPriorityDirForTest(t.TempDir())()
-	old := playingReadGap
-	playingReadGap = 5 * time.Millisecond
-	defer func() { playingReadGap = old }()
+	old, oldCache := playingReadGap, fromCache
+	playingReadGap, fromCache = 5*time.Millisecond, 0
+	defer func() { playingReadGap, fromCache = old, oldCache }()
 	root, snap := fillStick(t, 20)
 	bigPWV7(t, root)
 	writeSnapshot(t, root, func(*rbstate.Snapshot) {})
@@ -579,5 +579,44 @@ func TestFillGoesOnPastATrackItCannotRead(t *testing.T) {
 	}
 	if res = mustFill(t, root, FillOptions{Stage: st}); res.Staged != 1 || res.Unread != 0 {
 		t.Fatalf("after the file is back: %+v", res)
+	}
+}
+
+// While a deck plays, a read that went to the stick is followed by a pause as long as it took and
+// at least playingReadGap; one the page cache served is not; a stop ends the pause at once.
+func TestPacerPausesOnlyAfterTheStick(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &pacer{ctx: ctx, active: func() bool { return true }}
+	opts, playing := p.readOptions()
+	if !playing || opts.Chunk != 64<<10 || opts.Pause == nil {
+		t.Fatalf("playing: %+v", opts)
+	}
+	measure := func(took time.Duration) time.Duration {
+		start := time.Now()
+		if err := opts.Pause(1, took); err != nil {
+			t.Fatal(err)
+		}
+		return time.Since(start)
+	}
+	if d := measure(100 * time.Microsecond); d > playingReadGap/2 {
+		t.Fatalf("a read from the cache paused %s", d)
+	}
+	if d := measure(fromCache); d < playingReadGap {
+		t.Fatalf("a read of the stick paused %s, want at least %s", d, playingReadGap)
+	}
+	if d := measure(3 * playingReadGap); d < 3*playingReadGap {
+		t.Fatalf("a slow read paused %s, want as long as it took", d)
+	}
+	if p.pauses != 2 {
+		t.Fatalf("%d pauses counted", p.pauses)
+	}
+	cancel()
+	start := time.Now()
+	if err := opts.Pause(1, time.Hour); err == nil || time.Since(start) > time.Second {
+		t.Fatalf("a stopped job paused: %v after %s", err, time.Since(start))
+	}
+	if _, playing = (&pacer{ctx: context.Background(), active: func() bool { return false }}).readOptions(); playing {
+		t.Fatal("no deck playing, yet paced")
 	}
 }

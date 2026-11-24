@@ -142,9 +142,9 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	if err == nil {
 		res.Publish = f.publish()
 	}
-	log.Printf("rb-bridge: fill of %s: %d staged, %d degraded, %d missing, %d unread, %d left of %d in %s (snapshot %s, exports %s); publish=%v",
+	log.Printf("rb-bridge: fill of %s: %d staged, %d degraded, %d missing, %d unread, %d left of %d in %s (snapshot %s, exports %s; %s); publish=%v",
 		mount, res.Staged, res.Degraded, res.Missing, res.Unread, res.Left, f.total,
-		time.Since(start).Round(time.Millisecond), loaded.Sub(start).Round(time.Millisecond), read.Sub(loaded).Round(time.Millisecond), res.Publish)
+		time.Since(start).Round(time.Millisecond), loaded.Sub(start).Round(time.Millisecond), read.Sub(loaded).Round(time.Millisecond), f.pace, res.Publish)
 	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 		return res, nil // stopped: the next job goes on from the stage
 	}
