@@ -13,6 +13,7 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
 // The hook stops the job under this name before an eject (edisksd_hook.c import_unit,
@@ -126,5 +127,27 @@ func TestImportStatusWaitingStaysUntilDone(t *testing.T) {
 	rep.Refresh()
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("status after done: %v", err)
+	}
+}
+
+// A stick no window left a snapshot on (no export, or a window stopped before it saved one)
+// has nothing to fill: the job ends quietly, with no error for the browser and no remount.
+func TestImportJobWithoutASnapshotEndsQuietly(t *testing.T) {
+	oldMounted, oldLock, oldRemount := mounted, importLock, startRemount
+	mounted = func(string) bool { return true }
+	importLock = filepath.Join(t.TempDir(), "lock")
+	remounts := 0
+	startRemount = func(string) error { remounts++; return nil }
+	defer func() { mounted, importLock, startRemount = oldMounted, oldLock, oldRemount }()
+	t.Setenv(rbstate.StageEnv, t.TempDir())
+	status := filepath.Join(t.TempDir(), "status")
+	t.Setenv("ENGINEX_USB_PREPARING_PATH", status)
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	if err := runImportJob(context.Background(), root); err != nil || remounts != 0 {
+		t.Fatalf("job: %v, %d remounts", err, remounts)
+	}
+	if _, err := os.Stat(status + ".err"); !os.IsNotExist(err) {
+		t.Fatalf("an error was left for the browser: %v", err)
 	}
 }

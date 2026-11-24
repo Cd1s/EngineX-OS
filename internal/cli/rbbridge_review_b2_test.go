@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
 // A serve observed during import postpones publication, then expires after a quiet window.
@@ -77,23 +77,21 @@ func TestIssue301ImportFailureStaysVisible(t *testing.T) {
 
 // Review B2: a stick whose import is done no longer holds the global lock while it waits for its
 // remount, so a second stick's import runs; its status is not overwritten by the first's refresh.
+// Bridge v2: the job fills the stage of a stick a window left a snapshot on, and that is what
+// asks for the remount.
 func TestIssue301CompletedImportReleasesGlobalLock(t *testing.T) {
 	oldMounted, oldLock, oldRemount := mounted, importLock, startRemount
 	mounted = func(string) bool { return true }
 	importLock = filepath.Join(t.TempDir(), "lock")
 	defer func() { mounted, importLock, startRemount = oldMounted, oldLock, oldRemount }()
+	t.Setenv(rbstate.StageEnv, t.TempDir())
 	root := t.TempDir()
 	testfixture.Export(t, root)
-	st, err := os.Stat(filepath.Join(root, "PIONEER/rekordbox/export.pdb"))
-	if err != nil {
+	dbDir := filepath.Join(root, "Engine Library/Database2")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	stage := filepath.Join(root, "Engine Library/Database2/.rb-bridge-import")
-	if err = os.MkdirAll(stage, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	stamp := fmt.Sprintf("v4 PIONEER/rekordbox/export.pdb %d %d", st.Size(), st.ModTime().UnixNano())
-	if err = os.WriteFile(filepath.Join(stage, ".rb-bridge-stamp"), []byte(stamp), 0o644); err != nil {
+	if err := rbstate.New("review-b2").Save(dbDir); err != nil {
 		t.Fatal(err)
 	}
 	status := filepath.Join(t.TempDir(), "status")

@@ -14,14 +14,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Cd1s/EngineX-OS/pkg/bridge"
-	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	bridgev2 "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
-// A first import that does not fit in the mount's time goes on after the mount in a job of its
-// own (#301): `rb-bridge --import-path`, started by the --mount-path run through systemd, at
-// idle CPU and I/O priority so a set playing from the same stick keeps its audio. The edisksd
-// hook stops the job under the same unit name before it unmounts the volume.
+// What a mount window leaves to do goes on after the mount in a job of its own (#301): `rb-bridge
+// --import-path`, started by the --mount-path run through systemd, at idle CPU and I/O priority
+// so a set playing from the same stick keeps its audio. The job builds the tracks' performance
+// data into the stage on /data (bridge v2, FillInBackground) and asks for a remount when a window
+// has something to apply. The edisksd hook stops the job under the same unit name before it
+// unmounts the volume.
 
 // importUnit names the job of the volume mounted at mount: FNV-1a 64 of the path, as the hook
 // computes it (edisksd_hook.c import_unit).
@@ -61,8 +63,8 @@ var startImport = func(mount string) error {
 // importLock lets one job run at a time, whatever the number of sticks.
 var importLock = "/run/enginex-rb-import.lock"
 
-// runImportJob is --import-path: wait for the visible mount, finish the import, then show
-// that the library is ready until the volume is ejected.
+// runImportJob is --import-path: wait for the visible mount, fill the stage, then ask for the
+// remount that publishes it and show that until the volume is ejected.
 func runImportJob(ctx context.Context, mount string) error {
 	if !filepath.IsAbs(mount) {
 		return fmt.Errorf("--import-path must be absolute")
@@ -95,17 +97,24 @@ func runImportJob(ctx context.Context, mount string) error {
 		log.Printf("rb-bridge: import of %s stopped; the next mount goes on from its last pass", mount)
 		return nil
 	}
+	if errors.Is(err, rbstate.ErrNoSnapshot) {
+		// No snapshot: no window converted this stick (it has no export, or the window was
+		// stopped before it saved one). The next mount starts again.
+		log.Printf("rb-bridge: nothing to fill on %s: %v", mount, err)
+		rep.Done()
+		return nil
+	}
 	if err != nil {
 		return err // rep.Fail kept the error for the browser; the next import's Start clears it
 	}
-	if r.Bypassed {
+	if !r.Publish {
 		rep.Done()
 		return nil
 	}
 	defer rep.Done()
 	// The remount helper refreshes publication status after this handoff.
 	// Published by a remount (#301); the hook stops this job when the remount unmounts the stick.
-	log.Printf("rb-bridge: import of %s complete; a remount publishes it", mount)
+	log.Printf("rb-bridge: the stage of %s holds what a window applies; a remount publishes it", mount)
 	rep.Publishing()
 	if err = startRemount(mount); err != nil {
 		log.Printf("rb-bridge: %v", err)
@@ -115,10 +124,10 @@ func runImportJob(ctx context.Context, mount string) error {
 	return nil
 }
 
-// convertLocked runs the import under the global lock and releases it as soon as the
-// conversion ends: a finished stick waiting for its remount never holds another's import.
-// started is false when it never got the lock (the stick went first).
-func convertLocked(ctx context.Context, mount string, rep *usbLoadingReporter) (r enginedb.Result, started bool, err error) {
+// convertLocked runs the fill under the global lock and releases it as soon as the fill ends:
+// a finished stick waiting for its remount never holds another's fill. started is false when it
+// never got the lock (the stick went first).
+func convertLocked(ctx context.Context, mount string, rep *usbLoadingReporter) (r bridgev2.FillResult, started bool, err error) {
 	lock, err := os.OpenFile(importLock, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return r, true, err
@@ -134,8 +143,8 @@ func convertLocked(ctx context.Context, mount string, rep *usbLoadingReporter) (
 	go func() { defer close(done); refresh(convert, rep) }()
 	defer func() { stop(); <-done }()
 	// Throttled: the job reports its count as each track goes (#328); refresh writes the latest.
-	r, err = bridge.ImportInBackground(ctx, mount, func(done, total int) { rep.Report(done, total, false) })
-	if err != nil && ctx.Err() == nil {
+	r, err = bridgev2.FillInBackground(ctx, mount, bridgev2.FillOptions{Progress: func(done, total int) { rep.Report(done, total, false) }})
+	if err != nil && ctx.Err() == nil && !errors.Is(err, rbstate.ErrNoSnapshot) {
 		rep.Fail(err)
 	}
 	return r, true, err
