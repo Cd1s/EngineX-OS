@@ -49,9 +49,12 @@ func adopt(ctx context.Context, dir, uuid string) (*rbstate.Snapshot, error) {
 		synced = `(SELECT CAST(y.lastEditTime AS INTEGER) FROM bridge.BridgeSynced y WHERE y.trackId=s.trackId),(SELECT y.digest FROM bridge.BridgeSynced y WHERE y.trackId=s.trackId)`
 	}
 	// A row imported in full with no record of what the import wrote is still the import's while
-	// it has Engine's import mark, and the deck's once Engine loaded it.
+	// it has Engine's import mark, and the deck's once Engine loaded it. Only such a row's
+	// PerformanceData is looked at: the mark sits behind the row's waveforms, a dozen cold reads
+	// a row, and asking it of all 6,051 rows of a 313 MB library had the insert killed (gate).
 	rows, err := db.QueryContext(ctx, `SELECT s.path,s.trackId,s.fingerprint,`+written+`,`+synced+`,
-		(SELECT thirdPartySourceId IS NOT NULL FROM PerformanceData p WHERE p.trackId=s.trackId)
+		CASE WHEN s.fingerprint<>'' AND substr(s.fingerprint,1,5)<>'fast:' AND `+written+` IS NULL
+		THEN (SELECT thirdPartySourceId IS NOT NULL FROM PerformanceData p WHERE p.trackId=s.trackId) END
 		FROM bridge.BridgeState s JOIN Track t ON t.id=s.trackId WHERE t.path=s.path`)
 	if err != nil {
 		return nil, err
