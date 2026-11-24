@@ -84,6 +84,9 @@ used through its present API and is not changed.
 
 ### 1.3 `pkg/rbstate`: the frozen interface
 
+The package is on the branch (`pkg/rbstate`, with its tests); where this text and the code differ, the code is
+right. It imports nothing else of EngineX.
+
 ```go
 package rbstate
 
@@ -212,6 +215,16 @@ func (s *Snapshot) Save(dbDir string) error
 // TrackAt is the track of an Engine path ("../Contents/…").
 func (s *Snapshot) TrackAt(enginePath string) (*Track, bool)
 
+// EngineIDs is the set of Track.id values the bridge owns (the readers of 1.8 use it).
+func (s *Snapshot) EngineIDs() map[int64]bool
+
+// ReplaceFile and RemoveFile are the pull-safe file writes of #321 for anything the bridge puts on the stick.
+// UnsafeToFree is set by pkg/bridge to its FAT chain check; a file it names is left alone (ErrUnownedClusters).
+func ReplaceFile(dst string, data []byte) error
+func RemoveFile(path string) error
+func CleanTemps(dir string) int
+var UnsafeToFree func(path string) bool
+
 // LockVolume is the one lock for everything that writes the stick's library or its export files: the mount path,
 // write-back, and NoteWriteBack. It is a flock in /run keyed by the volume's device, never a file on the stick.
 // wait 0 fails at once with ErrLocked.
@@ -243,6 +256,7 @@ type Facts struct { // from the audio header, as enginedb reads it today
 	BitDepth, Bitrate  int
 	StartOffsetSamples int
 	BPM                float64 // the grid's first tempo when the export has none
+	FileBytes          int64
 }
 
 type Staged struct {
@@ -251,16 +265,20 @@ type Staged struct {
 	Rel      string   // the audio file's spelling on the volume
 	Missing  bool     // the volume has no file for this track
 	Facts    Facts
-	Perf     enginedb.Performance // Engine's blobs; zero when Degraded != ""
+	Perf     Perf     // Engine's five blobs, ActiveLoops and Complete (the fields of enginedb.Performance); zero when Degraded != ""
 	RGB      []byte   // body of OverviewData/<uuid>/<id>.rgb, nil for none
 	Art      []byte   // only a cover taken from the audio file itself; export covers are read from Sig.Artwork
 	Detail   []string
 	Degraded string // why there is no performance data (#53), "" otherwise
 }
 
-func (s *Stage) Put(t *Staged) error                   // temp + rename, then one index line
+func (s *Stage) Put(t *Staged) error                   // the track's files, each whole and synced, then one index line
 func (s *Stage) Get(key string) (*Staged, error)       // os.ErrNotExist
 func (s *Stage) Index() (map[string]TrackSig, error)   // what is staged, without reading the blobs
+func (s *Stage) Entries() (map[string]*Staged, string, error) // every index line without blobs, and Verified
+func (s *Stage) Read(entry *Staged) (*Staged, error)   // an entry with its blobs
+func (s *Stage) Sync() error                           // the index to the disk; call it every few Puts
+func (s *Stage) Close() error
 func (s *Stage) MarkVerified(stamp string) error       // every track of this stamp was compared with Built
 func (s *Stage) Verified() string
 func (s *Stage) Drop(keys ...string) error             // after a window applied them
