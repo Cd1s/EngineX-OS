@@ -11,7 +11,7 @@ MIGRATION=$ROOT/rootfs-overlay/usr/libexec/enginex-migration
 WORK=$(mktemp -d /root/build/issue311-firstboot-run.XXXXXX)
 trap 'find "$WORK" -depth -delete' EXIT
 
-test -r "$MANIFEST" -x "$GUARD"
+[ -r "$MANIFEST" ] && [ -x "$GUARD" ]
 
 check_asset() {
     local name=$1
