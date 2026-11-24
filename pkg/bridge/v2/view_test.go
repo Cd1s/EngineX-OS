@@ -96,8 +96,15 @@ func TestViewOfTwoLibrariesHasThreeFoldersAndEveryTrackOnce(t *testing.T) {
 	if got := listsOf(v); !reflect.DeepEqual(got, want) {
 		t.Fatalf("lists:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	if v.Lists[0].Name != MergedFolderTitle("en") || v.Lists[5].Name != "Device Library" || v.Lists[9].Name != "OneLibrary" {
+	if v.Lists[0].Name != "Merged Library" || v.Lists[5].Name != "Device Library" || v.Lists[9].Name != "OneLibrary" {
 		t.Fatalf("folder titles: %q %q %q", v.Lists[0].Name, v.Lists[5].Name, v.Lists[9].Name)
+	}
+	// The merged folder follows the deck's language; the two libraries keep rekordbox's names.
+	for lang, want := range map[string]string{"zh-Hans": "合并曲库", "zh-Hant": "合併曲庫", "es": "Biblioteca combinada", "fr": "Merged Library", "": "Merged Library"} {
+		in, err := BuildView([]SourceLibrary{pdbLib(pdb), oneLib(one)}, rbstate.LayoutFolders, lang)
+		if err != nil || in.Lists[0].Name != want || in.Lists[5].Name != "Device Library" || in.Lists[0].Key != v.Lists[0].Key {
+			t.Fatalf("language %q: merged folder %q (%v)", lang, in.Lists[0].Name, err)
+		}
 	}
 	if v.Lists[2].Parent != v.Lists[1].Key || v.Lists[1].Parent != "merged" || v.Lists[0].Parent != "" {
 		t.Fatal("parents do not follow the tree")
