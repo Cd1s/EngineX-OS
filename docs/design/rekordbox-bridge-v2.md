@@ -48,7 +48,7 @@ Three stores, each with one writer:
 |---|---|---|---|
 | Snapshot `.rb-bridge-snapshot` | on the stick, beside `m.db` | the mount path (and `NoteWriteBack`, under the volume lock) | mount path, fill job, write-back, shadow display, dbhealer, MP3 grid fix, the hook (existence only) |
 | Stage `<library uuid>/` | on the deck, `/data/enginex/rb-stage/` | the fill job | the mount path |
-| Write-back state `.rb-bridge-synced` | on the stick, beside `m.db` | write-back | write-back |
+| Write-back's record of each row (`Track.Edit`, `Track.Synced`) | in the snapshot | write-back (`NoteWriteBack`) and the window (a row only the bridge wrote) | write-back |
 
 Rules that hold everywhere:
 
@@ -93,7 +93,6 @@ package rbstate
 
 const (
 	SnapshotName = ".rb-bridge-snapshot" // in Engine Library/Database2
-	SyncedName   = ".rb-bridge-synced"   // write-back's own state, same directory
 	// Rules is part of every stamp and track signature. Raising it stages every track again.
 	// It replaces stamp versions v2-v4, performanceEncoding and offsetRule.
 	Rules = 5
@@ -491,8 +490,9 @@ Contract:
   and to every library in `Refs` (`OneLibrary`: the cue table and the metadata; `DeviceLibrary`: the metadata the PDB
   holds). `pdbImportKey` is not read. A row without a snapshot track is not the bridge's and is skipped.
 - Baseline: a row whose `enginedb.WrittenDigest` equals `Track.Written` holds what the import wrote and is not read
-  further. The lane keeps its own "what the stick's files hold" state in `.rb-bridge-synced` (its format is the
-  lane's; today's `BridgeSynced` content).
+  further. What the stick's files hold of a row is in the snapshot: `Track.Edit` (the row's `lastEditTime` when it
+  was noted) and `Track.Synced` (the digest of its cues, loops and tags); a row whose `lastEditTime` is the noted one
+  is not read at all. There is no separate state file (`8cfc4924`).
 - After a pass that wrote files it calls `NoteWriteBack` under the same volume lock.
 - Kept as they are: the quiet watcher in stream-sync, the eject pass through the local endpoint, the key and export
   caches, first-original backups in `.enginex-backup`, the staged-file marks and the put-back at the next insert, the
@@ -541,13 +541,13 @@ func CleanWriteBackLeftovers(mount string) int                                  
 | `pkg/enginedb/rgb_overview.go` (969) | encode, validate and atomic write kept; stage backfill, publish and the verified cache deleted |
 | `pkg/enginedb/artwork.go` (561) | read, hash, `Artwork/` file and embedded covers kept; the migration deleted |
 | `pkg/enginedb/performance.go`, `display.go`, `pending.go`, `relocate.go`, `mp3grid.go`, `playlists.go`, `smart.go`, `inuse.go` | kept |
-| `internal/cli/rbbridge_stage.go` (299) | deleted with the stage; `rbbridge_import.go`, `rbbridge_remount.go`, `rbbridge_status.go` kept |
+| `internal/cli/rbbridge_stage.go` (299) | kept: it is the staging of Pioneer players' libraries over Pro DJ Link (#59, `stager`), which `source.go` reads as a library, not the old import's stage; `rbbridge_import.go`, `rbbridge_remount.go`, `rbbridge_status.go` kept |
 
 Marks and files that disappear from the stick: `.rb-bridge-state.db` (and its journal and `.compact`),
 `.rb-bridge-stamp`, `.rb-bridge-pending`, `.rb-bridge-reread`, `.rb-bridge-import/` with `BASE`, `BASE.counts`,
 `BASE.times`, `KIND`, `RESUME`, `QUICK`, `fast-base.db`, `.bulk`, `.rb-bridge-publish/READY`, `m.db.before-import`,
-`.rb-bridge-overview`, `.rb-bridge-rgb-verified`, `.rb-bridge.lock`. What remains: `.rb-bridge-snapshot`,
-`.rb-bridge-synced`, and write-back's recovery marks.
+`.rb-bridge-overview`, `.rb-bridge-rgb-verified`, `.rb-bridge.lock`. What remains: `.rb-bridge-snapshot` (with
+`.next` around a commit) and write-back's mark of a pass in progress (`.rb-bridge-writeback`).
 
 A library of an older build (it has `.rb-bridge-state.db` and no snapshot) is taken over once, in a window, by
 `adopt.go`: paths, Engine IDs, list IDs and written digests are read from the old state into a snapshot, every track
@@ -581,6 +581,261 @@ edits. The old state file is removed after the snapshot is saved.
    unreadable (#253 review). v2 keeps references only; such a track shows Engine's own overview on the shadow deck.
 4. **An older build after v2.** A deck running 5.3.0.5-r1 does not know the snapshot. What it does with a stick last
    written by v2 is tested with the `147e37fb` step binary before the deck test and reported.
+
+## 2. Requirements and the tests that cover them
+
+Each table row is one requirement of the bridge as a DJ or a maintainer sees it: a behaviour of the deck, or an
+invariant that must hold after a pull, a kill or a re-export. The `Tests` column names the test functions that assert
+it today, each with its file under the repository root; **no test** means that no test asserts it (listed again in
+2.9). A test is cited only when its assertions state the requirement. The tables say what a test asserts, not whether
+it passes; the gate run decides that. Issue numbers (#n) are those of the old bridge's tests and the regression
+checklist.
+
+### 2.1 Mount: reading both libraries, the view, three folders, the `rb_library_view` setting, ghost lists
+
+| Requirement | Tests |
+|---|---|
+| A stick with both libraries reads both and joins them by path: every track shows once, and the root holds three folders (merged, Device Library, OneLibrary), each with that view's whole tree (#327). | `TestViewOfTwoLibrariesHasThreeFoldersAndEveryTrackOnce` (`pkg/bridge/view_test.go`) |
+| The setting `rb_library_view` (folders, merged, device, onelibrary) chooses what the root shows, a stick with one library ignores it, the merged folder is titled in the deck's language (Simplified and Traditional Chinese, Spanish, English otherwise), and a change is seen at the next insert because the layout is part of the stamp. | `TestViewLayouts`, `TestViewOfTwoLibrariesHasThreeFoldersAndEveryTrackOnce` (`pkg/bridge/view_test.go`); `TestStampNamesRulesLayoutAndFiles` (`pkg/rbstate/rbstate_test.go`) |
+| The console and `settings.conf` keep the setting: default `folders` (not written to the file), a round trip through the console API, an invalid value reads as `folders`. | `TestRbLibraryViewSetting` (`pkg/webui/ui_settings_test.go`) |
+| The bridge reads the key `rb_library_view` from `settings.conf` (`ReadLayout`), and the deck's settings menu (Profile, Library) offers the four choices and writes it. | **no test** |
+| rekordbox 7's empty root lists that repeat a list with tracks and are absent from the Device Library are hidden in every folder (11-23 deck test). | `TestViewHidesOneLibraryGhostRootLists` (`pkg/bridge/view_test.go`) |
+| In a list a file named twice and a repeated entry show once, an unknown track is dropped, and two lists with one name both exist (#252); a track is identified by its case-folded NFC path, so two records naming one file are one track, and a path that leaves the volume or holds a NUL byte is refused. | `TestViewTreeEdgeCases` (`pkg/bridge/view_test.go`); `TestFoldPath` (`pkg/rbstate/rbstate_test.go`) |
+| A OneLibrary smart list shows as an ordinary list of the tracks rekordbox resolved; with a reference track, `[Smart Match]` is the last root list and is recomputed when the BPM or a list changes, an unknown reference is an error, and compatible keys follow the wheel. | `TestPort2IntelligentListCarriesMaterializedTracks`, `TestPort2SmartMatchRecomputesAndValidatesReference` (`pkg/bridge/port2_mount_misc_test.go`); `TestSmartMatchWheel` (`pkg/enginedb/performance_test.go`) |
+| The Device Library (`export.pdb`) reads whole: unanalysed or out-of-range BPM and rate are 0, orphan list entries are dropped, titles starting with byte 0x03 read in full, damaged pages are refused (#182, #216). | `TestPDBAudioMetadataNormalization`, `TestPDBOrphanPlaylistEntries` (`pkg/rekordbox/regression_test.go`); `TestDeviceSQLStringsStartingWithByte03`, `TestPDBPagesAndInvalidData` (`pkg/rekordbox/rekordbox_test.go`) |
+| The OneLibrary (`exportLibrary.db`, SQLCipher 4) reads without touching the stick: byte-exact decrypt, tamper and size bounds, soft-deleted rows skipped, the full rekordbox 7 schema with cues; ANLZ files merge into one analysis and ignore disabled slots, pads I and J and overflowing times (#252). | `TestSQLCipher4ByteExactAgainstCSQLCipher`, `TestSQLCipher4TamperAndBounds`, `TestOneLibraryFullSchemaCuesAndRecordHash` (`pkg/rekordbox/sqlcipher_test.go`); `TestOneLibrarySkipsSoftDeletedRekordboxRows` (`pkg/rekordbox/bh2_a4_test.go`); `TestAnalysisMergeAndBounds` (`pkg/rekordbox/rekordbox_test.go`); `TestAnalysisSkipsPadsIPAndDisabledCueSlots` (`pkg/rekordbox/order4_test.go`); `TestCueOverflow252` (`pkg/rekordbox/cue_overflow252_test.go`) |
+| The SQLCipher key is derived once per salt and kept for later reads, and the keys are kept in the deck's data directory so a power-on does not derive them again. | `TestPort2ReadSourcesCachesOneLibraryKeysBySalt` (`pkg/bridge/port2_keycache_test.go`); `TestKeyCacheSharesDerivedKeyAcrossCacheInstances` (`pkg/rekordbox/sqlcipher_keys_test.go`); `TestExportKeysAreKeptInTheDecksDataDirectory` (`pkg/bridge/mount_test.go`) |
+| The export is found under an upper-case or a hidden `.PIONEER` path; an `export.pdb` the deck generated itself for CDJ link is not a source. | `TestPort2UppercaseAndGeneratedExports` (`pkg/bridge/port2_mount_misc_test.go`); `TestPort1StagedAndLocalLibrariesRetainLocalRowsAndMergeHiddenExport` (`pkg/bridge/port1_mount_test.go`) |
+| When one of two libraries cannot be read, it is left out and the other is shown, nothing is removed, the next insert reads again, and the unreadable one does not hold the import back; when none can be read the window returns the error, builds no library, and the job was asked for first (#53). | `TestPort1BrokenOneLibraryLeavesDeviceRowsAndRetries`, `TestPort1UnreadableOneLibraryStillCompletesDeviceImport` (`pkg/bridge/port1_mount_test.go`); `TestMountStartsTheJobBeforeReadingTheExports` (`pkg/bridge/mount_test.go`) |
+| A Pro DJ Link library staged on the stick shows under `[Pro DJ Link: <name>]`; a stick with only staged libraries converts them, a repeated mount is Bypassed, a restaged export converts again, and the stick's own rows and Engine's own row stay (#59, #252). | `TestViewTreeEdgeCases` (`pkg/bridge/view_test.go`); `TestPort1StagedOnlyStickConvertsRepeatsAndRestages`, `TestPort1StagedAndLocalLibrariesRetainLocalRowsAndMergeHiddenExport` (`pkg/bridge/port1_mount_test.go`) |
+| Staged libraries share one budget per drive, unusable copies are removed, long-unseen players give way only when room is needed, nothing is touched through a symlink, and a deck of ours is never copied (#211). | `TestStagedLibrariesShareOneBudgetOfTheDrive`, `TestStagingRemovesWhatNoImportCanUse`, `TestStagingDropsLongUnseenPlayersForRoom`, `TestStagingRemovesNothingThroughASymlink`, `TestStagingNeverCopiesADeckOfOurs` (`internal/cli/rbbridge_stage_test.go`) |
+| The Pro DJ Link flags and the setting migration work, the retired `--watch` exits at once, the journal gets a device and not every packet (#51), and a track loaded over Link has the same performance data as the same track converted from USB. | `TestRBBridgeProlinkFlags`, `TestProlinkSettingOnMigration`, `TestRBBridgeRetiredWatchExitsAtOnce`, `TestRBBridgeLogsDevicesNotPackets` (`internal/cli/rbbridge_test.go`); `TestPort2RekordboxLinkAnalysisMatchesBridge` (`pkg/webui/port2_rekordbox_analysis_test.go`) |
+
+### 2.2 Mount: work proportional to the change, IDs stable, the window's time rules
+
+| Requirement | Tests |
+|---|---|
+| The first insert of a never-seen export builds rows and lists from the export alone (rows as Engine expects them, lists in Engine's chain order), rebuilds Engine's indexes, saves the snapshot, asks for the job, logs one timed line per step, and leaves only `m.db` and the snapshot in `Database2` (#182, #301). | `TestMountFirstInsert` (`pkg/bridge/mount_test.go`) |
+| An export unchanged since a complete import costs a stat and one line: the exports are not opened, `m.db` stays byte for byte, no job starts, nothing changes under `PIONEER`, the audio or `Database2`, and the CLI run skips the volume. | `TestMountUnchangedIsStatOnly` (`pkg/bridge/mount_test.go`); `TestRBBridgeUnchangedExportSkipsTheVolume` (`internal/cli/rbbridge_test.go`); `TestPort5UnchangedWindowLeavesStickAndDatabaseFilesUntouched` (`pkg/bridge/port5_misc_test.go`) |
+| A re-export that changes one list writes that list and nothing else, the new list is there at that mount, the plan line says one list (#48, #253), and the insert does not make Engine's trigger walk every list of the library (replica, 2026-11-24). | `TestMountPlaylistOnlyReexportWritesOnlyThatList`, `TestMountAddsListsWithoutEnginesWalkOfEveryList` (`pkg/bridge/mount_test.go`) |
+| A row that already holds the export's fields is not written; rows whose export fields changed are written after the rows and lists are committed, 100 to a transaction, and a window with no time for them leaves them pending. | `TestMountLeavesRowsThatHoldTheExportsFieldsUnwritten`, `TestMountUpdatesRowsInBatchesAfterTheLists` (`pkg/bridge/mount_test.go`) |
+| A re-export that only renumbers source IDs changes no row hash and no list hash and writes nothing to `m.db`; the snapshot takes the new source IDs. | `TestViewHashesIgnoreSourceIDsAndFollowContent` (`pkg/bridge/view_test.go`); `TestMountRenumberedReexportWritesNoRowAndRefreshesRefs` (`pkg/bridge/mount_test.go`) |
+| Engine IDs, the library UUID and the `OverviewData` files stay through renumbering; a renamed or swapped file keeps its Engine ID and deck edits with no ghost row (#4); the row's path has the file's on-disk spelling (#6). | `TestPort1RenumberedSourcesKeepIDsUUIDAndRGB`, `TestPort1MovedAndSwappedPathsRetainEngineIDs` (`pkg/bridge/port1_mount_test.go`); `TestPort2OnDiskSpellingReachesThePublishedRow` (`pkg/bridge/port2_mount_misc_test.go`) |
+| The window takes its deadline from the hook's `ENGINEX_HOOK_REMAINING_MS`: a re-export with a new list shows it at that mount and starts the job, a run given almost no time ends well before the kill, a window with no time for new rows adds none, commits what it did, and the next window adds them (#233, #264). | `TestMountPathAsTheHookRunsIt` (`internal/cli/rbbridge_test.go`); `TestMountOutOfTimeLeavesRowsPendingAndFinishesLater` (`pkg/bridge/mount_test.go`) |
+| A window works in the order rows, lists, staged performance data (priority tracks first), covers, and stops at its budget. | **no test** |
+| A track the export no longer has loses its row and list entries once the job has verified the stamp; a track whose file is not on the stick has no row and gets none again; with many files unfindable by name (a volume without UTF-8 names) nothing is removed and the job returns `ErrFilesUnreadable`; a row with a NULL track path does not break a re-export. | `TestPort1DeletedTracksAreRemovedAfterVerifiedFill`, `TestPort1UnreadableTrackNamesRefuseRemovalUntilRestored` (`pkg/bridge/port1_mount_test.go`); `TestPort2MissingTrackIsRemovedAndDuplicateSourceIsJoined`, `TestMountLeavesATrackWithoutItsFileWithoutARow` (`pkg/bridge/port2_mount_misc_test.go`); `TestPort5NullTrackPathDoesNotBreakReexport` (`pkg/bridge/port5_misc_test.go`) |
+| A window never writes a library it must not: one another process has open (`ErrLibraryInUse`), a symlinked `Engine Library`, a hard-linked `m.db`, a read-only library (also the HFS+ view); a cancelled first build leaves no `Engine Library` folder and a finished one passes `integrity_check` and `foreign_key_check` (#53, #301). | `TestPort1OpenLibraryRefusesConcurrentProcess`, `TestPort1CancelledFirstBuildLeavesNoEngineLibrary` (`pkg/bridge/port1_mount_test.go`); `TestPort2ProtectedAndReadOnlyLibrariesAreNotWritten` (`pkg/bridge/port2_mount_misc_test.go`) |
+| A row's tempo never takes rekordbox's 500 BPM clamp: it gets the grid's tempo, or 0 without a grid (CF-049); the staged half is in 2.4. | **no test** |
+| Staged data is applied once, when `Rules` and the row hash match; what the deck wrote afterwards stays when the export changes the track (each field decided alone: hot cue slot, saved loop, grid and BPM, grid lock, rating), and a row nobody touched is replaced (#328). | `TestMountStagedDataAndDeckEdits` (`pkg/bridge/mount_test.go`); `TestPort1ReexportKeepsDeckPerformanceFieldsFieldByField` (`pkg/bridge/port1_mount_test.go`) |
+| What Engine wrote while the job ran (a play, entries of the prepare list, the played indicator) survives the publishing window (#301). | `TestPort1PublishingWindowCarriesEngineWrites` (`pkg/bridge/port1_mount_test.go`) |
+| Edits queued while Engine had the library open (`enginex-pending.json`: a hot cue, genre, comment, label) are applied at the next mount (#314). | `TestPort2QueuedHotCueAppliesAtMount` (`pkg/bridge/port2_mount_misc_test.go`); `TestApplyPendingTrackMetadata` (`pkg/enginedb/pending_metadata_test.go`) |
+
+### 2.3 Take-over of an older build's library, and Engine's own rows and lists (#252)
+
+| Requirement | Tests |
+|---|---|
+| A library of an older build (`.rb-bridge-state.db`, no snapshot) is taken over once, in a window: paths, Engine IDs, list IDs and written digests come from the old state (also when its analysis records are malformed), every track is marked for the job, the old state file is removed after the snapshot is saved, the next mount is Bypassed, and nothing the deck wrote is lost (played marks, `dateAdded`, cues, loops, active-loop mask, list tree and order). | `TestPort1LegacyTakeoverUsesOwnedPathsWithMalformedAnalysis`, `TestPort1LegacyTakeoverPreservesDeckEdits` (`pkg/bridge/port1_mount_test.go`) |
+| The take-over of a large library (about 5,900 rows) finishes over several windows, without writing rows that already hold the export's fields (replica, 2026-11-25). | `TestMountLeavesRowsThatHoldTheExportsFieldsUnwritten`, `TestMountUpdatesRowsInBatchesAfterTheLists` (`pkg/bridge/mount_test.go`) |
+| A change of the offset or grid rule (`rbstate.Rules`) makes the next insert read the affected tracks again, once, unless the DJ edited the row (#178, #233, #333). | **no test** |
+| A deck running the previous build (5.3.0.5-r1) that meets a stick last written by v2 does not damage it. | **no test** |
+| Engine's empty skeleton `m.db` is not a library: the export is converted over it, and a track the deck had loaded and the library UUID are kept. | `TestPort1SkeletonLibraryIsReplacedByExport` (`pkg/bridge/port1_mount_test.go`) |
+| A row Engine made for a file the export also names is not overwritten or adopted (the title stays, the snapshot marks it native), and the job never stages a native row (#252). | `TestPort2NativeTrackConflictRemainsNative` (`pkg/bridge/port2_mount_misc_test.go`); `TestFillPublishesOnlyWhatAWindowWouldApply` (`pkg/bridge/fill_test.go`) |
+| A track Engine analysed itself, or a row that holds an import made under an older offset, gets rekordbox's grid, cues and loops (at this import's positions), unless the DJ edited them (#233, #253). | `TestPort2EngineAnalysisIsReplacedWhileDeckCueIsKept` (`pkg/bridge/port2_mount_misc_test.go`); `TestRealignKeptMovesTheImportsPositionsAndKeepsTheDecks` (`pkg/enginedb/realign_test.go`) |
+| Lists the DJ made survive every rebuild: one under an imported folder moves to the root when the folder is renamed, removed or rebuilt, with its tracks, sibling order and nested folders; a root name clash gets a suffix; a list Engine exported is never adopted; none is lost when the bridge's state is lost (#252, BH2-A4-3). | `TestPort1NativeChildPlaylistSurvivesImportedFolderRemoval` (`pkg/bridge/port1_mount_test.go`); `TestPort5NativeSiblingChainSurvivesFolderRebuild`, `TestPort5NestedNativeHierarchySurvivesFolderRename`, `TestPort5NativeChildParentChangesPreserveData`, `TestPort5NativeSiblingRelativeOrderSurvivesRebuild`, `TestPort5ExportedNativeChildIsNeverAdopted`, `TestPort5NativeChildSurvivesLostBridgeState` (`pkg/bridge/port5_playlist_test.go`) |
+| A write that fails part-way (a trigger aborting the reparent, the folder delete or the list write) leaves `m.db` and the snapshot as they were. | `TestPort2FailedMountRollsBackLiveLibrary` (`pkg/bridge/port2_mount_misc_test.go`); `TestPort5PlaylistRebuildRollsBackNativeChildren` (`pkg/bridge/port5_playlist_test.go`) |
+| When Engine recreates the imported lists under new IDs, the next window reuses them and makes no duplicate lists. | `TestPort2RebuiltPlaylistsAreReusedWithoutDuplicates` (`pkg/bridge/port2_mount_misc_test.go`) |
+
+### 2.4 The background job: order, priority, pacing, degraded tracks (#53), covers, list waveforms
+
+| Requirement | Tests |
+|---|---|
+| The job stages every track of the export (facts, row hash, audio and ANLZ signatures, beats, cues, overview, detail files), verifies the stamp, and writes nothing on the stick but the mini waveforms of finished tracks: `m.db`, the snapshot and the exports stay byte for byte. | `TestFillStagesEveryTrackAndWritesNothingElseOnTheStick` (`pkg/bridge/fill_test.go`) |
+| A track the stage or the snapshot already has for its files is not built again, and once the stamp is verified a built track is not even stat'ed; a changed file builds that track alone; a degraded track is not read again while its files are unchanged; a file that comes back without a re-export is found by the next job. | `TestFillSkipsWhatIsStagedOrBuilt`, `TestFillFindsAMissingFileThatCameBack` (`pkg/bridge/fill_test.go`); `TestStatTrackSignatureMatchesTheBuild` (`pkg/enginedb/trackbuild_test.go`) |
+| Priority tracks go first, newest request first, then every other track by path; an unknown path does not hold the job up; the acks survive a restarted queue; the queue coalesces identical requests, keeps one 0600 record per volume, and follows the deck-activity file; the deck and the browser enqueue through a loopback-only endpoint. | `TestFillServesThePriorityQueueFirst` (`pkg/bridge/fill_test.go`); `TestPriorityQueueCoalescePermissionsAndActivity` (`pkg/bridge/priority_test.go`); `TestRekordboxPriorityFromDecksAndBrowse` (`pkg/webui/rekordbox_priority_test.go`) |
+| With no deck playing the job reads at full speed; while one plays, reads are at most 64 KiB with a pause after each read that went to the stick (none after a page-cache read), and no readahead reads past the pause. | `TestFillYieldsToAPlayingDeck`, `TestPacerPausesOnlyAfterTheStick` (`pkg/bridge/fill_test.go`); `TestBuildTrackPacesItsReadsAndStopsCleanly` (`pkg/enginedb/trackbuild_test.go`); `TestBuildTrackPacedReadsLeaveTheRestOfTheFileUnread` (`pkg/enginedb/trackbuild_linux_test.go`) |
+| A stop ends the job at once and keeps what it staged; the next job goes on from there; the progress count never goes down and reaches the total (#301, #328); with `/data` at the stage's floor the job stops, reports what it staged, and does not fail. | `TestFillStopsCleanlyAndGoesOnLater`, `TestFillStopsAtAFullStageAndPublishesWhatItHas` (`pkg/bridge/fill_test.go`) |
+| The job never runs beside a window (it waits while a window holds the volume), and a job on a stick no window left a snapshot on ends quietly, with no error for the browser and no remount. | `TestFillWaitsForTheWindow` (`pkg/bridge/fill_test.go`); `TestImportJobWithoutASnapshotEndsQuietly` (`internal/cli/rbbridge_import_test.go`) |
+| A track the volume refuses (a symlink, also in a directory the job cannot list; traversal, NUL, a directory, a name two files share) is logged and left unstaged, and the job stages the others and still verifies the stamp (#252). | `TestFillGoesOnPastATrackItCannotRead` (`pkg/bridge/fill_test.go`); `TestStatTrackUnreadableDirectoryCannotHideSymlink`, `TestBuildTrackRefusesUnsafePaths` (`pkg/enginedb/trackbuild_test.go`) |
+| One unusable file degrades only its track, with the reason (a bad audio header, an over-large cover, a malformed or truncated ANLZ section); the other tracks are built. A missing audio file is a record that says so; one that cannot be read now is no record (#53, #253). | `TestBuildTrackDegradesOnlyTheTrackWithTheBadFile`, `TestBuildTrackDegradesOnMalformedOrTruncatedAnalysis`, `TestBuildTrackMissingAndUnreadableAudio` (`pkg/enginedb/trackbuild_test.go`) |
+| The job asks for the remount only for records a window would apply, and never twice for the same set, so a window that takes nothing cannot cause a remount loop; records the window refuses are dropped from the stage. | `TestFillPublishesOnlyWhatAWindowWouldApply` (`pkg/bridge/fill_test.go`) |
+| The job runs as its own systemd unit at idle priority, with the name the hook uses, waits for the visible mount, and a finished job releases the global lock so a second stick's job runs (#301). | `TestImportUnitMatchesTheHook`, `TestStartImportRunsAnIdleSystemdUnit`, `TestImportJobWaitsForTheVisibleMount`, `TestMountPathStartsTheBackgroundImport` (`internal/cli/rbbridge_import_test.go`); `TestIssue301CompletedImportReleasesGlobalLock` (`internal/cli/rbbridge_review_b2_test.go`) |
+| The remount waits until Engine has closed the stick's files, no deck or Engine Link peer holds a track of it, and a quiet time has passed; it leaves an ejected stick alone, keeps the real failure, and finds the device under an HFS+ view (#301). | `TestIssue301RemountRemovesAndAddsThePartition`, `TestIssue301RemountWaitsWhileADeckHoldsATrackFromTheStick`, `TestIssue301RemountLeavesAnEjectedStick`, `TestIssue301RemountFailureKeepsAnError`, `TestIssue301RemountFindsTheDeviceUnderAView` (`internal/cli/rbbridge_remount_test.go`); `TestIssue301RemountKeepsALibraryAPeerLoadedFrom`, `TestIssue301RemountAsksEngineLinkPeers` (`internal/cli/rbbridge_review_b2_test.go`); `TestIssue301WaitsThenRemountsAutomatically` (`internal/cli/rbbridge_quiet_test.go`) |
+| One start offset for a file however it reaches the deck: cues, beats and loops shift by 1105 samples (MP3 with an Info/LAME tag), 1152 (Xing only) or 0 (headerless, WAV), clamped at 0, the file header's rate winning over a wrong export rate (#178); AAC keeps the export's timing when the `moov` is cut, and an HE-AAC file shifts by its 2048 priming samples. | `TestBuildTrackOffsetRule4AcrossAudioClasses`, `TestBuildTrackAACKeepsTheExportTiming` (`pkg/enginedb/trackbuild_test.go`); `TestEncodePerformanceMP3StartOffsetAndClamping` (`pkg/enginedb/performance_test.go`) |
+| The staged tempo ignores rekordbox's 500 BPM clamp (the grid's tempo, or 0 without a grid; a grid whose first beat carries the clamp is dropped), and a WAV with a 32-bit container and 24 valid bits keeps the right sample count (CF-049). | `TestBuildTrackDropsRekordbox500BPMClamp` (`pkg/enginedb/trackbuild_test.go`); `TestPort2Bogus500BPMUsesGridOrZero`, `TestPort2WAVContainerBitsKeepValidSampleCount` (`pkg/enginedb/port2_buildtrack_test.go`) |
+| The OneLibrary cue table's cues join the ANLZ cues, a valid RGB overview is staged, rekordbox's 3-band bytes read as low, mid, high, the blobs are as Engine writes them (68-byte `trackData`, 129-byte empty quick cues, opaque cue colours, waveform peaks; GL-013, #101), and with a PWV7 in the `.2EX` the `.EXT` waveform bodies are not read (#253). | `TestBuildTrackStagesCuesFromTheExportAndAnRGBOverview`, `TestBuildTrackLeavesTheEXTWaveformsUnread` (`pkg/enginedb/trackbuild_test.go`); `TestPWV7BandsAreLowMidHighOnRekordboxDemoTracks` (`pkg/enginedb/pwv7_order_test.go`); `TestQCompressAndAbsentCues`, `TestExactContainerSamplesAndLegacyCueColor`, `TestTrackDataWaveformPeaks`, `TestTrackDataPeaksUpgrade` (`pkg/enginedb/performance_test.go`) |
+| The export's cover is used first, a cover inside the audio file only when the export names none, and extraction is bounded (ID3v2.2, FLAC and MP4; lying lengths and oversized images are refused without a panic); a staged cover is applied as one `AlbumArt` row with a 20-byte hash and an `Artwork/` file, shared by tracks with the same cover. | `TestBuildTrackTakesTheEmbeddedCoverOnlyWithoutAnExportCover` (`pkg/enginedb/trackbuild_test.go`); `TestExtractEmbeddedArtwork` (`pkg/enginedb/artwork_embedded_test.go`); `TestArtworkReadIsBoundedByTheFileAndTheCap`, `TestArtworkFromID3v22PIC` (`pkg/enginedb/artwork_bounds_test.go`); `TestTruncatedFLACPictureBlockAllocatesOnlyTheFile`, `TestMalformedArtworkLengthsAreRefusedWithoutPanic` (`pkg/enginedb/artwork_lengths_test.go`); `TestPutArtworkRejectsOversizedPNGDimensions` (`pkg/enginedb/bh2_a4_test.go`); `TestPort2StagedCoverIsDeduplicatedAndServed` (`pkg/bridge/port2_mount_misc_test.go`) |
+| Covers are applied after staged data, and a cover that cannot be read is not tried again until the export changes the track. | **no test** |
+| Every finished track gets its `OverviewData/<uuid>/<id>.rgb`, written atomically by the job, also for a prioritised track before the remount; a valid file is never replaced, an empty one is; the encoder writes PWV6 over PWV7, a PWV4 fallback, 3,099 bytes and a trailer equal to the per-channel maxima. | `TestFillWritesTheMiniWaveformNeverOverAValidOne` (`pkg/bridge/fill_test.go`); `TestEncodeRGBOverviewPWV6AndPWV4FormatAndPruneSafe` (`pkg/enginedb/rgb_overview_generate_test.go`) |
+| A track's `.rgb` is its own: the bridge never gives a row's ID to another file (Engine IDs are stable, `Track.id` is `AUTOINCREMENT`, a library is built only where none is), so v2 has no mount-time prune of the stick's files. A track whose audio or analysis changed in place keeps the `.rgb` it has: the job replaces only an empty or invalid one. | **no test** for the changed-in-place case (a known gap, 2.9); the deck's own library is still pruned at boot by `engine-ui-guard` (`--prune-rgb-overviews`, `tests/test_rootfs_overlay.sh`) |
+| Deck-speed targets: a whole fill of 2,420 tracks in about 354 s with no deck playing and 1,003 s while one plays; a prioritised track staged in 0.4 to 1.6 s; no underrun of a playing deck's reads. | **no test** |
+
+### 2.5 Cue write-back: gate, identity by path, what is written where, crash safety (#271, #314, #321), the watcher and eject
+
+| Requirement | Tests |
+|---|---|
+| Write-back writes only when the snapshot has no pending import work (a pending import means no write and one log line), and is allowed again once the job has verified the stamp after a re-export that changed no track file (#321). | `TestWriteBackGateRejectsPendingImport` (`pkg/bridge/writeback_test.go`); `TestPort5PlaylistOnlyReexportVerifiesStampForWriteback`, `TestPort5WritebackGateUsesCurrentExportAfterFill` (`pkg/bridge/port5_misc_test.go`) |
+| A snapshot whose stamp no longer matches the exports now on the stick refuses write-back, and so does a missing or older stamp. | **no test** |
+| A deck row maps to its rows in the libraries by the snapshot's path identity, never by source ID alone (a source ID that now names another path matches nothing); a reference whose library is unavailable stays pending and is not recorded as synced; an unreadable OneLibrary does not stop the Device Library write (#321). | `TestBuildChangesRequiresSnapshotPathIdentity`, `TestBuildChangesDoesNotConfirmMissingSourceReference` (`pkg/bridge/writeback_test.go`); `TestPort4WriteBackRejectsSnapshotPathMismatch` (`pkg/bridge/port4_writeback_test.go`); `TestWriteBackUsesSnapshotPathAndSkipsTheSecondPass` (`pkg/bridge/writeback_integration_test.go`); `TestP3UnreadableOneLibraryIsExcludedFromWriteBack` (`pkg/bridge/port3_writeback_test.go`) |
+| Only rows whose `lastEditTime` moved are read, and a pass over rows Engine only re-analysed reads no export, derives no key and writes no file; an edit made before a pull is found at the next pass; a row Engine rewrote unchanged is read once (#321). | `TestWriteBackAnalysisOnlyPassSkipsExportRead` (`pkg/bridge/writeback_test.go`); `TestPort4WriteBackAnalysisOnlyChangeSkipsExportRead` (`pkg/bridge/port4_writeback_test.go`); `TestP3EditBeforePullIsFoundOnNextPass`, `TestP3SessionReadsRewrittenRowOnce` (`pkg/bridge/port3_session_test.go`) |
+| A hot cue set on the deck is written into the track's ANLZ files, the first original of each file is saved under `.enginex-backup/<date>/`, a second pass changes nothing, and the cue survives a later insert (#271). Whether that insert is taken for an unchanged export is not asserted. | `TestP3CueWriteBackUpdatesANLZBackupAndReinsert` (`pkg/bridge/port3_writeback_test.go`); `TestPort4WriteBackPDBCuesMetadataBackupAndConvergence` (`pkg/bridge/port4_writeback_test.go`) |
+| Genre, comment and label edited on the deck reach `export.pdb` and the OneLibrary (#314). | `TestP3MetadataWriteBackUpdatesPDB` (`pkg/bridge/port3_writeback_test.go`); `TestP3MetadataWriteBackUpdatesPDBAndOneLibrary` (`pkg/bridge/port3_onelibrary_test.go`) |
+| A cue the DJ deleted is written back, a deactivated saved loop is seen, and an edit that sits only in `m.db`'s uncheckpointed WAL is seen; an untouched or merely clamped cue is not reported changed (uncoloured cues stay uncoloured, cues at the clamp keep their time, a legacy MP3 offset drift is not rewritten) (#321). | `TestP3WriteBackRoundTripsCueDeletion`, `TestP3WriteBackDetectsActiveLoopDeactivation`, `TestP3WriteBackReadsUncheckpointedWAL` (`pkg/bridge/port3_writeback_test.go`); `TestP3MergeEngineCuesPreservesUncolouredImportedCues`, `TestP3MergeEngineCuesClampAtZeroPreserved`, `TestP3MergeEngineCuesPreservesLegacyMP3OffsetDrift`, `TestP3TrackRekordboxOffsetRejectsUnreadableAudio` (`pkg/bridge/port3_safety_test.go`) |
+| MP3 and AAC start offsets are put back on write: a cue set at 65 ms lands at 65 ms within 1 ms. | **no test** |
+| A hot cue reaches the OneLibrary cue table (re-encrypted, `integrity_check` ok) as well as the ANLZ files; pad slots A to H map to hot cues 1 to 8; a macOS stick with a hidden `.PIONEER` is written. | **no test** |
+| Each pass logs one line (tracks, read, changed, per-phase times, files, bytes, pass kind). | `TestP3WriteBackLogsOnePassLine` (`pkg/bridge/port3_log_test.go`) |
+| The watcher writes a deck edit a quiet time after Engine's last write, once per burst, does not poll an unchanged `m.db`, drops a read that overlaps a write, waits for a running conversion and for an Eject, and cleans cut leftovers when it attaches (#321). | `TestP3WatcherWritesOnceAfterQuietPeriod`, `TestP3WatcherDefersConversionAndFinalPassWritesEjectEdit` (`pkg/bridge/port3_watcher_test.go`); `TestPort4WatcherWaitsForQuietAndDoesNotRepoll`, `TestPort4WatcherDefersConversionAndEjectToTheirPasses`, `TestPort4WatcherDropsOverlappingReadAndWritesLatestEdit`, `TestPort4WatcherCleansCutLeftoversOnAttach` (`pkg/bridge/port4_watch_test.go`) |
+| `--writeback-cues --on-eject` hands the pass to stream-sync's final pass, does its own pass when stream-sync does not answer, and gives up on a pass that overruns; the hook runs it at Eject only for a stick with a snapshot. | `TestRBBridgeOnEjectHandsThePassToStreamSync`, `TestRBBridgeOnEjectGivesUpOnAPassThatOverruns` (`internal/cli/rbbridge_writeback_test.go`); `TestRBBridgeWriteBackOnEjectFlag` (`internal/cli/rbbridge_test.go`); `test_eject_runs_cue_writeback`, `test_eject_writeback_overrun` (`tools/edisksd-hook/test_edisksd_hook.c`) |
+| The web write-back endpoint refuses GET, a bad drive and a missing drive, skips an unstamped library, and runs the Eject pass only for a request from the deck itself. | `TestHandleRekordboxWriteback`, `TestRekordboxWritebackFinalOnlyFromTheDeck` (`pkg/webui/rekordbox_writeback_test.go`) |
+| A stick that hangs at insert holds only itself: another stick's write-back and mount go on (#321). | **no test** |
+
+### 2.6 Crash safety of the window and the snapshot (design section 5)
+
+| Requirement | Tests |
+|---|---|
+| A power cut or the hook's kill between any two writes of a window (first insert, a re-export with new lists and tracks, a window that applies staged data) ends in the same library as an undisturbed run, every track once, with no next-snapshot left. | `TestMountCutAtEveryStepEndsInTheSameLibrary` (`pkg/bridge/mount_test.go`) |
+| A snapshot that is cut short or has changed bytes is no snapshot; the next-snapshot is invisible to readers until promoted, and a cut one is no claim. | `TestSnapshotRoundTripAndHeader`, `TestSnapshotCutOrChangedIsAbsent`, `TestNextSnapshotIsSeparateUntilPromoted` (`pkg/rbstate/rbstate_test.go`) |
+| A file replaced on the stick is whole at every point a pull can separate; the old file is left when it may not be freed, and a leftover or replaced file is freed only when the FAT gives it all its clusters (FAT16, FAT32, short chains; free clusters, wrong lengths and FAT12 are not owned) (#321). | `TestReplaceFileIsWholeAtEveryCut`, `TestReplaceFileLeavesTheOldFileWhenItMayNotBeFreed` (`pkg/rbstate/rbstate_test.go`); `TestIssue321FATChainOwned` (`pkg/bridge/fat_test.go`) |
+| One lock per volume: a second holder waits or is refused, and a waiting one takes it when the first lets go. | `TestLockVolumeExcludesAndWaits` (`pkg/rbstate/rbstate_test.go`) |
+| A write-back pass cut at every write step leaves no temporary file after the next mount's clean-up, every ANLZ file parses, and the pass after writes the cue; a staged copy cut at any offset is not trusted; a mark line through a symlink never leaves the mount; a pull before a rename, or a failing second rename, leaves every original whole (#321). | `TestPort4CutPassRecoversAndConverges`, `TestPort4StagedCopiesCutAtAnyOffsetAreRejected`, `TestPort4CutMarkCleanupStaysInsideMount` (`pkg/bridge/port4_safety_test.go`); `TestP3PullBeforeRenameLeavesOriginalFilesIntact`, `TestP3SecondRenameFailureLeavesAllExportTargetsIntact` (`pkg/bridge/port3_writeback_test.go`) |
+| Write order: the backup directories exist before the mark, and a replaced file is held open until the new entry is synced. | `TestPort4BackupDirectoriesExistBeforeWriteBackMark`, `TestPort4ReplacedFilesStayHeldUntilRenameSync` (`pkg/bridge/port4_safety_test.go`) |
+| The stage on `/data`: a record round-trips, a newer `Put` wins, a torn last index line is ignored, names are safe, and the performance file round-trips and refuses cut or oversized input. | `TestStagePutGetDropAndTornIndex`, `TestStageRootInTestsIsPrivateAndNamesAreSafe`, `TestPerfFileRoundTripAndBounds` (`pkg/rbstate/rbstate_test.go`) |
+| On a real FAT32 or exFAT volume a stale entry (a file naming freed clusters) is found before a pass creates anything: the pass refuses naming the path, writes nothing, and writes again after a disk check (#321). | **no test** |
+| Engine does not move `lastRekordBoxLibraryImportReadCounter` between a cut window and the next one (the assumption stated in design section 5). | **no test** |
+
+### 2.7 Other readers: shadow display, dbhealer, MP3 grid fix, CLI status, the edisksd hook
+
+| Requirement | Tests |
+|---|---|
+| The webui shadow display finds a bridge track's detail waveform through the snapshot's references to the ANLZ files, and prefers a valid PWV7, then PWV5. | `TestBridgeDetailsFollowTheReferenceToTheANLZFiles` (`pkg/webui/issue253_detail_test.go`) |
+| `dbhealer` leaves the rows the bridge manages alone; until a mount has taken a library over it reads the old state file. | `TestHealMountDataOnlyNormalizesMissingNFDPaths`, `TestHealMountDataOnlyLeavesTracksWhenBridgeStateIsUnreadable` (`pkg/dbhealer/normalization_test.go`) |
+| The MP3 grid fix and `dbhealer` find the bridge's rows by the snapshot's Engine IDs (`bridgeOwnedTracks`, `bridgeManagedTracks`). | **no test** |
+| The MP3 grid fix shifts the grid, cues and loops of an MP3 an earlier EngineX analysed, once, also on an unchanged export, and its cursor survives a hard exit (#246). | `TestPort2MountFixesAnEngineXMP3GridOnAnUnchangedExport` (`pkg/bridge/port2_mount_misc_test.go`); `TestFixMP3GridsExactShiftAndClamping`, `TestFixMP3GridsUntouchedTrackClasses`, `TestFixMP3GridsCursorSurvivesProcessExit` (`pkg/enginedb/mp3grid_test.go`) |
+| The USB banner follows the job (importing with done and total, waiting, removed when done), comes back after the hook clears it, belongs to its own drive's job, and keeps a failed job's error visible (#301, #328). | `TestRBBridgeUSBLoadingStatusLifecycle`, `TestIssue328StatusComesBackAfterTheHookClearsIt` (`internal/cli/rbbridge_status_test.go`); `TestImportStatusWaitingStaysUntilDone` (`internal/cli/rbbridge_import_test.go`); `TestIssue301StatusIsOwnedByItsJob`, `TestIssue301LateTransitionKeepsNewerStatus`, `TestIssue301ImportFailureStaysVisible` (`internal/cli/rbbridge_review_b2_test.go`) |
+| The hook stops the job under the job's unit name before an Eject, and the Eject's write-back needs `.rb-bridge-snapshot` on the stick. | `test_eject_stops_the_background_import`, `test_eject_runs_cue_writeback` (`tools/edisksd-hook/test_edisksd_hook.c`) |
+| A read-only HFS+ stick runs the bridge through the hook's view and its artwork folder is writable. | `test_hfs_mount_runs_bridge`, `test_hfs_view_artwork_is_writable` (`tools/edisksd-hook/test_edisksd_hook.c`) |
+| Write-back never runs on a lazy detach, a pulled stick or a read-only view. | **no test** |
+
+### 2.8 Old tests that pinned a mechanism that is gone
+
+These tests were not ported. Each group says why; the behaviour behind a group, where it still exists, has a row in
+2.1 to 2.7. Old names are given as written in the removed files.
+
+- **Export choice by file time** (`TestExportSelectionMTimeAndFallback`, `TestExportSelectionFreshness`,
+  `TestExportTieKeepsPDBImport`, `TestFreshExportTieKeepsSQLImport`, `TestMalformedLocalExportDoesNotFallBackToStaged`):
+  v2 reads both libraries and joins them; there is no preferred export (design 1.4). Replaced by the view tests of 2.1.
+- **The old merge and ghost filter** (`TestMergeExportLibraries*`,
+  `TestDualExportDropsGhostEmptyRootPlaylistsAbsentFromPDB`):
+  `mergeExportLibraries` and `filterGhostEmptyRootPlaylists` are gone. Replaced by
+  `TestViewOfTwoLibrariesHasThreeFoldersAndEveryTrackOnce`
+  and `TestViewHidesOneLibraryGhostRootLists`.
+- **The state database and its marks** (`BridgeState`, `BridgeAnalysis`, `BridgeWritten`, `BridgeSynced`,
+  `.rb-bridge-state.db`, `.rb-bridge-stamp`, `.rb-bridge-pending`, `fast:` fingerprints): `TestIssue272*`,
+  `TestIssue253StateStaysWithinAPerTrackBudget`, `TestIssue233UninspectedExistingOffsetStaysPending`,
+  `TestIssue233Large*`, `TestIssue264*`, `TestLargeLibrary*`, `TestSmallLibraryDeferredMountWritesPendingAndResumes`,
+  `TestFailedImportRollsBackBridgeSchema`, `TestEngineSchemaResetKeepsBridgeState`,
+  `TestImportedRecordChangedTreatsOpaqueFingerprintAsChanged`,
+  `TestInvalidateUnsyncedEditsKeepsWrittenAndDropsEdited`, `TestSingleExportStampUnchanged`, and the `pkg/enginedb`
+  compaction and shrink tests (`TestShrinkBridgeAnalysis*`, `TestIssue272Compact*`, `BenchmarkPackAnalysisLargeBatch`).
+  The snapshot (`pkg/rbstate`) replaces them (design 1.3, 1.9); the behaviours are the window and write-back rows.
+- **Waveform copies in the state database** (`TestIssue253BrokenANLZKeepsItsWaveformRow`,
+  `TestIssue253MountReadsNoANLZFileForTheWaveformCopies`, `TestIssue253UpdateLeavesTheWaveformCopiesBehind`,
+  `TestIssue253GateIsTheDetailReader`, `TestIssue253GateReadsTheFileAsTheDisplayDoes`): v2 keeps references only and
+  the shadow display shows Engine's own overview for a track whose ANLZ later fails (design 1.11 item 3). The build
+  half is `TestBuildTrackDegradesOnMalformedOrTruncatedAnalysis`.
+- **Quick update, list-first stage, staged library copy, publish directory** (`TestIssue253Cut*`,
+  `TestIssue253QuickUpdate*`, `TestIssue253ReexportTooLargeForTheMountPublishesItsListFirst`,
+  `TestIssue253FastPublishStartsTheBackgroundUpdate`,
+  `TestIssue301Stage*`, `TestIssue301BulkRefusesTheLiveLibrary`, `TestInterruptedFastPublishIsCompleted`,
+  `TestVacuumStageMDB*`,
+  `TestMountImportPreservesConcurrentEngineWrite`, `TestUpdatePublish*`,
+  `TestIssue301UpdateLeavesALibraryEngineChanged`):
+  the window writes `m.db` in place, so there is no stage copy to merge, vacuum or publish. The cut points are
+  `TestMountCutAtEveryStepEndsInTheSameLibrary`; what Engine wrote meanwhile is
+  `TestPort1PublishingWindowCarriesEngineWrites`.
+- **Mount-time budgets and deadlines** (`TestConvertAtMountKeepsOverviewDeadlineWhenImportFails`,
+  `TestConvertAtMountHandsOffBeforeHookKillWhenPruneConsumesBudget`,
+  `TestIssue233ExpiredIncrementalBudgetDoesNotReadEveryNewMP3`,
+  `TestIssue264ResumeNeverDeadlocksOnExpiredDeadline`, `TestIssue264SlowReconcileDoesNotExhaustFileReadingBudget`,
+  `TestConvertAtMountMP3GridsShareReadBudget`): a window has one deadline and the job has none. Replaced by
+  `TestMountOutOfTimeLeavesRowsPendingAndFinishesLater` and `TestMountPathAsTheHookRunsIt`.
+- **Overview backfill and zero-maximum completion** (`TestStampBypassCompletesOldOverviewsOnce`,
+  `TestOverviewBackfillCutShortGoesOnAtTheNextInsert`, `TestResumedImportCompletesOldOverviews`,
+  `TestOverviewProgress*`,
+  `TestFillOverviewMaximaGoesOnWhereTheLastMountStopped` and the rest of that family): the backfill and
+  `.rb-bridge-overview` are deleted; the UI hook draws a zero-trailer overview at stock height (row 272).
+- **Artwork migration** (`TestIssue233ArtworkDeadlineCommitsProgressAndRetries`,
+  `TestMigrateArtworkUsesCoveringHashIndex`,
+  `TestIssue233StampBypassDoesNotReloadMigratedArtwork`): `MigrateArtwork` is deleted (design 1.9).
+- **The verified-`.rgb` cache and the mount-time prune** (`TestRGBVerifiedCacheAndCountMissing`,
+  `TestPruneRGBOverviewsRespectsMountBudget`, `TestPublishRemovesRGBOverviewsOfAnotherTrack`): deleted with the cache.
+  `TestRenameStagePreservesValidDestinationRGB` and `TestPublishGeneratesAndPreservesRGBOverviews` are replaced by
+  `TestFillWritesTheMiniWaveformNeverOverAValidOne`. v2 gives no row's ID to another file, so nothing is pruned at a mount (2.4).
+- **Source-ID lookup and stamp text** (`TestResolveRekordboxTrackUsesPathBeforeShiftedID`,
+  `TestResolveRekordboxTrackRejectsIDWithDifferentPath`, `TestWriteBackStampReason`): `pdbImportKey` and the "v4" text
+  are gone. Replaced by `TestBuildChangesRequiresSnapshotPathIdentity` and `TestWriteBackGateRejectsPendingImport`; the
+  stamp-mismatch cases are not ported (2.9).
+- **Offset and grid versions carried by the stamp** (`TestOneOffsetRuleCompletedLibraryIsReadAgainOnce`,
+  `TestOneOffsetRuleFrozenRowsAreConvertedAgainOnce`, `TestAACGridMigratesAnUnchangedV2Export`, the resync half of
+  `TestIssue178MP3OffsetClassesAndExistingLibraryResync`): `rbstate.Rules` in each track's signature replaces the stamp
+  prefix. The positions are `TestBuildTrackOffsetRule4AcrossAudioClasses`; no test raises `Rules` (2.9).
+- **Fast rows and the fast-base file** (`TestIssue328AStageWithoutItsFastBase*`, `TestIssue328B*`): `BridgeFastBase` and
+  `fast-base.db` are deleted. The field rule is `TestPort1ReexportKeepsDeckPerformanceFieldsFieldByField`.
+- **Old import internals in `pkg/enginedb`** (`TestIssue301TrustPathsSkipsTheLookup`,
+  `TestOrderTracksForPreparePriorityThenPathSorted`,
+  `TestLargePDBPreparationProgress253`, `TestPrepare252CaseDifferencesBoundWorkAndMakeProgress`,
+  `TestWriteEntitiesPreservesEntityChain`,
+  `TestOpenReservesWriterBeforeReading`, the identity benchmarks): `sync.go` and `prepare.go` are replaced by
+  `library.go`
+  and `trackbuild.go`. Two files that differ only in case are one key now (`TestFoldPath`).
+- **The on-stick lock file and the old test harness** (`TestCleanupKeepsALockHeldByAnotherBridge`,
+  `TestInChildForTest*`):
+  `.rb-bridge.lock` is gone (`TestLockVolumeExcludesAndWaits` covers the lock) and `InChildForTest` was infrastructure.
+- **Assertions the port reports dropped on purpose.** Port 1 shrank two matrices (600 tracks and 71 unreadable names to
+  100 and 7; the 5/40/60 deletion cases to 20 tracks and 4 files). Port 2 replaced `Unchanged` and stamp assertions
+  with `Bypassed` and byte stability. Port 3 dropped the inotify assumptions (v2 polls every 100 ms), the exact global
+  key-derivation count, and the `rc3_cues_test.go` analysis-cap re-export (the cap state is gone). Port 4 dropped the
+  per-step temp truncation and exFAT directory-entry replay, the loop-device `mkfs`/`fsck` stale-chain tests, the
+  `strace` syscall-order parse (the hook now observes the directory state at the mark), the FIFO stall and cross-stick
+  scheduling case of
+  `issue321_attach_linux_test.go`, and the key-derivation counter. Port 5 dropped the late counter-update
+  injection of the rollback test and the old `Sync` result flags.
+
+### 2.9 Requirements without a test
+
+The rows above marked **no test**, by area.
+
+- 2.1: the bridge reads `rb_library_view` from `settings.conf` (`ReadLayout`), and the deck's settings menu offers the
+  four choices. Only the web console side of the setting is tested.
+- 2.2: the window's work order under a budget (rows, lists, staged data with priority tracks first, covers).
+- 2.2: a row's tempo ignores the 500 BPM clamp (only the staged half is tested, in 2.4).
+- 2.3: a change of `rbstate.Rules` makes the next insert read the affected tracks again, once.
+- 2.3: a deck running 5.3.0.5-r1 meets a stick last written by v2 (to be tried with the `147e37fb` step binary).
+- 2.4: covers are applied after staged data, and an unreadable cover is not tried again until the export changes.
+- 2.4: a track that was analysed again in rekordbox, or whose audio file was replaced, keeps its old list waveform
+  file: the job writes an `.rgb` only where none is valid (`TestFillWritesTheMiniWaveformNeverOverAValidOne` pins
+  that). The old mount-time prune removed such a file; it was also the step that ran a mount past the hook's kill.
+  Replacing the file when its content differs from the staged one is a small change in the job (one compare of a
+  file it reads anyway): a decision for the maintainer.
+- 2.4: the deck-speed targets (354 s and 1,003 s fills, 0.4 to 1.6 s for a prioritised track). The gate is the replica
+  script of design section 6, not a Go test.
+- 2.5: a stamp that no longer matches the exports, or is missing or older, refuses write-back. Only the pending-work
+  gate is tested at package level; the web endpoint skips an unstamped library.
+- 2.5: MP3 and AAC start offsets are put back on write (65 ms lands at 65 ms). Only the merge rules and the refusal
+  for unreadable audio are tested.
+- 2.5: a cue reaches the OneLibrary cue table; pad slots A to H; a macOS stick with `.PIONEER`. OneLibrary write-back
+  is tested for genre, comment and label only.
+- 2.5: a stick that hangs at insert holds only itself.
+- 2.6: a stale FAT entry on a real FAT32 or exFAT volume is found before a pass creates anything. Only the ownership
+  predicate (`TestIssue321FATChainOwned`) is tested; the loop-device tests were not ported.
+- 2.6: Engine does not move the commit counter between a cut window and the next (an assumption, design section 5).
+- 2.7: the MP3 grid fix and `dbhealer` find the bridge's rows by the snapshot. The `dbhealer` tests still build the old
+  state file, and the MP3 grid tests do not create a snapshot.
+- 2.7: write-back never runs on a lazy detach, a pulled stick or a read-only view.
+
+Gaps inside rows that have a test, so the row is not listed above: whether the insert after a write-back is taken for
+an unchanged export is not asserted (2.5, hot cue row); a blanked `Information` row put right (GL-010) and the
+read-count bounds of #321 (40 untouched tracks read 0, at most 2 MiB) were not ported; an Eject during the final pass
+failing visibly within 3 s with every file whole is not tested beyond the CLI's give-up (2.5, eject row).
 
 ## 3. The deck's limits
 
