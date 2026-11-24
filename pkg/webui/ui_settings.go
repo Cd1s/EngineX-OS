@@ -850,6 +850,9 @@ func (s *Server) deckClockWanted(now time.Time) bool {
 			return true
 		}
 	}
+	if preparing, _ := s.usbPreparingState(now); preparing {
+		return true
+	}
 	return s.modsManager().IsModEnabled("dmx-studio")
 }
 

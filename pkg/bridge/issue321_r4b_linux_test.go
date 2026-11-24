@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
-	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
 // #321 review R4b (c′): every file a pass writes on the stick to rename or remove later (a staged
@@ -107,7 +106,7 @@ func TestIssue321AStagedFilesDirectoryIsSyncedBeforeTheFile(t *testing.T) {
 func issue321FirstPassOnOneLibrary(t *testing.T) {
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(stick, "Engine Library", "Database2", "m.db")}).String())
@@ -118,7 +117,7 @@ func issue321FirstPassOnOneLibrary(t *testing.T) {
 	issue321Settle()
 	issue321Edit(t, db, 1, "Order 321", 1000)
 	issue321Settle()
-	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{}, Keys: testKeys, Settled: func() error { return nil }})
+	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{}, Keys: testKeys, Settled: func() error { return nil }, SkipPreparingCheck: true})
 	if err != nil || res.FilesUpdated == 0 || !res.OneLibraryUpdated || res.BackupDir == "" {
 		t.Fatalf("first pass: %+v %v", res, err)
 	}

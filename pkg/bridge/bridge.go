@@ -3,14 +3,17 @@ package bridge
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -155,6 +158,49 @@ func exportCandidates(r *compat.Resolver, mount string) ([]exportCandidate, erro
 // exportReads counts reads of a drive's own export (each may decrypt a OneLibrary).
 var exportReads atomic.Int64
 
+// exportKeys keeps SQLCipher keys for rekordbox 7 exports in memory. KeyCache keys entries by
+// salt and passphrase, so a rewritten export with a new salt derives its own key.
+var exportKeys = rekordbox.NewKeyCache()
+
+const exportLibraryCacheLimit = 4
+
+var exportLibraryCache = struct {
+	sync.Mutex
+	entries map[string]*rekordbox.Library
+}{entries: make(map[string]*rekordbox.Library)}
+
+func exportCacheKey(c exportCandidate) string {
+	f, err := os.Open(c.full)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	var dev, ino uint64
+	if st, err := f.Stat(); err == nil {
+		if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+			dev, ino = uint64(sys.Dev), uint64(sys.Ino)
+		}
+	}
+	h := sha256.New()
+	if c.size <= 64<<10 {
+		if _, err := io.Copy(h, f); err != nil {
+			return ""
+		}
+	} else {
+		var buf [4096]byte
+		for _, off := range []int64{0, max(int64(0), c.size/2-2048), max(int64(0), c.size-4096)} {
+			n, rerr := f.ReadAt(buf[:], off)
+			if n > 0 {
+				h.Write(buf[:n])
+			}
+			if rerr != nil && !errors.Is(rerr, io.EOF) {
+				return ""
+			}
+		}
+	}
+	return fmt.Sprintf("%s %d:%d %d %d %x", c.full, dev, ino, c.size, c.mtime.UnixNano(), h.Sum(nil)[:16])
+}
+
 // afterExportRead runs after each export read; tests use it to stretch the read.
 var afterExportRead = func() {}
 
@@ -172,27 +218,275 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 	if len(candidates) == 0 {
 		return nil, errNoLocalExport
 	}
-	var errs []error
-	for i, c := range candidates {
-		var l *rekordbox.Library
+	read := func(c exportCandidate) (*rekordbox.Library, error) {
+		key := exportCacheKey(c)
+		if key != "" {
+			exportLibraryCache.Lock()
+			if cached := exportLibraryCache.entries[key]; cached != nil {
+				copy := cloneLibrary(cached)
+				exportLibraryCache.Unlock()
+				return copy, nil
+			}
+			exportLibraryCache.Unlock()
+		}
+
+		var library *rekordbox.Library
 		var err error
 		if c.isPDB {
-			l, err = rekordbox.ReadPDB(c.full)
+			library, err = rekordbox.ReadPDB(c.full)
 		} else {
-			l, err = rekordbox.ReadSQLite(ctx, c.full, nil)
+			library, err = rekordbox.ReadSQLiteKeys(ctx, c.full, nil, exportKeys)
 		}
-		if err == nil {
-			return l, nil
-		}
-		if err := ctx.Err(); err != nil {
+		if err != nil {
 			return nil, err
 		}
-		errs = append(errs, fmt.Errorf("%s: %w", c.rel, err))
-		if i+1 < len(candidates) {
-			log.Printf("rb-bridge: %s unreadable (%v); falling back to %s", c.rel, err, candidates[i+1].rel)
+		if key != "" {
+			exportLibraryCache.Lock()
+			if len(exportLibraryCache.entries) >= exportLibraryCacheLimit {
+				clear(exportLibraryCache.entries)
+			}
+			exportLibraryCache.entries[key] = cloneLibrary(library)
+			exportLibraryCache.Unlock()
+		}
+		return library, nil
+	}
+	primary, err := read(candidates[0])
+	if err != nil {
+		var errs []error
+		errs = append(errs, fmt.Errorf("%s: %w", candidates[0].rel, err))
+		for i := 1; i < len(candidates); i++ {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			fallback, fallbackErr := read(candidates[i])
+			if fallbackErr == nil {
+				log.Printf("rb-bridge: %s unreadable (%v); using %s", candidates[0].rel, err, candidates[i].rel)
+				return fallback, nil
+			}
+			errs = append(errs, fmt.Errorf("%s: %w", candidates[i].rel, fallbackErr))
+		}
+		return nil, errors.Join(errs...)
+	}
+	if candidates[0].isPDB {
+		return primary, nil
+	}
+	for _, candidate := range candidates[1:] {
+		if !candidate.isPDB {
+			continue
+		}
+		evidence, evidenceErr := read(candidate)
+		if evidenceErr != nil {
+			log.Printf("rb-bridge: %s unreadable; using %s for the selected export: %v", candidate.rel, candidates[0].rel, evidenceErr)
+			return primary, nil
+		}
+		return filterGhostEmptyRootPlaylists(primary, evidence), nil
+	}
+	return primary, nil
+}
+
+func cloneLibrary(in *rekordbox.Library) *rekordbox.Library {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Tracks = append([]rekordbox.Track(nil), in.Tracks...)
+	out.Playlists = make([]rekordbox.Playlist, len(in.Playlists))
+	for i, playlist := range in.Playlists {
+		out.Playlists[i] = playlist
+		out.Playlists[i].Tracks = append([]uint32(nil), playlist.Tracks...)
+	}
+	if in.Artwork != nil {
+		out.Artwork = make(map[uint32]string, len(in.Artwork))
+		for id, artwork := range in.Artwork {
+			out.Artwork[id] = artwork
 		}
 	}
-	return nil, errors.Join(errs...)
+	if in.Keys != nil {
+		out.Keys = make(map[uint32]string, len(in.Keys))
+		for id, key := range in.Keys {
+			out.Keys[id] = key
+		}
+	}
+	return &out
+}
+
+// filterGhostEmptyRootPlaylists removes the empty root leaves that rekordbox 7
+// writes into exportLibrary.db when the matching PDB has no such playlist.
+func filterGhostEmptyRootPlaylists(oneLibrary, pdb *rekordbox.Library) *rekordbox.Library {
+	if oneLibrary == nil || pdb == nil {
+		return oneLibrary
+	}
+	populated := map[string]bool{}
+	for _, p := range oneLibrary.Playlists {
+		if !p.Folder && len(p.Tracks) > 0 {
+			populated[p.Name] = true
+		}
+	}
+	pdbEmptyRoot := map[string]bool{}
+	for _, p := range pdb.Playlists {
+		if !p.Folder && p.ParentID == 0 && len(p.Tracks) == 0 {
+			pdbEmptyRoot[p.Name] = true
+		}
+	}
+	filtered := *oneLibrary
+	filtered.Playlists = make([]rekordbox.Playlist, 0, len(oneLibrary.Playlists))
+	for _, p := range oneLibrary.Playlists {
+		ghost := !p.Folder && p.ParentID == 0 && len(p.Tracks) == 0 && populated[p.Name] && !pdbEmptyRoot[p.Name]
+		if !ghost {
+			filtered.Playlists = append(filtered.Playlists, p)
+		}
+	}
+	return &filtered
+}
+
+// mergeExportLibraries combines the PDB and OneLibrary views of one stick. The first library
+// retains its track and playlist IDs where possible, which keeps an existing source's Engine
+// identity stable. Duplicate tracks are matched by folded path. A playlist with more entries
+// supplies the initial order, then entries unique to the other source are appended.
+func mergeExportLibraries(libraries ...*rekordbox.Library) *rekordbox.Library {
+	if len(libraries) == 0 {
+		return &rekordbox.Library{}
+	}
+	merged := &rekordbox.Library{}
+	pathIDs := map[string]uint32{}
+	usedTrackIDs := map[uint32]bool{}
+	nextTrackID := uint32(1)
+	playlistKeys := map[string]uint32{}
+	usedPlaylistIDs := map[uint32]bool{}
+	nextPlaylistID := uint32(1)
+
+	for _, library := range libraries {
+		trackIDs := map[uint32]uint32{}
+		for _, track := range library.Tracks {
+			sourceID := track.ID
+			key := foldPath(track.Path)
+			if id, ok := pathIDs[key]; ok {
+				trackIDs[sourceID] = id
+				continue
+			}
+			id := track.ID
+			if usedTrackIDs[id] {
+				for usedTrackIDs[nextTrackID] {
+					nextTrackID++
+				}
+				id = nextTrackID
+			}
+			usedTrackIDs[id] = true
+			if id >= nextTrackID {
+				nextTrackID = id + 1
+			}
+			track.ID = id
+			pathIDs[key] = id
+			trackIDs[sourceID] = id
+			merged.Tracks = append(merged.Tracks, track)
+		}
+
+		parents := map[uint32]rekordbox.Playlist{}
+		for _, playlist := range library.Playlists {
+			parents[playlist.ID] = playlist
+		}
+		playlistIDs := map[uint32]uint32{}
+		for _, playlist := range library.Playlists {
+			parentKey := exportPlaylistPath(parents, playlist.ParentID)
+			key := fmt.Sprintf("%t\x00%s\x00%s", playlist.Folder, parentKey, playlist.Name)
+			id, exists := playlistKeys[key]
+			if !exists {
+				id = playlist.ID
+				if usedPlaylistIDs[id] {
+					for usedPlaylistIDs[nextPlaylistID] {
+						nextPlaylistID++
+					}
+					id = nextPlaylistID
+				}
+				usedPlaylistIDs[id] = true
+				if id >= nextPlaylistID {
+					nextPlaylistID = id + 1
+				}
+				playlistKeys[key] = id
+				merged.Playlists = append(merged.Playlists, rekordbox.Playlist{ID: id, ParentID: 0, SortOrder: playlist.SortOrder, Name: playlist.Name, Folder: playlist.Folder, Intelligent: playlist.Intelligent, Rules: playlist.Rules})
+			}
+			playlistIDs[playlist.ID] = id
+		}
+		for _, playlist := range library.Playlists {
+			dstID := playlistIDs[playlist.ID]
+			parentKey := exportPlaylistPath(parents, playlist.ParentID)
+			var dst *rekordbox.Playlist
+			for j := range merged.Playlists {
+				if merged.Playlists[j].ID == dstID {
+					dst = &merged.Playlists[j]
+					break
+				}
+			}
+			if dst == nil {
+				continue
+			}
+			if playlist.ParentID != 0 {
+				parentPlaylist := parents[playlist.ParentID]
+				parentParentKey := exportPlaylistPath(parents, parentPlaylist.ParentID)
+				parentKey = fmt.Sprintf("%t\x00%s\x00%s", parentPlaylist.Folder, parentParentKey, parentPlaylist.Name)
+				dst.ParentID = playlistKeys[parentKey]
+			}
+			if playlist.Folder {
+				continue
+			}
+			incoming := make([]uint32, 0, len(playlist.Tracks))
+			for _, trackID := range playlist.Tracks {
+				if id, ok := trackIDs[trackID]; ok {
+					incoming = append(incoming, id)
+				}
+			}
+			if len(incoming) > len(dst.Tracks) {
+				dst.Tracks, incoming = incoming, dst.Tracks
+			}
+			seen := map[uint32]bool{}
+			for _, id := range dst.Tracks {
+				seen[id] = true
+			}
+			for _, id := range incoming {
+				if !seen[id] {
+					dst.Tracks = append(dst.Tracks, id)
+					seen[id] = true
+				}
+			}
+		}
+	}
+	for i := range merged.Playlists {
+		if merged.Playlists[i].ParentID == 0 {
+			continue
+		}
+		if !usedPlaylistIDs[merged.Playlists[i].ParentID] {
+			merged.Playlists[i].ParentID = 0
+		}
+	}
+	for _, library := range libraries {
+		for id, artwork := range library.Artwork {
+			if merged.Artwork == nil {
+				merged.Artwork = map[uint32]string{}
+			}
+			if _, ok := merged.Artwork[id]; !ok {
+				merged.Artwork[id] = artwork
+			}
+		}
+	}
+	return merged
+}
+
+func exportPlaylistPath(playlists map[uint32]rekordbox.Playlist, id uint32) string {
+	var parts []string
+	seen := map[uint32]bool{}
+	for id != 0 && !seen[id] {
+		seen[id] = true
+		playlist, ok := playlists[id]
+		if !ok {
+			break
+		}
+		parts = append(parts, playlist.Name)
+		id = playlist.ParentID
+	}
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	return strings.Join(parts, "\x00")
 }
 
 // ensureWritableEngineLibrary mounts an ext4-backed overlay onto "<mount>/Engine Library"
@@ -320,6 +614,16 @@ func Reconcile(r *compat.Resolver, l *rekordbox.Library) {
 
 // ReconcileContext is Reconcile with cancellation between path lookups.
 func ReconcileContext(ctx context.Context, r *compat.Resolver, l *rekordbox.Library) error {
+	return reconcileContext(ctx, r, l, nil, nil)
+}
+
+// ReconcileOwnedContext reuses paths recorded in BridgeState before consulting the
+// volume. This keeps a re-export from walking every already-owned audio directory.
+func ReconcileOwnedContext(ctx context.Context, r *compat.Resolver, l *rekordbox.Library, ownedPaths map[uint32]string, ownedSpellings map[string]string) error {
+	return reconcileContext(ctx, r, l, ownedPaths, ownedSpellings)
+}
+
+func reconcileContext(ctx context.Context, r *compat.Resolver, l *rekordbox.Library, ownedPaths map[uint32]string, ownedSpellings map[string]string) error {
 	byPath := map[string]uint32{}
 	replaced := map[uint32]uint32{} // 0 means left out
 	kept := l.Tracks[:0:0]
@@ -329,19 +633,37 @@ func ReconcileContext(ctx context.Context, r *compat.Resolver, l *rekordbox.Libr
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		rel, err := r.ResolveContext(ctx, t.Path)
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if errors.Is(err, os.ErrNotExist) {
-			replaced[t.ID] = 0
-			missing++
-			gone = append(gone, t.Path)
+		var rel string
+		var known bool
+		var err error
+		clean, cleanErr := compat.CleanRelative(t.Path)
+		if cleanErr != nil {
+			kept = append(kept, t)
 			continue
 		}
-		if err != nil {
-			kept = append(kept, t) // Sync reports anything else
-			continue
+		if ownedSpellings != nil {
+			rel, known = ownedSpellings[foldPath(clean)]
+		}
+		if !known {
+			if candidate, ok := ownedPaths[t.ID]; ok && foldPath(candidate) == foldPath(clean) {
+				rel, known = candidate, true
+			}
+		}
+		if !known {
+			rel, err = r.ResolveContext(ctx, t.Path)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(err, os.ErrNotExist) {
+				replaced[t.ID] = 0
+				missing++
+				gone = append(gone, t.Path)
+				continue
+			}
+			if err != nil {
+				kept = append(kept, t) // Sync reports anything else
+				continue
+			}
 		}
 		if first, ok := byPath[rel]; ok {
 			replaced[t.ID] = first
@@ -491,10 +813,25 @@ func legacyGridOptions(stamp string) (mp3, aac bool) {
 var (
 	mountReadBudget    = 8 * time.Second
 	maxMountHookBudget = 14 * time.Second
+	quickMountReserve  = 8 * time.Second
+	mountPruneBudget   = 2 * time.Second
 	// An update in place still running this long after the mount stops before the hook's kill
 	// and goes on in the background (#301): the kill threw it away, at every insert.
 	mountGiveUp = 17 * time.Second
 )
+
+func mountPruneDeadline(start, requested time.Time) time.Time {
+	reserve := quickMountReserveForBudget()
+	deadline := start.Add(min(maxMountHookBudget-reserve, mountPruneBudget))
+	if !requested.IsZero() && requested.Before(deadline) {
+		deadline = requested
+	}
+	return deadline
+}
+
+func quickMountReserveForBudget() time.Duration {
+	return min(quickMountReserve, maxMountHookBudget/2)
+}
 
 // ConvertAtMount is Convert for when a volume is mounted, while Engine is waiting
 // for it. An export unchanged since the last import is skipped at once. A first
@@ -606,7 +943,9 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		if err := finishPublish(dir, stateName, stampName, "m.db", pendingName); err != nil {
 			return enginedb.Result{}, err
 		}
-		pruneRGBOverviews(ctx, dir, filepath.Join(dir, "m.db"), "")
+		pruneCtx, cancel := context.WithDeadline(ctx, mountPruneDeadline(mountStart, opts.Deadline))
+		pruneRGBOverviews(pruneCtx, dir, filepath.Join(dir, "m.db"), "")
+		cancel()
 	}
 	if !full && !opts.SmartMatch && firstImport(dir) {
 		if !canWrite {
@@ -649,13 +988,18 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		quick := false
 		// An export whose list is in the library already (.rb-bridge-pending) has only its files left.
 		if readMark(dir, pendingName) != stamp {
-			var err error
-			if res, err = quickUpdate(ctx, mount, dir, r, mountStart.Add(maxMountHookBudget)); err != nil {
-				log.Printf("rb-bridge: the re-export's playlists wait for the background job: %v", err)
-				res, quick = enginedb.Result{}, errors.Is(err, errQuickTooLong)
+			if time.Until(mountStart.Add(maxMountHookBudget)) < quickMountReserveForBudget() {
+				log.Printf("rb-bridge: mount budget left after overview pruning is too short for key derivation and the list; handing the update to the background")
+				quick = true
 			} else {
-				log.Printf("rb-bridge: re-export's playlists and %d new tracks in at the mount; grids and waveforms follow", res.Added)
-				cut("quick update committed")
+				var err error
+				if res, err = quickUpdate(ctx, mount, dir, r, mountStart.Add(maxMountHookBudget)); err != nil {
+					log.Printf("rb-bridge: the re-export's playlists wait for the background job: %v", err)
+					res, quick = enginedb.Result{}, errors.Is(err, errQuickTooLong)
+				} else {
+					log.Printf("rb-bridge: re-export's playlists and %d new tracks in at the mount; grids and waveforms follow", res.Added)
+					cut("quick update committed")
+				}
 			}
 		}
 		if err := startUpdate(stage, stamp); err != nil {
@@ -732,7 +1076,8 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		}
 		if writable(mount) { // drives imported by an earlier build still get their covers
 			if opts.Deadline.IsZero() {
-				opts.Deadline = time.Now().Add(mountReadBudget)
+				remaining := maxMountHookBudget - time.Since(mountStart)
+				opts.Deadline = mountStart.Add(min(mountReadBudget, max(remaining, time.Second)))
 			}
 			_, _ = enginedb.MigrateArtworkBefore(ctx, mount, opts.Deadline)
 			completeOverviews(ctx, mount, opts.Deadline)
@@ -793,6 +1138,9 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 			}
 		}
 	} else if err == nil && !result.Bypassed {
+		if oldStamp != "" && oldStamp != stamp {
+			_ = enginedb.InvalidateUnsyncedEdits(ctx, dir)
+		}
 		writeStamp(dir, stamp)
 		cut("in place stamped")
 		os.Remove(filepath.Join(dir, pendingName))
@@ -852,7 +1200,7 @@ func hasFastTracks(dir string) bool {
 	}
 	defer db.Close()
 	var fast int
-	err = db.QueryRow(`SELECT EXISTS(SELECT 1 FROM BridgeState WHERE fingerprint LIKE 'fast:%')`).Scan(&fast)
+	err = db.QueryRow(`SELECT EXISTS(SELECT 1 FROM BridgeState WHERE substr(fingerprint,1,5)='fast:')`).Scan(&fast)
 	return err == nil && fast == 1
 }
 

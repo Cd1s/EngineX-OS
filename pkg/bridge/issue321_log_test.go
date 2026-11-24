@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
-	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
 type issue321Log struct {
@@ -47,7 +46,7 @@ func TestIssue321OneLogLinePerPass(t *testing.T) {
 	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 	var out issue321Log

@@ -28,6 +28,14 @@ type OverviewProgress struct {
 	unverified bool // recorded without a generation: an import behind it would not have shown
 }
 
+// Done reports whether every overview in the library has been verified for this generation.
+func (p OverviewProgress) Done() bool { return p.done }
+
+// MarkOverviewProgressDone records that every overview in a freshly built library has band maxima.
+func MarkOverviewProgressDone(mount string) error {
+	return OverviewProgress{done: true}.Keep(mount)
+}
+
 // importGeneration changes with every import, an earlier build's on another deck too,
 // and that build leaves overviews without band maxima: each import writes rb-bridge's own
 // database, and with a rollback journal SQLite counts every committed write in the file's

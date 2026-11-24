@@ -88,7 +88,10 @@ func anlzWave(ext string, entries int) (b []byte, bodyAt, bodyEnd int) {
 	for i := 12; i < len(wave); i++ {
 		wave[i] = byte(i)
 	}
-	tail := testfixture.Section("PWV6", 20, make([]byte, 3600))
+	pwv6 := make([]byte, 8+3600)
+	be.PutUint32(pwv6[0:], 3)
+	be.PutUint32(pwv6[4:], 1200)
+	tail := testfixture.Section("PWV6", 20, pwv6)
 	b = testfixture.PMAI(testfixture.Section(tag, 24, wave), tail)
 	return b, 28 + 24, 28 + 24 + entries*width
 }

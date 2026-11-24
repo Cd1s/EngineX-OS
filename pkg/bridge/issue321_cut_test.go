@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
-	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
@@ -47,7 +46,14 @@ func issue321Copy(t *testing.T, src, dst string) {
 		}
 		defer o.Close()
 		_, err = io.Copy(o, in)
-		return err
+		if err != nil {
+			return err
+		}
+		st, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(out, st.ModTime(), st.ModTime())
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +145,7 @@ func TestIssue321WatcherPassCutAtEveryWriteStep(t *testing.T) {
 	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(stick, "Engine Library", "Database2", "m.db")}).String())
@@ -160,7 +166,7 @@ func TestIssue321WatcherPassCutAtEveryWriteStep(t *testing.T) {
 	})
 	var s bridge.CueSession
 	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &s, Keys: testKeys,
-		Settled: func() error { return nil }})
+		Settled: func() error { return nil }, SkipPreparingCheck: true})
 	restore()
 	if err != nil || res.TracksChanged != 1 || !res.OneLibraryUpdated {
 		t.Fatalf("uncut pass: %+v %v", res, err)
@@ -236,7 +242,7 @@ func TestIssue321WatcherPassCutAtEveryWriteStepOfExportPDB(t *testing.T) {
 	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, false)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 	oldGenre := issue321PDBGenre(t, stick, 1)
@@ -261,7 +267,7 @@ func TestIssue321WatcherPassCutAtEveryWriteStepOfExportPDB(t *testing.T) {
 		steps = append(steps, step)
 	})
 	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{},
-		Keys: testKeys, Settled: func() error { return nil }})
+		Keys: testKeys, Settled: func() error { return nil }, SkipPreparingCheck: true})
 	restore()
 	if err != nil || res.TracksChanged != 1 || res.OneLibraryUpdated || issue321PDBGenre(t, stick, 1) != newGenre {
 		t.Fatalf("uncut pass: %+v %v", res, err)
@@ -331,7 +337,7 @@ func TestIssue321ARenameCutThatLeftATargetMissingIsPutBack(t *testing.T) {
 func issue321MissingTarget(t *testing.T, oneLib bool) {
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, oneLib)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 	const cue, genre = "Missing 321", "Missing Genre 321"
@@ -391,7 +397,7 @@ func issue321MissingTarget(t *testing.T, oneLib bool) {
 		}
 	}
 	res, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{},
-		Keys: testKeys, Settled: func() error { return nil }})
+		Keys: testKeys, Settled: func() error { return nil }, SkipPreparingCheck: true})
 	restore()
 	if err != nil || res.TracksChanged != 1 || res.OneLibraryUpdated != oneLib {
 		t.Fatalf("uncut pass: %+v %v", res, err)
@@ -475,7 +481,7 @@ func TestIssue321BackupDirectoriesAreMadeBeforeTheMark(t *testing.T) {
 	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 	injectDeckCueEdit(t, stick)

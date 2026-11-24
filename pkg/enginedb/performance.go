@@ -294,6 +294,14 @@ func fillOverviewBatch(ctx context.Context, db *sql.DB, after int64) (n int, las
 }
 
 func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, error) {
+	return encodePerformance(t, a, false)
+}
+
+func encodeCuesOnly(t rekordbox.Track, cues []rekordbox.Cue) (Performance, error) {
+	return encodePerformance(t, &rekordbox.Analysis{Cues: cues}, true)
+}
+
+func encodePerformance(t rekordbox.Track, a *rekordbox.Analysis, cuesOnly bool) (Performance, error) {
 	if a == nil {
 		a = &rekordbox.Analysis{}
 	}
@@ -408,27 +416,29 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 			return p, e
 		}
 	}
-	peaks := defaultPeaks
-	if wave != nil && wave.Tag == "PWV7" { // PWV7 bytes share Engine's overview scale
-		for c := range peaks {
-			if top[c] > 0 {
-				peaks[c] = min(1, float64(top[c])*peakPerOverviewByte[c])
+	if !cuesOnly {
+		peaks := defaultPeaks
+		if wave != nil && wave.Tag == "PWV7" { // PWV7 bytes share Engine's overview scale
+			for c := range peaks {
+				if top[c] > 0 {
+					peaks[c] = min(1, float64(top[c])*peakPerOverviewByte[c])
+				}
 			}
 		}
-	}
-	var track bytes.Buffer
-	put(&track, big, float64(sr))
-	put(&track, big, sampleCount)
-	key := uint32(0)
-	if k, ok := EngineKey(t.Key).(int); ok {
-		key = uint32(k)
-	}
-	put(&track, big, key)
-	put(&track, big, peaks)
-	put(&track, big, [3]float64{}) // stem peaks: Engine keeps its own while these are zero
-	p.TrackData, e = QCompress(track.Bytes())
-	if e != nil {
-		return p, e
+		var track bytes.Buffer
+		put(&track, big, float64(sr))
+		put(&track, big, sampleCount)
+		key := uint32(0)
+		if k, ok := EngineKey(t.Key).(int); ok {
+			key = uint32(k)
+		}
+		put(&track, big, key)
+		put(&track, big, peaks)
+		put(&track, big, [3]float64{}) // stem peaks: Engine keeps its own while these are zero
+		p.TrackData, e = QCompress(track.Bytes())
+		if e != nil {
+			return p, e
+		}
 	}
 	var hot [8]*rekordbox.Cue
 	var memory []rekordbox.Cue
@@ -550,7 +560,7 @@ func WaveRGB(w rekordbox.Waveform, i int) [3]byte {
 	}
 	p := w.Data[int(offset):]
 	switch w.Tag {
-	case "PWV7":
+	case "PWV7", "PWV6":
 		if w.EntryBytes >= 3 {
 			return [3]byte{p[0], p[1], p[2]}
 		}

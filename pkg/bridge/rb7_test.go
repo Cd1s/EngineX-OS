@@ -61,6 +61,12 @@ func TestExportSelectionMTimeAndFallback(t *testing.T) {
 				if len(lib.Tracks) == 0 || lib.Tracks[0].ID != wantID {
 					t.Fatalf("first track ID: got %+v, want %d", lib.Tracks, wantID)
 				}
+				if diff > 5 && len(lib.Tracks) != 3 {
+					t.Fatalf("stale sibling was merged at +%ds: got %d tracks, want 3", diff, len(lib.Tracks))
+				}
+				if diff < -5 && len(lib.Tracks) != 5 {
+					t.Fatalf("stale sibling was merged at %ds: got %d tracks, want 5", diff, len(lib.Tracks))
+				}
 			})
 		}
 	}

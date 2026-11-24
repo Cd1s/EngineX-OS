@@ -37,9 +37,43 @@ const (
 	beforeImportName = "m.db.before-import"
 )
 
-// importWindow is one background pass, the most a kill, an eject or a power cut can cost.
+// defaultImportWindow is the default background pass duration; tests may override importWindow.
+const defaultImportWindow = 30 * time.Second
+
+// importWindow is one background pass when a test overrides it, or the upper bound for paced passes.
 // A variable only for tests.
-var importWindow = 30 * time.Second
+var importWindow = defaultImportWindow
+
+// Idle background fills commit one SQLite transaction per idleBatchTracks with full-speed
+// path-sorted reads; active-deck passes yield with smaller batches and 64 KiB + 20 ms pacing.
+var (
+	idleBatchTracks    = 256
+	playingBatchTracks = 8
+	playingPassWindow  = 5 * time.Second
+)
+
+func backgroundPassOptions(ctx context.Context, mount string, pri *priorityTracker, window time.Duration, base enginedb.Options) (enginedb.Options, bool) {
+	active := IsDeckActive()
+	base.SortByPath = true
+	if active {
+		base.MaxTracks = playingBatchTracks
+		base.Deadline = time.Now().Add(min(window, playingPassWindow))
+		base.ReadChunk = enginedb.PlayingReadChunk
+		base.ReadPause = playingDetailPace(ctx)
+		base.ShouldYield = func() bool { return pri.hasPending(mount) }
+		return base, true
+	}
+	base.MaxTracks = idleBatchTracks
+	if importWindow != defaultImportWindow {
+		base.Deadline = time.Now().Add(window)
+	} else {
+		base.Deadline = time.Time{}
+	}
+	base.ReadChunk = 0
+	base.ReadPause = nil
+	base.ShouldYield = func() bool { return pri.hasPending(mount) || IsDeckActive() }
+	return base, false
+}
 
 // Past this much export, a full first import cannot finish while the mount waits: a USB stick
 // reads the files of about 12 tracks a second (6000 in 8 minutes), and resolving a cold
@@ -102,8 +136,14 @@ func firstImportAtMount(ctx context.Context, mount, dir, stamp string, opts *eng
 	stage := filepath.Join(dir, importStageName)
 	switch {
 	case readMark(stage, stampName) == stamp:
+		freshBase := readMark(stage, baseName) == "absent"
 		if err := publishImport(mount, dir); err != nil {
 			return enginedb.Result{}, err
+		}
+		if freshBase {
+			_ = enginedb.MarkOverviewProgressDone(mount)
+		} else {
+			completeOverviews(ctx, mount, mountStart.Add(maxMountHookBudget))
 		}
 		log.Printf("rb-bridge: first import published")
 		return completeLater(dir, stage, stamp, enginedb.Result{PlaylistsChanged: true})
@@ -226,9 +266,15 @@ func fastPublish(ctx context.Context, mount, dir, stage, stamp string, r *compat
 	if err = completeStage(stage, stamp); err != nil {
 		return res, err
 	}
+	freshBase := readMark(stage, baseName) == "absent"
 	log.Printf("rb-bridge: first import of %d tracks published from the export; grids and waveforms follow", res.Added)
 	if err = publishImport(mount, dir); err != nil {
 		return res, err
+	}
+	if freshBase {
+		_ = enginedb.MarkOverviewProgressDone(mount)
+	} else {
+		completeOverviews(ctx, mount, time.Now().Add(time.Second))
 	}
 	if exportBytes(r, mount) > attemptExportBytes {
 		// The next mount would only start the update that reads the files of so large an
@@ -353,9 +399,14 @@ func publishImport(mount, dir string) error {
 // renameStage moves a complete stage into place: READY first, then finishPublish moves the
 // state, the stamp and m.db, and completes a publish an interruption cut short at the next mount.
 func renameStage(dir, stage string) error {
+	if err := finishStageCompact(stage); err != nil {
+		return err
+	}
 	// Engine's RGB overview files are keyed by track id: one the published library gives
 	// another track goes now, while the library they were written against is still here.
-	pruneRGBOverviews(context.Background(), dir, filepath.Join(stage, "m.db"), filepath.Join(dir, "m.db"))
+	pruneCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	pruneRGBOverviews(pruneCtx, dir, filepath.Join(stage, "m.db"), filepath.Join(dir, "m.db"))
+	cancel()
 	if err := os.WriteFile(filepath.Join(stage, publishReady), nil, 0o644); err != nil {
 		return err
 	}
@@ -428,6 +479,9 @@ func ImportInBackground(ctx context.Context, mount string, progress func(done, t
 		return enginedb.Result{}, err
 	}
 	stage := filepath.Join(mount, "Engine Library", "Database2", importStageName)
+	if err = finishStageCompact(stage); err != nil {
+		return enginedb.Result{}, err
+	}
 	if stamp == "" || readMark(stage, stampName) == stamp {
 		return enginedb.Result{Bypassed: stamp == ""}, nil
 	}
@@ -466,19 +520,39 @@ func ImportInBackground(ctx context.Context, mount string, progress func(done, t
 	}
 	mergeByPath(l)
 	total, left, window := len(l.Tracks), -1, importWindow
+	pri := newPriorityTracker()
 	for {
-		o := enginedb.Options{DatabaseDir: stage, Resume: true, StagedOnly: stagedOnly, Deadline: time.Now().Add(window), OnFinished: shown.set}
+		if _, perr := pri.service(ctx, mount, stage, stamp, r, l, stagedOnly, false, false, true, shown.set); perr != nil {
+			if ctx.Err() != nil || !errors.Is(perr, enginedb.ErrLibraryInUse) {
+				return enginedb.Result{}, perr
+			}
+		}
+		o, wasActive := backgroundPassOptions(ctx, mount, pri, window, enginedb.Options{
+			DatabaseDir: stage,
+			Resume:      true,
+			StagedOnly:  stagedOnly,
+			OnFinished:  shown.set,
+		})
 		res, err := enginedb.SyncResolved(ctx, r, l, o)
 		if err != nil {
 			return res, err
 		}
 		shown.set(total - res.Deferred)
 		if res.Deferred == 0 {
+			vacuumStageMDB(ctx, stage)
+			if n, rerr := enginedb.BackfillStageRGBOverviews(ctx, r, l, stage, filepath.Dir(stage)); rerr != nil {
+				log.Printf("rb-bridge: stage RGB overview backfill skipped: %v", rerr)
+			} else if n > 0 {
+				log.Printf("rb-bridge: generated %d missing stage RGB overviews", n)
+			}
 			return res, completeStage(stage, stamp)
 		}
 		// A pass whose window went on what every pass costs (the finished tracks' lookups, a
 		// track Engine owns) gets a longer one.
 		if left >= 0 && res.Deferred >= left {
+			if pri.hasPending(mount) || (!wasActive && IsDeckActive()) {
+				continue
+			}
 			if window *= 2; window > max(64*importWindow, 10*time.Minute) {
 				return res, fmt.Errorf("first import stopped making progress with %d tracks left", res.Deferred)
 			}

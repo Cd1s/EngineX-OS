@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
-	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
@@ -21,7 +20,7 @@ func TestIssue321OneKeyDerivationPerRun(t *testing.T) {
 	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatalf("Convert: %v", err)
 	}
 	injectDeckCueEdit(t, stick)

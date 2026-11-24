@@ -16,6 +16,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -125,13 +127,35 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	if err != nil {
 		return enginedb.Result{}, quickLate(ctx, err)
 	}
-	if err = ReconcileContext(inner, r, l); err != nil {
-		return enginedb.Result{}, quickLate(ctx, err)
-	}
 	read := time.Since(start)
-	fresh, err := quickPaths(dir, l)
+	fresh, owned, spellings, err := quickPathsWithOwned(dir, l)
 	if err != nil {
 		return enginedb.Result{}, err
+	}
+	exportFolded := make(map[string]bool, len(l.Tracks))
+	for i := range l.Tracks {
+		if clean, cerr := compat.CleanRelative(l.Tracks[i].Path); cerr == nil {
+			exportFolded[foldPath(clean)] = true
+		}
+	}
+	for i := range l.Tracks {
+		clean, cerr := compat.CleanRelative(l.Tracks[i].Path)
+		if cerr != nil {
+			continue
+		}
+		curFold := foldPath(clean)
+		if _, alreadyOwned := spellings[curFold]; alreadyOwned {
+			continue
+		}
+		if oldPath, ok := owned[l.Tracks[i].ID]; ok {
+			oldFold := foldPath(oldPath)
+			if oldFold != curFold && !exportFolded[oldFold] {
+				l.Tracks[i].Path = "/" + oldPath
+			}
+		}
+	}
+	if err = ReconcileOwnedContext(inner, r, l, owned, spellings); err != nil {
+		return enginedb.Result{}, quickLate(ctx, err)
 	}
 	entries := 0
 	for _, p := range l.Playlists {
@@ -141,10 +165,12 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	if left := time.Until(limit); cost > left {
 		return enginedb.Result{}, fmt.Errorf("%w: %d tracks (%d new) and %d playlist entries need about %s, %s left", errQuickTooLong, len(l.Tracks), fresh, entries, cost.Round(time.Second), left.Round(time.Second))
 	}
+	overviews := enginedb.ReadOverviewProgress(mount)
 	res, err := enginedb.SyncResolved(inner, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly})
 	if err != nil {
 		return res, quickLate(ctx, err)
 	}
+	_ = overviews.Keep(mount)
 	log.Printf("rb-bridge: quick update of %d tracks (%d new), %d playlist entries in %s (export read %s, estimate %s)", len(l.Tracks), fresh, entries, time.Since(start).Round(time.Millisecond), read.Round(time.Millisecond), cost.Round(time.Millisecond))
 	return res, nil
 }
@@ -173,24 +199,37 @@ func quickLate(ctx context.Context, err error) error {
 // export alone and then no longer count as the import's, and the update would replace what a deck
 // changed on it; the update moves it with its files read.
 func quickPaths(dir string, l *rekordbox.Library) (fresh int, err error) {
-	known, err := ownedSpellings(dir)
+	fresh, _, _, err = quickPathsWithOwned(dir, l)
+	return fresh, err
+}
+
+func quickPathsWithOwned(dir string, l *rekordbox.Library) (fresh int, rows map[uint32]string, known map[string]string, err error) {
+	known, err = ownedSpellings(dir)
 	if err != nil {
-		return 0, err
+		return 0, nil, nil, err
 	}
-	rows, err := ownedPaths(dir)
+	rows, err = ownedPaths(dir)
 	if err != nil {
-		return 0, err
+		return 0, nil, nil, err
 	}
 	for i := range l.Tracks {
-		if p, ok := rows[l.Tracks[i].ID]; ok {
+		clean, cleanErr := compat.CleanRelative(l.Tracks[i].Path)
+		if cleanErr != nil {
+			return 0, nil, nil, cleanErr
+		}
+		if p, ok := known[foldPath(clean)]; ok {
+			l.Tracks[i].Path = "/" + p
+			continue
+		}
+		if p, ok := rows[l.Tracks[i].ID]; ok && foldPath(p) == foldPath(clean) {
 			l.Tracks[i].Path = "/" + p
 		}
 	}
 	if fresh, err = keepSpellings(l, known); err != nil {
-		return 0, err
+		return 0, nil, nil, err
 	}
 	mergeByPath(l)
-	return fresh, nil
+	return fresh, rows, known, nil
 }
 
 // quickName marks the stage of an update whose list did not fit the mount (a 20 000-track
@@ -209,14 +248,30 @@ func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resol
 	if progress != nil {
 		progress(0, len(l.Tracks))
 	}
-	if err := ReconcileContext(ctx, r, l); err != nil {
-		return enginedb.Result{}, err
-	}
 	if _, err := quickPaths(stage, l); err != nil {
 		return enginedb.Result{}, err
 	}
-	res, err := enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly, DatabaseDir: stage})
+	owned, err := ownedPaths(stage)
 	if err != nil {
+		return enginedb.Result{}, err
+	}
+	spellings, err := ownedSpellings(stage)
+	if err != nil {
+		return enginedb.Result{}, err
+	}
+	if err := ReconcileOwnedContext(ctx, r, l, owned, spellings); err != nil {
+		return enginedb.Result{}, err
+	}
+	databaseDir, cleanup, err := privateStageDatabase(stage)
+	if err != nil {
+		return enginedb.Result{}, err
+	}
+	defer cleanup()
+	res, err := enginedb.SyncResolved(ctx, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly, DatabaseDir: databaseDir, Bulk: true})
+	if err != nil {
+		return res, err
+	}
+	if err = publishPrivateStageDatabase(stage, databaseDir); err != nil {
 		return res, err
 	}
 	cut("stage list committed")
@@ -225,6 +280,100 @@ func quickInStage(ctx context.Context, dir, stage, stamp string, r *compat.Resol
 	}
 	log.Printf("rb-bridge: the re-export's list is ready (%d new tracks); a remount publishes it before its files are read", res.Added)
 	return res, completeStage(stage, stamp)
+}
+
+func privateStageDatabase(stage string) (string, func(), error) {
+	root := os.Getenv("ENGINEX_RB_STAGE_DIR")
+	if root == "" {
+		if st, err := os.Stat("/data/enginex"); err == nil && st.IsDir() {
+			root = "/data/enginex/tmp"
+		} else {
+			root = "/var/tmp/enginex-rb-stage"
+		}
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", func() {}, err
+	}
+	if st, err := os.Lstat(root); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return "", func() {}, fmt.Errorf("quick stage directory is not a private directory: %s", root)
+	}
+	for _, stale := range globQuickStages(root) {
+		_ = os.RemoveAll(stale)
+	}
+	need := int64(64 << 20)
+	for _, name := range []string{"m.db", stateName} {
+		if st, err := os.Stat(filepath.Join(stage, name)); err == nil {
+			need += st.Size()
+		}
+	}
+	var fs syscall.Statfs_t
+	if err := syscall.Statfs(root, &fs); err != nil {
+		return "", func() {}, err
+	}
+	if fs.Bavail*uint64(fs.Bsize) < uint64(need) {
+		return "", func() {}, fmt.Errorf("quick stage directory has insufficient free space")
+	}
+	dir, err := os.MkdirTemp(root, fmt.Sprintf("enginex-rb-quick-%d-", os.Getpid()))
+	if err != nil {
+		return "", func() {}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	for _, name := range []string{"m.db", stateName} {
+		src := filepath.Join(stage, name)
+		if _, err := os.Stat(src); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			cleanup()
+			return "", func() {}, err
+		}
+		if err := copyFile(src, filepath.Join(dir, name)); err != nil {
+			cleanup()
+			return "", func() {}, err
+		}
+	}
+	return dir, cleanup, nil
+}
+
+func globQuickStages(root string) []string {
+	paths, _ := filepath.Glob(filepath.Join(root, "enginex-rb-quick-*-*"))
+	var stale []string
+	for _, p := range paths {
+		name := filepath.Base(p)
+		parts := strings.Split(name, "-")
+		if len(parts) < 4 {
+			continue
+		}
+		pid, err := strconv.Atoi(parts[3])
+		if err == nil && pid > 0 && pid != os.Getpid() && syscall.Kill(pid, 0) == syscall.ESRCH {
+			stale = append(stale, p)
+		}
+	}
+	return stale
+}
+
+func publishPrivateStageDatabase(stage, databaseDir string) error {
+	for _, name := range []string{"m.db", stateName} {
+		src := filepath.Join(databaseDir, name)
+		if _, err := os.Stat(src); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		tmp := filepath.Join(stage, ".enginex-quick-"+name+".tmp")
+		if err := copyFile(src, tmp); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		if err := syncFile(tmp); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		if err := os.Rename(tmp, filepath.Join(stage, name)); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+	}
+	return syncFile(stage)
 }
 
 // keepSpellings gives the tracks of l that the library holds their rows' spelling of their path,
@@ -431,6 +580,149 @@ func vacuumInto(ctx context.Context, src, dst string) error {
 	return syncFile(dst)
 }
 
+var (
+	stageCompactTimeout = 20 * time.Second
+	stageCompactPoll    = 50 * time.Millisecond
+)
+
+func finishStageCompact(stage string) error {
+	for _, name := range []string{"m.db", stateName} {
+		if err := finishStageCompactFile(stage, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func finishStageCompactFile(stage, name string) error {
+	p := filepath.Join(stage, name)
+	tmp := p + ".compact"
+	ready := p + ".compact.ready"
+	if _, err := os.Stat(ready); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if rerr := os.Remove(tmp); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+				return rerr
+			}
+			return nil
+		}
+		return err
+	}
+	if _, err := os.Stat(tmp); err == nil {
+		if err := os.Rename(tmp, p); err != nil {
+			return err
+		}
+		if err := syncFile(stage); err != nil {
+			return err
+		}
+		cut("compact replaced " + name)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, side := range []string{"-journal", "-wal", "-shm"} {
+		if err := os.Remove(p + side); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	cut("compact sidecars removed " + name)
+	if err := os.Remove(ready); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncFile(stage)
+}
+
+func vacuumStageMDB(ctx context.Context, stage string) {
+	if err := finishStageCompact(stage); err != nil {
+		return
+	}
+	if ctx.Err() != nil || IsDeckActive() {
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, stageCompactTimeout)
+	defer cancel()
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		t := time.NewTicker(stageCompactPoll)
+		defer t.Stop()
+		for {
+			select {
+			case <-stopWatch:
+				return
+			case <-cctx.Done():
+				return
+			case <-t.C:
+				if IsDeckActive() {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	for _, name := range []string{"m.db", stateName} {
+		if cctx.Err() != nil || IsDeckActive() {
+			return
+		}
+		if !vacuumStageFile(cctx, stage, name) {
+			if cctx.Err() != nil || IsDeckActive() {
+				return
+			}
+		}
+	}
+}
+
+func vacuumStageFile(ctx context.Context, stage, name string) bool {
+	p := filepath.Join(stage, name)
+	if _, err := os.Stat(p); err != nil {
+		return false
+	}
+	tmp := p + ".compact"
+	ready := p + ".compact.ready"
+	_ = os.Remove(ready)
+	_ = os.Remove(tmp)
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: p, RawQuery: "_pragma=busy_timeout(5000)"}).String())
+	if err != nil {
+		return false
+	}
+	db.SetMaxOpenConns(1)
+	_, _ = db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+	if ctx.Err() != nil || IsDeckActive() {
+		_ = db.Close()
+		_ = os.Remove(tmp)
+		return false
+	}
+	_, err = db.ExecContext(ctx, `VACUUM INTO ?`, tmp)
+	_ = db.Close()
+	if err != nil || ctx.Err() != nil || IsDeckActive() {
+		_ = os.Remove(tmp)
+		return false
+	}
+	if err := syncFile(tmp); err != nil {
+		_ = os.Remove(tmp)
+		return false
+	}
+	cut("compact vacuumed " + name)
+	if ctx.Err() != nil || IsDeckActive() {
+		_ = os.Remove(tmp)
+		return false
+	}
+	if err := os.WriteFile(ready, []byte("1\n"), 0o644); err != nil {
+		_ = os.Remove(tmp)
+		return false
+	}
+	if err := syncFile(ready); err != nil {
+		_ = os.Remove(ready)
+		_ = os.Remove(tmp)
+		return false
+	}
+	if err := syncFile(stage); err != nil {
+		_ = os.Remove(ready)
+		_ = os.Remove(tmp)
+		return false
+	}
+	cut("compact ready " + name)
+	return finishStageCompactFile(stage, name) == nil
+}
+
 // jobProgress reports a background job's tracks done out of the export's to progress: once the
 // export is read, before the long steps (its paths, the snapshot), then as each pass goes (its
 // share of the whole count, enginedb.Options.OnFinished), never fewer than it reported (#328).
@@ -491,21 +783,52 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 		}
 	}
 	total, left, window := len(l.Tracks), -1, importWindow
+	stageUpdated := 0
 	changed := readMark(stage, resumeName) != "" // an earlier pass may have changed it
+	pri := newPriorityTracker()
 	for {
-		o := enginedb.Options{DatabaseDir: stage, StagedOnly: stagedOnly, LegacyOffsets: legacy, LegacyAACOffsets: legacyAAC,
-			Resume: readMark(stage, resumeName) == stamp, Deadline: time.Now().Add(window), OnFinished: shown.set}
+		resuming := readMark(stage, resumeName) == stamp
+		if priChanged, perr := pri.service(ctx, mount, stage, stamp, r, l, stagedOnly, legacy, legacyAAC, resuming, shown.set); perr != nil {
+			if ctx.Err() != nil || !errors.Is(perr, enginedb.ErrLibraryInUse) {
+				return enginedb.Result{}, perr
+			}
+		} else if priChanged {
+			changed = true
+			if err = writeMark(stage, resumeName, stamp); err != nil {
+				return enginedb.Result{}, err
+			}
+			resuming = true
+		}
+		o, wasActive := backgroundPassOptions(ctx, mount, pri, window, enginedb.Options{
+			DatabaseDir:      stage,
+			StagedOnly:       stagedOnly,
+			LegacyOffsets:    legacy,
+			LegacyAACOffsets: legacyAAC,
+			Resume:           resuming,
+			OnFinished:       shown.set,
+		})
 		res, err := enginedb.SyncResolved(ctx, r, l, o)
 		if err != nil {
 			return res, err
 		}
 		cut("stage pass committed")
+		stageUpdated += res.Added + res.Updated
 		changed = changed || res.Added+res.Updated > 0 || res.PlaylistsChanged
 		shown.set(total - res.Deferred)
 		if res.Deferred == 0 {
+			if stageUpdated >= 256 {
+				vacuumStageMDB(ctx, stage)
+			}
+			if n, rerr := enginedb.BackfillStageRGBOverviews(ctx, r, l, stage, dir); rerr != nil {
+				log.Printf("rb-bridge: stage RGB overview backfill skipped: %v", rerr)
+			} else if n > 0 {
+				log.Printf("rb-bridge: generated %d missing stage RGB overviews", n)
+				changed = true
+			}
 			if !changed {
 				// Nothing to publish: the live library already is this export's.
 				log.Printf("rb-bridge: update of %s changed nothing", mount)
+				_ = enginedb.InvalidateUnsyncedEdits(ctx, dir)
 				writeStamp(dir, stamp)
 				cut("unchanged update stamped")
 				os.Remove(filepath.Join(dir, pendingName))
@@ -518,6 +841,9 @@ func updateInBackground(ctx context.Context, mount, stage, stamp string, r *comp
 		}
 		cut("stage resume marked")
 		if left >= 0 && res.Deferred >= left {
+			if pri.hasPending(mount) || (!wasActive && IsDeckActive()) {
+				continue
+			}
 			if window *= 2; window > max(64*importWindow, 10*time.Minute) {
 				return res, fmt.Errorf("update stopped making progress with %d tracks left", res.Deferred)
 			}
@@ -584,8 +910,13 @@ func handToMounts(ctx context.Context, r *compat.Resolver, l *rekordbox.Library,
 	if work > inPlaceUpdateTracks || int64(work)*perTrackReadBytes >= st.Size() {
 		return enginedb.Result{}, false, nil
 	}
+	if missingRGB, rerr := enginedb.CountMissingRGBOverviews(ctx, dir); rerr == nil && missingRGB > 0 {
+		log.Printf("rb-bridge: %d analyzed tracks missing RGB overviews; update goes on in its stage", missingRGB)
+		return enginedb.Result{}, false, nil
+	}
 	if work == 0 {
 		// Nothing to read: the live library already is this export's.
+		_ = enginedb.InvalidateUnsyncedEdits(ctx, dir)
 		writeStamp(dir, stamp)
 		cut("handoff stamped")
 		os.Remove(filepath.Join(dir, pendingName))
@@ -731,28 +1062,53 @@ func confirmedRefs(ctx context.Context, r *compat.Resolver, l *rekordbox.Library
 		return refs, nil
 	}
 	start, files, read := time.Now(), 0, int64(0)
-	pace := detailPace(ctx)
+	playingPace := playingDetailPace(ctx)
 	defer func() {
 		log.Printf("rb-bridge: %d of %d waveform copies can become references; ANLZ files read in %s (%d tracks, %d bytes)", len(refs), len(keys), time.Since(start).Round(time.Millisecond), files, read)
 	}()
-	for id, list := range enginedb.ExportRefs(l) {
-		if !keys[id] {
+	exportRefs := enginedb.ExportRefs(l)
+	type refJob struct {
+		id   uint32
+		list []string
+		key  string
+	}
+	jobs := make([]refJob, 0, len(keys))
+	for id, list := range exportRefs {
+		if !keys[id] || len(list) == 0 {
 			continue
 		}
-		key := strings.Join(list, "\x00")
-		ok, seen := checked[key]
+		jobs = append(jobs, refJob{id: id, list: list, key: strings.Join(list, "\x00")})
+	}
+	sort.Slice(jobs, func(i, j int) bool {
+		if jobs[i].key != jobs[j].key {
+			return jobs[i].key < jobs[j].key
+		}
+		return jobs[i].id < jobs[j].id
+	})
+	for _, job := range jobs {
+		if err := ctx.Err(); err != nil {
+			return refs, err
+		}
+		ok, seen := checked[job.key]
 		if !seen {
 			var n int64
 			var err error
-			ok, n, err = enginedb.DetailServes(r, list, pace)
+			if IsDeckActive() {
+				ok, n, err = enginedb.DetailServesWithChunk(r, job.list, enginedb.PlayingReadChunk, playingPace)
+			} else {
+				ok, n, err = enginedb.DetailServes(r, job.list, nil)
+			}
 			files, read = files+1, read+n
 			if err != nil {
 				return refs, err
 			}
-			checked[key] = ok
+			if err := ctx.Err(); err != nil {
+				return refs, err
+			}
+			checked[job.key] = ok
 		}
 		if ok {
-			refs[id] = list
+			refs[job.id] = job.list
 		}
 	}
 	return refs, ctx.Err()
@@ -764,8 +1120,18 @@ func confirmedRefs(ctx context.Context, r *compat.Resolver, l *rekordbox.Library
 // at least detailReadGap: the stick is free at least half the time, and a deck's request waits
 // behind one such read at most.
 func detailPace(ctx context.Context) enginedb.DetailPause {
+	return detailPaceWithGap(ctx, &detailReadGap)
+}
+
+// playingDetailPace paces background ANLZ reads with 64 KiB chunks and at least playingReadGap
+// (20 ms) while a deck is playing, cue-previewing, or scratching.
+func playingDetailPace(ctx context.Context) enginedb.DetailPause {
+	return detailPaceWithGap(ctx, &playingReadGap)
+}
+
+func detailPaceWithGap(ctx context.Context, gap *time.Duration) enginedb.DetailPause {
 	return func(_ int, took time.Duration) error {
-		t := time.NewTimer(max(took, detailReadGap))
+		t := time.NewTimer(max(took, *gap))
 		defer t.Stop()
 		select {
 		case <-ctx.Done():
@@ -776,8 +1142,11 @@ func detailPace(ctx context.Context) enginedb.DetailPause {
 	}
 }
 
-// detailReadGap is the least pause after a read of detailPace. A variable only for tests.
-var detailReadGap = 10 * time.Millisecond
+// detailReadGap and playingReadGap are minimum pauses after paced reads. Variables for tests.
+var (
+	detailReadGap  = 10 * time.Millisecond
+	playingReadGap = 20 * time.Millisecond
+)
 
 // publishUpdate replaces the live library with the complete update in the stage, at a mount
 // before Engine sees the volume, with what Engine wrote since the snapshot. A change Engine made
@@ -826,9 +1195,12 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 		}
 		cut("list stage pending")
 	}
+	overviews := enginedb.ReadOverviewProgress(mount)
+	_ = enginedb.InvalidateUnsyncedEdits(ctx, stage)
 	if err := renameStage(dir, stage); err != nil {
 		return enginedb.Result{}, err
 	}
+	_ = overviews.Keep(mount)
 	if quick {
 		// The update that reads the files starts now (completeLater).
 		log.Printf("rb-bridge: the re-export's list published; its files are read next")
@@ -848,6 +1220,7 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 // may be out of date, and a remount too many only waits. True when it cannot tell.
 func LibraryHasFile(mount, name string) bool {
 	dir := filepath.Join(mount, "Engine Library", "Database2")
+	_ = finishStageCompact(filepath.Join(dir, importStageName))
 	for _, p := range []string{filepath.Join(dir, importStageName, "m.db"), filepath.Join(dir, "m.db")} {
 		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
 			continue

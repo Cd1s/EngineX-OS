@@ -146,7 +146,7 @@ func BenchmarkRepeatLargePDBIdentity253(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				owned, err := stageOwnedMoves(context.Background(), tx, prepared, false)
+				owned, _, _, err := stageOwnedMoves(context.Background(), tx, prepared, false)
 				if err != nil || len(owned) != n {
 					b.Fatalf("identity pass: %d %v", len(owned), err)
 				}
@@ -231,7 +231,7 @@ func BenchmarkLegacySharedKeyIdentity253(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				owned, err := stageOwnedMoves(context.Background(), tx, prepared, false)
+				owned, _, _, err := stageOwnedMoves(context.Background(), tx, prepared, false)
 				if err != nil || len(owned) != 6000 {
 					b.Fatalf("legacy identity pass: %d %v", len(owned), err)
 				}

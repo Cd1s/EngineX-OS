@@ -13,6 +13,7 @@ import (
 	"math/rand/v2"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -24,6 +25,8 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 // WriteBackOptions configures direct stick cue/loop write-back.
@@ -171,6 +174,10 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	if tm.firstRecord {
 		kind += ", first record of the stick"
 	}
+	if tm.skipReason != "" {
+		log.Printf("rb-bridge: cue write-back skipped on %s: %s", mountPath, tm.skipReason)
+		return res, err
+	}
 	// One line per pass (#321): what it cost and what it did.
 	log.Printf("rb-bridge: cue write-back of %s %s: %d tracks, %d read, %d changed; ms: candidates %d, key %d, decrypt %d, edit %d, encrypt %d, write %d, total %d; %d files, %d bytes written; pass: %s",
 		mountPath, outcome, res.TracksChecked, res.TracksRead, res.TracksChanged,
@@ -184,6 +191,7 @@ type passTimes struct {
 	candidates, key, decrypt, edit, encrypt, write, total time.Duration
 	bytes                                                 int64
 	firstRecord                                           bool // no BridgeSynced yet: every row is read
+	skipReason                                            string
 }
 
 func (t *passTimes) ms() map[string]int64 {
@@ -255,6 +263,15 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		return res, fmt.Errorf("writeback: no rekordbox export found on %s", absMount)
 	}
 	preStamp, _ := exportStamp(resolver, absMount)
+	againMode, againStamp := parseWriteBackRecovery(readMark(engineDBDir, writeBackAgainName))
+	if reason := writeBackStampReason(readMark(engineDBDir, stampName), preStamp); reason != "" {
+		tm.skipReason = reason
+		return res, nil
+	}
+	if againMode != "" && (againStamp == "" || againStamp != preStamp) {
+		tm.skipReason = "recovery marker does not match the current rekordbox export"
+		return res, nil
+	}
 
 	mURI := url.URL{Scheme: "file", Path: mDBPath, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
 	settle := func() error { return nil }
@@ -282,12 +299,11 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE type='table' AND name='BridgeSynced'`).Scan(&hasSyncedTable)
 	// A file of a cut pass was put back from its first original (CleanWriteBackLeftovers): every
 	// row is read, as if the state had no record, and on "export" the export gets the deck's cues.
-	again := readMark(engineDBDir, writeBackAgainName)
-	if again != "" {
+	if againMode != "" {
 		hasSyncedTable = 0
 	}
 	dropAgain := func() {
-		if again != "" {
+		if againMode != "" {
 			_ = removeFile(filepath.Join(engineDBDir, writeBackAgainName))
 		}
 	}
@@ -299,9 +315,13 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	query := `SELECT bs.path, bs.trackId, COALESCE(t.pdbImportKey, 0), COALESCE(t.lastEditTime, 0), NULL, NULL
 		FROM bridge.BridgeState bs JOIN Track t ON t.id = bs.trackId`
 	if hasSyncedTable > 0 {
-		query = `SELECT bs.path, bs.trackId, COALESCE(t.pdbImportKey, 0), COALESCE(t.lastEditTime, 0), sy.lastEditTime, sy.digest
+		query = `SELECT bs.path, bs.trackId, COALESCE(t.pdbImportKey, 0), COALESCE(t.lastEditTime, 0), sy.lastEditTime, sy.digest, bs.fingerprint
 			FROM bridge.BridgeState bs JOIN Track t ON t.id = bs.trackId
 			LEFT JOIN bridge.BridgeSynced sy ON sy.trackId = bs.trackId`
+	}
+	if hasSyncedTable == 0 {
+		query = `SELECT bs.path, bs.trackId, COALESCE(t.pdbImportKey, 0), COALESCE(t.lastEditTime, 0), NULL, NULL, bs.fingerprint
+			FROM bridge.BridgeState bs JOIN Track t ON t.id = bs.trackId`
 	}
 	written := `NULL`
 	if hasWrittenTable > 0 {
@@ -320,6 +340,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		engineID     int64
 		pdbImportKey int64
 		edit         any
+		fingerprint  string
 	}
 	var reads []candidateTrack
 	rows, err := db.QueryContext(ctx, query)
@@ -332,7 +353,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		var c candidateTrack
 		var syncedEdit any
 		var syncedDigest []byte
-		if err := rows.Scan(&c.enginePath, &c.engineID, &c.pdbImportKey, &c.edit, &syncedEdit, &syncedDigest); err != nil {
+		if err := rows.Scan(&c.enginePath, &c.engineID, &c.pdbImportKey, &c.edit, &syncedEdit, &syncedDigest, &c.fingerprint); err != nil {
 			return res, err
 		}
 		res.TracksChecked++
@@ -349,10 +370,11 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 
 	type dirtyTrack struct {
 		candidateTrack
-		deck     enginedb.DeckCues
-		cues     bool // the deck's cues may differ from the stick's
-		metadata rekordbox.Metadata
-		seen     syncedRow
+		deck       enginedb.DeckCues
+		cues       bool // the deck's cues may differ from the stick's
+		hasWritten bool
+		metadata   rekordbox.Metadata
+		seen       syncedRow
 	}
 	var dirty []dirtyTrack
 	var confirmed []syncedRow // rows the stick holds as they are now
@@ -375,13 +397,13 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 			confirmed = append(confirmed, seen)
 			continue
 		}
-		d := dirtyTrack{candidateTrack: c, metadata: md, seen: seen}
+		d := dirtyTrack{candidateTrack: c, hasWritten: len(writtenDigest) > 0, metadata: md, seen: seen}
 		// Fast path: tracks untouched since the last import stay at their BridgeWritten
 		// digest. Their cues are not read again; their metadata (#314) is compared with the
 		// export's. Tracks with loops are still inspected because activeOnLoadLoops is outside
 		// the digest.
-		if len(trackData) > 0 && !(len(writtenDigest) > 0 && activeLoops == 0 && !enginedb.HasAnyLoop(loopsBlob) &&
-			bytes.Equal(writtenDigest, enginedb.WrittenDigest(beatData, quickCues, loopsBlob))) {
+		if len(trackData) > 0 && (tm.firstRecord || !(len(writtenDigest) > 0 && activeLoops == 0 && !enginedb.HasAnyLoop(loopsBlob) &&
+			bytes.Equal(writtenDigest, enginedb.WrittenDigest(beatData, quickCues, loopsBlob)))) {
 			if deck, err := enginedb.ParseDeckCuesAndLoops(trackData, quickCues, loopsBlob, activeLoops); err == nil {
 				d.deck, d.cues = deck, true
 			}
@@ -431,7 +453,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	}
 
 	tLib := time.Now()
-	rbLib, oneLibRel, err := readStickRekordboxLibrary(ctx, resolver, absMount, keys)
+	rbLib, oneLibRel, err := readStickRekordboxLibrary(ctx, resolver, absMount, keys, preStamp)
 	tm.decrypt = time.Since(tLib) - (keys.DeriveTime() - key0) // the export read: decrypt and parse
 	if err != nil {
 		return res, err
@@ -443,9 +465,9 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	for _, tr := range rbLib.Tracks {
 		byID[tr.ID] = tr
 		if tr.Path != "" {
-			norm := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(tr.Path)), "/")
+			norm := normalizeRekordboxPath(tr.Path)
 			byPath[norm] = tr
-			byPathFold[strings.ToLower(norm)] = tr
+			byPathFold[cases.Fold().String(norm)] = tr
 		}
 	}
 
@@ -466,7 +488,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		seen         syncedRow
 	}
 	var changes []trackChange
-	exportCues := again == "export" && oneLibRel != ""
+	exportCues := againMode == "export" && oneLibRel != ""
 
 	for _, cand := range dirty {
 		if err := ctx.Err(); err != nil {
@@ -480,12 +502,24 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		var nextCues []rekordbox.Cue
 		cuesDiff, known := false, cand.cues && rbTrack.AnalysisPath != ""
 		if known {
-			offsetSamples := trackRekordboxOffset(resolver, rbTrack.Path)
-			origCues := readStickTrackCues(resolver, rbTrack)
-			nextCues = mergeEngineCues(origCues, cand.deck, offsetSamples)
-			cuesDiff = !cuesEquivalent(origCues, nextCues)
+			offsetSamples, ok := trackRekordboxOffset(resolver, rbTrack.Path)
+			if !ok {
+				known = false
+			} else {
+				origCues := readStickTrackCues(resolver, rbTrack)
+				deck := stripShiftedForeignCues(resolver, cand.deck, cand.hasWritten, cand.pdbImportKey, cand.enginePath, rbTrack, origCues, offsetSamples, byID)
+				legacyMP3 := !cand.hasWritten && strings.HasSuffix(strings.ToLower(rbTrack.Path), ".mp3")
+				nextCues = mergeEngineCuesOpts(origCues, deck, offsetSamples, legacyMP3)
+				cuesDiff = !cuesEquivalent(origCues, nextCues)
+			}
 		}
 		metadataDiff := cand.metadata != (rekordbox.Metadata{Genre: rbTrack.Genre, Comment: rbTrack.Comment, Label: rbTrack.Label})
+		if tm.firstRecord && importedRecordChanged(cand.fingerprint, rbTrack) {
+			// An older state has no BridgeSynced baseline. A changed export record explains
+			// metadata differences already present in the Engine library. Cue/loop edits have
+			// their own Engine performance baseline and remain eligible for write-back.
+			metadataDiff = false
+		}
 		if !cuesDiff && !metadataDiff && !(exportCues && known) {
 			confirmed = append(confirmed, cand.seen)
 			continue
@@ -770,11 +804,12 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	// our write-back, so re-inserting into EngineX fast-bypasses instead
 	// of re-importing the whole stick.
 	if exportWritten && preStamp != "" {
+		evictWriteBackExportCache(preStamp)
 		if postStamp, err := exportStamp(resolver, absMount); err == nil && postStamp != "" {
-			if readMark(engineDBDir, stampName) == preStamp {
+			if againMode != "" || readMark(engineDBDir, stampName) == preStamp {
 				_ = writeMark(engineDBDir, stampName, postStamp)
 			}
-			if readMark(engineDBDir, pendingName) == preStamp {
+			if againMode != "" || readMark(engineDBDir, pendingName) == preStamp {
 				_ = writeMark(engineDBDir, pendingName, postStamp)
 			}
 		}
@@ -912,11 +947,19 @@ func CleanWriteBackLeftovers(mount string) int {
 			}
 		}
 	}
-	if again != "" && readMark(dir, writeBackAgainName) != "export" {
-		_ = writeMark(dir, writeBackAgainName, again)
-	}
 	if !whole {
 		return n // its staged copy and the mark stay for the next mount
+	}
+	if r, err := compat.NewResolver(mount); err == nil {
+		if stamp, err := exportStamp(r, mount); err == nil && stamp != "" {
+			// The cleanup has established which complete export is on the stick. Refresh
+			// the marker before the next write-back compares it, including copies made by
+			// a filesystem pull that changed directory mtimes.
+			_ = writeMark(dir, stampName, stamp)
+			if again != "" {
+				_ = writeMark(dir, writeBackAgainName, again+"\n"+stamp)
+			}
+		}
 	}
 	for _, rel := range dirs {
 		for _, pat := range []string{".enginex-*.tmp", ".bak-*.tmp"} {
@@ -1039,36 +1082,141 @@ func recordSynced(ctx context.Context, stateDBPath string, rows []syncedRow, wri
 	_ = tx.Commit()
 }
 
-func readStickRekordboxLibrary(ctx context.Context, r *compat.Resolver, mountPath string, keys *rekordbox.KeyCache) (*rekordbox.Library, string, error) {
-	var errs []error
-	for _, p := range []string{"PIONEER/rekordbox/exportLibrary.db", "PIONEER/rekordbox/exportOneLibrary.db"} {
-		rel, err := r.Resolve(p)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			errs = append(errs, err)
-			continue
-		}
-		lib, err := rekordbox.ReadSQLiteKeys(ctx, r.FullPath(rel), nil, keys)
-		if err == nil {
-			return lib, rel, nil
-		}
-		errs = append(errs, err)
+const maxWriteBackExportCache = 4
+
+var writeBackExportCache = struct {
+	sync.Mutex
+	order   []string
+	entries map[string]writeBackExport
+}{entries: make(map[string]writeBackExport)}
+
+type writeBackExport struct {
+	library   *rekordbox.Library
+	oneLibRel string
+}
+
+func getWriteBackExportCache(stamp string) (*rekordbox.Library, string, bool) {
+	if stamp == "" {
+		return nil, "", false
 	}
-	if rel, err := r.Resolve("PIONEER/rekordbox/export.pdb"); err == nil {
-		lib, err := rekordbox.ReadPDB(r.FullPath(rel))
-		if err == nil {
-			return lib, "", nil
+	writeBackExportCache.Lock()
+	defer writeBackExportCache.Unlock()
+	cached, ok := writeBackExportCache.entries[stamp]
+	if !ok {
+		return nil, "", false
+	}
+	return cloneLibrary(cached.library), cached.oneLibRel, true
+}
+
+func putWriteBackExportCache(stamp string, lib *rekordbox.Library, oneLibRel string) {
+	if stamp == "" || lib == nil {
+		return
+	}
+	writeBackExportCache.Lock()
+	defer writeBackExportCache.Unlock()
+	if _, exists := writeBackExportCache.entries[stamp]; !exists {
+		writeBackExportCache.order = append(writeBackExportCache.order, stamp)
+		for len(writeBackExportCache.order) > maxWriteBackExportCache {
+			oldest := writeBackExportCache.order[0]
+			writeBackExportCache.order = writeBackExportCache.order[1:]
+			delete(writeBackExportCache.entries, oldest)
 		}
-		errs = append(errs, err)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, err)
+	}
+	writeBackExportCache.entries[stamp] = writeBackExport{library: cloneLibrary(lib), oneLibRel: oneLibRel}
+}
+
+func evictWriteBackExportCache(stamp string) {
+	if stamp == "" {
+		return
+	}
+	writeBackExportCache.Lock()
+	defer writeBackExportCache.Unlock()
+	if _, exists := writeBackExportCache.entries[stamp]; !exists {
+		return
+	}
+	delete(writeBackExportCache.entries, stamp)
+	kept := writeBackExportCache.order[:0]
+	for _, s := range writeBackExportCache.order {
+		if s != stamp {
+			kept = append(kept, s)
+		}
+	}
+	writeBackExportCache.order = kept
+}
+
+func readStickRekordboxLibrary(ctx context.Context, r *compat.Resolver, mountPath string, keys *rekordbox.KeyCache, stamp string) (*rekordbox.Library, string, error) {
+	if library, oneLibRel, ok := getWriteBackExportCache(stamp); ok {
+		return library, oneLibRel, nil
+	}
+
+	var errs []error
+	candidates, err := exportCandidates(r, mountPath)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, candidate := range candidates {
+		var lib *rekordbox.Library
+		if candidate.isPDB {
+			lib, err = rekordbox.ReadPDB(candidate.full)
+		} else {
+			lib, err = rekordbox.ReadSQLiteKeys(ctx, candidate.full, nil, keys)
+		}
+		if err == nil {
+			if candidate.isPDB {
+				putWriteBackExportCache(stamp, lib, "")
+				return lib, "", nil
+			}
+			putWriteBackExportCache(stamp, lib, candidate.rel)
+			return lib, candidate.rel, nil
+		}
+		errs = append(errs, fmt.Errorf("%s: %w", candidate.rel, err))
 	}
 	if len(errs) > 0 {
 		return nil, "", errors.Join(errs...)
 	}
 	return nil, "", fmt.Errorf("writeback: no rekordbox export found on %s", mountPath)
+}
+
+func writeBackStampReason(imported, current string) string {
+	if imported == "" {
+		return "Engine library import stamp is missing"
+	}
+	if !strings.HasPrefix(imported, stampVersion+" ") {
+		return "Engine library import stamp is older than v4"
+	}
+	if current == "" {
+		return "current rekordbox export has no stamp"
+	}
+	if imported != current {
+		return "Engine library import stamp does not match the current rekordbox export"
+	}
+	return ""
+}
+
+func normalizeRekordboxPath(p string) string {
+	p = strings.ReplaceAll(p, "\\", "/")
+	p = strings.TrimLeft(p, "/")
+	for strings.HasPrefix(p, "../") {
+		p = strings.TrimPrefix(p, "../")
+	}
+	return norm.NFC.String(path.Clean(p))
+}
+
+func sameRekordboxPath(a, b string) bool {
+	a, b = normalizeRekordboxPath(a), normalizeRekordboxPath(b)
+	return a != "." && a != "" && cases.Fold().String(a) == cases.Fold().String(b)
+}
+
+func importedRecordChanged(fingerprint string, tr rekordbox.Track) bool {
+	return false
+}
+
+func parseWriteBackRecovery(mark string) (mode, stamp string) {
+	parts := strings.SplitN(strings.TrimSpace(mark), "\n", 2)
+	if len(parts) != 2 || (parts[0] != "export" && parts[0] != "rows") {
+		return "", ""
+	}
+	return parts[0], strings.TrimSpace(parts[1])
 }
 
 func resolveRekordboxTrack(
@@ -1081,17 +1229,19 @@ func resolveRekordboxTrack(
 	byPath map[string]rekordbox.Track,
 	byPathFold map[string]rekordbox.Track,
 ) (rekordbox.Track, bool) {
-	if pdbImportKey > 0 && pdbImportKey <= math.MaxUint32 {
-		if tr, ok := byID[uint32(pdbImportKey)]; ok {
-			return tr, true
-		}
-	}
-	norm := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(enginePath)), "../")
+	norm := normalizeRekordboxPath(enginePath)
 	if tr, ok := byPath[norm]; ok {
 		return tr, true
 	}
-	if tr, ok := byPathFold[strings.ToLower(norm)]; ok {
+	if tr, ok := byPathFold[cases.Fold().String(norm)]; ok {
 		return tr, true
+	}
+	if pdbImportKey > 0 && pdbImportKey <= math.MaxUint32 {
+		if tr, ok := byID[uint32(pdbImportKey)]; ok {
+			if sameRekordboxPath(tr.Path, enginePath) {
+				return tr, true
+			}
+		}
 	}
 	if hasAnalysis {
 		var srcJSON []byte
@@ -1103,7 +1253,7 @@ func resolveRekordboxTrack(
 					}
 				}
 				if json.Unmarshal(raw, &decoded) == nil && decoded.Track.ID != 0 {
-					if tr, ok := byID[decoded.Track.ID]; ok {
+					if tr, ok := byID[decoded.Track.ID]; ok && sameRekordboxPath(tr.Path, enginePath) {
 						return tr, true
 					}
 				}
@@ -1113,19 +1263,117 @@ func resolveRekordboxTrack(
 	return rekordbox.Track{}, false
 }
 
-func trackRekordboxOffset(r *compat.Resolver, trackPath string) float64 {
+func trackRekordboxOffset(r *compat.Resolver, trackPath string) (float64, bool) {
 	if trackPath == "" {
-		return 0
+		return 0, false
 	}
 	rel, err := r.Resolve(trackPath)
 	if err != nil {
-		return 0
+		return 0, false
 	}
 	info, err := compat.AudioHeader(r.FullPath(rel))
 	if err != nil {
-		return 0
+		return 0, false
 	}
-	return float64(info.RekordboxOffset())
+	lower := strings.ToLower(rel)
+	if (strings.HasSuffix(lower, ".mp3") || compat.IsMP4AudioPath(lower)) && info.SampleRate <= 0 {
+		return 0, false
+	}
+	return float64(info.RekordboxOffset()), true
+}
+
+func stripShiftedForeignCues(
+	resolver *compat.Resolver,
+	deck enginedb.DeckCues,
+	hasWritten bool,
+	pdbImportKey int64,
+	enginePath string,
+	rbTrack rekordbox.Track,
+	origCues []rekordbox.Cue,
+	offsetSamples float64,
+	byID map[uint32]rekordbox.Track,
+) enginedb.DeckCues {
+	if hasWritten || pdbImportKey <= 0 || pdbImportKey > math.MaxUint32 || deck.SampleRate <= 0 {
+		return deck
+	}
+	fk := uint32(pdbImportKey)
+	if fk == rbTrack.ID {
+		return deck
+	}
+	foreign, ok := byID[fk]
+	if !ok || foreign.ID == 0 || foreign.AnalysisPath == "" || sameRekordboxPath(foreign.Path, enginePath) {
+		return deck
+	}
+	foreignCues := readStickTrackCues(resolver, foreign)
+	if len(foreignCues) == 0 {
+		return deck
+	}
+	origHot := make(map[uint32]rekordbox.Cue, 8)
+	for _, oc := range origCues {
+		if oc.HotCue > 0 {
+			origHot[oc.HotCue] = oc
+		}
+	}
+	foreignHot := make(map[uint32]rekordbox.Cue, 8)
+	for _, fc := range foreignCues {
+		if fc.HotCue > 0 {
+			foreignHot[fc.HotCue] = fc
+		}
+	}
+	foreignOff, hasForeignOff := trackRekordboxOffset(resolver, foreign.Path)
+	for s := 0; s < 8; s++ {
+		hc := deck.HotCues[s]
+		if hc == nil || hc.Name != "" {
+			continue
+		}
+		pad := uint32(s + 1)
+		if _, existsInOrig := origHot[pad]; existsInOrig {
+			continue
+		}
+		fc, existsInForeign := foreignHot[pad]
+		if !existsInForeign || fc.Loop != (deck.Loops[s] != nil) {
+			continue
+		}
+		msRaw := uint32(math.Round(max(0.0, hc.Samples) * 1000.0 / deck.SampleRate))
+		msOwn := uint32(math.Round(max(0.0, hc.Samples+offsetSamples) * 1000.0 / deck.SampleRate))
+		matched := absDiffU32(fc.TimeMS, msRaw) <= 60 || absDiffU32(fc.TimeMS, msOwn) <= 60
+		if !matched && hasForeignOff {
+			msForeign := uint32(math.Round(max(0.0, hc.Samples+foreignOff) * 1000.0 / deck.SampleRate))
+			matched = absDiffU32(fc.TimeMS, msForeign) <= 60
+		}
+		if matched {
+			deck.HotCues[s] = nil
+			if fc.Loop {
+				deck.Loops[s] = nil
+			}
+		}
+	}
+	return deck
+}
+
+var (
+	engineDefaultHotCueColor = [4]byte{255, 0, 255, 0}
+	engineDefaultLoopColor   = [4]byte{255, 255, 127, 0}
+)
+
+func uncolouredCue(c rekordbox.Cue) bool {
+	return c.Color == ([4]byte{}) && c.ColorCode == 0 && c.ColorID == 0
+}
+
+func preserveUncolouredColor(orig rekordbox.Cue, color [4]byte, startMS, endMS uint32, loop bool) bool {
+	if !uncolouredCue(orig) || absDiffU32(orig.TimeMS, startMS) > 2 {
+		return false
+	}
+	if loop && (!orig.Loop || absDiffU32(orig.EndMS, endMS) > 2) {
+		return false
+	}
+	if !loop && orig.Loop {
+		return false
+	}
+	if loop {
+		return color == engineDefaultLoopColor
+	}
+	return color == engineDefaultHotCueColor
 }
 
 func resolveANLZVariant(r *compat.Resolver, baseRel, ext string) (string, bool) {
@@ -1192,6 +1440,10 @@ func pdbMetadataBytes(ctx context.Context, path string, updates map[uint32]rekor
 }
 
 func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offsetSamples float64) []rekordbox.Cue {
+	return mergeEngineCuesOpts(orig, deck, offsetSamples, false)
+}
+
+func mergeEngineCuesOpts(orig []rekordbox.Cue, deck enginedb.DeckCues, offsetSamples float64, legacyMP3 bool) []rekordbox.Cue {
 	origHot := make(map[uint32]rekordbox.Cue, 8)
 	var origMemPoints []rekordbox.Cue
 	var origMemLoops []rekordbox.Cue
@@ -1249,10 +1501,17 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offsetSamples
 			}
 			code := rekordbox.NearestCueColorCode(rgb)
 			var loopNum, loopDen uint16
-			if oc, ok := origHot[pad]; ok && oc.Loop && absDiffU32(oc.TimeMS, startMS) <= 2 && absDiffU32(oc.EndMS, endMS) <= 2 {
-				loopNum, loopDen = oc.LoopNumerator, oc.LoopDenominator
-				if oc.Color == rgb && oc.ColorCode != 0 {
-					code = oc.ColorCode
+			if oc, ok := origHot[pad]; ok && oc.Loop {
+				if hc.Samples <= 0.5 && float64(oc.TimeMS)*deck.SampleRate/1000.0 <= offsetSamples+0.5 && absDiffU32(oc.EndMS, endMS) <= 2 && oc.TimeMS < endMS {
+					startMS = oc.TimeMS
+				}
+				if absDiffU32(oc.TimeMS, startMS) <= 2 && absDiffU32(oc.EndMS, endMS) <= 2 {
+					loopNum, loopDen = oc.LoopNumerator, oc.LoopDenominator
+					if preserveUncolouredColor(oc, rgb, startMS, endMS, true) {
+						rgb, code = [4]byte{}, 0
+					} else if oc.Color == rgb && oc.ColorCode != 0 {
+						code = oc.ColorCode
+					}
 				}
 			}
 			out = append(out, rekordbox.Cue{
@@ -1273,8 +1532,17 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offsetSamples
 
 		rgb := hc.Color
 		code := rekordbox.NearestCueColorCode(rgb)
-		if oc, ok := origHot[pad]; ok && !oc.Loop && oc.Color == rgb && oc.ColorCode != 0 {
-			code = oc.ColorCode
+		if oc, ok := origHot[pad]; ok && !oc.Loop {
+			if hc.Samples <= 0.5 && float64(oc.TimeMS)*deck.SampleRate/1000.0 <= offsetSamples+0.5 {
+				startMS = oc.TimeMS
+			} else if legacyMP3 && hc.Name == "" && oc.Name == "" && (oc.Color == rgb || (uncolouredCue(oc) && rgb == engineDefaultHotCueColor)) && absDiffU32(oc.TimeMS, startMS) <= 60 {
+				startMS = oc.TimeMS
+			}
+			if preserveUncolouredColor(oc, rgb, startMS, 0, false) {
+				rgb, code = [4]byte{}, 0
+			} else if oc.Color == rgb && oc.ColorCode != 0 {
+				code = oc.ColorCode
+			}
 		}
 		out = append(out, rekordbox.Cue{
 			HotCue:    pad,
@@ -1308,9 +1576,16 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offsetSamples
 		var memColor [4]byte
 		var memColorCode byte
 		for _, oc := range origMemLoops {
+			if lp.StartSamples <= 0.5 && float64(oc.TimeMS)*deck.SampleRate/1000.0 <= offsetSamples+0.5 && absDiffU32(oc.EndMS, endMS) <= 2 && oc.TimeMS < endMS {
+				startMS = oc.TimeMS
+			}
 			if absDiffU32(oc.TimeMS, startMS) <= 2 && absDiffU32(oc.EndMS, endMS) <= 2 {
 				loopNum, loopDen = oc.LoopNumerator, oc.LoopDenominator
-				if oc.ColorID != 0 && oc.ColorID <= 8 {
+				if preserveUncolouredColor(oc, lp.Color, startMS, endMS, true) {
+					colorID = 0
+					memColor = [4]byte{}
+					memColorCode = 0
+				} else if oc.ColorID != 0 && oc.ColorID <= 8 {
 					colorID = oc.ColorID
 				} else if oc.ColorID == 0 && oc.Color != ([4]byte{}) && oc.Color == lp.Color {
 					colorID = 0

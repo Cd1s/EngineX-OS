@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 	"unicode/utf16"
 )
 
@@ -184,7 +185,7 @@ func (a *Analysis) section(tag string, s []byte, h int) error {
 			}
 			a.mergeCue(c)
 		}
-	case "PWV3", "PWV5", "PWV7", "PWV4", "PWAV", "PWV2":
+	case "PWV3", "PWV5", "PWV7", "PWV4", "PWV6", "PWAV", "PWV2":
 		width, count, ok := WaveformShape(tag, s, int64(h), int64(len(s)))
 		if !ok {
 			return bad()
@@ -279,9 +280,46 @@ func ReadAnalysisSkipping(path string, skip func(tag string) bool) (*Analysis, e
 	return a, e
 }
 
+func readAtPaced(f *os.File, buf []byte, off int64, chunk int, pause func(n int, took time.Duration) error) error {
+	if pause == nil || chunk <= 0 || len(buf) <= chunk {
+		start := time.Now()
+		n, err := f.ReadAt(buf, off)
+		if err != nil {
+			return err
+		}
+		if pause != nil && n > 0 {
+			return pause(n, time.Since(start))
+		}
+		return nil
+	}
+	for pos := 0; pos < len(buf); {
+		end := min(len(buf), pos+chunk)
+		start := time.Now()
+		n, err := f.ReadAt(buf[pos:end], off+int64(pos))
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("anlz: short read at offset %d", off+int64(pos))
+		}
+		pos += n
+		if err := pause(n, time.Since(start)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ReadAnalysisFile is ReadAnalysisSkipping on an open file; read is the bytes read from it. Only the
 // import uses it: whether the display can read a file is decided by reading it whole (#253 review 4).
 func ReadAnalysisFile(f *os.File, skip func(tag string) bool) (a *Analysis, read int64, e error) {
+	return ReadAnalysisFilePaced(f, skip, 0, nil)
+}
+
+// ReadAnalysisFilePaced is ReadAnalysisFile that reads in chunks of at most chunk bytes and invokes
+// pause after each chunk when pause is non-nil (used to yield USB bandwidth while a deck is active).
+// When skip is nil, the entire file is read and parsed.
+func ReadAnalysisFilePaced(f *os.File, skip func(tag string) bool, chunk int, pause func(n int, took time.Duration) error) (a *Analysis, read int64, e error) {
 	st, e := f.Stat()
 	if e != nil {
 		return nil, 0, e
@@ -292,18 +330,21 @@ func ReadAnalysisFile(f *os.File, skip func(tag string) bool) (a *Analysis, read
 			return nil, read, fmt.Errorf("anlz: file too large")
 		}
 		b := make([]byte, int(size))
-		if _, e := f.ReadAt(b, 0); e != nil {
+		if e := readAtPaced(f, b, 0, chunk, pause); e != nil {
 			return nil, read + size, e
 		}
 		a, e := ParseAnalysis(b)
 		return a, read + size, e
 	}
-	if size > MaxAnalysisBytes || size < 12 {
+	if skip == nil || size > MaxAnalysisBytes || size < 12 {
 		return whole()
 	}
 	head := make([]byte, 12)
 	read = 12
-	if _, e = f.ReadAt(head, 0); e != nil || string(head[:4]) != "PMAI" {
+	if e = readAtPaced(f, head, 0, chunk, pause); e != nil || string(head[:4]) != "PMAI" {
+		if e != nil && pause != nil {
+			return nil, read, e
+		}
 		return whole()
 	}
 	h, n := int64(be.Uint32(head[4:])), int64(be.Uint32(head[8:]))
@@ -312,7 +353,7 @@ func ReadAnalysisFile(f *os.File, skip func(tag string) bool) (a *Analysis, read
 	}
 	b := make([]byte, h, h+64<<10)
 	read += h
-	if _, e = f.ReadAt(b, 0); e != nil {
+	if e = readAtPaced(f, b, 0, chunk, pause); e != nil {
 		return nil, read, e
 	}
 	hdr := make([]byte, 24)
@@ -322,7 +363,7 @@ func ReadAnalysisFile(f *os.File, skip func(tag string) bool) (a *Analysis, read
 		}
 		k := min(int64(len(hdr)), n-off)
 		read += k
-		if _, e = f.ReadAt(hdr[:k], off); e != nil {
+		if e = readAtPaced(f, hdr[:k], off, chunk, pause); e != nil {
 			return nil, read, e
 		}
 		tag := string(hdr[:4])
@@ -337,7 +378,7 @@ func ReadAnalysisFile(f *os.File, skip func(tag string) bool) (a *Analysis, read
 		start := int64(len(b))
 		b = append(b, make([]byte, sn)...)
 		read += sn
-		if _, e = f.ReadAt(b[start:], off); e != nil {
+		if e = readAtPaced(f, b[start:], off, chunk, pause); e != nil {
 			return nil, read, e
 		}
 		off += sn
@@ -351,7 +392,7 @@ func ReadAnalysisFile(f *os.File, skip func(tag string) bool) (a *Analysis, read
 
 func isWaveform(tag string) bool {
 	switch tag {
-	case "PWV3", "PWV5", "PWV7", "PWV4", "PWAV", "PWV2":
+	case "PWV3", "PWV5", "PWV7", "PWV4", "PWV6", "PWAV", "PWV2":
 		return true
 	}
 	return false
@@ -365,7 +406,9 @@ func WaveformShape(tag string, hdr []byte, h, n int64) (width, count uint32, ok 
 		return 0, 0, false
 	}
 	width, count = 1, be.Uint32(hdr[12:])
-	if tag == "PWV3" || tag == "PWV4" || tag == "PWV5" || tag == "PWV7" {
+	if tag == "PWV6" {
+		width, count = be.Uint32(hdr[12:]), be.Uint32(hdr[16:])
+	} else if tag == "PWV3" || tag == "PWV4" || tag == "PWV5" || tag == "PWV7" {
 		if n < 24 || len(hdr) < 24 {
 			return 0, 0, false
 		}

@@ -2,10 +2,17 @@ package rekordbox
 
 import (
 	"crypto/pbkdf2"
+	"crypto/sha256"
 	"crypto/sha512"
+	"encoding/hex"
+	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -19,12 +26,26 @@ type KeyCache struct {
 	mu      sync.Mutex
 	keys    map[string]*cipherKeys
 	derived time.Duration
+	shared  string
 }
 
 type cipherKeys struct{ enc, mac []byte }
 
 // NewKeyCache returns an empty cache.
-func NewKeyCache() *KeyCache { return &KeyCache{} }
+func NewKeyCache() *KeyCache {
+	c := &KeyCache{}
+	if sharedDir := os.Getenv("ENGINEX_RB_SHARED_KEY_CACHE"); sharedDir != "" {
+		if err := os.MkdirAll(sharedDir, 0o700); err == nil && os.Chmod(sharedDir, 0o700) == nil {
+			c.shared = sharedDir
+		}
+	} else if flag.Lookup("test.v") == nil && !strings.HasSuffix(filepath.Base(os.Args[0]), ".test") && os.Geteuid() == 0 {
+		const dir = "/run/enginex-rb-keys"
+		if err := os.MkdirAll(dir, 0o700); err == nil && os.Chmod(dir, 0o700) == nil {
+			c.shared = dir
+		}
+	}
+	return c
+}
 
 // derivations counts the 256 000-round derivations of this process (tests, logs).
 var derivations atomic.Int64
@@ -66,6 +87,42 @@ func (c *KeyCache) get(salt, passphrase []byte) (*cipherKeys, error) {
 		if k, ok := c.keys[id]; ok {
 			return k, nil
 		}
+		if c.shared != "" {
+			if k, ok := c.readShared(salt, passphrase); ok {
+				if c.keys == nil {
+					c.keys = map[string]*cipherKeys{}
+				}
+				c.keys[id] = k
+				return k, nil
+			}
+		}
+	}
+	var lock *os.File
+	if c != nil && c.shared != "" {
+		var err error
+		lock, err = os.OpenFile(filepath.Join(c.shared, sharedKeyName(salt, passphrase)+".lock"), os.O_RDWR|os.O_CREATE, 0o600)
+		if err == nil {
+			if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+				lock.Close()
+				lock = nil
+			}
+		}
+		if lock != nil {
+			if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+				_ = lock.Close()
+				lock = nil
+			}
+		}
+		if lock != nil {
+			defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); _ = lock.Close() }()
+			if k, ok := c.readShared(salt, passphrase); ok {
+				if c.keys == nil {
+					c.keys = map[string]*cipherKeys{}
+				}
+				c.keys[id] = k
+				return k, nil
+			}
+		}
 	}
 	t0 := time.Now()
 	derivations.Add(1)
@@ -91,6 +148,85 @@ func (c *KeyCache) get(salt, passphrase []byte) (*cipherKeys, error) {
 		c.derived += time.Since(t0)
 	}
 	return k, nil
+}
+
+func sharedKeyName(salt, passphrase []byte) string {
+	h := sha256.New()
+	_, _ = h.Write(salt)
+	_, _ = h.Write(passphrase)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (c *KeyCache) readShared(salt, passphrase []byte) (*cipherKeys, bool) {
+	if c == nil || c.shared == "" {
+		return nil, false
+	}
+	path := filepath.Join(c.shared, sharedKeyName(salt, passphrase))
+	if st, err := os.Lstat(path); err != nil || !st.Mode().IsRegular() || st.Mode()&os.ModeSymlink != 0 {
+		return nil, false
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) != 64 {
+		return nil, false
+	}
+	return &cipherKeys{enc: append([]byte(nil), b[:32]...), mac: append([]byte(nil), b[32:]...)}, true
+}
+
+func (c *KeyCache) writeShared(salt, passphrase []byte, k *cipherKeys) {
+	if c == nil || c.shared == "" || k == nil {
+		return
+	}
+	if st, err := os.Lstat(c.shared); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	path := filepath.Join(c.shared, sharedKeyName(salt, passphrase))
+	if st, err := os.Lstat(path); err == nil && st.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	tmpPath := filepath.Join(c.shared, fmt.Sprintf(".%s.%d.tmp", sharedKeyName(salt, passphrase), os.Getpid()))
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return
+	}
+	ok := false
+	defer func() {
+		_ = f.Close()
+		if !ok {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	var b [64]byte
+	copy(b[:32], k.enc)
+	copy(b[32:], k.mac)
+	if n, err := f.Write(b[:]); err != nil || n != len(b) || f.Sync() != nil || f.Close() != nil {
+		return
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return
+	}
+	ok = true
+	if dir, err := os.Open(c.shared); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+}
+
+func (c *KeyCache) invalidate(salt, passphrase []byte) {
+	if c == nil {
+		return
+	}
+	id := string(salt) + "\x00" + string(passphrase)
+	if k, ok := c.keys[id]; ok {
+		clear(k.enc)
+		clear(k.mac)
+		delete(c.keys, id)
+	}
+	if c.shared != "" {
+		path := filepath.Join(c.shared, sharedKeyName(salt, passphrase))
+		if st, err := os.Lstat(path); err == nil && st.Mode().IsRegular() && st.Mode()&os.ModeSymlink == 0 {
+			_ = os.Remove(path)
+		}
+	}
 }
 
 // done clears keys that no cache keeps.

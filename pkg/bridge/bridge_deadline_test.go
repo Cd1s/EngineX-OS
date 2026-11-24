@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -33,5 +34,38 @@ func TestConvertAtMountKeepsOverviewDeadlineWhenImportFails(t *testing.T) {
 	}
 	if opts.Deadline.Before(start) || opts.Deadline.After(time.Now().Add(maxMountHookBudget)) {
 		t.Fatalf("deadline outside the shared mount budget: %v", opts.Deadline)
+	}
+}
+
+func TestPruneRGBOverviewsRespectsMountBudget(t *testing.T) {
+	t.Parallel()
+	_, root, _ := testlibrary.Create(t)
+	dir := filepath.Join(root, "Engine Library", "Database2")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	start := time.Now()
+	pruneRGBOverviews(ctx, dir, filepath.Join(dir, "m.db"), "")
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("expired prune context ran for %s", elapsed)
+	}
+	deadline := mountPruneDeadline(time.Now(), time.Time{})
+	if time.Until(deadline) > mountPruneBudget {
+		t.Fatalf("prune deadline exceeds sub-budget: %v", deadline)
+	}
+}
+
+func TestConvertAtMountHandsOffBeforeHookKillWhenPruneConsumesBudget(t *testing.T) {
+	if InChildForTest(t) {
+		return
+	}
+	_, root, _ := testlibrary.Create(t)
+	testfixture.Export(t, root)
+	oldBudget, oldReserve := maxMountHookBudget, quickMountReserve
+	maxMountHookBudget, quickMountReserve = time.Second, time.Second
+	t.Cleanup(func() { maxMountHookBudget, quickMountReserve = oldBudget, oldReserve })
+	start := time.Now()
+	_, _ = convertAtMount(context.Background(), root, &enginedb.Options{}, false)
+	if elapsed := time.Since(start); elapsed > maxMountHookBudget+500*time.Millisecond {
+		t.Fatalf("mount path exceeded its deadline: %s", elapsed)
 	}
 }

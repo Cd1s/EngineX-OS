@@ -397,28 +397,52 @@ func TestIssue321AStickWithStaleEntriesIsNotWrittenUntilADiskCheck(t *testing.T)
 		return
 	}
 	for _, tc := range []struct {
-		name string
-		spc  int
-	}{{"4KiB clusters", 8}, {"32KiB clusters", 64}} {
-		t.Run(tc.name, func(t *testing.T) { issue321StaleStick(t, tc.spc) })
+		name   string
+		spc    int
+		cutPDB bool
+	}{
+		{"4KiB clusters", 8, true},
+		{"32KiB clusters", 64, true},
+		{"stale ANLZ only", 8, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) { issue321StaleStick(t, tc.spc, tc.cutPDB) })
 	}
 }
 
-func issue321StaleStick(t *testing.T, spc int) {
+func issue321StaleStick(t *testing.T, spc int, cutPDB bool) {
 	ctx := context.Background()
 	work := t.TempDir()
 	img, mnt := vfatImageOf(t, work, 64, spc)
 	opts := bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-22", SkipPreparingCheck: true}
 	const cue, genre = "Stale 321", "Stale Genre 321"
-	targets := []string{"PIONEER/USBANLZ/P001/ANLZ0000.DAT", "PIONEER/rekordbox/export.pdb"}
+	targets := []string{"PIONEER/USBANLZ/P001/ANLZ0000.DAT"}
+	if cutPDB {
+		targets = append(targets, "PIONEER/rekordbox/export.pdb")
+	}
 
 	// A stick without OneLibrary (its metadata goes to export.pdb, #314), converted, a deck edit
 	// written back once (the stick an older build wrote); then the DJ sets a hot cue and a genre,
 	// and the stick is nearly full (2 MiB left).
 	src := setupWriteBackStick(t, false)
+	mp3s, err := filepath.Glob(filepath.Join(src, "Contents", "*", "*", "*.mp3"))
+	if err != nil || len(mp3s) == 0 {
+		t.Fatalf("fixture mp3s: %v %v", mp3s, err)
+	}
+	for _, p := range mp3s {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Give the header fixture's Xing tag ~10.4 s of frames (matching LargePDB's 8 s track)
+		// so a 1.5 s/3 s deck cue remains within SampleCount after ConvertAtMount re-imports.
+		binary.BigEndian.PutUint32(b[44:48], 400)
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	_, unmount := vfatMount(t, img, mnt)
 	issue321Copy(t, src, mnt)
-	if _, err := bridge.Convert(ctx, mnt, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, mnt); err != nil {
 		t.Fatal(err)
 	}
 	injectDeckCueEdit(t, mnt)
@@ -459,7 +483,7 @@ func issue321StaleStick(t *testing.T, spc int) {
 	}
 	unmountDry()
 	v := openFAT32(t, dry, false)
-	pdbAt := v.lookup(targets[1]).start
+	pdbAt := v.lookup("PIONEER/rekordbox/export.pdb").start
 	v.close()
 	if err = os.Remove(dry); err != nil {
 		t.Fatal(err)
@@ -467,8 +491,8 @@ func issue321StaleStick(t *testing.T, spc int) {
 
 	// The stale entries a pull during an older build's pass leaves: ANLZ0000.DAT names the cluster
 	// where the pass writes the new export.pdb, which holds its content and is free in the FAT (its
-	// own cluster stays allocated, named by nothing); export.pdb's last cluster is free in the FAT.
-	// Both still read.
+	// own cluster stays allocated, named by nothing); when cutPDB is true, export.pdb's last cluster
+	// is also free in the FAT. All still read.
 	v = openFAT32(t, img, true)
 	dat := v.lookup(targets[0])
 	if v.next(pdbAt) != 0 {
@@ -482,8 +506,10 @@ func issue321StaleStick(t *testing.T, spc int) {
 		t.Fatal(err)
 	}
 	v.setStart(dat, pdbAt)
-	pdbChain, _ := v.chain(v.lookup(targets[1]).start)
-	v.free(pdbChain[len(pdbChain)-1])
+	if cutPDB {
+		pdbChain, _ := v.chain(v.lookup(targets[1]).start)
+		v.free(pdbChain[len(pdbChain)-1])
+	}
 	v.countFree()
 	for _, rel := range targets {
 		if v.owned(v.lookup(rel)) {
@@ -541,9 +567,48 @@ func issue321StaleStick(t *testing.T, spc int) {
 			}
 		}
 	}
+	// Flush and unmount the repaired filesystem before taking the baseline image hash so dirty
+	// page-cache writes from recreating cut files are not attributed to the pass below.
+	unmount()
+	if !cutPDB {
+		// When fsck only cut ANLZ0000.DAT, export.pdb keeps its v4 stamp (bridge.go:778-794)
+		// and the first write-back pass after the disk check writes both the pending cue and
+		// genre edits cleanly.
+		_, unmount = vfatMount(t, img, mnt)
+		res, err = bridge.WriteBackCues(ctx, mnt, opts)
+		if err != nil || !issue321ANLZHas(t, mnt, cue) || issue321PDBGenre(t, mnt, 1) != genre {
+			t.Fatalf("the first pass after the disk check: %+v %v: the edits are not on the stick", res, err)
+		}
+		issue321ANLZSound(t, mnt)
+		unmount()
+		if out, err := exec.Command("fsck.fat", "-n", img).CombinedOutput(); err != nil {
+			t.Fatalf("fsck.fat -n after that pass: %v\n%s", err, out)
+		}
+		return
+	}
+	// When fsck also cut export.pdb and rekordbox exported it again, exportStamp (bridge.go:778-794)
+	// no longer matches .rb-bridge-imported, so writeBackStampReason (cue_writeback.go:267-270)
+	// refuses a pre-conversion pass without touching the repaired stick. Once ConvertAtMount imports
+	// the re-export, importKeeps and InvalidateUnsyncedEdits (realign.go:51-65, 368-401) keep the
+	// pending deck cue edit (while sync.go:988,1042 refreshes Track.genre from the re-exported
+	// export.pdb), and the next write-back pass writes the pending cue edit cleanly.
+	afterRepair := issue321Hash(t, img)
+	_, unmount = vfatMount(t, img, mnt)
 	res, err = bridge.WriteBackCues(ctx, mnt, opts)
-	if err != nil || !issue321ANLZHas(t, mnt, cue) || issue321PDBGenre(t, mnt, 1) != genre {
-		t.Fatalf("the first pass after the disk check: %+v %v: the edits are not on the stick", res, err)
+	if err != nil || res.FilesUpdated != 0 || res.TracksChanged != 0 || res.OneLibraryUpdated {
+		t.Fatalf("the first pass after the disk check: %+v %v, want stamp-mismatch refusal", res, err)
+	}
+	unmount()
+	if after := issue321Hash(t, img); after != afterRepair {
+		t.Fatalf("the refused pass changed the repaired stick: sha256 %s before, %s after", afterRepair, after)
+	}
+	_, unmount = vfatMount(t, img, mnt)
+	if _, err := bridge.ConvertAtMount(ctx, mnt, enginedb.Options{}, false); err != nil {
+		t.Fatalf("ConvertAtMount after re-export: %v", err)
+	}
+	res, err = bridge.WriteBackCues(ctx, mnt, opts)
+	if err != nil || !issue321ANLZHas(t, mnt, cue) {
+		t.Fatalf("write-back after ConvertAtMount on repaired stick: %+v %v: cue edit not written", res, err)
 	}
 	issue321ANLZSound(t, mnt)
 	unmount()
@@ -580,7 +645,7 @@ func issue321FirstPassRefused(t *testing.T, layout string) {
 	// A PDB stick converted at its insert, and a deck edit; no write-back pass has run on it.
 	_, unmount := vfatMount(t, img, mnt)
 	issue321Copy(t, setupWriteBackStick(t, false), mnt)
-	if _, err := bridge.Convert(ctx, mnt, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, mnt); err != nil {
 		t.Fatal(err)
 	}
 	issue321Settle() // the edit dates the row a second after the import
@@ -713,7 +778,7 @@ func TestIssue321TheNextInsertRemovesStagedCopies(t *testing.T) {
 			_, unmount := fsMount(t, fsType, img, mnt)
 			defer unmount()
 			issue321Copy(t, setupWriteBackStick(t, true), mnt)
-			if _, err := bridge.Convert(ctx, mnt, enginedb.Options{}); err != nil {
+			if _, err := convertWriteBackAtTest(ctx, mnt); err != nil {
 				t.Fatal(err)
 			}
 			db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(mnt, "Engine Library", "Database2", "m.db")}).String())
@@ -783,7 +848,7 @@ func TestIssue321EjectDuringTheFinalPassFailsVisiblyAndTheNextOneWorks(t *testin
 	src := setupWriteBackStick(t, true)
 	_, unmount := vfatMount(t, img, mnt)
 	issue321Copy(t, src, mnt)
-	if _, err := bridge.Convert(ctx, mnt, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, mnt); err != nil {
 		t.Fatal(err)
 	}
 	run := t.TempDir()

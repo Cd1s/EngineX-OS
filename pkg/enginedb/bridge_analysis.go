@@ -116,6 +116,9 @@ type DetailPause func(n int, took time.Duration) error
 // the job keeps the stick from a deck.
 const detailReadChunk = 128 << 10
 
+// PlayingReadChunk is the bounded chunk size used for background ANLZ reads while a deck is active.
+const PlayingReadChunk = 64 << 10
+
 // DetailServes reports whether a reference naming files gives the display a waveform: it is
 // BridgeDetail's own reading of them (detailFrom), every file read whole, so a row that holds a
 // waveform becomes a reference only where the display can then read the detail (#253 reviews 2-4).
@@ -123,11 +126,23 @@ const detailReadChunk = 128 << 10
 // waveform's body or the padding past its end included) does not serve. pause paces the reads;
 // its error (the job stopping) is returned, and nothing is confirmed then. read is the bytes read.
 func DetailServes(r *compat.Resolver, files []string, pause DetailPause) (ok bool, read int64, err error) {
-	return detailServes(r, files, pause, nil)
+	return detailServesChunk(r, files, detailReadChunk, pause, nil)
+}
+
+// DetailServesWithChunk is DetailServes with a caller-chosen chunk size (defaults to detailReadChunk).
+func DetailServesWithChunk(r *compat.Resolver, files []string, chunk int, pause DetailPause) (ok bool, read int64, err error) {
+	if chunk <= 0 {
+		chunk = detailReadChunk
+	}
+	return detailServesChunk(r, files, chunk, pause, nil)
 }
 
 func detailServes(r *compat.Resolver, files []string, pause DetailPause, rd detailReader) (ok bool, read int64, err error) {
-	a, read, err := detailFrom(r, files, pause, rd)
+	return detailServesChunk(r, files, detailReadChunk, pause, rd)
+}
+
+func detailServesChunk(r *compat.Resolver, files []string, chunk int, pause DetailPause, rd detailReader) (ok bool, read int64, err error) {
+	a, read, err := detailFromChunk(r, files, chunk, pause, rd)
 	return err == nil && a != nil, read, err
 }
 
@@ -141,9 +156,13 @@ type detailReader func(f *os.File, p []byte) (int, error)
 // the display draws (displayAnalysisWaveform) is the detail. Nil when none serves. err is only
 // pause's.
 func detailFrom(r *compat.Resolver, files []string, pause DetailPause, rd detailReader) (detail *rekordbox.Analysis, read int64, err error) {
+	return detailFromChunk(r, files, detailReadChunk, pause, rd)
+}
+
+func detailFromChunk(r *compat.Resolver, files []string, chunk int, pause DetailPause, rd detailReader) (detail *rekordbox.Analysis, read int64, err error) {
 	a := &rekordbox.Analysis{}
 	for _, f := range files {
-		data, n, err := readDetailFile(r, f, pause, rd)
+		data, n, err := readDetailFile(r, f, chunk, pause, rd)
 		read += n
 		if err != nil {
 			var stop detailStopped
@@ -169,18 +188,26 @@ type detailStopped struct{ err error }
 
 func (e detailStopped) Error() string { return "enginedb: detail read stopped: " + e.err.Error() }
 
+func openReadNoAtime(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|openNoAtime, 0)
+	if errors.Is(err, os.ErrPermission) {
+		f, err = os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	}
+	return f, err
+}
+
 // readDetailFile reads rel whole, as r resolves it, refusing traversal, symlinks, anything but a
-// regular file and more than maxDetailFile bytes, detailReadChunk at a time.
-func readDetailFile(r *compat.Resolver, rel string, pause DetailPause, rd detailReader) (b []byte, read int64, err error) {
+// regular file and more than maxDetailFile bytes, chunk bytes at a time.
+func readDetailFile(r *compat.Resolver, rel string, chunk int, pause DetailPause, rd detailReader) (b []byte, read int64, err error) {
+	if chunk <= 0 {
+		chunk = detailReadChunk
+	}
 	if rel, err = r.Resolve(rel); err != nil {
 		return nil, 0, err
 	}
 	// No access time: on FAT a read otherwise writes the file's directory entry back (measured,
 	// one write a track on the 6031-track stick copy). rb-bridge is root; others open it plainly.
-	f, err := os.OpenFile(r.FullPath(rel), os.O_RDONLY|syscall.O_NOFOLLOW|openNoAtime, 0)
-	if errors.Is(err, os.ErrPermission) {
-		f, err = os.OpenFile(r.FullPath(rel), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	}
+	f, err := openReadNoAtime(r.FullPath(rel))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -205,7 +232,7 @@ func readDetailFile(r *compat.Resolver, rel string, pause DetailPause, rd detail
 		}
 		start := time.Now()
 		var n int
-		if p := b[len(b):min(cap(b), len(b)+detailReadChunk)]; rd == nil {
+		if p := b[len(b):min(cap(b), len(b)+chunk)]; rd == nil {
 			n, err = f.Read(p)
 		} else {
 			n, err = rd(f, p)

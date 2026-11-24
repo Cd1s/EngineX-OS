@@ -6,6 +6,8 @@ import (
 	"hash/fnv"
 	"path/filepath"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
 )
 
 // CueWatcherForTest watches sticks as if they were the volumes mounted (no mount table), with
@@ -28,6 +30,19 @@ func SetCueRunDirForTest(dir string) func() {
 	oldFlag, oldEject := usbPreparingFlagPath, cueEjectingDir
 	usbPreparingFlagPath, cueEjectingDir = filepath.Join(dir, "enginex-usb-preparing"), dir
 	return func() { usbPreparingFlagPath, cueEjectingDir = oldFlag, oldEject }
+}
+
+// StampWriteBackForTest records the export stamp a direct test import would have published.
+func StampWriteBackForTest(mount string) error {
+	r, err := compat.NewResolver(mount)
+	if err != nil {
+		return err
+	}
+	stamp, err := exportStamp(r, mount)
+	if err != nil {
+		return err
+	}
+	return writeMark(filepath.Join(mount, "Engine Library", "Database2"), stampName, stamp)
 }
 
 // ErrNotQuietForTest is the error of a pass whose read overlapped a write by Engine.

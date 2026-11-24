@@ -17,6 +17,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -88,6 +90,10 @@ func finishPublish(dir string, names ...string) error {
 		}
 		return err
 	}
+	movedRGB, err := publishOverviewData(stage, dir)
+	if err != nil {
+		return err
+	}
 	for _, name := range names {
 		staged := filepath.Join(stage, name)
 		if _, err := os.Stat(staged); errors.Is(err, os.ErrNotExist) {
@@ -106,6 +112,11 @@ func finishPublish(dir string, names ...string) error {
 	if err := syncFile(dir); err != nil {
 		return err
 	}
+	if len(movedRGB) > 0 {
+		enginedb.RecordVerifiedRGBOverviews(context.Background(), dir, filepath.Join(dir, "m.db"), movedRGB)
+	} else {
+		enginedb.RefreshRGBVerifiedStat(dir, filepath.Join(dir, "m.db"))
+	}
 	return os.RemoveAll(stage)
 }
 
@@ -116,6 +127,84 @@ func syncFile(path string) error {
 	}
 	defer f.Close()
 	return f.Sync()
+}
+
+func validRGBOverviewFile(path string) bool {
+	st, err := os.Lstat(path)
+	if err != nil || !st.Mode().IsRegular() || st.Size() <= 8 || st.Size() > 1<<20 {
+		return false
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	raw, err := enginedb.QUncompress(b, 1<<20)
+	return err == nil && enginedb.ValidRGBOverview(raw)
+}
+
+// publishOverviewData atomically moves staged OverviewData/<uuid>/*.rgb files
+// into dir/OverviewData/<uuid>/ before m.db is published, without replacing an
+// already-valid Engine RGB sidecar at the destination. It is idempotent so an
+// interrupted publish resumes cleanly on the next mount.
+func publishOverviewData(stage, dir string) ([]int64, error) {
+	srcRoot := filepath.Join(stage, "OverviewData")
+	uuids, err := os.ReadDir(srcRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var movedIDs []int64
+	for _, u := range uuids {
+		if !u.IsDir() {
+			continue
+		}
+		uuid := u.Name()
+		if uuid == "" || uuid == "." || uuid == ".." || strings.ContainsAny(uuid, `/\`) {
+			continue
+		}
+		srcDir := filepath.Join(srcRoot, uuid)
+		dstDir := filepath.Join(dir, "OverviewData", uuid)
+		if err := os.MkdirAll(dstDir, 0o755); err != nil {
+			return movedIDs, err
+		}
+		files, err := os.ReadDir(srcDir)
+		if err != nil {
+			return movedIDs, err
+		}
+		moved := 0
+		for _, f := range files {
+			name := f.Name()
+			if !strings.HasSuffix(name, ".rgb") || !f.Type().IsRegular() {
+				continue
+			}
+			srcPath := filepath.Join(srcDir, name)
+			dstPath := filepath.Join(dstDir, name)
+			if validRGBOverviewFile(dstPath) {
+				if err := os.Remove(srcPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return movedIDs, err
+				}
+				if id, perr := strconv.ParseInt(strings.TrimSuffix(name, ".rgb"), 10, 64); perr == nil && id > 0 {
+					movedIDs = append(movedIDs, id)
+				}
+				continue
+			}
+			if err := os.Rename(srcPath, dstPath); err != nil {
+				return movedIDs, err
+			}
+			if id, perr := strconv.ParseInt(strings.TrimSuffix(name, ".rgb"), 10, 64); perr == nil && id > 0 {
+				movedIDs = append(movedIDs, id)
+			}
+			moved++
+		}
+		if moved > 0 {
+			if err := syncFile(dstDir); err != nil {
+				return movedIDs, err
+			}
+		}
+	}
+	return movedIDs, nil
 }
 
 // pruneRGBOverviews removes Engine's RGB overview files that no longer belong to their

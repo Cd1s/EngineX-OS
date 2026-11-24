@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
-	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
 // heldReplaced reports whether this process still holds open the file that a rename replaced
@@ -41,7 +40,7 @@ func TestIssue321ReplacedFileStaysAllocatedUntilTheNewEntryIsSynced(t *testing.T
 	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 	injectDeckCueEdit(t, stick)

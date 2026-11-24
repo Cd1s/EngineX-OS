@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 )
 
@@ -307,6 +308,63 @@ func TestDeckClockIncludesProlinkAndModEnabledFlag(t *testing.T) {
 	}
 	if snap.Decks[0].Beat < 2.0 || snap.Decks[0].Beat >= 3.0 {
 		t.Fatalf("expected beat in [2, 3), got %.3f", snap.Decks[0].Beat)
+	}
+}
+
+func TestDeckClockActiveWhileUSBPreparingAndScratchMarksDeckActive(t *testing.T) {
+	priDir := t.TempDir()
+	restore := bridge.SetPriorityDirForTest(priDir)
+	defer restore()
+
+	base := t.TempDir()
+	uiDir := filepath.Join(base, "ui")
+	if err := os.MkdirAll(uiDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prepPath := filepath.Join(base, "usb-preparing")
+	s := New(Config{UIDir: uiDir, StateDir: filepath.Join(base, "state"), USBPreparingPath: prepPath}, nil)
+	defer s.Close()
+
+	// Without USBPreparing, dmx-studio, or /clock poll, deckClock is omitted.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/v1/enginex/ui", nil)
+	req.RemoteAddr = "127.0.0.1:4100"
+	s.ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), `"deckClock"`) {
+		t.Fatalf("expected deckClock omitted when idle, got %s", rec.Body.String())
+	}
+
+	// Active background USB import (/run/enginex-usb-preparing) enables deckClock on 2-deck players.
+	if err := os.WriteFile(prepPath, []byte(`{"state":"loading","done":12,"total":2416}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/v1/enginex/ui", nil)
+	req.RemoteAddr = "127.0.0.1:4101"
+	s.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `"deckClock":true`) {
+		t.Fatalf("expected deckClock:true while usbPreparing is active, got %s", rec.Body.String())
+	}
+
+	// Paused platter/scratch sample via POST /v1/enginex/clock marks deck active without PlayState.
+	nowMS := time.Now().UnixMilli()
+	cBody := fmt.Sprintf(`[{"deck":1,"playing":false,"cue":false,"scratch":true,"at":%d}]`, nowMS)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/v1/enginex/clock", strings.NewReader(cBody))
+	req.RemoteAddr = "127.0.0.1:4102"
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 || !bridge.IsDeckActive() {
+		t.Fatalf("expected scratch clock post to mark deck active: code=%d active=%v", rec.Code, bridge.IsDeckActive())
+	}
+
+	// Removing usb-preparing returns deckClock to omitted once no /clock GET is active.
+	_ = os.Remove(prepPath)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/v1/enginex/ui", nil)
+	req.RemoteAddr = "127.0.0.1:4103"
+	s.ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), `"deckClock"`) {
+		t.Fatalf("expected deckClock omitted after usbPreparing ends, got %s", rec.Body.String())
 	}
 }
 

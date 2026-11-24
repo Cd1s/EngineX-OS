@@ -390,6 +390,7 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("POST /v1/enginex/automix", s.handleAutomix)
 	g.mux.HandleFunc("POST /v1/enginex/sampler/loop-to-pad", s.handleSamplerLoopToPad)
 	g.mux.HandleFunc("POST /v1/enginex/rekordbox/writeback", s.handleRekordboxWriteback)
+	g.mux.HandleFunc("POST /v1/enginex/rekordbox/priority", s.handleRekordboxPriority)
 	g.mux.HandleFunc("GET /v1/enginex/usb-audio", s.handleUSBAudio)
 	g.mux.HandleFunc("POST /v1/enginex/usb-audio", s.handleUSBAudio)
 	g.mux.HandleFunc("GET /v1/enginex/stems/source", g.stemsSource)

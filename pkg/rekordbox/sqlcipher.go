@@ -96,7 +96,8 @@ func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 		return fmt.Errorf("sqlcipher: read page 1: %w", err)
 	}
 
-	keys, err := kc.get(inPage[:sqlcipherSaltSize], passphrase)
+	salt := append([]byte(nil), inPage[:sqlcipherSaltSize]...)
+	keys, err := kc.get(salt, passphrase)
 	if err != nil {
 		return err
 	}
@@ -144,9 +145,22 @@ func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 		_, _ = mac.Write(pgLE[:])
 		gotMAC := mac.Sum(sumBuf[:0])
 		if !hmac.Equal(gotMAC, inPage[ivEnd:sqlcipherPageSize]) {
+			if pgno == 1 && kc != nil {
+				kc.invalidate(salt, passphrase)
+				keys, err = kc.get(salt, passphrase)
+				if err != nil {
+					return err
+				}
+				block, err = aes.NewCipher(keys.enc)
+				if err != nil {
+					return fmt.Errorf("sqlcipher: init AES-256: %w", err)
+				}
+				mac = hmac.New(sha512.New, keys.mac)
+				pgno = 0
+				continue
+			}
 			return fmt.Errorf("sqlcipher: page %d HMAC verification failed", pgno)
 		}
-
 		clear(outPage[:])
 		cipher.NewCBCDecrypter(block, inPage[usableEnd:ivEnd]).CryptBlocks(outPage[off:usableEnd], inPage[off:usableEnd])
 
@@ -162,6 +176,9 @@ func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 
 		if _, err := w.Write(outPage[:]); err != nil {
 			return fmt.Errorf("sqlcipher: write page %d: %w", pgno, err)
+		}
+		if pgno == 1 && kc != nil {
+			kc.writeShared(salt, passphrase, keys)
 		}
 	}
 	return nil
@@ -396,6 +413,9 @@ func encryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 
 		if _, err := w.Write(outPage[:]); err != nil {
 			return fmt.Errorf("sqlcipher: write page %d: %w", pgno, err)
+		}
+		if pgno == 1 && kc != nil {
+			kc.writeShared(salt, passphrase, keys)
 		}
 	}
 	return nil

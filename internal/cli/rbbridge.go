@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -133,6 +134,11 @@ func RBBridge(args []string, stdout io.Writer) error {
 			SmartMatch:   *smart != 0,
 			CurrentTrack: uint32(*smart),
 			OnProgress:   func(done, total int) { rep.Report(done, total, false) },
+		}
+		if raw := os.Getenv("ENGINEX_HOOK_REMAINING_MS"); raw != "" {
+			if ms, parseErr := strconv.ParseInt(raw, 10, 64); parseErr == nil && ms > 0 {
+				opts.Deadline = time.Now().Add(time.Duration(ms) * time.Millisecond)
+			}
 		}
 		r, err := bridge.ConvertAtMount(ctx, *mount, opts, *full)
 		if err == nil && r.Background {

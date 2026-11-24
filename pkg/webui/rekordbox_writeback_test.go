@@ -41,10 +41,27 @@ func TestHandleRekordboxWriteback(t *testing.T) {
 		t.Fatalf("missing drive status=%d, want 404", w.Code)
 	}
 
-	// Valid drive -> 200 JSON.
+	// Unstamped library (no v4 mount stamp) must be skipped safely.
 	stick := filepath.Join(mediaRoot, "USB1")
 	testfixture.LargeExport(t, stick, 1)
 	if _, err := bridge.Convert(t.Context(), stick, enginedb.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	s.handleRekordboxWriteback(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/rekordbox/writeback?drive=USB1", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("unstamped POST status=%d body=%s", w.Code, w.Body.String())
+	}
+	var skipped bridge.WriteBackResult
+	if err := json.Unmarshal(w.Body.Bytes(), &skipped); err != nil {
+		t.Fatal(err)
+	}
+	if skipped.TracksChecked != 0 || skipped.TracksChanged != 0 {
+		t.Fatalf("expected unstamped stick to be skipped, got %+v", skipped)
+	}
+
+	// Properly mounted drive with v4 stamp -> 200 JSON and checks 1 track.
+	if _, err := bridge.ConvertAtMount(t.Context(), stick, enginedb.Options{}, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -79,7 +96,7 @@ func TestRekordboxWritebackFinalOnlyFromTheDeck(t *testing.T) {
 	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir(), MediaRoot: mediaRoot}, nil)
 	stick := filepath.Join(mediaRoot, "USB1")
 	testfixture.LargeExport(t, stick, 1)
-	if _, err := bridge.Convert(t.Context(), stick, enginedb.Options{}); err != nil {
+	if _, err := bridge.ConvertAtMount(t.Context(), stick, enginedb.Options{}, false); err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer

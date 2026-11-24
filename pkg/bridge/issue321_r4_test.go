@@ -13,7 +13,6 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
-	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
@@ -123,11 +122,11 @@ func TestIssue321AnExportPutBackFromItsOriginalIsWrittenAgain(t *testing.T) {
 	}
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 	opts := func() bridge.WriteBackOptions {
-		return bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{}, Keys: testKeys, Settled: func() error { return nil }}
+		return bridge.WriteBackOptions{DateDir: "2026-11-22", Session: &bridge.CueSession{}, Keys: testKeys, Settled: func() error { return nil }, SkipPreparingCheck: true}
 	}
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(stick, "Engine Library", "Database2", "m.db")}).String())
 	if err != nil {

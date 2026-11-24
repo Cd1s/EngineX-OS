@@ -1710,7 +1710,9 @@ SERVICES_MAIN = """
 			current: root.scTr(prefix + "/CurrentBPM") || scShadowEmptyObject,
 			beat: root.scTr(prefix + "/BeatNumber") || scShadowEmptyObject,
 			position: root.scTr(prefix + "/Track/TrackPosition") || scShadowEmptyObject,
-			rate: root.scTr(prefix + "/Track/SampleRate") || scShadowEmptyObject
+			rate: root.scTr(prefix + "/Track/SampleRate") || scShadowEmptyObject,
+			touch: root.scTr(prefix + "/ExternalScratchWheelTouch") || scShadowEmptyObject,
+			platter: root.scTr(prefix + "/PlatterUserAction") || scShadowEmptyObject
 		}
 		scDeckClockProps[d] = g
 		return g
@@ -1738,21 +1740,22 @@ SERVICES_MAIN = """
 			const prevPos = scDeckClockPrevPos[d]
 			const prevCue = !!scDeckClockPrevCue[d]
 			const cue = !ps && sameTrack && !!g.cueLED.state && prevPos !== undefined && (posMs > prevPos + 0.5 || prevCue)
+			const scratch = loaded && (!!g.touch.state || !!g.platter.state || (!ps && !cue && sameTrack && prevPos !== undefined && Math.abs(posMs - prevPos) > 5 && Math.abs(posMs - prevPos) < 2000))
 			scDeckClockPrevLoaded[d] = loaded
 			scDeckClockPrevLen[d] = trackLen
 			scDeckClockPrevPos[d] = posMs
 			scDeckClockPrevCue[d] = cue
 			const playing = ps || cue
-			if (playing) anyPlaying = true
+			if (playing || scratch) anyPlaying = true
 			const master = !!g.master.state
 			const bpm = g.original.unnormalized || 0
 			const currentBpm = g.current.unnormalized || 0
 			const beat = g.beat.unnormalized || 0
 			const o = out[count] || (out[count] = {})
-			o.deck = d; o.playing = playing; o.cue = cue; o.master = master; o.lead = master
+			o.deck = d; o.playing = playing; o.cue = cue; o.scratch = scratch; o.master = master; o.lead = master
 			o.bpm = bpm; o.currentBpm = currentBpm; o.beat = beat; o.positionMs = posMs; o.at = now
 			count++
-			sig += d + ":" + (playing ? 1 : 0) + ":" + (master ? 1 : 0) + ":" + Math.round(currentBpm * 100) + ":" + Math.round(beat * 1000) + ";"
+			sig += d + ":" + (playing ? 1 : 0) + ":" + (scratch ? 1 : 0) + ":" + (master ? 1 : 0) + ":" + Math.round(currentBpm * 100) + ":" + Math.round(beat * 1000) + ";"
 		}
 		out.length = count
 		const rate = anyPlaying ? 100 : 500
@@ -5332,6 +5335,24 @@ SERVICES_MAIN = """
 			onUriChanged: root.scSwapStemmed(deckIdx, uri)
 		}
 	}
+	property var scPriorityXhr: null
+	property string scPriorityLast: ""
+	function scPrioritizeTrack(path, source, deck, net) {
+		if (path && path.indexOf("file:///media/") === 0) {
+			try { path = decodeURIComponent(path.slice(7)) } catch (e) { path = path.slice(7) }
+		}
+		const hasPath = !!path && path.indexOf("/media/") === 0
+		const hasNet = !hasPath && !!net && net.indexOf("net://") === 0
+		if (!hasPath && !hasNet) return
+		const key = source + ":" + (deck || 0) + ":" + (hasPath ? path : net)
+		if (key === scPriorityLast) return
+		scPriorityLast = key
+		if (!scPriorityXhr) scPriorityXhr = new XMLHttpRequest()
+		if (scPriorityXhr.readyState > 0 && scPriorityXhr.readyState < 4) scPriorityXhr.abort()
+		scPriorityXhr.open("POST", "http://127.0.0.1:8080/v1/enginex/rekordbox/priority")
+		scPriorityXhr.setRequestHeader("Content-Type", "application/json")
+		scPriorityXhr.send(JSON.stringify({ path: hasPath ? path : "", net: hasNet ? net : "", source: source, deck: deck || 0 }))
+	}
 	// A streamed row with a stemmed local copy (the services' own Stems lists)
 	// is swapped for that copy as it loads, so the deck has its Stems. Engine's
 	// own import finds the track it already imported; a playing deck is left alone.
@@ -5345,7 +5366,13 @@ SERVICES_MAIN = """
 		const real = root.scScope === "tidal" && root.scTidalLoggedIn
 		root.scNoteService(deck, m ? slot : "") // the last track's service must not outlive it
 		if (m && typeof root !== "undefined" && root && root.scStemRows && root.scStemRows[m[1]] === "fail") { if (root.scStemMark) root.scStemMark([m[1]], ""); if (root.scStemFailSweep) root.scStemFailSweep() }
-		if (!m) return
+		if (!m) {
+			if (uri && root.scFourDeckRole === "") {
+				const np = Planck.getProperty("/Engine/Deck%1/Track/TrackNetworkPath".arg(deck))
+				root.scPrioritizeTrack(uri, "deck", deck, np && np.translator ? np.translator.string : "")
+			}
+			return
+		}
 		const x = new XMLHttpRequest()
 		x.open("GET", "http://127.0.0.1:8080/v1/enginex/stems/local?id=" + m[1])
 		x.onreadystatechange = function() {
@@ -10555,6 +10582,9 @@ def legacy_qml_fixes():
                 "                        id: previewItem\n"
                 "                        property real scPendingSeek: -1\n"
                 "                        onIsListeningChanged: {\n"
+                "                            if (isListening && typeof root !== \"undefined\" && root.scPrioritizeTrack && row.absolutePath) {\n"
+                "                                root.scPrioritizeTrack(row.absolutePath, \"preview\")\n"
+                "                            }\n"
                 "                            if (isListening && scPendingSeek >= 0) {\n"
                 "                                const pos = scPendingSeek\n"
                 "                                scPendingSeek = -1\n"
@@ -10567,6 +10597,9 @@ def legacy_qml_fixes():
                 "\t\t\t\t\t\tid: previewItem\n"
                 "\t\t\t\t\t\tproperty real scPendingSeek: -1\n"
                 "\t\t\t\t\t\tonIsListeningChanged: {\n"
+                "\t\t\t\t\t\t\tif (isListening && typeof root !== \"undefined\" && root.scPrioritizeTrack && row.absolutePath) {\n"
+                "\t\t\t\t\t\t\t\troot.scPrioritizeTrack(row.absolutePath, \"preview\")\n"
+                "\t\t\t\t\t\t\t}\n"
                 "\t\t\t\t\t\t\tif (isListening && scPendingSeek >= 0) {\n"
                 "\t\t\t\t\t\t\t\tconst pos = scPendingSeek\n"
                 "\t\t\t\t\t\t\t\tscPendingSeek = -1\n"
@@ -10575,6 +10608,58 @@ def legacy_qml_fixes():
                 "\t\t\t\t\t\t}\n"
                 "\t\t\t\t\t\tonVisibleChanged: if (!visible) scPendingSeek = -1\n"
                 "\t\t\t\t\t}\n",
+            ),
+            (
+                "                onIsCurrentRowChanged: {\n"
+                "                    if (!isCurrentRow) {\n"
+                "                        clickedOnce = false\n"
+                "                        return\n"
+                "                    } else if (!pressed) {\n"
+                "                        clickedOnce = true\n"
+                "                    }\n\n"
+                "                    PlanckGUI.views.trackLoadOverlayView.setSelectedTrackStreamingFlags(streamingFlags)\n"
+                "                    Planck.librarianController.trackLoadArbitrator.selectedTrackChanged(\n"
+                "                        isStreamingTrack,\n"
+                "                        streamingProviderName\n"
+                "                    )\n"
+                "                }\n" if v53() else
+                "\t\t\t\tonIsCurrentRowChanged: {\n"
+                "\t\t\t\t\tif(!isCurrentRow) {\n"
+                "\t\t\t\t\t\treturn\n"
+                "\t\t\t\t\t}\n\n"
+                "\t\t\t\t\tPlanck.librarianController.trackLoadArbitrator.selectedTrackChanged(\n"
+                "\t\t\t\t\t\tisStreamingTrack,\n"
+                "\t\t\t\t\t\tstreamingProviderName\n"
+                "\t\t\t\t\t)\n"
+                "\t\t\t\t}\n",
+                "                onIsCurrentRowChanged: {\n"
+                "                    if (!isCurrentRow) {\n"
+                "                        clickedOnce = false\n"
+                "                        return\n"
+                "                    } else if (!pressed) {\n"
+                "                        clickedOnce = true\n"
+                "                    }\n\n"
+                "                    PlanckGUI.views.trackLoadOverlayView.setSelectedTrackStreamingFlags(streamingFlags)\n"
+                "                    Planck.librarianController.trackLoadArbitrator.selectedTrackChanged(\n"
+                "                        isStreamingTrack,\n"
+                "                        streamingProviderName\n"
+                "                    )\n"
+                "                    if (typeof root !== \"undefined\" && root.scPrioritizeTrack && row.absolutePath) {\n"
+                "                        root.scPrioritizeTrack(row.absolutePath, \"focus\")\n"
+                "                    }\n"
+                "                }\n" if v53() else
+                "\t\t\t\tonIsCurrentRowChanged: {\n"
+                "\t\t\t\t\tif(!isCurrentRow) {\n"
+                "\t\t\t\t\t\treturn\n"
+                "\t\t\t\t\t}\n\n"
+                "\t\t\t\t\tPlanck.librarianController.trackLoadArbitrator.selectedTrackChanged(\n"
+                "\t\t\t\t\t\tisStreamingTrack,\n"
+                "\t\t\t\t\t\tstreamingProviderName\n"
+                "\t\t\t\t\t)\n"
+                "\t\t\t\t\tif (typeof root !== \"undefined\" && root.scPrioritizeTrack && row.absolutePath) {\n"
+                "\t\t\t\t\t\troot.scPrioritizeTrack(row.absolutePath, \"focus\")\n"
+                "\t\t\t\t\t}\n"
+                "\t\t\t\t}\n",
             ),
             (
                 "                        if (point && inAlbumArt) {\n"

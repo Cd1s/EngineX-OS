@@ -8191,6 +8191,14 @@ assert.equal(posts[posts.length - 1][0].playing, false);
 const beforeLookups = lookups;
 scDeckClockTick();
 assert.equal(lookups, beforeLookups);
+// Paused platter touch reports scratch:true and wakes interval to 100 ms without setting playing:true.
+props["/Engine/Deck1/ExternalScratchWheelTouch"] = { state: true };
+scDeckClockProps = {};
+scDeckClockProbeAt = {};
+scDeckClockTick();
+assert.equal(posts[posts.length - 1][0].scratch, true);
+assert.equal(posts[posts.length - 1][0].playing, false);
+assert.equal(scDeckClockTimer.interval, 100);
 '''
             res = subprocess.run(["node"], input=script, text=True, capture_output=True)
             self.assertEqual(res.returncode, 0, res.stderr)
@@ -14988,6 +14996,126 @@ assert.strictEqual(say(true, [1, 2], false), 'T:Stems', 'no hint without a busy 
                      'if (!Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state)',
                      'Planck.getProperty("/Engine/Deck%1/Track/Unload".arg(deck)).translator.state = true'):
             self.assertIn(text, src, text)
+
+
+class TrackListRekordboxPriorityWiringTest(unittest.TestCase):
+    TRACK_LIST = "Views/BrowseView/Components/TrackList.qml"
+
+    def test_patch_table_wires_focus_and_preview_priority_for_504_and_530(self):
+        old_root = bp.ROOT
+        try:
+            for version, root in (("5.0.4", "Skins/EmbeddedCommon/"), ("5.3.0", "Skins/Embedded/")):
+                with self.subTest(version=version):
+                    bp.ROOT = root
+                    edits = bp.edits(False)
+                    tl_new = "\n".join(new for _, new in edits[root + self.TRACK_LIST])
+                    self.assertIn("onIsListeningChanged:", tl_new)
+                    self.assertIn('root.scPrioritizeTrack(row.absolutePath, "preview")', tl_new)
+                    self.assertIn("onIsCurrentRowChanged:", tl_new)
+                    self.assertIn('root.scPrioritizeTrack(row.absolutePath, "focus")', tl_new)
+        finally:
+            bp.ROOT = old_root
+        prio_fn = extract_qml_js_block(bp.SERVICES_MAIN, "function scPrioritizeTrack")
+        self.assertIn("/v1/enginex/rekordbox/priority", prio_fn)
+        self.assertIn("scPriorityXhr.abort()", prio_fn)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_generated_tracklist_focus_and_preview_handlers_coalesce_and_abort(self):
+        for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
+            qrc = LAB / version / "qrc"
+            if not qrc.is_dir():
+                if version == "5.0.4":
+                    continue
+                self.skipTest(f"{qrc} not found (run on the build host)")
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "packs"
+                built = subprocess.run(
+                    ["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)],
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(built.returncode, 0, built.stderr)
+                for lang in bp.LANGUAGES:
+                    tl_path = out / lang / f"Skins/{skin}/{self.TRACK_LIST}"
+                    tl_text = tl_path.read_text(encoding="utf-8")
+                    self.assertIn('root.scPrioritizeTrack(row.absolutePath, "preview")', tl_text)
+                    self.assertIn('root.scPrioritizeTrack(row.absolutePath, "focus")', tl_text)
+                main_qml = (out / "en" / f"Skins/{skin}/EmbeddedMain.qml").read_text(encoding="utf-8")
+                tl_en = (out / "en" / f"Skins/{skin}/{self.TRACK_LIST}").read_text(encoding="utf-8")
+                prio_body = extract_qml_js_block(main_qml, "function scPrioritizeTrack")
+                listen_body = extract_qml_js_block(tl_en, "onIsListeningChanged:")
+                focus_body = extract_qml_js_block(tl_en, "onIsCurrentRowChanged:")
+                script = f"""
+const assert = require('assert');
+const sent = [];
+let aborts = 0;
+let simulatedReadyState = 4;
+class XMLHttpRequest {{
+    constructor() {{ this.readyState = 0; this.headers = {{}}; }}
+    abort() {{ aborts++; this.readyState = 0; }}
+    open(method, url) {{ this.method = method; this.url = url; this.readyState = 1; }}
+    setRequestHeader(k, v) {{ this.headers[k] = v; }}
+    send(body) {{
+        sent.push({{ method: this.method, url: this.url, headers: {{...this.headers}}, body: JSON.parse(body) }});
+        this.readyState = simulatedReadyState;
+    }}
+}}
+let scPriorityXhr = null;
+let scPriorityLast = "";
+const root = {{
+    scPrioritizeTrack: function(path, source, deck, net) {prio_body}
+}};
+let seekPos = null;
+const arbitrations = [];
+const PlanckGUI = {{ views: {{ trackLoadOverlayView: {{ setSelectedTrackStreamingFlags: () => {{}} }} }} }};
+const Planck = {{
+    getProperty: () => ({{ translator: {{ set value(v) {{ seekPos = v; }} }} }}),
+    librarianController: {{ trackLoadArbitrator: {{ selectedTrackChanged: (s, p) => arbitrations.push([s, p]) }} }}
+}};
+function runFocus(isCurrentRow, absPath, pressed = false) {{
+    let clickedOnce = false;
+    const streamingFlags = 0, isStreamingTrack = false, streamingProviderName = "";
+    const row = {{ absolutePath: absPath }};
+    (() => {focus_body})();
+    return clickedOnce;
+}}
+function runPreview(isListening, absPath, pendingSeek = -1) {{
+    let scPendingSeek = pendingSeek;
+    const row = {{ absolutePath: absPath }};
+    (() => {listen_body})();
+    return scPendingSeek;
+}}
+
+// Unfocused row does not send priority or arbitrate.
+runFocus(false, "file:///media/USB/Contents/A%201.mp3");
+assert.strictEqual(sent.length, 0);
+assert.strictEqual(arbitrations.length, 0);
+
+// Focused row decodes file:// URI and posts focus priority; duplicate focus on same row coalesces.
+simulatedReadyState = 2; // leave XHR in-flight to verify abort on next distinct event
+assert.strictEqual(runFocus(true, "file:///media/USB/Contents/A%201.mp3"), {json.dumps(version == "5.3.0")});
+assert.strictEqual(arbitrations.length, 1);
+assert.strictEqual(sent.length, 1);
+assert.deepStrictEqual(sent[0].body, {{ path: "/media/USB/Contents/A 1.mp3", net: "", source: "focus", deck: 0 }});
+assert.strictEqual(sent[0].url, "http://127.0.0.1:8080/v1/enginex/rekordbox/priority");
+runFocus(true, "file:///media/USB/Contents/A%201.mp3");
+assert.strictEqual(sent.length, 1);
+assert.strictEqual(aborts, 0);
+
+// Stopping preview does not send; starting preview aborts in-flight XHR, posts preview priority, and seeks.
+runPreview(false, "/media/USB/Contents/B.mp3", 0.5);
+assert.strictEqual(sent.length, 1);
+assert.strictEqual(runPreview(true, "/media/USB/Contents/B.mp3", 0.35), -1);
+assert.strictEqual(aborts, 1);
+assert.strictEqual(sent.length, 2);
+assert.deepStrictEqual(sent[1].body, {{ path: "/media/USB/Contents/B.mp3", net: "", source: "preview", deck: 0 }});
+assert.strictEqual(seekPos, 0.35);
+
+// Non-/media paths without net:// are ignored.
+runPreview(true, "/internal/nonmedia.mp3", -1);
+assert.strictEqual(sent.length, 2);
+"""
+                res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, f"{version}: {res.stderr}")
 
 
 if __name__ == "__main__":

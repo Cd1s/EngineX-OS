@@ -142,12 +142,17 @@ func (w *CueWatcher) detach(mount string) {
 	w.mu.Lock()
 	st := w.sticks[mount]
 	delete(w.sticks, mount)
+	var cancel context.CancelFunc
+	if st != nil {
+		cancel = st.cancel
+		st.cancel = nil
+	}
 	w.mu.Unlock()
 	if st == nil {
 		return
 	}
-	if st.cancel != nil {
-		st.cancel()
+	if cancel != nil {
+		cancel()
 	}
 	st.keys.Clear()
 }

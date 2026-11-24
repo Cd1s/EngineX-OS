@@ -457,7 +457,8 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 		return r, nil
 	}
 
-	bridgeOwned := bridgeOwnedTracks(ctx, dbDir)
+	var bridgeOwned map[int64]bool
+	bridgeLoaded := false
 	cursor := readMP3GridCursor(cursorPath)
 
 	type candidate struct {
@@ -518,7 +519,7 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 			       substr(p.quickCues,1,65537),
 			       substr(p.loops,1,65537)
 			FROM Track t
-			JOIN PerformanceData p ON p.trackId = t.id
+			CROSS JOIN PerformanceData p ON p.trackId = t.id
 			WHERE t.id > ?
 			  AND coalesce(t.isAnalyzed, 0) = 1
 			  AND coalesce(t.isBeatGridLocked, 0) = 0
@@ -568,6 +569,10 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 				committedUnch = r.Unchanged
 				committedSkip = r.Skipped
 			}
+		}
+		if !bridgeLoaded {
+			bridgeOwned = bridgeOwnedTracks(ctx, dbDir)
+			bridgeLoaded = true
 		}
 		for _, c := range page {
 			lastID = c.id

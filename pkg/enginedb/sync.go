@@ -116,6 +116,24 @@ type Options struct {
 	// through it leaves complete, read now or up to date already: a pass's share of the whole
 	// count, which never goes down (#328).
 	OnFinished func(done int) `json:"-"`
+	// PriorityPaths are Engine-relative track paths ("../...") to prepare and
+	// import ahead of all other pending tracks in this pass.
+	PriorityPaths []string `json:"-"`
+	// SortByPath orders non-priority pending tracks by normalized volume-relative
+	// path so directory walks and ANLZ sibling reads stay sequential on FAT media.
+	SortByPath bool `json:"-"`
+	// MaxTracks, when positive, caps the number of pending tracks prepared and
+	// imported in this single SyncResolved transaction; remaining pending tracks
+	// are left deferred for the next batch.
+	MaxTracks int `json:"-"`
+	// ShouldYield, when non-nil, is polled between pending tracks once at least
+	// one track has been prepared/read; returning true stops the current batch
+	// early so the caller can commit and service urgent priority work.
+	ShouldYield func() bool `json:"-"`
+	// ReadChunk and ReadPause pace background ANLZ file reads while a deck is
+	// active (zero/nil reads at full speed).
+	ReadChunk int         `json:"-"`
+	ReadPause DetailPause `json:"-"`
 }
 type Result struct {
 	Added, Updated, Unchanged int
@@ -285,6 +303,7 @@ func open(ctx context.Context, p string, bulk bool) (*sql.DB, *sql.Tx, error) {
 	for _, index := range []string{
 		`CREATE INDEX IF NOT EXISTS index_PlaylistEntity_trackId ON PlaylistEntity(trackId)`,
 		`CREATE INDEX IF NOT EXISTS bridge.index_BridgeState_trackId ON BridgeState(trackId)`,
+		`CREATE INDEX IF NOT EXISTS bridge.index_BridgeState_fast ON BridgeState(trackId) WHERE substr(fingerprint,1,5)='fast:'`,
 	} {
 		if _, e = tx.ExecContext(ctx, index); e != nil {
 			return nil, nil, e
@@ -394,30 +413,58 @@ func sourceFiles(res *compat.Resolver, t rekordbox.Track) ([]analysisFile, *anal
 	return files, art, nil
 }
 
+func readAnalysisPaced(full string, skip func(tag string) bool, chunk int, pause DetailPause) (*rekordbox.Analysis, error) {
+	f, err := openReadNoAtime(full)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if pause != nil {
+		noReadahead(f)
+	}
+	var effSkip func(string) bool
+	if skip != nil {
+		effSkip = func(tag string) bool { return tag != "PWV7" && skip(tag) }
+	}
+	a, _, err := rekordbox.ReadAnalysisFilePaced(f, effSkip, chunk, pause)
+	return a, err
+}
+
 // readSources reads a track's ANLZ files and, unless skipAudio, its audio header.
-func readSources(res *compat.Resolver, p preparedTrack, full string, skipAudio bool) (*rekordbox.Analysis, compat.AudioInfo, error) {
-	// A valid PWV7 in the .2EX is the only waveform the import (its overview and peaks) and the
-	// display use: the other files' waveform sections are then not read (#253).
+func readSources(res *compat.Resolver, p preparedTrack, full string, skipAudio bool, chunk int, pause DetailPause) (*rekordbox.Analysis, compat.AudioInfo, error) {
+	// A valid PWV7 in the .2EX supplies the scrolling detail and 3-band overview;
+	// PWV6 in the same .2EX supplies the RGB mini waveform. Skip .EXT/.DAT
+	// waveform bodies when both are present, or read only PWV4 from .EXT when
+	// .2EX lacks PWV6 (#253).
 	parsed := make([]*rekordbox.Analysis, len(p.files))
 	skip := func(string) bool { return false }
+	hasPWV7, hasRGB := false, false
 	for i, f := range p.files {
 		if strings.EqualFold(path.Ext(f.rel), ".2EX") {
-			aa, e := rekordbox.ReadAnalysis(res.FullPath(f.rel))
+			aa, e := readAnalysisPaced(res.FullPath(f.rel), nil, chunk, pause)
 			if e != nil {
 				return nil, compat.AudioInfo{}, e
 			}
 			if w := displayAnalysisWaveform(aa); w != nil && w.Tag == "PWV7" {
-				skip = func(string) bool { return true }
+				hasPWV7 = true
+			}
+			if hasColorOverviewWaveform(aa) {
+				hasRGB = true
 			}
 			parsed[i] = aa
 		}
+	}
+	if hasPWV7 && hasRGB {
+		skip = func(string) bool { return true }
+	} else if hasPWV7 {
+		skip = func(tag string) bool { return tag != "PWV4" }
 	}
 	a := &rekordbox.Analysis{}
 	for i, f := range p.files {
 		aa := parsed[i]
 		if aa == nil {
 			var e error
-			if aa, e = rekordbox.ReadAnalysisSkipping(res.FullPath(f.rel), skip); e != nil {
+			if aa, e = readAnalysisPaced(res.FullPath(f.rel), skip, chunk, pause); e != nil {
 				return nil, compat.AudioInfo{}, e
 			}
 		}
@@ -515,7 +562,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			return result, err
 		}
 	} else if !opts.Resume {
-		if prepared, err = prepareTracks(ctx, res, l, cutoff, now, nil); err != nil {
+		if prepared, err = prepareTracksOpts(ctx, res, l, cutoff, now, nil, opts.PriorityPaths, opts.SortByPath, opts.MaxTracks, opts.ShouldYield); err != nil {
 			return result, err
 		}
 	}
@@ -575,7 +622,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		for p := range opts.Reread {
 			delete(done, p)
 		}
-		if prepared, err = prepareTracks(ctx, res, l, cutoff, now, done); err != nil {
+		if prepared, err = prepareTracksOpts(ctx, res, l, cutoff, now, done, opts.PriorityPaths, opts.SortByPath, opts.MaxTracks, opts.ShouldYield); err != nil {
 			return result, err
 		}
 	}
@@ -584,8 +631,11 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		return result, err
 	}
 	mapping := map[uint32]int64{}
-	effectiveTracks := append([]rekordbox.Track(nil), l.Tracks...)
-	owned, err := stageOwnedMoves(ctx, tx, prepared, opts.StagedOnly)
+	effectiveTracks := make([]rekordbox.Track, len(prepared))
+	for i, p := range prepared {
+		effectiveTracks[i] = p.track
+	}
+	owned, stateByID, stateByPath, err := stageOwnedMoves(ctx, tx, prepared, opts.StagedOnly)
 	if err != nil {
 		return result, err
 	}
@@ -601,13 +651,15 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	if err != nil {
 		return result, err
 	}
-	// needRef are the bridge tracks whose state row names no detail file: no row (the 3 GiB cap
-	// of earlier builds) or a reference without files. length() reads
-	// no overflow page, so the rows that still hold a waveform are not read (#253).
+	// needRef are the completed bridge tracks whose state row names no detail file: no row
+	// (the 3 GiB cap of earlier builds) or a reference without files. length() reads no
+	// overflow page, so rows that still hold a waveform are not read (#253). Filtering out
+	// "fast:" rows avoids joining thousands of pending rows on every resumed batch.
 	needRef := map[int64]bool{} // true: no row at all
-	if !opts.Fast && !empty {
+	if !opts.Fast && !empty && len(stateByID) > 0 {
 		rows, e := tx.QueryContext(ctx, `SELECT s.trackId,a.trackId IS NULL FROM BridgeState s LEFT JOIN BridgeAnalysis a ON a.trackId=s.trackId
-			WHERE a.trackId IS NULL OR length(a.sourceJSON)=8 AND substr(a.sourceJSON,1,4)=CAST('RBA2' AS BLOB)`)
+			WHERE s.fingerprint <> '' AND substr(s.fingerprint,1,5) <> 'fast:'
+				AND (a.trackId IS NULL OR (length(a.sourceJSON)=8 AND substr(a.sourceJSON,1,4)=CAST('RBA2' AS BLOB)))`)
 		if e != nil {
 			return result, e
 		}
@@ -641,6 +693,12 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		_, e := q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`, id, packBridgeRef(source, refs), emptyAudio)
 		return e
 	}
+	var trackByPath map[string]int64
+	type pendingRGBOverview struct {
+		id   int64
+		blob []byte
+	}
+	var pendingRGB []pendingRGBOverview
 	for i, preparedTrack := range prepared {
 		if err = ctx.Err(); err != nil {
 			return result, err
@@ -651,8 +709,11 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		if opts.OnFinished != nil {
 			opts.OnFinished(i - result.Deferred)
 		}
-		// Time left after the tracks prepared up front: prepare the next one now.
-		if preparedTrack.late && !opts.Deadline.IsZero() && !past() {
+		// Time or batch capacity left after the tracks prepared up front: prepare the next one now.
+		if preparedTrack.late && preparedTrack.audioErr == nil &&
+			((!opts.Deadline.IsZero() && !past()) || (opts.Deadline.IsZero() && opts.MaxTracks > 0)) &&
+			(opts.MaxTracks <= 0 || read < opts.MaxTracks) &&
+			(opts.ShouldYield == nil || !opts.ShouldYield()) {
 			if p, e := prepareOne(res, preparedTrack.track, preparedTrack.rel, opts.Deadline, now, true); e == nil {
 				preparedTrack = p
 			}
@@ -668,19 +729,20 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		switch ownedID := owned[t.ID]; {
 		case empty: // no row to find
 		case ownedID != 0:
-			e := q.QueryRowContext(ctx, `SELECT s.trackId,s.fingerprint,COALESCE(t.bpmAnalyzed,0) FROM BridgeState s JOIN Track t ON t.id=s.trackId WHERE s.trackId=?`, ownedID).Scan(&id, &previous, &storedBPM)
-			if e != nil {
-				return result, e
+			row, ok := stateByID[ownedID]
+			if !ok {
+				return result, sql.ErrNoRows
 			}
+			id, previous, storedBPM = row.id, row.fp, row.storedBPM
 		default:
-			e := q.QueryRowContext(ctx, `SELECT s.trackId,s.fingerprint,COALESCE(t.bpmAnalyzed,0) FROM BridgeState s JOIN Track t ON t.id=s.trackId WHERE s.path=?`, enginePath).Scan(&id, &previous, &storedBPM)
-			if e != nil && !errors.Is(e, sql.ErrNoRows) {
-				return result, e
+			if row, ok := stateByPath[enginePath]; ok {
+				id, previous, storedBPM = row.id, row.fp, row.storedBPM
 			}
 		}
 		legacyOffsets := opts.LegacyOffsets || opts.LegacyAACOffsets && compat.IsMP4AudioPath(rel)
 		fast := opts.Fast
-		if !fast && (preparedTrack.late || (previous != hash && past() && (read > 0 || (!inTime && !opts.Resume)))) {
+		limitReached := (opts.MaxTracks > 0 && read >= opts.MaxTracks) || (read > 0 && opts.ShouldYield != nil && opts.ShouldYield())
+		if !fast && (preparedTrack.late || (previous != hash && ((past() && (read > 0 || (!inTime && !opts.Resume))) || limitReached))) {
 			// A "fast:" fingerprint makes the next full import read this track.
 			fast, files, art, hash = true, nil, nil, "fast:"+t.RecordHash
 			// A completed v2 row keeps its fingerprint and deck edits on re-export.
@@ -694,15 +756,31 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		if !existing && !empty {
 			// Engine (or its desktop app) already owns a track at this path:
 			// reference it from imported playlists, but never adopt or rewrite it.
-			var native int64
-			e := q.QueryRowContext(ctx, `SELECT id FROM Track WHERE path=?`, enginePath).Scan(&native)
-			if e == nil {
+			if trackByPath == nil {
+				trackByPath = make(map[string]int64, len(prepared))
+				trows, terr := tx.QueryContext(ctx, `SELECT path, id FROM Track WHERE path IS NOT NULL`)
+				if terr != nil {
+					return result, terr
+				}
+				for trows.Next() {
+					var p string
+					var tid int64
+					if terr = trows.Scan(&p, &tid); terr != nil {
+						trows.Close()
+						return result, terr
+					}
+					trackByPath[p] = tid
+				}
+				terr = trows.Err()
+				trows.Close()
+				if terr != nil {
+					return result, terr
+				}
+			}
+			if native, ok := trackByPath[enginePath]; ok {
 				mapping[t.ID] = native
 				result.Unchanged++
 				continue
-			}
-			if !errors.Is(e, sql.ErrNoRows) {
-				return result, e
 			}
 		}
 		mapping[t.ID] = id
@@ -804,7 +882,10 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			degraded, fast, art = true, true, nil
 		}
 		preparedTrack.files = files
-		a, audio, e := readSources(res, preparedTrack, full, fast)
+		a, audio, e := readSources(res, preparedTrack, full, fast, opts.ReadChunk, opts.ReadPause)
+		if e != nil && (errors.Is(e, context.Canceled) || errors.Is(e, context.DeadlineExceeded)) {
+			return result, e
+		}
 		if e == nil {
 			e = preparedTrack.broken
 		}
@@ -854,7 +935,7 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			}
 		} else if opts.FastCues && len(t.Cues) > 0 && !existing {
 			// Positions without the audio header's start offset: the full import corrects them.
-			if p, e := EncodePerformance(t, &rekordbox.Analysis{Cues: t.Cues}); e == nil {
+			if p, e := encodeCuesOnly(t, t.Cues); e == nil {
 				perf = Performance{QuickCues: p.QuickCues, Loops: p.Loops, ActiveLoops: p.ActiveLoops}
 			}
 		}
@@ -923,23 +1004,34 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		}
 		if id == 0 {
 			// A pre-existing native track at the same path is never adopted/overwritten.
-			r, e := q.ExecContext(ctx, `INSERT INTO Track(length,bpm,year,path,filename,bitrate,bpmAnalyzed,albumArtId,fileBytes,title,artist,album,genre,comment,label,composer,remixer,key,rating,fileType,isAnalyzed,isAvailable,isMetadataImported,pdbImportKey,dateCreated,dateAdded) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s'),strftime('%s'))`, args...)
-			if e != nil {
-				return result, fmt.Errorf("insert track %d: %w", t.ID, e)
+			var batchedTrack bool
+			if bulk != nil && empty {
+				if _, dup := bulk.seenPaths[enginePath]; !dup {
+					bulk.seenPaths[enginePath] = struct{}{}
+					bulk.nextTrack++
+					id = bulk.nextTrack
+					bulk.addTrack(id, args)
+					batchedTrack = true
+				} else if e := bulk.flushTracks(ctx, q); e != nil {
+					return result, e
+				}
 			}
-			id, e = r.LastInsertId()
-			if e != nil {
-				return result, e
+			if !batchedTrack {
+				r, e := q.ExecContext(ctx, `INSERT INTO Track(length,bpm,year,path,filename,bitrate,bpmAnalyzed,albumArtId,fileBytes,title,artist,album,genre,comment,label,composer,remixer,key,rating,fileType,isAnalyzed,isAvailable,isMetadataImported,pdbImportKey,dateCreated,dateAdded) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s'),strftime('%s'))`, args...)
+				if e != nil {
+					return result, fmt.Errorf("insert track %d: %w", t.ID, e)
+				}
+				id, e = r.LastInsertId()
+				if e != nil {
+					return result, e
+				}
 			}
 			if bulk != nil { // what the dropped factory trigger does, with a Fast import's cues at once
 				var source, active any
 				if perf.QuickCues != nil && fast {
 					source, active = 1, perf.ActiveLoops
 				}
-				if _, e = q.ExecContext(ctx, `INSERT INTO PerformanceData(trackId,quickCues,loops,activeOnLoadLoops,thirdPartySourceId) VALUES(?,?,?,?,?)`,
-					id, perf.QuickCues, perf.Loops, active, source); e != nil {
-					return result, e
-				}
+				bulk.addPerf(id, perf.QuickCues, perf.Loops, active, source)
 				if fast {
 					perf.QuickCues = nil // written
 				}
@@ -990,6 +1082,11 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			if e = recordWritten(ctx, q, id, perf); e != nil {
 				return result, e
 			}
+			if perf.Overview != nil {
+				if rgbBlob, rerr := EncodeRGBOverview(t, a, perf.Overview); rerr == nil {
+					pendingRGB = append(pendingRGB, pendingRGBOverview{id: id, blob: rgbBlob})
+				}
+			}
 		} else if perf.QuickCues != nil {
 			if _, e = q.ExecContext(ctx, `UPDATE PerformanceData SET quickCues=?,loops=?,activeOnLoadLoops=?,thirdPartySourceId=1 WHERE trackId=?`, perf.QuickCues, perf.Loops, perf.ActiveLoops, id); e != nil {
 				return result, e
@@ -1033,6 +1130,8 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		}
 		if existing {
 			_, e = q.ExecContext(ctx, `UPDATE BridgeState SET path=?,fingerprint=? WHERE trackId=?`, enginePath, hash, id)
+		} else if bulk != nil {
+			bulk.addState(enginePath, id, hash)
 		} else {
 			_, e = q.ExecContext(ctx, `INSERT INTO BridgeState(path,trackId,fingerprint) VALUES(?,?,?)`, enginePath, id, hash)
 		}
@@ -1040,6 +1139,8 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 			return result, e
 		}
 		switch {
+		case strings.HasPrefix(hash, "fast:") && bulk != nil:
+			bulk.addFastBase(id, hash, fastLeft)
 		case strings.HasPrefix(hash, "fast:"):
 			// A new fast row: what this import left in it, for its import in full (fastRowEdits).
 			e = noteFastBase(ctx, q, id, hash, fastLeft)
@@ -1048,6 +1149,16 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 		}
 		if e != nil {
 			return result, e
+		}
+		if bulk != nil {
+			if e = bulk.maybeFlushTracks(ctx, q); e != nil {
+				return result, e
+			}
+		}
+	}
+	if bulk != nil {
+		if err = bulk.flushTracks(ctx, q); err != nil {
+			return result, err
 		}
 	}
 	if opts.OnFinished != nil {
@@ -1129,7 +1240,15 @@ func SyncResolved(ctx context.Context, res *compat.Resolver, l *rekordbox.Librar
 	if OpenElsewhere(filepath.Join(dir, "m.db")) != 0 {
 		return result, ErrLibraryInUse
 	}
-	if err = tx.Commit(); err == nil && opts.Bulk {
+	if err = tx.Commit(); err != nil {
+		return result, err
+	}
+	for _, rgb := range pendingRGB {
+		if werr := WriteRGBOverviewAtomic(dir, databaseUUID, rgb.id, rgb.blob); werr != nil {
+			log.Printf("rb-bridge: RGB overview for track %d not written: %v", rgb.id, werr)
+		}
+	}
+	if opts.Bulk {
 		if err = syncFilePath(filepath.Join(dir, "m.db")); err == nil {
 			err = syncFilePath(filepath.Join(dir, stateFile))
 		}

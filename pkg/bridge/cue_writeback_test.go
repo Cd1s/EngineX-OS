@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
@@ -103,6 +104,14 @@ func setupWriteBackStick(t *testing.T, withOneLibrary bool) string {
 		if err := os.WriteFile(filepath.Join(stick, "PIONEER", "rekordbox", "exportLibrary.db"), export, 0o644); err != nil {
 			t.Fatal(err)
 		}
+		pdbPath := filepath.Join(stick, "PIONEER", "rekordbox", "export.pdb")
+		pdbStat, err := os.Stat(pdbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(filepath.Join(stick, "PIONEER", "rekordbox", "exportLibrary.db"), pdbStat.ModTime().Add(10*time.Second), pdbStat.ModTime().Add(10*time.Second)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return stick
 }
@@ -135,7 +144,7 @@ func TestWriteBackTrackMetadataToPDBAndOneLibrary(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stick := setupWriteBackStick(t, tc.withOneLib)
-			if _, err := bridge.Convert(context.Background(), stick, enginedb.Options{}); err != nil {
+			if _, err := convertWriteBackAtTest(context.Background(), stick); err != nil {
 				t.Fatal(err)
 			}
 			injectDeckMetadataEdit(t, stick)
@@ -194,7 +203,7 @@ func TestWriteBackCuesEndToEndAndBridgeFastReinsert(t *testing.T) {
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
 
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatalf("initial Convert: %v", err)
 	}
 	injectDeckCueEdit(t, stick)
@@ -278,7 +287,7 @@ func TestWriteBackCuesPullOutMidWriteLeavesOriginalIntact(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 	injectDeckCueEdit(t, stick)
@@ -310,7 +319,7 @@ func TestWriteBackCuesFailureBeforeSecondRenameLeavesStickUntouched(t *testing.T
 	t.Parallel()
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, true)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 	injectDeckCueEdit(t, stick)
@@ -386,7 +395,7 @@ func TestWriteBackCuesReadsUncheckpointedWAL(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	stick := setupWriteBackStick(t, false)
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatal(err)
 	}
 
@@ -439,7 +448,7 @@ func TestWriteBackCuesFallsBackToPDBWhenOneLibUnreadable(t *testing.T) {
 	if err := os.WriteFile(oneLibPath, []byte("not-a-sqlcipher-db"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := bridge.Convert(ctx, stick, enginedb.Options{}); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatalf("Convert with corrupt exportLibrary.db: %v", err)
 	}
 	injectDeckCueEdit(t, stick)
@@ -488,8 +497,15 @@ func TestWriteBackCuesDotPioneerMacOSStickAndExactPadSlots(t *testing.T) {
 	if err := os.WriteFile(oneLibPath, export, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if pdbInfo, err := os.Stat(filepath.Join(stick, ".PIONEER", "rekordbox", "export.pdb")); err == nil {
+		if err := os.Chtimes(oneLibPath, pdbInfo.ModTime().Add(10*time.Second), pdbInfo.ModTime().Add(10*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		t.Fatal(err)
+	}
 
-	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatalf("ConvertAtMount(.PIONEER): %v", err)
 	}
 
@@ -676,10 +692,9 @@ func TestWriteBackCuesRestoresMP3RekordboxOffsetAndSkipsUntouched(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatalf("ConvertAtMount: %v", err)
 	}
-
 	// Even if BridgeWritten is cleared (simulating older bridge state), restoring
 	// RekordboxOffset must match the original 40ms cue with zero spurious diff.
 	statePath := filepath.Join(stick, "Engine Library", "Database2", ".rb-bridge-state.db")
@@ -779,7 +794,7 @@ func TestWriteBackCuesDetectsActiveLoopDeactivation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatalf("ConvertAtMount: %v", err)
 	}
 	// Deactivate the active loop on the deck without altering beatData/quickCues/loops
@@ -826,7 +841,7 @@ func TestWriteBackCuesRoundTripAddThenDelete(t *testing.T) {
 	ctx := context.Background()
 	stick := t.TempDir()
 	testfixture.Export(t, stick)
-	if _, err := bridge.ConvertAtMount(ctx, stick, enginedb.Options{}, true); err != nil {
+	if _, err := convertWriteBackAtTest(ctx, stick); err != nil {
 		t.Fatalf("ConvertAtMount: %v", err)
 	}
 	mPath := filepath.Join(stick, "Engine Library", "Database2", "m.db")
@@ -854,6 +869,10 @@ func TestWriteBackCuesRoundTripAddThenDelete(t *testing.T) {
 		_ = mdb.Close()
 		t.Fatal(err)
 	}
+	if _, err := mdb.Exec(`UPDATE Track SET lastEditTime = lastEditTime + 2 WHERE id = 1`); err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
 	_ = mdb.Close()
 
 	res1, err := bridge.WriteBackCues(ctx, stick, bridge.WriteBackOptions{Keys: testKeys, DateDir: "2026-11-21", OnEject: true})
@@ -868,6 +887,10 @@ func TestWriteBackCuesRoundTripAddThenDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := mdb2.Exec(`UPDATE PerformanceData SET quickCues = ? WHERE trackId = 1`, origQuick); err != nil {
+		_ = mdb2.Close()
+		t.Fatal(err)
+	}
+	if _, err := mdb2.Exec(`UPDATE Track SET lastEditTime = lastEditTime + 2 WHERE id = 1`); err != nil {
 		_ = mdb2.Close()
 		t.Fatal(err)
 	}

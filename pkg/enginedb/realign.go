@@ -7,6 +7,9 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"math"
+	"net/url"
+	"os"
+	"path/filepath"
 )
 
 // A row Engine has loaded keeps its grid, cues and loops at the next import (sync.go): they
@@ -93,12 +96,21 @@ func recordWritten(ctx context.Context, q *stmtCache, id int64, perf Performance
 	return e
 }
 
-// SyncedDigest names what the deck can change in a row and the stick's rekordbox files hold:
-// its grid, cues, loops, which saved loop is active on load (#321), and the track's genre,
-// comment and label (#314).
-func SyncedDigest(beats, cues, loops []byte, activeOnLoadLoops int64, genre, comment, label string) []byte {
+// SyncedDigest names what the deck can change in a row and cue write-back writes
+// back to the stick's rekordbox files: cues, loops, activeOnLoadLoops (#321), and
+// genre, comment, and label (#314). Beat-grid / analysis-only updates (beatData,
+// trackData, overviewWaveFormData) are intentionally excluded so analysis passes
+// do not trigger needless OneLibrary decryption.
+func SyncedDigest(_ []byte, cues, loops []byte, activeOnLoadLoops int64, genre, comment, label string) []byte {
 	h := sha256.New()
-	h.Write(writtenDigest(beats, cues, loops))
+	rawCues, err := QUncompress(cues, 8<<20)
+	if err != nil {
+		rawCues = cues
+	}
+	_ = binary.Write(h, big, uint64(len(rawCues)))
+	h.Write(rawCues)
+	_ = binary.Write(h, big, uint64(len(loops)))
+	h.Write(loops)
 	_ = binary.Write(h, big, activeOnLoadLoops)
 	for _, s := range []string{genre, comment, label} {
 		_ = binary.Write(h, big, uint32(len(s)))
@@ -307,4 +319,84 @@ func loopPositions(blob []byte) ([]int, bool) {
 		off += 22
 	}
 	return at, off == len(blob)
+}
+
+// InvalidateUnsyncedEdits drops BridgeSynced baselines for rows that no longer
+// match BridgeWritten when a library transitions to a different export stamp.
+// Untouched rows whose PerformanceData still matches BridgeWritten keep their
+// BridgeSynced baseline so subsequent analysis-only passes perform zero decrypts.
+func InvalidateUnsyncedEdits(ctx context.Context, dbDir string) error {
+	statePath := filepath.Join(dbDir, ".rb-bridge-state.db")
+	if _, err := os.Stat(statePath); err != nil {
+		return nil
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: statePath, RawQuery: "_pragma=busy_timeout(5000)"}).String())
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	var hasSynced, hasWritten int
+	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='BridgeSynced'`).Scan(&hasSynced)
+	if hasSynced == 0 {
+		return nil
+	}
+	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='BridgeWritten'`).Scan(&hasWritten)
+	if hasWritten == 0 {
+		_, err = db.ExecContext(ctx, `DELETE FROM BridgeSynced`)
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM BridgeSynced WHERE NOT EXISTS (SELECT 1 FROM BridgeWritten bw WHERE bw.trackId = BridgeSynced.trackId)`); err != nil {
+		return err
+	}
+
+	mPath := filepath.Join(dbDir, "m.db")
+	if _, err := os.Stat(mPath); err != nil {
+		return nil
+	}
+	mdb, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mPath, RawQuery: "mode=ro&immutable=1"}).String())
+	if err != nil {
+		return nil
+	}
+	defer mdb.Close()
+	mdb.SetMaxOpenConns(1)
+	stateRO := (&url.URL{Scheme: "file", Path: statePath, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}).String()
+	if _, err := mdb.ExecContext(ctx, `ATTACH DATABASE ? AS b`, stateRO); err != nil {
+		return nil
+	}
+	rows, err := mdb.QueryContext(ctx, `SELECT p.trackId, p.beatData, p.quickCues, p.loops, COALESCE(p.activeOnLoadLoops, 0), bw.digest
+		FROM b.BridgeSynced sy
+		JOIN b.BridgeWritten bw ON bw.trackId = sy.trackId
+		JOIN Track t ON t.id = sy.trackId
+		JOIN PerformanceData p ON p.trackId = sy.trackId
+		WHERE COALESCE(t.lastEditTime, 0) != 0`)
+	if err != nil {
+		return nil
+	}
+	var staleIDs []int64
+	for rows.Next() {
+		var id, active int64
+		var beats, cues, loops, wDigest []byte
+		if rows.Scan(&id, &beats, &cues, &loops, &active, &wDigest) != nil {
+			continue
+		}
+		if !bytes.Equal(wDigest, writtenDigest(beats, cues, loops)) || (HasAnyLoop(loops) && active != 0) {
+			staleIDs = append(staleIDs, id)
+		}
+	}
+	_ = rows.Close()
+	if len(staleIDs) == 0 {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, id := range staleIDs {
+		_, _ = tx.ExecContext(ctx, `DELETE FROM BridgeSynced WHERE trackId = ?`, id)
+		_, _ = tx.ExecContext(ctx, `DELETE FROM BridgeWritten WHERE trackId = ?`, id)
+	}
+	return tx.Commit()
 }
