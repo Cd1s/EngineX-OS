@@ -263,7 +263,7 @@ func (w *window) count() {
 		case t == nil:
 			p.Rows++
 		case t.Native || t.Perf == rbstate.PerfMissing:
-		case t.EngineID == 0:
+		case t.EngineID == 0 || t.Row != vt.Hash:
 			p.Rows++
 		case t.Perf == rbstate.PerfNone:
 			p.Perf++
@@ -445,8 +445,8 @@ func (w *window) apply(p *Plan) error {
 			}
 		}
 	}
-	if p.Empty() {
-		return w.saveIfChanged() // nothing for m.db: only the snapshot says which export this is
+	if len(p.AddTracks)+len(p.Moves)+len(p.RemoveTracks)+len(p.PutLists)+len(p.RemoveLists) == 0 {
+		return w.updateRows(p.UpdateTracks) // no row or list comes or goes
 	}
 	b, err := w.lib.Begin(w.ctx)
 	if err != nil {
@@ -503,22 +503,10 @@ func (w *window) apply(p *Plan) error {
 		for _, m := range p.Moves {
 			vt, t := &w.view.Tracks[m.New], s.Tracks[m.Old]
 			delete(s.Tracks, m.Old)
-			t.Key, t.Rel, t.Resolved, t.Refs, t.Row = vt.Key, vt.Rel, false, vt.Refs, "" // its fields follow below
+			t.Key, t.Rel, t.Resolved, t.Refs, t.Row = vt.Key, vt.Rel, false, vt.Refs, "" // its fields follow in updateRows
 			s.Tracks[vt.Key] = t
 			p.UpdateTracks = append(p.UpdateTracks, m.New)
 		}
-	}
-	for _, at := range p.UpdateTracks {
-		vt := &w.view.Tracks[at]
-		t := s.Tracks[vt.Key]
-		if err = b.UpdateTrack(w.ctx, t.EngineID, enginedb.TrackRow{Rel: t.Rel, Track: vt.Track}, t.Rating); err != nil {
-			return err
-		}
-		t.Row, t.Rating, t.Refs = vt.Hash, vt.Track.Rating, vt.Refs
-		if err = w.noteSync(b, t); err != nil {
-			return err
-		}
-		w.res.Updated++
 	}
 	// New rows, a hundred at a time while the window has time for them and the lists after them.
 	const chunk = 100
@@ -547,7 +535,7 @@ func (w *window) apply(p *Plan) error {
 			w.o.Progress(at+len(part), len(p.AddTracks))
 		}
 	}
-	w.st.done("rows", "%d added, %d updated, %d moved, %d removed", w.res.Added, w.res.Updated, len(p.Moves), w.res.Removed)
+	w.st.done("rows", "%d added, %d moved, %d removed", w.res.Added, len(p.Moves), w.res.Removed)
 
 	owned := make(map[int64]bool, len(s.Lists))
 	for _, l := range s.Lists {
@@ -585,7 +573,51 @@ func (w *window) apply(p *Plan) error {
 		return err
 	}
 	w.st.done("lists", "%d written, %d removed; committed", len(p.PutLists), len(p.RemoveLists))
-	return nil
+	return w.updateRows(p.UpdateTracks)
+}
+
+// updateBatch is how many rows one transaction gives the export's fields again.
+var updateBatch = 1000
+
+// updateRows gives the rows whose export fields changed those fields. A re-export changes a
+// few; the take-over of an older library, or a library retagged in rekordbox, thousands, and
+// 2,416 of them in the transaction of the lists would have kept an insert past the hook's
+// kill. So they come after the rows and lists are committed, a batch a transaction: the first
+// batch is owed like a new row, the rest is done while the window has time, and what is left
+// the next window does (the job stages those tracks again, so a remount follows).
+func (w *window) updateRows(idx []int) error {
+	done := 0
+	ok := func() bool {
+		if done < updateBatch {
+			return w.st.must(applyReserve)
+		}
+		return w.st.more(applyReserve)
+	}
+	for done < len(idx) && ok() {
+		b, err := w.lib.Begin(w.ctx)
+		if err != nil {
+			return err
+		}
+		for n := 0; n < updateBatch && done < len(idx) && ok(); n, done = n+1, done+1 {
+			vt := &w.view.Tracks[idx[done]]
+			t := w.snap.Tracks[vt.Key]
+			if err = b.UpdateTrack(w.ctx, t.EngineID, enginedb.TrackRow{Rel: t.Rel, Track: vt.Track}, t.Rating); err == nil {
+				t.Row, t.Rating, t.Refs = vt.Hash, vt.Track.Rating, vt.Refs
+				err = w.noteSync(b, t)
+			}
+			if err != nil {
+				b.Rollback()
+				return err
+			}
+		}
+		if err = w.commit(b); err != nil {
+			return err
+		}
+	}
+	if w.res.Updated += done; len(idx) > 0 {
+		w.st.done("update", "%d of %d rows got the export's fields", done, len(idx))
+	}
+	return w.saveIfChanged()
 }
 
 // keepOwn drops from a removal list what a window must not remove: everything when a library

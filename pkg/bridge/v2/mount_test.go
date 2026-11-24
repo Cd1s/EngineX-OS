@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -485,7 +486,7 @@ func TestMountOutOfTimeLeavesRowsPendingAndFinishesLater(t *testing.T) {
 	}
 	waiting := res.Pending.Rows
 	res = mountNow(t, mount, MountOptions{})
-	if res.Added != waiting || res.Pending.Rows != 0 || res.Pending.Lists {
+	if res.Added+res.Updated != waiting || res.Added == 0 || res.Pending.Rows != 0 || res.Pending.Lists {
 		t.Fatalf("next window: %+v, %d rows were waiting", res, waiting)
 	}
 	if n := query(t, mount, `SELECT count(*) FROM Track`); n[0][0] != "250" {
@@ -493,6 +494,47 @@ func TestMountOutOfTimeLeavesRowsPendingAndFinishesLater(t *testing.T) {
 	}
 	if n := query(t, mount, `SELECT count(DISTINCT trackId) FROM PlaylistEntity`); n[0][0] == "0" {
 		t.Fatal("the lists have no entries after their tracks got rows")
+	}
+}
+
+// Rows whose export fields changed are written after the rows and lists are committed, a
+// batch a transaction: a window that has no time for them commits everything else and leaves
+// them pending, and the next window does them (replica, 2026-11-25: the take-over of an older
+// library updates every row, which in one transaction with the lists was past the hook's kill).
+func TestMountUpdatesRowsInBatchesAfterTheLists(t *testing.T) {
+	mount := t.TempDir()
+	testfixture.LargeExport(t, mount, 250)
+	mountNow(t, mount, MountOptions{})
+	stageAll(t, mount)
+	mountNow(t, mount, MountOptions{Publish: true})
+	// As after a take-over: no row is known to hold the export's fields.
+	s := snapshot(t, mount)
+	for _, tr := range s.Tracks {
+		tr.Row = ""
+	}
+	if err := s.Save(dbDir(mount)); err != nil {
+		t.Fatal(err)
+	}
+	old := updateBatch
+	updateBatch = 100
+	defer func() { updateBatch = old }()
+	counter := func() string {
+		return query(t, mount, `SELECT lastRekordBoxLibraryImportReadCounter FROM Information`)[0][0]
+	}
+	before := counter()
+	res := mountNow(t, mount, MountOptions{Full: true, Deadline: time.Now().Add(commitReserve + applyReserve/2)})
+	if res.Updated != 0 || res.Pending.Rows != 250 || counter() != before {
+		t.Fatalf("window without time: %+v, commit counter %s to %s", res, before, counter())
+	}
+	res = mountNow(t, mount, MountOptions{})
+	if res.Updated != 250 || res.Pending.Rows != 0 {
+		t.Fatalf("next window: %+v", res)
+	}
+	if n, _ := strconv.Atoi(counter()); fmt.Sprint(n-3) != before {
+		t.Fatalf("250 rows in batches of 100 took %s to %d, want 3 transactions", before, n)
+	}
+	if again := mountNow(t, mount, MountOptions{}); !again.Bypassed {
+		t.Fatalf("after the updates: %+v", again)
 	}
 }
 

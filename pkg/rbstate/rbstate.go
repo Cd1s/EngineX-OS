@@ -62,7 +62,7 @@ type SourceRef struct {
 
 // Pending is the work that is not in m.db yet.
 type Pending struct {
-	Rows   int  `json:"rows,omitempty"`   // tracks of the view without a row
+	Rows   int  `json:"rows,omitempty"`   // tracks of the view without a row, or whose row lacks the export's fields
 	Lists  bool `json:"lists,omitempty"`  // the lists are not the view's yet
 	Perf   int  `json:"perf,omitempty"`   // rows without performance data for their current signature
 	Verify bool `json:"verify,omitempty"` // the export changed and not every track's files were compared yet
