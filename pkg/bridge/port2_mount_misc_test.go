@@ -122,6 +122,81 @@ func TestPort2FailedMountRollsBackLiveLibrary(t *testing.T) {
 	}
 }
 
+// A track whose file is not on the stick has no row, and stays without one: no later window
+// and no re-export adds the row again for the next window to remove (replica, KDATA: 32 such
+// tracks were added by every window's diff and removed by the next one's staged data, twelve
+// windows over, and the import never came to rest). When the file is back the track gets its
+// row, its data and its place in the lists.
+func TestMountLeavesATrackWithoutItsFileWithoutARow(t *testing.T) {
+	mount := stick(t)
+	file := filepath.Join(mount, "MUSIC/four.wav")
+	audio, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	fill := func() {
+		t.Helper()
+		if _, err := FillInBackground(context.Background(), mount, FillOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mountNow(t, mount, MountOptions{})
+	fill()
+	if res := mountNow(t, mount, MountOptions{Publish: true}); res.Removed != 1 || !res.Pending.None() {
+		t.Fatalf("window that takes the row away: %+v", res)
+	}
+	rows := func() string { return query(t, mount, `SELECT count(*) FROM Track`)[0][0] }
+	for i := 0; i < 3; i++ {
+		fill()
+		res := mountNow(t, mount, MountOptions{Full: true, Publish: true})
+		if res.Added != 0 || res.Removed != 0 || !res.Pending.None() || rows() != "4" {
+			t.Fatalf("window %d after the row went: %+v, %s rows", i, res, rows())
+		}
+	}
+	// A re-export that touches nothing of this track does not bring the row back either.
+	later := time.Now().Add(time.Hour)
+	if err = os.Chtimes(filepath.Join(mount, "PIONEER/rekordbox/export.pdb"), later, later); err != nil {
+		t.Fatal(err)
+	}
+	if res := mountNow(t, mount, MountOptions{}); res.Added != 0 || rows() != "4" {
+		t.Fatalf("re-export: %+v, %s rows", res, rows())
+	}
+	fill()
+	if res := mountNow(t, mount, MountOptions{Publish: true}); res.Added != 0 || res.Removed != 0 || !res.Pending.None() || rows() != "4" {
+		t.Fatalf("window after the re-export: %+v, %s rows", res, rows())
+	}
+	tree := strings.Join(libraryTree(t, mount), "\n")
+	if strings.Contains(tree, "four.wav") {
+		t.Fatalf("the lists name the missing track:\n%s", tree)
+	}
+	// The file is back. An unchanged export is one stat and no job, so it is found at the next
+	// export: its window starts the job, the job finds the file, and the job's window adds the row.
+	if err = os.WriteFile(file, audio, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	later = later.Add(time.Hour)
+	if err = os.Chtimes(filepath.Join(mount, "PIONEER/rekordbox/export.pdb"), later, later); err != nil {
+		t.Fatal(err)
+	}
+	if res := mountNow(t, mount, MountOptions{}); res.Added != 0 || rows() != "4" {
+		t.Fatalf("window of the export after the file came back: %+v, %s rows", res, rows())
+	}
+	fill()
+	res := mountNow(t, mount, MountOptions{Publish: true})
+	if res.Added != 1 || res.Applied != 1 || !res.Pending.None() || rows() != "5" {
+		t.Fatalf("window after the file came back: %+v, %s rows", res, rows())
+	}
+	if tree = strings.Join(libraryTree(t, mount), "\n"); !strings.Contains(tree, "four.wav") {
+		t.Fatalf("the lists lack the track that is back:\n%s", tree)
+	}
+	if again := mountNow(t, mount, MountOptions{}); !again.Bypassed {
+		t.Fatalf("not at rest: %+v", again)
+	}
+}
+
 func TestPort2MissingTrackIsRemovedAndDuplicateSourceIsJoined(t *testing.T) {
 	mount := stick(t)
 	if err := os.Remove(filepath.Join(mount, "MUSIC/four.wav")); err != nil {

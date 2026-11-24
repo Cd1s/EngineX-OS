@@ -41,6 +41,9 @@ func Diff(v *View, s *rbstate.Snapshot) *Plan {
 			continue
 		}
 		gone[key] = true
+		if t.EngineID == 0 {
+			continue // no row that could follow a file
+		}
 		for _, r := range t.Refs {
 			k := refKey{r.Kind, r.Source, r.ID}
 			if _, dup := byRef[k]; dup {
@@ -56,6 +59,10 @@ func Diff(v *View, s *rbstate.Snapshot) *Plan {
 			if !t.Native && t.Row != vt.Hash {
 				p.UpdateTracks = append(p.UpdateTracks, i)
 			}
+			continue
+		} else if ok && t.Perf == rbstate.PerfMissing {
+			// No row until the job finds the file again (applyStaged gives it one then). Adding it
+			// here put back, at every window and every re-export, the row the last window removed.
 			continue
 		}
 		moved := ""

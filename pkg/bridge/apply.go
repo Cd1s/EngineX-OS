@@ -376,7 +376,7 @@ func (w *window) putLists(b *enginedb.Batch, idx []int) error {
 		for _, key := range l.Tracks {
 			if t := w.snap.Tracks[key]; t != nil && t.EngineID != 0 {
 				members = append(members, t.EngineID)
-			} else {
+			} else if t == nil || t.Perf != rbstate.PerfMissing { // a missing file has no row to wait for
 				hash = "partial"
 			}
 		}
@@ -591,11 +591,23 @@ func (w *window) applyStaged() error {
 	}
 	keys = w.inApplyOrder(keys)
 	overviews := map[int64][]byte{} // written once their rows are committed
+	back := map[string]bool{}       // tracks whose file is on the stick again
 	applied, kept, degraded, gone, dropped := 0, 0, 0, 0, 0
 	_, err = w.inBatches(len(keys), applyBatch, func(int) bool { return w.st.more(applyReserve) }, func(b *enginedb.Batch, i int) error {
 		key := keys[i]
 		e, t := entries[key], w.snap.Tracks[key]
 		vt, _ := w.view.Track(key)
+		if t != nil && t.EngineID == 0 && t.Perf == rbstate.PerfMissing && !e.Missing {
+			// The file is back: the row the diff no longer asks for comes with its data.
+			ids, native, err := b.InsertTracks(w.ctx, []enginedb.TrackRow{{Rel: vt.Rel, Track: vt.Track}})
+			if err != nil {
+				return err
+			}
+			t = w.note(vt, ids[0], native[0])
+			w.index[key] = enginedb.Row{ID: ids[0], Path: "../" + vt.Rel}
+			w.res.Added++
+			back[key] = true
+		}
 		switch {
 		case t != nil && t.Native:
 			done = append(done, key)
@@ -665,6 +677,9 @@ func (w *window) applyStaged() error {
 		}
 		return err
 	})
+	if err == nil && len(back) > 0 {
+		err = w.relist(back)
+	}
 	if err != nil {
 		return err
 	}
@@ -676,6 +691,28 @@ func (w *window) applyStaged() error {
 	w.res.Removed += gone
 	w.st.done("staged", "%d applied (%d kept the deck's edits, %d without analysis), %d rows of missing files removed, %d of %d staged left", applied, kept, degraded, gone, max(len(keys)-applied-gone, 0), len(keys))
 	return nil
+}
+
+// relist writes again the lists that hold a track whose row has just come back.
+func (w *window) relist(back map[string]bool) error {
+	var idx []int
+	for i := range w.view.Lists {
+		l := &w.view.Lists[i]
+		if sl := w.snap.Lists[l.Key]; sl != nil && slices.ContainsFunc(l.Tracks, func(k string) bool { return back[k] }) {
+			sl.Hash, idx = "partial", append(idx, i)
+		}
+	}
+	b, err := w.lib.Begin(w.ctx)
+	if err != nil {
+		return err
+	}
+	if err = w.putLists(b, idx); err == nil {
+		err = w.commitBatch(b)
+	}
+	if err != nil {
+		b.Rollback()
+	}
+	return err
 }
 
 // writeOverview puts a track's list waveform where Engine reads it unless one is there; it is not
