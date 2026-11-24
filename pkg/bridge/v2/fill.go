@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
@@ -125,10 +127,7 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		}
 	}
 	slices.SortFunc(order, func(a, b int) int {
-		if c := compareStrings(view.tracks[a].key, view.tracks[b].key); c != 0 {
-			return c
-		}
-		return int(view.tracks[a].track.ID) - int(view.tracks[b].track.ID)
+		return cmp.Or(strings.Compare(view.tracks[a].key, view.tracks[b].key), cmp.Compare(view.tracks[a].track.ID, view.tracks[b].track.ID))
 	})
 	f.report()
 	err = f.run(order)
@@ -150,16 +149,6 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		return res, nil // stopped: the next job goes on from the stage
 	}
 	return res, err
-}
-
-func compareStrings(a, b string) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	}
-	return 0
 }
 
 type filler struct {
