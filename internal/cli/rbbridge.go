@@ -120,7 +120,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 				return nil
 			}
 		}
-		r, err := bridge.WriteBackCues(ctx, *mount, bridge.WriteBackOptions{OnEject: *onEject})
+		r, err := bridgev2.WriteBackCues(ctx, *mount, bridgev2.WriteBackOptions{OnEject: *onEject})
 		if err != nil {
 			return err
 		}

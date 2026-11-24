@@ -64,6 +64,7 @@ func TestHandleRekordboxWriteback(t *testing.T) {
 	if _, err := bridge.ConvertAtMount(t.Context(), stick, enginedb.Options{}, false); err != nil {
 		t.Fatal(err)
 	}
+	testfixture.WriteV2SnapshotFromMountedLibrary(t, stick)
 
 	w = httptest.NewRecorder()
 	s.handleRekordboxWriteback(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/rekordbox/writeback?drive=USB1", nil))
@@ -99,6 +100,7 @@ func TestRekordboxWritebackFinalOnlyFromTheDeck(t *testing.T) {
 	if _, err := bridge.ConvertAtMount(t.Context(), stick, enginedb.Options{}, false); err != nil {
 		t.Fatal(err)
 	}
+	testfixture.WriteV2SnapshotFromMountedLibrary(t, stick)
 	var out bytes.Buffer
 	log.SetOutput(&out)
 	defer log.SetOutput(os.Stderr)
