@@ -3,7 +3,9 @@ package bridge
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
@@ -180,6 +182,9 @@ func snapshot(t *testing.T, mount string) *rbstate.Snapshot {
 
 // stageAll plays the background job: every track of the snapshot without applied data gets a
 // staged record built from the fixture's analysis file.
+// stagedCover is the cover stageAll gives every track: an album's tracks share one image.
+var stagedCover = []byte{0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3}
+
 func stageAll(t *testing.T, mount string) int {
 	t.Helper()
 	s := snapshot(t, mount)
@@ -220,10 +225,11 @@ func stageAll(t *testing.T, mount string) int {
 		if err != nil {
 			t.Fatal(err)
 		}
-		rec := &rbstate.Staged{Key: vt.Key, Rel: vt.Rel, Sig: rbstate.TrackSig{Rules: rbstate.Rules, Row: vt.Hash, Audio: rbstate.FileSig{Rel: vt.Rel, Size: 1}},
-			Facts:  rbstate.Facts{Duration: 120, SampleRate: 44100},
-			Perf:   rbstate.Perf{TrackData: p.TrackData, Overview: p.Overview, Beats: p.Beats, QuickCues: p.QuickCues, Loops: p.Loops, ActiveLoops: p.ActiveLoops, Complete: p.Complete},
-			Detail: []string{"PIONEER/USBANLZ/P001/ANLZ0000.EXT"}}
+		rec := &rbstate.Staged{Key: vt.Key, Rel: vt.Rel, Sig: rbstate.TrackSig{Rules: rbstate.Rules, Row: vt.Hash, Audio: rbstate.FileSig{Rel: vt.Rel, Size: 1},
+			ANLZ: []rbstate.FileSig{{Rel: "PIONEER/USBANLZ/P001/ANLZ0000.DAT", Size: 1}, {Rel: "PIONEER/USBANLZ/P001/ANLZ0000.EXT", Size: 1}}},
+			Facts: rbstate.Facts{Duration: 120, SampleRate: 44100},
+			Perf:  rbstate.Perf{TrackData: p.TrackData, Overview: p.Overview, Beats: p.Beats, QuickCues: p.QuickCues, Loops: p.Loops, ActiveLoops: p.ActiveLoops, Complete: p.Complete},
+			Art:   stagedCover, Digest: enginedb.WrittenDigest(p.Beats, p.QuickCues, p.Loops)}
 		if err = stage.Put(rec); err != nil {
 			t.Fatal(err)
 		}
@@ -485,9 +491,19 @@ func TestMountStagedDataAndDeckEdits(t *testing.T) {
 	}
 	s := snapshot(t, mount)
 	for _, tr := range s.Tracks {
-		if tr.Perf != rbstate.PerfApplied || tr.Written == nil || !tr.Resolved || len(tr.Detail) != 1 {
+		if tr.Perf != rbstate.PerfApplied || tr.Written == nil || !tr.Resolved || len(enginedb.DetailFiles(tr.Built.ANLZ)) != 1 {
 			t.Fatalf("snapshot after the publish: %+v", tr)
 		}
+	}
+	// The covers came with the staged tracks: one AlbumArt row with Engine's 20-byte hash for the
+	// image they share, every row pointing at it, and the file Engine serves to other decks.
+	art := query(t, mount, `SELECT count(*),min(length(hash)),(SELECT count(*) FROM Track WHERE albumArtId IN (SELECT id FROM AlbumArt WHERE albumArt IS NOT NULL)) FROM AlbumArt WHERE albumArt IS NOT NULL`)
+	if art[0][0] != "1" || art[0][1] != "20" || art[0][2] != "5" {
+		t.Fatalf("covers: %v", art)
+	}
+	sum := sha1.Sum(stagedCover)
+	if b, err := os.ReadFile(filepath.Join(mount, "Engine Library", "Artwork", base64.RawURLEncoding.EncodeToString(sum[:])+".jpg")); err != nil || !bytes.Equal(b, stagedCover) {
+		t.Fatalf("the cover file for other decks: %v", err)
 	}
 	// The deck sets a hot cue on one track (Engine writes the row), then the export changes two titles.
 	edited := s.Tracks["music/two.flac"]

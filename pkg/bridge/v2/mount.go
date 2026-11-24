@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -58,8 +59,11 @@ var (
 	commitReserve = 2500 * time.Millisecond
 	// insertBudget is how long after its start an insert's window stops doing optional work.
 	insertBudget = 4 * time.Second
-	// applyBatch is how many staged tracks one transaction writes.
-	applyBatch = 64
+	// applyBatch is how many staged tracks one transaction writes at most: what a cut loses, and
+	// about 7 MB for the commit to put on the stick within commitReserve.
+	applyBatch = 512
+	// applyReserve is the optional time a window must have left to start on one more staged track.
+	applyReserve = 1500 * time.Millisecond
 	// lockWait is how long a window waits for a write-back pass to finish.
 	lockWait = 2 * time.Second
 )
@@ -264,16 +268,13 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	if err = w.applyStaged(); err != nil {
 		return res, err
 	}
-	if err = w.applyCovers(); err != nil {
-		return res, err
-	}
 	w.lib.Close()
 	w.lib = nil
 	chores(ctx, mount, st)
 	res.Pending = w.snap.Pending
-	log.Printf("rb-bridge: mount done in %d ms: %d added, %d updated, %d removed, lists changed %v, %d staged tracks applied; pending: %d rows, %d tracks' data, %d covers, verify %v",
+	log.Printf("rb-bridge: mount done in %d ms: %d added, %d updated, %d removed, lists changed %v, %d staged tracks applied; pending: %d rows, %d tracks' data, verify %v",
 		time.Since(st.start).Milliseconds(), res.Added, res.Updated, res.Removed, res.PlaylistsChanged, res.Applied,
-		res.Pending.Rows, res.Pending.Perf, res.Pending.Art, res.Pending.Verify)
+		res.Pending.Rows, res.Pending.Perf, res.Pending.Verify)
 	return res, nil
 }
 
@@ -347,14 +348,22 @@ func addSmartMatch(v *View, ref uint32) error {
 	return nil
 }
 
-// sortedByPriority orders staged keys: the tracks a deck loaded or the DJ looked at first, then
-// by path, so that a window that runs out of time has done the ones that matter.
-func sortedByPriority(mount string, keys []string) []string {
+// inApplyOrder orders staged keys: the tracks a deck loaded or the DJ looked at first, so that a
+// window that runs out of time has done the ones that matter, then by row. A library's rows lie
+// in m.db in the order of their IDs: in that order one page read serves many tracks, where one
+// track after another by path cost a read each.
+func (w *window) inApplyOrder(keys []string) []string {
 	first := map[string]int{}
-	for i, p := range priorityKeys(mount) {
+	for i, p := range priorityKeys(w.mount) {
 		if _, ok := first[rbstate.FoldPath(p)]; !ok {
 			first[rbstate.FoldPath(p)] = i + 1
 		}
+	}
+	id := func(key string) int64 {
+		if t := w.snap.Tracks[key]; t != nil && t.EngineID != 0 {
+			return t.EngineID
+		}
+		return math.MaxInt64 // no row yet: after the rows there are
 	}
 	sort.Slice(keys, func(a, b int) bool {
 		pa, pb := first[keys[a]], first[keys[b]]
@@ -363,6 +372,9 @@ func sortedByPriority(mount string, keys []string) []string {
 		}
 		if pa != pb {
 			return pa < pb
+		}
+		if ia, ib := id(keys[a]), id(keys[b]); ia != ib {
+			return ia < ib
 		}
 		return keys[a] < keys[b]
 	})

@@ -338,8 +338,8 @@ func TestBuildTrackLeavesTheEXTWaveformsUnread(t *testing.T) {
 	if raw, err := QUncompress(got.Perf.QuickCues, 1<<20); err != nil || !bytes.Contains(raw, []byte("H Loop")) {
 		t.Fatalf("the .EXT's cues were lost: %v", err)
 	}
-	if strings.Join(got.Detail, ",") != "PIONEER/USBANLZ/P001/ANLZ0000.2EX,PIONEER/USBANLZ/P001/ANLZ0000.EXT" {
-		t.Fatalf("detail files %q", got.Detail)
+	if detail := DetailFiles(got.Sig.ANLZ); strings.Join(detail, ",") != "PIONEER/USBANLZ/P001/ANLZ0000.2EX,PIONEER/USBANLZ/P001/ANLZ0000.EXT" {
+		t.Fatalf("detail files %q", detail)
 	}
 }
 
@@ -544,8 +544,9 @@ func TestStatTrackSignatureMatchesTheBuild(t *testing.T) {
 	}
 }
 
-// A cover inside the audio file is staged only when the export names none. Replaces the import
-// half of TestExtractEmbeddedArtwork (the extractor's own tests stay).
+// The export's cover is staged with the track, read at the job's pace; a cover inside the audio
+// file is taken only when the export names none. Replaces the import half of
+// TestExtractEmbeddedArtwork (the extractor's own tests stay).
 func TestBuildTrackTakesTheEmbeddedCoverOnlyWithoutAnExportCover(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -554,7 +555,8 @@ func TestBuildTrackTakesTheEmbeddedCoverOnlyWithoutAnExportCover(t *testing.T) {
 	tag := id3WithPicture(jpeg)
 	mp3 := append(tag, testfixture.MP3WithLAMETag()...)
 	testfixture.Write(t, root, "MUSIC/cover.mp3", mp3)
-	testfixture.Write(t, root, "PIONEER/Artwork/a.jpg", []byte{0xFF, 0xD8, 0xFF, 1})
+	exportCover := append([]byte{0xFF, 0xD8, 0xFF, 1}, bytes.Repeat([]byte{9}, 200<<10)...)
+	testfixture.Write(t, root, "PIONEER/Artwork/a.jpg", exportCover)
 	tr := rekordbox.Track{ID: 7, Path: "/MUSIC/cover.mp3", AnalysisPath: "/PIONEER/USBANLZ/P001/ANLZ0000.DAT", BPM: 120, Duration: 1, SampleRate: 44100}
 	var pauses, largest int
 	s, err := BuildTrack(buildResolver(t, root), tr, ReadOptions{Chunk: 64 << 10, Pause: func(n int, _ time.Duration) error {
@@ -569,8 +571,20 @@ func TestBuildTrackTakesTheEmbeddedCoverOnlyWithoutAnExportCover(t *testing.T) {
 		t.Fatalf("a 300 KiB cover was read in %d paced reads, the largest %d bytes", pauses, largest)
 	}
 	tr.ArtworkPath = "/PIONEER/Artwork/a.jpg"
-	if s = mustBuild(t, root, tr); s.Art != nil || s.Sig.Artwork.Rel != "PIONEER/Artwork/a.jpg" {
-		t.Fatalf("export cover: art %d bytes, sig %+v", len(s.Art), s.Sig.Artwork)
+	pauses, largest = 0, 0
+	s, err = BuildTrack(buildResolver(t, root), tr, ReadOptions{Chunk: 64 << 10, Pause: func(n int, _ time.Duration) error {
+		pauses++
+		largest = max(largest, n)
+		return nil
+	}})
+	if err != nil || !bytes.Equal(s.Art, exportCover) || s.Sig.Artwork.Rel != "PIONEER/Artwork/a.jpg" {
+		t.Fatalf("export cover: %v, art %d bytes, sig %+v", err, len(s.Art), s.Sig.Artwork)
+	}
+	if largest > 64<<10 || pauses < 4 {
+		t.Fatalf("a 200 KiB cover file was read in %d paced reads, the largest %d bytes", pauses, largest)
+	}
+	if s.Digest == nil || !bytes.Equal(s.Digest, WrittenDigest(s.Perf.Beats, s.Perf.QuickCues, s.Perf.Loops)) {
+		t.Fatal("the record does not carry the digest of its grid, cues and loops")
 	}
 }
 

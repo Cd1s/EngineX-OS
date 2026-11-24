@@ -1,14 +1,13 @@
 package bridge
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -33,7 +32,8 @@ type window struct {
 	lib     *enginedb.Library // nil: the stick has no library to keep, one is built
 	snap    *rbstate.Snapshot
 	index   map[string]enginedb.Row // every row of the library by key
-	saved   []byte                  // the snapshot as the stick has it
+	head    rbstate.Header          // the snapshot's header as the stick has it
+	dirty   bool                    // the snapshot's tracks or lists changed outside a commit
 	adopted bool                    // snap was read from an earlier build's state, which goes once it is saved
 }
 
@@ -93,13 +93,14 @@ func (w *window) open() error {
 				lib.Close()
 				return err
 			}
-			w.adopted = true
+			w.adopted, w.dirty = true, true
 			log.Printf("rb-bridge: library of an earlier build taken over: %d tracks, %d lists", len(snap.Tracks), len(snap.Lists))
 		}
 	}
 	if snap == nil {
 		snap = rbstate.New(lib.UUID())
 	} else if !w.adopted {
+		w.head = snap.Header
 		dropOldState(w.dir) // an adoption whose clean-up was cut short
 	}
 	w.lib, w.snap = lib, snap
@@ -107,9 +108,6 @@ func (w *window) open() error {
 		if err = w.settle(claims); err != nil {
 			return err
 		}
-	}
-	if b, err := os.ReadFile(filepath.Join(w.dir, rbstate.SnapshotName)); err == nil {
-		w.saved = b
 	}
 	if err = w.reconcile(); err != nil {
 		return err
@@ -131,7 +129,7 @@ func (w *window) settle(claims *rbstate.Snapshot) error {
 	if err = rbstate.Promote(w.dir); err != nil {
 		return err
 	}
-	w.snap = claims
+	w.snap, w.head, w.dirty = claims, claims.Header, false
 	log.Printf("rb-bridge: the last window was cut short after its commit; its %d tracks and %d lists are taken over", len(claims.Tracks), len(claims.Lists))
 	return nil
 }
@@ -161,7 +159,7 @@ func (w *window) reconcile() error {
 			continue
 		}
 		if rel := strings.TrimPrefix(row.Path, "../"); rel != t.Rel {
-			t.Rel, t.Resolved = rel, true
+			t.Rel, t.Resolved, w.dirty = rel, true, true
 		}
 	}
 	for key, l := range w.snap.Lists {
@@ -171,6 +169,7 @@ func (w *window) reconcile() error {
 		}
 	}
 	if gone > 0 {
+		w.dirty = true
 		log.Printf("rb-bridge: %d rows of the last import are no longer in the library", gone)
 	}
 	return nil
@@ -210,18 +209,24 @@ func (w *window) commit(b *enginedb.Batch) error {
 	if err := rbstate.Promote(w.dir); err != nil {
 		return err
 	}
-	w.saved, _ = w.snap.Encode()
 	cut("promoted")
+	w.saved()
+	return nil
+}
+
+// saved notes that the stick has the snapshot as it is in memory.
+func (w *window) saved() {
+	w.head, w.dirty = w.snap.Header, false
 	if w.adopted {
 		dropOldState(w.dir)
 		w.adopted = false
 	}
-	return nil
 }
 
 // count fills the snapshot's header from its rows.
 func (w *window) count() {
 	s := w.snap
+	s.Format, s.Rules, s.Header.Tracks, s.Header.Lists = rbstate.Format, rbstate.Rules, len(s.Tracks), len(s.Lists)
 	s.Layout, s.Sources = w.view.Layout, w.view.Sources
 	if w.partial {
 		s.Stamp = "" // a library was unreadable: the next insert reads again, and write-back waits
@@ -238,13 +243,8 @@ func (w *window) count() {
 		case t.Native || t.Perf == rbstate.PerfMissing:
 		case t.EngineID == 0:
 			p.Rows++
-		default:
-			if t.Perf == rbstate.PerfNone {
-				p.Perf++
-			}
-			if t.Art == "" && vt.Track.ArtworkPath != "" && t.Perf != rbstate.PerfNone {
-				p.Art++
-			}
+		case t.Perf == rbstate.PerfNone:
+			p.Perf++
 		}
 	}
 	for i := range w.view.Lists {
@@ -310,8 +310,8 @@ func (w *window) build() error {
 	if err = rbstate.Promote(w.dir); err != nil {
 		return err
 	}
-	w.saved, _ = w.snap.Encode()
 	cut("promoted")
+	w.saved()
 	w.st.done("install", "library copied to the stick")
 	w.res.Added, w.res.PlaylistsChanged = len(ids), len(listIDs) > 0
 	if w.o.Progress != nil {
@@ -407,7 +407,7 @@ func (w *window) apply(p *Plan) error {
 	}
 	w.st.done("diff", "+%d ~%d >%d -%d tracks, %d lists to write, %d to remove", len(p.AddTracks), len(p.UpdateTracks), len(p.Moves), len(p.RemoveTracks), len(p.PutLists), len(p.RemoveLists))
 	if w.snap.Stamp != w.view.Stamp {
-		w.snap.Pending.Verify = true // the job compares every track's files with what was built
+		w.snap.Pending.Verify, w.dirty = true, true // the job compares every track's files with what was built
 		// The export's own IDs of every track, as this export has them: a re-export renumbers them,
 		// and write-back finds a track's rows in the libraries through them.
 		for i := range w.view.Tracks {
@@ -619,10 +619,9 @@ func (w *window) applyStaged() error {
 		stale = append(stale, missing...) // looked at again by the next job, on the next mount's names
 		missing = nil
 	}
-	keys = sortedByPriority(w.mount, append(keys, missing...))
-	applied, kept, degraded, gone := 0, 0, 0, 0
-	for at := 0; at < len(keys) && w.st.more(1500*time.Millisecond); at += applyBatch {
-		part := keys[at:min(at+applyBatch, len(keys))]
+	keys = w.inApplyOrder(append(keys, missing...))
+	applied, kept, degraded, gone, left := 0, 0, 0, 0, len(entries)-len(stale)
+	for at := 0; at < len(keys) && w.st.more(applyReserve); {
 		b, err := w.lib.Begin(w.ctx)
 		if err != nil {
 			return err
@@ -633,7 +632,8 @@ func (w *window) applyStaged() error {
 		}
 		var overviews []rgb
 		var done []string
-		for _, key := range part {
+		for first := at; at < len(keys) && at-first < applyBatch && w.st.more(applyReserve); at++ {
+			key := keys[at]
 			e := entries[key]
 			vt, _ := w.view.Track(key)
 			t := w.snap.Tracks[key]
@@ -681,7 +681,7 @@ func (w *window) applyStaged() error {
 				}
 				t.Rel = full.Rel
 			}
-			t.Resolved, t.Built, t.Detail = true, e.Sig, e.Detail
+			t.Resolved, t.Built = true, e.Sig
 			if e.Degraded != "" {
 				t.Perf = rbstate.PerfDegraded
 				degraded++
@@ -703,8 +703,8 @@ func (w *window) applyStaged() error {
 				}
 			}
 			if len(full.Art) > 0 {
-				if sum, err := b.PutArtwork(w.ctx, t.EngineID, full.Art); err == nil {
-					t.Art = sum
+				if err = b.PutArtwork(w.ctx, t.EngineID, full.Art); err != nil {
+					log.Printf("rb-bridge: cover of track %d not written: %v", t.EngineID, err)
 				}
 			}
 			applied++
@@ -720,10 +720,14 @@ func (w *window) applyStaged() error {
 			return err
 		}
 		if w.o.Progress != nil {
-			w.o.Progress(at+len(part), len(keys))
+			w.o.Progress(at, len(keys))
 		}
+		left -= len(done)
 	}
 	_ = stage.Drop(stale...)
+	if left == 0 && len(entries) > 0 {
+		_ = stage.Reset(verified) // everything staged is applied or of another export: the index starts again
+	}
 	w.res.Applied = applied
 	w.res.Removed += gone
 	w.st.done("staged", "%d applied (%d kept the deck's edits, %d without analysis), %d rows of missing files removed, %d of %d staged left", applied, kept, degraded, gone, max(len(keys)-applied-gone, 0), len(keys))
@@ -743,113 +747,27 @@ func (w *window) finishLists() error {
 }
 
 // saveIfChanged saves the snapshot when it changed without a transaction on m.db (the stamp, the
-// export's IDs, pending counts, the verify mark).
+// export's IDs, pending counts, the verify mark, rows Engine removed).
 func (w *window) saveIfChanged() error {
-	before, err := w.snap.Encode()
-	if err != nil {
-		return err
-	}
 	w.count()
-	after, err := w.snap.Encode()
-	if err != nil {
-		return err
-	}
-	if bytes.Equal(before, w.saved) && bytes.Equal(after, w.saved) {
+	if !w.dirty && reflect.DeepEqual(w.snap.Header, w.head) {
 		return nil
 	}
-	if err = w.snap.Save(w.dir); err != nil {
+	if err := w.snap.Save(w.dir); err != nil {
 		return err
 	}
-	w.saved = after
+	w.saved()
 	return nil
 }
 
-// writeOverview puts a track's list waveform where Engine reads it, unless a valid one is there.
+// writeOverview puts a track's list waveform where Engine reads it, unless one is there: Engine's
+// own, or the one the job wrote when it staged the track (a row made in this window has none).
+// The file is not read: on a USB 2.0 disk a read a track was half of a window's time.
 func writeOverview(dir, uuid string, id int64, body []byte) {
-	p := filepath.Join(dir, "OverviewData", uuid, fmt.Sprintf("%d.rgb", id))
-	if have, err := os.ReadFile(p); err == nil {
-		if raw, err := enginedb.QUncompress(have, 1<<20); err == nil && enginedb.ValidRGBOverview(raw) {
-			return
-		}
+	if st, err := os.Stat(filepath.Join(dir, "OverviewData", uuid, fmt.Sprintf("%d.rgb", id))); err == nil && st.Size() > 4 {
+		return
 	}
 	if err := enginedb.WriteRGBOverviewAtomic(dir, uuid, id, body); err != nil {
 		log.Printf("rb-bridge: list waveform of track %d not written: %v", id, err)
 	}
-}
-
-const maxCover = 32 << 20
-
-// applyCovers gives rows the covers their export names, while the window has time. A cover
-// file is read once for all the tracks that share it.
-func (w *window) applyCovers() error {
-	type want struct {
-		t   *rbstate.Track
-		rel string
-	}
-	byFile := map[string][]want{}
-	var order []string
-	for i := range w.view.Tracks {
-		vt := &w.view.Tracks[i]
-		t := w.snap.Tracks[vt.Key]
-		if t == nil || t.Native || t.EngineID == 0 || t.Art != "" || vt.Track.ArtworkPath == "" || t.Perf == rbstate.PerfNone {
-			continue
-		}
-		if _, ok := byFile[vt.Track.ArtworkPath]; !ok {
-			order = append(order, vt.Track.ArtworkPath)
-		}
-		byFile[vt.Track.ArtworkPath] = append(byFile[vt.Track.ArtworkPath], want{t, vt.Track.ArtworkPath})
-	}
-	if len(order) == 0 || !w.st.more(time.Second) {
-		return nil
-	}
-	b, err := w.lib.Begin(w.ctx)
-	if err != nil {
-		return err
-	}
-	done, failed := 0, 0
-	for _, file := range order {
-		if !w.st.more(time.Second) {
-			break
-		}
-		image, err := readCover(w.r, file)
-		for _, x := range byFile[file] {
-			if err != nil {
-				x.t.Art = "-" // unreadable: not tried again until the export changes the track
-				failed++
-				continue
-			}
-			sum, perr := b.PutArtwork(w.ctx, x.t.EngineID, image)
-			if perr != nil {
-				b.Rollback()
-				return perr
-			}
-			x.t.Art = sum
-			done++
-		}
-	}
-	if err = w.commit(b); err != nil {
-		return err
-	}
-	w.st.done("art", "%d tracks got their cover, %d covers unreadable, %d tracks left", done, failed, w.snap.Pending.Art)
-	return nil
-}
-
-func readCover(r *compat.Resolver, exportPath string) ([]byte, error) {
-	rel, err := r.Resolve(exportPath)
-	if err != nil {
-		return nil, err
-	}
-	f, err := os.Open(r.FullPath(rel))
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	image, err := io.ReadAll(io.LimitReader(f, maxCover+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(image) == 0 || len(image) > maxCover {
-		return nil, fmt.Errorf("cover of %d bytes", len(image))
-	}
-	return image, nil
 }

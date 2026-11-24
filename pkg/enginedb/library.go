@@ -156,10 +156,11 @@ type Batch struct {
 	l          *Library
 	tx         *sql.Tx
 	stmts      map[string]*sql.Stmt
-	saved      []string // Engine's own SQL of the indexes and triggers suspended for the batch
-	nextTrack  int64    // bulk: the next Track.id
-	nextEntity int64    // the next PlaylistEntity.id, 0 until a list is written
-	lists      bool     // a list was added: Engine's persist trigger is suspended
+	saved      []string                  // Engine's own SQL of the indexes and triggers suspended for the batch
+	nextTrack  int64                     // bulk: the next Track.id
+	nextEntity int64                     // the next PlaylistEntity.id, 0 until a list is written
+	lists      bool                      // a list was added: Engine's persist trigger is suspended
+	covers     map[[sha1.Size]byte]int64 // AlbumArt.id of the images this batch has put
 	now        int64
 	commitID   int64
 }
@@ -693,8 +694,19 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 	if err = st.QueryRowContext(ctx, id).Scan(&row.beats, &row.cues, &row.loops, &row.active, &row.mark, &trackData, &overview, &row.locked, &row.rating); err != nil {
 		return nil, 0, fmt.Errorf("track %d: %w", id, err)
 	}
-	staged := writtenDigest(p.Beats, p.QuickCues, p.Loops)
-	have := writtenDigest(row.beats, row.cues, row.loops)
+	staged := p.Digest
+	if staged == nil {
+		staged = writtenDigest(p.Beats, p.QuickCues, p.Loops)
+	}
+	// The row's own digest unpacks its grid and cues, a third of a window's CPU on a deck: it is
+	// worked out only for a row that can hold something else than the staged data or the
+	// export's cue rows (the bridge wrote it before, or it has a grid).
+	same := bytes.Equal(row.beats, p.Beats) && bytes.Equal(row.cues, p.QuickCues) && bytes.Equal(row.loops, p.Loops)
+	var have []byte
+	if !same && (prev.Written != nil || row.beats != nil) {
+		have = writtenDigest(row.beats, row.cues, row.loops)
+		same = bytes.Equal(have, staged)
+	}
 	bpm := f.BPM
 	if bpm == 0 {
 		bpm = export.BPM
@@ -712,7 +724,7 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 		return e
 	}
 	switch {
-	case bytes.Equal(have, staged) && prev.State != rbstate.PerfDeck:
+	case same && prev.State != rbstate.PerfDeck:
 		if !bytes.Equal(trackData, p.TrackData) || !bytes.Equal(overview, p.Overview) || row.mark.Valid {
 			if _, err = b.exec(ctx, `UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,thirdPartySourceId=NULL WHERE trackId=?`, p.TrackData, p.Overview, id); err != nil {
 				return nil, 0, err
@@ -767,31 +779,36 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 }
 
 // PutArtwork gives a track its cover: the AlbumArt row (shared by tracks with the same image)
-// and the file in the library's Artwork directory that Engine Link reads.
-func (b *Batch) PutArtwork(ctx context.Context, id int64, image []byte) (string, error) {
+// and the file in Engine Library/Artwork that Engine serves to other decks. A batch looks each
+// image up once: an album's tracks share one cover.
+func (b *Batch) PutArtwork(ctx context.Context, id int64, image []byte) error {
 	if len(image) == 0 {
-		return "", errors.New("empty cover")
+		return errors.New("empty cover")
 	}
 	h := sha1.Sum(image)
 	sum := h[:]
-	if artDir, err := compat.SafeOutputDir(filepath.Dir(filepath.Dir(b.l.dir)), artworkDir); err == nil {
-		_ = putArtwork(artDir, sum, image) // without the file the cover still shows on this deck
-	}
-	var art int64
-	err := b.tx.QueryRowContext(ctx, `SELECT id FROM AlbumArt WHERE hash=? OR hash=? LIMIT 1`, sum, hex.EncodeToString(sum)).Scan(&art)
-	if errors.Is(err, sql.ErrNoRows) {
-		var res sql.Result
-		if res, err = b.exec(ctx, `INSERT INTO AlbumArt(hash,albumArt) VALUES(?,?)`, sum, image); err == nil {
-			art, err = res.LastInsertId()
+	art, known := b.covers[h]
+	if !known {
+		if artDir, err := compat.SafeOutputDir(filepath.Dir(filepath.Dir(b.l.dir)), artworkDir); err == nil {
+			_ = putArtwork(artDir, sum, image) // without the file the cover still shows on this deck
 		}
+		err := b.tx.QueryRowContext(ctx, `SELECT id FROM AlbumArt WHERE hash=? OR hash=? LIMIT 1`, sum, hex.EncodeToString(sum)).Scan(&art)
+		if errors.Is(err, sql.ErrNoRows) {
+			var res sql.Result
+			if res, err = b.exec(ctx, `INSERT INTO AlbumArt(hash,albumArt) VALUES(?,?)`, sum, image); err == nil {
+				art, err = res.LastInsertId()
+			}
+		}
+		if err != nil {
+			return err
+		}
+		if b.covers == nil {
+			b.covers = map[[sha1.Size]byte]int64{}
+		}
+		b.covers[h] = art
 	}
-	if err != nil {
-		return "", err
-	}
-	if _, err = b.exec(ctx, `UPDATE Track SET albumArtId=? WHERE id=? AND albumArtId IS NOT ?`, art, id, art); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(sum), nil
+	_, err := b.exec(ctx, `UPDATE Track SET albumArtId=? WHERE id=? AND albumArtId IS NOT ?`, art, id, art)
+	return err
 }
 
 // RowDigest is the digest of the grid, cues and loops a row holds now.

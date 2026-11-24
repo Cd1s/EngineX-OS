@@ -19,7 +19,7 @@ func sampleSnapshot() *Snapshot {
 	s.Tracks["contents/a/one.mp3"] = &Track{
 		Key: "contents/a/one.mp3", EngineID: 12, Rel: "Contents/A/One.mp3", Resolved: true,
 		Refs: []SourceRef{{Kind: DeviceLibrary, ID: 5, RecordHash: "aa"}, {Kind: OneLibrary, ID: 9, RecordHash: "bb"}},
-		Row:  "r1", Perf: PerfApplied, Written: []byte{1, 2, 3}, Art: "cafe", Detail: []string{"PIONEER/USBANLZ/P001/0001/ANLZ0000.2EX"},
+		Row:  "r1", Perf: PerfApplied, Written: []byte{1, 2, 3},
 		Built: TrackSig{Rules: Rules, Row: "r1", Audio: FileSig{Rel: "Contents/A/One.mp3", Size: 1, MTimeNS: 2}, ANLZ: []FileSig{{Rel: "x.DAT", Size: 3, MTimeNS: 4}}},
 	}
 	s.Tracks["contents/b/<two>&.flac"] = &Track{Key: "contents/b/<two>&.flac", Rel: "Contents/B/<two>&.flac"}
@@ -85,12 +85,16 @@ func TestSnapshotCutOrChangedIsAbsent(t *testing.T) {
 			t.Errorf("%s: Load %v", name, err)
 		}
 	}
-	changed := bytes.Replace(whole, []byte(`"id":12`), []byte(`"id":13`), 1)
-	if err := os.WriteFile(p, changed, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(dir); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("a changed byte passed the checksum: %v", err)
+	// Any one byte changed, wherever it is: the header, a record, the end line.
+	for at := range whole {
+		changed := bytes.Clone(whole)
+		changed[at] ^= 0x01
+		if err := os.WriteFile(p, changed, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("byte %d of %d changed and the snapshot still loads: %v", at, len(whole), err)
+		}
 	}
 }
 
@@ -231,7 +235,7 @@ func TestStagePutGetDropAndTornIndex(t *testing.T) {
 	}
 	sig := TrackSig{Rules: Rules, Row: "r", Audio: FileSig{Rel: "Contents/a.mp3", Size: 1, MTimeNS: 2}}
 	a := &Staged{Key: "contents/a.mp3", Sig: sig, Rel: "Contents/a.mp3", Facts: Facts{SampleRate: 44100, Duration: 1.5},
-		Perf: Perf{TrackData: []byte{1}, Beats: []byte{2}, ActiveLoops: 5, Complete: true}, RGB: []byte("rgb"), Detail: []string{"x.2EX"}}
+		Perf: Perf{TrackData: []byte{1}, Beats: []byte{2}, ActiveLoops: 5, Complete: true}, RGB: []byte("rgb")}
 	b := &Staged{Key: "contents/b.mp3", Sig: sig, Missing: true}
 	c := &Staged{Key: "contents/c.mp3", Sig: sig, Degraded: "audio header", Art: []byte("jpg")}
 	for _, st := range []*Staged{a, b, c} {
@@ -267,7 +271,7 @@ func TestStagePutGetDropAndTornIndex(t *testing.T) {
 		t.Fatalf("verified %q", s.Verified())
 	}
 	got, err := s.Get(a.Key)
-	if err != nil || !bytes.Equal(got.Perf.Beats, []byte{2}) || got.Perf.ActiveLoops != 5 || !got.Perf.Complete || string(got.RGB) != "rgb" || got.Facts.SampleRate != 44100 || got.Detail[0] != "x.2EX" {
+	if err != nil || !bytes.Equal(got.Perf.Beats, []byte{2}) || got.Perf.ActiveLoops != 5 || !got.Perf.Complete || string(got.RGB) != "rgb" || got.Facts.SampleRate != 44100 {
 		t.Fatalf("get a: %+v %v", got, err)
 	}
 	if got, err = s.Get(b.Key); err != nil || !got.Missing || got.HasPerf {

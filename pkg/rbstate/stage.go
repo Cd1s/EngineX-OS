@@ -70,8 +70,8 @@ type Staged struct {
 	Facts    Facts    `json:"facts"`
 	Perf     Perf     `json:"-"`
 	RGB      []byte   `json:"-"`
-	Art      []byte   `json:"-"` // only a cover from the audio file; an export's cover is read from Sig.Artwork
-	Detail   []string `json:"det,omitempty"`
+	Art      []byte   `json:"-"`             // the cover: the file the export names (Sig.Artwork), else the audio file's own
+	Digest   []byte   `json:"wr,omitempty"`  // of Perf's grid, cues and loops, as Track.Written names them
 	Degraded string   `json:"deg,omitempty"` // why there is no performance data, "" otherwise
 
 	// In the index line only: what lies beside it.
@@ -407,6 +407,21 @@ func (s *Stage) Drop(keys ...string) error {
 		}
 	}
 	return nil
+}
+
+// Reset empties the index once a window has applied or dropped everything in it, so that later
+// windows and jobs do not read through every line of a finished import. The verified stamp stays.
+func (s *Stage) Reset(verified string) error {
+	_ = s.Close()
+	var b []byte
+	if verified != "" {
+		line, err := json.Marshal(indexLine{Verified: verified})
+		if err != nil {
+			return err
+		}
+		b = append(line, '\n')
+	}
+	return writeWhole(filepath.Join(s.dir, stageIndex), b)
 }
 
 // Sync puts the index on the disk. Put syncs each track's files itself.

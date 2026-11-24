@@ -2,7 +2,7 @@ package enginedb
 
 // One track of a rekordbox export, built from the volume into what the background job stages
 // (rbstate.Staged): the audio header's facts, Engine's performance blobs, the body of the RGB
-// overview file and a cover taken from the audio file. It opens no library and writes nothing:
+// overview file and the cover (the export's, else the audio file's own). It opens no library and writes nothing:
 // the job puts the result in the stage on /data and a mount window applies it (design §1.5).
 //
 // The rules are the ones the import in sync.go applied:
@@ -225,6 +225,17 @@ func BuildTrackFrom(res *compat.Resolver, t rekordbox.Track, src TrackSources, r
 		return degrade(src.Broken)
 	}
 	full := res.FullPath(src.Rel)
+	if !src.Sig.Artwork.IsZero() {
+		// The export's cover is read here, at the job's pace, so that no window reads the stick
+		// for it. One that cannot be read is left out until its file changes.
+		art, err := readCover(res.FullPath(src.Sig.Artwork.Rel), read)
+		if halted != nil {
+			return nil, halted
+		}
+		if err == nil {
+			out.Art = art
+		}
+	}
 	a, err := readTrackAnalysis(res, src.Sig.ANLZ, read)
 	if halted != nil {
 		return nil, halted
@@ -303,12 +314,12 @@ func BuildTrackFrom(res *compat.Resolver, t rekordbox.Track, src TrackSources, r
 	}
 	out.Perf = rbstate.Perf{TrackData: perf.TrackData, Overview: perf.Overview, Beats: perf.Beats,
 		QuickCues: perf.QuickCues, Loops: perf.Loops, ActiveLoops: perf.ActiveLoops, Complete: perf.Complete}
+	out.Digest = writtenDigest(perf.Beats, perf.QuickCues, perf.Loops)
 	if perf.Overview != nil {
 		if rgb, err := EncodeRGBOverview(t, a, perf.Overview); err == nil {
 			out.RGB = rgb
 		}
 	}
-	out.Detail = trackDetailFiles(src.Sig.ANLZ)
 	if t.ArtworkPath == "" {
 		// The export names no cover: the audio file's own one, as the import took it.
 		art, err := embeddedCover(full, read)
@@ -391,9 +402,9 @@ func openTrackFile(full string) (*os.File, error) {
 	return f, err
 }
 
-// trackDetailFiles are the analysis files that serve the scrolling detail, in the order the
-// display prefers them.
-func trackDetailFiles(files []rbstate.FileSig) []string {
+// DetailFiles are the ANLZ files of a built track (the snapshot's Track.Built.ANLZ) that serve
+// the scrolling detail waveform, the one DetailOf reads first in front.
+func DetailFiles(files []rbstate.FileSig) []string {
 	var out []string
 	for _, ext := range []string{".2EX", ".EXT"} {
 		for _, f := range files {
@@ -403,6 +414,24 @@ func trackDetailFiles(files []rbstate.FileSig) []string {
 		}
 	}
 	return out
+}
+
+// readCover reads a cover file through read's pacing.
+func readCover(full string, read ReadOptions) ([]byte, error) {
+	f, err := openTrackFile(full)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	r := &pacedFile{f: f, chunk: read.Chunk, pause: read.Pause}
+	image, err := io.ReadAll(io.LimitReader(r, maxCoverFile+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(image) == 0 || len(image) > maxCoverFile {
+		return nil, fmt.Errorf("cover of %d bytes", len(image))
+	}
+	return image, nil
 }
 
 // embeddedCover is ExtractEmbeddedArtwork reading through read's pacing: a tag's picture can be

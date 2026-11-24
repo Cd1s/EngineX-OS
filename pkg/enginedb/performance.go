@@ -89,6 +89,8 @@ type Performance struct {
 	TrackData, Overview, Beats, QuickCues, Loops []byte
 	ActiveLoops                                  uint32
 	Complete                                     bool
+	// Digest is WrittenDigest of Beats, QuickCues and Loops when the builder has it already.
+	Digest []byte
 }
 
 func put(b *bytes.Buffer, order binary.ByteOrder, v any) { _ = binary.Write(b, order, v) }

@@ -24,7 +24,7 @@ const (
 	// 5 is the first snapshot build; it follows the stamp versions v2-v4 of earlier builds.
 	Rules = 5
 	// Format is the snapshot's file format.
-	Format = 1
+	Format = 2
 )
 
 // Layouts of a stick with two libraries (the setting rb_library_view).
@@ -67,7 +67,6 @@ type Pending struct {
 	Rows   int  `json:"rows,omitempty"`   // tracks of the view without a row
 	Lists  bool `json:"lists,omitempty"`  // the lists are not the view's yet
 	Perf   int  `json:"perf,omitempty"`   // rows without performance data for their current signature
-	Art    int  `json:"art,omitempty"`    // rows without their cover
 	Verify bool `json:"verify,omitempty"` // the export changed and not every track's files were compared yet
 }
 
@@ -129,8 +128,6 @@ type Track struct {
 	Perf     PerfState   `json:"perf,omitempty"`
 	Built    TrackSig    `json:"built"`
 	Written  []byte      `json:"wr,omitempty"`  // digest of grid, cues and loops as the bridge last wrote them
-	Art      string      `json:"art,omitempty"` // hex SHA-1 of the applied cover
-	Detail   []string    `json:"det,omitempty"` // ANLZ files that serve the detail waveform
 	Native   bool        `json:"nat,omitempty"` // an Engine-made row: lists refer to it, the bridge never writes it
 }
 

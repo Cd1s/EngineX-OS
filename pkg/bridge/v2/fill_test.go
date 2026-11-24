@@ -227,7 +227,7 @@ func TestFillStagesEveryTrackAndWritesNothingElseOnTheStick(t *testing.T) {
 			t.Fatalf("staged %s: %+v", k, sig)
 		}
 		rec, err := st.Get(k)
-		if err != nil || !rec.Perf.Complete || rec.Perf.Beats == nil || len(rec.RGB) == 0 || len(rec.Detail) != 2 {
+		if err != nil || !rec.Perf.Complete || rec.Perf.Beats == nil || len(rec.RGB) == 0 || len(enginedb.DetailFiles(rec.Sig.ANLZ)) != 2 {
 			t.Fatalf("record %s: %v", k, err)
 		}
 	}

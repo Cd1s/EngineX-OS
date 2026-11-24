@@ -3,6 +3,7 @@ package rbstate
 import (
 	"bufio"
 	"bytes"
+	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,20 +16,26 @@ import (
 	"strings"
 )
 
-// The snapshot is text, one record a line:
+// The snapshot is one file:
 //
-//	RBS1 {header}
-//	L {list}        one per list, by key
-//	T {track}       one per track, by key
-//	E <records> <crc32 of every byte above, hex>
+//	RBS2 {header}\n       JSON: all an unchanged insert reads
+//	body                  the lists and the tracks, by key, as encoding/gob writes them
+//	\nE <records> <crc32 of every byte above, hex>\n
 //
-// It is only ever replaced whole (Save), so a reader sees an old one or a new one. A file
-// without the E line is no snapshot.
+// The body is binary because every window that finds a changed export reads it all and every
+// commit writes it all: as JSON lines, 2,390 tracks took 0.4 s of a deck's CPU for one read and
+// one write (replica, 2026-11-24). The file is only ever replaced whole (Save), so a reader sees
+// an old one or a new one. A file without the E line is no snapshot.
 
 const (
-	snapshotMagic = "RBS1 "
+	snapshotMagic = "RBS2 "
 	maxSnapshot   = 256 << 20
 )
+
+type snapshotBody struct {
+	Lists  []*List
+	Tracks []*Track
+}
 
 // ErrNoSnapshot wraps os.ErrNotExist: the directory has no snapshot a reader can use.
 var ErrNoSnapshot = fmt.Errorf("rbstate: no snapshot: %w", os.ErrNotExist)
@@ -114,33 +121,22 @@ func load(file string) (*Snapshot, error) {
 		return nil, ErrNoSnapshot
 	}
 	s := &Snapshot{Tracks: map[string]*Track{}, Lists: map[string]*List{}}
-	lines := bytes.Split(body[:len(body)-1], []byte{'\n'})
-	if err = json.Unmarshal(lines[0][len(snapshotMagic):], &s.Header); err != nil || s.Format != Format {
+	head, rest, _ := bytes.Cut(body[:len(body)-1], []byte{'\n'})
+	if err = json.Unmarshal(head[len(snapshotMagic):], &s.Header); err != nil || s.Format != Format {
 		return nil, ErrNoSnapshot
 	}
-	if len(lines)-1 != records {
+	var rec snapshotBody
+	if err = gob.NewDecoder(bytes.NewReader(rest)).Decode(&rec); err != nil || len(rec.Lists)+len(rec.Tracks) != records {
 		return nil, ErrNoSnapshot
 	}
-	for _, line := range lines[1:] {
-		if len(line) < 2 || line[1] != ' ' {
-			return nil, ErrNoSnapshot
-		}
-		switch line[0] {
-		case 'T':
-			t := new(Track)
-			if err = json.Unmarshal(line[2:], t); err != nil || t.Key == "" {
-				return nil, ErrNoSnapshot
-			}
-			s.Tracks[t.Key] = t
-		case 'L':
-			l := new(List)
-			if err = json.Unmarshal(line[2:], l); err != nil || l.Key == "" {
-				return nil, ErrNoSnapshot
-			}
-			s.Lists[l.Key] = l
-		default:
-			return nil, ErrNoSnapshot
-		}
+	for _, l := range rec.Lists {
+		s.Lists[l.Key] = l
+	}
+	for _, t := range rec.Tracks {
+		s.Tracks[t.Key] = t
+	}
+	if len(s.Lists)+len(s.Tracks) != records {
+		return nil, ErrNoSnapshot // an empty or repeated key
 	}
 	return s, nil
 }
@@ -149,26 +145,26 @@ func load(file string) (*Snapshot, error) {
 func (s *Snapshot) Encode() ([]byte, error) {
 	s.Format, s.Rules = Format, Rules
 	s.Header.Tracks, s.Header.Lists = len(s.Tracks), len(s.Lists)
-	var b bytes.Buffer
-	b.Grow(256 + 64*len(s.Lists) + 256*len(s.Tracks))
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	b.WriteString(snapshotMagic)
-	if err := enc.Encode(&s.Header); err != nil {
+	head, err := json.Marshal(&s.Header)
+	if err != nil {
 		return nil, err
 	}
+	var b bytes.Buffer
+	b.Grow(len(head) + 256 + 64*len(s.Lists) + 512*len(s.Tracks))
+	b.WriteString(snapshotMagic)
+	b.Write(head)
+	b.WriteByte('\n')
+	rec := snapshotBody{Lists: make([]*List, 0, len(s.Lists)), Tracks: make([]*Track, 0, len(s.Tracks))}
 	for _, k := range sortedKeys(s.Lists) {
-		b.WriteString("L ")
-		if err := enc.Encode(s.Lists[k]); err != nil {
-			return nil, err
-		}
+		rec.Lists = append(rec.Lists, s.Lists[k])
 	}
 	for _, k := range sortedKeys(s.Tracks) {
-		b.WriteString("T ")
-		if err := enc.Encode(s.Tracks[k]); err != nil {
-			return nil, err
-		}
+		rec.Tracks = append(rec.Tracks, s.Tracks[k])
 	}
+	if err = gob.NewEncoder(&b).Encode(&rec); err != nil {
+		return nil, err
+	}
+	b.WriteByte('\n')
 	fmt.Fprintf(&b, "E %d %08x\n", len(s.Lists)+len(s.Tracks), crc32.ChecksumIEEE(b.Bytes()))
 	return b.Bytes(), nil
 }

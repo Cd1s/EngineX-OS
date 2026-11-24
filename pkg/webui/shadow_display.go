@@ -936,11 +936,11 @@ func bridgeDisplayWave(_ context.Context, file, rel string, id int64, rate, dura
 		return nil
 	}
 	t, ok := snap.TrackAt(rel)
-	if !ok || t.EngineID != id || len(t.Detail) == 0 {
+	if !ok || t.EngineID != id {
 		return nil
 	}
 	// The volume is the directory above Engine Library.
-	a := enginedb.DetailOf(filepath.Dir(filepath.Dir(filepath.Dir(file))), t.Detail)
+	a := enginedb.DetailOf(filepath.Dir(filepath.Dir(filepath.Dir(file))), enginedb.DetailFiles(t.Built.ANLZ))
 	w := enginedb.DisplayWaveFromRekordbox(a, rate)
 	if w == nil || math.Abs(float64(len(w.Bands)/3)*w.SamplesPerBin/rate*1000-durationMS) > 100 {
 		return nil
