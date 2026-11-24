@@ -9709,6 +9709,21 @@ def edits(dev: bool):
         "\t\t} else if (row.isRenderingStems) {",
     )])
     if v53():
+        # #339: On Numark Mixstream Pro Go (NH10) and Bluetooth audio decks, closing
+        # Bluetooth playback view via the touchscreen X button leaves /Engine/Bluetooth/DeckNumber
+        # persisted as "2". This left inBluetoothMode true and inDJMode false in DeckAssignmentConfig,
+        # muting jog wheel rotation reading and Shift+Jog search on Deck 2.
+        # Clear the Planck property on close so inDJMode and jog rotation reading are immediately restored.
+        out.setdefault("Skins/EngineOS/UI/CompositeControls/MediaDeck/BluetoothDeckInfo.qml", []).extend([(
+            "    onClose: PlanckGUI.views.bluetoothDeck.closeClicked()\n",
+            '    onClose: {\n'
+            '        const p = Planck.getProperty("/Engine/Bluetooth/DeckNumber")\n'
+            '        if (p && p.translator) {\n'
+            '            p.translator.string = ""\n'
+            '        }\n'
+            '        PlanckGUI.views.bluetoothDeck.closeClicked()\n'
+            '    }\n',
+        )])
         # #305: Track Info's Source line names the service, not TIDAL (scBrand swaps the word; a deck's own track says which).
         out.setdefault(ROOT + "Items/TrackInfo.qml", []).extend([(
             'text: trackData.streamingSource || "Local Drive"\n',

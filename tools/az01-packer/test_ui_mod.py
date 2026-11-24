@@ -6358,6 +6358,47 @@ class StockJogControlsTest(unittest.TestCase):
         finally:
             bp.ROOT = old_root
 
+    def test_bluetooth_deck_info_on_close_clears_deck_number(self):
+        # #339: On NH10 and Bluetooth decks, disconnecting via touchscreen X leaves /Engine/Bluetooth/DeckNumber = 2.
+        # BluetoothDeckInfo.qml onClose clears /Engine/Bluetooth/DeckNumber so inDJMode and jog rotation reading restore immediately.
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            e530 = bp.edits(False)
+            rel = "Skins/EngineOS/UI/CompositeControls/MediaDeck/BluetoothDeckInfo.qml"
+            self.assertIn(rel, e530)
+            patches = e530[rel]
+            bt_patches = [
+                (old, new) for old, new in patches
+                if "/Engine/Bluetooth/DeckNumber" in new
+            ]
+            self.assertEqual(len(bt_patches), 1)
+            old, new = bt_patches[0]
+            self.assertIn("onClose: PlanckGUI.views.bluetoothDeck.closeClicked()", old)
+            self.assertIn('p.translator.string = ""', new)
+
+            # Ensure 5.0.4 compatibility: BluetoothDeckInfo is not patched on 5.0.4
+            bp.ROOT = "Skins/EmbeddedCommon/"
+            e504 = bp.edits(False)
+            self.assertNotIn(rel, e504)
+
+            qrc = LAB / "5.3.0/qrc"
+            if qrc.is_dir():
+                stock = (qrc / rel).read_text(encoding="utf-8")
+                patched = stock
+                for p_old, p_new in patches:
+                    patched = bp.patch(patched, p_old, p_new, rel)
+                self.assertIn(
+                    'p.translator.string = ""',
+                    patched,
+                )
+                self.assertIn(
+                    "PlanckGUI.views.bluetoothDeck.closeClicked()",
+                    patched,
+                )
+        finally:
+            bp.ROOT = old_root
+
 
 class MotorizedPlatterRoleTest(unittest.TestCase):
     """#263: SC5000M / SC6000M in the 4-deck layout (4 Decks, Paired Player)."""
