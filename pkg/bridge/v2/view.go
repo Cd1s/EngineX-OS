@@ -25,17 +25,18 @@ const (
 	oneLibraryFolderTitle = "OneLibrary"
 )
 
-// MergedFolderTitle is the title of the merged view's folder in the deck's language.
-var MergedFolderTitle = func(lang string) string {
+// MergedFolderTitle is the title of the merged view's folder in the deck's language (the strings
+// of the setting's own entry in the deck's Profile, so the folder and the setting read alike).
+func MergedFolderTitle(lang string) string {
 	switch lang {
 	case "zh-Hans":
-		return "全部（合并）"
+		return "合并曲库"
 	case "zh-Hant":
-		return "全部（合併）"
+		return "合併曲庫"
 	case "es":
-		return "Todo (combinado)"
+		return "Biblioteca combinada"
 	}
-	return "All (merged)"
+	return "Merged Library"
 }
 
 // ViewTrack is one audio file of the stick, whichever libraries list it.

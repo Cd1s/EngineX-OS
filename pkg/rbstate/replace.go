@@ -2,6 +2,7 @@ package rbstate
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +68,55 @@ func ReplaceFile(dst string, data []byte) error {
 	_ = syncPath(dst)
 	cut("renamed " + dst)
 	return nil
+}
+
+// RenameFile renames src, already written and synced, over dst with the same order as ReplaceFile.
+func RenameFile(src, dst string) error {
+	if UnsafeToFree != nil && UnsafeToFree(dst) {
+		return ErrUnownedClusters
+	}
+	held, _ := os.Open(dst)
+	if held != nil {
+		defer held.Close()
+	}
+	if err := os.Rename(src, dst); err != nil {
+		return err
+	}
+	cut("replacing " + dst)
+	_ = syncPath(filepath.Dir(dst))
+	_ = syncPath(dst)
+	cut("renamed " + dst)
+	return nil
+}
+
+// InstallFile copies src, a file on another file system, to dst so that a pull leaves dst whole,
+// old or new: a temporary copy beside dst, synced, then RenameFile.
+func InstallFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp, err := os.CreateTemp(filepath.Dir(dst), tempPattern)
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	_, err = io.Copy(tmp, in)
+	if err == nil {
+		_ = syncPath(filepath.Dir(dst))
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = RenameFile(name, dst)
+	}
+	if err != nil {
+		_ = RemoveFile(name)
+	}
+	return err
 }
 
 // RemoveFile removes path so that a pull leaves either the file or no entry for it: held open,

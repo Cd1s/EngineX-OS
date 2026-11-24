@@ -15,7 +15,6 @@ func sampleSnapshot() *Snapshot {
 	s.Sources = []FileSig{{Rel: "PIONEER/rekordbox/export.pdb", Size: 10, MTimeNS: 20}, {Rel: "PIONEER/rekordbox/exportLibrary.db", Size: 30, MTimeNS: 40}}
 	s.Stamp = Stamp(s.Layout, s.Sources, "")
 	s.Pending = Pending{Perf: 1, Verify: true}
-	s.DB = DBIdentity{Size: 4096, Counter: 7}
 	s.Tracks["contents/a/one.mp3"] = &Track{
 		Key: "contents/a/one.mp3", EngineID: 12, Rel: "Contents/A/One.mp3", Resolved: true,
 		Refs: []SourceRef{{Kind: DeviceLibrary, ID: 5, RecordHash: "aa"}, {Kind: OneLibrary, ID: 9, RecordHash: "bb"}},
@@ -40,7 +39,7 @@ func TestSnapshotRoundTripAndHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.Stamp != want.Stamp || h.Tracks != 2 || h.Lists != 1 || h.Pending != want.Pending || h.DB != want.DB || h.LibraryUUID != want.LibraryUUID {
+	if h.Stamp != want.Stamp || h.Tracks != 2 || h.Lists != 1 || h.Pending != want.Pending || h.LibraryUUID != want.LibraryUUID {
 		t.Fatalf("header %+v", h)
 	}
 	got, err := Load(dir)
@@ -320,5 +319,48 @@ func TestStageNeedsItsRootInTestsAndASafeName(t *testing.T) {
 		if _, err := OpenStage(bad); err == nil {
 			t.Errorf("OpenStage(%q) worked", bad)
 		}
+	}
+}
+
+// The next snapshot is a claim, not the snapshot: readers of the snapshot never see it, and a cut
+// one is no claim at all.
+func TestNextSnapshotIsSeparateUntilPromoted(t *testing.T) {
+	dir := t.TempDir()
+	old := sampleSnapshot()
+	if err := old.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	next := sampleSnapshot()
+	next.Tracks["contents/new.mp3"] = &Track{Key: "contents/new.mp3", EngineID: 99, Rel: "Contents/new.mp3"}
+	if err := next.SaveNext(dir); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Load(dir); err != nil || len(got.Tracks) != 2 {
+		t.Fatalf("the snapshot changed before the promote: %v", err)
+	}
+	if claims, err := LoadNext(dir); err != nil || claims.Tracks["contents/new.mp3"].EngineID != 99 {
+		t.Fatalf("claims: %v", err)
+	}
+	if err := Promote(dir); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Load(dir); err != nil || len(got.Tracks) != 3 {
+		t.Fatalf("after the promote: %v", err)
+	}
+	if _, err := LoadNext(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a next snapshot is left: %v", err)
+	}
+	whole, _ := next.Encode()
+	if err := os.WriteFile(filepath.Join(dir, nextName), whole[:len(whole)/2], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadNext(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a cut next snapshot is a claim: %v", err)
+	}
+	if err := DropNext(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := DropNext(dir); err != nil {
+		t.Fatalf("dropping nothing: %v", err)
 	}
 }

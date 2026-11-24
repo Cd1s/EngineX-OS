@@ -121,12 +121,6 @@ type SourceRef struct {
 	RecordHash string // rekordbox.Track.RecordHash
 }
 
-// DBIdentity is m.db as the bridge left it: when it still matches, Engine has written nothing since.
-type DBIdentity struct {
-	Size    int64
-	Counter uint32 // SQLite file change counter, header bytes 24-27
-}
-
 type Pending struct {
 	Rows   int  // tracks of the view without a row yet
 	Lists  bool // the lists are not the view's yet
@@ -147,8 +141,8 @@ type Header struct {
 	Tracks      int
 	Lists       int
 	Pending     Pending
-	DB          DBIdentity
 	Applied     int64 // unix seconds of the last commit
+	Commit      int64 // the library's commit ID this snapshot describes (see "Commit and snapshot" below)
 }
 
 type PerfState uint8
@@ -158,6 +152,7 @@ const (
 	PerfApplied  PerfState = 1 // grid, cues, loops and waveforms written from Built
 	PerfDegraded PerfState = 2 // sources unreadable for Built; tried again when they change (#53)
 	PerfDeck     PerfState = 3 // the deck changed the row; it stays the deck's until the export changes it
+	PerfMissing  PerfState = 4 // the volume has no file for the track: it has no row until the file is back
 )
 
 // TrackSig is everything a track's staged data was built from.
@@ -178,6 +173,7 @@ type Track struct {
 	Resolved bool        // Rel was found on the volume under this spelling
 	Refs     []SourceRef // every library that holds the track
 	Row      string      // ViewTrack.Hash the row was written from
+	Rating   int         // the rating the bridge last wrote; another one in the row is the deck's
 	Perf     PerfState
 	Built    TrackSig // of the performance data in the row
 	Written  []byte   // enginedb.WrittenDigest of grid, cues, loops as the bridge last wrote them
@@ -238,6 +234,23 @@ RBS1 {header as JSON}
 L {list as JSON}            one per list
 T {track as JSON}           one per track
 E <records> <crc32 of all bytes above>
+```
+
+Commit and snapshot (changed on 2026-11-24 after part 1 was first pushed: `Header.DB` and `DBIdentity` are gone).
+Every transaction of the bridge on `m.db` adds one to `Information.lastRekordBoxLibraryImportReadCounter`, Engine's
+own counter of rekordbox imports, which earlier builds also moved at each import. That value is the library's commit
+ID. A window writes the snapshot its transaction leads to as `.rb-bridge-snapshot.next`, with `Header.Commit` set to
+the ID the commit will leave, then commits, then renames the file over the snapshot. A window that finds a `.next`
+file reads the library's commit ID: equal means the commit happened and the file is the snapshot, anything else
+means it did not and the file is dropped. Readers other than the mount path ignore the `.next` file.
+
+```go
+func (s *Snapshot) SaveNext(dbDir string) error
+func Promote(dbDir string) error
+func LoadNext(dbDir string) (*Snapshot, error)
+func DropNext(dbDir string) error
+func RenameFile(src, dst string) error  // pull-safe rename of a file already written and synced
+func InstallFile(src, dst string) error // pull-safe copy from another file system
 ```
 
 A file without a matching `E` line does not exist as far as `ReadHeader` and `Load` are concerned. The unchanged

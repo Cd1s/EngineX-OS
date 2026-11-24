@@ -1,0 +1,830 @@
+package bridge
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
+)
+
+// window is one mount's work on the library.
+type window struct {
+	ctx      context.Context
+	mount    string
+	dir      string // Engine Library/Database2
+	r        *compat.Resolver
+	view     *View
+	st       *steps
+	o        MountOptions
+	res      *MountResult
+	partial  bool // a library could not be read: nothing is removed and the stamp is not kept
+	linkOnly bool // the stick has only staged CDJ libraries now: its own earlier import stays
+
+	lib     *enginedb.Library // nil: the stick has no library to keep, one is built
+	snap    *rbstate.Snapshot
+	index   map[string]enginedb.Row // every row of the library by key
+	adopted bool                    // snap was read from an earlier build's state, which goes once it is saved
+}
+
+func (w *window) close() {
+	if w.lib != nil {
+		w.lib.Close()
+	}
+}
+
+const (
+	oldStateName     = ".rb-bridge-state.db" // the state file of builds before the snapshot
+	beforeImportName = "m.db.before-import"
+)
+
+// open opens the stick's library and the snapshot of what the bridge has in it. w.lib stays nil
+// when there is no library to keep: no m.db, or the skeleton Engine makes when it sees a stick
+// (no lists, and nothing of the bridge's).
+func (w *window) open() error {
+	snap, err := rbstate.Load(w.dir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	st, statErr := os.Stat(filepath.Join(w.dir, "m.db"))
+	if statErr != nil || st.Size() == 0 {
+		w.snap = nil
+		return nil
+	}
+	lib, err := enginedb.OpenLibrary(w.ctx, w.dir)
+	if err != nil {
+		return err
+	}
+	if snap != nil && (snap.LibraryUUID != lib.UUID() || snap.Rules != rbstate.Rules) {
+		snap = nil // another library took the file's place: what the snapshot says is not about it
+	}
+	claims, claimErr := rbstate.LoadNext(w.dir)
+	if snap == nil && claimErr != nil {
+		tracks, lists, err := lib.Counts(w.ctx)
+		if err != nil {
+			lib.Close()
+			return err
+		}
+		_, oldErr := os.Stat(filepath.Join(w.dir, oldStateName))
+		if lists == 0 && errors.Is(oldErr, os.ErrNotExist) {
+			// Engine's skeleton. It has a row for each track the DJ loaded while Engine showed the
+			// stock rekordbox view: kept aside, as earlier builds did, when it has any.
+			lib.Close()
+			if tracks > 0 {
+				if err = rbstate.RenameFile(filepath.Join(w.dir, "m.db"), filepath.Join(w.dir, beforeImportName)); err != nil {
+					return err
+				}
+				log.Printf("rb-bridge: Engine's own library of %d tracks on this stick is kept as %s", tracks, beforeImportName)
+			}
+			return nil
+		}
+		if oldErr == nil {
+			if snap, err = adopt(w.ctx, w.dir, lib.UUID()); err != nil {
+				lib.Close()
+				return err
+			}
+			w.adopted = true
+			log.Printf("rb-bridge: library of an earlier build taken over: %d tracks, %d lists", len(snap.Tracks), len(snap.Lists))
+		}
+	}
+	if snap == nil {
+		snap = rbstate.New(lib.UUID())
+	} else if !w.adopted {
+		dropOldState(w.dir) // an adoption whose clean-up was cut short
+	}
+	w.lib, w.snap = lib, snap
+	if claimErr == nil {
+		if err = w.settle(claims); err != nil {
+			return err
+		}
+	}
+	if err = w.reconcile(); err != nil {
+		return err
+	}
+	w.st.done("snapshot", "%d tracks, %d lists", len(w.snap.Tracks), len(w.snap.Lists))
+	return nil
+}
+
+// settle finishes a window that was cut around its commit: the snapshot it had written for
+// after the commit is the snapshot if the library has that commit, and is dropped if not.
+func (w *window) settle(claims *rbstate.Snapshot) error {
+	id, err := w.lib.CommitID(w.ctx)
+	if err != nil {
+		return err
+	}
+	if claims.LibraryUUID != w.lib.UUID() || claims.Commit != id || claims.Rules != rbstate.Rules {
+		return rbstate.DropNext(w.dir)
+	}
+	if err = rbstate.Promote(w.dir); err != nil {
+		return err
+	}
+	w.snap = claims
+	log.Printf("rb-bridge: the last window was cut short after its commit; its %d tracks and %d lists are taken over", len(claims.Tracks), len(claims.Lists))
+	return nil
+}
+
+// reconcile drops from the snapshot what Engine has removed from the library since, and takes
+// the spelling of a path another part of EngineX gave a row (#322 writes a path as the volume
+// spells it). It leaves w.index: every row of the library by key.
+func (w *window) reconcile() error {
+	index, err := w.lib.TrackIndex(w.ctx)
+	if err != nil {
+		return err
+	}
+	lists, err := w.lib.ListIDs(w.ctx)
+	if err != nil {
+		return err
+	}
+	w.index = index
+	gone := 0
+	for key, t := range w.snap.Tracks {
+		if t.EngineID == 0 {
+			continue
+		}
+		row, ok := index[key]
+		if !ok || row.ID != t.EngineID {
+			delete(w.snap.Tracks, key)
+			gone++
+			continue
+		}
+		if rel := strings.TrimPrefix(row.Path, "../"); rel != t.Rel {
+			t.Rel, t.Resolved = rel, true
+		}
+	}
+	for key, l := range w.snap.Lists {
+		if l.EngineID != 0 && !lists[l.EngineID] {
+			delete(w.snap.Lists, key)
+			gone++
+		}
+	}
+	if gone > 0 {
+		log.Printf("rb-bridge: %d rows of the last import are no longer in the library", gone)
+	}
+	return nil
+}
+
+// rows are the view's tracks at idx as the library takes them.
+func (w *window) rows(idx []int) []enginedb.TrackRow {
+	rows := make([]enginedb.TrackRow, len(idx))
+	for i, at := range idx {
+		rows[i] = enginedb.TrackRow{Rel: w.view.Tracks[at].Rel, Track: w.view.Tracks[at].Track}
+	}
+	return rows
+}
+
+func (w *window) note(vt *ViewTrack, id int64, native bool) {
+	w.snap.Tracks[vt.Key] = &rbstate.Track{Key: vt.Key, EngineID: id, Rel: vt.Rel, Refs: vt.Refs, Row: vt.Hash, Rating: vt.Track.Rating, Native: native}
+}
+
+// cut, in tests, is called between two writes that a power cut or the hook's kill can separate.
+var cut = func(step string) {}
+
+// commit writes the snapshot a transaction leads to beside the present one, commits, and makes
+// it the snapshot.
+func (w *window) commit(b *enginedb.Batch) error {
+	w.count()
+	w.snap.Applied, w.snap.Commit = time.Now().Unix(), b.CommitID()
+	if err := w.snap.SaveNext(w.dir); err != nil {
+		b.Rollback()
+		return err
+	}
+	cut("next saved")
+	if err := b.Commit(w.ctx); err != nil {
+		_ = rbstate.DropNext(w.dir)
+		return err
+	}
+	cut("committed")
+	if err := rbstate.Promote(w.dir); err != nil {
+		return err
+	}
+	cut("promoted")
+	if w.adopted {
+		dropOldState(w.dir)
+		w.adopted = false
+	}
+	return nil
+}
+
+// count fills the snapshot's header from its rows.
+func (w *window) count() {
+	s := w.snap
+	s.Layout, s.Sources = w.view.Layout, w.view.Sources
+	if w.partial {
+		s.Stamp = "" // a library was unreadable: the next insert reads again, and write-back waits
+	} else {
+		s.Stamp = w.view.Stamp
+	}
+	p := rbstate.Pending{Verify: s.Pending.Verify}
+	for i := range w.view.Tracks {
+		vt := &w.view.Tracks[i]
+		t := s.Tracks[vt.Key]
+		switch {
+		case t == nil:
+			p.Rows++
+		case t.Native || t.Perf == rbstate.PerfMissing:
+		case t.EngineID == 0:
+			p.Rows++
+		default:
+			if t.Perf == rbstate.PerfNone {
+				p.Perf++
+			}
+			if t.Art == "" && vt.Track.ArtworkPath != "" && t.Perf != rbstate.PerfNone {
+				p.Art++
+			}
+		}
+	}
+	for i := range w.view.Lists {
+		if l := s.Lists[w.view.Lists[i].Key]; l == nil || l.Hash != w.view.Lists[i].Hash {
+			p.Lists = true
+		}
+	}
+	s.Pending = p
+}
+
+// build makes the library of a stick that has none: built on the deck's own disk from the
+// export alone, then copied to the stick and put in place with one rename.
+func (w *window) build() error {
+	stage, err := rbstate.StageRoot()
+	if err != nil {
+		return err
+	}
+	if err = os.MkdirAll(stage, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.MkdirTemp(stage, "build-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	idx := make([]int, len(w.view.Tracks))
+	for i := range idx {
+		idx[i] = i
+	}
+	var listIDs map[string]int64
+	ids, uuid, commitID, err := enginedb.BuildLibrary(w.ctx, tmp, w.rows(idx), func(b *enginedb.Batch, ids []int64) error {
+		byKey := make(map[string]int64, len(ids))
+		for i, id := range ids {
+			byKey[w.view.Tracks[i].Key] = id
+		}
+		var e error
+		listIDs, e = putLists(w.ctx, b, w.view, allLists(w.view), nil, byKey)
+		return e
+	})
+	if err != nil {
+		return err
+	}
+	w.st.done("build", "%d rows, %d lists, on the deck's disk", len(ids), len(listIDs))
+	w.snap = rbstate.New(uuid)
+	for i := range w.view.Tracks {
+		w.note(&w.view.Tracks[i], ids[i], false)
+	}
+	for i := range w.view.Lists {
+		l := &w.view.Lists[i]
+		w.snap.Lists[l.Key] = &rbstate.List{Key: l.Key, EngineID: listIDs[l.Key], Hash: l.Hash}
+	}
+	w.snap.Pending.Verify = true
+	w.count()
+	w.snap.Applied, w.snap.Commit = time.Now().Unix(), commitID
+	if err = w.snap.SaveNext(w.dir); err != nil {
+		return err
+	}
+	cut("next saved")
+	if err = rbstate.InstallFile(filepath.Join(tmp, "m.db"), filepath.Join(w.dir, "m.db")); err != nil {
+		return err
+	}
+	cut("committed")
+	if err = rbstate.Promote(w.dir); err != nil {
+		return err
+	}
+	cut("promoted")
+	w.st.done("install", "library copied to the stick")
+	w.res.Added, w.res.PlaylistsChanged = len(ids), len(listIDs) > 0
+	if w.o.Progress != nil {
+		w.o.Progress(len(ids), len(ids))
+	}
+	if w.lib, err = enginedb.OpenLibrary(w.ctx, w.dir); err != nil {
+		return err
+	}
+	if w.index, err = w.lib.TrackIndex(w.ctx); err != nil {
+		return err
+	}
+	log.Printf("rb-bridge: first import of %d tracks published from the export; grids and waveforms follow", len(ids))
+	return nil
+}
+
+func allLists(v *View) []int {
+	idx := make([]int, len(v.Lists))
+	for i := range idx {
+		idx[i] = i
+	}
+	return idx
+}
+
+// putLists writes the view's lists at idx: new ones are added, changed ones get their entries
+// and their place again. known are the lists' Playlist.id so far; the result adds the new ones.
+// A list's entries are the tracks that have a row; one that lacks a row is left out for now.
+func putLists(ctx context.Context, b *enginedb.Batch, v *View, idx []int, known map[string]*rbstate.List, tracks map[string]int64) (map[string]int64, error) {
+	ids := make(map[string]int64, len(v.Lists))
+	for key, l := range known {
+		ids[key] = l.EngineID
+	}
+	reorder := map[string]bool{}
+	for _, at := range idx {
+		l := &v.Lists[at]
+		parent := ids[l.Parent]
+		if l.Parent != "" && parent == 0 {
+			return nil, fmt.Errorf("list %d has no folder in the library", at)
+		}
+		head, entries, _ := strings.Cut(l.Hash, ":")
+		old := known[l.Key]
+		id := int64(0)
+		if old != nil {
+			id = old.EngineID
+		}
+		if id == 0 {
+			var err error
+			if id, err = b.InsertList(ctx, enginedb.ListRow{Title: l.Name, Parent: parent}); err != nil {
+				return nil, err
+			}
+			ids[l.Key] = id
+			old = nil
+		}
+		oldHead, oldEntries := "", ""
+		if old != nil {
+			oldHead, oldEntries, _ = strings.Cut(old.Hash, ":")
+		}
+		if old == nil || oldHead != head {
+			reorder[l.Parent] = true
+		}
+		if !l.Folder && (old == nil || oldEntries != entries) {
+			members := make([]int64, 0, len(l.Tracks))
+			for _, key := range l.Tracks {
+				if id := tracks[key]; id != 0 {
+					members = append(members, id)
+				}
+			}
+			if err := b.SetEntries(ctx, id, members); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for parent := range reorder {
+		var order []int64
+		for i := range v.Lists {
+			if v.Lists[i].Parent == parent {
+				order = append(order, ids[v.Lists[i].Key])
+			}
+		}
+		if err := b.OrderLists(ctx, ids[parent], order); err != nil {
+			return nil, err
+		}
+	}
+	return ids, nil
+}
+
+// apply writes a plan to the library in one transaction: rows the export no longer has go, rows
+// whose file moved follow it, changed rows get their fields, new tracks get rows, and the lists
+// that changed are written. Rows are added only while the window has time; the rest is pending.
+func (w *window) apply(p *Plan) error {
+	if w.partial || w.linkOnly {
+		p.RemoveTracks = keepOwn(p.RemoveTracks, w.snap, w.partial)
+		p.RemoveLists = keepOwnLists(p.RemoveLists, w.partial)
+	}
+	w.st.done("diff", "+%d ~%d >%d -%d tracks, %d lists to write, %d to remove", len(p.AddTracks), len(p.UpdateTracks), len(p.Moves), len(p.RemoveTracks), len(p.PutLists), len(p.RemoveLists))
+	stampChanged := w.snap.Stamp != w.view.Stamp
+	if p.Empty() && !stampChanged {
+		return nil
+	}
+	if stampChanged {
+		w.snap.Pending.Verify = true // the job compares every track's files with what was built
+	}
+	b, err := w.lib.Begin(w.ctx)
+	if err != nil {
+		return err
+	}
+	defer b.Rollback()
+	s := w.snap
+	for _, key := range p.RemoveTracks {
+		if t := s.Tracks[key]; t.EngineID != 0 && !t.Native {
+			if err = b.DeleteTrack(w.ctx, t.EngineID); err != nil {
+				return err
+			}
+			w.res.Removed++
+		}
+		delete(s.Tracks, key)
+	}
+	// A file that already has a row the bridge did not make (Engine's own, under any spelling of
+	// its path) keeps that row: lists refer to it, the bridge never writes it (#252).
+	adds := p.AddTracks[:0:0]
+	for _, at := range p.AddTracks {
+		vt := &w.view.Tracks[at]
+		if row, ok := w.index[vt.Key]; ok {
+			w.note(vt, row.ID, true)
+			continue
+		}
+		adds = append(adds, at)
+	}
+	p.AddTracks = adds
+	moved := p.Moves[:0:0]
+	for _, m := range p.Moves {
+		vt := &w.view.Tracks[m.New]
+		if row, ok := w.index[vt.Key]; ok { // the file's new place has a row of Engine's own
+			if t := s.Tracks[m.Old]; t.EngineID != 0 {
+				if err = b.DeleteTrack(w.ctx, t.EngineID); err != nil {
+					return err
+				}
+				w.res.Removed++
+			}
+			delete(s.Tracks, m.Old)
+			w.note(vt, row.ID, true)
+			continue
+		}
+		moved = append(moved, m)
+	}
+	p.Moves = moved
+	if len(p.Moves) > 0 {
+		moves := make(map[int64]string, len(p.Moves))
+		for _, m := range p.Moves {
+			moves[s.Tracks[m.Old].EngineID] = w.view.Tracks[m.New].Rel
+		}
+		if err = b.MoveTracks(w.ctx, moves); err != nil {
+			return err
+		}
+		for _, m := range p.Moves {
+			vt, t := &w.view.Tracks[m.New], s.Tracks[m.Old]
+			delete(s.Tracks, m.Old)
+			t.Key, t.Rel, t.Resolved, t.Refs, t.Row = vt.Key, vt.Rel, false, vt.Refs, "" // its fields follow below
+			s.Tracks[vt.Key] = t
+			p.UpdateTracks = append(p.UpdateTracks, m.New)
+		}
+	}
+	for _, at := range p.UpdateTracks {
+		vt := &w.view.Tracks[at]
+		t := s.Tracks[vt.Key]
+		if err = b.UpdateTrack(w.ctx, t.EngineID, enginedb.TrackRow{Rel: t.Rel, Track: vt.Track}, t.Rating); err != nil {
+			return err
+		}
+		t.Row, t.Rating, t.Refs = vt.Hash, vt.Track.Rating, vt.Refs
+		w.res.Updated++
+	}
+	// New rows, a hundred at a time while the window has time for them and the lists after them.
+	const chunk = 100
+	for at := 0; at < len(p.AddTracks); at += chunk {
+		if !w.st.must(2 * time.Second) {
+			log.Printf("rb-bridge: %d new tracks wait for the next window", len(p.AddTracks)-at)
+			break
+		}
+		part := p.AddTracks[at:min(at+chunk, len(p.AddTracks))]
+		ids, native, err := b.InsertTracks(w.ctx, w.rows(part))
+		if err != nil {
+			return err
+		}
+		for i, vi := range part {
+			vt := &w.view.Tracks[vi]
+			w.note(vt, ids[i], native[i])
+			w.index[vt.Key] = enginedb.Row{ID: ids[i], Path: "../" + vt.Rel}
+			if !native[i] {
+				w.res.Added++
+			}
+		}
+		if w.o.Progress != nil {
+			w.o.Progress(at+len(part), len(p.AddTracks))
+		}
+	}
+	w.st.done("rows", "%d added, %d updated, %d moved, %d removed", w.res.Added, w.res.Updated, len(p.Moves), w.res.Removed)
+
+	owned := make(map[int64]bool, len(s.Lists))
+	for _, l := range s.Lists {
+		owned[l.EngineID] = true
+	}
+	for _, key := range p.RemoveLists {
+		if l := s.Lists[key]; l.EngineID != 0 {
+			if err = b.DeleteList(w.ctx, l.EngineID, func(id int64) bool { return owned[id] }); err != nil {
+				return err
+			}
+		}
+		delete(s.Lists, key)
+	}
+	trackIDs := make(map[string]int64, len(s.Tracks))
+	for key, t := range s.Tracks {
+		trackIDs[key] = t.EngineID
+	}
+	ids, err := putLists(w.ctx, b, w.view, p.PutLists, s.Lists, trackIDs)
+	if err != nil {
+		return err
+	}
+	for _, at := range p.PutLists {
+		l := &w.view.Lists[at]
+		hash := l.Hash
+		for _, key := range l.Tracks {
+			if trackIDs[key] == 0 {
+				hash = "partial" // written again once its tracks have rows
+				break
+			}
+		}
+		s.Lists[l.Key] = &rbstate.List{Key: l.Key, EngineID: ids[l.Key], Hash: hash}
+	}
+	w.res.PlaylistsChanged = len(p.PutLists)+len(p.RemoveLists) > 0
+	if err = w.commit(b); err != nil {
+		return err
+	}
+	w.st.done("lists", "%d written, %d removed; committed", len(p.PutLists), len(p.RemoveLists))
+	return nil
+}
+
+// keepOwn drops from a removal list what a window must not remove: everything when a library
+// was unreadable, the stick's own tracks when only staged CDJ libraries were read.
+func keepOwn(keys []string, s *rbstate.Snapshot, partial bool) []string {
+	if partial {
+		return nil
+	}
+	var out []string
+	for _, key := range keys {
+		for _, r := range s.Tracks[key].Refs {
+			if r.Kind == rbstate.LinkLibrary {
+				out = append(out, key)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func keepOwnLists(keys []string, partial bool) []string {
+	if partial {
+		return nil
+	}
+	var out []string
+	for _, key := range keys {
+		if strings.HasPrefix(key, viewLink) {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+// applyStaged writes the tracks the background job has staged, the ones the DJ asked for
+// first, a batch a transaction, until the stage is empty or the window's time for it is up.
+func (w *window) applyStaged() error {
+	stage, err := rbstate.OpenStage(w.lib.UUID())
+	if err != nil {
+		log.Printf("rb-bridge: no stage on this deck: %v", err)
+		return nil
+	}
+	defer stage.Close()
+	entries, verified, err := stage.Entries()
+	if err != nil {
+		return err
+	}
+	if w.snap.Pending.Verify && verified == w.view.Stamp && !w.partial {
+		w.snap.Pending.Verify = false
+	}
+	var keys, stale, missing []string
+	for key, e := range entries {
+		vt, ok := w.view.Track(key)
+		switch {
+		case !ok || e.Sig.Rules != rbstate.Rules || e.Sig.Row != vt.Hash:
+			stale = append(stale, key) // of another export or other rules
+		case e.Missing:
+			missing = append(missing, key)
+		default:
+			keys = append(keys, key)
+		}
+	}
+	// Tracks without a file: gone from the stick, or the names cannot be read on this mount. Many
+	// at once is the second, and then nothing is removed.
+	if len(missing) > unreadableLimit(len(w.view.Tracks)) {
+		log.Printf("rb-bridge: NOT REMOVED: %d of the export's %d tracks have no file under their name on the drive; the library stays as it is", len(missing), len(w.view.Tracks))
+		missing = nil
+	}
+	keys = sortedByPriority(w.mount, append(keys, missing...))
+	applied, kept, degraded, gone := 0, 0, 0, 0
+	for at := 0; at < len(keys) && w.st.more(1500*time.Millisecond); at += applyBatch {
+		part := keys[at:min(at+applyBatch, len(keys))]
+		b, err := w.lib.Begin(w.ctx)
+		if err != nil {
+			return err
+		}
+		type rgb struct {
+			id   int64
+			body []byte
+		}
+		var overviews []rgb
+		var done []string
+		for _, key := range part {
+			e := entries[key]
+			vt, _ := w.view.Track(key)
+			t := w.snap.Tracks[key]
+			if t != nil && t.Native {
+				done = append(done, key)
+				continue
+			}
+			if e.Missing {
+				if t != nil && t.EngineID != 0 {
+					if err = b.DeleteTrack(w.ctx, t.EngineID); err != nil {
+						b.Rollback()
+						return err
+					}
+					gone++
+				}
+				w.snap.Tracks[key] = &rbstate.Track{Key: key, Rel: vt.Rel, Refs: vt.Refs, Row: vt.Hash, Perf: rbstate.PerfMissing, Built: e.Sig}
+				done = append(done, key)
+				continue
+			}
+			if t == nil || t.EngineID == 0 { // no row yet: one the window had no time for, or a file that is back
+				ids, native, err := b.InsertTracks(w.ctx, []enginedb.TrackRow{{Rel: vt.Rel, Track: vt.Track}})
+				if err != nil {
+					b.Rollback()
+					return err
+				}
+				w.note(vt, ids[0], native[0])
+				if t = w.snap.Tracks[key]; t.Native {
+					done = append(done, key)
+					continue
+				}
+			}
+			full, err := stage.Read(e)
+			if errors.Is(err, os.ErrNotExist) {
+				continue // its files are not whole: the job stages it again
+			}
+			if err != nil {
+				b.Rollback()
+				return err
+			}
+			if full.Rel != "" && full.Rel != t.Rel && rbstate.FoldPath(full.Rel) == key {
+				// The file's own spelling on the volume, which Engine needs to open it.
+				if err = b.MoveTracks(w.ctx, map[int64]string{t.EngineID: full.Rel}); err != nil {
+					b.Rollback()
+					return err
+				}
+				t.Rel = full.Rel
+			}
+			t.Resolved, t.Built, t.Detail = true, e.Sig, e.Detail
+			if e.Degraded != "" {
+				t.Perf = rbstate.PerfDegraded
+				degraded++
+			} else {
+				perf := enginedb.Performance{TrackData: full.Perf.TrackData, Overview: full.Perf.Overview, Beats: full.Perf.Beats,
+					QuickCues: full.Perf.QuickCues, Loops: full.Perf.Loops, ActiveLoops: full.Perf.ActiveLoops, Complete: full.Perf.Complete}
+				digest, outcome, err := b.ApplyPerformance(w.ctx, t.EngineID, perf, full.Facts, enginedb.PerfPrev{State: t.Perf, Written: t.Written}, vt.Track)
+				if err != nil {
+					b.Rollback()
+					return err
+				}
+				t.Written, t.Perf = digest, rbstate.PerfApplied
+				if outcome == enginedb.PerfKept || outcome == enginedb.PerfMerged {
+					t.Perf = rbstate.PerfDeck
+					kept++
+				}
+				if len(full.RGB) > 0 {
+					overviews = append(overviews, rgb{t.EngineID, full.RGB})
+				}
+			}
+			if len(full.Art) > 0 {
+				if sum, err := b.PutArtwork(w.ctx, t.EngineID, full.Art); err == nil {
+					t.Art = sum
+				}
+			}
+			applied++
+			done = append(done, key)
+		}
+		if err = w.commit(b); err != nil {
+			return err
+		}
+		for _, o := range overviews {
+			writeOverview(w.dir, w.lib.UUID(), o.id, o.body)
+		}
+		if err = stage.Drop(done...); err != nil {
+			return err
+		}
+		if w.o.Progress != nil {
+			w.o.Progress(at+len(part), len(keys))
+		}
+	}
+	_ = stage.Drop(stale...)
+	w.res.Applied = applied
+	w.res.Removed += gone
+	w.st.done("staged", "%d applied (%d kept the deck's edits, %d without analysis), %d rows of missing files removed, %d of %d staged left", applied, kept, degraded, gone, max(len(keys)-applied-gone, 0), len(keys))
+	if (applied > 0 || gone > 0) && w.snap.Pending.Lists {
+		return w.finishLists()
+	}
+	return w.saveIfChanged()
+}
+
+// finishLists writes again the lists that waited for their tracks' rows.
+func (w *window) finishLists() error {
+	p := Diff(w.view, w.snap)
+	if len(p.PutLists) == 0 {
+		return w.saveIfChanged()
+	}
+	return w.apply(&Plan{PutLists: p.PutLists})
+}
+
+// saveIfChanged saves the snapshot when only its header moved (pending counts, the verify mark).
+func (w *window) saveIfChanged() error {
+	before := w.snap.Pending
+	stamp := w.snap.Stamp
+	w.count()
+	if before == w.snap.Pending && stamp == w.snap.Stamp {
+		return nil
+	}
+	return w.snap.Save(w.dir)
+}
+
+// writeOverview puts a track's list waveform where Engine reads it, unless a valid one is there.
+func writeOverview(dir, uuid string, id int64, body []byte) {
+	p := filepath.Join(dir, "OverviewData", uuid, fmt.Sprintf("%d.rgb", id))
+	if have, err := os.ReadFile(p); err == nil {
+		if raw, err := enginedb.QUncompress(have, 1<<20); err == nil && enginedb.ValidRGBOverview(raw) {
+			return
+		}
+	}
+	if err := enginedb.WriteRGBOverviewAtomic(dir, uuid, id, body); err != nil {
+		log.Printf("rb-bridge: list waveform of track %d not written: %v", id, err)
+	}
+}
+
+const maxCover = 32 << 20
+
+// applyCovers gives rows the covers their export names, while the window has time. A cover
+// file is read once for all the tracks that share it.
+func (w *window) applyCovers() error {
+	type want struct {
+		t   *rbstate.Track
+		rel string
+	}
+	byFile := map[string][]want{}
+	var order []string
+	for i := range w.view.Tracks {
+		vt := &w.view.Tracks[i]
+		t := w.snap.Tracks[vt.Key]
+		if t == nil || t.Native || t.EngineID == 0 || t.Art != "" || vt.Track.ArtworkPath == "" || t.Perf == rbstate.PerfNone {
+			continue
+		}
+		if _, ok := byFile[vt.Track.ArtworkPath]; !ok {
+			order = append(order, vt.Track.ArtworkPath)
+		}
+		byFile[vt.Track.ArtworkPath] = append(byFile[vt.Track.ArtworkPath], want{t, vt.Track.ArtworkPath})
+	}
+	if len(order) == 0 || !w.st.more(time.Second) {
+		return nil
+	}
+	b, err := w.lib.Begin(w.ctx)
+	if err != nil {
+		return err
+	}
+	done, failed := 0, 0
+	for _, file := range order {
+		if !w.st.more(time.Second) {
+			break
+		}
+		image, err := readCover(w.r, file)
+		for _, x := range byFile[file] {
+			if err != nil {
+				x.t.Art = "-" // unreadable: not tried again until the export changes the track
+				failed++
+				continue
+			}
+			sum, perr := b.PutArtwork(w.ctx, x.t.EngineID, image)
+			if perr != nil {
+				b.Rollback()
+				return perr
+			}
+			x.t.Art = sum
+			done++
+		}
+	}
+	if err = w.commit(b); err != nil {
+		return err
+	}
+	w.st.done("art", "%d tracks got their cover, %d covers unreadable, %d tracks left", done, failed, w.snap.Pending.Art)
+	return nil
+}
+
+func readCover(r *compat.Resolver, exportPath string) ([]byte, error) {
+	rel, err := r.Resolve(exportPath)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(r.FullPath(rel))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	image, err := io.ReadAll(io.LimitReader(f, maxCover+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(image) == 0 || len(image) > maxCover {
+		return nil, fmt.Errorf("cover of %d bytes", len(image))
+	}
+	return image, nil
+}

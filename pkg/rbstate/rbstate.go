@@ -62,12 +62,6 @@ type SourceRef struct {
 	RecordHash string      `json:"h,omitempty"`
 }
 
-// DBIdentity is m.db as the bridge left it: while it still matches, Engine has written nothing.
-type DBIdentity struct {
-	Size    int64  `json:"size"`
-	Counter uint32 `json:"counter"` // SQLite's file change counter, header bytes 24-27
-}
-
 // Pending is the work that is not in m.db yet.
 type Pending struct {
 	Rows   int  `json:"rows,omitempty"`   // tracks of the view without a row
@@ -82,17 +76,17 @@ func (p Pending) None() bool { return p == Pending{} }
 
 // Header is the snapshot's first line: all an unchanged insert reads.
 type Header struct {
-	Format      int        `json:"format"`
-	Rules       int        `json:"rules"`
-	LibraryUUID string     `json:"uuid"`
-	Stamp       string     `json:"stamp"`
-	Layout      string     `json:"layout"`
-	Sources     []FileSig  `json:"sources"`
-	Tracks      int        `json:"tracks"`
-	Lists       int        `json:"lists"`
-	Pending     Pending    `json:"pending"`
-	DB          DBIdentity `json:"db"`
-	Applied     int64      `json:"applied"` // unix seconds of the last commit
+	Format      int       `json:"format"`
+	Rules       int       `json:"rules"`
+	LibraryUUID string    `json:"uuid"`
+	Stamp       string    `json:"stamp"`
+	Layout      string    `json:"layout"`
+	Sources     []FileSig `json:"sources"`
+	Tracks      int       `json:"tracks"`
+	Lists       int       `json:"lists"`
+	Pending     Pending   `json:"pending"`
+	Applied     int64     `json:"applied"` // unix seconds of the last commit
+	Commit      int64     `json:"commit"`  // the library's commit ID this snapshot describes (see SaveNext)
 }
 
 // PerfState says what a row's performance data is.
@@ -103,6 +97,7 @@ const (
 	PerfApplied  PerfState = 1 // grid, cues, loops and waveforms written from Built
 	PerfDegraded PerfState = 2 // the sources were unreadable for Built; tried again when they change
 	PerfDeck     PerfState = 3 // the deck changed the row: it stays the deck's until the export changes
+	PerfMissing  PerfState = 4 // the volume has no file for the track: it has no row until the file is back
 )
 
 // TrackSig is everything a track's staged data was built from.
@@ -130,6 +125,7 @@ type Track struct {
 	Resolved bool        `json:"res,omitempty"`
 	Refs     []SourceRef `json:"refs,omitempty"`
 	Row      string      `json:"row,omitempty"` // the view hash the row was written from
+	Rating   int         `json:"rt,omitempty"`  // the rating the bridge last wrote: another one in the row is the deck's
 	Perf     PerfState   `json:"perf,omitempty"`
 	Built    TrackSig    `json:"built"`
 	Written  []byte      `json:"wr,omitempty"`  // digest of grid, cues and loops as the bridge last wrote them

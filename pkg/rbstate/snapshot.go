@@ -86,8 +86,10 @@ func parseEnd(line []byte) (records int, sum uint32, ok bool) {
 }
 
 // Load reads and checks the whole snapshot.
-func Load(dbDir string) (*Snapshot, error) {
-	f, err := os.Open(filepath.Join(dbDir, SnapshotName))
+func Load(dbDir string) (*Snapshot, error) { return load(filepath.Join(dbDir, SnapshotName)) }
+
+func load(file string) (*Snapshot, error) {
+	f, err := os.Open(file)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNoSnapshot
@@ -192,6 +194,42 @@ func (s *Snapshot) Save(dbDir string) error {
 // Remove deletes the snapshot of dbDir, pull-safe.
 func Remove(dbDir string) error {
 	err := RemoveFile(filepath.Join(dbDir, SnapshotName))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+// A window writes m.db and the snapshot so that a cut between the two loses nothing. After its
+// statements ran, and before the transaction commits, it saves the snapshot the commit leads to
+// as the next snapshot (SaveNext): by then every new row's ID is known. After the commit it
+// makes that file the snapshot (Promote). A next snapshot found at the start of a window was cut
+// off on either side of its commit; LoadNext returns it as claims, and the window takes over a
+// claimed row only if m.db really holds it (the row's ID with its path, the list's ID with its
+// title and folder). So no row is taken for the bridge's on the word of a commit that never
+// happened, whatever Engine wrote in between.
+const nextName = SnapshotName + ".next"
+
+// SaveNext writes the snapshot the transaction under way leads to.
+func (s *Snapshot) SaveNext(dbDir string) error {
+	b, err := s.Encode()
+	if err != nil {
+		return err
+	}
+	return ReplaceFile(filepath.Join(dbDir, nextName), b)
+}
+
+// Promote makes the next snapshot the snapshot, pull-safe.
+func Promote(dbDir string) error {
+	return RenameFile(filepath.Join(dbDir, nextName), filepath.Join(dbDir, SnapshotName))
+}
+
+// LoadNext returns the next snapshot a cut left, or ErrNoSnapshot.
+func LoadNext(dbDir string) (*Snapshot, error) { return load(filepath.Join(dbDir, nextName)) }
+
+// DropNext removes the next snapshot once its claims are settled.
+func DropNext(dbDir string) error {
+	err := RemoveFile(filepath.Join(dbDir, nextName))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
