@@ -1,8 +1,9 @@
 # rekordbox bridge v2: design
 
-Status: **part 1 (module boundaries) is fixed for the parallel lanes.** Parts 2-6 (requirements inventory with
-tests, deck limits with measurements, scenarios, state machine, test plan, evidence for the open questions) follow in
-the next pushes of this file. Branch `agent/5306-rb-rewrite`, from `7a979405`.
+Branch `agent/5306-rb-rewrite`, from `7a979405`. Section 1 fixes the module boundaries (the parallel lanes built
+against it). Sections 3 to 7 give the deck's limits, the scenarios, the state machine with its crash safety, the test
+gate and the evidence for the open questions. Section 2, the requirements inventory with its tests, is pushed
+separately.
 
 Words used here:
 
@@ -580,3 +581,145 @@ edits. The old state file is removed after the snapshot is saved.
    unreadable (#253 review). v2 keeps references only; such a track shows Engine's own overview on the shadow deck.
 4. **An older build after v2.** A deck running 5.3.0.5-r1 does not know the snapshot. What it does with a stick last
    written by v2 is tested with the `147e37fb` step binary before the deck test and reported.
+
+## 3. The deck's limits
+
+| Limit | Number | Where it comes from |
+|---|---|---|
+| CPU | The deck is about 6 times slower than the ARM build host for this code. A cached-key read of UNTITLED's OneLibrary by the armhf binary takes 128-136 ms on the build host and 742-830 ms at `cpu.max` 18 % of one core; the deck's eject pass measured 785 ms for that step. | replica calibration; the old estimates assumed 3 times (`update.go:100-110`) |
+| Reading the exports | Device Library 279-354 ms, OneLibrary 742-830 ms with the key cached, at deck speed. Deriving a OneLibrary key costs about 4.7 s on the deck, once per power-on (the key cache in `/run` is shared by all processes). | replica; `rb-incident-1123.md` §2.1 |
+| Engine's own load | About 75 % of one core while it analyses. The gate runs the playlist-only re-export a second time at half the CPU. | brief |
+| The stick | USB 2.0, FAT32 on a spinning disk: 10-15 ms a read, about 11 MB/s. The replica delays every read and write request by 12 ms. | deck journal 11-23; `rbupdate-253` |
+| The mount's time | The hook gives the whole pre-mount 20 s and keeps 3 s for the visible mount. `rb-bridge` gets what is left of 17 s after the hook's own steps, as `ENGINEX_HOOK_REMAINING_MS`, and is killed at that instant. Past 20 s Engine shows "USB loading timeout". | `edisksd_hook.c:63`, `:1860`, `:1917` |
+| Engine and `m.db` | Engine never sees what another process writes to a library it has open, and writes its own pages over it. So the bridge writes `m.db` only before Engine sees the stick. | handbook §3.13; sandbox 2026-11-17 |
+| The remount | Only when no deck holds a track of the stick, no peer deck reports one, Engine is not copying a track, and no audio read was served for 30 s. | `internal/cli/rbbridge_remount.go` (kept) |
+| Engine's writes | Each save of a loaded track moves `Track.lastEditTime`; write-back runs 5 s after the last one. | #321 (kept) |
+
+What a window plans with: one clock, the hook's deadline. Work the window owes (rows, lists) stops 2.5 s before the
+kill (`commitReserve`: the commit under way, the snapshot, the exit). Optional work (staged data, covers) also stops
+4 s after the window began when the window is an insert (`insertBudget`), so the DJ gets the stick; the window of a
+remount the job asked for has nobody waiting and uses all its time.
+
+## 4. Scenarios
+
+| Scenario | In the window | In the background | How it reaches Engine |
+|---|---|---|---|
+| First insert of a never-seen export | Stat; start the job; read the libraries; build `m.db` on the deck's disk from the exports alone (rows, lists, the export's own cue rows); copy it to the stick, one rename; snapshot. | Every track: stat, audio header, ANLZ, into the stage; `.rgb` files for finished tracks; then the remount is asked for. | Rows and lists at the insert. Cues, grids and waveforms at the remount's window, a batch of 64 tracks a transaction, the tracks a deck asked for first; what does not fit waits for the next window. Covers after that. |
+| The same export again, import complete | Stat of the export files and one line of the snapshot. | Nothing (the job is not started). | Nothing changes. |
+| The same export again, import not complete | As a re-export with an empty diff: read, diff, apply what is staged within 4 s. | The job goes on where the stage is. | As above. |
+| A re-export that changes only lists | Read; diff; the changed lists are written (a new list: one row and its entries; a changed list: its entries), in one transaction; snapshot. | The job compares every track's files with the snapshot (stat only) and marks the stamp verified. No remount. | The lists are there at the insert. |
+| A re-export with new or changed tracks | As above, plus rows for new tracks (the export's fields and cue rows), changed fields for changed rows, moves for files that moved, removal of rows whose track left the export. Rows are added while the window has time; the rest is pending and the lists that hold them are completed later. | Staging of the new and changed tracks only, then the remount. | Rows and lists at the insert, their performance data at the remount. |
+| A hot cue set on the deck | Nothing. | stream-sync's watcher, 5 s after Engine's last write: the changed rows only; the cue goes into the track's ANLZ files and into every library that lists the track; `NoteWriteBack` records the new export stamps so the next insert is not taken for a re-export. | rekordbox reads the stick. |
+| Eject | The hook runs the eject pass (12 s at most) before the unmount, through stream-sync, which has the keys and what it read. The hook stops the job. | - | - |
+| Power cut or pull, any step | See section 5. | | |
+| Two libraries on one stick (#327) | Both are read (about 1.1 s at deck speed with the key cached). Tracks are joined by path. The root shows three folders (merged, Device Library, OneLibrary), or one view at the root with the setting. | A track is staged once. | A cue edit belongs to the track, whichever folder it was loaded from; write-back writes it to both libraries. |
+| Read-only and HFS+ sticks | The hook decides how the stick is mounted (read-write, or read-only with a writable library view on the deck). The window writes where `Engine Library` is writable and does nothing otherwise. | The job reads the stick and writes the stage on the deck; a `.rgb` file needs the library view. | Write-back never runs on a read-only stick. |
+| First and second generation | The same Go code. The differences are the hook's: how HFS+ is mounted, and that second-generation decks get the hook from `/data`. | | |
+| A library imported by an older build | Taken over once: row and list IDs, paths and the digests of what the import wrote are read from the old state database into a snapshot; every track is pending. The old state and marks are removed after the first commit. | Every track is staged again under the current rules. A row the deck changed keeps its grid, cues and loops. | Performance data is refreshed at the remount. |
+
+## 5. States and crash safety
+
+A stick's state is what its files say; nothing else is stored.
+
+| State | Recognised by | A window does |
+|---|---|---|
+| No library | no `m.db`, or Engine's skeleton (no lists, no state of the bridge) | build and install |
+| Imported, work pending | snapshot whose `Pending` is not empty | read, diff (usually empty), apply staged data |
+| Complete | snapshot with the current stamp and empty `Pending` | stat only |
+| Export changed | snapshot with another stamp | read, diff, apply |
+| Older build's library | `.rb-bridge-state.db` and no snapshot | adopt, then as "work pending" |
+
+What a cut at each point leaves, and what the next window does (`TestMountCutAtEveryStepEndsInTheSameLibrary`
+copies the stick at every one of these points and requires the same library afterwards as without the cut):
+
+| Cut | On the stick | Next window |
+|---|---|---|
+| While the library is built | Nothing: it is built on the deck's disk. | Builds again. |
+| Build done, before the install's rename | A next-snapshot and a temp file; no `m.db`. | Removes the temp file, builds again, overwrites the next-snapshot. |
+| After the install's rename, before the promote | `m.db` and the next-snapshot. | The library's commit ID equals the next-snapshot's: it becomes the snapshot. |
+| In an in-place transaction, before the commit | `m.db` with a hot journal; the next-snapshot. | SQLite rolls the journal back when the window opens the library. The commit ID differs: the next-snapshot is dropped. The diff runs again. |
+| After the commit, before the promote | `m.db` committed; the next-snapshot. | Commit IDs are equal: promoted. Nothing is written twice. |
+| After the promote, before staged records are dropped | Applied records still in the stage. | They are applied again; the row already holds them, so nothing is written, and they are dropped. |
+| Between a commit and its `.rgb` files | Rows without their list waveform file. | The job writes a missing or invalid `.rgb` for every finished track; a valid one is never replaced. |
+| While the job writes the stage | A record's files without its index line, or a torn index line. | The record does not exist; the track is staged again. |
+| While the snapshot is replaced | Old or new snapshot, whole (the replace order of #321: the old file is held open until the directory and the new file are synced). | Either is consistent with a committed `m.db` through the commit ID. |
+
+The commit ID is `Information.lastRekordBoxLibraryImportReadCounter`, which earlier builds also added one to at every
+import. One assumption is not proven here: that Engine does not move this counter itself between a window that was cut
+before its commit and the next window. If it did, a next-snapshot could be promoted without its commit; the rows it
+names would then be missing, which `reconcile` (every window compares the snapshot's rows with the library's IDs and
+paths) removes from the snapshot, so the tracks get rows again. Lists are checked the same way.
+
+Rows Engine or the DJ removed are found by the same comparison. A row another part of EngineX gave another spelling
+of its path (#322) keeps its row; the snapshot takes the spelling.
+
+## 6. Tests and the gate
+
+- Unit tests: `pkg/rbstate`, `pkg/bridge` (view, plan, mount, fill, write-back), `pkg/enginedb` (`BuildTrack`,
+  encoders), `internal/cli`. Section 2 lists each requirement with its test, and the old tests that only pinned a
+  mechanism that is gone.
+- The command line the hook runs is what the tests of `internal/cli` and the replica run, with the hook's variable
+  set. No test may call the package entry with a deadline the hook does not use.
+- The gate is the replica (`job-after.sh` in the lane's tools, to be moved under `tools/dev`): the UNTITLED data
+  (2,416 tracks in OneLibrary, 2,320 in the Device Library, 7,252 ANLZ files, 8,779 covers) on FAT32 behind a 12 ms
+  delay, the audio files with their real sizes behind the same delay, the armhf binary at 18 % of one core, a kill
+  at 17 s. It prints one line a step with wall time, exit status, read and write counts, and the window's own step
+  lines. Steps: first insert; the same stick again before the job ran; the job and its remount windows until
+  nothing is pending; two re-inserts; a one-list re-export with a warm and with a cold key cache and at half the
+  CPU; a re-export with 30 new tracks, its job and remount; a re-insert; an eject pass with nothing to write. KDATA
+  (5,984 tracks, 6 deck cues) follows for write-back: the 6 cues on the right tracks, nothing else changed.
+- Limits of the replica: the delay device serves requests in parallel, so a large write costs one delay, not its
+  size at 11 MB/s; each step therefore prints the KiB it wrote. The audio evidence holds the first 512 KiB of each
+  file, so about 5 % of the tracks (headers at the end of the file) are built without analysis there.
+
+Real-deck test steps (the PM; read-only checks except the inserts):
+
+1. Push `go:rb-bridge`, `go:stream-sync`, `edisksd` (the hook's file name changed) and `ui` (the setting) to both
+   decks; check the digests.
+2. Insert UNTITLED (an older build's library): the journal shows `library of an earlier build taken over` and one
+   `rb-bridge: mount <step> <ms> ms` line a step; the lists show the three folders within the window.
+3. Wait for `fill of … publish=true` and the remount; `mount staged … applied`; load a track: cues, grid and
+   waveform are rekordbox's, and Engine does not analyse it.
+4. Eject and insert again: `mount stat` only, `Bypassed`.
+5. In rekordbox, add one playlist and export; insert: the new list is there; `mount diff` shows one list to write;
+   no remount follows.
+6. Export with a few new tracks; insert: rows and lists at once; after the remount their waveforms.
+7. Set a hot cue on a deck; after 5 s the write-back line; eject; open the stick in rekordbox 7: the cue is on that
+   track in both libraries. Then the same with the stick's `exportLibrary.db` put back from the backup, to learn
+   which file rekordbox reads the cue from (section 7, question c).
+8. Pull the stick during step 3's remount window; insert again: the library is whole, the journal shows either
+   `cut short after its commit … taken over` or nothing, and the stick is not read-only.
+9. The second deck plays from the stick over Engine Link during steps 3 to 6: no dropout, no "pool is disposed".
+10. KDATA on the right deck: the 6 deck cues reach the right tracks, nothing else changes.
+
+## 7. Evidence for the open questions
+
+**a. Is the gap between the two libraries in the file or in our parser?** In the file. An independent reader written
+from crate-digger's DeviceSQL description and `rekordbox.ReadPDB` return the same rows for both copies of UNTITLED's
+`export.pdb`: 2,320 tracks, 159 lists, 2,709 entries on 11-23; 2,340, 160 and 2,729 on 11-24; the same set of track
+paths, no unreadable row, no entry without its track or list. Against OneLibrary (2,416 tracks, 185 lists, 2,845
+entries) by case-folded NFC path: 2,316 tracks in both, 4 only in the Device Library, 100 only in OneLibrary, and
+none of the 100 has a file of the same name in the Device Library. Neither library is a superset of the other. This
+is what #327 reported and what the final decision (join by path) assumes.
+
+**b. Can rekordbox 7 write a stick with no `export.pdb`, or a stale one?** Both libraries of one stick do differ in
+practice: UNTITLED as above; KDATA has 46 tracks and 18 lists only in the Device Library and 22 tracks and 11 lists
+only in OneLibrary (#327), and its `exportLibrary.db` carries a 1980-01-01 time. Today's UNTITLED export wrote
+`export.pdb`, `exportExt.pdb` and `exportLibrary.db` with one time, so one export does write both. A stick with
+only OneLibrary is not among the evidence. The design does not depend on the answer: one library is used as it is,
+two are joined, and no file time chooses.
+
+**c. Which file does rekordbox 7 read deck cues back from?** Not proven: no test in the repository has put a stick
+back into rekordbox (#271's checklist row 266 is still "pending real-deck run"). What the evidence shows:
+
+- rekordbox 7's own exports keep cues in the ANLZ files (`PCOB`, `PCO2`). On KDATA as rekordbox left it, 14 tracks
+  had cues in their ANLZ files and OneLibrary's `cue` table had 0 rows; another real rekordbox 7 export in the lab
+  has an empty `cue` table too.
+- OneLibrary's `content` rows have `hasModified` and `cueUpdateCount` (pyrekordbox documents the second as "cue
+  update count"). Two KDATA tracks had `cueUpdateCount = 1` before any EngineX write-back, so a player had reported
+  cue changes that way.
+- The Device Library holds no cues at all.
+
+So write-back keeps writing all three places a cue can be read from: the ANLZ files, OneLibrary's `cue` table, and
+the two counters; the Device Library gets only the metadata it holds. Whether the encrypted writer is needed is
+decided by step 7 of the deck test. Its cost is paid only on a pass that has a changed cue to write.
