@@ -20,7 +20,7 @@ check_asset() {
 
 check_gen2_image() {
     local image=$1
-    tail -c +129 "$image" | tar -tzf - | grep -q '/bundle/bin/engine-ui-guard$'
+    tail -c +129 "$image" | tar -tzf - | grep -q '/bin/engine-ui-guard$'
 }
 
 check_gen1_image() {
