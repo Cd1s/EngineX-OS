@@ -303,7 +303,11 @@ func (w *window) build() error {
 			byKey[w.view.Tracks[i].Key] = id
 		}
 		var e error
-		listIDs, e = putLists(w.ctx, b, w.view, allLists(w.view), nil, byKey)
+		idx := make([]int, len(w.view.Lists))
+		for i := range idx {
+			idx[i] = i
+		}
+		listIDs, e = putLists(w.ctx, b, w.view, idx, nil, byKey)
 		return e
 	})
 	if err != nil {
@@ -347,14 +351,6 @@ func (w *window) build() error {
 	}
 	log.Printf("rb-bridge: first import of %d tracks published from the export; grids and waveforms follow", len(ids))
 	return nil
-}
-
-func allLists(v *View) []int {
-	idx := make([]int, len(v.Lists))
-	for i := range idx {
-		idx[i] = i
-	}
-	return idx
 }
 
 // putLists writes the view's lists at idx: new ones are added, changed ones get their entries
@@ -674,7 +670,9 @@ func (w *window) applyStaged() error {
 	if err != nil {
 		return err
 	}
-	if w.snap.Pending.Verify && verified == w.view.Stamp && !w.partial {
+	// The stage covers the readable portion of a partial source set. Its stamp still
+	// names every export file, so write-back can use the sources that were read.
+	if w.snap.Pending.Verify && verified == w.view.Stamp {
 		w.snap.Pending.Verify = false
 	}
 	var keys, stale, missing []string

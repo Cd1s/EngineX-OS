@@ -22,11 +22,6 @@ type Plan struct {
 	RemoveLists  []string // snapshot keys the view no longer has
 }
 
-// Empty reports that m.db already is the view.
-func (p *Plan) Empty() bool {
-	return len(p.AddTracks)+len(p.UpdateTracks)+len(p.Moves)+len(p.RemoveTracks)+len(p.PutLists)+len(p.RemoveLists) == 0
-}
-
 type refKey struct {
 	kind   rbstate.LibraryKind
 	source string
