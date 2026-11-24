@@ -246,6 +246,12 @@ func (f *filler) fill(i int) (ok bool, err error) {
 		// is stat'ed by every job, so a file put back or fixed is found without a re-export.
 		return true, nil
 	}
+	if e := f.entries[vt.key]; f.quick && e != nil && !e.Missing && e.Degraded == "" && e.Sig.Rules == rbstate.Rules && e.Sig.Row == vt.hash {
+		// Staged for this export and verified, waiting for a window: not stat'ed again either. A
+		// large library reaches Engine over many windows, and the job between two of them would
+		// stat every waiting track again (replica, KDATA: 155 s a round for 5,500 tracks).
+		return true, nil
+	}
 	opts, playing := f.pace.readOptions()
 	t0 := time.Now()
 	src, err := enginedb.StatTrack(f.ctx, f.r, vt.track)

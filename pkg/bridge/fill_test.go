@@ -267,6 +267,18 @@ func TestFillSkipsWhatIsStagedOrBuilt(t *testing.T) {
 	if res := mustFill(t, root, FillOptions{Stage: st}); !res.Publish {
 		t.Fatalf("job after the window that finished the rows: %+v", res)
 	}
+	// The same holds for a track that is staged and waits for a window: with the stamp verified
+	// its files are not stat'ed by the jobs in between (a large library takes many windows).
+	waiting := filepath.Join(t.TempDir(), "waiting")
+	if err := os.Rename(filepath.Join(root, testfixture.LargeTrackPath(1)), waiting); err != nil {
+		t.Fatal(err)
+	}
+	if res := mustFill(t, root, FillOptions{Stage: st}); res.Staged+res.Missing+res.Unread != 0 {
+		t.Fatalf("job while a staged track waits for its window: %+v", res)
+	}
+	if err := os.Rename(waiting, filepath.Join(root, testfixture.LargeTrackPath(1))); err != nil {
+		t.Fatal(err)
+	}
 	applyStage(t, root, st)
 	// With the stamp verified the built tracks are not looked at: not even a missing file shows.
 	// The degraded track is (a file that is fixed is found without a re-export); it is unchanged.
