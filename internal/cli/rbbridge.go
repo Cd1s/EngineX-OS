@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	bridgev2 "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
 	"github.com/Cd1s/EngineX-OS/pkg/djay"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
@@ -119,7 +120,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 				return nil
 			}
 		}
-		r, err := bridge.WriteBackCues(ctx, *mount, bridge.WriteBackOptions{OnEject: *onEject})
+		r, err := bridgev2.WriteBackCues(ctx, *mount, bridgev2.WriteBackOptions{OnEject: *onEject})
 		if err != nil {
 			return err
 		}

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	bridgev2 "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 	"github.com/skip2/go-qrcode"
@@ -100,7 +101,7 @@ type Config struct {
 type Server struct {
 	cfg           Config
 	jobs          *Jobs
-	cueWatch      atomic.Pointer[bridge.CueWatcher] // #321: set by WatchCues
+	cueWatch      atomic.Pointer[bridgev2.CueWatcher] // #321: set by WatchCues
 	rbPriorityMu  sync.Mutex
 	rbPriority    *bridge.PriorityQueue
 	rbDeckLoaded  [5]string // per deck: last prioritized file path
