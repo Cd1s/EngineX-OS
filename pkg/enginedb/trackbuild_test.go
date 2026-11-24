@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -621,5 +623,96 @@ func TestBuildTrackPacesItsReadsAndStopsCleanly(t *testing.T) {
 	}})
 	if s != nil || !errors.Is(err, stop) || calls != 1 {
 		t.Fatalf("stopped build: %+v %v after %d pauses", s, err, calls)
+	}
+}
+
+// #253 review 3: a section the parser refuses, in the .2EX and the .EXT, degrades the track to
+// the export's metadata; the build does not stop. Replaces the build half of
+// TestIssue253BrokenANLZKeepsItsWaveformRow (malformed kinds, truncated files; the waveform copy
+// rows it also pinned are gone with the state database, design §1.11 item 3).
+func TestBuildTrackDegradesOnMalformedOrTruncatedAnalysis(t *testing.T) {
+	t.Parallel()
+	for _, kind := range append(append([]string(nil), testfixture.MalformedANLZKinds...), "truncated") {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			testfixture.Export(t, root)
+			if kind == "truncated" {
+				ex2 := testfixture.EX2()
+				testfixture.Write(t, root, "PIONEER/USBANLZ/P001/ANLZ0000.2EX", ex2[:len(ex2)/2])
+			} else {
+				sec := testfixture.MalformedANLZSection(kind)
+				testfixture.Write(t, root, "PIONEER/USBANLZ/P001/ANLZ0000.2EX", testfixture.WithANLZSectionFirst(testfixture.EX2(), sec))
+				testfixture.Write(t, root, "PIONEER/USBANLZ/P001/ANLZ0000.EXT", testfixture.WithANLZSectionFirst(testfixture.EXT(), sec))
+			}
+			l, err := rekordbox.ReadPDB(filepath.Join(root, "PIONEER/rekordbox/export.pdb"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := mustBuild(t, root, l.Tracks[0])
+			if s.Degraded == "" || s.Perf.TrackData != nil || len(s.Sig.ANLZ) != 3 {
+				t.Fatalf("%s: %+v", kind, s)
+			}
+		})
+	}
+}
+
+// A symlink in a directory the job cannot list is refused, not taken for a missing file.
+// Replaces TestPrepare252UnreadableDirectoryCannotHideSymlink (the same boundary, run as a user).
+func TestStatTrackUnreadableDirectoryCannotHideSymlink(t *testing.T) {
+	if os.Geteuid() == 0 {
+		dir, err := os.MkdirTemp("", "trackbuild-permission-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(dir) })
+		if err = os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		tmpDir := filepath.Join(dir, "tmp")
+		if err = os.Mkdir(tmpDir, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		if err = os.Chmod(tmpDir, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		binary, err := os.ReadFile(os.Args[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		exe := filepath.Join(dir, "permission.test")
+		if err = os.WriteFile(exe, binary, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(exe, "-test.run=^TestStatTrackUnreadableDirectoryCannotHideSymlink$")
+		cmd.Dir = dir
+		for _, value := range os.Environ() {
+			if !strings.HasPrefix(value, "TMPDIR=") && !strings.HasPrefix(value, "GOTMPDIR=") && !strings.HasPrefix(value, "GOCACHE=") {
+				cmd.Env = append(cmd.Env, value)
+			}
+		}
+		cmd.Env = append(cmd.Env, "TMPDIR="+tmpDir)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65534, Gid: 65534}}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("unprivileged boundary: %v\n%s", err, out)
+		}
+		return
+	}
+	root, outside := t.TempDir(), t.TempDir()
+	testfixture.Write(t, outside, "audio.mp3", []byte("audio"))
+	private := filepath.Join(root, "private")
+	if err := os.Mkdir(private, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "audio.mp3"), filepath.Join(private, "audio.mp3")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(private, 0o111); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(private, 0o755) })
+	src, err := StatTrack(context.Background(), buildResolver(t, root), rekordbox.Track{ID: 1, Path: "/private/audio.mp3"})
+	if !errors.Is(err, os.ErrPermission) || src.Missing {
+		t.Fatalf("unverified path: %+v %v", src, err)
 	}
 }

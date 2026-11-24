@@ -551,3 +551,33 @@ func TestFillPublishesOnlyWhatAWindowWouldApply(t *testing.T) {
 		t.Fatalf("after the window, a record of an older export in the stage: %+v", res)
 	}
 }
+
+// A track the volume refuses (here a symlink) is logged and left unstaged; it does not stop the
+// job, which stages the others and still verifies the stamp: the track was looked at, and the next
+// job looks at it again. Replaces TestPrepare252UnreadableFirstTrackCannotStarveResumedMounts (one
+// bad track cannot hold the others up; its per-mount stat budget is gone with the deadline).
+func TestFillGoesOnPastATrackItCannotRead(t *testing.T) {
+	t.Parallel()
+	root, snap := fillStick(t, 4)
+	bad := filepath.Join(root, testfixture.LargeTrackPath(1))
+	if err := os.Rename(bad, bad+".real"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(bad+".real", bad); err != nil {
+		t.Fatal(err)
+	}
+	st := stageOf(t, snap)
+	res := mustFill(t, root, FillOptions{Stage: st})
+	if res.Unread != 1 || res.Staged != 3 || res.Left != 0 || st.Verified() != snap.Stamp {
+		t.Fatalf("fill: %+v, verified %q", res, st.Verified())
+	}
+	if err := os.Remove(bad); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(bad+".real", bad); err != nil {
+		t.Fatal(err)
+	}
+	if res = mustFill(t, root, FillOptions{Stage: st}); res.Staged != 1 || res.Unread != 0 {
+		t.Fatalf("after the file is back: %+v", res)
+	}
+}
