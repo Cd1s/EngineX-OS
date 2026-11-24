@@ -71,7 +71,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 		return fmt.Errorf("unexpected positional arguments")
 	}
 	if *pruneRGB != "" {
-		n, err := enginedb.PruneRGBOverviews(context.Background(), *pruneRGB, filepath.Join(*pruneRGB, "m.db"), "")
+		n, err := enginedb.PruneRGBOverviews(context.Background(), *pruneRGB, filepath.Join(*pruneRGB, "m.db"))
 		if n > 0 {
 			log.Printf("rb-bridge: %d stale RGB overviews removed from %s", n, *pruneRGB)
 		}

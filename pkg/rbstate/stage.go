@@ -16,9 +16,8 @@ import (
 	"time"
 )
 
-// The stage holds what the background job has built from a stick's ANLZ files and audio
-// headers, until a mount window writes it to m.db. It lives on the deck, one directory per
-// library (Information.uuid), so the job never writes the stick:
+// The stage (design §1.3) holds what the background job built, until a window writes it to
+// m.db. It is on the deck, one directory per library (Information.uuid):
 //
 //	<root>/<uuid>/index.jsonl     one line per Put (the last line of a key wins), and marks
 //	<root>/<uuid>/<name>.bin      the track's performance data, in the UI hook's RBXA1 layout
@@ -28,15 +27,13 @@ import (
 // <name> is the hex SHA-1 of the track's key.
 
 const (
-	// StageEnv overrides the stage root.
-	StageEnv         = "ENGINEX_RB_STAGE_DIR"
+	StageEnv         = "ENGINEX_RB_STAGE_DIR" // overrides the stage root
 	defaultStageRoot = "/data/enginex/rb-stage"
 	stageIndex       = "index.jsonl"
 	perfMagic        = "RBXA1"
-	// stageFloor is the free space /data keeps: Put refuses below it.
-	stageFloor = 256 << 20
-	stageIdle  = 30 * 24 * time.Hour
-	maxBlob    = 64 << 20
+	stageFloor       = 256 << 20 // the free space /data keeps: Put refuses below it
+	stageIdle        = 30 * 24 * time.Hour
+	maxBlob          = 64 << 20
 )
 
 // ErrStageFull: the stage's file system is at its floor; nothing was written.
@@ -49,7 +46,7 @@ type Perf struct {
 	Complete                                     bool
 }
 
-// Facts is what the audio file's header says, where it differs from or adds to the export.
+// Facts is what the audio header says, where it differs from or adds to the export.
 type Facts struct {
 	Duration           float64 `json:"dur,omitempty"`
 	SampleRate         int     `json:"rate,omitempty"`
@@ -74,7 +71,7 @@ type Staged struct {
 	Digest   []byte   `json:"wr,omitempty"`  // of Perf's grid, cues and loops, as Track.Written names them
 	Degraded string   `json:"deg,omitempty"` // why there is no performance data, "" otherwise
 
-	// In the index line only: what lies beside it.
+	// in the index line only: what lies beside it
 	HasPerf     bool   `json:"perf,omitempty"`
 	HasRGB      bool   `json:"rgb,omitempty"`
 	HasArt      bool   `json:"art,omitempty"`
@@ -93,21 +90,19 @@ type Stage struct {
 	index *os.File
 }
 
-// StageRoot is where the stages are.
+// StageRoot is where the stages are; a test process without StageEnv gets a private one.
 func StageRoot() (string, error) {
 	if root := os.Getenv(StageEnv); root != "" {
 		return root, nil
 	}
 	if testing.Testing() {
-		// Never the deck's own directory from a test: one private root per test process. Stages
-		// are per library, so tests share it without meeting.
 		return filepath.Join(os.TempDir(), fmt.Sprintf("enginex-rb-stage-test-%d", os.Getpid())), nil
 	}
 	return defaultStageRoot, nil
 }
 
-// OpenStage opens the stage of the library uuid, creating it, and removes the stages of other
-// libraries that were not touched for 30 days.
+// OpenStage opens (and makes) the stage of a library and removes other libraries' stages not
+// touched for 30 days.
 func OpenStage(libraryUUID string) (*Stage, error) {
 	if libraryUUID == "" || libraryUUID != filepath.Base(libraryUUID) || libraryUUID[0] == '.' {
 		return nil, fmt.Errorf("rbstate: bad library uuid %q", libraryUUID)
@@ -136,7 +131,6 @@ func OpenStage(libraryUUID string) (*Stage, error) {
 	return &Stage{dir: dir}, nil
 }
 
-// Dir is the stage's directory.
 func (s *Stage) Dir() string { return s.dir }
 
 func stageName(key string) string {
@@ -224,9 +218,9 @@ func writeWhole(dst string, data []byte) error {
 	return err
 }
 
-// EncodePerf is the RBXA1 file of p: the magic, then trackData, overviewWaveFormData, beatData,
-// quickCues and loops, each a little-endian uint32 length and its bytes, then one byte that
-// says whether the track counts as analysed. tools/ui-mod/rekordbox_analysis.h reads the same.
+// EncodePerf is the RBXA1 file the UI hook reads too (tools/ui-mod/rekordbox_analysis.h): the
+// magic; trackData, overviewWaveFormData, beatData, quickCues and loops, each a little-endian
+// uint32 length and its bytes; one byte for Complete.
 func EncodePerf(p Perf) []byte {
 	var b bytes.Buffer
 	b.WriteString(perfMagic)
@@ -271,9 +265,9 @@ func DecodePerf(b []byte) (Perf, error) {
 	return p, nil
 }
 
-// readIndex returns the last line of every key that was not dropped since, and the last
-// verified stamp. A torn last line is ignored.
-func (s *Stage) readIndex() (map[string]*Staged, string, error) {
+// Entries is every staged track as its index line has it (the last line of a key not dropped
+// since), without the blobs, and the last verified stamp. A torn last line is ignored.
+func (s *Stage) Entries() (map[string]*Staged, string, error) {
 	out := map[string]*Staged{}
 	f, err := os.Open(filepath.Join(s.dir, stageIndex))
 	if errors.Is(err, os.ErrNotExist) {
@@ -305,23 +299,15 @@ func (s *Stage) readIndex() (map[string]*Staged, string, error) {
 
 // Get reads a staged track with its blobs. os.ErrNotExist: not staged, or its files are not whole.
 func (s *Stage) Get(key string) (*Staged, error) {
-	lines, _, err := s.readIndex()
+	lines, _, err := s.Entries()
 	if err != nil {
 		return nil, err
 	}
-	return s.load(lines[key])
+	return s.Read(lines[key])
 }
 
-// Entries is every staged track as its index line has it, without the blobs, and the last
-// verified stamp. A window reads it once, picks what it applies and calls Read for each.
-func (s *Stage) Entries() (entries map[string]*Staged, verified string, err error) {
-	return s.readIndex()
-}
-
-// Read returns an entry of Entries with its blobs. os.ErrNotExist: its files are not whole.
-func (s *Stage) Read(entry *Staged) (*Staged, error) { return s.load(entry) }
-
-func (s *Stage) load(line *Staged) (*Staged, error) {
+// Read is an entry of Entries with its blobs. os.ErrNotExist: its files are not whole.
+func (s *Stage) Read(line *Staged) (*Staged, error) {
 	if line == nil {
 		return nil, os.ErrNotExist
 	}
@@ -372,7 +358,7 @@ func (s *Stage) MarkVerified(stamp string) error {
 
 // Verified is the last stamp MarkVerified recorded.
 func (s *Stage) Verified() string {
-	_, v, _ := s.readIndex()
+	_, v, _ := s.Entries()
 	return v
 }
 
@@ -390,8 +376,8 @@ func (s *Stage) Drop(keys ...string) error {
 	return nil
 }
 
-// Reset empties the index once a window has applied or dropped everything in it, so that later
-// windows and jobs do not read through every line of a finished import. The verified stamp stays.
+// Reset empties the index once a window applied or dropped everything in it, keeping the verified
+// stamp, so that later runs do not read through a finished import.
 func (s *Stage) Reset(verified string) error {
 	_ = s.Close()
 	var b []byte
@@ -405,7 +391,7 @@ func (s *Stage) Reset(verified string) error {
 	return writeWhole(filepath.Join(s.dir, stageIndex), b)
 }
 
-// Sync puts the index on the disk. Put syncs each track's files itself.
+// Sync puts the index on the disk; Put syncs each track's files itself.
 func (s *Stage) Sync() error {
 	if s.index == nil {
 		return nil
@@ -413,7 +399,6 @@ func (s *Stage) Sync() error {
 	return s.index.Sync()
 }
 
-// Close syncs and closes the index.
 func (s *Stage) Close() error {
 	if s.index == nil {
 		return nil
@@ -426,7 +411,6 @@ func (s *Stage) Close() error {
 	return err
 }
 
-// Remove deletes the whole stage.
 func (s *Stage) Remove() error {
 	_ = s.Close()
 	return os.RemoveAll(s.dir)

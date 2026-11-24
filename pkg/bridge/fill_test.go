@@ -379,7 +379,8 @@ func TestFillServesThePriorityQueueFirst(t *testing.T) {
 	if !slices.Equal(order, want) {
 		t.Fatalf("stage order\n%q\nwant\n%q", order, want)
 	}
-	if ack := ReadPriorityAck(root); ack.AckSeq < seq {
+	vk, _ := volumeIdentity(root)
+	if ack := readAck(vk); ack.AckSeq < seq {
 		t.Fatalf("ack %+v, want seq %d", ack, seq)
 	}
 	if p, _ := PendingPriority(root); len(p) != 1 || !strings.Contains(p[0].Path, "does-not-exist") {
@@ -387,7 +388,7 @@ func TestFillServesThePriorityQueueFirst(t *testing.T) {
 	}
 	restarted := NewPriorityQueue()
 	seq2, err := restarted.Enqueue(root, "../"+testfixture.LargeTrackPath(7), "deck", 2)
-	if err != nil || seq2 <= ReadPriorityAck(root).AckSeq {
+	if err != nil || seq2 <= readAck(vk).AckSeq {
 		t.Fatalf("restarted queue seq %d %v, want past the ack", seq2, err)
 	}
 }

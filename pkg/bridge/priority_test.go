@@ -64,10 +64,4 @@ func TestPriorityQueueCoalescePermissionsAndActivity(t *testing.T) {
 	if q.UpdateDeckActivity(false, t0.Add(1000*time.Millisecond)) || IsDeckActive() {
 		t.Fatal("2nd spaced idle sample should return deck to idle")
 	}
-
-	// Eject removes both record and ack.
-	q.RemoveVolume(mount)
-	if p, _ := PendingPriority(mount); len(p) != 0 {
-		t.Fatalf("after RemoveVolume: pending=%+v", p)
-	}
 }

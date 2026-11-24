@@ -118,7 +118,7 @@ func TestEncodeRGBOverviewPWV6AndPWV4FormatAndPruneSafe(t *testing.T) {
 			if err := WriteRGBOverviewAtomic(dir, "lib-uuid", 1, rgbBlob); err != nil {
 				t.Fatalf("WriteRGBOverviewAtomic: %v", err)
 			}
-			removed, err := PruneRGBOverviews(context.Background(), dir, libPath, "")
+			removed, err := PruneRGBOverviews(context.Background(), dir, libPath)
 			if err != nil || removed != 0 {
 				t.Fatalf("PruneRGBOverviews removed=%d err=%v, want 0", removed, err)
 			}

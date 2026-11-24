@@ -8,34 +8,23 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
-// How the background job shares the stick with a playing deck (design §1.5, handbook §3.11).
-// The job runs in its own process at idle CPU and I/O class and never touches the audio thread,
-// but the decks' I/O schedulers do not honour the idle class: a deck that loads or plays a track
-// from the same USB stick waits behind whatever the job has asked the disk for. So:
-//   - no deck playing (the deck-activity file of stream-sync): full speed, whole sections;
-//   - a deck playing, cue-previewing, scratching or moving its platter: reads of at most
-//     playingReadChunk, each that went to the stick followed by a pause as long as the read took
-//     and at least playingReadGap, so the stick is free at least half the time and a deck's read
-//     waits behind one 64 KiB read at most. A read served from the page cache (a section header
-//     in a page the last read brought in) did not use the stick and is not followed by a pause.
-//     A burst of directory reads (a stat that missed the cache) gets the same pause. The choice is
-//     made again before every track, so a deck that starts playing slows the job within one
-//     track, and the priority queue is looked at before every track.
+// How the job shares the stick with a playing deck (design §1.5, handbook §3.11). The decks' I/O
+// schedulers do not honour the job's idle class, so while a deck plays, cue-previews, scratches or
+// moves its platter (the deck-activity file) reads take at most playingReadChunk, and each that
+// went to the stick (slower than fromCache) is followed by a pause as long as it took, at least
+// playingReadGap: the stick is free half the time. A stat that missed the cache pauses alike.
+// No deck playing: full speed. The choice is made again before every track.
 var (
 	playingReadChunk = 64 << 10
 	playingReadGap   = 20 * time.Millisecond
-	// fromCache is how long a read or a stat may take and still have been served from the page
-	// cache: one that took longer used the stick and is followed by a pause while a deck plays.
-	// A USB 2.0 disk takes 10-15 ms a read; a copy of 64 KiB from memory well under 1 ms.
-	fromCache = 2 * time.Millisecond
+	fromCache        = 2 * time.Millisecond // a USB 2.0 read takes 10-15 ms; a page-cache copy well under 1 ms
 )
 
 // pacer decides, before each track, how the job reads, and counts what the pacing did.
 type pacer struct {
 	ctx    context.Context
-	active func() bool // a deck is playing; IsDeckActive
-	// While a deck played: the paced tracks, the reads and stats paused after, the time they
-	// took and the time the job then left the stick alone.
+	active func() bool // IsDeckActive
+	// while a deck played: paced tracks, pauses, the reads' time and the time the stick was left alone
 	tracks, pauses int
 	busy, idle     time.Duration
 }

@@ -7,26 +7,15 @@ import (
 	"math"
 )
 
-// A row Engine has loaded keeps its grid, cues and loops at the next import (sync.go): they
-// may hold the deck's edits. They also hold the offset of the import that wrote them, and
-// Engine's own shift if it loaded the row while it carried the import mark: a stick imported
-// before #178 kept the raw rekordbox positions for good, an M4A the positions without its
-// priming (real decks, 2026-11-19). What is still the import's is moved to this import's
-// positions here; what the deck changed stays where it is.
-
-// A row is the import's as long as it holds what the import left in it; BridgeWritten has the
-// digest of that. Engine's import mark (thirdPartySourceId) said the same until Engine loaded
-// the row, but with it Engine shifts the row again (2292 samples for an MP3) whenever it loads
-// it with a decoder attached, so no row carries it any more. A row of before this record
-// still has the mark, or has lost it to Engine.
+// A row the deck changed keeps its grid, cues and loops (ApplyPerformance), but they also hold the
+// offset of the import that wrote them: a stick imported before #178 kept the raw rekordbox
+// positions, an M4A the positions without its priming (real decks, 2026-11-19). realignKept moves
+// what is still the import's to this import's positions; what the deck changed stays. A row is the
+// import's while it holds what the bridge wrote (Track.Written, WrittenDigest): Engine's import
+// mark is not used, since Engine shifts a marked row again when it loads it (2292 samples, MP3).
 
 // WrittenDigest names the content of a row's grid, cues and loops, however it is compressed.
 func WrittenDigest(beats, cues, loops []byte) []byte {
-	return writtenDigest(beats, cues, loops)
-}
-
-// writtenDigest names the content of a row's grid, cues and loops, however it is compressed.
-func writtenDigest(beats, cues, loops []byte) []byte {
 	h := sha256.New()
 	for _, blob := range [][]byte{beats, cues} {
 		raw, err := QUncompress(blob, 8<<20)
@@ -40,11 +29,9 @@ func writtenDigest(beats, cues, loops []byte) []byte {
 	return h.Sum(nil)[:16]
 }
 
-// SyncedDigest names what the deck can change in a row and cue write-back writes
-// back to the stick's rekordbox files: cues, loops, activeOnLoadLoops (#321), and
-// genre, comment, and label (#314). Beat-grid / analysis-only updates (beatData,
-// trackData, overviewWaveFormData) are intentionally excluded so analysis passes
-// do not trigger needless OneLibrary decryption.
+// SyncedDigest names what the deck can change in a row and cue write-back writes back: cues,
+// loops, activeOnLoadLoops (#321), genre, comment and label (#314). The grid and the analysis are
+// left out, so that an analysis does not set off a write-back.
 func SyncedDigest(_ []byte, cues, loops []byte, activeOnLoadLoops int64, genre, comment, label string) []byte {
 	h := sha256.New()
 	rawCues, err := QUncompress(cues, 8<<20)
@@ -63,9 +50,9 @@ func SyncedDigest(_ []byte, cues, loops []byte, activeOnLoadLoops int64, genre, 
 	return h.Sum(nil)[:16]
 }
 
-// realignKept returns the row's three blobs moved to perf's positions. The row's default
-// grid says how far off it is: it has to be perf's grid, every marker the same distance
-// away, or the row is left alone (rekordbox's grid has changed since, or it is not ours).
+// realignKept returns the row's three blobs moved to perf's positions. The row's default grid
+// says how far off it is: perf's grid with every marker the same distance away, or the row is
+// left alone (rekordbox's grid has changed since, or it is not ours).
 func realignKept(beats, cues, loops []byte, perf Performance, locked bool) ([]byte, []byte, []byte, bool) {
 	rowRaw, e1 := QUncompress(beats, 8<<20)
 	newRaw, e2 := QUncompress(perf.Beats, 8<<20)
@@ -89,9 +76,8 @@ func realignKept(beats, cues, loops []byte, perf Performance, locked bool) ([]by
 	if !locked && bytes.Equal(rowDef, rowAdj) {
 		beats, changed = perf.Beats, true
 	}
-	// A position is still the import's when it is this import's of the same slot, the same
-	// distance away. Slot by slot: a cue the DJ named or added on the deck moves the bytes
-	// of every slot after it, and must not keep the import's other cues where they were.
+	// A position is the import's when it is this import's of the same slot, the same distance
+	// away; slot by slot, since a cue the DJ named or added moves the bytes of the slots after it.
 	move := func(row, now []byte, rowAt, nowAt []int, order binary.ByteOrder) bool {
 		moved := false
 		for i, off := range rowAt {

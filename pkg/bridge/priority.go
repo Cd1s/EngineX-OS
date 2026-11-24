@@ -1,8 +1,8 @@
 package bridge
 
-// The priority queue and the deck-activity file, as stream-sync writes them and the background
-// job reads them (design §1.5: kept as they are). Moved from pkg/bridge/priority.go; keys are
-// rbstate.FoldPath now, which folds a path the way the old foldPath did.
+// The priority queue and the deck-activity file (design §1.5, formats kept): stream-sync writes
+// them when a DJ loads, previews or focuses a track, and the background job reads them. Each is a
+// 0600 file in priorityRoot(); a volume's are keyed by its device and inode.
 
 import (
 	"encoding/json"
@@ -23,7 +23,6 @@ import (
 const (
 	defaultPriorityDir = "/run/enginex"
 	maxPriorityItems   = 16
-	deckActivityFile   = "rb-deck-activity.json"
 	deckActivityTTL    = 10 * time.Second
 	idleSampleMinGap   = 400 * time.Millisecond
 	idleSamplesNeeded  = 2
@@ -34,32 +33,25 @@ var (
 	priorityDir   = defaultPriorityDir
 )
 
-// SetPriorityDirForTest redirects priority and deck-activity runtime files
-// to dir for the duration of a test and returns a restore function.
+// SetPriorityDirForTest redirects the runtime files to dir and returns the restore function.
 func SetPriorityDirForTest(dir string) func() {
 	priorityDirMu.Lock()
 	old := priorityDir
 	priorityDir = dir
 	priorityDirMu.Unlock()
-	return func() {
-		priorityDirMu.Lock()
-		priorityDir = old
-		priorityDirMu.Unlock()
-	}
+	return func() { SetPriorityDirForTest(old) }
 }
 
 func priorityRoot() string {
 	priorityDirMu.RLock()
-	dir := priorityDir
-	priorityDirMu.RUnlock()
-	if dir == defaultPriorityDir && testing.Testing() {
+	defer priorityDirMu.RUnlock()
+	if priorityDir == defaultPriorityDir && testing.Testing() {
 		return filepath.Join(os.TempDir(), fmt.Sprintf("enginex-rb-priority-test-%d", os.Getpid()))
 	}
-	return dir
+	return priorityDir
 }
 
-// PriorityItem is a single prioritized Engine-relative track path on a mounted
-// rekordbox volume (e.g. "../Contents/Artist/Track.mp3").
+// PriorityItem is one prioritised Engine path on a volume ("../Contents/Artist/Track.mp3").
 type PriorityItem struct {
 	Path   string `json:"path"`
 	Source string `json:"source"` // "deck", "cue", "preview", "focus"
@@ -67,8 +59,7 @@ type PriorityItem struct {
 	Seq    uint64 `json:"seq"`
 }
 
-// PriorityRecord is the mode-0600 file written atomically by stream-sync for
-// each mounted rekordbox volume when a DJ loads, previews, or focuses a track.
+// PriorityRecord is a volume's queue, newest first; only stream-sync writes it.
 type PriorityRecord struct {
 	Dev         uint64         `json:"dev"`
 	Ino         uint64         `json:"ino"`
@@ -77,28 +68,22 @@ type PriorityRecord struct {
 	Items       []PriorityItem `json:"items,omitempty"`
 }
 
-// PriorityAck is written atomically by rb-bridge after a prioritized track is
-// imported or validated, keeping writer ownership strictly separate from
-// PriorityRecord.
+// PriorityAck is what rb-bridge has served of a volume's queue; only rb-bridge writes it.
 type PriorityAck struct {
 	AckSeq      uint64            `json:"ackSeq"`
 	Paths       map[string]uint64 `json:"paths,omitempty"`
 	UpdatedAtMS int64             `json:"updatedAtMs"`
 }
 
-// DeckActivity records whether any deck is actively playing, CUE previewing,
-// scratching, or moving the platter, so rb-bridge runs at full speed when idle
-// and yields immediately when a deck becomes active.
+// DeckActivity says whether a deck is playing, cue-previewing, scratching or moving its platter:
+// the job then yields the stick (pace.go).
 type DeckActivity struct {
 	Active      bool  `json:"active"`
 	IdleSamples int   `json:"idleSamples"`
 	UpdatedAtMS int64 `json:"updatedAtMs"`
 }
 
-type volumeKey struct {
-	dev uint64
-	ino uint64
-}
+type volumeKey struct{ dev, ino uint64 }
 
 func volumeIdentity(mount string) (volumeKey, error) {
 	var st syscall.Stat_t
@@ -108,25 +93,19 @@ func volumeIdentity(mount string) (volumeKey, error) {
 	return volumeKey{dev: uint64(st.Dev), ino: uint64(st.Ino)}, nil
 }
 
-func priorityRecordPath(v volumeKey) string {
-	return filepath.Join(priorityRoot(), fmt.Sprintf("rb-priority-%x-%x.json", v.dev, v.ino))
+// volumeFile is a runtime file of a volume: rb-priority-<dev>-<ino>.json and .ack, rb-publish-<dev>-<ino>.
+func volumeFile(prefix string, v volumeKey, ext string) string {
+	return filepath.Join(priorityRoot(), fmt.Sprintf("%s-%x-%x%s", prefix, v.dev, v.ino, ext))
 }
 
-func priorityAckPath(v volumeKey) string {
-	return filepath.Join(priorityRoot(), fmt.Sprintf("rb-priority-%x-%x.ack", v.dev, v.ino))
-}
-
-func deckActivityPath() string {
-	return filepath.Join(priorityRoot(), deckActivityFile)
-}
+func deckActivityPath() string { return filepath.Join(priorityRoot(), "rb-deck-activity.json") }
 
 func normalizePriorityEnginePath(p string) string {
 	p = strings.ReplaceAll(strings.TrimSpace(p), "\\", "/")
 	if p == "" {
 		return ""
 	}
-	p = strings.TrimPrefix(p, "../")
-	p = strings.TrimLeft(path.Clean("/"+p), "/")
+	p = strings.TrimLeft(path.Clean("/"+strings.TrimPrefix(p, "../")), "/")
 	if p == "" || p == "." || strings.HasPrefix(p, "..") {
 		return ""
 	}
@@ -137,45 +116,35 @@ func foldPriorityPath(p string) string {
 	return rbstate.FoldPath(strings.TrimPrefix(normalizePriorityEnginePath(p), "../"))
 }
 
-func writePrivateJSON(dst string, v any) error {
+// writePrivate replaces dst with data through a rename; os.CreateTemp makes the file 0600.
+func writePrivate(dst string, data []byte) error {
 	dir := filepath.Dir(dst)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if st, err := os.Lstat(dst); err == nil && st.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("priority: refusing symlink target %s", dst)
+	tmp, err := os.CreateTemp(dir, ".rb-pri-*")
+	if err != nil {
+		return err
 	}
+	_, err = tmp.Write(data)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), dst)
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+	}
+	return err
+}
+
+func writePrivateJSON(dst string, v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(dir, ".rb-pri-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	ok := false
-	defer func() {
-		if !ok {
-			_ = os.Remove(tmp)
-		}
-	}()
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		return err
-	}
-	ok = true
-	return nil
+	return writePrivate(dst, data)
 }
 
 func readPrivateJSON(src string, dst any) error {
@@ -184,19 +153,13 @@ func readPrivateJSON(src string, dst any) error {
 		return err
 	}
 	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	if !st.Mode().IsRegular() || st.Size() > 64<<10 {
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() || st.Size() > 64<<10 {
 		return fmt.Errorf("priority: invalid record %s", src)
 	}
 	return json.NewDecoder(f).Decode(dst)
 }
 
-// PriorityQueue maintains coalesced per-volume priority queues and global deck
-// activity state for stream-sync, persisting each update atomically under
-// priorityRoot().
+// PriorityQueue is stream-sync's side: the volumes' queues and the deck-activity state.
 type PriorityQueue struct {
 	mu           sync.Mutex
 	seq          uint64
@@ -208,16 +171,11 @@ type PriorityQueue struct {
 	hasActivity  bool
 }
 
-// NewPriorityQueue creates a new in-memory priority queue backed by mode-0600
-// files under priorityRoot().
 func NewPriorityQueue() *PriorityQueue {
-	return &PriorityQueue{
-		volumes: map[volumeKey]*PriorityRecord{},
-	}
+	return &PriorityQueue{volumes: map[volumeKey]*PriorityRecord{}}
 }
 
-// Enqueue records a high-priority track on mount, coalescing repeated edges
-// for the same folded path and moving the newest request to the head.
+// Enqueue puts a track at the head of its volume's queue. The same head edge again changes nothing.
 func (q *PriorityQueue) Enqueue(mount, enginePath, source string, deck int) (uint64, error) {
 	vk, err := volumeIdentity(mount)
 	if err != nil {
@@ -231,108 +189,62 @@ func (q *PriorityQueue) Enqueue(mount, enginePath, source string, deck int) (uin
 		source = "deck"
 	}
 	key := foldPriorityPath(norm)
-
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	rec := q.volumes[vk]
 	if rec == nil {
+		// Sequence numbers go on from what an earlier stream-sync wrote.
 		rec = &PriorityRecord{Dev: vk.dev, Ino: vk.ino}
-		var diskRec PriorityRecord
-		if readPrivateJSON(priorityRecordPath(vk), &diskRec) == nil && diskRec.Seq > q.seq {
-			q.seq = diskRec.Seq
+		var old PriorityRecord
+		if readPrivateJSON(volumeFile("rb-priority", vk, ".json"), &old) == nil {
+			q.seq = max(q.seq, old.Seq)
 		}
-		var diskAck PriorityAck
-		if readPrivateJSON(priorityAckPath(vk), &diskAck) == nil && diskAck.AckSeq > q.seq {
-			q.seq = diskAck.AckSeq
-		}
+		q.seq = max(q.seq, readAck(vk).AckSeq)
 		q.volumes[vk] = rec
 	}
-	// Coalesce repeated identical head edges without churning seq or disk.
-	if len(rec.Items) > 0 && foldPriorityPath(rec.Items[0].Path) == key &&
-		rec.Items[0].Source == source && rec.Items[0].Deck == deck {
+	if len(rec.Items) > 0 && foldPriorityPath(rec.Items[0].Path) == key && rec.Items[0].Source == source && rec.Items[0].Deck == deck {
 		return rec.Items[0].Seq, nil
 	}
 	q.seq++
-	seq := q.seq
-	item := PriorityItem{Path: norm, Source: source, Deck: deck, Seq: seq}
-	next := make([]PriorityItem, 0, min(len(rec.Items)+1, maxPriorityItems))
-	next = append(next, item)
-	for _, existing := range rec.Items {
-		if foldPriorityPath(existing.Path) == key {
-			continue
-		}
-		if len(next) >= maxPriorityItems {
+	next := []PriorityItem{{Path: norm, Source: source, Deck: deck, Seq: q.seq}}
+	for _, it := range rec.Items {
+		if len(next) == maxPriorityItems {
 			break
 		}
-		next = append(next, existing)
+		if foldPriorityPath(it.Path) != key {
+			next = append(next, it)
+		}
 	}
-	rec.Items = next
-	rec.Seq = seq
-	rec.UpdatedAtMS = time.Now().UnixMilli()
-	if err := writePrivateJSON(priorityRecordPath(vk), rec); err != nil {
+	rec.Items, rec.Seq, rec.UpdatedAtMS = next, q.seq, time.Now().UnixMilli()
+	if err := writePrivateJSON(volumeFile("rb-priority", vk, ".json"), rec); err != nil {
 		return 0, err
 	}
-	return seq, nil
+	return q.seq, nil
 }
 
-// RemoveVolume deletes the persisted priority record and ack for mount (e.g.
-// on eject or failed resolution).
-func (q *PriorityQueue) RemoveVolume(mount string) {
-	vk, err := volumeIdentity(mount)
-	if err != nil {
-		return
-	}
-	q.RemoveVolumeID(vk.dev, vk.ino)
-}
-
-// RemoveVolumeID deletes the priority record and ack for a volume identity.
-func (q *PriorityQueue) RemoveVolumeID(dev, ino uint64) {
-	vk := volumeKey{dev: dev, ino: ino}
-	q.mu.Lock()
-	delete(q.volumes, vk)
-	q.mu.Unlock()
-	_ = os.Remove(priorityRecordPath(vk))
-	_ = os.Remove(priorityAckPath(vk))
-	_ = os.Remove(publishMarkPath(vk))
-}
-
-// UpdateDeckActivity updates the global deck-activity state file. Active edges
-// (PlayState, CUE preview, scratch, or platter movement) take effect
-// immediately; returning to idle requires idleSamplesNeeded consecutive idle
-// samples separated by at least idleSampleMinGap (from the 500 ms state post).
+// UpdateDeckActivity takes a sample of the decks (stream-sync's 500 ms state post). Active takes
+// effect at once; idle after idleSamplesNeeded samples at least idleSampleMinGap apart. The file is
+// written at each change and every 2 s while a deck is active.
 func (q *PriorityQueue) UpdateDeckActivity(active bool, now time.Time) bool {
 	if now.IsZero() {
 		now = time.Now()
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-
 	changed := !q.hasActivity
 	if active {
-		if !q.deckActive || q.idleSamples != 0 {
-			changed = true
-		}
-		q.deckActive = true
-		q.idleSamples = 0
-		q.lastIdleAt = time.Time{}
-	} else {
-		if q.lastIdleAt.IsZero() || now.Sub(q.lastIdleAt) >= idleSampleMinGap {
-			q.idleSamples++
-			q.lastIdleAt = now
-			if q.deckActive && q.idleSamples >= idleSamplesNeeded {
-				q.deckActive = false
-				changed = true
-			}
+		changed = changed || !q.deckActive || q.idleSamples != 0
+		q.deckActive, q.idleSamples, q.lastIdleAt = true, 0, time.Time{}
+	} else if q.lastIdleAt.IsZero() || now.Sub(q.lastIdleAt) >= idleSampleMinGap {
+		q.idleSamples++
+		q.lastIdleAt = now
+		if q.deckActive && q.idleSamples >= idleSamplesNeeded {
+			q.deckActive, changed = false, true
 		}
 	}
 	q.hasActivity = true
-	// Persist immediately on transitions and refresh heartbeat every 2 s while active.
 	if changed || (q.deckActive && now.Sub(q.lastActWrite) >= 2*time.Second) {
-		act := DeckActivity{
-			Active:      q.deckActive,
-			IdleSamples: q.idleSamples,
-			UpdatedAtMS: now.UnixMilli(),
-		}
+		act := DeckActivity{Active: q.deckActive, IdleSamples: q.idleSamples, UpdatedAtMS: now.UnixMilli()}
 		if writePrivateJSON(deckActivityPath(), act) == nil {
 			q.lastActWrite = now
 		}
@@ -340,60 +252,44 @@ func (q *PriorityQueue) UpdateDeckActivity(active bool, now time.Time) bool {
 	return q.deckActive
 }
 
-// ReadPriority reads the current priority record for mount if present and its
-// device/inode match mount.
-func ReadPriority(mount string) (*PriorityRecord, error) {
+// readQueue is the volume's record, nil when there is none or it names another volume.
+func readQueue(mount string) (*PriorityRecord, volumeKey) {
 	vk, err := volumeIdentity(mount)
 	if err != nil {
-		return nil, err
+		return nil, vk
 	}
 	var rec PriorityRecord
-	if err := readPrivateJSON(priorityRecordPath(vk), &rec); err != nil {
-		return nil, err
+	if readPrivateJSON(volumeFile("rb-priority", vk, ".json"), &rec) != nil || rec.Dev != vk.dev || rec.Ino != vk.ino {
+		return nil, vk
 	}
-	if rec.Dev != vk.dev || rec.Ino != vk.ino {
-		return nil, os.ErrNotExist
-	}
-	return &rec, nil
+	return &rec, vk
 }
 
-// ReadPriorityAck reads the acknowledged sequence state for mount.
-func ReadPriorityAck(mount string) PriorityAck {
-	vk, err := volumeIdentity(mount)
-	if err != nil {
-		return PriorityAck{}
-	}
+func readAck(vk volumeKey) PriorityAck {
 	var ack PriorityAck
-	if err := readPrivateJSON(priorityAckPath(vk), &ack); err != nil {
+	if readPrivateJSON(volumeFile("rb-priority", vk, ".ack"), &ack) != nil {
 		return PriorityAck{}
 	}
 	return ack
 }
 
-// PendingPriority returns unacknowledged priority items for mount in
-// newest-first order along with the highest sequence seen.
+// PendingPriority is the volume's items not served yet, newest first, and the record's sequence.
 func PendingPriority(mount string) ([]PriorityItem, uint64) {
-	rec, err := ReadPriority(mount)
-	if err != nil || len(rec.Items) == 0 {
+	rec, vk := readQueue(mount)
+	if rec == nil || len(rec.Items) == 0 {
 		return nil, 0
 	}
-	ack := ReadPriorityAck(mount)
+	ack := readAck(vk)
 	var pending []PriorityItem
-	for _, item := range rec.Items {
-		key := foldPriorityPath(item.Path)
-		if key == "" {
-			continue
+	for _, it := range rec.Items {
+		if key := foldPriorityPath(it.Path); key != "" && ack.Paths[key] < it.Seq {
+			pending = append(pending, it)
 		}
-		if ack.Paths[key] >= item.Seq {
-			continue
-		}
-		pending = append(pending, item)
 	}
 	return pending, rec.Seq
 }
 
-// AckPriority records acknowledged sequence numbers for the given Engine paths
-// on mount.
+// AckPriority records items as served. The ack keeps the paths of its last 64 sequence numbers.
 func AckPriority(mount string, items []PriorityItem) error {
 	if len(items) == 0 {
 		return nil
@@ -402,64 +298,43 @@ func AckPriority(mount string, items []PriorityItem) error {
 	if err != nil {
 		return err
 	}
-	ack := ReadPriorityAck(mount)
+	ack := readAck(vk)
 	if ack.Paths == nil {
 		ack.Paths = map[string]uint64{}
 	}
 	for _, it := range items {
-		key := foldPriorityPath(it.Path)
-		if key == "" {
-			continue
-		}
-		if it.Seq > ack.Paths[key] {
-			ack.Paths[key] = it.Seq
-		}
-		if it.Seq > ack.AckSeq {
-			ack.AckSeq = it.Seq
+		if key := foldPriorityPath(it.Path); key != "" {
+			ack.Paths[key] = max(ack.Paths[key], it.Seq)
+			ack.AckSeq = max(ack.AckSeq, it.Seq)
 		}
 	}
-	// Keep the ack map bounded to active/recent paths.
-	if len(ack.Paths) > 64 {
-		cutoff := uint64(0)
-		if ack.AckSeq > 64 {
-			cutoff = ack.AckSeq - 64
-		}
+	if len(ack.Paths) > 64 && ack.AckSeq > 64 {
 		for k, s := range ack.Paths {
-			if s < cutoff {
+			if s < ack.AckSeq-64 {
 				delete(ack.Paths, k)
 			}
 		}
 	}
 	ack.UpdatedAtMS = time.Now().UnixMilli()
-	return writePrivateJSON(priorityAckPath(vk), ack)
+	return writePrivateJSON(volumeFile("rb-priority", vk, ".ack"), ack)
 }
 
-// HasPendingPriority reports whether mount currently has any unacknowledged
-// priority item with a sequence newer than lastSeq.
+// HasPendingPriority reports an item not served yet in a record newer than lastSeq.
 func HasPendingPriority(mount string, lastSeq uint64) bool {
-	rec, err := ReadPriority(mount)
-	if err != nil || rec.Seq <= lastSeq || len(rec.Items) == 0 {
+	if rec, _ := readQueue(mount); rec == nil || rec.Seq <= lastSeq || len(rec.Items) == 0 {
 		return false
 	}
 	pending, _ := PendingPriority(mount)
 	return len(pending) > 0
 }
 
-// IsDeckActive reports whether stream-sync recently observed an active deck
-// (PlayState, CUE preview, scratch, or platter movement). Missing or stale
-// state defaults to false so idle imports run at full speed.
+// IsDeckActive reports a deck stream-sync saw active within deckActivityTTL; no file or a stale
+// one is idle, so the job runs at full speed.
 func IsDeckActive() bool {
-	return isDeckActiveAt(time.Now())
-}
-
-func isDeckActiveAt(now time.Time) bool {
 	var act DeckActivity
-	if err := readPrivateJSON(deckActivityPath(), &act); err != nil {
+	if readPrivateJSON(deckActivityPath(), &act) != nil || !act.Active || act.UpdatedAtMS <= 0 {
 		return false
 	}
-	if !act.Active || act.UpdatedAtMS <= 0 {
-		return false
-	}
-	age := now.Sub(time.UnixMilli(act.UpdatedAtMS))
+	age := time.Since(time.UnixMilli(act.UpdatedAtMS))
 	return age >= -time.Second && age <= deckActivityTTL
 }

@@ -17,6 +17,14 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
+// Engine keeps each track's RGB overview outside m.db, in Database2/OverviewData/<uuid>/<id>.rgb
+// (qCompress'd: a 24-byte header and the bins), builds it only for a track that has none and never
+// checks it against its track again: one written for another track under the same id, or an empty
+// one, is drawn for good (real stick 2026-11-19: 26 of 123 files another song's, 140 empty).
+// PruneRGBOverviews removes such files from a library Engine does not have open (the guard runs it
+// on /data's library at boot), so that Engine builds them anew. .rb-bridge-rgb-verified names the
+// files it checked and m.db's size and time: when neither changed, m.db is not opened.
+
 const rgbVerifiedName = ".rb-bridge-rgb-verified"
 
 type rgbVerifiedEntry struct {
@@ -32,30 +40,24 @@ type rgbVerifiedCache struct {
 	Files      map[int64]rgbVerifiedEntry `json:"files"`
 }
 
-func loadRGBVerifiedCacheFull(dir string) (rgbVerifiedCache, bool) {
+func badUUID(uuid string) bool {
+	return uuid == "" || strings.ContainsAny(uuid, `/\`) || uuid == "." || uuid == ".."
+}
+
+func loadRGBVerifiedCache(dir string) (rgbVerifiedCache, bool) {
 	b, err := os.ReadFile(filepath.Join(dir, rgbVerifiedName))
 	if err != nil {
 		return rgbVerifiedCache{}, false
 	}
 	var c rgbVerifiedCache
-	if err := json.Unmarshal(b, &c); err != nil || c.UUID == "" || strings.ContainsAny(c.UUID, `/\`) || c.UUID == "." || c.UUID == ".." || c.Files == nil {
+	if err := json.Unmarshal(b, &c); err != nil || badUUID(c.UUID) || c.Files == nil {
 		return rgbVerifiedCache{}, false
 	}
 	return c, true
 }
 
-func loadRGBVerifiedCache(dir, uuid string) map[int64]rgbVerifiedEntry {
-	c, ok := loadRGBVerifiedCacheFull(dir)
-	if !ok || c.UUID != uuid {
-		return map[int64]rgbVerifiedEntry{}
-	}
-	return c.Files
-}
-
+// cleanMDBStat is m.db's size and time when no journal or WAL holds part of it.
 func cleanMDBStat(library string) (size, modTime int64, ok bool) {
-	if library == "" {
-		return 0, 0, false
-	}
 	for _, side := range []string{"-wal", "-journal"} {
 		if st, err := os.Stat(library + side); err == nil && st.Size() > 0 {
 			return 0, 0, false
@@ -69,100 +71,51 @@ func cleanMDBStat(library string) (size, modTime int64, ok bool) {
 }
 
 func saveRGBVerifiedCache(dir, library, uuid string, files map[int64]rgbVerifiedEntry) {
-	if uuid == "" || dir == "" {
-		return
-	}
 	ms, mm, _ := cleanMDBStat(library)
-	b, err := json.Marshal(rgbVerifiedCache{UUID: uuid, MDBSize: ms, MDBModTime: mm, Files: files})
-	if err != nil {
-		return
+	if b, err := json.Marshal(rgbVerifiedCache{UUID: uuid, MDBSize: ms, MDBModTime: mm, Files: files}); err == nil {
+		_ = writeRenamed(dir, rgbVerifiedName, b)
 	}
-	f, err := os.CreateTemp(dir, ".rb-rgb-verified-*")
-	if err != nil {
-		return
-	}
-	tmp := f.Name()
-	ok := false
-	defer func() {
-		if !ok {
-			_ = os.Remove(tmp)
-		}
-	}()
-	if err := f.Chmod(0o644); err != nil {
-		_ = f.Close()
-		return
-	}
-	if _, err := f.Write(b); err != nil {
-		_ = f.Close()
-		return
-	}
-	if err := f.Close(); err != nil {
-		return
-	}
-	if err := os.Rename(tmp, filepath.Join(dir, rgbVerifiedName)); err != nil {
-		return
-	}
-	ok = true
 }
 
-type rgbTrackMeta struct {
-	path string
-}
-
-func loadRGBTrackMeta(ctx context.Context, db *sql.DB) (map[int64]rgbTrackMeta, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, COALESCE(path,'') FROM Track`)
+// writeRenamed replaces dir/name with data, mode 0644, through a temp file and a rename.
+func writeRenamed(dir, name string, data []byte) error {
+	f, err := os.CreateTemp(dir, ".rb-tmp-*")
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer rows.Close()
-	out := map[int64]rgbTrackMeta{}
-	for rows.Next() {
-		var id int64
-		var m rgbTrackMeta
-		if err := rows.Scan(&id, &m.path); err != nil {
-			return nil, err
-		}
-		out[id] = m
+	err = f.Chmod(0o644)
+	if err == nil {
+		_, err = f.Write(data)
 	}
-	return out, rows.Err()
-}
-
-func loadTrackPaths(ctx context.Context, db *sql.DB) (map[int64]string, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, COALESCE(path,'') FROM Track`)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(f.Name(), filepath.Join(dir, name))
+	}
 	if err != nil {
-		return nil, err
+		_ = os.Remove(f.Name())
 	}
-	defer rows.Close()
-	out := map[int64]string{}
-	for rows.Next() {
-		var id int64
-		var p string
-		if err := rows.Scan(&id, &p); err != nil {
-			return nil, err
-		}
-		out[id] = p
-	}
-	return out, rows.Err()
+	return err
 }
 
-// Engine keeps each track's RGB overview outside m.db, in
-// Database2/OverviewData/<library uuid>/<track id>.rgb (qCompress'd, the overview's
-// 24-byte header and bins), and builds it only for a track that has none
-// (GET_RGB_OVERVIEW_SIZE = 0). A file is never checked against its track again: one
-// written for another track under the same id, or an empty one, is drawn for good
-// (real stick 2026-11-19: Fons et Origo drew Centauri's, 26 of 123 files another
-// song's, 140 empty). PruneRGBOverviews removes such files so Engine builds them anew
-// at the next load. It runs only before Engine has the library.
-//
-// library is the m.db the volume has once this mount is done; previous, when not "",
-// the m.db Engine wrote the files against (a publish replaces it): a file whose id
-// names another audio file in library than in previous goes.
+// rgbFileID is the track ID of an OverviewData entry, 0 for anything else.
+func rgbFileID(e os.DirEntry) int64 {
+	id, err := strconv.ParseInt(strings.TrimSuffix(e.Name(), ".rgb"), 10, 64)
+	if !strings.HasSuffix(e.Name(), ".rgb") || err != nil || id <= 0 || !e.Type().IsRegular() {
+		return 0
+	}
+	return id
+}
+
+// pruneRGBVerifiedFast is the prune of an m.db unchanged since the cache was written: empty files
+// go, and every other must be a file the cache names, as it was. handled is false otherwise.
 func pruneRGBVerifiedFast(ctx context.Context, dir, library string) (removed int, handled bool, err error) {
 	ms, mm, ok := cleanMDBStat(library)
 	if !ok || ms <= 0 {
 		return 0, false, nil
 	}
-	c, ok := loadRGBVerifiedCacheFull(dir)
+	c, ok := loadRGBVerifiedCache(dir)
 	if !ok || c.MDBSize != ms || c.MDBModTime != mm {
 		return 0, false, nil
 	}
@@ -177,31 +130,26 @@ func pruneRGBVerifiedFast(ctx context.Context, dir, library string) (removed int
 	dirty := false
 	seen := make(map[int64]bool, len(entries))
 	for _, e := range entries {
-		name := e.Name()
-		id, perr := strconv.ParseInt(strings.TrimSuffix(name, ".rgb"), 10, 64)
-		if !strings.HasSuffix(name, ".rgb") || perr != nil || id <= 0 || !e.Type().IsRegular() {
+		id := rgbFileID(e)
+		if id == 0 {
 			continue
 		}
 		if err := ctx.Err(); err != nil {
 			return removed, true, err
 		}
 		seen[id] = true
-		p := filepath.Join(root, name)
-		fi, infoErr := e.Info()
-		if infoErr != nil {
+		fi, err := e.Info()
+		if err != nil {
 			return removed, false, nil
 		}
 		if fi.Size() <= 8 {
-			if rerr := os.Remove(p); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-				return removed, true, rerr
+			if err := os.Remove(filepath.Join(root, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return removed, true, err
 			}
 			delete(c.Files, id)
 			dirty = true
 			removed++
-			continue
-		}
-		prev, exists := c.Files[id]
-		if !exists || prev.Size != fi.Size() || prev.ModTime != fi.ModTime().UnixNano() {
+		} else if prev, ok := c.Files[id]; !ok || prev.Size != fi.Size() || prev.ModTime != fi.ModTime().UnixNano() {
 			return removed, false, nil
 		}
 	}
@@ -217,11 +165,11 @@ func pruneRGBVerifiedFast(ctx context.Context, dir, library string) (removed int
 	return removed, true, nil
 }
 
-func PruneRGBOverviews(ctx context.Context, dir, library, previous string) (int, error) {
-	if previous == "" {
-		if removed, ok, err := pruneRGBVerifiedFast(ctx, dir, library); ok {
-			return removed, err
-		}
+// PruneRGBOverviews removes the OverviewData files of library (an m.db Engine does not have open)
+// that are not its tracks' own, and returns how many.
+func PruneRGBOverviews(ctx context.Context, dir, library string) (int, error) {
+	if removed, ok, err := pruneRGBVerifiedFast(ctx, dir, library); ok {
+		return removed, err
 	}
 	db, err := openReadOnly(library)
 	if err != nil {
@@ -232,84 +180,71 @@ func PruneRGBOverviews(ctx context.Context, dir, library, previous string) (int,
 	if err = db.QueryRowContext(ctx, `SELECT uuid FROM Information LIMIT 1`).Scan(&uuid); err != nil {
 		return 0, err
 	}
-	if uuid == "" || strings.ContainsAny(uuid, `/\`) || uuid == "." || uuid == ".." {
+	if badUUID(uuid) {
 		return 0, errors.New("rgb overviews: bad library uuid")
 	}
 	root := filepath.Join(dir, "OverviewData", uuid)
 	entries, err := os.ReadDir(root)
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, os.ErrNotExist) || err == nil && len(entries) == 0 {
 		return 0, nil
 	}
 	if err != nil {
 		return 0, err
 	}
-	if len(entries) == 0 {
-		return 0, nil
-	}
-	tracks, err := loadRGBTrackMeta(ctx, db)
+	paths := map[int64]string{}
+	rows, err := db.QueryContext(ctx, `SELECT id, COALESCE(path,'') FROM Track`)
 	if err != nil {
 		return 0, err
 	}
-	var before *sql.DB
-	var prevPaths map[int64]string
-	if previous != "" {
-		if _, err := os.Stat(previous); err == nil {
-			if before, err = openReadOnly(previous); err != nil {
-				return 0, err
-			}
-			defer before.Close()
-			if prevPaths, err = loadTrackPaths(ctx, before); err != nil {
-				return 0, err
-			}
+	for rows.Next() {
+		var id int64
+		var p string
+		if err = rows.Scan(&id, &p); err != nil {
+			rows.Close()
+			return 0, err
 		}
+		paths[id] = p
 	}
-	cached := loadRGBVerifiedCache(dir, uuid)
-	verified := make(map[int64]rgbVerifiedEntry, len(cached))
-	for k, v := range cached {
-		verified[k] = v
+	if err = rows.Close(); err != nil {
+		return 0, err
+	}
+	verified := map[int64]rgbVerifiedEntry{}
+	if c, ok := loadRGBVerifiedCache(dir); ok && c.UUID == uuid {
+		verified = c.Files
 	}
 	seen := make(map[int64]bool, len(entries))
-	dirty := false
-	removed := 0
+	dirty, removed := false, 0
 	var runErr error
 	for _, e := range entries {
-		name := e.Name()
-		id, err := strconv.ParseInt(strings.TrimSuffix(name, ".rgb"), 10, 64)
-		if !strings.HasSuffix(name, ".rgb") || err != nil || id <= 0 || !e.Type().IsRegular() {
+		id := rgbFileID(e)
+		if id == 0 {
 			continue
 		}
-		if err := ctx.Err(); err != nil {
-			runErr = err
+		if runErr = ctx.Err(); runErr != nil {
 			break
 		}
 		seen[id] = true
-		p := filepath.Join(root, name)
-		meta, exists := tracks[id]
-		if !exists {
-			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-				runErr = err
-				break
-			}
-			delete(verified, id)
-			dirty = true
-			removed++
-			continue
-		}
-		if prevPaths != nil {
-			prevPath, hadPrev := prevPaths[id]
-			if !hadPrev || prevPath != meta.path {
-				if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-					runErr = err
+		p := filepath.Join(root, e.Name())
+		path, stale := paths[id]
+		stale = !stale
+		if !stale {
+			fi, infoErr := e.Info()
+			if infoErr == nil && fi.Size() <= 8 {
+				stale = true
+			} else {
+				if prev, ok := verified[id]; infoErr == nil && ok && prev.Size == fi.Size() && prev.ModTime == fi.ModTime().UnixNano() && prev.Path == path {
+					continue
+				}
+				if stale, runErr = staleRGB(ctx, db, id, p); runErr != nil {
 					break
 				}
-				delete(verified, id)
-				dirty = true
-				removed++
-				continue
+				if !stale && infoErr == nil {
+					verified[id] = rgbVerifiedEntry{Size: fi.Size(), ModTime: fi.ModTime().UnixNano(), Path: path}
+					dirty = true
+				}
 			}
 		}
-		fi, infoErr := e.Info()
-		if infoErr == nil && fi.Size() <= 8 {
+		if stale {
 			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 				runErr = err
 				break
@@ -317,44 +252,16 @@ func PruneRGBOverviews(ctx context.Context, dir, library, previous string) (int,
 			delete(verified, id)
 			dirty = true
 			removed++
-			continue
-		}
-		if infoErr == nil {
-			if prev, ok := verified[id]; ok && prev.Size == fi.Size() && prev.ModTime == fi.ModTime().UnixNano() && prev.Path == meta.path {
-				continue
-			}
-		}
-		if stale, err := staleRGB(ctx, db, before, id, p); err != nil {
-			runErr = err
-			break
-		} else if stale {
-			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-				runErr = err
-				break
-			}
-			delete(verified, id)
-			dirty = true
-			removed++
-		} else if infoErr == nil {
-			verified[id] = rgbVerifiedEntry{
-				Size:    fi.Size(),
-				ModTime: fi.ModTime().UnixNano(),
-				Path:    meta.path,
-			}
-			dirty = true
 		}
 	}
 	if runErr == nil {
 		for id := range verified {
 			if !seen[id] {
 				delete(verified, id)
-				dirty = true
 			}
 		}
-		if len(verified) > 0 {
-			saveRGBVerifiedCache(dir, library, uuid, verified)
-		}
-	} else if dirty && len(verified) > 0 {
+	}
+	if len(verified) > 0 && (runErr == nil || dirty) {
 		saveRGBVerifiedCache(dir, library, uuid, verified)
 	}
 	return removed, runErr
@@ -368,7 +275,8 @@ func openReadOnly(p string) (*sql.DB, error) {
 	return db, err
 }
 
-func staleRGB(ctx context.Context, db, before *sql.DB, id int64, path string) (bool, error) {
+// staleRGB reports a file that is not the track's own overview.
+func staleRGB(ctx context.Context, db *sql.DB, id int64, path string) (bool, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return false, err
@@ -376,34 +284,21 @@ func staleRGB(ctx context.Context, db, before *sql.DB, id int64, path string) (b
 	if len(b) <= 8 { // qCompress of nothing: an overview Engine never got, drawn black
 		return true, nil
 	}
-	var file sql.NullString
 	var overview []byte
-	err = db.QueryRowContext(ctx, `SELECT t.path, p.overviewWaveFormData FROM Track t LEFT JOIN PerformanceData p ON p.trackId = t.id WHERE t.id = ?`, id).Scan(&file, &overview)
+	err = db.QueryRowContext(ctx, `SELECT p.overviewWaveFormData FROM Track t LEFT JOIN PerformanceData p ON p.trackId = t.id WHERE t.id = ?`, id).Scan(&overview)
 	if errors.Is(err, sql.ErrNoRows) {
 		return true, nil // the id names no track any more
 	}
 	if err != nil {
 		return false, err
 	}
-	if before != nil {
-		var was sql.NullString
-		err = before.QueryRowContext(ctx, `SELECT path FROM Track WHERE id = ?`, id).Scan(&was)
-		if errors.Is(err, sql.ErrNoRows) || err == nil && was != file {
-			return true, nil // Engine wrote it for another track of this id
-		}
-		if err != nil {
-			return false, err
-		}
-	}
-	// The old shadow and rekordbox replays answered Engine's RGB overview with the stored
-	// 3-band one, which Engine kept and drew in the wrong colours (LEFT, 2026-11-20: 184 of
-	// 207 shadow copies' files had exactly their row's bins; none of the 151 Engine made did).
+	// The old shadow and rekordbox replays answered Engine with the stored 3-band overview, which
+	// Engine kept and drew in the wrong colours (2026-11-20: 184 of 207 shadow copies' files).
 	if a, b := overviewBins(b), overviewBins(overview); a != nil && bytes.Equal(a, b) {
 		return true, nil
 	}
-	// Safety net for files gone stale before any of this: both overviews have 1024 bins,
-	// so their samples per bin say how long a track they are of. What decoders trim
-	// (< 16384 samples) moves it by at most 16; another song by far more.
+	// Both overviews have 1024 bins, so their samples per bin say how long a track they are of:
+	// what decoders trim moves it by at most 16, another song by far more.
 	got, own := rgbSamplesPerBin(b), rgbSamplesPerBin(overview)
 	return got > 0 && own > 0 && math.Abs(got-own) > max(16, own*0.002), nil
 }
@@ -444,11 +339,11 @@ func RGBOverview(ctx context.Context, dir, library, rel string) ([]byte, error) 
 	if err = db.QueryRowContext(ctx, `SELECT (SELECT uuid FROM Information LIMIT 1), id FROM Track WHERE path = ? ORDER BY id DESC LIMIT 1`, rel).Scan(&uuid, &id); err != nil {
 		return nil, err
 	}
-	if uuid == "" || strings.ContainsAny(uuid, `/\`) || uuid == "." || uuid == ".." {
+	if badUUID(uuid) {
 		return nil, errors.New("rgb overview: bad library uuid")
 	}
 	path := filepath.Join(dir, "OverviewData", uuid, strconv.FormatInt(id, 10)+".rgb")
-	if stale, err := staleRGB(ctx, db, nil, id, path); err != nil {
+	if stale, err := staleRGB(ctx, db, id, path); err != nil {
 		return nil, err
 	} else if stale {
 		return nil, os.ErrNotExist
@@ -476,8 +371,7 @@ func ValidRGBOverview(raw []byte) bool {
 	return bins > 0 && bins <= 1<<16 && binary.BigEndian.Uint64(raw[8:16]) == bins && uint64(len(raw)) == 24+3*bins+3
 }
 
-// hasColorOverviewWaveform reports whether a carries a rekordbox colour
-// overview section (PWV6 in .2EX or PWV4 in .EXT).
+// hasColorOverviewWaveform: a has a colour overview (PWV6 of a .2EX, PWV4 of an .EXT).
 func hasColorOverviewWaveform(a *rekordbox.Analysis) bool {
 	if a == nil {
 		return false
@@ -494,10 +388,7 @@ func hasColorOverviewWaveform(a *rekordbox.Analysis) bool {
 	return false
 }
 
-// selectRGBOverviewWaveform chooses the best ANLZ waveform for Engine's
-// Database2/OverviewData/<uuid>/<id>.rgb sidecar: PWV6 (.2EX colour overview)
-// first, PWV4 (.EXT colour overview) second, then remaining waveforms as
-// fallback so every analysed track gets a valid non-empty mini waveform.
+// selectRGBOverviewWaveform is the waveform the .rgb file is made of: PWV6, then PWV4, then any.
 func selectRGBOverviewWaveform(a *rekordbox.Analysis) *rekordbox.Waveform {
 	if a == nil {
 		return nil
@@ -525,20 +416,15 @@ func overviewRGBEntry(w rekordbox.Waveform, i int) [3]byte {
 	case "PWV6", "PWV4", "PWV5", "PWV7":
 		return WaveRGB(w, i)
 	default:
-		// Monochrome blue preview (PWAV/PWV2/PWV3): preserve silhouette with a
-		// rekordbox-blue tint so the RGB sidecar is both readable and distinct
-		// from the grayscale 3-band fallback overviewWaveFormData.
+		// A monochrome preview (PWAV/PWV2/PWV3), tinted rekordbox blue.
 		v := WaveRGB(w, i)[0]
 		return [3]byte{v / 4, v / 2, v}
 	}
 }
 
-// EncodeRGBOverview builds the qCompress'd 3,099-byte Engine RGB overview body
-// (>QQd 1024, 1024, samplesPerBin + 1024 RGB triples + 3-byte per-channel
-// maximum trailer) from rekordbox's colour waveform (PWV6 in .2EX, PWV4 in
-// .EXT, or tinted fallback). storedOverview, when present, supplies the exact
-// samplesPerBin and ensures the generated bins never equal the stored 3-band
-// overview blob (which PruneRGBOverviews intentionally rejects).
+// EncodeRGBOverview is the qCompress'd .rgb body (>QQd 1024, 1024, samplesPerBin; 1024 RGB
+// triples; the channels' maxima) from rekordbox's colour waveform. storedOverview, the row's
+// 3-band overview, gives samplesPerBin; the bins never equal its bins (PruneRGBOverviews' rule).
 func EncodeRGBOverview(t rekordbox.Track, a *rekordbox.Analysis, storedOverview []byte) ([]byte, error) {
 	wave := selectRGBOverviewWaveform(a)
 	if wave == nil {
@@ -589,11 +475,7 @@ func EncodeRGBOverview(t rekordbox.Track, a *rekordbox.Analysis, storedOverview 
 		raw[off], raw[off+1], raw[off+2] = peak[0], peak[1], peak[2]
 	}
 
-	// Never emit bins byte-identical to PerformanceData.overviewWaveFormData,
-	// because PruneRGBOverviews treats equal bins as an invalid 3-band replay.
-	// This only occurs when an export lacks PWV6/PWV7/PWV5 and both paths read
-	// the same PWV4 section; a 1-LSB adjustment on the peak bin is invisible and
-	// preserves full fidelity.
+	// Equal bins (both made of one PWV4) would be pruned: one LSB of the first lit bin moves.
 	if storedBins := overviewBins(storedOverview); storedBins != nil && bytes.Equal(raw[24:24+bins*3], storedBins) {
 		adjusted := false
 		for i := 0; i < bins*3; i++ {
@@ -622,10 +504,9 @@ func EncodeRGBOverview(t rekordbox.Track, a *rekordbox.Analysis, storedOverview 
 	return QCompress(raw)
 }
 
-// WriteRGBOverviewAtomic atomically writes a compressed RGB overview sidecar to
-// <dir>/OverviewData/<uuid>/<trackID>.rgb.
+// WriteRGBOverviewAtomic replaces <dir>/OverviewData/<uuid>/<trackID>.rgb with compressed.
 func WriteRGBOverviewAtomic(dir, uuid string, trackID int64, compressed []byte) error {
-	if uuid == "" || strings.ContainsAny(uuid, `/\`) || uuid == "." || uuid == ".." {
+	if badUUID(uuid) {
 		return errors.New("rgb overview: bad library uuid")
 	}
 	if trackID <= 0 || len(compressed) <= 8 {
@@ -635,35 +516,9 @@ func WriteRGBOverviewAtomic(dir, uuid string, trackID int64, compressed []byte) 
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
-	dst := filepath.Join(outDir, strconv.FormatInt(trackID, 10)+".rgb")
-	if st, err := os.Lstat(dst); err == nil && st.Mode()&os.ModeSymlink != 0 {
+	name := strconv.FormatInt(trackID, 10) + ".rgb"
+	if st, err := os.Lstat(filepath.Join(outDir, name)); err == nil && st.Mode()&os.ModeSymlink != 0 {
 		return errors.New("rgb overview: refusing symlink target")
 	}
-	f, err := os.CreateTemp(outDir, ".rgb-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	ok := false
-	defer func() {
-		if !ok {
-			_ = os.Remove(tmp)
-		}
-	}()
-	if err := f.Chmod(0o644); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if _, err := f.Write(compressed); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		return err
-	}
-	ok = true
-	return nil
+	return writeRenamed(outDir, name, compressed)
 }
