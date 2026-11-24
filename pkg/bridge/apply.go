@@ -51,15 +51,8 @@ func (w *window) run() (err error) {
 	if err = w.open(); err != nil {
 		return err
 	}
-	if w.snap.Stamp != w.view.Stamp {
-		// The job compares every track's files with what was built, and the rows' source IDs become
-		// this export's: a re-export renumbers them, and write-back finds a track's rows by them.
+	if w.snap.Stamp != w.view.Stamp { // the job compares every track's files with what was built
 		w.snap.Pending.Verify, w.dirty = true, true
-		for i := range w.view.Tracks {
-			if t := w.snap.Tracks[w.view.Tracks[i].Key]; t != nil {
-				t.Refs = w.view.Tracks[i].Refs
-			}
-		}
 	}
 	if w.lib == nil {
 		err = w.build()
@@ -75,9 +68,8 @@ func (w *window) run() (err error) {
 	return err
 }
 
-// open opens the stick's library and the snapshot of what the bridge has in it. w.lib stays nil
-// when there is none to keep: no m.db, or Engine's empty skeleton. A skeleton with rows (Engine
-// adds one for each track loaded from the export) is a library, and its rows stay Engine's.
+// open opens the stick's library and its snapshot. w.lib stays nil when there is no library to
+// keep: no m.db, or Engine's empty skeleton (one with rows Engine added is a library).
 func (w *window) open() error {
 	db := filepath.Join(w.dir, "m.db")
 	if enginedb.OpenElsewhere(db) != 0 {
@@ -125,8 +117,8 @@ func (w *window) open() error {
 	return nil
 }
 
-// settle finishes a window cut around its commit: its next snapshot becomes the snapshot when the
-// library has that commit, and is dropped otherwise (design section 5).
+// settle finishes a window cut around its commit: its next snapshot is promoted when the library
+// has that commit, and dropped otherwise (design section 5).
 func (w *window) settle() error {
 	claims, err := rbstate.LoadNext(w.dir)
 	if err != nil {
@@ -146,8 +138,8 @@ func (w *window) settle() error {
 	return nil
 }
 
-// reconcile drops from the snapshot what Engine removed from the library and takes the spelling
-// another part of EngineX gave a row's path (#322). It leaves w.index: every row by key.
+// reconcile drops from the snapshot what Engine removed and takes the spelling another part of
+// EngineX gave a row's path (#322). It fills w.index.
 func (w *window) reconcile() (err error) {
 	if w.index, err = w.lib.TrackIndex(w.ctx); err != nil {
 		return err
@@ -195,10 +187,9 @@ func (w *window) note(vt *ViewTrack, id int64, native bool) *rbstate.Track {
 	return t
 }
 
-// noteSync keeps write-back's note of a row (Track.Edit, Synced) so that write-back never reads a
-// row the bridge alone has written. A row written now is read back, and its digest kept only when
-// nobody else wrote the row since the last note and nothing of the deck's is in it. A row left
-// unwritten keeps its note when it is in step, and is dated without a read otherwise.
+// noteSync keeps write-back's note of a row (Edit, Synced), so that write-back does not read a
+// row only the bridge wrote. A written row is read back; its digest stands only when the row was
+// in step before. An unwritten row keeps its note in step, and is dated without a read otherwise.
 func (w *window) noteSync(b *enginedb.Batch, t *rbstate.Track, written bool) error {
 	if t.Native {
 		return nil
@@ -223,8 +214,7 @@ func (w *window) noteSync(b *enginedb.Batch, t *rbstate.Track, written bool) err
 	return nil
 }
 
-// commit saves the snapshot the commit leads to as the next snapshot, runs the commit, and
-// promotes the snapshot (design section 5).
+// commit saves the next snapshot, runs the commit and promotes the snapshot (design section 5).
 func (w *window) commit(id int64, do func() error) error {
 	w.count()
 	w.snap.Applied, w.snap.Commit = time.Now().Unix(), id
@@ -249,8 +239,7 @@ func (w *window) commitBatch(b *enginedb.Batch) error {
 	return w.commit(b.CommitID(), func() error { return b.Commit(w.ctx) })
 }
 
-// saved notes that the stick has the snapshot as it is in memory; an older build's state, read
-// by adopt, goes once that is so.
+// saved notes that the stick has the snapshot in memory; an older build's state then goes.
 func (w *window) saved() {
 	w.head, w.dirty = w.snap.Header, false
 	dropOldState(w.dir)
@@ -269,7 +258,7 @@ func (w *window) saveIfChanged() error {
 	return nil
 }
 
-// count fills the snapshot's header: what it was made from and what is pending.
+// count fills the snapshot's header (what it was made from, what is pending) and its tracks' refs.
 func (w *window) count() {
 	s := w.snap
 	s.Header.Tracks, s.Header.Lists = len(s.Tracks), len(s.Lists)
@@ -280,7 +269,11 @@ func (w *window) count() {
 	p := rbstate.Pending{Verify: s.Pending.Verify}
 	for i := range w.view.Tracks {
 		vt := &w.view.Tracks[i]
-		switch t := s.Tracks[vt.Key]; {
+		t := s.Tracks[vt.Key]
+		if t != nil {
+			t.Refs = vt.Refs // this export's IDs: a re-export renumbers them, and write-back finds rows by them
+		}
+		switch {
 		case t != nil && (t.Native || t.Perf == rbstate.PerfMissing):
 		case t == nil || t.EngineID == 0 || t.Row != vt.Hash:
 			p.Rows++
@@ -296,8 +289,8 @@ func (w *window) count() {
 	s.Pending = p
 }
 
-// build makes the library of a stick that has none on the deck's own disk from the export alone,
-// and puts it on the stick with one rename (design 1.1 rule 1).
+// build makes a stick's first library on the deck's disk from the export alone, and puts it on
+// the stick with one rename (design 1.1 rule 1).
 func (w *window) build() error {
 	stage, err := rbstate.StageRoot()
 	if err != nil {
@@ -344,9 +337,8 @@ func (w *window) build() error {
 	return nil
 }
 
-// putLists writes the view's lists at idx and notes them: a new one is added, a changed one gets
-// its entries and its place again. The entries are the tracks that have a row; a list that lacks
-// one is noted "partial" and written again once they have.
+// putLists writes the view's lists at idx and notes them. Entries are the tracks that have a row;
+// a list that lacks one is noted "partial" and written again later.
 func (w *window) putLists(b *enginedb.Batch, idx []int) error {
 	id := func(key string) int64 {
 		if l := w.snap.Lists[key]; l != nil {
@@ -409,9 +401,8 @@ func (w *window) putLists(b *enginedb.Batch, idx []int) error {
 	return nil
 }
 
-// apply writes a plan: in one transaction rows the export no longer has go, rows of moved files
-// follow them, new tracks get rows while the window has time, and changed lists are written. Rows
-// whose export fields changed follow in their own transactions (updateRows).
+// apply writes a plan: removed, moved and new rows (while the window has time) and the lists in
+// one transaction, then the rows whose export fields changed (updateRows).
 func (w *window) apply(p *Plan) error {
 	s := w.snap
 	if w.partial || w.linkOnly { // nothing is removed of a library that was not read
@@ -420,7 +411,8 @@ func (w *window) apply(p *Plan) error {
 		p.RemoveLists = slices.DeleteFunc(p.RemoveLists, func(k string) bool { return w.partial || !strings.HasPrefix(k, viewLink) })
 	}
 	w.st.done("diff", "+%d ~%d >%d -%d tracks, %d lists to write, %d to remove", len(p.AddTracks), len(p.UpdateTracks), len(p.Moves), len(p.RemoveTracks), len(p.PutLists), len(p.RemoveLists))
-	// A file whose new place has a row of Engine's own leaves its old row; the new one stays Engine's.
+	// A file that has a row the bridge did not make, under any spelling, keeps it: lists refer to
+	// it, the bridge never writes it (#252). A file that moved onto one leaves its old row.
 	p.Moves = slices.DeleteFunc(p.Moves, func(m Move) bool {
 		_, native := w.index[w.view.Tracks[m.New].Key]
 		if native {
@@ -437,7 +429,7 @@ func (w *window) apply(p *Plan) error {
 	}
 	defer b.Rollback()
 	for _, key := range p.RemoveTracks {
-		if t := s.Tracks[key]; t.EngineID != 0 && !t.Native {
+		if t := s.Tracks[key]; t.EngineID != 0 {
 			if err = b.DeleteTrack(w.ctx, t.EngineID); err != nil {
 				return err
 			}
@@ -459,8 +451,6 @@ func (w *window) apply(p *Plan) error {
 		s.Tracks[vt.Key] = t
 		p.UpdateTracks = append(p.UpdateTracks, m.New)
 	}
-	// A file that has a row the bridge did not make, under any spelling of its path, keeps that
-	// row: lists refer to it, the bridge never writes it (#252).
 	p.AddTracks = slices.DeleteFunc(p.AddTracks, func(at int) bool {
 		row, ok := w.index[w.view.Tracks[at].Key]
 		if ok {
@@ -468,7 +458,7 @@ func (w *window) apply(p *Plan) error {
 		}
 		return ok
 	})
-	const chunk = 100 // new rows a statement batch, while the window has time for them and the lists
+	const chunk = 100
 	for at := 0; at < len(p.AddTracks); at += chunk {
 		if !w.st.must(2 * time.Second) {
 			log.Printf("rb-bridge: %d new tracks wait for the next window", len(p.AddTracks)-at)
@@ -518,8 +508,8 @@ func (w *window) apply(p *Plan) error {
 	return w.updateRows(p.UpdateTracks)
 }
 
-// inBatches calls each for the items 0..n-1 while ok(i) allows, at most size a transaction, and
-// committed after each commit. It returns how many items it went through.
+// inBatches calls each for items 0..n-1 while ok(i), at most size a transaction, and committed
+// after each commit. It returns how many items it went through.
 func (w *window) inBatches(n, size int, ok func(i int) bool, each func(b *enginedb.Batch, i int) error, committed func(done int) error) (int, error) {
 	i := 0
 	for i < n && ok(i) {
@@ -547,9 +537,8 @@ func (w *window) inBatches(n, size int, ok func(i int) bool, each func(b *engine
 // updateBatch is how many rows one transaction gives the export's fields again.
 var updateBatch = 1000
 
-// updateRows gives the rows whose export fields changed those fields. A take-over or a retag in
-// rekordbox changes thousands, so they follow the committed rows and lists a batch a transaction:
-// the first batch is owed like a new row, the rest is done while the window has time.
+// updateRows gives rows their changed export fields after the rows and lists are committed, a
+// batch a transaction (a take-over changes thousands): the first batch is owed, the rest optional.
 func (w *window) updateRows(idx []int) error {
 	differed := 0
 	done, err := w.inBatches(len(idx), updateBatch, func(i int) bool {
@@ -568,7 +557,7 @@ func (w *window) updateRows(idx []int) error {
 		if changed {
 			differed++
 		}
-		return w.noteSync(b, t, changed) // a row that held the fields was not written, nor is it read
+		return w.noteSync(b, t, changed)
 	}, func(int) error { return nil })
 	if w.res.Updated += done; len(idx) > 0 {
 		w.st.done("update", "%d of %d rows got the export's fields (%d held others)", done, len(idx), differed)
@@ -576,9 +565,8 @@ func (w *window) updateRows(idx []int) error {
 	return err
 }
 
-// applyStaged writes what the background job has staged, the tracks the DJ asked for first, a
-// batch a transaction, until the stage is empty or the window's optional time is up. A track
-// without a row stays staged until a window has given it one.
+// applyStaged writes what the job staged, the tracks the DJ asked for first, a batch a
+// transaction, while the window has optional time. A track without a row yet stays staged.
 func (w *window) applyStaged() error {
 	stage, err := rbstate.OpenStage(w.lib.UUID())
 	if err != nil {
@@ -602,11 +590,7 @@ func (w *window) applyStaged() error {
 		}
 	}
 	keys = w.inApplyOrder(keys)
-	type rgb struct {
-		id   int64
-		body []byte
-	}
-	var overviews []rgb
+	overviews := map[int64][]byte{} // written once their rows are committed
 	applied, kept, degraded, gone, dropped := 0, 0, 0, 0, 0
 	_, err = w.inBatches(len(keys), applyBatch, func(int) bool { return w.st.more(applyReserve) }, func(b *enginedb.Batch, i int) error {
 		key := keys[i]
@@ -616,7 +600,7 @@ func (w *window) applyStaged() error {
 		case t != nil && t.Native:
 			done = append(done, key)
 			return nil
-		case e.Missing: // the file is gone from the stick: the track has no row until it is back
+		case e.Missing: // no row until the file is back
 			if t != nil && t.EngineID != 0 {
 				if err := b.DeleteTrack(w.ctx, t.EngineID); err != nil {
 					return err
@@ -637,7 +621,6 @@ func (w *window) applyStaged() error {
 			return err
 		}
 		if full.Rel != "" && full.Rel != t.Rel && rbstate.FoldPath(full.Rel) == key {
-			// The file's own spelling on the volume, which Engine needs to open it.
 			if err = b.MoveTracks(w.ctx, map[int64]string{t.EngineID: full.Rel}); err != nil {
 				return err
 			}
@@ -659,7 +642,7 @@ func (w *window) applyStaged() error {
 				kept++
 			}
 			if len(full.RGB) > 0 {
-				overviews = append(overviews, rgb{t.EngineID, full.RGB})
+				overviews[t.EngineID] = full.RGB
 			}
 		}
 		if len(full.Art) > 0 {
@@ -671,11 +654,12 @@ func (w *window) applyStaged() error {
 		done = append(done, key)
 		return w.noteSync(b, t, true)
 	}, func(at int) error {
-		for _, o := range overviews {
-			writeOverview(w.dir, w.lib.UUID(), o.id, o.body)
+		for id, body := range overviews {
+			writeOverview(w.dir, w.lib.UUID(), id, body)
 		}
+		clear(overviews)
 		err := stage.Drop(done...)
-		dropped, overviews, done = dropped+len(done), overviews[:0], done[:0]
+		dropped, done = dropped+len(done), done[:0]
 		if w.o.Progress != nil {
 			w.o.Progress(at, len(keys))
 		}
@@ -694,8 +678,8 @@ func (w *window) applyStaged() error {
 	return nil
 }
 
-// writeOverview puts a track's list waveform where Engine reads it unless one is there (Engine's
-// own, or the job's). The file is not read: on a USB 2.0 stick that was half a window's time.
+// writeOverview puts a track's list waveform where Engine reads it unless one is there; it is not
+// read (on a USB 2.0 stick that was half a window's time).
 func writeOverview(dir, uuid string, id int64, body []byte) {
 	if st, err := os.Stat(filepath.Join(dir, "OverviewData", uuid, fmt.Sprintf("%d.rgb", id))); err == nil && st.Size() > 4 {
 		return
