@@ -18,7 +18,8 @@ import (
 )
 
 const (
-	writeBackMarkName = ".rb-bridge-writeback"
+	writeBackMarkName  = ".rb-bridge-writeback"
+	writeBackRetryName = ".rb-bridge-writeback-retry"
 )
 
 func init() {
@@ -242,7 +243,14 @@ func stageChanges(ctx context.Context, mount string, resolver *compat.Resolver, 
 			return nil, nil, err
 		}
 		tm.bytes += n
-		data, err := pdbMetadataBytes(ctx, full, pdbMeta)
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		raw, err := os.ReadFile(full)
+		if err != nil {
+			return nil, nil, err
+		}
+		data, err := rekordbox.RewritePDBMetadata(raw, pdbMeta)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -479,5 +487,7 @@ func CleanWriteBackLeftovers(mount string) int {
 		}
 	}
 	_ = removeFile(mark)
+	_ = os.WriteFile(writeBackRetryPath(mount), []byte("replay\n"), 0o600)
+	refreshRecoveredSnapshotStamp(mount)
 	return n
 }

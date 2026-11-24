@@ -211,6 +211,33 @@ func NoteWriteBack(mount string, written map[string][]rbstate.FileSig, rows map[
 	return snap.Save(dbDir)
 }
 
+func writeBackRetryPath(mount string) string {
+	return filepath.Join(mount, "Engine Library", "Database2", writeBackRetryName)
+}
+
+// refreshRecoveredSnapshotStamp lets a pass replay the deck edit after cleanup has put a
+// complete staged export back over the original. The track baselines stay untouched.
+func refreshRecoveredSnapshotStamp(mount string) {
+	dbDir := filepath.Join(mount, "Engine Library", "Database2")
+	snap, err := rbstate.Load(dbDir)
+	if err != nil {
+		return
+	}
+	resolver, err := compat.NewResolver(mount)
+	if err != nil {
+		return
+	}
+	sources, err := FindSources(resolver, mount)
+	if err != nil {
+		return
+	}
+	snap.Header.Sources = sources
+	snap.Header.Stamp = rbstate.Stamp(snap.Header.Layout, sources, stagedStamp(mount))
+	if err := snap.Save(dbDir); err == nil {
+		_ = rbstate.ReplaceFile(writeBackRetryPath(mount), []byte("replay\n"))
+	}
+}
+
 func mountRootWritable(mount string) bool {
 	var st syscall.Statfs_t
 	return syscall.Statfs(mount, &st) == nil && st.Flags&unix_ST_RDONLY == 0
@@ -286,13 +313,14 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		}
 	}
 
+	_, recovery := os.Stat(writeBackRetryPath(absMount))
 	importState, e := ImportState(absMount)
 	if e != nil {
 		tm.skipReason = "import state unavailable"
 		return res, nil
 	}
-	if !importState.Matches() || !importState.Header.Pending.None() {
-		if !importState.Matches() {
+	if (recovery != nil && !importState.Matches()) || !importState.Header.Pending.None() {
+		if recovery != nil && !importState.Matches() {
 			tm.skipReason = "import stamp does not match the current export"
 		} else {
 			tm.skipReason = "import has pending work"
@@ -356,6 +384,9 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 			return res, errNotQuiet
 		}
 		opts.Session.add(insync)
+		if recovery == nil {
+			_ = rbstate.RemoveFile(writeBackRetryPath(absMount))
+		}
 		return res, nil
 	}
 
@@ -363,7 +394,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	if err != nil {
 		return res, err
 	}
-	changes, matched, err := buildChanges(ctx, resolver, libraries, candidates.rows)
+	changes, matched, err := buildChanges(ctx, resolver, libraries, candidates.rows, recovery == nil)
 	if err != nil {
 		return res, err
 	}
@@ -377,7 +408,11 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		}
 	}
 	if len(changes) == 0 {
-		return res, NoteWriteBack(absMount, nil, opts.Session.take(insync))
+		err := NoteWriteBack(absMount, nil, opts.Session.take(insync))
+		if err == nil {
+			_ = rbstate.RemoveFile(writeBackRetryPath(absMount))
+		}
+		return res, err
 	}
 
 	dateDir := opts.DateDir
@@ -435,10 +470,11 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		}
 		written[key] = sigs
 	}
+	writeBackCut("state")
 	if err := NoteWriteBack(absMount, written, opts.Session.take(insync)); err != nil {
 		return res, err
 	}
-	writeBackCut("state")
+	_ = rbstate.RemoveFile(writeBackRetryPath(absMount))
 	finished = true
 	res.TracksChanged = len(changes)
 	return res, nil
@@ -545,7 +581,8 @@ func readNeededLibraries(ctx context.Context, mount string, rows []dbCandidate, 
 	return out, nil
 }
 
-func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbstate.LibraryKind]SourceLibrary, rows []dbCandidate) ([]trackChange, map[string]bool, error) {
+func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbstate.LibraryKind]SourceLibrary, rows []dbCandidate, retry ...bool) ([]trackChange, map[string]bool, error) {
+	recovery := len(retry) > 0 && retry[0]
 	var changes []trackChange
 	matched := make(map[string]bool, len(rows))
 	for _, row := range rows {
@@ -561,7 +598,7 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 				continue
 			}
 			for _, tr := range src.Lib.Tracks {
-				if tr.ID != ref.ID || rbstate.FoldPath(tr.Path) != row.key || ref.RecordHash != "" && tr.RecordHash != ref.RecordHash {
+				if tr.ID != ref.ID || rbstate.FoldPath(tr.Path) != row.key || !recovery && ref.RecordHash != "" && tr.RecordHash != ref.RecordHash {
 					continue
 				}
 				refs[ref.Kind] = tr
@@ -577,7 +614,10 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 		}
 		matched[row.key] = true
 		change := trackChange{candidate: row, refs: refs, metadata: metadata}
-		needsCue := len(row.track.Written) == 0 || !bytes.Equal(row.writtenDigest, row.track.Written)
+		// A candidate already differs in the digest of the deck-editable fields. Parse its
+		// performance data whenever it has track data so a deletion or active-loop change can
+		// be compared with the ANLZ even when the imported baseline is unchanged.
+		needsCue := len(row.trackData) > 0
 		if needsCue && len(row.trackData) > 0 && primary.AnalysisPath != "" {
 			deck, err := enginedb.ParseDeckCuesAndLoops(row.trackData, row.quickCues, row.loops, row.activeLoops)
 			if err == nil {
@@ -585,7 +625,7 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 				if ok {
 					orig := readANLZCues(resolver, primary.AnalysisPath)
 					legacyMP3 := len(row.track.Written) == 0 && strings.HasSuffix(strings.ToLower(primary.Path), ".mp3")
-					next := mergeEngineCuesOpts(orig, deck, offset, legacyMP3)
+					next := mergeEngineCues(orig, deck, offset, legacyMP3)
 					change.cues = next
 					change.cuesDiff = !cuesEquivalent(orig, next)
 					for kind, sourceTrack := range refs {
@@ -593,6 +633,17 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 							change.cuesDiff = true
 						}
 					}
+					change.analysis = primary.AnalysisPath
+				}
+			}
+		}
+		if !change.cuesDiff {
+			if recovery {
+				for kind := range refs {
+					change.metadata[kind] = true
+				}
+				if primary.AnalysisPath != "" && len(row.trackData) > 0 {
+					change.cuesDiff = true
 					change.analysis = primary.AnalysisPath
 				}
 			}
@@ -683,17 +734,6 @@ func readANLZCues(r *compat.Resolver, analysisPath string) []rekordbox.Cue {
 		return nil
 	}
 	return merged.Cues
-}
-
-func pdbMetadataBytes(ctx context.Context, path string, updates map[uint32]rekordbox.Metadata) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return rekordbox.RewritePDBMetadata(raw, updates)
 }
 
 func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) (int64, error) {
@@ -799,6 +839,31 @@ func absDiffU32(a, b uint32) uint32 {
 	return b - a
 }
 
+var (
+	engineDefaultHotCueColor = [4]byte{255, 0, 255, 0}
+	engineDefaultLoopColor   = [4]byte{255, 255, 127, 0}
+)
+
+func uncolouredCue(c rekordbox.Cue) bool {
+	return c.Color == ([4]byte{}) && c.ColorCode == 0 && c.ColorID == 0
+}
+
+func preserveUncolouredColor(orig rekordbox.Cue, color [4]byte, startMS, endMS uint32, loop bool) bool {
+	if !uncolouredCue(orig) || absDiffU32(orig.TimeMS, startMS) > 2 {
+		return false
+	}
+	if loop && (!orig.Loop || absDiffU32(orig.EndMS, endMS) > 2) {
+		return false
+	}
+	if !loop && orig.Loop {
+		return false
+	}
+	if loop {
+		return color == engineDefaultLoopColor
+	}
+	return color == engineDefaultHotCueColor
+}
+
 func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offset float64, legacy bool) []rekordbox.Cue {
 	origHot := map[uint32]rekordbox.Cue{}
 	var memPoints, memLoops []rekordbox.Cue
@@ -850,10 +915,17 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offset float6
 			}
 			code := rekordbox.NearestCueColorCode(rgb)
 			var num, den uint16
-			if oc, ok := origHot[pad]; ok && oc.Loop && absDiffU32(oc.TimeMS, start) <= 2 && absDiffU32(oc.EndMS, end) <= 2 {
-				num, den = oc.LoopNumerator, oc.LoopDenominator
-				if oc.Color == rgb && oc.ColorCode != 0 {
-					code = oc.ColorCode
+			if oc, ok := origHot[pad]; ok && oc.Loop {
+				if hc.Samples <= 0.5 && float64(oc.TimeMS)*deck.SampleRate/1000 <= offset+0.5 && absDiffU32(oc.EndMS, end) <= 2 && oc.TimeMS < end {
+					start = oc.TimeMS
+				}
+				if absDiffU32(oc.TimeMS, start) <= 2 && absDiffU32(oc.EndMS, end) <= 2 {
+					num, den = oc.LoopNumerator, oc.LoopDenominator
+					if preserveUncolouredColor(oc, rgb, start, end, true) {
+						rgb, code = [4]byte{}, 0
+					} else if oc.Color == rgb && oc.ColorCode != 0 {
+						code = oc.ColorCode
+					}
 				}
 			}
 			out = append(out, rekordbox.Cue{HotCue: pad, TimeMS: start, EndMS: end, Loop: true, Active: lp.Active, Name: name, Color: rgb, ColorCode: code, LoopNumerator: num, LoopDenominator: den, Extended: true})
@@ -867,7 +939,9 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offset float6
 			} else if legacy && hc.Name == "" && oc.Name == "" && absDiffU32(oc.TimeMS, start) <= 60 {
 				start = oc.TimeMS
 			}
-			if oc.Color == rgb && oc.ColorCode != 0 {
+			if preserveUncolouredColor(oc, rgb, start, 0, false) {
+				rgb, code = [4]byte{}, 0
+			} else if oc.Color == rgb && oc.ColorCode != 0 {
 				code = oc.ColorCode
 			}
 		}
@@ -885,8 +959,13 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offset float6
 		id := rekordbox.NearestMemoryColorID(lp.Color)
 		var num, den uint16
 		for _, oc := range memLoops {
+			if lp.StartSamples <= 0.5 && float64(oc.TimeMS)*deck.SampleRate/1000 <= offset+0.5 && absDiffU32(oc.EndMS, end) <= 2 && oc.TimeMS < end {
+				start = oc.TimeMS
+			}
 			if absDiffU32(oc.TimeMS, start) <= 2 && absDiffU32(oc.EndMS, end) <= 2 {
-				if oc.ColorID != 0 {
+				if preserveUncolouredColor(oc, lp.Color, start, end, true) {
+					id = 0
+				} else if oc.ColorID != 0 {
 					id = oc.ColorID
 				}
 				num, den = oc.LoopNumerator, oc.LoopDenominator
@@ -900,6 +979,3 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offset float6
 }
 
 // Keep the old helper name used by test adapters and callers.
-func mergeEngineCuesOpts(orig []rekordbox.Cue, deck enginedb.DeckCues, offset float64, legacy bool) []rekordbox.Cue {
-	return mergeEngineCues(orig, deck, offset, legacy)
-}
