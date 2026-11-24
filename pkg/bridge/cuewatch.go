@@ -35,7 +35,6 @@ type CueWatcher struct {
 	Logf      func(string, ...any)
 	mounts    func() []string
 	pass      func(context.Context, string, WriteBackOptions) (WriteBackResult, error)
-	grace     time.Duration
 	// poll is how often the mounts and each stick's m.db are looked at. Ten times a second cost
 	// 0.4 % of a build-host core with nothing to do, about 2 % of a deck's; a second delays a
 	// pass that waits Quiet (5 s) after Engine's last write by at most that.
@@ -56,7 +55,7 @@ type cueStick struct {
 }
 
 func NewCueWatcher(mediaRoot string) *CueWatcher {
-	w := &CueWatcher{MediaRoot: mediaRoot, Quiet: CueQuiet, Retry: 15 * time.Second, Logf: log.Printf, pass: WriteBackCues, grace: 100 * time.Millisecond, poll: time.Second}
+	w := &CueWatcher{MediaRoot: mediaRoot, Quiet: CueQuiet, Retry: 15 * time.Second, Logf: log.Printf, pass: WriteBackCues, poll: time.Second}
 	w.mounts = func() []string { return mediaMounts(mediaRoot) }
 	return w
 }
@@ -160,9 +159,7 @@ func (w *CueWatcher) run(ctx context.Context, st *cueStick, done chan struct{}) 
 	}
 	ev0, q0 := st.events.Load(), quietState(st.mount)
 	_, err := w.pass(ctx, st.mount, WriteBackOptions{Session: &st.session, Keys: st.keys, Settled: func() error {
-		if w.grace > 0 {
-			time.Sleep(w.grace)
-		}
+		time.Sleep(100 * time.Millisecond)
 		if st.events.Load() != ev0 || quietState(st.mount) != q0 || cueEjecting(st.mount) {
 			return errNotQuiet
 		}

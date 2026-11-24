@@ -42,11 +42,11 @@ func TestP3MergeEngineCuesPreservesLegacyMP3OffsetDrift(t *testing.T) {
 	orig := []rekordbox.Cue{{HotCue: 1, TimeMS: 116089, Color: red, ColorCode: 1, Extended: true}}
 	deck := enginedb.DeckCues{SampleRate: 44100, SampleCount: 44100 * 300}
 	deck.HotCues[0] = &enginedb.DeckHotCue{Samples: 5117232.9, Name: "", Color: red}
-	if got := mergeEngineCuesOpts(orig, deck, 1105, true); !cuesEquivalent(orig, got) {
+	if got := mergeEngineCues(orig, deck, 1105, true); !cuesEquivalent(orig, got) {
 		t.Fatalf("legacy unnamed offset drift changed cue: orig=%+v got=%+v", orig, got)
 	}
 	deck.HotCues[0].Name = "Cue 1"
-	if got := mergeEngineCuesOpts(orig, deck, 1105, true); cuesEquivalent(orig, got) {
+	if got := mergeEngineCues(orig, deck, 1105, true); cuesEquivalent(orig, got) {
 		t.Fatalf("deck-named Cue 1 was suppressed: %+v", got)
 	}
 }

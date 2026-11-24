@@ -625,7 +625,7 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 				if ok {
 					orig := readANLZCues(resolver, primary.AnalysisPath)
 					legacyMP3 := len(row.track.Written) == 0 && strings.HasSuffix(strings.ToLower(primary.Path), ".mp3")
-					next := mergeEngineCuesOpts(orig, deck, offset, legacyMP3)
+					next := mergeEngineCues(orig, deck, offset, legacyMP3)
 					change.cues = next
 					change.cuesDiff = !cuesEquivalent(orig, next)
 					for kind, sourceTrack := range refs {
@@ -734,17 +734,6 @@ func readANLZCues(r *compat.Resolver, analysisPath string) []rekordbox.Cue {
 		return nil
 	}
 	return merged.Cues
-}
-
-func pdbMetadataBytes(ctx context.Context, path string, updates map[uint32]rekordbox.Metadata) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return rekordbox.RewritePDBMetadata(raw, updates)
 }
 
 func ensureFirstOriginalBackup(mountRoot, backupRoot, dateDir, relSlash string) (int64, error) {
@@ -990,6 +979,3 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offset float6
 }
 
 // Keep the old helper name used by test adapters and callers.
-func mergeEngineCuesOpts(orig []rekordbox.Cue, deck enginedb.DeckCues, offset float64, legacy bool) []rekordbox.Cue {
-	return mergeEngineCues(orig, deck, offset, legacy)
-}
