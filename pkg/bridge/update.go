@@ -116,21 +116,34 @@ var (
 // only marked its stage here, and the playlists appeared once a remount published the update:
 // 11.5 minutes on the maintainer's 6000-track stick, and not at all while a deck held one of its
 // tracks. limit is the hook's kill; nothing is written when the update would not end before it.
-func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, limit time.Time) (enginedb.Result, error) {
+func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, limit time.Time) (enginedb.Result, bool, error) {
 	inner, cancel := context.WithDeadline(ctx, limit)
 	defer cancel()
 	if enginedb.LibraryInUse(mount) {
-		return enginedb.Result{}, enginedb.ErrLibraryInUse
+		return enginedb.Result{}, false, enginedb.ErrLibraryInUse
 	}
 	start := time.Now()
 	l, stagedOnly, err := readLibrary(inner, mount)
 	if err != nil {
-		return enginedb.Result{}, quickLate(ctx, err)
+		return enginedb.Result{}, false, quickLate(ctx, err)
 	}
 	read := time.Since(start)
+	if unchanged, pathErr := unchangedTrackSet(dir, l); pathErr != nil {
+		return enginedb.Result{}, false, pathErr
+	} else if unchanged {
+		playlist, syncErr := enginedb.SyncPlaylistsOnly(inner, mount, l)
+		if syncErr == nil {
+			changed := playlist.Added + playlist.Updated + playlist.Removed
+			log.Printf("rb-bridge: playlist-only update changed %d lists in %s (export read %s)", changed, time.Since(start).Round(time.Millisecond), read.Round(time.Millisecond))
+			return enginedb.Result{PlaylistsChanged: changed > 0}, true, nil
+		}
+		if !errors.Is(syncErr, enginedb.ErrPlaylistTrackSetChanged) {
+			return enginedb.Result{}, false, syncErr
+		}
+	}
 	fresh, owned, spellings, err := quickPathsWithOwned(dir, l)
 	if err != nil {
-		return enginedb.Result{}, err
+		return enginedb.Result{}, false, err
 	}
 	exportFolded := make(map[string]bool, len(l.Tracks))
 	for i := range l.Tracks {
@@ -155,7 +168,7 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 		}
 	}
 	if err = ReconcileOwnedContext(inner, r, l, owned, spellings); err != nil {
-		return enginedb.Result{}, quickLate(ctx, err)
+		return enginedb.Result{}, false, quickLate(ctx, err)
 	}
 	entries := 0
 	for _, p := range l.Playlists {
@@ -163,16 +176,40 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	}
 	cost := quickCost(len(l.Tracks)-fresh, fresh, entries)
 	if left := time.Until(limit); cost > left {
-		return enginedb.Result{}, fmt.Errorf("%w: %d tracks (%d new) and %d playlist entries need about %s, %s left", errQuickTooLong, len(l.Tracks), fresh, entries, cost.Round(time.Second), left.Round(time.Second))
+		return enginedb.Result{}, false, fmt.Errorf("%w: %d tracks (%d new) and %d playlist entries need about %s, %s left", errQuickTooLong, len(l.Tracks), fresh, entries, cost.Round(time.Second), left.Round(time.Second))
 	}
 	overviews := enginedb.ReadOverviewProgress(mount)
 	res, err := enginedb.SyncResolved(inner, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly})
 	if err != nil {
-		return res, quickLate(ctx, err)
+		return res, false, quickLate(ctx, err)
 	}
 	_ = overviews.Keep(mount)
 	log.Printf("rb-bridge: quick update of %d tracks (%d new), %d playlist entries in %s (export read %s, estimate %s)", len(l.Tracks), fresh, entries, time.Since(start).Round(time.Millisecond), read.Round(time.Millisecond), cost.Round(time.Millisecond))
-	return res, nil
+	return res, false, nil
+}
+
+func unchangedTrackSet(dir string, l *rekordbox.Library) (bool, error) {
+	owned, err := ownedPaths(dir)
+	if err != nil {
+		return false, err
+	}
+	if len(owned) != len(l.Tracks) {
+		return false, nil
+	}
+	for _, track := range l.Tracks {
+		old, ok := owned[track.ID]
+		if !ok {
+			return false, nil
+		}
+		clean, err := compat.CleanRelative(track.Path)
+		if err != nil {
+			return false, err
+		}
+		if foldPath(clean) != foldPath(old) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // quickCost is what a quick update of known and fresh tracks and entries playlist entries costs on

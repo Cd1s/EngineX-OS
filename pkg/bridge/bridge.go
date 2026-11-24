@@ -1014,9 +1014,15 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 				quick = true
 			} else {
 				var err error
-				if res, err = quickUpdate(ctx, mount, dir, r, mountStart.Add(maxMountHookBudget)); err != nil {
+				var playlistOnly bool
+				if res, playlistOnly, err = quickUpdate(ctx, mount, dir, r, mountStart.Add(maxMountHookBudget)); err != nil {
 					log.Printf("rb-bridge: the re-export's playlists wait for the background job: %v", err)
 					res, quick = enginedb.Result{}, errors.Is(err, errQuickTooLong)
+				} else if playlistOnly {
+					if err = dropStage(stage); err != nil {
+						return enginedb.Result{}, err
+					}
+					return res, nil
 				} else {
 					log.Printf("rb-bridge: re-export's playlists and %d new tracks in at the mount; grids and waveforms follow", res.Added)
 					cut("quick update committed")
