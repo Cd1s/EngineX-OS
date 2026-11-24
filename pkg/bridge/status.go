@@ -3,12 +3,20 @@ package bridge
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
+
+func roURI(p string) string { return (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro"}).String() }
+
+// openRO opens an SQLite file read-only.
+func openRO(p string, busyMS int) (*sql.DB, error) {
+	return sql.Open("sqlite", roURI(p)+fmt.Sprintf("&_pragma=busy_timeout(%d)&_pragma=query_only(1)", busyMS))
+}
 
 // LibraryHasFile reports whether the stick's library has a track whose file is called name. A
 // remount waits while a deck holds Engine's copy of such a track (#301). By name only: the
@@ -19,7 +27,7 @@ func LibraryHasFile(mount, name string) bool {
 	if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
 		return false
 	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro&_pragma=busy_timeout(1500)&_pragma=query_only(1)"}).String())
+	db, err := openRO(p, 1500)
 	if err != nil {
 		return true
 	}
@@ -52,7 +60,7 @@ func HasPopulatedLibrary(mount string) bool {
 	if err != nil || !st.Mode().IsRegular() || st.Size() == 0 {
 		return false
 	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro&_pragma=busy_timeout(1500)&_pragma=query_only(1)"}).String())
+	db, err := openRO(p, 1500)
 	if err != nil {
 		return false
 	}

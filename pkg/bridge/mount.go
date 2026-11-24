@@ -1,17 +1,16 @@
 package bridge
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha1"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log"
 	"math"
-	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -24,23 +23,15 @@ import (
 
 // MountOptions are one window's.
 type MountOptions struct {
-	// Deadline is when the hook kills the process; zero for a run by hand, which has no limit.
-	Deadline time.Time
-	// Publish: the window was asked for by the background job's remount, so nobody is waiting
-	// for the stick and the whole window is used for staged data. At an insert the DJ waits:
-	// optional work stops after insertBudget.
-	Publish bool
-	// Full: never take the stat-only way out, and use no budget (a run by hand).
-	Full bool
-	// SmartMatch adds the list "[Smart Match]" for the track with this rekordbox ID.
-	SmartMatch uint32
-	// Settings is the deck's settings file (the layout and the language), "" for the defaults.
-	Settings string
-	// StartBackground starts this mount's background job. It is called before any step that can
-	// take long, so a window that is killed has still left the job running.
+	Deadline   time.Time // the hook's kill; zero for a run by hand, which has no limit
+	Publish    bool      // the job's remount asked for the window: nobody waits, staged data may use all of it
+	Full       bool      // a run by hand: never stat-only, no budget
+	SmartMatch uint32    // adds the list "[Smart Match]" for the track with this rekordbox ID
+	Settings   string    // the deck's settings file (layout, language), "" for the defaults
+	// StartBackground starts the mount's job. It is called before any step that can be long, so a
+	// window the hook kills has still left the job running.
 	StartBackground func() error
-	// Progress reports tracks done out of the view's, for the deck's "loading" banner.
-	Progress func(done, total int)
+	Progress        func(done, total int) // for the deck's "loading" banner
 }
 
 // MountResult is what a window did; the command line prints it.
@@ -54,37 +45,31 @@ type MountResult struct {
 }
 
 var (
-	// commitReserve ends a window's work this long before the hook's kill: the commit under
-	// way, the snapshot and the exit must fit in it.
-	commitReserve = 2500 * time.Millisecond
-	// insertBudget is how long after its start an insert's window stops doing optional work.
-	insertBudget = 4 * time.Second
-	// applyBatch is how many staged tracks one transaction writes at most: what a cut loses, and
-	// about 7 MB for the commit to put on the stick within commitReserve.
-	applyBatch = 512
-	// applyReserve is the optional time a window must have left to start on one more staged track.
-	applyReserve = 1500 * time.Millisecond
-	// lockWait is how long a window waits for a write-back pass to finish.
-	lockWait = 2 * time.Second
+	commitReserve = 2500 * time.Millisecond // the last commit starts this long before the kill (design section 3)
+	insertBudget  = 4 * time.Second         // an insert's optional work stops this long after its start
+	applyBatch    = 512                     // staged tracks a transaction: about 7 MB to commit within commitReserve
+	applyReserve  = 1500 * time.Millisecond // optional time a window needs left to start one more staged track
+	lockWait      = 2 * time.Second         // for a write-back pass to finish
 )
 
-func init() {
-	// Everything the bridge replaces or removes on a stick first checks that the file owns its
-	// clusters in the FAT (#321 review R3).
-	rbstate.UnsafeToFree = unsafeToFree
-}
+// Every file the bridge replaces or removes on a stick must own its clusters in the FAT (#321 review R3).
+func init() { rbstate.UnsafeToFree = unsafeToFree }
 
-// steps times a window and writes one journal line a step, so the next insert on a deck shows
-// where the time goes.
+// steps times a window: one journal line a step, and its two limits. Work the window owes (rows,
+// lists, the first batch of updates) runs until owed, optional work until optional.
 type steps struct {
-	start, last, deadline, soft time.Time
+	start, last, owed, optional time.Time
 }
 
 func newSteps(o MountOptions) *steps {
 	now := time.Now()
-	s := &steps{start: now, last: now, deadline: o.Deadline}
-	if !o.Publish && !o.Full {
-		s.soft = now.Add(insertBudget)
+	s := &steps{start: now, last: now}
+	if !o.Deadline.IsZero() {
+		s.owed = o.Deadline.Add(-commitReserve)
+	}
+	s.optional = s.owed
+	if soft := now.Add(insertBudget); !o.Publish && !o.Full && (s.owed.IsZero() || soft.Before(s.owed)) {
+		s.optional = soft
 	}
 	return s
 }
@@ -95,31 +80,15 @@ func (s *steps) done(name, format string, args ...any) {
 	s.last = now
 }
 
-// hard is when the window's last commit must have started.
-func (s *steps) hard() time.Time {
-	if s.deadline.IsZero() {
-		return time.Time{}
-	}
-	return s.deadline.Add(-commitReserve)
+func before(limit time.Time, d time.Duration) bool {
+	return limit.IsZero() || !time.Now().Add(d).After(limit)
 }
 
-// more reports whether optional work may go on for at least d.
-func (s *steps) more(d time.Duration) bool {
-	end := time.Now().Add(d)
-	if h := s.hard(); !h.IsZero() && end.After(h) {
-		return false
-	}
-	return s.soft.IsZero() || !end.After(s.soft)
-}
+func (s *steps) must(d time.Duration) bool { return before(s.owed, d) }
+func (s *steps) more(d time.Duration) bool { return before(s.optional, d) }
 
-// must reports whether work the window owes (rows and lists) may go on for at least d.
-func (s *steps) must(d time.Duration) bool {
-	h := s.hard()
-	return h.IsZero() || !time.Now().Add(d).After(h)
-}
-
-// writableLibrary reports that the stick's Engine Library can be written: the volume itself,
-// or the library view the mount hook puts over a read-only volume (HFS+).
+// writableLibrary reports that the stick's Engine Library can be written: the volume itself, or
+// the library view the mount hook puts over a read-only volume (HFS+).
 func writableLibrary(mount string) bool {
 	const rdonly = 0x1 // ST_RDONLY
 	var st syscall.Statfs_t
@@ -129,8 +98,8 @@ func writableLibrary(mount string) bool {
 	return syscall.Statfs(filepath.Join(mount, "Engine Library"), &st) == nil && st.Flags&rdonly == 0
 }
 
-// libraryUUID reads Information.uuid of dir/m.db without writing anything; "" when there is no
-// library or it is in the middle of a commit a cut left (a journal beside it).
+// libraryUUID reads Information.uuid of dir/m.db; "" when there is no library or a cut left a
+// journal beside it.
 func libraryUUID(dir string) string {
 	p := filepath.Join(dir, "m.db")
 	if st, err := os.Stat(p); err != nil || st.Size() == 0 {
@@ -139,7 +108,7 @@ func libraryUUID(dir string) string {
 	if st, err := os.Stat(p + "-journal"); err == nil && st.Size() > 0 {
 		return ""
 	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro&_pragma=busy_timeout(2000)"}).String())
+	db, err := openRO(p, 2000)
 	if err != nil {
 		return ""
 	}
@@ -151,14 +120,9 @@ func libraryUUID(dir string) string {
 	return strings.TrimSpace(id)
 }
 
-// ConvertAtMount is one window: it makes the stick's Engine library what its rekordbox
-// libraries hold, as far as the window's time goes, before Engine sees the stick.
-//
-// An export that has not changed since a complete import costs a stat of each export file and
-// one line of the snapshot. Anything else reads the exports once, compares them with the
-// snapshot and writes the difference to m.db in place: rows and lists first, then the tracks
-// the background job has staged, the ones the DJ asked for first. The job is started before
-// the exports are read.
+// ConvertAtMount is one window: it makes the stick's Engine library what its rekordbox libraries
+// hold, as far as the window's time goes, before Engine sees the stick. An export unchanged since
+// a complete import costs a stat of each export file and one line of the snapshot.
 func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res MountResult, err error) {
 	st := newSteps(o)
 	r, err := compat.NewResolver(mount)
@@ -179,8 +143,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		return res, err
 	}
 	if errors.Is(hadLibrary, os.ErrNotExist) {
-		// A first import that fails leaves no Engine Library behind (#53): Engine then shows the
-		// stick's rekordbox library itself instead of an empty one.
+		// A first import that fails leaves no Engine Library: Engine then shows the export itself (#53).
 		defer func() {
 			if _, e := os.Stat(filepath.Join(dir, "m.db")); err != nil && e != nil {
 				_ = rbstate.DropNext(dir)
@@ -224,8 +187,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	for _, f := range failed {
 		log.Printf("rb-bridge: %v: this library is left out of the import", f)
 	}
-	libs = append(libs, readStaged(mount)...)
-	if len(libs) == 0 {
+	if libs = append(libs, readStaged(mount)...); len(libs) == 0 {
 		if err != nil {
 			return res, err
 		}
@@ -244,25 +206,11 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	}
 	st.done("view", "%d tracks, %d lists", len(view.Tracks), len(view.Lists))
 
-	w := &window{ctx: ctx, mount: mount, dir: dir, r: r, view: view, st: st, o: o, res: &res,
+	w := &window{ctx: ctx, mount: mount, dir: dir, view: view, st: st, o: o, res: &res,
 		partial: len(failed) > 0, linkOnly: len(files) == 0}
-	defer w.close()
-	if err = w.open(); err != nil {
+	if err = w.run(); err != nil {
 		return res, err
 	}
-	if w.lib == nil {
-		err = w.build()
-	} else {
-		err = w.apply(Diff(view, w.snap))
-	}
-	if err != nil {
-		return res, err
-	}
-	if err = w.applyStaged(); err != nil {
-		return res, err
-	}
-	w.lib.Close()
-	w.lib = nil
 	chores(ctx, mount, st)
 	res.Pending = w.snap.Pending
 	log.Printf("rb-bridge: mount done in %d ms: %d added, %d updated, %d removed, lists changed %v, %d staged tracks applied; pending: %d rows, %d tracks' data, verify %v",
@@ -271,9 +219,8 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	return res, nil
 }
 
-// chores are the library upkeep every mount of a rekordbox stick does while it has time: the
-// edits the Web Console queued while Engine had the library open, and the MP3 grids of
-// streamed tracks an early build wrote.
+// chores are the upkeep every mount does while it has time: the library edits the Web Console
+// queued while Engine had the library open, and the MP3 grids an early build wrote.
 func chores(ctx context.Context, mount string, st *steps) {
 	if !st.more(500 * time.Millisecond) {
 		return
@@ -284,8 +231,8 @@ func chores(ctx context.Context, mount string, st *steps) {
 		log.Printf("rb-bridge: applied %d queued library edits", n)
 	}
 	budget := time.Second
-	if !st.soft.IsZero() {
-		budget = min(budget, time.Until(st.soft))
+	if !st.optional.IsZero() {
+		budget = min(budget, time.Until(st.optional))
 	}
 	if budget <= 0 {
 		return
@@ -297,42 +244,33 @@ func chores(ctx context.Context, mount string, st *steps) {
 	}
 }
 
-// addSmartMatch adds the list "[Smart Match]" at the end of the root: the tracks that mix with
-// the one whose rekordbox ID is ref. It refuses when no library has that track or when the
-// export has a root list of that name.
+// addSmartMatch adds the list "[Smart Match]" at the end of the root: the tracks that mix with the
+// one whose rekordbox ID is ref. It refuses when the export has a root list of that name or no
+// library has the track.
 func addSmartMatch(v *View, ref uint32) error {
 	const title = "[Smart Match]"
+	after, current := "", -1
 	for _, l := range v.Lists {
 		if l.Parent == "" && l.Name == title {
 			return fmt.Errorf("%s already exists; source playlist is protected", title)
+		} else if l.Parent == "" {
+			after = l.Key
 		}
 	}
-	current := -1
+	tracks := make([]rekordbox.Track, len(v.Tracks)) // enginedb.SmartMatch works on IDs: index + 1
 	for i := range v.Tracks {
-		for _, r := range v.Tracks[i].Refs {
-			if r.ID == ref && r.Kind != rbstate.LinkLibrary && current < 0 {
-				current = i
-			}
+		tracks[i] = v.Tracks[i].Track
+		tracks[i].ID = uint32(i + 1)
+		if current < 0 && slices.ContainsFunc(v.Tracks[i].Refs, func(r rbstate.SourceRef) bool { return r.ID == ref && r.Kind != rbstate.LinkLibrary }) {
+			current = i
 		}
 	}
 	if current < 0 {
 		return fmt.Errorf("Smart Match reference track %d not found", ref)
 	}
-	// enginedb.SmartMatch works on IDs: give every track of the view one of its own.
-	tracks := make([]rekordbox.Track, len(v.Tracks))
-	for i := range v.Tracks {
-		tracks[i] = v.Tracks[i].Track
-		tracks[i].ID = uint32(i + 1)
-	}
 	var keys []string
 	for _, id := range enginedb.SmartMatch(tracks, uint32(current+1)) {
 		keys = append(keys, v.Tracks[id-1].Key)
-	}
-	after := ""
-	for _, l := range v.Lists {
-		if l.Parent == "" {
-			after = l.Key
-		}
 	}
 	h := sha1.New()
 	l := ViewList{Key: "smart", Name: title, After: after, Tracks: keys}
@@ -341,37 +279,30 @@ func addSmartMatch(v *View, ref uint32) error {
 	return nil
 }
 
-// inApplyOrder orders staged keys: the tracks a deck loaded or the DJ looked at first, so that a
-// window that runs out of time has done the ones that matter, then by row. A library's rows lie
-// in m.db in the order of their IDs: in that order one page read serves many tracks, where one
-// track after another by path cost a read each.
+// inApplyOrder puts first the tracks a deck loaded or the DJ looked at, then the rest by row ID:
+// rows lie in m.db in ID order, so one page read serves many tracks.
 func (w *window) inApplyOrder(keys []string) []string {
-	first := map[string]int{}
+	rank := map[string]int{}
 	items, _ := PendingPriority(w.mount)
 	for i := len(items) - 1; i >= 0; i-- {
-		p := items[i].Path
-		if _, ok := first[rbstate.FoldPath(p)]; !ok {
-			first[rbstate.FoldPath(p)] = i + 1
+		if k := rbstate.FoldPath(items[i].Path); rank[k] == 0 {
+			rank[k] = i + 1
 		}
 	}
-	id := func(key string) int64 {
+	order := func(key string) (int, int64) {
+		r, id := rank[key], int64(math.MaxInt64) // no row yet: after the rows there are
+		if r == 0 {
+			r = math.MaxInt
+		}
 		if t := w.snap.Tracks[key]; t != nil && t.EngineID != 0 {
-			return t.EngineID
+			id = t.EngineID
 		}
-		return math.MaxInt64 // no row yet: after the rows there are
+		return r, id
 	}
-	sort.Slice(keys, func(a, b int) bool {
-		pa, pb := first[keys[a]], first[keys[b]]
-		if (pa != 0) != (pb != 0) {
-			return pa != 0
-		}
-		if pa != pb {
-			return pa < pb
-		}
-		if ia, ib := id(keys[a]), id(keys[b]); ia != ib {
-			return ia < ib
-		}
-		return keys[a] < keys[b]
+	slices.SortFunc(keys, func(a, b string) int {
+		ra, ia := order(a)
+		rb, ib := order(b)
+		return cmp.Or(cmp.Compare(ra, rb), cmp.Compare(ia, ib), strings.Compare(a, b))
 	})
 	return keys
 }

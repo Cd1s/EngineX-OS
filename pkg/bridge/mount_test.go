@@ -828,7 +828,7 @@ func TestMountRenumberedReexportWritesNoRowAndRefreshesRefs(t *testing.T) {
 		t.Fatal(err)
 	}
 	view.Stamp, view.Sources = old.Stamp+" renumbered", files
-	w := &window{ctx: context.Background(), mount: mount, dir: dbDir(mount), r: r, view: view, st: newSteps(MountOptions{Full: true}), res: &MountResult{}}
+	w := &window{ctx: context.Background(), mount: mount, dir: dbDir(mount), view: view, st: newSteps(MountOptions{Full: true}), res: &MountResult{}}
 	defer w.close()
 	if err = w.open(); err != nil {
 		t.Fatal(err)
@@ -837,11 +837,10 @@ func TestMountRenumberedReexportWritesNoRowAndRefreshesRefs(t *testing.T) {
 	if len(p.AddTracks)+len(p.UpdateTracks)+len(p.Moves)+len(p.RemoveTracks)+len(p.PutLists)+len(p.RemoveLists) != 0 {
 		t.Fatalf("a renumbering re-export has a plan: %+v", p)
 	}
-	if err = w.apply(p); err != nil {
+	w.close()
+	if err = w.run(); err != nil {
 		t.Fatal(err)
 	}
-	w.close()
-	w.lib = nil
 	if after, _ := os.ReadFile(filepath.Join(dbDir(mount), "m.db")); !bytes.Equal(before, after) {
 		t.Fatal("m.db was written for a re-export that changed no row and no list")
 	}

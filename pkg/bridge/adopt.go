@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,11 +12,11 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
-// Builds before the snapshot kept their bookkeeping in an SQLite file beside m.db and a set of
-// marks. A library they imported is taken over once: its rows keep their Engine IDs, so what
-// Engine made for them stays, and every track is staged again by the background job, which is
-// what applies this build's rules; a row the deck changed keeps the deck's grid, cues and loops.
-// The lists are written anew (they may now sit under the three folders).
+// A library an earlier build imported (its state in an SQLite file beside m.db, no snapshot) is
+// taken over once (design 1.9): rows keep their Engine IDs, every track is staged again under
+// this build's rules, a row the deck changed keeps its grid, cues and loops, and the lists are
+// written anew.
+const oldStateName = ".rb-bridge-state.db"
 
 // oldMarks are the files and directories of earlier builds in Database2.
 var oldMarks = []string{oldStateName, oldStateName + "-journal", oldStateName + ".compact", ".rb-bridge-stamp", ".rb-bridge-pending",
@@ -25,14 +24,13 @@ var oldMarks = []string{oldStateName, oldStateName + "-journal", oldStateName + 
 
 // adopt reads an earlier build's state into a snapshot of the library uuid.
 func adopt(ctx context.Context, dir, uuid string) (*rbstate.Snapshot, error) {
-	ro := func(p string) string { return (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro"}).String() }
-	db, err := sql.Open("sqlite", ro(filepath.Join(dir, "m.db"))+"&_pragma=busy_timeout(5000)")
+	db, err := openRO(filepath.Join(dir, "m.db"), 5000)
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	if _, err = db.ExecContext(ctx, `ATTACH DATABASE ? AS bridge`, ro(filepath.Join(dir, oldStateName))); err != nil {
+	if _, err = db.ExecContext(ctx, `ATTACH DATABASE ? AS bridge`, roURI(filepath.Join(dir, oldStateName))); err != nil {
 		return nil, fmt.Errorf("state of an earlier build: %w", err)
 	}
 	has := func(table string) bool {
@@ -108,7 +106,6 @@ func adopt(ctx context.Context, dir, uuid string) (*rbstate.Snapshot, error) {
 			return nil, err
 		}
 	}
-	s.Pending.Verify = true
 	return s, nil
 }
 
