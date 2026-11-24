@@ -24,7 +24,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	bridgev2 "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -103,7 +102,7 @@ type Server struct {
 	jobs          *Jobs
 	cueWatch      atomic.Pointer[bridgev2.CueWatcher] // #321: set by WatchCues
 	rbPriorityMu  sync.Mutex
-	rbPriority    *bridge.PriorityQueue
+	rbPriority    *bridgev2.PriorityQueue
 	rbDeckLoaded  [5]string // per deck: last prioritized file path
 	rbDeckCue     [5]bool   // per deck: last CUE preview state
 	mu            sync.Mutex

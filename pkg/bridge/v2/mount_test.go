@@ -603,3 +603,61 @@ func TestMountCutAtEveryStepEndsInTheSameLibrary(t *testing.T) {
 		})
 	}
 }
+
+// A re-export that only renumbers the export's own IDs writes nothing to m.db, and the snapshot
+// then names every track by its new ID: write-back finds a track's rows in the libraries by them.
+func TestMountRenumberedReexportWritesNoRowAndRefreshesRefs(t *testing.T) {
+	mount := stick(t)
+	mountNow(t, mount, MountOptions{})
+	stageAll(t, mount)
+	mountNow(t, mount, MountOptions{Publish: true})
+	before, _ := os.ReadFile(filepath.Join(dbDir(mount), "m.db"))
+	old := snapshot(t, mount)
+
+	// The same five files under other IDs, in the fixture's second layout (LargePDB numbers from 1
+	// too, so the IDs are swapped by hand: the PDB stores them little-endian after the row header).
+	r, files := mustSources(t, mount)
+	libs, _, err := ReadSources(context.Background(), r, mount, files, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range libs[0].Lib.Tracks {
+		libs[0].Lib.Tracks[i].ID += 5000
+	}
+	for i := range libs[0].Lib.Playlists {
+		for j := range libs[0].Lib.Playlists[i].Tracks {
+			libs[0].Lib.Playlists[i].Tracks[j] += 5000
+		}
+	}
+	view, err := BuildView(libs, old.Layout, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.Stamp, view.Sources = old.Stamp+" renumbered", files
+	w := &window{ctx: context.Background(), mount: mount, dir: dbDir(mount), r: r, view: view, st: newSteps(MountOptions{Full: true}), res: &MountResult{}}
+	defer w.close()
+	if err = w.open(); err != nil {
+		t.Fatal(err)
+	}
+	p := Diff(view, w.snap)
+	if !p.Empty() {
+		t.Fatalf("a renumbering re-export has a plan: %+v", p)
+	}
+	if err = w.apply(p); err != nil {
+		t.Fatal(err)
+	}
+	w.close()
+	w.lib = nil
+	if after, _ := os.ReadFile(filepath.Join(dbDir(mount), "m.db")); !bytes.Equal(before, after) {
+		t.Fatal("m.db was written for a re-export that changed no row and no list")
+	}
+	now := snapshot(t, mount)
+	for key, tr := range now.Tracks {
+		if tr.Refs[0].ID != old.Tracks[key].Refs[0].ID+5000 || tr.EngineID != old.Tracks[key].EngineID {
+			t.Fatalf("%s: ref %d (was %d), row %d (was %d)", key, tr.Refs[0].ID, old.Tracks[key].Refs[0].ID, tr.EngineID, old.Tracks[key].EngineID)
+		}
+	}
+	if now.Stamp != view.Stamp || !now.Pending.Verify {
+		t.Fatalf("stamp %q, pending %+v", now.Stamp, now.Pending)
+	}
+}

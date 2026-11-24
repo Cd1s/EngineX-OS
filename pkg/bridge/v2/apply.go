@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ type window struct {
 	lib     *enginedb.Library // nil: the stick has no library to keep, one is built
 	snap    *rbstate.Snapshot
 	index   map[string]enginedb.Row // every row of the library by key
+	saved   []byte                  // the snapshot as the stick has it
 	adopted bool                    // snap was read from an earlier build's state, which goes once it is saved
 }
 
@@ -105,6 +107,9 @@ func (w *window) open() error {
 		if err = w.settle(claims); err != nil {
 			return err
 		}
+	}
+	if b, err := os.ReadFile(filepath.Join(w.dir, rbstate.SnapshotName)); err == nil {
+		w.saved = b
 	}
 	if err = w.reconcile(); err != nil {
 		return err
@@ -205,6 +210,7 @@ func (w *window) commit(b *enginedb.Batch) error {
 	if err := rbstate.Promote(w.dir); err != nil {
 		return err
 	}
+	w.saved, _ = w.snap.Encode()
 	cut("promoted")
 	if w.adopted {
 		dropOldState(w.dir)
@@ -304,6 +310,7 @@ func (w *window) build() error {
 	if err = rbstate.Promote(w.dir); err != nil {
 		return err
 	}
+	w.saved, _ = w.snap.Encode()
 	cut("promoted")
 	w.st.done("install", "library copied to the stick")
 	w.res.Added, w.res.PlaylistsChanged = len(ids), len(listIDs) > 0
@@ -399,12 +406,18 @@ func (w *window) apply(p *Plan) error {
 		p.RemoveLists = keepOwnLists(p.RemoveLists, w.partial)
 	}
 	w.st.done("diff", "+%d ~%d >%d -%d tracks, %d lists to write, %d to remove", len(p.AddTracks), len(p.UpdateTracks), len(p.Moves), len(p.RemoveTracks), len(p.PutLists), len(p.RemoveLists))
-	stampChanged := w.snap.Stamp != w.view.Stamp
-	if p.Empty() && !stampChanged {
-		return nil
-	}
-	if stampChanged {
+	if w.snap.Stamp != w.view.Stamp {
 		w.snap.Pending.Verify = true // the job compares every track's files with what was built
+		// The export's own IDs of every track, as this export has them: a re-export renumbers them,
+		// and write-back finds a track's rows in the libraries through them.
+		for i := range w.view.Tracks {
+			if t := w.snap.Tracks[w.view.Tracks[i].Key]; t != nil {
+				t.Refs = w.view.Tracks[i].Refs
+			}
+		}
+	}
+	if p.Empty() {
+		return w.saveIfChanged() // nothing for m.db: only the snapshot says which export this is
 	}
 	b, err := w.lib.Begin(w.ctx)
 	if err != nil {
@@ -729,15 +742,26 @@ func (w *window) finishLists() error {
 	return w.apply(&Plan{PutLists: p.PutLists})
 }
 
-// saveIfChanged saves the snapshot when only its header moved (pending counts, the verify mark).
+// saveIfChanged saves the snapshot when it changed without a transaction on m.db (the stamp, the
+// export's IDs, pending counts, the verify mark).
 func (w *window) saveIfChanged() error {
-	before := w.snap.Pending
-	stamp := w.snap.Stamp
+	before, err := w.snap.Encode()
+	if err != nil {
+		return err
+	}
 	w.count()
-	if before == w.snap.Pending && stamp == w.snap.Stamp {
+	after, err := w.snap.Encode()
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(before, w.saved) && bytes.Equal(after, w.saved) {
 		return nil
 	}
-	return w.snap.Save(w.dir)
+	if err = w.snap.Save(w.dir); err != nil {
+		return err
+	}
+	w.saved = after
+	return nil
 }
 
 // writeOverview puts a track's list waveform where Engine reads it, unless a valid one is there.

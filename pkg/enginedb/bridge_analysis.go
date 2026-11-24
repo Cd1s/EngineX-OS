@@ -78,6 +78,20 @@ func detailFiles(files []analysisFile) []string {
 	return out
 }
 
+// DetailOf is the scrolling detail of a track whose ANLZ files (volume-relative, the snapshot's
+// Track.Detail) are files, as DisplayWaveFromRekordbox reads it. Nil when it cannot be read.
+func DetailOf(root string, files []string) *rekordbox.Analysis {
+	if len(files) == 0 {
+		return nil
+	}
+	r, err := compat.NewResolver(root)
+	if err != nil {
+		return nil
+	}
+	a, _, _ := detailFrom(r, files, nil, nil)
+	return a
+}
+
 // BridgeDetail is the scrolling detail a BridgeAnalysis column names or holds, as
 // DisplayWaveFromRekordbox reads it: from the track's ANLZ files under root, the volume, for a
 // reference (RBA2, read by detailFrom), else from the column itself. Nil when there is none or it

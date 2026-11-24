@@ -2523,7 +2523,7 @@ static void writeback_cues_on_eject(const char *target) {
     struct statvfs v;
     if(statvfs(target,&v)||(v.f_flag&ST_RDONLY))return;
     char state[PATH_MAX];
-    if(path_join(state,sizeof state,target,"Engine Library/Database2/.rb-bridge-state.db")||safe_path(state,0))return;
+    if(path_join(state,sizeof state,target,"Engine Library/Database2/.rb-bridge-snapshot")||safe_path(state,0))return;
     if(!has_export(target))return;
     const char *rb=RB_BRIDGE_PATH();
     char *const a[]={(char *)rb,"--mount-path",(char *)target,"--writeback-cues","--on-eject",NULL};

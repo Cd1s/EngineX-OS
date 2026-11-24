@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/audioheader"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	_ "modernc.org/sqlite"
 )
 
@@ -157,6 +158,11 @@ func writeMP3GridCursor(path string, c mp3GridCursor) error {
 }
 
 func bridgeOwnedTracks(ctx context.Context, dbDir string) map[int64]bool {
+	// The rekordbox bridge's snapshot; an earlier build's state database for a library no mount
+	// has taken over yet.
+	if snap, err := rbstate.Load(dbDir); err == nil {
+		return snap.EngineIDs()
+	}
 	statePath := filepath.Join(dbDir, stateFile)
 	if st, err := os.Stat(statePath); err != nil || !st.Mode().IsRegular() || safeFile(statePath) != nil {
 		return nil

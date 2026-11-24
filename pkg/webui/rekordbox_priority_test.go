@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	bridge "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
 )
 
 func TestRekordboxPriorityFromDecksAndBrowse(t *testing.T) {

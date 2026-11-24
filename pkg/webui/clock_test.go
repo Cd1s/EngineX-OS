@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	bridge "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 )
 

@@ -326,7 +326,7 @@ static void test_eject_runs_cue_writeback(const char *root) {
     join(p,vol,".PIONEER/rekordbox");assert(!make_dirs(p));
     join(p,vol,".PIONEER/rekordbox/exportLibrary.db");write_file(p,"db");
     join(p,vol,"Engine Library/Database2");assert(!make_dirs(p));
-    join(p,vol,"Engine Library/Database2/.rb-bridge-state.db");write_file(p,"state");
+    join(p,vol,"Engine Library/Database2/.rb-bridge-snapshot");write_file(p,"state");
     join(wb_log,root,"writeback.log");join(test_rb_bridge,root,"wb-bridge");
     snprintf(script,sizeof script,"#!/bin/sh\necho \"$@\" >> '%s'\nexit 0\n",wb_log);
     write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
@@ -351,8 +351,8 @@ static void test_eject_runs_cue_writeback(const char *root) {
     struct libmnt_context eject_fail={.target=vol};
     assert(!unmount_dispatch(&eject_fail,unmount_after_wb)&&wb_seen==1);
 
-    // 4. Stick without .rb-bridge-state.db skips write-back cleanly.
-    join(p,vol,"Engine Library/Database2/.rb-bridge-state.db");assert(!unlink(p));
+    // 4. Stick without .rb-bridge-snapshot skips write-back cleanly.
+    join(p,vol,"Engine Library/Database2/.rb-bridge-snapshot");assert(!unlink(p));
     unlink(wb_log);wb_seen=0;
     struct libmnt_context no_state={.target=vol};
     assert(!unmount_dispatch(&no_state,unmount_after_wb)&&wb_seen==0);
@@ -373,7 +373,7 @@ static void test_eject_writeback_overrun(const char *root) {
     join(p,vol,"PIONEER/rekordbox");assert(!make_dirs(p));
     join(p,vol,"PIONEER/rekordbox/exportLibrary.db");write_file(p,"db");
     join(p,vol,"Engine Library/Database2");assert(!make_dirs(p));
-    join(p,vol,"Engine Library/Database2/.rb-bridge-state.db");write_file(p,"state");
+    join(p,vol,"Engine Library/Database2/.rb-bridge-snapshot");write_file(p,"state");
     assert(!make_dirs(test_runtime));
     assert(!eject_mark_path(EJECTED,vol,ejected)&&!eject_mark_path(EJECTING,vol,ejecting));
     join(wb_log,root,"writeback-slow.log");join(done,root,"writeback-slow.done");join(test_rb_bridge,root,"wb-slow-bridge");

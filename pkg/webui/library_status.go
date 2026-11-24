@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	bridge "github.com/Cd1s/EngineX-OS/pkg/bridge/v2"
 )
 
 // libraryStatusGet reports whether a mounted drive under mediaRoot holds a

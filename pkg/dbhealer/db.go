@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"github.com/google/uuid"
 	"golang.org/x/text/unicode/norm"
 	_ "modernc.org/sqlite"
@@ -575,6 +576,15 @@ func collectTrackPathCandidates(db *sql.DB, mount string) ([]trackPathCandidate,
 
 func bridgeManagedTracks(mount string) (map[int64]bool, error) {
 	managed := map[int64]bool{}
+	// The rekordbox bridge's snapshot of this library; a library an earlier build imported, and
+	// that no mount has taken over yet, has the state database read below instead.
+	if snap, err := rbstate.Load(filepath.Join(mount, "Engine Library", "Database2")); err == nil {
+		for id := range snap.EngineIDs() {
+			managed[id] = true
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return managed, err
+	}
 	path := filepath.Join(mount, "Engine Library", "Database2", ".rb-bridge-state.db")
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return managed, nil

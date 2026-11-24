@@ -27,6 +27,7 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
@@ -890,28 +891,56 @@ func libraryDisplay(ctx context.Context, f, dataRoot, mediaRoot string) (*shadow
 	return nil, err
 }
 
-func bridgeDisplayWave(ctx context.Context, file, rel string, id int64, rate, durationMS float64) *enginedb.DisplayWave {
-	// rb-bridge's side database is separate from Engine's library and read-only.
-	// Its track IDs belong only to m.db; stm.db can have unrelated matching IDs.
-	if filepath.Base(file) != "m.db" {
-		return nil
-	}
-	file = filepath.Join(filepath.Dir(file), ".rb-bridge-state.db")
-	if _, err := os.Stat(file); err != nil {
-		return nil
-	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: file}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(100)")
+// bridgeSnapshots keeps the rekordbox bridge's snapshot of each stick's library, read again when
+// the file changes: the detail waveform of a track is in its ANLZ files, and the snapshot says which.
+var bridgeSnapshots = struct {
+	sync.Mutex
+	byDir map[string]*cachedSnapshot
+}{byDir: map[string]*cachedSnapshot{}}
+
+type cachedSnapshot struct {
+	size  int64
+	mtime time.Time
+	snap  *rbstate.Snapshot
+}
+
+func bridgeSnapshot(dbDir string) *rbstate.Snapshot {
+	st, err := os.Stat(filepath.Join(dbDir, rbstate.SnapshotName))
 	if err != nil {
 		return nil
 	}
-	defer db.Close()
-	var b []byte
-	if db.QueryRowContext(ctx, `SELECT substr(a.sourceJSON,1,12582913) FROM BridgeAnalysis a JOIN BridgeState s ON s.trackId=a.trackId WHERE a.trackId=? AND s.path=?`, id, rel).Scan(&b) != nil || len(b) > shadowDisplayLimit {
+	bridgeSnapshots.Lock()
+	defer bridgeSnapshots.Unlock()
+	if c := bridgeSnapshots.byDir[dbDir]; c != nil && c.size == st.Size() && c.mtime.Equal(st.ModTime()) {
+		return c.snap
+	}
+	snap, err := rbstate.Load(dbDir)
+	if err != nil {
 		return nil
 	}
-	// A row of this build names the track's ANLZ files on the volume (#253); older rows hold
-	// the detail. The volume is the directory above Engine Library.
-	a := enginedb.BridgeDetail(b, filepath.Dir(filepath.Dir(filepath.Dir(file))), shadowDisplayLimit)
+	if len(bridgeSnapshots.byDir) >= 4 {
+		clear(bridgeSnapshots.byDir)
+	}
+	bridgeSnapshots.byDir[dbDir] = &cachedSnapshot{size: st.Size(), mtime: st.ModTime(), snap: snap}
+	return snap
+}
+
+func bridgeDisplayWave(_ context.Context, file, rel string, id int64, rate, durationMS float64) *enginedb.DisplayWave {
+	// The bridge's snapshot is beside m.db and read-only here. Its track IDs belong only to
+	// m.db; stm.db can have unrelated matching IDs.
+	if filepath.Base(file) != "m.db" {
+		return nil
+	}
+	snap := bridgeSnapshot(filepath.Dir(file))
+	if snap == nil {
+		return nil
+	}
+	t, ok := snap.TrackAt(rel)
+	if !ok || t.EngineID != id || len(t.Detail) == 0 {
+		return nil
+	}
+	// The volume is the directory above Engine Library.
+	a := enginedb.DetailOf(filepath.Dir(filepath.Dir(filepath.Dir(file))), t.Detail)
 	w := enginedb.DisplayWaveFromRekordbox(a, rate)
 	if w == nil || math.Abs(float64(len(w.Bands)/3)*w.SamplesPerBin/rate*1000-durationMS) > 100 {
 		return nil
