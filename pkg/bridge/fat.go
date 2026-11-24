@@ -2,11 +2,12 @@ package bridge
 
 import (
 	"encoding/binary"
-	"errors"
 	"io"
+
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
-var errUnownedClusters = errors.New("bridge: the file's clusters are not its own in the FAT")
+var errUnownedClusters = rbstate.ErrUnownedClusters
 
 // fatChainOwned reports whether the FAT16/FAT32 volume read through dev still gives a file of
 // size bytes, whose first data sector is first (in the volume's sectors), all of its clusters:

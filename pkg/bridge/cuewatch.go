@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ const CueQuiet = 5 * time.Second
 var errNotQuiet = errors.New("writeback: m.db changed while it was read")
 var cueEjectingDir = "/run"
 
+// cueEjecting: the Eject's own pass is due on mount (the edisksd hook's flag).
 func cueEjecting(mount string) bool {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(mount))
@@ -28,42 +30,32 @@ func cueEjecting(mount string) bool {
 	return err == nil
 }
 
+// CueWatcher writes a deck's cue edits back to the rekordbox sticks under a media root by
+// itself, a quiet period after Engine's last write to a stick's m.db (#321).
 type CueWatcher struct {
-	MediaRoot string
-	Quiet     time.Duration
-	Retry     time.Duration
-	Logf      func(string, ...any)
-	mounts    func() []string
-	pass      func(context.Context, string, WriteBackOptions) (WriteBackResult, error)
-	// poll is how often the mounts and each stick's m.db are looked at. Ten times a second cost
-	// 0.4 % of a build-host core with nothing to do, about 2 % of a deck's; a second delays a
-	// pass that waits Quiet (5 s) after Engine's last write by at most that.
+	quiet, retry time.Duration
+	// poll is how often the mounts and each m.db are looked at: ten times a second cost about 2 %
+	// of a deck's core with nothing to do; a second delays a pass by at most that.
 	poll   time.Duration
+	mounts func() []string
+	pass   func(context.Context, string, WriteBackOptions) (WriteBackResult, error)
 	mu     sync.Mutex
 	sticks map[string]*cueStick
 }
 
 type cueStick struct {
-	mount   string
 	session CueSession
 	keys    *rekordbox.KeyCache
-	events  atomic.Uint64
-	state   string
-	due     time.Time
-	running chan struct{}
+	events  atomic.Uint64 // changes of m.db seen: a pass that saw one during its read is dropped
+	state   string        // quietState at the last poll
+	due     time.Time     // when the next pass starts; zero: none is due
+	running chan struct{} // closed when the pass in progress ends
 	cancel  context.CancelFunc
 }
 
 func NewCueWatcher(mediaRoot string) *CueWatcher {
-	w := &CueWatcher{MediaRoot: mediaRoot, Quiet: CueQuiet, Retry: 15 * time.Second, Logf: log.Printf, pass: WriteBackCues, poll: time.Second}
-	w.mounts = func() []string { return mediaMounts(mediaRoot) }
-	return w
-}
-
-func (w *CueWatcher) logf(format string, args ...any) {
-	if w.Logf != nil {
-		w.Logf(format, args...)
-	}
+	return &CueWatcher{quiet: CueQuiet, retry: 15 * time.Second, poll: time.Second, pass: WriteBackCues,
+		mounts: func() []string { return mediaMounts(mediaRoot) }}
 }
 
 func rekordboxStick(mount string) bool {
@@ -73,55 +65,6 @@ func rekordboxStick(mount string) bool {
 		}
 	}
 	return false
-}
-
-func (w *CueWatcher) attach(mount string) *cueStick {
-	w.mu.Lock()
-	if st := w.sticks[mount]; st != nil {
-		w.mu.Unlock()
-		return st
-	}
-	if w.sticks == nil {
-		w.sticks = map[string]*cueStick{}
-	}
-	st := &cueStick{mount: mount, keys: newKeyCache(), state: quietState(mount)}
-	w.sticks[mount] = st
-	w.mu.Unlock()
-	go func() {
-		if n := CleanWriteBackLeftovers(mount); n > 0 {
-			w.logf("rb-bridge: removed %d temporary files a cut write-back left on %s", n, mount)
-		}
-	}()
-	return st
-}
-
-func (w *CueWatcher) detach(mount string) {
-	w.mu.Lock()
-	st := w.sticks[mount]
-	delete(w.sticks, mount)
-	cancel := func() {}
-	if st != nil && st.cancel != nil {
-		cancel = st.cancel
-	}
-	w.mu.Unlock()
-	if st != nil {
-		cancel()
-		st.keys.Clear()
-	}
-}
-
-func (w *CueWatcher) startDue(ctx context.Context, now time.Time) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for _, st := range w.sticks {
-		if st.running != nil || st.due.IsZero() || st.due.After(now) {
-			continue
-		}
-		st.due = time.Time{}
-		pctx, cancel := context.WithCancel(ctx)
-		st.running, st.cancel = make(chan struct{}), cancel
-		go w.run(pctx, st, st.running)
-	}
 }
 
 func quietState(mount string) string {
@@ -140,43 +83,105 @@ func journalBusy(mount string) bool {
 	return err == nil && st.Size() > 0
 }
 
-func (w *CueWatcher) run(ctx context.Context, st *cueStick, done chan struct{}) {
-	retry := false
-	defer func() {
-		w.mu.Lock()
-		close(done)
-		if st.running == done {
-			st.running, st.cancel = nil, nil
+// rescan watches the rekordbox sticks mounted now (cleaning what a cut pass left on each new
+// one) and forgets the others.
+func (w *CueWatcher) rescan() {
+	now := map[string]bool{}
+	for _, mount := range w.mounts() {
+		if rekordboxStick(mount) {
+			now[mount] = true
 		}
-		if retry && st.due.IsZero() {
-			st.due = time.Now().Add(w.Retry)
-		}
-		w.mu.Unlock()
-	}()
-	if cueEjecting(st.mount) || journalBusy(st.mount) {
-		retry = true
-		return
 	}
-	ev0, q0 := st.events.Load(), quietState(st.mount)
-	_, err := w.pass(ctx, st.mount, WriteBackOptions{Session: &st.session, Keys: st.keys, Settled: func() error {
-		time.Sleep(100 * time.Millisecond)
-		if st.events.Load() != ev0 || quietState(st.mount) != q0 || cueEjecting(st.mount) {
-			return errNotQuiet
+	w.forget(now)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.sticks == nil {
+		w.sticks = map[string]*cueStick{}
+	}
+	for mount := range now {
+		if w.sticks[mount] == nil {
+			w.sticks[mount] = &cueStick{keys: newKeyCache(), state: quietState(mount)}
+			go func() {
+				if n := CleanWriteBackLeftovers(mount); n > 0 {
+					log.Printf("rb-bridge: removed %d temporary files a cut write-back left on %s", n, mount)
+				}
+			}()
 		}
-		return nil
-	}})
-	switch {
-	case err == nil, ctx.Err() != nil:
-	case errors.Is(err, errNotQuiet):
-		w.logf("rb-bridge: cue write-back on %s dropped: Engine wrote m.db while it was read", st.mount)
-	case errors.Is(err, errVolumeBusy), errors.Is(err, errConverting):
-		retry = true
-	case errors.Is(err, errUnownedClusters):
-	default:
-		w.logf("rb-bridge: cue write-back on %s: %v", st.mount, err)
 	}
 }
 
+// forget stops watching the sticks keep does not name: their pass is cancelled, their keys go.
+func (w *CueWatcher) forget(keep map[string]bool) {
+	var gone []*cueStick
+	w.mu.Lock()
+	for mount, st := range w.sticks {
+		if !keep[mount] {
+			if st.cancel != nil {
+				st.cancel()
+			}
+			delete(w.sticks, mount)
+			gone = append(gone, st)
+		}
+	}
+	w.mu.Unlock()
+	for _, st := range gone {
+		st.keys.Clear()
+	}
+}
+
+// tick notes each m.db change, and starts the passes that are due.
+func (w *CueWatcher) tick(ctx context.Context, now time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for mount, st := range w.sticks {
+		if state := quietState(mount); state != st.state {
+			st.state = state
+			st.events.Add(1)
+			st.due = now.Add(w.quiet)
+		}
+		if st.running == nil && !st.due.IsZero() && !st.due.After(now) {
+			st.due = time.Time{}
+			pctx, cancel := context.WithCancel(ctx)
+			st.running, st.cancel = make(chan struct{}), cancel
+			go w.run(pctx, mount, st, st.running)
+		}
+	}
+}
+
+func (w *CueWatcher) run(ctx context.Context, mount string, st *cueStick, done chan struct{}) {
+	retry := cueEjecting(mount) || journalBusy(mount)
+	if !retry {
+		ev0, q0 := st.events.Load(), quietState(mount)
+		_, err := w.pass(ctx, mount, WriteBackOptions{Session: &st.session, Keys: st.keys, Settled: func() error {
+			time.Sleep(100 * time.Millisecond)
+			if st.events.Load() != ev0 || quietState(mount) != q0 || cueEjecting(mount) {
+				return errNotQuiet
+			}
+			return nil
+		}})
+		switch {
+		case err == nil, ctx.Err() != nil, errors.Is(err, errUnownedClusters):
+		case errors.Is(err, errNotQuiet):
+			log.Printf("rb-bridge: cue write-back on %s dropped: Engine wrote m.db while it was read", mount)
+		case errors.Is(err, errVolumeBusy), errors.Is(err, errConverting):
+			retry = true
+		default:
+			log.Printf("rb-bridge: cue write-back on %s: %v", mount, err)
+		}
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	close(done)
+	if st.running == done {
+		st.running, st.cancel = nil, nil
+	}
+	if retry && st.due.IsZero() {
+		st.due = time.Now().Add(w.retry)
+	}
+}
+
+// exclusive runs a pass of its own on mount, with the stick's session and keys, once the
+// watcher's pass there (cancelled) has ended.
 func (w *CueWatcher) exclusive(ctx context.Context, mount string, opts WriteBackOptions) (WriteBackResult, error) {
 	for {
 		w.mu.Lock()
@@ -185,8 +190,9 @@ func (w *CueWatcher) exclusive(ctx context.Context, mount string, opts WriteBack
 			w.mu.Unlock()
 			return w.pass(ctx, mount, opts)
 		}
-		if st.running == nil {
-			done := make(chan struct{})
+		done := st.running
+		if done == nil {
+			done = make(chan struct{})
 			st.running, st.due = done, time.Time{}
 			w.mu.Unlock()
 			opts.Session, opts.Keys = &st.session, st.keys
@@ -197,11 +203,10 @@ func (w *CueWatcher) exclusive(ctx context.Context, mount string, opts WriteBack
 			w.mu.Unlock()
 			return res, err
 		}
-		cancel, done := st.cancel, st.running
-		w.mu.Unlock()
-		if cancel != nil {
-			cancel()
+		if st.cancel != nil {
+			st.cancel()
 		}
+		w.mu.Unlock()
 		select {
 		case <-done:
 		case <-ctx.Done():
@@ -210,6 +215,7 @@ func (w *CueWatcher) exclusive(ctx context.Context, mount string, opts WriteBack
 	}
 }
 
+// Final is the Eject's pass.
 func (w *CueWatcher) Final(ctx context.Context, mount string) (WriteBackResult, error) {
 	return w.exclusive(ctx, mount, WriteBackOptions{OnEject: true})
 }
@@ -218,98 +224,39 @@ func (w *CueWatcher) Pass(ctx context.Context, mount string) (WriteBackResult, e
 	return w.exclusive(ctx, mount, WriteBackOptions{})
 }
 
-func (w *CueWatcher) rescan() {
-	now := map[string]bool{}
-	for _, mount := range w.mounts() {
-		if rekordboxStick(mount) {
-			now[mount] = true
-		}
-	}
-	w.mu.Lock()
-	var gone []string
-	for mount := range w.sticks {
-		if !now[mount] {
-			gone = append(gone, mount)
-		}
-	}
-	w.mu.Unlock()
-	for _, mount := range gone {
-		w.detach(mount)
-	}
-	for mount := range now {
-		w.attach(mount)
-	}
-}
-
 func (w *CueWatcher) Run(ctx context.Context) error {
-	tick := time.NewTicker(w.poll)
-	defer tick.Stop()
+	t := time.NewTicker(w.poll)
+	defer t.Stop()
+	defer w.forget(nil)
 	w.rescan()
 	for {
 		select {
 		case <-ctx.Done():
-			w.mu.Lock()
-			var mounts []string
-			for mount := range w.sticks {
-				mounts = append(mounts, mount)
-			}
-			w.mu.Unlock()
-			for _, mount := range mounts {
-				w.detach(mount)
-			}
 			return nil
-		case now := <-tick.C:
+		case now := <-t.C:
 			w.rescan()
-			w.mu.Lock()
-			for mount, st := range w.sticks {
-				state := quietState(mount)
-				if state != st.state {
-					st.state = state
-					st.events.Add(1)
-					st.due = now.Add(w.Quiet)
-				}
-			}
-			w.mu.Unlock()
-			w.startDue(ctx, now)
+			w.tick(ctx, now)
 		}
 	}
 }
 
+// mediaMounts lists the read-write mounts right under root.
 func mediaMounts(root string) []string {
-	b, err := os.ReadFile("/proc/self/mountinfo")
-	if err != nil {
-		return nil
-	}
-	return parseMediaMounts(string(b), root)
-}
-
-func parseMediaMounts(info, root string) []string {
+	b, _ := os.ReadFile("/proc/self/mountinfo")
 	var out []string
-	seen := map[string]bool{}
-	for _, line := range strings.Split(info, "\n") {
+	for _, line := range strings.Split(string(b), "\n") {
 		f := strings.Fields(line)
-		if len(f) < 6 {
+		if len(f) < 6 || !slices.Contains(strings.Split(f[5], ","), "rw") {
 			continue
 		}
-		mount := unescapeMountinfo(f[4])
-		if filepath.Dir(mount) != filepath.Clean(root) || seen[mount] {
-			continue
-		}
-		for _, option := range strings.Split(f[5], ",") {
-			if option == "rw" {
-				seen[mount] = true
-				out = append(out, mount)
-				break
-			}
+		if mount := unescapeMountinfo(f[4]); filepath.Dir(mount) == filepath.Clean(root) && !slices.Contains(out, mount) {
+			out = append(out, mount)
 		}
 	}
 	return out
 }
 
 func unescapeMountinfo(s string) string {
-	if !strings.Contains(s, `\`) {
-		return s
-	}
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
 		if s[i] == '\\' && i+3 < len(s) && s[i+1] >= '0' && s[i+1] <= '3' {

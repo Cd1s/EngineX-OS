@@ -292,7 +292,7 @@ func TestPort4ReplacedFilesStayHeldUntilRenameSync(t *testing.T) {
 
 func TestPort4BackupDirectoriesExistBeforeWriteBackMark(t *testing.T) {
 	mount := p4ImportedStick(t)
-	p4DeckEdit(t, mount, "mark cue", "", "", "")
+	p4DeckEdit(t, mount, "mark cue", "mark genre", "", "") // a metadata edit too: export.pdb is a target
 	want := []string{
 		filepath.Join(mount, ".enginex-backup", "2026-11-24", "PIONEER", "USBANLZ", "P001"),
 		filepath.Join(mount, ".enginex-backup", "2026-11-24", "PIONEER", "rekordbox"),
