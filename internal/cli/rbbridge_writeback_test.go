@@ -25,6 +25,7 @@ func TestRBBridgeOnEjectHandsThePassToStreamSync(t *testing.T) {
 	if err := RBBridge([]string{"--mount-path", root}, &out); err != nil {
 		t.Fatalf("initial mount import: %v", err)
 	}
+	testfixture.WriteV2SnapshotFromMountedLibrary(t, root)
 	var asked atomic.Int32
 	var query string
 	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -161,6 +161,7 @@ func TestRBBridgeWriteBackOnEjectFlag(t *testing.T) {
 	if err := RBBridge([]string{"--mount-path", root}, &out); err != nil {
 		t.Fatalf("initial mount import: %v", err)
 	}
+	testfixture.WriteV2SnapshotFromMountedLibrary(t, root)
 	out.Reset()
 	if err := RBBridge([]string{"--mount-path", root, "--writeback-cues", "--on-eject"}, &out); err != nil {
 		t.Fatalf("writeback --on-eject: %v", err)
