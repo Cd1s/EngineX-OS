@@ -123,9 +123,17 @@ func TestPort4WatcherDropsOverlappingReadAndWritesLatestEdit(t *testing.T) {
 	time.Sleep(120 * time.Millisecond)
 	p4DeckEdit(t, mount, "before read", "", "", "")
 	p4WaitCue(t, mount, "during read", 4*time.Second)
-	mu.Lock()
-	gotErrs := append([]error(nil), errs...)
-	mu.Unlock()
+	// The cue is on the stick at its rename; the pass returns (and is recorded) after it notes the
+	// snapshot, which under -race and load can take longer than a poll.
+	var gotErrs []error
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		mu.Lock()
+		gotErrs = append([]error(nil), errs...)
+		mu.Unlock()
+		if len(gotErrs) >= 2 && gotErrs[len(gotErrs)-1] == nil || time.Now().After(deadline) {
+			break
+		}
+	}
 	if len(gotErrs) < 2 || !errors.Is(gotErrs[0], ErrNotQuietForTest) || gotErrs[len(gotErrs)-1] != nil {
 		t.Fatalf("passes=%v, want dropped first pass and successful retry", gotErrs)
 	}
