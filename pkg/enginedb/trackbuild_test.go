@@ -53,9 +53,18 @@ func buildResolver(t *testing.T, root string) *compat.Resolver {
 	return r
 }
 
+// buildTrack is StatTrack and BuildTrack, as the job runs them.
+func buildTrack(res *compat.Resolver, tr rekordbox.Track, read ReadOptions) (*rbstate.Staged, error) {
+	src, err := StatTrack(context.Background(), res, tr)
+	if err != nil {
+		return nil, err
+	}
+	return BuildTrack(res, tr, src, read)
+}
+
 func mustBuild(t *testing.T, root string, tr rekordbox.Track) *rbstate.Staged {
 	t.Helper()
-	s, err := BuildTrack(buildResolver(t, root), tr, ReadOptions{})
+	s, err := buildTrack(buildResolver(t, root), tr, ReadOptions{})
 	if err != nil {
 		t.Fatalf("BuildTrack %d: %v", tr.ID, err)
 	}
@@ -464,7 +473,7 @@ func TestBuildTrackMissingAndUnreadableAudio(t *testing.T) {
 				return oldHeader(p)
 			}
 		}
-		if s, err := BuildTrack(buildResolver(t, root), l.Tracks[1], ReadOptions{}); err == nil || !errors.Is(err, os.ErrPermission) {
+		if s, err := buildTrack(buildResolver(t, root), l.Tracks[1], ReadOptions{}); err == nil || !errors.Is(err, os.ErrPermission) {
 			t.Fatalf("%s: staged %+v, err %v; want no record and the permission error", failure, s, err)
 		}
 		if s := mustBuild(t, root, l.Tracks[0]); s.Degraded != "" || s.Perf.TrackData == nil {
@@ -480,7 +489,7 @@ func TestBuildTrackMissingAndUnreadableAudio(t *testing.T) {
 		trackAudioHeader = func(p string) (compat.AudioInfo, error) {
 			return compat.AudioInfo{}, &os.PathError{Op: "read", Path: p, Err: cause}
 		}
-		if _, err := BuildTrack(buildResolver(t, root), l.Tracks[0], ReadOptions{}); !errors.Is(err, cause) {
+		if _, err := buildTrack(buildResolver(t, root), l.Tracks[0], ReadOptions{}); !errors.Is(err, cause) {
 			t.Fatalf("a cancellation inside a file error became %v", err)
 		}
 	}
@@ -506,7 +515,7 @@ func TestBuildTrackRefusesUnsafePaths(t *testing.T) {
 		"nonregular":          "/MUSIC",
 		"ambiguous":           "/AMB/a.MP3",
 	} {
-		if s, err := BuildTrack(buildResolver(t, root), rekordbox.Track{ID: 1, Path: p}, ReadOptions{}); err == nil {
+		if s, err := buildTrack(buildResolver(t, root), rekordbox.Track{ID: 1, Path: p}, ReadOptions{}); err == nil {
 			t.Errorf("%s: staged %+v", name, s)
 		}
 	}
@@ -559,7 +568,7 @@ func TestBuildTrackTakesTheEmbeddedCoverOnlyWithoutAnExportCover(t *testing.T) {
 	testfixture.Write(t, root, "PIONEER/Artwork/a.jpg", exportCover)
 	tr := rekordbox.Track{ID: 7, Path: "/MUSIC/cover.mp3", AnalysisPath: "/PIONEER/USBANLZ/P001/ANLZ0000.DAT", BPM: 120, Duration: 1, SampleRate: 44100}
 	var pauses, largest int
-	s, err := BuildTrack(buildResolver(t, root), tr, ReadOptions{Chunk: 64 << 10, Pause: func(n int, _ time.Duration) error {
+	s, err := buildTrack(buildResolver(t, root), tr, ReadOptions{Chunk: 64 << 10, Pause: func(n int, _ time.Duration) error {
 		pauses++
 		largest = max(largest, n)
 		return nil
@@ -572,7 +581,7 @@ func TestBuildTrackTakesTheEmbeddedCoverOnlyWithoutAnExportCover(t *testing.T) {
 	}
 	tr.ArtworkPath = "/PIONEER/Artwork/a.jpg"
 	pauses, largest = 0, 0
-	s, err = BuildTrack(buildResolver(t, root), tr, ReadOptions{Chunk: 64 << 10, Pause: func(n int, _ time.Duration) error {
+	s, err = buildTrack(buildResolver(t, root), tr, ReadOptions{Chunk: 64 << 10, Pause: func(n int, _ time.Duration) error {
 		pauses++
 		largest = max(largest, n)
 		return nil
@@ -618,7 +627,7 @@ func TestBuildTrackPacesItsReadsAndStopsCleanly(t *testing.T) {
 		t.Fatal(err)
 	}
 	var reads, largest int
-	s, err := BuildTrack(buildResolver(t, root), l.Tracks[0], ReadOptions{Chunk: 64 << 10, Pause: func(n int, _ time.Duration) error {
+	s, err := buildTrack(buildResolver(t, root), l.Tracks[0], ReadOptions{Chunk: 64 << 10, Pause: func(n int, _ time.Duration) error {
 		reads++
 		largest = max(largest, n)
 		return nil
@@ -631,7 +640,7 @@ func TestBuildTrackPacesItsReadsAndStopsCleanly(t *testing.T) {
 	}
 	stop := errors.New("the deck needs the stick")
 	calls := 0
-	s, err = BuildTrack(buildResolver(t, root), l.Tracks[0], ReadOptions{Chunk: 64 << 10, Pause: func(int, time.Duration) error {
+	s, err = buildTrack(buildResolver(t, root), l.Tracks[0], ReadOptions{Chunk: 64 << 10, Pause: func(int, time.Duration) error {
 		calls++
 		return stop
 	}})

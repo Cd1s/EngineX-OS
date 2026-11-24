@@ -107,7 +107,7 @@ func TestBuildTrackPacedReadsLeaveTheRestOfTheFileUnread(t *testing.T) {
 	}
 	stop := errors.New("stop after the first read of the waveform")
 	reads := 0
-	_, err = BuildTrack(buildResolver(t, root), l.Tracks[0], ReadOptions{Chunk: chunk, Pause: func(n int, _ time.Duration) error {
+	_, err = buildTrack(buildResolver(t, root), l.Tracks[0], ReadOptions{Chunk: chunk, Pause: func(n int, _ time.Duration) error {
 		if reads++; n >= chunk {
 			return stop
 		}

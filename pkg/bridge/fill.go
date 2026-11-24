@@ -268,7 +268,7 @@ func (f *filler) fill(i int) (ok bool, err error) {
 	if e := f.entries[vt.key]; e != nil && e.Sig.Equal(src.Sig) {
 		return true, nil
 	}
-	rec, err := enginedb.BuildTrackFrom(f.r, vt.track, src, opts)
+	rec, err := enginedb.BuildTrack(f.r, vt.track, src, opts)
 	if err != nil {
 		return f.unread(vt, err)
 	}

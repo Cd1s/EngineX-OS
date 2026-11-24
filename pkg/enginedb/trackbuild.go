@@ -1,20 +1,13 @@
 package enginedb
 
-// One track of a rekordbox export, built from the volume into what the background job stages
-// (rbstate.Staged): the audio header's facts, Engine's performance blobs, the body of the RGB
-// overview file and the cover (the export's, else the audio file's own). It opens no library and writes nothing:
-// the job puts the result in the stage on /data and a mount window applies it (design §1.5).
-//
-// The rules are the ones the import in sync.go applied:
-//   - offsets: rule 4, one rekordbox offset for USB and Pro DJ Link (compat.AudioInfo.RekordboxOffset);
-//   - AAC: an implicit SBR stream that advertises only its core rate keeps the export's timing,
-//     and the priming of the file's header moves the grid and the cues;
-//   - CF049: a tempo of 499.5 BPM or more is rekordbox's clamp of a misparsed file, not a tempo;
+// One track of an export, built from the volume into what the background job stages (design
+// §1.5): the audio header's facts, Engine's performance blobs, the .rgb body and the cover. Rules:
+//   - offsets: rule 4, one rekordbox offset for USB and Pro DJ Link (AudioInfo.RekordboxOffset);
+//   - AAC: an implicit SBR stream that advertises only its core rate keeps the export's timing;
+//   - CF049: 499.5 BPM or more is rekordbox's clamp of a misparsed file, not a tempo;
 //   - the file header's sample rate wins over the export's;
-//   - PWV sections: a .2EX with PWV7 supplies the detail and 3-band overview, its PWV6 the RGB
-//     overview; the waveform bodies of .EXT and .DAT are then not read (#253);
-//   - #53: a track whose audio header, analysis or cover cannot be used is staged without
-//     performance data, with the reason, and read again only when its files change.
+//   - a .2EX with PWV7 (and PWV6) spares the waveform bodies of .EXT and .DAT (#253);
+//   - #53: an unusable header, analysis or cover gives a record without performance data.
 
 import (
 	"context"
@@ -34,43 +27,44 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
-// ReadOptions paces what BuildTrack reads from the volume.
+// ReadOptions paces what BuildTrack reads while a deck may play from the same stick: reads of at
+// most Chunk bytes, each followed by Pause, whose error stops the build. Zero: full speed.
 type ReadOptions struct {
-	// Chunk is the most bytes one read of an analysis file or a cover takes while Pause is set;
-	// 0 reads whole sections.
 	Chunk int
-	// Pause is called after each read with its size and duration: a deck may be playing from the
-	// same stick. An error stops the build and is returned. nil reads at full speed.
 	Pause func(n int, took time.Duration) error
 }
 
-// Seams for slow or failing media in tests: the stat of a track's files and the audio header.
+// Seams for slow or failing media in tests.
 var (
 	trackStat        = os.Stat
 	trackAudioHeader = compat.AudioHeader
 )
 
-// maxCoverFile is the largest cover file an export may name (the import's limit).
 const maxCoverFile = 32 << 20
 
-// TrackSources is a track's files as a stat sees them: what its staged data is built from.
+// TrackSources is a track's files as a stat sees them.
 type TrackSources struct {
-	// Rel is the audio file's spelling on the volume; the export's, cleaned, when Missing.
-	Rel string
-	// Missing: the volume has no file for the track.
-	Missing bool
-	// Sig is the signature of the files; Rules and Row are the caller's to set.
-	Sig rbstate.TrackSig
-	// Broken is why the track's analysis or cover cannot be used (#53): its performance data is
-	// not built. Nil otherwise.
-	Broken error
+	Rel     string           // the audio file's spelling on the volume; the export's, cleaned, when Missing
+	Missing bool             // the volume has no file for the track
+	Sig     rbstate.TrackSig // Row is the caller's to set
+	Broken  error            // why the analysis or the cover cannot be used (#53)
 }
 
-// StatTrack stats the audio file, the .DAT, .EXT and .2EX the export names and its cover, and
-// reads nothing else. Two calls on unchanged files give the same Sig, which is what the job
-// compares with the snapshot and the stage. An error is a path the volume refuses (traversal,
-// a symlink, a name two files share, not a regular file) or a file that cannot be stat'ed now
-// (permission, I/O); the track is left unstaged and looked at again by the next job.
+// sigOf stats a resolved path: a regular file's signature.
+func sigOf(res *compat.Resolver, rel string) (rbstate.FileSig, error) {
+	st, err := trackStat(res.FullPath(rel))
+	if err == nil && !st.Mode().IsRegular() {
+		err = fmt.Errorf("not a regular file: %s", rel)
+	}
+	if err != nil {
+		return rbstate.FileSig{}, err
+	}
+	return rbstate.FileSig{Rel: rel, Size: st.Size(), MTimeNS: st.ModTime().UnixNano()}, nil
+}
+
+// StatTrack stats the audio file, the .DAT, .EXT and .2EX and the cover, and reads nothing else:
+// unchanged files give the same Sig. An error (a path the volume refuses, a file that cannot be
+// stat'ed now) leaves the track unstaged until the next job.
 func StatTrack(ctx context.Context, res *compat.Resolver, t rekordbox.Track) (TrackSources, error) {
 	src := TrackSources{Sig: rbstate.TrackSig{Rules: rbstate.Rules}}
 	guess, err := compat.CleanRelative(t.Path)
@@ -86,18 +80,13 @@ func StatTrack(ctx context.Context, res *compat.Resolver, t rekordbox.Track) (Tr
 		return src, fmt.Errorf("track %d: %w", t.ID, err)
 	}
 	src.Rel = rel
-	st, err := trackStat(res.FullPath(rel))
-	if errors.Is(err, os.ErrNotExist) && !stopped(err) {
+	if src.Sig.Audio, err = sigOf(res, rel); errors.Is(err, os.ErrNotExist) && !stopped(err) {
 		src.Rel, src.Missing = guess, true
 		return src, nil
 	}
 	if err != nil {
-		return src, fmt.Errorf("track %d: %w", t.ID, err)
+		return src, fmt.Errorf("track %d: audio: %w", t.ID, err)
 	}
-	if !st.Mode().IsRegular() {
-		return src, fmt.Errorf("track %d: audio not a regular file: %s", t.ID, rel)
-	}
-	src.Sig.Audio = rbstate.FileSig{Rel: rel, Size: st.Size(), MTimeNS: st.ModTime().UnixNano()}
 	src.Sig.ANLZ, src.Broken = statAnalysis(ctx, res, t.AnalysisPath)
 	if stopped(src.Broken) {
 		return src, src.Broken
@@ -115,7 +104,7 @@ func StatTrack(ctx context.Context, res *compat.Resolver, t rekordbox.Track) (Tr
 	return src, nil
 }
 
-// statAnalysis stats the analysis files of base (the export's .DAT path) that exist.
+// statAnalysis stats the analysis files beside the export's .DAT path that exist.
 func statAnalysis(ctx context.Context, res *compat.Resolver, analysisPath string) ([]rbstate.FileSig, error) {
 	if analysisPath == "" {
 		return nil, nil
@@ -130,14 +119,11 @@ func statAnalysis(ctx context.Context, res *compat.Resolver, analysisPath string
 		if err != nil {
 			return files, err
 		}
-		st, err := trackStat(res.FullPath(rel))
+		sig, err := sigOf(res, rel)
 		if err != nil {
-			return files, err
+			return files, fmt.Errorf("analysis: %w", err)
 		}
-		if !st.Mode().IsRegular() {
-			return files, fmt.Errorf("analysis not a regular file: %s", rel)
-		}
-		files = append(files, rbstate.FileSig{Rel: rel, Size: st.Size(), MTimeNS: st.ModTime().UnixNano()})
+		files = append(files, sig)
 	}
 	if len(files) == 0 {
 		return nil, fmt.Errorf("no analysis files for %s", analysisPath)
@@ -145,21 +131,18 @@ func statAnalysis(ctx context.Context, res *compat.Resolver, analysisPath string
 	return files, nil
 }
 
-// statCover stats the export's cover. Only a regular file within maxCoverFile counts: anything
-// else has a zero signature, so the track is built again when a usable file appears.
+// statCover stats the export's cover. Anything but a regular file within maxCoverFile has a zero
+// signature, so the track is built again when a usable file appears.
 func statCover(ctx context.Context, res *compat.Resolver, artworkPath string) (rbstate.FileSig, error) {
 	rel, err := res.ResolveContext(ctx, artworkPath)
 	if err != nil {
 		return rbstate.FileSig{}, err
 	}
-	st, err := trackStat(res.FullPath(rel))
-	if err != nil {
-		return rbstate.FileSig{}, err
+	sig, err := sigOf(res, rel)
+	if err == nil && sig.Size > maxCoverFile {
+		sig, err = rbstate.FileSig{}, fmt.Errorf("larger than 32 MiB: %s", rel)
 	}
-	if !st.Mode().IsRegular() || st.Size() > maxCoverFile {
-		return rbstate.FileSig{}, fmt.Errorf("not a regular file within 32 MiB: %s", rel)
-	}
-	return rbstate.FileSig{Rel: rel, Size: st.Size(), MTimeNS: st.ModTime().UnixNano()}, nil
+	return sig, err
 }
 
 // stopped reports a cancellation, also when a file error wraps it.
@@ -173,25 +156,11 @@ type buildStopped struct{ err error }
 func (e buildStopped) Error() string { return "enginedb: track build stopped: " + e.err.Error() }
 func (e buildStopped) Unwrap() error { return e.err }
 
-// BuildTrack builds one track of the export from the volume. Key is the track's rbstate key of
-// the export's path and Sig.Row is empty: the caller sets both from its view. A missing audio
-// file gives a record with Missing; an unusable header, analysis or cover gives a record with
-// Degraded and no performance data (#53). An error leaves the track unstaged: a path the volume
-// refuses, a file that cannot be read now, or a stop from read.Pause (wrapped, so errors.Is
-// finds the Pause's error).
-func BuildTrack(res *compat.Resolver, t rekordbox.Track, read ReadOptions) (*rbstate.Staged, error) {
-	if res == nil {
-		return nil, errors.New("enginedb: nil resolver")
-	}
-	src, err := StatTrack(context.Background(), res, t)
-	if err != nil {
-		return nil, err
-	}
-	return BuildTrackFrom(res, t, src, read)
-}
-
-// BuildTrackFrom is BuildTrack from a StatTrack of the same track, which it does not repeat.
-func BuildTrackFrom(res *compat.Resolver, t rekordbox.Track, src TrackSources, read ReadOptions) (*rbstate.Staged, error) {
+// BuildTrack builds a track from its StatTrack. Sig.Row is the caller's to set. A missing audio
+// file gives Missing; an unusable header, analysis or cover gives Degraded and no performance data
+// (#53). An error leaves the track unstaged: a file that cannot be read now, or a stop from
+// read.Pause (wrapped: errors.Is finds the Pause's error).
+func BuildTrack(res *compat.Resolver, t rekordbox.Track, src TrackSources, read ReadOptions) (*rbstate.Staged, error) {
 	var halted error
 	if read.Pause != nil {
 		pause := read.Pause
@@ -226,8 +195,7 @@ func BuildTrackFrom(res *compat.Resolver, t rekordbox.Track, src TrackSources, r
 	}
 	full := res.FullPath(src.Rel)
 	if !src.Sig.Artwork.IsZero() {
-		// The export's cover is read here, at the job's pace, so that no window reads the stick
-		// for it. One that cannot be read is left out until its file changes.
+		// Read here, at the job's pace, so that no window reads the stick for it.
 		art, err := readCover(res.FullPath(src.Sig.Artwork.Rel), read)
 		if halted != nil {
 			return nil, halted
