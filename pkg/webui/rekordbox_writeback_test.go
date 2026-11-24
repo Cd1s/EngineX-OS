@@ -3,6 +3,7 @@ package webui
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge/v2/bridgetest"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -61,10 +62,7 @@ func TestHandleRekordboxWriteback(t *testing.T) {
 	}
 
 	// Properly mounted drive with v4 stamp -> 200 JSON and checks 1 track.
-	if _, err := bridge.ConvertAtMount(t.Context(), stick, enginedb.Options{}, false); err != nil {
-		t.Fatal(err)
-	}
-	testfixture.WriteV2SnapshotFromMountedLibrary(t, stick)
+	bridgetest.Import(t, stick)
 
 	w = httptest.NewRecorder()
 	s.handleRekordboxWriteback(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/rekordbox/writeback?drive=USB1", nil))
@@ -97,10 +95,7 @@ func TestRekordboxWritebackFinalOnlyFromTheDeck(t *testing.T) {
 	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir(), MediaRoot: mediaRoot}, nil)
 	stick := filepath.Join(mediaRoot, "USB1")
 	testfixture.LargeExport(t, stick, 1)
-	if _, err := bridge.ConvertAtMount(t.Context(), stick, enginedb.Options{}, false); err != nil {
-		t.Fatal(err)
-	}
-	testfixture.WriteV2SnapshotFromMountedLibrary(t, stick)
+	bridgetest.Import(t, stick)
 	var out bytes.Buffer
 	log.SetOutput(&out)
 	defer log.SetOutput(os.Stderr)

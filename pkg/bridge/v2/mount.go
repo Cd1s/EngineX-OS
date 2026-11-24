@@ -64,9 +64,11 @@ var (
 	lockWait = 2 * time.Second
 )
 
-// cleanWriteBack puts back what a cut write-back pass left on the stick; the write-back part of
-// the package sets it.
-var cleanWriteBack = func(mount string) int { return 0 }
+func init() {
+	// Everything the bridge replaces or removes on a stick first checks that the file owns its
+	// clusters in the FAT (#321 review R3).
+	rbstate.UnsafeToFree = unsafeToFree
+}
 
 // priorityKeys are the tracks a deck loaded or the DJ looked at, the newest request first.
 func priorityKeys(mount string) []string {
@@ -214,7 +216,9 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		}
 	}
 	rbstate.CleanTemps(dir)
-	cleanWriteBack(mount)
+	if n := CleanWriteBackLeftovers(mount); n > 0 {
+		log.Printf("rb-bridge: %d files of a write-back pass that was cut short put right", n)
+	}
 
 	libs, failed, err := ReadSources(ctx, r, mount, files, nil)
 	if err != nil && staged == "" {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -309,10 +310,11 @@ func TestStagePutGetDropAndTornIndex(t *testing.T) {
 	}
 }
 
-func TestStageNeedsItsRootInTestsAndASafeName(t *testing.T) {
+func TestStageRootInTestsIsPrivateAndNamesAreSafe(t *testing.T) {
 	t.Setenv(StageEnv, "")
-	if _, err := OpenStage("lib"); err == nil {
-		t.Fatal("a test opened the deck's stage root")
+	root, err := StageRoot()
+	if err != nil || root == defaultStageRoot || !strings.HasPrefix(root, os.TempDir()) {
+		t.Fatalf("a test's stage root is %q (%v)", root, err)
 	}
 	t.Setenv(StageEnv, t.TempDir())
 	for _, bad := range []string{"", "..", "a/b", ".hidden"} {

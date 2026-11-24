@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge/v2/bridgetest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,7 +70,17 @@ func TestRBBridgeUnchangedExportSkipsTheVolume(t *testing.T) {
 		t.Fatal(r)
 	}
 	db := filepath.Join(root, "Engine Library", "Database2", "m.db")
+	// The same export again before the background job has done anything: nothing is written.
 	before, _ := os.ReadFile(db)
+	if r := run(); r.Added != 0 || r.Updated != 0 || r.PlaylistsChanged {
+		t.Fatal(r)
+	}
+	if after, _ := os.ReadFile(db); !bytes.Equal(before, after) {
+		t.Fatal("an unchanged export rewrote m.db while its import was still pending")
+	}
+	// Once the import is complete an unchanged export costs a stat: the export's other files are not even opened.
+	bridgetest.Import(t, root)
+	before, _ = os.ReadFile(db)
 	if err := os.RemoveAll(filepath.Join(root, "PIONEER", "USBANLZ")); err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +172,7 @@ func TestRBBridgeWriteBackOnEjectFlag(t *testing.T) {
 	if err := RBBridge([]string{"--mount-path", root}, &out); err != nil {
 		t.Fatalf("initial mount import: %v", err)
 	}
-	testfixture.WriteV2SnapshotFromMountedLibrary(t, root)
+	bridgetest.Import(t, root)
 	out.Reset()
 	if err := RBBridge([]string{"--mount-path", root, "--writeback-cues", "--on-eject"}, &out); err != nil {
 		t.Fatalf("writeback --on-eject: %v", err)

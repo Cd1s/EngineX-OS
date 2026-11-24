@@ -161,6 +161,17 @@ func ImportState(mount string) (State, error) {
 	sources := append([]rbstate.FileSig(nil), sigs...)
 	out.Header = h
 	out.Current = rbstate.Stamp(h.Layout, sources, stagedStamp(abs))
+	// The job has compared every track's files with what was built for this stamp: the import
+	// is verified although no window has run since to say so in the snapshot (a re-export that
+	// changed no track file stages nothing, so no remount follows it).
+	if h.Pending.Verify && out.Matches() {
+		if stage, err := rbstate.OpenStage(h.LibraryUUID); err == nil {
+			if stage.Verified() == h.Stamp {
+				out.Header.Pending.Verify = false
+			}
+			stage.Close()
+		}
+	}
 	return out, nil
 }
 

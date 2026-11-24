@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
-	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
@@ -24,19 +23,13 @@ func TestImportUnitMatchesTheHook(t *testing.T) {
 	}
 }
 
-// #301: a first import the mount's time cannot hold goes on in a job, at idle priority.
+// #301: what a mount window leaves to do goes on in a job, at idle priority. The first insert's
+// window writes rows and lists; cues, grids and waveforms are the job's.
 func TestMountPathStartsTheBackgroundImport(t *testing.T) {
 	status := filepath.Join(t.TempDir(), "preparing")
 	t.Setenv("ENGINEX_USB_PREPARING_PATH", status)
 	root := t.TempDir()
 	testfixture.Export(t, root)
-	// An export too large to read while the mount waits (64 MB, sparse): the stage waits for its job.
-	if err := os.Truncate(filepath.Join(root, "PIONEER", "rekordbox", "export.pdb"), 64<<20); err != nil {
-		t.Fatal(err)
-	}
-	if r, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err != nil || !r.Background {
-		t.Fatalf("first mount: %+v %v", r, err)
-	}
 	var started []string
 	old := startImport
 	startImport = func(mount string) error { started = append(started, mount); return nil }
@@ -66,7 +59,7 @@ func TestStartImportRunsAnIdleSystemdUnit(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-	if err := startImport("/media/REKORDBOX"); err != nil {
+	if err := systemdStartImport("/media/REKORDBOX"); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(log)

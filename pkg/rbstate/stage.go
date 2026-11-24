@@ -28,7 +28,7 @@ import (
 // <name> is the hex SHA-1 of the track's key.
 
 const (
-	// StageEnv overrides the stage root; tests must set it.
+	// StageEnv overrides the stage root.
 	StageEnv         = "ENGINEX_RB_STAGE_DIR"
 	defaultStageRoot = "/data/enginex/rb-stage"
 	stageIndex       = "index.jsonl"
@@ -99,7 +99,9 @@ func StageRoot() (string, error) {
 		return root, nil
 	}
 	if testing.Testing() {
-		return "", fmt.Errorf("rbstate: a test must set %s", StageEnv)
+		// Never the deck's own directory from a test: one private root per test process. Stages
+		// are per library, so tests share it without meeting.
+		return filepath.Join(os.TempDir(), fmt.Sprintf("enginex-rb-stage-test-%d", os.Getpid())), nil
 	}
 	return defaultStageRoot, nil
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge/v2/bridgetest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,12 +35,21 @@ func TestRBBridgeUSBLoadingStatusLifecycle(t *testing.T) {
 	statusPath := filepath.Join(t.TempDir(), "preparing")
 	t.Setenv("ENGINEX_USB_PREPARING_PATH", statusPath)
 
-	// 1. Progress reporter writes throttled loading JSON and clears on success.
+	// 1. A mount that leaves work to the background job leaves the status to it; a mount of a
+	// complete library clears it.
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	var out bytes.Buffer
 	if err := RBBridge([]string{"--mount-path", root}, &out); err != nil {
 		t.Fatalf("RBBridge success: %v", err)
+	}
+	if _, err := os.Stat(statusPath); err != nil {
+		t.Fatalf("the job reports from here on: the status file must stay, got err=%v", err)
+	}
+	bridgetest.Import(t, root)
+	out.Reset()
+	if err := RBBridge([]string{"--mount-path", root}, &out); err != nil {
+		t.Fatalf("RBBridge of a complete library: %v", err)
 	}
 	if _, err := os.Stat(statusPath); !os.IsNotExist(err) {
 		t.Fatalf("status file must be removed on success, got err=%v", err)
