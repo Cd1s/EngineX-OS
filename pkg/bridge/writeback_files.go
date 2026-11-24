@@ -18,8 +18,7 @@ import (
 )
 
 const (
-	writeBackMarkName  = ".rb-bridge-writeback"
-	writeBackRetryName = ".rb-bridge-writeback-retry"
+	writeBackMarkName = ".rb-bridge-writeback"
 )
 
 func init() {
@@ -487,7 +486,5 @@ func CleanWriteBackLeftovers(mount string) int {
 		}
 	}
 	_ = removeFile(mark)
-	_ = os.WriteFile(writeBackRetryPath(mount), []byte("replay\n"), 0o600)
-	refreshRecoveredSnapshotStamp(mount)
 	return n
 }

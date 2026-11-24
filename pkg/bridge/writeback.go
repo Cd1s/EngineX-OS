@@ -211,33 +211,6 @@ func NoteWriteBack(mount string, written map[string][]rbstate.FileSig, rows map[
 	return snap.Save(dbDir)
 }
 
-func writeBackRetryPath(mount string) string {
-	return filepath.Join(mount, "Engine Library", "Database2", writeBackRetryName)
-}
-
-// refreshRecoveredSnapshotStamp lets a pass replay the deck edit after cleanup has put a
-// complete staged export back over the original. The track baselines stay untouched.
-func refreshRecoveredSnapshotStamp(mount string) {
-	dbDir := filepath.Join(mount, "Engine Library", "Database2")
-	snap, err := rbstate.Load(dbDir)
-	if err != nil {
-		return
-	}
-	resolver, err := compat.NewResolver(mount)
-	if err != nil {
-		return
-	}
-	sources, err := FindSources(resolver, mount)
-	if err != nil {
-		return
-	}
-	snap.Header.Sources = sources
-	snap.Header.Stamp = rbstate.Stamp(snap.Header.Layout, sources, stagedStamp(mount))
-	if err := snap.Save(dbDir); err == nil {
-		_ = rbstate.ReplaceFile(writeBackRetryPath(mount), []byte("replay\n"))
-	}
-}
-
 func mountRootWritable(mount string) bool {
 	var st syscall.Statfs_t
 	return syscall.Statfs(mount, &st) == nil && st.Flags&unix_ST_RDONLY == 0
@@ -313,14 +286,13 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		}
 	}
 
-	_, recovery := os.Stat(writeBackRetryPath(absMount))
 	importState, e := ImportState(absMount)
 	if e != nil {
 		tm.skipReason = "import state unavailable"
 		return res, nil
 	}
-	if (recovery != nil && !importState.Matches()) || !importState.Header.Pending.None() {
-		if recovery != nil && !importState.Matches() {
+	if !importState.Matches() || !importState.Header.Pending.None() {
+		if !importState.Matches() {
 			tm.skipReason = "import stamp does not match the current export"
 		} else {
 			tm.skipReason = "import has pending work"
@@ -384,9 +356,6 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 			return res, errNotQuiet
 		}
 		opts.Session.add(insync)
-		if recovery == nil {
-			_ = rbstate.RemoveFile(writeBackRetryPath(absMount))
-		}
 		return res, nil
 	}
 
@@ -394,7 +363,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	if err != nil {
 		return res, err
 	}
-	changes, matched, err := buildChanges(ctx, resolver, libraries, candidates.rows, recovery == nil)
+	changes, matched, err := buildChanges(ctx, resolver, libraries, candidates.rows)
 	if err != nil {
 		return res, err
 	}
@@ -408,11 +377,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		}
 	}
 	if len(changes) == 0 {
-		err := NoteWriteBack(absMount, nil, opts.Session.take(insync))
-		if err == nil {
-			_ = rbstate.RemoveFile(writeBackRetryPath(absMount))
-		}
-		return res, err
+		return res, NoteWriteBack(absMount, nil, opts.Session.take(insync))
 	}
 
 	dateDir := opts.DateDir
@@ -470,11 +435,10 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		}
 		written[key] = sigs
 	}
-	writeBackCut("state")
 	if err := NoteWriteBack(absMount, written, opts.Session.take(insync)); err != nil {
 		return res, err
 	}
-	_ = rbstate.RemoveFile(writeBackRetryPath(absMount))
+	writeBackCut("state")
 	finished = true
 	res.TracksChanged = len(changes)
 	return res, nil
@@ -581,8 +545,7 @@ func readNeededLibraries(ctx context.Context, mount string, rows []dbCandidate, 
 	return out, nil
 }
 
-func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbstate.LibraryKind]SourceLibrary, rows []dbCandidate, retry ...bool) ([]trackChange, map[string]bool, error) {
-	recovery := len(retry) > 0 && retry[0]
+func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbstate.LibraryKind]SourceLibrary, rows []dbCandidate) ([]trackChange, map[string]bool, error) {
 	var changes []trackChange
 	matched := make(map[string]bool, len(rows))
 	for _, row := range rows {
@@ -598,7 +561,7 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 				continue
 			}
 			for _, tr := range src.Lib.Tracks {
-				if tr.ID != ref.ID || rbstate.FoldPath(tr.Path) != row.key || !recovery && ref.RecordHash != "" && tr.RecordHash != ref.RecordHash {
+				if tr.ID != ref.ID || rbstate.FoldPath(tr.Path) != row.key || ref.RecordHash != "" && tr.RecordHash != ref.RecordHash {
 					continue
 				}
 				refs[ref.Kind] = tr
@@ -638,15 +601,6 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 			}
 		}
 		if !change.cuesDiff {
-			if recovery {
-				for kind := range refs {
-					change.metadata[kind] = true
-				}
-				if primary.AnalysisPath != "" && len(row.trackData) > 0 {
-					change.cuesDiff = true
-					change.analysis = primary.AnalysisPath
-				}
-			}
 		}
 		if !change.cuesDiff {
 			needsMeta := false
