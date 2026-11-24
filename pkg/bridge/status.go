@@ -57,7 +57,7 @@ func HasPopulatedLibrary(mount string) bool {
 	}
 	defer db.Close()
 	var ok, lists bool
-	if db.QueryRow(`SELECT EXISTS(SELECT 1 FROM Information WHERE id=1 AND trim(COALESCE(uuid,''))<>'') AND EXISTS(SELECT 1 FROM Track), EXISTS(SELECT 1 FROM Playlist)`).Scan(&ok, &lists) != nil || !ok {
+	if db.QueryRow(`SELECT EXISTS(SELECT 1 FROM Information WHERE id=1 AND trim(COALESCE(uuid,''))<>'') AND EXISTS(SELECT 1 FROM Track)`).Scan(&ok) != nil || !ok {
 		return false
 	}
 	for _, name := range []string{rbstate.SnapshotName, oldStateName} {
@@ -65,5 +65,6 @@ func HasPopulatedLibrary(mount string) bool {
 			return true
 		}
 	}
-	return lists
+	// Asked on its own: a library without that table is one all the same when the bridge's state is there.
+	return db.QueryRow(`SELECT EXISTS(SELECT 1 FROM Playlist)`).Scan(&lists) == nil && lists
 }
