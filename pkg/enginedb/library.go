@@ -426,15 +426,33 @@ func (b *Batch) insertTracksBulk(ctx context.Context, rows []TrackRow, ids []int
 	return flush()
 }
 
-// UpdateTrack gives the row the export's fields again after the export changed them. The
-// rating stays the deck's when the deck changed it: oldRating is what the bridge last wrote
-// (negative when that is not known: the export's rating is taken).
-func (b *Batch) UpdateTrack(ctx context.Context, id int64, r TrackRow, oldRating int) error {
+// UpdateTrack gives the row the export's fields again after the export changed them, and says
+// whether the row held anything else. Length, BPM, bitrate and size are the export's only until
+// the track's own data is applied (ApplyPerformance puts what the audio header and the grid
+// say): an analysed row keeps them. A row that holds everything already is not written: a
+// write costs the reads of the row's index pages and fires Engine's triggers, 31 ms a row on a
+// cold stick with a 313 MB library, which the take-over of an older build's 5,940 rows could
+// not pay inside its windows. The rating stays the deck's when the deck changed it: oldRating
+// is what the bridge last wrote (negative when that is not known: the export's rating is taken).
+func (b *Batch) UpdateTrack(ctx context.Context, id int64, r TrackRow, oldRating int) (changed bool, err error) {
 	a := b.trackArgs(&r)
-	_, err := b.exec(ctx, `UPDATE Track SET length=?1,bpm=?2,year=?3,bitrate=?6,bpmAnalyzed=?7,fileBytes=?8,title=?9,artist=?10,album=?11,genre=?12,
-		comment=?13,label=?14,composer=?15,remixer=?16,key=?17,rating=CASE WHEN ?22<0 OR COALESCE(rating,0)=?22 THEN ?18 ELSE rating END,pdbImportKey=?20 WHERE id=?21`,
+	const (
+		rating = `CASE WHEN ?22<0 OR COALESCE(rating,0)=?22 THEN ?18 ELSE rating END`
+		own    = `COALESCE(isAnalyzed,0)` // the figures are the audio's own
+	)
+	res, err := b.exec(ctx, `UPDATE Track SET length=CASE WHEN `+own+` THEN length ELSE ?1 END,bpm=CASE WHEN `+own+` THEN bpm ELSE ?2 END,
+		bitrate=CASE WHEN `+own+` THEN bitrate ELSE ?6 END,bpmAnalyzed=CASE WHEN `+own+` THEN bpmAnalyzed ELSE ?7 END,
+		fileBytes=CASE WHEN `+own+` THEN fileBytes ELSE ?8 END,year=?3,title=?9,artist=?10,album=?11,genre=?12,comment=?13,label=?14,composer=?15,
+		remixer=?16,key=?17,rating=`+rating+`,pdbImportKey=?20
+		WHERE id=?21 AND NOT ((`+own+` OR (length IS ?1 AND bpm IS ?2 AND bitrate IS ?6 AND bpmAnalyzed IS ?7 AND fileBytes IS ?8))
+		AND year IS ?3 AND title IS ?9 AND artist IS ?10 AND album IS ?11 AND genre IS ?12 AND comment IS ?13 AND label IS ?14 AND composer IS ?15
+		AND remixer IS ?16 AND key IS ?17 AND rating IS (`+rating+`) AND pdbImportKey IS ?20)`,
 		append(append(a[:len(a)-2:len(a)-2], id), oldRating)...)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // MoveTracks gives rows new paths in one go; paths may be swapped among them (#4).

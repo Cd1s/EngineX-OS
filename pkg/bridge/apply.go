@@ -586,7 +586,7 @@ var updateBatch = 1000
 // batch is owed like a new row, the rest is done while the window has time, and what is left
 // the next window does (the job stages those tracks again, so a remount follows).
 func (w *window) updateRows(idx []int) error {
-	done := 0
+	done, differed := 0, 0
 	ok := func() bool {
 		if done < updateBatch {
 			return w.st.must(applyReserve)
@@ -601,9 +601,19 @@ func (w *window) updateRows(idx []int) error {
 		for n := 0; n < updateBatch && done < len(idx) && ok(); n, done = n+1, done+1 {
 			vt := &w.view.Tracks[idx[done]]
 			t := w.snap.Tracks[vt.Key]
-			if err = b.UpdateTrack(w.ctx, t.EngineID, enginedb.TrackRow{Rel: t.Rel, Track: vt.Track}, t.Rating); err == nil {
+			var changed bool
+			if changed, err = b.UpdateTrack(w.ctx, t.EngineID, enginedb.TrackRow{Rel: t.Rel, Track: vt.Track}, t.Rating); err == nil {
 				t.Row, t.Rating, t.Refs = vt.Hash, vt.Track.Rating, vt.Refs
-				err = w.noteSync(b, t)
+				// A row that held the fields already was not written, and its cues are not read to note
+				// it again (that read is most of what a row costs on a cold stick). It is noted as
+				// noteSync would have left it: a row in step with the stick keeps its note, any other
+				// is dated as it is now and vouched for by nobody.
+				if changed {
+					differed++
+					err = w.noteSync(b, t)
+				} else if row := w.index[t.Key]; !t.Native && (row.Edit != t.Edit || t.Perf == rbstate.PerfDeck) {
+					t.Edit, t.Synced = row.Edit, nil
+				}
 			}
 			if err != nil {
 				b.Rollback()
@@ -615,7 +625,7 @@ func (w *window) updateRows(idx []int) error {
 		}
 	}
 	if w.res.Updated += done; len(idx) > 0 {
-		w.st.done("update", "%d of %d rows got the export's fields", done, len(idx))
+		w.st.done("update", "%d of %d rows got the export's fields (%d held others)", done, len(idx), differed)
 	}
 	return w.saveIfChanged()
 }

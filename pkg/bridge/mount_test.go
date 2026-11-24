@@ -497,6 +497,79 @@ func TestMountOutOfTimeLeavesRowsPendingAndFinishesLater(t *testing.T) {
 	}
 }
 
+// A row that holds the export's fields already is not written, and what write-back noted of it
+// stands (replica, 2026-11-25: the take-over of KDATA's 5,940 rows wrote every one of them and
+// read its cues, 31 ms a row on the cold stick; three windows of 14 s left 4,620 rows pending,
+// nothing staged was applied and cue write-back stayed locked out).
+func TestMountLeavesRowsThatHoldTheExportsFieldsUnwritten(t *testing.T) {
+	mount := t.TempDir()
+	testfixture.LargeExport(t, mount, 250)
+	mountNow(t, mount, MountOptions{})
+	stageAll(t, mount)
+	mountNow(t, mount, MountOptions{Publish: true})
+	exec := func(q string, args ...any) {
+		t.Helper()
+		db, err := sql.Open("sqlite", "file:"+filepath.Join(dbDir(mount), "m.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err = db.Exec(q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`CREATE TABLE zzRowWrites(id INTEGER)`)
+	exec(`CREATE TRIGGER zzRowWrite AFTER UPDATE ON Track BEGIN INSERT INTO zzRowWrites VALUES(new.id); END`)
+	asAfterTakeOver := func() *rbstate.Snapshot {
+		t.Helper()
+		s := snapshot(t, mount)
+		for _, tr := range s.Tracks {
+			tr.Row = ""
+		}
+		if err := s.Save(dbDir(mount)); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	before := asAfterTakeOver()
+	res := mountNow(t, mount, MountOptions{Full: true})
+	if res.Updated != 250 || res.Pending.Rows != 0 {
+		t.Fatalf("window: %+v", res)
+	}
+	if n := query(t, mount, `SELECT count(*) FROM zzRowWrites`)[0][0]; n != "0" {
+		t.Fatalf("%s rows written although every row held the export's fields", n)
+	}
+	after := snapshot(t, mount)
+	for key, tr := range before.Tracks {
+		got := after.Tracks[key]
+		if got.Row == "" || got.Edit != tr.Edit || !bytes.Equal(got.Synced, tr.Synced) || (tr.Synced == nil) != (got.Synced == nil) {
+			t.Fatalf("%s: row %q, noted %d/%x, was %d/%x", key, got.Row, got.Edit, got.Synced, tr.Edit, tr.Synced)
+		}
+	}
+	// One row holds another title: that row alone is written.
+	var one *rbstate.Track
+	for _, tr := range after.Tracks {
+		if !tr.Native && tr.EngineID != 0 {
+			one = tr
+			break
+		}
+	}
+	exec(`DROP TRIGGER zzRowWrite`)
+	exec(`UPDATE Track SET title='not the export''s' WHERE id=?`, one.EngineID)
+	exec(`CREATE TRIGGER zzRowWrite AFTER UPDATE ON Track BEGIN INSERT INTO zzRowWrites VALUES(new.id); END`)
+	asAfterTakeOver()
+	if res = mountNow(t, mount, MountOptions{Full: true}); res.Updated != 250 || res.Pending.Rows != 0 {
+		t.Fatalf("window after one row changed: %+v", res)
+	}
+	// Engine's own trigger dates the row, which is a second write of it.
+	if n := query(t, mount, `SELECT count(DISTINCT id), min(id) FROM zzRowWrites`)[0]; n[0] != "1" || n[1] != fmt.Sprint(one.EngineID) {
+		t.Fatalf("rows written: %v, want the one row %d", n, one.EngineID)
+	}
+	if n := query(t, mount, `SELECT count(*) FROM Track WHERE title='not the export''s'`)[0][0]; n != "0" {
+		t.Fatal("the row kept a title the export does not have")
+	}
+}
+
 // Rows whose export fields changed are written after the rows and lists are committed, a
 // batch a transaction: a window that has no time for them commits everything else and leaves
 // them pending, and the next window does them (replica, 2026-11-25: the take-over of an older
