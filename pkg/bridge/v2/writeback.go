@@ -291,7 +291,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	defer unlock()
 	keys := opts.Keys
 	if keys == nil {
-		keys = rekordbox.NewKeyCache()
+		keys = newKeyCache()
 		defer keys.Clear()
 	}
 	keyStart := time.Now()

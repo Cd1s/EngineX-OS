@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"testing"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
@@ -93,15 +95,44 @@ type SourceLibrary struct {
 	Lib    *rekordbox.Library
 }
 
-// exportKeys keeps the SQLCipher keys of OneLibrary exports for this process; pkg/rekordbox
-// also shares them between processes through its key cache directory.
-var exportKeys = rekordbox.NewKeyCache()
+// keyCacheEnv names pkg/rekordbox's directory of derived OneLibrary keys.
+const keyCacheEnv = "ENGINEX_RB_SHARED_KEY_CACHE"
+
+// keyDataDir is the deck's own data directory.
+var keyDataDir = "/data/enginex"
+
+// persistentKeyDir is where the keys are kept across power-ons, "" when dataDir is not there.
+// pkg/rekordbox's own default is in /run: every first insert after a power-on then derived the
+// key again, 5.5 s at deck speed. The key follows from the export file's salt and rekordbox's
+// public passphrase alone, so it is no secret of the DJ's, and a cached key is checked against
+// the file's first page before it is used.
+func persistentKeyDir(dataDir string) string {
+	if st, err := os.Stat(dataDir); err != nil || !st.IsDir() {
+		return ""
+	}
+	return filepath.Join(dataDir, "rb-keys")
+}
+
+// newKeyCache is a key cache of pkg/rekordbox that reads and writes the persistent directory.
+// A test, a caller that named a directory itself and a process that is not root keep
+// pkg/rekordbox's choice.
+func newKeyCache() *rekordbox.KeyCache {
+	if !testing.Testing() && os.Getenv(keyCacheEnv) == "" && os.Geteuid() == 0 {
+		if dir := persistentKeyDir(keyDataDir); dir != "" {
+			os.Setenv(keyCacheEnv, dir)
+		}
+	}
+	return rekordbox.NewKeyCache()
+}
+
+// exportKeys keeps the SQLCipher keys of OneLibrary exports for this process.
+var exportKeys = sync.OnceValue(newKeyCache)
 
 // ReadSources reads each export once. A library that cannot be read is reported in failed and
 // left out, so one broken file does not hide the other; with none readable err is set.
 func ReadSources(ctx context.Context, r *compat.Resolver, mount string, files []rbstate.FileSig, keys *rekordbox.KeyCache) (libs []SourceLibrary, failed []error, err error) {
 	if keys == nil {
-		keys = exportKeys
+		keys = exportKeys()
 	}
 	for _, f := range files {
 		if err = ctx.Err(); err != nil {

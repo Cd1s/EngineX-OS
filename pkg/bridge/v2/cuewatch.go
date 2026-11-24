@@ -81,7 +81,7 @@ func (w *CueWatcher) attach(mount string) *cueStick {
 	if w.sticks == nil {
 		w.sticks = map[string]*cueStick{}
 	}
-	st := &cueStick{mount: mount, keys: rekordbox.NewKeyCache(), state: quietState(mount)}
+	st := &cueStick{mount: mount, keys: newKeyCache(), state: quietState(mount)}
 	w.sticks[mount] = st
 	w.mu.Unlock()
 	go func() {

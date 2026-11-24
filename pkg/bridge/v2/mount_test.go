@@ -432,6 +432,26 @@ func TestMountAddsListsWithoutEnginesWalkOfEveryList(t *testing.T) {
 	}
 }
 
+// The keys derived for OneLibrary exports are kept in the deck's data directory, so a power-on
+// does not cost the first insert a derivation again (5.5 s at deck speed, replica 2026-11-24).
+// Where there is no such directory, and in every test, pkg/rekordbox's own choice stands.
+func TestExportKeysAreKeptInTheDecksDataDirectory(t *testing.T) {
+	data := t.TempDir()
+	if got := persistentKeyDir(data); got != filepath.Join(data, "rb-keys") {
+		t.Fatalf("key directory %q", got)
+	}
+	if got := persistentKeyDir(filepath.Join(data, "missing")); got != "" {
+		t.Fatalf("a deck without its data directory got %q", got)
+	}
+	old := keyDataDir
+	keyDataDir = data
+	defer func() { keyDataDir = old }()
+	t.Setenv(keyCacheEnv, "")
+	if newKeyCache() == nil || os.Getenv(keyCacheEnv) != "" {
+		t.Fatalf("a test was pointed at the data directory: %q", os.Getenv(keyCacheEnv))
+	}
+}
+
 // The background job is asked for before the exports are read: an export that cannot be read,
 // or a window that is killed while reading it, still leaves the job started.
 func TestMountStartsTheJobBeforeReadingTheExports(t *testing.T) {
