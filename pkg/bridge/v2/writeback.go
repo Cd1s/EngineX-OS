@@ -387,7 +387,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	if err != nil {
 		return res, err
 	}
-	changes, err := buildChanges(ctx, resolver, libraries, candidates.rows)
+	changes, matched, err := buildChanges(ctx, resolver, libraries, candidates.rows)
 	if err != nil {
 		return res, err
 	}
@@ -395,7 +395,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		if settle() != nil {
 			return res, errNotQuiet
 		}
-		all := confirmedRows(confirmed, candidates.confirmed, candidates.rows, nil)
+		all := confirmedRows(confirmed, candidates.confirmed, candidates.rows, nil, matched)
 		if err := saveSynced(engineDir, all); err != nil {
 			return res, err
 		}
@@ -465,7 +465,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 	if err := NoteWriteBack(absMount, written); err != nil {
 		return res, err
 	}
-	all := confirmedRows(confirmed, candidates.confirmed, candidates.rows, changes)
+	all := confirmedRows(confirmed, candidates.confirmed, candidates.rows, changes, matched)
 	if err := saveSynced(engineDir, all); err != nil {
 		return res, err
 	}
@@ -483,14 +483,14 @@ type candidateSet struct {
 	read      int
 }
 
-func confirmedRows(existing, session []syncedRow, rows []dbCandidate, changes []trackChange) []syncedRow {
+func confirmedRows(existing, session []syncedRow, rows []dbCandidate, changes []trackChange, matched map[string]bool) []syncedRow {
 	all := append(append([]syncedRow{}, existing...), session...)
 	changed := make(map[string]bool, len(changes))
 	for _, ch := range changes {
 		changed[ch.candidate.key] = true
 	}
 	for _, row := range rows {
-		if !changed[row.key] {
+		if matched[row.key] && !changed[row.key] {
 			all = append(all, syncedRow{key: row.key, id: row.engineID, edit: row.edit, digest: row.syncedDigest})
 		}
 	}
@@ -716,11 +716,12 @@ func evictWriteBackExportCache(stamp string) {
 	}
 }
 
-func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbstate.LibraryKind]sourceLibrary, rows []dbCandidate) ([]trackChange, error) {
+func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbstate.LibraryKind]sourceLibrary, rows []dbCandidate) ([]trackChange, map[string]bool, error) {
 	var changes []trackChange
+	matched := make(map[string]bool, len(rows))
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, matched, err
 		}
 		refs := map[rbstate.LibraryKind]rekordbox.Track{}
 		metadata := map[rbstate.LibraryKind]bool{}
@@ -745,6 +746,7 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 		if len(refs) == 0 {
 			continue
 		}
+		matched[row.key] = true
 		change := trackChange{candidate: row, refs: refs, metadata: metadata, seen: syncedRow{key: row.key, id: row.engineID, edit: row.edit, digest: row.syncedDigest}}
 		needsCue := len(row.track.Written) == 0 || !bytes.Equal(row.writtenDigest, row.track.Written)
 		if needsCue && len(row.trackData) > 0 && primary.AnalysisPath != "" {
@@ -752,11 +754,16 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 			if err == nil {
 				offset, ok := trackRekordboxOffset(resolver, primary.Path)
 				if ok {
-					orig := readStickTrackCues(resolver, primary)
+					orig := readANLZCues(resolver, primary.AnalysisPath)
 					legacyMP3 := len(row.track.Written) == 0 && strings.HasSuffix(strings.ToLower(primary.Path), ".mp3")
 					next := mergeEngineCuesOpts(orig, deck, offset, legacyMP3)
 					change.cues = next
 					change.cuesDiff = !cuesEquivalent(orig, next)
+					for kind, sourceTrack := range refs {
+						if kind == rbstate.OneLibrary && !cuesEquivalent(sourceTrack.Cues, next) {
+							change.cuesDiff = true
+						}
+					}
 					change.analysis = primary.AnalysisPath
 				}
 			}
@@ -772,7 +779,7 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 		}
 		changes = append(changes, change)
 	}
-	return changes, nil
+	return changes, matched, nil
 }
 
 func trackRekordboxOffset(r *compat.Resolver, trackPath string) (float64, bool) {
@@ -819,9 +826,19 @@ func resolveANLZVariant(r *compat.Resolver, baseRel, ext string) (string, bool) 
 }
 
 func readStickTrackCues(r *compat.Resolver, tr rekordbox.Track) []rekordbox.Cue {
-	clean, err := safeANLZRelPath(tr.AnalysisPath)
+	fromANLZ := readANLZCues(r, tr.AnalysisPath)
+	if len(tr.Cues) == 0 {
+		return fromANLZ
+	}
+	merged := &rekordbox.Analysis{Cues: fromANLZ}
+	merged.Merge(&rekordbox.Analysis{Cues: tr.Cues})
+	return merged.Cues
+}
+
+func readANLZCues(r *compat.Resolver, analysisPath string) []rekordbox.Cue {
+	clean, err := safeANLZRelPath(analysisPath)
 	if err != nil {
-		return append([]rekordbox.Cue(nil), tr.Cues...)
+		return nil
 	}
 	base := strings.TrimSuffix(clean, filepath.Ext(clean))
 	var merged *rekordbox.Analysis
@@ -831,12 +848,6 @@ func readStickTrackCues(r *compat.Resolver, tr rekordbox.Track) []rekordbox.Cue 
 				merged = a
 			}
 		}
-	}
-	if len(tr.Cues) > 0 {
-		if merged == nil {
-			merged = &rekordbox.Analysis{}
-		}
-		merged.Merge(&rekordbox.Analysis{Cues: tr.Cues})
 	}
 	if rel, ok := resolveANLZVariant(r, base, ".EXT"); ok {
 		if b, err := os.ReadFile(r.FullPath(rel)); err == nil {
