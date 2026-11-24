@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge/bridgetest"
@@ -14,6 +15,7 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
+	_ "modernc.org/sqlite"
 )
 
 func TestRBBridgeValidation(t *testing.T) {
@@ -93,6 +95,75 @@ func TestRBBridgeUnchangedExportSkipsTheVolume(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(db); !bytes.Equal(before, after) {
 		t.Fatal("unchanged export rewrote m.db")
+	}
+}
+
+// The command line the hook runs: rb-bridge --mount-path with ENGINEX_HOOK_REMAINING_MS set. On
+// 2026-11-24 a deck's re-export with one new playlist ran the full import to the hook's kill,
+// showed the old library and started no job, because the quick branch was reachable only
+// without the variable, which is how every test and every measurement had run it. With the
+// variable the new list is there at that mount and the job is started; and a run the hook
+// gives almost no time ends well before its kill with the job started.
+func TestMountPathAsTheHookRunsIt(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	started := 0
+	old := startImport
+	startImport = func(string) error { started++; return nil }
+	defer func() { startImport = old }()
+	run := func(ms string) bridge.MountResult {
+		t.Helper()
+		t.Setenv("ENGINEX_HOOK_REMAINING_MS", ms)
+		var out bytes.Buffer
+		if err := RBBridge([]string{"--mount-path", root}, &out); err != nil {
+			t.Fatal(err)
+		}
+		var r bridge.MountResult
+		if err := json.Unmarshal(out.Bytes(), &r); err != nil {
+			t.Fatalf("%q: %v", &out, err)
+		}
+		return r
+	}
+	reexport := func(list string) {
+		t.Helper()
+		pdb := filepath.Join(root, "PIONEER/rekordbox/export.pdb")
+		st, err := os.Stat(pdb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := [5]string{testfixture.UnicodeName, "two.flac", "three.wav", "four.wav", "five.wav"}
+		testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb", testfixture.PDBNamed(names, list))
+		later := st.ModTime().Add(time.Hour)
+		if err = os.Chtimes(pdb, later, later); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r := run("17000"); r.Added != 5 || !r.Background || started != 1 {
+		t.Fatalf("first insert: %+v, job started %d times", r, started)
+	}
+	bridgetest.Import(t, root)
+	if r := run("17000"); !r.Bypassed || started != 1 {
+		t.Fatalf("unchanged insert: %+v, job started %d times", r, started)
+	}
+	reexport("New Set")
+	r := run("17000")
+	if !r.PlaylistsChanged || r.Added != 0 || r.Bypassed || !r.Background || started != 2 {
+		t.Fatalf("re-export with one new list: %+v, job started %d times", r, started)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(root, "Engine Library/Database2/m.db")+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var lists int
+	if err = db.QueryRow(`SELECT count(*) FROM Playlist WHERE title='New Set'`).Scan(&lists); err != nil || lists != 1 {
+		t.Fatalf("the new list is in the library %d times (%v)", lists, err)
+	}
+	// Half a second of life: the job is started first, and the run ends on its own.
+	reexport("Late Set")
+	begin := time.Now()
+	if r = run("500"); !r.Background || started != 3 || time.Since(begin) > 5*time.Second {
+		t.Fatalf("run with 500 ms left: %+v, job started %d times, took %s", r, started, time.Since(begin))
 	}
 }
 
