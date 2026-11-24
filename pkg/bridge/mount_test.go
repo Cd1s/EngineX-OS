@@ -828,8 +828,7 @@ func TestMountRenumberedReexportWritesNoRowAndRefreshesRefs(t *testing.T) {
 		t.Fatal(err)
 	}
 	view.Stamp, view.Sources = old.Stamp+" renumbered", files
-	w := &window{ctx: context.Background(), mount: mount, dir: dbDir(mount), view: view, st: newSteps(MountOptions{Full: true}),
-		load: func() (*rbstate.Snapshot, error) { return rbstate.Load(dbDir(mount)) }, res: &MountResult{}}
+	w := &window{ctx: context.Background(), mount: mount, dir: dbDir(mount), view: view, st: newSteps(MountOptions{Full: true}), res: &MountResult{}}
 	defer w.close()
 	if err = w.open(); err != nil {
 		t.Fatal(err)

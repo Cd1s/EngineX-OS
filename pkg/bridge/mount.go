@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -181,11 +180,23 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		log.Printf("rb-bridge: %d files of a write-back pass that was cut short put right", n)
 	}
 
-	// The snapshot is megabytes on the stick: its read overlaps the exports' read and decryption
-	// (I/O wait beside CPU work). Not when a cut window left a next snapshot: open settles it first.
-	load := sync.OnceValues(func() (*rbstate.Snapshot, error) { return rbstate.Load(dir) })
-	if headErr == nil && errors.Is(nextErr, os.ErrNotExist) {
-		go load()
+	// What the window reads of the stick next (the snapshot, megabytes, and the library's Track and
+	// Playlist pages) is asked for now, so that the wait for it overlaps the exports' decryption
+	// instead of following it. Nothing depends on these reads: the window does its own.
+	if headErr == nil {
+		go func() {
+			_, _ = os.ReadFile(filepath.Join(dir, rbstate.SnapshotName))
+			if db, err := openRO(filepath.Join(dir, "m.db"), 0); err == nil {
+				for _, q := range []string{`SELECT id,path,COALESCE(lastEditTime,0) FROM Track WHERE path IS NOT NULL`, `SELECT id FROM Playlist`} {
+					if rows, err := db.QueryContext(ctx, q); err == nil {
+						for rows.Next() {
+						}
+						rows.Close()
+					}
+				}
+				db.Close()
+			}
+		}()
 	}
 
 	derived := rekordbox.KeyDerivations()
@@ -220,7 +231,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	}
 	st.done("view", "%d tracks, %d lists", len(view.Tracks), len(view.Lists))
 
-	w := &window{ctx: ctx, mount: mount, dir: dir, view: view, st: st, o: o, res: &res, load: load,
+	w := &window{ctx: ctx, mount: mount, dir: dir, view: view, st: st, o: o, res: &res,
 		partial: len(failed) > 0, linkOnly: len(files) == 0}
 	if err = w.run(); err != nil {
 		return res, err

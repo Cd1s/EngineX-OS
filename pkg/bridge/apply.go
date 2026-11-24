@@ -25,9 +25,8 @@ type window struct {
 	st       *steps
 	o        MountOptions
 	res      *MountResult
-	load     func() (*rbstate.Snapshot, error) // the stick's snapshot (its read may have started already)
-	partial  bool                              // a library was unreadable: nothing is removed and the stamp is not kept
-	linkOnly bool                              // only staged CDJ libraries were read: the stick's own import stays
+	partial  bool // a library was unreadable: nothing is removed and the stamp is not kept
+	linkOnly bool // only staged CDJ libraries were read: the stick's own import stays
 
 	lib   *enginedb.Library // nil: the stick has no library to keep, one is built
 	snap  *rbstate.Snapshot
@@ -88,7 +87,7 @@ func (w *window) open() error {
 	if err = w.settle(); err != nil {
 		return err
 	}
-	snap, err := w.load()
+	snap, err := rbstate.Load(w.dir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
