@@ -383,6 +383,49 @@ func TestMountPlaylistOnlyReexportWritesOnlyThatList(t *testing.T) {
 	}
 }
 
+// Engine's trigger that marks a new list's folders as persisted walks every list of the library
+// for each insert: the 506 lists of a real stick's three folders took 12 s at deck speed and the
+// first insert was killed (replica, 2026-11-24). The bridge's folders are persisted when they are
+// made, so a window suspends the trigger while it adds lists and leaves it as Engine made it.
+func TestMountAddsListsWithoutEnginesWalkOfEveryList(t *testing.T) {
+	mount := stick(t)
+	mountNow(t, mount, MountOptions{})
+	const name = "trigger_after_insert_isPersist"
+	made := query(t, mount, `SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?`, name)
+	if len(made) != 1 {
+		t.Fatalf("the first build left %d triggers named %s", len(made), name)
+	}
+	// The same trigger with a probe: it leaves a row each time it fires.
+	probed := strings.Replace(made[0][0], "BEGIN", "BEGIN\n\tINSERT INTO PersistProbe VALUES(new.id);", 1)
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dbDir(mount), "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`CREATE TABLE PersistProbe(id INTEGER)`, `DROP TRIGGER ` + name, probed} {
+		if _, err = db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	db.Close()
+
+	names := [5]string{testfixture.UnicodeName, "two.flac", "three.wav", "four.wav", "five.wav"}
+	testfixture.Write(t, mount, "PIONEER/rekordbox/export.pdb", testfixture.PDBNamed(names, "New Set"))
+	later := time.Now().Add(time.Hour)
+	os.Chtimes(filepath.Join(mount, "PIONEER/rekordbox/export.pdb"), later, later)
+	if res := mountNow(t, mount, MountOptions{}); !res.PlaylistsChanged {
+		t.Fatalf("result %+v", res)
+	}
+	if n := query(t, mount, `SELECT count(*) FROM PersistProbe`); n[0][0] != "0" {
+		t.Fatalf("Engine's trigger walked the library's lists %s times", n[0][0])
+	}
+	if got := query(t, mount, `SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?`, name); len(got) != 1 || got[0][0] != probed {
+		t.Fatalf("the trigger is not as the window found it: %q", got)
+	}
+	if n := query(t, mount, `SELECT count(*) FROM Playlist WHERE isPersisted IS NOT 1`); n[0][0] != "0" {
+		t.Fatalf("%s lists are not persisted", n[0][0])
+	}
+}
+
 // The background job is asked for before the exports are read: an export that cannot be read,
 // or a window that is killed while reading it, still leaves the job started.
 func TestMountStartsTheJobBeforeReadingTheExports(t *testing.T) {

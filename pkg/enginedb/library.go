@@ -156,9 +156,10 @@ type Batch struct {
 	l          *Library
 	tx         *sql.Tx
 	stmts      map[string]*sql.Stmt
-	saved      []string // bulk: Engine's own SQL of the indexes and triggers dropped for the load
+	saved      []string // Engine's own SQL of the indexes and triggers suspended for the batch
 	nextTrack  int64    // bulk: the next Track.id
 	nextEntity int64    // the next PlaylistEntity.id, 0 until a list is written
+	lists      bool     // a list was added: Engine's persist trigger is suspended
 	now        int64
 	commitID   int64
 }
@@ -241,10 +242,17 @@ func (l *Library) Begin(ctx context.Context) (*Batch, error) {
 }
 
 func (b *Batch) startBulk(ctx context.Context) error {
-	rows, err := b.tx.QueryContext(ctx, `SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (
-		(type='index' AND tbl_name IN ('Track','PlaylistEntity')) OR
-		(type='trigger' AND name IN ('trigger_after_insert_Track_fix_origin','trigger_after_insert_Track_insert_performance_data')))
-		ORDER BY rowid`)
+	if err := b.suspend(ctx, `(type='index' AND tbl_name IN ('Track','PlaylistEntity')) OR
+		(type='trigger' AND name IN ('trigger_after_insert_Track_fix_origin','trigger_after_insert_Track_insert_performance_data'))`); err != nil {
+		return err
+	}
+	return b.tx.QueryRowContext(ctx, `SELECT max(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='Track'),0),COALESCE((SELECT max(id) FROM Track),0))`).Scan(&b.nextTrack)
+}
+
+// suspend drops the indexes and triggers that match for the rest of the batch; Commit makes
+// them again in the same transaction, so no other connection ever sees the library without them.
+func (b *Batch) suspend(ctx context.Context, which string) error {
+	rows, err := b.tx.QueryContext(ctx, `SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (`+which+`) ORDER BY rowid`)
 	if err != nil {
 		return err
 	}
@@ -266,7 +274,7 @@ func (b *Batch) startBulk(ctx context.Context) error {
 			return err
 		}
 	}
-	return b.tx.QueryRowContext(ctx, `SELECT max(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='Track'),0),COALESCE((SELECT max(id) FROM Track),0))`).Scan(&b.nextTrack)
+	return nil
 }
 
 func (b *Batch) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
@@ -310,11 +318,11 @@ func (b *Batch) Commit(ctx context.Context) error {
 			b.Rollback()
 			return err
 		}
-		for _, text := range b.saved {
-			if _, err := b.tx.ExecContext(ctx, text); err != nil {
-				b.Rollback()
-				return fmt.Errorf("rebuild %q: %w", text, err)
-			}
+	}
+	for _, text := range b.saved {
+		if _, err := b.tx.ExecContext(ctx, text); err != nil {
+			b.Rollback()
+			return fmt.Errorf("rebuild %q: %w", text, err)
 		}
 	}
 	b.closeStmts()
@@ -465,8 +473,19 @@ func (b *Batch) uniqueTitle(ctx context.Context, name string, parent, self int64
 	}
 }
 
-// InsertList adds a list. Engine's triggers link it into its folder's chain in front of Before.
+// InsertList adds a list, at the root or in a folder the bridge made. Engine's triggers link it
+// into its folder's chain in front of Before.
+//
+// Engine's trigger that marks a new list's folders as persisted is suspended for the batch: it
+// walks every list of the library for each insert (506 lists of a real stick took 12 s at deck
+// speed, the first insert was killed), and the bridge's folders are persisted when they are made.
 func (b *Batch) InsertList(ctx context.Context, row ListRow) (int64, error) {
+	if !b.lists {
+		if err := b.suspend(ctx, `type='trigger' AND name='trigger_after_insert_isPersist'`); err != nil {
+			return 0, err
+		}
+		b.lists = true
+	}
 	title, err := b.uniqueTitle(ctx, row.Title, row.Parent, 0)
 	if err != nil {
 		return 0, err
