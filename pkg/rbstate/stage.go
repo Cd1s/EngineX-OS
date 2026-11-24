@@ -303,25 +303,6 @@ func (s *Stage) readIndex() (map[string]*Staged, string, error) {
 	return out, verified, sc.Err()
 }
 
-// Index is what is staged and from what, without reading the blobs. A line whose files are
-// gone is left out, so its track is staged again.
-func (s *Stage) Index() (map[string]TrackSig, error) {
-	lines, _, err := s.readIndex()
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]TrackSig, len(lines))
-	for k, t := range lines {
-		if t.HasPerf {
-			if _, err := os.Stat(filepath.Join(s.dir, stageName(k)+".bin")); err != nil {
-				continue
-			}
-		}
-		out[k] = t.Sig
-	}
-	return out, nil
-}
-
 // Get reads a staged track with its blobs. os.ErrNotExist: not staged, or its files are not whole.
 func (s *Stage) Get(key string) (*Staged, error) {
 	lines, _, err := s.readIndex()

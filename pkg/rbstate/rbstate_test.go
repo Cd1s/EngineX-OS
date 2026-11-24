@@ -263,8 +263,8 @@ func TestStagePutGetDropAndTornIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	idx, err := s.Index()
-	if err != nil || len(idx) != 3 || idx[a.Key].Row != "r2" {
+	idx, _, err := s.Entries()
+	if err != nil || len(idx) != 3 || idx[a.Key].Sig.Row != "r2" {
 		t.Fatalf("index %v %v", idx, err)
 	}
 	if s.Verified() != "stamp-1" {
@@ -287,20 +287,21 @@ func TestStagePutGetDropAndTornIndex(t *testing.T) {
 	if full, err := s.Read(entries[a.Key]); err != nil || len(full.Perf.Beats) != 1 {
 		t.Fatalf("read: %+v %v", full, err)
 	}
-	// A staged track whose performance file is gone is staged again: it is not in the index.
+	// A staged track whose performance file is gone cannot be read: the window drops it, and
+	// the job stages it again.
 	if err = os.Remove(filepath.Join(s.Dir(), stageName(a.Key)+".bin")); err != nil {
 		t.Fatal(err)
-	}
-	if idx, _ = s.Index(); len(idx) != 2 {
-		t.Fatalf("index with a lost file: %v", idx)
 	}
 	if _, err = s.Get(a.Key); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("get of a lost file: %v", err)
 	}
-	if err = s.Drop(b.Key, c.Key); err != nil {
+	if _, err = s.Read(idx[a.Key]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read of a lost file: %v", err)
+	}
+	if err = s.Drop(a.Key, b.Key, c.Key); err != nil {
 		t.Fatal(err)
 	}
-	if idx, _ = s.Index(); len(idx) != 0 {
+	if idx, _, _ = s.Entries(); len(idx) != 0 {
 		t.Fatalf("after drop: %v", idx)
 	}
 	if _, err = s.Get(c.Key); !errors.Is(err, os.ErrNotExist) {

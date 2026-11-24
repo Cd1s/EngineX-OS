@@ -434,17 +434,6 @@ func AckPriority(mount string, items []PriorityItem) error {
 	return writePrivateJSON(priorityAckPath(vk), ack)
 }
 
-// ClearPriority removes priority files for mount when an import finishes or a
-// volume is ejected.
-func ClearPriority(mount string) {
-	vk, err := volumeIdentity(mount)
-	if err != nil {
-		return
-	}
-	_ = os.Remove(priorityRecordPath(vk))
-	_ = os.Remove(priorityAckPath(vk))
-}
-
 // HasPendingPriority reports whether mount currently has any unacknowledged
 // priority item with a sequence newer than lastSeq.
 func HasPendingPriority(mount string, lastSeq uint64) bool {

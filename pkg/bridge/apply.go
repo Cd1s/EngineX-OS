@@ -730,7 +730,8 @@ func (w *window) applyStaged() error {
 			}
 			full, err := stage.Read(e)
 			if errors.Is(err, os.ErrNotExist) {
-				continue // its files are not whole: the job stages it again
+				stale = append(stale, key) // its files are not whole: dropped, so the job stages it again
+				continue
 			}
 			if err != nil {
 				b.Rollback()

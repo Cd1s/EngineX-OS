@@ -218,11 +218,12 @@ func TestFillStagesEveryTrackAndWritesNothingElseOnTheStick(t *testing.T) {
 	if n := len(after) - len(before); n != 12 {
 		t.Fatalf("%d mini waveforms, want 12", n)
 	}
-	idx, err := st.Index()
+	idx, _, err := st.Entries()
 	if err != nil || len(idx) != 12 {
 		t.Fatalf("stage index %d %v", len(idx), err)
 	}
-	for k, sig := range idx {
+	for k, e := range idx {
+		sig := e.Sig
 		if tr := snap.Tracks[k]; tr == nil || sig.Row != tr.Row || sig.Rules != rbstate.Rules || sig.Audio.IsZero() || len(sig.ANLZ) != 3 {
 			t.Fatalf("staged %s: %+v", k, sig)
 		}

@@ -36,8 +36,12 @@ type CueWatcher struct {
 	mounts    func() []string
 	pass      func(context.Context, string, WriteBackOptions) (WriteBackResult, error)
 	grace     time.Duration
-	mu        sync.Mutex
-	sticks    map[string]*cueStick
+	// poll is how often the mounts and each stick's m.db are looked at. Ten times a second cost
+	// 0.4 % of a build-host core with nothing to do, about 2 % of a deck's; a second delays a
+	// pass that waits Quiet (5 s) after Engine's last write by at most that.
+	poll   time.Duration
+	mu     sync.Mutex
+	sticks map[string]*cueStick
 }
 
 type cueStick struct {
@@ -52,7 +56,7 @@ type cueStick struct {
 }
 
 func NewCueWatcher(mediaRoot string) *CueWatcher {
-	w := &CueWatcher{MediaRoot: mediaRoot, Quiet: CueQuiet, Retry: 15 * time.Second, Logf: log.Printf, pass: WriteBackCues, grace: 100 * time.Millisecond}
+	w := &CueWatcher{MediaRoot: mediaRoot, Quiet: CueQuiet, Retry: 15 * time.Second, Logf: log.Printf, pass: WriteBackCues, grace: 100 * time.Millisecond, poll: time.Second}
 	w.mounts = func() []string { return mediaMounts(mediaRoot) }
 	return w
 }
@@ -105,15 +109,6 @@ func (w *CueWatcher) detach(mount string) {
 		cancel()
 		st.keys.Clear()
 	}
-}
-
-func (w *CueWatcher) changed(mount string, now time.Time) {
-	w.mu.Lock()
-	if st := w.sticks[mount]; st != nil {
-		st.events.Add(1)
-		st.due = now.Add(w.Quiet)
-	}
-	w.mu.Unlock()
 }
 
 func (w *CueWatcher) startDue(ctx context.Context, now time.Time) {
@@ -250,7 +245,7 @@ func (w *CueWatcher) rescan() {
 }
 
 func (w *CueWatcher) Run(ctx context.Context) error {
-	tick := time.NewTicker(100 * time.Millisecond)
+	tick := time.NewTicker(w.poll)
 	defer tick.Stop()
 	w.rescan()
 	for {

@@ -359,7 +359,7 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		return res, nil
 	}
 
-	libraries, err := readNeededLibraries(ctx, absMount, importState.Current, candidates.rows, keys, &tm.decrypt)
+	libraries, err := readNeededLibraries(ctx, absMount, candidates.rows, keys, &tm.decrypt)
 	if err != nil {
 		return res, err
 	}
@@ -435,7 +435,6 @@ func writeBackCues(ctx context.Context, mountPath string, opts WriteBackOptions,
 		}
 		written[key] = sigs
 	}
-	evictWriteBackExportCache(importState.Current)
 	if err := NoteWriteBack(absMount, written, opts.Session.take(insync)); err != nil {
 		return res, err
 	}
@@ -512,7 +511,7 @@ func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, ses
 	return out, nil
 }
 
-func readNeededLibraries(ctx context.Context, mount, stamp string, rows []dbCandidate, keys *rekordbox.KeyCache, decrypt *time.Duration) (map[rbstate.LibraryKind]SourceLibrary, error) {
+func readNeededLibraries(ctx context.Context, mount string, rows []dbCandidate, keys *rekordbox.KeyCache, decrypt *time.Duration) (map[rbstate.LibraryKind]SourceLibrary, error) {
 	needed := map[rbstate.LibraryKind]bool{}
 	for _, row := range rows {
 		for _, ref := range row.track.Refs {
@@ -521,9 +520,6 @@ func readNeededLibraries(ctx context.Context, mount, stamp string, rows []dbCand
 	}
 	if len(needed) == 0 {
 		return map[rbstate.LibraryKind]SourceLibrary{}, nil
-	}
-	if cached, ok := getWriteBackExportCache(stamp); ok {
-		return cached, nil
 	}
 	resolver, err := compat.NewResolver(mount)
 	if err != nil {
@@ -546,53 +542,7 @@ func readNeededLibraries(ctx context.Context, mount, stamp string, rows []dbCand
 			out[lib.Kind] = lib
 		}
 	}
-	putWriteBackExportCache(stamp, out)
 	return out, nil
-}
-
-var writeBackExportCache = struct {
-	sync.Mutex
-	entries map[string]map[rbstate.LibraryKind]SourceLibrary
-	order   []string
-}{entries: map[string]map[rbstate.LibraryKind]SourceLibrary{}}
-
-func getWriteBackExportCache(stamp string) (map[rbstate.LibraryKind]SourceLibrary, bool) {
-	writeBackExportCache.Lock()
-	defer writeBackExportCache.Unlock()
-	got, ok := writeBackExportCache.entries[stamp]
-	if !ok {
-		return nil, false
-	}
-	return got, true
-}
-
-func putWriteBackExportCache(stamp string, libs map[rbstate.LibraryKind]SourceLibrary) {
-	if stamp == "" || len(libs) == 0 {
-		return
-	}
-	writeBackExportCache.Lock()
-	defer writeBackExportCache.Unlock()
-	if _, ok := writeBackExportCache.entries[stamp]; !ok {
-		writeBackExportCache.order = append(writeBackExportCache.order, stamp)
-	}
-	writeBackExportCache.entries[stamp] = libs
-	for len(writeBackExportCache.order) > 4 {
-		old := writeBackExportCache.order[0]
-		writeBackExportCache.order = writeBackExportCache.order[1:]
-		delete(writeBackExportCache.entries, old)
-	}
-}
-
-func evictWriteBackExportCache(stamp string) {
-	writeBackExportCache.Lock()
-	defer writeBackExportCache.Unlock()
-	delete(writeBackExportCache.entries, stamp)
-	for i, v := range writeBackExportCache.order {
-		if v == stamp {
-			writeBackExportCache.order = append(writeBackExportCache.order[:i], writeBackExportCache.order[i+1:]...)
-			break
-		}
-	}
 }
 
 func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbstate.LibraryKind]SourceLibrary, rows []dbCandidate) ([]trackChange, map[string]bool, error) {
