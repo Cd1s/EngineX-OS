@@ -74,3 +74,35 @@ func TestSyncPlaylistsOnlyLeavesTracksAndBridgeStateUntouched(t *testing.T) {
 		t.Fatalf("tracks/state changed: tracks %d/%d state %d/%d added %d", beforeTracks, afterTracks, beforeState, afterState, added)
 	}
 }
+
+func TestSyncPlaylistsOnlyUsesPathsWhenExportIDsShift(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, true); err != nil {
+		t.Fatal(err)
+	}
+	library, err := bridge.ReadLibrary(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const shift = uint32(5000)
+	for i := range library.Tracks {
+		old := library.Tracks[i].ID
+		library.Tracks[i].ID += shift
+		for j := range library.Playlists {
+			for k := range library.Playlists[j].Tracks {
+				if library.Playlists[j].Tracks[k] == old {
+					library.Playlists[j].Tracks[k] += shift
+				}
+			}
+		}
+	}
+	library.Playlists = append(library.Playlists, rekordbox.Playlist{ID: 999998, Name: "Shifted", Tracks: []uint32{library.Tracks[0].ID}})
+	res, err := enginedb.SyncPlaylistsOnly(context.Background(), root, library)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Added != 1 {
+		t.Fatalf("playlist result %+v", res)
+	}
+}

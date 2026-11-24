@@ -128,18 +128,14 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 		return enginedb.Result{}, false, quickLate(ctx, err)
 	}
 	read := time.Since(start)
-	if unchanged, pathErr := unchangedTrackSet(dir, l); pathErr != nil {
-		return enginedb.Result{}, false, pathErr
-	} else if unchanged {
-		playlist, syncErr := enginedb.SyncPlaylistsOnly(inner, mount, l)
-		if syncErr == nil {
-			changed := playlist.Added + playlist.Updated + playlist.Removed
-			log.Printf("rb-bridge: playlist-only update changed %d lists in %s (export read %s)", changed, time.Since(start).Round(time.Millisecond), read.Round(time.Millisecond))
-			return enginedb.Result{PlaylistsChanged: changed > 0}, true, nil
-		}
-		if !errors.Is(syncErr, enginedb.ErrPlaylistTrackSetChanged) {
-			return enginedb.Result{}, false, syncErr
-		}
+	playlist, syncErr := enginedb.SyncPlaylistsOnly(inner, mount, l)
+	if syncErr == nil {
+		changed := playlist.Added + playlist.Updated + playlist.Removed
+		log.Printf("rb-bridge: playlist-only update changed %d lists in %s (export read %s)", changed, time.Since(start).Round(time.Millisecond), read.Round(time.Millisecond))
+		return enginedb.Result{PlaylistsChanged: changed > 0}, true, nil
+	}
+	if !errors.Is(syncErr, enginedb.ErrPlaylistTrackSetChanged) {
+		return enginedb.Result{}, false, syncErr
 	}
 	fresh, owned, spellings, err := quickPathsWithOwned(dir, l)
 	if err != nil {
@@ -186,30 +182,6 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	_ = overviews.Keep(mount)
 	log.Printf("rb-bridge: quick update of %d tracks (%d new), %d playlist entries in %s (export read %s, estimate %s)", len(l.Tracks), fresh, entries, time.Since(start).Round(time.Millisecond), read.Round(time.Millisecond), cost.Round(time.Millisecond))
 	return res, false, nil
-}
-
-func unchangedTrackSet(dir string, l *rekordbox.Library) (bool, error) {
-	owned, err := ownedPaths(dir)
-	if err != nil {
-		return false, err
-	}
-	if len(owned) != len(l.Tracks) {
-		return false, nil
-	}
-	for _, track := range l.Tracks {
-		old, ok := owned[track.ID]
-		if !ok {
-			return false, nil
-		}
-		clean, err := compat.CleanRelative(track.Path)
-		if err != nil {
-			return false, err
-		}
-		if foldPath(clean) != foldPath(old) {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 // quickCost is what a quick update of known and fresh tracks and entries playlist entries costs on
