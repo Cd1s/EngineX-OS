@@ -740,6 +740,27 @@ func TestPort1BrokenOneLibraryLeavesDeviceRowsAndRetries(t *testing.T) {
 	}
 }
 
+func TestPort1UnreadableOneLibraryStillCompletesDeviceImport(t *testing.T) {
+	mount := t.TempDir()
+	testfixture.Export(t, mount)
+	if err := os.WriteFile(filepath.Join(mount, "PIONEER", "rekordbox", "exportLibrary.db"), []byte("not a SQLCipher database"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConvertAtMount(context.Background(), mount, MountOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FillInBackground(context.Background(), mount, FillOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ConvertAtMount(context.Background(), mount, MountOptions{Publish: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Pending.None() {
+		t.Fatalf("unreadable OneLibrary should be excluded so Device Library import completes, got pending=%+v", res.Pending)
+	}
+}
+
 func TestPort1StagedOnlyStickConvertsRepeatsAndRestages(t *testing.T) {
 	for _, mode := range []string{"empty", "pioneer-directory", "native-engine"} {
 		t.Run(mode, func(t *testing.T) {
