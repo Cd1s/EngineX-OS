@@ -461,8 +461,8 @@ func embeddedCover(full string, read ReadOptions) ([]byte, error) {
 	}
 	r := &pacedFile{f: f, chunk: read.Chunk, pause: read.Pause}
 	hdr := make([]byte, 12)
-	n, err := r.ReadAt(hdr, 0)
-	if err != nil && err != io.EOF {
+	n, err := io.ReadFull(r, hdr)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return nil, err
 	}
 	if n < 4 {
@@ -502,8 +502,8 @@ func embeddedCover(full string, read ReadOptions) ([]byte, error) {
 	return nil, ErrNoArtwork
 }
 
-// pacedFile is an io.ReadSeeker and io.ReaderAt over f whose reads take at most chunk bytes
-// and call pause after each. A pause error sticks: every later read returns it.
+// pacedFile is an io.ReadSeeker over f whose reads take at most chunk bytes and call pause after
+// each. A pause error sticks: every later read returns it.
 type pacedFile struct {
 	f     *os.File
 	chunk int
@@ -511,47 +511,21 @@ type pacedFile struct {
 	err   error
 }
 
-func (p *pacedFile) limit(b []byte) []byte {
-	if p.pause != nil && p.chunk > 0 && len(b) > p.chunk {
-		return b[:p.chunk]
-	}
-	return b
-}
-
-func (p *pacedFile) paced(n int, start time.Time) {
-	if p.pause != nil && n > 0 && p.err == nil {
-		p.err = p.pause(n, time.Since(start))
-	}
-}
-
 func (p *pacedFile) Read(b []byte) (int, error) {
 	if p.err != nil {
 		return 0, p.err
 	}
+	if p.pause != nil && p.chunk > 0 && len(b) > p.chunk {
+		b = b[:p.chunk]
+	}
 	start := time.Now()
-	n, err := p.f.Read(p.limit(b))
-	p.paced(n, start)
-	if err == nil && p.err != nil {
-		err = p.err
+	n, err := p.f.Read(b)
+	if p.pause != nil && n > 0 {
+		if p.err = p.pause(n, time.Since(start)); err == nil {
+			err = p.err
+		}
 	}
 	return n, err
-}
-
-func (p *pacedFile) ReadAt(b []byte, off int64) (int, error) {
-	done := 0
-	for done < len(b) {
-		if p.err != nil {
-			return done, p.err
-		}
-		start := time.Now()
-		n, err := p.f.ReadAt(p.limit(b[done:]), off+int64(done))
-		done += n
-		p.paced(n, start)
-		if err != nil {
-			return done, err
-		}
-	}
-	return done, nil
 }
 
 func (p *pacedFile) Seek(off int64, whence int) (int64, error) { return p.f.Seek(off, whence) }

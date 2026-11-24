@@ -121,20 +121,16 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		byKey: make(map[string]int, len(view.tracks)), handled: make([]bool, len(view.tracks)), built: make([]bool, len(view.tracks)),
 		rgbDir: dbDir, progress: o.Progress,
 	}
+	order := make([]int, 0, len(view.tracks))
 	for i, t := range view.tracks {
 		f.byKey[t.key] = i
 		if s := snap.Tracks[t.key]; s != nil && s.Native {
 			f.handled[i], f.built[i] = true, true // Engine's own row: the bridge never writes it (#252)
-			continue
-		}
-		f.total++
-	}
-	order := make([]int, 0, len(view.tracks))
-	for i := range view.tracks {
-		if !f.handled[i] {
+		} else {
 			order = append(order, i)
 		}
 	}
+	f.total = len(order)
 	slices.SortFunc(order, func(a, b int) int {
 		return cmp.Or(strings.Compare(view.tracks[a].key, view.tracks[b].key), cmp.Compare(view.tracks[a].track.ID, view.tracks[b].track.ID))
 	})
