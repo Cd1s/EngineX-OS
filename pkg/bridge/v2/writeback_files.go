@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -254,8 +255,8 @@ func stageChanges(ctx context.Context, mount string, resolver *compat.Resolver, 
 }
 
 func newStagedName(dir, kind string) string {
-	for n := uint32(1); ; n++ {
-		name := fmt.Sprintf(".enginex-%s-%d.tmp", kind, n)
+	for {
+		name := fmt.Sprintf(".enginex-%s-%d.tmp", kind, rand.Uint32())
 		if _, err := os.Lstat(filepath.Join(dir, name)); errors.Is(err, os.ErrNotExist) {
 			return name
 		}
