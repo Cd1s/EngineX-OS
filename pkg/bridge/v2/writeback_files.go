@@ -22,6 +22,10 @@ const (
 	writeBackAgainName = ".rb-bridge-writeback-again"
 )
 
+func init() {
+	rbstate.UnsafeToFree = unsafeToFree
+}
+
 type writePlan struct {
 	dirs      []string
 	targets   [][2]string
@@ -478,6 +482,13 @@ func putBack(mount, rel, name string) (bool, bool) {
 func CleanWriteBackLeftovers(mount string) int {
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	n := rbstate.CleanTemps(dir)
+	if matches, err := filepath.Glob(filepath.Join(dir, ".enginex-wb-*.tmp")); err == nil {
+		for _, path := range matches {
+			if removeFile(path) == nil {
+				n++
+			}
+		}
+	}
 	mark := filepath.Join(dir, writeBackMarkName)
 	data, err := os.ReadFile(mark)
 	if err != nil {
