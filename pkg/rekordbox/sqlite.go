@@ -131,7 +131,24 @@ type sqlRecord map[string]string
 var nameSeparators = strings.NewReplacer("_", "", "-", "", " ", "")
 
 func normalized(s string) string {
-	return strings.ToLower(nameSeparators.Replace(s))
+	// Export column and table names are ASCII. Keep the common path allocation-light
+	// because get() runs once for every projected field of every row.
+	var buf [64]byte
+	out := buf[:0]
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 0x80 {
+			return strings.ToLower(nameSeparators.Replace(s))
+		}
+		if c == '_' || c == '-' || c == ' ' {
+			continue
+		}
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		out = append(out, c)
+	}
+	return string(out)
 }
 func (r sqlRecord) get(names ...string) string {
 	for _, n := range names {
