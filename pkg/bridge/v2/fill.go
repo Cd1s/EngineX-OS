@@ -134,6 +134,9 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	})
 	f.report()
 	err = f.run(order)
+	if err == nil && f.done == f.total {
+		err = f.refuseUnreadable()
+	}
 	if errors.Is(err, rbstate.ErrStageFull) {
 		// /data is at its floor: what is staged is published, a window applies and drops it, and
 		// the next job goes on.
@@ -148,8 +151,8 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	if err == nil && res.Left == 0 && view.stamp != "" && verified != view.stamp {
 		err = stage.MarkVerified(view.stamp)
 	}
-	if err == nil {
-		res.Publish = f.publish()
+	if err == nil || errors.Is(err, ErrFilesUnreadable) {
+		res.Publish = f.publish() // what could be read is published all the same
 	}
 	log.Printf("rb-bridge: fill of %s: %d staged, %d degraded, %d missing, %d unread, %d left of %d in %s (snapshot %s, exports %s; %s); publish=%v",
 		mount, res.Staged, res.Degraded, res.Missing, res.Unread, res.Left, f.total,
@@ -287,6 +290,123 @@ func (f *filler) fill(i int) (ok bool, err error) {
 		f.writeRGB(snapTrack.EngineID, rec.RGB)
 	}
 	return true, nil
+}
+
+// ErrFilesUnreadable: many tracks of the export have no file under their name, and files no
+// track of the export leads to lie where those names should be: the mount does not give the
+// names as the export wrote them (real stick, 2026-11-19: a mount without UTF-8 names made 707
+// tracks look deleted). Nothing is removed and the next job looks again.
+var ErrFilesUnreadable = errors.New("files of the export are on the drive under names that cannot be read")
+
+// unreadableLimit is how many such tracks a job lets pass as deleted: 2 % of the export's
+// tracks, at most 50 and at least 5.
+func unreadableLimit(tracks int) int { return min(50, max(5, tracks/50)) }
+
+// refuseUnreadable takes the Missing records back out of the stage when too many of them are
+// files the mount merely cannot name. Files deleted by hand, however many, stay Missing: the
+// window removes their rows.
+func (f *filler) refuseUnreadable() error {
+	kept := map[string]bool{}
+	var gone, keys []string
+	for i := range f.view.tracks {
+		vt := &f.view.tracks[i]
+		if e := f.entries[vt.key]; e != nil && e.Sig.Row == vt.hash {
+			if e.Missing {
+				gone, keys = append(gone, vt.track.Path), append(keys, vt.key)
+			} else {
+				kept[e.Rel] = true
+			}
+		} else if s := f.snap.Tracks[vt.key]; s != nil && s.Perf != rbstate.PerfMissing {
+			kept[s.Rel] = true
+		}
+	}
+	hidden := hiddenTracks(f.r, kept, gone)
+	if hidden <= unreadableLimit(len(f.view.tracks)) {
+		return nil
+	}
+	log.Printf("rb-bridge: NOT REMOVED: the files of %d of the export's %d tracks are on the drive under names that cannot be read as the export wrote them. Nothing is removed; the next insert tries again", hidden, len(f.view.tracks))
+	if err := f.stage.Drop(keys...); err != nil {
+		return err
+	}
+	for _, k := range keys {
+		delete(f.entries, k)
+	}
+	f.res.Missing = 0
+	return fmt.Errorf("%w: %d of %d tracks", ErrFilesUnreadable, hidden, len(f.view.tracks))
+}
+
+// hiddenTracks counts the tracks of gone (export paths without a file) whose file is probably
+// there under another name: where the lookup stopped lies an entry no found track (kept, by
+// volume path) leads to, of the same kind: a folder with a file somewhere in it for a folder
+// (deleting an album's files by hand leaves empty folders), a file with the same extension for
+// a file.
+func hiddenTracks(r *compat.Resolver, kept map[string]bool, gone []string) int {
+	claimed := map[string]map[string]bool{}
+	for rel := range kept {
+		dir := ""
+		for _, name := range strings.Split(rel, "/") {
+			if claimed[dir] == nil {
+				claimed[dir] = map[string]bool{}
+			}
+			claimed[dir][name] = true
+			dir = filepath.Join(dir, name)
+		}
+	}
+	type place struct{ dir, kind string } // kind: "/" for a folder, else the file's extension
+	lost := map[place]map[string]int{}    // the names not found there, and their tracks
+	for _, p := range gone {
+		stop, ok := r.Stopped(p)
+		if !ok {
+			continue
+		}
+		at := place{stop.Dir, "/"}
+		if stop.File {
+			at.kind = strings.ToLower(filepath.Ext(stop.Name))
+		}
+		if lost[at] == nil {
+			lost[at] = map[string]int{}
+		}
+		lost[at][stop.Name]++
+	}
+	hidden := 0
+	for at, names := range lost {
+		free, tracks := 0, 0
+		for _, name := range r.Entries(at.dir, at.kind == "/") {
+			if free >= len(names) || claimed[at.dir][name] || strings.HasPrefix(name, ".") {
+				continue
+			}
+			if at.kind == "/" {
+				if !holdsFile(r.FullPath(filepath.Join(at.dir, name))) {
+					continue
+				}
+			} else if strings.ToLower(filepath.Ext(name)) != at.kind {
+				continue
+			}
+			free++
+		}
+		for _, n := range names {
+			tracks += n
+		}
+		hidden += tracks * min(free, len(names)) / len(names)
+	}
+	return hidden
+}
+
+// holdsFile reports whether a file, hidden ones aside, lies anywhere under dir.
+func holdsFile(dir string) bool {
+	found := errors.New("found")
+	return filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && p != dir && strings.HasPrefix(d.Name(), ".") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if err == nil && !d.IsDir() {
+			return found
+		}
+		return nil
+	}) == found
 }
 
 // unread logs a track that could not be built now. A stop is returned.

@@ -30,6 +30,7 @@ type window struct {
 	linkOnly bool // the stick has only staged CDJ libraries now: its own earlier import stays
 
 	lib     *enginedb.Library // nil: the stick has no library to keep, one is built
+	uuid    string            // of Engine's empty skeleton, which the built library takes over
 	snap    *rbstate.Snapshot
 	index   map[string]enginedb.Row // every row of the library by key
 	head    rbstate.Header          // the snapshot's header as the stick has it
@@ -43,15 +44,19 @@ func (w *window) close() {
 	}
 }
 
-const (
-	oldStateName     = ".rb-bridge-state.db" // the state file of builds before the snapshot
-	beforeImportName = "m.db.before-import"
-)
+const oldStateName = ".rb-bridge-state.db" // the state file of builds before the snapshot
 
 // open opens the stick's library and the snapshot of what the bridge has in it. w.lib stays nil
-// when there is no library to keep: no m.db, or the skeleton Engine makes when it sees a stick
-// (no lists, and nothing of the bridge's).
+// when there is no library to keep: no m.db, or the empty skeleton Engine makes when it sees a
+// stick. A skeleton with rows (Engine adds one for each track the DJ loads while it shows the
+// stick's rekordbox library itself) is a library: its rows stay Engine's, the export is written
+// into it in place.
 func (w *window) open() error {
+	// Never under a process that has the file open, whatever is in it: Engine would go on
+	// writing a file that is no longer the stick's.
+	if enginedb.OpenElsewhere(filepath.Join(w.dir, "m.db")) != 0 {
+		return enginedb.ErrLibraryInUse
+	}
 	snap, err := rbstate.Load(w.dir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -76,17 +81,9 @@ func (w *window) open() error {
 			return err
 		}
 		_, oldErr := os.Stat(filepath.Join(w.dir, oldStateName))
-		if lists == 0 && errors.Is(oldErr, os.ErrNotExist) {
-			// Engine's skeleton. It has a row for each track the DJ loaded while Engine showed the
-			// stock rekordbox view: kept aside, as earlier builds did, when it has any.
-			lib.Close()
-			if tracks > 0 {
-				if err = rbstate.RenameFile(filepath.Join(w.dir, "m.db"), filepath.Join(w.dir, beforeImportName)); err != nil {
-					return err
-				}
-				log.Printf("rb-bridge: Engine's own library of %d tracks on this stick is kept as %s", tracks, beforeImportName)
-			}
-			return nil
+		if tracks == 0 && lists == 0 && errors.Is(oldErr, os.ErrNotExist) {
+			w.uuid = lib.UUID()
+			return lib.Close()
 		}
 		if oldErr == nil {
 			if snap, err = adopt(w.ctx, w.dir, lib.UUID()); err != nil {
@@ -162,9 +159,11 @@ func (w *window) reconcile() error {
 			t.Rel, t.Resolved, w.dirty = rel, true, true
 		}
 	}
-	for key, l := range w.snap.Lists {
+	for _, l := range w.snap.Lists {
 		if l.EngineID != 0 && !lists[l.EngineID] {
-			delete(w.snap.Lists, key)
+			// Still known as the bridge's: when Engine has made the list again under a new ID,
+			// putLists takes that one back instead of adding a second.
+			l.EngineID, l.Hash = 0, ""
 			gone++
 		}
 	}
@@ -275,7 +274,7 @@ func (w *window) build() error {
 		idx[i] = i
 	}
 	var listIDs map[string]int64
-	ids, uuid, commitID, err := enginedb.BuildLibrary(w.ctx, tmp, w.rows(idx), func(b *enginedb.Batch, ids []int64) error {
+	ids, uuid, commitID, err := enginedb.BuildLibrary(w.ctx, tmp, w.uuid, w.rows(idx), func(b *enginedb.Batch, ids []int64) error {
 		byKey := make(map[string]int64, len(ids))
 		for i, id := range ids {
 			byKey[w.view.Tracks[i].Key] = id
@@ -358,8 +357,15 @@ func putLists(ctx context.Context, b *enginedb.Batch, v *View, idx []int, known 
 		}
 		if id == 0 {
 			var err error
-			if id, err = b.InsertList(ctx, enginedb.ListRow{Title: l.Name, Parent: parent}); err != nil {
-				return nil, err
+			if old != nil { // Engine removed the bridge's list: the one it made in its place, if any
+				if id, err = b.FindList(ctx, l.Name, parent); err != nil {
+					return nil, err
+				}
+			}
+			if id == 0 {
+				if id, err = b.InsertList(ctx, enginedb.ListRow{Title: l.Name, Parent: parent}); err != nil {
+					return nil, err
+				}
 			}
 			ids[l.Key] = id
 			old = nil
@@ -612,13 +618,8 @@ func (w *window) applyStaged() error {
 			keys = append(keys, key)
 		}
 	}
-	// Tracks without a file: gone from the stick, or the names cannot be read on this mount. Many
-	// at once is the second, and then nothing is removed.
-	if len(missing) > unreadableLimit(len(w.view.Tracks)) {
-		log.Printf("rb-bridge: NOT REMOVED: %d of the export's %d tracks have no file under their name on the drive; the library stays as it is", len(missing), len(w.view.Tracks))
-		stale = append(stale, missing...) // looked at again by the next job, on the next mount's names
-		missing = nil
-	}
+	// missing: files gone from the stick. The job has told them from names its mount cannot read
+	// (ErrFilesUnreadable) before it staged them.
 	keys = w.inApplyOrder(append(keys, missing...))
 	applied, kept, degraded, gone, left := 0, 0, 0, 0, len(entries)-len(stale)
 	for at := 0; at < len(keys) && w.st.more(applyReserve); {

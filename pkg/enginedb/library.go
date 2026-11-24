@@ -58,10 +58,10 @@ const (
 // none. It returns ErrLibraryInUse when another process has the file open: Engine never sees
 // what another process writes to a library it has open, and writes its own pages over it.
 func OpenLibrary(ctx context.Context, dir string) (*Library, error) {
-	return openLibrary(ctx, dir, false)
+	return openLibrary(ctx, dir, false, "")
 }
 
-func openLibrary(ctx context.Context, dir string, bulk bool) (*Library, error) {
+func openLibrary(ctx context.Context, dir string, bulk bool, newUUID string) (*Library, error) {
 	p := filepath.Join(dir, "m.db")
 	for _, suffix := range []string{"", "-journal", "-wal", "-shm"} {
 		if err := safeFile(p + suffix); err != nil {
@@ -83,7 +83,10 @@ func openLibrary(ctx context.Context, dir string, bulk bool) (*Library, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	l := &Library{db: db, dir: dir, bulk: bulk}
+	if newUUID == "" {
+		newUUID = uuid.NewString()
+	}
+	l := &Library{db: db, dir: dir, bulk: bulk, uuid: newUUID}
 	if err = l.init(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -105,7 +108,7 @@ func (l *Library) init(ctx context.Context) error {
 		if _, err = tx.ExecContext(ctx, schema); err != nil {
 			return fmt.Errorf("engine schema: %w", err)
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch,currentPlayedIndiciator,lastRekordBoxLibraryImportReadCounter) VALUES(1,?,3,0,2,?,0)`, uuid.NewString(), playedIndicator()); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch,currentPlayedIndiciator,lastRekordBoxLibraryImportReadCounter) VALUES(1,?,3,0,2,?,0)`, l.uuid, playedIndicator()); err != nil {
 			return err
 		}
 		if err = tx.Commit(); err != nil {
@@ -498,6 +501,17 @@ func (b *Batch) InsertList(ctx context.Context, row ListRow) (int64, error) {
 	return res.LastInsertId()
 }
 
+// FindList is the list of a title in a folder that the DJ or Engine asked for by name, 0 when
+// there is none.
+func (b *Batch) FindList(ctx context.Context, title string, parent int64) (int64, error) {
+	var id int64
+	err := b.tx.QueryRowContext(ctx, `SELECT id FROM Playlist WHERE title=? AND parentListId=? AND isExplicitlyExported=1`, title, parent).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return id, err
+}
+
 // RenameList gives a list the export's title again.
 func (b *Batch) RenameList(ctx context.Context, id int64, name string) error {
 	var parent int64
@@ -824,8 +838,9 @@ func (b *Batch) RowDigest(ctx context.Context, id int64) ([]byte, error) {
 // export cue rows, then fn's lists. It loads without Engine's secondary indexes and rebuilds
 // them at the end, with its journal in memory and no sync until the file is complete: the
 // caller builds beside the stick's library and renames the finished file into place.
-func BuildLibrary(ctx context.Context, dir string, rows []TrackRow, lists func(b *Batch, ids []int64) error) (ids []int64, libraryUUID string, commitID int64, err error) {
-	l, err := openLibrary(ctx, dir, true)
+// libraryID is the UUID of the empty skeleton it replaces, "" for a new one.
+func BuildLibrary(ctx context.Context, dir, libraryID string, rows []TrackRow, lists func(b *Batch, ids []int64) error) (ids []int64, libraryUUID string, commitID int64, err error) {
+	l, err := openLibrary(ctx, dir, true, libraryID)
 	if err != nil {
 		return nil, "", 0, err
 	}

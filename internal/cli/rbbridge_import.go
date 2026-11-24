@@ -104,7 +104,7 @@ func runImportJob(ctx context.Context, mount string) error {
 		rep.Done()
 		return nil
 	}
-	if err != nil {
+	if err != nil && !(errors.Is(err, bridgev2.ErrFilesUnreadable) && r.Publish) {
 		return err // rep.Fail kept the error for the browser; the next import's Start clears it
 	}
 	if !r.Publish {

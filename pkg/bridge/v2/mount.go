@@ -84,15 +84,6 @@ func priorityKeys(mount string) []string {
 	return keys
 }
 
-// ErrFilesUnreadable: many tracks of the export have no file under their name. Nothing is
-// removed and the library stays as it is (real stick, 2026-11-19: a mount without UTF-8 names
-// made 707 tracks look deleted).
-var ErrFilesUnreadable = errors.New("files of the export are on the drive under names that cannot be read")
-
-// unreadableLimit is how many tracks without a file a window removes without refusing: 2 % of
-// the export's tracks, at most 50 and at least 5.
-func unreadableLimit(tracks int) int { return min(50, max(5, tracks/50)) }
-
 // steps times a window and writes one journal line a step, so the next insert on a deck shows
 // where the time goes.
 type steps struct {
@@ -192,9 +183,21 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	if (len(files) == 0 && staged == "") || !writableLibrary(mount) {
 		return MountResult{Bypassed: true}, nil
 	}
+	_, hadLibrary := os.Lstat(filepath.Join(mount, "Engine Library"))
 	dir, err := compat.SafeOutputDir(mount, databaseSubdir)
 	if err != nil {
 		return res, err
+	}
+	if errors.Is(hadLibrary, os.ErrNotExist) {
+		// A first import that fails leaves no Engine Library behind (#53): Engine then shows the
+		// stick's rekordbox library itself instead of an empty one.
+		defer func() {
+			if _, e := os.Stat(filepath.Join(dir, "m.db")); err != nil && e != nil {
+				_ = rbstate.DropNext(dir)
+				_ = os.Remove(dir)
+				_ = os.Remove(filepath.Dir(dir))
+			}
+		}()
 	}
 	unlock, err := rbstate.LockVolume(mount, lockWait)
 	if err != nil {
