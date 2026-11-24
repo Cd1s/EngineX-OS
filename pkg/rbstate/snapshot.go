@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,10 +23,8 @@ import (
 //	body                  the lists and the tracks, by key, as encoding/gob writes them
 //	\nE <records> <crc32 of every byte above, hex>\n
 //
-// The body is binary because every window that finds a changed export reads it all and every
-// commit writes it all: as JSON lines, 2,390 tracks took 0.4 s of a deck's CPU for one read and
-// one write (replica, 2026-11-24). The file is only ever replaced whole (Save), so a reader sees
-// an old one or a new one. A file without the E line is no snapshot.
+// The body is gob, not JSON lines: 2,390 tracks as JSON cost 0.4 s of a deck's CPU for one read
+// and one write (replica, 2026-11-24). A file without its E line is no snapshot.
 
 const (
 	snapshotMagic = "RBS2 "
@@ -41,14 +40,10 @@ type snapshotBody struct {
 var ErrNoSnapshot = fmt.Errorf("rbstate: no snapshot: %w", os.ErrNotExist)
 
 // ReadHeader reads the snapshot's first line and checks that the file ends with its E line.
-// It reads two small pieces of the file whatever its size.
 func ReadHeader(dbDir string) (Header, error) {
 	var h Header
-	f, err := os.Open(filepath.Join(dbDir, SnapshotName))
+	f, err := openSnapshot(filepath.Join(dbDir, SnapshotName))
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return h, ErrNoSnapshot
-		}
 		return h, err
 	}
 	defer f.Close()
@@ -95,12 +90,17 @@ func parseEnd(line []byte) (records int, sum uint32, ok bool) {
 // Load reads and checks the whole snapshot.
 func Load(dbDir string) (*Snapshot, error) { return load(filepath.Join(dbDir, SnapshotName)) }
 
-func load(file string) (*Snapshot, error) {
+func openSnapshot(file string) (*os.File, error) {
 	f, err := os.Open(file)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrNoSnapshot
+	}
+	return f, err
+}
+
+func load(file string) (*Snapshot, error) {
+	f, err := openSnapshot(file)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, ErrNoSnapshot
-		}
 		return nil, err
 	}
 	defer f.Close()
@@ -155,10 +155,10 @@ func (s *Snapshot) Encode() ([]byte, error) {
 	b.Write(head)
 	b.WriteByte('\n')
 	rec := snapshotBody{Lists: make([]*List, 0, len(s.Lists)), Tracks: make([]*Track, 0, len(s.Tracks))}
-	for _, k := range sortedKeys(s.Lists) {
+	for _, k := range slices.Sorted(maps.Keys(s.Lists)) {
 		rec.Lists = append(rec.Lists, s.Lists[k])
 	}
-	for _, k := range sortedKeys(s.Tracks) {
+	for _, k := range slices.Sorted(maps.Keys(s.Tracks)) {
 		rec.Tracks = append(rec.Tracks, s.Tracks[k])
 	}
 	if err = gob.NewEncoder(&b).Encode(&rec); err != nil {
@@ -169,50 +169,24 @@ func (s *Snapshot) Encode() ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	return keys
-}
-
 // Save replaces the snapshot in dbDir, pull-safe (ReplaceFile). The caller holds LockVolume.
-func (s *Snapshot) Save(dbDir string) error {
-	b, err := s.Encode()
-	if err != nil {
-		return err
-	}
-	return ReplaceFile(filepath.Join(dbDir, SnapshotName), b)
-}
+func (s *Snapshot) Save(dbDir string) error { return s.saveAs(filepath.Join(dbDir, SnapshotName)) }
 
-// Remove deletes the snapshot of dbDir, pull-safe.
-func Remove(dbDir string) error {
-	err := RemoveFile(filepath.Join(dbDir, SnapshotName))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return err
-}
-
-// A window writes m.db and the snapshot so that a cut between the two loses nothing. After its
-// statements ran, and before the transaction commits, it saves the snapshot the commit leads to
-// as the next snapshot (SaveNext): by then every new row's ID is known. After the commit it
-// makes that file the snapshot (Promote). A next snapshot found at the start of a window was cut
-// off on either side of its commit; LoadNext returns it as claims, and the window takes over a
-// claimed row only if m.db really holds it (the row's ID with its path, the list's ID with its
-// title and folder). So no row is taken for the bridge's on the word of a commit that never
-// happened, whatever Engine wrote in between.
+// A window saves the snapshot its transaction leads to as the next snapshot (SaveNext) before it
+// commits, then makes it the snapshot (Promote). A window that finds a next snapshot reads the
+// library's commit ID: equal to Header.Commit, the commit happened and the file is promoted;
+// otherwise it is dropped (design section 5). Readers other than the mount path ignore it.
 const nextName = SnapshotName + ".next"
 
 // SaveNext writes the snapshot the transaction under way leads to.
-func (s *Snapshot) SaveNext(dbDir string) error {
+func (s *Snapshot) SaveNext(dbDir string) error { return s.saveAs(filepath.Join(dbDir, nextName)) }
+
+func (s *Snapshot) saveAs(file string) error {
 	b, err := s.Encode()
 	if err != nil {
 		return err
 	}
-	return ReplaceFile(filepath.Join(dbDir, nextName), b)
+	return ReplaceFile(file, b)
 }
 
 // Promote makes the next snapshot the snapshot, pull-safe.
@@ -223,11 +197,10 @@ func Promote(dbDir string) error {
 // LoadNext returns the next snapshot a cut left, or ErrNoSnapshot.
 func LoadNext(dbDir string) (*Snapshot, error) { return load(filepath.Join(dbDir, nextName)) }
 
-// DropNext removes the next snapshot once its claims are settled.
+// DropNext removes the next snapshot.
 func DropNext(dbDir string) error {
-	err := RemoveFile(filepath.Join(dbDir, nextName))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+	if err := RemoveFile(filepath.Join(dbDir, nextName)); !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
-	return err
+	return nil
 }

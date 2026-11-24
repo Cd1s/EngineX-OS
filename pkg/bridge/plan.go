@@ -4,15 +4,15 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
-// Move is a row that follows its file: the library that listed it at Old now lists the same
-// record at the view's track New, and nothing is at Old any more.
+// Move is a row that follows its file: the record the snapshot has at Old is now at the view's
+// track New, and nothing is at Old any more.
 type Move struct {
 	Old string // the snapshot's key
 	New int    // index into View.Tracks
 }
 
-// Plan is what a window has to do to make m.db the view. Its sizes are what the window's time
-// is planned with: a re-export that adds one list has one entry in PutLists and nothing else.
+// Plan is what a window has to do to make m.db the view; its sizes are what the window's time is
+// planned with.
 type Plan struct {
 	AddTracks    []int    // indexes into View.Tracks: no row yet
 	UpdateTracks []int    // the row's export fields changed
@@ -28,23 +28,20 @@ type refKey struct {
 	id     uint32
 }
 
-// Diff compares the view with the snapshot of what m.db holds. Identity is the key, the path:
-// a track is the same track when its file is. A source ID only serves to follow a file that
-// moved: the view has a track at a new path whose record, by library and ID, the snapshot has
-// at a path the view no longer has at all. An ID that a re-export handed to another file whose
-// own path is still there names nothing (#253, the 11-23 cross-track damage).
+// Diff compares the view with the snapshot. Identity is the key, the path. A source ID only
+// follows a file that moved: the view's track at a new path has the record, by library and ID,
+// of a track at a path the view no longer has. An ID a re-export gave another file whose own
+// path is still there names nothing (#253, the 11-23 cross-track damage).
 func Diff(v *View, s *rbstate.Snapshot) *Plan {
 	p := &Plan{}
 	gone := map[string]bool{}
+	byRef := map[refKey]string{} // the record of each track that is gone; "" for one two of them share
 	for key, t := range s.Tracks {
-		if _, ok := v.index[key]; !ok && !t.Native {
-			gone[key] = true
+		if _, ok := v.index[key]; ok || t.Native {
+			continue
 		}
-	}
-	// The record of each track that is gone, for the moves; a record two gone tracks share names neither.
-	byRef := map[refKey]string{}
-	for key := range gone {
-		for _, r := range s.Tracks[key].Refs {
+		gone[key] = true
+		for _, r := range t.Refs {
 			k := refKey{r.Kind, r.Source, r.ID}
 			if _, dup := byRef[k]; dup {
 				byRef[k] = ""
@@ -55,31 +52,28 @@ func Diff(v *View, s *rbstate.Snapshot) *Plan {
 	}
 	for i := range v.Tracks {
 		vt := &v.Tracks[i]
-		st, ok := s.Tracks[vt.Key]
-		switch {
-		case ok && st.Native:
-		case ok && st.EngineID != 0:
-			if st.Row != vt.Hash {
+		if t, ok := s.Tracks[vt.Key]; ok && (t.Native || t.EngineID != 0) {
+			if !t.Native && t.Row != vt.Hash {
 				p.UpdateTracks = append(p.UpdateTracks, i)
 			}
-		default:
-			moved := ""
-			for _, r := range vt.Refs {
-				if old := byRef[refKey{r.Kind, r.Source, r.ID}]; old != "" && gone[old] {
-					moved = old
-					break
-				}
-			}
-			if moved != "" {
-				gone[moved] = false
-				p.Moves = append(p.Moves, Move{Old: moved, New: i})
-			} else {
-				p.AddTracks = append(p.AddTracks, i)
+			continue
+		}
+		moved := ""
+		for _, r := range vt.Refs {
+			if old := byRef[refKey{r.Kind, r.Source, r.ID}]; old != "" && gone[old] {
+				moved = old
+				break
 			}
 		}
+		if moved != "" {
+			gone[moved] = false
+			p.Moves = append(p.Moves, Move{Old: moved, New: i})
+		} else {
+			p.AddTracks = append(p.AddTracks, i)
+		}
 	}
-	for key := range s.Tracks {
-		if gone[key] {
+	for key, g := range gone {
+		if g {
 			p.RemoveTracks = append(p.RemoveTracks, key)
 		}
 	}

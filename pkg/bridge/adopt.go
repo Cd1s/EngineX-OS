@@ -3,9 +3,7 @@ package bridge
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,11 +11,11 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
-// Builds before the snapshot kept their bookkeeping in an SQLite file beside m.db and a set of
-// marks. A library they imported is taken over once: its rows keep their Engine IDs, so what
-// Engine made for them stays, and every track is staged again by the background job, which is
-// what applies this build's rules; a row the deck changed keeps the deck's grid, cues and loops.
-// The lists are written anew (they may now sit under the three folders).
+// A library an earlier build imported (its state in an SQLite file beside m.db, no snapshot) is
+// taken over once (design 1.9): rows keep their Engine IDs, every track is staged again under
+// this build's rules, a row the deck changed keeps its grid, cues and loops, and the lists are
+// written anew.
+const oldStateName = ".rb-bridge-state.db"
 
 // oldMarks are the files and directories of earlier builds in Database2.
 var oldMarks = []string{oldStateName, oldStateName + "-journal", oldStateName + ".compact", ".rb-bridge-stamp", ".rb-bridge-pending",
@@ -25,14 +23,13 @@ var oldMarks = []string{oldStateName, oldStateName + "-journal", oldStateName + 
 
 // adopt reads an earlier build's state into a snapshot of the library uuid.
 func adopt(ctx context.Context, dir, uuid string) (*rbstate.Snapshot, error) {
-	ro := func(p string) string { return (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro"}).String() }
-	db, err := sql.Open("sqlite", ro(filepath.Join(dir, "m.db"))+"&_pragma=busy_timeout(5000)")
+	db, err := openRO(filepath.Join(dir, "m.db"), 5000)
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	if _, err = db.ExecContext(ctx, `ATTACH DATABASE ? AS bridge`, ro(filepath.Join(dir, oldStateName))); err != nil {
+	if _, err = db.ExecContext(ctx, `ATTACH DATABASE ? AS bridge`, roURI(filepath.Join(dir, oldStateName))); err != nil {
 		return nil, fmt.Errorf("state of an earlier build: %w", err)
 	}
 	has := func(table string) bool {
@@ -47,48 +44,38 @@ func adopt(ctx context.Context, dir, uuid string) (*rbstate.Snapshot, error) {
 	if has("BridgeWritten") {
 		written = `(SELECT digest FROM bridge.BridgeWritten w WHERE w.trackId=s.trackId)`
 	}
-	// The older build's write-back record has the same two values per row as the snapshot.
 	synced := `0,NULL`
 	if has("BridgeSynced") {
 		synced = `(SELECT CAST(y.lastEditTime AS INTEGER) FROM bridge.BridgeSynced y WHERE y.trackId=s.trackId),(SELECT y.digest FROM bridge.BridgeSynced y WHERE y.trackId=s.trackId)`
 	}
-	rows, err := db.QueryContext(ctx, `SELECT s.path,s.trackId,s.fingerprint,`+written+`,`+synced+` FROM bridge.BridgeState s JOIN Track t ON t.id=s.trackId WHERE t.path=s.path`)
+	// A row imported in full with no record of what the import wrote is still the import's while
+	// it has Engine's import mark, and the deck's once Engine loaded it.
+	rows, err := db.QueryContext(ctx, `SELECT s.path,s.trackId,s.fingerprint,`+written+`,`+synced+`,
+		(SELECT thirdPartySourceId IS NOT NULL FROM PerformanceData p WHERE p.trackId=s.trackId)
+		FROM bridge.BridgeState s JOIN Track t ON t.id=s.trackId WHERE t.path=s.path`)
 	if err != nil {
 		return nil, err
 	}
-	var unknown []*rbstate.Track // imported in full, with no record of what the import wrote
 	for rows.Next() {
 		var p, fingerprint string
 		var id int64
 		var digest, syncedDigest []byte
 		var edit sql.NullInt64
-		if err = rows.Scan(&p, &id, &fingerprint, &digest, &edit, &syncedDigest); err != nil {
+		var marked sql.NullBool
+		if err = rows.Scan(&p, &id, &fingerprint, &digest, &edit, &syncedDigest, &marked); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		rel := strings.TrimPrefix(p, "../")
 		complete := fingerprint != "" && !strings.HasPrefix(fingerprint, "fast:")
 		t := &rbstate.Track{Key: rbstate.FoldPath(rel), EngineID: id, Rel: rel, Resolved: complete, Rating: -1, Written: digest, Edit: edit.Int64, Synced: syncedDigest}
-		if complete && digest == nil {
-			unknown = append(unknown, t)
+		if complete && digest == nil && marked.Valid && !marked.Bool {
+			t.Perf = rbstate.PerfDeck
 		}
 		s.Tracks[t.Key] = t
 	}
 	if err = rows.Close(); err != nil {
 		return nil, err
-	}
-	// Without a record of what the import wrote, Engine's import mark says whether Engine has
-	// loaded the row since: with the mark the row is still the import's, without it the deck's.
-	for _, t := range unknown {
-		var marked bool
-		if err = db.QueryRowContext(ctx, `SELECT thirdPartySourceId IS NOT NULL FROM PerformanceData WHERE trackId=?`, t.EngineID).Scan(&marked); errors.Is(err, sql.ErrNoRows) {
-			continue
-		} else if err != nil {
-			return nil, err
-		}
-		if !marked {
-			t.Perf = rbstate.PerfDeck
-		}
 	}
 	if has("BridgePlaylist") {
 		lists, err := db.QueryContext(ctx, `SELECT b.listId FROM bridge.BridgePlaylist b JOIN Playlist p ON p.id=b.listId`)
@@ -108,7 +95,6 @@ func adopt(ctx context.Context, dir, uuid string) (*rbstate.Snapshot, error) {
 			return nil, err
 		}
 	}
-	s.Pending.Verify = true
 	return s, nil
 }
 
@@ -116,20 +102,14 @@ func adopt(ctx context.Context, dir, uuid string) (*rbstate.Snapshot, error) {
 func dropOldState(dir string) {
 	for _, name := range oldMarks {
 		p := filepath.Join(dir, name)
-		st, err := os.Lstat(p)
-		if err != nil {
-			continue
-		}
-		if !st.IsDir() {
-			_ = rbstate.RemoveFile(p)
-			continue
-		}
 		_ = filepath.WalkDir(p, func(file string, d os.DirEntry, err error) error {
 			if err == nil && !d.IsDir() {
 				_ = rbstate.RemoveFile(file)
 			}
 			return nil
 		})
-		_ = os.RemoveAll(p)
+		if st, err := os.Lstat(p); err == nil && st.IsDir() {
+			_ = os.RemoveAll(p)
+		}
 	}
 }

@@ -1,12 +1,10 @@
-// Package rbstate holds the rekordbox bridge's state files: the snapshot beside a stick's m.db,
-// the stage of staged tracks on the deck, the volume lock and the stamp. The mount path, the
-// background job, cue write-back and the readers of bridge state outside pkg/bridge all share
-// these formats; the package imports nothing else of EngineX so that any of them can use it.
-//
-// See docs/design/rekordbox-bridge-v2.md, section 1.3.
+// Package rbstate holds the rekordbox bridge's state formats: the snapshot beside a stick's m.db,
+// the stage on the deck, the volume lock and the stamp. It imports nothing else of EngineX, so
+// every reader of bridge state can use it (docs/design/rekordbox-bridge-v2.md, section 1.3).
 package rbstate
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -16,14 +14,15 @@ import (
 )
 
 const (
-	// SnapshotName is the snapshot's file name in Engine Library/Database2.
-	SnapshotName = ".rb-bridge-snapshot"
+	SnapshotName = ".rb-bridge-snapshot" // in Engine Library/Database2
 	// Rules is part of every stamp and track signature: raising it stages every track again.
-	// 5 is the first snapshot build; it follows the stamp versions v2-v4 of earlier builds.
-	Rules = 5
-	// Format is the snapshot's file format.
-	Format = 2
+	// 5 follows the stamp versions v2-v4 of earlier builds.
+	Rules  = 5
+	Format = 2 // of the snapshot file
 )
+
+// ErrLocked: another process holds the volume's lock.
+var ErrLocked = errors.New("rbstate: the volume is locked by another bridge process")
 
 // Layouts of a stick with two libraries (the setting rb_library_view).
 const (
@@ -111,9 +110,6 @@ func (s TrackSig) Equal(o TrackSig) bool {
 	return s.Rules == o.Rules && s.Row == o.Row && s.Audio == o.Audio && s.Artwork == o.Artwork && slices.Equal(s.ANLZ, o.ANLZ)
 }
 
-// IsZero reports a signature of nothing.
-func (s TrackSig) IsZero() bool { return s.Equal(TrackSig{}) }
-
 // Track is one track of the stick's library.
 type Track struct {
 	Key      string      `json:"k"`
@@ -126,9 +122,8 @@ type Track struct {
 	Perf     PerfState   `json:"perf,omitempty"`
 	Built    TrackSig    `json:"built"`
 	Written  []byte      `json:"wr,omitempty"` // digest of grid, cues and loops as the bridge last wrote them
-	// Write-back's record of the row: the digest of its cues, loops and editable tags that the
-	// stick's export holds, and the row's lastEditTime when that was noted. A row whose time has
-	// not moved is not read; one whose digest has not changed needs no export read.
+	// Write-back's note of the row: the digest of its cues, loops and tags the export holds, and
+	// the row's lastEditTime then. A row whose time has not moved is not read.
 	Synced []byte `json:"sy,omitempty"`
 	Edit   int64  `json:"ed,omitempty"`
 	Native bool   `json:"nat,omitempty"` // an Engine-made row: lists refer to it, the bridge never writes it
@@ -175,8 +170,7 @@ func (s *Snapshot) EngineIDs() map[int64]bool {
 }
 
 // FoldPath is a track's key: its volume-relative path with forward slashes, without a leading
-// "/" or "../", in NFC and case-folded. It is the equivalence pkg/compat resolves paths by, so
-// two spellings that name one file on the volume have one key.
+// "/" or "../", NFC and case-folded, the equivalence pkg/compat resolves paths by.
 func FoldPath(rel string) string {
 	rel = strings.ReplaceAll(rel, "\\", "/")
 	rel = strings.TrimPrefix(rel, "../")
@@ -200,7 +194,7 @@ func FoldPath(rel string) string {
 }
 
 // Stamp names an import's inputs: the rules, the layout, each export file and the staged CDJ
-// libraries. The sizes and times only name the files; they never choose between libraries.
+// libraries. Sizes and times only name the files; they never choose between libraries.
 func Stamp(layout string, sources []FileSig, staged string) string {
 	if len(sources) == 0 && staged == "" {
 		return ""

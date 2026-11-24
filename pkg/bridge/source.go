@@ -1,7 +1,7 @@
 // Package bridge turns the rekordbox export of a stick into the Engine library the deck shows
-// (docs/design/rekordbox-bridge-v2.md). One pipeline serves every insert: the exports are read
-// into a view, the view is compared with the snapshot of the last import, and the difference
-// is written to the live m.db in place before Engine sees the stick.
+// (docs/design/rekordbox-bridge-v2.md): the exports are read into a view, the view is compared
+// with the snapshot of the last import, and the difference is written to the live m.db in place
+// before Engine sees the stick.
 package bridge
 
 import (
@@ -12,7 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -23,8 +23,8 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
-// The export files of a stick. A stick can hold both libraries; neither is a superset of the
-// other (a DJ edits them separately in rekordbox 7), so both are read and joined by path.
+// The export files of a stick. Neither library is a superset of the other (#327): both are read
+// and joined by path.
 const (
 	devicePDB      = "PIONEER/rekordbox/export.pdb"
 	oneLibraryDB   = "PIONEER/rekordbox/exportLibrary.db"
@@ -32,55 +32,26 @@ const (
 	databaseSubdir = "Engine Library/Database2"
 )
 
-// KindOf says which library an export file is.
-func KindOf(rel string) rbstate.LibraryKind {
-	if strings.EqualFold(path.Ext(rel), ".pdb") {
-		return rbstate.DeviceLibrary
-	}
-	return rbstate.OneLibrary
-}
-
-// FindSources stats the export files of the volume r resolves. No file is opened. An
-// export.pdb the deck generated itself for Pro DJ Link is not a source. Device Library comes
-// first, then OneLibrary; file times play no part.
+// FindSources stats the export files of the volume r resolves, Device Library first; no file is
+// opened and file times play no part. An export.pdb the deck made for Pro DJ Link is no source.
 func FindSources(r *compat.Resolver, mount string) ([]rbstate.FileSig, error) {
-	stat := func(p string) (rbstate.FileSig, bool, error) {
-		rel, err := r.Resolve(p)
-		if errors.Is(err, os.ErrNotExist) {
-			return rbstate.FileSig{}, false, nil
-		}
-		if err != nil {
-			return rbstate.FileSig{}, false, err
-		}
-		st, err := os.Stat(r.FullPath(rel))
-		if errors.Is(err, os.ErrNotExist) {
-			return rbstate.FileSig{}, false, nil
-		}
-		if err != nil {
-			return rbstate.FileSig{}, false, err
-		}
-		if !st.Mode().IsRegular() {
-			return rbstate.FileSig{}, false, nil
-		}
-		return rbstate.FileSig{Rel: rel, Size: st.Size(), MTimeNS: st.ModTime().UnixNano()}, true, nil
-	}
 	var files []rbstate.FileSig
-	if !prolink.GeneratedExport(mount) {
-		f, ok, err := stat(devicePDB)
-		if err != nil {
-			return nil, err
+	for _, names := range [][]string{{devicePDB}, {oneLibraryDB, oneLibraryDB2}} {
+		if names[0] == devicePDB && prolink.GeneratedExport(mount) {
+			continue
 		}
-		if ok {
-			files = append(files, f)
-		}
-	}
-	for _, p := range []string{oneLibraryDB, oneLibraryDB2} {
-		f, ok, err := stat(p)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			files = append(files, f)
+		for _, p := range names {
+			rel, err := r.Resolve(p)
+			var st os.FileInfo
+			if err == nil {
+				st, err = os.Stat(r.FullPath(rel))
+			}
+			if errors.Is(err, os.ErrNotExist) || err == nil && !st.Mode().IsRegular() {
+				continue
+			} else if err != nil {
+				return nil, err
+			}
+			files = append(files, rbstate.FileSig{Rel: rel, Size: st.Size(), MTimeNS: st.ModTime().UnixNano()})
 			break
 		}
 	}
@@ -95,17 +66,14 @@ type SourceLibrary struct {
 	Lib    *rekordbox.Library
 }
 
-// keyCacheEnv names pkg/rekordbox's directory of derived OneLibrary keys.
-const keyCacheEnv = "ENGINEX_RB_SHARED_KEY_CACHE"
+const keyCacheEnv = "ENGINEX_RB_SHARED_KEY_CACHE" // pkg/rekordbox's directory of derived OneLibrary keys
 
-// keyDataDir is the deck's own data directory.
-var keyDataDir = "/data/enginex"
+var keyDataDir = "/data/enginex" // the deck's own data directory
 
-// persistentKeyDir is where the keys are kept across power-ons, "" when dataDir is not there.
-// pkg/rekordbox's own default is in /run: every first insert after a power-on then derived the
-// key again, 5.5 s at deck speed. The key follows from the export file's salt and rekordbox's
-// public passphrase alone, so it is no secret of the DJ's, and a cached key is checked against
-// the file's first page before it is used.
+// persistentKeyDir keeps OneLibrary keys across power-ons, "" when dataDir is not there:
+// pkg/rekordbox's default in /run cost a 5.5 s key derivation at the first insert after each
+// power-on. A key follows from the file's salt and rekordbox's public passphrase, so it is no
+// secret of the DJ's, and a cached key is checked against the file before it is used.
 func persistentKeyDir(dataDir string) string {
 	if st, err := os.Stat(dataDir); err != nil || !st.IsDir() {
 		return ""
@@ -113,9 +81,8 @@ func persistentKeyDir(dataDir string) string {
 	return filepath.Join(dataDir, "rb-keys")
 }
 
-// newKeyCache is a key cache of pkg/rekordbox that reads and writes the persistent directory.
-// A test, a caller that named a directory itself and a process that is not root keep
-// pkg/rekordbox's choice.
+// newKeyCache is a key cache in the persistent directory; tests, a caller that named a directory
+// and a process that is not root keep pkg/rekordbox's choice.
 func newKeyCache() *rekordbox.KeyCache {
 	if !testing.Testing() && os.Getenv(keyCacheEnv) == "" && os.Geteuid() == 0 {
 		if dir := persistentKeyDir(keyDataDir); dir != "" {
@@ -125,11 +92,11 @@ func newKeyCache() *rekordbox.KeyCache {
 	return rekordbox.NewKeyCache()
 }
 
-// exportKeys keeps the SQLCipher keys of OneLibrary exports for this process.
-var exportKeys = sync.OnceValue(newKeyCache)
+var exportKeys = sync.OnceValue(newKeyCache) // this process's OneLibrary keys
 
 // ReadSources reads each export once. A library that cannot be read is reported in failed and
-// left out, so one broken file does not hide the other; with none readable err is set.
+// left out, so one broken file does not hide the other; with none readable err is set. keys nil
+// uses the process's key cache.
 func ReadSources(ctx context.Context, r *compat.Resolver, mount string, files []rbstate.FileSig, keys *rekordbox.KeyCache) (libs []SourceLibrary, failed []error, err error) {
 	if keys == nil {
 		keys = exportKeys()
@@ -140,16 +107,16 @@ func ReadSources(ctx context.Context, r *compat.Resolver, mount string, files []
 		}
 		var l *rekordbox.Library
 		var e error
-		kind := KindOf(f.Rel)
-		if kind == rbstate.DeviceLibrary {
+		kind := rbstate.OneLibrary
+		if strings.EqualFold(path.Ext(f.Rel), ".pdb") {
+			kind = rbstate.DeviceLibrary
 			l, e = rekordbox.ReadPDB(r.FullPath(f.Rel))
 		} else {
 			l, e = rekordbox.ReadSQLiteKeys(ctx, r.FullPath(f.Rel), nil, keys)
 		}
-		if e != nil {
-			if ctx.Err() != nil {
-				return nil, failed, ctx.Err()
-			}
+		if e != nil && ctx.Err() != nil {
+			return nil, failed, ctx.Err()
+		} else if e != nil {
 			failed = append(failed, fmt.Errorf("%s: %w", f.Rel, e))
 			continue
 		}
@@ -161,56 +128,50 @@ func ReadSources(ctx context.Context, r *compat.Resolver, mount string, files []
 	return libs, failed, nil
 }
 
-// stagedNames lists the libraries staged from Pioneer players into
-// <mount>/.prolink-cache/<name>/ (#59), in name order.
-func stagedNames(mount string) []string {
+// stagedLibraries lists the libraries staged from Pioneer players into
+// <mount>/.prolink-cache/<name>/ (#59) in name order, each with its export.pdb, found by the same
+// hidden-directory and case rules as a stick's own.
+func stagedLibraries(mount string) (names, pdbs []string) {
 	dirs, _ := os.ReadDir(filepath.Join(mount, prolink.StagedDir))
-	var names []string
-	for _, d := range dirs {
-		if d.IsDir() && d.Type()&os.ModeSymlink == 0 && stagedPDB(filepath.Join(mount, prolink.StagedDir, d.Name())) != "" {
-			names = append(names, d.Name())
+	for _, d := range dirs { // os.ReadDir sorts by name
+		if !d.IsDir() || d.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		r, err := compat.NewResolver(filepath.Join(mount, prolink.StagedDir, d.Name()))
+		if err != nil {
+			continue
+		}
+		if rel, err := r.Resolve(devicePDB); err == nil {
+			names, pdbs = append(names, d.Name()), append(pdbs, r.FullPath(rel))
 		}
 	}
-	sort.Strings(names)
-	return names
-}
-
-// stagedPDB uses the same hidden-directory and case rules as a stick's own export.
-func stagedPDB(root string) string {
-	r, err := compat.NewResolver(root)
-	if err != nil {
-		return ""
-	}
-	rel, err := r.Resolve(devicePDB)
-	if err != nil {
-		return ""
-	}
-	return r.FullPath(rel)
+	return names, pdbs
 }
 
 // stagedStamp changes whenever a staged library is written again.
 func stagedStamp(mount string) string {
 	var parts []string
-	for _, name := range stagedNames(mount) {
-		if st, err := os.Stat(stagedPDB(filepath.Join(mount, prolink.StagedDir, name))); err == nil {
+	names, pdbs := stagedLibraries(mount)
+	for i, name := range names {
+		if st, err := os.Stat(pdbs[i]); err == nil {
 			parts = append(parts, fmt.Sprintf("%s:%d:%d", name, st.Size(), st.ModTime().UnixNano()))
 		}
 	}
 	return strings.Join(parts, " ")
 }
 
-// readStaged reads the staged CDJ libraries, their paths pointing into the staged copies. A
-// broken one is left out with a log line: it must never fail the stick's own import.
+// readStaged reads the staged CDJ libraries, their paths pointing into the staged copies. A broken
+// one is left out with a log line: it never fails the stick's own import.
 func readStaged(mount string) []SourceLibrary {
 	var out []SourceLibrary
-	for _, name := range stagedNames(mount) {
-		root := filepath.Join(mount, prolink.StagedDir, name)
-		staged, err := rekordbox.ReadPDB(stagedPDB(root))
+	names, pdbs := stagedLibraries(mount)
+	for i, name := range names {
+		staged, err := rekordbox.ReadPDB(pdbs[i])
 		if err != nil {
 			log.Printf("rb-bridge: staged %s: %v", name, err)
 			continue
 		}
-		resolver, err := compat.NewResolver(root)
+		resolver, err := compat.NewResolver(filepath.Join(mount, prolink.StagedDir, name))
 		if err != nil {
 			continue
 		}
@@ -219,23 +180,17 @@ func readStaged(mount string) []SourceLibrary {
 			if !ok {
 				return ""
 			}
-			rel, err := resolver.Resolve(rel)
-			if err != nil {
-				return ""
+			if rel, e := resolver.Resolve(rel); e == nil {
+				return "/" + path.Join(prolink.StagedDir, name, filepath.ToSlash(rel))
 			}
-			return "/" + path.Join(prolink.StagedDir, name, filepath.ToSlash(rel))
+			return ""
 		}
-		kept := staged.Tracks[:0:0]
+		kept := staged.Tracks[:0]
 		for _, t := range staged.Tracks {
-			if t.ID == 0 {
-				continue
+			if t.Path = into(t.Path); t.ID != 0 && t.Path != "" { // "": its audio has not been copied yet
+				t.AnalysisPath, t.ArtworkPath, t.RecordHash = into(t.AnalysisPath), into(t.ArtworkPath), ""
+				kept = append(kept, t)
 			}
-			if t.Path = into(t.Path); t.Path == "" {
-				continue // its audio has not been copied yet
-			}
-			t.AnalysisPath, t.ArtworkPath = into(t.AnalysisPath), into(t.ArtworkPath)
-			t.RecordHash = ""
-			kept = append(kept, t)
 		}
 		staged.Tracks = kept
 		if err := staged.Validate(); err != nil {
@@ -247,26 +202,18 @@ func readStaged(mount string) []SourceLibrary {
 	return out
 }
 
-// ReadLayout is the setting rb_library_view of the deck's settings file: how a stick with two
-// libraries shows them. Anything else than the three fixed choices is the three folders.
+// ReadLayout is the setting rb_library_view: how a stick with two libraries shows them. Anything
+// but the three fixed choices is the three folders.
 func ReadLayout(settingsPath string) string {
-	switch readSetting(settingsPath, "rb_library_view") {
-	case rbstate.LayoutMerged:
-		return rbstate.LayoutMerged
-	case rbstate.LayoutDevice:
-		return rbstate.LayoutDevice
-	case rbstate.LayoutOneLibrary:
-		return rbstate.LayoutOneLibrary
+	if v := readSetting(settingsPath, "rb_library_view"); slices.Contains([]string{rbstate.LayoutMerged, rbstate.LayoutDevice, rbstate.LayoutOneLibrary}, v) {
+		return v
 	}
 	return rbstate.LayoutFolders
 }
 
 // readSetting returns the value of key in a key=value settings file, "" when it has none.
 func readSetting(settingsPath, key string) string {
-	b, err := os.ReadFile(settingsPath)
-	if err != nil {
-		return ""
-	}
+	b, _ := os.ReadFile(settingsPath)
 	for _, line := range strings.Split(string(b), "\n") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(line), key+"="); ok {
 			return strings.TrimSpace(v)
