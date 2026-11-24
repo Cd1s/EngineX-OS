@@ -87,16 +87,19 @@ func startUpdate(stage, stamp string) error {
 	if err := writeMark(stage, kindName, "update"); err != nil {
 		return err
 	}
-	cut("update stage marked")
 	if err := writeMark(stage, pendingName, stamp); err != nil {
 		return err
 	}
 	if err := syncFile(stage); err != nil {
 		return err
 	}
+	if err := requestBackground(stage); err != nil {
+		return err
+	}
+	cut("update stage marked")
 	cut("update stage pending")
 	log.Printf("rb-bridge: mount phase=stage-write ms=%d", time.Since(start).Milliseconds())
-	return requestBackground(stage)
+	return nil
 }
 
 // What a quick update costs on an SC5000, the slowest deck, on top of the export read: a track the
