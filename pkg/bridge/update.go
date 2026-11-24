@@ -77,6 +77,7 @@ func cut(name string) {
 
 // startUpdate marks the stage of an update of stamp's export; the job copies the library.
 func startUpdate(stage, stamp string) error {
+	start := time.Now()
 	if err := dropStage(stage); err != nil {
 		return err
 	}
@@ -94,6 +95,7 @@ func startUpdate(stage, stamp string) error {
 		return err
 	}
 	cut("update stage pending")
+	log.Printf("rb-bridge: mount phase=stage-write ms=%d", time.Since(start).Milliseconds())
 	return requestBackground(stage)
 }
 
@@ -124,6 +126,8 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	}
 	start := time.Now()
 	l, stagedOnly, err := readLibrary(inner, mount)
+	readElapsed := time.Since(start)
+	log.Printf("rb-bridge: mount phase=export-read ms=%d", readElapsed.Milliseconds())
 	if err != nil {
 		return enginedb.Result{}, false, quickLate(ctx, err)
 	}
@@ -131,13 +135,16 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 	playlist, syncErr := enginedb.SyncPlaylistsOnly(inner, mount, l)
 	if syncErr == nil {
 		changed := playlist.Added + playlist.Updated + playlist.Removed
+		log.Printf("rb-bridge: mount phase=playlist-transaction ms=%d", (time.Since(start) - readElapsed).Milliseconds())
 		log.Printf("rb-bridge: playlist-only update changed %d lists in %s (export read %s)", changed, time.Since(start).Round(time.Millisecond), read.Round(time.Millisecond))
 		return enginedb.Result{PlaylistsChanged: changed > 0}, true, nil
 	}
 	if !errors.Is(syncErr, enginedb.ErrPlaylistTrackSetChanged) {
 		return enginedb.Result{}, false, syncErr
 	}
+	quickPathsStart := time.Now()
 	fresh, owned, spellings, err := quickPathsWithOwned(dir, l)
+	log.Printf("rb-bridge: mount phase=quick-paths ms=%d", time.Since(quickPathsStart).Milliseconds())
 	if err != nil {
 		return enginedb.Result{}, false, err
 	}
@@ -163,9 +170,11 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 			}
 		}
 	}
+	reconcileStart := time.Now()
 	if err = ReconcileOwnedContext(inner, r, l, owned, spellings); err != nil {
 		return enginedb.Result{}, false, quickLate(ctx, err)
 	}
+	log.Printf("rb-bridge: mount phase=reconcile ms=%d", time.Since(reconcileStart).Milliseconds())
 	entries := 0
 	for _, p := range l.Playlists {
 		entries += len(p.Tracks)
@@ -175,10 +184,12 @@ func quickUpdate(ctx context.Context, mount, dir string, r *compat.Resolver, lim
 		return enginedb.Result{}, false, fmt.Errorf("%w: %d tracks (%d new) and %d playlist entries need about %s, %s left", errQuickTooLong, len(l.Tracks), fresh, entries, cost.Round(time.Second), left.Round(time.Second))
 	}
 	overviews := enginedb.ReadOverviewProgress(mount)
+	syncStart := time.Now()
 	res, err := enginedb.SyncResolved(inner, r, l, enginedb.Options{Fast: true, TrustPaths: true, FastCues: true, StagedOnly: stagedOnly})
 	if err != nil {
 		return res, false, quickLate(ctx, err)
 	}
+	log.Printf("rb-bridge: mount phase=live-list-write ms=%d", time.Since(syncStart).Milliseconds())
 	_ = overviews.Keep(mount)
 	log.Printf("rb-bridge: quick update of %d tracks (%d new), %d playlist entries in %s (export read %s, estimate %s)", len(l.Tracks), fresh, entries, time.Since(start).Round(time.Millisecond), read.Round(time.Millisecond), cost.Round(time.Millisecond))
 	return res, false, nil
@@ -1206,9 +1217,11 @@ func publishUpdate(ctx context.Context, mount, dir string) (enginedb.Result, err
 	}
 	overviews := enginedb.ReadOverviewProgress(mount)
 	_ = enginedb.InvalidateUnsyncedEdits(ctx, stage)
+	publishStart := time.Now()
 	if err := renameStage(dir, stage); err != nil {
 		return enginedb.Result{}, err
 	}
+	log.Printf("rb-bridge: mount phase=publish ms=%d", time.Since(publishStart).Milliseconds())
 	_ = overviews.Keep(mount)
 	if quick {
 		// The update that reads the files starts now (completeLater).

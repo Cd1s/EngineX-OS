@@ -961,9 +961,11 @@ func convertAtMount(ctx context.Context, mount string, opts *enginedb.Options, f
 		if err := finishPublish(dir, stateName, stampName, "m.db", pendingName); err != nil {
 			return enginedb.Result{}, err
 		}
+		pruneStart := time.Now()
 		pruneCtx, cancel := context.WithDeadline(ctx, mountPruneDeadline(mountStart, opts.Deadline))
 		pruneRGBOverviews(pruneCtx, dir, filepath.Join(dir, "m.db"), "")
 		cancel()
+		log.Printf("rb-bridge: mount phase=rgb-prune ms=%d", time.Since(pruneStart).Milliseconds())
 	}
 	if !full && !opts.SmartMatch && firstImport(dir) {
 		if !canWrite {
