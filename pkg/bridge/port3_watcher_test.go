@@ -79,6 +79,7 @@ func TestP3WatcherDefersConversionAndFinalPassWritesEjectEdit(t *testing.T) {
 	}
 	db := p3OpenDB(t, mount)
 	w, _, cancel, done := p3StartWatcher(t, mount, 120*time.Millisecond, 100*time.Millisecond, runDir)
+	defer func() { cancel(); <-done }()
 	p3DeckCue(t, db, p3FirstTrackID(t, db), "after conversion", 1, 1200)
 	_ = db.Close()
 	time.Sleep(450 * time.Millisecond)
@@ -89,7 +90,9 @@ func TestP3WatcherDefersConversionAndFinalPassWritesEjectEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	p3WaitCue(t, mount, "after conversion", 3*time.Second)
-	ejectMark := filepath.Join(runDir, bridge.EjectingNameForTest(mount))
+	// edisksd_hook creates enginex-rb-ejected-* on eager eject (and clears it if umount fails);
+	// cuewatch checks that marker so a failed eject does not permanently disable write-back.
+	ejectMark := filepath.Join(runDir, bridge.EjectedNameForTest(mount))
 	if err := os.WriteFile(ejectMark, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +104,7 @@ func TestP3WatcherDefersConversionAndFinalPassWritesEjectEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = db.Close()
-	time.Sleep(350 * time.Millisecond)
+	time.Sleep(450 * time.Millisecond)
 	if p3AnalysisHas(t, mount, "at eject") {
 		t.Fatal("watcher wrote while eject was marked")
 	}
@@ -109,6 +112,4 @@ func TestP3WatcherDefersConversionAndFinalPassWritesEjectEdit(t *testing.T) {
 	if err != nil || res.TracksChanged != 1 || !p3AnalysisHas(t, mount, "at eject") {
 		t.Fatalf("final eject pass: %+v %v", res, err)
 	}
-	cancel()
-	<-done
 }

@@ -21,10 +21,14 @@ var errNotQuiet = errors.New("writeback: m.db changed while it was read")
 var cueEjectingDir = "/run"
 
 // cueEjecting: the Eject's own pass is due on mount (the edisksd hook's flag).
-func cueEjecting(mount string) bool {
+func (w *CueWatcher) cueEjecting(mount string) bool {
+	dir := w.ejectDir
+	if dir == "" {
+		dir = cueEjectingDir
+	}
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(mount))
-	_, err := os.Lstat(filepath.Join(cueEjectingDir, fmt.Sprintf("enginex-rb-ejected-%016x", h.Sum64())))
+	_, err := os.Lstat(filepath.Join(dir, fmt.Sprintf("enginex-rb-ejected-%016x", h.Sum64())))
 	return err == nil
 }
 
@@ -34,11 +38,12 @@ type CueWatcher struct {
 	quiet, retry time.Duration
 	// poll is how often the mounts and each m.db are looked at: ten times a second cost about 2 %
 	// of a deck's core with nothing to do; a second delays a pass by at most that.
-	poll   time.Duration
-	mounts func() []string
-	pass   func(context.Context, string, WriteBackOptions) (WriteBackResult, error)
-	mu     sync.Mutex
-	sticks map[string]*cueStick
+	poll     time.Duration
+	ejectDir string
+	mounts   func() []string
+	pass     func(context.Context, string, WriteBackOptions) (WriteBackResult, error)
+	mu       sync.Mutex
+	sticks   map[string]*cueStick
 }
 
 type cueStick struct {
@@ -51,8 +56,8 @@ type cueStick struct {
 }
 
 func NewCueWatcher(mediaRoot string) *CueWatcher {
-	return &CueWatcher{quiet: CueQuiet, retry: 15 * time.Second, poll: time.Second, pass: WriteBackCues,
-		mounts: func() []string { return mediaMounts(mediaRoot) }}
+	return &CueWatcher{quiet: CueQuiet, retry: 15 * time.Second, poll: time.Second, ejectDir: cueEjectingDir,
+		pass: WriteBackCues, mounts: func() []string { return mediaMounts(mediaRoot) }}
 }
 
 func rekordboxStick(mount string) bool {
@@ -146,12 +151,15 @@ func (w *CueWatcher) tick(ctx context.Context, now time.Time) {
 }
 
 func (w *CueWatcher) run(ctx context.Context, mount string, st *cueStick, done chan struct{}) {
-	retry := cueEjecting(mount) || journalBusy(mount)
+	retry := w.cueEjecting(mount) || journalBusy(mount)
 	if !retry {
 		ev0, q0 := st.events.Load(), quietState(mount)
 		_, err := w.pass(ctx, mount, WriteBackOptions{Session: &st.session, Settled: func() error {
 			time.Sleep(100 * time.Millisecond)
-			if st.events.Load() != ev0 || quietState(mount) != q0 || cueEjecting(mount) {
+			if w.cueEjecting(mount) {
+				return errVolumeBusy
+			}
+			if st.events.Load() != ev0 || quietState(mount) != q0 {
 				return errNotQuiet
 			}
 			return nil
