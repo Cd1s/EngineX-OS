@@ -3791,8 +3791,10 @@ A32_ONLY static void install_rekordbox_rows(uintptr_t base, size_t page) {
 // (rekordbox_stage.h, feature rb-bridge): a rekordbox stick's row the bridge has staged data for.
 typedef int (*sqlite_prepare_fn)(void *, const char *, int, unsigned, void *, void **, const char **);
 typedef int (*sqlite_bind_int64_fn)(void *, int, long long);
+typedef int (*sqlite_bind_text_fn)(void *, int, const char *, int, void (*)(void *));
 static sqlite_prepare_fn rbx_prepare_original;
 static sqlite_bind_int64_fn rbx_bind_original;
+static sqlite_bind_text_fn rbx_bind_text_original;
 static const char *(*rbx_statement_sql)(void *);
 static void *(*rbx_statement_db)(void *);
 static struct sc_rbx_sqlite rbx_sqlite;
@@ -3813,6 +3815,14 @@ static void rbx_fill(void *db, long long track, const char *sql, int n) {
 static void rbs_fill(void *db, const char *main, long long track) {
     analysis_filling = 1;
     const char *result = sc_rbs_fill_track(&rbx_sqlite, db, main, track);
+    analysis_filling = 0;
+    if (result) fprintf(stderr, "engine-ui-hook: rekordbox stage for track %lld: %s\n", track, result);
+}
+
+static void rbs_fill_path(void *db, const char *main, const char *path, int n) {
+    long long track = 0;
+    analysis_filling = 1;
+    const char *result = sc_rbs_fill_path(&rbx_sqlite, db, main, path, n, &track);
     analysis_filling = 0;
     if (result) fprintf(stderr, "engine-ui-hook: rekordbox stage for track %lld: %s\n", track, result);
 }
@@ -3840,6 +3850,18 @@ static int rbx_bind(void *stmt, int i, long long value) {
     return rc;
 }
 
+static int rbx_bind_text(void *stmt, int i, const char *text, int n, void (*dtor)(void *)) {
+    if ((i == 1 || i == 2) && text && n && *text && !analysis_filling && stmt && sc_rbs_enabled) {
+        const int max_i = sc_rbs_path_bound(rbx_statement_sql(stmt));
+        if (max_i && i <= max_i) {
+            void *db = rbx_statement_db(stmt);
+            const char *drive = db ? sc_rbs_drive(&rbx_sqlite, db) : NULL;
+            if (drive) rbs_fill_path(db, drive, text, n);
+        }
+    }
+    return rbx_bind_text_original(stmt, i, text, n, dtor);
+}
+
 A32_ONLY static void install_rekordbox_analysis(uintptr_t base, size_t page) {
     const int gateway = hf_on(HF_GATEWAY);
     const int shadow = hf_on(HF_FOUR_DECK) && !strcmp(build->name, "5.3.0") && player_board();
@@ -3848,26 +3870,28 @@ A32_ONLY static void install_rekordbox_analysis(uintptr_t base, size_t page) {
     // sqlite3LockAndPrepare, which sqlite3_prepare_v2 (api slot 116) calls with "bl" at +0x1c;
     // sqlite3_db_filename is slot 180 (close_v2 at 179 is "mov r1,#1; b sqlite3Close", as
     // close at 16 is "mov r1,#0; b" to the same; db_readonly at 181 returns flags & 1 or -1).
-    // bind_int64 is slot 5, bind_int slot 4, db_handle 49 and sql 153 ("cmp r0,#0; ldrne r0,
+    // bind_int64 is slot 5, bind_int slot 4, bind_text slot 10, db_handle 49 and sql 153 ("cmp r0,#0; ldrne r0,
     // [r0,#n]; bx lr").
-    static const struct { const char *name; uint32_t lock, prepare_v2, close_v2, filename, bind_int64, bind_int, db_handle, sql; } sites[] = {
-        {"5.3.0", 0x1d55120, 0x1d55634, 0x1d21af4, 0x1cb0d94, 0x1cdfb90, 0x1cdfc28, 0x1c9a210, 0x1c9a2a0},
-        {"5.3.0-sclive4", 0x1dc19a0, 0x1dc1eb4, 0x1d8e374, 0x1d1d614, 0x1d4c410, 0x1d4c4a8, 0x1d06a90, 0x1d06b20},
+    static const struct { const char *name; uint32_t lock, prepare_v2, close_v2, filename, bind_int64, bind_int, bind_text, db_handle, sql; } sites[] = {
+        {"5.3.0", 0x1d55120, 0x1d55634, 0x1d21af4, 0x1cb0d94, 0x1cdfb90, 0x1cdfc28, 0x1cdfa3c, 0x1c9a210, 0x1c9a2a0},
+        {"5.3.0-sclive4", 0x1dc19a0, 0x1dc1eb4, 0x1d8e374, 0x1d1d614, 0x1d4c410, 0x1d4c4a8, 0x1d4c2bc, 0x1d06a90, 0x1d06b20},
     };
     static const uint32_t prologue[] = {0xe16d42f4, 0xe1cd60f8}; // strd r4,[sp,#-36]!; strd r6,[sp,#8]
     static const uint32_t bind_prologue[] = {0xe16d41f8, 0xe1a04001}; // strd r4,[sp,#-24]!; mov r4,r1
+    static const uint32_t bind_text_prologue[] = {0xe52de004, 0xe24dd014}; // push {lr}; sub sp,sp,#20
     static const uint32_t db_handle[] = {0xe3500000, 0x15900000, 0xe12fff1e}, sql_text[] = {0xe3500000, 0x159000d0, 0xe12fff1e};
     const uint32_t *api = (const void *)(base + build->sqlite_api);
     for (unsigned i = 0; i < sizeof sites / sizeof *sites; i++) {
         if (strcmp(build->name, sites[i].name)) continue;
-        const uintptr_t entry = base + sites[i].lock, bind = base + sites[i].bind_int64;
+        const uintptr_t entry = base + sites[i].lock, bind = base + sites[i].bind_int64, bind_text = base + sites[i].bind_text;
         if (!sqlite_exec_original || memcmp((const void *)entry, prologue, sizeof prologue) || api[116] != base + sites[i].prepare_v2 ||
             api[179] != base + sites[i].close_v2 || api[180] != base + sites[i].filename || api[5] != bind || api[4] != base + sites[i].bind_int ||
-            api[49] != base + sites[i].db_handle || api[153] != base + sites[i].sql) return;
+            api[10] != bind_text || api[49] != base + sites[i].db_handle || api[153] != base + sites[i].sql) return;
         uint32_t bl = *(const uint32_t *)(uintptr_t)(api[116] + 0x1c);
         if ((bl & 0xff000000u) != 0xeb000000u || api[116] + 0x1c + 8 + (uint32_t)((int32_t)(bl << 8) >> 6) != entry) return;
         if (memcmp((const void *)bind, bind_prologue, sizeof bind_prologue) || *(const uint32_t *)(uintptr_t)api[4] != 0xe1a03fc2 ||
-            arm_branch_target(api[4] + 4) != bind || memcmp((const void *)(uintptr_t)api[49], db_handle, sizeof db_handle) ||
+            arm_branch_target(api[4] + 4) != bind || memcmp((const void *)bind_text, bind_text_prologue, sizeof bind_text_prologue) ||
+            memcmp((const void *)(uintptr_t)api[49], db_handle, sizeof db_handle) ||
             memcmp((const void *)(uintptr_t)api[153], sql_text, sizeof sql_text)) return;
         rbx_sqlite.exec = sqlite_exec_original;
         rbx_sqlite.filename = (const char *(*)(void *, const char *))(uintptr_t)api[180];
@@ -3886,7 +3910,10 @@ A32_ONLY static void install_rekordbox_analysis(uintptr_t base, size_t page) {
             fprintf(stderr, "engine-ui-hook: rekordbox analysis for streamed tracks enabled\n");
         }
         if (stage) {
+            rbx_bind_text_original = (sqlite_bind_text_fn)function_trampoline(bind_text, page);
+            if (!rbx_bind_text_original) return;
             if (!rbx_bind_installed) redirect_function(HF_RB_BRIDGE, bind, rbx_bind, page);
+            redirect_function(HF_RB_BRIDGE, bind_text, rbx_bind_text, page);
             rbx_bind_installed = sc_rbs_enabled = 1;
             fprintf(stderr, "engine-ui-hook: rekordbox stage fill for drive tracks enabled\n");
         }

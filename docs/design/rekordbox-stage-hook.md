@@ -17,18 +17,25 @@ connection.
 ## Where the hook sees a drive load
 
 Engine opens each mounted drive's library as its own SQLite connection whose main database is
-`/media/<drive>/Engine Library/Database2/m.db`. A deck load reads the track row with the prepared
-`SELECT t.id, t.playOrder, t.length, t.bpm, t.year, t.path, … FROM Track AS t WHERE t.id = ?` (this copies
-`isAnalyzed`) and then `SELECT trackId, trackData, overviewWaveFormData, beatData, quickCues, loops,
-thirdPartySourceId, activeOnLoadLoops FROM PerformanceData WHERE trackId = ?`; both bind the id with
-`sqlite3_bind_int64`. With `isAnalyzed` 0 or no `trackData` Engine analyses the track. The hook already redirects
-`sqlite3_bind_int64` on the 32-bit builds `5.3.0` and `5.3.0-sclive4` (sites per BuildID, prologue and SQLite api
-table checked before the patch). The drive fill runs inside that redirect, after the bind, on the first of the two
-statements, before Engine steps it: Engine then reads the filled row.
+`/media/<drive>/Engine Library/Database2/m.db`. A deck load reads the track row by id with the prepared
+`SELECT t.id, t.playOrder, t.length, t.bpm, t.year, t.path, … FROM Track AS t WHERE t.id = ?` (binding `t.id` via
+`sqlite3_bind_int64`), by path with `SELECT t.id, t.playOrder, t.length, t.bpm, t.year, t.path, … FROM Track AS t …
+WHERE t.path = ? [OR t.path = ?]` (binding `t.path` via `sqlite3_bind_text`), and then
+`SELECT trackId, trackData, overviewWaveFormData, beatData, quickCues, loops, thirdPartySourceId, activeOnLoadLoops
+FROM PerformanceData WHERE trackId = ?` (`sqlite3_bind_int64`). With `isAnalyzed` 0 or no `trackData` Engine queues
+`OfflineAnalyzer` (on `5.3.0`, checked at `0xd6b138` before entering analysis queueing at `0xe525ec`).
 
-Seen in the sandbox (real 5.3.0 and SC LIVE 4 Engines, 2026-11-25): when Engine auto-selects a newly mounted drive it
-reads every row through the same bound Track read (1.5-2.6 s after the mount), so every row staged by then is filled at
-the insert, before any load. Browsing a list runs neither statement. A row staged later is filled at its load.
+On the 32-bit builds `5.3.0` and `5.3.0-sclive4`, the hook redirects `sqlite3_bind_int64` (`api[5]`, with
+`sqlite3_bind_int` `api[4]` branching into it) and `sqlite3_bind_text` (`api[10]`, prologue `push {lr}; sub sp, sp, #20`
+verified alongside the BuildID site table before patching). The drive fill runs inside both redirects (`rbx_bind`
+after binding the id; `rbx_bind_text` before binding the text so the path pointer remains valid regardless of SQLite's
+destructor) and before Engine steps the statement, so whichever connection reads the row first—by `t.id` or by
+`t.path`—sees the filled row atomically.
+
+Seen in the sandbox (real `5.3.0` and `5.3.0-sclive4` Engines, 2026-11-25): when Engine auto-selects a newly mounted
+drive it reads every row through the bound Track read (1.5-2.6 s after the mount), so every row staged by then is
+filled at the insert, before any load. Browsing a list triggers no fills. A row staged later is filled at its load, on
+the path-bound read before Engine's `isAnalyzed` check.
 
 ## From the track id to the stage file
 
@@ -40,8 +47,12 @@ the insert, before any load. Browsing a list runs neither statement. A row stage
    done, no statement. Today's guarantee for a drive load (not one statement) stays for every stick with nothing
    staged.
 4. The stage's index is kept as a small table of its live keys, read again only when the file changes (it is append
-   only: only the new lines are read).
-5. One read on Engine's connection: the row's path, `pdbImportKey`, the analysis columns' state and
+   only: only the new lines are read). The table scanner inspects up to four leading JSON members (`"k"`, optional
+   `"id"`, `"sig"`, `"rel"`) so it handles both the current index format and R1's `"id"` field without hiding `"rel"`.
+5. On a path-bound read (`sqlite3_bind_text`), the hook folds the bound path and checks the cached stage table under
+   its mutex *before* running any SQL: an unstaged track costs 0 SQL statements. Only a staged path (or an id-bound
+   read on a staged library) runs one indexed read on Engine's connection (`WHERE t.path = '<escaped>'` via `C_path` or
+   `WHERE t.id = <id>`) to obtain `t.id`, `t.path`, `t.pdbImportKey`, the analysis columns' state and
    `Information.uuid`, which must equal the snapshot's (a stale snapshot can only make a miss).
 6. Key: `rbstate.FoldPath` of the path without `../`. For an ASCII path that is the lower-case path, which the hook
    computes exactly; the files are `<sha1 hex of key>.bin` (`RBXA1`), `.rgb`, `.jpg`. For a non-ASCII path (Unicode
@@ -52,12 +63,19 @@ the insert, before any load. Browsing a list runs neither statement. A row stage
 
 ## What it writes, and when not
 
-One exec on Engine's connection, the conditions repeated in the `WHERE`:
-`UPDATE PerformanceData SET trackData, overviewWaveFormData, beatData, quickCues, loops = the five blobs of the .bin,
-activeOnLoadLoops = the line's "active", thirdPartySourceId = NULL WHERE trackId = <id> AND <the row as read>;
-UPDATE Track SET isAnalyzed = 1 WHERE id = <id> AND changes() > 0`. The import mark stays off: the staged data holds
-the bridge's start offset already, and Engine shifts a marked row again (2292 samples, MP3). `isBeatGridLocked`, the
-rating and every other `Track` field stay as they are.
+One atomic `SAVEPOINT` exec on Engine's connection, the conditions repeated in the `WHERE`:
+`SAVEPOINT sc_rbs; UPDATE PerformanceData SET trackData, overviewWaveFormData, beatData, quickCues, loops = the five
+blobs of the .bin, activeOnLoadLoops = the line's "active", thirdPartySourceId = NULL WHERE trackId = <id> AND <the row
+as read> AND (SELECT uuid FROM Information) = '<uuid>'; UPDATE Track SET isAnalyzed = 1 WHERE id = <id> AND
+changes() > 0; SELECT changes(); RELEASE sc_rbs`. Any error executes `ROLLBACK TO sc_rbs` then `RELEASE sc_rbs`
+(falling back to `ROLLBACK` on any non-zero `RELEASE` error) so no partial write (`PerformanceData` filled with
+`isAnalyzed = 0`) is ever committed and the connection stays in clean autocommit mode while preserving any outer
+`BEGIN`. Both the state read and the atomic write retry `SQLITE_BUSY` (masking extended result codes with `rc & 0xff`)
+within a 200 ms `CLOCK_MONOTONIC` wall-clock deadline (5 ms `nanosleep` between attempts, avoiding multiplication of
+`PRAGMA busy_timeout`) so concurrent connections on the same load wait for an in-flight fill to commit rather than
+reading `isAnalyzed = 0`. The import mark
+stays off: the staged data holds the bridge's start offset already, and Engine shifts a marked row again (2292 samples,
+MP3). `isBeatGridLocked`, the rating and every other `Track` field stay as they are.
 
 It writes nothing when:
 
@@ -91,23 +109,32 @@ It writes nothing when:
 
 ## Cost
 
-- Audio thread: nothing (the bind runs on Engine's library threads; no lock is taken on the audio path).
-- Browse and load of Engine's own library, Link and streaming rows, and of a drive with nothing staged: a compare and
-  a cached look at the stage on `/data`; no statement. The stick's snapshot line is read once per connection, and only
-  while the deck holds a stage.
-- On a drive with staged entries: one indexed read per bind of the two statements; the fill only for an empty row
-  the stage holds: one `.bin` read from `/data` (about 13 KB) and one UPDATE: 5.5-16.7 ms a row on the build host's
-  native armhf (load request to filled row 0.006-0.014 s). Engine's insert read fills every row staged and not yet
-  applied by then, one after the other on Engine's library thread: bounded by what a window left in the stage.
-- Play: nothing.
+- Play / audio thread: nothing (both bind redirects run on Engine's library threads; no lock or I/O is taken on the
+  audio path; `test_rt_budget.c` and `test_rt_callback.c` pass with 0 misses on arm64 and armhf).
+- Browse and load of Engine's own library, Link and streaming rows, and of a drive with nothing staged: a statement
+  string check and a cached look at the stage on `/data`; 0 SQL statements. The stick's snapshot line is read once per
+  connection, and only while the deck holds a stage.
+- On a drive with staged entries:
+  - Path-bound reads (`sqlite3_bind_text`) for an unstaged track: one O(1) hash lookup in the cached stage table, 0 SQL
+    statements.
+  - Id-bound reads (`sqlite3_bind_int64`) or staged path-bound reads: one indexed read (`Track.id` or unique `C_path`);
+    the fill runs only for an untouched row the stage holds: one `.bin` read from `/data` (about 13 KB) and one atomic
+    `SAVEPOINT` write: 2.9-13.5 ms a row on native armhf (`late2` runs: 3.1-6.6 ms on JP07, 2.9-13.5 ms on SC LIVE 4;
+    0-7 ms before the load request settles, 0.28-0.56 s request to loaded). Engine's insert read fills every row staged and not yet applied by then, one after the other on
+    Engine's library thread: bounded by what a window left in the stage.
 
-## Known limit (first-generation 5.3.0)
+## Race closure (first-generation 5.3.0, round 2)
 
-On JP07 (5.3.0) a row filled at its load (staged after Engine's insert read) was analysed again by Engine in 4 of 11
-sandbox loads, 1.0-1.7 s after the load, with a loaded deck and with an empty one; Engine's grid, overview and track
-data then replace the staged ones (hot cues and loops stay). Every hooked read after the fill saw the filled row, so
-Engine decides from state taken before the fill: a race in its load path. Rows filled at the insert read (most rows)
-were never analysed again, and SC LIVE 4's Engine never re-analysed one. Not handled here.
+In round 1 (id-bound redirect only), a row staged after Engine's insert read was re-analysed by `OfflineAnalyzer` in 4
+of 11 sandbox loads on JP07 (`5.3.0`), 1.0-1.7 s after load. Tracing the live `5.3.0` Engine showed that the deck load
+path reads `Track` by path (`WHERE t.path = ? OR t.path = ?` via `sqlite3_bind_text`) across multiple SQLite
+connections before checking `isAnalyzed` (`0xd6b138`) and queueing `OfflineAnalyzer` (`0xe525ec`), bypassing the
+`sqlite3_bind_int64`-only hook and racing with an in-flight fill.
+
+Adding the `sqlite3_bind_text` redirect on `WHERE t.path = ? [OR t.path = ?]`, wrapping `UPDATE PerformanceData` +
+`UPDATE Track` in `SAVEPOINT sc_rbs`, and retrying `SQLITE_BUSY` across concurrent connections closed the race:
+0 re-analyses in 20 of 20 load-time fills on JP07 (`5.3.0`) and 0 of 20 on SC LIVE 4 (`5.3.0-sclive4`) in the sandbox,
+plus full `engine` / `window` / `base` regressions passing on both targets.
 
 ## 64-bit units
 

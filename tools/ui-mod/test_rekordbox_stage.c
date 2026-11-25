@@ -141,6 +141,57 @@ static const char *load(sqlite3 *db, long long id) {
     return sc_rbs_fill_track(&engine, db, main, id);
 }
 
+static const char *load_path(sqlite3 *db, const char *p, int n, long long *out_id) {
+    const char *main = sc_rbs_drive(&engine, db);
+    assert(main);
+    return sc_rbs_fill_path(&engine, db, main, p, n, out_id);
+}
+
+struct lock_holder {
+    sqlite3 *db;
+    long long id;
+    int locked;
+};
+
+static int exec_raw(void *db, const char *sql, int (*row)(void *, int, char **, char **), void *arg, char **err) {
+    return sqlite3_exec(db, sql, row, arg, err);
+}
+static const struct sc_rbx_sqlite raw_engine = {exec_raw, db_main};
+
+static void *hold_and_fill(void *arg) {
+    struct lock_holder *h = arg;
+    assert(sqlite3_exec(h->db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK);
+    __atomic_store_n(&h->locked, 1, __ATOMIC_RELEASE);
+    struct timespec ts = {0, 25000000L}; // 25 ms
+    nanosleep(&ts, NULL);
+    const char *main = sc_rbs_drive(&raw_engine, h->db);
+    assert(main && sc_rbs_fill_track(&raw_engine, h->db, main, h->id) != NULL);
+    for (int i = 0; i < 40; i++) {
+        int rc = sqlite3_exec(h->db, "COMMIT", NULL, NULL, NULL);
+        if (rc == SQLITE_OK) return NULL;
+        assert(rc == SQLITE_BUSY);
+        struct timespec retry = {0, 5000000L};
+        nanosleep(&retry, NULL);
+    }
+    assert(!"COMMIT timed out");
+    return NULL;
+}
+
+static void *hold_shared_lock(void *arg) {
+    struct lock_holder *h = arg;
+    assert(sqlite3_exec(h->db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK);
+    sqlite3_stmt *st = NULL;
+    assert(sqlite3_prepare_v2(h->db, "SELECT id FROM Track WHERE id = ?", -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_bind_int64(st, 1, h->id) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    __atomic_store_n(&h->locked, 1, __ATOMIC_RELEASE);
+    struct timespec ts = {0, 25000000L}; // 25 ms
+    nanosleep(&ts, NULL);
+    sqlite3_finalize(st);
+    assert(sqlite3_exec(h->db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK);
+    return NULL;
+}
+
 static int starts(const char *s, const char *prefix) { return s && !strncmp(s, prefix, strlen(prefix)); }
 
 #define ROW "SELECT hex(trackData)||'/'||hex(overviewWaveFormData)||'/'||hex(beatData)||'/'||hex(quickCues)||'/'||hex(loops)||'/'||" \
@@ -444,6 +495,178 @@ int main(int argc, char **argv) {
     assert(sc_rbs_stage_of("lib-a")->live == 20001 && sc_rbs_stage_of("lib-a")->parsed > parsed);
     pthread_mutex_unlock(&sc_rbs_mu);
     printf("index of 20,000 lines read in %.1f ms\n", (double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6);
+
+    // Path-based read matcher (WHERE t.path = ? [OR t.path = ?]).
+    assert(sc_rbs_path_bound(SC_RBS_TRACK_READ "t.isAnalyzed FROM Track AS t WHERE t.path = ? OR t.path = ?") == 2);
+    assert(sc_rbs_path_bound(SC_RBS_TRACK_READ "t.isAnalyzed FROM Track AS t WHERE t.path = ? ; ") == 1);
+    assert(sc_rbs_path_bound(SC_RBS_TRACK_READ "t.isAnalyzed FROM Track AS t WHERE t.id = ?") == 0);
+    assert(sc_rbs_path_bound("SELECT * FROM Track AS t WHERE t.path = ? OR t.path = ?") == 0);
+    assert(sc_rbs_path_bound(SC_RBS_TRACK_READ "t.isAnalyzed FROM Track AS t WHERE t.id = ? AND t.path = ?") == 0);
+    assert(sc_rbs_path_bound(SC_RBS_TRACK_READ "t.isAnalyzed FROM Track AS t WHERE t.path = ? OR t.path = ? LIMIT 1") == 0);
+
+    // Path-based fill: unstaged path costs 0 SQL statements; staged ASCII (n=-1 and non-NUL n>0),
+    // quoted path, non-ASCII path, and missing DB row all behave cleanly.
+    long long t15 = track(db, "../Contents/PathUnstaged.mp3", 1, 1);
+    long long out_id = -1;
+    statements = 0;
+    assert(!strcmp(load_path(db, "../Contents/PathUnstaged.mp3", -1, &out_id), "skipped (not staged)") && !statements);
+    assert(!strcmp(text(db, ROW, t15), INSERTED));
+
+    long long t16 = track(db, "../Contents/PathOne.mp3", 1, 1);
+    stage("lib-a", "contents/pathone.mp3", "contents/pathone.mp3", "Contents/PathOne.mp3", 5, ",\"perf\":true,\"active\":3", bin, bin_n);
+    statements = 0;
+    out_id = 0;
+    assert(starts(load_path(db, "../Contents/PathOne.mp3", -1, &out_id), "filled (") && statements == 2 && out_id == t16);
+    assert(!strcmp(text(db, ROW, t16), FILLED));
+
+    long long t17 = track(db, "../Contents/O'Brien.mp3", 1, 1);
+    stage("lib-a", "contents/o'brien.mp3", "contents/o'brien.mp3", "Contents/O'Brien.mp3", 5, ",\"perf\":true,\"active\":3", bin, bin_n);
+    const char non_nul[] = "../Contents/O'Brien.mp3EXTRA";
+    statements = 0;
+    out_id = 0;
+    assert(starts(load_path(db, non_nul, 23, &out_id), "filled (") && statements == 2 && out_id == t17);
+    assert(!strcmp(text(db, ROW, t17), FILLED));
+
+    long long t18 = track(db, "../Contents/Caf\xc3\xa9/Track.mp3", 1, 1);
+    stage("lib-a", "contents/caf\\u00e9/track.mp3", "contents/caf\xc3\xa9/track.mp3", "Contents/Caf\xc3\xa9/Track.mp3", 5, ",\"perf\":true,\"active\":3", bin, bin_n);
+    statements = 0;
+    out_id = 0;
+    assert(starts(load_path(db, "../Contents/Caf\xc3\xa9/Track.mp3", -1, &out_id), "filled (") && statements == 2 && out_id == t18);
+    assert(!strcmp(text(db, ROW, t18), FILLED));
+
+    stage("lib-a", "contents/missing-row.mp3", "contents/missing-row.mp3", "Contents/Missing-Row.mp3", 5, ",\"perf\":true,\"active\":3", bin, bin_n);
+    assert(!strcmp(load_path(db, "../Contents/Missing-Row.mp3", -1, NULL), "skipped (no row)"));
+
+    // Atomic savepoint: if UPDATE Track fails, UPDATE PerformanceData must also roll back
+    // (never exposing filled PerformanceData with isAnalyzed = 0) and leave autocommit clean.
+    long long t19 = track(db, "../Contents/Atomic.mp3", 1, 1);
+    stage("lib-a", "contents/atomic.mp3", "contents/atomic.mp3", "Contents/Atomic.mp3", 5, ",\"perf\":true,\"active\":3", bin, bin_n);
+    char trig[256];
+    snprintf(trig, sizeof trig, "CREATE TEMP TRIGGER fail_track BEFORE UPDATE ON Track WHEN NEW.id = %lld BEGIN SELECT RAISE(ABORT, 'boom'); END;", t19);
+    assert(sqlite3_exec(db, trig, NULL, NULL, NULL) == SQLITE_OK);
+    assert(!strcmp(load(db, t19), "update failed"));
+    assert(!strcmp(text(db, ROW, t19), INSERTED));
+    assert(sqlite3_get_autocommit(db) == 1);
+    assert(sqlite3_exec(db, "DROP TRIGGER fail_track;", NULL, NULL, NULL) == SQLITE_OK);
+    assert(starts(load(db, t19), "filled (") && !strcmp(text(db, ROW, t19), FILLED));
+
+    // Concurrent second connection with busy_timeout=0 during an in-flight fill inside an outer
+    // transaction: retries past SQLITE_BUSY, sees the committed atomic fill, leaves autocommit clean.
+    long long t20 = track(db, "../Contents/RacePath.mp3", 1, 1);
+    stage("lib-a", "contents/racepath.mp3", "contents/racepath.mp3", "Contents/RacePath.mp3", 5, ",\"perf\":true,\"active\":3", bin, bin_n);
+    sqlite3 *db2 = NULL;
+    assert(sqlite3_open(sqlite3_db_filename(db, "main"), &db2) == SQLITE_OK);
+    assert(sqlite3_busy_timeout(db2, 0) == SQLITE_OK);
+    struct lock_holder holder = {db, t20, 0};
+    pthread_t th;
+    assert(!pthread_create(&th, NULL, hold_and_fill, &holder));
+    while (!__atomic_load_n(&holder.locked, __ATOMIC_ACQUIRE)) {
+        struct timespec ts = {0, 1000000L};
+        nanosleep(&ts, NULL);
+    }
+    const char *r2 = load_path(db2, "../Contents/RacePath.mp3", -1, &out_id);
+    assert(r2 && (!strcmp(r2, "skipped (row changed)") || !strcmp(r2, "skipped (row has analysis)")));
+    assert(sqlite3_get_autocommit(db2) == 1);
+    assert(!pthread_join(th, NULL));
+    assert(!strcmp(text(db2, ROW, t20), FILLED));
+    sqlite3_close(db2);
+
+    // Path-based fill writes Track.id (from the row) to filled.jsonl, and index lines with
+    // optional "id" between "k" and "sig" (R1) still populate "rel" for non-ASCII paths.
+    char jpath[PATH_MAX], jline[1024], jwant[256];
+    snprintf(jpath, sizeof jpath, "%s/lib-a/%s", root, SC_RBS_JOURNAL);
+    snprintf(jwant, sizeof jwant, "{\"id\":%lld,\"k\":\"contents/pathone.mp3\",", t16);
+    FILE *jf = fopen(jpath, "r");
+    int found_j = 0;
+    assert(jf);
+    while (fgets(jline, sizeof jline, jf))
+        if (starts(jline, jwant)) found_j = 1;
+    assert(!fclose(jf) && found_j);
+
+    long long t21 = track(db, "../Contents/R1-Caf\xc3\xa9.mp3", 1, 1);
+    {
+        char r1line[1024], r1hex[41], r1bin[PATH_MAX];
+        const char *r1key = "contents/r1-caf\xc3\xa9.mp3";
+        snprintf(r1line, sizeof r1line,
+                 "{\"k\":\"contents/r1-caf\\u00e9.mp3\",\"id\":%lld,\"sig\":{\"v\":5,\"w\":\"row-lib-a\",\"a\":{\"r\":\"Contents/R1-Caf\xc3\xa9.mp3\",\"s\":1,\"m\":1},\"z\":[],\"c\":{\"r\":\"\",\"s\":0,\"m\":0}},"
+                 "\"rel\":\"Contents/R1-Caf\xc3\xa9.mp3\",\"wr\":\"AAECAwQFBgcICQoLDA0ODw==\",\"perf\":true,\"active\":3}\n",
+                 t21);
+        stage_line("lib-a", r1line);
+        sc_rbs_sha1_hex(r1key, strlen(r1key), r1hex);
+        snprintf(r1bin, sizeof r1bin, "%s/lib-a/%s.bin", sc_rbs_root, r1hex);
+        put_file(r1bin, bin, bin_n, "wb");
+    }
+    statements = 0;
+    out_id = 0;
+    assert(starts(load_path(db, "../Contents/R1-Caf\xc3\xa9.mp3", -1, &out_id), "filled (") && statements == 2 && out_id == t21);
+    assert(!strcmp(text(db, ROW, t21), FILLED));
+
+    // Non-WAL (DELETE journal) RELEASE SQLITE_BUSY recovery with extended result codes: a concurrent
+    // SHARED reader blocks commit of SAVEPOINT sc_rbs; rollback must not leak an open savepoint.
+    assert(sqlite3_exec(db, "PRAGMA journal_mode=DELETE;", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_busy_timeout(db, 0) == SQLITE_OK);
+    assert(sqlite3_extended_result_codes(db, 1) == SQLITE_OK);
+    long long t22 = track(db, "../Contents/BusyRelease.mp3", 1, 1);
+    stage("lib-a", "contents/busyrelease.mp3", "contents/busyrelease.mp3", "Contents/BusyRelease.mp3", 5, ",\"perf\":true,\"active\":3", bin, bin_n);
+    sqlite3 *db_r = NULL;
+    assert(sqlite3_open(sqlite3_db_filename(db, "main"), &db_r) == SQLITE_OK);
+    assert(sqlite3_busy_timeout(db_r, 0) == SQLITE_OK);
+    struct lock_holder sh = {db_r, t22, 0};
+    assert(!pthread_create(&th, NULL, hold_shared_lock, &sh));
+    while (!__atomic_load_n(&sh.locked, __ATOMIC_ACQUIRE)) {
+        struct timespec ts = {0, 1000000L};
+        nanosleep(&ts, NULL);
+    }
+    out_id = 0;
+    assert(starts(load_path(db, "../Contents/BusyRelease.mp3", -1, &out_id), "filled (") && out_id == t22);
+    assert(sqlite3_get_autocommit(db) == 1);
+    assert(!pthread_join(th, NULL));
+    assert(!strcmp(text(db_r, ROW, t22), FILLED));
+    sqlite3_close(db_r);
+
+    // Non-zero busy_timeout (as tune_database sets on decks) must NOT be multiplied by 40 retries:
+    // wall-clock deadline bounds both sc_rbs_exec_write and sc_rbs_exec_read and leaves autocommit clean.
+    long long t25 = track(db, "../Contents/BusyCap.mp3", 1, 1);
+    stage("lib-a", "contents/busycap.mp3", "contents/busycap.mp3", "Contents/BusyCap.mp3", 5, ",\"perf\":true,\"active\":3", bin, bin_n);
+    sqlite3 *db_b = NULL;
+    assert(sqlite3_open(sqlite3_db_filename(db, "main"), &db_b) == SQLITE_OK);
+    assert(sqlite3_busy_timeout(db_b, 120) == SQLITE_OK);
+    assert(sqlite3_extended_result_codes(db_b, 1) == SQLITE_OK);
+    assert(sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK);
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    assert(!strcmp(load_path(db_b, "../Contents/BusyCap.mp3", -1, &out_id), "update failed"));
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    double w_ms = (double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6;
+    assert(w_ms < 600.0 && sqlite3_get_autocommit(db_b) == 1);
+    assert(sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(db, "BEGIN EXCLUSIVE", NULL, NULL, NULL) == SQLITE_OK);
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    assert(!strcmp(load_path(db_b, "../Contents/BusyCap.mp3", -1, &out_id), "skipped (no row)"));
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    double r_ms = (double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6;
+    assert(r_ms < 600.0 && sqlite3_get_autocommit(db_b) == 1);
+    assert(sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK);
+    out_id = 0;
+    assert(starts(load_path(db_b, "../Contents/BusyCap.mp3", -1, &out_id), "filled (") && out_id == t25);
+    assert(!strcmp(text(db, ROW, t25), FILLED));
+    sqlite3_close(db_b);
+
+    // Nested savepoint inside an explicit outer BEGIN: a failing fill rolls back only sc_rbs
+    // without aborting Engine's outer transaction.
+    long long t23 = track(db, "../Contents/NestedTx.mp3", 1, 1);
+    stage("lib-a", "contents/nestedtx.mp3", "contents/nestedtx.mp3", "Contents/NestedTx.mp3", 5, ",\"perf\":true,\"active\":3", bin, bin_n);
+    snprintf(trig, sizeof trig, "CREATE TEMP TRIGGER fail_track2 BEFORE UPDATE ON Track WHEN NEW.id = %lld BEGIN SELECT RAISE(ABORT, 'boom'); END;", t23);
+    assert(sqlite3_exec(db, trig, NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK);
+    long long t24 = track(db, "../Contents/OuterRow.mp3", 0, 0);
+    assert(!strcmp(load(db, t23), "update failed"));
+    assert(sqlite3_get_autocommit(db) == 0);
+    assert(sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_get_autocommit(db) == 1);
+    assert(!strcmp(text(db, ROW, t23), INSERTED));
+    assert(!strcmp(text(db, ROW, t24), NOTHING));
+    assert(sqlite3_exec(db, "DROP TRIGGER fail_track2;", NULL, NULL, NULL) == SQLITE_OK);
+    assert(starts(load(db, t23), "filled (") && !strcmp(text(db, ROW, t23), FILLED));
 
     sqlite3_close(db);
     char rm[160];

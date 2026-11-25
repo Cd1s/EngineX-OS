@@ -325,17 +325,17 @@ static int sc_rbs_parse_line(const char *line, size_t n, struct sc_rbs_line *l) 
 
 // --- the stage's live keys --------------------------------------------------------------------
 
-// The index read for the table: only a line's first members. Go writes a staged line's "k" first,
-// then "sig" and "rel" (Staged's first fields; indexLine embeds Staged first), and a drop as
-// {"drop":…}; test_rekordbox_stage.py holds that order to the Go source. 1: a staged line, 2: a
-// drop, 0: anything else. rel is filled for a staged line ("" when it is not there).
+// The index read for the table: only a line's first four members. Go writes a staged line's "k"
+// first, then optional "id", then "sig" and "rel" (Staged's first fields; indexLine embeds Staged
+// first), and a drop as {"drop":…}; test_rekordbox_stage.py holds that order to the Go source.
+// 1: a staged line, 2: a drop, 0: anything else. rel is filled for a staged line ("" when absent).
 static int sc_rbs_line_key(const char *line, size_t n, char *key, char *rel) {
     const char *p = sc_rbs_space(line, line + n), *end = line + n;
     char name[8];
     int kind = 0;
     rel[0] = 0;
     if (p >= end || *p++ != '{') return 0;
-    for (int member = 0; member < 3; member++) {
+    for (int member = 0; member < 4; member++) {
         p = sc_rbs_space(p, end);
         if (!(p = sc_rbs_string(p, end, name, sizeof name, NULL))) return kind;
         p = sc_rbs_space(p, end);
@@ -643,8 +643,37 @@ static void sc_rbs_conn_stale(void *db, const char *main) {
 
 // --- the row ------------------------------------------------------------------------------------
 
+#define SC_RBS_TRACK_READ "SELECT t.id, t.playOrder, t.length, t.bpm, t.year, t.path, "
+
+// Engine's deck-load and analysis-check Track read by path:
+//   SELECT t.id, t.playOrder, ... FROM Track AS t ... WHERE t.path = ? [OR t.path = ?]
+// Returns the number of bound path parameters (1 or 2), or 0 for any other statement.
+static int sc_rbs_path_bound(const char *sql) {
+    if (!sql || strncmp(sql, SC_RBS_TRACK_READ, sizeof SC_RBS_TRACK_READ - 1)) return 0;
+    const char *where = strstr(sql, " WHERE t.path = ?");
+    if (!where || strchr(sql, '?') != where + sizeof " WHERE t.path = " - 1) return 0;
+    int count = 1;
+    sql = where + sizeof " WHERE t.path = ?" - 1;
+    if (!strncmp(sql, " OR t.path = ?", sizeof " OR t.path = ?" - 1)) {
+        count = 2;
+        sql += sizeof " OR t.path = ?" - 1;
+    }
+    for (; *sql == ' ' || *sql == ';'; sql++) {}
+    return *sql ? 0 : count;
+}
+
+static void sc_rbs_escape_sql(const char *src, char *dst, size_t cap) {
+    size_t n = 0;
+    for (; *src && n + 1 + (*src == '\'') < cap; src++) {
+        if (*src == '\'') dst[n++] = '\'';
+        dst[n++] = *src;
+    }
+    dst[n] = 0;
+}
+
 struct sc_rbs_row {
     int rows;
+    long long id;
     char path[SC_RBS_TEXT], uuid[SC_RBS_TEXT];
     long long import_key;
     int empty, insert_cues; // no analysis yet; cues and loops as the insert left them
@@ -653,13 +682,14 @@ struct sc_rbs_row {
 static int sc_rbs_row_cb(void *arg, int n, char **v, char **name) {
     struct sc_rbs_row *r = arg;
     (void)name;
-    if (n != 5) return 0;
+    if (n != 6) return 0;
     r->rows++;
     snprintf(r->path, sizeof r->path, "%s", v[0] ? v[0] : "");
     r->import_key = v[1] ? strtoll(v[1], NULL, 10) : 0;
     snprintf(r->uuid, sizeof r->uuid, "%s", v[2] ? v[2] : "");
     r->empty = v[3] && !strcmp(v[3], "1");
     r->insert_cues = v[4] && !strcmp(v[4], "1");
+    r->id = v[5] ? strtoll(v[5], NULL, 10) : 0;
     return 0;
 }
 
@@ -682,7 +712,7 @@ static int sc_rbs_changes(void *arg, int n, char **v, char **names) {
 // not a whole, complete file with trackData and beatData (why says what is wrong).
 static char *sc_rbs_fill_sql(const unsigned char *b, size_t n, long long track, long long active, const char *uuid, const char **why) {
     static const char *const columns[] = {"trackData", "overviewWaveFormData", "beatData", "quickCues", "loops"};
-    size_t at = 5, len[5], start[5], total = 1024 + strlen(uuid);
+    size_t at = 5, len[5], start[5], total = 1088 + strlen(uuid);
     *why = "not an RBXA1 file";
     if (n < 5 || memcmp(b, "RBXA1", 5)) return NULL;
     *why = "cut short";
@@ -692,7 +722,7 @@ static char *sc_rbs_fill_sql(const unsigned char *b, size_t n, long long track, 
         start[i] = at + 4;
         if (len[i] > n - start[i]) return NULL;
         at = start[i] + len[i];
-        total += strlen(columns[i]) + 8 + 2 * len[i];
+        total += strlen(columns[i]) + 9 + 2 * len[i];
     }
     if (n - at != 1 || b[at] > 1) return NULL;
     *why = "not complete";
@@ -704,7 +734,7 @@ static char *sc_rbs_fill_sql(const unsigned char *b, size_t n, long long track, 
         *why = "out of memory";
         return NULL;
     }
-    p += sprintf(p, "UPDATE PerformanceData SET ");
+    p += sprintf(p, "SAVEPOINT sc_rbs; UPDATE PerformanceData SET ");
     for (int i = 0; i < 5; i++) {
         p += sprintf(p, "%s = ", columns[i]);
         if (!len[i]) {
@@ -716,7 +746,7 @@ static char *sc_rbs_fill_sql(const unsigned char *b, size_t n, long long track, 
         p += sprintf(p, "', ");
     }
     sprintf(p, "activeOnLoadLoops = %lld, thirdPartySourceId = NULL WHERE trackId = %lld AND %s AND %s AND (SELECT uuid FROM Information) = '%s'; "
-               "UPDATE Track SET isAnalyzed = 1 WHERE id = %lld AND changes() > 0; SELECT changes()",
+               "UPDATE Track SET isAnalyzed = 1 WHERE id = %lld AND changes() > 0; SELECT changes(); RELEASE sc_rbs",
             active, track, SC_RBS_UNTOUCHED(""), SC_RBS_INSERT_CUES(""), uuid, track);
     *why = NULL;
     return sql;
@@ -756,30 +786,86 @@ static void sc_rbs_journal(const char *uuid, long long track, const struct sc_rb
     close(fd);
 }
 
-// Before Engine reads track's row in the library of db, a drive's (main): when the stage holds
-// the track and the row is as the insert left it, the row gets the staged data. Returns what it
-// did, or why it left the row (only with sc_rbx_verbose), or NULL.
-static const char *sc_rbs_fill_track(const struct sc_rbx_sqlite *q, void *db, const char *main, long long track) {
+static long long sc_rbs_mono_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+
+static int sc_rbs_exec_read(const struct sc_rbx_sqlite *q, void *db, const char *sql, struct sc_rbs_row *r) {
+    const long long deadline = sc_rbs_mono_ns() + 200000000LL;
+    for (;;) {
+        memset(r, 0, sizeof *r);
+        int rc = q->exec(db, sql, sc_rbs_row_cb, r, NULL);
+        if ((rc & 0xff) != 5 /* SQLITE_BUSY */ || sc_rbs_mono_ns() >= deadline) return rc;
+        struct timespec ts = {0, 5000000L};
+        nanosleep(&ts, NULL);
+    }
+}
+
+static int sc_rbs_exec_write(const struct sc_rbx_sqlite *q, void *db, const char *sql, int *filled) {
+    const long long deadline = sc_rbs_mono_ns() + 200000000LL;
+    for (;;) {
+        *filled = 0;
+        int rc = q->exec(db, sql, sc_rbs_changes, filled, NULL);
+        if (!rc) return 0;
+        *filled = 0;
+        if (!q->exec(db, "ROLLBACK TO sc_rbs", NULL, NULL, NULL)) {
+            if (q->exec(db, "RELEASE sc_rbs", NULL, NULL, NULL))
+                (void)q->exec(db, "ROLLBACK", NULL, NULL, NULL);
+        }
+        if ((rc & 0xff) != 5 /* SQLITE_BUSY */ || sc_rbs_mono_ns() >= deadline) return rc;
+        struct timespec ts = {0, 5000000L};
+        nanosleep(&ts, NULL);
+    }
+}
+
+// Before Engine reads a row in the library of db, a drive's (main), by Track.id (path == NULL)
+// or by Track.path (path != NULL): when the stage holds the track and the row is as the insert
+// left it, the row gets the staged data atomically. Returns what it did, or why it left the row
+// (only with sc_rbx_verbose), or NULL.
+static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const char *main,
+                               long long track, const char *path, int path_len, long long *out_track) {
     static __thread char result[96];
     const char *why = NULL;
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     struct stat st;
-    if (track <= 0 || stat(sc_rbs_root, &st)) return sc_rbx_verbose ? "skipped (nothing staged on the deck)" : NULL;
+    size_t plen = 0;
+    if (path) {
+        plen = path_len < 0 ? strlen(path) : (size_t)path_len;
+        if (!plen || plen >= SC_RBS_TEXT || memchr(path, 0, plen)) return NULL;
+    } else if (track <= 0) {
+        return sc_rbx_verbose ? "skipped (nothing staged on the deck)" : NULL;
+    }
+    if (stat(sc_rbs_root, &st)) return sc_rbx_verbose ? "skipped (nothing staged on the deck)" : NULL;
     struct sc_rbs_line *l = malloc(sizeof *l);
     struct sc_rbs_row *r = malloc(sizeof *r);
-    char *key = malloc(SC_RBS_TEXT), *uuid = malloc(SC_RBS_TEXT), query[512];
-    if (!l || !r || !key || !uuid) {
+    char *key = malloc(SC_RBS_TEXT), *uuid = malloc(SC_RBS_TEXT), *query = malloc(SC_RBS_TEXT * 2 + 512);
+    if (!l || !r || !key || !uuid || !query) {
         why = "out of memory";
         goto done;
     }
     memset(r, 0, sizeof *r);
+    int ascii = 0, found = 0;
+    off_t off = 0;
+    char raw_path[SC_RBS_TEXT];
+    if (path) {
+        memcpy(raw_path, path, plen);
+        raw_path[plen] = 0;
+    }
     // The cached library and stage, under the lock; the statements below run without it.
     pthread_mutex_lock(&sc_rbs_mu);
     struct sc_rbs_conn *c = sc_rbs_conn_of(db, main);
     const int known = c->known;
     snprintf(uuid, SC_RBS_TEXT, "%s", c->uuid);
-    const int staged = known > 0 && sc_rbs_stage_of(uuid);
+    struct sc_rbs_stage *s = known > 0 ? sc_rbs_stage_of(uuid) : NULL;
+    const int staged = s != NULL;
+    if (staged && path) {
+        ascii = sc_rbs_fold(raw_path, key, SC_RBS_TEXT, 1) >= 0;
+        if (ascii || sc_rbs_fold(raw_path, key, SC_RBS_TEXT, 0) >= 0)
+            found = sc_rbs_find(s, key, !ascii, &off);
+    }
     pthread_mutex_unlock(&sc_rbs_mu);
     if (known < 0) {
         why = "skipped (no bridge snapshot)";
@@ -789,15 +875,29 @@ static const char *sc_rbs_fill_track(const struct sc_rbx_sqlite *q, void *db, co
         why = "skipped (nothing staged for this library)";
         goto done;
     }
-    // One read: the row's path and state, and the library's own uuid (a snapshot left behind by
+    if (path && !found) {
+        why = "skipped (not staged)";
+        goto done;
+    }
+    // One read: the row's path, id and state, and the library's own uuid (a snapshot left behind by
     // another library can only make a miss).
-    snprintf(query, sizeof query,
-             "SELECT t.path, t.pdbImportKey, (SELECT uuid FROM Information), " SC_RBS_UNTOUCHED("p.") ", " SC_RBS_INSERT_CUES("p.")
-             " FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.id = %lld", track);
-    if (q->exec(db, query, sc_rbs_row_cb, r, NULL) || r->rows != 1) {
+    if (path) {
+        char escaped[SC_RBS_TEXT * 2];
+        sc_rbs_escape_sql(raw_path, escaped, sizeof escaped);
+        snprintf(query, SC_RBS_TEXT * 2 + 512,
+                 "SELECT t.path, t.pdbImportKey, (SELECT uuid FROM Information), " SC_RBS_UNTOUCHED("p.") ", " SC_RBS_INSERT_CUES("p.") ", t.id"
+                 " FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.path = '%s'", escaped);
+    } else {
+        snprintf(query, SC_RBS_TEXT * 2 + 512,
+                 "SELECT t.path, t.pdbImportKey, (SELECT uuid FROM Information), " SC_RBS_UNTOUCHED("p.") ", " SC_RBS_INSERT_CUES("p.") ", t.id"
+                 " FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.id = %lld", track);
+    }
+    if (sc_rbs_exec_read(q, db, query, r) || r->rows != 1) {
         why = "skipped (no row)";
         goto done;
     }
+    track = r->id;
+    if (out_track) *out_track = track;
     if (strcmp(r->uuid, uuid)) {
         sc_rbs_conn_stale(db, main);
         why = "skipped (the snapshot names another library)";
@@ -815,17 +915,18 @@ static const char *sc_rbs_fill_track(const struct sc_rbx_sqlite *q, void *db, co
         why = "skipped (Engine's own row)";
         goto done;
     }
-    // The key: rbstate.FoldPath of an ASCII path; a non-ASCII one by the volume's spelling.
-    const int ascii = sc_rbs_fold(r->path, key, SC_RBS_TEXT, 1) >= 0;
-    if (!ascii && sc_rbs_fold(r->path, key, SC_RBS_TEXT, 0) < 0) {
-        why = "skipped (not staged)";
-        goto done;
+    if (!path) {
+        // The key: rbstate.FoldPath of an ASCII path; a non-ASCII one by the volume's spelling.
+        ascii = sc_rbs_fold(r->path, key, SC_RBS_TEXT, 1) >= 0;
+        if (!ascii && sc_rbs_fold(r->path, key, SC_RBS_TEXT, 0) < 0) {
+            why = "skipped (not staged)";
+            goto done;
+        }
+        pthread_mutex_lock(&sc_rbs_mu);
+        s = sc_rbs_stage_of(uuid);
+        found = s && sc_rbs_find(s, key, !ascii, &off);
+        pthread_mutex_unlock(&sc_rbs_mu);
     }
-    off_t off = 0;
-    pthread_mutex_lock(&sc_rbs_mu);
-    struct sc_rbs_stage *s = sc_rbs_stage_of(uuid);
-    int found = s && sc_rbs_find(s, key, !ascii, &off);
-    pthread_mutex_unlock(&sc_rbs_mu);
     found = found && sc_rbs_line_at(uuid, off, l) && (ascii ? !strcmp(l->key, key) : !strcmp(l->rel, key));
     if (found && !ascii) { // that line must still be its key's last, not dropped since
         off_t last = 0;
@@ -860,7 +961,7 @@ static const char *sc_rbs_fill_track(const struct sc_rbx_sqlite *q, void *db, co
         goto done;
     }
     int filled = 0;
-    const int error = q->exec(db, update, sc_rbs_changes, &filled, NULL);
+    const int error = sc_rbs_exec_write(q, db, update, &filled);
     free(update);
     if (error) {
         why = "update failed";
@@ -879,8 +980,18 @@ done:
     free(r);
     free(key);
     free(uuid);
+    free(query);
     if (why && strncmp(why, "skipped", 7)) return why;
     return sc_rbx_verbose ? why : NULL;
+}
+
+static const char *sc_rbs_fill_track(const struct sc_rbx_sqlite *q, void *db, const char *main, long long track) {
+    return sc_rbs_fill(q, db, main, track, NULL, 0, NULL);
+}
+
+static const char *sc_rbs_fill_path(const struct sc_rbx_sqlite *q, void *db, const char *main,
+                                    const char *path, int path_len, long long *track) {
+    return sc_rbs_fill(q, db, main, 0, path, path_len, track);
 }
 
 #endif

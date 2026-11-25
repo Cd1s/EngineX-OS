@@ -80,11 +80,14 @@ class RekordboxStageContractTest(unittest.TestCase):
         self.assertRegex(self.stage, r"type indexLine struct \{\s*\*Staged")
 
     def test_member_order_the_index_table_reads(self):
-        # The live-key table reads only a line's first members: a staged line is {"k":…,"sig":…,"rel":…
+        # The live-key table reads only a line's first four members: a staged line is
+        # {"k":…,"sig":…,"rel":…} or (with R1) {"k":…,"id":…,"sig":…,"rel":…}
         # (Staged's first fields, and indexLine embeds Staged first), a drop is {"drop":…}.
         staged = re.search(r"^type Staged struct \{\n(.*?)^\}", self.stage, re.S | re.M)[1]
-        first = re.findall(r"^\t(\w+)\s", staged, re.M)[:3]
-        self.assertEqual(first, ["Key", "Sig", "Rel"])
+        fields = re.findall(r"^\t(\w+)\s", staged, re.M)
+        self.assertIn(fields[:3], (["Key", "Sig", "Rel"], ["Key", "EngineID", "Sig"]))
+        if fields[1] == "EngineID":
+            self.assertEqual(fields[:4], ["Key", "EngineID", "Sig", "Rel"])
         line = re.search(r"^type indexLine struct \{\n(.*?)^\}", self.stage, re.S | re.M)[1]
         self.assertEqual(re.findall(r"^\t(\S+)", line, re.M)[:2], ["*Staged", "Drop"])
         self.assertIn("appendLine(indexLine{Drop: k})", self.stage)
