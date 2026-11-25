@@ -128,6 +128,35 @@ func TestMirrorLibraryTakesEveryRowOnceAndThenWhatEngineWrote(t *testing.T) {
 	if again, _ := os.ReadFile(next); !bytes.Equal(again, file) {
 		t.Fatal("a pass with nothing to take wrote the next library")
 	}
+	// What Engine writes at every mount of a stick, the played indicator, is taken without the
+	// triggers leaving the file.
+	mirrorExec(t, live, `UPDATE Information SET currentPlayedIndiciator=4711`)
+	if ch, err = MirrorLibrary(ctx, live, next, &m, nil); err != nil || len(ch.Tracks) != 0 || ch.Lists {
+		t.Fatalf("a pass after a mount by Engine: %+v %v", ch, err)
+	}
+	db, err := sql.Open("sqlite", "file:"+next+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var indicator, triggers, schema int64
+	err = db.QueryRow(`SELECT (SELECT currentPlayedIndiciator FROM Information),(SELECT count(*) FROM sqlite_master WHERE type='trigger'),(SELECT schema_version FROM pragma_schema_version)`).Scan(&indicator, &triggers, &schema)
+	db.Close()
+	if err != nil || indicator != 4711 || triggers < 10 {
+		t.Fatalf("the next library after a mount by Engine: indicator %d, %d triggers, %v", indicator, triggers, err)
+	}
+	mirrorExec(t, live, `UPDATE Information SET currentPlayedIndiciator=4712`)
+	if _, err = MirrorLibrary(ctx, live, next, &m, nil); err != nil {
+		t.Fatal(err)
+	}
+	if db, err = sql.Open("sqlite", "file:"+next+"?mode=ro"); err != nil {
+		t.Fatal(err)
+	}
+	var schema2 int64
+	err = db.QueryRow(`SELECT schema_version FROM pragma_schema_version`).Scan(&schema2)
+	db.Close()
+	if err != nil || schema2 != schema {
+		t.Fatalf("taking the played indicator changed the next library's schema (%d, then %d): its triggers were dropped and made again; %v", schema, schema2, err)
+	}
 	// The bridge's rows in the next library get IDs Engine does not give meanwhile.
 	mirrorExec(t, next, `INSERT INTO Track(path,filename) VALUES('../Contents/new.mp3','new.mp3')`,
 		`UPDATE PerformanceData SET trackData=x'aa' WHERE trackId IN (3,5)`)
@@ -151,7 +180,7 @@ func TestMirrorLibraryTakesEveryRowOnceAndThenWhatEngineWrote(t *testing.T) {
 	if fmt.Sprint(ch.Tracks) != "[2 3 11 41]" || !ch.Lists {
 		t.Fatalf("taken: tracks %v lists %v, want the played, the cued, the removed and Engine's own, and the lists", ch.Tracks, ch.Lists)
 	}
-	db, err := sql.Open("sqlite", next)
+	db, err = sql.Open("sqlite", next)
 	if err != nil {
 		t.Fatal(err)
 	}

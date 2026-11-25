@@ -457,11 +457,18 @@ func (mr *mirroring) tables() (again []string, err error) {
 			continue
 		}
 		mr.m.Tables[name] = h.Sum64()
-		if err = mr.plain(func() error {
-			if name == "Information" && known {
-				// The next library keeps its own commit ID.
+		if name == "Information" && known {
+			// Engine gives the library a new played indicator every time it mounts the stick (real
+			// Engine, sandbox 2026-11-25): one statement, and no trigger is on this table. The next
+			// library keeps its own commit ID.
+			if err = mr.transaction(func() error {
 				return mr.exec(`UPDATE main.Information SET currentPlayedIndiciator=(SELECT currentPlayedIndiciator FROM live.Information)`)
+			}); err != nil {
+				return nil, err
 			}
+			continue
+		}
+		if err = mr.plain(func() error {
 			if e := mr.exec(`DELETE FROM main."` + name + `"`); e != nil {
 				return e
 			}
