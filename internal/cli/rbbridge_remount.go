@@ -344,12 +344,13 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 // takeRowsWhileMounted is takeDeckRows, stopped when the stick is ejected or gone: the pass holds
 // files of the stick open and writes its next library, and after an Eject nothing may (the hook
 // marks the eject before its own pass and the unmount, and stops only the import job's unit).
+// It looks every 100 ms: the unmount follows the mark by the start of the hook's own pass.
 func takeRowsWhileMounted(ctx context.Context, mount string, ejected func() bool) bool {
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for sleepCtx(ctx, remountWait) == nil {
+		for sleepCtx(ctx, min(remountWait, 100*time.Millisecond)) == nil {
 			if ejected() || !mounted(mount) {
 				cancel()
 			}
