@@ -148,7 +148,7 @@ int setenv(const char *name, const char *value, int overwrite) {
 
 static void *alsa_sw_cache, *alsa_tstamp_set_cache, *alsa_tstamp_get_cache;
 static void *alsa_hw_cache, *alsa_hw_rate_cache, *alsa_stream_cache;
-static void *alsa_writei_cache, *alsa_state_cache, *alsa_prepare_cache, *alsa_resume_cache;
+static void *alsa_writei_cache, *alsa_state_cache, *alsa_prepare_cache;
 /* Rate after Engine's own pre-DAC render stage; Gen-1 renders at half its 96 kHz ALSA rate. */
 static unsigned master_rate = SC_DSP_DEFAULT_RATE;
 static int player_board(void);
@@ -156,27 +156,52 @@ static int player_board(void);
 typedef long (*alsa_writei_fn)(void *, const void *, unsigned long);
 typedef int (*alsa_pcm_int_fn)(void *);
 
+enum { ALSA_RECOV_SLOTS = 4, ALSA_RECOV_MAX_STREAK = 3 };
+static struct {
+    void *pcm;
+    unsigned streak;
+} alsa_recov_slots[ALSA_RECOV_SLOTS];
+
+static unsigned alsa_recov_bump(void *pcm) {
+    int empty = -1;
+    for (int i = 0; i < ALSA_RECOV_SLOTS; i++) {
+        void *p = __atomic_load_n(&alsa_recov_slots[i].pcm, __ATOMIC_RELAXED);
+        if (p == pcm) return __atomic_add_fetch(&alsa_recov_slots[i].streak, 1u, __ATOMIC_RELAXED);
+        if (!p && empty < 0) empty = i;
+    }
+    int slot = empty >= 0 ? empty : 0;
+    __atomic_store_n(&alsa_recov_slots[slot].pcm, pcm, __ATOMIC_RELAXED);
+    __atomic_store_n(&alsa_recov_slots[slot].streak, 1u, __ATOMIC_RELAXED);
+    return 1u;
+}
+
+static void alsa_recov_reset(void *pcm) {
+    for (int i = 0; i < ALSA_RECOV_SLOTS; i++) {
+        if (__atomic_load_n(&alsa_recov_slots[i].pcm, __ATOMIC_RELAXED) == pcm) {
+            __atomic_store_n(&alsa_recov_slots[i].streak, 0u, __ATOMIC_RELAXED);
+            return;
+        }
+    }
+}
+
 // #336 S13: stock Engine's ALSA xrun_recovery (0x1655898) only handles -EPIPE
-// and -ESTRPIPE. If a transient prepare failure or full-duplex capture reset
-// leaves playback in SETUP/XRUN/DRAINING/SUSPENDED, snd_pcm_writei returns
-// -EBADFD (-77) and stock spins silently until reboot. Recover once without
-// blocking, sleeping, or touching PAUSED/DISCONNECTED/OPEN states.
+// and -ESTRPIPE. If a transient prepare failure leaves playback in SETUP (st == 1),
+// snd_pcm_writei returns -EBADFD (-77) and stock spins silently until reboot.
+// Recover SETUP with one non-blocking prepare + retry, capped at 3 consecutive
+// recoveries without a normal healthy write so intentionally stopped streams
+// (standby/shutdown/device switch) are never revived indefinitely.
 static long alsa_writei_recover(void *pcm, const void *buffer, unsigned long size,
                                 alsa_writei_fn real, alsa_pcm_int_fn get_state,
-                                alsa_pcm_int_fn do_prepare, alsa_pcm_int_fn do_resume) {
+                                alsa_pcm_int_fn do_prepare) {
     long rc = real(pcm, buffer, size);
+    if (rc > 0) {
+        if (pcm) alsa_recov_reset(pcm);
+        return rc;
+    }
     if (rc != -EBADFD || !pcm || !get_state || !do_prepare) return rc;
-    int st = get_state(pcm);
-    if (st == 1 /* SETUP */ || st == 4 /* XRUN */ || st == 5 /* DRAINING */) {
-        if (do_prepare(pcm) >= 0) return real(pcm, buffer, size);
-        return rc;
-    }
-    if (st == 7 /* SUSPENDED */) {
-        int r = do_resume ? do_resume(pcm) : -ENOSYS;
-        if (r < 0 && r != -EAGAIN) r = do_prepare(pcm);
-        if (r >= 0) return real(pcm, buffer, size);
-        return rc;
-    }
+    if (get_state(pcm) != 1 /* SND_PCM_STATE_SETUP */) return rc;
+    if (alsa_recov_bump(pcm) > ALSA_RECOV_MAX_STREAK) return rc;
+    if (do_prepare(pcm) >= 0) return real(pcm, buffer, size);
     return rc;
 }
 
@@ -186,11 +211,11 @@ int snd_pcm_hw_params(void *pcm, void *params) {
     if (!real) return -ENOSYS;
     int rc = real(pcm, params);
     if (rc >= 0 && is_engine() && hf_on(HF_DSP_GUARDS)) {
+        if (pcm) alsa_recov_reset(pcm);
         // Pre-resolve playback recovery symbols off the RT audio write thread.
         (void)next_symbol(&alsa_writei_cache, "snd_pcm_writei");
         (void)next_symbol(&alsa_state_cache, "snd_pcm_state");
         (void)next_symbol(&alsa_prepare_cache, "snd_pcm_prepare");
-        (void)next_symbol(&alsa_resume_cache, "snd_pcm_resume");
         int (*get_rate)(const void *, unsigned *, int *) = next_symbol(&alsa_hw_rate_cache, "snd_pcm_hw_params_get_rate");
         int (*stream)(void *) = next_symbol(&alsa_stream_cache, "snd_pcm_stream");
         unsigned rate = 0;
@@ -209,8 +234,7 @@ long snd_pcm_writei(void *pcm, const void *buffer, unsigned long size) {
     if (!is_engine() || !hf_on(HF_DSP_GUARDS)) return real(pcm, buffer, size);
     alsa_pcm_int_fn get_state = (alsa_pcm_int_fn)__atomic_load_n(&alsa_state_cache, __ATOMIC_ACQUIRE);
     alsa_pcm_int_fn do_prepare = (alsa_pcm_int_fn)__atomic_load_n(&alsa_prepare_cache, __ATOMIC_ACQUIRE);
-    alsa_pcm_int_fn do_resume = (alsa_pcm_int_fn)__atomic_load_n(&alsa_resume_cache, __ATOMIC_ACQUIRE);
-    return alsa_writei_recover(pcm, buffer, size, real, get_state, do_prepare, do_resume);
+    return alsa_writei_recover(pcm, buffer, size, real, get_state, do_prepare);
 }
 
 HF_INTERPOSE(HF_ALSA_TIMESTAMP)
@@ -2840,6 +2864,12 @@ __attribute__((constructor)) static void edit_engine(void) {
     if (off[0]) fprintf(stderr, "engine-ui-hook: features off: %s\n", off);
     if (!install_shadow_position_hooks(base, page)) hf_runtime_off(HF_SHADOW_PAUSED_FOLLOW);
     hf_publish();
+    if (hf_on(HF_DSP_GUARDS)) {
+        /* Pre-resolve ALSA writei recovery symbols in ctor so RT write never calls dlsym. */
+        (void)next_symbol(&alsa_writei_cache, "snd_pcm_writei");
+        (void)next_symbol(&alsa_state_cache, "snd_pcm_state");
+        (void)next_symbol(&alsa_prepare_cache, "snd_pcm_prepare");
+    }
 #if !defined(__aarch64__)
     prepare_aux(base, page);
     prepare_config(base, page);

@@ -107,56 +107,69 @@ static int mock_prepare(void *pcm) {
     if (m->prepare_rc >= 0) m->state = 2; /* PREPARED */
     return m->prepare_rc;
 }
-static int mock_resume(void *pcm) {
-    struct mock_pcm *m = (struct mock_pcm *)pcm;
-    m->resume_calls++;
-    if (m->resume_rc >= 0) m->state = 3; /* RUNNING */
-    return m->resume_rc;
-}
 
 static void test_alsa_ebadfd_recovery(void) {
-    /* 1. XRUN/SETUP/DRAINING + -EBADFD -> prepare once, retry once, succeeds. */
-    int recoverable[] = {1, 4, 5};
-    for (unsigned i = 0; i < sizeof recoverable / sizeof *recoverable; i++) {
-        struct mock_pcm m = {.state = recoverable[i], .first_rc = -EBADFD, .retry_rc = 256, .prepare_rc = 0};
-        long rc = alsa_writei_recover(&m, "x", 256, mock_writei, mock_state, mock_prepare, mock_resume);
-        assert(rc == 256 && m.prepare_calls == 1 && m.write_calls == 2 && m.resume_calls == 0);
-    }
-    /* 2. SUSPENDED + -EBADFD: resume succeeds -> retry once without prepare. */
+    /* 1. SETUP (st == 1) + -EBADFD -> prepare once, retry once, succeeds. */
     {
-        struct mock_pcm m = {.state = 7, .first_rc = -EBADFD, .retry_rc = 128, .resume_rc = 0};
-        long rc = alsa_writei_recover(&m, "x", 128, mock_writei, mock_state, mock_prepare, mock_resume);
-        assert(rc == 128 && m.resume_calls == 1 && m.prepare_calls == 0 && m.write_calls == 2);
+        struct mock_pcm m = {.state = 1, .first_rc = -EBADFD, .retry_rc = 256, .prepare_rc = 0};
+        alsa_recov_reset(&m);
+        long rc = alsa_writei_recover(&m, "x", 256, mock_writei, mock_state, mock_prepare);
+        assert(rc == 256 && m.prepare_calls == 1 && m.write_calls == 2);
     }
-    /* 3. SUSPENDED + -EBADFD: resume returns -ENOSYS -> fall back to prepare and retry once. */
+    /* 2. Consecutive SETUP recovery cap (max 3 without a normal healthy write):
+     *    prevents reviving an intentionally stopped stream during shutdown/standby/switch. */
     {
-        struct mock_pcm m = {.state = 7, .first_rc = -EBADFD, .retry_rc = 128, .resume_rc = -ENOSYS, .prepare_rc = 0};
-        long rc = alsa_writei_recover(&m, "x", 128, mock_writei, mock_state, mock_prepare, mock_resume);
-        assert(rc == 128 && m.resume_calls == 1 && m.prepare_calls == 1 && m.write_calls == 2);
+        struct mock_pcm m = {.state = 1, .first_rc = -EBADFD, .retry_rc = 256, .prepare_rc = 0};
+        alsa_recov_reset(&m);
+        for (int i = 0; i < ALSA_RECOV_MAX_STREAK; i++) {
+            m.state = 1;
+            m.write_calls = 0;
+            long rc = alsa_writei_recover(&m, "x", 256, mock_writei, mock_state, mock_prepare);
+            assert(rc == 256 && m.prepare_calls == i + 1 && m.write_calls == 2);
+        }
+        /* 4th consecutive SETUP -EBADFD hits the cap: must NOT call prepare or retry. */
+        m.state = 1;
+        m.write_calls = 0;
+        long rc = alsa_writei_recover(&m, "x", 256, mock_writei, mock_state, mock_prepare);
+        assert(rc == -EBADFD && m.prepare_calls == ALSA_RECOV_MAX_STREAK && m.write_calls == 1);
+
+        /* One normal healthy write resets the streak so future transient glitches recover. */
+        m.state = 3;
+        m.first_rc = 256;
+        m.write_calls = 0;
+        assert(alsa_writei_recover(&m, "x", 256, mock_writei, mock_state, mock_prepare) == 256);
+        m.state = 1;
+        m.first_rc = -EBADFD;
+        m.write_calls = 0;
+        rc = alsa_writei_recover(&m, "x", 256, mock_writei, mock_state, mock_prepare);
+        assert(rc == 256 && m.prepare_calls == ALSA_RECOV_MAX_STREAK + 1 && m.write_calls == 2);
     }
-    /* 4. DISCONNECTED (8), PAUSED (6), OPEN (0) -> never prepare, never retry. */
-    int untouched[] = {0, 6, 8};
+    /* 3. Non-SETUP states (OPEN=0, XRUN=4, DRAINING=5, PAUSED=6, SUSPENDED=7, DISCONNECTED=8)
+     *    with -EBADFD -> never prepare, never retry. */
+    int untouched[] = {0, 4, 5, 6, 7, 8};
     for (unsigned i = 0; i < sizeof untouched / sizeof *untouched; i++) {
         struct mock_pcm m = {.state = untouched[i], .first_rc = -EBADFD, .retry_rc = 256};
-        long rc = alsa_writei_recover(&m, "x", 256, mock_writei, mock_state, mock_prepare, mock_resume);
-        assert(rc == -EBADFD && m.prepare_calls == 0 && m.resume_calls == 0 && m.write_calls == 1);
+        alsa_recov_reset(&m);
+        long rc = alsa_writei_recover(&m, "x", 256, mock_writei, mock_state, mock_prepare);
+        assert(rc == -EBADFD && m.prepare_calls == 0 && m.write_calls == 1);
     }
-    /* 5. Persistent prepare failure -> single attempt, no loop. */
+    /* 4. Persistent prepare failure -> single attempt, no loop. */
     {
-        struct mock_pcm m = {.state = 4, .first_rc = -EBADFD, .prepare_rc = -EIO};
-        long rc = alsa_writei_recover(&m, "x", 256, mock_writei, mock_state, mock_prepare, mock_resume);
+        struct mock_pcm m = {.state = 1, .first_rc = -EBADFD, .prepare_rc = -EIO};
+        alsa_recov_reset(&m);
+        long rc = alsa_writei_recover(&m, "x", 256, mock_writei, mock_state, mock_prepare);
         assert(rc == -EBADFD && m.prepare_calls == 1 && m.write_calls == 1);
     }
-    /* 6. Normal write and -EPIPE pass straight through untouched. */
+    /* 5. Normal write and -EPIPE pass straight through untouched. */
     {
         struct mock_pcm ok = {.state = 3, .first_rc = 256};
-        assert(alsa_writei_recover(&ok, "x", 256, mock_writei, mock_state, mock_prepare, mock_resume) == 256);
+        assert(alsa_writei_recover(&ok, "x", 256, mock_writei, mock_state, mock_prepare) == 256);
         assert(ok.write_calls == 1 && ok.prepare_calls == 0);
         struct mock_pcm ep = {.state = 4, .first_rc = -EPIPE};
-        assert(alsa_writei_recover(&ep, "x", 256, mock_writei, mock_state, mock_prepare, mock_resume) == -EPIPE);
+        assert(alsa_writei_recover(&ep, "x", 256, mock_writei, mock_state, mock_prepare) == -EPIPE);
         assert(ep.write_calls == 1 && ep.prepare_calls == 0);
     }
-    puts("S13 ALSA -EBADFD recovery: PASS");
+    puts("S13 ALSA -EBADFD recovery (SETUP-only + consecutive cap): PASS");
 }
 
 int main(void) {
