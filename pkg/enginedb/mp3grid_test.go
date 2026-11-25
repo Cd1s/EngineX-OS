@@ -820,3 +820,20 @@ func TestFixMP3GridsReturnsCursorWriteError(t *testing.T) {
 		t.Fatal("cursor write failure was ignored")
 	}
 }
+
+func TestBridgeOwnedTracksFallsBackToLegacyState(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, ".rb-bridge-state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE BridgeState(trackId INTEGER); INSERT INTO BridgeState VALUES(7),(9)`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+	got := bridgeOwnedTracks(dir)
+	if !got[7] || !got[9] || len(got) != 2 {
+		t.Fatalf("legacy bridge-owned tracks: %v", got)
+	}
+}
