@@ -228,6 +228,14 @@ func normalizeConfig(cfg *Config) error {
 	return nil
 }
 
+// Normalized returns cfg as Configure keeps it: defaults applied and old values migrated (a
+// Shoutcast target saved with "mp3" and 256 kbps becomes "aac" at 192 kbps), or an error for
+// settings Configure would refuse. The console saves this, so the file says what the deck does.
+func Normalized(cfg Config) (Config, error) {
+	err := normalizeConfig(&cfg)
+	return cfg, err
+}
+
 // Configure validates and updates settings, starting or stopping streaming as needed.
 func (b *Broadcaster) Configure(cfg Config) error {
 	b.ctl.Lock()

@@ -226,3 +226,50 @@ func TestConsoleBroadcastCardOffersIcecastWAVAndShoutcastAAC(t *testing.T) {
 		t.Error("the console still says Shoutcast is not supported")
 	}
 }
+
+// Review of the SHOUTcast mode, finding 3: the console reported an old file's "mp3" / 256 kbps
+// Shoutcast target as AAC at 192 kbps but saved the old values back, so the file never said what
+// the deck does. Saving (the form, or the Live Stream switch) now writes the normalized settings;
+// the password and the user's own values stay, the hook's feed path is still not saved (#234).
+func TestSavingRewritesAnOldBroadcastConfigAsWhatTheDeckDoes(t *testing.T) {
+	old := `{"enabled":false,"protocol":"shoutcast","serverUrl":"radio.example:8000","username":"2","password":"pw","format":"mp3","bitrate":256,"inputPath":"/tmp/enginex-broadcast.pcm"}`
+	for _, save := range []struct {
+		name string
+		do   func(t *testing.T, s *Server)
+	}{
+		{"form", func(t *testing.T, s *Server) {
+			if resp := doAuthRequest(t, s, "POST", "/api/broadcast", []byte(`{"streamName":"Friday"}`)); resp.StatusCode != http.StatusOK {
+				t.Fatalf("POST: %d", resp.StatusCode)
+			}
+		}},
+		{"switch", func(t *testing.T, s *Server) {
+			if err := s.SetBroadcastEnabled(false); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(save.name, func(t *testing.T) {
+			s, stateDir := newTestServer(t)
+			path := filepath.Join(stateDir, "broadcast-config.json")
+			if err := os.WriteFile(path, []byte(old), 0600); err != nil {
+				t.Fatal(err)
+			}
+			save.do(t, s)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got["protocol"] != "shoutcast" || got["format"] != "aac" || got["bitrate"] != float64(192) ||
+				got["password"] != "pw" || got["username"] != "2" || got["serverUrl"] != "radio.example:8000" {
+				t.Errorf("saved %s, want the Shoutcast target as aac at 192 kbps with its login kept", raw)
+			}
+			if _, ok := got["inputPath"]; ok {
+				t.Errorf("saved %s, want the hook's feed path left out (#234)", raw)
+			}
+		})
+	}
+}

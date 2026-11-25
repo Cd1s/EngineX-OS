@@ -220,11 +220,7 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err)
 		return
 	}
-	saved := cfg
-	if broadcast.BuiltinInput(saved.InputPath) {
-		saved.InputPath = "" // the hook's feed: each release reads it under its own name (#234)
-	}
-	if err := providers.SaveJSON(s.broadcastConfigPath(), saved); err != nil {
+	if err := providers.SaveJSON(s.broadcastConfigPath(), savedBroadcastConfig(cfg)); err != nil {
 		fail(w, 500, errors.New("could not save broadcast settings"))
 		return
 	}
@@ -273,10 +269,25 @@ func (s *Server) SetBroadcastEnabled(on bool) error {
 
 	cfg := s.loadBroadcastConfig()
 	cfg.Enabled = on
-	if err := providers.SaveJSON(s.broadcastConfigPath(), cfg); err != nil {
+	if err := providers.SaveJSON(s.broadcastConfigPath(), savedBroadcastConfig(cfg)); err != nil {
 		return err
 	}
 	return s.broadcaster().SetEnabled(on)
+}
+
+// savedBroadcastConfig is what broadcast-config.json keeps: the settings as the broadcaster
+// normalizes them, so a file from an older version ("mp3", 256 kbps) is rewritten as what the deck
+// does ("aac" at 192 kbps for a Shoutcast target, "wav" for Icecast), and without the hook's feed,
+// which each release reads under its own name (#234). Settings the broadcaster would refuse are
+// kept as they are; the POST handler has refused them before this.
+func savedBroadcastConfig(cfg broadcast.Config) broadcast.Config {
+	if n, err := broadcast.Normalized(cfg); err == nil {
+		cfg = n
+	}
+	if broadcast.BuiltinInput(cfg.InputPath) {
+		cfg.InputPath = ""
+	}
+	return cfg
 }
 
 // RegisterBroadcastRoutes registers broadcast routes on the server's mux.
