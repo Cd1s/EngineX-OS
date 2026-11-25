@@ -14,6 +14,21 @@ import (
 // import's while it holds what the bridge wrote (Track.Written, WrittenDigest): Engine's import
 // mark is not used, since Engine shifts a marked row again when it loads it (2292 samples, MP3).
 
+// RawWrittenDigest names the content of a row's grid, cues and loops without main-cue normalization.
+func RawWrittenDigest(beats, cues, loops []byte) []byte {
+	h := sha256.New()
+	for _, blob := range [][]byte{beats, cues} {
+		raw, err := QUncompress(blob, 8<<20)
+		if err != nil {
+			raw = blob
+		}
+		_ = binary.Write(h, big, uint64(len(raw)))
+		h.Write(raw)
+	}
+	h.Write(loops)
+	return h.Sum(nil)[:16]
+}
+
 // WrittenDigest names the content of a row's grid, cues and loops, however it is compressed.
 func WrittenDigest(beats, cues, loops []byte) []byte {
 	h := sha256.New()

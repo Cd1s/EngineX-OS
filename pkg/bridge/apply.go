@@ -146,10 +146,28 @@ func (w *window) open() error {
 		return err
 	}
 	_, oldErr := os.Stat(filepath.Join(w.dir, oldStateName))
+	tracks, lists, countErr := lib.Counts(w.ctx)
+	if countErr != nil {
+		return countErr
+	}
+	if tracks == 0 && lists == 0 && enginedb.HasRGBOverviews(w.dir, lib.UUID()) {
+		hasSequence, seqErr := lib.HasTrackSequence(w.ctx)
+		if seqErr != nil {
+			return seqErr
+		}
+		if !hasSequence {
+			w.snap = rbstate.New("")
+			w.close()
+			return nil
+		}
+	}
 	switch {
 	case snap != nil && snap.LibraryUUID == lib.UUID() && snap.Rules == rbstate.Rules:
 		w.snap, w.head = snap, snap.Header
 	case oldErr == nil && !w.next:
+		if err = lib.MigrateLegacyArtwork(w.ctx, 2*time.Second); err != nil {
+			return err
+		}
 		if w.snap, err = adopt(w.ctx, db, w.dir, lib.UUID()); err != nil {
 			return err
 		}
@@ -160,7 +178,14 @@ func (w *window) open() error {
 			return err
 		}
 		if tracks == 0 && lists == 0 {
-			if !enginedb.HasRGBOverviews(w.dir, lib.UUID()) {
+			hasSequence, err := lib.HasTrackSequence(w.ctx)
+			if err != nil {
+				return err
+			}
+			if !enginedb.HasRGBOverviews(w.dir, lib.UUID()) || !hasSequence {
+				if enginedb.HasRGBOverviews(w.dir, lib.UUID()) && !hasSequence {
+					w.snap.LibraryUUID = ""
+				}
 				w.close() // Engine's skeleton: a library is built under its UUID
 				return nil
 			}
@@ -241,7 +266,7 @@ func (w *window) note(vt *ViewTrack, id int64, native bool) *rbstate.Track {
 	t := &rbstate.Track{Key: vt.Key, EngineID: id, Rel: vt.Rel, Refs: vt.Refs, Row: vt.Hash, Rating: vt.Track.Rating, Native: native}
 	if !native {
 		base := enginedb.FastBaseForTrack(vt.Track)
-		t.FastRow, t.FastRating, t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = vt.Hash, int(base.Rating), base.Cues, base.Loops, base.Active, true
+		t.FastRating, t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = int(base.Rating), base.Cues, base.Loops, base.Active, true
 	}
 	w.snap.Tracks[vt.Key] = t
 	return t
@@ -745,8 +770,9 @@ func (w *window) applyStaged() error {
 			p := &full.Perf
 			perf := enginedb.Performance{TrackData: p.TrackData, Overview: p.Overview, Beats: p.Beats, QuickCues: p.QuickCues, Loops: p.Loops, ActiveLoops: p.ActiveLoops, Complete: p.Complete, Digest: e.Digest}
 			prev := enginedb.PerfPrev{State: t.Perf, Written: t.Written, FastKnown: t.FastKnown, FastRating: int64(t.FastRating), FastCues: t.FastCues, FastLoops: t.FastLoops, FastActive: t.FastActive}
-			if f, ok := filled[key]; ok && f.EngineID == t.EngineID && prev.Written == nil && prev.State != rbstate.PerfDeck {
+			if f, ok := filled[key]; ok && f.EngineID == t.EngineID && prev.State != rbstate.PerfDeck {
 				prev.Written = f.Written // the UI hook filled the row from the stage: the bridge's data, as if a window had written it
+				prev.BridgeFilled = true
 			}
 			digest, outcome, err := b.ApplyPerformance(w.ctx, t.EngineID, perf, full.Facts, prev, vt.Track)
 			if err != nil {
@@ -756,7 +782,7 @@ func (w *window) applyStaged() error {
 				t.Perf = rbstate.PerfDeck
 				kept++
 			}
-			t.FastRow, t.FastRating, t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = "", 0, nil, nil, 0, false
+			t.FastRating, t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = 0, nil, nil, 0, false
 			// A list waveform only for a row the stick's library has, and not when the job staged the
 			// track with this row (the line names it): it wrote the file then. The look for it alone
 			// reads the folder, which holds a file a track (20,000: 4.3 s of a window for 30 tracks).

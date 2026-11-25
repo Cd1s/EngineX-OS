@@ -1,9 +1,11 @@
 package enginedb
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
@@ -30,4 +32,42 @@ func TestMergeFastUsesTheStoredImportBaseline(t *testing.T) {
 	if withCurrent.cues == nil {
 		t.Fatal("current export baseline failed to expose the stale-cue regression")
 	}
+}
+
+func TestApplyPerformanceUsesStoredFastBaselineEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	old := rekordbox.Track{ID: 1, Path: "/Contents/a.mp3", SampleRate: 44100, Duration: 10, Cues: []rekordbox.Cue{{HotCue: 1, TimeMS: 1000}}}
+	ids, _, _, err := BuildLibrary(ctx, dir, "", []TrackRow{{Rel: "Contents/a.mp3", Track: old}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := old
+	now.Cues = []rekordbox.Cue{{HotCue: 1, TimeMS: 5000}}
+	p, err := EncodePerformance(now, &rekordbox.Analysis{Cues: now.Cues})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lib, err := OpenLibrary(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := lib.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, outcome, err := b.ApplyPerformance(ctx, ids[0], p, rbstate.Facts{Duration: 10, SampleRate: 44100}, PerfPrev{
+		State: rbstate.PerfNone, FastKnown: true,
+		FastCues: fastBaseOf(old).cues, FastLoops: fastBaseOf(old).loops, FastActive: uint32(fastBaseOf(old).active), FastRating: fastBaseOf(old).rating,
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != PerfWritten {
+		t.Fatalf("outcome=%d, want PerfWritten", outcome)
+	}
+	if err = b.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lib.Close()
 }

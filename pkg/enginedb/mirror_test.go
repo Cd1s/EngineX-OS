@@ -266,9 +266,8 @@ func TestMirrorLibraryRemovesTrackReferencesAndKeepsForeignKeysValid(t *testing.
 	if _, err := MirrorLibrary(context.Background(), live, next, &m, nil); err != nil {
 		t.Fatal(err)
 	}
+	mirrorExec(t, next, `INSERT INTO PlaylistEntity(listId,trackId,databaseUuid,nextEntityId,membershipReference) SELECT listId,1,'bridge',0,1 FROM PlaylistEntity WHERE trackId=2 LIMIT 1`)
 	mirrorExec(t, live, `INSERT INTO PreparelistEntity(trackId,trackNumber) VALUES(1,1)`,
-		`DELETE FROM PlaylistEntity WHERE trackId=1`,
-		`INSERT INTO PlaylistEntity(listId,trackId,databaseUuid,nextEntityId,membershipReference) SELECT listId,1,databaseUuid,nextEntityId,membershipReference FROM PlaylistEntity WHERE trackId=2 LIMIT 1`,
 		`DELETE FROM PerformanceData WHERE trackId=1`, `DELETE FROM Track WHERE id=1`)
 	if _, err := MirrorLibrary(context.Background(), live, next, &m, nil); err != nil {
 		t.Fatal(err)

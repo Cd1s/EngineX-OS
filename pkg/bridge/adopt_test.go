@@ -28,8 +28,8 @@ func TestAdoptMigratesFastBaseAndRejectsStaleSyncedDigest(t *testing.T) {
 		CREATE TABLE BridgeWritten(trackId INTEGER PRIMARY KEY,digest BLOB);
 		CREATE TABLE BridgeSynced(trackId INTEGER PRIMARY KEY,lastEditTime INTEGER,digest BLOB);
 		INSERT INTO BridgeState VALUES('../Contents/a.mp3',1,'fast:old-record');
-		INSERT INTO BridgeFastBase VALUES(1,1,77,X'0102',X'0304',5);
-		INSERT INTO BridgeSynced VALUES(1,1,X'BA');`)
+		INSERT INTO BridgeFastBase VALUES(1,?,77,X'0102',X'0304',5);
+		INSERT INTO BridgeSynced VALUES(1,1,X'BA');`, enginedb.FastBaseRecord("fast:old-record"))
 	db.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +39,7 @@ func TestAdoptMigratesFastBaseAndRejectsStaleSyncedDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	track := s.Tracks["contents/a.mp3"]
-	if track == nil || !track.FastKnown || track.FastRow != "fast:old-record" || track.FastRating != 77 || track.FastActive != 5 {
+	if track == nil || !track.FastKnown || track.FastRating != 77 || track.FastActive != 5 {
 		t.Fatalf("fast baseline not migrated: %+v", track)
 	}
 	if track.Synced != nil || track.Edit != 0 {

@@ -2,7 +2,9 @@ package enginedb
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"math"
 
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
@@ -44,6 +46,12 @@ type FastBaseData struct {
 func FastBaseForTrack(t rekordbox.Track) FastBaseData {
 	b := fastBaseOf(t)
 	return FastBaseData{Rating: b.rating, Cues: b.cues, Loops: b.loops, Active: uint32(b.active)}
+}
+
+// FastBaseRecord is the legacy BridgeFastBase fingerprint check for a fast-row record.
+func FastBaseRecord(fingerprint string) int64 {
+	h := sha256.Sum256([]byte(fingerprint))
+	return int64(binary.BigEndian.Uint64(h[:]))
 }
 
 // fastBaseOf is the fastBase of export track t, as InsertTracks writes it.

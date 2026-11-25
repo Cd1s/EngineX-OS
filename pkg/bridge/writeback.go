@@ -236,6 +236,7 @@ type dbCandidate struct {
 	activeLoops         int64
 	metadata            rekordbox.Metadata
 	writtenDigest       []byte
+	rawWrittenDigest    []byte
 	filledWritten       []byte
 	filledBeats         []byte
 	filledCues          []byte
@@ -408,7 +409,7 @@ func readFilledStage(snap *rbstate.Snapshot) map[string]filledStageRow {
 			continue
 		}
 		full, err := stage.Read(e)
-		if err != nil || full.Digest == nil || !bytes.Equal(full.Digest, f.WR) {
+		if err != nil {
 			continue
 		}
 		out[f.K] = filledStageRow{id: f.ID, written: f.WR, beats: full.Perf.Beats, cues: full.Perf.QuickCues, loops: full.Perf.Loops}
@@ -464,7 +465,7 @@ func needsCueRead(row dbCandidate) bool {
 	if len(row.filledCues) > 0 {
 		return !bytes.Equal(writtenDigestIgnoringMainCueTail(row.beatData, row.quickCues, row.loops), writtenDigestIgnoringMainCueTail(row.filledBeats, row.filledCues, row.filledLoops))
 	}
-	return len(row.track.Written) == 0 || !bytes.Equal(row.writtenDigest, row.track.Written) || row.track.Synced != nil
+	return len(row.track.Written) == 0 || (!bytes.Equal(row.writtenDigest, row.track.Written) && !bytes.Equal(row.rawWrittenDigest, row.track.Written)) || row.track.Synced != nil
 }
 
 // readCandidates finds the rows a pass has to compare with the export. A row whose lastEditTime
@@ -515,6 +516,7 @@ func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, ses
 			continue
 		}
 		c.writtenDigest = enginedb.WrittenDigest(c.beatData, c.quickCues, c.loops)
+		c.rawWrittenDigest = enginedb.RawWrittenDigest(c.beatData, c.quickCues, c.loops)
 		if f, ok := filled[c.key]; ok && f.id == c.engineID && len(c.track.Written) == 0 {
 			c.filledWritten, c.filledBeats, c.filledCues, c.filledLoops = f.written, f.beats, f.cues, f.loops
 		}

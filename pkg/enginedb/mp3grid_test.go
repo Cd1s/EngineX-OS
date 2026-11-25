@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
 func copyAudioFixture(t *testing.T, root, rel, fixture string) {
@@ -835,5 +836,18 @@ func TestBridgeOwnedTracksFallsBackToLegacyState(t *testing.T) {
 	got := bridgeOwnedTracks(dir)
 	if !got[7] || !got[9] || len(got) != 2 {
 		t.Fatalf("legacy bridge-owned tracks: %v", got)
+	}
+}
+
+func TestBridgeOwnedTracksReadsV2Snapshot(t *testing.T) {
+	dir := t.TempDir()
+	s := rbstate.New("uuid")
+	s.Tracks["contents/a.mp3"] = &rbstate.Track{Key: "contents/a.mp3", EngineID: 7, Rel: "Contents/a.mp3"}
+	if err := s.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	got := bridgeOwnedTracks(dir)
+	if !got[7] || len(got) != 1 {
+		t.Fatalf("v2 bridge-owned tracks: %v", got)
 	}
 }

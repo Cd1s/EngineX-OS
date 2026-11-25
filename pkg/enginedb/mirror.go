@@ -396,40 +396,28 @@ func (mr *mirroring) tracks(fresh bool) error {
 		for _, id := range gone {
 			delete(seen, id)
 			for _, table := range []string{"PlaylistEntity", "PreparelistEntity"} {
-				query := `SELECT id,listId,nextEntityId FROM main.PlaylistEntity WHERE trackId=? ORDER BY id`
-				if table == "PreparelistEntity" {
-					query = `SELECT id,0,0 FROM main.PreparelistEntity WHERE trackId=? ORDER BY id`
-				}
-				rows, e := mr.db.QueryContext(mr.ctx, query, id)
-				if e != nil {
-					return e
-				}
-				var entities [][3]int64
-				for rows.Next() {
-					var entity [3]int64
-					if e = rows.Scan(&entity[0], &entity[1], &entity[2]); e != nil {
-						rows.Close()
+				for {
+					var entityID, listID, nextID int64
+					query := `SELECT id,COALESCE(listId,0),COALESCE(nextEntityId,0) FROM main.PlaylistEntity WHERE trackId=? ORDER BY id LIMIT 1`
+					if table == "PreparelistEntity" {
+						query = `SELECT id,0,0 FROM main.PreparelistEntity WHERE trackId=? ORDER BY id LIMIT 1`
+					}
+					e := mr.db.QueryRowContext(mr.ctx, query, id).Scan(&entityID, &listID, &nextID)
+					if errors.Is(e, sql.ErrNoRows) {
+						break
+					}
+					if e != nil {
 						return e
 					}
-					entities = append(entities, entity)
-				}
-				if e = rows.Close(); e != nil {
-					return e
-				}
-				if table == "PlaylistEntity" {
-					for _, entity := range entities {
-						if _, e = mr.db.ExecContext(mr.ctx, `UPDATE main.PlaylistEntity SET nextEntityId=? WHERE listId=? AND nextEntityId=?`, entity[2], entity[1], entity[0]); e != nil {
+					if table == "PlaylistEntity" {
+						if e = mr.exec(`UPDATE main.PlaylistEntity SET nextEntityId=? WHERE listId=? AND nextEntityId=?`, nextID, listID, entityID); e != nil {
 							return e
 						}
 					}
-				}
-				for _, entity := range entities {
-					if e = mr.exec(`DELETE FROM main.`+table+` WHERE id=?`, entity[0]); e != nil {
+					if e = mr.exec(`DELETE FROM main.`+table+` WHERE id=?`, entityID); e != nil {
 						return e
 					}
-				}
-				if len(entities) > 0 {
-					mr.out.Lists = true
+					mr.out.Lists = mr.out.Lists || table == "PlaylistEntity"
 				}
 			}
 			for _, q := range []string{`DELETE FROM main.PerformanceData WHERE trackId=?`, `DELETE FROM main.Track WHERE id=?`} {
@@ -505,9 +493,6 @@ func (mr *mirroring) tables() (again []string, err error) {
 		}
 	}
 	if listChanged {
-		for name, sum := range listHashes {
-			mr.m.Tables[name] = sum
-		}
 		if err = mr.plain(func() error {
 			for _, name := range []string{"Playlist", "PlaylistEntity"} {
 				if !slices.Contains(names, name) {
@@ -523,6 +508,9 @@ func (mr *mirroring) tables() (again []string, err error) {
 			return nil
 		}); err != nil {
 			return nil, err
+		}
+		for name, sum := range listHashes {
+			mr.m.Tables[name] = sum
 		}
 		again = append(again, "Playlist", "PlaylistEntity")
 		mr.out.Lists = true
@@ -545,7 +533,6 @@ func (mr *mirroring) tables() (again []string, err error) {
 		if known && old == h.Sum64() {
 			continue
 		}
-		mr.m.Tables[name] = h.Sum64()
 		if name == "Information" && known {
 			// Engine gives the library a new played indicator every time it mounts the stick (real
 			// Engine, sandbox 2026-11-25): one statement, and no trigger is on this table. The next
@@ -555,6 +542,7 @@ func (mr *mirroring) tables() (again []string, err error) {
 			}); err != nil {
 				return nil, err
 			}
+			mr.m.Tables[name] = h.Sum64()
 			continue
 		}
 		if err = mr.plain(func() error {
@@ -565,6 +553,7 @@ func (mr *mirroring) tables() (again []string, err error) {
 		}); err != nil {
 			return nil, err
 		}
+		mr.m.Tables[name] = h.Sum64()
 		if known {
 			again = append(again, name)
 			mr.out.Lists = mr.out.Lists || name == "Playlist" || name == "PlaylistEntity"

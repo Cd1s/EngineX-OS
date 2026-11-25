@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path"
@@ -98,16 +99,24 @@ func openLibrary(ctx context.Context, p, mount string, bulk bool, newUUID string
 		db.Close()
 		return nil, err
 	}
-	if !bulk {
-		if err = l.migrateLegacyArtwork(ctx); err != nil {
-			db.Close()
-			return nil, err
-		}
-	}
 	return l, nil
 }
 
-func (l *Library) migrateLegacyArtwork(ctx context.Context) error {
+// MigrateLegacyArtwork migrates legacy text artwork hashes and restores their content-addressed
+// files. It stops cleanly when budget expires, leaving unprocessed text rows for a later adoption.
+func (l *Library) MigrateLegacyArtwork(ctx context.Context, budget time.Duration) error {
+	if l.bulk {
+		return nil
+	}
+	if budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
+	artDir, err := compat.SafeOutputDir(l.mount, artworkDir)
+	if err != nil {
+		return err
+	}
 	rows, err := l.db.QueryContext(ctx, `SELECT id,hash FROM AlbumArt WHERE typeof(hash)='text'`)
 	if err != nil {
 		return err
@@ -137,13 +146,26 @@ func (l *Library) migrateLegacyArtwork(ctx context.Context) error {
 	}
 	defer tx.Rollback()
 	for _, v := range pending {
-		hash, e := hex.DecodeString(v.hash)
-		if e != nil || len(hash) != sha1.Size {
-			continue
+		if err := ctx.Err(); err != nil {
+			return nil
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE AlbumArt SET hash=? WHERE id=?`, hash, v.id); err != nil {
+		var image []byte
+		if err = tx.QueryRowContext(ctx, `SELECT albumArt FROM AlbumArt WHERE id=?`, v.id).Scan(&image); err != nil {
 			return err
 		}
+		if len(image) == 0 {
+			continue
+		}
+		sum := sha1.Sum(image)
+		if err = putArtwork(artDir, sum[:], image); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE AlbumArt SET hash=? WHERE id=? AND typeof(hash)='text'`, sum[:], v.id); err != nil {
+			return err
+		}
+	}
+	if !l.bulk && OpenElsewhere(l.path) != 0 {
+		return ErrLibraryInUse
 	}
 	return tx.Commit()
 }
@@ -203,6 +225,16 @@ func (l *Library) Close() error { return l.db.Close() }
 func (l *Library) Counts(ctx context.Context) (tracks, lists int, err error) {
 	err = l.db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM Track),(SELECT count(*) FROM Playlist)`).Scan(&tracks, &lists)
 	return tracks, lists, err
+}
+
+// HasTrackSequence reports whether Engine has issued a Track ID in this library.
+func (l *Library) HasTrackSequence(ctx context.Context) (bool, error) {
+	var seq sql.NullInt64
+	err := l.db.QueryRowContext(ctx, `SELECT seq FROM sqlite_sequence WHERE name='Track'`).Scan(&seq)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return seq.Valid && seq.Int64 > 0, err
 }
 
 type Batch struct {
@@ -720,13 +752,70 @@ func (b *Batch) DeleteList(ctx context.Context, id int64, owned func(int64) bool
 
 // PerfPrev is what the snapshot knows of a row before staged data is applied.
 type PerfPrev struct {
-	State      rbstate.PerfState
-	Written    []byte // the digest of what the bridge last wrote, nil for a row only the export filled
-	FastKnown  bool
-	FastRating int64
-	FastCues   []byte
-	FastLoops  []byte
-	FastActive uint32
+	State        rbstate.PerfState
+	Written      []byte // the digest of what the bridge last wrote, nil for a row only the export filled
+	BridgeFilled bool
+	FastKnown    bool
+	FastRating   int64
+	FastCues     []byte
+	FastLoops    []byte
+	FastActive   uint32
+}
+
+func adjustedMainCue(cues []byte) bool {
+	raw, err := QUncompress(cues, 64<<10)
+	if err != nil {
+		return false
+	}
+	at, ok := cuePositions(raw)
+	return ok && raw[at[8]+8] != 0
+}
+
+func mainCuePosition(cues []byte) (float64, bool) {
+	raw, err := QUncompress(cues, 64<<10)
+	if err != nil {
+		return 0, false
+	}
+	at, ok := cuePositions(raw)
+	if !ok {
+		return 0, false
+	}
+	return math.Float64frombits(big.Uint64(raw[at[8]:])), true
+}
+
+func sameMainCueTail(a, b []byte) bool {
+	ra, ea := QUncompress(a, 64<<10)
+	rb, eb := QUncompress(b, 64<<10)
+	if ea != nil || eb != nil {
+		return false
+	}
+	aa, oka := cuePositions(ra)
+	ab, okb := cuePositions(rb)
+	return oka && okb && bytes.Equal(ra[aa[8]:aa[8]+8], rb[ab[8]:ab[8]+8])
+}
+
+func asWritten(cues, staged []byte) []byte {
+	raw, err := QUncompress(cues, 64<<10)
+	if err != nil {
+		return cues
+	}
+	at, ok := cuePositions(raw)
+	if !ok || raw[at[8]+8] != 0 {
+		return cues
+	}
+	ref, err := QUncompress(staged, 64<<10)
+	if err != nil {
+		return cues
+	}
+	rat, ok := cuePositions(ref)
+	if !ok || bytes.Equal(raw[at[8]:], ref[rat[8]:]) {
+		return cues
+	}
+	copy(raw[at[8]:], ref[rat[8]:])
+	if out, err := QCompress(raw); err == nil {
+		return out
+	}
+	return cues
 }
 
 // ApplyPerformance writes a track's staged data unless the deck changed the row since the bridge
@@ -758,8 +847,16 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 	same := bytes.Equal(row.beats, p.Beats) && bytes.Equal(row.cues, p.QuickCues) && bytes.Equal(row.loops, p.Loops)
 	var have []byte
 	if !same && (prev.Written != nil || row.beats != nil) {
+		rawHave := RawWrittenDigest(row.beats, row.cues, row.loops)
 		have = WrittenDigest(row.beats, row.cues, row.loops)
+		if prev.Written != nil && bytes.Equal(rawHave, prev.Written) {
+			have = rawHave
+		}
 		same = bytes.Equal(have, staged)
+		if !same && !bytes.Equal(have, prev.Written) {
+			have = WrittenDigest(row.beats, asWritten(row.cues, p.QuickCues), row.loops)
+			same = bytes.Equal(have, staged)
+		}
 	}
 	bpm := f.BPM
 	if bpm == 0 {
@@ -776,6 +873,19 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 			AND fileBytes IS (CASE WHEN ?3>0 THEN ?3 ELSE fileBytes END) AND (?4 OR (bpm IS ?5 AND bpmAnalyzed IS ?6)) AND isAnalyzed IS ?7)`,
 			int(f.Duration+0.5), f.Bitrate, f.FileBytes, keepGrid, int(bpm+0.5), bpm, p.Complete, id)
 		return e
+	}
+	if prev.BridgeFilled {
+		main, hasMain := mainCuePosition(row.cues)
+		if adjustedMainCue(row.cues) && (!hasMain || main >= 0) && !sameMainCueTail(row.cues, p.QuickCues) {
+			prev.BridgeFilled = false
+			prev.State = rbstate.PerfDeck
+		} else {
+			if _, err = b.exec(ctx, `UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,beatData=?,quickCues=?,loops=?,activeOnLoadLoops=?,thirdPartySourceId=NULL WHERE trackId=?`,
+				p.TrackData, p.Overview, p.Beats, p.QuickCues, p.Loops, p.ActiveLoops, id); err != nil {
+				return nil, 0, err
+			}
+			return staged, PerfWritten, facts(false)
+		}
 	}
 	switch {
 	case same && prev.State != rbstate.PerfDeck:
@@ -801,6 +911,15 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 			return nil, 0, err
 		}
 		return staged, PerfWritten, facts(false)
+	}
+	if prev.State == rbstate.PerfNone && prev.Written == nil && bytes.Equal(row.beats, p.Beats) && bytes.Equal(row.loops, p.Loops) {
+		if main, ok := mainCuePosition(row.cues); ok && main < 0 {
+			if _, err = b.exec(ctx, `UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,beatData=?,quickCues=?,loops=?,activeOnLoadLoops=?,thirdPartySourceId=NULL WHERE trackId=?`,
+				p.TrackData, p.Overview, p.Beats, p.QuickCues, p.Loops, p.ActiveLoops, id); err != nil {
+				return nil, 0, err
+			}
+			return staged, PerfWritten, facts(false)
+		}
 	}
 	// A row the export alone filled: rekordbox's analysis, with what the DJ did on it meanwhile.
 	base := fastBaseOf(export)
