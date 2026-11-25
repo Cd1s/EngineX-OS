@@ -67,13 +67,18 @@ func LibraryState(file string) string {
 	return state
 }
 
+const mirrorFlushBytes = 2 << 20 // cap dirty page cache during fresh mirror to <= 2 MiB
+
 type mirroring struct {
-	ctx      context.Context
-	db       *sql.DB
-	m        *Mirror
-	pace     func(took time.Duration) error
-	out      MirrorChange
-	triggers bool // the next library has Engine's triggers: they go before its first row is written
+	ctx        context.Context
+	db         *sql.DB
+	m          *Mirror
+	pace       func(took time.Duration) error
+	out        MirrorChange
+	triggers   bool // the next library has Engine's triggers: they go before its first row is written
+	nextPath   string
+	fresh      bool
+	syncedSize int64
 }
 
 // MirrorLibrary brings the file next up to the library live: rows of the live library that are new or
@@ -81,6 +86,11 @@ type mirroring struct {
 // removed. With an empty m the next library is made. pace is called after every statement with
 // the time it took (the job's pacing, and its stop).
 func MirrorLibrary(ctx context.Context, live, next string, m *Mirror, pace func(took time.Duration) error) (MirrorChange, error) {
+	if pace != nil {
+		if err := pace(0); err != nil {
+			return MirrorChange{}, err
+		}
+	}
 	state := LibraryState(live)
 	fresh := m.Tracks == nil
 	dsn := (&url.URL{Scheme: "file", Path: next}).String() + "?_pragma=busy_timeout(5000)"
@@ -112,7 +122,7 @@ func MirrorLibrary(ctx context.Context, live, next string, m *Mirror, pace func(
 	if _, err = db.ExecContext(ctx, `ATTACH DATABASE ? AS live`, (&url.URL{Scheme: "file", Path: live, RawQuery: "mode=ro"}).String()); err != nil {
 		return MirrorChange{}, err
 	}
-	mr := &mirroring{ctx: ctx, db: db, m: m, pace: pace, triggers: !fresh}
+	mr := &mirroring{ctx: ctx, db: db, m: m, pace: pace, triggers: !fresh, nextPath: next, fresh: fresh}
 	if fresh {
 		err = mr.objects(`type='table'`)
 	}
@@ -141,7 +151,19 @@ func MirrorLibrary(ctx context.Context, live, next string, m *Mirror, pace func(
 	}
 	if err == nil {
 		if err = db.Close(); err == nil && fresh {
-			err = syncFilePath(next)
+			if pace != nil {
+				err = pace(0)
+			}
+			if err == nil {
+				err = syncFilePath(next)
+			}
+		}
+	} else {
+		_ = db.Close()
+	}
+	if err != nil && fresh {
+		for _, suffix := range []string{"", "-journal"} {
+			_ = os.Remove(next + suffix)
 		}
 	}
 	if err == nil {
@@ -151,6 +173,11 @@ func MirrorLibrary(ctx context.Context, live, next string, m *Mirror, pace func(
 }
 
 func (mr *mirroring) exec(q string, args ...any) error {
+	if mr.pace != nil {
+		if err := mr.pace(0); err != nil {
+			return err
+		}
+	}
 	start := time.Now()
 	if _, err := mr.db.ExecContext(mr.ctx, q, args...); err != nil {
 		if strings.Contains(err.Error(), "constraint failed") {
@@ -234,6 +261,22 @@ func (mr *mirroring) transaction(do func() error) error {
 		}
 		if err != nil {
 			_, _ = mr.db.ExecContext(context.WithoutCancel(mr.ctx), `ROLLBACK`)
+		}
+	}
+	if err == nil && mr.fresh && mr.nextPath != "" {
+		if st, serr := os.Stat(mr.nextPath); serr == nil && st.Size()-mr.syncedSize >= mirrorFlushBytes {
+			if mr.pace != nil {
+				err = mr.pace(0)
+			}
+			if err == nil {
+				s0 := time.Now()
+				if err = syncFilePath(mr.nextPath); err == nil {
+					mr.syncedSize = st.Size()
+					if mr.pace != nil {
+						err = mr.pace(time.Since(s0))
+					}
+				}
+			}
 		}
 	}
 	return err

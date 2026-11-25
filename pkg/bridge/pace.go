@@ -107,6 +107,37 @@ func newPacer(ctx context.Context) *pacer {
 	}
 }
 
+func (p *pacer) isBusy() bool {
+	if p == nil {
+		return false
+	}
+	return p.active() || (p.loading != nil && p.loading())
+}
+
+// waitIdle blocks while any deck is playing, cueing, scratching, or loading a track.
+// Used to defer whole-DB writes (.rb-next.db copy and fsync) until the deck is idle.
+func (p *pacer) waitIdle() error {
+	if p == nil {
+		return nil
+	}
+	if err := p.ctx.Err(); err != nil {
+		return err
+	}
+	if !p.isBusy() {
+		return nil
+	}
+	t := time.NewTicker(loadingPollGap)
+	defer t.Stop()
+	for p.isBusy() {
+		select {
+		case <-p.ctx.Done():
+			return p.ctx.Err()
+		case <-t.C:
+		}
+	}
+	return p.ctx.Err()
+}
+
 // waitNotLoading blocks while any deck is loading a track, performing zero stick I/O until loading
 // clears or ctx ends.
 func (p *pacer) waitNotLoading() error {

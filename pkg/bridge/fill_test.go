@@ -912,3 +912,116 @@ func TestIsEngineCopyingHaltsFill(t *testing.T) {
 		t.Fatal("closed fd should clear IsEngineCopying")
 	}
 }
+
+// Finding 4.2: FillInBackground must never copy a full m.db (.rb-next.db) or run a whole-file
+// fsync onto the USB stick while any deck is active; it starts next.build only when no deck is
+// active and lets existing sticks keep staging to /data while deferring .rb-next.db until idle.
+func TestFillDefersNextLibraryCopyWhileDeckPlaying(t *testing.T) {
+	t.Run("first_insert_waits_for_idle", func(t *testing.T) {
+		defer SetPriorityDirForTest(t.TempDir())()
+		base := t.TempDir()
+		t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+		mount := filepath.Join(base, "stick")
+		testfixture.LargeExport(t, mount, 40)
+
+		setDeck(t, true)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		type outcome struct {
+			res FillResult
+			err error
+		}
+		doneCh := make(chan outcome, 1)
+		go func() {
+			r, e := FillInBackground(ctx, mount, FillOptions{})
+			doneCh <- outcome{r, e}
+		}()
+
+		time.Sleep(180 * time.Millisecond)
+		select {
+		case out := <-doneCh:
+			t.Fatalf("FillInBackground finished while deck played: res=%+v err=%v", out.res, out.err)
+		default:
+		}
+		if _, err := os.Stat(filepath.Join(dbDirOf(mount), nextDB)); err == nil {
+			t.Fatal(".rb-next.db was written to the stick while a deck played")
+		}
+		if _, err := os.Stat(filepath.Join(dbDirOf(mount), rbstate.SwapName)); err == nil {
+			t.Fatal(".rb-next.swap was written to the stick while a deck played")
+		}
+
+		setDeck(t, false)
+		out := <-doneCh
+		if out.err != nil || !out.res.Publish {
+			t.Fatalf("after deck became idle: res=%+v err=%v", out.res, out.err)
+		}
+		if _, err := os.Stat(filepath.Join(dbDirOf(mount), nextDB)); err != nil {
+			t.Fatalf("expected .rb-next.db after idle: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(dbDirOf(mount), rbstate.SwapName)); err != nil {
+			t.Fatalf("expected .rb-next.swap after idle: %v", err)
+		}
+	})
+
+	t.Run("existing_stick_stages_on_data_and_defers_next_db_until_idle", func(t *testing.T) {
+		defer SetPriorityDirForTest(t.TempDir())()
+		oldGap, oldCache := playingReadGap, fromCache
+		playingReadGap, fromCache = 2*time.Millisecond, 0
+		defer func() { playingReadGap, fromCache = oldGap, oldCache }()
+
+		base := t.TempDir()
+		t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+		mount := filepath.Join(base, "stick")
+		testfixture.LargeExport(t, mount, 10)
+		mountNow(t, mount, MountOptions{})
+
+		// Re-export with 15 more tracks so Diff(view, snap).structural() is true.
+		testfixture.LargeExport(t, mount, 25)
+		later := time.Now().Add(time.Hour)
+		_ = os.Chtimes(filepath.Join(mount, "PIONEER/rekordbox/export.pdb"), later, later)
+
+		setDeck(t, true)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		var stagedProgress atomic.Int32
+		type outcome struct {
+			res FillResult
+			err error
+		}
+		doneCh := make(chan outcome, 1)
+		go func() {
+			r, e := FillInBackground(ctx, mount, FillOptions{
+				Progress: func(done, _ int) { stagedProgress.Store(int32(done)) },
+			})
+			doneCh <- outcome{r, e}
+		}()
+
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) && stagedProgress.Load() == 0 {
+			time.Sleep(15 * time.Millisecond)
+		}
+		time.Sleep(150 * time.Millisecond)
+		select {
+		case out := <-doneCh:
+			t.Fatalf("FillInBackground finished next.build while deck played: res=%+v err=%v", out.res, out.err)
+		default:
+		}
+		if stagedProgress.Load() == 0 {
+			t.Fatal("staging to /data did not run while deck played")
+		}
+		if _, err := os.Stat(filepath.Join(dbDirOf(mount), nextDB)); err == nil {
+			t.Fatal(".rb-next.db was written to the stick while a deck played")
+		}
+
+		setDeck(t, false)
+		out := <-doneCh
+		if out.err != nil || !out.res.Publish {
+			t.Fatalf("after deck became idle: res=%+v err=%v", out.res, out.err)
+		}
+		if _, err := os.Stat(filepath.Join(dbDirOf(mount), nextDB)); err != nil {
+			t.Fatalf("expected .rb-next.db after idle: %v", err)
+		}
+	})
+}

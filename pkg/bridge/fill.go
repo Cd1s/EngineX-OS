@@ -143,19 +143,45 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	}
 	read := time.Now()
 	next := &nextBuild{ctx: ctx, mount: mount, dir: dbDir, view: view.view, live: snap,
-		pace: func(took time.Duration) error { return pace.afterStat(pace.active(), took) }}
+		pace: func(took time.Duration) error { return pace.afterStat(pace.active(), took) },
+		busy: pace.isBusy}
+	buildNextWhenIdle := func(drop, ready bool) error {
+		for {
+			if err := pace.waitIdle(); err != nil {
+				return err
+			}
+			err := next.build(drop, ready)
+			if !errors.Is(err, errDeckBusy) {
+				return err
+			}
+			log.Printf("rb-bridge: deck became active while building next library for %s; pausing until idle", mount)
+		}
+	}
+	rowsDeferred := false
 	// Rows and lists a window left to the job come first, with what is staged already: they are
 	// what the DJ browses. The performance data follows in the job the swap's window starts.
 	if rows := snap == nil || view.view != nil && Diff(view.view, snap).structural(); rows && view.view != nil && o.Stage == nil {
-		if err = next.build(false, true); err == nil {
+		if snap == nil {
+			err = buildNextWhenIdle(false, true)
+		} else if pace.isBusy() {
+			err = errDeckBusy
+		} else {
+			err = next.build(false, true)
+		}
+		if err == nil {
 			res.Publish = next.ask()
 			log.Printf("rb-bridge: rows and lists of %s are in the next library (exports read in %s); publish=%v", mount, read.Sub(loaded).Round(time.Millisecond), res.Publish)
 			return res, nil
 		}
-		if snap == nil || !errors.Is(err, errNoNext) {
-			return res, err
+		if snap != nil && errors.Is(err, errDeckBusy) {
+			rowsDeferred = true
+			log.Printf("rb-bridge: deck active on %s; staging tracks to /data before building next library", mount)
+		} else {
+			if snap == nil || !errors.Is(err, errNoNext) {
+				return res, err
+			}
+			log.Printf("rb-bridge: %v; rows and lists wait for the windows", err)
 		}
-		log.Printf("rb-bridge: %v; rows and lists wait for the windows", err)
 	}
 	if snap == nil {
 		return res, fmt.Errorf("snapshot: %w", rbstate.ErrNoSnapshot)
@@ -238,10 +264,13 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		// is closed first, or the lines of every later track would go to the file that is gone.
 		e := stage.Close()
 		if e == nil {
-			e = next.build(true, false)
+			e = buildNextWhenIdle(true, false)
 		}
 		if e != nil {
 			log.Printf("rb-bridge: %v", e)
+			if ctx.Err() != nil {
+				err = e
+			}
 			break
 		}
 		if f.inNext, err = rbstate.Load(nextState(snap.LibraryUUID)); err == nil {
@@ -283,13 +312,13 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		}
 		// (Only when there is something to publish: reading a 50,000-track export alone is more than
 		// a window has, and the job made a next library and asked for a remount after every swap.)
-		if e := errNoNext; ahead.staged+ahead.updates+parked > 0 && view.view != nil && o.Stage == nil && (parked > 0 || ahead.cost() > hookWindow-spare) {
-			if e = next.build(false, true); e == nil {
+		if e := errNoNext; (rowsDeferred || ahead.staged+ahead.updates+parked > 0) && view.view != nil && o.Stage == nil && (rowsDeferred || parked > 0 || ahead.cost() > hookWindow-spare) {
+			if e = buildNextWhenIdle(false, true); e == nil {
 				res.Publish = next.ask()
 			} else if !errors.Is(e, errNoNext) && err == nil {
 				err = e
 			}
-			if e != nil {
+			if e != nil && ctx.Err() == nil {
 				log.Printf("rb-bridge: %v; the staged data is published in place, a window at a time", e)
 			}
 		}

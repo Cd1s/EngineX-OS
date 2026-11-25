@@ -258,3 +258,39 @@ func TestMirrorLibraryLaysTrackRowsTogether(t *testing.T) {
 		t.Fatalf("the Track table's %d leaf pages lie over %d pages of the file; want them together", pages, span)
 	}
 }
+
+// Finding 4.2: MirrorLibrary must abort before writing or syncing when pace signals a busy deck,
+// and remove any incomplete fresh .rb-next.db so dirty page-cache pages are discarded without fsync.
+func TestMirrorLibraryAbortsBeforeSQLAndCleansFreshOnBusyPace(t *testing.T) {
+	dir := mirrorLive(t, 40)
+	live, next := filepath.Join(dir, "m.db"), filepath.Join(dir, ".rb-next.db")
+	errBusy := errors.New("deck active")
+
+	var m Mirror
+	_, err := MirrorLibrary(context.Background(), live, next, &m, func(time.Duration) error {
+		return errBusy
+	})
+	if !errors.Is(err, errBusy) {
+		t.Fatalf("immediate busy pace: err=%v, want %v", err, errBusy)
+	}
+	if _, statErr := os.Stat(next); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("fresh .rb-next.db left behind after immediate busy abort: statErr=%v", statErr)
+	}
+
+	// Allow two pace checks, then simulate playback starting mid-mirror.
+	var m2 Mirror
+	calls := 0
+	_, err = MirrorLibrary(context.Background(), live, next, &m2, func(time.Duration) error {
+		calls++
+		if calls > 2 {
+			return errBusy
+		}
+		return nil
+	})
+	if !errors.Is(err, errBusy) {
+		t.Fatalf("mid-mirror busy pace: err=%v, want %v", err, errBusy)
+	}
+	if _, statErr := os.Stat(next); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("partial fresh .rb-next.db left behind after mid-mirror busy abort: statErr=%v", statErr)
+	}
+}

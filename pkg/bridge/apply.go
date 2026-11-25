@@ -270,6 +270,11 @@ func (w *window) noteSync(b *enginedb.Batch, t *rbstate.Track, written bool) err
 
 // commit saves the next snapshot, runs the commit and promotes the snapshot (design section 5).
 func (w *window) commit(id int64, do func() error) error {
+	if w.rest != nil {
+		if err := w.rest(0); err != nil {
+			return err
+		}
+	}
 	t := time.Now()
 	w.count()
 	w.snap.Applied, w.snap.Commit = t.Unix(), id
@@ -351,6 +356,11 @@ func (w *window) count() {
 // build makes a stick's first library on the deck's disk from the export alone, and puts it on
 // the stick with one rename (design 1.1 rule 1).
 func (w *window) build() error {
+	if w.rest != nil {
+		if err := w.rest(0); err != nil {
+			return err
+		}
+	}
 	stage, err := rbstate.StageRoot()
 	if err != nil {
 		return err
@@ -378,7 +388,16 @@ func (w *window) build() error {
 	}
 	w.snap.LibraryUUID = uuid
 	w.st.done("build", "%d rows, %d lists, on the deck's disk", len(ids), len(w.snap.Lists))
-	if err = w.commit(commitID, func() error { return rbstate.InstallFile(filepath.Join(tmp, "m.db"), w.file()) }); err != nil {
+	install := func() error {
+		src := filepath.Join(tmp, "m.db")
+		if w.rest != nil {
+			return rbstate.InstallFilePaced(src, w.file(), playingReadChunk, 2<<20, func(_ int, took time.Duration) error {
+				return w.rest(took)
+			})
+		}
+		return rbstate.InstallFile(src, w.file())
+	}
+	if err = w.commit(commitID, install); err != nil {
 		return err
 	}
 	w.st.done("install", "library copied to the stick")
@@ -568,8 +587,14 @@ func (w *window) apply(p *Plan) error {
 		return err
 	}
 	w.res.PlaylistsChanged = len(p.PutLists)+len(p.RemoveLists) > 0
+	listBegan := time.Now()
 	if err = w.commitBatch(b); err != nil {
 		return err
+	}
+	if w.rest != nil {
+		if err = w.rest(time.Since(listBegan)); err != nil {
+			return err
+		}
 	}
 	w.st.done("lists", "%d written, %d removed; committed", len(p.PutLists), len(p.RemoveLists))
 	return w.updateRows(p.UpdateTracks)
@@ -580,6 +605,11 @@ func (w *window) apply(p *Plan) error {
 func (w *window) inBatches(n, size int, ok func(i int) bool, each func(b *enginedb.Batch, i int) error, committed func(done int) error) (int, error) {
 	i := 0
 	for i < n && ok(i) {
+		if w.rest != nil {
+			if err := w.rest(0); err != nil {
+				return i, err
+			}
+		}
 		b, err := w.lib.Begin(w.ctx)
 		if err != nil {
 			return i, err
@@ -818,11 +848,14 @@ func (w *window) relist(back map[string]bool) error {
 	if err != nil {
 		return err
 	}
+	began := time.Now()
 	if err = w.putLists(b, idx); err == nil {
 		err = w.commitBatch(b)
 	}
 	if err != nil {
 		b.Rollback()
+	} else if w.rest != nil {
+		err = w.rest(time.Since(began))
 	}
 	return err
 }

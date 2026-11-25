@@ -142,6 +142,10 @@ func takeLive(s, base *rbstate.Snapshot, ch enginedb.MirrorChange) {
 	}
 }
 
+// errDeckBusy: a deck is playing or loading; whole-DB writes (.rb-next.db copy/fsync)
+// wait until no deck is active and abort immediately if playback starts mid-build.
+var errDeckBusy = errors.New("deck active")
+
 // nextBuild is the job's work on the next library.
 type nextBuild struct {
 	ctx      context.Context
@@ -150,13 +154,37 @@ type nextBuild struct {
 	view     *View                     // the exports, as a window reads them
 	live     *rbstate.Snapshot         // the stick's snapshot, nil without one
 	pace     func(time.Duration) error // after each statement and commit, with the time it took
+	busy     func() bool               // true while any deck is playing, cueing, scratching, or loading
 	progress func(done, total int)
+}
+
+func (n *nextBuild) isBusy() bool {
+	if n.busy != nil {
+		return n.busy()
+	}
+	return IsDeckActive() || IsDeckLoading() || IsEngineCopying()
+}
+
+func (n *nextBuild) nextPace(took time.Duration) error {
+	if err := n.ctx.Err(); err != nil {
+		return err
+	}
+	if n.isBusy() {
+		return errDeckBusy
+	}
+	if n.pace != nil {
+		return n.pace(took)
+	}
+	return nil
 }
 
 // build brings the next library up to the view and to the stick's library: its rows, lists and
 // the staged data, as a window would write them, with no window's limits. drop: applied records
 // leave the stage (it is full). ready: the swap snapshot is written, a remount can swap it in.
 func (n *nextBuild) build(drop, ready bool) error {
+	if n.isBusy() {
+		return errDeckBusy
+	}
 	if _, err := rbstate.StageRoot(); err != nil {
 		return fmt.Errorf("%w: %v", errNoNext, err)
 	}
@@ -178,7 +206,7 @@ func (n *nextBuild) build(drop, ready bool) error {
 			return err
 		}
 		w := &window{ctx: n.ctx, mount: n.mount, dir: n.dir, view: n.view, st: newSteps(MountOptions{Full: true}),
-			o: MountOptions{Full: true, Progress: n.progress}, res: &res, next: true, keep: !drop, rest: n.pace}
+			o: MountOptions{Full: true, Progress: n.progress}, res: &res, next: true, keep: !drop, rest: n.nextPace}
 		uuid, commit := nextIdentity(n.ctx, n.mount, next)
 		if _, old := os.Stat(filepath.Join(n.dir, oldStateName)); content || old == nil {
 			err = n.mirror(live, next, liveUUID, uuid, commit)
@@ -208,6 +236,9 @@ func (n *nextBuild) build(drop, ready bool) error {
 	if !ready {
 		return nil
 	}
+	if n.isBusy() {
+		return errDeckBusy
+	}
 	snap.Base = state
 	return snap.SaveAs(swap)
 }
@@ -235,7 +266,7 @@ func (n *nextBuild) mirror(live, next, liveUUID, uuid string, commit int64) erro
 	if err := os.MkdirAll(filepath.Join(sdir, "base"), 0o700); err != nil {
 		return err
 	}
-	ch, err := enginedb.MirrorLibrary(n.ctx, live, next, &m, n.pace)
+	ch, err := enginedb.MirrorLibrary(n.ctx, live, next, &m, n.nextPace)
 	if errors.Is(err, enginedb.ErrMirrorConflict) {
 		log.Printf("rb-bridge: %v; the next library is made again", err)
 		discardNext(n.dir, liveUUID)
