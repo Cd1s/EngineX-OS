@@ -47,171 +47,49 @@ func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
 	if _, err := r.ReadAt(tables, 28); err != nil {
 		return nil, err
 	}
-	l := &Library{Artwork: map[uint32]string{}, Keys: map[uint32]string{}}
-	type row struct {
-		typ  uint32
-		data []byte
+	trackCapacity := int(size / 400)
+	if trackCapacity < 16 {
+		trackCapacity = 16
 	}
-	var rows []row
-	seen := map[uint32]bool{}
-	p := make([]byte, ps)
-	for ti := 0; ti < nt; ti++ {
-		t := tables[ti*16:]
-		typ, first, last := le.Uint32(t), le.Uint32(t[8:]), le.Uint32(t[12:])
-		for n := first; n != 0; {
-			if seen[n] || int64(n) >= size/int64(ps) {
-				return nil, fmt.Errorf("pdb: invalid/cyclic page %d", n)
-			}
-			seen[n] = true
-			if _, err := r.ReadAt(p, int64(n)*int64(ps)); err != nil {
-				return nil, err
-			}
-			if le.Uint32(p[4:]) != n || le.Uint32(p[8:]) != typ {
-				return nil, fmt.Errorf("pdb: page %d type/index mismatch", n)
-			}
-			if p[27]&0x40 == 0 {
-				count := int(le.Uint32(p[24:]) & 0x1fff)
-				// A full row group takes 36 bytes. The last one, if partial, only
-				// has its flags and the offsets it uses.
-				indexBytes := (count / 16) * 36
-				if rem := count % 16; rem != 0 {
-					indexBytes += 4 + 2*rem
-				}
-				heapEnd := ps - indexBytes
-				if heapEnd < 40 {
-					return nil, fmt.Errorf("pdb: row index overlaps header")
-				}
-				// Inactive offsets are stale and may alias a reused live allocation.
-				// Never inspect them, including for row-boundary calculations.
-				type ref struct {
-					off  int
-					live bool
-				}
-				var refs []ref
-				for i := 0; i < count; i++ {
-					base := ps - (i/16)*36
-					off := 40 + int(le.Uint16(p[base-6-2*(i%16):]))
-					live := le.Uint16(p[base-4:])&(1<<uint(i%16)) != 0
-					if !live {
-						continue
-					}
-					if off < 40 || off >= heapEnd {
-						if live {
-							return nil, fmt.Errorf("pdb: row outside heap")
-						}
-						continue
-					}
-					refs = append(refs, ref{off, live})
-				}
-				sort.Slice(refs, func(i, j int) bool { return refs[i].off < refs[j].off })
-				for i, rf := range refs {
-					if !rf.live {
-						continue
-					}
-					end := heapEnd
-					if i+1 < len(refs) {
-						end = refs[i+1].off
-					}
-					if end <= rf.off {
-						return nil, fmt.Errorf("pdb: overlapping row")
-					}
-					rows = append(rows, row{typ, append([]byte(nil), p[rf.off:end]...)})
-				}
-			}
-			if n == last {
-				break
-			}
-			n = le.Uint32(p[12:])
-			if n == 0 {
-				return nil, fmt.Errorf("pdb: page chain ends before last page")
-			}
-		}
+	l := &Library{Tracks: make([]Track, 0, trackCapacity), Artwork: map[uint32]string{}, Keys: map[uint32]string{}}
+
+	type trackRow struct {
+		recordHash                         string
+		trackID, artistID, composerID      uint32
+		artworkID, keyID, genreID          uint32
+		albumID, labelID, remixerID        uint32
+		sampleRate, fileSize, bitrate      uint32
+		bpmRaw                             uint32
+		year                               uint16
+		bitDepth, duration                 uint16
+		rating                             byte
+		analysisPath, comment, title, path string
 	}
-	artists, albums, genres, labels := map[uint32]string{}, map[uint32]string{}, map[uint32]string{}, map[uint32]string{}
-	for _, r := range rows {
-		b := r.data
-		var id uint32
-		var name string
-		var err error
-		switch r.typ {
-		case 1, 4, 5, 13:
-			if len(b) < 5 {
-				return nil, fmt.Errorf("pdb: short lookup row")
-			}
-			id = le.Uint32(b)
-			off := 4
-			if r.typ == 5 {
-				off = 8
-			}
-			name, err = readDeviceSQLString(b, off)
-		case 2:
-			if len(b) < 10 {
-				return nil, fmt.Errorf("pdb: short artist row")
-			}
-			id = le.Uint32(b[4:])
-			off := int(b[9])
-			if le.Uint16(b)&4 != 0 {
-				if len(b) < 12 {
-					return nil, fmt.Errorf("pdb: short far artist")
-				}
-				off = int(le.Uint16(b[10:]))
-			}
-			name, err = readDeviceSQLString(b, off)
-		case 3:
-			if len(b) < 22 {
-				return nil, fmt.Errorf("pdb: short album row")
-			}
-			id = le.Uint32(b[12:])
-			off := int(b[21])
-			if le.Uint16(b)&4 != 0 {
-				if len(b) < 24 {
-					return nil, fmt.Errorf("pdb: short far album")
-				}
-				off = int(le.Uint16(b[22:]))
-			}
-			name, err = readDeviceSQLString(b, off)
-		case 16:
-			l.Columns = append(l.Columns, b)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("pdb lookup %d: %w", r.typ, err)
-		}
-		switch r.typ {
-		case 1:
-			genres[id] = name
-		case 2:
-			artists[id] = name
-		case 3:
-			albums[id] = name
-		case 4:
-			labels[id] = name
-		case 5:
-			l.Keys[id] = name
-		case 13:
-			l.Artwork[id] = name
-		}
-	}
+	tracks := make([]trackRow, 0, trackCapacity)
 	type entry struct{ index, track uint32 }
 	entries := map[uint32][]entry{}
-	for _, r := range rows {
-		b := r.data
-		switch r.typ {
+	artists, albums, genres, labels := map[uint32]string{}, map[uint32]string{}, map[uint32]string{}, map[uint32]string{}
+	seen := map[uint32]bool{}
+	p := make([]byte, ps)
+
+	processRow := func(typ uint32, b []byte) error {
+		switch typ {
 		case 0:
 			if len(b) < 136 {
-				return nil, fmt.Errorf("pdb: short track row")
+				return fmt.Errorf("pdb: short track row")
 			}
 			var ss [21]string
 			for _, i := range []int{14, 16, 17, 20} {
 				off := int(le.Uint16(b[94+2*i:]))
 				s, err := readDeviceSQLString(b, off)
 				if err != nil {
-					return nil, fmt.Errorf("pdb track string %d: %w", i, err)
+					return fmt.Errorf("pdb track string %d: %w", i, err)
 				}
 				ss[i] = s
 			}
 			trackID := le.Uint32(b[72:])
 			if trackID == 0 || ss[20] == "" {
-				continue
+				return nil
 			}
 			// Row offsets do not encode sizes and the heap may have deleted holes.
 			// Hash through the last referenced string, excluding unrelated padding.
@@ -238,37 +116,181 @@ func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
 				}
 			}
 			hash := sha256.Sum256(b[:end])
-			bpmRaw := le.Uint32(b[56:])
-			var bpm float64
-			if bpmRaw != 0 && bpmRaw != 0x7fffffff && bpmRaw != 0xffffffff && bpmRaw <= 100000 {
-				bpm = float64(bpmRaw) / 100
+			tracks = append(tracks, trackRow{
+				recordHash:   hex.EncodeToString(hash[:]),
+				trackID:      trackID,
+				artistID:     le.Uint32(b[68:]),
+				composerID:   le.Uint32(b[12:]),
+				artworkID:    le.Uint32(b[28:]),
+				keyID:        le.Uint32(b[32:]),
+				genreID:      le.Uint32(b[60:]),
+				albumID:      le.Uint32(b[64:]),
+				remixerID:    le.Uint32(b[44:]),
+				labelID:      le.Uint32(b[40:]),
+				sampleRate:   le.Uint32(b[8:]),
+				fileSize:     le.Uint32(b[16:]),
+				bitrate:      le.Uint32(b[48:]),
+				bpmRaw:       le.Uint32(b[56:]),
+				year:         le.Uint16(b[80:]),
+				bitDepth:     le.Uint16(b[82:]),
+				duration:     le.Uint16(b[84:]),
+				rating:       b[89],
+				analysisPath: ss[14],
+				comment:      ss[16],
+				title:        ss[17],
+				path:         ss[20],
+			})
+		case 1, 4, 5, 13:
+			if len(b) < 5 {
+				return fmt.Errorf("pdb: short lookup row")
 			}
-			t := Track{ID: trackID, Path: ss[20], AnalysisPath: ss[14], Title: ss[17], Comment: ss[16], Artist: artists[le.Uint32(b[68:])], Album: albums[le.Uint32(b[64:])], Genre: genres[le.Uint32(b[60:])], Label: labels[le.Uint32(b[40:])], Composer: artists[le.Uint32(b[12:])], Remixer: artists[le.Uint32(b[44:])], Key: l.Keys[le.Uint32(b[32:])], ArtworkPath: l.Artwork[le.Uint32(b[28:])], SampleRate: int(le.Uint32(b[8:])), FileSize: int64(le.Uint32(b[16:])), Bitrate: int(le.Uint32(b[48:])), BPM: bpm, Year: int(le.Uint16(b[80:])), BitDepth: int(le.Uint16(b[82:])), Duration: float64(le.Uint16(b[84:])), Rating: int(b[89]), RecordHash: hex.EncodeToString(hash[:])}
-			normalizeParsedAudioMetadata(&t)
-			l.Tracks = append(l.Tracks, t)
+			id := le.Uint32(b)
+			off := 4
+			if typ == 5 {
+				off = 8
+			}
+			name, err := readDeviceSQLString(b, off)
+			if err != nil {
+				return fmt.Errorf("pdb lookup %d: %w", typ, err)
+			}
+			switch typ {
+			case 1:
+				genres[id] = name
+			case 4:
+				labels[id] = name
+			case 5:
+				l.Keys[id] = name
+			case 13:
+				l.Artwork[id] = name
+			}
+		case 2:
+			if len(b) < 10 {
+				return fmt.Errorf("pdb: short artist row")
+			}
+			id := le.Uint32(b[4:])
+			off := int(b[9])
+			if le.Uint16(b)&4 != 0 {
+				if len(b) < 12 {
+					return fmt.Errorf("pdb: short far artist")
+				}
+				off = int(le.Uint16(b[10:]))
+			}
+			name, err := readDeviceSQLString(b, off)
+			if err != nil {
+				return fmt.Errorf("pdb lookup %d: %w", typ, err)
+			}
+			artists[id] = name
+		case 3:
+			if len(b) < 22 {
+				return fmt.Errorf("pdb: short album row")
+			}
+			id := le.Uint32(b[12:])
+			off := int(b[21])
+			if le.Uint16(b)&4 != 0 {
+				if len(b) < 24 {
+					return fmt.Errorf("pdb: short far album")
+				}
+				off = int(le.Uint16(b[22:]))
+			}
+			name, err := readDeviceSQLString(b, off)
+			if err != nil {
+				return fmt.Errorf("pdb lookup %d: %w", typ, err)
+			}
+			albums[id] = name
 		case 7:
 			if len(b) < 21 {
-				return nil, fmt.Errorf("pdb: short playlist")
+				return fmt.Errorf("pdb: short playlist")
 			}
 			name, err := readDeviceSQLString(b, 20)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			l.Playlists = append(l.Playlists, Playlist{ID: le.Uint32(b[12:]), ParentID: le.Uint32(b), SortOrder: le.Uint32(b[8:]), Folder: le.Uint32(b[16:]) != 0, Name: name})
 		case 8:
 			if len(b) < 12 {
-				return nil, fmt.Errorf("pdb: short playlist entry")
+				return fmt.Errorf("pdb: short playlist entry")
 			}
 			id := le.Uint32(b[8:])
 			entries[id] = append(entries[id], entry{le.Uint32(b), le.Uint32(b[4:])})
+		case 16:
+			l.Columns = append(l.Columns, append([]byte(nil), b...))
 		}
+		return nil
+	}
+
+	for ti := 0; ti < nt; ti++ {
+		t := tables[ti*16:]
+		typ, first, last := le.Uint32(t), le.Uint32(t[8:]), le.Uint32(t[12:])
+		for n := first; n != 0; {
+			if seen[n] || int64(n) >= size/int64(ps) {
+				return nil, fmt.Errorf("pdb: invalid/cyclic page %d", n)
+			}
+			seen[n] = true
+			if _, err := r.ReadAt(p, int64(n)*int64(ps)); err != nil {
+				return nil, err
+			}
+			if le.Uint32(p[4:]) != n || le.Uint32(p[8:]) != typ {
+				return nil, fmt.Errorf("pdb: page %d type/index mismatch", n)
+			}
+			if p[27]&0x40 == 0 {
+				count := int(le.Uint32(p[24:]) & 0x1fff)
+				indexBytes := (count / 16) * 36
+				if rem := count % 16; rem != 0 {
+					indexBytes += 4 + 2*rem
+				}
+				heapEnd := ps - indexBytes
+				if heapEnd < 40 {
+					return nil, fmt.Errorf("pdb: row index overlaps header")
+				}
+				offsets := make([]int, 0, count)
+				for i := 0; i < count; i++ {
+					base := ps - (i/16)*36
+					off := 40 + int(le.Uint16(p[base-6-2*(i%16):]))
+					if le.Uint16(p[base-4:])&(1<<uint(i%16)) == 0 {
+						continue
+					}
+					if off < 40 || off >= heapEnd {
+						return nil, fmt.Errorf("pdb: row outside heap")
+					}
+					offsets = append(offsets, off)
+				}
+				sort.Ints(offsets)
+				for i, off := range offsets {
+					end := heapEnd
+					if i+1 < len(offsets) {
+						end = offsets[i+1]
+					}
+					if end <= off {
+						return nil, fmt.Errorf("pdb: overlapping row")
+					}
+					if err := processRow(typ, p[off:end]); err != nil {
+						return nil, err
+					}
+				}
+			}
+			if n == last {
+				break
+			}
+			n = le.Uint32(p[12:])
+			if n == 0 {
+				return nil, fmt.Errorf("pdb: page chain ends before last page")
+			}
+		}
+	}
+
+	knownTracks := make(map[uint32]bool, len(tracks))
+	for _, row := range tracks {
+		var bpm float64
+		if row.bpmRaw != 0 && row.bpmRaw != 0x7fffffff && row.bpmRaw != 0xffffffff && row.bpmRaw <= 100000 {
+			bpm = float64(row.bpmRaw) / 100
+		}
+		t := Track{ID: row.trackID, Path: row.path, AnalysisPath: row.analysisPath, Title: row.title, Comment: row.comment, Artist: artists[row.artistID], Album: albums[row.albumID], Genre: genres[row.genreID], Label: labels[row.labelID], Composer: artists[row.composerID], Remixer: artists[row.remixerID], Key: l.Keys[row.keyID], ArtworkPath: l.Artwork[row.artworkID], BPM: bpm, SampleRate: int(row.sampleRate), FileSize: int64(row.fileSize), Bitrate: int(row.bitrate), Year: int(row.year), BitDepth: int(row.bitDepth), Duration: float64(row.duration), Rating: int(row.rating), RecordHash: row.recordHash}
+		normalizeParsedAudioMetadata(&t)
+		l.Tracks = append(l.Tracks, t)
+		knownTracks[t.ID] = true
 	}
 	for i := range l.Tracks { // include lookup metadata in the incremental fingerprint
 		l.Tracks[i].RecordHash += ":" + RecordHash(l.Tracks[i])
-	}
-	knownTracks := make(map[uint32]bool, len(l.Tracks))
-	for _, tr := range l.Tracks {
-		knownTracks[tr.ID] = true
 	}
 	for i := range l.Playlists {
 		es := entries[l.Playlists[i].ID]
