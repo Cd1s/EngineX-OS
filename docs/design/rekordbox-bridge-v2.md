@@ -647,8 +647,10 @@ edits. The old state file is removed after the snapshot is saved.
    track of the stick, and looks at the decks again afterwards; the window then only renames. What Engine writes
    in the second or so between that pass and the remount is the window's to take: when that cannot end 3 s before
    the kill (above about 60,000 rows of all tables together) the window does not swap; the job takes the rows and
-   asks for the remount again. Not measured on a deck: whether Engine writes the library when the stick is taken
-   from it.
+   asks for the remount again. Engine itself writes nothing in that time: in the sandbox the real Engine (JP07,
+   5.3.0) wrote `m.db` once a session, when it opened the library (`Information.currentPlayedIndiciator`), not
+   while idle for a minute and not when the stick was removed; it let go of the stick 1.4 s after the remove
+   (report `rb-window-fable.md`, "Lane 6"). An Eject stops the helper's pass.
 7. **A big re-export cannot be browsed before its switch.** Engine shows the one library it opened at the mount and
    never sees another process's writes to it. The old library is on show at once; the new export's lists and
    tracks appear with the one remount that swaps the next library in (report `rb-window-fable.md`, "Proposal").
