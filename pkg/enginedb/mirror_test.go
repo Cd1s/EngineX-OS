@@ -294,3 +294,36 @@ func TestMirrorLibraryAbortsBeforeSQLAndCleansFreshOnBusyPace(t *testing.T) {
 		t.Fatalf("partial fresh .rb-next.db left behind after mid-mirror busy abort: statErr=%v", statErr)
 	}
 }
+
+// Finding 8: background fresh-mirror fsync step is raised to 16 MiB so a 4-6 MiB database does not
+// execute redundant mid-mirror fsync barriers while still bounding dirty cache on large libraries.
+func TestFix3_Finding8_MirrorFlushStep16MiB(t *testing.T) {
+	if mirrorFlushBytes < 8<<20 || mirrorFlushBytes > 16<<20 {
+		t.Fatalf("mirrorFlushBytes = %d, want in [8 MiB, 16 MiB]", mirrorFlushBytes)
+	}
+	dir := mirrorLive(t, 220)
+	live, next := filepath.Join(dir, "m.db"), filepath.Join(dir, ".rb-next.db")
+	// 220 tracks * 20 KiB ~= 4.4 MiB: >2 MiB (old step would fsync >=2 times mid-mirror) and <16 MiB (0 mid-mirror flushes).
+	mirrorExec(t, live, `UPDATE PerformanceData SET overviewWaveFormData=randomblob(20480)`)
+
+	midFlushes := 0
+	orig := syncMirrorFile
+	syncMirrorFile = func(p string) error {
+		midFlushes++
+		return orig(p)
+	}
+	defer func() { syncMirrorFile = orig }()
+
+	var m Mirror
+	if _, err := MirrorLibrary(context.Background(), live, next, &m, nil); err != nil {
+		t.Fatalf("MirrorLibrary: %v", err)
+	}
+	st, err := os.Stat(next)
+	if err != nil || st.Size() < 3<<20 {
+		t.Fatalf("unexpected mirrored size: st=%v err=%v", st, err)
+	}
+	if midFlushes != 0 {
+		t.Fatalf("expected 0 mid-mirror fsyncs for %.1f MiB db at %d MiB step, got %d",
+			float64(st.Size())/(1<<20), mirrorFlushBytes>>20, midFlushes)
+	}
+}

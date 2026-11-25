@@ -111,6 +111,7 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	if err := pace.waitNotLoading(); err != nil {
 		return res, err
 	}
+	cleanStaleSourceCopies()
 	r, err := compat.NewResolver(mount)
 	if err != nil {
 		return res, err
@@ -189,6 +190,9 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	if view.view != nil && snap.Stamp != view.stamp && o.Stage == nil {
 		// The window left the exports to the job and they change no row and no list: the snapshot
 		// takes their stamp, as that window would have given it, and the job compares every file.
+		if err = pace.waitNotLoading(); err != nil {
+			return res, err
+		}
 		if unlock, err = rbstate.LockVolume(mount, fillLockWait); err != nil {
 			return res, fmt.Errorf("volume lock: %w", err)
 		}

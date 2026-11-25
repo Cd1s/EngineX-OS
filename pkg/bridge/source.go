@@ -103,7 +103,96 @@ func ReadSources(ctx context.Context, r *compat.Resolver, mount string, files []
 	return readSourcesPaced(ctx, r, mount, files, keys, nil)
 }
 
+// cleanStaleSourceCopies removes any .rb-src-* temp files left in StageRoot by a killed background job.
+func cleanStaleSourceCopies() {
+	dir, err := rbstate.StageRoot()
+	if err != nil || dir == "" {
+		return
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, ".rb-src-*"))
+	for _, m := range matches {
+		if st, err := os.Lstat(m); err == nil && st.Mode().IsRegular() {
+			_ = os.Remove(m)
+		}
+	}
+}
+
+// checkExportSQLiteSidecars enforces the same clean-export check as pkg/rekordbox.ReadSQLite
+// directly against the source on the stick so uncheckpointed -journal or -wal sidecars are
+// always refused before any copy or read.
+func checkExportSQLiteSidecars(full string) error {
+	for _, suffix := range []string{"-wal", "-journal"} {
+		st, err := os.Lstat(full + suffix)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if err == nil && (!st.Mode().IsRegular() || st.Size() > 0) {
+			return fmt.Errorf("OneLibrary: requires checkpointed export; source sidecar %s is present", suffix)
+		}
+	}
+	return nil
+}
+
+type pacedReaderAt struct {
+	ctx  context.Context
+	f    *os.File
+	pace *pacer
+}
+
+func (r *pacedReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	total := 0
+	for total < len(p) {
+		if err := r.pace.waitNotLoading(); err != nil {
+			return total, err
+		}
+		if err := r.ctx.Err(); err != nil {
+			return total, err
+		}
+		end := min(total+playingReadChunk, len(p))
+		playing := r.pace != nil && r.pace.active()
+		t0 := time.Now()
+		n, err := r.f.ReadAt(p[total:end], off+int64(total))
+		took := time.Since(t0)
+		total += n
+		if n > 0 && playing {
+			if perr := r.pace.pause(n, took); perr != nil {
+				return total, perr
+			}
+		}
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+// readPDBPaced parses a PDB file directly in place on the stick without copying it to /data,
+// halting on SongLoading and pacing chunk reads while a deck plays.
+func readPDBPaced(ctx context.Context, full string, pace *pacer) (*rekordbox.Library, error) {
+	if err := pace.waitNotLoading(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f, err := os.Open(full)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	return rekordbox.ParsePDB(&pacedReaderAt{ctx: ctx, f: f, pace: pace}, st.Size())
+}
+
+var sourceCopyHook func(src string)
+
 func copyStickFilePaced(ctx context.Context, src string, pace *pacer) (dst *os.File, size int64, err error) {
+	if sourceCopyHook != nil {
+		sourceCopyHook(src)
+	}
 	if err = pace.waitNotLoading(); err != nil {
 		return nil, 0, err
 	}
@@ -183,16 +272,11 @@ func readSourcesPaced(ctx context.Context, r *compat.Resolver, mount string, fil
 			if pace == nil {
 				l, e = rekordbox.ReadPDB(full)
 			} else {
-				var tmp *os.File
-				var size int64
-				if tmp, size, e = copyStickFilePaced(ctx, full, pace); e == nil {
-					l, e = rekordbox.ParsePDB(tmp, size)
-					name := tmp.Name()
-					_ = tmp.Close()
-					_ = os.Remove(name)
-				}
+				l, e = readPDBPaced(ctx, full, pace)
 			}
-		} else if pace == nil {
+		} else if e = checkExportSQLiteSidecars(full); e != nil {
+			// Dirty -journal or -wal on the stick: refuse before any read or copy.
+		} else if pace == nil || !pace.isBusy() {
 			l, e = rekordbox.ReadSQLiteKeys(ctx, full, nil, keys)
 		} else {
 			var tmp *os.File
@@ -203,20 +287,11 @@ func readSourcesPaced(ctx context.Context, r *compat.Resolver, mount string, fil
 					_ = os.Remove(tmpName)
 					_ = os.Remove(tmpName + "-wal")
 					_ = os.Remove(tmpName + "-shm")
+					_ = os.Remove(tmpName + "-journal")
 				}
-				if walSrc := full + "-wal"; func() bool { _, se := os.Stat(walSrc); return se == nil }() {
-					if wt, _, we := copyStickFilePaced(ctx, walSrc, pace); we == nil {
-						wname := wt.Name()
-						_ = wt.Close()
-						if err2 := os.Rename(wname, tmpName+"-wal"); err2 != nil {
-							_ = os.Remove(wname)
-						}
-					} else if ctx.Err() != nil {
-						cleanup()
-						return nil, failed, ctx.Err()
-					}
+				if e = checkExportSQLiteSidecars(full); e == nil {
+					l, e = rekordbox.ReadSQLiteKeys(ctx, tmpName, nil, keys)
 				}
-				l, e = rekordbox.ReadSQLiteKeys(ctx, tmpName, nil, keys)
 				cleanup()
 			}
 		}
@@ -292,14 +367,8 @@ func readStagedPaced(ctx context.Context, mount string, pace *pacer) ([]SourceLi
 		if pace == nil {
 			staged, err = rekordbox.ReadPDB(pdbs[i])
 		} else {
-			var tmp *os.File
-			var size int64
-			if tmp, size, err = copyStickFilePaced(ctx, pdbs[i], pace); err == nil {
-				staged, err = rekordbox.ParsePDB(tmp, size)
-				tname := tmp.Name()
-				_ = tmp.Close()
-				_ = os.Remove(tname)
-			} else if ctx.Err() != nil {
+			staged, err = readPDBPaced(ctx, pdbs[i], pace)
+			if err != nil && ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 		}

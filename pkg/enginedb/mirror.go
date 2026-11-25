@@ -67,7 +67,9 @@ func LibraryState(file string) string {
 	return state
 }
 
-const mirrorFlushBytes = 2 << 20 // cap dirty page cache during fresh mirror to <= 2 MiB
+const mirrorFlushBytes = 16 << 20 // cap dirty page cache during fresh mirror to <= 16 MiB
+
+var syncMirrorFile = syncFilePath
 
 type mirroring struct {
 	ctx        context.Context
@@ -270,7 +272,7 @@ func (mr *mirroring) transaction(do func() error) error {
 			}
 			if err == nil {
 				s0 := time.Now()
-				if err = syncFilePath(mr.nextPath); err == nil {
+				if err = syncMirrorFile(mr.nextPath); err == nil {
 					mr.syncedSize = st.Size()
 					if mr.pace != nil {
 						err = mr.pace(time.Since(s0))

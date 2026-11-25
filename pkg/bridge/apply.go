@@ -413,10 +413,11 @@ func (w *window) build() error {
 	if err = cleanSQLiteSidecars(w.file()); err != nil {
 		return err
 	}
+	const installFlushBytes = 16 << 20
 	install := func() error {
 		src := filepath.Join(tmp, "m.db")
 		if w.rest != nil {
-			return rbstate.InstallFilePaced(src, w.file(), playingReadChunk, 2<<20, func(_ int, took time.Duration) error {
+			return rbstate.InstallFilePaced(src, w.file(), playingReadChunk, installFlushBytes, func(_ int, took time.Duration) error {
 				return w.rest(took)
 			})
 		}
@@ -498,6 +499,17 @@ func (w *window) putLists(b *enginedb.Batch, idx []int) error {
 		w.snap.Lists[l.Key] = &rbstate.List{Key: l.Key, EngineID: listID, Hash: hash}
 	}
 	for parent := range reorder {
+		if err := w.ctx.Err(); err != nil {
+			return err
+		}
+		if !w.next && !w.st.must(commitCost) {
+			return errWindowDeadline
+		}
+		if w.rest != nil {
+			if err := w.rest(0); err != nil {
+				return err
+			}
+		}
 		var order []int64
 		for i := range w.view.Lists {
 			if w.view.Lists[i].Parent == parent {
@@ -549,7 +561,12 @@ func (w *window) apply(p *Plan) error {
 	listAndCommit := work{lists: len(p.PutLists) + len(p.RemoveLists), entries: rows.entries, commits: 1, tracks: len(s.Tracks)}.cost()
 	commitCost := work{commits: 1, tracks: len(s.Tracks)}.cost()
 	cutRows := false
-	for _, key := range p.RemoveTracks {
+	for idx, key := range p.RemoveTracks {
+		if w.rest != nil && idx&15 == 0 {
+			if err = w.rest(0); err != nil {
+				return err
+			}
+		}
 		if w.ctx.Err() != nil || (!w.next && !w.st.must(listAndCommit)) {
 			cutRows = true
 			break
@@ -565,6 +582,11 @@ func (w *window) apply(p *Plan) error {
 	const moveChunk = 16
 	moved := 0
 	for at := 0; !cutRows && at < len(p.Moves); at += moveChunk {
+		if w.rest != nil {
+			if err = w.rest(0); err != nil {
+				return err
+			}
+		}
 		if w.ctx.Err() != nil || (!w.next && !w.st.must(listAndCommit)) {
 			cutRows = true
 			break
@@ -596,6 +618,11 @@ func (w *window) apply(p *Plan) error {
 	const chunk = 16
 	addMargin := max(listAndCommit, 2*time.Second)
 	for at := 0; !cutRows && at < len(p.AddTracks); at += chunk {
+		if w.rest != nil {
+			if err = w.rest(0); err != nil {
+				return err
+			}
+		}
 		if w.ctx.Err() != nil || (!w.next && !w.st.must(addMargin)) {
 			log.Printf("rb-bridge: %d new tracks wait for the next window", len(p.AddTracks)-at)
 			break
@@ -675,6 +702,11 @@ func (w *window) inBatches(n, size int, ok func(i int) bool, each func(b *engine
 			return i, err
 		}
 		for first := i; err == nil && i < n && i-first < size && ok(i); i++ {
+			if w.rest != nil && i > first && (i-first)%32 == 0 {
+				if err = w.rest(0); err != nil {
+					break
+				}
+			}
 			err = each(b, i)
 		}
 		began := time.Now()

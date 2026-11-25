@@ -1679,7 +1679,7 @@ SERVICES_MAIN = """
 	// PlayState/SongLoading wake immediately so background imports never hit a 3 s blind spot.
 	property bool scDeckClock: false
 	property bool scDeckClockWatched: false
-	property bool scShadowLoadingWatched: false
+	property var scShadowLoadingWatched: ({})
 	property bool scDeckClockWasActive: false
 	property bool scDeckClockDirty: false
 	onScDeckClockChanged: if (scDeckClock && scFourDeckRole === "") scDeckClockTick()
@@ -1702,7 +1702,7 @@ SERVICES_MAIN = """
 	Timer {
 		id: scDeckClockConfirmTimer
 		interval: 500; repeat: false
-		onTriggered: { root.scDeckClockSig = ""; root.scDeckClockTick() }
+		onTriggered: { if (!root.scDeckClock || root.scFourDeckRole !== "") return; root.scDeckClockSig = ""; root.scDeckClockTick() }
 	}
 	function scDeckClockDeckProps(d, now) {
 		let g = scDeckClockProps[d]
@@ -1733,18 +1733,21 @@ SERVICES_MAIN = """
 		return g
 	}
 	function scDeckClockWake() {
-		if (scFourDeckRole !== "") return
-		if (scDeckClock && scDeckClockTimer.interval !== 100) scDeckClockTimer.interval = 100
+		if (!scDeckClock || scFourDeckRole !== "") return
+		if (scDeckClockTimer.interval !== 100) scDeckClockTimer.interval = 100
 		scDeckClockTick()
 	}
 	function scDeckClockWatch() {
 		if (scFourDeckRole !== "") {
-			if (!scShadowLoadingWatched && typeof scShadowProperties === "function") {
+			if (typeof scShadowProperties === "function") {
 				for (let d = 1; d <= 4; d++) {
+					if (scShadowLoadingWatched[d]) continue
 					const p = scShadowProperties(d)
-					if (p && p.loading && p.loading.stateChanged) p.loading.stateChanged.connect(root.scShadowWake)
+					if (p && p.loading && p.loading.stateChanged) {
+						p.loading.stateChanged.connect(root.scShadowWake)
+						scShadowLoadingWatched[d] = true
+					}
 				}
-				scShadowLoadingWatched = true
 			}
 			return
 		}
@@ -1756,10 +1759,11 @@ SERVICES_MAIN = """
 		}
 		if (found) {
 			scDeckClockWatched = true
-			scDeckClockTick()
+			if (scDeckClock) scDeckClockTick()
 		}
 	}
 	function scDeckClockTick() {
+		if (!scDeckClock || scFourDeckRole !== "") return
 		const now = Date.now()
 		let x = scDeckClockRequest
 		if (!x) {
@@ -1767,7 +1771,7 @@ SERVICES_MAIN = """
 			x.onreadystatechange = function() {
 				if (x.readyState === 4 && root.scDeckClockDirty) {
 					root.scDeckClockDirty = false
-					root.scDeckClockTick()
+					if (root.scDeckClock && root.scFourDeckRole === "") root.scDeckClockTick()
 				}
 			}
 			scDeckClockRequest = x
@@ -1819,7 +1823,6 @@ SERVICES_MAIN = """
 				scDeckClockConfirmTimer.stop()
 			} else if (scDeckClockWasActive) {
 				scDeckClockWasActive = false
-				if (!scDeckClock) scDeckClockConfirmTimer.restart()
 			}
 		}
 		if (!anyPlaying && !anyLoading && sig === scDeckClockSig && now - scDeckClockPostAt < 1000) return

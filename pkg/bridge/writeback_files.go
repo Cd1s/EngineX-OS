@@ -413,12 +413,19 @@ func syncPath(path string) error {
 
 // stagedWhole reports whether a staged copy is a whole file of dst's kind.
 func stagedWhole(tmp, dst string) bool {
+	return stagedWholeCtx(context.Background(), tmp, dst)
+}
+
+func stagedWholeCtx(ctx context.Context, tmp, dst string) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	switch strings.ToLower(filepath.Base(dst)) {
 	case "export.pdb":
 		_, err := rekordbox.ReadPDB(tmp)
 		return err == nil && rekordbox.CheckPDBExtent(tmp) == nil
 	case "exportlibrary.db":
-		_, err := rekordbox.ReadSQLiteWhole(context.Background(), tmp)
+		_, err := rekordbox.ReadSQLiteWhole(ctx, tmp)
 		return err == nil
 	default:
 		b, err := os.ReadFile(tmp)
@@ -432,18 +439,24 @@ func stagedWhole(tmp, dst string) bool {
 
 // putBack restores rel when a cut pass left it missing: from its staged copy when that is
 // whole, else from its first-original backup. False when rel stays missing.
-func putBack(mount, rel, name string) bool {
+func putBack(ctx context.Context, mount, rel, name string) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	dst := filepath.Join(mount, rel)
 	if _, err := os.Lstat(dst); !errors.Is(err, os.ErrNotExist) {
 		return true
 	}
 	staged := filepath.Join(filepath.Dir(dst), name)
-	if st, err := os.Lstat(staged); err == nil && st.Mode().IsRegular() && stagedWhole(staged, dst) && replaceFile(staged, dst) == nil {
+	if st, err := os.Lstat(staged); err == nil && st.Mode().IsRegular() && stagedWholeCtx(ctx, staged, dst) && replaceFile(staged, dst) == nil {
 		log.Printf("rb-bridge: %s was missing after a cut write-back; its new copy put back", dst)
 		return true
 	}
 	entries, _ := os.ReadDir(filepath.Join(mount, ".enginex-backup"))
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return false
+		}
 		data, err := os.ReadFile(filepath.Join(mount, ".enginex-backup", entry.Name(), rel))
 		if !entry.IsDir() || err != nil {
 			continue
@@ -497,7 +510,7 @@ func CleanWriteBackLeftoversCtx(ctx context.Context, mount string) int {
 		case !ok:
 		case !isTarget:
 			dirs = append(dirs, rel)
-		case !putBack(mount, rel, name):
+		case !putBack(ctx, mount, rel, name):
 			whole = false
 		}
 	}

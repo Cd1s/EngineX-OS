@@ -270,20 +270,25 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		res.Pending = head.Pending
 		return res, nil
 	}
-	if o.StartBackground != nil {
-		if e := o.StartBackground(); e != nil {
-			log.Printf("rb-bridge: background job not started: %v", e)
-		} else {
-			res.Background = true
-		}
-	}
+	startBG()
 	rbstate.CleanTemps(dir)
-	if n := CleanWriteBackLeftovers(mount); n > 0 {
+	if n := CleanWriteBackLeftoversCtx(ctx, mount); n > 0 {
 		log.Printf("rb-bridge: %d files of a write-back pass that was cut short put right", n)
+	}
+	if deadlineReached() {
+		return stopAtDeadline()
 	}
 	ahead := exportWork(files, head.Tracks)
 	if lib, e := os.Stat(filepath.Join(dir, "m.db")); e != nil || lib.Size() == 0 {
 		ahead.build = ahead.view // a first library
+	} else if headErr != nil {
+		if oldSt, oe := os.Stat(filepath.Join(dir, oldStateName)); oe == nil && oldSt.Size() > 0 {
+			// Legacy take-over (adopt.go) scans BridgeState JOIN Track and reconciles every row.
+			adoptRows := max(ahead.view, int(oldSt.Size()/250))
+			ahead.load += adoptRows
+			ahead.scan += adoptRows
+			ahead.tracks = max(ahead.tracks, adoptRows)
+		}
 	}
 	if !st.fits(ahead) {
 		// Engine gets the stick now, with the library it has; the job reads the exports and
@@ -302,13 +307,20 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 
 	derived := rekordbox.KeyDerivations()
 	libs, failed, err := ReadSources(ctx, r, mount, files, nil)
+	if errors.Is(err, errWindowDeadline) || deadlineReached() {
+		return stopAtDeadline()
+	}
 	if err != nil && staged == "" {
 		return res, err
 	}
 	for _, f := range failed {
 		log.Printf("rb-bridge: %v: this library is left out of the import", f)
 	}
-	if libs = append(libs, readStaged(mount)...); len(libs) == 0 {
+	stagedLibs, stagedErr := readStagedCtx(ctx, mount)
+	if errors.Is(stagedErr, errWindowDeadline) || deadlineReached() {
+		return stopAtDeadline()
+	}
+	if libs = append(libs, stagedLibs...); len(libs) == 0 {
 		if err != nil {
 			return res, err
 		}
@@ -320,8 +332,11 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		key = "derived"
 	}
 	st.done("read", "%d libraries, %d unreadable, key %s", len(libs), len(failed), key)
-	view, err := BuildView(libs, layout, readSetting(o.Settings, "lang"))
+	view, err := BuildViewCtx(ctx, libs, layout, readSetting(o.Settings, "lang"))
 	if err != nil {
+		if errors.Is(err, errWindowDeadline) || deadlineReached() {
+			return stopAtDeadline()
+		}
 		return res, err
 	}
 	view.Stamp, view.Sources = stamp, files
@@ -335,6 +350,12 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	w := &window{ctx: ctx, mount: mount, dir: dir, view: view, st: st, o: o, res: &res, load: load,
 		partial: len(failed) > 0, linkOnly: len(files) == 0}
 	if err = w.run(); err != nil {
+		if errors.Is(err, errWindowDeadline) || deadlineReached() {
+			if w.snap != nil {
+				res.Pending = w.snap.Pending
+			}
+			return stopAtDeadline()
+		}
 		return res, err
 	}
 	chores(ctx, mount, st, false)
