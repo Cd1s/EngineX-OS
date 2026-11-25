@@ -46,7 +46,8 @@ type MountResult struct {
 }
 
 var (
-	commitReserve = 2500 * time.Millisecond // the last commit starts this long before the kill (design section 3)
+	spare         = 3 * time.Second         // every window of the hook ends this long before the kill (design section 3)
+	commitReserve = 3750 * time.Millisecond // the last commit starts this long before the kill, and ends spare before it
 	insertBudget  = 4 * time.Second         // an insert's optional work stops this long after its start
 	applyBatch    = 512                     // staged tracks a transaction: about 7 MB to commit within commitReserve
 	applyReserve  = 1500 * time.Millisecond // optional time a window needs left to start one more staged track
@@ -60,6 +61,7 @@ func init() { rbstate.UnsafeToFree = unsafeToFree }
 // lists, the first batch of updates) runs until owed, optional work until optional.
 type steps struct {
 	start, last, owed, optional time.Time
+	kill                        time.Time // zero: no hook, no limit, and nothing is left to a job
 }
 
 func newSteps(o MountOptions) *steps {
@@ -67,6 +69,9 @@ func newSteps(o MountOptions) *steps {
 	s := &steps{start: now, last: now}
 	if !o.Deadline.IsZero() {
 		s.owed = o.Deadline.Add(-commitReserve)
+		if !o.Full {
+			s.kill = o.Deadline
+		}
 	}
 	s.optional = s.owed
 	if soft := now.Add(insertBudget); !o.Publish && !o.Full && (s.owed.IsZero() || soft.Before(s.owed)) {
@@ -87,6 +92,61 @@ func before(limit time.Time, d time.Duration) bool {
 
 func (s *steps) must(d time.Duration) bool { return before(s.owed, d) }
 func (s *steps) more(d time.Duration) bool { return before(s.optional, d) }
+
+// work is what a window has still to do, and cost what that takes on a deck. Before every step
+// that grows with the library a window of the hook asks fits: work that would not end spare before
+// the kill is left to the job, which has no limit (a next library, next.go). The figures are the
+// deck-speed replica's (armhf at 18 % of one core, 12 ms a request to the stick, 2026-11-25) for two
+// real libraries of 2,416 and 5,962 tracks; a OneLibrary key is taken as not cached.
+type work struct {
+	oneLibrary, deviceLibrary int64 // bytes of export files to read
+	warm                      bool  // the OneLibrary key is in the cache (the job has just read the file)
+	view                      int   // tracks of the exports to join into the view
+	load                      int   // tracks of the snapshot to read and compare with the library
+	build                     int   // rows of a first library, built on the deck and copied to the stick
+	adds, removes, updates    int   // rows a diff writes in place
+	lists                     int   // lists a diff writes or removes
+	staged                    int   // staged tracks applied in place
+	scan                      int   // rows of m.db compared with a next library's
+	commits, tracks           int   // commits, each with a save of the snapshot of this many tracks
+}
+
+func (w work) cost() time.Duration {
+	us := 0.0
+	if w.oneLibrary > 0 && !w.warm {
+		us += 5.5e6 // the key
+	}
+	us += 0.81 * float64(w.oneLibrary)    // 0.85 s a MiB
+	us += 0.21 * float64(w.deviceLibrary) // 0.22 s a MiB
+	us += 130*float64(w.view) + 100*float64(w.load) + 650*float64(w.build)
+	us += 5000*float64(w.adds) + 30000*float64(w.removes) + 2000*float64(w.updates) + 5000*float64(w.lists)
+	us += 33000*float64(w.staged) + 150*float64(w.scan)
+	us += float64(w.commits) * (250000 + 65*float64(w.tracks))
+	return time.Duration(us) * time.Microsecond
+}
+
+// fits reports that the work ends spare before the kill. A run by hand has no kill.
+func (s *steps) fits(w work) bool {
+	return s.kill.IsZero() || !time.Now().Add(w.cost()).After(s.kill.Add(-spare))
+}
+
+// exportWork is the reading of these export files, the view of their tracks and the reading of a
+// snapshot of known tracks: what a window does before it knows the diff. The tracks are taken from
+// the files' sizes (480 bytes a track in a OneLibrary, 730 in a Device Library).
+func exportWork(files []rbstate.FileSig, known int) work {
+	w := work{load: known, commits: 1}
+	for _, f := range files {
+		if strings.EqualFold(filepath.Base(f.Rel), filepath.Base(devicePDB)) {
+			w.deviceLibrary += f.Size
+			w.view = max(w.view, int(f.Size/730))
+		} else {
+			w.oneLibrary += f.Size
+			w.view = max(w.view, int(f.Size/480))
+		}
+	}
+	w.tracks = max(w.view, known)
+	return w
+}
 
 // writableLibrary reports that the stick's Engine Library can be written: the volume itself, or
 // the library view the mount hook puts over a read-only volume (HFS+).
@@ -158,6 +218,16 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		return res, err
 	}
 	defer unlock()
+	swapped := swapNext(ctx, mount, dir, st)
+	if swapped && o.StartBackground != nil {
+		// The job drops the records the next library kept in the stage for the deck's loads, and
+		// goes on with what is pending.
+		if e := o.StartBackground(); e != nil {
+			log.Printf("rb-bridge: background job not started: %v", e)
+		} else {
+			res.Background = true
+		}
+	}
 	layout := ReadLayout(o.Settings)
 	stamp := rbstate.Stamp(layout, files, staged)
 	head, headErr := rbstate.ReadHeader(dir)
@@ -167,7 +237,12 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	st.done("stat", "%d export files, snapshot %v, unchanged %v", len(files), headErr == nil, unchanged)
 	if unchanged && head.Pending.None() {
 		chores(ctx, mount, st)
-		return MountResult{Bypassed: true}, nil
+		return MountResult{Bypassed: true, Background: res.Background}, nil
+	}
+	if unchanged && swapped && !o.Full {
+		// The window that swaps a library in does nothing else, whatever the library's size.
+		res.Pending = head.Pending
+		return res, nil
 	}
 	if o.StartBackground != nil {
 		if e := o.StartBackground(); e != nil {
@@ -179,6 +254,17 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	rbstate.CleanTemps(dir)
 	if n := CleanWriteBackLeftovers(mount); n > 0 {
 		log.Printf("rb-bridge: %d files of a write-back pass that was cut short put right", n)
+	}
+	ahead := exportWork(files, head.Tracks)
+	if lib, e := os.Stat(filepath.Join(dir, "m.db")); e != nil || lib.Size() == 0 {
+		ahead.build = ahead.view // a first library
+	}
+	if !st.fits(ahead) {
+		// Engine gets the stick now, with the library it has; the job reads the exports and
+		// makes the next library, and its remount swaps it in.
+		log.Printf("rb-bridge: mount leaves the exports to the job: reading them would take about %d ms of the %d ms left", ahead.cost().Milliseconds(), time.Until(st.kill).Milliseconds())
+		res.Pending = head.Pending
+		return res, nil
 	}
 
 	// The snapshot is megabytes on the stick: its read overlaps the exports' read and decryption

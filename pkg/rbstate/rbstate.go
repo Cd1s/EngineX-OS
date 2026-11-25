@@ -83,6 +83,9 @@ type Header struct {
 	Pending     Pending   `json:"pending"`
 	Applied     int64     `json:"applied"` // unix seconds of the last commit
 	Commit      int64     `json:"commit"`  // the library's commit ID this snapshot describes (see SaveNext)
+	// Base, in a swap snapshot only: the state of the stick's library (enginedb.LibraryState)
+	// whose every row the next library has taken.
+	Base string `json:"base,omitempty"`
 }
 
 // PerfState says what a row's performance data is.

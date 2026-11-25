@@ -86,6 +86,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 		if *remount != "" {
 			return runRemount(ctx, *remount)
 		}
+		importSettings = *uiSettings
 		return runImportJob(ctx, *importPath)
 	}
 	if !*link && *mount == "" {

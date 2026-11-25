@@ -28,10 +28,10 @@ import (
 // writer of m.db in the bridge (design §1.4). Rows are keyed by Engine's own IDs, which the
 // snapshot keeps; nothing of the bridge is stored in m.db.
 type Library struct {
-	db   *sql.DB
-	dir  string
-	uuid string
-	bulk bool
+	db    *sql.DB
+	mount string // the volume: covers go to its Engine Library/Artwork
+	uuid  string
+	bulk  bool
 }
 
 // TrackRow is a track as the export describes it.
@@ -59,11 +59,16 @@ const (
 // OpenLibrary opens dir/m.db for a window, made with Engine's schema when there is none.
 // ErrLibraryInUse: another process has it open (Engine would write its own pages over ours).
 func OpenLibrary(ctx context.Context, dir string) (*Library, error) {
-	return openLibrary(ctx, dir, false, "")
+	return openLibrary(ctx, filepath.Join(dir, "m.db"), filepath.Dir(filepath.Dir(dir)), false, "")
 }
 
-func openLibrary(ctx context.Context, dir string, bulk bool, newUUID string) (*Library, error) {
-	p := filepath.Join(dir, "m.db")
+// OpenLibraryFile opens a library file of the volume mounted at mount that is not its m.db: the
+// next library, which Engine does not have open.
+func OpenLibraryFile(ctx context.Context, file, mount string) (*Library, error) {
+	return openLibrary(ctx, file, mount, false, "")
+}
+
+func openLibrary(ctx context.Context, p, mount string, bulk bool, newUUID string) (*Library, error) {
 	for _, suffix := range []string{"", "-journal", "-wal", "-shm"} {
 		if err := safeFile(p + suffix); err != nil {
 			return nil, err
@@ -87,7 +92,7 @@ func openLibrary(ctx context.Context, dir string, bulk bool, newUUID string) (*L
 	if newUUID == "" {
 		newUUID = uuid.NewString()
 	}
-	l := &Library{db: db, dir: dir, bulk: bulk, uuid: newUUID}
+	l := &Library{db: db, mount: mount, bulk: bulk, uuid: newUUID}
 	if err = l.init(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -775,7 +780,7 @@ func (b *Batch) PutArtwork(ctx context.Context, id int64, image []byte) error {
 	sum := h[:]
 	art, known := b.covers[h]
 	if !known {
-		if artDir, err := compat.SafeOutputDir(filepath.Dir(filepath.Dir(b.l.dir)), artworkDir); err == nil {
+		if artDir, err := compat.SafeOutputDir(b.l.mount, artworkDir); err == nil {
 			_ = putArtwork(artDir, sum, image) // without the file the cover still shows on this deck
 		}
 		err := b.tx.QueryRowContext(ctx, `SELECT id FROM AlbumArt WHERE hash=? OR hash=? LIMIT 1`, sum, hex.EncodeToString(sum)).Scan(&art)
@@ -822,7 +827,7 @@ func (b *Batch) Synced(ctx context.Context, id int64) (edit int64, digest []byte
 // from the rows and lists' lists: without Engine's secondary indexes until the end, the journal
 // in memory, one sync. libraryID is the UUID of the skeleton it replaces, "" for a new one.
 func BuildLibrary(ctx context.Context, dir, libraryID string, rows []TrackRow, lists func(b *Batch, ids []int64) error) (ids []int64, libraryUUID string, commitID int64, err error) {
-	l, err := openLibrary(ctx, dir, true, libraryID)
+	l, err := openLibrary(ctx, filepath.Join(dir, "m.db"), filepath.Dir(filepath.Dir(dir)), true, libraryID)
 	if err != nil {
 		return nil, "", 0, err
 	}

@@ -21,9 +21,10 @@ const oldStateName = ".rb-bridge-state.db"
 var oldMarks = []string{oldStateName, oldStateName + "-journal", oldStateName + ".compact", ".rb-bridge-stamp", ".rb-bridge-pending",
 	".rb-bridge-reread", ".rb-bridge-overview", ".rb-bridge-rgb-verified", ".rb-bridge.lock", ".rb-bridge-import", ".rb-bridge-publish"}
 
-// adopt reads an earlier build's state into a snapshot of the library uuid.
-func adopt(ctx context.Context, dir, uuid string) (*rbstate.Snapshot, error) {
-	db, err := openRO(filepath.Join(dir, "m.db"), 5000)
+// adopt reads an earlier build's state in dir into a snapshot of the library uuid, whose file is
+// library: the stick's m.db, or the next library made from it.
+func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, error) {
+	db, err := openRO(library, 5000)
 	if err != nil {
 		return nil, err
 	}

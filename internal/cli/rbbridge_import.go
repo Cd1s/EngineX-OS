@@ -60,6 +60,10 @@ var startImport = func(mount string) error {
 	return nil
 }
 
+// importSettings is the deck's settings file (--ui-settings): the job builds the lists a window
+// would, under the folder names of the deck's language.
+var importSettings string
+
 // importLock lets one job run at a time, whatever the number of sticks.
 var importLock = "/run/enginex-rb-import.lock"
 
@@ -143,7 +147,7 @@ func convertLocked(ctx context.Context, mount string, rep *usbLoadingReporter) (
 	go func() { defer close(done); refresh(convert, rep) }()
 	defer func() { stop(); <-done }()
 	// Throttled: the job reports its count as each track goes (#328); refresh writes the latest.
-	r, err = bridge.FillInBackground(ctx, mount, bridge.FillOptions{Progress: func(done, total int) { rep.Report(done, total, false) }})
+	r, err = bridge.FillInBackground(ctx, mount, bridge.FillOptions{Settings: importSettings, Progress: func(done, total int) { rep.Report(done, total, false) }})
 	if err != nil && ctx.Err() == nil && !errors.Is(err, rbstate.ErrNoSnapshot) {
 		rep.Fail(err)
 	}

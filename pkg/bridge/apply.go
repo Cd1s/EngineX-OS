@@ -29,12 +29,25 @@ type window struct {
 	partial  bool                              // a library was unreadable: nothing is removed and the stamp is not kept
 	linkOnly bool                              // only staged CDJ libraries were read: the stick's own import stays
 
+	// next: the work is done on the next library (next.go), by the job and without a deadline. Its
+	// snapshot is kept on the deck until it is ready; the stick's own library is only read.
+	next bool
+	keep bool                      // staged records stay in the stage once applied (until the swap)
+	rest func(time.Duration) error // after each commit, with the time it took: the job's pacing
+
 	lib   *enginedb.Library // nil: the stick has no library to keep, one is built
 	snap  *rbstate.Snapshot
 	index map[string]enginedb.Row // every row of the library by key
 	head  rbstate.Header          // the snapshot's header as the stick has it
 	dirty bool                    // tracks or lists changed outside a commit
+	left  bool                    // work that would not end before the kill was left to the job
 	took  laps                    // where the time of the commits and of the staged step went
+}
+
+// leave notes that the window leaves this work to the job (see work).
+func (w *window) leave(what work, name string) {
+	w.left = true
+	log.Printf("rb-bridge: mount leaves %s to the job: about %d ms of work, %d ms left", name, what.cost().Milliseconds(), time.Until(w.st.kill).Milliseconds())
 }
 
 // laps are the parts of a window's commits and of its staged step, for the journal.
@@ -49,6 +62,24 @@ func lap(d *time.Duration, t *time.Time) {
 
 // cut, in tests, is called between two writes that a power cut or the hook's kill can separate.
 var cut = func(step string) {}
+
+// file is the library the window writes.
+func (w *window) file() string {
+	if w.next {
+		return filepath.Join(w.dir, nextDB)
+	}
+	return filepath.Join(w.dir, "m.db")
+}
+
+// sdir is where the snapshot of that library is.
+func (w *window) sdir() string {
+	if w.next {
+		dir := nextState(w.snap.LibraryUUID)
+		_ = os.MkdirAll(dir, 0o700)
+		return dir
+	}
+	return w.dir
+}
 
 func (w *window) close() {
 	if w.lib != nil {
@@ -66,15 +97,21 @@ func (w *window) run() (err error) {
 	if w.snap.Stamp != w.view.Stamp { // the job compares every track's files with what was built
 		w.snap.Pending.Verify, w.dirty = true, true
 	}
-	if w.lib == nil {
+	n := len(w.view.Tracks)
+	if first := (work{build: n, commits: 1, tracks: n}); w.lib != nil {
+		err = w.apply(Diff(w.view, w.snap))
+	} else if w.st.fits(first) {
 		err = w.build()
 	} else {
-		err = w.apply(Diff(w.view, w.snap))
+		w.leave(first, "the first library")
+		return nil
 	}
-	if err == nil {
+	// Staged data is applied in place by the window the job asked for, and by a run without a
+	// kill: an insert gives the DJ the stick.
+	if err == nil && !w.left && (w.next || w.o.Publish || w.st.kill.IsZero()) {
 		err = w.applyStaged()
 	}
-	if err == nil {
+	if err == nil && (!w.left || w.st.fits(work{commits: 1, tracks: n})) {
 		err = w.saveIfChanged()
 	}
 	return err
@@ -83,21 +120,26 @@ func (w *window) run() (err error) {
 // open opens the stick's library and its snapshot. w.lib stays nil when there is no library to
 // keep: no m.db, or Engine's empty skeleton (one with rows Engine added is a library).
 func (w *window) open() error {
-	db := filepath.Join(w.dir, "m.db")
-	if enginedb.OpenElsewhere(db) != 0 {
+	db := w.file()
+	if !w.next && enginedb.OpenElsewhere(db) != 0 {
 		return enginedb.ErrLibraryInUse // Engine would go on writing a file that is no longer the stick's
 	}
-	w.snap = rbstate.New("")
+	if w.snap == nil {
+		w.snap = rbstate.New("")
+	}
 	if st, err := os.Stat(db); err != nil || st.Size() == 0 {
 		return nil
 	}
-	lib, err := enginedb.OpenLibrary(w.ctx, w.dir)
+	lib, err := enginedb.OpenLibraryFile(w.ctx, db, filepath.Dir(filepath.Dir(w.dir)))
 	if err != nil {
 		return err
 	}
-	w.lib = lib
+	w.lib, w.snap = lib, rbstate.New(lib.UUID())
 	if err = w.settle(); err != nil {
 		return err
+	}
+	if w.load == nil {
+		w.load = func() (*rbstate.Snapshot, error) { return rbstate.Load(w.sdir()) }
 	}
 	snap, err := w.load()
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -107,8 +149,8 @@ func (w *window) open() error {
 	switch {
 	case snap != nil && snap.LibraryUUID == lib.UUID() && snap.Rules == rbstate.Rules:
 		w.snap, w.head = snap, snap.Header
-	case oldErr == nil:
-		if w.snap, err = adopt(w.ctx, w.dir, lib.UUID()); err != nil {
+	case oldErr == nil && !w.next:
+		if w.snap, err = adopt(w.ctx, db, w.dir, lib.UUID()); err != nil {
 			return err
 		}
 		log.Printf("rb-bridge: library of an earlier build taken over: %d tracks, %d lists", len(w.snap.Tracks), len(w.snap.Lists))
@@ -117,7 +159,7 @@ func (w *window) open() error {
 		if err != nil {
 			return err
 		}
-		if w.snap = rbstate.New(lib.UUID()); tracks == 0 && lists == 0 {
+		if tracks == 0 && lists == 0 {
 			w.close() // Engine's skeleton: a library is built under its UUID
 			return nil
 		}
@@ -132,7 +174,7 @@ func (w *window) open() error {
 // settle finishes a window cut around its commit: its next snapshot is promoted when the library
 // has that commit, and dropped otherwise (design section 5).
 func (w *window) settle() error {
-	claims, err := rbstate.LoadNext(w.dir)
+	claims, err := rbstate.LoadNext(w.sdir())
 	if err != nil {
 		return nil
 	}
@@ -141,9 +183,9 @@ func (w *window) settle() error {
 		return err
 	}
 	if claims.LibraryUUID != w.lib.UUID() || claims.Commit != id || claims.Rules != rbstate.Rules {
-		return rbstate.DropNext(w.dir)
+		return rbstate.DropNext(w.sdir())
 	}
-	if err = rbstate.Promote(w.dir); err != nil {
+	if err = rbstate.Promote(w.sdir()); err != nil {
 		return err
 	}
 	log.Printf("rb-bridge: the last window was cut short after its commit; its %d tracks and %d lists are taken over", len(claims.Tracks), len(claims.Lists))
@@ -231,18 +273,18 @@ func (w *window) commit(id int64, do func() error) error {
 	t := time.Now()
 	w.count()
 	w.snap.Applied, w.snap.Commit = t.Unix(), id
-	if err := w.snap.SaveNext(w.dir); err != nil {
+	if err := w.snap.SaveNext(w.sdir()); err != nil {
 		return err
 	}
 	lap(&w.took.save, &t)
 	cut("next saved")
 	if err := do(); err != nil {
-		_ = rbstate.DropNext(w.dir)
+		_ = rbstate.DropNext(w.sdir())
 		return err
 	}
 	lap(&w.took.commit, &t)
 	cut("committed")
-	if err := rbstate.Promote(w.dir); err != nil {
+	if err := rbstate.Promote(w.sdir()); err != nil {
 		return err
 	}
 	lap(&w.took.promote, &t)
@@ -257,8 +299,9 @@ func (w *window) commitBatch(b *enginedb.Batch) error {
 
 // saved notes that the stick has the snapshot in memory; an older build's state then goes.
 func (w *window) saved() {
-	w.head, w.dirty = w.snap.Header, false
-	dropOldState(w.dir)
+	if w.head, w.dirty = w.snap.Header, false; !w.next {
+		dropOldState(w.dir) // of a next library only once it is the stick's (swapNext)
+	}
 }
 
 // saveIfChanged saves the snapshot when it changed without a commit.
@@ -267,7 +310,7 @@ func (w *window) saveIfChanged() error {
 	if !w.dirty && reflect.DeepEqual(w.snap.Header, w.head) {
 		return nil
 	}
-	if err := w.snap.Save(w.dir); err != nil {
+	if err := w.snap.Save(w.sdir()); err != nil {
 		return err
 	}
 	w.saved()
@@ -335,7 +378,7 @@ func (w *window) build() error {
 	}
 	w.snap.LibraryUUID = uuid
 	w.st.done("build", "%d rows, %d lists, on the deck's disk", len(ids), len(w.snap.Lists))
-	if err = w.commit(commitID, func() error { return rbstate.InstallFile(filepath.Join(tmp, "m.db"), filepath.Join(w.dir, "m.db")) }); err != nil {
+	if err = w.commit(commitID, func() error { return rbstate.InstallFile(filepath.Join(tmp, "m.db"), w.file()) }); err != nil {
 		return err
 	}
 	w.st.done("install", "library copied to the stick")
@@ -343,7 +386,7 @@ func (w *window) build() error {
 	if w.o.Progress != nil {
 		w.o.Progress(len(ids), len(ids))
 	}
-	if w.lib, err = enginedb.OpenLibrary(w.ctx, w.dir); err != nil {
+	if w.lib, err = enginedb.OpenLibraryFile(w.ctx, w.file(), filepath.Dir(filepath.Dir(w.dir))); err != nil {
 		return err
 	}
 	if w.index, err = w.lib.TrackIndex(w.ctx); err != nil {
@@ -436,7 +479,12 @@ func (w *window) apply(p *Plan) error {
 		}
 		return native
 	})
-	if len(p.AddTracks)+len(p.Moves)+len(p.RemoveTracks)+len(p.PutLists)+len(p.RemoveLists) == 0 {
+	rows := work{adds: len(p.AddTracks), removes: len(p.RemoveTracks), updates: len(p.Moves), lists: len(p.PutLists) + len(p.RemoveLists), commits: 1, tracks: len(s.Tracks)}
+	if !w.st.fits(rows) {
+		w.leave(rows, "the rows and lists")
+		return nil
+	}
+	if !p.structural() {
 		return w.updateRows(p.UpdateTracks)
 	}
 	b, err := w.lib.Begin(w.ctx)
@@ -536,6 +584,7 @@ func (w *window) inBatches(n, size int, ok func(i int) bool, each func(b *engine
 		for first := i; err == nil && i < n && i-first < size && ok(i); i++ {
 			err = each(b, i)
 		}
+		began := time.Now()
 		if err == nil {
 			err = w.commitBatch(b)
 		}
@@ -543,7 +592,10 @@ func (w *window) inBatches(n, size int, ok func(i int) bool, each func(b *engine
 			b.Rollback()
 			return i, err
 		}
-		if err = committed(i); err != nil {
+		if err = committed(i); err == nil && w.rest != nil {
+			err = w.rest(time.Since(began))
+		}
+		if err != nil {
 			return i, err
 		}
 	}
@@ -556,6 +608,10 @@ var updateBatch = 1000
 // updateRows gives rows their changed export fields after the rows and lists are committed, a
 // batch a transaction (a take-over changes thousands): the first batch is owed, the rest optional.
 func (w *window) updateRows(idx []int) error {
+	if all := (work{updates: len(idx), commits: 1 + len(idx)/updateBatch, tracks: len(w.snap.Tracks)}); len(idx) > 0 && !w.st.fits(all) {
+		w.leave(all, "the rows' export fields")
+		return nil
+	}
 	differed := 0
 	done, err := w.inBatches(len(idx), updateBatch, func(i int) bool {
 		if i < updateBatch {
@@ -601,6 +657,8 @@ func (w *window) applyStaged() error {
 	for key, e := range entries {
 		if vt, ok := w.view.Track(key); !ok || e.Sig.Rules != rbstate.Rules || e.Sig.Row != vt.Hash {
 			stale = append(stale, key) // of another export or other rules
+		} else if t := w.snap.Tracks[key]; t != nil && t.EngineID != 0 && t.Perf != rbstate.PerfNone && !e.Missing && t.Built.Equal(e.Sig) {
+			// Applied: a next library kept the record for the deck's loads; the job drops it.
 		} else {
 			keys = append(keys, key)
 		}
@@ -672,7 +730,7 @@ func (w *window) applyStaged() error {
 				t.Perf = rbstate.PerfDeck
 				kept++
 			}
-			if len(full.RGB) > 0 {
+			if len(full.RGB) > 0 && !w.next { // a list waveform only for a row the stick's library has (FillInBackground)
 				overviews[t.EngineID] = full.RGB
 			}
 		}
@@ -691,9 +749,13 @@ func (w *window) applyStaged() error {
 		}
 		clear(overviews)
 		lap(&w.took.rgb, &t)
-		err := stage.Drop(done...)
+		var err error
+		if !w.keep {
+			err = stage.Drop(done...)
+			dropped += len(done)
+		}
 		lap(&w.took.drop, &t)
-		dropped, done = dropped+len(done), done[:0]
+		done = done[:0]
 		if w.o.Progress != nil {
 			w.o.Progress(at, len(keys))
 		}

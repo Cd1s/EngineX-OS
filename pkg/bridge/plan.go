@@ -28,6 +28,12 @@ type refKey struct {
 	id     uint32
 }
 
+// structural reports that the plan adds, moves or removes a row or writes or removes a list: what
+// the DJ sees when he browses. Rows whose export fields changed are not.
+func (p *Plan) structural() bool {
+	return len(p.AddTracks)+len(p.Moves)+len(p.RemoveTracks)+len(p.PutLists)+len(p.RemoveLists) > 0
+}
+
 // Diff compares the view with the snapshot. Identity is the key, the path. A source ID only
 // follows a file that moved: the view's track at a new path has the record, by library and ID,
 // of a track at a path the view no longer has. An ID a re-export gave another file whose own

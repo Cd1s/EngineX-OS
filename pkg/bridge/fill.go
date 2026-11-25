@@ -28,6 +28,7 @@ import (
 type FillOptions struct {
 	Progress func(done, total int) // tracks compared so far; never goes down (#328)
 	Stage    *rbstate.Stage        // nil: the stage of the snapshot's library
+	Settings string                // the deck's settings file (layout, language), "" for the defaults
 }
 
 type FillResult struct {
@@ -52,24 +53,36 @@ type fillTrack struct {
 type fillView struct {
 	stamp  string
 	tracks []fillTrack
+	view   *View // as a window builds it: what a next library is made from
 }
+
+// hookWindow is the time the hook gives a window (design section 3).
+const hookWindow = 17 * time.Second
 
 // readFillView reads the exports as a window would (FindSources, ReadSources, the staged CDJ
 // libraries, BuildView) into the view's tracks and the stamp; a variable for tests.
 var readFillView = func(ctx context.Context, r *compat.Resolver, mount, layout string) (*fillView, error) {
+	return readJobView(ctx, r, mount, layout, "")
+}
+
+func readJobView(ctx context.Context, r *compat.Resolver, mount, layout, lang string) (*fillView, error) {
 	files, err := FindSources(r, mount)
 	if err != nil {
 		return nil, err
 	}
-	libs, _, err := ReadSources(ctx, r, mount, files, nil)
+	libs, failed, err := ReadSources(ctx, r, mount, files, nil)
 	if err != nil {
 		return nil, err
 	}
-	v, err := BuildView(append(libs, readStaged(mount)...), layout, "")
+	v, err := BuildView(append(libs, readStaged(mount)...), layout, lang)
 	if err != nil {
 		return nil, err
 	}
-	out := &fillView{stamp: rbstate.Stamp(layout, files, stagedStamp(mount)), tracks: make([]fillTrack, len(v.Tracks))}
+	v.Stamp, v.Sources = rbstate.Stamp(layout, files, stagedStamp(mount)), files
+	out := &fillView{stamp: v.Stamp, tracks: make([]fillTrack, len(v.Tracks)), view: v}
+	if len(failed) > 0 || len(files) == 0 {
+		out.view = nil // a library could not be read: nothing is removed for it, by a window only
+	}
 	for i, t := range v.Tracks {
 		out.tracks[i] = fillTrack{key: t.Key, track: t.Track, hash: t.Hash}
 	}
@@ -95,10 +108,56 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	}
 	snap, err := rbstate.Load(dbDir)
 	unlock()
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return res, fmt.Errorf("snapshot: %w", err)
 	}
 	loaded := time.Now()
+	layout := ReadLayout(o.Settings)
+	if snap != nil {
+		layout = snap.Layout
+	}
+	view, err := readJobView(ctx, r, mount, layout, readSetting(o.Settings, "lang"))
+	if snap == nil && (err != nil || view.view == nil) {
+		return res, fmt.Errorf("snapshot: %w", rbstate.ErrNoSnapshot) // no window converted this stick, and there is nothing to convert
+	}
+	if err != nil {
+		return res, err
+	}
+	read := time.Now()
+	pace := newPacer(ctx)
+	next := &nextBuild{ctx: ctx, mount: mount, dir: dbDir, view: view.view, live: snap,
+		pace: func(took time.Duration) error { return pace.afterStat(pace.active(), took) }}
+	// Rows and lists a window left to the job come first, with what is staged already: they are
+	// what the DJ browses. The performance data follows in the job the swap's window starts.
+	if rows := snap == nil || view.view != nil && Diff(view.view, snap).structural(); rows && view.view != nil && o.Stage == nil {
+		if err = next.build(false, true); err == nil {
+			res.Publish = next.ask()
+			log.Printf("rb-bridge: rows and lists of %s are in the next library (exports read in %s); publish=%v", mount, read.Sub(loaded).Round(time.Millisecond), res.Publish)
+			return res, nil
+		}
+		if snap == nil || !errors.Is(err, errNoNext) {
+			return res, err
+		}
+		log.Printf("rb-bridge: %v; rows and lists wait for the windows", err)
+	}
+	if snap == nil {
+		return res, fmt.Errorf("snapshot: %w", rbstate.ErrNoSnapshot)
+	}
+	if view.view != nil && snap.Stamp != view.stamp && o.Stage == nil {
+		// The window left the exports to the job and they change no row and no list: the snapshot
+		// takes their stamp, as that window would have given it, and the job compares every file.
+		if unlock, err = rbstate.LockVolume(mount, fillLockWait); err != nil {
+			return res, fmt.Errorf("volume lock: %w", err)
+		}
+		if snap, err = rbstate.Load(dbDir); err == nil && snap.Stamp != view.stamp {
+			snap.Stamp, snap.Sources, snap.Pending.Verify = view.stamp, view.view.Sources, true
+			err = snap.Save(dbDir)
+		}
+		if unlock(); err != nil {
+			return res, fmt.Errorf("snapshot: %w", err)
+		}
+		next.live = snap
+	}
 	stage := o.Stage
 	if stage == nil {
 		if stage, err = rbstate.OpenStage(snap.LibraryUUID); err != nil {
@@ -106,18 +165,28 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		}
 		defer stage.Close()
 	}
-	view, err := readFillView(ctx, r, mount, snap.Layout)
-	if err != nil {
-		return res, err
-	}
-	read := time.Now()
 	entries, verified, err := stage.Entries()
 	if err != nil {
 		return res, fmt.Errorf("stage: %w", err)
 	}
+	// A record a next library applied stayed in the stage for the deck's loads until the swap:
+	// its list waveform is written now that the row is the stick's, and it goes.
+	for key, e := range entries {
+		if t := snap.Tracks[key]; t != nil && t.EngineID != 0 && t.Perf != rbstate.PerfNone && !e.Missing && t.Built.Equal(e.Sig) {
+			if full, e2 := stage.Read(e); e2 == nil && len(full.RGB) > 0 {
+				writeOverview(dbDir, snap.LibraryUUID, t.EngineID, full.RGB)
+			}
+			if err = stage.Drop(key); err != nil {
+				return res, err
+			}
+			delete(entries, key)
+		}
+	}
+	// What a next library holds already is not staged again.
+	inNext, _ := rbstate.Load(nextState(snap.LibraryUUID))
 	f := &filler{
 		ctx: ctx, mount: mount, r: r, snap: snap, stage: stage, view: view, entries: entries,
-		quick: verified != "" && verified == view.stamp, pace: newPacer(ctx), retries: map[string]int{},
+		quick: verified != "" && verified == view.stamp, pace: pace, retries: map[string]int{}, inNext: inNext,
 		byKey: make(map[string]int, len(view.tracks)), handled: make([]bool, len(view.tracks)), built: make([]bool, len(view.tracks)),
 		rgbDir: dbDir, progress: o.Progress,
 	}
@@ -136,6 +205,20 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	})
 	f.report()
 	err = f.run(order)
+	for full := 0; errors.Is(err, rbstate.ErrStageFull) && view.view != nil && o.Stage == nil && full < 64; full++ {
+		// /data is at its floor: what is staged goes into the next library and leaves the stage, and
+		// the job goes on. The remount is still asked for once, at the end.
+		log.Printf("rb-bridge: the stage of %s is full after %d of %d tracks; they go into the next library", mount, f.done, f.total)
+		if e := next.build(true, false); e != nil {
+			log.Printf("rb-bridge: %v", e)
+			break
+		}
+		if f.inNext, err = rbstate.Load(nextState(snap.LibraryUUID)); err == nil {
+			if f.entries, _, err = stage.Entries(); err == nil {
+				err = f.run(order)
+			}
+		}
+	}
 	if err == nil && f.done == f.total {
 		err = f.refuseUnreadable()
 	}
@@ -152,7 +235,24 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		err = stage.MarkVerified(view.stamp)
 	}
 	if err == nil || errors.Is(err, ErrFilesUnreadable) {
-		res.Publish = f.publish() // what could be read is published all the same
+		// What could be read is published all the same: in place when one window does it all,
+		// else as a next library, which a window only swaps in.
+		ahead := exportWork(view.view.sources(), len(snap.Tracks))
+		ahead.warm, ahead.staged, ahead.updates = true, f.applicable(), snap.Pending.Rows
+		ahead.commits += ahead.staged/applyBatch + ahead.updates/updateBatch
+		if e := errNoNext; view.view != nil && o.Stage == nil && ahead.cost() > hookWindow-spare {
+			if e = next.build(false, true); e == nil {
+				res.Publish = next.ask()
+			} else if !errors.Is(e, errNoNext) && err == nil {
+				err = e
+			}
+			if e != nil {
+				log.Printf("rb-bridge: %v; the staged data is published in place, a window at a time", e)
+			}
+		}
+		if !res.Publish {
+			res.Publish = f.publish()
+		}
 	}
 	log.Printf("rb-bridge: fill of %s: %d staged, %d degraded, %d missing, %d unread, %d left of %d in %s (snapshot %s, exports %s; %s); publish=%v",
 		mount, res.Staged, res.Degraded, res.Missing, res.Unread, res.Left, f.total,
@@ -183,6 +283,7 @@ type filler struct {
 	res      FillResult
 	progress func(done, total int)
 	rgbDir   string
+	inNext   *rbstate.Snapshot // of the next library, nil without one
 	// the priority queue: the last sequence served, and tries of a path that cannot be staged
 	lastAckSeq uint64
 	retries    map[string]int
@@ -263,6 +364,11 @@ func (f *filler) fill(i int) (ok bool, err error) {
 	}
 	if e := f.entries[vt.key]; e != nil && e.Sig.Equal(src.Sig) {
 		return true, nil
+	}
+	if f.inNext != nil {
+		if t := f.inNext.Tracks[vt.key]; t != nil && t.Perf != rbstate.PerfNone && t.Built.Equal(src.Sig) {
+			return true, nil
+		}
 	}
 	rec, err := enginedb.BuildTrack(f.r, vt.track, src, opts)
 	if err != nil {
@@ -480,11 +586,16 @@ func (f *filler) servePriority() error {
 	return nil
 }
 
-// publish reports whether the stage holds a record a window would apply. The set the last
-// remount was asked for is not asked for again (that window did nothing with it), unless rows
-// were still waiting: they are part of the sum (KDATA: a take-over window updated 5,524 rows and
-// applied nothing, and without another window cue write-back stayed locked out).
-func (f *filler) publish() bool {
+// sources are the export files the view was read from; nil for no view.
+func (v *View) sources() []rbstate.FileSig {
+	if v == nil {
+		return nil
+	}
+	return v.Sources
+}
+
+// staged are the stage's records a window would apply, sorted.
+func (f *filler) staged() []string {
 	var keys []string
 	for key, e := range f.entries {
 		i, ok := f.byKey[key]
@@ -496,27 +607,59 @@ func (f *filler) publish() bool {
 		}
 		keys = append(keys, key)
 	}
-	if len(keys) == 0 {
-		return false
-	}
 	slices.Sort(keys)
-	h := sha256.New()
-	for _, k := range keys {
-		e := f.entries[k]
-		fmt.Fprintf(h, "%s\x00%v\x00%v\x00", k, e.Sig.Audio, e.Sig.ANLZ)
-	}
-	sum := fmt.Sprintf("%s %s %d", f.snap.LibraryUUID, hex.EncodeToString(h.Sum(nil)), f.snap.Pending.Rows)
-	vk, err := volumeIdentity(f.mount)
+	return keys
+}
+
+func (f *filler) applicable() int { return len(f.staged()) }
+
+// askOnce reports whether a remount for this publication has not been asked for yet, and notes
+// it: a publication the last window did not take is not asked for again.
+func askOnce(mount, sum string) bool {
+	vk, err := volumeIdentity(mount)
 	if err != nil {
 		return true
 	}
 	mark := volumeFile("rb-publish", vk, "")
 	if b, err := os.ReadFile(mark); err == nil && string(b) == sum {
-		log.Printf("rb-bridge: the stage holds %d tracks the last window did not apply; no remount for them", len(keys))
 		return false
 	}
 	if err := writePrivate(mark, []byte(sum)); err != nil {
 		log.Printf("rb-bridge: publish mark not written: %v", err)
+	}
+	return true
+}
+
+// ask reports whether the remount that swaps this next library in is to be asked for.
+func (n *nextBuild) ask() bool {
+	h, err := rbstate.ReadHeaderFile(filepath.Join(n.dir, rbstate.SwapName))
+	if err != nil {
+		return false
+	}
+	if !askOnce(n.mount, fmt.Sprintf("next %s %d %s", h.LibraryUUID, h.Commit, h.Base)) {
+		log.Printf("rb-bridge: the last window did not swap the next library in; no remount for it")
+		return false
+	}
+	return true
+}
+
+// publish reports whether the stage holds a record a window would apply. The set the last
+// remount was asked for is not asked for again (that window did nothing with it), unless rows
+// were still waiting: they are part of the sum (KDATA: a take-over window updated 5,524 rows and
+// applied nothing, and without another window cue write-back stayed locked out).
+func (f *filler) publish() bool {
+	keys := f.staged()
+	if len(keys) == 0 {
+		return false
+	}
+	h := sha256.New()
+	for _, k := range keys {
+		e := f.entries[k]
+		fmt.Fprintf(h, "%s\x00%v\x00%v\x00", k, e.Sig.Audio, e.Sig.ANLZ)
+	}
+	if !askOnce(f.mount, fmt.Sprintf("%s %s %d", f.snap.LibraryUUID, hex.EncodeToString(h.Sum(nil)), f.snap.Pending.Rows)) {
+		log.Printf("rb-bridge: the stage holds %d tracks the last window did not apply; no remount for them", len(keys))
+		return false
 	}
 	return true
 }

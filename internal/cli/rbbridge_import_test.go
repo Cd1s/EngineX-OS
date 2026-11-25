@@ -123,9 +123,11 @@ func TestImportStatusWaitingStaysUntilDone(t *testing.T) {
 	}
 }
 
-// A stick no window left a snapshot on (no export, or a window stopped before it saved one)
-// has nothing to fill: the job ends quietly, with no error for the browser and no remount.
-func TestImportJobWithoutASnapshotEndsQuietly(t *testing.T) {
+// A stick without an export and without a snapshot has nothing to fill: the job ends quietly,
+// with no error for the browser and no remount. A stick with an export that no window converted
+// (a window left a big export to the job, or was stopped before it saved a snapshot) gets its
+// library from the job: the next library, and one remount that swaps it in.
+func TestImportJobWithoutASnapshot(t *testing.T) {
 	oldMounted, oldLock, oldRemount := mounted, importLock, startRemount
 	mounted = func(string) bool { return true }
 	importLock = filepath.Join(t.TempDir(), "lock")
@@ -133,12 +135,33 @@ func TestImportJobWithoutASnapshotEndsQuietly(t *testing.T) {
 	startRemount = func(string) error { remounts++; return nil }
 	defer func() { mounted, importLock, startRemount = oldMounted, oldLock, oldRemount }()
 	t.Setenv(rbstate.StageEnv, t.TempDir())
+	t.Setenv("ENGINEX_RB_PRIORITY_DIR", t.TempDir())
 	status := filepath.Join(t.TempDir(), "status")
 	t.Setenv("ENGINEX_USB_PREPARING_PATH", status)
+	empty := t.TempDir()
+	if err := runImportJob(context.Background(), empty); err != nil || remounts != 0 {
+		t.Fatalf("job on a stick without an export: %v, %d remounts", err, remounts)
+	}
+	if _, err := os.Stat(status + ".err"); !os.IsNotExist(err) {
+		t.Fatalf("an error was left for the browser: %v", err)
+	}
 	root := t.TempDir()
 	testfixture.Export(t, root)
-	if err := runImportJob(context.Background(), root); err != nil || remounts != 0 {
-		t.Fatalf("job: %v, %d remounts", err, remounts)
+	ctx, cancel := context.WithCancel(context.Background())
+	startRemount = func(string) error { remounts++; cancel(); return nil } // the hook stops the job at the remount
+	if err := runImportJob(ctx, root); err != nil || remounts != 1 {
+		t.Fatalf("job on a stick no window converted: %v, %d remounts", err, remounts)
+	}
+	db := filepath.Join(root, "Engine Library", "Database2")
+	if _, err := os.Stat(filepath.Join(db, "m.db")); !os.IsNotExist(err) {
+		t.Fatalf("the job wrote the stick's library itself: %v", err)
+	}
+	res, err := bridge.ConvertAtMount(context.Background(), root, bridge.MountOptions{Publish: true})
+	if err != nil || res.Pending.Rows != 0 || res.Pending.Lists {
+		t.Fatalf("the window of the remount: %+v, %v", res, err)
+	}
+	if h, err := rbstate.ReadHeader(db); err != nil || h.Tracks != 5 {
+		t.Fatalf("after the swap: %+v, %v", h, err)
 	}
 	if _, err := os.Stat(status + ".err"); !os.IsNotExist(err) {
 		t.Fatalf("an error was left for the browser: %v", err)

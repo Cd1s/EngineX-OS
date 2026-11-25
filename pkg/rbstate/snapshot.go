@@ -41,8 +41,13 @@ var ErrNoSnapshot = fmt.Errorf("rbstate: no snapshot: %w", os.ErrNotExist)
 
 // ReadHeader reads the snapshot's first line and checks that the file ends with its E line.
 func ReadHeader(dbDir string) (Header, error) {
+	return ReadHeaderFile(filepath.Join(dbDir, SnapshotName))
+}
+
+// ReadHeaderFile is ReadHeader of a snapshot under another name (SwapName).
+func ReadHeaderFile(file string) (Header, error) {
 	var h Header
-	f, err := openSnapshot(filepath.Join(dbDir, SnapshotName))
+	f, err := openSnapshot(file)
 	if err != nil {
 		return h, err
 	}
@@ -88,7 +93,7 @@ func parseEnd(line []byte) (records int, sum uint32, ok bool) {
 }
 
 // Load reads and checks the whole snapshot.
-func Load(dbDir string) (*Snapshot, error) { return load(filepath.Join(dbDir, SnapshotName)) }
+func Load(dbDir string) (*Snapshot, error) { return LoadFile(filepath.Join(dbDir, SnapshotName)) }
 
 func openSnapshot(file string) (*os.File, error) {
 	f, err := os.Open(file)
@@ -98,7 +103,8 @@ func openSnapshot(file string) (*os.File, error) {
 	return f, err
 }
 
-func load(file string) (*Snapshot, error) {
+// LoadFile is Load of a snapshot under another name.
+func LoadFile(file string) (*Snapshot, error) {
 	f, err := openSnapshot(file)
 	if err != nil {
 		return nil, err
@@ -170,7 +176,7 @@ func (s *Snapshot) Encode() ([]byte, error) {
 }
 
 // Save replaces the snapshot in dbDir, pull-safe (ReplaceFile). The caller holds LockVolume.
-func (s *Snapshot) Save(dbDir string) error { return s.saveAs(filepath.Join(dbDir, SnapshotName)) }
+func (s *Snapshot) Save(dbDir string) error { return s.SaveAs(filepath.Join(dbDir, SnapshotName)) }
 
 // A window saves the snapshot its transaction leads to as the next snapshot (SaveNext) before it
 // commits, then makes it the snapshot (Promote). A window that finds a next snapshot reads the
@@ -179,9 +185,14 @@ func (s *Snapshot) Save(dbDir string) error { return s.saveAs(filepath.Join(dbDi
 const nextName = SnapshotName + ".next"
 
 // SaveNext writes the snapshot the transaction under way leads to.
-func (s *Snapshot) SaveNext(dbDir string) error { return s.saveAs(filepath.Join(dbDir, nextName)) }
+func (s *Snapshot) SaveNext(dbDir string) error { return s.SaveAs(filepath.Join(dbDir, nextName)) }
 
-func (s *Snapshot) saveAs(file string) error {
+// SwapName is, beside the snapshot, the snapshot of a next library that is ready to take the
+// stick's library's place (pkg/bridge next.go). Its Header.Base names the library it replaces.
+const SwapName = SnapshotName + ".swap"
+
+// SaveAs is Save under another name, pull-safe.
+func (s *Snapshot) SaveAs(file string) error {
 	b, err := s.Encode()
 	if err != nil {
 		return err
@@ -195,7 +206,7 @@ func Promote(dbDir string) error {
 }
 
 // LoadNext returns the next snapshot a cut left, or ErrNoSnapshot.
-func LoadNext(dbDir string) (*Snapshot, error) { return load(filepath.Join(dbDir, nextName)) }
+func LoadNext(dbDir string) (*Snapshot, error) { return LoadFile(filepath.Join(dbDir, nextName)) }
 
 // DropNext removes the next snapshot.
 func DropNext(dbDir string) error {
