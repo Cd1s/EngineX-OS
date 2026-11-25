@@ -435,11 +435,6 @@ func parseSQLiteCue(r sqlRecordLike) (Cue, bool) {
 }
 
 var (
-	lookupColumnGroups = []sqlColumnGroup{
-		{"id"},
-		{"artist_id", "album_id", "genre_id", "label_id", "key_id", "artwork_id", "image_id"},
-		{"name", "scale_name", "title", "path", "file_path"},
-	}
 	contentColumnGroups = []sqlColumnGroup{
 		{"id", "content_id", "track_id"},
 		{"file_path", "path", "location"},
@@ -503,6 +498,13 @@ var (
 		{"content_id", "track_id"},
 	}
 )
+
+func lookupColumnGroups(kind string) []sqlColumnGroup {
+	return []sqlColumnGroup{
+		{"id", kind + "_id"},
+		{"name", "scale_name", "title", "path", "file_path"},
+	}
+}
 
 type sqlColumnGroup []string
 
@@ -790,7 +792,7 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 	for _, kind := range []string{"artist", "album", "genre", "label", "key", "artwork", "image"} {
 		m := map[uint32]string{}
 		if tbl := findTable(kind, "djmd"+kind); tbl != "" {
-			if e := eachSQLProjectedRow(ctx, db, tbl, lookupColumnGroups, func(r sqlDriverRecord) {
+			if e := eachSQLProjectedRow(ctx, db, tbl, lookupColumnGroups(kind), func(r sqlDriverRecord) {
 				m[r.num("id", kind+"_id")] = r.get("name", "scale_name", "title", "path", "file_path")
 			}); e != nil {
 				return nil, e
