@@ -63,12 +63,8 @@ type fillView struct {
 // hookWindow is the time the hook gives a window (design section 3).
 const hookWindow = 17 * time.Second
 
-// readFillView reads the exports as a window would (FindSources, ReadSources, the staged CDJ
-// libraries, BuildView) into the view's tracks and the stamp; a variable for tests.
-var readFillView = func(ctx context.Context, r *compat.Resolver, mount, layout string) (*fillView, error) {
-	return readJobView(ctx, r, mount, layout, "")
-}
-
+// readJobView reads the exports as a window would (FindSources, ReadSources, the staged CDJ
+// libraries, BuildView) into the view's tracks and the stamp.
 func readJobView(ctx context.Context, r *compat.Resolver, mount, layout, lang string) (*fillView, error) {
 	files, err := FindSources(r, mount)
 	if err != nil {

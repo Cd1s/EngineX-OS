@@ -63,7 +63,7 @@ func writeSnapshot(t *testing.T, root string, edit func(*rbstate.Snapshot)) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, err := readFillView(context.Background(), r, root, rbstate.LayoutFolders)
+	v, err := readJobView(context.Background(), r, root, rbstate.LayoutFolders, "")
 	if err != nil {
 		t.Fatal(err)
 	}
