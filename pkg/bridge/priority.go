@@ -75,10 +75,11 @@ type PriorityAck struct {
 	UpdatedAtMS int64             `json:"updatedAtMs"`
 }
 
-// DeckActivity says whether a deck is playing, cue-previewing, scratching or moving its platter:
-// the job then yields the stick (pace.go).
+// DeckActivity says whether a deck is playing, cue-previewing, scratching, moving its platter,
+// or loading a track (/Track/SongLoading): the job yields the stick (pace.go).
 type DeckActivity struct {
 	Active      bool  `json:"active"`
+	Loading     bool  `json:"loading,omitempty"`
 	IdleSamples int   `json:"idleSamples"`
 	UpdatedAtMS int64 `json:"updatedAtMs"`
 }
@@ -165,6 +166,7 @@ type PriorityQueue struct {
 	seq          uint64
 	volumes      map[volumeKey]*PriorityRecord
 	deckActive   bool
+	deckLoading  bool
 	idleSamples  int
 	lastIdleAt   time.Time
 	lastActWrite time.Time
@@ -226,12 +228,20 @@ func (q *PriorityQueue) Enqueue(mount, enginePath, source string, deck int) (uin
 // effect at once; idle after idleSamplesNeeded samples at least idleSampleMinGap apart. The file is
 // written at each change and every 2 s while a deck is active.
 func (q *PriorityQueue) UpdateDeckActivity(active bool, now time.Time) bool {
+	act, _ := q.UpdateDeckState(active, false, now)
+	return act
+}
+
+// UpdateDeckState takes a sample of both deck playback/cue/scratch activity and /Track/SongLoading.
+// Loading takes effect and clears immediately; active keeps the 2-sample idle debounce.
+func (q *PriorityQueue) UpdateDeckState(active, loading bool, now time.Time) (bool, bool) {
 	if now.IsZero() {
 		now = time.Now()
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	changed := !q.hasActivity
+	changed := !q.hasActivity || q.deckLoading != loading
+	q.deckLoading = loading
 	if active {
 		changed = changed || !q.deckActive || q.idleSamples != 0
 		q.deckActive, q.idleSamples, q.lastIdleAt = true, 0, time.Time{}
@@ -243,13 +253,34 @@ func (q *PriorityQueue) UpdateDeckActivity(active bool, now time.Time) bool {
 		}
 	}
 	q.hasActivity = true
-	if changed || (q.deckActive && now.Sub(q.lastActWrite) >= 2*time.Second) {
-		act := DeckActivity{Active: q.deckActive, IdleSamples: q.idleSamples, UpdatedAtMS: now.UnixMilli()}
+	if changed || ((q.deckActive || q.deckLoading) && now.Sub(q.lastActWrite) >= 2*time.Second) || now.Sub(q.lastActWrite) >= 4*time.Second {
+		act := DeckActivity{Active: q.deckActive, Loading: q.deckLoading, IdleSamples: q.idleSamples, UpdatedAtMS: now.UnixMilli()}
 		if writePrivateJSON(deckActivityPath(), act) == nil {
 			q.lastActWrite = now
 		}
 	}
-	return q.deckActive
+	return q.deckActive, q.deckLoading
+}
+
+// RefreshDeckActivity rewrites rb-deck-activity.json immediately when a deck is already
+// known active or loading and the on-disk file is absent or older than 2 s (e.g. a second
+// stick begins importing on a 2-deck player before QML's next 3 s UI poll).
+func (q *PriorityQueue) RefreshDeckActivity(now time.Time) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if !q.hasActivity || (!q.deckActive && !q.deckLoading) {
+		return
+	}
+	if _, err := os.Lstat(deckActivityPath()); err == nil && now.Sub(q.lastActWrite) < 2*time.Second {
+		return
+	}
+	act := DeckActivity{Active: q.deckActive, Loading: q.deckLoading, IdleSamples: q.idleSamples, UpdatedAtMS: now.UnixMilli()}
+	if writePrivateJSON(deckActivityPath(), act) == nil {
+		q.lastActWrite = now
+	}
 }
 
 // readQueue is the volume's record, nil when there is none or it names another volume.
@@ -333,6 +364,17 @@ func HasPendingPriority(mount string, lastSeq uint64) bool {
 func IsDeckActive() bool {
 	var act DeckActivity
 	if readPrivateJSON(deckActivityPath(), &act) != nil || !act.Active || act.UpdatedAtMS <= 0 {
+		return false
+	}
+	age := time.Since(time.UnixMilli(act.UpdatedAtMS))
+	return age >= -time.Second && age <= deckActivityTTL
+}
+
+// IsDeckLoading reports a deck stream-sync saw loading a track (/Track/SongLoading) within
+// deckActivityTTL; the background job performs no stick I/O while true.
+func IsDeckLoading() bool {
+	var act DeckActivity
+	if readPrivateJSON(deckActivityPath(), &act) != nil || !act.Loading || act.UpdatedAtMS <= 0 {
 		return false
 	}
 	age := time.Since(time.UnixMilli(act.UpdatedAtMS))

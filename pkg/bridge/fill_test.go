@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -736,5 +737,178 @@ func TestFillStopsWritingListWaveformsWhenTheirFolderIsFull(t *testing.T) {
 	files, _ := filepath.Glob(filepath.Join(dbDirOf(root), "OverviewData", snap.LibraryUUID, "*.rgb"))
 	if tries != 5 || len(files) != 4 || strings.Count(out.String(), "takes no more files") != 1 || strings.Contains(out.String(), "mini waveform of track") {
 		t.Fatalf("%d tries, %d files written; log:\n%s", tries, len(files), out)
+	}
+}
+
+// Finding 4.1: while any deck is loading a track (/Track/SongLoading -> loading:true in
+// rb-deck-activity.json), even when all decks are paused (active:false), FillInBackground
+// must do zero stick I/O until loading clears.
+func TestFillHaltsStickIOWhileDeckLoadingOnPausedDeck(t *testing.T) {
+	defer SetPriorityDirForTest(t.TempDir())()
+	root, snap := fillStick(t, 8)
+	writeLoading := func(loading bool) {
+		raw := fmt.Sprintf(`{"active":false,"loading":%v,"updatedAtMs":%d}`, loading, time.Now().UnixMilli())
+		if err := writePrivate(deckActivityPath(), []byte(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeLoading(true)
+
+	var rgbWrites atomic.Int64
+	real := writeRGBFile
+	defer func() { writeRGBFile = real }()
+	writeRGBFile = func(dir, uuid string, id int64, body []byte) error {
+		rgbWrites.Add(1)
+		return real(dir, uuid, id, body)
+	}
+
+	var prog atomic.Int64
+	done := make(chan FillResult, 1)
+	go func() {
+		res, err := FillInBackground(context.Background(), root, FillOptions{
+			Stage:    stageOf(t, snap),
+			Progress: func(d, _ int) { prog.Store(int64(d)) },
+		})
+		if err != nil {
+			t.Errorf("fill: %v", err)
+		}
+		done <- res
+	}()
+
+	time.Sleep(150 * time.Millisecond)
+	if w, p := rgbWrites.Load(), prog.Load(); w != 0 || p != 0 {
+		writeLoading(false)
+		<-done
+		t.Fatalf("stick I/O ran while paused deck was loading: rgbWrites=%d progress=%d", w, p)
+	}
+
+	writeLoading(false)
+	select {
+	case res := <-done:
+		if res.Staged != 8 || res.Left != 0 {
+			t.Fatalf("after loading cleared: %+v", res)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("fill did not resume after loading cleared")
+	}
+}
+
+// Finding 4.4: readJobView and writeRGB must pace stick I/O while a deck is playing.
+func TestFillPacesReadJobViewAndWriteRGB(t *testing.T) {
+	defer SetPriorityDirForTest(t.TempDir())()
+	oldGap, oldCache := playingReadGap, fromCache
+	playingReadGap, fromCache = 12*time.Millisecond, 0
+	defer func() { playingReadGap, fromCache = oldGap, oldCache }()
+
+	root, snap := fillStick(t, 6)
+	// Pad export.pdb to >256 KiB (trailing zero bytes are ignored by PDB header page count)
+	// so paced 64 KiB reads execute >=4 chunks in readJobView.
+	pdb := filepath.Join(root, "PIONEER/rekordbox/export.pdb")
+	b, err := os.ReadFile(pdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) < 260<<10 {
+		padded := make([]byte, 260<<10)
+		copy(padded, b)
+		if err := os.WriteFile(pdb, padded, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Mark every track as already built & verified in the stage, leaving only readJobView
+	// and the staged->live RGB replay loop (6 files with mismatched EngineID) to run.
+	st := stageOf(t, snap)
+	first := mustFill(t, root, FillOptions{Stage: st})
+	if first.Staged != 6 {
+		t.Fatalf("seed fill: %+v", first)
+	}
+	// Remove written RGBs and mark snapshot as already PerfApplied with a new EngineID so
+	// FillInBackground runs readJobView + the 6-file writeRGB loop and zero BuildTrack work.
+	_ = os.RemoveAll(filepath.Join(dbDirOf(root), "OverviewData"))
+	entries, _, err := st.Entries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSnapshot(t, root, func(s *rbstate.Snapshot) {
+		for k, tr := range s.Tracks {
+			if e := entries[k]; e != nil {
+				tr.Perf = rbstate.PerfApplied
+				tr.Built = e.Sig
+				tr.EngineID = e.EngineID + 100
+			}
+		}
+	})
+
+	setDeck(t, true)
+	var firstRGBAt time.Time
+	rgbCount := 0
+	real := writeRGBFile
+	defer func() { writeRGBFile = real }()
+	writeRGBFile = func(dir, uuid string, id int64, body []byte) error {
+		if firstRGBAt.IsZero() {
+			firstRGBAt = time.Now()
+		}
+		rgbCount++
+		return real(dir, uuid, id, body)
+	}
+	start := time.Now()
+	_ = mustFill(t, root, FillOptions{Stage: st})
+	total := time.Since(start)
+	if rgbCount != 6 {
+		t.Fatalf("expected 6 rgb writes, got %d", rgbCount)
+	}
+	// readJobView must pace across >=4 chunks (>=48 ms) before the first RGB write,
+	// and 6 RGB writes must pace >=6*12 ms (>=72 ms) after that.
+	if readDur := firstRGBAt.Sub(start); readDur < 4*playingReadGap {
+		t.Fatalf("readJobView was not paced while deck played: took %s, want >= %s", readDur, 4*playingReadGap)
+	}
+	if rgbDur := total - firstRGBAt.Sub(start); rgbDur < 6*playingReadGap {
+		t.Fatalf("writeRGB loop was not paced while deck played: took %s, want >= %s", rgbDur, 6*playingReadGap)
+	}
+}
+
+// Finding 4.1: IsEngineCopying detects Engine writing into /data/inMusicTempFiles/
+// (O_WRONLY/O_RDWR, not O_RDONLY) and halts FillInBackground until the copy closes.
+func TestIsEngineCopyingHaltsFill(t *testing.T) {
+	proc := t.TempDir()
+	copies := filepath.Join(t.TempDir(), "inMusicTempFiles")
+	if err := os.MkdirAll(copies, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pidDir := filepath.Join(proc, "4242")
+	if err := os.MkdirAll(filepath.Join(pidDir, "fd"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(pidDir, "fdinfo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pidDir, "comm"), []byte("Engine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	copyTarget := filepath.Join(copies, "track.mp3")
+	if err := os.Symlink(copyTarget, filepath.Join(pidDir, "fd", "7")); err != nil {
+		t.Fatal(err)
+	}
+	fdinfo := filepath.Join(pidDir, "fdinfo", "7")
+	if err := os.WriteFile(fdinfo, []byte("pos:\t0\nflags:\t0100000\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldProc, oldCopies := engineProcDir, engineCopiesDir
+	engineProcDir, engineCopiesDir = proc, copies+"/"
+	defer func() {
+		engineProcDir, engineCopiesDir = oldProc, oldCopies
+	}()
+	if IsEngineCopying() {
+		t.Fatal("O_RDONLY fd should not report IsEngineCopying")
+	}
+	if err := os.WriteFile(fdinfo, []byte("pos:\t0\nflags:\t0100001\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !IsEngineCopying() {
+		t.Fatal("O_WRONLY fd in copies dir must report IsEngineCopying")
+	}
+	_ = os.Remove(filepath.Join(pidDir, "fd", "7"))
+	if IsEngineCopying() {
+		t.Fatal("closed fd should clear IsEngineCopying")
 	}
 }

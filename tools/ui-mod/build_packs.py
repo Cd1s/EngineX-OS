@@ -1675,8 +1675,14 @@ SERVICES_MAIN = """
 	}
 	property var scShadowCueCache: ({})
 	// #209: lightweight local deck beat clock when 4-deck shadow mode is off.
-	// Active only while stream-sync reports deckClock=true; zero work otherwise.
+	// Timer runs only while stream-sync reports deckClock=true; edge signals on
+	// PlayState/SongLoading wake immediately so background imports never hit a 3 s blind spot.
 	property bool scDeckClock: false
+	property bool scDeckClockWatched: false
+	property bool scShadowLoadingWatched: false
+	property bool scDeckClockWasActive: false
+	property bool scDeckClockDirty: false
+	onScDeckClockChanged: if (scDeckClock && scFourDeckRole === "") scDeckClockTick()
 	property var scDeckClockRequest: null
 	property var scDeckClockProps: ({})
 	property var scDeckClockProbeAt: ({})
@@ -1693,6 +1699,11 @@ SERVICES_MAIN = """
 		running: root.scDeckClock && root.scFourDeckRole === ""
 		onTriggered: root.scDeckClockTick()
 	}
+	Timer {
+		id: scDeckClockConfirmTimer
+		interval: 500; repeat: false
+		onTriggered: { root.scDeckClockSig = ""; root.scDeckClockTick() }
+	}
 	function scDeckClockDeckProps(d, now) {
 		let g = scDeckClockProps[d]
 		if (g) return g
@@ -1704,6 +1715,7 @@ SERVICES_MAIN = """
 		g = {
 			play: play,
 			loaded: root.scTr(prefix + "/Track/SongLoaded") || scShadowEmptyObject,
+			loading: root.scTr(prefix + "/Track/SongLoading") || scShadowEmptyObject,
 			length: root.scTr(prefix + "/Track/TrackLength") || scShadowEmptyObject,
 			cueLED: root.scTr(prefix + "/Track/CueLEDState") || scShadowEmptyObject,
 			master: root.scTr(prefix + "/DeckIsMaster") || scShadowEmptyObject,
@@ -1715,25 +1727,64 @@ SERVICES_MAIN = """
 			touch: root.scTr(prefix + "/ExternalScratchWheelTouch") || scShadowEmptyObject,
 			platter: root.scTr(prefix + "/PlatterUserAction") || scShadowEmptyObject
 		}
+		for (const t of [g.play, g.cueLED, g.touch, g.platter, g.loading])
+			if (t && t.stateChanged) t.stateChanged.connect(root.scDeckClockWake)
 		scDeckClockProps[d] = g
 		return g
+	}
+	function scDeckClockWake() {
+		if (scFourDeckRole !== "") return
+		if (scDeckClock && scDeckClockTimer.interval !== 100) scDeckClockTimer.interval = 100
+		scDeckClockTick()
+	}
+	function scDeckClockWatch() {
+		if (scFourDeckRole !== "") {
+			if (!scShadowLoadingWatched && typeof scShadowProperties === "function") {
+				for (let d = 1; d <= 4; d++) {
+					const p = scShadowProperties(d)
+					if (p && p.loading && p.loading.stateChanged) p.loading.stateChanged.connect(root.scShadowWake)
+				}
+				scShadowLoadingWatched = true
+			}
+			return
+		}
+		if (scDeckClockWatched) return
+		const now = Date.now()
+		let found = false
+		for (let d = 1; d <= 4; d++) {
+			if (scDeckClockDeckProps(d, now)) found = true
+		}
+		if (found) {
+			scDeckClockWatched = true
+			scDeckClockTick()
+		}
 	}
 	function scDeckClockTick() {
 		const now = Date.now()
 		let x = scDeckClockRequest
-		if (!x) { x = new XMLHttpRequest(); scDeckClockRequest = x }
+		if (!x) {
+			x = new XMLHttpRequest()
+			x.onreadystatechange = function() {
+				if (x.readyState === 4 && root.scDeckClockDirty) {
+					root.scDeckClockDirty = false
+					root.scDeckClockTick()
+				}
+			}
+			scDeckClockRequest = x
+		}
 		if (x.readyState > 0 && x.readyState < 4) {
-			if (now - scDeckClockPostAt < 2000) return
+			if (now - scDeckClockPostAt < 2000) { scDeckClockDirty = true; return }
 			x.abort()
 		}
 		const out = scDeckClockOut
-		let count = 0, anyPlaying = false
+		let count = 0, anyPlaying = false, anyLoading = false
 		let sig = ""
 		for (let d = 1; d <= 4; d++) {
 			const g = scDeckClockDeckProps(d, now)
 			if (!g) continue
 			const ps = !!g.play.state
 			const loaded = !!g.loaded.state
+			const loading = !!g.loading.state
 			const trackLen = loaded ? (g.length.unnormalized || 0) : 0
 			const sameTrack = loaded && scDeckClockPrevLoaded[d] === true && scDeckClockPrevLen[d] === trackLen
 			const sr = g.rate.value || 0
@@ -1748,20 +1799,30 @@ SERVICES_MAIN = """
 			scDeckClockPrevCue[d] = cue
 			const playing = ps || cue
 			if (playing || scratch) anyPlaying = true
+			if (loading) anyLoading = true
 			const master = !!g.master.state
 			const bpm = g.original.unnormalized || 0
 			const currentBpm = g.current.unnormalized || 0
 			const beat = g.beat.unnormalized || 0
 			const o = out[count] || (out[count] = {})
-			o.deck = d; o.playing = playing; o.cue = cue; o.scratch = scratch; o.master = master; o.lead = master
+			o.deck = d; o.playing = playing; o.cue = cue; o.scratch = scratch; o.loading = loading; o.master = master; o.lead = master
 			o.bpm = bpm; o.currentBpm = currentBpm; o.beat = beat; o.positionMs = posMs; o.at = now
 			count++
-			sig += d + ":" + (playing ? 1 : 0) + ":" + (scratch ? 1 : 0) + ":" + (master ? 1 : 0) + ":" + Math.round(currentBpm * 100) + ":" + Math.round(beat * 1000) + ";"
+			sig += d + ":" + (playing ? 1 : 0) + ":" + (scratch ? 1 : 0) + ":" + (loading ? 1 : 0) + ":" + (master ? 1 : 0) + ":" + Math.round(currentBpm * 100) + ":" + Math.round(beat * 1000) + ";"
 		}
 		out.length = count
-		const rate = anyPlaying ? 100 : 500
+		const rate = (anyPlaying || anyLoading) ? 100 : 500
 		if (scDeckClockTimer.interval !== rate) scDeckClockTimer.interval = rate
-		if (!anyPlaying && sig === scDeckClockSig && now - scDeckClockPostAt < 1000) return
+		if (typeof scDeckClockConfirmTimer !== "undefined") {
+			if (anyPlaying) {
+				scDeckClockWasActive = true
+				scDeckClockConfirmTimer.stop()
+			} else if (scDeckClockWasActive) {
+				scDeckClockWasActive = false
+				if (!scDeckClock) scDeckClockConfirmTimer.restart()
+			}
+		}
+		if (!anyPlaying && !anyLoading && sig === scDeckClockSig && now - scDeckClockPostAt < 1000) return
 		scDeckClockSig = sig
 		scDeckClockPostAt = now
 		x.open("POST", "http://127.0.0.1:8080/v1/enginex/clock")
@@ -1979,7 +2040,7 @@ SERVICES_MAIN = """
 		const prefix = "/Engine/Deck" + d
 		for (const pair of [["rate", "/Track/SampleRate"], ["shown", "/SpeedState"], ["original", "/OriginalBPM"],
 			["current", "/CurrentBPM"], ["play", "/PlayState"], ["position", "/Track/TrackPosition"],
-			["loaded", "/Track/SongLoaded"], ["uri", "/Track/TrackUri"], ["net", "/Track/TrackNetworkPath"],
+			["loaded", "/Track/SongLoaded"], ["loading", "/Track/SongLoading"], ["uri", "/Track/TrackUri"], ["net", "/Track/TrackNetworkPath"],
 			["cueLED", "/Track/CueLEDState"], ["master", "/DeckIsMaster"], ["sync", "/SyncMode"],
 			["beat", "/BeatNumber"], ["cuePosition", "/Track/CuePosition"], ["title", "/Track/SongName"],
 			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"], ["length", "/Track/TrackLength"],
@@ -1996,7 +2057,7 @@ SERVICES_MAIN = """
 				position: root.scTr(q + "Position") || scShadowEmptyObject, name: root.scTr(q + "Name") || scShadowEmptyObject,
 				color: root.scTr(q + "Color") || scShadowEmptyObject})
 		}
-		// Rare signals: a play or CUE press, or a hand on the platter, restores the 25 Hz sampling at once
+		// Rare signals: a play or CUE press, or a hand on the platter, restores 25 Hz sampling at once
 		// (at the 5 Hz of a resting deck a scratch began up to 200 ms late on the other player: measured).
 		for (const t of [p.play, p.cueLED, p.touch, p.platterTouch]) if (t.stateChanged) t.stateChanged.connect(root.scShadowWake)
 		scShadowDeckProperties[d] = p
@@ -2041,6 +2102,7 @@ SERVICES_MAIN = """
 			s.rawPos = s.posMs
 			s.bpm = ob; s.currentBpm = cb; s.at = now; s.jumps = p ? p.jumps : 0
 			s.loaded = !!g.loaded.state
+			s.songLoading = !!g.loading.state
 			if (p && p.loaded === s.loaded && now - p.netAt < 500) { s.net = p.net; s.netAt = p.netAt }
 			else { s.net = s.loaded ? g.uri.string || g.net.string || "" : ""; s.netAt = now }
 			const touch = !!(g.touch.state || g.platterTouch.state)
@@ -2120,10 +2182,10 @@ SERVICES_MAIN = """
 				} else if (s.scratch && p.scratch && s.net === p.net && Math.abs(s.rawPos - p.rawPos) > 500) {
 					s.jumps++
 				}
-				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync || s.range !== p.range || s.keylock !== p.keylock) edge = true
+				if (s.jumps !== p.jumps || s.playing !== p.playing || s.songLoading !== p.songLoading || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync || s.range !== p.range || s.keylock !== p.keylock) edge = true
 				if (!s.ps && s.posMs !== p.posMs) busy = true // scrub, seek or CUE preview while paused
 			}
-			if (s.cue) busy = true
+			if (s.cue || s.songLoading) busy = true
 			if (s.ps) moving = true
 			if (s.scratch) anyScratch = true
 			// Engine moves TrackPosition in audio blocks: at 25 Hz a playing deck's raw
@@ -2248,7 +2310,7 @@ SERVICES_MAIN = """
 			const fresh = o.net !== s.net || !(now - (scShadowTextAt[d] || 0) < 2000) || o.keyOffset !== shift
 			o.deck = d; o.net = s.net; o.cues = s.net ? cc.cues : null; o.cuePos = s.net ? g.cuePosition.value : undefined
 			o.masterPress = scMasterPresses(d, g.requestMaster)
-			o.playing = s.playing; o.cue = s.cue; o.scratch = !!s.scratch; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
+			o.playing = s.playing; o.cue = s.cue; o.scratch = !!s.scratch; o.songLoading = !!s.songLoading; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
 			o.pitch = s.pitch; o.master = s.master || d === lead; o.lead = s.master; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
 			// The phase meter as this deck's header shows it: the peer's shadow header turns green with it (its copy is out of Sync).
@@ -4334,7 +4396,7 @@ SERVICES_MAIN = """
 		// Unchanged settings (stream-sync's digest): skip the parse and the writes,
 		// but re-apply every 30 s in case a local change raced a reply.
 		const digest = scUiPoll.getResponseHeader("X-UI-Digest") || "", now = Date.now()
-		if (digest && digest === scUiDigest && now - scUiAppliedAt < 30000) { scEnsureTidal(); return }
+		if (digest && digest === scUiDigest && now - scUiAppliedAt < 30000) { scEnsureTidal(); if (typeof scDeckClockWatch === "function") scDeckClockWatch(); return }
 		const prevScope = scScope
 		const wasLoaded = typeof scUiLoaded !== "undefined" && scUiLoaded
 		const wasIn = wasLoaded && prevScope && prevScope !== "tidal" && Array.isArray(scLoggedIn) ? scLoggedIn.indexOf(prevScope) >= 0 : null
@@ -4396,6 +4458,7 @@ SERVICES_MAIN = """
 		scPlayer = !!v.player
 		scDeckClock = !!v.deckClock
 		scFourDeckRole = scIsPlayerBoard && v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
+		if (typeof scDeckClockWatch === "function") scDeckClockWatch()
 		scFourDeckOn = scIsPlayerBoard && !!v.fourDeckWaveform
 		scPairedSetting = scIsPlayerBoard && !!v.fourDeckWaveform && !!v.pairedView
 		scConsoleLine = scConsoleLineBoard && !!v.consoleLineView

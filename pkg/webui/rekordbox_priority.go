@@ -47,22 +47,24 @@ func resolveMediaVolumePath(file, mediaRoot string) (mount, enginePath string, o
 	return mount, "../" + inner, true
 }
 
-// noteDeckPriority records deck activity (PlayState, CUE preview, scratch, or
-// platter movement) and enqueues newly loaded or CUE-previewed rekordbox stick
-// tracks for immediate background processing.
+// noteDeckPriority records deck activity (PlayState, CUE preview, scratch, platter
+// movement, or /Track/SongLoading) and enqueues newly loaded or CUE-previewed rekordbox
+// stick tracks for immediate background processing.
 func (s *Server) noteDeckPriority(decks []deckState, now time.Time) {
 	if s == nil || s.shadow == nil {
 		return
 	}
 	q := s.rbPriorityQueue()
-	anyActive := false
+	anyActive, anyLoading := false, false
 	for _, d := range decks {
 		if d.Playing || d.Cue || d.Scratch {
 			anyActive = true
-			break
+		}
+		if d.Loading || d.SongLoading {
+			anyLoading = true
 		}
 	}
-	q.UpdateDeckActivity(anyActive, now)
+	q.UpdateDeckState(anyActive, anyLoading, now)
 
 	mediaRoot := s.shadow.mediaRoot
 	if mediaRoot == "" {
