@@ -112,6 +112,33 @@ func nextLeftovers(t *testing.T, mount string) {
 func TestNextLibrarySwappedInIsTheLibraryTheWindowsWrite(t *testing.T) {
 	mount := nextStick(t, 60)
 	base, stage := filepath.Dir(mount), os.Getenv(rbstate.StageEnv)
+	// Two tracks have a list waveform: one staged before it had its row, one with it (the job
+	// wrote that file then).
+	first := snapshot(t, mount)
+	records, err := rbstate.OpenStage(first.LibraryUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var late, early int64
+	for i, withRow := range []bool{false, true} {
+		key := rbstate.FoldPath(testfixture.LargeTrackPath(i + 1))
+		rec, err := records.Get(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec.RGB = []byte{0, 0, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8}
+		if id := first.Tracks[key].EngineID; withRow {
+			rec.EngineID, early = id, id
+		} else {
+			late = id
+		}
+		if err = records.Put(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = records.Close(); err != nil {
+		t.Fatal(err)
+	}
 	copyTree(t, mount, filepath.Join(base, "inplace", "stick"))
 	copyTree(t, stage, filepath.Join(base, "inplace", "stage"))
 	ids := trackIDs(t, mount)
@@ -157,6 +184,10 @@ func TestNextLibrarySwappedInIsTheLibraryTheWindowsWrite(t *testing.T) {
 	}
 	if entries, _, _ := st.Entries(); len(entries) != 0 {
 		t.Fatalf("%d records left in the stage by the job after the swap", len(entries))
+	}
+	rgb, _ := filepath.Glob(filepath.Join(dbDir(mount), "OverviewData", first.LibraryUUID, "*.rgb"))
+	if len(rgb) != 1 || filepath.Base(rgb[0]) != fmt.Sprintf("%d.rgb", late) {
+		t.Fatalf("list waveforms after the swap: %v, want only row %d's (row %d's is the job's from the staging)", rgb, late, early)
 	}
 	if again := mountNow(t, mount, MountOptions{Deadline: time.Now().Add(hookWindow)}); !again.Bypassed {
 		t.Fatalf("the stick inserted again: %+v", again)

@@ -181,12 +181,15 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		byKey: make(map[string]int, len(view.tracks)), handled: make([]bool, len(view.tracks)), built: make([]bool, len(view.tracks)),
 		rgbDir: dbDir, progress: o.Progress,
 	}
-	// A record a next library applied stayed in the stage for the deck's loads until the swap:
-	// its list waveform is written now that the row is the stick's, and it goes.
+	// A record a next library applied stayed in the stage for the deck's loads until the swap, and
+	// goes now. Its list waveform is written now that the row is the stick's, unless the job wrote
+	// it when it staged the track with this row (KDATA: 5,548 files read again, 42 s of the job).
 	for key, e := range entries {
 		if t := snap.Tracks[key]; t != nil && t.EngineID != 0 && t.Perf != rbstate.PerfNone && !e.Missing && t.Built.Equal(e.Sig) {
-			if full, e2 := stage.Read(e); e2 == nil && len(full.RGB) > 0 {
-				f.writeRGB(t.EngineID, full.RGB)
+			if e.EngineID != t.EngineID {
+				if full, e2 := stage.Read(e); e2 == nil && len(full.RGB) > 0 {
+					f.writeRGB(t.EngineID, full.RGB)
+				}
 			}
 			if err = stage.Drop(key); err != nil {
 				return res, err
