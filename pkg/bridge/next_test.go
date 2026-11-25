@@ -862,12 +862,15 @@ func TestWorkCostAgainstTheReplica(t *testing.T) {
 		{"30 tracks more in a list of 20,030 (synthetic)", work{adds: 30, lists: 1, entries: 20030, commits: 1, tracks: 20000}, 4389},
 		{"KDATA staged window", work{staged: 320}, 10350},
 		{"KDATA commit", work{commits: 1, tracks: 5962}, 640},
-		{"rows the deck wrote, looked for among 50,000 tracks in one list (synthetic)", work{scan: 100002}, 15736},
+		{"KDATA deck-row look (13,169 rows, scattered)", work{scan: 13169}, 4400},
 	}
 	for _, m := range measured {
 		if got := m.w.cost().Milliseconds(); got < m.ms*85/100 || got > m.ms*135/100 {
 			t.Errorf("%s: estimated %d ms, measured %d ms", m.name, got, m.ms)
 		}
+	}
+	if got := (work{scan: 100002}).cost(); got < 33*time.Second {
+		t.Errorf("50,000-track deck-row scan estimated %s, want >= 33s", got)
 	}
 	window := &steps{kill: time.Now().Add(hookWindow)}
 	first := func(bytes int64) work {

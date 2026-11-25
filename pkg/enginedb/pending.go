@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"time"
 )
 
 const PendingFile = "enginex-pending.json"
@@ -147,7 +148,16 @@ func ApplyPending(ctx context.Context, root string) (int, error) {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	if len(p.Relocate) > 0 {
+	runRelocate := len(p.Relocate) > 0
+	if runRelocate {
+		if dl, hasDeadline := ctx.Deadline(); hasDeadline {
+			if st, serr := os.Stat(dbPath); serr == nil && st.Size() > 2<<20 && time.Until(dl) < 5*time.Second {
+				// Avoid full-DB VACUUM INTO inside a mount window; defer relocations to an unbounded pass.
+				runRelocate = false
+			}
+		}
+	}
+	if runRelocate {
 		if _, err := relocateBackup(ctx, db, dbPath); err != nil {
 			return 0, fmt.Errorf("backup failed, nothing changed: %w", err)
 		}
@@ -159,24 +169,37 @@ func ApplyPending(ctx context.Context, root string) (int, error) {
 	defer tx.Rollback()
 	n := 0
 	remaining := Pending{}
-	for _, m := range p.Relocate {
-		if _, err := os.Stat(filepath.Join(root, "Engine Library", filepath.FromSlash(m.NewPath))); err != nil {
-			continue
-		}
-		r, err := tx.ExecContext(ctx, `UPDATE Track SET path=?, filename=? WHERE id=? AND path=?`, m.NewPath, filepath.Base(m.NewPath), m.ID, m.OldPath)
-		if err != nil {
-			return 0, err
-		}
-		if k, _ := r.RowsAffected(); k == 1 {
-			n++
+	if !runRelocate {
+		remaining.Relocate = append(remaining.Relocate, p.Relocate...)
+	} else {
+		for _, m := range p.Relocate {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+			if _, err := os.Stat(filepath.Join(root, "Engine Library", filepath.FromSlash(m.NewPath))); err != nil {
+				continue
+			}
+			r, err := tx.ExecContext(ctx, `UPDATE Track SET path=?, filename=? WHERE id=? AND path=?`, m.NewPath, filepath.Base(m.NewPath), m.ID, m.OldPath)
+			if err != nil {
+				return 0, err
+			}
+			if k, _ := r.RowsAffected(); k == 1 {
+				n++
+			}
 		}
 	}
 	for _, c := range p.HotCues {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		if err := SetQuickCue(ctx, tx, c.TrackID, c.Index, c.Label, c.Color, c.PositionMS); err == nil {
 			n++
 		}
 	}
 	for _, m := range p.TrackMetadata {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		r, err := tx.ExecContext(ctx, `UPDATE Track SET genre=?, comment=?, label=? WHERE id=?`, m.Genre, m.Comment, m.Label, m.TrackID)
 		if err != nil {
 			return 0, err

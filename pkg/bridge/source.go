@@ -273,6 +273,10 @@ func readStaged(mount string) []SourceLibrary {
 	return out
 }
 
+func readStagedCtx(ctx context.Context, mount string) ([]SourceLibrary, error) {
+	return readStagedPaced(ctx, mount, nil)
+}
+
 func readStagedPaced(ctx context.Context, mount string, pace *pacer) ([]SourceLibrary, error) {
 	var out []SourceLibrary
 	if err := pace.waitNotLoading(); err != nil {

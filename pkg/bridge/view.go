@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
@@ -112,6 +113,10 @@ func rowHash(h hash.Hash, t *rekordbox.Track) string {
 // with that view's whole tree; "merged" shows the merged view at the root, and "device" or
 // "onelibrary" leaves the other library out. Staged CDJ libraries get a folder each (#59).
 func BuildView(libs []SourceLibrary, layout, lang string) (*View, error) {
+	return BuildViewCtx(context.Background(), libs, layout, lang)
+}
+
+func BuildViewCtx(ctx context.Context, libs []SourceLibrary, layout, lang string) (*View, error) {
 	var device, one *SourceLibrary
 	var links []*SourceLibrary
 	for i := range libs {
@@ -143,6 +148,11 @@ func BuildView(libs []SourceLibrary, layout, lang string) (*View, error) {
 		}
 		keys[l] = make(map[uint32]string, len(l.Lib.Tracks))
 		for i := range l.Lib.Tracks {
+			if i&511 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			t := &l.Lib.Tracks[i]
 			rel, err := compat.CleanRelative(t.Path)
 			if err != nil {
@@ -194,6 +204,11 @@ func BuildView(libs []SourceLibrary, layout, lang string) (*View, error) {
 	}
 	last := map[string]string{} // a folder's key to its last child so far
 	for i := range v.Lists {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		l := &v.Lists[i]
 		l.After, last[l.Parent] = last[l.Parent], l.Key
 		kind := "list"

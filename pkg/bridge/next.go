@@ -340,15 +340,15 @@ func nextRoom(dir, uuid string) error {
 // snapshot, each a rename inside Database2. Rows Engine wrote to m.db since the job last looked
 // are taken first (carryOver). It runs at the start of every window; without a swap snapshot it
 // costs one stat.
-func swapNext(ctx context.Context, mount, dir string, st *steps) bool {
+func swapNext(ctx context.Context, mount, dir string, st *steps) (swapped, deadlineHit bool) {
 	live, next, swap := filepath.Join(dir, "m.db"), filepath.Join(dir, nextDB), filepath.Join(dir, rbstate.SwapName)
 	h, err := rbstate.ReadHeaderFile(swap)
 	if err != nil {
-		return false
+		return false, false
 	}
 	if h.Rules != rbstate.Rules {
 		discardNext(dir, h.LibraryUUID) // of a build with other rules
-		return false
+		return false, false
 	}
 	finish := func() bool {
 		if err := rbstate.RenameFile(swap, filepath.Join(dir, rbstate.SnapshotName)); err != nil {
@@ -364,34 +364,37 @@ func swapNext(ctx context.Context, mount, dir string, st *steps) bool {
 		// A window was cut between its two renames: m.db is the next library, or the files are strays.
 		if _, commit := nextIdentity(ctx, mount, live); commit == h.Commit && h.Commit != 0 {
 			log.Printf("rb-bridge: the last window was cut short while it swapped the library in; done now")
-			return finish()
+			return finish(), false
 		}
 		_ = rbstate.RemoveFile(swap)
-		return false
+		return false, false
 	}
 	for _, side := range []string{live + "-journal", live + "-wal", next + "-journal"} {
 		if s, e := os.Stat(side); e == nil && s.Size() > 0 {
-			return false // an unfinished transaction: the file is opened first (this window does, or the job)
+			return false, false // an unfinished transaction: the file is opened first (this window does, or the job)
 		}
 	}
 	if enginedb.OpenElsewhere(live) != 0 {
-		return false
+		return false, false
 	}
-	if h.Base != enginedb.LibraryState(live) && !carryOver(ctx, dir, &h, st, nil) {
-		log.Printf("rb-bridge: the stick's library changed after the next one was made; the job takes the changes first")
-		return false
+	if h.Base != enginedb.LibraryState(live) {
+		ok, hit := carryOverChecked(ctx, dir, &h, st, nil)
+		if !ok {
+			log.Printf("rb-bridge: the stick's library changed after the next one was made; the job takes the changes first")
+			return false, hit
+		}
 	}
 	cut("before swap")
 	if err = rbstate.RenameFile(next, live); err != nil {
 		log.Printf("rb-bridge: next library not swapped in: %v", err)
-		return false
+		return false, false
 	}
 	cut("swapped")
 	if !finish() {
-		return false
+		return false, false
 	}
 	st.done("swap", "next library swapped in: %d tracks, %d lists; pending: %d rows, %d tracks' data", h.Tracks, h.Lists, h.Pending.Rows, h.Pending.Perf)
-	return true
+	return true, false
 }
 
 var mirrorLibrary = enginedb.MirrorLibrary // a variable for the test of the look's deadline
@@ -403,8 +406,13 @@ var mirrorLibrary = enginedb.MirrorLibrary // a variable for the test of the loo
 // job, and Engine may write again before the remount, so what was taken is also noted in the next
 // library's state on the deck, as after a pass of the job; the window or the job reads on from it.
 func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pace func(time.Duration) error) bool {
+	ok, _ := carryOverChecked(ctx, dir, h, st, pace)
+	return ok
+}
+
+func carryOverChecked(ctx context.Context, dir string, h *rbstate.Header, st *steps, pace func(time.Duration) error) (ok, deadlineHit bool) {
 	if ctx.Err() != nil {
-		return false
+		return false, true
 	}
 	live, next, swap := filepath.Join(dir, "m.db"), filepath.Join(dir, nextDB), filepath.Join(dir, rbstate.SwapName)
 	sdir := nextState(h.LibraryUUID)
@@ -412,53 +420,50 @@ func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pa
 	if readGob(filepath.Join(sdir, "mirror"), &m) != nil || m.Tracks == nil {
 		// Made from the exports alone, or on another deck: nothing of m.db may be lost with it.
 		_, content, err := liveLibrary(ctx, live)
-		return err == nil && !content
+		return err == nil && !content, false
 	}
-	// Every row of every table is read again to find the few Engine wrote (50,000 tracks in one
-	// list: 100,002 rows, 15.7 s): only when that ends in time. Else the job takes them and asks again.
-	save := work{commits: 1, tracks: h.Tracks}
-	if !st.fits(work{scan: m.Rows, commits: 1, tracks: h.Tracks}) {
-		return false
+	// Every row of every table is read again to find the few Engine wrote (KDATA scattered:
+	// >= 0.33 ms/row; 20,000+ tracks exceed a window). Account for post-mirror load/save/swap.
+	postSwap := work{load: h.Tracks, commits: 2, tracks: h.Tracks}
+	if !st.fits(work{scan: m.Rows, load: h.Tracks, commits: 2, tracks: h.Tracks}) {
+		return false, true
 	}
+	lookCtx := ctx
 	if !st.kill.IsZero() {
-		// The estimate is the replica's for rows that lie together (0.15 ms a row). In a library an
-		// older build made they lie between the waveforms, and the look took 4.4 s where 2.0 s were
-		// estimated (KDATA, 13,169 rows). So the look also stops where the window's rule says it
-		// must: what it took until then is taken again by the job, as after a cut.
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(ctx, st.kill.Add(-spare-save.cost()))
+		lookCtx, cancel = context.WithDeadline(ctx, st.kill.Add(-spare-postSwap.cost()))
 		defer cancel()
 	}
-	ch, err := mirrorLibrary(ctx, live, next, &m, pace)
+	ch, err := mirrorLibrary(lookCtx, live, next, &m, pace)
 	if err != nil {
 		log.Printf("rb-bridge: rows of the stick's library not taken: %v", err)
-		return false
+		return false, lookCtx.Err() != nil
 	}
-	if ctx.Err() != nil {
-		return false
+	if lookCtx.Err() != nil || (pace == nil && !st.fits(postSwap)) {
+		return false, true
 	}
 	if pace == nil {
 		st.done("carry", "%d rows the deck wrote taken into the next library (%d read, lists %v)", len(ch.Tracks), ch.Rows, ch.Lists)
 		if len(ch.Tracks) == 0 && !ch.Lists {
-			return true
+			return true, false
 		}
 	}
 	s, err := rbstate.LoadFile(swap)
 	if err != nil {
-		return false
+		return false, false
 	}
 	base, err := rbstate.Load(filepath.Join(sdir, "base"))
 	if err != nil {
-		return false
+		return false, false
 	}
 	takeLive(s, base, ch)
 	// What the window cannot count without the exports: the job's next round does.
 	s.Pending.Rows, s.Pending.Lists, s.Base = s.Pending.Rows+len(ch.Tracks), s.Pending.Lists || ch.Lists, m.State
 	if ctx.Err() != nil {
-		return false
+		return false, true
 	}
 	if err = s.SaveAs(swap); err != nil {
-		return false
+		return false, false
 	}
 	*h = s.Header
 	if pace != nil {
@@ -472,7 +477,7 @@ func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pa
 		log.Printf("rb-bridge: before the remount, %d rows the deck wrote taken into the next library in %d ms (%d read, lists %v)",
 			len(ch.Tracks), time.Since(st.start).Milliseconds(), ch.Rows, ch.Lists)
 	}
-	return true
+	return true, false
 }
 
 // TakeDeckRows is the remount helper's step right before the remount that swaps a next library

@@ -1173,3 +1173,98 @@ func TestMountLeavesTheListWaveformToTheJobThatStagedTheRow(t *testing.T) {
 		t.Fatalf("list waveforms the window wrote: %v, want only %s", files, want)
 	}
 }
+
+// Finding 2.1: ConvertAtMount enforces a deadline context with >= 3 s commit margin, checks the
+// deadline inside scaling loops (carryOver fallback, RemoveTracks, MoveTracks, AddTracks, putLists),
+// and uses >= 0.33 ms/row for work.scan and a conservative work.adds.
+func TestFinding21MountDeadlineAndCostModel(t *testing.T) {
+	t.Run("cost_model_scan_and_adds", func(t *testing.T) {
+		if got := (work{scan: 13169}).cost(); got < 13169*330*time.Microsecond {
+			t.Fatalf("work.scan(13169) = %s, want >= 0.33 ms/row (%s)", got, 13169*330*time.Microsecond)
+		}
+		if got := (work{adds: 100}).cost(); got < 1500*time.Millisecond {
+			t.Fatalf("work.adds(100) = %s, want >= 15 ms/row (1.5s)", got)
+		}
+		win := &steps{kill: time.Now().Add(hookWindow)}
+		if win.fits(work{scan: 40000, commits: 1, tracks: 20000}) {
+			t.Fatal("20,000-track deck-row scan (40,000 rows) must not fit a 17 s window")
+		}
+	})
+
+	t.Run("carryOver_deadline_returns_without_running_rest_of_mount", func(t *testing.T) {
+		mount := nextStick(t, 20)
+		makeNext(t, mount)
+		engineWrites(t, mount, `UPDATE Track SET isPlayed=1,timeLastPlayed=1700000001 WHERE id=1`)
+
+		kill := time.Now().Add(spare + 1500*time.Millisecond)
+		oldMirror := mirrorLibrary
+		var sawDeadline time.Time
+		var hadDeadline bool
+		mirrorLibrary = func(ctx context.Context, live, next string, m *enginedb.Mirror, pace func(time.Duration) error) (enginedb.MirrorChange, error) {
+			sawDeadline, hadDeadline = ctx.Deadline()
+			<-ctx.Done()
+			return enginedb.MirrorChange{}, ctx.Err()
+		}
+		defer func() { mirrorLibrary = oldMirror }()
+
+		out := captureLog(t)
+		started := 0
+		res, err := ConvertAtMount(context.Background(), mount, MountOptions{
+			Publish:         true,
+			Deadline:        kill,
+			StartBackground: func() error { started++; return nil },
+		})
+		if err != nil {
+			t.Fatalf("ConvertAtMount returned error on deadline handoff: %v", err)
+		}
+		if !hadDeadline || kill.Sub(sawDeadline) < spare-50*time.Millisecond {
+			t.Fatalf("carryOver ctx deadline margin too small: had=%v margin=%s want >= %s", hadDeadline, kill.Sub(sawDeadline), spare)
+		}
+		if left := time.Until(kill); left < spare-500*time.Millisecond {
+			t.Fatalf("ConvertAtMount finished too close to kill: %s left", left)
+		}
+		if strings.Contains(out.String(), "mount read") || strings.Contains(out.String(), "mount stat") {
+			t.Fatalf("ConvertAtMount kept running after carryOver deadline:\n%s", out.String())
+		}
+		if started != 1 || !res.Background {
+			t.Fatalf("background job not started on carryOver deadline handoff: started=%d res=%+v", started, res)
+		}
+	})
+
+	t.Run("remove_tracks_loop_checks_deadline", func(t *testing.T) {
+		mount := stick(t)
+		mountNow(t, mount, MountOptions{})
+		lib, err := enginedb.OpenLibrary(context.Background(), mount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lib.Close()
+		snap, err := rbstate.Load(dbDir(mount))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Empty view triggers RemoveTracks for every track; st.owed is already expired while
+		// st.kill is zero so fits() passes and only the in-loop deadline check can stop deletes.
+		emptyView := &View{Layout: snap.Layout, Stamp: "empty"}
+		var res MountResult
+		w := &window{
+			ctx:   context.Background(),
+			mount: mount,
+			dir:   dbDir(mount),
+			view:  emptyView,
+			st:    &steps{start: time.Now(), last: time.Now(), owed: time.Now().Add(-time.Second)},
+			res:   &res,
+			lib:   lib,
+			snap:  snap,
+		}
+		if w.index, err = lib.TrackIndex(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if err = w.apply(Diff(emptyView, snap)); err != nil {
+			t.Fatalf("w.apply: %v", err)
+		}
+		if res.Removed != 0 {
+			t.Fatalf("RemoveTracks deleted %d tracks past owed deadline, want 0", res.Removed)
+		}
+	})
+}

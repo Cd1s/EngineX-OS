@@ -420,8 +420,15 @@ func putBack(mount, rel, name string) bool {
 // mark names that is missing is put back; then, when none is missing, the temporary files in
 // the marked folders and the mark go. It returns how many temporary files it removed.
 func CleanWriteBackLeftovers(mount string) int {
+	return CleanWriteBackLeftoversCtx(context.Background(), mount)
+}
+
+func CleanWriteBackLeftoversCtx(ctx context.Context, mount string) int {
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	n := rbstate.CleanTemps(dir)
+	if ctx.Err() != nil {
+		return n
+	}
 	mark := filepath.Join(dir, writeBackMarkName)
 	data, err := os.ReadFile(mark)
 	if err != nil {
@@ -430,6 +437,9 @@ func CleanWriteBackLeftovers(mount string) int {
 	whole := true
 	var dirs []string
 	for _, line := range strings.Split(string(data), "\n") {
+		if ctx.Err() != nil {
+			return n
+		}
 		rest, isTarget := strings.CutPrefix(line, "= ")
 		name := ""
 		if isTarget {
@@ -451,9 +461,15 @@ func CleanWriteBackLeftovers(mount string) int {
 		return n
 	}
 	for _, rel := range dirs {
+		if ctx.Err() != nil {
+			return n
+		}
 		for _, pattern := range []string{".enginex-*.tmp", ".bak-*.tmp"} {
 			matches, _ := filepath.Glob(filepath.Join(mount, rel, pattern))
 			for _, path := range matches {
+				if ctx.Err() != nil {
+					return n
+				}
 				if st, err := os.Lstat(path); err == nil && st.Mode().IsRegular() && rbstate.RemoveFile(path) == nil {
 					n++
 				}
