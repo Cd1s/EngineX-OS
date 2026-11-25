@@ -208,6 +208,21 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	})
 	f.report()
 	err = f.run(order)
+	if view.view != nil && f.applicable() == 0 && (err == nil || errors.Is(err, ErrFilesUnreadable)) {
+		want := pendingRowsForView(view.view, snap)
+		if want != snap.Pending.Rows {
+			if lock, lockErr := rbstate.LockVolume(mount, fillLockWait); lockErr == nil {
+				if current, loadErr := rbstate.Load(dbDir); loadErr == nil {
+					current.Pending.Rows = pendingRowsForView(view.view, current)
+					if saveErr := current.Save(dbDir); saveErr == nil {
+						snap = current
+						f.snap = current
+					}
+				}
+				lock()
+			}
+		}
+	}
 	for full := 0; errors.Is(err, rbstate.ErrStageFull) && view.view != nil && o.Stage == nil && full < 64; full++ {
 		// /data is at its floor: what is staged goes into the next library and leaves the stage, and
 		// the job goes on. The remount is still asked for once, at the end.
@@ -282,6 +297,19 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		return res, nil // stopped: the next job goes on from the stage
 	}
 	return res, err
+}
+
+func pendingRowsForView(view *View, snap *rbstate.Snapshot) int {
+	pending := 0
+	for _, vt := range view.Tracks {
+		t := snap.Tracks[vt.Key]
+		switch {
+		case t != nil && (t.Native || t.Perf == rbstate.PerfMissing):
+		case t == nil || t.EngineID == 0 || t.Row != vt.Hash:
+			pending++
+		}
+	}
+	return pending
 }
 
 type filler struct {

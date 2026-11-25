@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -121,15 +122,30 @@ func takeLive(s, base *rbstate.Snapshot, ch enginedb.MirrorChange) {
 		for _, id := range ch.Tracks {
 			taken[id] = true
 		}
-		for key, t := range s.Tracks {
+		baseByID := make(map[int64]*rbstate.Track, len(base.Tracks))
+		for _, t := range base.Tracks {
 			if taken[t.EngineID] {
-				delete(s.Tracks, key)
+				baseByID[t.EngineID] = t
 			}
 		}
-		for key, t := range base.Tracks {
-			if taken[t.EngineID] {
-				c := *t
-				s.Tracks[key] = &c
+		seen := make(map[int64]bool, len(baseByID))
+		for _, current := range s.Tracks {
+			if old := baseByID[current.EngineID]; old != nil {
+				seen[old.EngineID] = true
+				current.EngineID = old.EngineID
+				current.Rating = old.Rating
+				current.Perf = old.Perf
+				current.Built = old.Built
+				current.Written = append(current.Written[:0], old.Written...)
+				current.Synced = append(current.Synced[:0], old.Synced...)
+				current.Edit = old.Edit
+				current.Native = old.Native
+			}
+		}
+		for key, old := range base.Tracks {
+			if baseByID[old.EngineID] != nil && !seen[old.EngineID] {
+				copy := *old
+				s.Tracks[key] = &copy
 			}
 		}
 	}
@@ -338,17 +354,29 @@ func swapNext(ctx context.Context, mount, dir string, st *steps) bool {
 		_ = rbstate.RemoveFile(swap)
 		return false
 	}
-	for _, side := range []string{live + "-journal", live + "-wal", next + "-journal"} {
-		if s, e := os.Stat(side); e == nil && s.Size() > 0 {
-			return false // an unfinished transaction: the file is opened first (this window does, or the job)
-		}
+	if err := cleanSQLiteSidecars(live); err != nil {
+		return false
+	}
+	if err := cleanSQLiteSidecars(next); err != nil {
+		return false
 	}
 	if enginedb.OpenElsewhere(live) != 0 {
 		return false
 	}
-	if h.Base != enginedb.LibraryState(live) && !carryOver(ctx, dir, &h, st, nil) {
-		log.Printf("rb-bridge: the stick's library changed after the next one was made; the job takes the changes first")
-		return false
+	if h.Base != enginedb.LibraryState(live) {
+		looked, carryErr := carryOver(ctx, dir, &h, st, nil)
+		if carryErr != nil {
+			if errors.Is(carryErr, context.Canceled) || errors.Is(carryErr, context.DeadlineExceeded) {
+				log.Printf("rb-bridge: the stick's library changed after the next one was made; the job takes the changes first")
+			} else {
+				log.Printf("rb-bridge: carry-over failed: %v", carryErr)
+			}
+			return false
+		}
+		if !looked {
+			log.Printf("rb-bridge: the stick's library changed after the next one was made; the job takes the changes first")
+			return false
+		}
 	}
 	cut("before swap")
 	if err = rbstate.RenameFile(next, live); err != nil {
@@ -365,26 +393,68 @@ func swapNext(ctx context.Context, mount, dir string, st *steps) bool {
 
 var mirrorLibrary = enginedb.MirrorLibrary // a variable for the test of the look's deadline
 
+// cleanSQLiteSidecars removes sidecars that cannot belong to the replacement database. An
+// all-zero rollback journal is SQLite's committed PERSIST journal and is safe to remove. A WAL or
+// non-zero journal means the database has uncheckpointed work and must not be replaced.
+func cleanSQLiteSidecars(db string) error {
+	for _, suffix := range []string{"-journal", "-wal", "-shm"} {
+		path := db + suffix
+		st, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		active := st.Size() > 0
+		if suffix == "-journal" && active {
+			f, e := os.Open(path)
+			if e != nil {
+				return e
+			}
+			var header [28]byte
+			_, e = io.ReadFull(f, header[:])
+			_ = f.Close()
+			if e == nil {
+				active = false
+				for _, b := range header {
+					if b != 0 {
+						active = true
+						break
+					}
+				}
+			}
+		}
+		if suffix != "-shm" && active {
+			return fmt.Errorf("sqlite sidecar has uncheckpointed work: %s", path)
+		}
+		if err := rbstate.RemoveFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 // carryOver takes into the next library the rows Engine wrote to m.db after the job made it
 // ready: the DJ's edits are not lost with the file. A row taken loses what the bridge wrote on it
 // in the next library; its track is pending again and published by the job's next round.
 // pace is nil in a window. With it the call is the remount helper's (TakeDeckRows): paced like the
 // job, and Engine may write again before the remount, so what was taken is also noted in the next
 // library's state on the deck, as after a pass of the job; the window or the job reads on from it.
-func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pace func(time.Duration) error) bool {
+func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pace func(time.Duration) error) (bool, error) {
 	live, next, swap := filepath.Join(dir, "m.db"), filepath.Join(dir, nextDB), filepath.Join(dir, rbstate.SwapName)
 	sdir := nextState(h.LibraryUUID)
 	var m enginedb.Mirror
 	if readGob(filepath.Join(sdir, "mirror"), &m) != nil || m.Tracks == nil {
 		// Made from the exports alone, or on another deck: nothing of m.db may be lost with it.
 		_, content, err := liveLibrary(ctx, live)
-		return err == nil && !content
+		return !content, err
 	}
 	// Every row of every table is read again to find the few Engine wrote (50,000 tracks in one
 	// list: 100,002 rows, 15.7 s): only when that ends in time. Else the job takes them and asks again.
 	save := work{commits: 1, tracks: h.Tracks}
 	if !st.fits(work{scan: m.Rows, commits: 1, tracks: h.Tracks}) {
-		return false
+		return false, nil
 	}
 	if !st.kill.IsZero() {
 		// The estimate is the replica's for rows that lie together (0.15 ms a row). In a library an
@@ -398,27 +468,27 @@ func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pa
 	ch, err := mirrorLibrary(ctx, live, next, &m, pace)
 	if err != nil {
 		log.Printf("rb-bridge: rows of the stick's library not taken: %v", err)
-		return false
+		return false, err
 	}
 	if pace == nil {
 		st.done("carry", "%d rows the deck wrote taken into the next library (%d read, lists %v)", len(ch.Tracks), ch.Rows, ch.Lists)
 		if len(ch.Tracks) == 0 && !ch.Lists {
-			return true
+			return true, nil
 		}
 	}
 	s, err := rbstate.LoadFile(swap)
 	if err != nil {
-		return false
+		return false, err
 	}
 	base, err := rbstate.Load(filepath.Join(sdir, "base"))
 	if err != nil {
-		return false
+		return false, err
 	}
 	takeLive(s, base, ch)
 	// What the window cannot count without the exports: the job's next round does.
 	s.Pending.Rows, s.Pending.Lists, s.Base = s.Pending.Rows+len(ch.Tracks), s.Pending.Lists || ch.Lists, m.State
 	if err = s.SaveAs(swap); err != nil {
-		return false
+		return false, err
 	}
 	*h = s.Header
 	if pace != nil {
@@ -428,11 +498,12 @@ func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pa
 		}
 		if err != nil {
 			log.Printf("rb-bridge: state of the next library not saved: %v", err) // the swap snapshot stands on its own
+			return false, err
 		}
 		log.Printf("rb-bridge: before the remount, %d rows the deck wrote taken into the next library in %d ms (%d read, lists %v)",
 			len(ch.Tracks), time.Since(st.start).Milliseconds(), ch.Rows, ch.Lists)
 	}
-	return true
+	return true, nil
 }
 
 // TakeDeckRows is the remount helper's step right before the remount that swaps a next library
@@ -443,6 +514,11 @@ func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pa
 // row on a deck), so the helper looks at the decks again after it. With no next library waiting,
 // or the stick's library as the job left it, it is two short reads.
 func TakeDeckRows(ctx context.Context, mount string) bool {
+	unlock, err := rbstate.LockVolume(mount, 0)
+	if err != nil {
+		return false
+	}
+	defer unlock()
 	dir := filepath.Join(mount, filepath.FromSlash(databaseSubdir))
 	h, err := rbstate.ReadHeaderFile(filepath.Join(dir, rbstate.SwapName))
 	if err != nil || h.Rules != rbstate.Rules || h.Base == enginedb.LibraryState(filepath.Join(dir, "m.db")) {
@@ -452,6 +528,10 @@ func TakeDeckRows(ctx context.Context, mount string) bool {
 		return false
 	}
 	pace := newPacer(ctx)
-	carryOver(ctx, dir, &h, newSteps(MountOptions{Full: true}), func(took time.Duration) error { return pace.afterStat(pace.active(), took) })
-	return true
+	looked, err := carryOver(ctx, dir, &h, newSteps(MountOptions{Full: true}), func(took time.Duration) error { return pace.afterStat(pace.active(), took) })
+	if err != nil {
+		log.Printf("rb-bridge: taking deck rows failed: %v", err)
+		return false
+	}
+	return looked
 }

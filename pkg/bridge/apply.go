@@ -378,6 +378,9 @@ func (w *window) build() error {
 	}
 	w.snap.LibraryUUID = uuid
 	w.st.done("build", "%d rows, %d lists, on the deck's disk", len(ids), len(w.snap.Lists))
+	if err = cleanSQLiteSidecars(w.file()); err != nil {
+		return err
+	}
 	if err = w.commit(commitID, func() error { return rbstate.InstallFile(filepath.Join(tmp, "m.db"), w.file()) }); err != nil {
 		return err
 	}
@@ -608,6 +611,18 @@ func (w *window) inBatches(n, size int, ok func(i int) bool, each func(b *engine
 // updateBatch is how many rows one transaction gives the export's fields again.
 var updateBatch = 1000
 
+func fitUpdateCount(all int, fits func(int) bool) int {
+	n := all
+	for n > 0 && !fits(n) {
+		if n <= updateBatch {
+			n /= 2
+			continue
+		}
+		n -= updateBatch
+	}
+	return n
+}
+
 // updateRows gives rows their changed export fields after the rows and lists are committed, a
 // batch a transaction (a take-over changes thousands): the first batch is owed, the rest optional.
 func (w *window) updateRows(idx []int) error {
@@ -620,10 +635,7 @@ func (w *window) updateRows(idx []int) error {
 		}
 		// The job cannot make a next library on this stick, so nothing would ever update these rows:
 		// the batches that fit are done here, and the next windows go on.
-		n := all
-		for n > 0 && !w.st.fits(cost(n)) {
-			n -= min(n, updateBatch)
-		}
+		n := fitUpdateCount(all, func(n int) bool { return w.st.fits(cost(n)) })
 		w.left, idx = true, idx[:n]
 		log.Printf("rb-bridge: %v; %d of %d rows get the export's fields in this window", room, n, all)
 	}
@@ -687,6 +699,7 @@ func (w *window) applyStaged() error {
 		key := keys[i]
 		e, t := entries[key], w.snap.Tracks[key]
 		vt, _ := w.view.Track(key)
+		row := w.index[key]
 		at := time.Now()
 		defer lap(&w.took.rows, &at)
 		if t != nil && t.EngineID == 0 && t.Perf == rbstate.PerfMissing && !e.Missing {
@@ -733,7 +746,12 @@ func (w *window) applyStaged() error {
 		}
 		t.Resolved, t.Built = true, e.Sig
 		if e.Degraded != "" {
-			t.Perf = rbstate.PerfDegraded
+			if t.Perf != rbstate.PerfDeck {
+				t.Perf = rbstate.PerfDegraded
+			}
+			if t.Perf == rbstate.PerfDeck || row.Edit != t.Edit {
+				t.Synced = nil
+			}
 			degraded++
 		} else {
 			p := &full.Perf
@@ -764,6 +782,9 @@ func (w *window) applyStaged() error {
 		}
 		applied++
 		done = append(done, key)
+		if e.Degraded != "" {
+			return w.noteSync(b, t, false)
+		}
 		return w.noteSync(b, t, true)
 	}, func(at int) error {
 		t := time.Now()
