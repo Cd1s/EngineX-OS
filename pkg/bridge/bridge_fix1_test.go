@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"bytes"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,7 +12,7 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
-func TestR2Proof_Finding1_1_SecondWriteBackRefreshesSourceHash(t *testing.T) {
+func TestR2Proof_Finding1_1_SecondWriteBackOnOneLibrary(t *testing.T) {
 	key := rbstate.FoldPath("Contents/track.mp3")
 	snap := rbstate.New("uuid")
 	snap.Tracks[key] = &rbstate.Track{Key: key, Refs: []rbstate.SourceRef{{Kind: rbstate.OneLibrary, ID: 7, RecordHash: "old"}}}
@@ -35,7 +36,7 @@ func TestR2Proof_Finding1_1_SecondWriteBackRefreshesSourceHash(t *testing.T) {
 	}
 }
 
-func TestR2Proof_Finding1_2_TakeLiveKeepsNewViewRefs(t *testing.T) {
+func TestR2Proof_Finding1_2_TakeDeckRowsLocksOutWriteBack(t *testing.T) {
 	key := rbstate.FoldPath("Contents/track.mp3")
 	base := rbstate.New("uuid")
 	base.Tracks[key] = &rbstate.Track{Key: key, EngineID: 7, Rel: "Contents/track.mp3", Rating: 40, Perf: rbstate.PerfDeck, Written: []byte{1}}
@@ -51,7 +52,7 @@ func TestR2Proof_Finding1_2_TakeLiveKeepsNewViewRefs(t *testing.T) {
 	}
 }
 
-func TestR2Proof_Finding3_1_ZeroedJournalAndEmptySidecarsAreRemoved(t *testing.T) {
+func TestR2Proof_Finding3_1_StaleSidecarsOnSwap(t *testing.T) {
 	dir := t.TempDir()
 	db := filepath.Join(dir, "m.db")
 	if err := os.WriteFile(db, []byte("db"), 0o600); err != nil {
@@ -85,10 +86,31 @@ func TestR2Proof_Finding3_2_StepDownFindsFittingPartialBatch(t *testing.T) {
 	}
 }
 
-func TestR2Proof_Finding1_4_MissingArtworkDoesNotMarkTrackBroken(t *testing.T) {
+func TestR2Proof_Finding1_4_DegradedClobbersPerfDeckAndSilencesWriteBack(t *testing.T) {
 	// The detailed fixture test lives with TrackBuild. This guard keeps the bridge lane's
 	// regression table explicit and fails if degraded rows are reintroduced here.
 	if rbstate.PerfDeck == rbstate.PerfDegraded {
 		t.Fatal("performance states collapsed")
+	}
+}
+
+func TestR2Proof_Finding1_3_AsWrittenDiscardsAndDeletesNewRekordboxCue(t *testing.T) {
+	raw := make([]byte, 8+8*13+17)
+	binary.BigEndian.PutUint64(raw, 8)
+	off := 8 + 8*13
+	raw[off+8] = 0
+	copy(raw[off+9:], []byte("old-main-cue"))
+	other := append([]byte(nil), raw...)
+	copy(other[off+9:], []byte("new-main-cue"))
+	a, err := enginedb.QCompress(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := enginedb.QCompress(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(writtenDigestIgnoringMainCueTail(nil, a, nil), writtenDigestIgnoringMainCueTail(nil, b, nil)) {
+		t.Fatal("unflagged main-cue bytes changed the written digest")
 	}
 }
