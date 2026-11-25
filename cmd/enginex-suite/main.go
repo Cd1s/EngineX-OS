@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 
 	"github.com/Cd1s/EngineX-OS/internal/cli"
+	"github.com/Cd1s/EngineX-OS/internal/datagrow"
 	"github.com/Cd1s/EngineX-OS/internal/deemixd"
 	"github.com/Cd1s/EngineX-OS/internal/leave"
 	"github.com/Cd1s/EngineX-OS/internal/stemsproc"
@@ -41,13 +42,15 @@ func main() {
 		os.Exit(leave.Main(args, os.Stdout, os.Stderr))
 	case "iw":
 		os.Exit(cli.IW(args, os.Stdout, os.Stderr))
+	case "data-grow":
+		os.Exit(datagrow.Main(args, os.Stdout, os.Stderr))
 	case "enginex-deemixd":
 		if err = deemixd.Main(args); err != nil && !errors.Is(err, flag.ErrHelp) {
 			log.Print(err)
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "usage: enginex-suite {rb-bridge|stream-sync|engine-guardian|stems-processor|enginex-deemixd|leave|iw} [args...]\n")
+		fmt.Fprintf(os.Stderr, "usage: enginex-suite {rb-bridge|stream-sync|engine-guardian|stems-processor|enginex-deemixd|leave|iw|data-grow} [args...]\n")
 		os.Exit(2)
 	}
 }

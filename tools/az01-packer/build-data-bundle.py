@@ -511,6 +511,21 @@ WantedBy=multi-user.target
 EOF
 fi
 
+# #244: EngineX-Installer's mode C writes a 64 MiB /data (it cannot ask the deck how big the
+# partition is) and the stock boot formats only an empty partition, so the kernel grows /data to
+# its partition once, in the background; on a /data that already fills it, this only reads.
+cat <<EOF > /run/systemd/system/enginex-data-grow.service
+[Unit]
+Description=EngineX /data uses its whole partition (#244)
+
+[Service]
+Type=oneshot
+ExecStart=$bin_dir/enginex-suite data-grow /data
+Nice=19
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+EOF
+
 rm -f /run/systemd/system/enginex-rb-bridge.service /run/systemd/system/enginex-deemixd.service
 if [ -x "$bin_dir/rb-bridge" ] && [ -n "$rb_bridge_on" ]; then
     cat <<EOF > /run/systemd/system/enginex-rb-bridge.service
@@ -624,6 +639,7 @@ if [ "$(cat "${ENGINEX_PID1_COMM:-/proc/1/comm}" 2>/dev/null)" = systemd ] && sy
     [ -n "$rb_bridge_on" ] || systemctl stop --no-block enginex-rb-bridge.service 2>/dev/null || :
     [ -n "$deemixd_on" ] || systemctl stop --no-block enginex-deemixd.service 2>/dev/null || :
     systemctl restart --no-block $services || :
+    systemctl start --no-block enginex-data-grow.service || :
     [ -z "$ssh_start" ] || systemctl start --no-block sshd.service || :
     [ ! -x "$bin_dir/enginex-sd-highspeed" ] || ENGINEX_UI_DIR="$dest/ui" ENGINEX_RUN_ROOT=/run/enginex "$bin_dir/enginex-sd-highspeed" boot || :
     # Blocking, so edisksd is up again before the hooked start converts what is in /media.
@@ -733,7 +749,9 @@ case " $boards" in *" inmusic,"*)
         done
         [ "$deck" = "$(cat model)" ] ||
             { echo "bundle is for $(cat model), this deck is ${deck:-not a second-generation model}" >&2; exit 1; }
-    fi ;;
+    fi
+    # #244: a /data that mode C left at 64 MiB has no room for the copy staged below.
+    [ "$dest" != /data/enginex ] || "$src/bin/enginex-suite" data-grow /data || : ;;
 esac
 for path in "$dest" "$dest/bundle" "$dest/ui" "$dest/ui/packs" "$dest/ui/icons" "$dest/.install-old" "$dest/.install-done"; do
     [ ! -L "$path" ] || { echo "refusing symlink: $path" >&2; exit 1; }
@@ -865,7 +883,7 @@ rm -rf "$dest/bundle"
 if [ -z "${ENGINEX_CUSTOM:-}" ]; then
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active basic.target >/dev/null 2>&1; then
         # enginex-deemixd: the unit's name before 5.3.0.5 (#234), still loaded until a reboot after an update.
-        for applet in stream-sync rb-bridge deemixd "$legacy_deemix"; do
+        for applet in stream-sync rb-bridge deemixd data-grow "$legacy_deemix"; do
             systemctl stop "enginex-$applet.service" 2>/dev/null || :
             rm -f "/run/systemd/system/enginex-$applet.service"
         done
@@ -880,6 +898,7 @@ if [ -z "${ENGINEX_CUSTOM:-}" ]; then
     pkill -x enginex-suite 2>/dev/null || :
     pkill -x "$legacy_suite" 2>/dev/null || :
     rm -f /run/systemd/system/enginex-stream-sync.service \
+          /run/systemd/system/enginex-data-grow.service \
           /run/systemd/system/engine-guardian.service \
           /run/systemd/system/enginex-rb-bridge.service \
           /run/systemd/system/enginex-deemixd.service \

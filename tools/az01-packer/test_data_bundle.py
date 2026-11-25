@@ -1060,7 +1060,8 @@ exec REAL "$@"
                      (legacy.PROJECT), (legacy.BOOT_CONVERTED), (legacy.TZ_NEWER)):
             self.assertFalse(os.path.lexists(run_dir / gone), gone)
         self.assertEqual(sorted(p.name for p in units.glob('enginex-*.service')),
-                         ['enginex-deemixd.service', 'enginex-rb-bridge.service', 'enginex-stream-sync.service'])
+                         ['enginex-data-grow.service', 'enginex-deemixd.service', 'enginex-rb-bridge.service',
+                          'enginex-stream-sync.service'])
         self.assertIn(f'ExecStart={dest}/bundle/bin/enginex-deemixd ', (units / 'enginex-deemixd.service').read_text())
         self.assertNotIn('ExecStart=old', (units / 'enginex-stream-sync.service').read_text())
         self.assertEqual([p.name for p in (units / 'engine.service.d').iterdir()], ['99-enginex.conf'])
@@ -1213,6 +1214,72 @@ pkill() { printf 'pkill %s\\n' "$*" >> "$KILLED"; }
     def test_234_no_downgrade_script_is_written(self):
         src = self.extract(self.build())
         self.assertNotIn('/run/enginex/leave.sh.new', (src / 'boot-activate.sh').read_text())
+
+    def test_244_data_grows_to_its_partition_at_boot_and_before_a_deck_install(self):
+        """#244: EngineX-Installer's mode C writes a 64 MiB /data to PRIME 4 G2 / SYSTEM ONE and the
+        stock boot never grows it, so the deck refused every update for lack of space. The boot run
+        hands the growing to the suite's data-grow applet in its own unit, in the background, at the
+        lowest priorities; install.sh on a deck grows /data before it stages the second copy."""
+        src = self.extract(self.build())
+        root = self.tmp / 'grow'
+        dest = root / 'enginex'
+        res = subprocess.run(['sh', str(src / 'install.sh')], env={**self.env, 'ENGINEX_CUSTOM': str(dest),
+                             'ENGINEX_ALSA_OVERLAY': str(root / 'alsa')}, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        run_dir = self.tmp / 'run-grow'
+        (run_dir / 'systemd/system').mkdir(parents=True)
+        ba = self.tmp / 'boot-activate-grow.sh'
+        ba.write_text((src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/')
+                      .replace('/usr/Engine/Scripts/engine', str(self.tmp / 'no-engine-script')))
+        env = dict(self.env, ENGINEX_CUSTOM=str(dest), ENGINEX_TIMESTAMP_FILE=str(self.tmp / 'no-ts'),
+                   ENGINEX_CONFIG_DIR=str(root / '.config'), ENGINEX_PID1_COMM=str(self.pid1_systemd()),
+                   ENGINEX_STREAMING_ACCOUNTS=str(self.tmp / 'StreamingAccounts.json'))
+        res = subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        cmds = self.host_commands.read_text().splitlines()
+        self.host_commands.write_text('')
+        unit = (run_dir / 'systemd/system/enginex-data-grow.service').read_text()
+        for line in ('Type=oneshot', f'ExecStart={dest}/bundle/bin/enginex-suite data-grow /data', 'Nice=19',
+                     'IOSchedulingClass=best-effort', 'IOSchedulingPriority=7'):
+            self.assertIn(line + '\n', unit)
+        # Started once the units are loaded, without waiting; nothing waits for it, Engine included.
+        start = [i for i, c in enumerate(cmds) if c.endswith('systemctl start --no-block enginex-data-grow.service')]
+        reload = [i for i, c in enumerate(cmds) if c.endswith('systemctl daemon-reload')]
+        self.assertEqual(len(start), 1, cmds)
+        self.assertTrue(reload and reload[0] < start[0], cmds)
+        self.assertNotIn('[Install]', unit)
+        drop = (run_dir / 'systemd/system/engine.service.d/99-enginex.conf').read_text()
+        self.assertNotIn('data-grow', drop)
+        # install.sh: only a deck's own /data/enginex grows /data, before the copy is staged.
+        inst = (src / 'install.sh').read_text()
+        line = '[ "$dest" != /data/enginex ] || "$src/bin/enginex-suite" data-grow /data || :'
+        self.assertIn(line, inst)
+        self.assertLess(inst.index('bundle is for $(cat model)'), inst.index(line))
+        self.assertLess(inst.index(line), inst.index('stage=$(mktemp -d "$dest/.bundle.XXXXXX")'))
+        # On a deck (an inmusic board and its CPU) installing anywhere but /data/enginex, the suite is
+        # never run: in the unpacked bundle, a stand-in suite whose 19th byte is the ARM ELF machine
+        # (all install.sh reads of it) records any call.
+        calls = self.tmp / 'suite.calls'
+        compat = self.tmp / 'compatible'
+        compat.write_bytes(b'inmusic,jp21\0rockchip,rk3288\0')
+        engine = self.tmp / 'Engine'
+        engine.write_bytes(fake_elf(bdb.EM_ARM, b'engine'))
+        src2 = self.extract(self.build(out='grow-deck', prefix='SCLIVE4'))
+        stand_in = src2 / 'bin/enginex-suite'
+        stand_in.write_text('#!/bin/sh\n#abcdefg(\nprintf "%s\\n" "$*" >> ' + str(calls) + '\n')
+        stand_in.chmod(0o755)
+        digest = hashlib.sha256(stand_in.read_bytes()).hexdigest()
+        sums = [digest + '  bin/enginex-suite' if l.endswith('  bin/enginex-suite') else l
+                for l in (src2 / 'SHA256SUMS').read_text().splitlines()]
+        self.assertIn(digest + '  bin/enginex-suite', sums)
+        (src2 / 'SHA256SUMS').write_text('\n'.join(sums) + '\n')
+        res = subprocess.run(['sh', str(src2 / 'install.sh')], env={
+            **self.env, 'ENGINEX_COMPATIBLE': str(compat), 'ENGINEX_SYSTEM_ELF': str(engine),
+            'ENGINEX_CUSTOM': str(root / 'deck'), 'ENGINEX_ALSA_OVERLAY': str(root / 'deck-alsa')},
+            capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue((root / 'deck/bundle/bin/enginex-suite').is_file())
+        self.assertFalse(calls.exists(), calls.read_text() if calls.exists() else '')
 
     def pid1_systemd(self):
         comm = self.tmp / 'pid1-comm'
