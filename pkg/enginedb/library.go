@@ -104,6 +104,11 @@ func openLibrary(ctx context.Context, p, mount string, bulk bool, newUUID string
 
 var migrateNow = time.Now
 
+// legacyArtworkIDsQuery relies on SQLite's index_AlbumArt_hash type ordering
+// (NULL < numeric < TEXT < BLOB) so a large library whose hashes are already BLOBs avoids a
+// full-table scan across AlbumArt's overflow-heavy leaf pages during adoption.
+const legacyArtworkIDsQuery = `SELECT id FROM AlbumArt WHERE hash >= '' AND hash < X'' AND typeof(hash)='text' ORDER BY id`
+
 // MigrateLegacyArtwork migrates legacy text artwork hashes and writes their content-addressed
 // files first. It stops cleanly when budget expires, committing rows migrated so far.
 func (l *Library) MigrateLegacyArtwork(ctx context.Context, budget time.Duration) error {
@@ -122,7 +127,7 @@ func (l *Library) MigrateLegacyArtwork(ctx context.Context, budget time.Duration
 	if err != nil {
 		return err
 	}
-	rows, err := l.db.QueryContext(ctx, `SELECT id FROM AlbumArt WHERE typeof(hash)='text' ORDER BY id`)
+	rows, err := l.db.QueryContext(ctx, legacyArtworkIDsQuery)
 	if err != nil {
 		return err
 	}

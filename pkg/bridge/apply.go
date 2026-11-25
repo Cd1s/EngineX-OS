@@ -172,6 +172,11 @@ func (w *window) open() error {
 		w.snap, w.head = snap, snap.Header
 	case oldErr == nil && !w.next:
 		artBudget := 2 * time.Second
+		if !w.st.owed.IsZero() {
+			if quarter := time.Until(w.st.owed) / 4; quarter < artBudget {
+				artBudget = quarter
+			}
+		}
 		if d, ok := w.ctx.Deadline(); ok {
 			if quarter := time.Until(d) / 4; quarter < artBudget {
 				artBudget = quarter

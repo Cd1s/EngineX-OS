@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -240,6 +241,90 @@ func TestMigrateLegacyArtworkSkipsCorruptCoverAndChecksOpenElsewhere(t *testing.
 	}
 	if thirdKind != "text" {
 		t.Fatalf("OpenElsewhere rollback failed: row3=%q, want text", thirdKind)
+	}
+}
+
+func TestMigrateLegacyArtworkUsesHashIndex(t *testing.T) {
+	ctx := context.Background()
+	mount := t.TempDir()
+	dir := filepath.Join(mount, "Engine Library", "Database2")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := BuildLibrary(ctx, dir, "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	lib, err := OpenLibraryFile(ctx, filepath.Join(dir, "m.db"), mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lib.Close()
+
+	rows, err := lib.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+legacyArtworkIDsQuery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plans []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err = rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		plans = append(plans, detail)
+	}
+	rows.Close()
+	joined := strings.Join(plans, "; ")
+	if !strings.Contains(joined, "COVERING INDEX index_AlbumArt_hash") || strings.Contains(joined, "SCAN AlbumArt") {
+		t.Fatalf("legacy artwork query must use covering index_AlbumArt_hash, got plan: %s", joined)
+	}
+
+	jpg1 := []byte{0xff, 0xd8, 0xff, 0xe0, 1, 1, 1}
+	jpg2 := []byte{0xff, 0xd8, 0xff, 0xe0, 2, 2, 2}
+	jpg3 := []byte{0xff, 0xd8, 0xff, 0xe0, 3, 3, 3}
+	if _, err = lib.db.ExecContext(ctx, `INSERT INTO AlbumArt(id,hash,albumArt) VALUES
+		(1, NULL, ?),
+		(2, X'', ?),
+		(3, X'00', ?),
+		(4, X'ff', ?),
+		(5, '', ?),
+		(6, 'deadbeef', ?),
+		(7, ?, ?)`, jpg1, jpg1, jpg1, jpg1, jpg1, jpg2, "\U0010ffff", jpg3); err != nil {
+		t.Fatal(err)
+	}
+	if err = lib.MigrateLegacyArtwork(ctx, time.Second); err != nil {
+		t.Fatalf("MigrateLegacyArtwork: %v", err)
+	}
+	wantKinds := map[int64]string{1: "null", 2: "blob", 3: "blob", 4: "blob", 5: "blob", 6: "blob", 7: "blob"}
+	for id, want := range wantKinds {
+		var kind string
+		var hash []byte
+		if err = lib.db.QueryRowContext(ctx, `SELECT typeof(hash), hash FROM AlbumArt WHERE id=?`, id).Scan(&kind, &hash); err != nil {
+			t.Fatalf("id %d: %v", id, err)
+		}
+		if kind != want {
+			t.Fatalf("id %d: typeof(hash)=%q, want %q", id, kind, want)
+		}
+		if id == 2 && len(hash) != 0 {
+			t.Fatalf("id 2 empty blob was altered: %x", hash)
+		}
+		if id == 3 && !bytes.Equal(hash, []byte{0x00}) {
+			t.Fatalf("id 3 blob 0x00 was altered: %x", hash)
+		}
+		if id == 4 && !bytes.Equal(hash, []byte{0xff}) {
+			t.Fatalf("id 4 blob 0xff was altered: %x", hash)
+		}
+		if id >= 5 && len(hash) != sha1.Size {
+			t.Fatalf("id %d text hash was not migrated to sha1 blob: len=%d", id, len(hash))
+		}
+	}
+	for _, img := range [][]byte{jpg1, jpg2, jpg3} {
+		sum := sha1.Sum(img)
+		p := filepath.Join(mount, "Engine Library", "Artwork", base64.RawURLEncoding.EncodeToString(sum[:])+".jpg")
+		if _, err = os.Stat(p); err != nil {
+			t.Fatalf("migrated artwork file %s missing: %v", p, err)
+		}
 	}
 }
 
