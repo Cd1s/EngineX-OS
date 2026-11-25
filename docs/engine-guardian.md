@@ -70,7 +70,7 @@ runs `--watch`, so the flag stays accepted.
 - History supports listId/historylistId references and recognized session date
   columns, with descending ID as a fallback/tiebreaker. An explicit full heal
   retains the newest 50 visible sessions by default (sessions deleted on the
-  deck, `isDeleted`, do not count and are removed) along with any unreferenced
+  deck, `isDeleted`, do not count and are removed) and removes any unreferenced
   `Track`, `PerformanceData` and `AlbumArt` rows; the mount hook's `--data-only`
   heal never deletes visible sessions (`isDeleted=0`) and never alters `hm.db`'s
   schema or adds `sqlite_stat1`, while safely removing soft-deleted

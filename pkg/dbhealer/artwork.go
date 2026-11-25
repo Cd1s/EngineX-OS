@@ -2,6 +2,7 @@ package dbhealer
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"fmt"
 	"image"
@@ -41,10 +42,16 @@ func thumbnail(src image.Image) image.Image {
 	return dst
 }
 
-func healArtwork(tx *sql.Tx, r *Report) error {
+func healArtwork(ctx context.Context, tx *sql.Tx, r *Report) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var last int64 = math.MinInt64
 	for {
-		rows, err := tx.Query("SELECT id,substr(albumArt,1,33554433) FROM AlbumArt WHERE id>? ORDER BY id LIMIT 250", last)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, "SELECT id,substr(albumArt,1,33554433) FROM AlbumArt WHERE id>? ORDER BY id LIMIT 250", last)
 		if err != nil {
 			return err
 		}
@@ -70,6 +77,9 @@ func healArtwork(tx *sql.Tx, r *Report) error {
 			break
 		}
 		for _, a := range page {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			last = a.id
 			if len(a.blob) == 0 {
 				continue
@@ -96,13 +106,20 @@ func healArtwork(tx *sql.Tx, r *Report) error {
 				return err
 			}
 			// Hashes identify the original source for bridge deduplication.
-			if _, err = tx.Exec("UPDATE AlbumArt SET albumArt=? WHERE id=?", out.Bytes(), a.id); err != nil {
+			if _, err = tx.ExecContext(ctx, "UPDATE AlbumArt SET albumArt=? WHERE id=?", out.Bytes(), a.id); err != nil {
 				return err
 			}
 			r.Artwork++
 		}
 	}
-	result, err := tx.Exec("UPDATE Track SET albumArtId=NULL WHERE albumArtId IS NOT NULL AND NOT EXISTS(SELECT 1 FROM AlbumArt WHERE id=Track.albumArtId)")
+	var hasOrphanRef int
+	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM Track WHERE albumArtId IS NOT NULL AND NOT EXISTS(SELECT 1 FROM AlbumArt WHERE id=Track.albumArtId))").Scan(&hasOrphanRef); err != nil {
+		return err
+	}
+	if hasOrphanRef == 0 {
+		return nil
+	}
+	result, err := tx.ExecContext(ctx, "UPDATE Track SET albumArtId=NULL WHERE albumArtId IS NOT NULL AND NOT EXISTS(SELECT 1 FROM AlbumArt WHERE id=Track.albumArtId)")
 	if err != nil {
 		return err
 	}

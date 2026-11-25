@@ -654,3 +654,113 @@ func TestS16PruneHistoryRemovesOrphanAlbumArt(t *testing.T) {
 		t.Fatalf("AlbumArt count after prune=%d, want 2 (sentinel id=1 + live id=2)", artCount)
 	}
 }
+
+func TestS16UnsupportedSchemaDoesNotMutate(t *testing.T) {
+	cases := []struct {
+		name      string
+		dropTable string
+	}{
+		{name: "missing_Information", dropTable: "Information"},
+		{name: "missing_PerformanceData", dropTable: "PerformanceData"},
+		{name: "missing_Playlist", dropTable: "Playlist"},
+		{name: "missing_AlbumArt", dropTable: "AlbumArt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mount, hm := stockHistoryMount(t)
+			hdb, err := sql.Open("sqlite", hm)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hdb.SetMaxOpenConns(1)
+			mustExec(t, hdb, "INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,NULL,NULL)")
+			mustExec(t, hdb, "INSERT INTO Track(id,path,filename,title,albumArtId,isAnalyzed) VALUES(1,'../Music/live.mp3','live.mp3','Live',1,0),(2,'../Music/dead.mp3','dead.mp3','Dead',1,0)")
+			mustExec(t, hdb, "INSERT INTO Historylist(id,title,startTime,timezone,isDeleted) VALUES(1,'Keep',200,'UTC',0),(2,'Del',100,'UTC',1)")
+			mustExec(t, hdb, "INSERT INTO HistorylistEntity(listId,trackId,startTime) VALUES(1,1,200),(2,2,100)")
+			mustExec(t, hdb, "PRAGMA foreign_keys=OFF")
+			mustExec(t, hdb, "DROP TABLE "+tc.dropTable)
+			if err := hdb.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			r, err := HealMountDataOnly(mount, 0)
+			if err == nil || r.Healthy {
+				t.Fatalf("expected error for %s, got report=%+v err=%v", tc.name, r, err)
+			}
+			if n := historyCount(t, hm, "WHERE COALESCE(isDeleted,0)<>0"); n != 1 {
+				t.Fatalf("%s mutated hm.db before schema validation: deleted tombstones remaining=%d, want 1", tc.name, n)
+			}
+			if n := historyCount(t, hm, "WHERE COALESCE(isDeleted,0)=0"); n != 1 {
+				t.Fatalf("%s altered visible sessions: remaining=%d, want 1", tc.name, n)
+			}
+			check, err := Open(hm, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer check.Close()
+			var tracks int
+			if err := check.QueryRow("SELECT count(*) FROM Track").Scan(&tracks); err != nil || tracks != 2 {
+				t.Fatalf("%s mutated Track rows: count=%d err=%v, want 2", tc.name, tracks, err)
+			}
+		})
+	}
+}
+
+func TestS16DataOnlyHistoryRespectsMountDeadlineWhenLocked(t *testing.T) {
+	mount, hm := stockHistoryMount(t)
+	hdb, err := sql.Open("sqlite", hm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdb.SetMaxOpenConns(1)
+	mustExec(t, hdb, "INSERT INTO Track(id,path,filename,title,isAnalyzed) VALUES(1,'../Music/live.mp3','live.mp3','Live',0),(2,'../Music/dead.mp3','dead.mp3','Dead',0)")
+	mustExec(t, hdb, "INSERT INTO Historylist(id,title,startTime,timezone,isDeleted) VALUES(1,'Keep',200,'UTC',0),(2,'Del',100,'UTC',1)")
+	mustExec(t, hdb, "INSERT INTO HistorylistEntity(listId,trackId,startTime) VALUES(1,1,200),(2,2,100)")
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold an EXCLUSIVE lock from the same process so libraryInUse (other PIDs)
+	// does not short-circuit and the hm.db phase must honor ctx.Deadline().
+	locker, err := sql.Open("sqlite", hm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locker.SetMaxOpenConns(1)
+	defer locker.Close()
+	if _, err := locker.Exec("BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	r, err := HealMountDataOnlyContext(ctx, mount, 0)
+	elapsed := time.Since(start)
+
+	if _, rbErr := locker.Exec("ROLLBACK"); rbErr != nil {
+		t.Fatal(rbErr)
+	}
+	if err := locker.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if elapsed >= time.Second {
+		t.Fatalf("locked hm.db blew past 200ms mount deadline: elapsed=%s (busy_timeout not bounded by ctx)", elapsed)
+	}
+	if err != nil || !r.Healthy || r.HistoryCleaned != 0 || r.HistoryCompacted {
+		t.Fatalf("locked hm.db under short mount budget should stop cleanly: report=%+v err=%v", r, err)
+	}
+	if n := historyCount(t, hm, "WHERE COALESCE(isDeleted,0)<>0"); n != 1 {
+		t.Fatalf("locked hm.db was unexpectedly mutated: tombstones=%d, want 1", n)
+	}
+
+	// Once unlocked, a normal-budget pass cleans the tombstone cleanly.
+	r2, err := HealMountDataOnly(mount, 0)
+	if err != nil || !r2.Healthy || r2.HistoryCleaned == 0 {
+		t.Fatalf("unlocked follow-up pass failed: report=%+v err=%v", r2, err)
+	}
+	if n := historyCount(t, hm, "WHERE COALESCE(isDeleted,0)<>0"); n != 0 {
+		t.Fatalf("unlocked follow-up left tombstones=%d, want 0", n)
+	}
+}

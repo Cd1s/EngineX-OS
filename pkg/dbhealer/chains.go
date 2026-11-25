@@ -1,14 +1,15 @@
 package dbhealer
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
 )
 
-func fixSchema(tx *sql.Tx) error {
-	_, err := tx.Exec(`
+func fixSchema(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `
  CREATE INDEX IF NOT EXISTS index_PlaylistEntity_listId_nextEntityId ON PlaylistEntity(listId,nextEntityId);
  CREATE INDEX IF NOT EXISTS index_PlaylistEntity_trackId ON PlaylistEntity(trackId);
  DROP TRIGGER IF EXISTS trigger_before_delete_PlaylistEntity;
@@ -67,25 +68,30 @@ func order(nodes []link) []link {
 }
 
 func HealPlaylistEntities(db *sql.DB) error {
-	return transaction(db, func(tx *sql.Tx) error {
-		if err := fixSchema(tx); err != nil {
+	ctx := context.Background()
+	return transactionContext(ctx, db, func(tx *sql.Tx) error {
+		if err := fixSchema(ctx, tx); err != nil {
 			return err
 		}
-		_, err := healChains(tx, false)
+		_, err := healChains(ctx, tx, false)
 		return err
 	})
 }
 func HealPlaylistTree(db *sql.DB) error {
-	return transaction(db, func(tx *sql.Tx) error {
-		_, err := healChains(tx, true)
+	ctx := context.Background()
+	return transactionContext(ctx, db, func(tx *sql.Tx) error {
+		_, err := healChains(ctx, tx, true)
 		if err != nil {
 			return err
 		}
-		return materialize(tx)
+		return materialize(ctx, tx)
 	})
 }
 
-func healChains(tx *sql.Tx, tree bool) (int, error) {
+func healChains(ctx context.Context, tx *sql.Tx, tree bool) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	table, groupCol, nextCol := "PlaylistEntity", "listId", "nextEntityId"
 	if tree {
 		table, groupCol, nextCol = "Playlist", "parentListId", "nextListId"
@@ -96,7 +102,7 @@ func healChains(tx *sql.Tx, tree bool) (int, error) {
 		query += ", COALESCE(title,''), parentListId IS NULL"
 	}
 	query += " FROM " + table + " ORDER BY id"
-	rows, err := tx.Query(query)
+	rows, err := tx.QueryContext(ctx, query)
 	if err != nil {
 		return 0, err
 	}
@@ -189,28 +195,31 @@ func healChains(tx *sql.Tx, tree bool) (int, error) {
 	if tree {
 		// Clear every sibling pointer before assigning new parents or links. NULL is
 		// temporary and stays invisible outside this transaction.
-		if _, err = tx.Exec("UPDATE Playlist SET nextListId=NULL"); err != nil {
+		if _, err = tx.ExecContext(ctx, "UPDATE Playlist SET nextListId=NULL"); err != nil {
 			return 0, err
 		}
 		// The stock parent-persistence trigger traverses the entire recursive
 		// ancestry view. Suspend it while parent cycles are being broken.
 		var parentTrigger string
 		if len(changedParents) > 0 {
-			err = tx.QueryRow("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='trigger_after_update_isPersistParent'").Scan(&parentTrigger)
+			err = tx.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='trigger_after_update_isPersistParent'").Scan(&parentTrigger)
 			if err != nil && err != sql.ErrNoRows {
 				return 0, err
 			}
-			if _, err = tx.Exec("DROP TRIGGER IF EXISTS trigger_after_update_isPersistParent"); err != nil {
+			if _, err = tx.ExecContext(ctx, "DROP TRIGGER IF EXISTS trigger_after_update_isPersistParent"); err != nil {
 				return 0, err
 			}
 		}
 		for _, n := range all {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
 			if changedParents[n.id] {
 				title := n.title
 				// Preserve every node when an orphan's title collides at the root.
 				for suffix := 0; ; suffix++ {
 					var count int
-					if err = tx.QueryRow("SELECT count(*) FROM Playlist WHERE parentListId=0 AND title=? AND id<>?", title, n.id).Scan(&count); err != nil {
+					if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM Playlist WHERE parentListId=0 AND title=? AND id<>?", title, n.id).Scan(&count); err != nil {
 						return 0, err
 					}
 					if count == 0 {
@@ -218,31 +227,37 @@ func healChains(tx *sql.Tx, tree bool) (int, error) {
 					}
 					title = fmt.Sprintf("%s [recovered %d-%d]", n.title, n.id, suffix)
 				}
-				if _, err = tx.Exec("UPDATE Playlist SET parentListId=0,title=? WHERE id=?", title, n.id); err != nil {
+				if _, err = tx.ExecContext(ctx, "UPDATE Playlist SET parentListId=0,title=? WHERE id=?", title, n.id); err != nil {
 					return 0, err
 				}
 			}
 		}
 		if parentTrigger != "" {
-			if _, err = tx.Exec(parentTrigger); err != nil {
+			if _, err = tx.ExecContext(ctx, parentTrigger); err != nil {
 				return 0, err
 			}
 		}
 		for _, k := range keys {
 			seq := order(groups[k])
 			for i, n := range seq {
+				if err := ctx.Err(); err != nil {
+					return 0, err
+				}
 				next := int64(0)
 				if i+1 < len(seq) {
 					next = seq[i+1].id
 				}
-				if _, err = tx.Exec("UPDATE Playlist SET nextListId=? WHERE id=?", next, n.id); err != nil {
+				if _, err = tx.ExecContext(ctx, "UPDATE Playlist SET nextListId=? WHERE id=?", next, n.id); err != nil {
 					return 0, err
 				}
 			}
 		}
 	} else {
 		for _, n := range changes {
-			if _, err = tx.Exec("UPDATE PlaylistEntity SET nextEntityId=? WHERE id=?", n.next, n.id); err != nil {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+			if _, err = tx.ExecContext(ctx, "UPDATE PlaylistEntity SET nextEntityId=? WHERE id=?", n.next, n.id); err != nil {
 				return 0, err
 			}
 		}
@@ -250,16 +265,19 @@ func healChains(tx *sql.Tx, tree bool) (int, error) {
 	return len(changes), nil
 }
 
-func materialize(tx *sql.Tx) error {
+func materialize(ctx context.Context, tx *sql.Tx) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// Preserve the stock view as a correctness fallback while edits have dirtied
 	// the cache. Existing Engine queries transparently use the fast snapshot.
 	var originalCount int
-	if err := tx.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='view' AND name='GuardianOriginalPlaylistPath'").Scan(&originalCount); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='view' AND name='GuardianOriginalPlaylistPath'").Scan(&originalCount); err != nil {
 		return err
 	}
 	if originalCount == 0 {
 		var ddl string
-		if err := tx.QueryRow("SELECT sql FROM sqlite_master WHERE type='view' AND name='PlaylistPath'").Scan(&ddl); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='view' AND name='PlaylistPath'").Scan(&ddl); err != nil {
 			return err
 		}
 		upper := strings.ToUpper(ddl)
@@ -274,13 +292,13 @@ func materialize(tx *sql.Tx) error {
 		if as < 0 {
 			return fmt.Errorf("unsupported PlaylistPath definition")
 		}
-		if _, err := tx.Exec("CREATE VIEW GuardianOriginalPlaylistPath AS " + ddl[as+2:]); err != nil {
+		if _, err := tx.ExecContext(ctx, "CREATE VIEW GuardianOriginalPlaylistPath AS "+ddl[as+2:]); err != nil {
 			return err
 		}
 	}
 	// Dirty tracking is O(1) for Engine's own edits; refresh at the next guardian
 	// pass. Reads retain a consistent snapshot between refreshes.
-	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS GuardianCacheState(id INTEGER PRIMARY KEY CHECK(id=1),dirty INTEGER NOT NULL);
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS GuardianCacheState(id INTEGER PRIMARY KEY CHECK(id=1),dirty INTEGER NOT NULL);
  INSERT OR IGNORE INTO GuardianCacheState VALUES(1,1);
  CREATE TABLE IF NOT EXISTS MaterializedPlaylistPath(id INTEGER PRIMARY KEY,parentListId INTEGER,nextListId INTEGER,position INTEGER,path TEXT);
  CREATE INDEX IF NOT EXISTS index_MaterializedPlaylistPath_parent_position ON MaterializedPlaylistPath(parentListId,position);`); err != nil {
@@ -289,14 +307,14 @@ func materialize(tx *sql.Tx) error {
 	// Preserve the vendor depth-descending, chain-tail-first position order.
 	// Build paths once instead of running an ancestry subquery for every row.
 	var liveDDL string
-	err := tx.QueryRow("SELECT sql FROM sqlite_master WHERE type='view' AND name='GuardianLivePlaylistPath'").Scan(&liveDDL)
+	err := tx.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='view' AND name='GuardianLivePlaylistPath'").Scan(&liveDDL)
 	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
 	// NULL-terminated chains have no vendor OrderedList row: their distance
 	// stays NULL. Equal ranks follow the captured parent/next covering index.
 	if !strings.Contains(liveDDL, "p.depth DESC,r.distance,r.parentListId,r.nextListId,p.id") {
-		if _, err = tx.Exec(`DROP VIEW IF EXISTS GuardianLivePlaylistPath;
+		if _, err = tx.ExecContext(ctx, `DROP VIEW IF EXISTS GuardianLivePlaylistPath;
  CREATE VIEW GuardianLivePlaylistPath AS
  WITH RECURSIVE ReverseOrder(id,parentListId,nextListId,title,distance) AS (
    SELECT id,parentListId,nextListId,title,
@@ -316,7 +334,7 @@ func materialize(tx *sql.Tx) error {
 			return err
 		}
 	}
-	if _, err := tx.Exec(`DROP VIEW IF EXISTS PlaylistPath;
+	if _, err := tx.ExecContext(ctx, `DROP VIEW IF EXISTS PlaylistPath;
  CREATE VIEW PlaylistPath AS
  SELECT id,path,position FROM MaterializedPlaylistPath WHERE (SELECT dirty FROM GuardianCacheState WHERE id=1)=0
  UNION ALL
@@ -324,30 +342,30 @@ func materialize(tx *sql.Tx) error {
 		return err
 	}
 	for _, event := range []string{"INSERT", "UPDATE", "DELETE"} {
-		if _, err := tx.Exec(fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS guardian_playlist_%s AFTER %s ON Playlist BEGIN UPDATE GuardianCacheState SET dirty=1 WHERE id=1; END`, strings.ToLower(event), event)); err != nil {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS guardian_playlist_%s AFTER %s ON Playlist BEGIN UPDATE GuardianCacheState SET dirty=1 WHERE id=1; END`, strings.ToLower(event), event)); err != nil {
 			return err
 		}
 	}
 	var dirty int
-	if err := tx.QueryRow("SELECT dirty FROM GuardianCacheState WHERE id=1").Scan(&dirty); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT dirty FROM GuardianCacheState WHERE id=1").Scan(&dirty); err != nil {
 		return err
 	}
 	if dirty == 0 {
 		return nil
 	}
-	if _, err := tx.Exec(`DELETE FROM MaterializedPlaylistPath;
+	if _, err := tx.ExecContext(ctx, `DELETE FROM MaterializedPlaylistPath;
  INSERT INTO MaterializedPlaylistPath(id,parentListId,nextListId,position,path)
  SELECT p.id,COALESCE(p.parentListId,0),COALESCE(p.nextListId,0),v.position,v.path
  FROM Playlist p JOIN GuardianLivePlaylistPath v ON v.id=p.id;`); err != nil {
 		return err
 	}
 	var total, cached int
-	if err := tx.QueryRow(`SELECT (SELECT count(*) FROM Playlist),(SELECT count(*) FROM MaterializedPlaylistPath)`).Scan(&total, &cached); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM Playlist),(SELECT count(*) FROM MaterializedPlaylistPath)`).Scan(&total, &cached); err != nil {
 		return err
 	}
 	if total != cached {
 		return fmt.Errorf("playlist tree is not rooted: %d of %d cached", cached, total)
 	}
-	_, err = tx.Exec("UPDATE GuardianCacheState SET dirty=0 WHERE id=1")
+	_, err = tx.ExecContext(ctx, "UPDATE GuardianCacheState SET dirty=0 WHERE id=1")
 	return err
 }
