@@ -117,6 +117,9 @@ func BuildView(libs []SourceLibrary, layout, lang string) (*View, error) {
 }
 
 func BuildViewCtx(ctx context.Context, libs []SourceLibrary, layout, lang string) (*View, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var device, one *SourceLibrary
 	var links []*SourceLibrary
 	for i := range libs {
@@ -131,7 +134,11 @@ func BuildViewCtx(ctx context.Context, libs []SourceLibrary, layout, lang string
 	}
 	if one != nil && device != nil {
 		filtered := *one
-		filtered.Lib = withoutGhostRootLists(one.Lib, device.Lib)
+		cleanOne, err := withoutGhostRootLists(ctx, one.Lib, device.Lib)
+		if err != nil {
+			return nil, err
+		}
+		filtered.Lib = cleanOne
 		one = &filtered
 		if layout == rbstate.LayoutDevice {
 			one = nil
@@ -174,37 +181,99 @@ func BuildViewCtx(ctx context.Context, libs []SourceLibrary, layout, lang string
 			}
 		}
 	}
-	add := func(prefix string, nodes []node) {
-		for _, n := range nodes {
+	add := func(prefix string, nodes []node) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		for i, n := range nodes {
+			if i&255 == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
 			parent := prefix
 			if len(n.path) > 1 {
 				parent += "\x00" + strings.Join(n.path[:len(n.path)-1], "\x00")
 			}
 			v.Lists = append(v.Lists, ViewList{Key: prefix + "\x00" + n.id(), Parent: parent, Name: n.name, Folder: n.folder, Tracks: n.entries})
 		}
+		return nil
 	}
-	folder := func(key, title string, nodes []node) {
+	folder := func(key, title string, nodes []node) error {
 		v.Lists = append(v.Lists, ViewList{Key: key, Name: title, Folder: true})
-		add(key, nodes)
+		return add(key, nodes)
+	}
+	mergePair := func() ([]node, error) {
+		a, err := tree(ctx, one, keys[one])
+		if err != nil {
+			return nil, err
+		}
+		b, err := tree(ctx, device, keys[device])
+		if err != nil {
+			return nil, err
+		}
+		return mergeTrees(ctx, a, b)
 	}
 	switch {
 	case one != nil && device != nil && layout == rbstate.LayoutMerged:
-		add("", mergeTrees(tree(one, keys[one]), tree(device, keys[device])))
+		nodes, err := mergePair()
+		if err == nil {
+			err = add("", nodes)
+		}
+		if err != nil {
+			return nil, err
+		}
 	case one != nil && device != nil:
-		folder(viewMerged, mergedFolderTitle(lang), mergeTrees(tree(one, keys[one]), tree(device, keys[device])))
-		folder(viewDevice, "Device Library", tree(device, keys[device]))
-		folder(viewOneLibrary, "OneLibrary", tree(one, keys[one]))
+		merged, err := mergePair()
+		if err == nil {
+			err = folder(viewMerged, mergedFolderTitle(lang), merged)
+		}
+		if err == nil {
+			var devNodes []node
+			devNodes, err = tree(ctx, device, keys[device])
+			if err == nil {
+				err = folder(viewDevice, "Device Library", devNodes)
+			}
+		}
+		if err == nil {
+			var oneNodes []node
+			oneNodes, err = tree(ctx, one, keys[one])
+			if err == nil {
+				err = folder(viewOneLibrary, "OneLibrary", oneNodes)
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
 	case one != nil:
-		add("", tree(one, keys[one]))
+		nodes, err := tree(ctx, one, keys[one])
+		if err == nil {
+			err = add("", nodes)
+		}
+		if err != nil {
+			return nil, err
+		}
 	case device != nil:
-		add("", tree(device, keys[device]))
+		nodes, err := tree(ctx, device, keys[device])
+		if err == nil {
+			err = add("", nodes)
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	for _, l := range links {
-		folder(viewLink+l.Source, "[Pro DJ Link: "+l.Source+"]", tree(l, keys[l]))
+		nodes, err := tree(ctx, l, keys[l])
+		if err == nil {
+			err = folder(viewLink+l.Source, "[Pro DJ Link: "+l.Source+"]", nodes)
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	last := map[string]string{} // a folder's key to its last child so far
 	for i := range v.Lists {
-		if i&255 == 0 {
+		if i&63 == 0 {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
@@ -223,13 +292,26 @@ func BuildViewCtx(ctx context.Context, libs []SourceLibrary, layout, lang string
 // tree is a library's lists in display order, a folder before its children. A list's entries are
 // the keys of its tracks, each once (Engine keeps a track once in a list), without tracks the
 // library does not have. A list whose folder is gone shows at the root.
-func tree(l *SourceLibrary, keys map[uint32]string) []node {
+func tree(ctx context.Context, l *SourceLibrary, keys map[uint32]string) ([]node, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	children := map[uint32][]*rekordbox.Playlist{}
 	known := map[uint32]bool{}
 	for i := range l.Lib.Playlists {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		known[l.Lib.Playlists[i].ID] = true
 	}
 	for i := range l.Lib.Playlists {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		p := &l.Lib.Playlists[i]
 		parent := p.ParentID
 		if !known[parent] {
@@ -239,13 +321,20 @@ func tree(l *SourceLibrary, keys map[uint32]string) []node {
 	}
 	var out []node
 	seen := map[uint32]bool{} // against a cycle in the export's tree
-	var walk func(parent uint32, prefix []string)
-	walk = func(parent uint32, prefix []string) {
+	steps := 0
+	var walk func(parent uint32, prefix []string) error
+	walk = func(parent uint32, prefix []string) error {
 		used := map[string]int{}
 		for _, p := range children[parent] {
 			if seen[p.ID] {
 				continue
 			}
+			if steps&63 == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
+			steps++
 			seen[p.ID] = true
 			name := p.Name
 			if used[p.Name]++; used[p.Name] > 1 {
@@ -254,58 +343,119 @@ func tree(l *SourceLibrary, keys map[uint32]string) []node {
 			n := node{path: append(slices.Clone(prefix), name), name: p.Name, folder: p.Folder}
 			if !p.Folder {
 				var ids []string
-				for _, id := range p.Tracks {
+				for j, id := range p.Tracks {
+					if j&511 == 0 {
+						if err := ctx.Err(); err != nil {
+							return err
+						}
+					}
 					if key, ok := keys[id]; ok {
 						ids = append(ids, key)
 					}
 				}
-				n.entries = union(nil, ids)
+				entries, err := unionCtx(ctx, nil, ids)
+				if err != nil {
+					return err
+				}
+				n.entries = entries
 			}
 			out = append(out, n)
-			walk(p.ID, n.path)
+			if err := walk(p.ID, n.path); err != nil {
+				return err
+			}
 		}
+		return nil
 	}
-	walk(0, nil)
-	return out
+	if err := walk(0, nil); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // union is a followed by what b has that a has not, each key once.
 func union(a, b []string) []string {
+	out, _ := unionCtx(context.Background(), a, b)
+	return out
+}
+
+func unionCtx(ctx context.Context, a, b []string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var out []string
 	in := map[string]bool{}
-	for _, k := range slices.Concat(a, b) {
-		if !in[k] {
-			in[k] = true
-			out = append(out, k)
+	idx := 0
+	for _, list := range [][]string{a, b} {
+		for _, k := range list {
+			if idx&511 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
+			idx++
+			if !in[k] {
+				in[k] = true
+				out = append(out, k)
+			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 // mergeTrees joins two trees: a list both have, by folder path and name, is one list with the
 // order of whichever has more entries, then what only the other has. A list only b has goes after
 // the last list of its folder, its own children after it.
-func mergeTrees(a, b []node) []node {
+func mergeTrees(ctx context.Context, a, b []node) ([]node, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	at := map[string]int{}
 	out := slices.Clone(a)
 	for i := range out {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		at[out[i].id()] = i
 	}
 	var extra []node
-	for _, n := range b {
+	for j, n := range b {
+		if j&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		i, ok := at[n.id()]
+		var entries []string
+		var err error
 		if !ok {
 			extra = append(extra, n)
+			continue
 		} else if len(n.entries) > len(out[i].entries) {
-			out[i].entries = union(n.entries, out[i].entries)
+			entries, err = unionCtx(ctx, n.entries, out[i].entries)
 		} else {
-			out[i].entries = union(out[i].entries, n.entries)
+			entries, err = unionCtx(ctx, out[i].entries, n.entries)
 		}
+		if err != nil {
+			return nil, err
+		}
+		out[i].entries = entries
 	}
+	scanStep := 0
 	for _, n := range extra {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		parent := strings.Join(n.path[:len(n.path)-1], "\x00")
 		pos := len(out)
 		for i := len(out) - 1; i >= 0 && parent != ""; i-- {
+			if scanStep&511 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
+			scanStep++
 			if p := out[i].id(); p == parent || strings.HasPrefix(p, parent+"\x00") {
 				pos = i + 1
 				break
@@ -313,24 +463,48 @@ func mergeTrees(a, b []node) []node {
 		}
 		out = slices.Insert(out, pos, n)
 	}
-	return out
+	return out, nil
 }
 
 // withoutGhostRootLists leaves out of OneLibrary the empty root lists rekordbox 7 writes into it:
 // empty, at the root, named like a list with tracks, and not an empty root list of the Device
 // Library of the same stick.
-func withoutGhostRootLists(oneLibrary, pdb *rekordbox.Library) *rekordbox.Library {
+func withoutGhostRootLists(ctx context.Context, oneLibrary, pdb *rekordbox.Library) (*rekordbox.Library, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	emptyRoot := func(p *rekordbox.Playlist) bool { return !p.Folder && p.ParentID == 0 && len(p.Tracks) == 0 }
 	populated, pdbEmpty := map[string]bool{}, map[string]bool{}
-	for _, p := range oneLibrary.Playlists {
+	for i, p := range oneLibrary.Playlists {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		populated[p.Name] = populated[p.Name] || !p.Folder && len(p.Tracks) > 0
 	}
 	for i := range pdb.Playlists {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		pdbEmpty[pdb.Playlists[i].Name] = pdbEmpty[pdb.Playlists[i].Name] || emptyRoot(&pdb.Playlists[i])
 	}
 	filtered := *oneLibrary
-	filtered.Playlists = slices.DeleteFunc(slices.Clone(oneLibrary.Playlists), func(p rekordbox.Playlist) bool {
-		return emptyRoot(&p) && populated[p.Name] && !pdbEmpty[p.Name]
-	})
-	return &filtered
+	kept := make([]rekordbox.Playlist, 0, len(oneLibrary.Playlists))
+	for i := range oneLibrary.Playlists {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		p := oneLibrary.Playlists[i]
+		if emptyRoot(&p) && populated[p.Name] && !pdbEmpty[p.Name] {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	filtered.Playlists = kept
+	return &filtered, nil
 }

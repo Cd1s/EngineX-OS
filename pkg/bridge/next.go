@@ -579,30 +579,55 @@ func carryOverChecked(ctx context.Context, dir string, h *rbstate.Header, st *st
 // row on a deck), so the helper looks at the decks again after it. With no next library waiting,
 // or the stick's library as the job left it, it is two short reads.
 func TakeDeckRows(ctx context.Context, mount string) bool {
-	if ctx.Err() != nil {
-		return false
+	looked, _ := TakeDeckRowsChecked(ctx, mount)
+	return looked
+}
+
+// TakeDeckRowsChecked is TakeDeckRows with an error return so callers can distinguish a safe
+// no-op (no swap waiting or base already current, (false, nil)) from a lock, state, or
+// carry-over failure ((false, err != nil)) and defer publication without losing deck edits.
+func TakeDeckRowsChecked(ctx context.Context, mount string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	unlock, err := rbstate.LockVolume(mount, 0)
 	if err != nil {
-		return false
+		return false, err
 	}
 	defer unlock()
 	dir := filepath.Join(mount, filepath.FromSlash(databaseSubdir))
-	h, err := rbstate.ReadHeaderFile(filepath.Join(dir, rbstate.SwapName))
-	if err != nil || h.Rules != rbstate.Rules || h.Base == enginedb.LibraryState(filepath.Join(dir, "m.db")) {
-		return false
+	swapPath := filepath.Join(dir, rbstate.SwapName)
+	if _, statErr := os.Stat(swapPath); errors.Is(statErr, os.ErrNotExist) {
+		return false, nil
+	} else if statErr != nil {
+		return false, statErr
 	}
-	if ctx.Err() != nil {
-		return false
+	h, err := rbstate.ReadHeaderFile(swapPath)
+	if err != nil {
+		return false, err
+	}
+	if h.Rules != rbstate.Rules {
+		return false, fmt.Errorf("take deck rows: swap snapshot rules %d != %d", h.Rules, rbstate.Rules)
+	}
+	if h.Base == enginedb.LibraryState(filepath.Join(dir, "m.db")) {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	if _, err = os.Stat(filepath.Join(dir, nextDB)); err != nil {
-		return false
+		return false, err
 	}
 	pace := newPacer(ctx)
 	looked, _, err := carryOverChecked(ctx, dir, &h, newSteps(MountOptions{Full: true}), func(took time.Duration) error { return pace.afterStat(pace.active(), took) })
 	if err != nil {
 		log.Printf("rb-bridge: taking deck rows failed: %v", err)
-		return false
+		return false, err
 	}
-	return looked
+	if !looked {
+		err = errors.New("take deck rows: live library changes could not be carried over")
+		log.Printf("rb-bridge: %v", err)
+		return false, err
+	}
+	return true, nil
 }

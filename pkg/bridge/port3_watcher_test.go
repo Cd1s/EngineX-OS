@@ -47,7 +47,11 @@ func p3StartWatcher(t *testing.T, mount string, quiet, retry time.Duration, runD
 		defer close(done)
 		_ = w.Run(ctx)
 	}()
-	time.Sleep(150 * time.Millisecond)
+	if !bridge.WaitWatchingForTest(w, mount, 2*time.Second) {
+		cancel()
+		<-done
+		t.Fatal("watcher did not attach stick")
+	}
 	return w, &passes, cancel, done
 }
 
@@ -90,6 +94,9 @@ func TestP3WatcherDefersConversionAndFinalPassWritesEjectEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	p3WaitCue(t, mount, "after conversion", 3*time.Second)
+	if !bridge.WaitPassIdleForTest(w, mount, 3*time.Second) {
+		t.Fatal("watcher phase 1 pass did not finish before eject phase")
+	}
 	// edisksd_hook creates enginex-rb-ejected-* on eager eject (and clears it if umount fails);
 	// cuewatch checks that marker so a failed eject does not permanently disable write-back.
 	ejectMark := filepath.Join(runDir, bridge.EjectedNameForTest(mount))

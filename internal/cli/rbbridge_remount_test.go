@@ -4,16 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"golang.org/x/sys/unix"
 )
 
@@ -147,13 +152,13 @@ func TestRemountTakesTheDecksRowsBeforeTheRemove(t *testing.T) {
 	var calls [][]string // the uevent writes seen at each call
 	var whileHeld []string
 	unloaded := make(chan struct{})
-	takeDeckRows = func(_ context.Context, mount string) bool {
+	takeDeckRows = func(_ context.Context, mount string) (bool, error) {
 		if mount != f.mount {
 			t.Errorf("rows taken on %s", mount)
 		}
 		calls = append(calls, f.seen())
 		if len(calls) > 1 {
-			return false // the deck wrote nothing since
+			return false, nil // the deck wrote nothing since
 		}
 		f.engine("9", track, "0100000") // a deck loads a track while the rows are looked for
 		go func() {
@@ -162,7 +167,7 @@ func TestRemountTakesTheDecksRowsBeforeTheRemove(t *testing.T) {
 			whileHeld = f.seen()
 			f.engine("9", "", "")
 		}()
-		return true
+		return true, nil
 	}
 	if err := remount(context.Background(), f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb")); err != nil {
 		t.Fatal(err)
@@ -179,7 +184,7 @@ func TestRemountTakesTheDecksRowsBeforeTheRemove(t *testing.T) {
 	}
 	// A library the deck goes on writing does not hold the remount back for ever.
 	calls = nil
-	takeDeckRows = func(context.Context, string) bool { calls = append(calls, nil); return true }
+	takeDeckRows = func(context.Context, string) (bool, error) { calls = append(calls, nil); return true, nil }
 	f.mu.Lock()
 	f.events = nil
 	f.mu.Unlock()
@@ -199,7 +204,7 @@ func TestRemountStopsTakingRowsAtAnEject(t *testing.T) {
 	old := takeDeckRows
 	t.Cleanup(func() { takeDeckRows = old })
 	var stopped time.Duration
-	takeDeckRows = func(ctx context.Context, mount string) bool {
+	takeDeckRows = func(ctx context.Context, mount string) (bool, error) {
 		start := time.Now()
 		go func() {
 			time.Sleep(100 * time.Millisecond)
@@ -210,7 +215,7 @@ func TestRemountStopsTakingRowsAtAnEject(t *testing.T) {
 			stopped = time.Since(start)
 		case <-time.After(5 * time.Second):
 		}
-		return true
+		return false, ctx.Err()
 	}
 	if err := remount(context.Background(), f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb")); err != nil {
 		t.Fatal(err)
@@ -441,4 +446,128 @@ func TestStartRemountRunsAnIdleSystemdUnit(t *testing.T) {
 	if n := len(args); n < 4 || args[n-3] != "rb-bridge" || args[n-2] != "--remount" || args[n-1] != "/media/REKORDBOX" {
 		t.Fatalf("command %q", args)
 	}
+}
+
+// BLOCK 1: a failed deck-row pass must never proceed to remove/add remounting (which would drop
+// deck edits in swapNext when m.db was not carried over). Transient failures defer and retry;
+// persistent failures abort remount without unmounting the stick.
+func TestR4_Block1_RemountDefersAndAbortsOnFailedDeckRowPass(t *testing.T) {
+	t.Run("transient_error_defers_then_publishes", func(t *testing.T) {
+		f := newFakeStick(t)
+		f.engine("5", "", "")
+		old := takeDeckRows
+		t.Cleanup(func() { takeDeckRows = old })
+		var calls atomic.Int32
+		var afterFirst []string
+		takeDeckRows = func(context.Context, string) (bool, error) {
+			n := calls.Add(1)
+			if n == 1 {
+				return false, errors.New("lock held")
+			}
+			if n == 2 {
+				afterFirst = f.seen()
+			}
+			return false, nil
+		}
+		if err := remount(context.Background(), f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb")); err != nil {
+			t.Fatalf("remount failed after transient deck-row error: %v", err)
+		}
+		if calls.Load() != 2 {
+			t.Fatalf("expected 2 takeDeckRows attempts, got %d", calls.Load())
+		}
+		if len(afterFirst) != 0 {
+			t.Fatalf("uevent writes %v after failed takeDeckRows before retry succeeded", afterFirst)
+		}
+		if got := strings.Join(f.seen(), " "); got != "remove: add:" {
+			t.Fatalf("uevent writes %q, want remove: add:", got)
+		}
+	})
+
+	t.Run("persistent_error_aborts_without_remount", func(t *testing.T) {
+		f := newFakeStick(t)
+		f.engine("5", "", "")
+		old := takeDeckRows
+		t.Cleanup(func() { takeDeckRows = old })
+		var calls atomic.Int32
+		takeDeckRows = func(context.Context, string) (bool, error) {
+			calls.Add(1)
+			return false, errors.New("carryOver failed")
+		}
+		err := remount(context.Background(), f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb"))
+		if err == nil || !strings.Contains(err.Error(), "take deck rows") {
+			t.Fatalf("expected error from remount when takeDeckRows repeatedly fails, got %v", err)
+		}
+		if got := calls.Load(); got != int32(deckRowFailures) {
+			t.Fatalf("expected %d failed attempts before aborting, got %d", deckRowFailures, got)
+		}
+		if seen := f.seen(); len(seen) != 0 {
+			t.Fatalf("remount wrote uevents %v despite failed deck-row passes", seen)
+		}
+	})
+
+	t.Run("real_lock_held_defers_remount", func(t *testing.T) {
+		t.Setenv(rbstate.StageEnv, filepath.Join(t.TempDir(), "stage"))
+		f := newFakeStick(t)
+		f.engine("5", "", "")
+		testfixture.LargeExport(t, f.mount, 4)
+		ctx := context.Background()
+		if _, err := bridge.ConvertAtMount(ctx, f.mount, bridge.MountOptions{}); err != nil {
+			t.Fatalf("ConvertAtMount: %v", err)
+		}
+		res, err := bridge.FillInBackground(ctx, f.mount, bridge.FillOptions{})
+		if err != nil || !res.Publish {
+			t.Fatalf("FillInBackground: res=%+v err=%v", res, err)
+		}
+		db, err := sql.Open("sqlite", filepath.Join(f.mount, "Engine Library", "Database2", "m.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE Track SET rating=80 WHERE id=1`); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		_ = db.Close()
+
+		unlock, err := rbstate.LockVolume(f.mount, 0)
+		if err != nil {
+			t.Fatalf("LockVolume: %v", err)
+		}
+		locked := true
+		defer func() {
+			if locked {
+				unlock()
+			}
+		}()
+
+		oldTake := takeDeckRows
+		var firstCallOnce sync.Once
+		firstTook := make(chan struct{})
+		takeDeckRows = func(c context.Context, m string) (bool, error) {
+			looked, err := oldTake(c, m)
+			firstCallOnce.Do(func() { close(firstTook) })
+			return looked, err
+		}
+		t.Cleanup(func() { takeDeckRows = oldTake })
+
+		deckWait = 60 * time.Millisecond
+		done := make(chan error, 1)
+		go func() {
+			done <- remount(ctx, f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb"))
+		}()
+
+		<-firstTook
+		time.Sleep(100 * time.Millisecond)
+		if seen := f.seen(); len(seen) != 0 {
+			t.Fatalf("remount proceeded (%v) while real volume lock prevented TakeDeckRows", seen)
+		}
+		locked = false
+		unlock()
+
+		if err := <-done; err != nil {
+			t.Fatalf("remount after lock release: %v", err)
+		}
+		if got := strings.Join(f.seen(), " "); got != "remove: add:" {
+			t.Fatalf("uevent writes %q, want remove: add:", got)
+		}
+	})
 }

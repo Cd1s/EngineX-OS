@@ -5,6 +5,7 @@
 package bridge
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -252,6 +254,121 @@ func copyStickFilePaced(ctx context.Context, src string, pace *pacer) (dst *os.F
 	return out, size, nil
 }
 
+type pacedReader struct {
+	ctx  context.Context
+	r    io.Reader
+	pace *pacer
+}
+
+func (r *pacedReader) Read(p []byte) (int, error) {
+	if err := r.pace.waitNotLoading(); err != nil {
+		return 0, err
+	}
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if len(p) > playingReadChunk {
+		p = p[:playingReadChunk]
+	}
+	t0 := time.Now()
+	n, err := r.r.Read(p)
+	took := time.Since(t0)
+	if n > 0 {
+		if perr := r.pace.chunkPause(n, took); perr != nil {
+			return n, perr
+		}
+	}
+	return n, err
+}
+
+// readSQLitePaced reads a OneLibrary export database without continuing stick I/O across a
+// SongLoading edge: encrypted SQLCipher exports stream through a loading-aware chunk reader
+// directly into decryption (zero /data temp copy), while plaintext SQLite exports watch for
+// loading edges and fall back to paced staging while busy.
+func readSQLitePaced(ctx context.Context, full string, keys *rekordbox.KeyCache, pace *pacer) (*rekordbox.Library, error) {
+	if err := pace.waitNotLoading(); err != nil {
+		return nil, err
+	}
+	enc, err := rekordbox.IsEncryptedSQLite(full)
+	if err != nil {
+		return nil, err
+	}
+	if enc {
+		return rekordbox.ReadSQLiteKeysPaced(ctx, full, nil, keys, func(r io.Reader) io.Reader {
+			return bufio.NewReaderSize(&pacedReader{ctx: ctx, r: r, pace: pace}, playingReadChunk)
+		})
+	}
+	for {
+		if err := pace.waitNotLoading(); err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if e := checkExportSQLiteSidecars(full); e != nil {
+			return nil, e
+		}
+		if pace.isBusy() {
+			tmp, _, e := copyStickFilePaced(ctx, full, pace)
+			if e != nil {
+				return nil, e
+			}
+			tmpName := tmp.Name()
+			_ = tmp.Close()
+			cleanup := func() {
+				_ = os.Remove(tmpName)
+				_ = os.Remove(tmpName + "-wal")
+				_ = os.Remove(tmpName + "-shm")
+				_ = os.Remove(tmpName + "-journal")
+			}
+			if e = checkExportSQLiteSidecars(full); e != nil {
+				cleanup()
+				return nil, e
+			}
+			l, e := rekordbox.ReadSQLiteKeys(ctx, tmpName, nil, keys)
+			cleanup()
+			return l, e
+		}
+		// Unencrypted export while idle: monitor loading edges so direct SQLite reads abort
+		// immediately when SongLoading starts instead of racing into stick I/O.
+		rctx, rcancel := context.WithCancel(ctx)
+		var loadingHit atomic.Bool
+		monDone := make(chan struct{})
+		if pace != nil && pace.loading != nil {
+			poll := min(max(loadingPollGap/4, 2*time.Millisecond), 15*time.Millisecond)
+			go func() {
+				defer close(monDone)
+				t := time.NewTicker(poll)
+				defer t.Stop()
+				for {
+					select {
+					case <-rctx.Done():
+						return
+					case <-t.C:
+						if pace.loading() {
+							loadingHit.Store(true)
+							rcancel()
+							return
+						}
+					}
+				}
+			}()
+		} else {
+			close(monDone)
+		}
+		l, e := rekordbox.ReadSQLiteKeys(rctx, full, nil, keys)
+		rcancel()
+		<-monDone
+		if loadingHit.Load() && ctx.Err() == nil {
+			if werr := pace.waitNotLoading(); werr != nil {
+				return nil, werr
+			}
+			continue
+		}
+		return l, e
+	}
+}
+
 func readSourcesPaced(ctx context.Context, r *compat.Resolver, mount string, files []rbstate.FileSig, keys *rekordbox.KeyCache, pace *pacer) (libs []SourceLibrary, failed []error, err error) {
 	if keys == nil {
 		keys = exportKeys()
@@ -276,24 +393,10 @@ func readSourcesPaced(ctx context.Context, r *compat.Resolver, mount string, fil
 			}
 		} else if e = checkExportSQLiteSidecars(full); e != nil {
 			// Dirty -journal or -wal on the stick: refuse before any read or copy.
-		} else if pace == nil || !pace.isBusy() {
+		} else if pace == nil {
 			l, e = rekordbox.ReadSQLiteKeys(ctx, full, nil, keys)
 		} else {
-			var tmp *os.File
-			if tmp, _, e = copyStickFilePaced(ctx, full, pace); e == nil {
-				tmpName := tmp.Name()
-				_ = tmp.Close()
-				cleanup := func() {
-					_ = os.Remove(tmpName)
-					_ = os.Remove(tmpName + "-wal")
-					_ = os.Remove(tmpName + "-shm")
-					_ = os.Remove(tmpName + "-journal")
-				}
-				if e = checkExportSQLiteSidecars(full); e == nil {
-					l, e = rekordbox.ReadSQLiteKeys(ctx, tmpName, nil, keys)
-				}
-				cleanup()
-			}
+			l, e = readSQLitePaced(ctx, full, keys, pace)
 		}
 		if e != nil && ctx.Err() != nil {
 			return nil, failed, ctx.Err()

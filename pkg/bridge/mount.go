@@ -341,7 +341,10 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	}
 	view.Stamp, view.Sources = stamp, files
 	if o.SmartMatch != 0 {
-		if err = addSmartMatch(view, o.SmartMatch); err != nil {
+		if err = addSmartMatchCtx(ctx, st, view, o.SmartMatch); err != nil {
+			if errors.Is(err, errWindowDeadline) || deadlineReached() {
+				return stopAtDeadline()
+			}
 			return res, err
 		}
 	}
@@ -415,9 +418,30 @@ func chores(ctx context.Context, mount string, st *steps, insert bool) {
 // one whose rekordbox ID is ref. It refuses when the export has a root list of that name or no
 // library has the track.
 func addSmartMatch(v *View, ref uint32) error {
+	return addSmartMatchCtx(context.Background(), nil, v, ref)
+}
+
+func addSmartMatchCtx(ctx context.Context, st *steps, v *View, ref uint32) error {
 	const title = "[Smart Match]"
+	checkStop := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if st != nil && !st.must(0) {
+			return errWindowDeadline
+		}
+		return nil
+	}
+	if err := checkStop(); err != nil {
+		return err
+	}
 	after, current := "", -1
-	for _, l := range v.Lists {
+	for i, l := range v.Lists {
+		if i&255 == 0 {
+			if err := checkStop(); err != nil {
+				return err
+			}
+		}
 		if l.Parent == "" && l.Name == title {
 			return fmt.Errorf("%s already exists; source playlist is protected", title)
 		} else if l.Parent == "" {
@@ -426,6 +450,11 @@ func addSmartMatch(v *View, ref uint32) error {
 	}
 	tracks := make([]rekordbox.Track, len(v.Tracks)) // enginedb.SmartMatch works on IDs: index + 1
 	for i := range v.Tracks {
+		if i&511 == 0 {
+			if err := checkStop(); err != nil {
+				return err
+			}
+		}
 		tracks[i] = v.Tracks[i].Track
 		tracks[i].ID = uint32(i + 1)
 		if current < 0 && slices.ContainsFunc(v.Tracks[i].Refs, func(r rbstate.SourceRef) bool { return r.ID == ref && r.Kind != rbstate.LinkLibrary }) {
@@ -435,9 +464,30 @@ func addSmartMatch(v *View, ref uint32) error {
 	if current < 0 {
 		return fmt.Errorf("Smart Match reference track %d not found", ref)
 	}
+	matchCtx := ctx
+	if st != nil && !st.owed.IsZero() {
+		var cancel context.CancelFunc
+		matchCtx, cancel = context.WithDeadline(ctx, st.owed)
+		defer cancel()
+	}
+	matched, err := enginedb.SmartMatchCtx(matchCtx, tracks, uint32(current+1))
+	if err != nil {
+		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			return errWindowDeadline
+		}
+		return err
+	}
 	var keys []string
-	for _, id := range enginedb.SmartMatch(tracks, uint32(current+1)) {
+	for i, id := range matched {
+		if i&511 == 0 {
+			if err := checkStop(); err != nil {
+				return err
+			}
+		}
 		keys = append(keys, v.Tracks[id-1].Key)
+	}
+	if err := checkStop(); err != nil {
+		return err
 	}
 	h := sha1.New()
 	l := ViewList{Key: "smart", Name: title, After: after, Tracks: keys}

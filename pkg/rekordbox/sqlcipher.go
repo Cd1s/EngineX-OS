@@ -256,6 +256,10 @@ func decryptSQLCipher4ToTemp(ctx context.Context, srcPath string, passphrase []b
 }
 
 func decryptSQLCipher4ToTempKeys(ctx context.Context, srcPath string, passphrase []byte, kc *KeyCache) (string, error) {
+	return decryptSQLCipher4ToTempKeysPaced(ctx, srcPath, passphrase, kc, nil)
+}
+
+func decryptSQLCipher4ToTempKeysPaced(ctx context.Context, srcPath string, passphrase []byte, kc *KeyCache, wrap func(io.Reader) io.Reader) (string, error) {
 	src, err := os.Open(srcPath)
 	if err != nil {
 		return "", err
@@ -300,8 +304,12 @@ func decryptSQLCipher4ToTempKeys(ctx context.Context, srcPath string, passphrase
 		return "", err
 	}
 
+	var r io.Reader = io.LimitReader(src, st.Size())
+	if wrap != nil {
+		r = wrap(r)
+	}
 	bw := bufio.NewWriterSize(tmp, 64*1024)
-	if err := decryptSQLCipher4(ctx, io.LimitReader(src, st.Size()), st.Size(), bw, passphrase, kc); err != nil {
+	if err := decryptSQLCipher4(ctx, r, st.Size(), bw, passphrase, kc); err != nil {
 		return "", err
 	}
 	if err := bw.Flush(); err != nil {

@@ -45,6 +45,9 @@ var putStaged = (*rbstate.Stage).Put
 // writeRGBFile writes a track's list waveform file; a variable for the test of a full folder.
 var writeRGBFile = enginedb.WriteRGBOverviewAtomic
 
+// fillStampLockTestHook runs in tests immediately before the locked pace.isBusy() re-check.
+var fillStampLockTestHook func()
+
 // fillLockWait is how long the job waits for a window to release the volume.
 var fillLockWait = 2 * time.Minute
 
@@ -85,7 +88,7 @@ func readJobViewPaced(ctx context.Context, r *compat.Resolver, mount, layout, la
 	if err != nil {
 		return nil, err
 	}
-	v, err := BuildView(append(libs, staged...), layout, lang)
+	v, err := BuildViewCtx(ctx, append(libs, staged...), layout, lang)
 	if err != nil {
 		return nil, err
 	}
@@ -187,21 +190,37 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	if snap == nil {
 		return res, fmt.Errorf("snapshot: %w", rbstate.ErrNoSnapshot)
 	}
-	if view.view != nil && snap.Stamp != view.stamp && o.Stage == nil {
+	if view.view != nil && snap.Stamp != view.stamp && o.Stage == nil && !rowsDeferred {
 		// The window left the exports to the job and they change no row and no list: the snapshot
 		// takes their stamp, as that window would have given it, and the job compares every file.
-		if err = pace.waitNotLoading(); err != nil {
-			return res, err
-		}
-		if unlock, err = rbstate.LockVolume(mount, fillLockWait); err != nil {
-			return res, fmt.Errorf("volume lock: %w", err)
-		}
-		if snap, err = rbstate.Load(dbDir); err == nil && snap.Stamp != view.stamp {
-			snap.Stamp, snap.Sources, snap.Pending.Verify = view.stamp, view.view.Sources, true
-			err = snap.Save(dbDir)
-		}
-		if unlock(); err != nil {
-			return res, fmt.Errorf("snapshot: %w", err)
+		// Never write to the stick while a deck is playing or loading; wait for idle and re-check
+		// activity inside the volume lock immediately before saving.
+		for {
+			if err = pace.waitIdle(); err != nil {
+				return res, err
+			}
+			if unlock, err = rbstate.LockVolume(mount, fillLockWait); err != nil {
+				return res, fmt.Errorf("volume lock: %w", err)
+			}
+			var busy bool
+			if snap, err = rbstate.Load(dbDir); err == nil && snap.Stamp != view.stamp {
+				if fillStampLockTestHook != nil {
+					fillStampLockTestHook()
+				}
+				if pace.isBusy() {
+					busy = true
+				} else {
+					snap.Stamp, snap.Sources, snap.Pending.Verify = view.stamp, view.view.Sources, true
+					err = snap.Save(dbDir)
+				}
+			}
+			unlock()
+			if err != nil {
+				return res, fmt.Errorf("snapshot: %w", err)
+			}
+			if !busy {
+				break
+			}
 		}
 		next.live = snap
 	}
@@ -265,7 +284,7 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		if want != snap.Pending.Rows {
 			if pace.waitNotLoading() == nil && !pace.isBusy() {
 				if lock, lockErr := rbstate.LockVolume(mount, fillLockWait); lockErr == nil {
-					if current, loadErr := rbstate.Load(dbDir); loadErr == nil {
+					if current, loadErr := rbstate.Load(dbDir); loadErr == nil && !pace.isBusy() {
 						current.Pending.Rows = pendingRowsForView(view.view, current)
 						if saveErr := current.Save(dbDir); saveErr == nil {
 							snap = current

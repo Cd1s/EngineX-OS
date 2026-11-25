@@ -51,9 +51,20 @@ func ReadSQLite(ctx context.Context, path string, adapter SQLiteAdapter) (*Libra
 	return ReadSQLiteKeys(ctx, path, adapter, nil)
 }
 
+// IsEncryptedSQLite reports whether path is an encrypted SQLCipher OneLibrary database.
+func IsEncryptedSQLite(path string) (bool, error) {
+	return isEncryptedSQLite(path)
+}
+
 // ReadSQLiteKeys is ReadSQLite with the SQLCipher keys of kc (#321).
 func ReadSQLiteKeys(ctx context.Context, path string, adapter SQLiteAdapter, kc *KeyCache) (*Library, error) {
-	return readSQLite(ctx, path, adapter, kc, false)
+	return readSQLitePaced(ctx, path, adapter, kc, false, nil)
+}
+
+// ReadSQLiteKeysPaced reads a OneLibrary SQLite database while optionally wrapping the source
+// stream used by SQLCipher decryption (e.g., to halt on loading edges and pace reads).
+func ReadSQLiteKeysPaced(ctx context.Context, path string, adapter SQLiteAdapter, kc *KeyCache, wrap func(io.Reader) io.Reader) (*Library, error) {
+	return readSQLitePaced(ctx, path, adapter, kc, false, wrap)
 }
 
 // ReadSQLiteWhole is ReadSQLite of a file that must be whole (#321 review R4): its pages,
@@ -62,10 +73,10 @@ func ReadSQLiteKeys(ctx context.Context, path string, adapter SQLiteAdapter, kc 
 // tables it needs, so a copy cut inside its last page, or by whole pages where the header leaves
 // the count to the file's size, still reads.
 func ReadSQLiteWhole(ctx context.Context, path string) (*Library, error) {
-	return readSQLite(ctx, path, nil, nil, true)
+	return readSQLitePaced(ctx, path, nil, nil, true, nil)
 }
 
-func readSQLite(ctx context.Context, path string, adapter SQLiteAdapter, kc *KeyCache, whole bool) (*Library, error) {
+func readSQLitePaced(ctx context.Context, path string, adapter SQLiteAdapter, kc *KeyCache, whole bool, wrap func(io.Reader) io.Reader) (*Library, error) {
 	abs, e := filepath.Abs(path)
 	if e != nil {
 		return nil, e
@@ -88,7 +99,7 @@ func readSQLite(ctx context.Context, path string, adapter SQLiteAdapter, kc *Key
 		return nil, e
 	}
 	if encrypted {
-		tmpPath, err := decryptSQLCipher4ToTempKeys(ctx, abs, []byte(oneLibraryPassphrase), kc)
+		tmpPath, err := decryptSQLCipher4ToTempKeysPaced(ctx, abs, []byte(oneLibraryPassphrase), kc, wrap)
 		if err != nil {
 			return nil, fmt.Errorf("OneLibrary SQLCipher: %w", err)
 		}
