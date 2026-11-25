@@ -103,11 +103,22 @@ func TestWiFiPowerSaveWaitsForUpAndAppliesOnce(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	checks, writes := 0, 0
-	disableWiFiPowerSave(ctx, time.Millisecond, func() bool { checks++; return checks >= 3 }, func() error { writes++; return nil })
-	if checks != 3 || writes != 1 {
-		t.Fatalf("checks=%d writes=%d", checks, writes)
+	disableWiFiPowerSave(ctx, time.Millisecond, func() wifiInterfaceState {
+		checks++
+		if checks >= 6 {
+			cancel()
+		}
+		return wifiInterfaceState{up: checks >= 3, index: 3}
+	}, func() bool { return false }, func() error { writes++; return nil })
+	if checks != 6 || writes != 1 {
+		t.Fatalf("checks=%d writes=%d, want 6 checks and 1 steady-state write", checks, writes)
 	}
-	disableWiFiPowerSave(ctx, time.Millisecond, func() bool { cancel(); return false }, func() error { t.Fatal("set before up"); return nil })
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	disableWiFiPowerSave(ctx2, time.Millisecond, func() wifiInterfaceState {
+		cancel2()
+		return wifiInterfaceState{}
+	}, func() bool { return false }, func() error { t.Fatal("set before up"); return nil })
 }
 
 func TestWiFiPowerSaveUsesStockIW(t *testing.T) {
@@ -137,5 +148,181 @@ func TestWiFiPowerSaveUsesStockIW(t *testing.T) {
 				t.Fatalf("stock iw arguments: %q, %v", out, err)
 			}
 		})
+	}
+}
+
+func TestWiFiPowerSaveRetriesAfterTransientError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	attempts, checks := 0, 0
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		disableWiFiPowerSave(ctx, time.Millisecond, func() wifiInterfaceState {
+			checks++
+			if checks >= 5 {
+				cancel()
+			}
+			return wifiInterfaceState{up: true, index: 3}
+		}, func() bool { return false }, func() error {
+			attempts++
+			if attempts == 1 {
+				return errors.New("driver busy")
+			}
+			return nil
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("timed out waiting for retry")
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts=%d, want 2 (retry once after transient error, then stay quiet)", attempts)
+	}
+}
+
+func TestWiFiPowerSaveReappliesAfterDownUp(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Sequence: UP (apply #1), UP (steady), DOWN, DOWN, UP (apply #2), UP (steady -> cancel)
+	seq := []bool{true, true, false, false, true, true}
+	step, writes := 0, 0
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		disableWiFiPowerSave(ctx, time.Millisecond, func() wifiInterfaceState {
+			if step >= len(seq) {
+				cancel()
+				return wifiInterfaceState{up: true, index: 3}
+			}
+			v := seq[step]
+			step++
+			return wifiInterfaceState{up: v, index: 3}
+		}, func() bool { return false }, func() error {
+			writes++
+			return nil
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("timed out waiting for down->up reapply")
+	}
+	if writes != 2 {
+		t.Fatalf("writes=%d after UP->DOWN->UP (step=%d), want 2", writes, step)
+	}
+}
+
+func TestWiFiPowerSaveReappliesOnInterfaceIndexChange(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Simulates brcmf_fw_crashed -> brcmf_sdio_bus_reset recreating wlan0 within one tick.
+	indices := []int{3, 3, 4, 4}
+	step, writes := 0, 0
+	disableWiFiPowerSave(ctx, time.Millisecond, func() wifiInterfaceState {
+		if step >= len(indices) {
+			cancel()
+			return wifiInterfaceState{up: true, index: 4}
+		}
+		idx := indices[step]
+		step++
+		return wifiInterfaceState{up: true, index: idx}
+	}, func() bool { return false }, func() error {
+		writes++
+		return nil
+	})
+	if writes != 2 {
+		t.Fatalf("writes=%d across ifindex 3->4 reset, want 2", writes)
+	}
+}
+
+func TestWiFiPowerSaveReappliesWhenKernelResetsPowerSaveOn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	psStates := []bool{false, false, true, false, false}
+	step, writes := 0, 0
+	ps := false
+	disableWiFiPowerSave(ctx, time.Millisecond, func() wifiInterfaceState {
+		if step >= len(psStates) {
+			cancel()
+			return wifiInterfaceState{up: true, index: 3}
+		}
+		ps = psStates[step]
+		step++
+		return wifiInterfaceState{up: true, index: 3}
+	}, func() bool { return ps }, func() error {
+		writes++
+		ps = false
+		return nil
+	})
+	if writes != 2 {
+		t.Fatalf("writes=%d after kernel wdev->ps flipped on once, want 2", writes)
+	}
+}
+
+func TestGuardRoutesReappliesARPAfterInterfaceReset(t *testing.T) {
+	dir := t.TempDir()
+	conf, table := filepath.Join(dir, "conf"), filepath.Join(dir, "table")
+	settings := []string{"eth0/arp_announce", "wlan0/arp_announce", "eth0/arp_ignore", "wlan0/arp_ignore"}
+	writeStock := func(dev string) {
+		os.MkdirAll(filepath.Join(conf, dev), 0o755)
+		for _, name := range []string{"arp_announce", "arp_ignore"} {
+			os.WriteFile(filepath.Join(conf, dev, name), []byte("0\n"), 0o644)
+		}
+	}
+	now := func() string {
+		var got []string
+		for _, name := range settings {
+			b, _ := os.ReadFile(filepath.Join(conf, name))
+			got = append(got, strings.TrimSpace(string(b)))
+		}
+		return strings.Join(got, " ")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ip"), []byte("#!/bin/sh\nif [ \"$2\" = show ]; then cat '"+table+"'; fi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	writeStock("lo")
+	writeStock("eth0")
+	writeStock("wlan0")
+	os.WriteFile(table, nil, 0o644)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); guardRoutes(ctx, conf, 5*time.Millisecond) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	within := func(what string, limit time.Duration) {
+		t.Helper()
+		for end := time.Now().Add(limit); now() != "2 2 1 1"; time.Sleep(5 * time.Millisecond) {
+			if time.Now().After(end) {
+				t.Fatalf("%s: arp settings are %q, want \"2 2 1 1\"", what, now())
+			}
+		}
+	}
+	within("initial boot", 2*time.Second)
+
+	// Case 1: fast in-place wlan0 reset within a single pass (defaults 0, 0 restored).
+	writeStock("wlan0")
+	within("after in-place wlan0 reset", 300*time.Millisecond)
+
+	// Case 2: wlan0 removed during SDIO reset, then recreated with stock 0, 0.
+	if err := os.RemoveAll(filepath.Join(conf, "wlan0")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	writeStock("wlan0")
+	within("after remove-and-recreate wlan0 reset", 300*time.Millisecond)
+
+	// Unrelated interface lo stays untouched.
+	for _, name := range []string{"lo/arp_announce", "lo/arp_ignore"} {
+		if b, _ := os.ReadFile(filepath.Join(conf, name)); strings.TrimSpace(string(b)) != "0" {
+			t.Fatalf("%s changed to %q", name, b)
+		}
 	}
 }
