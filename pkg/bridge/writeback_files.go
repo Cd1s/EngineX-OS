@@ -39,7 +39,7 @@ var (
 // write replaces the files of changes in the order of #321: first-original backups and their
 // folders, the mark naming every folder and staged copy, every staged copy synced, then the
 // renames. It returns the ANLZ files written, by track.
-func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLibrary, changes []trackChange) (map[string][]rbstate.FileSig, error) {
+func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLibrary, changes []trackChange) (map[string][]rbstate.FileSig, recordHashes, error) {
 	var targets []*target
 	seen := map[string]bool{}
 	add := func(t *target) error {
@@ -75,7 +75,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			for i, ext := range anlzExts {
 				if rel, ok := resolveANLZVariant(p.r, base, ext); ok {
 					if err := add(&target{rel: rel, key: ch.candidate.key, cues: ch.cues, ext: i}); err != nil {
-						return nil, err
+						return nil, nil, err
 					}
 				}
 			}
@@ -88,7 +88,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 		}
 		if src, ok := libs[kind]; ok && edits > 0 {
 			if err := add(&target{rel: src.File.Rel, kind: kind}); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
@@ -105,17 +105,17 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			flush, _ = os.Open(t.full)
 		}
 		if err := mkdirOrdered(p.mount, filepath.Join(backupRoot, dateDir, filepath.Dir(t.rel)), flush); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	if err := markWriteBack(p.mount, dateDir, targets); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var staged []*target
 	for _, t := range targets {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		var data []byte
 		if t.kind != rbstate.OneLibrary {
@@ -123,7 +123,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			if t.kind == 0 && errors.Is(err, os.ErrNotExist) {
 				continue
 			} else if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			changed := true
 			if t.kind == 0 {
@@ -134,19 +134,19 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 				data, err = rekordbox.RewritePDBMetadata(raw, pdbMeta)
 			}
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			} else if !changed {
 				continue
 			}
 		}
 		n, err := ensureFirstOriginalBackup(p.mount, backupRoot, dateDir, t.rel)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		tmp := filepath.Join(filepath.Dir(t.full), t.tmp)
 		f, err := createStaged(tmp)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		size := int64(len(data))
 		if t.kind == rbstate.OneLibrary {
@@ -158,13 +158,13 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			p.phase["encrypt"] += time.Since(started) - upd.Decrypt - upd.Edit
 			if err != nil {
 				_ = rbstate.RemoveFile(tmp)
-				return nil, err
+				return nil, nil, err
 			}
 			if st, err := os.Stat(tmp); err == nil {
 				size = st.Size()
 			}
 		} else if _, err := writeSynced(f, bytes.NewReader(data)); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		p.res.BytesWritten += n + size
 		writeBackCut("temp " + t.full)
@@ -174,7 +174,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 	for _, t := range staged {
 		if p.opts.BeforeRename != nil {
 			if err := p.opts.BeforeRename(t.full); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
@@ -182,7 +182,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 	written := map[string][]rbstate.FileSig{}
 	for _, t := range staged {
 		if err := replaceFile(filepath.Join(filepath.Dir(t.full), t.tmp), t.full); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		p.res.FilesUpdated++
 		p.res.OneLibraryUpdated = p.res.OneLibraryUpdated || t.kind == rbstate.OneLibrary
@@ -198,7 +198,34 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 	if p.res.FilesUpdated > 0 {
 		p.res.BackupDir = filepath.Join(".enginex-backup", dateDir)
 	}
-	return written, nil
+	hashes := make(recordHashes, len(changes))
+	rows := make([]dbCandidate, len(changes))
+	for i, change := range changes {
+		rows[i] = change.candidate
+	}
+	refreshed, err := p.readLibraries(ctx, rows)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, change := range changes {
+		for _, ref := range change.candidate.track.Refs {
+			for libraryKind, library := range refreshed {
+				if library.Lib == nil {
+					continue
+				}
+				for _, track := range library.Lib.Tracks {
+					if track.ID == ref.ID && rbstate.FoldPath(track.Path) == change.candidate.key {
+						if hashes[change.candidate.key] == nil {
+							hashes[change.candidate.key] = map[rbstate.LibraryKind]string{}
+						}
+						hashes[change.candidate.key][libraryKind] = track.RecordHash
+						break
+					}
+				}
+			}
+		}
+	}
+	return written, hashes, nil
 }
 
 // ensureFirstOriginalBackup copies rel to the backup folder of dateDir unless any backup folder
