@@ -876,17 +876,6 @@ func TestMountTakesRowsTheDeckHookFilledAsTheBridgesOwn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recode := func(cues []byte, edit func(raw []byte)) []byte {
-		raw, err := enginedb.QUncompress(cues, 1<<20)
-		if err != nil {
-			t.Fatal(err)
-		}
-		edit(raw)
-		if cues, err = enginedb.QCompress(raw); err != nil {
-			t.Fatal(err)
-		}
-		return cues
-	}
 	// fill is the hook's write of a staged record (one with a hot cue) to its row, its line in
 	// filled.jsonl, and the load.
 	fill := func(key string, journal bool, deck func(raw []byte)) *rbstate.Staged {
@@ -894,13 +883,13 @@ func TestMountTakesRowsTheDeckHookFilledAsTheBridgesOwn(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		rec.Perf.QuickCues = recode(rec.Perf.QuickCues, func(raw []byte) { binary.BigEndian.PutUint64(raw[8+1+int(raw[8]):], math.Float64bits(22050)) })
+		rec.Perf.QuickCues = recodeCues(t, rec.Perf.QuickCues, func(raw []byte) { binary.BigEndian.PutUint64(raw[8+1+int(raw[8]):], math.Float64bits(22050)) })
 		rec.Digest = enginedb.WrittenDigest(rec.Perf.Beats, rec.Perf.QuickCues, rec.Perf.Loops)
 		if err = stage.Put(rec); err != nil {
 			t.Fatal(err)
 		}
 		id := s.Tracks[key].EngineID
-		cues := recode(rec.Perf.QuickCues, func(raw []byte) {
+		cues := recodeCues(t, rec.Perf.QuickCues, func(raw []byte) {
 			binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(-1105)) // the main cue as imported, by Engine
 			if deck != nil {
 				deck(raw)
@@ -924,7 +913,7 @@ func TestMountTakesRowsTheDeckHookFilledAsTheBridgesOwn(t *testing.T) {
 	}
 	// two: filled, then the job staged it again with other cues (a re-export): replaced.
 	two := fill("music/two.flac", true, nil)
-	two.Perf.QuickCues = recode(two.Perf.QuickCues, func(raw []byte) { raw[8+1+int(raw[8])+8] ^= 0xFF }) // the first hot cue's colour
+	two.Perf.QuickCues = recodeCues(t, two.Perf.QuickCues, func(raw []byte) { raw[8+1+int(raw[8])+8] ^= 0xFF }) // the first hot cue's colour
 	two.Digest = enginedb.WrittenDigest(two.Perf.Beats, two.Perf.QuickCues, two.Perf.Loops)
 	if err = stage.Put(two); err != nil {
 		t.Fatal(err)

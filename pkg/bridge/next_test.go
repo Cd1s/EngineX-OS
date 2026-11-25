@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -30,7 +32,10 @@ func nextStick(t *testing.T, n int) string {
 }
 
 // makeNext is the job's part: the next library, ready for the swap.
-func makeNext(t *testing.T, mount string) {
+func makeNext(t *testing.T, mount string) { t.Helper(); makeNextOf(t, mount, nil) }
+
+// makeNextOf is makeNext with the view the job read changed first (a re-export the fixtures cannot write).
+func makeNextOf(t *testing.T, mount string, edit func(*View)) {
 	t.Helper()
 	r, err := newResolver(mount)
 	if err != nil {
@@ -45,10 +50,27 @@ func makeNext(t *testing.T, mount string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if edit != nil {
+		edit(v.view)
+	}
 	n := &nextBuild{ctx: context.Background(), mount: mount, dir: dbDir(mount), view: v.view, live: s}
 	if err = n.build(false, true); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// recodeCues is a quickCues blob with its uncompressed bytes changed by edit.
+func recodeCues(t *testing.T, cues []byte, edit func(raw []byte)) []byte {
+	t.Helper()
+	raw, err := enginedb.QUncompress(cues, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edit(raw)
+	if cues, err = enginedb.QCompress(raw); err != nil {
+		t.Fatal(err)
+	}
+	return cues
 }
 
 func engineWrites(t *testing.T, mount string, queries ...string) {
@@ -192,6 +214,229 @@ func TestNextLibraryKeepsWhatTheDeckWroteBeforeTheSwap(t *testing.T) {
 	}
 	if got[3] != cue {
 		t.Fatal("the deck's hot cue was overwritten")
+	}
+	nextLeftovers(t, mount)
+}
+
+// What Engine made itself is in the library after a swap as it was (#252): a track of its own with
+// its cue, the DJ's list, a prepared and a played track, and the history of the night, whether
+// Engine made them before the job copied the library or while the next library waited for its
+// remount.
+func TestSwapKeepsWhatEngineMadeItself(t *testing.T) {
+	mount := nextStick(t, 20)
+	uuid := snapshot(t, mount).LibraryUUID
+	// Engine's history is a file of its own beside m.db: its entries name tracks by ID and library.
+	hm := filepath.Join(dbDir(mount), "hm.db")
+	hdb, err := sql.Open("sqlite", "file:"+hm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hdb.Close()
+	if _, err = hdb.Exec(`CREATE TABLE Historylist(id INTEGER PRIMARY KEY,title TEXT,startTime INTEGER);
+		CREATE TABLE HistorylistEntity(id INTEGER PRIMARY KEY,listId INTEGER,trackId INTEGER,databaseUuid TEXT,startTime INTEGER);
+		INSERT INTO Historylist VALUES(1,'Night',1700000000)`); err != nil {
+		t.Fatal(err)
+	}
+	deck := func(n int, played int64) { // Engine's writes of one track played and one track of its own
+		db, err := sql.Open("sqlite", "file:"+filepath.Join(dbDir(mount), "m.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		res, err := db.Exec(`INSERT INTO Track(path,filename,title,rating) VALUES(?,?,?,80)`, fmt.Sprintf("../Music/own%d.mp3", n), fmt.Sprintf("own%d.mp3", n), fmt.Sprintf("Deck made %d", n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		own, _ := res.LastInsertId()
+		p5NativeList(t, db, fmt.Sprintf("Deck Set %d", n), 0, []int64{played, own}, false)
+		for _, q := range []string{`INSERT OR REPLACE INTO PerformanceData(trackId,quickCues) VALUES(?2,x'D0')`, `INSERT INTO PreparelistEntity(trackId,trackNumber) VALUES(?1,?3)`,
+			`UPDATE Track SET isPlayed=1,timeLastPlayed=1700000000+?3 WHERE id=?1`} {
+			if _, err = db.Exec(q, played, own, n); err != nil {
+				t.Fatalf("%s: %v", q, err)
+			}
+		}
+		if _, err = hdb.Exec(`INSERT INTO HistorylistEntity(listId,trackId,databaseUuid,startTime) VALUES(1,?1,?3,1700000000),(1,?2,?3,1700000100)`, played, own, uuid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	engineMade := func() string {
+		var b strings.Builder
+		fmt.Fprintln(&b, query(t, mount, `SELECT t.id,t.path,t.title,t.rating,t.isPlayed,t.timeLastPlayed,CASE WHEN t.id>20 THEN hex(p.quickCues) END
+			FROM Track t JOIN PerformanceData p ON p.trackId=t.id WHERE t.id>20 OR t.isPlayed=1 ORDER BY t.id`))
+		fmt.Fprintln(&b, query(t, mount, `SELECT trackId,trackNumber FROM PreparelistEntity ORDER BY trackNumber`))
+		fmt.Fprintln(&b, query(t, mount, `SELECT l.title,e.trackId FROM PlaylistEntity e JOIN Playlist l ON l.id=e.listId WHERE l.title LIKE 'Deck Set%' ORDER BY l.title,e.id`))
+		for _, line := range libraryTree(t, mount) {
+			if strings.Contains(line, "Deck Set") {
+				fmt.Fprintln(&b, line)
+			}
+		}
+		// The history: each entry with the track it names in the stick's library.
+		rows, err := hdb.Query(`SELECT trackId,databaseUuid FROM HistorylistEntity ORDER BY id`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			var lib string
+			if err = rows.Scan(&id, &lib); err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintln(&b, "played", query(t, mount, `SELECT path,(SELECT uuid FROM Information)=?2 FROM Track WHERE id=?1`, id, lib))
+		}
+		return b.String()
+	}
+	deck(1, 3)
+	makeNext(t, mount)
+	deck(2, 5)
+	want := engineMade()
+	if strings.Count(want, "[Deck Set") != 4 || !strings.Contains(want, "own2.mp3 Deck made 2 80") || strings.Count(want, "played [[../") != 4 {
+		t.Fatalf("what Engine made before the swap:\n%s", want)
+	}
+	history, _ := os.ReadFile(hm)
+	if _, out := hookWindowNow(t, mount); !strings.Contains(out, "mount swap") {
+		t.Fatalf("the window did not swap:\n%s", out)
+	}
+	if got := engineMade(); got != want {
+		t.Errorf("after the swap:\n%s\nwant:\n%s", got, want)
+	}
+	// The job's next round gives the rows the deck wrote their staged data, by the deck-edit rules.
+	if r := mustFill(t, mount, FillOptions{}); r.Publish {
+		hookWindowNow(t, mount)
+	}
+	if got := engineMade(); got != want {
+		t.Errorf("after the job's next round:\n%s\nwant:\n%s", got, want)
+	}
+	if after, _ := os.ReadFile(hm); !bytes.Equal(after, history) {
+		t.Error("Engine's history file changed")
+	}
+	if n := query(t, mount, `SELECT (SELECT count(*) FROM Track),(SELECT count(*) FROM PerformanceData WHERE beatData IS NOT NULL)`)[0]; n[0] != "22" || n[1] != "20" {
+		t.Errorf("%s tracks, %s with staged data; want the 20 of the export with their data and Engine's 2", n[0], n[1])
+	}
+	for id := range snapshot(t, mount).EngineIDs() {
+		if id > 20 {
+			t.Errorf("the snapshot owns row %d, which Engine made", id)
+		}
+	}
+	nextLeftovers(t, mount)
+}
+
+// The damage of 2026-11-23 (KDATA: tracks showed other tracks' cues and grids) came from matching
+// rows by rekordbox's IDs, which a re-export renumbers. A track is its path, across a swap too: a
+// re-export in which every ID names another file and five tracks are new is published as a next
+// library, while Engine adds a track of its own and rates one. Every row then holds the data built
+// for its own file, under the row ID it had.
+func TestSwapNeverGivesATrackAnotherTracksData(t *testing.T) {
+	mount := nextStick(t, 40)
+	ids := trackIDs(t, mount)
+	testfixture.LargeExport(t, mount, 45)
+	number := func(path string) (n int) { // of LargeTrackPath; 0 for any other file
+		fmt.Sscanf(strings.ToLower(filepath.Base(path)), "track%05d.mp3", &n)
+		return n
+	}
+	r, err := newResolver(mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := snapshot(t, mount)
+	v, err := readJobView(context.Background(), r, mount, s.Layout, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every track's staged data is its own: hot cue A lies 1,000 samples times the track's number in.
+	stage, err := rbstate.OpenStage(s.LibraryUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := stage.Get(v.tracks[0].key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range v.view.Tracks {
+		vt := &v.view.Tracks[i]
+		rec, err := stage.Get(vt.Key)
+		if err != nil { // a new track, staged as the job stages it
+			c := *model
+			c.Key, c.Rel, c.EngineID, c.Sig.Row, c.Sig.Audio.Rel = vt.Key, vt.Rel, 0, vt.Hash, vt.Rel
+			rec = &c
+		}
+		rec.Perf.QuickCues = recodeCues(t, model.Perf.QuickCues, func(raw []byte) {
+			binary.BigEndian.PutUint64(raw[8+1+int(raw[8]):], math.Float64bits(float64(1000*number(vt.Rel))))
+		})
+		rec.Digest = enginedb.WrittenDigest(rec.Perf.Beats, rec.Perf.QuickCues, rec.Perf.Loops)
+		if err = stage.Put(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = stage.Close(); err != nil {
+		t.Fatal(err)
+	}
+	renumbered := func(view *View) { // every ID names the next file
+		for i := range view.Tracks {
+			vt := &view.Tracks[i]
+			vt.Track.ID = vt.Track.ID%45 + 1
+			for j := range vt.Refs {
+				vt.Refs[j].ID = vt.Refs[j].ID%45 + 1
+			}
+		}
+	}
+	// own checks every row: an export's track holds its own cue or none yet, Engine's track none.
+	own := func(when string) (with int) {
+		t.Helper()
+		seen := map[string]bool{}
+		for _, row := range query(t, mount, `SELECT t.id,t.path,COALESCE(hex(p.quickCues),'') FROM Track t JOIN PerformanceData p ON p.trackId=t.id`) {
+			if seen[strings.ToLower(row[1])] {
+				t.Errorf("%s: two rows for %s", when, row[1])
+			}
+			seen[strings.ToLower(row[1])] = true
+			n := number(row[1])
+			if was, ok := ids[row[1]]; ok && was != row[0] {
+				t.Errorf("%s: %s is row %s, was row %s", when, row[1], row[0], was)
+			}
+			if row[2] == "" {
+				continue
+			}
+			var cues []byte
+			fmt.Sscanf(row[2], "%X", &cues)
+			raw, err := enginedb.QUncompress(cues, 1<<20)
+			if err != nil {
+				t.Fatalf("%s: row %s: %v", when, row[0], err)
+			}
+			if at := math.Float64frombits(binary.BigEndian.Uint64(raw[8+1+int(raw[8]):])); n == 0 || at != float64(1000*n) {
+				t.Errorf("%s: row %s (%s) holds the cue of track %v", when, row[0], row[1], at/1000)
+			}
+			with++
+		}
+		return with
+	}
+	makeNextOf(t, mount, renumbered)
+	engineWrites(t, mount, `INSERT INTO Track(path,filename,title) VALUES('../Music/own.mp3','own.mp3','Deck made')`, `UPDATE Track SET rating=80 WHERE id=7`)
+	if _, out := hookWindowNow(t, mount); !strings.Contains(out, "mount swap") {
+		t.Fatalf("the window did not swap:\n%s", out)
+	}
+	if n := own("after the swap"); n < 40 {
+		t.Errorf("%d rows with their data after the swap", n)
+	}
+	// The row the deck rated was taken as the deck left it; the job's next round gives it its data.
+	makeNextOf(t, mount, renumbered)
+	if _, out := hookWindowNow(t, mount); !strings.Contains(out, "mount swap") {
+		t.Fatalf("the second window did not swap:\n%s", out)
+	}
+	if n := own("after the second swap"); n != 45 {
+		t.Errorf("%d rows with their data after the second swap, want the export's 45", n)
+	}
+	if got := query(t, mount, `SELECT (SELECT count(*) FROM Track),(SELECT rating FROM Track WHERE id=7),(SELECT title FROM Track WHERE path='../Music/own.mp3')`)[0]; got[0] != "46" || got[1] != "80" || got[2] != "Deck made" {
+		t.Errorf("tracks, the deck's rating, Engine's own track: %v", got)
+	}
+	after := snapshot(t, mount)
+	for key, tr := range after.Tracks {
+		row := query(t, mount, `SELECT path FROM Track WHERE id=?`, tr.EngineID)
+		if len(row) != 1 || rbstate.FoldPath(strings.TrimPrefix(row[0][0], "../")) != key {
+			t.Errorf("the snapshot's row of %s is %v", key, row)
+		}
+		if want := uint32(number(tr.Rel)%45 + 1); len(tr.Refs) != 1 || tr.Refs[0].ID != want {
+			t.Errorf("%s: refs %+v, want the re-export's ID %d", key, tr.Refs, want)
+		}
 	}
 	nextLeftovers(t, mount)
 }
