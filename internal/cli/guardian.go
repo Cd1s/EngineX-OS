@@ -202,11 +202,16 @@ func Guardian(args []string, out, errOut io.Writer) int {
 				mountCtx, cancelMount = context.WithTimeout(context.Background(), remaining)
 			}
 			budgetExpired := false
+			opts := dbhealer.MountOptions{
+				MaxSessions:            *sessions,
+				DataOnly:               *dataOnly,
+				ExtractEmbeddedArtwork: enginedb.ExtractEmbeddedArtwork,
+			}
 			if *dataOnly {
-				r, err = dbhealer.HealMountDataOnlyContext(mountCtx, m, *sessions)
+				r, err = dbhealer.HealMountWithOptions(mountCtx, m, opts)
 				budgetExpired = mountCtx.Err() != nil
 			} else {
-				r, err = dbhealer.HealMount(m, *sessions)
+				r, err = dbhealer.HealMountWithOptions(context.Background(), m, opts)
 			}
 			cancelMount()
 			if err == nil && !budgetExpired {

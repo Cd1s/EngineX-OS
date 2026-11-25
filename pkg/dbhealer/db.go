@@ -32,6 +32,7 @@ type Report struct {
 	Waveforms         int       `json:"waveforms_replaced"`
 	Loops             int       `json:"loops_aligned"`
 	Artwork           int       `json:"artwork_resized"`
+	ArtworkReconciled int       `json:"artwork_reconciled,omitempty"`
 	OrphanArtwork     int       `json:"orphan_artwork_references"`
 	ReanalysisPending int       `json:"reanalysis_pending"`
 	PathsNormalized   int       `json:"paths_normalized"`
@@ -111,35 +112,44 @@ func transaction(db *sql.DB, f func(*sql.Tx) error) error {
 
 // Heal runs all m.db mutations atomically. Integrity errors are reported; a
 // corrupt library is never replaced with an empty one.
-func Heal(db *sql.DB) (Report, error) { return heal(db, false) }
+func Heal(db *sql.DB) (Report, error) {
+	r, _, err := healWithResized(db, false)
+	return r, err
+}
 
 // heal with dataOnly leaves Engine's views, triggers and indexes byte-identical:
 // Engine compares its schema on attach, then drops and recreates anything altered.
 func heal(db *sql.DB, dataOnly bool) (Report, error) {
+	r, _, err := healWithResized(db, dataOnly)
+	return r, err
+}
+
+func healWithResized(db *sql.DB, dataOnly bool) (Report, map[int64]bool, error) {
 	r := Report{CheckedAt: time.Now().UTC()}
 	var check string
 	if err := db.QueryRow("PRAGMA quick_check").Scan(&check); err != nil {
-		return r, err
+		return r, nil, err
 	}
 	if check != "ok" {
-		return r, fmt.Errorf("database integrity: %s", check)
+		return r, nil, fmt.Errorf("database integrity: %s", check)
 	}
 	var major, minor, patch int
 	if err := db.QueryRow("SELECT schemaVersionMajor,schemaVersionMinor,schemaVersionPatch FROM Information LIMIT 1").Scan(&major, &minor, &patch); err != nil {
-		return r, fmt.Errorf("missing library version: %w", err)
+		return r, nil, fmt.Errorf("missing library version: %w", err)
 	}
 	if major != 3 || minor != 0 || patch != 2 {
-		return r, fmt.Errorf("unsupported library schema %d.%d.%d (supported 3.0.2)", major, minor, patch)
+		return r, nil, fmt.Errorf("unsupported library schema %d.%d.%d (supported 3.0.2)", major, minor, patch)
 	}
 	if dataOnly {
 		// PRAGMA optimize could add sqlite_stat1, and the queue must stay out of
 		// the file: Engine drops unknown tables on attach.
 		if _, err := db.Exec("CREATE TEMP TABLE IF NOT EXISTS GuardianReanalysis(trackId INTEGER NOT NULL,field TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(trackId,field))"); err != nil {
-			return r, err
+			return r, nil, err
 		}
 	} else if err := Tune(db, false); err != nil {
-		return r, err
+		return r, nil, err
 	}
+	var resized map[int64]bool
 	err := transaction(db, func(tx *sql.Tx) error {
 		// An unrecognized future schema is not a license to rewrite its blobs.
 		var schema string
@@ -179,13 +189,13 @@ func heal(db *sql.DB, dataOnly bool) (Report, error) {
 		if err = healPerformance(tx, &r); err != nil {
 			return err
 		}
-		if err = healArtwork(tx, &r); err != nil {
+		if resized, err = healArtwork(tx, &r); err != nil {
 			return err
 		}
 		return tx.QueryRow("SELECT count(*) FROM GuardianReanalysis").Scan(&r.ReanalysisPending)
 	})
 	r.Healthy = err == nil
-	return r, err
+	return r, resized, err
 }
 
 func writable(path string) (bool, error) {
@@ -204,9 +214,16 @@ func writable(path string) (bool, error) {
 	return fs.Flags&1 == 0 && s.Mode().Perm()&0222 != 0 && d.Mode().Perm()&0222 != 0, nil
 }
 
+// MountOptions configures a mount-time heal pass.
+type MountOptions struct {
+	MaxSessions            int
+	DataOnly               bool
+	ExtractEmbeddedArtwork func(audioPath string) ([]byte, error)
+}
+
 // HealMount only opens Engine's two known database names; it never scans music.
 func HealMount(mount string, maxSessions int) (Report, error) {
-	return healMount(mount, maxSessions, false)
+	return HealMountWithOptions(context.Background(), mount, MountOptions{MaxSessions: maxSessions})
 }
 
 // HealMountDataOnly is HealMount without schema edits, for libraries Engine will
@@ -215,18 +232,22 @@ func HealMountDataOnly(mount string, maxSessions int) (Report, error) {
 	return HealMountDataOnlyContext(context.Background(), mount, maxSessions)
 }
 
-func healMount(mount string, maxSessions int, dataOnly bool) (Report, error) {
-	return healMountContext(context.Background(), mount, maxSessions, dataOnly)
-}
-
 // HealMountDataOnlyContext is the mount hook heal with a caller-owned budget.
 // The base heal commits first. Path normalization then commits in batches and
 // stops cleanly when the caller's budget expires.
 func HealMountDataOnlyContext(ctx context.Context, mount string, maxSessions int) (Report, error) {
-	return healMountContext(ctx, mount, maxSessions, true)
+	return HealMountWithOptions(ctx, mount, MountOptions{MaxSessions: maxSessions, DataOnly: true})
 }
 
-func healMountContext(ctx context.Context, mount string, maxSessions int, dataOnly bool) (Report, error) {
+// HealMountWithOptions runs the mount heal with caller-supplied budget and optional
+// embedded-artwork fallback for missing post-5.0 Artwork/<hash>.jpg files.
+func HealMountWithOptions(ctx context.Context, mount string, opts MountOptions) (Report, error) {
+	return healMountContext(ctx, mount, opts)
+}
+
+func healMountContext(ctx context.Context, mount string, opts MountOptions) (Report, error) {
+	maxSessions := opts.MaxSessions
+	dataOnly := opts.DataOnly
 	r := Report{Mount: mount, CheckedAt: time.Now().UTC()}
 	if maxSessions < 0 {
 		return r, fmt.Errorf("maxSessions must not be negative")
@@ -287,13 +308,21 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		return r, nil
 	}
 	pathsFixed := r.PathsNormalized
-	r, err = heal(db, dataOnly)
+	var resizedIDs map[int64]bool
+	r, resizedIDs, err = healWithResized(db, dataOnly)
 	r.ReserveFixed = fixed
 	r.PathsNormalized = pathsFixed
 	if err != nil {
 		_ = db.Close()
 		r.Mount = mount
 		return r, err
+	}
+	if ctx.Err() == nil {
+		if artErr := reconcileArtwork(ctx, db, mount, resizedIDs, opts.ExtractEmbeddedArtwork, &r); artErr != nil {
+			_ = db.Close()
+			r.Mount = mount
+			return r, artErr
+		}
 	}
 	closeErr := db.Close()
 	r.Mount = mount
@@ -318,7 +347,10 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		if e != nil {
 			return r, e
 		}
-		hr, e := heal(hdb, dataOnly)
+		hr, resizedH, e := healWithResized(hdb, dataOnly)
+		if e == nil && ctx.Err() == nil {
+			e = reconcileArtwork(ctx, hdb, mount, resizedH, opts.ExtractEmbeddedArtwork, &hr)
+		}
 		ce := hdb.Close()
 		if e != nil {
 			r.Healthy = false
@@ -332,6 +364,7 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		r.Waveforms += hr.Waveforms
 		r.Loops += hr.Loops
 		r.Artwork += hr.Artwork
+		r.ArtworkReconciled += hr.ArtworkReconciled
 		r.OrphanArtwork += hr.OrphanArtwork
 		for _, warning := range hr.Warnings {
 			r.Warnings = append(r.Warnings, "history: "+warning)
