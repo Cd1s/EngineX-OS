@@ -211,8 +211,9 @@ func TestTrackJSONDifferentialAllFields(t *testing.T) {
 
 func TestTrackJSONUsesTheAllocationLightEncoder(t *testing.T) {
 	track := reflectTrack(17)
+	var buffer [2048]byte
 	allocs := testing.AllocsPerRun(100, func() {
-		_ = appendTrackJSON(nil, track)
+		_ = appendTrackJSON(buffer[:0], track)
 	})
 	if allocs > 2 {
 		t.Fatalf("appendTrackJSON allocations = %.1f, want at most 2", allocs)
