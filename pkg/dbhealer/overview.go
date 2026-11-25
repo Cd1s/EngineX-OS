@@ -296,29 +296,27 @@ func selectOverviewWinner(valid []overviewCandidate, provenance map[string]bool,
 	if len(valid) == 0 {
 		return overviewCandidate{}, false
 	}
-	var prov []overviewCandidate
-	for _, c := range valid {
-		if provenance[c.name] {
-			prov = append(prov, c)
-		}
-	}
-	if len(prov) == 1 {
-		return prov[0], true
-	}
-	pool := valid
-	if len(prov) > 1 {
-		pool = prov
-	}
 	best := 0
-	for _, c := range pool {
+	for _, c := range valid {
 		if c.matchCount > best {
 			best = c.matchCount
 		}
 	}
 	var leaders []overviewCandidate
-	for _, c := range pool {
+	for _, c := range valid {
 		if c.matchCount == best {
 			leaders = append(leaders, c)
+		}
+	}
+	if len(leaders) > 1 {
+		var prov []overviewCandidate
+		for _, c := range leaders {
+			if provenance[c.name] {
+				prov = append(prov, c)
+			}
+		}
+		if len(prov) > 0 {
+			leaders = prov
 		}
 	}
 	if len(leaders) != 1 {
@@ -436,7 +434,11 @@ func reconcileOverviewDataDir(ctx context.Context, db *sql.DB, db2Dir string, r 
 			break
 		}
 		dst := filepath.Join(curDir, f.name)
-		if _, err := os.Lstat(dst); err == nil || !errors.Is(err, os.ErrNotExist) {
+		if dstSt, err := os.Lstat(dst); err == nil {
+			if dstSt.Mode()&os.ModeSymlink != 0 || !dstSt.Mode().IsRegular() || dstSt.Size() > 8 {
+				continue
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		src := filepath.Join(winner.dir, f.name)

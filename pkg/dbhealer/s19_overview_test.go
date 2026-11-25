@@ -261,6 +261,76 @@ func TestS19PartialMergePreservesNewerFilesAndChecksContext(t *testing.T) {
 	if err != nil || !rFinish.Healthy || rFinish.RGBOverviewsMigrated != 66 {
 		t.Fatalf("resume got %+v err=%v, want RGBOverviewsMigrated=66", rFinish, err)
 	}
+
+	t.Run("replaces_corrupt_short_stubs_and_refuses_dst_symlink", func(t *testing.T) {
+		const stubOldUUID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaac"
+		const stubCurUUID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbd"
+
+		_, stubRoot, stubDB := testlibrary.Create(t)
+		if _, err := stubDB.Exec(`UPDATE Information SET uuid=?`, stubCurUUID); err != nil {
+			t.Fatal(err)
+		}
+		for id := int64(1); id <= 4; id++ {
+			s19SeedTrack(t, stubDB, id, float64(4000+id*1000), "")
+		}
+		stubDB.Close()
+
+		ov := filepath.Join(stubRoot, "Engine Library", "Database2", "OverviewData")
+		curDir := filepath.Join(ov, stubCurUUID)
+		if err := os.MkdirAll(curDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		validNewer := s19TestOverviewBlob(5000, 91)
+		s19WriteRGB(t, ov, stubCurUUID, 1, validNewer)
+		if err := os.WriteFile(filepath.Join(curDir, "2.rgb"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(curDir, "3.rgb"), []byte("tiny"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		outsideTarget := filepath.Join(t.TempDir(), "keep.rgb")
+		if err := os.WriteFile(outsideTarget, []byte("keep-me"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outsideTarget, filepath.Join(curDir, "4.rgb")); err != nil {
+			t.Fatal(err)
+		}
+
+		for id := int64(1); id <= 4; id++ {
+			s19WriteRGB(t, ov, stubOldUUID, id, s19TestOverviewBlob(float64(4000+id*1000), 55))
+		}
+
+		rStub, err := HealMountDataOnly(stubRoot, 0)
+		if err != nil || !rStub.Healthy {
+			t.Fatalf("heal failed: %+v err=%v", rStub, err)
+		}
+		if got, _ := s19ReadMigratedJSON(t, rStub); got != 2 {
+			t.Fatalf("migrated=%d, want 2 (2.rgb and 3.rgb stubs replaced)", got)
+		}
+		got1, err := os.ReadFile(filepath.Join(curDir, "1.rgb"))
+		if err != nil || string(got1) != string(validNewer) {
+			t.Fatalf("valid 1.rgb was not preserved: err=%v", err)
+		}
+		got2, err := os.ReadFile(filepath.Join(curDir, "2.rgb"))
+		if err != nil || string(got2) != string(s19TestOverviewBlob(6000, 55)) {
+			t.Fatalf("0-byte 2.rgb was not replaced: len=%d err=%v", len(got2), err)
+		}
+		got3, err := os.ReadFile(filepath.Join(curDir, "3.rgb"))
+		if err != nil || string(got3) != string(s19TestOverviewBlob(7000, 55)) {
+			t.Fatalf("4-byte 3.rgb was not replaced: len=%d err=%v", len(got3), err)
+		}
+		st4, err := os.Lstat(filepath.Join(curDir, "4.rgb"))
+		if err != nil || st4.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("symlink 4.rgb should remain untouched: st=%v err=%v", st4, err)
+		}
+		outsideData, err := os.ReadFile(outsideTarget)
+		if err != nil || string(outsideData) != "keep-me" {
+			t.Fatalf("outside symlink target was modified: %q err=%v", outsideData, err)
+		}
+		if _, err := os.Stat(filepath.Join(ov, stubOldUUID, "4.rgb")); err != nil {
+			t.Fatalf("oldUUID 4.rgb should remain when dst is symlink: %v", err)
+		}
+	})
 }
 
 func TestS19RejectsMismatchedSamplesPerBinAndCorruptAndSymlinks(t *testing.T) {
@@ -583,6 +653,49 @@ func TestS19DesktopOriginDatabaseUuidRecovery(t *testing.T) {
 		}
 		if string(got1) != string(s19TestOverviewBlob(5000, 88)) {
 			t.Fatalf("recovered wrong candidate directory")
+		}
+	})
+
+	t.Run("larger_match_count_beats_smaller_provenance_candidate", func(t *testing.T) {
+		const fullUUID = "abababab-abab-4aba-8aba-abababababab"
+
+		_, root, db := testlibrary.Create(t)
+		if _, err := db.Exec(`UPDATE Information SET uuid=?`, curUUID); err != nil {
+			t.Fatal(err)
+		}
+		s19SeedTrack(t, db, 1, 4100, desktopUUID)
+		for id := int64(2); id <= 10; id++ {
+			s19SeedTrack(t, db, id, float64(4000+id*100), "")
+		}
+		db.Close()
+
+		overviewDir := filepath.Join(root, "Engine Library", "Database2", "OverviewData")
+		// Provenance-matching dir holds only 1 leftover file.
+		s19WriteRGB(t, overviewDir, desktopUUID, 1, s19TestOverviewBlob(4100, 22))
+		// Larger valid dir holds all 10 tracks without provenance match.
+		for id := int64(1); id <= 10; id++ {
+			s19WriteRGB(t, overviewDir, fullUUID, id, s19TestOverviewBlob(float64(4000+id*100), 77))
+		}
+
+		r, err := HealMountDataOnly(root, 0)
+		if err != nil || !r.Healthy {
+			t.Fatalf("heal failed: %+v err=%v", r, err)
+		}
+		if got, _ := s19ReadMigratedJSON(t, r); got != 10 {
+			t.Fatalf("migrated=%d, want 10 (larger candidate should beat 1-file provenance dir)", got)
+		}
+		got1, err := os.ReadFile(filepath.Join(overviewDir, curUUID, "1.rgb"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got1) != string(s19TestOverviewBlob(4100, 77)) {
+			t.Fatalf("recovered smaller provenance dir instead of 10-track candidate")
+		}
+		if _, err := os.Stat(filepath.Join(overviewDir, curUUID, "10.rgb")); err != nil {
+			t.Fatalf("missing 10.rgb from winning candidate: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(overviewDir, desktopUUID, "1.rgb")); err != nil {
+			t.Fatalf("smaller provenance dir should remain untouched: %v", err)
 		}
 	})
 }
