@@ -105,7 +105,7 @@ func (w *CueWatcher) rescan() {
 				if n := CleanWriteBackLeftoversWithKeys(mount, keys); n > 0 {
 					log.Printf("rb-bridge: removed %d temporary files a cut write-back left on %s", n, mount)
 				}
-			}(w.sticks[mount].session.keys)
+			}(keys)
 		}
 	}
 }
