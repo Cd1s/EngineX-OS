@@ -6,8 +6,10 @@ import (
 	"crypto/sha1"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -853,5 +855,108 @@ func TestMountRenumberedReexportWritesNoRowAndRefreshesRefs(t *testing.T) {
 	}
 	if now.Stamp != view.Stamp || !now.Pending.Verify {
 		t.Fatalf("stamp %q, pending %+v", now.Stamp, now.Pending)
+	}
+}
+
+// A deck loaded staged tracks before their window, and the deck's UI hook wrote the staged data
+// into the rows itself (filled.jsonl); Engine then put its own figure into the last field of the
+// main cue, as it does at every load. Those rows are the bridge's own writes: a newer staged
+// record replaces them, and the snapshot holds them as applied. What the DJ changed after the
+// fill stays the deck's.
+func TestMountTakesRowsTheDeckHookFilledAsTheBridgesOwn(t *testing.T) {
+	mount := stick(t)
+	mountNow(t, mount, MountOptions{})
+	stageAll(t, mount)
+	s := snapshot(t, mount)
+	stage, err := rbstate.OpenStage(s.LibraryUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dbDir(mount), "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recode := func(cues []byte, edit func(raw []byte)) []byte {
+		raw, err := enginedb.QUncompress(cues, 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		edit(raw)
+		if cues, err = enginedb.QCompress(raw); err != nil {
+			t.Fatal(err)
+		}
+		return cues
+	}
+	// fill is the hook's write of a staged record (one with a hot cue) to its row, its line in
+	// filled.jsonl, and the load.
+	fill := func(key string, journal bool, deck func(raw []byte)) *rbstate.Staged {
+		rec, err := stage.Get(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec.Perf.QuickCues = recode(rec.Perf.QuickCues, func(raw []byte) { binary.BigEndian.PutUint64(raw[8+1+int(raw[8]):], math.Float64bits(22050)) })
+		rec.Digest = enginedb.WrittenDigest(rec.Perf.Beats, rec.Perf.QuickCues, rec.Perf.Loops)
+		if err = stage.Put(rec); err != nil {
+			t.Fatal(err)
+		}
+		id := s.Tracks[key].EngineID
+		cues := recode(rec.Perf.QuickCues, func(raw []byte) {
+			binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(-1105)) // the main cue as imported, by Engine
+			if deck != nil {
+				deck(raw)
+			}
+		})
+		if _, err = db.Exec(`UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,beatData=?,quickCues=?,loops=?,thirdPartySourceId=NULL WHERE trackId=?`,
+			rec.Perf.TrackData, rec.Perf.Overview, rec.Perf.Beats, cues, rec.Perf.Loops, id); err != nil {
+			t.Fatal(err)
+		}
+		if journal {
+			f, err := os.OpenFile(filepath.Join(stage.Dir(), "filled.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+			if err == nil {
+				_, err = fmt.Fprintf(f, `{"id":%d,"k":%q,"wr":%q,"v":%d,"w":%q,"at":1795570000}`+"\n", id, key, base64.StdEncoding.EncodeToString(rec.Digest), rbstate.Rules, rec.Sig.Row)
+				f.Close()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		return rec
+	}
+	// two: filled, then the job staged it again with other cues (a re-export): replaced.
+	two := fill("music/two.flac", true, nil)
+	two.Perf.QuickCues = recode(two.Perf.QuickCues, func(raw []byte) { raw[8+1+int(raw[8])+8] ^= 0xFF }) // the first hot cue's colour
+	two.Digest = enginedb.WrittenDigest(two.Perf.Beats, two.Perf.QuickCues, two.Perf.Loops)
+	if err = stage.Put(two); err != nil {
+		t.Fatal(err)
+	}
+	// three: filled, and the hook's line is lost: the load alone is no edit.
+	three := fill("music/three.wav", false, nil)
+	// four: filled, then the DJ moved the main cue: the deck's.
+	fill("music/four.wav", true, func(raw []byte) {
+		binary.BigEndian.PutUint64(raw[len(raw)-17:], math.Float64bits(4410))
+		raw[len(raw)-9] = 1
+	})
+	db.Close()
+	if err = stage.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if res := mountNow(t, mount, MountOptions{Publish: true}); res.Applied != 5 {
+		t.Fatalf("applied %d", res.Applied)
+	}
+	after := snapshot(t, mount)
+	if tr := after.Tracks["music/two.flac"]; tr.Perf != rbstate.PerfApplied || !bytes.Equal(tr.Written, two.Digest) {
+		t.Fatalf("the filled row that was staged again: %+v", tr)
+	}
+	if got := query(t, mount, `SELECT hex(quickCues) FROM PerformanceData WHERE trackId=?`, after.Tracks["music/two.flac"].EngineID); got[0][0] != fmt.Sprintf("%X", two.Perf.QuickCues) {
+		t.Fatal("the filled row did not get the newer staged cues")
+	}
+	if tr := after.Tracks["music/three.wav"]; tr.Perf != rbstate.PerfApplied || !bytes.Equal(tr.Written, three.Digest) {
+		t.Fatalf("the filled row a deck loaded: %+v", tr)
+	}
+	if tr := after.Tracks["music/four.wav"]; tr.Perf != rbstate.PerfDeck || tr.Written != nil {
+		t.Fatalf("the filled row whose main cue the DJ moved: %+v", tr)
+	}
+	if tr := after.Tracks["music/five.wav"]; tr.Perf != rbstate.PerfApplied || tr.Written == nil {
+		t.Fatalf("a row nobody filled: %+v", tr)
 	}
 }

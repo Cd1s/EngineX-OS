@@ -375,6 +375,9 @@ func (f *filler) fill(i int) (ok bool, err error) {
 		return f.unread(vt, err)
 	}
 	rec.Key, rec.Sig.Row = vt.key, vt.hash
+	if snapTrack != nil {
+		rec.EngineID = snapTrack.EngineID // for the deck's UI hook, which fills a row a deck loads before its window
+	}
 	if err = putStaged(f.stage, rec); err != nil {
 		return false, fmt.Errorf("stage %s: %w", vt.key, err)
 	}

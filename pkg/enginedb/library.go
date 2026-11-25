@@ -672,6 +672,26 @@ type PerfPrev struct {
 	Written []byte // the digest of what the bridge last wrote, nil for a row only the export filled
 }
 
+// asWritten is a row's quickCues as the bridge wrote them when only a load changed them: Engine
+// puts its own figure into the last field, the main cue as imported, every time a deck loads the
+// track (the bridge writes the main cue there). A main cue the DJ adjusted has its flag set and
+// is an edit, as every other difference is.
+func asWritten(cues []byte) []byte {
+	raw, err := QUncompress(cues, 64<<10)
+	if err != nil {
+		return cues
+	}
+	at, ok := cuePositions(raw)
+	if !ok || raw[at[8]+8] != 0 || bytes.Equal(raw[at[8]:at[8]+8], raw[at[9]:]) {
+		return cues
+	}
+	copy(raw[at[9]:], raw[at[8]:at[8]+8])
+	if out, err := QCompress(raw); err == nil {
+		return out
+	}
+	return cues
+}
+
 // ApplyPerformance writes a track's staged data unless the deck changed the row since the bridge
 // wrote it, and returns the digest of the grid, cues and loops the bridge wrote (nil: the row is
 // the deck's from now on) and what it did. Four cases:
@@ -701,7 +721,7 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 	same := bytes.Equal(row.beats, p.Beats) && bytes.Equal(row.cues, p.QuickCues) && bytes.Equal(row.loops, p.Loops)
 	var have []byte
 	if !same && (prev.Written != nil || row.beats != nil) {
-		have = WrittenDigest(row.beats, row.cues, row.loops)
+		have = WrittenDigest(row.beats, asWritten(row.cues), row.loops)
 		same = bytes.Equal(have, staged)
 	}
 	bpm := f.BPM

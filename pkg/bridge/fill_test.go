@@ -226,6 +226,8 @@ func TestFillStagesEveryTrackAndWritesNothingElseOnTheStick(t *testing.T) {
 		sig := e.Sig
 		if tr := snap.Tracks[k]; tr == nil || sig.Row != tr.Row || sig.Rules != rbstate.Rules || sig.Audio.IsZero() || len(sig.ANLZ) != 3 {
 			t.Fatalf("staged %s: %+v", k, sig)
+		} else if e.EngineID != tr.EngineID || e.EngineID == 0 {
+			t.Fatalf("staged %s names row %d, the snapshot %d", k, e.EngineID, tr.EngineID)
 		}
 		rec, err := st.Get(k)
 		if err != nil || !rec.Perf.Complete || rec.Perf.Beats == nil || len(rec.RGB) == 0 || len(enginedb.DetailFiles(rec.Sig.ANLZ)) != 2 {

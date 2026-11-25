@@ -664,6 +664,7 @@ func (w *window) applyStaged() error {
 		}
 	}
 	keys = w.inApplyOrder(keys)
+	filled := stage.Filled()
 	overviews := map[int64][]byte{} // written once their rows are committed
 	back := map[string]bool{}       // tracks whose file is on the stick again
 	applied, kept, degraded, gone, dropped := 0, 0, 0, 0, 0
@@ -722,7 +723,11 @@ func (w *window) applyStaged() error {
 		} else {
 			p := &full.Perf
 			perf := enginedb.Performance{TrackData: p.TrackData, Overview: p.Overview, Beats: p.Beats, QuickCues: p.QuickCues, Loops: p.Loops, ActiveLoops: p.ActiveLoops, Complete: p.Complete, Digest: e.Digest}
-			digest, outcome, err := b.ApplyPerformance(w.ctx, t.EngineID, perf, full.Facts, enginedb.PerfPrev{State: t.Perf, Written: t.Written}, vt.Track)
+			prev := enginedb.PerfPrev{State: t.Perf, Written: t.Written}
+			if f, ok := filled[key]; ok && f.EngineID == t.EngineID && prev.Written == nil && prev.State != rbstate.PerfDeck {
+				prev.Written = f.Written // the UI hook filled the row from the stage: the bridge's data, as if a window had written it
+			}
+			digest, outcome, err := b.ApplyPerformance(w.ctx, t.EngineID, perf, full.Facts, prev, vt.Track)
 			if err != nil {
 				return err
 			}

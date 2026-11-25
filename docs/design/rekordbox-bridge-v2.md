@@ -227,14 +227,17 @@ var UnsafeToFree func(path string) bool
 func LockVolume(mount string, wait time.Duration) (unlock func(), err error)
 ```
 
-File format of the snapshot: text, one record per line.
+File format of the snapshot: a header line, a binary body, an end line.
 
 ```
-RBS1 {header as JSON}
-L {list as JSON}            one per list
-T {track as JSON}           one per track
-E <records> <crc32 of all bytes above>
+RBS2 {header as JSON}       one line: all an unchanged insert reads
+<body>                      the lists and the tracks, by key, as encoding/gob writes them
+E <records> <crc32 of all bytes above, hex>
 ```
+
+The body is gob and not JSON lines (`RBS1`, 2026-11-24 morning): 2,390 tracks as JSON cost 0.4 s of a deck's CPU
+for one read and one write. A file without its `E` line is no snapshot. A reader that is not Go (the UI hook) reads
+the header line only.
 
 Commit and snapshot (changed on 2026-11-24 after part 1 was first pushed: `Header.DB` and `DBIdentity` are gone).
 Every transaction of the bridge on `m.db` adds one to `Information.lastRekordBoxLibraryImportReadCounter`, Engine's
@@ -274,6 +277,7 @@ type Facts struct { // from the audio header, as enginedb reads it today
 
 type Staged struct {
 	Key      string
+	EngineID int64    // "id": the track's row in the stick's library (Track.id) when it was staged; left out without one
 	Sig      TrackSig // a window applies it only while Sig.Row and Sig.Rules are still the view's
 	Rel      string   // the audio file's spelling on the volume
 	Missing  bool     // the volume has no file for this track
@@ -296,6 +300,7 @@ func (s *Stage) MarkVerified(stamp string) error       // every track of this st
 func (s *Stage) Verified() string
 func (s *Stage) Drop(keys ...string) error             // after a window applied them
 func (s *Stage) Remove() error
+func (s *Stage) Filled() map[string]Filled             // the UI hook's record of the rows it filled, the last line of each key
 ```
 
 On disk: `<root>/<uuid>/index.jsonl` (append only, last line of a key wins, a torn last line is ignored) and one
@@ -304,6 +309,22 @@ On disk: `<root>/<uuid>/index.jsonl` (append only, last line of a key wins, a to
 `loops`, each a little-endian uint32 length and its bytes, then one byte for `Complete`. The other fields are in the
 index line; `RGB` and `Art` are files beside it (`.rgb`, `.jpg`). `Put` refuses when `/data` has less than 256 MiB
 free. A stage not touched for 30 days is removed by `OpenStage` of another library.
+
+Two things in the stage are for the deck's UI hook (`tools/ui-mod/rekordbox_stage.h`), which writes a staged
+track's data into its row when a deck loads the track before a window has published it:
+
+- An index line has `"id"`, the row's `Track.id` in the stick's library when the job staged the track. A track
+  whose row a window has not made yet has no `"id"`. The ID is the row's at that moment: a reader checks the row's
+  path against `"k"`.
+- The hook appends one line per fill to `<root>/<uuid>/filled.jsonl`: `{"id":<Track.id>,"k":"<key>","wr":"<the
+  staged line's wr>","v":<rules>,"w":"<row hash>","at":<unix time>}`. The bridge only reads it (`Stage.Filled`). A
+  row with a line there whose `id` is the row's, and for which the snapshot has no `Written`, is applied as a row the
+  bridge wrote with that digest (`PerfPrev.Written`): staged data replaces it, it is recorded `PerfApplied`, and only
+  a difference from that digest is a deck edit. The file goes with the stage directory.
+
+Engine writes its own figure into the last field of `quickCues` (the main cue as imported) every time a deck loads
+a track. `ApplyPerformance` compares a row with that field set back to the main cue, as the bridge writes it
+(`asWritten`), so a load alone is never a deck edit; a main cue the DJ adjusted has its flag set and is one.
 
 ### 1.4 This lane: sources, view, plan, apply, mount
 

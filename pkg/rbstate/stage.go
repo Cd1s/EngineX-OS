@@ -23,6 +23,7 @@ import (
 //	<root>/<uuid>/<name>.bin      the track's performance data, in the UI hook's RBXA1 layout
 //	<root>/<uuid>/<name>.rgb      the body of the track's OverviewData file, when it has one
 //	<root>/<uuid>/<name>.jpg      a cover taken from the audio file itself
+//	<root>/<uuid>/filled.jsonl    written by the deck's UI hook, read here: the rows it filled (Filled)
 //
 // <name> is the hex SHA-1 of the track's key.
 
@@ -30,6 +31,7 @@ const (
 	StageEnv         = "ENGINEX_RB_STAGE_DIR" // overrides the stage root
 	defaultStageRoot = "/data/enginex/rb-stage"
 	stageIndex       = "index.jsonl"
+	stageFilled      = "filled.jsonl"
 	perfMagic        = "RBXA1"
 	stageFloor       = 256 << 20 // the free space /data keeps: Put refuses below it
 	stageIdle        = 30 * 24 * time.Hour
@@ -61,6 +63,7 @@ type Facts struct {
 // Staged is one track as the job built it from the volume.
 type Staged struct {
 	Key      string   `json:"k"`
+	EngineID int64    `json:"id,omitempty"` // the track's row in the stick's library (Track.id) when it was staged; none yet: left out
 	Sig      TrackSig `json:"sig"`
 	Rel      string   `json:"rel,omitempty"` // the audio file's spelling on the volume
 	Missing  bool     `json:"missing,omitempty"`
@@ -295,6 +298,32 @@ func (s *Stage) Entries() (map[string]*Staged, string, error) {
 		}
 	}
 	return out, verified, sc.Err()
+}
+
+// Filled is a line of filled.jsonl. A deck loaded a staged track before a window published it,
+// and the deck's UI hook wrote the staged data into the row itself (tools/ui-mod/rekordbox_stage.h):
+// the row then holds the bridge's data, written by Engine's connection, and not an edit of the DJ's.
+type Filled struct {
+	EngineID int64  `json:"id"` // the row, Track.id
+	Key      string `json:"k"`
+	Written  []byte `json:"wr"` // Digest of the staged line the row was filled from
+}
+
+// Filled is the hook's last line of each key. A line that does not parse is skipped.
+func (s *Stage) Filled() map[string]Filled {
+	out := map[string]Filled{}
+	f, err := os.Open(filepath.Join(s.dir, stageFilled))
+	if err != nil {
+		return out
+	}
+	defer f.Close()
+	for sc := bufio.NewScanner(f); sc.Scan(); {
+		var l Filled
+		if json.Unmarshal(sc.Bytes(), &l) == nil && l.Key != "" && len(l.Written) > 0 {
+			out[l.Key] = l
+		}
+	}
+	return out
 }
 
 // Get reads a staged track with its blobs. os.ErrNotExist: not staged, or its files are not whole.

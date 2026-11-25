@@ -371,3 +371,44 @@ func TestNextSnapshotIsSeparateUntilPromoted(t *testing.T) {
 		t.Fatalf("dropping nothing: %v", err)
 	}
 }
+
+// R1 and R2 of the deck's UI hook, which fills a row a deck loads before its window: an index
+// line names the track's row, and the hook's own record of what it filled is read by key.
+func TestStageLineNamesTheRowAndFilledReadsTheHooksRecord(t *testing.T) {
+	t.Setenv(StageEnv, t.TempDir())
+	s, err := OpenStage("lib-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := TrackSig{Rules: Rules, Row: "r"}
+	for _, st := range []*Staged{{Key: "contents/a.mp3", EngineID: 41, Sig: sig}, {Key: "contents/b.mp3", Sig: sig}} { // b has no row yet
+		if err = s.Put(st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(s.Dir(), stageIndex))
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], `"k":"contents/a.mp3","id":41,`) || strings.Contains(lines[1], `"id"`) {
+		t.Fatalf("index lines: %q", lines)
+	}
+	entries, _, err := s.Entries()
+	if err != nil || entries["contents/a.mp3"].EngineID != 41 || entries["contents/b.mp3"].EngineID != 0 {
+		t.Fatalf("entries: %+v %v", entries, err)
+	}
+	if got := s.Filled(); len(got) != 0 {
+		t.Fatalf("without the hook's file: %+v", got)
+	}
+	// The lines as tools/ui-mod/rekordbox_stage.h writes them: the last of a key counts, a torn one is skipped.
+	hook := `{"id":41,"k":"contents/a.mp3","wr":"AQIDBAUGBwgJCgsMDQ4PEA==","v":5,"w":"r","at":1795570000}` + "\n" +
+		`{"id":41,"k":"contents/a.mp3","wr":"EBESExQVFhcYGRobHB0eHw==","v":5,"w":"r2","at":1795570100}` + "\n" + `{"id":7,"k":"contents/c.mp3","wr":"AQ`
+	if err = os.WriteFile(filepath.Join(s.Dir(), stageFilled), []byte(hook), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := s.Filled()
+	if a := got["contents/a.mp3"]; len(got) != 1 || a.EngineID != 41 || !bytes.Equal(a.Written, []byte{16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31}) {
+		t.Fatalf("the hook's record: %+v", got)
+	}
+}
