@@ -109,7 +109,7 @@ func TestMirrorLibraryTakesEveryRowOnceAndThenWhatEngineWrote(t *testing.T) {
 	var m Mirror
 	paced := 0
 	ch, err := MirrorLibrary(ctx, live, next, &m, func(time.Duration) error { paced++; return nil })
-	if err != nil || len(ch.Tracks) != 40 || m.State != state || len(m.Tracks) != 40 || paced < 10 {
+	if err != nil || len(ch.Tracks) != 40 || m.State != state || len(m.Tracks) != 40 || paced < 10 || m.Rows != ch.Rows || m.Rows < 80 {
 		t.Fatalf("first mirror: %d tracks, state %q want %q, %v", len(ch.Tracks), m.State, state, err)
 	}
 	if after, _ := os.ReadFile(live); string(after) != string(before) {

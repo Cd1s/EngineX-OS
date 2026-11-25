@@ -161,6 +161,14 @@ func TestNextLibrarySwappedInIsTheLibraryTheWindowsWrite(t *testing.T) {
 	if again := mountNow(t, mount, MountOptions{Deadline: time.Now().Add(hookWindow)}); !again.Bypassed {
 		t.Fatalf("the stick inserted again: %+v", again)
 	}
+	// A library whose export alone no window can read (50,000 tracks) with nothing left to publish:
+	// the job makes no next library and asks for no remount. It did after every swap, without end.
+	defer func(d time.Duration) { spare = d }(spare)
+	spare = hookWindow
+	if r := mustFill(t, mount, FillOptions{}); r.Publish {
+		t.Fatalf("the job with nothing to publish asks for a remount: %+v", r)
+	}
+	nextLeftovers(t, mount)
 }
 
 // What Engine wrote to the stick's library after the job made the next one ready is in the
@@ -197,6 +205,7 @@ func TestNextLibraryKeepsWhatTheDeckWroteBeforeTheSwap(t *testing.T) {
 	if !strings.Contains(out, "(2 rows the deck wrote") || !strings.Contains(out, "mount swap") || strings.Contains(out, "mount read") || res.Pending.Rows != 2 {
 		t.Fatalf("the window of the remount takes the deck's two rows, swaps and does nothing else: %+v\n%s", res, out)
 	}
+	// (A window that has no time to look for the deck's rows does not swap: the job takes them.)
 	// The two tracks are published by the job's next round, in place: one window does it.
 	if n := query(t, mount, `SELECT count(*) FROM PerformanceData WHERE overviewWaveFormData IS NOT NULL`); n[0][0] != "28" {
 		t.Fatalf("%s rows with staged data after the swap, want the 28 the deck did not write", n[0][0])
@@ -441,6 +450,39 @@ func TestSwapNeverGivesATrackAnotherTracksData(t *testing.T) {
 	nextLeftovers(t, mount)
 }
 
+// A window that cannot look for the rows the deck wrote and still end 3 s before the kill does
+// not swap: the stick's library stays as it is, the job takes the rows, and the next window
+// swaps. (50,000 tracks in one list: the look read 100,002 rows in 15.7 s and the window was
+// killed; the estimate counted the tracks only.)
+func TestSwapWaitsForTheJobWhenTheDecksRowsCannotBeLookedForInTime(t *testing.T) {
+	mount := nextStick(t, 12)
+	makeNext(t, mount)
+	engineWrites(t, mount, `UPDATE Track SET rating=80 WHERE id=2`)
+	live := filepath.Join(dbDir(mount), "m.db")
+	before, _ := os.ReadFile(live)
+	old := spare
+	spare = hookWindow - 100*time.Millisecond // no step fits
+	_, out := hookWindowNow(t, mount)
+	spare = old
+	if strings.Contains(out, "mount swap") || strings.Contains(out, "mount carry") || !strings.Contains(out, "the job takes the changes first") {
+		t.Fatalf("the window without time:\n%s", out)
+	}
+	if after, _ := os.ReadFile(live); !bytes.Equal(after, before) {
+		t.Fatal("the window without time changed the stick's library")
+	}
+	if _, err := os.Stat(filepath.Join(dbDir(mount), nextDB)); err != nil {
+		t.Fatalf("the next library is gone: %v", err)
+	}
+	makeNext(t, mount) // the job's next round takes the deck's row
+	if _, out = hookWindowNow(t, mount); !strings.Contains(out, "mount swap") {
+		t.Fatalf("the window after the job's next round did not swap:\n%s", out)
+	}
+	if got := query(t, mount, `SELECT rating FROM Track WHERE id=2`); got[0][0] != "80" {
+		t.Fatalf("the deck's rating after the swap: %v", got)
+	}
+	nextLeftovers(t, mount)
+}
+
 // A cut at any point of the window that swaps the next library in, and the next window on what
 // was on the stick then, end in the library of an undisturbed swap.
 func TestSwapCutAtEveryStepEndsInTheSameLibrary(t *testing.T) {
@@ -547,6 +589,7 @@ func TestWorkCostAgainstTheReplica(t *testing.T) {
 		{"30 tracks more in a list of 20,030 (synthetic)", work{adds: 30, lists: 1, entries: 20030, commits: 1, tracks: 20000}, 4389},
 		{"KDATA staged window", work{staged: 320}, 10350},
 		{"KDATA commit", work{commits: 1, tracks: 5962}, 640},
+		{"rows the deck wrote, looked for among 50,000 tracks in one list (synthetic)", work{scan: 100002}, 15736},
 	}
 	for _, m := range measured {
 		if got := m.w.cost().Milliseconds(); got < m.ms*85/100 || got > m.ms*135/100 {

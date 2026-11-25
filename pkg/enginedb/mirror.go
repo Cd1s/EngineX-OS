@@ -28,6 +28,7 @@ type Mirror struct {
 	Art    int64             // the highest AlbumArt.id taken
 	Arts   int64             // AlbumArt rows the live library had
 	Top    int64             // the highest Track.id the live library had issued when the next one was made
+	Rows   int               // rows of the live library the last call read: what the next call reads again
 }
 
 // MirrorChange is what MirrorLibrary took from the live library.
@@ -145,7 +146,7 @@ func MirrorLibrary(ctx context.Context, live, next string, m *Mirror, pace func(
 		}
 	}
 	if err == nil {
-		m.State = state // read before the rows: what Engine writes meanwhile is taken by the next call
+		m.State, m.Rows = state, mr.out.Rows // the state read before the rows: what Engine writes meanwhile is taken by the next call
 	}
 	return mr.out, err
 }

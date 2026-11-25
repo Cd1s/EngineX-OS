@@ -361,7 +361,9 @@ func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps) bo
 		_, content, err := liveLibrary(ctx, live)
 		return err == nil && !content
 	}
-	if !st.fits(work{scan: len(m.Tracks), commits: 1, tracks: h.Tracks}) {
+	// Every row of every table is read again to find the few Engine wrote (50,000 tracks in one
+	// list: 100,002 rows, 15.7 s): only when that ends in time. Else the job takes them and asks again.
+	if !st.fits(work{scan: m.Rows, commits: 1, tracks: h.Tracks}) {
 		return false
 	}
 	ch, err := enginedb.MirrorLibrary(ctx, live, next, &m, nil)

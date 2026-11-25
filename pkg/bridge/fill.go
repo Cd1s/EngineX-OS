@@ -244,7 +244,9 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		ahead := exportWork(view.view.sources(), len(snap.Tracks))
 		ahead.warm, ahead.staged, ahead.updates = true, f.applicable(), snap.Pending.Rows
 		ahead.commits += ahead.staged/applyBatch + ahead.updates/updateBatch
-		if e := errNoNext; view.view != nil && o.Stage == nil && ahead.cost() > hookWindow-spare {
+		// (Only when there is something to publish: reading a 50,000-track export alone is more than
+		// a window has, and the job made a next library and asked for a remount after every swap.)
+		if e := errNoNext; ahead.staged+ahead.updates > 0 && view.view != nil && o.Stage == nil && ahead.cost() > hookWindow-spare {
 			if e = next.build(false, true); e == nil {
 				res.Publish = next.ask()
 			} else if !errors.Is(e, errNoNext) && err == nil {
