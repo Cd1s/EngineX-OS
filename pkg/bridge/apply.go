@@ -148,6 +148,27 @@ func (w *window) open() error {
 		return err
 	}
 	_, oldErr := os.Stat(filepath.Join(w.dir, oldStateName))
+	empty, err := lib.Empty(w.ctx)
+	if err != nil {
+		return err
+	}
+	if empty {
+		hasSequence, seqErr := lib.HasTrackSequence(w.ctx)
+		if seqErr != nil {
+			return seqErr
+		}
+		if enginedb.HasRGBOverviews(w.dir, lib.UUID()) || hasSequence {
+			// A previously populated library emptied on the deck must not reuse its UUID
+			// or restart Track IDs onto stale OverviewData/<uuid>/<id>.rgb files.
+			w.snap = rbstate.New("")
+			w.close()
+			return nil
+		}
+		if snap == nil && oldErr != nil {
+			w.close() // Engine's pristine skeleton: a library is built under its UUID
+			return nil
+		}
+	}
 	switch {
 	case snap != nil && snap.LibraryUUID == lib.UUID() && snap.Rules == rbstate.Rules:
 		w.snap, w.head = snap, snap.Header
@@ -163,19 +184,26 @@ func (w *window) open() error {
 		snap.Rules, snap.Stamp = rbstate.Rules, ""
 		w.snap, w.dirty = snap, true
 	case oldErr == nil && !w.next:
+		artBudget := 2 * time.Second
+		if !w.st.owed.IsZero() {
+			if quarter := time.Until(w.st.owed) / 4; quarter < artBudget {
+				artBudget = quarter
+			}
+		}
+		if d, ok := w.ctx.Deadline(); ok {
+			if quarter := time.Until(d) / 4; quarter < artBudget {
+				artBudget = quarter
+			}
+		}
+		if artBudget > 0 {
+			if err = lib.MigrateLegacyArtwork(w.ctx, artBudget); err != nil {
+				return err
+			}
+		}
 		if w.snap, err = adopt(w.ctx, db, w.dir, lib.UUID()); err != nil {
 			return err
 		}
 		log.Printf("rb-bridge: library of an earlier build taken over: %d tracks, %d lists", len(w.snap.Tracks), len(w.snap.Lists))
-	default:
-		tracks, lists, err := lib.Counts(w.ctx)
-		if err != nil {
-			return err
-		}
-		if tracks == 0 && lists == 0 {
-			w.close() // Engine's skeleton: a library is built under its UUID
-			return nil
-		}
 	}
 	if err = w.reconcile(); err != nil {
 		return err
@@ -264,6 +292,10 @@ func (w *window) rows(idx []int) []enginedb.TrackRow {
 
 func (w *window) note(vt *ViewTrack, id int64, native bool) *rbstate.Track {
 	t := &rbstate.Track{Key: vt.Key, EngineID: id, Rel: vt.Rel, Refs: vt.Refs, Row: vt.Hash, Rating: vt.Track.Rating, Native: native}
+	if !native {
+		base := enginedb.FastBaseForTrack(vt.Track)
+		t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = base.Cues, base.Loops, base.Active, true
+	}
 	w.snap.Tracks[vt.Key] = t
 	return t
 }
@@ -886,7 +918,7 @@ func (w *window) applyStaged() error {
 		} else {
 			p := &full.Perf
 			perf := enginedb.Performance{TrackData: p.TrackData, Overview: p.Overview, Beats: p.Beats, QuickCues: p.QuickCues, Loops: p.Loops, ActiveLoops: p.ActiveLoops, Complete: p.Complete, Digest: e.Digest}
-			prev := enginedb.PerfPrev{State: t.Perf, Written: t.Written}
+			prev := enginedb.PerfPrev{State: t.Perf, Written: t.Written, FastKnown: t.FastKnown, FastCues: t.FastCues, FastLoops: t.FastLoops, FastActive: t.FastActive}
 			if f, ok := filled[key]; ok && f.EngineID == t.EngineID && prev.Written == nil && prev.State != rbstate.PerfDeck {
 				prev.Written = f.Written // the UI hook filled the row from the stage: the bridge's data, as if a window had written it
 			}
@@ -898,6 +930,7 @@ func (w *window) applyStaged() error {
 				t.Perf = rbstate.PerfDeck
 				kept++
 			}
+			t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = nil, nil, 0, false
 			// A list waveform only for a row the stick's library has, and not when the job staged the
 			// track with this row (the line names it): it wrote the file then. The look for it alone
 			// reads the folder, which holds a file a track (20,000: 4.3 s of a window for 30 tracks).
@@ -992,7 +1025,11 @@ func (w *window) relist(back map[string]bool) error {
 // read (on a USB 2.0 stick that was half a window's time).
 func writeOverview(dir, uuid string, id int64, body []byte) {
 	if st, err := os.Stat(filepath.Join(dir, "OverviewData", uuid, fmt.Sprintf("%d.rgb", id))); err == nil && st.Size() > 4 {
-		return
+		if body, err := os.ReadFile(filepath.Join(dir, "OverviewData", uuid, fmt.Sprintf("%d.rgb", id))); err == nil {
+			if raw, err := enginedb.QUncompress(body, 1<<20); err == nil && enginedb.ValidRGBOverview(raw) {
+				return
+			}
+		}
 	}
 	if err := enginedb.WriteRGBOverviewAtomic(dir, uuid, id, body); err != nil {
 		log.Printf("rb-bridge: list waveform of track %d not written: %v", id, err)

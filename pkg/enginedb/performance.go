@@ -377,11 +377,13 @@ func encodePerformance(t rekordbox.Track, a *rekordbox.Analysis, cuesOnly bool) 
 		writeCue(c)
 	}
 	main := float64(-1)
+	var mainAdjusted byte
 	if len(memory) > 0 {
 		main = max(0, float64(memory[0].TimeMS)*float64(sr)/1000-offset)
+		mainAdjusted = 1
 	}
 	put(&q, big, main)
-	q.WriteByte(0)
+	q.WriteByte(mainAdjusted)
 	put(&q, big, main)
 	p.QuickCues, e = QCompress(q.Bytes())
 	if e != nil {

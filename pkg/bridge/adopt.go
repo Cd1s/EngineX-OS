@@ -2,12 +2,12 @@ package bridge
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
@@ -45,17 +45,7 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 	if has("BridgeWritten") {
 		written = `(SELECT digest FROM bridge.BridgeWritten w WHERE w.trackId=s.trackId)`
 	}
-	synced := `0,NULL`
-	if has("BridgeSynced") {
-		synced = `(SELECT CAST(y.lastEditTime AS INTEGER) FROM bridge.BridgeSynced y WHERE y.trackId=s.trackId),(SELECT y.digest FROM bridge.BridgeSynced y WHERE y.trackId=s.trackId)`
-	}
-	// A row imported in full with no record of what the import wrote is still the import's while
-	// it has Engine's import mark, and the deck's once Engine loaded it. Only such a row's
-	// PerformanceData is looked at: the mark sits behind the row's waveforms, a dozen cold reads
-	// a row, and asking it of all 6,051 rows of a 313 MB library had the insert killed (gate).
-	rows, err := db.QueryContext(ctx, `SELECT s.path,s.trackId,s.fingerprint,`+written+`,`+synced+`,
-		CASE WHEN s.fingerprint<>'' AND substr(s.fingerprint,1,5)<>'fast:' AND `+written+` IS NULL
-		THEN (SELECT thirdPartySourceId IS NOT NULL FROM PerformanceData p WHERE p.trackId=s.trackId) END
+	rows, err := db.QueryContext(ctx, `SELECT s.path,s.trackId,s.fingerprint,`+written+`
 		FROM bridge.BridgeState s JOIN Track t ON t.id=s.trackId WHERE t.path=s.path`)
 	if err != nil {
 		return nil, err
@@ -67,23 +57,49 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 		}
 		var p, fingerprint string
 		var id int64
-		var digest, syncedDigest []byte
-		var edit sql.NullInt64
-		var marked sql.NullBool
-		if err = rows.Scan(&p, &id, &fingerprint, &digest, &edit, &syncedDigest, &marked); err != nil {
+		var digest []byte
+		if err = rows.Scan(&p, &id, &fingerprint, &digest); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		rel := strings.TrimPrefix(p, "../")
 		complete := fingerprint != "" && !strings.HasPrefix(fingerprint, "fast:")
-		t := &rbstate.Track{Key: rbstate.FoldPath(rel), EngineID: id, Rel: rel, Resolved: complete, Rating: -1, Written: digest, Edit: edit.Int64, Synced: syncedDigest}
-		if complete && digest == nil && marked.Valid && !marked.Bool {
-			t.Perf = rbstate.PerfDeck
-		}
+		t := &rbstate.Track{Key: rbstate.FoldPath(rel), EngineID: id, Rel: rel, Resolved: complete, Rating: -1, Written: digest}
 		s.Tracks[t.Key] = t
 	}
 	if err = rows.Close(); err != nil {
 		return nil, err
+	}
+	byID := make(map[int64]*rbstate.Track, len(s.Tracks))
+	for _, t := range s.Tracks {
+		byID[t.EngineID] = t
+	}
+	if has("BridgeFastBase") {
+		fastRows, e := db.QueryContext(ctx, `SELECT f.trackId,f.record,f.quickCues,f.loops,f.active,s.fingerprint
+			FROM bridge.BridgeFastBase f JOIN bridge.BridgeState s ON s.trackId=f.trackId WHERE s.fingerprint LIKE 'fast:%'`)
+		if e != nil {
+			return nil, e
+		}
+		for fastRows.Next() {
+			if e = ctx.Err(); e != nil {
+				fastRows.Close()
+				return nil, e
+			}
+			var id, record int64
+			var cues, loops []byte
+			var active int64
+			var fingerprint string
+			if e = fastRows.Scan(&id, &record, &cues, &loops, &active, &fingerprint); e != nil {
+				fastRows.Close()
+				return nil, e
+			}
+			if t := byID[id]; t != nil && record == enginedb.FastBaseRecord(fingerprint) {
+				t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = cues, loops, uint32(active), true
+			}
+		}
+		if e = fastRows.Close(); e != nil {
+			return nil, e
+		}
 	}
 	if has("BridgePlaylist") {
 		lists, err := db.QueryContext(ctx, `SELECT b.listId FROM bridge.BridgePlaylist b JOIN Playlist p ON p.id=b.listId`)

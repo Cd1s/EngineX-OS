@@ -14,19 +14,110 @@ import (
 // import's while it holds what the bridge wrote (Track.Written, WrittenDigest): Engine's import
 // mark is not used, since Engine shifts a marked row again when it loads it (2292 samples, MP3).
 
-// WrittenDigest names the content of a row's grid, cues and loops, however it is compressed.
-func WrittenDigest(beats, cues, loops []byte) []byte {
+func writtenDigestBytes(beatsRaw, cuesRaw, loops []byte) []byte {
 	h := sha256.New()
-	for _, blob := range [][]byte{beats, cues} {
-		raw, err := QUncompress(blob, 8<<20)
-		if err != nil {
-			raw = blob
-		}
+	for _, raw := range [][]byte{beatsRaw, cuesRaw} {
 		_ = binary.Write(h, big, uint64(len(raw)))
 		h.Write(raw)
 	}
 	h.Write(loops)
 	return h.Sum(nil)[:16]
+}
+
+// writtenDigests decompresses beats and cues once and returns the normalized WrittenDigest and
+// the un-normalized RawWrittenDigest. When quickCues is already adjusted (or not an 8-slot cue
+// blob), both digests are identical and hashed once.
+func writtenDigests(beats, cues, loops []byte) (norm, raw []byte) {
+	beatsRaw, err := QUncompress(beats, 8<<20)
+	if err != nil {
+		beatsRaw = beats
+	}
+	cuesRaw, err := QUncompress(cues, 8<<20)
+	if err != nil {
+		cuesRaw = cues
+	}
+	raw = writtenDigestBytes(beatsRaw, cuesRaw, loops)
+	normCues := normalizeMainCueForWrittenDigest(cuesRaw)
+	if len(normCues) == len(cuesRaw) && (len(normCues) == 0 || &normCues[0] == &cuesRaw[0]) {
+		return raw, raw
+	}
+	return writtenDigestBytes(beatsRaw, normCues, loops), raw
+}
+
+// RawWrittenDigest names the content of a row's grid, cues and loops without main-cue normalization.
+func RawWrittenDigest(beats, cues, loops []byte) []byte {
+	beatsRaw, err := QUncompress(beats, 8<<20)
+	if err != nil {
+		beatsRaw = beats
+	}
+	cuesRaw, err := QUncompress(cues, 8<<20)
+	if err != nil {
+		cuesRaw = cues
+	}
+	return writtenDigestBytes(beatsRaw, cuesRaw, loops)
+}
+
+// WrittenDigest names the content of a row's grid, cues and loops, however it is compressed.
+func WrittenDigest(beats, cues, loops []byte) []byte {
+	beatsRaw, err := QUncompress(beats, 8<<20)
+	if err != nil {
+		beatsRaw = beats
+	}
+	cuesRaw, err := QUncompress(cues, 8<<20)
+	if err != nil {
+		cuesRaw = cues
+	}
+	return writtenDigestBytes(beatsRaw, normalizeMainCueForWrittenDigest(cuesRaw), loops)
+}
+
+func normalizeMainCueForWrittenDigest(raw []byte) []byte {
+	at, ok := cuePositions(raw)
+	if !ok || raw[at[8]+8] != 0 {
+		return raw
+	}
+	out := append([]byte(nil), raw...)
+	clear(out[at[8] : at[8]+8])
+	clear(out[at[9]:])
+	return out
+}
+
+// unadjustedLegacyMatches reports whether an unadjusted (adj==0) row whose main cue Engine rewrote
+// on load still matches a pre-normalization RawWrittenDigest stored by v1 or 9f2c0770 (either with
+// main=-1 for a track without a memory cue, or with stagedCues' memory cue position and adj=0).
+func unadjustedLegacyMatches(beats, cues, loops, stagedCues, prevWritten []byte) bool {
+	if prevWritten == nil {
+		return false
+	}
+	cuesRaw, err := QUncompress(cues, 8<<20)
+	if err != nil {
+		return false
+	}
+	at, ok := cuePositions(cuesRaw)
+	if !ok || cuesRaw[at[8]+8] != 0 {
+		return false
+	}
+	beatsRaw, err := QUncompress(beats, 8<<20)
+	if err != nil {
+		beatsRaw = beats
+	}
+	buf := append([]byte(nil), cuesRaw...)
+	tryMain := func(pos float64) bool {
+		big.PutUint64(buf[at[8]:], math.Float64bits(pos))
+		buf[at[8]+8] = 0
+		big.PutUint64(buf[at[9]:], math.Float64bits(pos))
+		return bytes.Equal(writtenDigestBytes(beatsRaw, buf, loops), prevWritten)
+	}
+	if tryMain(-1) {
+		return true
+	}
+	if refRaw, err := QUncompress(stagedCues, 64<<10); err == nil {
+		if rat, ok := cuePositions(refRaw); ok {
+			if main := math.Float64frombits(big.Uint64(refRaw[rat[8]:])); main >= 0 && tryMain(main) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // SyncedDigest names what the deck can change in a row and cue write-back writes back: cues,

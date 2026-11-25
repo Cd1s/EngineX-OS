@@ -3,6 +3,7 @@ package bridge
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -83,6 +84,15 @@ func liveLibrary(ctx context.Context, file string) (uuid string, content bool, e
 	}
 	defer db.Close()
 	err = db.QueryRowContext(ctx, `SELECT COALESCE(uuid,''),EXISTS(SELECT 1 FROM Track) OR EXISTS(SELECT 1 FROM Playlist) FROM Information`).Scan(&uuid, &content)
+	if err == nil && !content {
+		var seq sql.NullInt64
+		if e := db.QueryRowContext(ctx, `SELECT seq FROM sqlite_sequence WHERE name='Track'`).Scan(&seq); e != nil && !errors.Is(e, sql.ErrNoRows) {
+			return "", false, e
+		}
+		if enginedb.HasRGBOverviews(filepath.Dir(file), uuid) || (seq.Valid && seq.Int64 > 0) {
+			return "", false, nil
+		}
+	}
 	return strings.TrimSpace(uuid), content, err
 }
 

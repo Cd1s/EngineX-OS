@@ -245,6 +245,29 @@ func stageAll(t *testing.T, mount string) int {
 	return n
 }
 
+func stageWithoutMemoryCue(t *testing.T, mount, key string) {
+	t.Helper()
+	s := snapshot(t, mount)
+	stage, err := rbstate.OpenStage(s.LibraryUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stage.Close()
+	rec, err := stage.Get(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Perf.QuickCues = recodeCues(t, rec.Perf.QuickCues, func(raw []byte) {
+		binary.BigEndian.PutUint64(raw[len(raw)-17:], math.Float64bits(-1))
+		raw[len(raw)-9] = 0
+		binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(-1))
+	})
+	rec.Digest = enginedb.WrittenDigest(rec.Perf.Beats, rec.Perf.QuickCues, rec.Perf.Loops)
+	if err = stage.Put(rec); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func mustSources(t *testing.T, mount string) (*resolverT, []rbstate.FileSig) {
 	t.Helper()
 	r, err := newResolver(mount)
@@ -670,6 +693,7 @@ func TestMountStagedDataAndDeckEdits(t *testing.T) {
 	mount := stick(t)
 	mountNow(t, mount, MountOptions{})
 	stageAll(t, mount)
+	stageWithoutMemoryCue(t, mount, "music/three.wav")
 	res := mountNow(t, mount, MountOptions{Publish: true})
 	if res.Applied != 5 {
 		t.Fatalf("applied %d", res.Applied)
@@ -741,6 +765,7 @@ func TestMountStagedDataAndDeckEdits(t *testing.T) {
 	if n := stageAll(t, mount); n != 2 {
 		t.Fatalf("%d tracks to stage again, want the 2 whose row changed", n)
 	}
+	stageWithoutMemoryCue(t, mount, "music/three.wav")
 	res = mountNow(t, mount, MountOptions{Publish: true})
 	if res.Applied != 2 {
 		t.Fatalf("applied %d", res.Applied)
@@ -994,21 +1019,23 @@ func TestMountRenumberedReexportWritesNoRowAndRefreshesRefs(t *testing.T) {
 func TestMountTakesRowsTheDeckHookFilledAsTheBridgesOwn(t *testing.T) {
 	for _, load := range []struct {
 		name    string
+		mainAdj byte
 		rewrite func(raw []byte) // Engine's write of the main cue's 17 bytes at a load
 	}{
-		// Real Engine 5.3.0 on JP07 and SC LIVE 4 (the stage-fill lane's runs load1 and load4): the main
-		// cue and the main cue as imported both went from 9920.0 to -1105.0, the flag between them stayed 0.
-		{"Engine 5.3.0: both fields", func(raw []byte) {
+		// Real Engine 5.3.0 on JP07 and SC LIVE 4: on an unadjusted row (flag 0), Engine rewrites
+		// mainCue and defaultMainCue to -1105.0; on a memory-cue row (flag 1), Engine leaves it untouched.
+		{"Engine 5.3.0: both fields", 0, func(raw []byte) {
 			binary.BigEndian.PutUint64(raw[len(raw)-17:], math.Float64bits(-1105))
 			binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(-1105))
 		}},
-		{"the last field only", func(raw []byte) { binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(-1105)) }},
+		{"the last field only", 0, func(raw []byte) { binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(-1105)) }},
+		{"memory cue (adj=1): untouched on load", 1, func(raw []byte) {}},
 	} {
-		t.Run(load.name, func(t *testing.T) { rowsTheDeckHookFilled(t, load.rewrite) })
+		t.Run(load.name, func(t *testing.T) { rowsTheDeckHookFilled(t, load.mainAdj, load.rewrite) })
 	}
 }
 
-func rowsTheDeckHookFilled(t *testing.T, engineLoad func(raw []byte)) {
+func rowsTheDeckHookFilled(t *testing.T, mainAdj byte, engineLoad func(raw []byte)) {
 	mount := stick(t)
 	mountNow(t, mount, MountOptions{})
 	stageAll(t, mount)
@@ -1031,6 +1058,7 @@ func rowsTheDeckHookFilled(t *testing.T, engineLoad func(raw []byte)) {
 		rec.Perf.QuickCues = recodeCues(t, rec.Perf.QuickCues, func(raw []byte) {
 			binary.BigEndian.PutUint64(raw[8+1+int(raw[8]):], math.Float64bits(22050))
 			binary.BigEndian.PutUint64(raw[len(raw)-17:], math.Float64bits(9920)) // rekordbox's main cue, as the bridge writes it: twice
+			raw[len(raw)-9] = mainAdj
 			binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(9920))
 		})
 		rec.Digest = enginedb.WrittenDigest(rec.Perf.Beats, rec.Perf.QuickCues, rec.Perf.Loops)
@@ -1060,6 +1088,15 @@ func rowsTheDeckHookFilled(t *testing.T, engineLoad func(raw []byte)) {
 		}
 		return rec
 	}
+	// one: filled, then the DJ moved hot cue 1 without touching the main cue: must stay the deck's.
+	oneKey := rbstate.FoldPath("Music/" + testfixture.UnicodeName)
+	var oneDeckCues []byte
+	fill(oneKey, true, func(raw []byte) {
+		binary.BigEndian.PutUint64(raw[8+1+int(raw[8]):], math.Float64bits(88200))
+	})
+	if err = db.QueryRow(`SELECT quickCues FROM PerformanceData WHERE trackId=?`, s.Tracks[oneKey].EngineID).Scan(&oneDeckCues); err != nil {
+		t.Fatal(err)
+	}
 	// two: filled, then the job staged it again with other cues (a re-export): replaced.
 	two := fill("music/two.flac", true, nil)
 	two.Perf.QuickCues = recodeCues(t, two.Perf.QuickCues, func(raw []byte) { raw[8+1+int(raw[8])+8] ^= 0xFF }) // the first hot cue's colour
@@ -1082,6 +1119,12 @@ func rowsTheDeckHookFilled(t *testing.T, engineLoad func(raw []byte)) {
 		t.Fatalf("applied %d", res.Applied)
 	}
 	after := snapshot(t, mount)
+	if tr := after.Tracks[oneKey]; tr.Perf != rbstate.PerfDeck || tr.Written != nil {
+		t.Fatalf("the filled row whose hot cue the DJ moved: %+v", tr)
+	}
+	if got := query(t, mount, `SELECT hex(quickCues) FROM PerformanceData WHERE trackId=?`, after.Tracks[oneKey].EngineID); got[0][0] != fmt.Sprintf("%X", oneDeckCues) {
+		t.Fatal("the DJ's hot cue on a filled row was overwritten")
+	}
 	if tr := after.Tracks["music/two.flac"]; tr.Perf != rbstate.PerfApplied || !bytes.Equal(tr.Written, two.Digest) {
 		t.Fatalf("the filled row that was staged again: %+v", tr)
 	}

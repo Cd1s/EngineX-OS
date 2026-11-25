@@ -239,4 +239,45 @@ func TestReadFilledStageUsesLastValidRowAndStageDigest(t *testing.T) {
 	if !ok || row.id != 9 || !bytes.Equal(row.written, rec.Digest) || !bytes.Equal(row.cues, rec.Perf.QuickCues) {
 		t.Fatalf("filled row was not read: %+v", got)
 	}
+	// When the stage entry was replaced by a newer export, filled.jsonl must not match it.
+	rec.Perf.QuickCues = []byte("newer-cues")
+	rec.Digest = enginedb.WrittenDigest(rec.Perf.Beats, rec.Perf.QuickCues, rec.Perf.Loops)
+	if err := stage.Put(rec); err != nil {
+		t.Fatal(err)
+	}
+	if got = readFilledStage(&rbstate.Snapshot{Header: rbstate.Header{LibraryUUID: "filled-test"}}); len(got) != 0 {
+		t.Fatalf("stale stage entry matched old filled.jsonl digest: %+v", got)
+	}
+}
+
+func TestNeedsCueReadAcceptsLegacyRawWrittenDigest(t *testing.T) {
+	beats := []byte("beats")
+	loops := []byte("loops")
+	cues, err := enginedb.QCompress(makeMainCueBlob(9920, 9920, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyDigest := enginedb.RawWrittenDigest(beats, cues, loops)
+	row := dbCandidate{
+		track:            &rbstate.Track{Written: legacyDigest},
+		trackData:        []byte{1},
+		beatData:         beats,
+		quickCues:        cues,
+		loops:            loops,
+		writtenDigest:    enginedb.WrittenDigest(beats, cues, loops),
+		rawWrittenDigest: enginedb.RawWrittenDigest(beats, cues, loops),
+	}
+	if needsCueRead(row) {
+		t.Fatal("untouched legacy RawWrittenDigest triggered cue write-back read")
+	}
+	editedCues, err := enginedb.QCompress(makeMainCueBlob(4410, 9920, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	row.quickCues = editedCues
+	row.writtenDigest = enginedb.WrittenDigest(beats, editedCues, loops)
+	row.rawWrittenDigest = enginedb.RawWrittenDigest(beats, editedCues, loops)
+	if !needsCueRead(row) {
+		t.Fatal("deck edit on legacy row was ignored by write-back")
+	}
 }

@@ -2,7 +2,9 @@ package enginedb
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"math"
 
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
@@ -24,17 +26,35 @@ import (
 // 2292 samples) and clears the mark.
 var engineLoadShifts = []float64{0, 2292}
 
-// fastBase is what the insert left in a row: the export's rating, and a OneLibrary export's hot
-// cues, loops and active-on-load loops without the file's offset, with Engine's mark.
+// fastBase is what the insert left in a row: a OneLibrary export's hot cues, loops and
+// active-on-load loops without the file's offset, with Engine's mark.
 type fastBase struct {
-	rating      int64
 	cues, loops []byte
 	active      int64
 }
 
+// FastBaseData is the baseline a fast row carries until its full performance is applied.
+type FastBaseData struct {
+	Cues   []byte
+	Loops  []byte
+	Active uint32
+}
+
+// FastBaseForTrack returns the values InsertTracks writes before analysis is staged.
+func FastBaseForTrack(t rekordbox.Track) FastBaseData {
+	b := fastBaseOf(t)
+	return FastBaseData{Cues: b.cues, Loops: b.loops, Active: uint32(b.active)}
+}
+
+// FastBaseRecord is the legacy BridgeFastBase fingerprint check for a fast-row record.
+func FastBaseRecord(fingerprint string) int64 {
+	h := sha256.Sum256([]byte(fingerprint))
+	return int64(binary.BigEndian.Uint64(h[:]))
+}
+
 // fastBaseOf is the fastBase of export track t, as InsertTracks writes it.
 func fastBaseOf(t rekordbox.Track) fastBase {
-	b := fastBase{rating: int64(t.Rating)}
+	var b fastBase
 	if len(t.Cues) > 0 {
 		if t.BPM >= 499.5 {
 			t.BPM = 0
@@ -51,14 +71,13 @@ type deckRow struct {
 	beats, cues, loops []byte
 	active, mark       sql.NullInt64
 	locked             bool
-	rating             sql.NullInt64
 }
 
 // fastMerge is what the DJ did, kept over perf; a nil field is perf's.
 type fastMerge struct {
 	beats, cues, loops []byte
 	active             any
-	grid, rating       bool // the DJ's grid (and the Track's BPM with it), the DJ's rating
+	grid               bool // the DJ's grid (and the Track's BPM with it)
 }
 
 func (m fastMerge) deck() bool {
@@ -68,10 +87,9 @@ func (m fastMerge) deck() bool {
 // mergeFast merges the deck's row of a track a fast import left as base into perf.
 func mergeFast(row deckRow, base fastBase, perf Performance) fastMerge {
 	var m fastMerge
-	m.rating = row.rating.Valid && row.rating.Int64 != base.rating
 	if row.mark.Valid && row.mark.Int64 != 0 {
 		// Engine clears its import mark when it loads the row: never loaded, so nothing of the
-		// deck's in it (a rating can be set in the browser, without a load).
+		// deck's in it.
 		return m
 	}
 	if row.beats != nil && (row.locked || !engineOwnGrid(row.beats)) {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
 func copyAudioFixture(t *testing.T, root, rel, fixture string) {
@@ -818,5 +819,35 @@ func TestFixMP3GridsReturnsCursorWriteError(t *testing.T) {
 	}})
 	if err == nil {
 		t.Fatal("cursor write failure was ignored")
+	}
+}
+
+func TestBridgeOwnedTracksFallsBackToLegacyState(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, ".rb-bridge-state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE BridgeState(trackId INTEGER); INSERT INTO BridgeState VALUES(7),(9)`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+	got := bridgeOwnedTracks(dir)
+	if !got[7] || !got[9] || len(got) != 2 {
+		t.Fatalf("legacy bridge-owned tracks: %v", got)
+	}
+}
+
+func TestBridgeOwnedTracksReadsV2Snapshot(t *testing.T) {
+	dir := t.TempDir()
+	s := rbstate.New("uuid")
+	s.Tracks["contents/a.mp3"] = &rbstate.Track{Key: "contents/a.mp3", EngineID: 7, Rel: "Contents/a.mp3"}
+	if err := s.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	got := bridgeOwnedTracks(dir)
+	if !got[7] || len(got) != 1 {
+		t.Fatalf("v2 bridge-owned tracks: %v", got)
 	}
 }
