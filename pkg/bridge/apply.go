@@ -151,6 +151,17 @@ func (w *window) open() error {
 	switch {
 	case snap != nil && snap.LibraryUUID == lib.UUID() && snap.Rules == rbstate.Rules:
 		w.snap, w.head = snap, snap.Header
+	case snap != nil && snap.LibraryUUID == lib.UUID():
+		// Rules revision bumped (#178): keep bridge ownership, Engine IDs, and deck edits,
+		// but clear Built and reset non-deck perf state so the background job re-stages once.
+		for _, t := range snap.Tracks {
+			t.Built = rbstate.TrackSig{}
+			if t.Perf != rbstate.PerfDeck && t.Perf != rbstate.PerfMissing {
+				t.Perf = rbstate.PerfNone
+			}
+		}
+		snap.Rules, snap.Stamp = rbstate.Rules, ""
+		w.snap, w.dirty = snap, true
 	case oldErr == nil && !w.next:
 		if w.snap, err = adopt(w.ctx, db, w.dir, lib.UUID()); err != nil {
 			return err

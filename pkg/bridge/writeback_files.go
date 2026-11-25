@@ -52,7 +52,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			return err
 		}
 		// Decided before anything is allocated on the volume (#321 review R3).
-		if unsafeToFree(t.full) {
+		if rbstate.UnsafeToFree != nil && rbstate.UnsafeToFree(t.full) {
 			return fmt.Errorf("%w: %s; the drive needs a disk check on a computer", errUnownedClusters, t.rel)
 		}
 		t.tmp = newStagedName(stagedKind[t.kind])
