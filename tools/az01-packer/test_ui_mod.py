@@ -13026,8 +13026,9 @@ assert.equal(p8.state().offset, 0);
 const assert = require('node:assert/strict');
 let now = 20000;
 Date.now = () => now;
-function runBoard(padsCount, hasSWBank) {
+function runBoard(padsCount, hasSWBank, stemsAvailable = true) {
     let view = 'CUES', offset = 0, triggers = [], offsetWrites = [];
+    let cppMode = 'CUES';
     const primary = ['CUES', 'LOOPS', 'ROLL'];
     const secondary = ['STEMS', 'AUTO', 'SAMPLER'];
     const Config = { device: { hardwarePadsCount: padsCount, hasSWBankButton: hasSWBank } };
@@ -13036,7 +13037,18 @@ function runBoard(padsCount, hasSWBank) {
     const button = { scStemsLatchedAt: 0, scExitedStemsAt: 0 };
     const model = { index: 0 };
     let onPadsMode = () => {}, onPadOff = () => {};
-    const pPadsView = { translator: { get string() { return view; }, set string(v) { const ch = v !== view; view = v; if (ch) onPadsMode(); } } };
+    const pPadsView = {
+        translator: {
+            get string() { return view; },
+            set string(v) {
+                const ch = v !== view;
+                view = v;
+                // Real Engine SimpleLedPadModeSelect only updates its internal currentMode when isModeAvailable(v) is true.
+                if (v !== 'STEMS' || stemsAvailable) cppMode = v;
+                if (ch) onPadsMode();
+            }
+        }
+    };
     const pPadIndexOffset = {
         translator: {
             get unnormalized() { return offset; },
@@ -13063,15 +13075,20 @@ function runBoard(padsCount, hasSWBank) {
                         if (!m) return;
                         const idx = Number(m[1]);
                         if (hasSWBank) {
-                            // Stock JP20 SimpleLedPadModeSelect: toggles primary <-> secondary and resets IndexOffset=0.
-                            const target = view === primary[idx] ? secondary[idx] : primary[idx];
+                            // Stock JP20 SimpleLedPadModeSelect: compares against cppMode and checks isModeAvailable(target).
+                            const target = cppMode === primary[idx] ? secondary[idx] : primary[idx];
+                            if (target === 'STEMS' && !stemsAvailable) return;
+                            cppMode = target;
                             pPadsView.translator.string = target;
                             pPadIndexOffset.translator.unnormalized = 0;
                         } else if (padsCount <= 4) {
                             if (idx === 0 && (view === 'CUES' || view === 'STEMS')) pPadIndexOffset.translator.unnormalized = offset === 0 ? 4 : 0;
                             else { pPadsView.translator.string = primary[idx]; pPadIndexOffset.translator.unnormalized = 0; }
                         } else {
-                            pPadsView.translator.string = view === primary[idx] ? secondary[idx] : primary[idx];
+                            const target = cppMode === primary[idx] ? secondary[idx] : primary[idx];
+                            if (target === 'STEMS' && !stemsAvailable) return;
+                            cppMode = target;
+                            pPadsView.translator.string = target;
                         }
                     }
                 }
@@ -13159,7 +13176,27 @@ jp20.pressMode(0, 120); // <350ms latch path sets pPadsView='STEMS' directly wit
 assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset }, { view: 'STEMS', offset: 0 },
     'JP20 rapid double-tap CUE from Bank 2 must reset IndexOffset to 0');
 
-// 6. Disabled SWBank assignment stays stock (no-op).
+// 6. JP20 on a track where C++ isModeAvailable('STEMS') is false (live Engine-sclive2 finding):
+//    rapid double-tap CUE (<350ms) or touchscreen enters STEMS on page 1, BANK stays a no-op,
+//    and single CUE must STILL exit STEMS back to CUES page 1 (never trapped in STEMS).
+const jp20NoStems = runBoard(4, true, false);
+jp20NoStems.pressBank();
+assert.equal(jp20NoStems.state().offset, 4);
+jp20NoStems.pressMode(0, 500); // tap 1 (stays CUES, sets scStemsLatchedAt)
+jp20NoStems.pressMode(0, 120); // tap 2 (<350ms) -> forces STEMS via QML, must reset offset to 0
+assert.deepEqual({ view: jp20NoStems.state().view, offset: jp20NoStems.state().offset, led: jp20NoStems.bankLed() },
+    { view: 'STEMS', offset: 0, led: 1 });
+jp20NoStems.pressBank();
+assert.deepEqual({ view: jp20NoStems.state().view, offset: jp20NoStems.state().offset, led: jp20NoStems.bankLed() },
+    { view: 'STEMS', offset: 0, led: 1 });
+jp20NoStems.pressMode(0, 500); // single CUE (>350ms) must exit STEMS even when C++ cppMode stayed 'CUES'
+assert.deepEqual({ view: jp20NoStems.state().view, offset: jp20NoStems.state().offset, led: jp20NoStems.bankLed() },
+    { view: 'CUES', offset: 0, led: 1 },
+    'JP20 single CUE in STEMS must exit to CUES even when C++ isModeAvailable(STEMS) is false');
+jp20NoStems.pressBank();
+assert.equal(jp20NoStems.state().offset, 4, 'JP20 BANK works normally after exiting STEMS');
+
+// 7. Disabled SWBank assignment stays stock (no-op).
 jp20.pressMode(0, 500); // back to CUES
 jp20.clearWrites();
 jp20.bankSetValue(2, 1.0, false);
