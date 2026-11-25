@@ -630,7 +630,7 @@ func TestMigrateLegacyArtworkBoundsPerImageConversionAndWrite(t *testing.T) {
 			t.Fatal(err)
 		}
 		pngData := pngBuf.Bytes()
-		if len(pngData) < 8192 {
+		if len(pngData) < 20<<10 {
 			t.Fatalf("synthetic PNG too small (%d bytes) to exercise chunked decode/encode bounds", len(pngData))
 		}
 		lib, mount, _ := openLegacyArtTestDB(t, 1, func(int) []byte { return pngData })
@@ -650,7 +650,7 @@ func TestMigrateLegacyArtworkBoundsPerImageConversionAndWrite(t *testing.T) {
 		migratePutArtwork = func(dir string, sum, data []byte, stop func() error) error {
 			var inner atomic.Int32
 			return origPut(dir, sum, data, func() error {
-				if inner.Add(1) >= 5 {
+				if inner.Add(1) >= 12 {
 					expired.Store(true)
 				}
 				return stop()

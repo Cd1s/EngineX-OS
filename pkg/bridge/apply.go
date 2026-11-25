@@ -935,10 +935,11 @@ func isEngineCopyingForArtwork() bool {
 }
 
 // migrateLegacyArtwork converts legacy TEXT AlbumArt hashes under window pacing and deck-activity
-// guards. In a hook mount window it runs only after required work when well inside the 3 s spare
-// margin; background next-library passes finish any deferred rows with job pacing.
+// guards when an adopted older library still holds legacy TEXT covers. In a hook mount window it
+// runs only after required work when well inside the 3 s spare margin; idle mounts or background
+// next-library passes finish any deferred rows with job pacing and clear LegacyArtwork once done.
 func (w *window) migrateLegacyArtwork() error {
-	if w.lib == nil || w.built || deckBusyForArtwork() {
+	if w.lib == nil || w.built || !w.snap.LegacyArtwork || deckBusyForArtwork() {
 		return nil
 	}
 	opts := enginedb.LegacyArtworkOptions{
@@ -959,5 +960,16 @@ func (w *window) migrateLegacyArtwork() error {
 		}
 		opts.Budget = budget
 	}
-	return w.lib.MigrateLegacyArtworkWithOptions(w.ctx, opts)
+	if err := w.lib.MigrateLegacyArtworkWithOptions(w.ctx, opts); err != nil {
+		return err
+	}
+	more, err := w.lib.HasLegacyArtwork(w.ctx)
+	if err != nil {
+		return err
+	}
+	if !more {
+		w.snap.LegacyArtwork, w.dirty = false, true
+		return w.saveIfChanged()
+	}
+	return nil
 }
