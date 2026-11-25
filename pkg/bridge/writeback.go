@@ -539,8 +539,13 @@ func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, ses
 	return out, nil
 }
 
+var writeBackReadLibsHook func()
+
 // readLibraries reads the export libraries the rows have references in.
 func (p *pass) readLibraries(ctx context.Context, rows []dbCandidate) (map[rbstate.LibraryKind]SourceLibrary, error) {
+	if writeBackReadLibsHook != nil {
+		writeBackReadLibsHook()
+	}
 	out := map[rbstate.LibraryKind]SourceLibrary{}
 	needed := map[rbstate.LibraryKind]bool{}
 	for _, row := range rows {

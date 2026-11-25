@@ -407,6 +407,9 @@ func (w *window) build() error {
 	if w.ctx.Err() != nil || (!w.next && !w.st.must(0)) {
 		return errWindowDeadline
 	}
+	if !w.next && enginedb.OpenElsewhere(w.file()) != 0 {
+		return enginedb.ErrLibraryInUse
+	}
 	if err = cleanSQLiteSidecars(w.file()); err != nil {
 		return err
 	}

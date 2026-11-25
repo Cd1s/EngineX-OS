@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/gob"
 	"errors"
@@ -103,7 +104,7 @@ func nextIdentity(ctx context.Context, mount, file string) (uuid string, commit 
 
 // discardNext removes a next library that cannot be gone on with, and its state on the deck.
 func discardNext(dir, uuid string) {
-	for _, name := range []string{rbstate.SwapName, nextDB, nextDB + "-journal"} {
+	for _, name := range []string{rbstate.SwapName, nextDB, nextDB + "-journal", nextDB + "-wal", nextDB + "-shm"} {
 		if err := rbstate.RemoveFile(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("rb-bridge: %s not removed: %v", name, err)
 		}
@@ -133,11 +134,12 @@ func takeLive(s, base *rbstate.Snapshot, ch enginedb.MirrorChange) {
 			if old := baseByID[current.EngineID]; old != nil {
 				seen[old.EngineID] = true
 				current.EngineID = old.EngineID
+				current.Row = old.Row
 				current.Rating = old.Rating
 				current.Perf = old.Perf
 				current.Built = old.Built
-				current.Written = append(current.Written[:0], old.Written...)
-				current.Synced = append(current.Synced[:0], old.Synced...)
+				current.Written = bytes.Clone(old.Written)
+				current.Synced = bytes.Clone(old.Synced)
 				current.Edit = old.Edit
 				current.Native = old.Native
 			}
@@ -385,13 +387,13 @@ func swapNext(ctx context.Context, mount, dir string, st *steps) (swapped, deadl
 		_ = rbstate.RemoveFile(swap)
 		return false, false
 	}
-	if err := cleanSQLiteSidecars(live); err != nil {
-		return false, false
-	}
-	if err := cleanSQLiteSidecars(next); err != nil {
-		return false, false
-	}
 	if enginedb.OpenElsewhere(live) != 0 {
+		return false, false
+	}
+	if err := checkSQLiteSidecars(live); err != nil {
+		return false, false
+	}
+	if err := checkSQLiteSidecars(next); err != nil {
 		return false, false
 	}
 	if h.Base != enginedb.LibraryState(live) {
@@ -409,6 +411,15 @@ func swapNext(ctx context.Context, mount, dir string, st *steps) (swapped, deadl
 			return false, hit
 		}
 	}
+	if enginedb.OpenElsewhere(live) != 0 {
+		return false, false
+	}
+	if err := cleanSQLiteSidecars(live); err != nil {
+		return false, false
+	}
+	if err := cleanSQLiteSidecars(next); err != nil {
+		return false, false
+	}
 	cut("before swap")
 	if err = rbstate.RenameFile(next, live); err != nil {
 		log.Printf("rb-bridge: next library not swapped in: %v", err)
@@ -424,11 +435,11 @@ func swapNext(ctx context.Context, mount, dir string, st *steps) (swapped, deadl
 
 var mirrorLibrary = enginedb.MirrorLibrary // a variable for the test of the look's deadline
 
-// cleanSQLiteSidecars removes sidecars that cannot belong to the replacement database. An
-// all-zero rollback journal is SQLite's committed PERSIST journal and is safe to remove. A WAL or
-// non-zero journal means the database has uncheckpointed work and must not be replaced.
-func cleanSQLiteSidecars(db string) error {
-	for _, suffix := range []string{"-journal", "-wal", "-shm"} {
+// checkSQLiteSidecars verifies without modifying the filesystem that db has no uncheckpointed
+// WAL or active rollback journal. An all-zero rollback journal is SQLite's committed PERSIST
+// journal and is safe to replace.
+func checkSQLiteSidecars(db string) error {
+	for _, suffix := range []string{"-journal", "-wal"} {
 		path := db + suffix
 		st, err := os.Stat(path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -456,9 +467,21 @@ func cleanSQLiteSidecars(db string) error {
 				}
 			}
 		}
-		if suffix != "-shm" && active {
+		if active {
 			return fmt.Errorf("sqlite sidecar has uncheckpointed work: %s", path)
 		}
+	}
+	return nil
+}
+
+// cleanSQLiteSidecars verifies no sidecar holds uncheckpointed work, then removes stale sidecars
+// that cannot belong to a replacement database. Caller must confirm OpenElsewhere(db) == 0 first.
+func cleanSQLiteSidecars(db string) error {
+	if err := checkSQLiteSidecars(db); err != nil {
+		return err
+	}
+	for _, suffix := range []string{"-journal", "-wal", "-shm"} {
+		path := db + suffix
 		if err := rbstate.RemoveFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}

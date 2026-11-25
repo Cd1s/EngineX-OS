@@ -112,6 +112,17 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 		return nil, nil, err
 	}
 
+	hashes := make(recordHashes, len(changes))
+	setHash := func(key string, kind rbstate.LibraryKind, hash string) {
+		if hash == "" {
+			return
+		}
+		if hashes[key] == nil {
+			hashes[key] = map[rbstate.LibraryKind]string{}
+		}
+		hashes[key][kind] = hash
+	}
+
 	var staged []*target
 	for _, t := range targets {
 		if err := ctx.Err(); err != nil {
@@ -132,6 +143,21 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 				}
 			} else {
 				data, err = rekordbox.RewritePDBMetadata(raw, pdbMeta)
+				if err == nil {
+					parsed, perr := rekordbox.ParsePDB(bytes.NewReader(data), int64(len(data)))
+					if perr != nil {
+						return nil, nil, fmt.Errorf("writeback: verify rewritten %s: %w", t.rel, perr)
+					}
+					byID := make(map[uint32]string, len(parsed.Tracks))
+					for _, tr := range parsed.Tracks {
+						byID[tr.ID] = tr.RecordHash
+					}
+					for _, ch := range changes {
+						if tr, ok := ch.refs[rbstate.DeviceLibrary]; ok && ch.metadata[rbstate.DeviceLibrary] {
+							setHash(ch.candidate.key, rbstate.DeviceLibrary, byID[tr.ID])
+						}
+					}
+				}
 			}
 			if err != nil {
 				return nil, nil, err
@@ -159,6 +185,24 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			if err != nil {
 				_ = rbstate.RemoveFile(tmp)
 				return nil, nil, err
+			}
+			for _, ch := range changes {
+				tr, ok := ch.refs[rbstate.OneLibrary]
+				if !ok {
+					continue
+				}
+				updated := false
+				if _, wroteCues := oneCues[tr.ID]; wroteCues {
+					tr.Cues = upd.WrittenCues[tr.ID]
+					updated = true
+				}
+				if m, wroteMeta := upd.WrittenMetadata[tr.ID]; wroteMeta {
+					tr.Genre, tr.Comment, tr.Label = m.Genre, m.Comment, m.Label
+					updated = true
+				}
+				if updated {
+					setHash(ch.candidate.key, rbstate.OneLibrary, rekordbox.RecordHash(tr))
+				}
 			}
 			if st, err := os.Stat(tmp); err == nil {
 				size = st.Size()
@@ -197,33 +241,6 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 	p.phase["write"] = time.Since(started)
 	if p.res.FilesUpdated > 0 {
 		p.res.BackupDir = filepath.Join(".enginex-backup", dateDir)
-	}
-	hashes := make(recordHashes, len(changes))
-	rows := make([]dbCandidate, len(changes))
-	for i, change := range changes {
-		rows[i] = change.candidate
-	}
-	refreshed, err := p.readLibraries(ctx, rows)
-	if err != nil {
-		return nil, nil, err
-	}
-	for _, change := range changes {
-		for _, ref := range change.candidate.track.Refs {
-			for libraryKind, library := range refreshed {
-				if library.Lib == nil {
-					continue
-				}
-				for _, track := range library.Lib.Tracks {
-					if track.ID == ref.ID && rbstate.FoldPath(track.Path) == change.candidate.key {
-						if hashes[change.candidate.key] == nil {
-							hashes[change.candidate.key] = map[rbstate.LibraryKind]string{}
-						}
-						hashes[change.candidate.key][libraryKind] = track.RecordHash
-						break
-					}
-				}
-			}
-		}
 	}
 	return written, hashes, nil
 }

@@ -256,18 +256,20 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	})
 	f.report()
 	err = f.run(order)
-	if view.view != nil && f.applicable() == 0 && (err == nil || errors.Is(err, ErrFilesUnreadable)) {
+	if view.view != nil && !rowsDeferred && f.applicable() == 0 && (err == nil || errors.Is(err, ErrFilesUnreadable)) {
 		want := pendingRowsForView(view.view, snap)
 		if want != snap.Pending.Rows {
-			if lock, lockErr := rbstate.LockVolume(mount, fillLockWait); lockErr == nil {
-				if current, loadErr := rbstate.Load(dbDir); loadErr == nil {
-					current.Pending.Rows = pendingRowsForView(view.view, current)
-					if saveErr := current.Save(dbDir); saveErr == nil {
-						snap = current
-						f.snap = current
+			if pace.waitNotLoading() == nil && !pace.isBusy() {
+				if lock, lockErr := rbstate.LockVolume(mount, fillLockWait); lockErr == nil {
+					if current, loadErr := rbstate.Load(dbDir); loadErr == nil {
+						current.Pending.Rows = pendingRowsForView(view.view, current)
+						if saveErr := current.Save(dbDir); saveErr == nil {
+							snap = current
+							f.snap = current
+						}
 					}
+					lock()
 				}
-				lock()
 			}
 		}
 	}

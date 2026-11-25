@@ -97,7 +97,6 @@ func StatTrack(ctx context.Context, res *compat.Resolver, t rekordbox.Track) (Tr
 			return src, err
 		}
 		if errors.Is(err, os.ErrNotExist) {
-			log.Printf("rb-bridge: artwork for track %d (%s) unavailable: %v", t.ID, t.ArtworkPath, err)
 			cover = rbstate.FileSig{}
 		} else if err != nil && src.Broken == nil {
 			src.Broken = fmt.Errorf("artwork: %w", err)
