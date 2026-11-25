@@ -35,11 +35,11 @@ class RekordboxAnalysisSitesTest(unittest.TestCase):
         import struct
         source = (Path(__file__).resolve().parents[1] / "ui-mod/engine_ui_hook.c").read_text()
         table = source[source.index("install_rekordbox_analysis(uintptr_t base, size_t page) {"):]
-        sites = re.findall(r'\{"([^"]+)", ' + ", ".join(["(0x[0-9a-f]+)"] * 8) + r'\}', table[:2500])
+        sites = re.findall(r'\{"([^"]+)", ' + ", ".join(["(0x[0-9a-f]+)"] * 9) + r'\}', table[:2500])
         apis = {m[0]: int(m[1], 16) for m in re.findall(r'\{"(5\.3\.0(?:-sclive4)?)", "[^"]*",\n(?:.*\n){5}\s+(0x[0-9a-f]+), 0x', source)}
         self.assertEqual({s[0] for s in sites}, set(self.BINARIES))
         checked = 0
-        for name, lock, prepare_v2, close_v2, filename, bind_int64, bind_int, db_handle, sql in sites:
+        for name, lock, prepare_v2, close_v2, filename, bind_int64, bind_int, bind_text, db_handle, sql in sites:
             path = self.BINARIES[name]
             if not path.exists():
                 continue
@@ -55,16 +55,17 @@ class RekordboxAnalysisSitesTest(unittest.TestCase):
                 raise AssertionError(hex(va))
 
             api = apis[name]
-            lock, prepare_v2, close_v2, filename, bind_int64, bind_int, db_handle, sql = (int(x, 16) for x in (lock, prepare_v2, close_v2, filename, bind_int64, bind_int, db_handle, sql))
+            lock, prepare_v2, close_v2, filename, bind_int64, bind_int, bind_text, db_handle, sql = (int(x, 16) for x in (lock, prepare_v2, close_v2, filename, bind_int64, bind_int, bind_text, db_handle, sql))
             self.assertEqual((word(lock), word(lock + 4)), (0xe16d42f4, 0xe1cd60f8), name)
             self.assertEqual((word(api + 4 * 116), word(api + 4 * 179), word(api + 4 * 180)), (prepare_v2, close_v2, filename), name)
             bl = word(prepare_v2 + 0x1c)
             self.assertEqual(bl >> 24, 0xEB, name)
             self.assertEqual((prepare_v2 + 0x1C + 8 + (((bl & 0xFFFFFF) ^ 0x800000) - 0x800000) * 4) & 0xFFFFFFFF, lock, name)
             self.assertEqual((word(close_v2), word(word(api + 4 * 16))), (0xE3A01001, 0xE3A01000), name)
-            # Engine binds the analysis read's id: bind_int64, and bind_int that branches to it.
-            self.assertEqual((word(api + 4 * 5), word(api + 4 * 4), word(api + 4 * 49), word(api + 4 * 153)), (bind_int64, bind_int, db_handle, sql), name)
+            # Engine binds the analysis read's id (bind_int64/bind_int) and path (bind_text).
+            self.assertEqual((word(api + 4 * 5), word(api + 4 * 4), word(api + 4 * 10), word(api + 4 * 49), word(api + 4 * 153)), (bind_int64, bind_int, bind_text, db_handle, sql), name)
             self.assertEqual((word(bind_int64), word(bind_int64 + 4)), (0xE16D41F8, 0xE1A04001), name)
+            self.assertEqual((word(bind_text), word(bind_text + 4)), (0xE52DE004, 0xE24DD014), name)
             b = word(bind_int + 4)
             self.assertEqual((word(bind_int), b >> 24), (0xE1A03FC2, 0xEA), name)
             self.assertEqual((bind_int + 4 + 8 + (((b & 0xFFFFFF) ^ 0x800000) - 0x800000) * 4) & 0xFFFFFFFF, bind_int64, name)

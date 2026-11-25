@@ -6,6 +6,8 @@ int hook_test_engine;
 #define OA_SHADOW "/tmp/test-oa-replay/shadow-v3"
 #define OA_ENGINE_COPIES "/tmp/test-oa-replay/copies/"
 static char stems_bundle_file[4096], stems_bin_file[4096], stems_enginex_file[4096], stems_enginex_bin_file[4096];
+static char test_stage_root[128]; // the rekordbox stage (rekordbox_stage.h) of the dispatch test
+#define SC_RBS_ROOT test_stage_root
 #define STEMS_BUNDLE_PROCESSOR stems_bundle_file
 #define STEMS_BUNDLE_BIN_PROCESSOR stems_bin_file
 #define STEMS_ENGINEX_PROCESSOR stems_enginex_file
@@ -1617,6 +1619,17 @@ static void analysis_file(const char *path, const void *data, size_t size) {
     assert(file && fwrite(data, 1, size, file) == size && !fclose(file));
 }
 
+typedef int (*test_bind_text_fn)(void *, int, const char *, int, void (*)(void *));
+
+static void analysis_bind_text(test_bind_text_fn bind, sqlite3 *db, const char *sql, const char *p1, const char *p2) {
+    sqlite3_stmt *stmt = NULL;
+    assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
+    assert(bind(stmt, 1, p1, -1, SQLITE_STATIC) == SQLITE_OK);
+    if (p2) assert(bind(stmt, 2, p2, -1, SQLITE_STATIC) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(sqlite3_finalize(stmt) == SQLITE_OK);
+}
+
 static void analysis_bind(sqlite_bind_int64_fn bind, sqlite3 *db, const char *sql, int id) {
     sqlite3_stmt *stmt = NULL;
     assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
@@ -1666,9 +1679,70 @@ static void test_shadow_rgb_request(void) {
     puts("Shadow copy: Engine's analysis request goes through under the RGB waveform type: PASS");
 }
 
-static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
+// A rekordbox stick (a drive's library under sc_rbx_drives) whose track 1 the bridge's job has
+// staged and whose row is as the insert left it (the export's cue rows, the import mark). 1 when
+// a load (Track read, then PerformanceData read, both bound) left the row with the staged data.
+static int drive_load_kind(sqlite_bind_int64_fn id_entry, test_bind_text_fn text_entry, const char *dir, int slot2) {
+    char media[128], lib[192], path[512], line[512];
+    snprintf(media, sizeof media, "%s/media/", dir);
+    sc_rbx_drives = media;
+    snprintf(lib, sizeof lib, "%s/media/STICK/Engine Library/Database2", dir);
+    snprintf(path, sizeof path, "mkdir -p '%s' '%s/lib-x'", lib, test_stage_root);
+    assert(!system(path));
+    snprintf(path, sizeof path, "%s/.rb-bridge-snapshot", lib);
+    snprintf(line, sizeof line, "RBS2 {\"format\":1,\"rules\":5,\"uuid\":\"lib-x\",\"stamp\":\"s\"}\nE 0 0\n");
+    analysis_file(path, line, strlen(line));
+    snprintf(path, sizeof path, "%s/lib-x/index.jsonl", test_stage_root);
+    snprintf(line, sizeof line, "{\"k\":\"contents/staged.mp3\",\"sig\":{\"v\":5,\"w\":\"h\"},\"rel\":\"Contents/Staged.mp3\","
+                                "\"wr\":\"AAEC\",\"perf\":true,\"active\":2}\n");
+    analysis_file(path, line, strlen(line));
+    // RBXA1: trackData, overviewWaveFormData, beatData, quickCues, loops, Complete; named by
+    // the SHA-1 of the key.
+    static const char bin[] = "RBXA1" "\2\0\0\0" "td" "\2\0\0\0" "ov" "\2\0\0\0" "bt" "\2\0\0\0" "qc" "\2\0\0\0" "lp" "\1";
+    snprintf(path, sizeof path, "%s/lib-x/cabe66f46f8c5b47f433bd6f150275333eb4d2ba.bin", test_stage_root);
+    analysis_file(path, bin, sizeof bin - 1);
+    snprintf(path, sizeof path, "%s/m.db", lib);
+    sqlite3 *db = NULL;
+    assert(sqlite3_open(path, &db) == SQLITE_OK);
+    assert(sqlite3_exec(db,
+        "CREATE TABLE Information(id INTEGER PRIMARY KEY,uuid TEXT);INSERT INTO Information(uuid) VALUES('lib-x');"
+        "CREATE TABLE Track(id INTEGER PRIMARY KEY,path TEXT,pdbImportKey INTEGER,isAnalyzed INTEGER DEFAULT 0,"
+        "isBeatGridLocked INTEGER DEFAULT 0,playOrder INTEGER,length INTEGER,bpm REAL,year INTEGER);"
+        "CREATE TABLE PerformanceData(trackId INTEGER PRIMARY KEY,trackData BLOB,overviewWaveFormData BLOB,"
+        "beatData BLOB,quickCues BLOB,loops BLOB,thirdPartySourceId INTEGER,activeOnLoadLoops INTEGER);"
+        "INSERT INTO Track(id,path,pdbImportKey) VALUES(1,'../Contents/Staged.mp3',9);"
+        "INSERT INTO PerformanceData(trackId,quickCues,loops,activeOnLoadLoops,thirdPartySourceId) VALUES(1,X'c0',X'10',0,1);",
+        NULL, NULL, NULL) == SQLITE_OK);
+    if (text_entry) {
+        analysis_bind_text(text_entry, db,
+            SC_SHADOW_TRACK_READ "t.isAnalyzed FROM Track AS t WHERE t.path = ? OR t.path = ?",
+            slot2 ? "../Contents/OtherSpelling.mp3" : "../Contents/Staged.mp3",
+            slot2 ? "../Contents/Staged.mp3" : "../Contents/OtherSpelling.mp3");
+    } else {
+        analysis_bind(id_entry, db, SC_SHADOW_TRACK_READ "t.isAnalyzed FROM Track AS t WHERE t.id = ?", 1);
+        analysis_bind(id_entry, db, SC_RBX_ANALYSIS_SELECT "?", 1);
+    }
+    sqlite3_stmt *st = NULL;
+    assert(sqlite3_prepare_v2(db, "SELECT hex(trackData)||'/'||hex(overviewWaveFormData)||'/'||hex(beatData)||'/'||hex(quickCues)||'/'||hex(loops)||'/'||"
+                                  "activeOnLoadLoops||'/'||ifnull(thirdPartySourceId,'n')||'/'||isAnalyzed FROM PerformanceData JOIN Track ON id=trackId", -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    const char *row = (const char *)sqlite3_column_text(st, 0);
+    const int filled = !strcmp(row, "7464/6F76/6274/7163/6C70/2/n/1"); // td ov bt qc lp, active 2, no mark, analysed
+    assert(filled || !strcmp(row, "///C0/10/0/1/0"));                  // else as the insert wrote it
+    sqlite3_finalize(st);
+    assert(sqlite3_close(db) == SQLITE_OK);
+    snprintf(path, sizeof path, "rm -rf '%s/media' '%s'", dir, test_stage_root);
+    assert(!system(path));
+    return filled;
+}
+
+static int drive_load(sqlite_bind_int64_fn entry, const char *dir) {
+    return drive_load_kind(entry, NULL, dir, 0);
+}
+
+static void test_analysis_dispatch(const char *off, int gateway, int shadow, int stage) {
     enum { lock = 0x1d55120, prepare = 0x1d55634, close_v2 = 0x1d21af4, filename = 0x1cb0d94,
-           bind = 0x1cdfb90, bind_int = 0x1cdfc28, db_handle = 0x1c9a210, sql_text = 0x1c9a2a0,
+           bind = 0x1cdfb90, bind_int = 0x1cdfc28, bind_text = 0x1cdfa3c, db_handle = 0x1c9a210, sql_text = 0x1c9a2a0,
            step = 0x1d6fef8, analyze = 0xe525ec, load = 0xd6b100, size = 0x2d00000 };
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
     char *image = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -1679,7 +1753,7 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     assert(!strcmp(build->name, "5.3.0"));
     uint32_t *api = (void *)(base + build->sqlite_api);
     api[116] = base + prepare; api[179] = base + close_v2; api[180] = base + filename;
-    api[5] = base + bind; api[4] = base + bind_int; api[49] = base + db_handle; api[153] = base + sql_text;
+    api[5] = base + bind; api[4] = base + bind_int; api[10] = base + bind_text; api[49] = base + db_handle; api[153] = base + sql_text;
     api[65] = base + 0x1c9bc08; api[94] = base + step;
     const uint32_t lock_code[] = {0xe16d42f4, 0xe1cd60f8};
     const uint32_t db_code[] = {0xe3500000, 0x15900000, 0xe12fff1e};
@@ -1697,14 +1771,17 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     short_bind[0] = 0xe1a03fc2;
     short_bind[1] = 0xea000000u | (((uint32_t)(bind - bind_int - 12) >> 2) & 0xffffffu);
     // The production trampoline replays the first two instructions. The test
-    // tail restores r4/sp and continues into real SQLite.
+    // tail restores registers/sp and continues into real SQLite.
     const uint32_t bind_code[] = {0xe16d41f8, 0xe1a04001, 0xe49d4018};
+    const uint32_t bind_text_code[] = {0xe52de004, 0xe24dd014, 0xe28dd014, 0xe49de004};
     emit_tail(image + bind, bind_code, 3, sqlite3_bind_int64);
-    assert(!mprotect((void *)((base + bind) & ~(page - 1)), page, PROT_READ | PROT_EXEC));
-    __builtin___clear_cache(image + bind, image + bind + sizeof bind_code + 8);
+    emit_tail(image + bind_text, bind_text_code, 4, sqlite3_bind_text);
+    assert(!mprotect((void *)((base + bind_text) & ~(page - 1)), page, PROT_READ | PROT_EXEC));
+    __builtin___clear_cache(image + bind_text, image + bind + sizeof bind_code + 8);
 
     char dir[] = "/tmp/enginex-dispatch-XXXXXX", board[128], loading[128], rbx[128], peer[128], sidecar[128], library[128], conf[128], history[64];
     assert(mkdtemp(dir));
+    snprintf(test_stage_root, sizeof test_stage_root, "%s/stage", dir);
     snprintf(board, sizeof board, "%s/board", dir);
     snprintf(loading, sizeof loading, "%s/.loading", dir);
     snprintf(rbx, sizeof rbx, "%s/712.bin", dir);
@@ -1730,14 +1807,17 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
 
     install_rekordbox_analysis(base, page);
     assert(!!rbx_prepare_original == gateway);
-    assert(!!rbx_bind_original == (gateway || shadow));
+    assert(!!rbx_bind_original == (gateway || shadow || stage));
+    assert(!!rbx_bind_text_original == stage);
     assert((memcmp(image + lock, lock_code, sizeof lock_code) != 0) == gateway);
     install_shadow_analysis(base, page);
     assert(shadow_analysis_enabled == shadow);
     assert((memcmp(image + step, step_code, sizeof step_code) != 0) == shadow);
     assert((memcmp(image + analyze, lock_code, sizeof lock_code) != 0) == shadow);
-    if (gateway || shadow) assert(((const uint32_t *)(base + bind))[1] == (uintptr_t)rbx_bind);
+    if (gateway || shadow || stage) assert(((const uint32_t *)(base + bind))[1] == (uintptr_t)rbx_bind);
     else assert(!memcmp(image + bind, bind_code, sizeof bind_code));
+    if (stage) assert(((const uint32_t *)(base + bind_text))[1] == (uintptr_t)rbx_bind_text);
+    else assert(!memcmp(image + bind_text, bind_text_code, sizeof bind_text_code));
     // The stock consumers use the prepared statement's SQLite handle and SQL.
     // Use libsqlite adapters for the test statements while keeping the patched
     // entry and its original bind trampoline in the path.
@@ -1767,6 +1847,10 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     assert(pragma(db, "SELECT isAnalyzed FROM Track WHERE id = 2") == shadow);
     assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == gateway + shadow);
     assert(sqlite3_close(db) == SQLITE_OK);
+    // A staged rekordbox stick row is filled at its load (by id or by path, slot 1 or 2) only with rb-bridge on.
+    assert(drive_load(entry, dir) == stage);
+    assert(drive_load_kind(NULL, (test_bind_text_fn)(base + bind_text), dir, 0) == stage);
+    assert(drive_load_kind(NULL, (test_bind_text_fn)(base + bind_text), dir, 1) == stage);
     if (gateway) {
         char saved[128];
         snprintf(saved, sizeof saved, "%s/712-1-beatData", history);
@@ -1782,7 +1866,7 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     unlink(rowmap);
     assert(!unlink(library) && !unlink(sidecar) && !rmdir(peer) && !unlink(rbx) && !unlink(loading) && !unlink(board) && !rmdir(dir));
     assert(!munmap(image, size));
-    printf("Installed SQLite bind dispatcher isolates rekordbox and shadow (off: %s): PASS\n", *off ? off : "none");
+    printf("Installed SQLite bind dispatcher isolates rekordbox, the stage fill and shadow (off: %s): PASS\n", *off ? off : "none");
 }
 
 int main(int argc, char **argv) {
@@ -1815,14 +1899,18 @@ int main(int argc, char **argv) {
     test_stems_processor_prefers_enginex();
     test_alsa_boot_hook();
     for (int i = 1; i < argc; i++) { test_patch_files(argv[i]); test_rec_stream(argv[i]); }
-    static const struct { const char *off; int gateway, shadow; } cases[] = {
-        {"", 1, 1}, {"gateway", 0, 1}, {"four-deck", 1, 0}, {"gateway,four-deck", 0, 0},
+    // rb-bridge also owns the bind site (the stage fill for a drive's rows): with all three off
+    // it is left as Engine has it.
+    static const struct { const char *off; int gateway, shadow, stage; } cases[] = {
+        {"", 1, 1, 1}, {"gateway", 0, 1, 1}, {"four-deck", 1, 0, 1}, {"gateway,four-deck", 0, 0, 1},
+        {"rb-bridge", 1, 1, 0}, {"gateway,rb-bridge", 0, 1, 0}, {"four-deck,rb-bridge", 1, 0, 0},
+        {"gateway,four-deck,rb-bridge", 0, 0, 0},
     };
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
         fflush(NULL);
         pid_t child = fork(); assert(child >= 0);
         if (!child) {
-            test_analysis_dispatch(cases[i].off, cases[i].gateway, cases[i].shadow);
+            test_analysis_dispatch(cases[i].off, cases[i].gateway, cases[i].shadow, cases[i].stage);
             exit(0);
         }
         int status;
