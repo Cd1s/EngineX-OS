@@ -36,6 +36,8 @@ type Report struct {
 	ReanalysisPending int       `json:"reanalysis_pending"`
 	PathsNormalized   int       `json:"paths_normalized"`
 	HistoryPruned     bool      `json:"history_pruned"`
+	HistoryCleaned    int       `json:"history_cleaned,omitempty"`
+	HistoryCompacted  bool      `json:"history_compacted,omitempty"`
 	ReserveFixed      []string  `json:"reserve_fixed,omitempty"`
 	Warnings          []string  `json:"warnings,omitempty"`
 	CheckedAt         time.Time `json:"checked_at"`
@@ -318,7 +320,57 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		if e != nil {
 			return r, e
 		}
-		hr, e := heal(hdb, dataOnly)
+		if dataOnly {
+			// Clean soft-deleted tombstones and orphan Track/PerformanceData/AlbumArt
+			// rows before scanning blobs, without deleting any visible play history
+			// session (isDeleted=0) or altering hm.db's schema (BH-F52-2, BH-GC1-13).
+			cleaned, cleanErr := cleanHistoryOrphans(ctx, hdb)
+			if cleanErr != nil {
+				ce := hdb.Close()
+				if ctx.Err() != nil {
+					if ce != nil {
+						return r, ce
+					}
+					return r, nil
+				}
+				r.Healthy = false
+				return r, fmt.Errorf("history cleanup: %w", cleanErr)
+			}
+			r.HistoryCleaned = cleaned
+			if ctx.Err() != nil {
+				if ce := hdb.Close(); ce != nil {
+					return r, ce
+				}
+				return r, nil
+			}
+			hr, e := heal(hdb, true)
+			if e != nil {
+				_ = hdb.Close()
+				r.Healthy = false
+				return r, fmt.Errorf("history repair: %w", e)
+			}
+			r.PlaylistEntities += hr.PlaylistEntities
+			r.Playlists += hr.Playlists
+			r.Waveforms += hr.Waveforms
+			r.Loops += hr.Loops
+			r.Artwork += hr.Artwork
+			r.OrphanArtwork += hr.OrphanArtwork
+			r.ReanalysisPending += hr.ReanalysisPending
+			r.PathsNormalized += hr.PathsNormalized
+			for _, warning := range hr.Warnings {
+				r.Warnings = append(r.Warnings, "history: "+warning)
+			}
+			compactHistoryIfNeeded(ctx, hdb, history, cleaned > 0 || hr.Artwork > 0, &r)
+			ce := hdb.Close()
+			if r.HistoryCleaned > 0 || r.HistoryCompacted {
+				log.Printf("dbhealer: mount %s cleaned %d dead history rows (compacted=%v)", mount, r.HistoryCleaned, r.HistoryCompacted)
+			}
+			if ce != nil {
+				return r, ce
+			}
+			return r, nil
+		}
+		hr, e := heal(hdb, false)
 		ce := hdb.Close()
 		if e != nil {
 			r.Healthy = false
@@ -336,22 +388,12 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		for _, warning := range hr.Warnings {
 			r.Warnings = append(r.Warnings, "history: "+warning)
 		}
-		// The mount hook's heal (--data-only) never prunes a DJ's history: stock
-		// Engine keeps every session, and this deleted all but the newest 50 on
-		// every insert, then added sqlite_stat1 to hm.db (BH-F52-2, BH-GC1-13).
-		// An explicit full heal still prunes.
-		if !dataOnly {
-			if err = PruneHistoryDB(history, maxSessions); err != nil {
-				r.Healthy = false
-				return r, fmt.Errorf("history: %w", err)
-			}
-			r.HistoryPruned = true
+		// An explicit full heal prunes to the newest visible sessions and compacts.
+		if err = PruneHistoryDB(history, maxSessions); err != nil {
+			r.Healthy = false
+			return r, fmt.Errorf("history: %w", err)
 		}
-		if dataOnly {
-			r.ReanalysisPending += hr.ReanalysisPending
-			r.PathsNormalized += hr.PathsNormalized
-			return r, nil
-		}
+		r.HistoryPruned = true
 		hdb, e = Open(history, false)
 		if e != nil {
 			return r, e
@@ -375,9 +417,14 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 var errLibraryInUse = errors.New("Engine has this drive's library open")
 
 func libraryInUse(root string) bool {
-	path := filepath.Join(root, "Engine Library", "Database2", "m.db")
-	want, err := os.Stat(path)
-	if err != nil {
+	dir := filepath.Join(root, "Engine Library", "Database2")
+	var wants []os.FileInfo
+	for _, name := range []string{"m.db", "hm.db"} {
+		if st, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			wants = append(wants, st)
+		}
+	}
+	if len(wants) == 0 {
 		return false
 	}
 	entries, err := os.ReadDir("/proc")
@@ -395,8 +442,13 @@ func libraryInUse(root string) bool {
 		}
 		for _, fd := range fds {
 			opened, err := os.Stat(filepath.Join("/proc", entry.Name(), "fd", fd.Name()))
-			if err == nil && os.SameFile(opened, want) {
-				return true
+			if err != nil {
+				continue
+			}
+			for _, want := range wants {
+				if os.SameFile(opened, want) {
+					return true
+				}
 			}
 		}
 	}
