@@ -291,10 +291,11 @@ func TestWorkCostAgainstTheReplica(t *testing.T) {
 		w    work
 		ms   int64
 	}{
-		{"KDATA read, key derived", work{oneLibrary: kdataOne}, 7630},
-		{"KDATA read, key cached", work{oneLibrary: kdataOne, warm: true}, 2200},
-		{"UNTITLED read of both, key cached", work{oneLibrary: untitledOne, deviceLibrary: untitledPDB, warm: true}, 1250},
-		{"UNTITLED view of two libraries in three folders", work{view: 2416}, 318}, // KDATA's one library: 560 ms for 5,962
+		{"KDATA read, key derived", work{oneLibrary: kdataOne}, 7002}, // the reads at 605ea83e (616b8a11 merged)
+		{"KDATA read, key cached", work{oneLibrary: kdataOne, warm: true}, 1390},
+		{"UNTITLED read of both, key derived", work{oneLibrary: untitledOne, deviceLibrary: untitledPDB}, 6433},
+		{"UNTITLED read of both, key cached", work{oneLibrary: untitledOne, deviceLibrary: untitledPDB, warm: true}, 822},
+		{"UNTITLED view of two libraries in three folders", work{view: 2416}, 270}, // KDATA's one library: 530 ms for 5,962
 		{"KDATA snapshot", work{load: 5962}, 570},
 		{"KDATA first library", work{build: 5962}, 3750},
 		{"KDATA take-over rows and lists", work{removes: 91, lists: 605}, 5680},
