@@ -6,7 +6,9 @@
 # On the real unpacked rootfs.ext2 of both images (unshare -m -n -p + chroot; armhf runs
 # natively on an ARM host with 32-bit EL0, elsewhere through qemu-arm binfmt):
 #  1. static audit of the new rootfs: unit dependencies, Exec* commands, tool
-#     paths, shared libraries of every shipped ELF (rootfs_audit.py, ld.so --list);
+#     paths, shared libraries of every shipped ELF (rootfs_audit.py, ld.so --list, and
+#     each program's own interpreter), the Shoutcast encoder front end, and the copies of
+#     it in the second-generation images of the same build on their stock rootfs;
 #  2. the previous release boots (prepare, stream-sync, Engine) with a populated
 #     internal Engine library (/media/az01-internal), finds the new release on a
 #     local TLS GitHub mock and runs the deck's online update:
@@ -43,6 +45,7 @@ export LC_ALL=C
 SELF=$(realpath "$0")
 REPO=$(cd "$(dirname "$SELF")/../.." && pwd)
 . "$REPO/rootfs-overlay/usr/libexec/enginex-migration"
+. "$REPO/tools/az01-packer/elf-loader-audit.sh"
 PATH_DECK=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 pass() { echo "PASS $*" | tee -a "$W/results.txt"; }
@@ -590,12 +593,18 @@ inner() {
     systemd-analyze verify --root="$R" --man=no $units > "$W/systemd-verify.txt" 2>&1 || :
     check "image: systemd-analyze verify of $(echo $units | wc -w) units is clean" test ! -s "$W/systemd-verify.txt"
     interp=$(readelf -l "$R/usr/sbin/az01-update" | sed -n 's/.*interpreter: \(.*\)]/\1/p')
+    local rc
     while IFS= read -r f; do
-        readelf -h "$R$f" >/dev/null 2>&1 || continue
-        readelf -l "$R$f" 2>/dev/null | grep -q 'INTERP\|DYN' || continue
-        if chroot "$R" "$interp" --list "$f" > "$W/ldd.txt" 2>&1 && ! grep -q 'not found' "$W/ldd.txt"; then pass "image: libraries of $f"
-        else fail "image: libraries of $f"; cat "$W/ldd.txt"; fi
-    done < <(cd "$REPO/rootfs-overlay" && find . -type f | sed 's|^\.||'; echo /usr/sbin/fsck.hfsplus)
+        rc=0; elf_loader_audit "$R" "$interp" "$f" > "$W/ldd.txt" 2>&1 || rc=$?
+        case $rc in
+            0) pass "image: libraries of $f" ;;
+            1) fail "image: libraries of $f"; cat "$W/ldd.txt" ;;
+        esac
+    done < <(cd "$REPO/rootfs-overlay" && find . -type f | sed 's|^\.||'; echo /usr/sbin/fsck.hfsplus; echo /usr/local/lib/enginex/enginex-aacenc)
+    # The live stream's Shoutcast mode: build-release.sh adds the encoder front end; it must be there
+    # and open the AAC encoder of this image's own libavcodec (review of the SHOUTcast mode, finding 2).
+    check "image: enginex-aacenc opens the stock AAC encoder" chroot "$R" /usr/local/lib/enginex/enginex-aacenc --check
+    gen2_aacenc_audit
     check "image: engine script no longer forces 100 Mbps" bash -c "! grep -Eq 'az01-ethernet-speed[[:space:]]+100([^0-9]|\$)' '$R/usr/Engine/Scripts/engine'"
     for f in "$R"/usr/Engine/Scripts/*.sh "$R/usr/Engine/Scripts/engine" "$R/usr/Engine/Scripts/runengine"; do
         check "image: sh -n ${f#"$R"}" chroot "$R" /bin/sh -n "${f#"$R"}"
@@ -650,6 +659,10 @@ COMPAT=inmusic,$(echo "$PRODUCT" | tr 'A-Z' 'a-z')
 # re-release (old and new image both <version>) is published as v<version>-rN.
 RELTAG=${GATE_RELEASE_TAG:-v$NEWV}
 export W REPO OLDV NEWV NEXTV RELTAG PREFIX PRODUCT COMPAT QEMU_INTERP NEW_IMG
+# Stock second-generation rootfs for the bundle encoder audit (gen2_aacenc_audit).
+ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
+export GATE_GEN2_ROOTFS=${GATE_GEN2_ROOTFS:-$ENGINEX_LAB/sclive4-rea61-followup/rootfs}
+export GATE_AZ04_ROOTFS=${GATE_AZ04_ROOTFS:-$ENGINEX_LAB/systemone-analysis/rootfs}
 export LANG_PACK=${GATE_LANG:-zh-Hans} ENGINE_START=${GATE_ENGINE_START:-300} ENGINE_SECONDS=${GATE_ENGINE_SECONDS:-90}
 export BOOT2_SECONDS=${GATE_BOOT2_SECONDS:-30}
 # #206: all-in-ones also get the 8 recording-with-streaming sites; players (no recorder) do not.
