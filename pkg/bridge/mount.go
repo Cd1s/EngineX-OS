@@ -255,7 +255,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		}
 	}
 	rbstate.CleanTemps(dir)
-	if n := CleanWriteBackLeftoversWithKeys(mount, exportKeys()); n > 0 {
+	if n := CleanWriteBackLeftovers(mount); n > 0 {
 		log.Printf("rb-bridge: %d files of a write-back pass that was cut short put right", n)
 	}
 	ahead := exportWork(files, head.Tracks)

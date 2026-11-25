@@ -431,7 +431,7 @@ func putBackWithKeys(mount, rel, name string, keys *rekordbox.KeyCache) bool {
 // mark names that is missing is put back; then, when none is missing, the temporary files in
 // the marked folders and the mark go. It returns how many temporary files it removed.
 func CleanWriteBackLeftovers(mount string) int {
-	return CleanWriteBackLeftoversWithKeys(mount, nil)
+	return CleanWriteBackLeftoversWithKeys(mount, exportKeys())
 }
 
 // CleanWriteBackLeftoversWithKeys uses the session's warm key cache when it validates a staged
