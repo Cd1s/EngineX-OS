@@ -435,46 +435,6 @@ func parseSQLiteCue(r sqlRecordLike) (Cue, bool) {
 }
 
 var (
-	// cueColumns are the cue table columns parseSQLiteCue and the cue import use.
-	cueColumns = []string{"content_id", "cue_id", "id", "kind", "inUsec", "in_usec", "outUsec", "out_usec", "inMsec", "in_msec", "outMsec", "out_msec",
-		"isActiveLoop", "is_active_loop", "active_loop", "beatLoopNumerator", "beat_loop_numerator", "beatLoopDenominator", "beat_loop_denominator",
-		"cueComment", "cue_comment", "comment", "colorTableIndex", "color_table_index"}
-
-	contentColumns = []string{
-		"id", "content_id", "track_id",
-		"file_path", "path", "location", "file_name", "file_name_l", "filename", "folder_path",
-		"bpmx100", "bpm", "tempo",
-		"key_name", "key_id", "key",
-		"image_id", "artwork_id", "image_path",
-		"file_size",
-		"analysisDataFilePath", "analysis_data_path", "analyze_path", "analysis_path",
-		"title", "name",
-		"artist_id_artist", "artist_id", "artist",
-		"artist_id_composer", "composer_id",
-		"artist_id_remixer", "remixer_id",
-		"album_id", "album",
-		"genre_id", "label_id",
-		"length", "duration",
-		"samplingRate", "sample_rate",
-		"bit_depth", "bit_rate", "bitrate",
-		"release_year", "year", "rating",
-		"djComment", "commnt", "comment",
-	}
-
-	playlistColumns = []string{
-		"id", "playlist_id", "playlist_id_parent", "parent_id",
-		"sequenceNo", "seq", "sort_order",
-		"name", "title",
-		"attribute", "is_folder", "is_smart", "intelligent",
-		"smart_list", "rules",
-	}
-
-	playlistContentColumns = []string{
-		"playlist_id",
-		"sequenceNo", "track_no", "seq", "entry_index", "position",
-		"content_id", "track_id",
-	}
-
 	lookupColumnGroups = []sqlColumnGroup{
 		{"id"},
 		{"artist_id", "album_id", "genre_id", "label_id", "key_id", "artwork_id", "image_id"},
@@ -543,69 +503,6 @@ var (
 		{"content_id", "track_id"},
 	}
 )
-
-// eachSQLRow streams the wanted columns of table through fn, one reused record
-// at a time. Loading every cue as a map of all its columns took 375 MB on armhf
-// for 20000 tracks with 8 cues each (r2 review).
-func eachSQLRow(ctx context.Context, db *sql.DB, table string, wanted []string, fn func(sqlRecord)) error {
-	want := map[string]bool{}
-	for _, w := range wanted {
-		want[normalized(w)] = true
-	}
-	quote := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
-	info, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
-	if err != nil {
-		return err
-	}
-	var cols, keys []string
-	var delCol string
-	for info.Next() {
-		var name string
-		if err = info.Scan(&name); err != nil {
-			info.Close()
-			return err
-		}
-		if normalized(name) == "rblocaldeleted" {
-			delCol = quote(name)
-		}
-		if want[normalized(name)] {
-			cols, keys = append(cols, quote(name)), append(keys, normalized(name))
-		}
-	}
-	err = info.Err()
-	info.Close()
-	if err != nil || len(cols) == 0 {
-		return err
-	}
-	where := ""
-	if delCol != "" {
-		where = ` WHERE COALESCE(` + delCol + `, 0) = 0`
-	}
-	rows, err := db.QueryContext(ctx, `SELECT `+strings.Join(cols, ",")+` FROM `+quote(table)+where)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	values := make([]sql.RawBytes, len(cols))
-	ptrs := make([]any, len(cols))
-	for i := range ptrs {
-		ptrs[i] = &values[i]
-	}
-	r := sqlRecord{}
-	for rows.Next() {
-		if err = rows.Scan(ptrs...); err != nil {
-			return err
-		}
-		clear(r)
-		for i, v := range values {
-			if v != nil {
-				r[keys[i]] = string(v)
-			}
-		}
-		fn(r)
-	}
-	return rows.Err()
-}
 
 type sqlColumnGroup []string
 
