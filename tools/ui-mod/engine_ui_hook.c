@@ -47,6 +47,7 @@
 #include "pioneer_ms.h"
 #include "live_tap.h"
 #include "reverb_time.h"
+#include "flac_guard.h"
 #include "hook_features.h"
 #ifndef SC_TAP_PATH
 #define SC_TAP_PATH "/tmp/enginex-broadcast.pcm" // pkg/broadcast DefaultInputPath
@@ -190,6 +191,47 @@ int snd_pcm_sw_params(void *pcm, void *params) {
         }
     }
     return real(pcm, params);
+}
+
+// #336 S8: protect stock Engine's FFmpeg 4.4.3 FLAC parser and single-call
+// avcodec_decode_audio4 loop against false-sync "Junk frame" splits and the
+// compat_decode partial-decode -> AVERROR_BUG silence deadlock.
+static void *av_parser_init_cache, *av_decode_audio4_cache, *av_flush_buffers_cache;
+static void *av_codec_close_cache, *av_codec_free_ctx_cache;
+
+HF_INTERPOSE(HF_DSP_GUARDS)
+void *av_parser_init(int codec_id) {
+    void *(*real)(int) = next_symbol(&av_parser_init_cache, "av_parser_init");
+    if (!real) return NULL;
+    void *ctx = real(codec_id);
+    if (ctx && codec_id == FG_AV_CODEC_ID_FLAC && is_engine() && hf_on(HF_DSP_GUARDS))
+        fg_wrap_flac_parser(ctx);
+    return ctx;
+}
+
+HF_INTERPOSE(HF_DSP_GUARDS)
+int avcodec_decode_audio4(void *avctx, void *frame, int *got_frame, const void *pkt) {
+    fg_decode_audio4_fn real = (fg_decode_audio4_fn)next_symbol(&av_decode_audio4_cache, "avcodec_decode_audio4");
+    if (!real) return -ENOSYS;
+    if (!is_engine() || !hf_on(HF_DSP_GUARDS)) return real(avctx, frame, got_frame, pkt);
+    fg_flush_buffers_fn flush = (fg_flush_buffers_fn)next_symbol(&av_flush_buffers_cache, "avcodec_flush_buffers");
+    return fg_decode_audio4_guarded(avctx, frame, got_frame, pkt, real, flush);
+}
+
+HF_INTERPOSE(HF_DSP_GUARDS)
+int avcodec_close(void *avctx) {
+    int (*real)(void *) = next_symbol(&av_codec_close_cache, "avcodec_close");
+    if (!real) return -ENOSYS;
+    fg_dec_forget(avctx);
+    return real(avctx);
+}
+
+HF_INTERPOSE(HF_DSP_GUARDS)
+void avcodec_free_context(void **avctx) {
+    void (*real)(void **) = next_symbol(&av_codec_free_ctx_cache, "avcodec_free_context");
+    if (!real) return;
+    if (avctx && *avctx) fg_dec_forget(*avctx);
+    real(avctx);
 }
 
 // #58: the toggle is master_limiter=1 in settings.conf, polled once a second
