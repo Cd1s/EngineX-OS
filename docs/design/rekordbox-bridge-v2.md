@@ -666,6 +666,17 @@ edits. The old state file is removed after the snapshot is saved.
    Library of about 45,000) is never taken on such a stick,
    and every insert then costs a stat and the job's refusal. The job's line says how much is free and how much
    is needed.
+10. **A loaded track whose main cue a re-export moved is kept as the deck's.** Engine 5.3.0 writes its own figure
+   into the main cue and the main cue as imported at every load of a track whose main cue the DJ has not adjusted
+   (measured on JP07 and SC LIVE 4: 9920.0 twice became -1105.0 twice, the flag stayed 0). The bridge therefore
+   compares such a row with those two fields read as the staged record has them (`asWritten`,
+   `pkg/enginedb/library.go`): a load alone is no edit, whether a window or the UI hook wrote the row. `Written`
+   is a digest of the bytes written, so when a later export moved the track's main cue (its earliest memory cue)
+   the fields written before cannot be put back, and the loaded row counts as changed by the deck: its cues,
+   loops and grid stay (rule 5 errs on that side) and write-back treats them as the deck's. Closing this needs a
+   second digest without the two fields, in the snapshot and in the hook's `filled.jsonl` line. Also seen in that
+   measurement: after a load the row no longer holds the main cue the bridge wrote from rekordbox, since Engine
+   replaced it.
 
 ## 2. Requirements and the tests that cover them
 
@@ -704,6 +715,7 @@ checklist.
 | What the job publishes as a next library is, after the one window that swaps it in, the library the windows would have written in place (rows under the same IDs, lists, data, snapshot); the job never writes `m.db` and the window does no row work. A new next library has its `Track` rows together. | `TestNextLibrarySwappedInIsTheLibraryTheWindowsWrite` (`pkg/bridge/next_test.go`); `TestMirrorLibraryLaysTrackRowsTogether` (`pkg/enginedb/mirror_test.go`) |
 | The upkeep at a window's end is stopped at its budget (0.5 s in the insert of an unchanged stick, 1 s elsewhere), and a window leaves a list waveform to the job that staged the track with its row. | `TestMountUpkeepIsStoppedAtItsBudget`, `TestMountLeavesTheListWaveformToTheJobThatStagedTheRow` (`pkg/bridge/mount_test.go`) |
 | A window that cannot look for the deck's rows 3 s before the kill does not swap; the job takes them and the next window swaps. With nothing to publish the job makes no next library and asks for no remount. | `TestSwapWaitsForTheJobWhenTheDecksRowsCannotBeLookedForInTime`, `TestNextLibrarySwappedInIsTheLibraryTheWindowsWrite` (`pkg/bridge/next_test.go`) |
+| A load alone is no deck edit: Engine's own figure in the main cue and the main cue as imported (both fields, flag clear, as the real Engine writes them; and the last field only) leaves a row the bridge's, whether a window or the UI hook wrote it; an adjusted main cue is the deck's. | `TestMountTakesRowsTheDeckHookFilledAsTheBridgesOwn`, `TestMountStagedDataAndDeckEdits` (`pkg/bridge/mount_test.go`) |
 | A stick without room for a next library: row updates one window cannot write are written in place, the batches that fit each window; with room they are left to the job. | `TestRowUpdatesGoOnInPlaceOnAStickWithoutRoomForANextLibrary` (`pkg/bridge/mount_test.go`) |
 | The remount helper takes the deck's rows right before the remount, so that a window without time for the look still swaps; it looks at the decks again after the pass; what it took is read on from by the window and by the job. | `TestRowsTakenBeforeTheRemountLetAWindowWithoutTimeSwap`, `TestRowsTakenBeforeTheRemountAreReadOnFrom` (`pkg/bridge/next_test.go`), `TestRemountTakesTheDecksRowsBeforeTheRemove` (`internal/cli/rbbridge_remount_test.go`) |
 | A stage that fills `/data` is emptied into the next library and the job goes on: every track is staged and one remount publishes all of them. The job stops writing list waveforms when their folder takes no more files. | `TestFillGoesOnPastAFullStageThroughTheNextLibrary` (`pkg/bridge/next_test.go`); `TestFillStopsWritingListWaveformsWhenTheirFolderIsFull` (`pkg/bridge/fill_test.go`) |
