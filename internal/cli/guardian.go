@@ -203,9 +203,9 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			}
 			budgetExpired := false
 			opts := dbhealer.MountOptions{
-				MaxSessions:            *sessions,
-				DataOnly:               *dataOnly,
-				ExtractEmbeddedArtwork: enginedb.ExtractEmbeddedArtwork,
+				MaxSessions:                   *sessions,
+				DataOnly:                      *dataOnly,
+				ExtractEmbeddedArtworkContext: enginedb.ExtractEmbeddedArtworkContext,
 			}
 			if *dataOnly {
 				r, err = dbhealer.HealMountWithOptions(mountCtx, m, opts)

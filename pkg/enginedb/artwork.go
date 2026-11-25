@@ -246,57 +246,122 @@ func findImageOffset(b []byte) int {
 // ExtractEmbeddedArtwork extracts embedded cover artwork from an audio file (MP3 ID3v2 APIC,
 // FLAC METADATA_BLOCK_PICTURE, or MP4/M4A covr->data atoms), verifying PNG or JPEG headers.
 func ExtractEmbeddedArtwork(audioPath string) ([]byte, error) {
+	return ExtractEmbeddedArtworkContext(context.Background(), audioPath)
+}
+
+const extractReadChunkSize = 64 << 10
+
+type ctxReadSeeker struct {
+	ctx context.Context
+	rs  io.ReadSeeker
+}
+
+func (c *ctxReadSeeker) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if len(p) > extractReadChunkSize {
+		p = p[:extractReadChunkSize]
+	}
+	return c.rs.Read(p)
+}
+
+func (c *ctxReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.rs.Seek(offset, whence)
+}
+
+// ExtractEmbeddedArtworkContext extracts embedded cover artwork from audioPath while
+// honoring ctx cancellation before opening and during bounded tag/atom reads.
+func ExtractEmbeddedArtworkContext(ctx context.Context, audioPath string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(audioPath)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	return extractEmbeddedArtworkFromReadSeeker(ctx, f, filepath.Ext(audioPath))
+}
 
+func extractEmbeddedArtworkFromReadSeeker(ctx context.Context, rs io.ReadSeeker, ext string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	crs := &ctxReadSeeker{ctx: ctx, rs: rs}
+	if _, err := crs.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
 	hdr := make([]byte, 12)
-	n, err := f.ReadAt(hdr, 0)
-	if err != nil && err != io.EOF {
+	n, err := io.ReadFull(crs, hdr)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if n < 4 {
 		return nil, ErrNoArtwork
 	}
 
-	if string(hdr[:3]) == "ID3" {
-		if _, err := f.Seek(0, io.SeekStart); err == nil {
-			if art, err := extractMP3Artwork(f); err == nil {
-				return art, nil
+	tryParse := func(fn func(context.Context, io.ReadSeeker) ([]byte, error)) ([]byte, bool, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		if _, err := crs.Seek(0, io.SeekStart); err != nil {
+			if ctx.Err() != nil {
+				return nil, false, ctx.Err()
 			}
+			return nil, false, nil
+		}
+		art, err := fn(ctx, crs)
+		if err == nil {
+			return art, true, nil
+		}
+		if ctx.Err() != nil {
+			return nil, false, ctx.Err()
+		}
+		return nil, false, nil
+	}
+
+	if string(hdr[:3]) == "ID3" {
+		if art, ok, err := tryParse(extractMP3Artwork); err != nil {
+			return nil, err
+		} else if ok {
+			return art, nil
 		}
 	}
 	if string(hdr[:4]) == "fLaC" {
-		if _, err := f.Seek(0, io.SeekStart); err == nil {
-			if art, err := extractFLACArtwork(f); err == nil {
-				return art, nil
-			}
+		if art, ok, err := tryParse(extractFLACArtwork); err != nil {
+			return nil, err
+		} else if ok {
+			return art, nil
 		}
 	}
 	if (n >= 8 && (string(hdr[4:8]) == "ftyp" || string(hdr[4:8]) == "moov")) ||
-		filepath.Ext(audioPath) == ".m4a" || filepath.Ext(audioPath) == ".mp4" {
-		if _, err := f.Seek(0, io.SeekStart); err == nil {
-			if art, err := extractMP4Artwork(f); err == nil {
-				return art, nil
-			}
+		ext == ".m4a" || ext == ".mp4" {
+		if art, ok, err := tryParse(extractMP4Artwork); err != nil {
+			return nil, err
+		} else if ok {
+			return art, nil
 		}
 	}
 
 	// General fallbacks in case header check was indeterminate
-	if _, err := f.Seek(0, io.SeekStart); err == nil {
-		if art, err := extractMP3Artwork(f); err == nil {
-			return art, nil
-		}
-	}
-	if _, err := f.Seek(0, io.SeekStart); err == nil {
-		if art, err := extractFLACArtwork(f); err == nil {
-			return art, nil
-		}
-	}
-	if _, err := f.Seek(0, io.SeekStart); err == nil {
-		if art, err := extractMP4Artwork(f); err == nil {
+	for _, fn := range []func(context.Context, io.ReadSeeker) ([]byte, error){
+		extractMP3Artwork,
+		extractFLACArtwork,
+		extractMP4Artwork,
+	} {
+		if art, ok, err := tryParse(fn); err != nil {
+			return nil, err
+		} else if ok {
 			return art, nil
 		}
 	}
@@ -322,7 +387,10 @@ func remaining(f io.ReadSeeker) (int64, error) {
 	return end - pos, err
 }
 
-func extractMP3Artwork(f io.ReadSeeker) ([]byte, error) {
+func extractMP3Artwork(ctx context.Context, f io.ReadSeeker) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	hdr := make([]byte, 10)
 	if _, err := io.ReadFull(f, hdr); err != nil {
 		return nil, err
@@ -345,7 +413,7 @@ func extractMP3Artwork(f io.ReadSeeker) ([]byte, error) {
 		return nil, err
 	}
 	if ver == 2 {
-		return id3v22Artwork(tagData)
+		return id3v22Artwork(ctx, tagData)
 	}
 
 	// Every length below is a 32-bit claim of the file: compared in int64, so that on the
@@ -364,7 +432,12 @@ func extractMP3Artwork(f io.ReadSeeker) ([]byte, error) {
 		offset = int(extSize)
 	}
 
-	for offset+10 <= len(tagData) {
+	for frames := 0; offset+10 <= len(tagData); frames++ {
+		if frames&31 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		if tagData[offset] == 0 {
 			break
 		}
@@ -392,8 +465,13 @@ func extractMP3Artwork(f io.ReadSeeker) ([]byte, error) {
 
 // id3v22Artwork finds a PIC frame in an ID3v2.2 tag, whose frame headers are 6 bytes (a 3-byte ID
 // and a 3-byte size) instead of v2.3/v2.4's 10 (BH-GC1-14).
-func id3v22Artwork(tagData []byte) ([]byte, error) {
-	for offset := 0; offset+6 <= len(tagData) && tagData[offset] != 0; {
+func id3v22Artwork(ctx context.Context, tagData []byte) ([]byte, error) {
+	for offset, frames := 0, 0; offset+6 <= len(tagData) && tagData[offset] != 0; frames++ {
+		if frames&31 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		frameSize := int(tagData[offset+3])<<16 | int(tagData[offset+4])<<8 | int(tagData[offset+5])
 		if frameSize <= 0 || offset+6+frameSize > len(tagData) {
 			break
@@ -409,7 +487,10 @@ func id3v22Artwork(tagData []byte) ([]byte, error) {
 	return nil, ErrNoArtwork
 }
 
-func extractFLACArtwork(f io.ReadSeeker) ([]byte, error) {
+func extractFLACArtwork(ctx context.Context, f io.ReadSeeker) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	magic := make([]byte, 4)
 	if _, err := io.ReadFull(f, magic); err != nil {
 		return nil, err
@@ -419,8 +500,14 @@ func extractFLACArtwork(f io.ReadSeeker) ([]byte, error) {
 	}
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		hdr := make([]byte, 4)
 		if _, err := io.ReadFull(f, hdr); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, ErrNoArtwork
 		}
 		isLast := (hdr[0] & 0x80) != 0
@@ -459,6 +546,9 @@ func extractFLACArtwork(f io.ReadSeeker) ([]byte, error) {
 			}
 		} else {
 			if _, err := f.Seek(int64(blockLen), io.SeekCurrent); err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				return nil, ErrNoArtwork
 			}
 		}
@@ -469,11 +559,14 @@ func extractFLACArtwork(f io.ReadSeeker) ([]byte, error) {
 	return nil, ErrNoArtwork
 }
 
-func extractMP4Artwork(f io.ReadSeeker) ([]byte, error) {
-	return parseMP4Atoms(f, 0, 0)
+func extractMP4Artwork(ctx context.Context, f io.ReadSeeker) ([]byte, error) {
+	return parseMP4Atoms(ctx, f, 0, 0)
 }
 
-func parseMP4Atoms(f io.ReadSeeker, start, length int64) ([]byte, error) {
+func parseMP4Atoms(ctx context.Context, f io.ReadSeeker, start, length int64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if length == 0 {
 		size, err := f.Seek(0, io.SeekEnd)
 		if err != nil {
@@ -483,11 +576,20 @@ func parseMP4Atoms(f io.ReadSeeker, start, length int64) ([]byte, error) {
 	}
 	curr := start
 	for curr+8 <= start+length {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if _, err := f.Seek(curr, io.SeekStart); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			break
 		}
 		hdr := make([]byte, 8)
 		if _, err := io.ReadFull(f, hdr); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			break
 		}
 		atomSize := int64(binary.BigEndian.Uint32(hdr[:4]))
@@ -496,6 +598,9 @@ func parseMP4Atoms(f io.ReadSeeker, start, length int64) ([]byte, error) {
 		if atomSize == 1 {
 			extHdr := make([]byte, 8)
 			if _, err := io.ReadFull(f, extHdr); err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				break
 			}
 			atomSize = int64(binary.BigEndian.Uint64(extHdr))
@@ -509,19 +614,31 @@ func parseMP4Atoms(f io.ReadSeeker, start, length int64) ([]byte, error) {
 
 		switch atomType {
 		case "moov", "udta", "ilst":
-			if art, err := parseMP4Atoms(f, curr+headerLen, atomSize-headerLen); err == nil && art != nil {
+			art, err := parseMP4Atoms(ctx, f, curr+headerLen, atomSize-headerLen)
+			if err == nil && art != nil {
 				return art, nil
+			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
 			}
 		case "meta":
 			metaOffset := headerLen + 4
 			if atomSize > metaOffset {
-				if art, err := parseMP4Atoms(f, curr+metaOffset, atomSize-metaOffset); err == nil && art != nil {
+				art, err := parseMP4Atoms(ctx, f, curr+metaOffset, atomSize-metaOffset)
+				if err == nil && art != nil {
 					return art, nil
+				}
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
 				}
 			}
 		case "covr":
-			if art, err := parseMP4Covr(f, curr+headerLen, atomSize-headerLen); err == nil && art != nil {
+			art, err := parseMP4CovrContext(ctx, f, curr+headerLen, atomSize-headerLen)
+			if err == nil && art != nil {
 				return art, nil
+			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
 			}
 		}
 		curr += atomSize
@@ -530,13 +647,26 @@ func parseMP4Atoms(f io.ReadSeeker, start, length int64) ([]byte, error) {
 }
 
 func parseMP4Covr(f io.ReadSeeker, start, length int64) ([]byte, error) {
+	return parseMP4CovrContext(context.Background(), f, start, length)
+}
+
+func parseMP4CovrContext(ctx context.Context, f io.ReadSeeker, start, length int64) ([]byte, error) {
 	curr := start
 	for curr+8 <= start+length {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if _, err := f.Seek(curr, io.SeekStart); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			break
 		}
 		hdr := make([]byte, 8)
 		if _, err := io.ReadFull(f, hdr); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			break
 		}
 		atomSize := int64(binary.BigEndian.Uint32(hdr[:4]))
@@ -551,7 +681,11 @@ func parseMP4Covr(f io.ReadSeeker, start, length int64) ([]byte, error) {
 				if _, err := f.Seek(curr+16, io.SeekStart); err == nil {
 					if _, err := io.ReadFull(f, payload); err == nil {
 						return validateImage(payload)
+					} else if ctx.Err() != nil {
+						return nil, ctx.Err()
 					}
+				} else if ctx.Err() != nil {
+					return nil, ctx.Err()
 				}
 			}
 		}

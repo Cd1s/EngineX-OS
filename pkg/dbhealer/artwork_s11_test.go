@@ -897,3 +897,51 @@ func TestS11ArtworkPhaseRespectsMountDeadlineAndStreamsBlobs(t *testing.T) {
 		}
 	})
 }
+
+func TestS11EmbeddedExtractorObservesMountContext(t *testing.T) {
+	_, mount, db := testlibrary.Create(t)
+	musicDir := filepath.Join(mount, "Music")
+	if err := os.MkdirAll(musicDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(musicDir, "slow.mp3"), []byte("audio-slow"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha1.Sum([]byte("slow-embedded-cover"))
+	mustExec(t, db, `INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,NULL,NULL),(2,?,NULL)`, sum[:])
+	mustExec(t, db, `INSERT INTO Track(id,path,albumArtId,isAnalyzed) VALUES(1,'../Music/slow.mp3',2,1)`)
+	db.Close()
+
+	var sawDeadline bool
+	var extractorExited bool
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	r, err := HealMountWithOptions(ctx, mount, MountOptions{
+		DataOnly: true,
+		ExtractEmbeddedArtworkContext: func(callCtx context.Context, _ string) ([]byte, error) {
+			defer func() { extractorExited = true }()
+			_, sawDeadline = callCtx.Deadline()
+			select {
+			case <-callCtx.Done():
+				return nil, callCtx.Err()
+			case <-time.After(300 * time.Millisecond):
+				return nil, os.ErrNotExist
+			}
+		},
+	})
+	elapsed := time.Since(start)
+	if err != nil || !r.Healthy {
+		t.Fatalf("HealMountWithOptions: %+v err=%v", r, err)
+	}
+	if !sawDeadline {
+		t.Fatal("extractor did not receive mount context deadline")
+	}
+	if !extractorExited {
+		t.Fatal("extractor remained active after HealMountWithOptions returned")
+	}
+	if elapsed >= 200*time.Millisecond {
+		t.Fatalf("embedded extractor ignored 50ms mount deadline: elapsed=%v", elapsed)
+	}
+}

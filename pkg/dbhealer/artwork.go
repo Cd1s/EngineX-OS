@@ -748,7 +748,7 @@ func inspectAndNormalizeArtworkFile(ctx context.Context, cache *artworkDirCache,
 
 // recoverEmbeddedArtworkForRow probes referencing non-streaming tracks in bounded ID
 // pages under the mount context until embedded artwork is found or ctx expires.
-func recoverEmbeddedArtworkForRow(ctx context.Context, db *sql.DB, mount string, artID int64, extract func(string) ([]byte, error), r *Report) ([]byte, bool) {
+func recoverEmbeddedArtworkForRow(ctx context.Context, db *sql.DB, mount string, artID int64, extract func(context.Context, string) ([]byte, error), r *Report) ([]byte, bool) {
 	if extract == nil || ctx.Err() != nil {
 		return nil, false
 	}
@@ -789,7 +789,10 @@ func recoverEmbeddedArtworkForRow(ctx context.Context, db *sql.DB, mount string,
 			if err != nil || !st.Mode().IsRegular() {
 				continue
 			}
-			raw, err := extract(full)
+			raw, err := extract(ctx, full)
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, false
+			}
 			if err != nil || len(raw) == 0 {
 				continue
 			}
@@ -910,7 +913,7 @@ func reconcileUnresolvedHashRow(
 	mount, libDir, artDir string,
 	c artCandidate,
 	resizedIDs map[int64]bool,
-	extractEmbedded func(string) ([]byte, error),
+	extractEmbedded func(context.Context, string) ([]byte, error),
 	cache *artworkDirCache,
 	flusher *artHashFlusher,
 	r *Report,
@@ -976,7 +979,7 @@ func reconcileValidHashRow(
 	mount, libDir, artDir string,
 	c artCandidate,
 	resizedIDs map[int64]bool,
-	extractEmbedded func(string) ([]byte, error),
+	extractEmbedded func(context.Context, string) ([]byte, error),
 	cache *artworkDirCache,
 	flusher *artHashFlusher,
 	probeBuf []byte,
@@ -1062,7 +1065,7 @@ func reconcileValidHashRow(
 //   - upgrades legacy 40-char hex TEXT hashes to 20-byte BLOB hashes once the JPEG exists,
 //     rehashes invalid/numeric/NULL-with-blob rows, and clears unrecoverable numeric hashes;
 //   - preserves the stock id=1 NULL sentinel and image://streaming/ / image://fileart/ rows.
-func reconcileArtwork(ctx context.Context, db *sql.DB, mount string, resizedIDs map[int64]bool, extractEmbedded func(string) ([]byte, error), cache *artworkDirCache, r *Report) error {
+func reconcileArtwork(ctx context.Context, db *sql.DB, mount string, resizedIDs map[int64]bool, extractEmbedded func(context.Context, string) ([]byte, error), cache *artworkDirCache, r *Report) error {
 	if ctx.Err() != nil {
 		return nil
 	}

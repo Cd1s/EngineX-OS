@@ -270,9 +270,26 @@ func writable(path string) (bool, error) {
 
 // MountOptions configures a mount-time heal pass.
 type MountOptions struct {
-	MaxSessions            int
-	DataOnly               bool
-	ExtractEmbeddedArtwork func(audioPath string) ([]byte, error)
+	MaxSessions                   int
+	DataOnly                      bool
+	ExtractEmbeddedArtwork        func(audioPath string) ([]byte, error)
+	ExtractEmbeddedArtworkContext func(ctx context.Context, audioPath string) ([]byte, error)
+}
+
+func resolveEmbeddedArtworkExtractor(opts MountOptions) func(context.Context, string) ([]byte, error) {
+	if opts.ExtractEmbeddedArtworkContext != nil {
+		return opts.ExtractEmbeddedArtworkContext
+	}
+	if opts.ExtractEmbeddedArtwork != nil {
+		legacy := opts.ExtractEmbeddedArtwork
+		return func(ctx context.Context, audioPath string) ([]byte, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return legacy(audioPath)
+		}
+	}
+	return nil
 }
 
 // HealMount only opens Engine's two known database names; it never scans music.
@@ -394,8 +411,9 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 		return r, err
 	}
 	artCache := newArtworkDirCache()
+	extractEmbedded := resolveEmbeddedArtworkExtractor(opts)
 	if ctx.Err() == nil {
-		if artErr := reconcileArtwork(ctx, db, mount, resizedIDs, opts.ExtractEmbeddedArtwork, artCache, &r); artErr != nil {
+		if artErr := reconcileArtwork(ctx, db, mount, resizedIDs, extractEmbedded, artCache, &r); artErr != nil {
 			_ = db.Close()
 			r.Mount = mount
 			if dataOnly && budgetExpired(ctx, artErr) {
@@ -433,7 +451,7 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 		}
 		hr, resizedH, e := healWithResizedContext(ctx, hdb, dataOnly)
 		if e == nil && ctx.Err() == nil {
-			e = reconcileArtwork(ctx, hdb, mount, resizedH, opts.ExtractEmbeddedArtwork, artCache, &hr)
+			e = reconcileArtwork(ctx, hdb, mount, resizedH, extractEmbedded, artCache, &hr)
 		}
 		ce := hdb.Close()
 		if e != nil {
