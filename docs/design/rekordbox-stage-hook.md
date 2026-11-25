@@ -26,6 +26,10 @@ thirdPartySourceId, activeOnLoadLoops FROM PerformanceData WHERE trackId = ?`; b
 table checked before the patch). The drive fill runs inside that redirect, after the bind, on the first of the two
 statements, before Engine steps it: Engine then reads the filled row.
 
+Seen in the sandbox (real 5.3.0 and SC LIVE 4 Engines, 2026-11-25): when Engine auto-selects a newly mounted drive it
+reads every row through the same bound Track read (1.5-2.6 s after the mount), so every row staged by then is filled at
+the insert, before any load. Browsing a list runs neither statement. A row staged later is filled at its load.
+
 ## From the track id to the stage file
 
 1. Drive: `sqlite3_db_filename(db, "main")` starts with `/media/` (a string compare, as today).
@@ -70,9 +74,12 @@ It writes nothing when:
 ## The record, so that a filled row stays rekordbox's
 
 1. The row itself: it holds the staged blobs byte for byte, so `enginedb.WrittenDigest` of the row equals the staged
-   record's `wr`. The stage entry is not dropped by the hook. The next window applies that entry and
-   `ApplyPerformance` takes its first case ("the row holds the staged data already"): `Track.Written = wr`, `Perf =
-   PerfApplied`. No bridge change is needed for this path.
+   record's `wr`, until the first load: Engine rewrites the main-cue tail of `quickCues` at every load (sandbox:
+   9920.0 → −1105.0, flag 0; the hot-cue entries stay byte for byte). The stage entry is not dropped by the hook. The
+   next window applies that entry: for an unloaded row `ApplyPerformance` takes its first case ("the row holds the
+   staged data already"); for a loaded one it takes the export-only case (`mergeFast`), which in the sandbox (an export
+   without cue rows) still ended `Written = wr`, `PerfApplied`. With an export that has cue rows that case compares
+   the row with the export's cue rows, which do not carry the bridge's start offset: see R2.
 2. A journal beside the index, `<stage>/<uuid>/filled.jsonl`, one line per fill:
    `{"id":<Track.id>,"k":"<key>","wr":"<the line's wr>","v":<sig.v>,"w":"<sig.w>","at":<unix seconds>}`. It covers the
    cases where the window does not see the entry the hook wrote (re-staged, dropped as stale, a row the next library
@@ -89,8 +96,18 @@ It writes nothing when:
   a cached look at the stage on `/data`; no statement. The stick's snapshot line is read once per connection, and only
   while the deck holds a stage.
 - On a drive with staged entries: one indexed read per bind of the two statements; the fill only for an empty row
-  the stage holds: one `.bin` read from `/data` (about 13 KB) and one UPDATE. Measured on the real Engine.
+  the stage holds: one `.bin` read from `/data` (about 13 KB) and one UPDATE: 5.5-16.7 ms a row on the build host's
+  native armhf (load request to filled row 0.006-0.014 s). Engine's insert read fills every row staged and not yet
+  applied by then, one after the other on Engine's library thread: bounded by what a window left in the stage.
 - Play: nothing.
+
+## Known limit (first-generation 5.3.0)
+
+On JP07 (5.3.0) a row filled at its load (staged after the insert read) and loaded onto a deck that already holds
+another track is still analysed by Engine about 1.1 s after the load; Engine's grid, overview and track data replace
+the staged ones (hot cues and loops stay). Not on an empty deck, not after the stick is inserted again, and never on SC
+LIVE 4's Engine. Engine's deck copy of the track then says "not analysed" although the row was filled before Engine
+read it, so that load path takes `isAnalyzed` from a copy made at the insert read. Not handled here.
 
 ## 64-bit units
 
@@ -102,4 +119,6 @@ it at the next window.
 
 - R1: `"id"` (the row's `Track.id` from the snapshot) in each index line: the hook can then skip a row that is not
   staged without a statement, and find a non-ASCII row whose export spelling differs from the volume's.
-- R2: honour `filled.jsonl` as in "The record" item 2, in the window, the next library's mirror and write-back.
+- R2: a hook-filled row is the bridge's write, never a deck edit: in the window, the next library's mirror and
+  write-back, match it by `filled.jsonl` (`id`, `wr`) and compare it with the staged data without the main-cue tail
+  Engine rewrites at every load.
