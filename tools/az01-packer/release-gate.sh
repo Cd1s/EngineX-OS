@@ -654,7 +654,8 @@ export LANG_PACK=${GATE_LANG:-zh-Hans} ENGINE_START=${GATE_ENGINE_START:-300} EN
 export BOOT2_SECONDS=${GATE_BOOT2_SECONDS:-30}
 # #206: all-in-ones also get the 8 recording-with-streaming sites; players (no recorder) do not.
 # #207: and the Reverb decay site (players have no FX units).
-case $PRODUCT in JP07|JP08|JP13|JP14) applied=20 ;; *) applied=29 ;; esac
+# #336 S17: +2 InstantDouble remote TrackLength edits on all models.
+case $PRODUCT in JP07|JP08|JP13|JP14) applied=22 ;; *) applied=31 ;; esac
 export UPDATE_TIMEOUT=${GATE_UPDATE_TIMEOUT:-900} EXPECT_APPLIED=${GATE_EXPECT_APPLIED:-$applied} EXPECT_DSP=${GATE_EXPECT_DSP:-21}
 mkdir -p "$W/bin" "$W/tls" "$W/mock/assets"
 : > "$W/results.txt"

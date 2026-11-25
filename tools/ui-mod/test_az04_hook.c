@@ -472,7 +472,7 @@ static void test_rec_stream(const char *filename) {
     size_t first = build->edit_count, count = 0;
     for (size_t i = 0; i < build->edit_count; i++)
         if (build->edits[i].group == EDIT_REC_STREAM) { if (first > i) first = i; count++; }
-    assert(count == 8 && first + 8 == build->edit_count && build->edit_count == 26);
+    assert(count == 8 && first + 8 == build->edit_count && build->edit_count == 27);
     // nop / mov w22,#0 x2 / mov w0,#0 / mov w27,#0 / b <loop tail> / b <menu> / nop
     const uint32_t want[8] = {0xd503201f, 0x52800016, 0x52800016, 0x52800000, 0x5280001b, 0, 0, 0xd503201f};
     const uint32_t target[8] = {0, 0, 0, 0, 0, 0x97afa0, 0x97fa00, 0};
@@ -514,6 +514,67 @@ static void test_rec_stream(const char *filename) {
     product_code_path = saved;
     unlink(code_path);
     puts("#206 AZ04 recording with streaming tracks: 8 sites stock->patched, untouched on a player code, none on a 1-site mismatch: PASS");
+}
+
+// #336 S17: AZ04 InstantDoubleControl::doLoad() defaultValue for QJsonValue::toInt(int).
+// Stock mov w1, #0 yields 0 on empty/missing remote TrackLength JSON, which bypasses
+// doPositionSync()'s tbnz w2, #31 (< 0) check and fires a false StreamingQualityMismatch.
+static int eval_az04_toint_default(const uchar *image, uint32_t off, size_t page) {
+    uint32_t ins;
+    memcpy(&ins, image + off, 4);
+    uint32_t code[] = {ins, 0x2a0103e0u, 0xd65f03c0u}; // mov w1, #0/-1; mov w0, w1; ret
+    int (*fn)(void) = rx_code(code, sizeof code, page);
+    int rc = fn();
+    assert(!munmap((void *)fn, page));
+    return rc;
+}
+
+static void test_instant_double_track_length(const char *filename) {
+    size_t len, page = (size_t)sysconf(_SC_PAGESIZE);
+    uchar *image = map_image(filename, &len);
+    ElfW(Ehdr) *header = (void *)image;
+    struct dl_phdr_info info = {.dlpi_addr = (uintptr_t)image,
+        .dlpi_phdr = (void *)(image + header->e_phoff), .dlpi_phnum = header->e_phnum};
+    uintptr_t found = 0;
+    engine_base(&info, sizeof info, &found);
+    assert(found == (uintptr_t)image && !strcmp(build->name, "5.3.0-az04"));
+
+    // Context pins: doLoad() mov x0, x23; mov w1, #0; bl QJsonValue::toInt; str w0, [x19, #424]
+    uint32_t ctx[4];
+    memcpy(ctx, image + 0xdbb574u, sizeof ctx);
+    assert(ctx[0] == 0xaa1703e0u && ctx[1] == 0x52800001u && (ctx[2] >> 26) == 0x25u && ctx[3] == 0xb901aa60u);
+    // doPositionSync(): tbnz w2, #31, +0x1a4; cmp x0, w2, sxtw; b.eq +0x19c
+    uint32_t guard[3];
+    memcpy(guard, image + 0xdb8c18u, sizeof guard);
+    assert(guard[0] == 0x37f80d22u && guard[1] == 0xeb22c01fu && guard[2] == 0x54000ce0u);
+
+    // Stock executes the bug: missing JSON yields 0 (sign bit clear -> falls into mismatch!)
+    int stock_def = eval_az04_toint_default(image, 0xdbb578u, page);
+    assert(stock_def == 0 && !(stock_def < 0));
+
+    apply_engine_edits((uintptr_t)image, page);
+
+    // Patched returns -1 (sign bit set -> tbnz w2, #31 skips mismatch cleanly!)
+    int patched_def = eval_az04_toint_default(image, 0xdbb578u, page);
+    assert(patched_def == -1 && (patched_def < 0));
+    munmap(image, len);
+
+    // Switching instant-double off in hook-disable.conf leaves 0xdbb578 stock.
+    char off_path[] = "/tmp/az04-id-off-XXXXXX";
+    int ofd = mkstemp(off_path); assert(ofd >= 0);
+    assert(write(ofd, "instant-double\n", 15) == 15);
+    close(ofd);
+    const char *saved_hf = hf_path;
+    hf_path = off_path;
+    hf_reload();
+    image = map_image(filename, &len);
+    apply_engine_edits((uintptr_t)image, page);
+    assert(eval_az04_toint_default(image, 0xdbb578u, page) == 0);
+    munmap(image, len);
+    hf_path = saved_hf;
+    hf_reload();
+    unlink(off_path);
+    puts("#336 S17 AZ04 InstantDouble remote TrackLength: toInt(0)->toInt(-1) verified, executed, and switchable: PASS");
 }
 
 // HF_SHADOW_PAUSED_FOLLOW on the real image: WaveFormPositionItem::currentPosition and its
@@ -568,7 +629,7 @@ int main(int argc, char **argv) {
     test_led();
     test_led_replay_on_engine_thread();
     test_stems_processor_fallback();
-    for (int i = 1; i < argc; i++) { test_engine(argv[i]); test_rec_stream(argv[i]); test_sqlite(argv[i]); test_dsp(argv[i]); test_bt_send(argv[i]); test_shadow_follow_sites(argv[i]); }
+    for (int i = 1; i < argc; i++) { test_engine(argv[i]); test_rec_stream(argv[i]); test_instant_double_track_length(argv[i]); test_sqlite(argv[i]); test_dsp(argv[i]); test_bt_send(argv[i]); test_shadow_follow_sites(argv[i]); }
     const char *oa = getenv("AZ04_OFFLINE_ANALYZER");
     if (oa) test_offline_analyzer(oa);
     return 0;
