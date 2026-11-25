@@ -372,6 +372,9 @@ var mirrorLibrary = enginedb.MirrorLibrary // a variable for the test of the loo
 // job, and Engine may write again before the remount, so what was taken is also noted in the next
 // library's state on the deck, as after a pass of the job; the window or the job reads on from it.
 func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pace func(time.Duration) error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	live, next, swap := filepath.Join(dir, "m.db"), filepath.Join(dir, nextDB), filepath.Join(dir, rbstate.SwapName)
 	sdir := nextState(h.LibraryUUID)
 	var m enginedb.Mirror
@@ -400,6 +403,9 @@ func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pa
 		log.Printf("rb-bridge: rows of the stick's library not taken: %v", err)
 		return false
 	}
+	if ctx.Err() != nil {
+		return false
+	}
 	if pace == nil {
 		st.done("carry", "%d rows the deck wrote taken into the next library (%d read, lists %v)", len(ch.Tracks), ch.Rows, ch.Lists)
 		if len(ch.Tracks) == 0 && !ch.Lists {
@@ -417,6 +423,9 @@ func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pa
 	takeLive(s, base, ch)
 	// What the window cannot count without the exports: the job's next round does.
 	s.Pending.Rows, s.Pending.Lists, s.Base = s.Pending.Rows+len(ch.Tracks), s.Pending.Lists || ch.Lists, m.State
+	if ctx.Err() != nil {
+		return false
+	}
 	if err = s.SaveAs(swap); err != nil {
 		return false
 	}
@@ -443,9 +452,15 @@ func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pa
 // row on a deck), so the helper looks at the decks again after it. With no next library waiting,
 // or the stick's library as the job left it, it is two short reads.
 func TakeDeckRows(ctx context.Context, mount string) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	dir := filepath.Join(mount, filepath.FromSlash(databaseSubdir))
 	h, err := rbstate.ReadHeaderFile(filepath.Join(dir, rbstate.SwapName))
 	if err != nil || h.Rules != rbstate.Rules || h.Base == enginedb.LibraryState(filepath.Join(dir, "m.db")) {
+		return false
+	}
+	if ctx.Err() != nil {
 		return false
 	}
 	if _, err = os.Stat(filepath.Join(dir, nextDB)); err != nil {

@@ -313,6 +313,9 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 			clear, wait = 0, 0
 			passes++
 		}
+		if !mounted(mount) || ejected() {
+			return nil
+		}
 		if err = sleepCtx(ctx, wait); err != nil {
 			return nil
 		}
