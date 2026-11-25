@@ -148,9 +148,37 @@ int setenv(const char *name, const char *value, int overwrite) {
 
 static void *alsa_sw_cache, *alsa_tstamp_set_cache, *alsa_tstamp_get_cache;
 static void *alsa_hw_cache, *alsa_hw_rate_cache, *alsa_stream_cache;
+static void *alsa_writei_cache, *alsa_state_cache, *alsa_prepare_cache, *alsa_resume_cache;
 /* Rate after Engine's own pre-DAC render stage; Gen-1 renders at half its 96 kHz ALSA rate. */
 static unsigned master_rate = SC_DSP_DEFAULT_RATE;
 static int player_board(void);
+
+typedef long (*alsa_writei_fn)(void *, const void *, unsigned long);
+typedef int (*alsa_pcm_int_fn)(void *);
+
+// #336 S13: stock Engine's ALSA xrun_recovery (0x1655898) only handles -EPIPE
+// and -ESTRPIPE. If a transient prepare failure or full-duplex capture reset
+// leaves playback in SETUP/XRUN/DRAINING/SUSPENDED, snd_pcm_writei returns
+// -EBADFD (-77) and stock spins silently until reboot. Recover once without
+// blocking, sleeping, or touching PAUSED/DISCONNECTED/OPEN states.
+static long alsa_writei_recover(void *pcm, const void *buffer, unsigned long size,
+                                alsa_writei_fn real, alsa_pcm_int_fn get_state,
+                                alsa_pcm_int_fn do_prepare, alsa_pcm_int_fn do_resume) {
+    long rc = real(pcm, buffer, size);
+    if (rc != -EBADFD || !pcm || !get_state || !do_prepare) return rc;
+    int st = get_state(pcm);
+    if (st == 1 /* SETUP */ || st == 4 /* XRUN */ || st == 5 /* DRAINING */) {
+        if (do_prepare(pcm) >= 0) return real(pcm, buffer, size);
+        return rc;
+    }
+    if (st == 7 /* SUSPENDED */) {
+        int r = do_resume ? do_resume(pcm) : -ENOSYS;
+        if (r < 0 && r != -EAGAIN) r = do_prepare(pcm);
+        if (r >= 0) return real(pcm, buffer, size);
+        return rc;
+    }
+    return rc;
+}
 
 HF_INTERPOSE(HF_DSP_GUARDS)
 int snd_pcm_hw_params(void *pcm, void *params) {
@@ -158,6 +186,11 @@ int snd_pcm_hw_params(void *pcm, void *params) {
     if (!real) return -ENOSYS;
     int rc = real(pcm, params);
     if (rc >= 0 && is_engine() && hf_on(HF_DSP_GUARDS)) {
+        // Pre-resolve playback recovery symbols off the RT audio write thread.
+        (void)next_symbol(&alsa_writei_cache, "snd_pcm_writei");
+        (void)next_symbol(&alsa_state_cache, "snd_pcm_state");
+        (void)next_symbol(&alsa_prepare_cache, "snd_pcm_prepare");
+        (void)next_symbol(&alsa_resume_cache, "snd_pcm_resume");
         int (*get_rate)(const void *, unsigned *, int *) = next_symbol(&alsa_hw_rate_cache, "snd_pcm_hw_params_get_rate");
         int (*stream)(void *) = next_symbol(&alsa_stream_cache, "snd_pcm_stream");
         unsigned rate = 0;
@@ -166,6 +199,18 @@ int snd_pcm_hw_params(void *pcm, void *params) {
             __atomic_store_n(&master_rate, sc_dsp_rate_from_output(rate, player_board()), __ATOMIC_RELEASE);
     }
     return rc;
+}
+
+HF_INTERPOSE(HF_DSP_GUARDS)
+long snd_pcm_writei(void *pcm, const void *buffer, unsigned long size) {
+    alsa_writei_fn real = (alsa_writei_fn)__atomic_load_n(&alsa_writei_cache, __ATOMIC_ACQUIRE);
+    if (!real) real = (alsa_writei_fn)next_symbol(&alsa_writei_cache, "snd_pcm_writei");
+    if (!real) return -ENOSYS;
+    if (!is_engine() || !hf_on(HF_DSP_GUARDS)) return real(pcm, buffer, size);
+    alsa_pcm_int_fn get_state = (alsa_pcm_int_fn)__atomic_load_n(&alsa_state_cache, __ATOMIC_ACQUIRE);
+    alsa_pcm_int_fn do_prepare = (alsa_pcm_int_fn)__atomic_load_n(&alsa_prepare_cache, __ATOMIC_ACQUIRE);
+    alsa_pcm_int_fn do_resume = (alsa_pcm_int_fn)__atomic_load_n(&alsa_resume_cache, __ATOMIC_ACQUIRE);
+    return alsa_writei_recover(pcm, buffer, size, real, get_state, do_prepare, do_resume);
 }
 
 HF_INTERPOSE(HF_ALSA_TIMESTAMP)
@@ -1577,6 +1622,9 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
     } else {
         rc = orig(host, context, in_channels, in, out_channels, out, frames);
     }
+    // #336 S13: always scrub NaN/Inf on the master bus before optional FX,
+    // resampler, and stock Engine's unclamped float-to-S32_LE DAC conversion.
+    if (out && frames > 0) sc_dsp_sanitize_master_planar(out, out_channels, frames);
     // #104 Echo Out rings the master output out after music stops; before the limiter.
     // #258 every 5.3.0 console has native per-channel Transition FX; never stack master echo.
     if (out && frames > 0) {
@@ -1626,6 +1674,8 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
             sc_lim_set_rate(&master_lim[ch / 2], rate);
             sc_lim_planar(&master_lim[ch / 2], out[ch], r, (unsigned)frames);
         }
+    // Final master-bus finiteness barrier before live tap, BT capture, and DAC.
+    if (out && frames > 0) sc_dsp_sanitize_master_planar(out, out_channels, frames);
     // #50 Live Stream: the first pair as it goes to the DAC; one relaxed load when nobody listens.
     if (out && frames > 0 && out_channels > 0)
         sc_tap_push(&live_tap, out[0], out_channels > 1 ? out[1] : NULL, (uint32_t)frames);
