@@ -650,10 +650,10 @@ func TestWorkCostAgainstTheReplica(t *testing.T) {
 		w    work
 		ms   int64
 	}{
-		{"KDATA read, key derived", work{oneLibrary: kdataOne}, 7002}, // the reads at 605ea83e (616b8a11 merged)
-		{"KDATA read, key cached", work{oneLibrary: kdataOne, warm: true}, 1390},
-		{"UNTITLED read of both, key derived", work{oneLibrary: untitledOne, deviceLibrary: untitledPDB}, 6433},
-		{"UNTITLED read of both, key cached", work{oneLibrary: untitledOne, deviceLibrary: untitledPDB, warm: true}, 822},
+		{"KDATA read, key derived", work{oneLibrary: kdataOne}, 7196}, // the reads at 7b3efe4f (7fa6a009 merged)
+		{"KDATA read, key cached", work{oneLibrary: kdataOne, warm: true}, 1348},
+		{"UNTITLED read of both, key derived", work{oneLibrary: untitledOne, deviceLibrary: untitledPDB}, 6584},
+		{"UNTITLED read of both, key cached", work{oneLibrary: untitledOne, deviceLibrary: untitledPDB, warm: true}, 820},
 		{"UNTITLED view of two libraries in three folders", work{view: 2416}, 270}, // KDATA's one library: 530 ms for 5,962
 		{"KDATA snapshot", work{load: 5962}, 570},
 		{"KDATA first library", work{build: 5962}, 3750},
@@ -675,7 +675,7 @@ func TestWorkCostAgainstTheReplica(t *testing.T) {
 		return w
 	}
 	if !window.fits(first(kdataOne)) {
-		t.Error("KDATA's first insert is left to the job; it ends 4.7 s before the kill")
+		t.Error("KDATA's first insert is left to the job; it ends 4.6 s before the kill")
 	}
 	for _, tracks := range []int64{20000, 50000} {
 		if window.fits(first(tracks * 480)) {

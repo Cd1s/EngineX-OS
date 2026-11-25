@@ -97,7 +97,7 @@ func (s *steps) more(d time.Duration) bool { return before(s.optional, d) }
 // that grows with the library a window of the hook asks fits: work that would not end spare before
 // the kill is left to the job, which has no limit (a next library, next.go). The figures are the
 // deck-speed replica's (armhf at 18 % of one core, 12 ms a request to the stick, 2026-11-25) for two
-// real libraries of 2,416 and 5,962 tracks, the reads as of 616b8a11; a OneLibrary key is taken as
+// real libraries of 2,416 and 5,962 tracks, the reads as of 7fa6a009; a OneLibrary key is taken as
 // not cached.
 type work struct {
 	oneLibrary, deviceLibrary int64 // bytes of export files to read
@@ -115,10 +115,10 @@ type work struct {
 func (w work) cost() time.Duration {
 	us := 0.0
 	if w.oneLibrary > 0 && !w.warm {
-		us += 5.6e6 // the key
+		us += 5.8e6 // the key
 	}
-	us += 0.49 * float64(w.oneLibrary)    // 0.51 s a MiB
-	us += 0.14 * float64(w.deviceLibrary) // 0.15 s a MiB
+	us += 0.48 * float64(w.oneLibrary)    // 0.50 s a MiB
+	us += 0.15 * float64(w.deviceLibrary) // 0.16 s a MiB
 	us += 130*float64(w.view) + 100*float64(w.load) + 650*float64(w.build)
 	us += 5000*float64(w.adds) + 30000*float64(w.removes) + 2000*float64(w.updates) + 5000*float64(w.lists) + 120*float64(w.entries)
 	us += 33000*float64(w.staged) + 150*float64(w.scan)
