@@ -24,21 +24,22 @@ import (
 const DefaultMaxSessions = 50
 
 type Report struct {
-	Mount             string    `json:"mount"`
-	ReadOnly          bool      `json:"read_only"`
-	Healthy           bool      `json:"healthy"`
-	PlaylistEntities  int       `json:"playlist_entities_relinked"`
-	Playlists         int       `json:"playlists_relinked"`
-	Waveforms         int       `json:"waveforms_replaced"`
-	Loops             int       `json:"loops_aligned"`
-	Artwork           int       `json:"artwork_resized"`
-	OrphanArtwork     int       `json:"orphan_artwork_references"`
-	ReanalysisPending int       `json:"reanalysis_pending"`
-	PathsNormalized   int       `json:"paths_normalized"`
-	HistoryPruned     bool      `json:"history_pruned"`
-	ReserveFixed      []string  `json:"reserve_fixed,omitempty"`
-	Warnings          []string  `json:"warnings,omitempty"`
-	CheckedAt         time.Time `json:"checked_at"`
+	Mount              string    `json:"mount"`
+	ReadOnly           bool      `json:"read_only"`
+	Healthy            bool      `json:"healthy"`
+	PlaylistEntities   int       `json:"playlist_entities_relinked"`
+	Playlists          int       `json:"playlists_relinked"`
+	PlaylistsPersisted int       `json:"playlists_persisted,omitempty"`
+	Waveforms          int       `json:"waveforms_replaced"`
+	Loops              int       `json:"loops_aligned"`
+	Artwork            int       `json:"artwork_resized"`
+	OrphanArtwork      int       `json:"orphan_artwork_references"`
+	ReanalysisPending  int       `json:"reanalysis_pending"`
+	PathsNormalized    int       `json:"paths_normalized"`
+	HistoryPruned      bool      `json:"history_pruned"`
+	ReserveFixed       []string  `json:"reserve_fixed,omitempty"`
+	Warnings           []string  `json:"warnings,omitempty"`
+	CheckedAt          time.Time `json:"checked_at"`
 }
 
 // Open never creates a missing library. A single connection keeps connection-local
@@ -170,6 +171,12 @@ func heal(db *sql.DB, dataOnly bool) (Report, error) {
 		}
 		if r.Playlists, err = healChains(tx, true); err != nil {
 			return err
+		}
+		if r.PlaylistsPersisted, err = healPlaylistPersistence(tx); err != nil {
+			return err
+		}
+		if r.PlaylistsPersisted > 0 {
+			r.Warnings = append(r.Warnings, fmt.Sprintf("restored persistence flags on %d playlists", r.PlaylistsPersisted))
 		}
 		if !dataOnly {
 			if err = materialize(tx); err != nil {

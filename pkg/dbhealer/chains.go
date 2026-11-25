@@ -2,6 +2,7 @@ package dbhealer
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -350,4 +351,159 @@ func materialize(tx *sql.Tx) error {
 	}
 	_, err = tx.Exec("UPDATE GuardianCacheState SET dirty=0 WHERE id=1")
 	return err
+}
+
+// HealPlaylistPersistence restores isPersisted and isExplicitlyExported on
+// locally populated playlists (and their ancestor folders) whose persistence
+// flags were stripped to 0/NULL by Engine DJ Desktop 5.0.0 Sync Manager
+// exports (#336 S15, t/70166), without resurrecting empty deleted tombstones
+// or foreign-drive stub playlists.
+func HealPlaylistPersistence(db *sql.DB) (int, error) {
+	var fixed int
+	err := transaction(db, func(tx *sql.Tx) error {
+		var e error
+		fixed, e = healPlaylistPersistence(tx)
+		return e
+	})
+	return fixed, err
+}
+
+func healPlaylistPersistence(tx *sql.Tx) (int, error) {
+	cols, err := tx.Query("PRAGMA table_info(Playlist)")
+	if err != nil {
+		return 0, err
+	}
+	var hasPersisted, hasExported bool
+	for cols.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := cols.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			cols.Close()
+			return 0, err
+		}
+		switch name {
+		case "isPersisted":
+			hasPersisted = true
+		case "isExplicitlyExported":
+			hasExported = true
+		}
+	}
+	if err := cols.Err(); err != nil {
+		cols.Close()
+		return 0, err
+	}
+	cols.Close()
+	if !hasPersisted || !hasExported {
+		return 0, nil
+	}
+
+	var localUUID string
+	if err := tx.QueryRow("SELECT COALESCE(uuid,'') FROM Information LIMIT 1").Scan(&localUUID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+
+	rows, err := tx.Query("SELECT id, COALESCE(parentListId,0), COALESCE(isPersisted,0) FROM Playlist ORDER BY id")
+	if err != nil {
+		return 0, err
+	}
+	parent := make(map[int64]int64)
+	persisted := make(map[int64]int)
+	var allIDs []int64
+	for rows.Next() {
+		var id, parentID int64
+		var isPersisted int
+		if err := rows.Scan(&id, &parentID, &isPersisted); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		parent[id] = parentID
+		persisted[id] = isPersisted
+		allIDs = append(allIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	if len(allIDs) == 0 {
+		return 0, nil
+	}
+
+	popRows, err := tx.Query(`SELECT DISTINCT pe.listId
+		FROM PlaylistEntity pe
+		JOIN Track t ON t.id = pe.trackId
+		WHERE COALESCE(pe.databaseUuid, '') = '' OR pe.databaseUuid = ?`, localUUID)
+	if err != nil {
+		return 0, err
+	}
+	toHeal := make(map[int64]bool)
+	for popRows.Next() {
+		var listID int64
+		if err := popRows.Scan(&listID); err != nil {
+			popRows.Close()
+			return 0, err
+		}
+		if p, ok := persisted[listID]; ok && p == 0 {
+			toHeal[listID] = true
+		}
+	}
+	if err := popRows.Err(); err != nil {
+		popRows.Close()
+		return 0, err
+	}
+	popRows.Close()
+
+	// Persist every unpersisted ancestor folder of any persisted or healed
+	// playlist (matching Engine's trigger_after_insert_isPersist invariant).
+	for _, id := range allIDs {
+		if persisted[id] == 0 && !toHeal[id] {
+			continue
+		}
+		seen := map[int64]bool{id: true}
+		for cur := parent[id]; cur != 0 && !seen[cur]; cur = parent[cur] {
+			seen[cur] = true
+			p, ok := persisted[cur]
+			if !ok {
+				break
+			}
+			if p == 0 {
+				toHeal[cur] = true
+			}
+		}
+	}
+	if len(toHeal) == 0 {
+		return 0, nil
+	}
+
+	depthOf := func(id int64) int {
+		d := 0
+		seen := map[int64]bool{id: true}
+		for cur := parent[id]; cur != 0 && !seen[cur]; cur = parent[cur] {
+			seen[cur] = true
+			if _, ok := parent[cur]; !ok {
+				break
+			}
+			d++
+		}
+		return d
+	}
+	ids := make([]int64, 0, len(toHeal))
+	for id := range toHeal {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		di, dj := depthOf(ids[i]), depthOf(ids[j])
+		if di != dj {
+			return di < dj
+		}
+		return ids[i] < ids[j]
+	})
+	for _, id := range ids {
+		if _, err := tx.Exec("UPDATE Playlist SET isPersisted=1, isExplicitlyExported=1 WHERE id=?", id); err != nil {
+			return 0, err
+		}
+	}
+	return len(ids), nil
 }
