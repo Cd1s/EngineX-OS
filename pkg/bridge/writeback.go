@@ -423,8 +423,8 @@ func writtenDigestIgnoringMainCueTail(beats, cues, loops []byte) []byte {
 		if err != nil {
 			raw = blob
 		}
-		if i == 1 && len(raw) >= 8 {
-			raw = raw[:len(raw)-8]
+		if i == 1 {
+			raw = normalizeMainCueForWrittenDigest(raw)
 		}
 		var n [8]byte
 		binary.BigEndian.PutUint64(n[:], uint64(len(raw)))
@@ -433,6 +433,28 @@ func writtenDigestIgnoringMainCueTail(beats, cues, loops []byte) []byte {
 	}
 	_, _ = h.Write(loops)
 	return h.Sum(nil)[:16]
+}
+
+func normalizeMainCueForWrittenDigest(raw []byte) []byte {
+	if len(raw) < 8 || binary.BigEndian.Uint64(raw) != 8 {
+		return raw
+	}
+	off := 8
+	for i := 0; i < 8; i++ {
+		if off >= len(raw) || len(raw)-off-1 < int(raw[off])+12 {
+			return raw
+		}
+		off += 1 + int(raw[off]) + 12
+	}
+	if off+17 != len(raw) {
+		return raw
+	}
+	out := append([]byte(nil), raw...)
+	if out[off+8] == 0 {
+		clear(out[off : off+8])
+	}
+	clear(out[off+9:])
+	return out
 }
 
 func needsCueRead(row dbCandidate) bool {
