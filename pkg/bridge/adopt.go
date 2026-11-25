@@ -2,7 +2,6 @@ package bridge
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -46,9 +45,7 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 	if has("BridgeWritten") {
 		written = `(SELECT digest FROM bridge.BridgeWritten w WHERE w.trackId=s.trackId)`
 	}
-	synced := `0,NULL`
-	rows, err := db.QueryContext(ctx, `SELECT s.path,s.trackId,s.fingerprint,`+written+`,`+synced+`,
-		NULL
+	rows, err := db.QueryContext(ctx, `SELECT s.path,s.trackId,s.fingerprint,`+written+`
 		FROM bridge.BridgeState s JOIN Track t ON t.id=s.trackId WHERE t.path=s.path`)
 	if err != nil {
 		return nil, err
@@ -56,19 +53,14 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 	for rows.Next() {
 		var p, fingerprint string
 		var id int64
-		var digest, syncedDigest []byte
-		var edit sql.NullInt64
-		var marked sql.NullBool
-		if err = rows.Scan(&p, &id, &fingerprint, &digest, &edit, &syncedDigest, &marked); err != nil {
+		var digest []byte
+		if err = rows.Scan(&p, &id, &fingerprint, &digest); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		rel := strings.TrimPrefix(p, "../")
 		complete := fingerprint != "" && !strings.HasPrefix(fingerprint, "fast:")
-		t := &rbstate.Track{Key: rbstate.FoldPath(rel), EngineID: id, Rel: rel, Resolved: complete, Rating: -1, Written: digest, Edit: 0, Synced: nil}
-		if complete && digest == nil && marked.Valid && !marked.Bool {
-			t.Perf = rbstate.PerfDeck
-		}
+		t := &rbstate.Track{Key: rbstate.FoldPath(rel), EngineID: id, Rel: rel, Resolved: complete, Rating: -1, Written: digest}
 		s.Tracks[t.Key] = t
 	}
 	if err = rows.Close(); err != nil {
@@ -79,23 +71,22 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 		byID[t.EngineID] = t
 	}
 	if has("BridgeFastBase") {
-		fastRows, e := db.QueryContext(ctx, `SELECT f.trackId,f.record,f.rating,f.quickCues,f.loops,f.active,s.fingerprint
+		fastRows, e := db.QueryContext(ctx, `SELECT f.trackId,f.record,f.quickCues,f.loops,f.active,s.fingerprint
 			FROM bridge.BridgeFastBase f JOIN bridge.BridgeState s ON s.trackId=f.trackId WHERE s.fingerprint LIKE 'fast:%'`)
 		if e != nil {
 			return nil, e
 		}
 		for fastRows.Next() {
 			var id, record int64
-			var rating int64
 			var cues, loops []byte
 			var active int64
 			var fingerprint string
-			if e = fastRows.Scan(&id, &record, &rating, &cues, &loops, &active, &fingerprint); e != nil {
+			if e = fastRows.Scan(&id, &record, &cues, &loops, &active, &fingerprint); e != nil {
 				fastRows.Close()
 				return nil, e
 			}
 			if t := byID[id]; t != nil && record == enginedb.FastBaseRecord(fingerprint) {
-				t.FastRating, t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = int(rating), cues, loops, uint32(active), true
+				t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = cues, loops, uint32(active), true
 			}
 		}
 		if e = fastRows.Close(); e != nil {

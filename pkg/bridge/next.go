@@ -87,12 +87,9 @@ func liveLibrary(ctx context.Context, file string) (uuid string, content bool, e
 		if e := db.QueryRowContext(ctx, `SELECT seq FROM sqlite_sequence WHERE name='Track'`).Scan(&seq); e != nil && !errors.Is(e, sql.ErrNoRows) {
 			return "", false, e
 		}
-		if enginedb.HasRGBOverviews(filepath.Dir(file), uuid) && (!seq.Valid || seq.Int64 == 0) {
+		if enginedb.HasRGBOverviews(filepath.Dir(file), uuid) || (seq.Valid && seq.Int64 > 0) {
 			return "", false, nil
 		}
-	}
-	if err == nil && !content {
-		content = enginedb.HasRGBOverviews(filepath.Dir(file), uuid)
 	}
 	return strings.TrimSpace(uuid), content, err
 }

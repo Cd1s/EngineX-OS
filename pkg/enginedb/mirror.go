@@ -556,7 +556,6 @@ func (mr *mirroring) tables() (again []string, err error) {
 		mr.m.Tables[name] = h.Sum64()
 		if known {
 			again = append(again, name)
-			mr.out.Lists = mr.out.Lists || name == "Playlist" || name == "PlaylistEntity"
 		}
 	}
 	return again, nil

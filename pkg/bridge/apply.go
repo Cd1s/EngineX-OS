@@ -146,18 +146,24 @@ func (w *window) open() error {
 		return err
 	}
 	_, oldErr := os.Stat(filepath.Join(w.dir, oldStateName))
-	tracks, lists, countErr := lib.Counts(w.ctx)
-	if countErr != nil {
-		return countErr
+	empty, err := lib.Empty(w.ctx)
+	if err != nil {
+		return err
 	}
-	if tracks == 0 && lists == 0 && enginedb.HasRGBOverviews(w.dir, lib.UUID()) {
+	if empty {
 		hasSequence, seqErr := lib.HasTrackSequence(w.ctx)
 		if seqErr != nil {
 			return seqErr
 		}
-		if !hasSequence {
+		if enginedb.HasRGBOverviews(w.dir, lib.UUID()) || hasSequence {
+			// A previously populated library emptied on the deck must not reuse its UUID
+			// or restart Track IDs onto stale OverviewData/<uuid>/<id>.rgb files.
 			w.snap = rbstate.New("")
 			w.close()
+			return nil
+		}
+		if snap == nil && oldErr != nil {
+			w.close() // Engine's pristine skeleton: a library is built under its UUID
 			return nil
 		}
 	}
@@ -165,31 +171,21 @@ func (w *window) open() error {
 	case snap != nil && snap.LibraryUUID == lib.UUID() && snap.Rules == rbstate.Rules:
 		w.snap, w.head = snap, snap.Header
 	case oldErr == nil && !w.next:
-		if err = lib.MigrateLegacyArtwork(w.ctx, 2*time.Second); err != nil {
-			return err
+		artBudget := 2 * time.Second
+		if d, ok := w.ctx.Deadline(); ok {
+			if quarter := time.Until(d) / 4; quarter < artBudget {
+				artBudget = quarter
+			}
+		}
+		if artBudget > 0 {
+			if err = lib.MigrateLegacyArtwork(w.ctx, artBudget); err != nil {
+				return err
+			}
 		}
 		if w.snap, err = adopt(w.ctx, db, w.dir, lib.UUID()); err != nil {
 			return err
 		}
 		log.Printf("rb-bridge: library of an earlier build taken over: %d tracks, %d lists", len(w.snap.Tracks), len(w.snap.Lists))
-	default:
-		tracks, lists, err := lib.Counts(w.ctx)
-		if err != nil {
-			return err
-		}
-		if tracks == 0 && lists == 0 {
-			hasSequence, err := lib.HasTrackSequence(w.ctx)
-			if err != nil {
-				return err
-			}
-			if !enginedb.HasRGBOverviews(w.dir, lib.UUID()) || !hasSequence {
-				if enginedb.HasRGBOverviews(w.dir, lib.UUID()) && !hasSequence {
-					w.snap.LibraryUUID = ""
-				}
-				w.close() // Engine's skeleton: a library is built under its UUID
-				return nil
-			}
-		}
 	}
 	if err = w.reconcile(); err != nil {
 		return err
@@ -266,7 +262,7 @@ func (w *window) note(vt *ViewTrack, id int64, native bool) *rbstate.Track {
 	t := &rbstate.Track{Key: vt.Key, EngineID: id, Rel: vt.Rel, Refs: vt.Refs, Row: vt.Hash, Rating: vt.Track.Rating, Native: native}
 	if !native {
 		base := enginedb.FastBaseForTrack(vt.Track)
-		t.FastRating, t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = int(base.Rating), base.Cues, base.Loops, base.Active, true
+		t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = base.Cues, base.Loops, base.Active, true
 	}
 	w.snap.Tracks[vt.Key] = t
 	return t
@@ -769,10 +765,9 @@ func (w *window) applyStaged() error {
 		} else {
 			p := &full.Perf
 			perf := enginedb.Performance{TrackData: p.TrackData, Overview: p.Overview, Beats: p.Beats, QuickCues: p.QuickCues, Loops: p.Loops, ActiveLoops: p.ActiveLoops, Complete: p.Complete, Digest: e.Digest}
-			prev := enginedb.PerfPrev{State: t.Perf, Written: t.Written, FastKnown: t.FastKnown, FastRating: int64(t.FastRating), FastCues: t.FastCues, FastLoops: t.FastLoops, FastActive: t.FastActive}
-			if f, ok := filled[key]; ok && f.EngineID == t.EngineID && prev.State != rbstate.PerfDeck {
+			prev := enginedb.PerfPrev{State: t.Perf, Written: t.Written, FastKnown: t.FastKnown, FastCues: t.FastCues, FastLoops: t.FastLoops, FastActive: t.FastActive}
+			if f, ok := filled[key]; ok && f.EngineID == t.EngineID && prev.Written == nil && prev.State != rbstate.PerfDeck {
 				prev.Written = f.Written // the UI hook filled the row from the stage: the bridge's data, as if a window had written it
-				prev.BridgeFilled = true
 			}
 			digest, outcome, err := b.ApplyPerformance(w.ctx, t.EngineID, perf, full.Facts, prev, vt.Track)
 			if err != nil {
@@ -782,7 +777,7 @@ func (w *window) applyStaged() error {
 				t.Perf = rbstate.PerfDeck
 				kept++
 			}
-			t.FastRating, t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = 0, nil, nil, 0, false
+			t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = nil, nil, 0, false
 			// A list waveform only for a row the stick's library has, and not when the job staged the
 			// track with this row (the line names it): it wrote the file then. The look for it alone
 			// reads the folder, which holds a file a track (20,000: 4.3 s of a window for 30 tracks).

@@ -409,7 +409,7 @@ func readFilledStage(snap *rbstate.Snapshot) map[string]filledStageRow {
 			continue
 		}
 		full, err := stage.Read(e)
-		if err != nil {
+		if err != nil || full.Digest == nil || !bytes.Equal(full.Digest, f.WR) {
 			continue
 		}
 		out[f.K] = filledStageRow{id: f.ID, written: f.WR, beats: full.Perf.Beats, cues: full.Perf.QuickCues, loops: full.Perf.Loops}
