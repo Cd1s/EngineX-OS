@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -655,5 +656,208 @@ func TestNASStandaloneSMBSource59PlaylistsEndToEnd(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 || !bytes.Equal(gotAudio, mp3Bytes) {
 		t.Fatalf("SMB stream status=%d len=%d want=%d", resp.StatusCode, len(gotAudio), len(mp3Bytes))
+	}
+}
+
+func TestNASErrorsRedactCredentialsInGatewayAndLog(t *testing.T) {
+	dropSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				_ = conn.Close()
+				return
+			}
+		}
+		panic(http.ErrAbortHandler)
+	}))
+	defer dropSrv.Close()
+
+	const (
+		dummyUser  = "dummy-nas-user"
+		dummyPass  = "dummy-nas-pass-999"
+		dummyToken = "dummy-nas-token-999"
+	)
+	forbidden := []string{dummyPass, dummyToken, dummyUser, "t=", "s=", "p=", "X-Plex-Token", "?"}
+	assertNoLeak := func(t *testing.T, label, text string) {
+		t.Helper()
+		for _, bad := range forbidden {
+			if strings.Contains(text, bad) {
+				t.Errorf("%s leaked %q: %s", label, bad, text)
+			}
+		}
+	}
+
+	cases := []struct {
+		name    string
+		cfgJSON string
+	}{
+		{
+			name:    "subsonic-password",
+			cfgJSON: fmt.Sprintf(`{"protocol":"subsonic","url":%q,"username":%q,"password":%q,"enabled":true}`, dropSrv.URL, dummyUser, dummyPass),
+		},
+		{
+			name:    "subsonic-token",
+			cfgJSON: fmt.Sprintf(`{"protocol":"subsonic","url":%q,"username":%q,"token":%q,"enabled":true}`, dropSrv.URL, dummyUser, dummyToken),
+		},
+		{
+			name:    "plex-token",
+			cfgJSON: fmt.Sprintf(`{"protocol":"plex","url":%q,"token":%q,"enabled":true}`, dropSrv.URL, dummyToken),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			uiDir, stateDir := t.TempDir(), t.TempDir()
+			if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("sources=\nscope=nas\nomni_source=0\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s := New(Config{UIDir: uiDir, StateDir: stateDir, HTTP: dropSrv.Client()}, nil)
+			defer s.Close()
+
+			wCfg := httptest.NewRecorder()
+			s.handleNASConfig(wCfg, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(tc.cfgJSON)))
+			if wCfg.Code != http.StatusOK {
+				t.Fatalf("save NAS config failed (%d): %s", wCfg.Code, wCfg.Body.String())
+			}
+
+			// 1. /v1/users/1/playlists hint playlist JSON must not leak credentials.
+			reqList := httptest.NewRequest(http.MethodGet, "/v1/users/1/playlists?limit=50&offset=0", nil)
+			reqList.RemoteAddr = "127.0.0.1:1234"
+			wList := httptest.NewRecorder()
+			s.tidal.ServeHTTP(wList, reqList)
+			if wList.Code != http.StatusOK {
+				t.Fatalf("playlists status=%d body=%s", wList.Code, wList.Body.String())
+			}
+			hintBody := wList.Body.String()
+			if !strings.Contains(hintBody, hintPlaylist) {
+				t.Fatalf("expected hint playlist on dropped NAS, got: %s", hintBody)
+			}
+			assertNoLeak(t, "hint playlist JSON", hintBody)
+
+			// 2. /v1/playlists/{uuid}/tracks HTTP error body and stream-sync log line must not leak credentials.
+			plUUID := s.tidal.addPlaylist(playlistRef{
+				session:  nasScope,
+				provider: nasScope,
+				list:     providers.Playlist{ID: "pl-1", Title: "Crate"},
+			})
+			var logBuf bytes.Buffer
+			log.SetOutput(&logBuf)
+			defer log.SetOutput(os.Stderr)
+
+			reqTracks := httptest.NewRequest(http.MethodGet, "/v1/playlists/"+plUUID+"/tracks?limit=50&offset=0", nil)
+			reqTracks.RemoteAddr = "127.0.0.1:1234"
+			wTracks := httptest.NewRecorder()
+			s.tidal.ServeHTTP(wTracks, reqTracks)
+			log.SetOutput(os.Stderr)
+
+			if wTracks.Code != http.StatusBadGateway {
+				t.Fatalf("tracks status=%d body=%s", wTracks.Code, wTracks.Body.String())
+			}
+			assertNoLeak(t, "tracks HTTP error", wTracks.Body.String())
+			logged := logBuf.String()
+			if !strings.Contains(logged, "stream-sync: playlist open failed") {
+				t.Fatalf("expected playlist open failure log, got: %q", logged)
+			}
+			for _, bad := range []string{dummyPass, dummyToken, dummyUser, "X-Plex-Token", "?"} {
+				if strings.Contains(logged, bad) {
+					t.Errorf("playlist open failure log leaked %q: %s", bad, logged)
+				}
+			}
+			_, errPart, ok := strings.Cut(logged, "error=")
+			if !ok {
+				t.Fatalf("playlist open failure log missing error= field: %q", logged)
+			}
+			assertNoLeak(t, "playlist open failure log error=", errPart)
+
+			// 3. /v1/enginex/nas/test error body must not leak credentials.
+			wTest := httptest.NewRecorder()
+			s.handleNASTest(wTest, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas/test", strings.NewReader("{}")))
+			if wTest.Code != http.StatusBadGateway {
+				t.Fatalf("nas test status=%d body=%s", wTest.Code, wTest.Body.String())
+			}
+			assertNoLeak(t, "nas test error", wTest.Body.String())
+		})
+	}
+}
+
+func TestNASPlaylistOpenFailureEscapesLogInjection(t *testing.T) {
+	dropSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				_ = conn.Close()
+				return
+			}
+		}
+		panic(http.ErrAbortHandler)
+	}))
+	defer dropSrv.Close()
+
+	uiDir, stateDir := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("sources=\nscope=nas\nomni_source=0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{UIDir: uiDir, StateDir: stateDir, HTTP: dropSrv.Client()}, nil)
+	defer s.Close()
+
+	cfgJSON := fmt.Sprintf(`{"protocol":"subsonic","url":%q,"username":"dj","password":"pw","enabled":true}`, dropSrv.URL)
+	wCfg := httptest.NewRecorder()
+	s.handleNASConfig(wCfg, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(cfgJSON)))
+	if wCfg.Code != http.StatusOK {
+		t.Fatalf("save NAS config failed (%d): %s", wCfg.Code, wCfg.Body.String())
+	}
+
+	hostileID := "./Club\nstream-sync: forged=1\r\x1b[31m"
+	plUUID := s.tidal.addPlaylist(playlistRef{
+		session:  nasScope,
+		provider: nasScope,
+		list:     providers.Playlist{ID: hostileID, Title: "Club"},
+	})
+
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/playlists/"+plUUID+"/tracks?limit=50&offset=0", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	w := httptest.NewRecorder()
+	s.tidal.ServeHTTP(w, req)
+	log.SetOutput(os.Stderr)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("tracks status=%d body=%s", w.Code, w.Body.String())
+	}
+	line := logBuf.String()
+	if !strings.Contains(line, "stream-sync: playlist open failed") {
+		t.Fatalf("missing playlist open failure log: %q", line)
+	}
+	if strings.Count(strings.TrimSpace(line), "\n") != 0 || strings.ContainsAny(line, "\r\x1b") {
+		t.Fatalf("log injection not neutralized: %q", line)
+	}
+	wantSource := `source_id=nas:"Club\nstream-sync: forged=1\r\x1b[31m"`
+	if !strings.Contains(line, wantSource) {
+		t.Fatalf("log line missing quoted source_id %q: %q", wantSource, line)
+	}
+
+	// Verify OmniSource localProvider nas: IDs are also quoted and cannot inject newlines.
+	omniRef := &playlistRef{
+		session:  localProvider,
+		provider: localProvider,
+		list:     providers.Playlist{ID: "nas\x00./Crate\nforged=2"},
+	}
+	if got := playlistOpenSourceID(omniRef); got != `nas:"./Crate\nforged=2"` {
+		t.Fatalf("playlistOpenSourceID(local nas)=%q, want quoted", got)
+	}
+
+	// Verify newline in err (e.g. SMB path error echoing a hostile folder name) stays on one log line.
+	logBuf.Reset()
+	log.SetOutput(&logBuf)
+	s.tidal.logPlaylistOpenFailure(req, http.StatusBadGateway, plUUID, &playlistRef{
+		session:  nasScope,
+		provider: nasScope,
+		list:     providers.Playlist{ID: hostileID},
+	}, fmt.Errorf("open %s: file does not exist", hostileID))
+	log.SetOutput(os.Stderr)
+	errLine := logBuf.String()
+	if strings.Count(strings.TrimSpace(errLine), "\n") != 0 || strings.ContainsAny(errLine, "\r\x1b") {
+		t.Fatalf("error log injection not neutralized: %q", errLine)
 	}
 }

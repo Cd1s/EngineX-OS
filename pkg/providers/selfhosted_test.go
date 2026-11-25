@@ -618,3 +618,99 @@ func TestSelfHostedSubsonicErrorNotSavedAndWebDAVRelativeBase(t *testing.T) {
 		t.Fatalf("WebDAV DownloadTrack relative failed: %v (requested=%v)", err, requested)
 	}
 }
+
+func TestSelfHostedErrorsRedactCredentials(t *testing.T) {
+	dropSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				_ = conn.Close()
+				return
+			}
+		}
+		panic(http.ErrAbortHandler)
+	}))
+	defer dropSrv.Close()
+
+	const (
+		dummyUser  = "dummy-nas-user"
+		dummyPass  = "dummy-nas-pass-999"
+		dummyToken = "dummy-nas-token-999"
+	)
+	forbidden := []string{dummyPass, dummyToken, dummyUser, "t=", "s=", "p=", "X-Plex-Token", "?"}
+	assertClean := func(t *testing.T, op string, err error, wantSubstr string) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected error from dropped server, got nil", op)
+		}
+		msg := err.Error()
+		for _, bad := range forbidden {
+			if strings.Contains(msg, bad) {
+				t.Errorf("%s error leaked %q: %s", op, bad, msg)
+			}
+		}
+		if wantSubstr != "" && !strings.Contains(msg, wantSubstr) {
+			t.Errorf("%s error missing expected path %q: %s", op, wantSubstr, msg)
+		}
+	}
+
+	ctx := context.Background()
+	t.Run("subsonic-password", func(t *testing.T) {
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "subsonic",
+			URL:      dropSrv.URL,
+			Username: dummyUser,
+			Password: dummyPass,
+			Enabled:  true,
+		}, dropSrv.Client())
+		_, err := p.Playlists(ctx)
+		assertClean(t, "Playlists", err, "/rest/getPlaylists.view")
+		_, err = p.PlaylistTracks(ctx, "pl-1")
+		assertClean(t, "PlaylistTracks", err, "/rest/getPlaylist.view")
+		_, err = p.DownloadTrack(ctx, "tr-1", t.TempDir())
+		assertClean(t, "DownloadTrack", err, "/rest/stream.view")
+	})
+
+	t.Run("subsonic-token", func(t *testing.T) {
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "subsonic",
+			URL:      dropSrv.URL,
+			Username: dummyUser,
+			Token:    dummyToken,
+			Enabled:  true,
+		}, dropSrv.Client())
+		_, err := p.Playlists(ctx)
+		assertClean(t, "Playlists", err, "/rest/getPlaylists.view")
+		_, err = p.PlaylistTracks(ctx, "pl-1")
+		assertClean(t, "PlaylistTracks", err, "/rest/getPlaylist.view")
+		_, err = p.DownloadTrack(ctx, "tr-1", t.TempDir())
+		assertClean(t, "DownloadTrack", err, "/rest/stream.view")
+	})
+
+	t.Run("plex-token", func(t *testing.T) {
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "plex",
+			URL:      dropSrv.URL,
+			Token:    dummyToken,
+			Enabled:  true,
+		}, dropSrv.Client())
+		_, err := p.Playlists(ctx)
+		assertClean(t, "Playlists", err, "/playlists")
+		_, err = p.PlaylistTracks(ctx, "pl-1")
+		assertClean(t, "PlaylistTracks", err, "/playlists/pl-1/items")
+		_, err = p.DownloadTrack(ctx, "/library/parts/1/song.flac", t.TempDir())
+		assertClean(t, "DownloadTrack", err, "/library/parts/1/song.flac")
+	})
+
+	t.Run("webdav-userinfo-and-query", func(t *testing.T) {
+		host := strings.TrimPrefix(dropSrv.URL, "http://")
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "webdav",
+			URL:      "http://" + dummyUser + ":" + dummyPass + "@" + host + "/music?X-Plex-Token=" + dummyToken,
+			Enabled:  true,
+		}, dropSrv.Client())
+		_, err := p.Playlists(ctx)
+		assertClean(t, "Playlists", err, "/music")
+		_, err = p.DownloadTrack(ctx, "sub/song.flac", t.TempDir())
+		assertClean(t, "DownloadTrack", err, "/music/sub/song.flac")
+	})
+}

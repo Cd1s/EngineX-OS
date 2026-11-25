@@ -1233,7 +1233,7 @@ func playlistOpenSourceID(ref *playlistRef) string {
 	}
 	id := ref.list.ID
 	if ref.provider == nasScope {
-		return "nas:" + path.Base(id)
+		return fmt.Sprintf("nas:%q", path.Base(id))
 	}
 	if ref.provider != localProvider {
 		return id
@@ -1244,9 +1244,9 @@ func playlistOpenSourceID(ref *playlistRef) string {
 	}
 	switch parts[0] {
 	case "nas", "mount", "djay":
-		return parts[0] + ":" + parts[len(parts)-1]
+		return fmt.Sprintf("%s:%q", parts[0], parts[len(parts)-1])
 	default:
-		return "usb:" + parts[len(parts)-1]
+		return fmt.Sprintf("usb:%q", parts[len(parts)-1])
 	}
 }
 
@@ -1255,7 +1255,11 @@ func (g *tidalGateway) logPlaylistOpenFailure(r *http.Request, status int, id st
 	if ref != nil {
 		provider = ref.provider
 	}
-	log.Printf("stream-sync: playlist open failed route=%s status=%d scope=%s playlist=%s provider=%s session=%s source_id=%s error=%v", r.URL.Path, status, g.s.scope(), id, provider, playlistOpenSession(ref), playlistOpenSourceID(ref), err)
+	errText := fmt.Sprint(err)
+	if strings.ContainsAny(errText, "\r\n\x1b") {
+		errText = fmt.Sprintf("%q", errText)
+	}
+	log.Printf("stream-sync: playlist open failed route=%s status=%d scope=%s playlist=%s provider=%s session=%s source_id=%s error=%s", r.URL.Path, status, g.s.scope(), id, provider, playlistOpenSession(ref), playlistOpenSourceID(ref), errText)
 }
 func (g *tidalGateway) trackJSON(id int64, t providers.Track) map[string]any {
 	// Engine shows the BPM it is given for the track and builds its grid on it. A service's
