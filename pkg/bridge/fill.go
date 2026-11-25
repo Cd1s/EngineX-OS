@@ -216,7 +216,13 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		// /data is at its floor: what is staged goes into the next library and leaves the stage, and
 		// the job goes on. The remount is still asked for once, at the end.
 		log.Printf("rb-bridge: the stage of %s is full after %d of %d tracks; they go into the next library", mount, f.done, f.total)
-		if e := next.build(true, false); e != nil {
+		// The build empties the stage and starts its index again as a new file: the job's own handle
+		// is closed first, or the lines of every later track would go to the file that is gone.
+		e := stage.Close()
+		if e == nil {
+			e = next.build(true, false)
+		}
+		if e != nil {
 			log.Printf("rb-bridge: %v", e)
 			break
 		}
@@ -247,9 +253,19 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		ahead := exportWork(view.view.sources(), len(snap.Tracks))
 		ahead.warm, ahead.staged, ahead.updates = true, f.applicable(), snap.Pending.Rows
 		ahead.commits += ahead.staged/applyBatch + ahead.updates/updateBatch
+		// What a full stage sent into the next library already (in this run or one that was stopped)
+		// is on no stick yet and in no stage any more: only the next library publishes it.
+		parked := 0
+		if f.inNext != nil {
+			for key, t := range f.inNext.Tracks {
+				if s := snap.Tracks[key]; t.Perf != rbstate.PerfNone && (s == nil || s.Perf == rbstate.PerfNone || !s.Built.Equal(t.Built)) {
+					parked++
+				}
+			}
+		}
 		// (Only when there is something to publish: reading a 50,000-track export alone is more than
 		// a window has, and the job made a next library and asked for a remount after every swap.)
-		if e := errNoNext; ahead.staged+ahead.updates > 0 && view.view != nil && o.Stage == nil && ahead.cost() > hookWindow-spare {
+		if e := errNoNext; ahead.staged+ahead.updates+parked > 0 && view.view != nil && o.Stage == nil && (parked > 0 || ahead.cost() > hookWindow-spare) {
 			if e = next.build(false, true); e == nil {
 				res.Publish = next.ask()
 			} else if !errors.Is(e, errNoNext) && err == nil {

@@ -481,6 +481,47 @@ func TestSwapNeverGivesATrackAnotherTracksData(t *testing.T) {
 	nextLeftovers(t, mount)
 }
 
+// A deck's /data cannot hold the stage of a big library (KDATA: 306 MiB for 5,962 tracks; the
+// stage stops 256 MiB short of a full disk). At that floor the job writes what is staged into the
+// next library, takes it out of the stage and goes on, and one remount publishes every track:
+// also the ones whose records left the stage, however few are staged at the end.
+func TestFillGoesOnPastAFullStageThroughTheNextLibrary(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+	mount := filepath.Join(base, "stick")
+	testfixture.LargeExport(t, mount, 30)
+	mountNow(t, mount, MountOptions{})
+	old := putStaged
+	defer func() { putStaged = old }()
+	putStaged = func(s *rbstate.Stage, rec *rbstate.Staged) error {
+		if held, _ := filepath.Glob(filepath.Join(s.Dir(), "*.bin")); len(held) >= 8 { // room for eight tracks
+			return rbstate.ErrStageFull
+		}
+		return old(s, rec)
+	}
+	out := captureLog(t)
+	res := mustFill(t, mount, FillOptions{})
+	if res.Staged != 30 || res.Left != 0 || !res.Publish || strings.Count(out.String(), "is full after") != 3 {
+		t.Fatalf("the job with a stage of eight tracks: %+v\n%s", res, out)
+	}
+	if n := query(t, mount, `SELECT count(*) FROM PerformanceData WHERE beatData IS NOT NULL`); n[0][0] != "0" {
+		t.Fatalf("%s rows of the stick's library have data before the remount", n[0][0])
+	}
+	if _, log := hookWindowNow(t, mount); !strings.Contains(log, "mount swap") {
+		t.Fatalf("the window of the remount did not swap:\n%s", log)
+	}
+	if n := query(t, mount, `SELECT count(*) FROM PerformanceData WHERE beatData IS NOT NULL AND overviewWaveFormData IS NOT NULL`); n[0][0] != "30" {
+		t.Fatalf("%s of 30 rows have their data after the one remount", n[0][0])
+	}
+	if s := snapshot(t, mount); !s.Pending.None() {
+		t.Fatalf("pending after the remount: %+v", s.Pending)
+	}
+	if r := mustFill(t, mount, FillOptions{}); r.Publish || r.Staged != 0 {
+		t.Fatalf("the job after the remount: %+v", r)
+	}
+	nextLeftovers(t, mount)
+}
+
 // A window that cannot look for the rows the deck wrote and still end 3 s before the kill does
 // not swap: the stick's library stays as it is, the job takes the rows, and the next window
 // swaps. (50,000 tracks in one list: the look read 100,002 rows in 15.7 s and the window was
