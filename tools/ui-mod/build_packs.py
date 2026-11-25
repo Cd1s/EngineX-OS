@@ -4990,7 +4990,19 @@ SERVICES_MAIN = """
 			scStemFailed.interval = Math.max(1, 10000 - (now - next))
 			scStemFailed.restart()
 		} else {
+			if (scStemFailed.stop) scStemFailed.stop()
 			scStemFailed.interval = 10000
+		}
+	}
+	// Clear a row's failed Stems mark (and flag any open source request as loaded) once the track loads on a deck (#332).
+	function scStemClearFail(uri) {
+		const m = /^streaming:\\/\\/TIDAL\\/(?:Track\\/)?(\\d+)(?:[?#].*)?$/i.exec(uri || "")
+		if (!m) return
+		const gid = m[1]
+		if (root.scStemAsking && root.scStemAsking[gid]) root.scStemAsking[gid].loaded = true
+		if (root.scStemRows && root.scStemRows[gid] === "fail") {
+			if (root.scStemMark) root.scStemMark([gid], "")
+			if (root.scStemFailSweep) root.scStemFailSweep()
 		}
 	}
 	// A streamed track's Stems for Engine's queue, `rows` its marked rows.
@@ -5158,11 +5170,13 @@ SERVICES_MAIN = """
 			if (x.readyState !== 4) return
 			// The request was given up (its row stopped waiting) or a later tap replaced it: this answer is stale. Otherwise the queue (or nothing, after a
 			// failure) holds the track from here on.
-			if (!root.scStemAnswered(gid, gen)) return
+			const ans = root.scStemAnswered(gid, gen)
+			if (!ans) return
 			// The service gave no full file (a NetEase track this account only previews,
 			// no match, no network): say so on the row instead of dropping the tap.
 			if (x.status !== 200) {
 				console.warn("EngineX stems step=source-failed status=" + x.status)
+				if (ans === "loaded") { root.scStemMark([gid], null); return }
 				root.scStemMark([gid], "fail")
 				if (!scStemFailed.running) { scStemFailed.interval = 10000; scStemFailed.restart() }
 				return
@@ -5230,7 +5244,7 @@ SERVICES_MAIN = """
 		if (!open || open.gen !== gen) return false
 		delete scStemAsking[gid]
 		if (!Object.keys(scStemAsking).length) scStemExpiry.stop()
-		return true
+		return open.loaded ? "loaded" : true
 	}
 	// Gives up the requests that did not answer in time: the row stops waiting. Runs from scStemExpiry, which waits for the oldest open
 	// request and stops itself when none is open, so nothing runs while idle. The deck sets its clock from the network after boot: a request
@@ -5332,7 +5346,10 @@ SERVICES_MAIN = """
 			// used to jump to STEMS for every stemmed track, which is every track.
 			readonly property QObjProperty pUri: Planck.getProperty("/Engine/Deck%1/Track/TrackUri".arg(deckIdx))
 			readonly property string uri: pUri && pUri.translator ? pUri.translator.string : ""
+			readonly property QObjProperty pLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(deckIdx))
+			readonly property bool loaded: !!(pLoaded && pLoaded.translator && pLoaded.translator.state)
 			onUriChanged: root.scSwapStemmed(deckIdx, uri)
+			onLoadedChanged: if (loaded) root.scStemClearFail(uri)
 		}
 	}
 	property var scPriorityXhr: null
@@ -5365,7 +5382,8 @@ SERVICES_MAIN = """
 		// (TIDAL disabled in Sources keeps the pairing) the gateway can still be what plays, and "tidal" above is only the mark's default.
 		const real = root.scScope === "tidal" && root.scTidalLoggedIn
 		root.scNoteService(deck, m ? slot : "") // the last track's service must not outlive it
-		if (m && typeof root !== "undefined" && root && root.scStemRows && root.scStemRows[m[1]] === "fail") { if (root.scStemMark) root.scStemMark([m[1]], ""); if (root.scStemFailSweep) root.scStemFailSweep() }
+		if (typeof root !== "undefined" && root && root.scStemClearFail) root.scStemClearFail(uri)
+		else if (m && typeof root !== "undefined" && root && root.scStemRows && root.scStemRows[m[1]] === "fail") { if (root.scStemMark) root.scStemMark([m[1]], ""); if (root.scStemFailSweep) root.scStemFailSweep() }
 		if (!m) {
 			if (uri && root.scFourDeckRole === "") {
 				const np = Planck.getProperty("/Engine/Deck%1/Track/TrackNetworkPath".arg(deck))

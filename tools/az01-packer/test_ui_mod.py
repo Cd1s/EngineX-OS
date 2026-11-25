@@ -12239,6 +12239,137 @@ assert.equal(scStemFailAt['123'], undefined, 'scSwapStemmed must remove failed t
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_stems_download_failed_clears_on_song_loaded_and_in_flight_load(self):
+        """#332: 'Download failed' never lingers after a track is loaded — covers
+        SongLoaded without TrackUri change, in-flight stems/source failure after
+        load, stopping scStemFailed once empty, and isolating other failed rows."""
+        main = bp.SERVICES_MAIN
+        self.assertIn('Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(deckIdx))', main, "SongLoaded property missing")
+        self.assertIn('onLoadedChanged: if (loaded) root.scStemClearFail(uri)', main, "SongLoaded clear handler missing")
+        clear_m = re.search(r"function scStemClearFail\(uri\) \{[\s\S]*?\n\t\}", main)
+        self.assertIsNotNone(clear_m, "scStemClearFail missing")
+        stream_fn = re.search(r"function scStemStream\(uid\) \{[\s\S]*?\n\t\}", main).group(0)
+        mark_fn = re.search(r"function scStemMark\(ids, mark\) \{[\s\S]*?\n\t\}", main).group(0)
+        sweep_fn = re.search(r"function scStemFailSweep\(\) \{[\s\S]*?\n\t\}", main).group(0)
+        ask_fn = re.search(r"function scStemAsk\(gid\) \{[\s\S]*?\n\t\}", main).group(0)
+        answered_fn = re.search(r"function scStemAnswered\(gid, gen\) \{[\s\S]*?\n\t\}", main).group(0)
+        swap_fn = re.search(r"function scSwapStemmed\(deck, uri\) \{[\s\S]*?\n\t\}", main).group(0)
+        script = f"""
+const assert = require('assert');
+String.prototype.arg = function(v) {{ return this.replace(/%1/g, v); }};
+console.warn = () => {{}};
+let now = 1000;
+Date.now = () => now;
+const xhrs = [];
+class XMLHttpRequest {{
+    open(m, u) {{ this.url = u; }}
+    send() {{ xhrs.push(this); }}
+}}
+let scStemRows = {{}}, scStemGen = 0;
+const scStemFailAt = {{}}, scStemAsking = {{}}, turns = [];
+const scStemExpiry = {{ running: false, interval: 0, restart() {{ this.running = true; }}, stop() {{ this.running = false; }} }};
+const scStemAskMs = 120000;
+const scStemFailed = {{
+    interval: 10000,
+    running: false,
+    due: null,
+    restart() {{ this.running = true; this.due = now + this.interval; }},
+    stop() {{ this.running = false; this.due = null; }},
+}};
+const Planck = {{
+    librarianController: {{
+        collectionController: {{
+            getTrackUrisFromUniversalIds: ids => 'uri=streaming://TIDAL/Track/' + String(ids[0]).replace(/^u/, ''),
+        }},
+    }},
+    getProperty: () => ({{translator: {{state: false, string: ''}}}}),
+}};
+const root = {{
+    scScope: 'netease',
+    scTidalLoggedIn: false,
+    scLoadSeq: {{}},
+    scDeckList: () => [1, 2],
+    scDeckLocked: () => false,
+    scStemMark: (ids, mark) => scStemMark(ids, mark),
+    scStemFailSweep: () => scStemFailSweep(),
+    scStemClearFail: uri => scStemClearFail(uri),
+    scStemAsk: gid => scStemAsk(gid),
+    scStemAnswered: (gid, gen) => scStemAnswered(gid, gen),
+    scStemTurn: (gid, run) => turns.push(gid),
+    scNoteService: () => {{}},
+    scStemPending: () => ({{}}),
+    scStemMax: 8,
+    scStemAsking,
+    scStemFailAt,
+    get scStemRows() {{ return scStemRows; }},
+}};
+{mark_fn}
+{sweep_fn}
+{clear_m.group(0)}
+{ask_fn}
+{answered_fn}
+{stream_fn}
+{swap_fn}
+
+// 1. Clearing the sole failed mark via SongLoaded (same TrackUri) stops scStemFailed immediately.
+scStemMark(['123'], 'fail');
+scStemFailed.restart();
+assert.equal(scStemFailed.running, true);
+scStemClearFail('streaming://tidal/Track/123?src=deck');
+assert.equal(scStemRows['123'], undefined, 'SongLoaded clear must remove fail mark');
+assert.equal(scStemFailAt['123'], undefined, 'SongLoaded clear must remove fail timestamp');
+assert.equal(scStemFailed.running, false, 'scStemFailed timer must stop when no failures remain');
+
+// 2. Loading a different track leaves an unrelated failed row and its timer intact.
+scStemMark(['123'], 'fail');
+scStemFailed.restart();
+now = 4000;
+scStemMark(['456'], 'fail');
+scStemClearFail('streaming://TIDAL/Track/999');
+assert.equal(scStemRows['123'], 'fail');
+assert.equal(scStemRows['456'], 'fail');
+assert.equal(scStemFailed.running, true);
+// Clearing track 123 keeps track 456's timer armed for its own remaining window (14000).
+scStemClearFail('streaming://TIDAL/Track/123');
+assert.equal(scStemRows['123'], undefined);
+assert.equal(scStemRows['456'], 'fail');
+assert.equal(scStemFailed.running, true);
+assert.equal(scStemFailed.due, 14000);
+scStemClearFail('streaming://TIDAL/Track/456');
+assert.equal(scStemFailed.running, false);
+
+// 3. In-flight race: Stems requested -> track loads on a deck -> XHR later 404s.
+// Must clear 'wait' and never show 'fail' or arm the 10 s timer (both onUriChanged and SongLoaded-only).
+now = 20000;
+assert.equal(scStemStream('u777'), true);
+assert.equal(scStemRows['777'], 'wait');
+scSwapStemmed(1, 'streaming://TIDAL/Track/777');
+const req404 = xhrs.find(x => x.url.includes('stems/source?id=777'));
+req404.readyState = 4; req404.status = 404; req404.onreadystatechange();
+assert.equal(scStemRows['777'], undefined, 'late 404 after deck load must not mark fail');
+assert.equal(scStemFailAt['777'], undefined);
+assert.equal(scStemFailed.running, false);
+
+assert.equal(scStemStream('u778'), true);
+scStemClearFail('streaming://tidal/778');
+const req404b = xhrs.find(x => x.url.includes('stems/source?id=778'));
+req404b.readyState = 4; req404b.status = 404; req404b.onreadystatechange();
+assert.equal(scStemRows['778'], undefined, 'late 404 after SongLoaded clear must not mark fail');
+assert.equal(scStemFailAt['778'], undefined);
+assert.equal(scStemFailed.running, false);
+
+// 4. In-flight success: loading a track while stems/source is in flight still queues on 200.
+assert.equal(scStemStream('u888'), true);
+scSwapStemmed(1, 'streaming://TIDAL/Track/888');
+const req200 = xhrs.find(x => x.url.includes('stems/source?id=888'));
+req200.readyState = 4; req200.status = 200; req200.responseText = JSON.stringify({{path: '/media/u/888.flac'}});
+req200.onreadystatechange();
+assert.deepEqual(turns, ['888'], 'loading while in flight must not block a 200 stems download');
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
 
 class WholeBpmTest(unittest.TestCase):
     def test_no_separate_whole_bpm_setting(self):
