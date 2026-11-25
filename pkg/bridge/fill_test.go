@@ -13,8 +13,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
