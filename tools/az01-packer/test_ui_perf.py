@@ -302,5 +302,233 @@ assert.equal(entered, 0);
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class SessionLongevityTest(unittest.TestCase):
+    """S7: BreadcrumbView proxy-model lifetime and bounded deck/overlay/TrackInfo album art."""
+
+    def _edits_for(self, root: str):
+        saved = packs.ROOT
+        try:
+            packs.ROOT = root
+            return packs.edits(False)
+        finally:
+            packs.ROOT = saved
+
+    @staticmethod
+    def _join_replacements(fixes):
+        return "\n".join(new for _, new in fixes)
+
+    def test_breadcrumb_proxy_model_ownership_edits_registered_on_both_bases(self):
+        for root, label in (("Skins/Embedded/", "5.3.0"), ("Skins/EmbeddedCommon/", "5.0.4")):
+            with self.subTest(base=label):
+                ed = self._edits_for(root)
+                svh = root + "Views/BrowseView/Components/BreadcrumbView/Handlers/StackViewHandler.qml"
+                bsv = root + "Views/BrowseView/Components/BreadcrumbView/BreadcrumbStackView.qml"
+                self.assertTrue(svh in ed, f"{label}: missing StackViewHandler.qml ownership patch")
+                self.assertTrue(bsv in ed, f"{label}: missing BreadcrumbStackView.qml lifetime patch")
+                svh_new = self._join_replacements(ed[svh])
+                bsv_new = self._join_replacements(ed[bsv])
+                self.assertIn("scOwnsModel: true", svh_new)
+                self.assertIn("function scReleaseChildModel(", bsv_new)
+                self.assertIn("property bool scOwnsModel: false", bsv_new)
+                self.assertIn("if (scOwnsModel && model && typeof model.destroy === \"function\")", bsv_new)
+                self.assertGreaterEqual(bsv_new.count("scOwnsModel: true"), 2)
+                self.assertGreaterEqual(bsv_new.count("stackView.scReleaseChildModel("), 3)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise QML JavaScript")
+    def test_breadcrumb_release_and_handoff_state_machine_under_node(self):
+        ed = self._edits_for("Skins/Embedded/")
+        bsv = "Skins/Embedded/Views/BrowseView/Components/BreadcrumbView/BreadcrumbStackView.qml"
+        self.assertTrue(bsv in ed, "missing BreadcrumbStackView.qml edits")
+        bsv_new = self._join_replacements(ed[bsv])
+        m = re.search(r"function scReleaseChildModel\(m\)\s*\{.*?\n    \}", bsv_new, re.S)
+        self.assertIsNotNone(m, "scReleaseChildModel helper missing from BreadcrumbStackView edits")
+        helper_js = m.group(0)
+        script = r'''
+const assert = require('node:assert/strict');
+const StackView = { DontLoad: 1 };
+let nextId = 1, live = 0, destroyed = 0, doubleDestroyed = 0;
+function makeModel() {
+    live++;
+    return {
+        id: nextId++,
+        alive: true,
+        destroy() {
+            if (!this.alive) { doubleDestroyed++; return; }
+            this.alive = false; live--; destroyed++;
+        }
+    };
+}
+const stack = [];
+const stackView = {
+    get depth() { return stack.length; },
+    get(i, mode) { assert.equal(mode, StackView.DontLoad); return stack[i]; },
+    replace(item) {
+        const old = stack.pop();
+        if (old) destroyContentView(old);
+        stack.push(item);
+    },
+    push(item) { stack.push(item); },
+    pop() {
+        const old = stack.pop();
+        if (old) destroyContentView(old);
+    },
+};
+function destroyContentView(cv) {
+    // Destroy models owned by contentView (parented childModels + scOwnsModel root).
+    for (const m of cv.parented) if (m && m.alive) m.destroy();
+    if (cv.scOwnsModel && cv.model && typeof cv.model.destroy === 'function') cv.model.destroy();
+}
+''' + helper_js + r'''
+stackView.scReleaseChildModel = scReleaseChildModel;
+
+// 1. 50 source switches (StackViewHandler.replace with scOwnsModel: true) must leak 0 root models.
+for (let i = 0; i < 50; i++) {
+    const rootModel = makeModel();
+    stackView.replace({ model: rootModel, scOwnsModel: true, childModels: [], parented: [] });
+}
+assert.equal(live, 1, 'only the active root model remains live after 50 source switches');
+assert.equal(doubleDestroyed, 0);
+
+// 2. 200 delegate scroll overwrites across 60 rows keep live childModels <= 60 (0 leaked).
+const rootItem = stack[0];
+for (let sweep = 0; sweep < 4; sweep++) {
+    for (let row = 0; row < 50; row++) {
+        const nextChild = makeModel();
+        rootItem.parented.push(nextChild);
+        const prevChild = rootItem.childModels[row];
+        rootItem.childModels[row] = nextChild;
+        if (prevChild && prevChild !== nextChild) stackView.scReleaseChildModel(prevChild);
+    }
+}
+assert.equal(live, 51, '1 root + 50 active row childModels after 4 full scroll sweeps');
+assert.equal(doubleDestroyed, 0);
+
+// 3. Pushed stack item referencing childModels[5]: overwriting childModels[5] must NOT destroy it
+//    while still on the stack, must transfer scOwnsModel=true to the pushed page, and destroy on pop.
+const pushedModel = rootItem.childModels[5];
+stackView.push({ model: pushedModel, scOwnsModel: false, childModels: [], parented: [] });
+const replacement = makeModel();
+rootItem.parented.push(replacement);
+const prev5 = rootItem.childModels[5];
+rootItem.childModels[5] = replacement;
+stackView.scReleaseChildModel(prev5);
+assert.equal(pushedModel.alive, true, 'active stacked model must stay alive until popped');
+assert.equal(stack[1].scOwnsModel, true, 'ownership transferred to stacked page');
+stackView.pop();
+assert.equal(pushedModel.alive, false, 'transferred model destroyed cleanly on pop');
+assert.equal(live, 51);
+
+// 4. onRowsRemoved (with sparse undefined entries) and onRowsInserted release all unused models.
+rootItem.childModels[55] = undefined;
+const removed = rootItem.childModels.splice(10, 10);
+for (let i = 0; i < removed.length; i++) stackView.scReleaseChildModel(removed[i]);
+assert.equal(live, 41);
+const pushedBeforeClear = rootItem.childModels[2];
+stackView.push({ model: pushedBeforeClear, scOwnsModel: false, childModels: [], parented: [] });
+const prevAll = rootItem.childModels;
+rootItem.childModels = [];
+for (let i = 0; i < prevAll.length; i++) stackView.scReleaseChildModel(prevAll[i]);
+assert.equal(pushedBeforeClear.alive, true, 'pushed model survives onRowsInserted clear');
+assert.equal(live, 2, 'only root + still-pushed child model remain live');
+stackView.pop();
+assert.equal(pushedBeforeClear.alive, false);
+assert.equal(live, 1);
+
+// 5. deepSelect / deepSelectRememberedLocation push with scOwnsModel: true destroys on pop.
+const deepM = makeModel();
+stackView.push({ model: deepM, scOwnsModel: true, childModels: [], parented: [] });
+assert.equal(live, 2);
+stackView.pop();
+assert.equal(deepM.alive, false);
+assert.equal(live, 1);
+assert.equal(doubleDestroyed, 0);
+'''
+        result = subprocess.run(["node"], input=script, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_non_browse_album_art_images_bound_source_size_and_async_on_both_bases(self):
+        ed53 = self._edits_for("Skins/Embedded/")
+        for rel, expected_sz in (
+            ("Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/AlbumArt.qml", "Qt.size(256, 256)"),
+            ("Skins/EngineOS/UI/CompositeControls/Deck/MicroDeck.qml", "Qt.size(160, 160)"),
+            ("Skins/EngineOS/UI/CompositeControls/LoadOverlay/LoadOverlayTrackInfo.qml", "Qt.size(160, 160)"),
+            ("Skins/Embedded/Items/TrackInfo.qml", "Qt.size(144, 144)"),
+        ):
+            with self.subTest(base="5.3.0", rel=rel):
+                self.assertTrue(rel in ed53, f"5.3.0: missing edits for {rel}")
+                joined = self._join_replacements(ed53[rel])
+                self.assertIn(f"sourceSize: {expected_sz}", joined)
+                self.assertIn("asynchronous: true", joined)
+                if rel.endswith("/TrackInfo.qml"):
+                    self.assertEqual(joined.count(f"sourceSize: {expected_sz}"), 2)
+                    self.assertEqual(joined.count("asynchronous: true"), 2)
+
+        ed50 = self._edits_for("Skins/EmbeddedCommon/")
+        for rel, expected_sz, count in (
+            ("Skins/EmbeddedCommon/Items/TrackInfo.qml", "Qt.size(144, 144)", 2),
+            ("Skins/EmbeddedCommon/Views/LoadToDeckMenu/LoadToDeckTrackInfo.qml", "Qt.size(144, 144)", 1),
+        ):
+            with self.subTest(base="5.0.4", rel=rel):
+                self.assertTrue(rel in ed50, f"5.0.4: missing edits for {rel}")
+                joined = self._join_replacements(ed50[rel])
+                self.assertEqual(joined.count(f"sourceSize: {expected_sz}"), count)
+                self.assertEqual(joined.count("asynchronous: true"), count)
+
+        # Row 69 / Row 185 pin: BrowseView AlbumArt placeholder & native image://planck handling stay intact.
+        for root in ("Skins/Embedded/", "Skins/EmbeddedCommon/"):
+            ed = self._edits_for(root)
+            browse_art = self._join_replacements(ed[root + "Views/BrowseView/Components/Components/AlbumArt.qml"])
+            self.assertIn('objectName: "albumArt_placeholder"', browse_art)
+            self.assertIn('row.modelData.albumArt === "image://streaming/"', browse_art)
+
+    def test_generated_packs_compile_and_contain_s7_fixes_when_lab_present(self):
+        lab_roots = [
+            ("5.3.0", Path("/root/build/sc5000-lab/5.3.0/qrc"), "Skins/Embedded/"),
+            ("5.0.4", Path("/root/build/sc5000-lab/5.0.4/qrc"), "Skins/EmbeddedCommon/"),
+        ]
+        found_any = False
+        import tempfile
+        for ver, qrc, root in lab_roots:
+            if not (qrc / root / "EmbeddedMain.qml").is_file():
+                continue
+            found_any = True
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "packs"
+                res = subprocess.run(
+                    ["python3", str(Path(__file__).resolve().parents[1] / "ui-mod/build_packs.py"),
+                     "--qrc", str(qrc), "--out", str(out)],
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(res.returncode, 0, f"{ver} build_packs failed: {res.stderr}")
+                for lang in packs.LANGUAGES:
+                    pdir = out / lang
+                    svh = (pdir / root / "Views/BrowseView/Components/BreadcrumbView/Handlers/StackViewHandler.qml").read_text()
+                    bsv = (pdir / root / "Views/BrowseView/Components/BreadcrumbView/BreadcrumbStackView.qml").read_text()
+                    ti = (pdir / root / "Items/TrackInfo.qml").read_text()
+                    self.assertIn("scOwnsModel: true", svh)
+                    self.assertIn("function scReleaseChildModel(m)", bsv)
+                    self.assertEqual(ti.count("sourceSize: Qt.size(144, 144)"), 2)
+                    self.assertEqual(ti.count("asynchronous: true"), 2)
+                    # BrowseView AlbumArt Row 69/185 untouched across all languages.
+                    ba = (pdir / root / "Views/BrowseView/Components/Components/AlbumArt.qml").read_text()
+                    self.assertIn('objectName: "albumArt_placeholder"', ba)
+                    self.assertIn("sourceSize.width: parent.height", ba)
+                    if ver == "5.3.0":
+                        for rel, sz in (
+                            ("Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/AlbumArt.qml", "Qt.size(256, 256)"),
+                            ("Skins/EngineOS/UI/CompositeControls/Deck/MicroDeck.qml", "Qt.size(160, 160)"),
+                            ("Skins/EngineOS/UI/CompositeControls/LoadOverlay/LoadOverlayTrackInfo.qml", "Qt.size(160, 160)"),
+                        ):
+                            txt = (pdir / rel).read_text()
+                            self.assertIn(f"sourceSize: {sz}", txt, f"{ver}/{lang}/{rel}")
+                            self.assertIn("asynchronous: true", txt, f"{ver}/{lang}/{rel}")
+                    else:
+                        lt = (pdir / root / "Views/LoadToDeckMenu/LoadToDeckTrackInfo.qml").read_text()
+                        self.assertIn("sourceSize: Qt.size(144, 144)", lt)
+                        self.assertIn("asynchronous: true", lt)
+        if not found_any:
+            self.skipTest("no firmware QRC lab directory on this host")
+
+
 if __name__ == "__main__":
     unittest.main()

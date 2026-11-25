@@ -10242,6 +10242,153 @@ def edits(dev: bool):
         "\t\t\troot.scStemText(row.scStem, row.stemsRenderProgress, root.scStemLeft)\n"
         "\t\t} else if (row.isRenderingStems) {",
     )])
+    # #336 S7: long-session UI longevity.
+    # 1) BreadcrumbView proxy-model leak: StackViewHandler parents every root
+    # HierarchyFilterModel / HumanizedSortModel (+ FolderModel) to the immortal
+    # breadcrumbView singleton and never destroys it on replace(), while
+    # BreadcrumbStackView overwrites/splices/clears childModels[] and pushes
+    # deepSelect models onto currentItem without destroying replaced proxies.
+    # Under mlockall(), every leaked proxy stays connected to sourceModel signals
+    # and pins its V4 QML wrapper in /memfd:JSGCHeap:QtQml for the whole session.
+    svh_rel = v + "BrowseView/Components/BreadcrumbView/Handlers/StackViewHandler.qml"
+    bsv_rel = v + "BrowseView/Components/BreadcrumbView/BreadcrumbStackView.qml"
+    if v53():
+        out.setdefault(svh_rel, []).extend([(
+            "                        model: breadcrumbView.createModelComponent(\n"
+            "                            breadcrumbView,\n"
+            "                            breadcrumbView.model,\n"
+            "                            breadcrumbView.rootModelIndex\n"
+            "                        ),\n",
+            "                        model: breadcrumbView.createModelComponent(\n"
+            "                            breadcrumbView,\n"
+            "                            breadcrumbView.model,\n"
+            "                            breadcrumbView.rootModelIndex\n"
+            "                        ),\n"
+            "                        scOwnsModel: true,\n",
+        )])
+        out.setdefault(bsv_rel, []).extend([
+            ("    function deepSelectRememberedLocation(\n",
+             "    function scReleaseChildModel(m) {\n"
+             "        if (!m || typeof m.destroy !== \"function\") return\n"
+             "        for (let i = 0; i < stackView.depth; i++) {\n"
+             "            const it = stackView.get(i, StackView.DontLoad)\n"
+             "            if (it && it.model === m) {\n"
+             "                it.scOwnsModel = true\n"
+             "                return\n"
+             "            }\n"
+             "        }\n"
+             "        m.destroy()\n"
+             "    }\n\n"
+             "    function deepSelectRememberedLocation(\n"),
+            ("                        model: childModel,\n                        name: itemId,\n",
+             "                        model: childModel,\n                        scOwnsModel: true,\n                        name: itemId,\n"),
+            ("                            model: childModel,\n                            name: currentItem.model.data(index),\n",
+             "                            model: childModel,\n                            scOwnsModel: true,\n                            name: currentItem.model.data(index),\n"),
+            ("            property var childModels: []\n",
+             "            property var childModels: []\n            property bool scOwnsModel: false\n"),
+            ("                breadcrumbView.stackviewContentDestroyed()\n            }\n",
+             "                breadcrumbView.stackviewContentDestroyed()\n"
+             "                if (scOwnsModel && model && typeof model.destroy === \"function\") {\n"
+             "                    model.destroy()\n"
+             "                }\n"
+             "            }\n"),
+            ("                    contentView.childModels.splice(first, last - first + 1)\n",
+             "                    const removed = contentView.childModels.splice(first, last - first + 1)\n"
+             "                    for (let i = 0; i < removed.length; i++) stackView.scReleaseChildModel(removed[i])\n"),
+            ("                    contentView.childModels = []\n",
+             "                    const prevModels = contentView.childModels\n"
+             "                    contentView.childModels = []\n"
+             "                    for (let i = 0; i < prevModels.length; i++) stackView.scReleaseChildModel(prevModels[i])\n"),
+            ("                        contentView.childModels[rowIndex] = newChildModel\n",
+             "                        const prevChild = contentView.childModels[rowIndex]\n"
+             "                        contentView.childModels[rowIndex] = newChildModel\n"
+             "                        if (prevChild && prevChild !== newChildModel) {\n"
+             "                            stackView.scReleaseChildModel(prevChild)\n"
+             "                        }\n"),
+        ])
+    else:
+        out.setdefault(svh_rel, []).extend([(
+            "\t\t\t\t\tmodel: breadcrumbView.createModelComponent(breadcrumbView, breadcrumbView.model, breadcrumbView.rootModelIndex),\n",
+            "\t\t\t\t\tmodel: breadcrumbView.createModelComponent(breadcrumbView, breadcrumbView.model, breadcrumbView.rootModelIndex),\n"
+            "\t\t\t\t\tscOwnsModel: true,\n",
+        )])
+        out.setdefault(bsv_rel, []).extend([
+            ("\tfunction deepSelectRememberedLocation(",
+             "\tfunction scReleaseChildModel(m) {\n"
+             "\t\tif (!m || typeof m.destroy !== \"function\") return\n"
+             "\t\tfor (let i = 0; i < stackView.depth; i++) {\n"
+             "\t\t\tconst it = stackView.get(i, StackView.DontLoad)\n"
+             "\t\t\tif (it && it.model === m) {\n"
+             "\t\t\t\tit.scOwnsModel = true\n"
+             "\t\t\t\treturn\n"
+             "\t\t\t}\n"
+             "\t\t}\n"
+             "\t\tm.destroy()\n"
+             "\t}\n\n"
+             "\tfunction deepSelectRememberedLocation("),
+            ("\t\t\t\t\t\tmodel: childModel,\n\t\t\t\t\t\tname: itemId,\n",
+             "\t\t\t\t\t\tmodel: childModel,\n\t\t\t\t\t\tscOwnsModel: true,\n\t\t\t\t\t\tname: itemId,\n"),
+            ("\t\t\t\t\t\t\tmodel: childModel,\n\t\t\t\t\t\t\tname: currentItem.model.data(index)\n",
+             "\t\t\t\t\t\t\tmodel: childModel,\n\t\t\t\t\t\t\tscOwnsModel: true,\n\t\t\t\t\t\t\tname: currentItem.model.data(index)\n"),
+            ("\t\t\tproperty var childModels: []\n",
+             "\t\t\tproperty var childModels: []\n\t\t\tproperty bool scOwnsModel: false\n"),
+            ("\t\t\t\tbreadcrumbView.stackviewContentDestroyed()\n\t\t\t}\n",
+             "\t\t\t\tbreadcrumbView.stackviewContentDestroyed()\n"
+             "\t\t\t\tif (scOwnsModel && model && typeof model.destroy === \"function\") {\n"
+             "\t\t\t\t\tmodel.destroy()\n"
+             "\t\t\t\t}\n"
+             "\t\t\t}\n"),
+            ("\t\t\t\t\tcontentView.childModels.splice(first, (last - first) + 1)\n",
+             "\t\t\t\t\tconst removed = contentView.childModels.splice(first, (last - first) + 1)\n"
+             "\t\t\t\t\tfor (let i = 0; i < removed.length; i++) stackView.scReleaseChildModel(removed[i])\n"),
+            ("function onRowsInserted(parent, first, last) { contentView.childModels = [] }",
+             "function onRowsInserted(parent, first, last) {\n"
+             "\t\t\t\t\tconst prevModels = contentView.childModels\n"
+             "\t\t\t\t\tcontentView.childModels = []\n"
+             "\t\t\t\t\tfor (let i = 0; i < prevModels.length; i++) stackView.scReleaseChildModel(prevModels[i])\n"
+             "\t\t\t\t}"),
+            ("\t\t\t\t\t\tcontentView.childModels[rowIndex] = newChildModel\n",
+             "\t\t\t\t\t\tconst prevChild = contentView.childModels[rowIndex]\n"
+             "\t\t\t\t\t\tcontentView.childModels[rowIndex] = newChildModel\n"
+             "\t\t\t\t\t\tif (prevChild && prevChild !== newChildModel) {\n"
+             "\t\t\t\t\t\t\tstackView.scReleaseChildModel(prevChild)\n"
+             "\t\t\t\t\t\t}\n"),
+        ])
+    # 2) Unscaled non-BrowseView album art: PlanckImageProvider::requestTexture skips
+    # QImage::scaled() when sourceSize is unset, decoding full-res RGBA textures
+    # (1400x1400 = 7.48 MiB each) that blow Qt's 2 MiB QQuickPixmapStore cache and
+    # lock tens of MiB under mlockall(). BrowseView AlbumArt.qml stays untouched
+    # (Row 69 / Row 185).
+    if v53():
+        out.setdefault(ROOT + "Items/TrackInfo.qml", []).extend([
+            ("                    fillMode: Image.PreserveAspectCrop\n                    source: trackData.albumArt\n",
+             "                    fillMode: Image.PreserveAspectCrop\n                    sourceSize: Qt.size(144, 144)\n                    asynchronous: true\n                    source: trackData.albumArt\n"),
+            ("                        height: 144\n                        source: trackData.albumArt\n",
+             "                        height: 144\n                        sourceSize: Qt.size(144, 144)\n                        asynchronous: true\n                        source: trackData.albumArt\n"),
+        ])
+        out.setdefault("Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/AlbumArt.qml", []).extend([(
+            "        fillMode: Image.PreserveAspectCrop\n",
+            "        fillMode: Image.PreserveAspectCrop\n        sourceSize: Qt.size(256, 256)\n        asynchronous: true\n",
+        )])
+        out.setdefault("Skins/EngineOS/UI/CompositeControls/Deck/MicroDeck.qml", []).extend([(
+            "                objectName: \"MicroDeck_AlbumArt\"\n",
+            "                objectName: \"MicroDeck_AlbumArt\"\n                sourceSize: Qt.size(160, 160)\n                asynchronous: true\n",
+        )])
+        out.setdefault("Skins/EngineOS/UI/CompositeControls/LoadOverlay/LoadOverlayTrackInfo.qml", []).extend([(
+            "            objectName: \"LoadOverlayTrackInfo_AlbumArt\"\n",
+            "            objectName: \"LoadOverlayTrackInfo_AlbumArt\"\n            sourceSize: Qt.size(160, 160)\n            asynchronous: true\n",
+        )])
+    else:
+        out.setdefault(ROOT + "Items/TrackInfo.qml", []).extend([
+            ("\t\t\t\t\tfillMode: Image.PreserveAspectCrop\n\t\t\t\t\tsource: trackData.albumArt\n",
+             "\t\t\t\t\tfillMode: Image.PreserveAspectCrop\n\t\t\t\t\tsourceSize: Qt.size(144, 144)\n\t\t\t\t\tasynchronous: true\n\t\t\t\t\tsource: trackData.albumArt\n"),
+            ("\t\t\t\t\t\theight: 144\n\t\t\t\t\t\tsource: trackData.albumArt\n",
+             "\t\t\t\t\t\theight: 144\n\t\t\t\t\t\tsourceSize: Qt.size(144, 144)\n\t\t\t\t\t\tasynchronous: true\n\t\t\t\t\t\tsource: trackData.albumArt\n"),
+        ])
+        out.setdefault(v + "LoadToDeckMenu/LoadToDeckTrackInfo.qml", []).extend([(
+            "\t\t\t\tImage {\n\t\t\t\t\tid: albumArt\n",
+            "\t\t\t\tImage {\n\t\t\t\t\tid: albumArt\n\t\t\t\t\tsourceSize: Qt.size(144, 144)\n\t\t\t\t\tasynchronous: true\n",
+        )])
     if v53():
         # #305: Track Info's Source line names the service, not TIDAL (scBrand swaps the word; a deck's own track says which).
         out.setdefault(ROOT + "Items/TrackInfo.qml", []).extend([
