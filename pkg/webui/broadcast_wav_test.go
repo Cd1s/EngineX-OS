@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -74,22 +75,27 @@ func TestSavedMP3ConfigLoadsAsWAVAndStarts(t *testing.T) {
 	}
 }
 
-// An older client that still posts format and bitrate is not rejected, and the API
-// has no bitrate to offer any more.
-func TestBroadcastAPIHasNoBitrateAndIgnoresOldClients(t *testing.T) {
+// An older client that still posts format and bitrate is not rejected: the format follows the
+// protocol (WAV for Icecast) and the bitrate is the Shoutcast AAC one, the default when the
+// client's MP3 choice is not offered. (Until 5.3.0.6 the API had no bitrate at all.)
+func TestBroadcastAPIAcceptsOldClients(t *testing.T) {
 	s, _ := newTestServer(t)
-	body := []byte(`{"format":"mp3","bitrate":320,"streamName":"Old client"}`)
-	resp := doAuthRequest(t, s, "POST", "/api/broadcast", body)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("old client rejected with %d", resp.StatusCode)
-	}
-	for _, r := range []*http.Response{resp, doAuthRequest(t, s, "GET", "/api/broadcast", nil)} {
-		var st map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&st); err != nil {
-			t.Fatal(err)
+	for _, c := range []struct {
+		posted, want int
+	}{{320, 320}, {256, 192}} {
+		body := []byte(`{"format":"mp3","bitrate":` + strconv.Itoa(c.posted) + `,"streamName":"Old client"}`)
+		resp := doAuthRequest(t, s, "POST", "/api/broadcast", body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("old client rejected with %d", resp.StatusCode)
 		}
-		if _, ok := st["bitrate"]; ok || st["format"] != "wav" || st["streamName"] != "Old client" {
-			t.Errorf("status %v, want format wav, no bitrate, and the posted stream name", st)
+		for _, r := range []*http.Response{resp, doAuthRequest(t, s, "GET", "/api/broadcast", nil)} {
+			var st map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&st); err != nil {
+				t.Fatal(err)
+			}
+			if st["bitrate"] != float64(c.want) || st["format"] != "wav" || st["streamName"] != "Old client" {
+				t.Errorf("posted %d: status %v, want format wav, bitrate %d, and the posted stream name", c.posted, st, c.want)
+			}
 		}
 	}
 }
@@ -112,14 +118,17 @@ func TestLiveHeaderIsTheStreamingWAVHeader(t *testing.T) {
 }
 
 // A Shoutcast target saved by an older version, with Live Stream on, used to be
-// connected to, sent a WAV stream it cannot take, and retried for ever. Now nothing
-// is pushed, the status says what to do, and /live.wav keeps working.
-func TestSavedShoutcastConfigDoesNotPushAndSaysSo(t *testing.T) {
+// connected to, sent a WAV stream it cannot take, and retried for ever. It now gets AAC
+// (pkg/broadcast tests); on a deck without the AAC encoder nothing is pushed, the status
+// says why, and /live.wav keeps working. (Until 5.3.0.6 no Shoutcast target was pushed to.)
+func TestSavedShoutcastConfigWithoutAnEncoderIsNotPushed(t *testing.T) {
+	t.Setenv("ENGINEX_AACENC", filepath.Join(t.TempDir(), "enginex-aacenc")) // not there
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
+	listenerPort := ln.Addr().(*net.TCPAddr).Port - 1 // the source port is the next one up
 	connected := make(chan struct{}, 1)
 	go func() {
 		if conn, err := ln.Accept(); err == nil {
@@ -129,7 +138,7 @@ func TestSavedShoutcastConfigDoesNotPushAndSaysSo(t *testing.T) {
 	}()
 
 	s, stateDir := newTestServer(t)
-	saved := `{"enabled":true,"protocol":"shoutcast","serverUrl":"` + ln.Addr().String() + `","password":"x","format":"mp3","bitrate":192}`
+	saved := `{"enabled":true,"protocol":"shoutcast","serverUrl":"127.0.0.1:` + strconv.Itoa(listenerPort) + `","password":"x","format":"mp3","bitrate":192}`
 	if err := os.WriteFile(filepath.Join(stateDir, "broadcast-config.json"), []byte(saved), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -145,8 +154,8 @@ func TestSavedShoutcastConfigDoesNotPushAndSaysSo(t *testing.T) {
 	if err := json.NewDecoder(doAuthRequest(t, s, "GET", "/api/broadcast", nil).Body).Decode(&st); err != nil {
 		t.Fatal(err)
 	}
-	if !st.Enabled || st.Streaming || st.Protocol != "shoutcast" || !strings.Contains(st.LastError, "Shoutcast is not supported") {
-		t.Errorf("status %+v, want the saved Shoutcast target kept, not streaming, and a not-supported error", st)
+	if !st.Enabled || st.Streaming || st.Protocol != "shoutcast" || st.Format != "aac" || st.Bitrate != 192 || !strings.Contains(st.LastError, "AAC encoder unavailable") {
+		t.Errorf("status %+v, want the saved Shoutcast target kept as AAC at 192 kbps, not streaming, and the encoder error", st)
 	}
 
 	srv := httptest.NewServer(s)
@@ -162,26 +171,45 @@ func TestSavedShoutcastConfigDoesNotPushAndSaysSo(t *testing.T) {
 	}
 }
 
-// The console card shows the fixed WAV format and says how the push relates to
-// /live.wav; MP3, Ogg, bitrate and the Shoutcast choice are gone, and a saved Shoutcast
-// target is reported instead of pushed to. Only the Save button moves a setting to
-// Icecast: Start and Stop leave the protocol alone.
-func TestConsoleBroadcastCardIsWAVOnly(t *testing.T) {
+// The console card offers the two modes: Icecast with the fixed WAV format, and Shoutcast with
+// AAC at 128, 192 (default) or 320 kbps. MP3 and Ogg stay gone. Only the Save button sets the
+// protocol and bitrate: Start and Stop leave them alone. The card title ("Shoutcast / Icecast")
+// is true again, and status and errors of the Shoutcast mode are in all four languages.
+// (Until 5.3.0.6 the card was WAV only: TestConsoleBroadcastCardIsWAVOnly.)
+func TestConsoleBroadcastCardOffersIcecastWAVAndShoutcastAAC(t *testing.T) {
 	b, err := assets.ReadFile("index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
 	page := string(b)
-	for _, gone := range []string{`id="bcFmt"`, `id="bcBr"`, `id="bcProto"`, `kbps</option>`, `value="mp3"`, `value="shoutcast"`} {
+	for _, gone := range []string{`id="bcFmt"`, `value="mp3"`, `value="ogg"`} {
 		if strings.Contains(page, gone) {
 			t.Errorf("console still offers %s", gone)
 		}
 	}
-	if strings.Count(page, "protocol:'icecast'") != 1 || !strings.Contains(page, "post('broadcast',{...bcForm(),protocol:'icecast'})") {
-		t.Error("only the Save button should set the protocol to icecast")
+	for _, want := range []string{`<option value="icecast" data-i18n="bcProtoIce">`, `<option value="shoutcast" data-i18n="bcProtoSc">`,
+		`<option value="128">128 kbps</option><option value="192">192 kbps</option><option value="320">320 kbps</option></select>`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("console lacks %s", want)
+		}
 	}
-	for key, want := range map[string]string{"bcFormat": "1536", "bcRelay": "Icecast", "bcIntro": "live-header.wav", "bcShoutcast": "Icecast"} {
-		if !strings.Contains(page, `data-i18n="`+key+`"`) && !strings.Contains(page, "t('"+key+"')") {
+	if strings.Count(page, "kbps</option>") != 3 {
+		t.Error("the bitrate choice must be exactly 128, 192 and 320 kbps")
+	}
+	if !strings.Contains(page, "post('broadcast',{...bcForm(),protocol:$('bcProto').value,bitrate:+$('bcBr').value})") {
+		t.Error("Save should send the chosen protocol and bitrate")
+	}
+	toggle := page[strings.Index(page, "async function toggleBroadcast"):]
+	toggle = toggle[:strings.Index(toggle, "\n")]
+	form := page[strings.Index(page, "function bcForm"):]
+	form = form[:strings.Index(form, "\n")]
+	if strings.Contains(toggle+form, "protocol") || strings.Contains(toggle+form, "bitrate") {
+		t.Error("Start and Stop must leave the protocol and bitrate alone")
+	}
+	for key, want := range map[string]string{"bcTitle": "Shoutcast / Icecast", "bcFormat": "1536", "bcFormatAAC": "AAC-LC", "bcRelay": "AAC",
+		"bcIntro": "live-header.wav", "bcShoutcast": "+ 1", "bcProtoSc": "AAC", "bcProtoIce": "WAV", "bcBr": "AAC",
+		"bcDropped": "{0}", "bcEncMissing": "AAC", "bcEncFailed": "AAC", "bcScAuth": "Shoutcast"} {
+		if !strings.Contains(page, `data-i18n="`+key+`"`) && !strings.Contains(page, "t('"+key+"'") && !strings.Contains(page, "'"+key+"'") {
 			t.Errorf("%s is not shown on the card", key)
 		}
 		m := regexp.MustCompile(key + `:\[('(?:[^'\\]|\\.)*'),('(?:[^'\\]|\\.)*'),('(?:[^'\\]|\\.)*'),('(?:[^'\\]|\\.)*')\]`).FindStringSubmatch(page)
@@ -193,5 +221,8 @@ func TestConsoleBroadcastCardIsWAVOnly(t *testing.T) {
 				t.Errorf("%s: %s does not mention %s", key, text, want)
 			}
 		}
+	}
+	if strings.Contains(page, "Shoutcast is not supported") || strings.Contains(page, "Shoutcast 不受支持") {
+		t.Error("the console still says Shoutcast is not supported")
 	}
 }

@@ -218,45 +218,6 @@ func TestIcecastStreaming(t *testing.T) {
 	}
 }
 
-// SHOUTcast servers take MP3 or AAC, never WAV. A saved Shoutcast target used to be
-// connected to, sent RIFF/PCM and retried for ever; it is not pushed to now, Status
-// says what to do, and the local stream (/live.wav) keeps flowing.
-func TestShoutcastTargetIsNotPushed(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	connected := make(chan struct{}, 1)
-	go func() {
-		if conn, err := ln.Accept(); err == nil {
-			connected <- struct{}{}
-			conn.Close()
-		}
-	}()
-
-	b := New(newTestGuard())
-	defer b.Close()
-	if err := b.Configure(Config{Enabled: true, Protocol: "shoutcast", ServerURL: ln.Addr().String(), Password: "shoutpwd"}); err != nil {
-		t.Fatal(err)
-	}
-	pcm, cancel := b.Subscribe()
-	defer cancel()
-	select {
-	case <-pcm:
-	case <-time.After(2 * time.Second):
-		t.Fatal("the local stream does not flow")
-	}
-	select {
-	case <-connected:
-		t.Fatal("pushed to a Shoutcast server")
-	case <-time.After(500 * time.Millisecond):
-	}
-	if st := b.Status(); st.Streaming || !strings.Contains(st.LastError, "Shoutcast is not supported") || !strings.Contains(st.LastError, "Icecast") {
-		t.Errorf("status %+v, want not streaming and a Shoutcast-not-supported error", st)
-	}
-}
-
 // #245: saving a stream setting restarted capture together with the pusher and the LAN
 // stream, which closed every /live.wav listener: OBS and VLC had to reconnect on each
 // save. Now only what the setting is about restarts. Switching Live Stream off still
@@ -462,30 +423,6 @@ func TestUpdateMetadataIcecast(t *testing.T) {
 	}
 }
 
-// A saved Shoutcast target is not pushed to, so its track titles are not sent either
-// (the deck used to call the server's admin.cgi).
-func TestUpdateMetadataSkipsAShoutcastTarget(t *testing.T) {
-	hits := make(chan string, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits <- r.URL.Path
-	}))
-	defer server.Close()
-	b := New(newTestGuard())
-	defer b.Close()
-	b.cfg = Config{Protocol: "shoutcast", ServerURL: server.URL, Password: "mypass"}
-	if err := b.UpdateMetadata("Kraftwerk", "Autobahn"); err != nil {
-		t.Fatalf("UpdateMetadata: %v", err)
-	}
-	select {
-	case path := <-hits:
-		t.Fatalf("the Shoutcast server got a request for %s", path)
-	default:
-	}
-	if got := b.Status().CurrentTrack; got != "Kraftwerk - Autobahn" {
-		t.Errorf("current track = %q, want it kept for the local status", got)
-	}
-}
-
 func TestWAVStreaming(t *testing.T) {
 	// Test WAV container header and framing
 	lnWAV, err := net.Listen("tcp", "127.0.0.1:0")
@@ -625,29 +562,6 @@ func TestUpdateMetadataLastErrorDoesNotLeakPassword(t *testing.T) {
 	escaped := url.QueryEscape(secretPassword)
 	if strings.Contains(st.LastError, escaped) {
 		t.Fatalf("Status().LastError leaked escaped password: %s", st.LastError)
-	}
-}
-
-// The Shoutcast "not supported" text is added to an error that is already there, not put
-// in its place, and the password stays out of the combined text.
-func TestShoutcastNoticeIsAppendedToTheLastError(t *testing.T) {
-	b := New(newTestGuard())
-	defer b.Close()
-
-	secretPassword := "superSecretPassword123!@#"
-	b.cfg = Config{Protocol: "icecast", ServerURL: "http://127.0.0.1:59999", Password: secretPassword}
-	if err := b.UpdateMetadata("Artist", "Track"); err == nil {
-		t.Fatal("expected error updating metadata against unreachable URL")
-	}
-	before := b.Status().LastError
-	b.cfg.Protocol = "shoutcast" // the same target, saved as Shoutcast
-
-	got := b.Status().LastError
-	if !strings.HasPrefix(got, before+"; ") || !strings.Contains(got, "Shoutcast is not supported") {
-		t.Errorf("LastError = %q, want %q followed by the Shoutcast notice", got, before)
-	}
-	if strings.Contains(got, secretPassword) || strings.Contains(got, url.QueryEscape(secretPassword)) {
-		t.Errorf("LastError leaked the password: %s", got)
 	}
 }
 

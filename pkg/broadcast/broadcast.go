@@ -49,32 +49,30 @@ func BuiltinInput(path string) bool {
 // master bus to 48 kHz s16le stereo, matching X-Audio-Format and the LAN path.
 const SampleRate = 48000
 
-// wavKbps is the bitrate of the WAV stream (48 kHz x 16 bit x 2 channels), the
-// only output: no deck image ships an MP3 or Ogg encoder.
+// wavKbps is the bitrate of the WAV stream (48 kHz x 16 bit x 2 channels): /live.wav and the
+// Icecast push. No deck image ships an MP3 or Ogg encoder; the SHOUTcast mode sends AAC
+// through the stock libavcodec (shoutcast.go).
 const wavKbps = SampleRate * 16 * 2 / 1000
-
-// shoutcastUnsupported is why a saved Shoutcast target is not pushed to: SHOUTcast
-// servers take MP3 or AAC, never WAV. The local /live.wav stream is not affected.
-const shoutcastUnsupported = "Shoutcast is not supported: its servers take only MP3/AAC, not WAV. Save an Icecast server as the target; /live.wav still works"
 
 // Config specifies live stream parameters.
 type Config struct {
 	Enabled    bool   `json:"enabled"`
-	Protocol   string `json:"protocol"`            // "icecast" (default); "shoutcast" is kept for old settings only (its servers take MP3/AAC, not WAV)
+	Protocol   string `json:"protocol"`            // "icecast" (default, WAV) or "shoutcast" (AAC, see shoutcast.go)
 	ServerURL  string `json:"serverUrl"`           // e.g. "http://192.168.1.10:8000" or "192.168.1.10:8000"
 	Mountpoint string `json:"mountpoint"`          // e.g. "/live.mp3" (default "/live")
 	Username   string `json:"username"`            // default "source"
 	Password   string `json:"password,omitempty"`  // omitted in JSON output
-	Format     string `json:"format"`              // always "wav": old settings that say mp3 or ogg load as wav
+	Format     string `json:"format"`              // follows the protocol: "wav" for Icecast, "aac" for SHOUTcast; a saved mp3 or ogg loads as one of them
+	Bitrate    int    `json:"bitrate,omitempty"`   // SHOUTcast AAC bitrate in kbps: 128, 192 (default) or 320
 	StreamName string `json:"streamName"`          // default "EngineX OS Live Mix"
 	InputPath  string `json:"inputPath,omitempty"` // optional PCM file/FIFO path (default "/tmp/enginex-broadcast.pcm")
 	LANMode    string `json:"lanMode,omitempty"`   // "off" (default), "rtp", "teleport"
 	LANTarget  string `json:"lanTarget,omitempty"` // e.g. "239.255.0.1:5004" or "192.168.1.50:9998"
 }
 
-// pushes reports whether the WAV stream is sent to an external server. A Shoutcast
-// target is kept from old settings but not pushed to: its servers take MP3/AAC, not WAV.
-func (c Config) pushes() bool { return c.ServerURL != "" && c.Protocol != "shoutcast" }
+// pushes reports whether the stream is sent to an external server: WAV to Icecast, AAC to
+// SHOUTcast.
+func (c Config) pushes() bool { return c.ServerURL != "" }
 
 // Status captures real-time state of the broadcaster without revealing secrets.
 type Status struct {
@@ -86,10 +84,12 @@ type Status struct {
 	Username     string `json:"username"`
 	PasswordSet  bool   `json:"passwordSet"`
 	Format       string `json:"format"`
+	Bitrate      int    `json:"bitrate"` // the SHOUTcast mode's AAC bitrate
 	StreamName   string `json:"streamName"`
 	CurrentTrack string `json:"currentTrack"`
 	BytesSent    int64  `json:"bytesSent"`
-	Listeners    int    `json:"listeners"` // clients on the local /live.wav fan-out
+	Dropped      int64  `json:"dropped,omitempty"` // PCM chunks or AAC frames dropped because the server or encoder lagged
+	Listeners    int    `json:"listeners"`         // clients on the local /live.wav fan-out
 	ConnectedAt  string `json:"connectedAt,omitempty"`
 	LastError    string `json:"lastError,omitempty"`
 	LANMode      string `json:"lanMode,omitempty"`
@@ -100,7 +100,7 @@ type Status struct {
 	DriftPPM float64 `json:"driftPpm,omitempty"`
 }
 
-// Broadcaster manages background audio streaming to Icecast on CPU3.
+// Broadcaster manages background audio streaming to Icecast (WAV) or SHOUTcast (AAC) on CPU3.
 type Broadcaster struct {
 	ctl          sync.Mutex // serializes Configure/SetEnabled/Close; stopLocked drops mu while waiting
 	mu           sync.Mutex
@@ -113,6 +113,7 @@ type Broadcaster struct {
 	lastError    string
 
 	bytesSent atomic.Int64
+	dropped   atomic.Int64 // audio dropped instead of waiting on a slow server or encoder
 	driftPPB  atomic.Int64 // measured feed rate offset, parts per billion; 0 until measured
 	drift     float64      // last measured offset, kept across restarts of the capture loop
 	driftSet  bool
@@ -133,6 +134,8 @@ type Broadcaster struct {
 
 	// HTTP client used for metadata updates (can be overridden in tests).
 	httpClient *http.Client
+	// encoderCmd starts the SHOUTcast AAC encoder; nil means enginex-aacenc (tests set a fake).
+	encoderCmd encoderCommand
 }
 
 // New creates a new Broadcaster bound to the dedicated CPU3 guard.
@@ -147,6 +150,7 @@ func New(guard *resourceguard.Guard) *Broadcaster {
 			Mountpoint: DefaultMountpoint,
 			Username:   DefaultUsername,
 			Format:     DefaultFormat,
+			Bitrate:    DefaultBitrate,
 			StreamName: DefaultStreamName,
 			InputPath:  DefaultInputPath,
 			LANMode:    "off",
@@ -179,7 +183,14 @@ func normalizeConfig(cfg *Config) error {
 		return fmt.Errorf("invalid protocol: %q (must be 'icecast' or 'shoutcast')", cfg.Protocol)
 	}
 
-	cfg.Format = DefaultFormat // saved settings and older clients may still say mp3 or ogg
+	// The format follows the protocol; saved settings and older clients may still say mp3 or ogg.
+	cfg.Format = DefaultFormat
+	if cfg.Protocol == "shoutcast" {
+		cfg.Format = "aac"
+	}
+	if !validBitrate(cfg.Bitrate) {
+		cfg.Bitrate = DefaultBitrate // settings saved before 5.3.0.6 may carry any old MP3 bitrate
+	}
 
 	cfg.Mountpoint = strings.TrimSpace(cfg.Mountpoint)
 	if cfg.Mountpoint == "" {
@@ -274,12 +285,6 @@ func (b *Broadcaster) Status() Status {
 	// hid the reason behind "connected".
 	lanOn := b.cfg.LANMode != "" && b.cfg.LANMode != "off"
 	lanUp, lastError := false, b.lastError
-	if b.cfg.ServerURL != "" && b.cfg.Protocol == "shoutcast" {
-		if lastError != "" {
-			lastError += "; "
-		}
-		lastError += shoutcastUnsupported
-	}
 	lanErr, sent := b.lanErr, b.bytesSent.Load()
 	if b.lanStreamer != nil {
 		lanUp, lanErr = b.lanStreamer.Connected(), b.lanStreamer.Err()
@@ -300,9 +305,11 @@ func (b *Broadcaster) Status() Status {
 		Username:     b.cfg.Username,
 		PasswordSet:  b.cfg.Password != "",
 		Format:       b.cfg.Format,
+		Bitrate:      b.cfg.Bitrate,
 		StreamName:   b.cfg.StreamName,
 		CurrentTrack: b.currentTrack,
 		BytesSent:    sent,
+		Dropped:      b.dropped.Load(),
 		Listeners:    b.hub.count(),
 		ConnectedAt:  b.connectedAt,
 		LastError:    lastError,
@@ -365,6 +372,7 @@ func (b *Broadcaster) startOutputsLocked() {
 		ctx, cancel := context.WithCancel(context.Background())
 		cfg, feed := b.cfg, make(chan []byte, 80) // about 0.8 s of ~10 ms chunks, as 32 was with 24 ms ones
 		b.push, b.pushCancel = feed, cancel
+		b.dropped.Store(0)
 		b.pushWG.Add(1)
 		go func() {
 			defer b.pushWG.Done()
@@ -533,9 +541,12 @@ func (b *Broadcaster) workerLoop(ctx context.Context, _ *resourceguard.Throttle)
 				_ = ls.Push(out)
 			}
 
-			select {
-			case feed <- out:
-			default: // external server is slow or down: drop rather than stall the capture
+			if feed != nil {
+				select {
+				case feed <- out:
+				default: // external server or encoder is slow or down: drop rather than stall the capture
+					b.dropped.Add(1)
+				}
 			}
 		}
 		if p.tr.locked {
@@ -626,7 +637,7 @@ func (p *pcmReader) readFor(wait time.Duration) []byte {
 	return buf[:whole]
 }
 
-// pushLoop keeps the external Icecast connection alive, reconnecting with
+// pushLoop keeps the external Icecast or SHOUTcast connection alive, reconnecting with
 // exponential backoff (1s..30s) so a wrong password is not retried every second.
 func (b *Broadcaster) pushLoop(ctx context.Context, cfg Config, feed <-chan []byte) {
 	const maxDelay = 30 * time.Second
@@ -667,6 +678,19 @@ func (b *Broadcaster) streamOnce(ctx context.Context, cfg Config, feed <-chan []
 	if err != nil {
 		return false, err
 	}
+	shoutcast := cfg.Protocol == "shoutcast"
+	var enc *aacEncoder
+	if shoutcast {
+		// The encoder runs only while this session does; it waits on its input until the login is done.
+		if hostPort, err = shoutcastSourceAddr(scheme, hostPort); err != nil {
+			return false, err
+		}
+		if enc, err = b.startEncoder(cfg.Bitrate); err != nil {
+			return false, err
+		}
+		defer enc.stop()
+		scheme = "http"
+	}
 
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	var conn net.Conn
@@ -699,7 +723,12 @@ func (b *Broadcaster) streamOnce(ctx context.Context, cfg Config, feed <-chan []
 
 	// Perform server handshake under a deadline: a silent server must not hang us.
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	if err = b.handshakeIcecast(conn, cfg); err != nil {
+	if shoutcast {
+		err = b.handshakeShoutcast(conn, cfg)
+	} else {
+		err = b.handshakeIcecast(conn, cfg)
+	}
+	if err != nil {
 		return false, err
 	}
 	_ = conn.SetDeadline(time.Time{})
@@ -711,6 +740,9 @@ func (b *Broadcaster) streamOnce(ctx context.Context, cfg Config, feed <-chan []
 	b.lastError = ""
 	b.mu.Unlock()
 
+	if shoutcast {
+		return true, b.streamAAC(ctx, conn, feed, enc)
+	}
 	return true, b.streamFrames(ctx, conn, feed)
 }
 
@@ -802,7 +834,7 @@ func nextWAVFrame(pcm []byte) []byte {
 	return make([]byte, 1152*4) // 1152 samples * 2 channels * 2 bytes/sample
 }
 
-// UpdateMetadata pushes track metadata changes to the Icecast server.
+// UpdateMetadata pushes track metadata changes to the Icecast or SHOUTcast server.
 func (b *Broadcaster) UpdateMetadata(artist, title string) error {
 	b.mu.Lock()
 	artist = strings.TrimSpace(artist)
@@ -833,8 +865,17 @@ func (b *Broadcaster) UpdateMetadata(artist, title string) error {
 		return err
 	}
 
-	metaURL := fmt.Sprintf("%s://%s/admin/metadata?mode=updinfo&mount=%s&song=%s",
-		scheme, hostPort, url.QueryEscape(cfg.Mountpoint), url.QueryEscape(song))
+	var metaURL string
+	if cfg.Protocol == "shoutcast" { // DNAS admin.cgi on the listener port, with the source password
+		metaURL = fmt.Sprintf("%s://%s/admin.cgi?mode=updinfo&pass=%s&song=%s",
+			scheme, hostPort, url.QueryEscape(cfg.Password), url.QueryEscape(song))
+		if id := shoutcastStreamID(cfg); id > 0 {
+			metaURL += fmt.Sprintf("&sid=%d", id) // DNAS v2 multi-stream
+		}
+	} else {
+		metaURL = fmt.Sprintf("%s://%s/admin/metadata?mode=updinfo&mount=%s&song=%s",
+			scheme, hostPort, url.QueryEscape(cfg.Mountpoint), url.QueryEscape(song))
+	}
 	req, err := http.NewRequest("GET", metaURL, nil)
 	if err != nil {
 		b.mu.Lock()
@@ -843,7 +884,9 @@ func (b *Broadcaster) UpdateMetadata(artist, title string) error {
 		return err
 	}
 
-	req.SetBasicAuth(cfg.Username, cfg.Password)
+	if cfg.Protocol != "shoutcast" {
+		req.SetBasicAuth(cfg.Username, cfg.Password)
+	}
 	req.Header.Set("User-Agent", "EngineX-OS-Broadcaster")
 
 	client := b.httpClient

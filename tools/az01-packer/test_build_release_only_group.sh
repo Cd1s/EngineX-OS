@@ -49,6 +49,7 @@ cat > "$TMP/bin/sh" <<'MOCK'
 #!/usr/bin/env bash
 set -eu
 if [[ ${1:-} == tools/az01-packer/check-hfsplusx.sh ]]; then exit 0; fi
+if [[ ${1:-} == tools/aacenc/build.sh ]]; then : > "$OUT"; exit 0; fi  # the SHOUTcast encoder front end
 exec /bin/sh "$@"
 MOCK
 chmod +x "$TMP/bin"/*

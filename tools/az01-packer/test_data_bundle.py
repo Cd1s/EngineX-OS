@@ -298,6 +298,36 @@ class DataBundleTest(unittest.TestCase):
                            env=bad_env, capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('LKLFUSE', r.stderr)
+    def test_aacenc_is_packaged_for_every_gen2_model(self):
+        # The live stream's SHOUTcast mode runs bin/enginex-aacenc next to the suite (tools/aacenc).
+        enc = self.tmp / 'enginex-aacenc'
+        enc.write_bytes(fake_elf(bdb.EM_ARM, b'aacenc'))
+        for prefix in ('SCLIVE4', 'SCLIVE2', 'PRIME4PLUS', 'PRIMEGOPLUS', 'MIXSTREAMPROPLUS', 'MIXSTREAMPROGO'):
+            with self.subTest(prefix=prefix):
+                src = self.extract(self.build(f'out-aac-{prefix}', prefix=prefix))
+                self.assertEqual((src / 'bin/enginex-aacenc').read_bytes(), enc.read_bytes())
+                self.assertTrue((src / 'bin/enginex-aacenc').stat().st_mode & 0o100)
+                self.assertIn('bin/enginex-aacenc', (src / 'SHA256SUMS').read_text())
+        h64_dir = self.tmp / 'h64-aac'
+        h64_dir.mkdir()
+        suite64, hook64 = h64_dir / 'suite64', h64_dir / 'libengine-ui-hook.so'
+        suite64.write_bytes(fake_elf(bdb.EM_AARCH64, b'suite'))
+        hook64.write_bytes(fake_elf(bdb.EM_AARCH64, b'hook'))
+        (h64_dir / 'enginex-aacenc').write_bytes(fake_elf(bdb.EM_AARCH64, b'aac64'))
+        for prefix in ('PRIME4G2', 'SYSTEMONE'):
+            with self.subTest(prefix=prefix):
+                src = self.extract(self.build(f'out-aac-{prefix}', prefix=prefix, suite=suite64, hook=hook64))
+                self.assertEqual((src / 'bin/enginex-aacenc').read_bytes(), (h64_dir / 'enginex-aacenc').read_bytes())
+        # A 32-bit encoder in a 64-bit bundle (or the reverse) is refused.
+        with self.assertRaises(SystemExit):
+            self.build('out-aac-wrong', prefix='PRIME4G2', suite=suite64, hook=hook64, aacenc=enc)
+        with self.assertRaises(SystemExit):
+            self.build('out-aac-missing', prefix='SCLIVE4', aacenc=self.tmp / 'nonexistent')
+        release_sh = (bdb.Path(__file__).resolve().parent / 'build-release.sh').read_text()
+        self.assertIn('--aacenc "$WORK/hooks32/enginex-aacenc"', release_sh)
+        self.assertIn('--aacenc "$WORK/hooks64/enginex-aacenc"', release_sh)
+        self.assertIn('"$STAGE/usr/local/lib/enginex/enginex-aacenc"', release_sh)
+
     def test_no_edisksd_hook_option_leaves_the_mount_hook_out(self):
         edisksd = self.tmp / 'libedisksd-hook.so'  # would be found next to --hook
         edisksd.write_bytes(fake_elf(bdb.EM_ARM, b'edisksd'))

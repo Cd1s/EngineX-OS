@@ -1057,7 +1057,7 @@ def is_static_elf(data):
                for i in range(phnum))
 
 
-def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=None, release_tag=None, fsck_hfsplus=None, lklfuse=None, require_lklfuse=False, no_edisksd_hook=False):
+def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=None, release_tag=None, fsck_hfsplus=None, lklfuse=None, require_lklfuse=False, no_edisksd_hook=False, aacenc=None):
     """no_edisksd_hook leaves the mount hook out: sticks are never converted or healed at mount."""
     if no_edisksd_hook and edisksd_hook:
         fail('--edisksd-hook and --no-edisksd-hook exclude each other')
@@ -1082,6 +1082,9 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
         lklfuse = Path(hook).parent / 'lklfuse'
     if require_lklfuse and prefix not in AZ04 and not lklfuse:
         fail(f'missing lklfuse for armhf Gen-2 bundle {prefix}')
+    # The live stream's SHOUTcast mode: stream-sync runs enginex-aacenc from its own directory (tools/aacenc).
+    if aacenc is None and (Path(hook).parent / 'enginex-aacenc').is_file():
+        aacenc = Path(hook).parent / 'enginex-aacenc'
     parts = [(suite, 'bin/enginex-suite'), (hook, 'lib/libengine-ui-hook.so')]
     if edisksd_hook:
         parts.append((edisksd_hook, 'lib/libedisksd-hook.so'))
@@ -1091,6 +1094,10 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
         if not Path(lklfuse).is_file():
             fail(f'missing lklfuse binary: {lklfuse}')
         parts.append((lklfuse, 'bin/lklfuse'))
+    if aacenc:
+        if not Path(aacenc).is_file():
+            fail(f'missing enginex-aacenc binary: {aacenc}')
+        parts.append((aacenc, 'bin/enginex-aacenc'))
     for path, name in parts:
         data = Path(path).read_bytes()
         if data[:4] != b'\x7fELF':
@@ -1168,6 +1175,7 @@ def main(argv=None):
     p.add_argument('--fsck-hfsplus', type=Path, help='static fsck.hfsplus (AZ04 default: next to --hook, if present)')
     p.add_argument('--lklfuse', type=Path, help='static-libfuse lklfuse for armhf Gen-2 (default: next to --hook, if present)')
     p.add_argument('--require-lklfuse', action='store_true', help='fail if lklfuse is missing for armhf Gen-2 models')
+    p.add_argument('--aacenc', type=Path, help='enginex-aacenc, the SHOUTcast AAC front end (default: next to --hook, if present)')
     p.add_argument('--no-edisksd-hook', action='store_true',
                    help='leave the mount hook out (no rekordbox conversion or library heal when a stick is inserted)')
     p.add_argument('--ui-packs', required=True, type=Path, help='build_packs.py packs.tar(.gz)')
@@ -1175,7 +1183,7 @@ def main(argv=None):
     p.add_argument('--prefix', default='SCLIVE4', choices=PREFIXES, help='model prefix in the file name')
     p.add_argument('--release-tag', help='tag of the release, default v<version>; v<version>-rN for a same-version re-release')
     a = p.parse_args(argv)
-    json.dump(build(a.version, a.suite, a.hook, a.ui_packs, a.out, a.prefix, a.edisksd_hook, a.release_tag, a.fsck_hfsplus, a.lklfuse, a.require_lklfuse, a.no_edisksd_hook), sys.stdout, indent=2)
+    json.dump(build(a.version, a.suite, a.hook, a.ui_packs, a.out, a.prefix, a.edisksd_hook, a.release_tag, a.fsck_hfsplus, a.lklfuse, a.require_lklfuse, a.no_edisksd_hook, a.aacenc), sys.stdout, indent=2)
     print()
 
 

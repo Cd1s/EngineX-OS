@@ -124,7 +124,9 @@ type broadcastPostInput struct {
 	Mountpoint *string `json:"mountpoint"`
 	Username   *string `json:"username"`
 	Password   *string `json:"password"`
-	// Older clients still send these; the stream is always WAV, so they are ignored.
+	// Older clients still send format: it follows the protocol (WAV for Icecast, AAC for
+	// Shoutcast) and is ignored. Bitrate is the Shoutcast AAC bitrate; one that is not offered
+	// (an old client's MP3 choice) becomes the default.
 	Format     *string `json:"format"`
 	Bitrate    *int    `json:"bitrate"`
 	StreamName *string `json:"streamName"`
@@ -188,6 +190,9 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 			}
 			if in.Protocol != nil {
 				cfg.Protocol = *in.Protocol
+			}
+			if in.Bitrate != nil {
+				cfg.Bitrate = *in.Bitrate
 			}
 			if in.Mountpoint != nil {
 				cfg.Mountpoint = *in.Mountpoint
