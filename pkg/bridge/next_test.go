@@ -555,6 +555,51 @@ func TestSwapWaitsForTheJobWhenTheDecksRowsCannotBeLookedForInTime(t *testing.T)
 	nextLeftovers(t, mount)
 }
 
+// The estimate can be wrong (rows that lie between waveforms cost twice the replica's figure): a
+// look for the deck's rows that is still running where the window's rule says it must end is
+// stopped there. The window does not swap, the stick's library is as it was, and the job's next
+// round and its window take the rows.
+func TestSwapStopsALookForTheDecksRowsThatOutlastsItsEstimate(t *testing.T) {
+	mount := nextStick(t, 12)
+	makeNext(t, mount)
+	engineWrites(t, mount, `UPDATE Track SET rating=80 WHERE id=2`)
+	live := filepath.Join(dbDir(mount), "m.db")
+	before, _ := os.ReadFile(live)
+	oldSpare, oldLook := spare, mirrorLibrary
+	defer func() { spare, mirrorLibrary = oldSpare, oldLook }()
+	spare = hookWindow - time.Second // the estimate (a few ms of rows, 250 ms of saving) fits; the look has about 0.7 s
+	var stopped time.Duration
+	mirrorLibrary = func(ctx context.Context, live, next string, m *enginedb.Mirror, pace func(time.Duration) error) (enginedb.MirrorChange, error) {
+		start := time.Now()
+		select { // a look that would not end in time
+		case <-ctx.Done():
+			stopped = time.Since(start)
+		case <-time.After(10 * time.Second):
+		}
+		return enginedb.MirrorChange{}, ctx.Err()
+	}
+	start := time.Now()
+	_, out := hookWindowNow(t, mount)
+	if took := time.Since(start); stopped == 0 || took > 3*time.Second {
+		t.Fatalf("the look was not stopped at the window's limit (stopped after %v, window %v)", stopped, took)
+	}
+	if strings.Contains(out, "mount swap") || !strings.Contains(out, "the job takes the changes first") {
+		t.Fatalf("the window whose look was stopped:\n%s", out)
+	}
+	if after, _ := os.ReadFile(live); !bytes.Equal(after, before) {
+		t.Fatal("the window whose look was stopped changed the stick's library")
+	}
+	mirrorLibrary, spare = oldLook, oldSpare
+	makeNext(t, mount) // the job's next round takes the deck's row
+	if _, out = hookWindowNow(t, mount); !strings.Contains(out, "mount swap") {
+		t.Fatalf("the window after the job's next round did not swap:\n%s", out)
+	}
+	if got := query(t, mount, `SELECT rating FROM Track WHERE id=2`); got[0][0] != "80" {
+		t.Fatalf("the deck's rating after the swap: %v", got)
+	}
+	nextLeftovers(t, mount)
+}
+
 // The remount helper takes the deck's rows right before it triggers the remount, with no
 // window's limit (design 1.11 item 6): the window that had no time to look for them (the test
 // above) then finds the library the next one was made from, and only renames.

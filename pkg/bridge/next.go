@@ -363,6 +363,8 @@ func swapNext(ctx context.Context, mount, dir string, st *steps) bool {
 	return true
 }
 
+var mirrorLibrary = enginedb.MirrorLibrary // a variable for the test of the look's deadline
+
 // carryOver takes into the next library the rows Engine wrote to m.db after the job made it
 // ready: the DJ's edits are not lost with the file. A row taken loses what the bridge wrote on it
 // in the next library; its track is pending again and published by the job's next round.
@@ -380,10 +382,20 @@ func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pa
 	}
 	// Every row of every table is read again to find the few Engine wrote (50,000 tracks in one
 	// list: 100,002 rows, 15.7 s): only when that ends in time. Else the job takes them and asks again.
+	save := work{commits: 1, tracks: h.Tracks}
 	if !st.fits(work{scan: m.Rows, commits: 1, tracks: h.Tracks}) {
 		return false
 	}
-	ch, err := enginedb.MirrorLibrary(ctx, live, next, &m, pace)
+	if !st.kill.IsZero() {
+		// The estimate is the replica's for rows that lie together (0.15 ms a row). In a library an
+		// older build made they lie between the waveforms, and the look took 4.4 s where 2.0 s were
+		// estimated (KDATA, 13,169 rows). So the look also stops where the window's rule says it
+		// must: what it took until then is taken again by the job, as after a cut.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, st.kill.Add(-spare-save.cost()))
+		defer cancel()
+	}
+	ch, err := mirrorLibrary(ctx, live, next, &m, pace)
 	if err != nil {
 		log.Printf("rb-bridge: rows of the stick's library not taken: %v", err)
 		return false

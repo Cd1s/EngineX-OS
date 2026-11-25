@@ -647,7 +647,10 @@ edits. The old state file is removed after the snapshot is saved.
    track of the stick, and looks at the decks again afterwards; the window then only renames. What Engine writes
    in the second or so between that pass and the remount is the window's to take: when that cannot end 3 s before
    the kill (above about 60,000 rows of all tables together) the window does not swap; the job takes the rows and
-   asks for the remount again. Engine itself writes nothing in that time: in the sandbox the real Engine (JP07,
+   asks for the remount again. The estimate is for rows that lie together in the file. In a library an older
+   build or Engine made they lie between the waveforms and the look costs about twice as much (KDATA taken over:
+   4.4 s for 13,169 rows, 2.0 s estimated), so a look still running where the window must end is stopped there,
+   with the same outcome. Engine itself writes nothing in that time: in the sandbox the real Engine (JP07,
    5.3.0) wrote `m.db` once a session, when it opened the library (`Information.currentPlayedIndiciator`), not
    while idle for a minute and not when the stick was removed; it let go of the stick 1.4 s after the remove
    (report `rb-window-fable.md`, "Lane 6"). An Eject stops the helper's pass.
@@ -717,6 +720,7 @@ checklist.
 | A window that cannot look for the deck's rows 3 s before the kill does not swap; the job takes them and the next window swaps. With nothing to publish the job makes no next library and asks for no remount. | `TestSwapWaitsForTheJobWhenTheDecksRowsCannotBeLookedForInTime`, `TestNextLibrarySwappedInIsTheLibraryTheWindowsWrite` (`pkg/bridge/next_test.go`) |
 | A load alone is no deck edit: Engine's own figure in the main cue and the main cue as imported (both fields, flag clear, as the real Engine writes them; and the last field only) leaves a row the bridge's, whether a window or the UI hook wrote it; an adjusted main cue is the deck's. | `TestMountTakesRowsTheDeckHookFilledAsTheBridgesOwn`, `TestMountStagedDataAndDeckEdits` (`pkg/bridge/mount_test.go`) |
 | A stick without room for a next library: row updates one window cannot write are written in place, the batches that fit each window; with room they are left to the job. | `TestRowUpdatesGoOnInPlaceOnAStickWithoutRoomForANextLibrary` (`pkg/bridge/mount_test.go`) |
+| A look for the deck's rows that outlasts its estimate is stopped where the window must end; the window does not swap, the stick's library is untouched, and the job's next round takes the rows. | `TestSwapStopsALookForTheDecksRowsThatOutlastsItsEstimate` (`pkg/bridge/next_test.go`) |
 | The remount helper takes the deck's rows right before the remount, so that a window without time for the look still swaps; it looks at the decks again after the pass; what it took is read on from by the window and by the job. | `TestRowsTakenBeforeTheRemountLetAWindowWithoutTimeSwap`, `TestRowsTakenBeforeTheRemountAreReadOnFrom` (`pkg/bridge/next_test.go`), `TestRemountTakesTheDecksRowsBeforeTheRemove` (`internal/cli/rbbridge_remount_test.go`) |
 | A stage that fills `/data` is emptied into the next library and the job goes on: every track is staged and one remount publishes all of them. The job stops writing list waveforms when their folder takes no more files. | `TestFillGoesOnPastAFullStageThroughTheNextLibrary` (`pkg/bridge/next_test.go`); `TestFillStopsWritingListWaveformsWhenTheirFolderIsFull` (`pkg/bridge/fill_test.go`) |
 | The first insert of a never-seen export builds rows and lists from the export alone (rows as Engine expects them, lists in Engine's chain order), rebuilds Engine's indexes, saves the snapshot, asks for the job, logs one timed line per step, and leaves only `m.db` and the snapshot in `Database2` (#182, #301). | `TestMountFirstInsert` (`pkg/bridge/mount_test.go`) |
