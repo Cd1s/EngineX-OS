@@ -158,6 +158,10 @@ func takeLive(s, base *rbstate.Snapshot, ch enginedb.MirrorChange) {
 	}
 }
 
+// errDeckBusy: a deck is playing or loading; whole-DB writes (.rb-next.db copy/fsync)
+// wait until no deck is active and abort immediately if playback starts mid-build.
+var errDeckBusy = errors.New("deck active")
+
 // nextBuild is the job's work on the next library.
 type nextBuild struct {
 	ctx      context.Context
@@ -166,13 +170,37 @@ type nextBuild struct {
 	view     *View                     // the exports, as a window reads them
 	live     *rbstate.Snapshot         // the stick's snapshot, nil without one
 	pace     func(time.Duration) error // after each statement and commit, with the time it took
+	busy     func() bool               // true while any deck is playing, cueing, scratching, or loading
 	progress func(done, total int)
+}
+
+func (n *nextBuild) isBusy() bool {
+	if n.busy != nil {
+		return n.busy()
+	}
+	return IsDeckActive() || IsDeckLoading() || IsEngineCopying()
+}
+
+func (n *nextBuild) nextPace(took time.Duration) error {
+	if err := n.ctx.Err(); err != nil {
+		return err
+	}
+	if n.isBusy() {
+		return errDeckBusy
+	}
+	if n.pace != nil {
+		return n.pace(took)
+	}
+	return nil
 }
 
 // build brings the next library up to the view and to the stick's library: its rows, lists and
 // the staged data, as a window would write them, with no window's limits. drop: applied records
 // leave the stage (it is full). ready: the swap snapshot is written, a remount can swap it in.
 func (n *nextBuild) build(drop, ready bool) error {
+	if n.isBusy() {
+		return errDeckBusy
+	}
 	if _, err := rbstate.StageRoot(); err != nil {
 		return fmt.Errorf("%w: %v", errNoNext, err)
 	}
@@ -194,7 +222,7 @@ func (n *nextBuild) build(drop, ready bool) error {
 			return err
 		}
 		w := &window{ctx: n.ctx, mount: n.mount, dir: n.dir, view: n.view, st: newSteps(MountOptions{Full: true}),
-			o: MountOptions{Full: true, Progress: n.progress}, res: &res, next: true, keep: !drop, rest: n.pace}
+			o: MountOptions{Full: true, Progress: n.progress}, res: &res, next: true, keep: !drop, rest: n.nextPace}
 		uuid, commit := nextIdentity(n.ctx, n.mount, next)
 		if _, old := os.Stat(filepath.Join(n.dir, oldStateName)); content || old == nil {
 			err = n.mirror(live, next, liveUUID, uuid, commit)
@@ -224,6 +252,9 @@ func (n *nextBuild) build(drop, ready bool) error {
 	if !ready {
 		return nil
 	}
+	if n.isBusy() {
+		return errDeckBusy
+	}
 	snap.Base = state
 	return snap.SaveAs(swap)
 }
@@ -251,7 +282,7 @@ func (n *nextBuild) mirror(live, next, liveUUID, uuid string, commit int64) erro
 	if err := os.MkdirAll(filepath.Join(sdir, "base"), 0o700); err != nil {
 		return err
 	}
-	ch, err := enginedb.MirrorLibrary(n.ctx, live, next, &m, n.pace)
+	ch, err := enginedb.MirrorLibrary(n.ctx, live, next, &m, n.nextPace)
 	if errors.Is(err, enginedb.ErrMirrorConflict) {
 		log.Printf("rb-bridge: %v; the next library is made again", err)
 		discardNext(n.dir, liveUUID)
@@ -325,15 +356,15 @@ func nextRoom(dir, uuid string) error {
 // snapshot, each a rename inside Database2. Rows Engine wrote to m.db since the job last looked
 // are taken first (carryOver). It runs at the start of every window; without a swap snapshot it
 // costs one stat.
-func swapNext(ctx context.Context, mount, dir string, st *steps) bool {
+func swapNext(ctx context.Context, mount, dir string, st *steps) (swapped, deadlineHit bool) {
 	live, next, swap := filepath.Join(dir, "m.db"), filepath.Join(dir, nextDB), filepath.Join(dir, rbstate.SwapName)
 	h, err := rbstate.ReadHeaderFile(swap)
 	if err != nil {
-		return false
+		return false, false
 	}
 	if h.Rules != rbstate.Rules {
 		discardNext(dir, h.LibraryUUID) // of a build with other rules
-		return false
+		return false, false
 	}
 	finish := func() bool {
 		if err := rbstate.RenameFile(swap, filepath.Join(dir, rbstate.SnapshotName)); err != nil {
@@ -349,46 +380,46 @@ func swapNext(ctx context.Context, mount, dir string, st *steps) bool {
 		// A window was cut between its two renames: m.db is the next library, or the files are strays.
 		if _, commit := nextIdentity(ctx, mount, live); commit == h.Commit && h.Commit != 0 {
 			log.Printf("rb-bridge: the last window was cut short while it swapped the library in; done now")
-			return finish()
+			return finish(), false
 		}
 		_ = rbstate.RemoveFile(swap)
-		return false
+		return false, false
 	}
 	if err := cleanSQLiteSidecars(live); err != nil {
-		return false
+		return false, false
 	}
 	if err := cleanSQLiteSidecars(next); err != nil {
-		return false
+		return false, false
 	}
 	if enginedb.OpenElsewhere(live) != 0 {
-		return false
+		return false, false
 	}
 	if h.Base != enginedb.LibraryState(live) {
-		looked, carryErr := carryOver(ctx, dir, &h, st, nil)
+		ok, hit, carryErr := carryOverChecked(ctx, dir, &h, st, nil)
 		if carryErr != nil {
-			if errors.Is(carryErr, context.Canceled) || errors.Is(carryErr, context.DeadlineExceeded) {
+			if hit || errors.Is(carryErr, context.Canceled) || errors.Is(carryErr, context.DeadlineExceeded) {
 				log.Printf("rb-bridge: the stick's library changed after the next one was made; the job takes the changes first")
 			} else {
 				log.Printf("rb-bridge: carry-over failed: %v", carryErr)
 			}
-			return false
+			return false, hit
 		}
-		if !looked {
+		if !ok {
 			log.Printf("rb-bridge: the stick's library changed after the next one was made; the job takes the changes first")
-			return false
+			return false, hit
 		}
 	}
 	cut("before swap")
 	if err = rbstate.RenameFile(next, live); err != nil {
 		log.Printf("rb-bridge: next library not swapped in: %v", err)
-		return false
+		return false, false
 	}
 	cut("swapped")
 	if !finish() {
-		return false
+		return false, false
 	}
 	st.done("swap", "next library swapped in: %d tracks, %d lists; pending: %d rows, %d tracks' data", h.Tracks, h.Lists, h.Pending.Rows, h.Pending.Perf)
-	return true
+	return true, false
 }
 
 var mirrorLibrary = enginedb.MirrorLibrary // a variable for the test of the look's deadline
@@ -441,54 +472,65 @@ func cleanSQLiteSidecars(db string) error {
 // pace is nil in a window. With it the call is the remount helper's (TakeDeckRows): paced like the
 // job, and Engine may write again before the remount, so what was taken is also noted in the next
 // library's state on the deck, as after a pass of the job; the window or the job reads on from it.
-func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pace func(time.Duration) error) (bool, error) {
+func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pace func(time.Duration) error) bool {
+	ok, _, _ := carryOverChecked(ctx, dir, h, st, pace)
+	return ok
+}
+
+func carryOverChecked(ctx context.Context, dir string, h *rbstate.Header, st *steps, pace func(time.Duration) error) (ok, deadlineHit bool, err error) {
+	if ctx.Err() != nil {
+		return false, true, ctx.Err()
+	}
 	live, next, swap := filepath.Join(dir, "m.db"), filepath.Join(dir, nextDB), filepath.Join(dir, rbstate.SwapName)
 	sdir := nextState(h.LibraryUUID)
 	var m enginedb.Mirror
 	if readGob(filepath.Join(sdir, "mirror"), &m) != nil || m.Tracks == nil {
 		// Made from the exports alone, or on another deck: nothing of m.db may be lost with it.
 		_, content, err := liveLibrary(ctx, live)
-		return !content, err
+		return err == nil && !content, false, err
 	}
-	// Every row of every table is read again to find the few Engine wrote (50,000 tracks in one
-	// list: 100,002 rows, 15.7 s): only when that ends in time. Else the job takes them and asks again.
-	save := work{commits: 1, tracks: h.Tracks}
-	if !st.fits(work{scan: m.Rows, commits: 1, tracks: h.Tracks}) {
-		return false, nil
+	// Every row of every table is read again to find the few Engine wrote (KDATA scattered:
+	// >= 0.33 ms/row; 20,000+ tracks exceed a window). Account for post-mirror load/save/swap.
+	postSwap := work{load: h.Tracks, commits: 2, tracks: h.Tracks}
+	if !st.fits(work{scan: m.Rows, load: h.Tracks, commits: 2, tracks: h.Tracks}) {
+		return false, true, nil
 	}
+	lookCtx := ctx
 	if !st.kill.IsZero() {
-		// The estimate is the replica's for rows that lie together (0.15 ms a row). In a library an
-		// older build made they lie between the waveforms, and the look took 4.4 s where 2.0 s were
-		// estimated (KDATA, 13,169 rows). So the look also stops where the window's rule says it
-		// must: what it took until then is taken again by the job, as after a cut.
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(ctx, st.kill.Add(-spare-save.cost()))
+		lookCtx, cancel = context.WithDeadline(ctx, st.kill.Add(-spare-postSwap.cost()))
 		defer cancel()
 	}
-	ch, err := mirrorLibrary(ctx, live, next, &m, pace)
+	ch, err := mirrorLibrary(lookCtx, live, next, &m, pace)
 	if err != nil {
 		log.Printf("rb-bridge: rows of the stick's library not taken: %v", err)
-		return false, err
+		return false, lookCtx.Err() != nil, err
+	}
+	if lookCtx.Err() != nil || (pace == nil && !st.fits(postSwap)) {
+		return false, true, lookCtx.Err()
 	}
 	if pace == nil {
 		st.done("carry", "%d rows the deck wrote taken into the next library (%d read, lists %v)", len(ch.Tracks), ch.Rows, ch.Lists)
 		if len(ch.Tracks) == 0 && !ch.Lists {
-			return true, nil
+			return true, false, nil
 		}
 	}
 	s, err := rbstate.LoadFile(swap)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	base, err := rbstate.Load(filepath.Join(sdir, "base"))
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	takeLive(s, base, ch)
 	// What the window cannot count without the exports: the job's next round does.
 	s.Pending.Rows, s.Pending.Lists, s.Base = s.Pending.Rows+len(ch.Tracks), s.Pending.Lists || ch.Lists, m.State
+	if ctx.Err() != nil {
+		return false, true, ctx.Err()
+	}
 	if err = s.SaveAs(swap); err != nil {
-		return false, err
+		return false, false, err
 	}
 	*h = s.Header
 	if pace != nil {
@@ -498,12 +540,12 @@ func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pa
 		}
 		if err != nil {
 			log.Printf("rb-bridge: state of the next library not saved: %v", err) // the swap snapshot stands on its own
-			return false, err
+			return false, false, err
 		}
 		log.Printf("rb-bridge: before the remount, %d rows the deck wrote taken into the next library in %d ms (%d read, lists %v)",
 			len(ch.Tracks), time.Since(st.start).Milliseconds(), ch.Rows, ch.Lists)
 	}
-	return true, nil
+	return true, false, nil
 }
 
 // TakeDeckRows is the remount helper's step right before the remount that swaps a next library
@@ -514,6 +556,9 @@ func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pa
 // row on a deck), so the helper looks at the decks again after it. With no next library waiting,
 // or the stick's library as the job left it, it is two short reads.
 func TakeDeckRows(ctx context.Context, mount string) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	unlock, err := rbstate.LockVolume(mount, 0)
 	if err != nil {
 		return false
@@ -524,11 +569,14 @@ func TakeDeckRows(ctx context.Context, mount string) bool {
 	if err != nil || h.Rules != rbstate.Rules || h.Base == enginedb.LibraryState(filepath.Join(dir, "m.db")) {
 		return false
 	}
+	if ctx.Err() != nil {
+		return false
+	}
 	if _, err = os.Stat(filepath.Join(dir, nextDB)); err != nil {
 		return false
 	}
 	pace := newPacer(ctx)
-	looked, err := carryOver(ctx, dir, &h, newSteps(MountOptions{Full: true}), func(took time.Duration) error { return pace.afterStat(pace.active(), took) })
+	looked, _, err := carryOverChecked(ctx, dir, &h, newSteps(MountOptions{Full: true}), func(took time.Duration) error { return pace.afterStat(pace.active(), took) })
 	if err != nil {
 		log.Printf("rb-bridge: taking deck rows failed: %v", err)
 		return false

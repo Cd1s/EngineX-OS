@@ -876,6 +876,20 @@ static void stop_import(const char *target) {
     char *const a[]={(char *)SYSTEMCTL_PATH,"stop","--quiet",unit,NULL};
     if(run(a,now_ms()+8000)&&errno==ETIMEDOUT)note("background import did not stop on",target,errno);
 }
+// The unit of a volume's background remount helper (rb-bridge --remount, #301): FNV-1a 64 of
+// the mount path, as internal/cli remountUnit names it.
+static void remount_unit(const char *target,char out[64]) {
+    snprintf(out,64,"enginex-rb-remount-%016llx.service",(unsigned long long)hash_bytes(UINT64_C(14695981039346656037),target,strlen(target)));
+}
+// The remount helper can hold m.db and .rb-next.db open during TakeDeckRows: stop it
+// synchronously before an eager Eject's write-back and unmount so umount does not fail
+// with EBUSY. Never called on a lazy unmount, because the helper's own synthetic udev
+// remove triggers a lazy unmount.
+static void stop_remount(const char *target) {
+    char unit[64];remount_unit(target,unit);
+    char *const a[]={(char *)SYSTEMCTL_PATH,"stop","--quiet",unit,NULL};
+    if(run(a,now_ms()+8000)&&errno==ETIMEDOUT)note("remount helper did not stop on",target,errno);
+}
 #ifndef EJECT_MARK_DIR
 #define EJECT_MARK_DIR "/run"
 #endif
@@ -2543,7 +2557,7 @@ static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt
     }
     stop_import(target);
     int eager=!ctx_wants_lazy(ctx);
-    if(eager){mark_eject(EJECTING,target);mark_eject(EJECTED,target);}
+    if(eager){mark_eject(EJECTING,target);mark_eject(EJECTED,target);stop_remount(target);}
     // Only this target's own mount makes its view record, under view_lock. Without one it
     // is the stock umount and does not wait for view_lock, which another stick's
     // conversion holds for up to its whole budget (BH-O55-3).

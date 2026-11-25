@@ -402,3 +402,43 @@ INSERT INTO Track(filename,fileBytes) VALUES('Track00003.mp3',1234),('Track00004
 		})
 	}
 }
+
+// The hook stops the remount helper under this name before an eager eject
+// (edisksd_hook.c remount_unit, test_eject_stops_the_remount_helper pins the same value).
+func TestRemountUnitMatchesTheHook(t *testing.T) {
+	if got := remountUnit("/media/REKORDBOX"); got != "enginex-rb-remount-2531a9d305fa8897.service" {
+		t.Fatalf("unit %q", got)
+	}
+}
+
+func TestStartRemountRunsAnIdleSystemdUnit(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "args")
+	fake := filepath.Join(dir, "systemd-run")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > '"+log+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	if err := systemdStartRemount("/media/REKORDBOX"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Split(strings.TrimSpace(string(b)), "\n")
+	for _, want := range []string{
+		"--unit=enginex-rb-remount-2531a9d305fa8897.service", "--collect", "--no-block", "--quiet",
+		"--slice=enginex-background.slice", "--nice=19",
+		"--property=CPUSchedulingPolicy=idle", "--property=IOSchedulingClass=idle",
+		"--property=TimeoutStopSec=5",
+		"--setenv=GOMAXPROCS=1", "--setenv=GOMEMLIMIT=128MiB",
+	} {
+		if !strings.Contains("\n"+string(b), "\n"+want+"\n") {
+			t.Fatalf("missing %s in %q", want, args)
+		}
+	}
+	if n := len(args); n < 4 || args[n-3] != "rb-bridge" || args[n-2] != "--remount" || args[n-1] != "/media/REKORDBOX" {
+		t.Fatalf("command %q", args)
+	}
+}

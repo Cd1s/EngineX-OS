@@ -63,6 +63,8 @@ func lap(d *time.Duration, t *time.Time) {
 // cut, in tests, is called between two writes that a power cut or the hook's kill can separate.
 var cut = func(step string) {}
 
+var errWindowDeadline = errors.New("mount window deadline reached")
+
 // file is the library the window writes.
 func (w *window) file() string {
 	if w.next {
@@ -203,7 +205,14 @@ func (w *window) reconcile() (err error) {
 		return err
 	}
 	gone := 0
+	n := 0
 	for key, t := range w.snap.Tracks {
+		if n&511 == 0 {
+			if err = w.ctx.Err(); err != nil {
+				return err
+			}
+		}
+		n++
 		row, ok := w.index[key]
 		switch rel := strings.TrimPrefix(row.Path, "../"); {
 		case t.EngineID == 0:
@@ -214,7 +223,14 @@ func (w *window) reconcile() (err error) {
 			t.Rel, t.Resolved, w.dirty = rel, true, true
 		}
 	}
+	n = 0
 	for _, l := range w.snap.Lists {
+		if n&511 == 0 {
+			if err = w.ctx.Err(); err != nil {
+				return err
+			}
+		}
+		n++
 		if l.EngineID != 0 && !lists[l.EngineID] {
 			l.EngineID, l.Hash = 0, "" // still the bridge's: putLists takes back a list Engine made again
 			gone++
@@ -270,6 +286,11 @@ func (w *window) noteSync(b *enginedb.Batch, t *rbstate.Track, written bool) err
 
 // commit saves the next snapshot, runs the commit and promotes the snapshot (design section 5).
 func (w *window) commit(id int64, do func() error) error {
+	if w.rest != nil {
+		if err := w.rest(0); err != nil {
+			return err
+		}
+	}
 	t := time.Now()
 	w.count()
 	w.snap.Applied, w.snap.Commit = t.Unix(), id
@@ -351,6 +372,11 @@ func (w *window) count() {
 // build makes a stick's first library on the deck's disk from the export alone, and puts it on
 // the stick with one rename (design 1.1 rule 1).
 func (w *window) build() error {
+	if w.rest != nil {
+		if err := w.rest(0); err != nil {
+			return err
+		}
+	}
 	stage, err := rbstate.StageRoot()
 	if err != nil {
 		return err
@@ -378,10 +404,22 @@ func (w *window) build() error {
 	}
 	w.snap.LibraryUUID = uuid
 	w.st.done("build", "%d rows, %d lists, on the deck's disk", len(ids), len(w.snap.Lists))
+	if w.ctx.Err() != nil || (!w.next && !w.st.must(0)) {
+		return errWindowDeadline
+	}
 	if err = cleanSQLiteSidecars(w.file()); err != nil {
 		return err
 	}
-	if err = w.commit(commitID, func() error { return rbstate.InstallFile(filepath.Join(tmp, "m.db"), w.file()) }); err != nil {
+	install := func() error {
+		src := filepath.Join(tmp, "m.db")
+		if w.rest != nil {
+			return rbstate.InstallFilePaced(src, w.file(), playingReadChunk, 2<<20, func(_ int, took time.Duration) error {
+				return w.rest(took)
+			})
+		}
+		return rbstate.InstallFile(src, w.file())
+	}
+	if err = w.commit(commitID, install); err != nil {
 		return err
 	}
 	w.st.done("install", "library copied to the stick")
@@ -409,7 +447,14 @@ func (w *window) putLists(b *enginedb.Batch, idx []int) error {
 		return 0
 	}
 	reorder := map[string]bool{}
+	commitCost := work{commits: 1, tracks: len(w.snap.Tracks)}.cost()
 	for _, at := range idx {
+		if err := w.ctx.Err(); err != nil {
+			return err
+		}
+		if !w.next && !w.st.must(commitCost) {
+			return errWindowDeadline
+		}
 		l := &w.view.Lists[at]
 		parent := id(l.Parent)
 		if l.Parent != "" && parent == 0 {
@@ -498,7 +543,14 @@ func (w *window) apply(p *Plan) error {
 		return err
 	}
 	defer b.Rollback()
+	listAndCommit := work{lists: len(p.PutLists) + len(p.RemoveLists), entries: rows.entries, commits: 1, tracks: len(s.Tracks)}.cost()
+	commitCost := work{commits: 1, tracks: len(s.Tracks)}.cost()
+	cutRows := false
 	for _, key := range p.RemoveTracks {
+		if w.ctx.Err() != nil || (!w.next && !w.st.must(listAndCommit)) {
+			cutRows = true
+			break
+		}
 		if t := s.Tracks[key]; t.EngineID != 0 {
 			if err = b.DeleteTrack(w.ctx, t.EngineID); err != nil {
 				return err
@@ -507,19 +559,29 @@ func (w *window) apply(p *Plan) error {
 		}
 		delete(s.Tracks, key)
 	}
-	moves := make(map[int64]string, len(p.Moves))
-	for _, m := range p.Moves {
-		moves[s.Tracks[m.Old].EngineID] = w.view.Tracks[m.New].Rel
-	}
-	if err = b.MoveTracks(w.ctx, moves); err != nil {
-		return err
-	}
-	for _, m := range p.Moves {
-		vt, t := &w.view.Tracks[m.New], s.Tracks[m.Old]
-		delete(s.Tracks, m.Old)
-		t.Key, t.Rel, t.Resolved, t.Refs, t.Row = vt.Key, vt.Rel, false, vt.Refs, "" // its fields follow in updateRows
-		s.Tracks[vt.Key] = t
-		p.UpdateTracks = append(p.UpdateTracks, m.New)
+	const moveChunk = 16
+	moved := 0
+	for at := 0; !cutRows && at < len(p.Moves); at += moveChunk {
+		if w.ctx.Err() != nil || (!w.next && !w.st.must(listAndCommit)) {
+			cutRows = true
+			break
+		}
+		part := p.Moves[at:min(at+moveChunk, len(p.Moves))]
+		moves := make(map[int64]string, len(part))
+		for _, m := range part {
+			moves[s.Tracks[m.Old].EngineID] = w.view.Tracks[m.New].Rel
+		}
+		if err = b.MoveTracks(w.ctx, moves); err != nil {
+			return err
+		}
+		for _, m := range part {
+			vt, t := &w.view.Tracks[m.New], s.Tracks[m.Old]
+			delete(s.Tracks, m.Old)
+			t.Key, t.Rel, t.Resolved, t.Refs, t.Row = vt.Key, vt.Rel, false, vt.Refs, "" // its fields follow in updateRows
+			s.Tracks[vt.Key] = t
+			p.UpdateTracks = append(p.UpdateTracks, m.New)
+		}
+		moved += len(part)
 	}
 	p.AddTracks = slices.DeleteFunc(p.AddTracks, func(at int) bool {
 		row, ok := w.index[w.view.Tracks[at].Key]
@@ -528,9 +590,10 @@ func (w *window) apply(p *Plan) error {
 		}
 		return ok
 	})
-	const chunk = 100
-	for at := 0; at < len(p.AddTracks); at += chunk {
-		if !w.st.must(2 * time.Second) {
+	const chunk = 16
+	addMargin := max(listAndCommit, 2*time.Second)
+	for at := 0; !cutRows && at < len(p.AddTracks); at += chunk {
+		if w.ctx.Err() != nil || (!w.next && !w.st.must(addMargin)) {
 			log.Printf("rb-bridge: %d new tracks wait for the next window", len(p.AddTracks)-at)
 			break
 		}
@@ -553,13 +616,20 @@ func (w *window) apply(p *Plan) error {
 			w.o.Progress(at+len(part), len(p.AddTracks))
 		}
 	}
-	w.st.done("rows", "%d added, %d moved, %d removed", w.res.Added, len(p.Moves), w.res.Removed)
+	if cutRows && w.res.Removed == 0 && w.res.Added == 0 && moved == 0 && !w.st.must(commitCost) {
+		w.leave(rows, "the rows and lists")
+		return nil
+	}
+	w.st.done("rows", "%d added, %d moved, %d removed", w.res.Added, moved, w.res.Removed)
 
 	owned := make(map[int64]bool, len(s.Lists))
 	for _, l := range s.Lists {
 		owned[l.EngineID] = true
 	}
 	for _, key := range p.RemoveLists {
+		if w.ctx.Err() != nil || (!w.next && !w.st.must(commitCost)) {
+			return errWindowDeadline
+		}
 		if l := s.Lists[key]; l.EngineID != 0 {
 			if err = b.DeleteList(w.ctx, l.EngineID, func(id int64) bool { return owned[id] }); err != nil {
 				return err
@@ -571,8 +641,17 @@ func (w *window) apply(p *Plan) error {
 		return err
 	}
 	w.res.PlaylistsChanged = len(p.PutLists)+len(p.RemoveLists) > 0
+	if w.ctx.Err() != nil || (!w.next && !w.st.must(0)) {
+		return errWindowDeadline
+	}
+	listBegan := time.Now()
 	if err = w.commitBatch(b); err != nil {
 		return err
+	}
+	if w.rest != nil {
+		if err = w.rest(time.Since(listBegan)); err != nil {
+			return err
+		}
 	}
 	w.st.done("lists", "%d written, %d removed; committed", len(p.PutLists), len(p.RemoveLists))
 	return w.updateRows(p.UpdateTracks)
@@ -583,6 +662,11 @@ func (w *window) apply(p *Plan) error {
 func (w *window) inBatches(n, size int, ok func(i int) bool, each func(b *enginedb.Batch, i int) error, committed func(done int) error) (int, error) {
 	i := 0
 	for i < n && ok(i) {
+		if w.rest != nil {
+			if err := w.rest(0); err != nil {
+				return i, err
+			}
+		}
 		b, err := w.lib.Begin(w.ctx)
 		if err != nil {
 			return i, err
@@ -789,6 +873,9 @@ func (w *window) applyStaged() error {
 	}, func(at int) error {
 		t := time.Now()
 		for id, body := range overviews {
+			if w.ctx.Err() != nil || (!w.next && !w.st.more(0)) {
+				break
+			}
 			writeOverview(w.dir, w.lib.UUID(), id, body)
 		}
 		clear(overviews)
@@ -828,6 +915,10 @@ func (w *window) applyStaged() error {
 
 // relist writes again the lists that hold a track whose row has just come back.
 func (w *window) relist(back map[string]bool) error {
+	if w.ctx.Err() != nil || (!w.next && !w.st.more(applyReserve)) {
+		w.snap.Pending.Lists = true
+		return nil
+	}
 	var idx []int
 	for i := range w.view.Lists {
 		l := &w.view.Lists[i]
@@ -839,11 +930,14 @@ func (w *window) relist(back map[string]bool) error {
 	if err != nil {
 		return err
 	}
+	began := time.Now()
 	if err = w.putLists(b, idx); err == nil {
 		err = w.commitBatch(b)
 	}
 	if err != nil {
 		b.Rollback()
+	} else if w.rest != nil {
+		err = w.rest(time.Since(began))
 	}
 	return err
 }

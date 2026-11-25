@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // UnsafeToFree, when set, names a file on the stick whose clusters are not its own in the FAT
@@ -33,6 +34,102 @@ func InstallFile(src, dst string) error {
 	}
 	defer in.Close()
 	return writeAndRename(dst, func(f *os.File) error { _, err := io.Copy(f, in); return err })
+}
+
+// InstallFilePaced copies src to dst in bounded chunks, calling pace before each chunk,
+// before every incremental flushBytes sync, and before the final sync/rename. If pace returns
+// an error (e.g. a deck became active), the temp file is closed and removed without fsync.
+func InstallFilePaced(src, dst string, chunk int, flushBytes int64, pace func(n int, took time.Duration) error) error {
+	if pace != nil {
+		if err := pace(0, 0); err != nil {
+			return err
+		}
+	}
+	if UnsafeToFree != nil && UnsafeToFree(dst) {
+		return ErrUnownedClusters
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	dir := filepath.Dir(dst)
+	tmp, err := os.CreateTemp(dir, tempPattern)
+	if err != nil {
+		return err
+	}
+	if chunk <= 0 {
+		chunk = 64 << 10
+	}
+	buf := make([]byte, chunk)
+	var sinceSync int64
+	for {
+		if pace != nil {
+			if err = pace(0, 0); err != nil {
+				break
+			}
+		}
+		n, rerr := in.Read(buf)
+		if n > 0 {
+			t0 := time.Now()
+			if _, werr := tmp.Write(buf[:n]); werr != nil {
+				err = werr
+				break
+			}
+			took := time.Since(t0)
+			sinceSync += int64(n)
+			if pace != nil {
+				if err = pace(n, took); err != nil {
+					break
+				}
+			}
+			if flushBytes > 0 && sinceSync >= flushBytes {
+				if pace != nil {
+					if err = pace(0, 0); err != nil {
+						break
+					}
+				}
+				s0 := time.Now()
+				if err = tmp.Sync(); err != nil {
+					break
+				}
+				sinceSync = 0
+				if pace != nil {
+					if err = pace(0, time.Since(s0)); err != nil {
+						break
+					}
+				}
+			}
+		}
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			err = rerr
+			break
+		}
+	}
+	if err == nil && pace != nil {
+		err = pace(0, 0)
+	}
+	if err == nil {
+		_ = syncPath(dir)
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil && pace != nil {
+		err = pace(0, 0)
+	}
+	if err == nil {
+		cut("temp " + dst)
+		err = RenameFile(tmp.Name(), dst)
+	}
+	if err != nil {
+		_ = RemoveFile(tmp.Name())
+	}
+	return err
 }
 
 // writeAndRename writes a temporary file beside dst and renames it over dst. The order is the

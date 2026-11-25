@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
+	"testing"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
@@ -142,6 +144,7 @@ func convertLocked(ctx context.Context, mount string, rep *usbLoadingReporter) (
 	}
 	rep.state = "importing"
 	rep.Start()
+	pokeStreamSyncUI()
 	convert, stop := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() { defer close(done); refresh(convert, rep) }()
@@ -152,6 +155,20 @@ func convertLocked(ctx context.Context, mount string, rep *usbLoadingReporter) (
 		rep.Fail(err)
 	}
 	return r, true, err
+}
+
+// pokeStreamSyncUI nudges stream-sync to refresh rb-deck-activity.json right when
+// --import-path creates /run/enginex-usb-preparing, eliminating the 3 s UI poll blind spot
+// if a deck on a 2-deck player was already playing before the stick was inserted.
+var pokeStreamSyncUI = func() {
+	if testing.Testing() {
+		return
+	}
+	c := http.Client{Timeout: 200 * time.Millisecond}
+	resp, err := c.Get("http://127.0.0.1:8080/v1/enginex/ui")
+	if err == nil {
+		resp.Body.Close()
+	}
 }
 
 // refresh writes rep's state again every 2 s until ctx ends.

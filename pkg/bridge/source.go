@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
@@ -98,21 +100,125 @@ var exportKeys = sync.OnceValue(newKeyCache) // this process's OneLibrary keys
 // left out, so one broken file does not hide the other; with none readable err is set. keys nil
 // uses the process's key cache.
 func ReadSources(ctx context.Context, r *compat.Resolver, mount string, files []rbstate.FileSig, keys *rekordbox.KeyCache) (libs []SourceLibrary, failed []error, err error) {
+	return readSourcesPaced(ctx, r, mount, files, keys, nil)
+}
+
+func copyStickFilePaced(ctx context.Context, src string, pace *pacer) (dst *os.File, size int64, err error) {
+	if err = pace.waitNotLoading(); err != nil {
+		return nil, 0, err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer in.Close()
+	dir, derr := rbstate.StageRoot()
+	if derr != nil || (dir != "" && os.MkdirAll(dir, 0o755) != nil) {
+		dir = ""
+	}
+	out, err := os.CreateTemp(dir, ".rb-src-*")
+	if err != nil {
+		return nil, 0, err
+	}
+	cleanup := func() {
+		name := out.Name()
+		_ = out.Close()
+		_ = os.Remove(name)
+	}
+	buf := make([]byte, playingReadChunk)
+	for {
+		if err = pace.waitNotLoading(); err != nil {
+			cleanup()
+			return nil, 0, err
+		}
+		if err = ctx.Err(); err != nil {
+			cleanup()
+			return nil, 0, err
+		}
+		playing := pace != nil && pace.active()
+		t0 := time.Now()
+		n, rerr := in.Read(buf)
+		took := time.Since(t0)
+		if n > 0 {
+			if _, werr := out.Write(buf[:n]); werr != nil {
+				cleanup()
+				return nil, 0, werr
+			}
+			size += int64(n)
+			if playing {
+				if perr := pace.pause(n, took); perr != nil {
+					cleanup()
+					return nil, 0, perr
+				}
+			}
+		}
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			cleanup()
+			return nil, 0, rerr
+		}
+	}
+	return out, size, nil
+}
+
+func readSourcesPaced(ctx context.Context, r *compat.Resolver, mount string, files []rbstate.FileSig, keys *rekordbox.KeyCache, pace *pacer) (libs []SourceLibrary, failed []error, err error) {
 	if keys == nil {
 		keys = exportKeys()
 	}
 	for _, f := range files {
+		if err = pace.waitNotLoading(); err != nil {
+			return nil, failed, err
+		}
 		if err = ctx.Err(); err != nil {
 			return nil, failed, err
 		}
 		var l *rekordbox.Library
 		var e error
 		kind := rbstate.OneLibrary
+		full := r.FullPath(f.Rel)
 		if strings.EqualFold(path.Ext(f.Rel), ".pdb") {
 			kind = rbstate.DeviceLibrary
-			l, e = rekordbox.ReadPDB(r.FullPath(f.Rel))
+			if pace == nil {
+				l, e = rekordbox.ReadPDB(full)
+			} else {
+				var tmp *os.File
+				var size int64
+				if tmp, size, e = copyStickFilePaced(ctx, full, pace); e == nil {
+					l, e = rekordbox.ParsePDB(tmp, size)
+					name := tmp.Name()
+					_ = tmp.Close()
+					_ = os.Remove(name)
+				}
+			}
+		} else if pace == nil {
+			l, e = rekordbox.ReadSQLiteKeys(ctx, full, nil, keys)
 		} else {
-			l, e = rekordbox.ReadSQLiteKeys(ctx, r.FullPath(f.Rel), nil, keys)
+			var tmp *os.File
+			if tmp, _, e = copyStickFilePaced(ctx, full, pace); e == nil {
+				tmpName := tmp.Name()
+				_ = tmp.Close()
+				cleanup := func() {
+					_ = os.Remove(tmpName)
+					_ = os.Remove(tmpName + "-wal")
+					_ = os.Remove(tmpName + "-shm")
+				}
+				if walSrc := full + "-wal"; func() bool { _, se := os.Stat(walSrc); return se == nil }() {
+					if wt, _, we := copyStickFilePaced(ctx, walSrc, pace); we == nil {
+						wname := wt.Name()
+						_ = wt.Close()
+						if err2 := os.Rename(wname, tmpName+"-wal"); err2 != nil {
+							_ = os.Remove(wname)
+						}
+					} else if ctx.Err() != nil {
+						cleanup()
+						return nil, failed, ctx.Err()
+					}
+				}
+				l, e = rekordbox.ReadSQLiteKeys(ctx, tmpName, nil, keys)
+				cleanup()
+			}
 		}
 		if e != nil && ctx.Err() != nil {
 			return nil, failed, ctx.Err()
@@ -163,10 +269,40 @@ func stagedStamp(mount string) string {
 // readStaged reads the staged CDJ libraries, their paths pointing into the staged copies. A broken
 // one is left out with a log line: it never fails the stick's own import.
 func readStaged(mount string) []SourceLibrary {
+	out, _ := readStagedPaced(context.Background(), mount, nil)
+	return out
+}
+
+func readStagedCtx(ctx context.Context, mount string) ([]SourceLibrary, error) {
+	return readStagedPaced(ctx, mount, nil)
+}
+
+func readStagedPaced(ctx context.Context, mount string, pace *pacer) ([]SourceLibrary, error) {
 	var out []SourceLibrary
+	if err := pace.waitNotLoading(); err != nil {
+		return nil, err
+	}
 	names, pdbs := stagedLibraries(mount)
 	for i, name := range names {
-		staged, err := rekordbox.ReadPDB(pdbs[i])
+		if err := pace.waitNotLoading(); err != nil {
+			return nil, err
+		}
+		var staged *rekordbox.Library
+		var err error
+		if pace == nil {
+			staged, err = rekordbox.ReadPDB(pdbs[i])
+		} else {
+			var tmp *os.File
+			var size int64
+			if tmp, size, err = copyStickFilePaced(ctx, pdbs[i], pace); err == nil {
+				staged, err = rekordbox.ParsePDB(tmp, size)
+				tname := tmp.Name()
+				_ = tmp.Close()
+				_ = os.Remove(tname)
+			} else if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+		}
 		if err != nil {
 			log.Printf("rb-bridge: staged %s: %v", name, err)
 			continue
@@ -199,7 +335,7 @@ func readStaged(mount string) []SourceLibrary {
 		}
 		out = append(out, SourceLibrary{Kind: rbstate.LinkLibrary, Source: name, Lib: staged})
 	}
-	return out
+	return out, nil
 }
 
 // ReadLayout is the setting rb_library_view: how a stick with two libraries shows them. Anything

@@ -645,6 +645,62 @@ func TestRowsTakenBeforeTheRemountLetAWindowWithoutTimeSwap(t *testing.T) {
 	}
 }
 
+// Finding 3.3: once the remount helper's context is cancelled (Eject / SIGTERM),
+// TakeDeckRows and carryOver must not open or rewrite .rb-bridge-snapshot.swap.
+func TestTakeDeckRowsAndCarryOverRespectCancelledContext(t *testing.T) {
+	t.Run("cancelled before TakeDeckRows", func(t *testing.T) {
+		mount := nextStick(t, 12)
+		makeNext(t, mount)
+		engineWrites(t, mount, `UPDATE Track SET rating=80 WHERE id=2`)
+
+		oldLook := mirrorLibrary
+		defer func() { mirrorLibrary = oldLook }()
+		called := false
+		mirrorLibrary = func(ctx context.Context, live, next string, m *enginedb.Mirror, pace func(time.Duration) error) (enginedb.MirrorChange, error) {
+			called = true
+			return oldLook(ctx, live, next, m, pace)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if TakeDeckRows(ctx, mount) {
+			t.Fatal("TakeDeckRows reported work on an already-cancelled context")
+		}
+		if called {
+			t.Fatal("TakeDeckRows called mirrorLibrary on an already-cancelled context")
+		}
+	})
+
+	t.Run("cancelled before carryOver writes swap", func(t *testing.T) {
+		mount := nextStick(t, 12)
+		makeNext(t, mount)
+		engineWrites(t, mount, `UPDATE Track SET rating=80 WHERE id=2`)
+		swapPath := filepath.Join(dbDir(mount), rbstate.SwapName)
+		before, err := os.ReadFile(swapPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		oldLook := mirrorLibrary
+		defer func() { mirrorLibrary = oldLook }()
+		mirrorLibrary = func(c context.Context, live, next string, m *enginedb.Mirror, pace func(time.Duration) error) (enginedb.MirrorChange, error) {
+			ch, err := oldLook(c, live, next, m, pace)
+			cancel()
+			return ch, err
+		}
+
+		TakeDeckRows(ctx, mount)
+		after, err := os.ReadFile(swapPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatal("carryOver rewrote .rb-bridge-snapshot.swap after ctx was cancelled")
+		}
+	})
+}
+
 // What the helper took is noted in the next library's state on the deck, so that whoever comes
 // next reads on from it. Engine writes again before the remount (and had added a cover before the
 // helper's pass): the window takes that one row only, and the cover is not copied a second time.
@@ -806,12 +862,15 @@ func TestWorkCostAgainstTheReplica(t *testing.T) {
 		{"30 tracks more in a list of 20,030 (synthetic)", work{adds: 30, lists: 1, entries: 20030, commits: 1, tracks: 20000}, 4389},
 		{"KDATA staged window", work{staged: 320}, 10350},
 		{"KDATA commit", work{commits: 1, tracks: 5962}, 640},
-		{"rows the deck wrote, looked for among 50,000 tracks in one list (synthetic)", work{scan: 100002}, 15736},
+		{"KDATA deck-row look (13,169 rows, scattered)", work{scan: 13169}, 4400},
 	}
 	for _, m := range measured {
 		if got := m.w.cost().Milliseconds(); got < m.ms*85/100 || got > m.ms*135/100 {
 			t.Errorf("%s: estimated %d ms, measured %d ms", m.name, got, m.ms)
 		}
+	}
+	if got := (work{scan: 100002}).cost(); got < 33*time.Second {
+		t.Errorf("50,000-track deck-row scan estimated %s, want >= 33s", got)
 	}
 	window := &steps{kill: time.Now().Add(hookWindow)}
 	first := func(bytes int64) work {

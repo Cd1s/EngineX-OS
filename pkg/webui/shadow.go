@@ -66,6 +66,7 @@ type deckState struct {
 	ID           string  `json:"id,omitempty"`           // Engine mode, what the source has loaded: its Key (a copy), its Net (this player's own file), a CDJ's slot and track id. The QML loads again when it changes
 	DurationMS   float64 `json:"durationMs,omitempty"`   // the track's length on the source: tells the QML whether Engine holds this track or another
 	Loading      bool    `json:"loading,omitempty"`      // shadow deck: the peer has a track whose audio is still being fetched
+	SongLoading  bool    `json:"songLoading,omitempty"`  // Engine's /Track/SongLoading on this local deck (used to halt background USB I/O)
 	Progress     float64 `json:"progress,omitempty"`     // while loading, 0..1: how much of the copy (Engine mode) or of the source's detail waveform is done. Absent: not known, the QML shows a ring that turns
 	Error        string  `json:"error,omitempty"`        // Engine mode: why the copy failed (shadowCopy.err); it is tried again
 	Stale        bool    `json:"stale,omitempty"`        // frozen display sample; not an eject/goodbye
@@ -632,6 +633,7 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		}
 		postAt = max(postAt, d.At) // after clamping: one future timestamp must not freeze ownPostAt
 		d.Path, d.Name = "", ""
+		d.SongLoading = d.SongLoading || d.Loading
 		d.Key, d.Ext, d.Loading, d.ID = "", "", false, ""
 		np := d.Net
 		f := resolveNetPathFile(np, s.shadow.dataRoot, s.shadow.mediaRoot, true)

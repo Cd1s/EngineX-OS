@@ -122,8 +122,8 @@ func (w work) cost() time.Duration {
 	us += 0.48 * float64(w.oneLibrary)    // 0.50 s a MiB
 	us += 0.15 * float64(w.deviceLibrary) // 0.16 s a MiB
 	us += 130*float64(w.view) + 100*float64(w.load) + 650*float64(w.build)
-	us += 5000*float64(w.adds) + 30000*float64(w.removes) + 2000*float64(w.updates) + 5000*float64(w.lists) + 120*float64(w.entries)
-	us += 33000*float64(w.staged) + 150*float64(w.scan)
+	us += 25000*float64(w.adds) + 30000*float64(w.removes) + 15000*float64(w.updates) + 5000*float64(w.lists) + 120*float64(w.entries)
+	us += 33000*float64(w.staged) + 350*float64(w.scan)
 	us += float64(w.commits) * (250000 + 65*float64(w.tracks))
 	return time.Duration(us) * time.Microsecond
 }
@@ -189,6 +189,30 @@ func libraryUUID(dir string) string {
 // a complete import costs a stat of each export file and one line of the snapshot.
 func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res MountResult, err error) {
 	st := newSteps(o)
+	parentCtx := ctx
+	if !o.Deadline.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, o.Deadline.Add(-spare))
+		defer cancel()
+	}
+	startBG := func() {
+		if res.Background || o.StartBackground == nil {
+			return
+		}
+		if e := o.StartBackground(); e != nil {
+			log.Printf("rb-bridge: background job not started: %v", e)
+		} else {
+			res.Background = true
+		}
+	}
+	deadlineReached := func() bool {
+		return ctx.Err() != nil && parentCtx.Err() == nil
+	}
+	stopAtDeadline := func() (MountResult, error) {
+		startBG()
+		log.Printf("rb-bridge: mount window stopped at deadline margin (%d ms before kill); remaining work left to the job", time.Until(o.Deadline).Milliseconds())
+		return res, nil
+	}
 	r, err := compat.NewResolver(mount)
 	if err != nil {
 		return res, err
@@ -221,15 +245,14 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		return res, err
 	}
 	defer unlock()
-	swapped := swapNext(ctx, mount, dir, st)
-	if swapped && o.StartBackground != nil {
+	swapped, swapDeadline := swapNext(ctx, mount, dir, st)
+	if swapped {
 		// The job drops the records the next library kept in the stage for the deck's loads, and
 		// goes on with what is pending.
-		if e := o.StartBackground(); e != nil {
-			log.Printf("rb-bridge: background job not started: %v", e)
-		} else {
-			res.Background = true
-		}
+		startBG()
+	}
+	if !swapped && (swapDeadline || deadlineReached()) {
+		return stopAtDeadline()
 	}
 	layout := ReadLayout(o.Settings)
 	stamp := rbstate.Stamp(layout, files, staged)
@@ -335,11 +358,6 @@ func chores(ctx context.Context, mount string, st *steps, insert bool) {
 	if !st.more(500 * time.Millisecond) {
 		return
 	}
-	if n, err := enginedb.ApplyPending(ctx, mount); err != nil {
-		log.Printf("rb-bridge: queued library edits not applied: %v", err)
-	} else if n > 0 {
-		log.Printf("rb-bridge: applied %d queued library edits", n)
-	}
 	budget := time.Second
 	if insert {
 		budget = 500 * time.Millisecond
@@ -348,6 +366,19 @@ func chores(ctx context.Context, mount string, st *steps, insert bool) {
 		budget = min(budget, time.Until(st.optional))
 	}
 	if budget <= 0 {
+		return
+	}
+	pctx, pcancel := context.WithTimeout(ctx, budget)
+	if n, err := enginedb.ApplyPending(pctx, mount); err != nil && pctx.Err() == nil {
+		log.Printf("rb-bridge: queued library edits not applied: %v", err)
+	} else if n > 0 {
+		log.Printf("rb-bridge: applied %d queued library edits", n)
+	}
+	pcancel()
+	if !st.optional.IsZero() {
+		budget = min(budget, time.Until(st.optional))
+	}
+	if budget <= 0 || ctx.Err() != nil {
 		return
 	}
 	stop, cancel := context.WithTimeout(ctx, budget)
