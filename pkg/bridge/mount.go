@@ -393,9 +393,10 @@ func addSmartMatch(v *View, ref uint32) error {
 }
 
 // inApplyOrder sorts staged tracks by row ID: rows lie in m.db in that order, so one page read
-// serves many tracks. A track without a row yet comes last. (A window applies all that is staged
-// or leaves it to a next library, so the tracks the DJ asked for need no place of their own here;
-// the job stages them first.)
+// serves many tracks. A track without a row yet comes last. (The tracks a deck asked for have no
+// place of their own here: the job stages them first and acknowledges the request, so by the
+// window of its remount the queue names none of them; and what one window cannot apply goes into
+// a next library whole.)
 func (w *window) inApplyOrder(keys []string) []string {
 	id := func(key string) int64 {
 		if t := w.snap.Tracks[key]; t != nil && t.EngineID != 0 {
