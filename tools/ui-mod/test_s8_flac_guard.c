@@ -332,6 +332,20 @@ static void test_edge_streams(void) {
         run_parser_stream(&pctx, &avctx, stream, flen + 128, 64, &n_out, pts, dur, lens, crcs, 8);
         assert(n_out == 1 && lens[0] == flen && crcs[0] == 0 && dur[0] == 1024 && pts[0] == 0);
         pctx.parser->parser_close(&pctx);
+
+        /* Exact minimum-size (10-byte) final frame + 128-byte ID3v1 tag (flen == 138). */
+        uint8_t min_pay[1] = {0};
+        size_t min_flen = build_flac_frame(stream, 0, 1024, 9, 1, 4, 0, 0x00, min_pay, sizeof min_pay);
+        assert(min_flen == FG_FLAC_MIN_FRAME);
+        memset(stream + min_flen, 0, 128);
+        memcpy(stream + min_flen, "TAGMin10!", 9);
+        memset(&pctx, 0, sizeof pctx);
+        pctx.parser = &orig;
+        pctx.flags = FG_PARSER_FLAG_USE_CODEC_TS;
+        fg_wrap_flac_parser(&pctx);
+        run_parser_stream(&pctx, &avctx, stream, min_flen + 128, 64, &n_out, pts, dur, lens, crcs, 8);
+        assert(n_out == 1 && lens[0] == min_flen && crcs[0] == 0);
+        pctx.parser->parser_close(&pctx);
     }
 
     /* 2. Variable-blocksize stream with leading garbage (mid-frame seek resync) + 10-byte frames (#9270). */
@@ -425,11 +439,18 @@ static void test_edge_streams(void) {
 
 /* ---- Part 2 mock reproducing FFmpeg 4.4.3 compat_decode() partial-decode deadlock ---- */
 typedef struct mock_compat_ctx {
+    uint8_t avctx_raw[64]; /* embeds AVCodecContext.codec_id at FG_AVCTX_CODEC_ID_OFF */
     int partial_size;
     int bsf_jammed;
     int flushes;
     int decodes_ok;
+    int calls;
 } mock_compat_ctx;
+
+static void init_mock_compat(mock_compat_ctx *c, int codec_id) {
+    memset(c, 0, sizeof *c);
+    *(int *)(c->avctx_raw + FG_AVCTX_CODEC_ID_OFF) = codec_id;
+}
 
 static void mock_flush(void *raw) {
     mock_compat_ctx *c = (mock_compat_ctx *)raw;
@@ -449,6 +470,7 @@ static int mock_compat_decode(void *raw_ctx, void *frame, int *got_frame, const 
     (void)frame;
     mock_compat_ctx *c = (mock_compat_ctx *)raw_ctx;
     const fg_avpacket *pkt = (const fg_avpacket *)raw_pkt;
+    c->calls++;
     *got_frame = 0;
 
     if (c->partial_size > 0 && c->partial_size != pkt->size) {
@@ -508,7 +530,7 @@ static void test_compat_decode_recovery(void) {
 
     /* AFTER (guarded by fg_decode_audio4_guarded): recovers cleanly, zero AVERROR_BUG! */
     mock_compat_ctx guard_ctx;
-    memset(&guard_ctx, 0, sizeof guard_ctx);
+    init_mock_compat(&guard_ctx, FG_AV_CODEC_ID_FLAC);
     assert(fg_decode_audio4_guarded(&guard_ctx, NULL, &got, &p_multi, mock_compat_decode, mock_flush) == 14 && got == 1);
     for (int i = 0; i < 15; i++) {
         int rc = fg_decode_audio4_guarded(&guard_ctx, NULL, &got, &p_norm, mock_compat_decode, mock_flush);
@@ -538,9 +560,16 @@ static void test_compat_decode_recovery(void) {
     rc = fg_decode_audio4_guarded(&guard_ctx, NULL, &got, &p_norm, mock_compat_decode, mock_flush);
     assert(rc == (int)sizeof normal_buf && got == 1 && guard_ctx.flushes == 2);
 
+    /* Non-FLAC codecs (e.g. MP3 = 86017) pass straight through without draining or flushing. */
+    mock_compat_ctx mp3_ctx;
+    init_mock_compat(&mp3_ctx, 86017);
+    rc = fg_decode_audio4_guarded(&mp3_ctx, NULL, &got, &p_prefix, mock_compat_decode, mock_flush);
+    assert(rc == 10 && got == 0 && mp3_ctx.calls == 1 && mp3_ctx.flushes == 0);
+    assert(__atomic_load_n(&fg_partial_active, __ATOMIC_ACQUIRE) == 0);
+
     fg_dec_forget(&guard_ctx);
     assert(__atomic_load_n(&fg_partial_active, __ATOMIC_ACQUIRE) == 0);
-    puts("S8 compat_decode partial-decode & AVERROR_BUG recovery: PASS");
+    puts("S8 compat_decode partial-decode, non-FLAC passthrough & AVERROR_BUG recovery: PASS");
 }
 
 int main(void) {

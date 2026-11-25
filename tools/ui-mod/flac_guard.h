@@ -492,7 +492,7 @@ static int fg_flac_try_emit(fg_flac_stream *st, fg_parser_ctx *s, void *avctx,
         if (is_eof && st->len >= FG_FLAC_MIN_FRAME) {
             size_t flen = st->len;
             /* Strip trailing ID3v1 tag if the frame CRC-16 validates right before it. */
-            if (flen > 128u + FG_FLAC_MIN_FRAME &&
+            if (flen >= 128u + FG_FLAC_MIN_FRAME &&
                 memcmp(p + flen - 128u, "TAG", 3) == 0 &&
                 fg_crc16_compute(p, flen - 128u) == 0) {
                 flen -= 128u;
@@ -532,7 +532,8 @@ static int fg_flac_try_emit(fg_flac_stream *st, fg_parser_ctx *s, void *avctx,
 
     size_t max_a = st->len > hdr_margin ? st->len - hdr_margin : 0;
     unsigned tried = 0;
-    for (size_t off_a = 0; off_a <= max_a && tried < 256u; off_a++) {
+    size_t scan_budget = 0;
+    for (size_t off_a = 0; off_a <= max_a && tried < 64u && scan_budget < 2097152u; off_a++) {
         if (p[off_a] != 0xffu || (p[off_a + 1] & 0xfeu) != 0xf8u) continue;
         fg_flac_frame_info fi_a;
         if (!fg_parse_frame_header(p + off_a, st->len - off_a, si, &fi_a)) continue;
@@ -546,6 +547,7 @@ static int fg_flac_try_emit(fg_flac_stream *st, fg_parser_ctx *s, void *avctx,
         if (scan_end > off_a + max_frame) scan_end = off_a + max_frame;
         if (off_a + FG_FLAC_MIN_FRAME <= scan_end) {
             uint16_t crc = fg_crc16_compute(p + off_a, FG_FLAC_MIN_FRAME);
+            scan_budget += FG_FLAC_MIN_FRAME;
             for (size_t off_b = off_a + FG_FLAC_MIN_FRAME; off_b <= scan_end; off_b++) {
                 if (crc == 0 && p[off_b] == 0xffu && (p[off_b + 1] & 0xfeu) == 0xf8u) {
                     fg_flac_frame_info fi_b;
@@ -561,12 +563,15 @@ static int fg_flac_try_emit(fg_flac_stream *st, fg_parser_ctx *s, void *avctx,
                         return 1;
                     }
                 }
-                if (off_b < st->len) crc = fg_crc16_step(crc, p[off_b]);
+                if (off_b < st->len) {
+                    crc = fg_crc16_step(crc, p[off_b]);
+                    if (++scan_budget >= 2097152u) break;
+                }
             }
         }
         if (is_eof && st->len - off_a >= FG_FLAC_MIN_FRAME) {
             size_t flen = st->len - off_a;
-            if (flen > 128u + FG_FLAC_MIN_FRAME &&
+            if (flen >= 128u + FG_FLAC_MIN_FRAME &&
                 memcmp(p + off_a + flen - 128u, "TAG", 3) == 0 &&
                 fg_crc16_compute(p + off_a, flen - 128u) == 0) {
                 flen -= 128u;
@@ -773,6 +778,9 @@ static int fg_decode_audio4_guarded(void *avctx, void *frame, int *got_frame,
                                     const void *raw_pkt,
                                     fg_decode_audio4_fn real_decode,
                                     fg_flush_buffers_fn real_flush) {
+    /* Restrict recovery strictly to FLAC contexts so MP3/AAC/ALAC/WAV pass straight through. */
+    if (!avctx || *(const int *)((const char *)avctx + FG_AVCTX_CODEC_ID_OFF) != FG_AV_CODEC_ID_FLAC)
+        return real_decode(avctx, frame, got_frame, raw_pkt);
     const fg_avpacket *pkt = (const fg_avpacket *)raw_pkt;
     int pending_rem = fg_dec_take_partial(avctx);
     if (pending_rem > 0) {
