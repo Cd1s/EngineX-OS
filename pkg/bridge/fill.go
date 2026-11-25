@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
@@ -40,6 +41,9 @@ type FillResult struct {
 
 // putStaged is Stage.Put; a variable for tests of a full /data.
 var putStaged = (*rbstate.Stage).Put
+
+// writeRGBFile writes a track's list waveform file; a variable for the test of a full folder.
+var writeRGBFile = enginedb.WriteRGBOverviewAtomic
 
 // fillLockWait is how long the job waits for a window to release the volume.
 var fillLockWait = 2 * time.Minute
@@ -169,19 +173,6 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	if err != nil {
 		return res, fmt.Errorf("stage: %w", err)
 	}
-	// A record a next library applied stayed in the stage for the deck's loads until the swap:
-	// its list waveform is written now that the row is the stick's, and it goes.
-	for key, e := range entries {
-		if t := snap.Tracks[key]; t != nil && t.EngineID != 0 && t.Perf != rbstate.PerfNone && !e.Missing && t.Built.Equal(e.Sig) {
-			if full, e2 := stage.Read(e); e2 == nil && len(full.RGB) > 0 {
-				writeOverview(dbDir, snap.LibraryUUID, t.EngineID, full.RGB)
-			}
-			if err = stage.Drop(key); err != nil {
-				return res, err
-			}
-			delete(entries, key)
-		}
-	}
 	// What a next library holds already is not staged again.
 	inNext, _ := rbstate.Load(nextState(snap.LibraryUUID))
 	f := &filler{
@@ -189,6 +180,19 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		quick: verified != "" && verified == view.stamp, pace: pace, retries: map[string]int{}, inNext: inNext,
 		byKey: make(map[string]int, len(view.tracks)), handled: make([]bool, len(view.tracks)), built: make([]bool, len(view.tracks)),
 		rgbDir: dbDir, progress: o.Progress,
+	}
+	// A record a next library applied stayed in the stage for the deck's loads until the swap:
+	// its list waveform is written now that the row is the stick's, and it goes.
+	for key, e := range entries {
+		if t := snap.Tracks[key]; t != nil && t.EngineID != 0 && t.Perf != rbstate.PerfNone && !e.Missing && t.Built.Equal(e.Sig) {
+			if full, e2 := stage.Read(e); e2 == nil && len(full.RGB) > 0 {
+				f.writeRGB(t.EngineID, full.RGB)
+			}
+			if err = stage.Drop(key); err != nil {
+				return res, err
+			}
+			delete(entries, key)
+		}
 	}
 	order := make([]int, 0, len(view.tracks))
 	for i, t := range view.tracks {
@@ -283,6 +287,7 @@ type filler struct {
 	res      FillResult
 	progress func(done, total int)
 	rgbDir   string
+	rgbFull  bool              // the list waveform folder took no more files: no further file is tried
 	inNext   *rbstate.Snapshot // of the next library, nil without one
 	// the priority queue: the last sequence served, and tries of a path that cannot be staged
 	lastAckSeq uint64
@@ -528,13 +533,21 @@ func (f *filler) unread(vt *fillTrack, err error) (bool, error) {
 
 // writeRGB puts a finished track's mini waveform where Engine reads it, unless a valid one is there.
 func (f *filler) writeRGB(id int64, rgb []byte) {
+	if f.rgbFull {
+		return
+	}
 	dst := filepath.Join(f.rgbDir, "OverviewData", f.snap.LibraryUUID, strconv.FormatInt(id, 10)+".rgb")
 	if b, err := os.ReadFile(dst); err == nil {
 		if raw, err := enginedb.QUncompress(b, 1<<20); err == nil && enginedb.ValidRGBOverview(raw) {
 			return
 		}
 	}
-	if err := enginedb.WriteRGBOverviewAtomic(f.rgbDir, f.snap.LibraryUUID, id, rgb); err != nil {
+	if err := writeRGBFile(f.rgbDir, f.snap.LibraryUUID, id, rgb); errors.Is(err, syscall.ENOSPC) {
+		// A FAT32 folder holds 65,536 entries, and a file of this folder takes two: Engine's own
+		// layout ends at about 32,700 tracks there. Every further try would search the full folder.
+		f.rgbFull = true
+		log.Printf("rb-bridge: the list waveform folder of %s takes no more files (%v); the tracks from row %d on get none", f.mount, err, id)
+	} else if err != nil {
 		log.Printf("rb-bridge: mini waveform of track %d not written: %v", id, err)
 	}
 }

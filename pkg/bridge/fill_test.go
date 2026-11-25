@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"sync"
 	"testing"
 	"time"
@@ -710,5 +711,30 @@ func TestFillFindsAMissingFileThatCameBack(t *testing.T) {
 	testfixture.Write(t, root, testfixture.LargeTrackPath(2), saved)
 	if res := mustFill(t, root, FillOptions{Stage: st}); res.Staged != 1 || !res.Publish {
 		t.Fatalf("the file came back: %+v", res)
+	}
+}
+
+// A FAT32 folder holds 65,536 entries and a list waveform file takes two of them, so Engine's
+// folder of them is full at about 32,700 tracks (50,000 synthetic tracks on the replica: 17,000
+// failed writes, each a search of the full folder). The job stops writing them at the first
+// refusal, says so once and stages every track all the same.
+func TestFillStopsWritingListWaveformsWhenTheirFolderIsFull(t *testing.T) {
+	root, snap := fillStick(t, 12)
+	tries := 0
+	real := writeRGBFile
+	defer func() { writeRGBFile = real }()
+	writeRGBFile = func(dir, uuid string, id int64, body []byte) error {
+		if tries++; tries > 4 {
+			return &os.LinkError{Op: "rename", Old: "tmp", New: "rgb", Err: syscall.ENOSPC}
+		}
+		return real(dir, uuid, id, body)
+	}
+	out := captureLog(t)
+	if res := mustFill(t, root, FillOptions{Stage: stageOf(t, snap)}); res.Staged != 12 || res.Unread != 0 {
+		t.Fatalf("fill: %+v", res)
+	}
+	files, _ := filepath.Glob(filepath.Join(dbDirOf(root), "OverviewData", snap.LibraryUUID, "*.rgb"))
+	if tries != 5 || len(files) != 4 || strings.Count(out.String(), "takes no more files") != 1 || strings.Contains(out.String(), "mini waveform of track") {
+		t.Fatalf("%d tries, %d files written; log:\n%s", tries, len(files), out)
 	}
 }
