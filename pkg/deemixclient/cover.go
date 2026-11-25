@@ -125,7 +125,9 @@ func (c *Client) fetchCover(ctx context.Context, address string) ([]byte, string
 	if err != nil || u.Scheme != "https" {
 		return nil, "", errors.New("cover: invalid address")
 	}
-	req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
+	reqCtx, reqCancel := context.WithCancel(ctx)
+	defer reqCancel()
+	req, err := http.NewRequestWithContext(reqCtx, "GET", address, nil)
 	if err != nil {
 		return nil, "", errors.New("cover: invalid address")
 	}
@@ -137,7 +139,9 @@ func (c *Client) fetchCover(ctx context.Context, address string) ([]byte, string
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("cover: HTTP %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxCoverBytes+1))
+	sr := newStallReader(resp.Body, mediaStallTimeout, reqCancel)
+	data, err := io.ReadAll(io.LimitReader(sr, maxCoverBytes+1))
+	sr.Stop()
 	if err != nil {
 		return nil, "", errors.New("cover: transfer interrupted")
 	}

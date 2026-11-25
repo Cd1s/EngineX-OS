@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/analyzer"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -17,6 +18,12 @@ const (
 	minPreviewSeconds = 10
 )
 
+var previewHTTPClient = func() *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = 10 * time.Second
+	return &http.Client{Timeout: 30 * time.Second, Transport: t}
+}()
+
 // PreviewAnalyzer estimates tempo and key from a short public preview clip, under
 // the same resource guard as full analysis. Nothing is kept once it returns.
 func PreviewAnalyzer(guard *resourceguard.Guard) func(context.Context, string) providers.BPMInfo {
@@ -25,7 +32,7 @@ func PreviewAnalyzer(guard *resourceguard.Guard) func(context.Context, string) p
 		if err != nil {
 			return providers.BPMInfo{}
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := previewHTTPClient.Do(req)
 		if err != nil {
 			return providers.BPMInfo{}
 		}

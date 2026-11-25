@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -23,6 +24,56 @@ const (
 	// The deck's link fills at about 16 requests; 8 in lockstep got half of it.
 	partsAtOnce = 16
 )
+
+// A media or cover body read that makes no forward progress for this long is
+// cancelled so a half-open CDN connection cannot wedge a track load for 30 min.
+var mediaStallTimeout = 30 * time.Second
+
+type stallReader struct {
+	r       io.Reader
+	timeout time.Duration
+	mu      sync.Mutex
+	timer   *time.Timer
+	stopped bool
+}
+
+func newStallReader(r io.Reader, timeout time.Duration, cancel context.CancelFunc) *stallReader {
+	sr := &stallReader{r: r, timeout: timeout}
+	if timeout > 0 {
+		sr.timer = time.AfterFunc(timeout, func() {
+			sr.mu.Lock()
+			stopped := sr.stopped
+			sr.stopped = true
+			sr.mu.Unlock()
+			if !stopped {
+				cancel()
+			}
+		})
+	}
+	return sr
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if n > 0 && s.timer != nil {
+		s.mu.Lock()
+		if !s.stopped {
+			s.timer.Reset(s.timeout)
+		}
+		s.mu.Unlock()
+	}
+	return n, err
+}
+
+func (s *stallReader) Stop() {
+	if s.timer == nil {
+		return
+	}
+	s.mu.Lock()
+	s.stopped = true
+	s.timer.Stop()
+	s.mu.Unlock()
+}
 
 // Only downloads this pipeline named are ever evicted: Save's and Deemix's <id>.
 // subsonic-<id> is the name Subsonic downloads had up to 5.3.0.5; they are nas-<hash> now.
@@ -255,8 +306,10 @@ func (c *Client) fetchPart(ctx context.Context, p part) ([]byte, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		req, err := http.NewRequestWithContext(ctx, "GET", p.url, nil)
+		reqCtx, reqCancel := context.WithCancel(ctx)
+		req, err := http.NewRequestWithContext(reqCtx, "GET", p.url, nil)
 		if err != nil || (req.URL.Scheme != "http" && req.URL.Scheme != "https") {
+			reqCancel()
 			return nil, errors.New("audio: invalid address")
 		}
 		want := http.StatusOK
@@ -266,11 +319,15 @@ func (c *Client) fetchPart(ctx context.Context, p part) ([]byte, error) {
 		}
 		resp, err := c.media().Do(req)
 		if err != nil {
+			reqCancel()
 			last = errors.New("audio: transfer failed")
 			continue
 		}
-		data, err := io.ReadAll(io.LimitReader(resp.Body, maxPartBytes))
+		sr := newStallReader(resp.Body, mediaStallTimeout, reqCancel)
+		data, err := io.ReadAll(io.LimitReader(sr, maxPartBytes))
+		sr.Stop()
 		resp.Body.Close()
+		reqCancel()
 		switch {
 		case resp.StatusCode != want:
 			last = fmt.Errorf("audio: HTTP %d", resp.StatusCode)
@@ -291,22 +348,31 @@ const splitBytes = 2 << 20
 // fetchSplit downloads one file as parallel byte ranges. A host that ignores
 // Range just sends it whole, which is kept as it comes.
 func (c *Client) fetchSplit(ctx context.Context, f io.Writer, address string) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
+	reqCtx, reqCancel := context.WithCancel(ctx)
+	req, err := http.NewRequestWithContext(reqCtx, "GET", address, nil)
 	if err != nil || (req.URL.Scheme != "http" && req.URL.Scheme != "https") {
+		reqCancel()
 		return errors.New("audio: invalid address")
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", splitBytes-1))
 	resp, err := c.media().Do(req)
 	if err != nil {
+		reqCancel()
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		return errors.New("audio: transfer failed")
 	}
-	defer resp.Body.Close()
+	sr := newStallReader(resp.Body, mediaStallTimeout, reqCancel)
+	cleanup := func() {
+		sr.Stop()
+		resp.Body.Close()
+		reqCancel()
+	}
 	switch resp.StatusCode {
 	case http.StatusOK:
-		n, err := io.Copy(f, io.LimitReader(resp.Body, maxMediaBytes+1))
+		n, err := io.Copy(f, io.LimitReader(sr, maxMediaBytes+1))
+		cleanup()
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -319,13 +385,17 @@ func (c *Client) fetchSplit(ctx context.Context, f io.Writer, address string) er
 		return nil
 	case http.StatusPartialContent:
 	default:
-		return fmt.Errorf("audio: HTTP %d", resp.StatusCode)
+		code := resp.StatusCode
+		cleanup()
+		return fmt.Errorf("audio: HTTP %d", code)
 	}
 	var from, to, total int64
 	if _, err := fmt.Sscanf(resp.Header.Get("Content-Range"), "bytes %d-%d/%d", &from, &to, &total); err != nil || from != 0 || to < 0 || to >= total || total > maxMediaBytes {
+		cleanup()
 		return errors.New("audio: unexpected byte range")
 	}
-	n, err := io.Copy(f, io.LimitReader(resp.Body, to+2))
+	n, err := io.Copy(f, io.LimitReader(sr, to+2))
+	cleanup()
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -402,7 +472,9 @@ func (c *Client) Save(ctx context.Context, name, address string) (*Download, err
 	if badName(name) {
 		return nil, errBadName
 	}
-	req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
+	reqCtx, reqCancel := context.WithCancel(ctx)
+	defer reqCancel()
+	req, err := http.NewRequestWithContext(reqCtx, "GET", address, nil)
 	if err != nil || (req.URL.Scheme != "http" && req.URL.Scheme != "https") {
 		return nil, errors.New("audio: invalid address")
 	}
@@ -425,7 +497,9 @@ func (c *Client) Save(ctx context.Context, name, address string) (*Download, err
 		return nil, err
 	}
 	defer os.Remove(f.Name())
-	n, err := io.Copy(f, io.LimitReader(resp.Body, maxMediaBytes+1))
+	sr := newStallReader(resp.Body, mediaStallTimeout, reqCancel)
+	n, err := io.Copy(f, io.LimitReader(sr, maxMediaBytes+1))
+	sr.Stop()
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
 	}

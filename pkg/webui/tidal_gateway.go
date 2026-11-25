@@ -184,6 +184,9 @@ type tidalGateway struct {
 
 	saving bool       // a save of the track IDs is scheduled
 	saveMu sync.Mutex // keeps saves in order
+
+	proxyTransport     *http.Transport
+	proxyHeaderTimeout time.Duration
 }
 
 // savedRef is a trackRef on disk. Engine keeps a listing's IDs while stream-sync
@@ -450,6 +453,56 @@ func (g *tidalGateway) emptyPage(w http.ResponseWriter, r *http.Request) {
 	respond(w, page(r, 100, []any{}))
 }
 
+var (
+	// Real TIDAL API/auth requests are small JSON payloads (never audio files).
+	// Bound headers and total duration so a stalled upstream returns 502 instead
+	// of leaving Engine stuck waiting on track info.
+	tidalProxyTimeout       = 45 * time.Second
+	tidalProxyHeaderTimeout = 20 * time.Second
+	// Keep manifest-phase cold downloads under Engine 5.3.0's 60 s curl timeout
+	// so the deck receives a clean 502 instead of hanging on PreparingDownload.
+	manifestFetchTimeout = 50 * time.Second
+)
+
+func (g *tidalGateway) tidalTransport() http.RoundTripper {
+	if g.s != nil && g.s.cfg.HTTP != nil && g.s.cfg.HTTP.Transport != nil {
+		if _, ok := g.s.cfg.HTTP.Transport.(*http.Transport); !ok {
+			return g.s.cfg.HTTP.Transport
+		}
+	}
+	headerTimeout := tidalProxyHeaderTimeout
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.proxyTransport != nil && g.proxyHeaderTimeout == headerTimeout {
+		return g.proxyTransport
+	}
+	if g.proxyTransport != nil {
+		g.proxyTransport.CloseIdleConnections()
+	}
+	var base *http.Transport
+	if g.s != nil && g.s.cfg.HTTP != nil {
+		if t, ok := g.s.cfg.HTTP.Transport.(*http.Transport); ok && t != nil {
+			base = t.Clone()
+		}
+	}
+	if base == nil {
+		base = http.DefaultTransport.(*http.Transport).Clone()
+	}
+	base.ResponseHeaderTimeout = headerTimeout
+	g.proxyTransport = base
+	g.proxyHeaderTimeout = headerTimeout
+	return base
+}
+
+func (g *tidalGateway) closeIdleConnections() {
+	g.mu.Lock()
+	tr := g.proxyTransport
+	g.mu.Unlock()
+	if tr != nil {
+		tr.CloseIdleConnections()
+	}
+}
+
 // proxyToTidal passes a request on untouched when the deck is showing TIDAL itself,
 // so Engine talks to TIDAL's own servers with its own login and playback.
 func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clean string) {
@@ -473,7 +526,12 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 		fail(w, 500, errors.New("invalid upstream"))
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), tidalProxyTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+	tr := g.tidalTransport()
 	proxy := &httputil.ReverseProxy{
+		Transport: tr,
 		Rewrite: func(out *httputil.ProxyRequest) {
 			out.SetURL(base)
 			out.Out.URL.Path, out.Out.URL.RawPath = upstream, ""
@@ -492,7 +550,7 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 				}
 				retry := resp.Request.Clone(r.Context())
 				retry.Header.Set("Authorization", "Bearer "+a.AccessToken)
-				next, err := http.DefaultTransport.RoundTrip(retry)
+				next, err := tr.RoundTrip(retry)
 				if err != nil {
 					return errors.New("could not retry TIDAL request")
 				}
@@ -506,7 +564,6 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 			fail(w, 502, errors.New("could not reach TIDAL"))
 		},
 	}
-	http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	proxy.ServeHTTP(w, r)
 }
 
@@ -2039,8 +2096,11 @@ func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref tr
 			return true
 		}
 	}
-	http.NewResponseController(w).SetWriteDeadline(time.Time{})
-	if _, err := j.Fetch(r.Context(), ref.session, ref.track, ref.guest); err != nil {
+	timeout := manifestFetchTimeout
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout + 5*time.Second))
+	if _, err := j.Fetch(ctx, ref.session, ref.track, ref.guest); err != nil {
 		fail(w, 502, err)
 		return false
 	}

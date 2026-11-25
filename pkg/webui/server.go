@@ -446,6 +446,7 @@ func (s *Server) Close() {
 	}
 	if s.tidal != nil {
 		s.tidal.saveTracks() // the IDs Engine still lists, for the next run (#73)
+		s.tidal.closeIdleConnections()
 	}
 	if s.prolinkExport != nil {
 		s.prolinkExport.Close()

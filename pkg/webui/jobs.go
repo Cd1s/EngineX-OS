@@ -74,7 +74,9 @@ type Jobs struct {
 	order   []string
 	results map[string]*analyzer.Result
 	files   map[string]fetched
-	fetches map[string]chan struct{}
+	fetches map[string]*fetchFlight
+	fetchWG sync.WaitGroup
+	closed  bool
 	// sources maps trackKey to the file name it was saved as, kept on disk so a
 	// restart finds a Spotify/TIDAL track's Deezer file without asking Deezer.
 	sources map[string]string
@@ -102,16 +104,32 @@ type fetched struct {
 	dl      *deemixclient.Download
 }
 
+type fetchFlight struct {
+	done chan struct{}
+	f    fetched
+	path string
+	err  error
+}
+
+var coverEmbedTimeout = 8 * time.Second
+
 func NewJobs(p Pipeline) *Jobs {
 	if p.Guard == nil {
 		p.Guard = resourceguard.New(resourceguard.DefaultConfig())
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	j := &Jobs{p: p, ctx: ctx, cancel: cancel, queue: make(chan string, 16), done: make(chan struct{}), items: make(map[string]Job), results: make(map[string]*analyzer.Result), files: make(map[string]fetched), fetches: make(map[string]chan struct{}), queued: make(map[string]bool)}
+	j := &Jobs{p: p, ctx: ctx, cancel: cancel, queue: make(chan string, 16), done: make(chan struct{}), items: make(map[string]Job), results: make(map[string]*analyzer.Result), files: make(map[string]fetched), fetches: make(map[string]*fetchFlight), queued: make(map[string]bool)}
 	go j.worker()
 	return j
 }
-func (j *Jobs) Close() { j.cancel(); <-j.done }
+func (j *Jobs) Close() {
+	j.mu.Lock()
+	j.closed = true
+	j.mu.Unlock()
+	j.cancel()
+	<-j.done
+	j.fetchWG.Wait()
+}
 func (j *Jobs) timeout() time.Duration {
 	if j.p.Timeout > 0 {
 		return j.p.Timeout
@@ -274,9 +292,21 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 		// finishing in between cannot trigger a second download.
 		j.mu.Lock()
 		f, done := j.files[key]
-		busy, ok := j.fetches[key]
-		if !ok && !done {
-			j.fetches[key] = make(chan struct{})
+		flight := j.fetches[key]
+		start := false
+		if !done && flight == nil {
+			if err := wait.Err(); err != nil {
+				j.mu.Unlock()
+				return "", err
+			}
+			if j.closed {
+				j.mu.Unlock()
+				return "", context.Canceled
+			}
+			flight = &fetchFlight{done: make(chan struct{})}
+			j.fetches[key] = flight
+			j.fetchWG.Add(1)
+			start = true
 		}
 		j.mu.Unlock()
 		if done {
@@ -291,26 +321,41 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 			j.mu.Unlock()
 			continue
 		}
-		if !ok {
-			break
+		if start {
+			go j.runFetch(key, flight, session, t, guest)
 		}
 		select {
-		case <-busy:
+		case <-flight.done:
+			if flight.err != nil {
+				return "", flight.err
+			}
+			j.queueImport(session, t, guest, flight.f)
+			return flight.path, nil
 		case <-wait.Done():
 			return "", wait.Err()
 		}
 	}
+}
+
+func (j *Jobs) runFetch(key string, flight *fetchFlight, session string, t providers.Track, guest bool) {
+	defer j.fetchWG.Done()
 	defer func() {
+		if flight.path == "" && flight.err == nil {
+			flight.err = errors.New("fetch aborted")
+		}
 		j.mu.Lock()
-		close(j.fetches[key])
-		delete(j.fetches, key)
+		if j.fetches[key] == flight {
+			delete(j.fetches, key)
+		}
 		j.mu.Unlock()
+		close(flight.done)
 	}()
 	ctx, cancel := context.WithTimeout(j.ctx, j.timeout())
 	defer cancel()
 	matched, dl, err := j.acquire(ctx, session, t, guest, nil)
 	if err != nil {
-		return "", err
+		flight.err = err
+		return
 	}
 	j.addCover(ctx, t, dl)
 	f := fetched{matched, dl}
@@ -320,7 +365,8 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 		j.putFile(trackKey(matched), f)
 	}
 	j.queueImport(session, t, guest, f)
-	return dl.Path, nil
+	flight.f = f
+	flight.path = dl.Path
 }
 
 func (j *Jobs) putFile(key string, f fetched) {
@@ -718,12 +764,14 @@ func soundCloudSearch(t providers.Track) string {
 }
 
 // addCover embeds the artwork, which Engine reads from the file for its screens. A
-// missing cover is not worth failing a track over.
+// missing or stalled cover is not worth failing or delaying a track load over.
 func (j *Jobs) addCover(ctx context.Context, t providers.Track, dl *deemixclient.Download) {
 	if t.CoverURL == "" {
 		return
 	}
-	if err := j.p.Deemix.EmbedCover(ctx, dl.Path, t.CoverURL); err != nil {
+	coverCtx, cancel := context.WithTimeout(ctx, coverEmbedTimeout)
+	defer cancel()
+	if err := j.p.Deemix.EmbedCover(coverCtx, dl.Path, t.CoverURL); err != nil {
 		log.Printf("stream-sync: no cover for track %s: %v", t.ID, err)
 	}
 }
