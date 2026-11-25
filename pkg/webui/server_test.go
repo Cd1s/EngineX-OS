@@ -369,3 +369,25 @@ func TestLoginAccessCodeInputAndLockout(t *testing.T) {
 		t.Fatalf("other client: %d", code)
 	}
 }
+
+func TestLoginPageErrorAndHint(t *testing.T) {
+	ui := New(Config{AccessToken: "K7M9-P4X2", StateDir: t.TempDir()}, nil)
+	r := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	ui.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login page status: %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		"loginForm",
+		"loginErr",
+		"Invalid access code",
+		"Too many incorrect attempts",
+		"Settings → About",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("login page missing %q", want)
+		}
+	}
+}
