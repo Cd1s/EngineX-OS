@@ -227,9 +227,8 @@ func (n *nextBuild) mirror(live, next, liveUUID, uuid string, commit int64) erro
 		discardNext(n.dir, uuid)
 		discardNext(n.dir, liveUUID)
 		m = enginedb.Mirror{}
-		var fs syscall.Statfs_t
-		if st, err := os.Stat(live); err == nil && syscall.Statfs(n.dir, &fs) == nil && int64(fs.Bavail)*int64(fs.Bsize) < st.Size()+n.stagedBytes(liveUUID)+(64<<20) {
-			return fmt.Errorf("%w: the stick has %d MiB free, the library is %d MiB", errNoNext, int64(fs.Bavail)*int64(fs.Bsize)>>20, st.Size()>>20)
+		if err := nextRoom(n.dir, liveUUID); err != nil {
+			return err
 		}
 	}
 	fresh := m.Tracks == nil
@@ -279,16 +278,31 @@ func (n *nextBuild) mirror(live, next, liveUUID, uuid string, commit int64) erro
 	return writeGob(filepath.Join(sdir, "mirror"), &m)
 }
 
-// stagedBytes is what the stage of a library holds, as files.
-func (n *nextBuild) stagedBytes(uuid string) (sum int64) {
+// stickFree is what the filesystem of dir has free; a variable for the tests.
+var stickFree = func(dir string) (int64, bool) {
+	var fs syscall.Statfs_t
+	if syscall.Statfs(dir, &fs) != nil {
+		return 0, false
+	}
+	return int64(fs.Bavail) * int64(fs.Bsize), true
+}
+
+// nextRoom is errNoNext when the stick lacks the room for a next library beside its library: a
+// second copy, what the stage of the library holds as files, and 64 MiB.
+func nextRoom(dir, uuid string) error {
+	need := int64(64 << 20)
 	root, _ := rbstate.StageRoot()
 	entries, _ := os.ReadDir(filepath.Join(root, uuid))
 	for _, e := range entries {
 		if info, err := e.Info(); err == nil && info.Mode().IsRegular() {
-			sum += info.Size()
+			need += info.Size()
 		}
 	}
-	return sum
+	st, err := os.Stat(filepath.Join(dir, "m.db"))
+	if free, ok := stickFree(dir); err == nil && ok && free < st.Size()+need {
+		return fmt.Errorf("%w: the stick has %d MiB free, the library is %d MiB", errNoNext, free>>20, st.Size()>>20)
+	}
+	return nil
 }
 
 // swapNext makes a next library that is ready the stick's library: m.db first, then its

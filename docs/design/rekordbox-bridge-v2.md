@@ -655,6 +655,15 @@ edits. The old state file is removed after the snapshot is saved.
 8. **`/data` smaller than a library's stage.** At the stage's floor (256 MiB free) the job writes what is staged
    into the next library, empties the stage and goes on; one remount publishes all of it. Until that remount a
    track loaded on a deck is not in the stage any more, so the UI hook cannot fill it and Engine analyses it.
+9. **A stick without room for a second copy of its library** (the library's size, what its stage holds, and
+   64 MiB) gets no next library. Staged data and row updates are then written in place, the part that fits each
+   window (one remount a part, as before the next library; by the cost model a remount's window updates up to
+   about 4,000 rows of a 5,962-track library). A
+   change of rows and lists that one window cannot write waits for an insert with the OneLibrary key cached; an
+   export whose read alone does not fit a window (by the cost model a OneLibrary of about 20,000 tracks, a Device
+   Library of about 45,000) is never taken on such a stick,
+   and every insert then costs a stat and the job's refusal. The job's line says how much is free and how much
+   is needed.
 
 ## 2. Requirements and the tests that cover them
 
@@ -693,6 +702,7 @@ checklist.
 | What the job publishes as a next library is, after the one window that swaps it in, the library the windows would have written in place (rows under the same IDs, lists, data, snapshot); the job never writes `m.db` and the window does no row work. A new next library has its `Track` rows together. | `TestNextLibrarySwappedInIsTheLibraryTheWindowsWrite` (`pkg/bridge/next_test.go`); `TestMirrorLibraryLaysTrackRowsTogether` (`pkg/enginedb/mirror_test.go`) |
 | The upkeep at a window's end is stopped at its budget (0.5 s in the insert of an unchanged stick, 1 s elsewhere), and a window leaves a list waveform to the job that staged the track with its row. | `TestMountUpkeepIsStoppedAtItsBudget`, `TestMountLeavesTheListWaveformToTheJobThatStagedTheRow` (`pkg/bridge/mount_test.go`) |
 | A window that cannot look for the deck's rows 3 s before the kill does not swap; the job takes them and the next window swaps. With nothing to publish the job makes no next library and asks for no remount. | `TestSwapWaitsForTheJobWhenTheDecksRowsCannotBeLookedForInTime`, `TestNextLibrarySwappedInIsTheLibraryTheWindowsWrite` (`pkg/bridge/next_test.go`) |
+| A stick without room for a next library: row updates one window cannot write are written in place, the batches that fit each window; with room they are left to the job. | `TestRowUpdatesGoOnInPlaceOnAStickWithoutRoomForANextLibrary` (`pkg/bridge/mount_test.go`) |
 | The remount helper takes the deck's rows right before the remount, so that a window without time for the look still swaps; it looks at the decks again after the pass; what it took is read on from by the window and by the job. | `TestRowsTakenBeforeTheRemountLetAWindowWithoutTimeSwap`, `TestRowsTakenBeforeTheRemountAreReadOnFrom` (`pkg/bridge/next_test.go`), `TestRemountTakesTheDecksRowsBeforeTheRemove` (`internal/cli/rbbridge_remount_test.go`) |
 | A stage that fills `/data` is emptied into the next library and the job goes on: every track is staged and one remount publishes all of them. The job stops writing list waveforms when their folder takes no more files. | `TestFillGoesOnPastAFullStageThroughTheNextLibrary` (`pkg/bridge/next_test.go`); `TestFillStopsWritingListWaveformsWhenTheirFolderIsFull` (`pkg/bridge/fill_test.go`) |
 | The first insert of a never-seen export builds rows and lists from the export alone (rows as Engine expects them, lists in Engine's chain order), rebuilds Engine's indexes, saves the snapshot, asks for the job, logs one timed line per step, and leaves only `m.db` and the snapshot in `Database2` (#182, #301). | `TestMountFirstInsert` (`pkg/bridge/mount_test.go`) |
@@ -948,11 +958,11 @@ stamped.
 
 | Scenario | In the window | In the background | How it reaches Engine |
 |---|---|---|---|
-| First insert of a never-seen export | Stat; start the job; read the libraries; build `m.db` on the deck's disk from the exports alone (rows, lists, the export's own cue rows); copy it to the stick, one rename; snapshot. | Every track: stat, audio header, ANLZ, into the stage; `.rgb` files for finished tracks; then the remount is asked for. | Rows and lists at the insert. Cues, grids and waveforms at the remount's window, a batch of 64 tracks a transaction, the tracks a deck asked for first; what does not fit waits for the next window. Covers after that. |
+| First insert of a never-seen export | Stat; start the job; read the libraries; build `m.db` on the deck's disk from the exports alone (rows, lists, the export's own cue rows); copy it to the stick, one rename; snapshot. | Every track: stat, audio header, ANLZ, into the stage; `.rgb` files for finished tracks; then the remount is asked for. | Rows and lists at the insert when the first library fits the window (KDATA, 5,962 tracks: yes), else with the job's next library and one remount. Cues, grids, waveforms and covers with one remount: written in place when one window can write them all, else in a next library that the window swaps in. On a stick without room for a next library: in place, 512 tracks a transaction, what does not fit at the next window. |
 | The same export again, import complete | Stat of the export files and one line of the snapshot. | Nothing (the job is not started). | Nothing changes. |
-| The same export again, import not complete | As a re-export with an empty diff: read, diff, apply what is staged within 4 s. | The job goes on where the stage is. | As above. |
+| The same export again, import not complete | As a re-export with an empty diff: read, diff. An insert applies no staged data. | The job goes on where the stage is. | As above. |
 | A re-export that changes only lists | Read; diff; the changed lists are written (a new list: one row and its entries; a changed list: its entries), in one transaction; snapshot. | The job compares every track's files with the snapshot (stat only) and marks the stamp verified. No remount. | The lists are there at the insert. |
-| A re-export with new or changed tracks | As above, plus rows for new tracks (the export's fields and cue rows), changed fields for changed rows, moves for files that moved, removal of rows whose track left the export. Rows are added while the window has time; the rest is pending and the lists that hold them are completed later. | Staging of the new and changed tracks only, then the remount. | Rows and lists at the insert, their performance data at the remount. |
+| A re-export with new or changed tracks | As above, plus rows for new tracks (the export's fields and cue rows), changed fields for changed rows, moves for files that moved, removal of rows whose track left the export. What does not end 3 s before the kill by the cost model is left to the job. | Staging of the new and changed tracks only, then the remount; rows and lists a window left, in a next library first. | Rows and lists at the insert, or with the next library's remount; their performance data at the remount. |
 | A hot cue set on the deck | Nothing. | stream-sync's watcher, 5 s after Engine's last write: the changed rows only; the cue goes into the track's ANLZ files and into every library that lists the track; `NoteWriteBack` records the new export stamps so the next insert is not taken for a re-export. | rekordbox reads the stick. |
 | Eject | The hook runs the eject pass (12 s at most) before the unmount, through stream-sync, which has the keys and what it read. The hook stops the job. | - | - |
 | Power cut or pull, any step | See section 5. | | |

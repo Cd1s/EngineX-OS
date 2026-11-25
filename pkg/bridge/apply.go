@@ -611,9 +611,21 @@ var updateBatch = 1000
 // updateRows gives rows their changed export fields after the rows and lists are committed, a
 // batch a transaction (a take-over changes thousands): the first batch is owed, the rest optional.
 func (w *window) updateRows(idx []int) error {
-	if all := (work{updates: len(idx), commits: 1 + len(idx)/updateBatch, tracks: len(w.snap.Tracks)}); len(idx) > 0 && !w.st.fits(all) {
-		w.leave(all, "the rows' export fields")
-		return nil
+	cost := func(n int) work { return work{updates: n, commits: 1 + n/updateBatch, tracks: len(w.snap.Tracks)} }
+	if all := len(idx); all > 0 && !w.st.fits(cost(all)) {
+		room := nextRoom(w.dir, w.snap.LibraryUUID)
+		if room == nil {
+			w.leave(cost(all), "the rows' export fields")
+			return nil
+		}
+		// The job cannot make a next library on this stick, so nothing would ever update these rows:
+		// the batches that fit are done here, and the next windows go on.
+		n := all
+		for n > 0 && !w.st.fits(cost(n)) {
+			n -= min(n, updateBatch)
+		}
+		w.left, idx = true, idx[:n]
+		log.Printf("rb-bridge: %v; %d of %d rows get the export's fields in this window", room, n, all)
 	}
 	differed := 0
 	done, err := w.inBatches(len(idx), updateBatch, func(i int) bool {

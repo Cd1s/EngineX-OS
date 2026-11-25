@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -610,6 +611,56 @@ func TestMountUpdatesRowsInBatchesAfterTheLists(t *testing.T) {
 	}
 	if again := mountNow(t, mount, MountOptions{}); !again.Bypassed {
 		t.Fatalf("after the updates: %+v", again)
+	}
+}
+
+// A stick without room for a second copy of its library gets no next library. Row updates one
+// window cannot write (a take-over: every row) are then written in place, the batches that fit a
+// window: left to the job, as on a stick with room, nothing would ever write them.
+func TestRowUpdatesGoOnInPlaceOnAStickWithoutRoomForANextLibrary(t *testing.T) {
+	mount := t.TempDir()
+	t.Setenv(rbstate.StageEnv, filepath.Join(t.TempDir(), "stage"))
+	testfixture.LargeExport(t, mount, 250)
+	mountNow(t, mount, MountOptions{})
+	unknown := func() { // as after a take-over: no row is known to hold the export's fields
+		s := snapshot(t, mount)
+		for _, tr := range s.Tracks {
+			tr.Row = ""
+		}
+		if err := s.Save(dbDir(mount)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unknown()
+	oldBatch, oldSpare, oldFree := updateBatch, spare, stickFree
+	updateBatch, spare = 50, hookWindow-1700*time.Millisecond // 250 rows do not fit a window, 50 do
+	defer func() { updateBatch, spare, stickFree = oldBatch, oldSpare, oldFree }()
+	window := func() (MountResult, string) {
+		out := captureLog(t)
+		res := mountNow(t, mount, MountOptions{Deadline: time.Now().Add(hookWindow), StartBackground: func() error { return nil }})
+		return res, out.String()
+	}
+	// With room the rows are the job's: its next library takes them all.
+	if res, out := window(); res.Updated != 0 || res.Pending.Rows != 250 || !strings.Contains(out, "leaves the rows' export fields to the job") {
+		t.Fatalf("with room for a next library: %+v\n%s", res, out)
+	}
+	stickFree = func(string) (int64, bool) { return 1 << 20, true }
+	if err := (&nextBuild{ctx: context.Background(), mount: mount, dir: dbDir(mount)}).mirror(filepath.Join(dbDir(mount), "m.db"), filepath.Join(dbDir(mount), nextDB), snapshot(t, mount).LibraryUUID, "", 0); !errors.Is(err, errNoNext) {
+		t.Fatalf("the job on a stick with 1 MiB free: %v, want no next library", err)
+	}
+	left := 250
+	for i := 0; left > 0; i++ {
+		res, out := window()
+		if res.Updated == 0 || res.Updated%50 != 0 && res.Updated != left || res.Pending.Rows != left-res.Updated || i > 6 {
+			t.Fatalf("window %d on the stick without room: %d rows were waiting, %+v\n%s", i, left, res, out)
+		}
+		if res.Updated < left && !strings.Contains(out, fmt.Sprintf("%d of %d rows get the export's fields in this window", res.Updated, left)) {
+			t.Fatalf("window %d does not say what it did:\n%s", i, out)
+		}
+		left -= res.Updated
+	}
+	if res, out := window(); res.Updated != 0 || res.Pending.Rows != 0 || strings.Contains(out, "mount update") {
+		t.Fatalf("after the updates: %+v\n%s", res, out)
 	}
 }
 
