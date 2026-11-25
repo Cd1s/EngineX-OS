@@ -719,6 +719,13 @@ struct engine_build {
     // that holds its metaObject() and that function. QML asks an object for its meta
     // object before it can call anything on it, so the owner is known by then.
     uint32_t shadow_owner_slot, shadow_owner_fn;
+    // #336 S5: zoomed waveform builder & tile render guards (HF_DSP_GUARDS).
+    // LibrarianTrackData::startWaveformBuilder and RMSNodeCache::populateNode vtable
+    // slots, target function offsets, and 8-byte code prefixes.
+    uint32_t wf_start_slot, wf_start_fn;
+    uchar wf_start_prefix[8];
+    uint32_t wf_pop_slot, wf_pop_fn;
+    uchar wf_pop_prefix[8];
 };
 static const struct engine_build *build;
 
@@ -942,6 +949,215 @@ static void install_tidal_profile_sso(uintptr_t base, size_t page) {
     if (*slot != base + build->tidal_sso_getter) return;
     patch_pointer(HF_GATEWAY, slot, (uintptr_t)tidal_profile_sso, page);
     fprintf(stderr, "engine-ui-hook: isolated local TIDAL carrier from profile SSO\n");
+}
+
+// #336 S5: zoomed waveform builder & tile render guards (HF_DSP_GUARDS).
+// Stock Engine has two silent failure modes that leave the scrolling zoomed
+// waveform blank while the overview and audio playback stay healthy:
+//   1. LibrarianTrackData::startWaveformBuilder sets m_waveformBuilderStarted
+//      to 1 unconditionally before checking getAudioDecoder()/cache/metadata,
+//      and never clears it when a background WaveformBuilderJob exits early
+//      without finishing or writing any blocks (use_count drops back to 1 with
+//      state == 0 and an empty RB-tree).
+//   2. RMSNodeCache::populateNode returns true (inserting the blank tile into
+//      the node cache map) even when QOpenGLContext::currentContext() is NULL
+//      (leaving WaveFormRenderer with shaderProgram == NULL) or while the
+//      WaveFormItem is hidden (!isVisible(), e.g. inactive layer during layer
+//      switch), latching WaveFormRMSNode::m_visible = 0 so beforeRendering
+//      skips the tile permanently until zoom or track reload.
+#if defined(__aarch64__)
+#define WF_CTRL_USE_COUNT_OFF    0x8u
+#define WF_BUILDER_STATE_OFF     0x2cu
+#define WF_BUILDER_TREE_ROOT_OFF 0x68u
+#define WF_LTD_BUILDER_PTR_OFF   0x1d8u
+#define WF_LTD_BUILDER_CTRL_OFF  0x1e0u
+#define WF_LTD_STARTED_OFF       0x1e8u
+#define WF_REND_SHADER_OFF       0x30u
+#define WF_RMS_FBO_OFF           0x138u
+#define WF_RMS_REND_OFF          0x140u
+#define WF_RMS_VIS_OFF           0x151u
+#define WF_ENTRY_RMS_OFF         0x8u
+#define WF_CACHE_ITEM_OFF        0x90u
+#else
+#define WF_CTRL_USE_COUNT_OFF    0x4u
+#define WF_BUILDER_STATE_OFF     0x28u
+#define WF_BUILDER_TREE_ROOT_OFF 0x4cu
+#define WF_LTD_BUILDER_PTR_OFF   0x118u
+#define WF_LTD_BUILDER_CTRL_OFF  0x11cu
+#define WF_LTD_STARTED_OFF       0x120u
+#define WF_REND_SHADER_OFF       0x18u
+#define WF_RMS_FBO_OFF           0xe8u
+#define WF_RMS_REND_OFF          0xecu
+#define WF_RMS_VIS_OFF           0xf5u
+#define WF_ENTRY_RMS_OFF         0x4u
+#define WF_CACHE_ITEM_OFF        0x48u
+#endif
+
+typedef void (*wf_start_fn_t)(void *self, int flag);
+typedef int (*wf_pop_fn_t)(void *cache, void *tile_idx, void *node_ptr_ptr);
+
+static wf_start_fn_t wf_start_orig;
+static wf_pop_fn_t wf_pop_orig;
+static void *(*wf_gl_current_context)(void);
+static uint8_t (*wf_item_is_visible)(const void *item);
+static uint32_t (*wf_fbo_texture)(const void *fbo);
+static int wf_qt_syms_resolved;
+static pthread_mutex_t wf_qt_mu = PTHREAD_MUTEX_INITIALIZER;
+
+#define WF_RETRY_SLOTS 16u
+#define WF_MAX_DEAD_JOB_RETRIES 3u
+struct wf_retry_slot {
+    const void *track;
+    uint32_t count;
+};
+static pthread_mutex_t wf_retry_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct wf_retry_slot wf_retries[WF_RETRY_SLOTS];
+static uint32_t wf_retry_next;
+
+static void wf_retry_reset(const void *self) {
+    pthread_mutex_lock(&wf_retry_mu);
+    for (unsigned i = 0; i < WF_RETRY_SLOTS; i++) {
+        if (wf_retries[i].track == self) {
+            wf_retries[i].track = NULL;
+            wf_retries[i].count = 0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&wf_retry_mu);
+}
+
+static int wf_retry_consume(const void *self) {
+    int ok = 0;
+    pthread_mutex_lock(&wf_retry_mu);
+    int found = -1, empty = -1;
+    for (unsigned i = 0; i < WF_RETRY_SLOTS; i++) {
+        if (wf_retries[i].track == self) { found = (int)i; break; }
+        if (!wf_retries[i].track && empty < 0) empty = (int)i;
+    }
+    if (found >= 0) {
+        if (wf_retries[found].count < WF_MAX_DEAD_JOB_RETRIES) {
+            wf_retries[found].count++;
+            ok = 1;
+        }
+    } else {
+        unsigned idx = empty >= 0 ? (unsigned)empty : (wf_retry_next++ % WF_RETRY_SLOTS);
+        wf_retries[idx].track = self;
+        wf_retries[idx].count = 1;
+        ok = 1;
+    }
+    pthread_mutex_unlock(&wf_retry_mu);
+    return ok;
+}
+
+static int wf_builder_is_dead_empty(const void *self) {
+    const void *bptr = __atomic_load_n(
+        (const void *const *)((const char *)self + WF_LTD_BUILDER_PTR_OFF), __ATOMIC_ACQUIRE);
+    if (!bptr) return 1;
+    const void *ctrl = __atomic_load_n(
+        (const void *const *)((const char *)self + WF_LTD_BUILDER_CTRL_OFF), __ATOMIC_ACQUIRE);
+    if (ctrl) {
+        // Acquire synchronizes-with the background WaveformBuilderJob's release
+        // decrement on exit; never read Builder's RB-tree while another ref is alive.
+        int32_t use_count = __atomic_load_n(
+            (const int32_t *)((const char *)ctrl + WF_CTRL_USE_COUNT_OFF), __ATOMIC_ACQUIRE);
+        if (use_count > 1) return 0;
+    }
+    int32_t state = __atomic_load_n(
+        (const int32_t *)((const char *)bptr + WF_BUILDER_STATE_OFF), __ATOMIC_ACQUIRE);
+    if (state != 0) return 0;
+    const void *root = __atomic_load_n(
+        (const void *const *)((const char *)bptr + WF_BUILDER_TREE_ROOT_OFF), __ATOMIC_ACQUIRE);
+    return root == NULL;
+}
+
+static void waveform_builder_start_guard(void *self, int flag) {
+    if (!wf_start_orig) return;
+    if (!self) { wf_start_orig(self, flag); return; }
+    uint8_t *started = (uint8_t *)((char *)self + WF_LTD_STARTED_OFF);
+    uint8_t was_started = __atomic_load_n(started, __ATOMIC_ACQUIRE);
+    const void *old_ptr = __atomic_load_n(
+        (const void *const *)((const char *)self + WF_LTD_BUILDER_PTR_OFF), __ATOMIC_ACQUIRE);
+    int attempted = 0;
+    if (!was_started) {
+        wf_retry_reset(self);
+        attempted = 1;
+    } else if (wf_builder_is_dead_empty(self) && wf_retry_consume(self)) {
+        __atomic_store_n(started, 0, __ATOMIC_RELEASE);
+        attempted = 1;
+    }
+    wf_start_orig(self, flag);
+    if (attempted) {
+        const void *new_ptr = __atomic_load_n(
+            (const void *const *)((const char *)self + WF_LTD_BUILDER_PTR_OFF), __ATOMIC_ACQUIRE);
+        if (new_ptr == old_ptr && wf_builder_is_dead_empty(self))
+            __atomic_store_n(started, 0, __ATOMIC_RELEASE);
+    }
+}
+
+static void wf_resolve_qt_syms(void) {
+    if (__atomic_load_n(&wf_qt_syms_resolved, __ATOMIC_ACQUIRE)) return;
+    pthread_mutex_lock(&wf_qt_mu);
+    if (!__atomic_load_n(&wf_qt_syms_resolved, __ATOMIC_RELAXED)) {
+        wf_gl_current_context = (void *(*)(void))dlsym(
+            RTLD_DEFAULT, "_ZN14QOpenGLContext14currentContextEv");
+        wf_item_is_visible = (uint8_t (*)(const void *))dlsym(
+            RTLD_DEFAULT, "_ZNK10QQuickItem9isVisibleEv");
+        wf_fbo_texture = (uint32_t (*)(const void *))dlsym(
+            RTLD_DEFAULT, "_ZNK24QOpenGLFramebufferObject7textureEv");
+        __atomic_store_n(&wf_qt_syms_resolved, 1, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&wf_qt_mu);
+}
+
+static int rms_populate_node_guard(void *cache, void *tile_idx, void *node_ptr_ptr) {
+    if (!wf_pop_orig) return 0;
+    wf_resolve_qt_syms();
+    if (wf_gl_current_context && !wf_gl_current_context()) return 0;
+    if (wf_item_is_visible && cache) {
+        const void *item = *(const void *const *)((const char *)cache + WF_CACHE_ITEM_OFF);
+        if (item && !wf_item_is_visible(item)) return 0;
+    }
+    int ok = wf_pop_orig(cache, tile_idx, node_ptr_ptr);
+    if (!ok) return 0;
+    if (node_ptr_ptr) {
+        const void *entry = *(const void *const *)node_ptr_ptr;
+        const void *rms = entry
+            ? *(const void *const *)((const char *)entry + WF_ENTRY_RMS_OFF)
+            : NULL;
+        if (rms) {
+            if (!*(const uint8_t *)((const char *)rms + WF_RMS_VIS_OFF)) return 0;
+            const void *fbo = *(const void *const *)((const char *)rms + WF_RMS_FBO_OFF);
+            const void *rend = *(const void *const *)((const char *)rms + WF_RMS_REND_OFF);
+            if (!fbo || (wf_fbo_texture && wf_fbo_texture(fbo) == 0)) return 0;
+            if (!rend || !*(const void *const *)((const char *)rend + WF_REND_SHADER_OFF)) return 0;
+        }
+    }
+    return ok;
+}
+
+static void install_waveform_guards(uintptr_t base, size_t page) {
+    if (!build || !hf_on(HF_DSP_GUARDS)) return;
+    unsigned installed = 0;
+    if (build->wf_start_slot && build->wf_start_fn) {
+        uintptr_t *slot = (uintptr_t *)(base + build->wf_start_slot);
+        uintptr_t fn = base + build->wf_start_fn;
+        if (*slot == fn && !memcmp((const void *)fn, build->wf_start_prefix, sizeof build->wf_start_prefix)) {
+            wf_start_orig = (wf_start_fn_t)fn;
+            patch_pointer(HF_DSP_GUARDS, slot, (uintptr_t)waveform_builder_start_guard, page);
+            installed |= 1u;
+        }
+    }
+    if (build->wf_pop_slot && build->wf_pop_fn) {
+        uintptr_t *slot = (uintptr_t *)(base + build->wf_pop_slot);
+        uintptr_t fn = base + build->wf_pop_fn;
+        if (*slot == fn && !memcmp((const void *)fn, build->wf_pop_prefix, sizeof build->wf_pop_prefix)) {
+            wf_pop_orig = (wf_pop_fn_t)fn;
+            patch_pointer(HF_DSP_GUARDS, slot, (uintptr_t)rms_populate_node_guard, page);
+            installed |= 2u;
+        }
+    }
+    if (installed)
+        fprintf(stderr, "engine-ui-hook: waveform guards installed (0x%x)\n", installed);
 }
 
 static uint32_t stems_feature_jump[2];
@@ -2477,7 +2693,11 @@ static const struct engine_build engine_builds[] = {
      .shadow_array_offset = 0x450, .shadow_position_prefix_size = 16,
      .shadow_position_prefix = {0x5f, 0x24, 0x03, 0xd5, 0x00, 0x48, 0x40, 0xbd,
                                 0x00, 0x00, 0x38, 0x1e, 0xc0, 0x03, 0x5f, 0xd6},
-     .shadow_owner_slot = 0x2d27a10, .shadow_owner_fn = 0xb0b888},
+     .shadow_owner_slot = 0x2d27a10, .shadow_owner_fn = 0xb0b888,
+     .wf_start_slot = 0x2d7e0d0, .wf_start_fn = 0xf369a4,
+     .wf_start_prefix = {0x3f, 0x23, 0x03, 0xd5, 0xff, 0xc3, 0x04, 0xd1},
+     .wf_pop_slot = 0x2c98b80, .wf_pop_fn = 0xb52410,
+     .wf_pop_prefix = {0x3f, 0x23, 0x03, 0xd5, 0xfd, 0x7b, 0xb7, 0xa9}},
 };
 #else
 static const struct engine_edit edits_504[] = {
@@ -2633,7 +2853,11 @@ static const struct engine_build engine_builds[] = {
      0x842644, 0x29bc83c, 0x258e185, 0x8429b0, 0xe51b3340,
      0x29980a4, 0x1c91f74, 0x1cba858, 0x1cba874, 0,
      {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}, 0x4bc, 0, 0, 0,
-     .shadow_position_fn = 0},
+     .shadow_position_fn = 0,
+     .wf_start_slot = 0x2979140, .wf_start_fn = 0xd7ff04,
+     .wf_start_prefix = {0xf4, 0x42, 0x6d, 0xe1, 0x20, 0xe0, 0x8d, 0xe5},
+     .wf_pop_slot = 0x290cc1c, .wf_pop_fn = 0x9fc9f4,
+     .wf_pop_prefix = {0xf4, 0x42, 0x6d, 0xe1, 0xf0, 0x81, 0xcd, 0xe1}},
     {"5.3.0", "\xbe\x53\x7e\x90\x81\x21\xe7\x61\x64\xdd\xbb\xf9\x73\x0d\x47\x2b\xa0\xb8\xf9\xd4",
      {0xe6a090, 0xe6a0bc, 0xe6a16c, 0xe6a198, 0xe6a1c4, 0xe6a0e8, 0xe6a140, 0x170e714, 0x1710c00,
       0x1710a74, 0x170f110, 0xdde87c, 0xd265cc, 0xd265f8, 0xd26624, 0xf1afa4, 0x16b38e0, 0xf1dd20, 0xf1ede4, 0xf1ab24, 0xc77934},
@@ -2648,7 +2872,11 @@ static const struct engine_build engine_builds[] = {
      .shadow_array_offset = 0x244, .shadow_position_prefix_size = 8,
      .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5},
      .shadow_capture_site = 0xa1746c,
-     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5}},
+     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5},
+     .wf_start_slot = 0x2b7d450, .wf_start_fn = 0xe641b0,
+     .wf_start_prefix = {0xf4, 0x42, 0x6d, 0xe1, 0xf8, 0x60, 0xcd, 0xe1},
+     .wf_pop_slot = 0x2b0c0b8, .wf_pop_fn = 0xa43c9c,
+     .wf_pop_prefix = {0xf4, 0x42, 0x6d, 0xe1, 0xf0, 0x81, 0xcd, 0xe1}},
     // feature_object 0x2d0eb78 is StemsPreRenderedPlayback (stored into 0x2d180c8 at 0x360d68, read by PlanckScriptRoot::hasStemsPreRenderedPlayback at 0x9d7808).
     {"5.3.0-sclive4", "\xb9\x46\xc3\xb8\xd9\x9d\x32\x99\x8c\x81\x97\xd5\xdc\x90\x5a\x6b\xdd\xaa\x5d\x2f",
      {0xe774fc, 0xe77528, 0xe775d8, 0xe77604, 0xe77630, 0xe77554, 0xe775ac, 0x17597bc, 0x179b090,
@@ -2664,7 +2892,11 @@ static const struct engine_build engine_builds[] = {
      .shadow_array_offset = 0x244, .shadow_position_prefix_size = 8,
      .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5},
      .shadow_capture_site = 0xa3c264,
-     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5}},
+     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5},
+     .wf_start_slot = 0x2bfd1b0, .wf_start_fn = 0xe71700,
+     .wf_start_prefix = {0xf4, 0x42, 0x6d, 0xe1, 0xf8, 0x60, 0xcd, 0xe1},
+     .wf_pop_slot = 0x2b8b420, .wf_pop_fn = 0xa71384,
+     .wf_pop_prefix = {0xf4, 0x42, 0x6d, 0xe1, 0xf0, 0x81, 0xcd, 0xe1}},
 };
 #endif
 
@@ -2718,6 +2950,7 @@ static void install_shadow_browse(uintptr_t base, size_t page);
 
 static void apply_engine_edits(uintptr_t base, size_t page) {
     install_tidal_profile_sso(base, page);
+    install_waveform_guards(base, page);
     // A group is applied only if every site of it is stock or already patched.
     int ready[EDIT_GROUP_COUNT];
     for (unsigned i = 0; i < EDIT_GROUP_COUNT; i++) ready[i] = 1;
