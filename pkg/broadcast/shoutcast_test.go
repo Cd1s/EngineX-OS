@@ -527,6 +527,80 @@ func TestShoutcastHandshakeAcceptsV1AndV2(t *testing.T) {
 	}
 }
 
+// Review of the SHOUTcast mode, finding 1: the answer to the login was taken from a single Read,
+// so an "OK2" that TCP delivered in pieces ("O", then "K2\r\n") was refused as a wrong password,
+// and any line that started with OK2 ("OK2BAD") was accepted. The answer is now read as a line,
+// bounded, and must be exactly OK or OK2.
+func TestShoutcastHandshakeReadsTheWholeAnswerLine(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		pieces []string // each one a separate write: one read on the deck's side gets at most one
+		close  bool     // the server closes after its answer
+		ok     bool
+		errHas string
+	}{
+		{"OK2 in two pieces", []string{"O", "K2\r\nicy-caps:11\r\n\r\n"}, false, true, ""},
+		{"OK2 byte by byte", []string{"O", "K", "2", "\r", "\n"}, false, true, ""},
+		{"OK in two pieces", []string{"O", "K\r\n"}, false, true, ""},
+		{"blank line first", []string{"\r\n", "OK2\r\n"}, false, true, ""},
+		{"OK2BAD", []string{"OK2BAD\r\n"}, false, false, "authentication failed: OK2BAD"},
+		{"OK22", []string{"OK22\r\n"}, false, false, "authentication failed: OK22"},
+		{"OK2 with words", []string{"OK2 maybe\r\n"}, false, false, "authentication failed"},
+		{"refusal then close", []string{"invalid password"}, true, false, "authentication failed: invalid password"},
+		{"no line end within 512 bytes", []string{strings.Repeat("A", 700)}, false, false, "no answer line"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			defer client.Close()
+			_ = client.SetDeadline(time.Now().Add(3 * time.Second))
+			headers := make(chan string, 1)
+			go func() {
+				defer server.Close()
+				_ = server.SetDeadline(time.Now().Add(3 * time.Second))
+				r := bufio.NewReader(server)
+				if _, err := r.ReadString('\n'); err != nil { // the password line
+					headers <- ""
+					return
+				}
+				for _, p := range c.pieces {
+					if _, err := io.WriteString(server, p); err != nil {
+						headers <- ""
+						return
+					}
+				}
+				if c.close {
+					headers <- ""
+					return
+				}
+				var b strings.Builder
+				for {
+					line, err := r.ReadString('\n')
+					b.WriteString(line)
+					if err != nil || line == "\r\n" {
+						break
+					}
+				}
+				headers <- b.String()
+			}()
+			b := New(newTestGuard())
+			defer b.Close()
+			err := b.handshakeShoutcast(client, Config{Protocol: "shoutcast", Password: "pw", StreamName: "deck", Bitrate: 192})
+			if c.ok {
+				if err != nil {
+					t.Fatalf("answer %q refused: %v", c.pieces, err)
+				}
+				if h := <-headers; !strings.Contains(h, "content-type:audio/aacp\r\n") {
+					t.Fatalf("icy headers not sent after %q: %q", c.pieces, h)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.errHas) {
+				t.Fatalf("answer %q: err = %v, want one containing %q", c.pieces, err, c.errHas)
+			}
+		})
+	}
+}
+
 func TestShoutcastLoginUsesStreamID(t *testing.T) {
 	for _, c := range []struct{ user, want string }{
 		{"source", "pw"}, {"", "pw"}, {"admin", "pw"}, {"2", "pw:#2"}, {"#1", "pw:#1"}, {" #3 ", "pw:#3"},

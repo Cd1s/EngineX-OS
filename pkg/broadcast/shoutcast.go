@@ -123,6 +123,34 @@ func shoutcastSourceAddr(scheme, hostPort string) (string, error) {
 	return net.JoinHostPort(host, strconv.Itoa(n+1)), nil
 }
 
+// maxShoutcastReply bounds what is read of the server's answer to the login.
+const maxShoutcastReply = 512
+
+// readShoutcastReply returns the server's first non-empty answer line, trimmed. It reads up to the
+// line end, as TCP may deliver the line in pieces ("O", then "K2\r\n"), and at most
+// maxShoutcastReply bytes. A server that closes after its answer (often "invalid password")
+// ends the line too.
+func readShoutcastReply(conn net.Conn) (string, error) {
+	lr := &io.LimitedReader{R: conn, N: maxShoutcastReply}
+	r := bufio.NewReaderSize(lr, 64)
+	for {
+		line, err := r.ReadString('\n')
+		text := strings.TrimSpace(line)
+		switch {
+		case err == nil && text == "":
+			continue // a blank line before the answer
+		case err == nil:
+			return text, nil
+		case errors.Is(err, io.EOF) && lr.N <= 0:
+			return "", fmt.Errorf("shoutcast handshake: no answer line within %d bytes", maxShoutcastReply)
+		case errors.Is(err, io.EOF) && text != "":
+			return text, nil
+		default:
+			return "", fmt.Errorf("shoutcast reading handshake failed: %w", err)
+		}
+	}
+}
+
 // handshakeShoutcast logs in with the SHOUTcast v1 source protocol (DNAS v2 takes it with a
 // stream ID) and announces an AAC stream.
 func (b *Broadcaster) handshakeShoutcast(conn net.Conn, cfg Config) error {
@@ -130,18 +158,14 @@ func (b *Broadcaster) handshakeShoutcast(conn net.Conn, cfg Config) error {
 		return fmt.Errorf("shoutcast sending password failed: %w", err)
 	}
 
-	buf := make([]byte, 512)
-	n, err := conn.Read(buf)
+	reply, err := readShoutcastReply(conn)
 	if err != nil {
-		return fmt.Errorf("shoutcast reading handshake failed: %w", err)
+		return err
 	}
-
-	respStr := string(buf[:n])
 	// A Shoutcast v2 (and Icecast's v1 compatibility) answers "OK2", a Shoutcast v1 server "OK"
-	// (BH-GF4-7); anything else, e.g. "invalid password", is a refusal.
-	first, _, _ := strings.Cut(strings.TrimLeft(respStr, "\r\n"), "\n")
-	if first = strings.TrimSpace(first); first != "OK" && !strings.HasPrefix(first, "OK2") {
-		return fmt.Errorf("shoutcast authentication failed: %s", strings.TrimSpace(respStr))
+	// (BH-GF4-7); any other line, e.g. "invalid password" or "OK2BAD", is a refusal.
+	if reply != "OK" && reply != "OK2" {
+		return fmt.Errorf("shoutcast authentication failed: %s", reply)
 	}
 
 	icyHeaders := fmt.Sprintf(
