@@ -12366,6 +12366,22 @@ const req200 = xhrs.find(x => x.url.includes('stems/source?id=888'));
 req200.readyState = 4; req200.status = 200; req200.responseText = JSON.stringify({{path: '/media/u/888.flac'}});
 req200.onreadystatechange();
 assert.deepEqual(turns, ['888'], 'loading while in flight must not block a 200 stems download');
+
+// 5. scSwapStemmed routes through root.scStemClearFail to clear an existing fail mark and stop scStemFailed.
+scStemMark(['901'], 'fail');
+scStemFailed.restart();
+assert.equal(scStemFailed.running, true);
+scSwapStemmed(1, 'streaming://TIDAL/Track/901');
+assert.equal(scStemRows['901'], undefined, 'scSwapStemmed must clear fail via scStemClearFail');
+assert.equal(scStemFailAt['901'], undefined);
+assert.equal(scStemFailed.running, false, 'scSwapStemmed clearing last fail must stop scStemFailed');
+
+// 6. Normal 404 without a subsequent load still sets fail and arms the 10 s timer.
+assert.equal(scStemStream('u902'), true);
+const req404Normal = xhrs.find(x => x.url.includes('stems/source?id=902'));
+req404Normal.readyState = 4; req404Normal.status = 404; req404Normal.onreadystatechange();
+assert.equal(scStemRows['902'], 'fail', 'normal 404 without load must still mark fail');
+assert.equal(scStemFailed.running, true);
 """
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)

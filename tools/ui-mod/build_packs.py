@@ -4994,7 +4994,7 @@ SERVICES_MAIN = """
 			scStemFailed.interval = 10000
 		}
 	}
-	// Clear a row's failed Stems mark (and flag any open source request as loaded) once the track loads on a deck (#332).
+	// Clear a failed Stems mark (and flag any open source request as loaded) once the track loads on a deck (#332).
 	function scStemClearFail(uri) {
 		const m = /^streaming:\\/\\/TIDAL\\/(?:Track\\/)?(\\d+)(?:[?#].*)?$/i.exec(uri || "")
 		if (!m) return
