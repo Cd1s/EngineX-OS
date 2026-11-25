@@ -719,6 +719,12 @@ struct engine_build {
     // that holds its metaObject() and that function. QML asks an object for its meta
     // object before it can call anything on it, so the owner is known by then.
     uint32_t shadow_owner_slot, shadow_owner_fn;
+    // #336 S20 (t/71377): Deck::updateTrackMetadata HideTitleArtist branch clears
+    // /Engine/DeckN/Track/Stemmed to false, disabling physical Acapella/Instrumental
+    // Stems override buttons. Patch that site to preserve Track::isStemmed() when
+    // StemsPreRenderedPlayback::isEnabled() or Track::isDemoContentTrack().
+    uint32_t hide_stemmed_site, hide_stems_feat_slot;
+    uint16_t track_is_demo_slot, track_is_stemmed_slot;
 };
 static const struct engine_build *build;
 
@@ -2477,7 +2483,9 @@ static const struct engine_build engine_builds[] = {
      .shadow_array_offset = 0x450, .shadow_position_prefix_size = 16,
      .shadow_position_prefix = {0x5f, 0x24, 0x03, 0xd5, 0x00, 0x48, 0x40, 0xbd,
                                 0x00, 0x00, 0x38, 0x1e, 0xc0, 0x03, 0x5f, 0xd6},
-     .shadow_owner_slot = 0x2d27a10, .shadow_owner_fn = 0xb0b888},
+     .shadow_owner_slot = 0x2d27a10, .shadow_owner_fn = 0xb0b888,
+     .hide_stemmed_site = 0xe29f98, .hide_stems_feat_slot = 0x2ee6f90,
+     .track_is_demo_slot = 69, .track_is_stemmed_slot = 66},
 };
 #else
 static const struct engine_edit edits_504[] = {
@@ -2633,7 +2641,9 @@ static const struct engine_build engine_builds[] = {
      0x842644, 0x29bc83c, 0x258e185, 0x8429b0, 0xe51b3340,
      0x29980a4, 0x1c91f74, 0x1cba858, 0x1cba874, 0,
      {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}, 0x4bc, 0, 0, 0,
-     .shadow_position_fn = 0},
+     .shadow_position_fn = 0,
+     .hide_stemmed_site = 0xca5fc8, .hide_stems_feat_slot = 0x2a91e9c,
+     .track_is_demo_slot = 68, .track_is_stemmed_slot = 65},
     {"5.3.0", "\xbe\x53\x7e\x90\x81\x21\xe7\x61\x64\xdd\xbb\xf9\x73\x0d\x47\x2b\xa0\xb8\xf9\xd4",
      {0xe6a090, 0xe6a0bc, 0xe6a16c, 0xe6a198, 0xe6a1c4, 0xe6a0e8, 0xe6a140, 0x170e714, 0x1710c00,
       0x1710a74, 0x170f110, 0xdde87c, 0xd265cc, 0xd265f8, 0xd26624, 0xf1afa4, 0x16b38e0, 0xf1dd20, 0xf1ede4, 0xf1ab24, 0xc77934},
@@ -2648,7 +2658,9 @@ static const struct engine_build engine_builds[] = {
      .shadow_array_offset = 0x244, .shadow_position_prefix_size = 8,
      .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5},
      .shadow_capture_site = 0xa1746c,
-     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5}},
+     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5},
+     .hide_stemmed_site = 0xd4c6f8, .hide_stems_feat_slot = 0x2c97bd4,
+     .track_is_demo_slot = 69, .track_is_stemmed_slot = 66},
     // feature_object 0x2d0eb78 is StemsPreRenderedPlayback (stored into 0x2d180c8 at 0x360d68, read by PlanckScriptRoot::hasStemsPreRenderedPlayback at 0x9d7808).
     {"5.3.0-sclive4", "\xb9\x46\xc3\xb8\xd9\x9d\x32\x99\x8c\x81\x97\xd5\xdc\x90\x5a\x6b\xdd\xaa\x5d\x2f",
      {0xe774fc, 0xe77528, 0xe775d8, 0xe77604, 0xe77630, 0xe77554, 0xe775ac, 0x17597bc, 0x179b090,
@@ -2664,7 +2676,9 @@ static const struct engine_build engine_builds[] = {
      .shadow_array_offset = 0x244, .shadow_position_prefix_size = 8,
      .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5},
      .shadow_capture_site = 0xa3c264,
-     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5}},
+     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5},
+     .hide_stemmed_site = 0xd7edf8, .hide_stems_feat_slot = 0x2d180c8,
+     .track_is_demo_slot = 69, .track_is_stemmed_slot = 66},
 };
 #endif
 
@@ -2716,8 +2730,122 @@ static void install_shadow_analysis(uintptr_t base, size_t page);
 static void install_shadow_browse(uintptr_t base, size_t page);
 #endif
 
+/* #336 S20 (t/71377): Stock Engine's Deck::updateTrackMetadata HideTitleArtist
+ * branch unconditionally sets /Engine/DeckN/Track/Stemmed to false, disabling
+ * StemsOverrides.qml (PRIME 4 G2 / SYSTEM ONE physical Acapella & Instrumental
+ * buttons) and StemsLevel.qml whenever Hide Title/Artist is enabled. Replace
+ * only the Stemmed-clear block so Stemmed keeps Track::isStemmed() under the
+ * same (StemsPreRenderedPlayback::isEnabled() || Track::isDemoContentTrack())
+ * rule as the normal branch while title/artist/album-art stay hidden. */
+static uintptr_t hide_stems_feat_addr;
+static uint32_t hide_track_demo_slot, hide_track_stemmed_slot;
+
+static void apply_hide_title_stemmed(void *track, void *translator) {
+    if (!track || !translator) return;
+    int allow = 0;
+    uintptr_t fslot = __atomic_load_n(&hide_stems_feat_addr, __ATOMIC_ACQUIRE);
+    if (fslot) {
+        void *feat = *(void **)fslot;
+        if (feat) {
+            void **fvt = *(void ***)feat;
+            if (fvt && fvt[0]) {
+                _Bool (*is_enabled)(void *) = (_Bool (*)(void *))fvt[0];
+                if (is_enabled(feat)) allow = 1;
+            }
+        }
+    }
+    void **tvt = *(void ***)track;
+    if (!allow && tvt) {
+        uint32_t demo_slot = __atomic_load_n(&hide_track_demo_slot, __ATOMIC_ACQUIRE);
+        if (demo_slot && tvt[demo_slot]) {
+            _Bool (*is_demo)(void *) = (_Bool (*)(void *))tvt[demo_slot];
+            if (is_demo(track)) allow = 1;
+        }
+    }
+    _Bool stemmed = 0;
+    if (allow && tvt) {
+        uint32_t stem_slot = __atomic_load_n(&hide_track_stemmed_slot, __ATOMIC_ACQUIRE);
+        if (stem_slot && tvt[stem_slot]) {
+            _Bool (*is_stemmed)(void *) = (_Bool (*)(void *))tvt[stem_slot];
+            if (is_stemmed(track)) stemmed = 1;
+        }
+    }
+    void **trvt = *(void ***)translator;
+    if (trvt && trvt[40]) {
+        void (*set_state)(void *, _Bool) = (void (*)(void *, _Bool))trvt[40];
+        set_state(translator, stemmed);
+    }
+}
+
+static void install_hide_title_stems_fix(uintptr_t base, size_t page) {
+    if (!build || !build->hide_stemmed_site || !hf_on(HF_STEMS)) return;
+    uintptr_t site = base + build->hide_stemmed_site;
+#if defined(__aarch64__)
+    static const uint32_t stock_clear[7] = {
+        0x9101c2c0u, /* add  x0, x22, #0x70 */
+        0xf9400301u, /* ldr  x1, [x24] */
+        0xf940a022u, /* ldr  x2, [x1, #320] */
+        0xeb00005fu, /* cmp  x2, x0 */
+        0x54000ec1u, /* b.ne 0xe2a180 */
+        0xaa1803e0u, /* mov  x0, x24 */
+        0x942e80acu, /* bl   0x19ca260 */
+    };
+    if (memcmp((const void *)site, stock_clear, sizeof stock_clear) != 0) return;
+    uint32_t stub_code[10] = {
+        0xaa1303e0u, /* mov  x0, x19 (Track*) */
+        0xaa1803e1u, /* mov  x1, x24 (m_stemmed TwoStateTranslator*) */
+        0x58000090u, /* ldr  x16, [pc, #16] */
+        0xd63f0200u, /* blr  x16 */
+        0x58000090u, /* ldr  x16, [pc, #16] */
+        0xd61f0200u, /* br   x16 */
+        0, 0, 0, 0
+    };
+    uint64_t fn64 = (uint64_t)(uintptr_t)&apply_hide_title_stemmed;
+    uint64_t back64 = (uint64_t)(site + 0x1cu);
+    memcpy(&stub_code[6], &fn64, 8);
+    memcpy(&stub_code[8], &back64, 8);
+    void *stub = rx_code(stub_code, sizeof stub_code, page);
+    uint32_t jump[4] = {0x58000050u, 0xd61f0200u, 0, 0};
+    uint64_t to = (uint64_t)(uintptr_t)stub;
+    memcpy(&jump[2], &to, 8);
+#else
+    const uint32_t *p = (const uint32_t *)site;
+    if ((p[0] & 0xfffff000u) != 0xe59f2000u || p[1] != 0xe5973000u ||
+        p[2] != 0xe08f2002u || p[3] != 0xe59330a0u || p[4] != 0xe1530002u ||
+        (p[5] & 0xff000000u) != 0x1a000000u || p[6] != 0xe1a00007u ||
+        (p[7] & 0xff000000u) != 0xeb000000u)
+        return;
+    uint32_t stub_code[7] = {
+        0xe1a00004u, /* mov  r0, r4 (Track*) */
+        0xe1a01007u, /* mov  r1, r7 (m_stemmed TwoStateTranslator*) */
+        0xe59f3004u, /* ldr  r3, [pc, #4] */
+        0xe12fff33u, /* blx  r3 */
+        0xe59ff000u, /* ldr  pc, [pc, #0] */
+        (uint32_t)(uintptr_t)&apply_hide_title_stemmed,
+        (uint32_t)(site + 0x20u),
+    };
+    void *stub = rx_code(stub_code, sizeof stub_code, page);
+    uint32_t jump[2] = {0xe51ff004u, (uint32_t)(uintptr_t)stub};
+#endif
+    uintptr_t prev_feat = __atomic_load_n(&hide_stems_feat_addr, __ATOMIC_RELAXED);
+    uint32_t prev_demo = __atomic_load_n(&hide_track_demo_slot, __ATOMIC_RELAXED);
+    uint32_t prev_stem = __atomic_load_n(&hide_track_stemmed_slot, __ATOMIC_RELAXED);
+    __atomic_store_n(&hide_stems_feat_addr, build->hide_stems_feat_slot ? base + build->hide_stems_feat_slot : 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&hide_track_demo_slot, build->track_is_demo_slot, __ATOMIC_RELEASE);
+    __atomic_store_n(&hide_track_stemmed_slot, build->track_is_stemmed_slot, __ATOMIC_RELEASE);
+    if (try_patch_bytes(HF_STEMS, site, jump, sizeof jump, page)) {
+        fprintf(stderr, "engine-ui-hook: Hide Title/Artist Stems preservation installed\n");
+    } else {
+        __atomic_store_n(&hide_stems_feat_addr, prev_feat, __ATOMIC_RELEASE);
+        __atomic_store_n(&hide_track_demo_slot, prev_demo, __ATOMIC_RELEASE);
+        __atomic_store_n(&hide_track_stemmed_slot, prev_stem, __ATOMIC_RELEASE);
+        munmap(stub, page);
+    }
+}
+
 static void apply_engine_edits(uintptr_t base, size_t page) {
     install_tidal_profile_sso(base, page);
+    install_hide_title_stems_fix(base, page);
     // A group is applied only if every site of it is stock or already patched.
     int ready[EDIT_GROUP_COUNT];
     for (unsigned i = 0; i < EDIT_GROUP_COUNT; i++) ready[i] = 1;
