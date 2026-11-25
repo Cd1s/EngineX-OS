@@ -133,7 +133,7 @@ func (c *KeyCache) remember(id string, k *cipherKeys) {
 // get returns an independent copy of the keys of salt and passphrase. The cache owns its copy,
 // so clearing or invalidating the cache cannot race with a caller that is still using the result.
 func (c *KeyCache) get(salt, passphrase []byte) (*cipherKeys, error) {
-	k, lease, err := c.getWithLease(context.Background(), salt, passphrase)
+	k, _, lease, err := c.getWithLease(context.Background(), salt, passphrase)
 	lease.release()
 	return k, err
 }
