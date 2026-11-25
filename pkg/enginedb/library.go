@@ -734,7 +734,13 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 	same := bytes.Equal(row.beats, p.Beats) && bytes.Equal(row.cues, p.QuickCues) && bytes.Equal(row.loops, p.Loops)
 	var have []byte
 	if !same && (prev.Written != nil || row.beats != nil) {
-		have = WrittenDigest(row.beats, asWritten(row.cues, p.QuickCues), row.loops)
+		have = WrittenDigest(row.beats, row.cues, row.loops)
+		if !bytes.Equal(have, staged) && !bytes.Equal(have, prev.Written) {
+			// Neither what is staged nor what the bridge wrote: a load alone made it so, or the DJ.
+			// (A row that is what the bridge wrote is never read with the staged main cue: an export
+			// that moved the main cue would look applied.)
+			have = WrittenDigest(row.beats, asWritten(row.cues, p.QuickCues), row.loops)
+		}
 		same = bytes.Equal(have, staged)
 	}
 	bpm := f.BPM

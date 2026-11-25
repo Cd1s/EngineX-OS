@@ -759,6 +759,61 @@ func TestMountStagedDataAndDeckEdits(t *testing.T) {
 	}
 }
 
+// A re-export that moves a track's main cue (rekordbox's earliest memory cue) and nothing else
+// reaches the row the bridge wrote when no deck loaded the track since. Reading a row's main cue
+// as the staged record has it is only for a row that holds neither what the bridge wrote nor what
+// is staged: here the row is exactly what the bridge wrote, and it is replaced.
+func TestMountWritesAMainCueTheExportMoved(t *testing.T) {
+	mount := stick(t)
+	mountNow(t, mount, MountOptions{})
+	stageAll(t, mount)
+	if res := mountNow(t, mount, MountOptions{Publish: true}); res.Applied != 5 {
+		t.Fatalf("applied %d", res.Applied)
+	}
+	const key = "music/three.wav"
+	s := snapshot(t, mount)
+	wrote := s.Tracks[key].Written
+	s.Tracks[key].Built.Row = "" // staged again, as after a re-export
+	s.Pending.Perf = 1
+	if err := s.Save(dbDir(mount)); err != nil {
+		t.Fatal(err)
+	}
+	if n := stageAll(t, mount); n != 1 {
+		t.Fatalf("%d tracks staged again, want 1", n)
+	}
+	stage, err := rbstate.OpenStage(s.LibraryUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := stage.Get(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Perf.QuickCues = recodeCues(t, rec.Perf.QuickCues, func(raw []byte) {
+		moved := math.Float64bits(math.Float64frombits(binary.BigEndian.Uint64(raw[len(raw)-17:])) + 4410)
+		binary.BigEndian.PutUint64(raw[len(raw)-17:], moved)
+		binary.BigEndian.PutUint64(raw[len(raw)-8:], moved)
+	})
+	rec.Digest = enginedb.WrittenDigest(rec.Perf.Beats, rec.Perf.QuickCues, rec.Perf.Loops)
+	if err = stage.Put(rec); err != nil {
+		t.Fatal(err)
+	}
+	if err = stage.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if res := mountNow(t, mount, MountOptions{Publish: true}); res.Applied != 1 {
+		t.Fatalf("applied %d, want the one track staged again", res.Applied)
+	}
+	after := snapshot(t, mount).Tracks[key]
+	got := query(t, mount, `SELECT hex(quickCues) FROM PerformanceData WHERE trackId=?`, after.EngineID)
+	if got[0][0] != fmt.Sprintf("%X", rec.Perf.QuickCues) {
+		t.Fatal("the row still holds the main cue of the export before")
+	}
+	if after.Perf != rbstate.PerfApplied || !bytes.Equal(after.Written, rec.Digest) || bytes.Equal(wrote, rec.Digest) {
+		t.Fatalf("the snapshot's record of the row: %+v", after)
+	}
+}
+
 func utf16le(s string) []byte {
 	var b []byte
 	for _, r := range s {
