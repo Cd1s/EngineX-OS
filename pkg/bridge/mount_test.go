@@ -949,3 +949,78 @@ func TestMountTakesRowsTheDeckHookFilledAsTheBridgesOwn(t *testing.T) {
 		t.Fatalf("a row nobody filled: %+v", tr)
 	}
 }
+
+// The upkeep at the end of a window cannot outlast its budget. The grid fix reads every row of a
+// library it has not stamped, and its own budget does not stop that statement (KDATA: 6.5 s at
+// every insert of the unchanged stick): it is stopped after half a second in such an insert and
+// after a second in the window of the job's remount, and being stopped is not an error.
+func TestMountUpkeepIsStoppedAtItsBudget(t *testing.T) {
+	mount := stick(t)
+	mountNow(t, mount, MountOptions{})
+	stageAll(t, mount)
+	mountNow(t, mount, MountOptions{Publish: true})
+	var limits []time.Duration
+	real := fixMP3Grids
+	defer func() { fixMP3Grids = real }()
+	fixMP3Grids = func(ctx context.Context, _ string, _ enginedb.MP3GridOptions) (enginedb.MP3GridReport, error) {
+		if at, ok := ctx.Deadline(); ok {
+			limits = append(limits, time.Until(at))
+		}
+		<-ctx.Done() // a scan that would not end
+		return enginedb.MP3GridReport{Interrupted: true}, ctx.Err()
+	}
+	out := captureLog(t)
+	start := time.Now()
+	if res := mountNow(t, mount, MountOptions{Deadline: time.Now().Add(hookWindow)}); !res.Bypassed {
+		t.Fatalf("the unchanged stick: %+v", res)
+	}
+	if took := time.Since(start); len(limits) != 1 || limits[0] > 500*time.Millisecond || took > 900*time.Millisecond {
+		t.Fatalf("the insert of the unchanged stick took %s, its grid fix had %v", took, limits)
+	}
+	if res := mountNow(t, mount, MountOptions{Deadline: time.Now().Add(hookWindow), Publish: true}); !res.Bypassed {
+		t.Fatalf("the window of a remount: %+v", res)
+	}
+	if len(limits) != 2 || limits[1] <= 500*time.Millisecond || limits[1] > time.Second {
+		t.Fatalf("the grid fix's time in the two windows: %v", limits)
+	}
+	if strings.Contains(out.String(), "grid fix not finished") {
+		t.Fatalf("a grid fix stopped at its budget is logged as a failure:\n%s", out)
+	}
+}
+
+// A window does not write, or look for, the list waveform of a track the job staged with its row:
+// the job wrote the file then (the stage line names the row). The folder holds a file a track,
+// and a look into it costs a window seconds on a big stick.
+func TestMountLeavesTheListWaveformToTheJobThatStagedTheRow(t *testing.T) {
+	mount := stick(t)
+	mountNow(t, mount, MountOptions{})
+	stageAll(t, mount)
+	s := snapshot(t, mount)
+	stage, err := rbstate.OpenStage(s.LibraryUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rgb := []byte{0, 0, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8}
+	for key, tr := range s.Tracks {
+		rec, err := stage.Get(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.RGB = rgb; key != "music/two.flac" {
+			rec.EngineID = tr.EngineID // staged by the job when the row was there
+		}
+		if err = stage.Put(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = stage.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if res := mountNow(t, mount, MountOptions{Publish: true}); res.Applied != 5 {
+		t.Fatalf("applied %d", res.Applied)
+	}
+	files, _ := filepath.Glob(filepath.Join(dbDir(mount), "OverviewData", s.LibraryUUID, "*.rgb"))
+	if want := fmt.Sprintf("%d.rgb", s.Tracks["music/two.flac"].EngineID); len(files) != 1 || filepath.Base(files[0]) != want {
+		t.Fatalf("list waveforms the window wrote: %v, want only %s", files, want)
+	}
+}

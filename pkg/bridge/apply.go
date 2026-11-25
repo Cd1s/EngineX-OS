@@ -480,6 +480,9 @@ func (w *window) apply(p *Plan) error {
 		return native
 	})
 	rows := work{adds: len(p.AddTracks), removes: len(p.RemoveTracks), updates: len(p.Moves), lists: len(p.PutLists) + len(p.RemoveLists), commits: 1, tracks: len(s.Tracks)}
+	for _, at := range p.PutLists {
+		rows.entries += len(w.view.Lists[at].Tracks)
+	}
 	if !w.st.fits(rows) {
 		w.leave(rows, "the rows and lists")
 		return nil
@@ -735,7 +738,10 @@ func (w *window) applyStaged() error {
 				t.Perf = rbstate.PerfDeck
 				kept++
 			}
-			if len(full.RGB) > 0 && !w.next { // a list waveform only for a row the stick's library has (FillInBackground)
+			// A list waveform only for a row the stick's library has, and not when the job staged the
+			// track with this row (the line names it): it wrote the file then. The look for it alone
+			// reads the folder, which holds a file a track (20,000: 4.3 s of a window for 30 tracks).
+			if len(full.RGB) > 0 && !w.next && e.EngineID != t.EngineID {
 				overviews[t.EngineID] = full.RGB
 			}
 		}

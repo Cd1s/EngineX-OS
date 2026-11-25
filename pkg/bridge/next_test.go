@@ -543,7 +543,8 @@ func TestWorkCostAgainstTheReplica(t *testing.T) {
 		{"UNTITLED view of two libraries in three folders", work{view: 2416}, 270}, // KDATA's one library: 530 ms for 5,962
 		{"KDATA snapshot", work{load: 5962}, 570},
 		{"KDATA first library", work{build: 5962}, 3750},
-		{"KDATA take-over rows and lists", work{removes: 91, lists: 605}, 5680},
+		{"KDATA take-over rows and lists", work{removes: 91, lists: 605, entries: 6523}, 5680},
+		{"30 tracks more in a list of 20,030 (synthetic)", work{adds: 30, lists: 1, entries: 20030, commits: 1, tracks: 20000}, 4389},
 		{"KDATA staged window", work{staged: 320}, 10350},
 		{"KDATA commit", work{commits: 1, tracks: 5962}, 640},
 	}

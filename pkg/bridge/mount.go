@@ -106,7 +106,7 @@ type work struct {
 	load                      int   // tracks of the snapshot to read and compare with the library
 	build                     int   // rows of a first library, built on the deck and copied to the stick
 	adds, removes, updates    int   // rows a diff writes in place
-	lists                     int   // lists a diff writes or removes
+	lists, entries            int   // lists a diff writes or removes, and the entries of those it writes
 	staged                    int   // staged tracks applied in place
 	scan                      int   // rows of m.db compared with a next library's
 	commits, tracks           int   // commits, each with a save of the snapshot of this many tracks
@@ -120,7 +120,7 @@ func (w work) cost() time.Duration {
 	us += 0.49 * float64(w.oneLibrary)    // 0.51 s a MiB
 	us += 0.14 * float64(w.deviceLibrary) // 0.15 s a MiB
 	us += 130*float64(w.view) + 100*float64(w.load) + 650*float64(w.build)
-	us += 5000*float64(w.adds) + 30000*float64(w.removes) + 2000*float64(w.updates) + 5000*float64(w.lists)
+	us += 5000*float64(w.adds) + 30000*float64(w.removes) + 2000*float64(w.updates) + 5000*float64(w.lists) + 120*float64(w.entries)
 	us += 33000*float64(w.staged) + 150*float64(w.scan)
 	us += float64(w.commits) * (250000 + 65*float64(w.tracks))
 	return time.Duration(us) * time.Microsecond
@@ -237,7 +237,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		!o.Full && o.SmartMatch == 0 && libraryUUID(dir) == head.LibraryUUID
 	st.done("stat", "%d export files, snapshot %v, unchanged %v", len(files), headErr == nil, unchanged)
 	if unchanged && head.Pending.None() {
-		chores(ctx, mount, st)
+		chores(ctx, mount, st, !o.Publish)
 		return MountResult{Bypassed: true, Background: res.Background}, nil
 	}
 	if unchanged && swapped && !o.Full {
@@ -312,7 +312,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	if err = w.run(); err != nil {
 		return res, err
 	}
-	chores(ctx, mount, st)
+	chores(ctx, mount, st, false)
 	res.Pending = w.snap.Pending
 	log.Printf("rb-bridge: mount done in %d ms: %d added, %d updated, %d removed, lists changed %v, %d staged tracks applied; pending: %d rows, %d tracks' data, verify %v",
 		time.Since(st.start).Milliseconds(), res.Added, res.Updated, res.Removed, res.PlaylistsChanged, res.Applied,
@@ -320,9 +320,16 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	return res, nil
 }
 
+var fixMP3Grids = enginedb.FixMP3Grids // a variable for the test of its budget
+
 // chores are the upkeep every mount does while it has time: the library edits the Web Console
-// queued while Engine had the library open, and the MP3 grids an early build wrote.
-func chores(ctx context.Context, mount string, st *steps) {
+// queued while Engine had the library open, and the MP3 grids an early build wrote. The grid fix
+// reads every row of a library that has no stamp of it: on a cold stick that grows with the
+// library (1.6 s for 20,000 tracks, 6.5 s when the rows lie scattered) and its own budget does not
+// stop a statement. So it is stopped: after half a second in the insert of an unchanged stick,
+// where the DJ waits and nothing else is done, after a second in any other window. A fix cut
+// short goes on from its cursor at the next mount.
+func chores(ctx context.Context, mount string, st *steps, insert bool) {
 	if !st.more(500 * time.Millisecond) {
 		return
 	}
@@ -332,13 +339,18 @@ func chores(ctx context.Context, mount string, st *steps) {
 		log.Printf("rb-bridge: applied %d queued library edits", n)
 	}
 	budget := time.Second
+	if insert {
+		budget = 500 * time.Millisecond
+	}
 	if !st.optional.IsZero() {
 		budget = min(budget, time.Until(st.optional))
 	}
 	if budget <= 0 {
 		return
 	}
-	if r, err := enginedb.FixMP3Grids(ctx, mount, enginedb.MP3GridOptions{Budget: budget}); err != nil {
+	stop, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	if r, err := fixMP3Grids(stop, mount, enginedb.MP3GridOptions{Budget: budget}); err != nil && stop.Err() == nil {
 		log.Printf("rb-bridge: mp3 grid fix not finished: %v", err)
 	} else if r.Corrected > 0 || r.Skipped > 0 {
 		log.Printf("rb-bridge: mp3 grid fix: corrected=%d unchanged=%d skipped=%d interrupted=%v", r.Corrected, r.Unchanged, r.Skipped, r.Interrupted)
