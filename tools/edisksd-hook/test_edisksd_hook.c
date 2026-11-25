@@ -283,6 +283,17 @@ static void test_paths_and_copy(const char *root) {
     struct timespec times[2]={original.st_atim,original.st_mtim};
     write_file(native_db,"new PC database -- LONGER");assert(!utimensat(AT_FDCWD,native_db,times,AT_SYMLINK_NOFOLLOW));
     char revision[PATH_MAX];assert(!seed_library(volume_path,"unit",revision,deadline_from(now_ms()))&&strcmp(revision,previous_revision));
+    // #336 S14: SQLite rollback journal (m.db-journal) changes must also select a new seed
+    // revision instead of reusing a stale cache, while absent m.db-journal keeps the exact
+    // same signature as a clean stick.
+    char native_journal[PATH_MAX];join(native_journal,lib,"Database2/m.db-journal");
+    write_file(native_journal,"rollback-journal-v1");
+    char journal_rev[PATH_MAX];assert(!seed_library(volume_path,"unit",journal_rev,deadline_from(now_ms()))&&strcmp(journal_rev,revision));
+    join(src,journal_rev,"Database2/m.db-journal");expect_file(src,"rollback-journal-v1");
+    write_file(native_journal,"rollback-journal-v2");
+    char journal_rev2[PATH_MAX];assert(!seed_library(volume_path,"unit",journal_rev2,deadline_from(now_ms()))&&strcmp(journal_rev2,journal_rev));
+    assert(!unlink(native_journal));
+    char clean_again[PATH_MAX];assert(!seed_library(volume_path,"unit",clean_again,deadline_from(now_ms()))&&!strcmp(clean_again,revision));
     join(p,outside,"sentinel");expect_file(p,"untouched");
     assert(!volume("/etc"));assert(volume(volume_path));
     char unsafe[PATH_MAX];join(unsafe,root,"link-parent");assert(!symlink(outside,unsafe));join(p,unsafe,"child");
