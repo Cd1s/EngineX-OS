@@ -672,20 +672,33 @@ type PerfPrev struct {
 	Written []byte // the digest of what the bridge last wrote, nil for a row only the export filled
 }
 
-// asWritten is a row's quickCues as the bridge wrote them when only a load changed them: Engine
-// puts its own figure into the last field, the main cue as imported, every time a deck loads the
-// track (the bridge writes the main cue there). A main cue the DJ adjusted has its flag set and
-// is an edit, as every other difference is.
-func asWritten(cues []byte) []byte {
+// asWritten is a row's quickCues as the bridge wrote them when only a load changed them. Engine
+// 5.3.0 writes its own figure into the main cue and into the main cue as imported every time a
+// deck loads a track whose main cue the DJ has not adjusted (JP07 and SC LIVE 4, 2026-11-25:
+// 9920.0 and 9920.0 became -1105.0 and -1105.0, the flag between them stayed 0). With the flag
+// clear neither field is the DJ's, so both are read as the staged record has them, which is what
+// the bridge writes there. A main cue the DJ adjusted has its flag set and is an edit, as every
+// other difference is. (When a re-export moved the track's main cue since the bridge wrote the
+// row, the staged fields are not the ones written: such a row, once loaded, is taken for the
+// deck's and kept. Design 1.11 item 10.)
+func asWritten(cues, staged []byte) []byte {
 	raw, err := QUncompress(cues, 64<<10)
 	if err != nil {
 		return cues
 	}
 	at, ok := cuePositions(raw)
-	if !ok || raw[at[8]+8] != 0 || bytes.Equal(raw[at[8]:at[8]+8], raw[at[9]:]) {
+	if !ok || raw[at[8]+8] != 0 {
 		return cues
 	}
-	copy(raw[at[9]:], raw[at[8]:at[8]+8])
+	ref, err := QUncompress(staged, 64<<10)
+	if err != nil {
+		return cues
+	}
+	rat, ok := cuePositions(ref)
+	if !ok || ref[rat[8]+8] != 0 || bytes.Equal(raw[at[8]:], ref[rat[8]:]) {
+		return cues
+	}
+	copy(raw[at[8]:], ref[rat[8]:])
 	if out, err := QCompress(raw); err == nil {
 		return out
 	}
@@ -721,7 +734,7 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 	same := bytes.Equal(row.beats, p.Beats) && bytes.Equal(row.cues, p.QuickCues) && bytes.Equal(row.loops, p.Loops)
 	var have []byte
 	if !same && (prev.Written != nil || row.beats != nil) {
-		have = WrittenDigest(row.beats, asWritten(row.cues), row.loops)
+		have = WrittenDigest(row.beats, asWritten(row.cues, p.QuickCues), row.loops)
 		same = bytes.Equal(have, staged)
 	}
 	bpm := f.BPM

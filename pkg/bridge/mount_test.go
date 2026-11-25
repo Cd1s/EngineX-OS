@@ -702,6 +702,23 @@ func TestMountStagedDataAndDeckEdits(t *testing.T) {
 	if _, err = db.Exec(`UPDATE PerformanceData SET quickCues=X'00010203' WHERE trackId=?`, edited.EngineID); err != nil {
 		t.Fatal(err)
 	}
+	// A deck only loads another: Engine 5.3.0 writes its own figure into the main cue and the main
+	// cue as imported of a track whose main cue is not adjusted (measured: both -1105.0, flag 0).
+	loaded := s.Tracks["music/three.wav"]
+	var cues []byte
+	if err = db.QueryRow(`SELECT quickCues FROM PerformanceData WHERE trackId=?`, loaded.EngineID).Scan(&cues); err != nil {
+		t.Fatal(err)
+	}
+	cues = recodeCues(t, cues, func(raw []byte) {
+		if raw[len(raw)-9] != 0 || math.Float64frombits(binary.BigEndian.Uint64(raw[len(raw)-17:])) == -1105 {
+			t.Fatalf("the bridge's main cue: % x", raw[len(raw)-17:])
+		}
+		binary.BigEndian.PutUint64(raw[len(raw)-17:], math.Float64bits(-1105))
+		binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(-1105))
+	})
+	if _, err = db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=?`, cues, loaded.EngineID); err != nil {
+		t.Fatal(err)
+	}
 	db.Close()
 	names := [5]string{testfixture.UnicodeName, "two.flac", "three.wav", "four.wav", "five.wav"}
 	pdb := testfixture.PDBNamed(names, "同名")
@@ -734,6 +751,11 @@ func TestMountStagedDataAndDeckEdits(t *testing.T) {
 	s = snapshot(t, mount)
 	if s.Tracks["music/two.flac"].Perf != rbstate.PerfDeck || s.Tracks["music/two.flac"].Written != nil || s.Tracks["music/three.wav"].Perf != rbstate.PerfApplied {
 		t.Fatalf("after the second publish: %+v %+v", s.Tracks["music/two.flac"], s.Tracks["music/three.wav"])
+	}
+	// The load alone was no edit: the row is the bridge's still. Its cues are the staged ones but for
+	// Engine's own figure, so nothing was written (Engine would put it back at the next load).
+	if got := query(t, mount, `SELECT hex(quickCues) FROM PerformanceData WHERE trackId=?`, loaded.EngineID); s.Tracks["music/three.wav"].Written == nil || got[0][0] != fmt.Sprintf("%X", cues) {
+		t.Fatalf("the row a deck only loaded: written %x, cues changed %v", s.Tracks["music/three.wav"].Written, got[0][0] != fmt.Sprintf("%X", cues))
 	}
 }
 
@@ -910,11 +932,28 @@ func TestMountRenumberedReexportWritesNoRowAndRefreshesRefs(t *testing.T) {
 }
 
 // A deck loaded staged tracks before their window, and the deck's UI hook wrote the staged data
-// into the rows itself (filled.jsonl); Engine then put its own figure into the last field of the
-// main cue, as it does at every load. Those rows are the bridge's own writes: a newer staged
-// record replaces them, and the snapshot holds them as applied. What the DJ changed after the
-// fill stays the deck's.
+// into the rows itself (filled.jsonl); Engine then put its own figure into the main cue, as it
+// does at every load of a track whose main cue the DJ has not adjusted. Those rows are the
+// bridge's own writes: a newer staged record replaces them, and the snapshot holds them as
+// applied. What the DJ changed after the fill stays the deck's.
 func TestMountTakesRowsTheDeckHookFilledAsTheBridgesOwn(t *testing.T) {
+	for _, load := range []struct {
+		name    string
+		rewrite func(raw []byte) // Engine's write of the main cue's 17 bytes at a load
+	}{
+		// Real Engine 5.3.0 on JP07 and SC LIVE 4 (the stage-fill lane's runs load1 and load4): the main
+		// cue and the main cue as imported both went from 9920.0 to -1105.0, the flag between them stayed 0.
+		{"Engine 5.3.0: both fields", func(raw []byte) {
+			binary.BigEndian.PutUint64(raw[len(raw)-17:], math.Float64bits(-1105))
+			binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(-1105))
+		}},
+		{"the last field only", func(raw []byte) { binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(-1105)) }},
+	} {
+		t.Run(load.name, func(t *testing.T) { rowsTheDeckHookFilled(t, load.rewrite) })
+	}
+}
+
+func rowsTheDeckHookFilled(t *testing.T, engineLoad func(raw []byte)) {
 	mount := stick(t)
 	mountNow(t, mount, MountOptions{})
 	stageAll(t, mount)
@@ -934,14 +973,18 @@ func TestMountTakesRowsTheDeckHookFilledAsTheBridgesOwn(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		rec.Perf.QuickCues = recodeCues(t, rec.Perf.QuickCues, func(raw []byte) { binary.BigEndian.PutUint64(raw[8+1+int(raw[8]):], math.Float64bits(22050)) })
+		rec.Perf.QuickCues = recodeCues(t, rec.Perf.QuickCues, func(raw []byte) {
+			binary.BigEndian.PutUint64(raw[8+1+int(raw[8]):], math.Float64bits(22050))
+			binary.BigEndian.PutUint64(raw[len(raw)-17:], math.Float64bits(9920)) // rekordbox's main cue, as the bridge writes it: twice
+			binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(9920))
+		})
 		rec.Digest = enginedb.WrittenDigest(rec.Perf.Beats, rec.Perf.QuickCues, rec.Perf.Loops)
 		if err = stage.Put(rec); err != nil {
 			t.Fatal(err)
 		}
 		id := s.Tracks[key].EngineID
 		cues := recodeCues(t, rec.Perf.QuickCues, func(raw []byte) {
-			binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(-1105)) // the main cue as imported, by Engine
+			engineLoad(raw)
 			if deck != nil {
 				deck(raw)
 			}
