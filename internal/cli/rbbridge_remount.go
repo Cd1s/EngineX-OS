@@ -306,7 +306,7 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 		// into it now, with no window's limit, so that the remount's window only renames whatever
 		// the library's size. Looking for it reads every row (seconds on a big library): the decks
 		// are looked at again afterwards.
-		if clear == 2 && passes < deckRowPasses && takeDeckRows(ctx, mount) {
+		if clear == 2 && passes < deckRowPasses && takeRowsWhileMounted(ctx, mount, ejected) {
 			clear, wait = 0, 0
 			passes++
 		}
@@ -339,6 +339,26 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 	}
 	log.Printf("rb-bridge: %s published by a remount in %s", mount, time.Since(start).Round(10*time.Millisecond))
 	return nil
+}
+
+// takeRowsWhileMounted is takeDeckRows, stopped when the stick is ejected or gone: the pass holds
+// files of the stick open and writes its next library, and after an Eject nothing may (the hook
+// marks the eject before its own pass and the unmount, and stops only the import job's unit).
+func takeRowsWhileMounted(ctx context.Context, mount string, ejected func() bool) bool {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for sleepCtx(ctx, remountWait) == nil {
+			if ejected() || !mounted(mount) {
+				cancel()
+			}
+		}
+	}()
+	looked := takeDeckRows(ctx, mount)
+	cancel()
+	<-done
+	return looked
 }
 
 // mountID is the id of the mount at mount, "" when there is none.

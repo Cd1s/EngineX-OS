@@ -191,6 +191,38 @@ func TestRemountTakesTheDecksRowsBeforeTheRemove(t *testing.T) {
 	}
 }
 
+// An Eject while the helper looks for the deck's rows stops the pass at once (it holds files of
+// the stick open and writes the next library), and the stick is not mounted again.
+func TestRemountStopsTakingRowsAtAnEject(t *testing.T) {
+	f := newFakeStick(t)
+	f.engine("5", "", "")
+	old := takeDeckRows
+	t.Cleanup(func() { takeDeckRows = old })
+	var stopped time.Duration
+	takeDeckRows = func(ctx context.Context, mount string) bool {
+		start := time.Now()
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			os.WriteFile(ejectMark(mount), nil, 0o600) // the hook's mark of an Eject
+		}()
+		select {
+		case <-ctx.Done():
+			stopped = time.Since(start)
+		case <-time.After(5 * time.Second):
+		}
+		return true
+	}
+	if err := remount(context.Background(), f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb")); err != nil {
+		t.Fatal(err)
+	}
+	if stopped == 0 || stopped > 2*time.Second {
+		t.Fatalf("the pass was not stopped by the eject (stopped after %v)", stopped)
+	}
+	if got := f.seen(); len(got) != 0 {
+		t.Fatalf("uevent writes %v for an ejected stick", got)
+	}
+}
+
 // #301: a finished background import is published by a synthetic remove and add of the stick's
 // partition, once Engine copies no track it loads, and only after Engine has closed the stick's
 // files: the publish renames the library under them.
