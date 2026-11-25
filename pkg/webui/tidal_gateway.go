@@ -651,6 +651,56 @@ func (g *tidalGateway) emptyPage(w http.ResponseWriter, r *http.Request) {
 	respond(w, page(r, 100, []any{}))
 }
 
+type tidalRetryTransport struct {
+	base    http.RoundTripper
+	backoff time.Duration
+}
+
+func (t *tidalRetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	idempotent := req.Method == http.MethodGet || req.Method == http.MethodHead
+	tokenGrant := req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/oauth2/token") && req.GetBody != nil
+	maxAttempts := 1
+	if idempotent {
+		maxAttempts = 2
+	} else if tokenGrant {
+		maxAttempts = 3
+	}
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		out := req
+		if attempt > 0 {
+			if !sleepContext(req.Context(), t.backoff*time.Duration(attempt)) {
+				return nil, req.Context().Err()
+			}
+			out = req.Clone(req.Context())
+			if req.GetBody != nil {
+				body, err := req.GetBody()
+				if err != nil {
+					return nil, err
+				}
+				out.Body = body
+			}
+		}
+		resp, err := base.RoundTrip(out)
+		if err != nil {
+			if attempt+1 < maxAttempts && req.Context().Err() == nil && (idempotent || isSafePreConnectError(err)) {
+				continue
+			}
+			return nil, err
+		}
+		if attempt+1 < maxAttempts && isTransientUpstreamStatus(resp.StatusCode) {
+			io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			continue
+		}
+		return resp, nil
+	}
+	return nil, errors.New("could not reach TIDAL")
+}
+
 // proxyToTidal passes a request on untouched when the deck is showing TIDAL itself,
 // so Engine talks to TIDAL's own servers with its own login and playback.
 func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clean string) {
@@ -674,7 +724,9 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 		fail(w, 500, errors.New("invalid upstream"))
 		return
 	}
+	transport := &tidalRetryTransport{base: g.tidalTransport(), backoff: tidalRetryBackoff}
 	proxy := &httputil.ReverseProxy{
+		Transport: transport,
 		Rewrite: func(out *httputil.ProxyRequest) {
 			out.SetURL(base)
 			out.Out.URL.Path, out.Out.URL.RawPath = upstream, ""
@@ -684,25 +736,49 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 			if strings.HasSuffix(clean, "/oauth2/token") {
 				return g.tokenResponse(resp, r.Form.Get("refresh_token"), r.Form.Get("client_id"))
 			}
-			// Retry an expired bearer once. Token grants use the original form
-			// path above, preserving Engine's refresh-token error response.
-			if resp.StatusCode == http.StatusUnauthorized && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
-				a, err := g.refreshRealAuth(r.Context(), strings.TrimPrefix(resp.Request.Header.Get("Authorization"), "Bearer "))
-				if err != nil {
-					return nil
-				}
-				retry := resp.Request.Clone(r.Context())
-				retry.Header.Set("Authorization", "Bearer "+a.AccessToken)
-				next, err := http.DefaultTransport.RoundTrip(retry)
-				if err != nil {
-					return errors.New("could not retry TIDAL request")
-				}
+			// Handle session/token 401s without leaking transient Wi-Fi refresh
+			// failures as 401: Engine's TidalAPI::handleErrors turns 401 + failed
+			// refresh into StreamingLogoutEvent -> onLoggedOut -> unloadFromProvider,
+			// ejecting all loaded TIDAL decks mid-playback (Forum #336 S10).
+			if resp.StatusCode == http.StatusUnauthorized {
+				b, readErr := io.ReadAll(io.LimitReader(resp.Body, 65537))
 				resp.Body.Close()
-				*resp = *next
+				if readErr != nil || len(b) > 65536 {
+					return errTidalTransient
+				}
+				resp.Body = io.NopCloser(bytes.NewReader(b))
+				if isTidalSessionLogout401(b) && g.hasRealAuth() {
+					failedToken := strings.TrimSpace(strings.TrimPrefix(resp.Request.Header.Get("Authorization"), "Bearer "))
+					a, err := g.refreshRealAuth(r.Context(), failedToken)
+					if err != nil {
+						if errors.Is(err, errTidalAuthInvalid) {
+							return nil // genuine invalid_grant / no refresh token -> let Engine see 401
+						}
+						return errTidalTransient
+					}
+					if r.Method == http.MethodGet || r.Method == http.MethodHead {
+						retry := resp.Request.Clone(r.Context())
+						retry.Header.Set("Authorization", "Bearer "+a.AccessToken)
+						next, err := transport.RoundTrip(retry)
+						if err != nil {
+							return errors.New("could not retry TIDAL request")
+						}
+						*resp = *next
+						return nil
+					}
+					// Non-idempotent API request got a session 401 and we rotated to a
+					// fresh token; return 503 so Engine stays logged in and keeps decks.
+					return errTidalTransient
+				}
 			}
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			if errors.Is(err, errTidalTransient) {
+				log.Print("stream-sync: TIDAL refresh temporarily unavailable, keeping session")
+				tidalTemporarilyUnavailable(w)
+				return
+			}
 			log.Print("stream-sync: TIDAL upstream request failed")
 			fail(w, 502, errors.New("could not reach TIDAL"))
 		},
@@ -800,7 +876,12 @@ func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPost && strings.HasSuffix(clean, "/oauth2/token") {
 				g.refreshMu.Lock()
 				defer g.refreshMu.Unlock()
-				ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+				parent := r.Context()
+				if form.Get("grant_type") == "refresh_token" {
+					// Finish storing a rotated token pair even if Engine times out mid-flight.
+					parent = context.WithoutCancel(parent)
+				}
+				ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 				defer cancel()
 				r = r.WithContext(ctx)
 			}

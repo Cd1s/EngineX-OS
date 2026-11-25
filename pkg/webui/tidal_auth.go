@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -132,10 +134,86 @@ func (g *tidalGateway) updateRealAuth(in tidalAuth, fillOnly bool) error {
 	return os.Rename(f.Name(), g.authPath()) // CreateTemp uses 0600, including replacements.
 }
 
+var (
+	errTidalAuthInvalid = errors.New("TIDAL login expired")
+	errTidalTransient   = errors.New("temporary TIDAL connection error")
+)
+
+const tidalRetryBackoff = 150 * time.Millisecond
+
 func tidalNotLoggedIn(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
 	io.WriteString(w, `{"status":401,"subStatus":6001,"userMessage":"Not logged in"}`)
+}
+
+func tidalTemporarilyUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	io.WriteString(w, `{"status":503,"userMessage":"Temporary TIDAL connection error"}`)
+}
+
+// isTidalSessionLogout401 reports whether a TIDAL 401 response body will drive
+// Engine's TidalAPI::handleErrors into StreamingLogoutEvent -> onLoggedOut ->
+// unloadFromProvider (subStatus 6001, 6002, 11001, 11002, 11003, 11101, or
+// absent/empty). Non-zero subStatuses outside that set (such as 4005 track
+// restrictions) do not log out the session and should pass through untouched.
+func isTidalSessionLogout401(body []byte) bool {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return true
+	}
+	var v struct {
+		SubStatus int `json:"subStatus"`
+	}
+	if json.Unmarshal(body, &v) != nil || v.SubStatus == 0 {
+		return true
+	}
+	switch v.SubStatus {
+	case 6001, 6002, 11001, 11002, 11003, 11101:
+		return true
+	}
+	return false
+}
+
+// isSafePreConnectError reports transport errors that definitely occurred before
+// any bytes reached the upstream server, making a retry safe even on rotating
+// refresh_token grants.
+func isSafePreConnectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial"
+}
+
+func isTransientUpstreamStatus(code int) bool {
+	switch code {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
+}
+
+func isTransientOAuthError(code string) bool {
+	return code == "temporarily_unavailable" || code == "server_error"
+}
+
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // Capture only the Engine streaming boundary, never console credentials. Keep
@@ -149,6 +227,7 @@ func (g *tidalGateway) captureAuth(r *http.Request, clean string) (url.Values, e
 		}
 		r.Body.Close()
 		r.Body = io.NopCloser(bytes.NewReader(b))
+		r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(b)), nil }
 		form, err = url.ParseQuery(string(b))
 		if err != nil {
 			return nil, errors.New("invalid TIDAL token request")
@@ -190,6 +269,7 @@ func (g *tidalGateway) prepareRealAuth(w http.ResponseWriter, r *http.Request, c
 			}
 			body := form.Encode()
 			r.Body = io.NopCloser(strings.NewReader(body))
+			r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(strings.NewReader(body)), nil }
 			r.ContentLength = int64(len(body))
 		}
 		if form.Has("refresh_token") && isSyntheticTidalToken(form.Get("refresh_token")) {
@@ -205,16 +285,26 @@ func (g *tidalGateway) prepareRealAuth(w http.ResponseWriter, r *http.Request, c
 	}
 	h := r.Header.Get("Authorization")
 	if strings.HasPrefix(h, "Bearer ") || !strings.HasSuffix(clean, "/oauth2/token") {
-		if isSyntheticTidalToken(strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))) {
-			a := g.realAuth()
+		bearer := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+		a := g.realAuth()
+		if isSyntheticTidalToken(bearer) {
 			if isSyntheticTidalToken(a.AccessToken) {
 				var err error
 				a, err = g.refreshRealAuth(r.Context(), a.AccessToken)
 				if err != nil {
-					tidalNotLoggedIn(w)
+					if errors.Is(err, errTidalAuthInvalid) {
+						tidalNotLoggedIn(w)
+					} else {
+						tidalTemporarilyUnavailable(w)
+					}
 					return false
 				}
 			}
+			r.Header.Set("Authorization", "Bearer "+a.AccessToken)
+		} else if !isSyntheticTidalToken(a.AccessToken) && a.AccessToken != bearer {
+			// Engine keeps its pre-rotation access token in memory after gateway-side
+			// refresh; upgrade outgoing requests to the current rotated token so later
+			// expiries refresh cleanly instead of passing a 401 back to Engine.
 			r.Header.Set("Authorization", "Bearer "+a.AccessToken)
 		}
 	}
@@ -252,6 +342,13 @@ func (g *tidalGateway) tokenResponse(resp *http.Response, refresh, clientID stri
 	return nil
 }
 
+func (g *tidalGateway) tidalTransport() http.RoundTripper {
+	if g.s != nil && g.s.cfg.HTTP != nil && g.s.cfg.HTTP.Transport != nil {
+		return g.s.cfg.HTTP.Transport
+	}
+	return http.DefaultTransport
+}
+
 func (g *tidalGateway) refreshRealAuth(ctx context.Context, failedAccessToken string) (tidalAuth, error) {
 	g.refreshMu.Lock()
 	defer g.refreshMu.Unlock()
@@ -260,7 +357,7 @@ func (g *tidalGateway) refreshRealAuth(ctx context.Context, failedAccessToken st
 		return a, nil // another request already rotated the failed credentials
 	}
 	if isSyntheticTidalToken(a.RefreshToken) {
-		return tidalAuth{}, errors.New("no TIDAL refresh token")
+		return tidalAuth{}, fmt.Errorf("no TIDAL refresh token: %w", errTidalAuthInvalid)
 	}
 	base := g.s.cfg.TidalAuthURL
 	if base == "" {
@@ -270,31 +367,67 @@ func (g *tidalGateway) refreshRealAuth(ctx context.Context, failedAccessToken st
 	if a.ClientID != "" {
 		form.Set("client_id", a.ClientID)
 	}
-	// Not cancelled with the caller: once TIDAL has the request it rotates the pair and the
-	// old refresh token is dead, so the answer must be stored even if Engine gave up waiting.
-	// The client's own timeout still bounds it.
-	req, err := http.NewRequestWithContext(context.WithoutCancel(ctx), http.MethodPost, strings.TrimRight(base, "/")+"/v1/oauth2/token", strings.NewReader(form.Encode()))
-	if err != nil {
-		return tidalAuth{}, err
+	encoded := form.Encode()
+	endpoint := strings.TrimRight(base, "/") + "/v1/oauth2/token"
+	client := &http.Client{
+		Timeout:   15 * time.Second,
+		Transport: g.tidalTransport(),
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := client.Do(req)
-	if err != nil {
-		return tidalAuth{}, errors.New("could not refresh TIDAL login")
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 && !sleepContext(ctx, tidalRetryBackoff*time.Duration(attempt)) {
+			return tidalAuth{}, errors.New("could not refresh TIDAL login")
+		}
+		// Not cancelled with the caller: once TIDAL has the request it rotates the pair and the
+		// old refresh token is dead, so the answer must be stored even if Engine gave up waiting.
+		// The client's own timeout still bounds it.
+		req, err := http.NewRequestWithContext(context.WithoutCancel(ctx), http.MethodPost, endpoint, strings.NewReader(encoded))
+		if err != nil {
+			return tidalAuth{}, err
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		resp, err := client.Do(req)
+		if err != nil {
+			if attempt+1 < maxAttempts && isSafePreConnectError(err) {
+				continue
+			}
+			return tidalAuth{}, fmt.Errorf("could not refresh TIDAL login: %w", err)
+		}
+		tokErr := g.tokenResponse(resp, a.RefreshToken, a.ClientID)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		if tokErr != nil {
+			return tidalAuth{}, tokErr
+		}
+		if resp.StatusCode == 200 {
+			a = g.realAuth()
+			if isSyntheticTidalToken(a.AccessToken) {
+				return tidalAuth{}, errors.New("no TIDAL access token")
+			}
+			return a, nil
+		}
+		if resp.StatusCode == 400 || resp.StatusCode == 401 {
+			var v struct {
+				Error string `json:"error"`
+			}
+			_ = json.Unmarshal(b, &v)
+			if isTransientOAuthError(v.Error) {
+				if attempt+1 < maxAttempts {
+					continue
+				}
+				return tidalAuth{}, errors.New("TIDAL auth temporarily unavailable")
+			}
+			return tidalAuth{}, fmt.Errorf("TIDAL login expired: %w", errTidalAuthInvalid)
+		}
+		if isTransientUpstreamStatus(resp.StatusCode) && attempt+1 < maxAttempts {
+			continue
+		}
+		return tidalAuth{}, fmt.Errorf("TIDAL refresh failed with HTTP %d", resp.StatusCode)
 	}
-	defer resp.Body.Close()
-	if err := g.tokenResponse(resp, a.RefreshToken, a.ClientID); err != nil {
-		return tidalAuth{}, err
-	}
-	if resp.StatusCode != 200 {
-		return tidalAuth{}, errors.New("TIDAL login expired")
-	}
-	a = g.realAuth()
-	if isSyntheticTidalToken(a.AccessToken) {
-		return tidalAuth{}, errors.New("no TIDAL access token")
-	}
-	return a, nil
+	return tidalAuth{}, errors.New("could not refresh TIDAL login")
 }
 
 // Engine 5.3.0 writes a provider-name map whose values are encoded JSON strings.
