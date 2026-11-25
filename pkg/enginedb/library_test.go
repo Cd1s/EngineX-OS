@@ -7,10 +7,15 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -146,18 +151,29 @@ func TestMigrateLegacyArtworkCommitsPartialProgressWithinBudget(t *testing.T) {
 	}
 	db.Close()
 
-	// Advance clock past the 1s budget on the 3rd call (call 1 sets deadline, call 2 checks row 1, call 3 checks row 2).
+	// Advance clock past the 1s budget right after row 1 finishes writing so row 1 commits cleanly
+	// and row 2 stops cleanly on budget expiry.
 	base := time.Unix(1700000000, 0)
-	calls := 0
+	var expired atomic.Bool
 	origNow := migrateNow
 	migrateNow = func() time.Time {
-		calls++
-		if calls >= 3 {
+		if expired.Load() {
 			return base.Add(2 * time.Second)
 		}
 		return base
 	}
 	t.Cleanup(func() { migrateNow = origNow })
+	origPut := migratePutArtwork
+	var puts int
+	migratePutArtwork = func(dir string, sum, data []byte, stop func() error) error {
+		puts++
+		err := origPut(dir, sum, data, stop)
+		if err == nil && puts == 1 {
+			expired.Store(true)
+		}
+		return err
+	}
+	t.Cleanup(func() { migratePutArtwork = origPut })
 
 	lib, err := OpenLibraryFile(ctx, filepath.Join(dir, "m.db"), mount)
 	if err != nil {
@@ -260,43 +276,65 @@ func TestMigrateLegacyArtworkUsesHashIndex(t *testing.T) {
 	}
 	defer lib.Close()
 
-	rows, err := lib.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+legacyArtworkIDsQuery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var plans []string
-	for rows.Next() {
-		var id, parent, notused int
-		var detail string
-		if err = rows.Scan(&id, &parent, &notused, &detail); err != nil {
-			rows.Close()
+	for _, querySpec := range []struct {
+		name string
+		sql  string
+		args []any
+	}{
+		{"first_page", legacyArtworkFirstPageQuery, []any{legacyArtworkBatch}},
+		{"next_page", legacyArtworkNextPageQuery, []any{"", "", int64(0), legacyArtworkBatch}},
+	} {
+		rows, err := lib.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+querySpec.sql, querySpec.args...)
+		if err != nil {
 			t.Fatal(err)
 		}
-		plans = append(plans, detail)
-	}
-	rows.Close()
-	joined := strings.Join(plans, "; ")
-	if !strings.Contains(joined, "COVERING INDEX index_AlbumArt_hash") || strings.Contains(joined, "SCAN AlbumArt") {
-		t.Fatalf("legacy artwork query must use covering index_AlbumArt_hash, got plan: %s", joined)
+		var plans []string
+		for rows.Next() {
+			var id, parent, notused int
+			var detail string
+			if err = rows.Scan(&id, &parent, &notused, &detail); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			plans = append(plans, detail)
+		}
+		rows.Close()
+		joined := strings.Join(plans, "; ")
+		if !strings.Contains(joined, "COVERING INDEX index_AlbumArt_hash") ||
+			strings.Contains(joined, "SCAN AlbumArt") ||
+			strings.Contains(joined, "TEMP B-TREE") {
+			t.Fatalf("%s must use covering index_AlbumArt_hash without SCAN/TEMP B-TREE, got plan: %s", querySpec.name, joined)
+		}
 	}
 
 	jpg1 := []byte{0xff, 0xd8, 0xff, 0xe0, 1, 1, 1}
 	jpg2 := []byte{0xff, 0xd8, 0xff, 0xe0, 2, 2, 2}
 	jpg3 := []byte{0xff, 0xd8, 0xff, 0xe0, 3, 3, 3}
+	badPNG := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0}
 	if _, err = lib.db.ExecContext(ctx, `INSERT INTO AlbumArt(id,hash,albumArt) VALUES
 		(1, NULL, ?),
 		(2, X'', ?),
 		(3, X'00', ?),
 		(4, X'ff', ?),
 		(5, '', ?),
-		(6, 'deadbeef', ?),
-		(7, ?, ?)`, jpg1, jpg1, jpg1, jpg1, jpg1, jpg2, "\U0010ffff", jpg3); err != nil {
+		(6, 'aaa', ?),
+		(7, 'aaa', ?),
+		(8, 'bad', ?),
+		(9, 'bbb', ?),
+		(10, 'ccc', ?),
+		(11, 'ddd', ?),
+		(12, 'eee', ?),
+		(13, ?, ?)`, jpg1, jpg1, jpg1, jpg1, jpg1, jpg2, jpg3, badPNG, jpg1, jpg2, jpg3, jpg1, "\U0010ffff", jpg3); err != nil {
 		t.Fatal(err)
 	}
 	if err = lib.MigrateLegacyArtwork(ctx, time.Second); err != nil {
 		t.Fatalf("MigrateLegacyArtwork: %v", err)
 	}
-	wantKinds := map[int64]string{1: "null", 2: "blob", 3: "blob", 4: "blob", 5: "blob", 6: "blob", 7: "blob"}
+	wantKinds := map[int64]string{
+		1: "null", 2: "blob", 3: "blob", 4: "blob",
+		5: "blob", 6: "blob", 7: "blob", 8: "text",
+		9: "blob", 10: "blob", 11: "blob", 12: "blob", 13: "blob",
+	}
 	for id, want := range wantKinds {
 		var kind string
 		var hash []byte
@@ -315,7 +353,7 @@ func TestMigrateLegacyArtworkUsesHashIndex(t *testing.T) {
 		if id == 4 && !bytes.Equal(hash, []byte{0xff}) {
 			t.Fatalf("id 4 blob 0xff was altered: %x", hash)
 		}
-		if id >= 5 && len(hash) != sha1.Size {
+		if want == "blob" && id >= 5 && len(hash) != sha1.Size {
 			t.Fatalf("id %d text hash was not migrated to sha1 blob: len=%d", id, len(hash))
 		}
 	}
@@ -326,6 +364,429 @@ func TestMigrateLegacyArtworkUsesHashIndex(t *testing.T) {
 			t.Fatalf("migrated artwork file %s missing: %v", p, err)
 		}
 	}
+}
+
+func openLegacyArtTestDB(t *testing.T, count int, payloadFn func(i int) []byte) (*Library, string, string) {
+	t.Helper()
+	ctx := context.Background()
+	mount := t.TempDir()
+	dir := filepath.Join(mount, "Engine Library", "Database2")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dir, "m.db")
+	if _, _, _, err := BuildLibrary(ctx, dir, "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= count; i++ {
+		h := fmt.Sprintf("legacy-%04d", i)
+		if _, err = db.Exec(`INSERT INTO AlbumArt(id,hash,albumArt) VALUES(?,?,?)`, i, h, payloadFn(i)); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	lib, err := OpenLibraryFile(ctx, dbPath, mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { lib.Close() })
+	return lib, mount, dbPath
+}
+
+func TestMigrateLegacyArtworkBoundedPagesAndCancelKeepsCommittedBatches(t *testing.T) {
+	jpg := func(i int) []byte { return []byte{0xff, 0xd8, 0xff, 0xe0, byte(i), 1, 2} }
+
+	t.Run("BatchCommitsBeforeNextBatchForKillSafety", func(t *testing.T) {
+		lib, mount, dbPath := openLegacyArtTestDB(t, 6, jpg)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		origPut := migratePutArtwork
+		t.Cleanup(func() { migratePutArtwork = origPut })
+		var calls int
+		var batch1CommittedBeforeBatch2 bool
+		migratePutArtwork = func(dir string, sum, data []byte, stop func() error) error {
+			calls++
+			if calls == 3 {
+				// Before row 3 starts, batch 1 (rows 1..2) must already be durably committed
+				// on a separate connection so a process kill / Eject cannot roll it back.
+				ro, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+				if err != nil {
+					return err
+				}
+				var blobs int
+				err = ro.QueryRow(`SELECT count(*) FROM AlbumArt WHERE id<=2 AND typeof(hash)='blob'`).Scan(&blobs)
+				ro.Close()
+				if err != nil {
+					return err
+				}
+				batch1CommittedBeforeBatch2 = blobs == 2
+				cancel()
+			}
+			return origPut(dir, sum, data, stop)
+		}
+
+		err := lib.MigrateLegacyArtworkWithOptions(ctx, LegacyArtworkOptions{BatchSize: 2})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v, want context.Canceled", err)
+		}
+		if !batch1CommittedBeforeBatch2 {
+			t.Fatal("batch 1 was not durably committed before batch 2 started")
+		}
+		for i := 1; i <= 6; i++ {
+			var kind string
+			if err = lib.db.QueryRow(`SELECT typeof(hash) FROM AlbumArt WHERE id=?`, i).Scan(&kind); err != nil {
+				t.Fatal(err)
+			}
+			want := "text"
+			if i <= 2 {
+				want = "blob"
+			}
+			if kind != want {
+				t.Fatalf("id %d: kind=%q, want %q", i, kind, want)
+			}
+			sum := sha1.Sum(jpg(i))
+			p := filepath.Join(mount, "Engine Library", "Artwork", base64.RawURLEncoding.EncodeToString(sum[:])+".jpg")
+			_, statErr := os.Stat(p)
+			if i <= 2 && statErr != nil {
+				t.Fatalf("id %d committed artwork missing: %v", i, statErr)
+			}
+			if i > 2 && !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("id %d canceled artwork should not exist: err=%v", i, statErr)
+			}
+		}
+	})
+
+	t.Run("CancelMidBatchCommitsCompletedRow", func(t *testing.T) {
+		lib, mount, _ := openLegacyArtTestDB(t, 4, jpg)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		origPut := migratePutArtwork
+		t.Cleanup(func() { migratePutArtwork = origPut })
+		var calls int
+		migratePutArtwork = func(dir string, sum, data []byte, stop func() error) error {
+			calls++
+			if calls == 2 {
+				cancel()
+			}
+			return origPut(dir, sum, data, stop)
+		}
+
+		err := lib.MigrateLegacyArtworkWithOptions(ctx, LegacyArtworkOptions{BatchSize: 4})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v, want context.Canceled", err)
+		}
+		for i := 1; i <= 4; i++ {
+			var kind string
+			if err = lib.db.QueryRow(`SELECT typeof(hash) FROM AlbumArt WHERE id=?`, i).Scan(&kind); err != nil {
+				t.Fatal(err)
+			}
+			want := "text"
+			if i == 1 {
+				want = "blob"
+			}
+			if kind != want {
+				t.Fatalf("id %d: kind=%q, want %q", i, kind, want)
+			}
+		}
+		sum1 := sha1.Sum(jpg(1))
+		p1 := filepath.Join(mount, "Engine Library", "Artwork", base64.RawURLEncoding.EncodeToString(sum1[:])+".jpg")
+		if _, err = os.Stat(p1); err != nil {
+			t.Fatalf("row 1 completed before mid-batch cancel is missing: %v", err)
+		}
+	})
+
+	t.Run("BudgetExpiryDuringEnumerationStopsEarly", func(t *testing.T) {
+		lib, _, _ := openLegacyArtTestDB(t, 6, jpg)
+		var nowCalls atomic.Int32
+		var callsBeforeFirstPut int32
+		base := time.Unix(1700000000, 0)
+		origNow := migrateNow
+		migrateNow = func() time.Time {
+			nowCalls.Add(1)
+			return base
+		}
+		origPut := migratePutArtwork
+		migratePutArtwork = func(dir string, sum, data []byte, stop func() error) error {
+			if callsBeforeFirstPut == 0 {
+				callsBeforeFirstPut = nowCalls.Load()
+			}
+			return origPut(dir, sum, data, stop)
+		}
+		if err := lib.MigrateLegacyArtworkWithOptions(context.Background(), LegacyArtworkOptions{Budget: time.Second, BatchSize: 6}); err != nil {
+			migrateNow = origNow
+			migratePutArtwork = origPut
+			t.Fatalf("unexpected error: %v", err)
+		}
+		migrateNow = origNow
+		migratePutArtwork = origPut
+		// 6 scanned rows must each check stop() during rows.Next() before row 1 starts processing.
+		if callsBeforeFirstPut < 12 {
+			t.Fatalf("rows.Next() skipped budget/stop checks during enumeration: nowCalls before 1st put = %d, want >= 12", callsBeforeFirstPut)
+		}
+
+		// Also verify immediate stop when deadline expires inside rows.Next().
+		lib2, _, _ := openLegacyArtTestDB(t, 6, jpg)
+		nowCalls.Store(0)
+		migrateNow = func() time.Time {
+			if nowCalls.Add(1) >= 4 {
+				return base.Add(2 * time.Second)
+			}
+			return base
+		}
+		t.Cleanup(func() { migrateNow = origNow })
+		var puts int
+		migratePutArtwork = func(dir string, sum, data []byte, stop func() error) error {
+			puts++
+			return origPut(dir, sum, data, stop)
+		}
+		t.Cleanup(func() { migratePutArtwork = origPut })
+		if err := lib2.MigrateLegacyArtworkWithOptions(context.Background(), LegacyArtworkOptions{Budget: time.Second, BatchSize: 6}); err != nil {
+			t.Fatalf("unexpected error on enumeration timeout: %v", err)
+		}
+		if puts != 0 {
+			t.Fatalf("expected 0 artwork writes when budget expires during rows.Next(), got %d", puts)
+		}
+	})
+}
+
+func TestMigrateLegacyArtworkBoundsPerImageConversionAndWrite(t *testing.T) {
+	t.Run("ChunkedWriteAbortsMidImageOnBudgetExpiry", func(t *testing.T) {
+		origChunk := legacyArtworkWriteChunk
+		legacyArtworkWriteChunk = 1024
+		t.Cleanup(func() { legacyArtworkWriteChunk = origChunk })
+
+		largeJPG := append([]byte{0xff, 0xd8, 0xff, 0xe0}, bytes.Repeat([]byte{0x42}, 8192)...)
+		lib, mount, _ := openLegacyArtTestDB(t, 1, func(int) []byte { return largeJPG })
+
+		base := time.Unix(1700000000, 0)
+		var expired atomic.Bool
+		origNow := migrateNow
+		migrateNow = func() time.Time {
+			if expired.Load() {
+				return base.Add(2 * time.Second)
+			}
+			return base
+		}
+		t.Cleanup(func() { migrateNow = origNow })
+
+		origPut := migratePutArtwork
+		migratePutArtwork = func(dir string, sum, data []byte, stop func() error) error {
+			var inner atomic.Int32
+			return origPut(dir, sum, data, func() error {
+				if inner.Add(1) >= 5 {
+					expired.Store(true)
+				}
+				return stop()
+			})
+		}
+		t.Cleanup(func() { migratePutArtwork = origPut })
+
+		if err := lib.MigrateLegacyArtworkWithOptions(context.Background(), LegacyArtworkOptions{Budget: time.Second}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		var kind string
+		if err := lib.db.QueryRow(`SELECT typeof(hash) FROM AlbumArt WHERE id=1`).Scan(&kind); err != nil {
+			t.Fatal(err)
+		}
+		if kind != "text" {
+			t.Fatalf("aborted image hash mutated to %q, want text", kind)
+		}
+		artDir := filepath.Join(mount, "Engine Library", "Artwork")
+		entries, err := os.ReadDir(artDir)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("aborted chunked write left files in Artwork: %v", entries)
+		}
+	})
+
+	t.Run("PNGConversionAbortsMidDecodeOrEncodeOnBudgetExpiry", func(t *testing.T) {
+		origStep := legacyArtworkEncodeStep
+		origChunk := legacyArtworkWriteChunk
+		legacyArtworkEncodeStep = 1024
+		legacyArtworkWriteChunk = 1 << 20
+		t.Cleanup(func() {
+			legacyArtworkEncodeStep = origStep
+			legacyArtworkWriteChunk = origChunk
+		})
+
+		img := image.NewRGBA(image.Rect(0, 0, 256, 256))
+		for y := 0; y < 256; y++ {
+			for x := 0; x < 256; x++ {
+				v := uint8((x*37 ^ y*91) + (x+y)*13)
+				img.SetRGBA(x, y, color.RGBA{R: v, G: v ^ 0x55, B: uint8(x * y), A: 255})
+			}
+		}
+		var pngBuf bytes.Buffer
+		if err := png.Encode(&pngBuf, img); err != nil {
+			t.Fatal(err)
+		}
+		pngData := pngBuf.Bytes()
+		if len(pngData) < 8192 {
+			t.Fatalf("synthetic PNG too small (%d bytes) to exercise chunked decode/encode bounds", len(pngData))
+		}
+		lib, mount, _ := openLegacyArtTestDB(t, 1, func(int) []byte { return pngData })
+
+		base := time.Unix(1700000000, 0)
+		var expired atomic.Bool
+		origNow := migrateNow
+		migrateNow = func() time.Time {
+			if expired.Load() {
+				return base.Add(2 * time.Second)
+			}
+			return base
+		}
+		t.Cleanup(func() { migrateNow = origNow })
+
+		origPut := migratePutArtwork
+		migratePutArtwork = func(dir string, sum, data []byte, stop func() error) error {
+			var inner atomic.Int32
+			return origPut(dir, sum, data, func() error {
+				if inner.Add(1) >= 5 {
+					expired.Store(true)
+				}
+				return stop()
+			})
+		}
+		t.Cleanup(func() { migratePutArtwork = origPut })
+
+		if err := lib.MigrateLegacyArtworkWithOptions(context.Background(), LegacyArtworkOptions{Budget: time.Second}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		var kind string
+		if err := lib.db.QueryRow(`SELECT typeof(hash) FROM AlbumArt WHERE id=1`).Scan(&kind); err != nil {
+			t.Fatal(err)
+		}
+		if kind != "text" {
+			t.Fatalf("aborted PNG conversion hash=%q, want text", kind)
+		}
+		artDir := filepath.Join(mount, "Engine Library", "Artwork")
+		entries, err := os.ReadDir(artDir)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("aborted PNG conversion left files in Artwork: %v", entries)
+		}
+	})
+
+	t.Run("OversizedBlobSkippedWithoutAborting", func(t *testing.T) {
+		origMax := maxLegacyArtworkBytes
+		maxLegacyArtworkBytes = 2048
+		t.Cleanup(func() { maxLegacyArtworkBytes = origMax })
+
+		bigJPG := append([]byte{0xff, 0xd8, 0xff, 0xe0}, bytes.Repeat([]byte{0x11}, 4096)...)
+		smallJPG := []byte{0xff, 0xd8, 0xff, 0xe0, 9, 8, 7}
+		lib, _, _ := openLegacyArtTestDB(t, 2, func(i int) []byte {
+			if i == 1 {
+				return bigJPG
+			}
+			return smallJPG
+		})
+		if err := lib.MigrateLegacyArtworkWithOptions(context.Background(), LegacyArtworkOptions{Budget: time.Second}); err != nil {
+			t.Fatalf("oversized artwork aborted migration: %v", err)
+		}
+		var k1, k2 string
+		if err := lib.db.QueryRow(`SELECT typeof(hash) FROM AlbumArt WHERE id=1`).Scan(&k1); err != nil {
+			t.Fatal(err)
+		}
+		if err := lib.db.QueryRow(`SELECT typeof(hash) FROM AlbumArt WHERE id=2`).Scan(&k2); err != nil {
+			t.Fatal(err)
+		}
+		if k1 != "text" || k2 != "blob" {
+			t.Fatalf("oversized skip mismatch: k1=%q k2=%q, want text/blob", k1, k2)
+		}
+	})
+}
+
+func TestMigrateLegacyArtworkRespectsBusyAndPace(t *testing.T) {
+	jpg := func(i int) []byte { return []byte{0xff, 0xd8, 0xff, 0xe0, byte(i), 3, 4} }
+
+	t.Run("BusyBeforeStartDoesZeroWrites", func(t *testing.T) {
+		lib, mount, _ := openLegacyArtTestDB(t, 3, jpg)
+		if err := lib.MigrateLegacyArtworkWithOptions(context.Background(), LegacyArtworkOptions{
+			Busy: func() bool { return true },
+		}); err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		var textCount int
+		if err := lib.db.QueryRow(`SELECT count(*) FROM AlbumArt WHERE typeof(hash)='text'`).Scan(&textCount); err != nil {
+			t.Fatal(err)
+		}
+		if textCount != 3 {
+			t.Fatalf("migrated rows while deck busy: remaining text=%d, want 3", textCount)
+		}
+		entries, err := os.ReadDir(filepath.Join(mount, "Engine Library", "Artwork"))
+		if err == nil && len(entries) != 0 {
+			t.Fatalf("wrote Artwork files while deck busy: %v", entries)
+		}
+	})
+
+	t.Run("BusyMidRunPreservesBatch1AndSkipsBatch2Commit", func(t *testing.T) {
+		lib, _, _ := openLegacyArtTestDB(t, 6, jpg)
+		var busy atomic.Bool
+		var puts int
+		origPut := migratePutArtwork
+		t.Cleanup(func() { migratePutArtwork = origPut })
+		migratePutArtwork = func(dir string, sum, data []byte, stop func() error) error {
+			puts++
+			err := origPut(dir, sum, data, stop)
+			// Batch 1 = rows 1..2 commits; row 3 finishes in batch 2, then deck starts playing before batch 2 commits.
+			if puts == 3 {
+				busy.Store(true)
+			}
+			return err
+		}
+
+		if err := lib.MigrateLegacyArtworkWithOptions(context.Background(), LegacyArtworkOptions{
+			BatchSize: 2,
+			Busy:      busy.Load,
+		}); err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		for i := 1; i <= 6; i++ {
+			var kind string
+			if err := lib.db.QueryRow(`SELECT typeof(hash) FROM AlbumArt WHERE id=?`, i).Scan(&kind); err != nil {
+				t.Fatal(err)
+			}
+			want := "text"
+			if i <= 2 {
+				want = "blob"
+			}
+			if kind != want {
+				t.Fatalf("id %d: kind=%q, want %q (batch 2 must roll back on busy before commit)", i, kind, want)
+			}
+		}
+	})
+
+	t.Run("PaceCalledPerCommittedBatch", func(t *testing.T) {
+		lib, _, _ := openLegacyArtTestDB(t, 5, jpg)
+		var paceCalls int
+		err := lib.MigrateLegacyArtworkWithOptions(context.Background(), LegacyArtworkOptions{
+			BatchSize: 2,
+			Pace: func(took time.Duration) error {
+				paceCalls++
+				if took < 0 {
+					return fmt.Errorf("negative batch duration: %v", took)
+				}
+				return nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if paceCalls != 3 {
+			t.Fatalf("Pace called %d times for 5 rows in batch 2, want 3", paceCalls)
+		}
+	})
 }
 
 func makeQuickCuesWithMain(t *testing.T, base []byte, main float64, adj byte) []byte {

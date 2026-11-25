@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +42,7 @@ type window struct {
 	head  rbstate.Header          // the snapshot's header as the stick has it
 	dirty bool                    // tracks or lists changed outside a commit
 	left  bool                    // work that would not end before the kill was left to the job
+	built bool                    // library was built fresh from exports; holds no legacy artwork
 	took  laps                    // where the time of the commits and of the staged step went
 }
 
@@ -114,6 +116,9 @@ func (w *window) run() (err error) {
 	if err == nil && (!w.left || w.st.fits(work{commits: 1, tracks: n})) {
 		err = w.saveIfChanged()
 	}
+	if err == nil {
+		err = w.migrateLegacyArtwork()
+	}
 	return err
 }
 
@@ -171,22 +176,6 @@ func (w *window) open() error {
 	case snap != nil && snap.LibraryUUID == lib.UUID() && snap.Rules == rbstate.Rules:
 		w.snap, w.head = snap, snap.Header
 	case oldErr == nil && !w.next:
-		artBudget := 2 * time.Second
-		if !w.st.owed.IsZero() {
-			if quarter := time.Until(w.st.owed) / 4; quarter < artBudget {
-				artBudget = quarter
-			}
-		}
-		if d, ok := w.ctx.Deadline(); ok {
-			if quarter := time.Until(d) / 4; quarter < artBudget {
-				artBudget = quarter
-			}
-		}
-		if artBudget > 0 {
-			if err = lib.MigrateLegacyArtwork(w.ctx, artBudget); err != nil {
-				return err
-			}
-		}
 		if w.snap, err = adopt(w.ctx, db, w.dir, lib.UUID()); err != nil {
 			return err
 		}
@@ -421,6 +410,7 @@ func (w *window) build() error {
 	if w.lib, err = enginedb.OpenLibraryFile(w.ctx, w.file(), filepath.Dir(filepath.Dir(w.dir))); err != nil {
 		return err
 	}
+	w.built = true
 	if w.index, err = w.lib.TrackIndex(w.ctx); err != nil {
 		return err
 	}
@@ -873,4 +863,101 @@ func writeOverview(dir, uuid string, id int64, body []byte) {
 	if err := enginedb.WriteRGBOverviewAtomic(dir, uuid, id, body); err != nil {
 		log.Printf("rb-bridge: list waveform of track %d not written: %v", id, err)
 	}
+}
+
+var (
+	legacyArtworkWindowMin = 500 * time.Millisecond
+	legacyArtworkWindowMax = time.Second
+	artworkProcDir         = "/proc"
+	artworkCopiesDir       = "/data/inMusicTempFiles/"
+	deckBusyForArtwork     = isDeckPlayingOrLoading
+)
+
+// isDeckPlayingOrLoading checks deck playback/cue/scratch/loading flags in the runtime
+// activity file and active Engine track copies under /data/inMusicTempFiles/.
+func isDeckPlayingOrLoading() bool {
+	if IsDeckActive() {
+		return true
+	}
+	var act struct {
+		Active      bool  `json:"active"`
+		Loading     bool  `json:"loading"`
+		UpdatedAtMS int64 `json:"updatedAtMs"`
+	}
+	if readPrivateJSON(deckActivityPath(), &act) == nil && (act.Active || act.Loading) && act.UpdatedAtMS > 0 {
+		age := time.Since(time.UnixMilli(act.UpdatedAtMS))
+		if age >= -time.Second && age <= deckActivityTTL {
+			return true
+		}
+	}
+	return isEngineCopyingForArtwork()
+}
+
+func isEngineCopyingForArtwork() bool {
+	if _, err := os.Stat(artworkCopiesDir); err != nil {
+		return false
+	}
+	entries, err := os.ReadDir(artworkProcDir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		comm, err := os.ReadFile(filepath.Join(artworkProcDir, e.Name(), "comm"))
+		if err != nil || strings.TrimSpace(string(comm)) != "Engine" {
+			continue
+		}
+		fds, err := os.ReadDir(filepath.Join(artworkProcDir, e.Name(), "fd"))
+		if err != nil {
+			continue
+		}
+		for _, fd := range fds {
+			target, err := os.Readlink(filepath.Join(artworkProcDir, e.Name(), "fd", fd.Name()))
+			if err != nil || !strings.HasPrefix(target, artworkCopiesDir) {
+				continue
+			}
+			info, err := os.ReadFile(filepath.Join(artworkProcDir, e.Name(), "fdinfo", fd.Name()))
+			if err != nil {
+				return true
+			}
+			for _, line := range strings.Split(string(info), "\n") {
+				if v, ok := strings.CutPrefix(line, "flags:"); ok {
+					if flags, err := strconv.ParseUint(strings.TrimSpace(v), 8, 32); err != nil || flags&3 != 0 {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// migrateLegacyArtwork converts legacy TEXT AlbumArt hashes under window pacing and deck-activity
+// guards. In a hook mount window it runs only after required work when well inside the 3 s spare
+// margin; background next-library passes finish any deferred rows with job pacing.
+func (w *window) migrateLegacyArtwork() error {
+	if w.lib == nil || w.built || deckBusyForArtwork() {
+		return nil
+	}
+	opts := enginedb.LegacyArtworkOptions{
+		Busy: deckBusyForArtwork,
+		Pace: w.rest,
+	}
+	if !w.next && !w.st.kill.IsZero() {
+		if w.left || !w.st.more(legacyArtworkWindowMin) {
+			return nil
+		}
+		budget := legacyArtworkWindowMax
+		if !w.st.optional.IsZero() {
+			budget = min(budget, time.Until(w.st.optional))
+		}
+		budget = min(budget, time.Until(w.st.kill.Add(-spare)))
+		if budget <= 0 {
+			return nil
+		}
+		opts.Budget = budget
+	}
+	return w.lib.MigrateLegacyArtworkWithOptions(w.ctx, opts)
 }
