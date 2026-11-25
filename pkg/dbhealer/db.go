@@ -42,9 +42,41 @@ type Report struct {
 	CheckedAt         time.Time `json:"checked_at"`
 }
 
+func budgetExpired(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	if err != nil && strings.Contains(err.Error(), "SQLITE_BUSY") {
+		if d, ok := ctx.Deadline(); ok && time.Until(d) <= 25*time.Millisecond {
+			return true
+		}
+	}
+	return false
+}
+
+func clampBusyTimeout(ctx context.Context, maxMS int) int {
+	if deadline, ok := ctx.Deadline(); ok {
+		rem := int(time.Until(deadline).Milliseconds())
+		if rem < 1 {
+			return 1
+		}
+		if rem < maxMS {
+			return rem
+		}
+	}
+	return maxMS
+}
+
 // Open never creates a missing library. A single connection keeps connection-local
 // tuning consistent. Read-only opens never recover or create a journal.
 func Open(path string, readOnly bool) (*sql.DB, error) {
+	return openContext(context.Background(), path, readOnly)
+}
+
+func openContext(ctx context.Context, path string, readOnly bool) (*sql.DB, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(path); err != nil {
 		return nil, err
 	}
@@ -55,7 +87,7 @@ func Open(path string, readOnly bool) (*sql.DB, error) {
 	u := url.URL{Scheme: "file", Path: abs}
 	q := u.Query()
 	q.Set("mode", "rw")
-	q.Add("_pragma", "busy_timeout(3000)")
+	q.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", clampBusyTimeout(ctx, 3000)))
 	if readOnly {
 		for _, suffix := range []string{"-wal", "-journal"} {
 			if s, e := os.Stat(path + suffix); e == nil && s.Size() > 0 {
@@ -77,7 +109,7 @@ func Open(path string, readOnly bool) (*sql.DB, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	if err = db.Ping(); err != nil {
+	if err = db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -99,7 +131,11 @@ func Tune(db *sql.DB, readOnly bool) error {
 }
 
 func transaction(db *sql.DB, f func(*sql.Tx) error) error {
-	tx, err := db.Begin()
+	return transactionContext(context.Background(), db, f)
+}
+
+func transactionContext(ctx context.Context, db *sql.DB, f func(*sql.Tx) error) error {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -113,28 +149,31 @@ func transaction(db *sql.DB, f func(*sql.Tx) error) error {
 // Heal runs all m.db mutations atomically. Integrity errors are reported; a
 // corrupt library is never replaced with an empty one.
 func Heal(db *sql.DB) (Report, error) {
-	r, _, err := healWithResized(db, false)
+	r, _, err := healWithResizedContext(context.Background(), db, false)
 	return r, err
 }
 
 // heal with dataOnly leaves Engine's views, triggers and indexes byte-identical:
 // Engine compares its schema on attach, then drops and recreates anything altered.
 func heal(db *sql.DB, dataOnly bool) (Report, error) {
-	r, _, err := healWithResized(db, dataOnly)
+	r, _, err := healWithResizedContext(context.Background(), db, dataOnly)
 	return r, err
 }
 
-func healWithResized(db *sql.DB, dataOnly bool) (Report, map[int64]bool, error) {
+func healWithResizedContext(ctx context.Context, db *sql.DB, dataOnly bool) (Report, map[int64]bool, error) {
 	r := Report{CheckedAt: time.Now().UTC()}
+	if err := ctx.Err(); err != nil {
+		return r, nil, err
+	}
 	var check string
-	if err := db.QueryRow("PRAGMA quick_check").Scan(&check); err != nil {
+	if err := db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&check); err != nil {
 		return r, nil, err
 	}
 	if check != "ok" {
 		return r, nil, fmt.Errorf("database integrity: %s", check)
 	}
 	var major, minor, patch int
-	if err := db.QueryRow("SELECT schemaVersionMajor,schemaVersionMinor,schemaVersionPatch FROM Information LIMIT 1").Scan(&major, &minor, &patch); err != nil {
+	if err := db.QueryRowContext(ctx, "SELECT schemaVersionMajor,schemaVersionMinor,schemaVersionPatch FROM Information LIMIT 1").Scan(&major, &minor, &patch); err != nil {
 		return r, nil, fmt.Errorf("missing library version: %w", err)
 	}
 	if major != 3 || minor != 0 || patch != 2 {
@@ -143,30 +182,30 @@ func healWithResized(db *sql.DB, dataOnly bool) (Report, map[int64]bool, error) 
 	if dataOnly {
 		// PRAGMA optimize could add sqlite_stat1, and the queue must stay out of
 		// the file: Engine drops unknown tables on attach.
-		if _, err := db.Exec("CREATE TEMP TABLE IF NOT EXISTS GuardianReanalysis(trackId INTEGER NOT NULL,field TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(trackId,field))"); err != nil {
+		if _, err := db.ExecContext(ctx, "CREATE TEMP TABLE IF NOT EXISTS GuardianReanalysis(trackId INTEGER NOT NULL,field TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(trackId,field))"); err != nil {
 			return r, nil, err
 		}
 	} else if err := Tune(db, false); err != nil {
 		return r, nil, err
 	}
 	var resized map[int64]bool
-	err := transaction(db, func(tx *sql.Tx) error {
+	err := transactionContext(ctx, db, func(tx *sql.Tx) error {
 		// An unrecognized future schema is not a license to rewrite its blobs.
 		var schema string
-		if err := tx.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='PerformanceData'").Scan(&schema); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name='PerformanceData'").Scan(&schema); err != nil {
 			return fmt.Errorf("unsupported library schema: %w", err)
 		}
 		// GL-010: Engine rejects libraries where Information.id != 1 or uuid is empty.
 		var infoCount int
-		if err := tx.QueryRow("SELECT count(*) FROM Information").Scan(&infoCount); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM Information").Scan(&infoCount); err != nil {
 			return err
 		}
 		if infoCount == 1 {
-			if _, err := tx.Exec("UPDATE Information SET id=1 WHERE id<>1"); err != nil {
+			if _, err := tx.ExecContext(ctx, "UPDATE Information SET id=1 WHERE id<>1"); err != nil {
 				return err
 			}
 		}
-		if _, err := tx.Exec("UPDATE Information SET uuid=? WHERE uuid IS NULL OR trim(uuid)=''", uuid.NewString()); err != nil {
+		if _, err := tx.ExecContext(ctx, "UPDATE Information SET uuid=? WHERE uuid IS NULL OR trim(uuid)=''", uuid.NewString()); err != nil {
 			return err
 		}
 		var err error
@@ -189,13 +228,28 @@ func healWithResized(db *sql.DB, dataOnly bool) (Report, map[int64]bool, error) 
 		if err = healPerformance(tx, &r); err != nil {
 			return err
 		}
-		if resized, err = healArtwork(tx, &r); err != nil {
+		if err = healArtworkMetadata(ctx, tx, &r); err != nil {
 			return err
 		}
-		return tx.QueryRow("SELECT count(*) FROM GuardianReanalysis").Scan(&r.ReanalysisPending)
+		if !dataOnly {
+			if resized, err = resizeOversizedArtworkBlobsTx(ctx, tx, &r); err != nil {
+				return err
+			}
+		}
+		return tx.QueryRowContext(ctx, "SELECT count(*) FROM GuardianReanalysis").Scan(&r.ReanalysisPending)
 	})
-	r.Healthy = err == nil
-	return r, resized, err
+	if err != nil {
+		r.Healthy = false
+		return r, nil, err
+	}
+	if dataOnly && ctx.Err() == nil {
+		if resized, err = resizeOversizedArtworkBlobsMount(ctx, db, &r); err != nil {
+			r.Healthy = false
+			return r, resized, err
+		}
+	}
+	r.Healthy = true
+	return r, resized, nil
 }
 
 func writable(path string) (bool, error) {
@@ -260,14 +314,22 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 	if err != nil {
 		return r, err
 	}
+	if dataOnly && ctx.Err() != nil {
+		r.Healthy = true
+		return r, nil
+	}
 	if rw {
 		// Before Engine opens the volume: a nonzero page reserve breaks every ATTACH.
 		if r.ReserveFixed, err = NormalizeDatabase2(filepath.Dir(path)); err != nil {
 			return r, err
 		}
 	}
-	db, err := Open(path, !rw)
+	db, err := openContext(ctx, path, !rw)
 	if err != nil {
+		if dataOnly && budgetExpired(ctx, err) {
+			r.Healthy = true
+			return r, nil
+		}
 		return r, err
 	}
 	if !rw {
@@ -284,15 +346,25 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 	pathStart := time.Now()
 	remaining, err := normalizeTrackPaths(ctx, db, mount, &r)
 	if err != nil {
+		if dataOnly && budgetExpired(ctx, err) {
+			_ = db.Close()
+			r.Healthy = true
+			r.Mount = mount
+			return r, nil
+		}
 		// A path-pass database error means the library may be damaged. Run the
 		// existing base heal so it remains the recovery path for corruption.
 		pathsFixed := r.PathsNormalized
-		r, healErr := heal(db, dataOnly)
+		r, _, healErr := healWithResizedContext(ctx, db, dataOnly)
 		r.ReserveFixed = fixed
 		r.PathsNormalized = pathsFixed
 		_ = db.Close()
 		r.Mount = mount
 		if healErr != nil {
+			if dataOnly && budgetExpired(ctx, healErr) {
+				r.Healthy = true
+				return r, nil
+			}
 			return r, healErr
 		}
 		return r, err
@@ -309,18 +381,27 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 	}
 	pathsFixed := r.PathsNormalized
 	var resizedIDs map[int64]bool
-	r, resizedIDs, err = healWithResized(db, dataOnly)
+	r, resizedIDs, err = healWithResizedContext(ctx, db, dataOnly)
 	r.ReserveFixed = fixed
 	r.PathsNormalized = pathsFixed
 	if err != nil {
 		_ = db.Close()
 		r.Mount = mount
+		if dataOnly && budgetExpired(ctx, err) {
+			r.Healthy = true
+			return r, nil
+		}
 		return r, err
 	}
+	artCache := newArtworkDirCache()
 	if ctx.Err() == nil {
-		if artErr := reconcileArtwork(ctx, db, mount, resizedIDs, opts.ExtractEmbeddedArtwork, &r); artErr != nil {
+		if artErr := reconcileArtwork(ctx, db, mount, resizedIDs, opts.ExtractEmbeddedArtwork, artCache, &r); artErr != nil {
 			_ = db.Close()
 			r.Mount = mount
+			if dataOnly && budgetExpired(ctx, artErr) {
+				r.Healthy = true
+				return r, nil
+			}
 			return r, artErr
 		}
 	}
@@ -343,16 +424,22 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			r.Warnings = append(r.Warnings, "history library is read-only: skipped repairs and pruning")
 			return r, nil
 		}
-		hdb, e := Open(history, false)
+		hdb, e := openContext(ctx, history, false)
 		if e != nil {
+			if dataOnly && budgetExpired(ctx, e) {
+				return r, nil
+			}
 			return r, e
 		}
-		hr, resizedH, e := healWithResized(hdb, dataOnly)
+		hr, resizedH, e := healWithResizedContext(ctx, hdb, dataOnly)
 		if e == nil && ctx.Err() == nil {
-			e = reconcileArtwork(ctx, hdb, mount, resizedH, opts.ExtractEmbeddedArtwork, &hr)
+			e = reconcileArtwork(ctx, hdb, mount, resizedH, opts.ExtractEmbeddedArtwork, artCache, &hr)
 		}
 		ce := hdb.Close()
 		if e != nil {
+			if dataOnly && budgetExpired(ctx, e) {
+				return r, nil
+			}
 			r.Healthy = false
 			return r, fmt.Errorf("history repair: %w", e)
 		}
@@ -445,7 +532,7 @@ type trackPathCandidate struct {
 var normalizeTrackPathBatch func()
 
 func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Report) (int, error) {
-	candidates, bridgeManaged, err := collectTrackPathCandidates(db, mount)
+	candidates, bridgeManaged, err := collectTrackPathCandidates(ctx, db, mount)
 	if err != nil {
 		return 0, err
 	}
@@ -560,8 +647,8 @@ func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Repor
 	return remaining, nil
 }
 
-func collectTrackPathCandidates(db *sql.DB, mount string) ([]trackPathCandidate, map[int64]bool, error) {
-	rows, err := db.Query(`SELECT id, path FROM Track WHERE path IS NOT NULL AND path <> ''`)
+func collectTrackPathCandidates(ctx context.Context, db *sql.DB, mount string) ([]trackPathCandidate, map[int64]bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id, path FROM Track WHERE path IS NOT NULL AND path <> ''`)
 	if err != nil {
 		return nil, nil, err
 	}

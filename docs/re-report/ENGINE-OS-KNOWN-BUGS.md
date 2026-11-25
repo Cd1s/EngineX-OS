@@ -183,8 +183,8 @@
   - 5.0.3 发行说明，2026-07-06，只修高分辨率封面造成的音频中断。
 - 固件 / 数据库层怎么修：
   1. 盘面封面只做显示。找不到文件或哈希不符时显示占位图，禁止在音频加载路径上重算哈希或解码原图。
-  2. 查找顺序：Artwork 目录里的 `albumArtSourceHash` 文件，其次 `AlbumArt` blob，其次嵌入标签。任何一步失败都继续播放。
-  3. 解码限制在 256 边长以内，放到 UI 线程之外。5.0.3 已经证明大图会打断音频，设备侧应拒绝在热路径解码原尺寸图。
+  2. 查找顺序（早期 5.0.4 推断见上；**5.3.0 二进制实测修正**）：Engine 5.3.0 实际通过 `IFNULL(AlbumArt.albumArt, GET_ALBUM_ART(AlbumArt.hash))` 与 `GET_ALBUM_ART_SIZE(AlbumArt.hash)` 读取封面，外部路径固定为 `Engine Library/Artwork/<base64url(AlbumArt.hash)>.jpg`（要求 20 字节 `SQLITE_BLOB`；`Track.albumArtSourceHash` 仅用于打包/同步变更跟踪，不参与封面文件查找）。空非 NULL blob（`X''`）会短路 `IFNULL`，数字型 `hash` 会令 `GET_ALBUM_ART` 抛异常，40 字符十六进制 `TEXT` `hash` 会静默返回空。
+  3. 尺寸上限与解码线程：设备侧 `PlanckImageProvider` 已在独立 `QQuickPixmapRea` 线程做按需缩放解码（#223 恢复了其默认调度优先级并避开 CPU 1/2）；`engine-guardian`（`pkg/dbhealer`）在挂载期把超过 1024 px 或 1 MiB 的数据库 blob 与外部 `Artwork/*.jpg`（含小于 256 KiB 的高分辨率图和伪装 `.jpg` 的 PNG）统一缩放到 512×512 JPEG（与既有 EOS-09/bridge 去重测试一致，36M 像素 / 32 MiB 解码预算且受挂载超时上下文约束），避免播放热路径解码原尺寸大图。
   4. 不要为了修封面去 `UPDATE Track SET albumArtId = NULL` 这种会写脏用户库的办法。那是用户自救，不是固件修复。
 
 ### EOS-10 录音约 10 分钟后报 USB 速度不够，换快盘仍出现

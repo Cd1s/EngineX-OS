@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
 )
@@ -27,7 +28,7 @@ func s11JPEG(t *testing.T, w, h, quality int, noisy bool) []byte {
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			if noisy {
-				v := uint32(x*2654435761) ^ uint32(y*2246822519)
+				v := uint32(x)*2654435761 ^ uint32(y)*2246822519
 				v ^= v >> 13
 				v *= 1274126177
 				img.SetRGBA(x, y, color.RGBA{uint8(v), uint8(v >> 8), uint8(v >> 16), 255})
@@ -49,7 +50,7 @@ func s11PNG(t *testing.T, w, h int, alpha uint8, noisy bool) []byte {
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			if noisy {
-				v := uint32(x*2654435761) ^ uint32(y*2246822519)
+				v := uint32(x)*2654435761 ^ uint32(y)*2246822519
 				v ^= v >> 13
 				v *= 1274126177
 				img.SetNRGBA(x, y, color.NRGBA{uint8(v), uint8(v >> 8), uint8(v >> 16), alpha})
@@ -600,4 +601,299 @@ func TestS11PixelBombCorruptSymlinkBudgetAndCoveringIndex(t *testing.T) {
 	if _, err := os.Stat(s11ArtFile(mount3, sumC[:])); err != nil {
 		t.Fatalf("follow-up heal did not complete missing Artwork file: %v", err)
 	}
+}
+
+func s11SolidJPEG(t *testing.T, w, h, quality int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	c := color.RGBA{30, 120, 210, 255}
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.SetRGBA(x, y, c)
+		}
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality}); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestS11SmallOversizedExternalJPEGAndPNGDownscaled(t *testing.T) {
+	_, mount, db := testlibrary.Create(t)
+	artDir := filepath.Join(mount, "Engine Library", "Artwork")
+	if err := os.MkdirAll(artDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Row 2: 2048x2048 solid JPEG well below 256 KiB (~50-70 KiB).
+	smallOversizedJPG := s11SolidJPEG(t, 2048, 2048, 85)
+	if len(smallOversizedJPG) >= 256<<10 {
+		t.Fatalf("expected solid 2048x2048 JPEG < 256 KiB, got %d", len(smallOversizedJPG))
+	}
+	sum2 := sha1.Sum(smallOversizedJPG)
+	if err := os.WriteFile(s11ArtFile(mount, sum2[:]), smallOversizedJPG, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, db, `INSERT INTO AlbumArt(id,hash,albumArt) VALUES(2,?,NULL)`, sum2[:])
+
+	// Row 3: small 300x300 PNG (<256 KiB) masquerading as .jpg.
+	smallPNG := s11PNG(t, 300, 300, 255, false)
+	if len(smallPNG) >= 256<<10 {
+		t.Fatalf("expected solid 300x300 PNG < 256 KiB, got %d", len(smallPNG))
+	}
+	sum3 := sha1.Sum(smallPNG)
+	if err := os.WriteFile(s11ArtFile(mount, sum3[:]), smallPNG, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, db, `INSERT INTO AlbumArt(id,hash,albumArt) VALUES(3,?,NULL)`, sum3[:])
+	db.Close()
+
+	r, err := HealMountDataOnly(mount, 0)
+	if err != nil || !r.Healthy {
+		t.Fatalf("HealMountDataOnly: %+v err=%v", r, err)
+	}
+
+	got2, err := os.ReadFile(s11ArtFile(mount, sum2[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	img2, fmt2, err := image.Decode(bytes.NewReader(got2))
+	if err != nil || fmt2 != "jpeg" || img2.Bounds().Dx() > 512 || img2.Bounds().Dy() > 512 {
+		t.Fatalf("oversized <256 KiB external JPEG remained unchanged: fmt=%q bounds=%v err=%v", fmt2, imgBounds(img2), err)
+	}
+
+	got3, err := os.ReadFile(s11ArtFile(mount, sum3[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	img3, fmt3, err := image.Decode(bytes.NewReader(got3))
+	if err != nil || fmt3 != "jpeg" || img3.Bounds().Dx() != 300 || img3.Bounds().Dy() != 300 {
+		t.Fatalf("small <256 KiB external PNG-as-.jpg was not converted to JPEG: fmt=%q bounds=%v err=%v", fmt3, imgBounds(img3), err)
+	}
+}
+
+func TestS11EmbeddedRecoveryPastThreeTracksAndInvalidHashes(t *testing.T) {
+	_, mount, db := testlibrary.Create(t)
+	musicDir := filepath.Join(mount, "Music")
+	if err := os.MkdirAll(musicDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"u1.mp3", "u2.mp3", "u3.mp3", "tagged4.mp3", "badhash.mp3", "sentinel.mp3"} {
+		if err := os.WriteFile(filepath.Join(musicDir, name), []byte("audio-"+name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Row 1: stock sentinel (hash IS NULL, albumArt IS NULL) referenced by a tagged track.
+	// Must remain NULL so unrelated untagged tracks sharing id=1 never inherit one track's cover.
+	mustExec(t, db, `INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,NULL,NULL)`)
+	mustExec(t, db, `INSERT INTO Track(id,path,albumArtId,isAnalyzed) VALUES(1,'../Music/sentinel.mp3',1,1)`)
+
+	// Row 2: valid 20-byte BLOB hash, missing external file, shared by 4 tracks where tracks 1..3
+	// have no embedded tags and track 4 holds the cover.
+	cover4 := s11JPEG(t, 280, 280, 85, false)
+	sum2 := sha1.Sum([]byte("shared-album-row-2"))
+	mustExec(t, db, `INSERT INTO AlbumArt(id,hash,albumArt) VALUES(2,?,NULL)`, sum2[:])
+	mustExec(t, db, `INSERT INTO Track(id,path,albumArtId,isAnalyzed) VALUES
+		(2,'../Music/u1.mp3',2,1),
+		(3,'../Music/u2.mp3',2,1),
+		(4,'../Music/u3.mp3',2,1),
+		(5,'../Music/tagged4.mp3',2,1)`)
+
+	// Row 3: invalid non-40-hex TEXT hash + NULL albumArt, referenced by a tagged track.
+	coverBad := s11JPEG(t, 240, 240, 85, false)
+	mustExec(t, db, `INSERT INTO AlbumArt(id,hash,albumArt) VALUES(3,'corrupt-hash-token',NULL)`)
+	mustExec(t, db, `INSERT INTO Track(id,path,albumArtId,isAnalyzed) VALUES(6,'../Music/badhash.mp3',3,1)`)
+	db.Close()
+
+	extract := func(audioPath string) ([]byte, error) {
+		switch filepath.Base(audioPath) {
+		case "tagged4.mp3":
+			return cover4, nil
+		case "badhash.mp3":
+			return coverBad, nil
+		case "sentinel.mp3":
+			return cover4, nil
+		default:
+			return nil, os.ErrNotExist
+		}
+	}
+
+	r, err := HealMountWithOptions(context.Background(), mount, MountOptions{
+		DataOnly:               true,
+		ExtractEmbeddedArtwork: extract,
+	})
+	if err != nil || !r.Healthy {
+		t.Fatalf("HealMountWithOptions: %+v err=%v", r, err)
+	}
+
+	// Track #4 recovered Row 2's missing external file.
+	got2, err := os.ReadFile(s11ArtFile(mount, sum2[:]))
+	if err != nil || !bytes.Equal(got2, cover4) {
+		t.Fatalf("row 2 not recovered from 4th referencing track: len=%d err=%v", len(got2), err)
+	}
+
+	// Row 3 invalid hash recovered from embedded art and upgraded to valid 20-byte BLOB hash.
+	check, err := Open(filepath.Join(mount, "Engine Library", "Database2", "m.db"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var h1Type, a1Type string
+	if err := check.QueryRow(`SELECT typeof(hash), typeof(albumArt) FROM AlbumArt WHERE id=1`).Scan(&h1Type, &a1Type); err != nil || h1Type != "null" || a1Type != "null" {
+		check.Close()
+		t.Fatalf("sentinel id=1 modified: hash=%s albumArt=%s err=%v", h1Type, a1Type, err)
+	}
+	var h3Type string
+	var h3 []byte
+	if err := check.QueryRow(`SELECT typeof(hash), hash FROM AlbumArt WHERE id=3`).Scan(&h3Type, &h3); err != nil {
+		check.Close()
+		t.Fatal(err)
+	}
+	check.Close()
+	wantSum3 := sha1.Sum(coverBad)
+	if h3Type != "blob" || !bytes.Equal(h3, wantSum3[:]) {
+		t.Fatalf("row 3 invalid hash not recovered to 20-byte blob: got (%s, %x) want (blob, %x)", h3Type, h3, wantSum3)
+	}
+	if got3, err := os.ReadFile(s11ArtFile(mount, wantSum3[:])); err != nil || !bytes.Equal(got3, coverBad) {
+		t.Fatalf("row 3 external file missing after embedded recovery: len=%d err=%v", len(got3), err)
+	}
+
+	// Also verify true SQLITE_INTEGER hash with albumArt=NULL recovers from embedded artwork.
+	_, mountNum, dbNum := testlibrary.Create(t)
+	if err := os.MkdirAll(filepath.Join(mountNum, "Music"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mountNum, "Music", "num.mp3"), []byte("audio-num"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, dbNum, `PRAGMA foreign_keys=OFF; DROP TABLE AlbumArt; CREATE TABLE AlbumArt (id INTEGER PRIMARY KEY AUTOINCREMENT, hash, albumArt BLOB); CREATE INDEX index_AlbumArt_hash ON AlbumArt (hash); PRAGMA foreign_keys=ON`)
+	mustExec(t, dbNum, `INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,NULL,NULL),(2,12345,NULL)`)
+	mustExec(t, dbNum, `INSERT INTO Track(id,path,albumArtId,isAnalyzed) VALUES(1,'../Music/num.mp3',2,1)`)
+	dbNum.Close()
+
+	rNum, err := HealMountWithOptions(context.Background(), mountNum, MountOptions{
+		DataOnly: true,
+		ExtractEmbeddedArtwork: func(p string) ([]byte, error) {
+			if filepath.Base(p) == "num.mp3" {
+				return coverBad, nil
+			}
+			return nil, os.ErrNotExist
+		},
+	})
+	if err != nil || !rNum.Healthy {
+		t.Fatalf("numeric-hash embedded heal: %+v err=%v", rNum, err)
+	}
+	checkNum, err := Open(filepath.Join(mountNum, "Engine Library", "Database2", "m.db"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer checkNum.Close()
+	var numType string
+	var numHash []byte
+	if err := checkNum.QueryRow(`SELECT typeof(hash), hash FROM AlbumArt WHERE id=2`).Scan(&numType, &numHash); err != nil {
+		t.Fatal(err)
+	}
+	if numType != "blob" || !bytes.Equal(numHash, wantSum3[:]) {
+		t.Fatalf("numeric hash row not recovered from embedded art: got (%s, %x) want (blob, %x)", numType, numHash, wantSum3)
+	}
+	if st, err := os.Stat(s11ArtFile(mountNum, wantSum3[:])); err != nil || st.Size() == 0 {
+		t.Fatalf("numeric hash recovered external file missing: st=%v err=%v", st, err)
+	}
+}
+
+func TestS11ArtworkPhaseRespectsMountDeadlineAndStreamsBlobs(t *testing.T) {
+	t.Run("locked_mdb", func(t *testing.T) {
+		_, mountLock, dbLock := testlibrary.Create(t)
+		dbLock.Close()
+		mdbPath := filepath.Join(mountLock, "Engine Library", "Database2", "m.db")
+		locker, err := sql.Open("sqlite", mdbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer locker.Close()
+		if _, err := locker.Exec(`BEGIN EXCLUSIVE`); err != nil {
+			t.Fatal(err)
+		}
+		ctxLock, cancelLock := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		startLock := time.Now()
+		r, err := HealMountDataOnlyContext(ctxLock, mountLock, 0)
+		elapsedLock := time.Since(startLock)
+		cancelLock()
+		_, _ = locker.Exec(`ROLLBACK`)
+		if err != nil || !r.Healthy {
+			t.Fatalf("locked m.db short-deadline heal failed: %+v err=%v", r, err)
+		}
+		if elapsedLock >= 1500*time.Millisecond {
+			t.Fatalf("locked m.db blew past 200ms mount deadline: elapsed=%v", elapsedLock)
+		}
+	})
+
+	t.Run("locked_hmdb", func(t *testing.T) {
+		_, mountLock, dbLock := testlibrary.Create(t)
+		dbLock.Close()
+		mdbPath := filepath.Join(mountLock, "Engine Library", "Database2", "m.db")
+		hdbPath := filepath.Join(mountLock, "Engine Library", "Database2", "hm.db")
+		raw, err := os.ReadFile(mdbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(hdbPath, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		locker, err := sql.Open("sqlite", hdbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer locker.Close()
+		if _, err := locker.Exec(`BEGIN EXCLUSIVE`); err != nil {
+			t.Fatal(err)
+		}
+		ctxLock, cancelLock := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		startLock := time.Now()
+		r, err := HealMountDataOnlyContext(ctxLock, mountLock, 0)
+		elapsedLock := time.Since(startLock)
+		cancelLock()
+		_, _ = locker.Exec(`ROLLBACK`)
+		if err != nil || !r.Healthy {
+			t.Fatalf("locked hm.db short-deadline heal failed: %+v err=%v", r, err)
+		}
+		if elapsedLock >= 1500*time.Millisecond {
+			t.Fatalf("locked hm.db blew past 250ms mount deadline: elapsed=%v", elapsedLock)
+		}
+	})
+
+	t.Run("short_deadline_blobs", func(t *testing.T) {
+		_, mountBig, dbBig := testlibrary.Create(t)
+		bigPNG := s11PNG(t, 1600, 1600, 255, true)
+		const totalRows = 16
+		for i := 2; i < 2+totalRows; i++ {
+			h := sha1.Sum([]byte{byte(i), 0xaa, 0xbb})
+			mustExec(t, dbBig, `INSERT INTO AlbumArt(id,hash,albumArt) VALUES(?,?,?)`, i, h[:], bigPNG)
+		}
+		dbBig.Close()
+
+		ctxShort, cancelShort := context.WithTimeout(context.Background(), 120*time.Millisecond)
+		startBig := time.Now()
+		rShort, err := HealMountDataOnlyContext(ctxShort, mountBig, 0)
+		elapsedBig := time.Since(startBig)
+		cancelShort()
+		if err != nil || !rShort.Healthy {
+			t.Fatalf("short-deadline oversized blob heal failed: %+v err=%v", rShort, err)
+		}
+		if rShort.Artwork >= totalRows {
+			t.Fatalf("short-deadline heal ignored ctx and resized all %d blobs in %v", totalRows, elapsedBig)
+		}
+		if elapsedBig > 1500*time.Millisecond {
+			t.Fatalf("short-deadline artwork blob heal overran 120ms deadline: elapsed=%v resized=%d", elapsedBig, rShort.Artwork)
+		}
+
+		rFull, err := HealMountDataOnly(mountBig, 0)
+		if err != nil || !rFull.Healthy {
+			t.Fatalf("follow-up full heal failed: %+v err=%v", rFull, err)
+		}
+		if rShort.Artwork+rFull.Artwork != totalRows {
+			t.Fatalf("total resized across two mounts = %d + %d, want %d", rShort.Artwork, rFull.Artwork, totalRows)
+		}
+	})
 }
