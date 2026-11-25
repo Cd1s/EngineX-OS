@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -233,6 +236,10 @@ type dbCandidate struct {
 	activeLoops         int64
 	metadata            rekordbox.Metadata
 	writtenDigest       []byte
+	filledWritten       []byte
+	filledBeats         []byte
+	filledCues          []byte
+	filledLoops         []byte
 	now                 noted // the row as this pass read it
 }
 
@@ -364,12 +371,87 @@ type candidateSet struct {
 	read    int
 }
 
+type filledStageRow struct {
+	id      int64
+	written []byte
+	beats   []byte
+	cues    []byte
+	loops   []byte
+}
+
+func readFilledStage(snap *rbstate.Snapshot) map[string]filledStageRow {
+	out := map[string]filledStageRow{}
+	stage, err := rbstate.OpenStage(snap.LibraryUUID)
+	if err != nil {
+		return out
+	}
+	defer stage.Close()
+	entries, _, err := stage.Entries()
+	if err != nil {
+		return out
+	}
+	b, err := os.ReadFile(filepath.Join(stage.Dir(), "filled.jsonl"))
+	if err != nil {
+		return out
+	}
+	for _, line := range bytes.Split(b, []byte{'\n'}) {
+		var f struct {
+			ID int64  `json:"id"`
+			K  string `json:"k"`
+			WR []byte `json:"wr"`
+		}
+		if json.Unmarshal(line, &f) != nil || f.ID == 0 || f.K == "" || len(f.WR) == 0 {
+			continue
+		}
+		e := entries[f.K]
+		if e == nil {
+			continue
+		}
+		full, err := stage.Read(e)
+		if err != nil || full.Digest == nil || !bytes.Equal(full.Digest, f.WR) {
+			continue
+		}
+		out[f.K] = filledStageRow{id: f.ID, written: f.WR, beats: full.Perf.Beats, cues: full.Perf.QuickCues, loops: full.Perf.Loops}
+	}
+	return out
+}
+
+func writtenDigestIgnoringMainCueTail(beats, cues, loops []byte) []byte {
+	h := sha256.New()
+	for i, blob := range [][]byte{beats, cues} {
+		raw, err := enginedb.QUncompress(blob, 8<<20)
+		if err != nil {
+			raw = blob
+		}
+		if i == 1 && len(raw) >= 8 {
+			raw = raw[:len(raw)-8]
+		}
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(raw)))
+		_, _ = h.Write(n[:])
+		_, _ = h.Write(raw)
+	}
+	_, _ = h.Write(loops)
+	return h.Sum(nil)[:16]
+}
+
+func needsCueRead(row dbCandidate) bool {
+	if len(row.trackData) == 0 {
+		return false
+	}
+	if len(row.filledCues) > 0 {
+		return !bytes.Equal(writtenDigestIgnoringMainCueTail(row.beatData, row.quickCues, row.loops), writtenDigestIgnoringMainCueTail(row.filledBeats, row.filledCues, row.filledLoops))
+	}
+	return len(row.track.Written) == 0 || !bytes.Equal(row.writtenDigest, row.track.Written) || row.track.Synced != nil
+}
+
 // readCandidates finds the rows a pass has to compare with the export. A row whose lastEditTime
 // is the one the snapshot noted with its digest is not read at all (#321: Engine's triggers date
 // every write of a row's cues, loops and tags, so an untouched track's PerformanceData pages are
 // never read). A row written without a change to them (an analysis, a grid) needs no export.
 func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, session *CueSession) (candidateSet, error) {
 	out := candidateSet{insync: map[string]noted{}}
+	filled := readFilledStage(snap)
 	var reads []dbCandidate
 	rows, err := db.QueryContext(ctx, `SELECT id, COALESCE(path,''), COALESCE(lastEditTime,0) FROM Track WHERE path IS NOT NULL`)
 	if err != nil {
@@ -411,6 +493,9 @@ func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, ses
 			continue
 		}
 		c.writtenDigest = enginedb.WrittenDigest(c.beatData, c.quickCues, c.loops)
+		if f, ok := filled[c.key]; ok && f.id == c.engineID && len(c.track.Written) == 0 {
+			c.filledWritten, c.filledBeats, c.filledCues, c.filledLoops = f.written, f.beats, f.cues, f.loops
+		}
 		out.rows = append(out.rows, c)
 	}
 	sort.Slice(out.rows, func(i, j int) bool { return out.rows[i].key < out.rows[j].key })
@@ -485,8 +570,7 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 		// missing baseline, another written digest, or a row noted before and changed now is
 		// compared with the ANLZ, so a deleted cue or a loop no longer active on load is written
 		// (port3 regressions) although the import's baseline is unchanged.
-		needsCue := len(row.trackData) > 0 && (len(row.track.Written) == 0 ||
-			!bytes.Equal(row.writtenDigest, row.track.Written) || row.track.Synced != nil)
+		needsCue := needsCueRead(row)
 		if needsCue && primary.AnalysisPath != "" {
 			deck, err := enginedb.ParseDeckCuesAndLoops(row.trackData, row.quickCues, row.loops, row.activeLoops)
 			offset, ok := 0.0, false

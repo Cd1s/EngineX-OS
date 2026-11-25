@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -168,5 +169,58 @@ func TestWriteBackAnalysisOnlyPassSkipsExportRead(t *testing.T) {
 	}
 	if res := pass(); res.TracksRead != 0 {
 		t.Fatalf("an untouched row was read: %+v", res)
+	}
+}
+
+func TestNeedsCueReadFilledStageIgnoresEngineMainCueTail(t *testing.T) {
+	stagedCues := []byte("stage-cues-012345")
+	rowCues := append([]byte(nil), stagedCues...)
+	copy(rowCues[len(rowCues)-8:], []byte("engine!!"))
+	row := dbCandidate{
+		track:       &rbstate.Track{Written: nil, Synced: nil},
+		trackData:   []byte{1},
+		beatData:    []byte("beats"),
+		quickCues:   rowCues,
+		loops:       []byte("loops"),
+		filledBeats: []byte("beats"),
+		filledCues:  stagedCues,
+		filledLoops: []byte("loops"),
+	}
+	if needsCueRead(row) {
+		t.Fatal("filled row was treated as a deck cue edit")
+	}
+	row.quickCues[0] ^= 1
+	if !needsCueRead(row) {
+		t.Fatal("filled row with a real cue edit was ignored")
+	}
+}
+
+func TestReadFilledStageUsesLastValidRowAndStageDigest(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(rbstate.StageEnv, root)
+	stage, err := rbstate.OpenStage("filled-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &rbstate.Staged{Key: "contents/track.mp3", Perf: rbstate.Perf{Beats: []byte("beats"), QuickCues: []byte("cues"), Loops: []byte("loops")}}
+	rec.Digest = enginedb.WrittenDigest(rec.Perf.Beats, rec.Perf.QuickCues, rec.Perf.Loops)
+	if err := stage.Put(rec); err != nil {
+		t.Fatal(err)
+	}
+	line, err := json.Marshal(struct {
+		ID int64  `json:"id"`
+		K  string `json:"k"`
+		WR []byte `json:"wr"`
+	}{ID: 9, K: rec.Key, WR: rec.Digest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage.Dir(), "filled.jsonl"), append(line, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := readFilledStage(&rbstate.Snapshot{Header: rbstate.Header{LibraryUUID: "filled-test"}})
+	row, ok := got[rec.Key]
+	if !ok || row.id != 9 || !bytes.Equal(row.written, rec.Digest) || !bytes.Equal(row.cues, rec.Perf.QuickCues) {
+		t.Fatalf("filled row was not read: %+v", got)
 	}
 }
