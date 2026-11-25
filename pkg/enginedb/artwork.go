@@ -18,8 +18,75 @@ import (
 // 40-character TEXT hash yields nothing, so remote decks show no cover.
 const artworkDir = "Engine Library/Artwork"
 
+var (
+	legacyArtworkWriteChunk = 64 << 10
+	legacyArtworkEncodeStep = 16 << 10
+	maxLegacyArtworkBytes   = maxArtworkBytes
+)
+
+type stopReader struct {
+	r    io.Reader
+	stop func() error
+	step int
+	seen int
+}
+
+func (sr *stopReader) Read(p []byte) (int, error) {
+	step := sr.step
+	if step <= 0 {
+		step = 16 << 10
+	}
+	if sr.seen == 0 || sr.seen >= step {
+		sr.seen = 0
+		if err := sr.stop(); err != nil {
+			return 0, err
+		}
+	}
+	n, err := sr.r.Read(p)
+	sr.seen += n
+	return n, err
+}
+
+type stopWriter struct {
+	w    io.Writer
+	stop func() error
+	step int
+	seen int
+}
+
+func (sw *stopWriter) Write(p []byte) (int, error) {
+	step := sw.step
+	if step <= 0 {
+		step = 16 << 10
+	}
+	if sw.seen == 0 || sw.seen >= step {
+		sw.seen = 0
+		if err := sw.stop(); err != nil {
+			return 0, err
+		}
+	}
+	n, err := sw.w.Write(p)
+	sw.seen += n
+	return n, err
+}
+
 // putArtwork writes data as the file Engine looks up for sum, unless it exists.
 func putArtwork(dir string, sum, data []byte) error {
+	return putArtworkBounded(dir, sum, data, nil)
+}
+
+// putArtworkBounded writes the Engine artwork file in bounded chunks, aborting conversion or I/O
+// immediately when stop returns an error (and removing any temporary file before rename).
+func putArtworkBounded(dir string, sum, data []byte, stop func() error) error {
+	if stop == nil {
+		stop = func() error { return nil }
+	}
+	if err := stop(); err != nil {
+		return err
+	}
+	if len(data) > maxLegacyArtworkBytes {
+		return errors.New("artwork: image exceeds safe size limit")
+	}
 	p := filepath.Join(dir, base64.RawURLEncoding.EncodeToString(sum)+".jpg")
 	if _, e := os.Lstat(p); e == nil {
 		return nil
@@ -32,20 +99,65 @@ func putArtwork(dir string, sum, data []byte) error {
 		if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > 16<<20 {
 			return errors.New("artwork: PNG dimensions exceed safe limit")
 		}
-		img, e := png.Decode(bytes.NewReader(data))
+		if err := stop(); err != nil {
+			return err
+		}
+		step := legacyArtworkEncodeStep
+		img, e := png.Decode(&stopReader{r: bytes.NewReader(data), stop: stop, step: step})
 		if e != nil {
 			return e
 		}
+		if err := stop(); err != nil {
+			return err
+		}
 		var buf bytes.Buffer
-		if e = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); e != nil {
+		if e = jpeg.Encode(&stopWriter{w: &buf, stop: stop, step: step}, img, &jpeg.Options{Quality: 90}); e != nil {
 			return e
+		}
+		if err := stop(); err != nil {
+			return err
 		}
 		data = buf.Bytes()
 	}
-	if e := os.WriteFile(p+".tmp", data, 0o644); e != nil {
+	if err := stop(); err != nil {
+		return err
+	}
+	tmp := p + ".tmp"
+	f, e := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if e != nil {
 		return e
 	}
-	return os.Rename(p+".tmp", p)
+	chunk := legacyArtworkWriteChunk
+	if chunk <= 0 {
+		chunk = 64 << 10
+	}
+	for off := 0; off < len(data); {
+		if err := stop(); err != nil {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+			return err
+		}
+		end := min(off+chunk, len(data))
+		if _, e = f.Write(data[off:end]); e != nil {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+			return e
+		}
+		off = end
+	}
+	if e = f.Close(); e != nil {
+		_ = os.Remove(tmp)
+		return e
+	}
+	if err := stop(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if e = os.Rename(tmp, p); e != nil {
+		_ = os.Remove(tmp)
+		return e
+	}
+	return nil
 }
 
 var (

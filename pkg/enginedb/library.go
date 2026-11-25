@@ -102,87 +102,234 @@ func openLibrary(ctx context.Context, p, mount string, bulk bool, newUUID string
 	return l, nil
 }
 
-var migrateNow = time.Now
+var (
+	migrateNow         = time.Now
+	legacyArtworkBatch = 4
+	migratePutArtwork  = putArtworkBounded
+	errArtworkBudget   = errors.New("artwork: migration budget reached")
+	errArtworkDeckBusy = errors.New("artwork: deck active")
+)
 
-// legacyArtworkIDsQuery relies on SQLite's index_AlbumArt_hash type ordering
-// (NULL < numeric < TEXT < BLOB) so a large library whose hashes are already BLOBs avoids a
-// full-table scan across AlbumArt's overflow-heavy leaf pages during adoption.
-const legacyArtworkIDsQuery = `SELECT id FROM AlbumArt WHERE hash >= '' AND hash < X'' AND typeof(hash)='text' ORDER BY id`
+// LegacyArtworkOptions configures bounded, interrupt-safe legacy artwork hash migration.
+type LegacyArtworkOptions struct {
+	Budget    time.Duration
+	BatchSize int
+	Busy      func() bool
+	Pace      func(took time.Duration) error
+}
+
+type legacyArtworkItem struct {
+	id   int64
+	hash string
+}
+
+// legacyArtworkFirstPageQuery and legacyArtworkNextPageQuery rely on SQLite's index_AlbumArt_hash
+// type ordering (NULL < numeric < TEXT < BLOB) and (hash, id) index order so a large library
+// avoids scanning AlbumArt's overflow-heavy leaf pages and enumerates pending TEXT rows in
+// small keyset pages without TEMP B-TREE sorting.
+const (
+	legacyArtworkFirstPageQuery = `SELECT id, hash FROM AlbumArt WHERE hash >= '' AND hash < X'' AND typeof(hash)='text' ORDER BY hash, id LIMIT ?`
+	legacyArtworkNextPageQuery  = `SELECT id, hash FROM AlbumArt WHERE hash >= ? AND hash < X'' AND typeof(hash)='text' AND (hash > ? OR id > ?) ORDER BY hash, id LIMIT ?`
+)
+
+func isArtworkStop(err error) bool {
+	return errors.Is(err, errArtworkBudget) || errors.Is(err, errArtworkDeckBusy) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func isArtworkContextStop(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
 
 // MigrateLegacyArtwork migrates legacy text artwork hashes and writes their content-addressed
-// files first. It stops cleanly when budget expires, committing rows migrated so far.
+// files first within budget.
 func (l *Library) MigrateLegacyArtwork(ctx context.Context, budget time.Duration) error {
+	return l.MigrateLegacyArtworkWithOptions(ctx, LegacyArtworkOptions{Budget: budget})
+}
+
+// MigrateLegacyArtworkWithOptions migrates legacy text artwork hashes in bounded covering-index
+// pages, committing each small batch so kills or Ejects preserve completed work, yielding when
+// a deck is busy, and bounding per-image conversion and writes to the deadline.
+func (l *Library) MigrateLegacyArtworkWithOptions(ctx context.Context, opts LegacyArtworkOptions) error {
 	if l.bulk {
 		return nil
 	}
 	var deadline time.Time
-	if budget > 0 {
-		deadline = migrateNow().Add(budget)
+	if opts.Budget > 0 {
+		deadline = migrateNow().Add(opts.Budget)
 		if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 			deadline = d
 		}
 	}
-	past := func() bool { return !deadline.IsZero() && migrateNow().After(deadline) }
+	stop := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if opts.Busy != nil && opts.Busy() {
+			return errArtworkDeckBusy
+		}
+		if !deadline.IsZero() && !migrateNow().Before(deadline) {
+			return errArtworkBudget
+		}
+		return nil
+	}
+	if err := stop(); err != nil {
+		if isArtworkContextStop(err) {
+			return err
+		}
+		return nil
+	}
 	artDir, err := compat.SafeOutputDir(l.mount, artworkDir)
 	if err != nil {
 		return err
 	}
-	rows, err := l.db.QueryContext(ctx, legacyArtworkIDsQuery)
-	if err != nil {
-		return err
+	batchSize := opts.BatchSize
+	if batchSize <= 0 {
+		batchSize = legacyArtworkBatch
 	}
-	defer rows.Close()
-	var pending []int64
-	for rows.Next() {
-		var id int64
-		if err = rows.Scan(&id); err != nil {
+	if batchSize <= 0 {
+		batchSize = 4
+	}
+
+	var hasCursor bool
+	var lastHash string
+	var lastID int64
+	for {
+		if err := stop(); err != nil {
+			if isArtworkContextStop(err) {
+				return err
+			}
+			return nil
+		}
+		var rows *sql.Rows
+		if !hasCursor {
+			rows, err = l.db.QueryContext(ctx, legacyArtworkFirstPageQuery, batchSize)
+		} else {
+			rows, err = l.db.QueryContext(ctx, legacyArtworkNextPageQuery, lastHash, lastHash, lastID, batchSize)
+		}
+		if err != nil {
 			return err
 		}
-		pending = append(pending, id)
+		page := make([]legacyArtworkItem, 0, batchSize)
+		for rows.Next() {
+			if err = stop(); err != nil {
+				rows.Close()
+				if isArtworkContextStop(err) {
+					return err
+				}
+				return nil
+			}
+			var item legacyArtworkItem
+			if err = rows.Scan(&item.id, &item.hash); err != nil {
+				rows.Close()
+				return err
+			}
+			page = append(page, item)
+		}
+		if err = rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err = rows.Close(); err != nil {
+			return err
+		}
+		if len(page) == 0 {
+			return nil
+		}
+		lastHash, lastID, hasCursor = page[len(page)-1].hash, page[len(page)-1].id, true
+
+		done, err := l.migrateLegacyArtworkBatch(ctx, artDir, page, opts, stop)
+		if err != nil || done || len(page) < batchSize {
+			return err
+		}
 	}
-	if err = rows.Err(); err != nil || len(pending) == 0 {
-		return err
+}
+
+func (l *Library) migrateLegacyArtworkBatch(ctx context.Context, artDir string, page []legacyArtworkItem, opts LegacyArtworkOptions, stop func() error) (bool, error) {
+	batchStart := migrateNow()
+	if err := stop(); err != nil {
+		if isArtworkContextStop(err) {
+			return true, err
+		}
+		return true, nil
 	}
-	if err = rows.Close(); err != nil {
-		return err
-	}
-	tx, err := l.db.BeginTx(ctx, nil)
+	// Use a non-cancellable tx context so cancelling ctx mid-batch lets us durably commit
+	// rows already completed in this batch before returning ctx.Err().
+	txCtx := context.WithoutCancel(ctx)
+	tx, err := l.db.BeginTx(txCtx, nil)
 	if err != nil {
-		return err
+		return true, err
 	}
 	defer tx.Rollback()
+
 	migrated := 0
-	for _, id := range pending {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if past() {
+	var stopErr error
+	for _, item := range page {
+		if err := stop(); err != nil {
+			stopErr = err
 			break
 		}
 		var image []byte
-		if err = tx.QueryRowContext(ctx, `SELECT albumArt FROM AlbumArt WHERE id=?`, id).Scan(&image); err != nil {
-			return err
+		if err = tx.QueryRowContext(txCtx, `SELECT albumArt FROM AlbumArt WHERE id=?`, item.id).Scan(&image); err != nil {
+			return true, err
 		}
 		if len(image) == 0 {
 			continue
 		}
+		if err := stop(); err != nil {
+			stopErr = err
+			break
+		}
 		sum := sha1.Sum(image)
-		if err = putArtwork(artDir, sum[:], image); err != nil {
-			log.Printf("rb-bridge: artwork %d left as is: %v", id, err)
+		if err = migratePutArtwork(artDir, sum[:], image, stop); err != nil {
+			if isArtworkStop(err) {
+				stopErr = err
+				break
+			}
+			log.Printf("rb-bridge: artwork %d left as is: %v", item.id, err)
 			continue
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE AlbumArt SET hash=? WHERE id=? AND typeof(hash)='text'`, sum[:], id); err != nil {
-			return err
+		// Never mutate m.db if a deck began playing or loading while writing the artwork file.
+		if opts.Busy != nil && opts.Busy() {
+			stopErr = errArtworkDeckBusy
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			stopErr = err
+			break
+		}
+		if _, err = tx.ExecContext(txCtx, `UPDATE AlbumArt SET hash=? WHERE id=? AND typeof(hash)='text'`, sum[:], item.id); err != nil {
+			return true, err
 		}
 		migrated++
+		if err := stop(); err != nil {
+			stopErr = err
+			break
+		}
 	}
-	if migrated == 0 {
-		return nil
+	if migrated > 0 {
+		if opts.Busy != nil && opts.Busy() {
+			return true, nil
+		}
+		if !l.bulk && OpenElsewhere(l.path) != 0 {
+			return true, ErrLibraryInUse
+		}
+		if err = tx.Commit(); err != nil {
+			return true, err
+		}
 	}
-	if !l.bulk && OpenElsewhere(l.path) != 0 {
-		return ErrLibraryInUse
+	if stopErr != nil {
+		if isArtworkContextStop(stopErr) {
+			return true, stopErr
+		}
+		return true, nil
 	}
-	return tx.Commit()
+	if opts.Pace != nil {
+		if err = opts.Pace(migrateNow().Sub(batchStart)); err != nil {
+			return true, err
+		}
+	}
+	return false, nil
 }
 
 func (l *Library) init(ctx context.Context) error {
