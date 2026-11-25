@@ -80,7 +80,7 @@ runs `--watch`, so the flag stays accepted.
   verification against an unavailable real history database.
 - Read-only media is inspected without repair. Pending WAL/journal data requires
   recovery on writable media first; immutable reads never silently ignore it.
-  Tuning sets synchronous=NORMAL, mmap_size=128 MiB and temp_store=MEMORY without
+  Tuning sets synchronous=FULL, mmap_size=128 MiB and temp_store=MEMORY without
   forcing journal_mode=WAL. No journal tuning is attempted on read-only media.
 
 ## Overlay integration

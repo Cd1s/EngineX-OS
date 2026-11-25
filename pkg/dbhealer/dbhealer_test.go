@@ -490,7 +490,7 @@ func TestEOS02IndexesAndTuning(t *testing.T) {
 	for _, p := range []struct {
 		name string
 		want int
-	}{{"synchronous", 1}, {"mmap_size", 134217728}, {"temp_store", 2}} {
+	}{{"synchronous", 2}, {"mmap_size", 134217728}, {"temp_store", 2}} {
 		var value int
 		if err := db.QueryRow("PRAGMA " + p.name).Scan(&value); err != nil || value != p.want {
 			t.Fatalf("%s: %d %v", p.name, value, err)
