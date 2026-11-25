@@ -13,6 +13,11 @@
 static int statements, meanwhile_at;
 static const char *meanwhile; // runs just before the hook's statement number meanwhile_at
 static int exec_counted(void *db, const char *sql, int (*row)(void *, int, char **, char **), void *arg, char **err) {
+    // The hook's own lock is free while Engine's connection runs a statement: Engine has a pool of
+    // connections per drive, and a thread that holds the write lock on one of them may be on its
+    // way into the hook.
+    assert(pthread_mutex_trylock(&sc_rbs_mu) == 0);
+    pthread_mutex_unlock(&sc_rbs_mu);
     if (++statements == meanwhile_at && meanwhile) {
         assert(sqlite3_exec(db, meanwhile, NULL, NULL, NULL) == SQLITE_OK);
         meanwhile = NULL;
@@ -375,13 +380,37 @@ int main(int argc, char **argv) {
     statements = 0;
     assert(!strcmp(load(copy, c1), "skipped (the snapshot names another library)") && statements == 1);
     assert(!strcmp(text(copy, ROW, c1), INSERTED));
-    // A stick without a bridge snapshot (not a bridge stick): no statement, then or later.
+    // A stick without a bridge snapshot (not a bridge stick): no statement, then or later; the
+    // stick is not read again for sc_rbs_recheck seconds, and after that a snapshot is seen.
     sqlite3 *plain = stick("PLAIN", "lib-c", NULL);
     long long p1 = track(plain, "../Contents/Artist/Track One.MP3", 1, 1);
     statements = 0;
     assert(!strcmp(load(plain, p1), "skipped (no bridge snapshot)") && !statements);
-    assert(!strcmp(load(plain, p1), "skipped (no bridge snapshot)") && !statements);
     sqlite3_close(plain);
+    plain = stick("PLAIN", "lib-a", "lib-a"); // the same path, now a bridge stick
+    p1 = track(plain, "../Contents/Artist/Track One.MP3", 1, 1);
+    stage("lib-a", "contents/artist/track one.mp3", "contents/artist/track one.mp3", "Contents/Artist/Track One.MP3", 5, ",\"perf\":true,\"active\":3", bin, bin_n);
+    for (unsigned i = 0; i < SC_RBS_CONNS; i++) // Engine's new connection may have the old one's address
+        if (sc_rbs_conns[i].known < 0) sc_rbs_conns[i].db = plain;
+    assert(!strcmp(load(plain, p1), "skipped (no bridge snapshot)") && !statements);
+    sc_rbs_recheck = 0;
+    assert(starts(load(plain, p1), "filled (") && statements == 2 && !strcmp(text(plain, ROW, p1), FILLED));
+    sc_rbs_recheck = 30;
+    sqlite3_close(plain);
+    // The header line is longer than the hook reads (many export files): the uuid comes first.
+    char lib[256], head[8192];
+    snprintf(lib, sizeof lib, "%s/media/LONG/Engine Library/Database2", dir);
+    sqlite3 *longhead = stick("LONG", "lib-a", NULL);
+    int at = snprintf(head, sizeof head, "RBS2 {\"format\":1,\"rules\":5,\"uuid\":\"lib-a\",\"stamp\":\"s\",\"layout\":\"folders\",\"sources\":[");
+    for (int i = 0; i < 100; i++) at += snprintf(head + at, sizeof head - (size_t)at, "%s{\"r\":\"PIONEER/rekordbox/export%03d.pdb\",\"s\":1,\"m\":2}", i ? "," : "", i);
+    at += snprintf(head + at, sizeof head - (size_t)at, "]}\nE 0 0\n");
+    assert(at > 4096 && (size_t)at < sizeof head);
+    snprintf(path, sizeof path, "%s/%s", lib, SC_RBS_SNAPSHOT);
+    put_file(path, head, (size_t)at, "wb");
+    long long l1 = track(longhead, "../Contents/Artist/Track One.MP3", 1, 1);
+    statements = 0;
+    assert(starts(load(longhead, l1), "filled (") && statements == 2);
+    sqlite3_close(longhead);
     sqlite3_close(copy);
 
     // A window applied everything: the index starts again with only its mark; nothing to do,
@@ -404,12 +433,16 @@ int main(int argc, char **argv) {
     clock_gettime(CLOCK_MONOTONIC, &a);
     assert(!strcmp(load(db, t14), "skipped (not staged)"));
     clock_gettime(CLOCK_MONOTONIC, &b);
+    pthread_mutex_lock(&sc_rbs_mu);
     struct sc_rbs_stage *s = sc_rbs_stage_of("lib-a");
     assert(s && s->live == 20000);
     const off_t parsed = s->parsed;
+    pthread_mutex_unlock(&sc_rbs_mu);
     stage("lib-a", "contents/late.mp3", "contents/late.mp3", "Contents/Late.mp3", 5, ",\"perf\":true,\"active\":3", bin, bin_n);
     assert(starts(load(db, t14), "filled (") && !strcmp(text(db, ROW, t14), FILLED));
+    pthread_mutex_lock(&sc_rbs_mu);
     assert(sc_rbs_stage_of("lib-a")->live == 20001 && sc_rbs_stage_of("lib-a")->parsed > parsed);
+    pthread_mutex_unlock(&sc_rbs_mu);
     printf("index of 20,000 lines read in %.1f ms\n", (double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6);
 
     sqlite3_close(db);

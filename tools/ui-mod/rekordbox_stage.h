@@ -325,12 +325,56 @@ static int sc_rbs_parse_line(const char *line, size_t n, struct sc_rbs_line *l) 
 
 // --- the stage's live keys --------------------------------------------------------------------
 
-// What the index says now: for each key, its last staged line, unless a later line dropped it.
-// Kept per library and read again only when the file changes; the job only appends to it.
+// The index read for the table: only a line's first members. Go writes a staged line's "k" first,
+// then "sig" and "rel" (Staged's first fields; indexLine embeds Staged first), and a drop as
+// {"drop":…}; test_rekordbox_stage.py holds that order to the Go source. 1: a staged line, 2: a
+// drop, 0: anything else. rel is filled for a staged line ("" when it is not there).
+static int sc_rbs_line_key(const char *line, size_t n, char *key, char *rel) {
+    const char *p = sc_rbs_space(line, line + n), *end = line + n;
+    char name[8];
+    int kind = 0;
+    rel[0] = 0;
+    if (p >= end || *p++ != '{') return 0;
+    for (int member = 0; member < 3; member++) {
+        p = sc_rbs_space(p, end);
+        if (!(p = sc_rbs_string(p, end, name, sizeof name, NULL))) return kind;
+        p = sc_rbs_space(p, end);
+        if (p >= end || *p++ != ':') return kind;
+        p = sc_rbs_space(p, end);
+        if (member == 0) {
+            kind = !strcmp(name, "k") ? 1 : !strcmp(name, "drop") ? 2 : 0;
+            if (!kind || !(p = sc_rbs_string(p, end, key, SC_RBS_TEXT, NULL))) return 0;
+            if (kind == 2) return 2;
+        } else if (!strcmp(name, "rel")) {
+            if (!sc_rbs_string(p, end, rel, SC_RBS_TEXT, NULL)) rel[0] = 0;
+            return 1;
+        } else if (!(p = sc_rbs_skip(p, end))) {
+            return 1;
+        }
+        p = sc_rbs_space(p, end);
+        if (p >= end || *p++ != ',') return 1;
+    }
+    return 1;
+}
+
+static int sc_rbs_ascii(const char *s) {
+    for (; *s; s++)
+        if ((unsigned char)*s >= 0x80) return 0;
+    return 1;
+}
+
+// What the index says now: for each key, the offset of its last staged line, unless a later line
+// dropped it; for each non-ASCII "rel", the offset of the last staged line naming it. Kept per
+// library and read again only when the file changes; the job only appends to it.
 struct sc_rbs_slot {
-    uint64_t hash; // of the key; 0: free
-    uint32_t off;  // of the key's last staged line
-    uint32_t live; // 0: dropped since
+    uint64_t hash; // of the key (or rel); 0: free
+    uint32_t off;  // of the last staged line
+    uint32_t live; // keys: 0 when dropped since
+};
+
+struct sc_rbs_table {
+    struct sc_rbs_slot *slots;
+    unsigned cap, used;
 };
 
 struct sc_rbs_stage {
@@ -339,8 +383,8 @@ struct sc_rbs_stage {
     ino_t ino;
     off_t size, parsed;
     struct timespec mtime;
-    struct sc_rbs_slot *slots;
-    unsigned cap, used, live;
+    struct sc_rbs_table keys, rels;
+    unsigned live;
     unsigned long long touched;
 };
 
@@ -348,44 +392,61 @@ struct sc_rbs_stage {
 #define SC_RBS_CONNS 8
 static struct sc_rbs_stage sc_rbs_stages[SC_RBS_STAGES];
 static unsigned long long sc_rbs_clock;
+// Guards the tables and the connection cache only: never held while Engine's connection runs a
+// statement (Engine has a pool of connections per drive; one of them may hold the write lock).
 static pthread_mutex_t sc_rbs_mu = PTHREAD_MUTEX_INITIALIZER;
 
-static struct sc_rbs_slot *sc_rbs_slot(struct sc_rbs_stage *s, uint64_t hash) {
-    if (!s->cap) return NULL;
-    for (unsigned i = (unsigned)hash & (s->cap - 1);; i = (i + 1) & (s->cap - 1))
-        if (!s->slots[i].hash || s->slots[i].hash == hash) return &s->slots[i];
+static struct sc_rbs_slot *sc_rbs_slot(struct sc_rbs_table *t, uint64_t hash) {
+    if (!t->cap) return NULL;
+    for (unsigned i = (unsigned)hash & (t->cap - 1);; i = (i + 1) & (t->cap - 1))
+        if (!t->slots[i].hash || t->slots[i].hash == hash) return &t->slots[i];
+}
+
+// The slot of hash, made when it is not there. NULL: out of memory.
+static struct sc_rbs_slot *sc_rbs_put(struct sc_rbs_table *t, uint64_t hash) {
+    if ((t->used + 1) * 2 > t->cap) {
+        unsigned cap = t->cap ? t->cap * 2 : 1024;
+        struct sc_rbs_slot *old = t->slots, *slots = calloc(cap, sizeof *slots);
+        if (!slots) return NULL;
+        const unsigned oldcap = t->cap;
+        t->slots = slots;
+        t->cap = cap;
+        for (unsigned i = 0; i < oldcap; i++)
+            if (old[i].hash) *sc_rbs_slot(t, old[i].hash) = old[i];
+        free(old);
+    }
+    struct sc_rbs_slot *slot = sc_rbs_slot(t, hash);
+    if (!slot->hash) slot->hash = hash, t->used++;
+    return slot;
 }
 
 static void sc_rbs_forget(struct sc_rbs_stage *s) {
-    free(s->slots);
-    s->slots = NULL;
-    s->cap = s->used = s->live = 0;
+    free(s->keys.slots);
+    free(s->rels.slots);
+    memset(&s->keys, 0, sizeof s->keys);
+    memset(&s->rels, 0, sizeof s->rels);
+    s->live = 0;
     s->parsed = s->size = 0;
 }
 
-static int sc_rbs_note(struct sc_rbs_stage *s, const struct sc_rbs_line *l, off_t off) {
-    if (!l->put && !l->drop) return 1;
+static int sc_rbs_note(struct sc_rbs_stage *s, int kind, const char *key, const char *rel, off_t off) {
     if (off > (off_t)UINT32_MAX) return 0;
-    if ((s->used + 1) * 2 > s->cap) {
-        unsigned cap = s->cap ? s->cap * 2 : 1024;
-        struct sc_rbs_slot *old = s->slots, *slots = calloc(cap, sizeof *slots);
-        if (!slots) return 0;
-        unsigned oldcap = s->cap;
-        s->slots = slots;
-        s->cap = cap;
-        for (unsigned i = 0; i < oldcap; i++)
-            if (old[i].hash) *sc_rbs_slot(s, old[i].hash) = old[i];
-        free(old);
-    }
-    struct sc_rbs_slot *slot = sc_rbs_slot(s, sc_rbs_hash(l->key, strlen(l->key)));
-    if (l->drop) {
-        if (slot->hash && slot->live) slot->live = 0, s->live--;
+    const uint64_t hash = sc_rbs_hash(key, strlen(key));
+    if (kind == 2) {
+        struct sc_rbs_slot *slot = sc_rbs_slot(&s->keys, hash);
+        if (slot && slot->hash && slot->live) slot->live = 0, s->live--;
         return 1;
     }
-    if (!slot->hash) slot->hash = sc_rbs_hash(l->key, strlen(l->key)), s->used++;
+    struct sc_rbs_slot *slot = sc_rbs_put(&s->keys, hash);
+    if (!slot) return 0;
     if (!slot->live) s->live++;
     slot->off = (uint32_t)off;
     slot->live = 1;
+    if (rel[0] && !sc_rbs_ascii(rel)) {
+        struct sc_rbs_slot *by_rel = sc_rbs_put(&s->rels, sc_rbs_hash(rel, strlen(rel)));
+        if (!by_rel) return 0;
+        by_rel->off = (uint32_t)off;
+    }
     return 1;
 }
 
@@ -410,9 +471,8 @@ static int sc_rbs_refresh(struct sc_rbs_stage *s) {
     if (st.st_size == s->size && st.st_mtim.tv_sec == s->mtime.tv_sec && st.st_mtim.tv_nsec == s->mtime.tv_nsec) return 1;
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return 0;
-    char *buf = malloc(SC_RBS_LINE_MAX);
-    struct sc_rbs_line *l = malloc(sizeof *l);
-    int ok = buf && l;
+    char *buf = malloc(SC_RBS_LINE_MAX), *key = malloc(2 * SC_RBS_TEXT), *rel = key ? key + SC_RBS_TEXT : NULL;
+    int ok = buf && key;
     size_t have = 0;
     off_t at = s->parsed, base = s->parsed; // base: the file offset of buf[0]
     int skipping = 0;                       // inside a line longer than the buffer
@@ -422,12 +482,12 @@ static int sc_rbs_refresh(struct sc_rbs_stage *s) {
         if (got == 0) break;
         have += (size_t)got;
         size_t start = 0;
-        for (size_t i = 0; i < have; i++) {
-            if (buf[i] != '\n') continue;
-            if (!skipping && sc_rbs_parse_line(buf + start, i - start, l) && !sc_rbs_note(s, l, base + (off_t)start)) ok = 0;
+        for (char *nl; (nl = memchr(buf + start, '\n', have - start)); start = (size_t)(nl - buf) + 1) {
+            const size_t len = (size_t)(nl - buf) - start;
+            const int kind = skipping ? 0 : sc_rbs_line_key(buf + start, len, key, rel);
+            if (kind && !sc_rbs_note(s, kind, key, rel, base + (off_t)start)) ok = 0;
             skipping = 0;
-            start = i + 1;
-            at = base + (off_t)start;
+            at = base + (off_t)((size_t)(nl - buf) + 1);
         }
         if (start == 0 && have == SC_RBS_LINE_MAX) { // no newline in a whole buffer: drop that line
             skipping = 1;
@@ -439,7 +499,7 @@ static int sc_rbs_refresh(struct sc_rbs_stage *s) {
     }
     close(fd);
     free(buf);
-    free(l);
+    free(key);
     if (!ok) {
         sc_rbs_forget(s);
         return 0;
@@ -451,6 +511,7 @@ static int sc_rbs_refresh(struct sc_rbs_stage *s) {
 }
 
 // The stage of uuid, read up to date; NULL when it has nothing a window has not applied.
+// Called with sc_rbs_mu held.
 static struct sc_rbs_stage *sc_rbs_stage_of(const char *uuid) {
     struct sc_rbs_stage *s = NULL, *oldest = &sc_rbs_stages[0];
     for (unsigned i = 0; i < SC_RBS_STAGES; i++) {
@@ -467,47 +528,28 @@ static struct sc_rbs_stage *sc_rbs_stage_of(const char *uuid) {
     return sc_rbs_refresh(s) && s->live ? s : NULL;
 }
 
-// The key's index line, as it is now. 0: not staged, or dropped.
-static int sc_rbs_entry(struct sc_rbs_stage *s, const char *key, struct sc_rbs_line *l) {
-    struct sc_rbs_slot *slot = sc_rbs_slot(s, sc_rbs_hash(key, strlen(key)));
-    if (!slot || !slot->hash || !slot->live) return 0;
+// The index line at off, parsed whole. 0 when it is not a staged line.
+static int sc_rbs_line_at(const char *uuid, off_t off, struct sc_rbs_line *l) {
     char path[PATH_MAX];
-    sc_rbs_index_path(path, sizeof path, s->uuid, SC_RBS_INDEX);
+    sc_rbs_index_path(path, sizeof path, uuid, SC_RBS_INDEX);
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return 0;
     char *buf = malloc(SC_RBS_LINE_MAX);
-    ssize_t got = buf ? pread(fd, buf, SC_RBS_LINE_MAX, slot->off) : -1;
+    ssize_t got = buf ? pread(fd, buf, SC_RBS_LINE_MAX, off) : -1;
     close(fd);
     char *nl = got > 0 ? memchr(buf, '\n', (size_t)got) : NULL;
-    int ok = nl && sc_rbs_parse_line(buf, (size_t)(nl - buf), l) && l->put && !strcmp(l->key, key);
+    int ok = nl && sc_rbs_parse_line(buf, (size_t)(nl - buf), l) && l->put;
     free(buf);
     return ok;
 }
 
-// The live index line whose "rel" is rel: a non-ASCII path, which the hook cannot fold.
-static int sc_rbs_entry_by_rel(struct sc_rbs_stage *s, const char *rel, struct sc_rbs_line *l) {
-    char path[PATH_MAX];
-    sc_rbs_index_path(path, sizeof path, s->uuid, SC_RBS_INDEX);
-    FILE *f = fopen(path, "re");
-    if (!f) return 0;
-    char *line = malloc(SC_RBS_LINE_MAX), key[SC_RBS_TEXT] = "";
-    int found = 0;
-    off_t off = 0;
-    while (line && fgets(line, SC_RBS_LINE_MAX, f)) {
-        size_t n = strlen(line);
-        const off_t here = off;
-        off += (off_t)n;
-        if (!n || line[n - 1] != '\n') break; // a cut or overlong line ends the scan
-        if (!sc_rbs_parse_line(line, n - 1, l) || !l->put || strcmp(l->rel, rel)) continue;
-        struct sc_rbs_slot *slot = sc_rbs_slot(s, sc_rbs_hash(l->key, strlen(l->key)));
-        if (slot && slot->hash && slot->live && slot->off == (uint32_t)here) {
-            snprintf(key, sizeof key, "%s", l->key);
-            found = 1;
-        }
-    }
-    fclose(f);
-    free(line);
-    return found && sc_rbs_entry(s, key, l);
+// Where the live staged line of key (or, by_rel, of the non-ASCII volume spelling key) is: 1 and
+// *off, or 0. Called with sc_rbs_mu held; the line itself is read without it (sc_rbs_line_at).
+static int sc_rbs_find(struct sc_rbs_stage *s, const char *key, int by_rel, off_t *off) {
+    struct sc_rbs_slot *slot = sc_rbs_slot(by_rel ? &s->rels : &s->keys, sc_rbs_hash(key, strlen(key)));
+    if (!slot || !slot->hash || (!by_rel && !slot->live)) return 0;
+    *off = slot->off;
+    return 1;
 }
 
 // --- the library behind Engine's connection ---------------------------------------------------
@@ -515,15 +557,13 @@ static int sc_rbs_entry_by_rel(struct sc_rbs_stage *s, const char *rel, struct s
 struct sc_rbs_conn {
     void *db;
     char main[PATH_MAX];
-    int known; // 1: uuid is the snapshot's; -1: the stick has no bridge snapshot
+    int known;      // 1: uuid is the snapshot's; -1: the stick had no bridge snapshot at `checked`
+    time_t checked; // a -1 is looked at again after sc_rbs_recheck seconds
     char uuid[SC_RBS_TEXT];
     unsigned long long touched;
 };
+static long sc_rbs_recheck = 30; // a variable for the tests
 static struct sc_rbs_conn sc_rbs_conns[SC_RBS_CONNS];
-
-static const char *sc_rbs_uuid_field(void *arg, const char *name, const char *v, const char *end) {
-    return strcmp(name, "uuid") ? NULL : sc_rbs_string(v, end, arg, SC_RBS_TEXT, NULL);
-}
 
 // A directory name for the stage, as rbstate.OpenStage takes it, and safe inside SQL quotes.
 static int sc_rbs_uuid_ok(const char *uuid) {
@@ -533,20 +573,36 @@ static int sc_rbs_uuid_ok(const char *uuid) {
     return 1;
 }
 
-// The library uuid in the first line of the bridge's snapshot beside main (the magic, then the
-// header's JSON with "uuid"). 0: none.
+// The library uuid of the bridge's snapshot beside main: its first line is the magic and the
+// header's JSON, whose members are read in order up to "uuid" (Go writes it third). 0: none.
 static int sc_rbs_snapshot_uuid(const char *main, char uuid[SC_RBS_TEXT]) {
-    char path[PATH_MAX], head[4096];
+    char path[PATH_MAX], head[4096], name[16];
     const char *slash = strrchr(main, '/');
+    uuid[0] = 0;
     if (!slash || snprintf(path, sizeof path, "%.*s/%s", (int)(slash - main), main, SC_RBS_SNAPSHOT) >= (int)sizeof path) return 0;
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return 0;
     ssize_t n = read(fd, head, sizeof head);
     close(fd);
     const size_t magic = sizeof SC_RBS_SNAPSHOT_MAGIC - 1;
-    const char *nl = n > (ssize_t)magic ? memchr(head, '\n', (size_t)n) : NULL;
-    uuid[0] = 0;
-    return nl && !memcmp(head, SC_RBS_SNAPSHOT_MAGIC, magic) && sc_rbs_object(head + magic, nl, sc_rbs_uuid_field, uuid) && sc_rbs_uuid_ok(uuid);
+    if (n <= (ssize_t)magic || memcmp(head, SC_RBS_SNAPSHOT_MAGIC, magic)) return 0;
+    const char *end = head + n, *nl = memchr(head, '\n', (size_t)n), *p = sc_rbs_space(head + magic, nl ? nl : end);
+    if (nl) end = nl;
+    if (p >= end || *p++ != '{') return 0;
+    for (int member = 0; member < 8; member++) {
+        p = sc_rbs_space(p, end);
+        const char *value = sc_rbs_string(p, end, name, sizeof name, NULL);
+        if (!value) value = sc_rbs_string(p, end, NULL, 0, NULL), name[0] = 0;
+        if (!value) return 0;
+        p = sc_rbs_space(value, end);
+        if (p >= end || *p++ != ':') return 0;
+        p = sc_rbs_space(p, end);
+        if (!strcmp(name, "uuid")) return sc_rbs_string(p, end, uuid, SC_RBS_TEXT, NULL) && sc_rbs_uuid_ok(uuid);
+        if (!(p = sc_rbs_skip(p, end))) return 0;
+        p = sc_rbs_space(p, end);
+        if (p >= end || *p++ != ',') return 0;
+    }
+    return 0;
 }
 
 // main when db is a drive's library, else NULL.
@@ -555,6 +611,7 @@ static const char *sc_rbs_drive(const struct sc_rbx_sqlite *q, void *db) {
     return main && !strncmp(main, sc_rbx_drives, strlen(sc_rbx_drives)) ? main : NULL;
 }
 
+// The cached library of db. Called with sc_rbs_mu held.
 static struct sc_rbs_conn *sc_rbs_conn_of(void *db, const char *main) {
     struct sc_rbs_conn *c = NULL, *oldest = &sc_rbs_conns[0];
     for (unsigned i = 0; i < SC_RBS_CONNS; i++) {
@@ -568,7 +625,20 @@ static struct sc_rbs_conn *sc_rbs_conn_of(void *db, const char *main) {
         snprintf(c->main, sizeof c->main, "%s", main);
     }
     c->touched = ++sc_rbs_clock;
+    const time_t now = time(NULL);
+    if (!c->known || (c->known < 0 && now - c->checked >= sc_rbs_recheck)) {
+        c->known = sc_rbs_snapshot_uuid(main, c->uuid) ? 1 : -1;
+        c->checked = now;
+    }
     return c;
+}
+
+// The snapshot c named is not the library's: read it again at the next load.
+static void sc_rbs_conn_stale(void *db, const char *main) {
+    pthread_mutex_lock(&sc_rbs_mu);
+    for (unsigned i = 0; i < SC_RBS_CONNS; i++)
+        if (sc_rbs_conns[i].db == db && !strcmp(sc_rbs_conns[i].main, main)) sc_rbs_conns[i].known = 0;
+    pthread_mutex_unlock(&sc_rbs_mu);
 }
 
 // --- the row ------------------------------------------------------------------------------------
@@ -698,23 +768,24 @@ static const char *sc_rbs_fill_track(const struct sc_rbx_sqlite *q, void *db, co
     if (track <= 0 || stat(sc_rbs_root, &st)) return sc_rbx_verbose ? "skipped (nothing staged on the deck)" : NULL;
     struct sc_rbs_line *l = malloc(sizeof *l);
     struct sc_rbs_row *r = malloc(sizeof *r);
-    char query[512], key[SC_RBS_TEXT], uuid[SC_RBS_TEXT];
-    if (!l || !r) {
-        free(l);
-        free(r);
-        return "out of memory";
+    char *key = malloc(SC_RBS_TEXT), *uuid = malloc(SC_RBS_TEXT), query[512];
+    if (!l || !r || !key || !uuid) {
+        why = "out of memory";
+        goto done;
     }
     memset(r, 0, sizeof *r);
+    // The cached library and stage, under the lock; the statements below run without it.
     pthread_mutex_lock(&sc_rbs_mu);
     struct sc_rbs_conn *c = sc_rbs_conn_of(db, main);
-    if (!c->known) c->known = sc_rbs_snapshot_uuid(main, c->uuid) ? 1 : -1;
-    snprintf(uuid, sizeof uuid, "%s", c->uuid);
-    struct sc_rbs_stage *s = c->known > 0 ? sc_rbs_stage_of(uuid) : NULL;
-    if (c->known < 0) {
+    const int known = c->known;
+    snprintf(uuid, SC_RBS_TEXT, "%s", c->uuid);
+    const int staged = known > 0 && sc_rbs_stage_of(uuid);
+    pthread_mutex_unlock(&sc_rbs_mu);
+    if (known < 0) {
         why = "skipped (no bridge snapshot)";
         goto done;
     }
-    if (!s) {
+    if (!staged) {
         why = "skipped (nothing staged for this library)";
         goto done;
     }
@@ -728,7 +799,7 @@ static const char *sc_rbs_fill_track(const struct sc_rbx_sqlite *q, void *db, co
         goto done;
     }
     if (strcmp(r->uuid, uuid)) {
-        c->known = 0; // the snapshot is not this library's: read it again next time
+        sc_rbs_conn_stale(db, main);
         why = "skipped (the snapshot names another library)";
         goto done;
     }
@@ -744,11 +815,24 @@ static const char *sc_rbs_fill_track(const struct sc_rbx_sqlite *q, void *db, co
         why = "skipped (Engine's own row)";
         goto done;
     }
-    int found = 0;
-    if (sc_rbs_fold(r->path, key, sizeof key, 1) >= 0) {
-        found = sc_rbs_entry(s, key, l);
-    } else if (sc_rbs_fold(r->path, key, sizeof key, 0) >= 0) {
-        found = sc_rbs_entry_by_rel(s, key, l);
+    // The key: rbstate.FoldPath of an ASCII path; a non-ASCII one by the volume's spelling.
+    const int ascii = sc_rbs_fold(r->path, key, SC_RBS_TEXT, 1) >= 0;
+    if (!ascii && sc_rbs_fold(r->path, key, SC_RBS_TEXT, 0) < 0) {
+        why = "skipped (not staged)";
+        goto done;
+    }
+    off_t off = 0;
+    pthread_mutex_lock(&sc_rbs_mu);
+    struct sc_rbs_stage *s = sc_rbs_stage_of(uuid);
+    int found = s && sc_rbs_find(s, key, !ascii, &off);
+    pthread_mutex_unlock(&sc_rbs_mu);
+    found = found && sc_rbs_line_at(uuid, off, l) && (ascii ? !strcmp(l->key, key) : !strcmp(l->rel, key));
+    if (found && !ascii) { // that line must still be its key's last, not dropped since
+        off_t last = 0;
+        pthread_mutex_lock(&sc_rbs_mu);
+        s = sc_rbs_stage_of(uuid);
+        found = s && sc_rbs_find(s, l->key, 0, &last) && last == off;
+        pthread_mutex_unlock(&sc_rbs_mu);
     }
     if (!found) {
         why = "skipped (not staged)";
@@ -791,9 +875,10 @@ static const char *sc_rbs_fill_track(const struct sc_rbx_sqlite *q, void *db, co
     snprintf(result, sizeof result, "filled (%.1f ms)", (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6);
     why = result;
 done:
-    pthread_mutex_unlock(&sc_rbs_mu);
     free(l);
     free(r);
+    free(key);
+    free(uuid);
     if (why && strncmp(why, "skipped", 7)) return why;
     return sc_rbx_verbose ? why : NULL;
 }

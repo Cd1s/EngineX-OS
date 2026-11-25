@@ -79,6 +79,19 @@ class RekordboxStageContractTest(unittest.TestCase):
         # The index embeds the staged track, so its fields are the line's own.
         self.assertRegex(self.stage, r"type indexLine struct \{\s*\*Staged")
 
+    def test_member_order_the_index_table_reads(self):
+        # The live-key table reads only a line's first members: a staged line is {"k":…,"sig":…,"rel":…
+        # (Staged's first fields, and indexLine embeds Staged first), a drop is {"drop":…}.
+        staged = re.search(r"^type Staged struct \{\n(.*?)^\}", self.stage, re.S | re.M)[1]
+        first = re.findall(r"^\t(\w+)\s", staged, re.M)[:3]
+        self.assertEqual(first, ["Key", "Sig", "Rel"])
+        line = re.search(r"^type indexLine struct \{\n(.*?)^\}", self.stage, re.S | re.M)[1]
+        self.assertEqual(re.findall(r"^\t(\S+)", line, re.M)[:2], ["*Staged", "Drop"])
+        self.assertIn("appendLine(indexLine{Drop: k})", self.stage)
+        # The snapshot header's members up to the uuid, in Go's order.
+        header = re.search(r"^type Header struct \{\n(.*?)^\}", self.rbstate, re.S | re.M)[1]
+        self.assertEqual(re.findall(r"^\t(\w+)\s", header, re.M)[:3], ["Format", "Rules", "LibraryUUID"])
+
     def test_the_hook_folds_paths_as_fold_path_does(self):
         fold = re.search(r"^func FoldPath\(rel string\) string \{\n(.*?)^\}", self.rbstate, re.S | re.M)[1]
         steps = ['strings.ReplaceAll(rel, "\\\\", "/")', 'strings.TrimPrefix(rel, "../")', 'strings.TrimLeft(rel, "/")', "strings.ToLower(rel)"]
