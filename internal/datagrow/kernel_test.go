@@ -24,8 +24,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/Cd1s/EngineX-OS/internal/installer/ext4"
+	"golang.org/x/sys/unix"
 )
 
 const g2PartitionBytes = 21812719 << 10
@@ -218,6 +220,68 @@ func deckFsck(t *testing.T, dev string) {
 	t.Log("the deck's own fsck.ext4 -fn and -fy: clean")
 }
 
+// encryptedDir does what the deck's encrypt-fs.sh does for one directory (fscryptctl add_key
+// /data, then set_policy on an empty directory, v2), then writes and reads a file inside it.
+func encryptedDir(t *testing.T, mnt, name string) {
+	t.Helper()
+	key := pattern(0x3c, 64)
+	arg := make([]byte, 80+len(key)) // struct fscrypt_add_key_arg + raw key
+	binary.LittleEndian.PutUint32(arg[0:], unix.FSCRYPT_KEY_SPEC_TYPE_IDENTIFIER)
+	binary.LittleEndian.PutUint32(arg[40:], uint32(len(key)))
+	copy(arg[80:], key)
+	ioctl := func(path string, req uintptr, p unsafe.Pointer) unix.Errno {
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		_, _, e := unix.Syscall(unix.SYS_IOCTL, f.Fd(), req, uintptr(p))
+		return e
+	}
+	if e := ioctl(mnt, unix.FS_IOC_ADD_ENCRYPTION_KEY, unsafe.Pointer(&arg[0])); e != 0 {
+		t.Fatalf("FS_IOC_ADD_ENCRYPTION_KEY on the grown filesystem: %v", e)
+	}
+	dir := filepath.Join(mnt, name)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pol := make([]byte, 24) // struct fscrypt_policy_v2
+	pol[0] = 2
+	pol[1] = unix.FSCRYPT_MODE_AES_256_XTS
+	pol[2] = unix.FSCRYPT_MODE_AES_256_CTS
+	pol[3] = unix.FSCRYPT_POLICY_FLAGS_PAD_32
+	copy(pol[8:], arg[8:24]) // the key identifier the kernel returned
+	if e := ioctl(dir, unix.FS_IOC_SET_ENCRYPTION_POLICY, unsafe.Pointer(&pol[0])); e != 0 {
+		t.Fatalf("FS_IOC_SET_ENCRYPTION_POLICY on the grown filesystem: %v", e)
+	}
+	want := pattern(0x77, 1<<20)
+	if err := os.WriteFile(filepath.Join(dir, "a.stems"), want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "a.stems")); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("encrypted file reads back wrong: %v", err)
+	}
+	t.Logf("fscrypt v2 key and policy on %s: ok", name)
+}
+
+// writtenSectors is the device's count of 512-byte sectors written (field 7 of its block stat).
+func writtenSectors(t *testing.T, dev string) uint64 {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("/sys/class/block", filepath.Base(dev), "stat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := strings.Fields(string(b))
+	if len(f) < 7 {
+		t.Fatalf("block stat %q", b)
+	}
+	var n uint64
+	if _, err := fmt.Sscan(f[6], &n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func TestKernelGrowsDataToThePartition(t *testing.T) {
 	needKernel(t)
 	compat := filepath.Join(t.TempDir(), "compatible")
@@ -257,10 +321,15 @@ func TestKernelGrowsDataToThePartition(t *testing.T) {
 				}
 			})
 			files = append(files, writeFile(t, mnt, "before.bin", pattern(0x5a, 4<<20)))
+			sectors := writtenSectors(t, dev)
+			start := time.Now()
 			r, err := Grow(env, mnt)
 			if err != nil || !r.Grown {
 				t.Fatalf("grow: %+v, %v", r, err)
 			}
+			// What the deck's eMMC would see once: the new groups' bitmaps, descriptors and zeroed
+			// inode tables (a loop device zeroes ranges cheaply, so the time is not the deck's).
+			t.Logf("the grow wrote %d MiB in %v", (writtenSectors(t, dev)-sectors)*512>>20, time.Since(start).Round(time.Millisecond))
 			if r.ToBlocks*r.BlockSize < g2PartitionBytes/10*9 {
 				t.Fatalf("after the grow statfs says %d MiB of %d MiB", r.ToBlocks*r.BlockSize>>20, g2PartitionBytes>>20)
 			}
@@ -271,6 +340,10 @@ func TestKernelGrowsDataToThePartition(t *testing.T) {
 			}
 			// 200 MiB more than the old filesystem could hold goes into the new block groups.
 			files = append(files, writeFile(t, mnt, "after.bin", pattern(0xa5, 200<<20)))
+			// The deck's encrypt-fs.sh adds an fscrypt key to /data and sets a policy on fresh
+			// downloads/ and stems/ directories; if that fails, Engine's Reporter may answer with a
+			// factory reset. It must still work on the grown filesystem.
+			encryptedDir(t, mnt, "stems")
 			checkFiles(t, mnt, files)
 			if out, code := sh(t, "umount", mnt); code != 0 {
 				t.Fatalf("umount: %s", out)
@@ -287,6 +360,16 @@ func TestKernelGrowsDataToThePartition(t *testing.T) {
 			if f := dumpField(t, dev, "Filesystem features"); !strings.Contains(" "+f+" ", " "+tc.feature+" ") || !strings.Contains(f, "encrypt") {
 				t.Errorf("features %q", f)
 			}
+			// The kernel leaves the new groups' inode tables for its lazy-init thread, which zeroes
+			// them after the next mount, paced as after a stock mkfs.ext4: log how much that is.
+			var inodes, ipg, itb uint64
+			for f, v := range map[string]*uint64{"Inode count": &inodes, "Inodes per group": &ipg, "Inode blocks per group": &itb} {
+				if _, err := fmt.Sscan(dumpField(t, dev, f), v); err != nil {
+					t.Fatalf("%s: %v", f, err)
+				}
+			}
+			t.Logf("%d inodes, %d per group; inode tables %d MiB in all; journal %s", inodes, ipg,
+				inodes/ipg*itb*4096>>20, dumpField(t, dev, "Total journal size"))
 			if out, code := sh(t, "mount", "-t", "ext4", "-o", "ro", dev, mnt); code != 0 {
 				t.Fatalf("remount: %s", out)
 			}
