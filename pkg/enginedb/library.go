@@ -141,6 +141,17 @@ func isArtworkContextStop(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
+// HasLegacyArtwork reports in O(1) index-only lookup whether m.db still holds any legacy
+// TEXT AlbumArt hashes awaiting migration.
+func (l *Library) HasLegacyArtwork(ctx context.Context) (bool, error) {
+	if l.bulk {
+		return false, nil
+	}
+	var has bool
+	err := l.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM AlbumArt WHERE hash >= '' AND hash < X'' AND typeof(hash)='text')`).Scan(&has)
+	return has, err
+}
+
 // MigrateLegacyArtwork migrates legacy text artwork hashes and writes their content-addressed
 // files first within budget.
 func (l *Library) MigrateLegacyArtwork(ctx context.Context, budget time.Duration) error {

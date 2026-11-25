@@ -38,6 +38,9 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 		return db.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE type='table' AND name=?`, table).Scan(&n) == nil && n == 1
 	}
 	s := rbstate.New(uuid)
+	var hasLegacyArt bool
+	_ = db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM AlbumArt WHERE hash >= '' AND hash < X'' AND typeof(hash)='text')`).Scan(&hasLegacyArt)
+	s.LegacyArtwork = hasLegacyArt
 	if !has("BridgeState") {
 		return s, nil
 	}

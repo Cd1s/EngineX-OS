@@ -338,28 +338,24 @@ func TestAdoptLegacyArtworkWindowSpareAndNextPacing(t *testing.T) {
 		}
 		assertLegacyArtworkState(t, filepath.Join(dbDir(mount), nextDB), mount, sum, "blob", true)
 
-		// Also verify window.migrateLegacyArtwork wires w.rest as batch Pace when migrating in place.
+		// Also verify window.migrateLegacyArtwork wires w.rest as batch Pace when migrating an adopted stick.
 		mount2, sum2 := setupLegacyArtworkStick(t)
+		q2 := NewPriorityQueue()
+		now2 := time.Now()
+		q2.UpdateDeckActivity(true, now2)
 		mountNow(t, mount2, MountOptions{})
-		// Re-insert a fresh legacy TEXT row on an already-synced stick so diff+save are no-ops
-		// and only w.migrateLegacyArtwork writes a batch and triggers w.rest.
-		jpg2 := []byte{0xff, 0xd8, 0xff, 0xe0, 0x99, 0x88, 0x77}
-		sum2 = sha1.Sum(jpg2)
-		mdb, err := sql.Open("sqlite", filepath.Join(dbDir(mount2), "m.db"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err = mdb.Exec(`INSERT INTO AlbumArt(hash,albumArt) VALUES('2222222222222222222222222222222222222222',?)`, jpg2); err != nil {
-			mdb.Close()
-			t.Fatal(err)
-		}
-		mdb.Close()
+		assertLegacyArtworkState(t, filepath.Join(dbDir(mount2), "m.db"), mount2, sum2, "text", false)
+		q2.UpdateDeckActivity(false, now2.Add(time.Second))
+		q2.UpdateDeckActivity(false, now2.Add(2*time.Second))
 
 		r2, err := newResolver(mount2)
 		if err != nil {
 			t.Fatal(err)
 		}
 		s2 := snapshot(t, mount2)
+		if !s2.LegacyArtwork {
+			t.Fatal("adopted snapshot missing LegacyArtwork=true")
+		}
 		v2, err := readJobView(context.Background(), r2, mount2, s2.Layout, "")
 		if err != nil {
 			t.Fatal(err)
@@ -382,5 +378,8 @@ func TestAdoptLegacyArtworkWindowSpareAndNextPacing(t *testing.T) {
 			t.Fatal("window artwork migration did not invoke w.rest pacing")
 		}
 		assertLegacyArtworkState(t, filepath.Join(dbDir(mount2), "m.db"), mount2, sum2, "blob", true)
+		if after := snapshot(t, mount2); after.LegacyArtwork {
+			t.Fatal("snapshot kept LegacyArtwork=true after all covers migrated")
+		}
 	})
 }
