@@ -80,6 +80,10 @@ func DecryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 	return decryptSQLCipher4(ctx, r, size, w, passphrase, nil)
 }
 
+func cleanupKey(kc *KeyCache, keys **cipherKeys) func() {
+	return func() { kc.done(*keys) }
+}
+
 func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer, passphrase []byte, kc *KeyCache) error {
 	if size < sqlcipherPageSize || size%sqlcipherPageSize != 0 {
 		return fmt.Errorf("sqlcipher: invalid database size %d (must be a positive multiple of %d)", size, sqlcipherPageSize)
@@ -97,11 +101,14 @@ func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 	}
 
 	salt := append([]byte(nil), inPage[:sqlcipherSaltSize]...)
-	keys, fromCache, err := kc.getWithOrigin(salt, passphrase)
+	keys, fromCache, lease, err := kc.getWithLease(salt, passphrase)
 	if err != nil {
 		return err
 	}
-	defer kc.done(keys)
+	defer func() {
+		cleanupKey(kc, &keys)()
+		lease.release()
+	}()
 
 	block, err := aes.NewCipher(keys.enc)
 	if err != nil {
@@ -150,7 +157,7 @@ func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 				retriedCachedKey = true
 				kc.done(keys)
 				kc.invalidate(salt, passphrase)
-				keys, fromCache, err = kc.getWithOrigin(salt, passphrase)
+				keys, fromCache, lease, err = kc.getWithLease(salt, passphrase)
 				if err != nil {
 					return err
 				}
@@ -180,7 +187,7 @@ func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 		if _, err := w.Write(outPage[:]); err != nil {
 			return fmt.Errorf("sqlcipher: write page %d: %w", pgno, err)
 		}
-		if pgno == 1 && kc != nil {
+		if pgno == 1 && kc != nil && !fromCache {
 			kc.writeShared(salt, passphrase, keys)
 		}
 	}
@@ -352,11 +359,14 @@ func encryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 		return errors.New("sqlcipher: empty passphrase")
 	}
 
-	keys, err := kc.get(salt, passphrase)
+	keys, fromCache, lease, err := kc.getWithLease(salt, passphrase)
 	if err != nil {
 		return err
 	}
-	defer kc.done(keys)
+	defer func() {
+		cleanupKey(kc, &keys)()
+		lease.release()
+	}()
 
 	block, err := aes.NewCipher(keys.enc)
 	if err != nil {
@@ -417,7 +427,7 @@ func encryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 		if _, err := w.Write(outPage[:]); err != nil {
 			return fmt.Errorf("sqlcipher: write page %d: %w", pgno, err)
 		}
-		if pgno == 1 && kc != nil {
+		if pgno == 1 && kc != nil && !fromCache {
 			kc.writeShared(salt, passphrase, keys)
 		}
 	}

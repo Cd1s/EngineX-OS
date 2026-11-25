@@ -136,8 +136,6 @@ func readSQLite(ctx context.Context, path string, adapter SQLiteAdapter, kc *Key
 	return l, nil
 }
 
-type sqlRecord map[string]string
-
 // sqlDriverRecord is a projected row backed by the database/sql driver's
 // reusable Value slice. Reading through driver.Rows avoids database/sql's
 // per-cell Scan conversion and keeps numeric fields in their native type.
@@ -170,34 +168,6 @@ func normalized(s string) string {
 	}
 	return string(out)
 }
-func (r sqlRecord) get(names ...string) string {
-	for _, n := range names {
-		if v := r[normalized(n)]; v != "" {
-			return v
-		}
-	}
-	return ""
-}
-func (r sqlRecord) num(names ...string) uint32 {
-	v, _ := strconv.ParseUint(r.get(names...), 10, 32)
-	return uint32(v)
-}
-func (r sqlRecord) sint(names ...string) (int64, bool) {
-	s := r.get(names...)
-	if s == "" {
-		return 0, false
-	}
-	v, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	return v, true
-}
-func (r sqlRecord) decimal(names ...string) float64 {
-	v, _ := strconv.ParseFloat(r.get(names...), 64)
-	return v
-}
-
 func (r sqlDriverRecord) raw(names ...string) driver.Value {
 	for _, n := range names {
 		if i, ok := r.index[n]; ok && r.values[i] != nil {
@@ -318,30 +288,6 @@ type sqlRecordLike interface {
 	num(...string) uint32
 	sint(...string) (int64, bool)
 	decimal(...string) float64
-}
-
-func parseSQLiteBPM(r sqlRecordLike) float64 {
-	if rawStr := r.get("bpmx100"); rawStr != "" {
-		if iv, err := strconv.ParseInt(rawStr, 10, 64); err == nil {
-			if iv <= 0 || iv == 0x7fffffff || iv == 0xffffffff {
-				return 0
-			}
-			return float64(iv) / 100
-		}
-		fv := r.decimal("bpmx100")
-		if fv <= 0 || fv == 0x7fffffff || fv == 0xffffffff {
-			return 0
-		}
-		return fv / 100
-	}
-	if iv, ok := r.sint("bpm", "tempo"); ok && (iv <= 0 || iv == 0x7fffffff || iv == 0xffffffff) {
-		return 0
-	}
-	bpm := r.decimal("bpm", "tempo")
-	if bpm > 1000 {
-		bpm /= 100
-	}
-	return bpm
 }
 
 func isUnsetCueTime(v int64) bool {
@@ -821,6 +767,9 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 			}
 		}
 		artworkPath := lookups["image"][driverNumAt(values, p.imageID)]
+		if artworkPath == "" {
+			artworkPath = l.Artwork[driverNumAt(values, p.imageID)]
+		}
 		if artworkPath == "" {
 			artworkPath = l.Artwork[driverNumAt(values, p.artworkID)]
 		}

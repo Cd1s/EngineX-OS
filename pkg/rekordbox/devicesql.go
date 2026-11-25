@@ -73,21 +73,6 @@ func readDeviceSQLString(buf []byte, off int) (string, error) {
 	}
 }
 
-// readISRCString decodes ofs_strings[0] of a track row. rekordbox marks an ISRC
-// as UTF-16 (kind 0x90) but stores 0x03, the ASCII code and a NUL (Deep Symmetry,
-// "ISRC Strings"). Only that slot may be read this way: ordinary UTF-16LE text
-// can start with the byte 0x03 too (七 is 03 4E, 〃 03 30, ă 03 01).
-func readISRCString(buf []byte, off int) (string, error) {
-	if off >= 0 && off+5 <= len(buf) && buf[off] == strKindLongUTF16 && buf[off+4] == 0x03 {
-		n := int(binary.LittleEndian.Uint16(buf[off+1:]))
-		if n < 5 || off+n > len(buf) {
-			return "", errShortString
-		}
-		return strings.TrimRight(string(buf[off+5:off+n]), "\x00"), nil
-	}
-	return readDeviceSQLString(buf, off)
-}
-
 // EncodeDeviceSQLString encodes s the way rekordbox does: short ASCII when it
 // fits, long ASCII for longer ASCII and UTF-16LE for anything non-ASCII.
 func EncodeDeviceSQLString(s string) []byte {

@@ -3,10 +3,22 @@ package rekordbox
 import (
 	"bytes"
 	"encoding/binary"
+	"strings"
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 )
+
+func readISRCString(buf []byte, off int) (string, error) {
+	if off >= 0 && off+5 <= len(buf) && buf[off] == strKindLongUTF16 && buf[off+4] == 0x03 {
+		n := int(binary.LittleEndian.Uint16(buf[off+1:]))
+		if n < 5 || off+n > len(buf) {
+			return "", errShortString
+		}
+		return strings.TrimRight(string(buf[off+5:off+n]), "\x00"), nil
+	}
+	return readDeviceSQLString(buf, off)
+}
 
 func TestDeviceSQLStrings(t *testing.T) {
 	for _, s := range []string{"", "short", string(bytes.Repeat([]byte{'a'}, 200)), "é ガ 한 Ａ 🎵"} {

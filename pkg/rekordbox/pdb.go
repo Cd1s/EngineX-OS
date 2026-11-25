@@ -75,17 +75,28 @@ func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
 			if len(b) < 136 {
 				return fmt.Errorf("pdb: short track row")
 			}
-			var ss [21]string
-			for _, i := range []int{14, 16, 17, 20} {
+			readTrackString := func(i int) (string, error) {
 				off := int(le.Uint16(b[94+2*i:]))
-				s, err := readDeviceSQLString(b, off)
-				if err != nil {
-					return fmt.Errorf("pdb track string %d: %w", i, err)
-				}
-				ss[i] = s
+				return readDeviceSQLString(b, off)
+			}
+			analysisPath, err := readTrackString(14)
+			if err != nil {
+				return fmt.Errorf("pdb track string %d: %w", 14, err)
+			}
+			comment, err := readTrackString(16)
+			if err != nil {
+				return fmt.Errorf("pdb track string %d: %w", 16, err)
+			}
+			title, err := readTrackString(17)
+			if err != nil {
+				return fmt.Errorf("pdb track string %d: %w", 17, err)
+			}
+			path, err := readTrackString(20)
+			if err != nil {
+				return fmt.Errorf("pdb track string %d: %w", 20, err)
 			}
 			trackID := le.Uint32(b[72:])
-			if trackID == 0 || ss[20] == "" {
+			if trackID == 0 || path == "" {
 				return nil
 			}
 			// Row offsets do not encode sizes and the heap may have deleted holes.
@@ -132,10 +143,10 @@ func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
 				bitDepth:     le.Uint16(b[82:]),
 				duration:     le.Uint16(b[84:]),
 				rating:       b[89],
-				analysisPath: ss[14],
-				comment:      ss[16],
-				title:        ss[17],
-				path:         ss[20],
+				analysisPath: analysisPath,
+				comment:      comment,
+				title:        title,
+				path:         path,
 			})
 		case 1, 4, 5, 13:
 			if len(b) < 5 {
