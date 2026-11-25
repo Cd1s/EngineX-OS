@@ -392,30 +392,17 @@ func addSmartMatch(v *View, ref uint32) error {
 	return nil
 }
 
-// inApplyOrder puts first the tracks a deck loaded or the DJ looked at, then the rest by row ID:
-// rows lie in m.db in ID order, so one page read serves many tracks.
+// inApplyOrder sorts staged tracks by row ID: rows lie in m.db in that order, so one page read
+// serves many tracks. A track without a row yet comes last. (A window applies all that is staged
+// or leaves it to a next library, so the tracks the DJ asked for need no place of their own here;
+// the job stages them first.)
 func (w *window) inApplyOrder(keys []string) []string {
-	rank := map[string]int{}
-	items, _ := PendingPriority(w.mount)
-	for i := len(items) - 1; i >= 0; i-- {
-		if k := rbstate.FoldPath(items[i].Path); rank[k] == 0 {
-			rank[k] = i + 1
-		}
-	}
-	order := func(key string) (int, int64) {
-		r, id := rank[key], int64(math.MaxInt64) // no row yet: after the rows there are
-		if r == 0 {
-			r = math.MaxInt
-		}
+	id := func(key string) int64 {
 		if t := w.snap.Tracks[key]; t != nil && t.EngineID != 0 {
-			id = t.EngineID
+			return t.EngineID
 		}
-		return r, id
+		return math.MaxInt64
 	}
-	slices.SortFunc(keys, func(a, b string) int {
-		ra, ia := order(a)
-		rb, ib := order(b)
-		return cmp.Or(cmp.Compare(ra, rb), cmp.Compare(ia, ib), strings.Compare(a, b))
-	})
+	slices.SortFunc(keys, func(a, b string) int { return cmp.Or(cmp.Compare(id(a), id(b)), strings.Compare(a, b)) })
 	return keys
 }

@@ -39,32 +39,63 @@ exports on the stick ──ReadView──▶ View ──Diff──▶ Plan ─�
                                      ▲               │
                  snapshot (stick) ───┘               └──▶ snapshot (stick), written after each commit
 ANLZ + audio headers ──FillInBackground──▶ stage (/data) ──applied by the next window──▶ m.db + snapshot
+what one window cannot do ──the job──▶ next library (.rb-next.db beside m.db) ──one window: two renames──▶ m.db + snapshot
 m.db rows the deck changed ──WriteBack──▶ ANLZ + every library holding the track; then NoteWriteBack ──▶ snapshot
 ```
 
-Three stores, each with one writer:
+Four stores, each with one writer:
 
 | Store | Where | Writer | Readers |
 |---|---|---|---|
 | Snapshot `.rb-bridge-snapshot` | on the stick, beside `m.db` | the mount path (and `NoteWriteBack`, under the volume lock) | mount path, fill job, write-back, shadow display, dbhealer, MP3 grid fix, the hook (existence only) |
 | Stage `<library uuid>/` | on the deck, `/data/enginex/rb-stage/` | the fill job | the mount path |
+| Next library `.rb-next.db` and its snapshot `.rb-bridge-snapshot.swap` | on the stick, beside `m.db`; while it is built its snapshot, the snapshot of the `m.db` it was made from and what it took of `m.db` are on the deck, `<stage>/<uuid>/next/` | the fill job | the mount path, which renames both into place |
 | Write-back's record of each row (`Track.Edit`, `Track.Synced`) | in the snapshot | write-back (`NoteWriteBack`) and the window (a row only the bridge wrote) | write-back |
 
 Rules that hold everywhere:
 
-1. The live `m.db` is written only inside a window, in place, in short transactions. It is never copied, replaced by
-   a copy or merged with a copy. The one exception is a library the stick does not have yet (no `m.db`, or Engine's
-   empty skeleton): that one is built aside and renamed into place.
+1. The live `m.db` is written only inside a window: in place, in short transactions, or replaced whole by one
+   rename. A library the stick does not have yet (no `m.db`, or Engine's empty skeleton) is built aside and renamed
+   into place. A change one window cannot write is made in a next library (rule 7), which one window renames into
+   place. (Until 2026-11-25 the rule was "never copied, replaced by a copy or merged with a copy". What it protected
+   is kept by rule 7: every row is copied once, rows Engine writes afterwards are taken again before the rename, and
+   nothing of Engine's is dropped.)
 2. Everything the bridge writes to `m.db` is idempotent and keyed by path. After each commit the snapshot is saved. A
    cut between the two repeats the same writes at the next window.
-3. The background job never writes `m.db` or the snapshot. It writes the stage in `/data`, and `.rgb` files for
-   tracks it has finished (they are files Engine reads on demand; today's `mirrorPrioritizedRGB` does the same).
-4. A window does work in this order and stops at its budget: rows, lists, staged performance data (priority tracks
-   first), artwork. What is left stays pending for the next window.
+3. The background job never writes `m.db`; it reads it, in short statements. It writes the stage in `/data`, `.rgb`
+   files for tracks it has finished (they are files Engine reads on demand), and the next library with its swap
+   snapshot, which are new files beside `m.db` and the snapshot. It writes the snapshot in one case: a window left an
+   export to it that changes no row and no list, and the job gives the snapshot that export's stamp, as the window
+   would have, under the volume lock.
+4. A window does work in this order: rows, lists, staged performance data, artwork. A window of the hook ends at
+   least 3 s before the kill, whatever the library's size: before every step that grows with the library it asks
+   `work.cost()` (`pkg/bridge/mount.go`: deck-speed costs measured on the replica) whether the step ends in time, and
+   leaves what does not to the job. An insert applies no staged data: the DJ gets the stick.
 5. A row the deck has changed is never overwritten. "Changed" means the row no longer holds what the bridge last
    wrote (`Track.Written`), decided per row when staged data is applied, with the field rule of #328.
 6. Identity is the key. A source ID is used only together with its library (`SourceRef`), and only to follow a file
    that moved.
+7. The next library. What does not fit one window (the rows and lists of a big export, the staged data of
+   thousands of tracks) is not written into `m.db` a window at a time. The job copies every row of `m.db` into
+   `Database2/.rb-next.db` (`enginedb.MirrorLibrary`: short read-only statements on the live file, paced like the
+   job's other reads; all `Track` rows first, so that they lie together in the file), writes the rows, lists and
+   staged data there with the window's own code and no deadline, and saves its snapshot as
+   `.rb-bridge-snapshot.swap`. One window renames both into place and does nothing else: its work does not grow with
+   the library, and neither does the number of remounts (KDATA, 5,962 tracks: 2 instead of 36).
+   - Rows Engine wrote to `m.db` after the copy are taken again before the rename, in that window (`carryOver`), by
+     a fingerprint of every `Track` row (every column; a blob by its length; Engine's triggers move
+     `Track.lastEditTime` with every write of a track's performance data) and of every other table. A row taken
+     again loses what the bridge wrote on it in the next library; its track is pending and the job's next round
+     publishes it under rule 5. Tracks, lists, prepare-list entries and play marks Engine made are in the library
+     after the swap as they were (#252); Engine's history is a file of its own, which names tracks by row ID and
+     library UUID, and both are kept.
+   - Row IDs are kept. A row the bridge adds to the next library gets an ID 65,536 above the highest Engine had
+     issued, so a row Engine adds to the live file meanwhile never has the same ID. When Engine has used up that gap,
+     or both added the same file, the next library is made again.
+   - The stick needs room for a second copy of the library while the next one waits. Without it the job publishes
+     in place, a window at a time, as before.
+   - Small changes are still written in place: a new list, 30 new tracks, staged data one window can apply. The
+     job decides with the same cost model.
 
 ### 1.2 Packages and owners
 
@@ -636,6 +667,9 @@ checklist.
 
 | Requirement | Tests |
 |---|---|
+| A window of the hook that cannot end 3 s before the kill leaves the work to the job and gives Engine the stick; the estimate is within 15 % below and 35 % above the replica's measured steps, and a OneLibrary of 20,000 or 50,000 tracks, new or re-exported, is left to the job without being read. | `TestMountLeavesWhatDoesNotFitToTheJob`, `TestWorkCostAgainstTheReplica` (`pkg/bridge/next_test.go`) |
+| What the job publishes as a next library is, after the one window that swaps it in, the library the windows would have written in place (rows under the same IDs, lists, data, snapshot); the job never writes `m.db` and the window does no row work. A new next library has its `Track` rows together. | `TestNextLibrarySwappedInIsTheLibraryTheWindowsWrite` (`pkg/bridge/next_test.go`); `TestMirrorLibraryLaysTrackRowsTogether` (`pkg/enginedb/mirror_test.go`) |
+| The upkeep at a window's end is stopped at its budget (0.5 s in the insert of an unchanged stick, 1 s elsewhere), and a window leaves a list waveform to the job that staged the track with its row. | `TestMountUpkeepIsStoppedAtItsBudget`, `TestMountLeavesTheListWaveformToTheJobThatStagedTheRow` (`pkg/bridge/mount_test.go`) |
 | The first insert of a never-seen export builds rows and lists from the export alone (rows as Engine expects them, lists in Engine's chain order), rebuilds Engine's indexes, saves the snapshot, asks for the job, logs one timed line per step, and leaves only `m.db` and the snapshot in `Database2` (#182, #301). | `TestMountFirstInsert` (`pkg/bridge/mount_test.go`) |
 | An export unchanged since a complete import costs a stat and one line: the exports are not opened, `m.db` stays byte for byte, no job starts, nothing changes under `PIONEER`, the audio or `Database2`, and the CLI run skips the volume. | `TestMountUnchangedIsStatOnly` (`pkg/bridge/mount_test.go`); `TestRBBridgeUnchangedExportSkipsTheVolume` (`internal/cli/rbbridge_test.go`); `TestPort5UnchangedWindowLeavesStickAndDatabaseFilesUntouched` (`pkg/bridge/port5_misc_test.go`) |
 | A re-export that changes one list writes that list and nothing else, the new list is there at that mount, the plan line says one list (#48, #253), and the insert does not make Engine's trigger walk every list of the library (replica, 2026-11-24). | `TestMountPlaylistOnlyReexportWritesOnlyThatList`, `TestMountAddsListsWithoutEnginesWalkOfEveryList` (`pkg/bridge/mount_test.go`) |
@@ -655,6 +689,9 @@ checklist.
 
 | Requirement | Tests |
 |---|---|
+| What Engine made itself is the same after a next library is swapped in: a track of its own with its cue, a list the DJ made, a prepared and a played track, and the history file's entries (by row ID and library UUID), whether made before the job copied the library or while the next library waited. The snapshot owns none of Engine's rows. | `TestSwapKeepsWhatEngineMadeItself`, `TestNextLibraryKeepsWhatTheDeckWroteBeforeTheSwap` (`pkg/bridge/next_test.go`); `TestMirrorLibraryTakesEveryRowOnceAndThenWhatEngineWrote`, `TestMirrorLibraryRefusesARowBothAdded` (`pkg/enginedb/mirror_test.go`) |
+| No track gets another track's data across a swap (the damage of 2026-11-23): with every rekordbox ID naming another file, five new tracks, a track Engine added and a row the deck wrote, every row holds the data built for its own file under the row ID it had. | `TestSwapNeverGivesATrackAnotherTracksData` (`pkg/bridge/next_test.go`) |
+| A row the deck's UI hook filled from the stage (`filled.jsonl`) is the bridge's own write: newer staged data replaces it; Engine's rewrite of the main cue "as imported" at a load is not a deck edit; an adjusted main cue is. An index line of the stage names the track's row. | `TestMountTakesRowsTheDeckHookFilledAsTheBridgesOwn` (`pkg/bridge/mount_test.go`); `TestStageLineNamesTheRowAndFilledReadsTheHooksRecord` (`pkg/rbstate/rbstate_test.go`) |
 | A library of an older build (`.rb-bridge-state.db`, no snapshot) is taken over once, in a window: paths, Engine IDs, list IDs and written digests come from the old state (also when its analysis records are malformed), every track is marked for the job, the old state file is removed after the snapshot is saved, the next mount is Bypassed, and nothing the deck wrote is lost (played marks, `dateAdded`, cues, loops, active-loop mask, list tree and order). | `TestPort1LegacyTakeoverUsesOwnedPathsWithMalformedAnalysis`, `TestPort1LegacyTakeoverPreservesDeckEdits` (`pkg/bridge/port1_mount_test.go`) |
 | The take-over of a large library (about 5,900 rows) finishes over several windows, without writing rows that already hold the export's fields (replica, 2026-11-25). | `TestMountLeavesRowsThatHoldTheExportsFieldsUnwritten`, `TestMountUpdatesRowsInBatchesAfterTheLists` (`pkg/bridge/mount_test.go`) |
 | A change of the offset or grid rule (`rbstate.Rules`) makes the next insert read the affected tracks again, once, unless the DJ edited the row (#178, #233, #333). | **no test** |
@@ -713,6 +750,7 @@ checklist.
 
 | Requirement | Tests |
 |---|---|
+| A cut at any point of the window that swaps a next library in, and the next window on what was on the stick then, end in the library of an undisturbed swap. | `TestSwapCutAtEveryStepEndsInTheSameLibrary` (`pkg/bridge/next_test.go`) |
 | A power cut or the hook's kill between any two writes of a window (first insert, a re-export with new lists and tracks, a window that applies staged data) ends in the same library as an undisturbed run, every track once, with no next-snapshot left. | `TestMountCutAtEveryStepEndsInTheSameLibrary` (`pkg/bridge/mount_test.go`) |
 | A snapshot that is cut short or has changed bytes is no snapshot; the next-snapshot is invisible to readers until promoted, and a cut one is no claim. | `TestSnapshotRoundTripAndHeader`, `TestSnapshotCutOrChangedIsAbsent`, `TestNextSnapshotIsSeparateUntilPromoted` (`pkg/rbstate/rbstate_test.go`) |
 | A file replaced on the stick is whole at every point a pull can separate; the old file is left when it may not be freed, and a leftover or replaced file is freed only when the FAT gives it all its clusters (FAT16, FAT32, short chains; free clusters, wrong lengths and FAT12 are not owned) (#321). | `TestReplaceFileIsWholeAtEveryCut`, `TestReplaceFileLeavesTheOldFileWhenItMayNotBeFreed` (`pkg/rbstate/rbstate_test.go`); `TestIssue321FATChainOwned` (`pkg/bridge/fat_test.go`) |
@@ -871,10 +909,15 @@ failing visibly within 3 s with every file whole is not tested beyond the CLI's 
 | The remount | Only when no deck holds a track of the stick, no peer deck reports one, Engine is not copying a track, and no audio read was served for 30 s. | `internal/cli/rbbridge_remount.go` (kept) |
 | Engine's writes | Each save of a loaded track moves `Track.lastEditTime`; write-back runs 5 s after the last one. | #321 (kept) |
 
-What a window plans with: one clock, the hook's deadline. Work the window owes (rows, lists) stops 2.5 s before the
-kill (`commitReserve`: the commit under way, the snapshot, the exit). Optional work (staged data, covers) also stops
-4 s after the window began when the window is an insert (`insertBudget`), so the DJ gets the stick; the window of a
-remount the job asked for has nobody waiting and uses all its time.
+What a window plans with: one clock, the hook's deadline. A window of the hook ends at least 3 s before the kill
+(`spare`): before each step that grows with the library (reading the exports, the first library, rows and lists, row
+updates, taking the deck's rows into a next library) it compares `work.cost()` with the time left and leaves what
+does not fit to the job. The costs are the replica's, per byte of export, per track, per list entry and per commit
+(`TestWorkCostAgainstTheReplica`). Inside a step the last commit starts 3.75 s before the kill (`commitReserve`).
+Further batches of row updates in an insert also stop 4 s after the window began (`insertBudget`), so the DJ gets the
+stick. The upkeep at a window's end (queued edits, the MP3 grid fix) runs under its own deadline, half a second in
+the insert of an unchanged stick and a second elsewhere, since the grid fix reads every row of a library it has not
+stamped.
 
 ## 4. Scenarios
 
@@ -891,6 +934,10 @@ remount the job asked for has nobody waiting and uses all its time.
 | Two libraries on one stick (#327) | Both are read (about 1.1 s at deck speed with the key cached). Tracks are joined by path. The root shows three folders (merged, Device Library, OneLibrary), or one view at the root with the setting. | A track is staged once. | A cue edit belongs to the track, whichever folder it was loaded from; write-back writes it to both libraries. |
 | Read-only and HFS+ sticks | The hook decides how the stick is mounted (read-write, or read-only with a writable library view on the deck). The window writes where `Engine Library` is writable and does nothing otherwise. | The job reads the stick and writes the stage on the deck; a `.rgb` file needs the library view. | Write-back never runs on a read-only stick. |
 | First and second generation | The same Go code. The differences are the hook's: how HFS+ is mounted, and that second-generation decks get the hook from `/data`. | | |
+| An export too big for a window, never seen (a first library that cannot be built 3 s before the kill: by the cost model above about 7,000 tracks when the OneLibrary key is not cached, 12,000 when it is) | Stat; start the job; nothing else. Engine gets the stick without an Engine library and shows its own view of the export when the stick has a OneLibrary. | The job reads the exports, builds the library as a next library and asks for the remount (20,000 tracks: 13 s at deck speed, 50,000: 30 s). Then the fill; all data goes into a second next library. | Rows and lists at the first remount, cues, grids and waveforms at the second. Each remount's window is two renames. |
+| A re-export too big for a window (reading it and comparing it with the snapshot does not end 3 s before the kill, or its rows and lists do not) | Stat; start the job. The old library stays on show. | The job reads, diffs, copies the library into a next library, writes the change there and asks for the remount. | One remount switches to the new rows and lists; the data of new tracks follows in place when one window can apply it, else in another next library. |
+| Staged data one window cannot apply | Nothing. | After the fill the job writes all of it into a next library. | One remount (KDATA: 2 remounts in all instead of 36). |
+| The deck writes the library while a next library waits | The window takes the rows Engine wrote, then renames. | The job publishes those tracks' data again. | The DJ's edits are in the library after the swap. |
 | A library imported by an older build | Taken over once: row and list IDs, paths and the digests of what the import wrote are read from the old state database into a snapshot; every track is pending. The old state and marks are removed after the first commit. | Every track is staged again under the current rules. A row the deck changed keeps its grid, cues and loops. | Performance data is refreshed at the remount. |
 
 ## 5. States and crash safety
@@ -904,9 +951,11 @@ A stick's state is what its files say; nothing else is stored.
 | Complete | snapshot with the current stamp and empty `Pending` | stat only |
 | Export changed | snapshot with another stamp | read, diff, apply |
 | Older build's library | `.rb-bridge-state.db` and no snapshot | adopt, then as "work pending" |
+| Next library ready | `.rb-bridge-snapshot.swap` and `.rb-next.db` beside `m.db` | take the rows Engine wrote since, rename both into place, nothing else |
 
-What a cut at each point leaves, and what the next window does (`TestMountCutAtEveryStepEndsInTheSameLibrary`
-copies the stick at every one of these points and requires the same library afterwards as without the cut):
+What a cut at each point leaves, and what the next window does (`TestMountCutAtEveryStepEndsInTheSameLibrary` and,
+for the swap, `TestSwapCutAtEveryStepEndsInTheSameLibrary` copy the stick at every one of these points and require
+the same library afterwards as without the cut):
 
 | Cut | On the stick | Next window |
 |---|---|---|
@@ -918,6 +967,9 @@ copies the stick at every one of these points and requires the same library afte
 | After the promote, before staged records are dropped | Applied records still in the stage. | They are applied again; the row already holds them, so nothing is written, and they are dropped. |
 | Between a commit and its `.rgb` files | Rows without their list waveform file. | The job writes a missing or invalid `.rgb` for every finished track; a valid one is never replaced. |
 | While the job writes the stage | A record's files without its index line, or a torn index line. | The record does not exist; the track is staged again. |
+| While the job writes the next library | `.rb-next.db`, perhaps with a journal; no swap snapshot. Its own snapshot and next-snapshot are on the deck. | Windows do not look at it. The job's next run settles it by the commit ID as for `m.db`, or makes it again. |
+| Next library ready, before the first rename | `m.db`, its snapshot, `.rb-next.db`, the swap snapshot. | Swaps. |
+| Between the two renames of a swap | `m.db` is the next library; the old snapshot; the swap snapshot; no `.rb-next.db`. | The library's commit ID is the swap snapshot's: the second rename is done now. A swap snapshot with another commit ID and no `.rb-next.db` is a stray and is removed. |
 | While the snapshot is replaced | Old or new snapshot, whole (the replace order of #321: the old file is held open until the directory and the new file are synced). | Either is consistent with a committed `m.db` through the commit ID. |
 
 The commit ID is `Information.lastRekordBoxLibraryImportReadCounter`, which earlier builds also added one to at every
