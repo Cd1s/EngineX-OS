@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 	"net/url"
 	"os"
@@ -126,6 +128,14 @@ func readSQLite(ctx context.Context, path string, adapter SQLiteAdapter, kc *Key
 
 type sqlRecord map[string]string
 
+// sqlDriverRecord is a projected row backed by the database/sql driver's
+// reusable Value slice. Reading through driver.Rows avoids database/sql's
+// per-cell Scan conversion and keeps numeric fields in their native type.
+type sqlDriverRecord struct {
+	values []driver.Value
+	index  map[string]int
+}
+
 // Built once: a Replacer per call allocated a lookup table for every column
 // name of every row (GBs of garbage for a 20000-track cue table).
 var nameSeparators = strings.NewReplacer("_", "", "-", "", " ", "")
@@ -178,7 +188,146 @@ func (r sqlRecord) decimal(names ...string) float64 {
 	return v
 }
 
-func parseSQLiteBPM(r sqlRecord) float64 {
+func (r sqlDriverRecord) raw(names ...string) driver.Value {
+	for _, n := range names {
+		if i, ok := r.index[n]; ok && r.values[i] != nil {
+			return r.values[i]
+		}
+		if i, ok := r.index[normalized(n)]; ok && r.values[i] != nil {
+			return r.values[i]
+		}
+	}
+	return nil
+}
+
+func driverString(v driver.Value) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case []byte:
+		return string(x)
+	case int64:
+		return strconv.FormatInt(x, 10)
+	case int:
+		return strconv.Itoa(x)
+	case uint64:
+		return strconv.FormatUint(x, 10)
+	case float64:
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	default:
+		return ""
+	}
+}
+
+func rawUint(v []byte) (uint64, bool) {
+	if len(v) == 0 {
+		return 0, false
+	}
+	var n uint64
+	for _, c := range v {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		d := uint64(c - '0')
+		if n > (math.MaxUint64-d)/10 {
+			return 0, false
+		}
+		n = n*10 + d
+	}
+	return n, true
+}
+
+func rawInt(v []byte) (int64, bool) {
+	if len(v) == 0 {
+		return 0, false
+	}
+	neg := false
+	if v[0] == '-' {
+		neg = true
+		v = v[1:]
+	} else if v[0] == '+' {
+		v = v[1:]
+	}
+	n, ok := rawUint(v)
+	if !ok || (!neg && n > math.MaxInt64) || (neg && n > uint64(math.MaxInt64)+1) {
+		return 0, false
+	}
+	if neg {
+		if n == uint64(math.MaxInt64)+1 {
+			return math.MinInt64, true
+		}
+		return -int64(n), true
+	}
+	return int64(n), true
+}
+
+func driverInt(v driver.Value) (int64, bool) {
+	switch x := v.(type) {
+	case int64:
+		return x, true
+	case int:
+		return int64(x), true
+	case uint64:
+		if x <= math.MaxInt64 {
+			return int64(x), true
+		}
+	case float64:
+		if x >= math.MinInt64 && x <= math.MaxInt64 && x == math.Trunc(x) {
+			return int64(x), true
+		}
+	case []byte:
+		return rawInt(x)
+	case string:
+		return rawInt([]byte(x))
+	}
+	return 0, false
+}
+
+func (r sqlDriverRecord) get(names ...string) string {
+	return driverString(r.raw(names...))
+}
+
+func (r sqlDriverRecord) num(names ...string) uint32 {
+	n, ok := driverInt(r.raw(names...))
+	if !ok || n < 0 || n > math.MaxUint32 {
+		return 0
+	}
+	return uint32(n)
+}
+
+func (r sqlDriverRecord) sint(names ...string) (int64, bool) {
+	return driverInt(r.raw(names...))
+}
+
+func (r sqlDriverRecord) decimal(names ...string) float64 {
+	v := r.raw(names...)
+	switch x := v.(type) {
+	case int64:
+		return float64(x)
+	case int:
+		return float64(x)
+	case uint64:
+		return float64(x)
+	case float64:
+		return x
+	case []byte:
+		f, _ := strconv.ParseFloat(string(x), 64)
+		return f
+	case string:
+		f, _ := strconv.ParseFloat(x, 64)
+		return f
+	}
+	return 0
+}
+
+type sqlRecordLike interface {
+	get(...string) string
+	num(...string) uint32
+	sint(...string) (int64, bool)
+	decimal(...string) float64
+}
+
+func parseSQLiteBPM(r sqlRecordLike) float64 {
 	if rawStr := r.get("bpmx100"); rawStr != "" {
 		if iv, err := strconv.ParseInt(rawStr, 10, 64); err == nil {
 			if iv <= 0 || iv == 0x7fffffff || iv == 0xffffffff {
@@ -206,7 +355,7 @@ func isUnsetCueTime(v int64) bool {
 	return v < 0 || v == 0x7fffffff || v == 0xffffffff
 }
 
-func parseSQLiteCue(r sqlRecord) (Cue, bool) {
+func parseSQLiteCue(r sqlRecordLike) (Cue, bool) {
 	kind, ok := r.sint("kind")
 	if !ok || kind < 0 || kind > 8 {
 		return Cue{}, false
@@ -325,6 +474,74 @@ var (
 		"sequenceNo", "track_no", "seq", "entry_index", "position",
 		"content_id", "track_id",
 	}
+
+	lookupColumnGroups = []sqlColumnGroup{
+		{"id"},
+		{"artist_id", "album_id", "genre_id", "label_id", "key_id", "artwork_id", "image_id"},
+		{"name", "scale_name", "title", "path", "file_path"},
+	}
+	contentColumnGroups = []sqlColumnGroup{
+		{"id", "content_id", "track_id"},
+		{"file_path", "path", "location"},
+		{"file_name", "file_name_l", "filename"},
+		{"folder_path"},
+		{"bpmx100"},
+		{"bpm", "tempo"},
+		{"key_name"},
+		{"key_id"},
+		{"key"},
+		{"image_id", "artwork_id"},
+		{"image_path"},
+		{"file_size"},
+		{"analysisDataFilePath", "analysis_data_path", "analyze_path", "analysis_path"},
+		{"title", "name"},
+		{"artist_id_artist", "artist_id"},
+		{"artist_id_composer", "composer_id"},
+		{"artist_id_remixer", "remixer_id"},
+		{"album_id"},
+		{"album"},
+		{"genre_id"},
+		{"label_id"},
+		{"length", "duration"},
+		{"samplingRate", "sample_rate"},
+		{"bit_depth"},
+		{"bit_rate", "bitrate"},
+		{"release_year", "year"},
+		{"rating"},
+		{"djComment", "commnt", "comment"},
+		{"artist"},
+		{"composer"},
+		{"remixer"},
+	}
+	cueColumnGroups = []sqlColumnGroup{
+		{"content_id"},
+		{"cue_id", "id"},
+		{"kind"},
+		{"inUsec", "in_usec"},
+		{"outUsec", "out_usec"},
+		{"inMsec", "in_msec"},
+		{"outMsec", "out_msec"},
+		{"isActiveLoop", "is_active_loop", "active_loop"},
+		{"beatLoopNumerator", "beat_loop_numerator"},
+		{"beatLoopDenominator", "beat_loop_denominator"},
+		{"cueComment", "cue_comment", "comment"},
+		{"colorTableIndex", "color_table_index"},
+	}
+	playlistColumnGroups = []sqlColumnGroup{
+		{"id", "playlist_id"},
+		{"playlist_id_parent", "parent_id"},
+		{"sequenceNo", "seq", "sort_order"},
+		{"name", "title"},
+		{"attribute"},
+		{"is_folder"},
+		{"is_smart", "intelligent"},
+		{"smart_list", "rules"},
+	}
+	playlistContentColumnGroups = []sqlColumnGroup{
+		{"playlist_id"},
+		{"sequenceNo", "track_no", "seq", "entry_index", "position"},
+		{"content_id", "track_id"},
+	}
 )
 
 // eachSQLRow streams the wanted columns of table through fn, one reused record
@@ -390,6 +607,260 @@ func eachSQLRow(ctx context.Context, db *sql.DB, table string, wanted []string, 
 	return rows.Err()
 }
 
+type sqlColumnGroup []string
+
+type contentProjection struct {
+	sql                                    sqlProjection
+	id                                     int
+	path                                   int
+	fileName, folderPath                   int
+	bpmX100, bpm, tempo                    int
+	keyName, keyID, key                    int
+	imageID, imagePath                     int
+	fileSize, analysisPath                 int
+	title, artistID, composerID, remixerID int
+	albumID, album, genreID, labelID       int
+	length, sampleRate, bitDepth, bitRate  int
+	releaseYear, rating, comment, artist   int
+}
+
+type sqlProjection struct {
+	selects []string
+	index   map[string]int
+	where   string
+	table   string
+}
+
+func buildSQLProjection(ctx context.Context, db *sql.DB, table string, groups []sqlColumnGroup) (sqlProjection, error) {
+	quote := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+	info, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return sqlProjection{}, err
+	}
+	columns := map[string]string{}
+	var delCol string
+	for info.Next() {
+		var name string
+		if err = info.Scan(&name); err != nil {
+			info.Close()
+			return sqlProjection{}, err
+		}
+		normal := normalized(name)
+		columns[normal] = name
+		if normal == "rblocaldeleted" {
+			delCol = quote(name)
+		}
+	}
+	err = info.Err()
+	info.Close()
+	if err != nil {
+		return sqlProjection{}, err
+	}
+
+	p := sqlProjection{index: make(map[string]int, len(groups)*2), table: table}
+	for _, group := range groups {
+		actual := make([]string, 0, len(group))
+		for _, name := range group {
+			if column := columns[normalized(name)]; column != "" {
+				actual = append(actual, column)
+			}
+		}
+		if len(actual) == 0 {
+			continue
+		}
+		expr := quote(actual[0])
+		if len(actual) > 1 {
+			parts := make([]string, len(actual))
+			for i, column := range actual {
+				parts[i] = `NULLIF(` + quote(column) + `, '')`
+			}
+			expr = `COALESCE(` + strings.Join(parts, ",") + `)`
+		}
+		p.selects = append(p.selects, expr+` AS `+quote(group[0]))
+		at := len(p.selects) - 1
+		for _, name := range group {
+			p.index[normalized(name)] = at
+			p.index[name] = at
+		}
+	}
+	if delCol != "" {
+		p.where = ` WHERE COALESCE(` + delCol + `, 0) = 0`
+	}
+	return p, nil
+}
+
+func (p sqlProjection) each(ctx context.Context, db *sql.DB, fn func([]driver.Value)) error {
+	if len(p.selects) == 0 {
+		return nil
+	}
+	quote := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return conn.Raw(func(raw any) error {
+		q, ok := raw.(driver.QueryerContext)
+		if !ok {
+			return fmt.Errorf("sqlite driver does not support direct row queries")
+		}
+		rows, err := q.QueryContext(ctx, `SELECT `+strings.Join(p.selects, ",")+` FROM `+quote(p.table)+p.where, nil)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		values := make([]driver.Value, len(p.selects))
+		for {
+			if err := rows.Next(values); err != nil {
+				if err == io.EOF {
+					return nil
+				}
+				return err
+			}
+			fn(values)
+		}
+	})
+}
+
+func eachSQLProjectedRow(ctx context.Context, db *sql.DB, table string, groups []sqlColumnGroup, fn func(sqlDriverRecord)) error {
+	p, err := buildSQLProjection(ctx, db, table, groups)
+	if err != nil {
+		return err
+	}
+	return p.each(ctx, db, func(values []driver.Value) {
+		fn(sqlDriverRecord{values: values, index: p.index})
+	})
+}
+
+func contentField(p sqlProjection, names ...string) int {
+	for _, name := range names {
+		if i, ok := p.index[name]; ok {
+			return i
+		}
+	}
+	return -1
+}
+
+func newContentProjection(ctx context.Context, db *sql.DB, table string) (contentProjection, error) {
+	p, err := buildSQLProjection(ctx, db, table, contentColumnGroups)
+	if err != nil {
+		return contentProjection{}, err
+	}
+	return contentProjection{
+		sql:          p,
+		id:           contentField(p, "id", "content_id", "track_id"),
+		path:         contentField(p, "file_path", "path", "location"),
+		fileName:     contentField(p, "file_name", "file_name_l", "filename"),
+		folderPath:   contentField(p, "folder_path"),
+		bpmX100:      contentField(p, "bpmx100"),
+		bpm:          contentField(p, "bpm"),
+		tempo:        contentField(p, "tempo"),
+		keyName:      contentField(p, "key_name"),
+		keyID:        contentField(p, "key_id"),
+		key:          contentField(p, "key"),
+		imageID:      contentField(p, "image_id", "artwork_id"),
+		imagePath:    contentField(p, "image_path"),
+		fileSize:     contentField(p, "file_size"),
+		analysisPath: contentField(p, "analysisDataFilePath", "analysis_data_path", "analyze_path", "analysis_path"),
+		title:        contentField(p, "title", "name"),
+		artistID:     contentField(p, "artist_id_artist", "artist_id"),
+		composerID:   contentField(p, "artist_id_composer", "composer_id"),
+		remixerID:    contentField(p, "artist_id_remixer", "remixer_id"),
+		albumID:      contentField(p, "album_id"),
+		album:        contentField(p, "album"),
+		genreID:      contentField(p, "genre_id"),
+		labelID:      contentField(p, "label_id"),
+		length:       contentField(p, "length", "duration"),
+		sampleRate:   contentField(p, "samplingRate", "sample_rate"),
+		bitDepth:     contentField(p, "bit_depth"),
+		bitRate:      contentField(p, "bit_rate", "bitrate"),
+		releaseYear:  contentField(p, "release_year", "year"),
+		rating:       contentField(p, "rating"),
+		comment:      contentField(p, "djComment", "commnt", "comment"),
+		artist:       contentField(p, "artist"),
+	}, nil
+}
+
+func driverValueAt(values []driver.Value, index int) driver.Value {
+	if index < 0 || index >= len(values) {
+		return nil
+	}
+	return values[index]
+}
+
+func driverStringAt(values []driver.Value, index int) string {
+	return driverString(driverValueAt(values, index))
+}
+
+func driverIntAt(values []driver.Value, index int) (int64, bool) {
+	return driverInt(driverValueAt(values, index))
+}
+
+func driverNumAt(values []driver.Value, index int) uint32 {
+	n, ok := driverIntAt(values, index)
+	if !ok || n < 0 || n > math.MaxUint32 {
+		return 0
+	}
+	return uint32(n)
+}
+
+func driverDecimalAt(values []driver.Value, index int) float64 {
+	v := driverValueAt(values, index)
+	switch x := v.(type) {
+	case int64:
+		return float64(x)
+	case int:
+		return float64(x)
+	case uint64:
+		return float64(x)
+	case float64:
+		return x
+	case []byte:
+		f, _ := strconv.ParseFloat(string(x), 64)
+		return f
+	case string:
+		f, _ := strconv.ParseFloat(x, 64)
+		return f
+	default:
+		return 0
+	}
+}
+
+func parseContentBPM(values []driver.Value, p contentProjection) float64 {
+	if raw := driverStringAt(values, p.bpmX100); raw != "" {
+		if iv, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			if iv <= 0 || iv == 0x7fffffff || iv == 0xffffffff {
+				return 0
+			}
+			return float64(iv) / 100
+		}
+		fv := driverDecimalAt(values, p.bpmX100)
+		if fv <= 0 || fv == 0x7fffffff || fv == 0xffffffff {
+			return 0
+		}
+		return fv / 100
+	}
+	if iv, ok := driverIntAt(values, p.bpm); ok && (iv <= 0 || iv == 0x7fffffff || iv == 0xffffffff) {
+		return 0
+	}
+	bpm := driverDecimalAt(values, p.bpm)
+	if p.bpm < 0 || driverValueAt(values, p.bpm) == nil {
+		bpm = driverDecimalAt(values, p.tempo)
+	}
+	if bpm > 1000 {
+		bpm /= 100
+	}
+	return bpm
+}
+
+func eachSQLContentRow(ctx context.Context, db *sql.DB, table string, fn func([]driver.Value, contentProjection)) error {
+	p, err := newContentProjection(ctx, db, table)
+	if err != nil {
+		return err
+	}
+	return p.sql.each(ctx, db, func(values []driver.Value) { fn(values, p) })
+}
+
 func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error) {
 	rows, e := db.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table'`)
 	if e != nil {
@@ -422,7 +893,7 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 	for _, kind := range []string{"artist", "album", "genre", "label", "key", "artwork", "image"} {
 		m := map[uint32]string{}
 		if tbl := findTable(kind, "djmd"+kind); tbl != "" {
-			if e := eachSQLRow(ctx, db, tbl, []string{"id", kind + "_id", "name", "scale_name", "title", "path", "file_path"}, func(r sqlRecord) {
+			if e := eachSQLProjectedRow(ctx, db, tbl, lookupColumnGroups, func(r sqlDriverRecord) {
 				m[r.num("id", kind+"_id")] = r.get("name", "scale_name", "title", "path", "file_path")
 			}); e != nil {
 				return nil, e
@@ -439,10 +910,10 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 	if contentTable == "" {
 		return nil, fmt.Errorf("unsupported schema: missing content table")
 	}
-	if e := eachSQLRow(ctx, db, contentTable, contentColumns, func(r sqlRecord) {
-		path := r.get("file_path", "path", "location")
-		if filename := r.get("file_name", "file_name_l", "filename"); path == "" && filename != "" {
-			if folder := r.get("folder_path"); folder != "" {
+	if e := eachSQLContentRow(ctx, db, contentTable, func(values []driver.Value, p contentProjection) {
+		path := driverStringAt(values, p.path)
+		if filename := driverStringAt(values, p.fileName); path == "" && filename != "" {
+			if folder := driverStringAt(values, p.folderPath); folder != "" {
 				if strings.HasSuffix(folder, "/"+filename) || strings.HasSuffix(folder, `\`+filename) {
 					path = folder
 				} else {
@@ -450,35 +921,35 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 				}
 			}
 		}
-		bpm := parseSQLiteBPM(r)
-		key := r.get("key_name")
+		bpm := parseContentBPM(values, p)
+		key := driverStringAt(values, p.keyName)
 		if key == "" {
-			key = lookups["key"][r.num("key_id")]
+			key = lookups["key"][driverNumAt(values, p.keyID)]
 			if key == "" {
-				key = r.get("key")
+				key = driverStringAt(values, p.key)
 			}
 		}
-		artworkPath := lookups["image"][r.num("image_id")]
+		artworkPath := lookups["image"][driverNumAt(values, p.imageID)]
 		if artworkPath == "" {
-			artworkPath = l.Artwork[r.num("image_id", "artwork_id")]
+			artworkPath = l.Artwork[driverNumAt(values, p.imageID)]
 		}
 		if artworkPath == "" {
-			artworkPath = r.get("image_path")
+			artworkPath = driverStringAt(values, p.imagePath)
 		}
 		var fileSize int64
-		if sz, ok := r.sint("file_size"); ok && sz > 0 {
+		if sz, ok := driverIntAt(values, p.fileSize); ok && sz > 0 {
 			fileSize = sz
-		} else if fsz := r.decimal("file_size"); fsz > 0 {
+		} else if fsz := driverDecimalAt(values, p.fileSize); fsz > 0 {
 			fileSize = int64(fsz)
 		}
 		// OneLibrary content.length is stored in whole seconds (verified against
 		// libdjinterop content_table.cpp std::chrono::seconds{*length}).
-		t := Track{ID: r.num("id", "content_id", "track_id"), Path: path, AnalysisPath: r.get("analysisDataFilePath", "analysis_data_path", "analyze_path", "analysis_path"), Title: r.get("title", "name"), Artist: lookups["artist"][r.num("artist_id_artist", "artist_id")], Composer: lookups["artist"][r.num("artist_id_composer", "composer_id")], Remixer: lookups["artist"][r.num("artist_id_remixer", "remixer_id")], Album: lookups["album"][r.num("album_id")], Genre: lookups["genre"][r.num("genre_id")], Label: lookups["label"][r.num("label_id")], Key: key, BPM: bpm, Duration: r.decimal("length", "duration"), SampleRate: int(r.num("samplingRate", "sample_rate")), BitDepth: int(r.num("bit_depth")), Bitrate: int(r.num("bit_rate", "bitrate")), FileSize: fileSize, Year: int(r.num("release_year", "year")), Rating: int(r.num("rating")), Comment: r.get("djComment", "commnt", "comment"), ArtworkPath: artworkPath}
+		t := Track{ID: driverNumAt(values, p.id), Path: path, AnalysisPath: driverStringAt(values, p.analysisPath), Title: driverStringAt(values, p.title), Artist: lookups["artist"][driverNumAt(values, p.artistID)], Composer: lookups["artist"][driverNumAt(values, p.composerID)], Remixer: lookups["artist"][driverNumAt(values, p.remixerID)], Album: lookups["album"][driverNumAt(values, p.albumID)], Genre: lookups["genre"][driverNumAt(values, p.genreID)], Label: lookups["label"][driverNumAt(values, p.labelID)], Key: key, BPM: bpm, Duration: driverDecimalAt(values, p.length), SampleRate: int(driverNumAt(values, p.sampleRate)), BitDepth: int(driverNumAt(values, p.bitDepth)), Bitrate: int(driverNumAt(values, p.bitRate)), FileSize: fileSize, Year: int(driverNumAt(values, p.releaseYear)), Rating: int(driverNumAt(values, p.rating)), Comment: driverStringAt(values, p.comment), ArtworkPath: artworkPath}
 		if t.Artist == "" {
-			t.Artist = r.get("artist")
+			t.Artist = driverStringAt(values, p.artist)
 		}
 		if t.Album == "" {
-			t.Album = r.get("album")
+			t.Album = driverStringAt(values, p.album)
 		}
 		normalizeParsedAudioMetadata(&t)
 		l.Tracks = append(l.Tracks, t)
@@ -494,7 +965,7 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 		}
 		byContent := map[uint32][]indexedCue{}
 		idx := -1
-		if e = eachSQLRow(ctx, db, cueTable, cueColumns, func(r sqlRecord) {
+		if e = eachSQLProjectedRow(ctx, db, cueTable, cueColumnGroups, func(r sqlDriverRecord) {
 			idx++
 			cid := r.num("content_id")
 			if cid == 0 {
@@ -531,7 +1002,7 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 		l.Tracks[i].RecordHash = RecordHash(l.Tracks[i])
 	}
 	if plTable := findTable("playlist", "djmdPlaylist"); plTable != "" {
-		if e := eachSQLRow(ctx, db, plTable, playlistColumns, func(r sqlRecord) {
+		if e := eachSQLProjectedRow(ctx, db, plTable, playlistColumnGroups, func(r sqlDriverRecord) {
 			attr := r.num("attribute")
 			l.Playlists = append(l.Playlists, Playlist{ID: r.num("id", "playlist_id"), ParentID: r.num("playlist_id_parent", "parent_id"), SortOrder: r.num("sequenceNo", "seq", "sort_order"), Name: r.get("name", "title"), Folder: r.num("is_folder") != 0 || attr == 1, Intelligent: r.num("is_smart", "intelligent") != 0 || attr == 4, Rules: r.get("smart_list", "rules")})
 		}); e != nil {
@@ -546,7 +1017,7 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 	type entry struct{ seq, id uint32 }
 	grouped := map[uint32][]entry{}
 	if pcTable := findTable("playlist_content", "djmdSongPlaylist", "playlist_entry", "playlist_entries"); pcTable != "" {
-		if e := eachSQLRow(ctx, db, pcTable, playlistContentColumns, func(r sqlRecord) {
+		if e := eachSQLProjectedRow(ctx, db, pcTable, playlistContentColumnGroups, func(r sqlDriverRecord) {
 			id := r.num("playlist_id")
 			if _, ok := byID[id]; !ok { // orphan left by a deleted playlist
 				return
