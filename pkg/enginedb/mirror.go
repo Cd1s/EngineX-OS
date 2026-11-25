@@ -68,11 +68,12 @@ func LibraryState(file string) string {
 }
 
 type mirroring struct {
-	ctx  context.Context
-	db   *sql.DB
-	m    *Mirror
-	pace func(took time.Duration) error
-	out  MirrorChange
+	ctx      context.Context
+	db       *sql.DB
+	m        *Mirror
+	pace     func(took time.Duration) error
+	out      MirrorChange
+	triggers bool // the next library has Engine's triggers: they go before its first row is written
 }
 
 // MirrorLibrary brings the file next up to the library live: rows of the live library that are new or
@@ -111,11 +112,9 @@ func MirrorLibrary(ctx context.Context, live, next string, m *Mirror, pace func(
 	if _, err = db.ExecContext(ctx, `ATTACH DATABASE ? AS live`, (&url.URL{Scheme: "file", Path: live, RawQuery: "mode=ro"}).String()); err != nil {
 		return MirrorChange{}, err
 	}
-	mr := &mirroring{ctx: ctx, db: db, m: m, pace: pace}
+	mr := &mirroring{ctx: ctx, db: db, m: m, pace: pace, triggers: !fresh}
 	if fresh {
 		err = mr.objects(`type='table'`)
-	} else {
-		err = mr.dropTriggers()
 	}
 	if err == nil {
 		err = mr.tracks(fresh)
@@ -184,30 +183,50 @@ func (mr *mirroring) strings1(q string, args ...any) ([]string, error) {
 }
 
 // objects makes in the next library the live library's schema objects that match and that it
-// lacks, in the order Engine made them.
+// lacks, in the order Engine made them, in one transaction (none when it lacks none: a commit
+// each was thirty commits of a window on the stick).
 func (mr *mirroring) objects(which string) error {
 	texts, err := mr.strings1(`SELECT sql FROM live.sqlite_master l WHERE name NOT LIKE 'sqlite_%' AND (` + which + `)
 		AND NOT EXISTS(SELECT 1 FROM main.sqlite_master m WHERE m.type=l.type AND m.name=l.name) ORDER BY rowid`)
-	for i := 0; err == nil && i < len(texts); i++ {
-		err = mr.exec(texts[i])
-	}
-	return err
-}
-
-// dropTriggers removes the next library's triggers while rows are copied with their own IDs and
-// times; objects puts them back. A call that is cut leaves none: the next call ends with all.
-func (mr *mirroring) dropTriggers() error {
-	names, err := mr.strings1(`SELECT name FROM main.sqlite_master WHERE type='trigger'`)
-	return mr.plain(func() error {
-		for i := 0; err == nil && i < len(names); i++ {
-			err = mr.exec(`DROP TRIGGER main."` + names[i] + `"`)
-		}
+	if err != nil || len(texts) == 0 {
 		return err
+	}
+	return mr.transaction(func() error {
+		for _, text := range texts {
+			if err := mr.exec(text); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
-// plain runs do in one transaction of the next library.
+// plain runs do in one transaction of the next library, without Engine's triggers: rows are
+// copied with their own IDs and times. The triggers go before the first such transaction and
+// objects puts them back at the end; a call that copies nothing leaves them alone, and a call
+// that is cut leaves none: the next call ends with all.
 func (mr *mirroring) plain(do func() error) error {
+	if mr.triggers {
+		names, err := mr.strings1(`SELECT name FROM main.sqlite_master WHERE type='trigger'`)
+		if err == nil && len(names) > 0 {
+			err = mr.transaction(func() error {
+				for _, name := range names {
+					if err := mr.exec(`DROP TRIGGER main."` + name + `"`); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+		}
+		if err != nil {
+			return err
+		}
+		mr.triggers = false
+	}
+	return mr.transaction(do)
+}
+
+func (mr *mirroring) transaction(do func() error) error {
 	err := mr.exec(`BEGIN IMMEDIATE`)
 	if err == nil {
 		if err = do(); err == nil {

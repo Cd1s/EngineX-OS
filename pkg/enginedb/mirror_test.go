@@ -1,6 +1,7 @@
 package enginedb
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -117,6 +118,15 @@ func TestMirrorLibraryTakesEveryRowOnceAndThenWhatEngineWrote(t *testing.T) {
 	}
 	if got, want := mirrorDump(t, next), mirrorDump(t, live); got != want {
 		t.Fatalf("the next library is not the stick's:\n%s\nwant:\n%s", got, want)
+	}
+	// With nothing written on the stick since, a second pass writes nothing: no trigger is dropped
+	// and made again (each a commit on the stick, in the window that swaps the library in).
+	file, _ := os.ReadFile(next)
+	if ch, err = MirrorLibrary(ctx, live, next, &m, nil); err != nil || len(ch.Tracks) != 0 || ch.Lists {
+		t.Fatalf("a pass with nothing to take: %+v %v", ch, err)
+	}
+	if again, _ := os.ReadFile(next); !bytes.Equal(again, file) {
+		t.Fatal("a pass with nothing to take wrote the next library")
 	}
 	// The bridge's rows in the next library get IDs Engine does not give meanwhile.
 	mirrorExec(t, next, `INSERT INTO Track(path,filename) VALUES('../Contents/new.mp3','new.mp3')`,
