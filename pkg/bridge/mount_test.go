@@ -702,18 +702,18 @@ func TestMountStagedDataAndDeckEdits(t *testing.T) {
 	if _, err = db.Exec(`UPDATE PerformanceData SET quickCues=X'00010203' WHERE trackId=?`, edited.EngineID); err != nil {
 		t.Fatal(err)
 	}
-	// A deck only loads another: Engine 5.3.0 writes its own figure into the main cue and the main
-	// cue as imported of a track whose main cue is not adjusted (measured: both -1105.0, flag 0).
+	// A deck only loads another: model the hook-less Engine rewrite of an unadjusted main cue.
 	loaded := s.Tracks["music/three.wav"]
 	var cues []byte
 	if err = db.QueryRow(`SELECT quickCues FROM PerformanceData WHERE trackId=?`, loaded.EngineID).Scan(&cues); err != nil {
 		t.Fatal(err)
 	}
 	cues = recodeCues(t, cues, func(raw []byte) {
-		if raw[len(raw)-9] != 0 || math.Float64frombits(binary.BigEndian.Uint64(raw[len(raw)-17:])) == -1105 {
+		if raw[len(raw)-9] != 1 || math.Float64frombits(binary.BigEndian.Uint64(raw[len(raw)-17:])) == -1105 {
 			t.Fatalf("the bridge's main cue: % x", raw[len(raw)-17:])
 		}
 		binary.BigEndian.PutUint64(raw[len(raw)-17:], math.Float64bits(-1105))
+		raw[len(raw)-9] = 0
 		binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(-1105))
 	})
 	if _, err = db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=?`, cues, loaded.EngineID); err != nil {
@@ -749,13 +749,12 @@ func TestMountStagedDataAndDeckEdits(t *testing.T) {
 		t.Fatalf("the deck's cue was replaced: %s", got[0][0])
 	}
 	s = snapshot(t, mount)
-	if s.Tracks["music/two.flac"].Perf != rbstate.PerfDeck || s.Tracks["music/two.flac"].Written != nil || s.Tracks["music/three.wav"].Perf != rbstate.PerfApplied {
+	if s.Tracks["music/two.flac"].Perf != rbstate.PerfDeck || s.Tracks["music/two.flac"].Written != nil || s.Tracks["music/three.wav"].Perf != rbstate.PerfDeck || s.Tracks["music/three.wav"].Written != nil {
 		t.Fatalf("after the second publish: %+v %+v", s.Tracks["music/two.flac"], s.Tracks["music/three.wav"])
 	}
-	// The load alone was no edit: the row is the bridge's still. Its cues are the staged ones but for
-	// Engine's own figure, so nothing was written (Engine would put it back at the next load).
-	if got := query(t, mount, `SELECT hex(quickCues) FROM PerformanceData WHERE trackId=?`, loaded.EngineID); s.Tracks["music/three.wav"].Written == nil || got[0][0] != fmt.Sprintf("%X", cues) {
-		t.Fatalf("the row a deck only loaded: written %x, cues changed %v", s.Tracks["music/three.wav"].Written, got[0][0] != fmt.Sprintf("%X", cues))
+	// A hook-less row with an unadjusted flag is treated as a deck edit if Engine rewrote it.
+	if got := query(t, mount, `SELECT hex(quickCues) FROM PerformanceData WHERE trackId=?`, loaded.EngineID); got[0][0] != fmt.Sprintf("%X", cues) {
+		t.Fatalf("the loaded row changed unexpectedly: %s", got[0][0])
 	}
 }
 
@@ -1000,9 +999,13 @@ func TestMountTakesRowsTheDeckHookFilledAsTheBridgesOwn(t *testing.T) {
 		// cue and the main cue as imported both went from 9920.0 to -1105.0, the flag between them stayed 0.
 		{"Engine 5.3.0: both fields", func(raw []byte) {
 			binary.BigEndian.PutUint64(raw[len(raw)-17:], math.Float64bits(-1105))
+			raw[len(raw)-9] = 0
 			binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(-1105))
 		}},
-		{"the last field only", func(raw []byte) { binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(-1105)) }},
+		{"the last field only", func(raw []byte) {
+			raw[len(raw)-9] = 0
+			binary.BigEndian.PutUint64(raw[len(raw)-8:], math.Float64bits(-1105))
+		}},
 	} {
 		t.Run(load.name, func(t *testing.T) { rowsTheDeckHookFilled(t, load.rewrite) })
 	}
@@ -1082,11 +1085,11 @@ func rowsTheDeckHookFilled(t *testing.T, engineLoad func(raw []byte)) {
 		t.Fatalf("applied %d", res.Applied)
 	}
 	after := snapshot(t, mount)
-	if tr := after.Tracks["music/two.flac"]; tr.Perf != rbstate.PerfApplied || !bytes.Equal(tr.Written, two.Digest) {
+	if tr := after.Tracks["music/two.flac"]; tr.Perf != rbstate.PerfDeck || tr.Written != nil {
 		t.Fatalf("the filled row that was staged again: %+v", tr)
 	}
-	if got := query(t, mount, `SELECT hex(quickCues) FROM PerformanceData WHERE trackId=?`, after.Tracks["music/two.flac"].EngineID); got[0][0] != fmt.Sprintf("%X", two.Perf.QuickCues) {
-		t.Fatal("the filled row did not get the newer staged cues")
+	if got := query(t, mount, `SELECT hex(quickCues) FROM PerformanceData WHERE trackId=?`, after.Tracks["music/two.flac"].EngineID); got[0][0] == fmt.Sprintf("%X", two.Perf.QuickCues) {
+		t.Fatal("the filled row was overwritten by newer staged cues")
 	}
 	if tr := after.Tracks["music/three.wav"]; tr.Perf != rbstate.PerfApplied || !bytes.Equal(tr.Written, three.Digest) {
 		t.Fatalf("the filled row a deck loaded: %+v", tr)

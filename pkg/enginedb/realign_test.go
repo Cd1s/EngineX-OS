@@ -143,3 +143,53 @@ func TestRealignKeptMovesTheImportsPositionsAndKeepsTheDecks(t *testing.T) {
 		}
 	}
 }
+
+func TestWrittenDigestIgnoresUnadjustedMainCueBytes(t *testing.T) {
+	track := rekordbox.Track{SampleRate: 44100, Duration: 10}
+	base, err := EncodePerformance(track, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := append([]byte(nil), base.QuickCues...)
+	raw, err := QUncompress(changed, 1<<16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, ok := cuePositions(raw)
+	if !ok {
+		t.Fatal("cue layout not recognized")
+	}
+	big.PutUint64(raw[at[8]:], math.Float64bits(-1105))
+	big.PutUint64(raw[at[8]+9:], math.Float64bits(-1105))
+	changed, err = QCompress(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := WrittenDigest(nil, changed, nil), WrittenDigest(nil, base.QuickCues, nil); !bytes.Equal(got, want) {
+		t.Fatalf("unadjusted main cue changed digest: %x != %x", got, want)
+	}
+}
+
+func TestWrittenDigestStillSeesAddedCueWhenMainCueIsUnadjusted(t *testing.T) {
+	base, err := EncodePerformance(rekordbox.Track{SampleRate: 44100, Duration: 10}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := QUncompress(base.QuickCues, 1<<16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, ok := cuePositions(raw)
+	if !ok {
+		t.Fatal("cue layout not recognized")
+	}
+	big.PutUint64(raw[at[8]:], math.Float64bits(-1105))
+	big.PutUint64(raw[at[1]:], math.Float64bits(22050))
+	row, err := QCompress(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(WrittenDigest(nil, row, nil), WrittenDigest(nil, base.QuickCues, nil)) {
+		t.Fatal("added hot cue was hidden by main-cue normalization")
+	}
+}

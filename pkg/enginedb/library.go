@@ -98,7 +98,54 @@ func openLibrary(ctx context.Context, p, mount string, bulk bool, newUUID string
 		db.Close()
 		return nil, err
 	}
+	if !bulk {
+		if err = l.migrateLegacyArtwork(ctx); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	return l, nil
+}
+
+func (l *Library) migrateLegacyArtwork(ctx context.Context) error {
+	rows, err := l.db.QueryContext(ctx, `SELECT id,hash FROM AlbumArt WHERE typeof(hash)='text'`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type legacy struct {
+		id   int64
+		hash string
+	}
+	var pending []legacy
+	for rows.Next() {
+		var v legacy
+		if err = rows.Scan(&v.id, &v.hash); err != nil {
+			return err
+		}
+		pending = append(pending, v)
+	}
+	if err = rows.Err(); err != nil || len(pending) == 0 {
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, v := range pending {
+		hash, e := hex.DecodeString(v.hash)
+		if e != nil || len(hash) != sha1.Size {
+			continue
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE AlbumArt SET hash=? WHERE id=?`, hash, v.id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (l *Library) init(ctx context.Context) error {
@@ -682,39 +729,6 @@ type PerfPrev struct {
 	FastActive uint32
 }
 
-// asWritten is a row's quickCues as the bridge wrote them when only a load changed them. Engine
-// 5.3.0 writes its own figure into the main cue and into the main cue as imported every time a
-// deck loads a track whose main cue the DJ has not adjusted (JP07 and SC LIVE 4, 2026-11-25:
-// 9920.0 and 9920.0 became -1105.0 and -1105.0, the flag between them stayed 0). With the flag
-// clear neither field is the DJ's, so both are read as the staged record has them, which is what
-// the bridge writes there. A main cue the DJ adjusted has its flag set and is an edit, as every
-// other difference is. (When a re-export moved the track's main cue since the bridge wrote the
-// row, the staged fields are not the ones written: such a row, once loaded, is taken for the
-// deck's and kept. Design 1.11 item 10.)
-func asWritten(cues, staged []byte) []byte {
-	raw, err := QUncompress(cues, 64<<10)
-	if err != nil {
-		return cues
-	}
-	at, ok := cuePositions(raw)
-	if !ok || raw[at[8]+8] != 0 {
-		return cues
-	}
-	ref, err := QUncompress(staged, 64<<10)
-	if err != nil {
-		return cues
-	}
-	rat, ok := cuePositions(ref)
-	if !ok || ref[rat[8]+8] != 0 || bytes.Equal(raw[at[8]:], ref[rat[8]:]) {
-		return cues
-	}
-	copy(raw[at[8]:], ref[rat[8]:])
-	if out, err := QCompress(raw); err == nil {
-		return out
-	}
-	return cues
-}
-
 // ApplyPerformance writes a track's staged data unless the deck changed the row since the bridge
 // wrote it, and returns the digest of the grid, cues and loops the bridge wrote (nil: the row is
 // the deck's from now on) and what it did. Four cases:
@@ -745,12 +759,6 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 	var have []byte
 	if !same && (prev.Written != nil || row.beats != nil) {
 		have = WrittenDigest(row.beats, row.cues, row.loops)
-		if !bytes.Equal(have, staged) && !bytes.Equal(have, prev.Written) {
-			// Neither what is staged nor what the bridge wrote: a load alone made it so, or the DJ.
-			// (A row that is what the bridge wrote is never read with the staged main cue: an export
-			// that moved the main cue would look applied.)
-			have = WrittenDigest(row.beats, asWritten(row.cues, p.QuickCues), row.loops)
-		}
 		same = bytes.Equal(have, staged)
 	}
 	bpm := f.BPM

@@ -162,7 +162,28 @@ func bridgeOwnedTracks(dbDir string) map[int64]bool {
 	if snap, err := rbstate.Load(dbDir); err == nil {
 		return snap.EngineIDs()
 	}
-	return nil
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(dbDir, ".rb-bridge-state.db"), RawQuery: "mode=ro"}).String())
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT trackId FROM BridgeState`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	ids := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) != nil {
+			return nil
+		}
+		ids[id] = true
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	return ids
 }
 
 func resolveTrackAudioPath(root, rootReal, trackPath string) (string, error) {

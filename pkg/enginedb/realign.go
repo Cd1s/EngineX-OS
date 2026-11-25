@@ -17,16 +17,39 @@ import (
 // WrittenDigest names the content of a row's grid, cues and loops, however it is compressed.
 func WrittenDigest(beats, cues, loops []byte) []byte {
 	h := sha256.New()
-	for _, blob := range [][]byte{beats, cues} {
+	for i, blob := range [][]byte{beats, cues} {
 		raw, err := QUncompress(blob, 8<<20)
 		if err != nil {
 			raw = blob
+		}
+		if i == 1 {
+			raw = normalizeMainCueForWrittenDigest(raw)
 		}
 		_ = binary.Write(h, big, uint64(len(raw)))
 		h.Write(raw)
 	}
 	h.Write(loops)
 	return h.Sum(nil)[:16]
+}
+
+func normalizeMainCueForWrittenDigest(raw []byte) []byte {
+	if len(raw) < 8 || binary.BigEndian.Uint64(raw) != 8 {
+		return raw
+	}
+	off := 8
+	for i := 0; i < 8; i++ {
+		if off >= len(raw) || len(raw)-off-1 < int(raw[off])+12 {
+			return raw
+		}
+		off += 1 + int(raw[off]) + 12
+	}
+	if off+17 != len(raw) || raw[off+8] != 0 {
+		return raw
+	}
+	out := append([]byte(nil), raw...)
+	clear(out[off : off+8])
+	clear(out[off+9:])
+	return out
 }
 
 // SyncedDigest names what the deck can change in a row and cue write-back writes back: cues,
