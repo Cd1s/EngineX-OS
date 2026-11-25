@@ -12788,7 +12788,7 @@ assert.deepEqual(writes, ['2:0.5']); assert.equal(armed, 0);
 
 
 class PadModeSelectStemsPageTest(unittest.TestCase):
-    """On 4-pad models (NH08/NH08S/NH10/JP11), Stems sits on page 1 (IndexOffset=0) and CUE exits cleanly without flipping to blank page 2."""
+    """Gate #152's <350 ms double-tap CUE STEMS latch on stock availability across all 16 models (JP07/JP08/JP13/JP14/JC11/JC16/JP11/JP11S/JP20/JP21/JC11S/NH08/NH08S/NH10/JP24/RMZ2) while keeping 4-pad STEMS on page 1 (IndexOffset=0), SWBank no-op inside STEMS (JP20), and clean CUE exit."""
 
     @staticmethod
     def _block(text, start):
@@ -12835,6 +12835,13 @@ class PadModeSelectStemsPageTest(unittest.TestCase):
         m_four = re.search(r"readonly property bool scFourPad:\s*([^\n]+(?:\n\s+&&[^\n]+)*)", qml)
         if m_four:
             helpers += f"Object.defineProperty(module, 'scFourPad', {{ get() {{ return ({m_four.group(1)}); }} }});\n"
+        m_pstemmed = re.search(r"readonly property var scPStemmed:\s*([^\n]+)", qml)
+        if m_pstemmed:
+            helpers += f"Object.defineProperty(module, 'scPStemmed', {{ get() {{ return ({m_pstemmed.group(1)}); }} }});\n"
+        m_av = re.search(r"readonly property bool scStemsAvailable:\s*([^\n]+)", qml)
+        if m_av:
+            expr = m_av.group(1).replace("scPStemmed", "module.scPStemmed")
+            helpers += f"Object.defineProperty(module, 'scStemsAvailable', {{ get() {{ return ({expr}); }} }});\n"
         if "function scResetStemsPage(" in qml:
             helpers += self._block(qml, "function scResetStemsPage(")[0].replace("function scResetStemsPage", "module.scResetStemsPage = function") + "\n"
         on_mode = self._block(qml, "function onPadsModeChanged()")[1] if "function onPadsModeChanged()" in qml else ""
@@ -12844,7 +12851,7 @@ class PadModeSelectStemsPageTest(unittest.TestCase):
 const assert = require('node:assert/strict');
 let now = 10000;
 Date.now = () => now;
-function runDevice(padsCount) {
+function runDevice(padsCount, stemsAvailable = true) {
     let view = 'CUES', offset = 0, triggers = [];
     const Config = { device: { hardwarePadsCount: padsCount, hasSWBankButton: false } };
     const globalConfig = { shift: false };
@@ -12856,6 +12863,7 @@ function runDevice(padsCount) {
     const pPadIndexOffset = { translator: { get unnormalized() { return offset; }, set unnormalized(v) { const ch = v !== offset; offset = v; if (ch) onPadOff(); } } };
     const deckConfig = {
         activeDeckPath: '/Engine/Deck1/',
+        activeDeckTrackPath: '/Engine/Deck1/Track/',
         pPadsView,
         pPadIndexOffset,
         get padsMode() { return view; },
@@ -12864,6 +12872,9 @@ function runDevice(padsCount) {
     };
     const Planck = {
         getProperty(path) {
+            if (path.endsWith('/Track/Stemmed')) {
+                return { translator: { get state() { return stemsAvailable; } } };
+            }
             return {
                 translator: {
                     trigger() {
@@ -12877,8 +12888,12 @@ function runDevice(padsCount) {
                                 if (view === 'CUES' || view === 'STEMS') pPadIndexOffset.translator.unnormalized = offset === 0 ? 4 : 0;
                                 else { pPadsView.translator.string = 'CUES'; pPadIndexOffset.translator.unnormalized = 0; }
                             } else {
-                                // Stock 8-pad Engine exits STEMS back to CUES (#256).
-                                pPadsView.translator.string = 'CUES';
+                                // Stock 8-pad Engine toggles CUES <-> STEMS only when isModeAvailable('STEMS') is true (#256).
+                                if (view === 'CUES') {
+                                    if (stemsAvailable) pPadsView.translator.string = 'STEMS';
+                                } else {
+                                    pPadsView.translator.string = 'CUES';
+                                }
                             }
                         } else if (idx === 1) {
                             pPadsView.translator.string = 'LOOPS';
@@ -12904,7 +12919,7 @@ function runDevice(padsCount) {
     };
 }
 
-// 1. 4-pad (NH08/NH08S/NH10/JP11): double-tap CUE enters STEMS on page 1 (IndexOffset=0),
+// 1. 4-pad (NH08/NH08S/NH10): double-tap CUE enters STEMS on page 1 (IndexOffset=0),
 //    single-tap CUE in STEMS exits to CUES on page 1 without touching blank page 2,
 //    single-tap CUE in CUES keeps page 1<->2 bank toggle, and touchscreen STEMS stays on page 1.
 const p4 = runDevice(4);
@@ -12931,7 +12946,7 @@ assert.deepEqual({ view: p4.state().view, offset: p4.state().offset }, { view: '
 p4.press(1, 500);
 assert.equal(p4.state().view, 'LOOPS');
 
-// 2. 8-pad (SC LIVE 4 #256): double-tap CUE enters STEMS, single-tap CUE exits via stock Engine trigger.
+// 2. 8-pad (SC LIVE 4 #256): double-tap CUE enters STEMS when available, single-tap CUE exits via stock Engine trigger.
 const p8 = runDevice(8);
 p8.press(0, 500);
 p8.press(0, 120);
@@ -12941,6 +12956,26 @@ p8.press(0, 500);
 assert.equal(p8.state().view, 'CUES');
 assert.equal(p8.state().triggers.length, countAtEnter + 1, '8-pad CUE exit must still trigger PadModeButton0Pressed');
 assert.equal(p8.state().offset, 0);
+
+// 3. When stock STEMS is unavailable, rapid double-tap CUE must never force STEMS on 4-pad or 8-pad models.
+const p4NoStems = runDevice(4, false);
+p4NoStems.press(0, 500);
+p4NoStems.press(0, 120);
+assert.deepEqual({ view: p4NoStems.state().view, offset: p4NoStems.state().offset }, { view: 'CUES', offset: 0 },
+    '4-pad double-tap CUE without STEMS must keep stock CUES page 1/2 toggle');
+p4NoStems.press(1, 500); // LOOPS
+p4NoStems.press(0, 500); // LOOPS -> CUES
+p4NoStems.press(0, 120); // rapid tap must toggle page 2, never force STEMS
+assert.deepEqual({ view: p4NoStems.state().view, offset: p4NoStems.state().offset }, { view: 'CUES', offset: 4 });
+
+const p8NoStems = runDevice(8, false);
+p8NoStems.press(0, 500);
+p8NoStems.press(0, 120);
+assert.equal(p8NoStems.state().view, 'CUES', '8-pad double-tap CUE without STEMS must not force STEMS');
+p8NoStems.press(1, 500); // LOOPS
+p8NoStems.press(0, 500); // LOOPS -> CUES
+p8NoStems.press(0, 120); // rapid tap must stay in CUES
+assert.equal(p8NoStems.state().view, 'CUES');
 """.replace("HELPERS", helpers).replace("ON_MODE", on_mode).replace("ON_OFF", on_off).replace("SINGLE_BODY", single_body)
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -13017,6 +13052,13 @@ assert.equal(p8.state().offset, 0);
         m_four = re.search(r"readonly property bool scFourPad:\s*([^\n]+(?:\n\s+&&[^\n]+)*)", pad_qml)
         if m_four:
             helpers += f"Object.defineProperty(module, 'scFourPad', {{ get() {{ return ({m_four.group(1)}); }} }});\n"
+        m_pstemmed = re.search(r"readonly property var scPStemmed:\s*([^\n]+)", pad_qml)
+        if m_pstemmed:
+            helpers += f"Object.defineProperty(module, 'scPStemmed', {{ get() {{ return ({m_pstemmed.group(1)}); }} }});\n"
+        m_av = re.search(r"readonly property bool scStemsAvailable:\s*([^\n]+)", pad_qml)
+        if m_av:
+            expr = m_av.group(1).replace("scPStemmed", "module.scPStemmed")
+            helpers += f"Object.defineProperty(module, 'scStemsAvailable', {{ get() {{ return ({expr}); }} }});\n"
         if "function scResetStemsPage(" in pad_qml:
             helpers += self._block(pad_qml, "function scResetStemsPage(")[0].replace("function scResetStemsPage", "module.scResetStemsPage = function") + "\n"
         on_mode = self._block(pad_qml, "function onPadsModeChanged()")[1] if "function onPadsModeChanged()" in pad_qml else ""
@@ -13026,11 +13068,11 @@ assert.equal(p8.state().offset, 0);
 const assert = require('node:assert/strict');
 let now = 20000;
 Date.now = () => now;
-function runBoard(padsCount, hasSWBank, stemsAvailable = true) {
+function runBoard(padsCount, hasSWBank, stemsAvailable = true, hasSecondaryStems = true) {
     let view = 'CUES', offset = 0, triggers = [], offsetWrites = [];
     let cppMode = 'CUES';
     const primary = ['CUES', 'LOOPS', 'ROLL'];
-    const secondary = ['STEMS', 'AUTO', 'SAMPLER'];
+    const secondary = [hasSecondaryStems ? 'STEMS' : '', 'AUTO', 'SAMPLER'];
     const Config = { device: { hardwarePadsCount: padsCount, hasSWBankButton: hasSWBank } };
     const globalConfig = { shift: false };
     const module = { scBeatJumpOn: false };
@@ -13043,8 +13085,8 @@ function runBoard(padsCount, hasSWBank, stemsAvailable = true) {
             set string(v) {
                 const ch = v !== view;
                 view = v;
-                // Real Engine SimpleLedPadModeSelect only updates its internal currentMode when isModeAvailable(v) is true.
-                if (v !== 'STEMS' || stemsAvailable) cppMode = v;
+                // Real Engine only updates its internal currentMode/LED when target exists & isModeAvailable(v) is true.
+                if (v !== 'STEMS' || (hasSecondaryStems && stemsAvailable)) cppMode = v;
                 if (ch) onPadsMode();
             }
         }
@@ -13057,6 +13099,7 @@ function runBoard(padsCount, hasSWBank, stemsAvailable = true) {
     };
     const deckConfig = {
         activeDeckPath: '/Engine/Deck1/',
+        activeDeckTrackPath: '/Engine/Deck1/Track/',
         pPadsView,
         pPadIndexOffset,
         maxPadIndexOffset: Math.max(0, 8 - padsCount),
@@ -13067,6 +13110,9 @@ function runBoard(padsCount, hasSWBank, stemsAvailable = true) {
     };
     const Planck = {
         getProperty(path) {
+            if (path.endsWith('/Track/Stemmed')) {
+                return { translator: { get state() { return stemsAvailable; } } };
+            }
             return {
                 translator: {
                     trigger() {
@@ -13082,9 +13128,16 @@ function runBoard(padsCount, hasSWBank, stemsAvailable = true) {
                             pPadsView.translator.string = target;
                             pPadIndexOffset.translator.unnormalized = 0;
                         } else if (padsCount <= 4) {
-                            if (idx === 0 && (view === 'CUES' || view === 'STEMS')) pPadIndexOffset.translator.unnormalized = offset === 0 ? 4 : 0;
-                            else { pPadsView.translator.string = primary[idx]; pPadIndexOffset.translator.unnormalized = 0; }
+                            // Stock 4-pad BankedPadModeSelect: CUE flips 0<->4 in CUES/STEMS; other mode buttons select primary.
+                            if (idx === 0 && (cppMode === 'CUES' || cppMode === 'STEMS')) {
+                                pPadIndexOffset.translator.unnormalized = offset === 0 ? 4 : 0;
+                            } else {
+                                cppMode = primary[idx];
+                                pPadsView.translator.string = primary[idx];
+                                pPadIndexOffset.translator.unnormalized = 0;
+                            }
                         } else {
+                            // Stock 8-pad PadModeSelect (and live JP11/JP11S PRIME GO with hardware STMBank).
                             const target = cppMode === primary[idx] ? secondary[idx] : primary[idx];
                             if (target === 'STEMS' && !stemsAvailable) return;
                             cppMode = target;
@@ -13109,15 +13162,19 @@ function runBoard(padsCount, hasSWBank, stemsAvailable = true) {
     function bankLed() {
         return deckConfig.padIndexOffset > 0 ? (deckConfig.halfTempoSyncedFlashState ? 127 : 0) : 1;
     }
+    function c0Flash() {
+        return cppMode === 'STEMS';
+    }
     return {
         pressMode,
         pressBank() { bankSetValue(2, 1.0, true); bankSetValue(2, 0.0, true); },
         bankSetValue,
         bankLed,
+        c0Flash,
         setMode(v) { pPadsView.translator.string = v; },
         setOffset(v) { pPadIndexOffset.translator.unnormalized = v; },
         clearWrites() { offsetWrites = []; },
-        state() { return { view, offset, triggers: triggers.slice(), offsetWrites: offsetWrites.slice(), bankLed: bankLed() }; },
+        state() { return { view, offset, c0Flash: c0Flash(), triggers: triggers.slice(), offsetWrites: offsetWrites.slice(), bankLed: bankLed() }; },
     };
 }
 
@@ -13148,7 +13205,7 @@ assert.equal(jp20.state().offset, 4, 'JP20 BANK toggles page 2 in SAMPLER');
 jp20.pressMode(0, 500); // back to CUES
 assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset }, { view: 'CUES', offset: 0 });
 
-// 2. JP20 STEMS from Bank 2 (touchscreen or rapid double-tap CUE) must stay on page 1 (offset 0).
+// 2. JP20 STEMS from Bank 2 stays on page 1 (offset 0).
 jp20.pressBank();
 assert.equal(jp20.state().offset, 4);
 jp20.setMode('STEMS');
@@ -13162,49 +13219,66 @@ assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset, led: jp
     { view: 'STEMS', offset: 0, led: 1, writes: [] },
     'JP20 BANK inside STEMS must not write blank page 2');
 
-// 4. JP20 single CUE in STEMS still exits via stock PadModeButton0Pressed (SimpleLedPadModeSelect).
+// 4. JP20 single CUE in STEMS exits via stock PadModeButton0Pressed (SimpleLedPadModeSelect).
 const triggersBeforeExit = jp20.state().triggers.length;
 jp20.pressMode(0, 500);
-assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset }, { view: 'CUES', offset: 0 });
+assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset, c0Flash: jp20.state().c0Flash },
+    { view: 'CUES', offset: 0, c0Flash: false });
 assert.equal(jp20.state().triggers.length, triggersBeforeExit + 1, 'JP20 CUE exit from STEMS must stay on stock SimpleLedPadModeSelect');
 
-// 5. JP20 rapid double-tap CUE (<350ms) from Bank 2 lands on STEMS page 1 (offset 0).
+// 5. JP20 rapid double-tap CUE (<350ms) when STEMS is available:
+//    a) from LOOPS -> CUE -> Bank 2 -> CUE steps cleanly into STEMS page 1 via C++ with flashing LED;
+//    b) from CUES Bank 2 rapid double-tap CUE enters STEMS page 1 (tap 2 absorbed by #152 anti-bounce) and exits cleanly.
 jp20.pressMode(1, 500); // LOOPS
 jp20.pressMode(0, 500); // LOOPS -> CUES (offset=0, sets scStemsLatchedAt)
 jp20.setOffset(4);      // Bank 2
-jp20.pressMode(0, 120); // <350ms latch path sets pPadsView='STEMS' directly without C++ trigger
-assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset }, { view: 'STEMS', offset: 0 },
-    'JP20 rapid double-tap CUE from Bank 2 must reset IndexOffset to 0');
+jp20.pressMode(0, 120); // <350ms in CUES triggers stock C++ CUES -> STEMS with page 1 reset
+assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset, c0Flash: jp20.state().c0Flash },
+    { view: 'STEMS', offset: 0, c0Flash: true },
+    'JP20 rapid double-tap CUE from LOOPS must enter STEMS page 1 with synced C++ state');
+jp20.pressMode(0, 500); // clean exit to CUES
+assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset, c0Flash: jp20.state().c0Flash },
+    { view: 'CUES', offset: 0, c0Flash: false });
+jp20.pressBank();        // Bank 2
+const jp20AntiBounceBase = jp20.state().triggers.length;
+jp20.pressMode(0, 500); // tap 1: C++ enters STEMS page 1
+jp20.pressMode(0, 120); // tap 2 (<350ms): absorbed while already in STEMS (#152 anti-bounce)
+assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset, c0Flash: jp20.state().c0Flash },
+    { view: 'STEMS', offset: 0, c0Flash: true },
+    'JP20 rapid double-tap CUE from CUES Bank 2 must enter STEMS page 1 and resist tap-2 bounce');
+assert.equal(jp20.state().triggers.length, jp20AntiBounceBase + 1);
+jp20.pressMode(0, 500); // exit cleanly to CUES
+assert.equal(jp20.state().view, 'CUES');
 
-// 6. JP20 on a track where C++ isModeAvailable('STEMS') is false (live Engine-sclive2 finding):
-//    rapid double-tap CUE (<350ms) or touchscreen enters STEMS on page 1, BANK stays a no-op,
-//    and single CUE must STILL exit STEMS back to CUES page 1 (never trapped in STEMS).
+// 6. JP20 on an unstemmed/unloaded deck where C++ isModeAvailable('STEMS') is false:
+//    rapid double-tap CUE (<350ms) from CUES or LOOPS must NEVER force STEMS, Bank 2 offset and LED stay synced, and BANK keeps 0<->4 paging.
 const jp20NoStems = runBoard(4, true, false);
 jp20NoStems.pressBank();
 assert.equal(jp20NoStems.state().offset, 4);
-jp20NoStems.pressMode(0, 500); // tap 1 (stays CUES, sets scStemsLatchedAt)
-jp20NoStems.pressMode(0, 120); // tap 2 (<350ms) -> forces STEMS via QML, must reset offset to 0
-assert.deepEqual({ view: jp20NoStems.state().view, offset: jp20NoStems.state().offset, led: jp20NoStems.bankLed() },
-    { view: 'STEMS', offset: 0, led: 1 });
+jp20NoStems.pressMode(0, 500); // tap 1 (isModeAvailable('STEMS') is false -> C++ stays CUES Bank 2)
+jp20NoStems.pressMode(0, 120); // tap 2 (<350ms) -> must stay CUES Bank 2 with c0Flash=false
+assert.deepEqual({ view: jp20NoStems.state().view, offset: jp20NoStems.state().offset, c0Flash: jp20NoStems.state().c0Flash, led: jp20NoStems.bankLed() },
+    { view: 'CUES', offset: 4, c0Flash: false, led: 127 },
+    'JP20 rapid double-tap CUE without STEMS must never force STEMS');
 jp20NoStems.pressBank();
-assert.deepEqual({ view: jp20NoStems.state().view, offset: jp20NoStems.state().offset, led: jp20NoStems.bankLed() },
-    { view: 'STEMS', offset: 0, led: 1 });
-jp20NoStems.pressMode(0, 500); // single CUE (>350ms) must exit STEMS even when C++ cppMode stayed 'CUES'
-assert.deepEqual({ view: jp20NoStems.state().view, offset: jp20NoStems.state().offset, led: jp20NoStems.bankLed() },
-    { view: 'CUES', offset: 0, led: 1 },
-    'JP20 single CUE in STEMS must exit to CUES even when C++ isModeAvailable(STEMS) is false');
+assert.deepEqual({ offset: jp20NoStems.state().offset, led: jp20NoStems.bankLed() }, { offset: 0, led: 1 }, 'JP20 BANK toggles Bank 2 -> Bank 1 when STEMS is unavailable');
 jp20NoStems.pressBank();
-assert.equal(jp20NoStems.state().offset, 4, 'JP20 BANK works normally after exiting STEMS');
+assert.deepEqual({ offset: jp20NoStems.state().offset, led: jp20NoStems.bankLed() }, { offset: 4, led: 127 }, 'JP20 BANK toggles Bank 1 -> Bank 2 when STEMS is unavailable');
+jp20NoStems.pressMode(1, 500); // LOOPS
+jp20NoStems.pressMode(0, 500); // LOOPS -> CUES Bank 1
+jp20NoStems.pressMode(0, 120); // rapid tap must stay CUES
+assert.deepEqual({ view: jp20NoStems.state().view, offset: jp20NoStems.state().offset, c0Flash: jp20NoStems.state().c0Flash },
+    { view: 'CUES', offset: 0, c0Flash: false });
 
 // 7. Disabled SWBank assignment stays stock (no-op).
-jp20.pressMode(0, 500); // back to CUES
 jp20.clearWrites();
 jp20.bankSetValue(2, 1.0, false);
 assert.deepEqual(jp20.state().offsetWrites, [], 'disabled SWBank assignment must do nothing');
 
-// 7. Neighbouring models keep their exact behavior:
-//    4-pad without SWBank (NH08/NH08S/NH10/JP11/JP11S): CUE toggles 0<->4 in CUES, STEMS stays on 0, CUE exits without trigger.
-const nh08 = runBoard(4, false);
+// 8. 4-pad BankedPadModeSelect without SWBank (NH08/NH08S/NH10, no STEMS in secondaryPadModes):
+//    when STEMS is available, double-tap CUE enters STEMS on page 1 and single/double CUE exits cleanly (row 354);
+//    when STEMS is unavailable, rapid double-tap CUE from CUES or LOOPS keeps stock 0<->4 paging in CUES.
+const nh08 = runBoard(4, false, true, false);
 nh08.pressMode(0, 500);
 assert.equal(nh08.state().offset, 4);
 nh08.setMode('STEMS');
@@ -13212,15 +13286,71 @@ assert.equal(nh08.state().offset, 0);
 const nhTriggers = nh08.state().triggers.length;
 nh08.pressMode(0, 500);
 assert.deepEqual({ view: nh08.state().view, offset: nh08.state().offset }, { view: 'CUES', offset: 0 });
-assert.equal(nh08.state().triggers.length, nhTriggers, 'NH08/JP11 CUE exit from STEMS keeps BankedPadModeSelect override');
+assert.equal(nh08.state().triggers.length, nhTriggers, 'NH08/NH08S/NH10 CUE exit from STEMS keeps BankedPadModeSelect override');
 
-//    8-pad (JP21/JC11S): scResetStemsPage is a no-op and CUE uses stock trigger.
-const jp21 = runBoard(8, false);
+const nh08NoStems = runBoard(4, false, false, false);
+nh08NoStems.pressMode(0, 500); // CUES page 2
+nh08NoStems.pressMode(0, 120); // rapid double-tap -> stock CUES page 1, never STEMS
+assert.deepEqual({ view: nh08NoStems.state().view, offset: nh08NoStems.state().offset, c0Flash: nh08NoStems.state().c0Flash },
+    { view: 'CUES', offset: 0, c0Flash: false },
+    'NH08/NH08S/NH10 rapid double-tap CUE without STEMS must not force STEMS');
+nh08NoStems.pressMode(1, 500); // LOOPS
+nh08NoStems.pressMode(0, 500); // LOOPS -> CUES page 1
+nh08NoStems.pressMode(0, 120); // rapid tap -> CUES page 2, never STEMS
+assert.deepEqual({ view: nh08NoStems.state().view, offset: nh08NoStems.state().offset }, { view: 'CUES', offset: 4 });
+
+// 9. 8-pad players and consoles (JP07/JP08/JP13/JP14/JC11/JC16/JP21/JC11S/JP24/RMZ2):
+//    when STEMS is available, #152 rapid double-tap enters STEMS with synced flashing LED and single CUE exits via stock trigger;
+//    when STEMS is unavailable, rapid double-tap CUE from CUES or LOOPS never forces STEMS and never traps CUE.
+const jp21 = runBoard(8, false, true, true);
 jp21.setMode('STEMS');
 const jp21Triggers = jp21.state().triggers.length;
 jp21.pressMode(0, 500);
-assert.equal(jp21.state().view, 'CUES');
+assert.deepEqual({ view: jp21.state().view, c0Flash: jp21.state().c0Flash }, { view: 'CUES', c0Flash: false });
 assert.equal(jp21.state().triggers.length, jp21Triggers + 1);
+const jp21EnterStart = jp21.state().triggers.length;
+jp21.pressMode(0, 500); // tap 1 enters STEMS via C++
+jp21.pressMode(0, 120); // tap 2 (<350ms) absorbed while already in STEMS (#152 anti-bounce)
+assert.deepEqual({ view: jp21.state().view, c0Flash: jp21.state().c0Flash }, { view: 'STEMS', c0Flash: true });
+assert.equal(jp21.state().triggers.length, jp21EnterStart + 1);
+jp21.pressMode(0, 500); // exits via stock trigger
+assert.equal(jp21.state().view, 'CUES');
+jp21.pressMode(1, 500); // LOOPS
+jp21.pressMode(0, 500); // LOOPS -> CUES
+jp21.pressMode(0, 120); // <350ms from LOOPS enters STEMS via C++ with LED synced
+assert.deepEqual({ view: jp21.state().view, c0Flash: jp21.state().c0Flash }, { view: 'STEMS', c0Flash: true });
+jp21.pressMode(0, 500); // exits via stock trigger
+assert.equal(jp21.state().view, 'CUES');
+
+const jp21NoStems = runBoard(8, false, false, true);
+jp21NoStems.pressMode(0, 500);
+jp21NoStems.pressMode(0, 120);
+assert.deepEqual({ view: jp21NoStems.state().view, c0Flash: jp21NoStems.state().c0Flash }, { view: 'CUES', c0Flash: false },
+    '8-pad double-tap CUE from CUES without STEMS must not force STEMS');
+jp21NoStems.pressMode(1, 500); // LOOPS
+jp21NoStems.pressMode(0, 500); // LOOPS -> CUES
+jp21NoStems.pressMode(0, 120);
+assert.deepEqual({ view: jp21NoStems.state().view, c0Flash: jp21NoStems.state().c0Flash }, { view: 'CUES', c0Flash: false },
+    '8-pad double-tap CUE from LOOPS without STEMS must not force STEMS or trap CUE');
+
+// 10. PRIME GO / PRIME GO+ (JP11/JP11S): live Engine reports hardwarePadsCount=8, hasSWBankButton=false
+//     (physical 4-pad paging is hardware STMBank); behaves like 8-pad PadModeSelect.
+const jp11NoStems = runBoard(8, false, false, true);
+jp11NoStems.pressMode(0, 500);
+jp11NoStems.pressMode(0, 120);
+assert.deepEqual({ view: jp11NoStems.state().view, c0Flash: jp11NoStems.state().c0Flash }, { view: 'CUES', c0Flash: false },
+    'JP11/JP11S without STEMS must never force STEMS or trap CUE');
+jp11NoStems.pressMode(1, 500);
+jp11NoStems.pressMode(0, 500);
+jp11NoStems.pressMode(0, 120);
+assert.equal(jp11NoStems.state().view, 'CUES');
+
+const jp11WithStems = runBoard(8, false, true, true);
+jp11WithStems.pressMode(0, 500);
+jp11WithStems.pressMode(0, 120);
+assert.deepEqual({ view: jp11WithStems.state().view, c0Flash: jp11WithStems.state().c0Flash }, { view: 'STEMS', c0Flash: true });
+jp11WithStems.pressMode(0, 500);
+assert.equal(jp11WithStems.state().view, 'CUES');
 """.replace("HELPERS", helpers).replace("ON_MODE", on_mode).replace("ON_OFF", on_off).replace("SINGLE_BODY", single_body).replace("BANK_SET_VALUE", bank_set_value)
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
