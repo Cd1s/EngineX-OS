@@ -9374,11 +9374,13 @@ def edits(dev: bool):
             "    // unlit in the colour Engine gives an unselected mode button (LOOP's own while LOOP is unselected).\n"
             "    readonly property bool scBeatJumpOn: typeof globalConfig !== \"undefined\" && !!globalConfig && !!globalConfig.scBeatJumpPads && (globalConfig.scBeatJumpDecks & globalConfig.scBeatJumpBit(deckConfig.activeDeckPath)) !== 0\n"
             "    readonly property var scLoopColorProp: Planck.getProperty(deckConfig.activeDeckPath + \"PadModeButton1Color\")\n"
-            "    // 4-pad models without a software Bank button (NH08/NH08S/NH10/JP11): STEMS only uses pads 1-4;\n"
-            "    // keep IndexOffset at 0 so entering or tapping CUE never flips to a blank page 2.\n"
+            "    // 4-pad models: STEMS only uses pads 1-4; keep IndexOffset at 0 on every 4-pad board (including JP20 / SC LIVE 2),\n"
+            "    // while scFourPad gates the BankedPadModeSelect double-tap/CUE-exit override to models without a software Bank button.\n"
             "    readonly property bool scFourPad: typeof Config !== \"undefined\" && Config && Config.device && Config.device.hardwarePadsCount > 0 && Config.device.hardwarePadsCount <= 4 && !Config.device.hasSWBankButton\n"
+            "    readonly property var scPStemmed: typeof deckConfig !== \"undefined\" && deckConfig ? Planck.getProperty((deckConfig.activeDeckTrackPath || (deckConfig.activeDeckPath + \"Track/\")) + \"Stemmed\") : null\n"
+            "    readonly property bool scStemsAvailable: !!(scPStemmed && scPStemmed.translator && scPStemmed.translator.state)\n"
             "    function scResetStemsPage() {\n"
-            "        if (module.scFourPad && typeof deckConfig !== \"undefined\" && deckConfig && deckConfig.padsModeIsStems && deckConfig.pPadIndexOffset && deckConfig.pPadIndexOffset.translator && deckConfig.padIndexOffset !== 0) {\n"
+            "        if (typeof Config !== \"undefined\" && Config && Config.device && Config.device.hardwarePadsCount > 0 && Config.device.hardwarePadsCount <= 4 && typeof deckConfig !== \"undefined\" && deckConfig && deckConfig.padsModeIsStems && deckConfig.pPadIndexOffset && deckConfig.pPadIndexOffset.translator && deckConfig.padIndexOffset !== 0) {\n"
             "            deckConfig.pPadIndexOffset.translator.unnormalized = 0\n"
             "        }\n"
             "    }\n"
@@ -9431,11 +9433,18 @@ def edits(dev: bool):
             "                            if (model.index === 0 && now - button.scStemsLatchedAt < 350) {\n"
             "                                button.scStemsLatchedAt = 0\n"
             "                                button.scExitedStemsAt = 0\n"
-            "                                if (!deckConfig.padsModeIsStems && deckConfig.pPadsView && deckConfig.pPadsView.translator) {\n"
-            "                                    deckConfig.pPadsView.translator.string = \"STEMS\"\n"
+            "                                if (module.scFourPad) {\n"
+            "                                    if (module.scStemsAvailable) {\n"
+            "                                        if (!deckConfig.padsModeIsStems && deckConfig.pPadsView && deckConfig.pPadsView.translator) {\n"
+            "                                            deckConfig.pPadsView.translator.string = \"STEMS\"\n"
+            "                                        }\n"
+            "                                        module.scResetStemsPage()\n"
+            "                                        return\n"
+            "                                    }\n"
+            "                                } else if (deckConfig.padsModeIsStems) {\n"
+            "                                    module.scResetStemsPage()\n"
+            "                                    return\n"
             "                                }\n"
-            "                                module.scResetStemsPage()\n"
-            "                                return\n"
             "                            }\n"
             "                            const wasStems = deckConfig.padsModeIsStems\n"
             "                            if (model.index === 0 && wasStems && module.scFourPad) {\n"
@@ -9456,6 +9465,12 @@ def edits(dev: bool):
             "                                button.scStemsLatchedAt = now\n"
             "                            }\n"
             "                        }\n",
+        )]
+        # SC LIVE 2 (JP20, the only board using SWBank.qml): STEMS only has 4 pads, so BANK
+        # must stay a no-op in STEMS instead of flipping to blank page 2 and blinking the BANK LED.
+        scaled["ControlSurfaceModules/ControlSurfaceModules/private/SWBank.qml"] = [(
+            "                if (value > 0.5) {\n",
+            "                if (value > 0.5 && !deckConfig.padsModeIsStems) {\n",
         )]
         scaled["ControlSurfaceModules/ControlSurfaceModules/ActionPads.qml"] = [(
             "    property int displayOffset: deckConfig.name === \"Right\" ? 8 : 0\n",
