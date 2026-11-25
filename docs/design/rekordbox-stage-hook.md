@@ -32,7 +32,7 @@ statements, before Engine steps it: Engine then reads the filled row.
 2. Anything staged on the deck: a `/data/enginex/rb-stage/<uuid>/index.jsonl` with entries no window has applied
    (cached; looked at again only when a stage file changes). If not: done, no statement and no read of the stick.
 3. Library uuid without a statement: the first line of the stick's snapshot (`Database2/.rb-bridge-snapshot`,
-   `RBS1 {…"uuid":…}`), read once per connection. No snapshot (not a bridge stick) or no live stage for that uuid:
+   `RBS2 {…"uuid":…}`), read once per connection. No snapshot (not a bridge stick) or no live stage for that uuid:
    done, no statement. Today's guarantee for a drive load (not one statement) stays for every stick with nothing
    staged.
 4. The stage's index is kept as a small table of its live keys, read again only when the file changes (it is append

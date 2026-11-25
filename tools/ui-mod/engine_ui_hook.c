@@ -38,6 +38,7 @@
 #if !defined(__aarch64__)
 #include "rekordbox_rows.h"
 #include "rekordbox_analysis.h"
+#include "rekordbox_stage.h"
 #include "shadow_analysis.h"
 #endif
 #include "dsp_smooth.h"
@@ -3786,7 +3787,8 @@ A32_ONLY static void install_rekordbox_rows(uintptr_t base, size_t page) {
 // binds it at each read, so the fill runs when the id is bound to that statement
 // (sqlite3_bind_int64; bind_int is "asr r3,r2,#31; b bind_int64"); a read with the id in the
 // text is caught at prepare (sqlite3LockAndPrepare, which prepare_v2/v3 and prepare16 call).
-// Any other statement, and a drive's load, costs a compare and nothing else.
+// Any other statement costs a compare and nothing else. A drive's load goes to the stage fill
+// (rekordbox_stage.h, feature rb-bridge): a rekordbox stick's row the bridge has staged data for.
 typedef int (*sqlite_prepare_fn)(void *, const char *, int, unsigned, void *, void **, const char **);
 typedef int (*sqlite_bind_int64_fn)(void *, int, long long);
 static sqlite_prepare_fn rbx_prepare_original;
@@ -3794,6 +3796,8 @@ static sqlite_bind_int64_fn rbx_bind_original;
 static const char *(*rbx_statement_sql)(void *);
 static void *(*rbx_statement_db)(void *);
 static struct sc_rbx_sqlite rbx_sqlite;
+static int rbx_bind_installed;
+static int sc_rbs_enabled; // rb-bridge is on: a drive's load goes to the stage fill
 static __thread int analysis_filling;
 static int shadow_analysis_enabled;
 static void shadow_fill(void *db, long long id);
@@ -3804,6 +3808,13 @@ static void rbx_fill(void *db, long long track, const char *sql, int n) {
     const char *result = sql ? sc_rbx_fill(&rbx_sqlite, db, sql, n, &track, &id) : sc_rbx_fill_track(&rbx_sqlite, db, track, &id);
     analysis_filling = 0;
     if (result) fprintf(stderr, "engine-ui-hook: rekordbox analysis for track %lld (%lld): %s\n", track, id, result);
+}
+
+static void rbs_fill(void *db, const char *main, long long track) {
+    analysis_filling = 1;
+    const char *result = sc_rbs_fill_track(&rbx_sqlite, db, main, track);
+    analysis_filling = 0;
+    if (result) fprintf(stderr, "engine-ui-hook: rekordbox stage for track %lld: %s\n", track, result);
 }
 
 static int rbx_prepare(void *db, const char *sql, int n, unsigned flags, void *old, void **stmt, const char **tail) {
@@ -3817,7 +3828,11 @@ static int rbx_bind(void *stmt, int i, long long value) {
         const char *sql = rbx_statement_sql(stmt);
         const int track_read = sc_shadow_analysis_bound(sql);
         // The Track read copies isAnalyzed before a PerformanceData bind.
-        if (rbx_prepare_original && (track_read || sc_rbx_analysis_bound(sql)))
+        const int analysis_read = track_read || sc_rbx_analysis_bound(sql);
+        const char *drive = analysis_read && sc_rbs_enabled ? sc_rbs_drive(&rbx_sqlite, rbx_statement_db(stmt)) : NULL;
+        if (drive)
+            rbs_fill(rbx_statement_db(stmt), drive, value);
+        else if (rbx_prepare_original && analysis_read)
             rbx_fill(rbx_statement_db(stmt), value, NULL, 0);
         if (shadow_analysis_enabled && track_read)
             shadow_fill(rbx_statement_db(stmt), value);
@@ -3828,7 +3843,8 @@ static int rbx_bind(void *stmt, int i, long long value) {
 A32_ONLY static void install_rekordbox_analysis(uintptr_t base, size_t page) {
     const int gateway = hf_on(HF_GATEWAY);
     const int shadow = hf_on(HF_FOUR_DECK) && !strcmp(build->name, "5.3.0") && player_board();
-    if (!gateway && !shadow) return;
+    const int stage = hf_on(HF_RB_BRIDGE);
+    if (!gateway && !shadow && !stage) return;
     // sqlite3LockAndPrepare, which sqlite3_prepare_v2 (api slot 116) calls with "bl" at +0x1c;
     // sqlite3_db_filename is slot 180 (close_v2 at 179 is "mov r1,#1; b sqlite3Close", as
     // close at 16 is "mov r1,#0; b" to the same; db_readonly at 181 returns flags & 1 or -1).
@@ -3859,14 +3875,20 @@ A32_ONLY static void install_rekordbox_analysis(uintptr_t base, size_t page) {
         rbx_statement_sql = (const char *(*)(void *))(uintptr_t)api[153];
         rbx_bind_original = (sqlite_bind_int64_fn)function_trampoline(bind, page);
         if (!rbx_bind_original) return;
+        sc_rbx_verbose = !access("/run/enginex-rbx-analysis-trace", F_OK); // debug: log why a read was left alone
         if (gateway) {
             rbx_prepare_original = (sqlite_prepare_fn)function_trampoline(entry, page);
             if (!rbx_prepare_original) return;
-            sc_rbx_verbose = !access("/run/enginex-rbx-analysis-trace", F_OK); // debug: log why a read was left alone
             sc_rbx_load_track_map();
             redirect_function(HF_GATEWAY, entry, rbx_prepare, page);
             redirect_function(HF_GATEWAY, bind, rbx_bind, page);
+            rbx_bind_installed = 1;
             fprintf(stderr, "engine-ui-hook: rekordbox analysis for streamed tracks enabled\n");
+        }
+        if (stage) {
+            if (!rbx_bind_installed) redirect_function(HF_RB_BRIDGE, bind, rbx_bind, page);
+            rbx_bind_installed = sc_rbs_enabled = 1;
+            fprintf(stderr, "engine-ui-hook: rekordbox stage fill for drive tracks enabled\n");
         }
         return;
     }
@@ -3963,8 +3985,9 @@ A32_ONLY static void install_shadow_analysis(uintptr_t base, size_t page) {
     redirect_function(HF_FOUR_DECK, step, shadow_step, page);
     redirect_function(HF_FOUR_DECK, analyze, shadow_analyze, page);
     shadow_analysis_enabled = 1;
-    // The gateway already installed the dispatcher when enabled. Shadow alone owns it otherwise.
-    if (!rbx_prepare_original) redirect_function(HF_FOUR_DECK, (uintptr_t)api[5], rbx_bind, page);
+    // The gateway or the stage fill already installed the dispatcher when enabled. Shadow alone owns it otherwise.
+    if (!rbx_bind_installed) redirect_function(HF_FOUR_DECK, (uintptr_t)api[5], rbx_bind, page);
+    rbx_bind_installed = 1;
     fprintf(stderr, "engine-ui-hook: shadow analysis hooks installed\n");
 }
 
