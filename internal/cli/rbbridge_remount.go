@@ -29,7 +29,8 @@ import (
 // library before Engine sees the stick. It waits while any deck holds a track from the stick,
 // loaded, playing or not: Engine could not save that track's play count or edits after the
 // remount ("pool is disposed"). A stick the DJ ejected (the hook's mark) is never mounted again,
-// and one ejected or pulled meanwhile publishes at its next insert.
+// and one ejected or pulled meanwhile publishes at its next insert. When the decks are clear and a
+// next library waits, the rows the deck wrote meanwhile are taken into it first (design 1.11 item 6).
 //
 // EngineX peers report loaded tracks through /peer/decks. Silent peers cannot report an
 // unload, so they do not block forever: publication also requires a quiet window with no
@@ -53,6 +54,10 @@ var (
 	ownDecks = func() ([]string, bool) { return decksAt("127.0.0.1:8080") }
 	// peerDecks asks an Engine Link peer's stream-sync the same: an EngineX deck answers.
 	peerDecks = func(ip net.IP) ([]string, bool) { return decksAt(net.JoinHostPort(ip.String(), "8080")) }
+	// takeDeckRows takes the rows the deck wrote since the job's last pass into a next library that
+	// waits for this remount, and reports whether it had to look for them.
+	takeDeckRows  = bridge.TakeDeckRows
+	deckRowPasses = 3 // a library the deck goes on writing is left to the window after this many
 )
 
 // decksAt reads the decks an EngineX stream-sync at addr serves the other player
@@ -276,7 +281,7 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 		quietSince = st.ModTime()
 	}
 	waiting := false
-	for clear := 0; clear < 2; {
+	for clear, passes := 0, 0; clear < 2; {
 		if !mounted(mount) || ejected() {
 			return nil // ejected or pulled: the next mount publishes
 		}
@@ -296,6 +301,14 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 			rep.Waiting()
 		} else {
 			clear++
+		}
+		// The decks are clear. What the deck wrote to the library while a next one waited is taken
+		// into it now, with no window's limit, so that the remount's window only renames whatever
+		// the library's size. Looking for it reads every row (seconds on a big library): the decks
+		// are looked at again afterwards.
+		if clear == 2 && passes < deckRowPasses && takeDeckRows(ctx, mount) {
+			clear, wait = 0, 0
+			passes++
 		}
 		if err = sleepCtx(ctx, wait); err != nil {
 			return nil

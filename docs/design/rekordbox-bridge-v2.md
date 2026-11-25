@@ -82,7 +82,9 @@ Rules that hold everywhere:
    staged data there with the window's own code and no deadline, and saves its snapshot as
    `.rb-bridge-snapshot.swap`. One window renames both into place and does nothing else: its work does not grow with
    the library, and neither does the number of remounts (KDATA, 5,962 tracks: 2 instead of 36).
-   - Rows Engine wrote to `m.db` after the copy are taken again before the rename, in that window (`carryOver`), by
+   - Rows Engine wrote to `m.db` after the copy are taken again before the rename (`carryOver`): by the remount
+     helper right before it triggers the remount, paced like the job and without a limit (`TakeDeckRows`), and by
+     that window for what Engine wrote after that. They are found by
      a fingerprint of every `Track` row (every column; a blob by its length; Engine's triggers move
      `Track.lastEditTime` with every write of a track's performance data) and of every other table. A row taken
      again loses what the bridge wrote on it in the next library; its track is pending and the job's next round
@@ -639,10 +641,14 @@ edits. The old state file is removed after the snapshot is saved.
    with 50,000 synthetic tracks, 2026-11-25). The layout is Engine's. The job stops writing these files at the
    first refusal and says so once; rows, lists, cues, grids and the deck's own waveforms are not affected. exFAT
    has no such limit.
-6. **A next library needs the stick's library to be quiet for one round at the largest sizes.** The window that
-   swaps it in first takes the rows Engine wrote since the job's last pass, and reads every row of every table to
-   find them (0.15 ms a row at deck speed). When that cannot end 3 s before the kill (above about 60,000 rows of all
-   tables together) the window does not swap; the job takes the rows and asks for the remount again.
+6. **At the largest sizes a next library needs the stick's library to be quiet between the helper's pass and the
+   remount.** Finding the rows Engine wrote since the job's last pass reads every row of every table (0.15 ms a
+   row at deck speed). The remount helper does that right before it triggers the remount, when no deck holds a
+   track of the stick, and looks at the decks again afterwards; the window then only renames. What Engine writes
+   in the second or so between that pass and the remount is the window's to take: when that cannot end 3 s before
+   the kill (above about 60,000 rows of all tables together) the window does not swap; the job takes the rows and
+   asks for the remount again. Not measured on a deck: whether Engine writes the library when the stick is taken
+   from it.
 7. **A big re-export cannot be browsed before its switch.** Engine shows the one library it opened at the mount and
    never sees another process's writes to it. The old library is on show at once; the new export's lists and
    tracks appear with the one remount that swaps the next library in (report `rb-window-fable.md`, "Proposal").
@@ -687,6 +693,7 @@ checklist.
 | What the job publishes as a next library is, after the one window that swaps it in, the library the windows would have written in place (rows under the same IDs, lists, data, snapshot); the job never writes `m.db` and the window does no row work. A new next library has its `Track` rows together. | `TestNextLibrarySwappedInIsTheLibraryTheWindowsWrite` (`pkg/bridge/next_test.go`); `TestMirrorLibraryLaysTrackRowsTogether` (`pkg/enginedb/mirror_test.go`) |
 | The upkeep at a window's end is stopped at its budget (0.5 s in the insert of an unchanged stick, 1 s elsewhere), and a window leaves a list waveform to the job that staged the track with its row. | `TestMountUpkeepIsStoppedAtItsBudget`, `TestMountLeavesTheListWaveformToTheJobThatStagedTheRow` (`pkg/bridge/mount_test.go`) |
 | A window that cannot look for the deck's rows 3 s before the kill does not swap; the job takes them and the next window swaps. With nothing to publish the job makes no next library and asks for no remount. | `TestSwapWaitsForTheJobWhenTheDecksRowsCannotBeLookedForInTime`, `TestNextLibrarySwappedInIsTheLibraryTheWindowsWrite` (`pkg/bridge/next_test.go`) |
+| The remount helper takes the deck's rows right before the remount, so that a window without time for the look still swaps; it looks at the decks again after the pass; what it took is read on from by the window and by the job. | `TestRowsTakenBeforeTheRemountLetAWindowWithoutTimeSwap`, `TestRowsTakenBeforeTheRemountAreReadOnFrom` (`pkg/bridge/next_test.go`), `TestRemountTakesTheDecksRowsBeforeTheRemove` (`internal/cli/rbbridge_remount_test.go`) |
 | A stage that fills `/data` is emptied into the next library and the job goes on: every track is staged and one remount publishes all of them. The job stops writing list waveforms when their folder takes no more files. | `TestFillGoesOnPastAFullStageThroughTheNextLibrary` (`pkg/bridge/next_test.go`); `TestFillStopsWritingListWaveformsWhenTheirFolderIsFull` (`pkg/bridge/fill_test.go`) |
 | The first insert of a never-seen export builds rows and lists from the export alone (rows as Engine expects them, lists in Engine's chain order), rebuilds Engine's indexes, saves the snapshot, asks for the job, logs one timed line per step, and leaves only `m.db` and the snapshot in `Database2` (#182, #301). | `TestMountFirstInsert` (`pkg/bridge/mount_test.go`) |
 | An export unchanged since a complete import costs a stat and one line: the exports are not opened, `m.db` stays byte for byte, no job starts, nothing changes under `PIONEER`, the audio or `Database2`, and the CLI run skips the volume. | `TestMountUnchangedIsStatOnly` (`pkg/bridge/mount_test.go`); `TestRBBridgeUnchangedExportSkipsTheVolume` (`internal/cli/rbbridge_test.go`); `TestPort5UnchangedWindowLeavesStickAndDatabaseFilesUntouched` (`pkg/bridge/port5_misc_test.go`) |

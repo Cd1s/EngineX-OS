@@ -332,7 +332,7 @@ func swapNext(ctx context.Context, mount, dir string, st *steps) bool {
 	if enginedb.OpenElsewhere(live) != 0 {
 		return false
 	}
-	if h.Base != enginedb.LibraryState(live) && !carryOver(ctx, dir, &h, st) {
+	if h.Base != enginedb.LibraryState(live) && !carryOver(ctx, dir, &h, st, nil) {
 		log.Printf("rb-bridge: the stick's library changed after the next one was made; the job takes the changes first")
 		return false
 	}
@@ -352,7 +352,10 @@ func swapNext(ctx context.Context, mount, dir string, st *steps) bool {
 // carryOver takes into the next library the rows Engine wrote to m.db after the job made it
 // ready: the DJ's edits are not lost with the file. A row taken loses what the bridge wrote on it
 // in the next library; its track is pending again and published by the job's next round.
-func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps) bool {
+// pace is nil in a window. With it the call is the remount helper's (TakeDeckRows): paced like the
+// job, and Engine may write again before the remount, so what was taken is also noted in the next
+// library's state on the deck, as after a pass of the job; the window or the job reads on from it.
+func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps, pace func(time.Duration) error) bool {
 	live, next, swap := filepath.Join(dir, "m.db"), filepath.Join(dir, nextDB), filepath.Join(dir, rbstate.SwapName)
 	sdir := nextState(h.LibraryUUID)
 	var m enginedb.Mirror
@@ -366,14 +369,16 @@ func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps) bo
 	if !st.fits(work{scan: m.Rows, commits: 1, tracks: h.Tracks}) {
 		return false
 	}
-	ch, err := enginedb.MirrorLibrary(ctx, live, next, &m, nil)
+	ch, err := enginedb.MirrorLibrary(ctx, live, next, &m, pace)
 	if err != nil {
 		log.Printf("rb-bridge: rows of the stick's library not taken: %v", err)
 		return false
 	}
-	st.done("carry", "%d rows the deck wrote taken into the next library (%d read, lists %v)", len(ch.Tracks), ch.Rows, ch.Lists)
-	if len(ch.Tracks) == 0 && !ch.Lists {
-		return true
+	if pace == nil {
+		st.done("carry", "%d rows the deck wrote taken into the next library (%d read, lists %v)", len(ch.Tracks), ch.Rows, ch.Lists)
+		if len(ch.Tracks) == 0 && !ch.Lists {
+			return true
+		}
 	}
 	s, err := rbstate.LoadFile(swap)
 	if err != nil {
@@ -390,5 +395,37 @@ func carryOver(ctx context.Context, dir string, h *rbstate.Header, st *steps) bo
 		return false
 	}
 	*h = s.Header
+	if pace != nil {
+		// The snapshot before the mirror, as in the job's pass: a cut between the two has the same rows taken again.
+		if err = s.Save(sdir); err == nil {
+			err = writeGob(filepath.Join(sdir, "mirror"), &m)
+		}
+		if err != nil {
+			log.Printf("rb-bridge: state of the next library not saved: %v", err) // the swap snapshot stands on its own
+		}
+		log.Printf("rb-bridge: before the remount, %d rows the deck wrote taken into the next library in %d ms (%d read, lists %v)",
+			len(ch.Tracks), time.Since(st.start).Milliseconds(), ch.Rows, ch.Lists)
+	}
+	return true
+}
+
+// TakeDeckRows is the remount helper's step right before the remount that swaps a next library
+// in: the rows Engine wrote to the stick's library since the job made the next one ready are
+// taken now, as the swap's window would take them, with the job's pacing and no window's limit.
+// The window then finds the library the next one was made from and only renames, whatever the
+// library's size (design 1.11 item 6). It reports whether it looked: that takes time (0.15 ms a
+// row on a deck), so the helper looks at the decks again after it. With no next library waiting,
+// or the stick's library as the job left it, it is two short reads.
+func TakeDeckRows(ctx context.Context, mount string) bool {
+	dir := filepath.Join(mount, filepath.FromSlash(databaseSubdir))
+	h, err := rbstate.ReadHeaderFile(filepath.Join(dir, rbstate.SwapName))
+	if err != nil || h.Rules != rbstate.Rules || h.Base == enginedb.LibraryState(filepath.Join(dir, "m.db")) {
+		return false
+	}
+	if _, err = os.Stat(filepath.Join(dir, nextDB)); err != nil {
+		return false
+	}
+	pace := newPacer(ctx)
+	carryOver(ctx, dir, &h, newSteps(MountOptions{Full: true}), func(took time.Duration) error { return pace.afterStat(pace.active(), took) })
 	return true
 }

@@ -128,6 +128,69 @@ func (f *fakeStick) seen() []string {
 	return append([]string(nil), f.events...)
 }
 
+// Design 1.11 item 6: right before the remount the helper has the rows the deck wrote taken into
+// a next library that waits, so that the remount's window only renames. Looking for them takes
+// time, in which a deck can load a track of the stick: the decks are looked at again before the
+// remove, and the rows once more when the decks are clear again.
+func TestRemountTakesTheDecksRowsBeforeTheRemove(t *testing.T) {
+	f := newFakeStick(t)
+	f.engine("5", "", "")
+	track := filepath.Join(f.mount, "Contents", "a.mp3")
+	if err := os.MkdirAll(filepath.Dir(track), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(track, []byte("abcd"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := takeDeckRows
+	t.Cleanup(func() { takeDeckRows = old })
+	var calls [][]string // the uevent writes seen at each call
+	var whileHeld []string
+	unloaded := make(chan struct{})
+	takeDeckRows = func(_ context.Context, mount string) bool {
+		if mount != f.mount {
+			t.Errorf("rows taken on %s", mount)
+		}
+		calls = append(calls, f.seen())
+		if len(calls) > 1 {
+			return false // the deck wrote nothing since
+		}
+		f.engine("9", track, "0100000") // a deck loads a track while the rows are looked for
+		go func() {
+			defer close(unloaded)
+			time.Sleep(300 * time.Millisecond)
+			whileHeld = f.seen()
+			f.engine("9", "", "")
+		}()
+		return true
+	}
+	if err := remount(context.Background(), f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb")); err != nil {
+		t.Fatal(err)
+	}
+	<-unloaded
+	if len(calls) != 2 || len(calls[0]) != 0 || len(calls[1]) != 0 {
+		t.Fatalf("the rows are taken before the remove, and again after the decks were busy: uevent writes at each call %v", calls)
+	}
+	if len(whileHeld) != 0 {
+		t.Fatalf("uevent writes %v while a deck held the track it loaded during the pass", whileHeld)
+	}
+	if got := strings.Join(f.seen(), " "); got != "remove: add:" {
+		t.Fatalf("uevent writes %q, want one remove and one add", got)
+	}
+	// A library the deck goes on writing does not hold the remount back for ever.
+	calls = nil
+	takeDeckRows = func(context.Context, string) bool { calls = append(calls, nil); return true }
+	f.mu.Lock()
+	f.events = nil
+	f.mu.Unlock()
+	if err := remount(context.Background(), f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb")); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.seen(), " "); len(calls) != deckRowPasses || got != "remove: add:" {
+		t.Fatalf("%d passes (want %d), uevent writes %q", len(calls), deckRowPasses, got)
+	}
+}
+
 // #301: a finished background import is published by a synthetic remove and add of the stick's
 // partition, once Engine copies no track it loads, and only after Engine has closed the stick's
 // files: the publish renames the library under them.

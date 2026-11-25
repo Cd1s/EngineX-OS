@@ -555,6 +555,106 @@ func TestSwapWaitsForTheJobWhenTheDecksRowsCannotBeLookedForInTime(t *testing.T)
 	nextLeftovers(t, mount)
 }
 
+// The remount helper takes the deck's rows right before it triggers the remount, with no
+// window's limit (design 1.11 item 6): the window that had no time to look for them (the test
+// above) then finds the library the next one was made from, and only renames.
+func TestRowsTakenBeforeTheRemountLetAWindowWithoutTimeSwap(t *testing.T) {
+	for _, c := range []struct {
+		name, write, check, want string
+		rows                     int
+	}{
+		// What Engine writes when it mounts a stick: no track's row, and the window still had to look.
+		{"Engine mounted the stick", `UPDATE Information SET currentPlayedIndiciator=4711`, `SELECT currentPlayedIndiciator FROM Information`, "4711", 0},
+		{"the deck rated a track", `UPDATE Track SET rating=80 WHERE id=2`, `SELECT rating FROM Track WHERE id=2`, "80", 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			mount := nextStick(t, 12)
+			makeNext(t, mount)
+			if TakeDeckRows(context.Background(), mount) {
+				t.Fatal("the stick's library is as the job left it: there is nothing to look for")
+			}
+			engineWrites(t, mount, c.write)
+			out := captureLog(t)
+			if !TakeDeckRows(context.Background(), mount) || !strings.Contains(out.String(), fmt.Sprintf("before the remount, %d rows the deck wrote taken into the next library", c.rows)) {
+				t.Fatalf("what the deck wrote was not taken before the remount:\n%s", out)
+			}
+			if TakeDeckRows(context.Background(), mount) {
+				t.Fatal("the rows were looked for again though the deck wrote nothing since")
+			}
+			old := spare
+			spare = hookWindow - 100*time.Millisecond // no step fits
+			res, text := hookWindowNow(t, mount)
+			spare = old
+			if !strings.Contains(text, "mount swap") || strings.Contains(text, "mount carry") || strings.Contains(text, "the job takes the changes first") || res.Pending.Rows != c.rows {
+				t.Fatalf("the window without time after the helper's pass: %+v\n%s", res, text)
+			}
+			if got := query(t, mount, c.check); got[0][0] != c.want {
+				t.Fatalf("after the swap: %v, want %s", got, c.want)
+			}
+			nextLeftovers(t, mount)
+			// Without a next library that waits there is nothing to do.
+			if TakeDeckRows(context.Background(), mount) || TakeDeckRows(context.Background(), t.TempDir()) {
+				t.Fatal("rows were looked for without a next library")
+			}
+		})
+	}
+}
+
+// What the helper took is noted in the next library's state on the deck, so that whoever comes
+// next reads on from it. Engine writes again before the remount (and had added a cover before the
+// helper's pass): the window takes that one row only, and the cover is not copied a second time.
+// And when no window swaps (Engine still held the file), the job's next round finds the rows the
+// helper took as pending and writes their staged data again: none is left without.
+func TestRowsTakenBeforeTheRemountAreReadOnFrom(t *testing.T) {
+	prepare := func(t *testing.T) string {
+		mount := nextStick(t, 12)
+		mountNow(t, mount, MountOptions{Publish: true})
+		s := snapshot(t, mount) // every track is to be published again, through a next library
+		for _, tr := range s.Tracks {
+			tr.Built, tr.Perf, tr.Written = rbstate.TrackSig{}, rbstate.PerfNone, nil
+		}
+		s.Pending.Perf = len(s.Tracks)
+		if err := s.Save(dbDir(mount)); err != nil {
+			t.Fatal(err)
+		}
+		stageAll(t, mount)
+		engineWrites(t, mount, `UPDATE PerformanceData SET overviewWaveFormData=NULL`, `UPDATE Track SET lastEditTime=1700000000`)
+		makeNext(t, mount)
+		engineWrites(t, mount, `INSERT INTO AlbumArt(hash,albumArt) VALUES('deck',x'FFD8FF')`, `UPDATE Track SET isPlayed=1,timeLastPlayed=1700000000 WHERE id=2`)
+		if !TakeDeckRows(context.Background(), mount) {
+			t.Fatal("the deck's row was not taken before the remount")
+		}
+		return mount
+	}
+	withData := `SELECT count(*) FROM PerformanceData WHERE beatData IS NOT NULL AND overviewWaveFormData IS NOT NULL`
+	t.Run("the window", func(t *testing.T) {
+		mount := prepare(t)
+		engineWrites(t, mount, `UPDATE Track SET isPlayed=1,timeLastPlayed=1700000001 WHERE id=3`)
+		res, out := hookWindowNow(t, mount)
+		if !strings.Contains(out, "(1 rows the deck wrote") || !strings.Contains(out, "mount swap") || res.Pending.Rows != 2 {
+			t.Fatalf("the window after the helper's pass and one more row of the deck: %+v\n%s", res, out)
+		}
+		got := query(t, mount, `SELECT (SELECT count(*) FROM Track WHERE isPlayed=1 AND id IN (2,3)),(SELECT count(*) FROM AlbumArt WHERE hash='deck'),(`+withData+`)`)[0]
+		if got[0] != "2" || got[1] != "1" || got[2] != "10" {
+			t.Fatalf("played %s of 2, the deck's cover %s times, rows with staged data %s (want the 10 the deck did not write)", got[0], got[1], got[2])
+		}
+		nextLeftovers(t, mount)
+	})
+	t.Run("the job", func(t *testing.T) {
+		mount := prepare(t)
+		makeNext(t, mount)
+		res, out := hookWindowNow(t, mount)
+		if !strings.Contains(out, "mount swap") || strings.Contains(out, "mount carry") || !res.Pending.None() {
+			t.Fatalf("the window after the job's next round: %+v\n%s", res, out)
+		}
+		got := query(t, mount, `SELECT (SELECT isPlayed FROM Track WHERE id=2),(SELECT count(*) FROM AlbumArt WHERE hash='deck'),(`+withData+`)`)[0]
+		if got[0] != "1" || got[1] != "1" || got[2] != "12" {
+			t.Fatalf("played %s, the deck's cover %s times, rows with staged data %s of 12", got[0], got[1], got[2])
+		}
+		nextLeftovers(t, mount)
+	})
+}
+
 // A cut at any point of the window that swaps the next library in, and the next window on what
 // was on the stick then, end in the library of an undisturbed swap.
 func TestSwapCutAtEveryStepEndsInTheSameLibrary(t *testing.T) {
