@@ -351,6 +351,67 @@ FX_SELECTOR = r'''
     }
 '''
 
+# #276: on the SC LIVE 2 / SC LIVE 4 the hardware FX selector picks where the effect goes, and the screen did not
+# say which. The stock assignment files (JP20 / JP21 `FxAssignmentConfig` + `DJFxAssign`, CC 40) set exactly one of
+# /Engine/Mixer/<Channel1..4|Main>/DJFx/Assigned; this badge in front of the effect name only reads them.
+FX_ASSIGN_BADGE = r'''    Item {
+        id: scFxAssign
+        objectName: `DJFx${djFx.indicator}_Assign`
+        readonly property var scTargets: ({
+            "JP20": ["Channel1", "Channel2", "Main"],
+            "JP21": ["Channel1", "Channel2", "Channel3", "Channel4", "Main"]
+        })[Config.device.name] || []
+        readonly property var scProps: scTargets.map(t => Planck.getProperty(`/Engine/Mixer/${t}/DJFx/Assigned`))
+        readonly property var scAssigned: {
+            const out = []
+            for (let i = 0; i < scProps.length; i++) {
+                const p = scProps[i]
+                if (p && p.translator && p.translator.state) out.push(scTargets[i])
+            }
+            return out
+        }
+        readonly property string scLabel: scAssigned.length === 0 ? "–" : scAssigned.map(t => t === "Main"
+            ? (typeof root !== "undefined" && root.scT ? root.scT("Main") : "Main")
+            : t.slice(7)).join(" ")
+        visible: scTargets.length > 0
+        Layout.minimumWidth: visible ? 72 : 0
+        Layout.maximumWidth: visible ? 72 : 0
+        Layout.fillHeight: true
+        Layout.leftMargin: visible ? 12 : 0
+        Layout.topMargin: 10
+        Layout.bottomMargin: 10
+        Rectangle {
+            anchors.fill: parent
+            color: "transparent"
+            radius: 4
+            border.width: 2
+            border.color: scFxAssign.scAssigned.length > 0 ? Style.font02Color : Style.disabled01Color
+        }
+        Column {
+            anchors.centerIn: parent
+            width: parent.width - 8
+            Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: "FX"
+                color: Style.disabled01Color
+                font: Style.mainFont(12, Font.Normal, Font.AllUppercase)
+            }
+            Text {
+                objectName: `DJFx${djFx.indicator}_Assign_Target`
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                fontSizeMode: Text.HorizontalFit
+                minimumPixelSize: 10
+                text: scFxAssign.scLabel
+                color: scFxAssign.scAssigned.length > 0 ? Style.font02Color : Style.disabled01Color
+                font: Style.mainFont(22, Font.Bold, Font.AllUppercase)
+            }
+        }
+    }
+
+'''
+
 FX_KNOB = r'''
             readonly property int scFxUnit: fxConfig.hasSendStyleEffects ? Number(modelData) : 3 + Math.max(0, Number(String(modelData).replace("Channel", "")) - 1)
             readonly property string scFxBus: "/GUI/Scripted/EngineXFx" + scFxUnit
@@ -10451,6 +10512,7 @@ def edits(dev: bool):
         out[ROOT + "Views/MainView/Fx/DJFx.qml"] = [
             ("import Planck 1.0", "import Planck 1.0\nimport Common"),
             ("    property string indicator\n", "    property string indicator\n" + FX_SELECTOR),
+            ("    Button {\n        Layout.minimumWidth: 160\n", FX_ASSIGN_BADGE + "    Button {\n        Layout.minimumWidth: 160\n"),
             ("model: djFxView ? djFxView.effectsNames : {}", "model: djFx.scFxNames"),
             ("index: djFxView ? djFxView.selectionIndex : 0", "index: djFx.scFxIndex >= 0 ? djFx.scFxIndex : (djFxView ? djFxView.selectionIndex : 0)"),
             ("onAccepted: result => djFxView.selectEffect(result)", "onAccepted: result => djFx.scFxAccept(result)"),
