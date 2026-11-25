@@ -12945,6 +12945,249 @@ assert.equal(p8.state().offset, 0);
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_sclive2_jp20_stems_stays_on_page_one_and_bank_keeps_stock_paging(self):
+        pad_path = LAB / "5.3.0/qrc/ControlSurfaceModules/ControlSurfaceModules/PadModeSelect.qml"
+        bank_path = LAB / "5.3.0/qrc/ControlSurfaceModules/ControlSurfaceModules/private/SWBank.qml"
+        if pad_path.is_file() and bank_path.is_file():
+            pad_qml = pad_path.read_text(encoding="utf-8")
+            bank_qml = bank_path.read_text(encoding="utf-8")
+        else:
+            pad_qml = (
+                "Item {\n    id: module\n    property int ledType: LedType.None\n"
+                "    Repeater {\n        Item {\n            id: button\n"
+                "            readonly property bool lit: pLit.translator && pLit.translator.state\n"
+                "            readonly property bool flash: pFlash.translator && pFlash.translator.state\n"
+                "            readonly property color color: pColor.translator && pColor.translator.color\n"
+                "            ValueNoteAssignment {\n                id: padModeSelect\n"
+                "                output: ComboActionOutput {\n                    singleAction: function () {\n"
+                "                        if (globalConfig.shift) {\n"
+                "                            Planck.getProperty(\n"
+                "                                `${deckConfig.activeDeckPath}PadModeButton${model.index}ShiftPressed`\n"
+                "                            ).translator.trigger()\n"
+                "                        } else {\n"
+                "                            Planck.getProperty(\n"
+                "                                `${deckConfig.activeDeckPath}PadModeButton${model.index}Pressed`\n"
+                "                            ).translator.trigger()\n"
+                "                        }\n"
+                "                    }\n                }\n            }\n        }\n    }\n}\n"
+            )
+            bank_qml = (
+                "Item {\n    id: module\n    ValueNoteAssignment {\n"
+                "        output: QtObject {\n"
+                "            function setValue(channel, value, assignmentEnabled) {\n"
+                "                if (!assignmentEnabled) {\n                    return\n                }\n\n"
+                "                if (value > 0.5) {\n"
+                "                    deckConfig.pPadIndexOffset.translator.unnormalized =\n"
+                "                        deckConfig.padIndexOffset != deckConfig.maxPadIndexOffset ? deckConfig.maxPadIndexOffset : 0\n"
+                "                }\n"
+                "            }\n"
+                "        }\n"
+                "    }\n"
+                "    OutputAssignment {\n"
+                "        readonly property int ledValue: {\n"
+                "            if (deckConfig.padIndexOffset > 0) {\n"
+                "                deckConfig.halfTempoSyncedFlashState ? 127 : 0\n"
+                "            } else {\n"
+                "                1\n"
+                "            }\n"
+                "        }\n"
+                "    }\n"
+                "}\n"
+            )
+
+        prev_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            all_edits = bp.edits(False)
+            pad_patches = all_edits["ControlSurfaceModules/ControlSurfaceModules/PadModeSelect.qml"]
+            bank_patches = all_edits.get("ControlSurfaceModules/ControlSurfaceModules/private/SWBank.qml", [])
+        finally:
+            bp.ROOT = prev_root
+
+        for old, new in pad_patches:
+            self.assertEqual(pad_qml.count(old), 1, old[:60])
+            pad_qml = pad_qml.replace(old, new, 1)
+        for old, new in bank_patches:
+            self.assertEqual(bank_qml.count(old), 1, old[:60])
+            bank_qml = bank_qml.replace(old, new, 1)
+
+        _, single_body = self._block(pad_qml, "singleAction: function ()")
+        _, bank_set_value = self._block(bank_qml, "function setValue(")
+        helpers = ""
+        m_four = re.search(r"readonly property bool scFourPad:\s*([^\n]+(?:\n\s+&&[^\n]+)*)", pad_qml)
+        if m_four:
+            helpers += f"Object.defineProperty(module, 'scFourPad', {{ get() {{ return ({m_four.group(1)}); }} }});\n"
+        if "function scResetStemsPage(" in pad_qml:
+            helpers += self._block(pad_qml, "function scResetStemsPage(")[0].replace("function scResetStemsPage", "module.scResetStemsPage = function") + "\n"
+        on_mode = self._block(pad_qml, "function onPadsModeChanged()")[1] if "function onPadsModeChanged()" in pad_qml else ""
+        on_off = self._block(pad_qml, "function onPadIndexOffsetChanged()")[1] if "function onPadIndexOffsetChanged()" in pad_qml else ""
+
+        script = r"""
+const assert = require('node:assert/strict');
+let now = 20000;
+Date.now = () => now;
+function runBoard(padsCount, hasSWBank) {
+    let view = 'CUES', offset = 0, triggers = [], offsetWrites = [];
+    const primary = ['CUES', 'LOOPS', 'ROLL'];
+    const secondary = ['STEMS', 'AUTO', 'SAMPLER'];
+    const Config = { device: { hardwarePadsCount: padsCount, hasSWBankButton: hasSWBank } };
+    const globalConfig = { shift: false };
+    const module = { scBeatJumpOn: false };
+    const button = { scStemsLatchedAt: 0, scExitedStemsAt: 0 };
+    const model = { index: 0 };
+    let onPadsMode = () => {}, onPadOff = () => {};
+    const pPadsView = { translator: { get string() { return view; }, set string(v) { const ch = v !== view; view = v; if (ch) onPadsMode(); } } };
+    const pPadIndexOffset = {
+        translator: {
+            get unnormalized() { return offset; },
+            set unnormalized(v) { offsetWrites.push(v); const ch = v !== offset; offset = v; if (ch) onPadOff(); }
+        }
+    };
+    const deckConfig = {
+        activeDeckPath: '/Engine/Deck1/',
+        pPadsView,
+        pPadIndexOffset,
+        maxPadIndexOffset: Math.max(0, 8 - padsCount),
+        halfTempoSyncedFlashState: true,
+        get padsMode() { return view; },
+        get padsModeIsStems() { return view === 'STEMS'; },
+        get padIndexOffset() { return offset; },
+    };
+    const Planck = {
+        getProperty(path) {
+            return {
+                translator: {
+                    trigger() {
+                        triggers.push(path);
+                        const m = /PadModeButton(\d+)Pressed$/.exec(path);
+                        if (!m) return;
+                        const idx = Number(m[1]);
+                        if (hasSWBank) {
+                            // Stock JP20 SimpleLedPadModeSelect: toggles primary <-> secondary and resets IndexOffset=0.
+                            const target = view === primary[idx] ? secondary[idx] : primary[idx];
+                            pPadsView.translator.string = target;
+                            pPadIndexOffset.translator.unnormalized = 0;
+                        } else if (padsCount <= 4) {
+                            if (idx === 0 && (view === 'CUES' || view === 'STEMS')) pPadIndexOffset.translator.unnormalized = offset === 0 ? 4 : 0;
+                            else { pPadsView.translator.string = primary[idx]; pPadIndexOffset.translator.unnormalized = 0; }
+                        } else {
+                            pPadsView.translator.string = view === primary[idx] ? secondary[idx] : primary[idx];
+                        }
+                    }
+                }
+            };
+        }
+    };
+    HELPERS
+    onPadsMode = () => { ON_MODE };
+    onPadOff = () => { ON_OFF };
+    function pressMode(idx, dt) {
+        now += dt;
+        model.index = idx;
+        SINGLE_BODY
+    }
+    function bankSetValue(channel, value, assignmentEnabled) {
+        BANK_SET_VALUE
+    }
+    function bankLed() {
+        return deckConfig.padIndexOffset > 0 ? (deckConfig.halfTempoSyncedFlashState ? 127 : 0) : 1;
+    }
+    return {
+        pressMode,
+        pressBank() { bankSetValue(2, 1.0, true); bankSetValue(2, 0.0, true); },
+        bankSetValue,
+        bankLed,
+        setMode(v) { pPadsView.translator.string = v; },
+        setOffset(v) { pPadIndexOffset.translator.unnormalized = v; },
+        clearWrites() { offsetWrites = []; },
+        state() { return { view, offset, triggers: triggers.slice(), offsetWrites: offsetWrites.slice(), bankLed: bankLed() }; },
+    };
+}
+
+// 1. SC LIVE 2 (JP20: 4 pads, hasSWBankButton=true):
+//    Stock CUE/LOOP/ROLL primary & secondary modes and BANK 0<->4 paging stay untouched outside STEMS.
+const jp20 = runBoard(4, true);
+assert.equal(jp20.bankLed(), 1, 'JP20 stock BANK LED is dim blue (1) on Bank 1');
+jp20.pressBank();
+assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset, led: jp20.bankLed() }, { view: 'CUES', offset: 4, led: 127 });
+jp20.pressBank();
+assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset, led: jp20.bankLed() }, { view: 'CUES', offset: 0, led: 1 });
+jp20.pressMode(1, 500); // LOOP -> LOOPS
+assert.equal(jp20.state().view, 'LOOPS');
+jp20.pressBank();
+assert.equal(jp20.state().offset, 4, 'JP20 BANK toggles page 2 in LOOPS');
+jp20.pressMode(1, 500); // LOOP again -> AUTO
+assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset }, { view: 'AUTO', offset: 0 });
+jp20.pressBank();
+assert.equal(jp20.state().offset, 4, 'JP20 BANK toggles page 2 in AUTO');
+jp20.pressMode(2, 500); // ROLL -> ROLL
+assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset }, { view: 'ROLL', offset: 0 });
+jp20.pressBank();
+assert.equal(jp20.state().offset, 4, 'JP20 BANK toggles page 2 in ROLL');
+jp20.pressMode(2, 500); // ROLL again -> SAMPLER
+assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset }, { view: 'SAMPLER', offset: 0 });
+jp20.pressBank();
+assert.equal(jp20.state().offset, 4, 'JP20 BANK toggles page 2 in SAMPLER');
+jp20.pressMode(0, 500); // back to CUES
+assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset }, { view: 'CUES', offset: 0 });
+
+// 2. JP20 STEMS from Bank 2 (touchscreen or rapid double-tap CUE) must stay on page 1 (offset 0).
+jp20.pressBank();
+assert.equal(jp20.state().offset, 4);
+jp20.setMode('STEMS');
+assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset, led: jp20.bankLed() }, { view: 'STEMS', offset: 0, led: 1 },
+    'JP20 touchscreen STEMS from Bank 2 must reset IndexOffset to 0');
+
+// 3. JP20 BANK pressed inside STEMS must be a clean no-op (zero IndexOffset write, no blank page 2, no LED flash).
+jp20.clearWrites();
+jp20.pressBank();
+assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset, led: jp20.bankLed(), writes: jp20.state().offsetWrites },
+    { view: 'STEMS', offset: 0, led: 1, writes: [] },
+    'JP20 BANK inside STEMS must not write blank page 2');
+
+// 4. JP20 single CUE in STEMS still exits via stock PadModeButton0Pressed (SimpleLedPadModeSelect).
+const triggersBeforeExit = jp20.state().triggers.length;
+jp20.pressMode(0, 500);
+assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset }, { view: 'CUES', offset: 0 });
+assert.equal(jp20.state().triggers.length, triggersBeforeExit + 1, 'JP20 CUE exit from STEMS must stay on stock SimpleLedPadModeSelect');
+
+// 5. JP20 rapid double-tap CUE (<350ms) from Bank 2 lands on STEMS page 1 (offset 0).
+jp20.pressMode(1, 500); // LOOPS
+jp20.pressMode(0, 500); // LOOPS -> CUES (offset=0, sets scStemsLatchedAt)
+jp20.setOffset(4);      // Bank 2
+jp20.pressMode(0, 120); // <350ms latch path sets pPadsView='STEMS' directly without C++ trigger
+assert.deepEqual({ view: jp20.state().view, offset: jp20.state().offset }, { view: 'STEMS', offset: 0 },
+    'JP20 rapid double-tap CUE from Bank 2 must reset IndexOffset to 0');
+
+// 6. Disabled SWBank assignment stays stock (no-op).
+jp20.pressMode(0, 500); // back to CUES
+jp20.clearWrites();
+jp20.bankSetValue(2, 1.0, false);
+assert.deepEqual(jp20.state().offsetWrites, [], 'disabled SWBank assignment must do nothing');
+
+// 7. Neighbouring models keep their exact behavior:
+//    4-pad without SWBank (NH08/NH08S/NH10/JP11/JP11S): CUE toggles 0<->4 in CUES, STEMS stays on 0, CUE exits without trigger.
+const nh08 = runBoard(4, false);
+nh08.pressMode(0, 500);
+assert.equal(nh08.state().offset, 4);
+nh08.setMode('STEMS');
+assert.equal(nh08.state().offset, 0);
+const nhTriggers = nh08.state().triggers.length;
+nh08.pressMode(0, 500);
+assert.deepEqual({ view: nh08.state().view, offset: nh08.state().offset }, { view: 'CUES', offset: 0 });
+assert.equal(nh08.state().triggers.length, nhTriggers, 'NH08/JP11 CUE exit from STEMS keeps BankedPadModeSelect override');
+
+//    8-pad (JP21/JC11S): scResetStemsPage is a no-op and CUE uses stock trigger.
+const jp21 = runBoard(8, false);
+jp21.setMode('STEMS');
+const jp21Triggers = jp21.state().triggers.length;
+jp21.pressMode(0, 500);
+assert.equal(jp21.state().view, 'CUES');
+assert.equal(jp21.state().triggers.length, jp21Triggers + 1);
+""".replace("HELPERS", helpers).replace("ON_MODE", on_mode).replace("ON_OFF", on_off).replace("SINGLE_BODY", single_body).replace("BANK_SET_VALUE", bank_set_value)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 @unittest.skipUnless(shutil.which("node"), "Node runs the generated handlers")
 class PlayerBeatJumpPadModeTest(unittest.TestCase):
