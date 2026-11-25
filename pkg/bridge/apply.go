@@ -1124,13 +1124,18 @@ func (w *window) migrateLegacyArtwork() error {
 	if err := w.lib.MigrateLegacyArtworkWithOptions(w.ctx, opts); err != nil {
 		return err
 	}
+	if deckBusyForArtwork() {
+		return nil
+	}
 	more, err := w.lib.HasLegacyArtwork(w.ctx)
 	if err != nil {
 		return err
 	}
 	if !more {
 		w.snap.LegacyArtwork, w.dirty = false, true
-		return w.saveIfChanged()
+		if w.next || w.st.kill.IsZero() || w.st.fits(work{commits: 1, tracks: len(w.snap.Tracks)}) {
+			return w.saveIfChanged()
+		}
 	}
 	return nil
 }
