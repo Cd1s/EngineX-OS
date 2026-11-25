@@ -32,6 +32,20 @@ type fastBase struct {
 	active      int64
 }
 
+// FastBaseData is the baseline a fast row carries until its full performance is applied.
+type FastBaseData struct {
+	Rating int64
+	Cues   []byte
+	Loops  []byte
+	Active uint32
+}
+
+// FastBaseForTrack returns the values InsertTracks writes before analysis is staged.
+func FastBaseForTrack(t rekordbox.Track) FastBaseData {
+	b := fastBaseOf(t)
+	return FastBaseData{Rating: b.rating, Cues: b.cues, Loops: b.loops, Active: uint32(b.active)}
+}
+
 // fastBaseOf is the fastBase of export track t, as InsertTracks writes it.
 func fastBaseOf(t rekordbox.Track) fastBase {
 	b := fastBase{rating: int64(t.Rating)}

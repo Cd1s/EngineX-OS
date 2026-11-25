@@ -27,6 +27,24 @@ import (
 
 const rgbVerifiedName = ".rb-bridge-rgb-verified"
 
+// HasRGBOverviews reports whether a library UUID already has per-track overview files.
+// An empty m.db with such files is an old populated library whose Track IDs must not restart.
+func HasRGBOverviews(dir, uuid string) bool {
+	if badUUID(uuid) {
+		return false
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "OverviewData", uuid))
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if rgbFileID(entry) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 type rgbVerifiedEntry struct {
 	Size    int64  `json:"s"`
 	ModTime int64  `json:"m"`

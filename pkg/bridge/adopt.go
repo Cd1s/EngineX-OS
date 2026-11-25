@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
@@ -80,6 +82,46 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 	}
 	if err = rows.Close(); err != nil {
 		return nil, err
+	}
+	if has("BridgeFastBase") {
+		fastRows, e := db.QueryContext(ctx, `SELECT f.trackId,f.rating,f.quickCues,f.loops,f.active,s.fingerprint
+			FROM bridge.BridgeFastBase f JOIN bridge.BridgeState s ON s.trackId=f.trackId WHERE s.fingerprint LIKE 'fast:%'`)
+		if e != nil {
+			return nil, e
+		}
+		for fastRows.Next() {
+			var id int64
+			var rating int64
+			var cues, loops []byte
+			var active int64
+			var fingerprint string
+			if e = fastRows.Scan(&id, &rating, &cues, &loops, &active, &fingerprint); e != nil {
+				fastRows.Close()
+				return nil, e
+			}
+			for _, t := range s.Tracks {
+				if t.EngineID == id {
+					t.FastRow, t.FastRating, t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = fingerprint, int(rating), cues, loops, uint32(active), true
+					break
+				}
+			}
+		}
+		if e = fastRows.Close(); e != nil {
+			return nil, e
+		}
+	}
+	for _, t := range s.Tracks {
+		if t.Synced == nil {
+			continue
+		}
+		var cues, loops []byte
+		var active int64
+		var genre, comment, label string
+		e := db.QueryRowContext(ctx, `SELECT p.quickCues,p.loops,COALESCE(p.activeOnLoadLoops,0),COALESCE(t.genre,''),COALESCE(t.comment,''),COALESCE(t.label,'')
+			FROM Track t LEFT JOIN PerformanceData p ON p.trackId=t.id WHERE t.id=?`, t.EngineID).Scan(&cues, &loops, &active, &genre, &comment, &label)
+		if e != nil || !bytes.Equal(t.Synced, enginedb.SyncedDigest(nil, cues, loops, active, genre, comment, label)) {
+			t.Edit, t.Synced = 0, nil
+		}
 	}
 	if has("BridgePlaylist") {
 		lists, err := db.QueryContext(ctx, `SELECT b.listId FROM bridge.BridgePlaylist b JOIN Playlist p ON p.id=b.listId`)

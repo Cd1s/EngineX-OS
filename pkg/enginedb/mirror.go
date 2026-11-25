@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -95,13 +96,17 @@ func MirrorLibrary(ctx context.Context, live, next string, m *Mirror, pace func(
 		if err != nil {
 			return MirrorChange{}, err
 		}
-		for _, suffix := range []string{"", "-journal"} {
+		for _, suffix := range []string{"", "-journal", "-wal", "-shm"} {
 			if err = os.Remove(next + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return MirrorChange{}, err
 			}
 		}
 		*m = Mirror{Tracks: map[int64]uint64{}, Tables: map[string]uint64{}}
-		dsn += fmt.Sprintf("&_pragma=page_size(%d)&_pragma=journal_mode(MEMORY)&_pragma=synchronous(OFF)", binary.BigEndian.Uint16(head[16:]))
+		pageSize := int(binary.BigEndian.Uint16(head[16:]))
+		if pageSize == 1 {
+			pageSize = 65536
+		}
+		dsn += fmt.Sprintf("&_pragma=page_size(%d)&_pragma=journal_mode(MEMORY)&_pragma=synchronous(OFF)", pageSize)
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -390,6 +395,43 @@ func (mr *mirroring) tracks(fresh bool) error {
 	return mr.plain(func() error {
 		for _, id := range gone {
 			delete(seen, id)
+			for _, table := range []string{"PlaylistEntity", "PreparelistEntity"} {
+				query := `SELECT id,listId,nextEntityId FROM main.PlaylistEntity WHERE trackId=? ORDER BY id`
+				if table == "PreparelistEntity" {
+					query = `SELECT id,0,0 FROM main.PreparelistEntity WHERE trackId=? ORDER BY id`
+				}
+				rows, e := mr.db.QueryContext(mr.ctx, query, id)
+				if e != nil {
+					return e
+				}
+				var entities [][3]int64
+				for rows.Next() {
+					var entity [3]int64
+					if e = rows.Scan(&entity[0], &entity[1], &entity[2]); e != nil {
+						rows.Close()
+						return e
+					}
+					entities = append(entities, entity)
+				}
+				if e = rows.Close(); e != nil {
+					return e
+				}
+				if table == "PlaylistEntity" {
+					for _, entity := range entities {
+						if _, e = mr.db.ExecContext(mr.ctx, `UPDATE main.PlaylistEntity SET nextEntityId=? WHERE listId=? AND nextEntityId=?`, entity[2], entity[1], entity[0]); e != nil {
+							return e
+						}
+					}
+				}
+				for _, entity := range entities {
+					if e = mr.exec(`DELETE FROM main.`+table+` WHERE id=?`, entity[0]); e != nil {
+						return e
+					}
+				}
+				if len(entities) > 0 {
+					mr.out.Lists = true
+				}
+			}
 			for _, q := range []string{`DELETE FROM main.PerformanceData WHERE trackId=?`, `DELETE FROM main.Track WHERE id=?`} {
 				if e := mr.exec(q, id); e != nil {
 					return e
@@ -414,7 +456,7 @@ func (mr *mirroring) covers() error {
 			return err
 		}
 		if err = mr.plain(func() error {
-			return mr.exec(`INSERT INTO main.AlbumArt SELECT * FROM live.AlbumArt WHERE id>? AND id<=?`, mr.m.Art, ids[len(ids)-1])
+			return mr.exec(`INSERT OR IGNORE INTO main.AlbumArt SELECT * FROM live.AlbumArt WHERE id>? AND id<=?`, mr.m.Art, ids[len(ids)-1])
 		}); err != nil {
 			return err
 		}
@@ -423,7 +465,7 @@ func (mr *mirroring) covers() error {
 	}
 	if n != mr.m.Arts+int64(added) {
 		if err := mr.plain(func() error {
-			return mr.exec(`DELETE FROM main.AlbumArt WHERE id<=? AND id NOT IN (SELECT id FROM live.AlbumArt)`, mr.m.Art)
+			return mr.exec(`DELETE FROM main.AlbumArt WHERE id<=? AND id NOT IN (SELECT id FROM live.AlbumArt) AND id NOT IN (SELECT albumArtId FROM main.Track WHERE albumArtId IS NOT NULL)`, mr.m.Art)
 		}); err != nil {
 			return err
 		}
@@ -441,7 +483,54 @@ func (mr *mirroring) tables() (again []string, err error) {
 	if err != nil {
 		return nil, err
 	}
+	listChanged := false
+	listHashes := make(map[string]uint64, 2)
+	for _, name := range []string{"Playlist", "PlaylistEntity"} {
+		if !slices.Contains(names, name) {
+			continue
+		}
+		print, e := mr.print(name)
+		if e != nil {
+			return nil, e
+		}
+		h := fnv.New64a()
+		for after, got := int64(math.MinInt64), scanRows; got == scanRows; {
+			if after, got, e = mr.scan(name, print, after, scanRows, func(id int64, sum uint64) { fmt.Fprintf(h, "%d %d ", id, sum) }); e != nil {
+				return nil, e
+			}
+		}
+		listHashes[name] = h.Sum64()
+		if old, known := mr.m.Tables[name]; !known || old != h.Sum64() {
+			listChanged = true
+		}
+	}
+	if listChanged {
+		for name, sum := range listHashes {
+			mr.m.Tables[name] = sum
+		}
+		if err = mr.plain(func() error {
+			for _, name := range []string{"Playlist", "PlaylistEntity"} {
+				if !slices.Contains(names, name) {
+					continue
+				}
+				if e := mr.exec(`DELETE FROM main."` + name + `"`); e != nil {
+					return e
+				}
+				if e := mr.exec(`INSERT INTO main."` + name + `" SELECT * FROM live."` + name + `"`); e != nil {
+					return e
+				}
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		again = append(again, "Playlist", "PlaylistEntity")
+		mr.out.Lists = true
+	}
 	for _, name := range names {
+		if name == "Playlist" || name == "PlaylistEntity" {
+			continue
+		}
 		print, err := mr.print(name)
 		if err != nil {
 			return nil, err

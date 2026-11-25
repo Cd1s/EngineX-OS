@@ -130,6 +130,13 @@ type Track struct {
 	Synced []byte `json:"sy,omitempty"`
 	Edit   int64  `json:"ed,omitempty"`
 	Native bool   `json:"nat,omitempty"` // an Engine-made row: lists refer to it, the bridge never writes it
+	// Fast* records the row the bridge left before analysis was staged.
+	FastRow    string `json:"fr,omitempty"`
+	FastRating int    `json:"frr,omitempty"`
+	FastCues   []byte `json:"frc,omitempty"`
+	FastLoops  []byte `json:"frl,omitempty"`
+	FastActive uint32 `json:"fra,omitempty"`
+	FastKnown  bool   `json:"frk,omitempty"`
 }
 
 // List is one playlist or folder of the view.

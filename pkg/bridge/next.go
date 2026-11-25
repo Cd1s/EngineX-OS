@@ -81,6 +81,9 @@ func liveLibrary(ctx context.Context, file string) (uuid string, content bool, e
 	}
 	defer db.Close()
 	err = db.QueryRowContext(ctx, `SELECT COALESCE(uuid,''),EXISTS(SELECT 1 FROM Track) OR EXISTS(SELECT 1 FROM Playlist) FROM Information`).Scan(&uuid, &content)
+	if err == nil && !content {
+		content = enginedb.HasRGBOverviews(filepath.Join(filepath.Dir(file)), uuid)
+	}
 	return strings.TrimSpace(uuid), content, err
 }
 

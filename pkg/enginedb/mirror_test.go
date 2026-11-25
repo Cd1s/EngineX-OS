@@ -258,3 +258,65 @@ func TestMirrorLibraryLaysTrackRowsTogether(t *testing.T) {
 		t.Fatalf("the Track table's %d leaf pages lie over %d pages of the file; want them together", pages, span)
 	}
 }
+
+func TestMirrorLibraryRemovesTrackReferencesAndKeepsForeignKeysValid(t *testing.T) {
+	dir := mirrorLive(t, 2)
+	live, next := filepath.Join(dir, "m.db"), filepath.Join(dir, ".rb-next.db")
+	var m Mirror
+	if _, err := MirrorLibrary(context.Background(), live, next, &m, nil); err != nil {
+		t.Fatal(err)
+	}
+	mirrorExec(t, live, `INSERT INTO PreparelistEntity(trackId,trackNumber) VALUES(1,1)`,
+		`DELETE FROM PlaylistEntity WHERE trackId=1`,
+		`INSERT INTO PlaylistEntity(listId,trackId,databaseUuid,nextEntityId,membershipReference) SELECT listId,1,databaseUuid,nextEntityId,membershipReference FROM PlaylistEntity WHERE trackId=2 LIMIT 1`,
+		`DELETE FROM PerformanceData WHERE trackId=1`, `DELETE FROM Track WHERE id=1`)
+	if _, err := MirrorLibrary(context.Background(), live, next, &m, nil); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var violations, refs int
+	if err = db.QueryRow(`SELECT count(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT (SELECT count(*) FROM PlaylistEntity WHERE trackId=1)+(SELECT count(*) FROM PreparelistEntity WHERE trackId=1)`).Scan(&refs); err != nil {
+		t.Fatal(err)
+	}
+	if violations != 0 || refs != 0 {
+		t.Fatalf("foreign_key_check=%d references=%d", violations, refs)
+	}
+}
+
+func TestMirrorLibraryReloadsPlaylistPairTogether(t *testing.T) {
+	dir := mirrorLive(t, 2)
+	live, next := filepath.Join(dir, "m.db"), filepath.Join(dir, ".rb-next.db")
+	var m Mirror
+	if _, err := MirrorLibrary(context.Background(), live, next, &m, nil); err != nil {
+		t.Fatal(err)
+	}
+	mirrorExec(t, next, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES('Bridge',0,1,0,1)`,
+		`INSERT INTO PlaylistEntity(listId,trackId,databaseUuid,nextEntityId,membershipReference) VALUES((SELECT id FROM Playlist WHERE title='Bridge'),1,'bridge',0,1)`)
+	mirrorExec(t, live, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES('Deck',0,1,0,1)`)
+	ch, err := MirrorLibrary(context.Background(), live, next, &m, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ch.Lists {
+		t.Fatal("playlist pair change was not reported")
+	}
+	db, err := sql.Open("sqlite", next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var violations int
+	if err = db.QueryRow(`SELECT count(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil {
+		t.Fatal(err)
+	}
+	if violations != 0 {
+		t.Fatalf("foreign_key_check=%d", violations)
+	}
+}

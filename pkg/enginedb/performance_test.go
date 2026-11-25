@@ -53,6 +53,22 @@ func TestQCompressAndAbsentCues(t *testing.T) {
 	}
 }
 
+func TestEncodePerformanceMarksMemoryMainCueAdjusted(t *testing.T) {
+	p, err := enginedb.EncodePerformance(rekordbox.Track{SampleRate: 44100, Duration: 10}, &rekordbox.Analysis{
+		Cues: []rekordbox.Cue{{HotCue: 0, TimeMS: 1000}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := enginedb.QUncompress(p.QuickCues, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := raw[120]; got != 1 {
+		t.Fatalf("mainCueAdjusted=%d, want 1", got)
+	}
+}
+
 func TestSmartMatchWheel(t *testing.T) {
 	for _, tc := range []struct {
 		a, b string

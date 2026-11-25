@@ -160,8 +160,10 @@ func (w *window) open() error {
 			return err
 		}
 		if tracks == 0 && lists == 0 {
-			w.close() // Engine's skeleton: a library is built under its UUID
-			return nil
+			if !enginedb.HasRGBOverviews(w.dir, lib.UUID()) {
+				w.close() // Engine's skeleton: a library is built under its UUID
+				return nil
+			}
 		}
 	}
 	if err = w.reconcile(); err != nil {
@@ -237,6 +239,10 @@ func (w *window) rows(idx []int) []enginedb.TrackRow {
 
 func (w *window) note(vt *ViewTrack, id int64, native bool) *rbstate.Track {
 	t := &rbstate.Track{Key: vt.Key, EngineID: id, Rel: vt.Rel, Refs: vt.Refs, Row: vt.Hash, Rating: vt.Track.Rating, Native: native}
+	if !native {
+		base := enginedb.FastBaseForTrack(vt.Track)
+		t.FastRow, t.FastRating, t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = vt.Hash, int(base.Rating), base.Cues, base.Loops, base.Active, true
+	}
 	w.snap.Tracks[vt.Key] = t
 	return t
 }
@@ -738,7 +744,7 @@ func (w *window) applyStaged() error {
 		} else {
 			p := &full.Perf
 			perf := enginedb.Performance{TrackData: p.TrackData, Overview: p.Overview, Beats: p.Beats, QuickCues: p.QuickCues, Loops: p.Loops, ActiveLoops: p.ActiveLoops, Complete: p.Complete, Digest: e.Digest}
-			prev := enginedb.PerfPrev{State: t.Perf, Written: t.Written}
+			prev := enginedb.PerfPrev{State: t.Perf, Written: t.Written, FastKnown: t.FastKnown, FastRating: int64(t.FastRating), FastCues: t.FastCues, FastLoops: t.FastLoops, FastActive: t.FastActive}
 			if f, ok := filled[key]; ok && f.EngineID == t.EngineID && prev.Written == nil && prev.State != rbstate.PerfDeck {
 				prev.Written = f.Written // the UI hook filled the row from the stage: the bridge's data, as if a window had written it
 			}
@@ -750,6 +756,7 @@ func (w *window) applyStaged() error {
 				t.Perf = rbstate.PerfDeck
 				kept++
 			}
+			t.FastRow, t.FastRating, t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = "", 0, nil, nil, 0, false
 			// A list waveform only for a row the stick's library has, and not when the job staged the
 			// track with this row (the line names it): it wrote the file then. The look for it alone
 			// reads the folder, which holds a file a track (20,000: 4.3 s of a window for 30 tracks).
@@ -831,7 +838,11 @@ func (w *window) relist(back map[string]bool) error {
 // read (on a USB 2.0 stick that was half a window's time).
 func writeOverview(dir, uuid string, id int64, body []byte) {
 	if st, err := os.Stat(filepath.Join(dir, "OverviewData", uuid, fmt.Sprintf("%d.rgb", id))); err == nil && st.Size() > 4 {
-		return
+		if body, err := os.ReadFile(filepath.Join(dir, "OverviewData", uuid, fmt.Sprintf("%d.rgb", id))); err == nil {
+			if raw, err := enginedb.QUncompress(body, 1<<20); err == nil && enginedb.ValidRGBOverview(raw) {
+				return
+			}
+		}
 	}
 	if err := enginedb.WriteRGBOverviewAtomic(dir, uuid, id, body); err != nil {
 		log.Printf("rb-bridge: list waveform of track %d not written: %v", id, err)

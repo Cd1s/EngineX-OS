@@ -29,6 +29,7 @@ import (
 // snapshot keeps; nothing of the bridge is stored in m.db.
 type Library struct {
 	db    *sql.DB
+	path  string
 	mount string // the volume: covers go to its Engine Library/Artwork
 	uuid  string
 	bulk  bool
@@ -92,7 +93,7 @@ func openLibrary(ctx context.Context, p, mount string, bulk bool, newUUID string
 	if newUUID == "" {
 		newUUID = uuid.NewString()
 	}
-	l := &Library{db: db, mount: mount, bulk: bulk, uuid: newUUID}
+	l := &Library{db: db, path: p, mount: mount, bulk: bulk, uuid: newUUID}
 	if err = l.init(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -325,6 +326,10 @@ func (b *Batch) Commit(ctx context.Context) error {
 			b.Rollback()
 			return fmt.Errorf("rebuild %q: %w", text, err)
 		}
+	}
+	if !b.l.bulk && OpenElsewhere(b.l.path) != 0 {
+		b.Rollback()
+		return ErrLibraryInUse
 	}
 	b.closeStmts()
 	return b.tx.Commit()
@@ -652,7 +657,7 @@ func (b *Batch) DeleteList(ctx context.Context, id int64, owned func(int64) bool
 		if _, err = b.exec(ctx, `UPDATE Playlist SET parentListId=0,title=?,nextListId=? WHERE id=?`, title, -n.id-1, n.id); err != nil {
 			return err
 		}
-		if _, err = b.exec(ctx, `UPDATE Playlist SET nextListId=? WHERE parentListId=0 AND nextListId=0 AND id<>?`, n.id, n.id); err != nil {
+		if _, err = b.exec(ctx, `UPDATE Playlist SET nextListId=? WHERE parentListId=0 AND COALESCE(nextListId,0)=0 AND id<>?`, n.id, n.id); err != nil {
 			return err
 		}
 		if _, err = b.exec(ctx, `UPDATE Playlist SET nextListId=0 WHERE id=?`, n.id); err != nil {
@@ -668,8 +673,13 @@ func (b *Batch) DeleteList(ctx context.Context, id int64, owned func(int64) bool
 
 // PerfPrev is what the snapshot knows of a row before staged data is applied.
 type PerfPrev struct {
-	State   rbstate.PerfState
-	Written []byte // the digest of what the bridge last wrote, nil for a row only the export filled
+	State      rbstate.PerfState
+	Written    []byte // the digest of what the bridge last wrote, nil for a row only the export filled
+	FastKnown  bool
+	FastRating int64
+	FastCues   []byte
+	FastLoops  []byte
+	FastActive uint32
 }
 
 // asWritten is a row's quickCues as the bridge wrote them when only a load changed them. Engine
@@ -785,7 +795,11 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 		return staged, PerfWritten, facts(false)
 	}
 	// A row the export alone filled: rekordbox's analysis, with what the DJ did on it meanwhile.
-	m := mergeFast(row, fastBaseOf(export), p)
+	base := fastBaseOf(export)
+	if prev.FastKnown {
+		base = fastBase{rating: prev.FastRating, cues: prev.FastCues, loops: prev.FastLoops, active: int64(prev.FastActive)}
+	}
+	m := mergeFast(row, base, p)
 	or := func(deck, staged []byte) []byte {
 		if deck != nil {
 			return deck
