@@ -47,6 +47,22 @@ func readDeviceSQLString(buf []byte, off int) (string, error) {
 		if len(body)%2 != 0 {
 			body = body[:len(body)-1]
 		}
+		ascii := true
+		for i := 0; i < len(body)/2; i++ {
+			c := binary.LittleEndian.Uint16(body[2*i:])
+			if c > 0x7f {
+				ascii = false
+				break
+			}
+		}
+		if ascii {
+			var asciiBody strings.Builder
+			asciiBody.Grow(len(body) / 2)
+			for i := 0; i < len(body)/2; i++ {
+				asciiBody.WriteByte(byte(binary.LittleEndian.Uint16(body[2*i:])))
+			}
+			return strings.TrimRight(asciiBody.String(), "\x00"), nil
+		}
 		u := make([]uint16, len(body)/2)
 		for i := range u {
 			u[i] = binary.LittleEndian.Uint16(body[2*i:])
