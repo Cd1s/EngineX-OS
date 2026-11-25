@@ -238,7 +238,10 @@ var startRemount = func(mount string) error {
 	if err != nil {
 		return err
 	}
-	args := []string{"--unit=" + remountUnit(mount), "--collect", "--no-block", "--quiet", exe}
+	args := []string{"--unit=" + remountUnit(mount), "--collect", "--no-block", "--quiet",
+		"--slice=enginex-background.slice", "--nice=19",
+		"--property=CPUSchedulingPolicy=idle", "--property=IOSchedulingClass=idle", "--property=TimeoutStopSec=5",
+		"--setenv=GOMAXPROCS=1", "--setenv=GOMEMLIMIT=128MiB", exe}
 	if filepath.Base(exe) != "rb-bridge" {
 		args = append(args, "rb-bridge")
 	}
