@@ -103,11 +103,11 @@ It writes nothing when:
 
 ## Known limit (first-generation 5.3.0)
 
-On JP07 (5.3.0) a row filled at its load (staged after the insert read) and loaded onto a deck that already holds
-another track is still analysed by Engine about 1.1 s after the load; Engine's grid, overview and track data replace
-the staged ones (hot cues and loops stay). Not on an empty deck, not after the stick is inserted again, and never on SC
-LIVE 4's Engine. Engine's deck copy of the track then says "not analysed" although the row was filled before Engine
-read it, so that load path takes `isAnalyzed` from a copy made at the insert read. Not handled here.
+On JP07 (5.3.0) a row filled at its load (staged after Engine's insert read) was analysed again by Engine in 4 of 11
+sandbox loads, 1.0-1.7 s after the load, with a loaded deck and with an empty one; Engine's grid, overview and track
+data then replace the staged ones (hot cues and loops stay). Every hooked read after the fill saw the filled row, so
+Engine decides from state taken before the fill: a race in its load path. Rows filled at the insert read (most rows)
+were never analysed again, and SC LIVE 4's Engine never re-analysed one. Not handled here.
 
 ## 64-bit units
 
