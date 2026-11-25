@@ -98,7 +98,9 @@ func (s *steps) more(d time.Duration) bool { return before(s.optional, d) }
 // the kill is left to the job, which has no limit (a next library, next.go). The figures are the
 // deck-speed replica's (armhf at 18 % of one core, 12 ms a request to the stick, 2026-11-25) for two
 // real libraries of 2,416 and 5,962 tracks, the reads as of 7fa6a009; a OneLibrary key is taken as
-// not cached.
+// not cached. A row added costs what its index pages cost to read: 5 ms is the figure for many rows
+// (330 into KDATA: 1.6 ms each); 30 rows into a cold library took 4 to 25 ms each, a read a page
+// for up to the library's index pages. The loop that adds rows also stops by the clock (must).
 type work struct {
 	oneLibrary, deviceLibrary int64 // bytes of export files to read
 	warm                      bool  // the OneLibrary key is in the cache (the job has just read the file)
