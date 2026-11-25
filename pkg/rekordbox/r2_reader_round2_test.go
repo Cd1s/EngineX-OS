@@ -5,7 +5,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -157,38 +159,66 @@ func reflectTrack(seed uint64) Track {
 		return seed
 	}
 	var track Track
-	fillReflectValue(reflect.ValueOf(&track).Elem(), next)
+	if err := fillReflectValue(reflect.ValueOf(&track).Elem(), next); err != nil {
+		panic(err)
+	}
 	return track
 }
 
-func fillReflectValue(v reflect.Value, next func() uint64) {
+func fillReflectValue(v reflect.Value, next func() uint64) error {
 	switch v.Kind() {
 	case reflect.Struct:
 		for i := 0; i < v.NumField(); i++ {
-			fillReflectValue(v.Field(i), next)
+			if err := fillReflectValue(v.Field(i), next); err != nil {
+				return err
+			}
 		}
 	case reflect.String:
-		v.SetString(string([]byte{byte(next()), byte(next()), 'x', '\n', '<'}))
+		switch next() % 4 {
+		case 0:
+			v.SetString("ASCII fast path")
+		case 1:
+			v.SetString("line\u2028paragraph\u2029")
+		case 2:
+			v.SetString(string([]byte{0xff, 0xfe, 'x', '\n', '<'}))
+		default:
+			v.SetString(string([]byte{byte(next()), byte(next()), 'x', '\n', '<'}))
+		}
 	case reflect.Bool:
 		v.SetBool(next()&1 != 0)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		v.SetInt(int64(next() % 1000000))
+		v.SetInt(int64(next()%1000000) - 500000)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		v.SetUint(next() % 1000000)
 	case reflect.Float32, reflect.Float64:
-		v.SetFloat(float64(int64(next()%2000000)-1000000) / 1000)
+		values := []float64{
+			math.SmallestNonzeroFloat64, 1e-10, 1e-7, 9.999999999999999e-7, -1e-7,
+			math.Copysign(0, -1), 1e-6, 1e6, 1e20, 9.999999999999999e20,
+			1e21, 1e22, math.MaxFloat64, -1e21,
+		}
+		v.SetFloat(values[next()%uint64(len(values))])
 	case reflect.Array:
 		for i := 0; i < v.Len(); i++ {
-			fillReflectValue(v.Index(i), next)
+			if err := fillReflectValue(v.Index(i), next); err != nil {
+				return err
+			}
 		}
 	case reflect.Slice:
 		if v.Type() == reflect.TypeOf([]Cue{}) {
-			v.Set(reflect.MakeSlice(v.Type(), 2, 2))
+			length := int(next() % 3)
+			v.Set(reflect.MakeSlice(v.Type(), length, length))
 			for i := 0; i < v.Len(); i++ {
-				fillReflectValue(v.Index(i), next)
+				if err := fillReflectValue(v.Index(i), next); err != nil {
+					return err
+				}
 			}
+		} else {
+			return fmt.Errorf("unhandled reflected slice type %s", v.Type())
 		}
+	default:
+		return fmt.Errorf("unhandled reflected kind %s", v.Kind())
 	}
+	return nil
 }
 
 func assertTrackJSONMatches(t *testing.T, track Track) {
@@ -206,6 +236,31 @@ func assertTrackJSONMatches(t *testing.T, track Track) {
 func TestTrackJSONDifferentialAllFields(t *testing.T) {
 	for seed := uint64(1); seed <= 128; seed++ {
 		assertTrackJSONMatches(t, reflectTrack(seed))
+	}
+}
+
+func TestTrackJSONDifferentialSpecialValues(t *testing.T) {
+	floatValues := []float64{
+		math.SmallestNonzeroFloat64, 1e-10, 1e-7, 9.999999999999999e-7, -1e-7,
+		math.Copysign(0, -1), 1e-6, 1e6, 1e20, 9.999999999999999e20,
+		1e21, 1e22, math.MaxFloat64, -1e21,
+	}
+	for _, value := range floatValues {
+		assertTrackJSONMatches(t, Track{ID: 1, Path: "/track.mp3", BPM: value, Duration: value})
+	}
+	for i := 0; i < 256; i++ {
+		assertTrackJSONMatches(t, Track{ID: 2, Path: "/track.mp3", Title: string([]byte{byte(i)})})
+	}
+	for _, value := range []string{
+		"ASCII fast path", "line\u2028paragraph\u2029", string([]byte{0xc0, 0x80}), string([]byte{0xed, 0xa0, 0x80}),
+	} {
+		assertTrackJSONMatches(t, Track{ID: 3, Path: "/track.mp3", Title: value})
+	}
+	assertTrackJSONMatches(t, Track{})
+	assertTrackJSONMatches(t, Track{ID: 4, Path: "/track.mp3", StartOffsetSamples: -1})
+	var unknown struct{ Value complex64 }
+	if err := fillReflectValue(reflect.ValueOf(&unknown).Elem(), func() uint64 { return 1 }); err == nil {
+		t.Fatal("unknown reflected type was silently skipped")
 	}
 }
 

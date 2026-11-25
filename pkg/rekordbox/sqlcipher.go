@@ -101,7 +101,7 @@ func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 	}
 
 	salt := append([]byte(nil), inPage[:sqlcipherSaltSize]...)
-	keys, fromCache, lease, err := kc.getWithLease(salt, passphrase)
+	keys, fromCache, lease, err := kc.getWithLease(ctx, salt, passphrase)
 	if err != nil {
 		return err
 	}
@@ -157,7 +157,7 @@ func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 				retriedCachedKey = true
 				kc.done(keys)
 				kc.invalidate(salt, passphrase)
-				keys, fromCache, lease, err = kc.getWithLease(salt, passphrase)
+				keys, fromCache, lease, err = kc.getWithLease(ctx, salt, passphrase)
 				if err != nil {
 					return err
 				}
@@ -189,6 +189,8 @@ func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 		}
 		if pgno == 1 && kc != nil && !fromCache {
 			kc.writeShared(salt, passphrase, keys)
+			lease.release()
+			lease = nil
 		}
 	}
 	return nil
@@ -359,7 +361,7 @@ func encryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 		return errors.New("sqlcipher: empty passphrase")
 	}
 
-	keys, fromCache, lease, err := kc.getWithLease(salt, passphrase)
+	keys, fromCache, lease, err := kc.getWithLease(ctx, salt, passphrase)
 	if err != nil {
 		return err
 	}
@@ -429,6 +431,8 @@ func encryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 		}
 		if pgno == 1 && kc != nil && !fromCache {
 			kc.writeShared(salt, passphrase, keys)
+			lease.release()
+			lease = nil
 		}
 	}
 	return nil

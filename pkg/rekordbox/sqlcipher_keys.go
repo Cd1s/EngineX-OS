@@ -1,6 +1,7 @@
 package rekordbox
 
 import (
+	"context"
 	"crypto/pbkdf2"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -35,8 +36,7 @@ type KeyCache struct {
 type cipherKeys struct{ enc, mac []byte }
 
 type deriveLease struct {
-	cache  *KeyCache
-	marker string
+	file *os.File
 }
 
 // NewKeyCache returns an empty cache.
@@ -133,18 +133,12 @@ func (c *KeyCache) remember(id string, k *cipherKeys) {
 // get returns an independent copy of the keys of salt and passphrase. The cache owns its copy,
 // so clearing or invalidating the cache cannot race with a caller that is still using the result.
 func (c *KeyCache) get(salt, passphrase []byte) (*cipherKeys, error) {
-	k, _, lease, err := c.getWithLease(salt, passphrase)
+	k, lease, err := c.getWithLease(context.Background(), salt, passphrase)
 	lease.release()
 	return k, err
 }
 
-// getWithOrigin reports whether the returned keys came from the in-memory or shared cache.
-func (c *KeyCache) getWithOrigin(salt, passphrase []byte) (*cipherKeys, bool, error) {
-	k, fromCache, _, err := c.getWithLease(salt, passphrase)
-	return k, fromCache, err
-}
-
-func (c *KeyCache) getWithLease(salt, passphrase []byte) (*cipherKeys, bool, *deriveLease, error) {
+func (c *KeyCache) getWithLease(ctx context.Context, salt, passphrase []byte) (*cipherKeys, bool, *deriveLease, error) {
 	id := string(salt) + "\x00" + string(passphrase)
 	if c == nil {
 		k, err := deriveCipherKeys(salt, passphrase)
@@ -170,32 +164,48 @@ func (c *KeyCache) getWithLease(salt, passphrase []byte) (*cipherKeys, bool, *de
 		return cloneCipherKeys(k), false, nil, nil
 	}
 	name := sharedKeyName(salt, passphrase)
-	for {
-		if k, ok := c.readSharedLocked(salt, passphrase); ok {
-			c.mu.Lock()
-			c.remember(id, k)
-			c.mu.Unlock()
-			return cloneCipherKeys(k), true, nil, nil
-		}
-		claimed, err := c.claimDerive(name)
-		if err != nil {
+	if k, ok := c.readSharedLocked(salt, passphrase); ok {
+		c.mu.Lock()
+		c.remember(id, k)
+		c.mu.Unlock()
+		return cloneCipherKeys(k), true, nil, nil
+	}
+	lease, err := c.claimDerive(ctx, name)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, false, nil, err
 		}
-		if claimed {
-			t0 := time.Now()
-			k, err := deriveCipherKeys(salt, passphrase)
-			if err != nil {
-				c.releaseDerive(name)
-				return nil, false, nil, err
-			}
-			c.mu.Lock()
-			c.remember(id, k)
-			c.derived += time.Since(t0)
-			c.mu.Unlock()
-			return cloneCipherKeys(k), false, &deriveLease{cache: c, marker: name}, nil
+		// Shared storage is an optimization. If it disappears or becomes
+		// unwritable, continue with the in-memory cache exactly as a nil shared dir.
+		t0 := time.Now()
+		k, deriveErr := deriveCipherKeys(salt, passphrase)
+		if deriveErr != nil {
+			return nil, false, nil, deriveErr
 		}
-		time.Sleep(5 * time.Millisecond)
+		c.mu.Lock()
+		c.remember(id, k)
+		c.derived += time.Since(t0)
+		c.mu.Unlock()
+		return cloneCipherKeys(k), false, nil, nil
 	}
+	if k, ok := c.readSharedLocked(salt, passphrase); ok {
+		lease.release()
+		c.mu.Lock()
+		c.remember(id, k)
+		c.mu.Unlock()
+		return cloneCipherKeys(k), true, nil, nil
+	}
+	t0 := time.Now()
+	k, err := deriveCipherKeys(salt, passphrase)
+	if err != nil {
+		lease.release()
+		return nil, false, nil, err
+	}
+	c.mu.Lock()
+	c.remember(id, k)
+	c.derived += time.Since(t0)
+	c.mu.Unlock()
+	return cloneCipherKeys(k), false, lease, nil
 }
 
 func sharedKeyName(salt, passphrase []byte) string {
@@ -271,7 +281,6 @@ func (c *KeyCache) writeShared(salt, passphrase []byte, k *cipherKeys) {
 		return
 	}
 	ok = true
-	c.removeDeriveLocked(name)
 	c.pruneSharedLocked()
 	if dir, err := os.Open(c.shared); err == nil {
 		_ = dir.Sync()
@@ -300,70 +309,57 @@ func (c *KeyCache) invalidate(salt, passphrase []byte) {
 		defer unlockSharedDir(lock)
 		path := filepath.Join(shared, sharedKeyName(salt, passphrase))
 		if st, err := os.Lstat(path); err == nil && st.Mode().IsRegular() && st.Mode()&os.ModeSymlink == 0 {
-			_ = os.Remove(path)
+			removeSameFile(path, st)
 		}
 		c.pruneSharedLocked()
 	}
 }
 
-func (c *KeyCache) claimDerive(name string) (bool, error) {
-	lock, err := lockSharedDir(c.shared, syscall.LOCK_EX)
-	if err != nil {
-		return false, err
-	}
-	defer unlockSharedDir(lock)
-	keyPath := filepath.Join(c.shared, name)
-	if st, err := os.Lstat(keyPath); err == nil && st.Mode().IsRegular() && st.Size() == 64 && st.Mode()&os.ModeSymlink == 0 {
-		return false, nil
-	}
-	marker := keyPath + ".derive"
-	if st, err := os.Lstat(marker); err == nil {
-		if st.Mode().IsRegular() && time.Since(st.ModTime()) <= time.Minute {
-			return false, nil
+func (c *KeyCache) claimDerive(ctx context.Context, name string) (*deriveLease, error) {
+	path := filepath.Join(c.shared, name+".derive")
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		_ = os.Remove(marker)
-	}
-	f, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return false, nil
+		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+		if err != nil {
+			return nil, err
 		}
-		return false, err
-	}
-	_, writeErr := fmt.Fprintf(f, "%d\n", os.Getpid())
-	closeErr := f.Close()
-	if writeErr != nil || closeErr != nil {
-		_ = os.Remove(marker)
-		if writeErr != nil {
-			return false, writeErr
+		err = flockFile(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return &deriveLease{file: f}, nil
 		}
-		return false, closeErr
+		_ = f.Close()
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if !errors.Is(err, syscall.EAGAIN) && !errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, err
+		}
+		timer := time.NewTimer(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
-	return true, nil
-}
-
-func (c *KeyCache) releaseDerive(name string) {
-	if c == nil || c.shared == "" {
-		return
-	}
-	lock, err := lockSharedDir(c.shared, syscall.LOCK_EX)
-	if err != nil {
-		return
-	}
-	defer unlockSharedDir(lock)
-	c.removeDeriveLocked(name)
-}
-
-func (c *KeyCache) removeDeriveLocked(name string) {
-	_ = os.Remove(filepath.Join(c.shared, name+".derive"))
 }
 
 func (l *deriveLease) release() {
-	if l == nil || l.cache == nil {
+	if l == nil || l.file == nil {
 		return
 	}
-	l.cache.releaseDerive(l.marker)
-	l.cache = nil
+	for {
+		err := flockFile(int(l.file.Fd()), syscall.LOCK_UN)
+		if !errors.Is(err, syscall.EINTR) {
+			break
+		}
+	}
+	_ = l.file.Close()
+	l.file = nil
 }
 
 // done clears keys that no cache keeps.
@@ -421,24 +417,24 @@ func (c *KeyCache) pruneSharedLocked() {
 		path string
 		name string
 		when time.Time
+		info os.FileInfo
 	}
 	var files []candidate
 	for _, entry := range entries {
 		if strings.HasSuffix(entry.Name(), ".derive") {
-			if st, err := entry.Info(); err == nil && time.Since(st.ModTime()) > time.Minute {
-				_ = os.Remove(filepath.Join(c.shared, entry.Name()))
-			}
 			continue
 		}
 		if strings.HasSuffix(entry.Name(), ".lock") {
-			_ = os.Remove(filepath.Join(c.shared, entry.Name()))
+			if st, err := entry.Info(); err == nil {
+				removeSameFile(filepath.Join(c.shared, entry.Name()), st)
+			}
 			continue
 		}
 		st, err := entry.Info()
 		if err != nil || !st.Mode().IsRegular() || st.Size() != 64 || filepath.Ext(entry.Name()) != "" {
 			continue
 		}
-		files = append(files, candidate{path: filepath.Join(c.shared, entry.Name()), name: entry.Name(), when: st.ModTime()})
+		files = append(files, candidate{path: filepath.Join(c.shared, entry.Name()), name: entry.Name(), when: st.ModTime(), info: st})
 	}
 	if len(files) <= maxSharedKeyFiles {
 		return
@@ -450,6 +446,17 @@ func (c *KeyCache) pruneSharedLocked() {
 		return files[i].when.Before(files[j].when)
 	})
 	for _, file := range files[:len(files)-maxSharedKeyFiles] {
-		_ = os.Remove(file.path)
+		removeSameFile(file.path, file.info)
 	}
+}
+
+func removeSameFile(path string, expected os.FileInfo) {
+	if expected == nil {
+		return
+	}
+	current, err := os.Lstat(path)
+	if err != nil || !os.SameFile(current, expected) {
+		return
+	}
+	_ = os.Remove(path)
 }
