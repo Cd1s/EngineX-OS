@@ -81,12 +81,11 @@ func persistentKeyDir(dataDir string) string {
 	return filepath.Join(dataDir, "rb-keys")
 }
 
-// newKeyCache is a key cache in the persistent directory; tests, a caller that named a directory
-// and a process that is not root keep pkg/rekordbox's choice.
+// newKeyCache is a key cache in the persistent directory without mutating the process environment.
 func newKeyCache() *rekordbox.KeyCache {
 	if !testing.Testing() && os.Getenv(keyCacheEnv) == "" && os.Geteuid() == 0 {
 		if dir := persistentKeyDir(keyDataDir); dir != "" {
-			os.Setenv(keyCacheEnv, dir)
+			return rekordbox.NewKeyCacheAt(dir)
 		}
 	}
 	return rekordbox.NewKeyCache()

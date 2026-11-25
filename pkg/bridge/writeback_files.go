@@ -132,6 +132,9 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 				}
 			} else {
 				data, err = rekordbox.RewritePDBMetadata(raw, pdbMeta)
+				if err != nil {
+					err = fmt.Errorf("writeback: %s: %w", t.rel, err)
+				}
 			}
 			if err != nil {
 				return nil, err
@@ -369,12 +372,16 @@ func syncPath(path string) error {
 
 // stagedWhole reports whether a staged copy is a whole file of dst's kind.
 func stagedWhole(tmp, dst string) bool {
+	return stagedWholeWithKeys(tmp, dst, nil)
+}
+
+func stagedWholeWithKeys(tmp, dst string, keys *rekordbox.KeyCache) bool {
 	switch strings.ToLower(filepath.Base(dst)) {
 	case "export.pdb":
 		_, err := rekordbox.ReadPDB(tmp)
 		return err == nil && rekordbox.CheckPDBExtent(tmp) == nil
 	case "exportlibrary.db":
-		_, err := rekordbox.ReadSQLiteWhole(context.Background(), tmp)
+		_, err := rekordbox.ReadSQLiteWholeKeys(context.Background(), tmp, keys)
 		return err == nil
 	default:
 		b, err := os.ReadFile(tmp)
@@ -389,12 +396,16 @@ func stagedWhole(tmp, dst string) bool {
 // putBack restores rel when a cut pass left it missing: from its staged copy when that is
 // whole, else from its first-original backup. False when rel stays missing.
 func putBack(mount, rel, name string) bool {
+	return putBackWithKeys(mount, rel, name, nil)
+}
+
+func putBackWithKeys(mount, rel, name string, keys *rekordbox.KeyCache) bool {
 	dst := filepath.Join(mount, rel)
 	if _, err := os.Lstat(dst); !errors.Is(err, os.ErrNotExist) {
 		return true
 	}
 	staged := filepath.Join(filepath.Dir(dst), name)
-	if st, err := os.Lstat(staged); err == nil && st.Mode().IsRegular() && stagedWhole(staged, dst) && replaceFile(staged, dst) == nil {
+	if st, err := os.Lstat(staged); err == nil && st.Mode().IsRegular() && stagedWholeWithKeys(staged, dst, keys) && replaceFile(staged, dst) == nil {
 		log.Printf("rb-bridge: %s was missing after a cut write-back; its new copy put back", dst)
 		return true
 	}
@@ -420,6 +431,12 @@ func putBack(mount, rel, name string) bool {
 // mark names that is missing is put back; then, when none is missing, the temporary files in
 // the marked folders and the mark go. It returns how many temporary files it removed.
 func CleanWriteBackLeftovers(mount string) int {
+	return CleanWriteBackLeftoversWithKeys(mount, nil)
+}
+
+// CleanWriteBackLeftoversWithKeys uses the session's warm key cache when it validates a staged
+// OneLibrary recovery copy.
+func CleanWriteBackLeftoversWithKeys(mount string, keys *rekordbox.KeyCache) int {
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	n := rbstate.CleanTemps(dir)
 	mark := filepath.Join(dir, writeBackMarkName)
@@ -443,7 +460,7 @@ func CleanWriteBackLeftovers(mount string) int {
 		case !ok:
 		case !isTarget:
 			dirs = append(dirs, rel)
-		case !putBack(mount, rel, name):
+		case !putBackWithKeys(mount, rel, name, keys):
 			whole = false
 		}
 	}

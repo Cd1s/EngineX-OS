@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 const CueQuiet = 5 * time.Second
@@ -98,18 +100,23 @@ func (w *CueWatcher) rescan() {
 	for mount := range now {
 		if w.sticks[mount] == nil {
 			w.sticks[mount] = &cueStick{session: CueSession{keys: newKeyCache()}, state: quietState(mount)}
-			go func() {
-				if n := CleanWriteBackLeftovers(mount); n > 0 {
+			keys := w.sticks[mount].session.keys
+			go func(keys *rekordbox.KeyCache) {
+				if n := CleanWriteBackLeftoversWithKeys(mount, keys); n > 0 {
 					log.Printf("rb-bridge: removed %d temporary files a cut write-back left on %s", n, mount)
 				}
-			}()
+			}(w.sticks[mount].session.keys)
 		}
 	}
 }
 
 // forget stops watching the sticks keep does not name: their pass is cancelled, their keys go.
 func (w *CueWatcher) forget(keep map[string]bool) {
-	var gone []*cueStick
+	type forgotten struct {
+		stick *cueStick
+		done  <-chan struct{}
+	}
+	var gone []forgotten
 	w.mu.Lock()
 	for mount, st := range w.sticks {
 		if !keep[mount] {
@@ -117,12 +124,15 @@ func (w *CueWatcher) forget(keep map[string]bool) {
 				st.cancel()
 			}
 			delete(w.sticks, mount)
-			gone = append(gone, st)
+			gone = append(gone, forgotten{stick: st, done: st.running})
 		}
 	}
 	w.mu.Unlock()
-	for _, st := range gone {
-		st.session.keys.Clear()
+	for _, item := range gone {
+		if item.done != nil {
+			<-item.done
+		}
+		item.stick.session.keys.Clear()
 	}
 }
 
