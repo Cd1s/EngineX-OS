@@ -54,6 +54,7 @@ func legacyEachSQLRow(ctx context.Context, db *sql.DB, table string, wanted []st
 		return err
 	}
 	var cols, keys []string
+	var deletedColumn string
 	for info.Next() {
 		var name string
 		if err := info.Scan(&name); err != nil {
@@ -64,6 +65,9 @@ func legacyEachSQLRow(ctx context.Context, db *sql.DB, table string, wanted []st
 			cols = append(cols, quote(name))
 			keys = append(keys, normalized(name))
 		}
+		if normalized(name) == "rblocaldeleted" {
+			deletedColumn = quote(name)
+		}
 	}
 	if err := info.Close(); err != nil {
 		return err
@@ -71,7 +75,11 @@ func legacyEachSQLRow(ctx context.Context, db *sql.DB, table string, wanted []st
 	if len(cols) == 0 {
 		return nil
 	}
-	rows, err := db.QueryContext(ctx, `SELECT `+strings.Join(cols, ",")+` FROM `+quote(table))
+	where := ""
+	if deletedColumn != "" {
+		where = ` WHERE COALESCE(` + deletedColumn + `, 0) = 0`
+	}
+	rows, err := db.QueryContext(ctx, `SELECT `+strings.Join(cols, ",")+` FROM `+quote(table)+where)
 	if err != nil {
 		return err
 	}
@@ -164,6 +172,8 @@ func legacyReadOneLibrary(ctx context.Context, db *sql.DB) (*Library, error) {
 		var fileSize int64
 		if size, ok := row.sint("file_size"); ok && size > 0 {
 			fileSize = size
+		} else if size := row.decimal("file_size"); size > 0 && size < 0x1p63 {
+			fileSize = int64(size)
 		}
 		t := Track{ID: row.num("id", "content_id", "track_id"), Path: path, AnalysisPath: row.get("analysisDataFilePath", "analysis_data_path", "analyze_path", "analysis_path"), Title: row.get("title", "name"), Artist: lookups["artist"][row.num("artist_id_artist", "artist_id")], Composer: lookups["artist"][row.num("artist_id_composer", "composer_id")], Remixer: lookups["artist"][row.num("artist_id_remixer", "remixer_id")], Album: lookups["album"][row.num("album_id")], Genre: lookups["genre"][row.num("genre_id")], Label: lookups["label"][row.num("label_id")], Key: key, BPM: parseSQLiteBPM(row), Duration: row.decimal("length", "duration"), SampleRate: int(row.num("samplingRate", "sample_rate")), BitDepth: int(row.num("bit_depth")), Bitrate: int(row.num("bit_rate", "bitrate")), FileSize: fileSize, Year: int(row.num("release_year", "year")), Rating: int(row.num("rating")), Comment: row.get("djComment", "commnt", "comment"), ArtworkPath: art}
 		if t.Artist == "" {

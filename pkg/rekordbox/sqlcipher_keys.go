@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,8 +17,9 @@ import (
 	"time"
 )
 
-// KeyCache keeps the SQLCipher 4 keys derived for an export's salt in memory, never on disk
-// (#321). PBKDF2-HMAC-SHA512 with 256 000 rounds is the dearest step of a cue write-back on a
+// KeyCache keeps the SQLCipher 4 keys derived for an export's salt in memory and in the approved
+// bounded shared cache when configured (#321). PBKDF2-HMAC-SHA512 with 256 000 rounds is the
+// dearest step of a cue write-back on a
 // deck: with one cache a run decrypts and encrypts with a single derivation, and a long-lived
 // caller (the stick's watcher in stream-sync) derives once per export it sees. rekordbox keeps
 // an export's salt when it writes the file again, and so does EncryptSQLCipher4's caller, so
@@ -33,15 +35,25 @@ type cipherKeys struct{ enc, mac []byte }
 
 // NewKeyCache returns an empty cache.
 func NewKeyCache() *KeyCache {
+	sharedDir := os.Getenv("ENGINEX_RB_SHARED_KEY_CACHE")
+	if sharedDir == "" && flag.Lookup("test.v") == nil && !strings.HasSuffix(filepath.Base(os.Args[0]), ".test") && os.Geteuid() == 0 {
+		const dir = "/run/enginex-rb-keys"
+		sharedDir = dir
+	}
+	return newKeyCache(sharedDir)
+}
+
+// NewKeyCacheAt returns an empty cache that uses sharedDir for the approved persistent cache.
+// An empty directory keeps keys in memory only.
+func NewKeyCacheAt(sharedDir string) *KeyCache {
+	return newKeyCache(sharedDir)
+}
+
+func newKeyCache(sharedDir string) *KeyCache {
 	c := &KeyCache{}
-	if sharedDir := os.Getenv("ENGINEX_RB_SHARED_KEY_CACHE"); sharedDir != "" {
+	if sharedDir != "" {
 		if err := os.MkdirAll(sharedDir, 0o700); err == nil && os.Chmod(sharedDir, 0o700) == nil {
 			c.shared = sharedDir
-		}
-	} else if flag.Lookup("test.v") == nil && !strings.HasSuffix(filepath.Base(os.Args[0]), ".test") && os.Geteuid() == 0 {
-		const dir = "/run/enginex-rb-keys"
-		if err := os.MkdirAll(dir, 0o700); err == nil && os.Chmod(dir, 0o700) == nil {
-			c.shared = dir
 		}
 	}
 	return c
@@ -77,61 +89,24 @@ func (c *KeyCache) Clear() {
 	c.keys = nil
 }
 
-// get returns the keys of salt and passphrase, deriving them once. The lock is held while
-// deriving, so two callers of one cache never derive the same keys twice.
-func (c *KeyCache) get(salt, passphrase []byte) (*cipherKeys, error) {
-	id := string(salt) + "\x00" + string(passphrase)
-	if c != nil {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if k, ok := c.keys[id]; ok {
-			return k, nil
-		}
-		if c.shared != "" {
-			if k, ok := c.readShared(salt, passphrase); ok {
-				if c.keys == nil {
-					c.keys = map[string]*cipherKeys{}
-				}
-				c.keys[id] = k
-				return k, nil
-			}
-		}
+func cloneCipherKeys(k *cipherKeys) *cipherKeys {
+	if k == nil {
+		return nil
 	}
-	var lock *os.File
-	if c != nil && c.shared != "" {
-		var err error
-		lock, err = os.OpenFile(filepath.Join(c.shared, sharedKeyName(salt, passphrase)+".lock"), os.O_RDWR|os.O_CREATE, 0o600)
-		if err == nil {
-			if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-				lock.Close()
-				lock = nil
-			}
-		}
-		if lock != nil {
-			if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-				_ = lock.Close()
-				lock = nil
-			}
-		}
-		if lock != nil {
-			defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); _ = lock.Close() }()
-			if k, ok := c.readShared(salt, passphrase); ok {
-				if c.keys == nil {
-					c.keys = map[string]*cipherKeys{}
-				}
-				c.keys[id] = k
-				return k, nil
-			}
-		}
+	return &cipherKeys{enc: append([]byte(nil), k.enc...), mac: append([]byte(nil), k.mac...)}
+}
+
+func deriveCipherKeys(salt, passphrase []byte) (*cipherKeys, error) {
+	if len(salt) != sqlcipherSaltSize {
+		return nil, fmt.Errorf("sqlcipher: invalid salt length %d", len(salt))
 	}
-	t0 := time.Now()
 	derivations.Add(1)
 	enc, err := pbkdf2.Key(sha512.New, string(passphrase), salt, sqlcipherKDFIter, 32)
 	if err != nil {
 		return nil, fmt.Errorf("sqlcipher: derive encryption key: %w", err)
 	}
 	var macSalt [sqlcipherSaltSize]byte
-	for i := 0; i < sqlcipherSaltSize; i++ {
+	for i := range macSalt {
 		macSalt[i] = salt[i] ^ sqlcipherHMACSaltMask
 	}
 	mac, err := pbkdf2.Key(sha512.New, string(enc), macSalt[:], sqlcipherFastKDFIter, 32)
@@ -139,15 +114,65 @@ func (c *KeyCache) get(salt, passphrase []byte) (*cipherKeys, error) {
 		clear(enc)
 		return nil, fmt.Errorf("sqlcipher: derive HMAC key: %w", err)
 	}
-	k := &cipherKeys{enc: enc, mac: mac}
-	if c != nil {
-		if c.keys == nil {
-			c.keys = map[string]*cipherKeys{}
-		}
-		c.keys[id] = k
-		c.derived += time.Since(t0)
+	return &cipherKeys{enc: enc, mac: mac}, nil
+}
+
+func (c *KeyCache) remember(id string, k *cipherKeys) {
+	if c.keys == nil {
+		c.keys = map[string]*cipherKeys{}
 	}
-	return k, nil
+	c.keys[id] = k
+}
+
+// get returns an independent copy of the keys of salt and passphrase. The cache owns its copy,
+// so clearing or invalidating the cache cannot race with a caller that is still using the result.
+func (c *KeyCache) get(salt, passphrase []byte) (*cipherKeys, error) {
+	k, _, err := c.getWithOrigin(salt, passphrase)
+	return k, err
+}
+
+// getWithOrigin reports whether the returned keys came from the in-memory or shared cache.
+func (c *KeyCache) getWithOrigin(salt, passphrase []byte) (*cipherKeys, bool, error) {
+	id := string(salt) + "\x00" + string(passphrase)
+	if c == nil {
+		k, err := deriveCipherKeys(salt, passphrase)
+		return k, false, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if k, ok := c.keys[id]; ok {
+		return cloneCipherKeys(k), true, nil
+	}
+	if c.shared != "" {
+		lock, err := lockSharedDir(c.shared)
+		if err == nil {
+			defer unlockSharedDir(lock)
+			if k, ok := c.readShared(salt, passphrase); ok {
+				c.remember(id, k)
+				return cloneCipherKeys(k), true, nil
+			}
+			t0 := time.Now()
+			k, err := deriveCipherKeys(salt, passphrase)
+			if err != nil {
+				return nil, false, err
+			}
+			c.remember(id, k)
+			c.derived += time.Since(t0)
+			return cloneCipherKeys(k), false, nil
+		}
+		if k, ok := c.readShared(salt, passphrase); ok {
+			c.remember(id, k)
+			return cloneCipherKeys(k), true, nil
+		}
+	}
+	t0 := time.Now()
+	k, err := deriveCipherKeys(salt, passphrase)
+	if err != nil {
+		return nil, false, err
+	}
+	c.remember(id, k)
+	c.derived += time.Since(t0)
+	return cloneCipherKeys(k), false, nil
 }
 
 func sharedKeyName(salt, passphrase []byte) string {
@@ -179,11 +204,17 @@ func (c *KeyCache) writeShared(salt, passphrase []byte, k *cipherKeys) {
 	if st, err := os.Lstat(c.shared); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
 		return
 	}
-	path := filepath.Join(c.shared, sharedKeyName(salt, passphrase))
+	lock, err := lockSharedDir(c.shared)
+	if err != nil {
+		return
+	}
+	defer unlockSharedDir(lock)
+	name := sharedKeyName(salt, passphrase)
+	path := filepath.Join(c.shared, name)
 	if st, err := os.Lstat(path); err == nil && st.Mode()&os.ModeSymlink != 0 {
 		return
 	}
-	tmpPath := filepath.Join(c.shared, fmt.Sprintf(".%s.%d.tmp", sharedKeyName(salt, passphrase), os.Getpid()))
+	tmpPath := filepath.Join(c.shared, fmt.Sprintf(".%s.%d.%d.tmp", name, os.Getpid(), time.Now().UnixNano()))
 	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return
@@ -205,6 +236,7 @@ func (c *KeyCache) writeShared(salt, passphrase []byte, k *cipherKeys) {
 		return
 	}
 	ok = true
+	c.pruneSharedLocked()
 	if dir, err := os.Open(c.shared); err == nil {
 		_ = dir.Sync()
 		_ = dir.Close()
@@ -216,23 +248,93 @@ func (c *KeyCache) invalidate(salt, passphrase []byte) {
 		return
 	}
 	id := string(salt) + "\x00" + string(passphrase)
+	c.mu.Lock()
 	if k, ok := c.keys[id]; ok {
 		clear(k.enc)
 		clear(k.mac)
 		delete(c.keys, id)
 	}
-	if c.shared != "" {
-		path := filepath.Join(c.shared, sharedKeyName(salt, passphrase))
+	shared := c.shared
+	c.mu.Unlock()
+	if shared != "" {
+		lock, err := lockSharedDir(shared)
+		if err != nil {
+			return
+		}
+		defer unlockSharedDir(lock)
+		path := filepath.Join(shared, sharedKeyName(salt, passphrase))
 		if st, err := os.Lstat(path); err == nil && st.Mode().IsRegular() && st.Mode()&os.ModeSymlink == 0 {
 			_ = os.Remove(path)
 		}
+		c.pruneSharedLocked()
 	}
 }
 
 // done clears keys that no cache keeps.
 func (c *KeyCache) done(k *cipherKeys) {
-	if c == nil && k != nil {
+	if k != nil {
 		clear(k.enc)
 		clear(k.mac)
+	}
+}
+
+func lockSharedDir(dir string) (*os.File, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func unlockSharedDir(f *os.File) {
+	if f == nil {
+		return
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = f.Close()
+}
+
+const maxSharedKeyFiles = 8
+
+func (c *KeyCache) pruneSharedLocked() {
+	if c == nil || c.shared == "" {
+		return
+	}
+	entries, err := os.ReadDir(c.shared)
+	if err != nil {
+		return
+	}
+	type candidate struct {
+		path string
+		name string
+		when time.Time
+	}
+	var files []candidate
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".lock") {
+			_ = os.Remove(filepath.Join(c.shared, entry.Name()))
+			continue
+		}
+		st, err := entry.Info()
+		if err != nil || !st.Mode().IsRegular() || st.Size() != 64 || filepath.Ext(entry.Name()) != "" {
+			continue
+		}
+		files = append(files, candidate{path: filepath.Join(c.shared, entry.Name()), name: entry.Name(), when: st.ModTime()})
+	}
+	if len(files) <= maxSharedKeyFiles {
+		return
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].when.Equal(files[j].when) {
+			return files[i].name < files[j].name
+		}
+		return files[i].when.Before(files[j].when)
+	})
+	for _, file := range files[:len(files)-maxSharedKeyFiles] {
+		_ = os.Remove(file.path)
 	}
 }

@@ -47,11 +47,8 @@ func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
 	if _, err := r.ReadAt(tables, 28); err != nil {
 		return nil, err
 	}
-	trackCapacity := int(size / 400)
-	if trackCapacity < 16 {
-		trackCapacity = 16
-	}
-	l := &Library{Tracks: make([]Track, 0, trackCapacity), Artwork: map[uint32]string{}, Keys: map[uint32]string{}}
+	trackCapacity := min(max(int(size/400), 16), 4096)
+	l := &Library{Artwork: map[uint32]string{}, Keys: map[uint32]string{}}
 
 	type trackRow struct {
 		recordHash                         string
@@ -279,6 +276,7 @@ func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
 	}
 
 	knownTracks := make(map[uint32]bool, len(tracks))
+	l.Tracks = make([]Track, 0, len(tracks))
 	for _, row := range tracks {
 		var bpm float64
 		if row.bpmRaw != 0 && row.bpmRaw != 0x7fffffff && row.bpmRaw != 0xffffffff && row.bpmRaw <= 100000 {
@@ -356,5 +354,9 @@ func ReadPDB(path string) (*Library, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ParsePDB(f, s.Size())
+	l, err := ParsePDB(f, s.Size())
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return l, nil
 }

@@ -65,7 +65,17 @@ func ReadSQLiteWhole(ctx context.Context, path string) (*Library, error) {
 	return readSQLite(ctx, path, nil, nil, true)
 }
 
-func readSQLite(ctx context.Context, path string, adapter SQLiteAdapter, kc *KeyCache, whole bool) (*Library, error) {
+// ReadSQLiteWholeKeys is ReadSQLiteWhole using kc for the SQLCipher key cache.
+func ReadSQLiteWholeKeys(ctx context.Context, path string, kc *KeyCache) (*Library, error) {
+	return readSQLite(ctx, path, nil, kc, true)
+}
+
+func readSQLite(ctx context.Context, path string, adapter SQLiteAdapter, kc *KeyCache, whole bool) (library *Library, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("%s: %w", path, err)
+		}
+	}()
 	abs, e := filepath.Abs(path)
 	if e != nil {
 		return nil, e
@@ -272,7 +282,7 @@ func driverInt(v driver.Value) (int64, bool) {
 			return int64(x), true
 		}
 	case float64:
-		if x >= math.MinInt64 && x <= math.MaxInt64 && x == math.Trunc(x) {
+		if x >= -0x1p63 && x < 0x1p63 && x == math.Trunc(x) {
 			return int64(x), true
 		}
 	case []byte:
@@ -300,24 +310,7 @@ func (r sqlDriverRecord) sint(names ...string) (int64, bool) {
 }
 
 func (r sqlDriverRecord) decimal(names ...string) float64 {
-	v := r.raw(names...)
-	switch x := v.(type) {
-	case int64:
-		return float64(x)
-	case int:
-		return float64(x)
-	case uint64:
-		return float64(x)
-	case float64:
-		return x
-	case []byte:
-		f, _ := strconv.ParseFloat(string(x), 64)
-		return f
-	case string:
-		f, _ := strconv.ParseFloat(x, 64)
-		return f
-	}
-	return 0
+	return driverDecimal(r.raw(names...))
 }
 
 type sqlRecordLike interface {
@@ -445,7 +438,8 @@ var (
 		{"key_name"},
 		{"key_id"},
 		{"key"},
-		{"image_id", "artwork_id"},
+		{"image_id"},
+		{"artwork_id"},
 		{"image_path"},
 		{"file_size"},
 		{"analysisDataFilePath", "analysis_data_path", "analyze_path", "analysis_path"},
@@ -465,8 +459,6 @@ var (
 		{"rating"},
 		{"djComment", "commnt", "comment"},
 		{"artist"},
-		{"composer"},
-		{"remixer"},
 	}
 	cueColumnGroups = []sqlColumnGroup{
 		{"content_id"},
@@ -513,9 +505,9 @@ type contentProjection struct {
 	id                                     int
 	path                                   int
 	fileName, folderPath                   int
-	bpmX100, bpm, tempo                    int
+	bpmX100, bpm                           int
 	keyName, keyID, key                    int
-	imageID, imagePath                     int
+	imageID, artworkID, imagePath          int
 	fileSize, analysisPath                 int
 	title, artistID, composerID, remixerID int
 	albumID, album, genreID, labelID       int
@@ -653,11 +645,11 @@ func newContentProjection(ctx context.Context, db *sql.DB, table string) (conten
 		folderPath:   contentField(p, "folder_path"),
 		bpmX100:      contentField(p, "bpmx100"),
 		bpm:          contentField(p, "bpm"),
-		tempo:        contentField(p, "tempo"),
 		keyName:      contentField(p, "key_name"),
 		keyID:        contentField(p, "key_id"),
 		key:          contentField(p, "key"),
-		imageID:      contentField(p, "image_id", "artwork_id"),
+		imageID:      contentField(p, "image_id"),
+		artworkID:    contentField(p, "artwork_id"),
 		imagePath:    contentField(p, "image_path"),
 		fileSize:     contentField(p, "file_size"),
 		analysisPath: contentField(p, "analysisDataFilePath", "analysis_data_path", "analyze_path", "analysis_path"),
@@ -704,7 +696,10 @@ func driverNumAt(values []driver.Value, index int) uint32 {
 }
 
 func driverDecimalAt(values []driver.Value, index int) float64 {
-	v := driverValueAt(values, index)
+	return driverDecimal(driverValueAt(values, index))
+}
+
+func driverDecimal(v driver.Value) float64 {
 	switch x := v.(type) {
 	case int64:
 		return float64(x)
@@ -743,9 +738,6 @@ func parseContentBPM(values []driver.Value, p contentProjection) float64 {
 		return 0
 	}
 	bpm := driverDecimalAt(values, p.bpm)
-	if p.bpm < 0 || driverValueAt(values, p.bpm) == nil {
-		bpm = driverDecimalAt(values, p.tempo)
-	}
 	if bpm > 1000 {
 		bpm /= 100
 	}
@@ -830,7 +822,7 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 		}
 		artworkPath := lookups["image"][driverNumAt(values, p.imageID)]
 		if artworkPath == "" {
-			artworkPath = l.Artwork[driverNumAt(values, p.imageID)]
+			artworkPath = l.Artwork[driverNumAt(values, p.artworkID)]
 		}
 		if artworkPath == "" {
 			artworkPath = driverStringAt(values, p.imagePath)
@@ -838,7 +830,7 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 		var fileSize int64
 		if sz, ok := driverIntAt(values, p.fileSize); ok && sz > 0 {
 			fileSize = sz
-		} else if fsz := driverDecimalAt(values, p.fileSize); fsz > 0 {
+		} else if fsz := driverDecimalAt(values, p.fileSize); fsz > 0 && fsz < 0x1p63 {
 			fileSize = int64(fsz)
 		}
 		// OneLibrary content.length is stored in whole seconds (verified against

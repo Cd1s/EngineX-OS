@@ -97,7 +97,7 @@ func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 	}
 
 	salt := append([]byte(nil), inPage[:sqlcipherSaltSize]...)
-	keys, err := kc.get(salt, passphrase)
+	keys, fromCache, err := kc.getWithOrigin(salt, passphrase)
 	if err != nil {
 		return err
 	}
@@ -112,6 +112,7 @@ func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 	var sumBuf [sqlcipherHMACSize]byte
 	var pgLE [4]byte
 	autoVacuum := false
+	retriedCachedKey := false
 
 	totalPages := uint32(size / sqlcipherPageSize)
 	const usableEnd = sqlcipherPageSize - sqlcipherReserveSize // 4016
@@ -145,9 +146,11 @@ func decryptSQLCipher4(ctx context.Context, r io.Reader, size int64, w io.Writer
 		_, _ = mac.Write(pgLE[:])
 		gotMAC := mac.Sum(sumBuf[:0])
 		if !hmac.Equal(gotMAC, inPage[ivEnd:sqlcipherPageSize]) {
-			if pgno == 1 && kc != nil {
+			if pgno == 1 && kc != nil && fromCache && !retriedCachedKey {
+				retriedCachedKey = true
+				kc.done(keys)
 				kc.invalidate(salt, passphrase)
-				keys, err = kc.get(salt, passphrase)
+				keys, fromCache, err = kc.getWithOrigin(salt, passphrase)
 				if err != nil {
 					return err
 				}
