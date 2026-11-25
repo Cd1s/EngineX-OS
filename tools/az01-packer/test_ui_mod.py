@@ -8203,6 +8203,119 @@ assert.equal(scDeckClockTimer.interval, 100);
             res = subprocess.run(["node"], input=script, text=True, capture_output=True)
             self.assertEqual(res.returncode, 0, res.stderr)
 
+    def test_deck_clock_and_shadow_report_song_loading_and_wake_immediately(self):
+        m = bp.SERVICES_MAIN
+        self.assertIn("onScDeckClockChanged:", m)
+        self.assertIn("scDeckClockWake", m)
+        self.assertIn("scDeckClockWatch", m)
+        fn = m.split("function scDeckClockDeckProps(", 1)[1].split("\t// 25 Hz around every edge", 1)[0]
+        self.assertIn("/Track/SongLoading", fn)
+        self.assertIn("stateChanged.connect", fn)
+        shadow_fn = m.split("function scShadowProperties(", 1)[1].split("function scShadowTick(", 1)[0]
+        self.assertIn("/Track/SongLoading", shadow_fn)
+        if shutil.which("node"):
+            tr_fn = m.split("function scTr(path) {", 1)[1].split("// #151:", 1)[0]
+            script = r'''
+const assert = require('node:assert/strict');
+const root = globalThis;
+var scPropCache = {}, scDeckClock = false, scDeckClockWatched = false, scShadowLoadingWatched = {},
+    scFourDeckRole = "", scShadowEmptyObject = {}, scDeckClockWasActive = false, scDeckClockDirty = false,
+    scDeckClockRequest = null, scDeckClockProps = {}, scDeckClockProbeAt = {},
+    scDeckClockPrevPos = {}, scDeckClockPrevCue = {}, scDeckClockPrevLoaded = {},
+    scDeckClockPrevLen = {}, scDeckClockOut = [],
+    scDeckClockPostAt = 0, scDeckClockSig = "";
+const scDeckClockTimer = { interval: 500 };
+let posts = [];
+function mkProp(init) {
+    const listeners = [];
+    const obj = Object.assign({}, init, {
+        stateChanged: { connect(f) { listeners.push(f); } },
+        emit() { for (const f of listeners) f(); },
+        count() { return listeners.length; }
+    });
+    return obj;
+}
+const props = {
+    "/Engine/Deck1/PlayState": mkProp({ state: false }),
+    "/Engine/Deck1/Track/SongLoaded": mkProp({ state: false }),
+    "/Engine/Deck1/Track/SongLoading": mkProp({ state: false }),
+    "/Engine/Deck1/Track/TrackLength": mkProp({ unnormalized: 0 }),
+    "/Engine/Deck1/Track/CueLEDState": mkProp({ state: false }),
+    "/Engine/Deck1/DeckIsMaster": mkProp({ state: false }),
+    "/Engine/Deck1/OriginalBPM": mkProp({ unnormalized: 0 }),
+    "/Engine/Deck1/CurrentBPM": mkProp({ unnormalized: 0 }),
+    "/Engine/Deck1/BeatNumber": mkProp({ unnormalized: 0 }),
+    "/Engine/Deck1/Track/TrackPosition": mkProp({ unnormalized: 0 }),
+    "/Engine/Deck1/Track/SampleRate": mkProp({ value: 44100 }),
+    "/Engine/Deck1/ExternalScratchWheelTouch": mkProp({ state: false }),
+    "/Engine/Deck1/PlatterUserAction": mkProp({ state: false }),
+};
+const Planck = { getProperty(p) { return props[p] ? { translator: props[p] } : null; } };
+class XMLHttpRequest {
+    constructor() { this.readyState = 0; }
+    open(m, u) { this.readyState = 1; this.method = m; this.url = u; }
+    send(body) { this.readyState = 4; posts.push(JSON.parse(body)); }
+    abort() { this.readyState = 0; }
+}
+function scTr(path) {''' + tr_fn + "\nfunction scDeckClockDeckProps(" + fn + r'''
+root.scTr = scTr;
+root.scDeckClockWake = scDeckClockWake;
+// Watch wires stateChanged signals once while scDeckClock is false with ZERO XHR traffic.
+scDeckClockWatch();
+assert.equal(scDeckClockWatched, true);
+assert.equal(posts.length, 0);
+// Platter, CUE LED, PlayState, and SongLoading edges MUST NOT send synchronous XHRs while scDeckClock is false.
+props["/Engine/Deck1/PlatterUserAction"].state = true;
+props["/Engine/Deck1/PlatterUserAction"].emit();
+props["/Engine/Deck1/Track/CueLEDState"].state = true;
+props["/Engine/Deck1/Track/CueLEDState"].emit();
+props["/Engine/Deck1/PlayState"].state = true;
+props["/Engine/Deck1/PlayState"].emit();
+props["/Engine/Deck1/Track/SongLoading"].state = true;
+props["/Engine/Deck1/Track/SongLoading"].emit();
+assert.equal(posts.length, 0, "no XHR permitted while scDeckClock is false");
+props["/Engine/Deck1/PlatterUserAction"].state = false;
+props["/Engine/Deck1/Track/CueLEDState"].state = false;
+props["/Engine/Deck1/PlayState"].state = false;
+props["/Engine/Deck1/Track/SongLoading"].state = false;
+// Once scDeckClock flips true (background import / DMX / clock poll), tick & SongLoading wake immediately.
+scDeckClock = true;
+scDeckClockTick();
+assert.equal(posts.length, 1);
+assert.equal(posts[0][0].loading, false);
+props["/Engine/Deck1/Track/SongLoading"].state = true;
+props["/Engine/Deck1/Track/SongLoading"].emit();
+assert.equal(posts.length, 2);
+assert.equal(posts[1][0].loading, true);
+assert.equal(posts[1][0].playing, false);
+assert.equal(scDeckClockTimer.interval, 100);
+props["/Engine/Deck1/Track/SongLoading"].state = false;
+props["/Engine/Deck1/Track/SongLoading"].emit();
+assert.equal(posts.length, 3);
+assert.equal(posts[2][0].loading, false);
+// 4-deck early-boot start: scShadowProperties returning null initially must not prevent later attachment.
+scFourDeckRole = "13";
+let shadowReady = false;
+let shadowWakes = 0;
+root.scShadowWake = () => { shadowWakes++; };
+const shadowLoading = { 1: mkProp({ state: false }), 2: mkProp({ state: false }), 3: mkProp({ state: false }), 4: mkProp({ state: false }) };
+globalThis.scShadowProperties = (d) => shadowReady ? { loading: shadowLoading[d] } : null;
+scDeckClockWatch();
+assert.equal(shadowLoading[1].count(), 0);
+shadowReady = true;
+scDeckClockWatch();
+assert.equal(shadowLoading[1].count(), 1);
+assert.equal(shadowLoading[3].count(), 1);
+// Repeated watch does not double-connect.
+scDeckClockWatch();
+assert.equal(shadowLoading[1].count(), 1);
+shadowLoading[1].state = true;
+shadowLoading[1].emit();
+assert.equal(shadowWakes, 1);
+'''
+            res = subprocess.run(["node"], input=script, text=True, capture_output=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+
 
 @unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck scratch checks")
 class ShadowScratchTest(unittest.TestCase):

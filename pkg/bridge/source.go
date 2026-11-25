@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
@@ -97,21 +99,200 @@ var exportKeys = sync.OnceValue(newKeyCache) // this process's OneLibrary keys
 // left out, so one broken file does not hide the other; with none readable err is set. keys nil
 // uses the process's key cache.
 func ReadSources(ctx context.Context, r *compat.Resolver, mount string, files []rbstate.FileSig, keys *rekordbox.KeyCache) (libs []SourceLibrary, failed []error, err error) {
+	return readSourcesPaced(ctx, r, mount, files, keys, nil)
+}
+
+// cleanStaleSourceCopies removes any .rb-src-* temp files left in StageRoot by a killed background job.
+func cleanStaleSourceCopies() {
+	dir, err := rbstate.StageRoot()
+	if err != nil || dir == "" {
+		return
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, ".rb-src-*"))
+	for _, m := range matches {
+		if st, err := os.Lstat(m); err == nil && st.Mode().IsRegular() {
+			_ = os.Remove(m)
+		}
+	}
+}
+
+// checkExportSQLiteSidecars enforces the same clean-export check as pkg/rekordbox.ReadSQLite
+// directly against the source on the stick so uncheckpointed -journal or -wal sidecars are
+// always refused before any copy or read.
+func checkExportSQLiteSidecars(full string) error {
+	for _, suffix := range []string{"-wal", "-journal"} {
+		st, err := os.Lstat(full + suffix)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if err == nil && (!st.Mode().IsRegular() || st.Size() > 0) {
+			return fmt.Errorf("OneLibrary: requires checkpointed export; source sidecar %s is present", suffix)
+		}
+	}
+	return nil
+}
+
+type pacedReaderAt struct {
+	ctx  context.Context
+	f    *os.File
+	pace *pacer
+}
+
+func (r *pacedReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	total := 0
+	for total < len(p) {
+		if err := r.pace.waitNotLoading(); err != nil {
+			return total, err
+		}
+		if err := r.ctx.Err(); err != nil {
+			return total, err
+		}
+		end := min(total+playingReadChunk, len(p))
+		playing := r.pace != nil && r.pace.active()
+		t0 := time.Now()
+		n, err := r.f.ReadAt(p[total:end], off+int64(total))
+		took := time.Since(t0)
+		total += n
+		if n > 0 && playing {
+			if perr := r.pace.pause(n, took); perr != nil {
+				return total, perr
+			}
+		}
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+// readPDBPaced parses a PDB file directly in place on the stick without copying it to /data,
+// halting on SongLoading and pacing chunk reads while a deck plays.
+func readPDBPaced(ctx context.Context, full string, pace *pacer) (*rekordbox.Library, error) {
+	if err := pace.waitNotLoading(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f, err := os.Open(full)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	return rekordbox.ParsePDB(&pacedReaderAt{ctx: ctx, f: f, pace: pace}, st.Size())
+}
+
+var sourceCopyHook func(src string)
+
+func copyStickFilePaced(ctx context.Context, src string, pace *pacer) (dst *os.File, size int64, err error) {
+	if sourceCopyHook != nil {
+		sourceCopyHook(src)
+	}
+	if err = pace.waitNotLoading(); err != nil {
+		return nil, 0, err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer in.Close()
+	dir, derr := rbstate.StageRoot()
+	if derr != nil || (dir != "" && os.MkdirAll(dir, 0o755) != nil) {
+		dir = ""
+	}
+	out, err := os.CreateTemp(dir, ".rb-src-*")
+	if err != nil {
+		return nil, 0, err
+	}
+	cleanup := func() {
+		name := out.Name()
+		_ = out.Close()
+		_ = os.Remove(name)
+	}
+	buf := make([]byte, playingReadChunk)
+	for {
+		if err = pace.waitNotLoading(); err != nil {
+			cleanup()
+			return nil, 0, err
+		}
+		if err = ctx.Err(); err != nil {
+			cleanup()
+			return nil, 0, err
+		}
+		playing := pace != nil && pace.active()
+		t0 := time.Now()
+		n, rerr := in.Read(buf)
+		took := time.Since(t0)
+		if n > 0 {
+			if _, werr := out.Write(buf[:n]); werr != nil {
+				cleanup()
+				return nil, 0, werr
+			}
+			size += int64(n)
+			if playing {
+				if perr := pace.pause(n, took); perr != nil {
+					cleanup()
+					return nil, 0, perr
+				}
+			}
+		}
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			cleanup()
+			return nil, 0, rerr
+		}
+	}
+	return out, size, nil
+}
+
+func readSourcesPaced(ctx context.Context, r *compat.Resolver, mount string, files []rbstate.FileSig, keys *rekordbox.KeyCache, pace *pacer) (libs []SourceLibrary, failed []error, err error) {
 	if keys == nil {
 		keys = exportKeys()
 	}
 	for _, f := range files {
+		if err = pace.waitNotLoading(); err != nil {
+			return nil, failed, err
+		}
 		if err = ctx.Err(); err != nil {
 			return nil, failed, err
 		}
 		var l *rekordbox.Library
 		var e error
 		kind := rbstate.OneLibrary
+		full := r.FullPath(f.Rel)
 		if strings.EqualFold(path.Ext(f.Rel), ".pdb") {
 			kind = rbstate.DeviceLibrary
-			l, e = rekordbox.ReadPDB(r.FullPath(f.Rel))
+			if pace == nil {
+				l, e = rekordbox.ReadPDB(full)
+			} else {
+				l, e = readPDBPaced(ctx, full, pace)
+			}
+		} else if e = checkExportSQLiteSidecars(full); e != nil {
+			// Dirty -journal or -wal on the stick: refuse before any read or copy.
+		} else if pace == nil || !pace.isBusy() {
+			l, e = rekordbox.ReadSQLiteKeys(ctx, full, nil, keys)
 		} else {
-			l, e = rekordbox.ReadSQLiteKeys(ctx, r.FullPath(f.Rel), nil, keys)
+			var tmp *os.File
+			if tmp, _, e = copyStickFilePaced(ctx, full, pace); e == nil {
+				tmpName := tmp.Name()
+				_ = tmp.Close()
+				cleanup := func() {
+					_ = os.Remove(tmpName)
+					_ = os.Remove(tmpName + "-wal")
+					_ = os.Remove(tmpName + "-shm")
+					_ = os.Remove(tmpName + "-journal")
+				}
+				if e = checkExportSQLiteSidecars(full); e == nil {
+					l, e = rekordbox.ReadSQLiteKeys(ctx, tmpName, nil, keys)
+				}
+				cleanup()
+			}
 		}
 		if e != nil && ctx.Err() != nil {
 			return nil, failed, ctx.Err()
@@ -162,10 +343,34 @@ func stagedStamp(mount string) string {
 // readStaged reads the staged CDJ libraries, their paths pointing into the staged copies. A broken
 // one is left out with a log line: it never fails the stick's own import.
 func readStaged(mount string) []SourceLibrary {
+	out, _ := readStagedPaced(context.Background(), mount, nil)
+	return out
+}
+
+func readStagedCtx(ctx context.Context, mount string) ([]SourceLibrary, error) {
+	return readStagedPaced(ctx, mount, nil)
+}
+
+func readStagedPaced(ctx context.Context, mount string, pace *pacer) ([]SourceLibrary, error) {
 	var out []SourceLibrary
+	if err := pace.waitNotLoading(); err != nil {
+		return nil, err
+	}
 	names, pdbs := stagedLibraries(mount)
 	for i, name := range names {
-		staged, err := rekordbox.ReadPDB(pdbs[i])
+		if err := pace.waitNotLoading(); err != nil {
+			return nil, err
+		}
+		var staged *rekordbox.Library
+		var err error
+		if pace == nil {
+			staged, err = rekordbox.ReadPDB(pdbs[i])
+		} else {
+			staged, err = readPDBPaced(ctx, pdbs[i], pace)
+			if err != nil && ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+		}
 		if err != nil {
 			log.Printf("rb-bridge: staged %s: %v", name, err)
 			continue
@@ -198,7 +403,7 @@ func readStaged(mount string) []SourceLibrary {
 		}
 		out = append(out, SourceLibrary{Kind: rbstate.LinkLibrary, Source: name, Lib: staged})
 	}
-	return out
+	return out, nil
 }
 
 // ReadLayout is the setting rb_library_view: how a stick with two libraries shows them. Anything

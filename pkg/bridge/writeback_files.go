@@ -39,7 +39,7 @@ var (
 // write replaces the files of changes in the order of #321: first-original backups and their
 // folders, the mark naming every folder and staged copy, every staged copy synced, then the
 // renames. It returns the ANLZ files written, by track.
-func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLibrary, changes []trackChange) (map[string][]rbstate.FileSig, error) {
+func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLibrary, changes []trackChange) (map[string][]rbstate.FileSig, recordHashes, error) {
 	var targets []*target
 	seen := map[string]bool{}
 	add := func(t *target) error {
@@ -52,7 +52,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			return err
 		}
 		// Decided before anything is allocated on the volume (#321 review R3).
-		if unsafeToFree(t.full) {
+		if rbstate.UnsafeToFree != nil && rbstate.UnsafeToFree(t.full) {
 			return fmt.Errorf("%w: %s; the drive needs a disk check on a computer", errUnownedClusters, t.rel)
 		}
 		t.tmp = newStagedName(stagedKind[t.kind])
@@ -75,7 +75,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			for i, ext := range anlzExts {
 				if rel, ok := resolveANLZVariant(p.r, base, ext); ok {
 					if err := add(&target{rel: rel, key: ch.candidate.key, cues: ch.cues, ext: i}); err != nil {
-						return nil, err
+						return nil, nil, err
 					}
 				}
 			}
@@ -88,7 +88,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 		}
 		if src, ok := libs[kind]; ok && edits > 0 {
 			if err := add(&target{rel: src.File.Rel, kind: kind}); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
@@ -105,17 +105,28 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			flush, _ = os.Open(t.full)
 		}
 		if err := mkdirOrdered(p.mount, filepath.Join(backupRoot, dateDir, filepath.Dir(t.rel)), flush); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	if err := markWriteBack(p.mount, dateDir, targets); err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	hashes := make(recordHashes, len(changes))
+	setHash := func(key string, kind rbstate.LibraryKind, hash string) {
+		if hash == "" {
+			return
+		}
+		if hashes[key] == nil {
+			hashes[key] = map[rbstate.LibraryKind]string{}
+		}
+		hashes[key][kind] = hash
 	}
 
 	var staged []*target
 	for _, t := range targets {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		var data []byte
 		if t.kind != rbstate.OneLibrary {
@@ -123,7 +134,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			if t.kind == 0 && errors.Is(err, os.ErrNotExist) {
 				continue
 			} else if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			changed := true
 			if t.kind == 0 {
@@ -134,22 +145,36 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 				data, err = rekordbox.RewritePDBMetadata(raw, pdbMeta)
 				if err != nil {
 					err = fmt.Errorf("writeback: %s: %w", t.rel, err)
+				} else {
+					parsed, perr := rekordbox.ParsePDB(bytes.NewReader(data), int64(len(data)))
+					if perr != nil {
+						return nil, nil, fmt.Errorf("writeback: verify rewritten %s: %w", t.rel, perr)
+					}
+					byID := make(map[uint32]string, len(parsed.Tracks))
+					for _, tr := range parsed.Tracks {
+						byID[tr.ID] = tr.RecordHash
+					}
+					for _, ch := range changes {
+						if tr, ok := ch.refs[rbstate.DeviceLibrary]; ok && ch.metadata[rbstate.DeviceLibrary] {
+							setHash(ch.candidate.key, rbstate.DeviceLibrary, byID[tr.ID])
+						}
+					}
 				}
 			}
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			} else if !changed {
 				continue
 			}
 		}
 		n, err := ensureFirstOriginalBackup(p.mount, backupRoot, dateDir, t.rel)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		tmp := filepath.Join(filepath.Dir(t.full), t.tmp)
 		f, err := createStaged(tmp)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		size := int64(len(data))
 		if t.kind == rbstate.OneLibrary {
@@ -161,13 +186,31 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			p.phase["encrypt"] += time.Since(started) - upd.Decrypt - upd.Edit
 			if err != nil {
 				_ = rbstate.RemoveFile(tmp)
-				return nil, err
+				return nil, nil, err
+			}
+			for _, ch := range changes {
+				tr, ok := ch.refs[rbstate.OneLibrary]
+				if !ok {
+					continue
+				}
+				updated := false
+				if _, wroteCues := oneCues[tr.ID]; wroteCues {
+					tr.Cues = upd.WrittenCues[tr.ID]
+					updated = true
+				}
+				if m, wroteMeta := upd.WrittenMetadata[tr.ID]; wroteMeta {
+					tr.Genre, tr.Comment, tr.Label = m.Genre, m.Comment, m.Label
+					updated = true
+				}
+				if updated {
+					setHash(ch.candidate.key, rbstate.OneLibrary, rekordbox.RecordHash(tr))
+				}
 			}
 			if st, err := os.Stat(tmp); err == nil {
 				size = st.Size()
 			}
 		} else if _, err := writeSynced(f, bytes.NewReader(data)); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		p.res.BytesWritten += n + size
 		writeBackCut("temp " + t.full)
@@ -177,7 +220,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 	for _, t := range staged {
 		if p.opts.BeforeRename != nil {
 			if err := p.opts.BeforeRename(t.full); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
@@ -185,7 +228,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 	written := map[string][]rbstate.FileSig{}
 	for _, t := range staged {
 		if err := replaceFile(filepath.Join(filepath.Dir(t.full), t.tmp), t.full); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		p.res.FilesUpdated++
 		p.res.OneLibraryUpdated = p.res.OneLibraryUpdated || t.kind == rbstate.OneLibrary
@@ -201,7 +244,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 	if p.res.FilesUpdated > 0 {
 		p.res.BackupDir = filepath.Join(".enginex-backup", dateDir)
 	}
-	return written, nil
+	return written, hashes, nil
 }
 
 // ensureFirstOriginalBackup copies rel to the backup folder of dateDir unless any backup folder
@@ -372,16 +415,27 @@ func syncPath(path string) error {
 
 // stagedWhole reports whether a staged copy is a whole file of dst's kind.
 func stagedWhole(tmp, dst string) bool {
-	return stagedWholeWithKeys(tmp, dst, nil)
+	return stagedWholeCtxKeys(context.Background(), tmp, dst, nil)
 }
 
 func stagedWholeWithKeys(tmp, dst string, keys *rekordbox.KeyCache) bool {
+	return stagedWholeCtxKeys(context.Background(), tmp, dst, keys)
+}
+
+func stagedWholeCtx(ctx context.Context, tmp, dst string) bool {
+	return stagedWholeCtxKeys(ctx, tmp, dst, nil)
+}
+
+func stagedWholeCtxKeys(ctx context.Context, tmp, dst string, keys *rekordbox.KeyCache) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	switch strings.ToLower(filepath.Base(dst)) {
 	case "export.pdb":
 		_, err := rekordbox.ReadPDB(tmp)
 		return err == nil && rekordbox.CheckPDBExtent(tmp) == nil
 	case "exportlibrary.db":
-		_, err := rekordbox.ReadSQLiteWholeKeys(context.Background(), tmp, keys)
+		_, err := rekordbox.ReadSQLiteWholeKeys(ctx, tmp, keys)
 		return err == nil
 	default:
 		b, err := os.ReadFile(tmp)
@@ -395,22 +449,32 @@ func stagedWholeWithKeys(tmp, dst string, keys *rekordbox.KeyCache) bool {
 
 // putBack restores rel when a cut pass left it missing: from its staged copy when that is
 // whole, else from its first-original backup. False when rel stays missing.
-func putBack(mount, rel, name string) bool {
-	return putBackWithKeys(mount, rel, name, nil)
+func putBack(ctx context.Context, mount, rel, name string) bool {
+	return putBackCtxKeys(ctx, mount, rel, name, nil)
 }
 
 func putBackWithKeys(mount, rel, name string, keys *rekordbox.KeyCache) bool {
+	return putBackCtxKeys(context.Background(), mount, rel, name, keys)
+}
+
+func putBackCtxKeys(ctx context.Context, mount, rel, name string, keys *rekordbox.KeyCache) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	dst := filepath.Join(mount, rel)
 	if _, err := os.Lstat(dst); !errors.Is(err, os.ErrNotExist) {
 		return true
 	}
 	staged := filepath.Join(filepath.Dir(dst), name)
-	if st, err := os.Lstat(staged); err == nil && st.Mode().IsRegular() && stagedWholeWithKeys(staged, dst, keys) && replaceFile(staged, dst) == nil {
+	if st, err := os.Lstat(staged); err == nil && st.Mode().IsRegular() && stagedWholeCtxKeys(ctx, staged, dst, keys) && replaceFile(staged, dst) == nil {
 		log.Printf("rb-bridge: %s was missing after a cut write-back; its new copy put back", dst)
 		return true
 	}
 	entries, _ := os.ReadDir(filepath.Join(mount, ".enginex-backup"))
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return false
+		}
 		data, err := os.ReadFile(filepath.Join(mount, ".enginex-backup", entry.Name(), rel))
 		if !entry.IsDir() || err != nil {
 			continue
@@ -431,14 +495,27 @@ func putBackWithKeys(mount, rel, name string, keys *rekordbox.KeyCache) bool {
 // mark names that is missing is put back; then, when none is missing, the temporary files in
 // the marked folders and the mark go. It returns how many temporary files it removed.
 func CleanWriteBackLeftovers(mount string) int {
-	return CleanWriteBackLeftoversWithKeys(mount, exportKeys())
+	return CleanWriteBackLeftoversCtxKeys(context.Background(), mount, exportKeys())
 }
 
 // CleanWriteBackLeftoversWithKeys uses the session's warm key cache when it validates a staged
 // OneLibrary recovery copy.
 func CleanWriteBackLeftoversWithKeys(mount string, keys *rekordbox.KeyCache) int {
+	return CleanWriteBackLeftoversCtxKeys(context.Background(), mount, keys)
+}
+
+func CleanWriteBackLeftoversCtx(ctx context.Context, mount string) int {
+	return CleanWriteBackLeftoversCtxKeys(ctx, mount, exportKeys())
+}
+
+// CleanWriteBackLeftoversCtxKeys stops cleanly on ctx cancellation and uses the session's warm
+// key cache when validating a staged OneLibrary recovery copy.
+func CleanWriteBackLeftoversCtxKeys(ctx context.Context, mount string, keys *rekordbox.KeyCache) int {
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	n := rbstate.CleanTemps(dir)
+	if ctx.Err() != nil {
+		return n
+	}
 	mark := filepath.Join(dir, writeBackMarkName)
 	data, err := os.ReadFile(mark)
 	if err != nil {
@@ -447,6 +524,9 @@ func CleanWriteBackLeftoversWithKeys(mount string, keys *rekordbox.KeyCache) int
 	whole := true
 	var dirs []string
 	for _, line := range strings.Split(string(data), "\n") {
+		if ctx.Err() != nil {
+			return n
+		}
 		rest, isTarget := strings.CutPrefix(line, "= ")
 		name := ""
 		if isTarget {
@@ -460,7 +540,7 @@ func CleanWriteBackLeftoversWithKeys(mount string, keys *rekordbox.KeyCache) int
 		case !ok:
 		case !isTarget:
 			dirs = append(dirs, rel)
-		case !putBackWithKeys(mount, rel, name, keys):
+		case !putBackCtxKeys(ctx, mount, rel, name, keys):
 			whole = false
 		}
 	}
@@ -468,9 +548,15 @@ func CleanWriteBackLeftoversWithKeys(mount string, keys *rekordbox.KeyCache) int
 		return n
 	}
 	for _, rel := range dirs {
+		if ctx.Err() != nil {
+			return n
+		}
 		for _, pattern := range []string{".enginex-*.tmp", ".bak-*.tmp"} {
 			matches, _ := filepath.Glob(filepath.Join(mount, rel, pattern))
 			for _, path := range matches {
+				if ctx.Err() != nil {
+					return n
+				}
 				if st, err := os.Lstat(path); err == nil && st.Mode().IsRegular() && rbstate.RemoveFile(path) == nil {
 					n++
 				}

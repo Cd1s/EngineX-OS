@@ -67,6 +67,20 @@ type noted struct {
 	digest []byte
 }
 
+type recordHashes map[string]map[rbstate.LibraryKind]string
+
+func applyRecordHashes(snap *rbstate.Snapshot, hashes recordHashes) {
+	for key, byKind := range hashes {
+		if t, ok := snap.Tracks[key]; ok {
+			for i := range t.Refs {
+				if hash, ok := byKind[t.Refs[i].Kind]; ok {
+					t.Refs[i].RecordHash = hash
+				}
+			}
+		}
+	}
+}
+
 // CueSession keeps, for a watcher, the rows its passes found in sync without reading the export
 // (they reach the snapshot with the next pass that saves it), and the stick's OneLibrary keys.
 type CueSession struct {
@@ -154,7 +168,7 @@ func ImportState(mount string) (State, error) {
 // NoteWriteBack refreshes the snapshot after a pass that read the export: the ANLZ files it
 // wrote, the rows it found or brought in sync, and the export files as they are now, so the
 // next insert does not take the pass's own writes for a re-export. The caller holds LockVolume.
-func NoteWriteBack(mount string, written map[string][]rbstate.FileSig, rows map[string]noted) error {
+func NoteWriteBack(mount string, written map[string][]rbstate.FileSig, rows map[string]noted, hashes recordHashes) error {
 	abs, err := filepath.Abs(mount)
 	if err != nil {
 		return err
@@ -174,6 +188,7 @@ func NoteWriteBack(mount string, written map[string][]rbstate.FileSig, rows map[
 			t.Edit, t.Synced = n.edit, n.digest
 		}
 	}
+	applyRecordHashes(snap, hashes)
 	if snap.Header.Sources, snap.Header.Stamp, err = exportNow(abs, snap.Header.Layout); err != nil {
 		return err
 	}
@@ -349,13 +364,13 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 		}
 	}
 	if len(changes) == 0 {
-		return "", NoteWriteBack(p.mount, nil, p.opts.Session.take(cs.insync))
+		return "", NoteWriteBack(p.mount, nil, p.opts.Session.take(cs.insync), nil)
 	}
-	written, err := p.write(ctx, libs, changes)
+	written, hashes, err := p.write(ctx, libs, changes)
 	if err != nil {
 		return "", err
 	}
-	if err := NoteWriteBack(p.mount, written, p.opts.Session.take(cs.insync)); err != nil {
+	if err := NoteWriteBack(p.mount, written, p.opts.Session.take(cs.insync), hashes); err != nil {
 		return "", err
 	}
 	writeBackCut("state")
@@ -524,8 +539,13 @@ func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, ses
 	return out, nil
 }
 
+var writeBackReadLibsHook func()
+
 // readLibraries reads the export libraries the rows have references in.
 func (p *pass) readLibraries(ctx context.Context, rows []dbCandidate) (map[rbstate.LibraryKind]SourceLibrary, error) {
+	if writeBackReadLibsHook != nil {
+		writeBackReadLibsHook()
+	}
 	out := map[rbstate.LibraryKind]SourceLibrary{}
 	needed := map[rbstate.LibraryKind]bool{}
 	for _, row := range rows {

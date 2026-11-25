@@ -61,6 +61,10 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 		return nil, err
 	}
 	for rows.Next() {
+		if err = ctx.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
 		var p, fingerprint string
 		var id int64
 		var digest, syncedDigest []byte
@@ -87,6 +91,10 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 			return nil, err
 		}
 		for lists.Next() {
+			if err = ctx.Err(); err != nil {
+				lists.Close()
+				return nil, err
+			}
 			var id int64
 			if err = lists.Scan(&id); err != nil {
 				lists.Close()

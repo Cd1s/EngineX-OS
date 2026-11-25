@@ -411,6 +411,7 @@ func TestBuildTrackDegradesOnlyTheTrackWithTheBadFile(t *testing.T) {
 		{"bad audio header", l.Tracks[2], true},
 		{"cover is a directory", func() rekordbox.Track { tr := l.Tracks[0]; tr.ArtworkPath = "/cover-dir"; return tr }(), true},
 		{"cover over 32 MiB", func() rekordbox.Track { tr := l.Tracks[0]; tr.ArtworkPath = "/cover-big.jpg"; return tr }(), true},
+		{"missing cover", func() rekordbox.Track { tr := l.Tracks[0]; tr.ArtworkPath = "/cover-missing.jpg"; return tr }(), false},
 		{"missing ANLZ files", func() rekordbox.Track {
 			tr := l.Tracks[0]
 			tr.AnalysisPath = "/PIONEER/USBANLZ/P404/ANLZ0000.DAT"

@@ -305,11 +305,76 @@ static void test_eject_stops_the_background_import(const char *root) {
     char script[PATH_MAX+64];snprintf(script,sizeof script,"#!/bin/sh\necho \"$@\" >> '%s'\n",stop_log);
     write_file(test_systemctl,script);assert(!chmod(test_systemctl,0700));
     import_unit(volume_path,stop_unit);
+    char remount_u[64];remount_unit(volume_path,remount_u);
     struct libmnt_context c={.target=volume_path};unsigned calls=real_calls;
     assert(!unmount_dispatch(&c,unmount_after_stop)&&stop_seen==1&&real_calls==calls+1);
-    char expect[128];snprintf(expect,sizeof expect,"stop --quiet %s\n",stop_unit);expect_file(stop_log,expect);
+    char expect[256];snprintf(expect,sizeof expect,"stop --quiet %s\nstop --quiet %s\n",stop_unit,remount_u);expect_file(stop_log,expect);
     test_systemctl[0]=0;assert(!unlink(stop_log));
     puts("#301: eject stops the volume's background import before the unmount: PASS");
+}
+// Finding 3.3: an eager Eject stops the remount helper synchronously after marking
+// rb-ejected and before cue write-back and unmount, so TakeDeckRows cannot hold m.db or
+// .rb-next.db open and cause EBUSY. A lazy unmount (used by --remount's own synthetic
+// udev remove) must NOT stop the remount helper.
+static char remount_order_log[PATH_MAX];
+static int unmount_record_order(struct libmnt_context *c) {
+    c->status=1;real_calls++;
+    int fd=open(remount_order_log,O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC,0600);
+    if(fd>=0){ssize_t w=write(fd,"unmount\n",8);(void)w;close(fd);}
+    return 0;
+}
+static void test_eject_stops_the_remount_helper(const char *root) {
+    char check_u[64];remount_unit("/media/REKORDBOX",check_u);
+    assert(!strcmp(check_u,"enginex-rb-remount-2531a9d305fa8897.service")); // internal/cli TestRemountUnitMatchesTheHook
+    char vol[PATH_MAX],p[PATH_MAX],remount_u[64],import_u[64],ej_mark[PATH_MAX];
+    join(vol,MEDIA_ROOT,"REMOUNT-EJECT");
+    join(p,vol,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,vol,"PIONEER/rekordbox/export.pdb");write_file(p,"pdb");
+    join(p,vol,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,vol,"Engine Library/Database2/.rb-bridge-snapshot");write_file(p,"state");
+    import_unit(vol,import_u);
+    remount_unit(vol,remount_u);
+    uint64_t h=hash_bytes(UINT64_C(14695981039346656037),vol,strlen(vol));
+    assert(snprintf(ej_mark,sizeof ej_mark,"%s/enginex-rb-ejected-%016llx",test_runtime,(unsigned long long)h)<(int)sizeof ej_mark);
+    assert(!make_dirs(test_runtime));
+
+    join(remount_order_log,root,"remount-order.log");
+    join(test_systemctl,root,"systemctl-order");
+    join(test_rb_bridge,root,"rb-bridge-order");
+    char script[PATH_MAX*3];
+    snprintf(script,sizeof script,
+        "#!/bin/sh\n"
+        "m=no; [ -f '%s' ] && m=yes\n"
+        "printf 'systemctl %%s mark=%%s\\n' \"$*\" \"$m\" >> '%s'\n",
+        ej_mark,remount_order_log);
+    write_file(test_systemctl,script);assert(!chmod(test_systemctl,0700));
+    snprintf(script,sizeof script,"#!/bin/sh\nprintf 'writeback %%s\\n' \"$*\" >> '%s'\n",remount_order_log);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+
+    // 1. Lazy unmount stops only the import unit, never the remount helper.
+    unlink(remount_order_log);
+    struct libmnt_context lazy={.target=vol};assert(!mnt_context_enable_lazy(&lazy,1));
+    assert(!unmount_dispatch(&lazy,unmount_record_order));
+    mnt_free_context(&lazy);
+    char buf[1024]={0};int fd=open(remount_order_log,O_RDONLY|O_CLOEXEC);assert(fd>=0);
+    ssize_t n=read(fd,buf,sizeof buf-1);close(fd);assert(n>0);
+    assert(strstr(buf,import_u)!=NULL);
+    assert(strstr(buf,remount_u)==NULL);
+
+    // 2. Eager Eject marks rb-ejected, stops the remount helper, then runs write-back before unmount.
+    unlink(remount_order_log);
+    struct libmnt_context eject={.target=vol};
+    assert(!unmount_dispatch(&eject,unmount_record_order));
+    memset(buf,0,sizeof buf);fd=open(remount_order_log,O_RDONLY|O_CLOEXEC);assert(fd>=0);
+    n=read(fd,buf,sizeof buf-1);close(fd);assert(n>0);
+    char want_remount[128];
+    snprintf(want_remount,sizeof want_remount,"systemctl stop --quiet %s mark=yes",remount_u);
+    char *p_imp=strstr(buf,import_u),*p_rem=strstr(buf,want_remount),*p_wb=strstr(buf,"writeback "),*p_um=strstr(buf,"unmount\n");
+    assert(p_imp!=NULL&&p_rem!=NULL&&p_wb!=NULL&&p_um!=NULL);
+    assert(p_imp<p_rem&&p_rem<p_wb&&p_wb<p_um);
+
+    test_systemctl[0]=0;test_rb_bridge[0]=0;unlink(remount_order_log);unlink(ej_mark);
+    puts("3.3: eager eject stops remount helper after rb-ejected and before writeback/unmount; lazy does not: PASS");
 }
 // #321: a normal Eject of a writable rekordbox stick runs rb-bridge --writeback-cues --on-eject
 // before unmounting; lazy removal (pull without eject) and plain/unconverted sticks skip it,
@@ -2374,7 +2439,7 @@ int main(int argc,char **argv) {
     join(test_prepare_state,root,"run/enginex-usb-preparing");char prep_run[PATH_MAX];join(prep_run,root,"run");assert(!make_dirs(prep_run));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
-    assert(!make_dirs(test_media));test_guardian_window_floor();test_paths_and_copy(root);test_eject_stops_the_background_import(root);test_eject_runs_cue_writeback(root);test_eject_writeback_overrun(root);test_only_an_eject_marks_the_stick(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
+    assert(!make_dirs(test_media));test_guardian_window_floor();test_paths_and_copy(root);test_eject_stops_the_background_import(root);test_eject_stops_the_remount_helper(root);test_eject_runs_cue_writeback(root);test_eject_writeback_overrun(root);test_only_an_eject_marks_the_stick(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
     if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_hfs_gen2_lkl_policy(root,argv[0]);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_removal_detaches_a_view_in_use(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);test_hfs_view_scale_and_47879b10_253(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);

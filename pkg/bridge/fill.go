@@ -66,15 +66,26 @@ const hookWindow = 17 * time.Second
 // readJobView reads the exports as a window would (FindSources, ReadSources, the staged CDJ
 // libraries, BuildView) into the view's tracks and the stamp.
 func readJobView(ctx context.Context, r *compat.Resolver, mount, layout, lang string) (*fillView, error) {
+	return readJobViewPaced(ctx, r, mount, layout, lang, nil)
+}
+
+func readJobViewPaced(ctx context.Context, r *compat.Resolver, mount, layout, lang string, pace *pacer) (*fillView, error) {
+	if err := pace.waitNotLoading(); err != nil {
+		return nil, err
+	}
 	files, err := FindSources(r, mount)
 	if err != nil {
 		return nil, err
 	}
-	libs, failed, err := ReadSources(ctx, r, mount, files, nil)
+	libs, failed, err := readSourcesPaced(ctx, r, mount, files, nil, pace)
 	if err != nil {
 		return nil, err
 	}
-	v, err := BuildView(append(libs, readStaged(mount)...), layout, lang)
+	staged, err := readStagedPaced(ctx, mount, pace)
+	if err != nil {
+		return nil, err
+	}
+	v, err := BuildView(append(libs, staged...), layout, lang)
 	if err != nil {
 		return nil, err
 	}
@@ -92,10 +103,15 @@ func readJobView(ctx context.Context, r *compat.Resolver, mount, layout, lang st
 // FillInBackground is `rb-bridge --import-path`: the priority queue first, then the view's
 // tracks by path. Each is stat'ed and built into the stage unless the snapshot or the stage has
 // its signature; once the stage verified the stamp, built and staged tracks are not stat'ed
-// again. All compared: MarkVerified. It yields to a playing deck (pace.go).
+// again. All compared: MarkVerified. It yields to a playing or loading deck (pace.go).
 func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillResult, error) {
 	var res FillResult
 	start := time.Now()
+	pace := newPacer(ctx)
+	if err := pace.waitNotLoading(); err != nil {
+		return res, err
+	}
+	cleanStaleSourceCopies()
 	r, err := compat.NewResolver(mount)
 	if err != nil {
 		return res, err
@@ -116,29 +132,57 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	if snap != nil {
 		layout = snap.Layout
 	}
-	view, err := readJobView(ctx, r, mount, layout, readSetting(o.Settings, "lang"))
+	view, err := readJobViewPaced(ctx, r, mount, layout, readSetting(o.Settings, "lang"), pace)
 	if snap == nil && (err != nil || view.view == nil) {
+		if ctx.Err() != nil {
+			return res, ctx.Err()
+		}
 		return res, fmt.Errorf("snapshot: %w", rbstate.ErrNoSnapshot) // no window converted this stick, and there is nothing to convert
 	}
 	if err != nil {
 		return res, err
 	}
 	read := time.Now()
-	pace := newPacer(ctx)
 	next := &nextBuild{ctx: ctx, mount: mount, dir: dbDir, view: view.view, live: snap,
-		pace: func(took time.Duration) error { return pace.afterStat(pace.active(), took) }}
+		pace: func(took time.Duration) error { return pace.afterStat(pace.active(), took) },
+		busy: pace.isBusy}
+	buildNextWhenIdle := func(drop, ready bool) error {
+		for {
+			if err := pace.waitIdle(); err != nil {
+				return err
+			}
+			err := next.build(drop, ready)
+			if !errors.Is(err, errDeckBusy) {
+				return err
+			}
+			log.Printf("rb-bridge: deck became active while building next library for %s; pausing until idle", mount)
+		}
+	}
+	rowsDeferred := false
 	// Rows and lists a window left to the job come first, with what is staged already: they are
 	// what the DJ browses. The performance data follows in the job the swap's window starts.
 	if rows := snap == nil || view.view != nil && Diff(view.view, snap).structural(); rows && view.view != nil && o.Stage == nil {
-		if err = next.build(false, true); err == nil {
+		if snap == nil {
+			err = buildNextWhenIdle(false, true)
+		} else if pace.isBusy() {
+			err = errDeckBusy
+		} else {
+			err = next.build(false, true)
+		}
+		if err == nil {
 			res.Publish = next.ask()
 			log.Printf("rb-bridge: rows and lists of %s are in the next library (exports read in %s); publish=%v", mount, read.Sub(loaded).Round(time.Millisecond), res.Publish)
 			return res, nil
 		}
-		if snap == nil || !errors.Is(err, errNoNext) {
-			return res, err
+		if snap != nil && errors.Is(err, errDeckBusy) {
+			rowsDeferred = true
+			log.Printf("rb-bridge: deck active on %s; staging tracks to /data before building next library", mount)
+		} else {
+			if snap == nil || !errors.Is(err, errNoNext) {
+				return res, err
+			}
+			log.Printf("rb-bridge: %v; rows and lists wait for the windows", err)
 		}
-		log.Printf("rb-bridge: %v; rows and lists wait for the windows", err)
 	}
 	if snap == nil {
 		return res, fmt.Errorf("snapshot: %w", rbstate.ErrNoSnapshot)
@@ -146,6 +190,9 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	if view.view != nil && snap.Stamp != view.stamp && o.Stage == nil {
 		// The window left the exports to the job and they change no row and no list: the snapshot
 		// takes their stamp, as that window would have given it, and the job compares every file.
+		if err = pace.waitNotLoading(); err != nil {
+			return res, err
+		}
 		if unlock, err = rbstate.LockVolume(mount, fillLockWait); err != nil {
 			return res, fmt.Errorf("volume lock: %w", err)
 		}
@@ -181,10 +228,15 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	// goes now. Its list waveform is written now that the row is the stick's, unless the job wrote
 	// it when it staged the track with this row (KDATA: 5,548 files read again, 42 s of the job).
 	for key, e := range entries {
+		if err = f.ctx.Err(); err != nil {
+			return res, err
+		}
 		if t := snap.Tracks[key]; t != nil && t.EngineID != 0 && t.Perf != rbstate.PerfNone && !e.Missing && t.Built.Equal(e.Sig) {
 			if e.EngineID != t.EngineID {
 				if full, e2 := stage.Read(e); e2 == nil && len(full.RGB) > 0 {
-					f.writeRGB(t.EngineID, full.RGB)
+					if err = f.writeRGB(t.EngineID, full.RGB); err != nil {
+						return res, err
+					}
 				}
 			}
 			if err = stage.Drop(key); err != nil {
@@ -208,6 +260,23 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	})
 	f.report()
 	err = f.run(order)
+	if view.view != nil && !rowsDeferred && f.applicable() == 0 && (err == nil || errors.Is(err, ErrFilesUnreadable)) {
+		want := pendingRowsForView(view.view, snap)
+		if want != snap.Pending.Rows {
+			if pace.waitNotLoading() == nil && !pace.isBusy() {
+				if lock, lockErr := rbstate.LockVolume(mount, fillLockWait); lockErr == nil {
+					if current, loadErr := rbstate.Load(dbDir); loadErr == nil {
+						current.Pending.Rows = pendingRowsForView(view.view, current)
+						if saveErr := current.Save(dbDir); saveErr == nil {
+							snap = current
+							f.snap = current
+						}
+					}
+					lock()
+				}
+			}
+		}
+	}
 	for full := 0; errors.Is(err, rbstate.ErrStageFull) && view.view != nil && o.Stage == nil && full < 64; full++ {
 		// /data is at its floor: what is staged goes into the next library and leaves the stage, and
 		// the job goes on. The remount is still asked for once, at the end.
@@ -216,10 +285,13 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		// is closed first, or the lines of every later track would go to the file that is gone.
 		e := stage.Close()
 		if e == nil {
-			e = next.build(true, false)
+			e = buildNextWhenIdle(true, false)
 		}
 		if e != nil {
 			log.Printf("rb-bridge: %v", e)
+			if ctx.Err() != nil {
+				err = e
+			}
 			break
 		}
 		if f.inNext, err = rbstate.Load(nextState(snap.LibraryUUID)); err == nil {
@@ -261,13 +333,13 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		}
 		// (Only when there is something to publish: reading a 50,000-track export alone is more than
 		// a window has, and the job made a next library and asked for a remount after every swap.)
-		if e := errNoNext; ahead.staged+ahead.updates+parked > 0 && view.view != nil && o.Stage == nil && (parked > 0 || ahead.cost() > hookWindow-spare) {
-			if e = next.build(false, true); e == nil {
+		if e := errNoNext; (rowsDeferred || ahead.staged+ahead.updates+parked > 0) && view.view != nil && o.Stage == nil && (rowsDeferred || parked > 0 || ahead.cost() > hookWindow-spare) {
+			if e = buildNextWhenIdle(false, true); e == nil {
 				res.Publish = next.ask()
 			} else if !errors.Is(e, errNoNext) && err == nil {
 				err = e
 			}
-			if e != nil {
+			if e != nil && ctx.Err() == nil {
 				log.Printf("rb-bridge: %v; the staged data is published in place, a window at a time", e)
 			}
 		}
@@ -282,6 +354,19 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		return res, nil // stopped: the next job goes on from the stage
 	}
 	return res, err
+}
+
+func pendingRowsForView(view *View, snap *rbstate.Snapshot) int {
+	pending := 0
+	for _, vt := range view.Tracks {
+		t := snap.Tracks[vt.Key]
+		switch {
+		case t != nil && (t.Native || t.Perf == rbstate.PerfMissing):
+		case t == nil || t.EngineID == 0 || t.Row != vt.Hash:
+			pending++
+		}
+	}
+	return pending
 }
 
 type filler struct {
@@ -371,6 +456,9 @@ func (f *filler) fill(i int) (ok bool, err error) {
 		// Verified and staged, waiting for a window: not stat'ed either (KDATA: 155 s a round for 5,500).
 		return true, nil
 	}
+	if err := f.pace.waitNotLoading(); err != nil {
+		return false, err
+	}
 	opts, playing := f.pace.readOptions()
 	t0 := time.Now()
 	src, err := enginedb.StatTrack(f.ctx, f.r, vt.track)
@@ -391,6 +479,9 @@ func (f *filler) fill(i int) (ok bool, err error) {
 		if t := f.inNext.Tracks[vt.key]; t != nil && t.Perf != rbstate.PerfNone && t.Built.Equal(src.Sig) {
 			return true, nil
 		}
+	}
+	if err := f.pace.waitNotLoading(); err != nil {
+		return false, err
 	}
 	rec, err := enginedb.BuildTrack(f.r, vt.track, src, opts)
 	if err != nil {
@@ -420,7 +511,9 @@ func (f *filler) fill(i int) (ok bool, err error) {
 		f.res.Staged++
 	}
 	if len(rec.RGB) > 0 && snapTrack != nil && snapTrack.EngineID > 0 {
-		f.writeRGB(snapTrack.EngineID, rec.RGB)
+		if err := f.writeRGB(snapTrack.EngineID, rec.RGB); err != nil {
+			return false, err
+		}
 	}
 	return true, nil
 }
@@ -549,16 +642,24 @@ func (f *filler) unread(vt *fillTrack, err error) (bool, error) {
 }
 
 // writeRGB puts a finished track's mini waveform where Engine reads it, unless a valid one is there.
-func (f *filler) writeRGB(id int64, rgb []byte) {
+func (f *filler) writeRGB(id int64, rgb []byte) error {
 	if f.rgbFull {
-		return
+		return nil
+	}
+	if err := f.pace.waitNotLoading(); err != nil {
+		return err
 	}
 	dst := filepath.Join(f.rgbDir, "OverviewData", f.snap.LibraryUUID, strconv.FormatInt(id, 10)+".rgb")
+	t0 := time.Now()
 	if b, err := os.ReadFile(dst); err == nil {
 		if raw, err := enginedb.QUncompress(b, 1<<20); err == nil && enginedb.ValidRGBOverview(raw) {
-			return
+			return f.pace.afterStat(f.pace.active(), time.Since(t0))
 		}
 	}
+	if err := f.pace.waitNotLoading(); err != nil {
+		return err
+	}
+	t0 = time.Now()
 	if err := writeRGBFile(f.rgbDir, f.snap.LibraryUUID, id, rgb); errors.Is(err, syscall.ENOSPC) {
 		// A FAT32 folder holds 65,536 entries, and a file of this folder takes two: Engine's own
 		// layout ends at about 32,700 tracks there. Every further try would search the full folder.
@@ -567,6 +668,7 @@ func (f *filler) writeRGB(id int64, rgb []byte) {
 	} else if err != nil {
 		log.Printf("rb-bridge: mini waveform of track %d not written: %v", id, err)
 	}
+	return f.pace.afterStat(f.pace.active(), time.Since(t0))
 }
 
 // servePriority stages the queue's tracks and acknowledges them. A path the view does not have,

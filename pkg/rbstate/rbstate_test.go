@@ -412,3 +412,43 @@ func TestStageLineNamesTheRowAndFilledReadsTheHooksRecord(t *testing.T) {
 		t.Fatalf("the hook's record: %+v", got)
 	}
 }
+
+func TestInstallFilePacedAbortsCleanlyWhenBusy(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.db")
+	dst := filepath.Join(dir, "dst.db")
+	payload := bytes.Repeat([]byte("A"), 256<<10)
+	if err := os.WriteFile(src, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	errBusy := errors.New("deck active")
+	chunks := 0
+	err := InstallFilePaced(src, dst, 64<<10, 128<<10, func(n int, _ time.Duration) error {
+		if n > 0 {
+			chunks++
+			if chunks == 2 {
+				return errBusy
+			}
+		}
+		return nil
+	})
+	if !errors.Is(err, errBusy) {
+		t.Fatalf("mid-copy abort: err=%v, want %v", err, errBusy)
+	}
+	if _, serr := os.Stat(dst); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("dst created on aborted copy: %v", serr)
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".enginex-rb-") {
+			t.Fatalf("leftover temp file after abort: %s", e.Name())
+		}
+	}
+	if err := InstallFilePaced(src, dst, 64<<10, 128<<10, nil); err != nil {
+		t.Fatalf("idle InstallFilePaced: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("installed content mismatch: err=%v len=%d", err, len(got))
+	}
+}

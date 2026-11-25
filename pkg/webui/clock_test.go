@@ -431,3 +431,85 @@ func TestUIStatusNeverBlocksOnModsManagerLock(t *testing.T) {
 		t.Fatal("GET /v1/enginex/ui stalled while StartEnabled held managerMu")
 	}
 }
+
+// Findings 4.1 & 4.4:
+//  1. SongLoading posted on /v1/enginex/clock or /v1/enginex/decks persists loading:true in
+//     rb-deck-activity.json even while all decks are paused.
+//  2. When a deck was already playing before /run/enginex-usb-preparing appeared, GET
+//     /v1/enginex/ui refreshes rb-deck-activity.json immediately without a 3 s blind spot.
+func TestSongLoadingAndImmediateDeckClockRefresh(t *testing.T) {
+	priDir := t.TempDir()
+	defer bridge.SetPriorityDirForTest(priDir)()
+
+	base := t.TempDir()
+	uiDir := filepath.Join(base, "ui")
+	if err := os.MkdirAll(uiDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prepPath := filepath.Join(base, "usb-preparing")
+	s := New(Config{UIDir: uiDir, StateDir: filepath.Join(base, "state"), USBPreparingPath: prepPath}, nil)
+	defer s.Close()
+
+	actFile := filepath.Join(priDir, "rb-deck-activity.json")
+	nowMS := time.Now().UnixMilli()
+
+	// 1. Paused deck loading a track via /v1/enginex/clock must persist loading:true.
+	cBody := fmt.Sprintf(`[{"deck":1,"playing":false,"loading":true,"at":%d}]`, nowMS)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/enginex/clock", strings.NewReader(cBody))
+	req.RemoteAddr = "127.0.0.1:4201"
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("clock post: %d", rec.Code)
+	}
+	raw, err := os.ReadFile(actFile)
+	if err != nil || !strings.Contains(string(raw), `"loading":true`) {
+		t.Fatalf("clock post loading=true did not persist loading in rb-deck-activity.json: err=%v body=%s", err, string(raw))
+	}
+
+	// Clear loading via /v1/enginex/clock, then verify /v1/enginex/decks songLoading also works.
+	cBody = fmt.Sprintf(`[{"deck":1,"playing":false,"loading":false,"at":%d}]`, nowMS+10)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/v1/enginex/clock", strings.NewReader(cBody))
+	req.RemoteAddr = "127.0.0.1:4202"
+	s.ServeHTTP(rec, req)
+	raw, _ = os.ReadFile(actFile)
+	if strings.Contains(string(raw), `"loading":true`) {
+		t.Fatalf("loading did not clear: %s", string(raw))
+	}
+
+	dBody := fmt.Sprintf(`[{"deck":1,"playing":false,"songLoading":true,"at":%d}]`, nowMS+20)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(dBody))
+	req.RemoteAddr = "127.0.0.1:4203"
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("decks post: %d", rec.Code)
+	}
+	raw, err = os.ReadFile(actFile)
+	if err != nil || !strings.Contains(string(raw), `"loading":true`) {
+		t.Fatalf("decks post songLoading=true did not persist loading: err=%v body=%s", err, string(raw))
+	}
+
+	// 2. Deck started playing earlier; rb-deck-activity.json expired/removed; USB preparing starts.
+	// GET /v1/enginex/ui must immediately refresh rb-deck-activity.json to active=true (0 s lag).
+	cBody = fmt.Sprintf(`[{"deck":1,"playing":true,"loading":false,"at":%d}]`, nowMS+30)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/v1/enginex/clock", strings.NewReader(cBody))
+	req.RemoteAddr = "127.0.0.1:4204"
+	s.ServeHTTP(rec, req)
+	_ = os.Remove(actFile)
+	if bridge.IsDeckActive() {
+		t.Fatal("expected inactive after removing activity file")
+	}
+	if err := os.WriteFile(prepPath, []byte(`{"state":"importing","done":0,"total":100}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/v1/enginex/ui", nil)
+	req.RemoteAddr = "127.0.0.1:4205"
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 || !bridge.IsDeckActive() {
+		t.Fatalf("GET /v1/enginex/ui did not immediately refresh playing deck activity on USB prepare: code=%d active=%v", rec.Code, bridge.IsDeckActive())
+	}
+}

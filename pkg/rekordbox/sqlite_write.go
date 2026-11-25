@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"io"
 	"net/url"
@@ -73,9 +74,13 @@ func UpdateOneLibraryCues(ctx context.Context, dbPath string, updates map[uint32
 	return err
 }
 
-// UpdateTimes is where UpdateOneLibraryCuesKeys spent its time (#321 log line).
+// UpdateTimes is where UpdateOneLibraryCuesKeys spent its time (#321 log line), plus the
+// post-write cues/metadata read back from the already-decrypted working database so write-back
+// can refresh snapshot RecordHash values without a second full decrypt and scan.
 type UpdateTimes struct {
 	Decrypt, Edit, Encrypt time.Duration
+	WrittenCues            map[uint32][]Cue
+	WrittenMetadata        map[uint32]Metadata
 }
 
 // UpdateOneLibraryCuesKeys is UpdateOneLibraryCues with the SQLCipher keys of kc: with the
@@ -102,7 +107,8 @@ func UpdateOneLibraryMetadata(ctx context.Context, dbPath string, updates map[ui
 		return nil
 	}
 	return rewriteOneLibrary(ctx, dbPath, dstPath, nil, &UpdateTimes{}, func(plainPath string) error {
-		return applyMetadataUpdatesSQLite(ctx, plainPath, updates)
+		_, err := applyMetadataUpdatesSQLite(ctx, plainPath, updates)
+		return err
 	})
 }
 
@@ -125,11 +131,22 @@ func UpdateOneLibraryEditsKeys(ctx context.Context, dbPath string, cues map[uint
 			if err := applyCueUpdatesSQLite(ctx, plainPath, cues); err != nil {
 				return err
 			}
-		}
-		if len(metadata) > 0 {
-			if err := applyMetadataUpdatesSQLite(ctx, plainPath, metadata); err != nil {
+			ids := make([]uint32, 0, len(cues))
+			for id := range cues {
+				ids = append(ids, id)
+			}
+			written, err := readSQLiteCuesForIDs(ctx, plainPath, ids)
+			if err != nil {
 				return err
 			}
+			tm.WrittenCues = written
+		}
+		if len(metadata) > 0 {
+			written, err := applyMetadataUpdatesSQLite(ctx, plainPath, metadata)
+			if err != nil {
+				return err
+			}
+			tm.WrittenMetadata = written
 		}
 		return nil
 	})
@@ -349,29 +366,29 @@ func applyCueUpdatesSQLite(ctx context.Context, plainPath string, updates map[ui
 	return tx.Commit()
 }
 
-func applyMetadataUpdatesSQLite(ctx context.Context, plainPath string, updates map[uint32]Metadata) error {
+func applyMetadataUpdatesSQLite(ctx context.Context, plainPath string, updates map[uint32]Metadata) (map[uint32]Metadata, error) {
 	u := url.URL{Scheme: "file", Path: plainPath}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=DELETE;`); err != nil {
-		return fmt.Errorf("onelibrary: set journal_mode: %w", err)
+		return nil, fmt.Errorf("onelibrary: set journal_mode: %w", err)
 	}
 
 	contentTable, err := findSQLiteTable(ctx, db, "content", "djmdcontent", "track")
 	if err != nil {
-		return fmt.Errorf("onelibrary: content table: %w", err)
+		return nil, fmt.Errorf("onelibrary: content table: %w", err)
 	}
 	contentCols, err := sqliteTableColumns(ctx, db, contentTable)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	idCol := firstSQLiteColumn(contentCols, "content_id", "id", "track_id")
 	if idCol == "" {
-		return fmt.Errorf("onelibrary: content table has no id column")
+		return nil, fmt.Errorf("onelibrary: content table has no id column")
 	}
 	genreIDCol := firstSQLiteColumn(contentCols, "genre_id")
 	labelIDCol := firstSQLiteColumn(contentCols, "label_id")
@@ -379,58 +396,65 @@ func applyMetadataUpdatesSQLite(ctx context.Context, plainPath string, updates m
 	labelCol := firstSQLiteColumn(contentCols, "label")
 	commentCol := firstSQLiteColumn(contentCols, "djcomment", "commnt", "comment")
 	if commentCol == "" && genreIDCol == "" && labelIDCol == "" && genreCol == "" && labelCol == "" {
-		return fmt.Errorf("onelibrary: content table has no editable metadata columns")
+		return nil, fmt.Errorf("onelibrary: content table has no editable metadata columns")
 	}
 	genreTable, _ := findSQLiteTable(ctx, db, "genre", "djmdgenre")
 	labelTable, _ := findSQLiteTable(ctx, db, "label", "djmdlabel")
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
+	written := make(map[uint32]Metadata, len(updates))
 	for contentID, m := range updates {
 		sets := []string{}
 		args := []any{}
+		var applied Metadata
 		if commentCol != "" {
 			sets = append(sets, quoteSQLiteIdentifier(commentCol)+"=?")
 			args = append(args, m.Comment)
+			applied.Comment = m.Comment
 		}
 		if genreIDCol != "" {
 			var value any
 			if m.Genre != "" {
 				if genreTable == "" {
-					return fmt.Errorf("onelibrary: genre table missing")
+					return nil, fmt.Errorf("onelibrary: genre table missing")
 				}
 				id, err := lookupSQLiteID(ctx, tx, genreTable, m.Genre)
 				if err != nil {
-					return err
+					return nil, err
 				}
 				value = id
 			}
 			sets = append(sets, quoteSQLiteIdentifier(genreIDCol)+"=?")
 			args = append(args, value)
+			applied.Genre = m.Genre
 		} else if genreCol != "" {
 			sets = append(sets, quoteSQLiteIdentifier(genreCol)+"=?")
 			args = append(args, m.Genre)
+			applied.Genre = m.Genre
 		}
 		if labelIDCol != "" {
 			var value any
 			if m.Label != "" {
 				if labelTable == "" {
-					return fmt.Errorf("onelibrary: label table missing")
+					return nil, fmt.Errorf("onelibrary: label table missing")
 				}
 				id, err := lookupSQLiteID(ctx, tx, labelTable, m.Label)
 				if err != nil {
-					return err
+					return nil, err
 				}
 				value = id
 			}
 			sets = append(sets, quoteSQLiteIdentifier(labelIDCol)+"=?")
 			args = append(args, value)
+			applied.Label = m.Label
 		} else if labelCol != "" {
 			sets = append(sets, quoteSQLiteIdentifier(labelCol)+"=?")
 			args = append(args, m.Label)
+			applied.Label = m.Label
 		}
 		if len(sets) == 0 {
 			continue
@@ -438,10 +462,94 @@ func applyMetadataUpdatesSQLite(ctx context.Context, plainPath string, updates m
 		args = append(args, contentID)
 		q := `UPDATE ` + quoteSQLiteIdentifier(contentTable) + ` SET ` + strings.Join(sets, ", ") + ` WHERE ` + quoteSQLiteIdentifier(idCol) + `=?`
 		if _, err := tx.ExecContext(ctx, q, args...); err != nil {
-			return fmt.Errorf("onelibrary: update metadata for %d: %w", contentID, err)
+			return nil, fmt.Errorf("onelibrary: update metadata for %d: %w", contentID, err)
 		}
+		written[contentID] = applied
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return written, nil
+}
+
+// readSQLiteCuesForIDs reads back only the updated content_id cue rows from the already-decrypted
+// working database using the exact parseSQLiteCue + Analysis.mergeCue rules of ReadSQLite.
+func readSQLiteCuesForIDs(ctx context.Context, plainPath string, ids []uint32) (map[uint32][]Cue, error) {
+	out := make(map[uint32][]Cue, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	u := url.URL{Scheme: "file", Path: plainPath, RawQuery: "mode=ro"}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	cueTable, err := findSQLiteTable(ctx, db, "cue", "djmdcue")
+	if err != nil || cueTable == "" {
+		return out, nil
+	}
+	p, err := buildSQLProjection(ctx, db, cueTable, cueColumnGroups)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := p.index["content_id"]; !ok {
+		return out, nil
+	}
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = fmt.Sprintf("%d", id)
+	}
+	filter := `content_id IN (` + strings.Join(parts, ",") + `)`
+	if p.where == "" {
+		p.where = ` WHERE ` + filter
+	} else {
+		p.where += ` AND ` + filter
+	}
+	type indexedCue struct {
+		id  int64
+		seq int
+		cue Cue
+	}
+	byContent := make(map[uint32][]indexedCue, len(ids))
+	seq := -1
+	if err := p.each(ctx, db, func(values []driver.Value) {
+		seq++
+		r := sqlDriverRecord{values: values, index: p.index}
+		cid := r.num("content_id")
+		if cid == 0 {
+			return
+		}
+		c, ok := parseSQLiteCue(r)
+		if !ok {
+			return
+		}
+		cueID, _ := r.sint("cue_id", "id")
+		byContent[cid] = append(byContent[cid], indexedCue{id: cueID, seq: seq, cue: c})
+	}); err != nil {
+		return nil, err
+	}
+	for _, cid := range ids {
+		items := byContent[cid]
+		if len(items) == 0 {
+			out[cid] = nil
+			continue
+		}
+		sort.SliceStable(items, func(a, b int) bool {
+			if items[a].id != items[b].id {
+				return items[a].id < items[b].id
+			}
+			return items[a].seq < items[b].seq
+		})
+		var merged Analysis
+		for _, item := range items {
+			merged.mergeCue(item.cue)
+		}
+		out[cid] = merged.Cues
+	}
+	return out, nil
 }
 
 func findSQLiteTable(ctx context.Context, db *sql.DB, names ...string) (string, error) {

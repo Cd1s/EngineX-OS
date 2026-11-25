@@ -1032,6 +1032,9 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	v.TimeZone = s.savedTimeZone()
 	now := time.Now()
 	v.DeckClock = s.deckClockWanted(now)
+	if v.DeckClock {
+		s.rbPriorityQueue().RefreshDeckActivity(now)
+	}
 	v.USBPreparing, v.USBPrepare = s.usbPreparingState(now)
 	httpsOn := s.httpsOfferedLocked(v.ConsoleHTTPS)
 	if httpsOn {

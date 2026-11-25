@@ -96,7 +96,9 @@ func StatTrack(ctx context.Context, res *compat.Resolver, t rekordbox.Track) (Tr
 		if stopped(err) {
 			return src, err
 		}
-		if err != nil && src.Broken == nil {
+		if errors.Is(err, os.ErrNotExist) {
+			cover = rbstate.FileSig{}
+		} else if err != nil && src.Broken == nil {
 			src.Broken = fmt.Errorf("artwork: %w", err)
 		}
 		src.Sig.Artwork = cover
