@@ -189,3 +189,33 @@ func TestMirrorLibraryRefusesARowBothAdded(t *testing.T) {
 		t.Fatalf("error %v, want ErrMirrorConflict", err)
 	}
 }
+
+// A new next library has its Track rows together and in order, whatever their waveforms weigh: a
+// scan of them (the grid fix at every insert, Engine's own) is then a few reads of a USB 2.0 stick.
+// Copied between each other's waveforms they were a read a page, and the insert of an unchanged
+// 5,962-track stick took 6.8 s instead of 0.7 s.
+func TestMirrorLibraryLaysTrackRowsTogether(t *testing.T) {
+	dir := mirrorLive(t, 300)
+	live, next := filepath.Join(dir, "m.db"), filepath.Join(dir, ".rb-next.db")
+	mirrorExec(t, live, `UPDATE PerformanceData SET overviewWaveFormData=randomblob(20000)`)
+	var m Mirror
+	if _, err := MirrorLibrary(context.Background(), live, next, &m, nil); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var pages, span, rows, waves int
+	if err = db.QueryRow(`SELECT count(*),max(pageno)-min(pageno)+1,(SELECT count(*) FROM Track),
+		(SELECT count(*) FROM PerformanceData WHERE length(overviewWaveFormData)=20000) FROM dbstat WHERE name='Track' AND pagetype='leaf'`).Scan(&pages, &span, &rows, &waves); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 300 || waves != 300 {
+		t.Fatalf("the next library has %d tracks, %d with their waveform; want 300 and 300", rows, waves)
+	}
+	if pages < 4 || span > 2*pages { // between them: the pages of the table's own UNIQUE index, filled with it
+		t.Fatalf("the Track table's %d leaf pages lie over %d pages of the file; want them together", pages, span)
+	}
+}

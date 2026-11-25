@@ -292,35 +292,15 @@ func (mr *mirroring) tracks(fresh bool) error {
 	seen := mr.m.Tracks
 	live := make(map[int64]bool, len(seen))
 	const unsettled = 0 // no fingerprint: the row is taken again
-	for after, got := int64(math.MinInt64), scanRows; got == scanRows; {
-		var ids []int64
-		if after, got, err = mr.scan("Track", print, after, scanRows, func(id int64, sum uint64) {
-			live[id] = true
-			if old, ok := seen[id]; !ok || old != sum {
-				seen[id] = sum
-				ids = append(ids, id)
-			}
-		}); err != nil {
-			return err
-		}
-		if len(ids) > 0 {
-			fresh, err := mr.strings1(`SELECT id FROM live.Track WHERE id>=? AND id<=? AND lastEditTime>=CAST(strftime('%s','now') AS INTEGER)-1`, ids[0], ids[len(ids)-1])
-			if err != nil {
-				return err
-			}
-			for _, text := range fresh {
-				var id int64
-				fmt.Sscan(text, &id)
-				seen[id] = unsettled
-			}
-		}
+	// put copies the rows of ids, at most n a transaction; again: over the rows the next library has.
+	put := func(ids []int64, n int, again bool, tables ...[2]string) error {
 		for len(ids) > 0 {
-			part := ids[:min(blobRows, len(ids))]
+			part := ids[:min(n, len(ids))]
 			ids = ids[len(part):]
 			list := strings.Trim(strings.Join(strings.Fields(fmt.Sprint(part)), ","), "[]")
-			if err = mr.plain(func() error {
-				for _, t := range [][2]string{{"Track", "id"}, {"PerformanceData", "trackId"}} {
-					if !fresh {
+			if err := mr.plain(func() error {
+				for _, t := range tables {
+					if again {
 						if e := mr.exec(`DELETE FROM main.` + t[0] + ` WHERE ` + t[1] + ` IN (` + list + `)`); e != nil {
 							return e
 						}
@@ -333,8 +313,49 @@ func (mr *mirroring) tracks(fresh bool) error {
 			}); err != nil {
 				return err
 			}
-			mr.out.Tracks = append(mr.out.Tracks, part...)
 		}
+		return nil
+	}
+	track, perf := [2]string{"Track", "id"}, [2]string{"PerformanceData", "trackId"}
+	var all []int64
+	for after, got := int64(math.MinInt64), scanRows; got == scanRows; {
+		var ids []int64
+		if after, got, err = mr.scan("Track", print, after, scanRows, func(id int64, sum uint64) {
+			live[id] = true
+			if old, ok := seen[id]; !ok || old != sum {
+				seen[id] = sum
+				ids = append(ids, id)
+			}
+		}); err != nil {
+			return err
+		}
+		if len(ids) > 0 {
+			recent, err := mr.strings1(`SELECT id FROM live.Track WHERE id>=? AND id<=? AND lastEditTime>=CAST(strftime('%s','now') AS INTEGER)-1`, ids[0], ids[len(ids)-1])
+			if err != nil {
+				return err
+			}
+			for _, text := range recent {
+				var id int64
+				fmt.Sscan(text, &id)
+				seen[id] = unsettled
+			}
+		}
+		if fresh {
+			// A new file gets every Track row before any waveform: the rows then lie together and in
+			// order, and a scan of them is a few reads of the stick. Between each other's waveforms
+			// it was a read a page: 7.9 s for 5,962 tracks on a USB 2.0 stick, against 0.2 s.
+			err = put(ids, scanRows, false, track)
+			all = append(all, ids...)
+		} else {
+			err = put(ids, blobRows, true, track, perf)
+		}
+		if err != nil {
+			return err
+		}
+		mr.out.Tracks = append(mr.out.Tracks, ids...)
+	}
+	if err = put(all, blobRows, false, perf); err != nil {
+		return err
 	}
 	var gone []int64
 	for id := range seen {
