@@ -33,9 +33,24 @@ import (
 var (
 	errVolumeBusy        = errors.New("writeback: volume busy")
 	errConverting        = errors.New("writeback: conversion in progress")
+	usbPreparingFlagMu   sync.RWMutex
 	usbPreparingFlagPath = "/run/enginex-usb-preparing"
 	writeBackCut         = func(string) {} // tests: a pull between two writes
 )
+
+func getUSBPreparingFlagPath() string {
+	usbPreparingFlagMu.RLock()
+	defer usbPreparingFlagMu.RUnlock()
+	return usbPreparingFlagPath
+}
+
+func setUSBPreparingFlagPath(p string) string {
+	usbPreparingFlagMu.Lock()
+	defer usbPreparingFlagMu.Unlock()
+	old := usbPreparingFlagPath
+	usbPreparingFlagPath = p
+	return old
+}
 
 // WriteBackOptions configures a cue write-back pass.
 type WriteBackOptions struct {
@@ -280,7 +295,7 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 		return "", fmt.Errorf("writeback: stick is read-only: %s", p.mount)
 	}
 	if !p.opts.SkipPreparingCheck && !p.opts.OnEject {
-		if _, err := os.Stat(usbPreparingFlagPath); err == nil {
+		if _, err := os.Stat(getUSBPreparingFlagPath()); err == nil {
 			return "conversion is in progress", errConverting
 		}
 	}

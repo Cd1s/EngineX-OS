@@ -177,6 +177,7 @@ func (w *CueWatcher) run(ctx context.Context, mount string, st *cueStick, done c
 		switch {
 		case err == nil, ctx.Err() != nil, errors.Is(err, errUnownedClusters):
 		case errors.Is(err, errNotQuiet):
+			retry = true
 			log.Printf("rb-bridge: cue write-back on %s dropped: Engine wrote m.db while it was read", mount)
 		case errors.Is(err, errVolumeBusy), errors.Is(err, errConverting):
 			retry = true

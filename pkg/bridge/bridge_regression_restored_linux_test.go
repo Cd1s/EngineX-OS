@@ -123,9 +123,8 @@ func TestRestored_Issue321_HungStickAtInsertHoldsOnlyItself(t *testing.T) {
 	}
 	defer release()
 
-	oldPrep := usbPreparingFlagPath
-	usbPreparingFlagPath = filepath.Join(t.TempDir(), "no-preparing")
-	defer func() { usbPreparingFlagPath = oldPrep }()
+	oldPrep := setUSBPreparingFlagPath(filepath.Join(t.TempDir(), "no-preparing"))
+	defer func() { setUSBPreparingFlagPath(oldPrep) }()
 
 	w := &CueWatcher{
 		quiet:  150 * time.Millisecond,

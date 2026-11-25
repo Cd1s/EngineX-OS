@@ -24,9 +24,44 @@ type CuePass = func(context.Context, string, WriteBackOptions) (WriteBackResult,
 func WrapCuePassForTest(w *CueWatcher, wrap func(next CuePass) CuePass) { w.pass = wrap(w.pass) }
 
 func SetCueRunDirForTest(dir string) func() {
-	oldFlag, oldEject := usbPreparingFlagPath, cueEjectingDir
-	usbPreparingFlagPath, cueEjectingDir = filepath.Join(dir, "enginex-usb-preparing"), dir
-	return func() { usbPreparingFlagPath, cueEjectingDir = oldFlag, oldEject }
+	oldFlag := setUSBPreparingFlagPath(filepath.Join(dir, "enginex-usb-preparing"))
+	oldEject := cueEjectingDir
+	cueEjectingDir = dir
+	return func() {
+		setUSBPreparingFlagPath(oldFlag)
+		cueEjectingDir = oldEject
+	}
+}
+
+// WaitWatchingForTest blocks until CueWatcher has attached mount, or times out.
+func WaitWatchingForTest(w *CueWatcher, mount string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		w.mu.Lock()
+		_, ok := w.sticks[mount]
+		w.mu.Unlock()
+		if ok {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
+// WaitPassIdleForTest blocks until CueWatcher's stick pass for mount is no longer running.
+func WaitPassIdleForTest(w *CueWatcher, mount string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		w.mu.Lock()
+		st := w.sticks[mount]
+		idle := st != nil && st.running == nil
+		w.mu.Unlock()
+		if idle {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
 }
 
 func SetWriteBackCutForTest(cut func(step string)) func() {

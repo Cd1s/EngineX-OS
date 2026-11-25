@@ -64,9 +64,8 @@ func TestRestored_Issue321_FinalPassReusesWatchersKeys(t *testing.T) {
 	t.Setenv(rbstate.StageEnv, filepath.Join(t.TempDir(), "stage"))
 	diskCache := t.TempDir()
 	t.Setenv(keyCacheEnv, diskCache)
-	oldPrep := usbPreparingFlagPath
-	usbPreparingFlagPath = filepath.Join(t.TempDir(), "no-preparing")
-	defer func() { usbPreparingFlagPath = oldPrep }()
+	oldPrep := setUSBPreparingFlagPath(filepath.Join(t.TempDir(), "no-preparing"))
+	defer func() { setUSBPreparingFlagPath(oldPrep) }()
 
 	mount := t.TempDir()
 	testfixture.LargeExport(t, mount, 2)

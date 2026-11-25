@@ -55,9 +55,10 @@ var (
 	// peerDecks asks an Engine Link peer's stream-sync the same: an EngineX deck answers.
 	peerDecks = func(ip net.IP) ([]string, bool) { return decksAt(net.JoinHostPort(ip.String(), "8080")) }
 	// takeDeckRows takes the rows the deck wrote since the job's last pass into a next library that
-	// waits for this remount, and reports whether it had to look for them.
-	takeDeckRows  = bridge.TakeDeckRows
-	deckRowPasses = 3 // a library the deck goes on writing is left to the window after this many
+	// waits for this remount, reporting whether it looked or failed.
+	takeDeckRows    = bridge.TakeDeckRowsChecked
+	deckRowPasses   = 3 // a library the deck goes on writing is left to the window after this many
+	deckRowFailures = 3 // repeated takeDeckRows failures defer and eventually abort remount safely
 )
 
 // decksAt reads the decks an EngineX stream-sync at addr serves the other player
@@ -284,7 +285,7 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 		quietSince = st.ModTime()
 	}
 	waiting := false
-	for clear, passes := 0, 0; clear < 2; {
+	for clear, passes, failPasses := 0, 0, 0; clear < 2; {
 		if !mounted(mount) || ejected() {
 			return nil // ejected or pulled: the next mount publishes
 		}
@@ -309,9 +310,25 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 		// into it now, with no window's limit, so that the remount's window only renames whatever
 		// the library's size. Looking for it reads every row (seconds on a big library): the decks
 		// are looked at again afterwards.
-		if clear == 2 && passes < deckRowPasses && takeRowsWhileMounted(ctx, mount, ejected) {
-			clear, wait = 0, 0
-			passes++
+		if clear == 2 && passes < deckRowPasses {
+			looked, takeErr := takeRowsWhileMounted(ctx, mount, ejected)
+			if takeErr != nil {
+				if !mounted(mount) || ejected() || ctx.Err() != nil {
+					return nil
+				}
+				failPasses++
+				if failPasses >= deckRowFailures {
+					return fmt.Errorf("take deck rows on %s: %w", mount, takeErr)
+				}
+				log.Printf("rb-bridge: %s defers remount after deck-row pass failed (%d/%d): %v", mount, failPasses, deckRowFailures, takeErr)
+				clear, wait = 0, deckWait
+			} else {
+				failPasses = 0
+				if looked {
+					clear, wait = 0, 0
+					passes++
+				}
+			}
 		}
 		if !mounted(mount) || ejected() {
 			return nil
@@ -351,7 +368,7 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 // files of the stick open and writes its next library, and after an Eject nothing may (the hook
 // marks the eject before its own pass and the unmount, and stops only the import job's unit).
 // It looks every 100 ms: the unmount follows the mark by the start of the hook's own pass.
-func takeRowsWhileMounted(ctx context.Context, mount string, ejected func() bool) bool {
+func takeRowsWhileMounted(ctx context.Context, mount string, ejected func() bool) (bool, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
@@ -362,10 +379,10 @@ func takeRowsWhileMounted(ctx context.Context, mount string, ejected func() bool
 			}
 		}
 	}()
-	looked := takeDeckRows(ctx, mount)
+	looked, err := takeDeckRows(ctx, mount)
 	cancel()
 	<-done
-	return looked
+	return looked, err
 }
 
 // mountID is the id of the mount at mount, "" when there is none.

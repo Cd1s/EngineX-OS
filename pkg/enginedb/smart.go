@@ -1,6 +1,7 @@
 package enginedb
 
 import (
+	"context"
 	"math"
 	"strconv"
 	"strings"
@@ -51,23 +52,42 @@ func CompatibleKeys(a, b string) bool {
 
 // SmartMatch preserves source track order and excludes the currently playing track.
 func SmartMatch(tracks []rekordbox.Track, current uint32) []uint32 {
+	ids, _ := SmartMatchCtx(context.Background(), tracks, current)
+	return ids
+}
+
+// SmartMatchCtx is SmartMatch with context cancellation checks across large libraries.
+func SmartMatchCtx(ctx context.Context, tracks []rekordbox.Track, current uint32) ([]uint32, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var ref *rekordbox.Track
 	for i := range tracks {
+		if i&511 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		if tracks[i].ID == current {
 			ref = &tracks[i]
 			break
 		}
 	}
 	if ref == nil || ref.BPM <= 0 {
-		return nil
+		return nil, nil
 	}
 	var ids []uint32
-	for _, t := range tracks {
+	for i, t := range tracks {
+		if i&511 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		if t.ID != current && t.BPM > 0 && math.Abs(t.BPM-ref.BPM) <= 4 && CompatibleKeys(t.Key, ref.Key) {
 			ids = append(ids, t.ID)
 		}
 	}
-	return ids
+	return ids, nil
 }
 
 // Engine interleaves relative major/minor keys around the circle of fifths:
