@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -173,9 +175,8 @@ func TestWriteBackAnalysisOnlyPassSkipsExportRead(t *testing.T) {
 }
 
 func TestNeedsCueReadFilledStageIgnoresEngineMainCueTail(t *testing.T) {
-	stagedCues := []byte("stage-cues-012345")
-	rowCues := append([]byte(nil), stagedCues...)
-	copy(rowCues[len(rowCues)-8:], []byte("engine!!"))
+	stagedCues := makeMainCueBlob(9920, 9920, 0)
+	rowCues := makeMainCueBlob(-1105, -1105, 0)
 	row := dbCandidate{
 		track:       &rbstate.Track{Written: nil, Synced: nil},
 		trackData:   []byte{1},
@@ -193,6 +194,21 @@ func TestNeedsCueReadFilledStageIgnoresEngineMainCueTail(t *testing.T) {
 	if !needsCueRead(row) {
 		t.Fatal("filled row with a real cue edit was ignored")
 	}
+}
+
+func makeMainCueBlob(main, defaultMain float64, adjusted byte) []byte {
+	raw := make([]byte, 8+8*(1+12)+17)
+	binary.BigEndian.PutUint64(raw, 8)
+	off := 8
+	for i := 0; i < 8; i++ {
+		raw[off] = 0
+		off++
+		off += 12
+	}
+	binary.BigEndian.PutUint64(raw[off:], math.Float64bits(main))
+	raw[off+8] = adjusted
+	binary.BigEndian.PutUint64(raw[off+9:], math.Float64bits(defaultMain))
+	return raw
 }
 
 func TestReadFilledStageUsesLastValidRowAndStageDigest(t *testing.T) {
