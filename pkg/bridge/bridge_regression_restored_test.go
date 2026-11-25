@@ -303,7 +303,15 @@ func TestRestored_Issue253_ShortRGBOverviewReplacedOnPublish(t *testing.T) {
 	if err := os.WriteFile(rgb1, []byte{1, 2, 3}, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	validCustom := []byte("VALID-CUSTOM-RGB-DATA")
+	rawCustom := make([]byte, 30)
+	binary.BigEndian.PutUint64(rawCustom[0:8], 1)
+	binary.BigEndian.PutUint64(rawCustom[8:16], 1)
+	rawCustom[24], rawCustom[25], rawCustom[26] = 0x11, 0x22, 0x33
+	rawCustom[27], rawCustom[28], rawCustom[29] = 0x44, 0x55, 0x66
+	validCustom, err := enginedb.QCompress(rawCustom)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(rgb2, validCustom, 0o644); err != nil {
 		t.Fatal(err)
 	}
