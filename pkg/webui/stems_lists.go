@@ -336,7 +336,7 @@ const providerHeader = "X-Enginex-Provider"
 // stemsLocal answers whether a streamed row has a stemmed local copy.
 func (g *tidalGateway) stemsLocal(w http.ResponseWriter, r *http.Request) {
 	if _, ref, ok := g.lookup(w, r.URL.Query().Get("id")); ok {
-		w.Header().Set(providerHeader, ref.track.Provider)
+		w.Header().Set(providerHeader, gatewayProvider(ref.track.Provider))
 		if p := g.s.stemmedPath(ref.track); p != "" {
 			respond(w, map[string]any{"path": p})
 		} else {

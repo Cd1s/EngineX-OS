@@ -122,7 +122,7 @@ func sourceFailedTitle(provider string, err error) string {
 
 var (
 	tidalNS        = uuid.MustParse("6f1c5a52-3c55-4c2e-9d0b-5c5000000000")
-	providerLabels = map[string]string{"netease": "网易云音乐", "spotify": "Spotify", "deezer": "Deezer", "soundcloud": "SoundCloud", "beatport": "Beatport", localProvider: "USB/SD", "applemusic": "Apple Music", rekordboxScope: "rekordbox"}
+	providerLabels = map[string]string{"netease": "网易云音乐", "spotify": "Spotify", "deezer": "Deezer", "soundcloud": "SoundCloud", "beatport": "Beatport", localProvider: "USB/SD", "applemusic": "Apple Music", rekordboxScope: "rekordbox", "nas": "NAS"}
 	providerOrder  = map[string]int{"netease": 0, "spotify": 1, "deezer": 2, "soundcloud": 3, "beatport": 4, "applemusic": 5}
 )
 
@@ -516,7 +516,7 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 // list QML moves them to its BPM and Key columns. Display text only: this reaches
 // neither the beat grid nor the library.
 func labelWithBPM(t providers.Track) string {
-	label := providerLabels[t.Provider]
+	label := providerLabels[gatewayProvider(t.Provider)]
 	if t.BPM <= 0 {
 		return label
 	}
@@ -1084,7 +1084,7 @@ func playlistJSON(id, title, description string, count int) map[string]any {
 	return map[string]any{"uuid": id, "title": title, "numberOfTracks": count, "numberOfVideos": 0, "description": description, "duration": 0, "lastUpdated": now, "created": now, "type": "USER", "publicPlaylist": false, "url": "http://enginex.lan:8080", "image": "", "squareImage": "", "popularity": 0}
 }
 func (g *tidalGateway) refJSON(id string, ref playlistRef) map[string]any {
-	if ref.provider == listNoticeProvider || ref.provider == rekordboxScope {
+	if ref.provider == listNoticeProvider || ref.provider == rekordboxScope || ref.provider == nasScope {
 		return playlistJSON(id, ref.list.Title, "", ref.list.Count)
 	}
 	label := providerLabels[ref.provider]
@@ -1105,6 +1105,10 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 	scope := g.s.scope()
 	if scope == rekordboxScope { // a computer on the link: no service login to restore first
 		g.rbxPlaylistsPage(w, r)
+		return
+	}
+	if scope == nasScope {
+		g.nasPlaylistsPage(w, r)
 		return
 	}
 	sessions := []*Session{}
@@ -1228,6 +1232,9 @@ func playlistOpenSourceID(ref *playlistRef) string {
 		return "unresolved"
 	}
 	id := ref.list.ID
+	if ref.provider == nasScope {
+		return "nas:" + path.Base(id)
+	}
 	if ref.provider != localProvider {
 		return id
 	}
@@ -1565,6 +1572,10 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		order = "asc"
 	}
 
+	if ref.provider == nasScope {
+		g.nasTracks(w, r, id, ref, role, order)
+		return
+	}
 	if ref.provider == localProvider {
 		refs, err := g.s.driveListTracks(r.Context(), ref.list.ID)
 		if err != nil {
@@ -1844,11 +1855,17 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	}
 	scope := g.s.scope()
 	sources := []source{}
-	// Gateway search deliberately requires a login, including services whose
-	// provider APIs also support anonymous/public search.
-	for _, v := range g.sourcesFor(scope) {
-		if v.Provider == scope {
-			sources = append(sources, source{v.ID, v.Provider, v.Guest, v.p})
+	if scope == nasScope {
+		if nasProv := g.s.ownerSelfHosted(); nasProv != nil {
+			sources = append(sources, source{session: nasScope, provider: nasScope, p: nasProv})
+		}
+	} else {
+		// Gateway search deliberately requires a login, including services whose
+		// provider APIs also support anonymous/public search.
+		for _, v := range g.sourcesFor(scope) {
+			if v.Provider == scope {
+				sources = append(sources, source{v.ID, v.Provider, v.Guest, v.p})
+			}
 		}
 	}
 	var tracks [][]providers.Track
@@ -1878,6 +1895,9 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	for i, v := range sources {
 		g.s.cfg.BPM.Enrich(r.Context(), tracks[i])
 		for _, t := range tracks[i] {
+			if v.provider == nasScope {
+				httpsCover(&t)
+			}
 			trackItems = append(trackItems, g.trackJSON(g.addTrack(trackRef{track: t, session: v.session, guest: v.guest}), t))
 		}
 		for _, p := range lists[i] {
@@ -2033,7 +2053,7 @@ func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref tr
 	}
 	// These providers can deliver different codecs regardless of the quality setting.
 	switch ref.track.Provider {
-	case "soundcloud", "beatport", "webdav", "subsonic", "plex":
+	case "soundcloud", "beatport", "webdav", "subsonic", "plex", "smb":
 	default:
 		if !j.Lossy() {
 			return true
@@ -2122,7 +2142,7 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 	}
 	p = stemsImportFile(p, ref.track, reserve)
 	// The row joins the Stems list of the service it was stemmed from.
-	stemsScope := ref.track.Provider
+	stemsScope := gatewayProvider(ref.track.Provider)
 	if v := g.sessionByID(ref.session); v != nil && v.Provider != "" {
 		stemsScope = v.Provider
 	}

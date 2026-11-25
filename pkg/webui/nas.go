@@ -306,9 +306,36 @@ func (s *Server) handleNASTest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+const nasScope = "nas"
+
+func nasConfigReady(cfg providers.NASConfig) bool {
+	return cfg.Enabled &&
+		(cfg.Protocol == "webdav" || cfg.Protocol == "subsonic" || cfg.Protocol == "plex" || cfg.Protocol == "smb") &&
+		cfg.URL != "" && validateNASURL(cfg.URL) == nil
+}
+
+func gatewayProvider(p string) string {
+	switch p {
+	case "webdav", "subsonic", "plex", "smb":
+		return nasScope
+	default:
+		return p
+	}
+}
+
+func (s *Server) nasAvailableLocked() bool {
+	return nasConfigReady(s.loadNASConfigLocked())
+}
+
+func (s *Server) nasAvailable() bool {
+	s.uiMu.Lock()
+	defer s.uiMu.Unlock()
+	return s.nasAvailableLocked()
+}
+
 func (s *Server) ownerSelfHosted() *providers.SelfHostedProvider {
 	cfg := s.loadNASConfig()
-	if !cfg.Enabled || cfg.Protocol == "" || cfg.URL == "" || validateNASURL(cfg.URL) != nil {
+	if !nasConfigReady(cfg) {
 		return nil
 	}
 	return providers.NewSelfHostedProvider(cfg, s.nasHTTPClient())
@@ -324,4 +351,74 @@ func (s *Server) nasPlaylists(ctx context.Context) ([]providers.Playlist, *provi
 		return nil, p
 	}
 	return lists, p
+}
+
+// nasPlaylistsPage serves a configured NAS as its own source under Sources
+// (independent of OmniSource, #335).
+func (g *tidalGateway) nasPlaylistsPage(w http.ResponseWriter, r *http.Request) {
+	favorites := strings.HasSuffix(r.URL.Path, "/favorites/playlists")
+	items := []any{}
+	add := func(v map[string]any) {
+		if favorites {
+			flat := map[string]any{"item": v}
+			for k, f := range v {
+				flat[k] = f
+			}
+			v = flat
+		}
+		items = append(items, v)
+	}
+	if n := len(g.s.stemmed(nasScope)); n > 0 {
+		add(playlistJSON(stemsListID(nasScope), "Stems", "", n))
+	}
+	p := g.s.ownerSelfHosted()
+	if p == nil {
+		add(playlistJSON(hintPlaylist, sourceFailedTitle(nasScope, errors.New("not configured")), "http://"+lanHost()+":8080", 0))
+		respond(w, page(r, 100, items))
+		return
+	}
+	lists, err := p.Playlists(r.Context())
+	if err != nil && len(lists) == 0 {
+		add(playlistJSON(hintPlaylist, sourceFailedTitle(nasScope, err), err.Error(), 0))
+		respond(w, page(r, 100, items))
+		return
+	}
+	for _, pl := range lists {
+		ref := playlistRef{session: nasScope, provider: nasScope, list: pl}
+		add(g.refJSON(g.addPlaylist(ref), ref))
+	}
+	respond(w, page(r, 100, items))
+}
+
+func (g *tidalGateway) nasTracks(w http.ResponseWriter, r *http.Request, id string, ref playlistRef, role, order string) {
+	nasProv := g.s.ownerSelfHosted()
+	if nasProv == nil {
+		err := errors.New("nas provider is not enabled")
+		g.logPlaylistOpenFailure(r, http.StatusNotFound, id, &ref, err)
+		fail(w, http.StatusNotFound, err)
+		return
+	}
+	tracks, err := nasProv.PlaylistTracks(r.Context(), ref.list.ID)
+	if err != nil {
+		g.logPlaylistOpenFailure(r, http.StatusBadGateway, id, &ref, err)
+		fail(w, http.StatusBadGateway, err)
+		return
+	}
+	if len(tracks) > maxPlaylistTracks {
+		err := errors.New("playlist too large")
+		g.logPlaylistOpenFailure(r, http.StatusBadRequest, id, &ref, err)
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	g.s.cfg.BPM.Enrich(r.Context(), tracks)
+	g.enrichRatingsFromDB(r.Context(), tracks)
+	refs := make([]trackRef, 0, len(tracks))
+	for _, t := range tracks {
+		httpsCover(&t)
+		refs = append(refs, trackRef{track: t, session: nasScope})
+	}
+	if role != "" && role != "default" {
+		sortStreamingTracks(refs, role, order)
+	}
+	respond(w, page(r, 500, g.refItems(refs)))
 }

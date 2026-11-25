@@ -470,7 +470,7 @@ TIDAL_OPEN_530 = """	function scTidalProvider() {
 	function scOpen(id) {
 		if (!id || !scUiLoaded || scSources.indexOf(id) < 0) return
 		if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) {
-			if (id !== "rekordbox") {
+			if (id !== "rekordbox" && id !== "nas") {
 				root.scLoginOpen = id
 				scLoginBegin(id)
 			}
@@ -503,7 +503,7 @@ TIDAL_OPEN_504 = """
 	function scOpen(id) {
 		if (!id || !scUiLoaded || scSources.indexOf(id) < 0) return
 		if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) {
-			if (id !== "rekordbox") {
+			if (id !== "rekordbox" && id !== "nas") {
 				root.scLoginOpen = id
 				scLoginBegin(id)
 			}
@@ -3863,9 +3863,10 @@ SERVICES_MAIN = """
 	property string scRekordboxName: "" // the computer with rekordbox on Pro DJ Link, while there is one
 	// "Apple Music (EngineX)" is the third-party service on the gateway; Engine's own Apple Music is a row of its own and keeps its name (#323).
 	// The Sources list shows these in this order after the drives and Link sources:
-	// the computer with rekordbox is a library on the link, so it comes before the services.
+	// the computer with rekordbox and a configured NAS are local libraries, so they come before the services.
 	readonly property var scServices: [
 		{ id: "rekordbox", name: scRekordboxName ? "rekordbox (" + scRekordboxName + ")" : "rekordbox" },
+		{ id: "nas", name: "NAS" },
 		{ id: "tidal", name: "TIDAL" },
 		{ id: "netease", name: scT("NetEase Cloud Music") },
 		{ id: "spotify", name: "Spotify" },
@@ -3893,6 +3894,7 @@ SERVICES_MAIN = """
 		if (id === "soundcloud") return "qrc:/@ICONS@/SourceSoundCloudColored.png"
 		if (id === "beatport") return "qrc:/@ICONS@/SourceBeatport%20LINKColored.png"
 		if (id === "rekordbox") return "qrc:/@ICONS@/SourceEngineRemoteLibrary.png"
+		if (id === "nas") return "qrc:/@ICONS@/SourceNetwork.png"
 		return "file:///data/enginex/ui/icons/" + id + ".png"
 	}
 	// The gateway appends " [128 BPM 8A]" to a row's label; see labelWithBPM.
@@ -5750,7 +5752,7 @@ SOURCE_FOOTER = """
 				MouseArea {
 					anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
 					width: 140
-					visible: modelData.id !== "tidal" && modelData.id !== "rekordbox"
+					visible: modelData.id !== "tidal" && modelData.id !== "rekordbox" && modelData.id !== "nas"
 					onClicked: { root.scLoginOpen = ""; root.scLoginBegin(modelData.id) }
 					Text {
 						anchors.centerIn: parent
@@ -5835,7 +5837,7 @@ BLUETOOTH_SELECT = [
 
 STREAM_SWITCHES = """
 	Repeater {
-		model: root.scServices.filter(s => s.id !== "rekordbox") // a computer on the link, not a service to switch
+		model: root.scServices.filter(s => s.id !== "rekordbox").filter(s => s.id !== "nas") // libraries, not services to switch
 		SwitchEntry {
 			text: modelData.name
 			visible: !root.scOff("gateway")

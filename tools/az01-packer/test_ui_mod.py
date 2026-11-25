@@ -15118,5 +15118,122 @@ assert.strictEqual(sent.length, 2);
                 self.assertEqual(res.returncode, 0, f"{version}: {res.stderr}")
 
 
+class NASSeparateSourceTest(unittest.TestCase):
+    """Issue #335: configured NAS has its own Sources entry without OmniSource."""
+
+    def test_nas_separate_source_entry(self):
+        main = bp.SERVICES_MAIN
+        services = main[main.index("readonly property var scServices: ["):]
+        services = services[:services.index("\n\t]")]
+        self.assertIn('{ id: "nas", name: "NAS" }', services)
+        self.assertLess(services.index('id: "nas"'), services.index('id: "tidal"'))
+
+        self.assertIn('if (id === "nas") return "qrc:/@ICONS@/SourceNetwork.png"', main)
+        for rel in ("5.0.4/qrc/UIKit.1/UIKit/Icons/SourceNetwork.png", "5.3.0/qrc/Skins/UIKit/Icons/SourceNetwork.png"):
+            if (LAB / rel.split("/", 1)[0] / "qrc").is_dir():
+                self.assertTrue((LAB / rel).is_file(), f"stock icon missing: {rel}")
+
+        # QR login button in Sources footer is hidden for NAS; streaming switches exclude NAS.
+        vis_line = re.search(r"visible:\s*modelData\.id[^\n]+", bp.SOURCE_FOOTER)
+        self.assertIsNotNone(vis_line)
+        self.assertIn('modelData.id !== "nas"', vis_line.group(0))
+        sw_line = re.search(r"model:\s*root\.scServices[^\n]+", bp.STREAM_SWITCHES)
+        self.assertIsNotNone(sw_line)
+
+        def extract_fn(src, name):
+            start = src.index(f"function {name}(")
+            depth = 0
+            for idx in range(start, len(src)):
+                if src[idx] == "{":
+                    depth += 1
+                elif src[idx] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return src[start:idx + 1]
+            raise AssertionError(f"unclosed {name}")
+
+        sw_expr = sw_line.group(0).split(":", 1)[1].split("//", 1)[0].strip()
+        vis_expr = vis_line.group(0).split(":", 1)[1].strip()
+        fn_block = "\n".join([
+            extract_fn(main, "scIcon").replace("@ICONS@", "Skins/UIKit/Icons"),
+            extract_fn(main, "scBrand"),
+            extract_fn(main, "scNoteService"),
+            extract_fn(main, "scServiceOf"),
+            extract_fn(main, "scOwnService"),
+            extract_fn(main, "scSlotIcon"),
+            extract_fn(main, "scRowIcon"),
+        ])
+        for version, open_code in (("5.3.0", bp.TIDAL_OPEN_530), ("5.0.4", bp.TIDAL_OPEN_504)):
+            with self.subTest(version=version):
+                script = f"""
+const assert = require('assert');
+const posts = [], logins = [];
+let selects = 0;
+const tp = {{loggedIn: true, loginToService() {{ this.loggedIn = true; }}}};
+globalThis.root = globalThis;
+globalThis.Planck = {{librarianController: {{
+    streamingInterfaceController: {{logoutOfProvider() {{}}}},
+    streamingPlaylistsController: {{invalidateUI() {{}}}}
+}}}};
+const scServices = [
+    {{id: 'rekordbox', name: 'rekordbox'}},
+    {{id: 'nas', name: 'NAS'}},
+    {{id: 'tidal', name: 'TIDAL'}},
+    {{id: 'spotify', name: 'Spotify'}},
+];
+const scRowLabels = {{'rekordbox': 'rekordbox', '网易云音乐': 'netease', 'Apple Music': 'applemusic'}};
+Object.assign(globalThis, {{
+    scServices, scRowLabels, scDeckService: {{}}, scShadowHead: {{}},
+    scUiLoaded: true, scSources: ['nas', 'spotify'], scLoggedIn: ['spotify'],
+    scScope: 'spotify', scScopePending: 0, scTidalLoggedIn: false, scTidalSynthetic: false,
+    scTidalLoginPending: false, scTidalLogoutPending: false, scAskedAt: 0,
+    scLogin: '', scLoginOpen: '', scLoginStatus: '', scLoginLocal: false, scLoginSerial: 0,
+    scProviders: {{count: 1, objectAt() {{ return {{tidalProvider: tp}}; }}}},
+    scEnsureTidal() {{}},
+    scSelectTidal() {{ selects++; return true; }},
+    scEnterTimer: {{start() {{}}}},
+    scLoginBegin(id) {{ logins.push(id); }},
+    scCall(q, done) {{ if (q) posts.push(q); if (done) done({{}}); }}
+}});
+{fn_block}
+{open_code}
+// 1. STREAM_SWITCHES excludes nas; SOURCE_FOOTER hides login action for nas.
+const switched = ({sw_expr}).map(s => s.id);
+assert.ok(!switched.includes('nas'), 'nas must not appear in streaming switches: ' + switched);
+assert.ok(switched.includes('spotify'), 'streaming services remain in switches');
+for (const modelData of scServices) {{
+    const showLogin = ({vis_expr});
+    if (modelData.id === 'nas' || modelData.id === 'rekordbox' || modelData.id === 'tidal') {{
+        assert.strictEqual(showLogin, false, modelData.id + ' must hide login button');
+    }} else {{
+        assert.strictEqual(showLogin, true, modelData.id + ' must show login button');
+    }}
+}}
+// 2. Unavailable nas neither changes scope nor opens QR login.
+scOpen('nas');
+assert.strictEqual(scScope, 'spotify');
+assert.deepStrictEqual(posts, []);
+assert.deepStrictEqual(logins, []);
+// 3. Available nas switches scope to nas and selects TIDAL carrier without QR login.
+scLoggedIn = ['nas', 'spotify'];
+scOpen('nas');
+assert.strictEqual(scScope, 'nas');
+assert.deepStrictEqual(posts, ['scope=nas']);
+assert.deepStrictEqual(logins, []);
+assert.strictEqual(selects, 1);
+// 4. Icon, row icon, deck service header and carrier branding all recognize NAS.
+const nasIcon = 'qrc:/Skins/UIKit/Icons/SourceNetwork.png';
+assert.strictEqual(scIcon('nas'), nasIcon);
+assert.strictEqual(scRowIcon('qrc:/Skins/UIKit/Icons/SourceTIDAL.png', 'NAS [124 BPM 8A]'), nasIcon);
+assert.strictEqual(scServiceOf({{getResponseHeader(k) {{ return k === 'X-Enginex-Provider' ? 'nas' : ''; }}}}), 'nas');
+scNoteService(1, 'nas');
+scScope = 'spotify';
+assert.strictEqual(scSlotIcon('TIDAL', 1), nasIcon);
+assert.strictEqual(scBrand('TIDAL Error', 1), 'NAS Error');
+"""
+                res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, f"{version}: {res.stderr}")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -378,7 +378,7 @@ func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, g
 		return matched, dl, nil
 	case "netease":
 		return j.fromNeteaseMode(ctx, session, t, guest, progress)
-	case "webdav", "subsonic", "plex":
+	case "webdav", "subsonic", "plex", "smb":
 		dl, err := j.fromSelfHosted(ctx, t)
 		return t, dl, err
 	}

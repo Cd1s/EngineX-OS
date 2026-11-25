@@ -883,6 +883,9 @@ func (s *Server) scopeLoggedIn(scope string) bool {
 	if scope == rekordboxScope {
 		return s.rekordboxHost() != nil || len(s.rbxPlayers()) > 0
 	}
+	if scope == nasScope {
+		return s.nasAvailable()
+	}
 	if scope == "deezer" && s.deezerARLReady() {
 		return true
 	}
@@ -964,6 +967,7 @@ func (s *Server) isLegacy504Pack() bool {
 func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	v := s.loadUI()
+	nasReady := s.nasAvailableLocked()
 	v.FXSelectorAvailable = s.fxSelectorAvailable()
 	v.ColorFXAvailable = s.colorFXAvailable()
 	// pioneer_fx is the channel knobs' style now; only a PX board without them drops it.
@@ -999,6 +1003,10 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 		v.Sources = append(slices.Clone(v.Sources), rekordboxScope)
 		v.LoggedIn = append(v.LoggedIn, rekordboxScope)
 		v.RekordboxName = name
+	}
+	if nasReady {
+		v.Sources = append(slices.Clone(v.Sources), nasScope)
+		v.LoggedIn = append(v.LoggedIn, nasScope)
 	}
 	relay := s.relayStatusView()
 	v.RelayURL, v.DeemixPasswordSet = relay.RelayURL, relay.PasswordSet
