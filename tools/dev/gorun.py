@@ -140,7 +140,7 @@ def main():
     if pkgs.returncode:
         print(pkgs.stderr, file=sys.stderr); return 2
     dirs = {p: p.removeprefix(mod).lstrip('/') or '.' for p in pkgs.stdout.split()}
-    seed = json.loads(pathlib.Path(a.seed).read_text()) if a.seed else {}
+    seed = {k: v for k, v in json.loads(pathlib.Path(a.seed).read_text()).items() if not k.startswith('_')} if a.seed else {}
     defer, only = read_pairs(a.defer), read_pairs(a.only)
     base = ['go', 'test', '-vet=off', '-json', '-timeout', a.timeout] + ([] if a.no_race else ['-race']) + (['-count=1'] if a.no_cache else [])
     tmp, tmp_lock = stable_dir(os.environ.get('TMPDIR') or '/tmp', 'gorun-jobs')
@@ -242,8 +242,11 @@ def main():
         sug = {}
         for pkg, v in pkgs_res.items():
             d = dirs.get(pkg, pkg)
-            if v[1] >= 60 and pkg not in state['cached']:
-                sug[d] = {'shards': min(8, max(2, int(v[1] // 60) + 1)),
+            summed = sum(e for e, dd, t in top if dd == d)
+            # Only packages whose tests run one after another gain from shards; a package whose tests already run in
+            # parallel (t.Parallel) only oversubscribes the host when it is split, and its timing budgets break.
+            if v[1] >= 60 and pkg not in state['cached'] and summed < 1.5 * v[1]:
+                sug[d] = {'shards': min(4, max(2, int(v[1] // 60) + 1)),
                           'tests': {t: round(e, 1) for e, dd, t in top if dd == d and e >= 1}}
         pathlib.Path(a.suggest_seed).write_text(json.dumps(sug, indent=1, sort_keys=True))
     nshard = sum(1 for j in jobs if '#' in j['label'])
