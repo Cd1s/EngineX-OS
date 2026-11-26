@@ -116,8 +116,9 @@ func TestRound3KilledDeriverDoesNotDelayNextRead(t *testing.T) {
 	}
 
 	origFlock := flockFile
-	var deriveAttempts, deriveContended atomic.Int32
-	var deriveAcquiredNS atomic.Int64
+	var deriveAttempts, deriveContended, deriveAcquired, deriveReleased atomic.Int32
+	var deriveFD atomic.Int64
+	deriveFD.Store(-1)
 	flockFile = func(fd, op int) error {
 		err := origFlock(fd, op)
 		if op&(syscall.LOCK_EX|syscall.LOCK_NB) == syscall.LOCK_EX|syscall.LOCK_NB {
@@ -125,37 +126,67 @@ func TestRound3KilledDeriverDoesNotDelayNextRead(t *testing.T) {
 			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
 				deriveContended.Add(1)
 			} else if err == nil {
-				deriveAcquiredNS.CompareAndSwap(0, time.Now().UnixNano())
+				deriveAcquired.Add(1)
+				deriveFD.Store(int64(fd))
+			}
+		} else if op == syscall.LOCK_UN && err == nil {
+			if deriveFD.CompareAndSwap(int64(fd), -1) {
+				deriveReleased.Add(1)
 			}
 		}
 		return err
 	}
 	defer func() { flockFile = origFlock }()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	kc := NewKeyCacheAt(dir)
-	started := time.Now()
-	if err := decryptSQLCipher4(context.Background(), f, st.Size(), io.Discard, []byte(oneLibraryPassphrase), kc); err != nil {
+	if err := decryptSQLCipher4(ctx, f, st.Size(), io.Discard, []byte(oneLibraryPassphrase), kc); err != nil {
 		t.Fatal(err)
 	}
-	elapsed := time.Since(started)
-	if deriveAttempts.Load() == 0 {
-		t.Fatal("next read never attempted to claim the .derive lease")
+	if got := deriveAttempts.Load(); got != 1 {
+		t.Fatalf("derive lock attempts = %d, want 1 (immediate non-blocking recovery)", got)
 	}
 	if n := deriveContended.Load(); n != 0 {
 		t.Fatalf("next read contended %d times on killed deriver's .derive lock", n)
 	}
-	acqNS := deriveAcquiredNS.Load()
-	if acqNS == 0 {
-		t.Fatal("missing .derive lock acquisition timestamp")
+	if got := deriveAcquired.Load(); got != 1 {
+		t.Fatalf("derive lock acquisitions = %d, want 1", got)
 	}
-	if lockWait := time.Unix(0, acqNS).Sub(started); lockWait > 500*time.Millisecond {
-		t.Fatalf("acquiring .derive lock waited %s after killed deriver", lockWait)
+	if got := deriveReleased.Load(); got != 1 {
+		t.Fatalf("derive lock releases = %d, want 1", got)
 	}
-	if nonDerive := elapsed - kc.DeriveTime(); nonDerive > time.Second {
-		t.Fatalf("non-derivation overhead waited %s after killed deriver (total=%s derive=%s)", nonDerive, elapsed, kc.DeriveTime())
+
+	lockPath := filepath.Join(dir, sharedKeyName(salt, []byte(oneLibraryPassphrase))+".derive")
+	probe, err := os.OpenFile(lockPath, os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open recovered .derive lock file: %v", err)
 	}
-	if _, ok := NewKeyCacheAt(dir).readShared(salt, []byte(oneLibraryPassphrase)); !ok {
-		t.Fatal("shared key cache was not populated after killed deriver")
+	if err := origFlock(int(probe.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = probe.Close()
+		t.Fatalf(".derive lock remained held after decrypt returned: %v", err)
+	}
+	_ = origFlock(int(probe.Fd()), syscall.LOCK_UN)
+	_ = probe.Close()
+
+	gotKey, ok := NewKeyCacheAt(dir).readShared(salt, []byte(oneLibraryPassphrase))
+	if !ok || gotKey == nil || len(gotKey.enc) != 32 || len(gotKey.mac) != 32 {
+		t.Fatalf("shared key cache was not populated with valid 64-byte key after killed deriver (ok=%v)", ok)
+	}
+
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	derivBefore := KeyDerivations()
+	if err := decryptSQLCipher4(ctx, f, st.Size(), io.Discard, []byte(oneLibraryPassphrase), NewKeyCacheAt(dir)); err != nil {
+		t.Fatalf("second read with recovered shared key failed: %v", err)
+	}
+	if delta := KeyDerivations() - derivBefore; delta != 0 {
+		t.Fatalf("second read re-derived key %d times after recovery, want 0", delta)
+	}
+	if got := deriveAttempts.Load(); got != 1 {
+		t.Fatalf("second read attempted .derive lock %d total times, want 1 (shared cache hit)", got)
 	}
 }
 
