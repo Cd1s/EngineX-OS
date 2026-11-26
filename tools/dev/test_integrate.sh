@@ -18,6 +18,7 @@ while (($#)); do
 done
 printf '%s\n' "$cmd" >> "${FAKE_REMOTE_LOG:?}"
 if [[ ${FAKE_FAIL_TARGETED:-0} == 1 && $cmd == *"go test -race"* && $cmd == *pkg/webui* ]]; then exit 42; fi
+if [[ ${FAKE_FAIL_SHADOW:-0} == 1 && $cmd == *"check_instant_analysis.py"* ]]; then exit 43; fi
 MOCK
 cat > "$TMP/bin/sshctl" <<'MOCK'
 #!/bin/sh
@@ -105,4 +106,19 @@ before=$(git -C "$fail_repo" ls-remote origin refs/heads/agent/5306-integration 
 if FAKE_FAIL_TARGETED=1 run_integrate "$fail_repo" feature-fail; then echo 'targeted failure unexpectedly passed' >&2; exit 1; fi
 after=$(git -C "$fail_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
 [[ $before == "$after" ]]
-printf 'integrate.sh clean merge, refused conflict, and refused targeted failure tests passed\n'
+
+shadow_repo=$(new_repo shadow)
+git -C "$shadow_repo" switch -q -c feature-shadow
+printf 'package webui\n\nfunc ShadowLaneFixture() {}\n' > "$shadow_repo/pkg/webui/shadow_fixture.go"
+git -C "$shadow_repo" add pkg/webui/shadow_fixture.go && git -C "$shadow_repo" commit -qm shadow-fixture
+git -C "$shadow_repo" push -qu origin feature-shadow
+: > "$TMP/remote.log"
+before=$(git -C "$shadow_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
+if FAKE_FAIL_SHADOW=1 run_integrate "$shadow_repo" feature-shadow; then echo 'shadow instant check failure unexpectedly passed' >&2; exit 1; fi
+after=$(git -C "$shadow_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
+[[ $before == "$after" ]]
+grep -Fq "tools/shadow-twin/check_instant_analysis.py" "$TMP/remote.log"
+: > "$TMP/remote.log"
+run_integrate "$shadow_repo" feature-shadow
+grep -Fq "tools/shadow-twin/check_instant_analysis.py" "$TMP/remote.log"
+printf 'integrate.sh clean merge, refused conflict, refused targeted failure, and shadow instant check tests passed\n'

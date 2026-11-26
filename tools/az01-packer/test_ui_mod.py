@@ -2550,6 +2550,38 @@ scShadowApplyAll([Object.assign({}, e, {path:'/other.flac', id:'track-b'})], fal
 assert.deepEqual(feed, {deck: 2, active: false});
 """)
 
+    def test_shadow_grid_edit_does_not_reload_or_submit_native_analysis_346(self):
+        self.js(r"""
+scPausedShadowFollow = true; scShadowEngineMask = 1 << 2; scFourDeckRole = '13'; scPlayer = true;
+const props = new Map(), loads = [], analyzerPaths = [];
+globalThis.scTr = path => {
+    if (path.includes('/Client/Librarian/Analyzer/')) analyzerPaths.push(path);
+    if (props.has(path)) return props.get(path);
+    const p = { _state: path.endsWith('/SongLoaded'), _value: path.endsWith('/SampleRate') ? 48000 : 0,
+        string: path.endsWith('/SyncMode') ? 'Off' : path.endsWith('/SpeedRange') ? '8' : '', index: 1,
+        get state() { return this._state; }, set state(v) { this._state = v; },
+        get value() { return this._value; }, set value(v) { this._value = v; },
+        get url() { return this._url || ''; }, set url(v) { this._url = v; if (path.includes('AddToDatabaseAndLoadToDeck')) loads.push(v); },
+        get unnormalized() { return path.endsWith('/TrackLength') ? 48000 * 300 : 0; } };
+    props.set(path, p); return p;
+};
+globalThis.XMLHttpRequest = class { open() {} setRequestHeader() {} send() {} };
+globalThis.scBrowserVisible = () => false; globalThis.dialogOpen = false;
+globalThis.scShadowHolds = () => true; globalThis.scShadowEnd = () => false;
+globalThis.scShadowMirror = () => {}; globalThis.scShadowMirrorOff = () => {};
+globalThis.scShadowCues = () => {}; globalThis.scShadowBeat = () => {};
+// Initial load plus repeated in-place grid edits (same path/id, changing gridGen):
+// QML keeps the loaded copy without reloading and never touches /Client/Librarian/Analyzer/.
+const e = {deck:2,path:'/data/enginex/shadow-v3/peer-a/track.wav',id:'k1-1',gridGen:'g1',playing:false,scratch:false,stale:false,positionMs:1000,at:now,rate:1,jumps:0,pitch:0,bpm:128,currentBpm:128,range:8,cues:[]};
+scShadowApplyAll([e], false);
+assert.equal(loads.length, 1);
+for (const gen of ['g1', 'g2', 'g3']) {
+    e.gridGen = gen; now += 500; e.at = now; scShadowApplyAll([e], false);
+    assert.equal(loads.length, 1, 'grid edit must not reload the shadow deck');
+}
+assert.deepEqual(analyzerPaths, [], 'injected QML must never touch native analyzer paths');
+""")
+
     def test_line_hint_stays_stock_without_cdj(self):
         old_root = bp.ROOT
         try:
@@ -4256,7 +4288,7 @@ assert.equal(JSON.stringify([{deck: 1, player: 3 || undefined}]), '[{"deck":1,"p
             self.assertEqual(shown(code), text + " ", code)
         self.assertEqual(shown(""), "  ")  # no reason: the blank it always was
         # The code is not a retry, and the line's gate is the one it always had: busyState 0, a live fresh sample with a fallback.
-        self.assertIn('readonly property int retried: scDisplay.busyState > 3 || ["network", "timeout"].indexOf(scBusy.why) >= 0 ? 1 : 0', bp.SHADOW_BUSY)
+        self.assertIn('readonly property int retried: scDisplay.busyState > 3 && scDisplay.busyState < 7 || ["network", "timeout"].indexOf(scBusy.why) >= 0 ? 1 : 0', bp.SHADOW_BUSY)
         self.assertIn('readonly property string why: scDisplay.busyState === 0 && scDisplay.live && scDisplay.sample && !scDisplay.sample.stale && scDisplay.sample.fallback || ""', bp.SHADOW_BUSY)
 
     def test_the_prolink_off_reason_has_its_four_columns_and_a_run_time_lookup(self):
@@ -6364,13 +6396,42 @@ assert.equal(scShadowData(2).progress, 0); assert.equal(scShadowData(2).meta, nu
             self.assertNotIn("@BUSY@", other)
         table = {en: t["zh-Hans"] for en, t in bp.load_dict().items()}
         text = next(l for l in bp.translate(ringed, table, set(), live=True).split("\n") if "busyState - 1" in l)
-        for hans in ("正在下载", "正在加载", "等待源碟机分析波形", "文件不可用。", "未能在规定时间内打开文件。", "无法通过网络加载。", "正在重试…",
+        for hans in ("正在下载", "正在加载", "等待源碟机分析波形", "文件不可用。", "未能在规定时间内打开文件。", "无法通过网络加载。", "源碟机暂无分析数据，已停止等待。", "正在重试…",
                      "流媒体：CDJ 无文件可拷贝。", "rekordbox Link：CDJ 无文件可拷贝。", "CD 或第二 USB：CDJ 无文件可拷贝。"):
             self.assertIn('Math.scI18n.t("%s")' % hans, text)
-        self.assertNotRegex(text, "Downloading|Retrying|no file to copy")
+        self.assertNotRegex(text, "Downloading|Retrying|no file to copy|stopped waiting")
         # The reasons stream-sync gives (cdjFallback) each have a line.
         for why in ("streaming", "link", "media", "network", "timeout"):
             self.assertRegex(text, r"[{ ]%s: " % why)
+
+    def test_stopped_waiting_for_analysis_shows_non_retrying_wording(self):
+        self.js(r"""
+assert.equal(scShadowBusy({engine: true, copying: true, error: 'no analysis yet'}, null, false), 7);
+assert.equal(scShadowBusy({engine: true, copying: true, error: 'no analysis'}, null, false), 7);
+assert.equal(scShadowBusy({engine: true, copying: true, error: 'failed'}, null, false), 6);
+""")
+        line = next(l for l in bp.SHADOW_BUSY.splitlines() if l.strip().startswith("text: (["))
+        retried_line = next(l for l in bp.SHADOW_BUSY.splitlines() if "readonly property int retried:" in l)
+        retried_expr = retried_line.split("retried:", 1)[1].strip()
+        text_expr = line.strip()[len("text: "):]
+        if shutil.which("node"):
+            js = (
+                "const scDisplay = {busyState: 7}; const scBusy = {why: ''}; "
+                "const retried = (%s); console.log(JSON.stringify({retried, text: (%s)}))"
+                % (retried_expr, text_expr)
+            )
+            res = json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
+            self.assertEqual(res["retried"], 0)
+            self.assertEqual(res["text"], "No source analysis yet; stopped waiting. ")
+            self.assertNotIn("Retrying", res["text"])
+            self.assertNotIn("Could not load via network", res["text"])
+        rows = bp.load_dict()
+        en = "No source analysis yet; stopped waiting."
+        self.assertIn(en, rows)
+        for lang in ("zh-Hans", "zh-Hant", "es"):
+            self.assertTrue(rows[en][lang].strip(), lang)
+            translated = bp.translate(line, {k: v[lang] for k, v in rows.items()}, set(), live=True)
+            self.assertNotIn("stopped waiting", translated, lang)
 
     def test_cdj_without_a_file_goes_to_the_display_renderer_with_the_reason(self):
         self.js(self.ENGINE + self.COPY + r"""

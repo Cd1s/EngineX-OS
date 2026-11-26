@@ -2,22 +2,29 @@ package webui
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
 const (
@@ -200,6 +207,599 @@ func (s *Server) handleRekordboxOnDemand(w http.ResponseWriter, r *http.Request)
 	s.serveRekordboxOnDemand(w, r, false)
 }
 
+const (
+	rbOnDemandCacheMax  = 8
+	rbOnDemandCacheTTL  = 10 * time.Minute
+	rbOnDemandDBMetaMax = 8
+	rbOnDemandDBRowMax  = 32
+)
+
+// onDemandVerifiedID pins every on-demand cache entry and single-flight build to
+// the mounted volume identity (dev/mntID/ino), snapshot generation, live Engine
+// library identity (m.db dev/ino + Information.uuid), Device Library exports,
+// resolved audio + ANLZ files, and canonical track metadata.
+// Ordinary in-place m.db writes keep DBDev/DBIno/LiveUUID/track metadata intact
+// and therefore reuse the cached build without invalidating it.
+type onDemandVerifiedID struct {
+	mount         string
+	mountDev      uint64
+	mountMntID    uint64
+	mountIno      uint64
+	snapshotUUID  string
+	liveUUID      string
+	snapFile      bridge.OnDemandFileID
+	dbDev         uint64
+	dbIno         uint64
+	exportDB      bridge.OnDemandFileID
+	exportPDB     bridge.OnDemandFileID
+	audioFile     bridge.OnDemandFileID
+	anlzFiles     [3]bridge.OnDemandFileID
+	trackKey      string
+	trackRel      string
+	rowHash       string
+	engineID      int64
+	engineKey     int
+	engineBPMBits uint64
+	engineLen     int
+}
+
+type rbOnDemandDBKey struct {
+	mountDev   uint64
+	mountMntID uint64
+	mountIno   uint64
+	dbDev      uint64
+	dbIno      uint64
+	dbSize     int64
+	dbModNS    int64
+	walDev     uint64
+	walIno     uint64
+	walSize    int64
+	walModNS   int64
+}
+
+type rbOnDemandTrackMeta struct {
+	found    bool
+	id       int64
+	key      int
+	bpm      float64
+	length   int
+	analyzed bool
+}
+
+type rbOnDemandDBSnap struct {
+	uuid   string
+	tracks map[string]rbOnDemandTrackMeta
+	at     time.Time
+}
+
+type rbOnDemandCacheEntry struct {
+	id       onDemandVerifiedID
+	trackKey string
+	res      *bridge.OnDemandResult
+	enc      shadowEncodedPair
+	at       time.Time
+}
+
+type rbOnDemandFlight struct {
+	done     chan struct{}
+	cancel   context.CancelFunc
+	waiters  int
+	trackKey string
+	evicted  bool
+	res      *bridge.OnDemandResult
+	err      error
+}
+
+func onDemandCacheKey(mount, enginePath string) string {
+	p := strings.ReplaceAll(strings.TrimSpace(enginePath), "\\", "/")
+	p = strings.TrimPrefix(p, "../")
+	clean := strings.TrimPrefix(path.Clean("/"+p), "/")
+	if mount == "" || clean == "" || clean == "." {
+		return ""
+	}
+	return filepath.Clean(mount) + "\x00" + rbstate.FoldPath(clean)
+}
+
+func (s *Server) canonicalOnDemandTrackKey(srcPath string) string {
+	if srcPath == "" {
+		return ""
+	}
+	mediaRoot := filepath.Clean(s.onDemandMediaRoot())
+	sub, err := filepath.Rel(mediaRoot, filepath.Clean(srcPath))
+	if err != nil || sub == "." || sub == ".." || strings.HasPrefix(sub, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	vol, rel, ok := strings.Cut(filepath.ToSlash(sub), "/")
+	if !ok || vol == "" || rel == "" {
+		return ""
+	}
+	return onDemandCacheKey(filepath.Join(mediaRoot, vol), "../"+rel)
+}
+
+func onDemandStatFile(p string) (dev, ino uint64, size, modNS int64, ok bool) {
+	st, err := os.Stat(p)
+	if err != nil || !st.Mode().IsRegular() {
+		return 0, 0, 0, 0, false
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys != nil {
+		dev, ino = uint64(sys.Dev), uint64(sys.Ino)
+	}
+	return dev, ino, st.Size(), st.ModTime().UnixNano(), true
+}
+
+func (s *Server) lookupOnDemandDBMeta(ctx context.Context, stickID bridge.OnDemandStickIdentity) (string, rbOnDemandTrackMeta, error) {
+	if !stickID.DBFile.Present {
+		return "", rbOnDemandTrackMeta{}, bridge.ErrOnDemandNotFound
+	}
+	mdb := filepath.Join(stickID.Mount, "Engine Library", "Database2", "m.db")
+	wDev, wIno, wSize, wModNS, _ := onDemandStatFile(mdb + "-wal")
+	dbKey := rbOnDemandDBKey{
+		mountDev:   stickID.MountDev,
+		mountMntID: stickID.MountMntID,
+		mountIno:   stickID.MountIno,
+		dbDev:      stickID.DBFile.Dev,
+		dbIno:      stickID.DBFile.Ino,
+		dbSize:     stickID.DBFile.Size,
+		dbModNS:    stickID.DBFile.ModNS,
+		walDev:     wDev,
+		walIno:     wIno,
+		walSize:    wSize,
+		walModNS:   wModNS,
+	}
+	s.rbOnDemandCacheMu.Lock()
+	if snap := s.rbOnDemandDBMeta[dbKey]; snap != nil {
+		if tm, ok := snap.tracks[stickID.TrackKey]; ok {
+			uuid := snap.uuid
+			snap.at = time.Now()
+			s.rbOnDemandCacheMu.Unlock()
+			return uuid, tm, nil
+		}
+	}
+	s.rbOnDemandCacheMu.Unlock()
+
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
+	if err != nil {
+		return "", rbOnDemandTrackMeta{}, bridge.ErrOnDemandUnavailable
+	}
+	defer db.Close()
+
+	var liveUUID string
+	if err := db.QueryRowContext(ctx, `SELECT coalesce(uuid, '') FROM Information LIMIT 1`).Scan(&liveUUID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", rbOnDemandTrackMeta{}, bridge.ErrOnDemandUUIDMismatch
+		}
+		return "", rbOnDemandTrackMeta{}, bridge.ErrOnDemandUnavailable
+	}
+	liveUUID = strings.TrimSpace(liveUUID)
+
+	var tm rbOnDemandTrackMeta
+	readRow := func(query string, args ...any) (bool, error) {
+		var id int64
+		var rowPath string
+		var keyVal, lengthVal, analyzedVal int
+		var bpmVal float64
+		err := db.QueryRowContext(ctx, query, args...).Scan(&id, &rowPath, &keyVal, &bpmVal, &lengthVal, &analyzedVal)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		clean := strings.TrimPrefix(strings.ReplaceAll(strings.TrimSpace(rowPath), "\\", "/"), "../")
+		clean = strings.TrimPrefix(path.Clean("/"+clean), "/")
+		if rbstate.FoldPath(clean) != stickID.TrackKey {
+			return false, nil
+		}
+		tm = rbOnDemandTrackMeta{
+			found:    true,
+			id:       id,
+			key:      keyVal,
+			bpm:      bpmVal,
+			length:   lengthVal,
+			analyzed: analyzedVal != 0,
+		}
+		return true, nil
+	}
+	var matched bool
+	if stickID.EngineID > 0 {
+		matched, err = readRow(`SELECT id, path, COALESCE(key, -1), COALESCE(bpmAnalyzed, bpm, 0), COALESCE(length, 0), COALESCE(isAnalyzed, 0) FROM Track WHERE id = ? LIMIT 1`, stickID.EngineID)
+		if err != nil {
+			return "", rbOnDemandTrackMeta{}, bridge.ErrOnDemandUnavailable
+		}
+	}
+	if !matched {
+		matched, err = readRow(`SELECT id, path, COALESCE(key, -1), COALESCE(bpmAnalyzed, bpm, 0), COALESCE(length, 0), COALESCE(isAnalyzed, 0) FROM Track WHERE path = ? OR path = ? ORDER BY id DESC LIMIT 1`, "../"+stickID.TrackRel, stickID.TrackRel)
+		if err != nil {
+			return "", rbOnDemandTrackMeta{}, bridge.ErrOnDemandUnavailable
+		}
+	}
+
+	// Re-verify the DB inode/size/mtime did not change mid-read before caching.
+	postDev, postIno, postSize, postModNS, ok := onDemandStatFile(mdb)
+	if !ok || postDev != stickID.DBFile.Dev || postIno != stickID.DBFile.Ino {
+		return "", rbOnDemandTrackMeta{}, bridge.ErrOnDemandUnavailable
+	}
+	if postSize == stickID.DBFile.Size && postModNS == stickID.DBFile.ModNS {
+		s.rbOnDemandCacheMu.Lock()
+		if s.rbOnDemandDBMeta == nil {
+			s.rbOnDemandDBMeta = map[rbOnDemandDBKey]*rbOnDemandDBSnap{}
+		}
+		snap := s.rbOnDemandDBMeta[dbKey]
+		if snap == nil {
+			if len(s.rbOnDemandDBMeta) >= rbOnDemandDBMetaMax {
+				var oldestKey rbOnDemandDBKey
+				var oldestAt time.Time
+				first := true
+				for k, v := range s.rbOnDemandDBMeta {
+					if first || v.at.Before(oldestAt) {
+						oldestKey, oldestAt, first = k, v.at, false
+					}
+				}
+				if !first {
+					delete(s.rbOnDemandDBMeta, oldestKey)
+				}
+			}
+			snap = &rbOnDemandDBSnap{uuid: liveUUID, tracks: map[string]rbOnDemandTrackMeta{}}
+			s.rbOnDemandDBMeta[dbKey] = snap
+		}
+		if len(snap.tracks) >= rbOnDemandDBRowMax {
+			clear(snap.tracks)
+		}
+		snap.uuid = liveUUID
+		snap.tracks[stickID.TrackKey] = tm
+		snap.at = time.Now()
+		s.rbOnDemandCacheMu.Unlock()
+	}
+	return liveUUID, tm, nil
+}
+
+func (s *Server) resolveOnDemandIdentity(ctx context.Context, b *bridge.OnDemandBuilder, req bridge.OnDemandRequest, forPeer bool) (onDemandVerifiedID, bridge.OnDemandRequest, bool, error) {
+	stickID, err := b.InspectIdentity(ctx, req)
+	if err != nil {
+		return onDemandVerifiedID{}, bridge.OnDemandRequest{}, false, err
+	}
+	liveUUID, tm, err := s.lookupOnDemandDBMeta(ctx, stickID)
+	if err != nil {
+		return onDemandVerifiedID{}, bridge.OnDemandRequest{}, false, err
+	}
+	if liveUUID == "" || stickID.SnapshotUUID == "" || liveUUID != stickID.SnapshotUUID {
+		return onDemandVerifiedID{}, bridge.OnDemandRequest{}, false, bridge.ErrOnDemandUUIDMismatch
+	}
+	if req.UUID != "" && req.UUID != liveUUID {
+		return onDemandVerifiedID{}, bridge.OnDemandRequest{}, false, bridge.ErrOnDemandUUIDMismatch
+	}
+	canonical := bridge.OnDemandRequest{
+		Mount:      stickID.Mount,
+		UUID:       liveUUID,
+		EnginePath: "../" + stickID.TrackRel,
+		EngineID:   req.EngineID,
+		EngineKey:  req.EngineKey,
+		EngineBPM:  req.EngineBPM,
+		EngineLen:  req.EngineLen,
+	}
+	if !tm.found {
+		if forPeer {
+			// Defer peer answers until m.db holds the track row metadata needed to
+			// produce the exact same canonical payload as the source deck's own call.
+			return onDemandVerifiedID{}, bridge.OnDemandRequest{}, false, bridge.ErrOnDemandUnavailable
+		}
+		if canonical.EngineID <= 0 {
+			return onDemandVerifiedID{}, bridge.OnDemandRequest{}, false, bridge.ErrOnDemandNotFound
+		}
+	} else {
+		if canonical.EngineID > 0 && canonical.EngineID != tm.id {
+			return onDemandVerifiedID{}, bridge.OnDemandRequest{}, false, bridge.ErrOnDemandNotFound
+		}
+		canonical.EngineID = tm.id
+		if canonical.EngineKey < 0 {
+			canonical.EngineKey = tm.key
+		}
+		if canonical.EngineBPM <= 0 {
+			canonical.EngineBPM = tm.bpm
+		}
+		if canonical.EngineLen <= 0 {
+			canonical.EngineLen = tm.length
+		}
+	}
+	id := onDemandVerifiedID{
+		mount:         stickID.Mount,
+		mountDev:      stickID.MountDev,
+		mountMntID:    stickID.MountMntID,
+		mountIno:      stickID.MountIno,
+		snapshotUUID:  stickID.SnapshotUUID,
+		liveUUID:      liveUUID,
+		snapFile:      stickID.SnapFile,
+		dbDev:         stickID.DBFile.Dev,
+		dbIno:         stickID.DBFile.Ino,
+		exportDB:      stickID.ExportDB,
+		exportPDB:     stickID.ExportPDB,
+		audioFile:     stickID.AudioFile,
+		anlzFiles:     stickID.ANLZFiles,
+		trackKey:      stickID.TrackKey,
+		trackRel:      stickID.TrackRel,
+		rowHash:       stickID.RowHash,
+		engineID:      canonical.EngineID,
+		engineKey:     canonical.EngineKey,
+		engineBPMBits: math.Float64bits(canonical.EngineBPM),
+		engineLen:     canonical.EngineLen,
+	}
+	return id, canonical, tm.analyzed, nil
+}
+
+// buildOnDemandCached builds one track's RBXA1 on-demand payload and shares the
+// verified result across the source deck's own load and any shadow copies asking
+// for it (peer-first or deck-first, concurrent single-flight or warm reuse).
+func (s *Server) buildOnDemandCached(ctx context.Context, req bridge.OnDemandRequest, forPeer bool) (*bridge.OnDemandResult, error) {
+	entry, err := s.buildOnDemandEntry(ctx, req, forPeer)
+	if err != nil {
+		return nil, err
+	}
+	return entry.res, nil
+}
+
+func (s *Server) buildOnDemandEntry(ctx context.Context, req bridge.OnDemandRequest, forPeer bool) (*rbOnDemandCacheEntry, error) {
+	entry, _, err := s.buildOnDemandEntryChecked(ctx, req, forPeer, false)
+	return entry, err
+}
+
+func (s *Server) buildOnDemandEntryChecked(ctx context.Context, req bridge.OnDemandRequest, forPeer, skipIfDBAnalyzed bool) (*rbOnDemandCacheEntry, bool, error) {
+	b := s.rbOnDemandBuilder()
+	if b == nil {
+		return nil, false, os.ErrNotExist
+	}
+	id, canonical, dbAnalyzed, err := s.resolveOnDemandIdentity(ctx, b, req, forPeer)
+	if err != nil {
+		return nil, false, err
+	}
+	if skipIfDBAnalyzed && dbAnalyzed {
+		return nil, true, nil
+	}
+	trackKey := onDemandCacheKey(id.mount, "../"+id.trackRel)
+	now := time.Now()
+	s.rbOnDemandCacheMu.Lock()
+	if e := s.rbOnDemandCache[id]; e != nil {
+		if now.Sub(e.at) < rbOnDemandCacheTTL {
+			s.rbOnDemandCacheMu.Unlock()
+			return e, dbAnalyzed, nil
+		}
+		delete(s.rbOnDemandCache, id)
+	}
+	if f := s.rbOnDemandFlights[id]; f != nil {
+		f.waiters++
+		s.rbOnDemandCacheMu.Unlock()
+		res, werr := s.waitOnDemandFlight(ctx, f)
+		if werr != nil {
+			return nil, dbAnalyzed, werr
+		}
+		// Revalidate identity before authorizing a waiter/peer response.
+		postID, _, _, verr := s.resolveOnDemandIdentity(ctx, b, req, forPeer)
+		if verr != nil || postID != id {
+			return nil, dbAnalyzed, bridge.ErrOnDemandUnavailable
+		}
+		s.rbOnDemandCacheMu.Lock()
+		e := s.rbOnDemandCache[id]
+		s.rbOnDemandCacheMu.Unlock()
+		if e != nil && e.res == res {
+			return e, dbAnalyzed, nil
+		}
+		return &rbOnDemandCacheEntry{id: id, trackKey: trackKey, res: res, at: time.Now()}, dbAnalyzed, nil
+	}
+	buildCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	f := &rbOnDemandFlight{
+		done:     make(chan struct{}),
+		cancel:   cancel,
+		waiters:  1,
+		trackKey: trackKey,
+	}
+	if s.rbOnDemandFlights == nil {
+		s.rbOnDemandFlights = map[onDemandVerifiedID]*rbOnDemandFlight{}
+	}
+	s.rbOnDemandFlights[id] = f
+	s.rbOnDemandCacheMu.Unlock()
+
+	go func() {
+		defer cancel()
+		s.rbOnDemandBuildCount.Add(1)
+		res, berr := b.Build(buildCtx, canonical)
+		if berr == nil && res != nil {
+			postID, _, _, verr := s.resolveOnDemandIdentity(buildCtx, b, canonical, forPeer)
+			if verr != nil || postID != id {
+				res, berr = nil, bridge.ErrOnDemandUnavailable
+			}
+		}
+		s.rbOnDemandCacheMu.Lock()
+		f.res, f.err = res, berr
+		if berr == nil && res != nil && !f.evicted && s.rbOnDemandFlights[id] == f {
+			if s.rbOnDemandCache == nil {
+				s.rbOnDemandCache = map[onDemandVerifiedID]*rbOnDemandCacheEntry{}
+			}
+			if _, exists := s.rbOnDemandCache[id]; !exists && len(s.rbOnDemandCache) >= rbOnDemandCacheMax {
+				var oldestKey onDemandVerifiedID
+				var oldestAt time.Time
+				first := true
+				for k, v := range s.rbOnDemandCache {
+					if first || v.at.Before(oldestAt) {
+						oldestKey, oldestAt, first = k, v.at, false
+					}
+				}
+				if !first {
+					delete(s.rbOnDemandCache, oldestKey)
+				}
+			}
+			s.rbOnDemandCache[id] = &rbOnDemandCacheEntry{
+				id:       id,
+				trackKey: trackKey,
+				res:      res,
+				at:       time.Now(),
+			}
+		}
+		if s.rbOnDemandFlights[id] == f {
+			delete(s.rbOnDemandFlights, id)
+		}
+		s.rbOnDemandCacheMu.Unlock()
+		close(f.done)
+	}()
+
+	res, werr := s.waitOnDemandFlight(ctx, f)
+	if werr != nil {
+		return nil, dbAnalyzed, werr
+	}
+	postID, _, _, verr := s.resolveOnDemandIdentity(ctx, b, req, forPeer)
+	if verr != nil || postID != id {
+		return nil, dbAnalyzed, bridge.ErrOnDemandUnavailable
+	}
+	s.rbOnDemandCacheMu.Lock()
+	e := s.rbOnDemandCache[id]
+	s.rbOnDemandCacheMu.Unlock()
+	if e != nil && e.res == res {
+		return e, dbAnalyzed, nil
+	}
+	return &rbOnDemandCacheEntry{id: id, trackKey: trackKey, res: res, at: time.Now()}, dbAnalyzed, nil
+}
+
+// onDemandEncodings decodes an entry's RBXA1 payload exactly once (even under
+// concurrent first EXPF and native requests) and caches both native RBXA1 and
+// EXPF v1 encodings alongside the precomputed generation hash.
+func (s *Server) onDemandEncodings(e *rbOnDemandCacheEntry) (native, expf []byte, gen string, err error) {
+	if e == nil || e.res == nil {
+		return nil, nil, "", os.ErrNotExist
+	}
+	e.enc.once.Do(func() {
+		s.rbOnDemandEncodeCount.Add(1)
+		bpm := math.Float64frombits(e.id.engineBPMBits)
+		dec, derr := rbstate.DecodePerf(e.res.RBXA1)
+		if derr != nil {
+			e.enc.err = derr
+			return
+		}
+		p := enginedb.Performance{
+			TrackData:   dec.TrackData,
+			Overview:    dec.Overview,
+			Beats:       dec.Beats,
+			QuickCues:   dec.QuickCues,
+			Loops:       dec.Loops,
+			ActiveLoops: dec.ActiveLoops,
+			Complete:    dec.Complete,
+		}
+		e.enc.native, e.enc.expf, e.enc.gen, e.enc.err = encodePerfPair(bpm, p)
+	})
+	return e.enc.native, e.enc.expf, e.enc.gen, e.enc.err
+}
+
+func (s *Server) hasWarmOnDemandEntry(trackKey string) bool {
+	if trackKey == "" {
+		return false
+	}
+	now := time.Now()
+	s.rbOnDemandCacheMu.Lock()
+	defer s.rbOnDemandCacheMu.Unlock()
+	for _, e := range s.rbOnDemandCache {
+		if e.trackKey == trackKey && now.Sub(e.at) < rbOnDemandCacheTTL {
+			return true
+		}
+	}
+	for _, f := range s.rbOnDemandFlights {
+		if f.trackKey == trackKey {
+			return true
+		}
+	}
+	return false
+}
+
+// warmOnDemandCachedEntry returns a non-expired cached on-demand entry for
+// trackKey without waiting on in-flight builds or triggering a cold build.
+func (s *Server) warmOnDemandCachedEntry(trackKey string) *rbOnDemandCacheEntry {
+	if trackKey == "" {
+		return nil
+	}
+	now := time.Now()
+	s.rbOnDemandCacheMu.Lock()
+	defer s.rbOnDemandCacheMu.Unlock()
+	for _, e := range s.rbOnDemandCache {
+		if e.trackKey == trackKey && now.Sub(e.at) < rbOnDemandCacheTTL {
+			return e
+		}
+	}
+	return nil
+}
+
+// verifyWarmOnDemandGen verifies that cached entry e still matches the live
+// stick/library/file identity for libPath and returns its precomputed
+// generation digest without ever starting a cold on-demand build.
+func (s *Server) verifyWarmOnDemandGen(ctx context.Context, libPath string, e *rbOnDemandCacheEntry) string {
+	if e == nil || libPath == "" {
+		return ""
+	}
+	b := s.rbOnDemandBuilder()
+	if b == nil {
+		return ""
+	}
+	mount, rel, ok := s.onDemandMountAndRel(libPath)
+	if !ok {
+		return ""
+	}
+	curID, _, _, err := s.resolveOnDemandIdentity(ctx, b, bridge.OnDemandRequest{
+		Mount:      mount,
+		EnginePath: "../" + rel,
+		EngineKey:  -1,
+	}, true)
+	if err != nil || curID != e.id {
+		return ""
+	}
+	_, _, gen, err := s.onDemandEncodings(e)
+	if err != nil {
+		return ""
+	}
+	return gen
+}
+
+func (s *Server) waitOnDemandFlight(ctx context.Context, f *rbOnDemandFlight) (*bridge.OnDemandResult, error) {
+	select {
+	case <-f.done:
+		return f.res, f.err
+	case <-ctx.Done():
+		s.rbOnDemandCacheMu.Lock()
+		f.waiters--
+		if f.waiters == 0 && f.cancel != nil {
+			f.cancel()
+		}
+		s.rbOnDemandCacheMu.Unlock()
+		return nil, ctx.Err()
+	}
+}
+
+// evictOnDemandCacheForTrackKey drops any cached on-demand payload and cancels
+// any in-flight build for a canonical mount+folded-path key without retaining
+// unbounded per-path history.
+func (s *Server) evictOnDemandCacheForTrackKey(trackKey string) {
+	if trackKey == "" {
+		return
+	}
+	s.rbOnDemandCacheMu.Lock()
+	for id, e := range s.rbOnDemandCache {
+		if e.trackKey == trackKey {
+			delete(s.rbOnDemandCache, id)
+		}
+	}
+	for id, f := range s.rbOnDemandFlights {
+		if f.trackKey == trackKey {
+			f.evicted = true
+			if f.cancel != nil {
+				f.cancel()
+			}
+			delete(s.rbOnDemandFlights, id)
+		}
+	}
+	s.rbOnDemandCacheMu.Unlock()
+}
+
+// evictOnDemandCacheForPath drops cached on-demand state for a verified media path.
+// It never guesses an inMusicTempFiles origin by basename and size; callers pass
+// the deck's verified libraryPath or canonical track key.
+func (s *Server) evictOnDemandCacheForPath(srcPath string) {
+	s.evictOnDemandCacheForTrackKey(s.canonicalOnDemandTrackKey(srcPath))
+}
+
 func (s *Server) serveRekordboxOnDemand(w http.ResponseWriter, r *http.Request, fromUnix bool) {
 	if r.Method != http.MethodPost {
 		fail(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -232,7 +832,7 @@ func (s *Server) serveRekordboxOnDemand(w http.ResponseWriter, r *http.Request, 
 	if req.Key != nil {
 		engineKey = *req.Key
 	}
-	res, err := s.rbOnDemandBuilder().Build(r.Context(), bridge.OnDemandRequest{
+	res, err := s.buildOnDemandCached(r.Context(), bridge.OnDemandRequest{
 		Mount:      mount,
 		UUID:       strings.TrimSpace(req.UUID),
 		EnginePath: req.Path,
@@ -240,7 +840,7 @@ func (s *Server) serveRekordboxOnDemand(w http.ResponseWriter, r *http.Request, 
 		EngineKey:  engineKey,
 		EngineBPM:  req.BPM,
 		EngineLen:  req.Length,
-	})
+	}, false)
 	if err != nil {
 		switch {
 		case errors.Is(err, bridge.ErrOnDemandNotFound):

@@ -104,6 +104,14 @@ int main(void) {
     // so the shadow lane drew another grid than the source and no overview. The row is the
     // staged analysis again, and is written only when it differs.
     assert(!sc_shadow_analysis_fill(&api, db, 1));
+    // RIGHT, 2026-11-26: 0.5-1 s into one copy load Engine saves its own decoder-trimmed
+    // trackData and synced quickCues via SC_SHADOW_INSERT and re-reads Track. The hook must
+    // fill only once per sidecar digest and must not overwrite Engine's post-load updates.
+    assert(sqlite3_exec(db, "UPDATE PerformanceData SET trackData = X'7472696d6d6564', quickCues = X'73796e636564' WHERE trackId = 1", NULL, NULL, NULL) == SQLITE_OK);
+    assert(!sc_shadow_analysis_fill(&api, db, 1));
+    assert(sqlite3_prepare_v2(db, "SELECT CAST(trackData AS TEXT) || '/' || CAST(quickCues AS TEXT) FROM PerformanceData WHERE trackId = 1", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(stmt, 0), "trimmed/synced"));
+    sqlite3_finalize(stmt);
     assert(sqlite3_exec(db, "UPDATE PerformanceData SET beatData = X'00', overviewWaveFormData = NULL, thirdPartySourceId = NULL WHERE trackId = 1;"
                             "UPDATE Track SET isAnalyzed = 0 WHERE id = 1", NULL, NULL, NULL) == SQLITE_OK);
     assert(sc_shadow_analysis_fill(&api, db, 1));
@@ -125,6 +133,104 @@ int main(void) {
     assert(sqlite3_prepare_v2(db, "SELECT count(*) FROM PerformanceData WHERE trackId > 1 AND hex(beatData) = '00'", -1, &stmt, NULL) == SQLITE_OK);
     assert(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 4);
     sqlite3_finalize(stmt);
+    // #346: in-place grid update arms <copy>.perf.regrid -> .perf.regrid.run for
+    // peer-* copies only when a valid EXPF v1 <copy>.perf exists, and clears
+    // isAnalyzed/isBeatGridLocked so AnalysisQueue replays without reload.
+    char regrid[300], regrid_run[300], bad_regrid[300], perf_file[300];
+    snprintf(audio, sizeof audio, "%s/peer-f012/Contents/L'ete.wav", dir);
+    snprintf(perf_file, sizeof perf_file, "%s.perf", audio);
+    snprintf(regrid, sizeof regrid, "%s.perf.regrid", audio);
+    snprintf(regrid_run, sizeof regrid_run, "%s.perf.regrid.run", audio);
+    snprintf(bad_regrid, sizeof bad_regrid, "%s/peer-f012/../outside.wav", dir);
+    assert(!sc_shadow_regrid_arm(audio));
+    assert(!sc_shadow_regrid_ready(audio));
+    out = fopen(regrid, "wb"); assert(out && fputs("g2", out) >= 0 && !fclose(out));
+    // Missing or corrupt .perf must refuse ready & arm (copy keeps old grid).
+    assert(!sc_shadow_regrid_ready(audio));
+    assert(!sc_shadow_regrid_arm(audio));
+    out = fopen(perf_file, "wb"); assert(out && fputs("BAD!", out) >= 0 && !fclose(out));
+    assert(!sc_shadow_regrid_ready(audio));
+    assert(!sc_shadow_regrid_arm(audio));
+    // Write a valid minimal EXPF v1 .perf (track=20B, beats=4B, overview=27B).
+    {
+        unsigned char expf[16 + 4 + 20 + 4 + 4 + 4 + 27];
+        memset(expf, 0, sizeof expf);
+        memcpy(expf, "EXPF", 4);
+        uint32_t ver = 1, lt = 20, lb = 4, lo = 27;
+        double bpm = 128.0;
+        memcpy(expf + 4, &ver, 4);
+        memcpy(expf + 8, &bpm, 8);
+        memcpy(expf + 16, &lt, 4);
+        memcpy(expf + 16 + 4 + 20, &lb, 4);
+        memcpy(expf + 16 + 4 + 20 + 4, "GRID", 4);
+        memcpy(expf + 16 + 4 + 20 + 4 + 4, &lo, 4);
+        out = fopen(perf_file, "wb"); assert(out && fwrite(expf, 1, sizeof expf, out) == sizeof expf && !fclose(out));
+    }
+    assert(sc_shadow_regrid_ready(audio));
+    assert(!sc_shadow_regrid_ready(bad_regrid));
+    // Native regrid socket datagram parser rejects malformed IDs, NULs, control chars, and non-peer paths.
+    char dgram[400], parsed_path[400];
+    long long parsed_id = 0;
+    snprintf(dgram, sizeof dgram, "42\t%s", audio);
+    assert(sc_shadow_regrid_parse(dgram, strlen(dgram), &parsed_id, parsed_path, sizeof parsed_path));
+    assert(parsed_id == 42 && !strcmp(parsed_path, audio));
+    assert(!sc_shadow_regrid_parse("0\t/tmp/x", 8, &parsed_id, parsed_path, sizeof parsed_path));
+    snprintf(dgram, sizeof dgram, "0\t%s", audio);
+    assert(!sc_shadow_regrid_parse(dgram, strlen(dgram), &parsed_id, parsed_path, sizeof parsed_path));
+    snprintf(dgram, sizeof dgram, "-7\t%s", audio);
+    assert(!sc_shadow_regrid_parse(dgram, strlen(dgram), &parsed_id, parsed_path, sizeof parsed_path));
+    snprintf(dgram, sizeof dgram, "99999999999999999999999\t%s", audio);
+    assert(!sc_shadow_regrid_parse(dgram, strlen(dgram), &parsed_id, parsed_path, sizeof parsed_path));
+    snprintf(dgram, sizeof dgram, "42\t%s", bad_regrid);
+    assert(!sc_shadow_regrid_parse(dgram, strlen(dgram), &parsed_id, parsed_path, sizeof parsed_path));
+    snprintf(dgram, sizeof dgram, "42\t%s\n", audio);
+    assert(!sc_shadow_regrid_parse(dgram, strlen(dgram), &parsed_id, parsed_path, sizeof parsed_path));
+    snprintf(dgram, sizeof dgram, "42\t%s", audio);
+    assert(!sc_shadow_regrid_parse(dgram, strlen(dgram) + 1, &parsed_id, parsed_path, sizeof parsed_path)); // embedded NUL
+    assert(!sc_shadow_regrid_arm(bad_regrid));
+    assert(sc_shadow_regrid_arm(audio));
+    assert(!sc_shadow_regrid_arm(audio)); // one-shot atomic rename
+    assert(access(regrid, F_OK) != 0 && access(regrid_run, F_OK) == 0);
+    assert(sqlite3_exec(db, "UPDATE Track SET isAnalyzed = 1, isBeatGridLocked = 1 WHERE id = 1", NULL, NULL, NULL) == SQLITE_OK);
+    // Normal fill (regrid == 0) leaves isAnalyzed = 1 and isBeatGridLocked = 1 even while .regrid.run exists.
+    assert(!sc_shadow_analysis_fill_ex(&api, db, 1, 0));
+    assert(sqlite3_prepare_v2(db, "SELECT isAnalyzed,isBeatGridLocked FROM Track WHERE id=1", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1 && sqlite3_column_int(stmt, 1) == 1);
+    sqlite3_finalize(stmt);
+    // If .perf disappears after arming .regrid.run, regrid fill does NOT clear isAnalyzed/isBeatGridLocked.
+    assert(!unlink(perf_file));
+    assert(!sc_shadow_analysis_fill_ex(&api, db, 1, 1));
+    assert(sqlite3_prepare_v2(db, "SELECT isAnalyzed,isBeatGridLocked FROM Track WHERE id=1", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1 && sqlite3_column_int(stmt, 1) == 1);
+    sqlite3_finalize(stmt);
+    // Restore valid .perf: regrid fill (regrid == 1) bypasses sc_shadow_filled
+    // even for an unchanged sidecar digest, rewrites PerformanceData, and clears
+    // isAnalyzed and isBeatGridLocked for peer-* track 1.
+    assert(sqlite3_exec(db, "UPDATE PerformanceData SET beatData = X'7374616c65' WHERE trackId = 1", NULL, NULL, NULL) == SQLITE_OK);
+    {
+        unsigned char expf[16 + 4 + 20 + 4 + 4 + 4 + 27];
+        memset(expf, 0, sizeof expf);
+        memcpy(expf, "EXPF", 4);
+        uint32_t ver = 1, lt = 20, lb = 4, lo = 27;
+        double bpm = 128.0;
+        memcpy(expf + 4, &ver, 4);
+        memcpy(expf + 8, &bpm, 8);
+        memcpy(expf + 16, &lt, 4);
+        memcpy(expf + 16 + 4 + 20, &lb, 4);
+        memcpy(expf + 16 + 4 + 20 + 4, "GRID", 4);
+        memcpy(expf + 16 + 4 + 20 + 4 + 4, &lo, 4);
+        out = fopen(perf_file, "wb"); assert(out && fwrite(expf, 1, sizeof expf, out) == sizeof expf && !fclose(out));
+    }
+    assert(sc_shadow_analysis_fill_ex(&api, db, 1, 1));
+    assert(sqlite3_prepare_v2(db, "SELECT hex(beatData) FROM PerformanceData WHERE trackId = 1", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(stmt, 0), "4245415453"));
+    sqlite3_finalize(stmt);
+    check_flags(db, 0);
+    // Non-peer tracks are never touched even with regrid == 1.
+    assert(sqlite3_exec(db, "UPDATE Track SET isAnalyzed = 1 WHERE id = 2", NULL, NULL, NULL) == SQLITE_OK);
+    assert(!sc_shadow_analysis_fill_ex(&api, db, 2, 1));
+    check_flags(db, 2);
+    assert(!unlink(regrid_run) && !unlink(perf_file));
     assert(sqlite3_close(usb) == SQLITE_OK && sqlite3_close(db) == SQLITE_OK);
     assert(!unlink(path) && !unlink(stick) && !unlink(sidecar) && !unlink(malformed));
     assert(!rmdir(contents) && !rmdir(cache) && !rmdir(dir));

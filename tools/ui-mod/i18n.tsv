@@ -381,6 +381,7 @@ Console deck	一体机碟轨	一體機碟軌	Deck de consola
 Downloading	正在下载	正在下載	Descargando
 Loading	正在加载	正在載入	Cargando
 Waiting for source analysis	等待源碟机分析波形	等待來源碟機分析波形	Esperando el análisis de la fuente
+No source analysis yet; stopped waiting.	源碟机暂无分析数据，已停止等待。	來源碟機暫無分析資料，已停止等待。	Sin análisis de la fuente aún; se dejó de esperar.
 Failed to open file within appropriate time.	未能在规定时间内打开文件。	未能在規定時間內開啟檔案。	No se pudo abrir el archivo a tiempo.
 Could not load via network.	无法通过网络加载。	無法透過網路載入。	No se pudo cargar por la red.
 Retrying…	正在重试…	正在重試…	Reintentando…

@@ -26,17 +26,18 @@ func TestShadowFetchPerfWaitsForADelayedAnalysis(t *testing.T) {
 	var calls int
 	var always bool
 	status := http.StatusServiceUnavailable
+	valid := validTestEXPF(128)
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
 		if calls < 3 || always {
 			http.Error(w, "analysing", status)
 			return
 		}
-		w.Write([]byte("EXPF"))
+		w.Write(valid)
 	}))
 	defer peer.Close()
-	if b, pending := fetchPerfPending(context.Background(), peer.URL); string(b) != "EXPF" || pending || calls != 3 {
-		t.Fatalf("delayed analysis: %q pending %v after %d requests", b, pending, calls)
+	if b, pending := fetchPerfPending(context.Background(), peer.URL); !bytes.Equal(b, valid) || pending || calls != 3 {
+		t.Fatalf("delayed analysis: %d bytes pending %v after %d requests", len(b), pending, calls)
 	}
 	calls, status = 0, http.StatusNotFound
 	if b, pending := fetchPerfPending(context.Background(), peer.URL); b != nil || pending || calls != 1 {
@@ -65,11 +66,11 @@ func TestShadowRekordboxAnalysisNoLink(t *testing.T) {
 }
 
 // Each /perf request has its own deadline inside the bounded retry: a source that
-// does not answer does not hold the copy for the whole copy timeout.
+// does not answer stays pending rather than publishing bare audio for OfflineAnalyzer.
 func TestShadowFetchPerfTimesOut(t *testing.T) {
-	oldTimeout := perfRequestTimeout
-	perfRequestTimeout = 50 * time.Millisecond
-	defer func() { perfRequestTimeout = oldTimeout }()
+	oldWait, oldTries, oldTimeout := perfRetryWait, perfRetries, perfRequestTimeout
+	perfRetryWait, perfRetries, perfRequestTimeout = time.Millisecond, 2, 50*time.Millisecond
+	defer func() { perfRetryWait, perfRetries, perfRequestTimeout = oldWait, oldTries, oldTimeout }()
 	release := make(chan struct{})
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -80,7 +81,7 @@ func TestShadowFetchPerfTimesOut(t *testing.T) {
 	defer peer.Close()
 	defer close(release)
 	start := time.Now()
-	if b, pending := fetchPerfPending(context.Background(), peer.URL); b != nil || pending || time.Since(start) > time.Second {
+	if b, pending := fetchPerfPending(context.Background(), peer.URL); b != nil || !pending || time.Since(start) > time.Second {
 		t.Fatalf("slow /perf: %q pending %v after %v", b, pending, time.Since(start))
 	}
 }
@@ -109,7 +110,8 @@ func TestShadowFetchPerf503ThenTimeoutStaysPending(t *testing.T) {
 // analysis generation, without downloading the audio again.
 func TestShadowPerfGenRefreshesWithoutDownload(t *testing.T) {
 	var mu sync.Mutex
-	audio, perf := 0, []byte(nil)
+	initial := validTestEXPF(124)
+	audio, perf := 0, initial
 	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -150,11 +152,11 @@ func TestShadowPerfGenRefreshesWithoutDownload(t *testing.T) {
 	if first == "" {
 		t.Fatal("no initial shadow copy")
 	}
-	if _, err := os.Stat(first + ".perf"); !os.IsNotExist(err) {
-		t.Fatal("perf unexpectedly exists before the source analysis")
+	if got, err := os.ReadFile(first + ".perf"); err != nil || !bytes.Equal(got, initial) {
+		t.Fatalf("initial perf mismatch: %v %d bytes", err, len(got))
 	}
 	inPeerCache := regexp.MustCompile(`/shadow-v3/peer-[0-9a-f]{1,16}/[^/]+$`)
-	for i, want := range [][]byte{[]byte("EXPF1"), []byte("EXPF2")} {
+	for i, want := range [][]byte{validTestEXPF(128), validTestEXPF(132)} {
 		mu.Lock()
 		perf = want
 		mu.Unlock()

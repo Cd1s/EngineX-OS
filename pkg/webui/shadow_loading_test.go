@@ -1,8 +1,11 @@
 package webui
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,16 +16,71 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
+
+func validTestPerformanceBlobs(bpm float64) (track, beats, overview []byte) {
+	if !(bpm > 0 && bpm < 1000) {
+		bpm = 128
+	}
+	const rate = 44100.0
+	const samples = uint64(441000) // 10 s
+	track = make([]byte, 44)
+	binary.BigEndian.PutUint64(track[0:8], math.Float64bits(rate))
+	binary.BigEndian.PutUint64(track[8:16], samples)
+
+	var bb bytes.Buffer
+	_ = binary.Write(&bb, binary.BigEndian, rate)
+	_ = binary.Write(&bb, binary.BigEndian, float64(samples))
+	bb.WriteByte(1) // beat grid valid
+	_ = binary.Write(&bb, binary.BigEndian, uint64(2))
+	beatSamples := rate * 60.0 / bpm
+	// Default grid: 2 anchors at beat 0 and beat 16.
+	for _, m := range []struct {
+		pos float64
+		n   int64
+	}{{0, 0}, {16 * beatSamples, 16}} {
+		_ = binary.Write(&bb, binary.LittleEndian, m.pos)
+		_ = binary.Write(&bb, binary.LittleEndian, m.n)
+		_ = binary.Write(&bb, binary.LittleEndian, int64(4))
+	}
+	_ = binary.Write(&bb, binary.BigEndian, uint64(0)) // adjusted grid empty
+	beats = bb.Bytes()
+
+	overview = make([]byte, 30)
+	binary.BigEndian.PutUint64(overview[0:8], 1)
+	binary.BigEndian.PutUint64(overview[8:16], 1)
+	binary.BigEndian.PutUint64(overview[16:24], math.Float64bits(float64(samples)))
+	overview[24], overview[25], overview[26] = 100, 80, 60
+	overview[27], overview[28], overview[29] = 100, 80, 60
+	return track, beats, overview
+}
+
+func validTestEXPF(bpm float64) []byte {
+	track, beats, overview := validTestPerformanceBlobs(bpm)
+	track = enginedb.TrackDataPeaks(track, overview)
+	var b bytes.Buffer
+	b.WriteString("EXPF")
+	_ = binary.Write(&b, binary.LittleEndian, uint32(1))
+	_ = binary.Write(&b, binary.LittleEndian, bpm)
+	for _, part := range [][]byte{track, beats, overview} {
+		_ = binary.Write(&b, binary.LittleEndian, uint32(len(part)))
+		b.Write(part)
+	}
+	return b.Bytes()
+}
 
 // loadingPeer is the other player's deck 1. Each audio key answers as its
 // entry says; an entry is used once per request, the last one from then on.
 type loadingPeer struct {
-	mu      sync.Mutex
-	audio   map[string][]loadingAnswer
-	calls   map[string]int
-	display []string // the queries of /peer/decks/1/display
-	asset   []byte
+	mu          sync.Mutex
+	audio       map[string][]loadingAnswer
+	perf        map[string][]byte
+	defaultPerf []byte
+	calls       map[string]int
+	display     []string // the queries of /peer/decks/1/display
+	asset       []byte
 }
 
 type loadingAnswer struct {
@@ -46,6 +104,20 @@ func (p *loadingPeer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Write(asset)
+		return
+	}
+	if r.URL.Path == "/peer/decks/1/perf" {
+		p.mu.Lock()
+		b := p.perf[key]
+		if b == nil {
+			b = p.defaultPerf
+		}
+		p.mu.Unlock()
+		if b == nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write(b)
 		return
 	}
 	if r.URL.Path != "/peer/decks/1/audio" {
@@ -95,10 +167,25 @@ func loadingServer(t *testing.T, peer *loadingPeer) (*Server, func(key string), 
 	t.Helper()
 	peer.calls = map[string]int{}
 	server := httptest.NewServer(peer)
-	t.Cleanup(server.Close)
 	s := New(Config{UIDir: filepath.Join(t.TempDir(), "ui"), StateDir: t.TempDir()}, nil)
-	t.Cleanup(func() { s.Close() })
 	s.shadow.dataRoot, s.shadow.mediaRoot = t.TempDir(), t.TempDir()
+	// Cleanup runs LIFO: close the mock peer first to unblock any active HTTP
+	// reads, wait for background shadowFetch goroutines to exit so they cannot
+	// race t.TempDir() removal under -race, then close the server.
+	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() {
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			s.shadow.mu.Lock()
+			busy := len(s.shadow.busy)
+			s.shadow.mu.Unlock()
+			if busy == 0 {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	})
+	t.Cleanup(server.Close)
 	u, _ := url.Parse(server.URL)
 	s.shadow.peerPort, _ = strconv.Atoi(u.Port())
 	source := func(key string) {
@@ -172,11 +259,14 @@ func TestShadowCopyShown(t *testing.T) {
 // and names the source's display data. Another track starts again from nothing.
 func TestShadowLegacyCopyProgress(t *testing.T) {
 	half := map[string]chan struct{}{"A": make(chan struct{}), "B": make(chan struct{}), "N": make(chan struct{})}
-	peer := &loadingPeer{audio: map[string][]loadingAnswer{
-		"A": {{body: "AUDIO-AAAAAAAAAAAAAA", half: half["A"]}},
-		"B": {{body: "B", half: half["B"]}}, // not a byte before it is released (an empty body would be a finished copy)
-		"N": {{body: "AUDIO-NNNNNNNNNNNNNN", half: half["N"], noLength: true}},
-	}}
+	peer := &loadingPeer{
+		defaultPerf: validTestEXPF(128),
+		audio: map[string][]loadingAnswer{
+			"A": {{body: "AUDIO-AAAAAAAAAAAAAA", half: half["A"]}},
+			"B": {{body: "B", half: half["B"]}}, // not a byte before it is released (an empty body would be a finished copy)
+			"N": {{body: "AUDIO-NNNNNNNNNNNNNN", half: half["N"], noLength: true}},
+		},
+	}
 	s, source, deck := loadingServer(t, peer)
 	defer func() {
 		for _, c := range half {
@@ -219,12 +309,15 @@ func TestShadowLegacyCopyProgress(t *testing.T) {
 // A copy that fails says why, is tried again later and later, never 8 times a
 // second, and shows no failure once the next attempt delivers.
 func TestShadowLegacyCopyFailsAndRetries(t *testing.T) {
-	peer := &loadingPeer{audio: map[string][]loadingAnswer{
-		"gone": {{status: 404}, {status: 404}, {status: 404}, {body: "AUDIO-GONE"}},
-		"cut":  {{body: "AUDIO-CUT-AUDIO-CUT", cut: true}, {body: "AUDIO-CUT-AUDIO-CUT"}},
-		"slow": {{hang: true}},
-		"ok":   {{body: "AUDIO-OK"}},
-	}}
+	peer := &loadingPeer{
+		defaultPerf: validTestEXPF(128),
+		audio: map[string][]loadingAnswer{
+			"gone": {{status: 404}, {status: 404}, {status: 404}, {body: "AUDIO-GONE"}},
+			"cut":  {{body: "AUDIO-CUT-AUDIO-CUT", cut: true}, {body: "AUDIO-CUT-AUDIO-CUT"}},
+			"slow": {{hang: true}},
+			"ok":   {{body: "AUDIO-OK"}},
+		},
+	}
 	s, source, deck := loadingServer(t, peer)
 	s.shadow.copyRetry, s.shadow.copyTimeout = 40*time.Millisecond, 150*time.Millisecond
 	failing := func(d deckState) {
@@ -289,7 +382,7 @@ func TestShadowLegacyCoverReadsDisplayHead(t *testing.T) {
 	asset, _ := json.Marshal(a)
 	hold := make(chan struct{})
 	defer close(hold)
-	peer := &loadingPeer{asset: asset, audio: map[string][]loadingAnswer{"A": {{body: "AUDIO-A", half: hold}}}}
+	peer := &loadingPeer{defaultPerf: validTestEXPF(128), asset: asset, audio: map[string][]loadingAnswer{"A": {{body: "AUDIO-A", half: hold}}}}
 	s, source, _ := loadingServer(t, peer)
 	srv := httptest.NewServer(s)
 	defer srv.Close()

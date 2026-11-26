@@ -28,8 +28,10 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -69,6 +71,9 @@ static struct sc_tap live_tap; // #50, every Engine build; .bss (512 KiB ring), 
 #define UI_ROOT "/data/enginex/ui"
 #ifndef SHADOW_POSITION_FEED_PATH
 #define SHADOW_POSITION_FEED_PATH "/run/enginex/shadow-position"
+#endif
+#ifndef SHADOW_REGRID_SOCK_PATH
+#define SHADOW_REGRID_SOCK_PATH "/run/enginex/shadow-regrid.sock"
 #endif
 #define FLAG_COMPRESSED 0x01
 #define FLAG_DIRECTORY 0x02
@@ -634,10 +639,21 @@ static void start_thread(void *(*fn)(void *)) {
 
 static void lim_start_poll(void) { start_thread(lim_poll); start_thread(live_tap_drain); }
 
+#if !defined(__aarch64__)
+static int shadow_regrid_enabled;
+static int shadow_regrid_sock_fd = -1;
+#ifndef ENGINE_UI_HOOK_TEST
+static void *shadow_regrid_listener(void *arg);
+#endif
+#endif
+
 // LED brightness belongs to the UI pack even when all DSP guards stay stock.
 static void start_feature_workers(int dsp_ready) {
     if (dsp_ready) lim_start_poll();
     else if (!hf_on(HF_DSP_GUARDS) && hf_on(HF_UI_PACKS)) start_thread(lim_poll);
+#if !defined(__aarch64__) && !defined(ENGINE_UI_HOOK_TEST)
+    if (shadow_regrid_enabled && shadow_regrid_sock_fd >= 0) start_thread(shadow_regrid_listener);
+#endif
 }
 
 static int official_update_host(const char *node) {
@@ -3250,28 +3266,125 @@ static void oa_log(const char *what, const char *path, long us) {
     close(fd);
 }
 
-// Engine loads a /data file from its own copy, /data/inMusicTempFiles/<id>_<name>,
-// and analyses that: the .perf is next to the shadow copy with that name and
-// size, in <copy dir>/ or <copy dir>/Contents/ (a rekordbox export's track).
-static int oa_shadow_perf(const char *path, char *out, size_t cap) {
-    const size_t n = strlen(OA_ENGINE_COPIES);
-    const char *name = strncmp(path, OA_ENGINE_COPIES, n) ? NULL : strchr(path + n, '_');
-    struct stat st;
-    if (!name || strchr(name, '/') || stat(path, &st)) return 0;
-    DIR *dir = opendir(OA_SHADOW);
+#if defined(__aarch64__)
+static const char *sc_shadow_root = OA_SHADOW;
+#endif
+
+static int oa_peer_dir_ok(const char *d) {
+    if (!d || strncmp(d, "peer-", 5)) return 0;
+    size_t hash = strspn(d + 5, "0123456789abcdef");
+    return hash > 0 && hash <= 16 && d[5 + hash] == '\0';
+}
+
+static int oa_peer_rel_ok(const char *rel) {
+    if (!rel || strncmp(rel, "peer-", 5)) return 0;
+    size_t hash = strspn(rel + 5, "0123456789abcdef");
+    if (!hash || hash > 16 || rel[5 + hash] != '/') return 0;
+    const char *name = rel + 6 + hash;
+    if (!strncmp(name, "Contents/", 9)) name += 9;
+    return *name && strcmp(name, ".") && strcmp(name, "..") && !strchr(name, '/');
+}
+
+static int oa_clean_path(const char *in, char *out, size_t cap) {
+    if (!in || in[0] != '/' || cap < 2) return 0;
+    size_t o = 0;
+    const char *p = in;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        const char *q = p;
+        while (*q && *q != '/') q++;
+        size_t len = (size_t)(q - p);
+        if (len == 1 && p[0] == '.') {
+            // Skip '.'
+        } else if (len == 2 && p[0] == '.' && p[1] == '.') {
+            while (o > 0 && out[o - 1] != '/') o--;
+            if (o > 0) o--;
+        } else {
+            if (o + 1 + len + 1 > cap) return 0;
+            out[o++] = '/';
+            memcpy(out + o, p, len);
+            o += len;
+        }
+        p = q;
+    }
+    if (o == 0) out[o++] = '/';
+    out[o] = '\0';
+    return 1;
+}
+
+// Resolve symlinks and collapse '.'/'..' even when the leaf (or parent) does not exist yet.
+static int oa_resolve_path(const char *in, char *out, size_t cap) {
+    if (!in || in[0] != '/' || cap < 2) return 0;
+    char rp[PATH_MAX];
+    if (realpath(in, rp)) {
+        size_t n = strlen(rp);
+        if (n + 1 > cap) return 0;
+        memcpy(out, rp, n + 1);
+        return 1;
+    }
+    char clean[PATH_MAX];
+    if (!oa_clean_path(in, clean, sizeof clean)) return 0;
+    if (realpath(clean, rp)) {
+        size_t n = strlen(rp);
+        if (n + 1 > cap) return 0;
+        memcpy(out, rp, n + 1);
+        return 1;
+    }
+    char prefix[PATH_MAX];
+    strcpy(prefix, clean);
+    for (char *slash = strrchr(prefix, '/'); slash && slash > prefix; slash = strrchr(prefix, '/')) {
+        *slash = '\0';
+        if (realpath(prefix, rp)) {
+            const char *suffix = clean + (size_t)(slash - prefix);
+            int n = !strcmp(rp, "/") ? snprintf(out, cap, "%s", suffix) : snprintf(out, cap, "%s%s", rp, suffix);
+            return n > 0 && (size_t)n < cap;
+        }
+    }
+    size_t n = strlen(clean);
+    if (n + 1 > cap) return 0;
+    memcpy(out, clean, n + 1);
+    return 1;
+}
+
+static int oa_shadow_perf_in(const char *root, const char *name, off_t size, char *out, size_t cap) {
+    char rcanon[PATH_MAX];
+    if (!root || !*root || !oa_resolve_path(root, rcanon, sizeof rcanon)) return 0;
+    DIR *dir = opendir(rcanon);
     if (!dir) return 0;
     int found = 0;
     for (struct dirent *e; !found && (e = readdir(dir));) {
-        for (int sub = 0; !found && sub < 2 && e->d_name[0] != '.'; sub++) {
+        if (!oa_peer_dir_ok(e->d_name)) continue;
+        for (int sub = 0; !found && sub < 2; sub++) {
             struct stat copy;
-            int len = snprintf(out, cap, "%s/%s/%s%s", OA_SHADOW, e->d_name, sub ? "Contents/" : "", name + 1);
+            int len = snprintf(out, cap, "%s/%s/%s%s", rcanon, e->d_name, sub ? "Contents/" : "", name);
             found = len > 0 && (size_t)len + 6 <= cap && !stat(out, &copy) &&
-                S_ISREG(copy.st_mode) && copy.st_size == st.st_size;
+                S_ISREG(copy.st_mode) && copy.st_size == size;
         }
     }
     closedir(dir);
     if (found) strcat(out, ".perf");
     return found;
+}
+
+// Engine loads a /data file from its own copy, /data/inMusicTempFiles/<id>_<name>,
+// and analyses that: the .perf is next to the shadow copy with that name and
+// size, in <copy dir>/peer-<hex>/ or .../Contents/ (a rekordbox export's track).
+static int oa_shadow_perf(const char *path, char *out, size_t cap) {
+    char canon[PATH_MAX], croot[PATH_MAX];
+    if (!oa_resolve_path(path, canon, sizeof canon) || !oa_resolve_path(OA_ENGINE_COPIES, croot, sizeof croot)) return 0;
+    size_t n = strlen(croot);
+    if (n <= 1 || strncmp(canon, croot, n) || canon[n] != '/') return 0;
+    const char *base = canon + n + 1;
+    if (strchr(base, '/')) return 0;
+    const char *name = strchr(base, '_');
+    struct stat st;
+    if (!name || !name[1] || stat(canon, &st) || !S_ISREG(st.st_mode)) return 0;
+    if (oa_shadow_perf_in(OA_SHADOW, name + 1, st.st_size, out, cap)) return 1;
+    if (sc_shadow_root && strcmp(sc_shadow_root, OA_SHADOW)) {
+        if (oa_shadow_perf_in(sc_shadow_root, name + 1, st.st_size, out, cap)) return 1;
+    }
+    return 0;
 }
 
 // The stock process() emits: detectionStarted; per block beatData (unless
@@ -3325,6 +3438,32 @@ static char *oa_read_rgb(const char *path, uint32_t *len) {
     return b;
 }
 
+static int oa_match_shadow_root(const char *canon, const char *root) {
+    char rcanon[PATH_MAX];
+    if (!canon || !root || !*root || !oa_resolve_path(root, rcanon, sizeof rcanon)) return 0;
+    size_t n = strlen(rcanon);
+    return n > 1 && !strncmp(canon, rcanon, n) && canon[n] == '/' && oa_peer_rel_ok(canon + n + 1);
+}
+
+static int oa_is_shadow_path(const char *path) {
+    char canon[PATH_MAX];
+    if (!oa_resolve_path(path, canon, sizeof canon)) return 0;
+    if (oa_match_shadow_root(canon, OA_SHADOW)) return 1;
+    if (sc_shadow_root && strcmp(sc_shadow_root, OA_SHADOW) && oa_match_shadow_root(canon, sc_shadow_root)) return 1;
+    for (const char *m = strstr(canon, "/enginex/shadow-v3/"); m; m = strstr(m + 1, "/enginex/shadow-v3/")) {
+        if (oa_peer_rel_ok(m + sizeof "/enginex/shadow-v3/" - 1)) return 1;
+    }
+    return 0;
+}
+
+static int oa_skip_shadow(void *o, const char *why, const char *path) {
+    oa_emit(o, OA_STARTED, NULL);
+    oa_emit(o, OA_STOPPED, NULL);
+    oa_emit(o, OA_FINISHED, NULL);
+    oa_log(why, path, 0);
+    return 1;
+}
+
 static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
     char path[PATH_MAX];
     struct timespec t0, t1;
@@ -3336,14 +3475,32 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
         oa_log("rgb-stock", path, 0);
         return 0;
     }
+    char canon[PATH_MAX];
+    const char *rpath = oa_resolve_path(path, canon, sizeof canon) ? canon : path;
+    int is_shadow = oa_is_shadow_path(rpath);
     char perf[PATH_MAX + 8];
-    snprintf(perf, sizeof perf, "%s.perf", path);
+    snprintf(perf, sizeof perf, "%s.perf", rpath);
     int rekordbox_stream = 0;
 #if !defined(__aarch64__)
-    if (access(perf, F_OK)) rekordbox_stream = sc_rbx_replay_path(path, perf, sizeof perf);
+    if (!is_shadow && access(perf, F_OK)) rekordbox_stream = sc_rbx_replay_path(path, perf, sizeof perf);
 #endif
-    if (!rekordbox_stream && access(perf, F_OK) &&
-        (!oa_shadow_perf(path, perf, sizeof perf) || access(perf, F_OK))) {
+    if (!is_shadow && !rekordbox_stream && access(perf, F_OK)) {
+        if (oa_shadow_perf(path, perf, sizeof perf)) is_shadow = 1;
+    }
+    // An in-place grid update for an already-loaded shadow copy (.perf.regrid.run,
+    // armed by shadow_loaded_on_deck) does not race the initial deck loader, so it
+    // skips oa_settle() and replays immediately (~0.1 ms). Consume the one-shot
+    // before checking .perf so a missing or corrupt .perf cannot leave it armed.
+    char regrid_run[PATH_MAX + 24];
+    int regrid = 0;
+    if (!rekordbox_stream && (size_t)snprintf(regrid_run, sizeof regrid_run, "%s.regrid.run", perf) < sizeof regrid_run) {
+        struct stat rst;
+        if (!lstat(regrid_run, &rst) && S_ISREG(rst.st_mode) && !unlink(regrid_run)) regrid = 1;
+    }
+    if (!rekordbox_stream && access(perf, F_OK)) {
+        // Single fail-closed choke point: never hand a shadow copy (or a regrid
+        // trigger) to Engine's real OfflineAnalyzer when .perf is missing.
+        if (is_shadow || regrid) return oa_skip_shadow(o, "skip-shadow-missing", path);
         int named = 0;
 #if !defined(__aarch64__)
         named = sc_rbx_replay_named(path, OA_ENGINE_COPIES, perf, sizeof perf);
@@ -3355,13 +3512,16 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
     }
     struct oa_perf p;
     if (!oa_read_perf(perf, &p)) {
+        // Single fail-closed choke point: never hand a shadow copy (or a regrid
+        // trigger) to Engine's real OfflineAnalyzer when .perf is damaged.
+        if (is_shadow || regrid) return oa_skip_shadow(o, "skip-shadow-bad", perf);
         oa_log("bad", perf, 0);
         return 0;
     }
     oa_emit(o, OA_STARTED, NULL);
     // The streaming request is for Engine's completed download. The shadow
     // copy has its own loader timing and keeps the existing settle check.
-    int ready = rekordbox_stream ? !__atomic_load_n((uchar *)o + OA_STOP, __ATOMIC_ACQUIRE) : oa_settle(o, p.part[0], p.len[0]);
+    int ready = (rekordbox_stream || regrid) ? !__atomic_load_n((uchar *)o + OA_STOP, __ATOMIC_ACQUIRE) : oa_settle(o, p.part[0], p.len[0]);
     if (!ready) {
         oa_emit(o, OA_STOPPED, NULL);
         oa_emit(o, OA_FINISHED, NULL);
@@ -3929,7 +4089,243 @@ static int (*shadow_step_original)(void *);
 static long long (*shadow_last_insert)(void *);
 static struct sc_shadow_sqlite shadow_sqlite;
 static uintptr_t shadow_deck_load_return;
+static uintptr_t shadow_queue_loaded_return;
+static __thread int shadow_regrid_queued;
 static unsigned (*shadow_analyze_original)(void *, const void *);
+
+// #346: native 5.3.0-only AnalysisQueue bridge. No injected QML may touch
+// /Client/Librarian/Analyzer/; instead stream-sync notifies this root-only
+// Unix datagram socket after staging <copy>.perf.regrid, and the hook posts
+// a custom QEvent onto AnalysisQueue's own Qt thread to invoke addTracks().
+struct sc_qlist_i64 { void *d; const int64_t *ptr; int32_t size; };
+static const char *shadow_regrid_sock_path = SHADOW_REGRID_SOCK_PATH;
+static pthread_mutex_t shadow_regrid_mu = PTHREAD_MUTEX_INITIALIZER;
+static void *shadow_analysis_queue;
+static int64_t shadow_regrid_ids[16];
+static int shadow_regrid_count;
+static int shadow_regrid_posted;
+static int shadow_regrid_event_type;
+static void (*shadow_queue_add_tracks)(void *, const struct sc_qlist_i64 *, int);
+static const void *(*shadow_queue_meta_original)(void *);
+static void *(*shadow_queue_dtor_d1_original)(void *);
+static void *(*shadow_queue_dtor_d0_original)(void *);
+static int (*shadow_queue_event_original)(void *, void *);
+static void (*shadow_queue_connect_original)(void *, const void *);
+static void (*shadow_post_event)(void *, void *, int);
+static void (*shadow_qevent_ctor)(void *, int);
+static void (*shadow_qevent_dtor)(void *);
+static int (*shadow_qevent_reg)(int);
+static void *(*shadow_op_new)(size_t);
+static void *shadow_qobj_event_sym;
+static void *shadow_qobj_connect_sym;
+
+static void shadow_analysis_queue_capture(void *self) {
+    if (!self || __atomic_load_n(&shadow_analysis_queue, __ATOMIC_ACQUIRE) == self) return;
+    pthread_mutex_lock(&shadow_regrid_mu);
+    if (!shadow_analysis_queue) {
+        __atomic_store_n(&shadow_analysis_queue, self, __ATOMIC_RELEASE);
+        fprintf(stderr, "engine-ui-hook: shadow regrid captured AnalysisQueue\n");
+    }
+    pthread_mutex_unlock(&shadow_regrid_mu);
+}
+
+static void shadow_analysis_queue_clear(void *self) {
+    pthread_mutex_lock(&shadow_regrid_mu);
+    if (shadow_analysis_queue == self) {
+        __atomic_store_n(&shadow_analysis_queue, NULL, __ATOMIC_RELEASE);
+        shadow_regrid_count = 0;
+        shadow_regrid_posted = 0;
+    }
+    pthread_mutex_unlock(&shadow_regrid_mu);
+}
+
+static const void *shadow_analysis_queue_meta(void *self) {
+    shadow_analysis_queue_capture(self);
+    return shadow_queue_meta_original(self);
+}
+
+static void shadow_analysis_queue_connect(void *self, const void *sig) {
+    shadow_analysis_queue_capture(self);
+    shadow_queue_connect_original(self, sig);
+}
+
+static void *shadow_analysis_queue_dtor_d1(void *self) {
+    shadow_analysis_queue_clear(self);
+    return shadow_queue_dtor_d1_original(self);
+}
+
+static void *shadow_analysis_queue_dtor_d0(void *self) {
+    shadow_analysis_queue_clear(self);
+    return shadow_queue_dtor_d0_original(self);
+}
+
+static int shadow_analysis_queue_event(void *self, void *ev) {
+    shadow_analysis_queue_capture(self);
+    if (ev && shadow_regrid_event_type > 0) {
+        uint16_t ev_type = 0;
+        memcpy(&ev_type, (const unsigned char *)ev + 4, sizeof ev_type);
+        if (ev_type == (uint16_t)shadow_regrid_event_type) {
+            int64_t ids[16];
+            int n = 0;
+            pthread_mutex_lock(&shadow_regrid_mu);
+            n = shadow_regrid_count;
+            if (n > 16) n = 16;
+            if (n > 0) memcpy(ids, shadow_regrid_ids, (size_t)n * sizeof ids[0]);
+            shadow_regrid_count = 0;
+            shadow_regrid_posted = 0;
+            pthread_mutex_unlock(&shadow_regrid_mu);
+            if (n > 0 && shadow_queue_add_tracks) {
+                struct sc_qlist_i64 list = {NULL, ids, (int32_t)n};
+                shadow_queue_add_tracks(self, &list, 0);
+            }
+            return 1;
+        }
+    }
+    return shadow_queue_event_original(self, ev);
+}
+
+__attribute__((unused)) static int shadow_regrid_handle_dgram(const char *buf, size_t len) {
+    if (!shadow_regrid_enabled || !shadow_queue_add_tracks || !shadow_post_event ||
+        !shadow_qevent_ctor || !shadow_op_new || shadow_regrid_event_type <= 0) return 0;
+    long long track_id = 0;
+    char path[640];
+    if (!sc_shadow_regrid_parse(buf, len, &track_id, path, sizeof path)) return 0;
+    if (!sc_shadow_regrid_ready(path)) return 0;
+    int queued = 0;
+    pthread_mutex_lock(&shadow_regrid_mu);
+    void *q = shadow_analysis_queue;
+    if (q) {
+        int dup = 0;
+        for (int i = 0; i < shadow_regrid_count; i++) {
+            if (shadow_regrid_ids[i] == (int64_t)track_id) { dup = 1; break; }
+        }
+        if (!dup && shadow_regrid_count < 16) shadow_regrid_ids[shadow_regrid_count++] = (int64_t)track_id;
+        if (!shadow_regrid_posted) {
+            void *ev = shadow_op_new(32);
+            if (ev) {
+                memset(ev, 0, 32);
+                shadow_qevent_ctor(ev, shadow_regrid_event_type);
+                shadow_regrid_posted = 1;
+                shadow_post_event(q, ev, 0);
+                queued = 1;
+            }
+        } else {
+            queued = 1;
+        }
+    }
+    pthread_mutex_unlock(&shadow_regrid_mu);
+    return queued;
+}
+
+#ifndef ENGINE_UI_HOOK_TEST
+static void *shadow_regrid_listener(void *arg) {
+    (void)arg;
+    prctl(PR_SET_NAME, "sc-sh-regrid", 0, 0, 0);
+    char buf[768];
+    for (;;) {
+        ssize_t n = recv(shadow_regrid_sock_fd, buf, sizeof buf, 0);
+        if (n > 0) {
+            shadow_regrid_handle_dgram(buf, (size_t)n);
+        } else if (n < 0 && errno != EINTR) {
+            break;
+        }
+    }
+    return NULL;
+}
+#endif
+
+static int bind_shadow_regrid_sock(const char *path) {
+    if (!path || !*path) return -1;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof addr);
+    if (strlen(path) >= sizeof addr.sun_path) return -1;
+    char dir[sizeof addr.sun_path];
+    strncpy(dir, path, sizeof dir - 1);
+    dir[sizeof dir - 1] = '\0';
+    char *slash = strrchr(dir, '/');
+    if (slash && slash != dir) {
+        *slash = '\0';
+        mkdir(dir, 0755);
+    }
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, path);
+    unlink(path);
+    mode_t old_mask = umask(0177);
+    int rc = bind(fd, (struct sockaddr *)&addr, sizeof addr);
+    umask(old_mask);
+    if (rc || chmod(path, 0600)) {
+        close(fd);
+        unlink(path);
+        return -1;
+    }
+    return fd;
+}
+
+A32_ONLY static int install_shadow_regrid(uintptr_t base, size_t page) {
+    // Strictly SC5000 5.3.0 (exact BuildID) with both shadow and OA replay enabled.
+    if (strcmp(build->name, "5.3.0") || !player_board() || !hf_on(HF_FOUR_DECK) || !hf_on(HF_RB_BRIDGE)) return 0;
+    const uintptr_t add_tracks = base + 0xab8014;
+    const uint32_t add_prefix[] = {0xe16d42f4, 0xe1cd81f0};
+    if (memcmp((const void *)add_tracks, add_prefix, sizeof add_prefix)) return 0;
+    if (!shadow_post_event) shadow_post_event = dlsym(RTLD_DEFAULT, "_ZN16QCoreApplication9postEventEP7QObjectP6QEventi");
+    if (!shadow_qevent_ctor) shadow_qevent_ctor = dlsym(RTLD_DEFAULT, "_ZN6QEventC1ENS_4TypeE");
+    if (!shadow_qevent_ctor) shadow_qevent_ctor = dlsym(RTLD_DEFAULT, "_ZN6QEventC2ENS_4TypeE");
+    if (!shadow_qevent_dtor) shadow_qevent_dtor = dlsym(RTLD_DEFAULT, "_ZN6QEventD1Ev");
+    if (!shadow_qevent_dtor) shadow_qevent_dtor = dlsym(RTLD_DEFAULT, "_ZN6QEventD2Ev");
+    if (!shadow_qevent_reg) shadow_qevent_reg = dlsym(RTLD_DEFAULT, "_ZN6QEvent17registerEventTypeEi");
+    if (!shadow_op_new) shadow_op_new = dlsym(RTLD_DEFAULT, "_Znwj");
+    if (!shadow_qobj_event_sym) shadow_qobj_event_sym = dlsym(RTLD_DEFAULT, "_ZN7QObject5eventEP6QEvent");
+    if (!shadow_qobj_connect_sym) shadow_qobj_connect_sym = dlsym(RTLD_DEFAULT, "_ZN7QObject13connectNotifyERK11QMetaMethod");
+    if (!shadow_post_event || !shadow_qevent_ctor || !shadow_qevent_dtor || !shadow_qevent_reg ||
+        !shadow_op_new || !shadow_qobj_event_sym || !shadow_qobj_connect_sym) return 0;
+    uintptr_t *meta_slot = (uintptr_t *)(base + 0x2b6d1cc);
+    uintptr_t *dtor_d1_slot = (uintptr_t *)(base + 0x2b6d1d8);
+    uintptr_t *dtor_d0_slot = (uintptr_t *)(base + 0x2b6d1dc);
+    uintptr_t *event_slot = (uintptr_t *)(base + 0x2b6d1e0);
+    uintptr_t *connect_slot = (uintptr_t *)(base + 0x2b6d1f4);
+    if (*meta_slot != base + 0x911e04 ||
+        *dtor_d1_slot != base + 0x915874 ||
+        *dtor_d0_slot != base + 0x915b58 ||
+        (*event_slot != (uintptr_t)shadow_qobj_event_sym && *event_slot != base + 0x160434) ||
+        (*connect_slot != (uintptr_t)shadow_qobj_connect_sym && *connect_slot != base + 0x160470)) return 0;
+    int ev_type = shadow_qevent_reg(-1);
+    if (ev_type < 1000 || ev_type > 65535) return 0;
+    // Runtime Qt6 QEvent ABI self-check: verify QEvent::t sits at +4 and fits within 32 bytes.
+    unsigned char probe[64];
+    memset(probe, 0, sizeof probe);
+    shadow_qevent_ctor(probe, ev_type);
+    uint16_t probe_t = 0;
+    memcpy(&probe_t, probe + 4, sizeof probe_t);
+    shadow_qevent_dtor(probe);
+    for (size_t i = 32; i < sizeof probe; i++) {
+        if (probe[i]) return 0;
+    }
+    if (probe_t != (uint16_t)ev_type) return 0;
+    int fd = -1;
+    if (shadow_regrid_sock_path && *shadow_regrid_sock_path) {
+        fd = bind_shadow_regrid_sock(shadow_regrid_sock_path);
+        if (fd < 0) return 0;
+    }
+    shadow_queue_add_tracks = (void (*)(void *, const struct sc_qlist_i64 *, int))add_tracks;
+    shadow_queue_meta_original = (const void *(*)(void *))*meta_slot;
+    shadow_queue_dtor_d1_original = (void *(*)(void *))*dtor_d1_slot;
+    shadow_queue_dtor_d0_original = (void *(*)(void *))*dtor_d0_slot;
+    shadow_queue_event_original = (int (*)(void *, void *))*event_slot;
+    shadow_queue_connect_original = (void (*)(void *, const void *))*connect_slot;
+    shadow_regrid_event_type = ev_type;
+    shadow_regrid_sock_fd = fd;
+    patch_pointer(HF_FOUR_DECK, meta_slot, (uintptr_t)shadow_analysis_queue_meta, page);
+    patch_pointer(HF_FOUR_DECK, dtor_d1_slot, (uintptr_t)shadow_analysis_queue_dtor_d1, page);
+    patch_pointer(HF_FOUR_DECK, dtor_d0_slot, (uintptr_t)shadow_analysis_queue_dtor_d0, page);
+    patch_pointer(HF_FOUR_DECK, event_slot, (uintptr_t)shadow_analysis_queue_event, page);
+    patch_pointer(HF_FOUR_DECK, connect_slot, (uintptr_t)shadow_analysis_queue_connect, page);
+    shadow_regrid_enabled = 1;
+    fprintf(stderr, "engine-ui-hook: shadow regrid native queue enabled (%s)\n",
+            shadow_regrid_sock_path ? shadow_regrid_sock_path : "none");
+    return 1;
+}
 
 // Deck loads can request analysis on EMain even when the library Track is
 // marked analysed. Leave the loaded native data in place for our peer copies.
@@ -3968,11 +4364,38 @@ static unsigned shadow_analyze(void *obj, const void *prefs) {
     return shadow_analyze_original(obj, prefs);
 }
 
+// #346: AnalysisQueue skips any track currently loaded on a deck via
+// LibrarianTrackData::isLoadedOnDeck() (vtable +0xd8, caller 0xac6870).
+// For a peer shadow copy with a staged .perf.regrid marker, arm the one-shot
+// .perf.regrid.run marker, clear in-memory analysisStatus/isAnalyzed and return
+// 0 so AnalysisQueue runs OfflineAnalyzer replay in-place on its own thread
+// with its own refcounted ITrackData (no deck reload, no audio-thread work).
+static unsigned shadow_loaded_on_deck(void *obj) {
+    unsigned char *self = obj;
+    unsigned loaded = self[0xc8];
+    if (loaded && (uintptr_t)__builtin_return_address(0) == shadow_queue_loaded_return) {
+        const struct oa_string *path = (const void *)(self + 0x10);
+        if (path->ptr && path->size > 0 && path->size < 512) {
+            char text[512];
+            if (utf16_to_utf8(path->ptr, path->size, text, sizeof text) && sc_shadow_regrid_arm(text)) {
+                __atomic_store_n((uint32_t *)(self + 0x3c), 0u, __ATOMIC_RELEASE);
+                unsigned char *track = *(unsigned char **)(self + 0x48);
+                if (track) track[0x31d] = 0;
+                shadow_regrid_queued = 1;
+                return 0;
+            }
+        }
+    }
+    return loaded;
+}
+
 static void shadow_fill(void *db, long long id) {
+    int regrid = shadow_regrid_queued;
+    shadow_regrid_queued = 0;
     analysis_filling = 1;
-    int filled = sc_shadow_analysis_fill(&shadow_sqlite, db, id);
+    int filled = sc_shadow_analysis_fill_ex(&shadow_sqlite, db, id, regrid);
     analysis_filling = 0;
-    if (filled) fprintf(stderr, "engine-ui-hook: shadow analysis filled track %lld\n", id);
+    if (filled) fprintf(stderr, "engine-ui-hook: shadow analysis %s track %lld\n", regrid ? "regrid" : "filled", id);
 }
 
 static int shadow_step(void *stmt) {
@@ -4015,6 +4438,15 @@ A32_ONLY static void install_shadow_analysis(uintptr_t base, size_t page) {
     shadow_sqlite.filename = (const char *(*)(void *, const char *))(uintptr_t)api[180];
     redirect_function(HF_FOUR_DECK, step, shadow_step, page);
     redirect_function(HF_FOUR_DECK, analyze, shadow_analyze, page);
+    const uintptr_t queue_loaded_call = base + 0xac6870;
+    const uint32_t queue_loaded_code[] = {0xe59330d8, 0xe12fff33};
+    uintptr_t *loaded_slot = (uintptr_t *)(base + 0x2b7d480);
+    if (!memcmp((const void *)queue_loaded_call, queue_loaded_code, sizeof queue_loaded_code) &&
+        *loaded_slot == base + 0xe3b148) {
+        shadow_queue_loaded_return = queue_loaded_call + sizeof queue_loaded_code;
+        patch_pointer(HF_FOUR_DECK, loaded_slot, (uintptr_t)shadow_loaded_on_deck, page);
+        install_shadow_regrid(base, page);
+    }
     shadow_analysis_enabled = 1;
     // The gateway or the stage fill already installed the dispatcher when enabled. Shadow alone owns it otherwise.
     if (!rbx_bind_installed) redirect_function(HF_FOUR_DECK, (uintptr_t)api[5], rbx_bind, page);

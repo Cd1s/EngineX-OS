@@ -102,6 +102,9 @@ func displayPeerID(p peerDeck) string {
 	if id == "" {
 		id = p.ip
 	}
+	if p.GridGen != "" {
+		return fmt.Sprintf("peer:%s:%d:%s:%s", id, p.Deck, p.Key, p.GridGen)
+	}
 	return fmt.Sprintf("peer:%s:%d:%s", id, p.Deck, p.Key)
 }
 
@@ -518,12 +521,15 @@ func (s *Server) fetchShadowDisplay(p peerDeck, id string, slot *shadowDisplayEn
 	var err error
 	if p.local != "" {
 		var own *shadowDisplayAsset
-		if own, err = s.sourceDisplayAsset(ctx, p.local, p.Key, !p.head); err == nil {
+		if own, err = s.sourceDisplayAssetFor(ctx, p.local, p.Key, p.GridGen, !p.head); err == nil {
 			copyAsset := *own // the source cache's asset stays immutable
 			a = &copyAsset
 		}
 	} else {
 		u := fmt.Sprintf("http://%s/peer/decks/%d/display?key=%s", net.JoinHostPort(p.ip, strconv.Itoa(port)), p.Deck, url.QueryEscape(p.Key))
+		if p.GridGen != "" {
+			u += "&gridGen=" + url.QueryEscape(p.GridGen)
+		}
 		if p.head {
 			u += "&detail=0"
 		}
@@ -845,7 +851,7 @@ func (s *Server) peerDisplayGet(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 750*time.Millisecond)
 	defer cancel()
-	a, err := s.sourceDisplayAsset(ctx, path, r.URL.Query().Get("key"), r.URL.Query().Get("detail") != "0")
+	a, err := s.sourceDisplayAssetFor(ctx, path, r.URL.Query().Get("key"), r.URL.Query().Get("gridGen"), r.URL.Query().Get("detail") != "0")
 	if err != nil {
 		http.Error(w, "display data not ready", http.StatusNotFound)
 		return

@@ -102,35 +102,43 @@ type Config struct {
 	Factory func(provider string, guest bool, userID string) (providers.Provider, error)
 }
 type Server struct {
-	cfg            Config
-	jobs           *Jobs
-	cueWatch       atomic.Pointer[bridge.CueWatcher] // #321: set by WatchCues
-	rbPriorityMu   sync.Mutex
-	rbPriority     *bridge.PriorityQueue
-	rbDeckLoaded   [5]string // per deck: last prioritized file path
-	rbDeckCue      [5]bool   // per deck: last CUE preview state
-	rbOnDemandMu   sync.Mutex
-	rbOnDemand     *bridge.OnDemandBuilder
-	rbOnDemandSrv  *http.Server
-	rbOnDemandLn   net.Listener
-	rbOnDemandSock string
-	rbOnDemandWG   sync.WaitGroup
-	mu             sync.Mutex
-	sessions       map[string]*Session
-	pending        map[string]pending
-	mux            *http.ServeMux
-	tidal          *tidalGateway
-	uiMu           sync.Mutex
-	copyMu         sync.Mutex
-	copyIncoming   *copyPeerRequest
-	copyOutgoing   *copyPeerRequest
-	copyReceived   *copyBundle
-	logsMu         sync.Mutex
-	fxMu           sync.Mutex // transient FX commands never hold the settings lock
-	stemsMu        sync.Mutex // streaming-stems.json
-	stemsImportMu  sync.Mutex // one streamed row at a time is named, recorded and swept
-	rbxPresenceMu  sync.Mutex
-	rbxPresence    map[string]*rbxPresence
+	cfg          Config
+	jobs         *Jobs
+	cueWatch     atomic.Pointer[bridge.CueWatcher] // #321: set by WatchCues
+	rbPriorityMu sync.Mutex
+	rbPriority   *bridge.PriorityQueue
+	rbDeckLoaded [5]string // per deck: last prioritized file path
+	rbDeckCue    [5]bool   // per deck: last CUE preview state
+
+	rbOnDemandMu          sync.Mutex
+	rbOnDemand            *bridge.OnDemandBuilder
+	rbOnDemandSrv         *http.Server
+	rbOnDemandLn          net.Listener
+	rbOnDemandSock        string
+	rbOnDemandWG          sync.WaitGroup
+	rbOnDemandCacheMu     sync.Mutex
+	rbOnDemandCache       map[onDemandVerifiedID]*rbOnDemandCacheEntry
+	rbOnDemandFlights     map[onDemandVerifiedID]*rbOnDemandFlight
+	rbOnDemandDBMeta      map[rbOnDemandDBKey]*rbOnDemandDBSnap
+	rbOnDemandBuildCount  atomic.Int64
+	rbOnDemandEncodeCount atomic.Int64
+
+	mu            sync.Mutex
+	sessions      map[string]*Session
+	pending       map[string]pending
+	mux           *http.ServeMux
+	tidal         *tidalGateway
+	uiMu          sync.Mutex
+	copyMu        sync.Mutex
+	copyIncoming  *copyPeerRequest
+	copyOutgoing  *copyPeerRequest
+	copyReceived  *copyBundle
+	logsMu        sync.Mutex
+	fxMu          sync.Mutex // transient FX commands never hold the settings lock
+	stemsMu       sync.Mutex // streaming-stems.json
+	stemsImportMu sync.Mutex // one streamed row at a time is named, recorded and swept
+	rbxPresenceMu sync.Mutex
+	rbxPresence   map[string]*rbxPresence
 
 	prolinkExport *prolink.Exporter
 	closed        chan struct{}

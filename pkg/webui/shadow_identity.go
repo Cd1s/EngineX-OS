@@ -6,13 +6,22 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"syscall"
 )
 
-// File identity invalidates the cached resolution after an audio edit.
-type shadowFileIdentity struct{ size, modified int64 }
+// File identity invalidates the cached resolution after an audio edit or file replacement.
+type shadowFileIdentity struct {
+	dev, ino       uint64
+	size, modified int64
+}
 
 func shadowIdentity(st os.FileInfo) shadowFileIdentity {
-	return shadowFileIdentity{st.Size(), st.ModTime().UnixNano()}
+	id := shadowFileIdentity{size: st.Size(), modified: st.ModTime().UnixNano()}
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys != nil {
+		id.dev = uint64(sys.Dev)
+		id.ino = uint64(sys.Ino)
+	}
+	return id
 }
 
 type shadowResolvedFile struct {
