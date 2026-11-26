@@ -2,7 +2,9 @@ package webui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/internal/testaudio"
 	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
 	"github.com/Cd1s/EngineX-OS/pkg/analyzer"
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
@@ -47,8 +50,17 @@ type nasAnswer struct {
 }
 
 func newNASSwitchRig(t *testing.T, opts ...func(*Pipeline)) *nasSwitchRig {
-	rig := &nasSwitchRig{t: t, one: testMP3(120), two: testMP3(150), asked: make(chan struct{}, 4), listAsked: make(chan struct{}, 4)}
+	return newNASSwitchRigWith(t, testMP3(120), testMP3(150), opts...)
+}
+
+// newNASSwitchRigWith is newNASSwitchRig with the two servers' recordings given.
+func newNASSwitchRigWith(t *testing.T, one, two []byte, opts ...func(*Pipeline)) *nasSwitchRig {
+	rig := &nasSwitchRig{t: t, one: one, two: two, asked: make(chan struct{}, 4), listAsked: make(chan struct{}, 4)}
 	nas := func(audio []byte, held bool) string {
+		suffix, mime, seconds := "mp3", "audio/mpeg", 210
+		if bytes.HasPrefix(audio, []byte("fLaC")) { // a real song: no listed length to compare
+			suffix, mime, seconds = "flac", "audio/flac", 0
+		}
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/rest/getPlaylists.view":
@@ -65,7 +77,7 @@ func newNASSwitchRig(t *testing.T, opts ...func(*Pipeline)) *nasSwitchRig {
 					}
 				}
 				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlist":{"id":"pl-42","name":"Club Crate","entry":[{"id":"tr-99","title":"Warehouse Dub","artist":"DJ Test","album":"NAS Vol 1","duration":210,"suffix":"mp3"}]}}}`)
+				fmt.Fprintf(w, `{"subsonic-response":{"status":"ok","playlist":{"id":"pl-42","name":"Club Crate","entry":[{"id":"tr-99","title":"Warehouse Dub","artist":"DJ Test","album":"NAS Vol 1","duration":%d,"suffix":"%s"}]}}}`, seconds, suffix)
 			case "/rest/download.view":
 				if held {
 					rig.twoDownloads.Add(1)
@@ -77,7 +89,7 @@ func newNASSwitchRig(t *testing.T, opts ...func(*Pipeline)) *nasSwitchRig {
 						<-gate
 					}
 				}
-				w.Header().Set("Content-Type", "audio/mpeg")
+				w.Header().Set("Content-Type", mime)
 				w.Write(audio)
 			default:
 				http.NotFound(w, r)
@@ -714,5 +726,304 @@ func TestReviewOldImportDropsAfterChange(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("server one's import did not finish: %+v", jobs)
 		}
+	}
+}
+
+// stemmedRig is the two-server rig with a stemmed copy of each server's track, as a
+// Stems source makes it: server one's row stemmed before the change, server two's after.
+func stemmedRig(t *testing.T) (rig *nasSwitchRig, id1, id2 int64, src1, src2 string) {
+	rig = newNASSwitchRig(t)
+	stem := func(id int64) string {
+		t.Helper()
+		var v struct {
+			Path string `json:"path"`
+		}
+		tidalGet(t, rig.gw.URL, fmt.Sprintf("/v1/enginex/stems/source?id=%d", id), 200, &v)
+		return v.Path
+	}
+	rig.saveNAS(rig.oneURL)
+	id1 = rig.browse()
+	src1 = stem(id1)
+	rig.saveNAS(rig.twoURL)
+	id2 = rig.browse()
+	src2 = stem(id2)
+	if src1 == "" || src2 == "" || src1 == src2 {
+		t.Fatalf("stemmed copies: server one %q, server two %q", src1, src2)
+	}
+	return rig, id1, id2, src1, src2
+}
+
+// Round 5 (re-check of 4480a0c1, HIGH 1): stems/local of server one's row passed the
+// generation check, then the NAS moved to server two and its row was stemmed; the old
+// request picked server two's stemmed copy. The check and the pick are one step now.
+func TestReviewStemsLocalPausedAfterCheck(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.oneURL)
+	id1 := rig.browse()
+	hook, reached, resume := pauseOnce("stems-local")
+	t.Cleanup(resume)
+	rig.s.tidal.pause = hook
+	done := make(chan nasAnswer, 1)
+	go func() { done <- rig.get(fmt.Sprintf("/v1/enginex/stems/local?id=%d", id1)) }()
+	nasWaitFor(t, reached, "the Stems lookup of server one's track passed its lookup")
+	rig.saveNAS(rig.twoURL)
+	id2 := rig.browse()
+	if a := rig.get(fmt.Sprintf("/v1/enginex/stems/source?id=%d", id2)); a.code != http.StatusOK {
+		t.Fatalf("server two's Stems source: HTTP %d %s", a.code, a.body)
+	}
+	resume()
+	if a := <-done; a.code != http.StatusNotFound {
+		t.Fatalf("stems/local of server one's track %d, begun before the change, answered HTTP %d after it: %s, want 404", id1, a.code, a.body)
+	}
+}
+
+// Round 5 (HIGH 2): a Stems file with an unrelated service's bad field decoded in part;
+// the part kept server one's entry after the change, and server two's new row with the
+// same track ID got server one's stemmed copy. Such a file serves nothing now, and is
+// never rewritten from the part.
+func TestReviewPartialStemsFileServesNothing(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.oneURL)
+	id1 := rig.browse()
+	var src struct {
+		Path string `json:"path"`
+	}
+	tidalGet(t, rig.gw.URL, fmt.Sprintf("/v1/enginex/stems/source?id=%d", id1), 200, &src)
+	path := rig.s.stemsFile()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := append(bytes.TrimSuffix(bytes.TrimSpace(raw), []byte("}")), []byte(`,"spotify":[{"track":{"id":"sp-1","provider":"spotify"},"path":7}]}`)...)
+	if err := os.WriteFile(path, bad, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rig.saveNAS(rig.twoURL)
+	id2 := rig.browse()
+	if a := rig.get(fmt.Sprintf("/v1/enginex/stems/local?id=%d", id2)); a.code != http.StatusNotFound {
+		t.Fatalf("server two's track %d got a stemmed copy from a Stems file that does not decode: HTTP %d %s (server one's copy %q)", id2, a.code, a.body, src.Path)
+	}
+	if a := rig.get(fmt.Sprintf("/v1/enginex/stems/source?id=%d", id2)); a.code == http.StatusOK {
+		t.Fatalf("a Stems source rewrote a Stems file that does not decode: HTTP %d %s", a.code, a.body)
+	}
+	if got, _ := os.ReadFile(path); !bytes.Equal(got, bad) {
+		t.Fatalf("the Stems file that does not decode was rewritten:\n%s", got)
+	}
+}
+
+// Round 5 (HIGH 2): when the reset could not save the Stems file, server one's entry
+// stayed in it and server two's row with the same track ID got server one's copy.
+func TestReviewFailedStemsResetServesNoOldEntry(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.oneURL)
+	id1 := rig.browse()
+	var src struct {
+		Path string `json:"path"`
+	}
+	tidalGet(t, rig.gw.URL, fmt.Sprintf("/v1/enginex/stems/source?id=%d", id1), 200, &src)
+	saved := saveStemsFile
+	saveStemsFile = func(string, any) error { return errors.New("disk full") }
+	rig.saveNAS(rig.twoURL)
+	saveStemsFile = saved
+	id2 := rig.browse()
+	if a := rig.get(fmt.Sprintf("/v1/enginex/stems/local?id=%d", id2)); a.code != http.StatusNotFound {
+		t.Fatalf("server two's track %d got server one's stemmed copy after the reset could not save: HTTP %d %s", id2, a.code, a.body)
+	}
+	if list := rig.s.stemmed("subsonic"); len(list) != 0 {
+		t.Fatalf("the Stems list still has %d of server one's rows after the reset could not save", len(list))
+	}
+}
+
+// Round 5 (HIGH 3): an import of server one's track paused after its last generation
+// check committed server one's recording after the NAS moved to server two. The check
+// and the import are one step now, under a lock the reset takes.
+func TestReviewImportPausedAfterLastCheck(t *testing.T) {
+	var imported atomic.Int32
+	// Real songs, so the analysis passes and the job reaches the library import.
+	song := func(seconds int) []byte {
+		var buf bytes.Buffer
+		if err := testaudio.FLAC(&buf, testaudio.Song(seconds)); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+	rig := newNASSwitchRigWith(t, song(8), song(10), withLibrary(t), func(p *Pipeline) {
+		p.Library = importerFunc(func(context.Context, analyzer.Import) (int64, error) { imported.Add(1); return 1, nil })
+	})
+	rig.saveNAS(rig.oneURL)
+	id1 := rig.browse()
+	hook, reached, resume := pauseOnce("import")
+	t.Cleanup(resume)
+	rig.jobs.pause = hook
+	rig.plays("server one", id1, rig.one)
+	nasWaitFor(t, reached, "server one's import passed its last check")
+	switched := make(chan struct{})
+	go func() { rig.saveNAS(rig.twoURL); close(switched) }()
+	select {
+	case <-switched:
+		resume()
+		t.Fatal("the NAS change finished while server one's import was between its last check and the library import")
+	case <-time.After(300 * time.Millisecond):
+	}
+	resume()
+	nasWaitFor(t, switched, "the NAS change finished after the import")
+	if n := imported.Load(); n != 1 {
+		t.Fatalf("library imports: %d, want 1 (server one's, before the change)", n)
+	}
+}
+
+// Round 5 (review note): without a library, a load of server one's track paused after
+// filing returned server one's bytes after the change; queueImport returned before its
+// generation check.
+func TestReviewNoLibraryLoadAfterChange(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.oneURL)
+	id1 := rig.browse()
+	hook, reached, resume := pauseOnce("filed")
+	t.Cleanup(resume)
+	rig.jobs.pause = hook
+	first := rig.streamAsync(id1)
+	nasWaitFor(t, reached, "server one's download was filed")
+	rig.saveNAS(rig.twoURL)
+	resume()
+	if a := <-first; a.code != http.StatusNotFound {
+		t.Fatalf("the load of server one's track answered HTTP %d after the change (its recording=%v), want 404", a.code, bytes.Equal(a.body, rig.one))
+	}
+}
+
+// Round 5 (review note): playback info of server one's track paused after its generation
+// check and before reading the cache advertised a stream after the change. It answers 404.
+func TestReviewPlaybackInfoPausedAfterCheck(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.oneURL)
+	id1 := rig.browse()
+	rig.plays("server one", id1, rig.one)
+	hook, reached, resume := pauseOnce("codec")
+	t.Cleanup(resume)
+	rig.s.tidal.pause = hook
+	done := make(chan nasAnswer, 1)
+	go func() {
+		done <- rig.get(fmt.Sprintf("/v1/tracks/%d/playbackinfopostpaywall?audioquality=LOSSLESS&playbackmode=STREAM&assetpresentation=FULL", id1))
+	}()
+	nasWaitFor(t, reached, "playback info of server one's track passed its check")
+	rig.saveNAS(rig.twoURL)
+	id2 := rig.browse()
+	rig.plays("server two's row", id2, rig.two) // server two's file cached under the same track ID
+	resume()
+	if a := <-done; a.code != http.StatusNotFound {
+		t.Fatalf("playback info of server one's track %d, checked before the change, answered HTTP %d after it, want 404", id1, a.code)
+	}
+}
+
+type importerFunc func(context.Context, analyzer.Import) (int64, error)
+
+func (f importerFunc) Import(ctx context.Context, v analyzer.Import) (int64, error) { return f(ctx, v) }
+
+// saveNASAsync is saveNAS for a save that pauses: it reports the HTTP status.
+func (rig *nasSwitchRig) saveNASAsync(url string) chan int {
+	done := make(chan int, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		body := fmt.Sprintf(`{"protocol":"subsonic","url":%q,"username":"dj","password":"pw","enabled":true}`, url)
+		rig.s.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(body)))
+		done <- w.Code
+	}()
+	return done
+}
+
+// Round 5 (the rule, applied to the reset): the new settings were readable before the
+// reset bumped the generation, so a load of server one's row in that gap downloaded
+// server two's recording and played it under server one's ID. The writer now resets
+// before anyone can read the new settings.
+func TestReviewLoadBeforeResetBump(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.oneURL)
+	id1 := rig.browse()
+	hook, reached, resume := pauseOnce("reset")
+	t.Cleanup(resume)
+	rig.jobs.pause = hook
+	saved := rig.saveNASAsync(rig.twoURL)
+	nasWaitFor(t, reached, "the reset began")
+	load := rig.streamAsync(id1)
+	var a nasAnswer
+	select {
+	case a = <-load: // answered inside the gap
+	case <-time.After(500 * time.Millisecond):
+	}
+	resume()
+	if a.code == 0 {
+		a = <-load
+	}
+	if code := <-saved; code != http.StatusOK {
+		t.Fatalf("save server two: HTTP %d", code)
+	}
+	if a.code != http.StatusNotFound {
+		t.Fatalf("a load of server one's track %d during the change answered HTTP %d (server two's recording=%v), want 404",
+			id1, a.code, bytes.Equal(a.body, rig.two))
+	}
+}
+
+// Round 5 (the rule, applied to the reset): the reset bumped the generation, then dropped
+// the NAS Stems entries in a second step; a Stems list read between the two took the new
+// generation with root A's entry and published it. Both now change in one step.
+func TestReviewStemsListDuringReset(t *testing.T) {
+	uiDir, stateDir := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("sources=\nscope=nas\nomni_source=0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{DownloadDir: t.TempDir()}})
+	t.Cleanup(jobs.Close)
+	s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, jobs)
+	t.Cleanup(s.Close)
+	gw := httptest.NewServer(s)
+	t.Cleanup(gw.Close)
+	save := func(root string) chan int {
+		done := make(chan int, 1)
+		go func() {
+			w := httptest.NewRecorder()
+			body := fmt.Sprintf(`{"protocol":"smb","url":"smb://nas.example/music/%s","username":"dj","password":"pw","enabled":true}`, root)
+			s.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(body)))
+			done <- w.Code
+		}()
+		return done
+	}
+	if code := <-save("rootA"); code != http.StatusOK {
+		t.Fatalf("save rootA: HTTP %d", code)
+	}
+	opener := stemmedTrack{Track: providers.Track{ID: "Sets/Opener.flac", Provider: "smb", Title: "Opener"}, Session: nasScope, Path: filepath.Join(stateDir, "opener.flac")}
+	if err := s.addStemmed(nasScope, opener); err != nil {
+		t.Fatal(err)
+	}
+	hook, reached, resume := pauseOnce("reset-bumped")
+	t.Cleanup(resume)
+	jobs.pause = hook
+	saved := save("rootB")
+	nasWaitFor(t, reached, "the reset bumped the generation")
+	list := make(chan nasAnswer, 1)
+	go func() {
+		resp, err := http.Get(gw.URL + "/v1/playlists/" + stemsListID(nasScope) + "/tracks?limit=50&offset=0")
+		if err != nil {
+			list <- nasAnswer{code: -1}
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		list <- nasAnswer{resp.StatusCode, body}
+	}()
+	var a nasAnswer
+	select {
+	case a = <-list:
+	case <-time.After(500 * time.Millisecond):
+	}
+	resume()
+	if a.code == 0 {
+		a = <-list
+	}
+	<-saved
+	var page struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(a.body, &page); err != nil || a.code != http.StatusOK || len(page.Items) != 0 {
+		t.Fatalf("a Stems list read during the change published %d rows (HTTP %d): %s", len(page.Items), a.code, a.body)
 	}
 }

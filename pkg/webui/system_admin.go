@@ -809,9 +809,9 @@ func (s *Server) handleMountsPost(w http.ResponseWriter, r *http.Request) {
 		enabled = *in.Enabled
 	}
 
-	defer s.resetNASIfMoved(s.loadNASConfig())
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
+	defer s.resetNASIfMoved(s.loadNASConfigLocked())
 
 	list := s.loadMountsLocked()
 	id := in.ID
@@ -907,9 +907,9 @@ func (s *Server) handleMountsDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	defer s.resetNASIfMoved(s.loadNASConfig())
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
+	defer s.resetNASIfMoved(s.loadNASConfigLocked())
 
 	list := s.loadMountsLocked()
 	found := -1

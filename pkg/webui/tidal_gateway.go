@@ -1933,13 +1933,24 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	}
 	var tracks [][]providers.Track
 	var lists [][]providers.Playlist
+	if g.pause != nil {
+		g.pause("search")
+	}
+	// A NAS search is cached under its generation: one begun before a NAS change is
+	// never served after it, even when its load began after the reset cleared the cache.
+	cacheSession := func(v source) string {
+		if listing != 0 {
+			return fmt.Sprintf("%s@%d", v.session, listing-1)
+		}
+		return v.session
+	}
 	var searches sync.WaitGroup
 	searches.Add(2)
 	go func() {
 		defer searches.Done()
 		tracks = each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Track, error) {
 			if p, ok := v.p.(trackSearcher); ok {
-				return g.searchTracks(ctx, v.provider, v.session, p, query)
+				return g.searchTracks(ctx, v.provider, cacheSession(v), p, query)
 			}
 			return nil, nil
 		})
@@ -1948,7 +1959,7 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 		defer searches.Done()
 		lists = each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Playlist, error) {
 			if p, ok := v.p.(playlistSearcher); ok {
-				return g.searchLists(ctx, v.provider, v.session, p, query)
+				return g.searchLists(ctx, v.provider, cacheSession(v), p, query)
 			}
 			return nil, nil
 		})
@@ -2019,7 +2030,7 @@ func (g *tidalGateway) streamedFile(net string) string {
 		p, _ := localFile(ref)
 		return p
 	case g.s.jobs != nil:
-		return g.s.jobs.File(ref.track)
+		return g.s.jobs.FileAt(ref.track, ref.gen)
 	}
 	return ""
 }
@@ -2088,7 +2099,7 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 			ext = "mp4"
 		}
 	} else if g.s.jobs != nil {
-		switch strings.ToLower(path.Ext(g.s.jobs.File(ref.track))) {
+		switch strings.ToLower(path.Ext(g.s.jobs.FileAt(ref.track, ref.gen))) {
 		case ".flac":
 			codec, ext = "flac", "flac"
 		case ".mp3":
@@ -2130,7 +2141,10 @@ func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref tr
 		fail(w, http.StatusNotFound, errNASChanged)
 		return false
 	}
-	if ref.file != "" || ref.track.Provider == "spotify" || j == nil || j.File(ref.track) != "" {
+	if g.pause != nil {
+		g.pause("codec")
+	}
+	if ref.file != "" || ref.track.Provider == "spotify" || j == nil || j.FileAt(ref.track, ref.gen) != "" {
 		return true
 	}
 	// These providers can deliver different codecs regardless of the quality setting.

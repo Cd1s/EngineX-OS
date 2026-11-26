@@ -3,6 +3,7 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -43,12 +44,48 @@ func (s *Server) stemsFile() string {
 	return filepath.Join(s.cfg.StateDir, "streaming-stems.json")
 }
 
-func (s *Server) loadStemmed() map[string][]stemmedTrack {
+// saveStemsFile writes streaming-stems.json; tests make it fail.
+var saveStemsFile = providers.SaveJSON
+
+// readStemmed decodes streaming-stems.json in full; s.stemsMu must be held. A
+// file that cannot be read is empty; one that does not decode in full is an
+// error, never a partial map (#335).
+func (s *Server) readStemmed() (map[string][]stemmedTrack, error) {
 	all := map[string][]stemmedTrack{}
-	if data, err := os.ReadFile(s.stemsFile()); err == nil {
-		json.Unmarshal(data, &all)
+	data, err := os.ReadFile(s.stemsFile())
+	if err != nil {
+		return all, nil
+	}
+	if err := json.Unmarshal(data, &all); err != nil {
+		return nil, err
+	}
+	return all, nil
+}
+
+// loadStemmed is the Stems lists to serve; s.stemsMu must be held. A file that
+// does not decode in full serves no list (it stays on disk as it is), and after
+// a NAS reset could not save the file its NAS entries are not served (#335).
+func (s *Server) loadStemmed() map[string][]stemmedTrack {
+	all, err := s.readStemmed()
+	if err != nil {
+		return map[string][]stemmedTrack{}
+	}
+	if s.stemsNASStale {
+		dropNASStems(all)
 	}
 	return all
+}
+
+// dropNASStems removes the NAS tracks from every list and tells whether any went.
+func dropNASStems(all map[string][]stemmedTrack) bool {
+	changed := false
+	for scope, list := range all {
+		kept := slices.DeleteFunc(slices.Clone(list), func(e stemmedTrack) bool { return isNASProvider(e.Track.Provider) })
+		if len(kept) != len(list) {
+			all[scope], changed = kept, true
+		}
+	}
+	return changed
 }
 
 func sameTrack(a, b providers.Track) bool { return a.Provider == b.Provider && a.ID == b.ID }
@@ -67,43 +104,56 @@ func (s *Server) addStemmedAt(scope string, t stemmedTrack, gen uint64) error {
 	if isNASProvider(t.Track.Provider) && gen != s.jobs.NASGen() {
 		return errNASChanged
 	}
-	all := s.loadStemmed()
+	all, err := s.readStemmed()
+	if err != nil { // never rewrite the file from a partial read
+		return errors.New("the Stems lists cannot be read")
+	}
+	if s.stemsNASStale {
+		dropNASStems(all)
+	}
 	list := slices.DeleteFunc(all[scope], func(e stemmedTrack) bool { return sameTrack(e.Track, t.Track) })
 	all[scope] = append([]stemmedTrack{t}, list[:min(len(list), maxStemmed-1)]...)
-	return providers.SaveJSON(s.stemsFile(), all)
+	if err := saveStemsFile(s.stemsFile(), all); err != nil {
+		return err
+	}
+	s.stemsNASStale = false
+	return nil
 }
 
 // resetNASStems drops the stemmed NAS tracks after the NAS server, share or
 // root changed: a deck loading the new root's track would swap to the old file.
 // A file that does not fully decode is left as it is (a partial read would drop
 // other services' entries).
-func (s *Server) resetNASStems() {
-	s.stemsMu.Lock()
-	defer s.stemsMu.Unlock()
-	data, err := os.ReadFile(s.stemsFile())
+func (s *Server) resetNASStemsLocked() {
+	all, err := s.readStemmed()
 	if err != nil {
-		return
-	}
-	all, changed := map[string][]stemmedTrack{}, false
-	if err := json.Unmarshal(data, &all); err != nil {
 		log.Printf("webui: NAS changed: Stems lists left as they are, the file does not decode (%T)", err)
+		return // loadStemmed serves no list from it
+	}
+	if !dropNASStems(all) {
 		return
 	}
-	for scope, list := range all {
-		kept := slices.DeleteFunc(slices.Clone(list), func(e stemmedTrack) bool { return isNASProvider(e.Track.Provider) })
-		if len(kept) != len(list) {
-			all[scope], changed = kept, true
-		}
+	if err := saveStemsFile(s.stemsFile(), all); err != nil {
+		// The old NAS's entries are still in the file: they are not served, and
+		// the next save of the lists drops them.
+		s.stemsNASStale = true
+		log.Printf("webui: NAS changed: Stems lists not saved; their NAS entries are not served (%T)", err)
+		return
 	}
-	if changed {
-		_ = providers.SaveJSON(s.stemsFile(), all)
-	}
+	s.stemsNASStale = false
 }
 
 func (s *Server) stemmed(scope string) []stemmedTrack {
+	_, list := s.stemmedAt(scope)
+	return list
+}
+
+// stemmedAt is stemmed with the NAS listing stamp (1 + generation) read in the same
+// stemsMu section: the reset bumps the generation and drops NAS entries in one.
+func (s *Server) stemmedAt(scope string) (uint64, []stemmedTrack) {
 	s.stemsMu.Lock()
 	defer s.stemsMu.Unlock()
-	return s.loadStemmed()[scope]
+	return s.jobs.NASGen() + 1, s.loadStemmed()[scope]
 }
 
 // stemsImportFile is the file Engine imports for a streamed row's Stems: the
@@ -183,7 +233,8 @@ func (s *Server) sweepStemsSources(ctx context.Context, root string) {
 	}
 	recorded := map[string]bool{}
 	s.stemsMu.Lock()
-	for _, list := range s.loadStemmed() {
+	all, err := s.readStemmed() // with old NAS entries a failed reset left: keep their files
+	for _, list := range all {
 		for _, e := range list {
 			recorded[e.Path] = true
 			if real, err := filepath.EvalSymlinks(e.Path); err == nil {
@@ -192,6 +243,9 @@ func (s *Server) sweepStemsSources(ctx context.Context, root string) {
 		}
 	}
 	s.stemsMu.Unlock()
+	if err != nil { // without the full lists every source would look unreferenced
+		return
+	}
 	var loose []string
 	dirs, _ := os.ReadDir(root)
 	for _, d := range dirs {
@@ -301,7 +355,18 @@ var statStemmedPath = os.Stat
 
 // stemmedPath is the stemmed local copy of t, if it is still on disk.
 func (s *Server) stemmedPath(t providers.Track) string {
+	return s.stemmedPathAt(t, s.jobs.NASGen())
+}
+
+// stemmedPathAt is stemmedPath for a row listed at NAS generation gen. The check
+// and the choice of candidates are one step under stemsMu, which the reset takes
+// after it bumps the generation: a NAS row of an older one gets nothing (#335).
+func (s *Server) stemmedPathAt(t providers.Track, gen uint64) string {
 	s.stemsMu.Lock()
+	if isNASProvider(t.Provider) && gen != s.jobs.NASGen() {
+		s.stemsMu.Unlock()
+		return ""
+	}
 	var candidates []string
 	for _, list := range s.loadStemmed() {
 		for _, e := range list {
@@ -324,8 +389,7 @@ func (s *Server) stemmedPath(t providers.Track) string {
 // exist the row is shown as stock shows an unavailable track, saying so:
 // loaded as a track it had no Stems, and nothing said why.
 func (g *tidalGateway) stemsListTracks(w http.ResponseWriter, r *http.Request, scope string) {
-	listing := g.s.jobs.NASGen() + 1 // NAS rows: before the list is read (#335)
-	list := g.s.stemmed(scope)
+	listing, list := g.s.stemmedAt(scope) // NAS rows carry the generation the list was read at (#335)
 	if g.pause != nil {
 		g.pause("stems-list")
 	}
@@ -382,9 +446,10 @@ const providerHeader = "X-Enginex-Provider"
 func (g *tidalGateway) stemsLocal(w http.ResponseWriter, r *http.Request) {
 	if _, ref, ok := g.lookup(w, r.URL.Query().Get("id")); ok {
 		w.Header().Set(providerHeader, gatewayProvider(ref.track.Provider))
-		if isNASKey(trackKey(ref.track)) && ref.gen != g.s.jobs.NASGen() { // listed before a NAS change (#335)
-			http.NotFound(w, r)
-		} else if p := g.s.stemmedPath(ref.track); p != "" {
+		if g.pause != nil {
+			g.pause("stems-local")
+		}
+		if p := g.s.stemmedPathAt(ref.track, ref.gen); p != "" {
 			respond(w, map[string]any{"path": p})
 		} else {
 			http.NotFound(w, r)

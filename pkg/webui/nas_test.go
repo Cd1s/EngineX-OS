@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1725,5 +1726,79 @@ func TestSourcesIndexWrittenMode0600(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf(".sources.json mode=%o, want 0600", info.Mode().Perm())
+	}
+}
+
+// Round 5 (the rule): a NAS search read root A's settings before the switch to root B and
+// began its load after the reset cleared the cache, so it stored root A's results; root
+// B's search for the same words then got root A's rows. The cache key names the generation.
+func TestReviewSearchAcrossSwitch(t *testing.T) {
+	smbSrv := testsmb.Start(t)
+	for _, f := range []string{"rootA/RootOnlyA.mp3", "rootB/RootOnlyB.mp3"} {
+		p := filepath.Join(smbSrv.Root, f)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, testMP3(120), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	uiDir, stateDir := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("sources=\nscope=nas\nomni_source=0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{DownloadDir: t.TempDir()}})
+	t.Cleanup(jobs.Close)
+	s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, jobs)
+	t.Cleanup(s.Close)
+	gw := httptest.NewServer(s)
+	t.Cleanup(gw.Close)
+	save := func(root string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"protocol":"smb","url":%q,"username":%q,"password":%q,"enabled":true}`, smbSrv.URL+"/"+root, smbSrv.User, smbSrv.Password)
+		w := httptest.NewRecorder()
+		s.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/api/nas", strings.NewReader(body)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("save SMB %s: %d %s", root, w.Code, w.Body.String())
+		}
+	}
+	type result struct {
+		Tracks struct {
+			Items []map[string]any `json:"items"`
+		} `json:"tracks"`
+	}
+	search := func() (result, int) {
+		var v result
+		resp, err := http.Get(gw.URL + "/v1/search?query=RootOnlyA&limit=50&offset=0")
+		if err != nil {
+			return v, -1
+		}
+		defer resp.Body.Close()
+		_ = json.NewDecoder(resp.Body).Decode(&v)
+		return v, resp.StatusCode
+	}
+	save("rootA")
+	reached, release := make(chan struct{}), make(chan struct{})
+	var paused atomic.Bool
+	s.tidal.pause = func(point string) {
+		if point == "search" && paused.CompareAndSwap(false, true) {
+			reached <- struct{}{}
+			<-release
+		}
+	}
+	first := make(chan int, 1)
+	go func() { _, code := search(); first <- code }()
+	select {
+	case <-reached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the search never reached its pause point")
+	}
+	save("rootB")
+	close(release)
+	if code := <-first; code != http.StatusOK {
+		t.Fatalf("first search: HTTP %d", code)
+	}
+	if v, code := search(); code != http.StatusOK || len(v.Tracks.Items) != 0 {
+		t.Fatalf("a search at root B returned %d of root A's rows (HTTP %d): %+v", len(v.Tracks.Items), code, v.Tracks.Items)
 	}
 }

@@ -175,9 +175,9 @@ func (s *Server) handleNASConfig(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.handleNASConfigPost(w, r)
 	case http.MethodDelete:
-		defer s.resetNASIfMoved(s.loadNASConfig())
 		s.uiMu.Lock()
 		defer s.uiMu.Unlock()
+		defer s.resetNASIfMoved(s.loadNASConfigLocked())
 		if err := os.Remove(s.nasConfigPath()); err != nil && !os.IsNotExist(err) {
 			fail(w, http.StatusInternalServerError, errors.New("could not remove NAS configuration"))
 			return
@@ -222,9 +222,9 @@ func (s *Server) handleNASConfigPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	defer s.resetNASIfMoved(s.loadNASConfig())
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
+	defer s.resetNASIfMoved(s.loadNASConfigLocked())
 
 	existing := s.loadNASConfigLocked()
 	newCfg := providers.NASConfig{
@@ -331,17 +331,28 @@ func isNASProvider(p string) bool {
 	return p == "webdav" || p == "subsonic" || p == "plex" || p == "smb"
 }
 
-// resetNASIfMoved runs after a write of nas.json, deferred before uiMu is
-// taken so it runs with uiMu free. When the server, share or root changed, it
-// forgets every NAS track ID, download, Stems entry and cached search: an old
-// ID could otherwise name the new root's file at the same path, or a new ID
-// play the old root's file (#335).
+// resetNASIfMoved runs after a write of nas.json, deferred after uiMu is taken,
+// so it runs while the writer still holds uiMu and no one reads the new settings
+// before it is done. When the server, share or root changed, it forgets every
+// NAS track ID, download, Stems entry and cached search: an old ID could
+// otherwise name the new root's file at the same path, or a new ID play the old
+// root's file (#335).
+//
+// The generation and the stores it guards change in one step: stemsMu, then the
+// import lock, then j.mu are held across the bump and the jobs and Stems resets.
+// Every generation check is made under one of those locks, or under g.mu
+// against rows the gateway reset then drops, together with the action it guards.
 func (s *Server) resetNASIfMoved(before providers.NASConfig) {
-	if nasTarget(s.loadNASConfig()) != nasTarget(before) {
-		s.jobs.resetNAS()
-		s.resetNASStems()
-		s.tidal.resetNAS()
+	if nasTarget(s.loadNASConfigLocked()) == nasTarget(before) {
+		return
 	}
+	if s.jobs != nil && s.jobs.pause != nil {
+		s.jobs.pause("reset")
+	}
+	s.stemsMu.Lock()
+	s.jobs.resetNAS(s.resetNASStemsLocked)
+	s.stemsMu.Unlock()
+	s.tidal.resetNAS()
 }
 
 // gatewayProvider: an SMB NAS is its own source (#335); WebDAV, Subsonic and

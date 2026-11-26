@@ -118,6 +118,7 @@ type Server struct {
 	logsMu        sync.Mutex
 	fxMu          sync.Mutex // transient FX commands never hold the settings lock
 	stemsMu       sync.Mutex // streaming-stems.json
+	stemsNASStale bool       // under stemsMu: a NAS reset could not drop the old NAS's entries (#335)
 	stemsImportMu sync.Mutex // one streamed row at a time is named, recorded and swept
 	rbxPresenceMu sync.Mutex
 	rbxPresence   map[string]*rbxPresence

@@ -89,6 +89,9 @@ type Jobs struct {
 	// nasGen counts NAS server, share or root changes: a NAS track listed before
 	// one is neither played nor filed (#335).
 	nasGen atomic.Uint64
+	// importMu is held across a NAS job's last generation check and its library
+	// import; the reset takes it too, so no import of the old NAS ends after it.
+	importMu sync.Mutex
 	// pause is nil except in tests that order two loads of one track.
 	pause func(point string)
 
@@ -132,9 +135,19 @@ func trackKey(t providers.Track) string { return t.Provider + ":" + t.ID }
 // File returns a finished download of t that is still on disk, including one
 // saved before a restart.
 func (j *Jobs) File(t providers.Track) string {
+	return j.FileAt(t, j.NASGen())
+}
+
+// FileAt is File for a track listed at NAS generation gen: a NAS track gets
+// nothing once the NAS changed since. The check and the lookup are one step
+// under j.mu, which the reset takes (#335).
+func (j *Jobs) FileAt(t providers.Track, gen uint64) string {
 	key := trackKey(t)
 	j.mu.Lock()
-	gen := j.nasGen.Load()
+	if isNASKey(key) && gen != j.nasGen.Load() {
+		j.mu.Unlock()
+		return ""
+	}
 	path := ""
 	if f, ok := j.files[key]; ok {
 		path = f.dl.Path
@@ -296,13 +309,27 @@ func isNASKey(key string) bool {
 
 // resetNAS forgets every NAS download, queue mark and index entry after the NAS
 // server, share or root changed: the same track ID may name another file now.
-func (j *Jobs) resetNAS() {
+//
+// also runs under the same locks right after the bump (the Stems reset), so the
+// generation and the state it guards change in one step.
+func (j *Jobs) resetNAS(also func()) {
 	if j == nil {
+		if also != nil {
+			also()
+		}
 		return
 	}
+	j.importMu.Lock() // waits for an import running now; later ones see the new generation
+	defer j.importMu.Unlock()
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.nasGen.Add(1)
+	if j.pause != nil {
+		j.pause("reset-bumped")
+	}
+	if also != nil {
+		also()
+	}
 	for k := range j.files {
 		if isNASKey(k) {
 			delete(j.files, k)
@@ -1058,9 +1085,6 @@ func (j *Jobs) queueImport(session string, t providers.Track, guest bool, f fetc
 	// No library (no front SD Engine Library): nothing to import into, so do not
 	// queue a job that can only end in "pipeline is not configured".
 	// A DJ set is played, not analysed: decoding hours of audio would exhaust memory.
-	if j.p.Library == nil || tooLongToAnalyse(t, f.dl.Path) {
-		return true
-	}
 	playlist := providers.OwnerPlaylist
 	if guest {
 		playlist = providers.GuestPlaylist
@@ -1069,7 +1093,10 @@ func (j *Jobs) queueImport(session string, t providers.Track, guest bool, f fetc
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if isNASKey(trackKey(t)) && gen != j.nasGen.Load() {
-		return false
+		return false // also when nothing would be imported: the load answers 404
+	}
+	if j.p.Library == nil || tooLongToAnalyse(t, f.dl.Path) {
+		return true
 	}
 	if j.queued[key] {
 		return true
@@ -1262,8 +1289,13 @@ func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error 
 	if !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
 		return errors.New("download changed during analysis; retry after the downloader finishes")
 	}
+	j.importMu.Lock()
+	defer j.importMu.Unlock()
 	if j.nasMoved(v) { // the NAS changed during the analysis
 		return errNASChanged
+	}
+	if j.pause != nil {
+		j.pause("import")
 	}
 	id, err := j.p.Library.Import(ctx, analyzer.Import{Path: dl.Path, Title: v.Track.Title, Artist: v.Track.Artist, Album: v.Track.Album, Comment: dl.Quality.Comment(), Format: audio.Format, Playlist: v.Playlist, Result: res})
 	if err != nil {
