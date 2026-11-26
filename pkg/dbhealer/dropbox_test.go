@@ -3,14 +3,18 @@ package dbhealer
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
 	"golang.org/x/text/unicode/norm"
+	"modernc.org/sqlite"
 )
 
 func TestHealMountDataOnlyLocalizesOfflineDropboxTracks(t *testing.T) {
@@ -647,7 +651,10 @@ func TestHealMountMixedNFDAndDropboxPreservesIdentityAndFinishes(t *testing.T) {
 			if _, err := db.Exec(`UPDATE Track SET path=?,filename=? WHERE id=2`, "../Music/"+nfd, nfd); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db.Exec(`UPDATE Track SET path='../Music/Track001.wav', filename='Track001.wav', streamingSource='Dropbox', uri='streaming://Dropbox/Track/1', streamingFlags=5 WHERE id=1`); err != nil {
+			if _, err := db.Exec(`UPDATE Track SET path='../Music/other1.wav', filename='other1.wav' WHERE id=1`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE Track SET path='../Music/Track001.wav', filename='Track001.wav', fileBytes=(SELECT fileBytes FROM Track WHERE id=1), streamingSource='Dropbox', uri='streaming://Dropbox/Track/3', streamingFlags=5 WHERE id=3`); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := db.Exec(`UPDATE Information SET id=99`); err != nil {
@@ -678,28 +685,28 @@ func TestHealMountMixedNFDAndDropboxPreservesIdentityAndFinishes(t *testing.T) {
 			}
 			defer check.Close()
 			var infoID, nextEntity int
-			var src1 string
+			var src3 string
 			if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
 				t.Fatal(err)
 			}
 			if err := check.QueryRow(`SELECT nextEntityId FROM PlaylistEntity WHERE id=99`).Scan(&nextEntity); err != nil {
 				t.Fatal(err)
 			}
-			if err := check.QueryRow(`SELECT coalesce(streamingSource,'') FROM Track WHERE id=1`).Scan(&src1); err != nil {
+			if err := check.QueryRow(`SELECT coalesce(streamingSource,'') FROM Track WHERE id=3`).Scan(&src3); err != nil {
 				t.Fatal(err)
 			}
 			if !got.Healthy || infoID != 1 {
 				t.Fatalf("mode=%s healthy=%v Information.id=%d", mode, got.Healthy, infoID)
 			}
 			if mode == "full" {
-				if nextEntity != 0 || src1 != "" {
-					t.Fatalf("full heal did not finish: nextEntity=%d src1=%q", nextEntity, src1)
+				if nextEntity != 0 || src3 != "" {
+					t.Fatalf("full heal did not finish: nextEntity=%d src3=%q", nextEntity, src3)
 				}
 			} else {
 				if nextEntity != 999 {
 					t.Fatalf("data-only soft stop ran heavy base heal: nextEntity=%d", nextEntity)
 				}
-				// Next pass must still visit Dropbox id=1 (cursor must not skip it) and finish base heal.
+				// Next pass must resume after NFD id=2, localize Dropbox id=3, and finish base heal.
 				normalizeTrackPathBatch = nil
 				check.Close()
 				got2, err := HealMountDataOnly(root, 0)
@@ -711,14 +718,14 @@ func TestHealMountMixedNFDAndDropboxPreservesIdentityAndFinishes(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer check2.Close()
-				if err := check2.QueryRow(`SELECT coalesce(streamingSource,'') FROM Track WHERE id=1`).Scan(&src1); err != nil {
+				if err := check2.QueryRow(`SELECT coalesce(streamingSource,'') FROM Track WHERE id=3`).Scan(&src3); err != nil {
 					t.Fatal(err)
 				}
 				if err := check2.QueryRow(`SELECT nextEntityId FROM PlaylistEntity WHERE id=99`).Scan(&nextEntity); err != nil {
 					t.Fatal(err)
 				}
-				if src1 != "" || nextEntity != 0 {
-					t.Fatalf("follow-up pass incomplete: src1=%q nextEntity=%d", src1, nextEntity)
+				if src3 != "" || nextEntity != 0 {
+					t.Fatalf("follow-up pass incomplete: src3=%q nextEntity=%d", src3, nextEntity)
 				}
 			}
 		})
@@ -813,5 +820,170 @@ func TestHealMountDataOnlyPublicAPIResumesLargeLibraryAcrossDeadlines(t *testing
 	}
 	if _, err := os.Stat(dropboxCursorPath(root)); !os.IsNotExist(err) {
 		t.Fatalf("cursor not removed after finishing large library: %v", err)
+	}
+}
+
+func TestHealMountDataOnlyPropagatesWriteRejectionOnCancel(t *testing.T) {
+	fnName := fmt.Sprintf("dbhealer_write_reject_%d", time.Now().UnixNano())
+	var signal func()
+	calls := 0
+	if err := sqlite.RegisterScalarFunction(fnName, 0, func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
+		calls++
+		if signal != nil {
+			signal()
+		}
+		return int64(1), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, cancelDuringWrite := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancel_%t", cancelDuringWrite), func(t *testing.T) {
+			root := t.TempDir()
+			testlibrary.ExportDrive(t, root)
+			dbPath := filepath.Join(root, "Engine Library", "Database2", "m.db")
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if _, err := db.Exec(`UPDATE Track SET path='../Music/Track001.wav', filename='Track001.wav', streamingSource='Dropbox', uri='streaming://Dropbox/Track/1', streamingFlags=5 WHERE id=1`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`CREATE TRIGGER reject_dropbox_update BEFORE UPDATE OF streamingSource ON Track WHEN OLD.id=1 BEGIN SELECT ` + fnName + `(); SELECT RAISE(ABORT,'simulated write rejected'); END`); err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			signal = nil
+			if cancelDuringWrite {
+				signal = cancel
+			}
+			beforeCalls := calls
+			rep, err := HealMountDataOnlyContext(ctx, root, 0)
+			var src string
+			if qerr := db.QueryRow(`SELECT coalesce(streamingSource,'') FROM Track WHERE id=1`).Scan(&src); qerr != nil {
+				t.Fatal(qerr)
+			}
+			if calls != beforeCalls+1 {
+				t.Fatalf("trigger calls=%d, want %d", calls-beforeCalls, 1)
+			}
+			if src != "Dropbox" {
+				t.Fatalf("rejected write altered streamingSource=%q", src)
+			}
+			if err == nil || !strings.Contains(err.Error(), "simulated write rejected") {
+				t.Fatalf("expected write rejection error, got rep=%+v err=%v", rep, err)
+			}
+			if rep.Healthy {
+				t.Fatalf("rejected write reported Healthy=true: %+v", rep)
+			}
+		})
+	}
+}
+
+func TestHealMountDataOnlyRejectsMissingOrUnsupportedSchemaUnderShortBudget(t *testing.T) {
+	for _, mode := range []string{"future", "missing"} {
+		t.Run(mode, func(t *testing.T) {
+			_, root, db := testlibrary.Create(t)
+			if _, err := db.Exec(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<4200)
+				INSERT INTO Track(id,path) SELECT i,printf('../Music/%d.wav',i) FROM n`); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "future" {
+				if _, err := db.Exec(`UPDATE Information SET schemaVersionMajor=4`); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err := db.Exec(`DELETE FROM Information`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			db.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 190*time.Millisecond)
+			shortRep, shortErr := HealMountDataOnlyContext(ctx, root, 0)
+			cancel()
+			if shortErr == nil || shortRep.Healthy {
+				t.Fatalf("short budget accepted %s schema: rep=%+v err=%v", mode, shortRep, shortErr)
+			}
+
+			fullRep, fullErr := HealMountDataOnly(root, 0)
+			if fullErr == nil || fullRep.Healthy {
+				t.Fatalf("unlimited pass accepted %s schema: rep=%+v err=%v", mode, fullRep, fullErr)
+			}
+		})
+	}
+}
+
+func TestHealMountMixedPageInterleavesNFDAndDropboxWithoutStarvation(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		dropboxAfter bool
+		exactNFDFile bool
+	}{
+		{name: "dropbox_first_missing_nfd", dropboxAfter: false, exactNFDFile: false},
+		{name: "dropbox_first_exact_nfd", dropboxAfter: false, exactNFDFile: true},
+		{name: "nfd_first_exact_nfd", dropboxAfter: true, exactNFDFile: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			testlibrary.ExportDrive(t, root)
+			dbPath := filepath.Join(root, "Engine Library", "Database2", "m.db")
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+
+			targetID := 1
+			if !tc.dropboxAfter {
+				if _, err := db.Exec(`UPDATE Track SET path='../Music/Track001.wav', filename='Track001.wav', streamingSource='Dropbox', uri='streaming://Dropbox/Track/1', streamingFlags=5 WHERE id=1`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for id := 9; id <= 73; id++ {
+				name := norm.NFD.String(fmt.Sprintf("Café-%d.wav", id))
+				if tc.exactNFDFile {
+					if err := os.Link(filepath.Join(root, "Music", "Track002.wav"), filepath.Join(root, "Music", name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := db.Exec(`INSERT INTO Track(id,path,filename) VALUES(?,?,?)`, id, "../Music/"+name, name); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.dropboxAfter {
+				targetID = 74
+				if _, err := db.Exec(`UPDATE Track SET path='../Music/other1.wav', filename='other1.wav' WHERE id=1`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes,streamingSource,uri,streamingFlags)
+					SELECT 74,'../Music/Track001.wav','Track001.wav',fileBytes,'Dropbox','streaming://Dropbox/Track/74',5 FROM Track WHERE id=1`); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			source := func() string {
+				t.Helper()
+				var s string
+				if err := db.QueryRow(`SELECT coalesce(streamingSource,'') FROM Track WHERE id=?`, targetID).Scan(&s); err != nil {
+					t.Fatal(err)
+				}
+				return s
+			}
+			t.Cleanup(func() { normalizeTrackPathBatch = nil })
+			for pass := 1; pass <= 4 && source() != ""; pass++ {
+				ctx, cancel := context.WithCancel(context.Background())
+				normalizeTrackPathBatch = cancel
+				rep, err := HealMountDataOnlyContext(ctx, root, 0)
+				cancel()
+				if err != nil || !rep.Healthy {
+					t.Fatalf("pass %d failed: %+v %v", pass, rep, err)
+				}
+			}
+			if got := source(); got != "" {
+				t.Fatalf("mixed page starved Dropbox track id=%d across 4 bounded passes (streamingSource=%q)", targetID, got)
+			}
+		})
 	}
 }

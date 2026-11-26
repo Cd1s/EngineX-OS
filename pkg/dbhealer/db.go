@@ -255,34 +255,54 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		return r, err
 	}
 	fixed := r.ReserveFixed
-	dbUUID, dropboxSchemaOK, schemaErr := librarySchema302UUID(ctx, db)
-	if schemaErr != nil && isContextStop(ctx, schemaErr) {
+	dbUUID, schemaErr := validateLibrarySchema302(ctx, db)
+	if schemaErr != nil {
+		if isContextStop(ctx, schemaErr) {
+			if idErr := repairLibraryIdentity(db); idErr != nil {
+				_ = db.Close()
+				r.Healthy = false
+				r.Mount = mount
+				return r, idErr
+			}
+			r.Healthy = true
+			closeErr := db.Close()
+			r.Mount = mount
+			if closeErr != nil {
+				r.Healthy = false
+				return r, closeErr
+			}
+			return r, nil
+		}
+		_ = db.Close()
+		r.Healthy = false
+		r.Mount = mount
+		return r, schemaErr
+	}
+	if dbUUID == "" {
 		if idErr := repairLibraryIdentity(db); idErr != nil {
 			_ = db.Close()
+			r.Healthy = false
 			r.Mount = mount
 			return r, idErr
 		}
-		r.Healthy = true
-		closeErr := db.Close()
-		r.Mount = mount
-		if closeErr != nil {
-			return r, closeErr
-		}
-		return r, nil
-	}
-	if dropboxSchemaOK && dbUUID == "" {
-		if idErr := repairLibraryIdentity(db); idErr == nil {
-			dbUUID, _, _ = librarySchema302UUID(context.Background(), db)
+		if refreshedUUID, err := validateLibrarySchema302(context.Background(), db); err == nil {
+			dbUUID = refreshedUUID
 		}
 	}
 	passRes, err := runMountTrackPass(ctx, db, mount, &r, mountTrackPassOptions{
 		runNFD:     true,
-		runDropbox: dropboxSchemaOK,
+		runDropbox: true,
 		dataOnly:   dataOnly,
 		dbUUID:     dbUUID,
 		pageSize:   mountDiscoveryPageSize,
 	})
 	if err != nil && !isContextStop(ctx, err) {
+		if dataOnly && ctx.Err() != nil {
+			_ = db.Close()
+			r.Healthy = false
+			r.Mount = mount
+			return r, err
+		}
 		// A non-context database error during the track pass means the library
 		// may be damaged. Run the existing base heal as the recovery path.
 		pathsFixed := r.PathsNormalized
@@ -293,6 +313,7 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		r.DropboxLocalized = dropboxFixed
 		_ = db.Close()
 		r.Mount = mount
+		r.Healthy = false
 		if healErr != nil {
 			return r, healErr
 		}
@@ -307,14 +328,13 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		}
 	}
 	if deferBaseHeal {
-		// Preserve GL-010 library identity before returning early from any
-		// budgeted data-only mount pass so Engine can still attach the library.
-		if dropboxSchemaOK {
-			if idErr := repairLibraryIdentity(db); idErr != nil {
-				_ = db.Close()
-				r.Mount = mount
-				return r, idErr
-			}
+		// Preserve GL-010 library identity and schema validation before returning
+		// early from any budgeted data-only mount pass so Engine can still attach.
+		if idErr := repairLibraryIdentity(db); idErr != nil {
+			_ = db.Close()
+			r.Healthy = false
+			r.Mount = mount
+			return r, idErr
 		}
 		r.Healthy = true
 		closeErr := db.Close()
@@ -324,6 +344,7 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 			log.Printf("dbhealer: mount %s localized %d dropbox tracks, %d remaining", mount, r.DropboxLocalized, passRes.dropboxRemaining)
 		}
 		if closeErr != nil {
+			r.Healthy = false
 			return r, closeErr
 		}
 		return r, nil
@@ -576,11 +597,39 @@ func repairLibraryIdentity(db *sql.DB) error {
 	return transaction(db, repairLibraryIdentityTx)
 }
 
+const sqliteInterruptCode = 9 // SQLITE_INTERRUPT
+
+func validateLibrarySchema302(ctx context.Context, db *sql.DB) (string, error) {
+	var dbUUID string
+	var major, minor, patch int
+	err := db.QueryRowContext(
+		ctx,
+		`SELECT COALESCE(uuid,''), schemaVersionMajor, schemaVersionMinor, schemaVersionPatch FROM Information LIMIT 1`,
+	).Scan(&dbUUID, &major, &minor, &patch)
+	if err != nil {
+		if isContextStop(ctx, err) {
+			return "", err
+		}
+		return "", fmt.Errorf("missing library version: %w", err)
+	}
+	if major != 3 || minor != 0 || patch != 2 {
+		return "", fmt.Errorf("unsupported library schema %d.%d.%d (supported 3.0.2)", major, minor, patch)
+	}
+	return strings.TrimSpace(dbUUID), nil
+}
+
 func isContextStop(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	return err != nil && ctx.Err() != nil
+	if ctx == nil || ctx.Err() == nil {
+		return false
+	}
+	var se interface{ Code() int }
+	return errors.As(err, &se) && (se.Code()&0xff) == sqliteInterruptCode
 }
 
 type mountTrackScan struct {
@@ -898,111 +947,165 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 			return res, nil
 		}
 
-		// 1. #322 NFD->NFC normalization for ordinary non-streaming rows on this page.
-		var rewritten map[int64]string
-		if opts.runNFD && len(page.nfd) > 0 {
-			bridgeOK, berr := ensureBridge()
-			if berr != nil {
-				if isContextStop(ctx, berr) {
-					saveCursorIfAdvanced(completedID)
-					res.stoppedEarly = true
-					return res, nil
-				}
-				return res, berr
+		// Interleave #322 NFD normalization and S22 Dropbox localization in
+		// ascending Track.id order so neither workstream starves the other
+		// across budgeted passes on a mixed page. Invariant: every Track with
+		// id <= completedID has finished all enabled workstreams.
+		var nfdSlice []trackPathCandidate
+		if opts.runNFD {
+			nfdSlice = page.nfd
+		}
+		var dropboxSlice []dropboxTrackCandidate
+		if opts.runDropbox {
+			dropboxSlice = page.dropbox
+		}
+		ni, di := 0, 0
+		for ni < len(nfdSlice) || di < len(dropboxSlice) {
+			if ctx.Err() != nil {
+				saveCursorIfAdvanced(completedID)
+				res.nfdRemaining = len(nfdSlice) - ni
+				res.dropboxRemaining = len(dropboxSlice) - di
+				res.stoppedEarly = true
+				return res, nil
 			}
-			if bridgeOK {
-				nfdRem, nfdLastID, rw, nerr := normalizeTrackPathsBatch(ctx, db, mount, page.nfd, bridgeManaged, claimedNFC, dirs, r)
-				if nerr != nil {
-					if isContextStop(ctx, nerr) {
-						safeID := completedID
-						if nfdLastID > safeID && (len(page.dropbox) == 0 || nfdLastID < page.dropbox[0].id) {
-							safeID = nfdLastID
-						}
-						saveCursorIfAdvanced(safeID)
-						res.nfdRemaining = nfdRem
+			if di < len(dropboxSlice) && (ni >= len(nfdSlice) || dropboxSlice[di].id < nfdSlice[ni].id) {
+				end := di
+				for end < len(dropboxSlice) && end-di < 64 && (ni >= len(nfdSlice) || dropboxSlice[end].id < nfdSlice[ni].id) {
+					end++
+				}
+				bridgeOK, berr := ensureBridge()
+				if berr != nil {
+					if isContextStop(ctx, berr) {
+						saveCursorIfAdvanced(completedID)
+						res.nfdRemaining = len(nfdSlice) - ni
+						res.dropboxRemaining = len(dropboxSlice) - di
 						res.stoppedEarly = true
 						return res, nil
 					}
-					return res, nerr
+					return res, berr
 				}
-				rewritten = rw
-				nfdSlow := opts.dataOnly && r.PathsNormalized != nfdBefore && time.Since(passStart) >= time.Second
-				if nfdRem > 0 || ctx.Err() != nil || nfdSlow {
-					safeID := completedID
-					if nfdLastID > safeID && (len(page.dropbox) == 0 || nfdLastID < page.dropbox[0].id) {
-						safeID = nfdLastID
-					}
-					if nfdRem == 0 && len(page.dropbox) == 0 && page.eof {
-						if opts.runDropbox && hadCursor {
-							removeDropboxCursor(mount)
-						}
-					} else {
-						saveCursorIfAdvanced(safeID)
-					}
-					res.nfdRemaining = nfdRem
-					res.stoppedEarly = true
-					return res, nil
+				if !bridgeOK {
+					ni = len(nfdSlice)
+					di = len(dropboxSlice)
+					break
 				}
-			}
-		}
-
-		// Apply any paths normalized above to Dropbox candidates on this page
-		// (e.g. packTracks rows with empty streamingSource + Dropbox URI).
-		if len(rewritten) > 0 && len(page.dropbox) > 0 {
-			for i := range page.dropbox {
-				if nextPath, ok := rewritten[page.dropbox[i].id]; ok {
-					page.dropbox[i].path = nextPath
-				}
-			}
-		}
-
-		// 2. S22 Dropbox localization for complete local files on this page.
-		if opts.runDropbox && len(page.dropbox) > 0 {
-			bridgeOK, berr := ensureBridge()
-			if berr != nil {
-				if isContextStop(ctx, berr) {
-					saveCursorIfAdvanced(completedID)
-					res.stoppedEarly = true
-					return res, nil
-				}
-				return res, berr
-			}
-			if bridgeOK {
 				dbRem, examinedID, interrupted, derr := processDropboxCandidates(
-					ctx, db, mount, r, page.dropbox, bridgeManaged, safeDirs, claimedNFC,
+					ctx, db, mount, r, dropboxSlice[di:end], bridgeManaged, safeDirs, claimedNFC,
 				)
 				if derr != nil {
 					if isContextStop(ctx, derr) {
-						cursorID := completedID
-						if examinedID > cursorID {
-							cursorID = examinedID
+						if examinedID > completedID {
+							completedID = examinedID
 						}
-						saveCursorIfAdvanced(cursorID)
-						res.dropboxRemaining = dbRem
+						saveCursorIfAdvanced(completedID)
+						res.nfdRemaining = len(nfdSlice) - ni
+						res.dropboxRemaining = (len(dropboxSlice) - end) + dbRem
 						res.stoppedEarly = true
 						return res, nil
 					}
 					return res, derr
 				}
+				if examinedID > completedID {
+					completedID = examinedID
+				}
+				if !interrupted && dbRem == 0 {
+					if lastChunkID := dropboxSlice[end-1].id; lastChunkID > completedID {
+						completedID = lastChunkID
+					}
+				}
+				di = end - dbRem
 				dropboxSlow := opts.dataOnly && r.DropboxLocalized != dropboxBefore && time.Since(passStart) >= time.Second
 				if interrupted || dbRem > 0 || ctx.Err() != nil || dropboxSlow {
-					cursorID := completedID
-					if interrupted || dbRem > 0 {
-						if examinedID > cursorID {
-							cursorID = examinedID
+					nfdRemTotal := len(nfdSlice) - ni
+					dbRemTotal := len(dropboxSlice) - di
+					if nfdRemTotal == 0 && dbRemTotal == 0 && page.eof {
+						if opts.runDropbox && hadCursor {
+							removeDropboxCursor(mount)
 						}
-					} else if page.lastID > cursorID {
-						cursorID = page.lastID
+					} else {
+						saveCursorIfAdvanced(completedID)
 					}
-					if !page.eof || dbRem > 0 || interrupted {
-						saveCursorIfAdvanced(cursorID)
-					} else if hadCursor {
-						removeDropboxCursor(mount)
-					}
-					res.dropboxRemaining = dbRem
+					res.nfdRemaining = nfdRemTotal
+					res.dropboxRemaining = dbRemTotal
 					res.stoppedEarly = true
 					return res, nil
 				}
+				continue
+			}
+
+			// NFD leads or ties with the next Dropbox row (same Track.id when
+			// streamingSource is empty and uri is a Dropbox streaming URI).
+			end := ni
+			for end < len(nfdSlice) && end-ni < 64 && (di >= len(dropboxSlice) || nfdSlice[end].id <= dropboxSlice[di].id) {
+				end++
+			}
+			bridgeOK, berr := ensureBridge()
+			if berr != nil {
+				if isContextStop(ctx, berr) {
+					saveCursorIfAdvanced(completedID)
+					res.nfdRemaining = len(nfdSlice) - ni
+					res.dropboxRemaining = len(dropboxSlice) - di
+					res.stoppedEarly = true
+					return res, nil
+				}
+				return res, berr
+			}
+			if !bridgeOK {
+				ni = len(nfdSlice)
+				di = len(dropboxSlice)
+				break
+			}
+			nfdRem, nfdLastID, rewritten, nfdInterrupted, nerr := normalizeTrackPathsBatch(
+				ctx, db, mount, nfdSlice[ni:end], bridgeManaged, claimedNFC, dirs, r,
+			)
+			if len(rewritten) > 0 && di < len(dropboxSlice) {
+				for j := di; j < len(dropboxSlice); j++ {
+					if nextPath, ok := rewritten[dropboxSlice[j].id]; ok {
+						dropboxSlice[j].path = nextPath
+					}
+				}
+			}
+			advanceNFDCompleted := func(id int64) {
+				if di < len(dropboxSlice) && id >= dropboxSlice[di].id {
+					id = dropboxSlice[di].id - 1
+				}
+				if id > completedID {
+					completedID = id
+				}
+			}
+			if nerr != nil {
+				if isContextStop(ctx, nerr) {
+					advanceNFDCompleted(nfdLastID)
+					saveCursorIfAdvanced(completedID)
+					res.nfdRemaining = (len(nfdSlice) - end) + nfdRem
+					res.dropboxRemaining = len(dropboxSlice) - di
+					res.stoppedEarly = true
+					return res, nil
+				}
+				return res, nerr
+			}
+			advanceNFDCompleted(nfdLastID)
+			if !nfdInterrupted && nfdRem == 0 {
+				advanceNFDCompleted(nfdSlice[end-1].id)
+				ni = end
+			} else {
+				ni = end - nfdRem
+			}
+			nfdSlow := opts.dataOnly && r.PathsNormalized != nfdBefore && time.Since(passStart) >= time.Second
+			if nfdInterrupted || nfdRem > 0 || ctx.Err() != nil || nfdSlow {
+				nfdRemTotal := len(nfdSlice) - ni
+				dbRemTotal := len(dropboxSlice) - di
+				if nfdRemTotal == 0 && dbRemTotal == 0 && page.eof {
+					if opts.runDropbox && hadCursor {
+						removeDropboxCursor(mount)
+					}
+				} else {
+					saveCursorIfAdvanced(completedID)
+				}
+				res.nfdRemaining = nfdRemTotal
+				res.dropboxRemaining = dbRemTotal
+				res.stoppedEarly = true
+				return res, nil
 			}
 		}
 
@@ -1035,7 +1138,7 @@ func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Repor
 			bridgeManaged[candidate.id] = true
 		}
 	}
-	rem, _, _, err := normalizeTrackPathsBatch(
+	rem, _, _, _, err := normalizeTrackPathsBatch(
 		ctx, db, mount, candidates, bridgeManaged,
 		map[string]int64{}, make(map[string]map[string]bool), r,
 	)
@@ -1051,31 +1154,44 @@ func normalizeTrackPathsBatch(
 	claimed map[string]int64,
 	dirs map[string]map[string]bool,
 	r *Report,
-) (remaining int, lastCompletedID int64, rewritten map[int64]string, err error) {
+) (remaining int, lastCompletedID int64, rewritten map[int64]string, interrupted bool, err error) {
 	if len(candidates) == 0 {
-		return 0, 0, nil, nil
+		return 0, 0, nil, false, nil
 	}
+	allCandidates := candidates
 	eligible := make([]trackPathCandidate, 0, len(candidates))
-	for _, candidate := range candidates {
+	for i, candidate := range candidates {
 		if ctx.Err() != nil {
-			return len(candidates), lastCompletedID, nil, nil
+			return len(candidates) - i, lastCompletedID, nil, true, nil
 		}
 		if bridgeManaged[candidate.id] {
+			if len(eligible) == 0 && candidate.id > lastCompletedID {
+				lastCompletedID = candidate.id
+			}
 			continue
 		}
 		var other int64
 		err := db.QueryRowContext(ctx, `SELECT id FROM Track WHERE path=?`, candidate.nfcPath).Scan(&other)
 		if err == nil && other != candidate.id {
+			if len(eligible) == 0 && candidate.id > lastCompletedID {
+				lastCompletedID = candidate.id
+			}
 			continue
 		}
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return 0, lastCompletedID, nil, err
+			return len(candidates) - i, lastCompletedID, nil, false, err
 		}
 		if other, collision := claimed[candidate.nfcPath]; collision && other != candidate.id {
+			if len(eligible) == 0 && candidate.id > lastCompletedID {
+				lastCompletedID = candidate.id
+			}
 			continue
 		}
 		claimed[candidate.nfcPath] = candidate.id
 		eligible = append(eligible, candidate)
+	}
+	if len(eligible) == 0 {
+		return 0, allCandidates[len(allCandidates)-1].id, nil, false, nil
 	}
 	candidates = eligible
 	listFiles := func(dir string) map[string]bool {
@@ -1097,12 +1213,12 @@ func normalizeTrackPathsBatch(
 	rewritten = map[int64]string{}
 	for start := 0; start < len(candidates); start += 64 {
 		if ctx.Err() != nil {
-			return len(candidates) - start, lastCompletedID, rewritten, nil
+			return len(candidates) - start, lastCompletedID, rewritten, true, nil
 		}
 		end := min(start+64, len(candidates))
 		tx, err := db.Begin()
 		if err != nil {
-			return remaining, lastCompletedID, rewritten, err
+			return len(candidates) - start, lastCompletedID, rewritten, false, err
 		}
 		next := start
 		batchFixed := 0
@@ -1153,16 +1269,21 @@ func normalizeTrackPathsBatch(
 					continue
 				}
 				_ = tx.Rollback()
-				return remaining, lastCompletedID, rewritten, err
+				return len(candidates) - start, lastCompletedID, rewritten, false, err
 			}
 			batchFixed++
 			batchRewritten = append(batchRewritten, candidate)
 		}
 		if err := tx.Commit(); err != nil {
-			return remaining, lastCompletedID, rewritten, err
+			return len(candidates) - start, lastCompletedID, rewritten, false, err
 		}
 		if batchLastID > lastCompletedID {
 			lastCompletedID = batchLastID
+		}
+		if next == end && end == len(candidates) {
+			if tailID := allCandidates[len(allCandidates)-1].id; tailID > lastCompletedID {
+				lastCompletedID = tailID
+			}
 		}
 		for _, candidate := range batchRewritten {
 			rewritten[candidate.id] = candidate.nfcPath
@@ -1172,11 +1293,14 @@ func normalizeTrackPathsBatch(
 			normalizeTrackPathBatch()
 		}
 		if next < end {
-			return len(candidates) - next, lastCompletedID, rewritten, nil
+			return len(candidates) - next, lastCompletedID, rewritten, true, nil
 		}
 		remaining = len(candidates) - end
+		if ctx.Err() != nil {
+			return remaining, lastCompletedID, rewritten, true, nil
+		}
 	}
-	return remaining, lastCompletedID, rewritten, nil
+	return 0, lastCompletedID, rewritten, false, nil
 }
 
 func collectTrackPathCandidates(db *sql.DB) ([]trackPathCandidate, error) {
