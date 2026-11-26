@@ -58,6 +58,13 @@ func TestShadowLegacyCarryPreservesMonotonicClockAcrossWallStep(t *testing.T) {
 	}
 	s.shadow.mu.Unlock()
 
+	// Same-millisecond wake right after receipt must never walk backward below p.PositionMS.
+	sameMSNow := pAt.Add(20 * time.Microsecond)
+	outSameMS, _, _, _ := s.shadowLegacy("13", sameMSNow, false)
+	if len(outSameMS) != 1 || outSameMS[0].PositionMS < 1000 {
+		t.Fatalf("same-ms wake walked backward: %+v", outSameMS)
+	}
+
 	// Normal monotonic advance: carried position matches d.At to the exact ms.
 	steadyNow := pAt.Add(50*time.Millisecond + 600*time.Microsecond)
 	outSteady, _, _, _ := s.shadowLegacy("13", steadyNow, false)

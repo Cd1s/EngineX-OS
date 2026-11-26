@@ -2963,8 +2963,9 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 		atMS := now.UnixMilli()
 		if d.Playing && !d.Scratch {
 			// Carry to the exact millisecond stamped in d.At while keeping Go's
-			// monotonic clock reading (immune to local wall-clock steps).
-			carry := now.Sub(p.at) - time.Duration(now.Nanosecond())%time.Millisecond
+			// monotonic clock reading (immune to local wall-clock steps) and
+			// never walking backward when composed in the same ms as receipt.
+			carry := max(time.Duration(0), now.Sub(p.at)-time.Duration(now.Nanosecond())%time.Millisecond)
 			d.PositionMS, d.Rate = p.carried(carry)
 		}
 		d.Progress, d.Error = 0, "" // ours to say, not the peer's
