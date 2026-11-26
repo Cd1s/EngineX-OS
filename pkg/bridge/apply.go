@@ -269,7 +269,7 @@ func (w *window) open() error {
 				t.Perf = rbstate.PerfNone
 			}
 		}
-		snap.Rules, snap.Stamp = rbstate.Rules, ""
+		snap.Rules, snap.Stamp, snap.SettleCursor = rbstate.Rules, "", 0
 		w.snap, w.dirty = snap, true
 	case oldErr == nil && !w.next:
 		if w.snap, err = adopt(w.ctx, db, w.dir, lib.UUID()); err != nil {
@@ -515,9 +515,13 @@ func (w *window) count() {
 		w.dirty = true
 	}
 	s.Header.Tracks, s.Header.Lists = len(s.Tracks), len(s.Lists)
+	prevStamp := s.Stamp
 	s.Layout, s.Sources, s.Stamp = w.view.Layout, w.view.Sources, w.view.Stamp
 	if w.partial {
 		s.Stamp = "" // a library was unreadable: the next insert reads again, and write-back waits
+	}
+	if s.Stamp != prevStamp {
+		s.SettleCursor = 0
 	}
 	p := rbstate.Pending{Verify: s.Pending.Verify && !w.o.OnDemand, Rows: w.missingCovers}
 	for i := range w.view.Tracks {

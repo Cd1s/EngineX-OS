@@ -128,7 +128,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			return nil, nil, err
 		}
 	}
-	if err := markWriteBack(p.mount, dateDir, targets); err != nil {
+	if err := markWriteBack(ctx, p.mount, dateDir, targets); err != nil {
 		return nil, nil, err
 	}
 
@@ -358,7 +358,10 @@ func writeSynced(f *os.File, r io.Reader) (int64, error) {
 
 // markWriteBack names, before a pass writes beside them, every folder it may leave a temporary
 // file in, and after "= " each target with the name of its staged copy: "= <name> <file>".
-func markWriteBack(mount, dateDir string, targets []*target) error {
+func markWriteBack(ctx context.Context, mount, dateDir string, targets []*target) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	seen := map[string]bool{}
 	var b strings.Builder
 	for _, t := range targets {
@@ -375,7 +378,7 @@ func markWriteBack(mount, dateDir string, targets []*target) error {
 	}
 	mark := filepath.Join(mount, "Engine Library", "Database2", writeBackMarkName)
 	writeBackCut("temp " + mark)
-	return rbstate.ReplaceFile(mark, []byte(b.String()))
+	return rbstate.ReplaceFileCtx(ctx, mark, []byte(b.String()))
 }
 
 // markPath is a mark line's path inside mount; refused when it leaves mount, passes a symlink or

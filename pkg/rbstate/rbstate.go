@@ -96,8 +96,11 @@ type Header struct {
 	Base string `json:"base,omitempty"`
 	// Mode distinguishes build modes that share Rules ("" = full perf build, "ondemand" = CDJ direct-read).
 	Mode string `json:"mode,omitempty"`
-	// RepairStamp records that historical .enginex-backup ANLZ/phantom-cue migration has run for this volume state.
+	// RepairStamp records that historical .enginex-backup ANLZ cue-layout repair has run for this volume state.
 	RepairStamp string `json:"repairStamp,omitempty"`
+	// SettleCursor is the highest EngineID whose historical Synced==nil baseline settle pass
+	// has been checkpointed for the current export stamp.
+	SettleCursor int64 `json:"settleCursor,omitempty"`
 }
 
 // PerfState says what a row's performance data is.

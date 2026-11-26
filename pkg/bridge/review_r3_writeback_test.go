@@ -498,3 +498,278 @@ func TestReviewR3CueWatcherDiscoversDelayedExportOnMountedVolume(t *testing.T) {
 		})
 	}
 }
+
+func seedUnsettledNTrackStick(t *testing.T, mount string, n int) {
+	t.Helper()
+	t.Setenv(rbstate.StageEnv, filepath.Join(t.TempDir(), "stage"))
+	ctx := context.Background()
+	testfixture.LargeExport(t, mount, n)
+	if _, err := ConvertAtMount(ctx, mount, MountOptions{Full: true}); err != nil {
+		t.Fatalf("ConvertAtMount(Full #1, %d): %v", n, err)
+	}
+	if _, err := FillInBackground(ctx, mount, FillOptions{}); err != nil {
+		t.Fatalf("FillInBackground(%d): %v", n, err)
+	}
+	res, err := ConvertAtMount(ctx, mount, MountOptions{Full: true})
+	if err != nil || !res.Pending.None() {
+		t.Fatalf("ConvertAtMount(Full #2, %d) = (%+v, %v), want Pending.None()", n, res, err)
+	}
+	dir := filepath.Join(mount, "Engine Library", "Database2")
+	snap, err := rbstate.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mdb, err := sql.Open("sqlite", filepath.Join(dir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mdb.Close()
+	for _, tr := range snap.Tracks {
+		if tr.Native {
+			continue
+		}
+		var edit int64
+		if err := mdb.QueryRow(`SELECT COALESCE(lastEditTime,0) FROM Track WHERE id=?`, tr.EngineID).Scan(&edit); err != nil {
+			t.Fatal(err)
+		}
+		tr.Edit = edit
+		tr.Synced = nil
+	}
+	if err := snap.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReviewR3LargeBatchUsesIDFilteredPerformanceQuery(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	const nTracks = 120
+	seedUnsettledNTrackStick(t, root, nTracks)
+
+	dir := filepath.Join(root, "Engine Library", "Database2")
+	snap, err := rbstate.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Mark Tracks 1..50 already Synced, leaving 51..120 (70 tracks > 64) unsettled, and poison
+	// PerformanceData.activeOnLoadLoops on an unselected settled Track 10 with a non-integer TEXT
+	// sentinel so any full-table PerformanceData join scan fails immediately.
+	var sentinelID int64
+	for _, tr := range snap.Tracks {
+		if tr.Native {
+			continue
+		}
+		if tr.EngineID <= 50 {
+			tr.Synced = []byte{1, 2, 3, 4}
+			if tr.EngineID == 10 {
+				sentinelID = tr.EngineID
+			}
+		}
+	}
+	if sentinelID == 0 {
+		t.Fatal("missing settled track 10")
+	}
+	if err := snap.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	mdb, err := sql.Open("sqlite", filepath.Join(dir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mdb.Exec(`UPDATE PerformanceData SET activeOnLoadLoops='sentinel-unselected' WHERE trackId=?`, sentinelID); err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	// PerformanceData UPDATE triggers Track.lastEditTime; sync snapshot Edit for the settled
+	// track so only the 70 unsettled tracks (51..120) are in the batch while Track 10 stays settled.
+	var sentinelEdit int64
+	if err := mdb.QueryRow(`SELECT COALESCE(lastEditTime,0) FROM Track WHERE id=?`, sentinelID).Scan(&sentinelEdit); err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	_ = mdb.Close()
+	snap2, err := rbstate.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tr := range snap2.Tracks {
+		if tr.EngineID == sentinelID {
+			tr.Edit = sentinelEdit
+			break
+		}
+	}
+	if err := snap2.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, SettleBatch: 70})
+	if err != nil {
+		t.Fatalf("large batch scanned unselected settled row: %v", err)
+	}
+	if res.TracksRead != 70 || res.PendingSettle != 0 {
+		t.Fatalf("unexpected large-batch result: %+v, want TracksRead=70 PendingSettle=0", res)
+	}
+}
+
+func TestReviewR3PersistedSettleCursorAdvancesAndSkipsRescanWhenMDBUnchanged(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	const nTracks = 12
+	seedUnsettledNTrackStick(t, root, nTracks)
+	dir := filepath.Join(root, "Engine Library", "Database2")
+
+	var dirtyScans atomic.Int32
+	oldHook := writeBackDirtyScanHook
+	writeBackDirtyScanHook = func() { dirtyScans.Add(1) }
+	t.Cleanup(func() { writeBackDirtyScanHook = oldHook })
+
+	sess := &CueSession{}
+	// Pass 1: settles IDs 1..4 (cursor -> 4, 1 dirty scan).
+	res1, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, SettleBatch: 4, Session: sess})
+	if err != nil || res1.TracksRead != 4 || res1.PendingSettle != 8 {
+		t.Fatalf("pass 1: res=%+v err=%v", res1, err)
+	}
+	if dirtyScans.Load() != 1 {
+		t.Fatalf("expected 1 dirty scan on pass 1, got %d", dirtyScans.Load())
+	}
+	h1, err := rbstate.ReadHeader(dir)
+	if err != nil || h1.SettleCursor != 4 {
+		t.Fatalf("expected persisted SettleCursor=4 after pass 1, got %+v err=%v", h1, err)
+	}
+
+	// Pass 2 (m.db unchanged): skips dirty Track scan (still 1!) and settles IDs 5..8 (cursor -> 8).
+	res2, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, SettleBatch: 4, Session: sess})
+	if err != nil || res2.TracksRead != 4 || res2.PendingSettle != 4 {
+		t.Fatalf("pass 2: res=%+v err=%v", res2, err)
+	}
+	if dirtyScans.Load() != 1 {
+		t.Fatalf("expected 0 extra dirty scans on unchanged m.db pass 2, got %d", dirtyScans.Load())
+	}
+	h2, err := rbstate.ReadHeader(dir)
+	if err != nil || h2.SettleCursor != 8 {
+		t.Fatalf("expected persisted SettleCursor=8 after pass 2, got %+v err=%v", h2, err)
+	}
+
+	// Pass 3 (fresh session, reading persisted cursor=8 from snapshot): settles IDs 9..12 (cursor -> 0).
+	res3, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, SettleBatch: 4})
+	if err != nil || res3.TracksRead != 4 || res3.PendingSettle != 0 {
+		t.Fatalf("pass 3: res=%+v err=%v", res3, err)
+	}
+	h3, err := rbstate.ReadHeader(dir)
+	if err != nil || h3.SettleCursor != 0 {
+		t.Fatalf("expected SettleCursor reset to 0 when all tracks settled, got %+v err=%v", h3, err)
+	}
+
+	// FAT32 safety: warm clean scan on sess, then edit Track 1 in m.db AND restore exact mtime;
+	// SQLite file change counter in header bytes [24:28] must still detect the commit.
+	_, err = WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, Session: sess})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mdbPath := filepath.Join(dir, "m.db")
+	stBefore, err := os.Stat(mdbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mdb, err := sql.Open("sqlite", mdbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mdb.Exec(`UPDATE Track SET comment='FAT32 Same MTime Edit' WHERE id=1`); err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	if _, err := mdb.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+99 WHERE id=1`); err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	_ = mdb.Close()
+	if err := os.Chtimes(mdbPath, stBefore.ModTime(), stBefore.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	scansBeforeEdit := dirtyScans.Load()
+	res4, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, Session: sess})
+	if err != nil || res4.TracksChanged != 1 || dirtyScans.Load() != scansBeforeEdit+1 {
+		t.Fatalf("same-mtime SQLite commit was missed by mdbCommitIdent cache: res=%+v dirtyDelta=%d err=%v",
+			res4, dirtyScans.Load()-scansBeforeEdit, err)
+	}
+}
+
+func TestReviewR3OnEjectSkipsLegacyRepairAndDoesNotStampRepairStamp(t *testing.T) {
+	ctx := context.Background()
+	env := setupPhantomTestStick(t, nil)
+
+	// Make Track 1's DAT have legacy swapped cue layout (due for repair against backup).
+	brokenDAT := swapCompactDATCueOrder(t, env.origDAT)
+	testfixture.Write(t, env.root, env.dat1Rel, brokenDAT)
+	refreshPhantomSnapStamp(t, env)
+
+	// Give Track 2 a live deck cue edit on the stick.
+	setMDBQuickCues(t, env.dbDir, 2, env.rbOffset, map[int]uint32{0: 9000})
+	mdb, err := sql.Open("sqlite", filepath.Join(env.dbDir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mdb.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+15 WHERE id=2`); err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	_ = mdb.Close()
+
+	// Final OnEject pass must export ONLY live Track 2 edit, skip legacy Track 1 repair, and NOT stamp RepairStamp.
+	res, err := WriteBackCues(ctx, env.root, WriteBackOptions{SkipPreparingCheck: true, OnEject: true})
+	if err != nil {
+		t.Fatalf("OnEject: %v", err)
+	}
+	if res.TracksChanged != 1 || len(res.Changes) != 1 || res.Changes[0].EngineID != 2 {
+		t.Fatalf("OnEject expected only Track 2 live edit (skipping Track 1 bulk repair), got %+v", res)
+	}
+	if cur, _ := os.ReadFile(env.dat1Path); !bytes.Equal(cur, brokenDAT) {
+		t.Fatal("OnEject unexpectedly repaired legacy Track 1 DAT")
+	}
+	hdrAfterEject, err := rbstate.ReadHeader(env.dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hdrAfterEject.RepairStamp != "" {
+		t.Fatalf("OnEject falsely stamped RepairStamp=%q although legacy repair was skipped", hdrAfterEject.RepairStamp)
+	}
+
+	// Next idle pass (OnEject=false) runs the deferred repair cleanly and stamps RepairStamp.
+	resIdle, err := WriteBackCues(ctx, env.root, WriteBackOptions{SkipPreparingCheck: true})
+	if err != nil {
+		t.Fatalf("post-eject idle repair: %v", err)
+	}
+	if resIdle.TracksChanged != 1 || len(resIdle.Changes) != 1 || resIdle.Changes[0].EngineID != 1 {
+		t.Fatalf("idle pass did not repair Track 1: %+v", resIdle)
+	}
+	hdrAfterIdle, err := rbstate.ReadHeader(env.dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hdrAfterIdle.RepairStamp == "" {
+		t.Fatal("expected RepairStamp stamped after idle repair completed")
+	}
+}
+
+func TestReviewR3CheckpointSaveHonorsCanceledContext(t *testing.T) {
+	env := setupPhantomTestStick(t, nil)
+	snapPath := filepath.Join(env.dbDir, rbstate.SnapshotName)
+	before, err := os.ReadFile(snapPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := noteWriteBackCtx(cctx, env.root, nil, nil, nil, true, 1, true); !errors.Is(err, context.Canceled) {
+		t.Fatalf("noteWriteBackCtx with canceled context returned err=%v, want context.Canceled", err)
+	}
+	after, err := os.ReadFile(snapPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("canceled noteWriteBackCtx modified snapshot on disk")
+	}
+}

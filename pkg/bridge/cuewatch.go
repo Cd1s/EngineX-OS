@@ -183,7 +183,7 @@ func needsInitialSettle(mount string) bool {
 		return false
 	}
 	for _, tr := range snap.Tracks {
-		if !tr.Native && tr.Synced == nil {
+		if !tr.Native && tr.Synced == nil && tr.EngineID > snap.Header.SettleCursor {
 			return true
 		}
 	}
