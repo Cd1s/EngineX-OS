@@ -138,9 +138,9 @@ func TestRBBridgeProlinkSeenPlayerCopiesNothing(t *testing.T) {
 
 // TestNoSilentProlinkStagingCodePaths is a fail-before/pass-after guard ensuring no code path
 // in internal/cli or pkg/prolink silently copies a Pro DJ Link player's library to any drive
-// or /data or deletes leftover .prolink-cache folders.
+// or /data, and only prolink_cleanup.go may reference ".prolink-cache" (to remove leftovers).
 func TestNoSilentProlinkStagingCodePaths(t *testing.T) {
-	checkDir := func(dir string, forbiddenFuncs, forbiddenTypes, forbiddenLiterals []string) {
+	checkDir := func(dir string, forbiddenFuncs, forbiddenTypes, forbiddenLiterals []string, allowLiteralFiles map[string]bool) {
 		t.Helper()
 		fset := token.NewFileSet()
 		entries, err := os.ReadDir(dir)
@@ -175,9 +175,11 @@ func TestNoSilentProlinkStagingCodePaths(t *testing.T) {
 						t.Errorf("%s references forbidden silent-copy selector .%s", full, x.Sel.Name)
 					}
 				case *ast.BasicLit:
-					for _, bad := range forbiddenLiterals {
-						if strings.Contains(x.Value, bad) {
-							t.Errorf("%s contains forbidden literal %s", full, bad)
+					if !allowLiteralFiles[e.Name()] {
+						for _, bad := range forbiddenLiterals {
+							if strings.Contains(x.Value, bad) {
+								t.Errorf("%s contains forbidden literal %s", full, bad)
+							}
 						}
 					}
 				}
@@ -186,6 +188,6 @@ func TestNoSilentProlinkStagingCodePaths(t *testing.T) {
 		}
 	}
 
-	checkDir(".", []string{"localExports", "localExportsFrom", "stageName"}, []string{"stager"}, []string{".prolink-cache"})
-	checkDir(filepath.Join("..", "..", "pkg", "prolink"), []string{"Stage", "StagedExport", "OwnStagedName"}, nil, []string{".prolink-cache"})
+	checkDir(".", []string{"localExports", "localExportsFrom", "stageName"}, []string{"stager"}, []string{".prolink-cache"}, map[string]bool{"prolink_cleanup.go": true})
+	checkDir(filepath.Join("..", "..", "pkg", "prolink"), []string{"Stage", "StagedExport", "OwnStagedName"}, nil, []string{".prolink-cache"}, nil)
 }

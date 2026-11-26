@@ -208,6 +208,7 @@ func rbBridgeCtx(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 
 	_, _ = resourceguard.New(resourceguard.DefaultConfig()).ApplyToProcess(0)
+	go watchProlinkCacheCleanup(ctx)
 	// Packets arrive many times a second; snapshot at most every 500 ms and only when something changed.
 	var dirty, verbose atomic.Bool
 	verbose.Store(settingOn(*uiSettings, "verbose_log"))
