@@ -245,6 +245,11 @@ type uiSettings struct {
 	// the 4-deck layout the decks of a linked console appear in the lanes this player has free, display only.
 	// Off by default, needs FourDeckWaveform, honoured on those four boards only, never copied between units.
 	ConsoleDecks bool `json:"consoleDecks"`
+	// ShareDecks (the row Share Decks, #329): on SC5000, SC5000M, SC6000 and SC6000M in the Stock layout the
+	// decks of this player are shown by a linked console's Line In view; the player keeps its stock screen and
+	// controls (no 4-deck layout). It samples and sends only while such a console asks. Off by default, honoured
+	// on those four boards only, never copied between units; without effect in the 4-deck layout, which shares anyway.
+	ShareDecks bool `json:"shareDecks"`
 	// DebugTelemetry logs every shadow deck update and decision (shadow_debug.go).
 	// Development only: off by default, and nothing in the image turns it on.
 	DebugTelemetry bool `json:"debugTelemetry"`
@@ -464,6 +469,8 @@ func (s *Server) loadUI() uiSettings {
 			v.ConsoleLineView = val == "1"
 		case "console_decks":
 			v.ConsoleDecks = val == "1"
+		case "share_decks":
+			v.ShareDecks = val == "1"
 		case "four_deck_waveform":
 			if val == "1" || strings.EqualFold(val, "true") {
 				v.FourDeckWaveform = true
@@ -597,6 +604,9 @@ func (s *Server) loadUI() uiSettings {
 	if v.ConsoleDecks && (!v.FourDeckWaveform || !playerBoards[imagePrefix(deviceCompatible())]) {
 		v.ConsoleDecks = false // the row belongs to the 4-deck layout of the standalone players; a stray key alone is nothing
 	}
+	if v.ShareDecks && !playerBoards[imagePrefix(deviceCompatible())] {
+		v.ShareDecks = false // a stored or copied value means nothing on any other board
+	}
 	if slices.Contains(uiServices, v.Scope) && !slices.Contains(v.Sources, v.Scope) {
 		v.Scope = ""
 	}
@@ -664,6 +674,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.ConsoleDecks && v.FourDeckWaveform {
 		text += "console_decks=1\n"
+	}
+	if v.ShareDecks {
+		text += "share_decks=1\n"
 	}
 	if v.FourDeckRole != "auto" {
 		text += "four_deck_role=" + v.FourDeckRole + "\n"
@@ -1222,6 +1235,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.ConsoleDecks = b && v.FourDeckWaveform && playerBoards[imagePrefix(deviceCompatible())]
+	}
+	if q.Has("shareDecks") {
+		b, ok := parseBoolParam(q.Get("shareDecks"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.ShareDecks = b && playerBoards[imagePrefix(deviceCompatible())]
 	}
 	if q.Has("pairedView") {
 		b, ok := parseBoolParam(q.Get("pairedView"))

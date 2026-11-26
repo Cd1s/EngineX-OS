@@ -1839,7 +1839,7 @@ SERVICES_MAIN = """
 	Timer {
 		id: scShadowTickTimer
 		interval: 40; repeat: true
-		running: root.scFourDeckRole !== "" || (root.scConsoleLine && root.scConsoleAsked)
+		running: root.scFourDeckRole !== "" || (root.scConsoleLine && root.scConsoleAsked) || (root.scShareLive && root.scShareAsked)
 		onTriggered: root.scShadowTick()
 	}
 	property real scShadowBusyAt: 0
@@ -1859,6 +1859,9 @@ SERVICES_MAIN = """
 	// or on with no channel on Line / AUX, nothing here runs: no timer, no request, no stream-sync loop.
 	property bool scConsoleLine: false // the saved switch, honoured on the four consoles only
 	property bool scShowConsole: false // a player: the row Show Console (stage 2)
+	property bool scShareDecks: false // a player: the row Share Decks (#329)
+	// Share Decks counts in the Stock layout only: in the 4-deck layout the player is a peer and is shown anyway.
+	readonly property bool scShareLive: scShareDecks && !scFourDeckOn
 	readonly property bool scConsoleLineBoard: ["JC11", "JC11S", "JP21", "JP24"].indexOf(scBoard) >= 0
 	property int scLineMask: 0 // bit N: channel N's input is Line / AUX, as the mixer says (a signal, never polled)
 	readonly property bool scLineLive: scConsoleLine && scLineMask !== 0
@@ -1941,10 +1944,63 @@ SERVICES_MAIN = """
 		for (let d = 1; d <= 4; d++) if (((scLineMask >> d) & 1) === 0 && scShadowProperties(d).loaded.state) out.push(d)
 		return out
 	}
+	// Share Decks (#329), the same channel the other way round: a player in the Stock layout is shown by a console's
+	// Line In view. It samples and posts its two layers only while stream-sync says a Line In console asks (the same
+	// held request). Without an asker nothing of this runs: no sampler, no post, one held request to this unit's own
+	// stream-sync, answered at most every 25 s. The screen, the layout and every control stay stock.
+	property bool scShareAsked: false
+	property string scShareSession: "" // the run of asks the sampler works for: its posts carry it, stream-sync takes no other
+	property var scShareAskRequest: null
+	function scShareAskPoll() {
+		if (!scShareLive) return
+		let x = scShareAskRequest
+		if (x && x.readyState > 0 && x.readyState < 4) return
+		x = scShareAskRequest = new XMLHttpRequest()
+		x.open("GET", "http://127.0.0.1:8080/v1/enginex/consolesend?asked=" + (scShareAsked ? 1 : 0) + "&session=" + scShareSession)
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4 || root.scShareAskRequest !== x || !root.scShareLive) return
+			let ok = false
+			if (x.status === 200) {
+				try {
+					const r = JSON.parse(x.responseText), a = !!r.asked, session = a ? String(r.session || "") : ""
+					ok = true
+					// A new session while asked (the last ask ran out and another began) starts over, as a new ask does.
+					if (a && root.scShareAsked && session !== root.scShareSession) { root.scShareSession = session; root.scShareRestart() }
+					else root.scShareSession = session
+					if (a !== root.scShareAsked) root.scShareAsked = a
+				} catch (err) { ok = false }
+			}
+			// The next one carries what we believe now, so stream-sync holds it: no loop. A failure stops the sampler
+			// (nobody can be told it asks) and waits.
+			if (ok) root.scShareAskPoll()
+			else { root.scShareAsked = false; root.scShareSession = ""; scShareAskTimer.restart() }
+		}
+		x.send()
+	}
+	// Everything the sampler sent belongs to the session before: the next post is a full one for the new session,
+	// with the track read again (the sampler keeps a deck's track URI up to 500 ms while the deck stays loaded, and
+	// Engine may have put another track on it in that time).
+	function scShareRestart() {
+		scShadowSent = []; scShadowMine = []; scShadowOwn.length = 0; scShadowPostFull = true; scShadowPostPending = true
+		for (const d of [1, 2]) { const prev = scShadowPrev[d]; if (prev) prev.netAt = -Infinity }
+		if (scShareAsked) scShadowWake()
+	}
+	Timer { id: scShareAskTimer; interval: 5000; onTriggered: root.scShareAskPoll() }
+	onScShareLiveChanged: {
+		if (scShareLive) scShareAskPoll()
+		else {
+			scShareAskTimer.stop()
+			const x = scShareAskRequest
+			if (x && x.readyState > 0 && x.readyState < 4) x.abort()
+			scShareAsked = false
+			scShareSession = ""
+		}
+	}
+	onScShareAskedChanged: scShareRestart()
 	// This unit's Engine Link player number, for its post: a console orders the units it shows by it. Read
-	// when the role is known and again if the number changes; the sampler only copies it.
+	// when the role is known (or Share Decks is on) and again if the number changes; the sampler only copies it.
 	readonly property int scOwnPlayer: {
-		const t = scFourDeckRole !== "" ? scTr("/Client/Preferences/Player") : null
+		const t = scFourDeckRole !== "" || scShareLive ? scTr("/Client/Preferences/Player") : null
 		const n = t ? parseInt(t.string) : 0
 		return n >= 1 && n <= 8 ? n : 0
 	}
@@ -2068,13 +2124,18 @@ SERVICES_MAIN = """
 	}
 	function scShadowTick() {
 		const now = Date.now()
-		const consoleSend = scFourDeckRole === "" // no role: only a console in stage 2, while a player asks
+		const consoleSend = scFourDeckRole === "" // no role: only a console in stage 2, while a player asks, or Share Decks
+		const share = consoleSend && !!root.scShareLive // a player in the Stock layout, while a Line In console asks (#329)
 		if (!consoleSend) {
 			if (now - scShadowPollAt > 3000) scShadowPoll()
 			scShadowLine(now)
 			scShadowLandingTick(now)
 		}
-		if (consoleSend) {
+		if (share) {
+			// Its two layers, both, loaded or not: the console shows the deck on the active layer, as the player does.
+			if (scShadowMineRole !== "share" || scShadowMine.length !== 2) { scShadowMine = [1, 2]; scShadowOwn.length = 2; scShadowPostPending = true; scShadowPostFull = true }
+			scShadowMineRole = "share"
+		} else if (consoleSend) {
 			const own = scConsoleSendDecks()
 			if (own.join() !== scShadowMine.join()) { scShadowMine = own; scShadowOwn.length = own.length; scShadowPostPending = true; scShadowPostFull = true }
 			scShadowMineRole = "console"
@@ -2235,9 +2296,10 @@ SERVICES_MAIN = """
 		let lead = 0
 		for (let d = 1; d <= 4 && root.scPlayer && !scShadowDisplayOnly; d++) if (mine.indexOf(d) < 0 && (scShadowAt[d] || scShadowEmptyObject).link && scShadowProperties(d).master.state) lead = d
 		if (lead !== scShadowLead) { scShadowLead = lead; edge = true }
-		// #201: a Layer press moves the other player's paired view at once.
-		const layer = consoleSend ? null : root.scTr(scLayerPath(scShadowMineRole))
-		const active = mine.length && !consoleSend ? mine[layer && layer.index === 1 ? mine.length - 1 : 0] : 0
+		// #201: a Layer press moves the other player's paired view at once. Share Decks: the stock screen's
+		// own Layer (A: Deck 1, B: Deck 2), so a Layer press moves the console's Line In lane at once.
+		const layer = share ? root.scTr("/GUI/Decks/Deck/Layer") : consoleSend ? null : root.scTr(scLayerPath(scShadowMineRole))
+		const active = mine.length && (share || !consoleSend) ? mine[layer && layer.index === 1 ? mine.length - 1 : 0] : 0
 		if (active !== scShadowActiveDeck) { scShadowActiveDeck = active; edge = true }
 		if (!consoleSend) scShadowMasterBack(mine, now)
 		// Every edge (play, CUE, jump, pitch, master, sync, track) posts at once. The
@@ -2364,10 +2426,13 @@ SERVICES_MAIN = """
 				(sent.phase !== o.phase && now - scShadowPostAt >= 100)) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
 		}
 		scShadowPostAt = now; scShadowPostPending = false
+		// Share Decks (#329): its posts carry their session; stream-sync drops one of another session or after the row
+		// went off (never a peer's).
+		const tag = scShadowMineRole === "share" ? "?share=" + scShareSession : ""
 		// Nothing the peer shows changed: ping instead of serialising the decks again
 		// (stream-sync keeps them live and extrapolated). Full post at least every 5 s.
 		if (!edge && !scShadowPostFull && now - scShadowFullAt < 5000 && own.length === scShadowSent.length) {
-			post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks/alive")
+			post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks/alive" + tag)
 			post.send()
 			return
 		}
@@ -2380,7 +2445,7 @@ SERVICES_MAIN = """
 		}
 		scShadowSent.length = own.length
 		scShadowFullAt = now; scShadowPostFull = false
-		post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks")
+		post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks" + tag)
 		post.send(JSON.stringify(own))
 	}
 	// One request at a time: Go holds it until the other player's state changes
@@ -4467,6 +4532,7 @@ SERVICES_MAIN = """
 		scPairedSetting = scIsPlayerBoard && !!v.fourDeckWaveform && !!v.pairedView
 		scConsoleLine = scConsoleLineBoard && !!v.consoleLineView
 		scShowConsole = scIsPlayerBoard && !!v.consoleDecks
+		scShareDecks = scIsPlayerBoard && !!v.shareDecks
 		scFourDeckRoleSetting = v.fourDeckRole || "auto"
 		scShadowMode = v.shadowMode || "auto"
 		scRbLibraryView = v.rbLibraryView || "folders"
@@ -6329,11 +6395,25 @@ CONSOLE_DECKS_ENTRIES = switch_entry("Show Console", "scShowConsole", "consoleDe
 		},
 """
 
+# Share Decks (#329): on a standalone player in the Stock layout, a linked console with Line In shows this player's
+# deck on a Line / AUX channel, as it shows a player in the 4-deck layout (share_decks). Off by default; the player
+# samples and sends only while such a console asks; its screen, layout and controls stay stock.
+SHARE_DECKS_ENTRIES = switch_entry("Share Decks", "scShareDecks", "shareDecks", '\t\t\tvisible: root.scIsPlayerBoard && !root.scFourDeckOn\n') + """
+		@HEADLINE@ {
+			visible: root.scIsPlayerBoard && !root.scFourDeckOn
+			leftPadding: 24; rightPadding: 24
+			wrapMode: Text.WordWrap
+			Layout.preferredHeight: implicitHeight
+			color: "#9a9a9a"
+			text: "Share Decks: a linked console set to Line In shows this player's deck on a channel whose input is Line or AUX; display only, sent only while it asks"
+		},
+"""
+
 VIEW_ENTRIES = """
 		@HEADLINE@ {
 			text: "ENGINEX VIEW PRESET"
 		},
-""" + CUE_COUNTDOWN_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES + CONSOLE_LINE_ENTRIES + CONSOLE_DECKS_ENTRIES
+""" + CUE_COUNTDOWN_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES + CONSOLE_LINE_ENTRIES + CONSOLE_DECKS_ENTRIES + SHARE_DECKS_ENTRIES
 
 # #78: a deck in a booth can be switched off without reaching for the recessed rear
 # button. Engine's own quit path: the "Turn Off" confirmation, recording and library

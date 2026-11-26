@@ -378,6 +378,8 @@ Pro DJ Link is off: no CDJ waveform	Pro DJ Link 未开启：不显示 CDJ 波形
 Show Console	显示一体机	顯示一體機	Mostrar consola
 Show Console: the loaded decks of a linked console appear in this player's free lanes; display only	显示一体机：联机一体机已载入曲目的碟轨，会显示在本机空闲的波形区；仅显示，不会载入	顯示一體機：聯機一體機已載入曲目的碟軌，會顯示在本機空閒的波形區；僅顯示，不會載入	Mostrar consola: los decks cargados de una consola vinculada aparecen en los carriles libres de este reproductor; solo visualización
 Console deck	一体机碟轨	一體機碟軌	Deck de consola
+Share Decks	共享碟轨	共享碟軌	Compartir decks
+Share Decks: a linked console set to Line In shows this player's deck on a channel whose input is Line or AUX; display only, sent only while it asks	共享碟轨：联机视图设为线路输入的联机一体机，会在输入为 Line 或 AUX 的通道上显示本机的碟轨；仅显示，仅在一体机请求时发送	共享碟軌：聯機視圖設為線路輸入的聯機一體機，會在輸入為 Line 或 AUX 的通道上顯示本機的碟軌；僅顯示，僅在一體機請求時傳送	Compartir decks: una consola vinculada en Entrada de línea muestra el deck de este reproductor en un canal con entrada Line o AUX; solo visualización, se envía solo cuando lo pide
 Downloading	正在下载	正在下載	Descargando
 Loading	正在加载	正在載入	Cargando
 Waiting for source analysis	等待源碟机分析波形	等待來源碟機分析波形	Esperando el análisis de la fuente
