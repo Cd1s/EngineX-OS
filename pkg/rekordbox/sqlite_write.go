@@ -7,6 +7,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -74,13 +75,19 @@ func UpdateOneLibraryCues(ctx context.Context, dbPath string, updates map[uint32
 	return err
 }
 
+// GridUpdate describes a beat-grid write-back update for a OneLibrary content row.
+type GridUpdate struct {
+	BPM float64 // dominant beat-grid BPM; >0 updates bpmx100 when present
+}
+
 // UpdateTimes is where UpdateOneLibraryCuesKeys spent its time (#321 log line), plus the
-// post-write cues/metadata read back from the already-decrypted working database so write-back
+// post-write cues/metadata/BPM read back from the already-decrypted working database so write-back
 // can refresh snapshot RecordHash values without a second full decrypt and scan.
 type UpdateTimes struct {
 	Decrypt, Edit, Encrypt time.Duration
 	WrittenCues            map[uint32][]Cue
 	WrittenMetadata        map[uint32]Metadata
+	WrittenBPM             map[uint32]float64
 }
 
 // UpdateOneLibraryCuesKeys is UpdateOneLibraryCues with the SQLCipher keys of kc: with the
@@ -122,8 +129,14 @@ func UpdateOneLibraryEdits(ctx context.Context, dbPath string, cues map[uint32][
 // UpdateOneLibraryEditsKeys is UpdateOneLibraryEdits with the SQLCipher keys of kc, as
 // UpdateOneLibraryCuesKeys (#321), and where it spent its time.
 func UpdateOneLibraryEditsKeys(ctx context.Context, dbPath string, cues map[uint32][]Cue, metadata map[uint32]Metadata, dstPath string, kc *KeyCache) (UpdateTimes, error) {
+	return UpdateOneLibraryAllKeys(ctx, dbPath, cues, metadata, nil, dstPath, kc)
+}
+
+// UpdateOneLibraryAllKeys applies cue, metadata, and beat-grid change-tracking updates to one
+// decrypted or copied SQLite working file before writing the final OneLibrary export.
+func UpdateOneLibraryAllKeys(ctx context.Context, dbPath string, cues map[uint32][]Cue, metadata map[uint32]Metadata, grids map[uint32]GridUpdate, dstPath string, kc *KeyCache) (UpdateTimes, error) {
 	var tm UpdateTimes
-	if len(cues) == 0 && len(metadata) == 0 {
+	if len(cues) == 0 && len(metadata) == 0 && len(grids) == 0 {
 		return tm, nil
 	}
 	err := rewriteOneLibrary(ctx, dbPath, dstPath, kc, &tm, func(plainPath string) error {
@@ -147,6 +160,13 @@ func UpdateOneLibraryEditsKeys(ctx context.Context, dbPath string, cues map[uint
 				return err
 			}
 			tm.WrittenMetadata = written
+		}
+		if len(grids) > 0 {
+			written, err := applyGridUpdatesSQLite(ctx, plainPath, grids)
+			if err != nil {
+				return err
+			}
+			tm.WrittenBPM = written
 		}
 		return nil
 	})
@@ -465,6 +485,81 @@ func applyMetadataUpdatesSQLite(ctx context.Context, plainPath string, updates m
 			return nil, fmt.Errorf("onelibrary: update metadata for %d: %w", contentID, err)
 		}
 		written[contentID] = applied
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return written, nil
+}
+
+func applyGridUpdatesSQLite(ctx context.Context, plainPath string, updates map[uint32]GridUpdate) (map[uint32]float64, error) {
+	u := url.URL{Scheme: "file", Path: plainPath}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=DELETE;`); err != nil {
+		return nil, fmt.Errorf("onelibrary: set journal_mode: %w", err)
+	}
+
+	contentTable, err := findSQLiteTable(ctx, db, "content", "djmdcontent", "track")
+	if err != nil {
+		return nil, fmt.Errorf("onelibrary: content table: %w", err)
+	}
+	contentCols, err := sqliteTableColumns(ctx, db, contentTable)
+	if err != nil {
+		return nil, err
+	}
+	idCol := firstSQLiteColumn(contentCols, "content_id", "id", "track_id")
+	if idCol == "" {
+		return nil, fmt.Errorf("onelibrary: content table has no id column")
+	}
+	hasModifiedCol := firstSQLiteColumn(contentCols, "hasmodified")
+	analysisUpdCol := firstSQLiteColumn(contentCols, "analysisdataupdatecount")
+	bpmX100Col := firstSQLiteColumn(contentCols, "bpmx100")
+
+	contentIDs := make([]uint32, 0, len(updates))
+	for id := range updates {
+		contentIDs = append(contentIDs, id)
+	}
+	sort.Slice(contentIDs, func(i, j int) bool { return contentIDs[i] < contentIDs[j] })
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	written := make(map[uint32]float64, len(updates))
+	for _, contentID := range contentIDs {
+		g := updates[contentID]
+		var sets []string
+		var args []any
+		if hasModifiedCol != "" {
+			sets = append(sets, quoteSQLiteIdentifier(hasModifiedCol)+" = 1")
+		}
+		if analysisUpdCol != "" {
+			qCol := quoteSQLiteIdentifier(analysisUpdCol)
+			sets = append(sets, qCol+" = COALESCE("+qCol+", 0) + 1")
+		}
+		if bpmX100Col != "" && g.BPM > 0 && !math.IsNaN(g.BPM) && !math.IsInf(g.BPM, 0) {
+			bpm100 := int64(math.Round(g.BPM * 100))
+			if bpm100 > 0 && bpm100 <= math.MaxUint16 {
+				sets = append(sets, quoteSQLiteIdentifier(bpmX100Col)+" = ?")
+				args = append(args, bpm100)
+				written[contentID] = float64(bpm100) / 100
+			}
+		}
+		if len(sets) == 0 {
+			continue
+		}
+		args = append(args, contentID)
+		q := `UPDATE ` + quoteSQLiteIdentifier(contentTable) + ` SET ` + strings.Join(sets, ", ") + ` WHERE ` + quoteSQLiteIdentifier(idCol) + ` = ?`
+		if _, err := tx.ExecContext(ctx, q, args...); err != nil {
+			return nil, fmt.Errorf("onelibrary: update grid tracking for %d: %w", contentID, err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err

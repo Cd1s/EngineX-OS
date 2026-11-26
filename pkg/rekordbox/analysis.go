@@ -15,6 +15,7 @@ type Beat struct {
 	Number uint16
 	BPM    float64
 	TimeMS uint32
+	SubUS  uint16 // optional sub-millisecond offset in microseconds (0..999), from PQT2
 }
 type Cue struct {
 	HotCue                         uint32 // 0 = memory cue; 1..8 = A..H; never assigned by the bridge
@@ -43,6 +44,7 @@ type SongStructure struct {
 type Analysis struct {
 	DurationMS uint32 // track duration from PDB, when available (overview has no timebase)
 	Beats      []Beat
+	BeatSubUS  []uint16 // per-beat sub-millisecond offsets (0..999 us) parsed from PQT2
 	Cues       []Cue
 	Waveforms  []Waveform
 	Structure  *SongStructure
@@ -96,7 +98,24 @@ func (a *Analysis) section(tag string, s []byte, h int) error {
 		n := int(n64)
 		for i := 0; i < n; i++ {
 			p := s[24+8*i:]
-			a.Beats = append(a.Beats, Beat{be.Uint16(p), float64(be.Uint16(p[2:])) / 100, be.Uint32(p[4:])})
+			a.Beats = append(a.Beats, Beat{Number: be.Uint16(p), BPM: float64(be.Uint16(p[2:])) / 100, TimeMS: be.Uint32(p[4:])})
+		}
+		a.applyBeatSubUS()
+	case "PQT2":
+		if h < 56 || len(s) < 56 {
+			return bad()
+		}
+		n64 := uint64(be.Uint32(s[40:]))
+		if n64 > uint64((len(s)-h)/2) {
+			return bad()
+		}
+		if n64 > 0 {
+			subs := make([]uint16, int(n64))
+			for i := range subs {
+				subs[i] = be.Uint16(s[h+2*i:])
+			}
+			a.BeatSubUS = subs
+			a.applyBeatSubUS()
 		}
 	case "PCOB", "PCO2":
 		min, off, countAt := 24, 24, 18
@@ -244,11 +263,26 @@ func (a *Analysis) mergeCue(c Cue) {
 	a.Cues = append(a.Cues, c)
 }
 
+func (a *Analysis) applyBeatSubUS() {
+	if len(a.Beats) == 0 || len(a.BeatSubUS) != len(a.Beats) {
+		return
+	}
+	for i, sub := range a.BeatSubUS {
+		if sub < 1000 {
+			a.Beats[i].SubUS = sub
+		}
+	}
+}
+
 // Merge prefers extended cues while keeping DAT-only memory cues and all waveform variants.
 func (a *Analysis) Merge(b *Analysis) {
 	if len(b.Beats) > 0 {
 		a.Beats = b.Beats
 	}
+	if len(b.BeatSubUS) > 0 {
+		a.BeatSubUS = b.BeatSubUS
+	}
+	a.applyBeatSubUS()
 	for _, c := range b.Cues {
 		a.mergeCue(c)
 	}
