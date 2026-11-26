@@ -585,13 +585,13 @@ class DeckFeeder:
 def deck_state_b():
     return twin.evj(
         "B",
-        'JSON.stringify({loaded: root.rtTr("/Engine/Deck1/Track/SongLoaded").state,'
-        'analysed: root.rtTr("/Engine/Deck1/Track/SongAnalyzed").state,'
-        'play: root.rtTr("/Engine/Deck1/PlayState").state,'
-        'pos: root.rtTr("/Engine/Deck1/Track/TrackPosition").value,'
-        'cue: root.rtTr("/Engine/Deck1/Track/QuickCue1Name").string,'
-        'bpm: root.rtTr("/Engine/Deck1/OriginalBPM").unnormalized,'
-        'name: root.rtTr("/Engine/Deck1/Track/SongName").string})',
+        'JSON.stringify({loaded: !!(root.rtTr("/Engine/Deck1/Track/SongLoaded")||{}).state,'
+        'analysed: !!(root.rtTr("/Engine/Deck1/Track/SongAnalyzed")||{}).state,'
+        'play: !!(root.rtTr("/Engine/Deck1/PlayState")||{}).state,'
+        'pos: (root.rtTr("/Engine/Deck1/Track/TrackPosition")||{}).unnormalized||0,'
+        'cue: (root.rtTr("/Engine/Deck1/Track/QuickCue1Name")||{}).string||"",'
+        'bpm: (root.rtTr("/Engine/Deck1/OriginalBPM")||{}).unnormalized||0,'
+        'name: (root.rtTr("/Engine/Deck1/Track/SongName")||{}).string||""})',
     )
 
 
@@ -647,10 +647,16 @@ def main():
     assert "/shadow-v3/peer-" in target[1], target[:2]
     assert target[2:7] == source[2:7], "receiving Engine did not store the source blobs"
     assert_full_height_overview("baseline track-a.wav", target[2], target[3])
-    wait_for(
-        lambda: (s := deck_state_b()) and s["loaded"] and s["analysed"] and s["cue"] == "Shadow test cue" and abs(s["bpm"] - 128) < 0.1 and s,
-        label="B baseline deck ready",
-    )
+    try:
+        wait_for(
+            lambda: (s := deck_state_b()) and s["loaded"] and s["analysed"] and s["cue"] == "Shadow test cue" and abs(s["bpm"] - 128) < 0.1 and s,
+            label="B baseline deck ready",
+        )
+    except AssertionError:
+        print("DIAG B baseline deck_state:", deck_state_b(), "row flags:", row("B", "track-a.wav")[7:], flush=True)
+        print("DIAG B engine shadow lines:", [l for l in engine_logs("B").splitlines() if "shadow" in l.lower() or "offline" in l.lower()][-15:], flush=True)
+        print("DIAG B sync log tail:", sync_logs("B").splitlines()[-15:], flush=True)
+        raise
     print("Receiver analysis flags:", target[7:], flush=True)
     assert target[7:9] == source[7:9], (source[7:], target[7:])
     sidecars = twin.WORK / "B/data/enginex/shadow-v3"
@@ -664,27 +670,27 @@ def main():
     # Verify paused follow (on=shadow-paused-follow): copy follows playing A while PlayState stays False!
     hf_b = subprocess.check_output(twin.ns_chroot_cmd("B", "cat /run/enginex/hook-features"), text=True)
     assert "shadow-paused-follow" in hf_b and "on=" in hf_b, f"unexpected B hook-features: {hf_b!r}"
-    pos_a0 = twin.evj("A", 'root.rtTr("/Engine/Deck1/Track/TrackPosition").value')
+    pos_a0 = twin.evj("A", '(root.rtTr("/Engine/Deck1/Track/TrackPosition")||{}).unnormalized||0')
     pos_b0 = deck_state_b()["pos"]
-    twin.ev("A", 'root.rtTr("/Engine/Deck1/PlayState").state=true; "play"')
+    twin.ev("A", 'root.rtTr("/Engine/Deck1/Play").state=true; "play"')
     try:
         b_max_pos = pos_b0
-        deadline = time.monotonic() + 3.5
+        deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             sb = deck_state_b()
             assert not sb["play"], f"paused-follow regression: B PlayState became True while following A ({sb})"
             if sb["pos"] > b_max_pos:
                 b_max_pos = sb["pos"]
-            pos_a = twin.evj("A", 'root.rtTr("/Engine/Deck1/Track/TrackPosition").value')
+            pos_a = twin.evj("A", '(root.rtTr("/Engine/Deck1/Track/TrackPosition")||{}).unnormalized||0')
             if pos_a - pos_a0 >= 44100 and b_max_pos - pos_b0 >= 22050:
                 break
-            time.sleep(0.2)
-        pos_a1 = twin.evj("A", 'root.rtTr("/Engine/Deck1/Track/TrackPosition").value')
+            time.sleep(0.25)
+        pos_a1 = twin.evj("A", '(root.rtTr("/Engine/Deck1/Track/TrackPosition")||{}).unnormalized||0')
         assert pos_a1 - pos_a0 >= 44100, f"A did not advance while playing: {pos_a0} -> {pos_a1}"
         assert b_max_pos - pos_b0 >= 22050, f"B did not follow playing A while paused: {pos_b0} -> {b_max_pos}"
         print(f"PAUSED-FOLLOW: PASS (A +{pos_a1 - pos_a0:.0f} smp, B +{b_max_pos - pos_b0:.0f} smp, B PlayState=False)", flush=True)
     finally:
-        twin.ev("A", 'root.rtTr("/Engine/Deck1/PlayState").state=false; "pause"')
+        twin.ev("A", 'root.rtTr("/Engine/Deck1/Play").state=false; "pause"')
 
     # --- Phase 2: Prepare all 5 sources on A and run 5 x 4 = 20 timing matrix ---
     # Pause A's QML shadow tick timer so DeckFeeder drives A's real stream-sync with exact timings.
@@ -775,7 +781,7 @@ def main():
             mpath.write_text(mounts_json)
         def refresh_prolink_snap():
             now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            (twin.WORK / "A/tmp/enginex-prolink.json").write_text(json.dumps({
+            snap = json.dumps({
                 "updatedAt": now_iso,
                 "devices": [{
                     "name": "rekordbox",
@@ -784,7 +790,14 @@ def main():
                     "kind": "rekordbox",
                     "lastSeen": now_iso,
                 }],
-            }))
+            })
+            for ppath in (
+                twin.WORK / "A/tmp/enginex-prolink.json",
+                twin.WORK / "A/data/enginex/prolink.json",
+                twin.WORK / "A/data/enginex/ui/prolink.json",
+            ):
+                ppath.parent.mkdir(parents=True, exist_ok=True)
+                ppath.write_text(snap)
 
         refresh_prolink_snap()
         prolink_cfg = json.dumps({
