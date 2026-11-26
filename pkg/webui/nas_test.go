@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/internal/testaudio"
+	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
 	"github.com/Cd1s/EngineX-OS/internal/testsmb"
 	"github.com/Cd1s/EngineX-OS/pkg/analyzer"
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
@@ -347,27 +349,6 @@ func TestOmniSourceNASPlaylistsBrowseAndStream(t *testing.T) {
 }
 
 func TestNASStandaloneSourceWithoutOmniSource(t *testing.T) {
-	mp3Bytes := testMP3(120)
-	nasSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/rest/getPlaylists.view":
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlists":{"playlist":[{"id":"pl-42","name":"Club Crate","songCount":1}]}}}`)
-		case "/rest/getPlaylist.view":
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlist":{"id":"pl-42","name":"Club Crate","entry":[{"id":"tr-99","title":"Warehouse Dub","artist":"DJ Test","album":"NAS Vol 1","duration":210,"suffix":"mp3"}]}}}`)
-		case "/rest/search3.view":
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"subsonic-response":{"status":"ok","searchResult3":{"song":[{"id":"tr-99","title":"Warehouse Dub","artist":"DJ Test","album":"NAS Vol 1","duration":210,"suffix":"mp3"}]}}}`)
-		case "/rest/download.view":
-			w.Header().Set("Content-Type", "audio/mpeg")
-			w.Write(mp3Bytes)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer nasSrv.Close()
-
 	uiDir, stateDir, dlDir := t.TempDir(), t.TempDir(), t.TempDir()
 	// OmniSource is OFF, all streaming services are switched off, and no streaming account is logged in.
 	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("sources=\nscope=\nomni_source=0\n"), 0o600); err != nil {
@@ -403,12 +384,33 @@ func TestNASStandaloneSourceWithoutOmniSource(t *testing.T) {
 		t.Fatalf("unconfigured scope=nas: got HTTP %d, want 409", code)
 	}
 
-	// 2. Save enabled NAS config: NAS appears dynamically in sources & loggedIn without OmniSource.
-	cfgBody := fmt.Sprintf(`{"protocol":"subsonic","url":%q,"username":"dj","password":"pw","enabled":true}`, nasSrv.URL)
+	// 2. HTTP NAS protocols (subsonic, webdav, plex) keep the released [NAS] route and get no standalone entry.
+	for _, cfgBody := range []string{
+		`{"protocol":"subsonic","url":"http://nas.example:4533","username":"dj","password":"pw","enabled":true}`,
+		`{"protocol":"webdav","url":"http://nas.example:8080/music","username":"dj","password":"pw","enabled":true}`,
+		`{"protocol":"plex","url":"http://nas.example:32400","token":"tok","enabled":true}`,
+	} {
+		wCfg := httptest.NewRecorder()
+		s.handleNASConfig(wCfg, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(cfgBody)))
+		if wCfg.Code != http.StatusOK {
+			t.Fatalf("save HTTP NAS config failed (%d): %s", wCfg.Code, wCfg.Body.String())
+		}
+		status = uiSettings{}
+		tidalGet(t, gw.URL, "/v1/enginex/ui", 200, &status)
+		if hasIn(status.Sources, "nas") || hasIn(status.LoggedIn, "nas") {
+			t.Fatalf("HTTP NAS should not appear as standalone source: cfg=%s sources=%v loggedIn=%v", cfgBody, status.Sources, status.LoggedIn)
+		}
+		if code, _ := uiPost(t, gw.URL, "scope=nas"); code != http.StatusConflict {
+			t.Fatalf("HTTP NAS scope=nas: got HTTP %d, want 409", code)
+		}
+	}
+
+	// 3. Save enabled SMB NAS config: NAS appears dynamically in sources & loggedIn without OmniSource.
+	cfgBody := `{"protocol":"smb","url":"smb://nas.example/music","username":"dj","password":"pw","enabled":true}`
 	wCfg := httptest.NewRecorder()
 	s.handleNASConfig(wCfg, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(cfgBody)))
 	if wCfg.Code != http.StatusOK {
-		t.Fatalf("save NAS config failed (%d): %s", wCfg.Code, wCfg.Body.String())
+		t.Fatalf("save SMB NAS config failed (%d): %s", wCfg.Code, wCfg.Body.String())
 	}
 
 	status = uiSettings{}
@@ -417,7 +419,7 @@ func TestNASStandaloneSourceWithoutOmniSource(t *testing.T) {
 		t.Fatalf("configured NAS missing from UI status: sources=%v loggedIn=%v", status.Sources, status.LoggedIn)
 	}
 
-	// 3. Selecting scope=nas succeeds without any streaming login or OmniSource and does not persist nas into sources=.
+	// 4. Selecting scope=nas succeeds without any streaming login or OmniSource and does not persist nas into sources=.
 	if code, updated := uiPost(t, gw.URL, "scope=nas"); code != http.StatusOK || updated.Scope != "nas" {
 		t.Fatalf("scope=nas failed: code=%d scope=%q", code, updated.Scope)
 	}
@@ -425,76 +427,7 @@ func TestNASStandaloneSourceWithoutOmniSource(t *testing.T) {
 		t.Fatalf("dynamic nas source must not be persisted into settings.conf sources=: %q %v", string(raw), err)
 	}
 
-	// 4. Both /playlists and /favorites/playlists list NAS playlists cleanly (no [NAS] prefix needed).
-	for _, route := range []string{"/v1/users/1/playlists?limit=50&offset=0", "/v1/users/1/favorites/playlists?limit=50&offset=0"} {
-		var lists struct {
-			Items []map[string]any `json:"items"`
-		}
-		tidalGet(t, gw.URL, route, 200, &lists)
-		var nasUUID string
-		for _, it := range lists.Items {
-			if it["title"] == "Club Crate" {
-				nasUUID, _ = it["uuid"].(string)
-			}
-		}
-		if nasUUID == "" {
-			t.Fatalf("%s: expected standalone NAS playlist 'Club Crate', got %+v", route, lists.Items)
-		}
-
-		// 5. Playlist detail, track list, NAS row label, X-Enginex-Provider header, playback & stream all work.
-		var detail map[string]any
-		tidalGet(t, gw.URL, "/v1/playlists/"+nasUUID, 200, &detail)
-		if detail["title"] != "Club Crate" {
-			t.Fatalf("playlist detail title=%v, want Club Crate", detail["title"])
-		}
-
-		var tracks struct {
-			Items []map[string]any `json:"items"`
-		}
-		tidalGet(t, gw.URL, "/v1/playlists/"+nasUUID+"/tracks?limit=50&offset=0", 200, &tracks)
-		if len(tracks.Items) != 1 || tracks.Items[0]["title"] != "Warehouse Dub" {
-			t.Fatalf("unexpected NAS tracks: %+v", tracks.Items)
-		}
-		if got, _ := tracks.Items[0]["copyright"].(string); !strings.HasPrefix(got, "NAS") {
-			t.Fatalf("NAS row copyright=%q, want prefix NAS", got)
-		}
-		trackID := int64(tracks.Items[0]["id"].(float64))
-
-		reqStem, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/enginex/stems/local?id=%d", gw.URL, trackID), nil)
-		respStem, err := http.DefaultClient.Do(reqStem)
-		if err != nil {
-			t.Fatal(err)
-		}
-		respStem.Body.Close()
-		if got := respStem.Header.Get(providerHeader); got != "nas" {
-			t.Fatalf("%s = %q, want %q", providerHeader, got, "nas")
-		}
-
-		var pb map[string]any
-		tidalGet(t, gw.URL, fmt.Sprintf("/v1/tracks/%d/playbackinfopostpaywall?audioquality=LOSSLESS&playbackmode=STREAM&assetpresentation=FULL", trackID), 200, &pb)
-		resp, err := http.Get(fmt.Sprintf("%s/v1/stream/%d.mp3", gw.URL, trackID))
-		if err != nil {
-			t.Fatal(err)
-		}
-		gotAudio, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != 200 || !bytes.Equal(gotAudio, mp3Bytes) {
-			t.Fatalf("NAS stream status=%d len=%d want=%d", resp.StatusCode, len(gotAudio), len(mp3Bytes))
-		}
-	}
-
-	// 6. Search works inside the standalone NAS scope.
-	var searchRes struct {
-		Tracks struct {
-			Items []map[string]any `json:"items"`
-		} `json:"tracks"`
-	}
-	tidalGet(t, gw.URL, "/v1/search?query=Warehouse&limit=50&offset=0", 200, &searchRes)
-	if len(searchRes.Tracks.Items) != 1 || searchRes.Tracks.Items[0]["title"] != "Warehouse Dub" {
-		t.Fatalf("NAS search returned %+v", searchRes.Tracks.Items)
-	}
-
-	// 7. Deleting NAS removes it from UI status and rejects scope=nas with 409.
+	// 5. Deleting NAS removes it from UI status and rejects scope=nas with 409.
 	wDel := httptest.NewRecorder()
 	s.handleNASConfig(wDel, httptest.NewRequest(http.MethodDelete, "/v1/enginex/nas", nil))
 	if wDel.Code != http.StatusOK {
@@ -545,6 +478,9 @@ func TestNASSMBTrackRoutesToSelfHostedDownloader(t *testing.T) {
 func TestNASStandaloneSMBSource59PlaylistsEndToEnd(t *testing.T) {
 	smbSrv := testsmb.Start(t)
 	mp3Bytes := testMP3(120)
+	if err := os.WriteFile(filepath.Join(smbSrv.Root, "Root Opener.mp3"), mp3Bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	// Mirror the #335 Synology SMB layout: Root + 58 subfolders = 59 playlists.
 	for i := 1; i <= 58; i++ {
 		dir := filepath.Join(smbSrv.Root, fmt.Sprintf("Crate %02d", i))
@@ -660,6 +596,33 @@ func TestNASStandaloneSMBSource59PlaylistsEndToEnd(t *testing.T) {
 	if resp.StatusCode != 200 || !bytes.Equal(gotAudio, mp3Bytes) {
 		t.Fatalf("SMB stream status=%d len=%d want=%d", resp.StatusCode, len(gotAudio), len(mp3Bytes))
 	}
+
+	// Verify favorites/playlists, X-Enginex-Provider header, and standalone search on SMB NAS.
+	var favLists struct {
+		Total int `json:"totalNumberOfItems"`
+	}
+	tidalGet(t, gw.URL, "/v1/users/1/favorites/playlists?limit=50&offset=0", 200, &favLists)
+	if favLists.Total != 59 {
+		t.Fatalf("SMB favorites playlists total=%d, want 59", favLists.Total)
+	}
+	reqStem, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/enginex/stems/local?id=%d", gw.URL, trackID), nil)
+	respStem, err := http.DefaultClient.Do(reqStem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respStem.Body.Close()
+	if got := respStem.Header.Get(providerHeader); got != "nas" {
+		t.Fatalf("%s = %q, want %q", providerHeader, got, "nas")
+	}
+	var searchRes struct {
+		Tracks struct {
+			Items []map[string]any `json:"items"`
+		} `json:"tracks"`
+	}
+	tidalGet(t, gw.URL, "/v1/search?query=Root+Opener&limit=50&offset=0", 200, &searchRes)
+	if len(searchRes.Tracks.Items) != 1 || searchRes.Tracks.Items[0]["title"] != "Root Opener" {
+		t.Fatalf("SMB search returned %+v", searchRes.Tracks.Items)
+	}
 }
 
 func TestNASErrorsRedactCredentialsInGatewayAndLog(t *testing.T) {
@@ -722,7 +685,7 @@ func TestNASErrorsRedactCredentialsInGatewayAndLog(t *testing.T) {
 				t.Fatalf("save NAS config failed (%d): %s", wCfg.Code, wCfg.Body.String())
 			}
 
-			// 1. /v1/users/1/playlists hint playlist JSON must not leak credentials.
+			// 1. Stale scope=nas must return an empty list for HTTP NAS without leaking anything.
 			reqList := httptest.NewRequest(http.MethodGet, "/v1/users/1/playlists?limit=50&offset=0", nil)
 			reqList.RemoteAddr = "127.0.0.1:1234"
 			wList := httptest.NewRecorder()
@@ -730,17 +693,13 @@ func TestNASErrorsRedactCredentialsInGatewayAndLog(t *testing.T) {
 			if wList.Code != http.StatusOK {
 				t.Fatalf("playlists status=%d body=%s", wList.Code, wList.Body.String())
 			}
-			hintBody := wList.Body.String()
-			if !strings.Contains(hintBody, hintPlaylist) {
-				t.Fatalf("expected hint playlist on dropped NAS, got: %s", hintBody)
-			}
-			assertNoLeak(t, "hint playlist JSON", hintBody)
+			assertNoLeak(t, "standalone list JSON", wList.Body.String())
 
-			// 2. /v1/playlists/{uuid}/tracks HTTP error body and stream-sync log line must not leak credentials.
+			// 2. OmniSource [NAS] /v1/playlists/{uuid}/tracks HTTP error body and stream-sync log line must not leak credentials.
 			plUUID := s.tidal.addPlaylist(playlistRef{
 				session:  nasScope,
-				provider: nasScope,
-				list:     providers.Playlist{ID: "pl-1", Title: "Crate"},
+				provider: localProvider,
+				list:     providers.Playlist{ID: "nas\x00pl-1", Title: "[NAS] Crate"},
 			})
 			var logBuf bytes.Buffer
 			log.SetOutput(&logBuf)
@@ -752,7 +711,7 @@ func TestNASErrorsRedactCredentialsInGatewayAndLog(t *testing.T) {
 			s.tidal.ServeHTTP(wTracks, reqTracks)
 			log.SetOutput(os.Stderr)
 
-			if wTracks.Code != http.StatusBadGateway {
+			if wTracks.Code != http.StatusNotFound {
 				t.Fatalf("tracks status=%d body=%s", wTracks.Code, wTracks.Body.String())
 			}
 			assertNoLeak(t, "tracks HTTP error", wTracks.Body.String())
@@ -825,7 +784,7 @@ func TestNASPlaylistOpenFailureEscapesLogInjection(t *testing.T) {
 	s.tidal.ServeHTTP(w, req)
 	log.SetOutput(os.Stderr)
 
-	if w.Code != http.StatusBadGateway {
+	if w.Code != http.StatusNotFound {
 		t.Fatalf("tracks status=%d body=%s", w.Code, w.Body.String())
 	}
 	line := logBuf.String()
@@ -838,6 +797,27 @@ func TestNASPlaylistOpenFailureEscapesLogInjection(t *testing.T) {
 	wantSource := `source_id=nas:"Club\nstream-sync: forged=1\r\x1b[31m"`
 	if !strings.Contains(line, wantSource) {
 		t.Fatalf("log line missing quoted source_id %q: %q", wantSource, line)
+	}
+
+	// Verify OmniSource localProvider nas: failure through the gateway also stays on one line.
+	omniUUID := s.tidal.addPlaylist(playlistRef{
+		session:  nasScope,
+		provider: localProvider,
+		list:     providers.Playlist{ID: "nas\x00" + hostileID, Title: "[NAS] Club"},
+	})
+	logBuf.Reset()
+	log.SetOutput(&logBuf)
+	reqOmni := httptest.NewRequest(http.MethodGet, "/v1/playlists/"+omniUUID+"/tracks?limit=50&offset=0", nil)
+	reqOmni.RemoteAddr = "127.0.0.1:1234"
+	wOmni := httptest.NewRecorder()
+	s.tidal.ServeHTTP(wOmni, reqOmni)
+	log.SetOutput(os.Stderr)
+	if wOmni.Code != http.StatusNotFound {
+		t.Fatalf("omni tracks status=%d body=%s", wOmni.Code, wOmni.Body.String())
+	}
+	omniLine := logBuf.String()
+	if strings.Count(strings.TrimSpace(omniLine), "\n") != 0 || strings.ContainsAny(omniLine, "\r\x1b") {
+		t.Fatalf("omni log injection not neutralized: %q", omniLine)
 	}
 
 	// Verify OmniSource localProvider nas: IDs are also quoted and cannot inject newlines.
@@ -1042,9 +1022,16 @@ func TestNASSMBCredentialsNeverLeakInStateErrorsJobsOrLogs(t *testing.T) {
 		".sources.json":        filepath.Join(dlDir, sourcesFile),
 		"streaming-stems.json": filepath.Join(stateDir, "streaming-stems.json"),
 	} {
-		raw, err := os.ReadFile(path)
+		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatalf("expected state file %s: %v", name, err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("state file %s mode=%o, want 0600", name, info.Mode().Perm())
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read state file %s: %v", name, err)
 		}
 		assertClean(name, string(raw), smbSrv.Password, smbSrv.User+":"+smbSrv.Password+"@")
 	}
@@ -1252,5 +1239,513 @@ func TestNASSMBLegacyConfigPreservesPasswordAndMasksMalformedURL(t *testing.T) {
 	}
 	if strings.Contains(wBad.Body.String(), malformedPass) || strings.Contains(wBad.Body.String(), "alice:"+malformedPass+"@") {
 		t.Fatalf("GET /api/nas leaked malformed credentialed URL: %s", wBad.Body.String())
+	}
+}
+
+func TestSourcesIndexWrittenMode0600(t *testing.T) {
+	dlDir := t.TempDir()
+	audioPath := filepath.Join(dlDir, "nas-fixture.mp3")
+	if err := os.WriteFile(audioPath, testMP3(120), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := NewJobs(Pipeline{
+		Catalog: noCatalog{},
+		Deemix:  &deemixclient.Client{DownloadDir: dlDir, AllowLossy: true},
+	})
+	t.Cleanup(jobs.Close)
+	jobs.putFile("smb:Sets/Track.mp3", fetched{
+		matched: providers.Track{ID: "Sets/Track.mp3", Provider: "smb"},
+		dl:      &deemixclient.Download{Path: audioPath},
+	})
+	info, err := os.Stat(filepath.Join(dlDir, sourcesFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf(".sources.json mode=%o, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestReviewHTTPEnumerationDifference(t *testing.T) {
+	const diagMarker = "upstream-diagnostic-marker-335"
+	var subsonicHits, webdavHits, plexHits int
+	subsonicMode := "error"
+
+	subsonicSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		subsonicHits++
+		w.Header().Set("Content-Type", "application/json")
+		if subsonicMode == "error" {
+			fmt.Fprintf(w, `{"subsonic-response":{"status":"failed","error":{"code":40,"message":%q}}}`, diagMarker)
+			return
+		}
+		switch r.URL.Path {
+		case "/rest/getPlaylists.view":
+			fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlists":{"playlist":[{"id":"pl-1","name":"Club Crate","songCount":1}]}}}`)
+		case "/rest/getPlaylist.view":
+			fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlist":{"id":"pl-1","name":"Club Crate","entry":[{"id":"tr-1","title":"Subsonic Dub","artist":"DJ","duration":180,"suffix":"mp3"}]}}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer subsonicSrv.Close()
+
+	webdavSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webdavHits++
+		http.Error(w, diagMarker, http.StatusBadGateway)
+	}))
+	defer webdavSrv.Close()
+
+	plexSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		plexHits++
+		http.Error(w, diagMarker, http.StatusUnauthorized)
+	}))
+	defer plexSrv.Close()
+
+	cases := []struct {
+		name    string
+		cfgJSON string
+		hits    *int
+	}{
+		{
+			name:    "subsonic",
+			cfgJSON: fmt.Sprintf(`{"protocol":"subsonic","url":%q,"username":"dj","password":"pw","enabled":true}`, subsonicSrv.URL),
+			hits:    &subsonicHits,
+		},
+		{
+			name:    "webdav",
+			cfgJSON: fmt.Sprintf(`{"protocol":"webdav","url":%q,"username":"dj","password":"pw","enabled":true}`, webdavSrv.URL+"/music"),
+			hits:    &webdavHits,
+		},
+		{
+			name:    "plex",
+			cfgJSON: fmt.Sprintf(`{"protocol":"plex","url":%q,"token":"tok","enabled":true}`, plexSrv.URL),
+			hits:    &plexHits,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			uiDir, stateDir := t.TempDir(), t.TempDir()
+			if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("sources=spotify\nscope=spotify\nomni_source=1\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, nil)
+			t.Cleanup(s.Close)
+			s.sessions["sp-owner"] = &Session{ID: "sp-owner", Provider: "spotify", Ready: true, p: &browseTestProvider{}}
+
+			wCfg := httptest.NewRecorder()
+			s.handleNASConfig(wCfg, httptest.NewRequest(http.MethodPost, "/api/nas", strings.NewReader(tc.cfgJSON)))
+			if wCfg.Code != http.StatusOK {
+				t.Fatalf("save %s config (%d): %s", tc.name, wCfg.Code, wCfg.Body.String())
+			}
+
+			gw := httptest.NewServer(s)
+			defer gw.Close()
+
+			// 1. Released OmniSource enumeration suppresses upstream error text and keeps working when healthy.
+			respOmni, err := http.Get(gw.URL + "/v1/users/1/playlists?limit=50&offset=0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			omniBody, _ := io.ReadAll(respOmni.Body)
+			respOmni.Body.Close()
+			if respOmni.StatusCode != 200 || strings.Contains(string(omniBody), diagMarker) {
+				t.Fatalf("%s OmniSource leaked upstream marker or failed (%d): %s", tc.name, respOmni.StatusCode, omniBody)
+			}
+			if tc.name == "subsonic" {
+				subsonicMode = "ok"
+				var okOmni struct {
+					Items []map[string]any `json:"items"`
+				}
+				tidalGet(t, gw.URL, "/v1/users/1/playlists?limit=50&offset=0", 200, &okOmni)
+				foundNAS := false
+				for _, it := range okOmni.Items {
+					if it["title"] == "[NAS] Club Crate" {
+						foundNAS = true
+					}
+				}
+				if !foundNAS {
+					t.Fatalf("released OmniSource [NAS] playlist missing for subsonic: %+v", okOmni.Items)
+				}
+				subsonicMode = "error"
+			}
+
+			// 2. No standalone NAS source in UI status, and scope=nas is rejected with 409.
+			var status uiSettings
+			tidalGet(t, gw.URL, "/v1/enginex/ui", 200, &status)
+			for _, src := range append(append([]string(nil), status.Sources...), status.LoggedIn...) {
+				if src == nasScope {
+					t.Errorf("%s must not appear in standalone UI sources/loggedIn: sources=%v loggedIn=%v", tc.name, status.Sources, status.LoggedIn)
+					break
+				}
+			}
+			if code, _ := uiPost(t, gw.URL, "scope=nas"); code != http.StatusConflict {
+				t.Errorf("%s scope=nas got HTTP %d, want 409", tc.name, code)
+			}
+
+			// 3. Stale persisted scope=nas and stale standalone playlist/Stems refs must produce no standalone answer and zero HTTP hits.
+			staleUUID := s.tidal.addPlaylist(playlistRef{
+				session:  nasScope,
+				provider: nasScope,
+				list:     providers.Playlist{ID: "pl-stale", Title: "Stale Standalone"},
+			})
+			if err := s.addStemmed(nasScope, stemmedTrack{
+				Track:   providers.Track{ID: "tr-stale", Title: "Stale Stem", Provider: "smb"},
+				Session: nasScope,
+				Path:    filepath.Join(stateDir, "stale.flac"),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("sources=\nscope=nas\nomni_source=0\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			hitsBefore := *tc.hits
+
+			for _, route := range []string{"/v1/users/1/playlists?limit=50&offset=0", "/v1/users/1/favorites/playlists?limit=50&offset=0"} {
+				resp, err := http.Get(gw.URL + route)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if strings.Contains(string(body), diagMarker) {
+					t.Errorf("%s %s exposed upstream marker in standalone response: %s", tc.name, route, body)
+				}
+				var list struct {
+					Items []map[string]any `json:"items"`
+				}
+				if err := json.Unmarshal(body, &list); err != nil || resp.StatusCode != 200 || len(list.Items) != 0 {
+					t.Errorf("%s %s status=%d items=%d body=%s (want 200 empty)", tc.name, route, resp.StatusCode, len(list.Items), body)
+				}
+			}
+
+			var searchRes struct {
+				Tracks struct {
+					Items []map[string]any `json:"items"`
+				} `json:"tracks"`
+				Playlists struct {
+					Items []map[string]any `json:"items"`
+				} `json:"playlists"`
+			}
+			tidalGet(t, gw.URL, "/v1/search?query=Dub&limit=50&offset=0", 200, &searchRes)
+			if len(searchRes.Tracks.Items) != 0 || len(searchRes.Playlists.Items) != 0 {
+				t.Fatalf("%s standalone search returned items: %+v", tc.name, searchRes)
+			}
+
+			for _, route := range []string{
+				"/v1/playlists/" + staleUUID,
+				"/v1/playlists/" + staleUUID + "/tracks?limit=50&offset=0",
+				"/v1/playlists/" + stemsListID(nasScope),
+				"/v1/playlists/" + stemsListID(nasScope) + "/tracks?limit=50&offset=0",
+			} {
+				resp, err := http.Get(gw.URL + route)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusNotFound {
+					t.Fatalf("%s stale %s got HTTP %d body=%s, want 404", tc.name, route, resp.StatusCode, body)
+				}
+			}
+			if *tc.hits != hitsBefore {
+				t.Fatalf("%s standalone NAS routes made %d upstream HTTP requests, want 0", tc.name, *tc.hits-hitsBefore)
+			}
+		})
+	}
+}
+
+func TestReviewSMBImportStemsAndSwitch(t *testing.T) {
+	smbSrv := testsmb.Start(t)
+
+	makeFLAC := func(seconds int) []byte {
+		var buf bytes.Buffer
+		if err := testaudio.FLAC(&buf, testaudio.Song(seconds)); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+	flacA := makeFLAC(4)
+	flacB := makeFLAC(6)
+	if bytes.Equal(flacA, flacB) {
+		t.Fatal("test fixtures must differ")
+	}
+
+	for _, tc := range []struct {
+		root string
+		data []byte
+	}{
+		{"rootA", flacA},
+		{"rootB", flacB},
+	} {
+		dir := filepath.Join(smbSrv.Root, tc.root, "Sets")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SameTrack.flac"), tc.data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(smbSrv.Root, "rootA", "RootOnlyA.mp3"), testMP3(120), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath, libRoot, db := testlibrary.Create(t)
+	lib, err := analyzer.OpenLibrary(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+
+	uiDir, stateDir := t.TempDir(), t.TempDir()
+	dlDir := filepath.Join(libRoot, "stream-cache")
+	if err := os.MkdirAll(dlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("sources=\nscope=\nomni_source=0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	newStack := func() (*Jobs, *Server, *httptest.Server) {
+		jobs := NewJobs(Pipeline{
+			Guard:   resourceguard.New(resourceguard.Config{Disabled: true}),
+			Catalog: noCatalog{},
+			Deemix:  &deemixclient.Client{DownloadDir: dlDir, AllowLossy: false},
+			Library: lib,
+		})
+		s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, jobs)
+		gw := httptest.NewServer(s)
+		return jobs, s, gw
+	}
+
+	jobs, s, gw := newStack()
+	closed1 := false
+	close1 := func() {
+		if !closed1 {
+			closed1 = true
+			gw.Close()
+			s.Close()
+			jobs.Close()
+		}
+	}
+	t.Cleanup(close1)
+
+	saveSMB := func(srv *Server, root string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"protocol":"smb","url":%q,"username":%q,"password":%q,"enabled":true}`,
+			smbSrv.URL+"/"+root, smbSrv.User, smbSrv.Password)
+		w := httptest.NewRecorder()
+		srv.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/api/nas", strings.NewReader(body)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("save SMB %s failed (%d): %s", root, w.Code, w.Body.String())
+		}
+	}
+
+	browseSetsTrack := func(baseURL string) (string, int64, bool) {
+		t.Helper()
+		var lists struct {
+			Items []map[string]any `json:"items"`
+		}
+		tidalGet(t, baseURL, "/v1/users/1/playlists?limit=50&offset=0", 200, &lists)
+		var setsUUID string
+		hasStems := false
+		for _, it := range lists.Items {
+			switch it["title"] {
+			case "Sets":
+				setsUUID, _ = it["uuid"].(string)
+			case "Stems":
+				hasStems = true
+			}
+		}
+		if setsUUID == "" {
+			t.Fatalf("missing Sets playlist: %+v", lists.Items)
+		}
+		var tracks struct {
+			Items []map[string]any `json:"items"`
+		}
+		tidalGet(t, baseURL, "/v1/playlists/"+setsUUID+"/tracks?limit=50&offset=0", 200, &tracks)
+		if len(tracks.Items) != 1 || tracks.Items[0]["title"] != "SameTrack" {
+			t.Fatalf("unexpected Sets tracks: %+v", tracks.Items)
+		}
+		return setsUUID, int64(tracks.Items[0]["id"].(float64)), hasStems
+	}
+
+	streamTrack := func(baseURL string, id int64) []byte {
+		t.Helper()
+		var pb struct {
+			Manifest string `json:"manifest"`
+		}
+		tidalGet(t, baseURL, fmt.Sprintf("/v1/tracks/%d/playbackinfopostpaywall?audioquality=LOSSLESS&playbackmode=STREAM&assetpresentation=FULL", id), 200, &pb)
+		rawManifest, err := base64.StdEncoding.DecodeString(pb.Manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var mf struct {
+			Codecs string   `json:"codecs"`
+			URLs   []string `json:"urls"`
+		}
+		if err := json.Unmarshal(rawManifest, &mf); err != nil || mf.Codecs != "flac" || len(mf.URLs) != 1 {
+			t.Fatalf("manifest=%s err=%v", rawManifest, err)
+		}
+		resp, err := http.Get(mf.URLs[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("stream %d status=%d", id, resp.StatusCode)
+		}
+		return data
+	}
+
+	waitImportedCount := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			var count int
+			if err := db.QueryRow("SELECT COUNT(*) FROM Track WHERE title = 'SameTrack'").Scan(&count); err == nil && count >= want {
+				return
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		var count int
+		_ = db.QueryRow("SELECT COUNT(*) FROM Track WHERE title = 'SameTrack'").Scan(&count)
+		t.Fatalf("Engine DB imported track count=%d, want >=%d (jobs=%+v)", count, want, jobs.List())
+	}
+
+	// 1. Configure root A, select standalone NAS, browse, stream exact FLAC A, import to DB, prepare Stems.
+	saveSMB(s, "rootA")
+	if code, updated := uiPost(t, gw.URL, "scope=nas"); code != http.StatusOK || updated.Scope != nasScope {
+		t.Fatalf("scope=nas failed: code=%d scope=%q", code, updated.Scope)
+	}
+	uuidA, idA, _ := browseSetsTrack(gw.URL)
+	gotA := streamTrack(gw.URL, idA)
+	if !bytes.Equal(gotA, flacA) {
+		t.Fatalf("root A stream bytes mismatch: got=%d want=%d", len(gotA), len(flacA))
+	}
+	waitImportedCount(1)
+
+	var srcA struct {
+		Path string `json:"path"`
+	}
+	tidalGet(t, gw.URL, fmt.Sprintf("/v1/enginex/stems/source?id=%d", idA), 200, &srcA)
+	if st, err := os.Stat(srcA.Path); err != nil || !st.Mode().IsRegular() {
+		t.Fatalf("root A stems source missing: %q %v", srcA.Path, err)
+	}
+	var localA struct {
+		Path string `json:"path"`
+	}
+	tidalGet(t, gw.URL, fmt.Sprintf("/v1/enginex/stems/local?id=%d", idA), 200, &localA)
+	if localA.Path != srcA.Path {
+		t.Fatalf("root A stems/local=%q, want %q", localA.Path, srcA.Path)
+	}
+	_, _, hasStemsA := browseSetsTrack(gw.URL)
+	if !hasStemsA {
+		t.Fatal("root A NAS Stems list missing after stems/source")
+	}
+	var searchA struct {
+		Tracks struct {
+			Items []map[string]any `json:"items"`
+		} `json:"tracks"`
+	}
+	tidalGet(t, gw.URL, "/v1/search?query=RootOnlyA&limit=50&offset=0", 200, &searchA)
+	if len(searchA.Tracks.Items) != 1 {
+		t.Fatalf("root A search returned %+v, want 1 item", searchA.Tracks.Items)
+	}
+
+	// 2. Switch configured SMB root to root B on the same share.
+	saveSMB(s, "rootB")
+
+	// Stale root A gateway track/playlist IDs and search cache must be dropped immediately.
+	if resp, err := http.Get(fmt.Sprintf("%s/v1/tracks/%d/playbackinfopostpaywall?audioquality=LOSSLESS&playbackmode=STREAM&assetpresentation=FULL", gw.URL, idA)); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("stale root A track id=%d got HTTP %d, want 404", idA, resp.StatusCode)
+		}
+	}
+	if resp, err := http.Get(gw.URL + "/v1/playlists/" + uuidA + "/tracks?limit=50&offset=0"); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("stale root A playlist uuid=%s got HTTP %d, want 404", uuidA, resp.StatusCode)
+		}
+	}
+	var searchB struct {
+		Tracks struct {
+			Items []map[string]any `json:"items"`
+		} `json:"tracks"`
+	}
+	tidalGet(t, gw.URL, "/v1/search?query=RootOnlyA&limit=50&offset=0", 200, &searchB)
+	if len(searchB.Tracks.Items) != 0 {
+		t.Errorf("root A search hit leaked after switch to root B: %+v", searchB.Tracks.Items)
+	}
+
+	// Re-browse root B: must get a new track ID, no root A Stems list, no root A stems/local match, exact FLAC B bytes, and a second DB import.
+	_, idB, hasStemsB := browseSetsTrack(gw.URL)
+	if hasStemsB {
+		t.Errorf("root A NAS Stems list survived switch to root B")
+	}
+	if idB == idA {
+		t.Errorf("re-browsed root B reused root A gateway track ID %d", idA)
+	}
+	if resp, err := http.Get(fmt.Sprintf("%s/v1/enginex/stems/local?id=%d", gw.URL, idB)); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("root B track id=%d resolved stale root A stems file (HTTP %d, want 404)", idB, resp.StatusCode)
+		}
+	}
+	gotB := streamTrack(gw.URL, idB)
+	if bytes.Equal(gotB, flacA) || !bytes.Equal(gotB, flacB) {
+		t.Fatalf("re-browsed root B stream matched root A=%v matched root B=%v (same gateway ID=%v)", bytes.Equal(gotB, flacA), bytes.Equal(gotB, flacB), idB == idA)
+	}
+	waitImportedCount(2)
+
+	var srcB struct {
+		Path string `json:"path"`
+	}
+	tidalGet(t, gw.URL, fmt.Sprintf("/v1/enginex/stems/source?id=%d", idB), 200, &srcB)
+	if srcB.Path == "" || srcB.Path == srcA.Path {
+		t.Fatalf("root B stems source=%q collided with root A %q", srcB.Path, srcA.Path)
+	}
+	if st, err := os.Stat(srcB.Path); err != nil || !st.Mode().IsRegular() {
+		t.Fatalf("root B stems source missing: %q %v", srcB.Path, err)
+	}
+
+	// 3. Offline nas.json root switch back to root A across restart must also drop root B identity state.
+	close1()
+
+	if err := providers.SaveJSON(filepath.Join(uiDir, "nas.json"), providers.NASConfig{
+		Protocol: "smb",
+		URL:      smbSrv.URL + "/rootA",
+		Username: smbSrv.User,
+		Password: smbSrv.Password,
+		Enabled:  true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	jobs2, s2, gw2 := newStack()
+	defer func() {
+		gw2.Close()
+		s2.Close()
+		jobs2.Close()
+	}()
+
+	tidalGet(t, gw2.URL, fmt.Sprintf("/v1/tracks/%d/playbackinfopostpaywall?audioquality=LOSSLESS&playbackmode=STREAM&assetpresentation=FULL", idB), 404, nil)
+	_, idA2, hasStemsAfterRestart := browseSetsTrack(gw2.URL)
+	if hasStemsAfterRestart {
+		t.Fatal("root B NAS Stems list survived offline root switch across restart")
+	}
+	if idA2 == idB || idA2 == idA {
+		t.Fatalf("restart after offline switch reused old track ID: idA2=%d idA=%d idB=%d", idA2, idA, idB)
+	}
+	gotA2 := streamTrack(gw2.URL, idA2)
+	if !bytes.Equal(gotA2, flacA) {
+		t.Fatalf("restart root A stream bytes mismatch: got=%d want=%d", len(gotA2), len(flacA))
 	}
 }

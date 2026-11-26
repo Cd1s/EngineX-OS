@@ -69,6 +69,44 @@ func (s *Server) stemmed(scope string) []stemmedTrack {
 	return s.loadStemmed()[scope]
 }
 
+func (s *Server) resetNASStems() {
+	path := s.stemsFile()
+	if path == "" {
+		return
+	}
+	s.stemsMu.Lock()
+	defer s.stemsMu.Unlock()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	all := map[string][]stemmedTrack{}
+	if json.Unmarshal(data, &all) != nil {
+		return
+	}
+	changed := false
+	if _, ok := all[nasScope]; ok {
+		delete(all, nasScope)
+		changed = true
+	}
+	for scope, list := range all {
+		filtered := slices.DeleteFunc(slices.Clone(list), func(e stemmedTrack) bool {
+			return isNASProvider(e.Track.Provider)
+		})
+		if len(filtered) != len(list) {
+			if len(filtered) == 0 {
+				delete(all, scope)
+			} else {
+				all[scope] = filtered
+			}
+			changed = true
+		}
+	}
+	if changed {
+		_ = providers.SaveJSON(path, all)
+	}
+}
+
 // stemsImportFile is the file Engine imports for a streamed row's Stems: the
 // download under a name that says what it is, with its tags. The cache names
 // files by id and services send audio without tags, so the internal library

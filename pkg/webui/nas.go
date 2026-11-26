@@ -2,12 +2,15 @@ package webui
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -175,11 +178,13 @@ func (s *Server) handleNASConfig(w http.ResponseWriter, r *http.Request) {
 		s.handleNASConfigPost(w, r)
 	case http.MethodDelete:
 		s.uiMu.Lock()
-		defer s.uiMu.Unlock()
-		if err := os.Remove(s.nasConfigPath()); err != nil && !os.IsNotExist(err) {
+		err := os.Remove(s.nasConfigPath())
+		s.uiMu.Unlock()
+		if err != nil && !os.IsNotExist(err) {
 			fail(w, http.StatusInternalServerError, errors.New("could not remove NAS configuration"))
 			return
 		}
+		s.resetNASState("")
 		respond(w, toNASConfigView(providers.NASConfig{}))
 	default:
 		fail(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -221,8 +226,6 @@ func (s *Server) handleNASConfigPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.uiMu.Lock()
-	defer s.uiMu.Unlock()
-
 	existing := s.loadNASConfigLocked()
 	newCfg := providers.NASConfig{
 		Protocol: proto,
@@ -245,9 +248,14 @@ func (s *Server) handleNASConfigPost(w http.ResponseWriter, r *http.Request) {
 		newCfg.Token = in.Token
 	}
 
-	if err := providers.SaveJSON(s.nasConfigPath(), newCfg); err != nil {
+	err := providers.SaveJSON(s.nasConfigPath(), newCfg)
+	s.uiMu.Unlock()
+	if err != nil {
 		fail(w, http.StatusInternalServerError, errors.New("could not save nas configuration"))
 		return
+	}
+	if oldTarget, newTarget := nasTargetKey(existing), nasTargetKey(newCfg); oldTarget != newTarget {
+		s.resetNASState(newTarget)
 	}
 
 	respond(w, toNASConfigView(newCfg))
@@ -318,23 +326,82 @@ func (s *Server) handleNASTest(w http.ResponseWriter, r *http.Request) {
 
 const nasScope = "nas"
 
+func isNASProvider(p string) bool {
+	switch p {
+	case "webdav", "subsonic", "plex", "smb":
+		return true
+	default:
+		return false
+	}
+}
+
 func nasConfigReady(cfg providers.NASConfig) bool {
-	return cfg.Enabled &&
-		(cfg.Protocol == "webdav" || cfg.Protocol == "subsonic" || cfg.Protocol == "plex" || cfg.Protocol == "smb") &&
-		cfg.URL != "" && validateNASURL(cfg.URL) == nil
+	return cfg.Enabled && isNASProvider(cfg.Protocol) && cfg.URL != "" && validateNASURL(cfg.URL) == nil
+}
+
+func smbNASConfigReady(cfg providers.NASConfig) bool {
+	return cfg.Enabled && cfg.Protocol == "smb" && cfg.URL != "" && validateNASURL(cfg.URL) == nil
 }
 
 func gatewayProvider(p string) string {
-	switch p {
-	case "webdav", "subsonic", "plex", "smb":
+	if p == "smb" {
 		return nasScope
-	default:
-		return p
+	}
+	return p
+}
+
+// nasTargetKey identifies the configured NAS server, share, and root without
+// credentials so changing any of them drops stale NAS identity state.
+func nasTargetKey(cfg providers.NASConfig) string {
+	raw := strings.TrimSpace(cfg.URL)
+	if !cfg.Enabled || cfg.Protocol == "" || raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	switch {
+	case u.Scheme == "smb" && port == "445",
+		u.Scheme == "http" && port == "80",
+		u.Scheme == "https" && port == "443":
+		port = ""
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	}
+	p := strings.TrimRight(path.Clean("/"+u.Path), "/")
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(cfg.Protocol)) + "\x00" + strings.ToLower(u.Scheme) + "://" + host + "\x00" + p))
+	return hex.EncodeToString(sum[:16])
+}
+
+func (s *Server) resetNASState(target string) {
+	if s.tidal != nil {
+		s.tidal.resetNAS(target)
+	}
+	if s.jobs != nil {
+		s.jobs.resetNAS()
+	}
+	s.resetNASStems()
+}
+
+func (s *Server) syncNASTargetOnStartup() {
+	if s.tidal == nil {
+		return
+	}
+	cur := nasTargetKey(s.loadNASConfig())
+	s.tidal.mu.Lock()
+	prev := s.tidal.nasTarget
+	s.tidal.mu.Unlock()
+	if prev != cur {
+		s.resetNASState(cur)
 	}
 }
 
 func (s *Server) nasAvailableLocked() bool {
-	return nasConfigReady(s.loadNASConfigLocked())
+	return smbNASConfigReady(s.loadNASConfigLocked())
 }
 
 func (s *Server) nasAvailable() bool {
@@ -346,6 +413,14 @@ func (s *Server) nasAvailable() bool {
 func (s *Server) ownerSelfHosted() *providers.SelfHostedProvider {
 	cfg := s.loadNASConfig()
 	if !nasConfigReady(cfg) {
+		return nil
+	}
+	return providers.NewSelfHostedProvider(cfg, s.nasHTTPClient())
+}
+
+func (s *Server) ownerSMBSelfHosted() *providers.SelfHostedProvider {
+	cfg := s.loadNASConfig()
+	if !smbNASConfigReady(cfg) {
 		return nil
 	}
 	return providers.NewSelfHostedProvider(cfg, s.nasHTTPClient())
@@ -363,7 +438,7 @@ func (s *Server) nasPlaylists(ctx context.Context) ([]providers.Playlist, *provi
 	return lists, p
 }
 
-// nasPlaylistsPage serves a configured NAS as its own source under Sources
+// nasPlaylistsPage serves a configured SMB NAS as its own source under Sources
 // (independent of OmniSource, #335).
 func (g *tidalGateway) nasPlaylistsPage(w http.ResponseWriter, r *http.Request) {
 	favorites := strings.HasSuffix(r.URL.Path, "/favorites/playlists")
@@ -378,14 +453,13 @@ func (g *tidalGateway) nasPlaylistsPage(w http.ResponseWriter, r *http.Request) 
 		}
 		items = append(items, v)
 	}
-	if n := len(g.s.stemmed(nasScope)); n > 0 {
-		add(playlistJSON(stemsListID(nasScope), "Stems", "", n))
-	}
-	p := g.s.ownerSelfHosted()
+	p := g.s.ownerSMBSelfHosted()
 	if p == nil {
-		add(playlistJSON(hintPlaylist, sourceFailedTitle(nasScope, errors.New("not configured")), "http://"+lanHost()+":8080", 0))
 		respond(w, page(r, 100, items))
 		return
+	}
+	if n := len(g.s.stemmed(nasScope)); n > 0 {
+		add(playlistJSON(stemsListID(nasScope), "Stems", "", n))
 	}
 	lists, err := p.Playlists(r.Context())
 	if err != nil && len(lists) == 0 {
@@ -401,7 +475,7 @@ func (g *tidalGateway) nasPlaylistsPage(w http.ResponseWriter, r *http.Request) 
 }
 
 func (g *tidalGateway) nasTracks(w http.ResponseWriter, r *http.Request, id string, ref playlistRef, role, order string) {
-	nasProv := g.s.ownerSelfHosted()
+	nasProv := g.s.ownerSMBSelfHosted()
 	if nasProv == nil {
 		err := errors.New("nas provider is not enabled")
 		g.logPlaylistOpenFailure(r, http.StatusNotFound, id, &ref, err)

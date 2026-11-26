@@ -395,6 +395,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 		}
 		jobs.mu.Unlock()
 	}
+	s.syncNASTargetOnStartup()
 	return s
 }
 

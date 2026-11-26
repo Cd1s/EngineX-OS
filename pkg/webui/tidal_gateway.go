@@ -166,6 +166,7 @@ type tidalGateway struct {
 	albums    map[int64]albumRef
 	albumIDs  map[string]int64
 	next      int64
+	nasTarget string
 
 	rbxBrowse rbxPrefetchQueue
 
@@ -211,10 +212,11 @@ type savedAlbum struct {
 	Guest    bool   `json:"guest,omitempty"`
 }
 type savedTracks struct {
-	Next   int64        `json:"next"`
-	Tracks []savedRef   `json:"tracks"` // least recently used first
-	Lists  []savedList  `json:"lists"`  // least recently used first
-	Albums []savedAlbum `json:"albums,omitempty"`
+	Next      int64        `json:"next"`
+	NASTarget string       `json:"nasTarget,omitempty"`
+	Tracks    []savedRef   `json:"tracks"` // least recently used first
+	Lists     []savedList  `json:"lists"`  // least recently used first
+	Albums    []savedAlbum `json:"albums,omitempty"`
 }
 
 const trackSaveDelay = 3 * time.Second
@@ -246,6 +248,7 @@ func (g *tidalGateway) loadTracks() {
 	if err != nil || json.Unmarshal(b, &v) != nil {
 		return
 	}
+	g.nasTarget = v.NASTarget
 	for _, r := range v.Tracks {
 		ref := trackRef{track: r.Track, session: r.Session, guest: r.Guest, file: r.File, drive: r.Drive}
 		g.tracks[r.ID], g.ids[refKey(ref)] = ref, r.ID
@@ -286,7 +289,7 @@ func (g *tidalGateway) saveTracks() {
 	defer g.saveMu.Unlock()
 	g.mu.Lock()
 	g.saving = false
-	v := savedTracks{Next: g.next, Tracks: make([]savedRef, 0, len(g.tracks))}
+	v := savedTracks{Next: g.next, NASTarget: g.nasTarget, Tracks: make([]savedRef, 0, len(g.tracks))}
 	for id, ref := range g.tracks {
 		v.Tracks = append(v.Tracks, savedRef{id, ref.track, ref.session, ref.guest, ref.file, ref.drive})
 	}
@@ -305,6 +308,54 @@ func (g *tidalGateway) saveTracks() {
 	}
 	if err := providers.SaveJSON(path, v); err != nil {
 		log.Printf("stream-sync: save gateway track IDs: %v", err)
+	}
+}
+
+func isNASNotice(t providers.Track) bool {
+	if t.Provider != listNoticeProvider {
+		return false
+	}
+	rest, ok := strings.CutPrefix(t.ID, "stems-")
+	if !ok {
+		return false
+	}
+	p, _, ok := strings.Cut(rest, "-")
+	return ok && isNASProvider(p)
+}
+
+func (g *tidalGateway) resetNAS(target string) {
+	g.mu.Lock()
+	changed := g.nasTarget != target
+	g.nasTarget = target
+	for id, ref := range g.tracks {
+		if isNASProvider(ref.track.Provider) || ref.session == nasScope || isNASNotice(ref.track) {
+			delete(g.ids, refKey(ref))
+			delete(g.tracks, id)
+			delete(g.trackSeen, id)
+			changed = true
+		}
+	}
+	for id, ref := range g.lists {
+		if ref.provider == nasScope || (ref.provider == localProvider && strings.HasPrefix(ref.list.ID, "nas\x00")) {
+			delete(g.lists, id)
+			delete(g.listSeen, id)
+			changed = true
+		}
+	}
+	for id, ref := range g.albums {
+		if ref.provider == nasScope || isNASProvider(ref.provider) {
+			delete(g.albumIDs, albumKey(ref))
+			delete(g.albums, id)
+			delete(g.albumSeen, id)
+			changed = true
+		}
+	}
+	g.mu.Unlock()
+	if g.searches != nil {
+		g.searches.clear()
+	}
+	if changed {
+		g.saveTracks()
 	}
 }
 
@@ -1203,12 +1254,12 @@ func (g *tidalGateway) playlist(w http.ResponseWriter, r *http.Request) {
 		respond(w, playlistJSON(hintPlaylist, hintTitle(g.s.scope()), "", 0))
 		return
 	}
-	if scope := g.s.scope(); isStemsListID(id, scope) {
+	if scope := g.s.scope(); isStemsListID(id, scope) && (scope != nasScope || g.s.nasAvailable()) {
 		respond(w, playlistJSON(id, "Stems", "", len(g.s.stemmed(scope))))
 		return
 	}
 	ref, ok := g.list(id)
-	if !ok {
+	if !ok || (ref.provider == nasScope && !g.s.nasAvailable()) {
 		err := errors.New("playlist not found")
 		g.logPlaylistOpenFailure(r, http.StatusNotFound, id, nil, err)
 		fail(w, http.StatusNotFound, err)
@@ -1532,7 +1583,7 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		respond(w, page(r, 500, []any{}))
 		return
 	}
-	if scope := g.s.scope(); isStemsListID(id, scope) {
+	if scope := g.s.scope(); isStemsListID(id, scope) && (scope != nasScope || g.s.nasAvailable()) {
 		g.stemsListTracks(w, r, scope)
 		return
 	}
@@ -1860,7 +1911,7 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	scope := g.s.scope()
 	sources := []source{}
 	if scope == nasScope {
-		if nasProv := g.s.ownerSelfHosted(); nasProv != nil {
+		if nasProv := g.s.ownerSMBSelfHosted(); nasProv != nil {
 			sources = append(sources, source{session: nasScope, provider: nasScope, p: nasProv})
 		}
 	} else {
