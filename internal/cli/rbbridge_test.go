@@ -259,3 +259,28 @@ func TestRBBridgeWriteBackOnEjectFlag(t *testing.T) {
 		t.Fatalf("unexpected untouched writeback result: %+v", res)
 	}
 }
+
+func TestVerifyRemountPublishedFailsClosedOnStatAndSnapshotErrors(t *testing.T) {
+	// 1. Stat error on pending swap artifact (Database2 is a regular file -> ENOTDIR) must fail verification.
+	mount1 := t.TempDir()
+	eng1 := filepath.Join(mount1, "Engine Library")
+	if err := os.MkdirAll(eng1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(eng1, "Database2"), []byte("not-a-dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyRemountPublished(mount1, remountPending{hadSwap: true}); err == nil {
+		t.Fatal("verifyRemountPublished passed when Database2 stat returned ENOTDIR")
+	}
+
+	// 2. Corrupt/missing snapshot header when verifying pending state change must fail verification.
+	mount2 := t.TempDir()
+	db2 := filepath.Join(mount2, "Engine Library", "Database2")
+	if err := os.MkdirAll(db2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyRemountPublished(mount2, remountPending{hadPendingSnap: true, snapCommit: 7}); err == nil {
+		t.Fatal("verifyRemountPublished passed when snapshot header could not be read")
+	}
+}

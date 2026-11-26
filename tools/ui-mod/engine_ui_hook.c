@@ -4170,18 +4170,33 @@ static const char *volatile_path(int dirfd, const char *path, char out[PATH_MAX]
 
 static const char *stems_processor_path(const char *path);
 
+__attribute__((noinline))
+static int rbb_try_open(int dirfd, const char *path, int flags, char scratch[PATH_MAX], const char **out_path) {
+    if (dirfd != AT_FDCWD && (!path || path[0] != '/')) return -1;
+    sc_rbb_note_path(path);
+    int rgb_fd = sc_rbb_open_rgb(path, flags);
+    if (rgb_fd >= 0) return rgb_fd;
+    if ((flags & O_ACCMODE) == O_RDONLY && !(flags & (O_CREAT | O_TRUNC | O_APPEND | O_DIRECTORY)) &&
+        sc_rbb_map_artwork(path, scratch)) {
+        *out_path = scratch;
+    }
+    return -1;
+}
+
 static int redirected_open(int dirfd, const char *path, int flags, mode_t mode) {
     static void *cache;
     int (*real)(int, const char *, int, ...) = next_symbol(&cache, "openat");
     char mapped[PATH_MAX];
-    char rbb_art[PATH_MAX];
     if (is_engine()) {
         path = stems_processor_path(path);
-        if (hf_on(HF_RB_BRIDGE) && (dirfd == AT_FDCWD || (path && path[0] == '/'))) {
-            sc_rbb_note_path(path);
-            int rgb_fd = sc_rbb_open_rgb(path, flags);
+        if (hf_on(HF_RB_BRIDGE) && sc_rbb_path_has_media_prefix(path)) {
+            const char *art_path = path;
+            int rgb_fd = rbb_try_open(dirfd, path, flags, mapped, &art_path);
             if (rgb_fd >= 0) return rgb_fd;
-            if (sc_rbb_map_artwork(path, rbb_art)) path = rbb_art;
+            if (art_path == mapped) {
+                return real ? real(AT_FDCWD, mapped, flags, mode)
+                            : (int)syscall(SYS_openat, AT_FDCWD, mapped, flags, mode);
+            }
         }
         int copied = sc_copy_profile_read(path, flags, UI_ROOT "/../settings-copy/usb-read",
                                          UI_ROOT "/../settings-copy/usb.profile", mapped, sizeof mapped);
@@ -4258,19 +4273,38 @@ static const char *stems_processor_path(const char *path) {
     return path;
 }
 
+__attribute__((noinline))
+static int rbb_try_access(const char *path, int mode, int (*real)(const char *, int)) {
+    if (sc_rbb_access_rgb(path, mode)) return 0;
+    char rbb_art[PATH_MAX];
+    if (!(mode & W_OK) && sc_rbb_map_artwork(path, rbb_art)) return real(rbb_art, mode);
+    return real(path, mode);
+}
+
 HF_INTERPOSE(HF_ALWAYS)
 int access(const char *path, int mode) {
     int (*real)(const char *, int) = next_symbol(&access_cache, "access");
     if (!real) { errno = ENOSYS; return -1; }
-    char rbb_art[PATH_MAX];
     if (is_engine()) {
         path = stems_processor_path(path);
-        if (hf_on(HF_RB_BRIDGE)) {
-            if (sc_rbb_access_rgb(path, mode)) return 0;
-            if (sc_rbb_map_artwork(path, rbb_art)) path = rbb_art;
+        if (hf_on(HF_RB_BRIDGE) && sc_rbb_path_has_media_prefix(path)) {
+            return rbb_try_access(path, mode, real);
         }
     }
     return real(path, mode);
+}
+
+__attribute__((noinline))
+static int rbb_try_statx(int dirfd, const char *path, int flags, unsigned int mask, struct statx *buf,
+                         int (*real)(int, const char *, int, unsigned int, struct statx *)) {
+    if (dirfd == AT_FDCWD || (path && path[0] == '/')) {
+#ifdef STATX_BASIC_STATS
+        if (sc_rbb_statx_rgb(path, buf)) return 0;
+#endif
+        char rbb_art[PATH_MAX];
+        if (sc_rbb_map_artwork(path, rbb_art)) return real(AT_FDCWD, rbb_art, flags, mask, buf);
+    }
+    return real(dirfd, path, flags, mask, buf);
 }
 
 static void *statx_cache;
@@ -4278,17 +4312,23 @@ HF_INTERPOSE(HF_ALWAYS)
 int statx(int dirfd, const char *path, int flags, unsigned int mask, struct statx *buf) {
     int (*real)(int, const char *, int, unsigned int, struct statx *) = next_symbol(&statx_cache, "statx");
     if (!real) { errno = ENOSYS; return -1; }
-    char rbb_art[PATH_MAX];
     if (is_engine()) {
         path = stems_processor_path(path);
-        if (hf_on(HF_RB_BRIDGE) && (dirfd == AT_FDCWD || (path && path[0] == '/'))) {
-#ifdef STATX_BASIC_STATS
-            if (sc_rbb_statx_rgb(path, buf)) return 0;
-#endif
-            if (sc_rbb_map_artwork(path, rbb_art)) path = rbb_art;
+        if (hf_on(HF_RB_BRIDGE) && sc_rbb_path_has_media_prefix(path)) {
+            return rbb_try_statx(dirfd, path, flags, mask, buf, real);
         }
     }
     return real(dirfd, path, flags, mask, buf);
+}
+
+__attribute__((noinline))
+static int rbb_try_stems_stat(const char *name, const char *path, struct stat *buf,
+                              int (*real)(const char *, struct stat *)) {
+    if ((sizeof(void *) == 8 || !strcmp(name, "__stat64_time64")) && sc_rbb_stat_rgb(path, buf))
+        return 0;
+    char rbb_art[PATH_MAX];
+    if (sc_rbb_map_artwork(path, rbb_art)) return real(rbb_art, buf);
+    return real(path, buf);
 }
 
 // Engine's Stems launcher (5.3.0-sclive4 0xc1ffe0) looks the processor up with
@@ -4298,13 +4338,10 @@ int statx(int dirfd, const char *path, int flags, unsigned int mask, struct stat
 static int stems_stat(void **cache, const char *name, const char *path, struct stat *buf) {
     int (*real)(const char *, struct stat *) = next_symbol(cache, name);
     if (!real) { errno = ENOSYS; return -1; }
-    char rbb_art[PATH_MAX];
     if (is_engine()) {
         path = stems_processor_path(path);
-        if (hf_on(HF_RB_BRIDGE)) {
-            if ((sizeof(void *) == 8 || !strcmp(name, "__stat64_time64")) && sc_rbb_stat_rgb(path, buf))
-                return 0;
-            if (sc_rbb_map_artwork(path, rbb_art)) path = rbb_art;
+        if (hf_on(HF_RB_BRIDGE) && sc_rbb_path_has_media_prefix(path)) {
+            return rbb_try_stems_stat(name, path, buf, real);
         }
     }
     return real(path, buf);

@@ -341,8 +341,21 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		!o.Full && o.SmartMatch == 0 && libraryUUID(dir) == head.LibraryUUID
 	st.done("stat", "%d export files, snapshot %v, unchanged %v", len(files), headErr == nil, unchanged)
 	if unchanged && head.Pending.None() {
-		chores(ctx, mount, st, !o.Publish)
-		return MountResult{Bypassed: true, Background: res.Background}, nil
+		if o.OnDemand {
+			if _, err := os.Stat(filepath.Join(dir, rbstate.BrowseIndexName)); errors.Is(err, os.ErrNotExist) {
+				if snap, lerr := rbstate.Load(dir); lerr == nil {
+					if serr := rbstate.SaveBrowseIndex(dir, snap); serr == nil {
+						chores(ctx, mount, st, !o.Publish)
+						return MountResult{Bypassed: true, Background: res.Background}, nil
+					}
+				}
+				unchanged = false
+			}
+		}
+		if unchanged {
+			chores(ctx, mount, st, !o.Publish)
+			return MountResult{Bypassed: true, Background: res.Background}, nil
+		}
 	}
 	if unchanged && swapped && !o.Full {
 		// The window that swaps a library in does nothing else, whatever the library's size.

@@ -359,24 +359,30 @@ func HasPendingPriority(mount string, lastSeq uint64) bool {
 	return len(pending) > 0
 }
 
+// DeckActivityState reads rb-deck-activity.json and returns whether a deck is active or
+// loading and whether a fresh sample within deckActivityTTL exists.
+func DeckActivityState() (active, loading, fresh bool) {
+	var act DeckActivity
+	if readPrivateJSON(deckActivityPath(), &act) != nil || act.UpdatedAtMS <= 0 {
+		return false, false, false
+	}
+	age := time.Since(time.UnixMilli(act.UpdatedAtMS))
+	if age < -time.Second || age > deckActivityTTL {
+		return false, false, false
+	}
+	return act.Active, act.Loading, true
+}
+
 // IsDeckActive reports a deck stream-sync saw active within deckActivityTTL; no file or a stale
 // one is idle, so the job runs at full speed.
 func IsDeckActive() bool {
-	var act DeckActivity
-	if readPrivateJSON(deckActivityPath(), &act) != nil || !act.Active || act.UpdatedAtMS <= 0 {
-		return false
-	}
-	age := time.Since(time.UnixMilli(act.UpdatedAtMS))
-	return age >= -time.Second && age <= deckActivityTTL
+	active, _, fresh := DeckActivityState()
+	return fresh && active
 }
 
 // IsDeckLoading reports a deck stream-sync saw loading a track (/Track/SongLoading) within
 // deckActivityTTL; the background job performs no stick I/O while true.
 func IsDeckLoading() bool {
-	var act DeckActivity
-	if readPrivateJSON(deckActivityPath(), &act) != nil || !act.Loading || act.UpdatedAtMS <= 0 {
-		return false
-	}
-	age := time.Since(time.UnixMilli(act.UpdatedAtMS))
-	return age >= -time.Second && age <= deckActivityTTL
+	_, loading, fresh := DeckActivityState()
+	return fresh && loading
 }

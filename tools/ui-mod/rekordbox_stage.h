@@ -707,6 +707,26 @@ struct sc_rbs_row {
     long long length;       // Track.length (seconds)
 };
 
+static double sc_rbs_parse_pos_double(const char *s) {
+    if (!s || *s < '0' || *s > '9') return 0.0;
+    double val = 0.0;
+    while (*s >= '0' && *s <= '9') {
+        val = val * 10.0 + (double)(*s - '0');
+        s++;
+    }
+    if (*s == '.') {
+        s++;
+        double scale = 0.1;
+        while (*s >= '0' && *s <= '9') {
+            val += (double)(*s - '0') * scale;
+            scale *= 0.1;
+            s++;
+        }
+    }
+    if (*s != '\0' || !(val > 0.0 && val < 10000.0)) return 0.0;
+    return val;
+}
+
 static int sc_rbs_row_cb(void *arg, int n, char **v, char **name) {
     struct sc_rbs_row *r = arg;
     (void)name;
@@ -719,7 +739,7 @@ static int sc_rbs_row_cb(void *arg, int n, char **v, char **name) {
     r->insert_cues = v[4] && !strcmp(v[4], "1");
     r->id = v[5] ? strtoll(v[5], NULL, 10) : 0;
     r->key = v[6] ? (int)strtol(v[6], NULL, 10) : -1;
-    r->bpm = v[7] ? strtod(v[7], NULL) : 0.0;
+    r->bpm = v[7] ? sc_rbs_parse_pos_double(v[7]) : 0.0;
     r->length = v[8] ? strtoll(v[8], NULL, 10) : 0;
     return 0;
 }
@@ -1002,7 +1022,7 @@ static int sc_rbs_inflight_enter(uint64_t hash, long long deadline_ns, long long
                 sc_rbs_inflight[free_slot].track = 0;
             }
             pthread_mutex_unlock(&sc_rbs_mu);
-            return free_slot;
+            return free_slot >= 0 ? free_slot : -2;
         }
         uint64_t gen = sc_rbs_inflight[peer].gen;
         while (sc_rbs_inflight[peer].active && sc_rbs_inflight[peer].gen == gen) {
@@ -1193,7 +1213,10 @@ static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const st
     sc_rbs_json_text(jf, row->path);
     fprintf(jf, ",\"id\":%lld", row->id);
     if (row->key >= 0 && row->key < 24) fprintf(jf, ",\"key\":%d", row->key);
-    if (row->bpm > 0.0) fprintf(jf, ",\"bpm\":%.4f", row->bpm);
+    if (row->bpm > 0.0 && row->bpm < 10000.0) {
+        long long scaled = (long long)(row->bpm * 10000.0 + 0.5);
+        fprintf(jf, ",\"bpm\":%lld.%04lld", scaled / 10000LL, scaled % 10000LL);
+    }
     if (row->length > 0) fprintf(jf, ",\"length\":%lld", row->length);
     fputc('}', jf);
     if (fclose(jf)) {
@@ -1273,19 +1296,37 @@ static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const st
         }
         ssize_t n = recv(fd, buf + have, cap - have, 0);
         if (n > 0) {
+            size_t scan_from = (have >= 3) ? have - 3 : 0;
             have += (size_t)n;
             if (!hdr_end && have >= 4) {
-                for (size_t i = 0; i + 4 <= have; i++) {
+                for (size_t i = scan_from; i + 4 <= have; i++) {
                     if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n') {
                         hdr_end = i + 4;
-                        // Peek Content-Length so we don't wait for EOF unnecessarily.
+                        // Peek Content-Length cleanly with strict validation against 32-bit size_t truncation.
                         const char *p = (const char *)buf, *end = (const char *)buf + i;
                         while (p < end) {
                             const char *nl = memchr(p, '\n', (size_t)(end - p));
                             size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
                             char cl[32];
                             if (sc_rbs_hdr_match(p, ll, "Content-Length", cl, sizeof cl)) {
-                                content_len = strtoll(cl, NULL, 10);
+                                char *cs = cl;
+                                while (*cs == ' ' || *cs == '\t') cs++;
+                                char *ce = cs + strlen(cs);
+                                while (ce > cs && (ce[-1] == ' ' || ce[-1] == '\t' || ce[-1] == '\r')) *--ce = '\0';
+                                if (*cs < '0' || *cs > '9') {
+                                    free(buf);
+                                    close(fd);
+                                    return -1;
+                                }
+                                errno = 0;
+                                char *ep = NULL;
+                                long long v = strtoll(cs, &ep, 10);
+                                if (errno == ERANGE || !ep || *ep != '\0' || v < 0 || v > SC_RBS_ONDEMAND_MAX_BODY) {
+                                    free(buf);
+                                    close(fd);
+                                    return -1;
+                                }
+                                content_len = v;
                                 break;
                             }
                             if (!nl) break;
@@ -1295,7 +1336,12 @@ static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const st
                     }
                 }
             }
-            if (hdr_end && content_len >= 0 && have >= hdr_end + (size_t)content_len) break;
+            if (!hdr_end && have >= 16384) {
+                free(buf);
+                close(fd);
+                return -1;
+            }
+            if (hdr_end && content_len >= 0 && have - hdr_end >= (size_t)content_len) break;
             continue;
         }
         if (n == 0) break;
@@ -1419,6 +1465,11 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
     static __thread char result[96];
     const char *why = NULL;
     struct timespec t0, t1;
+    // RT audio-thread guard FIRST before any stat/access/malloc/mutex or SQLite calls.
+    int pol = sc_rbs_sched_override ? sc_rbs_sched_override() : sched_getscheduler(0);
+    if (pol == SCHED_FIFO || pol == SCHED_RR) {
+        return sc_rbx_verbose ? "skipped (rt thread)" : NULL;
+    }
     clock_gettime(CLOCK_MONOTONIC, &t0);
     struct stat st;
     size_t plen = 0;

@@ -252,3 +252,59 @@ func TestWriteBackStandaloneFilledJSONLWithWRAndWRNM(t *testing.T) {
 		t.Fatal("needsCueRead returned false after DJ added a new hot cue on an on-demand loaded track")
 	}
 }
+
+func TestOnDemandUnchangedUpgradeGeneratesMissingBrowseIndexAndWritebackChecksVersionRow(t *testing.T) {
+	base := t.TempDir()
+	stageRoot := filepath.Join(base, "stage")
+	t.Setenv(rbstate.StageEnv, stageRoot)
+	mount := filepath.Join(base, "stick")
+	testfixture.LargeExport(t, mount, 2)
+
+	if _, err := ConvertAtMount(context.Background(), mount, MountOptions{OnDemand: false, StartBackground: func() error { return nil }}); err != nil {
+		t.Fatalf("initial mount: %v", err)
+	}
+	dir := dbDir(mount)
+	browsePath := filepath.Join(dir, rbstate.BrowseIndexName)
+	_ = os.Remove(browsePath)
+
+	// Mark snapshot Pending=none so unchanged fast-path runs on upgrade to OnDemand.
+	snap, err := rbstate.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap.Pending = (rbstate.Header{}).Pending
+	if err := snap.SaveNext(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := rbstate.Promote(dir); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ConvertAtMount(context.Background(), mount, MountOptions{OnDemand: true})
+	if err != nil || !res.Bypassed {
+		t.Fatalf("OnDemand upgrade bypass = %+v, err=%v", res, err)
+	}
+	if _, err := os.Stat(browsePath); err != nil {
+		t.Fatalf("OnDemand unchanged bypass did not materialize missing %s: %v", rbstate.BrowseIndexName, err)
+	}
+
+	// readFilledStage rejects standalone filled.jsonl entries with mismatched rule version or row hash.
+	var tr *rbstate.Track
+	for _, c := range snap.Tracks {
+		tr = c
+		break
+	}
+	tr.Row = "expected-row-hash"
+	sdir := filepath.Join(stageRoot, snap.LibraryUUID)
+	if err := os.MkdirAll(sdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wr := base64.StdEncoding.EncodeToString(make([]byte, 16))
+	badVer, _ := json.Marshal(map[string]any{"id": tr.EngineID, "k": tr.Key, "wr": wr, "v": rbstate.Rules + 99})
+	badRow, _ := json.Marshal(map[string]any{"id": tr.EngineID, "k": tr.Key, "wr": wr, "v": rbstate.Rules, "w": "stale-row"})
+	if err := os.WriteFile(filepath.Join(sdir, "filled.jsonl"), append(append(badVer, '\n'), append(badRow, '\n')...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFilledStage(snap); len(got) != 0 {
+		t.Fatalf("readFilledStage accepted stale rule version / row hash: %+v", got)
+	}
+}

@@ -426,3 +426,152 @@ func buildSyntheticDAT(bpm float64, memMS, hot1MS uint32) []byte {
 	out.Write(pwav.Bytes())
 	return out.Bytes()
 }
+
+func TestOnDemandSymlinkRootConfinementMetadataKeyMemoryLoopsAndAACSBR(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Confined under os.Root: intermediate symlink inside stick escaping root must be rejected.
+	stick1 := t.TempDir()
+	outside := t.TempDir()
+	outsideDir := filepath.Join(outside, "Contents")
+	buildTestMP3(t, filepath.Join(outsideDir, "escape.mp3"))
+	if err := os.Symlink(outsideDir, filepath.Join(stick1, "Contents")); err != nil {
+		t.Fatal(err)
+	}
+	anlzRel := "PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT"
+	anlzFull := filepath.Join(stick1, filepath.FromSlash(anlzRel))
+	if err := os.MkdirAll(filepath.Dir(anlzFull), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(anlzFull, buildSyntheticDAT(128.0, 500, 1500), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dbDir1 := filepath.Join(stick1, "Engine Library", "Database2")
+	if err := os.MkdirAll(dbDir1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	snap1 := rbstate.New("uuid-sym")
+	rel1 := "Contents/escape.mp3"
+	snap1.Tracks[rbstate.FoldPath(rel1)] = &rbstate.Track{
+		Key: rbstate.FoldPath(rel1), EngineID: 1, Rel: rel1, AnalysisPath: anlzRel, Row: "r1",
+	}
+	if err := snap1.SaveNext(dbDir1); err != nil {
+		t.Fatal(err)
+	}
+	if err := rbstate.Promote(dbDir1); err != nil {
+		t.Fatal(err)
+	}
+	b := NewOnDemandBuilder()
+	if _, err := b.Build(ctx, OnDemandRequest{Mount: stick1, UUID: "uuid-sym", EnginePath: "../" + rel1, EngineID: 1}); err == nil {
+		t.Fatal("expected symlink escape under stick Contents to fail")
+	}
+
+	// 2. Concurrent requests with different EngineKey do not coalesce onto one key.
+	stick2 := t.TempDir()
+	testfixture.LargeExport(t, stick2, 1)
+	if _, err := ConvertAtMount(ctx, stick2, MountOptions{OnDemand: true}); err != nil {
+		t.Fatal(err)
+	}
+	snap2, err := rbstate.Load(filepath.Join(stick2, "Engine Library", "Database2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tr2 *rbstate.Track
+	for _, c := range snap2.Tracks {
+		tr2 = c
+		break
+	}
+	var resK0, resK1 *OnDemandResult
+	var errK0, errK1 error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		resK0, errK0 = b.Build(ctx, OnDemandRequest{Mount: stick2, UUID: snap2.LibraryUUID, EnginePath: "../" + tr2.Rel, EngineID: tr2.EngineID, EngineKey: 0})
+	}()
+	go func() {
+		defer wg.Done()
+		resK1, errK1 = b.Build(ctx, OnDemandRequest{Mount: stick2, UUID: snap2.LibraryUUID, EnginePath: "../" + tr2.Rel, EngineID: tr2.EngineID, EngineKey: 2})
+	}()
+	wg.Wait()
+	if errK0 != nil || errK1 != nil {
+		t.Fatalf("concurrent metadata builds: err0=%v err1=%v", errK0, errK1)
+	}
+	if bytes.Equal(resK0.RBXA1, resK1.RBXA1) {
+		t.Fatal("requests with differing EngineKey coalesced onto identical RBXA1")
+	}
+
+	// 3. mergeFastCues preserves standalone saved memory loops (HotCues empty in slot).
+	basePerf, err := enginedb.EncodePerformance(rekordbox.Track{Duration: 60, SampleRate: 44100, SampleCount: 60 * 44100}, &rekordbox.Analysis{
+		Cues: []rekordbox.Cue{{HotCue: 0, Loop: true, TimeMS: 1000, EndMS: 3000, Name: "saved-loop", Active: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	an := &rekordbox.Analysis{}
+	mergeFastCues(an, &rbstate.Track{FastCues: basePerf.QuickCues, FastLoops: basePerf.Loops, FastActive: basePerf.ActiveLoops}, 44100, 60*44100, 60)
+	if len(an.Cues) != 1 || !an.Cues[0].Loop || an.Cues[0].HotCue != 0 || an.Cues[0].TimeMS != 1000 || an.Cues[0].EndMS != 3000 || !an.Cues[0].Active {
+		t.Fatalf("mergeFastCues lost standalone memory loop: %+v", an.Cues)
+	}
+
+	// 4. Implicit AAC SBR (22.05 kHz core container header + 44.1 kHz export metadata + 2048 priming)
+	// matches enginedb.BuildTrack byte-for-byte.
+	aacStick := t.TempDir()
+	aacRel := testfixture.AACExport(t, aacStick)
+	rawAAC := testfixture.AACWithPriming()
+	mp4aOff := bytes.Index(rawAAC, []byte("mp4a"))
+	binary.BigEndian.PutUint32(rawAAC[mp4aOff+4+24:], 22050<<16)
+	testfixture.Write(t, aacStick, aacRel, rawAAC)
+	if _, err := ConvertAtMount(ctx, aacStick, MountOptions{OnDemand: true}); err != nil {
+		t.Fatalf("ConvertAtMount AAC SBR: %v", err)
+	}
+	aacSnap, err := rbstate.Load(filepath.Join(aacStick, "Engine Library", "Database2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aacTR *rbstate.Track
+	for _, c := range aacSnap.Tracks {
+		aacTR = c
+		break
+	}
+	pdb, err := rekordbox.ReadPDB(filepath.Join(aacStick, "PIONEER", "rekordbox", "export.pdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expTrack := pdb.Tracks[0]
+	aacResv, err := compat.NewResolver(aacStick)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcAAC, err := enginedb.StatTrack(ctx, aacResv, expTrack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAAC, err := enginedb.BuildTrack(aacResv, expTrack, srcAAC, enginedb.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAACBytes := rbstate.EncodePerf(wantAAC.Perf)
+	ek := -1
+	if k, ok := enginedb.EngineKey(expTrack.Key).(int); ok {
+		ek = k
+	}
+	gotAAC, err := NewOnDemandBuilder().Build(ctx, OnDemandRequest{
+		Mount:      aacStick,
+		UUID:       aacSnap.LibraryUUID,
+		EnginePath: "../" + aacTR.Rel,
+		EngineID:   aacTR.EngineID,
+		EngineKey:  ek,
+		EngineBPM:  expTrack.BPM,
+		EngineLen:  int(math.Round(expTrack.Duration)),
+	})
+	if err != nil {
+		t.Fatalf("OnDemand AAC SBR Build: %v", err)
+	}
+	if !gotAAC.Timing.UsedExport {
+		t.Fatal("expected AAC implicit SBR path to consult export metadata")
+	}
+	if !bytes.Equal(gotAAC.RBXA1, wantAACBytes) {
+		t.Fatalf("OnDemand AAC SBR RBXA1 differs from enginedb.BuildTrack (%d vs %d)", len(gotAAC.RBXA1), len(wantAACBytes))
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -379,17 +380,26 @@ type remountPending struct {
 	snapPending    rbstate.Pending
 }
 
-func remountFileExists(path string) bool {
+func remountFilePresent(path string) (bool, error) {
 	_, err := os.Stat(path)
-	return err == nil
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }
 
 func readRemountPending(mount string) remountPending {
 	dbDir := filepath.Join(mount, "Engine Library", "Database2")
+	hasNext, _ := remountFilePresent(filepath.Join(dbDir, ".rb-next.db"))
+	hasSwap, _ := remountFilePresent(filepath.Join(dbDir, rbstate.SwapName))
+	hasBrowseSwap, _ := remountFilePresent(filepath.Join(dbDir, rbstate.BrowseSwapName))
 	p := remountPending{
-		hadNextDB:     remountFileExists(filepath.Join(dbDir, ".rb-next.db")),
-		hadSwap:       remountFileExists(filepath.Join(dbDir, rbstate.SwapName)),
-		hadBrowseSwap: remountFileExists(filepath.Join(dbDir, rbstate.BrowseSwapName)),
+		hadNextDB:     hasNext,
+		hadSwap:       hasSwap,
+		hadBrowseSwap: hasBrowseSwap,
 	}
 	if hdr, err := rbstate.ReadHeader(dbDir); err == nil && !hdr.Pending.None() {
 		p.hadPendingSnap = true
@@ -405,18 +415,32 @@ func readRemountPending(mount string) remountPending {
 // a pre-mount safety-walk timeout or bridge failure).
 func verifyRemountPublished(mount string, pre remountPending) error {
 	dbDir := filepath.Join(mount, "Engine Library", "Database2")
-	if pre.hadNextDB && remountFileExists(filepath.Join(dbDir, ".rb-next.db")) {
-		return fmt.Errorf("%s remounted without publishing pending next library (.rb-next.db still present)", mount)
-	}
-	if pre.hadSwap && remountFileExists(filepath.Join(dbDir, rbstate.SwapName)) {
-		return fmt.Errorf("%s remounted without publishing pending snapshot (%s still present)", mount, rbstate.SwapName)
-	}
-	if pre.hadBrowseSwap && remountFileExists(filepath.Join(dbDir, rbstate.BrowseSwapName)) {
-		return fmt.Errorf("%s remounted without publishing pending browse index (%s still present)", mount, rbstate.BrowseSwapName)
+	for _, item := range []struct {
+		had  bool
+		file string
+		msg  string
+	}{
+		{pre.hadNextDB, ".rb-next.db", "next library (.rb-next.db still present)"},
+		{pre.hadSwap, rbstate.SwapName, fmt.Sprintf("snapshot (%s still present)", rbstate.SwapName)},
+		{pre.hadBrowseSwap, rbstate.BrowseSwapName, fmt.Sprintf("browse index (%s still present)", rbstate.BrowseSwapName)},
+	} {
+		if !item.had {
+			continue
+		}
+		present, err := remountFilePresent(filepath.Join(dbDir, item.file))
+		if err != nil {
+			return fmt.Errorf("%s remount verification failed checking %s: %w", mount, item.file, err)
+		}
+		if present {
+			return fmt.Errorf("%s remounted without publishing pending %s", mount, item.msg)
+		}
 	}
 	if !pre.hadNextDB && !pre.hadSwap && !pre.hadBrowseSwap && pre.hadPendingSnap {
-		if after, err := rbstate.ReadHeader(dbDir); err == nil &&
-			after.Commit == pre.snapCommit && after.Applied == pre.snapApplied && after.Pending == pre.snapPending {
+		after, err := rbstate.ReadHeader(dbDir)
+		if err != nil {
+			return fmt.Errorf("%s remount verification failed reading snapshot header: %w", mount, err)
+		}
+		if after.Commit == pre.snapCommit && after.Applied == pre.snapApplied && after.Pending == pre.snapPending {
 			return fmt.Errorf("%s remounted without applying pending library state", mount)
 		}
 	}

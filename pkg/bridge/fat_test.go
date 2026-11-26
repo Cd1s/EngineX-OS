@@ -160,4 +160,31 @@ func TestIssue321FATChainOwnedBufferedFileAndEOF(t *testing.T) {
 	if _, ok = fatChainOwned(short, first, 3*spc*bps-100); ok {
 		t.Fatal("truncated FAT before chain end must return ok=false")
 	}
+
+	// Chunked ReaderAt returning at most 64 bytes per ReadAt across a 16 KiB window boundary
+	// (stresses short-read fallback when a 4-byte FAT entry straddles a short window read).
+	chunked := shortReadFAT{data: img, maxRead: 64}
+	owned, ok = fatChainOwned(chunked, first, 3*spc*bps-100)
+	if !ok || !owned {
+		t.Fatalf("chunked short-read cross-window chain: owned=%v ok=%v, want true/true", owned, ok)
+	}
+}
+
+type shortReadFAT struct {
+	data    []byte
+	maxRead int
+}
+
+func (s shortReadFAT) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 || off >= int64(len(s.data)) {
+		return 0, os.ErrInvalid
+	}
+	n := len(p)
+	// First boot-sector read (off==0, 512 bytes) can exceed maxRead in real 512 B block devices;
+	// simulate small reads >= 64 B (fatChainOwned reads 512 B boot sector with single ReadAt).
+	if off > 0 && s.maxRead > 0 && n > s.maxRead {
+		n = s.maxRead
+	}
+	n = copy(p[:n], s.data[off:])
+	return n, nil
 }

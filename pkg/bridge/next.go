@@ -373,22 +373,30 @@ func nextRoom(dir, uuid string) error {
 	return nil
 }
 
-// liveCommitRO reads m.db's commit ID read-only (safe even while Engine holds m.db open).
-func liveCommitRO(ctx context.Context, file string) int64 {
-	if st, err := os.Stat(file); err != nil || st.Size() == 0 {
-		return 0
+// liveIdentityRO reads m.db's commit ID and UUID read-only (safe even while Engine holds m.db open).
+func liveIdentityRO(ctx context.Context, file string) (commit int64, uuid string, exists bool, err error) {
+	st, err := os.Stat(file)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, "", false, nil
+		}
+		return 0, "", false, err
+	}
+	if st.Size() == 0 {
+		return 0, "", false, nil
 	}
 	db, err := openRO(file, 5000)
 	if err != nil {
-		return 0
+		return 0, "", true, err
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 	var id sql.NullInt64
-	if err := db.QueryRowContext(ctx, `SELECT lastRekordBoxLibraryImportReadCounter FROM Information`).Scan(&id); err != nil {
-		return 0
+	var u sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT lastRekordBoxLibraryImportReadCounter, COALESCE(uuid,'') FROM Information LIMIT 1`).Scan(&id, &u); err != nil {
+		return 0, "", true, err
 	}
-	return id.Int64
+	return id.Int64, u.String, true, nil
 }
 
 // reconcileOrphanSwap cleans up a leftover .rb-bridge-snapshot.swap when .rb-next.db is already
@@ -397,18 +405,30 @@ func liveCommitRO(ctx context.Context, file string) int64 {
 // m.db and is safe to call from the background job under LockVolume.
 func reconcileOrphanSwap(ctx context.Context, dir string) bool {
 	live, next, swap := filepath.Join(dir, "m.db"), filepath.Join(dir, nextDB), filepath.Join(dir, rbstate.SwapName)
-	if _, err := os.Stat(next); err == nil {
-		return false // active ready swap still waits for a mount window
+	if _, err := os.Stat(next); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return false // active ready swap waits for a mount window, or filesystem stat failed
 	}
 	if _, err := os.Stat(swap); err != nil {
 		return false
 	}
 	h, err := rbstate.ReadHeaderFile(swap)
-	if err != nil || h.Rules != rbstate.Rules {
-		_ = rbstate.RemoveFile(swap)
+	if err != nil {
+		if errors.Is(err, rbstate.ErrNoSnapshot) {
+			_ = rbstate.RemoveFile(swap)
+			_ = rbstate.RemoveFile(filepath.Join(dir, rbstate.BrowseSwapName))
+		}
 		return false
 	}
-	if commit := liveCommitRO(ctx, live); commit == h.Commit && h.Commit != 0 {
+	if h.Rules != rbstate.Rules {
+		_ = rbstate.RemoveFile(swap)
+		_ = rbstate.RemoveFile(filepath.Join(dir, rbstate.BrowseSwapName))
+		return false
+	}
+	commit, uuid, exists, err := liveIdentityRO(ctx, live)
+	if err != nil {
+		return false // transient DB read failure: keep swap intact for the next check
+	}
+	if exists && commit == h.Commit && h.Commit != 0 && (h.LibraryUUID == "" || uuid == h.LibraryUUID) {
 		if err := rbstate.RenameFile(swap, filepath.Join(dir, rbstate.SnapshotName)); err != nil {
 			log.Printf("rb-bridge: orphan swap snapshot not promoted: %v", err)
 			return false

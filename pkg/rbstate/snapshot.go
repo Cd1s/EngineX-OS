@@ -110,7 +110,12 @@ func LoadFile(file string) (*Snapshot, error) {
 		return nil, err
 	}
 	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, maxSnapshot+1))
+	return LoadReader(f)
+}
+
+// LoadReader reads and validates an encoded snapshot from r.
+func LoadReader(r io.Reader) (*Snapshot, error) {
+	b, err := io.ReadAll(io.LimitReader(r, maxSnapshot+1))
 	if err != nil {
 		return nil, err
 	}

@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
@@ -157,7 +156,9 @@ func (b *OnDemandBuilder) Build(ctx context.Context, req OnDemandRequest) (*OnDe
 	}
 	req.Mount = mount
 	req.EnginePath = cleanRel
-	sfKey := mount + "\x00" + req.UUID + "\x00" + rbstate.FoldPath(cleanRel)
+	sfKey := fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%d\x00%x\x00%d",
+		mount, req.UUID, rbstate.FoldPath(cleanRel),
+		req.EngineID, req.EngineKey, math.Float64bits(req.EngineBPM), req.EngineLen)
 
 	b.flightMu.Lock()
 	if call, ok := b.inflight[sfKey]; ok {
@@ -192,15 +193,24 @@ func (b *OnDemandBuilder) Build(ctx context.Context, req OnDemandRequest) (*OnDe
 	}
 }
 
-func (b *OnDemandBuilder) loadSnapshot(mount string) (*rbstate.Snapshot, *compat.Resolver, error) {
-	dbDir := filepath.Join(mount, databaseSubdir)
-	st, err := os.Stat(filepath.Join(dbDir, rbstate.SnapshotName))
+func (b *OnDemandBuilder) loadSnapshot(mount string, root *os.Root) (*rbstate.Snapshot, *compat.Resolver, error) {
+	relSnap := filepath.Join(databaseSubdir, rbstate.SnapshotName)
+	f, err := root.Open(relSnap)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil, ErrOnDemandNotFound
 		}
 		return nil, nil, err
 	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("snapshot is not a regular file")
+	}
+	dbDir := filepath.Join(mount, databaseSubdir)
 	b.snapMu.Lock()
 	if c := b.snaps[dbDir]; c != nil && c.size == st.Size() && c.mtime.Equal(st.ModTime()) {
 		b.snapMu.Unlock()
@@ -208,9 +218,9 @@ func (b *OnDemandBuilder) loadSnapshot(mount string) (*rbstate.Snapshot, *compat
 	}
 	b.snapMu.Unlock()
 
-	snap, err := rbstate.Load(dbDir)
+	snap, err := rbstate.LoadReader(f)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, rbstate.ErrNoSnapshot) {
 			return nil, nil, ErrOnDemandNotFound
 		}
 		return nil, nil, err
@@ -278,62 +288,29 @@ func (b *OnDemandBuilder) lookupExportTrack(ctx context.Context, mount string, r
 	return tr, ok, nil
 }
 
-func openOnDemandFile(full string) (*os.File, error) {
-	f, err := os.OpenFile(full, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+// openRootRegular opens rel strictly confined within root (refusing symlinks and path escapes),
+// trying the exact path first before falling back to compat.Resolver for case or NFC/NFD differences.
+func openRootRegular(ctx context.Context, root *os.Root, res *compat.Resolver, rel string) (*os.File, error) {
+	clean, err := compat.CleanRelative(rel)
 	if err != nil {
 		return nil, err
 	}
-	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() {
-		f.Close()
+	openRel := func(sub string) (*os.File, error) {
+		f, err := root.Open(filepath.FromSlash(sub))
 		if err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("not a regular file: %s", full)
-	}
-	return f, nil
-}
-
-// resolveVolumeFile checks the exact relative path under mount first (zero ReadDir calls on the
-// common case) and falls back to compat.Resolver for case or Unicode NFC/NFD differences.
-func resolveVolumeFile(ctx context.Context, mount string, res *compat.Resolver, rel string) (string, error) {
-	clean, err := compat.CleanRelative(rel)
-	if err != nil {
-		return "", err
-	}
-	direct := filepath.Join(mount, filepath.FromSlash(clean))
-	if st, err := os.Lstat(direct); err == nil {
-		if st.Mode().IsRegular() {
-			return direct, nil
+		st, serr := f.Stat()
+		if serr != nil || !st.Mode().IsRegular() {
+			f.Close()
+			if serr != nil {
+				return nil, serr
+			}
+			return nil, fmt.Errorf("not a regular file: %s", sub)
 		}
-		return "", fmt.Errorf("not a regular file: %s", clean)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
+		return f, nil
 	}
-	resolved, err := res.ResolveContext(ctx, clean)
-	if err != nil {
-		return "", err
-	}
-	full := res.FullPath(resolved)
-	st, err := os.Lstat(full)
-	if err != nil {
-		return "", err
-	}
-	if !st.Mode().IsRegular() {
-		return "", fmt.Errorf("not a regular file: %s", resolved)
-	}
-	return full, nil
-}
-
-// resolveANLZOpen opens an ANLZ file by trying the exact path directly before falling back to
-// compat.Resolver (avoiding extra lstat + ReadDir syscalls on slow USB sticks).
-func resolveANLZOpen(ctx context.Context, mount string, res *compat.Resolver, rel string) (*os.File, error) {
-	clean, err := compat.CleanRelative(rel)
-	if err != nil {
-		return nil, err
-	}
-	direct := filepath.Join(mount, filepath.FromSlash(clean))
-	f, err := openOnDemandFile(direct)
+	f, err := openRel(clean)
 	if err == nil {
 		return f, nil
 	}
@@ -344,7 +321,7 @@ func resolveANLZOpen(ctx context.Context, mount string, res *compat.Resolver, re
 	if err != nil {
 		return nil, err
 	}
-	return openOnDemandFile(res.FullPath(resolved))
+	return openRel(resolved)
 }
 
 func anlzCandidates(tr *rbstate.Track, fallbackAnalysisPath string) (datRel, extRel, ex2Rel string) {
@@ -390,8 +367,24 @@ func (b *OnDemandBuilder) buildOnce(ctx context.Context, req OnDemandRequest) (*
 	tStart := time.Now()
 	var timing OnDemandTiming
 
+	mountSt, err := os.Lstat(req.Mount)
+	if err != nil || !mountSt.Mode().IsDir() || mountSt.Mode()&os.ModeSymlink != 0 {
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			return nil, ErrOnDemandNotFound
+		}
+		return nil, err
+	}
+	root, err := os.OpenRoot(req.Mount)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrOnDemandNotFound
+		}
+		return nil, err
+	}
+	defer root.Close()
+
 	t0 := time.Now()
-	snap, res, err := b.loadSnapshot(req.Mount)
+	snap, res, err := b.loadSnapshot(req.Mount, root)
 	timing.SnapshotMS = float64(time.Since(t0).Microseconds()) / 1000.0
 	if err != nil {
 		return nil, err
@@ -422,13 +415,13 @@ func (b *OnDemandBuilder) buildOnce(ctx context.Context, req OnDemandRequest) (*
 		}
 	}
 
-	// Resolve audio path on the stick (direct stat first).
+	// Open audio file confined to root (direct stat/open first, zero ReadDir on common case).
 	tStat := time.Now()
 	audioRel := tr.Rel
 	if audioRel == "" {
 		audioRel = req.EnginePath
 	}
-	audioFull, err := resolveVolumeFile(ctx, req.Mount, res, audioRel)
+	audioFile, err := openRootRegular(ctx, root, res, audioRel)
 	timing.StatMS = float64(time.Since(tStat).Microseconds()) / 1000.0
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -436,6 +429,7 @@ func (b *OnDemandBuilder) buildOnce(ctx context.Context, req OnDemandRequest) (*
 		}
 		return nil, err
 	}
+	defer audioFile.Close()
 
 	// Determine ANLZ sibling paths; fall back to export DB only when snapshot lacks AnalysisPath.
 	datRel, extRel, ex2Rel := anlzCandidates(tr, "")
@@ -458,7 +452,7 @@ func (b *OnDemandBuilder) buildOnce(ctx context.Context, req OnDemandRequest) (*
 		if rel == "" {
 			return nil, nil
 		}
-		f, err := resolveANLZOpen(ctx, req.Mount, res, rel)
+		f, err := openRootRegular(ctx, root, res, rel)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil, nil
@@ -505,9 +499,9 @@ func (b *OnDemandBuilder) buildOnce(ctx context.Context, req OnDemandRequest) (*
 		}
 	}
 
-	// Read audio header for rule 4 start offset, sample rate, sample count, and duration.
+	// Read audio header from the confined file handle (no TOCTOU re-open by path).
 	tAud := time.Now()
-	audio, err := compat.AudioHeader(audioFull)
+	audio, err := compat.AudioHeaderFile(audioFile, audioRel)
 	timing.AudioHeaderMS = float64(time.Since(tAud).Microseconds()) / 1000.0
 	if err != nil {
 		var pe *os.PathError
@@ -578,7 +572,7 @@ func (b *OnDemandBuilder) buildOnce(ctx context.Context, req OnDemandRequest) (*
 	}
 
 	// Preserve OneLibrary-only cues recorded in snapshot FastCues/FastLoops without touching export DB.
-	if !hasExpTrack && len(tr.FastCues) > 0 {
+	if !hasExpTrack && (len(tr.FastCues) > 0 || len(tr.FastLoops) > 0) {
 		mergeFastCues(merged, tr, rt.SampleRate, rt.SampleCount, rt.Duration)
 	}
 
@@ -654,19 +648,25 @@ func mergeFastCues(a *rekordbox.Analysis, tr *rbstate.Track, sr int, sampleCount
 	}
 	hasHot := [9]bool{}
 	hasMem := false
+	hasMemLoop := make(map[[2]uint32]bool)
+	hasMemLoopStart := make(map[uint32]bool)
 	for _, c := range a.Cues {
 		if c.HotCue >= 1 && c.HotCue <= 8 {
 			hasHot[c.HotCue] = true
 		} else if c.HotCue == 0 {
+			if c.Loop {
+				hasMemLoop[[2]uint32{c.TimeMS, c.EndMS}] = true
+				hasMemLoopStart[c.TimeMS] = true
+			}
 			hasMem = true
 		}
 	}
 	var extra []rekordbox.Cue
 	for slot := 0; slot < 8; slot++ {
-		if hasHot[slot+1] {
-			continue
-		}
-		if hc := deck.HotCues[slot]; hc != nil {
+		hc := deck.HotCues[slot]
+		lp := deck.Loops[slot]
+		pairedLoop := hc != nil && lp != nil && math.Abs(lp.StartSamples-hc.Samples) <= float64(sr)/200
+		if !hasHot[slot+1] && hc != nil {
 			cue := rekordbox.Cue{
 				HotCue:   uint32(slot + 1),
 				TimeMS:   uint32(math.Round(hc.Samples * 1000 / float64(sr))),
@@ -674,20 +674,41 @@ func mergeFastCues(a *rekordbox.Analysis, tr *rbstate.Track, sr int, sampleCount
 				Color:    [4]byte{hc.Color[1], hc.Color[2], hc.Color[3], hc.Color[0]},
 				Extended: true,
 			}
-			if lp := deck.Loops[slot]; lp != nil && math.Abs(lp.StartSamples-hc.Samples) <= float64(sr)/200 {
+			if pairedLoop {
 				cue.Loop = true
 				cue.EndMS = uint32(math.Round(lp.EndSamples * 1000 / float64(sr)))
 				cue.Active = lp.Active
 			}
 			extra = append(extra, cue)
 		}
+		if lp != nil && !pairedLoop {
+			startMS := uint32(math.Round(lp.StartSamples * 1000 / float64(sr)))
+			endMS := uint32(math.Round(lp.EndSamples * 1000 / float64(sr)))
+			if !hasMemLoop[[2]uint32{startMS, endMS}] {
+				hasMemLoop[[2]uint32{startMS, endMS}] = true
+				hasMemLoopStart[startMS] = true
+				extra = append(extra, rekordbox.Cue{
+					HotCue:   0,
+					Loop:     true,
+					TimeMS:   startMS,
+					EndMS:    endMS,
+					Name:     lp.Name,
+					Color:    [4]byte{lp.Color[1], lp.Color[2], lp.Color[3], lp.Color[0]},
+					Active:   lp.Active,
+					Extended: true,
+				})
+			}
+		}
 	}
 	if !hasMem && deck.MainCue >= 0 {
-		extra = append(extra, rekordbox.Cue{
-			HotCue:   0,
-			TimeMS:   uint32(math.Round(deck.MainCue * 1000 / float64(sr))),
-			Extended: true,
-		})
+		mainMS := uint32(math.Round(deck.MainCue * 1000 / float64(sr)))
+		if !hasMemLoopStart[mainMS] {
+			extra = append(extra, rekordbox.Cue{
+				HotCue:   0,
+				TimeMS:   mainMS,
+				Extended: true,
+			})
+		}
 	}
 	if len(extra) > 0 {
 		a.Merge(&rekordbox.Analysis{Cues: extra})

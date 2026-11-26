@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"image"
+	"image/jpeg"
 	"io"
 	"net"
 	"net/http"
@@ -147,6 +150,21 @@ func TestRekordboxOnDemandEndpointAndUnixSocket(t *testing.T) {
 	if recEscape.Code != http.StatusNotFound {
 		t.Fatalf("mount escape status=%d, want 404", recEscape.Code)
 	}
+
+	// 6. Symlinked volume under mediaRoot must be rejected with 404 Not Found.
+	symTarget := t.TempDir()
+	symMount := filepath.Join(mediaRoot, "SYMLINK_USB")
+	if err := os.Symlink(symTarget, symMount); err != nil {
+		t.Fatal(err)
+	}
+	symReqBody, _ := json.Marshal(rbOnDemandRequest{Mount: symMount, UUID: snap.LibraryUUID, Path: "../" + tr.Rel})
+	reqSym := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(symReqBody))
+	reqSym.RemoteAddr = "127.0.0.1:1234"
+	recSym := httptest.NewRecorder()
+	srv.ServeHTTP(recSym, reqSym)
+	if recSym.Code != http.StatusNotFound {
+		t.Fatalf("symlink mount status=%d, want 404", recSym.Code)
+	}
 }
 
 func assertValidOnDemandResponse(t *testing.T, h http.Header, body []byte, tr *rbstate.Track) {
@@ -218,5 +236,72 @@ func TestBridgeDisplayWaveFallsBackToAnalysisPath(t *testing.T) {
 	}
 	if w == nil || len(w.Bands) == 0 {
 		t.Fatalf("bridgeDisplayWave returned nil for unstaged track with AnalysisPath=%q", tr.AnalysisPath)
+	}
+}
+
+func TestLibraryDisplayReadsUnloadedOnDemandTrackAndDirectArtwork(t *testing.T) {
+	ctx := context.Background()
+	mediaRoot := t.TempDir()
+	stick := filepath.Join(mediaRoot, "ONDEMAND_SHADOW")
+	if err := os.MkdirAll(stick, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testfixture.Export(t, stick)
+	wave := make([]byte, 12+3*300) // 300 PWV7 bins = 2.000 s at 150 Hz, matching WAV(true)
+	binary.BigEndian.PutUint32(wave, 3)
+	binary.BigEndian.PutUint32(wave[4:], 300)
+	for i := 0; i < 300; i++ {
+		wave[12+3*i] = 120
+		wave[12+3*i+1] = 80
+		wave[12+3*i+2] = 40
+	}
+	testfixture.Write(t, stick, "PIONEER/USBANLZ/P001/ANLZ0000.2EX", testfixture.PMAI(testfixture.Section("PWV7", 24, wave)))
+	if _, err := bridge.ConvertAtMount(ctx, stick, bridge.MountOptions{OnDemand: true}); err != nil {
+		t.Fatalf("ConvertAtMount(OnDemand): %v", err)
+	}
+	artRel := "PIONEER/Artwork/00001/cover.jpg"
+	artFull := filepath.Join(stick, filepath.FromSlash(artRel))
+	if err := os.MkdirAll(filepath.Dir(artFull), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var jpgBuf bytes.Buffer
+	if err := jpeg.Encode(&jpgBuf, image.NewRGBA(image.Rect(0, 0, 2, 2)), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artFull, jpgBuf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dbDir := filepath.Join(stick, "Engine Library", "Database2")
+	snap, err := rbstate.Load(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tr *rbstate.Track
+	for _, cand := range snap.Tracks {
+		if cand.AnalysisPath != "" {
+			tr = cand
+			break
+		}
+	}
+	if tr == nil {
+		t.Fatal("missing analyzed track")
+	}
+	tr.ArtworkPath = "/" + artRel
+	if err := snap.SaveNext(dbDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := rbstate.Promote(dbDir); err != nil {
+		t.Fatal(err)
+	}
+
+	asset, err := libraryDisplay(ctx, filepath.Join(stick, filepath.FromSlash(tr.Rel)), t.TempDir(), mediaRoot)
+	if err != nil {
+		t.Fatalf("libraryDisplay on unloaded OnDemand track: %v", err)
+	}
+	if !asset.Detail || asset.DetailSource != "rekordbox" || len(asset.Beats) == 0 || asset.DurationMS <= 0 {
+		t.Fatalf("unexpected OnDemand shadow display asset: detail=%v src=%q beats=%d dur=%.1f", asset.Detail, asset.DetailSource, len(asset.Beats), asset.DurationMS)
+	}
+	if !bytes.Equal(asset.Artwork, jpgBuf.Bytes()) {
+		t.Fatalf("expected direct-read artwork bytes (%d), got %d", jpgBuf.Len(), len(asset.Artwork))
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"golang.org/x/sys/unix"
 )
 
@@ -274,5 +275,110 @@ func TestCleanProlinkCachePausesWhenBusyAndResumesOnNextInsert(t *testing.T) {
 	}
 	if len(logs) != 2 || !strings.Contains(logs[1], "removed leftover .prolink-cache") {
 		t.Fatalf("expected completion log on next insert, got %v", logs)
+	}
+}
+
+func TestCleanProlinkCacheMountIDPreparingFailClosedAndByteAccounting(t *testing.T) {
+	// 1. Default grace must outlast the 17 s mount window.
+	def := newProlinkCleanupWatcher()
+	if def.grace < 18*time.Second {
+		t.Fatalf("default grace = %s, want >= 18s", def.grace)
+	}
+
+	// 2. Hardlinked + sparse files must not overcount bytesFreed.
+	drive := t.TempDir()
+	cache := filepath.Join(drive, ".prolink-cache", "CDJ-3000")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(cache, "orig.dat")
+	if err := os.WriteFile(src, []byte("hello-world-123"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(src, filepath.Join(cache, "hardlink.dat")); err != nil {
+		t.Fatal(err)
+	}
+	sparse, err := os.OpenFile(filepath.Join(cache, "sparse.bin"), os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sparse.Truncate(10 << 20); err != nil {
+		sparse.Close()
+		t.Fatal(err)
+	}
+	sparse.Close()
+
+	res, err := cleanProlinkCache(context.Background(), drive, prolinkCleanupOptions{
+		isBusy:     func() bool { return false },
+		isEjecting: func() bool { return false },
+		logf:       func(string, ...any) {},
+	})
+	if err != nil || !res.Removed || res.BytesFreed != 15 {
+		t.Fatalf("hardlink+sparse accounting = %+v (err=%v), want Removed=true BytesFreed=15", res, err)
+	}
+
+	// 3. Stale/missing deck activity fails closed when using default busy check; preparing defers cleanly.
+	priDir := t.TempDir()
+	defer bridge.SetPriorityDirForTest(priDir)()
+	prepFile := filepath.Join(t.TempDir(), "usb-prep")
+	t.Setenv("ENGINEX_USB_PREPARING_PATH", prepFile)
+
+	drive2 := t.TempDir()
+	cache2 := filepath.Join(drive2, ".prolink-cache", "CDJ-2")
+	if err := os.MkdirAll(cache2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache2, "f.dat"), []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Missing deck activity -> pauses (fails closed).
+	resStale, err := cleanProlinkCache(context.Background(), drive2, prolinkCleanupOptions{
+		isEjecting: func() bool { return false },
+		logf:       func(string, ...any) {},
+	})
+	if err != nil || !resStale.Stopped || resStale.Removed {
+		t.Fatalf("stale/missing deck activity did not fail closed: %+v err=%v", resStale, err)
+	}
+
+	// Preparing file present -> watcher waits without marking handled; mountID bump re-triggers!
+	if err := os.WriteFile(prepFile, []byte(`{"state":"loading"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	var mntID uint64 = 100
+	cleanCalls := 0
+	cw := &prolinkCleanupWatcher{
+		handled:   map[mountDevKey]bool{},
+		firstSeen: map[mountDevKey]time.Time{},
+		list:      func() []string { return []string{drive2} },
+		statMount: func(m string) (mountDevKey, bool) {
+			return mountDevKey{mount: m, dev: 42, mntID: mntID}, true
+		},
+		isPreparing: usbPreparingActive,
+		clean: func(context.Context, string) (prolinkCleanupResult, error) {
+			cleanCalls++
+			return prolinkCleanupResult{Removed: true}, nil
+		},
+		grace: 18 * time.Second,
+		now:   func() time.Time { return now },
+	}
+	cw.step(context.Background())
+	now = now.Add(19 * time.Second)
+	cw.step(context.Background())
+	if cleanCalls != 0 {
+		t.Fatalf("cleaned while usb preparing was active: cleanCalls=%d", cleanCalls)
+	}
+	_ = os.Remove(prepFile)
+	cw.step(context.Background())
+	if cleanCalls != 1 {
+		t.Fatalf("did not clean after usb preparing ended: cleanCalls=%d", cleanCalls)
+	}
+	// Quick remount at same path & dev with new Linux mntID must clean again!
+	mntID = 101
+	cw.step(context.Background())
+	now = now.Add(19 * time.Second)
+	cw.step(context.Background())
+	if cleanCalls != 2 {
+		t.Fatalf("new mount ID on same path/dev did not re-trigger cleanup: cleanCalls=%d", cleanCalls)
 	}
 }

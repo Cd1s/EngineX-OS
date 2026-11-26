@@ -71,6 +71,10 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 				writtenByID[id] = append([]byte(nil), digest...)
 			}
 		}
+		if e = wRows.Err(); e != nil {
+			wRows.Close()
+			return nil, e
+		}
 		if e = wRows.Close(); e != nil {
 			return nil, e
 		}
@@ -92,6 +96,10 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 			return nil, err
 		}
 		trackPath[id] = p
+	}
+	if err = tRows.Err(); err != nil {
+		tRows.Close()
+		return nil, err
 	}
 	if err = tRows.Close(); err != nil {
 		return nil, err
@@ -118,6 +126,10 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 		complete := fingerprint != "" && !strings.HasPrefix(fingerprint, "fast:")
 		t := &rbstate.Track{Key: rbstate.FoldPath(rel), EngineID: id, Rel: rel, Resolved: complete, Rating: -1, Written: writtenByID[id]}
 		s.Tracks[t.Key] = t
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
 	}
 	if err = rows.Close(); err != nil {
 		return nil, err
@@ -149,6 +161,10 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 				t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = cues, loops, uint32(active), true
 			}
 		}
+		if e = fastRows.Err(); e != nil {
+			fastRows.Close()
+			return nil, e
+		}
 		if e = fastRows.Close(); e != nil {
 			return nil, e
 		}
@@ -170,6 +186,10 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 			}
 			key := fmt.Sprintf("old:%d", id) // no list of the view has this key: removed, then written anew
 			s.Lists[key] = &rbstate.List{Key: key, EngineID: id}
+		}
+		if err = lists.Err(); err != nil {
+			lists.Close()
+			return nil, err
 		}
 		if err = lists.Close(); err != nil {
 			return nil, err

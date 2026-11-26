@@ -185,6 +185,48 @@ static void sc_rbb_recompute_active_locked(void) {
     __atomic_store_n(&sc_rbb_active, any, __ATOMIC_RELAXED);
 }
 
+static inline int sc_rbb_path_has_media_prefix(const char *path) {
+    const char *prefix = sc_rbb_drives;
+    if (!path || !prefix || !*prefix) return 0;
+    return strncmp(path, prefix, strlen(prefix)) == 0;
+}
+
+static uint64_t sc_rbb_hash_str(const char *s, size_t *len_out) {
+    uint64_t h = 14695981039346656037ULL;
+    size_t n = 0;
+    if (s) {
+        while (*s) {
+            h ^= (uint8_t)*s++;
+            h *= 1099511628211ULL;
+            n++;
+        }
+    }
+    if (len_out) *len_out = n;
+    return h;
+}
+
+static double sc_rbb_parse_nonneg_double(const char *s, int *ok_out) {
+    if (ok_out) *ok_out = 0;
+    if (!s || *s < '0' || *s > '9') return 0.0;
+    double val = 0.0;
+    while (*s >= '0' && *s <= '9') {
+        val = val * 10.0 + (double)(*s - '0');
+        s++;
+    }
+    if (*s == '.') {
+        s++;
+        double scale = 0.1;
+        while (*s >= '0' && *s <= '9') {
+            val += (double)(*s - '0') * scale;
+            scale *= 0.1;
+            s++;
+        }
+    }
+    if (*s != '\0' || !(val >= 0.0 && val <= 86400.0 * 7.0)) return 0.0;
+    if (ok_out) *ok_out = 1;
+    return val;
+}
+
 static void sc_rbb_clear_drive_index_locked(struct sc_rbb_drive *d) {
     free(d->raw_buf);
     free(d->tracks);
@@ -199,7 +241,7 @@ static void sc_rbb_clear_drive_index_locked(struct sc_rbb_drive *d) {
     d->idx_size = 0;
     d->idx_mtime_sec = 0;
     d->idx_mtime_nsec = 0;
-    d->gen = ++sc_rbb_gen_seq;
+    __atomic_store_n(&d->gen, ++sc_rbb_gen_seq, __ATOMIC_RELEASE);
 }
 
 static int sc_rbb_cmp_track(const void *a, const void *b) {
@@ -269,10 +311,11 @@ static int sc_rbb_parse_index_buf(char *buf, size_t len, char uuid[64],
             char *ep = NULL;
             long long id = strtoll(f1, &ep, 10);
             if (!ep || *ep || id <= 0) continue;
-            double dur = strtod(f2 + 1, &ep);
-            if (dur < 0 || dur > 86400.0 * 7) dur = 0;
+            int dur_ok = 0;
+            double dur = sc_rbb_parse_nonneg_double(f2 + 1, &dur_ok);
+            if (!dur_ok) dur = 0.0;
             unsigned long sr = strtoul(f3 + 1, &ep, 10);
-            if (sr < 8000 || sr > 384000) sr = 44100;
+            if (!ep || *ep || sr < 8000 || sr > 384000) sr = 44100;
             const char *ap = f4 + 1;
             if (!sc_rbb_safe_rel(ap)) continue;
             if (ti > 0 && tracks[ti - 1].id > (int64_t)id) t_sorted = 0;
@@ -306,8 +349,7 @@ static int sc_rbb_parse_index_buf(char *buf, size_t len, char uuid[64],
     return 1;
 }
 
-static char *sc_rbb_read_file_bounded(const char *path, size_t max_bytes, size_t *len_out) {
-    int fd = sc_rbb_raw_open_ro(path);
+static char *sc_rbb_read_fd_bounded(int fd, size_t max_bytes, size_t *len_out) {
     if (fd < 0) return NULL;
     size_t cap = 4096, len = 0;
     char *buf = (char *)malloc(cap + 1);
@@ -381,14 +423,23 @@ static int sc_rbb_ensure_drive(const char *mount) {
     int prev_has = (slot >= 0) ? sc_rbb_tbl[slot].has_index : 0;
     pthread_mutex_unlock(&sc_rbb_mu);
 
-    char idx_path[PATH_MAX];
-    int pn = snprintf(idx_path, sizeof idx_path, "%s/Engine Library/Database2/.rb-bridge-browse", mount);
-    if (pn <= 0 || (size_t)pn >= sizeof idx_path) return -1;
+    char *idx_path = (char *)malloc(PATH_MAX);
+    if (!idx_path) return -1;
+    int pn = snprintf(idx_path, PATH_MAX, "%s/Engine Library/Database2/.rb-bridge-browse", mount);
+    if (pn <= 0 || (size_t)pn >= PATH_MAX) {
+        free(idx_path);
+        return -1;
+    }
 
     struct stat st;
     sc_rbb_in_hook++;
-    int stat_rc = stat(idx_path, &st);
-    sc_rbb_in_hook--;
+    int idx_fd = sc_rbb_raw_open_ro(idx_path);
+    int stat_rc = (idx_fd >= 0) ? fstat(idx_fd, &st) : -1;
+    if (idx_fd >= 0 && stat_rc != 0) {
+        close(idx_fd);
+        idx_fd = -1;
+    }
+    free(idx_path);
 
     int unchanged = 0;
     char *raw = NULL;
@@ -405,9 +456,8 @@ static int sc_rbb_ensure_drive(const char *mount) {
             (int64_t)st.st_mtim.tv_nsec == prev_nsec) {
             unchanged = 1;
         } else {
-            sc_rbb_in_hook++;
-            raw = sc_rbb_read_file_bounded(idx_path, SC_RBB_MAX_INDEX_BYTES, &raw_len);
-            sc_rbb_in_hook--;
+            raw = sc_rbb_read_fd_bounded(idx_fd, SC_RBB_MAX_INDEX_BYTES, &raw_len);
+            idx_fd = -1;
             if (raw) {
                 parsed = sc_rbb_parse_index_buf(raw, raw_len, uuid, &tracks, &nt, &arts, &na);
                 if (!parsed) {
@@ -417,6 +467,8 @@ static int sc_rbb_ensure_drive(const char *mount) {
             }
         }
     }
+    if (idx_fd >= 0) close(idx_fd);
+    sc_rbb_in_hook--;
 
     pthread_mutex_lock(&sc_rbb_mu);
     slot = -1;
@@ -432,9 +484,13 @@ static int sc_rbb_ensure_drive(const char *mount) {
         if (sc_rbb_tbl[i].used && sc_rbb_tbl[i].last_check < sc_rbb_tbl[oldest].last_check)
             oldest = i;
     }
+    int cleared_active = 0;
     if (slot < 0) {
         slot = (empty >= 0) ? empty : oldest;
-        if (sc_rbb_tbl[slot].used) sc_rbb_clear_drive_index_locked(&sc_rbb_tbl[slot]);
+        if (sc_rbb_tbl[slot].used) {
+            cleared_active = sc_rbb_tbl[slot].has_index;
+            sc_rbb_clear_drive_index_locked(&sc_rbb_tbl[slot]);
+        }
         sc_rbb_tbl[slot].used = 1;
         memcpy(sc_rbb_tbl[slot].mount, mount, mlen + 1);
         sc_rbb_tbl[slot].mount_len = mlen;
@@ -442,6 +498,7 @@ static int sc_rbb_ensure_drive(const char *mount) {
     struct sc_rbb_drive *d = &sc_rbb_tbl[slot];
     d->last_check = now ? now : 1;
     if (unchanged && d->has_index) {
+        if (cleared_active) sc_rbb_recompute_active_locked();
         pthread_mutex_unlock(&sc_rbb_mu);
         return slot;
     }
@@ -464,8 +521,8 @@ static int sc_rbb_ensure_drive(const char *mount) {
     free(raw);
     free(tracks);
     free(arts);
-    if (d->has_index) {
-        sc_rbb_clear_drive_index_locked(d);
+    if (d->has_index || cleared_active) {
+        if (d->has_index) sc_rbb_clear_drive_index_locked(d);
         sc_rbb_recompute_active_locked();
     }
     pthread_mutex_unlock(&sc_rbb_mu);
@@ -580,9 +637,10 @@ static int sc_rbb_rdr_read(struct sc_rbb_reader *r, uint8_t *dst, size_t n) {
     return 1;
 }
 
-static void sc_rbb_encode_bins(int kind, const uint8_t *data, uint32_t width, uint32_t count,
-                               double dur, uint32_t sr, int blue_tint, uint8_t out[SC_RBB_BLOB_LEN]) {
-    uint8_t raw[SC_RBB_RAW_LEN];
+static int sc_rbb_encode_bins(int kind, const uint8_t *data, uint32_t width, uint32_t count,
+                              double dur, uint32_t sr, int blue_tint, uint8_t out[SC_RBB_BLOB_LEN]) {
+    uint8_t *raw = (uint8_t *)malloc(SC_RBB_RAW_LEN);
+    if (!raw) return 0;
     const uint64_t bins = 1024;
     if (sr == 0) sr = 44100;
     uint64_t samples = (dur > 0.0) ? (uint64_t)(dur * (double)sr + 0.5) : bins;
@@ -637,6 +695,8 @@ static void sc_rbb_encode_bins(int kind, const uint8_t *data, uint32_t width, ui
     raw[24 + 1024 * 3 + 1] = top[1];
     raw[24 + 1024 * 3 + 2] = top[2];
     sc_rbb_qcompress_stored(raw, out);
+    free(raw);
+    return 1;
 }
 
 // Scan one ANLZ file for the best matching overview waveform.
@@ -728,16 +788,27 @@ static int sc_rbb_scan_anlz_file(const char *path, int mode, double dur, uint32_
     close(fd);
     free(r);
     if (!best_data) return 0;
-    sc_rbb_encode_bins(best_kind, best_data, best_w, best_n, dur, sr, 1, out);
-    if (is_mono_out) *is_mono_out = (best_kind == SC_RBB_W_MONO) ? 1 : 0;
+    int enc_ok = sc_rbb_encode_bins(best_kind, best_data, best_w, best_n, dur, sr, 1, out);
+    if (enc_ok && is_mono_out) *is_mono_out = (best_kind == SC_RBB_W_MONO) ? 1 : 0;
     free(best_data);
-    return 1;
+    return enc_ok;
 }
 
 static int sc_rbb_build_from_anlz(const char *mount, const char *ap, double dur, uint32_t sr,
                                   uint8_t out[SC_RBB_BLOB_LEN], uint8_t *is_mono_out) {
-    char base[PATH_MAX];
-    if (!sc_rbb_join_rel(base, sizeof base, mount, ap)) return 0;
+    size_t cap = strlen(mount) + strlen(ap) + 16;
+    char *base = (char *)malloc(cap);
+    char *path = (char *)malloc(cap);
+    if (!base || !path) {
+        free(base);
+        free(path);
+        return 0;
+    }
+    if (!sc_rbb_join_rel(base, cap, mount, ap)) {
+        free(base);
+        free(path);
+        return 0;
+    }
     size_t blen = strlen(base);
     int lower_hint = 0;
     if (blen >= 4 && base[blen - 4] == '.') {
@@ -746,19 +817,27 @@ static int sc_rbb_build_from_anlz(const char *mount, const char *ap, double dur,
         blen -= 4;
     }
 
-    char path[PATH_MAX];
+    int ok = 0;
     static const char *const exts_upper[3] = {".2EX", ".EXT", ".DAT"};
     static const char *const exts_lower[3] = {".2ex", ".ext", ".dat"};
     for (int mode = 0; mode < 3; mode++) {
-        if (blen + 4 >= sizeof path) return 0;
+        if (blen + 5 > cap) break;
         if (lower_hint) {
-            snprintf(path, sizeof path, "%s%s", base, exts_lower[mode]);
-            if (sc_rbb_scan_anlz_file(path, mode, dur, sr, out, is_mono_out)) return 1;
+            snprintf(path, cap, "%s%s", base, exts_lower[mode]);
+            if (sc_rbb_scan_anlz_file(path, mode, dur, sr, out, is_mono_out)) {
+                ok = 1;
+                break;
+            }
         }
-        snprintf(path, sizeof path, "%s%s", base, exts_upper[mode]);
-        if (sc_rbb_scan_anlz_file(path, mode, dur, sr, out, is_mono_out)) return 1;
+        snprintf(path, cap, "%s%s", base, exts_upper[mode]);
+        if (sc_rbb_scan_anlz_file(path, mode, dur, sr, out, is_mono_out)) {
+            ok = 1;
+            break;
+        }
     }
-    return 0;
+    free(base);
+    free(path);
+    return ok;
 }
 
 // Fetch or synthesize overview blob for (slot, expected_gen, track_id) into dst[3114].
@@ -767,19 +846,13 @@ static int sc_rbb_fetch_overview(int slot, uint64_t expected_gen, int64_t track_
                                  uint8_t dst[SC_RBB_BLOB_LEN]) {
     if (slot < 0 || slot >= SC_RBB_MAX_DRIVES || track_id <= 0) return 0;
 
-    char mount[PATH_MAX];
-    char ap[PATH_MAX];
-    double dur = 0;
-    uint32_t sr = 44100;
-    uint64_t gen = 0;
-
     pthread_mutex_lock(&sc_rbb_mu);
     struct sc_rbb_drive *d = &sc_rbb_tbl[slot];
     if (!d->used || !d->has_index || (expected_gen != 0 && d->gen != expected_gen)) {
         pthread_mutex_unlock(&sc_rbb_mu);
         return 0;
     }
-    gen = d->gen;
+    uint64_t gen = d->gen;
     for (int i = 0; i < SC_RBB_CACHE_CAP; i++) {
         if (sc_rbb_cache[i].state != 0 && sc_rbb_cache[i].drive_gen == gen &&
             sc_rbb_cache[i].track_id == track_id) {
@@ -791,17 +864,25 @@ static int sc_rbb_fetch_overview(int slot, uint64_t expected_gen, int64_t track_
         }
     }
     struct sc_rbb_track *tr = sc_rbb_find_track_locked(d, track_id);
-    if (!tr || !tr->ap || strlen(tr->ap) >= sizeof ap) {
+    if (!tr || !tr->ap) {
         pthread_mutex_unlock(&sc_rbb_mu);
         return 0;
     }
+    size_t alen = strlen(tr->ap);
+    uint8_t *scratch = (uint8_t *)malloc(d->mount_len + 1 + alen + 1 + SC_RBB_BLOB_LEN);
+    if (!scratch) {
+        pthread_mutex_unlock(&sc_rbb_mu);
+        return 0;
+    }
+    char *mount = (char *)scratch;
+    char *ap = (char *)(scratch + d->mount_len + 1);
+    uint8_t *built = scratch + d->mount_len + 1 + alen + 1;
     memcpy(mount, d->mount, d->mount_len + 1);
-    strcpy(ap, tr->ap);
-    dur = tr->dur;
-    sr = tr->sr;
+    memcpy(ap, tr->ap, alen + 1);
+    double dur = tr->dur;
+    uint32_t sr = tr->sr;
     pthread_mutex_unlock(&sc_rbb_mu);
 
-    uint8_t built[SC_RBB_BLOB_LEN];
     uint8_t is_mono = 0;
     sc_rbb_in_hook++;
     int ok = sc_rbb_build_from_anlz(mount, ap, dur, sr, built, &is_mono);
@@ -837,6 +918,7 @@ static int sc_rbb_fetch_overview(int slot, uint64_t expected_gen, int64_t track_
         sc_rbb_cache[victim].state = 2;
     }
     pthread_mutex_unlock(&sc_rbb_mu);
+    free(scratch);
     return ok;
 }
 
@@ -853,7 +935,7 @@ static int sc_rbb_parse_rgb_rel(const char *rel, char uuid_out[64], int64_t *id_
     const char *file = slash + 1;
     size_t flen = strlen(file);
     if (flen <= 4 || strcmp(file + flen - 4, ".rgb") != 0) return 0;
-    if (strchr(file, '/')) return 0;
+    if (strchr(file, '/') || file[0] < '1' || file[0] > '9') return 0;
     char *ep = NULL;
     long long id = strtoll(file, &ep, 10);
     if (!ep || ep != file + flen - 4 || id <= 0) return 0;
@@ -941,16 +1023,20 @@ static int sc_rbb_map_artwork(const char *path, char out[PATH_MAX]) {
 // Intercept read-only open of OverviewData/<uuid>/<id>.rgb and return a memfd_create fd.
 // Returns >= 0 fd if handled, -1 to fall through to normal open.
 static int sc_rbb_open_rgb(const char *path, int flags) {
-    if (!path || sc_rbb_in_hook || !sc_rbb_is_sched_other()) return -1;
-    int is_write = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) != 0;
+    if (!path || sc_rbb_in_hook || (flags & O_DIRECTORY) || !sc_rbb_is_sched_other()) return -1;
+    int is_write = (flags & O_ACCMODE) != O_RDONLY || (flags & (O_CREAT | O_TRUNC | O_APPEND)) != 0;
     int slot = -1;
     uint64_t gen = 0;
     int64_t id = 0;
     if (!sc_rbb_lookup_rgb_track(path, is_write, &slot, &gen, &id)) return -1;
     if (is_write) return -1;
 
-    uint8_t blob[SC_RBB_BLOB_LEN];
-    if (!sc_rbb_fetch_overview(slot, gen, id, blob)) return -1;
+    uint8_t *blob = (uint8_t *)malloc(SC_RBB_BLOB_LEN);
+    if (!blob) return -1;
+    if (!sc_rbb_fetch_overview(slot, gen, id, blob)) {
+        free(blob);
+        return -1;
+    }
 
 #ifdef __NR_memfd_create
     int fd = (int)syscall(__NR_memfd_create, "rb_rgb",
@@ -958,17 +1044,22 @@ static int sc_rbb_open_rgb(const char *path, int flags) {
 #else
     int fd = -1;
 #endif
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        free(blob);
+        return -1;
+    }
     size_t written = 0;
     while (written < SC_RBB_BLOB_LEN) {
         ssize_t w = write(fd, blob + written, SC_RBB_BLOB_LEN - written);
         if (w < 0) {
             if (errno == EINTR) continue;
             close(fd);
+            free(blob);
             return -1;
         }
         written += (size_t)w;
     }
+    free(blob);
     if (lseek(fd, 0, SEEK_SET) != 0) {
         close(fd);
         return -1;
@@ -1040,7 +1131,10 @@ static struct sc_rbb_sqlite_api sc_rbb_sq;
 
 struct sc_rbb_stmt_meta {
     const void *stmt;
+    void *db;
     const char *sql_ptr;
+    size_t sql_len;
+    uint64_t sql_hash;
     int col_count;
     int relevant;
     int drive_slot;
@@ -1072,9 +1166,16 @@ static int sc_rbb_is_browse_thread(void) {
     return strcmp(comm, "Thread (pooled)") == 0;
 }
 
+static int sc_rbb_is_ident_char(char c) {
+    unsigned char uc = (unsigned char)c;
+    return (uc >= 'a' && uc <= 'z') || (uc >= 'A' && uc <= 'Z') ||
+           (uc >= '0' && uc <= '9') || uc == '_';
+}
+
 static int sc_rbb_sql_has_path_filter(const char *sql) {
     for (const char *p = sql; *p; p++) {
-        if ((p[0] == 'p' || p[0] == 'P') && !strncasecmp(p, "path", 4)) {
+        if ((p[0] == 'p' || p[0] == 'P') && !strncasecmp(p, "path", 4) &&
+            (p == sql || !sc_rbb_is_ident_char(p[-1]))) {
             const char *q = p + 4;
             while (*q == ' ' || *q == '\t') q++;
             if (*q == '=') return 1;
@@ -1085,10 +1186,11 @@ static int sc_rbb_sql_has_path_filter(const char *sql) {
 
 static int64_t sc_rbb_sql_inline_id(const char *sql) {
     for (const char *p = sql; *p; p++) {
-        if ((p[0] == 'w' || p[0] == 'W') && !strncasecmp(p, "where", 5)) {
+        if ((p[0] == 'w' || p[0] == 'W') && !strncasecmp(p, "where", 5) &&
+            (p == sql || !sc_rbb_is_ident_char(p[-1])) && !sc_rbb_is_ident_char(p[5])) {
             const char *q = p + 5;
             while (*q) {
-                if ((!strncasecmp(q, "trackId", 7) && (q[7] == ' ' || q[7] == '=')) ||
+                if ((!strncasecmp(q, "trackId", 7) && !sc_rbb_is_ident_char(q[-1]) && (q[7] == ' ' || q[7] == '=')) ||
                     (!strncasecmp(q, "id", 2) && (q == p + 5 || q[-1] == ' ' || q[-1] == '.' || q[-1] == '(') &&
                      (q[2] == ' ' || q[2] == '='))) {
                     const char *eq = strchr(q, '=');
@@ -1115,18 +1217,32 @@ static const struct sc_rbb_stmt_meta *sc_rbb_inspect_stmt(void *stmt) {
         !sc_rbb_sq.db_handle || !sc_rbb_sq.db_filename)
         return NULL;
     const char *sql = sc_rbb_sq.sql(stmt);
+    void *db = sc_rbb_sq.db_handle(stmt);
     int n = sc_rbb_sq.col_count(stmt);
+    size_t sql_len = 0;
+    uint64_t sql_hash = sc_rbb_hash_str(sql, &sql_len);
     for (int i = 0; i < SC_RBB_STMT_CACHE_CAP; i++) {
-        if (sc_rbb_stmts[i].stmt == stmt && sc_rbb_stmts[i].sql_ptr == sql &&
-            sc_rbb_stmts[i].col_count == n) {
-            return sc_rbb_stmts[i].relevant ? &sc_rbb_stmts[i] : NULL;
+        struct sc_rbb_stmt_meta *c = &sc_rbb_stmts[i];
+        if (c->stmt == stmt && c->db == db && c->sql_ptr == sql &&
+            c->sql_len == sql_len && c->sql_hash == sql_hash && c->col_count == n) {
+            if (c->relevant) {
+                uint64_t cur_gen = __atomic_load_n(&sc_rbb_tbl[c->drive_slot].gen, __ATOMIC_ACQUIRE);
+                if (cur_gen != c->drive_gen) {
+                    // Refresh stale slot when .rb-bridge-browse regenerated or evicted.
+                    break;
+                }
+            }
+            return c->relevant ? c : NULL;
         }
     }
 
     struct sc_rbb_stmt_meta m;
     memset(&m, 0, sizeof m);
     m.stmt = stmt;
+    m.db = db;
     m.sql_ptr = sql;
+    m.sql_len = sql_len;
+    m.sql_hash = sql_hash;
     m.col_count = n;
     m.drive_slot = -1;
     m.col_id = -1;
@@ -1134,7 +1250,6 @@ static const struct sc_rbb_stmt_meta *sc_rbb_inspect_stmt(void *stmt) {
     m.col_overview = -1;
 
     if (sql && n > 0 && !strncasecmp(sql, "SELECT ", 7) && !sc_rbb_sql_has_path_filter(sql)) {
-        void *db = sc_rbb_sq.db_handle(stmt);
         const char *fname = db ? sc_rbb_sq.db_filename(db, "main") : NULL;
         char mount[PATH_MAX];
         const char *rel = NULL;
@@ -1158,7 +1273,7 @@ static const struct sc_rbb_stmt_meta *sc_rbb_inspect_stmt(void *stmt) {
                         pthread_mutex_lock(&sc_rbb_mu);
                         if (sc_rbb_tbl[slot].used && sc_rbb_tbl[slot].has_index) {
                             m.drive_slot = slot;
-                            m.drive_gen = sc_rbb_tbl[slot].gen;
+                            m.drive_gen = __atomic_load_n(&sc_rbb_tbl[slot].gen, __ATOMIC_RELAXED);
                             m.relevant = 1;
                         }
                         pthread_mutex_unlock(&sc_rbb_mu);
@@ -1168,6 +1283,13 @@ static const struct sc_rbb_stmt_meta *sc_rbb_inspect_stmt(void *stmt) {
         }
     }
 
+    // Reuse an existing slot matching this stmt if refreshing after drive_gen bump.
+    for (int i = 0; i < SC_RBB_STMT_CACHE_CAP; i++) {
+        if (sc_rbb_stmts[i].stmt == stmt) {
+            sc_rbb_stmts[i] = m;
+            return sc_rbb_stmts[i].relevant ? &sc_rbb_stmts[i] : NULL;
+        }
+    }
     unsigned idx = sc_rbb_stmt_next++ % SC_RBB_STMT_CACHE_CAP;
     sc_rbb_stmts[idx] = m;
     return sc_rbb_stmts[idx].relevant ? &sc_rbb_stmts[idx] : NULL;

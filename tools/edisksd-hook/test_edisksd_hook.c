@@ -352,6 +352,19 @@ static void test_premount_shallow_walk_large_assets(const char *root) {
     close(libfd);
     assert(!unlink(art));
     assert(!rename(art_real,art));
+
+    // Special file (FIFO) inside Engine Library/Database2 must be rejected with ELOOP;
+    // past deadline must fail with ETIMEDOUT.
+    char badfifo[PATH_MAX];join(badfifo,vol,"Engine Library/Database2/pipe.db");
+    assert(!mkfifo(badfifo,0600));
+    libfd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);assert(libfd>=0);
+    errno=0;assert(validate_library_shallow(libfd,now_ms()+500)==-1&&errno==ELOOP);
+    close(libfd);
+    assert(!unlink(badfifo));
+
+    libfd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);assert(libfd>=0);
+    errno=0;assert(validate_library_shallow(libfd,now_ms()-10)==-1&&errno==ETIMEDOUT);
+    close(libfd);
     test_rb_bridge[0]=0;
     printf("pre-mount shallow walk on 12,000 OverviewData+Artwork files (%lld ms) + direct symlink rejection: PASS\n",(long long)shallow_ms);
 }

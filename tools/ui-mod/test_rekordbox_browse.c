@@ -244,6 +244,49 @@ static void *run_on_named_thread(void *arg) {
     return NULL;
 }
 
+struct tls_alias_arg {
+    const char *db_file;
+    char *root;
+};
+
+static void *run_tls_alias_and_gen_test(void *arg) {
+    struct tls_alias_arg *a = (struct tls_alias_arg *)arg;
+    assert(prctl(PR_SET_NAME, "Thread (pooled)", 0, 0, 0) == 0);
+
+    char sql_buf[128];
+    strcpy(sql_buf, "SELECT id, isAnalyzed, overviewWaveFormData FROM Track WHERE id = ?");
+    struct fake_stmt st = {
+        .sql = sql_buf,
+        .db_file = a->db_file,
+        .ncols = 3,
+        .names = {"id", "isAnalyzed", "overviewWaveFormData"},
+        .tid = 10,
+        .analyzed = 0,
+        .overview = NULL,
+        .overview_len = 0,
+    };
+    assert(sc_rbb_column_int_hook(&st, 1) == 1);
+
+    /* Bumping drive gen invalidates cached stmt drive_gen on the same thread & st handle */
+    __atomic_add_fetch(&sc_rbb_tbl[0].gen, 1, __ATOMIC_RELEASE);
+    assert(sc_rbb_column_int_hook(&st, 1) == 1);
+
+    /* Reuse exact same stmt & sql_buf pointer with rewritten SQL text (3 columns) -> must NOT alias */
+    strcpy(sql_buf, "SELECT id, isAnalyzed, overviewWaveFormData FROM Track WHERE path = ?");
+    assert(sc_rbb_column_int_hook(&st, 1) == 0);
+
+    /* Evicting the active indexed drive across SC_RBB_MAX_DRIVES unindexed paths recomputes sc_rbb_active=0 */
+    assert(__atomic_load_n(&sc_rbb_active, __ATOMIC_RELAXED) == 1);
+    for (int i = 0; i < SC_RBB_MAX_DRIVES; i++) {
+        char m[PATH_MAX];
+        snprintf(m, sizeof m, "%s/UNINDEXED_%d", a->root, i);
+        mkdir_p(m);
+        (void)sc_rbb_ensure_drive(m);
+    }
+    assert(__atomic_load_n(&sc_rbb_active, __ATOMIC_RELAXED) == 0);
+    return NULL;
+}
+
 int main(void) {
     char root_tpl[] = "/tmp/test_rbb_XXXXXX";
     char *root = mkdtemp(root_tpl);
@@ -374,11 +417,61 @@ int main(void) {
     path_fmt(rgb_req, sizeof rgb_req, ovdir, "/40.rgb");
     assert(sc_rbb_open_rgb(rgb_req, O_RDONLY) < 0);
 
-    /* Write-open marks track on_disk so future reads bypass memfd */
+    /* Write-open or O_APPEND/O_DIRECTORY must never bypass to memfd */
     path_fmt(rgb_req, sizeof rgb_req, ovdir, "/30.rgb");
+    assert(sc_rbb_open_rgb(rgb_req, O_RDONLY | O_DIRECTORY) < 0);
+    assert(sc_rbb_open_rgb(rgb_req, O_RDONLY | O_APPEND) < 0);
     assert(sc_rbb_open_rgb(rgb_req, O_WRONLY | O_CREAT) < 0);
     assert(sc_rbb_access_rgb(rgb_req, R_OK) == 0);
     assert(sc_rbb_open_rgb(rgb_req, O_RDONLY) < 0);
+
+    /* PWV5 (16-bit packed RGB) and PWV3 (monochrome tinted blue) decoding + inline WHERE boundary */
+    assert(sc_rbb_sql_inline_id("SELECT nowhere, overviewWaveFormData FROM Track WHERE trackId = 10") == 10);
+    {
+        /* Track 25: PWV5 in .EXT */
+        uint8_t pwv5[1200 * 2];
+        for (int i = 0; i < 1200; i++) {
+            uint16_t val = (uint16_t)((7u << 13) | (0u << 10) | (7u << 7) | (31u << 2)); /* magenta */
+            pwv5[i * 2 + 0] = (uint8_t)(val >> 8);
+            pwv5[i * 2 + 1] = (uint8_t)val;
+        }
+        char p5path[PATH_MAX];
+        path_fmt(p5path, sizeof p5path, anlzdir, "/ANLZ0005.EXT");
+        uint32_t total5 = 28 + 24 + sizeof pwv5;
+        uint8_t *b5 = (uint8_t *)calloc(1, total5);
+        assert(b5 != NULL);
+        memcpy(b5, "PMAI", 4); put_be32(b5 + 4, 28); put_be32(b5 + 8, total5);
+        uint8_t *s5 = b5 + 28;
+        memcpy(s5, "PWV5", 4); put_be32(s5 + 4, 24); put_be32(s5 + 8, 24 + sizeof pwv5);
+        put_be32(s5 + 12, 2); put_be32(s5 + 16, 1200);
+        memcpy(s5 + 24, pwv5, sizeof pwv5);
+        write_file_all(p5path, b5, total5);
+        free(b5);
+
+        /* Rewrite .rb-bridge-browse with Track 25 and bump mtime so sc_rbb_ensure_drive refreshes */
+        char idx2[2048];
+        snprintf(idx2, sizeof idx2,
+                 "RBB1 %s\n"
+                 "T\t10\t240.000\t44100\t/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT\n"
+                 "T\t20\t180.500\t48000\t/PIONEER/USBANLZ/P001/00000001/ANLZ0001.DAT\n"
+                 "T\t25\t120.000\t44100\t/PIONEER/USBANLZ/P001/00000001/ANLZ0005.DAT\n"
+                 "T\t30\t120.000\t44100\t/PIONEER/USBANLZ/P001/00000001/ANLZ0002.DAT\n"
+                 "A\tJcGzLMZmZphFwIWYUrbI7LyECvA\t/PIONEER/Artwork/00001/a1.jpg\n",
+                 uuid);
+        write_file_all(idx_path, idx2, strlen(idx2));
+        pthread_mutex_lock(&sc_rbb_mu);
+        sc_rbb_tbl[0].last_check = 0; /* force refresh immediately */
+        sc_rbb_tbl[0].idx_size = 0;
+        pthread_mutex_unlock(&sc_rbb_mu);
+
+        path_fmt(rgb_req, sizeof rgb_req, ovdir, "/25.rgb");
+        int fd5 = sc_rbb_open_rgb(rgb_req, O_RDONLY);
+        assert(fd5 >= 0);
+        assert(read(fd5, blob, sizeof blob) == SC_RBB_BLOB_LEN);
+        close(fd5);
+        verify_qcompress_blob(blob, sizeof blob, raw);
+        assert(raw[24] == 255 && raw[25] == 0 && raw[26] == 255);
+    }
 
     /* 4. SQLite browse column synthesis & strict thread isolation */
     sc_rbb_sq.col_blob = fake_col_blob;
@@ -419,6 +512,14 @@ int main(void) {
         pthread_t th;
         struct thread_check_arg arg = {cases[i].thr, cases[i].st, cases[i].expect};
         assert(pthread_create(&th, NULL, run_on_named_thread, &arg) == 0);
+        assert(pthread_join(th, NULL) == 0);
+    }
+
+    /* 5. Reused stmt pointer aliasing + drive_gen refresh + 8-drive eviction on single TLS worker */
+    {
+        struct tls_alias_arg ta = {mdb_path, root};
+        pthread_t th;
+        assert(pthread_create(&th, NULL, run_tls_alias_and_gen_test, &ta) == 0);
         assert(pthread_join(th, NULL) == 0);
     }
 

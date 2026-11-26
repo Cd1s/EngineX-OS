@@ -940,4 +940,24 @@ func TestReconcileOrphanSwapPromotesCutSwapAndDropsStaleOrCorruptSwap(t *testing
 			t.Fatalf("corrupt %s was not removed: err=%v", rbstate.SwapName, err)
 		}
 	})
+
+	t.Run("transient_live_db_error_keeps_valid_swap", func(t *testing.T) {
+		mount := nextStick(t, 3)
+		makeNext(t, mount)
+		dir := dbDir(mount)
+		swapPath := filepath.Join(dir, rbstate.SwapName)
+		if err := os.Remove(filepath.Join(dir, nextDB)); err != nil {
+			t.Fatal(err)
+		}
+		// Corrupt live m.db so openRO / SQL query returns an error; reconcileOrphanSwap must keep swap!
+		if err := os.WriteFile(filepath.Join(dir, "m.db"), []byte("temporarily-unreadable-db"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if reconcileOrphanSwap(context.Background(), dir) {
+			t.Fatal("reconcileOrphanSwap promoted swap despite corrupt m.db")
+		}
+		if _, err := os.Stat(swapPath); err != nil {
+			t.Fatalf("valid %s deleted on live DB read error: %v", rbstate.SwapName, err)
+		}
+	})
 }

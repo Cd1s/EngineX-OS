@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,16 +21,19 @@ import (
 )
 
 const (
-	prolinkCacheDirName     = ".prolink-cache"
-	prolinkCleanupPollEvery = 3 * time.Second
-	prolinkCleanupGraceWait = 3 * time.Second
-	prolinkReaddirBatch     = 128
-	stRdonlyFlag            = 0x1 // ST_RDONLY (mount(2) / statfs f_flags)
+	prolinkCacheDirName         = ".prolink-cache"
+	prolinkCleanupPollEvery     = 3 * time.Second
+	prolinkCleanupGraceWait     = 18 * time.Second
+	prolinkCleanupKeepaliveEach = 5 * time.Second
+	prolinkPreparingMaxAge      = 25 * time.Second
+	prolinkReaddirBatch         = 128
+	stRdonlyFlag                = 0x1 // ST_RDONLY (mount(2) / statfs f_flags)
 )
 
 type prolinkCleanupOptions struct {
 	isBusy            func() bool
 	isEjecting        func() bool
+	keepalive         func()
 	requireMountpoint bool
 	statfs            func(int, *unix.Statfs_t) error
 	logf              func(string, ...any)
@@ -137,19 +141,77 @@ func writableMediaMounts() []string {
 	return parseWritableMediaMounts(f, "/media/")
 }
 
+type mountIdentity struct {
+	dev      uint64
+	mntID    uint64
+	hasMntID bool
+}
+
+func statxMountNode(dirFD int, name string, flags int) (unix.Statx_t, mountIdentity, error) {
+	var stx unix.Statx_t
+	err := unix.Statx(dirFD, name, flags, unix.STATX_BASIC_STATS|unix.STATX_MNT_ID, &stx)
+	if err != nil {
+		return stx, mountIdentity{}, err
+	}
+	id := mountIdentity{
+		dev:      unix.Mkdev(stx.Dev_major, stx.Dev_minor),
+		mntID:    stx.Mnt_id,
+		hasMntID: stx.Mask&unix.STATX_MNT_ID != 0,
+	}
+	return stx, id, nil
+}
+
+func sameMountIdentity(a, b mountIdentity) bool {
+	if a.dev != b.dev {
+		return false
+	}
+	if a.hasMntID && b.hasMntID && a.mntID != b.mntID {
+		return false
+	}
+	return true
+}
+
+func usbPreparingActive() bool {
+	info, err := os.Lstat(usbLoadingStatusPath())
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	age := time.Since(info.ModTime())
+	return age >= -2*time.Second && age < prolinkPreparingMaxAge
+}
+
+var pokeDeckClock = func() {
+	if testing.Testing() {
+		return
+	}
+	c := http.Client{Timeout: 200 * time.Millisecond}
+	resp, err := c.Get("http://127.0.0.1:8080/v1/enginex/clock")
+	if err == nil {
+		resp.Body.Close()
+	}
+	pokeStreamSyncUI()
+}
+
 type cleanupWalk struct {
-	ctx        context.Context
-	mountDev   uint64
-	isBusy     func() bool
-	isEjecting func() bool
-	statfs     func(int, *unix.Statfs_t) error
-	bytesFreed int64
-	stopped    bool
+	ctx           context.Context
+	mountID       mountIdentity
+	isBusy        func() bool
+	isEjecting    func() bool
+	keepalive     func()
+	lastKeepalive time.Time
+	statfs        func(int, *unix.Statfs_t) error
+	seenIno       map[uint64]struct{}
+	bytesFreed    int64
+	stopped       bool
 }
 
 func (w *cleanupWalk) shouldStop() bool {
 	if w.stopped {
 		return true
+	}
+	if w.keepalive != nil && time.Since(w.lastKeepalive) >= prolinkCleanupKeepaliveEach {
+		w.keepalive()
+		w.lastKeepalive = time.Now()
 	}
 	if w.ctx.Err() != nil || w.isBusy() || w.isEjecting() {
 		w.stopped = true
@@ -198,11 +260,11 @@ func (w *cleanupWalk) drainOnePass(dirFD int, name string) (hadEntries bool, err
 	f := os.NewFile(uintptr(dirFD), name)
 	defer f.Close()
 
-	var st unix.Stat_t
-	if e := unix.Fstat(int(f.Fd()), &st); e != nil {
+	_, dirID, e := statxMountNode(int(f.Fd()), "", unix.AT_EMPTY_PATH|unix.AT_SYMLINK_NOFOLLOW)
+	if e != nil {
 		return false, e
 	}
-	if uint64(st.Dev) != w.mountDev {
+	if !sameMountIdentity(dirID, w.mountID) {
 		w.stopped = true
 		return false, nil
 	}
@@ -228,18 +290,18 @@ func (w *cleanupWalk) drainOnePass(dirFD int, name string) (hadEntries bool, err
 			if w.shouldStop() {
 				return hadEntries, nil
 			}
-			var est unix.Stat_t
-			if e := unix.Fstatat(int(f.Fd()), entry, &est, unix.AT_SYMLINK_NOFOLLOW); e != nil {
+			estx, eid, e := statxMountNode(int(f.Fd()), entry, unix.AT_SYMLINK_NOFOLLOW)
+			if e != nil {
 				if errors.Is(e, unix.ENOENT) {
 					continue
 				}
 				return hadEntries, e
 			}
-			if uint64(est.Dev) != w.mountDev {
+			if !sameMountIdentity(eid, w.mountID) {
 				w.stopped = true
 				return hadEntries, nil
 			}
-			if est.Mode&unix.S_IFMT == unix.S_IFDIR {
+			if estx.Mode&unix.S_IFMT == unix.S_IFDIR {
 				if e := w.cleanDirChild(int(f.Fd()), entry); e != nil {
 					return hadEntries, e
 				}
@@ -254,8 +316,28 @@ func (w *cleanupWalk) drainOnePass(dirFD int, name string) (hadEntries bool, err
 				}
 				return hadEntries, e
 			}
-			if est.Mode&unix.S_IFMT == unix.S_IFREG {
-				w.bytesFreed += est.Size
+			if estx.Mode&unix.S_IFMT == unix.S_IFREG {
+				if estx.Nlink > 1 && w.seenIno == nil {
+					w.seenIno = make(map[uint64]struct{})
+				}
+				counted := true
+				if w.seenIno != nil {
+					if _, dup := w.seenIno[estx.Ino]; dup {
+						counted = false
+					} else if estx.Nlink > 1 {
+						w.seenIno[estx.Ino] = struct{}{}
+					}
+				}
+				if counted {
+					sz := int64(estx.Size)
+					if estx.Mask&unix.STATX_BLOCKS != 0 {
+						alloc := int64(estx.Blocks) * 512
+						if sz > 4096 && alloc < sz {
+							sz = alloc
+						}
+					}
+					w.bytesFreed += sz
+				}
 			}
 		}
 		if errors.Is(rerr, io.EOF) {
@@ -278,7 +360,8 @@ func cleanProlinkCache(ctx context.Context, mount string, opts prolinkCleanupOpt
 	isBusy := opts.isBusy
 	if isBusy == nil {
 		isBusy = func() bool {
-			return bridge.IsDeckActive() || bridge.IsDeckLoading() || bridge.IsEngineCopying()
+			active, loading, fresh := bridge.DeckActivityState()
+			return active || loading || !fresh || bridge.IsEngineCopying() || usbPreparingActive()
 		}
 	}
 	isEjecting := opts.isEjecting
@@ -292,6 +375,10 @@ func cleanProlinkCache(ctx context.Context, mount string, opts prolinkCleanupOpt
 			}
 			return false
 		}
+	}
+	keepalive := opts.keepalive
+	if keepalive == nil && opts.isBusy == nil {
+		keepalive = pokeDeckClock
 	}
 	statfs := opts.statfs
 	if statfs == nil {
@@ -315,13 +402,13 @@ func cleanProlinkCache(ctx context.Context, mount string, opts prolinkCleanupOpt
 	}
 	defer unix.Close(mountFD)
 
-	var mountSt unix.Stat_t
-	if err := unix.Fstat(mountFD, &mountSt); err != nil {
+	_, mountID, err := statxMountNode(mountFD, "", unix.AT_EMPTY_PATH|unix.AT_SYMLINK_NOFOLLOW)
+	if err != nil {
 		return prolinkCleanupResult{}, err
 	}
 	if opts.requireMountpoint {
-		var parentSt unix.Stat_t
-		if err := unix.Lstat(filepath.Dir(mount), &parentSt); err != nil || parentSt.Dev == mountSt.Dev {
+		_, parentID, perr := statxMountNode(unix.AT_FDCWD, filepath.Dir(mount), unix.AT_SYMLINK_NOFOLLOW)
+		if perr != nil || sameMountIdentity(parentID, mountID) {
 			return prolinkCleanupResult{}, nil
 		}
 	}
@@ -333,25 +420,30 @@ func cleanProlinkCache(ctx context.Context, mount string, opts prolinkCleanupOpt
 		return prolinkCleanupResult{}, nil
 	}
 
-	// Quick existence + symlink guard on <mount>/.prolink-cache before entering walk.
-	var cacheSt unix.Stat_t
-	if err := unix.Fstatat(mountFD, prolinkCacheDirName, &cacheSt, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+	// Quick existence + symlink + mount-boundary guard on <mount>/.prolink-cache before entering walk.
+	cacheStx, cacheID, err := statxMountNode(mountFD, prolinkCacheDirName, unix.AT_SYMLINK_NOFOLLOW)
+	if err != nil {
 		if errors.Is(err, unix.ENOENT) {
 			return prolinkCleanupResult{}, nil
 		}
 		return prolinkCleanupResult{}, err
 	}
-	if cacheSt.Mode&unix.S_IFMT != unix.S_IFDIR || uint64(cacheSt.Dev) != uint64(mountSt.Dev) {
+	if cacheStx.Mode&unix.S_IFMT != unix.S_IFDIR || !sameMountIdentity(cacheID, mountID) {
 		// Never follow symlinks or touch non-directory or cross-mount filesystems.
 		return prolinkCleanupResult{}, nil
 	}
 
+	if keepalive != nil {
+		keepalive()
+	}
 	w := &cleanupWalk{
-		ctx:        ctx,
-		mountDev:   uint64(mountSt.Dev),
-		isBusy:     isBusy,
-		isEjecting: isEjecting,
-		statfs:     statfs,
+		ctx:           ctx,
+		mountID:       mountID,
+		isBusy:        isBusy,
+		isEjecting:    isEjecting,
+		keepalive:     keepalive,
+		lastKeepalive: time.Now(),
+		statfs:        statfs,
 	}
 	if err := w.cleanDirChild(mountFD, prolinkCacheDirName); err != nil {
 		return prolinkCleanupResult{Stopped: w.stopped, BytesFreed: w.bytesFreed}, err
@@ -375,28 +467,46 @@ func cleanProlinkCache(ctx context.Context, mount string, opts prolinkCleanupOpt
 type mountDevKey struct {
 	mount string
 	dev   uint64
+	mntID uint64
 }
 
 type prolinkCleanupWatcher struct {
-	mu        sync.Mutex
-	handled   map[mountDevKey]bool
-	firstSeen map[mountDevKey]time.Time
-	list      func() []string
-	clean     func(context.Context, string) (prolinkCleanupResult, error)
-	poke      func()
-	grace     time.Duration
-	now       func() time.Time
+	mu            sync.Mutex
+	handled       map[mountDevKey]bool
+	firstSeen     map[mountDevKey]time.Time
+	list          func() []string
+	statMount     func(string) (mountDevKey, bool)
+	isPreparing   func() bool
+	activityFresh func() bool
+	clean         func(context.Context, string) (prolinkCleanupResult, error)
+	poke          func()
+	grace         time.Duration
+	now           func() time.Time
+}
+
+func defaultStatMountKey(mount string) (mountDevKey, bool) {
+	stx, id, err := statxMountNode(unix.AT_FDCWD, mount, unix.AT_SYMLINK_NOFOLLOW)
+	if err != nil || stx.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return mountDevKey{}, false
+	}
+	return mountDevKey{mount: mount, dev: id.dev, mntID: id.mntID}, true
 }
 
 func newProlinkCleanupWatcher() *prolinkCleanupWatcher {
 	return &prolinkCleanupWatcher{
-		handled:   map[mountDevKey]bool{},
-		firstSeen: map[mountDevKey]time.Time{},
-		list:      writableMediaMounts,
+		handled:     map[mountDevKey]bool{},
+		firstSeen:   map[mountDevKey]time.Time{},
+		list:        writableMediaMounts,
+		statMount:   defaultStatMountKey,
+		isPreparing: usbPreparingActive,
+		activityFresh: func() bool {
+			_, _, fresh := bridge.DeckActivityState()
+			return fresh
+		},
 		clean: func(ctx context.Context, mount string) (prolinkCleanupResult, error) {
 			return cleanProlinkCache(ctx, mount, prolinkCleanupOptions{requireMountpoint: true})
 		},
-		poke:  pokeStreamSyncUI,
+		poke:  pokeDeckClock,
 		grace: prolinkCleanupGraceWait,
 		now:   time.Now,
 	}
@@ -404,14 +514,17 @@ func newProlinkCleanupWatcher() *prolinkCleanupWatcher {
 
 func (cw *prolinkCleanupWatcher) step(ctx context.Context) {
 	mounts := cw.list()
+	statFn := cw.statMount
+	if statFn == nil {
+		statFn = defaultStatMountKey
+	}
 	present := make(map[mountDevKey]bool, len(mounts))
 	var activeKeys []mountDevKey
 	for _, m := range mounts {
-		var st unix.Stat_t
-		if unix.Lstat(m, &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR {
+		k, ok := statFn(m)
+		if !ok {
 			continue
 		}
-		k := mountDevKey{mount: m, dev: uint64(st.Dev)}
 		present[k] = true
 		activeKeys = append(activeKeys, k)
 	}
@@ -449,8 +562,21 @@ func (cw *prolinkCleanupWatcher) step(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		info, lerr := os.Lstat(filepath.Join(k.mount, prolinkCacheDirName))
+		if lerr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			cw.mu.Lock()
+			cw.handled[k] = true
+			cw.mu.Unlock()
+			continue
+		}
+		if cw.isPreparing != nil && cw.isPreparing() {
+			continue
+		}
 		if cw.poke != nil {
 			cw.poke()
+		}
+		if cw.activityFresh != nil && !cw.activityFresh() {
+			continue
 		}
 		_, _ = cw.clean(ctx, k.mount)
 		// Once done (removed or absent) OR paused while busy/ejecting, stop touching the

@@ -412,10 +412,14 @@ type filledStageRow struct {
 	loops         []byte
 }
 
+func validStageUUID(uuid string) bool {
+	return uuid != "" && uuid != "." && uuid != ".." && !strings.ContainsAny(uuid, "/\\\x00")
+}
+
 func readFilledStage(snap *rbstate.Snapshot) map[string]filledStageRow {
 	out := map[string]filledStageRow{}
 	root, err := rbstate.StageRoot()
-	if err != nil || snap == nil || snap.LibraryUUID == "" {
+	if err != nil || snap == nil || !validStageUUID(snap.LibraryUUID) {
 		return out
 	}
 	b, err := os.ReadFile(filepath.Join(root, snap.LibraryUUID, "filled.jsonl"))
@@ -435,6 +439,8 @@ func readFilledStage(snap *rbstate.Snapshot) map[string]filledStageRow {
 			K    string `json:"k"`
 			WR   []byte `json:"wr"`
 			WRNM []byte `json:"wrnm"`
+			V    int    `json:"v"`
+			W    string `json:"w"`
 		}
 		if json.Unmarshal(line, &f) != nil || f.ID == 0 || f.K == "" || (len(f.WR) == 0 && len(f.WRNM) == 0) {
 			continue
@@ -442,13 +448,22 @@ func readFilledStage(snap *rbstate.Snapshot) map[string]filledStageRow {
 		row := filledStageRow{id: f.ID, written: f.WR, writtenNoMain: f.WRNM}
 		if stage != nil && entries != nil {
 			if e := entries[f.K]; e != nil {
-				if full, err := stage.Read(e); err == nil && full.Digest != nil && bytes.Equal(full.Digest, f.WR) {
-					row.beats, row.cues, row.loops = full.Perf.Beats, full.Perf.QuickCues, full.Perf.Loops
-				} else if len(f.WRNM) == 0 {
-					// Legacy staged entry exists with mismatched/unreadable .bin and no standalone wrnm.
+				full, rerr := stage.Read(e)
+				if rerr != nil || full.Digest == nil || !bytes.Equal(full.Digest, f.WR) {
+					// A newer stage entry exists and disagrees (or cannot be read); never accept
+					// an older filled.jsonl digest (wr or wrnm) in its place.
 					continue
 				}
+				row.beats, row.cues, row.loops = full.Perf.Beats, full.Perf.QuickCues, full.Perf.Loops
+				out[f.K] = row
+				continue
 			}
+		}
+		if f.V != 0 && f.V != rbstate.Rules {
+			continue
+		}
+		if tr := snap.Tracks[f.K]; tr != nil && tr.Row != "" && f.W != "" && f.W != tr.Row {
+			continue
 		}
 		out[f.K] = row
 	}

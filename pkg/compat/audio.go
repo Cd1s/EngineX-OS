@@ -38,6 +38,11 @@ func AudioHeader(path string) (AudioInfo, error) {
 		return AudioInfo{}, e
 	}
 	defer f.Close()
+	return AudioHeaderFile(f, path)
+}
+
+// AudioHeaderFile parses container headers from an already-open file handle.
+func AudioHeaderFile(f *os.File, nameHint string) (AudioInfo, error) {
 	st, e := f.Stat()
 	if e != nil {
 		return AudioInfo{}, e
@@ -47,7 +52,7 @@ func AudioHeader(path string) (AudioInfo, error) {
 		return AudioInfo{}, e
 	}
 	if st.Size()-baseOff < 12 {
-		lower := strings.ToLower(path)
+		lower := strings.ToLower(nameHint)
 		if strings.HasSuffix(lower, ".wav") || strings.HasSuffix(lower, ".wave") || strings.HasSuffix(lower, ".flac") || strings.HasSuffix(lower, ".aif") || strings.HasSuffix(lower, ".aiff") || strings.HasSuffix(lower, ".aifc") {
 			return AudioInfo{}, fmt.Errorf("invalid WAV/FLAC/AIFF magic")
 		}
@@ -68,7 +73,7 @@ func AudioHeader(path string) (AudioInfo, error) {
 	case string(b[:4]) == "FORM" && (string(b[8:12]) == "AIFF" || string(b[8:12]) == "AIFC"):
 		return aiffHeader(f, baseOff, st.Size(), string(b[8:12]) == "AIFC")
 	default:
-		lower := strings.ToLower(path)
+		lower := strings.ToLower(nameHint)
 		if IsMP4AudioPath(lower) && string(b[4:8]) == "ftyp" {
 			// Leave export timing available when the MP4 header is unreadable.
 			// The Link prefix reader still needs the error to request more bytes.

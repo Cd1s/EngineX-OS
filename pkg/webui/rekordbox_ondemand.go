@@ -180,8 +180,8 @@ func resolveOnDemandMount(mount, dbPath, mediaRoot string) (string, bool) {
 	if strings.ContainsAny(filepath.ToSlash(rel), "/") {
 		return "", false
 	}
-	st, err := os.Stat(cleanMount)
-	if err != nil || !st.IsDir() {
+	st, err := os.Lstat(cleanMount)
+	if err != nil || !st.Mode().IsDir() || st.Mode()&os.ModeSymlink != 0 {
 		return "", false
 	}
 	return cleanMount, true

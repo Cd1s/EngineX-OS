@@ -273,6 +273,23 @@ static void *od_mock_serve(void *arg) {
     return NULL;
 }
 
+struct raw_http_arg {
+    int listen_fd;
+    const char *reply;
+};
+
+static void *raw_http_once(void *arg) {
+    struct raw_http_arg *a = arg;
+    int cfd = accept(a->listen_fd, NULL, NULL);
+    if (cfd >= 0) {
+        char reqb[1024];
+        (void)!recv(cfd, reqb, sizeof reqb, 0);
+        (void)!send(cfd, a->reply, strlen(a->reply), MSG_NOSIGNAL);
+        close(cfd);
+    }
+    return NULL;
+}
+
 struct od_race_arg {
     sqlite3 *db;
     const char *path;
@@ -1000,6 +1017,66 @@ int main(int argc, char **argv) {
         close(tfd);
         pthread_mutex_destroy(&tmock.mu);
         sc_rbs_ondemand_url = NULL;
+    }
+
+    // 12. Locale-independent BPM parse, 16-slot inflight full (-2), and strict Content-Length rejection
+    //     on a pthread server (safe under ASan).
+    {
+        assert(sc_rbs_parse_pos_double("128.5000") > 128.49 && sc_rbs_parse_pos_double("128.5000") < 128.51);
+        assert(sc_rbs_parse_pos_double("128,5000") == 0.0);
+        long long peer = 0;
+        int claimed[SC_RBS_INFLIGHT_SLOTS];
+        for (int i = 0; i < SC_RBS_INFLIGHT_SLOTS; i++) {
+            claimed[i] = sc_rbs_inflight_enter((uint64_t)(9000 + i), sc_rbs_mono_ns() + 1000000000LL, &peer);
+            assert(claimed[i] >= 0);
+        }
+        assert(sc_rbs_inflight_enter(99999ULL, sc_rbs_mono_ns() + 1000000000LL, &peer) == -2);
+        for (int i = 0; i < SC_RBS_INFLIGHT_SLOTS; i++) sc_rbs_inflight_leave(claimed[i], 0, 0);
+
+        struct sc_rbs_line bad_l;
+        int bad_status = 0;
+        unsigned char *bad_body = NULL;
+        size_t bad_bn = 0;
+        struct sc_rbs_row bad_r;
+        memset(&bad_r, 0, sizeof bad_r);
+        snprintf(bad_r.path, sizeof bad_r.path, "../Contents/BadCL.mp3");
+        bad_r.id = 1;
+
+        int bfd = socket(AF_INET, SOCK_STREAM, 0);
+        assert(bfd >= 0);
+        int one2 = 1;
+        setsockopt(bfd, SOL_SOCKET, SO_REUSEADDR, &one2, sizeof one2);
+        struct sockaddr_in bsin;
+        memset(&bsin, 0, sizeof bsin);
+        bsin.sin_family = AF_INET;
+        bsin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        assert(!bind(bfd, (struct sockaddr *)&bsin, sizeof bsin));
+        socklen_t bslen = sizeof bsin;
+        assert(!getsockname(bfd, (struct sockaddr *)&bsin, &bslen));
+        assert(!listen(bfd, 4));
+        char burl[128];
+        snprintf(burl, sizeof burl, "http://127.0.0.1:%u%s", (unsigned)ntohs(bsin.sin_port), SC_RBS_ONDEMAND_ROUTE);
+        sc_rbs_ondemand_url = burl;
+
+        const char *bad_replies[2] = {
+            "HTTP/1.1 200 OK\r\nContent-Length: 4294967301\r\nX-RB-Key: k\r\nX-RB-Written: AAEC\r\nX-RB-Rules: 5\r\n\r\nRBXA1",
+            "HTTP/1.1 200 OK\r\nContent-Length: abc\r\n\r\n",
+        };
+        for (int k = 0; k < 2; k++) {
+            struct raw_http_arg ha = {bfd, bad_replies[k]};
+            pthread_t bt;
+            assert(!pthread_create(&bt, NULL, raw_http_once, &ha));
+            bad_body = NULL;
+            bad_bn = 0;
+            bad_status = 0;
+            assert(sc_rbs_ondemand_fetch(sqlite3_db_filename(db, "main"), "lib-a", &bad_r, sc_rbs_mono_ns() + 500000000LL, &bad_l, &bad_body, &bad_bn, &bad_status) < 0);
+            assert(bad_body == NULL && bad_bn == 0);
+            assert(!pthread_join(bt, NULL));
+        }
+        sc_rbs_ondemand_url = NULL;
+        close(bfd);
+        (void)bad_l;
+        (void)bad_status;
     }
 
     sqlite3_close(db);
