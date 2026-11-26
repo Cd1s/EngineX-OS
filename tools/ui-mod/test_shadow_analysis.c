@@ -128,7 +128,7 @@ int main(void) {
     // #346: in-place grid update arms <copy>.perf.regrid -> .perf.regrid.run for
     // peer-* copies only, and clears isAnalyzed/isBeatGridLocked so AnalysisQueue
     // replays the updated beatData onto the already-loaded deck without reload.
-    char regrid[256], regrid_run[256], bad_regrid[256];
+    char regrid[300], regrid_run[300], bad_regrid[300];
     snprintf(audio, sizeof audio, "%s/peer-f012/Contents/L'ete.wav", dir);
     snprintf(regrid, sizeof regrid, "%s.perf.regrid", audio);
     snprintf(regrid_run, sizeof regrid_run, "%s.perf.regrid.run", audio);
