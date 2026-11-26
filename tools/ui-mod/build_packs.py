@@ -2256,7 +2256,8 @@ SERVICES_MAIN = """
 					}
 				}
 			}
-			s.lineMs = isFinite(drawMs) ? drawMs : (s.ps ? s.env + speed * now : s.posMs)
+			s.wfLive = isFinite(drawMs)
+			s.lineMs = s.wfLive ? drawMs : (s.ps ? s.env + speed * now : s.posMs)
 			// A jog nudge moves the line off the one the peer carries on: post it at once,
 			// not at the next heartbeat (25 Hz for 2 s, so the peer follows the nudge).
 			const sent = scShadowSent[n]
@@ -2389,7 +2390,7 @@ SERVICES_MAIN = """
 					onLine = Math.abs(o.positionMs - sent.positionMs) <= 6
 				} else {
 					const expect = sent.positionMs + (o.playing ? (o.at - sent.at) * (1 + o.pitch / 100) : 0)
-					onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
+					onLine = Math.abs(o.positionMs - expect) <= (o.playing ? (s.wfLive ? 2 : 15) : 0.5)
 				}
 			}
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.masterPress !== o.masterPress || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
