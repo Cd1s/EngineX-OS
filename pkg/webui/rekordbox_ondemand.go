@@ -276,10 +276,7 @@ type rbOnDemandCacheEntry struct {
 	id       onDemandVerifiedID
 	trackKey string
 	res      *bridge.OnDemandResult
-	native   []byte
-	expf     []byte
-	encDone  bool
-	encErr   error
+	enc      shadowEncodedPair
 	at       time.Time
 }
 
@@ -660,51 +657,33 @@ func (s *Server) buildOnDemandEntryChecked(ctx context.Context, req bridge.OnDem
 	return &rbOnDemandCacheEntry{id: id, trackKey: trackKey, res: res, at: time.Now()}, dbAnalyzed, nil
 }
 
-// onDemandEncodings decodes an entry's RBXA1 payload once and caches both the
-// native shadow-analysis and EXPF v1 encodings so multiple formats and multiple
-// asking copies share one decode and encode per load.
-func (s *Server) onDemandEncodings(e *rbOnDemandCacheEntry) (native, expf []byte, err error) {
+// onDemandEncodings decodes an entry's RBXA1 payload exactly once (even under
+// concurrent first EXPF and native requests) and caches both native RBXA1 and
+// EXPF v1 encodings alongside the precomputed generation hash.
+func (s *Server) onDemandEncodings(e *rbOnDemandCacheEntry) (native, expf []byte, gen string, err error) {
 	if e == nil || e.res == nil {
-		return nil, nil, os.ErrNotExist
+		return nil, nil, "", os.ErrNotExist
 	}
-	s.rbOnDemandCacheMu.Lock()
-	if e.encDone {
-		native, expf, err = e.native, e.expf, e.encErr
-		s.rbOnDemandCacheMu.Unlock()
-		return native, expf, err
-	}
-	raw := e.res.RBXA1
-	bpm := math.Float64frombits(e.id.engineBPMBits)
-	s.rbOnDemandCacheMu.Unlock()
-
-	dec, derr := rbstate.DecodePerf(raw)
-	if derr != nil {
-		s.rbOnDemandCacheMu.Lock()
-		e.encDone, e.encErr = true, derr
-		s.rbOnDemandCacheMu.Unlock()
-		return nil, nil, derr
-	}
-	p := enginedb.Performance{
-		TrackData:   dec.TrackData,
-		Overview:    dec.Overview,
-		Beats:       dec.Beats,
-		QuickCues:   dec.QuickCues,
-		Loops:       dec.Loops,
-		ActiveLoops: dec.ActiveLoops,
-		Complete:    dec.Complete,
-	}
-	nat, nerr := encodeShadowAnalysis(p)
-	var ex []byte
-	if nerr == nil {
-		ex, nerr = perfFromBlobs(bpm, p.TrackData, p.Beats, p.Overview)
-	}
-	s.rbOnDemandCacheMu.Lock()
-	if !e.encDone {
-		e.native, e.expf, e.encErr, e.encDone = nat, ex, nerr, true
-	}
-	native, expf, err = e.native, e.expf, e.encErr
-	s.rbOnDemandCacheMu.Unlock()
-	return native, expf, err
+	e.enc.once.Do(func() {
+		s.rbOnDemandEncodeCount.Add(1)
+		bpm := math.Float64frombits(e.id.engineBPMBits)
+		dec, derr := rbstate.DecodePerf(e.res.RBXA1)
+		if derr != nil {
+			e.enc.err = derr
+			return
+		}
+		p := enginedb.Performance{
+			TrackData:   dec.TrackData,
+			Overview:    dec.Overview,
+			Beats:       dec.Beats,
+			QuickCues:   dec.QuickCues,
+			Loops:       dec.Loops,
+			ActiveLoops: dec.ActiveLoops,
+			Complete:    dec.Complete,
+		}
+		e.enc.native, e.enc.expf, e.enc.gen, e.enc.err = encodePerfPair(bpm, p)
+	})
+	return e.enc.native, e.enc.expf, e.enc.gen, e.enc.err
 }
 
 func (s *Server) hasWarmOnDemandEntry(trackKey string) bool {

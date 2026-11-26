@@ -16,15 +16,50 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
-func validTestEXPF(bpm float64) []byte {
-	track := make([]byte, 44)
-	binary.BigEndian.PutUint64(track[:8], math.Float64bits(44100))
-	beats := []byte("GRID")
-	overview := make([]byte, 30)
+func validTestPerformanceBlobs(bpm float64) (track, beats, overview []byte) {
+	if !(bpm > 0 && bpm < 1000) {
+		bpm = 128
+	}
+	const rate = 44100.0
+	const samples = uint64(441000) // 10 s
+	track = make([]byte, 44)
+	binary.BigEndian.PutUint64(track[0:8], math.Float64bits(rate))
+	binary.BigEndian.PutUint64(track[8:16], samples)
+
+	var bb bytes.Buffer
+	_ = binary.Write(&bb, binary.BigEndian, rate)
+	_ = binary.Write(&bb, binary.BigEndian, float64(samples))
+	bb.WriteByte(1) // beat grid valid
+	_ = binary.Write(&bb, binary.BigEndian, uint64(2))
+	beatSamples := rate * 60.0 / bpm
+	// Default grid: 2 anchors at beat 0 and beat 16.
+	for _, m := range []struct {
+		pos float64
+		n   int64
+	}{{0, 0}, {16 * beatSamples, 16}} {
+		_ = binary.Write(&bb, binary.LittleEndian, m.pos)
+		_ = binary.Write(&bb, binary.LittleEndian, m.n)
+		_ = binary.Write(&bb, binary.LittleEndian, int64(4))
+	}
+	_ = binary.Write(&bb, binary.BigEndian, uint64(0)) // adjusted grid empty
+	beats = bb.Bytes()
+
+	overview = make([]byte, 30)
+	binary.BigEndian.PutUint64(overview[0:8], 1)
+	binary.BigEndian.PutUint64(overview[8:16], 1)
+	binary.BigEndian.PutUint64(overview[16:24], math.Float64bits(float64(samples)))
 	overview[24], overview[25], overview[26] = 100, 80, 60
 	overview[27], overview[28], overview[29] = 100, 80, 60
+	return track, beats, overview
+}
+
+func validTestEXPF(bpm float64) []byte {
+	track, beats, overview := validTestPerformanceBlobs(bpm)
+	track = enginedb.TrackDataPeaks(track, overview)
 	var b bytes.Buffer
 	b.WriteString("EXPF")
 	_ = binary.Write(&b, binary.LittleEndian, uint32(1))

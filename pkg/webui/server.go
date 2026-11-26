@@ -110,17 +110,18 @@ type Server struct {
 	rbDeckLoaded [5]string // per deck: last prioritized file path
 	rbDeckCue    [5]bool   // per deck: last CUE preview state
 
-	rbOnDemandMu         sync.Mutex
-	rbOnDemand           *bridge.OnDemandBuilder
-	rbOnDemandSrv        *http.Server
-	rbOnDemandLn         net.Listener
-	rbOnDemandSock       string
-	rbOnDemandWG         sync.WaitGroup
-	rbOnDemandCacheMu    sync.Mutex
-	rbOnDemandCache      map[onDemandVerifiedID]*rbOnDemandCacheEntry
-	rbOnDemandFlights    map[onDemandVerifiedID]*rbOnDemandFlight
-	rbOnDemandDBMeta     map[rbOnDemandDBKey]*rbOnDemandDBSnap
-	rbOnDemandBuildCount atomic.Int64
+	rbOnDemandMu          sync.Mutex
+	rbOnDemand            *bridge.OnDemandBuilder
+	rbOnDemandSrv         *http.Server
+	rbOnDemandLn          net.Listener
+	rbOnDemandSock        string
+	rbOnDemandWG          sync.WaitGroup
+	rbOnDemandCacheMu     sync.Mutex
+	rbOnDemandCache       map[onDemandVerifiedID]*rbOnDemandCacheEntry
+	rbOnDemandFlights     map[onDemandVerifiedID]*rbOnDemandFlight
+	rbOnDemandDBMeta      map[rbOnDemandDBKey]*rbOnDemandDBSnap
+	rbOnDemandBuildCount  atomic.Int64
+	rbOnDemandEncodeCount atomic.Int64
 
 	mu            sync.Mutex
 	sessions      map[string]*Session

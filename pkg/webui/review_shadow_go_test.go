@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -637,7 +639,7 @@ func TestReviewShadowNote6SharedEncodingsAndZeroWorkPositionPost(t *testing.T) {
 	s.rbOnDemandCacheMu.Lock()
 	encCached := 0
 	for _, e := range s.rbOnDemandCache {
-		if e.encDone && len(e.native) > 0 && len(e.expf) > 0 {
+		if len(e.enc.native) > 0 && len(e.enc.expf) > 0 && e.enc.gen != "" {
 			encCached++
 		}
 	}
@@ -673,18 +675,19 @@ func TestReviewShadowNote6SharedEncodingsAndZeroWorkPositionPost(t *testing.T) {
 	if d1.PerfGen == "" {
 		t.Fatal("initial Pro DJ Link post produced empty PerfGen")
 	}
-	// Replace the file contents while keeping identical stat identity would be
-	// impossible on POSIX, so verify steady-state posts produce identical PerfGen
-	// without invoking ownPerf/shadowPerfCache rebuild: clear perfCache and
-	// confirm unchanged stat identity still hits perfGens without rebuilding perfCache.
-	r.s.evictShadowPerfCache(d1.Key)
+	// Clear deckPerf slot and confirm steady-state 1 s position posts still hit
+	// stat-pinned perfGens without re-running ownPerfPair/deckEncodeCount.
+	r.s.shadow.perfMu.Lock()
+	r.s.shadow.deckPerf[1] = nil
+	r.s.shadow.perfMu.Unlock()
+	encBefore := r.s.shadow.deckEncodeCount.Load()
 	for i := 0; i < 10; i++ {
 		dNext := postRbx(float64(2000 + i*1000))
 		if dNext.PerfGen != d1.PerfGen || dNext.Key != d1.Key {
 			t.Fatalf("steady-state post %d changed key/gen: %+v vs %+v", i, dNext, d1)
 		}
 	}
-	if _, ok := r.s.getShadowPerfCache(d1.Key); ok {
+	if r.s.shadow.deckEncodeCount.Load() != encBefore {
 		t.Fatal("steady-state 1 s position posts re-ran ownPerf despite unchanged rbxAnalysis stat identity")
 	}
 	// Verify /peer/decks/1/perf returns X-EngineX-Perf-Gen matching d1.PerfGen so
@@ -703,7 +706,7 @@ func TestReviewShadowNote6SharedEncodingsAndZeroWorkPositionPost(t *testing.T) {
 	}
 
 	// 3. Concurrent EXPF + native + RGB requests for the same loaded DB track
-	// share one shadowPerfCache entry cleanly under -race and evict on unload.
+	// share one per-deck shadowDeckPerf slot cleanly under -race and evict on unload.
 	var wg sync.WaitGroup
 	for g := 0; g < 6; g++ {
 		wg.Add(1)
@@ -720,8 +723,8 @@ func TestReviewShadowNote6SharedEncodingsAndZeroWorkPositionPost(t *testing.T) {
 	}
 	wg.Wait()
 	post(`[{"deck":1,"net":""}]`)
-	if _, ok := s.getShadowPerfCache(key); ok {
-		t.Fatal("shadowPerfCache was not evicted on deck unload")
+	if s.getDeckPerf(1, key) != nil {
+		t.Fatal("deckPerf was not evicted on deck unload")
 	}
 }
 
@@ -849,3 +852,386 @@ func BenchmarkDecksPostPosition(b *testing.B) {
 }
 
 var _ = sync.Mutex{}
+
+// GPT R2 BLOCK (Finding 1): the receiver must never publish EXPF from one
+// generation alongside native RBXA1 from another generation.
+func TestReviewShadowR2DoesNotPublishMixedAnalysisGenerations(t *testing.T) {
+	oldBoard := shadowIsPlayerBoard
+	oldWait := shadowPairGenRetryWait
+	shadowIsPlayerBoard = func() bool { return true }
+	shadowPairGenRetryWait = time.Millisecond
+	t.Cleanup(func() {
+		shadowIsPlayerBoard = oldBoard
+		shadowPairGenRetryWait = oldWait
+	})
+	expf, native := validTestEXPF(128), validTestNativeAnalysis(t)
+	var mu sync.Mutex
+	expfGen, natGen := "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		eg, ng := expfGen, natGen
+		mu.Unlock()
+		w.Header().Set(shadowPerfFormatsHeader, "expf,native")
+		switch {
+		case r.URL.Path == "/peer/decks/1/audio":
+			_, _ = w.Write([]byte("AUDIO"))
+		case r.URL.Query().Get("format") == "native":
+			w.Header().Set(shadowPerfGenHeader, ng)
+			_, _ = w.Write(native)
+		case r.URL.Query().Get("format") == "rgb":
+			http.NotFound(w, r)
+		default:
+			w.Header().Set(shadowPerfGenHeader, eg)
+			_, _ = w.Write(expf)
+		}
+	}))
+	defer peer.Close()
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	s.shadow.copyRetry = time.Millisecond
+	u, _ := url.Parse(peer.URL)
+	s.shadow.peerPort, _ = strconv.Atoi(u.Port())
+	const key = "peer:mixed"
+	p := peerDeck{
+		deckState: deckState{Deck: 1, Key: "mixed", Ext: ".flac", Name: "Song.flac"},
+		ip:        "127.0.0.1",
+	}
+	s.shadow.mu.Lock()
+	s.shadowFetchPeer(key, p)
+	s.shadow.mu.Unlock()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		s.shadow.mu.Lock()
+		busy, path, gen := s.shadow.busy[key], s.shadow.files[key], s.shadow.copyGens[key]
+		s.shadow.mu.Unlock()
+		if busy {
+			continue
+		}
+		if path != "" {
+			t.Fatalf("published EXPF generation A with native generation B and recorded %q", gen)
+		}
+		break
+	}
+	// Once both responses carry the same generation, retry succeeds and records it.
+	mu.Lock()
+	expfGen = "bbbbbbbbbbbbbbbb"
+	mu.Unlock()
+	time.Sleep(5 * time.Millisecond)
+	s.shadow.mu.Lock()
+	s.shadowFetchPeer(key, p)
+	s.shadow.mu.Unlock()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		s.shadow.mu.Lock()
+		busy, path, gen := s.shadow.busy[key], s.shadow.files[key], s.shadow.copyGens[key]
+		s.shadow.mu.Unlock()
+		if busy {
+			continue
+		}
+		if path == "" || gen != "bbbbbbbbbbbbbbbb" {
+			t.Fatalf("matching generation did not publish cleanly: path=%q gen=%q", path, gen)
+		}
+		return
+	}
+	t.Fatal("matching copy job did not settle")
+}
+
+// GPT R2 FIX (Finding 2): persistent 503 answers transition after a bounded wait
+// to a visible terminal "no analysis yet" state, stop polling, and retry only
+// when a new source generation arrives or on explicit DJ retry.
+func TestReviewShadowR2Persistent503TransitionsToVisibleTerminalStateAndRetries(t *testing.T) {
+	oldWait, oldTries := perfRetryWait, perfRetries
+	oldMaxFails, oldTimeout := shadowPendingMaxFails, shadowPendingTimeout
+	oldBoard := shadowIsPlayerBoard
+	perfRetryWait, perfRetries = time.Millisecond, 1
+	shadowPendingMaxFails, shadowPendingTimeout = 2, 10*time.Second
+	shadowIsPlayerBoard = func() bool { return true }
+	t.Cleanup(func() {
+		perfRetryWait, perfRetries = oldWait, oldTries
+		shadowPendingMaxFails, shadowPendingTimeout = oldMaxFails, oldTimeout
+		shadowIsPlayerBoard = oldBoard
+	})
+	expf, native := validTestEXPF(128), validTestNativeAnalysis(t)
+	var ready atomic.Bool
+	var perfReqs, audioReqs atomic.Int32
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(shadowPerfFormatsHeader, "expf,native")
+		if r.URL.Path == "/peer/decks/1/audio" {
+			audioReqs.Add(1)
+			_, _ = w.Write([]byte("AUDIO"))
+			return
+		}
+		if r.URL.Query().Get("format") == "rgb" {
+			http.NotFound(w, r)
+			return
+		}
+		perfReqs.Add(1)
+		if !ready.Load() {
+			http.Error(w, "analysing", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set(shadowPerfGenHeader, "2222222222222222")
+		if r.URL.Query().Get("format") == "native" {
+			_, _ = w.Write(native)
+			return
+		}
+		_, _ = w.Write(expf)
+	}))
+	defer peer.Close()
+
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	s.shadow.copyRetry = 2 * time.Millisecond
+	u, _ := url.Parse(peer.URL)
+	s.shadow.peerPort, _ = strconv.Atoi(u.Port())
+
+	setPeer := func(k, gen string) {
+		s.shadow.mu.Lock()
+		s.shadow.peerDecks[1] = peerDeck{
+			deckState: deckState{Deck: 1, Key: k, Ext: ".flac", Name: k + ".flac", PerfGen: gen},
+			ip:        "127.0.0.1",
+			at:        time.Now(),
+		}
+		s.shadow.mu.Unlock()
+	}
+	compose := func() deckState {
+		out := s.shadowComposeLegacy("24", time.Now())
+		if len(out) != 1 {
+			t.Fatalf("expected 1 shadow deck, got %+v", out)
+		}
+		return out[0]
+	}
+
+	// Sub-case A: persistent 503 transitions to visible "no analysis yet", stops polling,
+	// and retries automatically when a new PerfGen arrives.
+	setPeer("k503a", "1111111111111111")
+	var d deckState
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		d = compose()
+		if d.Error == "no analysis yet" {
+			break
+		}
+	}
+	if d.Error != "no analysis yet" || d.Path != "" || audioReqs.Load() != 0 {
+		t.Fatalf("persistent 503 did not reach visible terminal state: deck=%+v audioReqs=%d", d, audioReqs.Load())
+	}
+	settledReqs := perfReqs.Load()
+	time.Sleep(25 * time.Millisecond)
+	for i := 0; i < 5; i++ {
+		if d2 := compose(); d2.Error != "no analysis yet" || d2.Path != "" {
+			t.Fatalf("terminal state lost on idle compose: %+v", d2)
+		}
+	}
+	if perfReqs.Load() != settledReqs {
+		t.Fatalf("terminal 503 kept polling: reqs %d -> %d", settledReqs, perfReqs.Load())
+	}
+	ready.Store(true)
+	setPeer("k503a", "2222222222222222")
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		d = compose()
+		if d.Path != "" {
+			break
+		}
+	}
+	if d.Path == "" || d.Error != "" {
+		t.Fatalf("new PerfGen did not trigger retry and publish: %+v", d)
+	}
+
+	// Sub-case B: explicit DJ retry action (POST /v1/enginex/shadow/retry) resumes a terminal copy.
+	ready.Store(false)
+	setPeer("k503b", "")
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		d = compose()
+		if d.Error == "no analysis yet" {
+			break
+		}
+	}
+	if d.Error != "no analysis yet" {
+		t.Fatalf("k503b did not enter terminal state: %+v", d)
+	}
+	ready.Store(true)
+	w := httptest.NewRecorder()
+	s.shadowRetryPost(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/shadow/retry", strings.NewReader(`{"key":"peer:k503b"}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("shadowRetryPost status=%d", w.Code)
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		d = compose()
+		if d.Path != "" {
+			break
+		}
+	}
+	if d.Path == "" || d.Error != "" {
+		t.Fatalf("explicit shadow retry did not publish copy: %+v", d)
+	}
+}
+
+// GPT R2 FIX (Finding 3): concurrent first EXPF and native requests initialize
+// the encoding + precomputed generation exactly once per entry (both on-demand
+// and Pro DJ Link), with zero re-encoding or per-response full-blob hashing.
+func TestReviewShadowR2ConcurrentEncodingsRunOnceAndReuseGen(t *testing.T) {
+	// 1. On-demand concurrent first EXPF + native requests run sync.Once exactly once.
+	mediaRoot := t.TempDir()
+	oldMedia := shadowMediaRoot
+	shadowMediaRoot = mediaRoot
+	defer func() { shadowMediaRoot = oldMedia }()
+	stick, rel, _, _ := makeOnDemandStickFixture(t, mediaRoot, "R2_CONC")
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir(), MediaRoot: mediaRoot, RekordboxOnDemandSock: "-"}, nil)
+	defer s.Close()
+	entry, err := s.buildOnDemandEntry(context.Background(), bridge.OnDemandRequest{
+		Mount:      stick,
+		EnginePath: "../" + rel,
+		EngineKey:  -1,
+	}, true)
+	if err != nil {
+		t.Fatalf("buildOnDemandEntry: %v", err)
+	}
+	s.rbOnDemandEncodeCount.Store(0)
+	const workers = 8
+	start := make(chan struct{})
+	gens := make([]string, workers)
+	errs := make([]error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			nat, expf, gen, gerr := s.onDemandEncodings(entry)
+			if gerr != nil {
+				errs[idx] = gerr
+				return
+			}
+			if !validShadowAnalysis(nat) || !validPerf(expf) || gen == "" {
+				errs[idx] = fmt.Errorf("invalid encoding/gen: nat=%d expf=%d gen=%q", len(nat), len(expf), gen)
+				return
+			}
+			gens[idx] = gen
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for i, gerr := range errs {
+		if gerr != nil {
+			t.Fatalf("worker %d: %v", i, gerr)
+		}
+		if gens[i] != gens[0] {
+			t.Fatalf("worker %d gen=%q != %q", i, gens[i], gens[0])
+		}
+	}
+	if got := s.rbOnDemandEncodeCount.Load(); got != 1 {
+		t.Fatalf("onDemandEncodings initialized %d times under concurrent requests, want 1", got)
+	}
+
+	// 2. Pro DJ Link concurrent first EXPF + native requests encode once and return identical X-EngineX-Perf-Gen.
+	r := newRbxShadowSource(t)
+	id := r.row(77)
+	r.publish(t, id, 1000)
+	uri := "streaming://TIDAL/Track/" + strconv.FormatInt(id, 10)
+	body := `[{"deck":1,"net":` + strconv.Quote(uri) + `,"playing":true,"positionMs":1000,"bpm":120}]`
+	resp, err := http.Post(r.srv.URL+"/v1/enginex/decks", "application/json", strings.NewReader(body))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("rbx decksPost: %v %v", resp, err)
+	}
+	resp.Body.Close()
+	r.s.shadow.mu.Lock()
+	d1 := r.s.shadow.own[0]
+	r.s.shadow.mu.Unlock()
+	// Reset deckPerf and counter to test cold concurrent first EXPF + native HTTP requests.
+	r.s.shadow.perfMu.Lock()
+	r.s.shadow.deckPerf[1] = nil
+	r.s.shadow.perfMu.Unlock()
+	r.s.shadow.deckEncodeCount.Store(0)
+
+	start2 := make(chan struct{})
+	gotGens := make([]string, workers)
+	gotErrs := make([]error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start2
+			q := ""
+			if idx%2 == 1 {
+				q = "&format=native"
+			}
+			res, rerr := http.Get(r.srv.URL + "/peer/decks/1/perf?key=" + url.QueryEscape(d1.Key) + q)
+			if rerr != nil {
+				gotErrs[idx] = rerr
+				return
+			}
+			_, _ = io.ReadAll(res.Body)
+			res.Body.Close()
+			if res.StatusCode != http.StatusOK {
+				gotErrs[idx] = fmt.Errorf("status %d", res.StatusCode)
+				return
+			}
+			gotGens[idx] = res.Header.Get(shadowPerfGenHeader)
+		}(i)
+	}
+	close(start2)
+	wg.Wait()
+	for i, rerr := range gotErrs {
+		if rerr != nil {
+			t.Fatalf("prolink worker %d: %v", i, rerr)
+		}
+		if gotGens[i] != d1.PerfGen || gotGens[i] == "" {
+			t.Fatalf("prolink worker %d gen=%q, want %q", i, gotGens[i], d1.PerfGen)
+		}
+	}
+	if got := r.s.shadow.deckEncodeCount.Load(); got != 1 {
+		t.Fatalf("prolink deckPerf encoded %d times under concurrent requests, want 1", got)
+	}
+}
+
+// GPT R2 FIX (Finding 5 on A): EXPF-only compatibility path validates the beat
+// grid semantically and rejects a framed one-byte unreadable beat grid.
+func TestReviewShadowR2RejectsEXPFWithUnreadableBeatGrid(t *testing.T) {
+	b := validTestEXPF(128)
+	n := int(binary.LittleEndian.Uint32(b[16:20]))
+	beatsLen := 20 + n
+	end := beatsLen + 4 + int(binary.LittleEndian.Uint32(b[beatsLen:]))
+	bad := append([]byte(nil), b[:beatsLen]...)
+	bad = append(bad, 1, 0, 0, 0, 0)
+	bad = append(bad, b[end:]...)
+	if validPerf(bad) {
+		t.Fatal("validPerf accepted EXPF with one-byte unreadable beat grid")
+	}
+	oldBoard := shadowIsPlayerBoard
+	shadowIsPlayerBoard = func() bool { return true }
+	t.Cleanup(func() { shadowIsPlayerBoard = oldBoard })
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/peer/decks/1/audio" {
+			_, _ = w.Write([]byte("AUDIO"))
+			return
+		}
+		// Older EXPF-only peer (no X-EngineX-Perf-Formats header) serving bad beat grid.
+		_, _ = w.Write(bad)
+	}))
+	defer peer.Close()
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	u, _ := url.Parse(peer.URL)
+	s.shadow.peerPort, _ = strconv.Atoi(u.Port())
+	const key = "peer:bad-expf-grid"
+	s.shadow.mu.Lock()
+	s.shadowFetchPeer(key, peerDeck{
+		deckState: deckState{Deck: 1, Key: "bad-expf-grid", Ext: ".flac", Name: "Song.flac"},
+		ip:        "127.0.0.1",
+	})
+	s.shadow.mu.Unlock()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		s.shadow.mu.Lock()
+		busy, path, cp := s.shadow.busy[key], s.shadow.files[key], s.shadow.copies[key]
+		s.shadow.mu.Unlock()
+		if busy {
+			continue
+		}
+		if path != "" {
+			t.Fatalf("EXPF-only compatibility path published copy with unreadable beat grid: %s", path)
+		}
+		if cp == nil || cp.err != "no analysis" {
+			t.Fatalf("expected \"no analysis\" error, got %+v", cp)
+		}
+		return
+	}
+	t.Fatal("copy job did not settle")
+}

@@ -109,10 +109,7 @@ func TestShadowDeckFromPeer(t *testing.T) {
 	dbDir := filepath.Join(data, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2")
 	os.MkdirAll(dbDir, 0o755)
 	dbFile, _, seedDB := testlibrary.Create(t)
-	track := bytes.Repeat([]byte{0}, 44)
-	binary.BigEndian.PutUint64(track, 0x40e5888000000000) // 44100.0
-	overview := append(bytes.Repeat([]byte{0}, 24), 100, 50, 25, 100, 50, 25)
-	beats := []byte("GRID")
+	track, beats, overview := validTestPerformanceBlobs(128.0)
 	qc := func(b []byte) []byte { c, _ := enginedb.QCompress(b); return c }
 	if _, err := seedDB.Exec(`INSERT INTO Track (path, filename, bpmAnalyzed, isAnalyzed) VALUES ('../../../../` + migration.DataName + `/Stream/a.mp3', 'a.mp3', 128.0, 1)`); err != nil {
 		t.Fatal(err)
@@ -192,11 +189,10 @@ func TestShadowPerfFromPeer(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "Contents", "it's.mp3"), []byte("AUDIO"), 0o644)
 	os.WriteFile(filepath.Join(root, "plain.mp3"), []byte("AUDIO"), 0o644)
 	os.WriteFile(filepath.Join(root, "Contents", "raw.mp3"), []byte("AUDIO"), 0o644)
-	// A 5.0.4-style 44-byte trackData (zero peaks) and a one-entry overview.
-	track := bytes.Repeat([]byte{0}, 44)
-	binary.BigEndian.PutUint64(track, 0x40e5888000000000) // 44100.0
-	overview := append(bytes.Repeat([]byte{0}, 24), 100, 50, 25, 7, 7, 7)
-	beats := []byte("GRID")
+	// A 5.0.4-style 44-byte trackData (zero peaks), a valid beat grid, and a one-entry overview.
+	track, beats, overview := validTestPerformanceBlobs(130.5)
+	overview[24], overview[25], overview[26] = 100, 50, 25
+	overview[27], overview[28], overview[29] = 7, 7, 7
 	qc := func(b []byte) []byte { c, _ := enginedb.QCompress(b); return c }
 	if _, err := src.Exec(`INSERT INTO Track (path, filename, bpmAnalyzed, isAnalyzed) VALUES ('../Contents/it''s.mp3', 'it''s.mp3', 130.5, 1), ('../plain.mp3', 'plain.mp3', 124.0, 1), ('../Contents/raw.mp3', 'raw.mp3', 120, 0)`); err != nil {
 		t.Fatal(err)
