@@ -272,12 +272,40 @@ def _py_importers(idx, path):
     return [t for t in idx.tests if os.path.dirname(t) == d and t.endswith('.py') and t != path and rx.search(idx.text(t))]
 
 
-def map_path(plan, path, root='.'):
+def all_c_tests(idx):
+    """Every C test the runner builds itself, and the Python and bash tests that build the others."""
+    srcs = sorted(f for f in idx.files if os.path.dirname(f) in C_TEST_DIRS and re.match(r'test_[^/]*\.c$', os.path.basename(f)))
+    own, drivers = set(), set()
+    for f in srcs:
+        entry = C_TESTS['tests'].get(f) or {}
+        if entry.get('via'):
+            drivers.add(entry['via'])
+        elif f in C_TESTS['tests']:
+            own.add(f)
+        else:
+            found = c_drivers(idx, f)
+            if found:
+                drivers |= set(found)
+            else:
+                own.add(f)
+    return own, drivers
+
+
+def map_path(plan, path, root='.', gone=False):
+    """Select the tests for one changed path. gone: the change deletes it (or renames it away); a deleted test, or a
+    deleted path no rule knows, is left unmapped, and the caller runs everything."""
     idx = index(root)
     plan.root = root
     d, name = os.path.dirname(path), os.path.basename(path)
     start = plan.hits
-    why = path
+    why = path + (' (deleted)' if gone else '')
+    if gone and (is_test_file(path) or path in SH_TESTS['auto'] or path in SH_TESTS['manual']):
+        plan.unmapped.append(path)  # a deleted test cannot be run: everything runs instead
+        return
+    if gone and name.endswith('.go') and (d or '.') not in idx.go_dirs:
+        plan.go_all = True  # the whole package went: its former importers are found by building everything
+        plan.note('go ./...', why)
+        return
     if path in ('go.mod', 'go.sum'):
         plan.go_all = True
         plan.note('go ./...', why)
@@ -313,18 +341,25 @@ def map_path(plan, path, root='.'):
         _py(plan, 'tools/dev/test_devtools.py', why)
         if name in ('integrate.sh', 'test_integrate.sh', 'test.sh', 'devtest.py', 'testmap.py'):
             _sh(plan, 'tools/dev/test_integrate.sh', why)
-    if path in idx.testset or is_test_file(path):
+    if not gone and (path in idx.testset or is_test_file(path)):
         _select_test_file(plan, path, why + ' (the test itself)')
 
-    # C: every test that includes the file; the overlay test when a shipped hook includes it.
+    # C: a C source or header under tools/ runs EVERY C test (includes found only through -I paths or macros would
+    # escape an include map), and the overlay test when it is in a hook's directory or a shipped hook includes it.
     closure = {path}
-    if name.endswith(('.c', '.h')):
+    if name.endswith(('.c', '.h')) and path.startswith('tools/'):
         closure = idx.include_closure(path)
-        for f in sorted(closure):
-            if f != path and re.match(r'test_[^/]*\.c$', os.path.basename(f)):
-                _c_test(plan, f, f'{why} (included)', root)
+        own, drivers = all_c_tests(idx)
+        for f in sorted(own):
+            if f != path or not gone:
+                plan.c.add(f)
+                plan.note('c ' + f, why + ' (a C change runs every C test)')
+        for t in sorted(drivers):
+            (_py if t.endswith('.py') else _sh)(plan, t, why + ' (a C change runs every C test)')
+    elif name.endswith(('.c', '.h')):
+        closure = idx.include_closure(path)
     if path.startswith('rootfs-overlay/') or path == OVERLAY or path in HOOK_BUILDS or (
-            name.endswith(('.c', '.h')) and closure & set(HOOK_SOURCES)):
+            name.endswith(('.c', '.h')) and (closure & set(HOOK_SOURCES) or d in C_TEST_DIRS)):
         _sh(plan, OVERLAY, why)
     if path.startswith('docs/') or re.match(r'README(\.[\w-]+)?\.md$', path):
         _py(plan, 'tools/az01-packer/test_docs_audit.py', why)
@@ -341,10 +376,11 @@ def map_path(plan, path, root='.'):
         plan.unmapped.append(path)
 
 
-def map_paths(paths, root='.'):
+def map_paths(paths, root='.', deleted=()):
     plan = Plan()
+    deleted = set(deleted)
     for p in paths:
-        map_path(plan, p, root)
+        map_path(plan, p, root, gone=p in deleted or not os.path.lexists(os.path.join(root, p)))
     return plan
 
 

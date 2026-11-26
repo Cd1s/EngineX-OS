@@ -15,15 +15,19 @@ HOSTS=${ENGINEX_BUILD_HOSTS:-}
 [[ -n "$SSHCTL" ]] || { echo "sshctl is required for host selection and exact workspace cleanup" >&2; exit 2; }
 
 branches=()
+accept=()
 while (($#)); do
     case $1 in
         --into) (($# >= 2)) || { echo "--into needs a target branch" >&2; exit 2; }; TARGET=$2; shift 2 ;;
+        # test.sh exits 3 (INCOMPLETE) when a merged change selects tests it cannot run (Engine sandboxes): pass this
+        # only after checking the lanes ran them; the list stays in the output. Never for the full run.
+        --accept-incomplete) accept=(--accept-incomplete); shift ;;
         --) shift; break ;;
         -*) echo "unknown option: $1" >&2; exit 2 ;;
         *) branches+=("$1"); shift ;;
     esac
 done
-[[ ${#branches[@]} -gt 0 ]] || { echo "usage: $0 <branch>... [--into <target>]" >&2; exit 2; }
+[[ ${#branches[@]} -gt 0 ]] || { echo "usage: $0 <branch>... [--into <target>] [--accept-incomplete]" >&2; exit 2; }
 
 IFS=',' read -r -a host_list <<< "${HOSTS// /,}"
 run_id=$(printf '%s-%s-%s' "$(date +%s)" "$$" "${RANDOM:-0}")
@@ -407,7 +411,7 @@ for branch in "${branches[@]}"; do
     mapfile -t overlays < <(git -C "$worktree" diff --name-only "$base" "origin/$branch" -- rootfs-overlay | grep '\.so$' || true)
     if ((${#overlays[@]})); then rebuild_overlay "$(pick_host 1)" "${branch//[^A-Za-z0-9._-]/_}-${target_head}" "${overlays[@]}"; fi
     if cmd=$(test_cmd); then
-        "$cmd" --tree "$worktree" --base "$pre_merge" --exclusive
+        "$cmd" --tree "$worktree" --base "$pre_merge" --exclusive "${accept[@]}"
     else
         targeted_tests "$(pick_host 0)" "${touched[@]}"
     fi

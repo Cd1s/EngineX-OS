@@ -24,9 +24,11 @@ cat > "$TMP/bin/test.sh" <<'MOCK'
 #!/usr/bin/env bash
 set -eu
 printf 'test.sh %s\n' "$*" >> "${FAKE_REMOTE_LOG:?}"
-full=0
-for arg in "$@"; do [[ $arg == --full ]] && full=1; done
+full=0 accept=0
+for arg in "$@"; do [[ $arg == --full ]] && full=1; [[ $arg == --accept-incomplete ]] && accept=1; done
 if [[ ${FAKE_FAIL_TARGETED:-0} == 1 && $full == 0 ]]; then exit 42; fi
+if [[ ${FAKE_INCOMPLETE:-0} == 1 && $full == 0 && $accept == 0 ]]; then exit 3; fi
+if [[ $full == 1 && $accept == 1 ]]; then exit 44; fi  # the full run never accepts an incomplete run
 if [[ ${FAKE_FAIL_FULL:-0} == 1 && $full == 1 ]]; then exit 43; fi
 MOCK
 cat > "$TMP/bin/sshctl" <<'MOCK'
@@ -148,4 +150,26 @@ for mode in TARGETED FULL; do
     after=$(git -C "$fail_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
     [[ $before == "$after" ]]
 done
-printf 'integrate.sh clean merge, refused conflict, refused targeted failure, test.sh targeted+full runs, and refused test.sh targeted and full failures passed\n'
+# test.sh INCOMPLETE (exit 3: a merged change selects Engine sandboxes): refused, unless --accept-incomplete is given,
+# which reaches the targeted runs only.
+for accept in no yes; do
+    inc_repo=$(new_repo "runner-incomplete-$accept")
+    git -C "$inc_repo" switch -q -c feature-inc
+    printf 'inc\n' > "$inc_repo/inc.txt"
+    git -C "$inc_repo" add inc.txt && git -C "$inc_repo" commit -qm inc
+    git -C "$inc_repo" push -qu origin feature-inc
+    before=$(git -C "$inc_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
+    rc=0
+    if [[ $accept == yes ]]; then
+        FAKE_INCOMPLETE=1 ENGINEX_TEST_CMD="$TMP/bin/test.sh" run_integrate "$inc_repo" feature-inc --accept-incomplete || rc=$?
+    else
+        FAKE_INCOMPLETE=1 ENGINEX_TEST_CMD="$TMP/bin/test.sh" run_integrate "$inc_repo" feature-inc || rc=$?
+    fi
+    after=$(git -C "$inc_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
+    if [[ $accept == yes ]]; then
+        [[ $rc == 0 && $before != "$after" ]] || { echo "--accept-incomplete: rc=$rc, the push did not happen" >&2; exit 1; }
+    else
+        [[ $rc != 0 && $before == "$after" ]] || { echo 'an INCOMPLETE targeted run unexpectedly passed' >&2; exit 1; }
+    fi
+done
+printf 'integrate.sh clean merge, refused conflict, refused targeted failure, test.sh targeted+full runs, refused test.sh targeted and full failures, and INCOMPLETE refused unless accepted passed\n'
