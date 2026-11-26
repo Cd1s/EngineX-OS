@@ -374,12 +374,13 @@ def parse_rbxa1(b: bytes):
 
 
 MOCK_PROLINK_SERVER = r"""
-import json, socket, struct, sys, threading, time
+import json, os, socket, struct, sys, threading, time
 
 cfg = json.loads(sys.argv[1])
 tracks = {int(k): v for k, v in cfg["tracks"].items()}
 blobs = {k: bytes.fromhex(v) for k, v in cfg["blobs"].items()}
 delay_ids = set(cfg["delay_ids"])
+delay_flag = cfg["delay_flag"]
 delayed_once = set()
 delay_lock = threading.Lock()
 
@@ -499,7 +500,7 @@ def handle_db(conn):
             elif kind == 0x2C04:
                 tid = args[1][1]
                 tag = struct.pack("<I", args[2][1]).rstrip(b"\x00").decode("ascii", "ignore")
-                if tid in delay_ids:
+                if tid in delay_ids and os.path.exists(delay_flag):
                     do_sleep = False
                     with delay_lock:
                         if tid not in delayed_once:
@@ -813,11 +814,14 @@ def main():
                 ppath.parent.mkdir(parents=True, exist_ok=True)
                 ppath.write_text(snap)
 
+        prolink_delay_flag = twin.WORK / "A/tmp/prolink-delay-armed"
+        prolink_delay_flag.unlink(missing_ok=True)
         refresh_prolink_snap()
         prolink_cfg = json.dumps({
             "tracks": pl_tracks_cfg,
             "blobs": {"PQTZ": pqtz_sec.hex(), "PCO2": pco2_sec.hex(), "PWV7": pwv7_sec.hex()},
             "delay_ids": [1, 2],  # 0 ms and 100 ms exercise 503 while rbxWriteAnalysis runs
+            "delay_flag": str(prolink_delay_flag),
         })
         prolink_proc = subprocess.Popen(
             ["ip", "netns", "exec", twin.SIDE_CFG["A"]["netns"], "python3", "-u", "-c", MOCK_PROLINK_SERVER, prolink_cfg],
@@ -838,14 +842,21 @@ def main():
         ns_curl("A", "/v1/enginex/ui?scope=rekordbox", method="POST")
 
         # Browse Pro DJ Link Tracks playlist through real tidal_gateway so stream-sync assigns gateway IDs!
+        last_pl_diag = {}
+
         def get_prolink_gids():
+            refresh_prolink_snap()
             lists = json.loads(ns_curl("A", "/v1/users/1/playlists"))
+            last_pl_diag["lists"] = lists
             for item in lists.get("items") or []:
                 if item.get("title") in ("Tracks", "曲目", "Pistas") and item.get("uuid"):
                     tr_resp = json.loads(ns_curl("A", f"/v1/playlists/{item['uuid']}/tracks"))
+                    last_pl_diag["tracks"] = tr_resp
                     out = {}
                     for tr in tr_resp.get("items") or []:
-                        out[tr["title"]] = int(tr["id"])
+                        title = tr.get("title", "")
+                        if title.startswith("ProLink "):
+                            out[title] = int(tr["id"])
                     if len(out) == len(REQUEST_TIMES_MS):
                         return out
             return None
@@ -853,7 +864,8 @@ def main():
         try:
             prolink_gids = wait_for(get_prolink_gids, timeout=25, label="A Pro DJ Link track list")
         except AssertionError:
-            print("DIAG A /v1/users/1/playlists:", ns_curl("A", "/v1/users/1/playlists").decode("utf-8", "replace")[:400], flush=True)
+            print("DIAG A prolink browse:", json.dumps(last_pl_diag)[:600], flush=True)
+            print("DIAG A sync log tail:", sync_logs("A").splitlines()[-10:], flush=True)
             raise
 
         # 5. streaming setup: /data/downloads/TIDAL/stream-*.wav + A's stm.db
@@ -928,6 +940,11 @@ def main():
                 ns_curl("A", "/v1/enginex/ui")
                 fname = f"prolink-{t_ms}.wav"
                 gid = prolink_gids[f"ProLink {t_ms}"]
+                if t_ms < 1000:
+                    (twin.WORK / f"A/run/enginex-rbx-analysis-v3/{gid}.bin").unlink(missing_ok=True)
+                    prolink_delay_flag.write_text("1")
+                else:
+                    prolink_delay_flag.unlink(missing_ok=True)
                 # Trigger real rbxPrepare (+ rbxWriteAnalysis; 0ms & 100ms keep rbxAnalysing running past 3 s wait).
                 ns_curl("A", f"/v1/tracks/{gid}/playbackinfopostpaywall", timeout=15)
                 deck_obj = {"deck": 1, "net": f"streaming://TIDAL/Track/{gid}", "title": f"ProLink {t_ms}", "artist": "Link Artist", "bpm": 0 if t_ms == 0 else 128}
