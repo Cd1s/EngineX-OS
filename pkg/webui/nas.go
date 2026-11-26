@@ -343,17 +343,22 @@ func (s *Server) resetNASIfMoved(before providers.NASConfig) {
 	}
 }
 
+// gatewayProvider: an SMB NAS is its own source (#335); WebDAV, Subsonic and
+// Plex keep their released place, the [NAS] playlists inside OmniSource.
 func gatewayProvider(p string) string {
-	switch p {
-	case "webdav", "subsonic", "plex", "smb":
+	if p == "smb" {
 		return nasScope
-	default:
-		return p
 	}
+	return p
+}
+
+// smbNASConfigReady: only an SMB NAS gets the standalone NAS entry.
+func smbNASConfigReady(cfg providers.NASConfig) bool {
+	return cfg.Protocol == "smb" && nasConfigReady(cfg)
 }
 
 func (s *Server) nasAvailableLocked() bool {
-	return nasConfigReady(s.loadNASConfigLocked())
+	return smbNASConfigReady(s.loadNASConfigLocked())
 }
 
 func (s *Server) nasAvailable() bool {
@@ -370,6 +375,15 @@ func (s *Server) ownerSelfHosted() *providers.SelfHostedProvider {
 	return providers.NewSelfHostedProvider(cfg, s.nasHTTPClient())
 }
 
+// ownerSMBSelfHosted is ownerSelfHosted for the standalone NAS entry: nil
+// unless the NAS is SMB.
+func (s *Server) ownerSMBSelfHosted() *providers.SelfHostedProvider {
+	if cfg := s.loadNASConfig(); smbNASConfigReady(cfg) {
+		return providers.NewSelfHostedProvider(cfg, s.nasHTTPClient())
+	}
+	return nil
+}
+
 func (s *Server) nasPlaylists(ctx context.Context) ([]providers.Playlist, *providers.SelfHostedProvider) {
 	p := s.ownerSelfHosted()
 	if p == nil {
@@ -382,7 +396,7 @@ func (s *Server) nasPlaylists(ctx context.Context) ([]providers.Playlist, *provi
 	return lists, p
 }
 
-// nasPlaylistsPage serves a configured NAS as its own source under Sources
+// nasPlaylistsPage serves a configured SMB NAS as its own source under Sources
 // (independent of OmniSource, #335).
 func (g *tidalGateway) nasPlaylistsPage(w http.ResponseWriter, r *http.Request) {
 	favorites := strings.HasSuffix(r.URL.Path, "/favorites/playlists")
@@ -400,7 +414,7 @@ func (g *tidalGateway) nasPlaylistsPage(w http.ResponseWriter, r *http.Request) 
 	if n := len(g.s.stemmed(nasScope)); n > 0 {
 		add(playlistJSON(stemsListID(nasScope), "Stems", "", n))
 	}
-	p := g.s.ownerSelfHosted()
+	p := g.s.ownerSMBSelfHosted()
 	if p == nil {
 		add(playlistJSON(hintPlaylist, sourceFailedTitle(nasScope, errors.New("not configured")), "http://"+lanHost()+":8080", 0))
 		respond(w, page(r, 100, items))
@@ -420,7 +434,7 @@ func (g *tidalGateway) nasPlaylistsPage(w http.ResponseWriter, r *http.Request) 
 }
 
 func (g *tidalGateway) nasTracks(w http.ResponseWriter, r *http.Request, id string, ref playlistRef, role, order string) {
-	nasProv := g.s.ownerSelfHosted()
+	nasProv := g.s.ownerSMBSelfHosted()
 	if nasProv == nil {
 		err := errors.New("nas provider is not enabled")
 		g.logPlaylistOpenFailure(r, http.StatusNotFound, id, &ref, err)

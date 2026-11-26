@@ -1893,7 +1893,7 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	scope := g.s.scope()
 	sources := []source{}
 	if scope == nasScope {
-		if nasProv := g.s.ownerSelfHosted(); nasProv != nil {
+		if nasProv := g.s.ownerSMBSelfHosted(); nasProv != nil {
 			sources = append(sources, source{session: nasScope, provider: nasScope, p: nasProv})
 		}
 	} else {
