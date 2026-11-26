@@ -322,22 +322,18 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 	j.File(t) // loads a download saved before a restart
 	j.dropUnusable(t)
 	j.mu.Lock()
-	gen := j.nasGen // a fetch begun before a NAS change answers nothing of the old NAS
+	gen := j.nasGen // a NAS download for a fetch begun before a NAS change is not used
 	j.mu.Unlock()
 	for {
 		// Check the cache and claim the download under one lock so a fetch
 		// finishing in between cannot trigger a second download.
 		j.mu.Lock()
-		moved := isNASKey(key) && gen != j.nasGen
 		f, done := j.files[key]
 		busy, ok := j.fetches[key]
-		if !ok && !done && !moved {
+		if !ok && !done {
 			j.fetches[key] = make(chan struct{})
 		}
 		j.mu.Unlock()
-		if moved {
-			return "", errNASChanged
-		}
 		if done {
 			if st, err := os.Stat(f.dl.Path); err == nil && st.Mode().IsRegular() {
 				j.queueImport(session, t, guest, f)
