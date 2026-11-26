@@ -1337,10 +1337,12 @@ static void test_shadow_replay(void) {
     prefs[12] = 1;
     assert(!oa_replay(oa_self, &qs, prefs) && oa_count == 0);
     prefs[12] = 0;
-    // A corrupt or missing .perf falls through to the stock analysis.
+    // A corrupt or missing .perf falls through to the stock analysis and still consumes .perf.regrid.run.
     f = fopen("/tmp/test-oa-replay/\xc3\xa9.flac.perf", "r+b"); assert(f); fwrite("XXXX", 1, 4, f); fclose(f);
+    f = fopen("/tmp/test-oa-replay/\xc3\xa9.flac.perf.regrid.run", "wb"); assert(f); fputs("g3", f); fclose(f);
     oa_count = 0;
     assert(!oa_replay(oa_self, &qs, prefs) && oa_count == 0);
+    assert(access("/tmp/test-oa-replay/\xc3\xa9.flac.perf.regrid.run", F_OK) != 0);
     unlink("/tmp/test-oa-replay/\xc3\xa9.flac.perf");
     assert(!oa_replay(oa_self, &qs, prefs) && oa_count == 0);
     // Engine analyses its own copy of a /data file: the shadow copy's .perf
@@ -1777,6 +1779,24 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     analysis_bind(entry, db, shadow_read, 2);
     assert(pragma(db, "SELECT isAnalyzed FROM Track WHERE id = 2") == shadow);
     assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == gateway + shadow);
+    if (shadow) {
+        char regrid_marker[160], regrid_run[160];
+        snprintf(regrid_marker, sizeof regrid_marker, "%s/peer-a/track.wav.perf.regrid", dir);
+        snprintf(regrid_run, sizeof regrid_run, "%s/peer-a/track.wav.perf.regrid.run", dir);
+        analysis_file(regrid_marker, "g2", 2);
+        unsigned char fake_ltd[0xd0] = {0};
+        fake_ltd[0xc8] = 1;
+        // Non-AnalysisQueue callers see the real loaded state and leave .perf.regrid untouched.
+        assert(shadow_loaded_on_deck(fake_ltd) == 1);
+        assert(access(regrid_marker, F_OK) == 0 && !unlink(regrid_marker));
+        // Armed regrid in shadow_fill clears isAnalyzed so AnalysisQueue replays the new grid.
+        analysis_file(regrid_run, "g2", 2);
+        shadow_regrid_queued = 1;
+        analysis_bind(entry, db, shadow_read, 2);
+        assert(shadow_regrid_queued == 0);
+        assert(pragma(db, "SELECT isAnalyzed FROM Track WHERE id = 2") == 0);
+        assert(!unlink(regrid_run));
+    }
     assert(sqlite3_close(db) == SQLITE_OK);
     if (gateway) {
         char saved[128];

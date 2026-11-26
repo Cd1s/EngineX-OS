@@ -249,7 +249,10 @@ def main():
         d1 = next((d for d in (sh.get("decks") or []) if d.get("deck") == 1 and d.get("key") and not d.get("loading")), None)
         if not d1:
             return None
-        meta = http_get_json("B", "/v1/enginex/shadow/display?" + urlencode({"deck": 1, "key": d1["key"]}))
+        try:
+            meta = http_get_json("B", "/v1/enginex/shadow/display?" + urlencode({"deck": 1, "key": d1["key"]}))
+        except (subprocess.CalledProcessError, json.JSONDecodeError):
+            return None
         if not meta.get("beats"):
             return None
         return {"key": d1["key"], "bpm": meta["bpm"], "beat0": meta["beats"][0]["ms"]}

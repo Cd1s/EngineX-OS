@@ -3349,19 +3349,20 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
             return 0;
         }
     }
-    struct oa_perf p;
-    if (!oa_read_perf(perf, &p)) {
-        oa_log("bad", perf, 0);
-        return 0;
-    }
     // An in-place grid update for an already-loaded shadow copy (.perf.regrid.run,
     // armed by shadow_loaded_on_deck) does not race the initial deck loader, so it
-    // skips oa_settle() and replays immediately (~0.1 ms).
+    // skips oa_settle() and replays immediately (~0.1 ms). Consume the one-shot
+    // before reading .perf so a corrupt .perf cannot leave it armed on disk.
     char regrid_run[PATH_MAX + 24];
     int regrid = 0;
     if (!rekordbox_stream && (size_t)snprintf(regrid_run, sizeof regrid_run, "%s.regrid.run", perf) < sizeof regrid_run) {
         struct stat rst;
         if (!lstat(regrid_run, &rst) && S_ISREG(rst.st_mode) && !unlink(regrid_run)) regrid = 1;
+    }
+    struct oa_perf p;
+    if (!oa_read_perf(perf, &p)) {
+        oa_log("bad", perf, 0);
+        return 0;
     }
     oa_emit(o, OA_STARTED, NULL);
     // The streaming request is for Engine's completed download. The shadow

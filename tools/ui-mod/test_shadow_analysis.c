@@ -140,9 +140,11 @@ int main(void) {
     assert(!sc_shadow_regrid_arm(audio)); // one-shot atomic rename
     assert(access(regrid, F_OK) != 0 && access(regrid_run, F_OK) == 0);
     assert(sqlite3_exec(db, "UPDATE Track SET isAnalyzed = 1, isBeatGridLocked = 1 WHERE id = 1", NULL, NULL, NULL) == SQLITE_OK);
-    // Normal fill (regrid == 0) leaves isAnalyzed = 1 even while .regrid.run exists.
+    // Normal fill (regrid == 0) leaves isAnalyzed = 1 and isBeatGridLocked = 1 even while .regrid.run exists.
     assert(!sc_shadow_analysis_fill_ex(&api, db, 1, 0));
-    check_flags(db, 1);
+    assert(sqlite3_prepare_v2(db, "SELECT isAnalyzed,isBeatGridLocked FROM Track WHERE id=1", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1 && sqlite3_column_int(stmt, 1) == 1);
+    sqlite3_finalize(stmt);
     // Regrid fill (regrid == 1) clears isAnalyzed and isBeatGridLocked for peer-* track 1.
     assert(sc_shadow_analysis_fill_ex(&api, db, 1, 1));
     check_flags(db, 0);
