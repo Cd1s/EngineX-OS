@@ -462,6 +462,15 @@ class GorunTest(unittest.TestCase):
                 self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
                 self.assertIn('test timed out after 1s', p.stdout + p.stderr)
 
+    def test_a_directory_whose_go_files_are_all_excluded_is_not_a_package_here(self):
+        import gotree
+        with tempfile.TemporaryDirectory() as root:
+            self.module(root)
+            write(root, 'tool/server.go', '//go:build ignore\n\npackage main\n')
+            self.assertIn('tool', gotree.static_closure(root, ['tool']), 'the static map ignores build tags')
+            ok = gotree.buildable(root, env=dict(os.environ, GOFLAGS='-buildvcs=false'))
+            self.assertEqual(sorted(ok), ['a', 'b'])
+
     def test_failing_test_fails_the_run(self):
         with tempfile.TemporaryDirectory() as root:
             self.module(root)

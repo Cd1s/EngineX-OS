@@ -198,13 +198,19 @@ def exec_plan(plan_path):
 
     try:
         # Go selection: the plan's static closure, plus whatever `go list` finds that it missed.
-        pk = ['./...'] if plan['go_all'] else [f'./{d}' if d != '.' else '.' for d in plan['go']]
+        go_dirs = list(plan['go'])
         if plan['go_code'] and not plan['go_all']:
             gl = gotree.go_list_closure('.', set(plan['go_code']), env=env)
             if gl is not None:
-                extra = sorted(set(gl) - set(plan['go']))
+                extra = sorted(set(gl) - set(go_dirs))
                 results['go_added_by_go_list'] = extra
-                pk += [f'./{d}' if d != '.' else '.' for d in extra]
+                go_dirs += extra
+        if go_dirs and not plan['go_all']:  # the static map ignores build tags: drop what has no Go files for this host
+            ok_dirs = gotree.buildable('.', env=env)
+            if ok_dirs is not None:
+                results['go_not_buildable_here'] = sorted(d for d in go_dirs if d not in ok_dirs)
+                go_dirs = [d for d in go_dirs if d in ok_dirs]
+        pk = ['./...'] if plan['go_all'] else [f'./{d}' if d != '.' else '.' for d in sorted(set(go_dirs))]
         if plan['gofmt'] is None or plan['gofmt']:
             s = Step('gofmt'); spawn(s, ['gofmt', '-l'] + (['.'] if plan['gofmt'] is None else plan['gofmt']), env)
             if s.ok and s.out.strip():
@@ -422,6 +428,8 @@ def report(a, plan, res, host, started):
     for s in res['steps']:
         ok &= bool(s['ok'])
         print(f"{s['name'][:40]:40} {s['secs']:7.1f}s  {'ok' if s['ok'] else 'FAILED'}{'  ' + s['note'] if s['note'] else ''}")
+    if res.get('go_not_buildable_here'):
+        print(f"not Go packages on this host (build constraints exclude every file): {' '.join(res['go_not_buildable_here'])}")
     if res.get('go_added_by_go_list'):
         print(f"go list added packages the static map missed: {' '.join(res['go_added_by_go_list'])}")
     if res.get('go'):

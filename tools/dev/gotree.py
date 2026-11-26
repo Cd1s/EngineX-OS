@@ -78,6 +78,21 @@ def static_closure(root, dirs):
     return sorted(want)
 
 
+def buildable(root, env=None):
+    """Package dirs that have Go files for this host's build constraints and are not test-only stubs (go list -e).
+    None if go list fails."""
+    fmt = '{{.Dir}}\t{{len .GoFiles}}\t{{len .TestGoFiles}}\t{{len .XTestGoFiles}}\t{{len .IgnoredGoFiles}}'
+    p = subprocess.run(['go', 'list', '-e', '-f', fmt, './...'], cwd=root, capture_output=True, text=True, env=env)
+    if p.returncode:
+        return None
+    out = set()
+    for line in p.stdout.splitlines():
+        d, gofiles, tests, xtests, _ = line.split('\t')
+        if int(gofiles) or int(tests) or int(xtests):
+            out.add(os.path.relpath(d, root))
+    return out
+
+
 def go_list_closure(root, dirs, env=None):
     """The same closure from `go list` (needs Go; build constraints of this host apply). None if go list fails."""
     fmt = '{{.ImportPath}}\t{{.Dir}}\t{{join .Imports " "}} {{join .TestImports " "}} {{join .XTestImports " "}}'
