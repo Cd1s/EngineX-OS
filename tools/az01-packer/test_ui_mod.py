@@ -4463,6 +4463,39 @@ const gone = last(); scShareLive = false; gone.readyState = 1; gone.answer(200, 
         self.assertIn('post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks/alive" + tag)', post)
         self.assertIn('post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks" + tag)', post)
 
+    def test_a_new_share_session_reads_the_current_track_in_its_first_post(self):
+        # Review 329-share round 3: a new session's first full post must name the track on the deck now, even when
+        # Engine replaced one loaded track with another between two ticks (the sampler keeps the URI up to 500 ms).
+        self.js(self._qml_fn("scShareRestart") + r"""
+scPlayer = true; scFourDeckRole = '';
+globalThis.scShareLive = true; globalThis.scShareAsked = true; globalThis.scShareSession = '42'; globalThis.scOwnPlayer = 1;
+globalThis.scShadowWake = () => {};
+let uri = 'net://library/(Unknown)/old.mp3';
+const posts = [];
+globalThis.XMLHttpRequest = class { constructor() { this.readyState = 0; } open(m, url) { this.url = url; this.readyState = 1; }
+    send(body) { if (body) posts.push({url: this.url, net: JSON.parse(body)[0].net}); this.readyState = 4; this.status = 200; } };
+let uriReads = 0;
+globalThis.scTr = path => {
+    if (path === '/GUI/Decks/Deck/Layer') return {index: 0};
+    const first = path.indexOf('/Engine/Deck1/') === 0;
+    return {value: path.endsWith('/SampleRate') ? 48000 : 0, unnormalized: 0, color: '#ffffff', index: 0,
+        get state() { return first && path.endsWith('/SongLoaded'); },
+        get string() { if (first && path.endsWith('/TrackUri')) { uriReads++; return uri; } return ''; }};
+};
+const tick = () => { now += 40; scShadowTick(); };
+tick();
+assert(posts[0].url.endsWith('?share=42')); assert.equal(posts[0].net, uri);
+// The asks ran out into a new session between two held requests, and Engine put another track on the loaded deck.
+uri = 'net://library/(Unknown)/current.mp3';
+scShareSession = '43'; scShareRestart();
+tick();
+assert.equal(posts.length, 2); assert(posts[1].url.endsWith('?share=43'));
+assert.equal(posts[1].net, uri, "the new session's first post names the track on the deck now");
+// Within a session the URI cache stays as it was (500 ms): a steady deck is not re-read on every tick.
+const before = uriReads; for (let i = 0; i < 5; i++) tick();
+assert(uriReads - before <= 1, 'the URI is re-read at most once per 500 ms within a session: ' + (uriReads - before));
+""")
+
     def test_a_share_decks_player_samples_its_two_layers_and_marks_the_active_one(self):
         # No role, Share Decks on, a Line In console asking: its sampler runs. It sends Layer A and Layer B (decks 1
         # and 2), loaded or not, marks the deck on the stock screen's Layer, carries its player number, and does nothing

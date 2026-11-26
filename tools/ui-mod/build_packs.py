@@ -1912,9 +1912,12 @@ SERVICES_MAIN = """
 		}
 		x.send()
 	}
-	// Everything the sampler sent belongs to the session before: the next post is a full one for the new session.
+	// Everything the sampler sent belongs to the session before: the next post is a full one for the new session,
+	// with the track read again (the sampler keeps a deck's track URI up to 500 ms while the deck stays loaded, and
+	// Engine may have put another track on it in that time).
 	function scShareRestart() {
 		scShadowSent = []; scShadowMine = []; scShadowOwn.length = 0; scShadowPostFull = true; scShadowPostPending = true
+		for (const d of [1, 2]) { const prev = scShadowPrev[d]; if (prev) prev.netAt = -Infinity }
 		if (scShareAsked) scShadowWake()
 	}
 	Timer { id: scShareAskTimer; interval: 5000; onTriggered: root.scShareAskPoll() }
