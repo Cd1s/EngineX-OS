@@ -177,11 +177,12 @@ type DeckLoop struct {
 
 // DeckCues is the exact slot-indexed cue/loop state parsed from a PerformanceData row.
 type DeckCues struct {
-	SampleRate  float64
-	SampleCount float64
-	HotCues     [8]*DeckHotCue
-	Loops       [8]*DeckLoop
-	MainCue     float64 // >= 0 when set, -1 when unset
+	SampleRate      float64
+	SampleCount     float64
+	HotCues         [8]*DeckHotCue
+	Loops           [8]*DeckLoop
+	MainCue         float64 // >= 0 when set, -1 when unset
+	MainCueAdjusted bool    // true when user/export explicitly set the main cue
 }
 
 // ParseDeckCuesAndLoops parses exact slot-indexed Hot Cues, Saved Loops, and active-loop
@@ -252,6 +253,7 @@ func ParseDeckCuesAndLoops(track, cues, loops []byte, activeOnLoadLoops int64) (
 		}
 		if p >= 0 {
 			out.MainCue = p
+			out.MainCueAdjusted = qraw[off+8] != 0
 		}
 	}
 

@@ -1007,10 +1007,19 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 			}
 			if offsetOK && needsGrid {
 				if deckBeats, adjDiff, err := decodeEngineBeatGrid(row.beatData, offset); err == nil && len(deckBeats) > 0 {
-					origBeats = readANLZBeats(resolver, primary.AnalysisPath)
-					gridChanged := !beatsEquivalent(origBeats, deckBeats)
+					origPair := readANLZPair(resolver, primary.AnalysisPath)
+					if origPair != nil {
+						origBeats = origPair.Beats
+					}
+					hasSubUS := origPair != nil && len(origPair.BeatSubUS) == len(origBeats) && len(origBeats) > 0
+					var gridChanged bool
+					if adjDiff {
+						gridChanged = !beatsEquivalentAdjusted(origBeats, deckBeats, hasSubUS)
+					} else {
+						gridChanged = !beatsEquivalent(origBeats, deckBeats, 2.5, 0.05)
+					}
 					if takeOver && gridChanged && !adjDiff {
-						if deckZero, _, zerr := decodeEngineBeatGrid(row.beatData, 0); zerr == nil && beatsEquivalent(origBeats, deckZero) {
+						if deckZero, _, zerr := decodeEngineBeatGrid(row.beatData, 0); zerr == nil && beatsEquivalent(origBeats, deckZero, 2.5, 0.05) {
 							gridChanged = false
 						}
 					}
@@ -2071,7 +2080,7 @@ func decodeEngineBeatGrid(blob []byte, offsetSamples float64) ([]rekordbox.Beat,
 	return beats, adjustedDiffers, nil
 }
 
-func beatsEquivalent(a, b []rekordbox.Beat) bool {
+func beatsEquivalent(a, b []rekordbox.Beat, tolMS, tolBPM float64) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -2079,12 +2088,30 @@ func beatsEquivalent(a, b []rekordbox.Beat) bool {
 		if a[i].Number != b[i].Number {
 			return false
 		}
-		if math.Abs(a[i].BPM-b[i].BPM) > 0.05 {
+		if math.Abs(a[i].BPM-b[i].BPM) > tolBPM {
 			return false
 		}
 		ta := float64(a[i].TimeMS) + float64(a[i].SubUS)/1000.0
 		tb := float64(b[i].TimeMS) + float64(b[i].SubUS)/1000.0
-		if math.Abs(ta-tb) > 2.5 {
+		if math.Abs(ta-tb) > tolMS {
+			return false
+		}
+	}
+	return true
+}
+
+func beatsEquivalentAdjusted(a, b []rekordbox.Beat, hasSubUS bool) bool {
+	if hasSubUS {
+		return beatsEquivalent(a, b, 0.05, 0.01)
+	}
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Number != b[i].Number || a[i].TimeMS != b[i].TimeMS {
+			return false
+		}
+		if math.Abs(a[i].BPM-b[i].BPM) > 0.01 {
 			return false
 		}
 	}
@@ -2389,6 +2416,27 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offset float6
 			}
 		}
 		out = append(out, rekordbox.Cue{TimeMS: start, EndMS: end, Loop: true, Active: lp.Active, Name: lp.Name, ColorID: id, LoopNumerator: num, LoopDenominator: den, Extended: true})
+	}
+	if deck.MainCue >= 0 && deck.MainCueAdjusted {
+		mainMS := toMS(deck.MainCue)
+		seenMain := false
+		for _, mc := range memPoints {
+			if near(mc.TimeMS, mainMS) || atZero(deck.MainCue, mc) {
+				seenMain = true
+				break
+			}
+		}
+		if !seenMain {
+			for _, ml := range memLoops {
+				if near(ml.TimeMS, mainMS) || atZero(deck.MainCue, ml) {
+					seenMain = true
+					break
+				}
+			}
+		}
+		if !seenMain {
+			memPoints = append(memPoints, rekordbox.Cue{HotCue: 0, TimeMS: mainMS, Extended: true})
+		}
 	}
 	return append(out, memPoints...)
 }

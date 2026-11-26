@@ -1,6 +1,7 @@
 package rekordbox
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"sort"
@@ -114,6 +115,264 @@ func isCompactHotCue(c Cue) bool {
 }
 
 func buildPCOBSection(kind uint32, selected []Cue) []byte {
+	return buildPCOBSectionPreserving(kind, selected, nil, false)
+}
+
+func buildPCO2Section(kind uint32, selected []Cue) []byte {
+	return buildPCO2SectionPreserving(kind, selected, nil, false)
+}
+
+func sortCueList(kind uint32, selected []Cue) {
+	sort.SliceStable(selected, func(i, j int) bool {
+		if kind == 1 {
+			return selected[i].HotCue < selected[j].HotCue
+		}
+		return selected[i].TimeMS < selected[j].TimeMS
+	})
+}
+
+// BuildCueSections builds ANLZ PCOB (extended=false, for .DAT) or PCO2 (extended=true, for .EXT)
+// sections in rekordbox order: hot cues/loops (kind=1) first, memory cues/loops (kind=0) second.
+// For .DAT PCOB, only hot cues A..C (1..3) are emitted; hot cues D..H (4..8) belong in .EXT.
+func BuildCueSections(cues []Cue, extended bool) [][]byte {
+	var hot, mem []Cue
+	for _, c := range cues {
+		if c.HotCue > 0 {
+			if extended || c.HotCue <= 3 {
+				hot = append(hot, c)
+			}
+		} else {
+			mem = append(mem, c)
+		}
+	}
+	if extended {
+		return [][]byte{buildPCO2Section(1, hot), buildPCO2Section(0, mem)}
+	}
+	return [][]byte{buildPCOBSection(1, hot), buildPCOBSection(0, mem)}
+}
+
+// buildExtPCOBSections builds the .EXT PCOB(1) and PCOB(0) sections in rekordbox layout:
+// PCOB(1) carries hot cues D..H (4..8) plus any active hot loop on A..C (so the active-loop
+// status flag is preserved even when .EXT is parsed standalone); PCOB(0) is empty unless a
+// memory loop is marked active.
+func buildExtPCOBSections(cues []Cue) [][]byte {
+	var hot, mem []Cue
+	for _, c := range cues {
+		if c.HotCue > 0 {
+			if c.HotCue >= 4 || (c.Loop && c.Active) {
+				hot = append(hot, c)
+			}
+		} else if c.Loop && c.Active {
+			mem = append(mem, c)
+		}
+	}
+	return [][]byte{buildPCOBSection(1, hot), buildPCOBSection(0, mem)}
+}
+
+type rawANLZCueEntry struct {
+	cue     Cue
+	compact bool // PCOB PCPT compact profile (u1 == 0)
+	valid   bool // passes rekordbox layout rules for raw byte reuse
+	raw     []byte
+}
+
+func parseRawCueEntries(sec anlzSection) ([]rawANLZCueEntry, bool) {
+	if sec.tag != "PCOB" && sec.tag != "PCO2" {
+		return nil, false
+	}
+	minLen, off, countAt := 24, 24, 18
+	if sec.tag == "PCO2" {
+		minLen, off, countAt = 20, 20, 16
+	}
+	if len(sec.raw) < minLen {
+		return nil, false
+	}
+	listType := be.Uint32(sec.raw[12:])
+	n := int(be.Uint16(sec.raw[countAt:]))
+	if n > (len(sec.raw)-off)/12 {
+		return nil, false
+	}
+	entries := make([]rawANLZCueEntry, 0, n)
+	for i := 0; i < n; i++ {
+		if len(sec.raw)-off < 12 {
+			return nil, false
+		}
+		p := sec.raw[off:]
+		size := int(be.Uint32(p[8:]))
+		if size < 12 || size > len(p) {
+			return nil, false
+		}
+		p = p[:size]
+		off += size
+		c := Cue{}
+		var cueType byte
+		var compact, valid bool
+		if sec.tag == "PCOB" {
+			if size < 56 || string(p[:4]) != "PCPT" {
+				return nil, false
+			}
+			cueType = p[28]
+			c.HotCue = be.Uint32(p[12:])
+			status := be.Uint32(p[16:])
+			c.Active = status == 4
+			c.Loop = cueType == 2
+			c.TimeMS = be.Uint32(p[32:])
+			c.EndMS = be.Uint32(p[36:])
+			compact = be.Uint32(p[20:]) == 0
+			valid = size == 56 && (c.HotCue == 0 || !compact == (status == 0 || status == 4))
+		} else {
+			if size < 40 || string(p[:4]) != "PCP2" {
+				return nil, false
+			}
+			c.Extended = true
+			cueType = p[16]
+			c.HotCue = be.Uint32(p[12:])
+			c.Loop = cueType == 2
+			c.TimeMS = be.Uint32(p[20:])
+			c.EndMS = be.Uint32(p[24:])
+			c.ColorID = p[28]
+			c.LoopNumerator = be.Uint16(p[36:])
+			c.LoopDenominator = be.Uint16(p[38:])
+			if size > 43 {
+				cn := int(be.Uint32(p[40:]))
+				if cn < 0 || cn%2 != 0 || cn > size-44 {
+					return nil, false
+				}
+				c.Name = decodeUTF16BE(p[44 : 44+cn])
+				q := 44 + cn
+				if size > q {
+					c.ColorCode = p[q]
+				}
+				if size >= q+4 && (c.HotCue > 0 || p[q] != 0 || p[q+1] != 0 || p[q+2] != 0 || p[q+3] != 0) {
+					c.Color = [4]byte{255, p[q+1], p[q+2], p[q+3]}
+				}
+				b29 := p[29]
+				valid = b29 == 0x03 || (b29 == 0x01 && size >= 88+cn)
+			}
+		}
+		if cueType != 1 && cueType != 2 {
+			return nil, false
+		}
+		if c.TimeMS == 0xffffffff || (c.Loop && c.EndMS == 0xffffffff) {
+			return nil, false
+		}
+		switch listType {
+		case 0:
+			if c.HotCue != 0 {
+				return nil, false
+			}
+		case 1:
+			if c.HotCue < 1 || c.HotCue > 8 {
+				return nil, false
+			}
+		default:
+			return nil, false
+		}
+		if c.Loop && c.EndMS < c.TimeMS {
+			return nil, false
+		}
+		entries = append(entries, rawANLZCueEntry{
+			cue:     c,
+			compact: compact,
+			valid:   valid,
+			raw:     append([]byte(nil), p...),
+		})
+	}
+	if off != len(sec.raw) {
+		return nil, false
+	}
+	return entries, true
+}
+
+func canonicalCueEnd(c Cue) uint32 {
+	if c.Loop {
+		return c.EndMS
+	}
+	return 0
+}
+
+func pco2ColorMatches(a, b Cue) bool {
+	if a.HotCue == 0 {
+		return a.ColorID == b.ColorID && a.Color == b.Color
+	}
+	if a.ColorCode != b.ColorCode {
+		return false
+	}
+	if a.Color == b.Color {
+		return true
+	}
+	if b.Color == ([4]byte{}) && b.ColorCode > 0 && int(b.ColorCode) <= len(rekordboxCuePalette) {
+		pal := rekordboxCuePalette[b.ColorCode-1]
+		return a.Color == [4]byte{255, pal[0], pal[1], pal[2]}
+	}
+	if a.Color == ([4]byte{}) && a.ColorCode > 0 && int(a.ColorCode) <= len(rekordboxCuePalette) {
+		pal := rekordboxCuePalette[a.ColorCode-1]
+		return b.Color == [4]byte{255, pal[0], pal[1], pal[2]}
+	}
+	return false
+}
+
+func rawCueMatchesTarget(tag string, entry rawANLZCueEntry, target Cue) bool {
+	old := entry.cue
+	if old.HotCue != target.HotCue || old.TimeMS != target.TimeMS || old.Loop != target.Loop || canonicalCueEnd(old) != canonicalCueEnd(target) {
+		return false
+	}
+	if tag == "PCOB" {
+		if old.Active != (target.Loop && target.Active) {
+			return false
+		}
+		if target.HotCue > 0 && entry.compact != isCompactHotCue(target) {
+			return false
+		}
+		return true
+	}
+	return old.Name == target.Name && old.LoopNumerator == target.LoopNumerator && old.LoopDenominator == target.LoopDenominator && pco2ColorMatches(old, target)
+}
+
+func cueEntriesMatchSet(tag string, entries []rawANLZCueEntry, targets []Cue) bool {
+	if len(entries) != len(targets) {
+		return false
+	}
+	used := make([]bool, len(entries))
+	for _, target := range targets {
+		matched := false
+		for i, entry := range entries {
+			if !used[i] && rawCueMatchesTarget(tag, entry, target) {
+				used[i] = true
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func hasExpectedCueSectionLayout(secs []anlzSection, extended bool) bool {
+	var tags []string
+	for _, s := range secs {
+		if s.tag == "PCOB" || s.tag == "PCO2" {
+			tags = append(tags, fmt.Sprintf("%s:%d", s.tag, s.kind))
+		}
+	}
+	want := []string{"PCOB:1", "PCOB:0"}
+	if extended {
+		want = append(want, "PCO2:1", "PCO2:0")
+	}
+	if len(tags) != len(want) {
+		return false
+	}
+	for i := range want {
+		if tags[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func buildPCOBSectionPreserving(kind uint32, selected []Cue, pool []rawANLZCueEntry, allowReuse bool) []byte {
 	sortCueList(kind, selected)
 	payload := make([]byte, 12)
 	be.PutUint32(payload, kind)
@@ -126,7 +385,34 @@ func buildPCOBSection(kind uint32, selected []Cue) []byte {
 	}
 	be.PutUint32(payload[8:], memCount)
 
+	used := make([]bool, len(pool))
 	for i, c := range selected {
+		first, last := uint16(0xffff), uint16(0xffff)
+		if kind == 0 {
+			if i > 0 {
+				first = uint16(i - 1)
+			}
+			if i < len(selected)-1 {
+				last = uint16(i + 1)
+			}
+		}
+		if allowReuse {
+			reused := false
+			for j, entry := range pool {
+				if !used[j] && entry.valid && len(entry.raw) == 56 && rawCueMatchesTarget("PCOB", entry, c) {
+					used[j] = true
+					p := append([]byte(nil), entry.raw...)
+					be.PutUint16(p[24:], first)
+					be.PutUint16(p[26:], last)
+					payload = append(payload, p...)
+					reused = true
+					break
+				}
+			}
+			if reused {
+				continue
+			}
+		}
 		typ := byte(1)
 		if c.Loop {
 			typ = 2
@@ -154,15 +440,6 @@ func buildPCOBSection(kind uint32, selected []Cue) []byte {
 		if !compact {
 			be.PutUint32(p[20:], 0x10000)
 		}
-		first, last := uint16(0xffff), uint16(0xffff)
-		if kind == 0 {
-			if i > 0 {
-				first = uint16(i - 1)
-			}
-			if i < len(selected)-1 {
-				last = uint16(i + 1)
-			}
-		}
 		be.PutUint16(p[24:], first)
 		be.PutUint16(p[26:], last)
 		p[28] = typ
@@ -181,13 +458,28 @@ func buildPCOBSection(kind uint32, selected []Cue) []byte {
 	return sec
 }
 
-func buildPCO2Section(kind uint32, selected []Cue) []byte {
+func buildPCO2SectionPreserving(kind uint32, selected []Cue, pool []rawANLZCueEntry, allowReuse bool) []byte {
 	sortCueList(kind, selected)
 	payload := make([]byte, 8)
 	be.PutUint32(payload, kind)
 	be.PutUint16(payload[4:], uint16(len(selected)))
 
+	used := make([]bool, len(pool))
 	for _, c := range selected {
+		if allowReuse {
+			reused := false
+			for j, entry := range pool {
+				if !used[j] && entry.valid && rawCueMatchesTarget("PCO2", entry, c) {
+					used[j] = true
+					payload = append(payload, entry.raw...)
+					reused = true
+					break
+				}
+			}
+			if reused {
+				continue
+			}
+		}
 		typ := byte(1)
 		if c.Loop {
 			typ = 2
@@ -287,56 +579,10 @@ func buildPCO2Section(kind uint32, selected []Cue) []byte {
 	return sec
 }
 
-func sortCueList(kind uint32, selected []Cue) {
-	sort.SliceStable(selected, func(i, j int) bool {
-		if kind == 1 {
-			return selected[i].HotCue < selected[j].HotCue
-		}
-		return selected[i].TimeMS < selected[j].TimeMS
-	})
-}
-
-// BuildCueSections builds ANLZ PCOB (extended=false, for .DAT) or PCO2 (extended=true, for .EXT)
-// sections in rekordbox order: hot cues/loops (kind=1) first, memory cues/loops (kind=0) second.
-// For .DAT PCOB, only hot cues A..C (1..3) are emitted; hot cues D..H (4..8) belong in .EXT.
-func BuildCueSections(cues []Cue, extended bool) [][]byte {
-	var hot, mem []Cue
-	for _, c := range cues {
-		if c.HotCue > 0 {
-			if extended || c.HotCue <= 3 {
-				hot = append(hot, c)
-			}
-		} else {
-			mem = append(mem, c)
-		}
-	}
-	if extended {
-		return [][]byte{buildPCO2Section(1, hot), buildPCO2Section(0, mem)}
-	}
-	return [][]byte{buildPCOBSection(1, hot), buildPCOBSection(0, mem)}
-}
-
-// buildExtPCOBSections builds the .EXT PCOB(1) and PCOB(0) sections in rekordbox layout:
-// PCOB(1) carries hot cues D..H (4..8) plus any active hot loop on A..C (so the active-loop
-// status flag is preserved even when .EXT is parsed standalone); PCOB(0) is empty unless a
-// memory loop is marked active.
-func buildExtPCOBSections(cues []Cue) [][]byte {
-	var hot, mem []Cue
-	for _, c := range cues {
-		if c.HotCue > 0 {
-			if c.HotCue >= 4 || (c.Loop && c.Active) {
-				hot = append(hot, c)
-			}
-		} else if c.Loop && c.Active {
-			mem = append(mem, c)
-		}
-	}
-	return [][]byte{buildPCOBSection(1, hot), buildPCOBSection(0, mem)}
-}
-
 // RewriteANLZCues replaces PCOB/PCO2 cue sections in a PMAI ANLZ file in place in the
 // original file's section order while preserving every non-cue section byte-for-byte.
 // Hot cue lists (type 1) are always placed before memory cue lists (type 0).
+// Unchanged valid sections and unchanged entries are kept verbatim when no cue repair is needed.
 // When onlyIfCueSectionPresent is true and the file has no existing PCOB/PCO2 section,
 // it returns (raw, false, nil).
 func RewriteANLZCues(raw []byte, cues []Cue, extended bool, onlyIfCueSectionPresent bool) ([]byte, bool, error) {
@@ -356,12 +602,75 @@ func RewriteANLZCues(raw []byte, cues []Cue, extended bool, onlyIfCueSectionPres
 		return raw, false, nil
 	}
 
+	var wantPCOBHot, wantPCOBMem, wantPCO2Hot, wantPCO2Mem []Cue
+	for _, c := range cues {
+		if extended {
+			if c.HotCue > 0 {
+				wantPCO2Hot = append(wantPCO2Hot, c)
+				if c.HotCue >= 4 || (c.Loop && c.Active) {
+					wantPCOBHot = append(wantPCOBHot, c)
+				}
+			} else {
+				wantPCO2Mem = append(wantPCO2Mem, c)
+				if c.Loop && c.Active {
+					wantPCOBMem = append(wantPCOBMem, c)
+				}
+			}
+		} else {
+			if c.HotCue > 0 {
+				if c.HotCue <= 3 {
+					wantPCOBHot = append(wantPCOBHot, c)
+				}
+			} else {
+				wantPCOBMem = append(wantPCOBMem, c)
+			}
+		}
+	}
+
+	needsRepair := ANLZNeedsCueRepair(raw, extended)
+	keepWhole := !needsRepair && hasExpectedCueSectionLayout(secs, extended)
+	type secKey struct {
+		tag  string
+		kind uint32
+	}
+	pools := map[secKey][]rawANLZCueEntry{}
+	for _, s := range secs {
+		if s.tag != "PCOB" && s.tag != "PCO2" {
+			continue
+		}
+		if entries, ok := parseRawCueEntries(s); ok {
+			k := secKey{s.tag, s.kind}
+			pools[k] = append(pools[k], entries...)
+		}
+	}
+
+	buildSection := func(tag string, kind uint32, targets []Cue) []byte {
+		k := secKey{tag, kind}
+		pool := pools[k]
+		if keepWhole && len(pool) > 0 && cueEntriesMatchSet(tag, pool, targets) {
+			for _, s := range secs {
+				if s.tag == tag && s.kind == kind {
+					return s.raw
+				}
+			}
+		}
+		allowReuse := !needsRepair
+		if tag == "PCO2" {
+			return buildPCO2SectionPreserving(kind, targets, pool, allowReuse)
+		}
+		return buildPCOBSectionPreserving(kind, targets, pool, allowReuse)
+	}
+
 	var pcobPair, pco2Pair [][]byte
+	pcobPair = [][]byte{
+		buildSection("PCOB", 1, wantPCOBHot),
+		buildSection("PCOB", 0, wantPCOBMem),
+	}
 	if extended {
-		pcobPair = buildExtPCOBSections(cues)
-		pco2Pair = BuildCueSections(cues, true)
-	} else {
-		pcobPair = BuildCueSections(cues, false)
+		pco2Pair = [][]byte{
+			buildSection("PCO2", 1, wantPCO2Hot),
+			buildSection("PCO2", 0, wantPCO2Mem),
+		}
 	}
 
 	// Replace PCOB and PCO2 sections in place where they occur in the original file.
@@ -406,7 +715,11 @@ func RewriteANLZCues(raw []byte, cues []Cue, extended bool, onlyIfCueSectionPres
 		}
 	}
 
-	return assembleANLZ(raw[:h], ordered), true, nil
+	out := assembleANLZ(raw[:h], ordered)
+	if bytes.Equal(out, raw) {
+		return raw, false, nil
+	}
+	return out, true, nil
 }
 
 // ANLZNeedsCueRepair reports whether an ANLZ file carries legacy EngineX cue-writer

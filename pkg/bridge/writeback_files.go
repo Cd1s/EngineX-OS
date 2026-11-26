@@ -184,7 +184,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 					next, c, rerr := rekordbox.RewriteANLZCues(data, t.cues, t.ext > 0, t.ext == 2)
 					if rerr != nil {
 						err = fmt.Errorf("writeback: %s: %w", t.rel, rerr)
-					} else if c {
+					} else if c && !bytes.Equal(next, data) {
 						data = next
 						changed = true
 					}

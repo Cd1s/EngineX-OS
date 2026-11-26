@@ -1528,3 +1528,119 @@ func TestUpdateOneLibraryWithResetPreservesAnalysisMod(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewOracleCueRewriteNoop(t *testing.T) {
+	for _, stem := range []string{"rb_hot_compact", "rb_hot_mem_full"} {
+		t.Run(stem, func(t *testing.T) {
+			dat, err := os.ReadFile(filepath.Join("testdata", stem+".dat"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ext, err := os.ReadFile(filepath.Join("testdata", stem+".ext"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			a, err := ParseAnalysis(dat)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := ParseAnalysis(ext)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.Merge(b)
+			for _, f := range []struct {
+				name string
+				raw  []byte
+				ext  bool
+			}{{"DAT", dat, false}, {"EXT", ext, true}} {
+				got, changed, err := RewriteANLZCues(f.raw, a.Cues, f.ext, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if changed || !bytes.Equal(got, f.raw) {
+					first := 0
+					for first < min(len(f.raw), len(got)) && f.raw[first] == got[first] {
+						first++
+					}
+					t.Fatalf("%s unchanged cues altered file: changed=%v %d -> %d bytes; first difference at %d", f.name, changed, len(f.raw), len(got), first)
+				}
+			}
+		})
+	}
+}
+
+func TestRewriteANLZCuesPreservesUnchangedEntriesOnEdit(t *testing.T) {
+	ext, err := os.ReadFile(filepath.Join("testdata", "rb_hot_mem_full.ext"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := ParseAnalysis(ext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := append([]Cue(nil), a.Cues...)
+	moved := false
+	for i := range edited {
+		if edited[i].HotCue == 1 {
+			edited[i].TimeMS += 500
+			moved = true
+			break
+		}
+	}
+	if !moved {
+		t.Fatal("fixture missing HotCue 1")
+	}
+	got, changed, err := RewriteANLZCues(ext, edited, true, false)
+	if err != nil || !changed {
+		t.Fatalf("RewriteANLZCues edited: changed=%v err=%v", changed, err)
+	}
+	_, origSecs, err := parseANLZSections(ext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, gotSecs, err := parseANLZSections(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secByKey := func(secs []anlzSection, tag string, kind uint32) anlzSection {
+		for _, s := range secs {
+			if s.tag == tag && s.kind == kind {
+				return s
+			}
+		}
+		t.Fatalf("missing section %s:%d", tag, kind)
+		return anlzSection{}
+	}
+	// PCOB(1) (cues 4..8), PCOB(0) (empty), and PCO2(0) (memory cues) are unchanged -> section-identical.
+	for _, k := range []struct {
+		tag  string
+		kind uint32
+	}{{"PCOB", 1}, {"PCOB", 0}, {"PCO2", 0}} {
+		os := secByKey(origSecs, k.tag, k.kind)
+		gs := secByKey(gotSecs, k.tag, k.kind)
+		if !bytes.Equal(os.raw, gs.raw) {
+			t.Fatalf("%s:%d changed on unrelated HotCue 1 edit", k.tag, k.kind)
+		}
+	}
+	// Inside rebuilt PCO2(1), untouched entries (e.g. HotCue 2) keep exact raw bytes.
+	origHot, ok1 := parseRawCueEntries(secByKey(origSecs, "PCO2", 1))
+	gotHot, ok2 := parseRawCueEntries(secByKey(gotSecs, "PCO2", 1))
+	if !ok1 || !ok2 {
+		t.Fatal("parseRawCueEntries failed on PCO2:1")
+	}
+	var origHC2, gotHC2 []byte
+	for _, e := range origHot {
+		if e.cue.HotCue == 2 {
+			origHC2 = e.raw
+		}
+	}
+	for _, e := range gotHot {
+		if e.cue.HotCue == 2 {
+			gotHC2 = e.raw
+		}
+	}
+	if len(origHC2) == 0 || !bytes.Equal(origHC2, gotHC2) {
+		t.Fatalf("untouched HotCue 2 PCP2 entry changed: orig=%d got=%d", len(origHC2), len(gotHC2))
+	}
+}

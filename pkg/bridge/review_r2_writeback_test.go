@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
@@ -788,4 +789,245 @@ func TestWriteBackOneLibraryMinimalCuePredicateKillsMutation(t *testing.T) {
 	if len(lib.Tracks) == 0 || len(lib.Tracks[0].Cues) != 1 || lib.Tracks[0].Cues[0].TimeMS != cueMS {
 		t.Fatalf("OneLibrary cue was not updated to %d ms: %+v", cueMS, lib.Tracks[0].Cues)
 	}
+}
+
+func TestWriteBackAdjustedMainCueExportsAsMemoryCueAndKeepsExistingMemoryCues(t *testing.T) {
+	orig := []rekordbox.Cue{{TimeMS: 1000}}
+	unadj := enginedb.DeckCues{SampleRate: 48000, MainCue: 96000, MainCueAdjusted: false}
+	if got := mergeEngineCues(orig, unadj, 0, false); len(got) != 1 || got[0].TimeMS != 1000 {
+		t.Fatalf("unadjusted main cue leaked into export: %+v", got)
+	}
+	adj := enginedb.DeckCues{SampleRate: 48000, MainCue: 96000, MainCueAdjusted: true}
+	got := mergeEngineCues(orig, adj, 0, false)
+	var seen1000, seen2000 bool
+	for _, c := range got {
+		if c.HotCue == 0 && !c.Loop && c.TimeMS == 1000 {
+			seen1000 = true
+		}
+		if c.HotCue == 0 && !c.Loop && c.TimeMS == 2000 {
+			seen2000 = true
+		}
+	}
+	if !seen1000 || !seen2000 {
+		t.Fatalf("adjusted main cue merge=%+v, want both 1000ms and 2000ms memory cues", got)
+	}
+
+	// Full ParseDeckCuesAndLoops -> WriteBackCues round-trip verifying adj=0 stays ignored and adj=1 writes back.
+	ctx := context.Background()
+	root := t.TempDir()
+	dat1Rel, ext1Rel, _, _ := seedRealRekordboxOneLibraryStick(t, root)
+	r, err := compat.NewResolver(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offset, ok := trackRekordboxOffset(r, "Contents/FixtureA/Track01.mp3")
+	if !ok {
+		t.Fatal("missing offset")
+	}
+	db, err := sql.Open("sqlite", filepath.Join(root, "Engine Library", "Database2", "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	var origQC []byte
+	if err := db.QueryRow(`SELECT quickCues FROM PerformanceData WHERE trackId=1`).Scan(&origQC); err != nil {
+		t.Fatal(err)
+	}
+	rawQC, err := enginedb.QUncompress(origQC, 1<<20)
+	if err != nil || len(rawQC) < 17 {
+		t.Fatalf("QUncompress quickCues: len=%d err=%v", len(rawQC), err)
+	}
+	makeQC := func(mainSamples float64, adjusted byte) []byte {
+		buf := append([]byte(nil), rawQC...)
+		off := len(buf) - 17
+		binary.BigEndian.PutUint64(buf[off:], math.Float64bits(mainSamples))
+		buf[off+8] = adjusted
+		binary.BigEndian.PutUint64(buf[off+9:], math.Float64bits(mainSamples))
+		comp, cerr := enginedb.QCompress(buf)
+		if cerr != nil {
+			t.Fatal(cerr)
+		}
+		return comp
+	}
+
+	// Load-generated unadjusted main cue (adjusted=0) -> 0 changes!
+	mainSamples := math.Round(2.0*44100.0 - offset)
+	if _, err := db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=1`, makeQC(mainSamples, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+5 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	resUnadj, err := WriteBackCues(ctx, root, WriteBackOptions{})
+	if err != nil || resUnadj.TracksChanged != 0 {
+		t.Fatalf("unadjusted mainCue triggered write-back: %+v err=%v", resUnadj, err)
+	}
+
+	// Deliberate user-adjusted main cue at 2000ms (adjusted=1) -> written to ANLZ + OneLibrary!
+	if _, err := db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=1`, makeQC(mainSamples, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+5 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	resAdj, err := WriteBackCues(ctx, root, WriteBackOptions{})
+	if err != nil || resAdj.TracksChanged != 1 || resAdj.FilesUpdated == 0 {
+		t.Fatalf("adjusted mainCue failed to write back: %+v err=%v", resAdj, err)
+	}
+	datBytes, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(dat1Rel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	extBytes, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(ext1Rel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aDat, err := rekordbox.ParseAnalysis(datBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aExt, err := rekordbox.ParseAnalysis(extBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aDat.Merge(aExt)
+	foundMem := false
+	for _, c := range aDat.Cues {
+		if c.HotCue == 0 && !c.Loop && c.TimeMS == 2000 {
+			foundMem = true
+		}
+	}
+	if !foundMem {
+		t.Fatalf("adjusted 2000ms main cue missing from written ANLZ: %+v", aDat.Cues)
+	}
+}
+
+func TestWriteBackPreservesSubTwoPointFiveMSGridNudge(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	dat1Rel, ext1Rel, _, _ := seedRealRekordboxOneLibraryStick(t, root)
+	r, err := compat.NewResolver(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offset, ok := trackRekordboxOffset(r, "Contents/FixtureA/Track01.mp3")
+	if !ok {
+		t.Fatal("missing offset")
+	}
+	aExtOrig, err := rekordbox.ParseAnalysis(mustReadFile(t, filepath.Join(root, filepath.FromSlash(ext1Rel))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aDatOrig, err := rekordbox.ParseAnalysis(mustReadFile(t, filepath.Join(root, filepath.FromSlash(dat1Rel))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aDatOrig.Merge(aExtOrig)
+	if len(aDatOrig.Beats) < 2 {
+		t.Fatalf("fixture has %d beats", len(aDatOrig.Beats))
+	}
+
+	const sr = 44100.0
+	orig0US := float64(aDatOrig.Beats[0].TimeMS)*1000.0 + float64(aDatOrig.Beats[0].SubUS)
+	base0 := orig0US*sr/1e6 - offset
+	lastIdx := len(aDatOrig.Beats) - 1
+	origLastUS := float64(aDatOrig.Beats[lastIdx].TimeMS)*1000.0 + float64(aDatOrig.Beats[lastIdx].SubUS)
+	baseLast := origLastUS*sr/1e6 - offset
+	nudgeSamples := 1.5 * sr / 1000.0 // 1.5 ms (< 2.5 ms old threshold)
+	nudgeBeats := uint32(lastIdx)
+
+	defGrid := []struct {
+		pos      float64
+		idx      int64
+		numBeats uint32
+	}{
+		{pos: base0, idx: 0, numBeats: nudgeBeats},
+		{pos: baseLast, idx: int64(lastIdx), numBeats: 0},
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(root, "Engine Library", "Database2", "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Unadjusted 2.0 ms drift (def == adj, so adjDiff == false) -> stays within 2.5 ms tolerance (0 writes).
+	driftSamples := 2.0 * sr / 1000.0
+	unadjGrid := []struct {
+		pos      float64
+		idx      int64
+		numBeats uint32
+	}{
+		{pos: base0 + driftSamples, idx: 0, numBeats: nudgeBeats},
+		{pos: baseLast + driftSamples, idx: int64(lastIdx), numBeats: 0},
+	}
+	if _, err := db.Exec(`UPDATE PerformanceData SET beatData=? WHERE trackId=1`, buildEngineBeatDataBlob(sr, 20*sr, unadjGrid, unadjGrid, true)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+5 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	resUnadj, err := WriteBackCues(ctx, root, WriteBackOptions{})
+	if err != nil || resUnadj.TracksChanged != 0 {
+		t.Fatalf("unadjusted 2.0 ms drift triggered grid write-back: %+v err=%v", resUnadj, err)
+	}
+
+	// Explicit adjusted +1.5 ms bulk nudge (adjDiff == true) -> MUST write back!
+	adjGrid := []struct {
+		pos      float64
+		idx      int64
+		numBeats uint32
+	}{
+		{pos: base0 + nudgeSamples, idx: 0, numBeats: nudgeBeats},
+		{pos: baseLast + nudgeSamples, idx: int64(lastIdx), numBeats: 0},
+	}
+	if _, err := db.Exec(`UPDATE PerformanceData SET beatData=? WHERE trackId=1`, buildEngineBeatDataBlob(sr, 20*sr, defGrid, adjGrid, true)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+5 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	resAdj, err := WriteBackCues(ctx, root, WriteBackOptions{})
+	if err != nil || resAdj.TracksChanged != 1 || len(resAdj.Changes) != 1 || !strings.Contains(strings.Join(resAdj.Changes[0].Fields, ","), "grid:anlz(") {
+		t.Fatalf("adjusted 1.5 ms nudge was dropped: %+v err=%v", resAdj, err)
+	}
+	aDatNew, err := rekordbox.ParseAnalysis(mustReadFile(t, filepath.Join(root, filepath.FromSlash(dat1Rel))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aExtNew, err := rekordbox.ParseAnalysis(mustReadFile(t, filepath.Join(root, filepath.FromSlash(ext1Rel))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aDatNew.Merge(aExtNew)
+	gotUS := float64(aDatNew.Beats[0].TimeMS)*1000.0 + float64(aDatNew.Beats[0].SubUS)
+	origUS := float64(aDatOrig.Beats[0].TimeMS)*1000.0 + float64(aDatOrig.Beats[0].SubUS)
+	if math.Abs((gotUS-origUS)-1500.0) > 20.0 {
+		t.Fatalf("beat[0] shift=%.1f us, want ~1500 us (orig=%.1f got=%.1f)", gotUS-origUS, origUS, gotUS)
+	}
+
+	// Clearing Synced on Track 1 to force candidate re-read after write-back must still be a zero-change no-op!
+	dbDir := filepath.Join(root, "Engine Library", "Database2")
+	snap, err := rbstate.Load(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap.Tracks["contents/fixturea/track01.mp3"].Synced = nil
+	if err := snap.Save(dbDir); err != nil {
+		t.Fatal(err)
+	}
+	resNoop, err := WriteBackCues(ctx, root, WriteBackOptions{})
+	if err != nil || resNoop.TracksChanged != 0 {
+		t.Fatalf("re-read after 1.5 ms grid write-back triggered duplicate write: %+v err=%v", resNoop, err)
+	}
+}
+
+func mustReadFile(t *testing.T, p string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
