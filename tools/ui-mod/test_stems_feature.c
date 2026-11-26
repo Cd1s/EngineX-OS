@@ -1337,13 +1337,19 @@ static void test_shadow_replay(void) {
     prefs[12] = 1;
     assert(!oa_replay(oa_self, &qs, prefs) && oa_count == 0);
     prefs[12] = 0;
-    // A corrupt or missing .perf falls through to the stock analysis and still consumes .perf.regrid.run.
+    // With .perf.regrid.run staged, corrupt .perf consumes .perf.regrid.run and
+    // skips analysis (STARTED -> STOPPED -> FINISHED) rather than calling OfflineAnalyzer.
     f = fopen("/tmp/test-oa-replay/\xc3\xa9.flac.perf", "r+b"); assert(f); fwrite("XXXX", 1, 4, f); fclose(f);
     f = fopen("/tmp/test-oa-replay/\xc3\xa9.flac.perf.regrid.run", "wb"); assert(f); fputs("g3", f); fclose(f);
     oa_count = 0;
-    assert(!oa_replay(oa_self, &qs, prefs) && oa_count == 0);
+    assert(oa_replay(oa_self, &qs, prefs) == 1 && oa_count == 3 &&
+           oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
     assert(access("/tmp/test-oa-replay/\xc3\xa9.flac.perf.regrid.run", F_OK) != 0);
+    // Without .perf.regrid.run on a non-shadow path, corrupt or missing .perf still falls through to stock analysis.
+    oa_count = 0;
+    assert(!oa_replay(oa_self, &qs, prefs) && oa_count == 0);
     unlink("/tmp/test-oa-replay/\xc3\xa9.flac.perf");
+    oa_count = 0;
     assert(!oa_replay(oa_self, &qs, prefs) && oa_count == 0);
     // Engine analyses its own copy of a /data file: the shadow copy's .perf
     // with that name and size is used; another size is a different file.
@@ -1376,6 +1382,30 @@ static void test_shadow_replay(void) {
     assert(!oa_replay(oa_self, &ds, prefs) && oa_count == 0);
     prefs[12] = 0;
     assert(oa_replay(oa_self, &ds, prefs) && oa_count == 9 && oa_seen[2] == OA_BEATS);
+    // Shadow-copy choke point: corrupt or missing .perf on a shadow copy (direct
+    // OA_SHADOW/peer-* or Engine's inMusicTempFiles copy of it) skips analysis
+    // (STARTED -> STOPPED -> FINISHED) and NEVER falls through to OfflineAnalyzer.
+    f = fopen("/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3.perf", "wb"); assert(f); fputs("BAD!", f); fclose(f);
+    oa_count = 0;
+    assert(oa_replay(oa_self, &ds, prefs) == 1 && oa_count == 3 &&
+           oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
+    oa_count = 0;
+    assert(oa_replay(oa_self, &cs, prefs) == 1 && oa_count == 3 &&
+           oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
+    assert(!unlink("/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3.perf"));
+    oa_count = 0;
+    assert(oa_replay(oa_self, &ds, prefs) == 1 && oa_count == 3 &&
+           oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
+    oa_count = 0;
+    assert(oa_replay(oa_self, &cs, prefs) == 1 && oa_count == 3 &&
+           oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
+    // Restore valid .perf for the late-Link alias test below.
+    f = fopen("/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3.perf", "wb"); assert(f);
+    fwrite("EXPF", 1, 4, f); fwrite(&one, 4, 1, f); fwrite(&bpm, 8, 1, f);
+    fwrite(&lt, 4, 1, f); fwrite(track, 1, lt, f);
+    fwrite(&lb, 4, 1, f); fwrite(beats, 1, lb, f);
+    fwrite(&lo, 4, 1, f); fwrite(overview, 1, lo, f);
+    fclose(f);
     // A late Link analysis arrives after the named copy, without an alias or
     // the Engine SQLite install. A same-name copy of another size is not a hit.
     const char *named_audio = OA_ENGINE_COPIES "ab-cd_link.m4a";
