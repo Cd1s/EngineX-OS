@@ -4796,7 +4796,7 @@ assert(pings>beforePings,'steady play must keep using /alive pings');
 assert(Math.abs(scShadowPrev[1].lineMs-trueMs)<0.01,'lineMs matches Engine draw position');
 // 2b. A small 5 ms Sync phase trim while wfItem is live posts on the next 500 ms
 // heartbeat instead of sitting behind the legacy 15 ms TrackPosition tolerance for 5 s.
-trueMs-=5;
+trueMs+=5;
 const beforeTrim=bodies.length;
 for(let i=0;i<8;i++) step(80); // 640 ms -> next 500 ms heartbeat
 assert.equal(bodies.length,beforeTrim+1,'5 ms phase trim while wfLive did not post on next heartbeat');
