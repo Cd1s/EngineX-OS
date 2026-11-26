@@ -7,11 +7,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -993,13 +997,28 @@ func TestSelfHostedTracksOmitCoverCredentials(t *testing.T) {
 	})
 }
 
+func makeTestJPEG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			img.Set(x, y, color.RGBA{R: 120, G: 80, B: 200, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80}); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
 func TestSelfHostedFetchCoverAndSanitize(t *testing.T) {
 	const (
 		dummyUser  = "dummy-cover-user"
 		dummyPass  = "dummy-cover-pass-789"
 		dummyToken = "dummy-plex-cover-tok-789"
 	)
-	fakeJPEG := []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00, 0xff, 0xd9}
+	fakeJPEG := makeTestJPEG(t)
 	ctx := context.Background()
 
 	t.Run("sanitize", func(t *testing.T) {
@@ -1108,11 +1127,407 @@ func TestSelfHostedFetchCoverAndSanitize(t *testing.T) {
 		if err != nil || !bytes.Equal(got, fakeJPEG) {
 			t.Fatalf("FetchCover plex: len=%d err=%v", len(got), err)
 		}
-		if _, err := p.FetchCover(ctx, srv.URL+"/library/metadata/tr1/thumb/redir", 0); err != nil {
-			t.Fatalf("FetchCover redirect: %v", err)
+		if _, err := p.FetchCover(ctx, srv.URL+"/library/metadata/tr1/thumb/redir", 0); err == nil {
+			t.Fatal("FetchCover followed cross-host redirect")
 		}
 		if leakedHeader != "" {
 			t.Fatalf("X-Plex-Token leaked across host redirect: %q", leakedHeader)
+		}
+	})
+}
+
+func TestSelfHostedCrossOriginRedirectsRefusedAndNoReferer(t *testing.T) {
+	const (
+		dummyUser  = "dummy-redir-user"
+		dummyPass  = "dummy-redir-pass-555"
+		dummyToken = "dummy-redir-plex-555"
+	)
+	validJPEG := makeTestJPEG(t)
+	ctx := context.Background()
+
+	var otherHits atomic.Int32
+	var leakedReferer, leakedPlex, leakedAuth atomic.Value
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		otherHits.Add(1)
+		if v := r.Header.Get("Referer"); v != "" {
+			leakedReferer.Store(v)
+		}
+		if v := r.Header.Get("X-Plex-Token"); v != "" {
+			leakedPlex.Store(v)
+		}
+		if v := r.Header.Get("Authorization"); v != "" {
+			leakedAuth.Store(v)
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(validJPEG)
+	}))
+	defer other.Close()
+
+	assertNoCrossOrigin := func(t *testing.T, label string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected cross-origin redirect error, got nil", label)
+		}
+		msg := err.Error()
+		for _, bad := range []string{dummyUser, dummyPass, dummyToken, "t=", "s=", "p=", "X-Plex-Token", other.URL} {
+			if strings.Contains(msg, bad) {
+				t.Errorf("%s error leaked %q: %s", label, bad, msg)
+			}
+		}
+		if otherHits.Load() != 0 {
+			t.Fatalf("%s reached cross-origin server (%d hits, referer=%v, plex=%v, auth=%v)",
+				label, otherHits.Load(), leakedReferer.Load(), leakedPlex.Load(), leakedAuth.Load())
+		}
+	}
+
+	t.Run("subsonic", func(t *testing.T) {
+		var sameOriginReferer string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/rest/getCoverArt.view" && r.URL.Query().Get("id") == "same-redir" {
+				http.Redirect(w, r, "/rest/getCoverArt.view?id=same-dest", http.StatusFound)
+				return
+			}
+			if r.URL.Path == "/rest/getCoverArt.view" && r.URL.Query().Get("id") == "same-dest" {
+				sameOriginReferer = r.Header.Get("Referer")
+				w.Header().Set("Content-Type", "image/jpeg")
+				_, _ = w.Write(validJPEG)
+				return
+			}
+			http.Redirect(w, r, other.URL+"/steal", http.StatusFound)
+		}))
+		defer srv.Close()
+
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "subsonic",
+			URL:      srv.URL,
+			Username: dummyUser,
+			Password: dummyPass,
+			Enabled:  true,
+		}, srv.Client())
+
+		_, err := p.FetchCover(ctx, srv.URL+"/rest/getCoverArt.view?id=art-1", 0)
+		assertNoCrossOrigin(t, "subsonic FetchCover", err)
+		_, err = p.Playlists(ctx)
+		assertNoCrossOrigin(t, "subsonic Playlists", err)
+		_, err = p.DownloadTrack(ctx, "tr-1", t.TempDir())
+		assertNoCrossOrigin(t, "subsonic DownloadTrack", err)
+
+		got, err := p.FetchCover(ctx, srv.URL+"/rest/getCoverArt.view?id=same-redir", 0)
+		if err != nil || !bytes.Equal(got, validJPEG) {
+			t.Fatalf("subsonic same-origin redirect cover failed: len=%d err=%v", len(got), err)
+		}
+		if sameOriginReferer != "" {
+			t.Fatalf("subsonic same-origin redirect leaked Referer: %q", sameOriginReferer)
+		}
+	})
+
+	t.Run("plex", func(t *testing.T) {
+		var queryTokenSeen atomic.Bool
+		var sameOriginReferer string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("X-Plex-Token") != "" {
+				queryTokenSeen.Store(true)
+			}
+			if r.URL.Path == "/library/metadata/1/thumb/same" {
+				http.Redirect(w, r, "/library/metadata/1/thumb/final", http.StatusFound)
+				return
+			}
+			if r.URL.Path == "/library/metadata/1/thumb/final" {
+				sameOriginReferer = r.Header.Get("Referer")
+				w.Header().Set("Content-Type", "image/jpeg")
+				_, _ = w.Write(validJPEG)
+				return
+			}
+			http.Redirect(w, r, other.URL+"/steal", http.StatusFound)
+		}))
+		defer srv.Close()
+
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "plex",
+			URL:      srv.URL,
+			Token:    dummyToken,
+			Enabled:  true,
+		}, srv.Client())
+
+		_, err := p.Playlists(ctx)
+		assertNoCrossOrigin(t, "plex Playlists", err)
+		_, err = p.DownloadTrack(ctx, "/library/parts/1/song.flac", t.TempDir())
+		assertNoCrossOrigin(t, "plex DownloadTrack", err)
+		_, err = p.FetchCover(ctx, srv.URL+"/library/metadata/1/thumb/redir", 0)
+		assertNoCrossOrigin(t, "plex FetchCover", err)
+		if queryTokenSeen.Load() {
+			t.Fatal("plex sent X-Plex-Token in URL query instead of header-only")
+		}
+
+		got, err := p.FetchCover(ctx, srv.URL+"/library/metadata/1/thumb/same", 0)
+		if err != nil || !bytes.Equal(got, validJPEG) {
+			t.Fatalf("plex same-origin redirect cover failed: len=%d err=%v", len(got), err)
+		}
+		if sameOriginReferer != "" {
+			t.Fatalf("plex same-origin redirect leaked Referer: %q", sameOriginReferer)
+		}
+	})
+
+	t.Run("webdav", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, other.URL+"/steal", http.StatusFound)
+		}))
+		defer srv.Close()
+
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "webdav",
+			URL:      srv.URL + "/music/",
+			Username: dummyUser,
+			Password: dummyPass,
+			Enabled:  true,
+		}, srv.Client())
+
+		_, err := p.Playlists(ctx)
+		assertNoCrossOrigin(t, "webdav Playlists", err)
+		_, err = p.DownloadTrack(ctx, "/music/song.flac", t.TempDir())
+		assertNoCrossOrigin(t, "webdav DownloadTrack", err)
+	})
+}
+
+func TestSelfHostedCoverRouteAndImageValidation(t *testing.T) {
+	validJPEG := makeTestJPEG(t)
+	ctx := context.Background()
+
+	var nonCoverHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/library/metadata/1/thumb/42":
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(validJPEG)
+		case "/library/metadata/1/thumb/html":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<html><body>private</body></html>"))
+		case "/library/metadata/1/thumb/fakejpg":
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write([]byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00, 0xff, 0xd9})
+		default:
+			nonCoverHits.Add(1)
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte("<MediaContainer secret='1'/>"))
+		}
+	}))
+	defer srv.Close()
+
+	p := NewSelfHostedProvider(NASConfig{
+		Protocol: "plex",
+		URL:      srv.URL,
+		Token:    "plex-secret-tok",
+		Enabled:  true,
+	}, srv.Client())
+
+	for _, bad := range []string{
+		srv.URL + "/:/prefs",
+		srv.URL + "/library/parts/1/song.flac",
+		srv.URL + "/library/metadata/1",
+		srv.URL + "/library/metadata/1/thumb/../../prefs",
+		srv.URL + "/library/metadata/1/thumb/%2e%2e/prefs",
+		srv.URL + "/library/metadata/1/thumb/42?X-Plex-Token=x",
+	} {
+		if p.MatchesCoverURL(bad) {
+			t.Errorf("MatchesCoverURL accepted non-cover Plex URL %q", bad)
+		}
+		if _, err := p.FetchCover(ctx, bad, 0); err == nil {
+			t.Errorf("FetchCover accepted non-cover Plex URL %q", bad)
+		}
+	}
+	if nonCoverHits.Load() != 0 {
+		t.Fatalf("non-cover Plex routes were contacted %d times", nonCoverHits.Load())
+	}
+
+	if _, err := p.FetchCover(ctx, srv.URL+"/library/metadata/1/thumb/html", 0); err == nil {
+		t.Fatal("FetchCover accepted HTML response body")
+	}
+	if _, err := p.FetchCover(ctx, srv.URL+"/library/metadata/1/thumb/fakejpg", 0); err == nil {
+		t.Fatal("FetchCover accepted header-only truncated JPEG")
+	}
+	got, err := p.FetchCover(ctx, srv.URL+"/library/metadata/1/thumb/42", 0)
+	if err != nil || !bytes.Equal(got, validJPEG) {
+		t.Fatalf("FetchCover valid JPEG failed: len=%d err=%v", len(got), err)
+	}
+}
+
+func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("plex-signed-part-key", func(t *testing.T) {
+		const (
+			plexUser   = "plex-u-secret"
+			plexPass   = "plex-p-secret"
+			plexTok    = "plex-tok-secret"
+			signedPart = "sig-part-secret"
+		)
+		var srvURL string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tok := r.Header.Get("X-Plex-Token")
+			if tok == "" {
+				tok = r.URL.Query().Get("X-Plex-Token")
+			}
+			if tok != plexTok {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			host := strings.TrimPrefix(srvURL, "http://")
+			switch r.URL.Path {
+			case "/playlists":
+				fmt.Fprintf(w, `{"MediaContainer":{"Metadata":[{"key":"http://%s:%s@%s/playlists/5/items?X-Plex-Token=%s","title":"Signed List","leafCount":2}]}}`,
+					plexUser, plexPass, host, plexTok)
+			case "/playlists/pl-1/items":
+				fmt.Fprintf(w, `{"MediaContainer":{"Metadata":[
+					{"ratingKey":"rk-301","title":"With RatingKey","Media":[{"Part":[{"key":"http://%s:%s@%s/library/parts/301/song.flac?X-Plex-Token=%s&sig=%s"}]}]},
+					{"title":"No RatingKey","Media":[{"Part":[{"key":"/library/parts/302/other.flac?X-Plex-Token=%s&sig=%s"}]}]}
+				]}}`, plexUser, plexPass, host, plexTok, signedPart, plexTok, signedPart)
+			case "/library/metadata/rk-301":
+				fmt.Fprintf(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"rk-301","title":"With RatingKey","Media":[{"Part":[{"key":"http://%s:%s@%s/library/parts/301/song.flac?X-Plex-Token=%s&sig=%s"}]}]}]}}`,
+					plexUser, plexPass, host, plexTok, signedPart)
+			case "/library/parts/301/song.flac":
+				if r.URL.Query().Get("sig") != signedPart {
+					http.Error(w, "missing private sig", http.StatusForbidden)
+					return
+				}
+				_, _ = w.Write([]byte("SIGNED-PLEX-FLAC-1"))
+			case "/library/parts/302/other.flac":
+				if r.URL.Query().Get("sig") != signedPart {
+					http.Error(w, "missing private sig", http.StatusForbidden)
+					return
+				}
+				_, _ = w.Write([]byte("SIGNED-PLEX-FLAC-2"))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		srvURL = srv.URL
+
+		cfg := NASConfig{Protocol: "plex", URL: srv.URL, Token: plexTok, Enabled: true}
+		p := NewSelfHostedProvider(cfg, srv.Client())
+
+		pls, err := p.Playlists(ctx)
+		if err != nil || len(pls) != 1 {
+			t.Fatalf("Playlists: len=%d err=%v", len(pls), err)
+		}
+		if pls[0].ID != "/playlists/5/items" {
+			t.Fatalf("Playlist ID leaked credentials or was not normalized: %q", pls[0].ID)
+		}
+
+		tracks, err := p.PlaylistTracks(ctx, "pl-1")
+		if err != nil || len(tracks) != 2 {
+			t.Fatalf("PlaylistTracks: len=%d err=%v", len(tracks), err)
+		}
+		for _, tr := range tracks {
+			for _, field := range []string{tr.ID, tr.Preview, tr.CoverURL} {
+				for _, bad := range []string{plexUser, plexPass, plexTok, signedPart, "X-Plex-Token", "?", "://"} {
+					if strings.Contains(field, bad) {
+						t.Errorf("Plex track field leaked %q: %+v", bad, tr)
+					}
+				}
+			}
+		}
+		if tracks[0].ID != "rk-301" || tracks[1].ID != "/library/parts/302/other.flac" {
+			t.Fatalf("unexpected clean Plex track IDs: %q, %q", tracks[0].ID, tracks[1].ID)
+		}
+
+		// Same provider instance resolves both private locators.
+		for i, want := range []string{"SIGNED-PLEX-FLAC-1", "SIGNED-PLEX-FLAC-2"} {
+			fp, err := p.DownloadTrack(ctx, tracks[i].ID, t.TempDir())
+			if err != nil {
+				t.Fatalf("DownloadTrack[%d] (%q): %v", i, tracks[i].ID, err)
+			}
+			b, _ := os.ReadFile(fp)
+			if string(b) != want {
+				t.Fatalf("DownloadTrack[%d] body=%q want %q", i, string(b), want)
+			}
+		}
+
+		// Fresh provider instance (like webui ownerSelfHosted) still resolves ratingKey via metadata.
+		fresh := NewSelfHostedProvider(cfg, srv.Client())
+		fp, err := fresh.DownloadTrack(ctx, tracks[0].ID, t.TempDir())
+		if err != nil {
+			t.Fatalf("fresh DownloadTrack(%q): %v", tracks[0].ID, err)
+		}
+		b, _ := os.ReadFile(fp)
+		if string(b) != "SIGNED-PLEX-FLAC-1" {
+			t.Fatalf("fresh DownloadTrack body=%q", string(b))
+		}
+	})
+
+	t.Run("webdav-signed-href", func(t *testing.T) {
+		const (
+			davUser = "dav-u-secret"
+			davPass = "dav-p-secret"
+			dirTok  = "dav-dir-secret"
+			fileSig = "dav-file-secret"
+		)
+		var srvURL string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			host := strings.TrimPrefix(srvURL, "http://")
+			switch {
+			case r.Method == "PROPFIND" && r.URL.Path == "/music/":
+				fmt.Fprintf(w, `<?xml version="1.0"?><D:multistatus xmlns:D="DAV:">
+					<D:response><D:href>/music/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>
+					<D:response><D:href>http://%s:%s@%s/music/Mixes/?token=%s</D:href><D:propstat><D:prop><D:displayname>Mixes</D:displayname><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>
+				</D:multistatus>`, davUser, davPass, host, dirTok)
+			case r.Method == "PROPFIND" && r.URL.Path == "/music/Mixes/":
+				if r.URL.Query().Get("token") != dirTok {
+					http.Error(w, "missing dir token", http.StatusForbidden)
+					return
+				}
+				fmt.Fprintf(w, `<?xml version="1.0"?><D:multistatus xmlns:D="DAV:">
+					<D:response><D:href>/music/Mixes/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>
+					<D:response><D:href>http://%s:%s@%s/music/Mixes/track.flac?sig=%s</D:href><D:propstat><D:prop><D:displayname>track.flac</D:displayname></D:prop></D:propstat></D:response>
+				</D:multistatus>`, davUser, davPass, host, fileSig)
+			case r.Method == "GET" && r.URL.Path == "/music/Mixes/track.flac":
+				if r.URL.Query().Get("sig") != fileSig {
+					http.Error(w, "missing file sig", http.StatusForbidden)
+					return
+				}
+				_, _ = w.Write([]byte("SIGNED-DAV-FLAC"))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		srvURL = srv.URL
+
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "webdav",
+			URL:      srv.URL + "/music/",
+			Token:    "dav-bearer",
+			Enabled:  true,
+		}, srv.Client())
+
+		pls, err := p.Playlists(ctx)
+		if err != nil || len(pls) != 2 {
+			t.Fatalf("WebDAV Playlists: len=%d err=%v", len(pls), err)
+		}
+		if pls[1].ID != "/music/Mixes/" {
+			t.Fatalf("WebDAV Playlist ID not clean: %q", pls[1].ID)
+		}
+		tracks, err := p.PlaylistTracks(ctx, pls[1].ID)
+		if err != nil || len(tracks) != 1 {
+			t.Fatalf("WebDAV PlaylistTracks: len=%d err=%v", len(tracks), err)
+		}
+		if tracks[0].ID != "/music/Mixes/track.flac" || tracks[0].Album != "/music/Mixes/" {
+			t.Fatalf("WebDAV Track fields not clean: %+v", tracks[0])
+		}
+		for _, field := range []string{pls[1].ID, tracks[0].ID, tracks[0].Album} {
+			for _, bad := range []string{davUser, davPass, dirTok, fileSig, "?", "://"} {
+				if strings.Contains(field, bad) {
+					t.Errorf("WebDAV field leaked %q: %q", bad, field)
+				}
+			}
+		}
+		fp, err := p.DownloadTrack(ctx, tracks[0].ID, t.TempDir())
+		if err != nil {
+			t.Fatalf("WebDAV DownloadTrack: %v", err)
+		}
+		b, _ := os.ReadFile(fp)
+		if string(b) != "SIGNED-DAV-FLAC" {
+			t.Fatalf("WebDAV body=%q", string(b))
 		}
 	})
 }

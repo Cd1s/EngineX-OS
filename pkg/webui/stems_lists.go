@@ -3,6 +3,7 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -43,10 +44,32 @@ func (s *Server) stemsFile() string {
 	return filepath.Join(s.cfg.StateDir, "streaming-stems.json")
 }
 
+func (s *Server) readStemmed() (map[string][]stemmedTrack, error) {
+	path := s.stemsFile()
+	if path == "" {
+		return map[string][]stemmedTrack{}, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string][]stemmedTrack{}, nil
+		}
+		return nil, err
+	}
+	var all map[string][]stemmedTrack
+	if err := json.Unmarshal(data, &all); err != nil {
+		return nil, err
+	}
+	if all == nil {
+		all = map[string][]stemmedTrack{}
+	}
+	return all, nil
+}
+
 func (s *Server) loadStemmed() map[string][]stemmedTrack {
-	all := map[string][]stemmedTrack{}
-	if data, err := os.ReadFile(s.stemsFile()); err == nil {
-		json.Unmarshal(data, &all)
+	all, err := s.readStemmed()
+	if err != nil {
+		return map[string][]stemmedTrack{}
 	}
 	return all
 }
@@ -54,16 +77,7 @@ func (s *Server) loadStemmed() map[string][]stemmedTrack {
 func sameTrack(a, b providers.Track) bool { return a.Provider == b.Provider && a.ID == b.ID }
 
 func sanitizeTrackCovers(t *providers.Track) bool {
-	changed := false
-	if clean := providers.SanitizeCoverURL(t.CoverURL); clean != t.CoverURL {
-		t.CoverURL = clean
-		changed = true
-	}
-	if clean := providers.SanitizeCoverURL(t.ThumbURL); clean != t.ThumbURL {
-		t.ThumbURL = clean
-		changed = true
-	}
-	return changed
+	return providers.SanitizeSelfHostedTrack(t)
 }
 
 func scrubStemmedMap(all map[string][]stemmedTrack) bool {
@@ -80,14 +94,18 @@ func scrubStemmedMap(all map[string][]stemmedTrack) bool {
 }
 
 // scrubLegacyStems strips any pre-fix credentials from an existing
-// streaming-stems.json on startup without rewriting clean files.
+// streaming-stems.json on startup without rewriting clean or undecodable files.
 func (s *Server) scrubLegacyStems() {
 	if s.stemsFile() == "" {
 		return
 	}
 	s.stemsMu.Lock()
 	defer s.stemsMu.Unlock()
-	all := s.loadStemmed()
+	all, err := s.readStemmed()
+	if err != nil {
+		log.Printf("stream-sync: skip stems state scrub: could not decode state (%T)", err)
+		return
+	}
 	if scrubStemmedMap(all) {
 		if err := providers.SaveJSON(s.stemsFile(), all); err != nil {
 			log.Printf("stream-sync: scrub stems state: %v", err)
@@ -100,7 +118,11 @@ func (s *Server) addStemmed(scope string, t stemmedTrack) error {
 	s.stemsMu.Lock()
 	defer s.stemsMu.Unlock()
 	sanitizeTrackCovers(&t.Track)
-	all := s.loadStemmed()
+	all, err := s.readStemmed()
+	if err != nil {
+		log.Printf("stream-sync: skip stems state update: could not decode state (%T)", err)
+		return errors.New("stems state could not be decoded")
+	}
 	scrubStemmedMap(all)
 	list := slices.DeleteFunc(all[scope], func(e stemmedTrack) bool { return sameTrack(e.Track, t.Track) })
 	all[scope] = append([]stemmedTrack{t}, list[:min(len(list), maxStemmed-1)]...)

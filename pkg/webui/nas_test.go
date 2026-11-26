@@ -1695,3 +1695,383 @@ func TestNASLegacyStateScrubbedOnStartup(t *testing.T) {
 		})
 	}
 }
+
+func TestArtworkProxyNASRouteProvenanceAndImageOnly(t *testing.T) {
+	const dummyToken = "plex-art-owner-token-999"
+
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			img.Set(x, y, color.RGBA{R: 50, G: 180, B: 90, A: 255})
+		}
+	}
+	var jpegBuf bytes.Buffer
+	if err := jpeg.Encode(&jpegBuf, img, &jpeg.Options{Quality: 80}); err != nil {
+		t.Fatal(err)
+	}
+	jpegBytes := jpegBuf.Bytes()
+
+	var prefsHits, htmlHits, authedCoverHits atomic.Int32
+	nasSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Plex-Token") != dummyToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/:/prefs":
+			prefsHits.Add(1)
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(`<MediaContainer secret="owner-prefs"/>`))
+		case "/library/metadata/1/thumb/html":
+			htmlHits.Add(1)
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<html><body>not an image</body></html>`))
+		case "/library/metadata/1/thumb/42":
+			authedCoverHits.Add(1)
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(jpegBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer nasSrv.Close()
+
+	uiDir, stateDir := t.TempDir(), t.TempDir()
+	nasCfg := fmt.Sprintf(`{"protocol":"plex","url":%q,"token":%q,"enabled":true}`, nasSrv.URL, dummyToken)
+	if err := os.WriteFile(filepath.Join(uiDir, "nas.json"), []byte(nasCfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dlDir := t.TempDir()
+	dc := &deemixclient.Client{DownloadDir: dlDir, Media: nasSrv.Client()}
+	jobs := NewJobs(Pipeline{Deemix: dc, Catalog: &providers.Deezer{HTTP: nasSrv.Client()}})
+	defer jobs.Close()
+
+	s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir, HTTP: nasSrv.Client()}, jobs)
+	defer s.Close()
+	gw := httptest.NewServer(s)
+	defer gw.Close()
+
+	// 1. Non-cover Plex path on a NAS track must never be fetched or served.
+	t.Run("non-cover-plex-route", func(t *testing.T) {
+		s.tidal.addTrack(trackRef{track: providers.Track{
+			ID:       "/library/parts/1/a.flac",
+			Title:    "PrefsTrack",
+			Artist:   "NASArtist",
+			Provider: "plex",
+			CoverURL: nasSrv.URL + "/:/prefs",
+		}})
+		resp, err := http.Get(gw.URL + "/v1/enginex/art?song=PrefsTrack&artist=NASArtist")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("/:/prefs via /v1/enginex/art status=%d, want 404", resp.StatusCode)
+		}
+		if prefsHits.Load() != 0 {
+			t.Fatalf("/:/prefs received %d authenticated hits, want 0", prefsHits.Load())
+		}
+	})
+
+	// 2. Non-image body on a valid Plex cover path must be rejected and not cached.
+	t.Run("non-image-body", func(t *testing.T) {
+		s.tidal.addTrack(trackRef{track: providers.Track{
+			ID:       "/library/parts/2/b.flac",
+			Title:    "HTMLTrack",
+			Artist:   "NASArtist",
+			Provider: "plex",
+			CoverURL: nasSrv.URL + "/library/metadata/1/thumb/html",
+		}})
+		resp, err := http.Get(gw.URL + "/v1/enginex/art?song=HTMLTrack&artist=NASArtist")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("HTML cover via /v1/enginex/art status=%d, want 404", resp.StatusCode)
+		}
+	})
+
+	// 3. Another source (Deezer) naming the Plex cover URL must never attach the owner NAS token.
+	t.Run("non-nas-provenance", func(t *testing.T) {
+		spoof := providers.Track{
+			ID:       "dz-spoof-1",
+			Title:    "SpoofTrack",
+			Artist:   "OtherArtist",
+			Provider: "deezer",
+			CoverURL: nasSrv.URL + "/library/metadata/1/thumb/42",
+		}
+		s.tidal.addTrack(trackRef{track: spoof})
+		resp, err := http.Get(gw.URL + "/v1/enginex/art?song=SpoofTrack&artist=OtherArtist")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("Deezer spoof cover via /v1/enginex/art status=%d, want 404", resp.StatusCode)
+		}
+		s.tidal.prewarmArt([]trackRef{{track: spoof}})
+		for end := time.Now().Add(3 * time.Second); s.tidal.warming.Load() && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		}
+		var flacBuf bytes.Buffer
+		if err := testaudio.FLAC(&flacBuf, testaudio.Song(2)); err != nil {
+			t.Fatal(err)
+		}
+		flacPath := filepath.Join(dlDir, "spoof.flac")
+		if err := os.WriteFile(flacPath, flacBuf.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		jobs.addCover(context.Background(), spoof, &deemixclient.Download{Path: flacPath})
+		if authedCoverHits.Load() != 0 {
+			t.Fatalf("non-NAS source triggered %d authenticated Plex cover requests, want 0", authedCoverHits.Load())
+		}
+	})
+
+	// 4. Genuine NAS track with valid Plex cover path and JPEG body succeeds.
+	t.Run("valid-nas-cover", func(t *testing.T) {
+		s.tidal.addTrack(trackRef{track: providers.Track{
+			ID:       "/library/parts/3/c.flac",
+			Title:    "GoodTrack",
+			Artist:   "NASArtist",
+			Provider: "plex",
+			CoverURL: nasSrv.URL + "/library/metadata/1/thumb/42",
+		}})
+		resp, err := http.Get(gw.URL + "/v1/enginex/art?song=GoodTrack&artist=NASArtist")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || !bytes.Equal(body, jpegBytes) {
+			t.Fatalf("valid Plex cover status=%d len=%d, want 200 JPEG", resp.StatusCode, len(body))
+		}
+		if authedCoverHits.Load() != 1 {
+			t.Fatalf("valid Plex cover hits=%d, want 1", authedCoverHits.Load())
+		}
+	})
+}
+
+func TestNASLegacyDirtyIDsScrubbedPreservingGatewayIDs(t *testing.T) {
+	const (
+		dirtyPlexUser = "legacy-plex-u"
+		dirtyPlexPass = "legacy-plex-p"
+		dirtyPlexTok  = "legacy-plex-tok"
+		dirtyDavTok   = "legacy-dav-tok"
+	)
+	uiDir, stateDir, dlDir := t.TempDir(), t.TempDir(), t.TempDir()
+	var flacBuf bytes.Buffer
+	if err := testaudio.FLAC(&flacBuf, testaudio.Song(2)); err != nil {
+		t.Fatal(err)
+	}
+	cachedFile := filepath.Join(dlDir, "nas-cached.flac")
+	if err := os.WriteFile(cachedFile, flacBuf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirtyPlexID := "http://" + dirtyPlexUser + ":" + dirtyPlexPass + "@nas.local:32400/library/parts/301/song.flac?X-Plex-Token=" + dirtyPlexTok
+	dirtyDavID := "http://nas.local:8080/music/Mixes/track.flac?sig=" + dirtyDavTok
+	dirtyDavList := "http://nas.local:8080/music/Mixes/?token=" + dirtyDavTok
+
+	legacyTracks := fmt.Sprintf(`{
+		"next": 42,
+		"tracks": [
+			{"id": 42, "track": {"id": %q, "title": "Plex Track", "artist": "A", "preview": %q, "provider": "plex"}, "session": "nas"},
+			{"id": 43, "track": {"id": %q, "title": "DAV Track", "artist": "B", "album": %q, "provider": "webdav"}, "session": "nas"}
+		],
+		"lists": [
+			{"id": "list-uuid-1", "session": "nas", "provider": "nas", "list": {"id": %q, "title": "Mixes", "count": 1}}
+		]
+	}`, dirtyPlexID, dirtyPlexID, dirtyDavID, dirtyDavList, dirtyDavList)
+	if err := os.WriteFile(filepath.Join(stateDir, "gateway-tracks.json"), []byte(legacyTracks), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacyStems := fmt.Sprintf(`{"nas":[{"track":{"id":%q,"title":"Plex Track","preview":%q,"provider":"plex"},"session":"nas","path":"/tmp/a.flac"}]}`,
+		dirtyPlexID, dirtyPlexID)
+	if err := os.WriteFile(filepath.Join(stateDir, "streaming-stems.json"), []byte(legacyStems), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacySources := fmt.Sprintf(`{%q:"nas-cached.flac",%q:"nas-cached.flac"}`, "plex:"+dirtyPlexID, "webdav:"+dirtyDavID)
+	if err := os.WriteFile(filepath.Join(dlDir, sourcesFile), []byte(legacySources), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dc := &deemixclient.Client{DownloadDir: dlDir}
+	jobs := NewJobs(Pipeline{Deemix: dc, Catalog: &providers.Deezer{}})
+	defer jobs.Close()
+
+	s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, jobs)
+	defer s.Close()
+
+	forbidden := []string{dirtyPlexUser, dirtyPlexPass, dirtyPlexTok, dirtyDavTok, "X-Plex-Token", "sig=", "token=", "?", "://"}
+	for _, p := range []string{
+		filepath.Join(stateDir, "gateway-tracks.json"),
+		filepath.Join(stateDir, "streaming-stems.json"),
+		filepath.Join(dlDir, sourcesFile),
+	} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		text := string(b)
+		for _, bad := range forbidden {
+			if strings.Contains(text, bad) {
+				t.Errorf("%s still contains %q after migration: %s", filepath.Base(p), bad, text)
+			}
+		}
+	}
+
+	// Gateway numeric ID 42 is preserved and maps to the normalized Plex track.
+	s.tidal.mu.Lock()
+	ref42, ok42 := s.tidal.tracks[42]
+	mappedID := s.tidal.ids[refKey(ref42)]
+	listRef, okList := s.tidal.lists["list-uuid-1"]
+	s.tidal.mu.Unlock()
+	if !ok42 || ref42.track.ID != "/library/parts/301/song.flac" || mappedID != 42 {
+		t.Fatalf("gateway numeric ID 42 not preserved cleanly: ok=%v track=%+v mapped=%d", ok42, ref42.track, mappedID)
+	}
+	if !okList || listRef.list.ID != "/music/Mixes/" {
+		t.Fatalf("gateway playlist ID not normalized: ok=%v list=%+v", okList, listRef.list)
+	}
+
+	// Migrated .sources.json resolves the cached download under the normalized ID.
+	if got := jobs.File(providers.Track{ID: "/library/parts/301/song.flac", Provider: "plex"}); got != cachedFile {
+		t.Fatalf("jobs.File after .sources.json migration = %q, want %q", got, cachedFile)
+	}
+
+	// Job submission and cover-error logs scrub URL-shaped IDs too.
+	job, err := jobs.submitTo("nas", providers.Track{ID: dirtyPlexID, Preview: dirtyPlexID, Provider: "plex", Title: "Job Track"}, "", providers.Track{}, nil)
+	if err != nil {
+		t.Fatalf("submitTo: %v", err)
+	}
+	jobBytes, _ := json.Marshal(job)
+	for _, bad := range forbidden {
+		if strings.Contains(string(jobBytes), bad) {
+			t.Errorf("job response leaked %q: %s", bad, string(jobBytes))
+		}
+	}
+	var logBuf bytes.Buffer
+	origOut := log.Writer()
+	log.SetOutput(&logBuf)
+	jobs.addCover(context.Background(), providers.Track{
+		ID:       dirtyPlexID,
+		Provider: "plex",
+		CoverURL: "https://127.0.0.1:1/unreachable.jpg",
+	}, &deemixclient.Download{Path: cachedFile})
+	log.SetOutput(origOut)
+	for _, bad := range forbidden {
+		if strings.Contains(logBuf.String(), bad) {
+			t.Errorf("cover error log leaked %q: %s", bad, logBuf.String())
+		}
+	}
+}
+
+func TestNASConfigRejectsQueryAndMigratesLegacyURL(t *testing.T) {
+	s, dir := newTestServerWithUIDir(t)
+	defer s.Close()
+
+	// 1. POST /v1/enginex/nas rejects query parameters and fragments without echoing secrets.
+	for _, tc := range []struct {
+		name, body, secret string
+	}{
+		{"plex-query", `{"protocol":"plex","url":"http://192.168.1.10:32400/?X-Plex-Token=secret-q-tok","enabled":true}`, "secret-q-tok"},
+		{"subsonic-query", `{"protocol":"subsonic","url":"http://192.168.1.10:4533/?u=alice&p=secret-q-pass","enabled":true}`, "secret-q-pass"},
+		{"fragment", `{"protocol":"webdav","url":"http://192.168.1.10:8080/dav/#secret-frag","enabled":true}`, "secret-frag"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			s.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(tc.body)))
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("POST /v1/enginex/nas status=%d, want 400 (body=%s)", w.Code, w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), tc.secret) {
+				t.Fatalf("error echoed secret %q: %s", tc.secret, w.Body.String())
+			}
+			wt := httptest.NewRecorder()
+			s.handleNASTest(wt, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas/test", strings.NewReader(tc.body)))
+			if wt.Code != http.StatusBadRequest {
+				t.Fatalf("POST /v1/enginex/nas/test status=%d, want 400", wt.Code)
+			}
+		})
+	}
+
+	// 2. Legacy nas.json carrying a query token is scrubbed on load/GET and migrated on disk.
+	const legacyTok = "legacy-url-query-tok-777"
+	legacyCfg := fmt.Sprintf(`{"protocol":"plex","url":"http://192.168.1.10:32400/base?X-Plex-Token=%s#frag","enabled":true}`, legacyTok)
+	if err := os.WriteFile(filepath.Join(dir, "nas.json"), []byte(legacyCfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	s.handleNASConfig(w, httptest.NewRequest(http.MethodGet, "/v1/enginex/nas", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /v1/enginex/nas status=%d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), legacyTok) || strings.Contains(w.Body.String(), "?") || strings.Contains(w.Body.String(), "#") {
+		t.Fatalf("GET /v1/enginex/nas leaked query/fragment: %s", w.Body.String())
+	}
+	var view NASConfigView
+	if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.URL != "http://192.168.1.10:32400/base" || !view.HasToken || view.Token != "" {
+		t.Fatalf("unexpected migrated view: %+v", view)
+	}
+	onDiskBytes, err := os.ReadFile(filepath.Join(dir, "nas.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onDisk providers.NASConfig
+	if err := json.Unmarshal(onDiskBytes, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.URL != "http://192.168.1.10:32400/base" || onDisk.Token != legacyTok {
+		t.Fatalf("on-disk nas.json not migrated properly: %+v", onDisk)
+	}
+}
+
+func TestStartupStemsScrubPreservesUndecodableFile(t *testing.T) {
+	for _, tc := range []struct {
+		name, content string
+	}{
+		{
+			name:    "partial-decode-wrong-field-type",
+			content: `{"nas":[{"track":{"id":"s-1","title":"Keep","provider":"plex","coverUrl":"http://127.0.0.1:32400/library/metadata/1/thumb/1?X-Plex-Token=secret-keep-tok"},"session":"nas","path":"/tmp/a.flac"}],"deezer":"wrong-type-entry"}`,
+		},
+		{
+			name:    "malformed-json",
+			content: `{"nas": [broken secret-keep-tok`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			uiDir, stateDir := t.TempDir(), t.TempDir()
+			stemsPath := filepath.Join(stateDir, "streaming-stems.json")
+			if err := os.WriteFile(stemsPath, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			var logBuf bytes.Buffer
+			origOut := log.Writer()
+			log.SetOutput(&logBuf)
+			s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, nil)
+			log.SetOutput(origOut)
+			defer s.Close()
+
+			after, err := os.ReadFile(stemsPath)
+			if err != nil {
+				t.Fatalf("read stems file after startup: %v", err)
+			}
+			if string(after) != tc.content {
+				t.Fatalf("startup scrub overwrote undecodable stems file:\ngot:  %s\nwant: %s", string(after), tc.content)
+			}
+			logs := logBuf.String()
+			if !strings.Contains(logs, "skip stems state scrub") {
+				t.Fatalf("expected diagnostic log when skipping stems scrub, got: %q", logs)
+			}
+			for _, bad := range []string{"secret-keep-tok", "wrong-type-entry", "X-Plex-Token"} {
+				if strings.Contains(logs, bad) {
+					t.Errorf("stems scrub diagnostic log leaked file content %q: %s", bad, logs)
+				}
+			}
+		})
+	}
+}

@@ -33,7 +33,7 @@ func disallowedNASIP(ip net.IP) bool {
 	return false
 }
 
-func validateNASURL(raw string) error {
+func validateNASRedirectURL(raw string) error {
 	u, err := url.ParseRequestURI(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "smb") {
 		return errors.New("invalid url: must be http, https, or smb with host")
@@ -57,6 +57,60 @@ func validateNASURL(raw string) error {
 		return errors.New("invalid url: target address is not allowed")
 	}
 	return nil
+}
+
+func validateNASURL(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	if err := validateNASRedirectURL(trimmed); err != nil {
+		return err
+	}
+	u, err := url.ParseRequestURI(trimmed)
+	if err != nil {
+		return errors.New("invalid url: must be http, https, or smb with host")
+	}
+	if u.RawQuery != "" || strings.Contains(trimmed, "?") {
+		return errors.New("invalid url: query parameters are not allowed")
+	}
+	if u.Fragment != "" || strings.Contains(trimmed, "#") {
+		return errors.New("invalid url: fragments are not allowed")
+	}
+	return nil
+}
+
+func sameOriginURL(a, b *url.URL) bool {
+	if a == nil || b == nil || !strings.EqualFold(a.Scheme, b.Scheme) {
+		return false
+	}
+	norm := func(scheme, host string) string {
+		h := strings.ToLower(strings.TrimSpace(host))
+		if hn, port, err := net.SplitHostPort(h); err == nil {
+			if (strings.EqualFold(scheme, "http") && port == "80") ||
+				(strings.EqualFold(scheme, "https") && port == "443") {
+				if strings.Contains(hn, ":") {
+					return "[" + hn + "]"
+				}
+				return hn
+			}
+		}
+		return h
+	}
+	return norm(a.Scheme, a.Host) == norm(b.Scheme, b.Host)
+}
+
+func sanitizeNASBaseURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		return ""
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	return u.String()
 }
 
 func (s *Server) nasHTTPClient() *http.Client {
@@ -97,10 +151,17 @@ func (s *Server) nasHTTPClient() *http.Client {
 		Timeout:   timeout,
 		Transport: base,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			req.Header.Del("Referer")
+			if len(via) > 0 && (req.URL.User != nil || !sameOriginURL(req.URL, via[0].URL)) {
+				req.Header.Del("Authorization")
+				req.Header.Del("X-Plex-Token")
+				req.Header.Del("Cookie")
+				return errors.New("nas: cross-origin redirect is not allowed")
+			}
 			if len(via) >= 5 {
 				return errors.New("nas: too many redirects")
 			}
-			return validateNASURL(req.URL.String())
+			return validateNASRedirectURL(req.URL.String())
 		},
 	}
 }
@@ -123,18 +184,60 @@ func (s *Server) nasConfigPath() string {
 
 func (s *Server) loadNASConfigLocked() providers.NASConfig {
 	var cfg providers.NASConfig
+	hadFile := false
 	if b, err := os.ReadFile(s.nasConfigPath()); err == nil {
-		_ = json.Unmarshal(b, &cfg)
-	}
-	// Older configs could keep Basic Auth in the URL. Preserve that login without
-	// returning its credentials in a URL or overwriting explicit auth fields.
-	if u, err := url.Parse(cfg.URL); err == nil && u.User != nil {
-		if cfg.Username == "" {
-			cfg.Username = u.User.Username()
-			cfg.Password, _ = u.User.Password()
+		if json.Unmarshal(b, &cfg) == nil {
+			hadFile = true
 		}
-		u.User = nil
-		cfg.URL = u.String()
+	}
+	// Older configs could keep credentials in URL userinfo or query parameters.
+	// Preserve explicit login fields where empty, strip them from the base URL,
+	// and migrate the on-disk record so the settings API never echoes them.
+	if u, err := url.Parse(cfg.URL); err == nil {
+		migrated := false
+		if u.User != nil {
+			if cfg.Username == "" {
+				cfg.Username = u.User.Username()
+				cfg.Password, _ = u.User.Password()
+			}
+			u.User = nil
+			migrated = true
+		}
+		if u.RawQuery != "" || u.ForceQuery || strings.Contains(cfg.URL, "?") {
+			if q, qerr := url.ParseQuery(u.RawQuery); qerr == nil {
+				switch strings.ToLower(strings.TrimSpace(cfg.Protocol)) {
+				case "plex":
+					if cfg.Token == "" {
+						for k, vals := range q {
+							if strings.EqualFold(k, "x-plex-token") && len(vals) > 0 && vals[0] != "" {
+								cfg.Token = vals[0]
+								break
+							}
+						}
+					}
+				case "subsonic":
+					if cfg.Username == "" && q.Get("u") != "" {
+						cfg.Username = q.Get("u")
+					}
+					if cfg.Password == "" && q.Get("p") != "" {
+						cfg.Password = q.Get("p")
+					}
+				}
+			}
+			u.RawQuery = ""
+			u.ForceQuery = false
+			migrated = true
+		}
+		if u.Fragment != "" || strings.Contains(cfg.URL, "#") {
+			u.Fragment = ""
+			migrated = true
+		}
+		if migrated {
+			cfg.URL = u.String()
+			if hadFile {
+				_ = providers.SaveJSON(s.nasConfigPath(), cfg)
+			}
+		}
 	}
 	return cfg
 }
@@ -148,7 +251,7 @@ func (s *Server) loadNASConfig() providers.NASConfig {
 func toNASConfigView(cfg providers.NASConfig) NASConfigView {
 	v := NASConfigView{
 		Protocol:    cfg.Protocol,
-		URL:         cfg.URL,
+		URL:         sanitizeNASBaseURL(cfg.URL),
 		Username:    cfg.Username,
 		Enabled:     cfg.Enabled,
 		HasPassword: cfg.Password != "",
@@ -170,6 +273,8 @@ func (s *Server) handleNASConfig(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusInternalServerError, errors.New("could not remove NAS configuration"))
 			return
 		}
+		s.nasProv = nil
+		s.nasProvCfg = providers.NASConfig{}
 		respond(w, toNASConfigView(providers.NASConfig{}))
 	default:
 		fail(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -240,6 +345,8 @@ func (s *Server) handleNASConfigPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.nasProv = nil
+	s.nasProvCfg = providers.NASConfig{}
 	respond(w, toNASConfigView(newCfg))
 }
 
@@ -314,6 +421,15 @@ func nasConfigReady(cfg providers.NASConfig) bool {
 		cfg.URL != "" && validateNASURL(cfg.URL) == nil
 }
 
+func isNASProvider(p string) bool {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case "webdav", "subsonic", "plex", "smb", nasScope:
+		return true
+	default:
+		return false
+	}
+}
+
 func gatewayProvider(p string) string {
 	switch p {
 	case "webdav", "subsonic", "plex", "smb":
@@ -334,22 +450,21 @@ func (s *Server) nasAvailable() bool {
 }
 
 func (s *Server) ownerSelfHosted() *providers.SelfHostedProvider {
-	cfg := s.loadNASConfig()
+	s.uiMu.Lock()
+	defer s.uiMu.Unlock()
+	cfg := s.loadNASConfigLocked()
 	if !nasConfigReady(cfg) {
+		s.nasProv = nil
+		s.nasProvCfg = providers.NASConfig{}
 		return nil
 	}
-	return providers.NewSelfHostedProvider(cfg, s.nasHTTPClient())
-}
-
-func (s *Server) nasCoverProvider(address string) *providers.SelfHostedProvider {
-	if address == "" {
-		return nil
+	if s.nasProv != nil && s.nasProvCfg == cfg && s.nasProvLoopback == nasAllowLoopback {
+		return s.nasProv
 	}
-	cfg := s.loadNASConfig()
-	if !nasConfigReady(cfg) || !providers.NASConfigMatchesCoverURL(cfg, address) {
-		return nil
-	}
-	return providers.NewSelfHostedProvider(cfg, s.nasHTTPClient())
+	s.nasProv = providers.NewSelfHostedProvider(cfg, s.nasHTTPClient())
+	s.nasProvCfg = cfg
+	s.nasProvLoopback = nasAllowLoopback
+	return s.nasProv
 }
 
 func (s *Server) nasPlaylists(ctx context.Context) ([]providers.Playlist, *providers.SelfHostedProvider) {

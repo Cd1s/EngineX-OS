@@ -163,6 +163,10 @@ type Server struct {
 	httpsLn   net.Listener
 	httpsPort int
 	httpsWG   sync.WaitGroup
+
+	nasProv         *providers.SelfHostedProvider
+	nasProvCfg      providers.NASConfig
+	nasProvLoopback bool
 }
 
 func New(cfg Config, jobs *Jobs) *Server {
@@ -373,6 +377,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.loadAppleMusicHelper()
 	s.appleMusic.OwnerPath = filepath.Join(cfg.StateDir, "applemusic-owner.json")
 	_ = s.appleMusic.Load()
+	_ = s.loadNASConfig()
 	s.tidal = newTidalGateway(s)
 	s.scrubLegacyStems()
 	s.RegisterTunnelRoutes()
@@ -395,6 +400,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 			jobs.p.Deemix.PreferMP3 = func() bool { return s.quality() == quality320k }
 		}
 		jobs.mu.Unlock()
+		jobs.scrubLegacySources()
 	}
 	return s
 }

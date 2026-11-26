@@ -118,7 +118,9 @@ func (j *Jobs) timeout() time.Duration {
 	}
 	return 30 * time.Minute
 }
-func trackKey(t providers.Track) string { return t.Provider + ":" + t.ID }
+func trackKey(t providers.Track) string {
+	return t.Provider + ":" + providers.SanitizeSelfHostedID(t.Provider, t.ID)
+}
 
 // File returns a finished download of t that is still on disk, including one
 // saved before a restart.
@@ -219,17 +221,62 @@ func (j *Jobs) dropUnusable(t providers.Track) {
 
 const sourcesFile = ".sources.json"
 
-// loadSources reads the saved index once; j.mu must be held.
+// loadSources reads the saved index once; j.mu must be held. Any legacy
+// URL-shaped Plex/WebDAV keys carrying credentials are normalized in place.
 func (j *Jobs) loadSources() map[string]string {
 	if j.sources == nil {
 		j.sources = map[string]string{}
 		if j.p.Deemix != nil {
-			if b, err := os.ReadFile(filepath.Join(j.p.Deemix.DownloadDir, sourcesFile)); err == nil {
-				json.Unmarshal(b, &j.sources)
+			path := filepath.Join(j.p.Deemix.DownloadDir, sourcesFile)
+			if b, err := os.ReadFile(path); err == nil {
+				if json.Unmarshal(b, &j.sources) == nil {
+					type migration struct {
+						oldKey, newKey, name string
+					}
+					var dirty []migration
+					for k, name := range j.sources {
+						provider, id, ok := strings.Cut(k, ":")
+						if !ok || (provider != "plex" && provider != "webdav") {
+							continue
+						}
+						clean := providers.SanitizeSelfHostedID(provider, id)
+						if clean == id {
+							continue
+						}
+						newKey := ""
+						if clean != "" {
+							newKey = provider + ":" + clean
+						}
+						dirty = append(dirty, migration{oldKey: k, newKey: newKey, name: name})
+					}
+					if len(dirty) > 0 {
+						for _, m := range dirty {
+							delete(j.sources, m.oldKey)
+							if m.newKey != "" && j.sources[m.newKey] == "" {
+								j.sources[m.newKey] = m.name
+							}
+						}
+						if mb, err := json.Marshal(j.sources); err == nil {
+							tmp := filepath.Join(j.p.Deemix.DownloadDir, sourcesFile+".tmp")
+							if os.WriteFile(tmp, mb, 0o644) == nil {
+								_ = os.Rename(tmp, path)
+							}
+						}
+					}
+				}
 			}
 		}
 	}
 	return j.sources
+}
+
+func (j *Jobs) scrubLegacySources() {
+	if j == nil {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.loadSources()
 }
 
 // saveSource records key's file and drops entries whose file was evicted; j.mu
@@ -723,22 +770,30 @@ func (j *Jobs) addCover(ctx context.Context, t providers.Track, dl *deemixclient
 	if t.CoverURL == "" {
 		return
 	}
-	j.mu.Lock()
-	lookup := j.selfHosted
-	j.mu.Unlock()
-	if lookup != nil {
-		if sh := lookup(); sh != nil && sh.MatchesCoverURL(t.CoverURL) {
-			err := j.p.Deemix.EmbedCoverWith(ctx, dl.Path, func(ctx context.Context) ([]byte, error) {
-				return sh.FetchCover(ctx, t.CoverURL, 0)
-			})
-			if err != nil {
-				log.Printf("stream-sync: no cover for track %s: %v", t.ID, err)
+	safeID := providers.SanitizeSelfHostedID(t.Provider, t.ID)
+	if isNASProvider(t.Provider) {
+		j.mu.Lock()
+		lookup := j.selfHosted
+		j.mu.Unlock()
+		if lookup != nil {
+			if sh := lookup(); sh != nil {
+				if sh.MatchesCoverURL(t.CoverURL) {
+					err := j.p.Deemix.EmbedCoverWith(ctx, dl.Path, func(ctx context.Context) ([]byte, error) {
+						return sh.FetchCover(ctx, t.CoverURL, 0)
+					})
+					if err != nil {
+						log.Printf("stream-sync: no cover for track %q: %v", safeID, err)
+					}
+					return
+				}
+				if sh.SameOrigin(t.CoverURL) {
+					return
+				}
 			}
-			return
 		}
 	}
 	if err := j.p.Deemix.EmbedCover(ctx, dl.Path, t.CoverURL); err != nil {
-		log.Printf("stream-sync: no cover for track %s: %v", t.ID, err)
+		log.Printf("stream-sync: no cover for track %q: %v", safeID, err)
 	}
 }
 

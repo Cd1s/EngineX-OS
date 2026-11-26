@@ -242,6 +242,34 @@ func (g *tidalGateway) tracksPath() string {
 
 // loadTracks restores the IDs of the previous run, and its counter, so an old ID
 // never names a different track.
+func artSource(provider string) string {
+	switch {
+	case provider == rekordboxScope:
+		return rekordboxScope
+	case isNASProvider(provider):
+		return nasScope
+	default:
+		return ""
+	}
+}
+
+func sanitizeGatewayPlaylistID(provider, id string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "plex", "webdav":
+		return providers.SanitizeSelfHostedID(provider, id)
+	case nasScope:
+		if id == "." || strings.HasPrefix(id, "./") {
+			return id
+		}
+		if strings.Contains(id, "://") || strings.HasPrefix(id, "//") || strings.Contains(id, "?") || (strings.HasPrefix(id, "/") && strings.Contains(id, "#")) {
+			return providers.SanitizeSelfHostedID("webdav", id)
+		}
+		return id
+	default:
+		return id
+	}
+}
+
 func (g *tidalGateway) loadTracks() {
 	b, err := os.ReadFile(g.tracksPath())
 	var v savedTracks
@@ -254,10 +282,8 @@ func (g *tidalGateway) loadTracks() {
 			scrubbed = true
 		}
 		httpsCover(&r.Track)
-		src := ""
-		if r.Track.Provider == rekordboxScope {
-			src = rekordboxScope
-		} else {
+		src := artSource(r.Track.Provider)
+		if src != rekordboxScope {
 			for _, p := range []*string{&r.Track.CoverURL, &r.Track.ThumbURL} {
 				if strings.HasPrefix(*p, rbxCoverScheme) {
 					*p = ""
@@ -265,7 +291,11 @@ func (g *tidalGateway) loadTracks() {
 			}
 		}
 		ref := trackRef{track: r.Track, session: r.Session, guest: r.Guest, file: r.File, drive: r.Drive}
-		g.tracks[r.ID], g.ids[refKey(ref)] = ref, r.ID
+		g.tracks[r.ID] = ref
+		key := refKey(ref)
+		if prev, ok := g.ids[key]; !ok || r.ID > prev {
+			g.ids[key] = r.ID
+		}
 		if address := thumbURL(ref.track); address != "" {
 			if len(g.artURLs) > maxTracks {
 				g.artURLs = map[string]string{}
@@ -279,11 +309,19 @@ func (g *tidalGateway) loadTracks() {
 	}
 	g.next = max(g.next, v.Next)
 	for _, l := range v.Lists {
+		if clean := sanitizeGatewayPlaylistID(l.Provider, l.List.ID); clean != l.List.ID {
+			l.List.ID = clean
+			scrubbed = true
+		}
 		g.lists[l.ID] = playlistRef{l.Session, l.Provider, l.List, l.Guest}
 		g.seq++
 		g.listSeen[l.ID] = g.seq
 	}
 	for _, al := range v.Albums {
+		if clean := sanitizeGatewayPlaylistID(al.Provider, al.ListID); clean != al.ListID {
+			al.ListID = clean
+			scrubbed = true
+		}
 		ref := albumRef{al.Session, al.Provider, al.ListID, al.Guest}
 		g.albums[al.ID] = ref
 		g.albumIDs[albumKey(ref)] = al.ID
@@ -806,6 +844,7 @@ func each[T, R any](ctx context.Context, in []T, fn func(context.Context, T) ([]
 	return out
 }
 func (g *tidalGateway) addPlaylist(ref playlistRef) string {
+	ref.list.ID = sanitizeGatewayPlaylistID(ref.provider, ref.list.ID)
 	id := uuid.NewSHA1(tidalNS, []byte(owner(ref.session, ref.guest)+"\x00"+ref.provider+"\x00"+ref.list.ID)).String()
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -832,6 +871,7 @@ func albumKey(ref albumRef) string {
 }
 
 func (g *tidalGateway) addAlbum(ref albumRef) int64 {
+	ref.listID = sanitizeGatewayPlaylistID(ref.provider, ref.listID)
 	key := albumKey(ref)
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -888,10 +928,8 @@ func (g *tidalGateway) dropAppleMusicBrowse(sessionID string) {
 func (g *tidalGateway) addTrack(ref trackRef) int64 {
 	sanitizeTrackCovers(&ref.track)
 	httpsCover(&ref.track)
-	src := "" // a rekordbox row's cover has its own keys: it never replaces a service's
-	if ref.track.Provider == rekordboxScope {
-		src = rekordboxScope
-	} else { // only the gateway's own rekordbox rows reach a computer
+	src := artSource(ref.track.Provider) // rekordbox and NAS covers keep their own keys
+	if src != rekordboxScope {           // only the gateway's own rekordbox rows reach a computer
 		for _, p := range []*string{&ref.track.CoverURL, &ref.track.ThumbURL} {
 			if strings.HasPrefix(*p, rbxCoverScheme) {
 				*p = ""
@@ -948,22 +986,26 @@ const (
 // art serves a list row's thumbnail, keeping the most recently fetched in memory.
 func (g *tidalGateway) art(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	order := []string{"", rekordboxScope} // the browsed source's cover first
-	if g.s.scope() == rekordboxScope {
-		order = []string{rekordboxScope, ""}
+	order := []string{"", nasScope, rekordboxScope} // the browsed source's cover first
+	switch g.s.scope() {
+	case rekordboxScope:
+		order = []string{rekordboxScope, "", nasScope}
+	case nasScope:
+		order = []string{nasScope, "", rekordboxScope}
 	}
-	address := ""
+	address, foundSrc := "", ""
 	g.mu.Lock()
 	for _, src := range order {
 		if address = g.artURLs[artKey(src, q.Get("song"), q.Get("artist"))]; address == "" {
 			address = g.artURLs[artKey(src, q.Get("song"), "")]
 		}
 		if address != "" {
+			foundSrc = src
 			break
 		}
 	}
 	g.mu.Unlock()
-	data := g.artBytes(r.Context(), address)
+	data := g.artBytesFor(r.Context(), foundSrc, address)
 	if data == nil {
 		http.NotFound(w, r)
 		return
@@ -979,19 +1021,38 @@ var artClient = func() *http.Client {
 	return &http.Client{Timeout: 6 * time.Second, Transport: t}
 }()
 
-// artBytes is the cover at address (https, configured NAS, or a rekordbox computer's),
+// artBytes is the cover at address (https or a rekordbox computer's),
 // from memory or fetched; nil on any failure.
 func (g *tidalGateway) artBytes(ctx context.Context, address string) []byte {
+	return g.artBytesFor(ctx, "", address)
+}
+
+// artBytesFor fetches a cover with source provenance. Only covers produced by
+// the NAS provider (src == nasScope) may attach owner NAS credentials.
+func (g *tidalGateway) artBytesFor(ctx context.Context, src, address string) []byte {
+	if address == "" {
+		return nil
+	}
 	rbx := strings.HasPrefix(address, rbxCoverScheme)
 	var nas *providers.SelfHostedProvider
-	if !rbx && g.s != nil {
-		nas = g.s.nasCoverProvider(address)
+	if !rbx && src == nasScope && g.s != nil {
+		if sh := g.s.ownerSelfHosted(); sh != nil {
+			if sh.MatchesCoverURL(address) {
+				nas = sh
+			} else if sh.SameOrigin(address) {
+				return nil
+			}
+		}
 	}
 	if !rbx && nas == nil && !strings.HasPrefix(address, "https://") {
 		return nil
 	}
+	cacheKey := address
+	if nas != nil {
+		cacheKey = nasScope + "\x00" + address
+	}
 	g.artMu.Lock()
-	data := g.artCache[address]
+	data := g.artCache[cacheKey]
 	g.artMu.Unlock()
 	if data != nil {
 		return data
@@ -1004,7 +1065,7 @@ func (g *tidalGateway) artBytes(ctx context.Context, address string) []byte {
 	default:
 		data = fetchArt(ctx, address)
 	}
-	if data == nil {
+	if data == nil || (!rbx && !providers.IsValidCoverImage(data)) {
 		return nil
 	}
 	g.artMu.Lock()
@@ -1013,9 +1074,9 @@ func (g *tidalGateway) artBytes(ctx context.Context, address string) []byte {
 		delete(g.artCache, g.artAge[0])
 		g.artAge = append(g.artAge[:0], g.artAge[1:]...) // keep the backing array bounded
 	}
-	if _, ok := g.artCache[address]; !ok {
-		g.artCache[address] = data
-		g.artAge = append(g.artAge, address)
+	if _, ok := g.artCache[cacheKey]; !ok {
+		g.artCache[cacheKey] = data
+		g.artAge = append(g.artAge, cacheKey)
 	}
 	return data
 }
@@ -1031,7 +1092,7 @@ func fetchArt(ctx context.Context, address string) []byte {
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxArtBytes+1))
-	if err != nil || resp.StatusCode != http.StatusOK || len(data) > maxArtBytes {
+	if err != nil || resp.StatusCode != http.StatusOK || len(data) > maxArtBytes || !providers.IsValidCoverImage(data) {
 		return nil
 	}
 	return data
@@ -1051,7 +1112,7 @@ func (g *tidalGateway) prewarmArt(refs []trackRef) {
 			// Never a rekordbox computer's cover: its session goes to the analysis prefetch first,
 			// and another source's row naming one is not the gateway's own (addTrack drops it).
 			if address := thumbURL(ref.track); !strings.HasPrefix(address, rbxCoverScheme) {
-				g.artBytes(ctx, address)
+				g.artBytesFor(ctx, artSource(ref.track.Provider), address)
 			}
 		}
 	}()
@@ -1073,7 +1134,7 @@ func (g *tidalGateway) stageAlbumArt(ctx context.Context, id int64, t providers.
 	if address == "" {
 		address = thumbURL(t)
 	}
-	data := g.artBytes(ctx, address)
+	data := g.artBytesFor(ctx, artSource(t.Provider), address)
 	if len(data) < 3 || len(data) > maxStagedArtBytes || data[0] != 0xff || data[1] != 0xd8 { // Engine's Artwork files are JPEG
 		return
 	}
