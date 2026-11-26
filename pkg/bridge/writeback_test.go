@@ -749,10 +749,10 @@ func TestWriteBackDefaultCueNameStrippedAndCompactPCP2(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Set Pad A with Engine's auto-generated "Cue 1" + default Pad 1 color (must strip name & default
-	// color -> 44-byte uncolored compact b29=0x03 matching compact rekordbox oracle), Pad B with explicit user name
-	// "Vocal Drop" (-> 88+clen b29=0x01), and Pad C with "Cue 3" + custom non-default RGB (-> 48-byte
-	// colored compact b29=0x03).
+	// Set Pad A (already imported as #00ff00 from rb_hot_compact) with Engine's auto-generated "Cue 1" +
+	// unchanged #00ff00 (replacing an existing #00ff00 pad with #f4d338 is now an explicit green->yellow edit
+	// tested in TestReviewR9ColourBaseline), Pad B with explicit user name "Vocal Drop" (-> 88+clen b29=0x01),
+	// and Pad C with "Cue 3" + custom non-default RGB (-> 48-byte colored compact b29=0x03).
 	var slots [8]struct {
 		name    string
 		samples float64
@@ -765,7 +765,7 @@ func TestWriteBackDefaultCueNameStrippedAndCompactPCP2(t *testing.T) {
 		name    string
 		samples float64
 		color   [4]byte
-	}{name: "Cue 1", samples: 44100 * 10, color: [4]byte{255, 0xf4, 0xd3, 0x38}}
+	}{name: "Cue 1", samples: 44100 * 10, color: [4]byte{255, 0x00, 0xff, 0x00}}
 	slots[1] = struct {
 		name    string
 		samples float64
@@ -822,7 +822,7 @@ func TestWriteBackDefaultCueNameStrippedAndCompactPCP2(t *testing.T) {
 				if cnt != 3 {
 					t.Fatalf("EXT PCO2(1) count=%d, want 3", cnt)
 				}
-				// Entry 0: Pad A compact 44-byte b29=0x03 (default name & default Pad 1 color stripped).
+				// Entry 0: Pad A compact 44-byte b29=0x03 (default name & unchanged #00ff00 stripped).
 				off := 20
 				n0 := int(binary.BigEndian.Uint32(s.raw[off+8:]))
 				if n0 != 44 || s.raw[off+29] != 0x03 || binary.BigEndian.Uint32(s.raw[off+40:]) != 0 {
@@ -856,6 +856,53 @@ func TestWriteBackDefaultCueNameStrippedAndCompactPCP2(t *testing.T) {
 	}
 	if res2.TracksRead != 0 || res2.TracksChanged != 0 || res2.FilesUpdated != 0 {
 		t.Fatalf("second pass was not a no-op: %+v", res2)
+	}
+
+	// Newly added Pad D with auto-generated "Cue 4" + default Pad 4 color also strips to compact 44-byte b29=0x03.
+	slots[3] = struct {
+		name    string
+		samples float64
+		color   [4]byte
+	}{name: "Cue 4", samples: 44100 * 40, color: engineDefaultPadColors[3]}
+	if _, err := db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=1`, buildEngineQuickCuesBlob(slots)); err != nil {
+		t.Fatal(err)
+	}
+	dbDir := filepath.Join(root, "Engine Library", "Database2")
+	snapD, err := rbstate.Load(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapD.Tracks["contents/fixturea/track01.mp3"].Edit--
+	if err := snapD.Save(dbDir); err != nil {
+		t.Fatal(err)
+	}
+	if res3, err := WriteBackCues(ctx, root, WriteBackOptions{}); err != nil || res3.TracksChanged != 1 {
+		t.Fatalf("WriteBackCues #3 (new Pad D): res=%+v err=%v", res3, err)
+	}
+	gotEXT3, err := os.ReadFile(ext1Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var checkedPadD bool
+	for _, s := range dumpANLZSections(t, gotEXT3) {
+		if s.tag == "PCO2" && s.kind == 1 {
+			cnt := int(binary.BigEndian.Uint16(s.raw[16:18]))
+			if cnt != 4 {
+				t.Fatalf("EXT PCO2(1) count after Pad D=%d, want 4", cnt)
+			}
+			off := 20
+			for idx := 0; idx < 3; idx++ {
+				off += int(binary.BigEndian.Uint32(s.raw[off+8:]))
+			}
+			n3 := int(binary.BigEndian.Uint32(s.raw[off+8:]))
+			if n3 != 44 || s.raw[off+29] != 0x03 || binary.BigEndian.Uint32(s.raw[off+40:]) != 0 {
+				t.Fatalf("Pad D not compact 44-byte b29=0x03: len=%d b29=0x%02x bytes=%x", n3, s.raw[off+29], s.raw[off:off+n3])
+			}
+			checkedPadD = true
+		}
+	}
+	if !checkedPadD {
+		t.Fatal("missing EXT PCO2(1) after adding Pad D")
 	}
 }
 
@@ -1784,13 +1831,14 @@ func TestWriteBackZeroWritesOnImportedRepairedTrack(t *testing.T) {
 	})
 
 	sampleFor28264 := float64(cueMS)*44.1 - rbOffset
+	// Subtest ordering places pad1_yellow last so Case 3 afterwards sees pad1_yellow as the settled baseline before moving 28264 -> 45000 ms (arbitrary_rgb last would look like a colour edit).
 	for _, tc := range []struct {
 		name  string
 		color [4]byte
 	}{
-		{"pad1_yellow", [4]byte{255, 0xf4, 0xd3, 0x38}},
 		{"engine_green", [4]byte{255, 0x00, 0xff, 0x00}},
 		{"arbitrary_rgb", [4]byte{255, 0x12, 0xab, 0x34}},
+		{"pad1_yellow", [4]byte{255, 0xf4, 0xd3, 0x38}},
 	} {
 		t.Run("Case2_ZeroWrite_"+tc.name, func(t *testing.T) {
 			var slots [8]struct {
