@@ -132,6 +132,7 @@ type trackRef struct {
 	guest   bool
 	// file is a drive track's audio on its drive (OmniSource, #62), drive the volume.
 	file, drive string
+	gen         uint64 // NAS generation when listed (#335)
 }
 type playlistRef struct {
 	session  string // empty for the built-in Deezer catalog
@@ -168,6 +169,9 @@ type tidalGateway struct {
 	next      int64
 
 	rbxBrowse rbxPrefetchQueue
+
+	// pause is nil except in tests that pause a load at a point.
+	pause func(point string)
 
 	// Artwork for list rows, by what the row knows: title and artist.
 	artURLs  map[string]string
@@ -913,6 +917,9 @@ func (g *tidalGateway) addTrack(ref trackRef) int64 {
 		g.ids[key] = id
 	}
 	g.scheduleSave()
+	if g.s != nil {
+		ref.gen = g.s.jobs.NASGen()
+	}
 	g.tracks[id] = ref
 	if address := thumbURL(ref.track); address != "" {
 		if len(g.artURLs) > maxTracks {
@@ -2083,6 +2090,14 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 
 // Spotify defers a cold match to the media request to preserve #269 carrier
 // isolation. Other variable-codec sources download before returning a manifest.
+// fetchFailStatus: a NAS track listed before the NAS changed is gone (#335).
+func fetchFailStatus(err error) int {
+	if errors.Is(err, errNASChanged) {
+		return http.StatusNotFound
+	}
+	return http.StatusBadGateway
+}
+
 func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref trackRef) bool {
 	j := g.s.jobs
 	if ref.file != "" || ref.track.Provider == "spotify" || j == nil || j.File(ref.track) != "" {
@@ -2097,8 +2112,8 @@ func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref tr
 		}
 	}
 	http.NewResponseController(w).SetWriteDeadline(time.Time{})
-	if _, err := j.Fetch(r.Context(), ref.session, ref.track, ref.guest); err != nil {
-		fail(w, 502, err)
+	if _, err := j.FetchAt(r.Context(), ref.session, ref.track, ref.guest, ref.gen); err != nil {
+		fail(w, fetchFailStatus(err), err)
 		return false
 	}
 	return true
@@ -2163,9 +2178,9 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.NewResponseController(w).SetWriteDeadline(time.Time{})
-	p, err := g.s.jobs.Fetch(r.Context(), ref.session, ref.track, ref.guest)
+	p, err := g.s.jobs.FetchAt(r.Context(), ref.session, ref.track, ref.guest, ref.gen)
 	if err != nil {
-		fail(w, 502, err)
+		fail(w, fetchFailStatus(err), err)
 		return
 	}
 	// One import at a time: the sweep below must not meet another request's
@@ -2307,6 +2322,9 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if g.pause != nil {
+		g.pause("lookup")
+	}
 	started := time.Now()
 	log.Printf("stream-sync: load track=%d provider=%s scope=%s step=stream result=request", id, ref.track.Provider, g.s.scope())
 	if ref.file != "" { // OmniSource: straight from the drive, with Range
@@ -2333,10 +2351,10 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	}
 	// A first play waits for Deemix; lift the server's 2-minute write limit.
 	http.NewResponseController(w).SetWriteDeadline(time.Time{})
-	p, err := g.s.jobs.Fetch(r.Context(), ref.session, ref.track, ref.guest)
+	p, err := g.s.jobs.FetchAt(r.Context(), ref.session, ref.track, ref.guest, ref.gen)
 	if err != nil {
 		log.Printf("stream-sync: load track=%d provider=%s step=stream result=failed elapsed=%s canceled=%t error_type=%T", id, ref.track.Provider, time.Since(started).Round(time.Millisecond), r.Context().Err() != nil, err)
-		fail(w, 502, err)
+		fail(w, fetchFailStatus(err), err)
 		return
 	}
 	w.Header().Set("Content-Type", "audio/flac")

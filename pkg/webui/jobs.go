@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -82,9 +83,11 @@ type Jobs struct {
 	// Playlists each streamed track was queued for, so a guest playing a
 	// track the owner already downloaded still gets it in the guest playlist.
 	queued map[string]bool
-	// nasGen counts NAS server, share or root changes: a NAS download that began
-	// before one is not filed under its track (#335).
-	nasGen uint64
+	// nasGen counts NAS server, share or root changes: a NAS track listed before
+	// one is neither played nor filed (#335).
+	nasGen atomic.Uint64
+	// pause is nil except in tests that order two loads of one track.
+	pause func(point string)
 
 	// netease returns the NetEase login a session may fetch audio with, or nil.
 	netease func(session string, guest bool) *providers.Netease
@@ -128,7 +131,7 @@ func trackKey(t providers.Track) string { return t.Provider + ":" + t.ID }
 func (j *Jobs) File(t providers.Track) string {
 	key := trackKey(t)
 	j.mu.Lock()
-	gen := j.nasGen
+	gen := j.nasGen.Load()
 	path := ""
 	if f, ok := j.files[key]; ok {
 		path = f.dl.Path
@@ -270,7 +273,15 @@ func (j *Jobs) writeSources() {
 	}
 }
 
-var errNASChanged = errors.New("the NAS changed during the download")
+var errNASChanged = errors.New("the NAS changed since this track was listed")
+
+// NASGen is the NAS generation; it changes when the NAS server, share or root does.
+func (j *Jobs) NASGen() uint64 {
+	if j == nil {
+		return 0
+	}
+	return j.nasGen.Load()
+}
 
 func isNASKey(key string) bool {
 	p, _, ok := strings.Cut(key, ":")
@@ -285,7 +296,7 @@ func (j *Jobs) resetNAS() {
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	j.nasGen++
+	j.nasGen.Add(1)
 	for k := range j.files {
 		if isNASKey(k) {
 			delete(j.files, k)
@@ -315,25 +326,32 @@ func (j *Jobs) resetNAS() {
 // of the same file. Playback never waits for analysis. Concurrent requests for
 // one track share a download; it continues if the waiting caller gives up.
 func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, guest bool) (string, error) {
+	return j.FetchAt(wait, session, t, guest, j.NASGen())
+}
+
+// FetchAt is Fetch for a track listed at NAS generation gen: once the NAS server,
+// share or root changed since, a NAS track is neither played nor filed (#335).
+func (j *Jobs) FetchAt(wait context.Context, session string, t providers.Track, guest bool, gen uint64) (string, error) {
 	if j.p.Catalog == nil || j.p.Deemix == nil {
 		return "", errors.New("pipeline is not configured")
 	}
 	key := trackKey(t)
 	j.File(t) // loads a download saved before a restart
 	j.dropUnusable(t)
-	j.mu.Lock()
-	gen := j.nasGen // a NAS download for a fetch begun before a NAS change is not used
-	j.mu.Unlock()
 	for {
 		// Check the cache and claim the download under one lock so a fetch
 		// finishing in between cannot trigger a second download.
 		j.mu.Lock()
+		moved := isNASKey(key) && gen != j.nasGen.Load()
 		f, done := j.files[key]
 		busy, ok := j.fetches[key]
-		if !ok && !done {
+		if !ok && !done && !moved {
 			j.fetches[key] = make(chan struct{})
 		}
 		j.mu.Unlock()
+		if moved {
+			return "", errNASChanged
+		}
 		if done {
 			if st, err := os.Stat(f.dl.Path); err == nil && st.Mode().IsRegular() {
 				j.queueImport(session, t, guest, f)
@@ -349,8 +367,14 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 		if !ok {
 			break
 		}
+		if j.pause != nil {
+			j.pause("wait")
+		}
 		select {
 		case <-busy:
+			if j.pause != nil {
+				j.pause("woke")
+			}
 		case <-wait.Done():
 			return "", wait.Err()
 		}
@@ -390,7 +414,7 @@ func (j *Jobs) putFile(key string, f fetched) {
 func (j *Jobs) putFileIfGen(key string, f fetched, gen uint64) bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if isNASKey(key) && gen != j.nasGen {
+	if isNASKey(key) && gen != j.nasGen.Load() {
 		return false
 	}
 	j.putFileLocked(key, f)
