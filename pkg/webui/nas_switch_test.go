@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 // nasSwitchRig is OmniSource with its [NAS] lists and two Subsonic servers that use the
@@ -42,7 +43,7 @@ type nasAnswer struct {
 	body []byte
 }
 
-func newNASSwitchRig(t *testing.T) *nasSwitchRig {
+func newNASSwitchRig(t *testing.T, opts ...func(*Pipeline)) *nasSwitchRig {
 	rig := &nasSwitchRig{t: t, one: testMP3(120), two: testMP3(150), asked: make(chan struct{}, 4), listAsked: make(chan struct{}, 4)}
 	nas := func(audio []byte, held bool) string {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +89,11 @@ func newNASSwitchRig(t *testing.T) *nasSwitchRig {
 	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("scope=spotify\nomni_source=1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rig.jobs = NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{DownloadDir: dlDir, AllowLossy: true}})
+	p := Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{DownloadDir: dlDir, AllowLossy: true}}
+	for _, opt := range opts {
+		opt(&p)
+	}
+	rig.jobs = NewJobs(p)
 	t.Cleanup(rig.jobs.Close)
 	rig.s = New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, rig.jobs)
 	t.Cleanup(rig.s.Close)
@@ -98,6 +103,32 @@ func newNASSwitchRig(t *testing.T) *nasSwitchRig {
 	t.Cleanup(rig.release) // before gw.Close, which waits for a held request
 	t.Cleanup(rig.releaseLists)
 	return rig
+}
+
+// pauseOnce pauses the first request that reaches point until resume; reached
+// signals it got there.
+func pauseOnce(point string) (hook func(string), reached chan struct{}, resume func()) {
+	reached, release := make(chan struct{}), make(chan struct{})
+	var paused atomic.Bool
+	var once sync.Once
+	hook = func(p string) {
+		if p == point && paused.CompareAndSwap(false, true) {
+			reached <- struct{}{}
+			<-release
+		}
+	}
+	return hook, reached, func() { once.Do(func() { close(release) }) }
+}
+
+// get makes no t calls: it also runs in a goroutine.
+func (rig *nasSwitchRig) get(path string) nasAnswer {
+	resp, err := http.Get(rig.gw.URL + path)
+	if err != nil {
+		return nasAnswer{code: -1}
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return nasAnswer{resp.StatusCode, body}
 }
 
 // hold makes server two's downloads wait until release.
@@ -448,5 +479,106 @@ func TestNASChangeLeavesAStemsFileItCannotReadAlone(t *testing.T) {
 		if strings.Contains(logs.String(), entry) {
 			t.Fatalf("the log names a Stems entry (%q): %q", entry, logs.String())
 		}
+	}
+}
+
+// Round 4 (re-check of f35f2c9d, HIGH 1): a Stems list read before the NAS moved from
+// root A to root B published root A's row after it, at root B's generation, so it
+// played root B's file at the same path. It publishes no NAS row now.
+func TestReviewStemsListAcrossSwitch(t *testing.T) {
+	uiDir, stateDir := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("sources=\nscope=nas\nomni_source=0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{DownloadDir: t.TempDir()}})
+	t.Cleanup(jobs.Close)
+	s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, jobs)
+	t.Cleanup(s.Close)
+	gw := httptest.NewServer(s)
+	t.Cleanup(gw.Close)
+	save := func(root string) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		body := fmt.Sprintf(`{"protocol":"smb","url":"smb://nas.example/music/%s","username":"dj","password":"pw","enabled":true}`, root)
+		s.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(body)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("save SMB %s: %d %s", root, w.Code, w.Body.String())
+		}
+	}
+	save("rootA")
+	opener := stemmedTrack{Track: providers.Track{ID: "Sets/Opener.flac", Provider: "smb", Title: "Opener"}, Session: nasScope, Path: filepath.Join(stateDir, "opener.flac")}
+	if err := s.addStemmed(nasScope, opener); err != nil {
+		t.Fatal(err)
+	}
+	hook, reached, resume := pauseOnce("stems-list")
+	t.Cleanup(resume)
+	s.tidal.pause = hook
+	done := make(chan nasAnswer, 1)
+	go func() {
+		resp, err := http.Get(gw.URL + "/v1/playlists/" + stemsListID(nasScope) + "/tracks?limit=50&offset=0")
+		if err != nil {
+			done <- nasAnswer{code: -1}
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		done <- nasAnswer{resp.StatusCode, body}
+	}()
+	nasWaitFor(t, reached, "the Stems list was read")
+	save("rootB")
+	resume()
+	a := <-done
+	var page struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(a.body, &page); err != nil || a.code != http.StatusOK || len(page.Items) != 0 {
+		t.Fatalf("a Stems list read before the move to root B published %d rows after it (HTTP %d): %s", len(page.Items), a.code, a.body)
+	}
+}
+
+// Round 4 (HIGH 1): a Stems source request that fetched server one's file before the
+// change wrote its Stems entry after it, so server two's row with the same track ID
+// got server one's local Stems file. Nothing is written or answered now.
+func TestReviewLateStemsWrite(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.oneURL)
+	id1 := rig.browse()
+	hook, reached, resume := pauseOnce("stems-write")
+	t.Cleanup(resume)
+	rig.s.tidal.pause = hook
+	done := make(chan nasAnswer, 1)
+	go func() { done <- rig.get(fmt.Sprintf("/v1/enginex/stems/source?id=%d", id1)) }()
+	nasWaitFor(t, reached, "the Stems source fetched server one's file")
+	rig.saveNAS(rig.twoURL)
+	resume()
+	if a := <-done; a.code != http.StatusNotFound {
+		t.Fatalf("a Stems source of server one's track, fetched before the change, answered HTTP %d after it: %s, want 404", a.code, a.body)
+	}
+	id2 := rig.browse()
+	if a := rig.get(fmt.Sprintf("/v1/enginex/stems/local?id=%d", id2)); a.code != http.StatusNotFound {
+		t.Fatalf("server two's track %d got a local Stems file from a late write for server one's track: HTTP %d %s", id2, a.code, a.body)
+	}
+}
+
+// Round 4 (HIGH 1): a Stems lookup of server one's row that began before the change and
+// resumed after server two's row was stemmed answered with server two's Stems file.
+func TestReviewStemsLocalAcrossSwitch(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.oneURL)
+	id1 := rig.browse()
+	hook, reached, resume := pauseOnce("lookup")
+	t.Cleanup(resume)
+	rig.s.tidal.pause = hook
+	done := make(chan nasAnswer, 1)
+	go func() { done <- rig.get(fmt.Sprintf("/v1/enginex/stems/local?id=%d", id1)) }()
+	nasWaitFor(t, reached, "the Stems lookup of server one's track looked it up")
+	rig.saveNAS(rig.twoURL)
+	id2 := rig.browse()
+	if a := rig.get(fmt.Sprintf("/v1/enginex/stems/source?id=%d", id2)); a.code != http.StatusOK {
+		t.Fatalf("server two's Stems source: HTTP %d %s", a.code, a.body)
+	}
+	resume()
+	if a := <-done; a.code != http.StatusNotFound {
+		t.Fatalf("the Stems lookup of server one's track %d, begun before the change, answered HTTP %d after it: %s, want 404", id1, a.code, a.body)
 	}
 }

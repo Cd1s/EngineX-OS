@@ -55,8 +55,18 @@ func sameTrack(a, b providers.Track) bool { return a.Provider == b.Provider && a
 
 // addStemmed puts t first in scope's list.
 func (s *Server) addStemmed(scope string, t stemmedTrack) error {
+	return s.addStemmedAt(scope, t, s.jobs.NASGen())
+}
+
+// addStemmedAt is addStemmed for a track listed at NAS generation gen: a NAS track
+// is not written once the NAS changed since (errNASChanged). The reset drops NAS
+// entries under the same lock after it bumps the generation (#335).
+func (s *Server) addStemmedAt(scope string, t stemmedTrack, gen uint64) error {
 	s.stemsMu.Lock()
 	defer s.stemsMu.Unlock()
+	if isNASProvider(t.Track.Provider) && gen != s.jobs.NASGen() {
+		return errNASChanged
+	}
 	all := s.loadStemmed()
 	list := slices.DeleteFunc(all[scope], func(e stemmedTrack) bool { return sameTrack(e.Track, t.Track) })
 	all[scope] = append([]stemmedTrack{t}, list[:min(len(list), maxStemmed-1)]...)
@@ -314,7 +324,11 @@ func (s *Server) stemmedPath(t providers.Track) string {
 // exist the row is shown as stock shows an unavailable track, saying so:
 // loaded as a track it had no Stems, and nothing said why.
 func (g *tidalGateway) stemsListTracks(w http.ResponseWriter, r *http.Request, scope string) {
+	listing := g.s.jobs.NASGen() + 1 // NAS rows: before the list is read (#335)
 	list := g.s.stemmed(scope)
+	if g.pause != nil {
+		g.pause("stems-list")
+	}
 	paths := make([]string, len(list))
 	for i, e := range list {
 		paths[i] = e.Path
@@ -326,7 +340,11 @@ func (g *tidalGateway) stemsListTracks(w http.ResponseWriter, r *http.Request, s
 			items = append(items, g.stemsPendingRow(e.Track))
 			continue
 		}
-		items = append(items, g.trackItems(e.Session, e.Guest, []providers.Track{e.Track})...)
+		ref := trackRef{track: e.Track, session: e.Session, guest: e.Guest}
+		if isNASProvider(e.Track.Provider) {
+			ref.listing = listing
+		}
+		items = append(items, g.refItems([]trackRef{ref})...)
 	}
 	respond(w, page(r, 500, items))
 }
@@ -364,7 +382,9 @@ const providerHeader = "X-Enginex-Provider"
 func (g *tidalGateway) stemsLocal(w http.ResponseWriter, r *http.Request) {
 	if _, ref, ok := g.lookup(w, r.URL.Query().Get("id")); ok {
 		w.Header().Set(providerHeader, gatewayProvider(ref.track.Provider))
-		if p := g.s.stemmedPath(ref.track); p != "" {
+		if isNASKey(trackKey(ref.track)) && ref.gen != g.s.jobs.NASGen() { // listed before a NAS change (#335)
+			http.NotFound(w, r)
+		} else if p := g.s.stemmedPath(ref.track); p != "" {
 			respond(w, map[string]any{"path": p})
 		} else {
 			http.NotFound(w, r)

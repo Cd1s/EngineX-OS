@@ -1991,6 +1991,9 @@ func (g *tidalGateway) lookup(w http.ResponseWriter, raw string) (int64, trackRe
 		fail(w, 404, errors.New("track not found; browse it on the deck first"))
 		return 0, trackRef{}, false
 	}
+	if g.pause != nil {
+		g.pause("lookup")
+	}
 	return id, ref, true
 }
 
@@ -2206,6 +2209,9 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 		fail(w, fetchFailStatus(err), err)
 		return
 	}
+	if g.pause != nil {
+		g.pause("stems-write")
+	}
 	// One import at a time: the sweep below must not meet another request's
 	// file before its record is written.
 	g.s.stemsImportMu.Lock()
@@ -2224,8 +2230,12 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 	if stemsScope == "" {
 		stemsScope = g.s.scope()
 	}
-	if err = g.s.addStemmed(stemsScope, stemmedTrack{ref.track, ref.session, ref.guest, p}); err != nil {
-		fail(w, 500, err)
+	if err = g.s.addStemmedAt(stemsScope, stemmedTrack{ref.track, ref.session, ref.guest, p}, ref.gen); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errNASChanged) {
+			status = http.StatusNotFound
+		}
+		fail(w, status, err)
 		return
 	}
 	g.s.sweepStemsSources(r.Context(), filepath.Join(cacheDir, "Stems"))
@@ -2344,9 +2354,6 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	id, ref, ok := g.playable(w, r, strings.TrimSuffix(file, suffix))
 	if !ok {
 		return
-	}
-	if g.pause != nil {
-		g.pause("lookup")
 	}
 	started := time.Now()
 	log.Printf("stream-sync: load track=%d provider=%s scope=%s step=stream result=request", id, ref.track.Provider, g.s.scope())
