@@ -755,6 +755,14 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		respond(w, map[string]any{"ok": true})
 		return
 	}
+	// Share Decks (#329): the row is read once, under the lock its switch takes, so decks posted for sharing never
+	// take the peer path below; a share post (?share=1, the QML's own) after the row went off is dropped.
+	sharing := s.shadow.shares.Load()
+	if !sharing && r.URL.Query().Get("share") == "1" {
+		s.shadow.mu.Unlock()
+		respond(w, map[string]any{"ok": true})
+		return
+	}
 	s.shadow.ownPostAt = postAt
 	s.shadow.own, s.shadow.ownAt, s.shadow.ownExport, s.shadow.ownDecks = own, time.Now(), ex, players
 	s.shadow.dbg.event("post", map[string]any{"decks": slimDecks(own)})
@@ -776,7 +784,7 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		respond(w, map[string]any{"ok": true}) // a console's decks are a picture for the players that ask: no Pro DJ Link status, no MASTER claim, no loop, no push
 		return
 	}
-	if s.shadow.shares.Load() {
+	if sharing {
 		s.sharePush() // Share Decks: a picture for the Line In consoles that ask, as a console's: no Pro DJ Link status, no MASTER claim, no loop
 		respond(w, map[string]any{"ok": true})
 		return
@@ -816,6 +824,9 @@ func (s *Server) decksAlive(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict) // stale or unknown: the post brings the state back
 		return
 	}
+	// Share Decks (#329): read once, under the lock its switch takes, as in decksPost. A share ping after the row went
+	// off finds no decks (the switch forgets them) and gets 409 above.
+	sharing := sh.shares.Load()
 	sh.ownAt = now
 	seq := now.UnixNano()
 	for i := range sh.own {
@@ -835,7 +846,7 @@ func (s *Server) decksAlive(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if sh.shares.Load() {
+	if sharing {
 		s.sharePush()
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -2743,14 +2754,15 @@ func (s *Server) shadowLoop() {
 			sh.mu.Unlock()
 			return
 		}
+		askPlayers := sh.lineAsking(time.Now())
 		sh.mu.Unlock()
 		if conn != nil && i%8 == 0 {
 			shadowSendBeacons(conn)
 			if sh.askConsole.Load() {
 				shadowSendAsk(conn)
 			}
-			if sh.hears.Load() {
-				shadowSendAskPlayers(conn) // a console with Line In on: a player in the Stock layout with Share Decks answers
+			if askPlayers {
+				shadowSendAskPlayers(conn) // a console with a channel on Line: a player in the Stock layout with Share Decks answers
 			}
 		}
 		s.shadowPollPeers()
@@ -2917,12 +2929,12 @@ func (s *Server) shadowPollPeers() {
 		}
 	}
 	port := sh.peerPort
+	line := sh.lineAsking(now) // a console with a channel on Line: a pull a player with Share Decks answers, which an older unit ignores
 	sh.mu.Unlock()
 	if port == 0 {
 		port = 8080
 	}
 	ask := sh.askConsole.Load() // the row Show Console: this pull is also an ask, which an older unit ignores
-	line := sh.hears.Load()     // a console with Line In on: a pull a player with Share Decks answers, which an older unit ignores
 	for _, ip := range ips {
 		u := "http://" + net.JoinHostPort(ip, strconv.Itoa(port)) + "/peer/decks"
 		if ask {

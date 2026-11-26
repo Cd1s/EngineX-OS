@@ -4441,8 +4441,17 @@ scShareAskPoll(); assert.equal(reqs.length, 1, 'one held request at a time');
 reqs[0].answer(200, {asked: true}); assert.equal(scShareAsked, true); assert.equal(reqs.length, 2); assert(reqs[1].url.endsWith('asked=1'), 'the next carries what we believe');
 reqs[1].answer(200, {asked: false}); assert.equal(scShareAsked, false); assert.equal(reqs.length, 3);
 reqs[2].answer(500, {}); assert.equal(reqs.length, 3, 'a failure does not loop'); assert.equal(scShareAskTimer.restarts, 1);
-scShareLive = false; reqs[2].readyState = 1; reqs[2].answer(200, {asked: true}); assert.equal(scShareAsked, false, 'an answer after the row went off is dropped');
+// A failure while asked stops the sampler at once: nobody can tell it a console still asks.
+scShareAskPoll(); assert.equal(reqs.length, 4); reqs[3].answer(200, {asked: true}); assert.equal(scShareAsked, true); assert.equal(reqs.length, 5);
+reqs[4].answer(503, {}); assert.equal(scShareAsked, false, 'a failed held request must not keep the sampler running'); assert.equal(scShareAskTimer.restarts, 2);
+scShareLive = false; reqs[4].readyState = 1; reqs[4].answer(200, {asked: true}); assert.equal(scShareAsked, false, 'an answer after the row went off is dropped');
 """)
+
+    def test_only_a_share_post_is_tagged(self):
+        post = self._qml_fn("scShadowPost")
+        self.assertIn('const tag = scShadowMineRole === "share" ? "?share=1" : ""', post)
+        self.assertIn('post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks/alive" + tag)', post)
+        self.assertIn('post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks" + tag)', post)
 
     def test_a_share_decks_player_samples_its_two_layers_and_marks_the_active_one(self):
         # No role, Share Decks on, a Line In console asking: its sampler runs. It sends Layer A and Layer B (decks 1
@@ -4454,9 +4463,9 @@ globalThis.scShareLive = true; globalThis.scShareAsked = true; globalThis.scOwnP
 globalThis.scConsoleLine = false; globalThis.scConsoleAsked = false; globalThis.scLineMask = 0;
 globalThis.scConsoleSendDecks = () => { throw Error("a console's deck list is not a player's"); };
 const loaded = {1: true, 2: false};
-let layer = 0, bodies = [], reads = [];
-globalThis.XMLHttpRequest = class { constructor() { this.readyState = 0; } open(m, url) { this.url = url; this.readyState = 1; }
-    send(body) { if (!this.url.endsWith('/alive')) bodies.push(JSON.parse(body)); this.readyState = 4; this.status = 200; } };
+let layer = 0, bodies = [], reads = [], urls = [];
+globalThis.XMLHttpRequest = class { constructor() { this.readyState = 0; } open(m, url) { this.url = url; this.readyState = 1; urls.push(url); }
+    send(body) { if (!this.url.includes('/alive')) bodies.push(JSON.parse(body)); this.readyState = 4; this.status = 200; } };
 globalThis.scShadowPoll = () => { throw Error('Share Decks must not start the deck loop'); };
 globalThis.scShadowLine = () => { throw Error('lane work of a 4-deck player'); };
 globalThis.scShadowLandingTick = () => { throw Error('lane work of a 4-deck player'); };
@@ -4483,6 +4492,10 @@ assert(reads.length > 0 && reads.every(p => p === '/GUI/Decks/Deck/Layer'), "the
 // An ask ends and another begins (onScShareAskedChanged empties the lists): both layers again, in full.
 scShadowMine = []; scShadowOwn.length = 0; scShadowPostFull = true; const n = bodies.length; tick();
 assert.equal(bodies.length, n + 1); assert.deepEqual(last().map(o => o.deck), [1, 2]);
+// Heartbeats and posts say they are a share's: stream-sync drops one that arrives after the row went off.
+for (let i = 0; i < 40; i++) tick();
+assert(urls.some(u => u.includes('/decks/alive')), 'a heartbeat between posts');
+assert(urls.every(u => /[/]v1[/]enginex[/]decks([/]alive)?[?]share=1$/.test(u)), 'every share post and ping is tagged: ' + urls.filter(u => !u.endsWith('?share=1')));
 """)
 
 

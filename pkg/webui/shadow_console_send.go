@@ -66,15 +66,21 @@ func (s *Server) applyShadowFlags(v uiSettings) {
 
 // ---- console side ----
 
-// askedNow: some player asked within shadowPeerSeenTimeout. Called with sh.mu held.
+// askedNow: some player asked within shadowPeerSeenTimeout. Called with sh.mu held. On a Share Decks player the
+// last ask running out ends the session: the decks it posted go too, so a new ask never sees them and the display
+// work on their tracks stops (shadowSourceLoaded reads sh.own).
 func (sh *shadowState) askedNow(now time.Time) bool {
-	asked := false
+	asked, expired := false, false
 	for ip, t := range sh.askers {
 		if now.Sub(t) < shadowPeerSeenTimeout {
 			asked = true
 		} else {
 			delete(sh.askers, ip)
+			expired = true
 		}
+	}
+	if expired && !asked && sh.shares.Load() {
+		sh.own, sh.ownAt = nil, time.Time{}
 	}
 	return asked
 }
@@ -98,13 +104,26 @@ func (s *Server) consoleAskSync(want bool) {
 	s.askListenSync()
 }
 
+// askClose ends both modes and closes the listener under one lock: the server is closing.
+func (s *Server) askClose() {
+	sh := s.shadow
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	sh.hears.Store(false)
+	if sh.shares.Swap(false) {
+		sh.own, sh.ownAt = nil, time.Time{}
+	}
+	s.askListenSync()
+}
+
 // shareAskSync opens or closes the same listener on a player: up only while Share Decks is on in the Stock layout.
-// Switched off, the decks it shared are forgotten: a console that still pulls gets nothing, not the last picture.
+// Either way the decks posted so far are forgotten: those of one mode are never served in the other (a console that
+// still pulls after the row went off gets nothing, and the 4-deck layout's last decks are never shared).
 func (s *Server) shareAskSync(want bool) {
 	sh := s.shadow
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	if sh.shares.Swap(want) && !want {
+	if sh.shares.Swap(want) != want {
 		sh.own, sh.ownAt = nil, time.Time{}
 	}
 	s.askListenSync()
@@ -147,10 +166,12 @@ func (s *Server) consoleAskLoop(conn *net.UDPConn) {
 		if err != nil {
 			return
 		}
-		if msg := string(b[:n]); !(msg == shadowAskMagic && sh.hears.Load()) && !(msg == shadowAskPlayerMagic && sh.shares.Load()) {
+		msg := string(b[:n])
+		sh.mu.Lock() // the mode and the listener are read under the lock that switches them
+		if sh.askConn != conn || !(msg == shadowAskMagic && sh.hears.Load()) && !(msg == shadowAskPlayerMagic && sh.shares.Load()) {
+			sh.mu.Unlock()
 			continue
 		}
-		sh.mu.Lock()
 		port := cmp.Or(sh.pushPort, shadowBeaconPort)
 		sh.ask(addr.IP.String(), time.Now())
 		sh.mu.Unlock()
@@ -334,7 +355,18 @@ func shadowSendAsk(conn *net.UDPConn) {
 	shadowBroadcast(conn, []byte(shadowAskMagic), shadowAskPort)
 }
 
-// shadowSendAskPlayers is what a console with Line In on says beside its beacon (Share Decks).
+// shadowLineAskGrace: a console asks for Share Decks players only within this much of its QML's last poll for a
+// channel on Line / AUX (it polls at least about once a second while one is). When the last channel leaves Line
+// the QML stops polling and the asks stop with it; the deck loop's 10 s linger is discovery only.
+const shadowLineAskGrace = 3 * time.Second
+
+// lineAsking: this console asks for Share Decks players now (Line In on, a Line poll within shadowLineAskGrace;
+// on a console only consoleLineGet wakes the loop, so sh.polled is that poll). Called with sh.mu held.
+func (sh *shadowState) lineAsking(now time.Time) bool {
+	return sh.hears.Load() && !sh.polled.IsZero() && now.Sub(sh.polled) < shadowLineAskGrace
+}
+
+// shadowSendAskPlayers is what a console with a channel on Line says beside its beacon (Share Decks).
 func shadowSendAskPlayers(conn *net.UDPConn) {
 	shadowBroadcast(conn, []byte(shadowAskPlayerMagic), shadowAskPort)
 }

@@ -1897,8 +1897,10 @@ SERVICES_MAIN = """
 			if (x.status === 200) {
 				try { const a = !!JSON.parse(x.responseText).asked; ok = true; if (a !== root.scShareAsked) root.scShareAsked = a } catch (err) { ok = false }
 			}
-			// The next one carries what we believe now, so stream-sync holds it: no loop. A failure waits.
-			if (ok) root.scShareAskPoll(); else scShareAskTimer.restart()
+			// The next one carries what we believe now, so stream-sync holds it: no loop. A failure stops the sampler
+			// (nobody can be told it asks) and waits.
+			if (ok) root.scShareAskPoll()
+			else { root.scShareAsked = false; scShareAskTimer.restart() }
 		}
 		x.send()
 	}
@@ -2344,10 +2346,12 @@ SERVICES_MAIN = """
 				(sent.phase !== o.phase && now - scShadowPostAt >= 100)) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
 		}
 		scShadowPostAt = now; scShadowPostPending = false
+		// Share Decks (#329): its posts say so; stream-sync drops one that arrives after the row went off (never a peer's).
+		const tag = scShadowMineRole === "share" ? "?share=1" : ""
 		// Nothing the peer shows changed: ping instead of serialising the decks again
 		// (stream-sync keeps them live and extrapolated). Full post at least every 5 s.
 		if (!edge && !scShadowPostFull && now - scShadowFullAt < 5000 && own.length === scShadowSent.length) {
-			post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks/alive")
+			post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks/alive" + tag)
 			post.send()
 			return
 		}
@@ -2360,7 +2364,7 @@ SERVICES_MAIN = """
 		}
 		scShadowSent.length = own.length
 		scShadowFullAt = now; scShadowPostFull = false
-		post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks")
+		post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks" + tag)
 		post.send(JSON.stringify(own))
 	}
 	// One request at a time: Go holds it until the other player's state changes

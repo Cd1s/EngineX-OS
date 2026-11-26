@@ -9,9 +9,12 @@ package webui
 // code they compile and fail on what they check.
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"github.com/Cd1s/EngineX-OS/internal/migration"
+	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +26,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 const shareAskDatagram = "EngineX-ask-player 1" // what a console with Line In on says beside its beacon
@@ -44,14 +51,19 @@ func sharePlayer(t *testing.T, share bool, extra string) (*Server, *httptest.Ser
 	return s, srv
 }
 
-// sharePost is what the player's QML posts: decks 1 and 2, deck 2 on the active layer, player number 2.
-func sharePost(t *testing.T, s *Server) {
+// sharePost is what the player's QML posts with Share Decks (tagged ?share=1): decks 1 and 2, deck 2 on the active
+// layer, player number 2. fourDeckPost is the same decks as a player in the 4-deck layout posts them (untagged).
+func sharePost(t *testing.T, s *Server) { t.Helper(); decksPostTo(t, s, "/v1/enginex/decks?share=1") }
+
+func fourDeckPost(t *testing.T, s *Server) { t.Helper(); decksPostTo(t, s, "/v1/enginex/decks") }
+
+func decksPostTo(t *testing.T, s *Server, path string) {
 	t.Helper()
 	at := time.Now().UnixMilli()
 	body := fmt.Sprintf(`[{"deck":1,"title":"P1","link":"{p1ay3r}","playing":false,"positionMs":0,"player":2,"at":%d},`+
 		`{"deck":2,"title":"P2","link":"{p1ay3r}","playing":true,"positionMs":5000,"active":true,"player":2,"at":%d}]`, at, at)
 	w := httptest.NewRecorder()
-	s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(body)))
+	s.decksPost(w, httptest.NewRequest("POST", path, strings.NewReader(body)))
 	if w.Code != 200 {
 		t.Fatalf("post: %d", w.Code)
 	}
@@ -110,12 +122,16 @@ func TestShareDecksSettingIsPlayerOnlyLiveAndDefaultsOff(t *testing.T) {
 			// It is its own row: the 4-deck layout neither needs it nor clears it, and there it changes nothing (the
 			// player is a peer: its decks go to every peer that pulls, as before).
 			clUI(t, srv.URL, "fourDeckWaveform=1")
-			sharePost(t, s)
+			fourDeckPost(t, s)
 			if got := strings.Join(sharePull(t, srv, ""), ","); got != "P1,P2" {
 				t.Fatalf("the 4-deck layout with the row on: %q", got)
 			}
 			if v := clUI(t, srv.URL, "fourDeckWaveform=0"); v["shareDecks"] != true {
 				t.Fatalf("the layout cleared it: %v", v["shareDecks"])
+			}
+			// Back in the Stock layout the 4-deck layout's last decks are not shared: only what the QML posts now.
+			if got := sharePull(t, srv, "?line=1"); len(got) != 0 {
+				t.Fatalf("the 4-deck layout's decks were shared: %v", got)
 			}
 			if v := clUI(t, srv.URL, "shareDecks=0"); v["shareDecks"] != false {
 				t.Fatalf("off: %v", v["shareDecks"])
@@ -232,34 +248,74 @@ func TestShareDecksGivesItsDecksOnlyToALineInConsoleThatAsks(t *testing.T) {
 	_ = off
 	// The 4-deck layout with the row on is as before: its decks go to every peer that pulls.
 	four, fourSrv := sharePlayer(t, true, "four_deck_waveform=1\n")
-	sharePost(t, four)
+	fourDeckPost(t, four)
 	if got := strings.Join(sharePull(t, fourSrv, ""), ","); got != "P1,P2" {
 		t.Fatalf("the 4-deck layout changed: %q", got)
 	}
 }
 
-// A console's Line In view fetches only the display data of the track; a Share Decks player gives nothing more: no
-// audio file and no performance data, which only a shadow copy (the 4-deck layout) is made from.
+// shareTrack is a 4 s WAV with analysed performance data (beat grid, overview) in its drive's Engine library, as
+// Engine leaves a track it played: what a console's Line In lane draws. It returns the net path Engine posts.
+func shareTrack(t *testing.T, s *Server) string {
+	t.Helper()
+	_, root, db := testlibrary.Create(t)
+	path := filepath.Join(root, "Contents/share.wav")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const rate = 8000
+	const samples = 4 * rate
+	var wav bytes.Buffer
+	wav.WriteString("RIFF")
+	binary.Write(&wav, binary.LittleEndian, uint32(36+samples*2))
+	wav.WriteString("WAVEfmt ")
+	for _, v := range []any{uint32(16), uint16(1), uint16(1), uint32(rate), uint32(rate * 2), uint16(2), uint16(16)} {
+		binary.Write(&wav, binary.LittleEndian, v)
+	}
+	wav.WriteString("data")
+	binary.Write(&wav, binary.LittleEndian, uint32(samples*2))
+	for i := 0; i < samples; i++ {
+		binary.Write(&wav, binary.LittleEndian, int16(16000*math.Sin(2*math.Pi*100*float64(i)/rate)))
+	}
+	if err := os.WriteFile(path, wav.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	perf, err := enginedb.EncodePerformance(rekordbox.Track{Duration: 4, SampleRate: rate}, &rekordbox.Analysis{
+		Beats:     []rekordbox.Beat{{TimeMS: 250, BPM: 120, Number: 1}, {TimeMS: 750, BPM: 120, Number: 2}},
+		Waveforms: []rekordbox.Waveform{{Tag: "PWV7", EntryBytes: 3, Data: []byte{100, 50, 25}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO Track(path,filename,bpmAnalyzed,isAnalyzed) VALUES('../Contents/share.wav','share.wav',120,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,beatData=?,quickCues=?,loops=?`, perf.TrackData, perf.Overview, perf.Beats, perf.QuickCues, perf.Loops); err != nil {
+		t.Fatal(err)
+	}
+	s.shadow.mediaRoot = filepath.Dir(root)
+	return "net://u/" + filepath.Base(root) + "/Contents/share.wav"
+}
+
+// A console's Line In view fetches only the display data of the track; a Share Decks player gives exactly that, a
+// decodable picture (duration, beat grid, overview), and nothing more: no audio file and no performance data, which
+// only a shadow copy (the 4-deck layout) is made from.
 func TestShareDecksGivesDisplayDataOnlyNeverTheAudio(t *testing.T) {
-	data := t.TempDir()
-	oldRoot := shadowDataRoot
-	shadowDataRoot = data
-	defer func() { shadowDataRoot = oldRoot }()
-	os.MkdirAll(filepath.Join(data, migration.DataName+"/Stream"), 0o755)
-	os.WriteFile(filepath.Join(data, migration.DataName+"/Stream/a.mp3"), []byte("AUDIO"), 0o644)
 	for _, share := range []bool{true, false} {
 		extra := ""
 		if !share {
 			extra = "four_deck_waveform=1\n" // the 4-deck layout: a peer copies the track, as before
 		}
 		s, srv := sharePlayer(t, true, extra)
-		body := `[{"deck":1,"net":"net://u/(Unknown)/` + migration.DataName + `/Stream/a.mp3","playing":true,"positionMs":1000,"player":2}]`
-		w := httptest.NewRecorder()
-		s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(body)))
+		np := shareTrack(t, s)
 		q := ""
 		if share {
 			q = "?line=1"
+			csPull(t, srv, q) // the console asks first: the QML posts only while asked
 		}
+		body := `[{"deck":1,"net":"` + np + `","playing":true,"positionMs":1000,"player":2}]`
+		w := httptest.NewRecorder()
+		s.decksPost(w, httptest.NewRequest("POST", "/v1/enginex/decks", strings.NewReader(body)))
 		decks := csPull(t, srv, q)
 		if len(decks) != 1 || decks[0].Key == "" {
 			t.Fatalf("share=%t: the deck and its key: %+v", share, decks)
@@ -271,7 +327,7 @@ func TestShareDecksGivesDisplayDataOnlyNeverTheAudio(t *testing.T) {
 				t.Fatal(err)
 			}
 			resp.Body.Close()
-			if refused := resp.StatusCode == http.StatusForbidden; refused != share {
+			if share && resp.StatusCode != http.StatusForbidden || !share && resp.StatusCode != http.StatusOK {
 				t.Fatalf("share=%t: %s answered %d", share, path, resp.StatusCode)
 			}
 		}
@@ -279,10 +335,194 @@ func TestShareDecksGivesDisplayDataOnlyNeverTheAudio(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		var a shadowDisplayAsset
+		err = json.NewDecoder(resp.Body).Decode(&a)
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusForbidden {
-			t.Fatalf("share=%t: the display data was refused", share)
+		if resp.StatusCode != http.StatusOK || err != nil || validateDisplayAsset(&a, decks[0].Key) != nil {
+			t.Fatalf("share=%t: the display data: %d %v %v", share, resp.StatusCode, err, validateDisplayAsset(&a, decks[0].Key))
 		}
+		if a.DurationMS < 3900 || a.DurationMS > 4100 || len(a.Beats) != 2 {
+			t.Fatalf("share=%t: the picture is not the track's: duration %v ms, %d beats", share, a.DurationMS, len(a.Beats))
+		}
+	}
+}
+
+// heldBody is a request body that arrives only when released: a QML post still in flight.
+type heldBody struct {
+	io.Reader
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *heldBody) Read(p []byte) (int, error) {
+	b.once.Do(func() { close(b.started) })
+	<-b.release
+	return b.Reader.Read(p)
+}
+
+// The review's case (#329 review finding 1): the row switched off while the QML's share post is still arriving.
+// The post, tagged as a share's, is dropped: no peer decks, no deck loop, nothing reaches the peer path.
+func TestAShareDecksPostInFlightWhenTheRowGoesOffIsDropped(t *testing.T) {
+	s, srv := sharePlayer(t, true, "")
+	sharePull(t, srv, "?line=1")
+	sharePost(t, s)
+	if len(sharePull(t, srv, "?line=1")) == 0 {
+		t.Fatal("no share session to start from")
+	}
+	body := &heldBody{
+		Reader:  strings.NewReader(fmt.Sprintf(`[{"deck":1,"title":"Late sample","playing":true,"active":true,"at":%d}]`, time.Now().UnixMilli())),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	done := make(chan int, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		s.decksPost(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/decks?share=1", body))
+		done <- w.Code
+	}()
+	select {
+	case <-body.started:
+	case <-time.After(3 * time.Second):
+		close(body.release)
+		t.Fatal("the post did not start arriving")
+	}
+	if v := clUI(t, srv.URL, "shareDecks=0"); v["shareDecks"] != false {
+		close(body.release)
+		t.Fatalf("row off: %v", v["shareDecks"])
+	}
+	close(body.release)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the post did not finish")
+	}
+	s.shadow.mu.Lock()
+	running := s.shadow.running
+	s.shadow.mu.Unlock()
+	if got := sharePull(t, srv, ""); running || len(got) != 0 {
+		t.Fatalf("the late share post: deck loop running=%t, a peer's pull got %v", running, got)
+	}
+}
+
+// The review's case (#329 review finding 3): the last ask ran out, then a console asks again. Its first pull gets
+// nothing of the earlier session (those decks are gone with it), and the display work on their tracks stops.
+func TestANewAskNeverSeesTheDecksOfAnEarlierOne(t *testing.T) {
+	s, srv := sharePlayer(t, true, "")
+	sharePull(t, srv, "?line=1")
+	sharePost(t, s)
+	const key = "share-earlier-track"
+	s.shadow.mu.Lock()
+	s.shadow.own[0].Key, s.shadow.own[0].Path = key, "/earlier/track.wav"
+	s.shadow.mu.Unlock()
+	if !s.shadowSourceLoaded(key) {
+		t.Fatal("the display work is not eligible during the session")
+	}
+	s.shadow.mu.Lock()
+	now := time.Now()
+	for ip := range s.shadow.askers {
+		s.shadow.askers[ip] = now.Add(-shadowPeerSeenTimeout - time.Second)
+	}
+	s.shadow.ownAt = now.Add(-3 * time.Second) // within an ask's life: only the ended session makes it old
+	asked := s.shadow.askedNow(now)
+	s.shadow.mu.Unlock()
+	if asked {
+		t.Fatal("the ask did not run out")
+	}
+	if s.shadowSourceLoaded(key) {
+		t.Fatal("the display work goes on after the last ask ran out")
+	}
+	if got := sharePull(t, srv, "?line=1"); len(got) != 0 {
+		t.Fatalf("the first pull of a new ask got the earlier session's decks: %v", got)
+	}
+	// The ended session is not only noticed by the held request: the next pull ends it too.
+	s2, srv2 := sharePlayer(t, true, "")
+	sharePull(t, srv2, "?line=1")
+	sharePost(t, s2)
+	s2.shadow.mu.Lock()
+	for ip := range s2.shadow.askers {
+		s2.shadow.askers[ip] = time.Now().Add(-shadowPeerSeenTimeout - time.Second)
+	}
+	s2.shadow.mu.Unlock()
+	if got := sharePull(t, srv2, "?line=1"); len(got) != 0 {
+		t.Fatalf("the first pull after silence got the earlier session's decks: %v", got)
+	}
+}
+
+// The review's case (#329 review finding 5): a closing server frees the ask port whichever mode bound it.
+func TestClosingASharingServerFreesTheAskPort(t *testing.T) {
+	probe := listenUDP(t)
+	port := probe.LocalAddr().(*net.UDPAddr).Port
+	probe.Close()
+	clSetBoard(t, "jp07")
+	oldPort, oldBeacon := shadowAskPort, shadowBeaconOn
+	shadowAskPort, shadowBeaconOn = port, true
+	defer func() { shadowAskPort, shadowBeaconOn = oldPort, oldBeacon }()
+	s, _ := sharePlayer(t, true, "")
+	s.shadow.mu.Lock()
+	bound := s.shadow.askConn != nil
+	s.shadow.mu.Unlock()
+	if !bound {
+		t.Fatal("no listener to free")
+	}
+	s.Close()
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	if err != nil {
+		t.Fatalf("a closed Share Decks server still holds the ask port: %v", err)
+	}
+	c.Close()
+	if s.shadow.shares.Load() || s.shadow.hears.Load() {
+		t.Fatal("a closed server still shares or hears")
+	}
+}
+
+// A share post still in flight when the row goes off must not become a peer's post: stream-sync drops a post or a
+// ping the QML tagged as a share's (?share=1) once the row is off, and reads the row once, so a post it took as a
+// share's never falls through to the peer path. Untagged posts (a 4-deck player's) are taken as before.
+func TestAShareDecksPostAfterTheRowWentOffIsDropped(t *testing.T) {
+	s, srv := sharePlayer(t, true, "")
+	post := func(path string) int {
+		at := time.Now().UnixMilli()
+		body := fmt.Sprintf(`[{"deck":1,"title":"P1","playing":true,"positionMs":0,"player":2,"at":%d}]`, at)
+		w := httptest.NewRecorder()
+		h := s.decksPost
+		if strings.Contains(path, "/alive") {
+			h = s.decksAlive
+		}
+		h(w, httptest.NewRequest("POST", path, strings.NewReader(body)))
+		return w.Code
+	}
+	if code := post("/v1/enginex/decks?share=1"); code != 200 {
+		t.Fatalf("a share post with the row on: %d", code)
+	}
+	if code := post("/v1/enginex/decks/alive?share=1"); code != http.StatusNoContent {
+		t.Fatalf("a share ping with the row on: %d", code)
+	}
+	if code, _ := uiPost(t, srv.URL, "shareDecks=0"); code != 200 {
+		t.Fatalf("row off: %d", code)
+	}
+	// The late post and ping of the QML, still tagged: dropped, so nothing reaches a pulling peer and no loop starts.
+	if code := post("/v1/enginex/decks?share=1"); code != 200 {
+		t.Fatalf("a late share post: %d", code)
+	}
+	if code := post("/v1/enginex/decks/alive?share=1"); code != http.StatusConflict {
+		t.Fatalf("a late share ping must be refused (the row off forgot the decks): %d", code)
+	}
+	if got := sharePull(t, srv, ""); len(got) != 0 {
+		t.Fatalf("a late share post became a peer's decks: %v", got)
+	}
+	s.shadow.mu.Lock()
+	running := s.shadow.running
+	s.shadow.mu.Unlock()
+	if running {
+		t.Fatal("a late share post started the deck loop")
+	}
+	// An untagged post (what a player in the 4-deck layout sends) is taken as before.
+	if code := post("/v1/enginex/decks"); code != 200 {
+		t.Fatalf("an untagged post: %d", code)
+	}
+	if got := sharePull(t, srv, ""); len(got) != 1 {
+		t.Fatalf("an untagged post was not taken: %v", got)
 	}
 }
 
@@ -369,9 +609,15 @@ func TestShareDecksListensForTheConsoleAndSendsOnlyToIt(t *testing.T) {
 	if !closed {
 		t.Fatal("the listener outlived the row")
 	}
-	sharePost(t, s)
-	if got := readUDP(console, 300*time.Millisecond); got != "" && !strings.HasPrefix(got, "EngineX-shadow") {
+	sharePost(t, s) // a late share post of the QML: dropped
+	if got := readUDP(console, 300*time.Millisecond); got != "" {
 		t.Fatalf("sent after the row was switched off: %q", got)
+	}
+	s.shadow.mu.Lock()
+	running = s.shadow.running
+	s.shadow.mu.Unlock()
+	if got := sharePull(t, srv, ""); running || len(got) != 0 {
+		t.Fatalf("after the row went off: deck loop running=%t, a peer's pull got %v", running, got)
 	}
 }
 
@@ -432,14 +678,20 @@ func peerRecorder(t *testing.T) (*httptest.Server, func() []string) {
 	return srv, func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), queries...) }
 }
 
+// A console asks for Share Decks players only while a channel is on Line: its QML polls for one at least about
+// once a second, and stops when the last one leaves Line. The deck loop lingers 10 s for discovery; the asks do not.
 func TestALineInConsolePullsWithLineAndOthersDoNot(t *testing.T) {
 	for _, tc := range []struct {
-		name, board, conf, want string
+		name, board, conf string
+		linePoll          time.Duration // how long ago the QML last polled for a channel on Line (0: never)
+		want              string
 	}{
-		{"console, Line In on", "jc11", "console_line_view=1\n", "line=1"},
-		{"console, Line In off", "jc11", "", ""},
-		{"player, 4-deck", "jp13", "four_deck_waveform=1\n", ""},
-		{"player, Show Console", "jp13", "four_deck_waveform=1\nconsole_decks=1\n", "console=1"},
+		{"console, a channel on Line", "jc11", "console_line_view=1\n", time.Millisecond, "line=1"},
+		{"console, the last channel left Line 4 s ago", "jc11", "console_line_view=1\n", 4 * time.Second, ""},
+		{"console, Line In on, never on Line", "jc11", "console_line_view=1\n", 0, ""},
+		{"console, Line In off", "jc11", "", time.Millisecond, ""},
+		{"player, 4-deck", "jp13", "four_deck_waveform=1\n", time.Millisecond, ""},
+		{"player, Show Console", "jp13", "four_deck_waveform=1\nconsole_decks=1\n", time.Millisecond, "console=1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clSetBoard(t, tc.board)
@@ -453,6 +705,9 @@ func TestALineInConsolePullsWithLineAndOthersDoNot(t *testing.T) {
 			s.shadow.mu.Lock()
 			s.shadow.peerPort = port
 			s.shadow.peers["127.0.0.1"] = time.Now()
+			if tc.linePoll > 0 {
+				s.shadow.polled = time.Now().Add(-tc.linePoll)
+			}
 			s.shadow.mu.Unlock()
 			s.shadowPollPeers()
 			got := queries()
@@ -474,6 +729,7 @@ func TestALineInConsoleShowsAShareDecksPlayer(t *testing.T) {
 	c.shadow.mu.Lock()
 	c.shadow.peerPort = port
 	c.shadow.peers["127.0.0.1"] = time.Now()
+	c.shadow.polled = time.Now() // its QML polls for channel 3 on Line
 	c.shadow.mu.Unlock()
 	c.shadowPollPeers()
 	lanes := c.consoleLineLanes(time.Now(), []int{3})
