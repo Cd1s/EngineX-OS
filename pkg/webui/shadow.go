@@ -1489,7 +1489,8 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 	// Asked before the read and again after a miss: a load that finishes in between
 	// has written the file the read missed.
 	running := d.rbxAnalysis != "" && rbxAnalysisRunning(d.rbxRow)
-	perf, err := s.ownPerf(r.Context(), d, r.URL.Query().Get("format") == "native")
+	wantNative := r.URL.Query().Get("format") == "native"
+	perf, err := s.ownPerf(r.Context(), d, wantNative)
 	afterPerfRead()
 	if err != nil && s.perfAnalysisPending(d, err, running) {
 		// The source is still loading or reading the analysis (Pro DJ Link,
@@ -1503,6 +1504,17 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "not analysed", http.StatusNotFound)
 		return
+	}
+	if d.rbxAnalysis != "" {
+		var genBytes []byte
+		if wantNative {
+			genBytes = perf
+		} else if e, ok := s.getShadowPerfCache(d.Key); ok && len(e.native) > 0 {
+			genBytes = e.native
+		}
+		if len(genBytes) > 0 {
+			w.Header().Set(shadowPerfGenHeader, fmt.Sprintf("%x", sha256.Sum256(genBytes))[:16])
+		}
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(perf)
@@ -2509,49 +2521,55 @@ func fetchPerf(ctx context.Context, url string) []byte {
 // (nil, false), which shadowFetchPeer treats as errAnalysisUnavailable (never
 // publishing bare audio).
 func fetchPerfPending(ctx context.Context, url string) (perf []byte, pending bool) {
+	b, _, p := fetchPerfPendingGen(ctx, url)
+	return b, p
+}
+
+func fetchPerfPendingGen(ctx context.Context, url string) (perf []byte, gen string, pending bool) {
 	for try := 0; ; try++ {
-		b, status, ok := fetchPerfOnce(ctx, url)
+		b, hdrGen, status, ok := fetchPerfOnce(ctx, url)
 		switch {
 		case ok && validPerf(b):
-			return b, false
+			return b, hdrGen, false
 		case ok:
 			log.Printf("stream-sync: shadow: the source gave invalid analysis (%d bytes)", len(b))
-			return nil, false
+			return nil, "", false
 		case status == 0 || status == http.StatusServiceUnavailable || status >= 500:
 			pending = true
 		default:
 			log.Printf("stream-sync: shadow: the source gave no analysis (http %d)", status)
-			return nil, false
+			return nil, "", false
 		}
 		if try+1 >= perfRetries {
-			return nil, true
+			return nil, "", true
 		}
 		select {
 		case <-ctx.Done():
-			return nil, true
+			return nil, "", true
 		case <-time.After(perfRetryWait):
 		}
 	}
 }
 
 // fetchPerfOnce: ok only for a complete 200 answer.
-func fetchPerfOnce(ctx context.Context, url string) ([]byte, int, bool) {
+func fetchPerfOnce(ctx context.Context, url string) ([]byte, string, int, bool) {
 	ctx, cancel := context.WithTimeout(ctx, perfRequestTimeout)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	resp, err := peerFileClient.Do(req)
 	if err != nil {
-		return nil, 0, false
+		return nil, "", 0, false
 	}
 	defer resp.Body.Close()
+	hdrGen := strings.TrimSpace(resp.Header.Get(shadowPerfGenHeader))
 	b, err := io.ReadAll(io.LimitReader(resp.Body, shadowPerfMax+1))
 	if err != nil {
-		return nil, 0, false
+		return nil, "", 0, false
 	}
 	if resp.StatusCode != 200 {
-		return nil, resp.StatusCode, false
+		return nil, "", resp.StatusCode, false
 	}
-	return b, resp.StatusCode, true
+	return b, hdrGen, resp.StatusCode, true
 }
 
 // cdjCuePlay is a status packet's play state while CUE is held (P1 0x07).
@@ -3151,7 +3169,7 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 		// publishing audio. A shadow copy is never published bare for Engine to
 		// run OfflineAnalyzer on.
 		perfURL := strings.Replace(url, "/audio?", "/perf?", 1)
-		perf, pending := fetchPerfPending(ctx, perfURL)
+		perf, perfGen, pending := fetchPerfPendingGen(ctx, perfURL)
 		if pending {
 			return "", errPerfPending
 		}
@@ -3159,10 +3177,11 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 			return "", errAnalysisUnavailable
 		}
 		var native []byte
+		var natGen string
 		noFill := "not a player"
 		if shadowIsPlayerBoard() {
 			var olderEXPFOnly, nativePending bool
-			native, olderEXPFOnly, nativePending, noFill = fetchNativeAnalysisPending(ctx, perfURL+"&format=native")
+			native, natGen, olderEXPFOnly, nativePending, noFill = fetchNativeAnalysisPending(ctx, perfURL+"&format=native")
 			if nativePending {
 				return "", errPerfPending
 			}
@@ -3218,7 +3237,13 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 			_ = os.Remove(local + ".analysis")
 			return "", err
 		}
-		s.shadowCopyGen(key, p.PerfGen)
+		gotGen := p.PerfGen
+		if natGen != "" {
+			gotGen = natGen
+		} else if perfGen != "" {
+			gotGen = perfGen
+		}
+		s.shadowCopyGen(key, gotGen)
 		// The three ways a copy is analysed end with different waveform peaks.
 		if noFill != "" {
 			noFill = " (" + noFill + ")"
@@ -3253,7 +3278,7 @@ func (s *Server) shadowRefreshPeerPerf(key string, p peerDeck, old string) {
 	local := filepath.Join(dir, filepath.Base(old))
 	gen := p.PerfGen
 	s.shadowFetch(key, func(ctx context.Context, cp *shadowCopy) (string, error) {
-		perf, pending := fetchPerfPending(ctx, perfURL)
+		perf, perfGen, pending := fetchPerfPendingGen(ctx, perfURL)
 		if pending {
 			return "", errPerfPending
 		}
@@ -3261,15 +3286,21 @@ func (s *Server) shadowRefreshPeerPerf(key string, p peerDeck, old string) {
 			return "", errAnalysisUnavailable
 		}
 		var native []byte
+		var natGen string
 		if shadowIsPlayerBoard() {
 			var olderEXPFOnly, nativePending bool
-			native, olderEXPFOnly, nativePending, _ = fetchNativeAnalysisPending(ctx, perfURL+"&format=native")
+			native, natGen, olderEXPFOnly, nativePending, _ = fetchNativeAnalysisPending(ctx, perfURL+"&format=native")
 			if nativePending {
 				return "", errPerfPending
 			}
 			if native == nil && !olderEXPFOnly {
 				return "", errAnalysisUnavailable
 			}
+		}
+		if natGen != "" {
+			gen = natGen
+		} else if perfGen != "" {
+			gen = perfGen
 		}
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return "", err

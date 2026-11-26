@@ -687,6 +687,20 @@ func TestReviewShadowNote6SharedEncodingsAndZeroWorkPositionPost(t *testing.T) {
 	if _, ok := r.s.getShadowPerfCache(d1.Key); ok {
 		t.Fatal("steady-state 1 s position posts re-ran ownPerf despite unchanged rbxAnalysis stat identity")
 	}
+	// Verify /peer/decks/1/perf returns X-EngineX-Perf-Gen matching d1.PerfGen so
+	// a copy fetched at t=0ms (before PerfGen was advertised) records the exact
+	// generation and does not spuriously run shadowRefreshPeerPerf when PerfGen appears.
+	for _, q := range []string{"", "&format=native"} {
+		resp, err := http.Get(r.srv.URL + "/peer/decks/1/perf?key=" + url.QueryEscape(d1.Key) + q)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("prolink /perf%s: %v %v", q, resp, err)
+		}
+		_, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if gotGen := resp.Header.Get(shadowPerfGenHeader); gotGen != d1.PerfGen {
+			t.Fatalf("prolink /perf%s %s = %q, want %q", q, shadowPerfGenHeader, gotGen, d1.PerfGen)
+		}
+	}
 
 	// 3. Concurrent EXPF + native + RGB requests for the same loaded DB track
 	// share one shadowPerfCache entry cleanly under -race and evict on unload.

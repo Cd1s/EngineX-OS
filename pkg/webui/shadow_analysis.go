@@ -19,6 +19,7 @@ import (
 const shadowAnalysisMagic = "RBXA1" // Same five PerformanceData blobs as the rekordbox bind hook.
 const shadowAnalysisMax = 8 << 20
 const shadowPerfFormatsHeader = "X-EngineX-Perf-Formats"
+const shadowPerfGenHeader = "X-EngineX-Perf-Gen"
 
 func peerAdvertisesFormat(header, want string) bool {
 	for _, part := range strings.Split(header, ",") {
@@ -104,40 +105,41 @@ func validShadowAnalysis(b []byte) bool {
 // connections) retry up to perfRetries and stay pending if exhausted. An older
 // EXPF-only peer is accepted only through explicit capability absence (no
 // X-EngineX-Perf-Formats header advertising native AND a valid EXPF response).
-func fetchNativeAnalysisPending(ctx context.Context, url string) (b []byte, olderEXPFOnly bool, pending bool, why string) {
+func fetchNativeAnalysisPending(ctx context.Context, url string) (b []byte, gen string, olderEXPFOnly bool, pending bool, why string) {
 	for try := 0; ; try++ {
 		reqCtx, cancel := context.WithTimeout(ctx, perfRequestTimeout)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 		if err != nil {
 			cancel()
-			return nil, false, false, "no request"
+			return nil, "", false, false, "no request"
 		}
 		resp, err := peerFileClient.Do(req)
 		if err != nil {
 			cancel()
 			why = "no answer"
 			if try+1 >= perfRetries {
-				return nil, false, true, why
+				return nil, "", false, true, why
 			}
 			select {
 			case <-ctx.Done():
-				return nil, false, true, "no answer"
+				return nil, "", false, true, "no answer"
 			case <-time.After(perfRetryWait):
 				continue
 			}
 		}
 		formats := resp.Header.Get(shadowPerfFormatsHeader)
+		perfGen := strings.TrimSpace(resp.Header.Get(shadowPerfGenHeader))
 		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode >= 500 {
 			code := resp.StatusCode
 			resp.Body.Close()
 			cancel()
 			why = "http " + strconv.Itoa(code)
 			if try+1 >= perfRetries {
-				return nil, false, true, why
+				return nil, "", false, true, why
 			}
 			select {
 			case <-ctx.Done():
-				return nil, false, true, "no answer"
+				return nil, "", false, true, "no answer"
 			case <-time.After(perfRetryWait):
 				continue
 			}
@@ -146,12 +148,12 @@ func fetchNativeAnalysisPending(ctx context.Context, url string) (b []byte, olde
 			code := resp.StatusCode
 			resp.Body.Close()
 			cancel()
-			return nil, false, false, "http " + strconv.Itoa(code)
+			return nil, "", false, false, "http " + strconv.Itoa(code)
 		}
 		if resp.ContentLength > shadowAnalysisMax {
 			resp.Body.Close()
 			cancel()
-			return nil, false, false, "too large"
+			return nil, "", false, false, "too large"
 		}
 		b, err = io.ReadAll(io.LimitReader(resp.Body, shadowAnalysisMax+1))
 		resp.Body.Close()
@@ -159,22 +161,22 @@ func fetchNativeAnalysisPending(ctx context.Context, url string) (b []byte, olde
 		if err != nil {
 			why = "cut off"
 			if try+1 >= perfRetries {
-				return nil, false, true, why
+				return nil, "", false, true, why
 			}
 			select {
 			case <-ctx.Done():
-				return nil, false, true, "no answer"
+				return nil, "", false, true, "no answer"
 			case <-time.After(perfRetryWait):
 				continue
 			}
 		}
 		if validShadowAnalysis(b) {
-			return b, false, false, ""
+			return b, perfGen, false, false, ""
 		}
 		if validPerf(b) && formats == "" {
-			return nil, true, false, "not a native analysis"
+			return nil, perfGen, true, false, "not a native analysis"
 		}
-		return nil, false, false, "not a native analysis"
+		return nil, "", false, false, "not a native analysis"
 	}
 }
 
@@ -208,7 +210,7 @@ func writeShadowAnalysis(local string, b []byte) error {
 func saveShadowAnalysis(ctx context.Context, local, url string) string {
 	out := local + ".analysis"
 	_ = os.Remove(out)
-	b, _, _, why := fetchNativeAnalysisPending(ctx, url)
+	b, _, _, _, why := fetchNativeAnalysisPending(ctx, url)
 	if why != "" {
 		return why
 	}
