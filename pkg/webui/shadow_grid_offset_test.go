@@ -44,8 +44,10 @@ func stepWallClock(t *testing.T, base time.Time, deltaSec int64) time.Time {
 
 func TestShadowLegacyCarryPreservesMonotonicClockAcrossWallStep(t *testing.T) {
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
 	pAt := time.Now()
 	s.shadow.mu.Lock()
+	s.shadow.files["peer:"+stableTrackKey("k")] = "/tmp/already-copied.wav"
 	s.shadow.peerDecks[2] = peerDeck{
 		deckState: deckState{Deck: 2, Key: "k", Link: "link-A", Playing: true, PositionMS: 1000, Pitch: 0, BPM: 128, CurrentBPM: 128},
 		ip:        "192.0.2.7",
@@ -109,6 +111,7 @@ func TestSlowHTTPPollDoesNotAdvanceColdUDPCopy(t *testing.T) {
 	}
 
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
 	s.shadow.mu.Lock()
 	s.shadow.peers[host] = time.Now()
 	s.shadow.peerPort = port
@@ -388,6 +391,7 @@ func TestUIGetSyncsPausedFollowWithoutLoopPolling(t *testing.T) {
 	}()
 
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
 	if err := os.WriteFile(stateFile, []byte("pid=4242\nbuild=\noff=\non=shadow-paused-follow\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

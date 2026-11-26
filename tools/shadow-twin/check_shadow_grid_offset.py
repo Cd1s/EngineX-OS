@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 
@@ -361,7 +362,9 @@ def run_synced_case(label, fn_a, fn_b, *, load_b_bpm=None, measure_cost=False):
     print(f"Synced ({label}): phase={phase:+.2f}ms | A1={a1} | B2={b2}", flush=True)
     time.sleep(2.5)
 
-    mode_a, mode_b = arm_burst("A", N_SAMPLES), arm_burst("B", N_SAMPLES)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fa, fb = pool.submit(arm_burst, "A", N_SAMPLES), pool.submit(arm_burst, "B", N_SAMPLES)
+        mode_a, mode_b = fa.result(), fb.result()
     la, lb = read_burst("A", N_SAMPLES), read_burst("B", N_SAMPLES)
     dt_a = [la[i]["now"] - la[i - 1]["now"] for i in range(1, len(la))]
     dt_b = [lb[i]["now"] - lb[i - 1]["now"] for i in range(1, len(lb))]
@@ -439,7 +442,7 @@ def main():
     wait_analyzed("B", 1, 128)
 
     r_native, cost = run_synced_case("NATIVE SAME BPM (128 vs 128), SYNC ON, LEAD=A1", "track-a.wav", "track-b128.wav", measure_cost=True)
-    r_pitched, _ = run_synced_case("PITCHED SAME BPM (128 vs 132@-3.03%=128), SYNC ON, LEAD=A1", "track-a.wav", "track-b.wav", load_b_bpm=132)
+    r_pitched, _ = run_synced_case("PITCHED SAME BPM (128 vs 132 synced), SYNC ON, LEAD=A1", "track-a.wav", "track-b.wav", load_b_bpm=132)
     check_paused_alignment("track-a.wav", "track-b.wav")
 
     worst_copy = max(r_native["b1_p99"], r_native["a2_p99"], r_pitched["b1_p99"], r_pitched["a2_p99"])
