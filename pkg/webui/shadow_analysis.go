@@ -19,6 +19,30 @@ const shadowAnalysisMagic = "RBXA1" // Same five PerformanceData blobs as the re
 const shadowAnalysisMax = 8 << 20
 
 func encodeShadowAnalysis(p enginedb.Performance) ([]byte, error) {
+	// Ensure native shadow blobs carry non-zero overview band maxima and 5.3.0
+	// trackData peaks (matching EXPF perfFromBlobs), without altering already
+	// complete blobs.
+	var rawOv []byte
+	if len(p.Overview) > 4 {
+		if raw, err := enginedb.QUncompress(p.Overview, shadowAnalysisMax); err == nil {
+			rawOv = enginedb.OverviewMaxima(raw)
+			if len(rawOv) > 0 && (len(raw) == 0 || &rawOv[0] != &raw[0]) {
+				if fixed, err := enginedb.QCompress(rawOv); err == nil {
+					p.Overview = fixed
+				}
+			}
+		}
+	}
+	if len(p.TrackData) > 4 {
+		if raw, err := enginedb.QUncompress(p.TrackData, 4096); err == nil {
+			fixedTrack := enginedb.TrackDataPeaks(raw, rawOv)
+			if !bytes.Equal(fixedTrack, raw) {
+				if fixed, err := enginedb.QCompress(fixedTrack); err == nil {
+					p.TrackData = fixed
+				}
+			}
+		}
+	}
 	var b bytes.Buffer
 	b.WriteString(shadowAnalysisMagic)
 	for _, blob := range [][]byte{p.TrackData, p.Overview, p.Beats, p.QuickCues, p.Loops} {
@@ -70,26 +94,50 @@ func validShadowAnalysis(b []byte) bool {
 func saveShadowAnalysis(ctx context.Context, local, url string) string {
 	out := local + ".analysis"
 	_ = os.Remove(out)
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "no request"
-	}
-	resp, err := peerFileClient.Do(req)
-	if err != nil {
-		return "no answer"
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "http " + strconv.Itoa(resp.StatusCode)
-	}
-	if resp.ContentLength > shadowAnalysisMax {
-		return "too large"
-	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, shadowAnalysisMax+1))
-	if err != nil {
-		return "cut off"
+	var b []byte
+	for try := 0; ; try++ {
+		reqCtx, cancel := context.WithTimeout(ctx, perfRequestTimeout)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+		if err != nil {
+			cancel()
+			return "no request"
+		}
+		resp, err := peerFileClient.Do(req)
+		if err != nil {
+			cancel()
+			return "no answer"
+		}
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			resp.Body.Close()
+			cancel()
+			if try+1 >= perfRetries {
+				return "http 503"
+			}
+			select {
+			case <-ctx.Done():
+				return "no answer"
+			case <-time.After(perfRetryWait):
+				continue
+			}
+		}
+		if resp.StatusCode != http.StatusOK {
+			code := resp.StatusCode
+			resp.Body.Close()
+			cancel()
+			return "http " + strconv.Itoa(code)
+		}
+		if resp.ContentLength > shadowAnalysisMax {
+			resp.Body.Close()
+			cancel()
+			return "too large"
+		}
+		b, err = io.ReadAll(io.LimitReader(resp.Body, shadowAnalysisMax+1))
+		resp.Body.Close()
+		cancel()
+		if err != nil {
+			return "cut off"
+		}
+		break
 	}
 	if !validShadowAnalysis(b) {
 		return "not a native analysis"

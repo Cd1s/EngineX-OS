@@ -2,6 +2,8 @@
 #define SC_SHADOW_ANALYSIS_H
 
 #include <fcntl.h>
+#include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -109,11 +111,21 @@ static int sc_shadow_analysis_staged(const char *path) {
     return !lstat(sidecar, &st) && S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size <= SC_SHADOW_MAX;
 }
 
-static int sc_shadow_copy_path(void *out, int n, char **values, char **names) {
+struct sc_shadow_row_info {
+    char path[512];
+    int analyzed;
+    int has_blobs;
+};
+
+static int sc_shadow_copy_info(void *out, int n, char **values, char **names) {
     (void)names;
-    if (n == 1 && values[0] && !strncmp(values[0], SC_SHADOW_REL, sizeof SC_SHADOW_REL - 1) &&
-        sc_shadow_peer_path(values[0] + sizeof SC_SHADOW_REL - 1) && strlen(values[0]) < 512)
-        strcpy(out, values[0]);
+    struct sc_shadow_row_info *info = out;
+    if (n >= 1 && values[0] && !strncmp(values[0], SC_SHADOW_REL, sizeof SC_SHADOW_REL - 1) &&
+        sc_shadow_peer_path(values[0] + sizeof SC_SHADOW_REL - 1) && strlen(values[0]) < sizeof info->path) {
+        strcpy(info->path, values[0]);
+        info->analyzed = n >= 2 && values[1] && values[1][0] != '0';
+        info->has_blobs = n >= 3 && values[2] && values[2][0] != '0';
+    }
     return 0;
 }
 
@@ -123,19 +135,79 @@ static int sc_shadow_written(void *out, int n, char **values, char **names) {
     return 0;
 }
 
+static uint64_t sc_shadow_fnv1a(const unsigned char *b, size_t n) {
+    uint64_t h = 14695981039346656037ULL;
+    for (size_t i = 0; i < n; i++) {
+        h ^= b[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+// Per-process filled cache: once a track has been filled from a given sidecar
+// digest and the DB row is still analysed with complete core blobs, skip repeat
+// UPDATEs triggered ~0.5-1 s later when Engine saves decoder-trimmed trackData
+// or synced cues via SC_SHADOW_INSERT / Track re-read. Rollbacks, wiped rows
+// (isAnalyzed=0 or missing blobs), and updated sidecars (new hash) still fill.
+#define SC_SHADOW_FILLED_CAP 16
+struct sc_shadow_filled_entry {
+    long long id;
+    uint64_t hash;
+    char db[512];
+    char path[512];
+};
+static pthread_mutex_t sc_shadow_filled_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct sc_shadow_filled_entry sc_shadow_filled[SC_SHADOW_FILLED_CAP];
+static unsigned sc_shadow_filled_next;
+
+static int sc_shadow_filled_hit(long long id, const char *db, const char *path, uint64_t hash) {
+    int hit = 0;
+    pthread_mutex_lock(&sc_shadow_filled_mu);
+    for (unsigned i = 0; i < SC_SHADOW_FILLED_CAP; i++) {
+        if (sc_shadow_filled[i].id == id && sc_shadow_filled[i].hash == hash &&
+            !strcmp(sc_shadow_filled[i].db, db) && !strcmp(sc_shadow_filled[i].path, path)) {
+            hit = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&sc_shadow_filled_mu);
+    return hit;
+}
+
+static void sc_shadow_filled_put(long long id, const char *db, const char *path, uint64_t hash) {
+    if (strlen(db) >= sizeof sc_shadow_filled[0].db || strlen(path) >= sizeof sc_shadow_filled[0].path) return;
+    pthread_mutex_lock(&sc_shadow_filled_mu);
+    for (unsigned i = 0; i < SC_SHADOW_FILLED_CAP; i++) {
+        if (sc_shadow_filled[i].id == id && !strcmp(sc_shadow_filled[i].db, db) && !strcmp(sc_shadow_filled[i].path, path)) {
+            sc_shadow_filled[i].hash = hash;
+            pthread_mutex_unlock(&sc_shadow_filled_mu);
+            return;
+        }
+    }
+    struct sc_shadow_filled_entry *e = &sc_shadow_filled[sc_shadow_filled_next++ % SC_SHADOW_FILLED_CAP];
+    e->id = id;
+    e->hash = hash;
+    strcpy(e->db, db);
+    strcpy(e->path, path);
+    pthread_mutex_unlock(&sc_shadow_filled_mu);
+}
+
 // Whether the row was written.
 static int sc_shadow_analysis_fill(const struct sc_shadow_sqlite *q, void *db, long long id) {
     if (!db || id <= 0) return 0;
     const char *main = q->filename(db, "main");
     if (!main || strcmp(main, sc_shadow_library) || access(sc_shadow_root, F_OK)) return 0;
-    char path[512] = "", query[384];
+    struct sc_shadow_row_info info = {"", 0, 0};
+    char query[512];
     snprintf(query, sizeof query,
-             "SELECT t.path FROM main.Track t JOIN main.PerformanceData p ON p.trackId=t.id "
+             "SELECT t.path, COALESCE(t.isAnalyzed,0), "
+             "CASE WHEN length(p.trackData)>4 AND length(p.overviewWaveFormData)>4 AND length(p.beatData)>4 THEN 1 ELSE 0 END "
+             "FROM main.Track t JOIN main.PerformanceData p ON p.trackId=t.id "
              "WHERE t.id=%lld AND t.path GLOB '" SC_SHADOW_REL "peer-*'", id);
-    if (q->exec(db, query, sc_shadow_copy_path, path, NULL) || !*path) return 0;
+    if (q->exec(db, query, sc_shadow_copy_info, &info, NULL) || !*info.path) return 0;
     char sidecar[640];
     if ((size_t)snprintf(sidecar, sizeof sidecar, "%s/%s.analysis", sc_shadow_root,
-                         path + sizeof SC_SHADOW_REL - 1) >= sizeof sidecar) return 0;
+                         info.path + sizeof SC_SHADOW_REL - 1) >= sizeof sidecar) return 0;
     int fd = open(sidecar, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) return 0;
     int filled = 0;
@@ -148,9 +220,18 @@ static int sc_shadow_analysis_fill(const struct sc_shadow_sqlite *q, void *db, l
             if (got <= 0) break;
             at += (size_t)got;
         }
-        char *sql = at == size ? sc_shadow_analysis_sql(b, size, id, path) : NULL;
-        if (sql && q->exec(db, sql, sc_shadow_written, &filled, NULL)) filled = 0;
-        free(sql);
+        if (at == size) {
+            uint64_t hash = sc_shadow_fnv1a(b, size);
+            if (!(info.analyzed && info.has_blobs && sc_shadow_filled_hit(id, main, info.path, hash))) {
+                char *sql = sc_shadow_analysis_sql(b, size, id, info.path);
+                if (sql) {
+                    int rc = q->exec(db, sql, sc_shadow_written, &filled, NULL);
+                    if (rc) filled = 0;
+                    else if (filled || (info.analyzed && info.has_blobs)) sc_shadow_filled_put(id, main, info.path, hash);
+                    free(sql);
+                }
+            }
+        }
         free(b);
     }
     close(fd);

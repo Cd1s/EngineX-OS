@@ -178,6 +178,11 @@ type deckState struct {
 	// here; rbxRow the gateway row it is of.
 	rbxAnalysis string
 	rbxRow      int64
+	// streamURI keeps the original streaming:// URI for non-rekordbox streaming tracks
+	// (d.Net is cleared when netPathFile returns "") so /perf can read stm.db by uri
+	// and answer 503 while Engine is still analysing the download.
+	streamURI string
+	loadedAt  time.Time
 	// PerfGen names the analysis /perf serves for a rekordbox Link deck. The
 	// audio copy remains reusable while a changed generation refreshes its sidecars.
 	PerfGen string `json:"perfGen,omitempty"`
@@ -665,6 +670,9 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		if d.rbxAnalysis == "" && strings.HasPrefix(np, "streaming://") {
+			d.streamURI = np
+		}
 		if f != "" && slices.Contains(shadowAudioExt, strings.ToLower(filepath.Ext(f))) {
 			if st, err := os.Stat(f); err == nil && st.Mode().IsRegular() {
 				d.Path, d.Ext, d.Name = f, strings.ToLower(filepath.Ext(f)), filepath.Base(f)
@@ -712,9 +720,13 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		if d.Key != "" {
 			d.baseKey = d.Key
 			d.Key = fmt.Sprintf("%s-%x", d.baseKey, seq)
+			d.loadedAt = time.Now()
 			for _, previous := range s.shadow.own {
 				if previous.Deck == d.Deck && previous.baseKey == d.baseKey && previous.Path == d.Path && previous.Key != "" {
 					d.Key = previous.Key
+					if !previous.loadedAt.IsZero() {
+						d.loadedAt = previous.loadedAt
+					}
 					break
 				}
 			}
@@ -759,6 +771,22 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.shadow.ownPostAt = postAt
+	var droppedPaths []string
+	for _, prev := range s.shadow.own {
+		if prev.Path == "" {
+			continue
+		}
+		kept := false
+		for _, cur := range own {
+			if cur.Path == prev.Path {
+				kept = true
+				break
+			}
+		}
+		if !kept {
+			droppedPaths = append(droppedPaths, prev.Path)
+		}
+	}
 	s.shadow.own, s.shadow.ownAt, s.shadow.ownExport, s.shadow.ownDecks = own, time.Now(), ex, players
 	s.shadow.dbg.event("post", map[string]any{"decks": slimDecks(own)})
 	// Master on another of our decks is a claim too (#217): a console's Line In
@@ -774,6 +802,9 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	claimed := ex.Master && (!s.shadow.ownMaster || masterDeck != s.shadow.ownMasterDeck || pressed) && (masterPlaying || pressed)
 	s.shadow.ownMaster, s.shadow.ownMasterDeck, s.shadow.ownMasterPress = ex.Master, masterDeck, masterPress
 	s.shadow.mu.Unlock()
+	for _, p := range droppedPaths {
+		s.evictOnDemandCacheForPath(p)
+	}
 	s.noteDeckPriority(own, time.Now())
 	if consoleLineBoards[s.shadow.model] {
 		respond(w, map[string]any{"ok": true}) // a console's decks are a picture for the players that ask: no Pro DJ Link status, no MASTER claim, no loop, no push
@@ -1359,9 +1390,10 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 	running := d.rbxAnalysis != "" && rbxAnalysisRunning(d.rbxRow)
 	perf, err := s.ownPerf(r.Context(), d, r.URL.Query().Get("format") == "native")
 	afterPerfRead()
-	if d.rbxAnalysis != "" && errors.Is(err, os.ErrNotExist) && (running || rbxAnalysisRunning(d.rbxRow)) {
-		// The load is still reading it from rekordbox: the copy waits for it. Once
-		// that is over without one, 404: the copy is analysed here, as before.
+	if err != nil && s.perfAnalysisPending(d, err, running) {
+		// The source is still loading or reading the analysis (Pro DJ Link,
+		// streaming track being analysed into stm.db, or transient on-demand
+		// contention): tell the copy to retry instead of running OfflineAnalyzer.
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "analysing", http.StatusServiceUnavailable)
 		return
@@ -1372,6 +1404,24 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(perf)
+}
+
+const shadowStreamAnalysisWait = 25 * time.Second
+
+func (s *Server) perfAnalysisPending(d deckState, err error, rbxWasRunning bool) bool {
+	if d.rbxAnalysis != "" && errors.Is(err, os.ErrNotExist) && (rbxWasRunning || rbxAnalysisRunning(d.rbxRow)) {
+		return true
+	}
+	if errors.Is(err, bridge.ErrOnDemandUnavailable) {
+		return true
+	}
+	if d.SongLoading {
+		return true
+	}
+	if d.streamURI != "" && (d.loadedAt.IsZero() || time.Since(d.loadedAt) < shadowStreamAnalysisWait) {
+		return true
+	}
+	return false
 }
 
 // afterPerfRead runs between /perf's read and its second check; tests use it.
@@ -1433,16 +1483,24 @@ func rbxReadAnalysisFile(file string) ([]byte, error) {
 const rbxAnalysisMax = 16 << 20
 
 // ownPerf is what /perf serves for an own deck: its library's analysis, else a
-// rekordbox Link deck's own (os.ErrNotExist while that is not written yet), or on-demand
-// RBXA1 from stream-sync when an OnDemand USB track has not been filled into m.db yet.
+// streaming track's stm.db row by URI, else a rekordbox Link deck's own
+// (os.ErrNotExist while that is not written yet), or cached/on-demand RBXA1
+// from stream-sync when an OnDemand USB track has not been filled into m.db yet.
 func (s *Server) ownPerf(ctx context.Context, d deckState, native bool) ([]byte, error) {
 	perf, err := libraryPerfFormat(ctx, d.Path, s.shadow.dataRoot, s.shadow.mediaRoot, native)
+	if err != nil && d.streamURI != "" {
+		if stPerf, stErr := stmURIPerf(ctx, d.streamURI, s.shadow.dataRoot, native); stErr == nil {
+			perf, err = stPerf, nil
+		}
+	}
 	if err != nil && d.rbxAnalysis != "" {
 		perf, err = rbxPeerPerf(d.rbxAnalysis, d.BPM, native)
 	}
 	if err != nil && d.Path != "" {
 		if odPerf, odErr := s.onDemandPeerPerf(ctx, d, native); odErr == nil {
 			perf, err = odPerf, nil
+		} else if errors.Is(odErr, bridge.ErrOnDemandUnavailable) {
+			return nil, odErr
 		}
 	}
 	if err == nil && !native {
@@ -1452,8 +1510,7 @@ func (s *Server) ownPerf(ctx context.Context, d deckState, native bool) ([]byte,
 }
 
 func (s *Server) onDemandPeerPerf(ctx context.Context, d deckState, native bool) ([]byte, error) {
-	b := s.rbOnDemandBuilder()
-	if b == nil {
+	if s.rbOnDemandBuilder() == nil {
 		return nil, os.ErrNotExist
 	}
 	mediaRoot := filepath.Clean(s.onDemandMediaRoot())
@@ -1478,11 +1535,12 @@ func (s *Server) onDemandPeerPerf(ctx context.Context, d deckState, native bool)
 	if !ok {
 		return nil, os.ErrNotExist
 	}
-	res, err := b.Build(ctx, bridge.OnDemandRequest{
+	res, err := s.buildOnDemandCached(ctx, bridge.OnDemandRequest{
 		Mount:      mount,
 		EnginePath: "../" + rel,
+		EngineKey:  -1,
 		EngineBPM:  d.BPM,
-	})
+	}, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1712,6 +1770,15 @@ func saveShadowRGB(ctx context.Context, local, perfURL string) {
 }
 
 func dbPerf(ctx context.Context, mdb, rel string, native bool) ([]byte, error) {
+	return dbPerfByCol(ctx, mdb, "path", rel, native)
+}
+
+func stmURIPerf(ctx context.Context, uri, dataRoot string, native bool) ([]byte, error) {
+	mdb := filepath.Join(dataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2/stm.db")
+	return dbPerfByCol(ctx, mdb, "uri", uri, native)
+}
+
+func dbPerfByCol(ctx context.Context, mdb, col, val string, native bool) ([]byte, error) {
 	if _, err := os.Stat(mdb); err != nil {
 		return nil, err
 	}
@@ -1720,11 +1787,16 @@ func dbPerf(ctx context.Context, mdb, rel string, native bool) ([]byte, error) {
 		return nil, err
 	}
 	defer db.Close()
+	where := "t.path = ?"
+	if col == "uri" {
+		where = "t.uri = ?"
+	}
 	if native {
 		var p enginedb.Performance
 		err := db.QueryRowContext(ctx, `SELECT p.trackData,p.overviewWaveFormData,p.beatData,p.quickCues,p.loops
 			FROM Track t JOIN PerformanceData p ON p.trackId=t.id
-			WHERE t.path=? AND t.isAnalyzed=1 AND length(p.trackData)>4 AND length(p.overviewWaveFormData)>4 AND length(p.beatData)>4`, rel).
+			WHERE `+where+` AND t.isAnalyzed=1 AND length(p.trackData)>4 AND length(p.overviewWaveFormData)>4 AND length(p.beatData)>4
+			ORDER BY t.id DESC LIMIT 1`, val).
 			Scan(&p.TrackData, &p.Overview, &p.Beats, &p.QuickCues, &p.Loops)
 		if err != nil {
 			return nil, err
@@ -1734,7 +1806,8 @@ func dbPerf(ctx context.Context, mdb, rel string, native bool) ([]byte, error) {
 	var bpm sql.NullFloat64
 	var track, beats, overview []byte
 	err = db.QueryRowContext(ctx, `SELECT coalesce(t.bpmAnalyzed, t.bpm), p.trackData, p.beatData, p.overviewWaveFormData
-		FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.path = ? AND length(p.trackData)>4 AND length(p.beatData)>4 AND length(p.overviewWaveFormData)>4`, rel).
+		FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE `+where+` AND length(p.trackData)>4 AND length(p.beatData)>4 AND length(p.overviewWaveFormData)>4
+		ORDER BY t.id DESC LIMIT 1`, val).
 		Scan(&bpm, &track, &beats, &overview)
 	if err != nil {
 		return nil, err
@@ -1742,20 +1815,74 @@ func dbPerf(ctx context.Context, mdb, rel string, native bool) ([]byte, error) {
 	return perfFromBlobs(bpm.Float64, track, beats, overview)
 }
 
+// beatDataBPM derives the track's first-interval BPM from an uncompressed Engine
+// beatData blob so EXPF generation succeeds even when a deck posts BPM=0 at load time.
+func beatDataBPM(rawBeats []byte) float64 {
+	if len(rawBeats) < 33 || rawBeats[16] != 1 {
+		return 0
+	}
+	sr := math.Float64frombits(binary.BigEndian.Uint64(rawBeats[0:8]))
+	if math.IsNaN(sr) || math.IsInf(sr, 0) || sr < 8000 || sr > 384000 {
+		return 0
+	}
+	type pair struct {
+		ok     bool
+		p0, p1 float64
+		n0, n1 int64
+	}
+	var grids [2]pair
+	off := 17
+	for g := range grids {
+		if len(rawBeats)-off < 8 {
+			break
+		}
+		n := binary.BigEndian.Uint64(rawBeats[off : off+8])
+		off += 8
+		if n > 65536 || n > uint64((len(rawBeats)-off)/24) {
+			return 0
+		}
+		if n >= 2 {
+			p0 := math.Float64frombits(binary.LittleEndian.Uint64(rawBeats[off : off+8]))
+			n0 := int64(binary.LittleEndian.Uint64(rawBeats[off+8 : off+16]))
+			p1 := math.Float64frombits(binary.LittleEndian.Uint64(rawBeats[off+24 : off+32]))
+			n1 := int64(binary.LittleEndian.Uint64(rawBeats[off+32 : off+40]))
+			if p1 > p0 && n1 > n0 {
+				grids[g] = pair{ok: true, p0: p0, p1: p1, n0: n0, n1: n1}
+			}
+		}
+		off += int(n) * 24
+	}
+	chosen := grids[1]
+	if !chosen.ok {
+		chosen = grids[0]
+	}
+	if !chosen.ok {
+		return 0
+	}
+	bpm := 60 * sr * float64(chosen.n1-chosen.n0) / (chosen.p1 - chosen.p0)
+	if math.IsNaN(bpm) || math.IsInf(bpm, 0) || !(bpm > 0 && bpm < 1000) {
+		return 0
+	}
+	return bpm
+}
+
 // perfFromBlobs turns a track's qCompress'd PerformanceData blobs into EXPF v1,
 // what engine_ui_hook.c's OfflineAnalyzer hook replays: "EXPF", u32 1, f64 bpm,
 // then raw trackData, beatData and overviewWaveFormData, each u32 length +
 // bytes, little-endian. trackData gets 5.3.0's waveform peaks if it lacks them.
 func perfFromBlobs(bpm float64, track, beats, overview []byte) ([]byte, error) {
-	if !(bpm > 0 && bpm < 1000) {
-		return nil, fmt.Errorf("perf: bpm %v", bpm)
-	}
 	var raw [3][]byte
 	for i, blob := range [][]byte{track, beats, overview} {
 		var err error
 		if raw[i], err = enginedb.QUncompress(blob, 8<<20); err != nil {
 			return nil, err
 		}
+	}
+	if !(bpm > 0 && bpm < 1000) {
+		bpm = beatDataBPM(raw[1])
+	}
+	if !(bpm > 0 && bpm < 1000) {
+		return nil, fmt.Errorf("perf: bpm %v", bpm)
 	}
 	raw[2] = enginedb.OverviewMaxima(raw[2])
 	raw[0] = enginedb.TrackDataPeaks(raw[0], raw[2])
@@ -1782,9 +1909,9 @@ func savePerf(local string, perf []byte) {
 	}
 }
 
-// A source still writing a rekordbox Link track's analysis answers 503: asked again
+// A source still writing a track's analysis answers 503: asked again
 // this often, a few times, before Engine loads the copy (only such a track waits).
-var perfRetryWait, perfRetries, perfRequestTimeout = 2 * time.Second, 5, 5 * time.Second
+var perfRetryWait, perfRetries, perfRequestTimeout = 500 * time.Millisecond, 10, 5 * time.Second
 
 func fetchPerf(ctx context.Context, url string) []byte {
 	b, _ := fetchPerfPending(ctx, url)

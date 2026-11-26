@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
 const (
@@ -200,6 +202,185 @@ func (s *Server) handleRekordboxOnDemand(w http.ResponseWriter, r *http.Request)
 	s.serveRekordboxOnDemand(w, r, false)
 }
 
+const (
+	rbOnDemandCacheMax = 8
+	rbOnDemandCacheTTL = 10 * time.Minute
+)
+
+type rbOnDemandCacheEntry struct {
+	res       *bridge.OnDemandResult
+	uuid      string
+	engineID  int64
+	engineKey int
+	engineLen int
+	fromDeck  bool
+	at        time.Time
+}
+
+type rbOnDemandFlight struct {
+	done      chan struct{}
+	cancel    context.CancelFunc
+	waiters   int
+	uuid      string
+	engineID  int64
+	engineKey int
+	engineLen int
+	fromDeck  bool
+	res       *bridge.OnDemandResult
+	err       error
+}
+
+func onDemandCacheKey(mount, enginePath string) string {
+	clean := strings.TrimPrefix(path.Clean("/"+strings.ReplaceAll(strings.TrimSpace(enginePath), "\\", "/")), "/")
+	if mount == "" || clean == "" {
+		return ""
+	}
+	return filepath.Clean(mount) + "\x00" + rbstate.FoldPath(clean)
+}
+
+func (e *rbOnDemandCacheEntry) matchesDeck(req bridge.OnDemandRequest) bool {
+	return e.fromDeck && e.uuid == req.UUID && e.engineID == req.EngineID && e.engineKey == req.EngineKey && e.engineLen == req.EngineLen
+}
+
+func (f *rbOnDemandFlight) matchesDeck(req bridge.OnDemandRequest) bool {
+	return f.fromDeck && f.uuid == req.UUID && f.engineID == req.EngineID && f.engineKey == req.EngineKey && f.engineLen == req.EngineLen
+}
+
+// buildOnDemandCached builds one track's RBXA1 on-demand payload and shares the
+// result across the source deck's own load and any shadow copies asking for it
+// (both concurrent single-flight and post-load cache reuse), so one load does
+// one stick read even when multiple shadow copies ask for EXPF and native data.
+func (s *Server) buildOnDemandCached(ctx context.Context, req bridge.OnDemandRequest, forPeer bool) (*bridge.OnDemandResult, error) {
+	b := s.rbOnDemandBuilder()
+	if b == nil {
+		return nil, os.ErrNotExist
+	}
+	key := onDemandCacheKey(req.Mount, req.EnginePath)
+	if key == "" {
+		s.rbOnDemandBuildCount.Add(1)
+		return b.Build(ctx, req)
+	}
+	now := time.Now()
+	s.rbOnDemandCacheMu.Lock()
+	if e := s.rbOnDemandCache[key]; e != nil {
+		if now.Sub(e.at) < rbOnDemandCacheTTL && (forPeer || e.matchesDeck(req)) {
+			res := e.res
+			s.rbOnDemandCacheMu.Unlock()
+			return res, nil
+		}
+		if now.Sub(e.at) >= rbOnDemandCacheTTL {
+			delete(s.rbOnDemandCache, key)
+		}
+	}
+	if f := s.rbOnDemandFlights[key]; f != nil && (forPeer || f.matchesDeck(req)) {
+		f.waiters++
+		s.rbOnDemandCacheMu.Unlock()
+		return s.waitOnDemandFlight(ctx, f)
+	}
+	// If a peer-initiated flight is running without deck metadata and the source
+	// deck arrives with full metadata, run the deck build cleanly without losing
+	// single-flight protection for other peers.
+	buildCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	f := &rbOnDemandFlight{
+		done:      make(chan struct{}),
+		cancel:    cancel,
+		waiters:   1,
+		uuid:      req.UUID,
+		engineID:  req.EngineID,
+		engineKey: req.EngineKey,
+		engineLen: req.EngineLen,
+		fromDeck:  !forPeer,
+	}
+	if s.rbOnDemandFlights == nil {
+		s.rbOnDemandFlights = map[string]*rbOnDemandFlight{}
+	}
+	if s.rbOnDemandFlights[key] == nil || !forPeer {
+		s.rbOnDemandFlights[key] = f
+	}
+	s.rbOnDemandCacheMu.Unlock()
+
+	go func() {
+		defer cancel()
+		s.rbOnDemandBuildCount.Add(1)
+		f.res, f.err = b.Build(buildCtx, req)
+		s.rbOnDemandCacheMu.Lock()
+		if f.err == nil && f.res != nil {
+			if s.rbOnDemandCache == nil {
+				s.rbOnDemandCache = map[string]*rbOnDemandCacheEntry{}
+			}
+			prev := s.rbOnDemandCache[key]
+			if prev == nil || f.fromDeck || !prev.fromDeck {
+				if len(s.rbOnDemandCache) >= rbOnDemandCacheMax && prev == nil {
+					var oldestKey string
+					var oldestAt time.Time
+					for k, v := range s.rbOnDemandCache {
+						if oldestKey == "" || v.at.Before(oldestAt) {
+							oldestKey, oldestAt = k, v.at
+						}
+					}
+					if oldestKey != "" {
+						delete(s.rbOnDemandCache, oldestKey)
+					}
+				}
+				s.rbOnDemandCache[key] = &rbOnDemandCacheEntry{
+					res:       f.res,
+					uuid:      f.uuid,
+					engineID:  f.engineID,
+					engineKey: f.engineKey,
+					engineLen: f.engineLen,
+					fromDeck:  f.fromDeck,
+					at:        time.Now(),
+				}
+			}
+		}
+		if s.rbOnDemandFlights[key] == f {
+			delete(s.rbOnDemandFlights, key)
+		}
+		s.rbOnDemandCacheMu.Unlock()
+		close(f.done)
+	}()
+	return s.waitOnDemandFlight(ctx, f)
+}
+
+func (s *Server) waitOnDemandFlight(ctx context.Context, f *rbOnDemandFlight) (*bridge.OnDemandResult, error) {
+	select {
+	case <-f.done:
+		return f.res, f.err
+	case <-ctx.Done():
+		s.rbOnDemandCacheMu.Lock()
+		f.waiters--
+		if f.waiters == 0 && f.cancel != nil {
+			f.cancel()
+		}
+		s.rbOnDemandCacheMu.Unlock()
+		return nil, ctx.Err()
+	}
+}
+
+// evictOnDemandCacheForPath drops the cached on-demand payload when the source
+// deck unloads or switches away from a track.
+func (s *Server) evictOnDemandCacheForPath(srcPath string) {
+	if srcPath == "" {
+		return
+	}
+	mediaRoot := filepath.Clean(s.onDemandMediaRoot())
+	sub, err := filepath.Rel(mediaRoot, filepath.Clean(srcPath))
+	if err != nil || sub == "." || sub == ".." || strings.HasPrefix(sub, ".."+string(filepath.Separator)) {
+		return
+	}
+	vol, rel, ok := strings.Cut(filepath.ToSlash(sub), "/")
+	if !ok || vol == "" || rel == "" {
+		return
+	}
+	key := onDemandCacheKey(filepath.Join(mediaRoot, vol), "../"+rel)
+	if key == "" {
+		return
+	}
+	s.rbOnDemandCacheMu.Lock()
+	delete(s.rbOnDemandCache, key)
+	s.rbOnDemandCacheMu.Unlock()
+}
+
 func (s *Server) serveRekordboxOnDemand(w http.ResponseWriter, r *http.Request, fromUnix bool) {
 	if r.Method != http.MethodPost {
 		fail(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -232,7 +413,7 @@ func (s *Server) serveRekordboxOnDemand(w http.ResponseWriter, r *http.Request, 
 	if req.Key != nil {
 		engineKey = *req.Key
 	}
-	res, err := s.rbOnDemandBuilder().Build(r.Context(), bridge.OnDemandRequest{
+	res, err := s.buildOnDemandCached(r.Context(), bridge.OnDemandRequest{
 		Mount:      mount,
 		UUID:       strings.TrimSpace(req.UUID),
 		EnginePath: req.Path,
@@ -240,7 +421,7 @@ func (s *Server) serveRekordboxOnDemand(w http.ResponseWriter, r *http.Request, 
 		EngineKey:  engineKey,
 		EngineBPM:  req.BPM,
 		EngineLen:  req.Length,
-	})
+	}, false)
 	if err != nil {
 		switch {
 		case errors.Is(err, bridge.ErrOnDemandNotFound):

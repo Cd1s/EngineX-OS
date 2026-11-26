@@ -104,6 +104,14 @@ int main(void) {
     // so the shadow lane drew another grid than the source and no overview. The row is the
     // staged analysis again, and is written only when it differs.
     assert(!sc_shadow_analysis_fill(&api, db, 1));
+    // RIGHT, 2026-11-26: 0.5-1 s into one copy load Engine saves its own decoder-trimmed
+    // trackData and synced quickCues via SC_SHADOW_INSERT and re-reads Track. The hook must
+    // fill only once per sidecar digest and must not overwrite Engine's post-load updates.
+    assert(sqlite3_exec(db, "UPDATE PerformanceData SET trackData = X'7472696d6d6564', quickCues = X'73796e636564' WHERE trackId = 1", NULL, NULL, NULL) == SQLITE_OK);
+    assert(!sc_shadow_analysis_fill(&api, db, 1));
+    assert(sqlite3_prepare_v2(db, "SELECT CAST(trackData AS TEXT) || '/' || CAST(quickCues AS TEXT) FROM PerformanceData WHERE trackId = 1", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(stmt, 0), "trimmed/synced"));
+    sqlite3_finalize(stmt);
     assert(sqlite3_exec(db, "UPDATE PerformanceData SET beatData = X'00', overviewWaveFormData = NULL, thirdPartySourceId = NULL WHERE trackId = 1;"
                             "UPDATE Track SET isAnalyzed = 0 WHERE id = 1", NULL, NULL, NULL) == SQLITE_OK);
     assert(sc_shadow_analysis_fill(&api, db, 1));
