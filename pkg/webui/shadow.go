@@ -414,6 +414,7 @@ type shadowState struct {
 	// (address -> newest ask), askNotify wakes the QML's held request when "somebody asks" flips.
 	askConsole   atomic.Bool
 	hears        atomic.Bool
+	shares       atomic.Bool // Share Decks (#329): a player in the Stock layout; the same listener and askers, for a Line In console's ask
 	askers       map[string]time.Time
 	askNotify    chan struct{}
 	askConn      *net.UDPConn
@@ -775,6 +776,11 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		respond(w, map[string]any{"ok": true}) // a console's decks are a picture for the players that ask: no Pro DJ Link status, no MASTER claim, no loop, no push
 		return
 	}
+	if s.shadow.shares.Load() {
+		s.sharePush() // Share Decks: a picture for the Line In consoles that ask, as a console's: no Pro DJ Link status, no MASTER claim, no loop
+		respond(w, map[string]any{"ok": true})
+		return
+	}
 	if s.prolinkExport != nil {
 		s.prolinkExport.SetDeck(ex, players...)
 		if claimed {
@@ -826,6 +832,11 @@ func (s *Server) decksAlive(w http.ResponseWriter, r *http.Request) {
 	sh.mu.Unlock()
 	s.noteDeckPriority(ownCopy, now)
 	if consoleLineBoards[sh.model] {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if sh.shares.Load() {
+		s.sharePush()
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -1281,6 +1292,15 @@ func (s *Server) peerDecksGet(w http.ResponseWriter, r *http.Request) {
 	sh.mu.Lock()
 	var out []deckState
 	switch {
+	case sh.shares.Load(): // a player in the Stock layout with Share Decks on: its decks go to a Line In console that asks, and to nobody else
+		if r.URL.Query().Get("line") == "1" {
+			sh.ask(remoteIP(r), now)
+			// Posted while asked: a stall shows as a frozen picture (stale after 2 s), as any player's. Older decks are
+			// those of an earlier ask (the QML samples only while asked; an ask lasts 6 s): a new ask never shows them.
+			if now.Sub(sh.ownAt) < shadowPeerSeenTimeout {
+				out = sh.ownForPeer(now)
+			}
+		}
 	case !consoleLineBoards[sh.model]:
 		out = sh.ownForPeer(now)
 	case sh.hears.Load() && r.URL.Query().Get("console") == "1": // a console with Line In on: its decks go to a player that asks, and to nobody else
@@ -1311,7 +1331,20 @@ func (s *Server) ownDeck(r *http.Request) (deckState, bool) {
 	return deckState{}, false
 }
 
+// shareDisplayOnly refuses what a console's Line In view never asks for: a player with Share Decks gives the deck's
+// state and the display data of its track, never the audio file or the performance data a shadow copy is made from.
+func (s *Server) shareDisplayOnly(w http.ResponseWriter) bool {
+	if !s.shadow.shares.Load() {
+		return false
+	}
+	http.Error(w, "display only", http.StatusForbidden)
+	return true
+}
+
 func (s *Server) peerAudioGet(w http.ResponseWriter, r *http.Request) {
+	if s.shareDisplayOnly(w) {
+		return
+	}
 	path := s.ownDeckFile(r)
 	if path == "" {
 		http.Error(w, "not loaded", http.StatusConflict)
@@ -1333,6 +1366,9 @@ func (s *Server) peerAudioGet(w http.ResponseWriter, r *http.Request) {
 // peerPerfGet serves the current deck's analysis as EXPF (#49) or as the
 // original compressed blobs for a peer that can fill its shadow row at load.
 func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
+	if s.shareDisplayOnly(w) {
+		return
+	}
 	d, _ := s.ownDeck(r)
 	if d.Path == "" {
 		http.Error(w, "not loaded", http.StatusConflict)
@@ -2713,6 +2749,9 @@ func (s *Server) shadowLoop() {
 			if sh.askConsole.Load() {
 				shadowSendAsk(conn)
 			}
+			if sh.hears.Load() {
+				shadowSendAskPlayers(conn) // a console with Line In on: a player in the Stock layout with Share Decks answers
+			}
 		}
 		s.shadowPollPeers()
 	}
@@ -2883,10 +2922,13 @@ func (s *Server) shadowPollPeers() {
 		port = 8080
 	}
 	ask := sh.askConsole.Load() // the row Show Console: this pull is also an ask, which an older unit ignores
+	line := sh.hears.Load()     // a console with Line In on: a pull a player with Share Decks answers, which an older unit ignores
 	for _, ip := range ips {
 		u := "http://" + net.JoinHostPort(ip, strconv.Itoa(port)) + "/peer/decks"
 		if ask {
 			u += "?console=1"
+		} else if line {
+			u += "?line=1"
 		}
 		resp, err := peerClient.Get(u)
 		if err != nil {

@@ -17,9 +17,21 @@ package webui
 //     so what the players show each other does not move, and places them in the lanes still free.
 //  5. Silence ends it: no ask for 6 s, and the QML stops sampling; a channel put on Line / AUX
 //     leaves the next post, and the player lets the deck go.
+//
+// Share Decks (#329) is the same channel the other way round: a player in the Stock layout with the row
+// Share Decks on is shown by a console's Line In view without the 4-deck layout.
+//  1. A console with Line In on, while a channel is on Line / AUX (its deck loop runs), broadcasts
+//     shadowAskPlayerMagic on shadowAskPort beside its beacon and pulls GET /peer/decks?line=1.
+//  2. A player with the row on listens on that port (the same bound socket), answers with a unicast
+//     beacon, so the console finds it, and serves its decks to a pull with line=1 and to nobody else.
+//  3. An ask or a pull with line=1 is noted (askers); the player's QML is told by the same held request
+//     and samples only then. Its posts go to the consoles that asked, unicast, nowhere else: no deck loop,
+//     no beacon of its own, no Pro DJ Link status, no MASTER claim.
+//  4. Silence ends it, as above. An older unit has no listener and ignores the query.
 
 import (
 	"cmp"
+	"encoding/json"
 	"net"
 	"net/http"
 	"slices"
@@ -33,6 +45,9 @@ var shadowAskPort = 50198
 
 const shadowAskMagic = "EngineX-ask-console 1"
 
+// shadowAskPlayerMagic is what a console with Line In on says beside its beacon: a player with Share Decks answers.
+const shadowAskPlayerMagic = "EngineX-ask-player 1"
+
 // consoleAskHold is how long the QML's request is held while nothing changes; a var so tests need not wait.
 var consoleAskHold = 25 * time.Second
 
@@ -45,6 +60,8 @@ func (s *Server) applyShadowFlags(v uiSettings) {
 	sh := s.shadow
 	sh.askConsole.Store(v.ConsoleDecks && playerBoards[sh.model])
 	s.consoleAskSync(v.ConsoleLineView && consoleLineBoards[sh.model])
+	// Share Decks takes effect in the Stock layout only: in the 4-deck layout the player beacons and is shown anyway.
+	s.shareAskSync(v.ShareDecks && !v.FourDeckWaveform && playerBoards[sh.model])
 }
 
 // ---- console side ----
@@ -78,7 +95,26 @@ func (s *Server) consoleAskSync(want bool) {
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	sh.hears.Store(want)
-	if !want {
+	s.askListenSync()
+}
+
+// shareAskSync opens or closes the same listener on a player: up only while Share Decks is on in the Stock layout.
+// Switched off, the decks it shared are forgotten: a console that still pulls gets nothing, not the last picture.
+func (s *Server) shareAskSync(want bool) {
+	sh := s.shadow
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if sh.shares.Swap(want) && !want {
+		sh.own, sh.ownAt = nil, time.Time{}
+	}
+	s.askListenSync()
+}
+
+// askListenSync opens the ask listener while a console hears or a player shares, and closes it, forgetting the
+// asks, when neither does (a unit is one or the other). Called with sh.mu held.
+func (s *Server) askListenSync() {
+	sh := s.shadow
+	if want := sh.hears.Load() || sh.shares.Load(); !want {
 		if sh.askConn != nil {
 			sh.askConn.Close()
 			sh.askConn = nil
@@ -101,7 +137,8 @@ func (s *Server) consoleAskSync(want bool) {
 	go s.consoleAskLoop(conn)
 }
 
-// consoleAskLoop reads the asks: a blocked read, nothing else, until the listener is closed.
+// consoleAskLoop reads the asks: a blocked read, nothing else, until the listener is closed. A console takes a
+// player's ask, a player with Share Decks a Line In console's; each ignores the other kind.
 func (s *Server) consoleAskLoop(conn *net.UDPConn) {
 	sh := s.shadow
 	b := make([]byte, 64)
@@ -110,7 +147,7 @@ func (s *Server) consoleAskLoop(conn *net.UDPConn) {
 		if err != nil {
 			return
 		}
-		if string(b[:n]) != shadowAskMagic {
+		if msg := string(b[:n]); !(msg == shadowAskMagic && sh.hears.Load()) && !(msg == shadowAskPlayerMagic && sh.shares.Load()) {
 			continue
 		}
 		sh.mu.Lock()
@@ -295,6 +332,37 @@ func (s *Server) consoleLanes(role string, taken []deckState, now time.Time) []c
 // shadowSendAsk is what a player with the row on says beside its beacon.
 func shadowSendAsk(conn *net.UDPConn) {
 	shadowBroadcast(conn, []byte(shadowAskMagic), shadowAskPort)
+}
+
+// shadowSendAskPlayers is what a console with Line In on says beside its beacon (Share Decks).
+func shadowSendAskPlayers(conn *net.UDPConn) {
+	shadowBroadcast(conn, []byte(shadowAskPlayerMagic), shadowAskPort)
+}
+
+// sharePush sends a Share Decks player's decks to the consoles that asked, from its listener's socket, unicast:
+// to nobody else, and nothing at all without an ask.
+func (s *Server) sharePush() {
+	sh := s.shadow
+	now := time.Now()
+	sh.mu.Lock()
+	conn, port := sh.askConn, cmp.Or(sh.pushPort, shadowBeaconPort)
+	var ips []net.IP
+	for ip, t := range sh.askers {
+		if now.Sub(t) < shadowPeerSeenTimeout {
+			ips = append(ips, net.ParseIP(ip))
+		}
+	}
+	b, err := json.Marshal(sh.ownForPeer(now))
+	sh.mu.Unlock()
+	if conn == nil || err != nil || len(ips) == 0 {
+		return
+	}
+	pkt := append([]byte(shadowDecksMagic), b...)
+	for _, ip := range ips {
+		if ip != nil {
+			conn.WriteToUDP(pkt, &net.UDPAddr{IP: ip, Port: port})
+		}
+	}
 }
 
 // consoleDeckEntry is the display data of a console's deck as the lane at (deck, key) shows it.

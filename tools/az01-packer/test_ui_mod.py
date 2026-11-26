@@ -643,6 +643,7 @@ class OnOffSwitchCompatibilityTest(unittest.TestCase):
             "scSdHighSpeed": "sdHighSpeed", "scRemoteAccess": "remoteAccess",
             "scRestoreBpmOnUnsync": "restoreBpmOnUnsync",
             "scHifiOutput": "hifiOutput", "scShowConsole": "consoleDecks",
+            "scShareDecks": "shareDecks",
         }
         for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
             qrc = LAB / version / "qrc"
@@ -4109,7 +4110,9 @@ assert.equal(gate("JP07", {{consoleLineView: true, fourDeckWaveform: true, fourD
         self.assertIn('running: (root.scFourDeckRole !== "" || root.scLineLive) && root.scShadowEngineMask !== 30', bp.SERVICES_MAIN)
         # The sampler (the only sender) runs on a role, or, stage 2, on a console only while Line In is on and a player asks
         # (test_the_console_sampler_does_not_run_without_an_asker): with Line In on and nobody asking it never sends.
-        self.assertRegex(bp.SERVICES_MAIN, r'id: scShadowTickTimer\n\t\tinterval: 40; repeat: true\n\t\trunning: root\.scFourDeckRole !== "" \|\| \(root\.scConsoleLine && root\.scConsoleAsked\)\n')
+        # #329 Share Decks adds one more case, a player in the Stock layout while a Line In console asks
+        # (test_the_share_sampler_runs_only_while_a_line_in_console_asks); the line stays pinned whole.
+        self.assertRegex(bp.SERVICES_MAIN, r'id: scShadowTickTimer\n\t\tinterval: 40; repeat: true\n\t\trunning: root\.scFourDeckRole !== "" \|\| \(root\.scConsoleLine && root\.scConsoleAsked\) \|\| \(root\.scShareLive && root\.scShareAsked\)\n')
         # The mixer is followed by signal, never by timer: four Connections, none gated by a Timer, and no Timer names the mask.
         self.assertEqual(len(re.findall(r'Connections \{ target: root\.scConsoleLine \? root\.scTr\("/Engine/Mixer/Channel[1-4]/Line"\) : null', bp.SERVICES_MAIN)), 4)
         self.assertNotRegex(bp.SERVICES_MAIN, r'running:[^\n]*scLineSync')
@@ -4217,7 +4220,10 @@ assert.match(requests[0].url, /\/v1\/enginex\/shadow\?ver=0$/);
         self.assertIn("o.player = root.scOwnPlayer || undefined", bp.SERVICES_MAIN)
         m = re.search(r"readonly property int scOwnPlayer: \{\n(.*?)\n\t\}", bp.SERVICES_MAIN, re.S)
         self.assertIsNotNone(m)
-        self.assertIn('scFourDeckRole !== "" ? scTr("/Client/Preferences/Player") : null', m.group(1))  # a console never reads it
+        # A console never reads it: it has no role, and Share Decks (#329) is a player's row (scShareLive needs scShareDecks,
+        # which only a player board sets; test_the_share_sampler_runs_only_while_a_line_in_console_asks).
+        self.assertIn('scFourDeckRole !== "" || scShareLive ? scTr("/Client/Preferences/Player") : null', m.group(1))
+        self.assertIn("scShareDecks = scIsPlayerBoard && !!v.shareDecks\n", bp.SERVICES_MAIN)
         # The edge test and the heartbeat know nothing of it: the number rides on full posts only.
         tick = self._qml_fn("scShadowTick")
         self.assertNotIn("sent.player", tick)
@@ -4378,6 +4384,105 @@ scLineMask = 0; loaded[2] = true; tick(); assert.deepEqual(decks(), [1, 2, 3, 4]
 for (const d of [1, 2, 3, 4]) loaded[d] = false; tick(); assert.deepEqual(decks(), []);
 assert.equal(layerReads, 0, 'a console has no layer to read');
 assert(bodies.every(b => b.every(o => o.player === undefined || o.player === 0)), 'a console has no player number');
+""")
+
+    # ---- #329 Share Decks: a player in the Stock layout is shown by a console's Line In view ----
+
+    def test_share_decks_is_a_player_row_of_the_stock_layout_default_off(self):
+        entries = bp.SHARE_DECKS_ENTRIES
+        self.assertIn('text: "Share Decks"', entries)
+        self.assertEqual(entries.count("visible: root.scIsPlayerBoard && !root.scFourDeckOn"), 2)  # the row and its hint, nothing else
+        self.assertIn('root.scCall("shareDecks=" + (root.scShareDecks ? 0 : 1))', entries)
+        self.assertNotIn("scRestartCall", entries)  # live: stream-sync reads the flag, the QML follows each answer
+        view = bp.VIEW_ENTRIES
+        self.assertIn(entries, view)  # in the Layout tab, after the 4-deck rows
+        self.assertLess(view.index(bp.CONSOLE_DECKS_ENTRIES), view.index(entries))
+        self.assertIn("property bool scShareDecks: false", bp.SERVICES_MAIN)  # default off
+        self.assertIn("scShareDecks = scIsPlayerBoard && !!v.shareDecks\n", bp.SERVICES_MAIN)  # a console never has it on
+        rows = bp.load_dict()
+        hint = next(l for l in entries.splitlines() if l.strip().startswith('text: "Share Decks: ')).strip()[len('text: "'):-1]
+        for en in ("Share Decks", hint):
+            self.assertIn(en, rows, en)
+            for lang in ("zh-Hans", "zh-Hant", "es"):
+                self.assertTrue(rows[en][lang].strip(), (en, lang))
+        # The player keeps its stock screen: the row is not a layout. What switches the layout (the guard that writes
+        # the player's assignment files, the Gen-2 bundle) never reads it, and the 4-deck gates stay as they were.
+        for path in ("rootfs-overlay/etc/enginex/engine-ui-guard", "tools/az01-packer/build-data-bundle.py"):
+            self.assertNotIn("share_decks", (REPO / path).read_text(), path)
+            self.assertNotIn("shareDecks", (REPO / path).read_text(), path)
+        for line in ("scFourDeckRole = scIsPlayerBoard && v.fourDeckWaveform ?", "scFourDeckOn = scIsPlayerBoard && !!v.fourDeckWaveform"):
+            self.assertIn(line, bp.SERVICES_MAIN)
+        self.assertNotIn("scShare", bp.FOUR_DECK_ENTRIES)
+
+    def test_the_share_sampler_runs_only_while_a_line_in_console_asks(self):
+        # The timer is the only start of the sampler without a role; for Share Decks: the row on, the Stock layout,
+        # AND a Line In console asking. Without an asker nothing runs but one held request to its own stream-sync.
+        self.assertIn('running: root.scFourDeckRole !== "" || (root.scConsoleLine && root.scConsoleAsked) || (root.scShareLive && root.scShareAsked)', bp.SERVICES_MAIN)
+        self.assertIn("readonly property bool scShareLive: scShareDecks && !scFourDeckOn", bp.SERVICES_MAIN)
+        poll = self._qml_fn("scShareAskPoll")
+        self.assertIn("if (!scShareLive) return", poll)
+        self.assertIn('"http://127.0.0.1:8080/v1/enginex/consolesend?asked=" + (scShareAsked ? 1 : 0)', poll)
+        handler = re.search(r"onScShareLiveChanged: \{(.*?)\n\t\}", bp.SERVICES_MAIN, re.S).group(1)
+        self.assertIn("if (scShareLive) scShareAskPoll()", handler)
+        self.assertIn("scShareAsked = false", handler)
+        self.assertIn("x.abort()", handler)
+        asked = re.search(r"onScShareAskedChanged: \{(.*?)\n\t\}", bp.SERVICES_MAIN, re.S).group(1)
+        self.assertIn("scShadowMine = []", asked)  # every ask starts with a full post
+        self.assertIn("if (scShareAsked) scShadowWake()", asked)
+        self.js(self._qml_fn("scShareAskPoll") + r"""
+globalThis.scShareLive = false; globalThis.scShareAsked = false; globalThis.scShareAskRequest = null;
+globalThis.scShareAskTimer = {restarts: 0, restart() { this.restarts++; }};
+const reqs = [];
+globalThis.XMLHttpRequest = class { constructor() { reqs.push(this); this.readyState = 1; } open(m, url) { this.url = url; assert.equal(m, 'GET'); } send() {}
+    answer(status, data) { this.status = status; this.responseText = JSON.stringify(data); this.readyState = 4; this.onreadystatechange(); } };
+scShareAskPoll(); assert.equal(reqs.length, 0, 'row off, or the 4-deck layout: no request');
+scShareLive = true; scShareAskPoll(); assert.equal(reqs.length, 1); assert(reqs[0].url.endsWith('/v1/enginex/consolesend?asked=0'));
+scShareAskPoll(); assert.equal(reqs.length, 1, 'one held request at a time');
+reqs[0].answer(200, {asked: true}); assert.equal(scShareAsked, true); assert.equal(reqs.length, 2); assert(reqs[1].url.endsWith('asked=1'), 'the next carries what we believe');
+reqs[1].answer(200, {asked: false}); assert.equal(scShareAsked, false); assert.equal(reqs.length, 3);
+reqs[2].answer(500, {}); assert.equal(reqs.length, 3, 'a failure does not loop'); assert.equal(scShareAskTimer.restarts, 1);
+scShareLive = false; reqs[2].readyState = 1; reqs[2].answer(200, {asked: true}); assert.equal(scShareAsked, false, 'an answer after the row went off is dropped');
+""")
+
+    def test_a_share_decks_player_samples_its_two_layers_and_marks_the_active_one(self):
+        # No role, Share Decks on, a Line In console asking: its sampler runs. It sends Layer A and Layer B (decks 1
+        # and 2), loaded or not, marks the deck on the stock screen's Layer, carries its player number, and does nothing
+        # of a 4-deck peer's: no poll of the deck loop, no lanes, no MASTER work, no 4-deck Layer.
+        self.js(r"""
+scPlayer = true; scFourDeckRole = '';
+globalThis.scShareLive = true; globalThis.scShareAsked = true; globalThis.scOwnPlayer = 3;
+globalThis.scConsoleLine = false; globalThis.scConsoleAsked = false; globalThis.scLineMask = 0;
+globalThis.scConsoleSendDecks = () => { throw Error("a console's deck list is not a player's"); };
+const loaded = {1: true, 2: false};
+let layer = 0, bodies = [], reads = [];
+globalThis.XMLHttpRequest = class { constructor() { this.readyState = 0; } open(m, url) { this.url = url; this.readyState = 1; }
+    send(body) { if (!this.url.endsWith('/alive')) bodies.push(JSON.parse(body)); this.readyState = 4; this.status = 200; } };
+globalThis.scShadowPoll = () => { throw Error('Share Decks must not start the deck loop'); };
+globalThis.scShadowLine = () => { throw Error('lane work of a 4-deck player'); };
+globalThis.scShadowLandingTick = () => { throw Error('lane work of a 4-deck player'); };
+globalThis.scShadowMasterBack = () => { throw Error('Share Decks takes no MASTER'); };
+globalThis.scTr = path => {
+    if (path.indexOf('/GUI/Decks/') === 0) reads.push(path);
+    if (path === '/GUI/Decks/Deck/Layer') return { get index() { return layer; } };
+    const m = /^[/]Engine[/]Deck([1-4])[/]/.exec(path);
+    if (m && Number(m[1]) > 2) return null; // the Stock layout has two Engine decks
+    return { value: path.endsWith('/SampleRate') ? 48000 : 0, unnormalized: 0, color: '#ffffff', index: 0,
+        get state() { return !!m && path.endsWith('/SongLoaded') && loaded[m[1]]; },
+        get string() { return m && path.endsWith('/TrackUri') && loaded[m[1]] ? 'file:///d' + m[1] + '.mp3' : ''; } };
+};
+const tick = () => { now += 40; scShadowTick(); };
+const last = () => bodies[bodies.length - 1];
+tick();
+assert.deepEqual(last().map(o => o.deck), [1, 2], 'both layers, the empty one too');
+assert.deepEqual(last().map(o => !!o.active), [true, false], 'Layer A is on the screen');
+assert(last().every(o => o.player === 3), 'the console orders the units it shows by player number');
+assert.equal(scShadowMineRole, 'share');
+layer = 1; tick();
+assert.deepEqual(last().map(o => !!o.active), [false, true], 'a Layer press moves the lane at once');
+assert(reads.length > 0 && reads.every(p => p === '/GUI/Decks/Deck/Layer'), "the stock screen's Layer, never a 4-deck one: " + reads);
+// An ask ends and another begins (onScShareAskedChanged empties the lists): both layers again, in full.
+scShadowMine = []; scShadowOwn.length = 0; scShadowPostFull = true; const n = bodies.length; tick();
+assert.equal(bodies.length, n + 1); assert.deepEqual(last().map(o => o.deck), [1, 2]);
 """)
 
 
