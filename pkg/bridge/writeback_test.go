@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -1821,4 +1822,416 @@ func TestWriteBackZeroWritesOnImportedRepairedTrack(t *testing.T) {
 	if len(aDat.Cues) != 1 || aDat.Cues[0].HotCue != 1 || aDat.Cues[0].TimeMS != newCueMS || aDat.Cues[0].Name != "" || aDat.Cues[0].Color != ([4]byte{}) {
 		t.Fatalf("Case 3 cues mismatch: %+v", aDat.Cues)
 	}
+}
+
+func TestWriteBackZeroDecryptOnOnDemandLoad(t *testing.T) {
+	ctx := context.Background()
+	parentDir := t.TempDir()
+	t.Setenv(rbstate.StageEnv, filepath.Join(parentDir, "stage"))
+	root := filepath.Join(parentDir, "UNTITLED")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rawDAT, err := os.ReadFile(filepath.Join("..", "rekordbox", "testdata", "rb_hot_compact.dat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawEXT, err := os.ReadFile(filepath.Join("..", "rekordbox", "testdata", "rb_hot_compact.ext"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const cueMS = uint32(10000)
+	repDAT, _, err := rekordbox.RewriteANLZCues(rawDAT, []rekordbox.Cue{{HotCue: 1, TimeMS: cueMS}}, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repEXT, _, err := rekordbox.RewriteANLZCues(rawEXT, []rekordbox.Cue{{HotCue: 1, TimeMS: cueMS}}, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	datRel := "PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT"
+	extRel := "PIONEER/USBANLZ/P001/00000001/ANLZ0000.EXT"
+	testfixture.Write(t, root, datRel, repDAT)
+	testfixture.Write(t, root, extRel, repEXT)
+
+	mp3 := makeLAMEFixtureMP3(25000)
+	testfixture.Write(t, root, "Contents/FixtureA/Track01.mp3", mp3)
+	testfixture.Write(t, root, "Contents/FixtureA/Track02.mp3", mp3)
+	info, err := compat.AudioHeader(filepath.Join(root, "Contents", "FixtureA", "Track01.mp3"))
+	if err != nil || info.RekordboxOffset() <= 0 {
+		t.Fatalf("AudioHeader: info=%+v err=%v", info, err)
+	}
+	rbOffset := float64(info.RekordboxOffset())
+
+	// Track 2 carries an inactive loop so toggling activeOnLoadLoops alone tests filled.jsonl "al".
+	repDAT2, _, err := rekordbox.RewriteANLZCues(rawDAT, []rekordbox.Cue{{HotCue: 1, TimeMS: 2000, EndMS: 4000, Loop: true}}, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repEXT2, _, err := rekordbox.RewriteANLZCues(rawEXT, []rekordbox.Cue{{HotCue: 1, TimeMS: 2000, EndMS: 4000, Loop: true}}, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testfixture.Write(t, root, "PIONEER/USBANLZ/P001/00000002/ANLZ0000.DAT", repDAT2)
+	testfixture.Write(t, root, "PIONEER/USBANLZ/P001/00000002/ANLZ0000.EXT", repEXT2)
+
+	// Create a SQLCipher 4 encrypted OneLibrary export matching complete_export_anlz0000.
+	plainSource := filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary_decrypted.db")
+	encryptedSource := filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary.db")
+	plainRaw, err := os.ReadFile(plainSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainPath := filepath.Join(t.TempDir(), "one.db")
+	if err := os.WriteFile(plainPath, plainRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oneDB, err := sql.Open("sqlite", plainPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = oneDB.Exec(`
+		PRAGMA journal_mode=DELETE;
+		ALTER TABLE content ADD COLUMN analysisDataFilePath varchar;
+		ALTER TABLE content ADD COLUMN genre_id INTEGER;
+		ALTER TABLE content ADD COLUMN label_id INTEGER;
+		ALTER TABLE content ADD COLUMN hasModified integer;
+		ALTER TABLE content ADD COLUMN cueUpdateCount integer;
+		ALTER TABLE content ADD COLUMN analysisDataUpdateCount integer;
+		CREATE TABLE genre(genre_id INTEGER PRIMARY KEY, name TEXT);
+		CREATE TABLE label(label_id INTEGER PRIMARY KEY, name TEXT);
+		INSERT INTO genre VALUES (20, 'House');
+		INSERT INTO label VALUES (30, 'LabelA');
+		DELETE FROM content;
+		DELETE FROM cue;
+		INSERT INTO content(content_id, title, bpmx100, length, path, samplingRate, djComment, analysisDataFilePath, genre_id, label_id, hasModified, cueUpdateCount)
+		VALUES
+			(1, 'Fixture Track 1', 12800, 25, '/Contents/FixtureA/Track01.mp3', 44100, 'InitNote', '/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT', 20, 30, 0, NULL),
+			(2, 'Fixture Track 2', 12800, 25, '/Contents/FixtureA/Track02.mp3', 44100, 'InitNote', '/PIONEER/USBANLZ/P001/00000002/ANLZ0000.DAT', 20, 30, 0, NULL);
+		INSERT INTO cue(cue_id, content_id, kind, colorTableIndex, cueComment, isActiveLoop, beatLoopNumerator, beatLoopDenominator, inUsec, outUsec)
+		VALUES
+			(1, 1, 1, 0, '', 0, 0, 0, 10000000, -1),
+			(2, 2, 1, 0, '', 0, 0, 0, 2000000, 4000000);
+	`)
+	_ = oneDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	salt, err := rekordbox.ReadSQLCipherSalt(encryptedSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainF, err := os.Open(plainPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainStat, err := plainF.Stat()
+	if err != nil {
+		_ = plainF.Close()
+		t.Fatal(err)
+	}
+	onePath := filepath.Join(root, "PIONEER", "rekordbox", "exportLibrary.db")
+	if err := os.MkdirAll(filepath.Dir(onePath), 0o755); err != nil {
+		_ = plainF.Close()
+		t.Fatal(err)
+	}
+	encF, err := os.Create(onePath)
+	if err != nil {
+		_ = plainF.Close()
+		t.Fatal(err)
+	}
+	if err := rekordbox.EncryptSQLCipher4(ctx, plainF, plainStat.Size(), encF, salt, []byte("r8gddnr4k847830ar6cqzbkk0el6qytmb3trbbx805jm74vez64i5o8fnrqryqls")); err != nil {
+		_ = encF.Close()
+		_ = plainF.Close()
+		t.Fatal(err)
+	}
+	_ = encF.Close()
+	_ = plainF.Close()
+
+	if res, err := ConvertAtMount(ctx, root, MountOptions{OnDemand: true}); err != nil || res.Added != 2 {
+		t.Fatalf("ConvertAtMount(OnDemand): res=%+v err=%v", res, err)
+	}
+	dbDir := filepath.Join(root, "Engine Library", "Database2")
+	snapPath := filepath.Join(dbDir, rbstate.SnapshotName)
+	snap, err := rbstate.Load(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr1 := snap.Tracks["contents/fixturea/track01.mp3"]
+	tr2 := snap.Tracks["contents/fixturea/track02.mp3"]
+	if tr1 == nil || len(tr1.MetaDigest) == 0 || tr2 == nil || len(tr2.MetaDigest) == 0 {
+		t.Fatalf("expected OnDemand snapshot tracks with MetaDigest, got tr1=%+v tr2=%+v", tr1, tr2)
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(dbDir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	sdir := filepath.Join(parentDir, "stage", snap.LibraryUUID)
+	if err := os.MkdirAll(sdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var jlines []byte
+	for _, item := range []struct {
+		tr   *rbstate.Track
+		path string
+	}{
+		{tr1, "../Contents/FixtureA/Track01.mp3"},
+		{tr2, "../Contents/FixtureA/Track02.mp3"},
+	} {
+		odRes, err := NewOnDemandBuilder().Build(ctx, OnDemandRequest{
+			Mount:      root,
+			EnginePath: item.path,
+			EngineID:   item.tr.EngineID,
+		})
+		if err != nil {
+			t.Fatalf("OnDemandBuilder.Build(%s): %v", item.path, err)
+		}
+		perf, err := rbstate.DecodePerf(odRes.RBXA1)
+		if err != nil {
+			t.Fatalf("DecodePerf: %v", err)
+		}
+		if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=?, thirdPartySourceId=NULL WHERE trackId=?`,
+			perf.TrackData, perf.Overview, perf.Beats, perf.QuickCues, perf.Loops, perf.ActiveLoops, item.tr.EngineID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE Track SET isAnalyzed=1, lastEditTime=COALESCE(lastEditTime,0)+5 WHERE id=?`, item.tr.EngineID); err != nil {
+			t.Fatal(err)
+		}
+		jline, _ := json.Marshal(map[string]any{
+			"id":   item.tr.EngineID,
+			"k":    item.tr.Key,
+			"wr":   base64.StdEncoding.EncodeToString(odRes.Written),
+			"wrnm": base64.StdEncoding.EncodeToString(odRes.WrittenNoMain),
+			"al":   int64(perf.ActiveLoops),
+			"v":    rbstate.Rules,
+			"w":    item.tr.Row,
+		})
+		jlines = append(jlines, append(jline, '\n')...)
+	}
+	if err := os.WriteFile(filepath.Join(sdir, "filled.jsonl"), jlines, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var readLibsCalls int
+	origHook := writeBackReadLibsHook
+	writeBackReadLibsHook = func() { readLibsCalls++ }
+	t.Cleanup(func() { writeBackReadLibsHook = origHook })
+
+	snapBytesBefore, err := os.ReadFile(snapPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Untouched on-demand loads must perform 0 export decryptions, 0 key derivations, and 0 snapshot writes
+	// in both watcher mode and eject mode!
+	keyDir := t.TempDir()
+	wRes, err := WriteBackCues(ctx, root, WriteBackOptions{
+		SkipPreparingCheck: true,
+		Session:            &CueSession{keys: rekordbox.NewKeyCacheAt(keyDir)},
+		Settled:            func() error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("watcher WriteBackCues: %v", err)
+	}
+	if readLibsCalls != 0 || wRes.TracksRead != 2 || wRes.TracksChanged != 0 || wRes.FilesUpdated != 0 ||
+		wRes.BytesWritten != 0 || wRes.PhasesMS["decrypt"] != 0 || wRes.PhasesMS["key"] != 0 {
+		t.Fatalf("untouched on-demand load triggered export read/decrypt/write: readLibs=%d res=%+v", readLibsCalls, wRes)
+	}
+	ejRes, err := WriteBackCues(ctx, root, WriteBackOptions{
+		SkipPreparingCheck: true,
+		OnEject:            true,
+		Session:            &CueSession{keys: rekordbox.NewKeyCacheAt(keyDir)},
+	})
+	if err != nil {
+		t.Fatalf("eject WriteBackCues: %v", err)
+	}
+	if readLibsCalls != 0 || ejRes.TracksRead != 2 || ejRes.TracksChanged != 0 || ejRes.FilesUpdated != 0 ||
+		ejRes.PhasesMS["decrypt"] != 0 || ejRes.PhasesMS["key"] != 0 {
+		t.Fatalf("eject on untouched on-demand load triggered export read/decrypt: readLibs=%d res=%+v", readLibsCalls, ejRes)
+	}
+	snapBytesAfter, err := os.ReadFile(snapPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(snapBytesBefore, snapBytesAfter) {
+		t.Fatal("untouched on-demand write-back rewrote .rb-bridge-snapshot on disk!")
+	}
+
+	// Adopted tracks with Synced == nil persist their baseline Synced once in 0 ms decrypt/key
+	// so subsequent passes with a fresh session read 0 untouched rows and do 0 snapshot writes.
+	adoptedSnap, err := rbstate.Load(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adoptedSnap.Tracks[tr1.Key].Synced = nil
+	if err := adoptedSnap.SaveNext(dbDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := rbstate.Promote(dbDir); err != nil {
+		t.Fatal(err)
+	}
+	settle1, err := WriteBackCues(ctx, root, WriteBackOptions{
+		SkipPreparingCheck: true,
+		OnEject:            true,
+		Session:            &CueSession{keys: rekordbox.NewKeyCacheAt(keyDir)},
+	})
+	if err != nil || readLibsCalls != 0 || settle1.TracksRead != 2 || settle1.TracksChanged != 0 ||
+		settle1.PhasesMS["decrypt"] != 0 || settle1.PhasesMS["key"] != 0 {
+		t.Fatalf("adopted Synced==nil settle pass = %+v, calls=%d err=%v", settle1, readLibsCalls, err)
+	}
+	afterSettleSnap, err := rbstate.Load(dbDir)
+	if err != nil || len(afterSettleSnap.Tracks[tr1.Key].Synced) == 0 || len(afterSettleSnap.Tracks[tr2.Key].Synced) == 0 {
+		t.Fatalf("adopted settle pass did not persist Synced digest: tr1=%+v tr2=%+v err=%v", afterSettleSnap.Tracks[tr1.Key], afterSettleSnap.Tracks[tr2.Key], err)
+	}
+	settleSnapBytes, err := os.ReadFile(snapPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settle2, err := WriteBackCues(ctx, root, WriteBackOptions{
+		SkipPreparingCheck: true,
+		OnEject:            true,
+		Session:            &CueSession{keys: rekordbox.NewKeyCacheAt(keyDir)},
+	})
+	if err != nil || readLibsCalls != 0 || settle2.TracksRead != 0 || settle2.TracksChanged != 0 {
+		t.Fatalf("post-settle second eject pass re-read tracks: %+v, calls=%d err=%v", settle2, readLibsCalls, err)
+	}
+	if curSnapBytes, err := os.ReadFile(snapPath); err != nil || !bytes.Equal(settleSnapBytes, curSnapBytes) {
+		t.Fatalf("post-settle second eject pass modified .rb-bridge-snapshot")
+	}
+
+	// Playing/loading an adopted track after Synced is settled can update unadjusted (adj == 0)
+	// defaultMainCue and lastEditTime without any DJ cue edit: SyncedDigest normalization must
+	// still report 0 export decrypts, 0 key derivations, and 0 snapshot writes.
+	var curQC []byte
+	if err := db.QueryRow(`SELECT quickCues FROM PerformanceData WHERE trackId=?`, tr1.EngineID).Scan(&curQC); err != nil {
+		t.Fatal(err)
+	}
+	rawQC, err := enginedb.QUncompress(curQC, 1<<20)
+	if err != nil || len(rawQC) < 17 || rawQC[len(rawQC)-9] != 0 {
+		t.Fatalf("unexpected quickCues tail on tr1: err=%v len=%d", err, len(rawQC))
+	}
+	binary.BigEndian.PutUint64(rawQC[len(rawQC)-8:], binary.BigEndian.Uint64(rawQC[len(rawQC)-8:])^1)
+	flippedQC, err := enginedb.QCompress(rawQC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=?`, flippedQC, tr1.EngineID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+5 WHERE id=?`, tr1.EngineID); err != nil {
+		t.Fatal(err)
+	}
+	settle3, err := WriteBackCues(ctx, root, WriteBackOptions{
+		SkipPreparingCheck: true,
+		OnEject:            true,
+		Session:            &CueSession{keys: rekordbox.NewKeyCacheAt(keyDir)},
+	})
+	if err != nil || readLibsCalls != 0 || settle3.TracksRead != 1 || settle3.TracksChanged != 0 ||
+		settle3.PhasesMS["decrypt"] != 0 || settle3.PhasesMS["key"] != 0 {
+		t.Fatalf("post-settle unadjusted mainCue flip = %+v, calls=%d err=%v", settle3, readLibsCalls, err)
+	}
+	if curSnapBytes, err := os.ReadFile(snapPath); err != nil || !bytes.Equal(settleSnapBytes, curSnapBytes) {
+		t.Fatalf("post-settle unadjusted mainCue flip rewrote .rb-bridge-snapshot")
+	}
+
+	// Now verify all 4 real mutations DO trigger write-back promptly, using warm KeyCache after initial derivation.
+	sharedKeys := rekordbox.NewKeyCacheAt(keyDir)
+	t.Run("1_CueEdit", func(t *testing.T) {
+		prevCalls := readLibsCalls
+		var slots [8]struct {
+			name    string
+			samples float64
+			color   [4]byte
+		}
+		for i := range slots {
+			slots[i].samples = -1
+		}
+		slots[0] = struct {
+			name    string
+			samples float64
+			color   [4]byte
+		}{samples: float64(cueMS)*44.1 - rbOffset}
+		slots[1] = struct {
+			name    string
+			samples float64
+			color   [4]byte
+		}{samples: float64(20000)*44.1 - rbOffset}
+		if _, err := db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=?`, buildEngineQuickCuesBlob(slots), tr1.EngineID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+100 WHERE id=?`, tr1.EngineID); err != nil {
+			t.Fatal(err)
+		}
+		r, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, Session: &CueSession{keys: sharedKeys}})
+		if err != nil || readLibsCalls != prevCalls+1 || r.TracksChanged != 1 {
+			t.Fatalf("cue edit write-back = %+v, calls=%d err=%v", r, readLibsCalls-prevCalls, err)
+		}
+	})
+
+	t.Run("2_ActiveLoopToggle", func(t *testing.T) {
+		prevCalls := readLibsCalls
+		if _, err := db.Exec(`UPDATE PerformanceData SET activeOnLoadLoops=1 WHERE trackId=?`, tr2.EngineID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+100 WHERE id=?`, tr2.EngineID); err != nil {
+			t.Fatal(err)
+		}
+		derivBefore := rekordbox.KeyDerivations()
+		r, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, Session: &CueSession{keys: sharedKeys}})
+		if err != nil || readLibsCalls != prevCalls+1 || r.TracksChanged != 1 {
+			t.Fatalf("active loop toggle write-back = %+v, calls=%d err=%v", r, readLibsCalls-prevCalls, err)
+		}
+		if rekordbox.KeyDerivations() != derivBefore || r.PhasesMS["key"] != 0 {
+			t.Fatalf("warm KeyCache re-derived key: derivDelta=%d keyMs=%d", rekordbox.KeyDerivations()-derivBefore, r.PhasesMS["key"])
+		}
+	})
+
+	t.Run("3_BeatGridEdit", func(t *testing.T) {
+		prevCalls := readLibsCalls
+		const sr = 44100.0
+		const step = sr * 60.0 / 125.0
+		defGrid := []struct {
+			pos      float64
+			idx      int64
+			numBeats uint32
+		}{{pos: 4410, idx: 0, numBeats: 4}, {pos: 4410 + 4*step, idx: 4, numBeats: 0}}
+		adjGrid := []struct {
+			pos      float64
+			idx      int64
+			numBeats uint32
+		}{{pos: 8820, idx: 0, numBeats: 8}, {pos: 8820 + 8*step, idx: 8, numBeats: 0}}
+		if _, err := db.Exec(`UPDATE PerformanceData SET beatData=? WHERE trackId=?`,
+			buildEngineBeatDataBlob(sr, 25*sr, defGrid, adjGrid, true), tr1.EngineID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+100 WHERE id=?`, tr1.EngineID); err != nil {
+			t.Fatal(err)
+		}
+		derivBefore := rekordbox.KeyDerivations()
+		r, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, Session: &CueSession{keys: sharedKeys}})
+		if err != nil || readLibsCalls != prevCalls+1 || r.TracksChanged != 1 {
+			t.Fatalf("beat grid edit write-back = %+v, calls=%d err=%v", r, readLibsCalls-prevCalls, err)
+		}
+		if rekordbox.KeyDerivations() != derivBefore || r.PhasesMS["key"] != 0 {
+			t.Fatalf("warm KeyCache re-derived key: derivDelta=%d keyMs=%d", rekordbox.KeyDerivations()-derivBefore, r.PhasesMS["key"])
+		}
+	})
+
+	t.Run("4_MetadataEdit", func(t *testing.T) {
+		prevCalls := readLibsCalls
+		if _, err := db.Exec(`UPDATE Track SET comment='DJ Edited Comment', lastEditTime=COALESCE(lastEditTime,0)+100 WHERE id=?`, tr1.EngineID); err != nil {
+			t.Fatal(err)
+		}
+		derivBefore := rekordbox.KeyDerivations()
+		r, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, Session: &CueSession{keys: sharedKeys}})
+		if err != nil || readLibsCalls != prevCalls+1 || r.TracksChanged != 1 {
+			t.Fatalf("metadata edit write-back = %+v, calls=%d err=%v", r, readLibsCalls-prevCalls, err)
+		}
+		if rekordbox.KeyDerivations() != derivBefore || r.PhasesMS["key"] != 0 {
+			t.Fatalf("warm KeyCache re-derived key: derivDelta=%d keyMs=%d", rekordbox.KeyDerivations()-derivBefore, r.PhasesMS["key"])
+		}
+	})
 }

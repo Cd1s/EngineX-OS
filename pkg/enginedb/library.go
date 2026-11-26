@@ -786,17 +786,182 @@ func (b *Batch) insertTracksBulk(ctx context.Context, rows []TrackRow, ids []int
 	return flush()
 }
 
+func queryMissingAlbumArtIDs(ctx context.Context, db *sql.DB) (map[int64]bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id FROM Track WHERE albumArtId IS NULL OR albumArtId <= 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err = rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
+// MissingAlbumArtIDs returns Track IDs whose albumArtId is NULL or <= 0 using index_Track_albumArtId.
+func (l *Library) MissingAlbumArtIDs(ctx context.Context) (map[int64]bool, error) {
+	return queryMissingAlbumArtIDs(ctx, l.db)
+}
+
+// MissingAlbumArtIDsRO returns Track IDs whose albumArtId is NULL or <= 0 from a read-only m.db handle.
+func MissingAlbumArtIDsRO(ctx context.Context, dbPath string) (map[int64]bool, error) {
+	dsn := (&url.URL{Scheme: "file", Path: dbPath, RawQuery: "mode=ro"}).String() + "&_pragma=busy_timeout(5000)&_pragma=query_only(1)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	return queryMissingAlbumArtIDs(ctx, db)
+}
+
+func albumArtMatchesOrPreserved(existingHash []byte, hasBlob bool, wantHash []byte) bool {
+	return hasBlob || bytes.Equal(existingHash, wantHash)
+}
+
+type trackStateRow struct {
+	length, bpm, year, bitrate, fileBytes sql.NullInt64
+	bpmAnalyzed                           sql.NullFloat64
+	title, artist, album, genre           sql.NullString
+	comment, label, composer, remixer     sql.NullString
+	key, rating, pdbImportKey             sql.NullInt64
+	isAnalyzed                            int64
+	albumArtID                            sql.NullInt64
+}
+
+const trackUpdateSelectCols = `length,bpm,year,bitrate,bpmAnalyzed,fileBytes,title,artist,album,genre,comment,label,composer,remixer,key,rating,pdbImportKey,COALESCE(isAnalyzed,0),albumArtId`
+
+func scanTrackStateRow(row *sql.Row, st *trackStateRow) error {
+	return row.Scan(
+		&st.length, &st.bpm, &st.year, &st.bitrate, &st.bpmAnalyzed, &st.fileBytes,
+		&st.title, &st.artist, &st.album, &st.genre, &st.comment, &st.label, &st.composer, &st.remixer,
+		&st.key, &st.rating, &st.pdbImportKey, &st.isAnalyzed, &st.albumArtID,
+	)
+}
+
+func trackUpdateDiff(cur trackStateRow, r TrackRow, oldRating int) (cols []string, args []any) {
+	t := &r.Track
+	bpm := t.BPM
+	if bpm >= 499.5 { // rekordbox's analyser clamps a misparsed AIFF to 500 BPM
+		bpm = 0
+	}
+	setInt := func(col string, have sql.NullInt64, want int64) {
+		if !have.Valid || have.Int64 != want {
+			cols = append(cols, col+"=?")
+			args = append(args, want)
+		}
+	}
+	setStr := func(col string, have sql.NullString, want string) {
+		if !have.Valid || have.String != want {
+			cols = append(cols, col+"=?")
+			args = append(args, want)
+		}
+	}
+	if cur.isAnalyzed == 0 {
+		setInt("length", cur.length, int64(int(t.Duration+0.5)))
+		setInt("bpm", cur.bpm, int64(int(bpm+0.5)))
+		setInt("bitrate", cur.bitrate, int64(t.Bitrate))
+		if !cur.bpmAnalyzed.Valid || cur.bpmAnalyzed.Float64 != bpm {
+			cols = append(cols, "bpmAnalyzed=?")
+			args = append(args, bpm)
+		}
+		setInt("fileBytes", cur.fileBytes, t.FileSize)
+	}
+	setInt("year", cur.year, int64(t.Year))
+	setStr("title", cur.title, t.Title)
+	setStr("artist", cur.artist, t.Artist)
+	setStr("album", cur.album, t.Album)
+	setStr("genre", cur.genre, t.Genre)
+	setStr("comment", cur.comment, t.Comment)
+	setStr("label", cur.label, t.Label)
+	setStr("composer", cur.composer, t.Composer)
+	setStr("remixer", cur.remixer, t.Remixer)
+	if wantKey, ok := EngineKey(t.Key).(int); !ok {
+		if cur.key.Valid {
+			cols = append(cols, "key=?")
+			args = append(args, nil)
+		}
+	} else {
+		setInt("key", cur.key, int64(wantKey))
+	}
+	curRating := int64(0)
+	if cur.rating.Valid {
+		curRating = cur.rating.Int64
+	}
+	if oldRating < 0 || curRating == int64(oldRating) {
+		setInt("rating", cur.rating, int64(t.Rating))
+	}
+	setInt("pdbImportKey", cur.pdbImportKey, int64(t.ID))
+	return cols, args
+}
+
+// TrackUpdatePlan inspects one Track row read-only without starting a write transaction and reports
+// whether UpdateTrack or SetDirectCover would modify m.db.
+func (l *Library) TrackUpdatePlan(ctx context.Context, id int64, r TrackRow, oldRating int, directArtHash []byte) (needTrack bool, needCover bool, err error) {
+	var cur trackStateRow
+	err = scanTrackStateRow(l.db.QueryRowContext(ctx, `SELECT `+trackUpdateSelectCols+` FROM Track WHERE id=?`, id), &cur)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	cols, _ := trackUpdateDiff(cur, r, oldRating)
+	needTrack = len(cols) > 0
+	if len(directArtHash) == sha1.Size {
+		if !cur.albumArtID.Valid || cur.albumArtID.Int64 <= 0 {
+			needCover = true
+		} else {
+			var existingHash []byte
+			var hasBlob bool
+			err = l.db.QueryRowContext(ctx, `SELECT hash,(albumArt IS NOT NULL AND length(albumArt)>0) FROM AlbumArt WHERE id=?`, cur.albumArtID.Int64).Scan(&existingHash, &hasBlob)
+			if errors.Is(err, sql.ErrNoRows) {
+				needCover = true
+			} else if err != nil {
+				return false, false, err
+			} else if !albumArtMatchesOrPreserved(existingHash, hasBlob, directArtHash) {
+				needCover = true
+			}
+		}
+	}
+	return needTrack, needCover, nil
+}
+
 // SetDirectCover links a track row to a hash-only AlbumArt row when the track currently has no
-// cover or already points at a hash-only (albumArt IS NULL) cover, preserving embedded BLOB art.
+// cover or already points at a hash-only/empty (albumArt IS NULL/empty) cover, preserving
+// non-empty embedded BLOB art without creating orphan AlbumArt rows.
 func (b *Batch) SetDirectCover(ctx context.Context, id int64, sum []byte) (bool, error) {
 	if len(sum) != sha1.Size {
+		return false, nil
+	}
+	st, err := b.stmt(ctx, `SELECT t.albumArtId,a.id,a.hash,(a.albumArt IS NOT NULL AND length(a.albumArt)>0)
+		FROM Track t LEFT JOIN AlbumArt a ON a.id=t.albumArtId WHERE t.id=?`)
+	if err != nil {
+		return false, err
+	}
+	var trackArtID, artRowID sql.NullInt64
+	var existingHash []byte
+	var hasBlob sql.NullBool
+	err = st.QueryRowContext(ctx, id).Scan(&trackArtID, &artRowID, &existingHash, &hasBlob)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if trackArtID.Valid && trackArtID.Int64 > 0 && artRowID.Valid && albumArtMatchesOrPreserved(existingHash, hasBlob.Bool, sum) {
 		return false, nil
 	}
 	art, err := b.putCoverHash(ctx, sum)
 	if err != nil {
 		return false, err
 	}
-	res, err := b.exec(ctx, `UPDATE Track SET albumArtId=? WHERE id=? AND albumArtId IS NOT ? AND (albumArtId IS NULL OR EXISTS(SELECT 1 FROM AlbumArt a WHERE a.id=Track.albumArtId AND a.albumArt IS NULL))`, art, id, art)
+	res, err := b.exec(ctx, `UPDATE Track SET albumArtId=? WHERE id=?`, art, id)
 	if err != nil {
 		return false, err
 	}
@@ -804,25 +969,29 @@ func (b *Batch) SetDirectCover(ctx context.Context, id int64, sum []byte) (bool,
 	return n > 0, err
 }
 
-// UpdateTrack gives the row the export's fields and says whether it held anything else. An
-// analysed row keeps its own length, BPM, bitrate and size (ApplyPerformance's). A row that holds
-// it all already is not written: a write fires Engine's triggers, 31 ms a row on a cold stick
-// with a 313 MB library (64b0ea95). The rating stays the deck's when the deck changed it:
-// oldRating is what the bridge last wrote (negative: unknown, the export's is taken).
+// UpdateTrack gives the row the export's changed fields and says whether it held anything else.
+// An analysed row keeps its own length, BPM, bitrate and size (ApplyPerformance's). Only columns
+// whose values actually differ are included in UPDATE Track SET ... so unchanged secondary index
+// B-trees and triggers stay cold, and an identical row writes nothing.
 func (b *Batch) UpdateTrack(ctx context.Context, id int64, r TrackRow, oldRating int) (changed bool, err error) {
-	a := b.trackArgs(&r)
-	const (
-		rating = `CASE WHEN ?22<0 OR COALESCE(rating,0)=?22 THEN ?18 ELSE rating END`
-		own    = `COALESCE(isAnalyzed,0)` // the figures are the audio's own
-	)
-	res, err := b.exec(ctx, `UPDATE Track SET length=CASE WHEN `+own+` THEN length ELSE ?1 END,bpm=CASE WHEN `+own+` THEN bpm ELSE ?2 END,
-		bitrate=CASE WHEN `+own+` THEN bitrate ELSE ?6 END,bpmAnalyzed=CASE WHEN `+own+` THEN bpmAnalyzed ELSE ?7 END,
-		fileBytes=CASE WHEN `+own+` THEN fileBytes ELSE ?8 END,year=?3,title=?9,artist=?10,album=?11,genre=?12,comment=?13,label=?14,composer=?15,
-		remixer=?16,key=?17,rating=`+rating+`,pdbImportKey=?20
-		WHERE id=?21 AND NOT ((`+own+` OR (length IS ?1 AND bpm IS ?2 AND bitrate IS ?6 AND bpmAnalyzed IS ?7 AND fileBytes IS ?8))
-		AND year IS ?3 AND title IS ?9 AND artist IS ?10 AND album IS ?11 AND genre IS ?12 AND comment IS ?13 AND label IS ?14 AND composer IS ?15
-		AND remixer IS ?16 AND key IS ?17 AND rating IS (`+rating+`) AND pdbImportKey IS ?20)`,
-		append(append(a[:len(a)-2:len(a)-2], id), oldRating)...)
+	st, err := b.stmt(ctx, `SELECT `+trackUpdateSelectCols+` FROM Track WHERE id=?`)
+	if err != nil {
+		return false, err
+	}
+	var cur trackStateRow
+	err = scanTrackStateRow(st.QueryRowContext(ctx, id), &cur)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	cols, args := trackUpdateDiff(cur, r, oldRating)
+	if len(cols) == 0 {
+		return false, nil
+	}
+	args = append(args, id)
+	res, err := b.tx.ExecContext(ctx, `UPDATE Track SET `+strings.Join(cols, ",")+` WHERE id=?`, args...)
 	if err != nil {
 		return false, err
 	}

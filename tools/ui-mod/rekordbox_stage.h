@@ -850,7 +850,7 @@ static void sc_rbs_journal(const char *uuid, long long track, const struct sc_rb
             fputs(",\"wrnm\":", f);
             sc_rbs_json_text(f, l->wrnm);
         }
-        fprintf(f, ",\"v\":%lld,\"w\":", l->rules);
+        fprintf(f, ",\"al\":%lld,\"v\":%lld,\"w\":", l->active, l->rules);
         sc_rbs_json_text(f, l->row);
         fprintf(f, ",\"at\":%lld}\n", (long long)time(NULL));
         if (!fclose(f)) (void)!write(fd, line, size); // one write: a whole line, appended

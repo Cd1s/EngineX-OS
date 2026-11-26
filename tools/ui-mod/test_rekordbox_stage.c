@@ -488,7 +488,7 @@ int main(int argc, char **argv) {
     f = fopen(path, "r");
     assert(f && fgets(journal, sizeof journal, f) && !fclose(f));
     char want[512];
-    snprintf(want, sizeof want, "{\"id\":%lld,\"k\":\"contents/artist/track one.mp3\",\"wr\":\"AAECAwQFBgcICQoLDA0ODw==\",\"v\":5,\"w\":\"row-lib-a\",\"at\":", t1);
+    snprintf(want, sizeof want, "{\"id\":%lld,\"k\":\"contents/artist/track one.mp3\",\"wr\":\"AAECAwQFBgcICQoLDA0ODw==\",\"al\":3,\"v\":5,\"w\":\"row-lib-a\",\"at\":", t1);
     assert(starts(journal, want) && journal[strlen(journal) - 1] == '\n');
     // Without the trace a fill still says so.
     sc_rbx_verbose = 0;
@@ -909,6 +909,7 @@ int main(int argc, char **argv) {
         assert(strstr(od_jline, "\"k\":\"contents/ondemand1.mp3\""));
         assert(strstr(od_jline, "\"wr\":\"AAECAwQFBgcICQoLDA0ODw==\""));
         assert(strstr(od_jline, "\"wrnm\":\"EBESExQVFhcYGRobHB0eHw==\""));
+        assert(strstr(od_jline, "\"al\":3"));
 
         // 2. Second load of already-filled track does ZERO IPC.
         int reqs_before = mock.requests;

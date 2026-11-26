@@ -576,7 +576,7 @@ func TestR2Proof_Finding3_2_StepDownFindsFittingPartialBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lib, err := enginedb.OpenLibrary(context.Background(), mount)
+	lib, err := enginedb.OpenLibrary(context.Background(), dbDir(mount))
 	if err != nil {
 		t.Fatal(err)
 	}

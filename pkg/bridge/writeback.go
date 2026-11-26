@@ -89,9 +89,10 @@ var phaseNames = []string{"candidates", "key", "decrypt", "edit", "encrypt", "wr
 // noted is a row as a pass found it in sync with the export: rbstate.Track.Edit, Synced, and
 // (when known/synced) Written.
 type noted struct {
-	edit    int64
-	digest  []byte
-	written []byte
+	edit       int64
+	digest     []byte
+	metaDigest []byte
+	written    []byte
 }
 
 type recordHashes map[string]map[rbstate.LibraryKind]string
@@ -213,6 +214,9 @@ func NoteWriteBack(mount string, written map[string][]rbstate.FileSig, rows map[
 	for key, n := range rows {
 		if t, ok := snap.Tracks[key]; ok {
 			t.Edit, t.Synced = n.edit, n.digest
+			if len(n.metaDigest) > 0 {
+				t.MetaDigest = n.metaDigest
+			}
 			if len(n.written) > 0 {
 				t.Written = n.written
 			}
@@ -282,21 +286,24 @@ type pass struct {
 
 // dbCandidate is an Engine row a pass compares with the export.
 type dbCandidate struct {
-	key                 string
-	engineID            int64
-	track               *rbstate.Track
-	beatData, trackData []byte
-	quickCues, loops    []byte
-	activeLoops         int64
-	metadata            rekordbox.Metadata
-	writtenDigest       []byte
-	rawWrittenDigest    []byte
-	filledWritten       []byte
-	filledWrittenNoMain []byte
-	filledBeats         []byte
-	filledCues          []byte
-	filledLoops         []byte
-	now                 noted // the row as this pass read it
+	key                  string
+	engineID             int64
+	track                *rbstate.Track
+	beatData, trackData  []byte
+	quickCues, loops     []byte
+	activeLoops          int64
+	metadata             rekordbox.Metadata
+	metaDigest           []byte
+	writtenDigest        []byte
+	rawWrittenDigest     []byte
+	filledWritten        []byte
+	filledWrittenNoMain  []byte
+	filledBeats          []byte
+	filledCues           []byte
+	filledLoops          []byte
+	hasFilledActiveLoops bool
+	filledActiveLoops    int64
+	now                  noted // the row as this pass read it
 }
 
 type trackChange struct {
@@ -359,8 +366,8 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 		p.keys = newKeyCache()
 		defer p.keys.Clear()
 	}
-	locked := time.Now()
-	defer func() { p.phase["key"] = time.Since(locked) }()
+	deriveBefore := p.keys.DeriveTime()
+	defer func() { p.phase["key"] = p.keys.DeriveTime() - deriveBefore }()
 
 	mDB := filepath.Join(dbDir, "m.db")
 	if _, err := os.Stat(mDB); err != nil {
@@ -406,13 +413,18 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 	changes = applyRepairChanges(p.r, p.mount, snap, changes)
 	if len(cs.rows) == 0 && len(changes) == 0 {
 		// Nothing to compare with the export and no EngineX-written ANLZ files need repair:
-		// no file of the stick is read or written.
+		// no export file of the stick is read or decrypted. Persist baseline Synced digests once
+		// when adopted rows had Synced == nil so future eject/watcher passes skip re-reading all rows.
 		if settle() != nil {
 			return "", errNotQuiet
 		}
-		if !p.opts.DryRun {
-			p.opts.Session.add(cs.insync)
+		if p.opts.DryRun {
+			return "", nil
 		}
+		if cs.needSaveSynced {
+			return "", NoteWriteBack(p.mount, nil, p.opts.Session.take(cs.insync), nil)
+		}
+		p.opts.Session.add(cs.insync)
 		return "", nil
 	}
 	if err := settle(); err != nil {
@@ -454,19 +466,22 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 }
 
 type candidateSet struct {
-	rows    []dbCandidate    // differ from what the stick is known to hold: compared with the export
-	insync  map[string]noted // read, and still what the stick holds
-	checked int
-	read    int
+	rows           []dbCandidate    // differ from what the stick is known to hold: compared with the export
+	insync         map[string]noted // read, and still what the stick holds
+	needSaveSynced bool             // an in-sync row lacked a persisted Synced digest (e.g., legacy adopt)
+	checked        int
+	read           int
 }
 
 type filledStageRow struct {
-	id            int64
-	written       []byte
-	writtenNoMain []byte
-	beats         []byte
-	cues          []byte
-	loops         []byte
+	id             int64
+	written        []byte
+	writtenNoMain  []byte
+	beats          []byte
+	cues           []byte
+	loops          []byte
+	hasActiveLoops bool
+	activeLoops    int64
 }
 
 func validStageUUID(uuid string) bool {
@@ -496,6 +511,7 @@ func readFilledStage(snap *rbstate.Snapshot) map[string]filledStageRow {
 			K    string `json:"k"`
 			WR   []byte `json:"wr"`
 			WRNM []byte `json:"wrnm"`
+			AL   *int64 `json:"al"`
 			V    int    `json:"v"`
 			W    string `json:"w"`
 		}
@@ -503,6 +519,10 @@ func readFilledStage(snap *rbstate.Snapshot) map[string]filledStageRow {
 			continue
 		}
 		row := filledStageRow{id: f.ID, written: f.WR, writtenNoMain: f.WRNM}
+		if f.AL != nil {
+			row.hasActiveLoops = true
+			row.activeLoops = *f.AL
+		}
 		if stage != nil && entries != nil {
 			if e := entries[f.K]; e != nil {
 				full, rerr := stage.Read(e)
@@ -512,6 +532,10 @@ func readFilledStage(snap *rbstate.Snapshot) map[string]filledStageRow {
 					continue
 				}
 				row.beats, row.cues, row.loops = full.Perf.Beats, full.Perf.QuickCues, full.Perf.Loops
+				if !row.hasActiveLoops {
+					row.hasActiveLoops = true
+					row.activeLoops = int64(e.ActiveLoops)
+				}
 				out[f.K] = row
 				continue
 			}
@@ -568,6 +592,13 @@ func normalizeMainCueForWrittenDigest(raw []byte) []byte {
 	return out
 }
 
+func filledActiveLoopsDiffer(row dbCandidate) bool {
+	if row.hasFilledActiveLoops {
+		return row.activeLoops != row.filledActiveLoops
+	}
+	return row.activeLoops != 0
+}
+
 func needsCueRead(row dbCandidate) bool {
 	if len(row.trackData) == 0 {
 		return false
@@ -576,9 +607,15 @@ func needsCueRead(row dbCandidate) bool {
 		return false
 	}
 	if len(row.filledCues) > 0 {
+		if filledActiveLoopsDiffer(row) {
+			return true
+		}
 		return !bytes.Equal(writtenDigestIgnoringMainCueTail(row.beatData, row.quickCues, row.loops), writtenDigestIgnoringMainCueTail(row.filledBeats, row.filledCues, row.filledLoops))
 	}
 	if len(row.filledWritten) > 0 || len(row.filledWrittenNoMain) > 0 {
+		if filledActiveLoopsDiffer(row) {
+			return true
+		}
 		if len(row.filledWritten) > 0 && (bytes.Equal(row.writtenDigest, row.filledWritten) || bytes.Equal(row.rawWrittenDigest, row.filledWritten)) {
 			return false
 		}
@@ -649,14 +686,27 @@ func needsGridRead(row dbCandidate) bool {
 
 func appendCandidateRow(c dbCandidate, filled map[string]filledStageRow, out *candidateSet) {
 	out.read++
+	c.metaDigest = enginedb.MetadataDigest(c.metadata.Genre, c.metadata.Comment, c.metadata.Label)
+	c.now.metaDigest = c.metaDigest
 	c.now.digest = enginedb.SyncedDigest(nil, c.quickCues, c.loops, c.activeLoops, c.metadata.Genre, c.metadata.Comment, c.metadata.Label)
 	c.writtenDigest = enginedb.WrittenDigest(c.beatData, c.quickCues, c.loops)
 	c.rawWrittenDigest = enginedb.RawWrittenDigest(c.beatData, c.quickCues, c.loops)
 	if f, ok := filled[c.key]; ok && f.id == c.engineID && len(c.track.Written) == 0 {
 		c.filledWritten, c.filledWrittenNoMain = f.written, f.writtenNoMain
 		c.filledBeats, c.filledCues, c.filledLoops = f.beats, f.cues, f.loops
+		c.hasFilledActiveLoops, c.filledActiveLoops = f.hasActiveLoops, f.activeLoops
 	}
 	if c.track.Synced != nil && bytes.Equal(c.track.Synced, c.now.digest) && !needsGridRead(c) {
+		out.insync[c.key] = c.now
+		return
+	}
+	if len(c.track.MetaDigest) > 0 && bytes.Equal(c.track.MetaDigest, c.metaDigest) && !needsCueRead(c) && !needsGridRead(c) {
+		if len(c.track.Written) == 0 && len(c.trackData) > 0 && len(c.writtenDigest) > 0 {
+			c.now.written = c.writtenDigest
+		}
+		if c.track.Synced == nil {
+			out.needSaveSynced = true
+		}
 		out.insync[c.key] = c.now
 		return
 	}

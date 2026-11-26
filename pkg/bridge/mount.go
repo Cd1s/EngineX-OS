@@ -347,9 +347,11 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 				// never emit a header-only stub; hydrate from exports in-window or via background job.
 				unchanged = false
 			} else if !rbstate.BrowseIndexMatches(dir, head) {
-				if snap, lerr := rbstate.Load(dir); lerr == nil && syncBrowseIndex(dir, snap) == nil {
-					chores(ctx, mount, st, !o.Publish)
-					return MountResult{Bypassed: true, Background: res.Background}, nil
+				if !deadlineReached() && (st.kill.IsZero() || st.fits(work{load: head.Tracks})) {
+					if snap, lerr := rbstate.Load(dir); lerr == nil && syncBrowseIndex(dir, snap) == nil {
+						chores(ctx, mount, st, !o.Publish)
+						return MountResult{Bypassed: true, Background: res.Background}, nil
+					}
 				}
 				unchanged = false
 			}
@@ -388,6 +390,8 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 			ahead.scan += adoptRows
 			ahead.legacyState += stateBytes
 			ahead.tracks = max(ahead.tracks, adoptRows)
+		} else {
+			ahead.load = max(ahead.load, ahead.view)
 		}
 	}
 	if !st.fits(ahead) {
@@ -460,9 +464,9 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	if o.OnDemand && (w.left || !res.Pending.None()) {
 		startBG()
 	}
-	log.Printf("rb-bridge: mount done in %d ms: %d added, %d updated, %d removed, lists changed %v, %d staged tracks applied; pending: %d rows, %d tracks' data, verify %v",
+	log.Printf("rb-bridge: mount done in %d ms: %d added, %d updated, %d removed, lists changed %v, %d staged tracks applied; pending: %d rows, lists %v, %d tracks' data, verify %v",
 		time.Since(st.start).Milliseconds(), res.Added, res.Updated, res.Removed, res.PlaylistsChanged, res.Applied,
-		res.Pending.Rows, res.Pending.Perf, res.Pending.Verify)
+		res.Pending.Rows, res.Pending.Lists, res.Pending.Perf, res.Pending.Verify)
 	return res, nil
 }
 

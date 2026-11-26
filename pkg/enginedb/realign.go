@@ -133,6 +133,17 @@ func unadjustedLegacyMatches(beats, cues, loops, stagedCues, prevWritten []byte)
 	return UnadjustedLegacyMatches(beats, cues, loops, stagedCues, prevWritten)
 }
 
+// MetadataDigest hashes the editable metadata fields write-back syncs (genre, comment, label)
+// so an unchanged on-demand track load can verify metadata parity without decrypting exports.
+func MetadataDigest(genre, comment, label string) []byte {
+	h := sha256.New()
+	for _, s := range []string{genre, comment, label} {
+		_ = binary.Write(h, big, uint32(len(s)))
+		h.Write([]byte(s))
+	}
+	return h.Sum(nil)[:16]
+}
+
 // SyncedDigest names what the deck can change in a row and cue write-back writes back: cues,
 // loops, activeOnLoadLoops (#321), genre, comment and label (#314). The grid and the analysis are
 // left out, so that an analysis does not set off a write-back.
@@ -142,6 +153,7 @@ func SyncedDigest(_ []byte, cues, loops []byte, activeOnLoadLoops int64, genre, 
 	if err != nil {
 		rawCues = cues
 	}
+	rawCues = normalizeMainCueForWrittenDigest(rawCues)
 	_ = binary.Write(h, big, uint64(len(rawCues)))
 	h.Write(rawCues)
 	_ = binary.Write(h, big, uint64(len(loops)))

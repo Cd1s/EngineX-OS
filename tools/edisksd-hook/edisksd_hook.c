@@ -2060,6 +2060,67 @@ static int has_pending_swap(const char *mount_path) {
     }
     return 0;
 }
+// Reports 1 when a slow-marked stick still has unfinished import work (legacy state DB,
+// missing/malformed snapshot, snapshot older than slow_marker, or non-empty "pending" object
+// in RBS2 header) so re-insert kicks off background rb-bridge --import-path even while skipping
+// the synchronous 17 s pre-mount conversion.
+static int has_unfinished_import(const char *mount_path,const char *marker_path) {
+    if(!mount_path||safe_path(mount_path,0))return 1;
+    char p[PATH_MAX];struct stat st;
+    if(!path_join(p,sizeof p,mount_path,"Engine Library/Database2/.rb-bridge-state.db")&&!LSTAT(p,&st)&&S_ISREG(st.st_mode))return 1;
+    if(path_join(p,sizeof p,mount_path,"Engine Library/Database2/.rb-bridge-snapshot"))return 1;
+    int fd=open(p,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
+    if(fd<0)return 1;
+    if(fstat(fd,&st)||!S_ISREG(st.st_mode)){close(fd);return 1;}
+    if(marker_path&&*marker_path) {
+        struct stat mst;
+        if(!stat(marker_path,&mst)&&st.st_mtime<mst.st_mtime){close(fd);return 1;}
+    }
+    char buf[4096];
+    ssize_t n=0;
+    while(n<(ssize_t)sizeof buf-1) {
+        ssize_t got=read(fd,buf+n,sizeof buf-1-(size_t)n);
+        if(got<0&&errno==EINTR)continue;
+        if(got<=0)break;
+        n+=got;
+        if(memchr(buf,'\n',(size_t)n))break;
+    }
+    close(fd);
+    if(n<7||memcmp(buf,"RBS2 ",5))return 1;
+    char *nl=memchr(buf,'\n',(size_t)n);
+    if(nl)*nl=0;
+    else buf[n]=0;
+    const char *pend=strstr(buf,"\"pending\"");
+    if(!pend)return 1;
+    pend+=9;
+    while(*pend==' '||*pend=='\t')pend++;
+    if(*pend++!=':')return 1;
+    while(*pend==' '||*pend=='\t')pend++;
+    if(*pend++!='{')return 1;
+    for(;;) {
+        while(*pend==' '||*pend=='\t')pend++;
+        if(*pend=='}')return 0;
+        if(*pend++!='"')return 1;
+        while(*pend&&*pend!='"'){if(*pend=='\\'&&pend[1])pend++;pend++;}
+        if(*pend++!='"')return 1;
+        while(*pend==' '||*pend=='\t')pend++;
+        if(*pend++!=':')return 1;
+        while(*pend==' '||*pend=='\t')pend++;
+        if(!strncmp(pend,"true",4))return 1;
+        if(!strncmp(pend,"false",5)){pend+=5;}
+        else if(*pend>='0'&&*pend<='9') {
+            long long v=0;
+            while(*pend>='0'&&*pend<='9'){if(v<100000000LL)v=v*10+(*pend-'0');pend++;}
+            if(v>0)return 1;
+        } else {
+            return 1;
+        }
+        while(*pend==' '||*pend=='\t')pend++;
+        if(*pend==','){pend++;continue;}
+        if(*pend=='}')return 0;
+        return 1;
+    }
+}
 static int run_pre_vis_at(const char *mount_path,const char *label_target,const char *src,int64_t deadline,int whole_window) {
     int pioneer=has_export(mount_path);
     if(!pioneer&&!has_engine_db(mount_path))return 0;
@@ -2072,8 +2133,12 @@ static int run_pre_vis_at(const char *mount_path,const char *label_target,const 
         return 3; // whatever happened, the heal is not repeated after the visible mount
     }
     if(!secure_runtime()&&!has_pending_swap(mount_path)&&!slow_marker(mount_path,marker))known=!access(marker,F_OK);
-    if(known){note("rekordbox library too large to convert at mount, skipped on",label_target,0);r=2;}
-    else r=after_mount_at(mount_path,label_target,src,MOUNT_PRE,deadline);
+    if(known) {
+        int unfinished=has_unfinished_import(mount_path,marker);
+        note(unfinished?"rekordbox library too large to convert at mount, skipped on (starting background import)":"rekordbox library too large to convert at mount, skipped on",label_target,0);
+        return unfinished?4:2;
+    }
+    r=after_mount_at(mount_path,label_target,src,MOUNT_PRE,deadline);
     if(r&CONVERTED&&!slow_marker(mount_path,marker))unlink(marker);
     if(r&TIMED_OUT&&whole_window&&!slow_marker(mount_path,marker)){int fd=open(marker,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)close(fd);}
     return r&CONVERTED?1:r&TIMED_OUT?4:r?2:0;

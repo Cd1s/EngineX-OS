@@ -1,11 +1,13 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -558,5 +560,392 @@ func TestOnDemandManyListsWindowDefersAndPublishesViaNext(t *testing.T) {
 	}
 	if snap := snapshot(t, mount); snap.Mode != rbstate.ModeOnDemand || !rbstate.BrowseIndexMatches(dir, snap.Header) {
 		t.Fatalf("published snapshot mode=%q or browse index mismatch", snap.Mode)
+	}
+}
+
+func TestOnDemandUpdateRowsZeroWriteFastPath(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+	mount := filepath.Join(base, "stick")
+	const trackCount = 16
+	testfixture.LargeExport(t, mount, trackCount)
+	fix3WritePlainOneLibrary(t, mount)
+
+	onePath := filepath.Join(mount, "PIONEER", "rekordbox", "exportLibrary.db")
+	odb, err := sql.Open("sqlite", onePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id := 3; id <= trackCount; id++ {
+		if _, err := odb.Exec(`INSERT INTO content(content_id,title,bpmx100,length,path,samplingRate,djComment,analysisDataFilePath,genre_id,label_id) VALUES (?, ?, 12800, 4, ?, 44100, '', '/PIONEER/USBANLZ/P001/ANLZ0000.DAT', 20, 30)`,
+			id, fmt.Sprintf("Track %d", id), "/"+testfixture.LargeTrackPath(id)); err != nil {
+			_ = odb.Close()
+			t.Fatal(err)
+		}
+	}
+	if _, err := odb.Exec(`
+		ALTER TABLE content ADD COLUMN image_path varchar;
+		UPDATE content SET image_path='/PIONEER/Artwork/00001/shared.jpg';
+	`); err != nil {
+		_ = odb.Close()
+		t.Fatal(err)
+	}
+	_ = odb.Close()
+
+	if res, err := ConvertAtMount(context.Background(), mount, MountOptions{OnDemand: true}); err != nil || res.Added != trackCount {
+		t.Fatalf("initial import: res=%+v err=%v", res, err)
+	}
+	dir := dbDir(mount)
+	libBefore, err := enginedb.OpenLibraryFile(context.Background(), filepath.Join(dir, "m.db"), mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitBefore, err := libBefore.CommitID(context.Background())
+	_ = libBefore.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mdbBefore, err := os.ReadFile(filepath.Join(dir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Modify only export cue rows in exportLibrary.db (which changes vt.Hash -> Diff puts all 16 tracks
+	// in UpdateTracks while EVERY Track column + cover hash in m.db is already identical).
+	odb, err = sql.Open("sqlite", onePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := odb.Exec(`DELETE FROM cue`); err != nil {
+		_ = odb.Close()
+		t.Fatal(err)
+	}
+	for id := 1; id <= trackCount; id++ {
+		if _, err := odb.Exec(`INSERT INTO cue(cue_id, content_id, kind, colorTableIndex, cueComment, isActiveLoop, beatLoopNumerator, beatLoopDenominator, inUsec, outUsec) VALUES (?, ?, 1, 0, '', 0, 0, 0, 5000000, -1)`, id, id); err != nil {
+			_ = odb.Close()
+			t.Fatal(err)
+		}
+	}
+	_ = odb.Close()
+	future := time.Now().Add(5 * time.Second)
+	_ = os.Chtimes(onePath, future, future)
+
+	updRes, err := ConvertAtMount(context.Background(), mount, MountOptions{OnDemand: true})
+	if err != nil || updRes.Updated != trackCount {
+		t.Fatalf("fast-path update re-insert = %+v, err=%v; want Updated=%d", updRes, err, trackCount)
+	}
+	libAfter, err := enginedb.OpenLibraryFile(context.Background(), filepath.Join(dir, "m.db"), mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitAfter, err := libAfter.CommitID(context.Background())
+	_ = libAfter.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commitAfter != commitBefore {
+		t.Fatalf("fast-path update unexpectedly bumped m.db CommitID %d -> %d", commitBefore, commitAfter)
+	}
+	mdbAfter, err := os.ReadFile(filepath.Join(dir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(mdbBefore, mdbAfter) {
+		t.Fatal("fast-path update modified m.db bytes despite 0 Track/cover column diffs")
+	}
+	snap := snapshot(t, mount)
+	if !snap.Pending.None() {
+		t.Fatalf("fast-path update left pending work: %+v", snap.Pending)
+	}
+}
+
+func TestWindowCommitStopsCleanlyAtExpiredDeadlineWithoutTempFile(t *testing.T) {
+	base := t.TempDir()
+	mount := filepath.Join(base, "stick")
+	dir := dbDir(mount)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := enginedb.BuildLibrary(context.Background(), dir, "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	w := &window{
+		ctx:  ctx,
+		dir:  dir,
+		view: &View{Layout: rbstate.LayoutMerged},
+		st:   newSteps(MountOptions{}),
+		snap: rbstate.New("uuid-test"),
+	}
+	if err := w.commit(7, func() error { t.Fatal("do callback ran after context cancellation"); return nil }); err == nil {
+		t.Fatal("w.commit succeeded on cancelled context, want deadline/cancel error")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".enginex-rb-") || strings.HasSuffix(e.Name(), ".next") {
+			t.Fatalf("w.commit left unexpected artifact after expired deadline: %s", e.Name())
+		}
+	}
+}
+
+func TestOldUnfinishedLibraryBackfillsDirectCoversAndUnblocksWriteBack(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+	mount := filepath.Join(base, "untitled-old")
+	testfixture.LargeExport(t, mount, 4)
+	fix3WritePlainOneLibrary(t, mount)
+	onePath := filepath.Join(mount, "PIONEER", "rekordbox", "exportLibrary.db")
+	odb, err := sql.Open("sqlite", onePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := odb.Exec(`
+		INSERT INTO content(content_id,title,bpmx100,length,path,samplingRate,djComment,analysisDataFilePath,genre_id,label_id) VALUES
+			(3,'Track 3',12600,4,?,44100,'','/PIONEER/USBANLZ/P001/ANLZ0000.DAT',20,30),
+			(4,'Track 4',12200,4,?,44100,'','/PIONEER/USBANLZ/P001/ANLZ0000.DAT',20,30);
+		ALTER TABLE content ADD COLUMN image_path varchar;
+		UPDATE content SET image_path='/PIONEER/Artwork/00001/c1.jpg' WHERE content_id <= 3;
+	`, "/"+testfixture.LargeTrackPath(3), "/"+testfixture.LargeTrackPath(4)); err != nil {
+		_ = odb.Close()
+		t.Fatal(err)
+	}
+	_ = odb.Close()
+
+	// Seed an old ModeFull unfinished library (like 2026-11-21 build): Tracks 1..3 have albumArtId=NULL
+	// even though export holds image_path, and Pending.Perf > 0.
+	if _, err := ConvertAtMount(context.Background(), mount, MountOptions{OnDemand: false}); err != nil {
+		t.Fatal(err)
+	}
+	dir := dbDir(mount)
+	db, err := sql.Open("sqlite", filepath.Join(dir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE Track SET albumArtId=NULL WHERE id IN (1,2,3)`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	snap, err := rbstate.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap.Mode = rbstate.ModeFull
+	snap.Pending = rbstate.Pending{Perf: 4, Verify: true}
+	for _, tr := range snap.Tracks {
+		tr.ArtworkPath = ""
+	}
+	if err := snap.SaveNext(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := rbstate.Promote(dir); err != nil {
+		t.Fatal(err)
+	}
+	// Copy stick before upgrade to test deferred FillInBackground(OnDemand: true) path separately.
+	deferredMount := filepath.Join(base, "untitled-deferred")
+	copyTreeForTest(t, mount, deferredMount)
+
+	// Path A: In-window OnDemand upgrade backfills missing covers, clears pending, writes browse index, unblocks write-back.
+	res, err := ConvertAtMount(context.Background(), mount, MountOptions{OnDemand: true})
+	if err != nil {
+		t.Fatalf("ConvertAtMount(OnDemand) old library: %v", err)
+	}
+	if !res.Pending.None() {
+		t.Fatalf("upgraded old library still has pending: %+v", res.Pending)
+	}
+	if n := query(t, mount, `SELECT count(*) FROM Track WHERE albumArtId IS NOT NULL`); n[0][0] != "3" {
+		t.Fatalf("linked direct cover count = %s, want 3 (track 4 has no artwork)", n[0][0])
+	}
+	if up := snapshot(t, mount); up.Mode != rbstate.ModeOnDemand || !rbstate.BrowseIndexMatches(dir, up.Header) {
+		t.Fatalf("upgraded snapshot mode=%q or browse mismatch", up.Mode)
+	}
+	// WriteBackCues must NOT return early with "import has pending work".
+	wb, err := WriteBackCues(context.Background(), mount, WriteBackOptions{SkipPreparingCheck: true})
+	if err != nil {
+		t.Fatalf("WriteBackCues after old library upgrade: %v", err)
+	}
+	if wb.TracksChecked != 4 {
+		t.Fatalf("WriteBackCues did not pass gate (checked=%d, want 4)", wb.TracksChecked)
+	}
+
+	// Path B: Deferred background FillInBackground(OnDemand: true) + remount swap path.
+	fres, err := FillInBackground(context.Background(), deferredMount, FillOptions{OnDemand: true})
+	if err != nil || !fres.Publish {
+		t.Fatalf("FillInBackground(OnDemand) on old library missing covers = (%+v, %v), want Publish=true", fres, err)
+	}
+	pubRes, err := ConvertAtMount(context.Background(), deferredMount, MountOptions{
+		OnDemand: true,
+		Publish:  true,
+		Deadline: time.Now().Add(hookWindow),
+	})
+	if err != nil || !pubRes.Pending.None() {
+		t.Fatalf("Publish remount = (%+v, %v), want Pending.None()", pubRes, err)
+	}
+	if n := query(t, deferredMount, `SELECT count(*) FROM Track WHERE albumArtId IS NOT NULL`); n[0][0] != "3" {
+		t.Fatalf("deferred swap linked cover count = %s, want 3", n[0][0])
+	}
+	defDir := dbDir(deferredMount)
+	if up := snapshot(t, deferredMount); up.Mode != rbstate.ModeOnDemand || !rbstate.BrowseIndexMatches(defDir, up.Header) {
+		t.Fatalf("deferred snapshot mode=%q or browse mismatch", up.Mode)
+	}
+	wb2, err := WriteBackCues(context.Background(), deferredMount, WriteBackOptions{SkipPreparingCheck: true})
+	if err != nil || wb2.TracksChecked != 4 {
+		t.Fatalf("WriteBackCues after deferred upgrade: checked=%d err=%v", wb2.TracksChecked, err)
+	}
+}
+
+func TestOnDemandLegacyAdoptManyListsDefersAndPublishesViaNext(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+	mount := filepath.Join(base, "untitled-legacy")
+	testfixture.LargeExport(t, mount, 4)
+
+	// Build a pre-v2 .rb-bridge-state.db library (like the 2026-11-21 build on UNTITLED) with missing
+	// artwork links on Tracks 1..4 and no .rb-bridge-snapshot.
+	dir := dbDir(mount)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rows := make([]enginedb.TrackRow, 4)
+	for i := 0; i < 4; i++ {
+		rel := fmt.Sprintf("Contents/Artist000/Album000/Track%05d.mp3", i+1)
+		rows[i] = enginedb.TrackRow{Rel: rel, Track: rekordbox.Track{ID: uint32(i + 1), Path: "/" + rel, Title: fmt.Sprintf("Track %05d", i+1)}}
+	}
+	ids, _, _, err := enginedb.BuildLibrary(context.Background(), dir, "", rows, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stDB, err := sql.Open("sqlite", filepath.Join(dir, oldStateName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stDB.Exec(`
+		CREATE TABLE BridgeState(path TEXT PRIMARY KEY, trackId INTEGER, fingerprint TEXT);
+		CREATE TABLE BridgePlaylist(listId INTEGER PRIMARY KEY);
+	`); err != nil {
+		_ = stDB.Close()
+		t.Fatal(err)
+	}
+	for i, id := range ids {
+		if _, err := stDB.Exec(`INSERT INTO BridgeState(path, trackId, fingerprint) VALUES(?, ?, 'legacy')`, "../"+rows[i].Rel, id); err != nil {
+			_ = stDB.Close()
+			t.Fatal(err)
+		}
+	}
+	_ = stDB.Close()
+
+	// Also give export OneLibrary artwork paths and confirm errNoNext keeps OnDemand metadata un-settled.
+	fix3WritePlainOneLibrary(t, mount)
+	onePath := filepath.Join(mount, "PIONEER", "rekordbox", "exportLibrary.db")
+	odb, err := sql.Open("sqlite", onePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := odb.Exec(`
+		INSERT INTO content(content_id,title,bpmx100,length,path,samplingRate,djComment,analysisDataFilePath,genre_id,label_id) VALUES
+			(3,'Track 3',12600,4,?,44100,'','/PIONEER/USBANLZ/P001/ANLZ0000.DAT',20,30),
+			(4,'Track 4',12200,4,?,44100,'','/PIONEER/USBANLZ/P001/ANLZ0000.DAT',20,30);
+		ALTER TABLE content ADD COLUMN image_path varchar;
+		UPDATE content SET image_path='/PIONEER/Artwork/00001/c1.jpg';
+	`, "/"+testfixture.LargeTrackPath(3), "/"+testfixture.LargeTrackPath(4)); err != nil {
+		_ = odb.Close()
+		t.Fatal(err)
+	}
+	_ = odb.Close()
+
+	// Tight mount window (3.5s margin) on legacy adopt defers to background cleanly.
+	bgStarts := 0
+	res, err := ConvertAtMount(context.Background(), mount, MountOptions{
+		OnDemand:        true,
+		Deadline:        time.Now().Add(spare + 500*time.Millisecond),
+		StartBackground: func() error { bgStarts++; return nil },
+	})
+	if err != nil || !res.Background || bgStarts != 1 {
+		t.Fatalf("legacy adopt defer = (%+v, %v), bgStarts=%d; want Background=true", res, err, bgStarts)
+	}
+
+	// With snap == nil (legacy adopt) and low room, FillInBackground returns errNoNext and leaves no fabricated snapshot.
+	origFree := stickFree
+	stickFree = func(string) (int64, bool) { return 1 << 20, true }
+	fillNoRoom, err := FillInBackground(context.Background(), mount, FillOptions{OnDemand: true})
+	stickFree = origFree
+	if !errors.Is(err, errNoNext) || fillNoRoom.Publish {
+		t.Fatalf("FillInBackground(no room, snap==nil) = (%+v, %v), want errNoNext & Publish=false", fillNoRoom, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, rbstate.SnapshotName)); !os.IsNotExist(err) {
+		t.Fatalf("no-room FillInBackground unexpectedly fabricated snapshot")
+	}
+
+	// With room available, FillInBackground builds .rb-next.db with all direct covers and asks for publish.
+	fillOK, err := FillInBackground(context.Background(), mount, FillOptions{OnDemand: true})
+	if err != nil || !fillOK.Publish {
+		t.Fatalf("FillInBackground(legacy adopt) = (%+v, %v), want Publish=true", fillOK, err)
+	}
+	pubRes, err := ConvertAtMount(context.Background(), mount, MountOptions{
+		OnDemand: true,
+		Publish:  true,
+		Deadline: time.Now().Add(hookWindow),
+	})
+	if err != nil || !pubRes.Pending.None() {
+		t.Fatalf("publish remount = (%+v, %v), want Pending.None()", pubRes, err)
+	}
+	if n := query(t, mount, `SELECT count(*) FROM Track WHERE albumArtId IS NOT NULL`); n[0][0] != "4" {
+		t.Fatalf("legacy adopt published cover count = %s, want 4", n[0][0])
+	}
+	if _, err := os.Stat(filepath.Join(dir, oldStateName)); !os.IsNotExist(err) {
+		t.Fatalf("legacy state DB survived swap: %v", err)
+	}
+
+	// With snap != nil and Pending.Rows > 0 on a low-room stick, FillInBackground returns (res, nil) with Publish=false
+	// and does NOT falsely clear Pending or claim settled OnDemand state.
+	pendSnap, err := rbstate.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendSnap.Mode = rbstate.ModeFull
+	pendSnap.Pending = rbstate.Pending{Rows: 1}
+	if err := pendSnap.SaveNext(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := rbstate.Promote(dir); err != nil {
+		t.Fatal(err)
+	}
+	stickFree = func(string) (int64, bool) { return 1 << 20, true }
+	fillSnapNoRoom, err := FillInBackground(context.Background(), mount, FillOptions{OnDemand: true})
+	stickFree = origFree
+	if err != nil || fillSnapNoRoom.Publish {
+		t.Fatalf("FillInBackground(no room, snap!=nil) = (%+v, %v), want (Publish=false, nil)", fillSnapNoRoom, err)
+	}
+	if still := snapshot(t, mount); still.Mode != rbstate.ModeFull || still.Pending.Rows != 1 {
+		t.Fatalf("low-room FillInBackground falsely settled snapshot: mode=%q pending=%+v", still.Mode, still.Pending)
+	}
+}
+
+func copyTreeForTest(t *testing.T, src, dst string) {
+	t.Helper()
+	if err := filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, b, 0o644)
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

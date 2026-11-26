@@ -2568,13 +2568,43 @@ static void test_timeout_starts_import_and_pending_swap_overrides_slow_marker(co
     assert(strstr(sbuf,want_unit)&&strstr(sbuf,"--import-path")&&strstr(sbuf,target));
     assert(!umount2(target,UMOUNT_NOFOLLOW));unlink(slog);unlink(blog);
 
-    // Next insert without pending swap honors slow_marker and skips rb-bridge.
+    // Next insert without pending swap and without a completed snapshot honors slow_marker
+    // (skips synchronous 17 s rb-bridge --mount-path) AND kicks off background --import-path.
     c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
     assert(access(blog,F_OK)==-1);
+    sf=fopen(slog,"r");assert(sf);memset(sbuf,0,sizeof sbuf);sn=fread(sbuf,1,sizeof sbuf-1,sf);fclose(sf);sbuf[sn]=0;
+    assert(strstr(sbuf,want_unit)&&strstr(sbuf,"--import-path")&&strstr(sbuf,target));
+    assert(!umount2(target,UMOUNT_NOFOLLOW));unlink(slog);
+
+    // Re-insert with slow_marker + legacy .rb-bridge-state.db (no snapshot yet) also skips
+    // synchronous conversion AND starts background --import-path.
+    join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2/.rb-bridge-state.db");write_file(p,"legacy-state");
+    c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
+    assert(access(blog,F_OK)==-1);
+    sf=fopen(slog,"r");assert(sf);memset(sbuf,0,sizeof sbuf);sn=fread(sbuf,1,sizeof sbuf-1,sf);fclose(sf);sbuf[sn]=0;
+    assert(strstr(sbuf,want_unit)&&strstr(sbuf,"--import-path")&&strstr(sbuf,target));
+    assert(!umount2(target,UMOUNT_NOFOLLOW));unlink(slog);unlink(p);
+
+    // Re-insert with slow_marker + unfinished pending snapshot (rows>0, lists:true) also skips
+    // synchronous conversion AND starts background --import-path.
+    join(p,disk,"Engine Library/Database2/.rb-bridge-snapshot");
+    write_file(p,"RBS2 {\"format\":2,\"rules\":5,\"uuid\":\"u-unt\",\"pending\":{\"rows\":2420,\"lists\":true}}\nE 0 0\n");
+    c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
+    assert(access(blog,F_OK)==-1);
+    sf=fopen(slog,"r");assert(sf);memset(sbuf,0,sizeof sbuf);sn=fread(sbuf,1,sizeof sbuf-1,sf);fclose(sf);sbuf[sn]=0;
+    assert(strstr(sbuf,want_unit)&&strstr(sbuf,"--import-path")&&strstr(sbuf,target));
+    assert(!umount2(target,UMOUNT_NOFOLLOW));unlink(slog);
+
+    // Re-insert with slow_marker + settled snapshot (pending:{} newer than marker) skips BOTH
+    // synchronous conversion and background import.
+    write_file(p,"RBS2 {\"format\":2,\"rules\":5,\"uuid\":\"u-unt\",\"pending\":{}}\nE 0 0\n");
+    c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
+    assert(access(blog,F_OK)==-1);
+    assert(access(slog,F_OK)==-1);
     assert(!umount2(target,UMOUNT_NOFOLLOW));
 
     // Pending swap (.rb-next.db + .swap) overrides slow_marker, runs rb-bridge, and clears slow_marker.
-    join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
     join(p,disk,"Engine Library/Database2/.rb-next.db");write_file(p,"next");
     join(p,disk,"Engine Library/Database2/.rb-bridge-snapshot.swap");write_file(p,"swap");
     snprintf(script,sizeof script,"#!/bin/sh\necho \"pub $*\" >> '%s'\nrm -f \"$2/Engine Library/Database2/.rb-next.db\" \"$2/Engine Library/Database2/.rb-bridge-snapshot.swap\"\nexit 0\n",blog);

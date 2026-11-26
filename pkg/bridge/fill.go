@@ -170,7 +170,10 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	if snap != nil && view.view != nil {
 		diff = Diff(view.view, snap)
 	}
-	needsNextRows := snap == nil || (diff != nil && (diff.structural() || (o.OnDemand && (len(diff.UpdateTracks) > 0 || snap.Pending.Rows > 0 || snap.Pending.Lists))))
+	needsDirectCovers := o.OnDemand && snap != nil && view.view != nil &&
+		hasMissingDirectCovers(ctx, filepath.Join(dbDir, "m.db"), view.view, snap)
+	needsNextRows := snap == nil || (diff != nil && (diff.structural() || (o.OnDemand && (len(diff.UpdateTracks) > 0 || snap.Pending.Rows > 0 || snap.Pending.Lists || needsDirectCovers))))
+	nextSkippedNoRoom := false
 	if needsNextRows && view.view != nil && o.Stage == nil {
 		if snap == nil || o.OnDemand {
 			err = buildNextWhenIdle(false, true)
@@ -191,6 +194,7 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 			if snap == nil || !errors.Is(err, errNoNext) {
 				return res, err
 			}
+			nextSkippedNoRoom = true
 			log.Printf("rb-bridge: %v; rows and lists wait for the windows", err)
 		}
 	}
@@ -198,6 +202,10 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 		return res, fmt.Errorf("snapshot: %w", rbstate.ErrNoSnapshot)
 	}
 	if o.OnDemand {
+		if nextSkippedNoRoom {
+			log.Printf("rb-bridge: on-demand mode for %s: next library unavailable; rows/lists remain pending for mount windows (%s)", mount, time.Since(start).Round(time.Millisecond))
+			return res, nil
+		}
 		// OnDemand mode: rows and lists are current; no background performance-data pass is run.
 		// Hydrate legacy snapshots missing ModeOnDemand/browse paths, clear stale perf/verify flags,
 		// and ensure .rb-bridge-browse matches the live snapshot generation.
@@ -445,6 +453,27 @@ func pendingRowsForView(view *View, snap *rbstate.Snapshot) int {
 		}
 	}
 	return pending
+}
+
+func hasMissingDirectCovers(ctx context.Context, dbPath string, view *View, snap *rbstate.Snapshot) bool {
+	if view == nil || snap == nil {
+		return false
+	}
+	missing, err := enginedb.MissingAlbumArtIDsRO(ctx, dbPath)
+	if err != nil || len(missing) == 0 {
+		return false
+	}
+	for i := range view.Tracks {
+		vt := &view.Tracks[i]
+		if vt.Track.ArtworkPath == "" {
+			continue
+		}
+		t := snap.Tracks[vt.Key]
+		if t != nil && !t.Native && t.EngineID != 0 && missing[t.EngineID] {
+			return true
+		}
+	}
+	return false
 }
 
 type filler struct {
