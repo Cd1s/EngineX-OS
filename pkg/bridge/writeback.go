@@ -1000,6 +1000,18 @@ func filledActiveLoopsDiffer(row dbCandidate) bool {
 	return row.activeLoops != 0
 }
 
+func cueStateMatchesSynced(row dbCandidate, refs map[rbstate.LibraryKind]rekordbox.Track) bool {
+	if row.track == nil || len(row.track.Synced) == 0 {
+		return false
+	}
+	for _, tr := range refs {
+		if bytes.Equal(row.track.Synced, enginedb.SyncedDigest(nil, row.quickCues, row.loops, row.activeLoops, tr.Genre, tr.Comment, tr.Label)) {
+			return true
+		}
+	}
+	return false
+}
+
 func needsCueRead(row dbCandidate) bool {
 	if len(row.trackData) == 0 {
 		return false
@@ -1471,7 +1483,7 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 		var orig []rekordbox.Cue
 		var origBeats []rekordbox.Beat
 		anlzDiff, oneDiff := false, false
-		needsCue := needsCueRead(row)
+		needsCue := needsCueRead(row) && !cueStateMatchesSynced(row, change.refs)
 		needsGrid := needsGridRead(row)
 		if (needsCue || needsGrid) && primary.AnalysisPath != "" {
 			offset, offsetOK := trackRekordboxOffset(resolver, primary.Path)
@@ -1482,6 +1494,11 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 						if one, hasOne := change.refs[rbstate.OneLibrary]; hasOne && len(one.Cues) > 0 {
 							orig = one.Cues
 						}
+					}
+					origPhantom := isPhantomZeroHotCueSet(orig)
+					onePhantom := false
+					if one, hasOne := change.refs[rbstate.OneLibrary]; hasOne && isPhantomZeroHotCueSet(one.Cues) {
+						onePhantom = true
 					}
 					cuesMatchedLegacy := false
 					if takeOver && len(row.track.Written) > 0 {
@@ -1500,7 +1517,7 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 						}
 						cuesMatchedLegacy = enginedb.UnadjustedLegacyMatches(row.beatData, row.quickCues, row.loops, nil, row.track.Written, cands...)
 					}
-					if !cuesMatchedLegacy {
+					if !cuesMatchedLegacy && !origPhantom && !onePhantom {
 						legacyMP3 := len(row.track.Written) == 0 && strings.HasSuffix(strings.ToLower(primary.Path), ".mp3")
 						merged := mergeEngineCues(orig, deck, offset, legacyMP3)
 						anlzDiff = !cuesEquivalent(orig, merged)
