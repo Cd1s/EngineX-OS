@@ -399,8 +399,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 		if jobs.p.Deemix != nil {
 			jobs.p.Deemix.PreferMP3 = func() bool { return s.quality() == quality320k }
 		}
+		jobs.loadSources()
 		jobs.mu.Unlock()
-		jobs.scrubLegacySources()
 	}
 	return s
 }
@@ -453,7 +453,7 @@ func (s *Server) Close() {
 	}
 	if s.tidal != nil {
 		s.tidal.closeArt()
-		s.tidal.saveTracks() // the IDs Engine still lists, for the next run (#73)
+		s.tidal.flushTracks() // the IDs Engine still lists, for the next run (#73)
 	}
 	if s.prolinkExport != nil {
 		s.prolinkExport.Close()

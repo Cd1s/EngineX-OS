@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -45,19 +46,15 @@ func (s *Server) stemsFile() string {
 }
 
 func (s *Server) readStemmed() (map[string][]stemmedTrack, error) {
-	path := s.stemsFile()
-	if path == "" {
-		return map[string][]stemmedTrack{}, nil
+	all := map[string][]stemmedTrack{}
+	data, err := os.ReadFile(s.stemsFile())
+	if s.stemsFile() == "" || os.IsNotExist(err) {
+		return all, nil
 	}
-	data, err := os.ReadFile(path)
+	if err == nil {
+		err = json.Unmarshal(data, &all)
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string][]stemmedTrack{}, nil
-		}
-		return nil, err
-	}
-	var all map[string][]stemmedTrack
-	if err := json.Unmarshal(data, &all); err != nil {
 		return nil, err
 	}
 	if all == nil {
@@ -66,35 +63,35 @@ func (s *Server) readStemmed() (map[string][]stemmedTrack, error) {
 	return all, nil
 }
 
-func (s *Server) loadStemmed() map[string][]stemmedTrack {
-	all, err := s.readStemmed()
-	if err != nil {
-		return map[string][]stemmedTrack{}
-	}
-	return all
-}
+func (s *Server) loadStemmed() map[string][]stemmedTrack { all, _ := s.readStemmed(); return all }
 
 func sameTrack(a, b providers.Track) bool { return a.Provider == b.Provider && a.ID == b.ID }
 
-func sanitizeTrackCovers(t *providers.Track) bool {
-	return providers.SanitizeSelfHostedTrack(t)
-}
+func sanitizeTrackCovers(t *providers.Track) bool { return providers.SanitizeSelfHostedTrack(t) }
 
-func scrubStemmedMap(all map[string][]stemmedTrack) bool {
-	changed := false
+func scrubStemmedMap(all map[string][]stemmedTrack) (changed, collision bool) {
+	cleaned := make(map[string][]stemmedTrack, len(all))
 	for scope, list := range all {
-		for i := range list {
-			if sanitizeTrackCovers(&list[i].Track) {
-				changed = true
+		cand, seen := append([]stemmedTrack(nil), list...), make(map[string]string, len(list))
+		for i := range cand {
+			orig := cand[i].Track
+			changed = sanitizeTrackCovers(&cand[i].Track) || changed
+			ok, nk := orig.Provider+"\x00"+orig.ID, cand[i].Track.Provider+"\x00"+cand[i].Track.ID
+			if (orig.ID != "" && cand[i].Track.ID == "") || (seen[nk] != "" && seen[nk] != ok) {
+				return false, true
 			}
+			seen[nk] = ok
 		}
-		all[scope] = list
+		cleaned[scope] = cand
 	}
-	return changed
+	if changed {
+		maps.Copy(all, cleaned)
+	}
+	return changed, false
 }
 
-// scrubLegacyStems strips any pre-fix credentials from an existing
-// streaming-stems.json on startup without rewriting clean or undecodable files.
+// scrubLegacyStems strips pre-fix credentials from streaming-stems.json on startup
+// without rewriting clean, colliding, or undecodable files.
 func (s *Server) scrubLegacyStems() {
 	if s.stemsFile() == "" {
 		return
@@ -104,9 +101,9 @@ func (s *Server) scrubLegacyStems() {
 	all, err := s.readStemmed()
 	if err != nil {
 		log.Printf("stream-sync: skip stems state scrub: could not decode state (%T)", err)
-		return
-	}
-	if scrubStemmedMap(all) {
+	} else if changed, collision := scrubStemmedMap(all); collision {
+		log.Printf("stream-sync: skip stems state scrub: id collision")
+	} else if changed {
 		if err := providers.SaveJSON(s.stemsFile(), all); err != nil {
 			log.Printf("stream-sync: scrub stems state: %v", err)
 		}
@@ -123,7 +120,9 @@ func (s *Server) addStemmed(scope string, t stemmedTrack) error {
 		log.Printf("stream-sync: skip stems state update: could not decode state (%T)", err)
 		return errors.New("stems state could not be decoded")
 	}
-	scrubStemmedMap(all)
+	if _, collision := scrubStemmedMap(all); collision {
+		log.Printf("stream-sync: skip stems state scrub during update: id collision")
+	}
 	list := slices.DeleteFunc(all[scope], func(e stemmedTrack) bool { return sameTrack(e.Track, t.Track) })
 	all[scope] = append([]stemmedTrack{t}, list[:min(len(list), maxStemmed-1)]...)
 	return providers.SaveJSON(s.stemsFile(), all)
@@ -132,7 +131,11 @@ func (s *Server) addStemmed(scope string, t stemmedTrack) error {
 func (s *Server) stemmed(scope string) []stemmedTrack {
 	s.stemsMu.Lock()
 	defer s.stemsMu.Unlock()
-	return s.loadStemmed()[scope]
+	list := s.loadStemmed()[scope]
+	for i := range list {
+		sanitizeTrackCovers(&list[i].Track)
+	}
+	return list
 }
 
 // stemsImportFile is the file Engine imports for a streamed row's Stems: the

@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1930,13 +1931,17 @@ func TestNASLegacyDirtyIDsScrubbedPreservingGatewayIDs(t *testing.T) {
 	if !ok42 || ref42.track.ID != "/library/parts/301/song.flac" || mappedID != 42 {
 		t.Fatalf("gateway numeric ID 42 not preserved cleanly: ok=%v track=%+v mapped=%d", ok42, ref42.track, mappedID)
 	}
-	if !okList || listRef.list.ID != "/music/Mixes/" {
-		t.Fatalf("gateway playlist ID not normalized: ok=%v list=%+v", okList, listRef.list)
+	wantDavList := providers.SanitizeSelfHostedID("webdav", dirtyDavList)
+	if !okList || listRef.list.ID != wantDavList || !strings.HasPrefix(listRef.list.ID, "/music/Mixes/;id=") {
+		t.Fatalf("gateway playlist ID not normalized: ok=%v list=%+v want=%q", okList, listRef.list, wantDavList)
 	}
 
-	// Migrated .sources.json resolves the cached download under the normalized ID.
+	// Migrated .sources.json resolves cached downloads under the normalized IDs.
 	if got := jobs.File(providers.Track{ID: "/library/parts/301/song.flac", Provider: "plex"}); got != cachedFile {
 		t.Fatalf("jobs.File after .sources.json migration = %q, want %q", got, cachedFile)
+	}
+	if got := jobs.File(providers.Track{ID: providers.SanitizeSelfHostedID("webdav", dirtyDavID), Provider: "webdav"}); got != cachedFile {
+		t.Fatalf("jobs.File for webdav after .sources.json migration = %q, want %q", got, cachedFile)
 	}
 
 	// Job submission and cover-error logs scrub URL-shaped IDs too.
@@ -2074,4 +2079,287 @@ func TestStartupStemsScrubPreservesUndecodableFile(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNASRound6TwoStartsLosslessAndIdempotent(t *testing.T) {
+	writeJSON := func(t *testing.T, path string, v any) {
+		t.Helper()
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var sampleFLAC bytes.Buffer
+	if err := testaudio.FLAC(&sampleFLAC, testaudio.Song(2)); err != nil {
+		t.Fatal(err)
+	}
+	writeAudio := func(t *testing.T, dir string, names ...string) {
+		t.Helper()
+		for _, name := range names {
+			if err := os.WriteFile(filepath.Join(dir, name), sampleFLAC.Bytes(), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	t.Run("two-starts-lossless-all-four-files", func(t *testing.T) {
+		ui, state, downloads := t.TempDir(), t.TempDir(), t.TempDir()
+		paths := []string{
+			filepath.Join(state, "gateway-tracks.json"),
+			filepath.Join(state, "streaming-stems.json"),
+			filepath.Join(downloads, sourcesFile),
+			filepath.Join(ui, "nas.json"),
+		}
+		base := url.URL{Scheme: "https", Host: "nas.example.invalid"}
+		legacy := base
+		legacy.User = url.User("owner")
+		const explicitPass = "explicit-saved-pass-999"
+		writeJSON(t, paths[3], providers.NASConfig{URL: legacy.String(), Protocol: "webdav", Password: explicitPass, Enabled: true})
+
+		a, b := "/music/item?edition=original", "/music/item?edition=remix"
+		group := "/music/mixes?edition=first"
+		first := providers.Track{Provider: "webdav", ID: a, Title: "Original", Rating: 4}
+		second := providers.Track{Provider: "webdav", ID: b, Title: "Remix", Rating: 5}
+		writeJSON(t, paths[0], savedTracks{
+			Next: 90,
+			Tracks: []savedRef{
+				{ID: 41, Track: first, Session: "nas"},
+				{ID: 42, Track: second, Session: "nas"},
+			},
+			Lists: []savedList{
+				{ID: "omni", Session: "nas", Provider: localProvider, List: providers.Playlist{ID: "nas\x00" + group, Title: "Mixes"}},
+			},
+			Albums: []savedAlbum{
+				{ID: 71, Provider: "nas", ListID: group},
+			},
+		})
+		writeJSON(t, paths[1], map[string][]stemmedTrack{"nas": {{Track: first, Path: "original.flac"}, {Track: second, Path: "remix.flac"}}})
+		writeJSON(t, paths[2], map[string]string{"webdav:" + a: "original.flac", "webdav:" + b: "remix.flac", "deezer:8": "keep.flac"})
+		writeAudio(t, downloads, "original.flac", "remix.flac", "keep.flac")
+
+		prior := make([][]byte, len(paths))
+		for boot := 1; boot <= 2; boot++ {
+			jobs := NewJobs(Pipeline{Deemix: &deemixclient.Client{DownloadDir: downloads}, Catalog: &providers.Deezer{}})
+			s := New(Config{UIDir: ui, StateDir: state}, jobs)
+			s.tidal.mu.Lock()
+			rev41 := s.tidal.ids[refKey(s.tidal.tracks[41])]
+			rev42 := s.tidal.ids[refKey(s.tidal.tracks[42])]
+			s.tidal.mu.Unlock()
+			gotFile1 := jobs.File(first)
+			gotFile2 := jobs.File(second)
+			s.Close()
+			jobs.Close()
+
+			if rev41 != 41 || rev42 != 42 {
+				t.Errorf("boot %d: reverse gateway IDs lost: rev41=%d rev42=%d", boot, rev41, rev42)
+			}
+			if gotFile1 != filepath.Join(downloads, "original.flac") || gotFile2 != filepath.Join(downloads, "remix.flac") {
+				t.Errorf("boot %d: jobs.File lost distinct mappings: %q vs %q", boot, gotFile1, gotFile2)
+			}
+			var g savedTracks
+			var st map[string][]stemmedTrack
+			var src map[string]string
+			var cfg providers.NASConfig
+			into := []any{&g, &st, &src, &cfg}
+			for i, path := range paths {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(data, into[i]); err != nil {
+					t.Fatal(err)
+				}
+				if boot == 2 && !bytes.Equal(prior[i], data) {
+					t.Errorf("boot %d: %s changed on second start", boot, filepath.Base(path))
+				}
+				prior[i] = data
+			}
+			wantGroup := providers.SanitizeSelfHostedID("webdav", group)
+			if len(g.Tracks) != 2 || g.Next != 90 || g.Tracks[0].ID != 41 || g.Tracks[1].ID != 42 ||
+				g.Tracks[0].Track.Rating != 4 || g.Tracks[1].Track.Rating != 5 ||
+				len(g.Albums) != 1 || g.Albums[0].ID != 71 || g.Albums[0].ListID != wantGroup {
+				t.Errorf("boot %d: gateway rows, ratings, album, or counter changed: %+v", boot, g)
+			}
+			if g.Tracks[0].Track.ID == g.Tracks[1].Track.ID ||
+				strings.Contains(g.Tracks[0].Track.ID, "?") || strings.Contains(g.Tracks[1].Track.ID, "?") {
+				t.Errorf("boot %d: gateway track IDs collided or retained query: %q vs %q", boot, g.Tracks[0].Track.ID, g.Tracks[1].Track.ID)
+			}
+			if len(g.Lists) != 1 || g.Lists[0].ID != "omni" || g.Lists[0].List.ID != "nas\x00"+wantGroup || strings.Contains(g.Lists[0].List.ID, "?") {
+				t.Errorf("boot %d: OmniSource playlist not cleanly normalized: %+v", boot, g.Lists)
+			}
+			rows := st["nas"]
+			if len(rows) != 2 || rows[0].Path != "original.flac" || rows[1].Path != "remix.flac" || sameTrack(rows[0].Track, rows[1].Track) {
+				t.Errorf("boot %d: Stems rows lost order/paths or collided: %+v", boot, rows)
+			}
+			if len(src) != 3 || src["deezer:8"] != "keep.flac" ||
+				src["webdav:"+g.Tracks[0].Track.ID] != "original.flac" ||
+				src["webdav:"+g.Tracks[1].Track.ID] != "remix.flac" {
+				t.Errorf("boot %d: download mappings lost: %+v", boot, src)
+			}
+			if cfg.Password != explicitPass || cfg.Username != "owner" || cfg.URL != base.String() || !cfg.Enabled {
+				t.Errorf("boot %d: nas config migration lost fields: %+v", boot, cfg)
+			}
+		}
+	})
+
+	t.Run("url-password-migrated-with-existing-username", func(t *testing.T) {
+		ui := t.TempDir()
+		writeJSON(t, filepath.Join(ui, "nas.json"), providers.NASConfig{
+			URL: "https://owner:url-secret-pass@nas.example.invalid", Protocol: "webdav", Username: "owner", Enabled: true,
+		})
+		s := New(Config{UIDir: ui, StateDir: t.TempDir()}, nil)
+		defer s.Close()
+		cfg := s.loadNASConfig()
+		if cfg.Username != "owner" || cfg.Password != "url-secret-pass" || cfg.URL != "https://nas.example.invalid" {
+			t.Fatalf("password migration with populated username failed: %+v", cfg)
+		}
+	})
+
+	t.Run("nas-migration-persistence-error-logged-cleanly", func(t *testing.T) {
+		// Make uiDir/nas.json fit under Linux PATH_MAX (4096) while SaveJSON's
+		// longer ".credential-*" temp file fails with ENAMETOOLONG even as root.
+		ui := t.TempDir()
+		for len(ui) < 4080 {
+			segLen := min(200, 4080-len(ui)-1)
+			if segLen <= 0 {
+				break
+			}
+			ui = filepath.Join(ui, strings.Repeat("d", segLen))
+		}
+		if err := os.MkdirAll(ui, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		const secretPass = "persist-err-pass-777"
+		writeJSON(t, filepath.Join(ui, "nas.json"), providers.NASConfig{
+			URL: "https://owner:" + secretPass + "@nas.example.invalid/dav?tok=secret-q", Protocol: "webdav", Enabled: true,
+		})
+
+		var logBuf bytes.Buffer
+		origOut := log.Writer()
+		log.SetOutput(&logBuf)
+		s := New(Config{UIDir: ui, StateDir: t.TempDir()}, nil)
+		log.SetOutput(origOut)
+		defer s.Close()
+
+		logs := logBuf.String()
+		if !strings.Contains(logs, "migrate nas config failed") {
+			t.Fatalf("expected persistence failure log, got: %q", logs)
+		}
+		for _, bad := range []string{secretPass, "secret-q", "owner", "nas.example.invalid"} {
+			if strings.Contains(logs, bad) {
+				t.Errorf("persistence error log leaked %q: %s", bad, logs)
+			}
+		}
+		w := httptest.NewRecorder()
+		s.handleNASConfig(w, httptest.NewRequest(http.MethodGet, "/v1/enginex/nas", nil))
+		if strings.Contains(w.Body.String(), secretPass) || strings.Contains(w.Body.String(), "secret-q") || strings.Contains(w.Body.String(), "?") {
+			t.Fatalf("GET /v1/enginex/nas leaked credentials after save failure: %s", w.Body.String())
+		}
+	})
+
+	t.Run("collision-preflight-leaves-files-untouched", func(t *testing.T) {
+		ui, state, downloads := t.TempDir(), t.TempDir(), t.TempDir()
+		gwPath := filepath.Join(state, "gateway-tracks.json")
+		stemsPath := filepath.Join(state, "streaming-stems.json")
+		srcPath := filepath.Join(downloads, sourcesFile)
+
+		dirtyPlex := "http://col-u:col-p@nas.local:32400/library/parts/1/a.flac?X-Plex-Token=col-tok"
+		cleanPlex := "/library/parts/1/a.flac"
+		t1 := providers.Track{Provider: "plex", ID: dirtyPlex, Title: "First"}
+		t2 := providers.Track{Provider: "plex", ID: cleanPlex, Title: "Second"}
+		writeJSON(t, gwPath, savedTracks{Next: 10, Tracks: []savedRef{{ID: 1, Track: t1, Session: "nas"}, {ID: 2, Track: t2, Session: "nas"}}})
+		writeJSON(t, stemsPath, map[string][]stemmedTrack{"nas": {{Track: t1, Path: "one.flac"}, {Track: t2, Path: "two.flac"}}})
+		writeJSON(t, srcPath, map[string]string{"plex:" + dirtyPlex: "one.flac", "plex:" + cleanPlex: "two.flac"})
+		writeAudio(t, downloads, "one.flac", "two.flac")
+		origGW, _ := os.ReadFile(gwPath)
+		origStems, _ := os.ReadFile(stemsPath)
+		origSrc, _ := os.ReadFile(srcPath)
+
+		var logBuf bytes.Buffer
+		origOut := log.Writer()
+		log.SetOutput(&logBuf)
+		jobs := NewJobs(Pipeline{Deemix: &deemixclient.Client{DownloadDir: downloads}, Catalog: &providers.Deezer{}})
+		s := New(Config{UIDir: ui, StateDir: state}, jobs)
+		log.SetOutput(origOut)
+
+		s.tidal.mu.Lock()
+		rev1 := s.tidal.ids[refKey(s.tidal.tracks[1])]
+		rev2 := s.tidal.ids[refKey(s.tidal.tracks[2])]
+		s.tidal.mu.Unlock()
+		if rev1 != 1 || rev2 != 2 {
+			t.Errorf("colliding gateway rows lost reverse mappings: rev1=%d rev2=%d", rev1, rev2)
+		}
+		if got1, got2, got1Again := jobs.File(t1), jobs.File(t2), jobs.File(t1); got1 != filepath.Join(downloads, "one.flac") || got2 != filepath.Join(downloads, "two.flac") || got1Again != filepath.Join(downloads, "one.flac") {
+			t.Errorf("colliding download mappings lost: %q vs %q vs %q", got1, got2, got1Again)
+		}
+
+		for _, tc := range []struct {
+			name string
+			path string
+			want []byte
+		}{
+			{"gateway-tracks.json", gwPath, origGW},
+			{"streaming-stems.json", stemsPath, origStems},
+			{".sources.json", srcPath, origSrc},
+		} {
+			got, _ := os.ReadFile(tc.path)
+			if !bytes.Equal(got, tc.want) {
+				t.Errorf("colliding %s was modified on startup", tc.name)
+			}
+		}
+		logs := logBuf.String()
+		for _, wantLog := range []string{"skip gateway track migration", "skip stems state scrub", "skip download source index migration"} {
+			if !strings.Contains(logs, wantLog) {
+				t.Errorf("expected diagnostic %q in logs: %s", wantLog, logs)
+			}
+		}
+		for _, bad := range []string{"col-u", "col-p", "col-tok"} {
+			if strings.Contains(logs, bad) {
+				t.Errorf("collision log leaked %q: %s", bad, logs)
+			}
+		}
+		// Returned JSON, stems list, and playlist error logs still clean unmigrated values.
+		out := s.tidal.trackJSON(1, providers.Track{Provider: "webdav", ID: "http://col-u:col-p@nas/a.flac?sig=col-tok", Album: "http://col-u:col-p@nas/dir/?sig=col-tok"})
+		outJSON, _ := json.Marshal(out)
+		stemsJSON, _ := json.Marshal(s.stemmed("nas"))
+		srcLog := playlistOpenSourceID(&playlistRef{provider: localProvider, list: providers.Playlist{ID: "nas\x00http://col-u:col-p@nas/dir/?sig=col-tok"}})
+		for _, bad := range []string{"col-u", "col-p", "col-tok", "?"} {
+			if strings.Contains(string(outJSON), bad) || strings.Contains(string(stemsJSON), bad) || strings.Contains(srcLog, bad) {
+				t.Errorf("sanitized output/log leaked %q: json=%s stems=%s log=%s", bad, string(outJSON), string(stemsJSON), srcLog)
+			}
+		}
+		// A second start also preserves all three colliding files byte-for-byte.
+		s.Close()
+		jobs.Close()
+		jobs2 := NewJobs(Pipeline{Deemix: &deemixclient.Client{DownloadDir: downloads}, Catalog: &providers.Deezer{}})
+		s2 := New(Config{UIDir: ui, StateDir: state}, jobs2)
+		s2.Close()
+		jobs2.Close()
+		for _, tc := range []struct {
+			name string
+			path string
+			want []byte
+		}{
+			{"gateway-tracks.json", gwPath, origGW},
+			{"streaming-stems.json", stemsPath, origStems},
+			{".sources.json", srcPath, origSrc},
+		} {
+			got, _ := os.ReadFile(tc.path)
+			if !bytes.Equal(got, tc.want) {
+				t.Errorf("colliding %s was modified after second start", tc.name)
+			}
+		}
+		if got := playlistOpenSourceID(&playlistRef{provider: localProvider, list: providers.Playlist{ID: "nas\x00http://col-u:col-p@nas.local"}}); got != `nas:""` {
+			t.Errorf("empty inner OmniSource locator = %q, want %q", got, `nas:""`)
+		}
+		for _, smbDir := range []string{"90s #1 Hits", "Who? Mix"} {
+			if got := providers.SanitizeSelfHostedID(nasScope, smbDir); got != smbDir {
+				t.Errorf("SMB folder %q mangled to %q", smbDir, got)
+			}
+		}
+	})
 }

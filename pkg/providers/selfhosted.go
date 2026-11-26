@@ -2,6 +2,7 @@ package providers
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/md5"
 	"crypto/rand"
@@ -43,16 +44,14 @@ type NASConfig struct {
 }
 
 type SelfHostedProvider struct {
-	cfg            NASConfig
-	client         *http.Client
-	mu             sync.RWMutex
-	webdavCache    map[string]Track  // clean path ID -> Track
-	webdavKeys     []string          // FIFO eviction queue
-	webdavHrefMap  map[string]string // clean path ID -> same-origin private href (path+query)
-	webdavHrefKeys []string          // FIFO eviction queue
-	plexPartMap    map[string]string // ratingKey or clean part path -> private Part.key
-	plexPartKeys   []string          // FIFO eviction queue
-	maxCache       int               // max entries for caches (<=0 uses defaultMaxCache)
+	cfg          NASConfig
+	client       *http.Client
+	mu           sync.RWMutex
+	webdavCache  map[string]Track  // href/ID -> Track
+	webdavKeys   []string          // FIFO eviction queue
+	locatorMap   map[string]string // "<kind>\x00<publicID>" -> private same-origin path+query
+	locatorOrder []string          // FIFO eviction queue
+	maxCache     int               // max entries for caches (<=0 uses defaultMaxCache)
 }
 
 func NewSelfHostedProvider(cfg NASConfig, c *http.Client) *SelfHostedProvider {
@@ -60,12 +59,11 @@ func NewSelfHostedProvider(cfg NASConfig, c *http.Client) *SelfHostedProvider {
 		c = &http.Client{Timeout: 30 * time.Second}
 	}
 	return &SelfHostedProvider{
-		cfg:           cfg,
-		client:        c,
-		webdavCache:   make(map[string]Track),
-		webdavHrefMap: make(map[string]string),
-		plexPartMap:   make(map[string]string),
-		maxCache:      defaultMaxCache,
+		cfg:         cfg,
+		client:      c,
+		webdavCache: make(map[string]Track),
+		locatorMap:  make(map[string]string),
+		maxCache:    defaultMaxCache,
 	}
 }
 
@@ -80,43 +78,26 @@ func (p *SelfHostedProvider) httpClient() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}
 }
 
-func normalizeOriginHost(scheme, host string) string {
-	h := strings.ToLower(strings.TrimSpace(host))
-	if hn, port, err := net.SplitHostPort(h); err == nil {
-		if (strings.EqualFold(scheme, "http") && port == "80") ||
-			(strings.EqualFold(scheme, "https") && port == "443") {
-			if strings.Contains(hn, ":") {
-				return "[" + hn + "]"
-			}
-			return hn
-		}
-	}
-	return h
-}
-
 func sameOrigin(a, b *url.URL) bool {
-	if a == nil || b == nil {
+	if a == nil || b == nil || !strings.EqualFold(a.Scheme, b.Scheme) || !strings.EqualFold(a.Hostname(), b.Hostname()) {
 		return false
 	}
-	if !strings.EqualFold(a.Scheme, b.Scheme) {
-		return false
-	}
-	return normalizeOriginHost(a.Scheme, a.Host) == normalizeOriginHost(b.Scheme, b.Host)
+	def := map[string]string{"http": "80", "https": "443"}[strings.ToLower(a.Scheme)]
+	return cmp.Or(a.Port(), def) == cmp.Or(b.Port(), def)
 }
 
-// authHTTPClient returns a shallow copy of p.httpClient() with one redirect
-// policy for all authenticated NAS requests: always drop Referer and refuse
-// cross-origin redirects so query/header credentials never reach another origin.
-func (p *SelfHostedProvider) authHTTPClient(baseU *url.URL) *http.Client {
+// authHTTPClient copies p.httpClient() with one redirect policy for authenticated
+// NAS requests: always drop Referer and refuse cross-origin (or disallowed) redirects.
+func (p *SelfHostedProvider) authHTTPClient(baseU *url.URL, check ...func(*http.Request) bool) *http.Client {
 	client := *p.httpClient()
 	origCheck := client.CheckRedirect
 	client.CheckRedirect = func(r *http.Request, via []*http.Request) error {
 		r.Header.Del("Referer")
-		if baseU == nil || r.URL.User != nil || !sameOrigin(r.URL, baseU) {
+		if baseU == nil || r.URL.User != nil || !sameOrigin(r.URL, baseU) || (len(check) > 0 && !check[0](r)) {
 			r.Header.Del("Authorization")
 			r.Header.Del("X-Plex-Token")
 			r.Header.Del("Cookie")
-			return errors.New("cross-origin redirect refused")
+			return errors.New("redirect refused")
 		}
 		if origCheck != nil {
 			return origCheck(r, via)
@@ -127,6 +108,90 @@ func (p *SelfHostedProvider) authHTTPClient(baseU *url.URL) *http.Client {
 		return nil
 	}
 	return &client
+}
+
+func (p *SelfHostedProvider) lookupLocator(kind, id string) string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	prefix := kind + "\x00"
+	if v := p.locatorMap[prefix+id]; v != "" {
+		return v
+	}
+	basePath, hashed := splitSelfHostedHash(id)
+	if hashed || !strings.HasPrefix(basePath, "/") {
+		return ""
+	}
+	target, found := strings.TrimRight(basePath, "/"), ""
+	for k, val := range p.locatorMap {
+		if rest, ok := strings.CutPrefix(k, prefix); ok {
+			if kBase, _ := splitSelfHostedHash(rest); strings.TrimRight(kBase, "/") == target {
+				if found != "" && found != val {
+					return ""
+				}
+				found = val
+			}
+		}
+	}
+	return found
+}
+
+func (p *SelfHostedProvider) withLocator(kind, id, fallback, missingErr string, refresh func() string, do func(string) (bool, error)) error {
+	ref, refreshed := p.lookupLocator(kind, id), false
+	if ref == "" {
+		if _, hashed := splitSelfHostedHash(id); hashed || fallback == "" {
+			ref, refreshed = refresh(), true
+		} else {
+			ref = fallback
+		}
+	}
+	if ref == "" {
+		return errors.New(missingErr)
+	}
+	retry, err := do(ref)
+	if retry && !refreshed {
+		p.mu.Lock()
+		delete(p.locatorMap, kind+"\x00"+id)
+		p.mu.Unlock()
+		if next := refresh(); next != "" && next != ref {
+			_, err = do(next)
+		}
+	}
+	return err
+}
+
+func (p *SelfHostedProvider) getWithLocator(ctx context.Context, proto, kind, id, fallback, missingErr string, baseU *url.URL,
+	buildURL func(string) (string, error), setAuth func(*http.Request), refresh func() string,
+) (resp *http.Response, reqURL *url.URL, usedRef string, err error) {
+	err = p.withLocator(kind, id, fallback, missingErr, refresh, func(ref string) (bool, error) {
+		if resp != nil {
+			resp.Body.Close()
+			resp = nil
+		}
+		rawURL, rerr := buildURL(ref)
+		if rerr != nil {
+			return false, rerr
+		}
+		req, rerr := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		if rerr != nil {
+			return false, fmt.Errorf("%s: invalid download URL", proto)
+		}
+		setAuth(req)
+		r, rerr := p.authHTTPClient(baseU).Do(req)
+		if rerr != nil {
+			return false, safeSelfHostedError(proto, "download", req.URL, rerr)
+		}
+		resp, reqURL, usedRef = r, req.URL, ref
+		return r.StatusCode == 401 || r.StatusCode == 403 || r.StatusCode == 404, nil
+	})
+	if err != nil && resp != nil {
+		resp.Body.Close()
+		resp = nil
+	}
+	return
+}
+
+func isRetryableLocatorError(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "HTTP 401") || strings.Contains(err.Error(), "HTTP 403") || strings.Contains(err.Error(), "HTTP 404"))
 }
 
 func (p *SelfHostedProvider) Playlists(ctx context.Context) ([]Playlist, error) {
@@ -316,10 +381,7 @@ func isSubsonicCoverPath(p string) bool {
 }
 
 func hasRawPathTraversal(u *url.URL) bool {
-	if u == nil {
-		return true
-	}
-	if strings.Contains(u.Path, "\\") {
+	if u == nil || strings.Contains(u.Path, "\\") {
 		return true
 	}
 	if u.Path != "" {
@@ -327,87 +389,33 @@ func hasRawPathTraversal(u *url.URL) bool {
 		if strings.HasSuffix(u.Path, "/") && clean != "/" {
 			clean += "/"
 		}
-		if clean != u.Path {
+		if clean != u.Path || clean == ".." || strings.HasPrefix(clean, "../") {
 			return true
 		}
 	}
-	for _, seg := range strings.Split(u.Path, "/") {
-		if seg == ".." {
-			return true
-		}
-	}
-	if u.RawPath != "" {
-		low := strings.ToLower(u.RawPath)
-		if strings.Contains(low, "%2f") || strings.Contains(low, "%5c") || strings.Contains(low, "%2e") || strings.Contains(low, "\\") {
-			return true
-		}
-	}
-	return false
-}
-
-func safePathSegment(seg string) bool {
-	if seg == "" || seg == "." || seg == ".." {
-		return false
-	}
-	for i := 0; i < len(seg); i++ {
-		c := seg[i]
-		if c < 0x20 || c == 0x7f || c == '\\' || c == '?' || c == '#' {
-			return false
-		}
-	}
-	return true
+	low := strings.ToLower(u.RawPath)
+	return strings.Contains(low, "%2f") || strings.Contains(low, "%5c") || strings.Contains(low, "%2e")
 }
 
 // isPlexCoverPath reports whether rel (relative to the Plex base path) is one
 // of Plex's artwork endpoints rather than arbitrary private metadata/prefs/media.
 func isPlexCoverPath(rel string) bool {
-	if !strings.HasPrefix(rel, "/") || strings.HasSuffix(rel, "/") || path.Clean(rel) != rel {
+	if !strings.HasPrefix(rel, "/") || strings.HasSuffix(rel, "/") || path.Clean(rel) != rel ||
+		strings.ContainsAny(rel, "\\?#") || strings.IndexFunc(rel, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
 		return false
 	}
-	parts := strings.Split(strings.TrimPrefix(rel, "/"), "/")
-	for _, seg := range parts {
-		if !safePathSegment(seg) {
-			return false
-		}
-	}
-	switch {
-	case len(parts) >= 4 && len(parts) <= 5 && parts[0] == "library" && parts[1] == "metadata":
-		return parts[3] == "thumb" || parts[3] == "art" || (parts[3] == "composite" && len(parts) == 5)
-	case len(parts) >= 4 && len(parts) <= 5 && parts[0] == "library" && parts[1] == "sections":
-		return parts[3] == "thumb" || (parts[3] == "composite" && len(parts) == 5)
-	case len(parts) == 4 && parts[0] == "playlists" && parts[2] == "composite":
-		return true
-	default:
-		return false
-	}
+	p := strings.Split(rel[1:], "/")
+	n := len(p)
+	return ((n == 4 || n == 5) && p[0] == "library" && ((p[1] == "metadata" && (p[3] == "thumb" || p[3] == "art" || (p[3] == "composite" && n == 5))) || (p[1] == "sections" && (p[3] == "thumb" || (p[3] == "composite" && n == 5))))) ||
+		(n == 4 && p[0] == "playlists" && p[2] == "composite")
 }
 
-func allowedCoverContentType(ct string) bool {
-	if strings.TrimSpace(ct) == "" {
-		return true
-	}
-	mt, _, err := mime.ParseMediaType(ct)
-	if err != nil {
-		mt = strings.ToLower(strings.TrimSpace(strings.Split(ct, ";")[0]))
-	}
-	switch mt {
-	case "image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp", "image/bmp",
-		"application/octet-stream", "binary/octet-stream":
-		return true
-	default:
-		return false
-	}
-}
-
-// IsValidCoverImage reports whether data is a supported raster image body
-// (JPEG, PNG, GIF, WebP, or BMP) so cover proxies never cache or serve HTML,
-// JSON, XML, audio, or arbitrary private content.
+// IsValidCoverImage reports whether data is a supported raster image body.
 func IsValidCoverImage(data []byte) bool {
 	if len(data) < 12 {
 		return false
 	}
-	ct := http.DetectContentType(data)
-	switch ct {
+	switch http.DetectContentType(data) {
 	case "image/jpeg", "image/png", "image/gif":
 		cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 		return err == nil && cfg.Width > 0 && cfg.Height > 0
@@ -415,98 +423,92 @@ func IsValidCoverImage(data []byte) bool {
 		return string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP"
 	case "image/bmp":
 		return len(data) >= 26 && data[0] == 'B' && data[1] == 'M'
-	default:
-		return false
 	}
+	return false
+}
+
+const selfHostedHashSep = ";id="
+
+func splitSelfHostedHash(id string) (string, bool) {
+	if i := strings.LastIndex(id, selfHostedHashSep); i >= 0 {
+		if h := id[i+len(selfHostedHashSep):]; len(h) == 16 && h == strings.ToLower(h) {
+			if _, err := hex.DecodeString(h); err == nil {
+				return id[:i], true
+			}
+		}
+	}
+	return id, false
+}
+
+func canonicalSelfHostedQuery(rawQuery string) string {
+	q, err := url.ParseQuery(rawQuery)
+	if rawQuery == "" || err != nil {
+		return rawQuery
+	}
+	for k := range q {
+		if strings.EqualFold(k, "x-plex-token") {
+			q.Del(k)
+		}
+	}
+	return q.Encode()
 }
 
 // SanitizeSelfHostedID removes URL authority, userinfo, query, and fragment
-// credentials from URL-shaped Plex or WebDAV track/playlist identifiers while
-// preserving clean paths and opaque IDs unchanged.
+// credentials from URL-shaped Plex/WebDAV/NAS identifiers, hashing remaining
+// non-token query selectors so distinct resources stay unique.
 func SanitizeSelfHostedID(provider, rawID string) string {
-	s := strings.TrimSpace(rawID)
+	s, proto := strings.TrimSpace(rawID), strings.ToLower(strings.TrimSpace(provider))
 	if s == "" {
 		return ""
 	}
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "plex", "webdav":
-	default:
+	if proto != "plex" && proto != "webdav" && proto != "nas" {
 		return rawID
 	}
-	if s == "root" {
-		return "root"
-	}
-	if !strings.Contains(s, "://") && !strings.HasPrefix(s, "//") && !strings.ContainsAny(s, "?#") {
+	if !strings.Contains(s, "://") && !strings.HasPrefix(s, "//") &&
+		!((strings.HasPrefix(s, "/") || proto != "nas") && strings.ContainsAny(s, "?#")) {
 		return s
 	}
+	cleanPath, _, _ := strings.Cut(s, "#")
+	cleanPath, rawQuery, _ := strings.Cut(cleanPath, "?")
 	if u, err := url.Parse(s); err == nil {
-		p := u.EscapedPath()
-		if p == "" {
-			p = u.Path
+		cleanPath, rawQuery = u.EscapedPath(), u.RawQuery
+		if cleanPath != "" && (u.Scheme != "" || u.Host != "") && !strings.HasPrefix(cleanPath, "/") {
+			cleanPath = "/" + cleanPath
 		}
-		if p != "" && (u.Scheme != "" || u.Host != "") && !strings.HasPrefix(p, "/") {
-			p = "/" + p
+	} else if _, rest, ok := strings.Cut(cleanPath, "//"); ok && (strings.Contains(cleanPath, "://") || strings.HasPrefix(cleanPath, "//")) {
+		cleanPath = ""
+		if _, after, ok := strings.Cut(rest, "/"); ok {
+			cleanPath = "/" + after
 		}
-		return p
 	}
-	if i := strings.IndexAny(s, "?#"); i >= 0 {
-		s = s[:i]
-	}
-	if idx := strings.Index(s, "://"); idx >= 0 {
-		rest := s[idx+3:]
-		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
-			return rest[slash:]
-		}
+	if cleanPath == "" {
 		return ""
 	}
-	if strings.HasPrefix(s, "//") {
-		rest := s[2:]
-		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
-			return rest[slash:]
-		}
-		return ""
+	if cq := canonicalSelfHostedQuery(rawQuery); cq != "" {
+		sum := sha256.Sum256([]byte(cleanPath + "?" + cq))
+		return cleanPath + selfHostedHashSep + hex.EncodeToString(sum[:8])
 	}
-	return s
+	return cleanPath
 }
 
-// SanitizeSelfHostedTrack scrubs embedded credentials from cover/thumbnail/preview
+// SanitizeSelfHostedTrack scrubs embedded credentials from cover/thumbnail
 // URLs and normalizes URL-shaped Plex/WebDAV track identifiers in place.
 func SanitizeSelfHostedTrack(t *Track) bool {
 	if t == nil {
 		return false
 	}
 	changed := false
-	if clean := SanitizeCoverURL(t.CoverURL); clean != t.CoverURL {
-		t.CoverURL = clean
-		changed = true
+	scrub := func(dst *string, clean string) {
+		if clean != *dst {
+			*dst, changed = clean, true
+		}
 	}
-	if clean := SanitizeCoverURL(t.ThumbURL); clean != t.ThumbURL {
-		t.ThumbURL = clean
-		changed = true
-	}
-	proto := strings.ToLower(strings.TrimSpace(t.Provider))
-	if proto == "plex" || proto == "webdav" {
-		if clean := SanitizeSelfHostedID(proto, t.ID); clean != t.ID {
-			t.ID = clean
-			changed = true
-		}
-		if t.Preview != "" {
-			if clean := SanitizeSelfHostedID(proto, t.Preview); clean != t.Preview {
-				t.Preview = clean
-				changed = true
-			}
-		}
-		if proto == "webdav" && t.Album != "" &&
-			(strings.Contains(t.Album, "://") || strings.HasPrefix(t.Album, "//") || strings.ContainsAny(t.Album, "?#")) {
-			if clean := SanitizeSelfHostedID("webdav", t.Album); clean != t.Album {
-				t.Album = clean
-				changed = true
-			}
-		}
-	} else if t.Preview != "" {
-		if clean := SanitizeCoverURL(t.Preview); clean != t.Preview {
-			t.Preview = clean
-			changed = true
+	scrub(&t.CoverURL, SanitizeCoverURL(t.CoverURL))
+	scrub(&t.ThumbURL, SanitizeCoverURL(t.ThumbURL))
+	if proto := strings.ToLower(strings.TrimSpace(t.Provider)); proto == "plex" || proto == "webdav" {
+		scrub(&t.ID, SanitizeSelfHostedID(proto, t.ID))
+		if proto == "webdav" && (strings.Contains(t.Album, "://") || strings.HasPrefix(t.Album, "//") || strings.ContainsAny(t.Album, "?#")) {
+			scrub(&t.Album, SanitizeSelfHostedID("webdav", t.Album))
 		}
 	}
 	return changed
@@ -575,31 +577,23 @@ func SanitizeCoverURL(raw string) string {
 }
 
 // NASConfigMatchesCoverURL reports whether rawURL is a supported artwork URL
-// belonging to cfg's configured Subsonic or Plex server (same origin, base
-// path, and supported cover route).
+// belonging to cfg's configured Subsonic or Plex server.
 func NASConfigMatchesCoverURL(cfg NASConfig, rawURL string) bool {
 	proto := strings.ToLower(strings.TrimSpace(cfg.Protocol))
-	if !cfg.Enabled || (proto != "subsonic" && proto != "plex") {
-		return false
-	}
 	baseU, err := validateBaseURL(proto, cfg.URL)
-	if err != nil {
+	if !cfg.Enabled || (proto != "subsonic" && proto != "plex") || err != nil {
 		return false
 	}
 	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.Fragment != "" {
-		return false
-	}
-	if !sameOrigin(u, baseU) || hasRawPathTraversal(u) {
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.Fragment != "" || !sameOrigin(u, baseU) || hasRawPathTraversal(u) {
 		return false
 	}
 	basePath := strings.TrimRight(baseU.Path, "/")
-	if basePath != "" && u.Path != basePath && !strings.HasPrefix(u.Path, basePath+"/") {
+	rel, ok := strings.CutPrefix(u.Path, basePath)
+	if basePath != "" && (!ok || (rel != "" && !strings.HasPrefix(rel, "/"))) {
 		return false
 	}
-	rel := strings.TrimPrefix(u.Path, basePath)
-	switch proto {
-	case "subsonic":
+	if proto == "subsonic" {
 		if rel != "/rest/getCoverArt.view" && rel != "/rest/getCoverArt" {
 			return false
 		}
@@ -613,44 +607,38 @@ func NASConfigMatchesCoverURL(cfg NASConfig, rawURL string) bool {
 			}
 		}
 		return true
-	case "plex":
-		return u.RawQuery == "" && !u.ForceQuery && isPlexCoverPath(rel)
-	default:
-		return false
 	}
+	return u.RawQuery == "" && !u.ForceQuery && isPlexCoverPath(rel)
 }
 
 // MatchesCoverURL reports whether rawURL belongs to this provider's configured
 // Subsonic or Plex server and should be fetched with its configured credentials.
 func (p *SelfHostedProvider) MatchesCoverURL(rawURL string) bool {
-	if p == nil {
-		return false
-	}
-	return NASConfigMatchesCoverURL(p.cfg, rawURL)
+	return p != nil && NASConfigMatchesCoverURL(p.cfg, rawURL)
 }
 
-// SameOrigin reports whether rawURL has the same scheme and host (origin) as
-// this provider's configured NAS base URL.
+// SameOrigin reports whether rawURL shares the origin of this NAS base URL.
 func (p *SelfHostedProvider) SameOrigin(rawURL string) bool {
 	if p == nil {
 		return false
 	}
-	proto := strings.ToLower(strings.TrimSpace(p.cfg.Protocol))
-	baseU, err := validateBaseURL(proto, p.cfg.URL)
-	if err != nil {
-		return false
+	baseU, err := validateBaseURL(strings.ToLower(strings.TrimSpace(p.cfg.Protocol)), p.cfg.URL)
+	u, uerr := url.Parse(strings.TrimSpace(rawURL))
+	return err == nil && uerr == nil && sameOrigin(u, baseU)
+}
+
+func (p *SelfHostedProvider) sanitizeTrackCover(raw string) string {
+	if c := SanitizeCoverURL(raw); c != "" && (!p.SameOrigin(c) || p.MatchesCoverURL(c)) {
+		return c
 	}
-	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil {
-		return false
-	}
-	return sameOrigin(u, baseU)
+	return ""
 }
 
 // FetchCover fetches cover image bytes for a credential-free NAS cover URL,
 // attaching credentials from p.cfg only inside the outgoing HTTP request.
 func (p *SelfHostedProvider) FetchCover(ctx context.Context, rawURL string, maxBytes int64) ([]byte, error) {
-	if !p.MatchesCoverURL(rawURL) {
+	u, uerr := url.Parse(strings.TrimSpace(rawURL))
+	if !p.MatchesCoverURL(rawURL) || uerr != nil {
 		return nil, errors.New("cover: invalid address")
 	}
 	proto := strings.ToLower(strings.TrimSpace(p.cfg.Protocol))
@@ -658,17 +646,10 @@ func (p *SelfHostedProvider) FetchCover(ctx context.Context, rawURL string, maxB
 	if err != nil {
 		return nil, err
 	}
-	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil {
-		return nil, errors.New("cover: invalid address")
-	}
 	reqU := *u
-	reqU.User = nil
-	reqU.Fragment = ""
+	reqU.User, reqU.Fragment = nil, ""
 
-	var req *http.Request
-	switch proto {
-	case "subsonic":
+	if proto == "subsonic" {
 		inQ, _ := url.ParseQuery(reqU.RawQuery)
 		q := p.subsonicAuthParams()
 		q.Set("id", inQ.Get("id"))
@@ -676,24 +657,24 @@ func (p *SelfHostedProvider) FetchCover(ctx context.Context, rawURL string, maxB
 			q.Set("size", sz)
 		}
 		reqU.RawQuery = q.Encode()
-		req, err = http.NewRequestWithContext(ctx, http.MethodGet, reqU.String(), nil)
-		if err != nil {
-			return nil, errors.New("cover: invalid address")
-		}
-	case "plex":
+	} else {
 		reqU.RawQuery = ""
-		req, err = http.NewRequestWithContext(ctx, http.MethodGet, reqU.String(), nil)
-		if err != nil {
-			return nil, errors.New("cover: invalid address")
-		}
-		if tok := p.plexToken(); tok != "" {
-			req.Header.Set("X-Plex-Token", tok)
-		}
-	default:
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqU.String(), nil)
+	if err != nil {
 		return nil, errors.New("cover: invalid address")
 	}
+	if tok := p.plexToken(); proto == "plex" && tok != "" {
+		req.Header.Set("X-Plex-Token", tok)
+	}
 
-	resp, err := p.authHTTPClient(baseU).Do(req)
+	resp, err := p.authHTTPClient(baseU, func(r *http.Request) bool {
+		target := r.URL.String()
+		if proto == "subsonic" {
+			target = SanitizeCoverURL(target)
+		}
+		return p.MatchesCoverURL(target)
+	}).Do(req)
 	if err != nil {
 		return nil, safeSelfHostedError(proto, "cover", req.URL, err)
 	}
@@ -701,8 +682,10 @@ func (p *SelfHostedProvider) FetchCover(ctx context.Context, rawURL string, maxB
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("cover: HTTP %d", resp.StatusCode)
 	}
-	if !allowedCoverContentType(resp.Header.Get("Content-Type")) {
-		return nil, errors.New("cover: not an image")
+	if ct := strings.TrimSpace(resp.Header.Get("Content-Type")); ct != "" {
+		if mt, _, _ := mime.ParseMediaType(ct); (!strings.HasPrefix(mt, "image/") || mt == "image/svg+xml") && mt != "application/octet-stream" && mt != "binary/octet-stream" {
+			return nil, errors.New("cover: not an image")
+		}
 	}
 	limit := maxBytes
 	if limit <= 0 {
@@ -862,12 +845,7 @@ func (p *SelfHostedProvider) subsonicEntryToTrack(e subsonicSong) Track {
 	var coverURL string
 	if e.CoverArt != "" {
 		if strings.HasPrefix(e.CoverArt, "http://") || strings.HasPrefix(e.CoverArt, "https://") {
-			candidate := SanitizeCoverURL(e.CoverArt)
-			if baseU, err := validateBaseURL("subsonic", p.cfg.URL); err == nil {
-				if cu, perr := url.Parse(candidate); perr == nil && (!sameOrigin(cu, baseU) || p.MatchesCoverURL(candidate)) {
-					coverURL = candidate
-				}
-			}
+			coverURL = p.sanitizeTrackCover(e.CoverArt)
 		} else if base := cleanBaseURL(p.cfg.URL); base != "" {
 			q := url.Values{}
 			q.Set("id", e.CoverArt)
@@ -1091,77 +1069,49 @@ func (p *SelfHostedProvider) setWebDAVAuth(req *http.Request) {
 	}
 }
 
-func cleanWebDAVRootURL(baseU *url.URL) string {
-	u := *baseU
-	u.User = nil
-	u.RawQuery = ""
-	u.ForceQuery = false
-	u.Fragment = ""
-	return u.String()
-}
-
-func (p *SelfHostedProvider) setWebDAVHref(cleanID, privateRef string) {
-	if cleanID == "" || privateRef == "" || cleanID == privateRef {
-		return
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.webdavHrefMap == nil {
-		p.webdavHrefMap = make(map[string]string)
-	}
-	max := p.maxCache
-	if max <= 0 {
-		max = defaultMaxCache
-	}
-	if _, exists := p.webdavHrefMap[cleanID]; !exists {
-		for len(p.webdavHrefMap) >= max && len(p.webdavHrefKeys) > 0 {
-			evictKey := p.webdavHrefKeys[0]
-			p.webdavHrefKeys = p.webdavHrefKeys[1:]
-			delete(p.webdavHrefMap, evictKey)
-		}
-		p.webdavHrefKeys = append(p.webdavHrefKeys, cleanID)
-	}
-	p.webdavHrefMap[cleanID] = privateRef
-}
-
-func (p *SelfHostedProvider) getWebDAVHref(cleanID string) string {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.webdavHrefMap[cleanID]
-}
-
-func (p *SelfHostedProvider) webdavCleanRef(rawHref string) (string, string, bool) {
+func (p *SelfHostedProvider) webdavCleanRef(rawHref string) (string, bool) {
 	refU, err := resolveWebDAVURL(p.cfg.URL, rawHref)
 	if err != nil {
-		return "", "", false
+		return "", false
 	}
-	cleanID := refU.EscapedPath()
-	if cleanID == "" {
-		cleanID = "/"
-	}
-	privateRef := cleanID
+	priv := cmp.Or(refU.EscapedPath(), "/")
 	if refU.RawQuery != "" {
-		privateRef += "?" + refU.RawQuery
-		p.setWebDAVHref(cleanID, privateRef)
+		priv += "?" + refU.RawQuery
 	}
-	return cleanID, privateRef, true
+	cleanID := SanitizeSelfHostedID("webdav", priv)
+	if cleanID != priv {
+		p.setLocator("dav", cleanID, priv)
+	}
+	return cleanID, true
+}
+
+func (p *SelfHostedProvider) refreshWebDAVRef(ctx context.Context, baseU *url.URL, id string, isPlaylist bool) string {
+	if isPlaylist {
+		_, _ = p.webdavPlaylists(ctx)
+	} else if basePath, _ := splitSelfHostedHash(id); strings.Trim(path.Dir(basePath), "/") == strings.Trim(baseU.EscapedPath(), "/") {
+		_, _ = p.webdavPlaylistTracks(ctx, "root")
+	} else {
+		parent := strings.Trim(path.Dir(basePath), "/")
+		pls, _ := p.webdavPlaylists(ctx)
+		matched := false
+		for _, pl := range pls {
+			if plBase, _ := splitSelfHostedHash(pl.ID); pl.ID != "root" && strings.Trim(plBase, "/") == parent {
+				_, _ = p.webdavPlaylistTracks(ctx, pl.ID)
+				matched = true
+			}
+		}
+		if !matched {
+			_, _ = p.webdavPlaylistTracks(ctx, "/"+strings.TrimLeft(parent+"/", "/"))
+		}
+	}
+	return p.lookupLocator("dav", id)
 }
 
 func (p *SelfHostedProvider) webdavPropfind(ctx context.Context, targetURL string) ([]davResponse, error) {
-	baseU, err := validateBaseURL("webdav", p.cfg.URL)
+	reqU, err := resolveWebDAVURL(p.cfg.URL, targetURL)
 	if err != nil {
 		return nil, err
 	}
-	targetU, err := validateBaseURL("webdav", targetURL)
-	if err != nil {
-		return nil, err
-	}
-	if !sameOrigin(targetU, baseU) {
-		return nil, errors.New("webdav: target host does not match base URL")
-	}
-	reqU := *targetU
-	reqU.User = nil
-	reqU.Fragment = ""
 	propfindXML := `<?xml version="1.0" encoding="utf-8" ?>
 <D:propfind xmlns:D="DAV:">
   <D:prop>
@@ -1178,7 +1128,7 @@ func (p *SelfHostedProvider) webdavPropfind(ctx context.Context, targetURL strin
 	req.Header.Set("Content-Type", "application/xml; charset=\"utf-8\"")
 	p.setWebDAVAuth(req)
 
-	resp, err := p.authHTTPClient(baseU).Do(req)
+	resp, err := p.authHTTPClient(reqU).Do(req)
 	if err != nil {
 		return nil, safeSelfHostedError("webdav", "propfind", req.URL, err)
 	}
@@ -1229,7 +1179,7 @@ func (p *SelfHostedProvider) webdavPlaylists(ctx context.Context) ([]Playlist, e
 	if err != nil {
 		return nil, err
 	}
-	responses, err := p.webdavPropfind(ctx, cleanWebDAVRootURL(baseU))
+	responses, err := p.webdavPropfind(ctx, safeURLRoute(baseU))
 	if err != nil {
 		return nil, err
 	}
@@ -1258,7 +1208,7 @@ func (p *SelfHostedProvider) webdavPlaylists(ctx context.Context) ([]Playlist, e
 
 		prop := getDavProp(resp)
 		if isDavCollection(resp) {
-			cleanID, _, ok := p.webdavCleanRef(resp.Href)
+			cleanID, ok := p.webdavCleanRef(resp.Href)
 			if !ok {
 				continue
 			}
@@ -1295,13 +1245,13 @@ func (p *SelfHostedProvider) webdavPlaylists(ctx context.Context) ([]Playlist, e
 }
 
 func (p *SelfHostedProvider) davResponseToTrack(resp davResponse, playlistID string) (Track, bool) {
-	cleanID, _, ok := p.webdavCleanRef(resp.Href)
+	cleanID, ok := p.webdavCleanRef(resp.Href)
 	if !ok {
 		return Track{}, false
 	}
 	prop := getDavProp(resp)
-	parsedHref, _ := url.Parse(cleanID)
-	unescapedPath, _ := url.PathUnescape(parsedHref.Path)
+	basePath, _ := splitSelfHostedHash(cleanID)
+	unescapedPath, _ := url.PathUnescape(basePath)
 	filename := path.Base(unescapedPath)
 	ext := filepath.Ext(filename)
 	title := strings.TrimSuffix(filename, ext)
@@ -1345,26 +1295,21 @@ func resolveWebDAVURL(baseRaw, ref string) (*url.URL, error) {
 	if err != nil {
 		return nil, err
 	}
-	base := *u
-	base.User = nil
-	base.RawQuery = ""
-	base.ForceQuery = false
-	base.Fragment = ""
-	if !strings.HasSuffix(base.Path, "/") {
-		base.Path += "/"
+	u.User, u.RawQuery, u.ForceQuery, u.Fragment = nil, "", false, ""
+	if !strings.HasSuffix(u.Path, "/") {
+		u.Path += "/"
 	}
-	if base.RawPath != "" && !strings.HasSuffix(base.RawPath, "/") {
-		base.RawPath += "/"
+	if u.RawPath != "" && !strings.HasSuffix(u.RawPath, "/") {
+		u.RawPath += "/"
 	}
-	refU, err := base.Parse(ref)
+	refU, err := u.Parse(ref)
 	if err != nil {
 		return nil, errors.New("webdav: invalid target URL")
 	}
-	if !sameOrigin(refU, &base) {
+	if !sameOrigin(refU, u) {
 		return nil, errors.New("webdav: target host does not match base URL")
 	}
-	refU.User = nil
-	refU.Fragment = ""
+	refU.User, refU.Fragment = nil, ""
 	return refU, nil
 }
 
@@ -1373,22 +1318,24 @@ func (p *SelfHostedProvider) webdavPlaylistTracks(ctx context.Context, playlistI
 	if err != nil {
 		return nil, err
 	}
-	targetURL := cleanWebDAVRootURL(baseU)
-	cleanListID := "root"
+	targetURL, cleanListID := safeURLRoute(baseU), "root"
+	var responses []davResponse
 	if playlistID != "" && playlistID != "root" {
 		cleanListID = SanitizeSelfHostedID("webdav", playlistID)
-		rawRef := p.getWebDAVHref(cleanListID)
-		if rawRef == "" {
-			rawRef = playlistID
-		}
-		subU, err := resolveWebDAVURL(p.cfg.URL, rawRef)
-		if err != nil {
-			return nil, err
-		}
-		targetURL = subU.String()
+		err = p.withLocator("dav", cleanListID, playlistID, "webdav: could not resolve playlist locator",
+			func() string { return p.refreshWebDAVRef(ctx, baseU, cleanListID, true) },
+			func(ref string) (bool, error) {
+				subU, rerr := resolveWebDAVURL(p.cfg.URL, ref)
+				if rerr != nil {
+					return false, rerr
+				}
+				targetURL = subU.String()
+				responses, rerr = p.webdavPropfind(ctx, targetURL)
+				return isRetryableLocatorError(rerr), rerr
+			})
+	} else {
+		responses, err = p.webdavPropfind(ctx, targetURL)
 	}
-
-	responses, err := p.webdavPropfind(ctx, targetURL)
 	if err != nil {
 		return nil, err
 	}
@@ -1461,24 +1408,17 @@ func (p *SelfHostedProvider) webdavDownloadTrack(ctx context.Context, trackID, d
 	if err != nil {
 		return "", err
 	}
-	rawRef := p.getWebDAVHref(SanitizeSelfHostedID("webdav", trackID))
-	if rawRef == "" {
-		rawRef = trackID
-	}
-	targetU, err := resolveWebDAVURL(p.cfg.URL, rawRef)
+	cleanTrackID := SanitizeSelfHostedID("webdav", trackID)
+	resp, targetU, _, err := p.getWithLocator(ctx, "webdav", "dav", cleanTrackID, trackID, "webdav: could not resolve track locator", baseU,
+		func(ref string) (string, error) {
+			u, e := resolveWebDAVURL(p.cfg.URL, ref)
+			if e != nil {
+				return "", e
+			}
+			return u.String(), nil
+		}, p.setWebDAVAuth, func() string { return p.refreshWebDAVRef(ctx, baseU, cleanTrackID, false) })
 	if err != nil {
 		return "", err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetU.String(), nil)
-	if err != nil {
-		return "", errors.New("webdav: invalid download URL")
-	}
-	p.setWebDAVAuth(req)
-
-	resp, err := p.authHTTPClient(baseU).Do(req)
-	if err != nil {
-		return "", safeSelfHostedError("webdav", "download", req.URL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -1495,10 +1435,14 @@ func (p *SelfHostedProvider) webdavDownloadTrack(ctx context.Context, trackID, d
 			ext = ".mp3"
 		}
 	}
-	filename := nasCacheFilename(targetU, targetU.Path, ext)
+	cacheRes := targetU.Path
+	if targetU.RawQuery != "" {
+		cacheRes += "?" + targetU.RawQuery
+	}
+	filename := nasCacheFilename(targetU, cacheRes, ext)
 	outPath, err := saveStreamToFile(destDir, filename, resp.Body)
 	if err != nil {
-		return "", safeSelfHostedError("webdav", "download", req.URL, err)
+		return "", safeSelfHostedError("webdav", "download", targetU, err)
 	}
 	return outPath, nil
 }
@@ -1557,57 +1501,38 @@ func (p *SelfHostedProvider) setPlexHeaders(req *http.Request) {
 	}
 }
 
-func (p *SelfHostedProvider) setPlexPart(ratingKeyOrPart, partKey string) {
+func (p *SelfHostedProvider) setLocator(kind, publicID, privateRef string) {
+	if publicID == "" || privateRef == "" {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.plexPartMap == nil {
-		p.plexPartMap = make(map[string]string)
+	if p.locatorMap == nil {
+		p.locatorMap = make(map[string]string)
 	}
 	max := p.maxCache
 	if max <= 0 {
 		max = defaultMaxCache
 	}
-	if _, exists := p.plexPartMap[ratingKeyOrPart]; !exists {
-		for len(p.plexPartMap) >= max && len(p.plexPartKeys) > 0 {
-			evictKey := p.plexPartKeys[0]
-			p.plexPartKeys = p.plexPartKeys[1:]
-			delete(p.plexPartMap, evictKey)
+	key := kind + "\x00" + publicID
+	if _, exists := p.locatorMap[key]; !exists {
+		for len(p.locatorMap) >= max && len(p.locatorOrder) > 0 {
+			delete(p.locatorMap, p.locatorOrder[0])
+			p.locatorOrder = p.locatorOrder[1:]
 		}
-		p.plexPartKeys = append(p.plexPartKeys, ratingKeyOrPart)
+		p.locatorOrder = append(p.locatorOrder, key)
 	}
-	p.plexPartMap[ratingKeyOrPart] = partKey
-}
-
-func (p *SelfHostedProvider) getPlexPart(key string) string {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.plexPartMap[key]
+	p.locatorMap[key] = privateRef
 }
 
 func plexPrivatePart(baseU *url.URL, rawPartKey string) (string, string, bool) {
 	s := strings.TrimSpace(rawPartKey)
-	if s == "" {
-		return "", "", false
-	}
 	pu, err := url.Parse(s)
-	if err != nil {
-		return "", "", false
-	}
-	if pu.Scheme != "" || pu.Host != "" {
-		if baseU == nil || !sameOrigin(pu, baseU) {
-			return "", "", false
-		}
-	}
-	if hasRawPathTraversal(pu) {
+	if s == "" || err != nil || pu.EscapedPath() == "" || hasRawPathTraversal(pu) ||
+		((pu.Scheme != "" || pu.Host != "") && (baseU == nil || !sameOrigin(pu, baseU))) {
 		return "", "", false
 	}
 	cleanPath := pu.EscapedPath()
-	if cleanPath == "" {
-		cleanPath = pu.Path
-	}
-	if cleanPath == "" {
-		return "", "", false
-	}
 	if !strings.HasPrefix(cleanPath, "/") {
 		cleanPath = "/" + cleanPath
 	}
@@ -1617,18 +1542,10 @@ func plexPrivatePart(baseU *url.URL, rawPartKey string) (string, string, bool) {
 		}
 	}
 	priv := cleanPath
-	if pu.RawQuery != "" {
-		q, _ := url.ParseQuery(pu.RawQuery)
-		for k := range q {
-			if strings.EqualFold(k, "x-plex-token") {
-				q.Del(k)
-			}
-		}
-		if enc := q.Encode(); enc != "" {
-			priv += "?" + enc
-		}
+	if enc := canonicalSelfHostedQuery(pu.RawQuery); enc != "" {
+		priv += "?" + enc
 	}
-	return cleanPath, priv, true
+	return SanitizeSelfHostedID("plex", priv), priv, true
 }
 
 func (p *SelfHostedProvider) plexGet(ctx context.Context, pathAndQuery string, out *plexContainer) error {
@@ -1667,17 +1584,25 @@ func (p *SelfHostedProvider) plexPlaylists(ctx context.Context) ([]Playlist, err
 	if err := p.plexGet(ctx, "/playlists?playlistType=audio", &c); err != nil {
 		return nil, err
 	}
+	baseU, _ := validateBaseURL("plex", p.cfg.URL)
 	var out []Playlist
 	for _, m := range c.MediaContainer.Metadata {
 		id := SanitizeSelfHostedID("plex", m.RatingKey)
-		if id == "" {
-			id = SanitizeSelfHostedID("plex", m.Key)
+		if rk := strings.TrimSpace(m.RatingKey); strings.Contains(rk, "://") || strings.HasPrefix(rk, "//") || strings.HasPrefix(rk, "/") {
+			clean, priv, ok := plexPrivatePart(baseU, rk)
+			if !ok {
+				continue
+			}
+			id = clean
+			p.setLocator("plexpl", id, priv)
 		}
-		out = append(out, Playlist{
-			ID:    id,
-			Title: m.Title,
-			Count: m.LeafCount,
-		})
+		if clean, priv, ok := plexPrivatePart(baseU, m.Key); ok {
+			id = cmp.Or(id, clean)
+			p.setLocator("plexpl", id, priv)
+		}
+		if id != "" {
+			out = append(out, Playlist{ID: id, Title: m.Title, Count: m.LeafCount})
+		}
 	}
 	return out, nil
 }
@@ -1693,14 +1618,10 @@ func (p *SelfHostedProvider) plexMetadataToTrack(m plexMetadata) Track {
 	trackID := cleanRating
 	if rawPartKey != "" {
 		if cleanPart, privPart, ok := plexPrivatePart(baseU, rawPartKey); ok {
-			if cleanRating != "" {
-				p.setPlexPart(cleanRating, privPart)
-			}
-			p.setPlexPart(cleanPart, privPart)
+			p.setLocator("plex", cleanRating, privPart)
+			p.setLocator("plex", cleanPart, privPart)
 			if rawPartKey == cleanPart || cleanRating == "" {
 				trackID = cleanPart
-			} else {
-				trackID = cleanRating
 			}
 		}
 	}
@@ -1713,20 +1634,10 @@ func (p *SelfHostedProvider) plexMetadataToTrack(m plexMetadata) Track {
 	var coverURL string
 	if m.Thumb != "" {
 		if strings.HasPrefix(m.Thumb, "http://") || strings.HasPrefix(m.Thumb, "https://") {
-			candidate := SanitizeCoverURL(m.Thumb)
-			if baseU != nil {
-				if cu, err := url.Parse(candidate); err == nil && (!sameOrigin(cu, baseU) || p.MatchesCoverURL(candidate)) {
-					coverURL = candidate
-				}
-			}
+			coverURL = p.sanitizeTrackCover(m.Thumb)
 		} else if base := cleanBaseURL(p.cfg.URL); base != "" {
 			if tu, err := url.Parse(m.Thumb); err == nil && tu.Scheme == "" && tu.Host == "" {
-				thumb := m.Thumb
-				if !strings.HasPrefix(thumb, "/") {
-					thumb = "/" + thumb
-				}
-				candidate := SanitizeCoverURL(base + thumb)
-				if p.MatchesCoverURL(candidate) {
+				if candidate := SanitizeCoverURL(base + "/" + strings.TrimPrefix(m.Thumb, "/")); p.MatchesCoverURL(candidate) {
 					coverURL = candidate
 				}
 			}
@@ -1745,9 +1656,25 @@ func (p *SelfHostedProvider) plexMetadataToTrack(m plexMetadata) Track {
 }
 
 func (p *SelfHostedProvider) plexPlaylistTracks(ctx context.Context, playlistID string) ([]Track, error) {
-	path := "/playlists/" + url.PathEscape(playlistID) + "/items"
+	baseU, err := validateBaseURL("plex", p.cfg.URL)
+	if err != nil {
+		return nil, err
+	}
+	fallback := "/playlists/" + url.PathEscape(playlistID) + "/items"
+	if strings.HasPrefix(playlistID, "/") || strings.HasPrefix(playlistID, "//") || strings.Contains(playlistID, "://") {
+		_, fallback, _ = plexPrivatePart(baseU, playlistID)
+	}
 	var c plexContainer
-	if err := p.plexGet(ctx, path, &c); err != nil {
+	err = p.withLocator("plexpl", playlistID, fallback, "plex: invalid playlist ID",
+		func() string {
+			_, _ = p.plexPlaylists(ctx)
+			return p.lookupLocator("plexpl", playlistID)
+		},
+		func(reqPath string) (bool, error) {
+			rerr := p.plexGet(ctx, reqPath, &c)
+			return isRetryableLocatorError(rerr), rerr
+		})
+	if err != nil {
 		return nil, err
 	}
 	var out []Track
@@ -1788,6 +1715,33 @@ func (p *SelfHostedProvider) plexSearch(ctx context.Context, query string) ([]Tr
 	return out, nil
 }
 
+func (p *SelfHostedProvider) refreshPlexPart(ctx context.Context, trackID string) string {
+	var c plexContainer
+	if !strings.HasPrefix(trackID, "/") {
+		if p.plexGet(ctx, "/library/metadata/"+url.PathEscape(trackID), &c) == nil && len(c.MediaContainer.Metadata) > 0 {
+			p.plexMetadataToTrack(c.MediaContainer.Metadata[0])
+		}
+		return p.lookupLocator("plex", trackID)
+	}
+	if p.plexGet(ctx, "/library/all?type=10", &c) == nil {
+		for _, m := range c.MediaContainer.Metadata {
+			p.plexMetadataToTrack(m)
+		}
+		if pk := p.lookupLocator("plex", trackID); pk != "" {
+			return pk
+		}
+	}
+	if pls, err := p.plexPlaylists(ctx); err == nil {
+		for i := 0; i < len(pls) && i < 200; i++ {
+			_, _ = p.plexPlaylistTracks(ctx, pls[i].ID)
+			if pk := p.lookupLocator("plex", trackID); pk != "" {
+				return pk
+			}
+		}
+	}
+	return p.lookupLocator("plex", trackID)
+}
+
 func (p *SelfHostedProvider) plexDownloadTrack(ctx context.Context, trackID, destDir string) (string, error) {
 	baseU, err := validateBaseURL("plex", p.cfg.URL)
 	if err != nil {
@@ -1799,48 +1753,26 @@ func (p *SelfHostedProvider) plexDownloadTrack(ctx context.Context, trackID, des
 			return "", errors.New("plex: invalid track ID")
 		}
 	}
-	var partKey string
-	if pk := p.getPlexPart(trackID); pk != "" {
-		partKey = pk
-	} else if strings.HasPrefix(trackID, "/") {
-		if _, priv, ok := plexPrivatePart(baseU, trackID); ok {
-			partKey = priv
-		}
-	} else {
-		// Lookup via /library/metadata/<trackID>
-		var c plexContainer
-		if err := p.plexGet(ctx, "/library/metadata/"+url.PathEscape(trackID), &c); err == nil && len(c.MediaContainer.Metadata) > 0 {
-			m := c.MediaContainer.Metadata[0]
-			if len(m.Media) > 0 && len(m.Media[0].Part) > 0 {
-				if _, priv, ok := plexPrivatePart(baseU, m.Media[0].Part[0].Key); ok {
-					partKey = priv
-					p.setPlexPart(trackID, partKey)
-				}
+	fallback := ""
+	if strings.HasPrefix(trackID, "/") {
+		_, fallback, _ = plexPrivatePart(baseU, trackID)
+	}
+	resp, reqURL, partKey, err := p.getWithLocator(ctx, "plex", "plex", trackID, fallback, "plex: could not resolve track part key", baseU,
+		func(pk string) (string, error) {
+			if !strings.HasPrefix(pk, "/") {
+				return "", errors.New("plex: could not resolve track part key")
 			}
-		}
-	}
-
-	if !strings.HasPrefix(partKey, "/") {
-		return "", errors.New("plex: could not resolve track part key")
-	}
-
-	downloadURL := cleanBaseURL(p.cfg.URL) + partKey
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+			return cleanBaseURL(p.cfg.URL) + pk, nil
+		}, p.setPlexHeaders, func() string { return p.refreshPlexPart(ctx, trackID) })
 	if err != nil {
-		return "", errors.New("plex: invalid download URL")
-	}
-	p.setPlexHeaders(req)
-
-	resp, err := p.authHTTPClient(baseU).Do(req)
-	if err != nil {
-		return "", safeSelfHostedError("plex", "download", req.URL, err)
+		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("plex: download HTTP %d", resp.StatusCode)
 	}
 
-	ext := filepath.Ext(req.URL.Path)
+	ext := filepath.Ext(reqURL.Path)
 	if ext == "" {
 		ext = parseExtFromHeader(resp.Header.Get("Content-Disposition"))
 		if ext == "" {
@@ -1850,10 +1782,10 @@ func (p *SelfHostedProvider) plexDownloadTrack(ctx context.Context, trackID, des
 			ext = ".mp3"
 		}
 	}
-	filename := nasCacheFilename(baseU, req.URL.Path, ext)
+	filename := nasCacheFilename(baseU, strings.TrimRight(baseU.Path, "/")+partKey, ext)
 	outPath, err := saveStreamToFile(destDir, filename, resp.Body)
 	if err != nil {
-		return "", safeSelfHostedError("plex", "download", req.URL, err)
+		return "", safeSelfHostedError("plex", "download", reqURL, err)
 	}
 	return outPath, nil
 }

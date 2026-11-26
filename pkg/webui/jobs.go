@@ -125,12 +125,16 @@ func trackKey(t providers.Track) string {
 // File returns a finished download of t that is still on disk, including one
 // saved before a restart.
 func (j *Jobs) File(t providers.Track) string {
-	key := trackKey(t)
+	key, rawKey := trackKey(t), t.Provider+":"+t.ID
 	j.mu.Lock()
+	sources := j.loadSources()
+	if rawKey != key && sources[rawKey] != "" {
+		key = rawKey
+	}
 	path := ""
 	if f, ok := j.files[key]; ok {
 		path = f.dl.Path
-	} else if name := j.loadSources()[key]; name != "" && j.p.Deemix != nil {
+	} else if name := sources[key]; name != "" && j.p.Deemix != nil {
 		j.mu.Unlock()
 		if !j.reusable(t, name) {
 			return ""
@@ -221,62 +225,43 @@ func (j *Jobs) dropUnusable(t providers.Track) {
 
 const sourcesFile = ".sources.json"
 
-// loadSources reads the saved index once; j.mu must be held. Any legacy
-// URL-shaped Plex/WebDAV keys carrying credentials are normalized in place.
+// loadSources reads the saved index once; j.mu must be held. Legacy URL-shaped
+// Plex/WebDAV keys are migrated only when preflight confirms no collision.
 func (j *Jobs) loadSources() map[string]string {
-	if j.sources == nil {
-		j.sources = map[string]string{}
-		if j.p.Deemix != nil {
-			path := filepath.Join(j.p.Deemix.DownloadDir, sourcesFile)
-			if b, err := os.ReadFile(path); err == nil {
-				if json.Unmarshal(b, &j.sources) == nil {
-					type migration struct {
-						oldKey, newKey, name string
-					}
-					var dirty []migration
-					for k, name := range j.sources {
-						provider, id, ok := strings.Cut(k, ":")
-						if !ok || (provider != "plex" && provider != "webdav") {
-							continue
-						}
-						clean := providers.SanitizeSelfHostedID(provider, id)
-						if clean == id {
-							continue
-						}
-						newKey := ""
-						if clean != "" {
-							newKey = provider + ":" + clean
-						}
-						dirty = append(dirty, migration{oldKey: k, newKey: newKey, name: name})
-					}
-					if len(dirty) > 0 {
-						for _, m := range dirty {
-							delete(j.sources, m.oldKey)
-							if m.newKey != "" && j.sources[m.newKey] == "" {
-								j.sources[m.newKey] = m.name
-							}
-						}
-						if mb, err := json.Marshal(j.sources); err == nil {
-							tmp := filepath.Join(j.p.Deemix.DownloadDir, sourcesFile+".tmp")
-							if os.WriteFile(tmp, mb, 0o644) == nil {
-								_ = os.Rename(tmp, path)
-							}
-						}
-					}
-				}
+	if j.sources != nil {
+		return j.sources
+	}
+	j.sources = map[string]string{}
+	if j.p.Deemix == nil {
+		return j.sources
+	}
+	path := filepath.Join(j.p.Deemix.DownloadDir, sourcesFile)
+	if b, err := os.ReadFile(path); err != nil || json.Unmarshal(b, &j.sources) != nil {
+		return j.sources
+	}
+	clean, changed := make(map[string]string, len(j.sources)), false
+	for k, name := range j.sources {
+		nk := k
+		if p, id, ok := strings.Cut(k, ":"); ok && (p == "plex" || p == "webdav") {
+			if c := providers.SanitizeSelfHostedID(p, id); c == "" {
+				nk = ""
+			} else if c != id {
+				nk, changed = p+":"+c, true
 			}
+		}
+		if _, dup := clean[nk]; nk == "" || dup {
+			log.Printf("stream-sync: skip download source index migration: id collision")
+			return j.sources
+		}
+		clean[nk] = name
+	}
+	if changed {
+		j.sources = clean
+		if err := providers.SaveJSON(path, j.sources); err != nil {
+			log.Printf("stream-sync: migrate download source index failed (%T)", err)
 		}
 	}
 	return j.sources
-}
-
-func (j *Jobs) scrubLegacySources() {
-	if j == nil {
-		return
-	}
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	j.loadSources()
 }
 
 // saveSource records key's file and drops entries whose file was evicted; j.mu
@@ -776,19 +761,15 @@ func (j *Jobs) addCover(ctx context.Context, t providers.Track, dl *deemixclient
 		lookup := j.selfHosted
 		j.mu.Unlock()
 		if lookup != nil {
-			if sh := lookup(); sh != nil {
+			if sh := lookup(); sh != nil && sh.SameOrigin(t.CoverURL) {
 				if sh.MatchesCoverURL(t.CoverURL) {
-					err := j.p.Deemix.EmbedCoverWith(ctx, dl.Path, func(ctx context.Context) ([]byte, error) {
+					if err := j.p.Deemix.EmbedCoverWith(ctx, dl.Path, func(ctx context.Context) ([]byte, error) {
 						return sh.FetchCover(ctx, t.CoverURL, 0)
-					})
-					if err != nil {
+					}); err != nil {
 						log.Printf("stream-sync: no cover for track %q: %v", safeID, err)
 					}
-					return
 				}
-				if sh.SameOrigin(t.CoverURL) {
-					return
-				}
+				return
 			}
 		}
 	}

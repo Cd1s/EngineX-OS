@@ -1305,6 +1305,14 @@ func TestSelfHostedCoverRouteAndImageValidation(t *testing.T) {
 		case "/library/metadata/1/thumb/fakejpg":
 			w.Header().Set("Content-Type", "image/jpeg")
 			_, _ = w.Write([]byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00, 0xff, 0xd9})
+		case "/library/metadata/1/thumb/redir-ok":
+			http.Redirect(w, r, "/library/metadata/1/thumb/42", http.StatusFound)
+		case "/library/metadata/1/thumb/redir-bad":
+			http.Redirect(w, r, "/secret-cover.jpg", http.StatusFound)
+		case "/secret-cover.jpg":
+			nonCoverHits.Add(1)
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(validJPEG)
 		default:
 			nonCoverHits.Add(1)
 			w.Header().Set("Content-Type", "application/xml")
@@ -1335,6 +1343,9 @@ func TestSelfHostedCoverRouteAndImageValidation(t *testing.T) {
 			t.Errorf("FetchCover accepted non-cover Plex URL %q", bad)
 		}
 	}
+	if _, err := p.FetchCover(ctx, srv.URL+"/library/metadata/1/thumb/redir-bad", 0); err == nil {
+		t.Fatal("FetchCover followed same-origin redirect to non-artwork Plex route")
+	}
 	if nonCoverHits.Load() != 0 {
 		t.Fatalf("non-cover Plex routes were contacted %d times", nonCoverHits.Load())
 	}
@@ -1349,6 +1360,34 @@ func TestSelfHostedCoverRouteAndImageValidation(t *testing.T) {
 	if err != nil || !bytes.Equal(got, validJPEG) {
 		t.Fatalf("FetchCover valid JPEG failed: len=%d err=%v", len(got), err)
 	}
+	if redirGot, err := p.FetchCover(ctx, srv.URL+"/library/metadata/1/thumb/redir-ok", 0); err != nil || !bytes.Equal(redirGot, validJPEG) {
+		t.Fatalf("FetchCover valid same-origin artwork redirect failed: len=%d err=%v", len(redirGot), err)
+	}
+
+	var subNonCoverHits atomic.Int32
+	subSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/getCoverArt.view" && r.URL.Query().Get("id") == "redir-bad" {
+			http.Redirect(w, r, "/rest/ping.view", http.StatusFound)
+			return
+		}
+		subNonCoverHits.Add(1)
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(validJPEG)
+	}))
+	defer subSrv.Close()
+	subP := NewSelfHostedProvider(NASConfig{
+		Protocol: "subsonic",
+		URL:      subSrv.URL,
+		Username: "sub-user",
+		Password: "sub-pass",
+		Enabled:  true,
+	}, subSrv.Client())
+	if _, err := subP.FetchCover(ctx, subSrv.URL+"/rest/getCoverArt.view?id=redir-bad", 0); err == nil {
+		t.Fatal("FetchCover followed same-origin redirect to non-artwork Subsonic route")
+	}
+	if subNonCoverHits.Load() != 0 {
+		t.Fatalf("non-cover Subsonic route contacted %d times", subNonCoverHits.Load())
+	}
 }
 
 func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testing.T) {
@@ -1359,6 +1398,7 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 			plexUser   = "plex-u-secret"
 			plexPass   = "plex-p-secret"
 			plexTok    = "plex-tok-secret"
+			plSig      = "sig-pl-secret"
 			signedPart = "sig-part-secret"
 		)
 		var srvURL string
@@ -1374,13 +1414,18 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 			host := strings.TrimPrefix(srvURL, "http://")
 			switch r.URL.Path {
 			case "/playlists":
-				fmt.Fprintf(w, `{"MediaContainer":{"Metadata":[{"key":"http://%s:%s@%s/playlists/5/items?X-Plex-Token=%s","title":"Signed List","leafCount":2}]}}`,
-					plexUser, plexPass, host, plexTok)
-			case "/playlists/pl-1/items":
+				fmt.Fprintf(w, `{"MediaContainer":{"Metadata":[{"key":"http://%s:%s@%s/playlists/5/items?X-Plex-Token=%s&sig=%s","title":"Signed List","leafCount":3}]}}`,
+					plexUser, plexPass, host, plexTok, plSig)
+			case "/playlists/5/items":
+				if r.URL.Query().Get("sig") != plSig {
+					http.Error(w, "missing playlist sig", http.StatusForbidden)
+					return
+				}
 				fmt.Fprintf(w, `{"MediaContainer":{"Metadata":[
 					{"ratingKey":"rk-301","title":"With RatingKey","Media":[{"Part":[{"key":"http://%s:%s@%s/library/parts/301/song.flac?X-Plex-Token=%s&sig=%s"}]}]},
-					{"title":"No RatingKey","Media":[{"Part":[{"key":"/library/parts/302/other.flac?X-Plex-Token=%s&sig=%s"}]}]}
-				]}}`, plexUser, plexPass, host, plexTok, signedPart, plexTok, signedPart)
+					{"title":"Edition A","Media":[{"Part":[{"key":"/library/parts/302/other.flac?X-Plex-Token=%s&edition=original"}]}]},
+					{"title":"Edition B","Media":[{"Part":[{"key":"/library/parts/302/other.flac?X-Plex-Token=%s&edition=remix"}]}]}
+				]}}`, plexUser, plexPass, host, plexTok, signedPart, plexTok, plexTok)
 			case "/library/metadata/rk-301":
 				fmt.Fprintf(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"rk-301","title":"With RatingKey","Media":[{"Part":[{"key":"http://%s:%s@%s/library/parts/301/song.flac?X-Plex-Token=%s&sig=%s"}]}]}]}}`,
 					plexUser, plexPass, host, plexTok, signedPart)
@@ -1391,11 +1436,14 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 				}
 				_, _ = w.Write([]byte("SIGNED-PLEX-FLAC-1"))
 			case "/library/parts/302/other.flac":
-				if r.URL.Query().Get("sig") != signedPart {
-					http.Error(w, "missing private sig", http.StatusForbidden)
-					return
+				switch r.URL.Query().Get("edition") {
+				case "original":
+					_, _ = w.Write([]byte("SIGNED-PLEX-ORIGINAL"))
+				case "remix":
+					_, _ = w.Write([]byte("SIGNED-PLEX-REMIX"))
+				default:
+					http.Error(w, "missing edition selector", http.StatusForbidden)
 				}
-				_, _ = w.Write([]byte("SIGNED-PLEX-FLAC-2"))
 			default:
 				http.NotFound(w, r)
 			}
@@ -1410,48 +1458,73 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 		if err != nil || len(pls) != 1 {
 			t.Fatalf("Playlists: len=%d err=%v", len(pls), err)
 		}
-		if pls[0].ID != "/playlists/5/items" {
-			t.Fatalf("Playlist ID leaked credentials or was not normalized: %q", pls[0].ID)
+		if !strings.HasPrefix(pls[0].ID, "/playlists/5/items;id=") {
+			t.Fatalf("Playlist ID not hashed cleanly: %q", pls[0].ID)
+		}
+		for _, bad := range []string{plexUser, plexPass, plexTok, plSig, "X-Plex-Token", "?", "://"} {
+			if strings.Contains(pls[0].ID, bad) {
+				t.Errorf("Playlist ID leaked %q: %q", bad, pls[0].ID)
+			}
 		}
 
-		tracks, err := p.PlaylistTracks(ctx, "pl-1")
-		if err != nil || len(tracks) != 2 {
-			t.Fatalf("PlaylistTracks: len=%d err=%v", len(tracks), err)
+		// Round-trip the actual emitted playlist ID (not a hard-coded scalar ID).
+		tracks, err := p.PlaylistTracks(ctx, pls[0].ID)
+		if err != nil || len(tracks) != 3 {
+			t.Fatalf("PlaylistTracks(%q): len=%d err=%v", pls[0].ID, len(tracks), err)
 		}
 		for _, tr := range tracks {
 			for _, field := range []string{tr.ID, tr.Preview, tr.CoverURL} {
-				for _, bad := range []string{plexUser, plexPass, plexTok, signedPart, "X-Plex-Token", "?", "://"} {
+				for _, bad := range []string{plexUser, plexPass, plexTok, signedPart, "X-Plex-Token", "edition", "original", "remix", "?", "://"} {
 					if strings.Contains(field, bad) {
 						t.Errorf("Plex track field leaked %q: %+v", bad, tr)
 					}
 				}
 			}
 		}
-		if tracks[0].ID != "rk-301" || tracks[1].ID != "/library/parts/302/other.flac" {
-			t.Fatalf("unexpected clean Plex track IDs: %q, %q", tracks[0].ID, tracks[1].ID)
+		if tracks[0].ID != "rk-301" || tracks[1].ID == tracks[2].ID ||
+			!strings.HasPrefix(tracks[1].ID, "/library/parts/302/other.flac;id=") ||
+			!strings.HasPrefix(tracks[2].ID, "/library/parts/302/other.flac;id=") {
+			t.Fatalf("unexpected Plex track IDs: %q, %q, %q", tracks[0].ID, tracks[1].ID, tracks[2].ID)
 		}
 
-		// Same provider instance resolves both private locators.
-		for i, want := range []string{"SIGNED-PLEX-FLAC-1", "SIGNED-PLEX-FLAC-2"} {
-			fp, err := p.DownloadTrack(ctx, tracks[i].ID, t.TempDir())
+		// Warm provider resolves all three and writes distinct cache files for the two editions.
+		warmDir := t.TempDir()
+		var paths [3]string
+		for i, want := range []string{"SIGNED-PLEX-FLAC-1", "SIGNED-PLEX-ORIGINAL", "SIGNED-PLEX-REMIX"} {
+			fp, err := p.DownloadTrack(ctx, tracks[i].ID, warmDir)
 			if err != nil {
 				t.Fatalf("DownloadTrack[%d] (%q): %v", i, tracks[i].ID, err)
 			}
+			paths[i] = fp
 			b, _ := os.ReadFile(fp)
 			if string(b) != want {
 				t.Fatalf("DownloadTrack[%d] body=%q want %q", i, string(b), want)
 			}
 		}
-
-		// Fresh provider instance (like webui ownerSelfHosted) still resolves ratingKey via metadata.
-		fresh := NewSelfHostedProvider(cfg, srv.Client())
-		fp, err := fresh.DownloadTrack(ctx, tracks[0].ID, t.TempDir())
-		if err != nil {
-			t.Fatalf("fresh DownloadTrack(%q): %v", tracks[0].ID, err)
+		if paths[1] == paths[2] {
+			t.Fatalf("distinct Plex editions collided on cache file %q", paths[1])
 		}
-		b, _ := os.ReadFile(fp)
-		if string(b) != "SIGNED-PLEX-FLAC-1" {
-			t.Fatalf("fresh DownloadTrack body=%q", string(b))
+
+		// Cold providers (restart/eviction) recover signed playlist, hashed part IDs, and legacy path IDs.
+		freshPl := NewSelfHostedProvider(cfg, srv.Client())
+		if coldTracks, err := freshPl.PlaylistTracks(ctx, pls[0].ID); err != nil || len(coldTracks) != 3 {
+			t.Fatalf("cold PlaylistTracks(%q): len=%d err=%v", pls[0].ID, len(coldTracks), err)
+		}
+		for i, tc := range []struct{ id, want string }{
+			{tracks[0].ID, "SIGNED-PLEX-FLAC-1"},
+			{tracks[1].ID, "SIGNED-PLEX-ORIGINAL"},
+			{tracks[2].ID, "SIGNED-PLEX-REMIX"},
+			{"/library/parts/301/song.flac", "SIGNED-PLEX-FLAC-1"},
+		} {
+			cold := NewSelfHostedProvider(cfg, srv.Client())
+			fp, err := cold.DownloadTrack(ctx, tc.id, t.TempDir())
+			if err != nil {
+				t.Fatalf("cold DownloadTrack[%d](%q): %v", i, tc.id, err)
+			}
+			b, _ := os.ReadFile(fp)
+			if string(b) != tc.want {
+				t.Fatalf("cold DownloadTrack[%d] body=%q want %q", i, string(b), tc.want)
+			}
 		}
 	})
 
@@ -1478,14 +1551,22 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 				}
 				fmt.Fprintf(w, `<?xml version="1.0"?><D:multistatus xmlns:D="DAV:">
 					<D:response><D:href>/music/Mixes/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>
-					<D:response><D:href>http://%s:%s@%s/music/Mixes/track.flac?sig=%s</D:href><D:propstat><D:prop><D:displayname>track.flac</D:displayname></D:prop></D:propstat></D:response>
-				</D:multistatus>`, davUser, davPass, host, fileSig)
+					<D:response><D:href>http://%s:%s@%s/music/Mixes/track.flac?edition=original&amp;sig=%s</D:href><D:propstat><D:prop><D:displayname>track.flac</D:displayname></D:prop></D:propstat></D:response>
+					<D:response><D:href>http://%s:%s@%s/music/Mixes/track.flac?edition=remix&amp;sig=%s</D:href><D:propstat><D:prop><D:displayname>track.flac</D:displayname></D:prop></D:propstat></D:response>
+				</D:multistatus>`, davUser, davPass, host, fileSig, davUser, davPass, host, fileSig)
 			case r.Method == "GET" && r.URL.Path == "/music/Mixes/track.flac":
 				if r.URL.Query().Get("sig") != fileSig {
 					http.Error(w, "missing file sig", http.StatusForbidden)
 					return
 				}
-				_, _ = w.Write([]byte("SIGNED-DAV-FLAC"))
+				switch r.URL.Query().Get("edition") {
+				case "original":
+					_, _ = w.Write([]byte("SIGNED-DAV-ORIGINAL"))
+				case "remix":
+					_, _ = w.Write([]byte("SIGNED-DAV-REMIX"))
+				default:
+					http.Error(w, "missing edition", http.StatusForbidden)
+				}
 			default:
 				http.NotFound(w, r)
 			}
@@ -1493,41 +1574,68 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 		defer srv.Close()
 		srvURL = srv.URL
 
-		p := NewSelfHostedProvider(NASConfig{
+		cfg := NASConfig{
 			Protocol: "webdav",
 			URL:      srv.URL + "/music/",
 			Token:    "dav-bearer",
 			Enabled:  true,
-		}, srv.Client())
+		}
+		p := NewSelfHostedProvider(cfg, srv.Client())
 
 		pls, err := p.Playlists(ctx)
 		if err != nil || len(pls) != 2 {
 			t.Fatalf("WebDAV Playlists: len=%d err=%v", len(pls), err)
 		}
-		if pls[1].ID != "/music/Mixes/" {
-			t.Fatalf("WebDAV Playlist ID not clean: %q", pls[1].ID)
+		if !strings.HasPrefix(pls[1].ID, "/music/Mixes/;id=") {
+			t.Fatalf("WebDAV Playlist ID not hashed cleanly: %q", pls[1].ID)
 		}
 		tracks, err := p.PlaylistTracks(ctx, pls[1].ID)
-		if err != nil || len(tracks) != 1 {
+		if err != nil || len(tracks) != 2 {
 			t.Fatalf("WebDAV PlaylistTracks: len=%d err=%v", len(tracks), err)
 		}
-		if tracks[0].ID != "/music/Mixes/track.flac" || tracks[0].Album != "/music/Mixes/" {
-			t.Fatalf("WebDAV Track fields not clean: %+v", tracks[0])
+		if tracks[0].ID == tracks[1].ID ||
+			!strings.HasPrefix(tracks[0].ID, "/music/Mixes/track.flac;id=") ||
+			!strings.HasPrefix(tracks[1].ID, "/music/Mixes/track.flac;id=") ||
+			tracks[0].Album != pls[1].ID || tracks[0].Title != "track" {
+			t.Fatalf("unexpected WebDAV tracks: %+v", tracks)
 		}
-		for _, field := range []string{pls[1].ID, tracks[0].ID, tracks[0].Album} {
-			for _, bad := range []string{davUser, davPass, dirTok, fileSig, "?", "://"} {
+		for _, field := range []string{pls[1].ID, tracks[0].ID, tracks[1].ID, tracks[0].Album} {
+			for _, bad := range []string{davUser, davPass, dirTok, fileSig, "edition", "original", "remix", "?", "://"} {
 				if strings.Contains(field, bad) {
 					t.Errorf("WebDAV field leaked %q: %q", bad, field)
 				}
 			}
 		}
-		fp, err := p.DownloadTrack(ctx, tracks[0].ID, t.TempDir())
+
+		// Warm downloads keep distinct cache files.
+		warmDir := t.TempDir()
+		fp0, err := p.DownloadTrack(ctx, tracks[0].ID, warmDir)
 		if err != nil {
-			t.Fatalf("WebDAV DownloadTrack: %v", err)
+			t.Fatalf("WebDAV DownloadTrack[0]: %v", err)
 		}
-		b, _ := os.ReadFile(fp)
-		if string(b) != "SIGNED-DAV-FLAC" {
-			t.Fatalf("WebDAV body=%q", string(b))
+		fp1, err := p.DownloadTrack(ctx, tracks[1].ID, warmDir)
+		if err != nil {
+			t.Fatalf("WebDAV DownloadTrack[1]: %v", err)
+		}
+		if fp0 == fp1 {
+			t.Fatalf("distinct WebDAV editions collided on cache file %q", fp0)
+		}
+
+		// Cold providers recover signed playlist and both signed tracks after restart/eviction.
+		coldPl := NewSelfHostedProvider(cfg, srv.Client())
+		if coldTracks, err := coldPl.PlaylistTracks(ctx, pls[1].ID); err != nil || len(coldTracks) != 2 {
+			t.Fatalf("cold WebDAV PlaylistTracks(%q): len=%d err=%v", pls[1].ID, len(coldTracks), err)
+		}
+		for i, want := range []string{"SIGNED-DAV-ORIGINAL", "SIGNED-DAV-REMIX"} {
+			cold := NewSelfHostedProvider(cfg, srv.Client())
+			fp, err := cold.DownloadTrack(ctx, tracks[i].ID, t.TempDir())
+			if err != nil {
+				t.Fatalf("cold WebDAV DownloadTrack[%d](%q): %v", i, tracks[i].ID, err)
+			}
+			b, _ := os.ReadFile(fp)
+			if string(b) != want {
+				t.Fatalf("cold WebDAV DownloadTrack[%d] body=%q want %q", i, string(b), want)
+			}
 		}
 	})
 }

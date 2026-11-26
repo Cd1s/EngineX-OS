@@ -248,26 +248,69 @@ func artSource(provider string) string {
 		return rekordboxScope
 	case isNASProvider(provider):
 		return nasScope
-	default:
-		return ""
 	}
+	return ""
+}
+
+func (r savedRef) ref() trackRef {
+	return trackRef{track: r.Track, session: r.Session, guest: r.Guest, file: r.File, drive: r.Drive}
 }
 
 func sanitizeGatewayPlaylistID(provider, id string) string {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "plex", "webdav":
+	case "plex", "webdav", nasScope:
 		return providers.SanitizeSelfHostedID(provider, id)
-	case nasScope:
-		if id == "." || strings.HasPrefix(id, "./") {
-			return id
+	case localProvider:
+		if rawID, ok := strings.CutPrefix(id, "nas\x00"); ok {
+			if clean := providers.SanitizeSelfHostedID(nasScope, rawID); clean != "" {
+				return "nas\x00" + clean
+			}
+			return ""
 		}
-		if strings.Contains(id, "://") || strings.HasPrefix(id, "//") || strings.Contains(id, "?") || (strings.HasPrefix(id, "/") && strings.Contains(id, "#")) {
-			return providers.SanitizeSelfHostedID("webdav", id)
-		}
-		return id
-	default:
-		return id
 	}
+	return id
+}
+
+func preflightGatewayMigration(v *savedTracks) (scrubbed, collision bool) {
+	seen := map[string]string{}
+	okKey := func(kind, origID, newID, origK, newK string) bool {
+		k := kind + "\x00" + newK
+		if (origID != "" && newID == "") || (seen[k] != "" && seen[k] != origK) {
+			return false
+		}
+		seen[k] = origK
+		return true
+	}
+	cleanList := func(kind, sess string, guest bool, prov string, id *string) bool {
+		orig, clean := *id, sanitizeGatewayPlaylistID(prov, *id)
+		p := owner(sess, guest) + "\x00" + prov + "\x00"
+		if !okKey(kind, orig, clean, p+orig, p+clean) {
+			return false
+		}
+		*id, scrubbed = clean, scrubbed || clean != orig
+		return true
+	}
+	tracks, lists, albums := append([]savedRef(nil), v.Tracks...), append([]savedList(nil), v.Lists...), append([]savedAlbum(nil), v.Albums...)
+	for i, orig := range tracks {
+		scrubbed = sanitizeTrackCovers(&tracks[i].Track) || scrubbed
+		if !okKey("t", orig.Track.ID, tracks[i].Track.ID, refKey(orig.ref()), refKey(tracks[i].ref())) {
+			return false, true
+		}
+	}
+	for i := range lists {
+		if !cleanList("l", lists[i].Session, lists[i].Guest, lists[i].Provider, &lists[i].List.ID) {
+			return false, true
+		}
+	}
+	for i := range albums {
+		if !cleanList("a", albums[i].Session, albums[i].Guest, albums[i].Provider, &albums[i].ListID) {
+			return false, true
+		}
+	}
+	if scrubbed {
+		v.Tracks, v.Lists, v.Albums = tracks, lists, albums
+	}
+	return scrubbed, false
 }
 
 func (g *tidalGateway) loadTracks() {
@@ -276,10 +319,13 @@ func (g *tidalGateway) loadTracks() {
 	if err != nil || json.Unmarshal(b, &v) != nil {
 		return
 	}
-	scrubbed := false
+	scrubbed, collision := preflightGatewayMigration(&v)
+	if collision {
+		log.Printf("stream-sync: skip gateway track migration: id collision")
+	}
 	for _, r := range v.Tracks {
-		if sanitizeTrackCovers(&r.Track) {
-			scrubbed = true
+		if collision {
+			r.Track.CoverURL, r.Track.ThumbURL = providers.SanitizeCoverURL(r.Track.CoverURL), providers.SanitizeCoverURL(r.Track.ThumbURL)
 		}
 		httpsCover(&r.Track)
 		src := artSource(r.Track.Provider)
@@ -290,12 +336,8 @@ func (g *tidalGateway) loadTracks() {
 				}
 			}
 		}
-		ref := trackRef{track: r.Track, session: r.Session, guest: r.Guest, file: r.File, drive: r.Drive}
-		g.tracks[r.ID] = ref
-		key := refKey(ref)
-		if prev, ok := g.ids[key]; !ok || r.ID > prev {
-			g.ids[key] = r.ID
-		}
+		ref := r.ref()
+		g.tracks[r.ID], g.ids[refKey(ref)] = ref, r.ID
 		if address := thumbURL(ref.track); address != "" {
 			if len(g.artURLs) > maxTracks {
 				g.artURLs = map[string]string{}
@@ -309,19 +351,11 @@ func (g *tidalGateway) loadTracks() {
 	}
 	g.next = max(g.next, v.Next)
 	for _, l := range v.Lists {
-		if clean := sanitizeGatewayPlaylistID(l.Provider, l.List.ID); clean != l.List.ID {
-			l.List.ID = clean
-			scrubbed = true
-		}
 		g.lists[l.ID] = playlistRef{l.Session, l.Provider, l.List, l.Guest}
 		g.seq++
 		g.listSeen[l.ID] = g.seq
 	}
 	for _, al := range v.Albums {
-		if clean := sanitizeGatewayPlaylistID(al.Provider, al.ListID); clean != al.ListID {
-			al.ListID = clean
-			scrubbed = true
-		}
 		ref := albumRef{al.Session, al.Provider, al.ListID, al.Guest}
 		g.albums[al.ID] = ref
 		g.albumIDs[albumKey(ref)] = al.ID
@@ -338,6 +372,18 @@ func (g *tidalGateway) scheduleSave() {
 	if !g.saving && g.tracksPath() != "" {
 		g.saving = true
 		time.AfterFunc(trackSaveDelay, g.saveTracks)
+	}
+}
+
+// flushTracks writes pending track-ID changes on Close without rewriting unchanged state files.
+func (g *tidalGateway) flushTracks() {
+	g.saveMu.Lock()
+	g.mu.Lock()
+	pending := g.saving
+	g.mu.Unlock()
+	g.saveMu.Unlock()
+	if pending {
+		g.saveTracks()
 	}
 }
 
@@ -1036,12 +1082,11 @@ func (g *tidalGateway) artBytesFor(ctx context.Context, src, address string) []b
 	rbx := strings.HasPrefix(address, rbxCoverScheme)
 	var nas *providers.SelfHostedProvider
 	if !rbx && src == nasScope && g.s != nil {
-		if sh := g.s.ownerSelfHosted(); sh != nil {
-			if sh.MatchesCoverURL(address) {
-				nas = sh
-			} else if sh.SameOrigin(address) {
+		if sh := g.s.ownerSelfHosted(); sh != nil && sh.SameOrigin(address) {
+			if !sh.MatchesCoverURL(address) {
 				return nil
 			}
+			nas = sh
 		}
 	}
 	if !rbx && nas == nil && !strings.HasPrefix(address, "https://") {
@@ -1065,7 +1110,7 @@ func (g *tidalGateway) artBytesFor(ctx context.Context, src, address string) []b
 	default:
 		data = fetchArt(ctx, address)
 	}
-	if data == nil || (!rbx && !providers.IsValidCoverImage(data)) {
+	if data == nil {
 		return nil
 	}
 	g.artMu.Lock()
@@ -1334,17 +1379,19 @@ func playlistOpenSourceID(ref *playlistRef) string {
 	}
 	id := ref.list.ID
 	if ref.provider == nasScope {
-		return fmt.Sprintf("nas:%q", path.Base(id))
+		return fmt.Sprintf("nas:%q", path.Base(sanitizeGatewayPlaylistID(nasScope, id)))
 	}
 	if ref.provider != localProvider {
-		return id
+		return sanitizeGatewayPlaylistID(ref.provider, id)
 	}
 	parts := strings.Split(id, "\x00")
 	if len(parts) == 1 {
 		return "local"
 	}
 	switch parts[0] {
-	case "nas", "mount", "djay":
+	case "nas":
+		return fmt.Sprintf("nas:%q", sanitizeGatewayPlaylistID(nasScope, parts[len(parts)-1]))
+	case "mount", "djay":
 		return fmt.Sprintf("%s:%q", parts[0], parts[len(parts)-1])
 	default:
 		return fmt.Sprintf("usb:%q", parts[len(parts)-1])
@@ -1363,6 +1410,7 @@ func (g *tidalGateway) logPlaylistOpenFailure(r *http.Request, status int, id st
 	log.Printf("stream-sync: playlist open failed route=%s status=%d scope=%s playlist=%s provider=%s session=%s source_id=%s error=%s", r.URL.Path, status, g.s.scope(), id, provider, playlistOpenSession(ref), playlistOpenSourceID(ref), errText)
 }
 func (g *tidalGateway) trackJSON(id int64, t providers.Track) map[string]any {
+	sanitizeTrackCovers(&t)
 	// Engine shows the BPM it is given for the track and builds its grid on it. A service's
 	// tempo is metadata, often another than the audio's (Supermanera: 84 here, 140 analysed),
 	// and a shadow copy, a local file, gets Engine's own analysis: the two units showed
