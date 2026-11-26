@@ -6,6 +6,8 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
@@ -13,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -214,7 +218,7 @@ func validateBaseURL(proto, raw string) (*url.URL, error) {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("%s: invalid URL: %w", proto, redactURLError(err))
+		return nil, fmt.Errorf("%s: invalid URL", proto)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("%s: invalid URL scheme %q", proto, u.Scheme)
@@ -225,25 +229,109 @@ func validateBaseURL(proto, raw string) (*url.URL, error) {
 	return u, nil
 }
 
-// redactURLError strips query parameters, fragments, and userinfo from any
-// *url.Error URL so transport errors never leak Subsonic/Plex/WebDAV credentials.
-func redactURLError(err error) error {
+type selfHostedError struct {
+	msg   string
+	cause error // only standard context sentinels; never raw transport/redirect errors
+}
+
+func (e *selfHostedError) Error() string { return e.msg }
+func (e *selfHostedError) Unwrap() error { return e.cause }
+
+// safeURLRoute returns scheme://host/path with userinfo, query, and fragment stripped.
+func safeURLRoute(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if (scheme != "http" && scheme != "https") || u.Host == "" {
+		return ""
+	}
+	return (&url.URL{
+		Scheme: scheme,
+		Host:   u.Host,
+		Path:   u.Path,
+	}).String()
+}
+
+// classifySelfHostedError maps a transport, redirect, or I/O error to a fixed
+// diagnostic category without copying any bytes from the underlying error text.
+func classifySelfHostedError(err error) (string, error) {
+	if errors.Is(err, context.Canceled) {
+		return "request canceled", context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "request timed out", context.DeadlineExceeded
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "request timed out", nil
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "host lookup failed", nil
+	}
+	var certErr *tls.CertificateVerificationError
+	var recErr tls.RecordHeaderError
+	var unknownAuth x509.UnknownAuthorityError
+	var hostErr x509.HostnameError
+	var certInv x509.CertificateInvalidError
+	if errors.As(err, &certErr) || errors.As(err, &recErr) ||
+		errors.As(err, &unknownAuth) || errors.As(err, &hostErr) || errors.As(err, &certInv) {
+		return "TLS handshake failed", nil
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return "connection refused", nil
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return "connection reset", nil
+	}
+	if errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) {
+		return "host unreachable", nil
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return "connection closed", nil
+	}
 	var ue *url.Error
-	for cur := err; errors.As(cur, &ue); cur = ue.Err {
-		if ue.URL == "" {
-			continue
-		}
-		if parsed, perr := url.Parse(ue.URL); perr == nil {
-			ue.URL = (&url.URL{
-				Scheme: parsed.Scheme,
-				Host:   parsed.Host,
-				Path:   parsed.Path,
-			}).String()
-		} else {
-			ue.URL = "<redacted>"
+	if errors.As(err, &ue) && ue.Err != nil {
+		inner := ue.Err.Error()
+		switch {
+		case strings.Contains(inner, "Location"), strings.Contains(inner, "redirect"):
+			return "redirect failed", nil
+		case strings.Contains(inner, "not allowed"):
+			return "target address not allowed", nil
+		case strings.Contains(inner, "no addresses"):
+			return "host lookup failed", nil
+		case strings.Contains(inner, "invalid url"):
+			return "invalid redirect URL", nil
 		}
 	}
-	return err
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return "connection failed", nil
+	}
+	var pathErr *os.PathError
+	var linkErr *os.LinkError
+	if errors.As(err, &pathErr) || errors.As(err, &linkErr) {
+		return "storage write failed", nil
+	}
+	return "request failed", nil
+}
+
+// safeSelfHostedError builds an outward diagnostic from a fixed protocol,
+// operation, sanitized initial request route, and fixed error category so
+// transport/redirect inner errors never leak Subsonic/Plex/WebDAV credentials.
+func safeSelfHostedError(proto, op string, reqURL *url.URL, err error) error {
+	category, sentinel := classifySelfHostedError(err)
+	if route := safeURLRoute(reqURL); route != "" {
+		return &selfHostedError{
+			msg:   fmt.Sprintf("%s: %s %s: %s", proto, op, route, category),
+			cause: sentinel,
+		}
+	}
+	return &selfHostedError{
+		msg:   fmt.Sprintf("%s: %s: %s", proto, op, category),
+		cause: sentinel,
+	}
 }
 
 func (p *SelfHostedProvider) subsonicGet(ctx context.Context, action string, extra url.Values, out *subsonicResponse) error {
@@ -259,11 +347,11 @@ func (p *SelfHostedProvider) subsonicGet(ctx context.Context, action string, ext
 	u := strings.TrimRight(p.cfg.URL, "/") + "/rest/" + action + ".view?" + params.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return redactURLError(err)
+		return errors.New("subsonic: invalid request URL")
 	}
 	resp, err := p.httpClient().Do(req)
 	if err != nil {
-		return fmt.Errorf("subsonic: %w", redactURLError(err))
+		return safeSelfHostedError("subsonic", "request", req.URL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -271,14 +359,14 @@ func (p *SelfHostedProvider) subsonicGet(ctx context.Context, action string, ext
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
-		return err
+		return safeSelfHostedError("subsonic", "read", req.URL, err)
 	}
 	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("subsonic: invalid JSON: %w", err)
+		return errors.New("subsonic: invalid JSON response")
 	}
 	if out.SubsonicResponse.Status == "failed" {
 		if out.SubsonicResponse.Error != nil {
-			return fmt.Errorf("subsonic error: %s (code %d)", out.SubsonicResponse.Error.Message, out.SubsonicResponse.Error.Code)
+			return fmt.Errorf("subsonic error (code %d)", out.SubsonicResponse.Error.Code)
 		}
 		return errors.New("subsonic error: unknown failure")
 	}
@@ -378,7 +466,7 @@ func checkSubsonicMediaError(resp *http.Response) error {
 	if isJSON {
 		var sr subsonicResponse
 		if json.Unmarshal(body, &sr) == nil && sr.SubsonicResponse.Error != nil {
-			return fmt.Errorf("subsonic error: %s (code %d)", sr.SubsonicResponse.Error.Message, sr.SubsonicResponse.Error.Code)
+			return fmt.Errorf("subsonic error (code %d)", sr.SubsonicResponse.Error.Code)
 		}
 	}
 	if isXML {
@@ -390,10 +478,13 @@ func checkSubsonicMediaError(resp *http.Response) error {
 			} `xml:"error"`
 		}
 		if xml.Unmarshal(body, &xr) == nil && xr.Error != nil {
-			return fmt.Errorf("subsonic error: %s (code %d)", xr.Error.Message, xr.Error.Code)
+			return fmt.Errorf("subsonic error (code %d)", xr.Error.Code)
 		}
 	}
-	return fmt.Errorf("subsonic: unexpected %s response instead of audio", ct)
+	if isJSON {
+		return errors.New("subsonic: unexpected JSON response instead of audio")
+	}
+	return errors.New("subsonic: unexpected XML response instead of audio")
 }
 
 func (p *SelfHostedProvider) subsonicDownloadTrack(ctx context.Context, trackID, destDir string) (string, error) {
@@ -408,7 +499,7 @@ func (p *SelfHostedProvider) subsonicDownloadTrack(ctx context.Context, trackID,
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
-		return "", redactURLError(err)
+		return "", errors.New("subsonic: invalid download URL")
 	}
 	resp, err := p.httpClient().Do(req)
 	var dlErr error
@@ -426,11 +517,11 @@ func (p *SelfHostedProvider) subsonicDownloadTrack(ctx context.Context, trackID,
 		streamURL := strings.TrimRight(p.cfg.URL, "/") + "/rest/stream.view?" + streamParams.Encode()
 		req, err = http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
 		if err != nil {
-			return "", redactURLError(err)
+			return "", errors.New("subsonic: invalid stream URL")
 		}
 		resp, err = p.httpClient().Do(req)
 		if err != nil {
-			return "", fmt.Errorf("subsonic: stream failed: %w", redactURLError(err))
+			return "", safeSelfHostedError("subsonic", "stream", req.URL, err)
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
@@ -454,7 +545,11 @@ func (p *SelfHostedProvider) subsonicDownloadTrack(ctx context.Context, trackID,
 	// The same flat hashed name as WebDAV, Plex and SMB: the cache budget evicts only those,
 	// and two IDs or two servers never share a file.
 	filename := nasCacheFilename(baseU, strings.TrimRight(baseU.Path, "/")+"\x00subsonic\x00"+trackID, ext)
-	return saveStreamToFile(destDir, filename, resp.Body)
+	outPath, err := saveStreamToFile(destDir, filename, resp.Body)
+	if err != nil {
+		return "", safeSelfHostedError("subsonic", "download", req.URL, err)
+	}
+	return outPath, nil
 }
 
 // ----------------------------------------------------------------------------
@@ -518,7 +613,7 @@ func (p *SelfHostedProvider) webdavPropfind(ctx context.Context, targetURL strin
 </D:propfind>`
 	req, err := http.NewRequestWithContext(ctx, "PROPFIND", targetURL, bytes.NewBufferString(propfindXML))
 	if err != nil {
-		return nil, redactURLError(err)
+		return nil, errors.New("webdav: invalid propfind URL")
 	}
 	req.Header.Set("Depth", "1")
 	req.Header.Set("Content-Type", "application/xml; charset=\"utf-8\"")
@@ -526,7 +621,7 @@ func (p *SelfHostedProvider) webdavPropfind(ctx context.Context, targetURL strin
 
 	resp, err := p.httpClient().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("webdav: propfind %w", redactURLError(err))
+		return nil, safeSelfHostedError("webdav", "propfind", req.URL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -535,12 +630,12 @@ func (p *SelfHostedProvider) webdavPropfind(ctx context.Context, targetURL strin
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
-		return nil, err
+		return nil, safeSelfHostedError("webdav", "read", req.URL, err)
 	}
 
 	var multi davMultistatus
 	if err := xml.Unmarshal(body, &multi); err != nil {
-		return nil, fmt.Errorf("webdav: invalid XML: %w", err)
+		return nil, errors.New("webdav: invalid XML response")
 	}
 	return multi.Responses, nil
 }
@@ -687,7 +782,7 @@ func resolveWebDAVURL(baseRaw, ref string) (*url.URL, error) {
 	}
 	refU, err := u.Parse(ref)
 	if err != nil {
-		return nil, fmt.Errorf("webdav: invalid target URL: %w", redactURLError(err))
+		return nil, errors.New("webdav: invalid target URL")
 	}
 	if refU.Host != "" && (refU.Host != u.Host || refU.Scheme != u.Scheme) {
 		return nil, errors.New("webdav: target host does not match base URL")
@@ -784,13 +879,13 @@ func (p *SelfHostedProvider) webdavDownloadTrack(ctx context.Context, trackID, d
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetU.String(), nil)
 	if err != nil {
-		return "", redactURLError(err)
+		return "", errors.New("webdav: invalid download URL")
 	}
 	p.setWebDAVAuth(req)
 
 	resp, err := p.httpClient().Do(req)
 	if err != nil {
-		return "", fmt.Errorf("webdav: download %w", redactURLError(err))
+		return "", safeSelfHostedError("webdav", "download", req.URL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -808,7 +903,11 @@ func (p *SelfHostedProvider) webdavDownloadTrack(ctx context.Context, trackID, d
 		}
 	}
 	filename := nasCacheFilename(targetU, targetU.Path+"\x00"+targetU.RawQuery, ext)
-	return saveStreamToFile(destDir, filename, resp.Body)
+	outPath, err := saveStreamToFile(destDir, filename, resp.Body)
+	if err != nil {
+		return "", safeSelfHostedError("webdav", "download", req.URL, err)
+	}
+	return outPath, nil
 }
 
 // ----------------------------------------------------------------------------
@@ -907,13 +1006,13 @@ func (p *SelfHostedProvider) plexGet(ctx context.Context, pathAndQuery string, o
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return redactURLError(err)
+		return errors.New("plex: invalid request URL")
 	}
 	p.setPlexHeaders(req)
 
 	resp, err := p.httpClient().Do(req)
 	if err != nil {
-		return fmt.Errorf("plex: %w", redactURLError(err))
+		return safeSelfHostedError("plex", "request", req.URL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -922,10 +1021,10 @@ func (p *SelfHostedProvider) plexGet(ctx context.Context, pathAndQuery string, o
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
-		return err
+		return safeSelfHostedError("plex", "read", req.URL, err)
 	}
 	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("plex: invalid JSON: %w", err)
+		return errors.New("plex: invalid JSON response")
 	}
 	return nil
 }
@@ -1087,13 +1186,13 @@ func (p *SelfHostedProvider) plexDownloadTrack(ctx context.Context, trackID, des
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
-		return "", redactURLError(err)
+		return "", errors.New("plex: invalid download URL")
 	}
 	p.setPlexHeaders(req)
 
 	resp, err := p.httpClient().Do(req)
 	if err != nil {
-		return "", fmt.Errorf("plex: download %w", redactURLError(err))
+		return "", safeSelfHostedError("plex", "download", req.URL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -1111,7 +1210,11 @@ func (p *SelfHostedProvider) plexDownloadTrack(ctx context.Context, trackID, des
 		}
 	}
 	filename := nasCacheFilename(baseU, strings.TrimRight(baseU.Path, "/")+partKey, ext)
-	return saveStreamToFile(destDir, filename, resp.Body)
+	outPath, err := saveStreamToFile(destDir, filename, resp.Body)
+	if err != nil {
+		return "", safeSelfHostedError("plex", "download", req.URL, err)
+	}
+	return outPath, nil
 }
 
 // ----------------------------------------------------------------------------

@@ -288,7 +288,7 @@ func (g *tidalGateway) saveTracks() {
 	g.saving = false
 	v := savedTracks{Next: g.next, Tracks: make([]savedRef, 0, len(g.tracks))}
 	for id, ref := range g.tracks {
-		v.Tracks = append(v.Tracks, savedRef{id, ref.track, ref.session, ref.guest, ref.file, ref.drive})
+		v.Tracks = append(v.Tracks, savedRef{id, publicTrack(ref.track), ref.session, ref.guest, ref.file, ref.drive})
 	}
 	sort.Slice(v.Tracks, func(a, b int) bool { return g.trackSeen[v.Tracks[a].ID] < g.trackSeen[v.Tracks[b].ID] })
 	for id, ref := range g.lists {

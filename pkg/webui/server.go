@@ -1166,7 +1166,11 @@ func (s *Server) tracks(w http.ResponseWriter, r *http.Request) {
 		v.tracks[t.ID] = t
 	}
 	s.mu.Unlock()
-	respond(w, tracks)
+	out := make([]providers.Track, len(tracks))
+	for i, t := range tracks {
+		out[i] = publicTrack(t)
+	}
+	respond(w, out)
 }
 func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 	var in struct {

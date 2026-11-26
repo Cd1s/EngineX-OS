@@ -6,6 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"io"
 	"log"
 	"net/http"
@@ -13,11 +16,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/Cd1s/EngineX-OS/internal/testaudio"
+	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
 	"github.com/Cd1s/EngineX-OS/internal/testsmb"
+	"github.com/Cd1s/EngineX-OS/pkg/analyzer"
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
+	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
 )
 
 func newTestServerWithUIDir(t *testing.T) (*Server, string) {
@@ -859,5 +868,423 @@ func TestNASPlaylistOpenFailureEscapesLogInjection(t *testing.T) {
 	errLine := logBuf.String()
 	if strings.Count(strings.TrimSpace(errLine), "\n") != 0 || strings.ContainsAny(errLine, "\r\x1b") {
 		t.Fatalf("error log injection not neutralized: %q", errLine)
+	}
+}
+
+func TestNASRedirectAndUpstreamErrorsNeverLeakInGatewayAndStream(t *testing.T) {
+	const (
+		dummyUser  = "dummy-nas-user"
+		dummyPass  = "dummy-nas-pass-999"
+		dummyToken = "dummy-nas-token-999"
+		redirUser  = "redir-user"
+		redirPass  = "redir-pass-999"
+		redirToken = "redir-tok-999"
+		redirPlex  = "redir-plex-999"
+	)
+	forbidden := []string{
+		dummyUser, dummyPass, dummyToken,
+		redirUser, redirPass, redirToken, redirPlex,
+		"evil.invalid", "t=", "s=", "p=", "X-Plex-Token", "?",
+		"forged=1",
+	}
+	assertNoLeak := func(t *testing.T, label, text string) {
+		t.Helper()
+		for _, bad := range forbidden {
+			if strings.Contains(text, bad) {
+				t.Errorf("%s leaked %q: %s", label, bad, text)
+			}
+		}
+	}
+
+	redirSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "http://"+redirUser+":"+redirPass+"@evil.invalid/steal%zz?u="+redirUser+"&t="+redirToken+"&s=salt&X-Plex-Token="+redirPlex)
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer redirSrv.Close()
+
+	upstreamErrSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"subsonic-response":{"status":"failed","error":{"code":40,"message":"auth failed for u=%s&p=%s\nstream-sync: forged=1"}}}`, dummyUser, dummyPass)
+	}))
+	defer upstreamErrSrv.Close()
+
+	cases := []struct {
+		name     string
+		client   *http.Client
+		provider string
+		trackID  string
+		cfgJSON  string
+	}{
+		{
+			name:     "subsonic-malformed-redirect",
+			client:   redirSrv.Client(),
+			provider: "subsonic",
+			trackID:  "s-1",
+			cfgJSON:  fmt.Sprintf(`{"protocol":"subsonic","url":%q,"username":%q,"password":%q,"enabled":true}`, redirSrv.URL, dummyUser, dummyPass),
+		},
+		{
+			name:     "plex-malformed-redirect",
+			client:   redirSrv.Client(),
+			provider: "plex",
+			trackID:  "/library/parts/1/song.flac",
+			cfgJSON:  fmt.Sprintf(`{"protocol":"plex","url":%q,"token":%q,"enabled":true}`, redirSrv.URL, dummyToken),
+		},
+		{
+			name:     "subsonic-upstream-message",
+			client:   upstreamErrSrv.Client(),
+			provider: "subsonic",
+			trackID:  "s-1",
+			cfgJSON:  fmt.Sprintf(`{"protocol":"subsonic","url":%q,"username":%q,"password":%q,"enabled":true}`, upstreamErrSrv.URL, dummyUser, dummyPass),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			uiDir, stateDir, dlDir := t.TempDir(), t.TempDir(), t.TempDir()
+			if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("sources=\nscope=nas\nomni_source=0\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			jobs := NewJobs(Pipeline{
+				Catalog: noCatalog{},
+				Deemix:  &deemixclient.Client{DownloadDir: dlDir},
+			})
+			defer jobs.Close()
+			s := New(Config{UIDir: uiDir, StateDir: stateDir, HTTP: tc.client}, jobs)
+			defer s.Close()
+
+			wCfg := httptest.NewRecorder()
+			s.handleNASConfig(wCfg, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(tc.cfgJSON)))
+			if wCfg.Code != http.StatusOK {
+				t.Fatalf("save NAS config (%d): %s", wCfg.Code, wCfg.Body.String())
+			}
+
+			// 1. NAS hint playlist JSON (/v1/users/1/playlists).
+			reqList := httptest.NewRequest(http.MethodGet, "/v1/users/1/playlists?limit=50&offset=0", nil)
+			reqList.RemoteAddr = "127.0.0.1:1234"
+			wList := httptest.NewRecorder()
+			s.tidal.ServeHTTP(wList, reqList)
+			if wList.Code != http.StatusOK || !strings.Contains(wList.Body.String(), hintPlaylist) {
+				t.Fatalf("expected hint playlist, status=%d body=%s", wList.Code, wList.Body.String())
+			}
+			assertNoLeak(t, "hint playlist JSON", wList.Body.String())
+
+			// 2. Playlist open error body + stream-sync log line.
+			plUUID := s.tidal.addPlaylist(playlistRef{
+				session:  nasScope,
+				provider: nasScope,
+				list:     providers.Playlist{ID: "pl-1", Title: "Crate"},
+			})
+			var logBuf bytes.Buffer
+			log.SetOutput(&logBuf)
+			defer log.SetOutput(os.Stderr)
+
+			reqTracks := httptest.NewRequest(http.MethodGet, "/v1/playlists/"+plUUID+"/tracks?limit=50&offset=0", nil)
+			reqTracks.RemoteAddr = "127.0.0.1:1234"
+			wTracks := httptest.NewRecorder()
+			s.tidal.ServeHTTP(wTracks, reqTracks)
+			log.SetOutput(os.Stderr)
+
+			if wTracks.Code != http.StatusBadGateway {
+				t.Fatalf("tracks status=%d body=%s", wTracks.Code, wTracks.Body.String())
+			}
+			assertNoLeak(t, "tracks HTTP error", wTracks.Body.String())
+			logged := logBuf.String()
+			if !strings.Contains(logged, "stream-sync: playlist open failed") {
+				t.Fatalf("missing playlist open failure log: %q", logged)
+			}
+			_, errPart, ok := strings.Cut(logged, "error=")
+			if !ok {
+				t.Fatalf("log missing error=: %q", logged)
+			}
+			assertNoLeak(t, "playlist open failure log error=", errPart)
+			if strings.Count(strings.TrimSpace(logged), "\n") != 0 {
+				t.Fatalf("log line split by newline: %q", logged)
+			}
+
+			// 3. Stream endpoint error body (/v1/stream/{id}.flac).
+			tid := s.tidal.addTrack(trackRef{
+				session: nasScope,
+				track:   providers.Track{ID: tc.trackID, Title: "Track", Provider: tc.provider},
+			})
+			reqStream := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/stream/%d.flac", tid), nil)
+			reqStream.RemoteAddr = "127.0.0.1:1234"
+			wStream := httptest.NewRecorder()
+			s.tidal.ServeHTTP(wStream, reqStream)
+			if wStream.Code != http.StatusBadGateway {
+				t.Fatalf("stream status=%d body=%s", wStream.Code, wStream.Body.String())
+			}
+			assertNoLeak(t, "stream HTTP error", wStream.Body.String())
+
+			// 4. NAS test endpoint error body (/v1/enginex/nas/test).
+			wTest := httptest.NewRecorder()
+			s.handleNASTest(wTest, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas/test", strings.NewReader("{}")))
+			if wTest.Code != http.StatusBadGateway {
+				t.Fatalf("nas test status=%d body=%s", wTest.Code, wTest.Body.String())
+			}
+			assertNoLeak(t, "nas test error", wTest.Body.String())
+		})
+	}
+}
+
+func TestNASJobResponsesAndSavedTracksStripCoverCredentials(t *testing.T) {
+	const (
+		dummyUser  = "dummy-nas-user"
+		dummyPass  = "dummy-nas-pass-999"
+		dummyToken = "dummy-nas-token-999"
+	)
+	var flacBuf bytes.Buffer
+	if err := testaudio.FLAC(&flacBuf, testaudio.Song(8)); err != nil {
+		t.Fatal(err)
+	}
+	flacBytes := flacBuf.Bytes()
+
+	img := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			img.Set(x, y, color.RGBA{R: 40, G: 120, B: 200, A: 255})
+		}
+	}
+	var jpegBuf bytes.Buffer
+	if err := jpeg.Encode(&jpegBuf, img, &jpeg.Options{Quality: 80}); err != nil {
+		t.Fatal(err)
+	}
+	jpegBytes := jpegBuf.Bytes()
+
+	forbidden := []string{
+		dummyUser, dummyPass, dummyToken,
+		"X-Plex-Token", "t=", "s=", "p=", "getCoverArt.view", "/thumb/", `"coverUrl"`,
+	}
+	assertNoLeak := func(t *testing.T, label, text string) {
+		t.Helper()
+		for _, bad := range forbidden {
+			if strings.Contains(text, bad) {
+				t.Errorf("%s leaked %q: %s", label, bad, text)
+			}
+		}
+	}
+
+	for _, proto := range []string{"subsonic", "plex"} {
+		t.Run(proto, func(t *testing.T) {
+			var coverFetched atomic.Int32
+			nasSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch proto {
+				case "subsonic":
+					switch r.URL.Path {
+					case "/rest/getPlaylists.view":
+						w.Header().Set("Content-Type", "application/json")
+						fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlists":{"playlist":[{"id":"pl-1","name":"NAS Crate","songCount":1}]}}}`)
+					case "/rest/getPlaylist.view":
+						w.Header().Set("Content-Type", "application/json")
+						fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlist":{"id":"pl-1","name":"NAS Crate","entry":[{"id":"s-1","title":"Cover Track","artist":"DJ Test","album":"NAS Album","duration":8,"coverArt":"art-42"}]}}}`)
+					case "/rest/download.view":
+						w.Header().Set("Content-Type", "audio/flac")
+						w.Header().Set("Content-Disposition", `attachment; filename="cover.flac"`)
+						_, _ = w.Write(flacBytes)
+					case "/rest/getCoverArt.view":
+						q := r.URL.Query()
+						if q.Get("id") != "art-42" || q.Get("u") != dummyUser || (q.Get("p") == "" && (q.Get("t") == "" || q.Get("s") == "")) {
+							http.Error(w, "unauthorized cover", http.StatusUnauthorized)
+							return
+						}
+						coverFetched.Add(1)
+						w.Header().Set("Content-Type", "image/jpeg")
+						_, _ = w.Write(jpegBytes)
+					default:
+						http.NotFound(w, r)
+					}
+				case "plex":
+					switch r.URL.Path {
+					case "/playlists":
+						w.Header().Set("Content-Type", "application/json")
+						fmt.Fprint(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"pl-1","title":"NAS Crate","leafCount":1}]}}`)
+					case "/playlists/pl-1/items":
+						w.Header().Set("Content-Type", "application/json")
+						fmt.Fprint(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"tr-1","title":"Cover Track","grandparentTitle":"DJ Test","parentTitle":"NAS Album","duration":8000,"thumb":"/library/metadata/tr-1/thumb/42","Media":[{"Part":[{"key":"/library/parts/1/song.flac"}]}]}]}}`)
+					case "/library/parts/1/song.flac":
+						w.Header().Set("Content-Type", "audio/flac")
+						_, _ = w.Write(flacBytes)
+					case "/library/metadata/tr-1/thumb/42":
+						if r.URL.Query().Get("X-Plex-Token") != dummyToken {
+							http.Error(w, "unauthorized cover", http.StatusUnauthorized)
+							return
+						}
+						coverFetched.Add(1)
+						w.Header().Set("Content-Type", "image/jpeg")
+						_, _ = w.Write(jpegBytes)
+					default:
+						http.NotFound(w, r)
+					}
+				}
+			}))
+			defer nasSrv.Close()
+
+			libPath, libRoot, _ := testlibrary.Create(t)
+			lib, err := analyzer.OpenLibrary(libPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lib.Close()
+
+			uiDir, stateDir := t.TempDir(), t.TempDir()
+			if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("sources=\nscope=nas\nomni_source=0\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			guard := resourceguard.New(resourceguard.Config{Disabled: true})
+			jobs := NewJobs(Pipeline{
+				Guard:   guard,
+				Catalog: noCatalog{},
+				Deemix:  &deemixclient.Client{DownloadDir: libRoot, Media: nasSrv.Client()},
+				Library: lib,
+			})
+			defer jobs.Close()
+
+			s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir, HTTP: nasSrv.Client()}, jobs)
+			defer s.Close()
+			gw := httptest.NewServer(s)
+			defer gw.Close()
+
+			var cfgJSON string
+			if proto == "subsonic" {
+				cfgJSON = fmt.Sprintf(`{"protocol":"subsonic","url":%q,"username":%q,"password":%q,"enabled":true}`, nasSrv.URL, dummyUser, dummyPass)
+			} else {
+				cfgJSON = fmt.Sprintf(`{"protocol":"plex","url":%q,"token":%q,"enabled":true}`, nasSrv.URL, dummyToken)
+			}
+			wCfg := httptest.NewRecorder()
+			s.handleNASConfig(wCfg, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(cfgJSON)))
+			if wCfg.Code != http.StatusOK {
+				t.Fatalf("save NAS config (%d): %s", wCfg.Code, wCfg.Body.String())
+			}
+
+			// 1. Browse playlists & tracks via gateway.
+			var plResp struct {
+				Items []map[string]any `json:"items"`
+			}
+			tidalGet(t, gw.URL, "/v1/users/1/playlists?limit=50&offset=0", 200, &plResp)
+			if len(plResp.Items) != 1 {
+				t.Fatalf("expected 1 playlist, got %+v", plResp.Items)
+			}
+			plUUID, _ := plResp.Items[0]["uuid"].(string)
+
+			var trResp struct {
+				Items []map[string]any `json:"items"`
+			}
+			tidalGet(t, gw.URL, "/v1/playlists/"+plUUID+"/tracks?limit=50&offset=0", 200, &trResp)
+			if len(trResp.Items) != 1 {
+				t.Fatalf("expected 1 track, got %+v", trResp.Items)
+			}
+			trackID := int64(trResp.Items[0]["id"].(float64))
+
+			// 2. Persisted gateway track map must not contain cover credentials.
+			s.tidal.saveTracks()
+			savedBytes, err := os.ReadFile(s.tidal.tracksPath())
+			if err != nil {
+				t.Fatalf("read saved tracks: %v", err)
+			}
+			assertNoLeak(t, "gateway-tracks.json", string(savedBytes))
+
+			// 3. Stream the track: downloads audio, embeds authenticated cover, and queues import job.
+			var pb struct {
+				Manifest string `json:"manifest"`
+			}
+			tidalGet(t, gw.URL, fmt.Sprintf("/v1/tracks/%d/playbackinfopostpaywall?audioquality=LOSSLESS&playbackmode=STREAM&assetpresentation=FULL", trackID), 200, &pb)
+			rawManifest, err := base64.StdEncoding.DecodeString(pb.Manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mf struct {
+				URLs []string `json:"urls"`
+			}
+			if err := json.Unmarshal(rawManifest, &mf); err != nil || len(mf.URLs) != 1 {
+				t.Fatalf("manifest=%s err=%v", rawManifest, err)
+			}
+			resp, err := http.Get(mf.URLs[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("stream status=%d", resp.StatusCode)
+			}
+			if coverFetched.Load() < 1 {
+				t.Fatalf("internal cover fetcher did not fetch authenticated %s cover (count=%d)", proto, coverFetched.Load())
+			}
+
+			// 4. Wait for the queued import job to finish and inspect GET /api/jobs JSON.
+			deadline := time.Now().Add(10 * time.Second)
+			var jobsBody string
+			for {
+				wJobs := httptest.NewRecorder()
+				s.listJobs(wJobs, httptest.NewRequest(http.MethodGet, "/api/jobs", nil))
+				if wJobs.Code != http.StatusOK {
+					t.Fatalf("listJobs status=%d body=%s", wJobs.Code, wJobs.Body.String())
+				}
+				jobsBody = wJobs.Body.String()
+				assertNoLeak(t, "GET /api/jobs response", jobsBody)
+				var payload struct {
+					Jobs []Job `json:"jobs"`
+				}
+				if err := json.Unmarshal(wJobs.Body.Bytes(), &payload); err != nil {
+					t.Fatalf("decode jobs: %v", err)
+				}
+				if len(payload.Jobs) >= 1 && (payload.Jobs[0].State == "done" || payload.Jobs[0].State == "error") {
+					if payload.Jobs[0].State != "done" {
+						t.Fatalf("import job ended in state=%q err=%q", payload.Jobs[0].State, payload.Jobs[0].Error)
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("timed out waiting for import job; last /api/jobs=%s", jobsBody)
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			if !strings.Contains(jobsBody, `"Cover Track"`) {
+				t.Fatalf("expected NAS job in /api/jobs response: %s", jobsBody)
+			}
+
+			// 5. Submit return value must also strip cover credentials while keeping internal CoverURL.
+			var authCover string
+			if proto == "subsonic" {
+				authCover = nasSrv.URL + "/rest/getCoverArt.view?id=art-42&u=" + dummyUser + "&p=" + dummyPass
+			} else {
+				authCover = nasSrv.URL + "/library/metadata/tr-1/thumb/42?X-Plex-Token=" + dummyToken
+			}
+			subJob, err := jobs.Submit(nasScope, providers.Track{
+				ID:       "direct-submit-1",
+				Title:    "Submitted Track",
+				Provider: proto,
+				CoverURL: authCover,
+			}, false)
+			if err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			subJSON, err := json.Marshal(subJob)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertNoLeak(t, "Jobs.Submit returned Job JSON", string(subJSON))
+			jobs.mu.Lock()
+			internalCover := jobs.items[subJob.ID].Track.CoverURL
+			jobs.mu.Unlock()
+			if internalCover != authCover {
+				t.Fatalf("internal job CoverURL was stripped: got %q, want %q", internalCover, authCover)
+			}
+		})
+	}
+
+	// Non-NAS public cover URLs must remain intact on public job copies.
+	pubJobs := NewJobs(Pipeline{Catalog: noCatalog{}})
+	defer pubJobs.Close()
+	pubJob, err := pubJobs.Submit("sess-pub", providers.Track{
+		ID:       "dz-1",
+		Title:    "Public Track",
+		Provider: "deezer",
+		CoverURL: "https://cdn-images.dzcdn.net/images/cover/abc/500x500.jpg",
+	}, false)
+	if err != nil {
+		t.Fatalf("Submit public track: %v", err)
+	}
+	if pubJob.Track.CoverURL != "https://cdn-images.dzcdn.net/images/cover/abc/500x500.jpg" {
+		t.Fatalf("public non-NAS CoverURL was altered: %q", pubJob.Track.CoverURL)
 	}
 }

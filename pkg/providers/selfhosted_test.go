@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -712,5 +713,178 @@ func TestSelfHostedErrorsRedactCredentials(t *testing.T) {
 		assertClean(t, "Playlists", err, "/music")
 		_, err = p.DownloadTrack(ctx, "sub/song.flac", t.TempDir())
 		assertClean(t, "DownloadTrack", err, "/music/sub/song.flac")
+	})
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestSelfHostedSanitizesRedirectTransportAndUpstreamErrors(t *testing.T) {
+	const (
+		dummyUser  = "dummy-nas-user"
+		dummyPass  = "dummy-nas-pass-999"
+		dummyToken = "dummy-nas-token-999"
+		redirUser  = "redir-user"
+		redirPass  = "redir-pass-999"
+		redirToken = "redir-tok-999"
+		redirPlex  = "redir-plex-999"
+	)
+	forbidden := []string{
+		dummyUser, dummyPass, dummyToken,
+		redirUser, redirPass, redirToken, redirPlex,
+		"evil.invalid", "t=", "s=", "p=", "X-Plex-Token", "?",
+		"proxy rejected", "forged=1", "\n",
+	}
+	assertSafe := func(t *testing.T, op string, err error, wantSubstrs ...string) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected error, got nil", op)
+		}
+		msg := err.Error()
+		for _, bad := range forbidden {
+			if strings.Contains(msg, bad) {
+				t.Errorf("%s error leaked %q: %s", op, bad, msg)
+			}
+		}
+		for _, want := range wantSubstrs {
+			if !strings.Contains(msg, want) {
+				t.Errorf("%s error missing %q: %s", op, want, msg)
+			}
+		}
+	}
+
+	ctx := context.Background()
+
+	t.Run("malformed-redirect-location", func(t *testing.T) {
+		redirSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Location", "http://"+redirUser+":"+redirPass+"@evil.invalid/steal%zz?u="+redirUser+"&t="+redirToken+"&s=salt&X-Plex-Token="+redirPlex)
+			w.WriteHeader(http.StatusFound)
+		}))
+		defer redirSrv.Close()
+
+		sub := NewSelfHostedProvider(NASConfig{
+			Protocol: "subsonic",
+			URL:      redirSrv.URL,
+			Username: dummyUser,
+			Password: dummyPass,
+			Enabled:  true,
+		}, redirSrv.Client())
+		_, err := sub.Playlists(ctx)
+		assertSafe(t, "subsonic Playlists", err, "/rest/getPlaylists.view", "redirect failed")
+		_, err = sub.PlaylistTracks(ctx, "pl-1")
+		assertSafe(t, "subsonic PlaylistTracks", err, "/rest/getPlaylist.view", "redirect failed")
+		_, err = sub.DownloadTrack(ctx, "tr-1", t.TempDir())
+		assertSafe(t, "subsonic DownloadTrack", err, "/rest/stream.view", "redirect failed")
+
+		plex := NewSelfHostedProvider(NASConfig{
+			Protocol: "plex",
+			URL:      redirSrv.URL,
+			Token:    dummyToken,
+			Enabled:  true,
+		}, redirSrv.Client())
+		_, err = plex.Playlists(ctx)
+		assertSafe(t, "plex Playlists", err, "/playlists", "redirect failed")
+		_, err = plex.PlaylistTracks(ctx, "pl-1")
+		assertSafe(t, "plex PlaylistTracks", err, "/playlists/pl-1/items", "redirect failed")
+		_, err = plex.DownloadTrack(ctx, "/library/parts/1/song.flac", t.TempDir())
+		assertSafe(t, "plex DownloadTrack", err, "/library/parts/1/song.flac", "redirect failed")
+
+		host := strings.TrimPrefix(redirSrv.URL, "http://")
+		dav := NewSelfHostedProvider(NASConfig{
+			Protocol: "webdav",
+			URL:      "http://" + dummyUser + ":" + dummyPass + "@" + host + "/music?X-Plex-Token=" + dummyToken,
+			Enabled:  true,
+		}, redirSrv.Client())
+		_, err = dav.Playlists(ctx)
+		assertSafe(t, "webdav Playlists", err, "/music", "redirect failed")
+		_, err = dav.DownloadTrack(ctx, "sub/song.flac", t.TempDir())
+		assertSafe(t, "webdav DownloadTrack", err, "/music/sub/song.flac", "redirect failed")
+	})
+
+	t.Run("transport-inner-error-url", func(t *testing.T) {
+		client := &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return nil, fmt.Errorf("proxy rejected %s", r.URL.String())
+			}),
+		}
+
+		sub := NewSelfHostedProvider(NASConfig{
+			Protocol: "subsonic",
+			URL:      "http://nas.local:4533",
+			Username: dummyUser,
+			Token:    dummyToken,
+			Enabled:  true,
+		}, client)
+		_, err := sub.Playlists(ctx)
+		assertSafe(t, "subsonic Playlists", err, "/rest/getPlaylists.view", "request failed")
+		_, err = sub.DownloadTrack(ctx, "tr-1", t.TempDir())
+		assertSafe(t, "subsonic DownloadTrack", err, "/rest/stream.view", "request failed")
+
+		plex := NewSelfHostedProvider(NASConfig{
+			Protocol: "plex",
+			URL:      "http://nas.local:32400",
+			Token:    dummyToken,
+			Enabled:  true,
+		}, client)
+		_, err = plex.Playlists(ctx)
+		assertSafe(t, "plex Playlists", err, "/playlists", "request failed")
+		_, err = plex.DownloadTrack(ctx, "/library/parts/1/song.flac", t.TempDir())
+		assertSafe(t, "plex DownloadTrack", err, "/library/parts/1/song.flac", "request failed")
+
+		dav := NewSelfHostedProvider(NASConfig{
+			Protocol: "webdav",
+			URL:      "http://" + dummyUser + ":" + dummyPass + "@nas.local:8080/music?X-Plex-Token=" + dummyToken,
+			Enabled:  true,
+		}, client)
+		_, err = dav.Playlists(ctx)
+		assertSafe(t, "webdav Playlists", err, "/music", "request failed")
+		_, err = dav.DownloadTrack(ctx, "sub/song.flac", t.TempDir())
+		assertSafe(t, "webdav DownloadTrack", err, "/music/sub/song.flac", "request failed")
+	})
+
+	t.Run("subsonic-upstream-error-message", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/rest/getPlaylists.view", "/rest/download.view":
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"subsonic-response":{"status":"failed","error":{"code":40,"message":"auth failed for u=%s&p=%s\nstream-sync: forged=1"}}}`, dummyUser, dummyPass)
+			case "/rest/stream.view":
+				w.Header().Set("Content-Type", "text/xml")
+				fmt.Fprintf(w, `<subsonic-response status="failed"><error code="70" message="missing track for t=%s&amp;s=salt"/></subsonic-response>`, dummyToken)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		sub := NewSelfHostedProvider(NASConfig{
+			Protocol: "subsonic",
+			URL:      srv.URL,
+			Username: dummyUser,
+			Password: dummyPass,
+			Enabled:  true,
+		}, srv.Client())
+		_, err := sub.Playlists(ctx)
+		assertSafe(t, "subsonic JSON upstream error", err, "code 40")
+		_, err = sub.DownloadTrack(ctx, "tr-1", t.TempDir())
+		assertSafe(t, "subsonic XML upstream error", err, "code 70")
+	})
+
+	t.Run("context-canceled-preserved", func(t *testing.T) {
+		canceledCtx, cancel := context.WithCancel(context.Background())
+		cancel()
+		sub := NewSelfHostedProvider(NASConfig{
+			Protocol: "subsonic",
+			URL:      "http://127.0.0.1:1",
+			Username: dummyUser,
+			Password: dummyPass,
+			Enabled:  true,
+		}, http.DefaultClient)
+		_, err := sub.Playlists(canceledCtx)
+		assertSafe(t, "subsonic canceled", err, "/rest/getPlaylists.view", "request canceled")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected errors.Is(err, context.Canceled), got %v", err)
+		}
 	})
 }
