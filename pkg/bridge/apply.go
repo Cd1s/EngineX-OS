@@ -280,7 +280,17 @@ func (w *window) rows(idx []int) []enginedb.TrackRow {
 }
 
 func (w *window) note(vt *ViewTrack, id int64, native bool) *rbstate.Track {
-	t := &rbstate.Track{Key: vt.Key, EngineID: id, Rel: vt.Rel, Refs: vt.Refs, Row: vt.Hash, Rating: vt.Track.Rating, Native: native}
+	t := &rbstate.Track{
+		Key:          vt.Key,
+		EngineID:     id,
+		Rel:          vt.Rel,
+		AnalysisPath: vt.Track.AnalysisPath,
+		ArtworkPath:  vt.Track.ArtworkPath,
+		Refs:         vt.Refs,
+		Row:          vt.Hash,
+		Rating:       vt.Track.Rating,
+		Native:       native,
+	}
 	if !native {
 		base := enginedb.FastBaseForTrack(vt.Track)
 		t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = base.Cues, base.Loops, base.Active, true
@@ -384,6 +394,10 @@ func (w *window) count() {
 		t := s.Tracks[vt.Key]
 		if t != nil {
 			t.Refs = vt.Refs // this export's IDs: a re-export renumbers them, and write-back finds rows by them
+			if t.AnalysisPath != vt.Track.AnalysisPath || t.ArtworkPath != vt.Track.ArtworkPath {
+				t.AnalysisPath, t.ArtworkPath = vt.Track.AnalysisPath, vt.Track.ArtworkPath
+				w.dirty = true
+			}
 		}
 		switch {
 		case t != nil && (t.Native || t.Perf == rbstate.PerfMissing):
@@ -635,7 +649,7 @@ func (w *window) apply(p *Plan) error {
 		for _, m := range part {
 			vt, t := &w.view.Tracks[m.New], s.Tracks[m.Old]
 			delete(s.Tracks, m.Old)
-			t.Key, t.Rel, t.Resolved, t.Refs, t.Row = vt.Key, vt.Rel, false, vt.Refs, "" // its fields follow in updateRows
+			t.Key, t.Rel, t.AnalysisPath, t.ArtworkPath, t.Resolved, t.Refs, t.Row = vt.Key, vt.Rel, vt.Track.AnalysisPath, vt.Track.ArtworkPath, false, vt.Refs, "" // its fields follow in updateRows
 			s.Tracks[vt.Key] = t
 			p.UpdateTracks = append(p.UpdateTracks, m.New)
 		}
@@ -804,7 +818,7 @@ func (w *window) updateRows(idx []int) error {
 		if err != nil {
 			return err
 		}
-		t.Row, t.Rating, t.Refs = vt.Hash, vt.Track.Rating, vt.Refs
+		t.Row, t.Rating, t.Refs, t.AnalysisPath, t.ArtworkPath = vt.Hash, vt.Track.Rating, vt.Refs, vt.Track.AnalysisPath, vt.Track.ArtworkPath
 		if changed {
 			differed++
 		}
@@ -876,7 +890,7 @@ func (w *window) applyStaged() error {
 				}
 				gone++
 			}
-			w.snap.Tracks[key] = &rbstate.Track{Key: key, Rel: vt.Rel, Refs: vt.Refs, Row: vt.Hash, Perf: rbstate.PerfMissing, Built: e.Sig}
+			w.snap.Tracks[key] = &rbstate.Track{Key: key, Rel: vt.Rel, AnalysisPath: vt.Track.AnalysisPath, ArtworkPath: vt.Track.ArtworkPath, Refs: vt.Refs, Row: vt.Hash, Perf: rbstate.PerfMissing, Built: e.Sig}
 			done = append(done, key)
 			return nil
 		case t == nil || t.EngineID == 0:

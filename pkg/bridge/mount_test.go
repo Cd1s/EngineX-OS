@@ -1311,3 +1311,80 @@ func TestFinding21MountDeadlineAndCostModel(t *testing.T) {
 		}
 	})
 }
+
+func TestMountPopulatesAnalysisAndArtworkPaths(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+	mount := filepath.Join(base, "stick")
+	testfixture.LargeExport(t, mount, 2)
+	fix3WritePlainOneLibrary(t, mount)
+	// Add artwork path on the OneLibrary content rows so both AnalysisPath and ArtworkPath are exercised.
+	onePath := filepath.Join(mount, "PIONEER", "rekordbox", "exportLibrary.db")
+	odb, err := sql.Open("sqlite", onePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := odb.Exec(`
+		ALTER TABLE content ADD COLUMN image_path varchar;
+		UPDATE content SET image_path='/PIONEER/Artwork/00001/a1.jpg' WHERE content_id=1;
+		UPDATE content SET image_path='/PIONEER/Artwork/00001/a2.jpg' WHERE content_id=2;
+	`); err != nil {
+		_ = odb.Close()
+		t.Fatal(err)
+	}
+	_ = odb.Close()
+
+	mountNow(t, mount, MountOptions{})
+
+	snap := snapshot(t, mount)
+	k1 := rbstate.FoldPath(testfixture.LargeTrackPath(1))
+	k2 := rbstate.FoldPath(testfixture.LargeTrackPath(2))
+	if tr := snap.Tracks[k1]; tr == nil || tr.AnalysisPath != "/PIONEER/USBANLZ/P001/ANLZ0000.DAT" || tr.ArtworkPath != "/PIONEER/Artwork/00001/a1.jpg" {
+		t.Fatalf("build() track 1 paths = %+v", tr)
+	}
+	if tr := snap.Tracks[k2]; tr == nil || tr.AnalysisPath != "/PIONEER/USBANLZ/P001/ANLZ0000.DAT" || tr.ArtworkPath != "/PIONEER/Artwork/00001/a2.jpg" {
+		t.Fatalf("build() track 2 paths = %+v", tr)
+	}
+
+	// Simulate an older snapshot lacking AnalysisPath/ArtworkPath (without changing export hash)
+	// and verify a mount window backfills both via count() and persists them.
+	for _, tr := range snap.Tracks {
+		tr.AnalysisPath = ""
+		tr.ArtworkPath = ""
+	}
+	snap.Stamp = "stale-stamp"
+	if err := snap.Save(dbDir(mount)); err != nil {
+		t.Fatal(err)
+	}
+	mountNow(t, mount, MountOptions{})
+
+	reloaded := snapshot(t, mount)
+	if tr := reloaded.Tracks[k1]; tr == nil || tr.AnalysisPath != "/PIONEER/USBANLZ/P001/ANLZ0000.DAT" || tr.ArtworkPath != "/PIONEER/Artwork/00001/a1.jpg" {
+		t.Fatalf("backfill track 1 paths = %+v", tr)
+	}
+	if tr := reloaded.Tracks[k2]; tr == nil || tr.AnalysisPath != "/PIONEER/USBANLZ/P001/ANLZ0000.DAT" || tr.ArtworkPath != "/PIONEER/Artwork/00001/a2.jpg" {
+		t.Fatalf("backfill track 2 paths = %+v", tr)
+	}
+
+	// Update export's AnalysisPath and ArtworkPath and verify updateRows() refreshes both.
+	odb, err = sql.Open("sqlite", onePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := odb.Exec(`
+		UPDATE content SET analysisDataFilePath='/PIONEER/USBANLZ/P002/ANLZ0001.DAT', image_path='/PIONEER/Artwork/00002/b1.jpg' WHERE content_id=1;
+	`); err != nil {
+		_ = odb.Close()
+		t.Fatal(err)
+	}
+	_ = odb.Close()
+	// Bump mtime so Stamp changes even on 1-second filesystems.
+	future := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(onePath, future, future)
+
+	mountNow(t, mount, MountOptions{})
+	updated := snapshot(t, mount)
+	if tr := updated.Tracks[k1]; tr == nil || tr.AnalysisPath != "/PIONEER/USBANLZ/P002/ANLZ0001.DAT" || tr.ArtworkPath != "/PIONEER/Artwork/00002/b1.jpg" {
+		t.Fatalf("updateRows() track 1 paths = %+v", tr)
+	}
+}

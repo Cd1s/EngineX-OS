@@ -17,9 +17,12 @@ func sampleSnapshot() *Snapshot {
 	s.Stamp = Stamp(s.Layout, s.Sources, "")
 	s.Pending = Pending{Perf: 1, Verify: true}
 	s.Tracks["contents/a/one.mp3"] = &Track{
-		Key: "contents/a/one.mp3", EngineID: 12, Rel: "Contents/A/One.mp3", Resolved: true,
-		Refs: []SourceRef{{Kind: DeviceLibrary, ID: 5, RecordHash: "aa"}, {Kind: OneLibrary, ID: 9, RecordHash: "bb"}},
-		Row:  "r1", Perf: PerfApplied, Written: []byte{1, 2, 3},
+		Key: "contents/a/one.mp3", EngineID: 12, Rel: "Contents/A/One.mp3",
+		AnalysisPath: "/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT",
+		ArtworkPath:  "/PIONEER/Artwork/00001/a1.jpg",
+		Resolved:     true,
+		Refs:         []SourceRef{{Kind: DeviceLibrary, ID: 5, RecordHash: "aa"}, {Kind: OneLibrary, ID: 9, RecordHash: "bb"}},
+		Row:          "r1", Perf: PerfApplied, Written: []byte{1, 2, 3},
 		Built: TrackSig{Rules: Rules, Row: "r1", Audio: FileSig{Rel: "Contents/A/One.mp3", Size: 1, MTimeNS: 2}, ANLZ: []FileSig{{Rel: "x.DAT", Size: 3, MTimeNS: 4}}},
 	}
 	s.Tracks["contents/b/<two>&.flac"] = &Track{Key: "contents/b/<two>&.flac", Rel: "Contents/B/<two>&.flac"}
@@ -53,7 +56,9 @@ func TestSnapshotRoundTripAndHeader(t *testing.T) {
 		t.Fatalf("round trip differs:\n%s\n%s", a, b)
 	}
 	tr, ok := got.TrackAt("../Contents/A/ONE.mp3")
-	if !ok || tr.EngineID != 12 || !tr.Built.Equal(want.Tracks["contents/a/one.mp3"].Built) {
+	if !ok || tr.EngineID != 12 || !tr.Built.Equal(want.Tracks["contents/a/one.mp3"].Built) ||
+		tr.AnalysisPath != "/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT" ||
+		tr.ArtworkPath != "/PIONEER/Artwork/00001/a1.jpg" {
 		t.Fatalf("TrackAt: %+v %v", tr, ok)
 	}
 	if ids := got.EngineIDs(); len(ids) != 1 || !ids[12] {

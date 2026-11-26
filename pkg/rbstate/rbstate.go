@@ -118,16 +118,18 @@ func (s TrackSig) Equal(o TrackSig) bool {
 
 // Track is one track of the stick's library.
 type Track struct {
-	Key      string      `json:"k"`
-	EngineID int64       `json:"id,omitempty"` // Track.id; 0 while the row is not written
-	Rel      string      `json:"p"`            // the row's path without "../"; the export's spelling until Resolved
-	Resolved bool        `json:"res,omitempty"`
-	Refs     []SourceRef `json:"refs,omitempty"`
-	Row      string      `json:"row,omitempty"` // the view hash the row was written from
-	Rating   int         `json:"rt,omitempty"`  // the rating the bridge last wrote: another one in the row is the deck's
-	Perf     PerfState   `json:"perf,omitempty"`
-	Built    TrackSig    `json:"built"`
-	Written  []byte      `json:"wr,omitempty"` // digest of grid, cues and loops as the bridge last wrote them
+	Key          string      `json:"k"`
+	EngineID     int64       `json:"id,omitempty"` // Track.id; 0 while the row is not written
+	Rel          string      `json:"p"`            // the row's path without "../"; the export's spelling until Resolved
+	AnalysisPath string      `json:"ap,omitempty"` // volume-relative rekordbox ANLZ .DAT path from the export
+	ArtworkPath  string      `json:"aw,omitempty"` // volume-relative rekordbox artwork path from the export
+	Resolved     bool        `json:"res,omitempty"`
+	Refs         []SourceRef `json:"refs,omitempty"`
+	Row          string      `json:"row,omitempty"` // the view hash the row was written from
+	Rating       int         `json:"rt,omitempty"`  // the rating the bridge last wrote: another one in the row is the deck's
+	Perf         PerfState   `json:"perf,omitempty"`
+	Built        TrackSig    `json:"built"`
+	Written      []byte      `json:"wr,omitempty"` // digest of grid, cues and loops as the bridge last wrote them
 	// Write-back's note of the row: the digest of its cues, loops and tags the export holds, and
 	// the row's lastEditTime then. A row whose time has not moved is not read.
 	Synced     []byte `json:"sy,omitempty"`
