@@ -37,6 +37,10 @@ var (
 	usbPreparingFlagMu   sync.RWMutex
 	usbPreparingFlagPath = "/run/enginex-usb-preparing"
 	writeBackCut         = func(string) {} // tests: a pull between two writes
+
+	writeBackSnapshotLoadHook func()
+	writeBackFilledReadHook   func()
+	writeBackBackupWalkHook   func()
 )
 
 func getUSBPreparingFlagPath() string {
@@ -112,12 +116,137 @@ func applyRecordHashes(snap *rbstate.Snapshot, hashes recordHashes) {
 	}
 }
 
+type fileIdent struct {
+	dev, ino uint64
+	size     int64
+	mtimeNS  int64
+}
+
+func statIdent(path string) (fileIdent, bool) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return fileIdent{}, false
+	}
+	id := fileIdent{size: st.Size(), mtimeNS: st.ModTime().UnixNano()}
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys != nil {
+		id.dev = uint64(sys.Dev)
+		id.ino = uint64(sys.Ino)
+	}
+	return id, true
+}
+
 // CueSession keeps, for a watcher, the rows its passes found in sync without reading the export
-// (they reach the snapshot with the next pass that saves it), and the stick's OneLibrary keys.
+// (they reach the snapshot with the next pass that saves it), the stick's OneLibrary keys,
+// and the parsed snapshot/backup state across idle untouched passes.
 type CueSession struct {
 	mu   sync.Mutex
 	rows map[string]noted
 	keys *rekordbox.KeyCache
+
+	snapPath       string
+	snapIdent      fileIdent
+	snap           *rbstate.Snapshot
+	byID           map[int64]*rbstate.Track
+	allSynced      bool
+	bakStampKey    string
+	bakRoot        string
+	bakRootIdent   fileIdent
+	bakKnown       bool
+	bakRepairStamp string
+	bakHasBackups  bool
+}
+
+func (s *CueSession) invalidateSnapshot() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap = nil
+	s.byID = nil
+	s.snapIdent = fileIdent{}
+	s.allSynced = false
+	s.bakKnown = false
+}
+
+func (s *CueSession) loadSnapshot(dbDir string) (*rbstate.Snapshot, map[int64]*rbstate.Track, error) {
+	path := filepath.Join(dbDir, rbstate.SnapshotName)
+	ident, ok := statIdent(path)
+	if s != nil && ok {
+		s.mu.Lock()
+		if s.snap != nil && s.snapPath == path && s.snapIdent == ident {
+			snap, byID := s.snap, s.byID
+			s.mu.Unlock()
+			return snap, byID, nil
+		}
+		s.mu.Unlock()
+	}
+	if writeBackSnapshotLoadHook != nil {
+		writeBackSnapshotLoadHook()
+	}
+	snap, err := rbstate.Load(dbDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	byID := make(map[int64]*rbstate.Track, len(snap.Tracks))
+	allSynced := true
+	for _, tr := range snap.Tracks {
+		if tr.Native || tr.EngineID == 0 {
+			continue
+		}
+		if byID[tr.EngineID] == nil {
+			byID[tr.EngineID] = tr
+		}
+		if tr.Synced == nil {
+			allSynced = false
+		}
+	}
+	if s != nil && ok {
+		s.mu.Lock()
+		s.snapPath = path
+		s.snapIdent = ident
+		s.snap = snap
+		s.byID = byID
+		s.allSynced = allSynced
+		s.mu.Unlock()
+	}
+	return snap, byID, nil
+}
+
+func (s *CueSession) repairStamp(snapStamp, backupRoot string) (string, bool) {
+	dirIdent, dirOK := statIdent(backupRoot)
+	if !dirOK {
+		if s != nil {
+			s.mu.Lock()
+			s.bakKnown = false
+			s.mu.Unlock()
+		}
+		return "", false
+	}
+	if s != nil {
+		s.mu.Lock()
+		if s.bakKnown && s.bakStampKey == snapStamp && s.bakRoot == backupRoot && s.bakRootIdent == dirIdent {
+			st, has := s.bakRepairStamp, s.bakHasBackups
+			s.mu.Unlock()
+			return st, has
+		}
+		s.mu.Unlock()
+	}
+	if writeBackBackupWalkHook != nil {
+		writeBackBackupWalkHook()
+	}
+	st, has := stickRepairStamp(snapStamp, backupRoot)
+	if s != nil {
+		s.mu.Lock()
+		s.bakKnown = true
+		s.bakStampKey = snapStamp
+		s.bakRoot = backupRoot
+		s.bakRootIdent = dirIdent
+		s.bakRepairStamp = st
+		s.bakHasBackups = has
+		s.mu.Unlock()
+	}
+	return st, has
 }
 
 func (s *CueSession) has(key string, edit int64) bool {
@@ -367,7 +496,7 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 		return "import has pending work", nil
 	}
 	dbDir := filepath.Join(p.mount, "Engine Library", "Database2")
-	snap, err := rbstate.Load(dbDir)
+	snap, byID, err := p.opts.Session.loadSnapshot(dbDir)
 	if err != nil {
 		return "snapshot is unavailable", nil
 	}
@@ -408,7 +537,7 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 	_, _ = db.ExecContext(ctx, "PRAGMA cache_size=-16384")
 
 	started := time.Now()
-	cs, err := readCandidates(ctx, db, snap, p.opts)
+	cs, err := readCandidates(ctx, db, snap, byID, p.opts)
 	if err != nil {
 		return "", err
 	}
@@ -416,7 +545,7 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 	p.phase["candidates"] = time.Since(started)
 
 	backupRoot := filepath.Join(p.mount, ".enginex-backup")
-	curRepairStamp, hasBackups := stickRepairStamp(snap.Header.Stamp, backupRoot)
+	curRepairStamp, hasBackups := p.opts.Session.repairStamp(snap.Header.Stamp, backupRoot)
 	needRepair := hasBackups && snap.Header.RepairStamp != curRepairStamp
 
 	var libs map[rbstate.LibraryKind]SourceLibrary
@@ -451,7 +580,11 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 			return "", nil
 		}
 		if cs.needSaveSynced || needRepair {
-			return "", noteWriteBackWithRepair(p.mount, nil, p.opts.Session.take(cs.insync), nil, needRepair)
+			err := noteWriteBackWithRepair(p.mount, nil, p.opts.Session.take(cs.insync), nil, needRepair)
+			if err == nil {
+				p.opts.Session.invalidateSnapshot()
+			}
+			return "", err
 		}
 		p.opts.Session.add(cs.insync)
 		return "", nil
@@ -480,7 +613,11 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 		return "", nil
 	}
 	if len(changes) == 0 && len(mdbCleanups) == 0 {
-		return "", noteWriteBackWithRepair(p.mount, nil, p.opts.Session.take(cs.insync), nil, needRepair)
+		err := noteWriteBackWithRepair(p.mount, nil, p.opts.Session.take(cs.insync), nil, needRepair)
+		if err == nil {
+			p.opts.Session.invalidateSnapshot()
+		}
+		return "", err
 	}
 	var written map[string][]rbstate.FileSig
 	var hashes recordHashes
@@ -499,6 +636,7 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 	if err := noteWriteBackWithRepair(p.mount, written, p.opts.Session.take(cs.insync), hashes, needRepair); err != nil {
 		return "", err
 	}
+	p.opts.Session.invalidateSnapshot()
 	writeBackCut("state")
 	_ = rbstate.RemoveFile(filepath.Join(dbDir, writeBackMarkName))
 	return "", nil
@@ -529,6 +667,9 @@ func validStageUUID(uuid string) bool {
 }
 
 func readFilledStage(snap *rbstate.Snapshot) map[string]filledStageRow {
+	if writeBackFilledReadHook != nil {
+		writeBackFilledReadHook()
+	}
 	out := map[string]filledStageRow{}
 	root, err := rbstate.StageRoot()
 	if err != nil || snap == nil || !validStageUUID(snap.LibraryUUID) {
@@ -757,23 +898,21 @@ func appendCandidateRow(c dbCandidate, filled map[string]filledStageRow, out *ca
 // is the one the snapshot noted with its digest is not read at all (#321: Engine's triggers date
 // every write of a row's cues, loops and tags, so an untouched track's PerformanceData pages are
 // never read). A row written without a change to them (an analysis, a grid) needs no export.
-func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, opts WriteBackOptions) (candidateSet, error) {
+func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, byID map[int64]*rbstate.Track, opts WriteBackOptions) (candidateSet, error) {
 	out := candidateSet{insync: map[string]noted{}}
-	filled := readFilledStage(snap)
 	var dirtyReads, settleReads []dbCandidate
-	rows, err := db.QueryContext(ctx, `SELECT id, COALESCE(path,''), COALESCE(lastEditTime,0) FROM Track WHERE path IS NOT NULL`)
+	rows, err := db.QueryContext(ctx, `SELECT id, COALESCE(lastEditTime,0) FROM Track WHERE path IS NOT NULL`)
 	if err != nil {
 		return out, err
 	}
 	for rows.Next() {
 		var c dbCandidate
-		var path string
-		if err = rows.Scan(&c.engineID, &path, &c.now.edit); err != nil {
+		if err = rows.Scan(&c.engineID, &c.now.edit); err != nil {
 			rows.Close()
 			return out, err
 		}
-		tr, ok := snap.TrackAt(path)
-		if !ok || tr.Native || tr.EngineID != c.engineID {
+		tr := byID[c.engineID]
+		if tr == nil || tr.Native {
 			continue
 		}
 		out.checked++
@@ -802,13 +941,23 @@ func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, opt
 	default:
 		reads = append(reads, settleReads...)
 	}
+	if len(reads) == 0 {
+		return out, nil
+	}
+	var filled map[string]filledStageRow
+	for _, c := range reads {
+		if len(c.track.Written) == 0 {
+			filled = readFilledStage(snap)
+			break
+		}
+	}
 	if len(reads) > 64 {
 		// On legacy take-overs or large dirty batches, one sequential join replaces N point lookups.
-		byID := make(map[int64]dbCandidate, len(reads))
+		byCandID := make(map[int64]dbCandidate, len(reads))
 		for _, c := range reads {
-			byID[c.engineID] = c
+			byCandID[c.engineID] = c
 		}
-		qrows, err := db.QueryContext(ctx, `SELECT t.id, COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,''), p.beatData, p.trackData, p.quickCues, p.loops, COALESCE(p.activeOnLoadLoops,0)
+		qrows, err := db.QueryContext(ctx, `SELECT t.id, COALESCE(t.path,''), COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,''), p.beatData, p.trackData, p.quickCues, p.loops, COALESCE(p.activeOnLoadLoops,0)
 			FROM Track t LEFT JOIN PerformanceData p ON p.trackId=t.id ORDER BY t.id`)
 		if err != nil {
 			return out, err
@@ -823,13 +972,17 @@ func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, opt
 			}
 			scanned++
 			var id int64
+			var tpath string
 			var c dbCandidate
-			if err = qrows.Scan(&id, &c.metadata.Genre, &c.metadata.Comment, &c.metadata.Label, &c.beatData, &c.trackData, &c.quickCues, &c.loops, &c.activeLoops); err != nil {
+			if err = qrows.Scan(&id, &tpath, &c.metadata.Genre, &c.metadata.Comment, &c.metadata.Label, &c.beatData, &c.trackData, &c.quickCues, &c.loops, &c.activeLoops); err != nil {
 				qrows.Close()
 				return out, err
 			}
-			base, ok := byID[id]
+			base, ok := byCandID[id]
 			if !ok {
+				continue
+			}
+			if trCheck, okCheck := snap.TrackAt(tpath); !okCheck || trCheck.Key != base.key || trCheck.EngineID != id {
 				continue
 			}
 			c.engineID, c.key, c.track, c.now = base.engineID, base.key, base.track, base.now
@@ -840,13 +993,17 @@ func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, opt
 		}
 	} else {
 		for _, c := range reads {
-			err = db.QueryRowContext(ctx, `SELECT COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,''), p.beatData, p.trackData, p.quickCues, p.loops, COALESCE(p.activeOnLoadLoops,0)
-				FROM Track t LEFT JOIN PerformanceData p ON p.trackId=t.id WHERE t.id=?`, c.engineID).Scan(&c.metadata.Genre, &c.metadata.Comment, &c.metadata.Label, &c.beatData, &c.trackData, &c.quickCues, &c.loops, &c.activeLoops)
+			var tpath string
+			err = db.QueryRowContext(ctx, `SELECT COALESCE(t.path,''), COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,''), p.beatData, p.trackData, p.quickCues, p.loops, COALESCE(p.activeOnLoadLoops,0)
+				FROM Track t LEFT JOIN PerformanceData p ON p.trackId=t.id WHERE t.id=?`, c.engineID).Scan(&tpath, &c.metadata.Genre, &c.metadata.Comment, &c.metadata.Label, &c.beatData, &c.trackData, &c.quickCues, &c.loops, &c.activeLoops)
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
 			}
 			if err != nil {
 				return out, err
+			}
+			if trCheck, okCheck := snap.TrackAt(tpath); !okCheck || trCheck.Key != c.key || trCheck.EngineID != c.engineID {
+				continue
 			}
 			appendCandidateRow(c, filled, &out)
 		}

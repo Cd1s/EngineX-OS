@@ -14,7 +14,7 @@ import (
 // CueWatcherForTest watches explicit mounts without consulting mountinfo.
 func CueWatcherForTest(sticks []string, quiet, retry time.Duration) *CueWatcher {
 	w := NewCueWatcher(filepath.Dir(sticks[0]))
-	w.quiet, w.retry, w.poll = quiet, retry, 100*time.Millisecond
+	w.quiet, w.retry, w.poll, w.useMountWatch = quiet, retry, 100*time.Millisecond, false
 	w.mounts = func() []string { return sticks }
 	return w
 }

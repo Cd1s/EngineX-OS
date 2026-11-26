@@ -40,14 +40,16 @@ func (w *CueWatcher) cueEjecting(mount string) bool {
 // itself, a quiet period after Engine's last write to a stick's m.db (#321).
 type CueWatcher struct {
 	quiet, retry time.Duration
-	// poll is how often the mounts and each m.db are looked at: ten times a second cost about 2 %
-	// of a deck's core with nothing to do; a second delays a pass by at most that.
-	poll     time.Duration
-	ejectDir string
-	mounts   func() []string
-	pass     func(context.Context, string, WriteBackOptions) (WriteBackResult, error)
-	mu       sync.Mutex
-	sticks   map[string]*cueStick
+	// poll is how often active sticks' m.db are looked at: stopped when 0 rekordbox sticks
+	// are mounted on Linux where /proc/self/mountinfo notifies mount/unmount via EPOLLPRI.
+	poll          time.Duration
+	ejectDir      string
+	mounts        func() []string
+	pass          func(context.Context, string, WriteBackOptions) (WriteBackResult, error)
+	useMountWatch bool
+	mountEvents   <-chan struct{}
+	mu            sync.Mutex
+	sticks        map[string]*cueStick
 }
 
 type cueStick struct {
@@ -61,7 +63,8 @@ type cueStick struct {
 
 func NewCueWatcher(mediaRoot string) *CueWatcher {
 	return &CueWatcher{quiet: CueQuiet, retry: 15 * time.Second, poll: time.Second, ejectDir: cueEjectingDir,
-		pass: WriteBackCues, mounts: func() []string { return mediaMounts(mediaRoot) }}
+		useMountWatch: true,
+		pass:          WriteBackCues, mounts: func() []string { return mediaMounts(mediaRoot) }}
 }
 
 const cueWatcherSettleBatch = 256
@@ -265,18 +268,67 @@ func (w *CueWatcher) Pass(ctx context.Context, mount string) (WriteBackResult, e
 	return w.exclusive(ctx, mount, WriteBackOptions{})
 }
 
+func (w *CueWatcher) hasSticks() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.sticks) > 0
+}
+
 func (w *CueWatcher) Run(ctx context.Context) error {
-	t := time.NewTicker(w.poll)
-	defer t.Stop()
+	evCh := w.mountEvents
+	stopWatch := func() {}
+	if evCh == nil && w.useMountWatch {
+		evCh, stopWatch = watchMountChanges(ctx)
+	}
+	defer stopWatch()
 	defer w.forget(nil)
+
+	var ticker *time.Ticker
+	var tickC <-chan time.Time
+	syncTicker := func() {
+		needTick := evCh == nil || w.hasSticks()
+		if needTick && ticker == nil {
+			ticker = time.NewTicker(w.poll)
+			tickC = ticker.C
+		} else if !needTick && ticker != nil {
+			ticker.Stop()
+			ticker = nil
+			tickC = nil
+		}
+	}
+	defer func() {
+		if ticker != nil {
+			ticker.Stop()
+		}
+	}()
+
 	w.rescan()
+	if w.hasSticks() {
+		w.tick(ctx, time.Now())
+	}
+	syncTicker()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case now := <-t.C:
+		case _, ok := <-evCh:
+			if !ok {
+				evCh = nil
+				syncTicker()
+				continue
+			}
 			w.rescan()
+			if w.hasSticks() {
+				w.tick(ctx, time.Now())
+			}
+			syncTicker()
+		case now := <-tickC:
+			if evCh == nil {
+				w.rescan()
+			}
 			w.tick(ctx, now)
+			syncTicker()
 		}
 	}
 }
