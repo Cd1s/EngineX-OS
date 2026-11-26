@@ -3812,9 +3812,10 @@ static void rbx_fill(void *db, long long track, const char *sql, int n) {
     if (result) fprintf(stderr, "engine-ui-hook: rekordbox analysis for track %lld (%lld): %s\n", track, id, result);
 }
 
-static void rbs_fill(void *db, const char *main, long long track) {
+static void rbs_fill(void *db, const char *main, long long track, int allow_ondemand) {
     analysis_filling = 1;
-    const char *result = sc_rbs_fill_track(&rbx_sqlite, db, main, track);
+    const char *result = allow_ondemand ? sc_rbs_fill_perf(&rbx_sqlite, db, main, track)
+                                        : sc_rbs_fill_track(&rbx_sqlite, db, main, track);
     analysis_filling = 0;
     if (result) fprintf(stderr, "engine-ui-hook: rekordbox stage for track %lld: %s\n", track, result);
 }
@@ -3837,11 +3838,13 @@ static int rbx_bind(void *stmt, int i, long long value) {
     if (!rc && i == 1 && value > 0 && !analysis_filling && stmt) {
         const char *sql = rbx_statement_sql(stmt);
         const int track_read = sc_shadow_analysis_bound(sql);
-        // The Track read copies isAnalyzed before a PerformanceData bind.
-        const int analysis_read = track_read || sc_rbx_analysis_bound(sql);
+        // Track WHERE t.id = ? runs on browse/SceneGraph (stage cache only, 0 IPC);
+        // PerformanceData WHERE trackId = ? runs on J:Fetchingperfo (load fallback).
+        const int perf_read = !track_read && sc_rbx_analysis_bound(sql);
+        const int analysis_read = track_read || perf_read;
         const char *drive = analysis_read && sc_rbs_enabled ? sc_rbs_drive(&rbx_sqlite, rbx_statement_db(stmt)) : NULL;
         if (drive)
-            rbs_fill(rbx_statement_db(stmt), drive, value);
+            rbs_fill(rbx_statement_db(stmt), drive, value, perf_read);
         else if (rbx_prepare_original && analysis_read)
             rbx_fill(rbx_statement_db(stmt), value, NULL, 0);
         if (shadow_analysis_enabled && track_read)
