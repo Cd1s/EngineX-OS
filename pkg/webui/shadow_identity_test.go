@@ -23,8 +23,12 @@ type identityPeer struct {
 }
 
 func (p *identityPeer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/peer/decks/1/perf" {
+		w.Write(validTestEXPF(128))
+		return
+	}
 	if r.URL.Path != "/peer/decks/1/audio" {
-		http.NotFound(w, r) // no analysis: the copy is analysed here
+		http.NotFound(w, r)
 		return
 	}
 	key := r.URL.Query().Get("key")

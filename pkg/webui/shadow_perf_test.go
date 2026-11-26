@@ -72,6 +72,10 @@ func TestShadowLegacyReusesTrackPathAcrossReloads(t *testing.T) {
 	audioCalls := map[string]int{}
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.URL.Query().Get("key")
+		if r.URL.Path == "/peer/decks/1/perf" {
+			w.Write(validTestEXPF(128))
+			return
+		}
 		if r.URL.Path == "/peer/decks/1/audio" {
 			mu.Lock()
 			audioCalls[key]++

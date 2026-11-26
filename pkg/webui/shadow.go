@@ -665,7 +665,7 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		// re-parsing paths, opening SQLite, or reading analysis files.
 		prev := prevByDeck[d.Deck]
 		reused := false
-		if prev.Deck == d.Deck && prev.rawNet == np && prev.Path != "" && (prev.rbxAnalysis == "" || prev.rbx.Source != 0 || s.tidal == nil) {
+		if prev.Deck == d.Deck && prev.rawNet == np && prev.Path != "" && (!prev.isTempFile || prev.libraryPath != "") {
 			if st, err := os.Stat(prev.Path); err == nil && st.Mode().IsRegular() && shadowIdentity(st) == prev.pathIdentity {
 				libOK := true
 				if prev.isTempFile && prev.libraryPath != "" {

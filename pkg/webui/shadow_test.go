@@ -104,6 +104,27 @@ func TestShadowDeckFromPeer(t *testing.T) {
 	defer func() { shadowDataRoot, shadowBeaconOn = "/data", true }()
 	os.MkdirAll(filepath.Join(data, migration.DataName+"/Stream"), 0o755)
 	os.WriteFile(filepath.Join(data, migration.DataName+"/Stream/a.mp3"), []byte("AUDIO"), 0o644)
+	// Seed analysed Engine library entry for a.mp3 so A serves valid analysis
+	// (shadow copies never publish bare audio for OfflineAnalyzer).
+	dbDir := filepath.Join(data, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2")
+	os.MkdirAll(dbDir, 0o755)
+	dbFile, _, seedDB := testlibrary.Create(t)
+	track := bytes.Repeat([]byte{0}, 44)
+	binary.BigEndian.PutUint64(track, 0x40e5888000000000) // 44100.0
+	overview := append(bytes.Repeat([]byte{0}, 24), 100, 50, 25, 100, 50, 25)
+	beats := []byte("GRID")
+	qc := func(b []byte) []byte { c, _ := enginedb.QCompress(b); return c }
+	if _, err := seedDB.Exec(`INSERT INTO Track (path, filename, bpmAnalyzed, isAnalyzed) VALUES ('../../../../` + migration.DataName + `/Stream/a.mp3', 'a.mp3', 128.0, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seedDB.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?`, qc(track), qc(overview), qc(beats)); err != nil {
+		t.Fatal(err)
+	}
+	if dbBytes, err := os.ReadFile(dbFile); err != nil {
+		t.Fatal(err)
+	} else if err := os.WriteFile(filepath.Join(dbDir, "m.db"), dbBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	a := httptest.NewServer(New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil))
 	defer a.Close()
