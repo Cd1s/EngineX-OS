@@ -160,7 +160,7 @@ def main():
     ra1 = db_row("A", "track-a.wav")
     try:
         wait_for(
-            lambda: (s := deck_state("B")) and abs(s["bpm"] - 64) < 0.1 and (rb := db_row("B", "track-a.wav")) and (ra := db_row("A", "track-a.wav")) and rb["beatSha"] == ra["beatSha"],
+            lambda: (s := deck_state("B")) and abs(s["bpm"] - 64) < 0.1 and (rb := db_row("B", "track-a.wav")) and (ra := db_row("A", "track-a.wav")) and rb["analyzed"] == 1 and rb["beatSha"] == ra["beatSha"],
             20,
             "B in-place update after edit 1",
         )
@@ -182,7 +182,8 @@ def main():
     print(f"EDIT1 (paused 128->64+shift): A bpm={a1['bpm']:.2f} beat={a1['beat']:.3f} | B bpm={b1['bpm']:.2f} beat={b1['beat']:.3f} diff={bd1:.3f} loads={b1['loads']} cue1={b1['cue1']:.0f} sha={rb1['beatSha']}", flush=True)
     assert b1["loads"] == 1, f"deck reloaded on edit 1: {b1}"
     assert abs(b1["firstAnchor"] - 64) < 0.1, b1
-    assert bd1 < 0.08, f"beat phase mismatch after edit 1: A={a1} B={b1} diff={bd1}"
+    # Paused BeatNumber can lag TrackPosition by one ~4410-sample (100 ms) buffer (~0.107 beats at 64 BPM).
+    assert bd1 < 0.13, f"beat phase mismatch after edit 1: A={a1} B={b1} diff={bd1}"
     assert abs(b1["cue1"] - 220500) < 2, f"hot cue lost on edit 1: {b1}"
     assert rb1["analyzed"] == 1 and rb1["beatSha"] == ra1["beatSha"], (ra1, rb1)
 
@@ -202,7 +203,7 @@ def main():
     print(f"EDIT2 (phase+anchor): A firstAnchor={a2['firstAnchor']:.2f} beat={a2['beat']:.3f} sha={ra2['beatSha']} | B firstAnchor={b2['firstAnchor']:.2f} beat={b2['beat']:.3f} diff={bd2:.3f} loads={b2['loads']} sha={rb2['beatSha']}", flush=True)
     assert b2["loads"] == 1, f"deck reloaded on edit 2: {b2}"
     assert abs(b2["firstAnchor"] - a2["firstAnchor"]) < 0.05, (a2, b2)
-    assert bd2 < 0.08, f"beat phase mismatch after edit 2: A={a2} B={b2} diff={bd2}"
+    assert bd2 < 0.13, f"beat phase mismatch after edit 2: A={a2} B={b2} diff={bd2}"
     assert abs(b2["cue1"] - 220500) < 2, f"hot cue lost on edit 2: {b2}"
 
     # 3) Live edit while A Deck 1 is PLAYING: resetGrid() restores 128 BPM single-anchor grid.
