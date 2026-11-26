@@ -661,3 +661,58 @@ func TestReviewWarmPlaybackInfo(t *testing.T) {
 		t.Fatalf("playback info of server one's track %d, looked up before the change, answered HTTP %d with server two's file cached, want 404", id1, a.code)
 	}
 }
+
+// Round 4b: an import of server one's track, accepted before the NAS moved to server
+// two and not yet run, absorbed server two's import of the same track ID (same
+// session and ID): server two's recording never reached the library.
+func TestReviewOldImportKeepsNewImport(t *testing.T) {
+	rig := newNASSwitchRig(t, withLibrary(t))
+	rig.saveNAS(rig.oneURL)
+	id1 := rig.browse()
+	hook, reached, resume := pauseOnce("run")
+	t.Cleanup(resume)
+	rig.jobs.pause = hook
+	rig.plays("server one", id1, rig.one)
+	nasWaitFor(t, reached, "server one's import job started")
+	rig.saveNAS(rig.twoURL)
+	id2 := rig.browse()
+	rig.plays("server two's row", id2, rig.two)
+	rig.jobs.mu.Lock()
+	want := rig.jobs.files[trackKey(providers.Track{Provider: "subsonic", ID: "tr-99"})].dl
+	found, n := false, len(rig.jobs.items)
+	for _, v := range rig.jobs.items {
+		found = found || (want != nil && v.dl != nil && v.dl.Path == want.Path)
+	}
+	rig.jobs.mu.Unlock()
+	if !found {
+		t.Fatalf("server two's track got no import job while server one's import was unfinished (%d jobs)", n)
+	}
+}
+
+// Round 4b: an import of server one's track accepted before the change ran after it
+// and imported server one's recording. It drops itself now: nothing is imported.
+func TestReviewOldImportDropsAfterChange(t *testing.T) {
+	rig := newNASSwitchRig(t, withLibrary(t))
+	rig.saveNAS(rig.oneURL)
+	id1 := rig.browse()
+	hook, reached, resume := pauseOnce("run")
+	t.Cleanup(resume)
+	rig.jobs.pause = hook
+	rig.plays("server one", id1, rig.one)
+	nasWaitFor(t, reached, "server one's import job started")
+	rig.saveNAS(rig.twoURL)
+	resume()
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(25 * time.Millisecond) {
+		jobs := rig.jobs.List()
+		if len(jobs) == 1 && (jobs[0].State == "done" || jobs[0].State == "error") {
+			if jobs[0].Error != errNASChanged.Error() || jobs[0].TrackID != 0 {
+				t.Fatalf("server one's import, accepted before the change, ran after it: state=%s error=%q library track=%d, want it dropped",
+					jobs[0].State, jobs[0].Error, jobs[0].TrackID)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server one's import did not finish: %+v", jobs)
+		}
+	}
+}

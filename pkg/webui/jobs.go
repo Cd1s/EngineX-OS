@@ -56,6 +56,9 @@ type Job struct {
 	// Set when the TIDAL gateway already downloaded the file for playback.
 	matched providers.Track
 	dl      *deemixclient.Download
+	// nasGen is the NAS generation the track was listed at: a NAS job of an older
+	// one imports nothing and absorbs no newer job (#335).
+	nasGen uint64
 }
 type Pipeline struct {
 	Guard   *resourceguard.Guard
@@ -272,6 +275,11 @@ func (j *Jobs) writeSources() {
 }
 
 var errNASChanged = errors.New("the NAS changed since this track was listed")
+
+// nasMoved reports whether v is a NAS job and the NAS changed since its track was listed.
+func (j *Jobs) nasMoved(v Job) bool {
+	return isNASKey(trackKey(v.Track)) && v.nasGen != j.nasGen.Load()
+}
 
 // NASGen is the NAS generation; it changes when the NAS server, share or root does.
 func (j *Jobs) NASGen() uint64 {
@@ -1072,7 +1080,7 @@ func (j *Jobs) queueImport(session string, t providers.Track, guest bool, f fetc
 			break
 		}
 	}
-	if _, err := j.submitLocked(session, t, playlist, f.matched, f.dl); err == nil {
+	if _, err := j.submitLocked(session, t, playlist, f.matched, f.dl, gen); err == nil {
 		j.queued[key] = true
 	}
 	return true
@@ -1118,17 +1126,17 @@ func (j *Jobs) SubmitFile(path, playlist string) (job Job, ok bool, err error) {
 func (j *Jobs) submitTo(session string, t providers.Track, playlist string, matched providers.Track, dl *deemixclient.Download) (Job, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return j.submitLocked(session, t, playlist, matched, dl)
+	return j.submitLocked(session, t, playlist, matched, dl, j.nasGen.Load())
 }
 
-// submitLocked is submitTo with j.mu held.
-func (j *Jobs) submitLocked(session string, t providers.Track, playlist string, matched providers.Track, dl *deemixclient.Download) (Job, error) {
+// submitLocked is submitTo with j.mu held, for a track listed at NAS generation gen.
+func (j *Jobs) submitLocked(session string, t providers.Track, playlist string, matched providers.Track, dl *deemixclient.Download, gen uint64) (Job, error) {
 	if j.ctx.Err() != nil {
 		return Job{}, errors.New("worker stopped")
 	}
 	// Bound retained history and reject duplicate active downloads.
 	for _, v := range j.items {
-		if v.SessionID == session && v.Track.ID == t.ID && (v.State == "queued" || v.State == "matching" || v.State == "downloading" || v.State == "analyzing" || v.State == "importing") {
+		if v.SessionID == session && v.Track.ID == t.ID && (v.nasGen == gen || !isNASKey(trackKey(t))) && (v.State == "queued" || v.State == "matching" || v.State == "downloading" || v.State == "analyzing" || v.State == "importing") {
 			return v, nil
 		}
 	}
@@ -1142,7 +1150,7 @@ func (j *Jobs) submitLocked(session string, t providers.Track, playlist string, 
 		delete(j.results, old)
 		j.order = j.order[1:]
 	}
-	job := Job{ID: providers.RandomID(), SessionID: session, Track: t, Playlist: playlist, State: "queued", matched: matched, dl: dl}
+	job := Job{ID: providers.RandomID(), SessionID: session, Track: t, Playlist: playlist, State: "queued", matched: matched, dl: dl, nasGen: gen}
 	j.items[job.ID] = job
 	j.order = append(j.order, job.ID)
 	select {
@@ -1195,6 +1203,12 @@ func (j *Jobs) worker() {
 	}
 }
 func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error {
+	if j.pause != nil {
+		j.pause("run")
+	}
+	if j.nasMoved(v) {
+		return errNASChanged
+	}
 	if j.p.Catalog == nil || j.p.Deemix == nil || j.p.Library == nil {
 		return errors.New("pipeline is not configured")
 	}
@@ -1247,6 +1261,9 @@ func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error 
 	}
 	if !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
 		return errors.New("download changed during analysis; retry after the downloader finishes")
+	}
+	if j.nasMoved(v) { // the NAS changed during the analysis
+		return errNASChanged
 	}
 	id, err := j.p.Library.Import(ctx, analyzer.Import{Path: dl.Path, Title: v.Track.Title, Artist: v.Track.Artist, Album: v.Track.Album, Comment: dl.Quality.Comment(), Format: audio.Format, Playlist: v.Playlist, Result: res})
 	if err != nil {
