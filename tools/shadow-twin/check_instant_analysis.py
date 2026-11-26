@@ -300,14 +300,16 @@ def build_pdb(track_specs, wav_size):
 
 
 def mount_tmpfs_in_a(vol_name: str):
+    host_dir = twin.WORK / "A/tmp/vols" / vol_name
+    host_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         twin.ns_chroot_cmd(
             "A",
-            f"mkdir -p /media/{vol_name} && mountpoint -q /media/{vol_name} || mount -t tmpfs tmpfs /media/{vol_name}",
+            f"mkdir -p /tmp/vols/{vol_name} /media/{vol_name} && (mountpoint -q /media/{vol_name} || mount --bind /tmp/vols/{vol_name} /media/{vol_name})",
         ),
         check=True,
     )
-    return twin.WORK / "A/root/media" / vol_name
+    return host_dir
 
 
 def clone_empty_engine_db(src_mdb: Path, dst_mdb: Path):
