@@ -1435,6 +1435,22 @@ func TestReviewSMBImportStemsAndSwitch(t *testing.T) {
 		t.Fatalf("root A search returned %+v, want 1 item", searchA.Tracks.Items)
 	}
 
+	// Round 3: root A spelled with a trailing or doubled slash is the same root. Its ID,
+	// stream and Stems source stay.
+	for _, same := range []string{"rootA/", "/rootA"} {
+		saveSMB(s, same)
+		if got := streamTrack(gw.URL, idA); !bytes.Equal(got, flacA) {
+			t.Fatalf("root A saved as %q: track %d no longer plays root A", same, idA)
+		}
+		var local struct {
+			Path string `json:"path"`
+		}
+		tidalGet(t, gw.URL, fmt.Sprintf("/v1/enginex/stems/local?id=%d", idA), 200, &local)
+		if local.Path != srcA.Path {
+			t.Fatalf("root A saved as %q: stems/local=%q, want %q", same, local.Path, srcA.Path)
+		}
+	}
+
 	// 2. Switch configured SMB root to root B on the same share.
 	saveSMB(s, "rootB")
 

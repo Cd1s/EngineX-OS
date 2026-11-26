@@ -180,10 +180,15 @@ func nasWaitFor(t *testing.T, ch <-chan struct{}, what string) {
 func TestNASServerChangeNeverServesTheOldServersTrack(t *testing.T) {
 	rig := newNASSwitchRig(t)
 
-	// 1. Server one plays its track.
+	// 1. Server one plays its track. Its address spelled with a trailing or doubled slash
+	// is the same NAS (round 3): the track keeps its ID and download.
 	rig.saveNAS(rig.oneURL)
 	id1 := rig.browse()
 	rig.plays("server one", id1, rig.one)
+	for _, same := range []string{rig.oneURL + "/", rig.oneURL + "//"} {
+		rig.saveNAS(same)
+		rig.plays("server one saved as "+same, id1, rig.one)
+	}
 
 	// 2. Server two has the same playlist and track IDs: its track comes from it.
 	rig.saveNAS(rig.twoURL)

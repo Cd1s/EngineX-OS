@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -336,7 +337,7 @@ func isNASProvider(p string) bool {
 // ID could otherwise name the new root's file at the same path, or a new ID
 // play the old root's file (#335).
 func (s *Server) resetNASIfMoved(before providers.NASConfig) {
-	if now := s.loadNASConfig(); now.Protocol != before.Protocol || now.URL != before.URL {
+	if nasTarget(s.loadNASConfig()) != nasTarget(before) {
 		s.jobs.resetNAS()
 		s.resetNASStems()
 		s.tidal.resetNAS()
@@ -345,6 +346,21 @@ func (s *Server) resetNASIfMoved(before providers.NASConfig) {
 
 // gatewayProvider: an SMB NAS is its own source (#335); WebDAV, Subsonic and
 // Plex keep their released place, the [NAS] playlists inside OmniSource.
+// nasTarget is what NAS settings point at: protocol, host, effective port, share
+// and root. A trailing or doubled slash does not count; the case of path
+// components does.
+func nasTarget(cfg providers.NASConfig) string {
+	u, err := url.Parse(strings.TrimSpace(cfg.URL))
+	if err != nil || u.Host == "" {
+		return cfg.Protocol + "\x00" + cfg.URL
+	}
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"smb": "445", "http": "80", "https": "443"}[u.Scheme]
+	}
+	return strings.Join([]string{strings.ToLower(cfg.Protocol), u.Scheme, strings.ToLower(u.Hostname()), port, path.Clean("/" + u.Path)}, "\x00")
+}
+
 func gatewayProvider(p string) string {
 	if p == "smb" {
 		return nasScope
