@@ -1875,13 +1875,13 @@ static void test_shadow_regrid_native(const char *build_name, const char *off, i
     snprintf(peer, sizeof peer, "%s/peer-a", dir);
     snprintf(sock, sizeof sock, "%s/regrid.sock", dir);
     assert(!mkdir(peer, 0755));
-    FILE *f = fopen(board, "wb"); assert(f); fwrite("inmusic,jp07\0", 1, 13, f); fclose(f);
-    if (*off) { f = fopen(conf, "wb"); assert(f); fprintf(f, "%s\n", off); fclose(f); }
-    board_compatible_path = board;
-    hf_conf_path = conf;
+    analysis_file(board, "JP07", 4);
+    if (*off) analysis_file(conf, off, strlen(off));
+    hf_path = conf;
+    hf_reload();
+    product_code_path = board;
     sc_shadow_root = dir;
     shadow_regrid_sock_path = sock;
-    hf_loaded = 0; hf_disabled = 0;
     const uint32_t add_prefix[] = {0xe16d42f4, 0xe1cd81f0};
     memcpy(image + add_tracks, add_prefix, sizeof add_prefix);
     *(uintptr_t *)(image + vtable + 0x00) = base + meta_fn;
