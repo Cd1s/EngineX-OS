@@ -801,8 +801,8 @@ def main():
                     "name": "rekordbox",
                     "number": 17,
                     "address": "127.0.0.1",
-                    "kind": "rekordbox",
-                    "lastSeen": now_iso,
+                    "packet_type": 41,
+                    "last_seen": now_iso,
                 }],
             })
             for ppath in (
@@ -828,6 +828,13 @@ def main():
         ready_line = prolink_proc.stdout.readline().strip()
         assert ready_line.startswith("READY "), f"mock prolink server failed: {ready_line!r} {prolink_proc.stderr.read() if prolink_proc.poll() is not None else ''}"
         ns_curl("A", "/v1/enginex/ui?prolinkShare=1&rekordboxShare=/", method="POST")
+
+        def prolink_logged_in():
+            refresh_prolink_snap()
+            ui = json.loads(ns_curl("A", "/v1/enginex/ui"))
+            return "rekordbox" in (ui.get("loggedIn") or [])
+
+        wait_for(prolink_logged_in, timeout=15, label="A Pro DJ Link rekordbox presence")
         ns_curl("A", "/v1/enginex/ui?scope=rekordbox", method="POST")
 
         # Browse Pro DJ Link Tracks playlist through real tidal_gateway so stream-sync assigns gateway IDs!
@@ -914,6 +921,7 @@ def main():
                 deck_obj = {"deck": 1, "net": f"net://src-uuid/RB_MDB/Contents/RBMDB/{fname}", "bpm": 128}
             elif source_name == "prolink":
                 refresh_prolink_snap()
+                ns_curl("A", "/v1/enginex/ui")
                 fname = f"prolink-{t_ms}.wav"
                 gid = prolink_gids[f"ProLink {t_ms}"]
                 # Trigger real rbxPrepare (+ rbxWriteAnalysis; 0ms & 100ms keep rbxAnalysing running past 3 s wait).
