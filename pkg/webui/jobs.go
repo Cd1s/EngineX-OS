@@ -266,7 +266,9 @@ func (j *Jobs) saveSource(key, path string) {
 
 // writeSources stores the source index owner-only and atomically; j.mu must be held.
 func (j *Jobs) writeSources() {
-	_ = providers.SaveJSON(filepath.Join(j.p.Deemix.DownloadDir, sourcesFile), j.sources)
+	if err := providers.SaveJSON(filepath.Join(j.p.Deemix.DownloadDir, sourcesFile), j.sources); err != nil {
+		log.Printf("webui: source index not saved (%T)", err)
+	}
 }
 
 var errNASChanged = errors.New("the NAS changed since this track was listed")
