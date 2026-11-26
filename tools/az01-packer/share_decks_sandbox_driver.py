@@ -151,20 +151,21 @@ def engine_pid():
     return 0
 
 
+def ticks(path):
+    """utime + stime of a /proc stat file, in clock ticks."""
+    f = open(path).read()
+    fields = f[f.rindex(")") + 2:].split()
+    return int(fields[11]) + int(fields[12])
+
+
 def cpu(pid):
-    total, main, threads = 0, 0, 0
+    """The process's CPU time from /proc/<pid>/stat (the whole thread group, threads that exited included: a sum over
+    the live tasks would drop those and could go down), its main thread's (the GUI thread), and its thread count."""
+    total = main = threads = 0
     try:
-        for tid in os.listdir("/proc/%d/task" % pid):
-            try:
-                f = open("/proc/%d/task/%s/stat" % (pid, tid)).read()
-            except OSError:
-                continue
-            fields = f[f.rindex(")") + 2:].split()
-            ticks = int(fields[11]) + int(fields[12])  # utime + stime
-            total += ticks
-            threads += 1
-            if int(tid) == pid:
-                main = ticks
+        total = ticks("/proc/%d/stat" % pid)
+        main = ticks("/proc/%d/task/%d/stat" % (pid, pid))
+        threads = len(os.listdir("/proc/%d/task" % pid))
     except OSError:
         pass
     return total, main, threads

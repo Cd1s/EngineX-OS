@@ -175,11 +175,13 @@ def rate(a, b, key):
 phases = (("no ask, playing", 3, 14), ("asked, playing", 17, 24), ("asked, later", 36, 44), ("after the asks", 57, 65.5),
           ("asked again", 68, 75.5), ("row off", 79, 89))
 print("cost (% of one core: Engine all threads / Engine GUI thread / player stream-sync / console stream-sync):")
-complete = True
+complete = sane = True
 for name, a, b in phases:
     vals = [rate(a, b, k) for k in ("cpu", "gui", "sync", "csync")]
     complete = complete and all(v is not None for v in vals)
+    sane = sane and all(v is None or v >= 0 for v in vals)
     print("  COST|%s|%s" % (name, "|".join(str(v) for v in vals)))
 check(complete, "CPU time was sampled for every phase and process")
+check(sane, "no CPU rate is negative (a fault of the measurement, not a cost)")
 print("RESULT|%s|%d failures" % ("PASS" if not failures else "FAIL", len(failures)))
 sys.exit(1 if failures else 0)
