@@ -1051,6 +1051,10 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	// without what the poll has (the hook's state among it) took that away until the next
 	// poll that applies, 3 to 30 s later, and a paused shadow copy played for that long.
 	if r.URL.Path == "/v1/enginex/ui" {
+		featuresOff := runningFeaturesOff()
+		if featuresOff == nil {
+			featuresOff = []string{}
+		}
 		pausedFollow := runningFeatureOn("shadow-paused-follow")
 		if s.shadow != nil {
 			s.shadow.pausedFollow.Store(pausedFollow)
@@ -1062,12 +1066,13 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 			Tunnel     TunnelStatus `json:"tunnel"`
 			// LANStems: the home legacy-stemsd last seen, for Settings -> About (#148).
 			LANStems *stems.LANState `json:"lanStems,omitempty"`
-			// FeaturesOff: hook features the running Engine has off; QML hides their
-			// rows. Absent when unknown: every row stays.
-			FeaturesOff []string `json:"featuresOff,omitempty"`
-			// ShadowPausedFollow: the running hook moves a paused shadow deck's line.
-			ShadowPausedFollow bool `json:"shadowPausedFollow,omitempty"`
-		}{v, s.cfg.AccessToken, consoleLink, s.TunnelManager().Status(""), relay.LANStems, runningFeaturesOff(), pausedFollow})
+			// FeaturesOff: hook features the running Engine has off; always sent
+			// (empty [] when none or unknown) so a running UI clears stale entries.
+			FeaturesOff []string `json:"featuresOff"`
+			// ShadowPausedFollow: the running hook moves a paused shadow deck's line;
+			// always sent (also false) so a running UI clears stale true state.
+			ShadowPausedFollow bool `json:"shadowPausedFollow"`
+		}{v, s.cfg.AccessToken, consoleLink, s.TunnelManager().Status(""), relay.LANStems, featuresOff, pausedFollow})
 		if err != nil {
 			fail(w, http.StatusInternalServerError, err)
 			return

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -161,6 +162,11 @@ func TestUDPPingPongMeasuresTransitIndependentOfSlowHTTP(t *testing.T) {
 	b := newShadowState()
 	bPort := bConn.LocalAddr().(*net.UDPAddr).Port
 
+	t0 := time.Now()
+	// Register peers via valid discovery beacons so echo replies are permitted.
+	a.receive([]byte("EngineX-shadow 1"), "127.0.0.1", t0)
+	b.receive([]byte("EngineX-shadow 1"), "127.0.0.1", t0)
+
 	// Drive one real UDP ping -> peer handleUDP echo -> sender handleUDP pong with
 	// synthetic 4 ms RTT (2 ms one-way), plus an initial 30 ms spike that converges down.
 	exchange := func(tSend time.Time, rtt time.Duration) {
@@ -181,7 +187,6 @@ func TestUDPPingPongMeasuresTransitIndependentOfSlowHTTP(t *testing.T) {
 		a.handleUDP(aConn, buf[:n], fromB, tSend.Add(rtt))
 	}
 
-	t0 := time.Now()
 	// Cold peer before first pong: halfRTT must be 0.
 	if got := a.peerHalfRTT("127.0.0.1", t0); got != 0 {
 		t.Fatalf("cold peerHalfRTT = %v, want 0", got)
@@ -233,12 +238,12 @@ func TestUDPPingPongMeasuresTransitIndependentOfSlowHTTP(t *testing.T) {
 		t.Fatalf("warm UDP copy pos = %.3f ms, want ~5002.0 ms", gotPos)
 	}
 
-	// Pruning the peer clears RTT and pending UDP ping state.
+	// Pruning the peer clears RTT and echo peer state.
 	a.mu.Lock()
 	a.peers["127.0.0.1"] = t0
 	a.prunePeers(t0.Add(shadowPeerSeenTimeout + 2*time.Second))
-	if len(a.peerRTT) != 0 || len(a.udpPings) != 0 || len(a.udpPingTries) != 0 {
-		t.Fatalf("prunePeers left UDP RTT state: rtt=%v pings=%v tries=%v", a.peerRTT, a.udpPings, a.udpPingTries)
+	if p := a.findEchoPeer("127.0.0.1"); p != nil {
+		t.Fatalf("prunePeers left UDP echo peer state: %+v", p)
 	}
 	a.mu.Unlock()
 }
@@ -295,8 +300,8 @@ func TestPeerHalfRTTCompensatesMinTransitAndBoundsOutliers(t *testing.T) {
 		t.Fatalf("stale halfRTT = %v, want 0", got)
 	}
 	sh2.prunePeers(t0.Add(shadowPeerSeenTimeout + time.Second))
-	if len(sh2.peerRTT) != 0 {
-		t.Fatalf("peerRTT not pruned: %+v", sh2.peerRTT)
+	if p := sh2.findEchoPeer("192.0.2.8"); p != nil {
+		t.Fatalf("peerRTT not pruned: %+v", p)
 	}
 }
 
@@ -412,5 +417,259 @@ func TestUIGetSyncsPausedFollowWithoutLoopPolling(t *testing.T) {
 	s.ServeHTTP(w, req)
 	if w.Code != http.StatusOK || s.shadow.pausedFollow.Load() {
 		t.Fatalf("GET /v1/enginex/ui did not sync pausedFollow=false: code=%d pausedFollow=%v", w.Code, s.shadow.pausedFollow.Load())
+	}
+}
+
+func TestUDPEchoKnownPeersOnlyRateLimitedAndLockFree(t *testing.T) {
+	aConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aConn.Close()
+	bConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bConn.Close()
+
+	a := newShadowState()
+	b := newShadowState()
+	aAddr := aConn.LocalAddr().(*net.UDPAddr)
+	bAddr := bConn.LocalAddr().(*net.UDPAddr)
+	t0 := time.Now()
+
+	readReply := func(conn *net.UDPConn, wait time.Duration) (string, bool) {
+		buf := make([]byte, 128)
+		conn.SetReadDeadline(time.Now().Add(wait))
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			return "", false
+		}
+		return string(buf[:n]), true
+	}
+
+	// 1. Unknown peer ping must be dropped (no echo reply).
+	b.handleUDP(bConn, []byte(shadowPingMagic+"1a2b"), aAddr, t0)
+	if got, ok := readReply(aConn, 40*time.Millisecond); ok {
+		t.Fatalf("answered UDP ping from unknown peer: %q", got)
+	}
+
+	// 2. Known peer gets a reply, bounded to at most one reply per reply gap.
+	b.receive([]byte("EngineX-shadow 1"), "127.0.0.1", t0)
+	b.handleUDP(bConn, []byte(shadowPingMagic+"1111"), aAddr, t0)
+	if got, ok := readReply(aConn, 200*time.Millisecond); !ok || got != shadowPongMagic+"1111" {
+		t.Fatalf("known peer first ping reply = (%q, %v), want %q", got, ok, shadowPongMagic+"1111")
+	}
+	// Rapid flood within 200 ms must be dropped.
+	for _, off := range []time.Duration{10 * time.Millisecond, 50 * time.Millisecond, 150 * time.Millisecond} {
+		b.handleUDP(bConn, []byte(shadowPingMagic+"2222"), aAddr, t0.Add(off))
+	}
+	if got, ok := readReply(aConn, 40*time.Millisecond); ok {
+		t.Fatalf("rate-limited UDP ping was answered: %q", got)
+	}
+	// After the reply interval elapses, a known peer is answered again.
+	b.handleUDP(bConn, []byte(shadowPingMagic+"3333"), aAddr, t0.Add(250*time.Millisecond))
+	if got, ok := readReply(aConn, 200*time.Millisecond); !ok || got != shadowPongMagic+"3333" {
+		t.Fatalf("post-interval ping reply = (%q, %v), want %q", got, ok, shadowPongMagic+"3333")
+	}
+
+	// 3. Receive path (both ping reply and pong handling) must be lock-free under sh.mu.
+	a.receive([]byte("EngineX-shadow 1"), "127.0.0.1", t0.Add(500*time.Millisecond))
+	tSend := t0.Add(500 * time.Millisecond)
+	a.sendUDPPing(aConn, "127.0.0.1", bAddr.Port, tSend)
+	pingPkt, ok := readReply(bConn, 200*time.Millisecond)
+	if !ok {
+		t.Fatal("did not receive sent UDP ping")
+	}
+
+	done := make(chan struct{})
+	a.mu.Lock()
+	b.mu.Lock()
+	go func() {
+		defer close(done)
+		b.handleUDP(bConn, []byte(pingPkt), aAddr, tSend.Add(2*time.Millisecond))
+		pongPkt, ok := readReply(aConn, 100*time.Millisecond)
+		if ok {
+			a.handleUDP(aConn, []byte(pongPkt), bAddr, tSend.Add(4*time.Millisecond))
+		}
+	}()
+	select {
+	case <-done:
+		b.mu.Unlock()
+		a.mu.Unlock()
+	case <-time.After(250 * time.Millisecond):
+		b.mu.Unlock()
+		a.mu.Unlock()
+		<-done
+		t.Fatal("UDP ping/pong receive path blocked on sh.mu (not lock-free)")
+	}
+	if got := a.peerHalfRTT("127.0.0.1", tSend.Add(4*time.Millisecond)); math.Abs(got-2.0) > 0.1 {
+		t.Fatalf("lock-free pong halfRTT = %.3f ms, want ~2.0 ms", got)
+	}
+
+	// 4. Pruned peer is no longer eligible for UDP echo replies.
+	b.mu.Lock()
+	b.prunePeers(tSend.Add(shadowPeerSeenTimeout + time.Second))
+	b.mu.Unlock()
+	b.handleUDP(bConn, []byte(shadowPingMagic+"4444"), aAddr, tSend.Add(shadowPeerSeenTimeout+time.Second))
+	if got, ok := readReply(aConn, 40*time.Millisecond); ok {
+		t.Fatalf("answered UDP ping from pruned peer: %q", got)
+	}
+}
+
+func TestPausedFollowWireAndSuiteLifecycle(t *testing.T) {
+	oldState, oldDisable, oldAlive := hookFeatureStatePath, hookDisablePath, engineAlive
+	dir := t.TempDir()
+	stateFile := filepath.Join(dir, "hook-features")
+	disableFile := filepath.Join(dir, "hook-disable.conf")
+	hookFeatureStatePath = stateFile
+	hookDisablePath = disableFile
+	livePID := 4242
+	engineAlive = func(pid int) bool { return pid == livePID }
+	defer func() {
+		hookFeatureStatePath, hookDisablePath, engineAlive = oldState, oldDisable, oldAlive
+	}()
+
+	uiDir := filepath.Join(dir, "ui")
+	stateDir := filepath.Join(dir, "state")
+
+	// Model the exact QML semantics in tools/ui-mod/build_packs.py:
+	//   if (Array.isArray(v.featuresOff)) scFeaturesOff = v.featuresOff
+	//   if (v.shadowPausedFollow !== undefined) scHookFollows = v.shadowPausedFollow === true
+	//   scPausedShadowFollow = scHookFollows && !scOff("shadow-paused-follow")
+	type qmlUI struct {
+		featuresOff []string
+		hookFollows bool
+	}
+	apply := func(ui *qmlUI, raw []byte) map[string]any {
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal /v1/enginex/ui: %v (%s)", err, raw)
+		}
+		if rawOff, ok := m["featuresOff"]; ok {
+			if arr, ok := rawOff.([]any); ok {
+				off := make([]string, 0, len(arr))
+				for _, item := range arr {
+					if s, ok := item.(string); ok {
+						off = append(off, s)
+					}
+				}
+				ui.featuresOff = off
+			}
+		}
+		if rawFollow, ok := m["shadowPausedFollow"]; ok {
+			b, _ := rawFollow.(bool)
+			ui.hookFollows = b
+		}
+		return m
+	}
+	uiPausedFollow := func(ui *qmlUI) bool {
+		return ui.hookFollows && !slices.Contains(ui.featuresOff, "shadow-paused-follow")
+	}
+
+	callUI := func(s *Server, method, target string, ui *qmlUI, want bool, step string) {
+		t.Helper()
+		req := httptest.NewRequest(method, target, nil)
+		req.RemoteAddr = "127.0.0.1:4000"
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s (%s %s): status=%d body=%s", step, method, target, w.Code, w.Body.String())
+		}
+		m := apply(ui, w.Body.Bytes())
+		if _, ok := m["shadowPausedFollow"]; !ok {
+			t.Fatalf("%s (%s): wire JSON omitted explicit shadowPausedFollow: %s", step, method, w.Body.String())
+		}
+		rawOff, ok := m["featuresOff"]
+		if !ok {
+			t.Fatalf("%s (%s): wire JSON omitted explicit featuresOff: %s", step, method, w.Body.String())
+		}
+		if _, isArr := rawOff.([]any); !isArr {
+			t.Fatalf("%s (%s): wire JSON featuresOff is not array (%T): %s", step, method, rawOff, w.Body.String())
+		}
+		gotUI := uiPausedFollow(ui)
+		gotSuite := s.shadow.pausedFollow.Load()
+		if gotUI != want || gotSuite != want {
+			t.Fatalf("%s (%s): UI=%v suite=%v, want both %v (body=%s)", step, method, gotUI, gotSuite, want, w.Body.String())
+		}
+	}
+
+	newSrv := func() *Server {
+		return New(Config{UIDir: uiDir, StateDir: stateDir}, nil)
+	}
+
+	// 1. Fresh UI with feature ON, persist a setting so reboot persistence is exercised too.
+	if err := os.WriteFile(stateFile, []byte("pid=4242\nbuild=\noff=\non=shadow-paused-follow\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newSrv()
+	ui := &qmlUI{}
+	callUI(s, http.MethodGet, "/v1/enginex/ui", ui, true, "initial on")
+	callUI(s, http.MethodPost, "/v1/enginex/ui?fourDeckWaveform=1", ui, true, "post on")
+
+	// 2. Toggle OFF while UI stays warm: wire must explicitly send shadowPausedFollow:false.
+	if err := os.WriteFile(stateFile, []byte("pid=4242\nbuild=\noff=shadow-paused-follow\non=shadow-paused-follow\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	callUI(s, http.MethodGet, "/v1/enginex/ui", ui, false, "warm toggle off")
+	callUI(s, http.MethodPost, "/v1/enginex/ui?fourDeckWaveform=1", ui, false, "warm post off")
+
+	// 3. Re-enable while UI stays warm: wire must explicitly send featuresOff:[] so UI clears stale off entry.
+	if err := os.WriteFile(stateFile, []byte("pid=4242\nbuild=\noff=\non=shadow-paused-follow\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	callUI(s, http.MethodGet, "/v1/enginex/ui", ui, true, "warm toggle back on")
+
+	// 4. stream-sync re-creation with the same warm UI (both ON and OFF states).
+	s.Close()
+	s = newSrv()
+	callUI(s, http.MethodGet, "/v1/enginex/ui", ui, true, "after stream-sync recreate (on)")
+	if err := os.WriteFile(stateFile, []byte("pid=4242\nbuild=\noff=shadow-paused-follow\non=\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s = newSrv()
+	callUI(s, http.MethodGet, "/v1/enginex/ui", ui, false, "after stream-sync recreate (off)")
+
+	// 5. Fresh UI with feature ON, then hook-state file disappears: wire must explicitly send false + [].
+	if err := os.WriteFile(stateFile, []byte("pid=4242\nbuild=\noff=\non=shadow-paused-follow\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ui = &qmlUI{}
+	callUI(s, http.MethodGet, "/v1/enginex/ui", ui, true, "fresh ui on before removal")
+	if err := os.Remove(stateFile); err != nil {
+		t.Fatal(err)
+	}
+	callUI(s, http.MethodGet, "/v1/enginex/ui", ui, false, "hook-state removed while ui warm")
+
+	// 6. Reboot-like restart: new Engine PID, fresh stream-sync, fresh UI, persisted uiSettings intact.
+	s.Close()
+	livePID = 9001
+	for _, tc := range []struct {
+		name  string
+		state string
+		want  bool
+	}{
+		{"reboot off", "pid=9001\nbuild=\noff=shadow-paused-follow\non=\n", false},
+		{"reboot on", "pid=9001\nbuild=\noff=\non=shadow-paused-follow\n", true},
+	} {
+		if err := os.WriteFile(stateFile, []byte(tc.state), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		s = newSrv()
+		freshUI := &qmlUI{}
+		callUI(s, http.MethodGet, "/v1/enginex/ui", freshUI, tc.want, tc.name)
+		// Verify persisted fourDeckWaveform setting survived the reboot-like restart.
+		req := httptest.NewRequest(http.MethodGet, "/v1/enginex/ui", nil)
+		req.RemoteAddr = "127.0.0.1:4000"
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		var persisted struct {
+			FourDeckWaveform bool `json:"fourDeckWaveform"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &persisted); err != nil || !persisted.FourDeckWaveform {
+			t.Fatalf("%s: persisted fourDeckWaveform lost: %s", tc.name, w.Body.String())
+		}
+		s.Close()
 	}
 }
