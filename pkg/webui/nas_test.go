@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/internal/testaudio"
+	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
 	"github.com/Cd1s/EngineX-OS/internal/testsmb"
 	"github.com/Cd1s/EngineX-OS/pkg/analyzer"
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
@@ -1252,5 +1254,271 @@ func TestNASSMBLegacyConfigPreservesPasswordAndMasksMalformedURL(t *testing.T) {
 	}
 	if strings.Contains(wBad.Body.String(), malformedPass) || strings.Contains(wBad.Body.String(), "alice:"+malformedPass+"@") {
 		t.Fatalf("GET /api/nas leaked malformed credentialed URL: %s", wBad.Body.String())
+	}
+}
+
+// The review's reproduction (#335 round 2): after the SMB root moved from A to B on the
+// same share, root A's IDs, search hits, download, database import and Stems source must
+// not answer for root B's file at the same relative path.
+func TestReviewSMBImportStemsAndSwitch(t *testing.T) {
+	smbSrv := testsmb.Start(t)
+
+	makeFLAC := func(seconds int) []byte {
+		var buf bytes.Buffer
+		if err := testaudio.FLAC(&buf, testaudio.Song(seconds)); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+	flacA := makeFLAC(4)
+	flacB := makeFLAC(6)
+	if bytes.Equal(flacA, flacB) {
+		t.Fatal("test fixtures must differ")
+	}
+
+	for _, tc := range []struct {
+		root string
+		data []byte
+	}{
+		{"rootA", flacA},
+		{"rootB", flacB},
+	} {
+		dir := filepath.Join(smbSrv.Root, tc.root, "Sets")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SameTrack.flac"), tc.data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(smbSrv.Root, "rootA", "RootOnlyA.mp3"), testMP3(120), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath, libRoot, db := testlibrary.Create(t)
+	lib, err := analyzer.OpenLibrary(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+
+	uiDir, stateDir := t.TempDir(), t.TempDir()
+	dlDir := filepath.Join(libRoot, "stream-cache")
+	if err := os.MkdirAll(dlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("sources=\nscope=\nomni_source=0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	newStack := func() (*Jobs, *Server, *httptest.Server) {
+		jobs := NewJobs(Pipeline{
+			Guard:   resourceguard.New(resourceguard.Config{Disabled: true}),
+			Catalog: noCatalog{},
+			Deemix:  &deemixclient.Client{DownloadDir: dlDir, AllowLossy: false},
+			Library: lib,
+		})
+		s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, jobs)
+		gw := httptest.NewServer(s)
+		return jobs, s, gw
+	}
+
+	jobs, s, gw := newStack()
+	closed1 := false
+	close1 := func() {
+		if !closed1 {
+			closed1 = true
+			gw.Close()
+			s.Close()
+			jobs.Close()
+		}
+	}
+	t.Cleanup(close1)
+
+	saveSMB := func(srv *Server, root string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"protocol":"smb","url":%q,"username":%q,"password":%q,"enabled":true}`,
+			smbSrv.URL+"/"+root, smbSrv.User, smbSrv.Password)
+		w := httptest.NewRecorder()
+		srv.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/api/nas", strings.NewReader(body)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("save SMB %s failed (%d): %s", root, w.Code, w.Body.String())
+		}
+	}
+
+	browseSetsTrack := func(baseURL string) (string, int64, bool) {
+		t.Helper()
+		var lists struct {
+			Items []map[string]any `json:"items"`
+		}
+		tidalGet(t, baseURL, "/v1/users/1/playlists?limit=50&offset=0", 200, &lists)
+		var setsUUID string
+		hasStems := false
+		for _, it := range lists.Items {
+			switch it["title"] {
+			case "Sets":
+				setsUUID, _ = it["uuid"].(string)
+			case "Stems":
+				hasStems = true
+			}
+		}
+		if setsUUID == "" {
+			t.Fatalf("missing Sets playlist: %+v", lists.Items)
+		}
+		var tracks struct {
+			Items []map[string]any `json:"items"`
+		}
+		tidalGet(t, baseURL, "/v1/playlists/"+setsUUID+"/tracks?limit=50&offset=0", 200, &tracks)
+		if len(tracks.Items) != 1 || tracks.Items[0]["title"] != "SameTrack" {
+			t.Fatalf("unexpected Sets tracks: %+v", tracks.Items)
+		}
+		return setsUUID, int64(tracks.Items[0]["id"].(float64)), hasStems
+	}
+
+	streamTrack := func(baseURL string, id int64) []byte {
+		t.Helper()
+		var pb struct {
+			Manifest string `json:"manifest"`
+		}
+		tidalGet(t, baseURL, fmt.Sprintf("/v1/tracks/%d/playbackinfopostpaywall?audioquality=LOSSLESS&playbackmode=STREAM&assetpresentation=FULL", id), 200, &pb)
+		rawManifest, err := base64.StdEncoding.DecodeString(pb.Manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var mf struct {
+			Codecs string   `json:"codecs"`
+			URLs   []string `json:"urls"`
+		}
+		if err := json.Unmarshal(rawManifest, &mf); err != nil || mf.Codecs != "flac" || len(mf.URLs) != 1 {
+			t.Fatalf("manifest=%s err=%v", rawManifest, err)
+		}
+		resp, err := http.Get(mf.URLs[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("stream %d status=%d", id, resp.StatusCode)
+		}
+		return data
+	}
+
+	waitImportedCount := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			var count int
+			if err := db.QueryRow("SELECT COUNT(*) FROM Track WHERE title = 'SameTrack'").Scan(&count); err == nil && count >= want {
+				return
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		var count int
+		_ = db.QueryRow("SELECT COUNT(*) FROM Track WHERE title = 'SameTrack'").Scan(&count)
+		t.Fatalf("Engine DB imported track count=%d, want >=%d (jobs=%+v)", count, want, jobs.List())
+	}
+
+	// 1. Configure root A, select standalone NAS, browse, stream exact FLAC A, import to DB, prepare Stems.
+	saveSMB(s, "rootA")
+	if code, updated := uiPost(t, gw.URL, "scope=nas"); code != http.StatusOK || updated.Scope != nasScope {
+		t.Fatalf("scope=nas failed: code=%d scope=%q", code, updated.Scope)
+	}
+	uuidA, idA, _ := browseSetsTrack(gw.URL)
+	gotA := streamTrack(gw.URL, idA)
+	if !bytes.Equal(gotA, flacA) {
+		t.Fatalf("root A stream bytes mismatch: got=%d want=%d", len(gotA), len(flacA))
+	}
+	waitImportedCount(1)
+
+	var srcA struct {
+		Path string `json:"path"`
+	}
+	tidalGet(t, gw.URL, fmt.Sprintf("/v1/enginex/stems/source?id=%d", idA), 200, &srcA)
+	if st, err := os.Stat(srcA.Path); err != nil || !st.Mode().IsRegular() {
+		t.Fatalf("root A stems source missing: %q %v", srcA.Path, err)
+	}
+	var localA struct {
+		Path string `json:"path"`
+	}
+	tidalGet(t, gw.URL, fmt.Sprintf("/v1/enginex/stems/local?id=%d", idA), 200, &localA)
+	if localA.Path != srcA.Path {
+		t.Fatalf("root A stems/local=%q, want %q", localA.Path, srcA.Path)
+	}
+	_, _, hasStemsA := browseSetsTrack(gw.URL)
+	if !hasStemsA {
+		t.Fatal("root A NAS Stems list missing after stems/source")
+	}
+	var searchA struct {
+		Tracks struct {
+			Items []map[string]any `json:"items"`
+		} `json:"tracks"`
+	}
+	tidalGet(t, gw.URL, "/v1/search?query=RootOnlyA&limit=50&offset=0", 200, &searchA)
+	if len(searchA.Tracks.Items) != 1 {
+		t.Fatalf("root A search returned %+v, want 1 item", searchA.Tracks.Items)
+	}
+
+	// 2. Switch configured SMB root to root B on the same share.
+	saveSMB(s, "rootB")
+
+	// Stale root A gateway track/playlist IDs and search cache must be dropped immediately.
+	if resp, err := http.Get(fmt.Sprintf("%s/v1/tracks/%d/playbackinfopostpaywall?audioquality=LOSSLESS&playbackmode=STREAM&assetpresentation=FULL", gw.URL, idA)); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("stale root A track id=%d got HTTP %d, want 404", idA, resp.StatusCode)
+		}
+	}
+	if resp, err := http.Get(gw.URL + "/v1/playlists/" + uuidA + "/tracks?limit=50&offset=0"); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("stale root A playlist uuid=%s got HTTP %d, want 404", uuidA, resp.StatusCode)
+		}
+	}
+	var searchB struct {
+		Tracks struct {
+			Items []map[string]any `json:"items"`
+		} `json:"tracks"`
+	}
+	tidalGet(t, gw.URL, "/v1/search?query=RootOnlyA&limit=50&offset=0", 200, &searchB)
+	if len(searchB.Tracks.Items) != 0 {
+		t.Errorf("root A search hit leaked after switch to root B: %+v", searchB.Tracks.Items)
+	}
+
+	// Re-browse root B: must get a new track ID, no root A Stems list, no root A stems/local match, exact FLAC B bytes, and a second DB import.
+	_, idB, hasStemsB := browseSetsTrack(gw.URL)
+	if hasStemsB {
+		t.Errorf("root A NAS Stems list survived switch to root B")
+	}
+	if idB == idA {
+		t.Errorf("re-browsed root B reused root A gateway track ID %d", idA)
+	}
+	if resp, err := http.Get(fmt.Sprintf("%s/v1/enginex/stems/local?id=%d", gw.URL, idB)); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("root B track id=%d resolved stale root A stems file (HTTP %d, want 404)", idB, resp.StatusCode)
+		}
+	}
+	gotB := streamTrack(gw.URL, idB)
+	if bytes.Equal(gotB, flacA) || !bytes.Equal(gotB, flacB) {
+		t.Fatalf("re-browsed root B stream matched root A=%v matched root B=%v (same gateway ID=%v)", bytes.Equal(gotB, flacA), bytes.Equal(gotB, flacB), idB == idA)
+	}
+	waitImportedCount(2)
+
+	var srcB struct {
+		Path string `json:"path"`
+	}
+	tidalGet(t, gw.URL, fmt.Sprintf("/v1/enginex/stems/source?id=%d", idB), 200, &srcB)
+	if srcB.Path == "" || srcB.Path == srcA.Path {
+		t.Fatalf("root B stems source=%q collided with root A %q", srcB.Path, srcA.Path)
+	}
+	if st, err := os.Stat(srcB.Path); err != nil || !st.Mode().IsRegular() {
+		t.Fatalf("root B stems source missing: %q %v", srcB.Path, err)
 	}
 }

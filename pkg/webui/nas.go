@@ -174,6 +174,7 @@ func (s *Server) handleNASConfig(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.handleNASConfigPost(w, r)
 	case http.MethodDelete:
+		defer s.resetNASIfMoved(s.loadNASConfig())
 		s.uiMu.Lock()
 		defer s.uiMu.Unlock()
 		if err := os.Remove(s.nasConfigPath()); err != nil && !os.IsNotExist(err) {
@@ -220,6 +221,7 @@ func (s *Server) handleNASConfigPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	defer s.resetNASIfMoved(s.loadNASConfig())
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
 
@@ -322,6 +324,23 @@ func nasConfigReady(cfg providers.NASConfig) bool {
 	return cfg.Enabled &&
 		(cfg.Protocol == "webdav" || cfg.Protocol == "subsonic" || cfg.Protocol == "plex" || cfg.Protocol == "smb") &&
 		cfg.URL != "" && validateNASURL(cfg.URL) == nil
+}
+
+func isNASProvider(p string) bool {
+	return p == "webdav" || p == "subsonic" || p == "plex" || p == "smb"
+}
+
+// resetNASIfMoved runs after a write of nas.json, deferred before uiMu is
+// taken so it runs with uiMu free. When the server, share or root changed, it
+// forgets every NAS track ID, download, Stems entry and cached search: an old
+// ID could otherwise name the new root's file at the same path, or a new ID
+// play the old root's file (#335).
+func (s *Server) resetNASIfMoved(before providers.NASConfig) {
+	if now := s.loadNASConfig(); now.Protocol != before.Protocol || now.URL != before.URL {
+		s.jobs.resetNAS()
+		s.resetNASStems()
+		s.tidal.resetNAS()
+	}
 }
 
 func gatewayProvider(p string) string {

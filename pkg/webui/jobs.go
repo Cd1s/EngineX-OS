@@ -82,6 +82,9 @@ type Jobs struct {
 	// Playlists each streamed track was queued for, so a guest playing a
 	// track the owner already downloaded still gets it in the guest playlist.
 	queued map[string]bool
+	// nasGen counts NAS server, share or root changes: a NAS download that began
+	// before one is not filed under its track (#335).
+	nasGen uint64
 
 	// netease returns the NetEase login a session may fetch audio with, or nil.
 	netease func(session string, guest bool) *providers.Netease
@@ -125,6 +128,7 @@ func trackKey(t providers.Track) string { return t.Provider + ":" + t.ID }
 func (j *Jobs) File(t providers.Track) string {
 	key := trackKey(t)
 	j.mu.Lock()
+	gen := j.nasGen
 	path := ""
 	if f, ok := j.files[key]; ok {
 		path = f.dl.Path
@@ -140,7 +144,9 @@ func (j *Jobs) File(t providers.Track) string {
 		// Recently used: Trim evicts by modification time.
 		now := time.Now()
 		os.Chtimes(dl.Path, now, now)
-		j.putFile(key, fetched{t, dl})
+		if !j.putFileIfGen(key, fetched{t, dl}, gen) {
+			return ""
+		}
 		return dl.Path
 	} else if j.p.Deemix != nil {
 		// A finished provider file may predate the source index (or have been
@@ -252,10 +258,56 @@ func (j *Jobs) saveSource(key, path string) {
 			delete(sources, k)
 		}
 	}
-	b, _ := json.Marshal(sources)
-	tmp := filepath.Join(dir, sourcesFile+".tmp")
+	j.writeSources()
+}
+
+// writeSources stores the source index; j.mu must be held.
+func (j *Jobs) writeSources() {
+	b, _ := json.Marshal(j.sources)
+	tmp := filepath.Join(j.p.Deemix.DownloadDir, sourcesFile+".tmp")
 	if os.WriteFile(tmp, b, 0o644) == nil {
-		os.Rename(tmp, filepath.Join(dir, sourcesFile))
+		os.Rename(tmp, filepath.Join(j.p.Deemix.DownloadDir, sourcesFile))
+	}
+}
+
+var errNASChanged = errors.New("the NAS changed during the download")
+
+func isNASKey(key string) bool {
+	p, _, ok := strings.Cut(key, ":")
+	return ok && isNASProvider(p)
+}
+
+// resetNAS forgets every NAS download, queue mark and index entry after the NAS
+// server, share or root changed: the same track ID may name another file now.
+func (j *Jobs) resetNAS() {
+	if j == nil {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.nasGen++
+	for k := range j.files {
+		if isNASKey(k) {
+			delete(j.files, k)
+		}
+	}
+	for k := range j.queued {
+		if _, tk, _ := strings.Cut(k, "\x00"); isNASKey(tk) {
+			delete(j.queued, k)
+		}
+	}
+	if j.p.Deemix == nil {
+		return
+	}
+	changed := false
+	for k := range j.loadSources() {
+		if isNASKey(k) {
+			delete(j.sources, k)
+			changed = true
+		}
+	}
+	if changed {
+		j.writeSources()
 	}
 }
 
@@ -269,16 +321,23 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 	key := trackKey(t)
 	j.File(t) // loads a download saved before a restart
 	j.dropUnusable(t)
+	j.mu.Lock()
+	gen := j.nasGen // a fetch begun before a NAS change answers nothing of the old NAS
+	j.mu.Unlock()
 	for {
 		// Check the cache and claim the download under one lock so a fetch
 		// finishing in between cannot trigger a second download.
 		j.mu.Lock()
+		moved := isNASKey(key) && gen != j.nasGen
 		f, done := j.files[key]
 		busy, ok := j.fetches[key]
-		if !ok && !done {
+		if !ok && !done && !moved {
 			j.fetches[key] = make(chan struct{})
 		}
 		j.mu.Unlock()
+		if moved {
+			return "", errNASChanged
+		}
 		if done {
 			if st, err := os.Stat(f.dl.Path); err == nil && st.Mode().IsRegular() {
 				j.queueImport(session, t, guest, f)
@@ -314,7 +373,9 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 	}
 	j.addCover(ctx, t, dl)
 	f := fetched{matched, dl}
-	j.putFile(key, f)
+	if !j.putFileIfGen(key, f, gen) {
+		return "", errNASChanged
+	}
 	// NetEase in Deemix mode downloaded the Deezer file: Deezer finds it as well.
 	if t.Provider == "netease" && matched.Provider == "deezer" {
 		j.putFile(trackKey(matched), f)
@@ -326,6 +387,21 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 func (j *Jobs) putFile(key string, f fetched) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	j.putFileLocked(key, f)
+}
+
+// putFileIfGen is putFile for a download that began at NAS generation gen.
+func (j *Jobs) putFileIfGen(key string, f fetched, gen uint64) bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if isNASKey(key) && gen != j.nasGen {
+		return false
+	}
+	j.putFileLocked(key, f)
+	return true
+}
+
+func (j *Jobs) putFileLocked(key string, f fetched) {
 	if _, ok := j.files[key]; !ok && len(j.files) >= maxJobFiles {
 		for k := range j.files {
 			if j.fetches[k] == nil {
@@ -1093,6 +1169,9 @@ func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error 
 	if dl == nil {
 		var err error
 		j.update(v.ID, func(v *Job) { v.State = "downloading"; v.Progress = .05 })
+		j.mu.Lock()
+		gen := j.nasGen
+		j.mu.Unlock()
 		matched, dl, err = j.acquire(ctx, v.SessionID, v.Track, v.Playlist == providers.GuestPlaylist, func(q deemixclient.QueueStatus) {
 			j.update(v.ID, func(v *Job) { v.Progress = .05 + .55*max(0, min(1, q.Progress)) })
 		})
@@ -1100,7 +1179,7 @@ func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error 
 			return err
 		}
 		j.addCover(ctx, v.Track, dl)
-		j.putFile(trackKey(v.Track), fetched{matched, dl})
+		j.putFileIfGen(trackKey(v.Track), fetched{matched, dl}, gen)
 	}
 	if tooLongToAnalyse(v.Track, dl.Path) {
 		j.update(v.ID, func(v *Job) { v.State = "done"; v.Quality = dl.Quality.Label; v.Progress = 1 })

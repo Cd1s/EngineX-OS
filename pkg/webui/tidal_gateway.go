@@ -308,6 +308,39 @@ func (g *tidalGateway) saveTracks() {
 	}
 }
 
+// resetNAS forgets the NAS rows (standalone NAS and OmniSource's [NAS] lists)
+// and every cached search. IDs keep increasing, so an old track ID answers 404
+// instead of naming another file (#335).
+func (g *tidalGateway) resetNAS() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	changed := false
+	for id, ref := range g.tracks {
+		if isNASProvider(ref.track.Provider) || ref.session == nasScope {
+			delete(g.ids, refKey(ref))
+			delete(g.tracks, id)
+			delete(g.trackSeen, id)
+			changed = true
+		}
+	}
+	for id, ref := range g.lists {
+		if ref.provider == nasScope || (ref.provider == localProvider && strings.HasPrefix(ref.list.ID, "nas\x00")) {
+			delete(g.lists, id)
+			delete(g.listSeen, id)
+			changed = true
+		}
+	}
+	g.mu.Unlock()
+	if g.searches != nil {
+		g.searches.clear()
+	}
+	if changed {
+		g.saveTracks()
+	}
+}
+
 // Browse state is bounded. When full, the least recently used tenth is
 // dropped; IDs keep increasing so a stale ID never names a different track.
 // The track bound holds two of the largest accepted playlists, so a listing
