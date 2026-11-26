@@ -438,8 +438,19 @@ func TestSelfHosted252RestartCache(t *testing.T) {
 			}
 			restarted := webui.NewJobs(webui.Pipeline{Deemix: &deemixclient.Client{DownloadDir: dir, AllowLossy: true}})
 			defer restarted.Close()
-			if got := restarted.File(tr); got != saved {
-				t.Fatalf("cache lost after restart: got %q, want %q", got, saved)
+			// A restart starts the server with the jobs: it tells them the NAS root, which the
+			// index records since #335 round 6.
+			restartedServer := webui.New(webui.Config{UIDir: ui, StateDir: t.TempDir()}, restarted)
+			defer restartedServer.Close()
+			want := saved
+			if legacy {
+				// #335 round 6 (PM decision): an index from an older version names no NAS
+				// root, so its NAS entries are of unknown origin and not used; such a track
+				// downloads once more. An entry the current version filed is kept (new_flat).
+				want = ""
+			}
+			if got := restarted.File(tr); got != want {
+				t.Fatalf("cache after restart: got %q, want %q", got, want)
 			}
 		})
 	}
