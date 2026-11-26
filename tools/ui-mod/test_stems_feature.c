@@ -1810,22 +1810,40 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     assert(pragma(db, "SELECT isAnalyzed FROM Track WHERE id = 2") == shadow);
     assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == gateway + shadow);
     if (shadow) {
-        char regrid_marker[160], regrid_run[160];
+        char regrid_marker[160], regrid_run[160], perf_file[160];
         snprintf(regrid_marker, sizeof regrid_marker, "%s/peer-a/track.wav.perf.regrid", dir);
         snprintf(regrid_run, sizeof regrid_run, "%s/peer-a/track.wav.perf.regrid.run", dir);
+        snprintf(perf_file, sizeof perf_file, "%s/peer-a/track.wav.perf", dir);
         analysis_file(regrid_marker, "g2", 2);
         unsigned char fake_ltd[0xd0] = {0};
         fake_ltd[0xc8] = 1;
         // Non-AnalysisQueue callers see the real loaded state and leave .perf.regrid untouched.
         assert(shadow_loaded_on_deck(fake_ltd) == 1);
         assert(access(regrid_marker, F_OK) == 0 && !unlink(regrid_marker));
-        // Armed regrid in shadow_fill clears isAnalyzed so AnalysisQueue replays the new grid.
+        // Armed regrid without a valid .perf refuses to clear isAnalyzed (fail-closed).
         analysis_file(regrid_run, "g2", 2);
         shadow_regrid_queued = 1;
         analysis_bind(entry, db, shadow_read, 2);
         assert(shadow_regrid_queued == 0);
+        assert(pragma(db, "SELECT isAnalyzed FROM Track WHERE id = 2") == 1);
+        // With a valid EXPF v1 .perf present, armed regrid clears isAnalyzed so AnalysisQueue replays the new grid.
+        {
+            FILE *pf = fopen(perf_file, "wb");
+            assert(pf);
+            uint32_t ver = 1, lt = 20, lb = 4, lo = 27;
+            double bpm = 128.0;
+            unsigned char z[32] = {0};
+            assert(fwrite("EXPF", 1, 4, pf) == 4 && fwrite(&ver, 4, 1, pf) == 1 && fwrite(&bpm, 8, 1, pf) == 1);
+            assert(fwrite(&lt, 4, 1, pf) == 1 && fwrite(z, 1, lt, pf) == lt);
+            assert(fwrite(&lb, 4, 1, pf) == 1 && fwrite(z, 1, lb, pf) == lb);
+            assert(fwrite(&lo, 4, 1, pf) == 1 && fwrite(z, 1, lo, pf) == lo);
+            fclose(pf);
+        }
+        shadow_regrid_queued = 1;
+        analysis_bind(entry, db, shadow_read, 2);
+        assert(shadow_regrid_queued == 0);
         assert(pragma(db, "SELECT isAnalyzed FROM Track WHERE id = 2") == 0);
-        assert(!unlink(regrid_run));
+        assert(!unlink(perf_file) && !unlink(regrid_run));
     }
     assert(sqlite3_close(db) == SQLITE_OK);
     if (gateway) {
