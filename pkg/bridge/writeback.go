@@ -168,9 +168,21 @@ type mdbCommitIdent struct {
 	versionValid  uint32
 }
 
+func sidecarActiveOrUnknown(path string) bool {
+	st, err := os.Stat(path)
+	if err == nil {
+		return st.Size() > 0
+	}
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+func hasLiveWAL(dbDir string) bool {
+	return sidecarActiveOrUnknown(filepath.Join(dbDir, "m.db-wal"))
+}
+
 func readMDBCommitIdent(dbDir string) (mdbCommitIdent, bool) {
 	for _, sidecar := range []string{"m.db-journal", "m.db-wal"} {
-		if st, err := os.Stat(filepath.Join(dbDir, sidecar)); err == nil && st.Size() > 0 {
+		if sidecarActiveOrUnknown(filepath.Join(dbDir, sidecar)) {
 			return mdbCommitIdent{}, false
 		}
 	}
@@ -203,21 +215,51 @@ type CueSession struct {
 	rows map[string]noted
 	keys *rekordbox.KeyCache
 
-	snapPath       string
-	snapIdent      fileIdent
-	snapHdr        snapHeaderIdent
-	snap           *rbstate.Snapshot
-	byID           map[int64]*rbstate.Track
-	bakStampKey    string
-	bakRoot        string
-	bakRootIdent   fileIdent
-	bakKnown       bool
-	bakRepairStamp string
-	bakHasBackups  bool
-	mdbScanValid   bool
-	mdbScanIdent   mdbCommitIdent
-	mdbScanUUID    string
-	mdbScanStamp   string
+	snapPath         string
+	snapIdent        fileIdent
+	snapHdr          snapHeaderIdent
+	snap             *rbstate.Snapshot
+	byID             map[int64]*rbstate.Track
+	unsettledIDs     []int64
+	bakStampKey      string
+	bakRoot          string
+	bakRootIdent     fileIdent
+	bakKnown         bool
+	bakRepairStamp   string
+	bakHasBackups    bool
+	mdbScanValid     bool
+	mdbScanIdent     mdbCommitIdent
+	mdbScanHdr       snapHeaderIdent
+	mdbScanFileIdent fileIdent
+}
+
+type savedSnapshot struct {
+	path   string
+	snap   *rbstate.Snapshot
+	hdr    snapHeaderIdent
+	file   fileIdent
+	fileOK bool
+}
+
+func indexSnapshotTracks(snap *rbstate.Snapshot) (map[int64]*rbstate.Track, []int64) {
+	if snap == nil {
+		return nil, nil
+	}
+	byID := make(map[int64]*rbstate.Track, len(snap.Tracks))
+	var unsettledIDs []int64
+	for _, tr := range snap.Tracks {
+		if tr == nil || tr.Native || tr.EngineID == 0 {
+			continue
+		}
+		if byID[tr.EngineID] == nil {
+			byID[tr.EngineID] = tr
+			if tr.Synced == nil {
+				unsettledIDs = append(unsettledIDs, tr.EngineID)
+			}
+		}
+	}
+	slices.Sort(unsettledIDs)
+	return byID, unsettledIDs
 }
 
 func (s *CueSession) reset() {
@@ -228,14 +270,15 @@ func (s *CueSession) reset() {
 	s.rows = nil
 	s.snap = nil
 	s.byID = nil
+	s.unsettledIDs = nil
 	s.snapPath = ""
 	s.snapIdent = fileIdent{}
 	s.snapHdr = snapHeaderIdent{}
 	s.bakKnown = false
 	s.mdbScanValid = false
 	s.mdbScanIdent = mdbCommitIdent{}
-	s.mdbScanUUID = ""
-	s.mdbScanStamp = ""
+	s.mdbScanHdr = snapHeaderIdent{}
+	s.mdbScanFileIdent = fileIdent{}
 	s.mu.Unlock()
 }
 
@@ -247,63 +290,100 @@ func (s *CueSession) invalidateSnapshot() {
 	defer s.mu.Unlock()
 	s.snap = nil
 	s.byID = nil
+	s.unsettledIDs = nil
+	s.snapPath = ""
 	s.snapIdent = fileIdent{}
 	s.snapHdr = snapHeaderIdent{}
 	s.bakKnown = false
 	s.mdbScanValid = false
+	s.mdbScanIdent = mdbCommitIdent{}
+	s.mdbScanHdr = snapHeaderIdent{}
+	s.mdbScanFileIdent = fileIdent{}
 }
 
-func (s *CueSession) afterOwnSave(uuid, newStamp string, preserveMDBScan bool, mdbIdent mdbCommitIdent) {
+func (s *CueSession) afterOwnSave(saved savedSnapshot, preserveMDBScan bool, mdbIdent mdbCommitIdent) {
 	if s == nil {
 		return
 	}
+	var byID map[int64]*rbstate.Track
+	var unsettledIDs []int64
+	if saved.fileOK && saved.snap != nil {
+		byID, unsettledIDs = indexSnapshotTracks(saved.snap)
+	}
 	s.mu.Lock()
-	s.snap = nil
-	s.byID = nil
-	s.snapIdent = fileIdent{}
-	s.snapHdr = snapHeaderIdent{}
 	s.bakKnown = false
-	if preserveMDBScan && uuid != "" && newStamp != "" {
+	if saved.fileOK && saved.snap != nil {
+		s.snapPath = saved.path
+		s.snapIdent = saved.file
+		s.snapHdr = saved.hdr
+		s.snap = saved.snap
+		s.byID = byID
+		s.unsettledIDs = unsettledIDs
+	} else {
+		s.snapPath = ""
+		s.snapIdent = fileIdent{}
+		s.snapHdr = snapHeaderIdent{}
+		s.snap = nil
+		s.byID = nil
+		s.unsettledIDs = nil
+	}
+	if preserveMDBScan && saved.fileOK && saved.hdr.uuid != "" && saved.hdr.stamp != "" {
 		s.mdbScanValid = true
 		s.mdbScanIdent = mdbIdent
-		s.mdbScanUUID = uuid
-		s.mdbScanStamp = newStamp
+		s.mdbScanHdr = saved.hdr
+		s.mdbScanFileIdent = saved.file
 	} else {
 		s.mdbScanValid = false
+		s.mdbScanIdent = mdbCommitIdent{}
+		s.mdbScanHdr = snapHeaderIdent{}
+		s.mdbScanFileIdent = fileIdent{}
 	}
 	s.mu.Unlock()
 }
 
-func (s *CueSession) hasCleanMDBScan(cur mdbCommitIdent, ok bool, uuid, stamp string) bool {
-	if s == nil || !ok {
+func (s *CueSession) hasCleanMDBScan(cur mdbCommitIdent, ok bool, hdr snapHeaderIdent, snapFile fileIdent, snapOK bool) bool {
+	if s == nil || !ok || !snapOK {
 		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.mdbScanValid && s.mdbScanIdent == cur && s.mdbScanUUID == uuid && s.mdbScanStamp == stamp
+	return s.mdbScanValid && s.mdbScanIdent == cur && s.mdbScanHdr == hdr && s.mdbScanFileIdent == snapFile
 }
 
-func (s *CueSession) recordCleanMDBScan(cur mdbCommitIdent, ok bool, uuid, stamp string) {
+func (s *CueSession) recordCleanMDBScan(cur mdbCommitIdent, ok bool, hdr snapHeaderIdent, snapFile fileIdent, snapOK bool) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
-	if ok && uuid != "" && stamp != "" {
+	if ok && snapOK && hdr.uuid != "" && hdr.stamp != "" {
 		s.mdbScanValid = true
 		s.mdbScanIdent = cur
-		s.mdbScanUUID = uuid
-		s.mdbScanStamp = stamp
+		s.mdbScanHdr = hdr
+		s.mdbScanFileIdent = snapFile
 	} else {
 		s.mdbScanValid = false
+		s.mdbScanIdent = mdbCommitIdent{}
+		s.mdbScanHdr = snapHeaderIdent{}
+		s.mdbScanFileIdent = fileIdent{}
 	}
 	s.mu.Unlock()
 }
 
-func (s *CueSession) loadSnapshot(dbDir string) (*rbstate.Snapshot, map[int64]*rbstate.Track, error) {
-	return s.loadSnapshotHeader(dbDir, nil)
+func (s *CueSession) hasAnyRows() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.rows) > 0
 }
 
-func (s *CueSession) loadSnapshotHeader(dbDir string, wantHdr *rbstate.Header) (*rbstate.Snapshot, map[int64]*rbstate.Track, error) {
+func (s *CueSession) loadSnapshot(dbDir string) (*rbstate.Snapshot, map[int64]*rbstate.Track, error) {
+	snap, byID, _, _, _, err := s.loadSnapshotHeader(dbDir, nil)
+	return snap, byID, err
+}
+
+func (s *CueSession) loadSnapshotHeader(dbDir string, wantHdr *rbstate.Header) (*rbstate.Snapshot, map[int64]*rbstate.Track, []int64, fileIdent, bool, error) {
 	path := filepath.Join(dbDir, rbstate.SnapshotName)
 	ident, ok := statIdent(path)
 	var want snapHeaderIdent
@@ -320,9 +400,9 @@ func (s *CueSession) loadSnapshotHeader(dbDir string, wantHdr *rbstate.Header) (
 		}
 		s.mu.Lock()
 		if s.snap != nil && s.snapPath == path && s.snapIdent == ident && (!haveWant || s.snapHdr == want) {
-			snap, byID := s.snap, s.byID
+			snap, byID, unsettledIDs, snapIdent := s.snap, s.byID, s.unsettledIDs, s.snapIdent
 			s.mu.Unlock()
-			return snap, byID, nil
+			return snap, byID, unsettledIDs, snapIdent, true, nil
 		}
 		s.mu.Unlock()
 	}
@@ -331,20 +411,12 @@ func (s *CueSession) loadSnapshotHeader(dbDir string, wantHdr *rbstate.Header) (
 	}
 	snap, err := rbstate.Load(dbDir)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, fileIdent{}, false, err
 	}
 	if ident2, ok2 := statIdent(path); ok2 {
 		ident, ok = ident2, true
 	}
-	byID := make(map[int64]*rbstate.Track, len(snap.Tracks))
-	for _, tr := range snap.Tracks {
-		if tr.Native || tr.EngineID == 0 {
-			continue
-		}
-		if byID[tr.EngineID] == nil {
-			byID[tr.EngineID] = tr
-		}
-	}
+	byID, unsettledIDs := indexSnapshotTracks(snap)
 	loadedHdr := headerIdent(&snap.Header)
 	if s != nil {
 		var keysToClear *rekordbox.KeyCache
@@ -352,8 +424,11 @@ func (s *CueSession) loadSnapshotHeader(dbDir string, wantHdr *rbstate.Header) (
 		if s.snapHdr.uuid != "" && loadedHdr.uuid != "" && s.snapHdr.uuid != loadedHdr.uuid {
 			keysToClear = s.keys
 		}
-		if s.mdbScanValid && (loadedHdr.uuid != s.mdbScanUUID || loadedHdr.stamp != s.mdbScanStamp) {
+		if s.mdbScanValid && (!ok || loadedHdr != s.mdbScanHdr || ident != s.mdbScanFileIdent) {
 			s.mdbScanValid = false
+			s.mdbScanIdent = mdbCommitIdent{}
+			s.mdbScanHdr = snapHeaderIdent{}
+			s.mdbScanFileIdent = fileIdent{}
 		}
 		// Any reload from disk clears cached row edit timestamps so a replaced snapshot never
 		// suppresses work (normal saves already drained rows via take()).
@@ -365,19 +440,21 @@ func (s *CueSession) loadSnapshotHeader(dbDir string, wantHdr *rbstate.Header) (
 			s.snapHdr = loadedHdr
 			s.snap = snap
 			s.byID = byID
+			s.unsettledIDs = unsettledIDs
 		} else {
 			s.snapPath = ""
 			s.snapIdent = fileIdent{}
 			s.snapHdr = snapHeaderIdent{}
 			s.snap = nil
 			s.byID = nil
+			s.unsettledIDs = nil
 		}
 		s.mu.Unlock()
 		if keysToClear != nil {
 			keysToClear.Clear()
 		}
 	}
-	return snap, byID, nil
+	return snap, byID, unsettledIDs, ident, ok, nil
 }
 
 func (s *CueSession) repairStamp(snapStamp, backupRoot string) (string, bool) {
@@ -500,21 +577,21 @@ func NoteWriteBack(mount string, written map[string][]rbstate.FileSig, rows map[
 	return err
 }
 
-func noteWriteBackCtx(ctx context.Context, mount string, written map[string][]rbstate.FileSig, rows map[string]noted, hashes recordHashes, markRepaired bool, nextCursor int64, updateCursor bool) (string, error) {
+func noteWriteBackCtx(ctx context.Context, mount string, written map[string][]rbstate.FileSig, rows map[string]noted, hashes recordHashes, markRepaired bool, nextCursor int64, updateCursor bool) (savedSnapshot, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return savedSnapshot{}, err
 	}
 	abs, err := filepath.Abs(mount)
 	if err != nil {
-		return "", err
+		return savedSnapshot{}, err
 	}
 	dbDir := filepath.Join(abs, "Engine Library", "Database2")
 	snap, err := rbstate.Load(dbDir)
 	if err != nil {
-		return "", err
+		return savedSnapshot{}, err
 	}
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return savedSnapshot{}, err
 	}
 	for key, sigs := range written {
 		if t, ok := snap.Tracks[rbstate.FoldPath(key)]; ok {
@@ -534,7 +611,7 @@ func noteWriteBackCtx(ctx context.Context, mount string, written map[string][]rb
 	}
 	applyRecordHashes(snap, hashes)
 	if snap.Header.Sources, snap.Header.Stamp, err = exportNow(abs, snap.Header.Layout); err != nil {
-		return "", err
+		return savedSnapshot{}, err
 	}
 	if markRepaired {
 		if st, ok := stickRepairStamp(snap.Header.Stamp, filepath.Join(abs, ".enginex-backup")); ok {
@@ -559,9 +636,17 @@ func noteWriteBackCtx(ctx context.Context, mount string, written map[string][]rb
 	}
 	snap.Header.Applied = time.Now().Unix()
 	if err := snap.SaveCtx(ctx, dbDir); err != nil {
-		return "", err
+		return savedSnapshot{}, err
 	}
-	return snap.Header.Stamp, nil
+	snapPath := filepath.Join(dbDir, rbstate.SnapshotName)
+	fi, fiOK := statIdent(snapPath)
+	return savedSnapshot{
+		path:   snapPath,
+		snap:   snap,
+		hdr:    headerIdent(&snap.Header),
+		file:   fi,
+		fileOK: fiOK,
+	}, nil
 }
 
 // WriteBackCues writes changed deck cues, loops, and editable metadata to the ANLZ files and
@@ -709,7 +794,7 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 		}
 	}
 	dbDir := filepath.Join(p.mount, "Engine Library", "Database2")
-	snap, byID, err := p.opts.Session.loadSnapshotHeader(dbDir, &st.Header)
+	snap, byID, unsettledIDs, snapIdent, snapIdentOK, err := p.opts.Session.loadSnapshotHeader(dbDir, &st.Header)
 	if err != nil {
 		p.opts.Session.reset()
 		return "snapshot is unavailable", nil
@@ -728,11 +813,16 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 	if p.r, err = compat.NewResolver(p.mount); err != nil {
 		return "", err
 	}
-	query, settle := "mode=ro&_pragma=busy_timeout(5000)", func() error { return nil }
+	query, settle := "mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)", func() error { return nil }
 	if p.opts.Settled != nil {
 		// The watcher reads m.db as it is after a quiet period, and drops what it read when
-		// Engine wrote meanwhile.
-		query, settle = "mode=ro&immutable=1", p.opts.Settled
+		// Engine wrote meanwhile. With no live WAL it uses immutable=1 to avoid reader locks;
+		// when a nonempty/unknown WAL exists it uses a normal read-only connection so
+		// committed uncheckpointed WAL edits are still visible.
+		settle = p.opts.Settled
+		if !hasLiveWAL(dbDir) {
+			query = "mode=ro&immutable=1"
+		}
 	}
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mDB, RawQuery: query}).String())
 	if err != nil {
@@ -743,7 +833,7 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 	_, _ = db.ExecContext(ctx, "PRAGMA cache_size=-16384")
 
 	started := time.Now()
-	cs, err := readCandidates(ctx, db, dbDir, snap, byID, p.opts)
+	cs, err := readCandidates(ctx, db, dbDir, snap, byID, unsettledIDs, snapIdent, snapIdentOK, p.opts)
 	if err != nil {
 		return "", err
 	}
@@ -790,16 +880,16 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 			if err := ctx.Err(); err != nil {
 				return "", err
 			}
-			newStamp, err := noteWriteBackCtx(ctx, p.mount, nil, p.opts.Session.take(cs.insync), nil, markRepaired, cs.nextCursor, cs.updateCursor)
+			saved, err := noteWriteBackCtx(ctx, p.mount, nil, p.opts.Session.take(cs.insync), nil, markRepaired, cs.nextCursor, cs.updateCursor)
 			if err != nil {
 				return "", err
 			}
-			p.opts.Session.afterOwnSave(snap.Header.LibraryUUID, newStamp, cs.mdbIdentOK, cs.mdbIdent)
+			p.opts.Session.afterOwnSave(saved, cs.mdbIdentOK, cs.mdbIdent)
 			return "", nil
 		}
 		p.opts.Session.add(cs.insync)
 		if cs.mdbIdentOK {
-			p.opts.Session.recordCleanMDBScan(cs.mdbIdent, true, snap.Header.LibraryUUID, snap.Header.Stamp)
+			p.opts.Session.recordCleanMDBScan(cs.mdbIdent, true, headerIdent(&snap.Header), snapIdent, snapIdentOK)
 		}
 		return "", nil
 	}
@@ -833,11 +923,11 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		newStamp, err := noteWriteBackCtx(ctx, p.mount, nil, p.opts.Session.take(cs.insync), nil, markRepaired, cs.nextCursor, cs.updateCursor)
+		saved, err := noteWriteBackCtx(ctx, p.mount, nil, p.opts.Session.take(cs.insync), nil, markRepaired, cs.nextCursor, cs.updateCursor)
 		if err != nil {
 			return "", err
 		}
-		p.opts.Session.afterOwnSave(snap.Header.LibraryUUID, newStamp, allResolved, cs.mdbIdent)
+		p.opts.Session.afterOwnSave(saved, allResolved, cs.mdbIdent)
 		return "", nil
 	}
 	written, hashes, err := p.write(ctx, libs, changes)
@@ -847,11 +937,11 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	newStamp, err := noteWriteBackCtx(ctx, p.mount, written, p.opts.Session.take(cs.insync), hashes, markRepaired, cs.nextCursor, cs.updateCursor)
+	saved, err := noteWriteBackCtx(ctx, p.mount, written, p.opts.Session.take(cs.insync), hashes, markRepaired, cs.nextCursor, cs.updateCursor)
 	if err != nil {
 		return "", err
 	}
-	p.opts.Session.afterOwnSave(snap.Header.LibraryUUID, newStamp, allResolved, cs.mdbIdent)
+	p.opts.Session.afterOwnSave(saved, allResolved, cs.mdbIdent)
 	writeBackCut("state")
 	_ = rbstate.RemoveFile(filepath.Join(dbDir, writeBackMarkName))
 	return "", nil
@@ -1171,7 +1261,7 @@ func queryDirtyByIDs(ctx context.Context, db *sql.DB, ids []int64, byID map[int6
 // skip Track scanning altogether via mdbCommitIdent; historical Synced==nil settles advance a
 // persisted SettleCursor directly in memory, and PerformanceData loads strictly via chunked
 // ID-filtered queries so unselected rows never cross SQLite->Go.
-func readCandidates(ctx context.Context, db *sql.DB, dbDir string, snap *rbstate.Snapshot, byID map[int64]*rbstate.Track, opts WriteBackOptions) (candidateSet, error) {
+func readCandidates(ctx context.Context, db *sql.DB, dbDir string, snap *rbstate.Snapshot, byID map[int64]*rbstate.Track, unsettledIDs []int64, snapIdent fileIdent, snapIdentOK bool, opts WriteBackOptions) (candidateSet, error) {
 	out := candidateSet{insync: map[string]noted{}, checked: len(byID)}
 	if len(byID) == 0 {
 		return out, nil
@@ -1179,7 +1269,7 @@ func readCandidates(ctx context.Context, db *sql.DB, dbDir string, snap *rbstate
 
 	curMDBIdent, mdbOK := readMDBCommitIdent(dbDir)
 	var dirtyReads []dbCandidate
-	if !opts.Session.hasCleanMDBScan(curMDBIdent, mdbOK, snap.Header.LibraryUUID, snap.Header.Stamp) {
+	if !opts.Session.hasCleanMDBScan(curMDBIdent, mdbOK, headerIdent(&snap.Header), snapIdent, snapIdentOK) {
 		if writeBackDirtyScanHook != nil {
 			writeBackDirtyScanHook()
 		}
@@ -1268,14 +1358,18 @@ func readCandidates(ctx context.Context, db *sql.DB, dbDir string, snap *rbstate
 		dirtySet[c.engineID] = true
 	}
 
-	var unsettled []int64
-	for id, tr := range byID {
-		if tr == nil || tr.Native || tr.Synced != nil || dirtySet[id] || opts.Session.has(tr.Key, tr.Edit) {
-			continue
+	unsettled := unsettledIDs
+	if len(dirtySet) > 0 || opts.Session.hasAnyRows() {
+		filtered := make([]int64, 0, len(unsettledIDs))
+		for _, id := range unsettledIDs {
+			tr := byID[id]
+			if tr == nil || tr.Native || tr.Synced != nil || dirtySet[id] || opts.Session.has(tr.Key, tr.Edit) {
+				continue
+			}
+			filtered = append(filtered, id)
 		}
-		unsettled = append(unsettled, id)
+		unsettled = filtered
 	}
-	slices.Sort(unsettled)
 
 	var settleReads []dbCandidate
 	switch {

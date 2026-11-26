@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
@@ -369,4 +372,359 @@ func TestReviewR4UnresolvedMountReadinessWindowExpiresAndLateExportNeedsEvent(t 
 			t.Fatal("delayed export on remounted identity was not discovered in fresh readiness window")
 		}
 	})
+}
+
+func TestReviewR4WatcherReadsCommittedWAL(t *testing.T) {
+	t.Run("SettledPass", func(t *testing.T) {
+		root := t.TempDir()
+		seedRealRekordboxOneLibraryStick(t, root)
+		dir := filepath.Join(root, "Engine Library", "Database2")
+		path := filepath.Join(dir, "m.db")
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		db.SetMaxOpenConns(1)
+		var mode string
+		if err := db.QueryRow("PRAGMA journal_mode=WAL").Scan(&mode); err != nil || mode != "wal" {
+			t.Fatalf("WAL mode = %q, err %v", mode, err)
+		}
+		for _, stmt := range []string{"PRAGMA wal_autocheckpoint=0", "PRAGMA wal_checkpoint(TRUNCATE)"} {
+			if _, err := db.Exec(stmt); err != nil {
+				t.Fatal(err)
+			}
+		}
+		header := func() [2]uint32 {
+			t.Helper()
+			raw, err := os.ReadFile(path)
+			if err != nil || len(raw) < 100 {
+				t.Fatalf("read SQLite header: %v", err)
+			}
+			return [2]uint32{binary.BigEndian.Uint32(raw[24:28]), binary.BigEndian.Uint32(raw[92:96])}
+		}
+		s := &CueSession{}
+		ctx := context.Background()
+		if _, err := WriteBackCues(ctx, root, WriteBackOptions{Session: s}); err != nil {
+			t.Fatal(err)
+		}
+		before := header()
+		if _, err := db.Exec("UPDATE Track SET comment='Committed WAL edit' WHERE id=1"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec("UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+999 WHERE id=1"); err != nil {
+			t.Fatal(err)
+		}
+		if after := header(); after != before {
+			t.Fatalf("uncheckpointed WAL commit changed main header: %v -> %v", before, after)
+		}
+		wal, err := os.Stat(path + "-wal")
+		if err != nil || wal.Size() == 0 {
+			t.Fatalf("missing committed WAL: %v", err)
+		}
+		if _, ok := readMDBCommitIdent(dir); ok {
+			t.Error("nonempty WAL must invalidate cached dirty scan")
+		}
+		res, err := WriteBackCues(ctx, root, WriteBackOptions{Session: s, Settled: func() error { return nil }})
+		watcherChanged := res.TracksChanged
+		if err != nil || watcherChanged != 1 {
+			t.Fatalf("watcher missed committed WAL edit: tracks read=%d changed=%d err=%v", res.TracksRead, res.TracksChanged, err)
+		}
+		one, err := rekordbox.ReadSQLiteWhole(ctx, filepath.Join(root, "PIONEER", "rekordbox", "exportLibrary.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		foundComment := false
+		for _, tr := range one.Tracks {
+			if tr.ID == 1 && tr.Comment == "Committed WAL edit" {
+				foundComment = true
+				break
+			}
+		}
+		if !foundComment {
+			t.Fatalf("OneLibrary did not receive committed WAL edit: %+v", one.Tracks)
+		}
+		res, err = WriteBackCues(ctx, root, WriteBackOptions{OnEject: true})
+		if err != nil || res.TracksChanged != 0 {
+			t.Fatalf("eject control saw leftover WAL edit after watcher: tracks read=%d changed=%d err=%v", res.TracksRead, res.TracksChanged, err)
+		}
+	})
+
+	t.Run("LiveCueWatcherLoop", func(t *testing.T) {
+		t.Cleanup(SetCueRunDirForTest(t.TempDir()))
+		root := t.TempDir()
+		seedRealRekordboxOneLibraryStick(t, root)
+		dir := filepath.Join(root, "Engine Library", "Database2")
+		path := filepath.Join(dir, "m.db")
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		db.SetMaxOpenConns(1)
+		if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; PRAGMA wal_checkpoint(TRUNCATE);`); err != nil {
+			t.Fatal(err)
+		}
+
+		evCh := make(chan struct{}, 2)
+		w := &CueWatcher{
+			quiet:          25 * time.Millisecond,
+			retry:          50 * time.Millisecond,
+			poll:           20 * time.Millisecond,
+			rescanFallback: 10 * time.Second,
+			ejectDir:       cueEjectingDir,
+			useMountWatch:  true,
+			mountEvents:    evCh,
+			mounts:         func() []string { return []string{root} },
+			pass:           WriteBackCues,
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = w.Run(ctx)
+		}()
+		defer func() {
+			cancel()
+			<-done
+		}()
+		if !WaitWatchingForTest(w, root, 2*time.Second) {
+			t.Fatal("watcher did not attach WAL stick")
+		}
+
+		if _, err := db.Exec("UPDATE Track SET comment='Live Watcher WAL' WHERE id=1"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec("UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+888 WHERE id=1"); err != nil {
+			t.Fatal(err)
+		}
+		onePath := filepath.Join(root, "PIONEER", "rekordbox", "exportLibrary.db")
+		deadline := time.Now().Add(3 * time.Second)
+		synced := false
+		for time.Now().Before(deadline) {
+			one, rerr := rekordbox.ReadSQLiteWhole(context.Background(), onePath)
+			if rerr == nil {
+				for _, tr := range one.Tracks {
+					if tr.ID == 1 && tr.Comment == "Live Watcher WAL" {
+						synced = true
+						break
+					}
+				}
+			}
+			if synced {
+				break
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		if !synced {
+			t.Fatal("live CueWatcher missed committed uncheckpointed WAL edit")
+		}
+	})
+}
+
+func TestReviewR4WALStatErrorMarksNotClean(t *testing.T) {
+	// Passing a regular file as dbDir causes os.Stat(filepath.Join(dbDir, "m.db-wal"))
+	// to fail with ENOTDIR (non-ENOENT regardless of effective UID).
+	notDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(notDir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !hasLiveWAL(notDir) {
+		t.Fatal("hasLiveWAL returned false on unexpected stat error (ENOTDIR)")
+	}
+	if _, ok := readMDBCommitIdent(notDir); ok {
+		t.Fatal("readMDBCommitIdent treated non-ENOENT sidecar stat error as clean")
+	}
+}
+
+func TestReviewR4CleanScanDoesNotSurviveNewSnapshotCommit(t *testing.T) {
+	root := t.TempDir()
+	seedRealRekordboxOneLibraryStick(t, root)
+	dir := filepath.Join(root, "Engine Library", "Database2")
+	snapPath := filepath.Join(dir, rbstate.SnapshotName)
+	s := &CueSession{}
+	ctx := context.Background()
+	if _, err := WriteBackCues(ctx, root, WriteBackOptions{Session: s}); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := rbstate.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapIdent1, ok1 := statIdent(snapPath)
+	identity, ok := readMDBCommitIdent(dir)
+	if !s.hasCleanMDBScan(identity, ok, headerIdent(&snap.Header), snapIdent1, ok1) {
+		t.Fatal("fixture requires a cached clean scan")
+	}
+
+	// External replacement bumping Commit while keeping LibraryUUID and Stamp equal.
+	snap.Commit++
+	if err := snap.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	snapIdent2, ok2 := statIdent(snapPath)
+	if _, _, err := s.loadSnapshot(dir); err != nil {
+		t.Fatal(err)
+	}
+	if s.hasCleanMDBScan(identity, ok, headerIdent(&snap.Header), snapIdent2, ok2) {
+		t.Fatal("clean scan survived replacement by a different snapshot commit")
+	}
+
+	// End-to-end: an untouched m.db against an external snapshot replacement (same UUID+Stamp,
+	// Commit++ and reset Edit=1 while m.db stays at Edit=99) must run the dirty scan.
+	mdb, err := sql.Open("sqlite", filepath.Join(dir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mdb.Exec(`UPDATE Track SET comment='Seen after commit bump', lastEditTime=99 WHERE id=1`); err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	_ = mdb.Close()
+	if _, err := WriteBackCues(ctx, root, WriteBackOptions{Session: s}); err != nil {
+		t.Fatal(err)
+	}
+	snap3, err := rbstate.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap3.Commit++
+	snap3.Tracks["contents/fixturea/track01.mp3"].Edit = 1
+	if err := snap3.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	var dirtyScans atomic.Int32
+	prevHook := writeBackDirtyScanHook
+	writeBackDirtyScanHook = func() { dirtyScans.Add(1) }
+	t.Cleanup(func() { writeBackDirtyScanHook = prevHook })
+
+	res, err := WriteBackCues(ctx, root, WriteBackOptions{Session: s})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirtyScans.Load() != 1 || res.TracksRead == 0 {
+		t.Fatalf("clean scan skipped dirty scan after external snapshot replacement: scans=%d res=%+v", dirtyScans.Load(), res)
+	}
+}
+
+func TestReviewR4SettleReusesCachedUnsettledQueue6000Tracks(t *testing.T) {
+	t.Setenv(rbstate.StageEnv, filepath.Join(t.TempDir(), "stage"))
+	const nTracks = 6000
+	root := t.TempDir()
+	testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb", []byte("pdb-header"))
+	dbDir := filepath.Join(root, "Engine Library", "Database2")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mdb, err := sql.Open("sqlite", filepath.Join(dbDir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mdb.Exec(`CREATE TABLE Track(id INTEGER PRIMARY KEY, path TEXT, lastEditTime INTEGER, genre TEXT, comment TEXT, label TEXT); CREATE TABLE PerformanceData(trackId INTEGER PRIMARY KEY, beatData BLOB, trackData BLOB, quickCues BLOB, loops BLOB, activeOnLoadLoops INTEGER);`); err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	tx, err := mdb.Begin()
+	if err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	insT, err := tx.Prepare(`INSERT INTO Track(id, path, lastEditTime, genre, comment, label) VALUES(?, ?, 1, '', '', '')`)
+	if err != nil {
+		_ = tx.Rollback()
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	insP, err := tx.Prepare(`INSERT INTO PerformanceData(trackId, beatData, trackData, quickCues, loops, activeOnLoadLoops) VALUES(?, NULL, NULL, NULL, NULL, 0)`)
+	if err != nil {
+		_ = tx.Rollback()
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	snap := rbstate.New("uuid-6000")
+	snap.Header.Layout = rbstate.LayoutDevice
+	sources, stamp, err := exportNow(root, snap.Header.Layout)
+	if err != nil {
+		_ = tx.Rollback()
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	snap.Header.Sources, snap.Header.Stamp = sources, stamp
+	metaDigest := enginedb.MetadataDigest("", "", "")
+	for i := 1; i <= nTracks; i++ {
+		rel := fmt.Sprintf("Contents/Album/%04d.mp3", i)
+		key := rbstate.FoldPath(rel)
+		if _, err := insT.Exec(i, "../"+rel); err != nil {
+			_ = tx.Rollback()
+			_ = mdb.Close()
+			t.Fatal(err)
+		}
+		if _, err := insP.Exec(i); err != nil {
+			_ = tx.Rollback()
+			_ = mdb.Close()
+			t.Fatal(err)
+		}
+		snap.Tracks[key] = &rbstate.Track{
+			Key:        key,
+			Rel:        rel,
+			EngineID:   int64(i),
+			Edit:       1,
+			Written:    []byte{1},
+			MetaDigest: metaDigest,
+			Refs:       []rbstate.SourceRef{{Kind: rbstate.DeviceLibrary, ID: uint32(i)}},
+		}
+	}
+	_ = insT.Close()
+	_ = insP.Close()
+	if err := tx.Commit(); err != nil {
+		_ = mdb.Close()
+		t.Fatal(err)
+	}
+	_ = mdb.Close()
+	if err := snap.Save(dbDir); err != nil {
+		t.Fatal(err)
+	}
+
+	idxStart := time.Now()
+	_, indexed := indexSnapshotTracks(snap)
+	idxDur := time.Since(idxStart)
+	if len(indexed) != nTracks || indexed[0] != 1 || indexed[nTracks-1] != nTracks {
+		t.Fatalf("unexpected indexed unsettled queue: len=%d", len(indexed))
+	}
+
+	var snapLoads atomic.Int32
+	prevLoad := writeBackSnapshotLoadHook
+	writeBackSnapshotLoadHook = func() { snapLoads.Add(1) }
+	t.Cleanup(func() { writeBackSnapshotLoadHook = prevLoad })
+
+	sess := &CueSession{}
+	ctx := context.Background()
+	p1Start := time.Now()
+	res1, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, SettleBatch: cueWatcherSettleBatch, Session: sess})
+	p1Dur := time.Since(p1Start)
+	if err != nil || res1.TracksRead != cueWatcherSettleBatch || res1.PendingSettle != nTracks-cueWatcherSettleBatch {
+		t.Fatalf("6000-track batch 1 failed: res=%+v err=%v", res1, err)
+	}
+	if snapLoads.Load() != 1 {
+		t.Fatalf("expected 1 snapshot load on batch 1, got %d", snapLoads.Load())
+	}
+	if got := len(sess.unsettledIDs); got != nTracks-cueWatcherSettleBatch {
+		t.Fatalf("cached unsettled queue after own save = %d, want %d", got, nTracks-cueWatcherSettleBatch)
+	}
+
+	// Pass 2 reuses cached snapshot + cached unsettled queue without re-parsing gob, and advances cursor to 512.
+	p2Start := time.Now()
+	res2, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, SettleBatch: cueWatcherSettleBatch, Session: sess})
+	p2Dur := time.Since(p2Start)
+	if err != nil || res2.TracksRead != cueWatcherSettleBatch || res2.PendingSettle != nTracks-2*cueWatcherSettleBatch {
+		t.Fatalf("6000-track batch 2 failed: res=%+v err=%v", res2, err)
+	}
+	if snapLoads.Load() != 1 {
+		t.Fatalf("batch 2 re-loaded snapshot from disk (snapLoads=%d)", snapLoads.Load())
+	}
+	h2, err := rbstate.ReadHeader(dbDir)
+	if err != nil || h2.SettleCursor != 2*cueWatcherSettleBatch {
+		t.Fatalf("SettleCursor = %d, want %d (err=%v)", h2.SettleCursor, 2*cueWatcherSettleBatch, err)
+	}
+	t.Logf("6000-track timings: indexSnapshotTracks=%v batch1=%v batch2=%v", idxDur, p1Dur, p2Dur)
 }
