@@ -2035,6 +2035,10 @@ SERVICES_MAIN = """
 	function scPhaseMeterOf(d) {
 		return typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views && PlanckGUI.views.getPhaseMeter ? PlanckGUI.views.getPhaseMeter(d - 1) : null
 	}
+	// The stock waveform position item of deck d, what this deck's waveform draws (null before Engine builds it).
+	function scWaveformPositionOf(d) {
+		return typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.waveformPositionItem ? PlanckGUI.waveformPositionItem(d) : null
+	}
 	property var scShadowTextAt: ({})
 	function scShadowProperties(d) {
 		let p = scShadowDeckProperties[d]
@@ -2221,7 +2225,21 @@ SERVICES_MAIN = """
 				s.rise = raw - p.env > 2
 				s.env = Math.max(s.rise && !p.rise ? p.env + 2 : raw, p.env - (slow > 0 ? slow * 0.2 : 0.0005 * (now - p.at)))
 			} else s.env = s.avg = raw
-			s.lineMs = s.ps ? s.env + speed * now : s.posMs
+			// Engine's own playing waveform draws WaveFormPositionItem.currentPosition
+			// (extrapolated on CLOCK_MONOTONIC_RAW), while TrackPosition lags ~19.5 ms
+			// even at 60 Hz. Publish what Engine draws while playing; keep TrackPosition
+			// + s.env as the fallback when paused, scratching, held, or when the item
+			// is missing or not yet on this track's timeline.
+			let drawMs = NaN
+			if (s.ps && !s.scratch && !s.phaseHold && sr > 0) {
+				const wf = scWaveformPositionOf(d)
+				const wfPos = wf ? wf.currentPosition : NaN
+				if (isFinite(wfPos)) {
+					const ms = wfPos / sr * 1000
+					if (Math.abs(ms - s.posMs) <= 250 * Math.max(1, speed)) drawMs = ms
+				}
+			}
+			s.lineMs = isFinite(drawMs) ? drawMs : (s.ps ? s.env + speed * now : s.posMs)
 			// A jog nudge moves the line off the one the peer carries on: post it at once,
 			// not at the next heartbeat (25 Hz for 2 s, so the peer follows the nudge).
 			const sent = scShadowSent[n]

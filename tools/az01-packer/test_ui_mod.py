@@ -4753,6 +4753,65 @@ run(6000); n=bodies.length; const late=pos; now+=80; scShadowTick(); pos=late+80
 assert(bodies.length-n<=1,'a late position is not a slip'); assert(shifts(n).every(s=>Math.abs(s)<2),'late '+shifts(n));
 """)
 
+    def test_sender_publishes_waveform_position_item_while_playing_with_fallback(self):
+        # Playing decks publish PlanckGUI.waveformPositionItem(d).currentPosition
+        # (what Engine draws) instead of the ~20 ms lagged TrackPosition + s.env,
+        # falling back when paused, scratching, or when the item is missing/invalid.
+        self.js(r"""
+let bodies=[], pings=0, playing=true, touch=false, trueMs=10000, wfMode='live', wfCalls=0;
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(this.url.endsWith('/alive'))pings++;else bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+globalThis.PlanckGUI={
+    waveformPositionItem(d){
+        wfCalls++;
+        if(d!==1||wfMode==='null') return null;
+        if(wfMode==='nan') return {currentPosition:NaN};
+        if(wfMode==='stale0') return {currentPosition:0};
+        if(wfMode==='pausedAhead') return {currentPosition:(trueMs+50)*48};
+        return {currentPosition:trueMs*48};
+    }
+};
+globalThis.scTr=path=>({
+    get value(){return path.endsWith('/SampleRate')?48000:0},
+    get unnormalized(){return path.endsWith('/TrackPosition')?(playing?(trueMs-20)*48:trueMs*48):path.endsWith('BPM')?128:0},
+    get state(){return path.endsWith('/SongLoaded')||(path.endsWith('/PlayState')&&playing)||(path.endsWith('/ExternalScratchWheelTouch')&&touch)},
+    get string(){return path.endsWith('/TrackUri')?'file:///a.mp3':''}, color:'#ffffff', stateChanged:{connect(){}}});
+const step=ms=>{now+=ms;if(playing&&!touch)trueMs+=ms;scShadowTick();};
+// 1. Playing: publishes waveformPositionItem immediately on first tick (no ~20 ms lag).
+step(40);
+assert.equal(bodies.length,1);
+assert(Math.abs(bodies[0][0].positionMs-trueMs)<0.01,'first playing post used TrackPosition: '+bodies[0][0].positionMs+' vs '+trueMs);
+// 2. Steady play: stays on /alive pings, 80 ms tick interval, zero extra full posts.
+for(let i=0;i<50;i++) step(scShadowTickTimer.interval);
+assert.equal(scShadowTickTimer.interval,80);
+const beforeSteady=bodies.length, beforePings=pings;
+for(let i=0;i<30;i++) step(80); // 2.4 s
+assert.equal(bodies.length,beforeSteady,'steady play with wfItem triggered extra full posts');
+assert(pings>beforePings,'steady play must keep using /alive pings');
+assert(Math.abs(scShadowPrev[1].lineMs-trueMs)<0.01,'lineMs matches Engine draw position');
+// 3. Fallback when item is null / NaN / uninitialized 0 far from TrackPosition.
+wfMode='null'; step(80);
+assert(Math.abs(scShadowPrev[1].lineMs-(trueMs-20))<1.5,'null item must fall back to TrackPosition+env: '+scShadowPrev[1].lineMs);
+wfMode='nan'; step(80);
+assert(Math.abs(scShadowPrev[1].lineMs-(trueMs-20))<1.5,'NaN item must fall back: '+scShadowPrev[1].lineMs);
+wfMode='stale0'; step(80);
+assert(Math.abs(scShadowPrev[1].lineMs-(trueMs-20))<1.5,'stale 0 item must fall back: '+scShadowPrev[1].lineMs);
+// 4. Scratching bypasses wfItem and publishes raw TrackPosition.
+wfMode='live'; touch=true; trueMs-=15; step(25);
+assert(Math.abs(scShadowPrev[1].lineMs-(trueMs-20))<0.5,'scratch must use raw TrackPosition');
+// 5. Paused uses TrackPosition (0.000 ms) and does not read wfItem.
+touch=false; playing=false; wfMode='pausedAhead';
+const callsBeforePause=wfCalls;
+step(40);
+assert.equal(wfCalls,callsBeforePause,'paused tick must not read waveformPositionItem');
+assert(Math.abs(scShadowPrev[1].lineMs-trueMs)<0.001,'paused lineMs must match TrackPosition exactly');
+""")
+
     def test_receiver_holds_the_line_on_a_fast_animation_clock(self):
         # The players' panel runs at 59.34 Hz and Qt steps Animators by 1/59 s a frame:
         # 0.57 % fast, 3.4 s in ten minutes of an unsteered scroll.
