@@ -867,7 +867,7 @@ static uint64_t sc_rbs_inflight_gen;
 static pthread_cond_t sc_rbs_inflight_cond;
 static int sc_rbs_inflight_cond_ready;
 
-static void sc_rbs_ondemand_reset(void) {
+static inline void sc_rbs_ondemand_reset(void) {
     pthread_mutex_lock(&sc_rbs_mu);
     memset(sc_rbs_neg, 0, sizeof sc_rbs_neg);
     memset(sc_rbs_inflight, 0, sizeof sc_rbs_inflight);
@@ -900,7 +900,8 @@ static int sc_rbs_ondemand_available(void) {
     return sock && sock[0] && !access(sock, F_OK);
 }
 
-// Returns 0 if safe for blocking on-demand I/O, -1 on RT audio threads, -2 on Qt GUI threads.
+// Returns 0 if safe for blocking on-demand I/O, -1 on RT audio threads, -2 on Qt GUI threads,
+// -3 on Qt/Engine browse/cache/save worker threads (which must stay non-blocking).
 static int sc_rbs_thread_safe_for_ondemand(void) {
     int pol = sc_rbs_sched_override ? sc_rbs_sched_override() : sched_getscheduler(0);
     if (pol == SCHED_FIFO || pol == SCHED_RR) return -1;
@@ -909,9 +910,19 @@ static int sc_rbs_thread_safe_for_ondemand(void) {
     memset(comm, 0, sizeof comm);
     if (!prctl(PR_GET_NAME, (unsigned long)comm, 0, 0, 0)) {
         if (!strcmp(comm, "SceneGraph") || !strcmp(comm, "EMain") || !strcmp(comm, "EPlanckApp")) return -2;
+        if (!strcmp(comm, "Thread (pooled)") || !strcmp(comm, "FileCachingThre") ||
+            !strcmp(comm, "QQuickPixmapRea") || !strcmp(comm, "J:Savingtrackda"))
+            return -3;
     }
 #endif
     return 0;
+}
+
+static const char *sc_rbs_ondemand_skip_reason(int safe) {
+    if (safe == -1) return "skipped (rt thread)";
+    if (safe == -2) return "skipped (gui thread)";
+    if (safe == -3) return "skipped (browse thread)";
+    return NULL;
 }
 
 static uint64_t sc_rbs_ondemand_key_hash(const char *uuid, const char *path, long long track) {
@@ -1476,13 +1487,9 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
     uint64_t od_hash = 0;
     long long od_deadline = 0;
     if (use_ondemand) {
-        int safe = sc_rbs_thread_safe_for_ondemand();
-        if (safe == -1) {
-            why = "skipped (rt thread)";
-            goto done;
-        }
-        if (safe == -2) {
-            why = "skipped (gui thread)";
+        const char *skip_why = sc_rbs_ondemand_skip_reason(sc_rbs_thread_safe_for_ondemand());
+        if (skip_why) {
+            why = skip_why;
             goto done;
         }
         od_hash = sc_rbs_ondemand_key_hash(uuid, path ? raw_path : NULL, track);
@@ -1572,13 +1579,9 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
                 goto done;
             }
             // PerformanceData load fallback: stage missed, try direct on-demand fetch.
-            int safe = sc_rbs_thread_safe_for_ondemand();
-            if (safe == -1) {
-                why = "skipped (rt thread)";
-                goto done;
-            }
-            if (safe == -2) {
-                why = "skipped (gui thread)";
+            const char *skip_why = sc_rbs_ondemand_skip_reason(sc_rbs_thread_safe_for_ondemand());
+            if (skip_why) {
+                why = skip_why;
                 goto done;
             }
             use_ondemand = 1;

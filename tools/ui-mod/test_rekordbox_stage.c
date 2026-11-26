@@ -279,14 +279,18 @@ struct od_race_arg {
     long long out_id;
     char res[96];
     int set_gui_name;
+    long long perf_id;
 };
 
 static void *od_race_worker(void *arg) {
     struct od_race_arg *a = arg;
 #ifdef __linux__
-    if (a->set_gui_name) prctl(PR_SET_NAME, (unsigned long)"SceneGraph", 0, 0, 0);
+    if (a->set_gui_name == 1) prctl(PR_SET_NAME, (unsigned long)"SceneGraph", 0, 0, 0);
+    if (a->set_gui_name == 2) prctl(PR_SET_NAME, (unsigned long)"Thread (pooled)", 0, 0, 0);
 #endif
-    const char *r = sc_rbs_fill_path(&raw_engine, a->db, sqlite3_db_filename(a->db, "main"), a->path, -1, &a->out_id);
+    const char *r = a->perf_id > 0
+                        ? sc_rbs_fill_perf(&raw_engine, a->db, sqlite3_db_filename(a->db, "main"), a->perf_id)
+                        : sc_rbs_fill_path(&raw_engine, a->db, sqlite3_db_filename(a->db, "main"), a->path, -1, &a->out_id);
     snprintf(a->res, sizeof a->res, "%s", r ? r : "");
     return NULL;
 }
@@ -899,14 +903,24 @@ int main(int argc, char **argv) {
         assert(mock.requests == reqs_before && statements == 0 && !strcmp(text(db, ROW, od_rt), INSERTED));
 
 #ifdef __linux__
-        // 9. GUI thread safety guard (comm == SceneGraph): immediate bailout, 0 SQL, 0 IPC.
-        struct od_race_arg gui_arg = {db, "../Contents/OnDemandRT.mp3", 0, "", 1};
+        // 9. GUI thread (SceneGraph) and browse worker (Thread (pooled) querying PerformanceData)
+        //    safety guards: immediate bailout, 0 SQL, 0 IPC.
+        struct od_race_arg gui_arg = {db, "../Contents/OnDemandRT.mp3", 0, "", 1, 0};
         reqs_before = mock.requests;
         statements = 0;
         pthread_t gth;
         assert(!pthread_create(&gth, NULL, od_race_worker, &gui_arg));
         assert(!pthread_join(gth, NULL));
         assert(!strcmp(gui_arg.res, "skipped (gui thread)") && mock.requests == reqs_before && statements == 0);
+
+        struct od_race_arg brw_arg = {db, NULL, 0, "", 2, od_rt};
+        reqs_before = mock.requests;
+        statements = 0;
+        pthread_t bth;
+        assert(!pthread_create(&bth, NULL, od_race_worker, &brw_arg));
+        assert(!pthread_join(bth, NULL));
+        assert(!strcmp(brw_arg.res, "skipped (browse thread)") && mock.requests == reqs_before && statements == 0 &&
+               !strcmp(text(db, ROW, od_rt), INSERTED));
 #endif
 
         // 10. Concurrent 2-thread load race (TrackLoad1 + J:Searchingtrac on 2 separate SQLite connections):
@@ -923,8 +937,8 @@ int main(int argc, char **argv) {
         snprintf(mock.key, sizeof mock.key, "contents/ondemandrace.mp3");
         pthread_mutex_unlock(&mock.mu);
         reqs_before = mock.requests;
-        struct od_race_arg ra1 = {db_r1, "../Contents/OnDemandRace.mp3", 0, "", 0};
-        struct od_race_arg ra2 = {db_r2, "../Contents/OnDemandRace.mp3", 0, "", 0};
+        struct od_race_arg ra1 = {db_r1, "../Contents/OnDemandRace.mp3", 0, "", 0, 0};
+        struct od_race_arg ra2 = {db_r2, "../Contents/OnDemandRace.mp3", 0, "", 0, 0};
         pthread_t rt1, rt2;
         assert(!pthread_create(&rt1, NULL, od_race_worker, &ra1));
         assert(!pthread_create(&rt2, NULL, od_race_worker, &ra2));
