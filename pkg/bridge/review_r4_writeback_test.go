@@ -7,7 +7,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
@@ -213,4 +216,157 @@ func TestReviewR4MetadataOnlyEditNeverRewritesANLZCues(t *testing.T) {
 	if !bytes.Equal(beforeDAT, afterDAT) || !bytes.Equal(beforeEXT, afterEXT) {
 		t.Fatal("metadata-only edit rewrote ANLZ files")
 	}
+}
+
+func TestReviewR4StockStickDoesNotArmFallbackRescan(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "Engine Library", "Database2"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var scans atomic.Int32
+	w := &CueWatcher{
+		mountEvents:    make(chan struct{}),
+		rescanFallback: 15 * time.Millisecond,
+		mounts: func() []string {
+			scans.Add(1)
+			return []string{root}
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := w.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := scans.Load(); n != 1 {
+		t.Fatalf("idle stock stick caused %d scans, want only the initial rescan", n)
+	}
+}
+
+func TestReviewR4UnresolvedMountReadinessWindowExpiresAndLateExportNeedsEvent(t *testing.T) {
+	t.Cleanup(SetCueRunDirForTest(t.TempDir()))
+
+	t.Run("ExpiryStopsFallbackAndNeedsNotifyOrMountEvent", func(t *testing.T) {
+		root := t.TempDir()
+		evCh := make(chan struct{}, 2)
+		var scans atomic.Int32
+		w := &CueWatcher{
+			quiet:           20 * time.Millisecond,
+			retry:           50 * time.Millisecond,
+			poll:            20 * time.Millisecond,
+			rescanFallback:  15 * time.Millisecond,
+			readinessWindow: 50 * time.Millisecond,
+			ejectDir:        cueEjectingDir,
+			useMountWatch:   true,
+			mountEvents:     evCh,
+			mounts: func() []string {
+				scans.Add(1)
+				return []string{root}
+			},
+			pass: WriteBackCues,
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = w.Run(ctx)
+		}()
+		defer func() {
+			cancel()
+			<-done
+		}()
+
+		// Wait until readiness window expires and fallback polling stops.
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if scans.Load() >= 2 && !w.hasOtherMounts() {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if w.hasOtherMounts() || scans.Load() < 2 {
+			t.Fatalf("readiness window did not expire cleanly: hasOtherMounts=%v scans=%d", w.hasOtherMounts(), scans.Load())
+		}
+		afterExpiry := scans.Load()
+		time.Sleep(80 * time.Millisecond)
+		if got := scans.Load(); got != afterExpiry {
+			t.Fatalf("fallback rescan continued after readiness expiry: %d -> %d", afterExpiry, got)
+		}
+
+		// Late export created without mount/notify event stays unnoticed while idle.
+		testfixture.LargeExport(t, root, 1)
+		time.Sleep(60 * time.Millisecond)
+		if w.hasSticks() || scans.Load() != afterExpiry {
+			t.Fatalf("unexpected rescan or attach without event: hasSticks=%v scans=%d (want %d)", w.hasSticks(), scans.Load(), afterExpiry)
+		}
+
+		// Explicit eligibility notification attaches immediately.
+		w.Notify()
+		if !WaitWatchingForTest(w, root, 2*time.Second) {
+			t.Fatal("Notify did not attach late export after readiness window expired")
+		}
+	})
+
+	t.Run("NewMountIdentityGetsFreshReadinessWindow", func(t *testing.T) {
+		root := t.TempDir()
+		evCh := make(chan struct{}, 2)
+		var idMu sync.Mutex
+		mountID := "mid:1:8:1:/:initial"
+		var scans atomic.Int32
+		w := &CueWatcher{
+			quiet:           20 * time.Millisecond,
+			retry:           50 * time.Millisecond,
+			poll:            20 * time.Millisecond,
+			rescanFallback:  15 * time.Millisecond,
+			readinessWindow: 120 * time.Millisecond,
+			ejectDir:        cueEjectingDir,
+			useMountWatch:   true,
+			mountEvents:     evCh,
+			mountsInfo: func() []mountEntry {
+				scans.Add(1)
+				idMu.Lock()
+				id := mountID
+				idMu.Unlock()
+				return []mountEntry{{path: root, id: id}}
+			},
+			pass: WriteBackCues,
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = w.Run(ctx)
+		}()
+		defer func() {
+			cancel()
+			<-done
+		}()
+
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if scans.Load() >= 2 && !w.hasOtherMounts() {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if w.hasOtherMounts() {
+			t.Fatalf("initial mount did not settle after readiness expiry")
+		}
+
+		// Coalesced remount at same path with new mount ID gets a fresh readiness window.
+		idMu.Lock()
+		mountID = "mid:2:8:2:/:remounted"
+		idMu.Unlock()
+		evCh <- struct{}{}
+		deadline = time.Now().Add(time.Second)
+		for time.Now().Before(deadline) && !w.hasOtherMounts() {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if !w.hasOtherMounts() {
+			t.Fatal("new mount identity did not receive a fresh readiness window")
+		}
+		testfixture.LargeExport(t, root, 1)
+		if !WaitWatchingForTest(w, root, 2*time.Second) {
+			t.Fatal("delayed export on remounted identity was not discovered in fresh readiness window")
+		}
+	})
 }

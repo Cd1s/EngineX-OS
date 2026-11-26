@@ -37,7 +37,10 @@ func (w *CueWatcher) cueEjecting(mount string) bool {
 	return err == nil
 }
 
-const cueWatcherDefaultFallback = 15 * time.Second
+const (
+	cueWatcherDefaultFallback  = 15 * time.Second
+	cueWatcherDefaultReadiness = 60 * time.Second
+)
 
 type mountEntry struct {
 	path string
@@ -50,20 +53,23 @@ type CueWatcher struct {
 	quiet, retry time.Duration
 	// poll is how often active sticks' m.db are looked at: stopped when 0 rekordbox sticks
 	// are mounted on Linux where /proc/self/mountinfo notifies mount/unmount via EPOLLPRI.
-	poll           time.Duration
-	rescanFallback time.Duration
-	mediaRoot      string
-	ejectDir       string
-	mounts         func() []string
-	mountsInfo     func() []mountEntry
-	pass           func(context.Context, string, WriteBackOptions) (WriteBackResult, error)
-	useMountWatch  bool
-	mountEvents    <-chan struct{}
-	wakeOnce       sync.Once
-	wakeCh         chan struct{}
-	mu             sync.Mutex
-	sticks         map[string]*cueStick
-	otherMounts    int
+	poll            time.Duration
+	rescanFallback  time.Duration
+	readinessWindow time.Duration
+	mediaRoot       string
+	ejectDir        string
+	mounts          func() []string
+	mountsInfo      func() []mountEntry
+	pass            func(context.Context, string, WriteBackOptions) (WriteBackResult, error)
+	useMountWatch   bool
+	mountEvents     <-chan struct{}
+	wakeOnce        sync.Once
+	wakeCh          chan struct{}
+	mu              sync.Mutex
+	sticks          map[string]*cueStick
+	otherMounts     int
+	pendingReady    map[string]time.Time
+	settledOther    map[string]bool
 }
 
 type cueStick struct {
@@ -89,16 +95,35 @@ func (st *cueStick) clearKeys() {
 
 func NewCueWatcher(mediaRoot string) *CueWatcher {
 	return &CueWatcher{
-		quiet:          CueQuiet,
-		retry:          15 * time.Second,
-		poll:           time.Second,
-		rescanFallback: cueWatcherDefaultFallback,
-		mediaRoot:      mediaRoot,
-		ejectDir:       cueEjectingDir,
-		useMountWatch:  true,
-		pass:           WriteBackCues,
-		mounts:         func() []string { return mediaMounts(mediaRoot) },
+		quiet:           CueQuiet,
+		retry:           15 * time.Second,
+		poll:            time.Second,
+		rescanFallback:  cueWatcherDefaultFallback,
+		readinessWindow: cueWatcherDefaultReadiness,
+		mediaRoot:       mediaRoot,
+		ejectDir:        cueEjectingDir,
+		useMountWatch:   true,
+		pass:            WriteBackCues,
+		mounts:          func() []string { return mediaMounts(mediaRoot) },
 	}
+}
+
+func (w *CueWatcher) fallbackInterval() time.Duration {
+	if w.rescanFallback > 0 {
+		return w.rescanFallback
+	}
+	return cueWatcherDefaultFallback
+}
+
+func (w *CueWatcher) readinessDuration() time.Duration {
+	if w.readinessWindow > 0 {
+		return w.readinessWindow
+	}
+	fb := w.fallbackInterval()
+	if fb < cueWatcherDefaultFallback {
+		return min(cueWatcherDefaultReadiness, 8*fb)
+	}
+	return cueWatcherDefaultReadiness
 }
 
 func (w *CueWatcher) notifyCh() chan struct{} {
@@ -206,25 +231,89 @@ func journalBusy(mount string) bool {
 	return err == nil && st.Size() > 0
 }
 
+func isStockEngineMount(mount string) bool {
+	st, err := os.Stat(filepath.Join(mount, "Engine Library", "Database2"))
+	if err != nil || !st.IsDir() {
+		return false
+	}
+	for _, name := range []string{"PIONEER", ".PIONEER", "pioneer", ".pioneer"} {
+		if _, err := os.Stat(filepath.Join(mount, name)); err == nil || !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+	}
+	return true
+}
+
 // rescan watches the rekordbox sticks mounted now (cleaning what a cut pass left on each new
-// one) and forgets any gone or mount/view-replaced stick.
+// one) and forgets any gone or mount/view-replaced stick. Unresolved non-stock mounts get a
+// finite readiness window keyed by mount identity before fallback rescans stop permanently.
 func (w *CueWatcher) rescan() {
+	type otherEntry struct {
+		key   string
+		stock bool
+	}
 	now := map[string]string{}
 	views := map[string]string{}
-	other := 0
+	var others []otherEntry
 	for _, ent := range w.listMounts() {
 		if rekordboxStick(ent.path) {
 			vu := viewUUID(ent.path)
 			now[ent.path] = ent.id + "\x00" + vu
 			views[ent.path] = vu
 		} else {
-			other++
+			others = append(others, otherEntry{
+				key:   ent.path + "\x00" + ent.id,
+				stock: isStockEngineMount(ent.path),
+			})
 		}
 	}
 	w.forget(now)
+	nowTime := time.Now()
+	win := w.readinessDuration()
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.otherMounts = other
+	if w.pendingReady == nil {
+		w.pendingReady = map[string]time.Time{}
+	}
+	if w.settledOther == nil {
+		w.settledOther = map[string]bool{}
+	}
+	seenOther := make(map[string]bool, len(others))
+	pendingCount := 0
+	for _, o := range others {
+		seenOther[o.key] = true
+		if o.stock {
+			w.settledOther[o.key] = true
+			delete(w.pendingReady, o.key)
+			continue
+		}
+		if w.settledOther[o.key] {
+			continue
+		}
+		deadline, ok := w.pendingReady[o.key]
+		if !ok {
+			w.pendingReady[o.key] = nowTime.Add(win)
+			pendingCount++
+			continue
+		}
+		if !nowTime.Before(deadline) {
+			delete(w.pendingReady, o.key)
+			w.settledOther[o.key] = true
+			continue
+		}
+		pendingCount++
+	}
+	for k := range w.pendingReady {
+		if !seenOther[k] {
+			delete(w.pendingReady, k)
+		}
+	}
+	for k := range w.settledOther {
+		if !seenOther[k] {
+			delete(w.settledOther, k)
+		}
+	}
+	w.otherMounts = pendingCount
 	if w.sticks == nil {
 		w.sticks = map[string]*cueStick{}
 	}
@@ -432,10 +521,7 @@ func (w *CueWatcher) Run(ctx context.Context) error {
 	defer stopWatch()
 	defer w.forget(nil)
 
-	fbInterval := w.rescanFallback
-	if fbInterval <= 0 {
-		fbInterval = cueWatcherDefaultFallback
-	}
+	fbInterval := w.fallbackInterval()
 
 	var ticker, fbTicker *time.Ticker
 	var tickC, fbC <-chan time.Time
