@@ -841,7 +841,7 @@ def main():
         def get_prolink_gids():
             lists = json.loads(ns_curl("A", "/v1/users/1/playlists"))
             for item in lists.get("items") or []:
-                if item.get("title") == "Tracks" and item.get("uuid"):
+                if item.get("title") in ("Tracks", "曲目", "Pistas") and item.get("uuid"):
                     tr_resp = json.loads(ns_curl("A", f"/v1/playlists/{item['uuid']}/tracks"))
                     out = {}
                     for tr in tr_resp.get("items") or []:
@@ -850,7 +850,11 @@ def main():
                         return out
             return None
 
-        prolink_gids = wait_for(get_prolink_gids, timeout=25, label="A Pro DJ Link track list")
+        try:
+            prolink_gids = wait_for(get_prolink_gids, timeout=25, label="A Pro DJ Link track list")
+        except AssertionError:
+            print("DIAG A /v1/users/1/playlists:", ns_curl("A", "/v1/users/1/playlists").decode("utf-8", "replace")[:400], flush=True)
+            raise
 
         # 5. streaming setup: /data/downloads/TIDAL/stream-*.wav + A's stm.db
         stm_mdb = db_path("A", "stm.db")
