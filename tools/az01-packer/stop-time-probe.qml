@@ -20,6 +20,9 @@ Item {
     readonly property string board: "@BOARD@"
     readonly property string arm: "@ARM@"
     readonly property bool brakeRuns: "@BRAKE@" === "1"
+    readonly property bool expectPlayer: "@EXPECT_PLAYER@" === "true"
+    readonly property string expectName: "@EXPECT_NAME@"
+    readonly property string expectPath: "@EXPECT_PATH@"
     readonly property bool motorRuns: "@MOTOR@" !== ""
     property var motor: null
     property int step: 0
@@ -58,6 +61,10 @@ Item {
             + " rampDownTime.isPerDeck=" + flag(ramp, "isPerDeck") + " rampDownTime.isPerLayer=" + flag(ramp, "isPerLayer")
             + " rampDownTime.canStore=" + flag(ramp, "canStore"))
         say("properties at start " + rampState())
+        // The arm's layout, or nothing below means anything: a failed 4-deck switch leaves isPlayer true.
+        if (!device || device.isPlayer !== expectPlayer)
+            throw new Error("layout: Config.device.isPlayer is " + flag(device, "isPlayer") + ", this arm needs " + expectPlayer)
+        if (!brakeRuns && !motorRuns) throw new Error("neither the brake nor the motor check runs on this board")
     }
     function makeKnob() {
         const text = "import QtQuick 2.12\nimport Planck 1.0\nimport ControlSurfaceModules 0.1\nItem {\n"
@@ -71,6 +78,18 @@ Item {
         ctx.knobPath = path
         say("knob deckConfig.name=\"" + knob.deckName + "\" target=" + path + " exists=" + (opt(path) ? "yes" : "no"))
         if (!path) throw new Error("the stock StopTime module gave no target path")
+        if (knob.deckName !== expectName || path !== expectPath)
+            throw new Error("knob: deckConfig.name \"" + knob.deckName + "\" and target " + path + ", this arm needs \""
+                + expectName + "\" and " + expectPath)
+        // The target must be a property Engine has and keeps what is written to it.
+        const target = opt(path)
+        if (!target) throw new Error("knob: Engine has no " + path)
+        const before = target.value
+        target.value = 0.25
+        const kept = Math.abs(target.value - 0.25) < 1e-6
+        target.value = before
+        if (!kept) throw new Error("knob: " + path + " did not keep a written value")
+        say("knob target " + path + " exists and keeps a written value")
         if (!motorRuns) { say("motor: this board's assignment has no Motorized module"); return }
         const motorText = "import QtQuick 2.12\nimport Planck 1.0\nimport airAssignments 1.0\nItem {\n"
             + "    QtObject {\n        id: deckConfig\n        property int midiChannel: 0\n@DECKCONFIG@\n"
@@ -119,14 +138,24 @@ Item {
         const travel = s.length ? (s[s.length - 1][1] - s[0][1]) / rate : 0
         ctx[label] = {runOn: lastMove / 1000, travel: travel}
         say("brake " + label + ": ran on " + num(lastMove / 1000) + " s, " + num(travel) + " s of track after PLAY was released"
-            + " (" + s.length + " samples, play state " + tr("/Engine/Deck1/PlayState").state + ")")
+            + " (" + s.length + " samples over " + num(s.length ? s[s.length - 1][0] / 1000 : 0) + " s, "
+            + (stopped() ? "stopped" : "still moving at the 12 s limit") + ", play state " + tr("/Engine/Deck1/PlayState").state + ")")
+    }
+    // The deck has stopped when its position has not moved over the last 300 ms of samples.
+    function stopped() {
+        const s = probe.samples
+        if (s.length < 2) return false
+        const last = s[s.length - 1]
+        for (let i = s.length - 2; i >= 0 && last[0] - s[i][0] <= 300; i--) if (Math.abs(last[1] - s[i][1]) > 1) return false
+        return last[0] >= 300
     }
     function brake(label, before) {
         return [
             [300, function() { if (before) before() }],
             [2000, function() { tr("/Engine/Deck1/Play").state = true }],
-            [2600, function() { release() }],
-            [300, function() { measure(label) }]
+            [0, function() { release() }],
+            // Sample until the deck has stopped (the whole run-on), at most 12 s.
+            [300, function() { if (!stopped() && Date.now() - probe.releasedAt < 12000) return false; measure(label) }]
         ]
     }
     function moves(hi, lo) { return ctx[hi].runOn - ctx[lo].runOn >= 0.2 && ctx[hi].travel - ctx[lo].travel >= 0.05 }

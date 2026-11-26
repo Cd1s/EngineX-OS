@@ -10,7 +10,7 @@ ENGINEX_LAB=${ENGINEX_LAB:-$legacy_lab}
 # measures Engine's brake after PLAY with the knob at the top and at the bottom (a motorized board loads no track here: its
 # platter is missing). Each board runs the stock 2-deck layout (arm 2deck) and the hook's 4-deck layout (arm 4deck:
 # four_deck_waveform=1, four_deck_role=13).
-#   bash tools/az01-packer/stop-time-sandbox.sh <new-private-dir> [BOARD ...]      (default: JP07 JP08)
+#   bash tools/az01-packer/stop-time-sandbox.sh <new-private-dir> [BOARD ...]      (default: JP07 JP08; JP14 also runs)
 #   STOP_TIME_ARMS="2deck 4deck" picks the arms. Run it under `enginex-run exclusive` (timing, one GPU); it takes no lock.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
@@ -19,7 +19,10 @@ LAB=${ENGINEX_LAB}
 image_of() {
     case "$1" in
         JP07|JP08) echo fw-5.3.0/SC5000 ;;
-        JP13|JP14) echo fw-5.3.0/SC6000 ;;
+        JP14) echo fw-5.3.0/SC6000 ;;
+        # A track never loads on JP13 in this sandbox (as on the motorized boards), and JP13 has no motor, so neither
+        # check could run; its knob and brake are the stock modules JP07 runs.
+        JP13) echo "JP13: no track loads in this sandbox and it has no motor: nothing to check (JP07 covers its knob and brake)" >&2; return 1 ;;
         *) echo "not a player: $1" >&2; return 1 ;;
     esac
 }
@@ -56,13 +59,24 @@ PY
     sed -n "/cat > \"\$patched\/role.awk\" <<'AWK'/,/^AWK\$/p" "$REPO/rootfs-overlay/etc/enginex/engine-ui-guard" | sed '1d;$d' > "$W/role.awk"
     grep -q 'id: deckConfig' "$W/role.awk" || { echo "engine-ui-guard no longer rewrites deckConfig: update this sandbox" >&2; exit 1; }
     fail=0
+    # The child checks that it really runs in its own mount and network namespaces before its first mount.
+    export ENGINEX_OUTER_MNTNS ENGINEX_OUTER_NETNS
+    ENGINEX_OUTER_MNTNS=$(readlink /proc/self/ns/mnt)
+    ENGINEX_OUTER_NETNS=$(readlink /proc/self/ns/net)
     for board in "${boards[@]}"; do
         for arm in ${STOP_TIME_ARMS:-2deck 4deck}; do
-            unshare -m -n -p -f --kill-child bash "$0" "$W" --inner "$board" "$arm" || fail=1
+            unshare -m -n -p -f --kill-child --propagation private bash "$0" "$W" --inner "$board" "$arm" || fail=1
         done
     done
     [ "$fail" = 0 ] && echo "STOP_TIME RESULT|PASS|${boards[*]}" || echo "STOP_TIME RESULT|FAIL"
     exit $fail
+fi
+# --inner is this script's own re-exec. Passed by hand it would skip the unshare above, and the mounts below would land
+# in the caller's namespaces (the build host's): refuse unless both namespaces really changed.
+if [ -z "${ENGINEX_OUTER_MNTNS:-}" ] || [ -z "${ENGINEX_OUTER_NETNS:-}" ] ||
+    [ "$(readlink /proc/self/ns/mnt)" = "$ENGINEX_OUTER_MNTNS" ] || [ "$(readlink /proc/self/ns/net)" = "$ENGINEX_OUTER_NETNS" ]; then
+    echo "stop-time-sandbox.sh: --inner is this script's own re-exec flag; run it as: bash $0 <new-private-dir> [BOARD ...]" >&2
+    exit 2
 fi
 board=${3:?board required}
 arm=${4:?arm required}
@@ -126,9 +140,19 @@ if [ "$arm" = 4deck ]; then
     printf 'four_deck_waveform=1\nfour_deck_role=13\n' > "$W/$board-$arm-fourdeck.conf"
 fi
 sed 's/^/  deckConfig| /' "$W/$board-$arm-deckconfig.txt"
+# What this arm must show before any trial counts: the layout (Config.device.isPlayer), the knob's deck name and its
+# exact target. A 4-deck arm whose layout switch failed would otherwise pass on the stock property.
+case $arm in
+    2deck) expect_player=true; expect_name=; expect_path=/Client/Preferences/RampDownTime ;;
+    4deck) expect_player=false; expect_name=Left; expect_path=/Client/Preferences/RampDownTime/DeckLeft ;;
+    *) echo "unknown arm $arm" >&2; exit 1 ;;
+esac
 # The motor's ramp-down lines from the Motorized module Engine serves: the pack's copy when the pack replaces it.
 : > "$W/$board-$arm-motor.txt"
 brake=${STOP_TIME_BRAKE:-1}
+case $board in JP08|JP14)
+    grep -q '^    Motorized {' "$stock" || { echo "$board: the stock assignment has no Motorized module" >&2; exit 1; } ;;
+esac
 if grep -q '^    Motorized {' "$stock"; then
     brake=${STOP_TIME_BRAKE:-0}
     rel=ControlSurfaceModules/ControlSurfaceModules/Motorized.qml
@@ -141,14 +165,16 @@ if grep -q '^    Motorized {' "$stock"; then
     sed 's/^/  motor| /' "$W/$board-$arm-motor.txt"
 fi
 python3 -I - "$REPO/tools/az01-packer/stop-time-probe.qml" "$R/data/enginex/ui/packs/en/Skins/Common/Items/QmlWarnings.qml" \
-    "$board" "$arm" "$W/$board-$arm-deckconfig.txt" "$W/$board-$arm-motor.txt" "$brake" <<'PY'
+    "$board" "$arm" "$W/$board-$arm-deckconfig.txt" "$W/$board-$arm-motor.txt" "$brake" \
+    "$expect_player" "$expect_name" "$expect_path" <<'PY'
 import sys
-src, out, board, arm, deck, motor, brake = sys.argv[1:]
+src, out, board, arm, deck, motor, brake, player, name, path = sys.argv[1:]
 def js(path):  # the lines, as the inside of a JavaScript string literal
     lines = open(path, encoding="utf-8").read().rstrip("\n")
     return lines.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 text = open(src, encoding="utf-8").read()
-for key, value in (("@BOARD@", board), ("@ARM@", arm), ("@DECKCONFIG@", js(deck)), ("@MOTOR@", js(motor)), ("@BRAKE@", brake)):
+for key, value in (("@BOARD@", board), ("@ARM@", arm), ("@DECKCONFIG@", js(deck)), ("@MOTOR@", js(motor)), ("@BRAKE@", brake),
+                   ("@EXPECT_PLAYER@", player), ("@EXPECT_NAME@", name), ("@EXPECT_PATH@", path)):
     text = text.replace(key, value)
 open(out, "w", encoding="utf-8").write(text)
 PY

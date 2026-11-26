@@ -6837,7 +6837,7 @@ class MotorizedPlatterRoleTest(unittest.TestCase):
             bp.ROOT = old_root
         return stock, text
 
-    def test_only_the_deck_list_differs_from_stock(self):
+    def test_only_the_deck_list_and_the_stop_time_source_differ_from_stock(self):
         # #263 the deck list; #329 the motor's stop time comes from the property the Stop Time knob writes. Nothing else.
         import difflib
         stock, text = self.patched()
