@@ -35,6 +35,7 @@ type Report struct {
 	OrphanArtwork     int       `json:"orphan_artwork_references"`
 	ReanalysisPending int       `json:"reanalysis_pending"`
 	PathsNormalized   int       `json:"paths_normalized"`
+	DropboxLocalized  int       `json:"dropbox_localized,omitempty"`
 	HistoryPruned     bool      `json:"history_pruned"`
 	ReserveFixed      []string  `json:"reserve_fixed,omitempty"`
 	Warnings          []string  `json:"warnings,omitempty"`
@@ -286,10 +287,39 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		}
 		return r, nil
 	}
+	dropboxBefore := r.DropboxLocalized
+	dropboxStart := time.Now()
+	dropboxRemaining, err := localizeDropboxTracks(ctx, db, mount, &r)
+	if err != nil {
+		pathsFixed := r.PathsNormalized
+		dropboxFixed := r.DropboxLocalized
+		r, healErr := heal(db, dataOnly)
+		r.ReserveFixed = fixed
+		r.PathsNormalized = pathsFixed
+		r.DropboxLocalized = dropboxFixed
+		_ = db.Close()
+		r.Mount = mount
+		if healErr != nil {
+			return r, healErr
+		}
+		return r, err
+	}
+	if ctx.Err() != nil || (r.DropboxLocalized != dropboxBefore && time.Since(dropboxStart) >= time.Second) {
+		r.Healthy = true
+		closeErr := db.Close()
+		r.Mount = mount
+		log.Printf("dbhealer: mount %s localized %d dropbox tracks, %d remaining", mount, r.DropboxLocalized, dropboxRemaining)
+		if closeErr != nil {
+			return r, closeErr
+		}
+		return r, nil
+	}
 	pathsFixed := r.PathsNormalized
+	dropboxFixed := r.DropboxLocalized
 	r, err = heal(db, dataOnly)
 	r.ReserveFixed = fixed
 	r.PathsNormalized = pathsFixed
+	r.DropboxLocalized = dropboxFixed
 	if err != nil {
 		_ = db.Close()
 		r.Mount = mount
@@ -298,6 +328,9 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 	closeErr := db.Close()
 	r.Mount = mount
 	log.Printf("dbhealer: mount %s normalized %d track paths, %d remaining", mount, r.PathsNormalized, remaining)
+	if r.DropboxLocalized > 0 || dropboxRemaining > 0 {
+		log.Printf("dbhealer: mount %s localized %d dropbox tracks, %d remaining", mount, r.DropboxLocalized, dropboxRemaining)
+	}
 	if closeErr != nil {
 		return r, closeErr
 	}
