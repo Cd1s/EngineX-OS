@@ -7157,6 +7157,7 @@ class ShadowHeadSyncLeadTest(unittest.TestCase):
     while the source's BPM was green, and drew the phase meter while the source showed LEAD (g10-e-z3-L)."""
 
     def test_final_bindings_use_explicit_false_and_fall_back_only_when_missing(self):
+        self.addCleanup(setattr, bp, 'ROOT', bp.ROOT)  # later tests must see the stock ROOT
         bp.ROOT = 'Skins/Embedded/'
         patches = bp.edits(False)
         for path, marker in (
@@ -7209,6 +7210,7 @@ assert.deepEqual(scShadowHead, {});
 
     def test_the_shadow_phase_meter_shows_the_sources(self):
         """A synced follower's copy is out of Sync: its stock phase meter stayed grey while the source's was green (2026-11-20)."""
+        self.addCleanup(setattr, bp, 'ROOT', bp.ROOT)  # later tests must see the stock ROOT
         bp.ROOT = 'Skins/Embedded/'
         patches = bp.edits(False)
         for path, marker in (
@@ -7234,6 +7236,7 @@ assert.equal(result(), true);
 
     def test_a_shadow_phase_meter_draws_the_sources_phase(self):
         """The copy follows the source, so its own phase offset jumps: lines jumped on green and the needle ran wild off it (2026-11-20)."""
+        self.addCleanup(setattr, bp, 'ROOT', bp.ROOT)  # later tests must see the stock ROOT
         bp.ROOT = 'Skins/Embedded/'
         replacement = next(new for old, new in bp.edits(False)['Skins/Embedded/Views/MainView/PhaseMeter.qml'] if 'value:' in new)
         ShadowDisplayTest.js(self, r"""
