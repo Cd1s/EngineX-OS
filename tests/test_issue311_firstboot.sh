@@ -140,5 +140,5 @@ check_asset SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img
 
 run_profile az04 "$ASSETS/PRIME4G2-5.3.0.5-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img" 1
 run_profile gen2-armhf "$ASSETS/SCLIVE4-5.3.0.5-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img" 1
-run_profile gen1-sc5000 "$ASSETS/SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img" 0
+run_profile gen1-jp07 "$ASSETS/SC5000-5.3.0.5-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img" 0
 run_crash_loop
