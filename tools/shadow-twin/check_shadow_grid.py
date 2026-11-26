@@ -202,20 +202,21 @@ def main():
     assert bd2 < 0.08, f"beat phase mismatch after edit 2: A={a2} B={b2} diff={bd2}"
     assert abs(b2["cue1"] - 220500) < 2, f"hot cue lost on edit 2: {b2}"
 
-    # 3) Live edit while A Deck 1 is PLAYING: double tempo.
+    # 3) Live edit while A Deck 1 is PLAYING: resetGrid() restores 128 BPM single-anchor grid.
+    # (Stock BeatGridEditView disables doubleTempo() once dynamic anchors are present.)
     twin.ev("A", 'root.rtTr("/Engine/Deck1/Play").state = true; "play"')
     wait_for(lambda: deck_state("A")["play"], 10, "A playing")
     time.sleep(0.8)
-    edit_grid_a("ed.doubleTempo();")
+    edit_grid_a("ed.resetGrid();")
     time.sleep(1.0)
-    wait_for(lambda: (r := db_row("A", "track-a.wav")) and r["bpmA"] > 100 and r["beatSha"] != ra2["beatSha"], 15, "A edit 3 playing m.db")
+    wait_for(lambda: (r := db_row("A", "track-a.wav")) and abs(r["bpmA"] - 128) < 0.2 and r["beatSha"] != ra2["beatSha"], 15, "A edit 3 playing m.db")
     wait_for(
         lambda: (ra := db_row("A", "track-a.wav")) and (rb := db_row("B", "track-a.wav")) and rb["beatSha"] == ra["beatSha"] and abs(deck_state("B")["firstAnchor"] - deck_state("A")["firstAnchor"]) < 0.1,
         20,
         "B in-place update while A playing",
     )
     a3, b3, rb3 = deck_state("A"), deck_state("B"), db_row("B", "track-a.wav")
-    print(f"EDIT3 (playing double): A play={a3['play']} firstAnchor={a3['firstAnchor']:.2f} | B play={b3['play']} master={b3['master']} firstAnchor={b3['firstAnchor']:.2f} loads={b3['loads']} cue1={b3['cue1']:.0f} sha={rb3['beatSha']}", flush=True)
+    print(f"EDIT3 (playing reset->128): A play={a3['play']} firstAnchor={a3['firstAnchor']:.2f} | B play={b3['play']} master={b3['master']} firstAnchor={b3['firstAnchor']:.2f} loads={b3['loads']} cue1={b3['cue1']:.0f} sha={rb3['beatSha']}", flush=True)
     assert a3["play"], "A stopped playing during grid edit"
     assert b3["loads"] == 1, f"deck reloaded during playing edit: {b3}"
     assert not b3["master"], f"silent shadow copy took MASTER: {b3}"
