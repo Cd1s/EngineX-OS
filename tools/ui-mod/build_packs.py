@@ -8662,9 +8662,19 @@ def edits(dev: bool):
         # 2+4, ...: on 2+4 the motor never ran and the platter's touch reached deck 1, on 1+3 deck 3
         # had neither. engine-ui-guard names the unit's decks in its assignment file
         # (deckConfig.scDecks, layer A first, so the two motor slots stay 0 and 1); without it, stock.
+        # #329: in the 4-deck layout Engine keeps the ramp-down time per deck group (RampDownTime/DeckLeft and
+        # /DeckRight, no global RampDownTime), and the Stop Time knob writes its group's (stock StopTime.qml: the suffix
+        # of deckConfig.name, which engine-ui-guard sets). Stock Motorized.qml reads only the global property, so on the
+        # SC5000M / SC6000M the platter motor never got the knob's stop time: playback stopped at once whatever the
+        # knob said. The motor reads the property the knob writes; with stock's unnamed deckConfig that is the global one.
         out["ControlSurfaceModules/ControlSurfaceModules/Motorized.qml"] = [(
             "        model: [1, 2]\n",
             "        model: deckConfig.scDecks || [1, 2]\n",
+        ), (
+            '    readonly property real rampDownTime: Planck.getProperty("/Client/Preferences/RampDownTime").translator.value\n',
+            '    readonly property QObjProperty scRampDownTime: Planck.getProperty("/Client/Preferences/RampDownTime"'
+            ' + (deckConfig.name ? "/Deck" + deckConfig.name : ""))\n'
+            "    readonly property real rampDownTime: scRampDownTime && scRampDownTime.translator ? scRampDownTime.translator.value : 0\n",
         )]
         # #49: a swipe loads the role's own decks (1+3: left 1, right 3), not the stock
         # left/right layer deck. Only "Deck N" actions; Prepare List etc. stay stock.

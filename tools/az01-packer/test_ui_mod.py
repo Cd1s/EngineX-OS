@@ -6838,10 +6838,70 @@ class MotorizedPlatterRoleTest(unittest.TestCase):
         return stock, text
 
     def test_only_the_deck_list_differs_from_stock(self):
+        # #263 the deck list; #329 the motor's stop time comes from the property the Stop Time knob writes. Nothing else.
+        import difflib
         stock, text = self.patched()
-        changed = [(a, b) for a, b in zip(stock.splitlines(), text.splitlines()) if a != b]
-        self.assertEqual(len(stock.splitlines()), len(text.splitlines()))
-        self.assertEqual(changed, [("        model: [1, 2]", "        model: deckConfig.scDecks || [1, 2]")])
+        changed = [l for l in difflib.unified_diff(stock.splitlines(), text.splitlines(), lineterm="", n=0)
+                   if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+        self.assertEqual(changed, [
+            '-    readonly property real rampDownTime: Planck.getProperty("/Client/Preferences/RampDownTime").translator.value',
+            '+    readonly property QObjProperty scRampDownTime: Planck.getProperty("/Client/Preferences/RampDownTime"'
+            ' + (deckConfig.name ? "/Deck" + deckConfig.name : ""))',
+            "+    readonly property real rampDownTime: scRampDownTime && scRampDownTime.translator ? scRampDownTime.translator.value : 0",
+            "-        model: [1, 2]",
+            "+        model: deckConfig.scDecks || [1, 2]",
+        ])
+
+    @unittest.skipUnless(shutil.which("node"), "node needed for the stop time checks")
+    def test_329_the_motor_reads_the_property_the_stop_time_knob_writes(self):
+        # The knob is stock StopTime.qml: it writes RampDownTime plus "/Deck" + deckConfig.name when the name is set.
+        # The 4-deck layout has only the group properties (RampDownTime/DeckLeft and /DeckRight), the stock layout only
+        # the global one (both read in Engine 5.3.0 on JP07 and JP08 by stop-time-sandbox.sh). engine-ui-guard names
+        # deckConfig "Left" (roles 13, 1) or "Right" (24, 2), by layer for 12 and 34; stock leaves it unnamed. The motor
+        # (the bindings of the patched Motorized.qml, evaluated as they are) must read what the knob wrote.
+        stock, text = self.patched()
+        knob = (LAB / "5.3.0/qrc/ControlSurfaceModules/ControlSurfaceModules/StopTime.qml").read_text()
+        suffix = re.search(r"readonly property string suffix: ([^\n]+)\n", knob).group(1)
+        path = re.search(r"\n\s*path: ([^\n]+)\n", knob).group(1)
+        bindings = re.findall(r"^    readonly property \w+ (scRampDownTime|rampDownTime): ([^\n]+)$", text, re.M)
+        self.assertTrue(bindings and bindings[-1][0] == "rampDownTime", bindings)
+        script = "const assert = require('node:assert/strict');\n"
+        script += "const suffixSource = " + json.dumps(suffix) + ", pathSource = " + json.dumps(path) + ";\n"
+        script += "const bindings = " + json.dumps(bindings) + ";\n"
+        script += r"""
+const global = '/Client/Preferences/RampDownTime';
+const layouts = {
+    stock: {names: [''], props: [global]},
+    fourDeck: {names: ['Left', 'Right'], props: [global + '/DeckLeft', global + '/DeckRight']},
+};
+for (const [layout, {names, props}] of Object.entries(layouts)) {
+    for (const name of names) {
+        for (const v of [1, 0, 0.5]) {
+            const store = {};
+            for (const p of props) store[p] = 0.25;
+            const Planck = {getProperty: p => p in store ? {translator: {get value() { return store[p] }}} : null};
+            const deckConfig = {name};
+            const suffix = new Function('deckConfig', 'return ' + suffixSource)(deckConfig);
+            const knobPath = new Function('suffix', 'return ' + pathSource)(suffix);
+            assert.ok(knobPath in store, layout + ' ' + JSON.stringify(name) + ': the knob writes ' + knobPath + ', which Engine does not have');
+            store[knobPath] = v;
+            const scope = {};
+            let value;
+            try {
+                for (const [prop, source] of bindings) {
+                    scope[prop] = new Function('Planck', 'deckConfig', ...Object.keys(scope), 'return (' + source + ')')(Planck, deckConfig, ...Object.values(scope));
+                }
+                value = scope.rampDownTime;
+            } catch (e) {
+                assert.fail(layout + ' ' + JSON.stringify(name) + ': the motor binding failed (' + e.message + '), so the motor never gets the knob\'s stop time');
+            }
+            assert.equal(value, v, layout + ' ' + JSON.stringify(name) + ': the knob wrote ' + v + ' to ' + knobPath + ', the motor reads ' + value);
+        }
+    }
+}
+"""
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr[-1500:])
 
     @unittest.skipUnless(shutil.which("node"), "node needed for the platter role checks")
     def test_platter_layer_and_motor_slot_follow_the_role(self):
