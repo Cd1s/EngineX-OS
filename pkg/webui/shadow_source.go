@@ -39,13 +39,21 @@ type shadowSourceCache struct {
 // detail it queues the detail waveform; without (Engine mode's cover) it is
 // read from the library as it is, and neither queued nor kept.
 func (s *Server) sourceDisplayAsset(ctx context.Context, path, key string, detail bool) (*shadowDisplayAsset, error) {
+	return s.sourceDisplayAssetFor(ctx, path, key, "", detail)
+}
+
+func (s *Server) sourceDisplayAssetFor(ctx context.Context, path, key, gridGen string, detail bool) (*shadowDisplayAsset, error) {
 	stableKey := stableTrackKey(key)
+	reqKey := key
+	if gridGen != "" {
+		reqKey = key + "\x00" + gridGen
+	}
 	c := &s.shadow.sourceDisplay
 	c.mu.Lock()
 	if c.entries == nil {
 		c.entries = map[string]*shadowSourceEntry{}
 	}
-	if e := c.entries[stableKey]; e != nil && e.req == key {
+	if e := c.entries[stableKey]; e != nil && e.req == reqKey {
 		e.at = time.Now()
 		a := e.asset
 		if size := e.size.Load(); a.DetailPending && size > 0 {
@@ -57,8 +65,8 @@ func (s *Server) sourceDisplayAsset(ctx context.Context, path, key string, detai
 		return a, nil
 	}
 	c.mu.Unlock()
-	// Revalidate metadata on every new load, including a load while the audio
-	// worker is running. The immutable waveform survives metadata-only changes.
+	// Revalidate metadata on every new load or grid edit, including while the
+	// audio worker is running. The immutable waveform survives metadata-only changes.
 	a, err := libraryDisplay(ctx, path, s.shadow.dataRoot, s.shadow.mediaRoot)
 	if err != nil {
 		return nil, err
@@ -72,7 +80,7 @@ func (s *Server) sourceDisplayAsset(ctx context.Context, path, key string, detai
 			a.Detail = true
 		}
 		a.DetailPending = a.Waveform == nil && (e.queued || e.working)
-		e.asset, e.path, e.req, e.at = a, path, key, time.Now()
+		e.asset, e.path, e.req, e.at = a, path, reqKey, time.Now()
 		if !c.trim(stableKey) {
 			delete(c.entries, stableKey)
 		}
@@ -81,7 +89,7 @@ func (s *Server) sourceDisplayAsset(ctx context.Context, path, key string, detai
 	if !detail {
 		return a, nil
 	}
-	e := &shadowSourceEntry{asset: a, path: path, key: stableKey, req: key, at: time.Now()}
+	e := &shadowSourceEntry{asset: a, path: path, key: stableKey, req: reqKey, at: time.Now()}
 	if a.Waveform == nil {
 		a.DetailPending = true
 		e.queued = true

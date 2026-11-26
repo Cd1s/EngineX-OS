@@ -1300,6 +1300,11 @@ static void test_shadow_replay(void) {
         oa_count = 0;
         assert(oa_replay(oa_self, &qs, prefs) && oa_count == 9);
     }
+    // #346: an armed .perf.regrid.run marker is consumed and skips oa_settle().
+    f = fopen("/tmp/test-oa-replay/\xc3\xa9.flac.perf.regrid.run", "wb"); assert(f); fputs("g2", f); fclose(f);
+    oa_count = 0;
+    assert(oa_replay(oa_self, &qs, prefs) && oa_count == 9 && oa_seen[2] == OA_BEATS);
+    assert(access("/tmp/test-oa-replay/\xc3\xa9.flac.perf.regrid.run", F_OK) != 0);
     // A completed streaming download uses the analysis registered by the
     // rekordbox row fill; the analyzer delivers the imported grid without decoding.
     const char *old_rbx_dir = sc_rbx_dir;
@@ -1334,11 +1339,19 @@ static void test_shadow_replay(void) {
     prefs[12] = 1;
     assert(!oa_replay(oa_self, &qs, prefs) && oa_count == 0);
     prefs[12] = 0;
-    // A corrupt or missing .perf falls through to the stock analysis.
+    // With .perf.regrid.run staged, corrupt .perf consumes .perf.regrid.run and
+    // skips analysis (STARTED -> STOPPED -> FINISHED) rather than calling OfflineAnalyzer.
     f = fopen("/tmp/test-oa-replay/\xc3\xa9.flac.perf", "r+b"); assert(f); fwrite("XXXX", 1, 4, f); fclose(f);
+    f = fopen("/tmp/test-oa-replay/\xc3\xa9.flac.perf.regrid.run", "wb"); assert(f); fputs("g3", f); fclose(f);
+    oa_count = 0;
+    assert(oa_replay(oa_self, &qs, prefs) == 1 && oa_count == 3 &&
+           oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
+    assert(access("/tmp/test-oa-replay/\xc3\xa9.flac.perf.regrid.run", F_OK) != 0);
+    // Without .perf.regrid.run on a non-shadow path, corrupt or missing .perf still falls through to stock analysis.
     oa_count = 0;
     assert(!oa_replay(oa_self, &qs, prefs) && oa_count == 0);
     unlink("/tmp/test-oa-replay/\xc3\xa9.flac.perf");
+    oa_count = 0;
     assert(!oa_replay(oa_self, &qs, prefs) && oa_count == 0);
     // Engine analyses its own copy of a /data file: the shadow copy's .perf
     // with that name and size is used; another size is a different file.
@@ -1767,7 +1780,8 @@ static int drive_load(sqlite_bind_int64_fn entry, const char *dir) {
 static void test_analysis_dispatch(const char *off, int gateway, int shadow, int stage) {
     enum { lock = 0x1d55120, prepare = 0x1d55634, close_v2 = 0x1d21af4, filename = 0x1cb0d94,
            bind = 0x1cdfb90, bind_int = 0x1cdfc28, bind_text = 0x1cdfa3c, db_handle = 0x1c9a210, sql_text = 0x1c9a2a0,
-           step = 0x1d6fef8, analyze = 0xe525ec, load = 0xd6b100, size = 0x2d00000 };
+           step = 0x1d6fef8, analyze = 0xe525ec, load = 0xd6b100,
+           queue_loaded = 0xac6870, loaded_slot = 0x2b7d480, loaded_fn = 0xe3b148, size = 0x2d00000 };
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
     char *image = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(image != MAP_FAILED);
@@ -1784,12 +1798,15 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow, int
     const uint32_t sql_code[] = {0xe3500000, 0x159000d0, 0xe12fff1e};
     const uint32_t step_code[] = {0xe59f3d88, 0xe16d42f4};
     const uint32_t load_code[] = {0xe24b105c, 0xe1a00007, 0xe59330c8, 0xe12fff33};
+    const uint32_t queue_loaded_code[] = {0xe59330d8, 0xe12fff33};
     memcpy(image + lock, lock_code, sizeof lock_code);
     memcpy(image + analyze, lock_code, sizeof lock_code);
     memcpy(image + db_handle, db_code, sizeof db_code);
     memcpy(image + sql_text, sql_code, sizeof sql_code);
     memcpy(image + step, step_code, sizeof step_code);
     memcpy(image + load, load_code, sizeof load_code);
+    memcpy(image + queue_loaded, queue_loaded_code, sizeof queue_loaded_code);
+    *(uintptr_t *)(image + loaded_slot) = base + loaded_fn;
     *(uint32_t *)(image + prepare + 0x1c) = 0xeb000000u | (((uint32_t)(lock - prepare - 0x1c - 8) >> 2) & 0xffffffu);
     uint32_t *short_bind = (void *)(image + bind_int);
     short_bind[0] = 0xe1a03fc2;
@@ -1838,6 +1855,8 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow, int
     assert(shadow_analysis_enabled == shadow);
     assert((memcmp(image + step, step_code, sizeof step_code) != 0) == shadow);
     assert((memcmp(image + analyze, lock_code, sizeof lock_code) != 0) == shadow);
+    assert((*(uintptr_t *)(image + loaded_slot) == (uintptr_t)shadow_loaded_on_deck) == shadow);
+    assert((*(uintptr_t *)(image + loaded_slot) == base + loaded_fn) == !shadow);
     if (gateway || shadow || stage) assert(((const uint32_t *)(base + bind))[1] == (uintptr_t)rbx_bind);
     else assert(!memcmp(image + bind, bind_code, sizeof bind_code));
     if (stage) assert(((const uint32_t *)(base + bind_text))[1] == (uintptr_t)rbx_bind_text);
@@ -1870,6 +1889,42 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow, int
     analysis_bind(entry, db, shadow_read, 2);
     assert(pragma(db, "SELECT isAnalyzed FROM Track WHERE id = 2") == shadow);
     assert(pragma(db, "SELECT count(*) FROM PerformanceData WHERE trackData IS NOT NULL") == gateway + shadow);
+    if (shadow) {
+        char regrid_marker[160], regrid_run[160], perf_file[160];
+        snprintf(regrid_marker, sizeof regrid_marker, "%s/peer-a/track.wav.perf.regrid", dir);
+        snprintf(regrid_run, sizeof regrid_run, "%s/peer-a/track.wav.perf.regrid.run", dir);
+        snprintf(perf_file, sizeof perf_file, "%s/peer-a/track.wav.perf", dir);
+        analysis_file(regrid_marker, "g2", 2);
+        unsigned char fake_ltd[0xd0] = {0};
+        fake_ltd[0xc8] = 1;
+        // Non-AnalysisQueue callers see the real loaded state and leave .perf.regrid untouched.
+        assert(shadow_loaded_on_deck(fake_ltd) == 1);
+        assert(access(regrid_marker, F_OK) == 0 && !unlink(regrid_marker));
+        // Armed regrid without a valid .perf refuses to clear isAnalyzed (fail-closed).
+        analysis_file(regrid_run, "g2", 2);
+        shadow_regrid_queued = 1;
+        analysis_bind(entry, db, shadow_read, 2);
+        assert(shadow_regrid_queued == 0);
+        assert(pragma(db, "SELECT isAnalyzed FROM Track WHERE id = 2") == 1);
+        // With a valid EXPF v1 .perf present, armed regrid clears isAnalyzed so AnalysisQueue replays the new grid.
+        {
+            FILE *pf = fopen(perf_file, "wb");
+            assert(pf);
+            uint32_t ver = 1, lt = 20, lb = 4, lo = 27;
+            double bpm = 128.0;
+            unsigned char z[32] = {0};
+            assert(fwrite("EXPF", 1, 4, pf) == 4 && fwrite(&ver, 4, 1, pf) == 1 && fwrite(&bpm, 8, 1, pf) == 1);
+            assert(fwrite(&lt, 4, 1, pf) == 1 && fwrite(z, 1, lt, pf) == lt);
+            assert(fwrite(&lb, 4, 1, pf) == 1 && fwrite(z, 1, lb, pf) == lb);
+            assert(fwrite(&lo, 4, 1, pf) == 1 && fwrite(z, 1, lo, pf) == lo);
+            fclose(pf);
+        }
+        shadow_regrid_queued = 1;
+        analysis_bind(entry, db, shadow_read, 2);
+        assert(shadow_regrid_queued == 0);
+        assert(pragma(db, "SELECT isAnalyzed FROM Track WHERE id = 2") == 0);
+        assert(!unlink(perf_file) && !unlink(regrid_run));
+    }
     assert(sqlite3_close(db) == SQLITE_OK);
     // A staged rekordbox stick row is filled at its load (by id or by path, slot 1 or 2) only with rb-bridge on.
     assert(drive_load(entry, dir) == stage);
@@ -1891,6 +1946,288 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow, int
     assert(!unlink(library) && !unlink(sidecar) && !rmdir(peer) && !unlink(rbx) && !unlink(loading) && !unlink(board) && !rmdir(dir));
     assert(!munmap(image, size));
     printf("Installed SQLite bind dispatcher isolates rekordbox, the stage fill and shadow (off: %s): PASS\n", *off ? off : "none");
+}
+
+static void *mock_aq_posted_obj;
+static void *mock_aq_posted_ev;
+static int mock_aq_post_count;
+static void *mock_aq_added_obj;
+static int64_t mock_aq_added_ids[16];
+static int mock_aq_added_count;
+static int mock_aq_added_action;
+static int mock_aq_orig_events;
+static int mock_aq_orig_connects;
+static int mock_aq_orig_dtors;
+static int mock_aq_reg_type = 1042;
+
+static void mock_post_event(void *obj, void *ev, int prio) {
+    (void)prio;
+    mock_aq_posted_obj = obj;
+    mock_aq_posted_ev = ev;
+    mock_aq_post_count++;
+}
+static void mock_qevent_ctor(void *ev, int type) {
+    uint16_t t = (uint16_t)type;
+    memcpy((unsigned char *)ev + 4, &t, sizeof t);
+}
+static void mock_qevent_dtor(void *ev) { (void)ev; }
+static int mock_qevent_reg(int hint) { (void)hint; return mock_aq_reg_type; }
+static void *mock_op_new(size_t n) { return malloc(n); }
+static const void *mock_aq_meta_orig(void *self) { (void)self; return NULL; }
+static void *mock_aq_dtor_orig(void *self) { mock_aq_orig_dtors++; return self; }
+static int mock_aq_event_orig(void *self, void *ev) { (void)self; (void)ev; mock_aq_orig_events++; return 0; }
+static void mock_aq_connect_orig(void *self, const void *sig) { (void)self; (void)sig; mock_aq_orig_connects++; }
+static void mock_aq_add_tracks(void *self, const struct sc_qlist_i64 *ids, int action) {
+    mock_aq_added_obj = self;
+    mock_aq_added_action = action;
+    mock_aq_added_count = ids ? ids->size : 0;
+    for (int i = 0; i < mock_aq_added_count && i < 16; i++) mock_aq_added_ids[i] = ids->ptr[i];
+}
+
+// #346: verify 5.3.0-only fail-closed gating and native AnalysisQueue event dispatch.
+static void test_shadow_regrid_native(const char *build_name, const char *off, int expect_enabled) {
+    enum { add_tracks = 0xab8014, vtable = 0x2b6d1cc,
+           meta_fn = 0x911e04, dtor_d1 = 0x915874, dtor_d0 = 0x915b58,
+           event_plt = 0x160434, connect_plt = 0x160470, size = 0x2d00000 };
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    char *image = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(image != MAP_FAILED);
+    uintptr_t base = (uintptr_t)image;
+    const struct engine_build *selected = NULL;
+    for (size_t i = 0; i < sizeof engine_builds / sizeof *engine_builds; i++) {
+        if (!strcmp(engine_builds[i].name, build_name)) { selected = &engine_builds[i]; break; }
+    }
+    assert(selected != NULL);
+    select_build(selected);
+    char dir[] = "/tmp/regrid-XXXXXX";
+    assert(mkdtemp(dir));
+    char board[128], conf[128], peer[128], sock[128];
+    snprintf(board, sizeof board, "%s/compatible", dir);
+    snprintf(conf, sizeof conf, "%s/hook-disable.conf", dir);
+    snprintf(peer, sizeof peer, "%s/peer-a", dir);
+    snprintf(sock, sizeof sock, "%s/regrid.sock", dir);
+    assert(!mkdir(peer, 0755));
+    analysis_file(board, "JP07", 4);
+    if (*off) analysis_file(conf, off, strlen(off));
+    hf_path = conf;
+    hf_reload();
+    product_code_path = board;
+    sc_shadow_root = dir;
+    shadow_regrid_sock_path = sock;
+    const uint32_t add_prefix[] = {0xe16d42f4, 0xe1cd81f0};
+    memcpy(image + add_tracks, add_prefix, sizeof add_prefix);
+    *(uintptr_t *)(image + vtable + 0x00) = base + meta_fn;
+    *(uintptr_t *)(image + vtable + 0x0c) = base + dtor_d1;
+    *(uintptr_t *)(image + vtable + 0x10) = base + dtor_d0;
+    *(uintptr_t *)(image + vtable + 0x14) = base + event_plt;
+    *(uintptr_t *)(image + vtable + 0x28) = base + connect_plt;
+    shadow_post_event = mock_post_event;
+    shadow_qevent_ctor = mock_qevent_ctor;
+    shadow_qevent_dtor = mock_qevent_dtor;
+    shadow_qevent_reg = mock_qevent_reg;
+    shadow_op_new = mock_op_new;
+    shadow_qobj_event_sym = (void *)(uintptr_t)mock_aq_event_orig;
+    shadow_qobj_connect_sym = (void *)(uintptr_t)mock_aq_connect_orig;
+    int installed = install_shadow_regrid(base, page);
+    assert(installed == expect_enabled);
+    assert(shadow_regrid_enabled == expect_enabled);
+    if (!expect_enabled) {
+        assert(*(uintptr_t *)(image + vtable + 0x00) == base + meta_fn);
+        assert(*(uintptr_t *)(image + vtable + 0x14) == base + event_plt);
+        assert(access(sock, F_OK) != 0);
+    } else {
+        assert(*(uintptr_t *)(image + vtable + 0x00) == (uintptr_t)shadow_analysis_queue_meta);
+        assert(*(uintptr_t *)(image + vtable + 0x0c) == (uintptr_t)shadow_analysis_queue_dtor_d1);
+        assert(*(uintptr_t *)(image + vtable + 0x10) == (uintptr_t)shadow_analysis_queue_dtor_d0);
+        assert(*(uintptr_t *)(image + vtable + 0x14) == (uintptr_t)shadow_analysis_queue_event);
+        assert(*(uintptr_t *)(image + vtable + 0x28) == (uintptr_t)shadow_analysis_queue_connect);
+        assert(shadow_queue_add_tracks == (void (*)(void *, const struct sc_qlist_i64 *, int))(base + add_tracks));
+        struct stat st;
+        assert(!stat(sock, &st) && S_ISSOCK(st.st_mode) && (st.st_mode & 0777) == 0600);
+        // Route originals to mock C functions for behavioral verification.
+        shadow_queue_add_tracks = mock_aq_add_tracks;
+        shadow_queue_meta_original = mock_aq_meta_orig;
+        shadow_queue_dtor_d1_original = mock_aq_dtor_orig;
+        shadow_queue_dtor_d0_original = mock_aq_dtor_orig;
+        shadow_queue_event_original = mock_aq_event_orig;
+        shadow_queue_connect_original = mock_aq_connect_orig;
+        char fake_aq[16] = {0};
+        char audio[160], perf[180], marker[180], dgram[220];
+        snprintf(audio, sizeof audio, "%s/peer-a/track.wav", dir);
+        snprintf(perf, sizeof perf, "%s.perf", audio);
+        snprintf(marker, sizeof marker, "%s.perf.regrid", audio);
+        snprintf(dgram, sizeof dgram, "42\t%s", audio);
+        // Valid minimal EXPF v1 sidecar for regrid readiness checks.
+        unsigned char valid_expf[16 + 4 + 20 + 4 + 4 + 4 + 27];
+        memset(valid_expf, 0, sizeof valid_expf);
+        memcpy(valid_expf, "EXPF", 4);
+        uint32_t ver = 1, lt = 20, lb = 4, lo = 27;
+        double bpm = 128.0;
+        memcpy(valid_expf + 4, &ver, 4);
+        memcpy(valid_expf + 8, &bpm, 8);
+        memcpy(valid_expf + 16, &lt, 4);
+        memcpy(valid_expf + 16 + 4 + 20, &lb, 4);
+        memcpy(valid_expf + 16 + 4 + 20 + 4, "GRID", 4);
+        memcpy(valid_expf + 16 + 4 + 20 + 4 + 4, &lo, 4);
+        analysis_file(perf, valid_expf, sizeof valid_expf);
+        // Before AnalysisQueue is captured, datagrams do nothing.
+        analysis_file(marker, "g2", 2);
+        assert(!shadow_regrid_handle_dgram(dgram, strlen(dgram)));
+        assert(mock_aq_post_count == 0);
+        // Capture AnalysisQueue via connectNotify (runs at Engine startup).
+        shadow_analysis_queue_connect(fake_aq, NULL);
+        assert(mock_aq_orig_connects == 1 && shadow_analysis_queue == fake_aq);
+        // Missing .perf.regrid marker is rejected fail-closed.
+        assert(!unlink(marker));
+        assert(!shadow_regrid_handle_dgram(dgram, strlen(dgram)));
+        assert(mock_aq_post_count == 0);
+        // Missing .perf beside .perf.regrid is rejected fail-closed.
+        analysis_file(marker, "g2", 2);
+        assert(!unlink(perf));
+        assert(!shadow_regrid_handle_dgram(dgram, strlen(dgram)));
+        assert(mock_aq_post_count == 0);
+        // Valid .perf + staged .perf.regrid marker posts one custom QEvent to AnalysisQueue.
+        analysis_file(perf, valid_expf, sizeof valid_expf);
+        assert(shadow_regrid_handle_dgram(dgram, strlen(dgram)));
+        assert(mock_aq_post_count == 1 && mock_aq_posted_obj == fake_aq && mock_aq_posted_ev != NULL);
+        // Unrelated Qt event passes through to stock QObject::event.
+        unsigned char other_ev[32] = {0};
+        uint16_t other_t = 99;
+        memcpy(other_ev + 4, &other_t, sizeof other_t);
+        assert(shadow_analysis_queue_event(fake_aq, other_ev) == 0 && mock_aq_orig_events == 1);
+        // Delivering our custom QEvent invokes AnalysisQueue::addTracks([42], 0).
+        assert(shadow_analysis_queue_event(fake_aq, mock_aq_posted_ev) == 1);
+        free(mock_aq_posted_ev);
+        mock_aq_posted_ev = NULL;
+        assert(mock_aq_added_obj == fake_aq && mock_aq_added_count == 1 && mock_aq_added_ids[0] == 42 && mock_aq_added_action == 0);
+        // Destructor clears shadow_analysis_queue safely (no UAF on late datagram).
+        assert(shadow_analysis_queue_dtor_d1(fake_aq) == fake_aq && mock_aq_orig_dtors == 1);
+        assert(shadow_analysis_queue == NULL);
+        assert(!shadow_regrid_handle_dgram(dgram, strlen(dgram)));
+        assert(mock_aq_post_count == 1);
+        assert(!unlink(marker) && !unlink(perf));
+        if (shadow_regrid_sock_fd >= 0) { close(shadow_regrid_sock_fd); shadow_regrid_sock_fd = -1; }
+        assert(!unlink(sock));
+    }
+    if (*off) assert(!unlink(conf));
+    assert(!rmdir(peer) && !unlink(board) && !rmdir(dir));
+    assert(!munmap(image, size));
+    printf("Native AnalysisQueue regrid (%s, off: %s, enabled: %d): PASS\n", build_name, *off ? off : "none", expect_enabled);
+}
+
+static void mock_qevent_ctor_bad_offset(void *ev, int type) {
+    uint16_t t = (uint16_t)type;
+    memcpy((unsigned char *)ev + 8, &t, sizeof t);
+}
+
+static void mock_qevent_ctor_too_big(void *ev, int type) {
+    mock_qevent_ctor(ev, type);
+    ((unsigned char *)ev)[36] = 1;
+}
+
+// #346 review proof (Check 4): wrong vtable, addTracks prologue, QEvent ABI or board leaves no socket and no hook change.
+static void test_shadow_regrid_fail_closed_gates(int fault) {
+    enum { add_tracks = 0xab8014, vtable = 0x2b6d1cc,
+           meta_fn = 0x911e04, dtor_d1 = 0x915874, dtor_d0 = 0x915b58,
+           event_plt = 0x160434, connect_plt = 0x160470, size = 0x2d00000 };
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    char *image = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(image != MAP_FAILED);
+    uintptr_t base = (uintptr_t)image;
+    const struct engine_build *selected = NULL;
+    for (size_t i = 0; i < sizeof engine_builds / sizeof *engine_builds; i++) {
+        if (!strcmp(engine_builds[i].name, "5.3.0")) { selected = &engine_builds[i]; break; }
+    }
+    assert(selected != NULL);
+    select_build(selected);
+    char dir[] = "/tmp/regrid-gate-XXXXXX";
+    assert(mkdtemp(dir));
+    char board[128], conf[128], sock[128];
+    snprintf(board, sizeof board, "%s/compatible", dir);
+    snprintf(conf, sizeof conf, "%s/hook-disable.conf", dir);
+    snprintf(sock, sizeof sock, "%s/regrid.sock", dir);
+    analysis_file(board, fault == 5 ? "AZ01" : "JP07", 4);
+    hf_path = conf;
+    hf_reload();
+    product_code_path = board;
+    shadow_regrid_sock_path = sock;
+    const uint32_t add_prefix[] = {0xe16d42f4, 0xe1cd81f0};
+    memcpy(image + add_tracks, add_prefix, sizeof add_prefix);
+    *(uintptr_t *)(image + vtable + 0x00) = base + meta_fn;
+    *(uintptr_t *)(image + vtable + 0x0c) = base + dtor_d1;
+    *(uintptr_t *)(image + vtable + 0x10) = base + dtor_d0;
+    *(uintptr_t *)(image + vtable + 0x14) = base + event_plt;
+    *(uintptr_t *)(image + vtable + 0x28) = base + connect_plt;
+    shadow_post_event = mock_post_event;
+    shadow_qevent_ctor = fault == 3 ? mock_qevent_ctor_bad_offset
+                       : fault == 4 ? mock_qevent_ctor_too_big : mock_qevent_ctor;
+    shadow_qevent_dtor = mock_qevent_dtor;
+    shadow_qevent_reg = mock_qevent_reg;
+    shadow_op_new = mock_op_new;
+    shadow_qobj_event_sym = (void *)(uintptr_t)mock_aq_event_orig;
+    shadow_qobj_connect_sym = (void *)(uintptr_t)mock_aq_connect_orig;
+    if (fault == 1) *(uintptr_t *)(image + vtable + 0x00) ^= 4;
+    if (fault == 2) memset(image + add_tracks, 0, sizeof add_prefix);
+    assert(install_shadow_regrid(base, page) == 0);
+    assert(shadow_regrid_enabled == 0);
+    assert(access(sock, F_OK) != 0);
+    if (fault != 1) assert(*(uintptr_t *)(image + vtable + 0x00) == base + meta_fn);
+    assert(*(uintptr_t *)(image + vtable + 0x0c) == base + dtor_d1);
+    assert(*(uintptr_t *)(image + vtable + 0x10) == base + dtor_d0);
+    assert(*(uintptr_t *)(image + vtable + 0x14) == base + event_plt);
+    assert(*(uintptr_t *)(image + vtable + 0x28) == base + connect_plt);
+    assert(!unlink(board) && !rmdir(dir));
+    assert(!munmap(image, size));
+    printf("Native AnalysisQueue regrid fail-closed gate (fault %d): PASS\n", fault);
+}
+
+// #346 review proof (Finding 1) + oa_replay choke point: missing or corrupt .perf
+// beside .perf.regrid neither arms regrid nor falls through to stock OfflineAnalyzer.
+static void test_shadow_regrid_missing_perf_fallback(void) {
+    static const char root[] = "/tmp/test-oa-regrid";
+    static const char peer[] = "/tmp/test-oa-regrid/peer-f012";
+    static const char audio[] = "/tmp/test-oa-regrid/peer-f012/track.wav";
+    static const char perf[] = "/tmp/test-oa-regrid/peer-f012/track.wav.perf";
+    static const char regrid[] = "/tmp/test-oa-regrid/peer-f012/track.wav.perf.regrid";
+    static const char regrid_run[] = "/tmp/test-oa-regrid/peer-f012/track.wav.perf.regrid.run";
+    static const uint16_t u16[] = u"/tmp/test-oa-regrid/peer-f012/track.wav";
+    struct oa_string qs = {NULL, u16, sizeof u16 / sizeof *u16 - 1};
+    uchar prefs[13] = {0};
+    mkdir(root, 0755);
+    mkdir(peer, 0755);
+    analysis_file(audio, "WAV", 3);
+    analysis_file(regrid, "g2", 2);
+    oa_activate = mock_activate;
+    oa_make_bytes = mock_make_bytes;
+    oa_meta = (void *)&oa_seen;
+    oa_count = 0;
+    const char *old_root = sc_shadow_root;
+    sc_shadow_root = root;
+    // 1. Missing .perf: regrid refuses ready/arm, AND oa_replay skips (never returns 0).
+    int ready = sc_shadow_regrid_ready(audio);
+    int armed = sc_shadow_regrid_arm(audio);
+    int replayed = oa_replay(oa_self, &qs, prefs);
+    assert(!ready && !armed);
+    assert(replayed == 1 && oa_count == 3 &&
+           oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
+    // 2. Corrupt .perf + pre-armed .perf.regrid.run: refuses ready/arm, and oa_replay
+    // unlinks .perf.regrid.run and skips cleanly (never hands copy to OfflineAnalyzer).
+    analysis_file(perf, "BAD!CORRUPT", 11);
+    analysis_file(regrid_run, "g2", 2);
+    assert(!sc_shadow_regrid_ready(audio) && !sc_shadow_regrid_arm(audio));
+    oa_count = 0;
+    assert(oa_replay(oa_self, &qs, prefs) == 1 && oa_count == 3 &&
+           oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
+    assert(access(regrid_run, F_OK) != 0);
+    sc_shadow_root = old_root;
+    unlink(perf);
+    unlink(regrid);
+    unlink(regrid_run);
+    unlink(audio);
+    rmdir(peer);
+    rmdir(root);
+    unlink(OA_LOG);
+    printf("Shadow regrid missing/corrupt .perf fail-closed + oa_replay choke point: PASS\n");
 }
 
 // #346/ondemand Check 2 regression: oa_is_shadow_path / oa_shadow_perf decide on the
@@ -2024,6 +2361,36 @@ int main(int argc, char **argv) {
         assert(waitpid(child, &status, 0) == child);
         assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
+    static const struct { const char *build_name; const char *off; int enabled; } regrid_cases[] = {
+        {"5.3.0", "", 1},
+        {"5.3.0", "four-deck", 0},
+        {"5.3.0", "rb-bridge", 0},
+        {"5.0.4", "", 0},
+        {"5.3.0-sclive4", "", 0},
+    };
+    for (size_t i = 0; i < sizeof regrid_cases / sizeof *regrid_cases; i++) {
+        fflush(NULL);
+        pid_t child = fork(); assert(child >= 0);
+        if (!child) {
+            test_shadow_regrid_native(regrid_cases[i].build_name, regrid_cases[i].off, regrid_cases[i].enabled);
+            exit(0);
+        }
+        int status;
+        assert(waitpid(child, &status, 0) == child);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+    for (int fault = 1; fault <= 5; fault++) {
+        fflush(NULL);
+        pid_t child = fork(); assert(child >= 0);
+        if (!child) {
+            test_shadow_regrid_fail_closed_gates(fault);
+            exit(0);
+        }
+        int status;
+        assert(waitpid(child, &status, 0) == child);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+    test_shadow_regrid_missing_perf_fallback();
     test_oa_is_shadow_path_edge_cases();
     return 0;
 }

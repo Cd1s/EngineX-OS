@@ -190,6 +190,9 @@ type deckState struct {
 	// PerfGen names the analysis /perf serves for a rekordbox Link deck. The
 	// audio copy remains reusable while a changed generation refreshes its sidecars.
 	PerfGen string `json:"perfGen,omitempty"`
+	// GridGen names the beat grid (bpm + beatData) of an Engine library track.
+	// Peers update their already-loaded copy's grid in-place when it changes.
+	GridGen string `json:"gridGen,omitempty"`
 }
 
 // shadowCue is one hot cue (I 1..8); the receiver checks it before use.
@@ -277,7 +280,7 @@ func sameOptionalFloat(a, b *float64) bool {
 // Seq, At, Beat and Dbg do not count: the display QML does not use them.
 func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	o := old.deckState
-	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.PerfGen != d.PerfGen || o.Ext != d.Ext || o.Name != d.Name ||
+	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.PerfGen != d.PerfGen || o.GridGen != d.GridGen || o.Ext != d.Ext || o.Name != d.Name ||
 		o.Title != d.Title || o.Artist != d.Artist || o.KeyName != d.KeyName || o.Loading != d.Loading || o.Active != d.Active || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
 		o.Playing != d.Playing || o.Pitch != d.Pitch || !sameOptionalBool(o.Master, d.Master) || !sameOptionalBool(o.Lead, d.Lead) ||
 		!sameOptionalBool(o.Aligned, d.Aligned) || !sameOptionalBool(o.PhaseActive, d.PhaseActive) || !sameOptionalBool(o.PhaseMeter, d.PhaseMeter) || !sameOptionalFloat(o.Phase, d.Phase) || o.Loop != d.Loop || o.LoopIn != d.LoopIn || o.LoopOut != d.LoopOut || o.KeyOffset != d.KeyOffset || o.Stems != d.Stems || o.Slip != d.Slip || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM || o.Service != d.Service ||
@@ -412,8 +415,20 @@ type shadowState struct {
 	unresolved          [5]string              // per deck: the last TrackNetworkPath logged as having no file
 	streamFiles         map[string]streamTrack // streaming uri -> Engine's download (zero = none)
 	copyGens            map[string]string      // copy key -> the source's PerfGen its analysis is of
-	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer (as peerSeq)
-	peerClock           map[string]peerClock   // per peer (as peerSeq)
+	copyGridGens        map[string]string      // copy key -> the source's GridGen staged on disk
+	copyGridPending     map[string]string      // copy key -> staged GridGen awaiting native hook datagram delivery
+	copyGridNotifyRetry map[string]time.Time
+	copyGridTries       map[string]int
+	copyGridBusy        map[string]bool
+	copyGridRetry       map[string]time.Time
+	copyTrackIDs        map[string]int64 // local shadow copy path -> local m.db Track.id
+	copyTrackIDBusy     map[string]bool
+	regridSockPath      string // Unix datagram socket owned by the 5.3.0 native hook; empty disables notification
+	gridGenMu           sync.Mutex
+	gridGens            map[string]gridGenEntry
+	gridGenQueries      atomic.Uint64
+	peerTaken           map[string]time.Time // when takePeer last accepted an update per peer (as peerSeq)
+	peerClock           map[string]peerClock // per peer (as peerSeq)
 	dbg                 shadowDebug
 	metaOnlyPoll        bool       // the newest compose had a CDJ deck, including cached display assets: 120 ms polls
 	resolveMu           sync.Mutex // cold file resolution, independent of the live position lock
@@ -439,7 +454,7 @@ type shadowState struct {
 }
 
 func newShadowState() *shadowState {
-	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, copyGens: map[string]string{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn, model: imagePrefix(deviceCompatible()), askers: map[string]time.Time{}, askNotify: make(chan struct{}), consoleDecks: map[int]peerDeck{}}
+	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, copyGens: map[string]string{}, copyGridGens: map[string]string{}, copyGridPending: map[string]string{}, copyGridNotifyRetry: map[string]time.Time{}, copyGridTries: map[string]int{}, copyGridBusy: map[string]bool{}, copyGridRetry: map[string]time.Time{}, copyTrackIDs: map[string]int64{}, copyTrackIDBusy: map[string]bool{}, regridSockPath: shadowRegridSockPath, gridGens: map[string]gridGenEntry{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn, model: imagePrefix(deviceCompatible()), askers: map[string]time.Time{}, askNotify: make(chan struct{}), consoleDecks: map[int]peerDeck{}}
 }
 
 // shadow-v3: copies under the old "shadow" were analysed by Engine itself,
@@ -804,6 +819,9 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		}
 		if d.Key != "" {
 			d.PerfGen = s.perfGen(r.Context(), d)
+			if d.rbxAnalysis == "" && d.Path != "" {
+				d.GridGen = s.gridGen(r.Context(), d.Path)
+			}
 		}
 		own = append(own, d)
 	}
@@ -952,6 +970,7 @@ func (s *Server) decksAlive(w http.ResponseWriter, r *http.Request) {
 	sh.ownDecks = decks
 	ownCopy := append([]deckState(nil), sh.own...)
 	sh.mu.Unlock()
+	s.refreshOwnGridGens(r.Context(), ownCopy)
 	s.noteDeckPriority(ownCopy, now)
 	if consoleLineBoards[sh.model] {
 		w.WriteHeader(http.StatusNoContent)
@@ -1506,6 +1525,11 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 	if gen != "" {
 		w.Header().Set(shadowPerfGenHeader, gen)
 	}
+	if d.rbxAnalysis == "" && d.Path != "" {
+		if gg := perfGridGen(perf); gg != "" {
+			w.Header().Set("X-Shadow-Grid-Gen", gg)
+		}
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(perf)
 }
@@ -1967,6 +1991,165 @@ func (s *Server) perfGen(ctx context.Context, d deckState) string {
 	s.shadow.perfGens[d.Deck] = next
 	s.shadow.perfMu.Unlock()
 	return next.gen
+}
+
+// gridGenEvery rate-limits stat checks on m.db / m.db-wal for live beat-grid
+// edits; a var so unit tests can set it to 0.
+var gridGenEvery = 500 * time.Millisecond
+
+type gridGenEntry struct {
+	at              time.Time
+	mdb, rel        string
+	dbSize, dbMod   int64
+	walSize, walMod int64
+	gen             string
+}
+
+func statFileSig(path string) (size, mod int64) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return -1, 0
+	}
+	return st.Size(), st.ModTime().UnixNano()
+}
+
+// gridGen returns a 16-hex hash of (bpm, beatData) for an Engine library track.
+// Steady-state cost while playing: 0 SQLite opens — at most two stat() calls
+// every gridGenEvery; SQLite is only opened read-only when m.db or m.db-wal
+// actually changes. Hot-cue-only edits leave (bpm, beatData) and the hash equal.
+func (s *Server) gridGen(ctx context.Context, path string) string {
+	sh := s.shadow
+	now := time.Now()
+	sh.gridGenMu.Lock()
+	e, ok := sh.gridGens[path]
+	sh.gridGenMu.Unlock()
+	if ok && e.gen != "" && now.Sub(e.at) < gridGenEvery {
+		return e.gen
+	}
+	if ok && e.mdb != "" {
+		dbSize, dbMod := statFileSig(e.mdb)
+		walSize, walMod := statFileSig(e.mdb + "-wal")
+		if dbSize >= 0 && dbSize == e.dbSize && dbMod == e.dbMod && walSize == e.walSize && walMod == e.walMod {
+			sh.gridGenMu.Lock()
+			if cur, exists := sh.gridGens[path]; exists && cur.mdb == e.mdb {
+				cur.at = now
+				sh.gridGens[path] = cur
+			}
+			sh.gridGenMu.Unlock()
+			return e.gen
+		}
+	}
+	gen, mdb, rel := s.readLibraryGridGen(ctx, path, e.mdb, e.rel)
+	var dbSize, dbMod, walSize, walMod int64 = -1, 0, -1, 0
+	if mdb != "" {
+		dbSize, dbMod = statFileSig(mdb)
+		walSize, walMod = statFileSig(mdb + "-wal")
+	}
+	next := gridGenEntry{at: now, mdb: mdb, rel: rel, dbSize: dbSize, dbMod: dbMod, walSize: walSize, walMod: walMod, gen: gen}
+	sh.gridGenMu.Lock()
+	if sh.gridGens == nil {
+		sh.gridGens = map[string]gridGenEntry{}
+	}
+	if len(sh.gridGens) > 64 {
+		clear(sh.gridGens)
+	}
+	sh.gridGens[path] = next
+	sh.gridGenMu.Unlock()
+	return gen
+}
+
+func (s *Server) readLibraryGridGen(ctx context.Context, f, hintDB, hintRel string) (gen, mdb, rel string) {
+	if hintDB != "" && hintRel != "" {
+		if g, ok := s.dbGridGen(ctx, hintDB, hintRel); ok {
+			return g, hintDB, hintRel
+		}
+	}
+	sh := s.shadow
+	lib := engineLibrary(f, sh.dataRoot, sh.mediaRoot)
+	r, err := filepath.Rel(lib, f)
+	if err != nil {
+		return "", "", ""
+	}
+	slashRel := filepath.ToSlash(r)
+	fallbackDB := ""
+	for _, name := range []string{"m.db", "stm.db"} {
+		candidate := filepath.Join(lib, "Database2", name)
+		if fallbackDB == "" {
+			if _, stErr := os.Stat(candidate); stErr == nil {
+				fallbackDB = candidate
+			}
+		}
+		if candidate == hintDB && slashRel == hintRel {
+			continue
+		}
+		if g, ok := s.dbGridGen(ctx, candidate, slashRel); ok {
+			return g, candidate, slashRel
+		}
+	}
+	if orig, ok := inMusicTempOrig(f, sh.dataRoot); ok {
+		if st, statErr := os.Stat(f); statErr == nil {
+			if real := resolveInMusicTempPath(ctx, orig, st.Size(), sh.dataRoot); real != "" && real != f {
+				return s.readLibraryGridGen(ctx, real, "", "")
+			}
+		}
+	}
+	return "", fallbackDB, slashRel
+}
+
+func (s *Server) dbGridGen(ctx context.Context, mdb, rel string) (string, bool) {
+	if _, err := os.Stat(mdb); err != nil {
+		return "", false
+	}
+	s.shadow.gridGenQueries.Add(1)
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(100)")
+	if err != nil {
+		return "", false
+	}
+	defer db.Close()
+	var bpm sql.NullFloat64
+	var beats []byte
+	err = db.QueryRowContext(ctx, `SELECT coalesce(t.bpmAnalyzed, t.bpm), p.beatData
+		FROM Track t JOIN PerformanceData p ON p.trackId = t.id
+		WHERE t.path = ? AND t.isAnalyzed = 1 AND length(p.beatData) > 4`, rel).Scan(&bpm, &beats)
+	if err != nil || !(bpm.Float64 > 0 && bpm.Float64 < 1000) || len(beats) <= 4 {
+		return "", false
+	}
+	rawBeats, err := enginedb.QUncompress(beats, 8<<20)
+	if err != nil || len(rawBeats) == 0 {
+		return "", false
+	}
+	return gridGenHash(bpm.Float64, rawBeats), true
+}
+
+// refreshOwnGridGens keeps own decks' GridGen current on /decks/alive pings so
+// paused grid phase shifts (where BPM does not change) still notify peers.
+func (s *Server) refreshOwnGridGens(ctx context.Context, own []deckState) {
+	type update struct {
+		deck          int
+		path, key, gg string
+	}
+	var updates []update
+	for _, d := range own {
+		if d.Key == "" || d.Path == "" || d.rbxAnalysis != "" {
+			continue
+		}
+		if g := s.gridGen(ctx, d.Path); g != "" && g != d.GridGen {
+			updates = append(updates, update{deck: d.Deck, path: d.Path, key: d.Key, gg: g})
+		}
+	}
+	if len(updates) == 0 {
+		return
+	}
+	sh := s.shadow
+	sh.mu.Lock()
+	for _, u := range updates {
+		for i := range sh.own {
+			if sh.own[i].Deck == u.deck && sh.own[i].Path == u.path && sh.own[i].Key == u.key {
+				sh.own[i].GridGen = u.gg
+			}
+		}
+	}
+	sh.mu.Unlock()
 }
 
 // streamingDownload is Engine's own download of a streaming track (Engine
@@ -2475,10 +2658,23 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 			if d.Path == "" {
 				s.shadowFetchPeer(key, p)
 				d.Progress, d.Error = sh.copyShown(key)
+			} else if p.GridGen != "" {
+				if p.GridGen != sh.copyGridGens[key] {
+					// The source edited this track's beat grid. Refresh sidecars
+					// in place without changing d.Path so Engine updates the loaded
+					// shadow deck without reloading it.
+					s.shadowRefreshPeerGrid(key, p, d.Path)
+				}
 			} else if p.PerfGen != "" && p.PerfGen != sh.copyGens[key] {
 				// The audio copy is reusable, but Engine keeps a path's analysis
 				// after load. Publish the edited source analysis on a new path.
 				s.shadowRefreshPeerPerf(key, p, d.Path)
+			}
+			if d.Path != "" {
+				d.GridGen = sh.copyGridGens[key]
+				if sh.copyGridPending[key] != "" {
+					s.shadowNotifyPendingRegrid(key, d.Path)
+				}
 			}
 		}
 		// Audio still on its way: the QML shows the deck as loading. No track on
@@ -2745,6 +2941,8 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 		if err := installShadowSidecars(ctx, local, perfURL, pair); err != nil {
 			return "", err
 		}
+		_ = os.Remove(local + ".perf.regrid")
+		_ = os.Remove(local + ".perf.regrid.run")
 		if err := os.Rename(f.Name(), local); err != nil {
 			removeShadowSidecars(local)
 			return "", err
@@ -2754,6 +2952,13 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 			gotGen = p.PerfGen
 		}
 		s.shadowCopyGen(key, gotGen)
+		if pair.gridGen != "" {
+			s.shadowCopyGridGen(key, pair.gridGen)
+		} else if p.GridGen != "" {
+			s.shadowCopyGridGen(key, p.GridGen)
+		} else if gg := perfGridGen(pair.expf); gg != "" {
+			s.shadowCopyGridGen(key, gg)
+		}
 		noFill := pair.noFill
 		if noFill != "" {
 			noFill = " (" + noFill + ")"
@@ -2770,6 +2975,216 @@ func (s *Server) shadowCopyGen(key, gen string) {
 		s.shadow.copyGens = map[string]string{}
 	}
 	s.shadow.copyGens[key] = gen
+}
+
+func (s *Server) shadowCopyGridGen(key, gen string) {
+	s.shadow.mu.Lock()
+	defer s.shadow.mu.Unlock()
+	if s.shadow.copyGridGens == nil {
+		s.shadow.copyGridGens = map[string]string{}
+	}
+	s.shadow.copyGridGens[key] = gen
+}
+
+const shadowRegridSockPath = "/run/enginex/shadow-regrid.sock"
+const shadowRegridMaxTries = 12
+
+func sendShadowRegrid(sockPath string, trackID int64, localPath string) bool {
+	if sockPath == "" || trackID <= 0 || localPath == "" {
+		return false
+	}
+	conn, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: sockPath, Net: "unixgram"})
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	_ = conn.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
+	_, err = fmt.Fprintf(conn, "%d\t%s", trackID, localPath)
+	return err == nil
+}
+
+// shadowRefreshPeerGrid updates a cached shadow copy's sidecars in place when
+// the source's beat grid changes, writes <local>.perf.regrid for Engine's
+// in-place AnalysisQueue replay hook, and notifies the 5.3.0-only native hook
+// socket with "<trackId>\t<local>" (zero QML analyzer calls).
+// Called with sh.mu held.
+func (s *Server) shadowRefreshPeerGrid(key string, p peerDeck, local string) {
+	sh := s.shadow
+	if sh.copyGridBusy == nil {
+		sh.copyGridBusy = map[string]bool{}
+	}
+	if sh.copyGridRetry == nil {
+		sh.copyGridRetry = map[string]time.Time{}
+	}
+	if sh.copyGridBusy[key] || time.Now().Before(sh.copyGridRetry[key]) {
+		return
+	}
+	port := sh.peerPort
+	if port == 0 {
+		port = 8080
+	}
+	perfURL := fmt.Sprintf("http://%s/peer/decks/%d/perf?key=%s", net.JoinHostPort(p.ip, strconv.Itoa(port)), p.Deck, url.QueryEscape(p.Key))
+	gen := p.GridGen
+	sock := sh.regridSockPath
+	cachedID := sh.copyTrackIDs[local]
+	sh.copyGridBusy[key] = true
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		pair, err := fetchShadowAnalysisPair(ctx, perfURL)
+		if err != nil || !validPerf(pair.expf) {
+			sh.mu.Lock()
+			delete(sh.copyGridBusy, key)
+			sh.copyGridRetry[key] = time.Now().Add(time.Second)
+			sh.mu.Unlock()
+			return
+		}
+		if err := savePerf(local, pair.expf); err != nil {
+			sh.mu.Lock()
+			delete(sh.copyGridBusy, key)
+			sh.copyGridRetry[key] = time.Now().Add(time.Second)
+			sh.mu.Unlock()
+			return
+		}
+		if pair.native != nil {
+			if err := writeShadowAnalysis(local, pair.native); err != nil {
+				sh.mu.Lock()
+				delete(sh.copyGridBusy, key)
+				sh.copyGridRetry[key] = time.Now().Add(time.Second)
+				sh.mu.Unlock()
+				return
+			}
+		}
+		marker := local + ".perf.regrid"
+		if os.WriteFile(marker+".tmp", []byte(gen), 0o644) != nil || os.Rename(marker+".tmp", marker) != nil {
+			_ = os.Remove(marker + ".tmp")
+			sh.mu.Lock()
+			delete(sh.copyGridBusy, key)
+			sh.copyGridRetry[key] = time.Now().Add(time.Second)
+			sh.mu.Unlock()
+			return
+		}
+		id := cachedID
+		if id <= 0 {
+			id = s.copyTrackID(ctx, local)
+		}
+		sent := id > 0 && sendShadowRegrid(sock, id, local)
+		gotPerfGen := pair.gen
+		if gotPerfGen == "" {
+			gotPerfGen = p.PerfGen
+		}
+		sh.mu.Lock()
+		delete(sh.copyGridBusy, key)
+		delete(sh.copyGridRetry, key)
+		if sh.files[key] == local {
+			if sh.copyGridGens == nil {
+				sh.copyGridGens = map[string]string{}
+			}
+			sh.copyGridGens[key] = gen
+			if gotPerfGen != "" {
+				if sh.copyGens == nil {
+					sh.copyGens = map[string]string{}
+				}
+				sh.copyGens[key] = gotPerfGen
+			}
+			if id > 0 {
+				if sh.copyTrackIDs == nil {
+					sh.copyTrackIDs = map[string]int64{}
+				}
+				sh.copyTrackIDs[local] = id
+			}
+			if sent {
+				delete(sh.copyGridPending, key)
+				delete(sh.copyGridNotifyRetry, key)
+				delete(sh.copyGridTries, key)
+			} else {
+				if sh.copyGridPending == nil {
+					sh.copyGridPending = map[string]string{}
+				}
+				if sh.copyGridNotifyRetry == nil {
+					sh.copyGridNotifyRetry = map[string]time.Time{}
+				}
+				if sh.copyGridTries == nil {
+					sh.copyGridTries = map[string]int{}
+				}
+				sh.copyGridPending[key] = gen
+				sh.copyGridTries[key] = 0
+				sh.copyGridNotifyRetry[key] = time.Now().Add(350 * time.Millisecond)
+			}
+			sh.bump()
+		}
+		sh.mu.Unlock()
+	}()
+}
+
+// shadowNotifyPendingRegrid retries resolving the copy's m.db Track.id and
+// notifying the 5.3.0 native regrid socket if m.db had not yet committed the
+// row (or the socket was not ready) when shadowRefreshPeerGrid ran. Bounded by
+// shadowRegridMaxTries so non-5.3.0 builds without the socket do 0 ongoing work.
+// Called with sh.mu held.
+func (s *Server) shadowNotifyPendingRegrid(key, local string) {
+	sh := s.shadow
+	if sh.copyTrackIDBusy == nil {
+		sh.copyTrackIDBusy = map[string]bool{}
+	}
+	if sh.copyGridNotifyRetry == nil {
+		sh.copyGridNotifyRetry = map[string]time.Time{}
+	}
+	if sh.copyGridTries == nil {
+		sh.copyGridTries = map[string]int{}
+	}
+	if sh.copyTrackIDBusy[local] || time.Now().Before(sh.copyGridNotifyRetry[key]) {
+		return
+	}
+	if sh.copyGridTries[key] >= shadowRegridMaxTries {
+		delete(sh.copyGridPending, key)
+		delete(sh.copyGridNotifyRetry, key)
+		delete(sh.copyGridTries, key)
+		return
+	}
+	gen := sh.copyGridPending[key]
+	cachedID := sh.copyTrackIDs[local]
+	sock := sh.regridSockPath
+	sh.copyTrackIDBusy[local] = true
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if _, err := os.Stat(local + ".perf.regrid"); os.IsNotExist(err) {
+			sh.mu.Lock()
+			delete(sh.copyTrackIDBusy, local)
+			if sh.copyGridPending[key] == gen {
+				delete(sh.copyGridPending, key)
+				delete(sh.copyGridNotifyRetry, key)
+				delete(sh.copyGridTries, key)
+			}
+			sh.mu.Unlock()
+			return
+		}
+		id := cachedID
+		if id <= 0 {
+			id = s.copyTrackID(ctx, local)
+		}
+		sent := id > 0 && sendShadowRegrid(sock, id, local)
+		sh.mu.Lock()
+		delete(sh.copyTrackIDBusy, local)
+		if id > 0 {
+			if sh.copyTrackIDs == nil {
+				sh.copyTrackIDs = map[string]int64{}
+			}
+			sh.copyTrackIDs[local] = id
+		}
+		if sh.copyGridPending[key] == gen {
+			if sent {
+				delete(sh.copyGridPending, key)
+				delete(sh.copyGridNotifyRetry, key)
+				delete(sh.copyGridTries, key)
+			} else {
+				sh.copyGridTries[key]++
+				sh.copyGridNotifyRetry[key] = time.Now().Add(500 * time.Millisecond)
+			}
+		}
+		sh.mu.Unlock()
+	}()
 }
 
 // Refresh a cached shadow audio path's analysis without downloading the audio
@@ -2803,14 +3218,18 @@ func (s *Server) shadowRefreshPeerPerf(key string, p peerDeck, old string) {
 		if err := installShadowSidecars(ctx, local, perfURL, pair); err != nil {
 			return "", err
 		}
-		_ = os.Remove(local)
-		if err := os.Link(old, local); err != nil {
-			removeShadowSidecars(local)
-			return "", err
+		if local != old {
+			_ = os.Remove(local)
+			if err := os.Link(old, local); err != nil {
+				removeShadowSidecars(local)
+				return "", err
+			}
 		}
 		s.shadowCopyGen(key, gen)
-		_ = os.Remove(old)
-		removeShadowSidecars(old)
+		if local != old {
+			_ = os.Remove(old)
+			removeShadowSidecars(old)
+		}
 		for d := filepath.Dir(old); d != s.shadowDir() && strings.HasPrefix(d, s.shadowDir()); d = filepath.Dir(d) {
 			_ = os.Remove(d)
 		}
@@ -2860,6 +3279,29 @@ func (s *Server) copyRowBPM(ctx context.Context, local string) (float64, bool) {
 		return 0, false
 	}
 	return bpm.Float64, true
+}
+
+// copyTrackID is the m.db Track.id for the shadow copy at local, read-only.
+func (s *Server) copyTrackID(ctx context.Context, local string) int64 {
+	lib := engineLibrary(local, s.shadow.dataRoot, s.shadow.mediaRoot)
+	rel, err := filepath.Rel(lib, local)
+	if err != nil {
+		return 0
+	}
+	mdb := filepath.Join(lib, "Database2", "m.db")
+	if _, err := os.Stat(mdb); err != nil {
+		return 0
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
+	if err != nil {
+		return 0
+	}
+	defer db.Close()
+	var id int64
+	if db.QueryRowContext(ctx, `SELECT id FROM Track WHERE path = ? ORDER BY id DESC LIMIT 1`, filepath.ToSlash(rel)).Scan(&id) != nil || id <= 0 {
+		return 0
+	}
+	return id
 }
 
 // Bounded wait before a persistently 503 source transitions to a visible
@@ -3034,6 +3476,8 @@ func (s *Server) shadowCleanCopies(keep string) {
 			os.Remove(f)
 			os.Remove(f + ".perf")
 			os.Remove(f + ".perf.rgb")
+			os.Remove(f + ".perf.regrid")
+			os.Remove(f + ".perf.regrid.run")
 			os.Remove(f + ".analysis")
 			for dir := filepath.Dir(f); dir != s.shadowDir() && strings.HasPrefix(dir, s.shadowDir()); dir = filepath.Dir(dir) {
 				os.Remove(dir) // the copy's own directories, once empty
@@ -3041,6 +3485,12 @@ func (s *Server) shadowCleanCopies(keep string) {
 			delete(sh.files, k)
 			delete(sh.used, k)
 			delete(sh.copyGens, k)
+			delete(sh.copyGridGens, k)
+			delete(sh.copyGridPending, k)
+			delete(sh.copyGridNotifyRetry, k)
+			delete(sh.copyGridTries, k)
+			delete(sh.copyGridRetry, k)
+			delete(sh.copyTrackIDs, f)
 		}
 	}
 }

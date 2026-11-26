@@ -55,10 +55,11 @@ type shadowEncodedPair struct {
 // shadowAnalysisPair is a validated, generation-matched pair fetched from a peer
 // before downloading or linking audio.
 type shadowAnalysisPair struct {
-	expf   []byte
-	native []byte
-	gen    string
-	noFill string
+	expf    []byte
+	native  []byte
+	gen     string
+	gridGen string
+	noFill  string
 }
 
 func peerAdvertisesFormat(header, want string) bool {
@@ -275,32 +276,62 @@ func expfBPM(perf []byte) (float64, bool) {
 // validPerf reports whether b is a well-formed EXPF v1 payload accepted by
 // engine_ui_hook.c's oa_read_perf AND whose uncompressed trackData, overview,
 // and beatData parse cleanly into a supported non-empty Engine beat grid.
-func validPerf(b []byte) bool {
+func parsePerfParts(b []byte) (bpm float64, parts [3][]byte, ok bool) {
 	if len(b) < 28 || len(b) > shadowPerfMax || string(b[:4]) != "EXPF" {
-		return false
+		return 0, parts, false
 	}
 	if binary.LittleEndian.Uint32(b[4:8]) != 1 {
-		return false
+		return 0, parts, false
 	}
-	bpm := math.Float64frombits(binary.LittleEndian.Uint64(b[8:16]))
+	bpm = math.Float64frombits(binary.LittleEndian.Uint64(b[8:16]))
 	if math.IsNaN(bpm) || math.IsInf(bpm, 0) || !(bpm > 0 && bpm < 1000) {
-		return false
+		return 0, parts, false
 	}
 	off := 16
-	var parts [3][]byte
 	for i := range parts {
 		if len(b)-off < 4 {
-			return false
+			return 0, parts, false
 		}
 		n := binary.LittleEndian.Uint32(b[off : off+4])
 		off += 4
 		if uint64(n) > uint64(len(b)-off) {
-			return false
+			return 0, parts, false
 		}
 		parts[i] = b[off : off+int(n)]
 		off += int(n)
 	}
 	if off != len(b) || len(parts[0]) < 20 || len(parts[1]) == 0 || len(parts[2]) < 27 {
+		return 0, parts, false
+	}
+	return bpm, parts, true
+}
+
+// gridGenHash identifies a track's beat grid by BPM and uncompressed beatData so
+// on-demand EXPF payloads and subsequent Engine m.db fills agree regardless of
+// zlib compression differences, while any real beat-grid edit changes the hash.
+func gridGenHash(bpm float64, rawBeats []byte) string {
+	if math.IsNaN(bpm) || math.IsInf(bpm, 0) || !(bpm > 0 && bpm < 1000) || len(rawBeats) == 0 {
+		return ""
+	}
+	h := sha256.New()
+	var raw [8]byte
+	binary.LittleEndian.PutUint64(raw[:], math.Float64bits(bpm))
+	h.Write(raw[:])
+	h.Write(rawBeats)
+	return fmt.Sprintf("%x", h.Sum(nil))[:16]
+}
+
+func perfGridGen(b []byte) string {
+	bpm, parts, ok := parsePerfParts(b)
+	if !ok {
+		return ""
+	}
+	return gridGenHash(bpm, parts[1])
+}
+
+func validPerf(b []byte) bool {
+	_, parts, ok := parsePerfParts(b)
+	if !ok {
 		return false
 	}
 	ct, err := enginedb.QCompress(parts[0])
@@ -446,58 +477,59 @@ func fetchPerf(ctx context.Context, url string) []byte {
 }
 
 func fetchPerfPending(ctx context.Context, url string) (perf []byte, pending bool) {
-	b, _, p := fetchPerfPendingGen(ctx, url)
+	b, _, _, p := fetchPerfPendingGen(ctx, url)
 	return b, p
 }
 
-func fetchPerfPendingGen(ctx context.Context, url string) (perf []byte, gen string, pending bool) {
+func fetchPerfPendingGen(ctx context.Context, url string) (perf []byte, gen, gridGen string, pending bool) {
 	for try := 0; ; try++ {
 		if ctx.Err() != nil {
-			return nil, "", true
+			return nil, "", "", true
 		}
-		b, hdrGen, status, ok := fetchPerfOnce(ctx, url)
+		b, hdrGen, hdrGridGen, status, ok := fetchPerfOnce(ctx, url)
 		switch {
 		case ok && validPerf(b):
-			return b, hdrGen, false
+			return b, hdrGen, hdrGridGen, false
 		case ok:
 			log.Printf("stream-sync: shadow: the source gave invalid analysis (%d bytes)", len(b))
-			return nil, "", false
+			return nil, "", "", false
 		case status == 0 || status == http.StatusServiceUnavailable || status >= 500:
 			pending = true
 		default:
 			log.Printf("stream-sync: shadow: the source gave no analysis (http %d)", status)
-			return nil, "", false
+			return nil, "", "", false
 		}
 		if try+1 >= perfRetries || ctx.Err() != nil {
-			return nil, "", true
+			return nil, "", "", true
 		}
 		select {
 		case <-ctx.Done():
-			return nil, "", true
+			return nil, "", "", true
 		case <-time.After(perfRetryWait):
 		}
 	}
 }
 
 // fetchPerfOnce: ok only for a complete 200 answer.
-func fetchPerfOnce(ctx context.Context, url string) ([]byte, string, int, bool) {
+func fetchPerfOnce(ctx context.Context, url string) ([]byte, string, string, int, bool) {
 	ctx, cancel := context.WithTimeout(ctx, perfRequestTimeout)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	resp, err := peerFileClient.Do(req)
 	if err != nil {
-		return nil, "", 0, false
+		return nil, "", "", 0, false
 	}
 	defer resp.Body.Close()
 	hdrGen := strings.TrimSpace(resp.Header.Get(shadowPerfGenHeader))
+	hdrGridGen := strings.TrimSpace(resp.Header.Get("X-Shadow-Grid-Gen"))
 	b, err := io.ReadAll(io.LimitReader(resp.Body, shadowPerfMax+1))
 	if err != nil {
-		return nil, "", 0, false
+		return nil, "", "", 0, false
 	}
 	if resp.StatusCode != 200 {
-		return nil, "", resp.StatusCode, false
+		return nil, "", "", resp.StatusCode, false
 	}
-	return b, hdrGen, resp.StatusCode, true
+	return b, hdrGen, hdrGridGen, resp.StatusCode, true
 }
 
 // fetchNativeAnalysisPending fetches a validated native RBXA1 payload before a
@@ -592,14 +624,14 @@ func fetchShadowAnalysisPair(ctx context.Context, perfURL string) (shadowAnalysi
 		if ctx.Err() != nil {
 			return shadowAnalysisPair{}, errPerfPending
 		}
-		expf, expfGen, pending := fetchPerfPendingGen(ctx, perfURL)
+		expf, expfGen, expfGridGen, pending := fetchPerfPendingGen(ctx, perfURL)
 		if pending {
 			return shadowAnalysisPair{}, errPerfPending
 		}
 		if expf == nil {
 			return shadowAnalysisPair{}, errAnalysisUnavailable
 		}
-		pair := shadowAnalysisPair{expf: expf, gen: expfGen, noFill: "not a player"}
+		pair := shadowAnalysisPair{expf: expf, gen: expfGen, gridGen: expfGridGen, noFill: "not a player"}
 		if !shadowIsPlayerBoard() {
 			return pair, nil
 		}
@@ -636,6 +668,8 @@ func fetchShadowAnalysisPair(ctx context.Context, perfURL string) (shadowAnalysi
 func removeShadowSidecars(local string) {
 	_ = os.Remove(local + ".perf")
 	_ = os.Remove(local + ".perf.rgb")
+	_ = os.Remove(local + ".perf.regrid")
+	_ = os.Remove(local + ".perf.regrid.run")
 	_ = os.Remove(local + ".analysis")
 }
 
@@ -681,14 +715,15 @@ func writeShadowAnalysis(local string, b []byte) error {
 	return os.Rename(tmp.Name(), out)
 }
 
-// Publish only a complete file, before shadowFetch publishes the audio path.
+// Publish only a complete file, replacing any previous sidecar atomically on
+// success so an in-place refresh never leaves a missing .analysis window.
 // Older peers ignore format=native and return EXPF; it never becomes a sidecar.
 // The result says why there is none ("" when there is one), for the log.
 func saveShadowAnalysis(ctx context.Context, local, url string) string {
 	out := local + ".analysis"
-	_ = os.Remove(out)
 	b, _, _, _, why := fetchNativeAnalysisPending(ctx, url)
 	if why != "" {
+		_ = os.Remove(out)
 		return why
 	}
 	if err := writeShadowAnalysis(local, b); err != nil {
