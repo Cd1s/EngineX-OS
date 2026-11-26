@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
-	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
@@ -22,7 +21,6 @@ const (
 	viewMerged     = "merged"
 	viewDevice     = "device"
 	viewOneLibrary = "onelibrary"
-	viewLink       = "link:"
 )
 
 // mergedFolderTitle is the merged view's folder title in the deck's language: the strings of the
@@ -112,7 +110,7 @@ func rowHash(h hash.Hash, t *rekordbox.Track) string {
 // fields (it carries the cue rows a new row starts with). With two libraries and the layout
 // "folders" the root holds three folders, the merged view, Device Library and OneLibrary, each
 // with that view's whole tree; "merged" shows the merged view at the root, and "device" or
-// "onelibrary" leaves the other library out. Staged CDJ libraries get a folder each (#59).
+// "onelibrary" leaves the other library out.
 func BuildView(libs []SourceLibrary, layout, lang string) (*View, error) {
 	return BuildViewCtx(context.Background(), libs, layout, lang)
 }
@@ -122,18 +120,12 @@ func BuildViewCtx(ctx context.Context, libs []SourceLibrary, layout, lang string
 		return nil, err
 	}
 	var device, one *SourceLibrary
-	var links []*SourceLibrary
 	for i := range libs {
 		switch libs[i].Kind {
 		case rbstate.DeviceLibrary:
 			device = &libs[i]
 		case rbstate.OneLibrary:
 			one = &libs[i]
-		default:
-			if prolink.OwnStagedName(libs[i].Source) {
-				continue
-			}
-			links = append(links, &libs[i])
 		}
 	}
 	if one != nil && device != nil {
@@ -153,7 +145,7 @@ func BuildViewCtx(ctx context.Context, libs []SourceLibrary, layout, lang string
 	v := &View{Layout: layout, index: map[string]int{}}
 	h := sha1.New()
 	keys := map[*SourceLibrary]map[uint32]string{} // a library's track ID to its key
-	for _, l := range append([]*SourceLibrary{one, device}, links...) {
+	for _, l := range []*SourceLibrary{one, device} {
 		if l == nil {
 			continue
 		}
@@ -167,11 +159,11 @@ func BuildViewCtx(ctx context.Context, libs []SourceLibrary, layout, lang string
 			t := &l.Lib.Tracks[i]
 			rel, err := compat.CleanRelative(t.Path)
 			if err != nil {
-				return nil, fmt.Errorf("track %d of library %d %s: %w", t.ID, l.Kind, l.Source, err)
+				return nil, fmt.Errorf("track %d of library %d: %w", t.ID, l.Kind, err)
 			}
 			key := rbstate.FoldPath(rel)
 			keys[l][t.ID] = key
-			ref := rbstate.SourceRef{Kind: l.Kind, Source: l.Source, ID: t.ID, RecordHash: t.RecordHash}
+			ref := rbstate.SourceRef{Kind: l.Kind, ID: t.ID, RecordHash: t.RecordHash}
 			if ref.RecordHash == "" {
 				ref.RecordHash = rekordbox.RecordHash(*t)
 			}
@@ -180,7 +172,7 @@ func BuildViewCtx(ctx context.Context, libs []SourceLibrary, layout, lang string
 			if at, ok := v.index[key]; !ok {
 				v.index[key] = len(v.Tracks)
 				v.Tracks = append(v.Tracks, ViewTrack{Key: key, Rel: rel, Track: *t, Refs: []rbstate.SourceRef{ref}, Hash: rowHash(h, t)})
-			} else if !slices.ContainsFunc(v.Tracks[at].Refs, func(r rbstate.SourceRef) bool { return r.Kind == l.Kind && r.Source == l.Source }) {
+			} else if !slices.ContainsFunc(v.Tracks[at].Refs, func(r rbstate.SourceRef) bool { return r.Kind == l.Kind }) {
 				v.Tracks[at].Refs = append(v.Tracks[at].Refs, ref)
 			}
 		}
@@ -261,15 +253,6 @@ func BuildViewCtx(ctx context.Context, libs []SourceLibrary, layout, lang string
 		nodes, err := tree(ctx, device, keys[device])
 		if err == nil {
 			err = add("", nodes)
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-	for _, l := range links {
-		nodes, err := tree(ctx, l, keys[l])
-		if err == nil {
-			err = folder(viewLink+l.Source, "[Pro DJ Link: "+l.Source+"]", nodes)
 		}
 		if err != nil {
 			return nil, err

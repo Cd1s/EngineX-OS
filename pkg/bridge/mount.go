@@ -298,8 +298,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	if err != nil {
 		return res, err
 	}
-	staged := stagedStamp(mount)
-	if (len(files) == 0 && staged == "") || !writableLibrary(mount) {
+	if len(files) == 0 || !writableLibrary(mount) {
 		return MountResult{Bypassed: true}, nil
 	}
 	_, hadLibrary := os.Lstat(filepath.Join(mount, "Engine Library"))
@@ -332,7 +331,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		return stopAtDeadline()
 	}
 	layout := ReadLayout(o.Settings)
-	stamp := rbstate.Stamp(layout, files, staged)
+	stamp := rbstate.Stamp(layout, files, "")
 	head, headErr := rbstate.ReadHeader(dir)
 	if swapped && o.OnDemand && (headErr != nil || !head.Pending.None()) {
 		startBG()
@@ -397,20 +396,13 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	if errors.Is(err, errWindowDeadline) || deadlineReached() {
 		return stopAtDeadline()
 	}
-	if err != nil && staged == "" {
+	if err != nil {
 		return res, err
 	}
 	for _, f := range failed {
 		log.Printf("rb-bridge: %v: this library is left out of the import", f)
 	}
-	stagedLibs, stagedErr := readStagedCtx(ctx, mount)
-	if errors.Is(stagedErr, errWindowDeadline) || deadlineReached() {
-		return stopAtDeadline()
-	}
-	if libs = append(libs, stagedLibs...); len(libs) == 0 {
-		if err != nil {
-			return res, err
-		}
+	if len(libs) == 0 {
 		return MountResult{Bypassed: true}, nil
 	}
 	// A OneLibrary key not in the cache costs seconds on a deck: the line says which it was.
@@ -438,7 +430,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	st.done("view", "%d tracks, %d lists", len(view.Tracks), len(view.Lists))
 
 	w := &window{ctx: ctx, mount: mount, dir: dir, view: view, st: st, o: o, res: &res, load: load,
-		partial: len(failed) > 0, linkOnly: len(files) == 0}
+		partial: len(failed) > 0}
 	if err = w.run(); err != nil {
 		if errors.Is(err, errWindowDeadline) || deadlineReached() {
 			if w.snap != nil {
@@ -547,7 +539,7 @@ func addSmartMatchCtx(ctx context.Context, st *steps, v *View, ref uint32) error
 		}
 		tracks[i] = v.Tracks[i].Track
 		tracks[i].ID = uint32(i + 1)
-		if current < 0 && slices.ContainsFunc(v.Tracks[i].Refs, func(r rbstate.SourceRef) bool { return r.ID == ref && r.Kind != rbstate.LinkLibrary }) {
+		if current < 0 && slices.ContainsFunc(v.Tracks[i].Refs, func(r rbstate.SourceRef) bool { return r.ID == ref }) {
 			current = i
 		}
 	}

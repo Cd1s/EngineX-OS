@@ -1,13 +1,10 @@
 package cli
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 )
 
 // The package's tests run as root on shared build hosts: the markers and the import lock must point
@@ -28,23 +25,11 @@ func TestDriveStatusStaysOffTheHost(t *testing.T) {
 	}
 }
 
-// The mount filter takes its root from a variable, so a test keeps its drive in its own directory
-// instead of creating one under the host's /media.
-func TestLocalExportsFollowMediaRoot(t *testing.T) {
-	base := t.TempDir()
-	drive := filepath.Join(base, "DRIVE")
-	if err := os.MkdirAll(drive, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	testfixture.Export(t, drive)
-	line := fmt.Sprintf("/dev/test %s ext4 rw 0 0\n", drive)
-	if got := localExportsFrom(strings.NewReader(line)); len(got) != 0 {
-		t.Fatalf("a drive outside %s was selected: %v", mediaRoot, got)
-	}
-	old := mediaRoot
-	mediaRoot = base + string(os.PathSeparator)
-	defer func() { mediaRoot = old }()
-	if got := localExportsFrom(strings.NewReader(line)); len(got) != 1 || got[0] != drive {
-		t.Fatalf("the drive below mediaRoot was not selected: %v", got)
+// Pro DJ Link's live-display MediaCache defaults to tmpfs (/tmp), never to /data or a user drive under /media.
+func TestProlinkMediaCacheDefaultStaysInTmpfs(t *testing.T) {
+	t.Setenv("ENGINEX_PROLINK_MEDIA_CACHE", "")
+	got := prolink.SharedMediaCacheDir()
+	if !strings.HasPrefix(got, "/tmp/") || strings.HasPrefix(got, "/data") || strings.HasPrefix(got, "/media") {
+		t.Fatalf("SharedMediaCacheDir() = %q, must default under /tmp/", got)
 	}
 }

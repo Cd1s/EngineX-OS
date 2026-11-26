@@ -67,8 +67,8 @@ type fillView struct {
 // hookWindow is the time the hook gives a window (design section 3).
 const hookWindow = 17 * time.Second
 
-// readJobView reads the exports as a window would (FindSources, ReadSources, the staged CDJ
-// libraries, BuildView) into the view's tracks and the stamp.
+// readJobView reads the exports as a window would (FindSources, ReadSources, BuildView) into the
+// view's tracks and the stamp.
 func readJobView(ctx context.Context, r *compat.Resolver, mount, layout, lang string) (*fillView, error) {
 	return readJobViewPaced(ctx, r, mount, layout, lang, nil)
 }
@@ -85,15 +85,11 @@ func readJobViewPaced(ctx context.Context, r *compat.Resolver, mount, layout, la
 	if err != nil {
 		return nil, err
 	}
-	staged, err := readStagedPaced(ctx, mount, pace)
+	v, err := BuildViewCtx(ctx, libs, layout, lang)
 	if err != nil {
 		return nil, err
 	}
-	v, err := BuildViewCtx(ctx, append(libs, staged...), layout, lang)
-	if err != nil {
-		return nil, err
-	}
-	v.Stamp, v.Sources = rbstate.Stamp(layout, files, stagedStamp(mount)), files
+	v.Stamp, v.Sources = rbstate.Stamp(layout, files, ""), files
 	out := &fillView{stamp: v.Stamp, tracks: make([]fillTrack, len(v.Tracks)), view: v}
 	if len(failed) > 0 || len(files) == 0 {
 		out.view = nil // a library could not be read: nothing is removed for it, by a window only

@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -65,7 +64,7 @@ func FindSources(r *compat.Resolver, mount string) ([]rbstate.FileSig, error) {
 // SourceLibrary is one library as pkg/rekordbox read it.
 type SourceLibrary struct {
 	Kind   rbstate.LibraryKind
-	Source string // the staged library's name for a LinkLibrary
+	Source string
 	File   rbstate.FileSig
 	Lib    *rekordbox.Library
 }
@@ -409,104 +408,6 @@ func readSourcesPaced(ctx context.Context, r *compat.Resolver, mount string, fil
 		return nil, failed, errors.Join(failed...)
 	}
 	return libs, failed, nil
-}
-
-// stagedLibraries lists the libraries staged from Pioneer players into
-// <mount>/.prolink-cache/<name>/ (#59) in name order, each with its export.pdb, found by the same
-// hidden-directory and case rules as a stick's own.
-func stagedLibraries(mount string) (names, pdbs []string) {
-	dirs, _ := os.ReadDir(filepath.Join(mount, prolink.StagedDir))
-	for _, d := range dirs { // os.ReadDir sorts by name
-		if !d.IsDir() || d.Type()&os.ModeSymlink != 0 || prolink.OwnStagedName(d.Name()) {
-			continue
-		}
-		r, err := compat.NewResolver(filepath.Join(mount, prolink.StagedDir, d.Name()))
-		if err != nil {
-			continue
-		}
-		if rel, err := r.Resolve(devicePDB); err == nil {
-			names, pdbs = append(names, d.Name()), append(pdbs, r.FullPath(rel))
-		}
-	}
-	return names, pdbs
-}
-
-// stagedStamp changes whenever a staged library is written again.
-func stagedStamp(mount string) string {
-	var parts []string
-	names, pdbs := stagedLibraries(mount)
-	for i, name := range names {
-		if st, err := os.Stat(pdbs[i]); err == nil {
-			parts = append(parts, fmt.Sprintf("%s:%d:%d", name, st.Size(), st.ModTime().UnixNano()))
-		}
-	}
-	return strings.Join(parts, " ")
-}
-
-// readStaged reads the staged CDJ libraries, their paths pointing into the staged copies. A broken
-// one is left out with a log line: it never fails the stick's own import.
-func readStaged(mount string) []SourceLibrary {
-	out, _ := readStagedPaced(context.Background(), mount, nil)
-	return out
-}
-
-func readStagedCtx(ctx context.Context, mount string) ([]SourceLibrary, error) {
-	return readStagedPaced(ctx, mount, nil)
-}
-
-func readStagedPaced(ctx context.Context, mount string, pace *pacer) ([]SourceLibrary, error) {
-	var out []SourceLibrary
-	if err := pace.waitNotLoading(); err != nil {
-		return nil, err
-	}
-	names, pdbs := stagedLibraries(mount)
-	for i, name := range names {
-		if err := pace.waitNotLoading(); err != nil {
-			return nil, err
-		}
-		var staged *rekordbox.Library
-		var err error
-		if pace == nil {
-			staged, err = rekordbox.ReadPDB(pdbs[i])
-		} else {
-			staged, err = readPDBPaced(ctx, pdbs[i], pace)
-			if err != nil && ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-		}
-		if err != nil {
-			log.Printf("rb-bridge: staged %s: %v", name, err)
-			continue
-		}
-		resolver, err := compat.NewResolver(filepath.Join(mount, prolink.StagedDir, name))
-		if err != nil {
-			continue
-		}
-		into := func(p string) string {
-			rel, ok := prolink.SafeRel(p)
-			if !ok {
-				return ""
-			}
-			if rel, e := resolver.Resolve(rel); e == nil {
-				return "/" + path.Join(prolink.StagedDir, name, filepath.ToSlash(rel))
-			}
-			return ""
-		}
-		kept := staged.Tracks[:0]
-		for _, t := range staged.Tracks {
-			if t.Path = into(t.Path); t.ID != 0 && t.Path != "" { // "": its audio has not been copied yet
-				t.AnalysisPath, t.ArtworkPath, t.RecordHash = into(t.AnalysisPath), into(t.ArtworkPath), ""
-				kept = append(kept, t)
-			}
-		}
-		staged.Tracks = kept
-		if err := staged.Validate(); err != nil {
-			log.Printf("rb-bridge: staged %s left out: %v", name, err)
-			continue
-		}
-		out = append(out, SourceLibrary{Kind: rbstate.LinkLibrary, Source: name, Lib: staged})
-	}
-	return out, nil
 }
 
 // ReadLayout is the setting rb_library_view: how a stick with two libraries shows them. Anything

@@ -151,7 +151,7 @@ func exportNow(abs, layout string) ([]rbstate.FileSig, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	return sources, rbstate.Stamp(layout, sources, stagedStamp(abs)), nil
+	return sources, rbstate.Stamp(layout, sources, ""), nil
 }
 
 // ImportState reads only the snapshot header and current export file signatures.

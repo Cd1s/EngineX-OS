@@ -197,7 +197,7 @@ func stageAll(t *testing.T, mount string) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	view, err := BuildView(append(libs, readStaged(mount)...), s.Layout, "")
+	view, err := BuildView(libs, s.Layout, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func stageAll(t *testing.T, mount string) int {
 		}
 		n++
 	}
-	if err = stage.MarkVerified(rbstate.Stamp(s.Layout, files, stagedStamp(mount))); err != nil {
+	if err = stage.MarkVerified(rbstate.Stamp(s.Layout, files, "")); err != nil {
 		t.Fatal(err)
 	}
 	return n

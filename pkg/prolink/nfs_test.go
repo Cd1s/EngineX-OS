@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,37 +111,36 @@ func TestNFSClientErrors(t *testing.T) {
 	}
 }
 
-func TestStageCopiesLibraryWithinBudget(t *testing.T) {
+func TestMediaCacheSeenPlayerCopiesNothingAndLoadedTrackFetchesOnlyAnalysis(t *testing.T) {
 	usb := t.TempDir()
 	testfixture.Export(t, usb)
 	player := newFakePlayer(t, usb)
-	c := &prolink.NFSClient{IP: net.IPv4(127, 0, 0, 1), Portmap: player.port()}
-	dst := t.TempDir()
-	n, err := prolink.Stage(t.Context(), c, "/C/", dst, 1<<30)
-	if err != nil || n == 0 {
-		t.Fatalf("stage: %d %v", n, err)
+	cache := t.TempDir()
+	d := prolink.NewDiscovery()
+	d.SetMediaCache(&prolink.MediaCache{Dir: cache, Portmap: player.port()})
+
+	// Seeing a player announce (PacketType == 6, TrackID == 0) must copy nothing at all.
+	d.Observe(prolink.Device{Address: "127.0.0.1", Number: 2, Name: "CDJ-3000", PacketType: 6})
+	if entries, err := os.ReadDir(cache); err != nil || len(entries) != 0 {
+		t.Fatalf("seen player wrote files into MediaCache: %v %v", entries, err)
 	}
-	// Staged under the export's own spelling (/Music/...), whatever the stick's case.
-	for rel, src := range map[string]string{"PIONEER/rekordbox/export.pdb": "", "PIONEER/USBANLZ/P001/ANLZ0000.DAT": "", "Music/two.flac": "MUSIC/two.flac", "Music/five.wav": "MUSIC/five.wav"} {
-		if src == "" {
-			src = rel
+
+	// Loading TrackID 1 on the player caches ONLY export.pdb and Track 1's ANLZ files
+	// for live display — never audio files or artwork.
+	obs := d.Observe(prolink.Device{Address: "127.0.0.1", Number: 2, Name: "CDJ-3000", PacketType: 0x0a, SourcePlayer: 2, SourceSlot: 3, TrackID: 1})
+	if obs.Title == "" || len(obs.Waveform) == 0 {
+		t.Fatalf("loaded track display metadata missing: %+v", obs)
+	}
+	if err := filepath.WalkDir(cache, func(p string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
 		}
-		want, _ := os.ReadFile(filepath.Join(usb, src))
-		got, err := os.ReadFile(filepath.Join(dst, rel))
-		if err != nil || string(got) != string(want) {
-			t.Fatalf("%s: %v", rel, err)
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		if ext == ".flac" || ext == ".wav" || ext == ".mp3" || ext == ".aif" || ext == ".aiff" || ext == ".m4a" || ext == ".jpg" || ext == ".png" {
+			t.Errorf("MediaCache copied non-analysis file %s", p)
 		}
-	}
-	// Again: everything is already there.
-	if n, err := prolink.Stage(t.Context(), c, "/C/", dst, 1<<30); err != nil || n != 0 {
-		t.Fatalf("restage: %d %v", n, err)
-	}
-	// A tiny budget copies nothing but still writes export.pdb.
-	small := t.TempDir()
-	if n, err := prolink.Stage(t.Context(), c, "/C/", small, 1); err != nil || n != 0 {
-		t.Fatalf("budget: %d %v", n, err)
-	}
-	if _, err := os.Stat(filepath.Join(small, "PIONEER", "rekordbox", "export.pdb")); err != nil {
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := prolink.SafeRel("/../../etc/passwd"); ok {

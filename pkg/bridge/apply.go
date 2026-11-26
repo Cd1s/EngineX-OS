@@ -19,16 +19,15 @@ import (
 
 // window is one mount's work on the library.
 type window struct {
-	ctx      context.Context
-	mount    string
-	dir      string // Engine Library/Database2
-	view     *View
-	st       *steps
-	o        MountOptions
-	res      *MountResult
-	load     func() (*rbstate.Snapshot, error) // the stick's snapshot (its read may have started already)
-	partial  bool                              // a library was unreadable: nothing is removed and the stamp is not kept
-	linkOnly bool                              // only staged CDJ libraries were read: the stick's own import stays
+	ctx     context.Context
+	mount   string
+	dir     string // Engine Library/Database2
+	view    *View
+	st      *steps
+	o       MountOptions
+	res     *MountResult
+	load    func() (*rbstate.Snapshot, error) // the stick's snapshot (its read may have started already)
+	partial bool                              // a library was unreadable: nothing is removed and the stamp is not kept
 
 	// next: the work is done on the next library (next.go), by the job and without a deadline. Its
 	// snapshot is kept on the deck until it is ready; the stick's own library is only read.
@@ -593,10 +592,9 @@ func (w *window) putLists(b *enginedb.Batch, idx []int) error {
 // one transaction, then the rows whose export fields changed (updateRows).
 func (w *window) apply(p *Plan) error {
 	s := w.snap
-	if w.partial || w.linkOnly { // nothing is removed of a library that was not read
-		link := func(r rbstate.SourceRef) bool { return r.Kind == rbstate.LinkLibrary }
-		p.RemoveTracks = slices.DeleteFunc(p.RemoveTracks, func(k string) bool { return w.partial || !slices.ContainsFunc(s.Tracks[k].Refs, link) })
-		p.RemoveLists = slices.DeleteFunc(p.RemoveLists, func(k string) bool { return w.partial || !strings.HasPrefix(k, viewLink) })
+	if w.partial { // nothing is removed of a library that was not read
+		p.RemoveTracks = nil
+		p.RemoveLists = nil
 	}
 	w.st.done("diff", "+%d ~%d >%d -%d tracks, %d lists to write, %d to remove", len(p.AddTracks), len(p.UpdateTracks), len(p.Moves), len(p.RemoveTracks), len(p.PutLists), len(p.RemoveLists))
 	// A file that has a row the bridge did not make, under any spelling, keeps it: lists refer to

@@ -761,7 +761,7 @@ func TestPort1UnreadableOneLibraryStillCompletesDeviceImport(t *testing.T) {
 	}
 }
 
-func TestPort1StagedOnlyStickConvertsRepeatsAndRestages(t *testing.T) {
+func TestPort1LeftoverProlinkCacheOnlyStickIsBypassedAndUntouched(t *testing.T) {
 	for _, mode := range []string{"empty", "pioneer-directory", "native-engine"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
@@ -785,93 +785,152 @@ func TestPort1StagedOnlyStickConvertsRepeatsAndRestages(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			staged := filepath.Join(root, ".prolink-cache", "CDJ-3000")
-			testfixture.Export(t, staged)
+			cdj := filepath.Join(root, ".prolink-cache", "CDJ-3000")
+			own := filepath.Join(root, ".prolink-cache", "EngineX Export Beta 1 USB")
+			unfinished := filepath.Join(root, ".prolink-cache", "XDJ-2", "Contents", ".fetch-partial")
+			testfixture.Export(t, cdj)
+			testfixture.Export(t, own)
+			if err := os.MkdirAll(filepath.Dir(unfinished), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(unfinished, []byte("partial"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
 			res := mountNow(t, root, MountOptions{})
-			if res.Added != 5 {
-				t.Fatalf("staged-only import: %+v", res)
-			}
-			if got := query(t, root, `SELECT count(*) FROM Track WHERE path LIKE '../.prolink-cache/CDJ-3000/%'`); got[0][0] != "5" {
-				t.Fatalf("staged rows=%s", got[0][0])
-			}
-			if got := query(t, root, `SELECT count(*) FROM Playlist WHERE title='[Pro DJ Link: CDJ-3000]'`); got[0][0] != "1" {
-				t.Fatalf("staged root folder count=%s", got[0][0])
+			if !res.Bypassed || res.Added != 0 {
+				t.Fatalf("leftover .prolink-cache-only stick must be bypassed: %+v", res)
 			}
 			if mode == "native-engine" {
 				if got := query(t, root, `SELECT count(*) FROM Track WHERE title='Native preserved'`); got[0][0] != "1" {
 					t.Fatalf("native Engine row was lost: %s", got[0][0])
 				}
+				if got := query(t, root, `SELECT count(*) FROM Track WHERE path LIKE '%prolink-cache%'`); got[0][0] != "0" {
+					t.Fatalf("leftover .prolink-cache rows injected: %s", got[0][0])
+				}
+				if got := query(t, root, `SELECT count(*) FROM Playlist WHERE title LIKE '[Pro DJ Link:%'`); got[0][0] != "0" {
+					t.Fatalf("[Pro DJ Link: ...] playlists injected: %s", got[0][0])
+				}
+			} else if _, err := os.Stat(filepath.Join(root, "Engine Library")); !os.IsNotExist(err) {
+				t.Fatalf("Engine Library created for .prolink-cache-only stick: %v", err)
 			}
-			if _, err := FillInBackground(context.Background(), root, FillOptions{}); err != nil {
-				t.Fatal(err)
-			}
-			mountNow(t, root, MountOptions{Publish: true})
-			if again := mountNow(t, root, MountOptions{}); !again.Bypassed {
-				t.Fatalf("repeat staged-only mount: %+v", again)
-			}
-			pdb := filepath.Join(staged, "PIONEER/rekordbox/export.pdb")
-			st, err := os.Stat(pdb)
-			if err != nil {
-				t.Fatal(err)
-			}
-			when := st.ModTime().Add(time.Hour)
-			if err := os.Chtimes(pdb, when, when); err != nil {
-				t.Fatal(err)
-			}
-			if changed := mountNow(t, root, MountOptions{}); changed.Bypassed {
-				t.Fatalf("restaged export bypassed: %+v", changed)
-			}
-			if _, err := FillInBackground(context.Background(), root, FillOptions{}); err != nil {
-				t.Fatal(err)
-			}
-			mountNow(t, root, MountOptions{Publish: true})
-			if _, err := os.Stat(filepath.Join(root, "PIONEER/rekordbox/export.pdb")); !os.IsNotExist(err) && mode != "pioneer-directory" {
-				t.Fatalf("created local export: %v", err)
+			// Leftover .prolink-cache files are never silently deleted.
+			for _, kept := range []string{
+				filepath.Join(cdj, "PIONEER/rekordbox/export.pdb"),
+				filepath.Join(own, "PIONEER/rekordbox/export.pdb"),
+				unfinished,
+			} {
+				if _, err := os.Stat(kept); err != nil {
+					t.Fatalf("leftover .prolink-cache file removed: %s (%v)", kept, err)
+				}
 			}
 		})
 	}
 }
 
-func TestPort1StagedAndLocalLibrariesRetainLocalRowsAndMergeHiddenExport(t *testing.T) {
+func TestPort1LeftoverProlinkCacheIgnoredAndUntouchedWithLocalLibrary(t *testing.T) {
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	staged := filepath.Join(root, ".prolink-cache", "CDJ 1 USB")
+	own := filepath.Join(root, ".prolink-cache", "EngineX Export Beta 1 USB")
+	unfinished := filepath.Join(root, ".prolink-cache", "XDJ 2 USB", "Contents", ".fetch-123")
 	testfixture.Export(t, staged)
+	testfixture.Export(t, own)
 	if err := os.Rename(filepath.Join(staged, "PIONEER"), filepath.Join(staged, ".PIONEER")); err != nil {
 		t.Fatal(err)
 	}
-	if got := mountNow(t, root, MountOptions{}); got.Added != 10 {
-		t.Fatalf("local + hidden staged import: %+v", got)
+	if err := os.MkdirAll(filepath.Dir(unfinished), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unfinished, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := mountNow(t, root, MountOptions{}); got.Added != 5 {
+		t.Fatalf("local import with leftover .prolink-cache added %d tracks, want 5: %+v", got.Added, got)
+	}
+	if got := query(t, root, `SELECT count(*) FROM Track WHERE path LIKE '%prolink-cache%'`); got[0][0] != "0" {
+		t.Fatalf("leftover .prolink-cache tracks imported: %s", got[0][0])
+	}
+	if got := query(t, root, `SELECT count(*) FROM Playlist WHERE title LIKE '[Pro DJ Link:%'`); got[0][0] != "0" {
+		t.Fatalf("[Pro DJ Link: ...] folder imported: %s", got[0][0])
 	}
 	if _, err := FillInBackground(context.Background(), root, FillOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	mountNow(t, root, MountOptions{Publish: true})
+
+	// Stamp must exclude .prolink-cache completely; modifying or adding folders under
+	// .prolink-cache must keep the stick Bypassed on re-insert.
+	snap := snapshot(t, root)
+	if want := rbstate.Stamp(snap.Layout, snap.Sources, ""); snap.Stamp != want {
+		t.Fatalf("snapshot stamp %q != %q (included .prolink-cache)", snap.Stamp, want)
+	}
+	pdb := filepath.Join(staged, ".PIONEER/rekordbox/export.pdb")
+	st, err := os.Stat(pdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	when := st.ModTime().Add(time.Hour)
+	if err := os.Chtimes(pdb, when, when); err != nil {
+		t.Fatal(err)
+	}
+	extra := filepath.Join(root, ".prolink-cache", "CDJ-3000 3 USB")
+	testfixture.Export(t, extra)
+	if got := mountNow(t, root, MountOptions{}); !got.Bypassed {
+		t.Fatalf("changing leftover .prolink-cache invalidated mount stamp: %+v", got)
+	}
+
+	// Simulate upgrading a stick whose pre-upgrade m.db + snapshot still carried a
+	// [Pro DJ Link: ...] folder, LinkLibrary track row, and staged stamp: the next mount
+	// cleans them from m.db without touching .prolink-cache on disk.
 	localID := trackIDs(t, root)["../MUSIC/two.flac"]
-	if err := os.Rename(filepath.Join(root, "PIONEER"), filepath.Join(root, "PIONEER.saved")); err != nil {
+	db := p1Open(t, root)
+	res, err := db.Exec(`INSERT INTO Track(path,filename,title) VALUES('../.prolink-cache/CDJ 1 USB/MUSIC/two.flac','two.flac','Old ProLink')`)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(staged, "MUSIC/five.wav")); err != nil {
+	oldTrackID, _ := res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES('[Pro DJ Link: CDJ 1 USB]',0,1,0,1)`)
+	if err != nil {
 		t.Fatal(err)
 	}
-	mountNow(t, root, MountOptions{})
-	if _, err := FillInBackground(context.Background(), root, FillOptions{}); err != nil {
+	oldListID, _ := res.LastInsertId()
+	snap.Header.Stamp = rbstate.Stamp(snap.Layout, snap.Sources, "CDJ 1 USB:123:456")
+	snap.Tracks[".prolink-cache/cdj 1 usb/music/two.flac"] = &rbstate.Track{
+		Key:      ".prolink-cache/cdj 1 usb/music/two.flac",
+		Rel:      ".prolink-cache/CDJ 1 USB/MUSIC/two.flac",
+		EngineID: oldTrackID,
+		Refs:     []rbstate.SourceRef{{Kind: rbstate.LinkLibrary, Source: "CDJ 1 USB", ID: 1}},
+	}
+	snap.Lists["link:CDJ 1 USB"] = &rbstate.List{Key: "link:CDJ 1 USB", EngineID: oldListID, Hash: "legacy"}
+	if err := snap.Save(dbDir(root)); err != nil {
 		t.Fatal(err)
 	}
-	mountNow(t, root, MountOptions{Publish: true})
+	if got := mountNow(t, root, MountOptions{}); got.Removed != 1 || !got.PlaylistsChanged {
+		t.Fatalf("upgrade cleanup from legacy [Pro DJ Link: ...] rows: %+v", got)
+	}
 	if got := trackIDs(t, root)["../MUSIC/two.flac"]; got != localID {
 		t.Fatalf("local row changed from %s to %s", localID, got)
 	}
-	if got := query(t, root, `SELECT count(*) FROM Track WHERE path NOT LIKE '../.prolink-cache/%'`); got[0][0] != "5" {
-		t.Fatalf("local rows=%s", got[0][0])
+	if got := query(t, root, `SELECT count(*) FROM Track WHERE path LIKE '%prolink-cache%'`); got[0][0] != "0" {
+		t.Fatalf("legacy .prolink-cache track remained after upgrade: %s", got[0][0])
 	}
-	if got := query(t, root, `SELECT count(*) FROM Track WHERE path LIKE '../.prolink-cache/%'`); got[0][0] != "4" {
-		t.Fatalf("staged rows=%s", got[0][0])
+	if got := query(t, root, `SELECT count(*) FROM Playlist WHERE title LIKE '[Pro DJ Link:%'`); got[0][0] != "0" {
+		t.Fatalf("legacy [Pro DJ Link: ...] playlist remained after upgrade: %s", got[0][0])
 	}
-	if got := query(t, root, `SELECT count(*) FROM Track`); got[0][0] != "9" {
-		t.Fatalf("merged rows=%s", got[0][0])
+	if got := query(t, root, `SELECT count(*) FROM Track`); got[0][0] != "5" {
+		t.Fatalf("local rows=%s, want 5", got[0][0])
 	}
-	if got := mountNow(t, root, MountOptions{}); !got.Bypassed {
-		t.Fatalf("unchanged merged view was not bypassed: %+v", got)
+	// Every leftover .prolink-cache file on disk must remain intact.
+	for _, kept := range []string{
+		pdb,
+		filepath.Join(own, "PIONEER/rekordbox/export.pdb"),
+		filepath.Join(extra, "PIONEER/rekordbox/export.pdb"),
+		unfinished,
+	} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Fatalf("leftover .prolink-cache file silently deleted: %s (%v)", kept, err)
+		}
 	}
 }

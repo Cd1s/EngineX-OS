@@ -101,6 +101,6 @@ func StampWriteBackForTest(mount string) error {
 		return err
 	}
 	snap.Header.Sources = sources
-	snap.Header.Stamp = rbstate.Stamp(snap.Header.Layout, sources, stagedStamp(mount))
+	snap.Header.Stamp = rbstate.Stamp(snap.Header.Layout, sources, "")
 	return snap.Save(dbDir)
 }
