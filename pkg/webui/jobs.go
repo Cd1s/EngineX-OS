@@ -264,13 +264,9 @@ func (j *Jobs) saveSource(key, path string) {
 	j.writeSources()
 }
 
-// writeSources stores the source index; j.mu must be held.
+// writeSources stores the source index owner-only and atomically; j.mu must be held.
 func (j *Jobs) writeSources() {
-	b, _ := json.Marshal(j.sources)
-	tmp := filepath.Join(j.p.Deemix.DownloadDir, sourcesFile+".tmp")
-	if os.WriteFile(tmp, b, 0o600) == nil {
-		os.Rename(tmp, filepath.Join(j.p.Deemix.DownloadDir, sourcesFile))
-	}
+	_ = providers.SaveJSON(filepath.Join(j.p.Deemix.DownloadDir, sourcesFile), j.sources)
 }
 
 var errNASChanged = errors.New("the NAS changed since this track was listed")

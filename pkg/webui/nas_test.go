@@ -1710,6 +1710,11 @@ func TestSourcesIndexWrittenMode0600(t *testing.T) {
 		Deemix:  &deemixclient.Client{DownloadDir: dlDir, AllowLossy: true},
 	})
 	t.Cleanup(jobs.Close)
+	// Round 3: an older writer's leftover temporary file (mode 0644) does not publish the
+	// index 0644.
+	if err := os.WriteFile(filepath.Join(dlDir, sourcesFile+".tmp"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	jobs.putFile("smb:Sets/Track.mp3", fetched{
 		matched: providers.Track{ID: "Sets/Track.mp3", Provider: "smb"},
 		dl:      &deemixclient.Download{Path: audioPath},
