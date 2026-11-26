@@ -3325,6 +3325,22 @@ static char *oa_read_rgb(const char *path, uint32_t *len) {
     return b;
 }
 
+static int oa_is_shadow_path(const char *path) {
+    size_t n = strlen(OA_SHADOW);
+    if (n > 0 && !strncmp(path, OA_SHADOW, n) && path[n] == '/' && !strncmp(path + n + 1, "peer-", 5)) return 1;
+    n = strlen(sc_shadow_root);
+    if (n > 0 && !strncmp(path, sc_shadow_root, n) && path[n] == '/' && !strncmp(path + n + 1, "peer-", 5)) return 1;
+    return 0;
+}
+
+static int oa_skip_shadow(void *o, const char *why, const char *path) {
+    oa_emit(o, OA_STARTED, NULL);
+    oa_emit(o, OA_STOPPED, NULL);
+    oa_emit(o, OA_FINISHED, NULL);
+    oa_log(why, path, 0);
+    return 1;
+}
+
 static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
     char path[PATH_MAX];
     struct timespec t0, t1;
@@ -3336,14 +3352,20 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
         oa_log("rgb-stock", path, 0);
         return 0;
     }
+    int is_shadow = oa_is_shadow_path(path);
     char perf[PATH_MAX + 8];
     snprintf(perf, sizeof perf, "%s.perf", path);
     int rekordbox_stream = 0;
 #if !defined(__aarch64__)
-    if (access(perf, F_OK)) rekordbox_stream = sc_rbx_replay_path(path, perf, sizeof perf);
+    if (!is_shadow && access(perf, F_OK)) rekordbox_stream = sc_rbx_replay_path(path, perf, sizeof perf);
 #endif
-    if (!rekordbox_stream && access(perf, F_OK) &&
-        (!oa_shadow_perf(path, perf, sizeof perf) || access(perf, F_OK))) {
+    if (!is_shadow && !rekordbox_stream && access(perf, F_OK)) {
+        if (oa_shadow_perf(path, perf, sizeof perf)) is_shadow = 1;
+    }
+    if (!rekordbox_stream && access(perf, F_OK)) {
+        // Fail closed for shadow copies: never hand a shadow copy to Engine's
+        // real OfflineAnalyzer when its .perf is missing.
+        if (is_shadow) return oa_skip_shadow(o, "skip-shadow-missing", path);
         int named = 0;
 #if !defined(__aarch64__)
         named = sc_rbx_replay_named(path, OA_ENGINE_COPIES, perf, sizeof perf);
@@ -3355,6 +3377,9 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
     }
     struct oa_perf p;
     if (!oa_read_perf(perf, &p)) {
+        // Fail closed for shadow copies: never hand a shadow copy to Engine's
+        // real OfflineAnalyzer when its .perf is corrupt or unreadable.
+        if (is_shadow) return oa_skip_shadow(o, "skip-shadow-bad", perf);
         oa_log("bad", perf, 0);
         return 0;
     }
