@@ -76,6 +76,14 @@ func capCover(data []byte, mime string) ([]byte, string, error) {
 // EmbedCover fetches artwork and writes it into a downloaded FLAC or MP3, unless the
 // file already has a picture. The file is replaced in one step.
 func (c *Client) EmbedCover(ctx context.Context, path, address string) error {
+	return c.EmbedCoverWith(ctx, path, func(ctx context.Context) ([]byte, error) {
+		return c.fetchCoverBytes(ctx, address)
+	})
+}
+
+// EmbedCoverWith fetches artwork via fetch and writes it into a downloaded FLAC or MP3,
+// unless the file already has a picture. fetch is only called when embedding is needed.
+func (c *Client) EmbedCoverWith(ctx context.Context, path string, fetch func(context.Context) ([]byte, error)) error {
 	// Artwork for Ogg streams lives in Engine's artwork store. Rewriting tags
 	// here would require remuxing pages and updating their CRCs/granule positions.
 	if strings.EqualFold(filepath.Ext(path), ".ogg") {
@@ -97,7 +105,11 @@ func (c *Client) EmbedCover(ctx context.Context, path, address string) error {
 	if has, err := hasPicture(path); err != nil || has {
 		return err
 	}
-	cover, mime, err := c.fetchCover(ctx, address)
+	data, err := fetch(ctx)
+	if err != nil {
+		return err
+	}
+	cover, mime, err := validateCoverBytes(data)
 	if err != nil {
 		return err
 	}
@@ -120,27 +132,34 @@ func coverAudioMagic(path string) (string, error) {
 	return string(head[:]), nil
 }
 
-func (c *Client) fetchCover(ctx context.Context, address string) ([]byte, string, error) {
+func (c *Client) fetchCoverBytes(ctx context.Context, address string) ([]byte, error) {
 	u, err := url.Parse(address)
 	if err != nil || u.Scheme != "https" {
-		return nil, "", errors.New("cover: invalid address")
+		return nil, errors.New("cover: invalid address")
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
 	if err != nil {
-		return nil, "", errors.New("cover: invalid address")
+		return nil, errors.New("cover: invalid address")
 	}
 	resp, err := c.media().Do(req)
 	if err != nil {
-		return nil, "", errors.New("cover: transfer failed")
+		return nil, errors.New("cover: transfer failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("cover: HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("cover: HTTP %d", resp.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxCoverBytes+1))
 	if err != nil {
-		return nil, "", errors.New("cover: transfer interrupted")
+		return nil, errors.New("cover: transfer interrupted")
 	}
+	if len(data) > maxCoverBytes {
+		return nil, errors.New("cover: too large")
+	}
+	return data, nil
+}
+
+func validateCoverBytes(data []byte) ([]byte, string, error) {
 	if len(data) > maxCoverBytes {
 		return nil, "", errors.New("cover: too large")
 	}

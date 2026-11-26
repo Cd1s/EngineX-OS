@@ -170,11 +170,13 @@ type tidalGateway struct {
 	rbxBrowse rbxPrefetchQueue
 
 	// Artwork for list rows, by what the row knows: title and artist.
-	artURLs  map[string]string
-	artMu    sync.Mutex
-	artCache map[string][]byte
-	artAge   []string
-	warming  atomic.Bool // a prewarmArt run is going
+	artURLs   map[string]string
+	artMu     sync.Mutex
+	artCache  map[string][]byte
+	artAge    []string
+	artClosed bool
+	artWG     sync.WaitGroup
+	warming   atomic.Bool // a prewarmArt run is going
 
 	// Last-use sequence numbers for evicting the least recently used refs.
 	seq       int64
@@ -246,9 +248,31 @@ func (g *tidalGateway) loadTracks() {
 	if err != nil || json.Unmarshal(b, &v) != nil {
 		return
 	}
+	scrubbed := false
 	for _, r := range v.Tracks {
+		if sanitizeTrackCovers(&r.Track) {
+			scrubbed = true
+		}
+		httpsCover(&r.Track)
+		src := ""
+		if r.Track.Provider == rekordboxScope {
+			src = rekordboxScope
+		} else {
+			for _, p := range []*string{&r.Track.CoverURL, &r.Track.ThumbURL} {
+				if strings.HasPrefix(*p, rbxCoverScheme) {
+					*p = ""
+				}
+			}
+		}
 		ref := trackRef{track: r.Track, session: r.Session, guest: r.Guest, file: r.File, drive: r.Drive}
 		g.tracks[r.ID], g.ids[refKey(ref)] = ref, r.ID
+		if address := thumbURL(ref.track); address != "" {
+			if len(g.artURLs) > maxTracks {
+				g.artURLs = map[string]string{}
+			}
+			g.artURLs[artKey(src, ref.track.Title, ref.track.Artist)] = address
+			g.artURLs[artKey(src, ref.track.Title, "")] = address
+		}
 		g.seq++
 		g.trackSeen[r.ID] = g.seq
 		g.next = max(g.next, r.ID)
@@ -265,6 +289,9 @@ func (g *tidalGateway) loadTracks() {
 		g.albumIDs[albumKey(ref)] = al.ID
 		g.seq++
 		g.albumSeen[al.ID] = g.seq
+	}
+	if scrubbed {
+		g.saveTracks()
 	}
 }
 
@@ -288,7 +315,7 @@ func (g *tidalGateway) saveTracks() {
 	g.saving = false
 	v := savedTracks{Next: g.next, Tracks: make([]savedRef, 0, len(g.tracks))}
 	for id, ref := range g.tracks {
-		v.Tracks = append(v.Tracks, savedRef{id, publicTrack(ref.track), ref.session, ref.guest, ref.file, ref.drive})
+		v.Tracks = append(v.Tracks, savedRef{id, ref.track, ref.session, ref.guest, ref.file, ref.drive})
 	}
 	sort.Slice(v.Tracks, func(a, b int) bool { return g.trackSeen[v.Tracks[a].ID] < g.trackSeen[v.Tracks[b].ID] })
 	for id, ref := range g.lists {
@@ -859,6 +886,7 @@ func (g *tidalGateway) dropAppleMusicBrowse(sessionID string) {
 
 // addTrack assigns stable positive IDs per source track, kept across restarts.
 func (g *tidalGateway) addTrack(ref trackRef) int64 {
+	sanitizeTrackCovers(&ref.track)
 	httpsCover(&ref.track)
 	src := "" // a rekordbox row's cover has its own keys: it never replaces a service's
 	if ref.track.Provider == rekordboxScope {
@@ -951,11 +979,15 @@ var artClient = func() *http.Client {
 	return &http.Client{Timeout: 6 * time.Second, Transport: t}
 }()
 
-// artBytes is the cover at address (https, or a rekordbox computer's), from memory or
-// fetched; nil on any failure.
+// artBytes is the cover at address (https, configured NAS, or a rekordbox computer's),
+// from memory or fetched; nil on any failure.
 func (g *tidalGateway) artBytes(ctx context.Context, address string) []byte {
 	rbx := strings.HasPrefix(address, rbxCoverScheme)
-	if !rbx && !strings.HasPrefix(address, "https://") {
+	var nas *providers.SelfHostedProvider
+	if !rbx && g.s != nil {
+		nas = g.s.nasCoverProvider(address)
+	}
+	if !rbx && nas == nil && !strings.HasPrefix(address, "https://") {
 		return nil
 	}
 	g.artMu.Lock()
@@ -964,9 +996,12 @@ func (g *tidalGateway) artBytes(ctx context.Context, address string) []byte {
 	if data != nil {
 		return data
 	}
-	if rbx {
+	switch {
+	case rbx:
 		data = g.rbxArt(ctx, address)
-	} else {
+	case nas != nil:
+		data, _ = nas.FetchCover(ctx, address, maxArtBytes)
+	default:
 		data = fetchArt(ctx, address)
 	}
 	if data == nil {
@@ -1069,8 +1104,13 @@ func (g *tidalGateway) stageAlbumArt(ctx context.Context, id int64, t providers.
 }
 
 // httpsCover upgrades http:// cover links (NetEase serves them on both): the
-// cover embed and the thumbnail proxy accept https only.
+// cover embed and the thumbnail proxy accept https only. Configured NAS covers
+// keep their own scheme because LAN NAS servers commonly serve HTTP.
 func httpsCover(t *providers.Track) {
+	switch strings.ToLower(t.Provider) {
+	case "subsonic", "plex", "webdav", "smb", nasScope:
+		return
+	}
 	for _, p := range []*string{&t.CoverURL, &t.ThumbURL} {
 		if rest, ok := strings.CutPrefix(*p, "http://"); ok {
 			*p = "https://" + rest
@@ -1899,9 +1939,6 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	for i, v := range sources {
 		g.s.cfg.BPM.Enrich(r.Context(), tracks[i])
 		for _, t := range tracks[i] {
-			if v.provider == nasScope {
-				httpsCover(&t)
-			}
 			trackItems = append(trackItems, g.trackJSON(g.addTrack(trackRef{track: t, session: v.session, guest: v.guest}), t))
 		}
 		for _, p := range lists[i] {
@@ -2321,15 +2358,56 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, p)
 }
 
+func (g *tidalGateway) closeArt() {
+	g.artMu.Lock()
+	g.artClosed = true
+	g.artMu.Unlock()
+	g.artWG.Wait()
+}
+
 // stageAlbumArtLater runs stageAlbumArt by the stream request. It retries a few times:
 // a rekordbox computer's cover waits for the load to give the dbserver session back.
 func (g *tidalGateway) stageAlbumArtLater(id int64, t providers.Track) {
+	g.artMu.Lock()
+	if g.artClosed {
+		g.artMu.Unlock()
+		return
+	}
+	g.artWG.Add(1)
+	g.artMu.Unlock()
+	var closed <-chan struct{}
+	if g.s != nil {
+		closed = g.s.closed
+	}
 	go func() {
+		defer g.artWG.Done()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if closed != nil {
+			go func() {
+				select {
+				case <-closed:
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
+		}
 		for _, wait := range []time.Duration{0, 800 * time.Millisecond, 1700 * time.Millisecond, 3500 * time.Millisecond} {
-			time.Sleep(wait)
-			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-			g.stageAlbumArt(ctx, id, t)
-			cancel()
+			if wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				}
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			stepCtx, stepCancel := context.WithTimeout(ctx, 8*time.Second)
+			g.stageAlbumArt(stepCtx, id, t)
+			stepCancel()
 		}
 	}()
 }

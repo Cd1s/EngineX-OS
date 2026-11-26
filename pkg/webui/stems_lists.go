@@ -53,11 +53,55 @@ func (s *Server) loadStemmed() map[string][]stemmedTrack {
 
 func sameTrack(a, b providers.Track) bool { return a.Provider == b.Provider && a.ID == b.ID }
 
+func sanitizeTrackCovers(t *providers.Track) bool {
+	changed := false
+	if clean := providers.SanitizeCoverURL(t.CoverURL); clean != t.CoverURL {
+		t.CoverURL = clean
+		changed = true
+	}
+	if clean := providers.SanitizeCoverURL(t.ThumbURL); clean != t.ThumbURL {
+		t.ThumbURL = clean
+		changed = true
+	}
+	return changed
+}
+
+func scrubStemmedMap(all map[string][]stemmedTrack) bool {
+	changed := false
+	for scope, list := range all {
+		for i := range list {
+			if sanitizeTrackCovers(&list[i].Track) {
+				changed = true
+			}
+		}
+		all[scope] = list
+	}
+	return changed
+}
+
+// scrubLegacyStems strips any pre-fix credentials from an existing
+// streaming-stems.json on startup without rewriting clean files.
+func (s *Server) scrubLegacyStems() {
+	if s.stemsFile() == "" {
+		return
+	}
+	s.stemsMu.Lock()
+	defer s.stemsMu.Unlock()
+	all := s.loadStemmed()
+	if scrubStemmedMap(all) {
+		if err := providers.SaveJSON(s.stemsFile(), all); err != nil {
+			log.Printf("stream-sync: scrub stems state: %v", err)
+		}
+	}
+}
+
 // addStemmed puts t first in scope's list.
 func (s *Server) addStemmed(scope string, t stemmedTrack) error {
 	s.stemsMu.Lock()
 	defer s.stemsMu.Unlock()
+	sanitizeTrackCovers(&t.Track)
 	all := s.loadStemmed()
+	scrubStemmedMap(all)
 	list := slices.DeleteFunc(all[scope], func(e stemmedTrack) bool { return sameTrack(e.Track, t.Track) })
 	all[scope] = append([]stemmedTrack{t}, list[:min(len(list), maxStemmed-1)]...)
 	return providers.SaveJSON(s.stemsFile(), all)

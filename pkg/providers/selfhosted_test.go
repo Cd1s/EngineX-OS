@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
@@ -885,6 +886,233 @@ func TestSelfHostedSanitizesRedirectTransportAndUpstreamErrors(t *testing.T) {
 		assertSafe(t, "subsonic canceled", err, "/rest/getPlaylists.view", "request canceled")
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("expected errors.Is(err, context.Canceled), got %v", err)
+		}
+	})
+}
+
+func TestSelfHostedTracksOmitCoverCredentials(t *testing.T) {
+	const (
+		dummyUser  = "dummy-sub-user"
+		dummyPass  = "dummy-sub-pass-123"
+		dummyToken = "dummy-plex-tok-456"
+	)
+	ctx := context.Background()
+
+	t.Run("subsonic", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/rest/getPlaylist.view":
+				fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlist":{"id":"pl1","name":"Set","entry":[{"id":"s1","title":"Song","artist":"DJ","album":"Alb","duration":60,"coverArt":"art-42"}]}}}`)
+			case "/rest/search3.view":
+				fmt.Fprint(w, `{"subsonic-response":{"status":"ok","searchResult3":{"song":[{"id":"s1","title":"Song","artist":"DJ","album":"Alb","duration":60,"coverArt":"art-42"}]}}}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "subsonic",
+			URL:      srv.URL,
+			Username: dummyUser,
+			Password: dummyPass,
+			Enabled:  true,
+		}, srv.Client())
+		wantCover := srv.URL + "/rest/getCoverArt.view?id=art-42"
+
+		tracks, err := p.PlaylistTracks(ctx, "pl1")
+		if err != nil || len(tracks) != 1 {
+			t.Fatalf("PlaylistTracks: tracks=%+v err=%v", tracks, err)
+		}
+		search, err := p.Search(ctx, "Song")
+		if err != nil || len(search) != 1 {
+			t.Fatalf("Search: tracks=%+v err=%v", search, err)
+		}
+		for _, tc := range []struct {
+			name string
+			url  string
+		}{
+			{"playlist", tracks[0].CoverURL},
+			{"search", search[0].CoverURL},
+		} {
+			if tc.url != wantCover {
+				t.Errorf("%s CoverURL = %q, want %q", tc.name, tc.url, wantCover)
+			}
+			for _, bad := range []string{dummyUser, dummyPass, "u=", "p=", "t=", "s="} {
+				if strings.Contains(tc.url, bad) {
+					t.Errorf("%s CoverURL leaked %q: %q", tc.name, bad, tc.url)
+				}
+			}
+		}
+	})
+
+	t.Run("plex", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/playlists/pl1/items":
+				fmt.Fprint(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"tr1","title":"Song","grandparentTitle":"DJ","parentTitle":"Alb","duration":60000,"thumb":"/library/metadata/tr1/thumb/42","Media":[{"Part":[{"key":"/library/parts/1/song.flac"}]}]}]}}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "plex",
+			URL:      srv.URL,
+			Token:    dummyToken,
+			Enabled:  true,
+		}, srv.Client())
+		wantCover := srv.URL + "/library/metadata/tr1/thumb/42"
+
+		tracks, err := p.PlaylistTracks(ctx, "pl1")
+		if err != nil || len(tracks) != 1 {
+			t.Fatalf("PlaylistTracks: tracks=%+v err=%v", tracks, err)
+		}
+		if tracks[0].CoverURL != wantCover {
+			t.Errorf("plex CoverURL = %q, want %q", tracks[0].CoverURL, wantCover)
+		}
+		for _, bad := range []string{dummyToken, "X-Plex-Token", "?"} {
+			if strings.Contains(tracks[0].CoverURL, bad) {
+				t.Errorf("plex CoverURL leaked %q: %q", bad, tracks[0].CoverURL)
+			}
+		}
+
+		// URL-shaped track ID validation error must not echo raw track ID.
+		_, err = p.DownloadTrack(ctx, "http://rawuser:rawsecret@evil.invalid/part?X-Plex-Token="+dummyToken, t.TempDir())
+		if err == nil {
+			t.Fatal("expected error for URL-shaped plex track ID")
+		}
+		for _, bad := range []string{"rawuser", "rawsecret", "evil.invalid", "X-Plex-Token", dummyToken} {
+			if strings.Contains(err.Error(), bad) {
+				t.Errorf("plex DownloadTrack error leaked %q: %v", bad, err)
+			}
+		}
+	})
+}
+
+func TestSelfHostedFetchCoverAndSanitize(t *testing.T) {
+	const (
+		dummyUser  = "dummy-cover-user"
+		dummyPass  = "dummy-cover-pass-789"
+		dummyToken = "dummy-plex-cover-tok-789"
+	)
+	fakeJPEG := []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00, 0xff, 0xd9}
+	ctx := context.Background()
+
+	t.Run("sanitize", func(t *testing.T) {
+		cases := []struct {
+			in, want string
+		}{
+			{
+				in:   "https://user:pass@nas.local:4533/rest/getCoverArt.view?c=EngineX&f=json&id=art-42&p=secret&u=alice&v=1.16.1",
+				want: "https://nas.local:4533/rest/getCoverArt.view?id=art-42",
+			},
+			{
+				in:   "http://nas.local:32400/library/metadata/tr1/thumb/42?X-Plex-Token=secret-tok",
+				want: "http://nas.local:32400/library/metadata/tr1/thumb/42",
+			},
+			{
+				in:   "https://cdn-images.dzcdn.net/images/cover/abc/500x500.jpg",
+				want: "https://cdn-images.dzcdn.net/images/cover/abc/500x500.jpg",
+			},
+		}
+		for _, tc := range cases {
+			if got := SanitizeCoverURL(tc.in); got != tc.want {
+				t.Errorf("SanitizeCoverURL(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("subsonic-fetch", func(t *testing.T) {
+		var hits int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits++
+			q := r.URL.Query()
+			if r.URL.Path != "/rest/getCoverArt.view" || q.Get("id") != "art-42" || q.Get("u") != dummyUser || (q.Get("p") == "" && (q.Get("t") == "" || q.Get("s") == "")) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(fakeJPEG)
+		}))
+		defer srv.Close()
+
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "subsonic",
+			URL:      srv.URL,
+			Username: dummyUser,
+			Password: dummyPass,
+			Enabled:  true,
+		}, srv.Client())
+
+		cleanURL := srv.URL + "/rest/getCoverArt.view?id=art-42"
+		if !p.MatchesCoverURL(cleanURL) {
+			t.Fatalf("MatchesCoverURL(%q) = false", cleanURL)
+		}
+		got, err := p.FetchCover(ctx, cleanURL, 0)
+		if err != nil || !bytes.Equal(got, fakeJPEG) {
+			t.Fatalf("FetchCover: len=%d err=%v", len(got), err)
+		}
+		if hits != 1 {
+			t.Fatalf("hits=%d, want 1", hits)
+		}
+		if p.MatchesCoverURL("https://other.invalid/rest/getCoverArt.view?id=art-42") {
+			t.Fatal("MatchesCoverURL accepted unrelated host")
+		}
+		if _, err := p.FetchCover(ctx, "https://other.invalid/rest/getCoverArt.view?id=art-42", 0); err == nil {
+			t.Fatal("FetchCover accepted unrelated host")
+		}
+	})
+
+	t.Run("plex-fetch-header-and-redirect", func(t *testing.T) {
+		var leakedHeader string
+		other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			leakedHeader = r.Header.Get("X-Plex-Token")
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(fakeJPEG)
+		}))
+		defer other.Close()
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("X-Plex-Token") != "" {
+				http.Error(w, "token must not be in query", http.StatusBadRequest)
+				return
+			}
+			if r.Header.Get("X-Plex-Token") != dummyToken {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			switch r.URL.Path {
+			case "/library/metadata/tr1/thumb/42":
+				w.Header().Set("Content-Type", "image/jpeg")
+				_, _ = w.Write(fakeJPEG)
+			case "/library/metadata/tr1/thumb/redir":
+				http.Redirect(w, r, other.URL+"/img.jpg", http.StatusFound)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "plex",
+			URL:      srv.URL,
+			Token:    dummyToken,
+			Enabled:  true,
+		}, srv.Client())
+
+		got, err := p.FetchCover(ctx, srv.URL+"/library/metadata/tr1/thumb/42", 0)
+		if err != nil || !bytes.Equal(got, fakeJPEG) {
+			t.Fatalf("FetchCover plex: len=%d err=%v", len(got), err)
+		}
+		if _, err := p.FetchCover(ctx, srv.URL+"/library/metadata/tr1/thumb/redir", 0); err != nil {
+			t.Fatalf("FetchCover redirect: %v", err)
+		}
+		if leakedHeader != "" {
+			t.Fatalf("X-Plex-Token leaked across host redirect: %q", leakedHeader)
 		}
 	})
 }

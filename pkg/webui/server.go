@@ -374,6 +374,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.appleMusic.OwnerPath = filepath.Join(cfg.StateDir, "applemusic-owner.json")
 	_ = s.appleMusic.Load()
 	s.tidal = newTidalGateway(s)
+	s.scrubLegacyStems()
 	s.RegisterTunnelRoutes()
 	// Resume before accepting requests: a delayed resume could see a newly
 	// enabled tunnel and restart it underneath its first Configure call.
@@ -445,6 +446,7 @@ func (s *Server) Close() {
 		p.Close()
 	}
 	if s.tidal != nil {
+		s.tidal.closeArt()
 		s.tidal.saveTracks() // the IDs Engine still lists, for the next run (#73)
 	}
 	if s.prolinkExport != nil {
@@ -1158,6 +1160,9 @@ func (s *Server) tracks(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errors.New("playlist too large"))
 		return
 	}
+	for i := range tracks {
+		sanitizeTrackCovers(&tracks[i])
+	}
 	s.mu.Lock()
 	if v.tracks == nil {
 		v.tracks = make(map[string]providers.Track, len(tracks))
@@ -1166,11 +1171,7 @@ func (s *Server) tracks(w http.ResponseWriter, r *http.Request) {
 		v.tracks[t.ID] = t
 	}
 	s.mu.Unlock()
-	out := make([]providers.Track, len(tracks))
-	for i, t := range tracks {
-		out[i] = publicTrack(t)
-	}
-	respond(w, out)
+	respond(w, tracks)
 }
 func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 	var in struct {

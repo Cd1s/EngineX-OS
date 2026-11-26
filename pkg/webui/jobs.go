@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -724,6 +723,20 @@ func (j *Jobs) addCover(ctx context.Context, t providers.Track, dl *deemixclient
 	if t.CoverURL == "" {
 		return
 	}
+	j.mu.Lock()
+	lookup := j.selfHosted
+	j.mu.Unlock()
+	if lookup != nil {
+		if sh := lookup(); sh != nil && sh.MatchesCoverURL(t.CoverURL) {
+			err := j.p.Deemix.EmbedCoverWith(ctx, dl.Path, func(ctx context.Context) ([]byte, error) {
+				return sh.FetchCover(ctx, t.CoverURL, 0)
+			})
+			if err != nil {
+				log.Printf("stream-sync: no cover for track %s: %v", t.ID, err)
+			}
+			return
+		}
+	}
 	if err := j.p.Deemix.EmbedCover(ctx, dl.Path, t.CoverURL); err != nil {
 		log.Printf("stream-sync: no cover for track %s: %v", t.ID, err)
 	}
@@ -1010,6 +1023,7 @@ func (j *Jobs) SubmitFile(path, playlist string) (job Job, ok bool, err error) {
 }
 
 func (j *Jobs) submitTo(session string, t providers.Track, playlist string, matched providers.Track, dl *deemixclient.Download) (Job, error) {
+	sanitizeTrackCovers(&t)
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.ctx.Err() != nil {
@@ -1018,7 +1032,7 @@ func (j *Jobs) submitTo(session string, t providers.Track, playlist string, matc
 	// Bound retained history and reject duplicate active downloads.
 	for _, v := range j.items {
 		if v.SessionID == session && v.Track.ID == t.ID && (v.State == "queued" || v.State == "matching" || v.State == "downloading" || v.State == "analyzing" || v.State == "importing") {
-			return publicJob(v), nil
+			return v, nil
 		}
 	}
 	if len(j.order) >= 100 {
@@ -1036,7 +1050,7 @@ func (j *Jobs) submitTo(session string, t providers.Track, playlist string, matc
 	j.order = append(j.order, job.ID)
 	select {
 	case j.queue <- job.ID:
-		return publicJob(job), nil
+		return job, nil
 	default:
 		delete(j.items, job.ID)
 		j.order = j.order[:len(j.order)-1]
@@ -1048,52 +1062,9 @@ func (j *Jobs) List() []Job {
 	defer j.mu.Unlock()
 	out := make([]Job, 0, len(j.order))
 	for i := len(j.order) - 1; i >= 0; i-- {
-		out = append(out, publicJob(j.items[j.order[i]]))
+		out = append(out, j.items[j.order[i]])
 	}
 	return out
-}
-
-// trackCoverCarriesCredentials reports whether a track's CoverURL may carry
-// self-hosted auth (Subsonic u/t/s/p query params, Plex X-Plex-Token, or URL
-// userinfo) and must be cleared on public API responses and persisted state
-// while remaining available to internal cover fetchers.
-func trackCoverCarriesCredentials(t providers.Track) bool {
-	if t.CoverURL == "" {
-		return false
-	}
-	switch strings.ToLower(t.Provider) {
-	case "subsonic", "plex", "webdav", "smb", nasScope:
-		return true
-	}
-	u, err := url.Parse(t.CoverURL)
-	if err != nil || u.User != nil {
-		return true
-	}
-	q := u.Query()
-	for k, vals := range q {
-		if len(vals) == 0 || vals[0] == "" {
-			continue
-		}
-		if strings.EqualFold(k, "X-Plex-Token") {
-			return true
-		}
-	}
-	if q.Get("u") != "" && (q.Get("p") != "" || (q.Get("t") != "" && q.Get("s") != "")) {
-		return true
-	}
-	return false
-}
-
-func publicTrack(t providers.Track) providers.Track {
-	if trackCoverCarriesCredentials(t) {
-		t.CoverURL = ""
-	}
-	return t
-}
-
-func publicJob(job Job) Job {
-	job.Track = publicTrack(job.Track)
-	return job
 }
 func (j *Jobs) Result(id string) *analyzer.Result {
 	j.mu.Lock()

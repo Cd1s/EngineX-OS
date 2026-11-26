@@ -341,6 +341,17 @@ func (s *Server) ownerSelfHosted() *providers.SelfHostedProvider {
 	return providers.NewSelfHostedProvider(cfg, s.nasHTTPClient())
 }
 
+func (s *Server) nasCoverProvider(address string) *providers.SelfHostedProvider {
+	if address == "" {
+		return nil
+	}
+	cfg := s.loadNASConfig()
+	if !nasConfigReady(cfg) || !providers.NASConfigMatchesCoverURL(cfg, address) {
+		return nil
+	}
+	return providers.NewSelfHostedProvider(cfg, s.nasHTTPClient())
+}
+
 func (s *Server) nasPlaylists(ctx context.Context) ([]providers.Playlist, *providers.SelfHostedProvider) {
 	p := s.ownerSelfHosted()
 	if p == nil {
@@ -414,7 +425,6 @@ func (g *tidalGateway) nasTracks(w http.ResponseWriter, r *http.Request, id stri
 	g.enrichRatingsFromDB(r.Context(), tracks)
 	refs := make([]trackRef, 0, len(tracks))
 	for _, t := range tracks {
-		httpsCover(&t)
 		refs = append(refs, trackRef{track: t, session: nasScope})
 	}
 	if role != "" && role != "default" {

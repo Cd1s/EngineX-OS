@@ -1052,7 +1052,7 @@ func TestNASJobResponsesAndSavedTracksStripCoverCredentials(t *testing.T) {
 
 	forbidden := []string{
 		dummyUser, dummyPass, dummyToken,
-		"X-Plex-Token", "t=", "s=", "p=", "getCoverArt.view", "/thumb/", `"coverUrl"`,
+		"X-Plex-Token", "t=", "s=", "p=", "u=",
 	}
 	assertNoLeak := func(t *testing.T, label, text string) {
 		t.Helper()
@@ -1104,7 +1104,11 @@ func TestNASJobResponsesAndSavedTracksStripCoverCredentials(t *testing.T) {
 						w.Header().Set("Content-Type", "audio/flac")
 						_, _ = w.Write(flacBytes)
 					case "/library/metadata/tr-1/thumb/42":
-						if r.URL.Query().Get("X-Plex-Token") != dummyToken {
+						if r.URL.Query().Get("X-Plex-Token") != "" {
+							http.Error(w, "plex cover token must not be in query", http.StatusBadRequest)
+							return
+						}
+						if r.Header.Get("X-Plex-Token") != dummyToken {
 							http.Error(w, "unauthorized cover", http.StatusUnauthorized)
 							return
 						}
@@ -1117,6 +1121,11 @@ func TestNASJobResponsesAndSavedTracksStripCoverCredentials(t *testing.T) {
 				}
 			}))
 			defer nasSrv.Close()
+
+			expectedCover := nasSrv.URL + "/rest/getCoverArt.view?id=art-42"
+			if proto == "plex" {
+				expectedCover = nasSrv.URL + "/library/metadata/tr-1/thumb/42"
+			}
 
 			libPath, libRoot, _ := testlibrary.Create(t)
 			lib, err := analyzer.OpenLibrary(libPath)
@@ -1174,13 +1183,23 @@ func TestNASJobResponsesAndSavedTracksStripCoverCredentials(t *testing.T) {
 			}
 			trackID := int64(trResp.Items[0]["id"].(float64))
 
-			// 2. Persisted gateway track map must not contain cover credentials.
+			s.tidal.mu.Lock()
+			storedCover := s.tidal.tracks[trackID].track.CoverURL
+			s.tidal.mu.Unlock()
+			if storedCover != expectedCover {
+				t.Fatalf("gateway track CoverURL = %q, want %q", storedCover, expectedCover)
+			}
+
+			// 2. Persisted gateway track map keeps the credential-free cover URL and leaks no credentials.
 			s.tidal.saveTracks()
 			savedBytes, err := os.ReadFile(s.tidal.tracksPath())
 			if err != nil {
 				t.Fatalf("read saved tracks: %v", err)
 			}
 			assertNoLeak(t, "gateway-tracks.json", string(savedBytes))
+			if !strings.Contains(string(savedBytes), expectedCover) {
+				t.Fatalf("gateway-tracks.json dropped credential-free cover %q: %s", expectedCover, string(savedBytes))
+			}
 
 			// 3. Stream the track: downloads audio, embeds authenticated cover, and queues import job.
 			var pb struct {
@@ -1201,13 +1220,16 @@ func TestNASJobResponsesAndSavedTracksStripCoverCredentials(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, _ = io.ReadAll(resp.Body)
+			streamedFLAC, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
 				t.Fatalf("stream status=%d", resp.StatusCode)
 			}
 			if coverFetched.Load() < 1 {
 				t.Fatalf("internal cover fetcher did not fetch authenticated %s cover (count=%d)", proto, coverFetched.Load())
+			}
+			if !bytes.Contains(streamedFLAC, []byte("image/jpeg")) {
+				t.Fatalf("streamed FLAC missing embedded JPEG picture block")
 			}
 
 			// 4. Wait for the queued import job to finish and inspect GET /api/jobs JSON.
@@ -1242,7 +1264,7 @@ func TestNASJobResponsesAndSavedTracksStripCoverCredentials(t *testing.T) {
 				t.Fatalf("expected NAS job in /api/jobs response: %s", jobsBody)
 			}
 
-			// 5. Submit return value must also strip cover credentials while keeping internal CoverURL.
+			// 5. Direct Submit with a credentialed cover URL strips credentials from both returned and stored Job.
 			var authCover string
 			if proto == "subsonic" {
 				authCover = nasSrv.URL + "/rest/getCoverArt.view?id=art-42&u=" + dummyUser + "&p=" + dummyPass
@@ -1266,13 +1288,13 @@ func TestNASJobResponsesAndSavedTracksStripCoverCredentials(t *testing.T) {
 			jobs.mu.Lock()
 			internalCover := jobs.items[subJob.ID].Track.CoverURL
 			jobs.mu.Unlock()
-			if internalCover != authCover {
-				t.Fatalf("internal job CoverURL was stripped: got %q, want %q", internalCover, authCover)
+			if internalCover != expectedCover {
+				t.Fatalf("internal job CoverURL = %q, want credential-free %q", internalCover, expectedCover)
 			}
 		})
 	}
 
-	// Non-NAS public cover URLs must remain intact on public job copies.
+	// Non-NAS public cover URLs must remain intact on job copies.
 	pubJobs := NewJobs(Pipeline{Catalog: noCatalog{}})
 	defer pubJobs.Close()
 	pubJob, err := pubJobs.Submit("sess-pub", providers.Track{
@@ -1286,5 +1308,390 @@ func TestNASJobResponsesAndSavedTracksStripCoverCredentials(t *testing.T) {
 	}
 	if pubJob.Track.CoverURL != "https://cdn-images.dzcdn.net/images/cover/abc/500x500.jpg" {
 		t.Fatalf("public non-NAS CoverURL was altered: %q", pubJob.Track.CoverURL)
+	}
+}
+
+func TestNASStemsStateAndRestartCoverRecovery(t *testing.T) {
+	const (
+		dummyUser  = "dummy-nas-stems-user"
+		dummyPass  = "dummy-nas-stems-pass-999"
+		dummyToken = "dummy-nas-stems-token-999"
+	)
+	var flacBuf bytes.Buffer
+	if err := testaudio.FLAC(&flacBuf, testaudio.Song(8)); err != nil {
+		t.Fatal(err)
+	}
+	flacBytes := flacBuf.Bytes()
+
+	img := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			img.Set(x, y, color.RGBA{R: 20, G: 180, B: 90, A: 255})
+		}
+	}
+	var jpegBuf bytes.Buffer
+	if err := jpeg.Encode(&jpegBuf, img, &jpeg.Options{Quality: 80}); err != nil {
+		t.Fatal(err)
+	}
+	jpegBytes := jpegBuf.Bytes()
+
+	forbidden := []string{
+		dummyUser, dummyPass, dummyToken,
+		"X-Plex-Token", "t=", "s=", "p=", "u=",
+	}
+	assertNoLeak := func(t *testing.T, label, text string) {
+		t.Helper()
+		for _, bad := range forbidden {
+			if strings.Contains(text, bad) {
+				t.Errorf("%s leaked %q: %s", label, bad, text)
+			}
+		}
+	}
+
+	cases := []struct {
+		name  string
+		proto string
+		tls   bool
+	}{
+		{"subsonic-http", "subsonic", false},
+		{"subsonic-https", "subsonic", true},
+		{"plex-http", "plex", false},
+		{"plex-https", "plex", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var coverFetched atomic.Int32
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch tc.proto {
+				case "subsonic":
+					switch r.URL.Path {
+					case "/rest/getPlaylists.view":
+						w.Header().Set("Content-Type", "application/json")
+						fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlists":{"playlist":[{"id":"pl-1","name":"NAS Crate","songCount":1}]}}}`)
+					case "/rest/getPlaylist.view":
+						w.Header().Set("Content-Type", "application/json")
+						fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlist":{"id":"pl-1","name":"NAS Crate","entry":[{"id":"s-1","title":"Cover Track","artist":"DJ Test","album":"NAS Album","duration":8,"coverArt":"art-42"}]}}}`)
+					case "/rest/download.view":
+						w.Header().Set("Content-Type", "audio/flac")
+						w.Header().Set("Content-Disposition", `attachment; filename="cover.flac"`)
+						_, _ = w.Write(flacBytes)
+					case "/rest/getCoverArt.view":
+						q := r.URL.Query()
+						if q.Get("id") != "art-42" || q.Get("u") != dummyUser || (q.Get("p") == "" && (q.Get("t") == "" || q.Get("s") == "")) {
+							http.Error(w, "unauthorized cover", http.StatusUnauthorized)
+							return
+						}
+						coverFetched.Add(1)
+						w.Header().Set("Content-Type", "image/jpeg")
+						_, _ = w.Write(jpegBytes)
+					default:
+						http.NotFound(w, r)
+					}
+				case "plex":
+					switch r.URL.Path {
+					case "/playlists":
+						w.Header().Set("Content-Type", "application/json")
+						fmt.Fprint(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"pl-1","title":"NAS Crate","leafCount":1}]}}`)
+					case "/playlists/pl-1/items":
+						w.Header().Set("Content-Type", "application/json")
+						fmt.Fprint(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"tr-1","title":"Cover Track","grandparentTitle":"DJ Test","parentTitle":"NAS Album","duration":8000,"thumb":"/library/metadata/tr-1/thumb/42","Media":[{"Part":[{"key":"/library/parts/1/song.flac"}]}]}]}}`)
+					case "/library/parts/1/song.flac":
+						w.Header().Set("Content-Type", "audio/flac")
+						_, _ = w.Write(flacBytes)
+					case "/library/metadata/tr-1/thumb/42":
+						tok := r.Header.Get("X-Plex-Token")
+						if tok == "" {
+							tok = r.URL.Query().Get("X-Plex-Token")
+						}
+						if tok != dummyToken {
+							http.Error(w, "unauthorized cover", http.StatusUnauthorized)
+							return
+						}
+						coverFetched.Add(1)
+						w.Header().Set("Content-Type", "image/jpeg")
+						_, _ = w.Write(jpegBytes)
+					default:
+						http.NotFound(w, r)
+					}
+				}
+			})
+			var nasSrv *httptest.Server
+			if tc.tls {
+				nasSrv = httptest.NewTLSServer(handler)
+			} else {
+				nasSrv = httptest.NewServer(handler)
+			}
+			defer nasSrv.Close()
+
+			expectedCover := nasSrv.URL + "/rest/getCoverArt.view?id=art-42"
+			if tc.proto == "plex" {
+				expectedCover = nasSrv.URL + "/library/metadata/tr-1/thumb/42"
+			}
+
+			uiDir, stateDir := t.TempDir(), t.TempDir()
+			if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("sources=\nscope=nas\nomni_source=0\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			// First server instance: browse, trigger stems persistence, and shut down.
+			dl1 := t.TempDir()
+			jobs1 := NewJobs(Pipeline{
+				Guard:   resourceguard.New(resourceguard.Config{Disabled: true}),
+				Catalog: noCatalog{},
+				Deemix:  &deemixclient.Client{DownloadDir: dl1, Media: nasSrv.Client()},
+			})
+			s1 := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir, HTTP: nasSrv.Client()}, jobs1)
+			gw1 := httptest.NewServer(s1)
+
+			var cfgJSON string
+			if tc.proto == "subsonic" {
+				cfgJSON = fmt.Sprintf(`{"protocol":"subsonic","url":%q,"username":%q,"password":%q,"enabled":true}`, nasSrv.URL, dummyUser, dummyPass)
+			} else {
+				cfgJSON = fmt.Sprintf(`{"protocol":"plex","url":%q,"token":%q,"enabled":true}`, nasSrv.URL, dummyToken)
+			}
+			wCfg := httptest.NewRecorder()
+			s1.handleNASConfig(wCfg, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(cfgJSON)))
+			if wCfg.Code != http.StatusOK {
+				t.Fatalf("save NAS config (%d): %s", wCfg.Code, wCfg.Body.String())
+			}
+
+			var plResp struct {
+				Items []map[string]any `json:"items"`
+			}
+			tidalGet(t, gw1.URL, "/v1/users/1/playlists?limit=50&offset=0", 200, &plResp)
+			plUUID, _ := plResp.Items[0]["uuid"].(string)
+
+			var trResp struct {
+				Items []map[string]any `json:"items"`
+			}
+			tidalGet(t, gw1.URL, "/v1/playlists/"+plUUID+"/tracks?limit=50&offset=0", 200, &trResp)
+			trackID := int64(trResp.Items[0]["id"].(float64))
+
+			// 1. Stems endpoint writes streaming-stems.json without any credentials.
+			reqStems := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/enginex/stems/source?id=%d", trackID), nil)
+			reqStems.RemoteAddr = "127.0.0.1:1234"
+			wStems := httptest.NewRecorder()
+			s1.tidal.ServeHTTP(wStems, reqStems)
+			if wStems.Code != http.StatusOK {
+				t.Fatalf("stemsSource status=%d body=%s", wStems.Code, wStems.Body.String())
+			}
+			stemsBytes, err := os.ReadFile(filepath.Join(stateDir, "streaming-stems.json"))
+			if err != nil {
+				t.Fatalf("read streaming-stems.json: %v", err)
+			}
+			assertNoLeak(t, "streaming-stems.json", string(stemsBytes))
+			if !strings.Contains(string(stemsBytes), expectedCover) {
+				t.Errorf("streaming-stems.json missing credential-free cover %q: %s", expectedCover, string(stemsBytes))
+			}
+
+			gw1.Close()
+			s1.Close()
+			jobs1.Close()
+
+			savedBytes, err := os.ReadFile(filepath.Join(stateDir, "gateway-tracks.json"))
+			if err != nil {
+				t.Fatalf("read gateway-tracks.json: %v", err)
+			}
+			assertNoLeak(t, "gateway-tracks.json", string(savedBytes))
+			if !strings.Contains(string(savedBytes), expectedCover) {
+				t.Errorf("gateway-tracks.json missing credential-free cover %q: %s", expectedCover, string(savedBytes))
+			}
+
+			// 2. Cold restart: brand-new Server, Jobs, and empty download cache on the same uiDir/stateDir.
+			// Do not browse playlists or tracks again before requesting cover art and streaming.
+			dl2 := t.TempDir()
+			jobs2 := NewJobs(Pipeline{
+				Guard:   resourceguard.New(resourceguard.Config{Disabled: true}),
+				Catalog: noCatalog{},
+				Deemix:  &deemixclient.Client{DownloadDir: dl2, Media: nasSrv.Client()},
+			})
+			defer jobs2.Close()
+			s2 := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir, HTTP: nasSrv.Client()}, jobs2)
+			defer s2.Close()
+			gw2 := httptest.NewServer(s2)
+			defer gw2.Close()
+
+			s2.tidal.mu.Lock()
+			restored, ok := s2.tidal.tracks[trackID]
+			s2.tidal.mu.Unlock()
+			if !ok {
+				t.Fatalf("track %d was not restored from gateway-tracks.json", trackID)
+			}
+			if restored.track.CoverURL != expectedCover {
+				t.Errorf("restored track CoverURL = %q, want %q", restored.track.CoverURL, expectedCover)
+			}
+
+			// 2a. Staging album art on the restored track succeeds without re-browsing.
+			coverFetched.Store(0)
+			dataDir := t.TempDir()
+			stmPath := filepath.Join(dataDir, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2/stm.db")
+			if err := os.MkdirAll(filepath.Dir(stmPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(stmPath, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stageDir := t.TempDir()
+			oldShadow, oldRbx := shadowDataRoot, rbxAnalysisDir
+			shadowDataRoot, rbxAnalysisDir = dataDir, stageDir
+			s2.tidal.stageAlbumArt(context.Background(), trackID, restored.track)
+			shadowDataRoot, rbxAnalysisDir = oldShadow, oldRbx
+
+			stagedFile := filepath.Join(stageDir, fmt.Sprintf("%d.cover", trackID))
+			stagedBytes, err := os.ReadFile(stagedFile)
+			if err != nil {
+				t.Errorf("restored track failed to stage album art: %v", err)
+			} else if !bytes.HasPrefix(stagedBytes, []byte(rbxCoverMagic)) || !bytes.HasSuffix(stagedBytes, jpegBytes) {
+				t.Errorf("staged cover malformed (len=%d)", len(stagedBytes))
+			}
+			if coverFetched.Load() < 1 {
+				t.Errorf("stageAlbumArt did not fetch authenticated cover")
+			}
+
+			// 2b. /v1/enginex/art serves the restored track's thumbnail after clearing in-memory cache.
+			s2.tidal.artMu.Lock()
+			s2.tidal.artCache = map[string][]byte{}
+			s2.tidal.artAge = nil
+			s2.tidal.artMu.Unlock()
+			coverFetched.Store(0)
+			artResp, err := http.Get(gw2.URL + "/v1/enginex/art?song=Cover+Track&artist=DJ+Test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			artBody, _ := io.ReadAll(artResp.Body)
+			artResp.Body.Close()
+			if artResp.StatusCode != http.StatusOK || !bytes.Equal(artBody, jpegBytes) {
+				t.Errorf("restored /v1/enginex/art status=%d len=%d", artResp.StatusCode, len(artBody))
+			}
+			if coverFetched.Load() < 1 {
+				t.Errorf("/v1/enginex/art did not fetch authenticated cover")
+			}
+
+			// 2c. Cold stream after restart downloads audio and embeds the authenticated cover into the FLAC.
+			coverFetched.Store(0)
+			var pb struct {
+				Manifest string `json:"manifest"`
+			}
+			tidalGet(t, gw2.URL, fmt.Sprintf("/v1/tracks/%d/playbackinfopostpaywall?audioquality=LOSSLESS&playbackmode=STREAM&assetpresentation=FULL", trackID), 200, &pb)
+			rawManifest, err := base64.StdEncoding.DecodeString(pb.Manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mf struct {
+				URLs []string `json:"urls"`
+			}
+			if err := json.Unmarshal(rawManifest, &mf); err != nil || len(mf.URLs) != 1 {
+				t.Fatalf("manifest=%s err=%v", rawManifest, err)
+			}
+			resp, err := http.Get(mf.URLs[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			streamedFLAC, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("cold restart stream status=%d", resp.StatusCode)
+			}
+			if coverFetched.Load() < 1 {
+				t.Errorf("cold restart stream did not fetch authenticated cover")
+			}
+			if !bytes.Contains(streamedFLAC, []byte("image/jpeg")) {
+				t.Errorf("cold restart streamed FLAC missing embedded JPEG picture block")
+			}
+		})
+	}
+}
+
+func TestNASLegacyStateScrubbedOnStartup(t *testing.T) {
+	const (
+		dummyUser  = "legacy-nas-user"
+		dummyPass  = "legacy-nas-pass-321"
+		dummyToken = "legacy-plex-tok-321"
+	)
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	var jpegBuf bytes.Buffer
+	if err := jpeg.Encode(&jpegBuf, img, &jpeg.Options{Quality: 80}); err != nil {
+		t.Fatal(err)
+	}
+	jpegBytes := jpegBuf.Bytes()
+
+	for _, proto := range []string{"subsonic", "plex"} {
+		t.Run(proto, func(t *testing.T) {
+			nasSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch proto {
+				case "subsonic":
+					q := r.URL.Query()
+					if r.URL.Path == "/rest/getCoverArt.view" && q.Get("id") == "art-99" && q.Get("u") == dummyUser && (q.Get("p") != "" || (q.Get("t") != "" && q.Get("s") != "")) {
+						w.Header().Set("Content-Type", "image/jpeg")
+						_, _ = w.Write(jpegBytes)
+						return
+					}
+				case "plex":
+					if r.URL.Path == "/library/metadata/tr-99/thumb/99" && r.Header.Get("X-Plex-Token") == dummyToken {
+						w.Header().Set("Content-Type", "image/jpeg")
+						_, _ = w.Write(jpegBytes)
+						return
+					}
+				}
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+			}))
+			defer nasSrv.Close()
+
+			uiDir, stateDir := t.TempDir(), t.TempDir()
+			var legacyCover, cleanCover, nasCfg string
+			if proto == "subsonic" {
+				legacyCover = nasSrv.URL + "/rest/getCoverArt.view?c=EngineX&f=json&id=art-99&p=" + dummyPass + "&u=" + dummyUser + "&v=1.16.1"
+				cleanCover = nasSrv.URL + "/rest/getCoverArt.view?id=art-99"
+				nasCfg = fmt.Sprintf(`{"protocol":"subsonic","url":%q,"username":%q,"password":%q,"enabled":true}`, nasSrv.URL, dummyUser, dummyPass)
+			} else {
+				legacyCover = nasSrv.URL + "/library/metadata/tr-99/thumb/99?X-Plex-Token=" + dummyToken
+				cleanCover = nasSrv.URL + "/library/metadata/tr-99/thumb/99"
+				nasCfg = fmt.Sprintf(`{"protocol":"plex","url":%q,"token":%q,"enabled":true}`, nasSrv.URL, dummyToken)
+			}
+			if err := os.WriteFile(filepath.Join(uiDir, "nas.json"), []byte(nasCfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			legacyStems := fmt.Sprintf(`{"nas":[{"track":{"id":"s-99","title":"Legacy Track","artist":"DJ Old","provider":%q,"coverUrl":%q},"session":"nas","path":"/tmp/legacy.flac"}]}`, proto, legacyCover)
+			if err := os.WriteFile(filepath.Join(stateDir, "streaming-stems.json"), []byte(legacyStems), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			legacyTracks := fmt.Sprintf(`{"next":7,"tracks":[{"id":7,"track":{"id":"s-99","title":"Legacy Track","artist":"DJ Old","provider":%q,"coverUrl":%q},"session":"nas"}]}`, proto, legacyCover)
+			if err := os.WriteFile(filepath.Join(stateDir, "gateway-tracks.json"), []byte(legacyTracks), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir, HTTP: nasSrv.Client()}, nil)
+			defer s.Close()
+			gw := httptest.NewServer(s)
+			defer gw.Close()
+
+			for _, name := range []string{"streaming-stems.json", "gateway-tracks.json"} {
+				b, err := os.ReadFile(filepath.Join(stateDir, name))
+				if err != nil {
+					t.Fatalf("read %s: %v", name, err)
+				}
+				text := string(b)
+				for _, bad := range []string{dummyUser, dummyPass, dummyToken, "X-Plex-Token", "t=", "s=", "p=", "u="} {
+					if strings.Contains(text, bad) {
+						t.Errorf("%s still contains %q after startup scrub: %s", name, bad, text)
+					}
+				}
+				if !strings.Contains(text, cleanCover) {
+					t.Errorf("%s did not preserve credential-free cover %q: %s", name, cleanCover, text)
+				}
+			}
+
+			artResp, err := http.Get(gw.URL + "/v1/enginex/art?song=Legacy+Track&artist=DJ+Old")
+			if err != nil {
+				t.Fatal(err)
+			}
+			artBody, _ := io.ReadAll(artResp.Body)
+			artResp.Body.Close()
+			if artResp.StatusCode != http.StatusOK || !bytes.Equal(artBody, jpegBytes) {
+				t.Fatalf("scrubbed track /v1/enginex/art status=%d len=%d", artResp.StatusCode, len(artBody))
+			}
+		})
 	}
 }

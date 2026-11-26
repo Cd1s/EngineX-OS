@@ -237,6 +237,230 @@ type selfHostedError struct {
 func (e *selfHostedError) Error() string { return e.msg }
 func (e *selfHostedError) Unwrap() error { return e.cause }
 
+// cleanBaseURL returns scheme://host/path with userinfo, query, fragment, and
+// trailing slash stripped.
+func cleanBaseURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if (scheme != "http" && scheme != "https") || u.Host == "" {
+		return ""
+	}
+	return (&url.URL{
+		Scheme: scheme,
+		Host:   u.Host,
+		Path:   strings.TrimRight(u.Path, "/"),
+	}).String()
+}
+
+func isSubsonicCoverPath(p string) bool {
+	return strings.HasSuffix(p, "/rest/getCoverArt.view") || strings.HasSuffix(p, "/rest/getCoverArt")
+}
+
+// SanitizeCoverURL removes embedded credentials (userinfo, Plex X-Plex-Token,
+// and Subsonic u/p/t/s auth query parameters) from a cover URL while keeping
+// the credential-free cover location intact.
+func SanitizeCoverURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		if u.User != nil {
+			u.User = nil
+			return u.String()
+		}
+		return raw
+	}
+	changed := false
+	if u.User != nil {
+		u.User = nil
+		changed = true
+	}
+	if u.RawQuery != "" {
+		q, qerr := url.ParseQuery(u.RawQuery)
+		if qerr != nil {
+			changed = true
+		}
+		hasU, hasSecret := false, false
+		for k := range q {
+			switch strings.ToLower(k) {
+			case "x-plex-token":
+				q.Del(k)
+				changed = true
+			case "u":
+				hasU = true
+			case "p", "t", "s":
+				hasSecret = true
+			}
+		}
+		subCover := isSubsonicCoverPath(u.Path)
+		if (hasU && hasSecret) || (subCover && (hasU || hasSecret)) {
+			for k := range q {
+				switch strings.ToLower(k) {
+				case "u", "p", "t", "s", "v", "c", "f":
+					q.Del(k)
+					changed = true
+				}
+			}
+		}
+		if changed {
+			u.RawQuery = q.Encode()
+		}
+	}
+	if !changed {
+		return raw
+	}
+	return u.String()
+}
+
+// NASConfigMatchesCoverURL reports whether rawURL is a cover URL belonging to
+// cfg's configured Subsonic or Plex server (same scheme, host, and base path).
+func NASConfigMatchesCoverURL(cfg NASConfig, rawURL string) bool {
+	proto := strings.ToLower(strings.TrimSpace(cfg.Protocol))
+	if !cfg.Enabled || (proto != "subsonic" && proto != "plex") {
+		return false
+	}
+	baseU, err := validateBaseURL(proto, cfg.URL)
+	if err != nil {
+		return false
+	}
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	if !strings.EqualFold(u.Scheme, baseU.Scheme) || !strings.EqualFold(u.Host, baseU.Host) {
+		return false
+	}
+	for _, seg := range strings.Split(u.Path, "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	basePath := strings.TrimRight(baseU.Path, "/")
+	if basePath != "" && u.Path != basePath && !strings.HasPrefix(u.Path, basePath+"/") {
+		return false
+	}
+	if proto == "subsonic" {
+		rel := strings.TrimPrefix(u.Path, basePath)
+		return rel == "/rest/getCoverArt.view" || rel == "/rest/getCoverArt"
+	}
+	return true
+}
+
+// MatchesCoverURL reports whether rawURL belongs to this provider's configured
+// Subsonic or Plex server and should be fetched with its configured credentials.
+func (p *SelfHostedProvider) MatchesCoverURL(rawURL string) bool {
+	if p == nil {
+		return false
+	}
+	return NASConfigMatchesCoverURL(p.cfg, rawURL)
+}
+
+// FetchCover fetches cover image bytes for a credential-free NAS cover URL,
+// attaching credentials from p.cfg only inside the outgoing HTTP request.
+func (p *SelfHostedProvider) FetchCover(ctx context.Context, rawURL string, maxBytes int64) ([]byte, error) {
+	if !p.MatchesCoverURL(rawURL) {
+		return nil, errors.New("cover: invalid address")
+	}
+	proto := strings.ToLower(strings.TrimSpace(p.cfg.Protocol))
+	baseU, err := validateBaseURL(proto, p.cfg.URL)
+	if err != nil {
+		return nil, err
+	}
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return nil, errors.New("cover: invalid address")
+	}
+	reqU := *u
+	reqU.User = nil
+	reqU.Fragment = ""
+
+	var req *http.Request
+	switch proto {
+	case "subsonic":
+		q, _ := url.ParseQuery(reqU.RawQuery)
+		for k := range q {
+			switch strings.ToLower(k) {
+			case "u", "p", "t", "s", "v", "c", "f":
+				q.Del(k)
+			}
+		}
+		for k, vals := range p.subsonicAuthParams() {
+			q[k] = vals
+		}
+		reqU.RawQuery = q.Encode()
+		req, err = http.NewRequestWithContext(ctx, http.MethodGet, reqU.String(), nil)
+		if err != nil {
+			return nil, errors.New("cover: invalid address")
+		}
+	case "plex":
+		if reqU.RawQuery != "" {
+			q, _ := url.ParseQuery(reqU.RawQuery)
+			for k := range q {
+				if strings.EqualFold(k, "x-plex-token") {
+					q.Del(k)
+				}
+			}
+			reqU.RawQuery = q.Encode()
+		}
+		req, err = http.NewRequestWithContext(ctx, http.MethodGet, reqU.String(), nil)
+		if err != nil {
+			return nil, errors.New("cover: invalid address")
+		}
+		if tok := p.plexToken(); tok != "" {
+			req.Header.Set("X-Plex-Token", tok)
+		}
+	default:
+		return nil, errors.New("cover: invalid address")
+	}
+
+	client := *p.httpClient()
+	origCheck := client.CheckRedirect
+	client.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		if origCheck != nil {
+			if err := origCheck(r, via); err != nil {
+				return err
+			}
+		} else if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		if !strings.EqualFold(r.URL.Scheme, baseU.Scheme) || !strings.EqualFold(r.URL.Host, baseU.Host) {
+			r.Header.Del("X-Plex-Token")
+			r.Header.Del("Authorization")
+		}
+		return nil
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, safeSelfHostedError(proto, "cover", req.URL, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("cover: HTTP %d", resp.StatusCode)
+	}
+	limit := maxBytes
+	if limit <= 0 {
+		limit = 2 << 20
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, safeSelfHostedError(proto, "cover-read", req.URL, err)
+	}
+	if int64(len(data)) > limit {
+		return nil, errors.New("cover: too large")
+	}
+	return data, nil
+}
+
 // safeURLRoute returns scheme://host/path with userinfo, query, and fragment stripped.
 func safeURLRoute(u *url.URL) string {
 	if u == nil {
@@ -377,11 +601,11 @@ func (p *SelfHostedProvider) subsonicEntryToTrack(e subsonicSong) Track {
 	var coverURL string
 	if e.CoverArt != "" {
 		if strings.HasPrefix(e.CoverArt, "http://") || strings.HasPrefix(e.CoverArt, "https://") {
-			coverURL = e.CoverArt
-		} else {
-			artParams := p.subsonicAuthParams()
-			artParams.Set("id", e.CoverArt)
-			coverURL = strings.TrimRight(p.cfg.URL, "/") + "/rest/getCoverArt.view?" + artParams.Encode()
+			coverURL = SanitizeCoverURL(e.CoverArt)
+		} else if base := cleanBaseURL(p.cfg.URL); base != "" {
+			q := url.Values{}
+			q.Set("id", e.CoverArt)
+			coverURL = base + "/rest/getCoverArt.view?" + q.Encode()
 		}
 	}
 	return Track{
@@ -1074,15 +1298,14 @@ func (p *SelfHostedProvider) plexMetadataToTrack(m plexMetadata) Track {
 	var coverURL string
 	if m.Thumb != "" {
 		if strings.HasPrefix(m.Thumb, "http://") || strings.HasPrefix(m.Thumb, "https://") {
-			coverURL = m.Thumb
-		} else {
-			coverURL = strings.TrimRight(p.cfg.URL, "/") + m.Thumb
-			if tok := p.plexToken(); tok != "" {
-				if strings.Contains(coverURL, "?") {
-					coverURL += "&X-Plex-Token=" + url.QueryEscape(tok)
-				} else {
-					coverURL += "?X-Plex-Token=" + url.QueryEscape(tok)
+			coverURL = SanitizeCoverURL(m.Thumb)
+		} else if base := cleanBaseURL(p.cfg.URL); base != "" {
+			if tu, err := url.Parse(m.Thumb); err == nil && tu.Scheme == "" && tu.Host == "" {
+				thumb := m.Thumb
+				if !strings.HasPrefix(thumb, "/") {
+					thumb = "/" + thumb
 				}
+				coverURL = SanitizeCoverURL(base + thumb)
 			}
 		}
 	}
@@ -1151,7 +1374,7 @@ func (p *SelfHostedProvider) plexDownloadTrack(ctx context.Context, trackID, des
 	if strings.Contains(trackID, "://") {
 		u, err := url.Parse(trackID)
 		if err != nil || u.Host != "" {
-			return "", fmt.Errorf("plex: invalid track ID %q", trackID)
+			return "", errors.New("plex: invalid track ID")
 		}
 	}
 	partKey := trackID
@@ -1172,7 +1395,7 @@ func (p *SelfHostedProvider) plexDownloadTrack(ctx context.Context, trackID, des
 	}
 
 	if !strings.HasPrefix(partKey, "/") {
-		return "", fmt.Errorf("plex: could not resolve part key for track %q", trackID)
+		return "", errors.New("plex: could not resolve track part key")
 	}
 
 	downloadURL := strings.TrimRight(baseU.String(), "/") + partKey
