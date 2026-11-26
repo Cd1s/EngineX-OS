@@ -238,6 +238,9 @@ func (n *nextBuild) build(drop, ready bool) error {
 		uuid, commit := nextIdentity(n.ctx, n.mount, next)
 		if _, old := os.Stat(filepath.Join(n.dir, oldStateName)); content || old == nil {
 			err = n.mirror(live, next, liveUUID, uuid, commit)
+			if err == nil {
+				w.st.done("mirror", "next library mirrored from live")
+			}
 		} else {
 			// The stick has no library to keep: the next one is built from the exports, under the
 			// UUID of Engine's skeleton when there is one.

@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
@@ -111,6 +112,7 @@ type work struct {
 	lists, entries            int   // lists a diff writes or removes, and the entries of those it writes
 	staged                    int   // staged tracks applied in place
 	scan                      int   // rows of m.db compared with a next library's
+	legacyState               int64 // bytes of a valid legacy .rb-bridge-state.db (FAT32 walk + page scatter)
 	commits, tracks           int   // commits, each with a save of the snapshot of this many tracks
 }
 
@@ -124,6 +126,7 @@ func (w work) cost() time.Duration {
 	us += 130*float64(w.view) + 100*float64(w.load) + 650*float64(w.build)
 	us += 25000*float64(w.adds) + 30000*float64(w.removes) + 15000*float64(w.updates) + 5000*float64(w.lists) + 120*float64(w.entries)
 	us += 33000*float64(w.staged) + 350*float64(w.scan)
+	us += 0.0057 * float64(w.legacyState) // ~6 ms/MiB FAT32 cluster-chain traversal + page scatter on multi-GB legacy state DBs
 	us += float64(w.commits) * (250000 + 65*float64(w.tracks))
 	return time.Duration(us) * time.Microsecond
 }
@@ -149,6 +152,79 @@ func exportWork(files []rbstate.FileSig, known int) work {
 	}
 	w.tracks = max(w.view, known)
 	return w
+}
+
+const (
+	legacySQLiteProbeMaxBytes = 16 << 20 // never run SQLite queries on >16 MiB legacy DBs during the mount window (FAT32 walk risk)
+	legacyFallbackMaxRows     = 200_000  // cap non-SQLite size/250 fallback
+)
+
+// legacyAdoptEstimate estimates the row count and legacy-file FAT32 scan bytes for adopting an
+// earlier build's .rb-bridge-state.db without letting BridgeAnalysis waveform blobs blow up the
+// row estimate (a 2.71 GB legacy state DB with ~6k rows previously estimated 5,597,379 ms via
+// size/250). For valid SQLite files <= 16 MiB, MAX(rowid) on BridgeState descends only the
+// rightmost B-tree path (2-3 pages). Above 16 MiB, querying the state DB during the 17 s mount
+// window risks a multi-second FAT32 cluster-chain walk, so rows come from m.db's Track MAX(id)
+// when m.db <= 16 MiB (or exportWork's view estimate when m.db is also huge), while stateBytes
+// prices the FAT32 traversal + scattered page cost (~6 ms/MiB). Non-SQLite files fall back
+// conservatively to size/250 (capped).
+func legacyAdoptEstimate(ctx context.Context, dir string, oldSt os.FileInfo) (rows int, stateBytes int64) {
+	if oldSt == nil || oldSt.Size() <= 0 {
+		return 0, 0
+	}
+	statePath := filepath.Join(dir, oldStateName)
+	if !isSQLiteFile(statePath) {
+		return int(min(oldSt.Size()/250, legacyFallbackMaxRows)), 0
+	}
+	stateBytes = oldSt.Size()
+	if ctx.Err() != nil {
+		return 0, stateBytes
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	if oldSt.Size() <= legacySQLiteProbeMaxBytes {
+		if n, ok := queryMaxInt(probeCtx, statePath, `SELECT COALESCE(MAX(rowid), 0) FROM BridgeState`); ok {
+			return n, stateBytes
+		}
+		return 0, stateBytes
+	}
+	mdbPath := filepath.Join(dir, "m.db")
+	if mSt, err := os.Stat(mdbPath); err == nil && mSt.Size() > 0 && mSt.Size() <= legacySQLiteProbeMaxBytes {
+		if n, ok := queryMaxInt(probeCtx, mdbPath, `SELECT COALESCE(MAX(id), 0) FROM Track`); ok {
+			return n, stateBytes
+		}
+	}
+	return 0, stateBytes
+}
+
+func isSQLiteFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var hdr [16]byte
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
+		return false
+	}
+	return string(hdr[:]) == "SQLite format 3\x00"
+}
+
+func queryMaxInt(ctx context.Context, dbPath, q string) (int, bool) {
+	db, err := openRO(dbPath, 100)
+	if err != nil {
+		return 0, false
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var n int64
+	if err := db.QueryRowContext(ctx, q).Scan(&n); err != nil {
+		return 0, false
+	}
+	if n < 0 {
+		return 0, true
+	}
+	return int(min(n, legacyFallbackMaxRows)), true
 }
 
 // writableLibrary reports that the stick's Engine Library can be written: the volume itself, or
@@ -283,10 +359,14 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		ahead.build = ahead.view // a first library
 	} else if headErr != nil {
 		if oldSt, oe := os.Stat(filepath.Join(dir, oldStateName)); oe == nil && oldSt.Size() > 0 {
-			// Legacy take-over (adopt.go) scans BridgeState JOIN Track and reconciles every row.
-			adoptRows := max(ahead.view, int(oldSt.Size()/250))
+			// Legacy take-over (adopt.go) reads BridgeState/BridgeWritten/Track and reconciles
+			// every row. Estimate rows independently of BridgeAnalysis blob size, while still
+			// pricing FAT32 cluster-chain walk + scatter for multi-GB legacy state files.
+			stateRows, stateBytes := legacyAdoptEstimate(ctx, dir, oldSt)
+			adoptRows := max(ahead.view, stateRows)
 			ahead.load += adoptRows
 			ahead.scan += adoptRows
+			ahead.legacyState += stateBytes
 			ahead.tracks = max(ahead.tracks, adoptRows)
 		}
 	}

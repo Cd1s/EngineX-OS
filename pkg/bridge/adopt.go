@@ -30,6 +30,8 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
+	// Keep 16 MiB of SQLite page cache so scattered multi-GB legacy state B-trees never thrash.
+	_, _ = db.ExecContext(ctx, `PRAGMA cache_size=-16384`)
 	if _, err = db.ExecContext(ctx, `ATTACH DATABASE ? AS bridge`, roURI(filepath.Join(dir, oldStateName))); err != nil {
 		return nil, fmt.Errorf("state of an earlier build: %w", err)
 	}
@@ -44,12 +46,57 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 	if !has("BridgeState") {
 		return s, nil
 	}
-	written := `NULL`
+	// Read BridgeWritten, Track's covering path index, and BridgeState in three sequential scans
+	// rather than an interleaved correlated-subquery join, keeping page reads sequential and
+	// avoiding random thrashing across multi-GB legacy state files.
+	var writtenByID map[int64][]byte
 	if has("BridgeWritten") {
-		written = `(SELECT digest FROM bridge.BridgeWritten w WHERE w.trackId=s.trackId)`
+		writtenByID = make(map[int64][]byte)
+		wRows, e := db.QueryContext(ctx, `SELECT trackId, digest FROM bridge.BridgeWritten`)
+		if e != nil {
+			return nil, e
+		}
+		for wRows.Next() {
+			if e = ctx.Err(); e != nil {
+				wRows.Close()
+				return nil, e
+			}
+			var id int64
+			var digest []byte
+			if e = wRows.Scan(&id, &digest); e != nil {
+				wRows.Close()
+				return nil, e
+			}
+			if len(digest) > 0 {
+				writtenByID[id] = append([]byte(nil), digest...)
+			}
+		}
+		if e = wRows.Close(); e != nil {
+			return nil, e
+		}
 	}
-	rows, err := db.QueryContext(ctx, `SELECT s.path,s.trackId,s.fingerprint,`+written+`
-		FROM bridge.BridgeState s JOIN Track t ON t.id=s.trackId WHERE t.path=s.path`)
+	trackPath := make(map[int64]string)
+	tRows, err := db.QueryContext(ctx, `SELECT id, path FROM Track WHERE path IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	for tRows.Next() {
+		if err = ctx.Err(); err != nil {
+			tRows.Close()
+			return nil, err
+		}
+		var id int64
+		var p string
+		if err = tRows.Scan(&id, &p); err != nil {
+			tRows.Close()
+			return nil, err
+		}
+		trackPath[id] = p
+	}
+	if err = tRows.Close(); err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT path, trackId, fingerprint FROM bridge.BridgeState`)
 	if err != nil {
 		return nil, err
 	}
@@ -60,14 +107,16 @@ func adopt(ctx context.Context, library, dir, uuid string) (*rbstate.Snapshot, e
 		}
 		var p, fingerprint string
 		var id int64
-		var digest []byte
-		if err = rows.Scan(&p, &id, &fingerprint, &digest); err != nil {
+		if err = rows.Scan(&p, &id, &fingerprint); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		if tp, ok := trackPath[id]; !ok || tp != p {
+			continue
+		}
 		rel := strings.TrimPrefix(p, "../")
 		complete := fingerprint != "" && !strings.HasPrefix(fingerprint, "fast:")
-		t := &rbstate.Track{Key: rbstate.FoldPath(rel), EngineID: id, Rel: rel, Resolved: complete, Rating: -1, Written: digest}
+		t := &rbstate.Track{Key: rbstate.FoldPath(rel), EngineID: id, Rel: rel, Resolved: complete, Rating: -1, Written: writtenByID[id]}
 		s.Tracks[t.Key] = t
 	}
 	if err = rows.Close(); err != nil {
