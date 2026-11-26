@@ -249,3 +249,86 @@ func TestStockEngineStickWithNonExportPioneerFolderUnaffected(t *testing.T) {
 		t.Fatalf("stock Engine stick with non-export PIONEER folder mutated")
 	}
 }
+
+func TestStockEngineStickWithEmptyPioneerRekordboxDirUnaffected(t *testing.T) {
+	t.Setenv(rbstate.StageEnv, filepath.Join(t.TempDir(), "stage"))
+	mount := filepath.Join(t.TempDir(), "ENGINE_WITH_EMPTY_REKORDBOX_DIR")
+	makeStockEngineStick(t, mount)
+
+	// Empty PIONEER/rekordbox, hidden .PIONEER/rekordbox, and PIONEER/DeviceData directories
+	// (plus a Prolink-generated export.pdb) must NOT fool CueWatcher, WriteBackCues, cleanup,
+	// ConvertAtMount, FillInBackground, or OnDemandBuilder into treating this stick as rekordbox.
+	for _, relDir := range []string{"PIONEER/rekordbox", ".PIONEER/rekordbox", "PIONEER/DeviceData"} {
+		if err := os.MkdirAll(filepath.Join(mount, filepath.FromSlash(relDir)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pdb := filepath.Join(mount, "PIONEER", "rekordbox", "export.pdb")
+	if err := os.WriteFile(pdb, []byte("generated-by-prolink"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(pdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mount, "PIONEER", "rekordbox", ".enginex-generated"),
+		[]byte(fmt.Sprintf("%d:%d", st.Size(), st.ModTime().UnixNano())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rekordboxStick(mount) {
+		t.Fatal("rekordboxStick returned true when only empty rekordbox dirs + generated export.pdb exist")
+	}
+
+	before := snapshotTree(t, mount)
+	for _, opts := range []MountOptions{{OnDemand: false}, {OnDemand: true, Publish: true}} {
+		if res, err := ConvertAtMount(context.Background(), mount, opts); err != nil || !res.Bypassed {
+			t.Fatalf("ConvertAtMount(%+v) = (%+v, %v), want bypassed", opts, res, err)
+		}
+	}
+	if _, err := FillInBackground(context.Background(), mount, FillOptions{OnDemand: true}); !errors.Is(err, rbstate.ErrNoSnapshot) {
+		t.Fatalf("FillInBackground got err=%v, want ErrNoSnapshot", err)
+	}
+	od := NewOnDemandBuilderWithConfig(OnDemandBuilderConfig{MediaRoot: filepath.Dir(mount)})
+	if _, err := od.Build(context.Background(), OnDemandRequest{Mount: mount, UUID: "gate-internal-library-uuid", EnginePath: "../../Music/Track001.wav", EngineID: 1}); !errors.Is(err, ErrOnDemandNotFound) {
+		t.Fatalf("OnDemandBuilder.Build got err=%v, want ErrOnDemandNotFound", err)
+	}
+	if cleaned := CleanWriteBackLeftoversWithKeys(mount, newKeyCache()); cleaned != 0 {
+		t.Fatalf("CleanWriteBackLeftoversWithKeys cleaned=%d, want 0", cleaned)
+	}
+	t.Cleanup(SetCueRunDirForTest(t.TempDir()))
+	w := CueWatcherForTest([]string{mount}, 20*time.Millisecond, 50*time.Millisecond)
+	var passes atomic.Int32
+	WrapCuePassForTest(w, func(next CuePass) CuePass {
+		return func(ctx context.Context, m string, opts WriteBackOptions) (WriteBackResult, error) {
+			passes.Add(1)
+			return next(ctx, m, opts)
+		}
+	})
+	wctx, cancel := context.WithCancel(context.Background())
+	wdone := make(chan struct{})
+	go func() {
+		defer close(wdone)
+		_ = w.Run(wctx)
+	}()
+	mdb := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+	origSt, err := os.Stat(mdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := origSt.ModTime().Add(2 * time.Second)
+	_ = os.Chtimes(mdb, future, future)
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+	<-wdone
+	_ = os.Chtimes(mdb, origSt.ModTime(), origSt.ModTime())
+	if passes.Load() != 0 {
+		t.Fatalf("CueWatcher ran %d passes on stock Engine stick with empty PIONEER/rekordbox, want 0", passes.Load())
+	}
+	if wres, err := WriteBackCues(context.Background(), mount, WriteBackOptions{SkipPreparingCheck: true}); err != nil || wres.TracksChecked != 0 || wres.FilesUpdated != 0 {
+		t.Fatalf("WriteBackCues = (%+v, %v), want zero activity", wres, err)
+	}
+	after := snapshotTree(t, mount)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("stock Engine stick with empty PIONEER/rekordbox dir mutated:\nbefore=%v\nafter=%v", before, after)
+	}
+}

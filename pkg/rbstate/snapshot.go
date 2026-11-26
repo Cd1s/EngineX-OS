@@ -3,6 +3,7 @@ package rbstate
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
@@ -181,7 +182,12 @@ func (s *Snapshot) Encode() ([]byte, error) {
 }
 
 // Save replaces the snapshot in dbDir, pull-safe (ReplaceFile). The caller holds LockVolume.
-func (s *Snapshot) Save(dbDir string) error { return s.SaveAs(filepath.Join(dbDir, SnapshotName)) }
+func (s *Snapshot) Save(dbDir string) error { return s.SaveCtx(context.Background(), dbDir) }
+
+// SaveCtx replaces the snapshot in dbDir while honoring ctx cancellation.
+func (s *Snapshot) SaveCtx(ctx context.Context, dbDir string) error {
+	return s.SaveAsCtx(ctx, filepath.Join(dbDir, SnapshotName))
+}
 
 // A window saves the snapshot its transaction leads to as the next snapshot (SaveNext) before it
 // commits, then makes it the snapshot (Promote). A window that finds a next snapshot reads the
@@ -190,24 +196,40 @@ func (s *Snapshot) Save(dbDir string) error { return s.SaveAs(filepath.Join(dbDi
 const nextName = SnapshotName + ".next"
 
 // SaveNext writes the snapshot the transaction under way leads to.
-func (s *Snapshot) SaveNext(dbDir string) error { return s.SaveAs(filepath.Join(dbDir, nextName)) }
+func (s *Snapshot) SaveNext(dbDir string) error {
+	return s.SaveNextCtx(context.Background(), dbDir)
+}
+
+// SaveNextCtx writes the next snapshot while honoring ctx cancellation.
+func (s *Snapshot) SaveNextCtx(ctx context.Context, dbDir string) error {
+	return s.SaveAsCtx(ctx, filepath.Join(dbDir, nextName))
+}
 
 // SwapName is, beside the snapshot, the snapshot of a next library that is ready to take the
 // stick's library's place (pkg/bridge next.go). Its Header.Base names the library it replaces.
 const SwapName = SnapshotName + ".swap"
 
 // SaveAs is Save under another name, pull-safe.
-func (s *Snapshot) SaveAs(file string) error {
+func (s *Snapshot) SaveAs(file string) error { return s.SaveAsCtx(context.Background(), file) }
+
+// SaveAsCtx encodes and writes the snapshot under another name while honoring ctx cancellation.
+func (s *Snapshot) SaveAsCtx(ctx context.Context, file string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	b, err := s.Encode()
 	if err != nil {
 		return err
 	}
-	return ReplaceFile(file, b)
+	return ReplaceFileCtx(ctx, file, b)
 }
 
 // Promote makes the next snapshot the snapshot, pull-safe.
-func Promote(dbDir string) error {
-	return RenameFile(filepath.Join(dbDir, nextName), filepath.Join(dbDir, SnapshotName))
+func Promote(dbDir string) error { return PromoteCtx(context.Background(), dbDir) }
+
+// PromoteCtx promotes the next snapshot while checking ctx cancellation before rename.
+func PromoteCtx(ctx context.Context, dbDir string) error {
+	return RenameFileCtx(ctx, filepath.Join(dbDir, nextName), filepath.Join(dbDir, SnapshotName))
 }
 
 // LoadNext returns the next snapshot a cut left, or ErrNoSnapshot.

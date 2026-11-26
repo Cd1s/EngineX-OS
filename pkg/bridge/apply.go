@@ -51,13 +51,20 @@ type window struct {
 // syncBrowseIndex writes .rb-bridge-browse once when missing or out of sync with snap.Header,
 // removing any mismatched leftover index if regeneration fails.
 func syncBrowseIndex(dir string, snap *rbstate.Snapshot) error {
+	return syncBrowseIndexCtx(context.Background(), dir, snap)
+}
+
+func syncBrowseIndexCtx(ctx context.Context, dir string, snap *rbstate.Snapshot) error {
 	if snap == nil || snap.LibraryUUID == "" {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if rbstate.BrowseIndexMatches(dir, snap.Header) {
 		return nil
 	}
-	if err := rbstate.SaveBrowseIndex(dir, snap); err != nil {
+	if err := rbstate.SaveBrowseIndexCtx(ctx, dir, snap); err != nil {
 		if !rbstate.BrowseIndexMatches(dir, snap.Header) {
 			_ = rbstate.RemoveFile(filepath.Join(dir, rbstate.BrowseIndexName))
 		}
@@ -192,7 +199,7 @@ func (w *window) run() (err error) {
 	}
 	if !w.next && w.o.OnDemand && w.ctx.Err() == nil && (w.browseDirty || (err == nil && w.lib != nil && !w.left)) {
 		if w.st.kill.IsZero() || w.st.must(500*time.Millisecond) || (w.browseDirty && time.Until(w.st.kill) > spare/2) {
-			if serr := syncBrowseIndex(w.dir, w.snap); serr != nil && err == nil {
+			if serr := syncBrowseIndexCtx(w.ctx, w.dir, w.snap); serr != nil && err == nil {
 				err = serr
 			}
 		}
@@ -291,7 +298,7 @@ func (w *window) settle() error {
 	if claims.LibraryUUID != w.lib.UUID() || claims.Commit != id || claims.Rules != rbstate.Rules {
 		return rbstate.DropNext(w.sdir())
 	}
-	if err = rbstate.Promote(w.sdir()); err != nil {
+	if err = rbstate.PromoteCtx(w.ctx, w.sdir()); err != nil {
 		return err
 	}
 	log.Printf("rb-bridge: the last window was cut short after its commit; its %d tracks and %d lists are taken over", len(claims.Tracks), len(claims.Lists))
@@ -418,6 +425,18 @@ func (w *window) noteSync(b *enginedb.Batch, t *rbstate.Track, written bool) err
 	return nil
 }
 
+const saveReserve = 250 * time.Millisecond
+
+func (w *window) saveHeadroom() error {
+	if err := w.ctx.Err(); err != nil {
+		return err
+	}
+	if !w.next && !w.st.kill.IsZero() && time.Until(w.st.kill) < saveReserve {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
 // commit saves the next snapshot, runs the commit and promotes the snapshot (design section 5).
 func (w *window) commit(id int64, do func() error) error {
 	if err := w.ctx.Err(); err != nil {
@@ -431,10 +450,10 @@ func (w *window) commit(id int64, do func() error) error {
 	t := time.Now()
 	w.count()
 	w.snap.Applied, w.snap.Commit = t.Unix(), id
-	if err := w.ctx.Err(); err != nil {
+	if err := w.saveHeadroom(); err != nil {
 		return err
 	}
-	if err := w.snap.SaveNext(w.sdir()); err != nil {
+	if err := w.snap.SaveNextCtx(w.ctx, w.sdir()); err != nil {
 		return err
 	}
 	lap(&w.took.save, &t)
@@ -445,7 +464,7 @@ func (w *window) commit(id int64, do func() error) error {
 	}
 	lap(&w.took.commit, &t)
 	cut("committed")
-	if err := rbstate.Promote(w.sdir()); err != nil {
+	if err := rbstate.PromoteCtx(w.ctx, w.sdir()); err != nil {
 		return err
 	}
 	lap(&w.took.promote, &t)
@@ -474,10 +493,10 @@ func (w *window) saveIfChanged() error {
 	if !w.dirty && reflect.DeepEqual(w.snap.Header, w.head) {
 		return nil
 	}
-	if err := w.ctx.Err(); err != nil {
+	if err := w.saveHeadroom(); err != nil {
 		return err
 	}
-	if err := w.snap.Save(w.sdir()); err != nil {
+	if err := w.snap.SaveCtx(w.ctx, w.sdir()); err != nil {
 		return err
 	}
 	w.saved()

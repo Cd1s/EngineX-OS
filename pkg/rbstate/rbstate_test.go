@@ -2,6 +2,7 @@ package rbstate
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -455,5 +456,49 @@ func TestInstallFilePacedAbortsCleanlyWhenBusy(t *testing.T) {
 	got, err := os.ReadFile(dst)
 	if err != nil || !bytes.Equal(got, payload) {
 		t.Fatalf("installed content mismatch: err=%v len=%d", err, len(got))
+	}
+}
+
+func TestReplaceFileCtxHonorsDeadlineAtEveryCutPoint(t *testing.T) {
+	payload := bytes.Repeat([]byte("Z"), 192<<10) // >= 3 chunks of 64 KiB so "write" cut fires mid-write
+	for _, targetCut := range []string{"write", "dirsync", "filesync", "temp"} {
+		t.Run(targetCut, func(t *testing.T) {
+			dir := t.TempDir()
+			dst := filepath.Join(dir, "snapshot.bin")
+			if err := os.WriteFile(dst, []byte("original-state"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			hit := false
+			hook := func(step string) {
+				if strings.HasPrefix(step, targetCut+" ") {
+					hit = true
+					cancel()
+				}
+			}
+			restore := SetCutHooks(hook, hook)
+			defer restore()
+
+			err := ReplaceFileCtx(ctx, dst, payload)
+			if !hit {
+				t.Fatalf("cut point %q never fired", targetCut)
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("ReplaceFileCtx at cut %q err=%v, want context.Canceled", targetCut, err)
+			}
+			if got, rerr := os.ReadFile(dst); rerr != nil || string(got) != "original-state" {
+				t.Fatalf("dst corrupted after canceled %q: got=%q err=%v", targetCut, got, rerr)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), ".enginex-rb-") {
+					t.Fatalf("leftover temp file after cut %q: %s", targetCut, e.Name())
+				}
+			}
+		})
 	}
 }

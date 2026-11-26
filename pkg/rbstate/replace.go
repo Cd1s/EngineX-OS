@@ -1,6 +1,7 @@
 package rbstate
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -17,13 +18,55 @@ var UnsafeToFree func(path string) bool
 var ErrUnownedClusters = errors.New("rbstate: the file's clusters are not its own in the FAT")
 
 // cut, in tests, is called between two writes a pull can separate.
-var cut = func(step string) {}
+// cutWrite is only used by Ctx replacement paths for write/sync/dirsync cancellation testing.
+var (
+	cut      = func(step string) {}
+	cutWrite = func(step string) {}
+)
+
+// SetCutHooks installs test cut hooks and returns a restore function.
+func SetCutHooks(onTemp, onWrite func(string)) func() {
+	prevCut, prevWrite := cut, cutWrite
+	if onTemp != nil {
+		cut = onTemp
+	} else {
+		cut = func(string) {}
+	}
+	if onWrite != nil {
+		cutWrite = onWrite
+	} else {
+		cutWrite = func(string) {}
+	}
+	return func() {
+		cut, cutWrite = prevCut, prevWrite
+	}
+}
 
 const tempPattern = ".enginex-rb-*.tmp"
 
 // ReplaceFile writes data to dst so that a pull at any moment leaves dst whole, old or new.
 func ReplaceFile(dst string, data []byte) error {
-	return writeAndRename(dst, func(f *os.File) error { _, err := f.Write(data); return err })
+	return ReplaceFileCtx(context.Background(), dst, data)
+}
+
+// ReplaceFileCtx is ReplaceFile honoring ctx cancellation across chunks, fsyncs, and before rename.
+func ReplaceFileCtx(ctx context.Context, dst string, data []byte) error {
+	return writeAndRenameCtx(ctx, dst, func(f *os.File) error {
+		const chunk = 64 << 10
+		for off := 0; off < len(data); off += chunk {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			end := min(off+chunk, len(data))
+			if _, err := f.Write(data[off:end]); err != nil {
+				return err
+			}
+			if off == 0 {
+				cutWrite("write " + dst)
+			}
+		}
+		return nil
+	})
 }
 
 // InstallFile copies src, a file on another file system, to dst as ReplaceFile writes.
@@ -136,6 +179,13 @@ func InstallFilePaced(src, dst string, chunk int, flushBytes int64, pace func(n 
 // one measured for cue write-back (#321, #253 review 3): the directory is synced before the
 // temporary file (its allocation before its entry).
 func writeAndRename(dst string, write func(*os.File) error) error {
+	return writeAndRenameCtx(context.Background(), dst, write)
+}
+
+func writeAndRenameCtx(ctx context.Context, dst string, write func(*os.File) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if UnsafeToFree != nil && UnsafeToFree(dst) {
 		return ErrUnownedClusters
 	}
@@ -145,15 +195,21 @@ func writeAndRename(dst string, write func(*os.File) error) error {
 		return err
 	}
 	if err = write(tmp); err == nil {
-		_ = syncPath(dir)
-		err = tmp.Sync()
+		cutWrite("dirsync " + dst)
+		if err = ctx.Err(); err == nil {
+			_ = syncPath(dir)
+			cutWrite("filesync " + dst)
+			if err = ctx.Err(); err == nil {
+				err = tmp.Sync()
+			}
+		}
 	}
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
 	if err == nil {
 		cut("temp " + dst)
-		err = RenameFile(tmp.Name(), dst)
+		err = RenameFileCtx(ctx, tmp.Name(), dst)
 	}
 	if err != nil {
 		_ = RemoveFile(tmp.Name())
@@ -165,6 +221,14 @@ func writeAndRename(dst string, write func(*os.File) error) error {
 // directory and then dst are synced: on FAT a rename frees its clusters at once, and the entry
 // naming the new ones is written only later.
 func RenameFile(src, dst string) error {
+	return RenameFileCtx(context.Background(), src, dst)
+}
+
+// RenameFileCtx checks ctx cancellation before os.Rename and completes post-rename syncs once renamed.
+func RenameFileCtx(ctx context.Context, src, dst string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if UnsafeToFree != nil && UnsafeToFree(dst) {
 		return ErrUnownedClusters
 	}

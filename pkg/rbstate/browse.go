@@ -3,6 +3,7 @@ package rbstate
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"encoding/base64"
 	"errors"
@@ -155,10 +156,23 @@ func EncodeBrowseIndex(s *Snapshot) []byte {
 
 // SaveBrowseIndex writes .rb-bridge-browse into dbDir, pull-safe.
 func SaveBrowseIndex(dbDir string, s *Snapshot) error {
-	return SaveBrowseIndexAs(filepath.Join(dbDir, BrowseIndexName), s)
+	return SaveBrowseIndexCtx(context.Background(), dbDir, s)
+}
+
+// SaveBrowseIndexCtx writes .rb-bridge-browse while honoring ctx cancellation.
+func SaveBrowseIndexCtx(ctx context.Context, dbDir string, s *Snapshot) error {
+	return SaveBrowseIndexAsCtx(ctx, filepath.Join(dbDir, BrowseIndexName), s)
 }
 
 // SaveBrowseIndexAs writes the browse index to file, pull-safe.
 func SaveBrowseIndexAs(file string, s *Snapshot) error {
-	return ReplaceFile(file, EncodeBrowseIndex(s))
+	return SaveBrowseIndexAsCtx(context.Background(), file, s)
+}
+
+// SaveBrowseIndexAsCtx encodes and writes the browse index while honoring ctx cancellation.
+func SaveBrowseIndexAsCtx(ctx context.Context, file string, s *Snapshot) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return ReplaceFileCtx(ctx, file, EncodeBrowseIndex(s))
 }

@@ -348,7 +348,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 				unchanged = false
 			} else if !rbstate.BrowseIndexMatches(dir, head) {
 				if !deadlineReached() && (st.kill.IsZero() || st.fits(work{load: head.Tracks})) {
-					if snap, lerr := rbstate.Load(dir); lerr == nil && syncBrowseIndex(dir, snap) == nil {
+					if snap, lerr := rbstate.Load(dir); lerr == nil && syncBrowseIndexCtx(ctx, dir, snap) == nil {
 						chores(ctx, mount, st, !o.Publish)
 						return MountResult{Bypassed: true, Background: res.Background}, nil
 					}

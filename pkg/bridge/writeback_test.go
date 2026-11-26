@@ -2131,7 +2131,7 @@ func TestWriteBackZeroDecryptOnOnDemandLoad(t *testing.T) {
 	}
 	settle1, err := WriteBackCues(ctx, root, WriteBackOptions{
 		SkipPreparingCheck: true,
-		OnEject:            true,
+		SettleBatch:        256,
 		Session:            &CueSession{keys: rekordbox.NewKeyCacheAt(keyDir)},
 	})
 	if err != nil || readLibsCalls != 0 || settle1.TracksRead != 2 || settle1.TracksChanged != 0 ||

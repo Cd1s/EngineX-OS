@@ -926,6 +926,141 @@ func TestOnDemandLegacyAdoptManyListsDefersAndPublishesViaNext(t *testing.T) {
 	}
 }
 
+func TestSaveDeadlineCutPointsRecoverCleanlyOnNextInsert(t *testing.T) {
+	assertNoTemps := func(t *testing.T, dir string) {
+		t.Helper()
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), ".enginex-rb-") {
+				t.Fatalf("leftover temp file in %s: %s", dir, e.Name())
+			}
+		}
+	}
+
+	// Cut 1: cancel during SaveNext inside initial OnDemand import (no temp left; next ConvertAtMount builds clean).
+	t.Run("SaveNextCut", func(t *testing.T) {
+		base := t.TempDir()
+		t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+		mount := filepath.Join(base, "stick")
+		testfixture.LargeExport(t, mount, 2)
+		fix3WritePlainOneLibrary(t, mount)
+		// Seed initial full library and mutate an export row so OnDemand upgrade uses window.commit -> SaveNextCtx.
+		if _, err := ConvertAtMount(context.Background(), mount, MountOptions{OnDemand: false}); err != nil {
+			t.Fatal(err)
+		}
+		odb, err := sql.Open("sqlite", filepath.Join(mount, "PIONEER", "rekordbox", "exportLibrary.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = odb.Exec(`UPDATE content SET djComment='force-save-next' WHERE content_id=1`)
+		_ = odb.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		restore := rbstate.SetCutHooks(nil, func(step string) {
+			if strings.HasPrefix(step, "dirsync ") && strings.HasSuffix(step, rbstate.SnapshotName+".next") {
+				cancel()
+			}
+		})
+		_, err = ConvertAtMount(ctx, mount, MountOptions{OnDemand: true})
+		restore()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled on SaveNext cut, got %v", err)
+		}
+		assertNoTemps(t, dbDir(mount))
+		if _, serr := os.Stat(filepath.Join(dbDir(mount), rbstate.SnapshotName+".next")); !errors.Is(serr, os.ErrNotExist) {
+			t.Fatalf("aborted SaveNext left .next behind: %v", serr)
+		}
+		// Next insert recovers cleanly to OnDemand mode.
+		if res, rerr := ConvertAtMount(context.Background(), mount, MountOptions{OnDemand: true}); rerr != nil || !res.Pending.None() {
+			t.Fatalf("recovery ConvertAtMount after SaveNext cut = (%+v, %v)", res, rerr)
+		}
+		if s := snapshot(t, mount); s.Mode != rbstate.ModeOnDemand || !rbstate.BrowseIndexMatches(dbDir(mount), s.Header) {
+			t.Fatalf("recovered snapshot invalid: mode=%q browse=%v", s.Mode, rbstate.BrowseIndexMatches(dbDir(mount), s.Header))
+		}
+	})
+
+	// Cut 2: cancel right after DB commit before Promote (.next stays intact and settle() promotes on next insert).
+	t.Run("PromoteCut", func(t *testing.T) {
+		base := t.TempDir()
+		t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+		mount := filepath.Join(base, "stick")
+		testfixture.LargeExport(t, mount, 2)
+		fix3WritePlainOneLibrary(t, mount)
+		if _, err := ConvertAtMount(context.Background(), mount, MountOptions{OnDemand: false}); err != nil {
+			t.Fatal(err)
+		}
+		// Trigger a snapshot commit change via OnDemand update + add track? Updating to OnDemand saves via saveIfChanged;
+		// force a commit by deleting one track row via m.db? Easier: add a track or test build commit, OR cancel on Promote.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		prevCut := cut
+		cut = func(step string) {
+			if step == "committed" {
+				cancel()
+			}
+		}
+		// Mutate an export field in OneLibrary to force a DB commit inside window.commit!
+		onePath := filepath.Join(mount, "PIONEER", "rekordbox", "exportLibrary.db")
+		odb, err := sql.Open("sqlite", onePath)
+		if err != nil {
+			cut = prevCut
+			t.Fatal(err)
+		}
+		_, err = odb.Exec(`UPDATE content SET djComment='trigger-commit' WHERE content_id=1`)
+		_ = odb.Close()
+		if err != nil {
+			cut = prevCut
+			t.Fatal(err)
+		}
+		_, err = ConvertAtMount(ctx, mount, MountOptions{OnDemand: true})
+		cut = prevCut
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled before Promote, got %v", err)
+		}
+		assertNoTemps(t, dbDir(mount))
+		if res, rerr := ConvertAtMount(context.Background(), mount, MountOptions{OnDemand: true}); rerr != nil || !res.Pending.None() {
+			t.Fatalf("recovery ConvertAtMount after Promote cut = (%+v, %v)", res, rerr)
+		}
+		if s := snapshot(t, mount); s.Mode != rbstate.ModeOnDemand || !rbstate.BrowseIndexMatches(dbDir(mount), s.Header) {
+			t.Fatalf("recovered snapshot after Promote cut invalid: mode=%q", s.Mode)
+		}
+	})
+
+	// Cut 3: cancel inside SaveBrowseIndex (no temp or corrupt browse index; next insert regenerates it).
+	t.Run("SaveBrowseIndexCut", func(t *testing.T) {
+		base := t.TempDir()
+		t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+		mount := filepath.Join(base, "stick")
+		testfixture.LargeExport(t, mount, 2)
+		fix3WritePlainOneLibrary(t, mount)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		restore := rbstate.SetCutHooks(nil, func(step string) {
+			if strings.HasPrefix(step, "filesync ") && strings.HasSuffix(step, rbstate.BrowseIndexName) {
+				cancel()
+			}
+		})
+		_, err := ConvertAtMount(ctx, mount, MountOptions{OnDemand: true})
+		restore()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled during SaveBrowseIndex, got %v", err)
+		}
+		assertNoTemps(t, dbDir(mount))
+		if res, rerr := ConvertAtMount(context.Background(), mount, MountOptions{OnDemand: true}); rerr != nil || !res.Pending.None() {
+			t.Fatalf("recovery ConvertAtMount after SaveBrowseIndex cut = (%+v, %v)", res, rerr)
+		}
+		if s := snapshot(t, mount); !rbstate.BrowseIndexMatches(dbDir(mount), s.Header) {
+			t.Fatal(".rb-bridge-browse not regenerated on recovery insert")
+		}
+	})
+}
+
 func copyTreeForTest(t *testing.T, src, dst string) {
 	t.Helper()
 	if err := filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {

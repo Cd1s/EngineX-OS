@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
@@ -62,9 +64,24 @@ func NewCueWatcher(mediaRoot string) *CueWatcher {
 		pass: WriteBackCues, mounts: func() []string { return mediaMounts(mediaRoot) }}
 }
 
+const cueWatcherSettleBatch = 256
+
 func rekordboxStick(mount string) bool {
-	for _, d := range []string{"PIONEER/rekordbox", ".PIONEER/rekordbox"} {
-		if st, err := os.Stat(filepath.Join(mount, d)); err == nil && st.IsDir() {
+	r, err := compat.NewResolver(mount)
+	if err != nil {
+		return false
+	}
+	files, err := FindSources(r, mount)
+	return err == nil && len(files) > 0
+}
+
+func needsInitialSettle(mount string) bool {
+	snap, err := rbstate.Load(filepath.Join(mount, "Engine Library", "Database2"))
+	if err != nil || !snap.Header.Pending.None() {
+		return false
+	}
+	for _, tr := range snap.Tracks {
+		if !tr.Native && tr.Synced == nil {
 			return true
 		}
 	}
@@ -104,7 +121,11 @@ func (w *CueWatcher) rescan() {
 	}
 	for mount := range now {
 		if w.sticks[mount] == nil {
-			w.sticks[mount] = &cueStick{session: CueSession{keys: newKeyCache()}, state: quietState(mount)}
+			var due time.Time
+			if needsInitialSettle(mount) {
+				due = time.Now().Add(w.quiet)
+			}
+			w.sticks[mount] = &cueStick{session: CueSession{keys: newKeyCache()}, state: quietState(mount), due: due}
 			keys := w.sticks[mount].session.keys
 			go func(keys *rekordbox.KeyCache) {
 				if n := CleanWriteBackLeftoversWithKeys(mount, keys); n > 0 {
@@ -162,9 +183,10 @@ func (w *CueWatcher) tick(ctx context.Context, now time.Time) {
 
 func (w *CueWatcher) run(ctx context.Context, mount string, st *cueStick, done chan struct{}) {
 	retry := w.cueEjecting(mount) || journalBusy(mount)
+	var moreSettle bool
 	if !retry {
 		ev0, q0 := st.events.Load(), quietState(mount)
-		_, err := w.pass(ctx, mount, WriteBackOptions{Session: &st.session, Settled: func() error {
+		res, err := w.pass(ctx, mount, WriteBackOptions{Session: &st.session, SettleBatch: cueWatcherSettleBatch, Settled: func() error {
 			time.Sleep(100 * time.Millisecond)
 			if w.cueEjecting(mount) {
 				return errVolumeBusy
@@ -174,6 +196,7 @@ func (w *CueWatcher) run(ctx context.Context, mount string, st *cueStick, done c
 			}
 			return nil
 		}})
+		moreSettle = err == nil && res.PendingSettle > 0
 		switch {
 		case err == nil, ctx.Err() != nil, errors.Is(err, errUnownedClusters):
 		case errors.Is(err, errNotQuiet):
@@ -191,7 +214,9 @@ func (w *CueWatcher) run(ctx context.Context, mount string, st *cueStick, done c
 	if st.running == done {
 		st.running, st.cancel = nil, nil
 	}
-	if retry && st.due.IsZero() {
+	if moreSettle && st.due.IsZero() {
+		st.due = time.Now().Add(w.quiet)
+	} else if retry && st.due.IsZero() {
 		st.due = time.Now().Add(w.retry)
 	}
 }

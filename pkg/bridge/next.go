@@ -278,11 +278,11 @@ func (n *nextBuild) build(drop, ready bool) error {
 		snap.Mode = rbstate.ModeFull
 	}
 	if n.onDemand {
-		if err := rbstate.SaveBrowseIndexAs(filepath.Join(n.dir, rbstate.BrowseSwapName), snap); err != nil {
+		if err := rbstate.SaveBrowseIndexAsCtx(n.ctx, filepath.Join(n.dir, rbstate.BrowseSwapName), snap); err != nil {
 			return err
 		}
 	}
-	return snap.SaveAs(swap)
+	return snap.SaveAsCtx(n.ctx, swap)
 }
 
 // mirror makes the next library from the stick's (every row of it, once) or takes the rows Engine
@@ -290,7 +290,7 @@ func (n *nextBuild) build(drop, ready bool) error {
 func (n *nextBuild) mirror(live, next, liveUUID, uuid string, commit int64) error {
 	sdir := nextState(liveUUID)
 	if c, e := rbstate.LoadNext(sdir); e == nil && c.Commit == commit {
-		_ = rbstate.Promote(sdir) // a commit of the job was cut after it
+		_ = rbstate.PromoteCtx(n.ctx, sdir) // a commit of the job was cut after it
 	} else if e == nil {
 		_ = rbstate.DropNext(sdir)
 	}
@@ -340,12 +340,12 @@ func (n *nextBuild) mirror(live, next, liveUUID, uuid string, commit int64) erro
 	if fresh || len(ch.Tracks) > 0 || ch.Lists {
 		// The snapshot before the mirror: a cut between the two has the same rows taken again.
 		_, s.Commit = nextIdentity(n.ctx, n.mount, next)
-		if err = s.Save(sdir); err != nil {
+		if err = s.SaveCtx(n.ctx, sdir); err != nil {
 			return err
 		}
 		log.Printf("rb-bridge: next library took %d rows of the stick's library (%d read, lists %v)", len(ch.Tracks), ch.Rows, ch.Lists)
 	}
-	if err = base.Save(filepath.Join(sdir, "base")); err != nil {
+	if err = base.SaveCtx(n.ctx, filepath.Join(sdir, "base")); err != nil {
 		return err
 	}
 	return writeGob(filepath.Join(sdir, "mirror"), &m)
@@ -697,17 +697,17 @@ func carryOverChecked(ctx context.Context, dir string, h *rbstate.Header, st *st
 		return false, true, ctx.Err()
 	}
 	if s.Mode == rbstate.ModeOnDemand {
-		if err = rbstate.SaveBrowseIndexAs(filepath.Join(dir, rbstate.BrowseSwapName), s); err != nil {
+		if err = rbstate.SaveBrowseIndexAsCtx(ctx, filepath.Join(dir, rbstate.BrowseSwapName), s); err != nil {
 			return false, false, err
 		}
 	}
-	if err = s.SaveAs(swap); err != nil {
+	if err = s.SaveAsCtx(ctx, swap); err != nil {
 		return false, false, err
 	}
 	*h = s.Header
 	if pace != nil {
 		// The snapshot before the mirror, as in the job's pass: a cut between the two has the same rows taken again.
-		if err = s.Save(sdir); err == nil {
+		if err = s.SaveCtx(ctx, sdir); err == nil {
 			err = writeGob(filepath.Join(sdir, "mirror"), &m)
 		}
 		if err != nil {

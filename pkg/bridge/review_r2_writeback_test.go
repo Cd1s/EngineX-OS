@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
@@ -1030,4 +1032,215 @@ func mustReadFile(t *testing.T, p string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func seedSixTrackUnsettledStick(t *testing.T, root string) {
+	t.Helper()
+	t.Setenv(rbstate.StageEnv, filepath.Join(t.TempDir(), "stage"))
+	testfixture.LargeExport(t, root, 6)
+	fix3WritePlainOneLibrary(t, root)
+	onePath := filepath.Join(root, "PIONEER", "rekordbox", "exportLibrary.db")
+	odb, err := sql.Open("sqlite", onePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id := 3; id <= 6; id++ {
+		if _, err := odb.Exec(
+			`INSERT INTO content(content_id,title,bpmx100,length,path,samplingRate,djComment,analysisDataFilePath,genre_id,label_id) VALUES(?,?,12400,4,?,44100,'','/PIONEER/USBANLZ/P001/ANLZ0000.DAT',20,30)`,
+			id, fmt.Sprintf("Track %d", id), "/"+testfixture.LargeTrackPath(id),
+		); err != nil {
+			_ = odb.Close()
+			t.Fatal(err)
+		}
+	}
+	_ = odb.Close()
+	if _, err := ConvertAtMount(context.Background(), root, MountOptions{Full: true}); err != nil {
+		t.Fatalf("ConvertAtMount(Full): %v", err)
+	}
+	if _, err := FillInBackground(context.Background(), root, FillOptions{}); err != nil {
+		t.Fatalf("FillInBackground: %v", err)
+	}
+	res, err := ConvertAtMount(context.Background(), root, MountOptions{Full: true})
+	if err != nil || !res.Pending.None() {
+		t.Fatalf("ConvertAtMount(Full #2) = (%+v, %v), want Pending.None()", res, err)
+	}
+	dir := dbDir(root)
+	snap, err := rbstate.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mdb, err := sql.Open("sqlite", filepath.Join(dir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mdb.Close()
+	for _, tr := range snap.Tracks {
+		var edit int64
+		if err := mdb.QueryRow(`SELECT COALESCE(lastEditTime,0) FROM Track WHERE id=?`, tr.EngineID).Scan(&edit); err != nil {
+			t.Fatal(err)
+		}
+		tr.Edit = edit
+		tr.Synced = nil
+	}
+	if err := snap.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriteBackOnEjectSkipsBulkHistoricalSettleWhileWritingRealEdit(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	seedSixTrackUnsettledStick(t, root)
+
+	dir := dbDir(root)
+	snap, err := rbstate.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Edit only Track 6 on the deck (both quickCues and lastEditTime bumped); leave Tracks 1..5
+	// with Synced == nil and Edit == lastEditTime (historical unsettled backlog).
+	target := snap.Tracks[rbstate.FoldPath(testfixture.LargeTrackPath(6))]
+	if target == nil {
+		t.Fatal("missing track 6 in snapshot")
+	}
+	mdb, err := sql.Open("sqlite", filepath.Join(dir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mdb.Close()
+	qc, err := enginedb.QCompress(makeMainCueBlob(500, 500, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mdb.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=?`, qc, target.EngineID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mdb.Exec(`UPDATE Track SET comment='Eject Real Edit' WHERE id=?`, target.EngineID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mdb.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+10 WHERE id=?`, target.EngineID); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, OnEject: true})
+	if err != nil {
+		t.Fatalf("WriteBackCues(OnEject): %v", err)
+	}
+	if res.TracksRead != 1 || res.TracksChanged != 1 || res.PendingSettle != 5 {
+		t.Fatalf("OnEject read/settled wrong subset: %+v, want TracksRead=1 TracksChanged=1 PendingSettle=5", res)
+	}
+	if len(res.Changes) != 1 || res.Changes[0].EngineID != target.EngineID {
+		t.Fatalf("OnEject changes = %+v, want engineID %d", res.Changes, target.EngineID)
+	}
+	after, err := rbstate.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Tracks[target.Key].Synced) == 0 {
+		t.Fatal("dirty track 6 was not marked Synced after OnEject write-back")
+	}
+	unsettled := 0
+	for k, tr := range after.Tracks {
+		if k != target.Key && tr.Synced == nil {
+			unsettled++
+		}
+	}
+	if unsettled != 5 {
+		t.Fatalf("remaining unsettled count = %d, want 5", unsettled)
+	}
+}
+
+func TestCueWatcherSettlesAdoptedLibraryInBoundedIdleBatchesWithCheckpoints(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	seedSixTrackUnsettledStick(t, root)
+	dir := dbDir(root)
+
+	// 1. Bounded SettleBatch=2 checkpoints 2 tracks per pass (6 -> 4 -> 2 -> 0).
+	var sess CueSession
+	for _, want := range []struct {
+		read, pending, synced int
+	}{
+		{read: 2, pending: 4, synced: 2},
+		{read: 2, pending: 2, synced: 4},
+		{read: 2, pending: 0, synced: 6},
+		{read: 0, pending: 0, synced: 6},
+	} {
+		res, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, SettleBatch: 2, Session: &sess})
+		if err != nil {
+			t.Fatalf("batched settle: %v", err)
+		}
+		if res.TracksRead != want.read || res.PendingSettle != want.pending || res.TracksChanged != 0 {
+			t.Fatalf("batched settle got %+v, want read=%d pending=%d changed=0", res, want.read, want.pending)
+		}
+		snap, err := rbstate.Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gotSynced := 0
+		for _, tr := range snap.Tracks {
+			if len(tr.Synced) > 0 {
+				gotSynced++
+			}
+		}
+		if gotSynced != want.synced {
+			t.Fatalf("checkpointed Synced=%d, want %d", gotSynced, want.synced)
+		}
+	}
+
+	// 2. CueWatcher schedules idle settle automatically when mounting a stick with Synced == nil.
+	snap, err := rbstate.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tr := range snap.Tracks {
+		tr.Synced = nil
+	}
+	if err := snap.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(SetCueRunDirForTest(t.TempDir()))
+	prevFlag := setUSBPreparingFlagPath(filepath.Join(t.TempDir(), "absent-flag"))
+	t.Cleanup(func() { setUSBPreparingFlagPath(prevFlag) })
+	w := CueWatcherForTest([]string{root}, 20*time.Millisecond, 50*time.Millisecond)
+	var passes atomic.Int32
+	settled := make(chan struct{})
+	WrapCuePassForTest(w, func(next CuePass) CuePass {
+		return func(pctx context.Context, m string, opts WriteBackOptions) (WriteBackResult, error) {
+			passes.Add(1)
+			r, err := next(pctx, m, opts)
+			if err == nil && r.PendingSettle == 0 {
+				select {
+				case <-settled:
+				default:
+					close(settled)
+				}
+			}
+			return r, err
+		}
+	})
+	wctx, cancel := context.WithCancel(ctx)
+	wdone := make(chan struct{})
+	go func() {
+		defer close(wdone)
+		_ = w.Run(wctx)
+	}()
+	select {
+	case <-settled:
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-wdone
+		t.Fatalf("CueWatcher did not settle Synced==nil stick in idle time (passes=%d)", passes.Load())
+	}
+	cancel()
+	<-wdone
+	if after, err := rbstate.Load(dir); err != nil {
+		t.Fatal(err)
+	} else {
+		for k, tr := range after.Tracks {
+			if len(tr.Synced) == 0 {
+				t.Fatalf("track %s still Synced==nil after CueWatcher idle settle", k)
+			}
+		}
+	}
 }

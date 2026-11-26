@@ -481,3 +481,50 @@ func TestCleanProlinkCacheMountReplacementOutsideHardlinkAndErrorLogging(t *test
 		t.Fatalf("cleanup error was swallowed instead of logged: %v", errLogs)
 	}
 }
+
+func TestProlinkCleanupOnStockEngineStickRemovesOnlyProlinkCache(t *testing.T) {
+	drive := t.TempDir()
+	keep := map[string]string{
+		filepath.Join(drive, "Engine Library", "Database2", "m.db"): "engine-master-db-bytes",
+		filepath.Join(drive, "Engine Library", "Database2", "p.db"): "engine-perf-db-bytes",
+		filepath.Join(drive, "Music", "Track01.flac"):               "flac-audio-bytes",
+	}
+	for p, data := range keep {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(drive, "PIONEER", "rekordbox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cacheFile := filepath.Join(drive, ".prolink-cache", "CDJ-1", "cache.bin")
+	if err := os.MkdirAll(filepath.Dir(cacheFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cacheFile, []byte("cache-payload-1234"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := cleanProlinkCache(context.Background(), drive, prolinkCleanupOptions{
+		isBusy:     func() bool { return false },
+		isEjecting: func() bool { return false },
+		logf:       func(string, ...any) {},
+	})
+	if err != nil || !res.Removed || res.BytesFreed != 18 {
+		t.Fatalf("cleanProlinkCache on stock stick = (%+v, %v), want Removed=true BytesFreed=18", res, err)
+	}
+	if _, err := os.Lstat(filepath.Join(drive, ".prolink-cache")); !os.IsNotExist(err) {
+		t.Fatalf(".prolink-cache still present: err=%v", err)
+	}
+	for p, want := range keep {
+		got, err := os.ReadFile(p)
+		if err != nil || string(got) != want {
+			t.Fatalf("stock file %s changed: got=%q want=%q err=%v", p, got, want, err)
+		}
+	}
+	if st, err := os.Stat(filepath.Join(drive, "PIONEER", "rekordbox")); err != nil || !st.IsDir() {
+		t.Fatalf("neighbor PIONEER/rekordbox dir unexpectedly affected: %v", err)
+	}
+}

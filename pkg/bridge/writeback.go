@@ -58,6 +58,7 @@ type WriteBackOptions struct {
 	DateDir            string // the backup folder; today by default
 	SkipPreparingCheck bool
 	OnEject            bool
+	SettleBatch        int                    // >0 bounds historical Synced==nil settles per pass (0 = all)
 	BeforeRename       func(dst string) error // tests: a pull after staging
 	Session            *CueSession
 	Settled            func() error // the watcher's: an error when m.db changed while it was read
@@ -77,6 +78,7 @@ type WriteBackResult struct {
 	TracksChecked     int                  `json:"tracksChecked"`
 	TracksRead        int                  `json:"tracksRead"`
 	TracksChanged     int                  `json:"tracksChanged"`
+	PendingSettle     int                  `json:"pendingSettle,omitempty"`
 	Changes           []WriteBackTrackDiff `json:"changes,omitempty"`
 	FilesUpdated      int                  `json:"filesUpdated"`
 	OneLibraryUpdated bool                 `json:"oneLibraryUpdated"`
@@ -406,11 +408,11 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 	_, _ = db.ExecContext(ctx, "PRAGMA cache_size=-16384")
 
 	started := time.Now()
-	cs, err := readCandidates(ctx, db, snap, p.opts.Session)
+	cs, err := readCandidates(ctx, db, snap, p.opts)
 	if err != nil {
 		return "", err
 	}
-	p.res.TracksChecked, p.res.TracksRead = cs.checked, cs.read
+	p.res.TracksChecked, p.res.TracksRead, p.res.PendingSettle = cs.checked, cs.read, cs.pendingSettle
 	p.phase["candidates"] = time.Since(started)
 
 	backupRoot := filepath.Join(p.mount, ".enginex-backup")
@@ -506,6 +508,7 @@ type candidateSet struct {
 	rows           []dbCandidate    // differ from what the stick is known to hold: compared with the export
 	insync         map[string]noted // read, and still what the stick holds
 	needSaveSynced bool             // an in-sync row lacked a persisted Synced digest (e.g., legacy adopt)
+	pendingSettle  int              // historical Synced==nil rows deferred to subsequent idle batches
 	checked        int
 	read           int
 }
@@ -754,10 +757,10 @@ func appendCandidateRow(c dbCandidate, filled map[string]filledStageRow, out *ca
 // is the one the snapshot noted with its digest is not read at all (#321: Engine's triggers date
 // every write of a row's cues, loops and tags, so an untouched track's PerformanceData pages are
 // never read). A row written without a change to them (an analysis, a grid) needs no export.
-func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, session *CueSession) (candidateSet, error) {
+func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, opts WriteBackOptions) (candidateSet, error) {
 	out := candidateSet{insync: map[string]noted{}}
 	filled := readFilledStage(snap)
-	var reads []dbCandidate
+	var dirtyReads, settleReads []dbCandidate
 	rows, err := db.QueryContext(ctx, `SELECT id, COALESCE(path,''), COALESCE(lastEditTime,0) FROM Track WHERE path IS NOT NULL`)
 	if err != nil {
 		return out, err
@@ -774,13 +777,30 @@ func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, ses
 			continue
 		}
 		out.checked++
-		if (c.now.edit != tr.Edit || tr.Synced == nil) && !session.has(tr.Key, c.now.edit) {
+		isDirty := c.now.edit != tr.Edit
+		if (isDirty || tr.Synced == nil) && !opts.Session.has(tr.Key, c.now.edit) {
 			c.key, c.track = tr.Key, tr
-			reads = append(reads, c)
+			if isDirty {
+				dirtyReads = append(dirtyReads, c)
+			} else {
+				settleReads = append(settleReads, c)
+			}
 		}
 	}
 	if err = rows.Close(); err != nil {
 		return out, err
+	}
+	reads := make([]dbCandidate, 0, len(dirtyReads)+len(settleReads))
+	reads = append(reads, dirtyReads...)
+	switch {
+	case opts.OnEject:
+		out.pendingSettle = len(settleReads)
+	case opts.SettleBatch > 0 && len(settleReads) > opts.SettleBatch:
+		sort.Slice(settleReads, func(i, j int) bool { return settleReads[i].key < settleReads[j].key })
+		reads = append(reads, settleReads[:opts.SettleBatch]...)
+		out.pendingSettle = len(settleReads) - opts.SettleBatch
+	default:
+		reads = append(reads, settleReads...)
 	}
 	if len(reads) > 64 {
 		// On legacy take-overs or large dirty batches, one sequential join replaces N point lookups.
