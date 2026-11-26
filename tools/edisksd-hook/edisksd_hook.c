@@ -374,6 +374,8 @@ static int validate_dir_shallow(int dirfd,int64_t deadline) {
         errno=0;e=readdir(d);if(!e){if(errno)rc=-1;break;}
         if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
         if(budget(deadline)){rc=-1;break;}
+        if(e->d_type==DT_REG||e->d_type==DT_DIR)continue;
+        if(e->d_type!=DT_UNKNOWN){errno=ELOOP;rc=-1;break;}
         struct stat st;
         if(fstatat(dirfd,e->d_name,&st,AT_SYMLINK_NOFOLLOW)){rc=-1;break;}
         if(S_ISLNK(st.st_mode)||(!S_ISDIR(st.st_mode)&&!S_ISREG(st.st_mode))){errno=ELOOP;rc=-1;break;}
