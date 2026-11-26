@@ -26,9 +26,12 @@ const writeBackMarkName = ".rb-bridge-writeback"
 type target struct {
 	rel, full, tmp string // tmp: the name of its staged copy, beside it
 	kind           rbstate.LibraryKind
-	key            string          // ANLZ: the track
-	cues           []rekordbox.Cue // ANLZ
-	ext            int             // ANLZ: the index in anlzExts
+	key            string           // ANLZ: the track
+	cues           []rekordbox.Cue  // ANLZ cues (when cuesDiff)
+	beats          []rekordbox.Beat // ANLZ beat grid (when gridDiff)
+	cuesDiff       bool             // ANLZ: rewrite cue sections
+	gridDiff       bool             // ANLZ: rewrite PQTZ/PQT2 grid section
+	ext            int              // ANLZ: the index in anlzExts
 }
 
 var (
@@ -59,7 +62,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 		targets = append(targets, t)
 		return nil
 	}
-	oneCues, oneMeta, pdbMeta := map[uint32][]rekordbox.Cue{}, map[uint32]rekordbox.Metadata{}, map[uint32]rekordbox.Metadata{}
+	oneCues, oneMeta, oneGrids, pdbMeta := map[uint32][]rekordbox.Cue{}, map[uint32]rekordbox.Metadata{}, map[uint32]rekordbox.GridUpdate{}, map[uint32]rekordbox.Metadata{}
 	for _, ch := range changes {
 		for kind, tr := range ch.refs {
 			if kind == rbstate.OneLibrary && ch.metadata[kind] {
@@ -70,11 +73,26 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			if kind == rbstate.OneLibrary && ch.cuesDiff {
 				oneCues[tr.ID] = ch.cues
 			}
+			if kind == rbstate.OneLibrary && ch.gridDiff {
+				oneGrids[tr.ID] = rekordbox.GridUpdate{BPM: ch.bpm}
+			}
 		}
-		if base, ok := anlzBase(ch.analysis); ch.cuesDiff && ok {
+		anlzCues := ch.cuesDiff || ch.anlzCueRepair
+		if base, ok := anlzBase(ch.analysis); (anlzCues || ch.gridDiff) && ok {
 			for i, ext := range anlzExts {
+				if i == 2 && !anlzCues {
+					continue
+				}
 				if rel, ok := resolveANLZVariant(p.r, base, ext); ok {
-					if err := add(&target{rel: rel, key: ch.candidate.key, cues: ch.cues, ext: i}); err != nil {
+					if err := add(&target{
+						rel:      rel,
+						key:      ch.candidate.key,
+						cues:     ch.cues,
+						beats:    ch.beats,
+						cuesDiff: anlzCues,
+						gridDiff: ch.gridDiff,
+						ext:      i,
+					}); err != nil {
 						return nil, nil, err
 					}
 				}
@@ -84,7 +102,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 	for _, kind := range []rbstate.LibraryKind{rbstate.OneLibrary, rbstate.DeviceLibrary} {
 		edits := len(pdbMeta)
 		if kind == rbstate.OneLibrary {
-			edits = len(oneCues) + len(oneMeta)
+			edits = len(oneCues) + len(oneMeta) + len(oneGrids)
 		}
 		if src, ok := libs[kind]; ok && edits > 0 {
 			if err := add(&target{rel: src.File.Rel, kind: kind}); err != nil {
@@ -138,8 +156,25 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			}
 			changed := true
 			if t.kind == 0 {
-				if data, changed, err = rekordbox.RewriteANLZCues(raw, t.cues, t.ext > 0, t.ext == 2); err != nil {
-					err = fmt.Errorf("writeback: %s: %w", t.rel, err)
+				data = raw
+				changed = false
+				if t.cuesDiff {
+					next, c, rerr := rekordbox.RewriteANLZCues(data, t.cues, t.ext > 0, t.ext == 2)
+					if rerr != nil {
+						err = fmt.Errorf("writeback: %s: %w", t.rel, rerr)
+					} else if c {
+						data = next
+						changed = true
+					}
+				}
+				if err == nil && t.gridDiff && t.ext < 2 {
+					next, c, rerr := rekordbox.RewriteANLZGrid(data, t.beats, t.ext > 0)
+					if rerr != nil {
+						err = fmt.Errorf("writeback: %s: %w", t.rel, rerr)
+					} else if c {
+						data = next
+						changed = true
+					}
 				}
 			} else {
 				data, err = rekordbox.RewritePDBMetadata(raw, pdbMeta)
@@ -180,7 +215,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 		if t.kind == rbstate.OneLibrary {
 			_ = f.Close()
 			started := time.Now()
-			upd, err := rekordbox.UpdateOneLibraryEditsKeys(ctx, t.full, oneCues, oneMeta, tmp, p.keys)
+			upd, err := rekordbox.UpdateOneLibraryAllKeys(ctx, t.full, oneCues, oneMeta, oneGrids, tmp, p.keys)
 			p.phase["decrypt"] += upd.Decrypt
 			p.phase["edit"] += upd.Edit
 			p.phase["encrypt"] += time.Since(started) - upd.Decrypt - upd.Edit
@@ -200,6 +235,10 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 				}
 				if m, wroteMeta := upd.WrittenMetadata[tr.ID]; wroteMeta {
 					tr.Genre, tr.Comment, tr.Label = m.Genre, m.Comment, m.Label
+					updated = true
+				}
+				if bpm, wroteBPM := upd.WrittenBPM[tr.ID]; wroteBPM {
+					tr.BPM = bpm
 					updated = true
 				}
 				if updated {
