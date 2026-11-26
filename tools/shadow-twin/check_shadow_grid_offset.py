@@ -175,7 +175,7 @@ def ensure_sync_a_lead(grid_a, grid_b, bpm_tol=BPM_TOL, stock_phase_limit_ms=STO
         if not deck_sync_info("A", 1)["master"]:
             twin.ev("A", 'root.rtPress("/Engine/Deck1/RequestMaster"); "reqMasterA"')
             time.sleep(0.5)
-        for _ in range(24):
+        for _ in range(48):
             time.sleep(0.25)
             last_a1, last_b2 = deck_sync_info("A", 1), deck_sync_info("B", 2)
             last_phase = snapshot_stock_phase_ms(last_a1, last_b2, grid_a, grid_b)
@@ -425,25 +425,18 @@ def check_paused_alignment(fn_a, fn_b):
 
 def main():
     assert os.environ.get("SHADOW_TWIN_WORK"), "use a fresh SHADOW_TWIN_WORK"
+    # Keep eth0 continuously UP so Engine Link / Ableton Link clock sync stays
+    # converged from boot; removing the opposite local music files forces shadow copies.
     shutil.copy2(twin.WORK / "A/data/music/track-a.wav", twin.WORK / "B/data/music/track-b128.wav")
     for side, fn in (("A", "track-b.wav"), ("B", "track-a.wav")):
         (twin.WORK / side / "data/music" / fn).unlink(missing_ok=True)
 
-    link_cmd = ["ip", "-n", twin.SIDE_CFG["B"]["netns"], "link", "set", "eth0"]
-    subprocess.run([*link_cmd, "down"], check=True)
-    try:
-        twin.ev("A", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck1").url="file:///data/music/track-a.wav"; "loadA"')
-        twin.ev("B", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck2").url="file:///data/music/track-b.wav"; "loadB132"')
-        wait_analyzed("A", 1)
-        wait_analyzed("B", 2)
-        twin.ev("B", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck2").url="file:///data/music/track-b128.wav"; "loadB128"')
-        wait_analyzed("B", 2, 128)
-    finally:
-        subprocess.run([*link_cmd, "up"], check=True)
-        subprocess.run(["ip", "-n", twin.SIDE_CFG["B"]["netns"], "route", "replace", "default", "via", twin.SIDE_CFG["B"]["peer_ip"], "dev", "eth0"], check=False)
-
-    wait_analyzed("A", 2)
-    wait_analyzed("B", 1)
+    twin.ev("A", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck1").url="file:///data/music/track-a.wav"; "loadA"')
+    twin.ev("B", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck2").url="file:///data/music/track-b128.wav"; "loadB128"')
+    wait_analyzed("A", 1, 128)
+    wait_analyzed("B", 2, 128)
+    wait_analyzed("A", 2, 128)
+    wait_analyzed("B", 1, 128)
 
     r_native, cost = run_synced_case("NATIVE SAME BPM (128 vs 128), SYNC ON, LEAD=A1", "track-a.wav", "track-b128.wav", measure_cost=True)
     r_pitched, _ = run_synced_case("PITCHED SAME BPM (128 vs 132@-3.03%=128), SYNC ON, LEAD=A1", "track-a.wav", "track-b.wav", load_b_bpm=132)
