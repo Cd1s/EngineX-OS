@@ -4794,6 +4794,23 @@ for(let i=0;i<30;i++) step(80); // 2.4 s
 assert.equal(bodies.length,beforeSteady,'steady play with wfItem triggered extra full posts');
 assert(pings>beforePings,'steady play must keep using /alive pings');
 assert(Math.abs(scShadowPrev[1].lineMs-trueMs)<0.01,'lineMs matches Engine draw position');
+// 2b. A late GUI tick (stall before next render frame) with stale wfPos carries the line instead of posting a backward step.
+const frozenWf = trueMs * 48;
+globalThis.PlanckGUI = { waveformPositionItem(d){ wfCalls++; return d===1 ? {currentPosition: frozenWf} : null; } };
+const beforeStall = bodies.length;
+now += 110; trueMs += 110; scShadowTick();
+assert.equal(bodies.length, beforeStall, 'stale wfPos during GUI stall triggered a backward post');
+assert(Math.abs(scShadowPrev[1].lineMs - trueMs) < 0.01, 'stale wfPos must carry expected line: ' + scShadowPrev[1].lineMs + ' vs ' + trueMs);
+globalThis.PlanckGUI={
+    waveformPositionItem(d){
+        wfCalls++;
+        if(d!==1||wfMode==='null') return null;
+        if(wfMode==='nan') return {currentPosition:NaN};
+        if(wfMode==='stale0') return {currentPosition:0};
+        if(wfMode==='pausedAhead') return {currentPosition:(trueMs+50)*48};
+        return {currentPosition:trueMs*48};
+    }
+};
 // 3. Fallback when item is null / NaN / uninitialized 0 far from TrackPosition.
 wfMode='null'; step(80);
 assert(Math.abs(scShadowPrev[1].lineMs-(trueMs-20))<1.5,'null item must fall back to TrackPosition+env: '+scShadowPrev[1].lineMs);

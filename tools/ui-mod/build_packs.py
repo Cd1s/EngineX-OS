@@ -2229,14 +2229,22 @@ SERVICES_MAIN = """
 			// (extrapolated on CLOCK_MONOTONIC_RAW), while TrackPosition lags ~19.5 ms
 			// even at 60 Hz. Publish what Engine draws while playing; keep TrackPosition
 			// + s.env as the fallback when paused, scratching, held, or when the item
-			// is missing or not yet on this track's timeline.
+			// is missing or not yet on this track's timeline. If a GUI stall ran this
+			// tick before the next render frame updated currentPosition, carry the
+			// preceding line instead of posting a stale-frame step backward.
 			let drawMs = NaN
+			s.wfPos = NaN
 			if (s.ps && !s.scratch && !s.phaseHold && sr > 0) {
 				const wf = scWaveformPositionOf(d)
 				const wfPos = wf ? wf.currentPosition : NaN
 				if (isFinite(wfPos)) {
+					s.wfPos = wfPos
 					const ms = wfPos / sr * 1000
-					if (Math.abs(ms - s.posMs) <= 250 * Math.max(1, speed)) drawMs = ms
+					const sameRun = p && p.ps && p.net === s.net && p.pitch === s.pitch && p.jumps === s.jumps
+					const expectLine = sameRun && isFinite(p.lineMs) ? p.lineMs + (now - p.at) * speed : NaN
+					const staleFrame = sameRun && (wfPos === p.wfPos || (now - p.at > scShadowTickTimer.interval + 20 && isFinite(expectLine) && ms < expectLine - 8))
+					if (staleFrame && isFinite(expectLine)) drawMs = expectLine
+					else if (Math.abs(ms - s.posMs) <= 250 * Math.max(1, speed)) drawMs = ms
 				}
 			}
 			s.lineMs = isFinite(drawMs) ? drawMs : (s.ps ? s.env + speed * now : s.posMs)
