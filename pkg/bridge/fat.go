@@ -52,14 +52,43 @@ func fatChainOwned(dev io.ReaderAt, first, size int64) (owned, ok bool) {
 	}
 	want := (size + spc*bps - 1) / (spc * bps)
 	c := (first-data)/spc + 2
+	// Buffer 16 KiB FAT windows so multi-hundred-MiB files do not issue one ReadAt per cluster.
+	const fatBufSize = 16 << 10
+	fatStart := rsvd * bps
+	fatEnd := fatStart + fatSz*bps
+	var fatBuf [fatBufSize]byte
+	bufOff := int64(-1)
+	bufLen := int64(0)
 	var e [4]byte
 	for n := int64(1); ; n++ {
 		if c < 2 || c >= clusters || n > want {
 			return false, true
 		}
-		if _, err := dev.ReadAt(e[:width], rsvd*bps+c*width); err != nil {
-			return false, false
+		pos := fatStart + c*width
+		if bufOff < 0 || pos < bufOff || pos+width > bufOff+bufLen {
+			win := (pos - fatStart) &^ (fatBufSize - 1)
+			bufOff = fatStart + win
+			wantRead := min(int64(fatBufSize), fatEnd-bufOff)
+			if wantRead < width {
+				return false, false
+			}
+			nr, err := dev.ReadAt(fatBuf[:wantRead], bufOff)
+			bufLen = int64(nr)
+			if pos+width > bufOff+bufLen {
+				// Short read (e.g. non-windowed ReaderAt or truncated image): fall back to an exact read at pos.
+				bufOff, bufLen = -1, 0
+				nr2, err2 := dev.ReadAt(e[:width], pos)
+				if int64(nr2) < width || (err2 != nil && err2 != io.EOF) {
+					return false, false
+				}
+				goto decode
+			}
+			if err != nil && err != io.EOF {
+				return false, false
+			}
 		}
+		copy(e[:width], fatBuf[pos-bufOff:pos-bufOff+width])
+	decode:
 		next := int64(le.Uint16(e[:]))
 		end := next >= 0xfff8
 		if width == 4 {

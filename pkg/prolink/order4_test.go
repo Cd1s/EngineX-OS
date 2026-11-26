@@ -2,7 +2,6 @@ package prolink
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"io"
 	"math"
@@ -11,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,33 +19,22 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
-func TestStageCountsExistingFilesTowardBudget(t *testing.T) {
-	usb := t.TempDir()
-	testfixture.Export(t, usb)
-	srv := &NFSServer{Root: usb}
-	if err := srv.Listen("127.0.0.1:0"); err != nil {
-		t.Fatal(err)
-	}
-	defer srv.Close()
-
-	c := &NFSClient{IP: net.IPv4(127, 0, 0, 1), Portmap: srv.PortmapPort()}
-	dst := t.TempDir()
-
-	// Pre-populate dst with 4 KiB of staged content exceeding a 2 KiB budget.
-	pre := filepath.Join(dst, "Music", "preexisting.bin")
-	if err := os.MkdirAll(filepath.Dir(pre), 0o755); err != nil {
-		t.Fatal(err)
-	}
+func TestStageRoomAccountsForExistingCacheBytes(t *testing.T) {
+	dir := t.TempDir()
+	pre := filepath.Join(dir, "preexisting.bin")
 	if err := os.WriteFile(pre, make([]byte, 4096), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	copied, err := Stage(context.Background(), c, "/C/", dst, 2048)
-	if err != nil {
-		t.Fatalf("Stage failed: %v", err)
+	if got := DirSize(dir); got != 4096 {
+		t.Fatalf("DirSize = %d, want 4096", got)
 	}
-	if copied != 0 {
-		t.Fatalf("Stage copied %d new files despite existing dst files already exceeding max budget", copied)
+	fs := syscall.Statfs_t{Bsize: 4096, Blocks: 64 << 30 / 4096, Bavail: 20 << 30 / 4096}
+	allowance := int64(64<<30) / 10
+	if room := StageRoom(&fs, DirSize(dir)); room != allowance-4096 {
+		t.Fatalf("StageRoom = %d, want %d", room, allowance-4096)
+	}
+	if room := StageRoom(&fs, allowance); room != 0 {
+		t.Fatalf("StageRoom at cap = %d, want 0", room)
 	}
 }
 

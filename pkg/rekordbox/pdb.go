@@ -371,3 +371,135 @@ func ReadPDB(path string) (*Library, error) {
 	}
 	return l, nil
 }
+
+// FindPDBTrack scans ONLY the Track table (typ == 0) of a DeviceSQL export.pdb through r and
+// returns the first track for which match(id, path) is true, without parsing playlists or
+// lookup tables and without hashing track records. Returns zero Track and false when absent.
+func FindPDBTrack(r io.ReaderAt, size int64, match func(id uint32, trackPath string) bool) (Track, bool, error) {
+	const maxPDBBytes = 512 << 20
+	if match == nil || size <= 0 || size > maxPDBBytes {
+		return Track{}, false, nil
+	}
+	h := make([]byte, 28)
+	if _, err := r.ReadAt(h, 0); err != nil {
+		return Track{}, false, fmt.Errorf("pdb header: %w", err)
+	}
+	ps32, nt32 := le.Uint32(h[4:]), le.Uint32(h[8:])
+	if ps32 < 512 || ps32 > 65536 || size%int64(ps32) != 0 || nt32 > (ps32-28)/16 {
+		return Track{}, false, fmt.Errorf("rekordbox: invalid page size/table count")
+	}
+	ps, nt := int(ps32), int(nt32)
+	tables := make([]byte, nt*16)
+	if _, err := r.ReadAt(tables, 28); err != nil {
+		return Track{}, false, err
+	}
+	var first, last uint32
+	foundTable := false
+	for ti := 0; ti < nt; ti++ {
+		t := tables[ti*16:]
+		if le.Uint32(t) == 0 {
+			first, last = le.Uint32(t[8:]), le.Uint32(t[12:])
+			foundTable = true
+			break
+		}
+	}
+	if !foundTable || first == 0 {
+		return Track{}, false, nil
+	}
+	p := make([]byte, ps)
+	seen := map[uint32]bool{}
+	for n := first; n != 0; {
+		if seen[n] || int64(n) >= size/int64(ps) {
+			return Track{}, false, fmt.Errorf("pdb: invalid/cyclic page %d", n)
+		}
+		seen[n] = true
+		if _, err := r.ReadAt(p, int64(n)*int64(ps)); err != nil {
+			return Track{}, false, err
+		}
+		if le.Uint32(p[4:]) != n || le.Uint32(p[8:]) != 0 {
+			return Track{}, false, fmt.Errorf("pdb: page %d type/index mismatch", n)
+		}
+		if p[27]&0x40 == 0 {
+			count := int(le.Uint32(p[24:]) & 0x1fff)
+			indexBytes := (count / 16) * 36
+			if rem := count % 16; rem != 0 {
+				indexBytes += 4 + 2*rem
+			}
+			heapEnd := ps - indexBytes
+			if heapEnd < 40 {
+				return Track{}, false, fmt.Errorf("pdb: row index overlaps header")
+			}
+			offsets := make([]int, 0, count)
+			for i := 0; i < count; i++ {
+				base := ps - (i/16)*36
+				off := 40 + int(le.Uint16(p[base-6-2*(i%16):]))
+				if le.Uint16(p[base-4:])&(1<<uint(i%16)) == 0 {
+					continue
+				}
+				if off < 40 || off >= heapEnd {
+					return Track{}, false, fmt.Errorf("pdb: row outside heap")
+				}
+				offsets = append(offsets, off)
+			}
+			sort.Ints(offsets)
+			for i, off := range offsets {
+				end := heapEnd
+				if i+1 < len(offsets) {
+					end = offsets[i+1]
+				}
+				if end <= off {
+					return Track{}, false, fmt.Errorf("pdb: overlapping row")
+				}
+				b := p[off:end]
+				if len(b) < 136 {
+					return Track{}, false, fmt.Errorf("pdb: short track row")
+				}
+				trackID := le.Uint32(b[72:])
+				if trackID == 0 {
+					continue
+				}
+				pathOff := int(le.Uint16(b[94+2*20:]))
+				trackPath, err := readDeviceSQLString(b, pathOff)
+				if err != nil {
+					return Track{}, false, fmt.Errorf("pdb track string %d: %w", 20, err)
+				}
+				if trackPath == "" || !match(trackID, trackPath) {
+					continue
+				}
+				apOff := int(le.Uint16(b[94+2*14:]))
+				analysisPath, err := readDeviceSQLString(b, apOff)
+				if err != nil {
+					return Track{}, false, fmt.Errorf("pdb track string %d: %w", 14, err)
+				}
+				bpmRaw := le.Uint32(b[56:])
+				var bpm float64
+				if bpmRaw != 0 && bpmRaw != 0x7fffffff && bpmRaw != 0xffffffff && bpmRaw <= 100000 {
+					bpm = float64(bpmRaw) / 100
+				}
+				tr := Track{
+					ID:           trackID,
+					Path:         trackPath,
+					AnalysisPath: analysisPath,
+					BPM:          bpm,
+					SampleRate:   int(le.Uint32(b[8:])),
+					FileSize:     int64(le.Uint32(b[16:])),
+					Bitrate:      int(le.Uint32(b[48:])),
+					Year:         int(le.Uint16(b[80:])),
+					BitDepth:     int(le.Uint16(b[82:])),
+					Duration:     float64(le.Uint16(b[84:])),
+					Rating:       int(b[89]),
+				}
+				normalizeParsedAudioMetadata(&tr)
+				return tr, true, nil
+			}
+		}
+		if n == last {
+			break
+		}
+		n = le.Uint32(p[12:])
+		if n == 0 {
+			return Track{}, false, fmt.Errorf("pdb: page chain ends before last page")
+		}
+	}
+	return Track{}, false, nil
+}

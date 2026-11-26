@@ -254,16 +254,46 @@ func TestViewTreeEdgeCases(t *testing.T) {
 			t.Errorf("a track at %q was accepted", bad)
 		}
 	}
-	link := SourceLibrary{Kind: rbstate.LinkLibrary, Source: "CDJ 1 USB", Lib: &rekordbox.Library{
+	link := SourceLibrary{Kind: rbstate.LinkLibrary, Lib: &rekordbox.Library{
 		Tracks:    []rekordbox.Track{{ID: 1, Path: "/.prolink-cache/CDJ 1 USB/Contents/x.mp3"}},
 		Playlists: []rekordbox.Playlist{{ID: 1, Name: "Theirs", Tracks: []uint32{1}}},
 	}}
 	withLink := mustView(t, rbstate.LayoutFolders, pdbLib(l), link)
-	got := listsOf(withLink)
-	if len(got) != 5 || got[3] != "link:CDJ 1 USB/" || got[4] != "link:CDJ 1 USB/Theirs [.prolink-cache/cdj 1 usb/contents/x.mp3]" || withLink.Lists[3].Name != "[Pro DJ Link: CDJ 1 USB]" {
-		t.Fatalf("staged library: %v", got)
+	if got := listsOf(withLink); !reflect.DeepEqual(got, want) {
+		t.Fatalf("LinkLibrary leaked into lists: %v, want %v", got, want)
 	}
-	if ref := withLink.Tracks[2].Refs[0]; ref.Kind != rbstate.LinkLibrary || ref.Source != "CDJ 1 USB" {
-		t.Fatalf("staged ref %+v", ref)
+	if len(withLink.Tracks) != 2 {
+		t.Fatalf("LinkLibrary leaked into tracks: %d, want 2", len(withLink.Tracks))
+	}
+}
+
+func TestLinkLibrariesIgnoredInBuildView(t *testing.T) {
+	// BuildView must ignore every LinkLibrary entry (both own-export and real CDJ),
+	// producing zero [Pro DJ Link: ...] folders and zero .prolink-cache tracks.
+	base := pdbLib(&rekordbox.Library{
+		Tracks:    []rekordbox.Track{{ID: 1, Path: "/Contents/a.mp3"}},
+		Playlists: []rekordbox.Playlist{{ID: 1, Name: "Mine", Tracks: []uint32{1}}},
+	})
+	ownLink := SourceLibrary{Kind: rbstate.LinkLibrary, Lib: &rekordbox.Library{
+		Tracks:    []rekordbox.Track{{ID: 1, Path: "/.prolink-cache/EngineX Export Beta 2 USB/Contents/y.mp3"}},
+		Playlists: []rekordbox.Playlist{{ID: 1, Name: "Loopback", Tracks: []uint32{1}}},
+	}}
+	cdjLink := SourceLibrary{Kind: rbstate.LinkLibrary, Lib: &rekordbox.Library{
+		Tracks:    []rekordbox.Track{{ID: 1, Path: "/.prolink-cache/CDJ-3000 3 USB/Contents/x.mp3"}},
+		Playlists: []rekordbox.Playlist{{ID: 1, Name: "Theirs", Tracks: []uint32{1}}},
+	}}
+	v := mustView(t, rbstate.LayoutFolders, base, ownLink, cdjLink)
+	for _, l := range v.Lists {
+		if strings.Contains(l.Name, "Pro DJ Link") || strings.Contains(l.Name, "EngineX Export Beta") || strings.Contains(l.Name, "CDJ-3000") {
+			t.Fatalf("LinkLibrary leaked into view lists: %+v", l)
+		}
+	}
+	for _, tr := range v.Tracks {
+		if strings.Contains(tr.Rel, ".prolink-cache") {
+			t.Fatalf("LinkLibrary leaked into view tracks: %+v", tr)
+		}
+	}
+	if len(v.Tracks) != 1 || len(v.Lists) != 1 || v.Lists[0].Name != "Mine" {
+		t.Fatalf("view tracks=%d lists=%+v, want only the stick's own 1 track and 1 list", len(v.Tracks), v.Lists)
 	}
 }

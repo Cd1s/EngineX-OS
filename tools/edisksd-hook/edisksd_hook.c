@@ -365,6 +365,75 @@ static int seeded_ok(const char *name) {
 // Set in the pre-mount child: edisksd's views carry other mount ids there, so
 // nothing in the cache may be judged unused (and removed) from inside it.
 static int private_ns;
+// Validate direct entries of one directory (no links or special files) within deadline.
+static int validate_dir_shallow(int dirfd,int64_t deadline) {
+    int fd=openat(dirfd,".",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)return -1;
+    DIR *d=fdopendir(fd);if(!d){close(fd);return -1;}
+    int rc=0;struct dirent *e;
+    for(;;) {
+        errno=0;e=readdir(d);if(!e){if(errno)rc=-1;break;}
+        if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+        if(budget(deadline)){rc=-1;break;}
+        if(e->d_type==DT_REG||e->d_type==DT_DIR)continue;
+        if(e->d_type!=DT_UNKNOWN){errno=ELOOP;rc=-1;break;}
+        struct stat st;
+        if(fstatat(dirfd,e->d_name,&st,AT_SYMLINK_NOFOLLOW)){rc=-1;break;}
+        if(S_ISLNK(st.st_mode)||(!S_ISDIR(st.st_mode)&&!S_ISREG(st.st_mode))){errno=ELOOP;rc=-1;break;}
+    }
+    int saved=errno;closedir(d);errno=saved;return rc;
+}
+// Pre-mount safety walk for Engine Library: validate Engine Library and Database2 top-level
+// entries (catching symlinks/special files on m.db, bridge state, OverviewData, Artwork)
+// without recursively walking multi-thousand-file OverviewData/Artwork/Music asset subtrees
+// that exhaust the 17 s mount window on large USB sticks.
+static int validate_library_shallow(int lib,int64_t deadline) {
+    if(validate_dir_shallow(lib,deadline))return -1;
+    int meta=openat(lib,"Database2",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if(meta<0)return (errno==ENOENT||errno==ENOTDIR)?0:-1;
+    int rc=validate_dir_shallow(meta,deadline);
+    int saved=errno;close(meta);errno=saved;return rc;
+}
+// Shallow validation of PIONEER / .PIONEER and direct children + rekordbox/: catches symlinks,
+// FIFOs, sockets, and device nodes under PIONEER/ without walking USBANLZ/*/* or Artwork/*/*.
+static int validate_pioneer_shallow(const char *mount_path,int64_t deadline) {
+    int mfd=open(mount_path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if(mfd<0)return -1;
+    DIR *md=fdopendir(mfd);
+    if(!md){close(mfd);return -1;}
+    int rc=0;
+    struct dirent *e;
+    for(;;) {
+        errno=0;e=readdir(md);
+        if(!e){if(errno)rc=-1;break;}
+        if(strcasecmp(e->d_name,"PIONEER")&&strcasecmp(e->d_name,".PIONEER"))continue;
+        if(budget(deadline)){rc=-1;break;}
+        struct stat st;
+        if(fstatat(mfd,e->d_name,&st,AT_SYMLINK_NOFOLLOW)){rc=-1;break;}
+        if(!S_ISDIR(st.st_mode)){errno=ELOOP;rc=-1;break;}
+        int pfd=openat(mfd,e->d_name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+        if(pfd<0){rc=-1;break;}
+        if(validate_dir_shallow(pfd,deadline)){rc=-1;close(pfd);break;}
+        DIR *pd=fdopendir(pfd);
+        if(!pd){rc=-1;close(pfd);break;}
+        struct dirent *pe;
+        for(;;) {
+            errno=0;pe=readdir(pd);
+            if(!pe){if(errno)rc=-1;break;}
+            if(strcasecmp(pe->d_name,"rekordbox"))continue;
+            struct stat rst;
+            if(fstatat(pfd,pe->d_name,&rst,AT_SYMLINK_NOFOLLOW)){rc=-1;break;}
+            if(!S_ISDIR(rst.st_mode)){errno=ELOOP;rc=-1;break;}
+            int rbfd=openat(pfd,pe->d_name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+            if(rbfd<0){rc=-1;break;}
+            int rrc=validate_dir_shallow(rbfd,deadline);
+            int rsaved=errno;close(rbfd);errno=rsaved;
+            if(rrc){rc=-1;break;}
+        }
+        int psaved=errno;closedir(pd);errno=psaved;
+        if(rc)break;
+    }
+    int saved=errno;closedir(md);errno=saved;return rc;
+}
 // The top level of a stick's Engine Library: no links or special files. *meta
 // is its Database2 directory, -1 when it has none.
 static int library_top(int lib,int *meta) {
@@ -863,6 +932,14 @@ static int run(char *const argv[],int64_t deadline) {
 }
 #ifndef SYSTEMCTL_PATH
 #define SYSTEMCTL_PATH "/bin/systemctl"
+#endif
+#ifndef SYSTEMD_RUN_PATH
+static const char *systemd_run_path(void) {
+    if(!access("/usr/bin/systemd-run",X_OK))return "/usr/bin/systemd-run";
+    if(!access("/bin/systemd-run",X_OK))return "/bin/systemd-run";
+    return NULL;
+}
+#define SYSTEMD_RUN_PATH systemd_run_path()
 #endif
 // The unit of a volume's background first import (rb-bridge --import-path, #301): FNV-1a 64 of
 // the mount path, as internal/cli importUnit names it.
@@ -1695,6 +1772,22 @@ static const char *rb_bridge_path(void) {
 }
 #define RB_BRIDGE_PATH rb_bridge_path
 #endif
+static void start_import(const char *target) {
+    const char *sr=SYSTEMD_RUN_PATH;
+    if(!sr||!*sr||!target||!volume(target)||secure_runtime())return;
+    struct statvfs sv;
+    if(statvfs(target,&sv)||(sv.f_flag&ST_RDONLY))return;
+    const char *rb=RB_BRIDGE_PATH();
+    if(!rb||!*rb)return;
+    char uname[64],unit[80];import_unit(target,uname);
+    snprintf(unit,sizeof unit,"--unit=%s",uname);
+    char *const a[]={(char *)sr,unit,"--collect","--no-block","--quiet",
+        "--slice=enginex-background.slice","--nice=19",
+        "--property=CPUSchedulingPolicy=idle","--property=IOSchedulingClass=idle",
+        "--property=TimeoutStopSec=5","--setenv=GOMAXPROCS=1","--setenv=GOMEMLIMIT=128MiB",
+        (char *)rb,"--import-path",(char *)target,NULL};
+    if(run(a,now_ms()+2000))note("background import did not start on",target,errno);
+}
 // engine-guardian the same way: a second-generation deck keeps the vendor's
 // rootfs and has the tools only in the data bundle (BH2-A1-1: the hook asked
 // for /usr/local/bin alone, so no stick was ever healed at mount there).
@@ -1862,8 +1955,11 @@ static int after_mount_at(const char *mount_path,const char *label_target,const 
     if(!hfs_ro&&mode!=MOUNT_POST&&!lstat(lib,&existing)) {
         int fd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
         if(fd<0)return 0;
-        int unsafe=copy_tree(fd,-1,deadline,0,NULL);close(fd);
+        int unsafe=validate_library_shallow(fd,deadline);close(fd);
         if(unsafe){note("unsafe library contents rejected on",label_target,errno);return 0;}
+    }
+    if(pioneer&&mode!=MOUNT_POST&&validate_pioneer_shallow(mount_path,deadline)) {
+        note("unsafe pioneer contents rejected on",label_target,errno);return 0;
     }
     if(hfs_ro&&(pioneer||heal||mode!=MOUNT_PRE)) {
         char identity[80];
@@ -1871,7 +1967,7 @@ static int after_mount_at(const char *mount_path,const char *label_target,const 
     }
     release_post(); // the visible tree is final; a bridge or guardian run below must not hold edisksd's monitor
     int done=0;
-    if(pioneer&&mode!=MOUNT_POST){const char *rb=RB_BRIDGE_PATH();char remaining[32];int64_t left=deadline-now_ms();snprintf(remaining,sizeof remaining,"%lld",(long long)(left>0?left:1));setenv("ENGINEX_HOOK_REMAINING_MS",remaining,1);char *const a[]={(char *)rb,"--mount-path",(char *)mount_path,NULL};int bridge_rc=run(a,deadline);unsetenv("ENGINEX_HOOK_REMAINING_MS");if(!bridge_rc)done=CONVERTED;else{int is_sd=(label_target&&strstr(label_target,"mmcblk"))||(src&&strstr(src,"mmcblk"));if(errno==ETIMEDOUT){done=TIMED_OUT;set_preparing_error(label_target,src,is_sd?"SD card conversion timed out":"USB conversion timed out");note("bridge timed out on",label_target,errno);}else{set_preparing_error(label_target,src,is_sd?"SD card conversion failed":"USB conversion failed");note("bridge failed on",label_target,errno);}}}
+    if(pioneer&&mode!=MOUNT_POST){const char *rb=RB_BRIDGE_PATH();char remaining[32];int64_t left=deadline-now_ms();snprintf(remaining,sizeof remaining,"%lld",(long long)(left>0?left:1));setenv("ENGINEX_HOOK_REMAINING_MS",remaining,1);char *const a[]={(char *)rb,"--mount-path",(char *)mount_path,NULL};int bridge_rc=run(a,deadline);unsetenv("ENGINEX_HOOK_REMAINING_MS");if(!bridge_rc)done=CONVERTED;else{int is_sd=(label_target&&strstr(label_target,"mmcblk"))||(src&&strstr(src,"mmcblk"));if(errno==ETIMEDOUT){done=TIMED_OUT;set_preparing_error(label_target,src,is_sd?"SD card conversion timed out":"USB conversion timed out");note("bridge timed out on",label_target,errno);if(mode!=MOUNT_PRE)start_import(label_target);}else{set_preparing_error(label_target,src,is_sd?"SD card conversion failed":"USB conversion failed");note("bridge failed on",label_target,errno);}}}
     if(heal) {
 		char timeout[32];
 		int64_t left=deadline-now_ms();
@@ -1952,6 +2048,95 @@ static int private_mount(struct libmnt_context *ctx,int (*real)(struct libmnt_co
 // is known to be too slow), 0 when it held neither or this failed. whole_window: the budget was not cut
 // short by the wait for view_lock, so running out of it says the library is too
 // large; only then is the stick remembered as such.
+static int open_engine_db2_dir(const char *mount_path) {
+    if(!mount_path||safe_path(mount_path,0))return -1;
+    int mfd=open(mount_path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if(mfd<0)return -1;
+    int efd=openat(mfd,"Engine Library",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    int saved=errno;close(mfd);
+    if(efd<0){errno=saved;return -1;}
+    int dfd=openat(efd,"Database2",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    saved=errno;close(efd);
+    if(dfd<0){errno=saved;return -1;}
+    return dfd;
+}
+static int has_pending_swap(const char *mount_path) {
+    static const char *const files[]={
+        ".rb-next.db",
+        ".rb-bridge-snapshot.swap",
+    };
+    int dfd=open_engine_db2_dir(mount_path);
+    if(dfd<0)return 0;
+    int found=0;
+    for(unsigned i=0;i<sizeof files/sizeof *files;i++) {
+        struct stat st;
+        if(!fstatat(dfd,files[i],&st,AT_SYMLINK_NOFOLLOW)&&S_ISREG(st.st_mode)){found=1;break;}
+    }
+    close(dfd);
+    return found;
+}
+// Reports 1 when a slow-marked stick still has unfinished import work (legacy state DB,
+// missing/malformed snapshot, snapshot older than slow_marker, or non-empty "pending" object
+// in RBS2 header) so re-insert kicks off background rb-bridge --import-path even while skipping
+// the synchronous 17 s pre-mount conversion.
+static int has_unfinished_import(const char *mount_path,const char *marker_path) {
+    int dfd=open_engine_db2_dir(mount_path);
+    if(dfd<0)return 1;
+    struct stat st;
+    if(!fstatat(dfd,".rb-bridge-state.db",&st,AT_SYMLINK_NOFOLLOW)&&S_ISREG(st.st_mode)){close(dfd);return 1;}
+    int fd=openat(dfd,".rb-bridge-snapshot",O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
+    close(dfd);
+    if(fd<0)return 1;
+    if(fstat(fd,&st)||!S_ISREG(st.st_mode)){close(fd);return 1;}
+    if(marker_path&&*marker_path) {
+        struct stat mst;
+        if(!stat(marker_path,&mst)&&st.st_mtime<mst.st_mtime){close(fd);return 1;}
+    }
+    char buf[4096];
+    ssize_t n=0;
+    while(n<(ssize_t)sizeof buf-1) {
+        ssize_t got=read(fd,buf+n,sizeof buf-1-(size_t)n);
+        if(got<0&&errno==EINTR)continue;
+        if(got<=0)break;
+        n+=got;
+        if(memchr(buf,'\n',(size_t)n))break;
+    }
+    close(fd);
+    if(n<7||memcmp(buf,"RBS2 ",5))return 1;
+    char *nl=memchr(buf,'\n',(size_t)n);
+    if(nl)*nl=0;
+    else buf[n]=0;
+    const char *pend=strstr(buf,"\"pending\"");
+    if(!pend)return 1;
+    pend+=9;
+    while(*pend==' '||*pend=='\t')pend++;
+    if(*pend++!=':')return 1;
+    while(*pend==' '||*pend=='\t')pend++;
+    if(*pend++!='{')return 1;
+    for(;;) {
+        while(*pend==' '||*pend=='\t')pend++;
+        if(*pend=='}')return 0;
+        if(*pend++!='"')return 1;
+        while(*pend&&*pend!='"'){if(*pend=='\\'&&pend[1])pend++;pend++;}
+        if(*pend++!='"')return 1;
+        while(*pend==' '||*pend=='\t')pend++;
+        if(*pend++!=':')return 1;
+        while(*pend==' '||*pend=='\t')pend++;
+        if(!strncmp(pend,"true",4))return 1;
+        if(!strncmp(pend,"false",5)){pend+=5;}
+        else if(*pend>='0'&&*pend<='9') {
+            long long v=0;
+            while(*pend>='0'&&*pend<='9'){if(v<100000000LL)v=v*10+(*pend-'0');pend++;}
+            if(v>0)return 1;
+        } else {
+            return 1;
+        }
+        while(*pend==' '||*pend=='\t')pend++;
+        if(*pend==','){pend++;continue;}
+        if(*pend=='}')return 0;
+        return 1;
+    }
+}
 static int run_pre_vis_at(const char *mount_path,const char *label_target,const char *src,int64_t deadline,int whole_window) {
     int pioneer=has_export(mount_path);
     if(!pioneer&&!has_engine_db(mount_path))return 0;
@@ -1963,11 +2148,16 @@ static int run_pre_vis_at(const char *mount_path,const char *label_target,const 
         if(r&TIMED_OUT&&whole_window&&!heal_marker(mount_path,marker)){int fd=open(marker,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)close(fd);}
         return 3; // whatever happened, the heal is not repeated after the visible mount
     }
-    if(!secure_runtime()&&!slow_marker(mount_path,marker))known=!access(marker,F_OK);
-    if(known){note("rekordbox library too large to convert at mount, skipped on",label_target,0);r=2;}
-    else r=after_mount_at(mount_path,label_target,src,MOUNT_PRE,deadline);
+    if(!secure_runtime()&&!has_pending_swap(mount_path)&&!slow_marker(mount_path,marker))known=!access(marker,F_OK);
+    if(known) {
+        int unfinished=has_unfinished_import(mount_path,marker);
+        note(unfinished?"rekordbox library too large to convert at mount, skipped on (starting background import)":"rekordbox library too large to convert at mount, skipped on",label_target,0);
+        return unfinished?4:2;
+    }
+    r=after_mount_at(mount_path,label_target,src,MOUNT_PRE,deadline);
+    if(r&CONVERTED&&!slow_marker(mount_path,marker))unlink(marker);
     if(r&TIMED_OUT&&whole_window&&!slow_marker(mount_path,marker)){int fd=open(marker,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)close(fd);}
-    return r&CONVERTED?1:r?2:0;
+    return r&CONVERTED?1:r&TIMED_OUT?4:r?2:0;
 }
 static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context *),int64_t deadline,int whole_window) {
     const char *target=mnt_context_get_target(ctx);
@@ -1997,7 +2187,7 @@ static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context
             break;
         }
         if(r<0&&errno!=EINTR){result=0;break;}
-        if(now_ms()>=deadline+1000){kill(pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}drop_orphans();if(access(PREPARE_STATE_PATH,F_OK)==0){const char *tgt=mnt_context_get_target(ctx),*src=mnt_context_get_source(ctx);int is_sd=(tgt&&strstr(tgt,"mmcblk"))||(src&&strstr(src,"mmcblk"));set_preparing_error(tgt,src,is_sd?"SD card conversion timed out":"USB conversion timed out");}result=2;break;}
+        if(now_ms()>=deadline+1000){kill(pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}drop_orphans();if(access(PREPARE_STATE_PATH,F_OK)==0){const char *tgt=mnt_context_get_target(ctx),*src=mnt_context_get_source(ctx);int is_sd=(tgt&&strstr(tgt,"mmcblk"))||(src&&strstr(src,"mmcblk"));set_preparing_error(tgt,src,is_sd?"SD card conversion timed out":"USB conversion timed out");}result=4;break;}
         usleep(20000);
     }
     close(up[0]);return result;
@@ -2349,7 +2539,8 @@ static int hfs_gen2_mount_flow(struct libmnt_context *ctx,const struct hfs_ctx_b
         hfs_gen2_teardown_stage(anchor,stage,pid);
         errno=err;return -1;
     }
-    if(!budget(deadline-POST_RESERVE_MS))(void)run_pre_vis_at(stage,target,source,deadline-POST_RESERVE_MS,whole_window);
+    int gen2_timed_out=0;
+    if(!budget(deadline-POST_RESERVE_MS))gen2_timed_out=(run_pre_vis_at(stage,target,source,deadline-POST_RESERVE_MS,whole_window)==4);
     else note("no time left to convert before the mount on",target,0);
     seeded_as[0]=0;
     pthread_mutex_lock(&post_lock);holding_post=1;
@@ -2372,6 +2563,7 @@ static int hfs_gen2_mount_flow(struct libmnt_context *ctx,const struct hfs_ctx_b
     rmdir(stage);
     (void)umount2(anchor,UMOUNT_NOFOLLOW);
     rmdir(anchor);
+    if(gen2_timed_out)start_import(target);
     mnt_context_set_syscall_status(ctx,0);
     return 0;
 }
@@ -2447,7 +2639,7 @@ static int hooked_mount(struct libmnt_context *ctx,int (*real)(struct libmnt_con
         rc=real(ctx);saved=errno;
     }
     hfs_rw_approved=HFS_RW_NONE;
-    if(!rc&&mnt_context_get_status(ctx)==1){clear_eject(EJECTED,mnt_context_get_target(ctx));clear_eject(EJECTING,mnt_context_get_target(ctx));after_mount(ctx,pre?MOUNT_POST:MOUNT_FULL,deadline);errno=saved;}
+    if(!rc&&mnt_context_get_status(ctx)==1){clear_eject(EJECTED,mnt_context_get_target(ctx));clear_eject(EJECTING,mnt_context_get_target(ctx));after_mount(ctx,pre?MOUNT_POST:MOUNT_FULL,deadline);if(pre==4)start_import(mnt_context_get_target(ctx));errno=saved;}
     release_post();clear_preparing();in_hook=0;
     seeded_hint[0]=0;
     pthread_mutex_unlock(&view_lock);return rc;

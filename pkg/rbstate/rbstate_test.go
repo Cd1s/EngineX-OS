@@ -2,6 +2,7 @@ package rbstate
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -17,9 +18,12 @@ func sampleSnapshot() *Snapshot {
 	s.Stamp = Stamp(s.Layout, s.Sources, "")
 	s.Pending = Pending{Perf: 1, Verify: true}
 	s.Tracks["contents/a/one.mp3"] = &Track{
-		Key: "contents/a/one.mp3", EngineID: 12, Rel: "Contents/A/One.mp3", Resolved: true,
-		Refs: []SourceRef{{Kind: DeviceLibrary, ID: 5, RecordHash: "aa"}, {Kind: OneLibrary, ID: 9, RecordHash: "bb"}},
-		Row:  "r1", Perf: PerfApplied, Written: []byte{1, 2, 3},
+		Key: "contents/a/one.mp3", EngineID: 12, Rel: "Contents/A/One.mp3",
+		AnalysisPath: "/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT",
+		ArtworkPath:  "/PIONEER/Artwork/00001/a1.jpg",
+		Resolved:     true,
+		Refs:         []SourceRef{{Kind: DeviceLibrary, ID: 5, RecordHash: "aa"}, {Kind: OneLibrary, ID: 9, RecordHash: "bb"}},
+		Row:          "r1", Perf: PerfApplied, Written: []byte{1, 2, 3},
 		Built: TrackSig{Rules: Rules, Row: "r1", Audio: FileSig{Rel: "Contents/A/One.mp3", Size: 1, MTimeNS: 2}, ANLZ: []FileSig{{Rel: "x.DAT", Size: 3, MTimeNS: 4}}},
 	}
 	s.Tracks["contents/b/<two>&.flac"] = &Track{Key: "contents/b/<two>&.flac", Rel: "Contents/B/<two>&.flac"}
@@ -53,7 +57,9 @@ func TestSnapshotRoundTripAndHeader(t *testing.T) {
 		t.Fatalf("round trip differs:\n%s\n%s", a, b)
 	}
 	tr, ok := got.TrackAt("../Contents/A/ONE.mp3")
-	if !ok || tr.EngineID != 12 || !tr.Built.Equal(want.Tracks["contents/a/one.mp3"].Built) {
+	if !ok || tr.EngineID != 12 || !tr.Built.Equal(want.Tracks["contents/a/one.mp3"].Built) ||
+		tr.AnalysisPath != "/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT" ||
+		tr.ArtworkPath != "/PIONEER/Artwork/00001/a1.jpg" {
 		t.Fatalf("TrackAt: %+v %v", tr, ok)
 	}
 	if ids := got.EngineIDs(); len(ids) != 1 || !ids[12] {
@@ -450,5 +456,49 @@ func TestInstallFilePacedAbortsCleanlyWhenBusy(t *testing.T) {
 	got, err := os.ReadFile(dst)
 	if err != nil || !bytes.Equal(got, payload) {
 		t.Fatalf("installed content mismatch: err=%v len=%d", err, len(got))
+	}
+}
+
+func TestReplaceFileCtxHonorsDeadlineAtEveryCutPoint(t *testing.T) {
+	payload := bytes.Repeat([]byte("Z"), 192<<10) // >= 3 chunks of 64 KiB so "write" cut fires mid-write
+	for _, targetCut := range []string{"write", "dirsync", "filesync", "temp"} {
+		t.Run(targetCut, func(t *testing.T) {
+			dir := t.TempDir()
+			dst := filepath.Join(dir, "snapshot.bin")
+			if err := os.WriteFile(dst, []byte("original-state"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			hit := false
+			hook := func(step string) {
+				if strings.HasPrefix(step, targetCut+" ") {
+					hit = true
+					cancel()
+				}
+			}
+			restore := SetCutHooks(hook, hook)
+			defer restore()
+
+			err := ReplaceFileCtx(ctx, dst, payload)
+			if !hit {
+				t.Fatalf("cut point %q never fired", targetCut)
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("ReplaceFileCtx at cut %q err=%v, want context.Canceled", targetCut, err)
+			}
+			if got, rerr := os.ReadFile(dst); rerr != nil || string(got) != "original-state" {
+				t.Fatalf("dst corrupted after canceled %q: got=%q err=%v", targetCut, got, rerr)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), ".enginex-rb-") {
+					t.Fatalf("leftover temp file after cut %q: %s", targetCut, e.Name())
+				}
+			}
+		})
 	}
 }

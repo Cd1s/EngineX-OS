@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -18,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -25,6 +27,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
@@ -939,13 +943,57 @@ func bridgeDisplayWave(_ context.Context, file, rel string, id int64, rate, dura
 	if !ok || t.EngineID != id {
 		return nil
 	}
+	files := enginedb.DetailFiles(t.Built.ANLZ)
+	if len(files) == 0 && t.AnalysisPath != "" {
+		ap := strings.TrimLeft(strings.ReplaceAll(t.AnalysisPath, "\\", "/"), "/")
+		base := strings.TrimSuffix(ap, path.Ext(ap))
+		files = []string{base + ".2EX", base + ".EXT"}
+	}
 	// The volume is the directory above Engine Library.
-	a := enginedb.DetailOf(filepath.Dir(filepath.Dir(filepath.Dir(file))), enginedb.DetailFiles(t.Built.ANLZ))
+	a := enginedb.DetailOf(filepath.Dir(filepath.Dir(filepath.Dir(file))), files)
 	w := enginedb.DisplayWaveFromRekordbox(a, rate)
 	if w == nil || math.Abs(float64(len(w.Bands)/3)*w.SamplesPerBin/rate*1000-durationMS) > 100 {
 		return nil
 	}
 	return w
+}
+
+var bridgeOnDemandBuilder = bridge.NewOnDemandBuilder()
+
+func bridgeDisplayArtwork(mount, artworkPath string) []byte {
+	if mount == "" || artworkPath == "" {
+		return nil
+	}
+	clean, err := compat.CleanRelative(artworkPath)
+	if err != nil {
+		return nil
+	}
+	root, err := os.OpenRoot(mount)
+	if err != nil {
+		return nil
+	}
+	defer root.Close()
+	openArt := func(rel string) []byte {
+		f, oerr := root.Open(filepath.FromSlash(rel))
+		if oerr != nil {
+			return nil
+		}
+		defer f.Close()
+		b, rerr := io.ReadAll(io.LimitReader(f, (1<<20)+1))
+		if rerr == nil && validDisplayArtwork(b) {
+			return b
+		}
+		return nil
+	}
+	if b := openArt(clean); b != nil {
+		return b
+	}
+	if res, rerr := compat.NewResolver(mount); rerr == nil {
+		if resolved, rerr := res.Resolve(clean); rerr == nil {
+			return openArt(resolved)
+		}
+	}
+	return nil
 }
 
 func dbDisplay(ctx context.Context, file, rel string) (*shadowDisplayAsset, error) {
@@ -966,10 +1014,45 @@ func dbDisplay(ctx context.Context, file, rel string) (*shadowDisplayAsset, erro
 		return nil, err
 	}
 	defer tx.Rollback()
+	dbDir := filepath.Dir(file)
+	mount := filepath.Dir(filepath.Dir(dbDir))
+	var snapTrack *rbstate.Track
+	if filepath.Base(file) == "m.db" {
+		if snap := bridgeSnapshot(dbDir); snap != nil {
+			if st, ok := snap.TrackAt(rel); ok && st != nil && !st.Native {
+				snapTrack = st
+			}
+		}
+	}
 	err = tx.QueryRowContext(ctx, `SELECT t.id, substr(COALESCE(t.title,''),1,4097), substr(COALESCE(t.artist,''),1,4097), COALESCE(t.bpmAnalyzed,t.bpm,0), t.key,
 		substr(p.trackData,1,4097), substr(p.overviewWaveFormData,1,8388609), substr(p.beatData,1,8388609), substr(p.quickCues,1,65537), substr(p.loops,1,65537)
 		FROM Track t JOIN PerformanceData p ON p.trackId=t.id WHERE t.path=? AND length(p.trackData)>4 AND length(p.overviewWaveFormData)>4 AND length(p.beatData)>4`, rel).
 		Scan(&id, &a.Title, &a.Artist, &a.BPM, &key, &track, &overview, &beats, &cues, &loops)
+	if errors.Is(err, sql.ErrNoRows) && snapTrack != nil {
+		var libUUID string
+		var trackLen int
+		if qerr := tx.QueryRowContext(ctx, `SELECT t.id, COALESCE((SELECT uuid FROM Information LIMIT 1),''), substr(COALESCE(t.title,''),1,4097), substr(COALESCE(t.artist,''),1,4097), COALESCE(t.bpmAnalyzed,t.bpm,0), t.key, COALESCE(t.length,0)
+			FROM Track t WHERE t.path=?`, rel).Scan(&id, &libUUID, &a.Title, &a.Artist, &a.BPM, &key, &trackLen); qerr == nil && (snapTrack.EngineID == 0 || id == snapTrack.EngineID) {
+			engKey := -1
+			if key.Valid {
+				engKey = int(key.Int64)
+			}
+			if od, oerr := bridgeOnDemandBuilder.Build(ctx, bridge.OnDemandRequest{
+				Mount:      mount,
+				UUID:       libUUID,
+				EnginePath: rel,
+				EngineID:   id,
+				EngineKey:  engKey,
+				EngineBPM:  a.BPM,
+				EngineLen:  trackLen,
+			}); oerr == nil {
+				if perf, perr := rbstate.DecodePerf(od.RBXA1); perr == nil {
+					track, overview, beats, cues, loops = perf.TrackData, perf.Overview, perf.Beats, perf.QuickCues, perf.Loops
+					err = nil
+				}
+			}
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -992,7 +1075,7 @@ func dbDisplay(ctx context.Context, file, rel string) (*shadowDisplayAsset, erro
 		if validDisplayArtwork(cover) {
 			a.Artwork = cover
 		} else if len(hash) == 20 {
-			art := filepath.Join(filepath.Dir(filepath.Dir(file)), "Artwork", base64.RawURLEncoding.EncodeToString(hash)+".jpg")
+			art := filepath.Join(filepath.Dir(dbDir), "Artwork", base64.RawURLEncoding.EncodeToString(hash)+".jpg")
 			if f, e := os.Open(art); e == nil {
 				b, re := io.ReadAll(io.LimitReader(f, (1<<20)+1))
 				f.Close()
@@ -1001,6 +1084,9 @@ func dbDisplay(ctx context.Context, file, rel string) (*shadowDisplayAsset, erro
 				}
 			}
 		}
+	}
+	if len(a.Artwork) == 0 && snapTrack != nil && snapTrack.ArtworkPath != "" {
+		a.Artwork = bridgeDisplayArtwork(mount, snapTrack.ArtworkPath)
 	}
 	return a, nil
 }

@@ -38,8 +38,9 @@ type Library struct {
 
 // TrackRow is a track as the export describes it.
 type TrackRow struct {
-	Rel   string          // the path the row gets, volume-relative
-	Track rekordbox.Track // the export's fields; Cues are the export's own cue rows, if it has any
+	Rel           string          // the path the row gets, volume-relative
+	Track         rekordbox.Track // the export's fields; Cues are the export's own cue rows, if it has any
+	DirectArtHash []byte          // optional 20-byte AlbumArt.hash for on-demand direct-read artwork (albumArt = NULL)
 }
 
 type ListRow struct {
@@ -418,16 +419,18 @@ func (l *Library) HasTrackSequence(ctx context.Context) (bool, error) {
 }
 
 type Batch struct {
-	l          *Library
-	tx         *sql.Tx
-	stmts      map[string]*sql.Stmt
-	saved      []string                  // Engine's own SQL of the indexes and triggers suspended for the batch
-	nextTrack  int64                     // bulk: the next Track.id
-	nextEntity int64                     // the next PlaylistEntity.id, 0 until a list is written
-	lists      bool                      // a list was added: Engine's persist trigger is suspended
-	covers     map[[sha1.Size]byte]int64 // AlbumArt.id of the images this batch has put
-	now        int64
-	commitID   int64
+	l                        *Library
+	tx                       *sql.Tx
+	stmts                    map[string]*sql.Stmt
+	saved                    []string                  // Engine's own SQL of the indexes and triggers suspended for the batch
+	nextTrack                int64                     // bulk: the next Track.id
+	nextEntity               int64                     // the next PlaylistEntity.id, 0 until a list is written
+	lists                    bool                      // a list was added: Engine's persist trigger is suspended
+	listEntities             bool                      // PlaylistEntity bulk delete trigger is suspended
+	playlistEntityTriggerSQL string                    // saved SQL of trigger_before_delete_PlaylistEntity if suspended
+	covers                   map[[sha1.Size]byte]int64 // AlbumArt.id of the images this batch has put
+	now                      int64
+	commitID                 int64
 }
 
 // CommitID is the library's CommitID once this batch is committed.
@@ -540,6 +543,51 @@ func (b *Batch) suspend(ctx context.Context, which string) error {
 	return nil
 }
 
+// suspendPlaylistEntityDelete drops trigger_before_delete_PlaylistEntity once per batch while
+// whole-list entity replacements or deletions run, avoiding O(N^2) linked-list updates; Commit
+// recreates it (and DeleteTrack restores it early if mixed into the same batch).
+func (b *Batch) suspendPlaylistEntityDelete(ctx context.Context) error {
+	if b.listEntities || b.l.bulk {
+		return nil
+	}
+	var text string
+	err := b.tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND type='trigger' AND name='trigger_before_delete_PlaylistEntity'`).Scan(&text)
+	if errors.Is(err, sql.ErrNoRows) {
+		b.listEntities = true
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err = b.tx.ExecContext(ctx, `DROP TRIGGER "trigger_before_delete_PlaylistEntity"`); err != nil {
+		return err
+	}
+	b.playlistEntityTriggerSQL = text
+	b.saved = append(b.saved, text)
+	b.listEntities = true
+	return nil
+}
+
+func (b *Batch) restorePlaylistEntityDelete(ctx context.Context) error {
+	if !b.listEntities {
+		return nil
+	}
+	if b.playlistEntityTriggerSQL != "" {
+		if _, err := b.tx.ExecContext(ctx, b.playlistEntityTriggerSQL); err != nil {
+			return err
+		}
+		for i, text := range b.saved {
+			if text == b.playlistEntityTriggerSQL {
+				b.saved = append(b.saved[:i], b.saved[i+1:]...)
+				break
+			}
+		}
+		b.playlistEntityTriggerSQL = ""
+	}
+	b.listEntities = false
+	return nil
+}
+
 func (b *Batch) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	st, err := b.stmt(ctx, query)
 	if err != nil {
@@ -596,10 +644,51 @@ func (b *Batch) Commit(ctx context.Context) error {
 
 const (
 	libTrackColumns = `length,bpm,year,path,filename,bitrate,bpmAnalyzed,albumArtId,fileBytes,title,artist,album,genre,comment,label,composer,remixer,key,rating,fileType,isAnalyzed,isAvailable,isMetadataImported,pdbImportKey,dateCreated,dateAdded`
-	libTrackTuple   = `(?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,0,1,1,?,?,?)`
+	libTrackTuple   = `(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,1,1,?,?,?)`
 )
 
-// trackArgs are a row's values in libTrackColumns order, without the cover and the three flags.
+// putCoverHash ensures a hash-only AlbumArt row (albumArt = NULL) exists for sum (20 bytes)
+// and returns its id, cached per batch. Zero stick artwork files are read or written.
+func (b *Batch) putCoverHash(ctx context.Context, sum []byte) (int64, error) {
+	if len(sum) != sha1.Size {
+		return 0, nil
+	}
+	var h [sha1.Size]byte
+	copy(h[:], sum)
+	if art, ok := b.covers[h]; ok {
+		return art, nil
+	}
+	var art int64
+	err := b.tx.QueryRowContext(ctx, `SELECT id FROM AlbumArt WHERE hash=? LIMIT 1`, sum).Scan(&art)
+	if errors.Is(err, sql.ErrNoRows) {
+		var res sql.Result
+		if res, err = b.exec(ctx, `INSERT INTO AlbumArt(hash,albumArt) VALUES(?,NULL)`, sum); err == nil {
+			art, err = res.LastInsertId()
+		}
+	}
+	if err != nil {
+		return 0, err
+	}
+	if b.covers == nil {
+		b.covers = map[[sha1.Size]byte]int64{}
+	}
+	b.covers[h] = art
+	return art, nil
+}
+
+// trackArgsWithArt are a row's values in libTrackColumns order, with albumArtId (int64 or nil).
+func (b *Batch) trackArgsWithArt(r *TrackRow, artID any) []any {
+	t := &r.Track
+	bpm := t.BPM
+	if bpm >= 499.5 { // rekordbox's analyser clamps a misparsed AIFF to 500 BPM
+		bpm = 0
+	}
+	return []any{int(t.Duration + 0.5), int(bpm + 0.5), t.Year, "../" + r.Rel, path.Base(r.Rel), t.Bitrate, bpm, artID, t.FileSize,
+		t.Title, t.Artist, t.Album, t.Genre, t.Comment, t.Label, t.Composer, t.Remixer, EngineKey(t.Key), t.Rating,
+		strings.TrimPrefix(strings.ToLower(path.Ext(r.Rel)), "."), int64(t.ID), b.now, b.now}
+}
+
+// trackArgs are a row's values in libTrackColumns order, without albumArtId and the three flags.
 func (b *Batch) trackArgs(r *TrackRow) []any {
 	t := &r.Track
 	bpm := t.BPM
@@ -622,7 +711,15 @@ func (b *Batch) InsertTracks(ctx context.Context, rows []TrackRow) (ids []int64,
 	}
 	insert := `INSERT INTO Track(` + libTrackColumns + `) VALUES` + libTrackTuple
 	for i := range rows {
-		res, e := b.exec(ctx, insert, b.trackArgs(&rows[i])...)
+		var artID any
+		if len(rows[i].DirectArtHash) == sha1.Size {
+			id, e := b.putCoverHash(ctx, rows[i].DirectArtHash)
+			if e != nil {
+				return nil, nil, e
+			}
+			artID = id
+		}
+		res, e := b.exec(ctx, insert, b.trackArgsWithArt(&rows[i], artID)...)
 		if e != nil {
 			var id int64
 			if qe := b.tx.QueryRowContext(ctx, `SELECT id FROM Track WHERE path=?`, "../"+rows[i].Rel).Scan(&id); qe == nil {
@@ -646,7 +743,7 @@ func (b *Batch) InsertTracks(ctx context.Context, rows []TrackRow) (ids []int64,
 const libBatchRows = 100
 
 func (b *Batch) insertTracksBulk(ctx context.Context, rows []TrackRow, ids []int64) error {
-	const cols = 23
+	const cols = 24
 	var trackArgs, perfArgs []any
 	flush := func() error {
 		if n := len(trackArgs) / cols; n > 0 {
@@ -663,9 +760,17 @@ func (b *Batch) insertTracksBulk(ctx context.Context, rows []TrackRow, ids []int
 		return nil
 	}
 	for i := range rows {
+		var artID any
+		if len(rows[i].DirectArtHash) == sha1.Size {
+			id, err := b.putCoverHash(ctx, rows[i].DirectArtHash)
+			if err != nil {
+				return err
+			}
+			artID = id
+		}
 		b.nextTrack++
 		ids[i] = b.nextTrack
-		trackArgs = append(append(trackArgs, ids[i]), b.trackArgs(&rows[i])...)
+		trackArgs = append(append(trackArgs, ids[i]), b.trackArgsWithArt(&rows[i], artID)...)
 		var cues, loops []byte
 		var active, mark any
 		if base := fastBaseOf(rows[i].Track); base.cues != nil {
@@ -681,25 +786,212 @@ func (b *Batch) insertTracksBulk(ctx context.Context, rows []TrackRow, ids []int
 	return flush()
 }
 
-// UpdateTrack gives the row the export's fields and says whether it held anything else. An
-// analysed row keeps its own length, BPM, bitrate and size (ApplyPerformance's). A row that holds
-// it all already is not written: a write fires Engine's triggers, 31 ms a row on a cold stick
-// with a 313 MB library (64b0ea95). The rating stays the deck's when the deck changed it:
-// oldRating is what the bridge last wrote (negative: unknown, the export's is taken).
-func (b *Batch) UpdateTrack(ctx context.Context, id int64, r TrackRow, oldRating int) (changed bool, err error) {
-	a := b.trackArgs(&r)
-	const (
-		rating = `CASE WHEN ?22<0 OR COALESCE(rating,0)=?22 THEN ?18 ELSE rating END`
-		own    = `COALESCE(isAnalyzed,0)` // the figures are the audio's own
+func queryMissingAlbumArtIDs(ctx context.Context, db *sql.DB) (map[int64]bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id FROM Track WHERE albumArtId IS NULL OR albumArtId <= 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err = rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
+// MissingAlbumArtIDs returns Track IDs whose albumArtId is NULL or <= 0 using index_Track_albumArtId.
+func (l *Library) MissingAlbumArtIDs(ctx context.Context) (map[int64]bool, error) {
+	return queryMissingAlbumArtIDs(ctx, l.db)
+}
+
+// MissingAlbumArtIDsRO returns Track IDs whose albumArtId is NULL or <= 0 from a read-only m.db handle.
+func MissingAlbumArtIDsRO(ctx context.Context, dbPath string) (map[int64]bool, error) {
+	dsn := (&url.URL{Scheme: "file", Path: dbPath, RawQuery: "mode=ro"}).String() + "&_pragma=busy_timeout(5000)&_pragma=query_only(1)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	return queryMissingAlbumArtIDs(ctx, db)
+}
+
+func albumArtMatchesOrPreserved(existingHash []byte, hasBlob bool, wantHash []byte) bool {
+	return hasBlob || bytes.Equal(existingHash, wantHash)
+}
+
+type trackStateRow struct {
+	length, bpm, year, bitrate, fileBytes sql.NullInt64
+	bpmAnalyzed                           sql.NullFloat64
+	title, artist, album, genre           sql.NullString
+	comment, label, composer, remixer     sql.NullString
+	key, rating, pdbImportKey             sql.NullInt64
+	isAnalyzed                            int64
+	albumArtID                            sql.NullInt64
+}
+
+const trackUpdateSelectCols = `length,bpm,year,bitrate,bpmAnalyzed,fileBytes,title,artist,album,genre,comment,label,composer,remixer,key,rating,pdbImportKey,COALESCE(isAnalyzed,0),albumArtId`
+
+func scanTrackStateRow(row *sql.Row, st *trackStateRow) error {
+	return row.Scan(
+		&st.length, &st.bpm, &st.year, &st.bitrate, &st.bpmAnalyzed, &st.fileBytes,
+		&st.title, &st.artist, &st.album, &st.genre, &st.comment, &st.label, &st.composer, &st.remixer,
+		&st.key, &st.rating, &st.pdbImportKey, &st.isAnalyzed, &st.albumArtID,
 	)
-	res, err := b.exec(ctx, `UPDATE Track SET length=CASE WHEN `+own+` THEN length ELSE ?1 END,bpm=CASE WHEN `+own+` THEN bpm ELSE ?2 END,
-		bitrate=CASE WHEN `+own+` THEN bitrate ELSE ?6 END,bpmAnalyzed=CASE WHEN `+own+` THEN bpmAnalyzed ELSE ?7 END,
-		fileBytes=CASE WHEN `+own+` THEN fileBytes ELSE ?8 END,year=?3,title=?9,artist=?10,album=?11,genre=?12,comment=?13,label=?14,composer=?15,
-		remixer=?16,key=?17,rating=`+rating+`,pdbImportKey=?20
-		WHERE id=?21 AND NOT ((`+own+` OR (length IS ?1 AND bpm IS ?2 AND bitrate IS ?6 AND bpmAnalyzed IS ?7 AND fileBytes IS ?8))
-		AND year IS ?3 AND title IS ?9 AND artist IS ?10 AND album IS ?11 AND genre IS ?12 AND comment IS ?13 AND label IS ?14 AND composer IS ?15
-		AND remixer IS ?16 AND key IS ?17 AND rating IS (`+rating+`) AND pdbImportKey IS ?20)`,
-		append(append(a[:len(a)-2:len(a)-2], id), oldRating)...)
+}
+
+func trackUpdateDiff(cur trackStateRow, r TrackRow, oldRating int) (cols []string, args []any) {
+	t := &r.Track
+	bpm := t.BPM
+	if bpm >= 499.5 { // rekordbox's analyser clamps a misparsed AIFF to 500 BPM
+		bpm = 0
+	}
+	setInt := func(col string, have sql.NullInt64, want int64) {
+		if !have.Valid || have.Int64 != want {
+			cols = append(cols, col+"=?")
+			args = append(args, want)
+		}
+	}
+	setStr := func(col string, have sql.NullString, want string) {
+		if !have.Valid || have.String != want {
+			cols = append(cols, col+"=?")
+			args = append(args, want)
+		}
+	}
+	if cur.isAnalyzed == 0 {
+		setInt("length", cur.length, int64(int(t.Duration+0.5)))
+		setInt("bpm", cur.bpm, int64(int(bpm+0.5)))
+		setInt("bitrate", cur.bitrate, int64(t.Bitrate))
+		if !cur.bpmAnalyzed.Valid || cur.bpmAnalyzed.Float64 != bpm {
+			cols = append(cols, "bpmAnalyzed=?")
+			args = append(args, bpm)
+		}
+		setInt("fileBytes", cur.fileBytes, t.FileSize)
+	}
+	setInt("year", cur.year, int64(t.Year))
+	setStr("title", cur.title, t.Title)
+	setStr("artist", cur.artist, t.Artist)
+	setStr("album", cur.album, t.Album)
+	setStr("genre", cur.genre, t.Genre)
+	setStr("comment", cur.comment, t.Comment)
+	setStr("label", cur.label, t.Label)
+	setStr("composer", cur.composer, t.Composer)
+	setStr("remixer", cur.remixer, t.Remixer)
+	if wantKey, ok := EngineKey(t.Key).(int); !ok {
+		if cur.key.Valid {
+			cols = append(cols, "key=?")
+			args = append(args, nil)
+		}
+	} else {
+		setInt("key", cur.key, int64(wantKey))
+	}
+	curRating := int64(0)
+	if cur.rating.Valid {
+		curRating = cur.rating.Int64
+	}
+	if oldRating < 0 || curRating == int64(oldRating) {
+		setInt("rating", cur.rating, int64(t.Rating))
+	}
+	setInt("pdbImportKey", cur.pdbImportKey, int64(t.ID))
+	return cols, args
+}
+
+// TrackUpdatePlan inspects one Track row read-only without starting a write transaction and reports
+// whether UpdateTrack or SetDirectCover would modify m.db.
+func (l *Library) TrackUpdatePlan(ctx context.Context, id int64, r TrackRow, oldRating int, directArtHash []byte) (needTrack bool, needCover bool, err error) {
+	var cur trackStateRow
+	err = scanTrackStateRow(l.db.QueryRowContext(ctx, `SELECT `+trackUpdateSelectCols+` FROM Track WHERE id=?`, id), &cur)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	cols, _ := trackUpdateDiff(cur, r, oldRating)
+	needTrack = len(cols) > 0
+	if len(directArtHash) == sha1.Size {
+		if !cur.albumArtID.Valid || cur.albumArtID.Int64 <= 0 {
+			needCover = true
+		} else {
+			var existingHash []byte
+			var hasBlob bool
+			err = l.db.QueryRowContext(ctx, `SELECT hash,(albumArt IS NOT NULL AND length(albumArt)>0) FROM AlbumArt WHERE id=?`, cur.albumArtID.Int64).Scan(&existingHash, &hasBlob)
+			if errors.Is(err, sql.ErrNoRows) {
+				needCover = true
+			} else if err != nil {
+				return false, false, err
+			} else if !albumArtMatchesOrPreserved(existingHash, hasBlob, directArtHash) {
+				needCover = true
+			}
+		}
+	}
+	return needTrack, needCover, nil
+}
+
+// SetDirectCover links a track row to a hash-only AlbumArt row when the track currently has no
+// cover or already points at a hash-only/empty (albumArt IS NULL/empty) cover, preserving
+// non-empty embedded BLOB art without creating orphan AlbumArt rows.
+func (b *Batch) SetDirectCover(ctx context.Context, id int64, sum []byte) (bool, error) {
+	if len(sum) != sha1.Size {
+		return false, nil
+	}
+	st, err := b.stmt(ctx, `SELECT t.albumArtId,a.id,a.hash,(a.albumArt IS NOT NULL AND length(a.albumArt)>0)
+		FROM Track t LEFT JOIN AlbumArt a ON a.id=t.albumArtId WHERE t.id=?`)
+	if err != nil {
+		return false, err
+	}
+	var trackArtID, artRowID sql.NullInt64
+	var existingHash []byte
+	var hasBlob sql.NullBool
+	err = st.QueryRowContext(ctx, id).Scan(&trackArtID, &artRowID, &existingHash, &hasBlob)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if trackArtID.Valid && trackArtID.Int64 > 0 && artRowID.Valid && albumArtMatchesOrPreserved(existingHash, hasBlob.Bool, sum) {
+		return false, nil
+	}
+	art, err := b.putCoverHash(ctx, sum)
+	if err != nil {
+		return false, err
+	}
+	res, err := b.exec(ctx, `UPDATE Track SET albumArtId=? WHERE id=?`, art, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// UpdateTrack gives the row the export's changed fields and says whether it held anything else.
+// An analysed row keeps its own length, BPM, bitrate and size (ApplyPerformance's). Only columns
+// whose values actually differ are included in UPDATE Track SET ... so unchanged secondary index
+// B-trees and triggers stay cold, and an identical row writes nothing.
+func (b *Batch) UpdateTrack(ctx context.Context, id int64, r TrackRow, oldRating int) (changed bool, err error) {
+	st, err := b.stmt(ctx, `SELECT `+trackUpdateSelectCols+` FROM Track WHERE id=?`)
+	if err != nil {
+		return false, err
+	}
+	var cur trackStateRow
+	err = scanTrackStateRow(st.QueryRowContext(ctx, id), &cur)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	cols, args := trackUpdateDiff(cur, r, oldRating)
+	if len(cols) == 0 {
+		return false, nil
+	}
+	args = append(args, id)
+	res, err := b.tx.ExecContext(ctx, `UPDATE Track SET `+strings.Join(cols, ",")+` WHERE id=?`, args...)
 	if err != nil {
 		return false, err
 	}
@@ -724,6 +1016,9 @@ func (b *Batch) MoveTracks(ctx context.Context, moves map[int64]string) error {
 
 // DeleteTrack removes a row the bridge owns, with its list entries and its performance data.
 func (b *Batch) DeleteTrack(ctx context.Context, id int64) error {
+	if err := b.restorePlaylistEntityDelete(ctx); err != nil {
+		return err
+	}
 	for _, q := range []string{`DELETE FROM PlaylistEntity WHERE trackId=?`, `DELETE FROM PreparelistEntity WHERE trackId=?`, `DELETE FROM Track WHERE id=?`} {
 		if _, err := b.exec(ctx, q, id); err != nil {
 			return err
@@ -847,6 +1142,9 @@ func (b *Batch) children(ctx context.Context, parent int64, owned func(int64) bo
 
 // SetEntries makes a list hold exactly these tracks, in this order.
 func (b *Batch) SetEntries(ctx context.Context, list int64, tracks []int64) error {
+	if err := b.suspendPlaylistEntityDelete(ctx); err != nil {
+		return err
+	}
 	if _, err := b.exec(ctx, `DELETE FROM PlaylistEntity WHERE listId=?`, list); err != nil {
 		return err
 	}
@@ -889,6 +1187,9 @@ func (b *Batch) SetEntries(ctx context.Context, list int64, tracks []int64) erro
 // root first, in their order, as "<name> (n)" when the root has the name: the bridge never
 // deletes a list the DJ made on a deck (#252).
 func (b *Batch) DeleteList(ctx context.Context, id int64, owned func(int64) bool) error {
+	if err := b.suspendPlaylistEntityDelete(ctx); err != nil {
+		return err
+	}
 	nodes, err := b.children(ctx, id, owned)
 	if err != nil {
 		return err

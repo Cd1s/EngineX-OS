@@ -291,7 +291,7 @@ func shiftQuickCues(blob []byte, shift float64) ([]byte, bool, error) {
 		}
 		off += lLen
 		pos := math.Float64frombits(big.Uint64(out[off : off+8]))
-		if finiteFloat(pos) && pos != -1 {
+		if finiteFloat(pos) && pos >= 0 {
 			next := max(0.0, pos-shift)
 			if next != pos {
 				big.PutUint64(out[off:off+8], math.Float64bits(next))
@@ -305,7 +305,7 @@ func shiftQuickCues(blob []byte, shift float64) ([]byte, bool, error) {
 	}
 	for _, cueOff := range []int{off, off + 9} {
 		pos := math.Float64frombits(big.Uint64(out[cueOff : cueOff+8]))
-		if finiteFloat(pos) && pos != -1 {
+		if finiteFloat(pos) && pos >= 0 {
 			next := max(0.0, pos-shift)
 			if next != pos {
 				big.PutUint64(out[cueOff:cueOff+8], math.Float64bits(next))
@@ -352,13 +352,13 @@ func shiftLoops(blob []byte, shift, sampleLen float64) ([]byte, bool) {
 			return blob, false
 		}
 		newStart, newEnd := start, end
-		if startSet == 1 && finiteFloat(start) && start != -1 {
+		if startSet == 1 && finiteFloat(start) && start >= 0 {
 			newStart = max(0.0, start-shift)
 		}
-		if endSet == 1 && finiteFloat(end) && end != -1 {
+		if endSet == 1 && finiteFloat(end) && end >= 0 {
 			newEnd = max(0.0, end-shift)
 		}
-		if startSet == 1 && endSet == 1 && finiteFloat(start) && finiteFloat(end) && end > start && newEnd <= newStart {
+		if startSet == 1 && endSet == 1 && finiteFloat(start) && finiteFloat(end) && start >= 0 && end >= 0 && end > start && newEnd <= newStart {
 			newEnd = newStart + max(1.0, end-start)
 			if sampleLen > 0 && newStart < sampleLen {
 				newEnd = min(sampleLen, newEnd)

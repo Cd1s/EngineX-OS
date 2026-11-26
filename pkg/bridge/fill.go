@@ -30,6 +30,7 @@ type FillOptions struct {
 	Progress func(done, total int) // tracks compared so far; never goes down (#328)
 	Stage    *rbstate.Stage        // nil: the stage of the snapshot's library
 	Settings string                // the deck's settings file (layout, language), "" for the defaults
+	OnDemand bool                  // CDJ direct-read mode: publish deferred rows/lists only, skip 24-min background perf pass
 }
 
 type FillResult struct {
@@ -66,8 +67,8 @@ type fillView struct {
 // hookWindow is the time the hook gives a window (design section 3).
 const hookWindow = 17 * time.Second
 
-// readJobView reads the exports as a window would (FindSources, ReadSources, the staged CDJ
-// libraries, BuildView) into the view's tracks and the stamp.
+// readJobView reads the exports as a window would (FindSources, ReadSources, BuildView) into the
+// view's tracks and the stamp.
 func readJobView(ctx context.Context, r *compat.Resolver, mount, layout, lang string) (*fillView, error) {
 	return readJobViewPaced(ctx, r, mount, layout, lang, nil)
 }
@@ -84,15 +85,11 @@ func readJobViewPaced(ctx context.Context, r *compat.Resolver, mount, layout, la
 	if err != nil {
 		return nil, err
 	}
-	staged, err := readStagedPaced(ctx, mount, pace)
+	v, err := BuildViewCtx(ctx, libs, layout, lang)
 	if err != nil {
 		return nil, err
 	}
-	v, err := BuildViewCtx(ctx, append(libs, staged...), layout, lang)
-	if err != nil {
-		return nil, err
-	}
-	v.Stamp, v.Sources = rbstate.Stamp(layout, files, stagedStamp(mount)), files
+	v.Stamp, v.Sources = rbstate.Stamp(layout, files, ""), files
 	out := &fillView{stamp: v.Stamp, tracks: make([]fillTrack, len(v.Tracks)), view: v}
 	if len(failed) > 0 || len(files) == 0 {
 		out.view = nil // a library could not be read: nothing is removed for it, by a window only
@@ -125,6 +122,9 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	if err != nil {
 		return res, fmt.Errorf("volume lock: %w", err)
 	}
+	if _, rerr := reconcileOrphanSwap(ctx, dbDir); rerr != nil {
+		log.Printf("rb-bridge: orphan swap check deferred: %v", rerr)
+	}
 	snap, err := rbstate.Load(dbDir)
 	unlock()
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -147,8 +147,9 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	}
 	read := time.Now()
 	next := &nextBuild{ctx: ctx, mount: mount, dir: dbDir, view: view.view, live: snap,
-		pace: func(took time.Duration) error { return pace.afterStat(pace.active(), took) },
-		busy: pace.isBusy}
+		pace:     func(took time.Duration) error { return pace.afterStat(pace.active(), took) },
+		busy:     pace.isBusy,
+		onDemand: o.OnDemand}
 	buildNextWhenIdle := func(drop, ready bool) error {
 		for {
 			if err := pace.waitIdle(); err != nil {
@@ -163,9 +164,18 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	}
 	rowsDeferred := false
 	// Rows and lists a window left to the job come first, with what is staged already: they are
-	// what the DJ browses. The performance data follows in the job the swap's window starts.
-	if rows := snap == nil || view.view != nil && Diff(view.view, snap).structural(); rows && view.view != nil && o.Stage == nil {
-		if snap == nil {
+	// what the DJ browses. The performance data follows in the job the swap's window starts
+	// (unless OnDemand is set, in which case load/browse read rekordbox files directly).
+	var diff *Plan
+	if snap != nil && view.view != nil {
+		diff = Diff(view.view, snap)
+	}
+	needsDirectCovers := o.OnDemand && snap != nil && view.view != nil &&
+		hasMissingDirectCovers(ctx, filepath.Join(dbDir, "m.db"), view.view, snap)
+	needsNextRows := snap == nil || (diff != nil && (diff.structural() || (o.OnDemand && (len(diff.UpdateTracks) > 0 || snap.Pending.Rows > 0 || snap.Pending.Lists || needsDirectCovers))))
+	nextSkippedNoRoom := false
+	if needsNextRows && view.view != nil && o.Stage == nil {
+		if snap == nil || o.OnDemand {
 			err = buildNextWhenIdle(false, true)
 		} else if pace.isBusy() {
 			err = errDeckBusy
@@ -177,18 +187,75 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 			log.Printf("rb-bridge: rows and lists of %s are in the next library (exports read in %s); publish=%v", mount, read.Sub(loaded).Round(time.Millisecond), res.Publish)
 			return res, nil
 		}
-		if snap != nil && errors.Is(err, errDeckBusy) {
+		if snap != nil && !o.OnDemand && errors.Is(err, errDeckBusy) {
 			rowsDeferred = true
 			log.Printf("rb-bridge: deck active on %s; staging tracks to /data before building next library", mount)
 		} else {
 			if snap == nil || !errors.Is(err, errNoNext) {
 				return res, err
 			}
+			nextSkippedNoRoom = true
 			log.Printf("rb-bridge: %v; rows and lists wait for the windows", err)
 		}
 	}
 	if snap == nil {
 		return res, fmt.Errorf("snapshot: %w", rbstate.ErrNoSnapshot)
+	}
+	if o.OnDemand {
+		if nextSkippedNoRoom {
+			log.Printf("rb-bridge: on-demand mode for %s: next library unavailable; rows/lists remain pending for mount windows (%s)", mount, time.Since(start).Round(time.Millisecond))
+			return res, nil
+		}
+		// OnDemand mode: rows and lists are current; no background performance-data pass is run.
+		// Hydrate legacy snapshots missing ModeOnDemand/browse paths, clear stale perf/verify flags,
+		// and ensure .rb-bridge-browse matches the live snapshot generation.
+		needsSettle := snap.Pending.Perf > 0 || snap.Pending.Verify ||
+			snap.Mode != rbstate.ModeOnDemand ||
+			(view.view != nil && snap.Stamp != view.stamp) ||
+			!rbstate.BrowseIndexMatches(dbDir, snap.Header)
+		if needsSettle {
+			if err := pace.waitIdle(); err != nil {
+				return res, err
+			}
+			lock, lockErr := rbstate.LockVolume(mount, fillLockWait)
+			if lockErr != nil {
+				return res, fmt.Errorf("volume lock: %w", lockErr)
+			}
+			var settleErr error
+			current, loadErr := rbstate.Load(dbDir)
+			if loadErr != nil {
+				settleErr = loadErr
+			} else if pace.isBusy() {
+				lock()
+				log.Printf("rb-bridge: deck active while settling on-demand metadata for %s; pausing", mount)
+				return res, nil
+			} else {
+				dirty := current.Pending.Perf > 0 || current.Pending.Verify || current.Mode != rbstate.ModeOnDemand
+				if view.view != nil {
+					if hydrateOnDemandTracks(current, view.view) {
+						dirty = true
+					}
+					if current.Stamp != view.stamp {
+						current.Stamp, current.Sources = view.stamp, view.view.Sources
+						dirty = true
+					}
+				}
+				current.Pending.Perf, current.Pending.Verify = 0, false
+				current.Mode = rbstate.ModeOnDemand
+				if dirty {
+					settleErr = current.Save(dbDir)
+				}
+				if settleErr == nil {
+					settleErr = syncBrowseIndex(dbDir, current)
+				}
+			}
+			lock()
+			if settleErr != nil {
+				return res, settleErr
+			}
+		}
+		log.Printf("rb-bridge: on-demand mode for %s: rows/lists current, skipping background perf pass (%s)", mount, time.Since(start).Round(time.Millisecond))
+		return res, nil
 	}
 	if view.view != nil && snap.Stamp != view.stamp && o.Stage == nil && !rowsDeferred {
 		// The window left the exports to the job and they change no row and no list: the snapshot
@@ -386,6 +453,27 @@ func pendingRowsForView(view *View, snap *rbstate.Snapshot) int {
 		}
 	}
 	return pending
+}
+
+func hasMissingDirectCovers(ctx context.Context, dbPath string, view *View, snap *rbstate.Snapshot) bool {
+	if view == nil || snap == nil {
+		return false
+	}
+	missing, err := enginedb.MissingAlbumArtIDsRO(ctx, dbPath)
+	if err != nil || len(missing) == 0 {
+		return false
+	}
+	for i := range view.Tracks {
+		vt := &view.Tracks[i]
+		if vt.Track.ArtworkPath == "" {
+			continue
+		}
+		t := snap.Tracks[vt.Key]
+		if t != nil && !t.Native && t.EngineID != 0 && missing[t.EngineID] {
+			return true
+		}
+	}
+	return false
 }
 
 type filler struct {

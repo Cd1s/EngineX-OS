@@ -37,6 +37,12 @@ import (
 // player's read-only /etc still pass --watch, so it exits at once instead of
 // failing, and systemd does not restart it.
 func RBBridge(args []string, stdout io.Writer) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	return rbBridgeCtx(ctx, args, stdout)
+}
+
+func rbBridgeCtx(ctx context.Context, args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("rb-bridge", flag.ContinueOnError)
 	mount := fs.String("mount-path", "", "mounted USB/export root")
 	importPath := fs.String("import-path", "", "finish the first import a --mount-path run left on this volume, after its mount (#301)")
@@ -47,6 +53,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 	migrateArt := fs.Bool("migrate-artwork", false, "retired; exits at once (a mount gives covers the hash Engine Link serves)")
 	writebackCues := fs.Bool("writeback-cues", false, "with --mount-path: write modified Engine Hot Cues, Memory Cues, and Loops back to the Rekordbox stick")
 	onEject := fs.Bool("on-eject", false, "with --writeback-cues: invoked by the eject hook before unmounting")
+	dryRun := fs.Bool("dry-run", false, "with --writeback-cues: report tracks and fields that would be written back without modifying the stick")
 	smart := fs.Uint("smart-match", 0, "optional recommendation playlist relative to this Rekordbox track ID")
 	defaultStateFile := "/tmp/enginex-prolink.json"
 	if env := os.Getenv("ENGINEX_PROLINK_STATE"); env != "" {
@@ -54,7 +61,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 	}
 	stateFile := fs.String("state-file", defaultStateFile, "path to write Pro DJ Link snapshot state JSON")
 	anlzRoot := fs.String("anlz-root", "/media", "root directory to scan for Rekordbox ANLZ analysis files")
-	mediaCache := fs.String("media-cache", prolink.SharedMediaCacheDir(), "where tracks read from Pioneer players over the network are kept (#59)")
+	mediaCache := fs.String("media-cache", prolink.SharedMediaCacheDir(), "tmpfs directory for loaded Pioneer track metadata and ANLZ display cache (#59)")
 	uiSettings := fs.String("ui-settings", "/data/enginex/ui/settings.conf", "deck settings; prolink_share=1 (or legacy prolink_export=1) enables Pro DJ Link")
 	pruneRGB := fs.String("prune-rgb-overviews", "", "Database2 directory of a library Engine does not have open: remove the RGB overview files that are not its tracks' own")
 	watch := fs.Bool("watch", false, "retired; exits at once")
@@ -81,8 +88,6 @@ func RBBridge(args []string, stdout io.Writer) error {
 		return fmt.Errorf("smart-match track ID exceeds uint32")
 	}
 	if *importPath != "" || *remount != "" {
-		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer cancel()
 		if *remount != "" {
 			return runRemount(ctx, *remount)
 		}
@@ -99,8 +104,6 @@ func RBBridge(args []string, stdout io.Writer) error {
 			return fmt.Errorf("bind must be IPv4")
 		}
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 	var mu sync.Mutex
 	enc := json.NewEncoder(stdout)
 	emit := func(v any) { mu.Lock(); defer mu.Unlock(); _ = enc.Encode(v) }
@@ -108,7 +111,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 		return nil
 	}
 	if *mount != "" && *writebackCues {
-		if *onEject {
+		if *onEject && !*dryRun {
 			// stream-sync's watcher keeps the stick's keys and what it has read (#321).
 			if r, err, ok := finalWriteBack(ctx, *mount); ok {
 				if err != nil {
@@ -118,7 +121,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 				return nil
 			}
 		}
-		r, err := bridge.WriteBackCues(ctx, *mount, bridge.WriteBackOptions{OnEject: *onEject})
+		r, err := bridge.WriteBackCues(ctx, *mount, bridge.WriteBackOptions{OnEject: *onEject, DryRun: *dryRun})
 		if err != nil {
 			return err
 		}
@@ -132,6 +135,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 		started := false
 		opts := bridge.MountOptions{
 			Full:       *full,
+			OnDemand:   rbOnDemandEnabled(),
 			SmartMatch: uint32(*smart),
 			Settings:   *uiSettings,
 			Publish:    takePublishMark(*mount),
@@ -167,7 +171,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 	}
 
 	discovery := prolink.NewDiscovery()
-	discovery.SetIgnoreLocal(true) // never stage or cache the deck's own export
+	discovery.SetIgnoreLocal(true) // never cache the deck's own export
 	if *anlzRoot != "" {
 		discovery.SetANLZRoot(*anlzRoot)
 	}
@@ -205,7 +209,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 	}
 
 	_, _ = resourceguard.New(resourceguard.DefaultConfig()).ApplyToProcess(0)
-	st := &stager{mounts: localExports, last: map[string]time.Time{}}
+	go watchProlinkCacheCleanup(ctx)
 	// Packets arrive many times a second; snapshot at most every 500 ms and only when something changed.
 	var dirty, verbose atomic.Bool
 	verbose.Store(settingOn(*uiSettings, "verbose_log"))
@@ -236,9 +240,6 @@ func RBBridge(args []string, stdout io.Writer) error {
 			emit(d)
 		}
 		devices.packet(log.Print, d, time.Now())
-		if d.PacketType == 6 && d.Number >= 1 && d.Number <= 6 && prolinkSettingOn(*uiSettings) {
-			st.observe(ctx, d)
-		}
 		dirty.Store(true)
 	})
 	if errors.Is(err, context.Canceled) {

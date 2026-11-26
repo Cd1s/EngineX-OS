@@ -7,20 +7,19 @@ package prolink_test
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/binary"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 	"unicode/utf16"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
-	"github.com/Cd1s/EngineX-OS/pkg/bridge/bridgetest"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
@@ -213,42 +212,33 @@ func TestSimCDJ3000ServerToDenon(t *testing.T) {
 			t.Fatal("missing fetched analysis", err)
 		}
 	}
-	// Import the same simulated network drive through Stage -> real rb-bridge.
-	denon := t.TempDir() // No local Rekordbox export on the receiving Denon drive.
-	client := &prolink.NFSClient{IP: net.IPv4(127, 63, 0, 2), Portmap: nfs.PortmapPort()}
-	staged := filepath.Join(denon, prolink.StagedDir, "CDJ-3000")
-	if count, err := prolink.Stage(t.Context(), client, "/C/", staged, 1<<26); err != nil || count < 8 {
-		t.Fatalf("stage: %d %v", count, err)
-	}
-	// The window gives the staged tracks rows; the background job and the window of its remount
-	// give them the CDJ's analysis.
-	if r, err := bridge.ConvertAtMount(t.Context(), denon, bridge.MountOptions{Full: true}); err != nil || r.Added != 5 {
-		t.Fatalf("bridge: %+v %v", r, err)
-	}
-	bridgetest.Import(t, denon)
-	db, err := sql.Open("sqlite", filepath.Join(denon, "Engine Library/Database2/m.db"))
-	if err != nil {
+	// Live display MediaCache fetches ONLY export.pdb and the loaded track's ANLZ —
+	// never audio files from the CDJ's drive.
+	if err := filepath.WalkDir(cache, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		ext := strings.ToLower(filepath.Ext(d.Name()))
+		if ext == ".flac" || ext == ".wav" || ext == ".mp3" || ext == ".aif" || ext == ".aiff" || ext == ".m4a" {
+			t.Errorf("MediaCache copied audio file %s", p)
+		}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	var id, n int
-	if err = db.QueryRow(`SELECT id FROM Playlist WHERE title='[Pro DJ Link: CDJ-3000]' AND parentListId=0`).Scan(&id); err != nil {
-		t.Fatal(err)
+	// A Denon drive with a leftover .prolink-cache is bypassed (no [Pro DJ Link: ...]
+	// folder or Engine Library created) and the leftover directory is left untouched on disk.
+	denon := t.TempDir()
+	leftover := filepath.Join(denon, ".prolink-cache", "CDJ-3000")
+	testfixture.Export(t, leftover)
+	if r, err := bridge.ConvertAtMount(t.Context(), denon, bridge.MountOptions{Full: true}); err != nil || !r.Bypassed || r.Added != 0 {
+		t.Fatalf("leftover .prolink-cache stick must be bypassed: %+v %v", r, err)
 	}
-	if err = db.QueryRow(`SELECT count(*) FROM Playlist WHERE parentListId=?`, id).Scan(&n); err != nil || n < 1 {
-		t.Fatal("imported playlists missing", err)
+	if _, err := os.Stat(filepath.Join(denon, "Engine Library")); !os.IsNotExist(err) {
+		t.Fatalf("Engine Library created from leftover .prolink-cache: %v", err)
 	}
-	if err = db.QueryRow(`SELECT count(*) FROM Track WHERE path LIKE '%.prolink-cache/CDJ-3000/%'`).Scan(&n); err != nil || n != 5 {
-		t.Fatal("staged playable audio missing", n, err)
-	}
-	// A CDJ's tracks load as a stick's do: with the CDJ's own grid, cues and both
-	// waveforms already in m.db, so Engine does not analyse them (the fixture's CDJ
-	// analysed one of its five tracks).
-	var grid, overview, data, cues int
-	if err = db.QueryRow(`SELECT count(p.beatData), count(p.overviewWaveFormData), count(p.trackData), count(p.quickCues) FROM Track t
-		JOIN PerformanceData p ON p.trackId = t.id WHERE t.path LIKE '%.prolink-cache/CDJ-3000/%'`).Scan(&grid, &overview, &data, &cues); err != nil ||
-		grid != 1 || overview != 1 || data != 5 || cues != 5 {
-		t.Fatalf("staged analysis: grid %d overview %d trackData %d cues %d of 5 (%v)", grid, overview, data, cues, err)
+	if _, err := os.Stat(filepath.Join(leftover, "PIONEER/rekordbox/export.pdb")); err != nil {
+		t.Fatalf("leftover .prolink-cache was silently removed: %v", err)
 	}
 }
 

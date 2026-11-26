@@ -193,3 +193,66 @@ func TestWrittenDigestStillSeesAddedCueWhenMainCueIsUnadjusted(t *testing.T) {
 		t.Fatal("added hot cue was hidden by main-cue normalization")
 	}
 }
+
+func TestSyncedDigestIgnoresUnadjustedMainCueBytes(t *testing.T) {
+	base, err := EncodePerformance(rekordbox.Track{SampleRate: 44100, Duration: 10}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := QUncompress(base.QuickCues, 1<<16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, ok := cuePositions(raw)
+	if !ok {
+		t.Fatal("cue layout not recognized")
+	}
+
+	// Unadjusted (adj == 0) mainCue/defaultMainCue rewrites must not change SyncedDigest.
+	unadj := append([]byte(nil), raw...)
+	big.PutUint64(unadj[at[8]:], math.Float64bits(-1105))
+	big.PutUint64(unadj[at[9]:], math.Float64bits(-1105))
+	unadjBlob, err := QCompress(unadj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseDigest := SyncedDigest(nil, base.QuickCues, base.Loops, int64(base.ActiveLoops), "House", "Note", "Label")
+	unadjDigest := SyncedDigest(nil, unadjBlob, base.Loops, int64(base.ActiveLoops), "House", "Note", "Label")
+	if !bytes.Equal(unadjDigest, baseDigest) {
+		t.Fatalf("unadjusted main cue changed SyncedDigest: %x != %x", unadjDigest, baseDigest)
+	}
+
+	// Changing adj to 1 or moving an adj == 1 main cue must change SyncedDigest.
+	adj := append([]byte(nil), unadj...)
+	adj[at[8]+8] = 1
+	adjBlob1, err := QCompress(adj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adjDigest1 := SyncedDigest(nil, adjBlob1, base.Loops, int64(base.ActiveLoops), "House", "Note", "Label")
+	if bytes.Equal(adjDigest1, baseDigest) {
+		t.Fatal("mainCueAdjusted=1 produced identical SyncedDigest")
+	}
+
+	big.PutUint64(adj[at[8]:], math.Float64bits(4410))
+	adjBlob2, err := QCompress(adj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adjDigest2 := SyncedDigest(nil, adjBlob2, base.Loops, int64(base.ActiveLoops), "House", "Note", "Label")
+	if bytes.Equal(adjDigest2, adjDigest1) {
+		t.Fatal("moving an adj=1 main cue produced identical SyncedDigest")
+	}
+
+	// Editing a hot cue slot must still change SyncedDigest.
+	hotEdited := append([]byte(nil), unadj...)
+	big.PutUint64(hotEdited[at[1]:], math.Float64bits(22050))
+	hotBlob, err := QCompress(hotEdited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hotDigest := SyncedDigest(nil, hotBlob, base.Loops, int64(base.ActiveLoops), "House", "Note", "Label")
+	if bytes.Equal(hotDigest, baseDigest) {
+		t.Fatal("editing a hot cue slot was hidden by main-cue normalization")
+	}
+}

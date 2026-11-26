@@ -19,6 +19,11 @@ const (
 	// 5 follows the stamp versions v2-v4 of earlier builds.
 	Rules  = 5
 	Format = 2 // of the snapshot file
+
+	// ModeFull is the full background-perf build mode (and empty legacy default).
+	ModeFull = ""
+	// ModeOnDemand is the CDJ direct-read on-demand mode.
+	ModeOnDemand = "ondemand"
 )
 
 // ErrLocked: another process holds the volume's lock.
@@ -89,6 +94,13 @@ type Header struct {
 	// Base, in a swap snapshot only: the state of the stick's library (enginedb.LibraryState)
 	// whose every row the next library has taken.
 	Base string `json:"base,omitempty"`
+	// Mode distinguishes build modes that share Rules ("" = full perf build, "ondemand" = CDJ direct-read).
+	Mode string `json:"mode,omitempty"`
+	// RepairStamp records that historical .enginex-backup ANLZ cue-layout repair has run for this volume state.
+	RepairStamp string `json:"repairStamp,omitempty"`
+	// SettleCursor is the highest EngineID whose historical Synced==nil baseline settle pass
+	// has been checkpointed for the current export stamp.
+	SettleCursor int64 `json:"settleCursor,omitempty"`
 }
 
 // PerfState says what a row's performance data is.
@@ -118,19 +130,24 @@ func (s TrackSig) Equal(o TrackSig) bool {
 
 // Track is one track of the stick's library.
 type Track struct {
-	Key      string      `json:"k"`
-	EngineID int64       `json:"id,omitempty"` // Track.id; 0 while the row is not written
-	Rel      string      `json:"p"`            // the row's path without "../"; the export's spelling until Resolved
-	Resolved bool        `json:"res,omitempty"`
-	Refs     []SourceRef `json:"refs,omitempty"`
-	Row      string      `json:"row,omitempty"` // the view hash the row was written from
-	Rating   int         `json:"rt,omitempty"`  // the rating the bridge last wrote: another one in the row is the deck's
-	Perf     PerfState   `json:"perf,omitempty"`
-	Built    TrackSig    `json:"built"`
-	Written  []byte      `json:"wr,omitempty"` // digest of grid, cues and loops as the bridge last wrote them
+	Key          string      `json:"k"`
+	EngineID     int64       `json:"id,omitempty"`  // Track.id; 0 while the row is not written
+	Rel          string      `json:"p"`             // the row's path without "../"; the export's spelling until Resolved
+	AnalysisPath string      `json:"ap,omitempty"`  // volume-relative rekordbox ANLZ .DAT path from the export
+	ArtworkPath  string      `json:"aw,omitempty"`  // volume-relative rekordbox artwork path from the export
+	Duration     float64     `json:"dur,omitempty"` // export duration in seconds (for on-demand overview scaling)
+	SampleRate   int         `json:"sr,omitempty"`  // export sample rate in Hz (for on-demand overview scaling)
+	Resolved     bool        `json:"res,omitempty"`
+	Refs         []SourceRef `json:"refs,omitempty"`
+	Row          string      `json:"row,omitempty"` // the view hash the row was written from
+	Rating       int         `json:"rt,omitempty"`  // the rating the bridge last wrote: another one in the row is the deck's
+	Perf         PerfState   `json:"perf,omitempty"`
+	Built        TrackSig    `json:"built"`
+	Written      []byte      `json:"wr,omitempty"` // digest of grid, cues and loops as the bridge last wrote them
 	// Write-back's note of the row: the digest of its cues, loops and tags the export holds, and
 	// the row's lastEditTime then. A row whose time has not moved is not read.
 	Synced     []byte `json:"sy,omitempty"`
+	MetaDigest []byte `json:"md,omitempty"`
 	Edit       int64  `json:"ed,omitempty"`
 	Native     bool   `json:"nat,omitempty"` // an Engine-made row: lists refer to it, the bridge never writes it
 	FastCues   []byte `json:"frc,omitempty"`

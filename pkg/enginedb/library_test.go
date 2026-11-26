@@ -1081,3 +1081,321 @@ func TestLibraryUsesImmediateWriteLock(t *testing.T) {
 		t.Fatal("BeginTx succeeded despite active write transaction; _txlock=immediate not active")
 	}
 }
+
+func TestSetEntriesSuspendsAndRestoresPlaylistEntityDeleteTrigger(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	rows := []TrackRow{
+		{Rel: "Contents/a.mp3", Track: rekordbox.Track{ID: 1, Path: "/Contents/a.mp3", Title: "A"}},
+		{Rel: "Contents/b.mp3", Track: rekordbox.Track{ID: 2, Path: "/Contents/b.mp3", Title: "B"}},
+		{Rel: "Contents/c.mp3", Track: rekordbox.Track{ID: 3, Path: "/Contents/c.mp3", Title: "C"}},
+	}
+	ids, _, _, err := BuildLibrary(ctx, dir, "", rows, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lib, err := OpenLibrary(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lib.Close()
+
+	b, err := lib.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list1, err := b.InsertList(ctx, ListRow{Title: "List1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetEntries(ctx, list1, ids); err != nil {
+		t.Fatal(err)
+	}
+	list2, err := b.InsertList(ctx, ListRow{Title: "List2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetEntries(ctx, list2, ids); err != nil {
+		t.Fatal(err)
+	}
+	// DeleteTrack after SetEntries in the same batch must restore the trigger and relink list2.
+	if err := b.DeleteTrack(ctx, ids[1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var trigCount int
+	if err := lib.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name='trigger_before_delete_PlaylistEntity'`).Scan(&trigCount); err != nil {
+		t.Fatal(err)
+	}
+	if trigCount != 1 {
+		t.Fatalf("trigger_before_delete_PlaylistEntity count = %d, want 1 after Commit", trigCount)
+	}
+	var e1Next, e3ID int64
+	if err := lib.db.QueryRowContext(ctx, `SELECT nextEntityId FROM PlaylistEntity WHERE listId=? AND trackId=?`, list2, ids[0]).Scan(&e1Next); err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.db.QueryRowContext(ctx, `SELECT id FROM PlaylistEntity WHERE listId=? AND trackId=?`, list2, ids[2]).Scan(&e3ID); err != nil {
+		t.Fatal(err)
+	}
+	if e1Next != e3ID {
+		t.Fatalf("list2 entity relink after DeleteTrack: nextEntityId=%d, want %d", e1Next, e3ID)
+	}
+}
+
+func TestUpdateTrackZeroWritesWhenUnchangedAndMinimalColumnUpdate(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	artHash := sha1.Sum([]byte("rb:/PIONEER/Artwork/00001/a1.jpg"))
+	rows := []TrackRow{{
+		Rel: "Contents/track.mp3",
+		Track: rekordbox.Track{
+			ID:       10,
+			Path:     "/Contents/track.mp3",
+			Title:    "Song A",
+			Artist:   "Artist A",
+			Album:    "Album A",
+			Genre:    "Techno",
+			Comment:  "Note A",
+			Label:    "Label A",
+			Composer: "Comp A",
+			Remixer:  "Rem A",
+			Key:      "8A",
+			Year:     2025,
+			Rating:   60,
+			BPM:      128,
+			Duration: 240,
+			Bitrate:  320,
+			FileSize: 123456,
+		},
+		DirectArtHash: artHash[:],
+	}}
+	ids, _, _, err := BuildLibrary(ctx, dir, "", rows, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lib, err := OpenLibrary(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lib.Close()
+
+	if _, err := lib.db.ExecContext(ctx, `UPDATE Track SET lastEditTime=111 WHERE id=?`, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read-only plan and Batch.UpdateTrack + SetDirectCover must agree on no-op.
+	needTrack, needCover, err := lib.TrackUpdatePlan(ctx, ids[0], rows[0], 60, artHash[:])
+	if err != nil || needTrack || needCover {
+		t.Fatalf("TrackUpdatePlan no-op = (%v, %v, %v), want (false, false, nil)", needTrack, needCover, err)
+	}
+	b, err := lib.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := b.UpdateTrack(ctx, ids[0], rows[0], 60)
+	if err != nil || changed {
+		b.Rollback()
+		t.Fatalf("UpdateTrack no-op = (%v, %v), want (false, nil)", changed, err)
+	}
+	covChanged, err := b.SetDirectCover(ctx, ids[0], artHash[:])
+	if err != nil || covChanged {
+		b.Rollback()
+		t.Fatalf("SetDirectCover no-op = (%v, %v), want (false, nil)", covChanged, err)
+	}
+	if err := b.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var editTime int64
+	if err := lib.db.QueryRowContext(ctx, `SELECT lastEditTime FROM Track WHERE id=?`, ids[0]).Scan(&editTime); err != nil {
+		t.Fatal(err)
+	}
+	if editTime != 111 {
+		t.Fatalf("no-op update moved lastEditTime to %d, want 111", editTime)
+	}
+
+	// Changing only pdbImportKey updates ONLY pdbImportKey without firing Track timestamp trigger.
+	changedRow := rows[0]
+	changedRow.Track.ID = 42
+	needTrack, needCover, err = lib.TrackUpdatePlan(ctx, ids[0], changedRow, 60, artHash[:])
+	if err != nil || !needTrack || needCover {
+		t.Fatalf("TrackUpdatePlan pdbImportKey change = (%v, %v, %v), want (true, false, nil)", needTrack, needCover, err)
+	}
+	b, err = lib.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err = b.UpdateTrack(ctx, ids[0], changedRow, 60)
+	if err != nil || !changed {
+		b.Rollback()
+		t.Fatalf("UpdateTrack pdbImportKey = (%v, %v), want (true, nil)", changed, err)
+	}
+	if err := b.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var gotImportKey int64
+	var gotTitle string
+	if err := lib.db.QueryRowContext(ctx, `SELECT pdbImportKey,title,lastEditTime FROM Track WHERE id=?`, ids[0]).Scan(&gotImportKey, &gotTitle, &editTime); err != nil {
+		t.Fatal(err)
+	}
+	if gotImportKey != 42 || gotTitle != "Song A" || editTime != 111 {
+		t.Fatalf("pdbImportKey-only update got key=%d title=%q lastEditTime=%d, want 42/Song A/111", gotImportKey, gotTitle, editTime)
+	}
+
+	// Analyzed row keeps Engine-owned length/bpm/bitrate/fileBytes even when export differs, while updating title.
+	if _, err := lib.db.ExecContext(ctx, `UPDATE Track SET isAnalyzed=1,length=300 WHERE id=?`, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	analyzedRow := changedRow
+	analyzedRow.Track.Title = "Song A v2"
+	analyzedRow.Track.Duration = 123
+	needTrack, needCover, err = lib.TrackUpdatePlan(ctx, ids[0], analyzedRow, 60, artHash[:])
+	if err != nil || !needTrack || needCover {
+		t.Fatalf("TrackUpdatePlan analyzed title update = (%v, %v, %v), want (true, false, nil)", needTrack, needCover, err)
+	}
+	b, err = lib.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := b.UpdateTrack(ctx, ids[0], analyzedRow, 60); err != nil || !changed {
+		b.Rollback()
+		t.Fatalf("UpdateTrack analyzed = (%v, %v), want (true, nil)", changed, err)
+	}
+	if err := b.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var gotLen int
+	if err := lib.db.QueryRowContext(ctx, `SELECT title,length FROM Track WHERE id=?`, ids[0]).Scan(&gotTitle, &gotLen); err != nil {
+		t.Fatal(err)
+	}
+	if gotTitle != "Song A v2" || gotLen != 300 {
+		t.Fatalf("analyzed UpdateTrack got title=%q length=%d, want Song A v2 / 300", gotTitle, gotLen)
+	}
+}
+
+func TestSetDirectCoverPreservesEmbeddedBlobWithoutOrphanAlbumArtRow(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	rows := []TrackRow{
+		{Rel: "Contents/blob.mp3", Track: rekordbox.Track{ID: 1, Path: "/Contents/blob.mp3", Title: "Blob"}},
+		{Rel: "Contents/nullart.mp3", Track: rekordbox.Track{ID: 2, Path: "/Contents/nullart.mp3", Title: "NullArt"}},
+		{Rel: "Contents/zeroart.mp3", Track: rekordbox.Track{ID: 3, Path: "/Contents/zeroart.mp3", Title: "ZeroArt"}},
+		{Rel: "Contents/stalehash.mp3", Track: rekordbox.Track{ID: 4, Path: "/Contents/stalehash.mp3", Title: "StaleHash"}},
+	}
+	ids, _, _, err := BuildLibrary(ctx, dir, "", rows, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed legacy invalid albumArtId=0 on track 3 with foreign_keys=OFF before OpenLibrary enables them.
+	rawDB, err := sql.Open("sqlite", filepath.Join(dir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.ExecContext(ctx, `UPDATE Track SET albumArtId=0 WHERE id=?`, ids[2]); err != nil {
+		rawDB.Close()
+		t.Fatal(err)
+	}
+	if err := rawDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	lib, err := OpenLibrary(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lib.Close()
+
+	// Link track 1 to a real embedded AlbumArt BLOB; track 2 stays NULL; track 3 has 0; track 4 has stale hash-only art.
+	if _, err := lib.db.ExecContext(ctx, `INSERT INTO AlbumArt(id,hash,albumArt) VALUES(10, X'0102030405060708090a0b0c0d0e0f1011121314', X'ffd8ffe0'),(11, X'1112131415161718191a1b1c1d1e1f2021222324', NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.db.ExecContext(ctx, `UPDATE Track SET albumArtId=10 WHERE id=?`, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.db.ExecContext(ctx, `UPDATE Track SET albumArtId=11 WHERE id=?`, ids[3]); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify EXPLAIN QUERY PLAN for MissingAlbumArtIDs uses covering index_Track_albumArtId.
+	qrows, err := lib.db.QueryContext(ctx, `EXPLAIN QUERY PLAN SELECT id FROM Track WHERE albumArtId IS NULL OR albumArtId <= 0`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plans []string
+	for qrows.Next() {
+		var a, b, c int
+		var d string
+		if err := qrows.Scan(&a, &b, &c, &d); err != nil {
+			qrows.Close()
+			t.Fatal(err)
+		}
+		plans = append(plans, d)
+	}
+	qrows.Close()
+	if !strings.Contains(strings.Join(plans, "; "), "COVERING INDEX index_Track_albumArtId") {
+		t.Fatalf("MissingAlbumArtIDs query plan = %v, want COVERING INDEX index_Track_albumArtId", plans)
+	}
+
+	missing, err := lib.MissingAlbumArtIDs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing[ids[0]] || !missing[ids[1]] || !missing[ids[2]] || missing[ids[3]] || len(missing) != 2 {
+		t.Fatalf("MissingAlbumArtIDs = %v, want {%d, %d}", missing, ids[1], ids[2])
+	}
+	missingRO, err := MissingAlbumArtIDsRO(ctx, filepath.Join(dir, "m.db"))
+	if err != nil || len(missingRO) != 2 || !missingRO[ids[1]] || !missingRO[ids[2]] {
+		t.Fatalf("MissingAlbumArtIDsRO = %v, err=%v", missingRO, err)
+	}
+
+	newHash := sha1.Sum([]byte("rb:/PIONEER/Artwork/00001/new.jpg"))
+	needTrack, needCover, err := lib.TrackUpdatePlan(ctx, ids[0], rows[0], -1, newHash[:])
+	if err != nil || needTrack || needCover {
+		t.Fatalf("TrackUpdatePlan embedded blob track = (%v, %v, %v), want false/false/nil", needTrack, needCover, err)
+	}
+	needTrack, needCover, err = lib.TrackUpdatePlan(ctx, ids[3], rows[3], -1, newHash[:])
+	if err != nil || needTrack || !needCover {
+		t.Fatalf("TrackUpdatePlan stale hash-only track = (%v, %v, %v), want false/true/nil", needTrack, needCover, err)
+	}
+
+	b, err := lib.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := b.SetDirectCover(ctx, ids[0], newHash[:])
+	if err != nil || changed {
+		b.Rollback()
+		t.Fatalf("SetDirectCover on embedded blob = (%v, %v), want (false, nil)", changed, err)
+	}
+	if err := b.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var artRows int
+	if err := lib.db.QueryRowContext(ctx, `SELECT count(*) FROM AlbumArt`).Scan(&artRows); err != nil {
+		t.Fatal(err)
+	}
+	if artRows != 2 {
+		t.Fatalf("SetDirectCover created orphan AlbumArt row on embedded cover: count=%d, want 2", artRows)
+	}
+
+	// Track 2, 3 (NULL / <=0) and track 4 (stale hash-only) must be repaired, clearing MissingAlbumArtIDs.
+	b, err = lib.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{ids[1], ids[2], ids[3]} {
+		if ch, err := b.SetDirectCover(ctx, id, newHash[:]); err != nil || !ch {
+			b.Rollback()
+			t.Fatalf("SetDirectCover row %d = (%v, %v), want (true, nil)", id, ch, err)
+		}
+	}
+	if err := b.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	missingAfter, err := lib.MissingAlbumArtIDs(ctx)
+	if err != nil || len(missingAfter) != 0 {
+		t.Fatalf("MissingAlbumArtIDs after repair = %v, err=%v, want empty", missingAfter, err)
+	}
+}

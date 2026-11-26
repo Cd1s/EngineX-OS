@@ -11,9 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestRecheckArtworkTableWithImageIDColumn(t *testing.T) {
@@ -221,12 +223,79 @@ func fillReflectValue(v reflect.Value, next func() uint64) error {
 	return nil
 }
 
-func assertTrackJSONMatches(t *testing.T, track Track) {
+func pickJSONSentinel(v reflect.Value) string {
+	sentinel := "__BADUTF8__"
+	var check func(reflect.Value)
+	check = func(x reflect.Value) {
+		switch x.Kind() {
+		case reflect.String:
+			for strings.Contains(x.String(), sentinel) {
+				sentinel += "_"
+			}
+		case reflect.Struct:
+			for i := 0; i < x.NumField(); i++ {
+				check(x.Field(i))
+			}
+		case reflect.Slice:
+			for i := 0; i < x.Len(); i++ {
+				check(x.Index(i))
+			}
+		}
+	}
+	check(v)
+	return sentinel
+}
+
+func replaceInvalidUTF8Bytes(s, sentinel string) string {
+	var b strings.Builder
+	for len(s) > 0 {
+		r, n := utf8.DecodeRuneInString(s)
+		if r == utf8.RuneError && n == 1 {
+			b.WriteString(sentinel)
+		} else {
+			b.WriteString(s[:n])
+		}
+		s = s[n:]
+	}
+	return b.String()
+}
+
+// marshalTrackLegacyInvalidUTF8 preserves Go <1.27 invalid-UTF-8 `\ufffd` escaping on top of
+// stdlib json.Marshal while keeping valid U+FFFD (`\xef\xbf\xbd`) and every other field identical.
+func marshalTrackLegacyInvalidUTF8(t *testing.T, track Track) []byte {
 	t.Helper()
+	if len(track.Cues) > 0 {
+		track.Cues = append([]Cue(nil), track.Cues...)
+	}
+	sentinel := pickJSONSentinel(reflect.ValueOf(track))
+	var rewrite func(reflect.Value)
+	rewrite = func(x reflect.Value) {
+		switch x.Kind() {
+		case reflect.String:
+			if s := x.String(); !utf8.ValidString(s) {
+				x.SetString(replaceInvalidUTF8Bytes(s, sentinel))
+			}
+		case reflect.Struct:
+			for i := 0; i < x.NumField(); i++ {
+				rewrite(x.Field(i))
+			}
+		case reflect.Slice:
+			for i := 0; i < x.Len(); i++ {
+				rewrite(x.Index(i))
+			}
+		}
+	}
+	rewrite(reflect.ValueOf(&track).Elem())
 	want, err := json.Marshal(track)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return bytes.ReplaceAll(want, []byte(sentinel), []byte(`\ufffd`))
+}
+
+func assertTrackJSONMatches(t *testing.T, track Track) {
+	t.Helper()
+	want := marshalTrackLegacyInvalidUTF8(t, track)
 	got := appendTrackJSON(nil, track)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("track JSON mismatch\n got: %s\nwant: %s", got, want)
@@ -253,6 +322,7 @@ func TestTrackJSONDifferentialSpecialValues(t *testing.T) {
 	}
 	for _, value := range []string{
 		"ASCII fast path", "line\u2028paragraph\u2029", string([]byte{0xc0, 0x80}), string([]byte{0xed, 0xa0, 0x80}),
+		"ok\ufffd" + string([]byte{0xff}) + "end",
 	} {
 		assertTrackJSONMatches(t, Track{ID: 3, Path: "/track.mp3", Title: value})
 	}

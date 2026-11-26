@@ -194,6 +194,191 @@ static void *hold_shared_lock(void *arg) {
 
 static int starts(const char *s, const char *prefix) { return s && !strncmp(s, prefix, strlen(prefix)); }
 
+static int fake_sched_rr(void) { return SCHED_RR; }
+
+struct od_mock {
+    int listen_fd;
+    int stop;
+    int requests;
+    int status;
+    int delay_ms;
+    char key[256];
+    char wr[64];
+    char wrnm[64];
+    char row[64];
+    const unsigned char *body;
+    size_t body_n;
+    char last_req[2048];
+    pthread_mutex_t mu;
+};
+
+static void *od_mock_serve(void *arg) {
+    struct od_mock *m = arg;
+    for (;;) {
+        struct pollfd pfd = {m->listen_fd, POLLIN, 0};
+        int rc = poll(&pfd, 1, 50);
+        if (__atomic_load_n(&m->stop, __ATOMIC_ACQUIRE)) break;
+        if (rc <= 0) continue;
+        int cfd = accept(m->listen_fd, NULL, NULL);
+        if (cfd < 0) continue;
+        char reqbuf[2048];
+        memset(reqbuf, 0, sizeof reqbuf);
+        ssize_t n = recv(cfd, reqbuf, sizeof reqbuf - 1, 0);
+        if (n < 0) n = 0;
+        reqbuf[n] = 0;
+
+        pthread_mutex_lock(&m->mu);
+        m->requests++;
+        snprintf(m->last_req, sizeof m->last_req, "%s", reqbuf);
+        int status = m->status;
+        int delay_ms = m->delay_ms;
+        char key[256], wr[64], wrnm[64], row[64];
+        snprintf(key, sizeof key, "%s", m->key);
+        snprintf(wr, sizeof wr, "%s", m->wr);
+        snprintf(wrnm, sizeof wrnm, "%s", m->wrnm);
+        snprintf(row, sizeof row, "%s", m->row);
+        const unsigned char *body = m->body;
+        size_t body_n = m->body_n;
+        pthread_mutex_unlock(&m->mu);
+
+        if (delay_ms > 0) {
+            struct timespec ts = {delay_ms / 1000, (long)(delay_ms % 1000) * 1000000L};
+            nanosleep(&ts, NULL);
+        }
+        char hdr[1024];
+        int hlen = 0;
+        if (status == 200) {
+            hlen = snprintf(hdr, sizeof hdr,
+                            "HTTP/1.1 200 OK\r\n"
+                            "Content-Type: application/octet-stream\r\n"
+                            "Content-Length: %zu\r\n"
+                            "X-RB-Key: %s\r\n"
+                            "X-RB-Written: %s\r\n"
+                            "X-RB-Written-NoMain: %s\r\n"
+                            "X-RB-Row: %s\r\n"
+                            "X-RB-Active-Loops: 3\r\n"
+                            "X-RB-Rules: 5\r\n"
+                            "Connection: close\r\n\r\n",
+                            body_n, key, wr, wrnm, row);
+            (void)!send(cfd, hdr, (size_t)hlen, MSG_NOSIGNAL);
+            if (body && body_n) (void)!send(cfd, body, body_n, MSG_NOSIGNAL);
+        } else {
+            hlen = snprintf(hdr, sizeof hdr,
+                            "HTTP/1.1 %d Error\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                            status);
+            (void)!send(cfd, hdr, (size_t)hlen, MSG_NOSIGNAL);
+        }
+        close(cfd);
+    }
+    return NULL;
+}
+
+struct raw_http_arg {
+    int listen_fd;
+    const char *reply;
+};
+
+static void *raw_http_once(void *arg) {
+    struct raw_http_arg *a = arg;
+    int cfd = accept(a->listen_fd, NULL, NULL);
+    if (cfd >= 0) {
+        char reqb[1024];
+        (void)!recv(cfd, reqb, sizeof reqb, 0);
+        (void)!send(cfd, a->reply, strlen(a->reply), MSG_NOSIGNAL);
+        close(cfd);
+    }
+    return NULL;
+}
+
+struct od_race_arg {
+    sqlite3 *db;
+    const char *path;
+    long long out_id;
+    char res[96];
+    int set_gui_name;
+    long long perf_id;
+};
+
+static void *od_race_worker(void *arg) {
+    struct od_race_arg *a = arg;
+#ifdef __linux__
+    if (a->set_gui_name == 1) prctl(PR_SET_NAME, (unsigned long)"SceneGraph", 0, 0, 0);
+    if (a->set_gui_name == 2) prctl(PR_SET_NAME, (unsigned long)"Thread (pooled)", 0, 0, 0);
+#endif
+    const char *r = a->perf_id > 0
+                        ? sc_rbs_fill_perf(&raw_engine, a->db, sqlite3_db_filename(a->db, "main"), a->perf_id)
+                        : sc_rbs_fill_path(&raw_engine, a->db, sqlite3_db_filename(a->db, "main"), a->path, -1, &a->out_id);
+    snprintf(a->res, sizeof a->res, "%s", r ? r : "");
+    return NULL;
+}
+
+static const char *load_perf(sqlite3 *db, long long id) {
+    const char *main = sc_rbs_drive(&engine, db);
+    assert(main);
+    return sc_rbs_fill_perf(&engine, db, main, id);
+}
+
+struct gui_guard_arg {
+    const char *thr_name;
+    sqlite3 *db;
+    const char *main_db;
+    const char *path;
+    long long perf_id;
+    int do_track_fill;
+    const char *want_res;
+    int ok;
+};
+
+static void *counted_gui_guard_worker(void *arg) {
+    struct gui_guard_arg *a = arg;
+#ifdef __linux__
+    prctl(PR_SET_NAME, (unsigned long)a->thr_name, 0, 0, 0);
+#endif
+    long long out_id = 0;
+    const char *r = NULL;
+    if (a->do_track_fill) {
+        r = sc_rbs_fill_track(&engine, a->db, a->main_db, a->perf_id);
+    } else if (a->perf_id > 0) {
+        r = sc_rbs_fill_perf(&engine, a->db, a->main_db, a->perf_id);
+    } else {
+        r = sc_rbs_fill_path(&raw_engine, a->db, a->main_db, a->path, -1, &out_id);
+    }
+    a->ok = (r && !strcmp(r, a->want_res));
+    return NULL;
+}
+
+struct raw_bytes_arg {
+    int listen_fd;
+    const char *reply;
+    size_t reply_len;
+    size_t chunk_len;
+    int chunk_delay_ms;
+    int stop;
+};
+
+static void *raw_bytes_once(void *arg) {
+    struct raw_bytes_arg *a = arg;
+    int cfd = accept(a->listen_fd, NULL, NULL);
+    if (cfd >= 0) {
+        char reqb[1024];
+        (void)!recv(cfd, reqb, sizeof reqb, 0);
+        size_t sent = 0;
+        while (sent < a->reply_len && !__atomic_load_n(&a->stop, __ATOMIC_ACQUIRE)) {
+            size_t step = a->reply_len - sent;
+            if (a->chunk_len > 0 && step > a->chunk_len) step = a->chunk_len;
+            ssize_t w = send(cfd, a->reply + sent, step, MSG_NOSIGNAL);
+            if (w <= 0) break;
+            sent += (size_t)w;
+            if (a->chunk_delay_ms > 0 && sent < a->reply_len) {
+                struct timespec ts = {0, (long)a->chunk_delay_ms * 1000000L};
+                nanosleep(&ts, NULL);
+            }
+        }
+        close(cfd);
+    }
+    return NULL;
+}
+
 #define ROW "SELECT hex(trackData)||'/'||hex(overviewWaveFormData)||'/'||hex(beatData)||'/'||hex(quickCues)||'/'||hex(loops)||'/'||" \
             "ifnull(activeOnLoadLoops,'n')||'/'||ifnull(thirdPartySourceId,'n')||'/'||isAnalyzed FROM PerformanceData JOIN Track ON id = trackId WHERE trackId = %lld"
 #define FILLED "5444/4F56/4254/5143/4C50/3/n/1"     // TD, OV, BT, QC, LP, active 3, no mark, analysed
@@ -259,6 +444,9 @@ int main(int argc, char **argv) {
     sc_rbx_drives = drives;
     snprintf(root, sizeof root, "%s/stage", dir);
     sc_rbs_root = root;
+    sc_rbs_ondemand_sock = "";
+    sc_rbs_ondemand_url = NULL;
+    sc_rbs_ondemand_env_init = 1;
     sc_rbx_verbose = 1;
 
     sqlite3 *db = stick("REKORDBOX", "lib-a", "lib-a");
@@ -300,7 +488,7 @@ int main(int argc, char **argv) {
     f = fopen(path, "r");
     assert(f && fgets(journal, sizeof journal, f) && !fclose(f));
     char want[512];
-    snprintf(want, sizeof want, "{\"id\":%lld,\"k\":\"contents/artist/track one.mp3\",\"wr\":\"AAECAwQFBgcICQoLDA0ODw==\",\"v\":5,\"w\":\"row-lib-a\",\"at\":", t1);
+    snprintf(want, sizeof want, "{\"id\":%lld,\"k\":\"contents/artist/track one.mp3\",\"wr\":\"AAECAwQFBgcICQoLDA0ODw==\",\"al\":3,\"v\":5,\"w\":\"row-lib-a\",\"at\":", t1);
     assert(starts(journal, want) && journal[strlen(journal) - 1] == '\n');
     // Without the trace a fill still says so.
     sc_rbx_verbose = 0;
@@ -667,6 +855,531 @@ int main(int argc, char **argv) {
     assert(!strcmp(text(db, ROW, t24), NOTHING));
     assert(sqlite3_exec(db, "DROP TRIGGER fail_track2;", NULL, NULL, NULL) == SQLITE_OK);
     assert(starts(load(db, t23), "filled (") && !strcmp(text(db, ROW, t23), FILLED));
+
+    // --- On-demand direct-read tests (no background pass, no stage dir required) ---------------
+    {
+        // Point sc_rbs_root at a directory that DOES NOT EXIST YET: proves on-demand works with
+        // zero pre-existing /data/enginex/rb-stage directory and creates filled.jsonl cleanly.
+        char od_stage[160], od_sock[160];
+        snprintf(od_stage, sizeof od_stage, "%s/no-stage-yet/rb-stage", dir);
+        snprintf(od_sock, sizeof od_sock, "%s/od.sock", dir);
+        sc_rbs_root = od_stage;
+        sc_rbs_ondemand_reset();
+
+        int ufd = socket(AF_UNIX, SOCK_STREAM, 0);
+        assert(ufd >= 0);
+        struct sockaddr_un su;
+        memset(&su, 0, sizeof su);
+        su.sun_family = AF_UNIX;
+        assert(strlen(od_sock) < sizeof su.sun_path);
+        memcpy(su.sun_path, od_sock, strlen(od_sock) + 1);
+        assert(!bind(ufd, (struct sockaddr *)&su, sizeof su));
+        assert(!listen(ufd, 16));
+
+        struct od_mock mock;
+        memset(&mock, 0, sizeof mock);
+        mock.listen_fd = ufd;
+        mock.status = 200;
+        snprintf(mock.key, sizeof mock.key, "contents/ondemand1.mp3");
+        snprintf(mock.wr, sizeof mock.wr, "AAECAwQFBgcICQoLDA0ODw==");
+        snprintf(mock.wrnm, sizeof mock.wrnm, "EBESExQVFhcYGRobHB0eHw==");
+        snprintf(mock.row, sizeof mock.row, "row-od-1");
+        mock.body = bin;
+        mock.body_n = bin_n;
+        pthread_mutex_init(&mock.mu, NULL);
+        pthread_t sth;
+        assert(!pthread_create(&sth, NULL, od_mock_serve, &mock));
+
+        sc_rbs_ondemand_sock = od_sock;
+        sc_rbs_ondemand_url = NULL;
+        sc_rbs_ondemand_timeout_ms = 1500;
+
+        // 1. Unstaged track with NO stage directory at all fills on demand over AF_UNIX and creates filled.jsonl with wr + wrnm.
+        long long od1 = track(db, "../Contents/OnDemand1.mp3", 1, 1);
+        out_id = 0;
+        const char *od_res = load_path(db, "../Contents/OnDemand1.mp3", -1, &out_id);
+        assert(starts(od_res, "filled on-demand (") && out_id == od1);
+        assert(!strcmp(text(db, ROW, od1), FILLED));
+        assert(mock.requests == 1);
+        char od_jpath[PATH_MAX], od_jline[1024];
+        snprintf(od_jpath, sizeof od_jpath, "%s/lib-a/%s", od_stage, SC_RBS_JOURNAL);
+        FILE *od_jf = fopen(od_jpath, "r");
+        assert(od_jf && fgets(od_jline, sizeof od_jline, od_jf));
+        assert(!fclose(od_jf));
+        assert(strstr(od_jline, "\"k\":\"contents/ondemand1.mp3\""));
+        assert(strstr(od_jline, "\"wr\":\"AAECAwQFBgcICQoLDA0ODw==\""));
+        assert(strstr(od_jline, "\"wrnm\":\"EBESExQVFhcYGRobHB0eHw==\""));
+        assert(strstr(od_jline, "\"al\":3"));
+
+        // 2. Second load of already-filled track does ZERO IPC.
+        int reqs_before = mock.requests;
+        assert(!strcmp(load_path(db, "../Contents/OnDemand1.mp3", -1, &out_id), "skipped (row has analysis)"));
+        assert(mock.requests == reqs_before);
+
+        // 3. Browse scan (sc_rbs_fill_track: Track WHERE t.id = ?) NEVER calls on-demand IPC.
+        //    (od_stage/lib-a now exists because test #1 wrote filled.jsonl, with no index.jsonl.)
+        long long od_browse = track(db, "../Contents/OnDemandBrowseOnly.mp3", 1, 1);
+        reqs_before = mock.requests;
+        statements = 0;
+        assert(!strcmp(load(db, od_browse), "skipped (nothing staged for this library)"));
+        assert(mock.requests == reqs_before && statements == 0);
+        assert(!strcmp(text(db, ROW, od_browse), INSERTED));
+
+        // 4. PerformanceData WHERE trackId = ? (sc_rbs_fill_perf) DOES fill on demand as fallback.
+        pthread_mutex_lock(&mock.mu);
+        snprintf(mock.key, sizeof mock.key, "contents/ondemandbrowseonly.mp3");
+        pthread_mutex_unlock(&mock.mu);
+        assert(starts(load_perf(db, od_browse), "filled on-demand ("));
+        assert(!strcmp(text(db, ROW, od_browse), FILLED));
+        assert(mock.requests == reqs_before + 1);
+
+        // 5. Non-ASCII path works end-to-end via Go FoldPath key returned in X-RB-Key.
+        long long od_utf = track(db, "../Contents/OnDemand-Caf\xc3\xa9.mp3", 1, 1);
+        pthread_mutex_lock(&mock.mu);
+        snprintf(mock.key, sizeof mock.key, "contents/ondemand-caf\xc3\xa9.mp3");
+        pthread_mutex_unlock(&mock.mu);
+        out_id = 0;
+        assert(starts(load_path(db, "../Contents/OnDemand-Caf\xc3\xa9.mp3", -1, &out_id), "filled on-demand (") && out_id == od_utf);
+        assert(!strcmp(text(db, ROW, od_utf), FILLED));
+
+        // 6. Degraded (422) populates negative cache: second call skips with 0 SQL and 0 IPC.
+        long long od_deg = track(db, "../Contents/OnDemandDegraded.mp3", 1, 1);
+        pthread_mutex_lock(&mock.mu);
+        mock.status = 422;
+        pthread_mutex_unlock(&mock.mu);
+        reqs_before = mock.requests;
+        assert(!strcmp(load_path(db, "../Contents/OnDemandDegraded.mp3", -1, &out_id), "skipped (ondemand degraded/missing)"));
+        assert(mock.requests == reqs_before + 1);
+        statements = 0;
+        assert(!strcmp(load_path(db, "../Contents/OnDemandDegraded.mp3", -1, &out_id), "skipped (ondemand cached miss)"));
+        assert(mock.requests == reqs_before + 1 && statements == 0);
+        assert(!strcmp(text(db, ROW, od_deg), INSERTED));
+
+        // 7. Timeout cap: 500 ms server delay with 120 ms timeout aborts promptly and leaves DB untouched.
+        long long od_to = track(db, "../Contents/OnDemandTimeout.mp3", 1, 1);
+        pthread_mutex_lock(&mock.mu);
+        mock.status = 200;
+        mock.delay_ms = 400;
+        pthread_mutex_unlock(&mock.mu);
+        sc_rbs_ondemand_timeout_ms = 120;
+        clock_gettime(CLOCK_MONOTONIC, &a);
+        assert(!strcmp(load_path(db, "../Contents/OnDemandTimeout.mp3", -1, &out_id), "ondemand fetch failed"));
+        clock_gettime(CLOCK_MONOTONIC, &b);
+        double to_ms = (double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6;
+        assert(to_ms < 350.0 && !strcmp(text(db, ROW, od_to), INSERTED) && sqlite3_get_autocommit(db) == 1);
+        sc_rbs_ondemand_timeout_ms = 1500;
+        pthread_mutex_lock(&mock.mu);
+        mock.delay_ms = 0;
+        pthread_mutex_unlock(&mock.mu);
+
+        // 8. RT thread safety guard (SCHED_RR): immediate bailout, 0 SQL, 0 IPC.
+        long long od_rt = track(db, "../Contents/OnDemandRT.mp3", 1, 1);
+        reqs_before = mock.requests;
+        statements = 0;
+        sc_rbs_sched_override = fake_sched_rr;
+        assert(!strcmp(load_path(db, "../Contents/OnDemandRT.mp3", -1, &out_id), "skipped (rt thread)"));
+        sc_rbs_sched_override = NULL;
+        assert(mock.requests == reqs_before && statements == 0 && !strcmp(text(db, ROW, od_rt), INSERTED));
+
+#ifdef __linux__
+        // 9. GUI thread (SceneGraph) and browse worker (Thread (pooled) querying PerformanceData)
+        //    safety guards: immediate bailout, 0 SQL, 0 IPC.
+        struct od_race_arg gui_arg = {db, "../Contents/OnDemandRT.mp3", 0, "", 1, 0};
+        reqs_before = mock.requests;
+        statements = 0;
+        pthread_t gth;
+        assert(!pthread_create(&gth, NULL, od_race_worker, &gui_arg));
+        assert(!pthread_join(gth, NULL));
+        assert(!strcmp(gui_arg.res, "skipped (gui thread)") && mock.requests == reqs_before && statements == 0);
+
+        struct od_race_arg brw_arg = {db, NULL, 0, "", 2, od_rt};
+        reqs_before = mock.requests;
+        statements = 0;
+        pthread_t bth;
+        assert(!pthread_create(&bth, NULL, od_race_worker, &brw_arg));
+        assert(!pthread_join(bth, NULL));
+        assert(!strcmp(brw_arg.res, "skipped (browse thread)") && mock.requests == reqs_before && statements == 0 &&
+               !strcmp(text(db, ROW, od_rt), INSERTED));
+#endif
+
+        // 10. Concurrent 2-thread load race (TrackLoad1 + J:Searchingtrac on 2 separate SQLite connections):
+        //     must coalesce to EXACTLY 1 HTTP request and both threads must see FILLED on return.
+        long long od_race = track(db, "../Contents/OnDemandRace.mp3", 1, 1);
+        sqlite3 *db_r1 = NULL, *db_r2 = NULL;
+        assert(sqlite3_open(sqlite3_db_filename(db, "main"), &db_r1) == SQLITE_OK);
+        assert(sqlite3_open(sqlite3_db_filename(db, "main"), &db_r2) == SQLITE_OK);
+        assert(sqlite3_busy_timeout(db_r1, 500) == SQLITE_OK);
+        assert(sqlite3_busy_timeout(db_r2, 500) == SQLITE_OK);
+        pthread_mutex_lock(&mock.mu);
+        mock.status = 200;
+        mock.delay_ms = 80;
+        snprintf(mock.key, sizeof mock.key, "contents/ondemandrace.mp3");
+        pthread_mutex_unlock(&mock.mu);
+        reqs_before = mock.requests;
+        struct od_race_arg ra1 = {db_r1, "../Contents/OnDemandRace.mp3", 0, "", 0, 0};
+        struct od_race_arg ra2 = {db_r2, "../Contents/OnDemandRace.mp3", 0, "", 0, 0};
+        pthread_t rt1, rt2;
+        assert(!pthread_create(&rt1, NULL, od_race_worker, &ra1));
+        assert(!pthread_create(&rt2, NULL, od_race_worker, &ra2));
+        assert(!pthread_join(rt1, NULL));
+        assert(!pthread_join(rt2, NULL));
+        assert(mock.requests == reqs_before + 1);
+        int one_filled = (starts(ra1.res, "filled on-demand (") && !strcmp(ra2.res, "skipped (row has analysis)")) ||
+                         (starts(ra2.res, "filled on-demand (") && !strcmp(ra1.res, "skipped (row has analysis)"));
+        assert(one_filled && ra1.out_id == od_race && ra2.out_id == od_race);
+        assert(!strcmp(text(db, ROW, od_race), FILLED));
+        sqlite3_close(db_r1);
+        sqlite3_close(db_r2);
+
+        __atomic_store_n(&mock.stop, 1, __ATOMIC_RELEASE);
+        assert(!pthread_join(sth, NULL));
+        close(ufd);
+        unlink(od_sock);
+        pthread_mutex_destroy(&mock.mu);
+
+        // 11. Loopback TCP (AF_INET) override works identically.
+        int tfd = socket(AF_INET, SOCK_STREAM, 0);
+        assert(tfd >= 0);
+        int one = 1;
+        setsockopt(tfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        struct sockaddr_in sin;
+        memset(&sin, 0, sizeof sin);
+        sin.sin_family = AF_INET;
+        sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        sin.sin_port = 0;
+        assert(!bind(tfd, (struct sockaddr *)&sin, sizeof sin));
+        socklen_t slen = sizeof sin;
+        assert(!getsockname(tfd, (struct sockaddr *)&sin, &slen));
+        assert(!listen(tfd, 8));
+        char tcp_url[128];
+        snprintf(tcp_url, sizeof tcp_url, "http://127.0.0.1:%u%s", (unsigned)ntohs(sin.sin_port), SC_RBS_ONDEMAND_ROUTE);
+
+        struct od_mock tmock;
+        memset(&tmock, 0, sizeof tmock);
+        tmock.listen_fd = tfd;
+        tmock.status = 200;
+        snprintf(tmock.key, sizeof tmock.key, "contents/ondemandtcp.mp3");
+        snprintf(tmock.wr, sizeof tmock.wr, "AAECAwQFBgcICQoLDA0ODw==");
+        snprintf(tmock.wrnm, sizeof tmock.wrnm, "EBESExQVFhcYGRobHB0eHw==");
+        snprintf(tmock.row, sizeof tmock.row, "row-od-tcp");
+        tmock.body = bin;
+        tmock.body_n = bin_n;
+        pthread_mutex_init(&tmock.mu, NULL);
+        assert(!pthread_create(&sth, NULL, od_mock_serve, &tmock));
+
+        sc_rbs_ondemand_sock = "";
+        sc_rbs_ondemand_url = tcp_url;
+        long long od_tcp = track(db, "../Contents/OnDemandTCP.mp3", 1, 1);
+        out_id = 0;
+        assert(starts(load_path(db, "../Contents/OnDemandTCP.mp3", -1, &out_id), "filled on-demand (") && out_id == od_tcp);
+        assert(!strcmp(text(db, ROW, od_tcp), FILLED) && tmock.requests == 1);
+
+        __atomic_store_n(&tmock.stop, 1, __ATOMIC_RELEASE);
+        assert(!pthread_join(sth, NULL));
+        close(tfd);
+        pthread_mutex_destroy(&tmock.mu);
+        sc_rbs_ondemand_url = NULL;
+    }
+
+    // 12. Locale-independent BPM parse, 16-slot inflight full (-2), and strict Content-Length rejection
+    //     on a pthread server (safe under ASan).
+    {
+        assert(sc_rbs_parse_pos_double("128.5000") > 128.49 && sc_rbs_parse_pos_double("128.5000") < 128.51);
+        assert(sc_rbs_parse_pos_double("128,5000") == 0.0);
+        long long peer = 0;
+        int claimed[SC_RBS_INFLIGHT_SLOTS];
+        for (int i = 0; i < SC_RBS_INFLIGHT_SLOTS; i++) {
+            claimed[i] = sc_rbs_inflight_enter((uint64_t)(9000 + i), sc_rbs_mono_ns() + 1000000000LL, &peer);
+            assert(claimed[i] >= 0);
+        }
+        assert(sc_rbs_inflight_enter(99999ULL, sc_rbs_mono_ns() + 1000000000LL, &peer) == -2);
+        for (int i = 0; i < SC_RBS_INFLIGHT_SLOTS; i++) sc_rbs_inflight_leave(claimed[i], 0, 0);
+
+        struct sc_rbs_line bad_l;
+        int bad_status = 0;
+        unsigned char *bad_body = NULL;
+        size_t bad_bn = 0;
+        struct sc_rbs_row bad_r;
+        memset(&bad_r, 0, sizeof bad_r);
+        snprintf(bad_r.path, sizeof bad_r.path, "../Contents/BadCL.mp3");
+        bad_r.id = 1;
+
+        int bfd = socket(AF_INET, SOCK_STREAM, 0);
+        assert(bfd >= 0);
+        int one2 = 1;
+        setsockopt(bfd, SOL_SOCKET, SO_REUSEADDR, &one2, sizeof one2);
+        struct sockaddr_in bsin;
+        memset(&bsin, 0, sizeof bsin);
+        bsin.sin_family = AF_INET;
+        bsin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        assert(!bind(bfd, (struct sockaddr *)&bsin, sizeof bsin));
+        socklen_t bslen = sizeof bsin;
+        assert(!getsockname(bfd, (struct sockaddr *)&bsin, &bslen));
+        assert(!listen(bfd, 4));
+        char burl[128];
+        snprintf(burl, sizeof burl, "http://127.0.0.1:%u%s", (unsigned)ntohs(bsin.sin_port), SC_RBS_ONDEMAND_ROUTE);
+        sc_rbs_ondemand_url = burl;
+
+        const char *bad_replies[2] = {
+            "HTTP/1.1 200 OK\r\nContent-Length: 4294967301\r\nX-RB-Key: k\r\nX-RB-Written: AAEC\r\nX-RB-Rules: 5\r\n\r\nRBXA1",
+            "HTTP/1.1 200 OK\r\nContent-Length: abc\r\n\r\n",
+        };
+        for (int k = 0; k < 2; k++) {
+            struct raw_http_arg ha = {bfd, bad_replies[k]};
+            pthread_t bt;
+            assert(!pthread_create(&bt, NULL, raw_http_once, &ha));
+            bad_body = NULL;
+            bad_bn = 0;
+            bad_status = 0;
+            assert(sc_rbs_ondemand_fetch(sqlite3_db_filename(db, "main"), "lib-a", &bad_r, sc_rbs_mono_ns() + 500000000LL, &bad_l, &bad_body, &bad_bn, &bad_status) < 0);
+            assert(bad_body == NULL && bad_bn == 0);
+            assert(!pthread_join(bt, NULL));
+        }
+        sc_rbs_ondemand_url = NULL;
+        close(bfd);
+        (void)bad_l;
+        (void)bad_status;
+    }
+
+    // 13. Review proof tests: fail on f65d4fdf for unfixed invariants (Findings 1 & 3).
+    {
+        int review_failures = 0;
+        const char *main_db = sqlite3_db_filename(db, "main");
+        long long od_gui = track(db, "../Contents/ReviewStageGUI.mp3", 1, 1);
+        sc_rbs_root = root;
+        sc_rbs_ondemand_sock = "";
+        sc_rbs_ondemand_url = "http://127.0.0.1:1" SC_RBS_ONDEMAND_ROUTE;
+
+        // Proof A (Finding 1): GUI threads (SceneGraph, EMain, EPlanckApp, QSGRenderThread) and browse
+        // threads (Thread (pooled)) must bail BEFORE any stat/access/malloc/sc_rbs_mu/snapshot read/SQLite
+        // in sc_rbs_fill_perf, sc_rbs_fill_path, AND sc_rbs_fill_track. Holding sc_rbs_mu proves zero mutex lock.
+        const struct {
+            const char *thr;
+            const char *want;
+        } thr_cases[] = {
+            {"SceneGraph", "skipped (gui thread)"},
+            {"EMain", "skipped (gui thread)"},
+            {"EPlanckApp", "skipped (gui thread)"},
+            {"QSGRenderThread", "skipped (gui thread)"},
+            {"Thread (pooled)", "skipped (browse thread)"},
+        };
+        pthread_mutex_lock(&sc_rbs_mu);
+        for (size_t i = 0; i < sizeof thr_cases / sizeof *thr_cases; i++) {
+            for (int call_kind = 0; call_kind < 3; call_kind++) {
+                statements = 0;
+                struct gui_guard_arg ga = {
+                    thr_cases[i].thr,
+                    db,
+                    main_db,
+                    call_kind == 2 ? "../Contents/ReviewStageGUI.mp3" : NULL,
+                    call_kind == 2 ? 0 : od_gui,
+                    call_kind == 1,
+                    thr_cases[i].want,
+                    0,
+                };
+                pthread_t th;
+                assert(!pthread_create(&th, NULL, counted_gui_guard_worker, &ga));
+                assert(!pthread_join(th, NULL));
+                if (!ga.ok || statements != 0) {
+                    fprintf(stderr, "REVIEW PROOF FAIL (Finding 1): %s kind=%d ok=%d statements=%d\n",
+                            thr_cases[i].thr, call_kind, ga.ok, statements);
+                    review_failures++;
+                }
+            }
+        }
+        pthread_mutex_unlock(&sc_rbs_mu);
+
+        // Proof B (Finding 3): >16 KiB header bypass and per-step deadline enforcement in sc_rbs_ondemand_fetch.
+        struct sc_rbs_line rev_l;
+        int rev_status = 0;
+        unsigned char *rev_body = NULL;
+        size_t rev_bn = 0;
+        struct sc_rbs_row rev_r;
+        memset(&rev_r, 0, sizeof rev_r);
+        snprintf(rev_r.path, sizeof rev_r.path, "../Contents/ReviewHTTP.mp3");
+        rev_r.id = 1;
+
+        int hfd = socket(AF_INET, SOCK_STREAM, 0);
+        assert(hfd >= 0);
+        int one3 = 1;
+        setsockopt(hfd, SOL_SOCKET, SO_REUSEADDR, &one3, sizeof one3);
+        struct sockaddr_in hsin;
+        memset(&hsin, 0, sizeof hsin);
+        hsin.sin_family = AF_INET;
+        hsin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        assert(!bind(hfd, (struct sockaddr *)&hsin, sizeof hsin));
+        socklen_t hslen = sizeof hsin;
+        assert(!getsockname(hfd, (struct sockaddr *)&hsin, &hslen));
+        assert(!listen(hfd, 4));
+        char hurl[128];
+        snprintf(hurl, sizeof hurl, "http://127.0.0.1:%u%s", (unsigned)ntohs(hsin.sin_port), SC_RBS_ONDEMAND_ROUTE);
+        sc_rbs_ondemand_url = hurl;
+
+        // Proof B1: >16 KiB HTTP headers delivered in one recv() (< 32 KiB) must be rejected.
+        size_t pad_len = 16500;
+        char *big_hdr = malloc(pad_len + 512 + bin_n);
+        assert(big_hdr);
+        int hlen = snprintf(big_hdr, pad_len + 512,
+                            "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nX-RB-Key: k\r\nX-RB-Written: AAEC\r\nX-RB-Rules: 5\r\nX-Pad: ",
+                            bin_n);
+        memset(big_hdr + hlen, 'A', pad_len);
+        memcpy(big_hdr + hlen + pad_len, "\r\n\r\n", 4);
+        memcpy(big_hdr + hlen + pad_len + 4, bin, bin_n);
+        size_t big_tot = (size_t)hlen + pad_len + 4 + bin_n;
+        struct raw_bytes_arg bha = {hfd, big_hdr, big_tot, 0, 0, 0};
+        pthread_t bht;
+        assert(!pthread_create(&bht, NULL, raw_bytes_once, &bha));
+        int rc_big = sc_rbs_ondemand_fetch(main_db, "lib-a", &rev_r,
+                                           sc_rbs_mono_ns() + 500000000LL, &rev_l, &rev_body, &rev_bn, &rev_status);
+        assert(!pthread_join(bht, NULL));
+        free(big_hdr);
+        if (rc_big == 0) {
+            fprintf(stderr, "REVIEW PROOF FAIL (Finding 3): >16 KiB header (%zu bytes) accepted (status=%d body=%zu)\n",
+                    (size_t)hlen + pad_len + 4, rev_status, rev_bn);
+            free(rev_body);
+            rev_body = NULL;
+            review_failures++;
+        }
+
+        // Proof B2a: Already-expired deadline against an immediate 200 OK server must fail immediately.
+        char ok_reply[512];
+        int ok_hlen = snprintf(ok_reply, sizeof ok_reply,
+                               "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nX-RB-Key: k\r\nX-RB-Written: AAEC\r\nX-RB-Rules: 5\r\n\r\n",
+                               bin_n);
+        assert(ok_hlen > 0 && (size_t)ok_hlen + bin_n <= sizeof ok_reply);
+        memcpy(ok_reply + ok_hlen, bin, bin_n);
+        struct raw_bytes_arg expa = {hfd, ok_reply, (size_t)ok_hlen + bin_n, 0, 0, 0};
+        pthread_t expt;
+        assert(!pthread_create(&expt, NULL, raw_bytes_once, &expa));
+        int rc_exp = sc_rbs_ondemand_fetch(main_db, "lib-a", &rev_r,
+                                           sc_rbs_mono_ns() - 1000LL, &rev_l, &rev_body, &rev_bn, &rev_status);
+        assert(!pthread_join(expt, NULL));
+        if (rc_exp == 0) {
+            fprintf(stderr, "REVIEW PROOF FAIL (Finding 3): expired deadline accepted immediate HTTP 200\n");
+            free(rev_body);
+            rev_body = NULL;
+            review_failures++;
+        }
+
+        // Proof B2b: Slow 1-byte header trickle (5 ms/byte) must fail when deadline passes mid-stream.
+        struct raw_bytes_arg trick = {hfd, ok_reply, (size_t)ok_hlen + bin_n, 1, 5, 0};
+        pthread_t trt;
+        assert(!pthread_create(&trt, NULL, raw_bytes_once, &trick));
+        struct timespec t_start, t_end;
+        clock_gettime(CLOCK_MONOTONIC, &t_start);
+        int rc_trick = sc_rbs_ondemand_fetch(main_db, "lib-a", &rev_r,
+                                             sc_rbs_mono_ns() + 45000000LL, &rev_l, &rev_body, &rev_bn, &rev_status);
+        clock_gettime(CLOCK_MONOTONIC, &t_end);
+        __atomic_store_n(&trick.stop, 1, __ATOMIC_RELEASE);
+        assert(!pthread_join(trt, NULL));
+        double trick_ms = (double)(t_end.tv_sec - t_start.tv_sec) * 1e3 + (double)(t_end.tv_nsec - t_start.tv_nsec) / 1e6;
+        if (rc_trick == 0 || trick_ms > 200.0) {
+            fprintf(stderr, "REVIEW PROOF FAIL (Finding 3): trickle deadline failed (rc=%d took=%.1f ms)\n",
+                    rc_trick, trick_ms);
+            free(rev_body);
+            rev_body = NULL;
+            review_failures++;
+        }
+
+        sc_rbs_ondemand_url = NULL;
+        close(hfd);
+        assert(review_failures == 0);
+    }
+
+    // 14. RD-3: Analyzer/import/freeze Engine threads must bail out immediately on allow_ondemand=1
+    //     with 0 SQL statements and 0 IPC, and concurrent sc_rbs_fill_path + sc_rbs_fill_perf for
+    //     the same track on separate connections must coalesce onto 1 HTTP request.
+    {
+        const char *main_db = sqlite3_db_filename(db, "main");
+        long long od_blk = track(db, "../Contents/OnDemandBlockedThr.mp3", 1, 1);
+#ifdef __linux__
+        const char *extra_threads[] = {
+            "Analysis Queue", "OfflineAnalyzer", "J:I:Collecting",
+            "J:I:Takingfreez", "J:Importingtrac", "J:N:Searching o",
+        };
+        sc_rbs_ondemand_url = "http://127.0.0.1:1" SC_RBS_ONDEMAND_ROUTE;
+        for (size_t i = 0; i < sizeof extra_threads / sizeof extra_threads[0]; i++) {
+            for (int call_kind = 0; call_kind < 2; call_kind++) {
+                statements = 0;
+                struct gui_guard_arg ga = {
+                    extra_threads[i],
+                    db,
+                    main_db,
+                    call_kind == 1 ? "../Contents/OnDemandBlockedThr.mp3" : NULL,
+                    call_kind == 1 ? 0 : od_blk,
+                    0,
+                    "skipped (browse thread)",
+                    0,
+                };
+                pthread_t th;
+                assert(!pthread_create(&th, NULL, counted_gui_guard_worker, &ga));
+                assert(!pthread_join(th, NULL));
+                assert(ga.ok && statements == 0);
+            }
+        }
+        sc_rbs_ondemand_url = NULL;
+#else
+        (void)od_blk;
+#endif
+        int mfd = socket(AF_INET, SOCK_STREAM, 0);
+        assert(mfd >= 0);
+        int one = 1;
+        setsockopt(mfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        struct sockaddr_in msin;
+        memset(&msin, 0, sizeof msin);
+        msin.sin_family = AF_INET;
+        msin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        msin.sin_port = 0;
+        assert(!bind(mfd, (struct sockaddr *)&msin, sizeof msin));
+        socklen_t mlen = sizeof msin;
+        assert(!getsockname(mfd, (struct sockaddr *)&msin, &mlen));
+        assert(!listen(mfd, 8));
+        char murl[128];
+        snprintf(murl, sizeof murl, "http://127.0.0.1:%u%s", (unsigned)ntohs(msin.sin_port), SC_RBS_ONDEMAND_ROUTE);
+
+        struct od_mock mmock;
+        memset(&mmock, 0, sizeof mmock);
+        mmock.listen_fd = mfd;
+        mmock.status = 200;
+        mmock.delay_ms = 120;
+        snprintf(mmock.key, sizeof mmock.key, "contents/ondemandmixedrace.mp3");
+        snprintf(mmock.wr, sizeof mmock.wr, "AAECAwQFBgcICQoLDA0ODw==");
+        snprintf(mmock.wrnm, sizeof mmock.wrnm, "EBESExQVFhcYGRobHB0eHw==");
+        snprintf(mmock.row, sizeof mmock.row, "row-od-mixed");
+        mmock.body = bin;
+        mmock.body_n = bin_n;
+        pthread_mutex_init(&mmock.mu, NULL);
+        pthread_t mth;
+        assert(!pthread_create(&mth, NULL, od_mock_serve, &mmock));
+
+        sc_rbs_ondemand_url = murl;
+        long long od_mixed = track(db, "../Contents/OnDemandMixedRace.mp3", 1, 1);
+        sqlite3 *db_m1 = NULL, *db_m2 = NULL;
+        assert(sqlite3_open(sqlite3_db_filename(db, "main"), &db_m1) == SQLITE_OK);
+        assert(sqlite3_open(sqlite3_db_filename(db, "main"), &db_m2) == SQLITE_OK);
+        assert(sqlite3_busy_timeout(db_m1, 500) == SQLITE_OK);
+        assert(sqlite3_busy_timeout(db_m2, 500) == SQLITE_OK);
+        struct od_race_arg ma1 = {db_m1, "../Contents/OnDemandMixedRace.mp3", 0, "", 0, 0};
+        struct od_race_arg ma2 = {db_m2, NULL, 0, "", 0, od_mixed};
+        pthread_t mt1, mt2;
+        assert(!pthread_create(&mt1, NULL, od_race_worker, &ma1));
+        struct timespec s15 = {0, 15000000L};
+        nanosleep(&s15, NULL);
+        assert(!pthread_create(&mt2, NULL, od_race_worker, &ma2));
+        assert(!pthread_join(mt1, NULL));
+        assert(!pthread_join(mt2, NULL));
+        assert(mmock.requests == 1);
+        assert(starts(ma1.res, "filled on-demand (") && !strcmp(ma2.res, "skipped (row has analysis)"));
+        assert(ma1.out_id == od_mixed && !strcmp(text(db, ROW, od_mixed), FILLED));
+        sqlite3_close(db_m1);
+        sqlite3_close(db_m2);
+
+        __atomic_store_n(&mmock.stop, 1, __ATOMIC_RELEASE);
+        assert(!pthread_join(mth, NULL));
+        close(mfd);
+        pthread_mutex_destroy(&mmock.mu);
+        sc_rbs_ondemand_url = NULL;
+    }
 
     sqlite3_close(db);
     char rm[160];

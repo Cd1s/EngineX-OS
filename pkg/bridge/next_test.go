@@ -893,3 +893,159 @@ func TestWorkCostAgainstTheReplica(t *testing.T) {
 		t.Error("a run by hand has no limit")
 	}
 }
+
+func TestReconcileOrphanSwapPromotesCutSwapAndDropsStaleOrCorruptSwap(t *testing.T) {
+	t.Run("cut_swap_promoted_by_background_job", func(t *testing.T) {
+		mount := nextStick(t, 5)
+		makeNext(t, mount)
+		dir := dbDir(mount)
+		swapPath := filepath.Join(dir, rbstate.SwapName)
+		wantHead, err := rbstate.ReadHeaderFile(swapPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Simulate a 17 s SIGKILL right between renaming .rb-next.db -> m.db and renaming
+		// .rb-bridge-snapshot.swap -> .rb-bridge-snapshot.
+		if err := os.Rename(filepath.Join(dir, nextDB), filepath.Join(dir, "m.db")); err != nil {
+			t.Fatal(err)
+		}
+		// FillInBackground must promote .rb-bridge-snapshot.swap -> .rb-bridge-snapshot under LockVolume.
+		if _, err := FillInBackground(context.Background(), mount, FillOptions{}); err != nil {
+			t.Fatalf("FillInBackground: %v", err)
+		}
+		if _, err := os.Stat(swapPath); !os.IsNotExist(err) {
+			t.Fatalf("leftover %s still exists after FillInBackground: err=%v", rbstate.SwapName, err)
+		}
+		gotHead, err := rbstate.ReadHeader(dir)
+		if err != nil {
+			t.Fatalf("ReadHeader: %v", err)
+		}
+		if gotHead.Commit != wantHead.Commit {
+			t.Fatalf("snapshot commit = %d, want promoted swap commit %d", gotHead.Commit, wantHead.Commit)
+		}
+	})
+
+	t.Run("corrupt_swap_removed_by_swapNext", func(t *testing.T) {
+		mount := nextStick(t, 3)
+		dir := dbDir(mount)
+		swapPath := filepath.Join(dir, rbstate.SwapName)
+		if err := os.WriteFile(swapPath, []byte("truncated-garbage"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		swapped, _ := swapNext(context.Background(), mount, dir, newSteps(MountOptions{}), false, "")
+		if swapped {
+			t.Fatal("swapNext swapped a corrupt swap file")
+		}
+		if _, err := os.Stat(swapPath); !os.IsNotExist(err) {
+			t.Fatalf("corrupt %s was not removed: err=%v", rbstate.SwapName, err)
+		}
+	})
+
+	t.Run("transient_live_db_error_keeps_valid_swap", func(t *testing.T) {
+		mount := nextStick(t, 3)
+		makeNext(t, mount)
+		dir := dbDir(mount)
+		swapPath := filepath.Join(dir, rbstate.SwapName)
+		if err := os.Remove(filepath.Join(dir, nextDB)); err != nil {
+			t.Fatal(err)
+		}
+		// Corrupt live m.db so openRO / SQL query returns an error; reconcileOrphanSwap and swapNext must keep swap!
+		if err := os.WriteFile(filepath.Join(dir, "m.db"), []byte("temporarily-unreadable-db"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if promoted, _ := reconcileOrphanSwap(context.Background(), dir); promoted {
+			t.Fatal("reconcileOrphanSwap promoted swap despite corrupt m.db")
+		}
+		if swapped, _ := swapNext(context.Background(), mount, dir, newSteps(MountOptions{}), false, ""); swapped {
+			t.Fatal("swapNext promoted swap despite corrupt m.db")
+		}
+		if _, err := os.Stat(swapPath); err != nil {
+			t.Fatalf("valid %s deleted on live DB read error: %v", rbstate.SwapName, err)
+		}
+	})
+}
+
+func TestInsertPathOrphanSwapReconciliationAndCarryOverBrowseIndex(t *testing.T) {
+	t.Run("same_commit_different_uuid_drops_orphan_swap", func(t *testing.T) {
+		mount := nextStick(t, 3)
+		makeNext(t, mount)
+		dir := dbDir(mount)
+		swapPath := filepath.Join(dir, rbstate.SwapName)
+		wantHead, err := rbstate.ReadHeaderFile(swapPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(dir, nextDB)); err != nil {
+			t.Fatal(err)
+		}
+		// Set live m.db commit to swap's commit while changing UUID so only a buggy commit-only check promotes it.
+		engineWrites(t, mount, fmt.Sprintf("UPDATE Information SET lastRekordBoxLibraryImportReadCounter=%d, uuid='other-uuid-0000'", wantHead.Commit))
+		if swapped, _ := swapNext(context.Background(), mount, dir, newSteps(MountOptions{}), false, ""); swapped {
+			t.Fatal("swapNext promoted orphan swap with mismatched UUID")
+		}
+		if _, err := os.Stat(swapPath); !os.IsNotExist(err) {
+			t.Fatalf("obsolete UUID-mismatched %s was not removed: err=%v", rbstate.SwapName, err)
+		}
+	})
+
+	t.Run("ondemand_interrupted_swap_and_carryover_browse_tag", func(t *testing.T) {
+		base := t.TempDir()
+		t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+		mount := filepath.Join(base, "stick")
+		testfixture.LargeExport(t, mount, 4)
+
+		if _, err := FillInBackground(context.Background(), mount, FillOptions{OnDemand: true}); err != nil {
+			t.Fatalf("FillInBackground(OnDemand): %v", err)
+		}
+		// Add a deck edit to m.db? Make an initial live mount first so live DB has m.db, then build next.
+		mount2 := nextStick(t, 4)
+		dir := dbDir(mount2)
+		mountNow(t, mount2, MountOptions{OnDemand: true})
+		r, err := newResolver(mount2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := rbstate.Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, err := readJobView(context.Background(), r, mount2, s.Layout, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		v.view.Tracks[0].Track.Title = "updated-title-next"
+		v.view.Tracks[0].Hash = "updated-hash-next"
+		nb := &nextBuild{ctx: context.Background(), mount: mount2, dir: dir, view: v.view, live: s, onDemand: true}
+		if err := nb.build(false, true); err != nil {
+			t.Fatalf("nextBuild.build: %v", err)
+		}
+		// Simulate deck edit between next build and swap -> carryOverChecked must rewrite matching BrowseSwapName!
+		engineWrites(t, mount2, "UPDATE Track SET rating=60, lastEditTime=1700000999 WHERE id=2")
+		looked, err := TakeDeckRowsChecked(context.Background(), mount2)
+		if err != nil || !looked {
+			t.Fatalf("TakeDeckRowsChecked: looked=%v err=%v", looked, err)
+		}
+		swapHdr, err := rbstate.ReadHeaderFile(filepath.Join(dir, rbstate.SwapName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !rbstate.BrowseIndexMatchesFile(filepath.Join(dir, rbstate.BrowseSwapName), swapHdr) {
+			t.Fatalf("%s does not match carried-over swap header", rbstate.BrowseSwapName)
+		}
+		// Now simulate interrupted swap right between renaming .rb-next.db -> m.db and renaming .swap -> snapshot.
+		if err := os.Rename(filepath.Join(dir, nextDB), filepath.Join(dir, "m.db")); err != nil {
+			t.Fatal(err)
+		}
+		res := mountNow(t, mount2, MountOptions{OnDemand: true, Publish: true})
+		if res.Pending.Rows == 0 && !res.Pending.Lists && !res.Bypassed {
+			// OK: swapped in cleanly or updated pending carried row
+		}
+		liveHdr := snapshot(t, mount2)
+		if liveHdr.Commit != swapHdr.Commit {
+			t.Fatalf("interrupted swap not promoted on ConvertAtMount: live commit=%d swap=%d", liveHdr.Commit, swapHdr.Commit)
+		}
+		if !rbstate.BrowseIndexMatches(dir, liveHdr.Header) {
+			t.Fatalf("live %s does not match promoted snapshot after interrupted swap", rbstate.BrowseIndexName)
+		}
+	})
+}

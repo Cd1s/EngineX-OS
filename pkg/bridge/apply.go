@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -19,16 +20,15 @@ import (
 
 // window is one mount's work on the library.
 type window struct {
-	ctx      context.Context
-	mount    string
-	dir      string // Engine Library/Database2
-	view     *View
-	st       *steps
-	o        MountOptions
-	res      *MountResult
-	load     func() (*rbstate.Snapshot, error) // the stick's snapshot (its read may have started already)
-	partial  bool                              // a library was unreadable: nothing is removed and the stamp is not kept
-	linkOnly bool                              // only staged CDJ libraries were read: the stick's own import stays
+	ctx     context.Context
+	mount   string
+	dir     string // Engine Library/Database2
+	view    *View
+	st      *steps
+	o       MountOptions
+	res     *MountResult
+	load    func() (*rbstate.Snapshot, error) // the stick's snapshot (its read may have started already)
+	partial bool                              // a library was unreadable: nothing is removed and the stamp is not kept
 
 	// next: the work is done on the next library (next.go), by the job and without a deadline. Its
 	// snapshot is kept on the deck until it is ready; the stick's own library is only read.
@@ -36,20 +36,90 @@ type window struct {
 	keep bool                      // staged records stay in the stage once applied (until the swap)
 	rest func(time.Duration) error // after each commit, with the time it took: the job's pacing
 
-	lib   *enginedb.Library // nil: the stick has no library to keep, one is built
-	snap  *rbstate.Snapshot
-	index map[string]enginedb.Row // every row of the library by key
-	head  rbstate.Header          // the snapshot's header as the stick has it
-	dirty bool                    // tracks or lists changed outside a commit
-	left  bool                    // work that would not end before the kill was left to the job
-	built bool                    // library was built fresh from exports; holds no legacy artwork
-	took  laps                    // where the time of the commits and of the staged step went
+	lib           *enginedb.Library // nil: the stick has no library to keep, one is built
+	snap          *rbstate.Snapshot
+	index         map[string]enginedb.Row // every row of the library by key
+	head          rbstate.Header          // the snapshot's header as the stick has it
+	dirty         bool                    // tracks or lists changed outside a commit
+	browseDirty   bool                    // live snapshot saved or committed in OnDemand mode
+	left          bool                    // work that would not end before the kill was left to the job
+	built         bool                    // library was built fresh from exports; holds no legacy artwork
+	missingCovers int                     // tracks with artwork missing AlbumArt linkage left for next/window
+	took          laps                    // where the time of the commits and of the staged step went
+}
+
+// syncBrowseIndex writes .rb-bridge-browse once when missing or out of sync with snap.Header,
+// removing any mismatched leftover index if regeneration fails.
+func syncBrowseIndex(dir string, snap *rbstate.Snapshot) error {
+	return syncBrowseIndexCtx(context.Background(), dir, snap)
+}
+
+func syncBrowseIndexCtx(ctx context.Context, dir string, snap *rbstate.Snapshot) error {
+	if snap == nil || snap.LibraryUUID == "" {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if rbstate.BrowseIndexMatches(dir, snap.Header) {
+		return nil
+	}
+	if err := rbstate.SaveBrowseIndexCtx(ctx, dir, snap); err != nil {
+		if !rbstate.BrowseIndexMatches(dir, snap.Header) {
+			_ = rbstate.RemoveFile(filepath.Join(dir, rbstate.BrowseIndexName))
+		}
+		return err
+	}
+	return nil
+}
+
+// hydrateOnDemandTracks fills on-demand browse fields (ANLZ/Artwork/duration/rate) on existing
+// snapshot tracks from the export view without rewriting m.db.
+func hydrateOnDemandTracks(snap *rbstate.Snapshot, view *View) bool {
+	if snap == nil || view == nil {
+		return false
+	}
+	changed := false
+	for i := range view.Tracks {
+		vt := &view.Tracks[i]
+		t := snap.Tracks[vt.Key]
+		if t == nil {
+			continue
+		}
+		t.Refs = vt.Refs
+		var md []byte
+		if !t.Native {
+			md = enginedb.MetadataDigest(vt.Track.Genre, vt.Track.Comment, vt.Track.Label)
+		}
+		if t.AnalysisPath != vt.Track.AnalysisPath || t.ArtworkPath != vt.Track.ArtworkPath ||
+			t.Duration != vt.Track.Duration || t.SampleRate != vt.Track.SampleRate ||
+			(!t.Native && !bytes.Equal(t.MetaDigest, md)) {
+			t.AnalysisPath, t.ArtworkPath = vt.Track.AnalysisPath, vt.Track.ArtworkPath
+			t.Duration, t.SampleRate = vt.Track.Duration, vt.Track.SampleRate
+			if !t.Native {
+				t.MetaDigest = md
+			}
+			changed = true
+		}
+	}
+	return changed
 }
 
 // leave notes that the window leaves this work to the job (see work).
 func (w *window) leave(what work, name string) {
+	w.leaveExtra(what, 0, name)
+}
+
+func (w *window) leaveExtra(what work, extra time.Duration, name string) {
 	w.left = true
-	log.Printf("rb-bridge: mount leaves %s to the job: about %d ms of work, %d ms left", name, what.cost().Milliseconds(), time.Until(w.st.kill).Milliseconds())
+	log.Printf("rb-bridge: mount leaves %s to the job: about %d ms of work, %d ms left", name, (what.cost() + extra).Milliseconds(), time.Until(w.st.kill).Milliseconds())
+}
+
+// listCommitExtra prices the extra FAT32 dirty-page flush and B-tree index commit overhead of
+// bulk playlist writes/deletes on real USB 2.0 sticks without disturbing work.cost()'s replica table.
+func listCommitExtra(lists, entries int) time.Duration {
+	return time.Duration(min(lists, 1000))*6*time.Millisecond +
+		time.Duration(min(entries, 50000))*150*time.Microsecond
 }
 
 // laps are the parts of a window's commits and of its staged step, for the journal.
@@ -98,21 +168,27 @@ func (w *window) run() (err error) {
 	if err = w.open(); err != nil {
 		return err
 	}
-	if w.snap.Stamp != w.view.Stamp { // the job compares every track's files with what was built
+	if !w.o.OnDemand && w.snap.Stamp != w.view.Stamp { // the job compares every track's files with what was built
 		w.snap.Pending.Verify, w.dirty = true, true
 	}
 	n := len(w.view.Tracks)
+	firstListEntries := 0
+	for i := range w.view.Lists {
+		firstListEntries += len(w.view.Lists[i].Tracks)
+	}
+	firstListExtra := time.Duration(min(len(w.view.Lists), 2000))*2*time.Millisecond +
+		time.Duration(min(firstListEntries, 50000))*30*time.Microsecond
 	if first := (work{build: n, commits: 1, tracks: n}); w.lib != nil {
 		err = w.apply(Diff(w.view, w.snap))
-	} else if w.st.fits(first) {
+	} else if w.st.fits(first) && (w.next || w.st.kill.IsZero() || time.Until(w.st.kill.Add(-spare)) >= first.cost()+firstListExtra) {
 		err = w.build()
 	} else {
-		w.leave(first, "the first library")
+		w.leaveExtra(first, firstListExtra, "the first library")
 		return nil
 	}
 	// Staged data is applied in place by the window the job asked for, and by a run without a
-	// kill: an insert gives the DJ the stick.
-	if err == nil && !w.left && (w.next || w.o.Publish || w.st.kill.IsZero()) {
+	// kill: an insert gives the DJ the stick. In OnDemand mode, tracks are read directly at load.
+	if err == nil && !w.o.OnDemand && !w.left && (w.next || w.o.Publish || w.st.kill.IsZero()) {
 		err = w.applyStaged()
 	}
 	if err == nil && (!w.left || w.st.fits(work{commits: 1, tracks: n})) {
@@ -120,6 +196,13 @@ func (w *window) run() (err error) {
 	}
 	if err == nil {
 		err = w.migrateLegacyArtwork()
+	}
+	if !w.next && w.o.OnDemand && w.ctx.Err() == nil && (w.browseDirty || (err == nil && w.lib != nil && !w.left)) {
+		if w.st.kill.IsZero() || w.st.must(500*time.Millisecond) || (w.browseDirty && time.Until(w.st.kill) > spare/2) {
+			if serr := syncBrowseIndexCtx(w.ctx, w.dir, w.snap); serr != nil && err == nil {
+				err = serr
+			}
+		}
 	}
 	return err
 }
@@ -186,7 +269,7 @@ func (w *window) open() error {
 				t.Perf = rbstate.PerfNone
 			}
 		}
-		snap.Rules, snap.Stamp = rbstate.Rules, ""
+		snap.Rules, snap.Stamp, snap.SettleCursor = rbstate.Rules, "", 0
 		w.snap, w.dirty = snap, true
 	case oldErr == nil && !w.next:
 		if w.snap, err = adopt(w.ctx, db, w.dir, lib.UUID()); err != nil {
@@ -215,7 +298,7 @@ func (w *window) settle() error {
 	if claims.LibraryUUID != w.lib.UUID() || claims.Commit != id || claims.Rules != rbstate.Rules {
 		return rbstate.DropNext(w.sdir())
 	}
-	if err = rbstate.Promote(w.sdir()); err != nil {
+	if err = rbstate.PromoteCtx(w.ctx, w.sdir()); err != nil {
 		return err
 	}
 	log.Printf("rb-bridge: the last window was cut short after its commit; its %d tracks and %d lists are taken over", len(claims.Tracks), len(claims.Lists))
@@ -274,16 +357,39 @@ func (w *window) reconcile() (err error) {
 func (w *window) rows(idx []int) []enginedb.TrackRow {
 	rows := make([]enginedb.TrackRow, len(idx))
 	for i, at := range idx {
-		rows[i] = enginedb.TrackRow{Rel: w.view.Tracks[at].Rel, Track: w.view.Tracks[at].Track}
+		vt := &w.view.Tracks[at]
+		var artHash []byte
+		if w.o.OnDemand && vt.Track.ArtworkPath != "" {
+			artHash = rbstate.DirectArtworkHash(vt.Track.ArtworkPath)
+		}
+		rows[i] = enginedb.TrackRow{Rel: vt.Rel, Track: vt.Track, DirectArtHash: artHash}
 	}
 	return rows
 }
 
 func (w *window) note(vt *ViewTrack, id int64, native bool) *rbstate.Track {
-	t := &rbstate.Track{Key: vt.Key, EngineID: id, Rel: vt.Rel, Refs: vt.Refs, Row: vt.Hash, Rating: vt.Track.Rating, Native: native}
+	t := &rbstate.Track{
+		Key:          vt.Key,
+		EngineID:     id,
+		Rel:          vt.Rel,
+		AnalysisPath: vt.Track.AnalysisPath,
+		ArtworkPath:  vt.Track.ArtworkPath,
+		Duration:     vt.Track.Duration,
+		SampleRate:   vt.Track.SampleRate,
+		Refs:         vt.Refs,
+		Row:          vt.Hash,
+		Rating:       vt.Track.Rating,
+		Native:       native,
+	}
 	if !native {
 		base := enginedb.FastBaseForTrack(vt.Track)
 		t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = base.Cues, base.Loops, base.Active, true
+		t.MetaDigest = enginedb.MetadataDigest(vt.Track.Genre, vt.Track.Comment, vt.Track.Label)
+		if w.o.OnDemand {
+			// Record initial write-back digest so #321 skips all untouched rows in 0 ms without a perf pass.
+			t.Edit = 0
+			t.Synced = enginedb.SyncedDigest(nil, base.Cues, base.Loops, int64(base.Active), vt.Track.Genre, vt.Track.Comment, vt.Track.Label)
+		}
 	}
 	w.snap.Tracks[vt.Key] = t
 	return t
@@ -297,12 +403,15 @@ func (w *window) noteSync(b *enginedb.Batch, t *rbstate.Track, written bool) err
 		return nil
 	}
 	row := w.index[t.Key]
-	insync := row.Edit == t.Edit && t.Perf != rbstate.PerfDeck
+	insync := row.Edit == t.Edit && (t.Perf != rbstate.PerfDeck || t.Synced != nil)
 	if !written {
 		if !insync {
 			t.Edit, t.Synced = row.Edit, nil
 		}
 		return nil
+	}
+	if b == nil {
+		return errors.New("rb-bridge: noteSync written row without batch")
 	}
 	edit, digest, err := b.Synced(w.ctx, t.EngineID)
 	if err != nil {
@@ -316,8 +425,23 @@ func (w *window) noteSync(b *enginedb.Batch, t *rbstate.Track, written bool) err
 	return nil
 }
 
+const saveReserve = 250 * time.Millisecond
+
+func (w *window) saveHeadroom() error {
+	if err := w.ctx.Err(); err != nil {
+		return err
+	}
+	if !w.next && !w.st.kill.IsZero() && time.Until(w.st.kill) < saveReserve {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
 // commit saves the next snapshot, runs the commit and promotes the snapshot (design section 5).
 func (w *window) commit(id int64, do func() error) error {
+	if err := w.ctx.Err(); err != nil {
+		return err
+	}
 	if w.rest != nil {
 		if err := w.rest(0); err != nil {
 			return err
@@ -326,7 +450,10 @@ func (w *window) commit(id int64, do func() error) error {
 	t := time.Now()
 	w.count()
 	w.snap.Applied, w.snap.Commit = t.Unix(), id
-	if err := w.snap.SaveNext(w.sdir()); err != nil {
+	if err := w.saveHeadroom(); err != nil {
+		return err
+	}
+	if err := w.snap.SaveNextCtx(w.ctx, w.sdir()); err != nil {
 		return err
 	}
 	lap(&w.took.save, &t)
@@ -337,7 +464,7 @@ func (w *window) commit(id int64, do func() error) error {
 	}
 	lap(&w.took.commit, &t)
 	cut("committed")
-	if err := rbstate.Promote(w.sdir()); err != nil {
+	if err := rbstate.PromoteCtx(w.ctx, w.sdir()); err != nil {
 		return err
 	}
 	lap(&w.took.promote, &t)
@@ -354,6 +481,9 @@ func (w *window) commitBatch(b *enginedb.Batch) error {
 func (w *window) saved() {
 	if w.head, w.dirty = w.snap.Header, false; !w.next {
 		dropOldState(w.dir) // of a next library only once it is the stick's (swapNext)
+		if w.o.OnDemand {
+			w.browseDirty = true
+		}
 	}
 }
 
@@ -363,7 +493,10 @@ func (w *window) saveIfChanged() error {
 	if !w.dirty && reflect.DeepEqual(w.snap.Header, w.head) {
 		return nil
 	}
-	if err := w.snap.Save(w.sdir()); err != nil {
+	if err := w.saveHeadroom(); err != nil {
+		return err
+	}
+	if err := w.snap.SaveCtx(w.ctx, w.sdir()); err != nil {
 		return err
 	}
 	w.saved()
@@ -373,23 +506,45 @@ func (w *window) saveIfChanged() error {
 // count fills the snapshot's header (what it was made from, what is pending) and its tracks' refs.
 func (w *window) count() {
 	s := w.snap
+	wantMode := rbstate.ModeFull
+	if w.o.OnDemand {
+		wantMode = rbstate.ModeOnDemand
+	}
+	if s.Mode != wantMode && !(w.o.OnDemand && w.left && !w.built && w.head.Mode != wantMode) {
+		s.Mode = wantMode
+		w.dirty = true
+	}
 	s.Header.Tracks, s.Header.Lists = len(s.Tracks), len(s.Lists)
+	prevStamp := s.Stamp
 	s.Layout, s.Sources, s.Stamp = w.view.Layout, w.view.Sources, w.view.Stamp
 	if w.partial {
 		s.Stamp = "" // a library was unreadable: the next insert reads again, and write-back waits
 	}
-	p := rbstate.Pending{Verify: s.Pending.Verify}
+	if s.Stamp != prevStamp {
+		s.SettleCursor = 0
+	}
+	p := rbstate.Pending{Verify: s.Pending.Verify && !w.o.OnDemand, Rows: w.missingCovers}
 	for i := range w.view.Tracks {
 		vt := &w.view.Tracks[i]
 		t := s.Tracks[vt.Key]
 		if t != nil {
 			t.Refs = vt.Refs // this export's IDs: a re-export renumbers them, and write-back finds rows by them
+			if !t.Native && len(t.MetaDigest) == 0 && t.EngineID != 0 && t.Row == vt.Hash && t.Perf != rbstate.PerfDeck {
+				t.MetaDigest = enginedb.MetadataDigest(vt.Track.Genre, vt.Track.Comment, vt.Track.Label)
+				w.dirty = true
+			}
+			if t.AnalysisPath != vt.Track.AnalysisPath || t.ArtworkPath != vt.Track.ArtworkPath ||
+				t.Duration != vt.Track.Duration || t.SampleRate != vt.Track.SampleRate {
+				t.AnalysisPath, t.ArtworkPath = vt.Track.AnalysisPath, vt.Track.ArtworkPath
+				t.Duration, t.SampleRate = vt.Track.Duration, vt.Track.SampleRate
+				w.dirty = true
+			}
 		}
 		switch {
 		case t != nil && (t.Native || t.Perf == rbstate.PerfMissing):
 		case t == nil || t.EngineID == 0 || t.Row != vt.Hash:
 			p.Rows++
-		case t.Perf == rbstate.PerfNone:
+		case !w.o.OnDemand && t.Perf == rbstate.PerfNone:
 			p.Perf++
 		}
 	}
@@ -484,7 +639,12 @@ func (w *window) putLists(b *enginedb.Batch, idx []int) error {
 		return 0
 	}
 	reorder := map[string]bool{}
-	commitCost := work{commits: 1, tracks: len(w.snap.Tracks)}.cost()
+	putEntries := 0
+	for _, at := range idx {
+		putEntries += len(w.view.Lists[at].Tracks)
+	}
+	extraCommit := listCommitExtra(len(idx), putEntries)
+	commitCost := work{commits: 1, tracks: len(w.snap.Tracks)}.cost() + extraCommit
 	for _, at := range idx {
 		if err := w.ctx.Err(); err != nil {
 			return err
@@ -560,10 +720,9 @@ func (w *window) putLists(b *enginedb.Batch, idx []int) error {
 // one transaction, then the rows whose export fields changed (updateRows).
 func (w *window) apply(p *Plan) error {
 	s := w.snap
-	if w.partial || w.linkOnly { // nothing is removed of a library that was not read
-		link := func(r rbstate.SourceRef) bool { return r.Kind == rbstate.LinkLibrary }
-		p.RemoveTracks = slices.DeleteFunc(p.RemoveTracks, func(k string) bool { return w.partial || !slices.ContainsFunc(s.Tracks[k].Refs, link) })
-		p.RemoveLists = slices.DeleteFunc(p.RemoveLists, func(k string) bool { return w.partial || !strings.HasPrefix(k, viewLink) })
+	if w.partial { // nothing is removed of a library that was not read
+		p.RemoveTracks = nil
+		p.RemoveLists = nil
 	}
 	w.st.done("diff", "+%d ~%d >%d -%d tracks, %d lists to write, %d to remove", len(p.AddTracks), len(p.UpdateTracks), len(p.Moves), len(p.RemoveTracks), len(p.PutLists), len(p.RemoveLists))
 	// A file that has a row the bridge did not make, under any spelling, keeps it: lists refer to
@@ -579,20 +738,27 @@ func (w *window) apply(p *Plan) error {
 	for _, at := range p.PutLists {
 		rows.entries += len(w.view.Lists[at].Tracks)
 	}
-	if !w.st.fits(rows) {
-		w.leave(rows, "the rows and lists")
+	listDirtyCommit := listCommitExtra(len(p.PutLists)+len(p.RemoveLists), rows.entries)
+	if !w.st.fits(rows) || (!w.next && !w.st.kill.IsZero() && time.Until(w.st.kill.Add(-spare)) < rows.cost()+listDirtyCommit) {
+		w.leaveExtra(rows, listDirtyCommit, "the rows and lists")
 		return nil
 	}
 	if !p.structural() {
-		return w.updateRows(p.UpdateTracks)
+		if err := w.updateRows(p.UpdateTracks); err != nil {
+			return err
+		}
+		if !w.left {
+			return w.maybeBackfillDirectCovers()
+		}
+		return nil
 	}
 	b, err := w.lib.Begin(w.ctx)
 	if err != nil {
 		return err
 	}
 	defer b.Rollback()
-	listAndCommit := work{lists: len(p.PutLists) + len(p.RemoveLists), entries: rows.entries, commits: 1, tracks: len(s.Tracks)}.cost()
-	commitCost := work{commits: 1, tracks: len(s.Tracks)}.cost()
+	commitCost := work{commits: 1, tracks: len(s.Tracks)}.cost() + listDirtyCommit
+	listAndCommit := work{lists: len(p.PutLists) + len(p.RemoveLists), entries: rows.entries, commits: 1, tracks: len(s.Tracks)}.cost() + listDirtyCommit
 	cutRows := false
 	for idx, key := range p.RemoveTracks {
 		if w.rest != nil && idx&15 == 0 {
@@ -635,7 +801,7 @@ func (w *window) apply(p *Plan) error {
 		for _, m := range part {
 			vt, t := &w.view.Tracks[m.New], s.Tracks[m.Old]
 			delete(s.Tracks, m.Old)
-			t.Key, t.Rel, t.Resolved, t.Refs, t.Row = vt.Key, vt.Rel, false, vt.Refs, "" // its fields follow in updateRows
+			t.Key, t.Rel, t.AnalysisPath, t.ArtworkPath, t.Resolved, t.Refs, t.Row = vt.Key, vt.Rel, vt.Track.AnalysisPath, vt.Track.ArtworkPath, false, vt.Refs, "" // its fields follow in updateRows
 			s.Tracks[vt.Key] = t
 			p.UpdateTracks = append(p.UpdateTracks, m.New)
 		}
@@ -704,7 +870,7 @@ func (w *window) apply(p *Plan) error {
 		return err
 	}
 	w.res.PlaylistsChanged = len(p.PutLists)+len(p.RemoveLists) > 0
-	if w.ctx.Err() != nil || (!w.next && !w.st.must(0)) {
+	if w.ctx.Err() != nil || (!w.next && !w.st.must(listDirtyCommit)) {
 		return errWindowDeadline
 	}
 	listBegan := time.Now()
@@ -717,7 +883,13 @@ func (w *window) apply(p *Plan) error {
 		}
 	}
 	w.st.done("lists", "%d written, %d removed; committed", len(p.PutLists), len(p.RemoveLists))
-	return w.updateRows(p.UpdateTracks)
+	if err = w.updateRows(p.UpdateTracks); err != nil {
+		return err
+	}
+	if !w.left {
+		return w.maybeBackfillDirectCovers()
+	}
+	return nil
 }
 
 // inBatches calls each for items 0..n-1 while ok(i), at most size a transaction, and committed
@@ -778,20 +950,138 @@ func fitUpdateCount(all int, fits func(int) bool) int {
 // updateRows gives rows their changed export fields after the rows and lists are committed, a
 // batch a transaction (a take-over changes thousands): the first batch is owed, the rest optional.
 func (w *window) updateRows(idx []int) error {
+	if len(idx) == 0 {
+		return nil
+	}
 	cost := func(n int) work { return work{updates: n, commits: 1 + n/updateBatch, tracks: len(w.snap.Tracks)} }
-	if all := len(idx); all > 0 && !w.st.fits(cost(all)) {
+	writeIdx := idx
+	skippedWrites := 0
+	if len(idx) <= 64 {
+		writeIdx = make([]int, 0, len(idx))
+		for i, at := range idx {
+			if i&15 == 0 {
+				if err := w.ctx.Err(); err != nil {
+					return err
+				}
+				if w.rest != nil {
+					if err := w.rest(0); err != nil {
+						return err
+					}
+				}
+			}
+			vt := &w.view.Tracks[at]
+			t := w.snap.Tracks[vt.Key]
+			var artHash []byte
+			if w.o.OnDemand && vt.Track.ArtworkPath != "" {
+				artHash = rbstate.DirectArtworkHash(vt.Track.ArtworkPath)
+			}
+			needTrack, needCover, err := w.lib.TrackUpdatePlan(w.ctx, t.EngineID, enginedb.TrackRow{Rel: t.Rel, Track: vt.Track}, t.Rating, artHash)
+			if err != nil {
+				return err
+			}
+			if !needTrack && !needCover {
+				t.Row, t.Rating, t.Refs, t.AnalysisPath, t.ArtworkPath = vt.Hash, vt.Track.Rating, vt.Refs, vt.Track.AnalysisPath, vt.Track.ArtworkPath
+				t.Duration, t.SampleRate = vt.Track.Duration, vt.Track.SampleRate
+				if !t.Native {
+					t.MetaDigest = enginedb.MetadataDigest(vt.Track.Genre, vt.Track.Comment, vt.Track.Label)
+				}
+				w.dirty = true
+				if err := w.noteSync(nil, t, false); err != nil {
+					return err
+				}
+				skippedWrites++
+				continue
+			}
+			writeIdx = append(writeIdx, at)
+		}
+		if len(writeIdx) == 0 {
+			w.res.Updated += skippedWrites
+			w.st.done("update", "%d of %d rows got the export's fields (0 held others, 0 m.db writes)", skippedWrites, len(idx))
+			return nil
+		}
+	}
+	if all := len(writeIdx); all > 0 && !w.st.fits(cost(all)) {
 		room := nextRoom(w.dir, w.snap.LibraryUUID)
 		if room == nil {
+			w.res.Updated += skippedWrites
 			w.leave(cost(all), "the rows' export fields")
 			return nil
 		}
 		// The job cannot make a next library on this stick, so nothing would ever update these rows:
 		// the batches that fit are done here, and the next windows go on.
 		n := fitUpdateCount(all, func(n int) bool { return w.st.fits(cost(n)) })
-		w.left, idx = true, idx[:n]
+		w.left, writeIdx = true, writeIdx[:n]
 		log.Printf("rb-bridge: %v; %d of %d rows get the export's fields in this window", room, n, all)
 	}
 	differed := 0
+	done, err := w.inBatches(len(writeIdx), updateBatch, func(i int) bool {
+		if i < updateBatch {
+			return w.st.must(applyReserve)
+		}
+		return w.st.more(applyReserve)
+	}, func(b *enginedb.Batch, i int) error {
+		vt := &w.view.Tracks[writeIdx[i]]
+		t := w.snap.Tracks[vt.Key]
+		changed, err := b.UpdateTrack(w.ctx, t.EngineID, enginedb.TrackRow{Rel: t.Rel, Track: vt.Track}, t.Rating)
+		if err != nil {
+			return err
+		}
+		if w.o.OnDemand && vt.Track.ArtworkPath != "" {
+			coverChanged, err := b.SetDirectCover(w.ctx, t.EngineID, rbstate.DirectArtworkHash(vt.Track.ArtworkPath))
+			if err != nil {
+				return err
+			}
+			changed = changed || coverChanged
+		}
+		t.Row, t.Rating, t.Refs, t.AnalysisPath, t.ArtworkPath = vt.Hash, vt.Track.Rating, vt.Refs, vt.Track.AnalysisPath, vt.Track.ArtworkPath
+		t.Duration, t.SampleRate = vt.Track.Duration, vt.Track.SampleRate
+		if !t.Native {
+			t.MetaDigest = enginedb.MetadataDigest(vt.Track.Genre, vt.Track.Comment, vt.Track.Label)
+		}
+		if changed {
+			differed++
+		}
+		return w.noteSync(b, t, changed)
+	}, func(int) error { return nil })
+	w.res.Updated += skippedWrites + done
+	w.st.done("update", "%d of %d rows got the export's fields (%d held others)", skippedWrites+done, len(idx), differed)
+	return err
+}
+
+func (w *window) maybeBackfillDirectCovers() error {
+	if !w.o.OnDemand || w.lib == nil || w.built {
+		return nil
+	}
+	missing, err := w.lib.MissingAlbumArtIDs(w.ctx)
+	if err != nil || len(missing) == 0 {
+		return err
+	}
+	var coverIdx []int
+	for i := range w.view.Tracks {
+		vt := &w.view.Tracks[i]
+		if vt.Track.ArtworkPath == "" {
+			continue
+		}
+		t := w.snap.Tracks[vt.Key]
+		if t == nil || t.Native || t.EngineID == 0 || !missing[t.EngineID] {
+			continue
+		}
+		coverIdx = append(coverIdx, i)
+	}
+	if len(coverIdx) == 0 {
+		return nil
+	}
+	return w.backfillDirectCovers(coverIdx)
+}
+
+func (w *window) backfillDirectCovers(idx []int) error {
+	coverCost := work{updates: len(idx), commits: 1 + len(idx)/updateBatch, tracks: len(w.snap.Tracks)}
+	if !w.next && !w.st.fits(coverCost) {
+		w.missingCovers = len(idx)
+		w.leave(coverCost, "missing track covers")
+		return nil
+	}
+	linked := 0
 	done, err := w.inBatches(len(idx), updateBatch, func(i int) bool {
 		if i < updateBatch {
 			return w.st.must(applyReserve)
@@ -800,18 +1090,22 @@ func (w *window) updateRows(idx []int) error {
 	}, func(b *enginedb.Batch, i int) error {
 		vt := &w.view.Tracks[idx[i]]
 		t := w.snap.Tracks[vt.Key]
-		changed, err := b.UpdateTrack(w.ctx, t.EngineID, enginedb.TrackRow{Rel: t.Rel, Track: vt.Track}, t.Rating)
+		changed, err := b.SetDirectCover(w.ctx, t.EngineID, rbstate.DirectArtworkHash(vt.Track.ArtworkPath))
 		if err != nil {
 			return err
 		}
-		t.Row, t.Rating, t.Refs = vt.Hash, vt.Track.Rating, vt.Refs
+		t.ArtworkPath = vt.Track.ArtworkPath
 		if changed {
-			differed++
+			linked++
 		}
 		return w.noteSync(b, t, changed)
 	}, func(int) error { return nil })
-	if w.res.Updated += done; len(idx) > 0 {
-		w.st.done("update", "%d of %d rows got the export's fields (%d held others)", done, len(idx), differed)
+	if done < len(idx) {
+		w.missingCovers = len(idx) - done
+		w.left = true
+	}
+	if w.res.Updated += linked; done > 0 {
+		w.st.done("covers", "%d of %d missing direct covers linked", linked, len(idx))
 	}
 	return err
 }
@@ -876,7 +1170,7 @@ func (w *window) applyStaged() error {
 				}
 				gone++
 			}
-			w.snap.Tracks[key] = &rbstate.Track{Key: key, Rel: vt.Rel, Refs: vt.Refs, Row: vt.Hash, Perf: rbstate.PerfMissing, Built: e.Sig}
+			w.snap.Tracks[key] = &rbstate.Track{Key: key, Rel: vt.Rel, AnalysisPath: vt.Track.AnalysisPath, ArtworkPath: vt.Track.ArtworkPath, Refs: vt.Refs, Row: vt.Hash, Perf: rbstate.PerfMissing, Built: e.Sig}
 			done = append(done, key)
 			return nil
 		case t == nil || t.EngineID == 0:
@@ -901,7 +1195,7 @@ func (w *window) applyStaged() error {
 			if t.Perf != rbstate.PerfDeck {
 				t.Perf = rbstate.PerfDegraded
 			}
-			if t.Perf == rbstate.PerfDeck || row.Edit != t.Edit {
+			if (t.Perf == rbstate.PerfDeck && t.Synced == nil) || row.Edit != t.Edit {
 				t.Synced = nil
 			}
 			degraded++
@@ -918,6 +1212,9 @@ func (w *window) applyStaged() error {
 			}
 			if t.Written, t.Perf = digest, rbstate.PerfApplied; outcome == enginedb.PerfKept || outcome == enginedb.PerfMerged {
 				t.Perf = rbstate.PerfDeck
+				if prev.State != rbstate.PerfDeck {
+					t.Synced = nil
+				}
 				kept++
 			}
 			t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = nil, nil, 0, false

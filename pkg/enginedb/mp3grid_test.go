@@ -851,3 +851,66 @@ func TestBridgeOwnedTracksReadsV2Snapshot(t *testing.T) {
 		t.Fatalf("v2 bridge-owned tracks: %v", got)
 	}
 }
+
+// Item 4 regression: shiftQuickCues and shiftLoops must ignore any negative position
+// (< 0, e.g. -420.0 or -23423.4), never clamping it up to 0.0 (which would fabricate
+// a live cue at sample 0) and never shifting it further negative.
+func TestShiftQuickCuesAndLoopsNeverClampOrShiftNegativeSlots(t *testing.T) {
+	allNeg := makeQuickCuesBlob(t, [8]float64{-420, -420, -420, -420, -420, -420, -420, -420}, -420, -420)
+	for _, shift := range []float64{1105, 2257, -2292} {
+		out, changed, err := shiftQuickCues(allNeg, shift)
+		if err != nil {
+			t.Fatalf("shiftQuickCues(allNeg, %v): %v", shift, err)
+		}
+		if changed || !bytes.Equal(out, allNeg) {
+			slots, mainPos, defPos := readQuickCuePositions(t, out)
+			t.Fatalf("shiftQuickCues(allNeg, %v) mutated negative cues: changed=%v slots=%v main=%v def=%v", shift, changed, slots, mainPos, defPos)
+		}
+	}
+
+	mixed := makeQuickCuesBlob(t, [8]float64{-420, -1, 500, 5000, -1103.21, 0, -1, -1}, -420, -23423.4)
+	out, changed, err := shiftQuickCues(mixed, 2257)
+	if err != nil {
+		t.Fatalf("shiftQuickCues(mixed, 2257): %v", err)
+	}
+	if !changed {
+		t.Fatal("expected positive cues to shift")
+	}
+	slots, mainPos, defPos := readQuickCuePositions(t, out)
+	if slots[0] != -420 || slots[1] != -1 || slots[4] != -1103.21 || mainPos != -420 || defPos != -23423.4 {
+		t.Fatalf("negative positions were modified: slots=%v main=%v def=%v", slots, mainPos, defPos)
+	}
+	if slots[2] != 0 || slots[3] != 2743 || slots[5] != 0 {
+		t.Fatalf("positive positions shifted unexpectedly: slots=%v", slots)
+	}
+
+	// Negative loops: pre-roll-only loop stays untouched; loop starting in pre-roll keeps
+	// its negative start untouched while its positive end shifts cleanly.
+	lpNeg := makeLoopsBlob(t,
+		[8]float64{-590.19, -590.19, 500, -1, -1, -1, -1, -1},
+		[8]float64{-100.0, 5000.0, 1500, -1, -1, -1, -1, -1},
+		[8][2]byte{{1, 1}, {1, 1}, {1, 1}})
+	lpOut, lpChanged := shiftLoops(lpNeg, 2257, 441000)
+	if !lpChanged {
+		t.Fatal("expected positive loop endpoints to shift")
+	}
+	starts, ends := readLoopPositions(t, lpOut)
+	if starts[0] != -590.19 || ends[0] != -100.0 {
+		t.Fatalf("pre-roll-only loop modified: (%v, %v)", starts[0], ends[0])
+	}
+	if starts[1] != -590.19 || ends[1] != 2743.0 {
+		t.Fatalf("mixed pre-roll loop modified unexpectedly: (%v, %v)", starts[1], ends[1])
+	}
+	if starts[2] != 0 || ends[2] != 1000.0 {
+		t.Fatalf("positive clamped loop modified unexpectedly: (%v, %v)", starts[2], ends[2])
+	}
+
+	// Pure negative loop must report changed=false.
+	lpOnlyNeg := makeLoopsBlob(t,
+		[8]float64{-590.19, -1, -1, -1, -1, -1, -1, -1},
+		[8]float64{-100.0, -1, -1, -1, -1, -1, -1, -1},
+		[8][2]byte{{1, 1}})
+	if out2, ch2 := shiftLoops(lpOnlyNeg, 2257, 441000); ch2 || !bytes.Equal(out2, lpOnlyNeg) {
+		t.Fatalf("pure negative loop mutated: changed=%v", ch2)
+	}
+}

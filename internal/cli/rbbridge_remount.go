@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"golang.org/x/sys/unix"
 )
 
@@ -339,6 +341,10 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 	}
 	rep.Publishing()
 	start := time.Now()
+	pre, err := readRemountPending(mount)
+	if err != nil {
+		return err
+	}
 	_ = os.WriteFile(publishMark(mount), nil, 0o600)
 	if err = os.WriteFile(uevent, []byte("remove"), 0); err != nil {
 		return fmt.Errorf("remove %s: %w", dev, err)
@@ -351,6 +357,7 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 	if pollUntil(ctx, closeLimit, func() bool { return !engineHolds(devno) }) != nil {
 		log.Printf("rb-bridge: Engine still holds files of %s; mounting it again anyway", dev)
 	}
+	cleanupEmptyMountDir(ctx, mount)
 	if ejected() {
 		return nil
 	}
@@ -360,7 +367,136 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 	if err = pollUntil(ctx, remountLimit, func() bool { return mounted(mount) }); err != nil {
 		return fmt.Errorf("%s not mounted again", dev)
 	}
+	if err = verifyRemountPublished(mount, pre); err != nil {
+		if errors.Is(err, ErrRemountDiscarded) {
+			log.Printf("rb-bridge: %s obsolete pending library was discarded rather than published: %v", mount, err)
+		}
+		return err
+	}
 	log.Printf("rb-bridge: %s published by a remount in %s", mount, time.Since(start).Round(10*time.Millisecond))
+	return nil
+}
+
+// ErrRemountDiscarded indicates pending publish files were discarded rather than promoted into m.db.
+var ErrRemountDiscarded = errors.New("pending next library discarded")
+
+type remountPending struct {
+	hadNextDB      bool
+	hadSwap        bool
+	hadBrowseSwap  bool
+	wantUUID       string
+	wantCommit     int64
+	wantMode       string
+	hadPendingSnap bool
+	snapCommit     int64
+	snapApplied    int64
+	snapPending    rbstate.Pending
+}
+
+func remountFilePresent(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+func readRemountPending(mount string) (remountPending, error) {
+	dbDir := filepath.Join(mount, "Engine Library", "Database2")
+	hasNext, err := remountFilePresent(filepath.Join(dbDir, ".rb-next.db"))
+	if err != nil {
+		return remountPending{}, fmt.Errorf("%s pre-remount check .rb-next.db: %w", mount, err)
+	}
+	hasSwap, err := remountFilePresent(filepath.Join(dbDir, rbstate.SwapName))
+	if err != nil {
+		return remountPending{}, fmt.Errorf("%s pre-remount check %s: %w", mount, rbstate.SwapName, err)
+	}
+	hasBrowseSwap, err := remountFilePresent(filepath.Join(dbDir, rbstate.BrowseSwapName))
+	if err != nil {
+		return remountPending{}, fmt.Errorf("%s pre-remount check %s: %w", mount, rbstate.BrowseSwapName, err)
+	}
+	p := remountPending{
+		hadNextDB:     hasNext,
+		hadSwap:       hasSwap,
+		hadBrowseSwap: hasBrowseSwap,
+	}
+	if hasSwap {
+		swapHdr, err := rbstate.ReadHeaderFile(filepath.Join(dbDir, rbstate.SwapName))
+		if err != nil {
+			return remountPending{}, fmt.Errorf("%s pre-remount read %s header: %w", mount, rbstate.SwapName, err)
+		}
+		p.wantUUID = swapHdr.LibraryUUID
+		p.wantCommit = swapHdr.Commit
+		p.wantMode = swapHdr.Mode
+	}
+	hdr, err := rbstate.ReadHeader(dbDir)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, rbstate.ErrNoSnapshot) {
+			return remountPending{}, fmt.Errorf("%s pre-remount read snapshot header: %w", mount, err)
+		}
+	} else if !hdr.Pending.None() {
+		p.hadPendingSnap = true
+		p.snapCommit = hdr.Commit
+		p.snapApplied = hdr.Applied
+		p.snapPending = hdr.Pending
+	}
+	return p, nil
+}
+
+// verifyRemountPublished confirms the mount hook actually consumed and published the intended
+// pending artifacts during the remount instead of silently skipping or discarding them.
+func verifyRemountPublished(mount string, pre remountPending) error {
+	dbDir := filepath.Join(mount, "Engine Library", "Database2")
+	for _, item := range []struct {
+		had  bool
+		file string
+		msg  string
+	}{
+		{pre.hadNextDB, ".rb-next.db", "next library (.rb-next.db still present)"},
+		{pre.hadSwap, rbstate.SwapName, fmt.Sprintf("snapshot (%s still present)", rbstate.SwapName)},
+		{pre.hadBrowseSwap, rbstate.BrowseSwapName, fmt.Sprintf("browse index (%s still present)", rbstate.BrowseSwapName)},
+	} {
+		if !item.had {
+			continue
+		}
+		present, err := remountFilePresent(filepath.Join(dbDir, item.file))
+		if err != nil {
+			return fmt.Errorf("%s remount verification failed checking %s: %w", mount, item.file, err)
+		}
+		if present {
+			return fmt.Errorf("%s remounted without publishing pending %s", mount, item.msg)
+		}
+	}
+	if pre.hadSwap {
+		after, err := rbstate.ReadHeader(dbDir)
+		if err != nil {
+			return fmt.Errorf("%s remount verification failed reading published snapshot header: %w", mount, err)
+		}
+		liveUUID, liveCommit, err := bridge.LiveLibraryIdentity(context.Background(), dbDir)
+		if err != nil {
+			return fmt.Errorf("%s remount verification failed reading live m.db identity: %w", mount, err)
+		}
+		if (pre.wantUUID != "" && (after.LibraryUUID != pre.wantUUID || liveUUID != pre.wantUUID)) ||
+			(pre.wantCommit != 0 && (after.Commit != pre.wantCommit || liveCommit != pre.wantCommit)) {
+			return fmt.Errorf("%s remount discarded pending swap (%s/%d); live is %s/%d (snapshot %s/%d): %w",
+				mount, pre.wantUUID, pre.wantCommit, liveUUID, liveCommit, after.LibraryUUID, after.Commit, ErrRemountDiscarded)
+		}
+		if pre.wantMode == rbstate.ModeOnDemand && !rbstate.BrowseIndexMatches(dbDir, after) {
+			return fmt.Errorf("%s remount verification failed: %s does not match published snapshot generation", mount, rbstate.BrowseIndexName)
+		}
+	}
+	if !pre.hadNextDB && !pre.hadSwap && !pre.hadBrowseSwap && pre.hadPendingSnap {
+		after, err := rbstate.ReadHeader(dbDir)
+		if err != nil {
+			return fmt.Errorf("%s remount verification failed reading snapshot header: %w", mount, err)
+		}
+		if after.Commit == pre.snapCommit && after.Applied == pre.snapApplied && after.Pending == pre.snapPending {
+			return fmt.Errorf("%s remounted without applying pending library state", mount)
+		}
+	}
 	return nil
 }
 
@@ -530,4 +666,45 @@ func engineHolds(devno uint64) bool {
 		}
 	}
 	return false
+}
+
+// cleanupEmptyMountDir removes an unmounted, empty mount directory (for example a stale
+// /media/<label> dir left by an earlier kernel/udisks unmount) before writing "add" to uevent
+// so udisks does not create /media/<label>1 on re-mount.
+func cleanupEmptyMountDir(ctx context.Context, mount string) {
+	clean := filepath.Clean(mount)
+	if clean == "" || clean == "." || filepath.Dir(clean) == clean {
+		return
+	}
+	if mounted(clean) {
+		return
+	}
+	st, err := os.Lstat(clean)
+	if err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	for i := 0; i < 5; i++ {
+		if mounted(clean) {
+			return
+		}
+		entries, err := os.ReadDir(clean)
+		if err != nil || len(entries) != 0 {
+			return
+		}
+		err = os.Remove(clean)
+		if err == nil || os.IsNotExist(err) {
+			if err == nil {
+				log.Printf("rb-bridge: removed leftover empty mount directory %s before remount add", clean)
+			}
+			return
+		}
+		if !errors.Is(err, syscall.EBUSY) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }

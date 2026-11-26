@@ -197,7 +197,7 @@ func stageAll(t *testing.T, mount string) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	view, err := BuildView(append(libs, readStaged(mount)...), s.Layout, "")
+	view, err := BuildView(libs, s.Layout, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func stageAll(t *testing.T, mount string) int {
 		}
 		n++
 	}
-	if err = stage.MarkVerified(rbstate.Stamp(s.Layout, files, stagedStamp(mount))); err != nil {
+	if err = stage.MarkVerified(rbstate.Stamp(s.Layout, files, "")); err != nil {
 		t.Fatal(err)
 	}
 	return n
@@ -1308,6 +1308,199 @@ func TestFinding21MountDeadlineAndCostModel(t *testing.T) {
 		}
 		if res.Removed != 0 {
 			t.Fatalf("RemoveTracks deleted %d tracks past owed deadline, want 0", res.Removed)
+		}
+	})
+}
+
+func TestMountPopulatesAnalysisAndArtworkPaths(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+	mount := filepath.Join(base, "stick")
+	testfixture.LargeExport(t, mount, 2)
+	fix3WritePlainOneLibrary(t, mount)
+	// Add artwork path on the OneLibrary content rows so both AnalysisPath and ArtworkPath are exercised.
+	onePath := filepath.Join(mount, "PIONEER", "rekordbox", "exportLibrary.db")
+	odb, err := sql.Open("sqlite", onePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := odb.Exec(`
+		ALTER TABLE content ADD COLUMN image_path varchar;
+		UPDATE content SET image_path='/PIONEER/Artwork/00001/a1.jpg' WHERE content_id=1;
+		UPDATE content SET image_path='/PIONEER/Artwork/00001/a2.jpg' WHERE content_id=2;
+	`); err != nil {
+		_ = odb.Close()
+		t.Fatal(err)
+	}
+	_ = odb.Close()
+
+	mountNow(t, mount, MountOptions{})
+
+	snap := snapshot(t, mount)
+	k1 := rbstate.FoldPath(testfixture.LargeTrackPath(1))
+	k2 := rbstate.FoldPath(testfixture.LargeTrackPath(2))
+	if tr := snap.Tracks[k1]; tr == nil || tr.AnalysisPath != "/PIONEER/USBANLZ/P001/ANLZ0000.DAT" || tr.ArtworkPath != "/PIONEER/Artwork/00001/a1.jpg" {
+		t.Fatalf("build() track 1 paths = %+v", tr)
+	}
+	if tr := snap.Tracks[k2]; tr == nil || tr.AnalysisPath != "/PIONEER/USBANLZ/P001/ANLZ0000.DAT" || tr.ArtworkPath != "/PIONEER/Artwork/00001/a2.jpg" {
+		t.Fatalf("build() track 2 paths = %+v", tr)
+	}
+
+	// Simulate an older snapshot lacking AnalysisPath/ArtworkPath (without changing export hash)
+	// and verify a mount window backfills both via count() and persists them.
+	for _, tr := range snap.Tracks {
+		tr.AnalysisPath = ""
+		tr.ArtworkPath = ""
+	}
+	snap.Stamp = "stale-stamp"
+	if err := snap.Save(dbDir(mount)); err != nil {
+		t.Fatal(err)
+	}
+	mountNow(t, mount, MountOptions{})
+
+	reloaded := snapshot(t, mount)
+	if tr := reloaded.Tracks[k1]; tr == nil || tr.AnalysisPath != "/PIONEER/USBANLZ/P001/ANLZ0000.DAT" || tr.ArtworkPath != "/PIONEER/Artwork/00001/a1.jpg" {
+		t.Fatalf("backfill track 1 paths = %+v", tr)
+	}
+	if tr := reloaded.Tracks[k2]; tr == nil || tr.AnalysisPath != "/PIONEER/USBANLZ/P001/ANLZ0000.DAT" || tr.ArtworkPath != "/PIONEER/Artwork/00001/a2.jpg" {
+		t.Fatalf("backfill track 2 paths = %+v", tr)
+	}
+
+	// Update export's AnalysisPath and ArtworkPath and verify updateRows() refreshes both.
+	odb, err = sql.Open("sqlite", onePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := odb.Exec(`
+		UPDATE content SET analysisDataFilePath='/PIONEER/USBANLZ/P002/ANLZ0001.DAT', image_path='/PIONEER/Artwork/00002/b1.jpg' WHERE content_id=1;
+	`); err != nil {
+		_ = odb.Close()
+		t.Fatal(err)
+	}
+	_ = odb.Close()
+	// Bump mtime so Stamp changes even on 1-second filesystems.
+	future := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(onePath, future, future)
+
+	mountNow(t, mount, MountOptions{})
+	updated := snapshot(t, mount)
+	if tr := updated.Tracks[k1]; tr == nil || tr.AnalysisPath != "/PIONEER/USBANLZ/P002/ANLZ0001.DAT" || tr.ArtworkPath != "/PIONEER/Artwork/00002/b1.jpg" {
+		t.Fatalf("updateRows() track 1 paths = %+v", tr)
+	}
+}
+
+// Regression test for the legacy-adoption estimator bug where oldSt.Size()/250 treated gigabytes
+// of BridgeAnalysis waveform blobs as millions of BridgeState rows (5,597,379 ms estimated vs
+// 7,177 ms real on KDATA). A bloated SQLite state DB with few tracks must estimate rows
+// independently of blob size and adopt inside a tight mount window, while a 2.71 GB legacy file
+// still produces a realistic (~20-35 s, not 5.6M ms) deferral estimate.
+func TestLegacyAdoptEstimatorIgnoresBridgeAnalysisBlobSize(t *testing.T) {
+	makeBloatedLegacy := func(t *testing.T, blobMiB int) (string, os.FileInfo) {
+		t.Helper()
+		base := t.TempDir()
+		t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+		mount := filepath.Join(base, "stick")
+		testfixture.LargeExport(t, mount, 2)
+		mountNow(t, mount, MountOptions{})
+		if err := os.Remove(filepath.Join(dbDir(mount), rbstate.SnapshotName)); err != nil {
+			t.Fatal(err)
+		}
+		ids := trackIDs(t, mount)
+		statePath := filepath.Join(dbDir(mount), oldStateName)
+		sdb, err := sql.Open("sqlite", statePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sdb.Exec(`
+			CREATE TABLE BridgeState(path TEXT, trackId INTEGER, fingerprint TEXT);
+			CREATE TABLE BridgeAnalysis(trackId INTEGER PRIMARY KEY, payload BLOB);
+		`); err != nil {
+			_ = sdb.Close()
+			t.Fatal(err)
+		}
+		for p, id := range ids {
+			if _, err := sdb.Exec(`INSERT INTO BridgeState VALUES(?, ?, 'complete')`, p, id); err != nil {
+				_ = sdb.Close()
+				t.Fatal(err)
+			}
+		}
+		chunk := bytes.Repeat([]byte{0x5a}, 1<<20)
+		for i := 1; i <= blobMiB; i++ {
+			if _, err := sdb.Exec(`INSERT INTO BridgeAnalysis VALUES(?, ?)`, i, chunk); err != nil {
+				_ = sdb.Close()
+				t.Fatal(err)
+			}
+		}
+		if err := sdb.Close(); err != nil {
+			t.Fatal(err)
+		}
+		st, err := os.Stat(statePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Size() < int64(blobMiB)<<20 {
+			t.Fatalf("bloated state DB size = %d, want >= %d", st.Size(), int64(blobMiB)<<20)
+		}
+		return mount, st
+	}
+
+	t.Run("bloated_6MiB_adopts_in_window", func(t *testing.T) {
+		// Under old size/250: 6 MiB -> 25k rows -> >11 s estimate -> wrongly deferred on a 4 s window.
+		mount, st := makeBloatedLegacy(t, 6)
+		rows, stateBytes := legacyAdoptEstimate(context.Background(), dbDir(mount), st)
+		if rows != 2 || stateBytes != st.Size() {
+			t.Fatalf("legacyAdoptEstimate(6MiB) = (%d, %d), want (2, %d)", rows, stateBytes, st.Size())
+		}
+		out := captureLog(t)
+		res, err := ConvertAtMount(context.Background(), mount, MountOptions{
+			Deadline: time.Now().Add(spare + 4*time.Second),
+		})
+		if err != nil {
+			t.Fatalf("ConvertAtMount: %v", err)
+		}
+		if strings.Contains(out.String(), "mount leaves the exports to the job") {
+			t.Fatalf("bloated 6 MiB 2-track legacy DB was wrongly deferred:\n%s", out)
+		}
+		if _, err := rbstate.ReadHeader(dbDir(mount)); err != nil {
+			t.Fatalf("snapshot not adopted inside window (res=%+v): %v", res, err)
+		}
+	})
+
+	t.Run("bloated_20MiB_above_probe_cap_adopts_in_window", func(t *testing.T) {
+		// Above the 16 MiB SQLite probe cap, rows fall back to m.db Track MAX(id) instead of
+		// walking a huge .rb-bridge-state.db on FAT32, and still fit a 4 s window.
+		mount, st := makeBloatedLegacy(t, 20)
+		rows, stateBytes := legacyAdoptEstimate(context.Background(), dbDir(mount), st)
+		if rows != 2 || stateBytes != st.Size() {
+			t.Fatalf("legacyAdoptEstimate(20MiB) = (%d, %d), want (2, %d)", rows, stateBytes, st.Size())
+		}
+		out := captureLog(t)
+		if _, err := ConvertAtMount(context.Background(), mount, MountOptions{
+			Deadline: time.Now().Add(spare + 4*time.Second),
+		}); err != nil {
+			t.Fatalf("ConvertAtMount: %v", err)
+		}
+		if strings.Contains(out.String(), "mount leaves the exports to the job") {
+			t.Fatalf("bloated 20 MiB 2-track legacy DB was wrongly deferred:\n%s", out)
+		}
+	})
+
+	t.Run("kdata_2_71GB_estimate_is_realistic_and_defers", func(t *testing.T) {
+		// Calibrated real KDATA deck case: 6,053 tracks, ~4.7 MB OneLibrary, 2.71 GB legacy state DB.
+		// Previously oldSt.Size()/250 yielded ~5,597,379 ms (>93 minutes). The calibrated cost must
+		// stay realistic (15-45 s) while still deferring out of the 17 s (14 s usable) mount window.
+		w := work{
+			oneLibrary:  4_700_000,
+			view:        6053,
+			load:        6053,
+			scan:        6053,
+			legacyState: 2_712_440_832,
+			commits:     1,
+			tracks:      6053,
+		}
+		got := w.cost()
+		if got < 15*time.Second || got > 45*time.Second {
+			t.Fatalf("KDATA 2.71 GB legacy adopt cost = %v, want within [15s, 45s]", got)
 		}
 	})
 }

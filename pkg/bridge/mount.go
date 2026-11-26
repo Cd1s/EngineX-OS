@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
@@ -27,6 +28,7 @@ type MountOptions struct {
 	Deadline   time.Time // the hook's kill; zero for a run by hand, which has no limit
 	Publish    bool      // the job's remount asked for the window: nobody waits, staged data may use all of it
 	Full       bool      // a run by hand: never stat-only, no budget
+	OnDemand   bool      // CDJ direct-read mode (arm32 hook present): hash-only AlbumArt, .rb-bridge-browse, no background perf pass
 	SmartMatch uint32    // adds the list "[Smart Match]" for the track with this rekordbox ID
 	Settings   string    // the deck's settings file (layout, language), "" for the defaults
 	// StartBackground starts the mount's job. It is called before any step that can be long, so a
@@ -111,6 +113,7 @@ type work struct {
 	lists, entries            int   // lists a diff writes or removes, and the entries of those it writes
 	staged                    int   // staged tracks applied in place
 	scan                      int   // rows of m.db compared with a next library's
+	legacyState               int64 // bytes of a valid legacy .rb-bridge-state.db (FAT32 walk + page scatter)
 	commits, tracks           int   // commits, each with a save of the snapshot of this many tracks
 }
 
@@ -122,8 +125,9 @@ func (w work) cost() time.Duration {
 	us += 0.48 * float64(w.oneLibrary)    // 0.50 s a MiB
 	us += 0.15 * float64(w.deviceLibrary) // 0.16 s a MiB
 	us += 130*float64(w.view) + 100*float64(w.load) + 650*float64(w.build)
-	us += 25000*float64(w.adds) + 30000*float64(w.removes) + 15000*float64(w.updates) + 5000*float64(w.lists) + 120*float64(w.entries)
+	us += 25000*float64(w.adds) + 30000*float64(w.removes) + 15000*float64(w.updates) + 6500*float64(w.lists) + 120*float64(w.entries)
 	us += 33000*float64(w.staged) + 350*float64(w.scan)
+	us += 0.0057 * float64(w.legacyState) // ~6 ms/MiB FAT32 cluster-chain traversal + page scatter on multi-GB legacy state DBs
 	us += float64(w.commits) * (250000 + 65*float64(w.tracks))
 	return time.Duration(us) * time.Microsecond
 }
@@ -149,6 +153,79 @@ func exportWork(files []rbstate.FileSig, known int) work {
 	}
 	w.tracks = max(w.view, known)
 	return w
+}
+
+const (
+	legacySQLiteProbeMaxBytes = 16 << 20 // never run SQLite queries on >16 MiB legacy DBs during the mount window (FAT32 walk risk)
+	legacyFallbackMaxRows     = 200_000  // cap non-SQLite size/250 fallback
+)
+
+// legacyAdoptEstimate estimates the row count and legacy-file FAT32 scan bytes for adopting an
+// earlier build's .rb-bridge-state.db without letting BridgeAnalysis waveform blobs blow up the
+// row estimate (a 2.71 GB legacy state DB with ~6k rows previously estimated 5,597,379 ms via
+// size/250). For valid SQLite files <= 16 MiB, MAX(rowid) on BridgeState descends only the
+// rightmost B-tree path (2-3 pages). Above 16 MiB, querying the state DB during the 17 s mount
+// window risks a multi-second FAT32 cluster-chain walk, so rows come from m.db's Track MAX(id)
+// when m.db <= 16 MiB (or exportWork's view estimate when m.db is also huge), while stateBytes
+// prices the FAT32 traversal + scattered page cost (~6 ms/MiB). Non-SQLite files fall back
+// conservatively to size/250 (capped).
+func legacyAdoptEstimate(ctx context.Context, dir string, oldSt os.FileInfo) (rows int, stateBytes int64) {
+	if oldSt == nil || oldSt.Size() <= 0 {
+		return 0, 0
+	}
+	statePath := filepath.Join(dir, oldStateName)
+	if !isSQLiteFile(statePath) {
+		return int(min(oldSt.Size()/250, legacyFallbackMaxRows)), 0
+	}
+	stateBytes = oldSt.Size()
+	if ctx.Err() != nil {
+		return 0, stateBytes
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	if oldSt.Size() <= legacySQLiteProbeMaxBytes {
+		if n, ok := queryMaxInt(probeCtx, statePath, `SELECT COALESCE(MAX(rowid), 0) FROM BridgeState`); ok {
+			return n, stateBytes
+		}
+		return 0, stateBytes
+	}
+	mdbPath := filepath.Join(dir, "m.db")
+	if mSt, err := os.Stat(mdbPath); err == nil && mSt.Size() > 0 && mSt.Size() <= legacySQLiteProbeMaxBytes {
+		if n, ok := queryMaxInt(probeCtx, mdbPath, `SELECT COALESCE(MAX(id), 0) FROM Track`); ok {
+			return n, stateBytes
+		}
+	}
+	return 0, stateBytes
+}
+
+func isSQLiteFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var hdr [16]byte
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
+		return false
+	}
+	return string(hdr[:]) == "SQLite format 3\x00"
+}
+
+func queryMaxInt(ctx context.Context, dbPath, q string) (int, bool) {
+	db, err := openRO(dbPath, 100)
+	if err != nil {
+		return 0, false
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var n int64
+	if err := db.QueryRowContext(ctx, q).Scan(&n); err != nil {
+		return 0, false
+	}
+	if n < 0 {
+		return 0, true
+	}
+	return int(min(n, legacyFallbackMaxRows)), true
 }
 
 // writableLibrary reports that the stick's Engine Library can be written: the volume itself, or
@@ -221,8 +298,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	if err != nil {
 		return res, err
 	}
-	staged := stagedStamp(mount)
-	if (len(files) == 0 && staged == "") || !writableLibrary(mount) {
+	if len(files) == 0 || !writableLibrary(mount) {
 		return MountResult{Bypassed: true}, nil
 	}
 	_, hadLibrary := os.Lstat(filepath.Join(mount, "Engine Library"))
@@ -245,8 +321,10 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		return res, err
 	}
 	defer unlock()
-	swapped, swapDeadline := swapNext(ctx, mount, dir, st)
-	if swapped {
+	layout := ReadLayout(o.Settings)
+	stamp := rbstate.Stamp(layout, files, "")
+	swapped, swapDeadline := swapNext(ctx, mount, dir, st, o.OnDemand, stamp)
+	if swapped && !o.OnDemand {
 		// The job drops the records the next library kept in the stage for the deck's loads, and
 		// goes on with what is pending.
 		startBG()
@@ -254,23 +332,43 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	if !swapped && (swapDeadline || deadlineReached()) {
 		return stopAtDeadline()
 	}
-	layout := ReadLayout(o.Settings)
-	stamp := rbstate.Stamp(layout, files, staged)
 	head, headErr := rbstate.ReadHeader(dir)
+	if swapped && o.OnDemand && (headErr != nil || !head.Pending.None()) {
+		startBG()
+	}
 	_, nextErr := os.Stat(filepath.Join(dir, rbstate.SnapshotName+".next"))
 	unchanged := headErr == nil && head.Stamp == stamp && head.Rules == rbstate.Rules && errors.Is(nextErr, os.ErrNotExist) &&
 		!o.Full && o.SmartMatch == 0 && libraryUUID(dir) == head.LibraryUUID
 	st.done("stat", "%d export files, snapshot %v, unchanged %v", len(files), headErr == nil, unchanged)
 	if unchanged && head.Pending.None() {
-		chores(ctx, mount, st, !o.Publish)
-		return MountResult{Bypassed: true, Background: res.Background}, nil
+		if o.OnDemand {
+			if head.Mode != rbstate.ModeOnDemand {
+				// Base-format snapshot lacks Track.AnalysisPath/ArtworkPath/Duration/SampleRate:
+				// never emit a header-only stub; hydrate from exports in-window or via background job.
+				unchanged = false
+			} else if !rbstate.BrowseIndexMatches(dir, head) {
+				if !deadlineReached() && (st.kill.IsZero() || st.fits(work{load: head.Tracks})) {
+					if snap, lerr := rbstate.Load(dir); lerr == nil && syncBrowseIndexCtx(ctx, dir, snap) == nil {
+						chores(ctx, mount, st, !o.Publish)
+						return MountResult{Bypassed: true, Background: res.Background}, nil
+					}
+				}
+				unchanged = false
+			}
+		}
+		if unchanged {
+			chores(ctx, mount, st, !o.Publish)
+			return MountResult{Bypassed: true, Background: res.Background}, nil
+		}
 	}
 	if unchanged && swapped && !o.Full {
 		// The window that swaps a library in does nothing else, whatever the library's size.
 		res.Pending = head.Pending
 		return res, nil
 	}
-	startBG()
+	if !o.OnDemand {
+		startBG()
+	}
 	rbstate.CleanTemps(dir)
 	if n := CleanWriteBackLeftoversCtx(ctx, mount); n > 0 {
 		log.Printf("rb-bridge: %d files of a write-back pass that was cut short put right", n)
@@ -283,16 +381,23 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		ahead.build = ahead.view // a first library
 	} else if headErr != nil {
 		if oldSt, oe := os.Stat(filepath.Join(dir, oldStateName)); oe == nil && oldSt.Size() > 0 {
-			// Legacy take-over (adopt.go) scans BridgeState JOIN Track and reconciles every row.
-			adoptRows := max(ahead.view, int(oldSt.Size()/250))
+			// Legacy take-over (adopt.go) reads BridgeState/BridgeWritten/Track and reconciles
+			// every row. Estimate rows independently of BridgeAnalysis blob size, while still
+			// pricing FAT32 cluster-chain walk + scatter for multi-GB legacy state files.
+			stateRows, stateBytes := legacyAdoptEstimate(ctx, dir, oldSt)
+			adoptRows := max(ahead.view, stateRows)
 			ahead.load += adoptRows
 			ahead.scan += adoptRows
+			ahead.legacyState += stateBytes
 			ahead.tracks = max(ahead.tracks, adoptRows)
+		} else {
+			ahead.load = max(ahead.load, ahead.view)
 		}
 	}
 	if !st.fits(ahead) {
 		// Engine gets the stick now, with the library it has; the job reads the exports and
 		// makes the next library, and its remount swaps it in.
+		startBG()
 		log.Printf("rb-bridge: mount leaves the exports to the job: reading them would take about %d ms of the %d ms left", ahead.cost().Milliseconds(), time.Until(st.kill).Milliseconds())
 		res.Pending = head.Pending
 		return res, nil
@@ -310,20 +415,13 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	if errors.Is(err, errWindowDeadline) || deadlineReached() {
 		return stopAtDeadline()
 	}
-	if err != nil && staged == "" {
+	if err != nil {
 		return res, err
 	}
 	for _, f := range failed {
 		log.Printf("rb-bridge: %v: this library is left out of the import", f)
 	}
-	stagedLibs, stagedErr := readStagedCtx(ctx, mount)
-	if errors.Is(stagedErr, errWindowDeadline) || deadlineReached() {
-		return stopAtDeadline()
-	}
-	if libs = append(libs, stagedLibs...); len(libs) == 0 {
-		if err != nil {
-			return res, err
-		}
+	if len(libs) == 0 {
 		return MountResult{Bypassed: true}, nil
 	}
 	// A OneLibrary key not in the cache costs seconds on a deck: the line says which it was.
@@ -351,7 +449,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	st.done("view", "%d tracks, %d lists", len(view.Tracks), len(view.Lists))
 
 	w := &window{ctx: ctx, mount: mount, dir: dir, view: view, st: st, o: o, res: &res, load: load,
-		partial: len(failed) > 0, linkOnly: len(files) == 0}
+		partial: len(failed) > 0}
 	if err = w.run(); err != nil {
 		if errors.Is(err, errWindowDeadline) || deadlineReached() {
 			if w.snap != nil {
@@ -363,9 +461,12 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	}
 	chores(ctx, mount, st, false)
 	res.Pending = w.snap.Pending
-	log.Printf("rb-bridge: mount done in %d ms: %d added, %d updated, %d removed, lists changed %v, %d staged tracks applied; pending: %d rows, %d tracks' data, verify %v",
+	if o.OnDemand && (w.left || !res.Pending.None()) {
+		startBG()
+	}
+	log.Printf("rb-bridge: mount done in %d ms: %d added, %d updated, %d removed, lists changed %v, %d staged tracks applied; pending: %d rows, lists %v, %d tracks' data, verify %v",
 		time.Since(st.start).Milliseconds(), res.Added, res.Updated, res.Removed, res.PlaylistsChanged, res.Applied,
-		res.Pending.Rows, res.Pending.Perf, res.Pending.Verify)
+		res.Pending.Rows, res.Pending.Lists, res.Pending.Perf, res.Pending.Verify)
 	return res, nil
 }
 
@@ -457,7 +558,7 @@ func addSmartMatchCtx(ctx context.Context, st *steps, v *View, ref uint32) error
 		}
 		tracks[i] = v.Tracks[i].Track
 		tracks[i].ID = uint32(i + 1)
-		if current < 0 && slices.ContainsFunc(v.Tracks[i].Refs, func(r rbstate.SourceRef) bool { return r.ID == ref && r.Kind != rbstate.LinkLibrary }) {
+		if current < 0 && slices.ContainsFunc(v.Tracks[i].Refs, func(r rbstate.SourceRef) bool { return r.ID == ref }) {
 			current = i
 		}
 	}

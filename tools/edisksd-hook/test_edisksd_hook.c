@@ -47,9 +47,11 @@ static uint64_t test_cache_reserve;
 // Free space left on a stick after a carry-over: none, so a tiny tmpfs stick fills up mid-copy.
 static uint64_t test_carry_slack;
 #define CARRY_SLACK test_carry_slack
-// systemctl for stopping a volume's background import: none (an empty path fails to run) until a test sets one.
+// systemctl / systemd-run for stopping/starting a volume's background import: empty until a test sets one.
 static char test_systemctl[PATH_MAX];
+static char test_systemd_run[PATH_MAX];
 #define SYSTEMCTL_PATH test_systemctl
+#define SYSTEMD_RUN_PATH test_systemd_run
 #include <errno.h>
 #include <sys/stat.h>
 static char test_eio_path[PATH_MAX];
@@ -288,6 +290,112 @@ static void test_paths_and_copy(const char *root) {
     char unsafe[PATH_MAX];join(unsafe,root,"link-parent");assert(!symlink(outside,unsafe));join(p,unsafe,"child");
     assert(make_dirs(p)==-1&&errno==ELOOP);
     puts("#20/#21/#22/#37: missing library, lossless seed/reuse, changed native DB, identity separation, all symlink components: PASS");
+}
+// Real-deck KDATA regression: a stick with 12,000 files in Database2/OverviewData and Artwork
+// must not blow the 17 s pre-mount window, while direct symlinks in Engine Library/ or
+// Engine Library/Database2/ are still rejected with ELOOP.
+static void test_premount_shallow_walk_large_assets(const char *root) {
+    char vol[PATH_MAX],p[PATH_MAX],ov[PATH_MAX],art[PATH_MAX],log[PATH_MAX],script[PATH_MAX*2];
+    join(vol,MEDIA_ROOT,"LARGE-ASSETS");
+    join(p,vol,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,vol,"PIONEER/rekordbox/export.pdb");write_file(p,"pdb");
+    join(ov,vol,"Engine Library/Database2/OverviewData/u1");assert(!make_dirs(ov));
+    join(art,vol,"Engine Library/Artwork");assert(!make_dirs(art));
+    join(p,vol,"Engine Library/Database2/m.db");write_file(p,"db");
+    int ovfd=open(ov,O_RDONLY|O_DIRECTORY|O_CLOEXEC);assert(ovfd>=0);
+    for(int i=1;i<=7000;i++) {
+        char name[32];snprintf(name,sizeof name,"%d.rgb",i);
+        int f=openat(ovfd,name,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC,0600);assert(f>=0);close(f);
+    }
+    close(ovfd);
+    int artfd=open(art,O_RDONLY|O_DIRECTORY|O_CLOEXEC);assert(artfd>=0);
+    for(int i=1;i<=5000;i++) {
+        char name[32];snprintf(name,sizeof name,"art%05d.jpg",i);
+        int f=openat(artfd,name,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC,0600);assert(f>=0);close(f);
+    }
+    close(artfd);
+
+    char lib[PATH_MAX];join(lib,vol,"Engine Library");
+    int libfd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);assert(libfd>=0);
+    int64_t t0=now_ms();
+    assert(!validate_library_shallow(libfd,t0+500));
+    int64_t shallow_ms=now_ms()-t0;
+    assert(shallow_ms<100);
+    // Contrast: deep copy_tree walks all 12,000 files; a 1 ms deadline trips ETIMEDOUT on slow sticks
+    // and even on tmpfs shallow skips the subtrees completely. Verify after_mount_at runs rb-bridge.
+    close(libfd);
+
+    join(log,root,"large-assets-bridge.log");join(test_rb_bridge,root,"large-assets-bridge");
+    snprintf(script,sizeof script,"#!/bin/sh\necho ran > '%s'\nexit 0\n",log);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    t0=now_ms();
+    int rc=after_mount_at(vol,vol,"/dev/sdz1",MOUNT_PRE,t0+2000);
+    assert((rc&CONVERTED)!=0);
+    assert(now_ms()-t0<500);
+    expect_file(log,"ran\n");
+
+    // Direct symlink inside Engine Library/Database2/ must still be rejected with ELOOP.
+    char badlink[PATH_MAX];join(badlink,vol,"Engine Library/Database2/bad.db");
+    assert(!symlink("/etc/passwd",badlink));
+    unlink(log);
+    libfd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);assert(libfd>=0);
+    errno=0;assert(validate_library_shallow(libfd,now_ms()+500)==-1&&errno==ELOOP);
+    close(libfd);
+    rc=after_mount_at(vol,vol,"/dev/sdz1",MOUNT_PRE,now_ms()+2000);
+    assert((rc&CONVERTED)==0&&access(log,F_OK)==-1&&errno==ENOENT);
+    assert(!unlink(badlink));
+
+    // Direct symlink replacing Engine Library/Artwork must also be rejected with ELOOP.
+    char art_real[PATH_MAX];join(art_real,vol,"Engine Library/Artwork-bak");
+    assert(!rename(art,art_real));
+    assert(!symlink("/etc",art));
+    libfd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);assert(libfd>=0);
+    errno=0;assert(validate_library_shallow(libfd,now_ms()+500)==-1&&errno==ELOOP);
+    close(libfd);
+    assert(!unlink(art));
+    assert(!rename(art_real,art));
+
+    // Special file (FIFO) inside Engine Library/Database2 must be rejected with ELOOP;
+    // past deadline must fail with ETIMEDOUT.
+    char badfifo[PATH_MAX];join(badfifo,vol,"Engine Library/Database2/pipe.db");
+    assert(!mkfifo(badfifo,0600));
+    libfd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);assert(libfd>=0);
+    errno=0;assert(validate_library_shallow(libfd,now_ms()+500)==-1&&errno==ELOOP);
+    close(libfd);
+    assert(!unlink(badfifo));
+
+    libfd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);assert(libfd>=0);
+    errno=0;assert(validate_library_shallow(libfd,now_ms()-10)==-1&&errno==ETIMEDOUT);
+    close(libfd);
+
+    // PIONEER/ shallow validation: valid PIONEER/rekordbox + PIONEER/USBANLZ passes, while
+    // symlinks/FIFOs on PIONEER, PIONEER/USBANLZ, or PIONEER/rekordbox/export.pdb reject (ELOOP).
+    errno=0;assert(validate_pioneer_shallow(vol,now_ms()+500)==0);
+
+    char pio[PATH_MAX],pio_bak[PATH_MAX],anlz_sub[PATH_MAX],sym_pdb[PATH_MAX],pio_fifo[PATH_MAX];
+    join(pio,vol,"PIONEER");join(pio_bak,vol,"PIONEER-bak");
+    join(anlz_sub,vol,"PIONEER/USBANLZ");
+    join(sym_pdb,vol,"PIONEER/rekordbox/sym.pdb");
+    assert(!symlink("/etc/passwd",sym_pdb));
+    errno=0;assert(validate_pioneer_shallow(vol,now_ms()+500)==-1&&errno==ELOOP);
+    unlink(log);
+    rc=after_mount_at(vol,vol,"/dev/sdz1",MOUNT_PRE,now_ms()+2000);
+    assert((rc&CONVERTED)==0&&access(log,F_OK)==-1&&errno==ENOENT);
+    assert(!unlink(sym_pdb));
+
+    join(pio_fifo,vol,"PIONEER/USBANLZ");
+    assert(!symlink("/etc",pio_fifo));
+    errno=0;assert(validate_pioneer_shallow(vol,now_ms()+500)==-1&&errno==ELOOP);
+    assert(!unlink(pio_fifo));
+
+    assert(!rename(pio,pio_bak));
+    assert(!symlink("/etc",pio));
+    errno=0;assert(validate_pioneer_shallow(vol,now_ms()+500)==-1&&errno==ELOOP);
+    assert(!unlink(pio));
+    assert(!rename(pio_bak,pio));
+
+    test_rb_bridge[0]=0;
+    printf("pre-mount shallow walk on 12,000 OverviewData+Artwork files (%lld ms) + direct symlink rejection: PASS\n",(long long)shallow_ms);
 }
 // #301: a first import too large for the mount goes on in a background job that writes its stage on
 // the stick. Eject stops it, under the unit rb-bridge started it as, before the unmount.
@@ -2433,14 +2541,201 @@ static void test_hfs_gen2_lkl_policy(const char *root,const char *self_exe) {
     test_platform_mode_val=0;test_fsck_bin[0]=0;test_lklfuse_bin[0]=0;test_rb_bridge[0]=0;test_guardian_system[0]=0;test_hfs_target[0]=0;test_disk[0]=0;test_modules_root[0]=0;
     puts("Gen-2 lklfuse policy (fsck-fail->ro, clean->rw+wait, unclean->fsck-y->rw, pull->lazy+kill, lkl-fail->ro, carry-over): PASS");
 }
+// RD-2 proof (fails on f65d4fdf): a mount-window timeout starts the background import unit via
+// systemd-run, and a finished pending swap (.rb-next.db + .swap) bypasses slow_marker so a
+// remount/re-insert publishes it and clears slow_marker.
+static void test_timeout_starts_import_and_pending_swap_overrides_slow_marker(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],blog[PATH_MAX],slog[PATH_MAX],script[PATH_MAX*3],marker[PATH_MAX];
+    join(disk,root,"rd2-disk");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"big-unt-pdb");
+    join(target,MEDIA_ROOT,"UNTITLED");assert(!make_dirs(target));
+    join(blog,root,"rd2-bridge.log");join(slog,root,"rd2-systemd.log");
+    join(test_rb_bridge,root,"rd2-bridge");join(test_systemd_run,root,"rd2-systemd-run");
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"sr $*\" >> '%s'\n",slog);
+    write_file(test_systemd_run,script);assert(!chmod(test_systemd_run,0700));
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"br $*\" >> '%s'\nexit 124\n",blog);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
+    unsigned slow_before=count_runtime("slow-");
+    struct libmnt_context c={.target=target,.source="/dev/sdx1"};
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    assert(count_runtime("slow-")==slow_before+1);
+    char want_unit[64],want_sr[PATH_MAX*2];
+    import_unit(target,want_unit);
+    snprintf(want_sr,sizeof want_sr,"%s/slow-",test_runtime);(void)want_sr;
+    FILE *sf=fopen(slog,"r");assert(sf);char sbuf[4096]={0};size_t sn=fread(sbuf,1,sizeof sbuf-1,sf);fclose(sf);sbuf[sn]=0;
+    assert(strstr(sbuf,want_unit)&&strstr(sbuf,"--import-path")&&strstr(sbuf,target));
+    assert(!umount2(target,UMOUNT_NOFOLLOW));unlink(slog);unlink(blog);
+
+    // Next insert without pending swap and without a completed snapshot honors slow_marker
+    // (skips synchronous 17 s rb-bridge --mount-path) AND kicks off background --import-path.
+    c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
+    assert(access(blog,F_OK)==-1);
+    sf=fopen(slog,"r");assert(sf);memset(sbuf,0,sizeof sbuf);sn=fread(sbuf,1,sizeof sbuf-1,sf);fclose(sf);sbuf[sn]=0;
+    assert(strstr(sbuf,want_unit)&&strstr(sbuf,"--import-path")&&strstr(sbuf,target));
+    assert(!umount2(target,UMOUNT_NOFOLLOW));unlink(slog);
+
+    // Re-insert with slow_marker + legacy .rb-bridge-state.db (no snapshot yet) also skips
+    // synchronous conversion AND starts background --import-path.
+    join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2/.rb-bridge-state.db");write_file(p,"legacy-state");
+    c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
+    assert(access(blog,F_OK)==-1);
+    sf=fopen(slog,"r");assert(sf);memset(sbuf,0,sizeof sbuf);sn=fread(sbuf,1,sizeof sbuf-1,sf);fclose(sf);sbuf[sn]=0;
+    assert(strstr(sbuf,want_unit)&&strstr(sbuf,"--import-path")&&strstr(sbuf,target));
+    assert(!umount2(target,UMOUNT_NOFOLLOW));unlink(slog);unlink(p);
+
+    // Re-insert with slow_marker + unfinished pending snapshot (rows>0, lists:true) also skips
+    // synchronous conversion AND starts background --import-path.
+    join(p,disk,"Engine Library/Database2/.rb-bridge-snapshot");
+    write_file(p,"RBS2 {\"format\":2,\"rules\":5,\"uuid\":\"u-unt\",\"pending\":{\"rows\":2420,\"lists\":true}}\nE 0 0\n");
+    c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
+    assert(access(blog,F_OK)==-1);
+    sf=fopen(slog,"r");assert(sf);memset(sbuf,0,sizeof sbuf);sn=fread(sbuf,1,sizeof sbuf-1,sf);fclose(sf);sbuf[sn]=0;
+    assert(strstr(sbuf,want_unit)&&strstr(sbuf,"--import-path")&&strstr(sbuf,target));
+    assert(!umount2(target,UMOUNT_NOFOLLOW));unlink(slog);
+
+    // Re-insert with slow_marker + settled snapshot (pending:{} newer than marker) skips BOTH
+    // synchronous conversion and background import.
+    write_file(p,"RBS2 {\"format\":2,\"rules\":5,\"uuid\":\"u-unt\",\"pending\":{}}\nE 0 0\n");
+    c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
+    assert(access(blog,F_OK)==-1);
+    assert(access(slog,F_OK)==-1);
+    assert(!umount2(target,UMOUNT_NOFOLLOW));
+
+    // Pending swap (.rb-next.db + .swap) overrides slow_marker, runs rb-bridge, and clears slow_marker.
+    join(p,disk,"Engine Library/Database2/.rb-next.db");write_file(p,"next");
+    join(p,disk,"Engine Library/Database2/.rb-bridge-snapshot.swap");write_file(p,"swap");
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"pub $*\" >> '%s'\nrm -f \"$2/Engine Library/Database2/.rb-next.db\" \"$2/Engine Library/Database2/.rb-bridge-snapshot.swap\"\nexit 0\n",blog);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
+    FILE *bf=fopen(blog,"r");assert(bf);char bbuf[4096]={0};size_t bn=fread(bbuf,1,sizeof bbuf-1,bf);fclose(bf);bbuf[bn]=0;
+    assert(strstr(bbuf,"pub --mount-path ")&&strstr(bbuf,target));
+    assert(count_runtime("slow-")==slow_before);
+    assert(!umount2(target,UMOUNT_NOFOLLOW));
+    (void)marker;test_systemd_run[0]=0;test_rb_bridge[0]=0;test_disk[0]=0;
+    puts("RD-2 edisksd timeout -> start_import & pending swap overrides/clears slow_marker: PASS");
+}
+// Item 6 proof: a stock Engine DJ export stick (Engine Library/Database2/m.db, NO PIONEER/
+// folder) runs neither rb-bridge on mount nor systemd-run background import nor rb-bridge
+// cue write-back on eject, creates no bridge snapshot/browse/stage/slow-marker files, and
+// keeps the shallow pre-mount library walk + stock guardian heal path unchanged.
+static void test_stock_engine_stick_unaffected(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],blog[PATH_MAX],slog[PATH_MAX],glog[PATH_MAX],script[PATH_MAX*3];
+    join(disk,root,"stock-engine-disk");
+    join(p,disk,"Engine Library/Database2/OverviewData/u-stock");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2/OverviewData/u-stock/1.rgb");write_file(p,"stock-rgb");
+    join(p,disk,"Engine Library/Database2/m.db");write_file(p,"stock-engine-mdb");
+    join(p,disk,"Engine Library/Artwork");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Artwork/a1.jpg");write_file(p,"stock-jpg");
+    join(p,disk,"Music");assert(!make_dirs(p));
+    join(p,disk,"Music/track.wav");write_file(p,"stock-audio");
+    join(target,MEDIA_ROOT,"STOCK-ENGINE");assert(!make_dirs(target));
+
+    join(blog,root,"stock-bridge.log");join(slog,root,"stock-systemd.log");join(glog,root,"stock-guardian.log");
+    join(test_rb_bridge,root,"stock-bridge");join(test_systemd_run,root,"stock-systemd-run");join(test_guardian_system,root,"stock-guardian");
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"br $*\" >> '%s'\nexit 0\n",blog);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"sr $*\" >> '%s'\nexit 0\n",slog);
+    write_file(test_systemd_run,script);assert(!chmod(test_systemd_run,0700));
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"gd $*\" >> '%s'\nexit 0\n",glog);
+    write_file(test_guardian_system,script);assert(!chmod(test_guardian_system,0700));
+    snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
+
+    unsigned slow_before=count_runtime("slow-");
+    struct libmnt_context c={.target=target,.source="/dev/sdz1"};
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    assert(!has_export(target)&&has_engine_db(target));
+    // Zero rb-bridge / systemd-run activity; stock guardian heal ran once in pre-mount.
+    assert(access(blog,F_OK)==-1&&errno==ENOENT);
+    assert(access(slog,F_OK)==-1&&errno==ENOENT);
+    assert(count_runtime("slow-")==slow_before);
+    FILE *gf=fopen(glog,"r");assert(gf);char gbuf[1024]={0};size_t gn=fread(gbuf,1,sizeof gbuf-1,gf);fclose(gf);gbuf[gn]=0;
+    assert(strstr(gbuf,"--heal-mount")&&strstr(gbuf,"--data-only"));
+    // No bridge snapshot/browse/next/swap files created on stick.
+    const char *forbidden[]={
+        "Engine Library/Database2/.rb-bridge-snapshot",
+        "Engine Library/Database2/.rb-bridge-snapshot.swap",
+        "Engine Library/Database2/.rb-bridge-browse",
+        "Engine Library/Database2/.rb-next.db",
+    };
+    for(unsigned i=0;i<sizeof forbidden/sizeof *forbidden;i++) {
+        join(p,target,forbidden[i]);
+        assert(access(p,F_OK)==-1&&errno==ENOENT);
+    }
+    // Shallow pre-mount walk passes on stock Engine tree and still rejects direct symlink in Database2.
+    char lib[PATH_MAX];join(lib,target,"Engine Library");
+    int libfd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);assert(libfd>=0);
+    assert(!validate_library_shallow(libfd,now_ms()+500));
+    close(libfd);
+    // Normal eager Eject must also run zero rb-bridge cue write-back passes.
+    assert(!unmount_dispatch(&c,real_unmount));
+    assert(access(blog,F_OK)==-1&&errno==ENOENT);
+    assert(access(slog,F_OK)==-1&&errno==ENOENT);
+    join(p,disk,"Engine Library/Database2/m.db");expect_file(p,"stock-engine-mdb");
+    join(p,disk,"Engine Library/Database2/OverviewData/u-stock/1.rgb");expect_file(p,"stock-rgb");
+    join(p,disk,"Engine Library/Artwork/a1.jpg");expect_file(p,"stock-jpg");
+    test_guardian_system[0]=0;test_systemd_run[0]=0;test_rb_bridge[0]=0;test_disk[0]=0;
+    puts("Item 6: stock Engine DJ export stick (no PIONEER/) has 0 rb-bridge, 0 background import, 0 eject write-back, 0 bridge files: PASS");
+}
+static void test_review_r2_proofs(const char *root) {
+    char mnt[PATH_MAX],p[PATH_MAX],glog[PATH_MAX],fscript[PATH_MAX],outside[PATH_MAX];
+    // Hook R2 FIX 2: stock Engine stick (!has_export) with leftover PIONEER symlink must still heal.
+    join(mnt,test_media,"R2PROOF2");
+    join(p,mnt,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,mnt,"Engine Library/Database2/m.db");write_file(p,"stock-engine-mdb");
+    join(p,mnt,"PIONEER");assert(!make_dirs(p));
+    join(p,mnt,"PIONEER/old_link");assert(!symlink("/etc/passwd",p));
+    join(glog,root,"r2f2-guardian.log");
+    join(fscript,root,"r2f2-guardian.sh");
+    char gbody[PATH_MAX+64];
+    snprintf(gbody,sizeof gbody,"#!/bin/sh\necho \"$*\" >> \"%s\"\nexit 0\n",glog);
+    write_file(fscript,gbody);assert(!chmod(fscript,0700));
+    snprintf(test_guardian_system,sizeof test_guardian_system,"%s",fscript);
+    assert(!has_export(mnt)&&has_engine_db(mnt));
+    int rc2=after_mount_at(mnt,mnt,"/dev/sdz9",MOUNT_PRE,now_ms()+2000);
+    assert(rc2!=0&&!access(glog,F_OK));
+    test_guardian_system[0]=0;
+
+    // Hook R2 FIX 3: slow-marker path must never follow symlinked Engine Library or Database2 dirs.
+    join(outside,root,"r2f3-outside");assert(!make_dirs(outside));
+    join(p,outside,".rb-bridge-snapshot");
+    write_file(p,"RBS2 {\"format\":1,\"rules\":5,\"uuid\":\"u\",\"pending\":{}}\n");
+    join(p,outside,".rb-next.db");
+    write_file(p,"outside-next-db");
+
+    // Case A: Engine Library/Database2 is a symlink to outside -> fail closed on unfinished import, 0 on pending swap.
+    join(mnt,test_media,"R2PROOF3A");
+    join(p,mnt,"Engine Library");assert(!make_dirs(p));
+    join(p,mnt,"Engine Library/Database2");assert(!symlink(outside,p));
+    assert(has_unfinished_import(mnt,NULL)==1);
+    assert(has_pending_swap(mnt)==0);
+
+    // Case B: Engine Library itself is a symlink to an outside parent with Database2/.
+    char outside_lib[PATH_MAX];
+    join(outside_lib,root,"r2f3-outside-lib");
+    join(p,outside_lib,"Database2");assert(!make_dirs(p));
+    join(p,outside_lib,"Database2/.rb-bridge-snapshot");
+    write_file(p,"RBS2 {\"format\":1,\"rules\":5,\"uuid\":\"u\",\"pending\":{}}\n");
+    join(p,outside_lib,"Database2/.rb-next.db");
+    write_file(p,"outside-lib-next-db");
+    join(mnt,test_media,"R2PROOF3B");
+    assert(!make_dirs(mnt));
+    join(p,mnt,"Engine Library");assert(!symlink(outside_lib,p));
+    assert(has_unfinished_import(mnt,NULL)==1);
+    assert(has_pending_swap(mnt)==0);
+    puts("Hook R2 FIX 2 & FIX 3 proofs: PASS");
+}
 int main(int argc,char **argv) {
     if(argc>1&&!strcmp(argv[1],"--mock-lklfuse"))return run_mock_lklfuse(argc,argv);
     char root[]="/tmp/enginex-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_prepare_state,root,"run/enginex-usb-preparing");char prep_run[PATH_MAX];join(prep_run,root,"run");assert(!make_dirs(prep_run));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
-    assert(!make_dirs(test_media));test_guardian_window_floor();test_paths_and_copy(root);test_eject_stops_the_background_import(root);test_eject_stops_the_remount_helper(root);test_eject_runs_cue_writeback(root);test_eject_writeback_overrun(root);test_only_an_eject_marks_the_stick(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_hfs_gen2_lkl_policy(root,argv[0]);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_removal_detaches_a_view_in_use(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);test_hfs_view_scale_and_47879b10_253(root);}
+    assert(!make_dirs(test_media));test_guardian_window_floor();test_paths_and_copy(root);test_premount_shallow_walk_large_assets(root);test_eject_stops_the_background_import(root);test_eject_stops_the_remount_helper(root);test_eject_runs_cue_writeback(root);test_eject_writeback_overrun(root);test_only_an_eject_marks_the_stick(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);test_review_r2_proofs(root);
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_hfs_gen2_lkl_policy(root,argv[0]);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_timeout_starts_import_and_pending_swap_overrides_slow_marker(root);test_stock_engine_stick_unaffected(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_removal_detaches_a_view_in_use(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);test_hfs_view_scale_and_47879b10_253(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;

@@ -81,10 +81,11 @@ func normalizeMainCueForWrittenDigest(raw []byte) []byte {
 	return out
 }
 
-// unadjustedLegacyMatches reports whether an unadjusted (adj==0) row whose main cue Engine rewrote
+// UnadjustedLegacyMatches reports whether an unadjusted (adj==0) row whose main cue Engine rewrote
 // on load still matches a pre-normalization RawWrittenDigest stored by v1 or 9f2c0770 (either with
-// main=-1 for a track without a memory cue, or with stagedCues' memory cue position and adj=0).
-func unadjustedLegacyMatches(beats, cues, loops, stagedCues, prevWritten []byte) bool {
+// main=-1 for a track without a memory cue, its default main cue, stagedCues' memory cue position,
+// or any candidateMains supplied by write-back from the track's ANLZ memory cues).
+func UnadjustedLegacyMatches(beats, cues, loops, stagedCues, prevWritten []byte, candidateMains ...float64) bool {
 	if prevWritten == nil {
 		return false
 	}
@@ -110,6 +111,9 @@ func unadjustedLegacyMatches(beats, cues, loops, stagedCues, prevWritten []byte)
 	if tryMain(-1) {
 		return true
 	}
+	if def := math.Float64frombits(big.Uint64(cuesRaw[at[9]:])); def >= 0 && tryMain(def) {
+		return true
+	}
 	if refRaw, err := QUncompress(stagedCues, 64<<10); err == nil {
 		if rat, ok := cuePositions(refRaw); ok {
 			if main := math.Float64frombits(big.Uint64(refRaw[rat[8]:])); main >= 0 && tryMain(main) {
@@ -117,7 +121,27 @@ func unadjustedLegacyMatches(beats, cues, loops, stagedCues, prevWritten []byte)
 			}
 		}
 	}
+	for _, pos := range candidateMains {
+		if pos >= 0 && tryMain(pos) {
+			return true
+		}
+	}
 	return false
+}
+
+func unadjustedLegacyMatches(beats, cues, loops, stagedCues, prevWritten []byte) bool {
+	return UnadjustedLegacyMatches(beats, cues, loops, stagedCues, prevWritten)
+}
+
+// MetadataDigest hashes the editable metadata fields write-back syncs (genre, comment, label)
+// so an unchanged on-demand track load can verify metadata parity without decrypting exports.
+func MetadataDigest(genre, comment, label string) []byte {
+	h := sha256.New()
+	for _, s := range []string{genre, comment, label} {
+		_ = binary.Write(h, big, uint32(len(s)))
+		h.Write([]byte(s))
+	}
+	return h.Sum(nil)[:16]
 }
 
 // SyncedDigest names what the deck can change in a row and cue write-back writes back: cues,
@@ -129,6 +153,7 @@ func SyncedDigest(_ []byte, cues, loops []byte, activeOnLoadLoops int64, genre, 
 	if err != nil {
 		rawCues = cues
 	}
+	rawCues = normalizeMainCueForWrittenDigest(rawCues)
 	_ = binary.Write(h, big, uint64(len(rawCues)))
 	h.Write(rawCues)
 	_ = binary.Write(h, big, uint64(len(loops)))

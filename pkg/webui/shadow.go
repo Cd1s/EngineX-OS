@@ -40,9 +40,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
 const shadowBeaconPort = 50199 // EngineX players find each other here
@@ -1431,16 +1433,76 @@ func rbxReadAnalysisFile(file string) ([]byte, error) {
 const rbxAnalysisMax = 16 << 20
 
 // ownPerf is what /perf serves for an own deck: its library's analysis, else a
-// rekordbox Link deck's own (os.ErrNotExist while that is not written yet).
+// rekordbox Link deck's own (os.ErrNotExist while that is not written yet), or on-demand
+// RBXA1 from stream-sync when an OnDemand USB track has not been filled into m.db yet.
 func (s *Server) ownPerf(ctx context.Context, d deckState, native bool) ([]byte, error) {
 	perf, err := libraryPerfFormat(ctx, d.Path, s.shadow.dataRoot, s.shadow.mediaRoot, native)
 	if err != nil && d.rbxAnalysis != "" {
 		perf, err = rbxPeerPerf(d.rbxAnalysis, d.BPM, native)
 	}
+	if err != nil && d.Path != "" {
+		if odPerf, odErr := s.onDemandPeerPerf(ctx, d, native); odErr == nil {
+			perf, err = odPerf, nil
+		}
+	}
 	if err == nil && !native {
 		perf = withDeckBPM(perf, d.BPM)
 	}
 	return perf, err
+}
+
+func (s *Server) onDemandPeerPerf(ctx context.Context, d deckState, native bool) ([]byte, error) {
+	b := s.rbOnDemandBuilder()
+	if b == nil {
+		return nil, os.ErrNotExist
+	}
+	mediaRoot := filepath.Clean(s.onDemandMediaRoot())
+	srcPath := d.Path
+	if orig, ok := inMusicTempOrig(srcPath, s.shadow.dataRoot); ok {
+		if st, statErr := os.Stat(srcPath); statErr == nil {
+			if real := resolveInMusicTempPath(ctx, orig, st.Size(), s.shadow.dataRoot); real != "" {
+				srcPath = real
+			}
+		}
+	}
+	cleanPath := filepath.Clean(srcPath)
+	sub, err := filepath.Rel(mediaRoot, cleanPath)
+	if err != nil || sub == "." || sub == ".." || strings.HasPrefix(sub, ".."+string(filepath.Separator)) {
+		return nil, os.ErrNotExist
+	}
+	vol, rel, ok := strings.Cut(filepath.ToSlash(sub), "/")
+	if !ok || vol == "" || rel == "" {
+		return nil, os.ErrNotExist
+	}
+	mount, ok := resolveOnDemandMount(filepath.Join(mediaRoot, vol), "", mediaRoot)
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	res, err := b.Build(ctx, bridge.OnDemandRequest{
+		Mount:      mount,
+		EnginePath: "../" + rel,
+		EngineBPM:  d.BPM,
+	})
+	if err != nil {
+		return nil, err
+	}
+	dec, err := rbstate.DecodePerf(res.RBXA1)
+	if err != nil {
+		return nil, err
+	}
+	p := enginedb.Performance{
+		TrackData:   dec.TrackData,
+		Overview:    dec.Overview,
+		Beats:       dec.Beats,
+		QuickCues:   dec.QuickCues,
+		Loops:       dec.Loops,
+		ActiveLoops: dec.ActiveLoops,
+		Complete:    dec.Complete,
+	}
+	if native {
+		return encodeShadowAnalysis(p)
+	}
+	return perfFromBlobs(d.BPM, p.TrackData, p.Beats, p.Overview)
 }
 
 // withDeckBPM gives an EXPF analysis the BPM the source deck shows (/OriginalBPM), so
