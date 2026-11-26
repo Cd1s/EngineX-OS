@@ -7,12 +7,25 @@ import sqlite3
 import subprocess
 import sys
 import time
+import zlib
 from contextlib import closing
 from pathlib import Path
 from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import twin
+
+
+def raw_beat_sha(beat):
+    if not beat:
+        return ""
+    raw = beat
+    if len(beat) > 4:
+        try:
+            raw = zlib.decompress(beat[4:])
+        except zlib.error:
+            raw = beat
+    return hashlib.sha256(raw).hexdigest()[:12]
 
 
 def db_row(side, filename):
@@ -35,7 +48,7 @@ def db_row(side, filename):
         "analyzed": r[2],
         "bpmA": r[3],
         "beatLen": len(beat),
-        "beatSha": hashlib.sha256(beat).hexdigest()[:12] if beat else "",
+        "beatSha": raw_beat_sha(beat),
     }
 
 
@@ -115,10 +128,17 @@ def main():
     if b_local.exists():
         b_local.unlink()
 
-    # Load track-a.wav on A Deck 1 and set Hot Cue 1.
-    twin.ev("A", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck1").url="file:///data/music/track-a.wav"; "load"')
-    wait_for(lambda: (s := deck_state("A"))["loaded"] and s["analyzed"] and abs(s["bpm"] - 128) < 0.2, 60, "A initial load")
-    twin.ev("A", 'root.rtTr("/Engine/Deck1/Track/QuickCue1SetPosition").value = 220500; "cue1"')
+    # Let A finish its initial library analysis before B sees the track (same setup as
+    # check_instant_analysis.py, representing an already-analysed track on a real deck).
+    link_cmd = ["ip", "-n", twin.SIDE_CFG["B"]["netns"], "link", "set", "eth0"]
+    subprocess.run([*link_cmd, "down"], check=True)
+    try:
+        twin.ev("A", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck1").url="file:///data/music/track-a.wav"; "load"')
+        wait_for(lambda: (s := deck_state("A"))["loaded"] and s["analyzed"] and abs(s["bpm"] - 128) < 0.2 and (r := db_row("A", "track-a.wav")) and r["analyzed"] == 1 and r["beatSha"], 60, "A initial load")
+        twin.ev("A", 'root.rtTr("/Engine/Deck1/Track/QuickCue1SetPosition").value = 220500; "cue1"')
+        wait_for(lambda: abs(deck_state("A")["cue1"] - 220500) < 2, 15, "A cue1")
+    finally:
+        subprocess.run([*link_cmd, "up"], check=True)
     wait_for(lambda: (s := deck_state("B"))["loaded"] and s["analyzed"] and abs(s["bpm"] - 128) < 0.2 and abs(s["cue1"] - 220500) < 2, 60, "B initial shadow load")
 
     a0, b0 = deck_state("A"), deck_state("B")

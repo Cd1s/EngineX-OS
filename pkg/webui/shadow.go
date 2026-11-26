@@ -1385,6 +1385,11 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not analysed", http.StatusNotFound)
 		return
 	}
+	if d.rbxAnalysis == "" {
+		if gg := s.gridGen(r.Context(), d.Path); gg != "" {
+			w.Header().Set("X-Shadow-Grid-Gen", gg)
+		}
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(perf)
 }
@@ -1538,7 +1543,7 @@ func (s *Server) gridGen(ctx context.Context, path string) string {
 	sh.gridGenMu.Lock()
 	e, ok := sh.gridGens[path]
 	sh.gridGenMu.Unlock()
-	if ok && now.Sub(e.at) < gridGenEvery {
+	if ok && e.gen != "" && now.Sub(e.at) < gridGenEvery {
 		return e.gen
 	}
 	if ok && e.mdb != "" {
@@ -1910,24 +1915,29 @@ func fetchPerf(ctx context.Context, url string) []byte {
 // Once the source said 503, only its analysis or an explicit 404 ends the wait: a
 // timeout, a broken connection or a cut body is not an answer.
 func fetchPerfPending(ctx context.Context, url string) (perf []byte, pending bool) {
+	perf, _, pending = fetchPerfPendingWithGen(ctx, url)
+	return perf, pending
+}
+
+func fetchPerfPendingWithGen(ctx context.Context, url string) (perf []byte, gridGen string, pending bool) {
 	for try := 0; ; try++ {
-		b, status, ok := fetchPerfOnce(ctx, url)
+		b, gg, status, ok := fetchPerfOnceWithGen(ctx, url)
 		switch {
 		case ok:
-			return b, false
+			return b, gg, false
 		case status == http.StatusServiceUnavailable:
 			pending = true
 		case !pending || status == http.StatusNotFound:
 			// Which answer left the copy to Engine's own analysis; 0 is none at all.
 			log.Printf("stream-sync: shadow: the source gave no analysis (http %d)", status)
-			return nil, false
+			return nil, "", false
 		}
 		if try+1 >= perfRetries {
-			return nil, true
+			return nil, "", true
 		}
 		select {
 		case <-ctx.Done():
-			return nil, true
+			return nil, "", true
 		case <-time.After(perfRetryWait):
 		}
 	}
@@ -1935,19 +1945,24 @@ func fetchPerfPending(ctx context.Context, url string) (perf []byte, pending boo
 
 // fetchPerfOnce: ok only for a complete 200 answer.
 func fetchPerfOnce(ctx context.Context, url string) ([]byte, int, bool) {
+	b, _, status, ok := fetchPerfOnceWithGen(ctx, url)
+	return b, status, ok
+}
+
+func fetchPerfOnceWithGen(ctx context.Context, url string) ([]byte, string, int, bool) {
 	ctx, cancel := context.WithTimeout(ctx, perfRequestTimeout)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	resp, err := peerFileClient.Do(req)
 	if err != nil {
-		return nil, 0, false
+		return nil, "", 0, false
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if resp.StatusCode != 200 || err != nil {
-		return nil, resp.StatusCode, false // a source without /perf: Engine analyses the copy
+		return nil, "", resp.StatusCode, false // a source without /perf: Engine analyses the copy
 	}
-	return b, resp.StatusCode, true
+	return b, resp.Header.Get("X-Shadow-Grid-Gen"), resp.StatusCode, true
 }
 
 // cdjCuePlay is a status packet's play state while CUE is held (P1 0x07).
@@ -2556,7 +2571,7 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 	s.shadowFetch(key, func(ctx context.Context, cp *shadowCopy) (string, error) {
 		// The analysis first: a copy is published only once the source has said what
 		// it has. Still being read there (503): no copy yet, tried again later.
-		perf, pending := fetchPerfPending(ctx, strings.Replace(url, "/audio?", "/perf?", 1))
+		perf, respGridGen, pending := fetchPerfPendingWithGen(ctx, strings.Replace(url, "/audio?", "/perf?", 1))
 		if pending {
 			return "", errPerfPending
 		}
@@ -2604,7 +2619,9 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 		}
 		if perf != nil {
 			s.shadowCopyGen(key, p.PerfGen)
-			if p.GridGen != "" {
+			if respGridGen != "" {
+				s.shadowCopyGridGen(key, respGridGen)
+			} else if p.GridGen != "" {
 				s.shadowCopyGridGen(key, p.GridGen)
 			}
 		}
