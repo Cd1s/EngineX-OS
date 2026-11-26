@@ -525,3 +525,94 @@ func TestShadowNeverReanalysesAllSourcesAndTimings(t *testing.T) {
 		}
 	})
 }
+
+// BenchmarkShadowOnDemandPeerPerf measures the source's extra work per copy
+// request on ARM hardware: cold on-demand build (once per track load, shared
+// with the source deck), cached EXPF copy request, cached native RBXA1 copy
+// request, and legacy zero-maxima overview repair in encodeShadowAnalysis.
+func BenchmarkShadowOnDemandPeerPerf(b *testing.B) {
+	shadowBeaconOn = false
+	defer func() { shadowBeaconOn = true }()
+	mediaRoot := b.TempDir()
+	oldMedia := shadowMediaRoot
+	shadowMediaRoot = mediaRoot
+	defer func() { shadowMediaRoot = oldMedia }()
+
+	stick := filepath.Join(mediaRoot, "BENCH_USB")
+	testfixture.LargeExport(b, stick, 1)
+	const mp3Frame = 417
+	longMP3 := make([]byte, 120*mp3Frame)
+	for i := 0; i < 120; i++ {
+		copy(longMP3[i*mp3Frame:], []byte{0xff, 0xfb, 0x90, 0})
+	}
+	copy(longMP3[36:], "Xing")
+	binary.BigEndian.PutUint32(longMP3[40:], 3)
+	binary.BigEndian.PutUint32(longMP3[44:], 120)
+	binary.BigEndian.PutUint32(longMP3[48:], uint32(len(longMP3)))
+	copy(longMP3[52:], "LAME3.100")
+	longMP3[73], longMP3[74], longMP3[75] = 0x24, 0, 0
+	relPath := testfixture.LargeTrackPath(1)
+	testfixture.Write(b, stick, relPath, longMP3)
+	if _, err := bridge.ConvertAtMount(context.Background(), stick, bridge.MountOptions{OnDemand: true}); err != nil {
+		b.Fatal(err)
+	}
+
+	s := New(Config{
+		UIDir:                 b.TempDir(),
+		StateDir:              b.TempDir(),
+		MediaRoot:             mediaRoot,
+		RekordboxOnDemandSock: "-",
+	}, nil)
+	defer s.Close()
+	d := deckState{Deck: 1, Path: filepath.Join(stick, filepath.FromSlash(relPath)), BPM: 120}
+	ctx := context.Background()
+
+	b.Run("ColdOnDemandBuild_OncePerLoad", func(b *testing.B) {
+		for b.Loop() {
+			s.evictOnDemandCacheForPath(d.Path)
+			if _, err := s.onDemandPeerPerf(ctx, d, true); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	// Prime cache once (as the source deck's own on-demand fill does).
+	if _, err := s.onDemandPeerPerf(ctx, d, true); err != nil {
+		b.Fatal(err)
+	}
+	b.Run("CachedCopy_NativeRBXA1", func(b *testing.B) {
+		for b.Loop() {
+			if _, err := s.onDemandPeerPerf(ctx, d, true); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("CachedCopy_EXPF", func(b *testing.B) {
+		for b.Loop() {
+			if _, err := s.onDemandPeerPerf(ctx, d, false); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	// Legacy [0,0,0] band-maxima repair cost in encodeShadowAnalysis.
+	p, err := enginedb.EncodePerformance(
+		rekordbox.Track{Duration: 4, SampleRate: 44100, SampleCount: 4 * 44100, BPM: 126},
+		&rekordbox.Analysis{
+			Beats:     []rekordbox.Beat{{TimeMS: 250, BPM: 126, Number: 1}, {TimeMS: 726, BPM: 126, Number: 2}},
+			Waveforms: []rekordbox.Waveform{{Tag: "PWV7", EntryBytes: 3, Data: bytes.Repeat([]byte{180, 120, 60}, 60)}},
+		},
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	rawOv, _ := enginedb.QUncompress(p.Overview, shadowAnalysisMax)
+	rawOv[len(rawOv)-3], rawOv[len(rawOv)-2], rawOv[len(rawOv)-1] = 0, 0, 0
+	p.Overview, _ = enginedb.QCompress(rawOv)
+	b.Run("EncodeShadowAnalysis_RepairZeroMaxima", func(b *testing.B) {
+		for b.Loop() {
+			if _, err := encodeShadowAnalysis(p); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}

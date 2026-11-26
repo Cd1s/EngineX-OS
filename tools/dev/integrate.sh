@@ -57,7 +57,11 @@ git worktree add --detach "$worktree" "origin/$TARGET" >/dev/null
 probe() {
     local host=$1 command=$2
     if [[ ${ENGINEX_SKIP_HOST_PROBE:-0} == 1 ]]; then
-        [[ $command == *gcc* ]] && printf '14\n' || printf '0\n'
+        case $command in
+            *gcc*) printf '14\n' ;;
+            *shadow-twin*) printf '1\n' ;;
+            *) printf '0\n' ;;
+        esac
         return 0
     fi
     [[ -n "$SSHCTL" ]] || return 1
@@ -75,6 +79,36 @@ pick_host() {
     done
     [[ -n "$best" ]] || { echo "no suitable build host" >&2; return 1; }
     printf '%s\n' "$best"
+}
+
+pick_sandbox_host() {
+    local best= best_score=999999 host ok queue
+    local candidates=()
+    if [[ -n ${ENGINEX_SANDBOX_HOSTS:-} ]]; then
+        IFS=',' read -r -a candidates <<< "${ENGINEX_SANDBOX_HOSTS// /,}"
+    else
+        candidates=("${host_list[@]}")
+    fi
+    for host in "${candidates[@]}"; do
+        [[ -n "$host" ]] || continue
+        ok=$(probe "$host" 'test "$(uname -m)" = aarch64 && test -x /usr/local/bin/enginex-run && test -f /var/tmp/shadow-twin/base/image/rootfs.ext2 && echo 1 || echo 0' || true)
+        [[ $ok == 1 ]] || continue
+        queue=$(probe "$host" 'ps -eo args= | awk '\''/[f]lock \/var\/lock\/enginex-heavy\.lock/ {n++} END {print n+0}'\''' || true)
+        [[ $queue =~ ^[0-9]+$ ]] || queue=999999
+        if [[ -z "$best" || $queue -lt $best_score ]]; then best=$host; best_score=$queue; fi
+    done
+    [[ -n "$best" ]] || return 1
+    printf '%s\n' "$best"
+}
+
+shadow_instant_passed_head=
+shadow_instant_check() {
+    local host=$1 head work inner
+    head=$(git -C "$worktree" rev-parse --short HEAD)
+    work="/var/tmp/st-integrate-${head}-${run_id}"
+    inner="set -eu; export SHADOW_TWIN_WORK='${work}'; trap 'python3 tools/shadow-twin/twin.py down --purge >/dev/null 2>&1 || true; rm -rf \"\$SHADOW_TWIN_WORK\"' EXIT; enginex-run sandbox -- sh -c 'set -eu; export SHADOW_TWIN_WORK=\"${work}\"; python3 tools/shadow-twin/twin.py up --local --mode engine && python3 tools/shadow-twin/check_instant_analysis.py'"
+    remote_run "$host" "$inner"
+    shadow_instant_passed_head=$(git -C "$worktree" rev-parse HEAD)
 }
 
 remote_run() {
@@ -173,7 +207,7 @@ PY
 
 targeted_tests() {
     local host=$1; shift
-    local go_pkgs=() py_tests=() file dir test
+    local go_pkgs=() py_tests=() file dir test shadow_instant=0
     for file in "$@"; do
         case $file in
             go.mod|go.sum) go_pkgs+=(./...) ;;
@@ -184,14 +218,24 @@ targeted_tests() {
             */test_*.py) py_tests+=("$file") ;;
             test_*.py) py_tests+=("$file") ;;
         esac
+        case $file in
+            pkg/webui/shadow*.go|pkg/webui/rekordbox_ondemand*.go|pkg/webui/rekordbox_analysis*.go|pkg/bridge/ondemand*.go|tools/ui-mod/shadow_analysis.h|tools/ui-mod/rekordbox_stage.h|tools/ui-mod/engine_ui_hook.c|tools/shadow-twin/check_instant_analysis.py|tools/shadow-twin/twin.py)
+                shadow_instant=1 ;;
+        esac
     done
     mapfile -t go_pkgs < <(printf '%s\n' "${go_pkgs[@]}" | sort -u | sed '/^$/d')
     mapfile -t py_tests < <(printf '%s\n' "${py_tests[@]}" | sort -u | sed '/^$/d')
-    ((${#go_pkgs[@]} || ${#py_tests[@]})) || return 0
-    local inner='set -eu'
-    for dir in "${go_pkgs[@]}"; do inner+="; go test -race -timeout 30m '$dir'"; done
-    for test in "${py_tests[@]}"; do inner+="; python3 '$test'"; done
-    remote_run "$host" "$inner"
+    if ((${#go_pkgs[@]} || ${#py_tests[@]})); then
+        local inner='set -eu'
+        for dir in "${go_pkgs[@]}"; do inner+="; go test -race -timeout 30m '$dir'"; done
+        for test in "${py_tests[@]}"; do inner+="; python3 '$test'"; done
+        remote_run "$host" "$inner"
+    fi
+    if ((shadow_instant)); then
+        local sbox_host
+        sbox_host=$(pick_sandbox_host) || { echo "no ARM shadow-twin sandbox host available for check_instant_analysis.py" >&2; return 1; }
+        shadow_instant_check "$sbox_host"
+    fi
 }
 
 resolve_conflicts_both() {
@@ -408,6 +452,11 @@ done
 full_host=$(pick_host 1)
 full_inner='set -eu; test -z "$(gofmt -l .)"; go vet ./...; go test -race -timeout 30m ./...; idx=$(mktemp); rm -f "$idx"; git init -q; GIT_INDEX_FILE="$idx" git add -A; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/az01-packer; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/splash; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/stems; rm -f "$idx"; rm -rf .git; bash tests/test_rootfs_overlay.sh'
 remote_run "$full_host" "$full_inner"
+if [[ "$shadow_instant_passed_head" != "$(git -C "$worktree" rev-parse HEAD)" ]]; then
+    if sbox_host=$(pick_sandbox_host); then
+        shadow_instant_check "$sbox_host"
+    fi
+fi
 git -C "$worktree" push origin "HEAD:$TARGET" >/dev/null
 elapsed=$(( $(date +%s) - started ))
 printf 'Merged %s into %s; targeted tests after each merge; full suites on %s; elapsed %ss.' "${merged[*]}" "$TARGET" "$full_host" "$elapsed"; if ((${#dropped_hunks[@]})); then printf ' Dropped hunks %s.' "${dropped_hunks[*]}"; fi; if ((${#doc_notes[@]})); then printf ' Doc cache decisions %s.' "${doc_notes[*]}"; fi; printf '\n'
