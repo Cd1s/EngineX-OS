@@ -22,7 +22,7 @@ if [ "$BOOTSTRAP_MODEL" = PRIME4PLUS ]; then
     PREFIX=PRIME4PLUS VARLIB=data/system/var/overlay/lib PROFILE=5.3.0-sclive4 EDITS=31
 elif [ "$AZ04" = 1 ]; then
     ROOTFS="${ROOTFS:-${ENGINEX_LAB}/systemone-analysis/rootfs}"
-    PREFIX=PRIME4G2 VARLIB=data/system/var-lib PROFILE=5.3.0-az04 EDITS=27
+    PREFIX=PRIME4G2 VARLIB=data/system/var-lib PROFILE=5.3.0-az04 EDITS=28
 else
     ROOTFS="${ROOTFS:-${ENGINEX_LAB}/sclive4-rea61-followup/rootfs}"  # or another unpacked gen2 rootfs
     PREFIX=SCLIVE4 VARLIB=data/system/var/overlay/lib PROFILE=5.3.0-sclive4 EDITS=31

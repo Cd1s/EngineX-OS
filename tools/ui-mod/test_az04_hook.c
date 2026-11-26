@@ -472,7 +472,7 @@ static void test_rec_stream(const char *filename) {
     size_t first = build->edit_count, count = 0;
     for (size_t i = 0; i < build->edit_count; i++)
         if (build->edits[i].group == EDIT_REC_STREAM) { if (first > i) first = i; count++; }
-    assert(count == 8 && first + 8 == build->edit_count && build->edit_count == 27);
+    assert(count == 8 && first + 8 == build->edit_count && build->edit_count == 28);
     // nop / mov w22,#0 x2 / mov w0,#0 / mov w27,#0 / b <loop tail> / b <menu> / nop
     const uint32_t want[8] = {0xd503201f, 0x52800016, 0x52800016, 0x52800000, 0x5280001b, 0, 0, 0xd503201f};
     const uint32_t target[8] = {0, 0, 0, 0, 0, 0x97afa0, 0x97fa00, 0};
@@ -516,15 +516,41 @@ static void test_rec_stream(const char *filename) {
     puts("#206 AZ04 recording with streaming tracks: 8 sites stock->patched, untouched on a player code, none on a 1-site mismatch: PASS");
 }
 
-// #336 S17: AZ04 InstantDoubleControl::doLoad() defaultValue for QJsonValue::toInt(int).
-// Stock mov w1, #0 yields 0 on empty/missing remote TrackLength JSON, which bypasses
-// doPositionSync()'s tbnz w2, #31 (< 0) check and fires a false StreamingQualityMismatch.
+// #336 S17: AZ04 InstantDoubleControl::doLoad() defaultValue for QJsonValue::toInt(int) and
+// InstantDoubleControl::doPositionSync() zero/negative guard (0xdb8c14..0xdb8c20).
+// Stock mov w1, #0 yields 0 on empty/missing remote TrackLength JSON and stock tbnz w2, #31
+// only skips negative values, so both missing JSON and peer IntegerTranslator default "value": 0
+// fall through into a false StreamingQualityMismatch.
 static int eval_az04_toint_default(const uchar *image, uint32_t off, size_t page) {
     uint32_t ins;
     memcpy(&ins, image + off, 4);
     uint32_t code[] = {ins, 0x2a0103e0u, 0xd65f03c0u}; // mov w1, #0/-1; mov w0, w1; ret
     int (*fn)(void) = rx_code(code, sizeof code, page);
     int rc = fn();
+    assert(!munmap((void *)fn, page));
+    return rc;
+}
+
+static int eval_az04_sync_guard(const uchar *image, size_t page, int32_t remote_len, int64_t local_len) {
+    uint32_t guard[3];
+    memcpy(guard, image + 0xdb8c18u, sizeof guard);
+    uint32_t ins0 = guard[0];
+    // Relocate stock tbnz w2, #31, +0x1a4 to skip_mismatch (+5 insns); patched cmp w2, #0 runs verbatim.
+    if ((ins0 & 0xff00001fu) == 0x37000002u) ins0 = (ins0 & ~0x0007ffe0u) | (5u << 5);
+    assert((guard[2] & 0xff00001fu) == 0x54000000u); // b.eq
+    uint32_t ins2 = (guard[2] & ~0x00ffffe0u) | (3u << 5);
+    uint32_t code[] = {
+        0x2a0103e2u, // mov w2, w1 (zero-extends w1 -> x2, matching ldr w2, [sp] at 0xdb8c14)
+        ins0,        // stock: tbnz w2, #31, skip; patched: cmp w2, #0
+        guard[1],    // stock: cmp x0, w2, sxtw;   patched: ccmp x0, x2, #4, gt
+        ins2,        // b.eq skip
+        0x52800020u, // mov w0, #1 (mismatch)
+        0xd65f03c0u, // ret
+        0x52800000u, // skip: mov w0, #0 (no mismatch)
+        0xd65f03c0u, // ret
+    };
+    int (*fn)(int64_t, int32_t) = rx_code(code, sizeof code, page);
+    int rc = fn(local_len, remote_len);
     assert(!munmap((void *)fn, page));
     return rc;
 }
@@ -543,23 +569,34 @@ static void test_instant_double_track_length(const char *filename) {
     uint32_t ctx[4];
     memcpy(ctx, image + 0xdbb574u, sizeof ctx);
     assert(ctx[0] == 0xaa1703e0u && ctx[1] == 0x52800001u && (ctx[2] >> 26) == 0x25u && ctx[3] == 0xb901aa60u);
-    // doPositionSync(): tbnz w2, #31, +0x1a4; cmp x0, w2, sxtw; b.eq +0x19c
-    uint32_t guard[3];
-    memcpy(guard, image + 0xdb8c18u, sizeof guard);
-    assert(guard[0] == 0x37f80d22u && guard[1] == 0xeb22c01fu && guard[2] == 0x54000ce0u);
+    // doPositionSync(): ldr w2, [sp]; tbnz w2, #31, +0x1a4; cmp x0, w2, sxtw; b.eq +0x19c
+    uint32_t guard[4];
+    memcpy(guard, image + 0xdb8c14u, sizeof guard);
+    assert(guard[0] == 0xb94003e2u && guard[1] == 0x37f80d22u && guard[2] == 0xeb22c01fu && guard[3] == 0x54000ce0u);
 
-    // Stock executes the bug: missing JSON yields 0 (sign bit clear -> falls into mismatch!)
+    // Stock executes both bugs: missing JSON yields 0, and remote=0 triggers false mismatch!
     int stock_def = eval_az04_toint_default(image, 0xdbb578u, page);
     assert(stock_def == 0 && !(stock_def < 0));
+    assert(eval_az04_sync_guard(image, page, -1, 240000) == 0);
+    assert(eval_az04_sync_guard(image, page, 0, 240000) == 1);
+    assert(eval_az04_sync_guard(image, page, 180000, 240000) == 1);
+    assert(eval_az04_sync_guard(image, page, 240000, 240000) == 0);
 
     apply_engine_edits((uintptr_t)image, page);
 
-    // Patched returns -1 (sign bit set -> tbnz w2, #31 skips mismatch cleanly!)
+    // Patched returns -1 on missing JSON, skips <= 0 remote TrackLength, and preserves real mismatches.
     int patched_def = eval_az04_toint_default(image, 0xdbb578u, page);
     assert(patched_def == -1 && (patched_def < 0));
+    assert(eval_az04_sync_guard(image, page, -1, 240000) == 0);
+    assert(eval_az04_sync_guard(image, page, INT32_MIN, 240000) == 0);
+    assert(eval_az04_sync_guard(image, page, 0, 240000) == 0);
+    assert(eval_az04_sync_guard(image, page, 0, (int64_t)0x100000000LL) == 0);
+    assert(eval_az04_sync_guard(image, page, 180000, 240000) == 1);
+    assert(eval_az04_sync_guard(image, page, 180000, (int64_t)0x100000000LL + 180000) == 1);
+    assert(eval_az04_sync_guard(image, page, 240000, 240000) == 0);
     munmap(image, len);
 
-    // Switching instant-double off in hook-disable.conf leaves 0xdbb578 stock.
+    // Switching instant-double off in hook-disable.conf leaves both 0xdbb578 and 0xdb8c18 stock.
     char off_path[] = "/tmp/az04-id-off-XXXXXX";
     int ofd = mkstemp(off_path); assert(ofd >= 0);
     assert(write(ofd, "instant-double\n", 15) == 15);
@@ -570,11 +607,12 @@ static void test_instant_double_track_length(const char *filename) {
     image = map_image(filename, &len);
     apply_engine_edits((uintptr_t)image, page);
     assert(eval_az04_toint_default(image, 0xdbb578u, page) == 0);
+    assert(eval_az04_sync_guard(image, page, 0, 240000) == 1);
     munmap(image, len);
     hf_path = saved_hf;
     hf_reload();
     unlink(off_path);
-    puts("#336 S17 AZ04 InstantDouble remote TrackLength: toInt(0)->toInt(-1) verified, executed, and switchable: PASS");
+    puts("#336 S17 AZ04 InstantDouble remote TrackLength: toInt(-1) and <=0 guard verified, executed, and switchable: PASS");
 }
 
 // HF_SHADOW_PAUSED_FOLLOW on the real image: WaveFormPositionItem::currentPosition and its

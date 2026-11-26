@@ -2441,8 +2441,12 @@ static const struct engine_edit edits_az04[] = {
     {0xc9cab4u, "\x00\x58\x64\x39", "\x20\x00\x80\x52", 4, EDIT_ONE, HF_SSO},
     {0xc9cb0cu, "\xe0\x03\x01\x2a", "\x00\x00\x80\x52", 4, EDIT_ONE, HF_SSO},
     // #336 S17 InstantDoubleControl::doLoad(): QJsonValue::toInt(0) -> toInt(-1) so missing/empty
-    // RemoteProperties/.../Track/TrackLength keeps the unknown sentinel (-1, skipped by tbnz #31 at 0xdb8c18).
+    // RemoteProperties/.../Track/TrackLength keeps the unknown sentinel (-1).
     {0xdbb578u, "\x01\x00\x80\x52", "\x01\x00\x80\x12", 4, EDIT_ONE, HF_INSTANT_DOUBLE},
+    // #336 S17 InstantDoubleControl::doPositionSync(): tbnz w2, #31, +0x1a4; cmp x0, w2, sxtw
+    // -> cmp w2, #0; ccmp x0, x2, #4, gt (ldr w2, [sp] at 0xdb8c14 zero-extends w2 into x2, so
+    // for w2 > 0 x2 == sxtw(w2); for w2 <= 0 Z=1 makes b.eq 0xdb8dbc skip false mismatch).
+    {0xdb8c18u, "\x22\x0d\xf8\x37\x1f\xc0\x22\xeb", "\x5f\x00\x00\x71\x04\xc0\x42\xfa", 8, EDIT_ONE, HF_INSTANT_DOUBLE},
     // #206 Recording with streaming tracks (all-in-ones only; the group is never ready on
     // the JP07/JP08/JP13/JP14 players, which have no recorder). All 8 sites or none.
     // AbstractCollectionModel streamingFlags: skip BlocksRecording (0x20) bit
