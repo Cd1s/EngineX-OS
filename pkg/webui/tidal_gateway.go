@@ -176,6 +176,10 @@ type tidalGateway struct {
 	// pause is nil except in tests that pause a load at a point.
 	pause func(point string)
 
+	// nasRoot is the NAS root (nasRootID) the NAS rows belong to, under mu; the
+	// saved file records it (#335).
+	nasRoot string
+
 	// Artwork for list rows, by what the row knows: title and artist.
 	artURLs  map[string]string
 	artMu    sync.Mutex
@@ -222,6 +226,8 @@ type savedTracks struct {
 	Tracks []savedRef   `json:"tracks"` // least recently used first
 	Lists  []savedList  `json:"lists"`  // least recently used first
 	Albums []savedAlbum `json:"albums,omitempty"`
+	// Root is the NAS root (nasRootID) of its NAS rows (#335).
+	Root string `json:"nasRoot,omitempty"`
 }
 
 const trackSaveDelay = 3 * time.Second
@@ -247,22 +253,31 @@ func (g *tidalGateway) tracksPath() string {
 
 // loadTracks restores the IDs of the previous run, and its counter, so an old ID
 // never names a different track.
-func (g *tidalGateway) loadTracks() {
+func (g *tidalGateway) loadTracks(root string) {
+	g.nasRoot = root
 	b, err := os.ReadFile(g.tracksPath())
 	var v savedTracks
 	if err != nil || json.Unmarshal(b, &v) != nil {
 		return
 	}
+	stale := v.Root == "" || v.Root != root // NAS rows of another root, or an unknown one, are not used (#335)
 	for _, r := range v.Tracks {
+		g.next = max(g.next, r.ID)
 		ref := trackRef{track: r.Track, session: r.Session, guest: r.Guest, file: r.File, drive: r.Drive}
+		if stale && isNASTrackRef(ref) {
+			continue
+		}
 		g.tracks[r.ID], g.ids[refKey(ref)] = ref, r.ID
 		g.seq++
 		g.trackSeen[r.ID] = g.seq
-		g.next = max(g.next, r.ID)
 	}
 	g.next = max(g.next, v.Next)
 	for _, l := range v.Lists {
-		g.lists[l.ID] = playlistRef{l.Session, l.Provider, l.List, l.Guest}
+		ref := playlistRef{l.Session, l.Provider, l.List, l.Guest}
+		if stale && isNASListRef(ref) {
+			continue
+		}
+		g.lists[l.ID] = ref
 		g.seq++
 		g.listSeen[l.ID] = g.seq
 	}
@@ -293,7 +308,7 @@ func (g *tidalGateway) saveTracks() {
 	defer g.saveMu.Unlock()
 	g.mu.Lock()
 	g.saving = false
-	v := savedTracks{Next: g.next, Tracks: make([]savedRef, 0, len(g.tracks))}
+	v := savedTracks{Next: g.next, Root: g.nasRoot, Tracks: make([]savedRef, 0, len(g.tracks))}
 	for id, ref := range g.tracks {
 		v.Tracks = append(v.Tracks, savedRef{id, ref.track, ref.session, ref.guest, ref.file, ref.drive})
 	}
@@ -310,7 +325,7 @@ func (g *tidalGateway) saveTracks() {
 	if _, err := os.Stat(filepath.Dir(path)); err != nil {
 		return // the state dir is gone (a test that ended)
 	}
-	if err := providers.SaveJSON(path, v); err != nil {
+	if err := saveState(path, v); err != nil {
 		log.Printf("stream-sync: save gateway track IDs: %v", err)
 	}
 }
@@ -318,14 +333,15 @@ func (g *tidalGateway) saveTracks() {
 // resetNAS forgets the NAS rows (standalone NAS and OmniSource's [NAS] lists)
 // and every cached search. IDs keep increasing, so an old track ID answers 404
 // instead of naming another file (#335).
-func (g *tidalGateway) resetNAS() {
+func (g *tidalGateway) resetNAS(root string) {
 	if g == nil {
 		return
 	}
 	g.mu.Lock()
+	g.nasRoot = root
 	changed := false
 	for id, ref := range g.tracks {
-		if isNASProvider(ref.track.Provider) || ref.session == nasScope {
+		if isNASTrackRef(ref) {
 			delete(g.ids, refKey(ref))
 			delete(g.tracks, id)
 			delete(g.trackSeen, id)
@@ -333,7 +349,7 @@ func (g *tidalGateway) resetNAS() {
 		}
 	}
 	for id, ref := range g.lists {
-		if ref.provider == nasScope || (ref.provider == localProvider && strings.HasPrefix(ref.list.ID, "nas\x00")) {
+		if isNASListRef(ref) {
 			delete(g.lists, id)
 			delete(g.listSeen, id)
 			changed = true
@@ -346,6 +362,14 @@ func (g *tidalGateway) resetNAS() {
 	if changed {
 		g.saveTracks()
 	}
+}
+
+func isNASTrackRef(ref trackRef) bool {
+	return isNASProvider(ref.track.Provider) || ref.session == nasScope
+}
+
+func isNASListRef(ref playlistRef) bool {
+	return ref.provider == nasScope || (ref.provider == localProvider && strings.HasPrefix(ref.list.ID, "nas\x00"))
 }
 
 // Browse state is bounded. When full, the least recently used tenth is
@@ -378,7 +402,7 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g := &tidalGateway{browse: newBrowseCache(s.cfg.StateDir), artURLs: map[string]string{}, artCache: map[string][]byte{}, s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, albums: map[int64]albumRef{}, albumIDs: map[string]int64{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}, albumSeen: map[int64]int64{}}
 	g.searches = newSearchCache()
 	g.seedFromStreamingAccounts()
-	g.loadTracks()
+	g.loadTracks(nasRootID(s.loadNASConfig()))
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
 	g.mux.HandleFunc("POST /v1/enginex/login", s.loginStart)
@@ -2248,7 +2272,7 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 	if stemsScope == "" {
 		stemsScope = g.s.scope()
 	}
-	if err = g.s.addStemmedAt(stemsScope, stemmedTrack{ref.track, ref.session, ref.guest, p}, ref.gen); err != nil {
+	if err = g.s.addStemmedAt(stemsScope, stemmedTrack{Track: ref.track, Session: ref.session, Guest: ref.guest, Path: p}, ref.gen); err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, errNASChanged) {
 			status = http.StatusNotFound

@@ -2,6 +2,8 @@ package webui
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net"
@@ -11,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -343,16 +346,49 @@ func isNASProvider(p string) bool {
 // Every generation check is made under one of those locks, or under g.mu
 // against rows the gateway reset then drops, together with the action it guards.
 func (s *Server) resetNASIfMoved(before providers.NASConfig) {
-	if nasTarget(s.loadNASConfigLocked()) == nasTarget(before) {
+	now := s.loadNASConfigLocked()
+	if nasTarget(now) == nasTarget(before) {
 		return
 	}
 	if s.jobs != nil && s.jobs.pause != nil {
 		s.jobs.pause("reset")
 	}
+	root := nasRootID(now)
 	s.stemsMu.Lock()
-	s.jobs.resetNAS(s.resetNASStemsLocked)
+	s.jobs.resetNAS(root, func() { s.resetNASStemsLocked(root) })
 	s.stemsMu.Unlock()
-	s.tidal.resetNAS()
+	s.tidal.resetNAS(root)
+}
+
+// nasRootID names the NAS root (protocol, server, port, share and root, as
+// nasTarget) without credentials or a readable server name. Each saved NAS state
+// file records the root its NAS entries belong to; entries of another root, or
+// of none (files from before #335 round 6), are never used.
+func nasRootID(cfg providers.NASConfig) string {
+	sum := sha256.Sum256([]byte(nasTarget(cfg)))
+	return hex.EncodeToString(sum[:16])
+}
+
+// stateIO is nil except in tests that make NAS state file reads or writes fail.
+var stateIO atomic.Pointer[stateFiles]
+
+type stateFiles struct {
+	save func(path string, v any) error
+	read func(path string) ([]byte, error)
+}
+
+func saveState(path string, v any) error {
+	if f := stateIO.Load(); f != nil && f.save != nil {
+		return f.save(path, v)
+	}
+	return providers.SaveJSON(path, v)
+}
+
+func readState(path string) ([]byte, error) {
+	if f := stateIO.Load(); f != nil && f.read != nil {
+		return f.read(path)
+	}
+	return os.ReadFile(path)
 }
 
 // gatewayProvider: an SMB NAS is its own source (#335); WebDAV, Subsonic and

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -27,6 +28,9 @@ type stemmedTrack struct {
 	Session string          `json:"session,omitempty"`
 	Guest   bool            `json:"guest,omitempty"`
 	Path    string          `json:"path"`
+	// NASRoot is the NAS root (nasRootID) a NAS track was stemmed from; a NAS
+	// entry of another root, or of none, is never used (#335).
+	NASRoot string `json:"nasRoot,omitempty"`
 }
 
 const maxStemmed = 500
@@ -44,17 +48,17 @@ func (s *Server) stemsFile() string {
 	return filepath.Join(s.cfg.StateDir, "streaming-stems.json")
 }
 
-// saveStemsFile writes streaming-stems.json; tests make it fail.
-var saveStemsFile = providers.SaveJSON
-
 // readStemmed decodes streaming-stems.json in full; s.stemsMu must be held. A
-// file that cannot be read is empty; one that does not decode in full is an
-// error, never a partial map (#335).
+// missing file is empty; one that cannot be read, or does not decode in full, is
+// an error, never an empty or partial map (#335).
 func (s *Server) readStemmed() (map[string][]stemmedTrack, error) {
 	all := map[string][]stemmedTrack{}
-	data, err := os.ReadFile(s.stemsFile())
-	if err != nil {
+	data, err := readState(s.stemsFile())
+	if errors.Is(err, fs.ErrNotExist) {
 		return all, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 	if err := json.Unmarshal(data, &all); err != nil {
 		return nil, err
@@ -63,15 +67,17 @@ func (s *Server) readStemmed() (map[string][]stemmedTrack, error) {
 }
 
 // loadStemmed is the Stems lists to serve; s.stemsMu must be held. A file that
-// does not decode in full serves no list (it stays on disk as it is), and after
-// a NAS reset could not save the file its NAS entries are not served (#335).
+// cannot be read in full serves no list (it stays on disk as it is), and a NAS
+// entry serves only for the NAS root it was stemmed from (#335).
 func (s *Server) loadStemmed() map[string][]stemmedTrack {
 	all, err := s.readStemmed()
 	if err != nil {
 		return map[string][]stemmedTrack{}
 	}
-	if s.stemsNASStale {
-		dropNASStems(all)
+	for scope, list := range all {
+		all[scope] = slices.DeleteFunc(list, func(e stemmedTrack) bool {
+			return isNASProvider(e.Track.Provider) && (e.NASRoot == "" || e.NASRoot != s.stemsRoot)
+		})
 	}
 	return all
 }
@@ -108,39 +114,33 @@ func (s *Server) addStemmedAt(scope string, t stemmedTrack, gen uint64) error {
 	if err != nil { // never rewrite the file from a partial read
 		return errors.New("the Stems lists cannot be read")
 	}
-	if s.stemsNASStale {
-		dropNASStems(all)
+	if isNASProvider(t.Track.Provider) {
+		t.NASRoot = s.stemsRoot
 	}
 	list := slices.DeleteFunc(all[scope], func(e stemmedTrack) bool { return sameTrack(e.Track, t.Track) })
 	all[scope] = append([]stemmedTrack{t}, list[:min(len(list), maxStemmed-1)]...)
-	if err := saveStemsFile(s.stemsFile(), all); err != nil {
-		return err
-	}
-	s.stemsNASStale = false
-	return nil
+	return saveState(s.stemsFile(), all)
 }
 
 // resetNASStems drops the stemmed NAS tracks after the NAS server, share or
 // root changed: a deck loading the new root's track would swap to the old file.
 // A file that does not fully decode is left as it is (a partial read would drop
-// other services' entries).
-func (s *Server) resetNASStemsLocked() {
+// other services' entries). root is the new NAS root: from now on only NAS
+// entries stemmed from it are served, so entries a failed read or write leaves
+// in the file are never used (#335).
+func (s *Server) resetNASStemsLocked(root string) {
+	s.stemsRoot = root
 	all, err := s.readStemmed()
 	if err != nil {
-		log.Printf("webui: NAS changed: Stems lists left as they are, the file does not decode (%T)", err)
-		return // loadStemmed serves no list from it
+		log.Printf("webui: NAS changed: Stems lists left as they are, the file cannot be read (%T)", err)
+		return
 	}
 	if !dropNASStems(all) {
 		return
 	}
-	if err := saveStemsFile(s.stemsFile(), all); err != nil {
-		// The old NAS's entries are still in the file: they are not served, and
-		// the next save of the lists drops them.
-		s.stemsNASStale = true
-		log.Printf("webui: NAS changed: Stems lists not saved; their NAS entries are not served (%T)", err)
-		return
+	if err := saveState(s.stemsFile(), all); err != nil {
+		log.Printf("webui: NAS changed: Stems lists not saved; the old NAS entries stay unused (%T)", err)
 	}
-	s.stemsNASStale = false
 }
 
 func (s *Server) stemmed(scope string) []stemmedTrack {

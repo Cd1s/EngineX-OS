@@ -118,7 +118,7 @@ type Server struct {
 	logsMu        sync.Mutex
 	fxMu          sync.Mutex // transient FX commands never hold the settings lock
 	stemsMu       sync.Mutex // streaming-stems.json
-	stemsNASStale bool       // under stemsMu: a NAS reset could not drop the old NAS's entries (#335)
+	stemsRoot     string     // under stemsMu: the NAS root whose NAS Stems entries are served (#335)
 	stemsImportMu sync.Mutex // one streamed row at a time is named, recorded and swept
 	rbxPresenceMu sync.Mutex
 	rbxPresence   map[string]*rbxPresence
@@ -374,6 +374,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.loadAppleMusicHelper()
 	s.appleMusic.OwnerPath = filepath.Join(cfg.StateDir, "applemusic-owner.json")
 	_ = s.appleMusic.Load()
+	s.stemsRoot = nasRootID(s.loadNASConfig()) // before any request
 	s.tidal = newTidalGateway(s)
 	s.RegisterTunnelRoutes()
 	// Resume before accepting requests: a delayed resume could see a newly
@@ -390,6 +391,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 		jobs.spotify = s.ownerSpotify
 		jobs.applemusic = func() *providers.AppleMusic { return s.appleMusic }
 		jobs.selfHosted = s.ownerSelfHosted
+		jobs.nasRoot = s.stemsRoot
 		jobs.bpm = cfg.BPM
 		if jobs.p.Deemix != nil {
 			jobs.p.Deemix.PreferMP3 = func() bool { return s.quality() == quality320k }

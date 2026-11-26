@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,6 +36,9 @@ type nasSwitchRig struct {
 	s              *Server
 	jobs           *Jobs
 	gw             *httptest.Server
+	p              Pipeline
+	uiDir          string
+	stateDir       string
 	one, two       []byte
 	oneURL, twoURL string
 	asked          chan struct{} // a held download of server two began
@@ -108,13 +113,9 @@ func newNASSwitchRigWith(t *testing.T, one, two []byte, opts ...func(*Pipeline))
 	for _, opt := range opts {
 		opt(&p)
 	}
-	rig.jobs = NewJobs(p)
-	t.Cleanup(rig.jobs.Close)
-	rig.s = New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, rig.jobs)
-	t.Cleanup(rig.s.Close)
-	rig.s.sessions["sp-owner"] = &Session{ID: "sp-owner", Provider: "spotify", Ready: true, p: &browseTestProvider{}}
-	rig.gw = httptest.NewServer(rig.s)
-	t.Cleanup(rig.gw.Close)
+	rig.p, rig.uiDir, rig.stateDir = p, uiDir, stateDir
+	rig.start()
+	t.Cleanup(rig.stop)
 	t.Cleanup(rig.release) // before gw.Close, which waits for a held request
 	t.Cleanup(rig.releaseLists)
 	return rig
@@ -163,6 +164,31 @@ func (rig *nasSwitchRig) get(path string) nasAnswer {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	return nasAnswer{resp.StatusCode, body}
+}
+
+// start runs the deck's jobs, server and gateway on the rig's state; stop ends them. A
+// stop and a start on the same state are a reboot.
+func (rig *nasSwitchRig) start() {
+	rig.jobs = NewJobs(rig.p)
+	rig.s = New(Config{AccessToken: "code", UIDir: rig.uiDir, StateDir: rig.stateDir}, rig.jobs)
+	rig.s.sessions["sp-owner"] = &Session{ID: "sp-owner", Provider: "spotify", Ready: true, p: &browseTestProvider{}}
+	rig.gw = httptest.NewServer(rig.s)
+}
+
+func (rig *nasSwitchRig) stop() {
+	rig.gw.Close()
+	rig.s.Close()
+	rig.jobs.Close()
+}
+
+// failSaving makes saves of the state file named base fail; other saves work.
+func failSaving(base string) func(string, any) error {
+	return func(path string, v any) error {
+		if filepath.Base(path) == base {
+			return errors.New("disk full")
+		}
+		return providers.SaveJSON(path, v)
+	}
 }
 
 // hold makes server two's downloads wait until release.
@@ -821,10 +847,9 @@ func TestReviewFailedStemsResetServesNoOldEntry(t *testing.T) {
 		Path string `json:"path"`
 	}
 	tidalGet(t, rig.gw.URL, fmt.Sprintf("/v1/enginex/stems/source?id=%d", id1), 200, &src)
-	saved := saveStemsFile
-	saveStemsFile = func(string, any) error { return errors.New("disk full") }
+	stateIO.Store(&stateFiles{save: failSaving("streaming-stems.json")})
 	rig.saveNAS(rig.twoURL)
-	saveStemsFile = saved
+	stateIO.Store(nil)
 	id2 := rig.browse()
 	if a := rig.get(fmt.Sprintf("/v1/enginex/stems/local?id=%d", id2)); a.code != http.StatusNotFound {
 		t.Fatalf("server two's track %d got server one's stemmed copy after the reset could not save: HTTP %d %s", id2, a.code, a.body)
@@ -1025,5 +1050,240 @@ func TestReviewStemsListDuringReset(t *testing.T) {
 	}
 	if err := json.Unmarshal(a.body, &page); err != nil || a.code != http.StatusOK || len(page.Items) != 0 {
 		t.Fatalf("a Stems list read during the change published %d rows (HTTP %d): %s", len(page.Items), a.code, a.body)
+	}
+}
+
+// Round 6 (re-check of 32b79b7d, HIGH 1): a NAS state file that could not be saved during
+// the change from server one to server two brought server one's mappings back after a
+// restart: server two's new row played server one's cached file (index), server one's
+// old ID played server two's recording (gateway), or server two's new row got server
+// one's stemmed copy (Stems). Each file records its NAS root now; entries of another
+// root are never used.
+func TestNASRestartAfterAFailedResetWrite(t *testing.T) {
+	// Without a failure a restart keeps what belongs to the NAS root it starts with:
+	// the rows, cached files and stemmed copies of that root.
+	keeps := func(t *testing.T, rig *nasSwitchRig, id int64, want []byte) {
+		t.Helper()
+		rig.plays("the row after the restart", id, want)
+		if a := rig.get(fmt.Sprintf("/v1/enginex/stems/local?id=%d", id)); a.code != http.StatusOK {
+			t.Fatalf("row %d lost its stemmed copy in the restart: HTTP %d %s", id, a.code, a.body)
+		}
+	}
+	prepare := func(t *testing.T, rig *nasSwitchRig, id int64, want []byte) {
+		t.Helper()
+		rig.plays("before the restart", id, want)
+		if a := rig.get(fmt.Sprintf("/v1/enginex/stems/source?id=%d", id)); a.code != http.StatusOK {
+			t.Fatalf("Stems source: HTTP %d %s", a.code, a.body)
+		}
+		rig.s.tidal.saveTracks()
+	}
+	cached := func(rig *nasSwitchRig) string {
+		return rig.jobs.FileAt(providers.Track{Provider: "subsonic", ID: "tr-99"}, rig.jobs.NASGen())
+	}
+	t.Run("same root", func(t *testing.T) {
+		rig := newNASSwitchRig(t)
+		rig.saveNAS(rig.oneURL)
+		id1 := rig.browse()
+		prepare(t, rig, id1, rig.one)
+		rig.stop()
+		rig.start()
+		if cached(rig) == "" {
+			t.Fatal("the restart lost the cached file of the same NAS root")
+		}
+		keeps(t, rig, id1, rig.one)
+	})
+	t.Run("switched", func(t *testing.T) {
+		rig := newNASSwitchRig(t)
+		rig.saveNAS(rig.oneURL)
+		id1 := rig.browse()
+		prepare(t, rig, id1, rig.one)
+		rig.saveNAS(rig.twoURL)
+		id2 := rig.browse()
+		prepare(t, rig, id2, rig.two)
+		rig.stop()
+		rig.start()
+		if cached(rig) == "" {
+			t.Fatal("the restart lost server two's cached file")
+		}
+		keeps(t, rig, id2, rig.two)
+		rig.gone("server one's old row after the restart", id1)
+	})
+	for _, file := range []string{sourcesFile, "gateway-tracks.json", "streaming-stems.json"} {
+		t.Run(file, func(t *testing.T) {
+			rig := newNASSwitchRig(t)
+			rig.saveNAS(rig.oneURL)
+			id1 := rig.browse()
+			rig.plays("server one", id1, rig.one) // its download in the index
+			if a := rig.get(fmt.Sprintf("/v1/enginex/stems/source?id=%d", id1)); a.code != http.StatusOK {
+				t.Fatalf("server one's Stems source: HTTP %d %s", a.code, a.body)
+			}
+			rig.s.tidal.saveTracks() // its rows on disk
+			stateIO.Store(&stateFiles{save: failSaving(file)})
+			t.Cleanup(func() { stateIO.Store(nil) })
+			rig.saveNAS(rig.twoURL)
+			rig.stop() // the failure lasts until the deck is off
+			stateIO.Store(nil)
+			rig.start()
+			rig.gone("server one's old row after the restart", id1)
+			id2 := rig.browse()
+			rig.plays("server two's new row after the restart", id2, rig.two)
+			if a := rig.get(fmt.Sprintf("/v1/enginex/stems/local?id=%d", id2)); a.code != http.StatusNotFound {
+				t.Fatalf("server two's new row %d got a stemmed copy after the restart: HTTP %d %s", id2, a.code, a.body)
+			}
+		})
+	}
+}
+
+// Round 6 (HIGH 2): one failed read of the Stems file during the change from server one to
+// server two was taken as an empty file, so nothing was dropped and, once reads recovered,
+// server two's new row got server one's stemmed copy, without a restart.
+func TestNASFailedStemsReadDuringReset(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.oneURL)
+	id1 := rig.browse()
+	if a := rig.get(fmt.Sprintf("/v1/enginex/stems/source?id=%d", id1)); a.code != http.StatusOK {
+		t.Fatalf("server one's Stems source: HTTP %d %s", a.code, a.body)
+	}
+	stateIO.Store(&stateFiles{read: func(path string) ([]byte, error) {
+		if filepath.Base(path) == "streaming-stems.json" {
+			return nil, fs.ErrPermission
+		}
+		return os.ReadFile(path)
+	}})
+	t.Cleanup(func() { stateIO.Store(nil) })
+	rig.saveNAS(rig.twoURL)
+	stateIO.Store(nil)
+	id2 := rig.browse()
+	if a := rig.get(fmt.Sprintf("/v1/enginex/stems/local?id=%d", id2)); a.code != http.StatusNotFound {
+		t.Fatalf("server two's new row %d got a stemmed copy after one failed Stems read: HTTP %d %s", id2, a.code, a.body)
+	}
+}
+
+// Round 6: state files from before the NAS root was recorded hold NAS entries of unknown
+// origin: those are never used; every other entry is kept.
+func TestNASLegacyStateFilesKeepOnlyOtherRows(t *testing.T) {
+	uiDir, stateDir, dlDir := t.TempDir(), t.TempDir(), t.TempDir()
+	write := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(uiDir, "nas.json"), `{"protocol":"subsonic","url":"http://nas.example:4533","username":"dj","password":"pw","enabled":true}`)
+	keepStem, oldStem := filepath.Join(stateDir, "keep.flac"), filepath.Join(stateDir, "old.flac")
+	write(keepStem, "x")
+	write(oldStem, "x")
+	write(filepath.Join(dlDir, sourcesFile), `{"spotify:sp-1":"sp-1.flac","subsonic:tr-99":"nas-old.mp3"}`)
+	write(filepath.Join(stateDir, "gateway-tracks.json"), `{"next":2,"tracks":[`+
+		`{"id":1,"track":{"id":"sp-1","provider":"spotify","title":"Keep"},"session":"sp-owner"},`+
+		`{"id":2,"track":{"id":"tr-99","provider":"subsonic","title":"Old"},"session":"nas"}],`+
+		`"lists":[{"id":"keep-list","session":"sp-owner","provider":"spotify","list":{"id":"pl-1"}},`+
+		`{"id":"old-list","session":"nas","provider":"`+localProvider+`","list":{"id":"nas\u0000pl-42"}}]}`)
+	write(filepath.Join(stateDir, "streaming-stems.json"), fmt.Sprintf(`{"spotify":[{"track":{"id":"sp-1","provider":"spotify"},"path":%q}],`+
+		`"subsonic":[{"track":{"id":"tr-99","provider":"subsonic"},"path":%q}]}`, keepStem, oldStem))
+	jobs := NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{DownloadDir: dlDir}})
+	t.Cleanup(jobs.Close)
+	s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, jobs)
+	t.Cleanup(s.Close)
+
+	s.tidal.mu.Lock()
+	_, keepRow := s.tidal.tracks[1]
+	_, oldRow := s.tidal.tracks[2]
+	_, keepList := s.tidal.lists["keep-list"]
+	_, oldList := s.tidal.lists["old-list"]
+	next := s.tidal.next
+	s.tidal.mu.Unlock()
+	if !keepRow || oldRow || !keepList || oldList || next < 2 {
+		t.Errorf("gateway rows: Spotify row %v (want true), NAS row %v (want false), Spotify list %v, NAS list %v, next %d (want >= 2)",
+			keepRow, oldRow, keepList, oldList, next)
+	}
+	jobs.mu.Lock()
+	sources := maps.Clone(jobs.loadSources())
+	jobs.mu.Unlock()
+	if sources["spotify:sp-1"] != "sp-1.flac" || sources["subsonic:tr-99"] != "" {
+		t.Errorf("index entries: %v, want the Spotify entry only", sources)
+	}
+	if got := s.stemmedPath(providers.Track{Provider: "spotify", ID: "sp-1"}); got != keepStem {
+		t.Errorf("Spotify stemmed copy: %q, want %q", got, keepStem)
+	}
+	if got := s.stemmedPath(providers.Track{Provider: "subsonic", ID: "tr-99"}); got != "" {
+		t.Errorf("a NAS stemmed copy of unknown origin was served: %q", got)
+	}
+}
+
+// Round 6: each NAS state file records the NAS root it was written for, as a hash: no
+// password and no server address in it.
+func TestNASStateFilesRecordTheRootWithoutSecrets(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	const secret = "s3cret-nas-pass-335"
+	body := fmt.Sprintf(`{"protocol":"subsonic","url":%q,"username":"dj","password":%q,"enabled":true}`, rig.oneURL, secret)
+	w := httptest.NewRecorder()
+	rig.s.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(body)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("save NAS: %d %s", w.Code, w.Body.String())
+	}
+	id := rig.browse()
+	rig.plays("server one", id, rig.one)
+	if a := rig.get(fmt.Sprintf("/v1/enginex/stems/source?id=%d", id)); a.code != http.StatusOK {
+		t.Fatalf("Stems source: HTTP %d %s", a.code, a.body)
+	}
+	rig.s.tidal.saveTracks()
+	want := nasRootID(rig.s.loadNASConfig())
+	if len(want) != 32 || strings.Contains(want, "127.0.0.1") {
+		t.Fatalf("NAS root %q is not a hash", want)
+	}
+	read := func(path string, v any) string {
+		t.Helper()
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, v); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if strings.Contains(string(raw), secret) || strings.Contains(string(raw), strings.TrimPrefix(rig.oneURL, "http://")) {
+			t.Errorf("%s holds the NAS password or address: %s", filepath.Base(path), raw)
+		}
+		return string(raw)
+	}
+	var index map[string]string
+	read(filepath.Join(rig.p.Deemix.DownloadDir, sourcesFile), &index)
+	var gateway struct {
+		Root string `json:"nasRoot"`
+	}
+	read(filepath.Join(rig.stateDir, "gateway-tracks.json"), &gateway)
+	var stems map[string][]stemmedTrack
+	read(filepath.Join(rig.stateDir, "streaming-stems.json"), &stems)
+	stemRoot := ""
+	for _, list := range stems {
+		for _, e := range list {
+			stemRoot = e.NASRoot
+		}
+	}
+	if index[sourcesRootKey] != want || gateway.Root != want || stemRoot != want {
+		t.Fatalf("recorded NAS roots: index %q, gateway %q, Stems %q; want %q", index[sourcesRootKey], gateway.Root, stemRoot, want)
+	}
+}
+
+// Round 6: a Stems list file that cannot be read is not an empty one. A Stems source
+// written while it could not be read replaced the whole file with its one entry; the
+// other services' Stems lists were gone. It writes nothing now.
+func TestNASStemsReadErrorNeverRewritesTheFile(t *testing.T) {
+	stateDir := t.TempDir()
+	s := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: stateDir}, nil)
+	t.Cleanup(s.Close)
+	if err := s.addStemmed("spotify", stemmedTrack{Track: providers.Track{Provider: "spotify", ID: "sp-1"}, Path: filepath.Join(stateDir, "sp-1.flac")}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(s.stemsFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateIO.Store(&stateFiles{read: func(string) ([]byte, error) { return nil, fs.ErrPermission }})
+	t.Cleanup(func() { stateIO.Store(nil) })
+	err = s.addStemmed("deezer", stemmedTrack{Track: providers.Track{Provider: "deezer", ID: "dz-1"}, Path: filepath.Join(stateDir, "dz-1.flac")})
+	stateIO.Store(nil)
+	if after, _ := os.ReadFile(s.stemsFile()); err == nil || !bytes.Equal(after, before) {
+		t.Fatalf("a Stems write while the file could not be read: err=%v, file now %s (was %s)", err, after, before)
 	}
 }

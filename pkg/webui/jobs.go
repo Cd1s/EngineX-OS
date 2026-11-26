@@ -92,6 +92,9 @@ type Jobs struct {
 	// importMu is held across a NAS job's last generation check and its library
 	// import; the reset takes it too, so no import of the old NAS ends after it.
 	importMu sync.Mutex
+	// nasRoot is the current NAS root (nasRootID), under mu: the index file records
+	// it, and NAS entries the file holds for another root are not used (#335).
+	nasRoot string
 	// pause is nil except in tests that order two loads of one track.
 	pause func(point string)
 
@@ -244,6 +247,10 @@ func (j *Jobs) dropUnusable(t providers.Track) {
 
 const sourcesFile = ".sources.json"
 
+// sourcesRootKey holds the NAS root in the index file; without a ":" it is
+// never a track key.
+const sourcesRootKey = "nasRoot"
+
 // loadSources reads the saved index once; j.mu must be held.
 func (j *Jobs) loadSources() map[string]string {
 	if j.sources == nil {
@@ -252,6 +259,14 @@ func (j *Jobs) loadSources() map[string]string {
 			if b, err := os.ReadFile(filepath.Join(j.p.Deemix.DownloadDir, sourcesFile)); err == nil {
 				json.Unmarshal(b, &j.sources)
 			}
+			if root := j.sources[sourcesRootKey]; root == "" || root != j.nasRoot {
+				for k := range j.sources { // filed for another NAS root, or an unknown one
+					if isNASKey(k) {
+						delete(j.sources, k)
+					}
+				}
+			}
+			delete(j.sources, sourcesRootKey)
 		}
 	}
 	return j.sources
@@ -282,7 +297,11 @@ func (j *Jobs) saveSource(key, path string) {
 
 // writeSources stores the source index owner-only and atomically; j.mu must be held.
 func (j *Jobs) writeSources() {
-	if err := providers.SaveJSON(filepath.Join(j.p.Deemix.DownloadDir, sourcesFile), j.sources); err != nil {
+	out := map[string]string{sourcesRootKey: j.nasRoot}
+	for k, v := range j.sources {
+		out[k] = v
+	}
+	if err := saveState(filepath.Join(j.p.Deemix.DownloadDir, sourcesFile), out); err != nil {
 		log.Printf("webui: source index not saved (%T)", err)
 	}
 }
@@ -312,7 +331,7 @@ func isNASKey(key string) bool {
 //
 // also runs under the same locks right after the bump (the Stems reset), so the
 // generation and the state it guards change in one step.
-func (j *Jobs) resetNAS(also func()) {
+func (j *Jobs) resetNAS(root string, also func()) {
 	if j == nil {
 		if also != nil {
 			also()
@@ -324,6 +343,7 @@ func (j *Jobs) resetNAS(also func()) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.nasGen.Add(1)
+	j.nasRoot = root
 	if j.pause != nil {
 		j.pause("reset-bumped")
 	}
