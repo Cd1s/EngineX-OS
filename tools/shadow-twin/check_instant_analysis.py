@@ -756,10 +756,14 @@ def main():
             check=True,
         )
         rbod_mdb = vol_rbod / "Engine Library/Database2/m.db"
-        assert rbod_mdb.is_file() and (vol_rbod / "Engine Library/Database2/.rb-state.bin").is_file(), "rb-bridge on-demand mount did not produce m.db + .rb-state.bin"
+        rbod_snap = vol_rbod / "Engine Library/Database2/.rb-bridge-snapshot"
+        assert rbod_mdb.is_file() and rbod_snap.is_file(), (
+            "rb-bridge on-demand mount did not produce m.db + .rb-bridge-snapshot: "
+            + (twin.WORK / "A/tmp/rbod-mount.log").read_text(errors="replace")[:400]
+        )
         with closing(sqlite3.connect(rbod_mdb)) as conn:
             rbod_uuid = conn.execute("SELECT uuid FROM Information LIMIT 1").fetchone()[0]
-            rbod_ids = {r[1]: r[0] for r in conn.execute("SELECT id, filename, isAnalyzed FROM Track")}
+            rbod_tracks = {r[1]: (r[0], r[2]) for r in conn.execute("SELECT id, filename, path FROM Track")}
             not_analysed = conn.execute("SELECT count(*) FROM Track WHERE isAnalyzed=0").fetchone()[0]
             assert not_analysed == len(REQUEST_TIMES_MS), f"expected {len(REQUEST_TIMES_MS)} unanalysed on-demand tracks, got {not_analysed}"
 
@@ -821,7 +825,8 @@ def main():
         )
         ready_line = prolink_proc.stdout.readline().strip()
         assert ready_line.startswith("READY "), f"mock prolink server failed: {ready_line!r} {prolink_proc.stderr.read() if prolink_proc.poll() is not None else ''}"
-        ns_curl("A", "/v1/enginex/ui?prolinkShare=1&rekordboxShare=/&scope=rekordbox", method="POST")
+        ns_curl("A", "/v1/enginex/ui?prolinkShare=1&rekordboxShare=/", method="POST")
+        ns_curl("A", "/v1/enginex/ui?scope=rekordbox", method="POST")
 
         # Browse Pro DJ Link Tracks playlist through real tidal_gateway so stream-sync assigns gateway IDs!
         def get_prolink_gids():
@@ -863,6 +868,7 @@ def main():
         def run_cell(source_name: str, t_ms: int):
             set_link("B", "down")
             bg_threads = []
+            bg_errors = []
             # Ensure B unloaded previous track cleanly while link was up before cutting eth0.
             # Choose source-specific deck payload and background source-side completion.
             if source_name == "stock-usb":
@@ -871,31 +877,34 @@ def main():
             elif source_name == "rb-ondemand":
                 fname = f"rb-od-{t_ms}.wav"
                 deck_obj = {"deck": 1, "net": f"net://src-uuid/RB_ONDEMAND/Contents/RBOD/{fname}", "bpm": 0 if t_ms == 0 else 128}
-                tid = rbod_ids[fname]
-                od_req = json.dumps({"mount": "/media/RB_ONDEMAND", "uuid": rbod_uuid, "path": f"../Contents/RBOD/{fname}", "id": tid, "bpm": 128})
+                tid, track_rel = rbod_tracks[fname]
+                od_req = json.dumps({"mount": "/media/RB_ONDEMAND", "uuid": rbod_uuid, "path": track_rel, "id": tid, "bpm": 128})
 
                 def fill_ondemand_at_230ms():
                     # Simulate source Engine calling /run/enginex/rb-ondemand.sock at t=0 and committing to m.db at ~230 ms.
-                    import http.client
-
-                    sock_path = str(twin.WORK / "A/run/enginex/rb-ondemand.sock")
-
-                    class UnixHTTP(http.client.HTTPConnection):
-                        def connect(self):
-                            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                            self.sock.settimeout(self.timeout)
-                            self.sock.connect(sock_path)
-
-                    conn = UnixHTTP("localhost", timeout=10)
                     try:
-                        conn.request("POST", "/v1/enginex/rekordbox/track-data", od_req.encode(), {"Content-Type": "application/json"})
-                        resp = conn.getresponse()
-                        body = resp.read()
-                        assert resp.status == 200, f"rb-ondemand.sock status={resp.status} body={body[:120]!r}"
-                    finally:
-                        conn.close()
-                    time.sleep(0.23)
-                    update_engine_track(rbod_mdb, tid, parse_rbxa1(body), bpm=128.0)
+                        import http.client
+
+                        sock_path = str(twin.WORK / "A/run/enginex/rb-ondemand.sock")
+
+                        class UnixHTTP(http.client.HTTPConnection):
+                            def connect(self):
+                                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                                self.sock.settimeout(self.timeout)
+                                self.sock.connect(sock_path)
+
+                        conn = UnixHTTP("localhost", timeout=10)
+                        try:
+                            conn.request("POST", "/v1/enginex/rekordbox/track-data", od_req.encode(), {"Content-Type": "application/json"})
+                            resp = conn.getresponse()
+                            body = resp.read()
+                            assert resp.status == 200, f"rb-ondemand.sock status={resp.status} body={body[:120]!r}"
+                        finally:
+                            conn.close()
+                        time.sleep(0.23)
+                        update_engine_track(rbod_mdb, tid, parse_rbxa1(body), bpm=128.0)
+                    except Exception as exc:
+                        bg_errors.append(exc)
 
                 bg_threads.append(threading.Thread(target=fill_ondemand_at_230ms, daemon=True))
             elif source_name == "rb-mdb":
@@ -947,6 +956,7 @@ def main():
                 raise
             for th in bg_threads:
                 th.join(timeout=5)
+            assert not bg_errors, f"{source_name}@{t_ms}ms background error: {bg_errors[0]!r}"
             wait_for(lambda: (s := deck_state_b()) and s["loaded"] and s["analysed"] and s, timeout=20, label=f"B ready {source_name}@{t_ms}ms")
             time.sleep(0.5)
             assert_no_oa_on_b(fname)
