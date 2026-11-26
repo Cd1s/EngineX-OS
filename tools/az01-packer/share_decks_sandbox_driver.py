@@ -14,17 +14,17 @@ import socketserver
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 BASE = "http://127.0.0.1:8080"
-# name, start and end in seconds after the probe's READY, whether a console channel is on Line (the console asks). The
-# console's deck loop, and so its asks, runs on for 10 s after its QML's last poll, and an ask lasts 6 s: the silence is
-# long enough for both. The probe switches the row off at 70 s.
+# name, start and end in seconds after the probe's READY, whether a console channel is on Line (the console polls for
+# it, so it asks). The probe moves the stock Layer at 25 and 33 s and switches the row off at 70 s, while the console asks.
 PHASES = [
     ("no-ask", 0, 15, False),
     ("ask", 15, 45, True),
-    ("silence", 45, 72, False),
-    ("row-off", 72, 88, True),
+    ("silence", 45, 66, False),  # the last channel leaves Line, the row stays on
+    ("ask-row-off", 66, 90, True),
 ]
 END = PHASES[-1][2]
 
@@ -71,14 +71,38 @@ def console(markport):
         return
     r = marks["ready"]
     sampled = set()
+    fetched, pngs = {}, {}
     while time.time() - r < END + 1:
         t = time.time() - r
         phase = next((p for p in PHASES if p[1] <= t < p[2]), None)
         if phase and phase[3]:
             try:
                 d = get("/v1/enginex/shadow?line=3")
-                lanes = [{k: x.get(k) for k in ("deck", "title", "lineIn", "player", "model", "playing", "stale", "displayOnly")}
+                lanes = [{k: x.get(k) for k in ("deck", "title", "lineIn", "player", "model", "playing", "stale", "displayOnly", "key", "loading")}
                          for x in d.get("decks") or []]
+                # The lane's picture, as the console's QML fetches it: the display data of the shared track (every 2 s),
+                # and its overview and first detail tile as PNGs (once each per key, when there).
+                for x in lanes:
+                    k = x.get("key")
+                    if not k or time.time() - fetched.get(k, 0) < 2:
+                        continue
+                    fetched[k] = time.time()
+                    q = "deck=%d&key=%s" % (x["deck"], urllib.parse.quote(k))
+                    try:
+                        disp = get("/v1/enginex/shadow/display?" + q)
+                        x["display"] = {"durationMs": disp.get("durationMs"), "bpm": disp.get("bpm"), "beats": len(disp.get("beats") or []),
+                                        "tiles": len(disp.get("waveformTiles") or []), "detail": disp.get("detail")}
+                        for name, path in (("overview", "/v1/enginex/shadow/waveform.png?%s&overview=1" % q),
+                                           ("tile", "/v1/enginex/shadow/waveform.png?%s&tile=0" % q)):
+                            if (k, name) in pngs or (name == "tile" and not x["display"]["tiles"]):
+                                continue
+                            with urllib.request.urlopen(BASE + path, timeout=4) as resp:
+                                body = resp.read()
+                            if body[:8] == b"\x89PNG\r\n\x1a\n" and len(body) > 200:
+                                pngs[(k, name)] = len(body)
+                                print("PNG|%s|%s|%d" % (name, k, len(body)), flush=True)
+                    except Exception as e:
+                        x["display"] = {"error": str(e)[:80]}
                 print("LANES|%d|%s|%.1f|%s" % (int(time.time() * 1000), phase[0], t, json.dumps(lanes)), flush=True)
             except Exception as e:
                 print("LANEERR|%s" % e, flush=True)
@@ -87,11 +111,31 @@ def console(markport):
             try:
                 d = get("/v1/enginex/debug/shadow")
                 print("CONSOLEDEBUG|%s|%s" % (phase[0], json.dumps({"running": d.get("running"), "peers": sorted((d.get("peers") or {}).keys()),
+                                                                    "peerDecks": len(d.get("peerDecks") or []),
                                                                     "console": d.get("console"), "udp50199": udp_bound(50199)})), flush=True)
             except Exception as e:
                 print("CONSOLEDEBUGERR|%s" % e, flush=True)
         time.sleep(0.5)
     print("CONSOLE|done", flush=True)
+
+
+def sync_pids():
+    """The two stream-syncs by command line, the player's (this network namespace) and the console's (the other one)."""
+    own = os.readlink("/proc/self/ns/net")
+    player = console = 0
+    for p in os.listdir("/proc"):
+        if p.isdigit():
+            try:
+                argv0 = open("/proc/%s/cmdline" % p, "rb").read().split(b"\0")[0]
+                if argv0 != b"/tmp/stream-sync":
+                    continue
+                if os.readlink("/proc/%s/ns/net" % p) == own:
+                    player = int(p)
+                else:
+                    console = int(p)
+            except OSError:
+                pass
+    return player, console
 
 
 def engine_pid():
@@ -143,6 +187,11 @@ def player():
         if pid:
             total, main, threads = cpu(pid)
             row.update(cpu=total / hz, gui=main / hz, threads=threads)
+        sp, cp = sync_pids()
+        if sp:
+            row["sync"] = cpu(sp)[0] / hz
+        if cp:
+            row["csync"] = cpu(cp)[0] / hz
         print("SAMPLE|" + json.dumps(row), flush=True)
         time.sleep(1.0)
 

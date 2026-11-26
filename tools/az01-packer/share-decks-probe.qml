@@ -60,14 +60,20 @@ Item {
         // The console asks from R+15 to R+45 (the driver's phases); the Layer moves inside that window.
         [0, function() { if (!at(25)) return false; setLayer(1) }],
         [0, function() { if (!at(33)) return false; setLayer(0) }],
-        // The row off, as a tap on it: the console asks again from R+72.
-        [0, function() { if (!at(70)) return false
+        // The console asks again from R+66; the row goes off at R+76 while it asks, as a tap on the row does.
+        [0, function() { if (!at(76)) return false
                          const x = new XMLHttpRequest(); x.open("POST", "http://127.0.0.1:8080/v1/enginex/ui?shareDecks=0"); x.send()
                          say("ROW off at=" + Date.now()) }],
         [0, function() { if (!at(90)) return false; get(probe.mark + "/done"); say("DONE|play=" + tr("/Engine/Deck1/PlayState").state) }],
-        // A playing deck holds Engine's quit: stop it first.
+        // Engine quits only with every deck stopped: release PLAY, wait for the brake to end, then quit (an edge).
         [0, function() { tr("/Engine/Deck1/Play").state = false }],
-        [1000, function() { Planck.getProperty("/Client/Quit").translator.state = true }]
+        [500, function() { if (tr("/Engine/Deck1/PlayState").state && Date.now() - probe.stepStarted < 15000) return false
+                           say("STOPPED playState=" + tr("/Engine/Deck1/PlayState").state) }],
+        // Engine's own quit without its confirmation dialog (as settings-copy-flow-probe.qml quits): /Client/Quit does
+        // nothing once a track is loaded, and Qt.quit() has no receiver in Engine. A step's delay runs after it: still
+        // here 20 s after the quit, the probe says so (the checker fails the run on any exit but a clean one).
+        [20000, function() { say("QUIT at=" + Date.now()); Planck.quit(QuitReasons.AnalyticsChange, true) }],
+        [0, function() { say("QUIT-STUCK") }]
     ]
     Timer {
         interval: 100

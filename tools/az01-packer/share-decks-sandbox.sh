@@ -158,7 +158,8 @@ timeout --kill-after=5s 360s chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr
     QT_QPA_PLATFORM=eglfs QT_QPA_EGLFS_INTEGRATION=eglfs_kms LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe LP_NUM_THREADS=2 \
     QML_DISABLE_DISK_CACHE=1 MALLOC_ARENA_MAX=1 /usr/Engine/Engine -d0 > "$W/engine.log" 2>&1 || engine_rc=$?
 echo "engine rc=$engine_rc"
-# The console's driver ends on its own 89 s after READY.
+echo "$engine_rc" > "$W/engine.rc" # the checker requires 0: the probe's own quit, not the timeout (124) or a crash
+# The console's driver ends on its own 91 s after READY.
 for _ in $(seq 1 30); do kill -0 "$CONSOLE_DRIVER" 2>/dev/null || break; sleep 1; done
 grep -aq "engine-ui-hook: Engine " "$W/engine.log" || echo "the hook did not start"
 exit 0
