@@ -31,7 +31,8 @@ if [ "${2:-}" != --inner ]; then
     [ ! -e "$W" ] || { echo "refusing existing sandbox $W" >&2; exit 1; }
     # The arms, checked before anything is built or started: a selector that names no arm (empty or blanks only) or
     # an unknown one is an error, never a run of zero arms that reports success.
-    read -r -a arms <<< "${STOP_TIME_ARMS-2deck 4deck}"
+    # The whole value, every line (read stops at a newline without -d ''; at the end of input it returns 1).
+    IFS=$' \t\n' read -r -d '' -a arms <<< "${STOP_TIME_ARMS-2deck 4deck}" || true
     [ ${#arms[@]} -gt 0 ] || { echo "STOP_TIME_ARMS names no arm (use 2deck and/or 4deck)" >&2; exit 1; }
     for arm in "${arms[@]}"; do
         case $arm in 2deck|4deck) ;; *) echo "unknown arm $arm (use 2deck and/or 4deck)" >&2; exit 1 ;; esac
