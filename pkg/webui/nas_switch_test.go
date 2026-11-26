@@ -132,24 +132,32 @@ func TestNASServerChangeNeverServesTheOldServersTrack(t *testing.T) {
 	// 2. Server two has the same playlist and track IDs: its track comes from it.
 	saveNAS(twoURL)
 	id2 := browse()
-	running := make(chan answer, 1)
-	go func() { running <- stream(id2) }()
+	first, second := make(chan answer, 1), make(chan answer, 1)
+	go func() { first <- stream(id2) }()
 	select {
 	case <-asked:
-	case a := <-running:
+	case a := <-first:
 		t.Fatalf("server two's track %d (the same ID as server one's: %v) answered HTTP %d without asking server two (server one's recording=%v)",
 			id2, id2 == id1, a.code, bytes.Equal(a.body, one))
 	case <-time.After(10 * time.Second):
 		t.Fatal("server two was never asked for its track")
 	}
 	gone("after the change to server two", id1)
+	// A second load of the same track waits for that download (Engine asks for the
+	// playback info and the stream of one track at once).
+	go func() { second <- stream(id2) }()
+	time.Sleep(300 * time.Millisecond)
 
-	// 3. Back to server one while server two's download runs: that download answers
-	// nothing and is not kept for the track, which server one now serves.
+	// 3. Back to server one while server two's download runs: neither load answers (the
+	// waiting one must not fetch the track again, now from server one), nothing is kept
+	// for the track, and server one serves it afresh.
 	saveNAS(oneURL)
 	release()
-	if a := <-running; a.code == http.StatusOK || bytes.Equal(a.body, two) {
-		t.Fatalf("server two's download, finished after the change, answered HTTP %d (its recording=%v)", a.code, bytes.Equal(a.body, two))
+	for i, ch := range []chan answer{first, second} {
+		if a := <-ch; a.code == http.StatusOK {
+			t.Fatalf("load %d of server two's track, begun before the change, answered HTTP 200 after it (server two's recording=%v, server one's=%v)",
+				i+1, bytes.Equal(a.body, two), bytes.Equal(a.body, one))
+		}
 	}
 	id3 := browse()
 	plays("server one again", id3, one)

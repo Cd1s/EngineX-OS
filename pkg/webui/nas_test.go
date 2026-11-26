@@ -333,6 +333,13 @@ func TestOmniSourceNASPlaylistsBrowseAndStream(t *testing.T) {
 		t.Fatalf("unexpected NAS playlist tracks: %+v", tracks.Items)
 	}
 	trackID := int64(tracks.Items[0]["id"].(float64))
+	// An HTTP NAS keeps its protocol as the track's provider, as released (Stems list, row
+	// label); only SMB is the standalone NAS source (#335).
+	if resp, err := http.Get(fmt.Sprintf("%s/v1/enginex/stems/local?id=%d", gw.URL, trackID)); err != nil {
+		t.Fatal(err)
+	} else if resp.Body.Close(); resp.Header.Get(providerHeader) != "subsonic" {
+		t.Fatalf("[NAS] track %s = %q, want subsonic", providerHeader, resp.Header.Get(providerHeader))
+	}
 
 	var pb map[string]any
 	tidalGet(t, gw.URL, fmt.Sprintf("/v1/tracks/%d/playbackinfopostpaywall?audioquality=LOSSLESS&playbackmode=STREAM&assetpresentation=FULL", trackID), 200, &pb)
