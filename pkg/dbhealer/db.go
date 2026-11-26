@@ -789,11 +789,10 @@ func scanMountTrackPage(
 		if path == "" {
 			continue
 		}
-		if runNFD && src == "" && !isASCII(path) && !norm.NFC.IsNormalString(path) {
-			page.nfd = append(page.nfd, trackPathCandidate{id: id, path: path, nfcPath: norm.NFC.String(path)})
-		}
 		if runDropbox && isDropboxLocalizableTag(src, uri) {
 			page.dropbox = append(page.dropbox, dropboxTrackCandidate{id: id, path: path, fileBytes: fileBytes})
+		} else if runNFD && src == "" && !isASCII(path) && !norm.NFC.IsNormalString(path) {
+			page.nfd = append(page.nfd, trackPathCandidate{id: id, path: path, nfcPath: norm.NFC.String(path)})
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -1033,10 +1032,9 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 				continue
 			}
 
-			// NFD leads or ties with the next Dropbox row (same Track.id when
-			// streamingSource is empty and uri is a Dropbox streaming URI).
+			// NFD leads (page.nfd and page.dropbox are disjoint in scanMountTrackPage).
 			end := ni
-			for end < len(nfdSlice) && end-ni < 64 && (di >= len(dropboxSlice) || nfdSlice[end].id <= dropboxSlice[di].id) {
+			for end < len(nfdSlice) && end-ni < 64 && (di >= len(dropboxSlice) || nfdSlice[end].id < dropboxSlice[di].id) {
 				end++
 			}
 			bridgeOK, berr := ensureBridge()
@@ -1055,27 +1053,14 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 				di = len(dropboxSlice)
 				break
 			}
-			nfdRem, nfdLastID, rewritten, nfdInterrupted, nerr := normalizeTrackPathsBatch(
+			nfdRem, nfdLastID, _, nfdInterrupted, nerr := normalizeTrackPathsBatch(
 				ctx, db, mount, nfdSlice[ni:end], bridgeManaged, claimedNFC, dirs, r,
 			)
-			if len(rewritten) > 0 && di < len(dropboxSlice) {
-				for j := di; j < len(dropboxSlice); j++ {
-					if nextPath, ok := rewritten[dropboxSlice[j].id]; ok {
-						dropboxSlice[j].path = nextPath
-					}
-				}
-			}
-			advanceNFDCompleted := func(id int64) {
-				if di < len(dropboxSlice) && id >= dropboxSlice[di].id {
-					id = dropboxSlice[di].id - 1
-				}
-				if id > completedID {
-					completedID = id
-				}
-			}
 			if nerr != nil {
 				if isContextStop(ctx, nerr) {
-					advanceNFDCompleted(nfdLastID)
+					if nfdLastID > completedID {
+						completedID = nfdLastID
+					}
 					saveCursorIfAdvanced(completedID)
 					res.nfdRemaining = (len(nfdSlice) - end) + nfdRem
 					res.dropboxRemaining = len(dropboxSlice) - di
@@ -1084,9 +1069,13 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 				}
 				return res, nerr
 			}
-			advanceNFDCompleted(nfdLastID)
+			if nfdLastID > completedID {
+				completedID = nfdLastID
+			}
 			if !nfdInterrupted && nfdRem == 0 {
-				advanceNFDCompleted(nfdSlice[end-1].id)
+				if lastChunkID := nfdSlice[end-1].id; lastChunkID > completedID {
+					completedID = lastChunkID
+				}
 				ni = end
 			} else {
 				ni = end - nfdRem

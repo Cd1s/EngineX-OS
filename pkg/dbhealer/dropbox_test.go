@@ -987,3 +987,92 @@ func TestHealMountMixedPageInterleavesNFDAndDropboxWithoutStarvation(t *testing.
 		})
 	}
 }
+
+func TestHealMountURIOnlyNFDDropboxSingleUnitNoStarvation(t *testing.T) {
+	setup := func(t *testing.T, onDiskNFC bool) (string, *sql.DB, string) {
+		t.Helper()
+		root := t.TempDir()
+		testlibrary.ExportDrive(t, root)
+		dbPath := filepath.Join(root, "Engine Library", "Database2", "m.db")
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		nfdName := norm.NFD.String("Café.wav")
+		diskName := nfdName
+		if onDiskNFC {
+			diskName = norm.NFC.String("Café.wav")
+		}
+		music := filepath.Join(root, "Music")
+		audio := filepath.Join(music, diskName)
+		if err := os.Rename(filepath.Join(music, "Track001.wav"), audio); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE Track SET path=?, filename=?, streamingSource=NULL, uri='streaming://Dropbox/Track/1', streamingFlags=5 WHERE id=1`, "../Music/"+nfdName, nfdName); err != nil {
+			t.Fatal(err)
+		}
+		return root, db, audio
+	}
+
+	isTagged := func(t *testing.T, db *sql.DB) bool {
+		t.Helper()
+		var uri string
+		var flags int
+		if err := db.QueryRow(`SELECT coalesce(uri,''), coalesce(streamingFlags,0) FROM Track WHERE id=1`).Scan(&uri, &flags); err != nil {
+			t.Fatal(err)
+		}
+		return uri != "" || flags != 0
+	}
+
+	t.Run("exact_nfd_skips_nfd_batch_and_localizes_in_one_pass", func(t *testing.T) {
+		root, db, _ := setup(t, false)
+		t.Cleanup(func() { normalizeTrackPathBatch = nil })
+		nfdBatches := 0
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		normalizeTrackPathBatch = func() { nfdBatches++; cancel() }
+		rep, err := HealMountDataOnlyContext(ctx, root, 0)
+		if err != nil || !rep.Healthy {
+			t.Fatalf("mount heal failed: %+v %v", rep, err)
+		}
+		if nfdBatches != 0 || rep.DropboxLocalized != 1 || isTagged(t, db) {
+			t.Fatalf("expected single-unit Dropbox localization without NFD batch: nfdBatches=%d rep=%+v tagged=%v", nfdBatches, rep, isTagged(t, db))
+		}
+	})
+
+	t.Run("exact_nfd_in_large_directory_does_not_read_dir", func(t *testing.T) {
+		root, db, audio := setup(t, false)
+		dir := filepath.Dir(audio)
+		for i := 0; i < 4000; i++ {
+			if err := os.Link(audio, filepath.Join(dir, fmt.Sprintf("Music-%05d.wav", i))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Cleanup(func() { normalizeTrackPathBatch = nil })
+		nfdBatches := 0
+		normalizeTrackPathBatch = func() { nfdBatches++ }
+		rep, err := HealMountDataOnly(root, 0)
+		if err != nil || !rep.Healthy {
+			t.Fatalf("large-dir mount heal failed: %+v %v", rep, err)
+		}
+		if nfdBatches != 0 || rep.DropboxLocalized != 1 || isTagged(t, db) {
+			t.Fatalf("expected direct lstat localization without NFD directory scan: nfdBatches=%d rep=%+v tagged=%v", nfdBatches, rep, isTagged(t, db))
+		}
+	})
+
+	t.Run("nfc_on_disk_normalizes_and_localizes_atomically", func(t *testing.T) {
+		root, db, _ := setup(t, true)
+		rep, err := HealMountDataOnly(root, 0)
+		if err != nil || !rep.Healthy || rep.DropboxLocalized != 1 || rep.PathsNormalized != 1 {
+			t.Fatalf("expected atomic normalize+localize: %+v %v", rep, err)
+		}
+		var path string
+		if err := db.QueryRow(`SELECT path FROM Track WHERE id=1`).Scan(&path); err != nil {
+			t.Fatal(err)
+		}
+		if !norm.NFC.IsNormalString(path) || isTagged(t, db) {
+			t.Fatalf("track not normalized+localized: path=%+q tagged=%v", path, isTagged(t, db))
+		}
+	})
+}
