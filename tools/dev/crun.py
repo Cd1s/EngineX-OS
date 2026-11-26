@@ -8,7 +8,7 @@ variants (for example test_dsp_smooth.c: plain, ASan/UBSan and TSan; test_rt_cal
 run plain and with `selftest`); every other tools/ui-mod test builds and runs the armhf way with the Engine
 arguments it needs. A run marked `root:` (edisksd-hook's --mounts, inside `unshare -m --propagation private`) is
 skipped with a reason when not root; a variant that needs the firmware lab fails when the lab is missing.
-Each test's runs hold a host-wide lock of that test (/var/tmp/enginex-ctest-<name>.lock): two lanes never run the same
+Each test's runs hold a host-wide lock of that test (/var/lock/enginex-ctest-<name>.lock): two lanes never run the same
 C test on one host at once (some use fixed paths such as /tmp/enginex-shadow-position-test).
 --rerun: a variant that failed runs once more alone after the others; a pass is reported as FLAKY, not as passed.
 Exit status: 0 when every variant built and every run passed (or passed on the rerun) or was skipped with a reason.
@@ -17,7 +17,7 @@ import argparse, fcntl, json, os, pathlib, re, shutil, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(os.path.dirname(HERE))
+ROOT = os.environ.get('ENGINEX_TREE') or os.getcwd()  # the tree under test (test.sh runs this from its root)
 CFG = json.loads(pathlib.Path(HERE, 'c-tests.json').read_text())
 
 
@@ -88,7 +88,7 @@ def run_job(job, work, lab, is_root):
     if rc:
         res.update(ok=False, secs=time.monotonic() - t0, tail='build failed:\n' + text[-4000:])
         return res
-    lock = open(f'/var/tmp/enginex-ctest-{stem}.lock', 'w')
+    lock = open(f'/var/lock/enginex-ctest-{stem}.lock', 'w')
     fcntl.flock(lock, fcntl.LOCK_EX)  # another lane's run of the same test on this host finishes first
     try:
         _runs(job, res, out, lab, is_root, sh)

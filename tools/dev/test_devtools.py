@@ -1,5 +1,5 @@
 """Self-test of tools/dev: path map, changed-test detection, skip accounting, shard and class counts."""
-import io, json, os, shutil, subprocess, sys, tempfile, textwrap, unittest
+import io, json, os, shutil, subprocess, sys, tempfile, textwrap, time, unittest
 from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -234,6 +234,20 @@ class ReportTest(unittest.TestCase):
         rc, text = self.report({}, res)
         self.assertEqual(rc, 1)
         self.assertIn('sync failed', text)
+
+
+class SpawnTest(unittest.TestCase):
+    def test_a_timed_out_step_takes_its_workers_with_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mark = os.path.join(tmp, 'pid')
+            step = devtest.Step('x')
+            rc = devtest.spawn(step, ['bash', '-c', f'sleep 300 & echo $! > {mark}; wait'], dict(os.environ), timeout=1)
+            self.assertEqual(rc, 124)
+            self.assertIn('timed out after 1s', step.out)
+            pid = int(open(mark).read())
+            time.sleep(0.3)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
 
 
 class ShardTest(unittest.TestCase):

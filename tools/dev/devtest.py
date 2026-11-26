@@ -20,7 +20,7 @@ and the hook rebuild), and runs there inside `enginex-run sandbox` (`--exclusive
 merge train and timing work), so lanes never slow an exclusive job and never take the heavy lock themselves.
 There `go list` re-checks the Go selection (it can only add packages). One summary, one exit code.
 """
-import argparse, hashlib, json, os, pathlib, re, shutil, socket, subprocess, sys, tempfile, threading, time
+import argparse, filecmp, hashlib, json, os, pathlib, re, shutil, signal, socket, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -30,6 +30,7 @@ import testmap  # noqa: E402
 
 MARK = 'ENGINEX_RESULT_JSON '
 PLAN_PREFIX = '.enginex-test-plan'  # .enginex-test-plan-<pid>.json in the tree for one run (synced with it)
+TOOLS_PREFIX = '.enginex-devtools'  # a copy of this runner in a tree that has none (synced with it, removed after)
 DEFAULT_INTO = 'agent/5306-batch2'
 SANDBOX_ENGINES = ('e504', 'e530', 'esl4', 'eaz04')
 
@@ -65,7 +66,7 @@ def make_plan(a, root):
             base = 'HEAD'
         plan['base'] = run(['git', '-C', root, 'rev-parse', base]).stdout.strip() or base
         changed = [p for p in git(root, 'diff', '--name-only', '--no-renames', base).splitlines()
-                   + git(root, 'ls-files', '-o', '--exclude-standard').splitlines() if p and not p.startswith(PLAN_PREFIX)]
+                   + git(root, 'ls-files', '-o', '--exclude-standard').splitlines() if p and not p.startswith((PLAN_PREFIX, TOOLS_PREFIX))]
         sel = testmap.map_paths(sorted(set(changed)), root)
     plan['changed'] = sorted(set(changed))
     plan['go_all'] = sel.go_all
@@ -135,15 +136,30 @@ class Step:
         self.name, self.secs, self.ok, self.note, self.tail, self.out = name, 0.0, None, '', '', ''
 
 
+def _stop(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 def spawn(step, cmd, env, cwd=None, timeout=None):
+    """Run one step in its own process group; on a timeout, a signal or any error the whole group (the runner and
+    every worker it started) is killed, so nothing keeps running on a shared host."""
     t0 = time.monotonic()
+    p = subprocess.Popen(cmd, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                         errors='replace', start_new_session=True)
     try:
-        p = subprocess.run(cmd, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                           errors='replace', timeout=timeout)
-        rc, out = p.returncode, p.stdout
-    except subprocess.TimeoutExpired as e:
-        rc, out = 124, (e.stdout or '') if isinstance(e.stdout, str) else ''
-        out += f'\n(timed out after {timeout}s)'
+        out, _ = p.communicate(timeout=timeout)
+        rc = p.returncode
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL)
+        out, _ = p.communicate()
+        rc, out = 124, (out or '') + f'\n(timed out after {timeout}s)'
+    except BaseException:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        p.wait()
+        raise
     step.secs = time.monotonic() - t0
     step.ok = rc == 0
     step.out = out
@@ -170,6 +186,8 @@ def gcc_major():
 
 
 def exec_plan(plan_path):
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):  # the caller stopped the run: clean up and leave
+        signal.signal(sig, _stop)
     plan = json.loads(pathlib.Path(plan_path).read_text())
     if os.uname().machine not in ('aarch64', 'arm64'):
         print(MARK + json.dumps({'steps': [{'name': 'host', 'secs': 0, 'ok': False, 'note': '',
@@ -399,16 +417,35 @@ def main():
     except OSError:
         name += f'-{os.getpid()}'
     mode = 'exclusive' if a.exclusive else 'sandbox'
-    inner = f'bash tools/dev/test.sh --exec {plan_name}'
+    # The tree may not carry this runner yet (a lane branch older than it): run a copy of this one, synced with the tree.
+    tools_copy = None
+    if not os.path.isfile(os.path.join(root, 'tools/dev/devtest.py')) or not filecmp.cmp(os.path.join(root, 'tools/dev/devtest.py'), __file__, shallow=False):
+        tools_copy = os.path.join(root, f'{TOOLS_PREFIX}-{os.getpid()}')
+        shutil.copytree(HERE, tools_copy, ignore=shutil.ignore_patterns('__pycache__', 'test_*'))
+        print(f'runner: this tree has no (or another) tools/dev runner; using a copy of {HERE}')
+    runner = os.path.relpath(tools_copy, root) if tools_copy else 'tools/dev'
+    inner = f'bash {runner}/test.sh --exec {plan_name}'
     command = f'if command -v enginex-run >/dev/null 2>&1; then enginex-run {mode} -- {inner}; else {inner}; fi'
     print(f'run: {host} ({mode}), /root/build/{name}', flush=True)
+    signal.signal(signal.SIGTERM, _stop)
     try:
         rc, out = remote(host, name, command, root, os.environ.get('ENGINEX_TEST_TIMEOUT', '150m'))
+    except BaseException:
+        # Interrupted here: stop this run on the host too (the plan file name is unique to it), then remove its copy.
+        sshctl = shutil.which('sshctl')
+        if sshctl:
+            run([sshctl, 'run', host, '--no-stdin', '--timeout', '30s', '--argv', 'pkill', '-TERM', '-f', plan_name])
+            time.sleep(3)
+            run([sshctl, 'run', host, '--no-stdin', '--timeout', '60s', '--argv', 'rm', '-rf', '--', f'/root/build/{name}'])
+        print(f'test.sh: interrupted; stopped the run on {host}', file=sys.stderr)
+        raise
     finally:
         try:
             os.remove(plan_path)
         except OSError:
             pass
+        if tools_copy:
+            shutil.rmtree(tools_copy, ignore_errors=True)  # only the copy made above
         guard.close()
     res = parse_result(out)
     if res is None:
