@@ -791,9 +791,15 @@ def main():
             dst.write_bytes(wav_bytes)
             pl_tracks_cfg[str(idx)] = {"title": f"ProLink {t_ms}", "path": f"/Music/{fn}"}
         mounts_json = json.dumps([{"id": "pl-share", "name": "Music", "mountPoint": "/media/RBX_SHARE", "enabled": True}])
-        for mpath in (twin.WORK / "A/data/enginex/mounts.json", twin.WORK / "A/data/enginex/ui/mounts.json", twin.WORK / "A/tmp/home/.config/enginex/mounts.json"):
+        for mpath in (
+            twin.WORK / "A/data/enginex/state/mounts.json",
+            twin.WORK / "A/data/enginex/mounts.json",
+            twin.WORK / "A/data/enginex/ui/mounts.json",
+            twin.WORK / "A/tmp/home/.config/stream-sync/mounts.json",
+        ):
             mpath.parent.mkdir(parents=True, exist_ok=True)
             mpath.write_text(mounts_json)
+
         def refresh_prolink_snap():
             now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             snap = json.dumps({
@@ -808,6 +814,7 @@ def main():
             })
             for ppath in (
                 twin.WORK / "A/tmp/enginex-prolink.json",
+                twin.WORK / "A/data/enginex/state/prolink.json",
                 twin.WORK / "A/data/enginex/prolink.json",
                 twin.WORK / "A/data/enginex/ui/prolink.json",
             ):
@@ -870,7 +877,13 @@ def main():
 
         # 5. streaming setup: /data/downloads/TIDAL/stream-*.wav + A's stm.db
         stm_mdb = db_path("A", "stm.db")
-        clone_empty_engine_db(src_mdb, stm_mdb)
+        if not stm_mdb.is_file():
+            clone_empty_engine_db(src_mdb, stm_mdb)
+        with closing(sqlite3.connect(stm_mdb)) as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(Track)")}
+            if "uri" not in cols:
+                conn.execute("ALTER TABLE Track ADD COLUMN uri TEXT")
+                conn.commit()
         stm_dir = twin.WORK / "A/data/downloads/TIDAL"
         stm_dir.mkdir(parents=True, exist_ok=True)
         stm_rows = {}
@@ -946,7 +959,9 @@ def main():
                 else:
                     prolink_delay_flag.unlink(missing_ok=True)
                 # Trigger real rbxPrepare (+ rbxWriteAnalysis; 0ms & 100ms keep rbxAnalysing running past 3 s wait).
-                ns_curl("A", f"/v1/tracks/{gid}/playbackinfopostpaywall", timeout=15)
+                pb_raw = ns_curl("A", f"/v1/tracks/{gid}/playbackinfopostpaywall", timeout=15)
+                pb = json.loads(pb_raw)
+                assert pb.get("trackId") == gid, f"prolink playbackinfopostpaywall failed for gid={gid}: {pb_raw[:300]!r} | A sync: {sync_logs('A').splitlines()[-6:]}"
                 deck_obj = {"deck": 1, "net": f"streaming://TIDAL/Track/{gid}", "title": f"ProLink {t_ms}", "artist": "Link Artist", "bpm": 0 if t_ms == 0 else 128}
                 # Peer copy filename is displayFileName("Link Artist", "ProLink <t>", ".wav")!
                 fname = f"Link Artist - ProLink {t_ms}.wav"
