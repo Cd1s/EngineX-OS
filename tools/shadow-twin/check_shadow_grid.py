@@ -189,14 +189,14 @@ def main():
     time.sleep(1.0)
     wait_for(lambda: (r := db_row("A", "track-a.wav")) and r["beatSha"] != ra1["beatSha"], 15, "A edit 2 m.db")
     wait_for(
-        lambda: (ra := db_row("A", "track-a.wav")) and (rb := db_row("B", "track-a.wav")) and rb["beatSha"] == ra["beatSha"] and rb["analyzed"] == 1 and abs(deck_state("B")["bpm"] - deck_state("A")["bpm"]) < 0.05,
+        lambda: (ra := db_row("A", "track-a.wav")) and (rb := db_row("B", "track-a.wav")) and rb["beatSha"] == ra["beatSha"] and rb["analyzed"] == 1 and abs(deck_state("B")["firstAnchor"] - deck_state("A")["firstAnchor"]) < 0.05,
         20,
         "B in-place update after edit 2 (phase/anchor only)",
     )
     ra2 = db_row("A", "track-a.wav")
     a2, b2, rb2 = deck_state("A"), deck_state("B"), db_row("B", "track-a.wav")
     bd2 = beat_diff(a2, b2)
-    print(f"EDIT2 (phase+anchor): A bpm={a2['bpm']:.2f} beat={a2['beat']:.3f} sha={ra2['beatSha']} | B bpm={b2['bpm']:.2f} beat={b2['beat']:.3f} diff={bd2:.3f} loads={b2['loads']} sha={rb2['beatSha']}", flush=True)
+    print(f"EDIT2 (phase+anchor): A firstAnchor={a2['firstAnchor']:.2f} beat={a2['beat']:.3f} sha={ra2['beatSha']} | B firstAnchor={b2['firstAnchor']:.2f} beat={b2['beat']:.3f} diff={bd2:.3f} loads={b2['loads']} sha={rb2['beatSha']}", flush=True)
     assert b2["loads"] == 1, f"deck reloaded on edit 2: {b2}"
     assert abs(b2["firstAnchor"] - a2["firstAnchor"]) < 0.05, (a2, b2)
     assert bd2 < 0.08, f"beat phase mismatch after edit 2: A={a2} B={b2} diff={bd2}"
@@ -210,12 +210,12 @@ def main():
     time.sleep(1.0)
     wait_for(lambda: (r := db_row("A", "track-a.wav")) and r["bpmA"] > 100 and r["beatSha"] != ra2["beatSha"], 15, "A edit 3 playing m.db")
     wait_for(
-        lambda: (ra := db_row("A", "track-a.wav")) and (rb := db_row("B", "track-a.wav")) and rb["beatSha"] == ra["beatSha"] and abs(deck_state("B")["bpm"] - deck_state("A")["bpm"]) < 0.1,
+        lambda: (ra := db_row("A", "track-a.wav")) and (rb := db_row("B", "track-a.wav")) and rb["beatSha"] == ra["beatSha"] and abs(deck_state("B")["firstAnchor"] - deck_state("A")["firstAnchor"]) < 0.1,
         20,
         "B in-place update while A playing",
     )
     a3, b3, rb3 = deck_state("A"), deck_state("B"), db_row("B", "track-a.wav")
-    print(f"EDIT3 (playing double): A play={a3['play']} bpm={a3['bpm']:.2f} | B play={b3['play']} master={b3['master']} bpm={b3['bpm']:.2f} loads={b3['loads']} cue1={b3['cue1']:.0f} sha={rb3['beatSha']}", flush=True)
+    print(f"EDIT3 (playing double): A play={a3['play']} firstAnchor={a3['firstAnchor']:.2f} | B play={b3['play']} master={b3['master']} firstAnchor={b3['firstAnchor']:.2f} loads={b3['loads']} cue1={b3['cue1']:.0f} sha={rb3['beatSha']}", flush=True)
     assert a3["play"], "A stopped playing during grid edit"
     assert b3["loads"] == 1, f"deck reloaded during playing edit: {b3}"
     assert not b3["master"], f"silent shadow copy took MASTER: {b3}"
