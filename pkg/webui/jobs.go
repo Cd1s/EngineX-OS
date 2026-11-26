@@ -1169,9 +1169,6 @@ func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error 
 	if dl == nil {
 		var err error
 		j.update(v.ID, func(v *Job) { v.State = "downloading"; v.Progress = .05 })
-		j.mu.Lock()
-		gen := j.nasGen
-		j.mu.Unlock()
 		matched, dl, err = j.acquire(ctx, v.SessionID, v.Track, v.Playlist == providers.GuestPlaylist, func(q deemixclient.QueueStatus) {
 			j.update(v.ID, func(v *Job) { v.Progress = .05 + .55*max(0, min(1, q.Progress)) })
 		})
@@ -1179,7 +1176,7 @@ func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error 
 			return err
 		}
 		j.addCover(ctx, v.Track, dl)
-		j.putFileIfGen(trackKey(v.Track), fetched{matched, dl}, gen)
+		j.putFile(trackKey(v.Track), fetched{matched, dl})
 	}
 	if tooLongToAnalyse(v.Track, dl.Path) {
 		j.update(v.ID, func(v *Job) { v.State = "done"; v.Quality = dl.Quality.Label; v.Progress = 1 })
