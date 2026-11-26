@@ -28,8 +28,10 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -67,6 +69,9 @@ static struct sc_tap live_tap; // #50, every Engine build; .bss (512 KiB ring), 
 #define UI_ROOT "/data/enginex/ui"
 #ifndef SHADOW_POSITION_FEED_PATH
 #define SHADOW_POSITION_FEED_PATH "/run/enginex/shadow-position"
+#endif
+#ifndef SHADOW_REGRID_SOCK_PATH
+#define SHADOW_REGRID_SOCK_PATH "/run/enginex/shadow-regrid.sock"
 #endif
 #define FLAG_COMPRESSED 0x01
 #define FLAG_DIRECTORY 0x02
@@ -632,10 +637,21 @@ static void start_thread(void *(*fn)(void *)) {
 
 static void lim_start_poll(void) { start_thread(lim_poll); start_thread(live_tap_drain); }
 
+#if !defined(__aarch64__)
+static int shadow_regrid_enabled;
+static int shadow_regrid_sock_fd = -1;
+#ifndef ENGINE_UI_HOOK_TEST
+static void *shadow_regrid_listener(void *arg);
+#endif
+#endif
+
 // LED brightness belongs to the UI pack even when all DSP guards stay stock.
 static void start_feature_workers(int dsp_ready) {
     if (dsp_ready) lim_start_poll();
     else if (!hf_on(HF_DSP_GUARDS) && hf_on(HF_UI_PACKS)) start_thread(lim_poll);
+#if !defined(__aarch64__) && !defined(ENGINE_UI_HOOK_TEST)
+    if (shadow_regrid_enabled && shadow_regrid_sock_fd >= 0) start_thread(shadow_regrid_listener);
+#endif
 }
 
 static int official_update_host(const char *node) {
@@ -3890,6 +3906,237 @@ static uintptr_t shadow_queue_loaded_return;
 static __thread int shadow_regrid_queued;
 static unsigned (*shadow_analyze_original)(void *, const void *);
 
+// #346: native 5.3.0-only AnalysisQueue bridge. No injected QML may touch
+// /Client/Librarian/Analyzer/; instead stream-sync notifies this root-only
+// Unix datagram socket after staging <copy>.perf.regrid, and the hook posts
+// a custom QEvent onto AnalysisQueue's own Qt thread to invoke addTracks().
+struct sc_qlist_i64 { void *d; const int64_t *ptr; int32_t size; };
+static const char *shadow_regrid_sock_path = SHADOW_REGRID_SOCK_PATH;
+static pthread_mutex_t shadow_regrid_mu = PTHREAD_MUTEX_INITIALIZER;
+static void *shadow_analysis_queue;
+static int64_t shadow_regrid_ids[16];
+static int shadow_regrid_count;
+static int shadow_regrid_posted;
+static int shadow_regrid_event_type;
+static void (*shadow_queue_add_tracks)(void *, const struct sc_qlist_i64 *, int);
+static const void *(*shadow_queue_meta_original)(void *);
+static void *(*shadow_queue_dtor_d1_original)(void *);
+static void *(*shadow_queue_dtor_d0_original)(void *);
+static int (*shadow_queue_event_original)(void *, void *);
+static void (*shadow_queue_connect_original)(void *, const void *);
+static void (*shadow_post_event)(void *, void *, int);
+static void (*shadow_qevent_ctor)(void *, int);
+static void (*shadow_qevent_dtor)(void *);
+static int (*shadow_qevent_reg)(int);
+static void *(*shadow_op_new)(size_t);
+static void *shadow_qobj_event_sym;
+static void *shadow_qobj_connect_sym;
+
+static void shadow_analysis_queue_capture(void *self) {
+    if (!self || __atomic_load_n(&shadow_analysis_queue, __ATOMIC_ACQUIRE) == self) return;
+    pthread_mutex_lock(&shadow_regrid_mu);
+    if (!shadow_analysis_queue) {
+        __atomic_store_n(&shadow_analysis_queue, self, __ATOMIC_RELEASE);
+        fprintf(stderr, "engine-ui-hook: shadow regrid captured AnalysisQueue\n");
+    }
+    pthread_mutex_unlock(&shadow_regrid_mu);
+}
+
+static void shadow_analysis_queue_clear(void *self) {
+    pthread_mutex_lock(&shadow_regrid_mu);
+    if (shadow_analysis_queue == self) {
+        __atomic_store_n(&shadow_analysis_queue, NULL, __ATOMIC_RELEASE);
+        shadow_regrid_count = 0;
+        shadow_regrid_posted = 0;
+    }
+    pthread_mutex_unlock(&shadow_regrid_mu);
+}
+
+static const void *shadow_analysis_queue_meta(void *self) {
+    shadow_analysis_queue_capture(self);
+    return shadow_queue_meta_original(self);
+}
+
+static void shadow_analysis_queue_connect(void *self, const void *sig) {
+    shadow_analysis_queue_capture(self);
+    shadow_queue_connect_original(self, sig);
+}
+
+static void *shadow_analysis_queue_dtor_d1(void *self) {
+    shadow_analysis_queue_clear(self);
+    return shadow_queue_dtor_d1_original(self);
+}
+
+static void *shadow_analysis_queue_dtor_d0(void *self) {
+    shadow_analysis_queue_clear(self);
+    return shadow_queue_dtor_d0_original(self);
+}
+
+static int shadow_analysis_queue_event(void *self, void *ev) {
+    shadow_analysis_queue_capture(self);
+    if (ev && shadow_regrid_event_type > 0) {
+        uint16_t ev_type = 0;
+        memcpy(&ev_type, (const unsigned char *)ev + 4, sizeof ev_type);
+        if (ev_type == (uint16_t)shadow_regrid_event_type) {
+            int64_t ids[16];
+            int n = 0;
+            pthread_mutex_lock(&shadow_regrid_mu);
+            n = shadow_regrid_count;
+            if (n > 16) n = 16;
+            if (n > 0) memcpy(ids, shadow_regrid_ids, (size_t)n * sizeof ids[0]);
+            shadow_regrid_count = 0;
+            shadow_regrid_posted = 0;
+            pthread_mutex_unlock(&shadow_regrid_mu);
+            if (n > 0 && shadow_queue_add_tracks) {
+                struct sc_qlist_i64 list = {NULL, ids, (int32_t)n};
+                shadow_queue_add_tracks(self, &list, 0);
+            }
+            return 1;
+        }
+    }
+    return shadow_queue_event_original(self, ev);
+}
+
+static int shadow_regrid_handle_dgram(const char *buf, size_t len) {
+    if (!shadow_regrid_enabled || !shadow_queue_add_tracks || !shadow_post_event ||
+        !shadow_qevent_ctor || !shadow_op_new || shadow_regrid_event_type <= 0) return 0;
+    long long track_id = 0;
+    char path[640];
+    if (!sc_shadow_regrid_parse(buf, len, &track_id, path, sizeof path)) return 0;
+    if (!sc_shadow_regrid_ready(path)) return 0;
+    int queued = 0;
+    pthread_mutex_lock(&shadow_regrid_mu);
+    void *q = shadow_analysis_queue;
+    if (q) {
+        int dup = 0;
+        for (int i = 0; i < shadow_regrid_count; i++) {
+            if (shadow_regrid_ids[i] == (int64_t)track_id) { dup = 1; break; }
+        }
+        if (!dup && shadow_regrid_count < 16) shadow_regrid_ids[shadow_regrid_count++] = (int64_t)track_id;
+        if (!shadow_regrid_posted) {
+            void *ev = shadow_op_new(32);
+            if (ev) {
+                memset(ev, 0, 32);
+                shadow_qevent_ctor(ev, shadow_regrid_event_type);
+                shadow_regrid_posted = 1;
+                shadow_post_event(q, ev, 0);
+                queued = 1;
+            }
+        } else {
+            queued = 1;
+        }
+    }
+    pthread_mutex_unlock(&shadow_regrid_mu);
+    return queued;
+}
+
+#ifndef ENGINE_UI_HOOK_TEST
+static void *shadow_regrid_listener(void *arg) {
+    (void)arg;
+    prctl(PR_SET_NAME, "sc-sh-regrid", 0, 0, 0);
+    char buf[768];
+    for (;;) {
+        ssize_t n = recv(shadow_regrid_sock_fd, buf, sizeof buf, 0);
+        if (n > 0) {
+            shadow_regrid_handle_dgram(buf, (size_t)n);
+        } else if (n < 0 && errno != EINTR) {
+            break;
+        }
+    }
+    return NULL;
+}
+#endif
+
+static int bind_shadow_regrid_sock(const char *path) {
+    if (!path || !*path) return -1;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof addr);
+    if (strlen(path) >= sizeof addr.sun_path) return -1;
+    char dir[sizeof addr.sun_path];
+    strncpy(dir, path, sizeof dir - 1);
+    dir[sizeof dir - 1] = '\0';
+    char *slash = strrchr(dir, '/');
+    if (slash && slash != dir) {
+        *slash = '\0';
+        mkdir(dir, 0755);
+    }
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, path);
+    unlink(path);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof addr) || chmod(path, 0600)) {
+        close(fd);
+        unlink(path);
+        return -1;
+    }
+    return fd;
+}
+
+A32_ONLY static int install_shadow_regrid(uintptr_t base, size_t page) {
+    // Strictly SC5000 5.3.0 (exact BuildID) with both shadow and OA replay enabled.
+    if (strcmp(build->name, "5.3.0") || !player_board() || !hf_on(HF_FOUR_DECK) || !hf_on(HF_RB_BRIDGE)) return 0;
+    const uintptr_t add_tracks = base + 0xab8014;
+    const uint32_t add_prefix[] = {0xe16d42f4, 0xe1cd81f0};
+    if (memcmp((const void *)add_tracks, add_prefix, sizeof add_prefix)) return 0;
+    if (!shadow_post_event) shadow_post_event = dlsym(RTLD_DEFAULT, "_ZN16QCoreApplication9postEventEP7QObjectP6QEventi");
+    if (!shadow_qevent_ctor) shadow_qevent_ctor = dlsym(RTLD_DEFAULT, "_ZN6QEventC1ENS_4TypeE");
+    if (!shadow_qevent_ctor) shadow_qevent_ctor = dlsym(RTLD_DEFAULT, "_ZN6QEventC2ENS_4TypeE");
+    if (!shadow_qevent_dtor) shadow_qevent_dtor = dlsym(RTLD_DEFAULT, "_ZN6QEventD1Ev");
+    if (!shadow_qevent_dtor) shadow_qevent_dtor = dlsym(RTLD_DEFAULT, "_ZN6QEventD2Ev");
+    if (!shadow_qevent_reg) shadow_qevent_reg = dlsym(RTLD_DEFAULT, "_ZN6QEvent17registerEventTypeEi");
+    if (!shadow_op_new) shadow_op_new = dlsym(RTLD_DEFAULT, "_Znwj");
+    if (!shadow_qobj_event_sym) shadow_qobj_event_sym = dlsym(RTLD_DEFAULT, "_ZN7QObject5eventEP6QEvent");
+    if (!shadow_qobj_connect_sym) shadow_qobj_connect_sym = dlsym(RTLD_DEFAULT, "_ZN7QObject13connectNotifyERK11QMetaMethod");
+    if (!shadow_post_event || !shadow_qevent_ctor || !shadow_qevent_dtor || !shadow_qevent_reg ||
+        !shadow_op_new || !shadow_qobj_event_sym || !shadow_qobj_connect_sym) return 0;
+    uintptr_t *meta_slot = (uintptr_t *)(base + 0x2b6d1cc);
+    uintptr_t *dtor_d1_slot = (uintptr_t *)(base + 0x2b6d1d8);
+    uintptr_t *dtor_d0_slot = (uintptr_t *)(base + 0x2b6d1dc);
+    uintptr_t *event_slot = (uintptr_t *)(base + 0x2b6d1e0);
+    uintptr_t *connect_slot = (uintptr_t *)(base + 0x2b6d1f4);
+    if (*meta_slot != base + 0x911e04 ||
+        *dtor_d1_slot != base + 0x915874 ||
+        *dtor_d0_slot != base + 0x915b58 ||
+        (*event_slot != (uintptr_t)shadow_qobj_event_sym && *event_slot != base + 0x160434) ||
+        (*connect_slot != (uintptr_t)shadow_qobj_connect_sym && *connect_slot != base + 0x160470)) return 0;
+    int ev_type = shadow_qevent_reg(-1);
+    if (ev_type < 1000 || ev_type > 65535) return 0;
+    // Runtime Qt6 QEvent ABI self-check: verify QEvent::t sits at +4 and fits within 32 bytes.
+    unsigned char probe[64];
+    memset(probe, 0, sizeof probe);
+    shadow_qevent_ctor(probe, ev_type);
+    uint16_t probe_t = 0;
+    memcpy(&probe_t, probe + 4, sizeof probe_t);
+    shadow_qevent_dtor(probe);
+    for (size_t i = 32; i < sizeof probe; i++) {
+        if (probe[i]) return 0;
+    }
+    if (probe_t != (uint16_t)ev_type) return 0;
+    int fd = -1;
+    if (shadow_regrid_sock_path && *shadow_regrid_sock_path) {
+        fd = bind_shadow_regrid_sock(shadow_regrid_sock_path);
+        if (fd < 0) return 0;
+    }
+    shadow_queue_add_tracks = (void (*)(void *, const struct sc_qlist_i64 *, int))add_tracks;
+    shadow_queue_meta_original = (const void *(*)(void *))*meta_slot;
+    shadow_queue_dtor_d1_original = (void *(*)(void *))*dtor_d1_slot;
+    shadow_queue_dtor_d0_original = (void *(*)(void *))*dtor_d0_slot;
+    shadow_queue_event_original = (int (*)(void *, void *))*event_slot;
+    shadow_queue_connect_original = (void (*)(void *, const void *))*connect_slot;
+    shadow_regrid_event_type = ev_type;
+    shadow_regrid_sock_fd = fd;
+    patch_pointer(HF_FOUR_DECK, meta_slot, (uintptr_t)shadow_analysis_queue_meta, page);
+    patch_pointer(HF_FOUR_DECK, dtor_d1_slot, (uintptr_t)shadow_analysis_queue_dtor_d1, page);
+    patch_pointer(HF_FOUR_DECK, dtor_d0_slot, (uintptr_t)shadow_analysis_queue_dtor_d0, page);
+    patch_pointer(HF_FOUR_DECK, event_slot, (uintptr_t)shadow_analysis_queue_event, page);
+    patch_pointer(HF_FOUR_DECK, connect_slot, (uintptr_t)shadow_analysis_queue_connect, page);
+    shadow_regrid_enabled = 1;
+    fprintf(stderr, "engine-ui-hook: shadow regrid native queue enabled (%s)\n",
+            shadow_regrid_sock_path ? shadow_regrid_sock_path : "none");
+    return 1;
+}
+
 // Deck loads can request analysis on EMain even when the library Track is
 // marked analysed. Leave the loaded native data in place for our peer copies.
 // Not under the RGB waveform type: for a copy without an RGB overview this request is
@@ -4008,6 +4255,7 @@ A32_ONLY static void install_shadow_analysis(uintptr_t base, size_t page) {
         *loaded_slot == base + 0xe3b148) {
         shadow_queue_loaded_return = queue_loaded_call + sizeof queue_loaded_code;
         patch_pointer(HF_FOUR_DECK, loaded_slot, (uintptr_t)shadow_loaded_on_deck, page);
+        install_shadow_regrid(base, page);
     }
     shadow_analysis_enabled = 1;
     // The gateway already installed the dispatcher when enabled. Shadow alone owns it otherwise.

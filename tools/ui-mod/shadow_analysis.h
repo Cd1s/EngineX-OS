@@ -2,6 +2,7 @@
 #define SC_SHADOW_ANALYSIS_H
 
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -111,6 +112,42 @@ static int sc_shadow_analysis_staged(const char *path) {
     if (!sc_shadow_regrid_path(path, sidecar, sizeof sidecar, ".analysis")) return 0;
     struct stat st;
     return !lstat(sidecar, &st) && S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size <= SC_SHADOW_MAX;
+}
+
+static int sc_shadow_regrid_ready(const char *path) {
+    char marker[640];
+    struct stat st;
+    if (!sc_shadow_regrid_path(path, marker, sizeof marker, ".perf.regrid")) return 0;
+    return !lstat(marker, &st) && S_ISREG(st.st_mode);
+}
+
+// Parse a "<trackId>\t<copyPath>" datagram for the native 5.3.0 regrid socket.
+// Rejects non-positive/overflowing IDs, embedded NULs, trailing control bytes,
+// and any path outside <sc_shadow_root>/peer-<hex>/[Contents/]<file>.
+static int sc_shadow_regrid_parse(const char *msg, size_t len, long long *track_id, char *path, size_t path_cap) {
+    if (!msg || !len || !track_id || !path || path_cap < 2) return 0;
+    if (memchr(msg, '\0', len)) return 0;
+    const char *tab = memchr(msg, '\t', len);
+    if (!tab || tab == msg) return 0;
+    unsigned long long v = 0;
+    for (const char *p = msg; p < tab; p++) {
+        if (*p < '0' || *p > '9') return 0;
+        unsigned d = (unsigned)(*p - '0');
+        if (v > ((unsigned long long)LLONG_MAX - d) / 10ULL) return 0;
+        v = v * 10ULL + d;
+    }
+    if (v == 0) return 0;
+    size_t plen = len - (size_t)(tab - msg) - 1;
+    if (!plen || plen >= path_cap) return 0;
+    memcpy(path, tab + 1, plen);
+    path[plen] = '\0';
+    for (size_t i = 0; i < plen; i++) {
+        if ((unsigned char)path[i] < 0x20) return 0;
+    }
+    char marker[640];
+    if (!sc_shadow_regrid_path(path, marker, sizeof marker, ".perf.regrid")) return 0;
+    *track_id = (long long)v;
+    return 1;
 }
 
 // Atomically move <copy>.perf.regrid -> <copy>.perf.regrid.run when Engine's

@@ -2412,7 +2412,7 @@ class ShadowDisplayTest(unittest.TestCase):
         names = ("scDeckLocked", "scPhaseMeterOf", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
                  "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueProps", "scCueBeatsLeft", "scCueTickFor", "scCueStep", "scCueTableOf", "scCueCount", "scCueWatch", "scCueFeedTick", "scCueFeedLine", "scCuePlayhead",
-                 "scShadowApply", "scShadowFeed", "scShadowEmpty", "scShadowScratchLine", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowRegrid", "scShadowBeat",
+                 "scShadowApply", "scShadowFeed", "scShadowEmpty", "scShadowScratchLine", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scBrowserVisible", "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowMirror", "scShadowMirrorOff", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
                  "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowNudgeTick", "scShadowNudgeDrop", "scShadowNudgeEnd", "scShadowLoopTick", "scShadowMasterBack", "scPressWrite", "scMasterPresses",
@@ -2550,18 +2550,18 @@ scShadowApplyAll([Object.assign({}, e, {path:'/other.flac', id:'track-b'})], fal
 assert.deepEqual(feed, {deck: 2, active: false});
 """)
 
-    def test_shadow_grid_edit_queues_reanalysis_without_reloading_346(self):
+    def test_shadow_grid_edit_does_not_reload_or_submit_native_analysis_346(self):
         self.js(r"""
 scPausedShadowFollow = true; scShadowEngineMask = 1 << 2; scFourDeckRole = '13'; scPlayer = true;
-const props = new Map(), queued = [], loads = [];
+const props = new Map(), loads = [], analyzerPaths = [];
 globalThis.scTr = path => {
+    if (path.includes('/Client/Librarian/Analyzer/')) analyzerPaths.push(path);
     if (props.has(path)) return props.get(path);
     const p = { _state: path.endsWith('/SongLoaded'), _value: path.endsWith('/SampleRate') ? 48000 : 0,
         string: path.endsWith('/SyncMode') ? 'Off' : path.endsWith('/SpeedRange') ? '8' : '', index: 1,
         get state() { return this._state; }, set state(v) { this._state = v; },
         get value() { return this._value; }, set value(v) { this._value = v; },
         get url() { return this._url || ''; }, set url(v) { this._url = v; if (path.includes('AddToDatabaseAndLoadToDeck')) loads.push(v); },
-        get array() { return this._arr || []; }, set array(v) { this._arr = v; if (path.endsWith('/AddTrackToAnalysisQueue')) queued.push(v); },
         get unnormalized() { return path.endsWith('/TrackLength') ? 48000 * 300 : 0; } };
     props.set(path, p); return p;
 };
@@ -2570,30 +2570,16 @@ globalThis.scBrowserVisible = () => false; globalThis.dialogOpen = false;
 globalThis.scShadowHolds = () => true; globalThis.scShadowEnd = () => false;
 globalThis.scShadowMirror = () => {}; globalThis.scShadowMirrorOff = () => {};
 globalThis.scShadowCues = () => {}; globalThis.scShadowBeat = () => {};
-// Initial load: gridGen is recorded on at without queueing re-analysis.
-const e = {deck:2,path:'/data/enginex/shadow-v3/peer-a/track.wav',id:'k1-1',gridGen:'g1',gridTrackId:0,playing:false,scratch:false,stale:false,positionMs:1000,at:now,rate:1,jumps:0,pitch:0,bpm:128,currentBpm:128,range:8,cues:[]};
+// Initial load plus repeated in-place grid edits (same path/id, changing gridGen):
+// QML keeps the loaded copy without reloading and never touches /Client/Librarian/Analyzer/.
+const e = {deck:2,path:'/data/enginex/shadow-v3/peer-a/track.wav',id:'k1-1',gridGen:'g1',playing:false,scratch:false,stale:false,positionMs:1000,at:now,rate:1,jumps:0,pitch:0,bpm:128,currentBpm:128,range:8,cues:[]};
 scShadowApplyAll([e], false);
 assert.equal(loads.length, 1);
-assert.equal(queued.length, 0);
-// Once held, steady gridGen 'g1' still does not queue re-analysis.
-now += 1500; e.at = now; scShadowApplyAll([e], false);
-assert.equal(loads.length, 1);
-assert.equal(queued.length, 0);
-// Grid edit arrives before gridTrackId is known: waits without dropping the edit.
-e.gridGen = 'g2'; e.gridTrackId = 0; now += 300; e.at = now; scShadowApplyAll([e], false);
-assert.equal(loads.length, 1);
-assert.equal(queued.length, 0);
-// Track ID resolves: queues [42] in place with ZERO deck reload.
-e.gridTrackId = 42; now += 100; e.at = now; scShadowApplyAll([e], false);
-assert.equal(loads.length, 1, 'grid edit must not reload the shadow deck');
-assert.deepEqual(queued, [[42]]);
-// Repeated polls with same gridGen 'g2' do not re-queue.
-now += 500; e.at = now; scShadowApplyAll([e], false);
-assert.equal(queued.length, 1);
-// Second grid edit 'g3': queues [42] again without reloading.
-e.gridGen = 'g3'; now += 500; e.at = now; scShadowApplyAll([e], false);
-assert.equal(loads.length, 1);
-assert.deepEqual(queued, [[42], [42]]);
+for (const gen of ['g1', 'g2', 'g3']) {
+    e.gridGen = gen; now += 500; e.at = now; scShadowApplyAll([e], false);
+    assert.equal(loads.length, 1, 'grid edit must not reload the shadow deck');
+}
+assert.deepEqual(analyzerPaths, [], 'injected QML must never touch native analyzer paths');
 """)
 
     def test_line_hint_stays_stock_without_cdj(self):

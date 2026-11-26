@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -189,6 +190,24 @@ func TestShadowGridEditUpdatesPeerInPlace(t *testing.T) {
 	defer recv.Close()
 	recv.shadow.dataRoot, recv.shadow.mediaRoot = recvData, t.TempDir()
 	recv.shadow.peerPort = srcPort
+	regridSock := filepath.Join(t.TempDir(), "shadow-regrid.sock")
+	regridConn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: regridSock, Net: "unixgram"})
+	if err != nil {
+		t.Fatalf("listen unixgram: %v", err)
+	}
+	defer regridConn.Close()
+	recv.shadow.regridSockPath = regridSock
+	regridCh := make(chan string, 8)
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			n, err := regridConn.Read(buf)
+			if err != nil {
+				return
+			}
+			regridCh <- string(buf[:n])
+		}
+	}()
 	if err := os.WriteFile(filepath.Join(recvUIDir, "settings.conf"), []byte("four_deck=1\nfour_deck_role=24\nshadow_mode=engine\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -245,22 +264,11 @@ func TestShadowGridEditUpdatesPeerInPlace(t *testing.T) {
 		t.Fatalf("initial .perf bpm=%v ok=%v, want 128", bpm1, ok)
 	}
 
-	// Simulate Engine importing the shadow copy into B's m.db as Track id=42.
-	relCopy, err := filepath.Rel(recvLib, copyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpDB, _, rdb := testlibrary.Create(t)
-	if _, err := rdb.Exec(`INSERT INTO Track(id,path,filename,bpmAnalyzed,isAnalyzed) VALUES(42,?,'track.wav',128,1)`, filepath.ToSlash(relCopy)); err != nil {
-		t.Fatal(err)
-	}
-	_ = rdb.Close()
-	rawRecvDB, err := os.ReadFile(tmpDB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(recvLib, "Database2", "m.db"), rawRecvDB, 0o644); err != nil {
-		t.Fatal(err)
+	// Initial load must not send any regrid datagram.
+	select {
+	case msg := <-regridCh:
+		t.Fatalf("unexpected regrid datagram on initial load: %q", msg)
+	default:
 	}
 
 	// Wait for initial Display-only asset.
@@ -316,11 +324,11 @@ func TestShadowGridEditUpdatesPeerInPlace(t *testing.T) {
 	feedPeers()
 
 	// Engine receiver must refresh .perf in place (same d.Path, audio downloaded once),
-	// stage .perf.regrid, and publish gridGen=gen2 + gridTrackId=42.
+	// stage .perf.regrid, and retry notifying the native hook socket once m.db commits Track 42.
 	var got deckState
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(15 * time.Millisecond) {
 		for _, d := range recv.shadowComposeLegacy("24", time.Now()) {
-			if d.Deck == 1 && d.GridGen == gen2 && d.GridTrackID == 42 {
+			if d.Deck == 1 && d.GridGen == gen2 {
 				got = d
 			}
 		}
@@ -328,8 +336,8 @@ func TestShadowGridEditUpdatesPeerInPlace(t *testing.T) {
 			break
 		}
 	}
-	if got.GridGen != gen2 || got.GridTrackID != 42 {
-		t.Fatalf("receiver did not publish in-place grid update: %+v (want gridGen=%q trackId=42)", got, gen2)
+	if got.GridGen != gen2 {
+		t.Fatalf("receiver did not publish in-place grid update: %+v (want gridGen=%q)", got, gen2)
 	}
 	if got.Path != copyPath {
 		t.Fatalf("receiver changed shadow copy path (would reload deck!): %q -> %q", copyPath, got.Path)
@@ -346,6 +354,55 @@ func TestShadowGridEditUpdatesPeerInPlace(t *testing.T) {
 	}
 	if _, err := os.Stat(copyPath + ".perf.regrid"); err != nil {
 		t.Fatalf("missing .perf.regrid marker: %v", err)
+	}
+	// Before m.db commits Track 42, no datagram has been sent yet.
+	select {
+	case msg := <-regridCh:
+		t.Fatalf("unexpected regrid datagram before m.db Track row existed: %q", msg)
+	default:
+	}
+	// Now simulate Engine committing the shadow copy into B's m.db as Track id=42;
+	// the pending regrid retry must deliver "42\t<copyPath>" to the native hook socket.
+	relCopy, err := filepath.Rel(recvLib, copyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpDB, _, rdb := testlibrary.Create(t)
+	if _, err := rdb.Exec(`INSERT INTO Track(id,path,filename,bpmAnalyzed,isAnalyzed) VALUES(42,?,'track.wav',128,1)`, filepath.ToSlash(relCopy)); err != nil {
+		t.Fatal(err)
+	}
+	_ = rdb.Close()
+	rawRecvDB, err := os.ReadFile(tmpDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(recvLib, "Database2", "m.db"), rawRecvDB, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantDgram := fmt.Sprintf("42\t%s", copyPath)
+	var gotDgram string
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(25 * time.Millisecond) {
+		recv.shadowComposeLegacy("24", time.Now())
+		select {
+		case gotDgram = <-regridCh:
+		default:
+		}
+		if gotDgram != "" {
+			break
+		}
+	}
+	if gotDgram != wantDgram {
+		t.Fatalf("native regrid datagram (edit 1) = %q, want %q", gotDgram, wantDgram)
+	}
+	// Steady polls with same gridGen must not send duplicate datagrams.
+	for i := 0; i < 3; i++ {
+		recv.shadowComposeLegacy("24", time.Now())
+		time.Sleep(15 * time.Millisecond)
+	}
+	select {
+	case msg := <-regridCh:
+		t.Fatalf("duplicate regrid datagram on steady poll: %q", msg)
+	default:
 	}
 
 	// Display-only receiver must pick up the shifted beat0=380ms.
@@ -374,7 +431,7 @@ func TestShadowGridEditUpdatesPeerInPlace(t *testing.T) {
 	var got3 deckState
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(15 * time.Millisecond) {
 		for _, d := range recv.shadowComposeLegacy("24", time.Now()) {
-			if d.Deck == 1 && d.GridGen == gen3 && d.GridTrackID == 42 {
+			if d.Deck == 1 && d.GridGen == gen3 {
 				got3 = d
 			}
 		}
@@ -384,6 +441,14 @@ func TestShadowGridEditUpdatesPeerInPlace(t *testing.T) {
 	}
 	if got3.GridGen != gen3 || got3.Path != copyPath {
 		t.Fatalf("second grid edit failed or changed path: %+v (want path=%q gen=%q)", got3, copyPath, gen3)
+	}
+	select {
+	case msg := <-regridCh:
+		if msg != wantDgram {
+			t.Fatalf("native regrid datagram (edit 2) = %q, want %q", msg, wantDgram)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for native regrid datagram on edit 2")
 	}
 	if hits := audioHits.Load(); hits != 1 {
 		t.Fatalf("audio downloaded %d times after 2 edits, want 1", hits)

@@ -134,7 +134,29 @@ int main(void) {
     snprintf(regrid_run, sizeof regrid_run, "%s.perf.regrid.run", audio);
     snprintf(bad_regrid, sizeof bad_regrid, "%s/peer-f012/../outside.wav", dir);
     assert(!sc_shadow_regrid_arm(audio));
+    assert(!sc_shadow_regrid_ready(audio));
     out = fopen(regrid, "wb"); assert(out && fputs("g2", out) >= 0 && !fclose(out));
+    assert(sc_shadow_regrid_ready(audio));
+    assert(!sc_shadow_regrid_ready(bad_regrid));
+    // Native regrid socket datagram parser rejects malformed IDs, NULs, control chars, and non-peer paths.
+    char dgram[400], parsed_path[400];
+    long long parsed_id = 0;
+    snprintf(dgram, sizeof dgram, "42\t%s", audio);
+    assert(sc_shadow_regrid_parse(dgram, strlen(dgram), &parsed_id, parsed_path, sizeof parsed_path));
+    assert(parsed_id == 42 && !strcmp(parsed_path, audio));
+    assert(!sc_shadow_regrid_parse("0\t/tmp/x", 8, &parsed_id, parsed_path, sizeof parsed_path));
+    snprintf(dgram, sizeof dgram, "0\t%s", audio);
+    assert(!sc_shadow_regrid_parse(dgram, strlen(dgram), &parsed_id, parsed_path, sizeof parsed_path));
+    snprintf(dgram, sizeof dgram, "-7\t%s", audio);
+    assert(!sc_shadow_regrid_parse(dgram, strlen(dgram), &parsed_id, parsed_path, sizeof parsed_path));
+    snprintf(dgram, sizeof dgram, "99999999999999999999999\t%s", audio);
+    assert(!sc_shadow_regrid_parse(dgram, strlen(dgram), &parsed_id, parsed_path, sizeof parsed_path));
+    snprintf(dgram, sizeof dgram, "42\t%s", bad_regrid);
+    assert(!sc_shadow_regrid_parse(dgram, strlen(dgram), &parsed_id, parsed_path, sizeof parsed_path));
+    snprintf(dgram, sizeof dgram, "42\t%s\n", audio);
+    assert(!sc_shadow_regrid_parse(dgram, strlen(dgram), &parsed_id, parsed_path, sizeof parsed_path));
+    snprintf(dgram, sizeof dgram, "42\t%s", audio);
+    assert(!sc_shadow_regrid_parse(dgram, strlen(dgram) + 1, &parsed_id, parsed_path, sizeof parsed_path)); // embedded NUL
     assert(!sc_shadow_regrid_arm(bad_regrid));
     assert(sc_shadow_regrid_arm(audio));
     assert(!sc_shadow_regrid_arm(audio)); // one-shot atomic rename

@@ -68,7 +68,6 @@ def deck_state(side, d=1):
         f' sr: g("/Track/SampleRate").value || 44100,'
         f' cue1: g("/Track/QuickCue1Position").value || 0,'
         f' loads: at.loads || 0,'
-        f' gridGen: at.gridGen || "",'
         f' engMask: root.scShadowEngineMask || 0,'
         f' dispOnly: !!root.scShadowDisplayOnly'
         f' }}); }})()'
@@ -153,6 +152,8 @@ def main():
     assert "track-a.wav" not in oa_log("B"), "first load must skip OfflineAnalyzer:\n" + oa_log("B")
 
     # 1) Paused grid edit on A: downbeat shift + halve tempo (128 -> 64) + fractional right shift.
+    # Verify the 5.3.0 native regrid socket is active inside B (zero QML analyzer calls).
+    subprocess.run(twin.ns_chroot_cmd("B", "test -S /run/enginex/shadow-regrid.sock"), check=True)
     edit_grid_a("ed.shiftDownbeatForwards(); ed.halveTempo(); ed.setShiftingGridRight(true);", hold_sec=0.5)
     time.sleep(1.0)  # let BeatGridEditView close flush settle on A before snapshotting target hash
     wait_for(lambda: (r := db_row("A", "track-a.wav")) and r["beatSha"] != ra0["beatSha"] and abs(r["bpmA"] - 64) < 0.1, 15, "A edit 1 m.db")

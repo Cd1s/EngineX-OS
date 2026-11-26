@@ -1816,6 +1816,154 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     printf("Installed SQLite bind dispatcher isolates rekordbox and shadow (off: %s): PASS\n", *off ? off : "none");
 }
 
+static void *mock_aq_posted_obj;
+static void *mock_aq_posted_ev;
+static int mock_aq_post_count;
+static void *mock_aq_added_obj;
+static int64_t mock_aq_added_ids[16];
+static int mock_aq_added_count;
+static int mock_aq_added_action;
+static int mock_aq_orig_events;
+static int mock_aq_orig_connects;
+static int mock_aq_orig_dtors;
+static int mock_aq_reg_type = 1042;
+
+static void mock_post_event(void *obj, void *ev, int prio) {
+    (void)prio;
+    mock_aq_posted_obj = obj;
+    mock_aq_posted_ev = ev;
+    mock_aq_post_count++;
+}
+static void mock_qevent_ctor(void *ev, int type) {
+    uint16_t t = (uint16_t)type;
+    memcpy((unsigned char *)ev + 4, &t, sizeof t);
+}
+static void mock_qevent_dtor(void *ev) { (void)ev; }
+static int mock_qevent_reg(int hint) { (void)hint; return mock_aq_reg_type; }
+static void *mock_op_new(size_t n) { return malloc(n); }
+static const void *mock_aq_meta_orig(void *self) { (void)self; return NULL; }
+static void *mock_aq_dtor_orig(void *self) { mock_aq_orig_dtors++; return self; }
+static int mock_aq_event_orig(void *self, void *ev) { (void)self; (void)ev; mock_aq_orig_events++; return 0; }
+static void mock_aq_connect_orig(void *self, const void *sig) { (void)self; (void)sig; mock_aq_orig_connects++; }
+static void mock_aq_add_tracks(void *self, const struct sc_qlist_i64 *ids, int action) {
+    mock_aq_added_obj = self;
+    mock_aq_added_action = action;
+    mock_aq_added_count = ids ? ids->size : 0;
+    for (int i = 0; i < mock_aq_added_count && i < 16; i++) mock_aq_added_ids[i] = ids->ptr[i];
+}
+
+// #346: verify 5.3.0-only fail-closed gating and native AnalysisQueue event dispatch.
+static void test_shadow_regrid_native(const char *build_name, const char *off, int expect_enabled) {
+    enum { add_tracks = 0xab8014, vtable = 0x2b6d1cc,
+           meta_fn = 0x911e04, dtor_d1 = 0x915874, dtor_d0 = 0x915b58,
+           event_plt = 0x160434, connect_plt = 0x160470, size = 0x2d00000 };
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    char *image = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(image != MAP_FAILED);
+    uintptr_t base = (uintptr_t)image;
+    const struct engine_build *selected = NULL;
+    for (size_t i = 0; i < sizeof engine_builds / sizeof *engine_builds; i++) {
+        if (!strcmp(engine_builds[i].name, build_name)) { selected = &engine_builds[i]; break; }
+    }
+    assert(selected != NULL);
+    select_build(selected);
+    char dir[] = "/tmp/regrid-XXXXXX";
+    assert(mkdtemp(dir));
+    char board[128], conf[128], peer[128], sock[128];
+    snprintf(board, sizeof board, "%s/compatible", dir);
+    snprintf(conf, sizeof conf, "%s/hook-disable.conf", dir);
+    snprintf(peer, sizeof peer, "%s/peer-a", dir);
+    snprintf(sock, sizeof sock, "%s/regrid.sock", dir);
+    assert(!mkdir(peer, 0755));
+    FILE *f = fopen(board, "wb"); assert(f); fwrite("inmusic,jp07\0", 1, 13, f); fclose(f);
+    if (*off) { f = fopen(conf, "wb"); assert(f); fprintf(f, "%s\n", off); fclose(f); }
+    board_compatible_path = board;
+    hf_conf_path = conf;
+    sc_shadow_root = dir;
+    shadow_regrid_sock_path = sock;
+    hf_loaded = 0; hf_disabled = 0;
+    const uint32_t add_prefix[] = {0xe16d42f4, 0xe1cd81f0};
+    memcpy(image + add_tracks, add_prefix, sizeof add_prefix);
+    *(uintptr_t *)(image + vtable + 0x00) = base + meta_fn;
+    *(uintptr_t *)(image + vtable + 0x0c) = base + dtor_d1;
+    *(uintptr_t *)(image + vtable + 0x10) = base + dtor_d0;
+    *(uintptr_t *)(image + vtable + 0x14) = base + event_plt;
+    *(uintptr_t *)(image + vtable + 0x28) = base + connect_plt;
+    shadow_post_event = mock_post_event;
+    shadow_qevent_ctor = mock_qevent_ctor;
+    shadow_qevent_dtor = mock_qevent_dtor;
+    shadow_qevent_reg = mock_qevent_reg;
+    shadow_op_new = mock_op_new;
+    shadow_qobj_event_sym = (void *)(uintptr_t)mock_aq_event_orig;
+    shadow_qobj_connect_sym = (void *)(uintptr_t)mock_aq_connect_orig;
+    int installed = install_shadow_regrid(base, page);
+    assert(installed == expect_enabled);
+    assert(shadow_regrid_enabled == expect_enabled);
+    if (!expect_enabled) {
+        assert(*(uintptr_t *)(image + vtable + 0x00) == base + meta_fn);
+        assert(*(uintptr_t *)(image + vtable + 0x14) == base + event_plt);
+        assert(access(sock, F_OK) != 0);
+    } else {
+        assert(*(uintptr_t *)(image + vtable + 0x00) == (uintptr_t)shadow_analysis_queue_meta);
+        assert(*(uintptr_t *)(image + vtable + 0x0c) == (uintptr_t)shadow_analysis_queue_dtor_d1);
+        assert(*(uintptr_t *)(image + vtable + 0x10) == (uintptr_t)shadow_analysis_queue_dtor_d0);
+        assert(*(uintptr_t *)(image + vtable + 0x14) == (uintptr_t)shadow_analysis_queue_event);
+        assert(*(uintptr_t *)(image + vtable + 0x28) == (uintptr_t)shadow_analysis_queue_connect);
+        assert(shadow_queue_add_tracks == (void (*)(void *, const struct sc_qlist_i64 *, int))(base + add_tracks));
+        struct stat st;
+        assert(!stat(sock, &st) && S_ISSOCK(st.st_mode) && (st.st_mode & 0777) == 0600);
+        // Route originals to mock C functions for behavioral verification.
+        shadow_queue_add_tracks = mock_aq_add_tracks;
+        shadow_queue_meta_original = mock_aq_meta_orig;
+        shadow_queue_dtor_d1_original = mock_aq_dtor_orig;
+        shadow_queue_dtor_d0_original = mock_aq_dtor_orig;
+        shadow_queue_event_original = mock_aq_event_orig;
+        shadow_queue_connect_original = mock_aq_connect_orig;
+        char fake_aq[16] = {0};
+        char audio[160], marker[180], dgram[220];
+        snprintf(audio, sizeof audio, "%s/peer-a/track.wav", dir);
+        snprintf(marker, sizeof marker, "%s.perf.regrid", audio);
+        snprintf(dgram, sizeof dgram, "42\t%s", audio);
+        // Before AnalysisQueue is captured, datagrams do nothing.
+        analysis_file(marker, "g2", 2);
+        assert(!shadow_regrid_handle_dgram(dgram, strlen(dgram)));
+        assert(mock_aq_post_count == 0);
+        // Capture AnalysisQueue via connectNotify (runs at Engine startup).
+        shadow_analysis_queue_connect(fake_aq, NULL);
+        assert(mock_aq_orig_connects == 1 && shadow_analysis_queue == fake_aq);
+        // Missing .perf.regrid marker is rejected fail-closed.
+        assert(!unlink(marker));
+        assert(!shadow_regrid_handle_dgram(dgram, strlen(dgram)));
+        assert(mock_aq_post_count == 0);
+        // Staged .perf.regrid marker posts one custom QEvent to AnalysisQueue.
+        analysis_file(marker, "g2", 2);
+        assert(shadow_regrid_handle_dgram(dgram, strlen(dgram)));
+        assert(mock_aq_post_count == 1 && mock_aq_posted_obj == fake_aq && mock_aq_posted_ev != NULL);
+        // Unrelated Qt event passes through to stock QObject::event.
+        unsigned char other_ev[32] = {0};
+        uint16_t other_t = 99;
+        memcpy(other_ev + 4, &other_t, sizeof other_t);
+        assert(shadow_analysis_queue_event(fake_aq, other_ev) == 0 && mock_aq_orig_events == 1);
+        // Delivering our custom QEvent invokes AnalysisQueue::addTracks([42], 0).
+        assert(shadow_analysis_queue_event(fake_aq, mock_aq_posted_ev) == 1);
+        free(mock_aq_posted_ev);
+        mock_aq_posted_ev = NULL;
+        assert(mock_aq_added_obj == fake_aq && mock_aq_added_count == 1 && mock_aq_added_ids[0] == 42 && mock_aq_added_action == 0);
+        // Destructor clears shadow_analysis_queue safely (no UAF on late datagram).
+        assert(shadow_analysis_queue_dtor_d1(fake_aq) == fake_aq && mock_aq_orig_dtors == 1);
+        assert(shadow_analysis_queue == NULL);
+        assert(!shadow_regrid_handle_dgram(dgram, strlen(dgram)));
+        assert(mock_aq_post_count == 1);
+        assert(!unlink(marker));
+        if (shadow_regrid_sock_fd >= 0) { close(shadow_regrid_sock_fd); shadow_regrid_sock_fd = -1; }
+        assert(!unlink(sock));
+    }
+    if (*off) assert(!unlink(conf));
+    assert(!rmdir(peer) && !unlink(board) && !rmdir(dir));
+    assert(!munmap(image, size));
+    printf("Native AnalysisQueue regrid (%s, off: %s, enabled: %d): PASS\n", build_name, *off ? off : "none", expect_enabled);
+}
+
 int main(int argc, char **argv) {
     for (size_t b = 0; b < sizeof engine_builds / sizeof *engine_builds; b++) {
         // Hooks and counters are process-global; each build starts pristine.
@@ -1854,6 +2002,24 @@ int main(int argc, char **argv) {
         pid_t child = fork(); assert(child >= 0);
         if (!child) {
             test_analysis_dispatch(cases[i].off, cases[i].gateway, cases[i].shadow);
+            exit(0);
+        }
+        int status;
+        assert(waitpid(child, &status, 0) == child);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+    static const struct { const char *build_name; const char *off; int enabled; } regrid_cases[] = {
+        {"5.3.0", "", 1},
+        {"5.3.0", "four-deck", 0},
+        {"5.3.0", "rb-bridge", 0},
+        {"5.0.4", "", 0},
+        {"5.3.0-sclive4", "", 0},
+    };
+    for (size_t i = 0; i < sizeof regrid_cases / sizeof *regrid_cases; i++) {
+        fflush(NULL);
+        pid_t child = fork(); assert(child >= 0);
+        if (!child) {
+            test_shadow_regrid_native(regrid_cases[i].build_name, regrid_cases[i].off, regrid_cases[i].enabled);
             exit(0);
         }
         int status;
