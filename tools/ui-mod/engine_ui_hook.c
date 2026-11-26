@@ -3997,7 +3997,7 @@ static int shadow_analysis_queue_event(void *self, void *ev) {
     return shadow_queue_event_original(self, ev);
 }
 
-static int shadow_regrid_handle_dgram(const char *buf, size_t len) {
+__attribute__((unused)) static int shadow_regrid_handle_dgram(const char *buf, size_t len) {
     if (!shadow_regrid_enabled || !shadow_queue_add_tracks || !shadow_post_event ||
         !shadow_qevent_ctor || !shadow_op_new || shadow_regrid_event_type <= 0) return 0;
     long long track_id = 0;
