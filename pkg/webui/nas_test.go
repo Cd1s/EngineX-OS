@@ -14,10 +14,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testsmb"
+	"github.com/Cd1s/EngineX-OS/pkg/analyzer"
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
+	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
 )
 
 func newTestServerWithUIDir(t *testing.T) (*Server, string) {
@@ -859,5 +862,395 @@ func TestNASPlaylistOpenFailureEscapesLogInjection(t *testing.T) {
 	errLine := logBuf.String()
 	if strings.Count(strings.TrimSpace(errLine), "\n") != 0 || strings.ContainsAny(errLine, "\r\x1b") {
 		t.Fatalf("error log injection not neutralized: %q", errLine)
+	}
+}
+
+type smbTestImporter struct{}
+
+func (smbTestImporter) Import(context.Context, analyzer.Import) (int64, error) { return 42, nil }
+
+func TestNASSMBCredentialsNeverLeakInStateErrorsJobsOrLogs(t *testing.T) {
+	smbSrv := testsmb.Start(t)
+	setsDir := filepath.Join(smbSrv.Root, "Sets")
+	if err := os.MkdirAll(setsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(setsDir, "Opener.mp3"), testMP3(120), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	uiDir, stateDir, dlDir := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("sources=\nscope=nas\nomni_source=0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := NewJobs(Pipeline{
+		Guard:   resourceguard.New(resourceguard.Config{Disabled: true}),
+		Catalog: noCatalog{},
+		Deemix:  &deemixclient.Client{DownloadDir: dlDir, AllowLossy: false},
+		Library: smbTestImporter{},
+	})
+	t.Cleanup(jobs.Close)
+	s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, jobs)
+	t.Cleanup(s.Close)
+	gw := httptest.NewServer(s)
+	defer gw.Close()
+
+	const badURLPass = "smb-url-secret-999"
+	const wrongPass = "wrong-smb-secret-999"
+	credURL := strings.Replace(smbSrv.URL, "smb://", "smb://"+smbSrv.User+":"+badURLPass+"@", 1)
+	assertClean := func(label, text string, secrets ...string) {
+		t.Helper()
+		for _, sec := range secrets {
+			if sec != "" && strings.Contains(text, sec) {
+				t.Errorf("%s leaked %q: %s", label, sec, text)
+			}
+		}
+	}
+
+	// 1. Both /api/nas and /api/nas/test reject smb://user:pass@ URLs without echoing credentials.
+	badBody := fmt.Sprintf(`{"protocol":"smb","url":%q,"enabled":true}`, credURL)
+	for _, ep := range []string{"/api/nas", "/api/nas/test"} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, ep, strings.NewReader(badBody))
+		if ep == "/api/nas" {
+			s.handleNASConfig(w, req)
+		} else {
+			s.handleNASTest(w, req)
+		}
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s accepted credentialed SMB URL (%d): %s", ep, w.Code, w.Body.String())
+		}
+		assertClean(ep+" 400", w.Body.String(), badURLPass, smbSrv.User+":"+badURLPass+"@")
+	}
+
+	// 2. Save valid SMB config; verify 0600 nas.json URL hygiene and masked GET/POST responses.
+	validBody := fmt.Sprintf(`{"protocol":"smb","url":%q,"username":%q,"password":%q,"enabled":true}`, smbSrv.URL, smbSrv.User, smbSrv.Password)
+	wSave := httptest.NewRecorder()
+	s.handleNASConfig(wSave, httptest.NewRequest(http.MethodPost, "/api/nas", strings.NewReader(validBody)))
+	if wSave.Code != http.StatusOK || !strings.Contains(wSave.Body.String(), `"hasPassword":true`) {
+		t.Fatalf("POST /api/nas (%d): %s", wSave.Code, wSave.Body.String())
+	}
+	assertClean("POST /api/nas", wSave.Body.String(), smbSrv.Password, smbSrv.User+":"+smbSrv.Password+"@")
+
+	wGet := httptest.NewRecorder()
+	s.handleNASConfig(wGet, httptest.NewRequest(http.MethodGet, "/api/nas", nil))
+	assertClean("GET /api/nas", wGet.Body.String(), smbSrv.Password, smbSrv.User+":"+smbSrv.Password+"@")
+	if info, err := os.Stat(s.nasConfigPath()); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("nas.json stat err=%v mode=%v, want 0600", err, info.Mode().Perm())
+	}
+	var savedCfg providers.NASConfig
+	if raw, err := os.ReadFile(s.nasConfigPath()); err != nil || json.Unmarshal(raw, &savedCfg) != nil || savedCfg.URL != smbSrv.URL {
+		t.Fatalf("nas.json url=%q err=%v, want %q", savedCfg.URL, err, smbSrv.URL)
+	}
+
+	// 3. Working SMB opens (standalone NAS and OmniSource) emit zero playlist-open failure logs.
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	var nasLists struct {
+		Items []map[string]any `json:"items"`
+	}
+	tidalGet(t, gw.URL, "/v1/users/1/playlists?limit=50&offset=0", 200, &nasLists)
+	var nasSetsUUID string
+	for _, it := range nasLists.Items {
+		if it["title"] == "Sets" {
+			nasSetsUUID, _ = it["uuid"].(string)
+		}
+	}
+	if nasSetsUUID == "" {
+		t.Fatalf("missing Sets playlist in standalone NAS: %+v", nasLists.Items)
+	}
+	var nasTracksRes struct {
+		Items []map[string]any `json:"items"`
+	}
+	tidalGet(t, gw.URL, "/v1/playlists/"+nasSetsUUID+"/tracks?limit=50&offset=0", 200, &nasTracksRes)
+	if len(nasTracksRes.Items) != 1 {
+		t.Fatalf("standalone NAS Sets tracks: %+v", nasTracksRes.Items)
+	}
+	trackID := int64(nasTracksRes.Items[0]["id"].(float64))
+
+	setSettings := func(scope string, omni int) {
+		t.Helper()
+		body := fmt.Sprintf("sources=soundcloud\nscope=%s\nomni_source=%d\n", scope, omni)
+		if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	setSettings("soundcloud", 1)
+	var omniLists struct {
+		Items []map[string]any `json:"items"`
+	}
+	tidalGet(t, gw.URL, "/v1/users/1/playlists?limit=50&offset=0", 200, &omniLists)
+	var omniSetsUUID string
+	for _, it := range omniLists.Items {
+		if it["title"] == "[NAS] Sets" {
+			omniSetsUUID, _ = it["uuid"].(string)
+		}
+	}
+	if omniSetsUUID == "" {
+		t.Fatalf("missing [NAS] Sets in OmniSource: %+v", omniLists.Items)
+	}
+	tidalGet(t, gw.URL, "/v1/playlists/"+omniSetsUUID+"/tracks?limit=50&offset=0", 200, &nasTracksRes)
+	log.SetOutput(os.Stderr)
+	if strings.Contains(logBuf.String(), "stream-sync: playlist open failed") {
+		t.Fatalf("working SMB opens logged failure diagnostic: %q", logBuf.String())
+	}
+
+	// 4. Play SMB track, record Stems, flush state, and verify state files + /api/jobs stay clean.
+	setSettings(nasScope, 0)
+	var pb struct {
+		Manifest string `json:"manifest"`
+	}
+	tidalGet(t, gw.URL, fmt.Sprintf("/v1/tracks/%d/playbackinfopostpaywall?audioquality=LOSSLESS&playbackmode=STREAM&assetpresentation=FULL", trackID), 200, &pb)
+	rawManifest, err := base64.StdEncoding.DecodeString(pb.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertClean("playback manifest", string(rawManifest), smbSrv.Password, smbSrv.User+":"+smbSrv.Password+"@")
+	var mf struct {
+		URLs []string `json:"urls"`
+	}
+	if err := json.Unmarshal(rawManifest, &mf); err != nil || len(mf.URLs) != 1 {
+		t.Fatalf("SMB manifest=%s err=%v", rawManifest, err)
+	}
+	resp, err := http.Get(mf.URLs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream status=%d", resp.StatusCode)
+	}
+	if err := s.addStemmed(nasScope, stemmedTrack{
+		Track:   providers.Track{ID: "Sets/Opener.mp3", Title: "Opener", Provider: "smb"},
+		Session: nasScope,
+		Path:    filepath.Join(dlDir, "opener-stems.wav"),
+	}); err != nil {
+		t.Fatalf("addStemmed failed: %v", err)
+	}
+	s.tidal.saveTracks()
+
+	wJobs := httptest.NewRecorder()
+	s.listJobs(wJobs, httptest.NewRequest(http.MethodGet, "/api/jobs", nil))
+	assertClean("GET /api/jobs (working)", wJobs.Body.String(), smbSrv.Password, smbSrv.User+":"+smbSrv.Password+"@")
+
+	for name, path := range map[string]string{
+		"gateway-tracks.json":  filepath.Join(stateDir, "gateway-tracks.json"),
+		".sources.json":        filepath.Join(dlDir, sourcesFile),
+		"streaming-stems.json": filepath.Join(stateDir, "streaming-stems.json"),
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("expected state file %s: %v", name, err)
+		}
+		assertClean(name, string(raw), smbSrv.Password, smbSrv.User+":"+smbSrv.Password+"@")
+	}
+
+	// 5. Wrong SMB password: test, hint, standalone open, OmniSource open, job error, and logs never leak it.
+	wrongBody := fmt.Sprintf(`{"protocol":"smb","url":%q,"username":%q,"password":%q,"enabled":true}`, smbSrv.URL, smbSrv.User, wrongPass)
+	wSaveWrong := httptest.NewRecorder()
+	s.handleNASConfig(wSaveWrong, httptest.NewRequest(http.MethodPost, "/api/nas", strings.NewReader(wrongBody)))
+	if wSaveWrong.Code != http.StatusOK {
+		t.Fatalf("save wrong-pass SMB config (%d): %s", wSaveWrong.Code, wSaveWrong.Body.String())
+	}
+
+	wTestWrong := httptest.NewRecorder()
+	s.handleNASTest(wTestWrong, httptest.NewRequest(http.MethodPost, "/api/nas/test", nil))
+	if wTestWrong.Code != http.StatusBadGateway {
+		t.Fatalf("wrong-pass /api/nas/test status=%d, want 502", wTestWrong.Code)
+	}
+	assertClean("POST /api/nas/test wrong pass", wTestWrong.Body.String(), wrongPass, smbSrv.User+":"+wrongPass+"@")
+
+	wHint := httptest.NewRecorder()
+	hintReq := httptest.NewRequest(http.MethodGet, "/v1/users/1/playlists?limit=50&offset=0", nil)
+	hintReq.RemoteAddr = "127.0.0.1:1234"
+	s.tidal.ServeHTTP(wHint, hintReq)
+	assertClean("NAS hint wrong pass", wHint.Body.String(), wrongPass, smbSrv.User+":"+wrongPass+"@")
+
+	logBuf.Reset()
+	log.SetOutput(&logBuf)
+	wNasFail := httptest.NewRecorder()
+	nasFailReq := httptest.NewRequest(http.MethodGet, "/v1/playlists/"+nasSetsUUID+"/tracks?limit=50&offset=0", nil)
+	nasFailReq.RemoteAddr = "127.0.0.1:1234"
+	s.tidal.ServeHTTP(wNasFail, nasFailReq)
+	log.SetOutput(os.Stderr)
+	if wNasFail.Code != http.StatusBadGateway {
+		t.Fatalf("wrong-pass standalone NAS tracks status=%d, want 502", wNasFail.Code)
+	}
+	assertClean("standalone NAS tracks error", wNasFail.Body.String(), wrongPass, smbSrv.User+":"+wrongPass+"@")
+	nasLog := logBuf.String()
+	assertClean("standalone NAS failure log", nasLog, wrongPass, smbSrv.User+":"+wrongPass+"@")
+	if strings.Count(nasLog, "stream-sync: playlist open failed") != 1 {
+		t.Errorf("standalone NAS failure log count=%d, want 1: %q", strings.Count(nasLog, "stream-sync: playlist open failed"), nasLog)
+	}
+	for _, want := range []string{"stream-sync: playlist open failed", "route=/v1/playlists/", "status=502", "scope=nas", "provider=nas", `source_id=nas:"Sets"`, "error="} {
+		if !strings.Contains(nasLog, want) {
+			t.Errorf("standalone NAS failure log missing %q: %q", want, nasLog)
+		}
+	}
+
+	setSettings("soundcloud", 1)
+	logBuf.Reset()
+	log.SetOutput(&logBuf)
+	wOmniFail := httptest.NewRecorder()
+	omniFailReq := httptest.NewRequest(http.MethodGet, "/v1/playlists/"+omniSetsUUID+"/tracks?limit=50&offset=0", nil)
+	omniFailReq.RemoteAddr = "127.0.0.1:1234"
+	s.tidal.ServeHTTP(wOmniFail, omniFailReq)
+	log.SetOutput(os.Stderr)
+	if wOmniFail.Code != http.StatusNotFound {
+		t.Fatalf("wrong-pass OmniSource SMB tracks status=%d, want 404", wOmniFail.Code)
+	}
+	assertClean("OmniSource SMB tracks error", wOmniFail.Body.String(), wrongPass, smbSrv.User+":"+wrongPass+"@")
+	omniLog := logBuf.String()
+	assertClean("OmniSource SMB failure log", omniLog, wrongPass, smbSrv.User+":"+wrongPass+"@")
+	if strings.Count(omniLog, "stream-sync: playlist open failed") != 1 {
+		t.Errorf("OmniSource SMB failure log count=%d, want 1: %q", strings.Count(omniLog, "stream-sync: playlist open failed"), omniLog)
+	}
+	for _, want := range []string{"stream-sync: playlist open failed", "route=/v1/playlists/", "status=404", "scope=soundcloud", "provider=local", `source_id=nas:"./Sets"`, "error="} {
+		if !strings.Contains(omniLog, want) {
+			t.Errorf("OmniSource SMB failure log missing %q: %q", want, omniLog)
+		}
+	}
+
+	failJob, err := jobs.Submit("nas", providers.Track{ID: "Sets/Missing.mp3", Title: "Missing", Provider: "smb"}, false)
+	if err != nil {
+		t.Fatalf("jobs.Submit failed: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	var failedJobSeen bool
+	for time.Now().Before(deadline) {
+		for _, jb := range jobs.List() {
+			if jb.ID == failJob.ID && jb.State == "error" {
+				failedJobSeen = true
+				break
+			}
+		}
+		if failedJobSeen {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !failedJobSeen {
+		t.Fatalf("SMB failure job did not reach error state: %+v", jobs.List())
+	}
+	wJobsFail := httptest.NewRecorder()
+	s.listJobs(wJobsFail, httptest.NewRequest(http.MethodGet, "/api/jobs", nil))
+	assertClean("GET /api/jobs (error)", wJobsFail.Body.String(), wrongPass, smbSrv.User+":"+wrongPass+"@")
+
+	// 6. Legacy nas.json carrying smb://user:pass@ still works without echoing credentials in GET /api/nas,
+	// username-only legacy URLs preserve a saved password, and unparseable credentialed URLs are never echoed.
+	legacyURL := strings.Replace(smbSrv.URL, "smb://", "smb://"+smbSrv.User+":"+smbSrv.Password+"@", 1)
+	if err := providers.SaveJSON(s.nasConfigPath(), providers.NASConfig{Protocol: "smb", URL: legacyURL, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	wLegacy := httptest.NewRecorder()
+	s.handleNASConfig(wLegacy, httptest.NewRequest(http.MethodGet, "/api/nas", nil))
+	if wLegacy.Code != http.StatusOK || !strings.Contains(wLegacy.Body.String(), `"hasPassword":true`) {
+		t.Fatalf("legacy SMB GET /api/nas (%d): %s", wLegacy.Code, wLegacy.Body.String())
+	}
+	assertClean("legacy SMB GET /api/nas", wLegacy.Body.String(), smbSrv.Password, smbSrv.User+":"+smbSrv.Password+"@")
+	if lists, prov := s.nasPlaylists(context.Background()); prov == nil || len(lists) != 2 {
+		t.Fatalf("legacy SMB nasPlaylists got prov=%v lists=%+v", prov != nil, lists)
+	}
+
+	userOnlyURL := strings.Replace(smbSrv.URL, "smb://", "smb://"+smbSrv.User+"@", 1)
+	if err := providers.SaveJSON(s.nasConfigPath(), providers.NASConfig{Protocol: "smb", URL: userOnlyURL, Password: smbSrv.Password, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	wUserOnly := httptest.NewRecorder()
+	s.handleNASConfig(wUserOnly, httptest.NewRequest(http.MethodGet, "/api/nas", nil))
+	if wUserOnly.Code != http.StatusOK || !strings.Contains(wUserOnly.Body.String(), `"hasPassword":true`) {
+		t.Fatalf("user-only legacy SMB GET /api/nas cleared password (%d): %s", wUserOnly.Code, wUserOnly.Body.String())
+	}
+	if lists, prov := s.nasPlaylists(context.Background()); prov == nil || len(lists) != 2 {
+		t.Fatalf("user-only legacy SMB nasPlaylists failed (saved password cleared?): prov=%v lists=%+v", prov != nil, lists)
+	}
+
+	malformedCredURL := "smb://" + smbSrv.User + ":" + badURLPass + "@127.0.0.1:badport/music"
+	if err := providers.SaveJSON(s.nasConfigPath(), providers.NASConfig{Protocol: "smb", URL: malformedCredURL, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	wMalformed := httptest.NewRecorder()
+	s.handleNASConfig(wMalformed, httptest.NewRequest(http.MethodGet, "/api/nas", nil))
+	if wMalformed.Code != http.StatusOK {
+		t.Fatalf("malformed legacy SMB GET /api/nas (%d): %s", wMalformed.Code, wMalformed.Body.String())
+	}
+	assertClean("malformed legacy SMB GET /api/nas", wMalformed.Body.String(), badURLPass, smbSrv.User+":"+badURLPass+"@")
+
+	// 7. Hostile SMB folder names with control characters stay on one log line in both standalone NAS and OmniSource.
+	if err := providers.SaveJSON(s.nasConfigPath(), providers.NASConfig{Protocol: "smb", URL: smbSrv.URL, Username: smbSrv.User, Password: smbSrv.Password, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	hostileFolder := "./Crate\nstream-sync: forged=1\r\x1b[31m"
+	for _, tc := range []struct {
+		name  string
+		scope string
+		omni  int
+		ref   playlistRef
+	}{
+		{name: "standalone-smb", scope: nasScope, omni: 0, ref: playlistRef{session: nasScope, provider: nasScope, list: providers.Playlist{ID: hostileFolder, Title: "Crate"}}},
+		{name: "omnisource-smb", scope: "soundcloud", omni: 1, ref: playlistRef{session: "nas", provider: localProvider, list: providers.Playlist{ID: "nas\x00" + hostileFolder, Title: "[NAS] Crate"}}},
+	} {
+		setSettings(tc.scope, tc.omni)
+		plUUID := s.tidal.addPlaylist(tc.ref)
+		logBuf.Reset()
+		log.SetOutput(&logBuf)
+		req := httptest.NewRequest(http.MethodGet, "/v1/playlists/"+plUUID+"/tracks?limit=50&offset=0", nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		w := httptest.NewRecorder()
+		s.tidal.ServeHTTP(w, req)
+		log.SetOutput(os.Stderr)
+		line := logBuf.String()
+		if !strings.Contains(line, "stream-sync: playlist open failed") {
+			t.Fatalf("%s missing diagnostic log: %q", tc.name, line)
+		}
+		if strings.Count(strings.TrimSpace(line), "\n") != 0 || strings.ContainsAny(line, "\r\x1b") {
+			t.Fatalf("%s log injection not neutralized: %q", tc.name, line)
+		}
+	}
+}
+
+func TestNASSMBLegacyConfigPreservesPasswordAndMasksMalformedURL(t *testing.T) {
+	s, _ := newTestServerWithUIDir(t)
+	const savedPass = "saved-smb-pass-777"
+	const malformedPass = "malformed-smb-pass-888"
+
+	// Username-only legacy SMB URL must not clear an explicit saved password.
+	if err := providers.SaveJSON(s.nasConfigPath(), providers.NASConfig{
+		Protocol: "smb",
+		URL:      "smb://alice@nas.example/music",
+		Password: savedPass,
+		Enabled:  true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	loaded := s.loadNASConfig()
+	if loaded.Username != "alice" || loaded.Password != savedPass || loaded.URL != "smb://nas.example/music" {
+		t.Fatalf("loadNASConfig=%+v, want user=alice saved password preserved and clean URL", loaded)
+	}
+	w := httptest.NewRecorder()
+	s.handleNASConfig(w, httptest.NewRequest(http.MethodGet, "/api/nas", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"hasPassword":true`) || strings.Contains(w.Body.String(), savedPass) {
+		t.Fatalf("GET /api/nas=%d %s", w.Code, w.Body.String())
+	}
+
+	// Unparseable legacy SMB URL with embedded user:pass@ must never be echoed by GET /api/nas.
+	if err := providers.SaveJSON(s.nasConfigPath(), providers.NASConfig{
+		Protocol: "smb",
+		URL:      "smb://alice:" + malformedPass + "@nas.example:badport/music",
+		Enabled:  true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wBad := httptest.NewRecorder()
+	s.handleNASConfig(wBad, httptest.NewRequest(http.MethodGet, "/api/nas", nil))
+	if wBad.Code != http.StatusOK {
+		t.Fatalf("GET /api/nas malformed=%d %s", wBad.Code, wBad.Body.String())
+	}
+	if strings.Contains(wBad.Body.String(), malformedPass) || strings.Contains(wBad.Body.String(), "alice:"+malformedPass+"@") {
+		t.Fatalf("GET /api/nas leaked malformed credentialed URL: %s", wBad.Body.String())
 	}
 }

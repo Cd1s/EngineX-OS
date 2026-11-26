@@ -128,10 +128,14 @@ func (s *Server) loadNASConfigLocked() providers.NASConfig {
 	}
 	// Older configs could keep Basic Auth in the URL. Preserve that login without
 	// returning its credentials in a URL or overwriting explicit auth fields.
-	if u, err := url.Parse(cfg.URL); err == nil && u.User != nil {
+	if u, err := url.Parse(strings.TrimSpace(cfg.URL)); err == nil && u.User != nil {
 		if cfg.Username == "" {
 			cfg.Username = u.User.Username()
-			cfg.Password, _ = u.User.Password()
+		}
+		if cfg.Password == "" {
+			if pass, ok := u.User.Password(); ok && pass != "" {
+				cfg.Password = pass
+			}
 		}
 		u.User = nil
 		cfg.URL = u.String()
@@ -146,15 +150,21 @@ func (s *Server) loadNASConfig() providers.NASConfig {
 }
 
 func toNASConfigView(cfg providers.NASConfig) NASConfigView {
-	v := NASConfigView{
+	cleanURL := ""
+	if raw := strings.TrimSpace(cfg.URL); raw != "" {
+		if u, err := url.Parse(raw); err == nil {
+			u.User, u.RawQuery, u.ForceQuery, u.Fragment = nil, "", false, ""
+			cleanURL = u.String()
+		}
+	}
+	return NASConfigView{
 		Protocol:    cfg.Protocol,
-		URL:         cfg.URL,
+		URL:         cleanURL,
 		Username:    cfg.Username,
 		Enabled:     cfg.Enabled,
 		HasPassword: cfg.Password != "",
 		HasToken:    cfg.Token != "",
 	}
-	return v
 }
 
 func (s *Server) handleNASConfig(w http.ResponseWriter, r *http.Request) {
