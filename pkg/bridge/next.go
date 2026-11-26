@@ -597,18 +597,16 @@ func carryOverChecked(ctx context.Context, dir string, h *rbstate.Header, st *st
 		return err == nil && !content, false, err
 	}
 	// Every row of every table is read again to find the few Engine wrote (KDATA scattered:
-	// >= 0.33 ms/row; 20,000+ tracks exceed a window). Account for post-mirror load/save/swap
-	// plus FAT32 rename+sync margin so a window is not killed between the m.db and snapshot renames.
-	const swapRenameReserve = 2 * time.Second
+	// >= 0.33 ms/row; 20,000+ tracks exceed a window). Reserve post-mirror load/save/swap cost
+	// on top of spare (3 s) so a window is not killed between the m.db and snapshot renames.
 	postSwap := work{load: h.Tracks, commits: 2, tracks: h.Tracks}
-	if !st.fits(work{scan: m.Rows, load: h.Tracks, commits: 2, tracks: h.Tracks}) ||
-		(!st.kill.IsZero() && !before(st.kill.Add(-spare-swapRenameReserve), work{scan: m.Rows, load: h.Tracks, commits: 2, tracks: h.Tracks}.cost())) {
+	if !st.fits(work{scan: m.Rows, load: h.Tracks, commits: 2, tracks: h.Tracks}) {
 		return false, true, nil
 	}
 	lookCtx := ctx
 	if !st.kill.IsZero() {
 		var cancel context.CancelFunc
-		lookCtx, cancel = context.WithDeadline(ctx, st.kill.Add(-spare-swapRenameReserve-postSwap.cost()))
+		lookCtx, cancel = context.WithDeadline(ctx, st.kill.Add(-spare-postSwap.cost()))
 		defer cancel()
 	}
 	ch, err := mirrorLibrary(lookCtx, live, next, &m, pace)
@@ -616,7 +614,7 @@ func carryOverChecked(ctx context.Context, dir string, h *rbstate.Header, st *st
 		log.Printf("rb-bridge: rows of the stick's library not taken: %v", err)
 		return false, lookCtx.Err() != nil, err
 	}
-	if lookCtx.Err() != nil || (pace == nil && (!st.fits(postSwap) || (!st.kill.IsZero() && !before(st.kill.Add(-spare-swapRenameReserve), postSwap.cost())))) {
+	if lookCtx.Err() != nil || (pace == nil && !st.fits(postSwap)) {
 		return false, true, lookCtx.Err()
 	}
 	if pace == nil {
