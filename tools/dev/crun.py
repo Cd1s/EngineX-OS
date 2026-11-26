@@ -127,7 +127,7 @@ def main():
         return 0 if not bad else 1
     lab = lab_dir()
     is_root = os.geteuid() == 0
-    work = tempfile.mkdtemp(prefix='crun-', dir=os.environ.get('TMPDIR'))
+    work = tempfile.mkdtemp(prefix='c', dir=os.environ.get('TMPDIR'))
     os.chmod(work, 0o755)
     t0 = time.monotonic()
     try:

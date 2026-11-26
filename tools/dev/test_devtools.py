@@ -299,7 +299,9 @@ class PyrunTest(unittest.TestCase):
             class Second(unittest.TestCase):
                 def test_tmp(self):
                     import tempfile
-                    self.assertIn('pyrun-', tempfile.gettempdir())
+                    import os
+                    self.assertTrue(os.environ['TMPDIR'].startswith(os.environ['PYRUN_BASE']), os.environ['TMPDIR'])
+                    self.assertLess(len(os.environ['TMPDIR']) - len(os.environ['PYRUN_BASE']), 20, 'short: unix sockets live there')
             """)
         write(root, 'test_two.py', """\
             import unittest
@@ -308,7 +310,7 @@ class PyrunTest(unittest.TestCase):
             """)
 
     def pyrun(self, root, *args, tmpdir=None):
-        env = dict(os.environ, TMPDIR=tmpdir or tempfile.gettempdir())
+        env = dict(os.environ, TMPDIR=tmpdir or tempfile.gettempdir(), PYRUN_BASE=tmpdir or tempfile.gettempdir())
         return subprocess.run([sys.executable, os.path.join(HERE, 'pyrun.py'), root, *args], capture_output=True, text=True, env=env)
 
     def test_class_count_equals_serial_discover(self):

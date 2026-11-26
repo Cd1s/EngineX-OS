@@ -143,11 +143,11 @@ def main():
     seed = {k: v for k, v in json.loads(pathlib.Path(a.seed).read_text()).items() if not k.startswith('_')} if a.seed else {}
     defer, only = read_pairs(a.defer), read_pairs(a.only)
     base = ['go', 'test', '-vet=off', '-json', '-timeout', a.timeout] + ([] if a.no_race else ['-race']) + (['-count=1'] if a.no_cache else [])
-    tmp, tmp_lock = stable_dir(os.environ.get('TMPDIR') or '/tmp', 'gorun-jobs')
+    tmp, tmp_lock = stable_dir(os.environ.get('TMPDIR') or '/tmp', 'g')  # short: tests bind unix sockets under TMPDIR
     jobs, expected, deferred, plain, weight = [], {}, [], [], {}
 
     def job(label, cmd):
-        wd = os.path.join(tmp, re.sub(r'[^\w.-]', '_', label)); os.mkdir(wd); os.chmod(wd, 0o1777)
+        wd = os.path.join(tmp, str(len(jobs))); os.mkdir(wd); os.chmod(wd, 0o1777)  # same path per label each run
         jobs.append({'label': label, 'cmd': cmd, 'env': dict(os.environ, TMPDIR=wd)})
 
     def listing(imp):

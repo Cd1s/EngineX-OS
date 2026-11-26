@@ -138,7 +138,7 @@ def main():
     seed = seed_all.get(a.dir.rstrip('/'), {})
     w = weights_for(tests, seed, prev)
     shards, load = make_shards(tests, w, a.j)
-    base = tempfile.mkdtemp(prefix='pyrun-', dir=os.environ.get('TMPDIR'))
+    base = tempfile.mkdtemp(prefix='p', dir=os.environ.get('TMPDIR'))
     os.chmod(base, 0o755)  # tests that drop privileges must reach their own TMPDIR
     t0 = time.monotonic()
 

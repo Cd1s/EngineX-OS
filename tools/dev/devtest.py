@@ -195,8 +195,12 @@ def exec_plan(plan_path):
                                  'go': None, 'py': {}, 'c': None}))
         return 0
     os.nice(5)
-    name = 'enginex-test-' + hashlib.sha1(os.getcwd().encode()).hexdigest()[:8]
-    tmp, lock = gorun.stable_dir('/var/tmp', name)  # same TMPDIR each run of this tree: Go's test cache keeps hitting
+    # Short TMPDIR paths: tests bind unix sockets (108-byte limit) and C tests build paths in fixed buffers under
+    # TMPDIR, so the runner's directories stay a few characters deep. Same path each run of this tree: Go's test
+    # cache keys on TMPDIR. /tmp when it has room (as the dev line's own runs use it), else /var/tmp.
+    name = 'ex' + hashlib.sha1(os.getcwd().encode()).hexdigest()[:6]
+    base = '/tmp' if shutil.disk_usage('/tmp').free > 4 << 30 else '/var/tmp'
+    tmp, lock = gorun.stable_dir(base, name)
     env = dict(os.environ, TMPDIR=tmp, GOFLAGS=(os.environ.get('GOFLAGS', '') + ' -buildvcs=false').strip())
     made_git = False
     if not os.path.exists('.git'):  # tests that call git ls-files see the tree, as in the dev line's full run
