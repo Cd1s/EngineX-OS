@@ -113,3 +113,47 @@ def go_list_closure(root, dirs, env=None):
                 want.add(u)
                 todo.append(u)
     return sorted(rel[i] for i in want)
+
+
+_FUNC = re.compile(r'^func (?:\([^)]*\) )?(\w+)\(', re.M)
+
+
+def smb_tests(root, dirs):
+    """[[dir, TestName], ...]: the tests of these package dirs that start the Samba fixture (internal/testsmb),
+    directly or through a helper in their package's test files. They need smbd and smbpasswd, and a private UTS
+    namespace whose hostname is localhost (the fixture's server name; with the build host's own name every SMB
+    login times out)."""
+    mod = module_path(root)
+    want = re.compile(r'^\s*(?:import\s+)?(\w+\s+)?"' + re.escape(mod + '/internal/testsmb') + r'"', re.M)
+    out = []
+    for d in sorted(set(dirs)):
+        try:
+            names = sorted(f for f in os.listdir(os.path.join(root, d)) if f.endswith('_test.go'))
+        except OSError:
+            continue
+        bodies, aliases = {}, set()
+        for f in names:
+            try:
+                with open(os.path.join(root, d, f), encoding='utf-8', errors='replace') as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            for m in want.finditer(text):
+                aliases.add((m.group(1) or 'testsmb').strip())
+            starts = [(m.start(), m.group(1)) for m in _FUNC.finditer(text)]
+            for i, (pos, name) in enumerate(starts):
+                end = starts[i + 1][0] if i + 1 < len(starts) else len(text)
+                bodies[name] = bodies.get(name, '') + text[pos:end]
+        if not aliases:
+            continue
+        users = {n for n, b in bodies.items() if any(a + '.Start(' in b for a in aliases)}
+        grew = True
+        while grew:  # helpers that start the fixture, and whatever calls them
+            grew = False
+            for n, b in bodies.items():
+                if n not in users and any(re.search(r'(?<![\w.])' + re.escape(u) + r'\(', b) for u in users):
+                    users.add(n)
+                    grew = True
+        out += [[d, n] for n in sorted(users) if re.match(r'(Test|Fuzz)\w', n) and n != 'TestMain']
+    return out
+

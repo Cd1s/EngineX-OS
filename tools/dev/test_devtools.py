@@ -237,11 +237,60 @@ class ReportTest(unittest.TestCase):
         self.assertIn('enginex-run sandbox -- bash x', text)
         self.assertIn('1 manual sandbox tests still to run', text)
 
+    def test_samba_tests_on_a_host_without_samba_are_not_run_and_said_so(self):
+        res = self.res(); res['smb_not_run'] = [['pkg/webui', 'TestSMBNASAPIAndRebootReload', 'no smbpasswd on h']]
+        rc, text = self.report({}, res)
+        self.assertEqual(rc, 0)
+        self.assertIn('NOT RUN: 1 Samba fixture tests', text)
+        self.assertIn('TestSMBNASAPIAndRebootReload', text)
+        self.assertIn('1 Samba fixture tests NOT RUN', text)
+        rc, text = self.report({'changed_tests': [['go', 'pkg/webui', 'TestSMBNASAPIAndRebootReload']]}, res)
+        self.assertEqual(rc, 1, 'a Samba test the lane changed must run')
+        self.assertIn('NOT PROVEN: go pkg/webui TestSMBNASAPIAndRebootReload (Samba fixture test NOT RUN', text)
+
     def test_a_remote_run_without_a_result_fails(self):
         res = {'steps': [{'name': 'remote run', 'secs': 1, 'ok': False, 'note': 'exit 1', 'tail': 'sync failed'}], 'go': None, 'py': {}, 'c': None}
         rc, text = self.report({}, res)
         self.assertEqual(rc, 1)
         self.assertIn('sync failed', text)
+
+
+class SambaTest(unittest.TestCase):
+    def test_tests_that_start_the_fixture_directly_or_through_a_helper_are_found(self):
+        import gotree
+        with tempfile.TemporaryDirectory() as root:
+            write(root, 'go.mod', 'module example.test/m\n\ngo 1.21\n')
+            write(root, 'internal/testsmb/server.go', 'package testsmb\n')
+            write(root, 'p/p_test.go', """\
+                package p
+
+                import (
+                	"testing"
+
+                	fix "example.test/m/internal/testsmb"
+                )
+
+                func startShare(t *testing.T) { fix.Start(t) }
+
+                func TestDirect(t *testing.T) { s := fix.Start(t); _ = s }
+                func TestThroughHelper(t *testing.T) { startShare(t) }
+                func TestPlain(t *testing.T) {}
+                """)
+            write(root, 'q/q_test.go', 'package q\n\nimport "testing"\n\nfunc TestQ(t *testing.T) {}\n')
+            self.assertEqual(gotree.smb_tests(root, ['p', 'q']), [['p', 'TestDirect'], ['p', 'TestThroughHelper']])
+
+    def test_the_repository_fixture_tests_are_found(self):
+        import gotree
+        found = gotree.smb_tests(REPO, ['internal/smbclient', 'pkg/providers', 'pkg/webui'])
+        self.assertIn(['internal/smbclient', 'TestSMBIdleConnectionSurvivesShortCachePause'], found)
+        self.assertIn(['pkg/webui', 'TestSMBRekordboxWrongPasswordNotice'], found)
+        self.assertEqual({d for d, _ in found}, {'internal/smbclient', 'pkg/providers', 'pkg/webui'})
+
+    def test_they_run_in_a_private_uts_namespace_named_localhost(self):
+        cmd = devtest.uts_localhost(['python3', 'gorun.py', './p'])
+        self.assertEqual(cmd[:3], ['unshare', '--uts', 'sh'])
+        self.assertIn('hostname localhost', cmd[4])
+        self.assertEqual(cmd[-3:], ['python3', 'gorun.py', './p'])
 
 
 class SpawnTest(unittest.TestCase):

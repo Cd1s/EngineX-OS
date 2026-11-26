@@ -2,7 +2,7 @@
 """Implementation of tools/dev/test.sh: one ARM build host runs every selected test (Go, Python, C, bash).
 
   tools/dev/test.sh [--full] [--list [--json]] [--base REF] [--into BRANCH] [--host HOST] [--exclusive]
-                    [--no-cache] [--strict] [--report DIR]
+                    [--require-samba] [--no-cache] [--strict] [--report DIR]
 
 Targeted (default): files changed against the merge base with origin/<BRANCH> (default agent/5306-batch2), plus
 uncommitted and untracked files, are mapped to tests by tools/dev/testmap.py: gofmt of the changed Go files, go vet
@@ -13,6 +13,10 @@ checklist with all their variants, and the automatic bash tests. Engine sandboxe
 their commands (the lane runs them; they need `enginex-run`), never silently dropped.
 --full: every Go package, Python directory, C test and automatic bash test (the merge train).
 --list: print the selection and why, and run nothing (needs only git and Python: works anywhere).
+Go tests that start the Samba fixture (internal/testsmb) run on a host with smbd and smbpasswd, one at a time, in a
+private UTS namespace with hostname localhost (with the host's own name every SMB login times out); hosts with Samba
+are preferred, and a lane that changed one of them (or --require-samba) gets only such a host. Elsewhere they are
+reported as NOT RUN (and a changed one as NOT PROVEN), never skipped silently.
 
 The plan is made here; the tree is copied with remote-build to one host of ENGINEX_BUILD_HOSTS (environment or
 ~/.config/enginex/dev.env), the least busy one that has what the plan needs (GCC 14 and the firmware lab for C tests
@@ -85,13 +89,16 @@ def make_plan(a, root):
     plan['manual'] = dict(sorted(sel.manual.items()))
     plan['unmapped'] = sorted(sel.unmapped)
     plan['changed_tests'] = [] if a.full else sorted(map(list, testmap.changed_tests(root, plan['base'], plan['changed'])))
+    plan['smb'] = gotree.smb_tests(root, sorted(gotree.packages(root)) if sel.go_all else plan['go'])
+    # A lane that changed a Samba fixture test needs a host with Samba; otherwise one is only preferred.
+    plan['smb_required'] = bool(plan['smb']) and (a.require_samba or any(['go', d, n] in plan['changed_tests'] for d, n in plan['smb']))
     plan['needs'] = needs_of(plan)
     return plan
 
 
 def needs_of(plan):
     """What the build host must have: gcc14 (the hook rebuild, the C tests' -Werror builds), lab files."""
-    needs = set()
+    needs = {'samba'} if plan.get('smb_required') else set()
     sh_auto = testmap.SH_TESTS['auto']
     for s in plan['sh']:
         needs |= set(sh_auto.get(s, {}).get('needs', []))
@@ -116,6 +123,9 @@ def print_plan(plan):
         print(f"python {item['dir']}: {' '.join(item['specs']) if item['specs'] else 'every test file'}")
     print(f"C tests ({len(plan['c'])}, every variant of tools/dev/c-tests.json): {' '.join(plan['c']) or '-'}")
     print(f"bash tests: {' '.join(plan['sh']) or '-'}")
+    if plan.get('smb'):
+        print(f"Samba fixture tests ({len(plan['smb'])}): on a host with smbd and smbpasswd, inside a private UTS namespace "
+              f"with hostname localhost; elsewhere NOT RUN{' (a changed one: Samba host required)' if plan['smb_required'] else ''}")
     print(f"host needs: {', '.join(plan['needs']) or 'any build host'}")
     if plan['manual']:
         print(f"manual (Engine sandboxes this change selects; test.sh does not run them):")
@@ -180,6 +190,21 @@ def cpu_budget():
     return max(2, min(12, round((i2 - i1) / max(1, t2 - t1) * (os.cpu_count() or 4))))
 
 
+def samba_missing():
+    """Why this host cannot run the Samba fixture (internal/testsmb), or '' when it can."""
+    missing = [t for t in ('smbd', 'smbpasswd', 'unshare', 'hostname') if not shutil.which(t)]
+    if missing:
+        return f"no {' and '.join(missing)} on {socket.gethostname()}"
+    if os.geteuid() != 0:
+        return 'not root (unshare --uts needs root)'
+    return ''
+
+
+def uts_localhost(cmd):
+    """cmd in a private UTS namespace whose hostname is localhost (the build host's own name is untouched)."""
+    return ['unshare', '--uts', 'sh', '-c', 'hostname localhost && exec "$@"', 'sh'] + cmd
+
+
 def gcc_major():
     out = run(['gcc', '-dumpversion']).stdout.strip()
     return out.split('.')[0] if out else ''
@@ -233,6 +258,10 @@ def exec_plan(plan_path):
                 results['go_not_buildable_here'] = sorted(d for d in go_dirs if d not in ok_dirs)
                 go_dirs = [d for d in go_dirs if d in ok_dirs]
         pk = ['./...'] if plan['go_all'] else [f'./{d}' if d != '.' else '.' for d in sorted(set(go_dirs))]
+        smb = gotree.smb_tests('.', sorted(gotree.packages('.')) if plan['go_all'] else sorted(set(go_dirs))) if pk else []
+        smb_file = os.path.join(tmp, 'smb.txt')
+        pathlib.Path(smb_file).write_text(''.join(f'{d} {n}\n' for d, n in smb))
+        smb_why = samba_missing()
         if plan['gofmt'] is None or plan['gofmt']:
             s = Step('gofmt'); spawn(s, ['gofmt', '-l'] + (['.'] if plan['gofmt'] is None else plan['gofmt']), env)
             if s.ok and s.out.strip():
@@ -256,12 +285,29 @@ def exec_plan(plan_path):
             s = Step('go test -race'); out_json = os.path.join(tmp, 'go.json')
             cmd = [sys.executable, os.path.join(HERE, 'gorun.py'), '--seed', os.path.join(HERE, 'go-slow.json'),
                    '--json', out_json, '--jobs', str(budget), '-p', str(max(2, budget // 2))] + (
-                   ['--no-cache'] if plan['no_cache'] else []) + ([] if plan['strict'] else ['--rerun']) + pk
+                   ['--no-cache'] if plan['no_cache'] else []) + ([] if plan['strict'] else ['--rerun']) + (
+                   ['--defer', smb_file] if smb else []) + pk
             spawn(s, cmd, env)
             if os.path.exists(out_json):
                 results['go'] = json.loads(pathlib.Path(out_json).read_text())
                 g = results['go']
                 s.note = f"{g['run']} tests, {sum(1 for v in g['packages'].values() if v.get('cached'))} packages cached"
+            add(s)
+        if smb and smb_why:
+            results['smb_not_run'] = [[d, n, smb_why] for d, n in smb]
+        elif smb:
+            # The Samba fixture's server is "localhost": with the build host's own name every SMB login times out.
+            # One test at a time (each starts its own smbd; the SMB deadlines are 3 s).
+            s = Step(f'go test -race (Samba, private UTS ns, {len(smb)} tests)'); out_json = os.path.join(tmp, 'go-smb.json')
+            pkgs = sorted({f'./{d}' if d != '.' else '.' for d, _ in smb})
+            cmd = uts_localhost([sys.executable, os.path.join(HERE, 'gorun.py'), '--only', smb_file, '--json', out_json,
+                                 '--jobs', '1', '-p', '1'] + (['--no-cache'] if plan['no_cache'] else []) + (
+                                 [] if plan['strict'] else ['--rerun']) + pkgs)
+            spawn(s, cmd, env)
+            if os.path.exists(out_json):
+                results['go_smb'] = json.loads(pathlib.Path(out_json).read_text())
+                g = results['go_smb']
+                s.note = f"{sum(1 for k in g['tests'] if ' ' in k)} tests"
             add(s)
         if plan['c']:
             s = Step(f"C tests ({len(plan['c'])})"); out_json = os.path.join(tmp, 'c.json')
@@ -311,7 +357,7 @@ def lab_path(root):
         return ''
 
 
-def probe(host, needs, lab):
+def probe(host, needs, lab, prefer_samba=False):
     """(score, reason): lower is better; None when the host lacks something the plan needs."""
     sshctl = shutil.which('sshctl')
     if not sshctl:
@@ -320,7 +366,8 @@ def probe(host, needs, lab):
     script = (". /etc/profile.d/buildtools.sh 2>/dev/null; echo gcc:$(gcc -dumpversion); echo arch:$(uname -m); "
               f"[ -d '{lab}' ] && echo has:lab; {checks} "
               "echo load:$(cut -d' ' -f1 /proc/loadavg); echo cpus:$(nproc); "
-              "echo heavy:$(ps -eo args= | grep -c '[f]lock.*enginex-heavy'); echo slots:$(ls /var/lock/enginex-slot*.lock 2>/dev/null | wc -l)")
+              "echo heavy:$(ps -eo args= | grep -c '[f]lock.*enginex-heavy'); echo slots:$(ls /var/lock/enginex-slot*.lock 2>/dev/null | wc -l); "
+              "command -v smbd >/dev/null 2>&1 && command -v smbpasswd >/dev/null 2>&1 && echo has:samba")
     out = run([sshctl, 'run', host, '--no-stdin', '--timeout', '20s', '--argv', 'sh', '-c', script]).stdout
     kv = dict(line.split(':', 1) for line in out.splitlines() if ':' in line and not line.startswith('ssm'))
     if not kv:
@@ -331,19 +378,22 @@ def probe(host, needs, lab):
     if 'gcc14' in needs and kv.get('gcc', '').split('.')[0] != '14':
         return None, f"gcc {kv.get('gcc')}"
     for n in needs:
-        if (n == 'lab' or n.startswith('lab:')) and n not in have:
+        if (n == 'lab' or n.startswith('lab:') or n == 'samba') and n not in have:
             return None, f'no {n}'
     try:
         load, cpus, heavy = float(kv.get('load', 9)), int(kv.get('cpus', 1)), int(kv.get('heavy', 0))
     except ValueError:
         return None, 'unparsable probe'
-    return heavy * 10 + load / cpus, f"load {load}/{cpus} cpus, {heavy} heavy-lock jobs"
+    samba = 'samba' in have
+    # Samba fixture tests in the plan: prefer a host that can run them (a busy one still loses: 10 per heavy job).
+    return heavy * 10 + load / cpus + (5 if prefer_samba and not samba else 0), \
+        f"load {load}/{cpus} cpus, {heavy} heavy-lock jobs{', Samba' if samba else ''}"
 
 
-def pick_host(hosts, needs, lab):
+def pick_host(hosts, needs, lab, prefer_samba=False):
     best, best_score, notes = None, None, []
     for h in hosts:
-        score, why = probe(h, needs, lab)
+        score, why = probe(h, needs, lab, prefer_samba)
         notes.append(f'{h}: {why}')
         if score is not None and (best is None or score < best_score):
             best, best_score = h, score
@@ -379,6 +429,7 @@ def main():
     ap.add_argument('--tree', help='tree under test (default: the git checkout of the current directory)')
     ap.add_argument('--host', help='this build host (default: the least busy of ENGINEX_BUILD_HOSTS that qualifies)')
     ap.add_argument('--exclusive', action='store_true', help='enginex-run exclusive instead of sandbox (merge train, timing)')
+    ap.add_argument('--require-samba', action='store_true', help='only a host with smbd and smbpasswd (the Samba fixture tests run)')
     ap.add_argument('--list', action='store_true'); ap.add_argument('--json', action='store_true')
     ap.add_argument('--report'); ap.add_argument('--top', type=int, default=5)
     ap.add_argument('--exec', dest='exec_plan')
@@ -404,7 +455,7 @@ def main():
     if not hosts:
         print('test.sh: ENGINEX_BUILD_HOSTS is not set (environment or ~/.config/enginex/dev.env)', file=sys.stderr); return 2
     lab = lab_path(root)
-    host, notes = pick_host(hosts, plan['needs'], lab)
+    host, notes = pick_host(hosts, plan['needs'], lab, prefer_samba=bool(plan.get('smb')))
     print('hosts: ' + '; '.join(notes))
     if not host:
         print(f"test.sh: no build host has what this plan needs ({', '.join(plan['needs'])})", file=sys.stderr); return 1
@@ -473,9 +524,10 @@ def report(a, plan, res, host, started):
         print(f"not Go packages on this host (build constraints exclude every file): {' '.join(res['go_not_buildable_here'])}")
     if res.get('go_added_by_go_list'):
         print(f"go list added packages the static map missed: {' '.join(res['go_added_by_go_list'])}")
-    if res.get('go'):
-        flaky += [('go ' + x['pkg'] + ' ' + x['test'], x['first_failure']) for x in res['go'].get('flaky', [])]
-        skipped += [('go', x['pkg'], x['test'], x['reason']) for x in res['go']['skipped']]
+    for g in (res.get('go'), res.get('go_smb')):
+        if g:
+            flaky += [('go ' + x['pkg'] + ' ' + x['test'], x['first_failure']) for x in g.get('flaky', [])]
+            skipped += [('go', x['pkg'], x['test'], x['reason']) for x in g['skipped']]
     for d, r in (res.get('py') or {}).items():
         flaky += [(f"py {d} {x['id']}", x['first_failure']) for x in r.get('flaky', [])]
         skipped += [('py', d, x[0], x[1]) for x in r['skipped']]
@@ -498,6 +550,10 @@ def report(a, plan, res, host, started):
                 unproven.append(f"c {where} (skipped: {'; '.join(x for r in mine for x in r['skipped'])[:200]})")
         if kind == 'sh' and where in plan['sh'] and where in dict(sh_skipped):
             unproven.append(f'sh {where} (skipped: {dict(sh_skipped)[where]})')
+    not_run = res.get('smb_not_run') or []
+    for d, n, why in not_run:
+        if ['go', d, n] in plan['changed_tests'] or ('go', d, n) in changed:
+            unproven.append(f'go {d} {n} (Samba fixture test NOT RUN: {why})')
     if unproven:
         ok = False
         print(f"{'proof of changed tests':40} {'':>8}  FAILED  not proven: a test this change added or changed did not run")
@@ -510,6 +566,9 @@ def report(a, plan, res, host, started):
         print(f'  C run skipped: {s}')
     for s, why in sh_skipped:
         print(f'  bash test skipped: {s} ({why})')
+    if not_run:
+        print(f"\nNOT RUN: {len(not_run)} Samba fixture tests ({not_run[0][2]}; they run on a host with smbd and smbpasswd, "
+              f"e.g. --host <that host>):" + ''.join(f'\n  go {d} {n}' for d, n, _ in not_run[:40]))
     for u in unproven:
         print('NOT PROVEN: ' + u)
     if plan['manual']:
@@ -529,7 +588,8 @@ def report(a, plan, res, host, started):
         os.makedirs(a.report, exist_ok=True)
         pathlib.Path(a.report, 'test-run.json').write_text(json.dumps({'plan': plan, 'result': res}, indent=1))
     wall = time.monotonic() - started
-    manual = f", {len(plan['manual'])} manual sandbox tests still to run" if plan['manual'] else ''
+    manual = (f", {len(plan['manual'])} manual sandbox tests still to run" if plan['manual'] else '') + (
+        f", {len(not_run)} Samba fixture tests NOT RUN" if not_run else '')
     print(f"\nRESULT: {'PASS' if ok else 'FAIL'}  (wall {wall:.1f}s{manual})")
     return 0 if ok else 1
 
