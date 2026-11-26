@@ -265,7 +265,7 @@ func (j *Jobs) saveSource(key, path string) {
 func (j *Jobs) writeSources() {
 	b, _ := json.Marshal(j.sources)
 	tmp := filepath.Join(j.p.Deemix.DownloadDir, sourcesFile+".tmp")
-	if os.WriteFile(tmp, b, 0o644) == nil {
+	if os.WriteFile(tmp, b, 0o600) == nil {
 		os.Rename(tmp, filepath.Join(j.p.Deemix.DownloadDir, sourcesFile))
 	}
 }

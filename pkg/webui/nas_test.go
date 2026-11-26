@@ -1006,9 +1006,16 @@ func TestNASSMBCredentialsNeverLeakInStateErrorsJobsOrLogs(t *testing.T) {
 		".sources.json":        filepath.Join(dlDir, sourcesFile),
 		"streaming-stems.json": filepath.Join(stateDir, "streaming-stems.json"),
 	} {
-		raw, err := os.ReadFile(path)
+		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatalf("expected state file %s: %v", name, err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("state file %s mode=%o, want 0600", name, info.Mode().Perm())
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read state file %s: %v", name, err)
 		}
 		assertClean(name, string(raw), smbSrv.Password, smbSrv.User+":"+smbSrv.Password+"@")
 	}
@@ -1664,5 +1671,31 @@ func TestReviewHTTPEnumerationDifference(t *testing.T) {
 				t.Errorf("%s standalone NAS routes made %d upstream HTTP requests, want 0", tc.name, *tc.hits-hitsBefore)
 			}
 		})
+	}
+}
+
+// Review of 8a3677ba, MEDIUM 3: the download source index names NAS files; like the other
+// state files it is written owner-only.
+func TestSourcesIndexWrittenMode0600(t *testing.T) {
+	dlDir := t.TempDir()
+	audioPath := filepath.Join(dlDir, "nas-fixture.mp3")
+	if err := os.WriteFile(audioPath, testMP3(120), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := NewJobs(Pipeline{
+		Catalog: noCatalog{},
+		Deemix:  &deemixclient.Client{DownloadDir: dlDir, AllowLossy: true},
+	})
+	t.Cleanup(jobs.Close)
+	jobs.putFile("smb:Sets/Track.mp3", fetched{
+		matched: providers.Track{ID: "Sets/Track.mp3", Provider: "smb"},
+		dl:      &deemixclient.Download{Path: audioPath},
+	})
+	info, err := os.Stat(filepath.Join(dlDir, sourcesFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf(".sources.json mode=%o, want 0600", info.Mode().Perm())
 	}
 }
