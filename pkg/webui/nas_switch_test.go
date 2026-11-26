@@ -2,6 +2,7 @@ package webui
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -32,6 +33,8 @@ type nasSwitchRig struct {
 	twoDownloads   atomic.Int32
 	mu             sync.Mutex
 	gate           chan struct{} // server two's downloads wait for it while set
+	listAsked      chan struct{} // a held playlist answer of server one began
+	listGate       chan struct{} // server one's playlist answers wait for it while set
 }
 
 type nasAnswer struct {
@@ -40,7 +43,7 @@ type nasAnswer struct {
 }
 
 func newNASSwitchRig(t *testing.T) *nasSwitchRig {
-	rig := &nasSwitchRig{t: t, one: testMP3(120), two: testMP3(150), asked: make(chan struct{}, 4)}
+	rig := &nasSwitchRig{t: t, one: testMP3(120), two: testMP3(150), asked: make(chan struct{}, 4), listAsked: make(chan struct{}, 4)}
 	nas := func(audio []byte, held bool) string {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
@@ -48,6 +51,15 @@ func newNASSwitchRig(t *testing.T) *nasSwitchRig {
 				w.Header().Set("Content-Type", "application/json")
 				fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlists":{"playlist":[{"id":"pl-42","name":"Club Crate","songCount":1}]}}}`)
 			case "/rest/getPlaylist.view":
+				if !held {
+					rig.mu.Lock()
+					gate := rig.listGate
+					rig.mu.Unlock()
+					if gate != nil {
+						rig.listAsked <- struct{}{}
+						<-gate
+					}
+				}
 				w.Header().Set("Content-Type", "application/json")
 				fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlist":{"id":"pl-42","name":"Club Crate","entry":[{"id":"tr-99","title":"Warehouse Dub","artist":"DJ Test","album":"NAS Vol 1","duration":210,"suffix":"mp3"}]}}}`)
 			case "/rest/download.view":
@@ -84,6 +96,7 @@ func newNASSwitchRig(t *testing.T) *nasSwitchRig {
 	rig.gw = httptest.NewServer(rig.s)
 	t.Cleanup(rig.gw.Close)
 	t.Cleanup(rig.release) // before gw.Close, which waits for a held request
+	t.Cleanup(rig.releaseLists)
 	return rig
 }
 
@@ -99,6 +112,22 @@ func (rig *nasSwitchRig) release() {
 	if rig.gate != nil {
 		close(rig.gate)
 		rig.gate = nil
+	}
+	rig.mu.Unlock()
+}
+
+// holdLists makes server one's playlist answers wait until releaseLists.
+func (rig *nasSwitchRig) holdLists() {
+	rig.mu.Lock()
+	rig.listGate = make(chan struct{})
+	rig.mu.Unlock()
+}
+
+func (rig *nasSwitchRig) releaseLists() {
+	rig.mu.Lock()
+	if rig.listGate != nil {
+		close(rig.listGate)
+		rig.listGate = nil
 	}
 	rig.mu.Unlock()
 }
@@ -327,6 +356,60 @@ func TestReviewThreeLoads(t *testing.T) {
 	if a := <-second; a.code != http.StatusNotFound || bytes.Equal(a.body, rig.one) || bytes.Equal(a.body, rig.two) {
 		t.Fatalf("the waiting load of server two's track %d answered HTTP %d after the change (server one's recording=%v, server two's=%v), want 404",
 			id2, a.code, bytes.Equal(a.body, rig.one), bytes.Equal(a.body, rig.two))
+	}
+}
+
+// The review's third probe (#335 round 3b): a listing of server one's playlist that
+// began before the NAS moved to server two and finished after it made rows with server
+// one's titles whose IDs then played server two's recording. It makes no rows now.
+func TestReviewBrowseOutlivesSwitch(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.oneURL)
+	var lists struct {
+		Items []map[string]any `json:"items"`
+	}
+	tidalGet(t, rig.gw.URL, "/v1/users/1/playlists?limit=50&offset=0", 200, &lists)
+	uuid := ""
+	for _, it := range lists.Items {
+		if it["title"] == "[NAS] Club Crate" {
+			uuid, _ = it["uuid"].(string)
+		}
+	}
+	if uuid == "" {
+		t.Fatalf("no [NAS] Club Crate list: %+v", lists.Items)
+	}
+	type answer struct {
+		code  int
+		items []map[string]any
+	}
+	done := make(chan answer, 1)
+	rig.holdLists()
+	go func() { // no t calls
+		resp, err := http.Get(rig.gw.URL + "/v1/playlists/" + uuid + "/tracks?limit=50&offset=0")
+		if err != nil {
+			done <- answer{code: -1}
+			return
+		}
+		defer resp.Body.Close()
+		var v struct {
+			Items []map[string]any `json:"items"`
+		}
+		json.NewDecoder(resp.Body).Decode(&v)
+		done <- answer{resp.StatusCode, v.Items}
+	}()
+	nasWaitFor(t, rig.listAsked, "server one was asked for the playlist")
+	rig.saveNAS(rig.twoURL)
+	rig.releaseLists()
+	a := <-done
+	for _, it := range a.items {
+		id, _ := it["id"].(float64)
+		if got := rig.stream(int64(id)); got.code == http.StatusOK {
+			t.Fatalf("a listing begun before the change made row %d (%v) after it, and it played (server two's recording=%v)",
+				int64(id), it["title"], bytes.Equal(got.body, rig.two))
+		}
+	}
+	if len(a.items) != 0 || rig.twoDownloads.Load() != 0 {
+		t.Fatalf("a listing begun before the change made %d rows after it (HTTP %d, server two asked %d times)", len(a.items), a.code, rig.twoDownloads.Load())
 	}
 }
 

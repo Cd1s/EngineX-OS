@@ -430,6 +430,7 @@ func (g *tidalGateway) nasPlaylistsPage(w http.ResponseWriter, r *http.Request) 
 	if n := len(g.s.stemmed(nasScope)); n > 0 {
 		add(playlistJSON(stemsListID(nasScope), "Stems", "", n))
 	}
+	listing := g.s.jobs.NASGen() + 1 // before the NAS settings are read (#335)
 	p := g.s.ownerSMBSelfHosted()
 	if p == nil {
 		add(playlistJSON(hintPlaylist, sourceFailedTitle(nasScope, errors.New("not configured")), "http://"+lanHost()+":8080", 0))
@@ -444,12 +445,15 @@ func (g *tidalGateway) nasPlaylistsPage(w http.ResponseWriter, r *http.Request) 
 	}
 	for _, pl := range lists {
 		ref := playlistRef{session: nasScope, provider: nasScope, list: pl}
-		add(g.refJSON(g.addPlaylist(ref), ref))
+		if id := g.addPlaylistAt(ref, listing); id != "" {
+			add(g.refJSON(id, ref))
+		}
 	}
 	respond(w, page(r, 100, items))
 }
 
 func (g *tidalGateway) nasTracks(w http.ResponseWriter, r *http.Request, id string, ref playlistRef, role, order string) {
+	listing := g.s.jobs.NASGen() + 1 // before the NAS settings are read (#335)
 	nasProv := g.s.ownerSMBSelfHosted()
 	if nasProv == nil {
 		err := errors.New("nas provider is not enabled")
@@ -474,7 +478,7 @@ func (g *tidalGateway) nasTracks(w http.ResponseWriter, r *http.Request, id stri
 	refs := make([]trackRef, 0, len(tracks))
 	for _, t := range tracks {
 		httpsCover(&t)
-		refs = append(refs, trackRef{track: t, session: nasScope})
+		refs = append(refs, trackRef{track: t, session: nasScope, listing: listing})
 	}
 	if role != "" && role != "default" {
 		sortStreamingTracks(refs, role, order)

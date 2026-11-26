@@ -133,6 +133,9 @@ type trackRef struct {
 	// file is a drive track's audio on its drive (OmniSource, #62), drive the volume.
 	file, drive string
 	gen         uint64 // NAS generation when listed (#335)
+	// listing is 1 + the NAS generation when the NAS listing this row comes from
+	// began, 0 if it is not from one: addTrack makes no row if the NAS changed since.
+	listing uint64
 }
 type playlistRef struct {
 	session  string // empty for the built-in Deezer catalog
@@ -815,10 +818,17 @@ func each[T, R any](ctx context.Context, in []T, fn func(context.Context, T) ([]
 	wg.Wait()
 	return out
 }
-func (g *tidalGateway) addPlaylist(ref playlistRef) string {
+func (g *tidalGateway) addPlaylist(ref playlistRef) string { return g.addPlaylistAt(ref, 0) }
+
+// addPlaylistAt is addPlaylist for a list from a NAS listing begun at NAS generation
+// listing-1 (0: not from one). It keeps no list and returns "" if the NAS changed since.
+func (g *tidalGateway) addPlaylistAt(ref playlistRef, listing uint64) string {
 	id := uuid.NewSHA1(tidalNS, []byte(owner(ref.session, ref.guest)+"\x00"+ref.provider+"\x00"+ref.list.ID)).String()
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if listing != 0 && g.s != nil && listing-1 != g.s.jobs.NASGen() {
+		return ""
+	}
 	g.scheduleSave()
 	g.lists[id] = ref
 	g.seq++
@@ -910,6 +920,12 @@ func (g *tidalGateway) addTrack(ref trackRef) int64 {
 	key := refKey(ref)
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.s != nil {
+		ref.gen = g.s.jobs.NASGen()
+	}
+	if ref.listing != 0 && ref.listing-1 != ref.gen {
+		return 0 // no row: the NAS changed while its listing ran (#335)
+	}
 	id := g.ids[key]
 	if id == 0 {
 		g.next++
@@ -917,9 +933,6 @@ func (g *tidalGateway) addTrack(ref trackRef) int64 {
 		g.ids[key] = id
 	}
 	g.scheduleSave()
-	if g.s != nil {
-		ref.gen = g.s.jobs.NASGen()
-	}
 	g.tracks[id] = ref
 	if address := thumbURL(ref.track); address != "" {
 		if len(g.artURLs) > maxTracks {
@@ -1343,7 +1356,11 @@ func (g *tidalGateway) trackItems(session string, guest bool, tracks []providers
 func (g *tidalGateway) refItems(refs []trackRef) []any {
 	items := make([]any, 0, len(refs))
 	for _, ref := range refs {
-		v := g.trackJSON(g.addTrack(ref), ref.track)
+		id := g.addTrack(ref)
+		if id == 0 {
+			continue
+		}
+		v := g.trackJSON(id, ref.track)
 		flat := map[string]any{"item": v, "type": "track"}
 		for k, f := range v {
 			flat[k] = f
@@ -1899,7 +1916,9 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	}
 	scope := g.s.scope()
 	sources := []source{}
+	listing := uint64(0) // set for a NAS search, the only source then
 	if scope == nasScope {
+		listing = g.s.jobs.NASGen() + 1 // before the NAS settings are read (#335)
 		if nasProv := g.s.ownerSMBSelfHosted(); nasProv != nil {
 			sources = append(sources, source{session: nasScope, provider: nasScope, p: nasProv})
 		}
@@ -1942,11 +1961,15 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 			if v.provider == nasScope {
 				httpsCover(&t)
 			}
-			trackItems = append(trackItems, g.trackJSON(g.addTrack(trackRef{track: t, session: v.session, guest: v.guest}), t))
+			if id := g.addTrack(trackRef{track: t, session: v.session, guest: v.guest, listing: listing}); id != 0 {
+				trackItems = append(trackItems, g.trackJSON(id, t))
+			}
 		}
 		for _, p := range lists[i] {
 			ref := playlistRef{v.session, v.provider, p, v.guest}
-			listItems = append(listItems, g.refJSON(g.addPlaylist(ref), ref))
+			if id := g.addPlaylistAt(ref, listing); id != "" {
+				listItems = append(listItems, g.refJSON(id, ref))
+			}
 		}
 	}
 	if g.s.omniSource() { // the DJ's own drives first

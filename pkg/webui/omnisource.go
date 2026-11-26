@@ -212,6 +212,7 @@ func (s *Server) driveListTracks(ctx context.Context, listID string) ([]trackRef
 	}
 
 	if rawID, ok := strings.CutPrefix(listID, "nas\x00"); ok {
+		listing := s.jobs.NASGen() + 1 // before the NAS settings are read (#335)
 		nasProv := s.ownerSelfHosted()
 		if nasProv == nil {
 			return nil, fmt.Errorf("nas provider is not enabled")
@@ -223,7 +224,7 @@ func (s *Server) driveListTracks(ctx context.Context, listID string) ([]trackRef
 		refs := make([]trackRef, 0, len(tracks))
 		for _, t := range tracks {
 			httpsCover(&t)
-			refs = append(refs, trackRef{track: t, session: "nas"})
+			refs = append(refs, trackRef{track: t, session: "nas", listing: listing})
 		}
 		return refs, nil
 	}
@@ -421,12 +422,15 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 			add(g.refJSON(g.addPlaylist(ref), ref))
 		}
 	}
+	nasListing := g.s.jobs.NASGen() + 1 // before the NAS settings are read (#335)
 	if nasLists, nasProv := g.s.nasPlaylists(ctx); nasProv != nil {
 		for _, p := range nasLists {
 			p.ID = "nas\x00" + p.ID
 			p.Title = "[NAS] " + p.Title
 			ref := playlistRef{"nas", localProvider, p, false}
-			add(g.refJSON(g.addPlaylist(ref), ref))
+			if id := g.addPlaylistAt(ref, nasListing); id != "" {
+				add(g.refJSON(id, ref))
+			}
 		}
 	}
 	for _, m := range g.s.loadMounts() {
