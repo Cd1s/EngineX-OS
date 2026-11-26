@@ -62,6 +62,15 @@ const exportName = "EngineX Export Beta"
 // library to copy (two decks copied each other's whole stick onto an SD card, 50 GB).
 func OwnExport(d Device) bool { return d.Name == exportName }
 
+// OwnStagedName reports whether a staged folder name under StagedDir (e.g. "EngineX Export Beta 1 USB")
+// came from a deck of ours sharing its library as a player (matching case-insensitively for FAT32).
+func OwnStagedName(name string) bool {
+	if strings.EqualFold(name, exportName) {
+		return true
+	}
+	return len(name) > len(exportName) && strings.EqualFold(name[:len(exportName)], exportName) && name[len(exportName)] == ' '
+}
+
 // StagedExport is where Stage leaves the export.pdb of the library it copied to dir. It is
 // written last and at the end of every copy: a folder without it was never finished, and
 // its time is when its player was last copied.

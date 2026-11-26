@@ -417,7 +417,7 @@ func readSourcesPaced(ctx context.Context, r *compat.Resolver, mount string, fil
 func stagedLibraries(mount string) (names, pdbs []string) {
 	dirs, _ := os.ReadDir(filepath.Join(mount, prolink.StagedDir))
 	for _, d := range dirs { // os.ReadDir sorts by name
-		if !d.IsDir() || d.Type()&os.ModeSymlink != 0 {
+		if !d.IsDir() || d.Type()&os.ModeSymlink != 0 || prolink.OwnStagedName(d.Name()) {
 			continue
 		}
 		r, err := compat.NewResolver(filepath.Join(mount, prolink.StagedDir, d.Name()))

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
+	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
@@ -129,6 +130,9 @@ func BuildViewCtx(ctx context.Context, libs []SourceLibrary, layout, lang string
 		case rbstate.OneLibrary:
 			one = &libs[i]
 		default:
+			if prolink.OwnStagedName(libs[i].Source) {
+				continue
+			}
 			links = append(links, &libs[i])
 		}
 	}

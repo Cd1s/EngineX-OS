@@ -252,3 +252,22 @@ func TestStagingNeverCopiesADeckOfOurs(t *testing.T) {
 		t.Fatalf("a player was not copied: %+v", calls)
 	}
 }
+
+func TestStageTidyRemovesOwnExportFolders(t *testing.T) {
+	d := stageDrive{root: t.TempDir(), size: 64 * stageGiB, other: 20 * stageGiB}
+	own1 := d.staged(t, "EngineX Export Beta 1 USB", 4096, true, time.Hour)
+	own2 := d.staged(t, "EngineX Export Beta 4 SD", 4096, true, time.Hour)
+	cdj := d.staged(t, "CDJ-3000 3 USB", 4096, true, time.Hour)
+
+	s := &stager{inUse: func(string) bool { return false }}
+	s.tidy(d.cache())
+
+	for _, gone := range []string{own1, own2} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Fatalf("own-export staged folder %s was not removed by tidy: err=%v", gone, err)
+		}
+	}
+	if _, err := os.Stat(cdj); err != nil {
+		t.Fatalf("real CDJ staged folder %s was wrongly removed by tidy: %v", cdj, err)
+	}
+}

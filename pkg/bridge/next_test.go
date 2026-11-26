@@ -893,3 +893,51 @@ func TestWorkCostAgainstTheReplica(t *testing.T) {
 		t.Error("a run by hand has no limit")
 	}
 }
+
+func TestReconcileOrphanSwapPromotesCutSwapAndDropsStaleOrCorruptSwap(t *testing.T) {
+	t.Run("cut_swap_promoted_by_background_job", func(t *testing.T) {
+		mount := nextStick(t, 5)
+		makeNext(t, mount)
+		dir := dbDir(mount)
+		swapPath := filepath.Join(dir, rbstate.SwapName)
+		wantHead, err := rbstate.ReadHeaderFile(swapPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Simulate a 17 s SIGKILL right between renaming .rb-next.db -> m.db and renaming
+		// .rb-bridge-snapshot.swap -> .rb-bridge-snapshot.
+		if err := os.Rename(filepath.Join(dir, nextDB), filepath.Join(dir, "m.db")); err != nil {
+			t.Fatal(err)
+		}
+		// FillInBackground must promote .rb-bridge-snapshot.swap -> .rb-bridge-snapshot under LockVolume.
+		if _, err := FillInBackground(context.Background(), mount, FillOptions{}); err != nil {
+			t.Fatalf("FillInBackground: %v", err)
+		}
+		if _, err := os.Stat(swapPath); !os.IsNotExist(err) {
+			t.Fatalf("leftover %s still exists after FillInBackground: err=%v", rbstate.SwapName, err)
+		}
+		gotHead, err := rbstate.ReadHeader(dir)
+		if err != nil {
+			t.Fatalf("ReadHeader: %v", err)
+		}
+		if gotHead.Commit != wantHead.Commit {
+			t.Fatalf("snapshot commit = %d, want promoted swap commit %d", gotHead.Commit, wantHead.Commit)
+		}
+	})
+
+	t.Run("corrupt_swap_removed_by_swapNext", func(t *testing.T) {
+		mount := nextStick(t, 3)
+		dir := dbDir(mount)
+		swapPath := filepath.Join(dir, rbstate.SwapName)
+		if err := os.WriteFile(swapPath, []byte("truncated-garbage"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		swapped, _ := swapNext(context.Background(), mount, dir, newSteps(MountOptions{}))
+		if swapped {
+			t.Fatal("swapNext swapped a corrupt swap file")
+		}
+		if _, err := os.Stat(swapPath); !os.IsNotExist(err) {
+			t.Fatalf("corrupt %s was not removed: err=%v", rbstate.SwapName, err)
+		}
+	})
+}

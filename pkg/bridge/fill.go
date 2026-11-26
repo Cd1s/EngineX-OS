@@ -125,6 +125,7 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	if err != nil {
 		return res, fmt.Errorf("volume lock: %w", err)
 	}
+	reconcileOrphanSwap(ctx, dbDir)
 	snap, err := rbstate.Load(dbDir)
 	unlock()
 	if err != nil && !errors.Is(err, os.ErrNotExist) {

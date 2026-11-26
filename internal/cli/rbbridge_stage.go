@@ -164,10 +164,20 @@ func (s *stager) tidy(cache string) {
 	if !realDir(cache) {
 		return
 	}
+	inUse := s.inUse
+	if inUse == nil {
+		inUse = stagedInUse
+	}
 	dirs, _ := os.ReadDir(cache)
 	for _, d := range dirs {
 		dir := filepath.Join(cache, d.Name())
 		if !d.IsDir() {
+			continue
+		}
+		if prolink.OwnStagedName(d.Name()) && !s.waiting(d.Name()) && !inUse(dir) {
+			if os.RemoveAll(dir) == nil {
+				log.Printf("rb-bridge: removed %s: staged copy of our own deck's export", dir)
+			}
 			continue
 		}
 		// ENOTDIR: a damaged library where PIONEER or rekordbox is a file has none either.

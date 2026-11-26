@@ -367,6 +367,56 @@ func nextRoom(dir, uuid string) error {
 	return nil
 }
 
+// liveCommitRO reads m.db's commit ID read-only (safe even while Engine holds m.db open).
+func liveCommitRO(ctx context.Context, file string) int64 {
+	if st, err := os.Stat(file); err != nil || st.Size() == 0 {
+		return 0
+	}
+	db, err := openRO(file, 5000)
+	if err != nil {
+		return 0
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var id sql.NullInt64
+	if err := db.QueryRowContext(ctx, `SELECT lastRekordBoxLibraryImportReadCounter FROM Information`).Scan(&id); err != nil {
+		return 0
+	}
+	return id.Int64
+}
+
+// reconcileOrphanSwap cleans up a leftover .rb-bridge-snapshot.swap when .rb-next.db is already
+// gone (e.g. a mount window killed right between renaming .rb-next.db -> m.db and renaming
+// .rb-bridge-snapshot.swap -> .rb-bridge-snapshot, or a corrupt/stale swap file). It never writes
+// m.db and is safe to call from the background job under LockVolume.
+func reconcileOrphanSwap(ctx context.Context, dir string) bool {
+	live, next, swap := filepath.Join(dir, "m.db"), filepath.Join(dir, nextDB), filepath.Join(dir, rbstate.SwapName)
+	if _, err := os.Stat(next); err == nil {
+		return false // active ready swap still waits for a mount window
+	}
+	if _, err := os.Stat(swap); err != nil {
+		return false
+	}
+	h, err := rbstate.ReadHeaderFile(swap)
+	if err != nil || h.Rules != rbstate.Rules {
+		_ = rbstate.RemoveFile(swap)
+		return false
+	}
+	if commit := liveCommitRO(ctx, live); commit == h.Commit && h.Commit != 0 {
+		if err := rbstate.RenameFile(swap, filepath.Join(dir, rbstate.SnapshotName)); err != nil {
+			log.Printf("rb-bridge: orphan swap snapshot not promoted: %v", err)
+			return false
+		}
+		_ = rbstate.DropNext(dir)
+		dropOldState(dir)
+		_ = os.RemoveAll(nextState(h.LibraryUUID))
+		log.Printf("rb-bridge: promoted leftover swap snapshot from an interrupted swap")
+		return true
+	}
+	_ = rbstate.RemoveFile(swap)
+	return false
+}
+
 // swapNext makes a next library that is ready the stick's library: m.db first, then its
 // snapshot, each a rename inside Database2. Rows Engine wrote to m.db since the job last looked
 // are taken first (carryOver). It runs at the start of every window; without a swap snapshot it
@@ -375,6 +425,14 @@ func swapNext(ctx context.Context, mount, dir string, st *steps) (swapped, deadl
 	live, next, swap := filepath.Join(dir, "m.db"), filepath.Join(dir, nextDB), filepath.Join(dir, rbstate.SwapName)
 	h, err := rbstate.ReadHeaderFile(swap)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, rbstate.ErrNoSnapshot) {
+			return false, false
+		}
+		if errors.Is(err, rbstate.ErrNoSnapshot) {
+			if _, statErr := os.Stat(swap); statErr == nil {
+				_ = rbstate.RemoveFile(swap)
+			}
+		}
 		return false, false
 	}
 	if h.Rules != rbstate.Rules {
@@ -526,15 +584,18 @@ func carryOverChecked(ctx context.Context, dir string, h *rbstate.Header, st *st
 		return err == nil && !content, false, err
 	}
 	// Every row of every table is read again to find the few Engine wrote (KDATA scattered:
-	// >= 0.33 ms/row; 20,000+ tracks exceed a window). Account for post-mirror load/save/swap.
+	// >= 0.33 ms/row; 20,000+ tracks exceed a window). Account for post-mirror load/save/swap
+	// plus FAT32 rename+sync margin so a window is not killed between the m.db and snapshot renames.
+	const swapRenameReserve = 2 * time.Second
 	postSwap := work{load: h.Tracks, commits: 2, tracks: h.Tracks}
-	if !st.fits(work{scan: m.Rows, load: h.Tracks, commits: 2, tracks: h.Tracks}) {
+	if !st.fits(work{scan: m.Rows, load: h.Tracks, commits: 2, tracks: h.Tracks}) ||
+		(!st.kill.IsZero() && !before(st.kill.Add(-spare-swapRenameReserve), work{scan: m.Rows, load: h.Tracks, commits: 2, tracks: h.Tracks}.cost())) {
 		return false, true, nil
 	}
 	lookCtx := ctx
 	if !st.kill.IsZero() {
 		var cancel context.CancelFunc
-		lookCtx, cancel = context.WithDeadline(ctx, st.kill.Add(-spare-postSwap.cost()))
+		lookCtx, cancel = context.WithDeadline(ctx, st.kill.Add(-spare-swapRenameReserve-postSwap.cost()))
 		defer cancel()
 	}
 	ch, err := mirrorLibrary(lookCtx, live, next, &m, pace)
@@ -542,7 +603,7 @@ func carryOverChecked(ctx context.Context, dir string, h *rbstate.Header, st *st
 		log.Printf("rb-bridge: rows of the stick's library not taken: %v", err)
 		return false, lookCtx.Err() != nil, err
 	}
-	if lookCtx.Err() != nil || (pace == nil && !st.fits(postSwap)) {
+	if lookCtx.Err() != nil || (pace == nil && (!st.fits(postSwap) || (!st.kill.IsZero() && !before(st.kill.Add(-spare-swapRenameReserve), postSwap.cost())))) {
 		return false, true, lookCtx.Err()
 	}
 	if pace == nil {
