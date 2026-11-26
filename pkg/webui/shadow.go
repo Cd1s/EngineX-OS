@@ -248,7 +248,7 @@ type peerLocalFile struct {
 // A paused deck must not move at all.
 const (
 	shadowPlayingDriftMS      = 12
-	shadowPausedFollowDriftMS = 3.0 // largest deadband keeping paused-follow copy p99 within +/-3 ms
+	shadowPausedFollowDriftMS = 2.0 // chosen from 60 FPS twin sweep: largest deadband keeping p99 within +/-3 ms
 	shadowPausedDriftMS       = 0.5
 	shadowScratchDriftMS      = 5
 	shadowHalfRTTMaxMS        = 20.0

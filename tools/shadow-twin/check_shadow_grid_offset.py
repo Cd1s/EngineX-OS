@@ -36,7 +36,7 @@ import twin
 P99_LIMIT_MS = float(os.environ.get("SGO_P99_LIMIT_MS", "3.0"))
 PAUSED_LIMIT_MS = 0.05
 COST_WINDOW_S = float(os.environ.get("SGO_COST_WINDOW_S", "20.0"))
-N_SAMPLES = int(os.environ.get("SGO_SAMPLES", "120"))
+N_SAMPLES = int(os.environ.get("SGO_SAMPLES", "150"))
 
 
 def wait_for(fn, timeout=60, label="condition"):
