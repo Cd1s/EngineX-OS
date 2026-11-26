@@ -100,17 +100,16 @@ def oa_log(side):
 
 
 def edit_grid_a(js_body, hold_sec=0.0):
+    getter = 'const ed = PlanckGUI.views.beatGridEditor(typeof planckQuickView !== "undefined" ? planckQuickView.screenLocation : 0);'
     twin.ev(
         "A",
-        '(() => { const ed = PlanckGUI.views.beatGridEditViewController;'
-        ' ed.open(); ed.decksTabBarViewController.selectDeck(1); ' + js_body + ' return "started"; })()',
+        '(() => { ' + getter + ' ed.open(); ed.decksTabBarViewController.selectDeck(1); ' + js_body + ' return "started"; })()',
     )
     if hold_sec > 0:
         time.sleep(hold_sec)
     twin.ev(
         "A",
-        '(() => { const ed = PlanckGUI.views.beatGridEditViewController;'
-        ' ed.setShiftingGridLeft(false); ed.setShiftingGridRight(false); ed.close(); return "closed"; })()',
+        '(() => { ' + getter + ' ed.setShiftingGridLeft(false); ed.setShiftingGridRight(false); ed.close(); return "closed"; })()',
     )
 
 
