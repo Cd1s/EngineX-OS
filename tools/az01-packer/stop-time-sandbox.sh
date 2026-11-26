@@ -29,8 +29,16 @@ image_of() {
 if [ "${2:-}" != --inner ]; then
     [ "$(uname -m)" = aarch64 ] || { echo 'native ARM build host (aarch64) required' >&2; exit 1; }
     [ ! -e "$W" ] || { echo "refusing existing sandbox $W" >&2; exit 1; }
-    mkdir -p "$W"
+    # The arms, checked before anything is built or started: a selector that names no arm (empty or blanks only) or
+    # an unknown one is an error, never a run of zero arms that reports success.
+    read -r -a arms <<< "${STOP_TIME_ARMS-2deck 4deck}"
+    [ ${#arms[@]} -gt 0 ] || { echo "STOP_TIME_ARMS names no arm (use 2deck and/or 4deck)" >&2; exit 1; }
+    for arm in "${arms[@]}"; do
+        case $arm in 2deck|4deck) ;; *) echo "unknown arm $arm (use 2deck and/or 4deck)" >&2; exit 1 ;; esac
+    done
     boards=("${@:2}"); [ ${#boards[@]} -gt 0 ] || boards=(JP07 JP08)
+    for board in "${boards[@]}"; do image_of "$board" > /dev/null; done
+    mkdir -p "$W"
     for board in "${boards[@]}"; do
         image=$(image_of "$board")
         dir=$W/$(basename "$image")
@@ -64,7 +72,7 @@ PY
     ENGINEX_OUTER_MNTNS=$(readlink /proc/self/ns/mnt)
     ENGINEX_OUTER_NETNS=$(readlink /proc/self/ns/net)
     for board in "${boards[@]}"; do
-        for arm in ${STOP_TIME_ARMS:-2deck 4deck}; do
+        for arm in "${arms[@]}"; do
             unshare -m -n -p -f --kill-child --propagation private bash "$0" "$W" --inner "$board" "$arm" || fail=1
         done
     done

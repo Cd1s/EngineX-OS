@@ -114,7 +114,8 @@ Item {
         if (++probe.polls % 20 === 1) say("load poll loaded=" + (l ? l.state : "absent") + " orig=" + (o ? num(o.unnormalized) : "absent"))
         return !!l && l.state && !!o && o.unnormalized > 60
     }
-    // One brake: play Deck 1 for two seconds, release PLAY, sample the position every 20 ms for 2.5 s.
+    // One brake: play Deck 1 for two seconds, release PLAY, sample the position every 20 ms until the deck has stopped
+    // (no movement over 300 ms) or 12 s have passed.
     property var samples: []
     property real releasedAt: 0
     Timer {
