@@ -4800,7 +4800,8 @@ trueMs-=5;
 const beforeTrim=bodies.length;
 for(let i=0;i<8;i++) step(80); // 640 ms -> next 500 ms heartbeat
 assert.equal(bodies.length,beforeTrim+1,'5 ms phase trim while wfLive did not post on next heartbeat');
-assert(Math.abs(bodies[bodies.length-1][0].positionMs-trueMs)<0.01,'heartbeat posted trimmed draw position');
+const trimmed=bodies[bodies.length-1][0];
+assert(Math.abs(trimmed.positionMs+(now-trimmed.at)-trueMs)<0.01,'heartbeat posted trimmed draw position: '+trimmed.positionMs+' at '+trimmed.at+' vs '+trueMs+' at '+now);
 assert.equal(scShadowTickTimer.interval,80,'heartbeat trim must keep 80 ms steady cadence');
 // 2b. Single-tick frame dips (-9 ms) and a late GUI stall tick are rejected with zero positive bias.
 let ageDip = 0;
