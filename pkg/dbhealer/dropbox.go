@@ -16,7 +16,7 @@ import (
 const (
 	dropboxCursorFile   = ".enginex-dropbox-cursor"
 	dropboxCursorPrefix = "v1"
-	dropboxScanPageSize = 256
+	dropboxScanPageSize = 512
 )
 
 type dropboxTrackCandidate struct {
@@ -42,22 +42,17 @@ var localizeDropboxTrackBatch func()
 // Manager or a manual copy placed the audio file locally on the SD card or USB
 // drive.
 //
-// Discovery is paged by Track.id and context-aware so large libraries without
-// Dropbox rows stop cleanly at caller deadlines and resume from the last
-// examined row across mounts via a per-library cursor file beside m.db (removed
-// on completion, leaving stock m.db schema byte-identical).
-//
-// Paid streaming providers (TIDAL, Beatport, Beatsource, SoundCloud, Amazon
-// Music, Apple Music, OfflineLibrary), online-only Dropbox rows without a local
-// file, truncated/mismatched copies when Track.fileBytes > 0, 0-byte files,
-// directories, symlinks, and paths escaping mount are never modified.
+// It shares runMountTrackPass with HealMountDataOnlyContext and HealMount so
+// standalone callers and the production mount entry point follow the exact
+// same paged, context-aware discovery, cursor persistence, fileBytes size
+// check, and #322 NFD->NFC safeguards.
 func localizeDropboxTracks(ctx context.Context, db *sql.DB, mount string, r *Report) (int, error) {
 	if ctx.Err() != nil {
 		return 1, nil
 	}
 	dbUUID, ok, err := librarySchema302UUID(ctx, db)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if isContextStop(ctx, err) {
 			return 1, nil
 		}
 		return 0, err
@@ -65,211 +60,20 @@ func localizeDropboxTracks(ctx context.Context, db *sql.DB, mount string, r *Rep
 	if !ok {
 		return 0, nil
 	}
-
-	afterID, hadCursor := readDropboxCursor(mount, dbUUID)
-	lastExaminedID := afterID
-	var bridgeManaged map[int64]bool
-	bridgeLoaded := false
-	safeDirs := map[string]bool{}
-	claimedNFC := map[string]int64{}
-
-	pageStmt, err := db.PrepareContext(ctx,
-		`SELECT COUNT(*), COALESCE(MAX(id), 0),
-		        COALESCE(SUM(CASE WHEN path IS NOT NULL AND path <> ''
-		            AND ((streamingSource IS NOT NULL AND streamingSource <> '') OR (uri IS NOT NULL AND uri <> ''))
-		        THEN 1 ELSE 0 END), 0)
-		 FROM (SELECT id, path, streamingSource, uri FROM Track WHERE id > ? ORDER BY id LIMIT ?)`,
-	)
+	res, err := runMountTrackPass(ctx, db, mount, r, mountTrackPassOptions{
+		runNFD:     false,
+		runDropbox: true,
+		dataOnly:   false,
+		dbUUID:     dbUUID,
+		pageSize:   dropboxScanPageSize,
+	})
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return 1, nil
-		}
-		return 0, err
+		return res.dropboxRemaining, err
 	}
-	defer pageStmt.Close()
-
-	var detailStmt *sql.Stmt
-	defer func() {
-		if detailStmt != nil {
-			_ = detailStmt.Close()
-		}
-	}()
-
-	pageAfter := afterID
-	for {
-		if ctx.Err() != nil {
-			if lastExaminedID > afterID {
-				writeDropboxCursor(mount, dbUUID, lastExaminedID)
-			}
-			return 1, nil
-		}
-		var count, pageLastID, hits int64
-		if err := pageStmt.QueryRowContext(ctx, pageAfter, dropboxScanPageSize).Scan(&count, &pageLastID, &hits); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				if lastExaminedID > afterID {
-					writeDropboxCursor(mount, dbUUID, lastExaminedID)
-				}
-				return 1, nil
-			}
-			return 0, err
-		}
-		if count == 0 {
-			if hadCursor {
-				removeDropboxCursor(mount)
-			}
-			return 0, nil
-		}
-		eof := count < dropboxScanPageSize
-		var page []dropboxTrackCandidate
-		if hits > 0 {
-			if detailStmt == nil {
-				detailStmt, err = db.PrepareContext(ctx,
-					`SELECT id, COALESCE(path,''), COALESCE(streamingSource,''), COALESCE(uri,''), COALESCE(fileBytes,0)
-					 FROM Track
-					 WHERE id > ? AND id <= ?
-					   AND path IS NOT NULL AND path <> ''
-					   AND ((streamingSource IS NOT NULL AND streamingSource <> '') OR (uri IS NOT NULL AND uri <> ''))
-					 ORDER BY id`,
-				)
-				if err != nil {
-					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-						if lastExaminedID > afterID {
-							writeDropboxCursor(mount, dbUUID, lastExaminedID)
-						}
-						return 1, nil
-					}
-					return 0, err
-				}
-			}
-			page, err = queryDropboxPageDetails(ctx, detailStmt, pageAfter, pageLastID)
-			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					if lastExaminedID > afterID {
-						writeDropboxCursor(mount, dbUUID, lastExaminedID)
-					}
-					return 1, nil
-				}
-				return 0, err
-			}
-		}
-		if len(page) > 0 {
-			if !bridgeLoaded {
-				bridgeLoaded = true
-				bridgeManaged, err = loadBridgeManagedForDropbox(ctx, mount)
-				if err != nil {
-					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-						if lastExaminedID > afterID {
-							writeDropboxCursor(mount, dbUUID, lastExaminedID)
-						}
-						return 1, nil
-					}
-					// Conservative fallback matching #322: unreadable bridge state skips updates.
-					bridgeManaged = nil
-					if hadCursor {
-						removeDropboxCursor(mount)
-					}
-					return 0, nil
-				}
-			}
-			rem, examinedID, interrupted, err := processDropboxCandidates(
-				ctx, db, mount, r, page, bridgeManaged, safeDirs, claimedNFC,
-			)
-			if examinedID > lastExaminedID {
-				lastExaminedID = examinedID
-			}
-			if err != nil {
-				return rem, err
-			}
-			if interrupted {
-				if !eof || rem > 0 {
-					if lastExaminedID > afterID {
-						writeDropboxCursor(mount, dbUUID, lastExaminedID)
-					}
-					if rem > 0 {
-						return rem, nil
-					}
-					return 1, nil
-				}
-			}
-		}
-		if pageLastID > lastExaminedID {
-			lastExaminedID = pageLastID
-		}
-		pageAfter = pageLastID
-		if eof {
-			if hadCursor {
-				removeDropboxCursor(mount)
-			}
-			return 0, nil
-		}
-	}
-}
-
-// localizeDropboxCandidates processes Dropbox candidates already collected by
-// healMountContext's unified Track scan (avoiding a second full-table scan on
-// normal mounts).
-func localizeDropboxCandidates(
-	ctx context.Context,
-	db *sql.DB,
-	mount string,
-	r *Report,
-	dbUUID string,
-	afterID int64,
-	hadCursor bool,
-	candidates []dropboxTrackCandidate,
-	lastScannedID int64,
-	eof bool,
-) (int, error) {
-	if len(candidates) == 0 {
-		if eof {
-			if hadCursor {
-				removeDropboxCursor(mount)
-			}
-			return 0, nil
-		}
-		if lastScannedID > afterID {
-			writeDropboxCursor(mount, dbUUID, lastScannedID)
-		}
+	if res.stoppedEarly && res.dropboxRemaining == 0 {
 		return 1, nil
 	}
-	if ctx.Err() != nil {
-		return len(candidates), nil
-	}
-	bridgeManaged, err := loadBridgeManagedForDropbox(ctx, mount)
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return len(candidates), nil
-		}
-		// Conservative fallback matching #322: unreadable bridge state skips updates.
-		return 0, nil
-	}
-	safeDirs := map[string]bool{}
-	claimedNFC := map[string]int64{}
-	rem, examinedID, interrupted, err := processDropboxCandidates(
-		ctx, db, mount, r, candidates, bridgeManaged, safeDirs, claimedNFC,
-	)
-	if err != nil {
-		return rem, err
-	}
-	if interrupted || rem > 0 || !eof {
-		cursorID := examinedID
-		if rem == 0 && lastScannedID > cursorID {
-			cursorID = lastScannedID
-		}
-		if cursorID > afterID {
-			writeDropboxCursor(mount, dbUUID, cursorID)
-		}
-		if rem > 0 {
-			return rem, nil
-		}
-		if !eof {
-			return 1, nil
-		}
-	}
-	if hadCursor {
-		removeDropboxCursor(mount)
-	}
-	return 0, nil
+	return res.dropboxRemaining, nil
 }
 
 func processDropboxCandidates(
@@ -295,19 +99,22 @@ func processDropboxCandidates(
 				break
 			}
 			next++
-			if candidate.id > batchLastID {
-				batchLastID = candidate.id
-			}
 			if bridgeManaged[candidate.id] {
+				if candidate.id > batchLastID {
+					batchLastID = candidate.id
+				}
 				continue
 			}
 			upd, ok, err := resolveDropboxCandidate(ctx, db, mount, candidate, safeDirs, claimedNFC)
 			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				if isContextStop(ctx, err) {
 					next--
 					break
 				}
 				return len(candidates) - start, lastExaminedID, false, err
+			}
+			if candidate.id > batchLastID {
+				batchLastID = candidate.id
 			}
 			if ok {
 				updates = append(updates, upd)
@@ -446,29 +253,6 @@ func applyDropboxUpdates(db *sql.DB, updates []dropboxResolvedUpdate) (fixed, no
 	return fixed, normalized, nil
 }
 
-func queryDropboxPageDetails(ctx context.Context, stmt *sql.Stmt, afterID, maxID int64) ([]dropboxTrackCandidate, error) {
-	rows, err := stmt.QueryContext(ctx, afterID, maxID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var candidates []dropboxTrackCandidate
-	for rows.Next() {
-		var id, fileBytes int64
-		var path, src, uri string
-		if err := rows.Scan(&id, &path, &src, &uri, &fileBytes); err != nil {
-			return nil, err
-		}
-		if path != "" && isDropboxLocalizableTag(src, uri) {
-			candidates = append(candidates, dropboxTrackCandidate{id: id, path: path, fileBytes: fileBytes})
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return candidates, nil
-}
-
 func librarySchema302UUID(ctx context.Context, db *sql.DB) (string, bool, error) {
 	var dbUUID string
 	var major, minor, patch int
@@ -483,10 +267,6 @@ func librarySchema302UUID(ctx context.Context, db *sql.DB) (string, bool, error)
 		return "", false, nil
 	}
 	return strings.TrimSpace(dbUUID), true, nil
-}
-
-func loadBridgeManagedForDropbox(ctx context.Context, mount string) (map[int64]bool, error) {
-	return bridgeManagedTracksContext(ctx, mount)
 }
 
 func isDropboxLocalizableTag(streamingSource, uri string) bool {

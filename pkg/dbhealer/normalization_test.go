@@ -399,6 +399,12 @@ func TestHealMountDataOnlyStopsAtContextDeadline(t *testing.T) {
 	if _, err := db.Exec(`UPDATE Information SET id=99`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`INSERT INTO Playlist(id,title,parentListId,nextListId) VALUES(1,'Set',0,0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO PlaylistEntity(id,listId,trackId,nextEntityId) VALUES(1,1,0,999)`); err != nil {
+		t.Fatal(err)
+	}
 	db.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -430,8 +436,15 @@ func TestHealMountDataOnlyStopsAtContextDeadline(t *testing.T) {
 	if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
 		t.Fatal(err)
 	}
-	if infoID != 99 {
-		t.Fatalf("base heal ran during a soft path stop, Information.id=%d", infoID)
+	if infoID != 1 {
+		t.Fatalf("GL-010 identity was not repaired during soft path stop, Information.id=%d", infoID)
+	}
+	var nextEntity int
+	if err := check.QueryRow(`SELECT nextEntityId FROM PlaylistEntity WHERE id=1`).Scan(&nextEntity); err != nil {
+		t.Fatal(err)
+	}
+	if nextEntity != 999 {
+		t.Fatalf("heavy base heal ran during a soft path stop, nextEntityId=%d", nextEntity)
 	}
 	got, err = HealMountDataOnly(root, 0)
 	if err != nil || !got.Healthy || got.PathsNormalized != 66 {
@@ -441,7 +454,13 @@ func TestHealMountDataOnlyStopsAtContextDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	if infoID != 1 {
-		t.Fatalf("fast path completion did not run base heal, Information.id=%d", infoID)
+		t.Fatalf("Information.id=%d after completion", infoID)
+	}
+	if err := check.QueryRow(`SELECT nextEntityId FROM PlaylistEntity WHERE id=1`).Scan(&nextEntity); err != nil {
+		t.Fatal(err)
+	}
+	if nextEntity != 0 {
+		t.Fatalf("fast path completion did not run base heal, nextEntityId=%d", nextEntity)
 	}
 }
 
@@ -502,6 +521,12 @@ func TestHealMountDataOnlySlowPathDefersBaseHeal(t *testing.T) {
 	if _, err := db.Exec(`UPDATE Information SET id=99`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`INSERT INTO Playlist(id,title,parentListId,nextListId) VALUES(1,'Set',0,0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO PlaylistEntity(id,listId,trackId,nextEntityId) VALUES(1,1,0,999)`); err != nil {
+		t.Fatal(err)
+	}
 	db.Close()
 	normalizeTrackPathBatch = func() { time.Sleep(time.Second) }
 	defer func() { normalizeTrackPathBatch = nil }()
@@ -518,7 +543,25 @@ func TestHealMountDataOnlySlowPathDefersBaseHeal(t *testing.T) {
 	if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
 		t.Fatal(err)
 	}
-	if infoID != 99 {
-		t.Fatalf("slow path pass unexpectedly ran base heal, Information.id=%d", infoID)
+	if infoID != 1 {
+		t.Fatalf("GL-010 identity was not repaired on slow path pass, Information.id=%d", infoID)
+	}
+	var nextEntity int
+	if err := check.QueryRow(`SELECT nextEntityId FROM PlaylistEntity WHERE id=1`).Scan(&nextEntity); err != nil {
+		t.Fatal(err)
+	}
+	if nextEntity != 999 {
+		t.Fatalf("slow path pass unexpectedly ran heavy base heal, nextEntityId=%d", nextEntity)
+	}
+	normalizeTrackPathBatch = nil
+	got, err = HealMountDataOnly(root, 0)
+	if err != nil || !got.Healthy {
+		t.Fatalf("follow-up fast pass failed: %+v %v", got, err)
+	}
+	if err := check.QueryRow(`SELECT nextEntityId FROM PlaylistEntity WHERE id=1`).Scan(&nextEntity); err != nil {
+		t.Fatal(err)
+	}
+	if nextEntity != 0 {
+		t.Fatalf("follow-up fast pass did not run base heal, nextEntityId=%d", nextEntity)
 	}
 }

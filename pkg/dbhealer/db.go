@@ -11,12 +11,16 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 	"golang.org/x/text/unicode/norm"
 	_ "modernc.org/sqlite"
 )
@@ -251,10 +255,8 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		return r, err
 	}
 	fixed := r.ReserveFixed
-	pathsBefore := r.PathsNormalized
-	pathStart := time.Now()
 	dbUUID, dropboxSchemaOK, schemaErr := librarySchema302UUID(ctx, db)
-	if schemaErr != nil && (errors.Is(schemaErr, context.Canceled) || errors.Is(schemaErr, context.DeadlineExceeded)) {
+	if schemaErr != nil && isContextStop(ctx, schemaErr) {
 		if idErr := repairLibraryIdentity(db); idErr != nil {
 			_ = db.Close()
 			r.Mount = mount
@@ -268,37 +270,27 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		}
 		return r, nil
 	}
-	var dropboxAfterID int64
-	var dropboxHadCursor bool
-	if dropboxSchemaOK {
-		if dbUUID == "" {
-			if idErr := repairLibraryIdentity(db); idErr == nil {
-				dbUUID, _, _ = librarySchema302UUID(context.Background(), db)
-			}
+	if dropboxSchemaOK && dbUUID == "" {
+		if idErr := repairLibraryIdentity(db); idErr == nil {
+			dbUUID, _, _ = librarySchema302UUID(context.Background(), db)
 		}
-		dropboxAfterID, dropboxHadCursor = readDropboxCursor(mount, dbUUID)
 	}
-	scan, err := discoverMountTrackCandidates(ctx, db, dropboxSchemaOK, dropboxAfterID)
-	if err != nil {
-		// A path-pass database error means the library may be damaged. Run the
-		// existing base heal so it remains the recovery path for corruption.
-		r, healErr := heal(db, dataOnly)
-		r.ReserveFixed = fixed
-		_ = db.Close()
-		r.Mount = mount
-		if healErr != nil {
-			return r, healErr
-		}
-		return r, err
-	}
-	remaining, rewritten, err := normalizeTrackPathsFromCandidates(ctx, db, mount, scan.nfd, &r)
-	if err != nil {
-		// A path-pass database error means the library may be damaged. Run the
-		// existing base heal so it remains the recovery path for corruption.
+	passRes, err := runMountTrackPass(ctx, db, mount, &r, mountTrackPassOptions{
+		runNFD:     true,
+		runDropbox: dropboxSchemaOK,
+		dataOnly:   dataOnly,
+		dbUUID:     dbUUID,
+		pageSize:   mountDiscoveryPageSize,
+	})
+	if err != nil && !isContextStop(ctx, err) {
+		// A non-context database error during the track pass means the library
+		// may be damaged. Run the existing base heal as the recovery path.
 		pathsFixed := r.PathsNormalized
+		dropboxFixed := r.DropboxLocalized
 		r, healErr := heal(db, dataOnly)
 		r.ReserveFixed = fixed
 		r.PathsNormalized = pathsFixed
+		r.DropboxLocalized = dropboxFixed
 		_ = db.Close()
 		r.Mount = mount
 		if healErr != nil {
@@ -306,59 +298,31 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		}
 		return r, err
 	}
-	if len(rewritten) > 0 {
-		for i := range scan.dropbox {
-			if nextPath, ok := rewritten[scan.dropbox[i].id]; ok {
-				scan.dropbox[i].path = nextPath
+	deferBaseHeal := false
+	if dataOnly {
+		if passRes.stoppedEarly || ctx.Err() != nil {
+			deferBaseHeal = true
+		} else if deadline, hasDeadline := ctx.Deadline(); hasDeadline && (passRes.resumed || passRes.scannedRows >= 4096) && time.Until(deadline) < 250*time.Millisecond {
+			deferBaseHeal = true
+		}
+	}
+	if deferBaseHeal {
+		// Preserve GL-010 library identity before returning early from any
+		// budgeted data-only mount pass so Engine can still attach the library.
+		if dropboxSchemaOK {
+			if idErr := repairLibraryIdentity(db); idErr != nil {
+				_ = db.Close()
+				r.Mount = mount
+				return r, idErr
 			}
-		}
-	}
-	nfdStopped := remaining > 0 || (r.PathsNormalized != pathsBefore && time.Since(pathStart) >= time.Second)
-	if nfdStopped || (ctx.Err() != nil && len(scan.nfd) > 0) {
-		r.Healthy = true
-		closeErr := db.Close()
-		r.Mount = mount
-		log.Printf("dbhealer: mount %s normalized %d track paths, %d remaining", mount, r.PathsNormalized, remaining)
-		if closeErr != nil {
-			return r, closeErr
-		}
-		return r, nil
-	}
-	dropboxBefore := r.DropboxLocalized
-	dropboxStart := time.Now()
-	var dropboxRemaining int
-	if dropboxSchemaOK {
-		dropboxRemaining, err = localizeDropboxCandidates(
-			ctx, db, mount, &r, dbUUID, dropboxAfterID, dropboxHadCursor,
-			scan.dropbox, scan.lastScannedID, scan.eof,
-		)
-		if err != nil {
-			pathsFixed := r.PathsNormalized
-			dropboxFixed := r.DropboxLocalized
-			r, healErr := heal(db, dataOnly)
-			r.ReserveFixed = fixed
-			r.PathsNormalized = pathsFixed
-			r.DropboxLocalized = dropboxFixed
-			_ = db.Close()
-			r.Mount = mount
-			if healErr != nil {
-				return r, healErr
-			}
-			return r, err
-		}
-	}
-	if dataOnly && (ctx.Err() != nil || dropboxRemaining > 0 || (r.DropboxLocalized != dropboxBefore && time.Since(dropboxStart) >= time.Second)) {
-		// Preserve GL-010 library identity before returning early from a budgeted
-		// data-only mount heal so Engine can still attach the library.
-		if idErr := repairLibraryIdentity(db); idErr != nil {
-			_ = db.Close()
-			r.Mount = mount
-			return r, idErr
 		}
 		r.Healthy = true
 		closeErr := db.Close()
 		r.Mount = mount
-		log.Printf("dbhealer: mount %s localized %d dropbox tracks, %d remaining", mount, r.DropboxLocalized, dropboxRemaining)
+		log.Printf("dbhealer: mount %s normalized %d track paths, %d remaining", mount, r.PathsNormalized, passRes.nfdRemaining)
+		if r.DropboxLocalized > 0 || passRes.dropboxRemaining > 0 {
+			log.Printf("dbhealer: mount %s localized %d dropbox tracks, %d remaining", mount, r.DropboxLocalized, passRes.dropboxRemaining)
+		}
 		if closeErr != nil {
 			return r, closeErr
 		}
@@ -377,9 +341,9 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 	}
 	closeErr := db.Close()
 	r.Mount = mount
-	log.Printf("dbhealer: mount %s normalized %d track paths, %d remaining", mount, r.PathsNormalized, remaining)
-	if r.DropboxLocalized > 0 || dropboxRemaining > 0 {
-		log.Printf("dbhealer: mount %s localized %d dropbox tracks, %d remaining", mount, r.DropboxLocalized, dropboxRemaining)
+	log.Printf("dbhealer: mount %s normalized %d track paths, %d remaining", mount, r.PathsNormalized, passRes.nfdRemaining)
+	if r.DropboxLocalized > 0 || passRes.dropboxRemaining > 0 {
+		log.Printf("dbhealer: mount %s localized %d dropbox tracks, %d remaining", mount, r.DropboxLocalized, passRes.dropboxRemaining)
 	}
 	if closeErr != nil {
 		return r, closeErr
@@ -459,30 +423,96 @@ var errLibraryInUse = errors.New("Engine has this drive's library open")
 
 func libraryInUse(root string) bool {
 	path := filepath.Join(root, "Engine Library", "Database2", "m.db")
-	want, err := os.Stat(path)
+	var want unix.Stat_t
+	if err := unix.Stat(path, &want); err != nil {
+		return false
+	}
+	wantDev, wantIno := uint64(want.Dev), uint64(want.Ino)
+	procDir, err := os.Open("/proc")
 	if err != nil {
 		return false
 	}
-	entries, err := os.ReadDir("/proc")
+	entries, err := procDir.Readdirnames(-1)
+	_ = procDir.Close()
 	if err != nil {
 		return false
 	}
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 0 || pid == os.Getpid() {
+	self := os.Getpid()
+	pids := make([]string, 0, len(entries))
+	for _, name := range entries {
+		if name == "" || name[0] < '1' || name[0] > '9' {
 			continue
 		}
-		fds, err := os.ReadDir(filepath.Join("/proc", entry.Name(), "fd"))
-		if err != nil {
+		pid, err := strconv.Atoi(name)
+		if err != nil || pid <= 0 || pid == self {
 			continue
 		}
-		for _, fd := range fds {
-			opened, err := os.Stat(filepath.Join("/proc", entry.Name(), "fd", fd.Name()))
-			if err == nil && os.SameFile(opened, want) {
+		pids = append(pids, name)
+	}
+	if len(pids) == 0 {
+		return false
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers > 4 {
+		workers = 4
+	}
+	if workers > len(pids) {
+		workers = len(pids)
+	}
+	var found atomic.Bool
+	if workers <= 1 {
+		for _, pid := range pids {
+			if pidHoldsFile(pid, wantDev, wantIno, &found) {
 				return true
 			}
 		}
+		return false
 	}
+	var next atomic.Uint64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for !found.Load() {
+				idx := int(next.Add(1) - 1)
+				if idx >= len(pids) {
+					return
+				}
+				if pidHoldsFile(pids[idx], wantDev, wantIno, &found) {
+					found.Store(true)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return found.Load()
+}
+
+func pidHoldsFile(pid string, wantDev, wantIno uint64, found *atomic.Bool) bool {
+	fdDir, err := os.Open("/proc/" + pid + "/fd")
+	if err != nil {
+		return false
+	}
+	fds, err := fdDir.Readdirnames(-1)
+	if err != nil {
+		_ = fdDir.Close()
+		return false
+	}
+	dirFD := int(fdDir.Fd())
+	for _, fd := range fds {
+		if found.Load() {
+			_ = fdDir.Close()
+			return false
+		}
+		var st unix.Stat_t
+		if unix.Fstatat(dirFD, fd, &st, 0) == nil && uint64(st.Dev) == wantDev && uint64(st.Ino) == wantIno {
+			_ = fdDir.Close()
+			return true
+		}
+	}
+	_ = fdDir.Close()
 	return false
 }
 
@@ -546,6 +576,13 @@ func repairLibraryIdentity(db *sql.DB) error {
 	return transaction(db, repairLibraryIdentityTx)
 }
 
+func isContextStop(ctx context.Context, err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return err != nil && ctx.Err() != nil
+}
+
 type mountTrackScan struct {
 	nfd           []trackPathCandidate
 	dropbox       []dropboxTrackCandidate
@@ -553,7 +590,31 @@ type mountTrackScan struct {
 	eof           bool
 }
 
-const mountDiscoveryPageSize = 512
+type mountTrackPage struct {
+	nfd     []trackPathCandidate
+	dropbox []dropboxTrackCandidate
+	count   int64
+	lastID  int64
+	eof     bool
+}
+
+type mountTrackPassOptions struct {
+	runNFD     bool
+	runDropbox bool
+	dataOnly   bool
+	dbUUID     string
+	pageSize   int
+}
+
+type mountTrackPassResult struct {
+	nfdRemaining     int
+	dropboxRemaining int
+	scannedRows      int64
+	resumed          bool
+	stoppedEarly     bool
+}
+
+const mountDiscoveryPageSize = 1024
 
 func isASCII(s string) bool {
 	for i := 0; i < len(s); i++ {
@@ -564,122 +625,394 @@ func isASCII(s string) bool {
 	return true
 }
 
+func prepareMountPageScanStmt(ctx context.Context, db *sql.DB, runNFD, runDropbox bool) (*sql.Stmt, error) {
+	switch {
+	case runNFD && runDropbox:
+		return db.PrepareContext(ctx,
+			`SELECT COUNT(*), COALESCE(MAX(id), 0),
+			        COALESCE(SUM(CASE WHEN path <> '' AND (
+			            octet_length(path) <> length(path)
+			            OR streamingSource <> ''
+			            OR uri <> ''
+			        ) THEN 1 ELSE 0 END), 0)
+			 FROM (SELECT id, path, streamingSource, uri FROM Track WHERE id > ? ORDER BY id LIMIT ?)`,
+		)
+	case runDropbox:
+		return db.PrepareContext(ctx,
+			`SELECT COUNT(*), COALESCE(MAX(id), 0),
+			        COALESCE(SUM(CASE WHEN path <> '' AND (streamingSource <> '' OR uri <> '') THEN 1 ELSE 0 END), 0)
+			 FROM (SELECT id, path, streamingSource, uri FROM Track WHERE id > ? ORDER BY id LIMIT ?)`,
+		)
+	default:
+		return db.PrepareContext(ctx,
+			`SELECT COUNT(*), COALESCE(MAX(id), 0),
+			        COALESCE(SUM(CASE WHEN path <> ''
+			            AND COALESCE(streamingSource,'') = ''
+			            AND octet_length(path) <> length(path)
+			        THEN 1 ELSE 0 END), 0)
+			 FROM (SELECT id, path, streamingSource FROM Track WHERE id > ? ORDER BY id LIMIT ?)`,
+		)
+	}
+}
+
+func prepareMountPageDetailStmt(ctx context.Context, db *sql.DB, runNFD, runDropbox bool) (*sql.Stmt, error) {
+	switch {
+	case runNFD && runDropbox:
+		return db.PrepareContext(ctx,
+			`SELECT id, COALESCE(path,''), COALESCE(streamingSource,''), COALESCE(uri,''), COALESCE(fileBytes,0)
+			 FROM Track
+			 WHERE id > ? AND id <= ?
+			   AND path <> ''
+			   AND (octet_length(path) <> length(path) OR streamingSource <> '' OR uri <> '')
+			 ORDER BY id`,
+		)
+	case runDropbox:
+		return db.PrepareContext(ctx,
+			`SELECT id, COALESCE(path,''), COALESCE(streamingSource,''), COALESCE(uri,''), COALESCE(fileBytes,0)
+			 FROM Track
+			 WHERE id > ? AND id <= ?
+			   AND path <> ''
+			   AND (streamingSource <> '' OR uri <> '')
+			 ORDER BY id`,
+		)
+	default:
+		return db.PrepareContext(ctx,
+			`SELECT id, COALESCE(path,''), COALESCE(streamingSource,''), '', 0
+			 FROM Track
+			 WHERE id > ? AND id <= ?
+			   AND path <> ''
+			   AND COALESCE(streamingSource,'') = ''
+			   AND octet_length(path) <> length(path)
+			 ORDER BY id`,
+		)
+	}
+}
+
+func scanMountTrackPage(
+	ctx context.Context,
+	db *sql.DB,
+	pageStmt *sql.Stmt,
+	detailStmt **sql.Stmt,
+	afterID int64,
+	pageSize int,
+	runNFD, runDropbox bool,
+) (mountTrackPage, error) {
+	var page mountTrackPage
+	page.lastID = afterID
+	if ctx.Err() != nil {
+		return page, ctx.Err()
+	}
+	var count, maxID, hits int64
+	if err := pageStmt.QueryRowContext(ctx, afterID, pageSize).Scan(&count, &maxID, &hits); err != nil {
+		return page, err
+	}
+	page.count = count
+	if count == 0 {
+		page.eof = true
+		return page, nil
+	}
+	page.lastID = maxID
+	page.eof = count < int64(pageSize)
+	if hits == 0 {
+		return page, nil
+	}
+	if ctx.Err() != nil {
+		return page, ctx.Err()
+	}
+	if *detailStmt == nil {
+		var err error
+		*detailStmt, err = prepareMountPageDetailStmt(ctx, db, runNFD, runDropbox)
+		if err != nil {
+			return page, err
+		}
+	}
+	rows, err := (*detailStmt).QueryContext(ctx, afterID, maxID)
+	if err != nil {
+		return page, err
+	}
+	for rows.Next() {
+		var id, fileBytes int64
+		var path, src, uri string
+		if err := rows.Scan(&id, &path, &src, &uri, &fileBytes); err != nil {
+			_ = rows.Close()
+			return page, err
+		}
+		if path == "" {
+			continue
+		}
+		if runNFD && src == "" && !isASCII(path) && !norm.NFC.IsNormalString(path) {
+			page.nfd = append(page.nfd, trackPathCandidate{id: id, path: path, nfcPath: norm.NFC.String(path)})
+		}
+		if runDropbox && isDropboxLocalizableTag(src, uri) {
+			page.dropbox = append(page.dropbox, dropboxTrackCandidate{id: id, path: path, fileBytes: fileBytes})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return page, err
+	}
+	if err := rows.Close(); err != nil {
+		return page, err
+	}
+	return page, nil
+}
+
 func discoverMountTrackCandidates(ctx context.Context, db *sql.DB, collectDropbox bool, dropboxAfterID int64) (mountTrackScan, error) {
 	var scan mountTrackScan
 	if ctx.Err() != nil {
 		return scan, nil
 	}
-	pageStmt, err := db.PrepareContext(ctx,
-		`SELECT id, COALESCE(path,''),
-		        CASE WHEN (streamingSource IS NOT NULL AND streamingSource <> '')
-		               OR (uri IS NOT NULL AND uri <> '') THEN 1 ELSE 0 END
-		 FROM Track
-		 WHERE id > ?
-		 ORDER BY id
-		 LIMIT ?`,
-	)
+	pageStmt, err := prepareMountPageScanStmt(ctx, db, true, collectDropbox)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if isContextStop(ctx, err) {
 			return scan, nil
 		}
 		return scan, err
 	}
 	defer pageStmt.Close()
 
-	var streamDetailStmt *sql.Stmt
+	var detailStmt *sql.Stmt
 	defer func() {
-		if streamDetailStmt != nil {
-			_ = streamDetailStmt.Close()
+		if detailStmt != nil {
+			_ = detailStmt.Close()
 		}
 	}()
 
 	var afterID int64
 	for {
-		if ctx.Err() != nil {
-			return scan, nil
-		}
-		rows, err := pageStmt.QueryContext(ctx, afterID, mountDiscoveryPageSize)
+		page, err := scanMountTrackPage(ctx, db, pageStmt, &detailStmt, afterID, mountDiscoveryPageSize, true, collectDropbox)
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if isContextStop(ctx, err) {
 				return scan, nil
 			}
 			return scan, err
 		}
-		count := 0
-		pageLastID := afterID
-		var streamIDs []int64
-		var streamPaths []string
-		for rows.Next() {
-			count++
-			var id int64
-			var path string
-			var hasStream int
-			if err := rows.Scan(&id, &path, &hasStream); err != nil {
-				_ = rows.Close()
-				return scan, err
-			}
-			pageLastID = id
-			if path == "" {
-				continue
-			}
-			if hasStream == 0 {
-				if !isASCII(path) && !norm.NFC.IsNormalString(path) {
-					scan.nfd = append(scan.nfd, trackPathCandidate{id: id, path: path, nfcPath: norm.NFC.String(path)})
-				}
-			} else {
-				streamIDs = append(streamIDs, id)
-				streamPaths = append(streamPaths, path)
-			}
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return scan, nil
-			}
-			return scan, err
-		}
-		if err := rows.Close(); err != nil {
-			return scan, err
-		}
-		for i, id := range streamIDs {
-			if ctx.Err() != nil {
-				return scan, nil
-			}
-			if streamDetailStmt == nil {
-				streamDetailStmt, err = db.PrepareContext(ctx,
-					`SELECT COALESCE(streamingSource,''), COALESCE(uri,''), COALESCE(fileBytes,0) FROM Track WHERE id=?`,
-				)
-				if err != nil {
-					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-						return scan, nil
-					}
-					return scan, err
-				}
-			}
-			var src, uri string
-			var fileBytes int64
-			if err := streamDetailStmt.QueryRowContext(ctx, id).Scan(&src, &uri, &fileBytes); err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return scan, nil
-				}
-				return scan, err
-			}
-			path := streamPaths[i]
-			if src == "" && !isASCII(path) && !norm.NFC.IsNormalString(path) {
-				scan.nfd = append(scan.nfd, trackPathCandidate{id: id, path: path, nfcPath: norm.NFC.String(path)})
-			}
-			if collectDropbox && id > dropboxAfterID && isDropboxLocalizableTag(src, uri) {
-				scan.dropbox = append(scan.dropbox, dropboxTrackCandidate{id: id, path: path, fileBytes: fileBytes})
-			}
-			if id > scan.lastScannedID {
-				scan.lastScannedID = id
-			}
-		}
-		afterID = pageLastID
-		scan.lastScannedID = pageLastID
-		if count < mountDiscoveryPageSize {
+		if page.count == 0 {
 			scan.eof = true
 			return scan, nil
+		}
+		scan.nfd = append(scan.nfd, page.nfd...)
+		for _, cand := range page.dropbox {
+			if cand.id > dropboxAfterID {
+				scan.dropbox = append(scan.dropbox, cand)
+			}
+		}
+		afterID = page.lastID
+		scan.lastScannedID = page.lastID
+		if page.eof {
+			scan.eof = true
+			return scan, nil
+		}
+	}
+}
+
+func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report, opts mountTrackPassOptions) (mountTrackPassResult, error) {
+	var res mountTrackPassResult
+	pageSize := opts.pageSize
+	if pageSize <= 0 {
+		pageSize = mountDiscoveryPageSize
+	}
+	var startAfterID int64
+	var hadCursor bool
+	if opts.runDropbox {
+		startAfterID, hadCursor = readDropboxCursor(mount, opts.dbUUID)
+		res.resumed = hadCursor && startAfterID > 0
+	}
+	completedID := startAfterID
+	saveCursorIfAdvanced := func(cursorID int64) {
+		if opts.runDropbox && cursorID > startAfterID {
+			writeDropboxCursor(mount, opts.dbUUID, cursorID)
+		}
+	}
+	if ctx.Err() != nil {
+		res.stoppedEarly = true
+		return res, nil
+	}
+
+	pageStmt, err := prepareMountPageScanStmt(ctx, db, opts.runNFD, opts.runDropbox)
+	if err != nil {
+		if isContextStop(ctx, err) {
+			res.stoppedEarly = true
+			return res, nil
+		}
+		return res, err
+	}
+	defer pageStmt.Close()
+
+	var detailStmt *sql.Stmt
+	defer func() {
+		if detailStmt != nil {
+			_ = detailStmt.Close()
+		}
+	}()
+
+	passStart := time.Now()
+	nfdBefore := r.PathsNormalized
+	dropboxBefore := r.DropboxLocalized
+	claimedNFC := map[string]int64{}
+	dirs := make(map[string]map[string]bool)
+	safeDirs := map[string]bool{}
+	var bridgeManaged map[int64]bool
+	bridgeLoaded := false
+	bridgeUnreadable := false
+
+	ensureBridge := func() (bool, error) {
+		if bridgeLoaded {
+			return !bridgeUnreadable, nil
+		}
+		loaded, err := bridgeManagedTracksContext(ctx, mount)
+		if err != nil {
+			if isContextStop(ctx, err) {
+				return false, err
+			}
+			bridgeLoaded = true
+			bridgeUnreadable = true
+			return false, nil
+		}
+		bridgeLoaded = true
+		bridgeManaged = loaded
+		return true, nil
+	}
+
+	afterID := startAfterID
+	for {
+		if ctx.Err() != nil {
+			saveCursorIfAdvanced(completedID)
+			res.stoppedEarly = true
+			return res, nil
+		}
+		page, err := scanMountTrackPage(ctx, db, pageStmt, &detailStmt, afterID, pageSize, opts.runNFD, opts.runDropbox)
+		if err != nil {
+			if isContextStop(ctx, err) {
+				saveCursorIfAdvanced(completedID)
+				res.stoppedEarly = true
+				return res, nil
+			}
+			return res, err
+		}
+		res.scannedRows += page.count
+		if page.count == 0 {
+			if opts.runDropbox && hadCursor {
+				removeDropboxCursor(mount)
+			}
+			return res, nil
+		}
+
+		// 1. #322 NFD->NFC normalization for ordinary non-streaming rows on this page.
+		var rewritten map[int64]string
+		if opts.runNFD && len(page.nfd) > 0 {
+			bridgeOK, berr := ensureBridge()
+			if berr != nil {
+				if isContextStop(ctx, berr) {
+					saveCursorIfAdvanced(completedID)
+					res.stoppedEarly = true
+					return res, nil
+				}
+				return res, berr
+			}
+			if bridgeOK {
+				nfdRem, nfdLastID, rw, nerr := normalizeTrackPathsBatch(ctx, db, mount, page.nfd, bridgeManaged, claimedNFC, dirs, r)
+				if nerr != nil {
+					if isContextStop(ctx, nerr) {
+						safeID := completedID
+						if nfdLastID > safeID && (len(page.dropbox) == 0 || nfdLastID < page.dropbox[0].id) {
+							safeID = nfdLastID
+						}
+						saveCursorIfAdvanced(safeID)
+						res.nfdRemaining = nfdRem
+						res.stoppedEarly = true
+						return res, nil
+					}
+					return res, nerr
+				}
+				rewritten = rw
+				nfdSlow := opts.dataOnly && r.PathsNormalized != nfdBefore && time.Since(passStart) >= time.Second
+				if nfdRem > 0 || ctx.Err() != nil || nfdSlow {
+					safeID := completedID
+					if nfdLastID > safeID && (len(page.dropbox) == 0 || nfdLastID < page.dropbox[0].id) {
+						safeID = nfdLastID
+					}
+					if nfdRem == 0 && len(page.dropbox) == 0 && page.eof {
+						if opts.runDropbox && hadCursor {
+							removeDropboxCursor(mount)
+						}
+					} else {
+						saveCursorIfAdvanced(safeID)
+					}
+					res.nfdRemaining = nfdRem
+					res.stoppedEarly = true
+					return res, nil
+				}
+			}
+		}
+
+		// Apply any paths normalized above to Dropbox candidates on this page
+		// (e.g. packTracks rows with empty streamingSource + Dropbox URI).
+		if len(rewritten) > 0 && len(page.dropbox) > 0 {
+			for i := range page.dropbox {
+				if nextPath, ok := rewritten[page.dropbox[i].id]; ok {
+					page.dropbox[i].path = nextPath
+				}
+			}
+		}
+
+		// 2. S22 Dropbox localization for complete local files on this page.
+		if opts.runDropbox && len(page.dropbox) > 0 {
+			bridgeOK, berr := ensureBridge()
+			if berr != nil {
+				if isContextStop(ctx, berr) {
+					saveCursorIfAdvanced(completedID)
+					res.stoppedEarly = true
+					return res, nil
+				}
+				return res, berr
+			}
+			if bridgeOK {
+				dbRem, examinedID, interrupted, derr := processDropboxCandidates(
+					ctx, db, mount, r, page.dropbox, bridgeManaged, safeDirs, claimedNFC,
+				)
+				if derr != nil {
+					if isContextStop(ctx, derr) {
+						cursorID := completedID
+						if examinedID > cursorID {
+							cursorID = examinedID
+						}
+						saveCursorIfAdvanced(cursorID)
+						res.dropboxRemaining = dbRem
+						res.stoppedEarly = true
+						return res, nil
+					}
+					return res, derr
+				}
+				dropboxSlow := opts.dataOnly && r.DropboxLocalized != dropboxBefore && time.Since(passStart) >= time.Second
+				if interrupted || dbRem > 0 || ctx.Err() != nil || dropboxSlow {
+					cursorID := completedID
+					if interrupted || dbRem > 0 {
+						if examinedID > cursorID {
+							cursorID = examinedID
+						}
+					} else if page.lastID > cursorID {
+						cursorID = page.lastID
+					}
+					if !page.eof || dbRem > 0 || interrupted {
+						saveCursorIfAdvanced(cursorID)
+					} else if hadCursor {
+						removeDropboxCursor(mount)
+					}
+					res.dropboxRemaining = dbRem
+					res.stoppedEarly = true
+					return res, nil
+				}
+			}
+		}
+
+		completedID = page.lastID
+		afterID = page.lastID
+		if page.eof {
+			if opts.runDropbox && hadCursor {
+				removeDropboxCursor(mount)
+			}
+			return res, nil
 		}
 	}
 }
@@ -689,37 +1022,54 @@ func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Repor
 	if err != nil {
 		return 0, err
 	}
-	remaining, _, err := normalizeTrackPathsFromCandidates(ctx, db, mount, candidates, r)
-	return remaining, err
-}
-
-func normalizeTrackPathsFromCandidates(ctx context.Context, db *sql.DB, mount string, candidates []trackPathCandidate, r *Report) (int, map[int64]string, error) {
 	if len(candidates) == 0 {
-		return 0, nil, nil
+		return 0, nil
 	}
 	bridgeManaged, err := bridgeManagedTracksContext(ctx, mount)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return len(candidates), nil, nil
+		if isContextStop(ctx, err) {
+			return len(candidates), nil
 		}
 		bridgeManaged = map[int64]bool{}
 		for _, candidate := range candidates {
 			bridgeManaged[candidate.id] = true
 		}
 	}
-	eligible := candidates[:0]
-	claimed := map[string]int64{}
+	rem, _, _, err := normalizeTrackPathsBatch(
+		ctx, db, mount, candidates, bridgeManaged,
+		map[string]int64{}, make(map[string]map[string]bool), r,
+	)
+	return rem, err
+}
+
+func normalizeTrackPathsBatch(
+	ctx context.Context,
+	db *sql.DB,
+	mount string,
+	candidates []trackPathCandidate,
+	bridgeManaged map[int64]bool,
+	claimed map[string]int64,
+	dirs map[string]map[string]bool,
+	r *Report,
+) (remaining int, lastCompletedID int64, rewritten map[int64]string, err error) {
+	if len(candidates) == 0 {
+		return 0, 0, nil, nil
+	}
+	eligible := make([]trackPathCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
+		if ctx.Err() != nil {
+			return len(candidates), lastCompletedID, nil, nil
+		}
 		if bridgeManaged[candidate.id] {
 			continue
 		}
 		var other int64
-		err := db.QueryRow(`SELECT id FROM Track WHERE path=?`, candidate.nfcPath).Scan(&other)
+		err := db.QueryRowContext(ctx, `SELECT id FROM Track WHERE path=?`, candidate.nfcPath).Scan(&other)
 		if err == nil && other != candidate.id {
 			continue
 		}
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return 0, nil, err
+			return 0, lastCompletedID, nil, err
 		}
 		if other, collision := claimed[candidate.nfcPath]; collision && other != candidate.id {
 			continue
@@ -728,7 +1078,6 @@ func normalizeTrackPathsFromCandidates(ctx context.Context, db *sql.DB, mount st
 		eligible = append(eligible, candidate)
 	}
 	candidates = eligible
-	dirs := make(map[string]map[string]bool)
 	listFiles := func(dir string) map[string]bool {
 		if names, ok := dirs[dir]; ok {
 			return names
@@ -745,25 +1094,28 @@ func normalizeTrackPathsFromCandidates(ctx context.Context, db *sql.DB, mount st
 		dirs[dir] = names
 		return names
 	}
-	rewritten := map[int64]string{}
-	remaining := 0
+	rewritten = map[int64]string{}
 	for start := 0; start < len(candidates); start += 64 {
-		if err := ctx.Err(); err != nil {
-			return len(candidates) - start, rewritten, nil
+		if ctx.Err() != nil {
+			return len(candidates) - start, lastCompletedID, rewritten, nil
 		}
 		end := min(start+64, len(candidates))
 		tx, err := db.Begin()
 		if err != nil {
-			return remaining, rewritten, err
+			return remaining, lastCompletedID, rewritten, err
 		}
 		next := start
 		batchFixed := 0
+		batchLastID := lastCompletedID
 		batchRewritten := make([]trackPathCandidate, 0, end-start)
 		for _, candidate := range candidates[start:end] {
 			if ctx.Err() != nil {
 				break
 			}
 			next++
+			if candidate.id > batchLastID {
+				batchLastID = candidate.id
+			}
 			oldFile, ok := trackPath(mount, candidate.path)
 			if !ok {
 				continue
@@ -801,13 +1153,16 @@ func normalizeTrackPathsFromCandidates(ctx context.Context, db *sql.DB, mount st
 					continue
 				}
 				_ = tx.Rollback()
-				return remaining, rewritten, err
+				return remaining, lastCompletedID, rewritten, err
 			}
 			batchFixed++
 			batchRewritten = append(batchRewritten, candidate)
 		}
 		if err := tx.Commit(); err != nil {
-			return remaining, rewritten, err
+			return remaining, lastCompletedID, rewritten, err
+		}
+		if batchLastID > lastCompletedID {
+			lastCompletedID = batchLastID
 		}
 		for _, candidate := range batchRewritten {
 			rewritten[candidate.id] = candidate.nfcPath
@@ -817,11 +1172,11 @@ func normalizeTrackPathsFromCandidates(ctx context.Context, db *sql.DB, mount st
 			normalizeTrackPathBatch()
 		}
 		if next < end {
-			return len(candidates) - next, rewritten, nil
+			return len(candidates) - next, lastCompletedID, rewritten, nil
 		}
 		remaining = len(candidates) - end
 	}
-	return remaining, rewritten, nil
+	return remaining, lastCompletedID, rewritten, nil
 }
 
 func collectTrackPathCandidates(db *sql.DB) ([]trackPathCandidate, error) {

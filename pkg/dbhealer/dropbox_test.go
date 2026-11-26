@@ -629,3 +629,189 @@ func TestHealMountDropboxRespectsBridgeStateAndReadOnly(t *testing.T) {
 		t.Fatalf("full HealMount did not localize dropbox track: %+v %v", got, err)
 	}
 }
+
+func TestHealMountMixedNFDAndDropboxPreservesIdentityAndFinishes(t *testing.T) {
+	for _, mode := range []string{"data-only", "full"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			testlibrary.ExportDrive(t, root)
+			music := filepath.Join(root, "Music")
+			if err := os.Rename(filepath.Join(music, "Track002.wav"), filepath.Join(music, "Café.wav")); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", filepath.Join(root, "Engine Library", "Database2", "m.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			nfd := norm.NFD.String("Café.wav")
+			if _, err := db.Exec(`UPDATE Track SET path=?,filename=? WHERE id=2`, "../Music/"+nfd, nfd); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE Track SET path='../Music/Track001.wav', filename='Track001.wav', streamingSource='Dropbox', uri='streaming://Dropbox/Track/1', streamingFlags=5 WHERE id=1`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE Information SET id=99`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO PlaylistEntity(id,listId,trackId,nextEntityId) VALUES(99,1,0,999)`); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			t.Cleanup(func() { normalizeTrackPathBatch = nil })
+			var got Report
+			if mode == "full" {
+				normalizeTrackPathBatch = func() { time.Sleep(1050 * time.Millisecond) }
+				got, err = HealMount(root, 0)
+			} else {
+				normalizeTrackPathBatch = cancel
+				got, err = HealMountDataOnlyContext(ctx, root, 0)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			check, err := sql.Open("sqlite", filepath.Join(root, "Engine Library", "Database2", "m.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer check.Close()
+			var infoID, nextEntity int
+			var src1 string
+			if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
+				t.Fatal(err)
+			}
+			if err := check.QueryRow(`SELECT nextEntityId FROM PlaylistEntity WHERE id=99`).Scan(&nextEntity); err != nil {
+				t.Fatal(err)
+			}
+			if err := check.QueryRow(`SELECT coalesce(streamingSource,'') FROM Track WHERE id=1`).Scan(&src1); err != nil {
+				t.Fatal(err)
+			}
+			if !got.Healthy || infoID != 1 {
+				t.Fatalf("mode=%s healthy=%v Information.id=%d", mode, got.Healthy, infoID)
+			}
+			if mode == "full" {
+				if nextEntity != 0 || src1 != "" {
+					t.Fatalf("full heal did not finish: nextEntity=%d src1=%q", nextEntity, src1)
+				}
+			} else {
+				if nextEntity != 999 {
+					t.Fatalf("data-only soft stop ran heavy base heal: nextEntity=%d", nextEntity)
+				}
+				// Next pass must still visit Dropbox id=1 (cursor must not skip it) and finish base heal.
+				normalizeTrackPathBatch = nil
+				check.Close()
+				got2, err := HealMountDataOnly(root, 0)
+				if err != nil || !got2.Healthy || got2.DropboxLocalized != 1 {
+					t.Fatalf("follow-up pass did not localize Dropbox track: %+v %v", got2, err)
+				}
+				check2, err := sql.Open("sqlite", filepath.Join(root, "Engine Library", "Database2", "m.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer check2.Close()
+				if err := check2.QueryRow(`SELECT coalesce(streamingSource,'') FROM Track WHERE id=1`).Scan(&src1); err != nil {
+					t.Fatal(err)
+				}
+				if err := check2.QueryRow(`SELECT nextEntityId FROM PlaylistEntity WHERE id=99`).Scan(&nextEntity); err != nil {
+					t.Fatal(err)
+				}
+				if src1 != "" || nextEntity != 0 {
+					t.Fatalf("follow-up pass incomplete: src1=%q nextEntity=%d", src1, nextEntity)
+				}
+			}
+		})
+	}
+}
+
+func TestHealMountDataOnlyPublicAPIResumesLargeLibraryAcrossDeadlines(t *testing.T) {
+	const totalTracks = 20000
+	root := t.TempDir()
+	testlibrary.ExportDrive(t, root)
+	dbPath := filepath.Join(root, "Engine Library", "Database2", "m.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE Track SET path='../Music/Track001.wav', filename='Track001.wav', streamingSource='Dropbox', uri='streaming://Dropbox/Track/1', streamingFlags=5 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`WITH RECURSIVE n(i) AS (VALUES(9) UNION ALL SELECT i+1 FROM n WHERE i<` + strconv.Itoa(totalTracks) + `)
+		INSERT INTO Track(id,path) SELECT i,printf('../Music/%d.wav',i) FROM n`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE Track SET path='../Music/Track002.wav', filename='Track002.wav', fileBytes=(SELECT fileBytes FROM Track WHERE id=2),
+		streamingSource='Dropbox', uri='streaming://Dropbox/Track/tail', streamingFlags=5 WHERE id=?`, totalTracks); err != nil {
+		t.Fatal(err)
+	}
+	// Calibrate per-pass soft budget to this host (including -race instrumentation)
+	// so every run exercises multiple deadline-interrupted passes without flaking.
+	openStart := time.Now()
+	_ = libraryInUse(root)
+	probeDB, err := Open(dbPath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	openDur := time.Since(openStart)
+	scanStart := time.Now()
+	if _, err := discoverMountTrackCandidates(context.Background(), probeDB, true, 0); err != nil {
+		probeDB.Close()
+		t.Fatal(err)
+	}
+	scanDur := time.Since(scanStart)
+	probeDB.Close()
+	db.Close()
+
+	passBudget := openDur + scanDur/3
+	if minBudget := openDur + time.Millisecond; passBudget < minBudget {
+		passBudget = minBudget
+	}
+	maxElapsed := max(passBudget*4, 2*time.Second)
+
+	tagged := func() int {
+		t.Helper()
+		c, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		var n int
+		if err := c.QueryRow(`SELECT count(*) FROM Track WHERE id IN (1,?) AND streamingSource='Dropbox'`, totalTracks).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	cursorSeen := 0
+	for pass := 1; pass <= 20 && tagged() > 0; pass++ {
+		ctx, cancel := context.WithTimeout(context.Background(), passBudget)
+		start := time.Now()
+		rep, err := HealMountDataOnlyContext(ctx, root, 0)
+		elapsed := time.Since(start)
+		cancel()
+		if err != nil {
+			t.Fatalf("pass=%d unexpected error (must soft-stop, not fail or trigger recovery): %v (elapsed=%s)", pass, err, elapsed)
+		}
+		if !rep.Healthy {
+			t.Fatalf("pass=%d not healthy: %+v", pass, rep)
+		}
+		if elapsed > maxElapsed {
+			t.Fatalf("pass=%d overran %s soft budget to %s (unbounded recovery leaked)", pass, passBudget, elapsed)
+		}
+		if _, statErr := os.Stat(dropboxCursorPath(root)); statErr == nil {
+			cursorSeen++
+		} else if !os.IsNotExist(statErr) {
+			t.Fatal(statErr)
+		}
+	}
+	if rem := tagged(); rem != 0 {
+		t.Fatalf("bounded passes left %d Dropbox tracks unlocalized (budget=%s open=%s scan=%s cursorSeen=%d)", rem, passBudget, openDur, scanDur, cursorSeen)
+	}
+	if cursorSeen == 0 {
+		t.Fatalf("expected at least one deadline-resumed pass with cursor (budget=%s open=%s scan=%s)", passBudget, openDur, scanDur)
+	}
+	if _, err := os.Stat(dropboxCursorPath(root)); !os.IsNotExist(err) {
+		t.Fatalf("cursor not removed after finishing large library: %v", err)
+	}
+}
