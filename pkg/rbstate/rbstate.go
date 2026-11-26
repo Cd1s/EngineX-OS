@@ -146,14 +146,17 @@ type Track struct {
 	Written      []byte      `json:"wr,omitempty"` // digest of grid, cues and loops as the bridge last wrote them
 	// Write-back's note of the row: the digest of its cues, loops and tags the export holds, and
 	// the row's lastEditTime then. A row whose time has not moved is not read.
-	Synced     []byte `json:"sy,omitempty"`
-	MetaDigest []byte `json:"md,omitempty"`
-	Edit       int64  `json:"ed,omitempty"`
-	Native     bool   `json:"nat,omitempty"` // an Engine-made row: lists refer to it, the bridge never writes it
-	FastCues   []byte `json:"frc,omitempty"`
-	FastLoops  []byte `json:"frl,omitempty"`
-	FastActive uint32 `json:"fra,omitempty"`
-	FastKnown  bool   `json:"frk,omitempty"`
+	Synced           []byte `json:"sy,omitempty"`
+	MetaDigest       []byte `json:"md,omitempty"`
+	Edit             int64  `json:"ed,omitempty"`
+	Native           bool   `json:"nat,omitempty"` // an Engine-made row: lists refer to it, the bridge never writes it
+	FastCues         []byte `json:"frc,omitempty"`
+	FastLoops        []byte `json:"frl,omitempty"`
+	FastActive       uint32 `json:"fra,omitempty"`
+	FastKnown        bool   `json:"frk,omitempty"`
+	SyncedColorTag   []byte `json:"sct,omitempty"`
+	SyncedHotColors  []byte `json:"shc,omitempty"`
+	SyncedLoopColors []byte `json:"slc,omitempty"`
 }
 
 // List is one playlist or folder of the view.

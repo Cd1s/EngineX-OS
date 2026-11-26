@@ -150,6 +150,9 @@ func takeLive(s, base *rbstate.Snapshot, ch enginedb.MirrorChange) {
 				current.Built = old.Built
 				current.Written = bytes.Clone(old.Written)
 				current.Synced = bytes.Clone(old.Synced)
+				current.SyncedColorTag = bytes.Clone(old.SyncedColorTag)
+				current.SyncedHotColors = bytes.Clone(old.SyncedHotColors)
+				current.SyncedLoopColors = bytes.Clone(old.SyncedLoopColors)
 				current.Edit = old.Edit
 				current.Native = old.Native
 			}
