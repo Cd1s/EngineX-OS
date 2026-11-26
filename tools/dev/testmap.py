@@ -14,8 +14,9 @@ Rules, in this order (a file can select from several):
                                        plus the directory's catch-all (test_az01_packer.py, tools/stems/test_worker.py,
                                        tools/splash/test_splash_tool.py)
   C sources (.c/.h)                    every C test that includes the file, directly or through other sources
-                                       (tools/dev/c-tests.json: the release checklist's variants for its six tests,
-                                       the armhf way for the other tools/ui-mod tests), and, when the shipped hooks
+                                       (tools/dev/c-tests.json: the release checklist's variants for its six tests;
+                                       a test a Python or bash test builds runs through that test; the armhf way
+                                       for the other tools/ui-mod tests), and, when the shipped hooks
                                        include it, tests/test_rootfs_overlay.sh (it rebuilds both hooks)
   rootfs-overlay/, the hook build scripts             tests/test_rootfs_overlay.sh
   docs/, READMEs                       tools/az01-packer/test_docs_audit.py
@@ -39,6 +40,7 @@ HOOK_BUILDS = ('tools/ui-mod/build.sh', 'tools/edisksd-hook/build.sh')
 C_TEST_DIRS = ('tools/ui-mod', 'tools/edisksd-hook')
 GENERIC = {'main.go', 'doc.go', 'build.sh', 'README.md', 'Makefile', 'go.mod', 'go.sum', 'index.html', 'content.js',
            'app.js', 'style.css', 'config.json', 'version.txt', '__init__.py', 'settings.conf', 'LICENSE'}
+_CC = re.compile(r'(?<![\w./-])(?:cc|gcc|clang|arm-linux-gnueabihf-gcc|aarch64-linux-gnu-gcc)(?![\w.-])')
 _TOKEN = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_./-]*')
 DIR_MENTION_LIMIT = 3
 MENTION_EXCLUDE = {'tools/dev/test_devtools.py'}  # its file names are fixtures, not dependencies  # a directory more test files name is a broad one (tools/ui-mod/...), not a reference
@@ -177,11 +179,22 @@ def _manual(plan, path, reason):
     plan.note('manual ' + path, reason)
 
 
-def _c_test(plan, path, reason):
-    """A C test source selected: run it (c-tests.json), through its script, or report it as manual."""
+def c_drivers(idx, path):
+    """Python or bash tests that build this C source themselves (they name it and call a compiler)."""
+    return [t for t in _mentions(idx, [path], {path}) if t.endswith(('.py', '.sh')) and _CC.search(idx.text(t))]
+
+
+def _c_test(plan, path, reason, root='.'):
+    """A C test source selected: its recipe in c-tests.json; else the Python or bash test that builds it (its
+    author's way); else the armhf default of tools/ui-mod; else it is reported as manual."""
     entry = C_TESTS['tests'].get(path) or {}
     if entry.get('via'):  # the bash or Python test that builds and runs this source with its own flags
         return (_py if entry['via'].endswith('.py') else _sh)(plan, entry['via'], f'{reason} (via {path})')
+    drivers = [] if entry else c_drivers(index(root), path)
+    for t in drivers:
+        (_py if t.endswith('.py') else _sh)(plan, t, f'{reason} (builds {path})')
+    if drivers:
+        return
     if entry or os.path.dirname(path) == C_TESTS['default']['dir']:
         plan.c.add(path)
         plan.note('c ' + path, reason)
@@ -204,11 +217,15 @@ def _select_test_file(plan, t, reason):
     elif name.endswith('.py'):
         _py(plan, t, reason)
     elif name.endswith('.c'):
-        _c_test(plan, t, reason)
+        _c_test(plan, t, reason, idx_root(plan))
     elif name.endswith('.sh'):
         _sh(plan, t, reason)
     elif t in SH_TESTS['manual']:
         _manual(plan, t, reason)
+
+
+def idx_root(plan):
+    return getattr(plan, 'root', '.')
 
 
 def _distinctive(name):
@@ -257,6 +274,7 @@ def _py_importers(idx, path):
 
 def map_path(plan, path, root='.'):
     idx = index(root)
+    plan.root = root
     d, name = os.path.dirname(path), os.path.basename(path)
     start = plan.hits
     why = path
@@ -304,7 +322,7 @@ def map_path(plan, path, root='.'):
         closure = idx.include_closure(path)
         for f in sorted(closure):
             if f != path and re.match(r'test_[^/]*\.c$', os.path.basename(f)):
-                _c_test(plan, f, f'{why} (included)')
+                _c_test(plan, f, f'{why} (included)', root)
     if path.startswith('rootfs-overlay/') or path == OVERLAY or path in HOOK_BUILDS or (
             name.endswith(('.c', '.h')) and closure & set(HOOK_SOURCES)):
         _sh(plan, OVERLAY, why)
@@ -337,7 +355,7 @@ def full_plan(root='.'):
     plan.sh = set(FULL_SH)
     idx = index(root)
     plan.c = {f for f in idx.files if os.path.dirname(f) in C_TEST_DIRS and re.match(r'test_[^/]*\.c$', os.path.basename(f))
-              and not (C_TESTS['tests'].get(f) or {}).get('via')}
+              and not (C_TESTS['tests'].get(f) or {}).get('via') and (f in C_TESTS['tests'] or not c_drivers(idx, f))}
     return plan
 
 

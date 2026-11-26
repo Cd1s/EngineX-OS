@@ -91,10 +91,13 @@ class MapTest(unittest.TestCase):
             write(root, 'tools/ui-mod/engine_ui_hook.c', '#include "stage.h"\n')
             write(root, 'tools/ui-mod/test_stems_feature.c', '#include "engine_ui_hook.c"\n')
             write(root, 'tools/ui-mod/test_other.c', 'int main(void) { return 0; }\n')
+            write(root, 'tools/ui-mod/test_built.c', '#include "stage.h"\n')
+            write(root, 'tools/az01-packer/test_built.py', 'import subprocess\nsubprocess.run(["cc", "tools/ui-mod/test_built.c", "-lsqlite3"])\n')
             write(root, 'tests/test_rootfs_overlay.sh', 'sh "$ROOT/tools/ui-mod/build.sh"\n')
             g('add', '-A'); g('commit', '-qm', 'base')
             plan = testmap.map_paths(['tools/ui-mod/stage.h'], root)
-            self.assertEqual(plan.c, {'tools/ui-mod/test_stems_feature.c'})
+            self.assertEqual(plan.c, {'tools/ui-mod/test_stems_feature.c'}, 'test_built.c runs through its own builder')
+            self.assertIn(('tools/az01-packer', 'test_built.py'), plan.py)
             self.assertEqual(plan.sh, {testmap.OVERLAY})
 
     def test_sandbox_helpers_name_their_sandbox_as_manual(self):
@@ -125,6 +128,11 @@ class MapTest(unittest.TestCase):
         idx = testmap.index(REPO)
         srcs = sorted(f for f in idx.files if os.path.dirname(f) in testmap.C_TEST_DIRS and os.path.basename(f).startswith('test_') and f.endswith('.c')
                       and not (testmap.C_TESTS['tests'].get(f) or {}).get('via'))
+        self.assertEqual(testmap.c_drivers(idx, 'tools/ui-mod/test_rekordbox_rows.c'), ['tools/az01-packer/test_rekordbox_rows.py'])
+        self.assertEqual(testmap.c_drivers(idx, 'tools/ui-mod/test_pioneer_selector.c'), ['tools/ui-mod/test_fx_selector.sh'])
+        self.assertEqual(testmap.c_drivers(idx, 'tools/ui-mod/test_dsp_smooth.c'), ['tools/ui-mod/test_fx_selector.sh'])
+        self.assertIn('tools/ui-mod/test_dsp_smooth.c', testmap.full_plan(REPO).c, 'an explicit recipe wins over a driver')
+        self.assertNotIn('tools/ui-mod/test_pioneer_selector.c', testmap.full_plan(REPO).c, 'built by test_fx_selector.sh')
         jobs, bad = crun.jobs_for(srcs)
         self.assertEqual(bad, [])
         variants = {}
