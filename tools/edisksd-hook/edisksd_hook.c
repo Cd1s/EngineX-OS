@@ -1958,7 +1958,7 @@ static int after_mount_at(const char *mount_path,const char *label_target,const 
         int unsafe=validate_library_shallow(fd,deadline);close(fd);
         if(unsafe){note("unsafe library contents rejected on",label_target,errno);return 0;}
     }
-    if(mode!=MOUNT_POST&&validate_pioneer_shallow(mount_path,deadline)) {
+    if(pioneer&&mode!=MOUNT_POST&&validate_pioneer_shallow(mount_path,deadline)) {
         note("unsafe pioneer contents rejected on",label_target,errno);return 0;
     }
     if(hfs_ro&&(pioneer||heal||mode!=MOUNT_PRE)) {
@@ -2048,28 +2048,44 @@ static int private_mount(struct libmnt_context *ctx,int (*real)(struct libmnt_co
 // is known to be too slow), 0 when it held neither or this failed. whole_window: the budget was not cut
 // short by the wait for view_lock, so running out of it says the library is too
 // large; only then is the stick remembered as such.
+static int open_engine_db2_dir(const char *mount_path) {
+    if(!mount_path||safe_path(mount_path,0))return -1;
+    int mfd=open(mount_path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if(mfd<0)return -1;
+    int efd=openat(mfd,"Engine Library",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    int saved=errno;close(mfd);
+    if(efd<0){errno=saved;return -1;}
+    int dfd=openat(efd,"Database2",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    saved=errno;close(efd);
+    if(dfd<0){errno=saved;return -1;}
+    return dfd;
+}
 static int has_pending_swap(const char *mount_path) {
     static const char *const files[]={
-        "Engine Library/Database2/.rb-next.db",
-        "Engine Library/Database2/.rb-bridge-snapshot.swap",
+        ".rb-next.db",
+        ".rb-bridge-snapshot.swap",
     };
-    if(!mount_path||safe_path(mount_path,0))return 0;
+    int dfd=open_engine_db2_dir(mount_path);
+    if(dfd<0)return 0;
+    int found=0;
     for(unsigned i=0;i<sizeof files/sizeof *files;i++) {
-        char p[PATH_MAX];struct stat st;
-        if(!path_join(p,sizeof p,mount_path,files[i])&&!LSTAT(p,&st)&&S_ISREG(st.st_mode))return 1;
+        struct stat st;
+        if(!fstatat(dfd,files[i],&st,AT_SYMLINK_NOFOLLOW)&&S_ISREG(st.st_mode)){found=1;break;}
     }
-    return 0;
+    close(dfd);
+    return found;
 }
 // Reports 1 when a slow-marked stick still has unfinished import work (legacy state DB,
 // missing/malformed snapshot, snapshot older than slow_marker, or non-empty "pending" object
 // in RBS2 header) so re-insert kicks off background rb-bridge --import-path even while skipping
 // the synchronous 17 s pre-mount conversion.
 static int has_unfinished_import(const char *mount_path,const char *marker_path) {
-    if(!mount_path||safe_path(mount_path,0))return 1;
-    char p[PATH_MAX];struct stat st;
-    if(!path_join(p,sizeof p,mount_path,"Engine Library/Database2/.rb-bridge-state.db")&&!LSTAT(p,&st)&&S_ISREG(st.st_mode))return 1;
-    if(path_join(p,sizeof p,mount_path,"Engine Library/Database2/.rb-bridge-snapshot"))return 1;
-    int fd=open(p,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
+    int dfd=open_engine_db2_dir(mount_path);
+    if(dfd<0)return 1;
+    struct stat st;
+    if(!fstatat(dfd,".rb-bridge-state.db",&st,AT_SYMLINK_NOFOLLOW)&&S_ISREG(st.st_mode)){close(dfd);return 1;}
+    int fd=openat(dfd,".rb-bridge-snapshot",O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
+    close(dfd);
     if(fd<0)return 1;
     if(fstat(fd,&st)||!S_ISREG(st.st_mode)){close(fd);return 1;}
     if(marker_path&&*marker_path) {
