@@ -3328,8 +3328,10 @@ static char *oa_read_rgb(const char *path, uint32_t *len) {
 static int oa_is_shadow_path(const char *path) {
     size_t n = strlen(OA_SHADOW);
     if (n > 0 && !strncmp(path, OA_SHADOW, n) && path[n] == '/' && !strncmp(path + n + 1, "peer-", 5)) return 1;
+#if !defined(__aarch64__)
     n = strlen(sc_shadow_root);
     if (n > 0 && !strncmp(path, sc_shadow_root, n) && path[n] == '/' && !strncmp(path + n + 1, "peer-", 5)) return 1;
+#endif
     return 0;
 }
 
