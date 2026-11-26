@@ -2226,25 +2226,37 @@ SERVICES_MAIN = """
 				s.env = Math.max(s.rise && !p.rise ? p.env + 2 : raw, p.env - (slow > 0 ? slow * 0.2 : 0.0005 * (now - p.at)))
 			} else s.env = s.avg = raw
 			// Engine's own playing waveform draws WaveFormPositionItem.currentPosition
-			// (extrapolated on CLOCK_MONOTONIC_RAW), while TrackPosition lags ~19.5 ms
-			// even at 60 Hz. Publish what Engine draws while playing; keep TrackPosition
+			// (extrapolated on CLOCK_MONOTONIC_RAW on each render frame), while
+			// TrackPosition lags ~19.5 ms even at 60 Hz. Keep a tight upper envelope
+			// (s.wfEnv) over wfMs - speed*now so a mid-frame or post-stall tick
+			// (frame age delta >= 0) never posts a backward dip; keep TrackPosition
 			// + s.env as the fallback when paused, scratching, held, or when the item
-			// is missing or not yet on this track's timeline. If a GUI stall ran this
-			// tick before the next render frame updated currentPosition, carry the
-			// preceding line instead of posting a stale-frame step backward.
+			// is missing or not yet on this track's timeline.
 			let drawMs = NaN
-			s.wfPos = NaN
+			s.wfEnv = s.wfAvg = NaN
 			if (s.ps && !s.scratch && !s.phaseHold && sr > 0) {
 				const wf = scWaveformPositionOf(d)
 				const wfPos = wf ? wf.currentPosition : NaN
 				if (isFinite(wfPos)) {
-					s.wfPos = wfPos
 					const ms = wfPos / sr * 1000
-					const sameRun = p && p.ps && p.net === s.net && p.pitch === s.pitch && p.jumps === s.jumps
-					const expectLine = sameRun && isFinite(p.lineMs) ? p.lineMs + (now - p.at) * speed : NaN
-					const staleFrame = sameRun && (wfPos === p.wfPos || (now - p.at > scShadowTickTimer.interval + 20 && isFinite(expectLine) && ms < expectLine - 8))
-					if (staleFrame && isFinite(expectLine)) drawMs = expectLine
-					else if (Math.abs(ms - s.posMs) <= 250 * Math.max(1, speed)) drawMs = ms
+					if (Math.abs(ms - s.posMs) <= 250 * Math.max(1, speed)) {
+						const rawWf = ms - speed * now
+						const sameRun = p && p.ps && p.net === s.net && p.pitch === s.pitch && p.sync === s.sync && p.jumps === s.jumps
+						if (sameRun && isFinite(p.wfEnv) && isFinite(p.wfAvg)) {
+							const lateTick = now - p.at > scShadowTickTimer.interval + 20
+							if (lateTick) {
+								s.wfAvg = p.wfAvg
+								s.wfEnv = Math.max(rawWf, p.wfEnv)
+							} else {
+								s.wfAvg = p.wfAvg + (rawWf - p.wfAvg) * 0.25
+								const slowWf = p.wfEnv - s.wfAvg - 4 * speed
+								s.wfEnv = Math.max(rawWf, p.wfEnv - (slowWf > 0 ? slowWf * 0.25 : 0.0005 * (now - p.at)))
+							}
+						} else {
+							s.wfEnv = s.wfAvg = rawWf
+						}
+						drawMs = s.wfEnv + speed * now
+					}
 				}
 			}
 			s.lineMs = isFinite(drawMs) ? drawMs : (s.ps ? s.env + speed * now : s.posMs)
