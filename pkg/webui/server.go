@@ -1234,7 +1234,7 @@ const loginLang=l.startsWith('zh')?(l.includes('hant')||/-(tw|hk|mo)/.test(l)?2:
 const loginErrors={
 wrong:['That access code is not right. Check the code on the deck under Settings → About and try again.','访问码不正确。请在碟机的「设置 → 关于」中核对后重试。','存取碼不正確。請在碟機的「設定 → 關於」中核對後重試。','El código de acceso no es correcto. Compruébalo en el deck en Ajustes → Acerca de y vuelve a intentarlo.'],
 locked:['Too many wrong codes. Wait a minute, then try again.','错误次数过多，请等一分钟后再试。','錯誤次數過多，請等一分鐘後再試。','Demasiados códigos incorrectos. Espera un minuto y vuelve a intentarlo.'],
-busy:['The deck is busy or cannot be reached. Check that it is on and on this network, then try again.','碟机正忙或无法连接。请确认碟机已开机并与本设备在同一网络，然后重试。','碟機忙碌中或無法連線。請確認碟機已開機並與本裝置在同一網路，然後重試。','El deck está ocupado o no responde. Comprueba que está encendido y en esta red, y vuelve a intentarlo.'],
+busy:['The deck is busy or cannot be reached. Check that it is on and connected, then try again.','碟机正忙或无法连接。请确认碟机已开机并已联网，然后重试。','碟機忙碌中或無法連線。請確認碟機已開機並已連上網路，然後重試。','El deck está ocupado o no responde. Comprueba que está encendido y conectado, y vuelve a intentarlo.'],
 failed:['Sign-in failed. Reload the page and try again.','登录失败，请刷新页面后重试。','登入失敗，請重新整理頁面後再試。','No se pudo iniciar sesión. Recarga la página y vuelve a intentarlo.']};
 function showLoginError(kind){const e=document.getElementById('loginError');e.textContent=loginErrors[kind][loginLang];e.hidden=false}
 document.getElementById('login').addEventListener('submit',async function(ev){ev.preventDefault();const button=document.getElementById('submit');button.disabled=true;document.getElementById('loginError').hidden=true;
