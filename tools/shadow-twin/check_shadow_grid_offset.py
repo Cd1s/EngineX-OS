@@ -471,6 +471,10 @@ def main():
         )
     finally:
         subprocess.run([*link_cmd, "up"], check=True)
+        subprocess.run(
+            ["ip", "-n", twin.SIDE_CFG["B"]["netns"], "route", "replace", "default", "via", twin.SIDE_CFG["B"]["peer_ip"], "dev", "eth0"],
+            check=False,
+        )
 
     wait_for(
         lambda: twin.evj("A", 'JSON.stringify(!!root.rtTr("/Engine/Deck2/Track/SongAnalyzed").state)')
@@ -496,8 +500,11 @@ def main():
     cost = measure_steady_cost(COST_WINDOW_S)
 
     # 2. Pitched same BPM (A1 128.0 LEAD vs B2 132.0 @ -3.03% = 128.0 SYNC)
+    # Pause both decks before reloading B2 and re-cueing to 0.05 so Engine Link
+    # locks both decks to ~0 ms true phase (matching steady real-deck Sync).
+    twin.ev("A", 'root.rtTr("/Engine/Deck1/Play").state = false; "stopA"')
     twin.ev("B", 'root.rtTr("/Engine/Deck2/Play").state = false; "stopB"')
-    time.sleep(0.3)
+    time.sleep(0.4)
     twin.ev("B", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck2").url="file:///data/music/track-b.wav"; "loadB132"')
     wait_for(
         lambda: twin.evj("B", 'JSON.stringify(!!root.rtTr("/Engine/Deck2/Track/SongAnalyzed").state && Math.abs((root.rtTr("/Engine/Deck2/OriginalBPM").unnormalized||0)-132)<0.2)'),
@@ -509,14 +516,12 @@ def main():
         60,
         "A2 132 shadow analyzed",
     )
-    # Keep A1 playing continuously (180 s track) so Engine Link stays phase-locked;
-    # only cue paused B2 before starting it into Sync.
+    twin.ev("A", 'root.rtTr("/Engine/Deck1/Track/SetSongPosition").value = 0.05; "seekA"')
     twin.ev("B", 'root.rtTr("/Engine/Deck2/Track/SetSongPosition").value = 0.05; "seekB"')
-    time.sleep(0.4)
+    time.sleep(0.6)
+    subprocess.run(["python3", str(Path(__file__).resolve().parent / "twin.py"), "play", "A"], check=True)
+    wait_for(lambda: deck_sync_info("A", 1)["master"], 10, "A1 LEAD for 128v132")
     subprocess.run(["python3", str(Path(__file__).resolve().parent / "twin.py"), "play", "B"], check=True)
-    # Re-engage B2 Sync if Engine kept it armed across reload so phase snaps cleanly to A1.
-    twin.ev("B", 'if ((root.rtTr("/Engine/Deck2/SyncMode")||{}).string !== "Off") root.rtPress("/Engine/Deck2/UnSync"); "unsyncB"')
-    time.sleep(0.3)
     a1, b2 = ensure_sync_a_lead()
     print(f"Synced 128v132: A1={a1} | B2={b2}", flush=True)
     time.sleep(2.5)
