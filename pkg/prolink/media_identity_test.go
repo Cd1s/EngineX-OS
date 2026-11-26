@@ -280,21 +280,19 @@ func TestDotPioneerAnalysisAndNativeRekordboxExportGuard(t *testing.T) {
 		t.Fatalf("Exporter did not start on .PIONEER stick: %+v", st)
 	}
 
-	// 4. Stage on a .PIONEER stick must write canonical PIONEER/rekordbox/export.pdb
-	// so pkg/bridge/prolink_merge.go discovers and imports the staged library.
+	// 4. Read-only NFS FetchAnalysis on a .PIONEER stick reads analysis in memory
+	// without writing .prolink-cache or copying audio files.
 	nfs := &NFSServer{Root: dotStick}
 	if err := nfs.Listen("127.0.0.1:0"); err != nil {
 		t.Fatal(err)
 	}
 	defer nfs.Close()
-	stagedDst := filepath.Join(t.TempDir(), StagedDir, "cdj")
 	client := &NFSClient{IP: net.IPv4(127, 0, 0, 1), Portmap: nfs.PortmapPort()}
-	n, err := Stage(context.Background(), client, "/C/", stagedDst, 1<<30)
-	if err != nil || n == 0 {
-		t.Fatalf("Stage(.PIONEER): n=%d err=%v", n, err)
+	tr, anlz, err := FetchAnalysis(context.Background(), client, 3, lib.Tracks[0].ID)
+	if err != nil || anlz == nil || len(anlz.Waveforms) == 0 || tr.ID != lib.Tracks[0].ID {
+		t.Fatalf("FetchAnalysis(.PIONEER): tr=%+v anlz=%v err=%v", tr, anlz, err)
 	}
-	stagedLib, err := rekordbox.ReadPDB(filepath.Join(stagedDst, "PIONEER", "rekordbox", "export.pdb"))
-	if err != nil || len(stagedLib.Tracks) == 0 {
-		t.Fatalf("staged canonical PIONEER/rekordbox/export.pdb missing or unreadable: %v", err)
+	if _, err := os.Stat(filepath.Join(dotStick, ".prolink-cache")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected .prolink-cache written on source stick: %v", err)
 	}
 }
