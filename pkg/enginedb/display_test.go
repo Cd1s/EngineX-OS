@@ -245,3 +245,94 @@ func TestDisplayStockPrerollHotCueAndLoop(t *testing.T) {
 		t.Fatal("inverted loop accepted")
 	}
 }
+
+// Item 4 regression (content 76 / Engine track 3222): quickCues slots carrying negative
+// positions (e.g. -420.0 across Cue 1..Cue 8, or pre-roll values != -1) must be treated
+// as unset by ParseDeckCuesAndLoops so write-back never clamps them to sample 0 + offset
+// and emits phantom hot cues at 0.023 s, while ParseDisplayPerformance (#BH-GC1-4) keeps
+// showing pre-roll cues on the web shadow display.
+func TestParseDeckCuesAndLoopsIgnoresNegativeSlots(t *testing.T) {
+	// 1. Exact content 76 / Engine track 3222 shape: 48 kHz MP3, all 8 slots Cue 1..Cue 8
+	// at -420.0 with Engine DJ default pad colors, main = -420.0, flag = 1, def = -420.0.
+	td := makeTrackDataBlob(t, 48000, 20882304, 0, [3]float64{0.68, 0.40, 0.18}, true)
+	colors := [8][4]byte{
+		{0xff, 0xf4, 0xd3, 0x38},
+		{0xff, 0xef, 0x81, 0x30},
+		{0xff, 0xaa, 0x55, 0xc4},
+		{0xff, 0xce, 0x32, 0x39},
+		{0xff, 0x86, 0xc6, 0x4b},
+		{0xff, 0x20, 0xc6, 0x70},
+		{0xff, 0x00, 0xa8, 0xa9},
+		{0xff, 0x15, 0x71, 0xe2},
+	}
+	var buf bytes.Buffer
+	put(&buf, big, uint64(8))
+	for i := range 8 {
+		name := "Cue " + string(rune('1'+i))
+		buf.WriteByte(byte(len(name)))
+		buf.WriteString(name)
+		put(&buf, big, float64(-420.0))
+		buf.Write(colors[i][:])
+	}
+	put(&buf, big, float64(-420.0))
+	buf.WriteByte(1)
+	put(&buf, big, float64(-420.0))
+	qcAllNeg, err := QCompress(buf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deck, err := ParseDeckCuesAndLoops(td, qcAllNeg, nil, 0)
+	if err != nil {
+		t.Fatalf("ParseDeckCuesAndLoops(-420.0): %v", err)
+	}
+	for slot, hc := range deck.HotCues {
+		if hc != nil {
+			t.Fatalf("slot %d with position -420.0 must be unset (nil), got %+v", slot, hc)
+		}
+	}
+	if deck.MainCue != -1 {
+		t.Fatalf("negative main cue = %v, want -1", deck.MainCue)
+	}
+
+	// 2. Mixed slots: -420.0, -1.0, and -1103.21 are ignored; 0.0 and positive positions stay valid.
+	buf.Reset()
+	put(&buf, big, uint64(8))
+	mixed := [8]float64{-420.0, -1.0, 0.0, 48000.0, -1103.21, -0.001, 96000.0, -1.0}
+	for i, pos := range mixed {
+		name := "Cue " + string(rune('1'+i))
+		buf.WriteByte(byte(len(name)))
+		buf.WriteString(name)
+		put(&buf, big, pos)
+		buf.Write(colors[i][:])
+	}
+	put(&buf, big, float64(12000.0))
+	buf.WriteByte(1)
+	put(&buf, big, float64(12000.0))
+	qcMixed, err := QCompress(buf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deck, err = ParseDeckCuesAndLoops(td, qcMixed, nil, 0)
+	if err != nil {
+		t.Fatalf("ParseDeckCuesAndLoops(mixed): %v", err)
+	}
+	for _, slot := range []int{0, 1, 4, 5, 7} {
+		if deck.HotCues[slot] != nil {
+			t.Fatalf("negative slot %d (%v) must be nil, got %+v", slot, mixed[slot], deck.HotCues[slot])
+		}
+	}
+	if deck.HotCues[2] == nil || deck.HotCues[2].Samples != 0 {
+		t.Fatalf("slot 2 at 0.0 must stay valid: %+v", deck.HotCues[2])
+	}
+	if deck.HotCues[3] == nil || deck.HotCues[3].Samples != 48000.0 {
+		t.Fatalf("slot 3 at 48000.0 must stay valid: %+v", deck.HotCues[3])
+	}
+	if deck.HotCues[6] == nil || deck.HotCues[6].Samples != 96000.0 {
+		t.Fatalf("slot 6 at 96000.0 must stay valid: %+v", deck.HotCues[6])
+	}
+	if deck.MainCue != 12000.0 {
+		t.Fatalf("main cue = %v, want 12000.0", deck.MainCue)
+	}
+}

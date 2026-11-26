@@ -2587,6 +2587,69 @@ static void test_timeout_starts_import_and_pending_swap_overrides_slow_marker(co
     (void)marker;test_systemd_run[0]=0;test_rb_bridge[0]=0;test_disk[0]=0;
     puts("RD-2 edisksd timeout -> start_import & pending swap overrides/clears slow_marker: PASS");
 }
+// Item 6 proof: a stock Engine DJ export stick (Engine Library/Database2/m.db, NO PIONEER/
+// folder) runs neither rb-bridge on mount nor systemd-run background import nor rb-bridge
+// cue write-back on eject, creates no bridge snapshot/browse/stage/slow-marker files, and
+// keeps the shallow pre-mount library walk + stock guardian heal path unchanged.
+static void test_stock_engine_stick_unaffected(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],blog[PATH_MAX],slog[PATH_MAX],glog[PATH_MAX],script[PATH_MAX*3];
+    join(disk,root,"stock-engine-disk");
+    join(p,disk,"Engine Library/Database2/OverviewData/u-stock");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2/OverviewData/u-stock/1.rgb");write_file(p,"stock-rgb");
+    join(p,disk,"Engine Library/Database2/m.db");write_file(p,"stock-engine-mdb");
+    join(p,disk,"Engine Library/Artwork");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Artwork/a1.jpg");write_file(p,"stock-jpg");
+    join(p,disk,"Music");assert(!make_dirs(p));
+    join(p,disk,"Music/track.wav");write_file(p,"stock-audio");
+    join(target,MEDIA_ROOT,"STOCK-ENGINE");assert(!make_dirs(target));
+
+    join(blog,root,"stock-bridge.log");join(slog,root,"stock-systemd.log");join(glog,root,"stock-guardian.log");
+    join(test_rb_bridge,root,"stock-bridge");join(test_systemd_run,root,"stock-systemd-run");join(test_guardian_system,root,"stock-guardian");
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"br $*\" >> '%s'\nexit 0\n",blog);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"sr $*\" >> '%s'\nexit 0\n",slog);
+    write_file(test_systemd_run,script);assert(!chmod(test_systemd_run,0700));
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"gd $*\" >> '%s'\nexit 0\n",glog);
+    write_file(test_guardian_system,script);assert(!chmod(test_guardian_system,0700));
+    snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
+
+    unsigned slow_before=count_runtime("slow-");
+    struct libmnt_context c={.target=target,.source="/dev/sdz1"};
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    assert(!has_export(target)&&has_engine_db(target));
+    // Zero rb-bridge / systemd-run activity; stock guardian heal ran once in pre-mount.
+    assert(access(blog,F_OK)==-1&&errno==ENOENT);
+    assert(access(slog,F_OK)==-1&&errno==ENOENT);
+    assert(count_runtime("slow-")==slow_before);
+    FILE *gf=fopen(glog,"r");assert(gf);char gbuf[1024]={0};size_t gn=fread(gbuf,1,sizeof gbuf-1,gf);fclose(gf);gbuf[gn]=0;
+    assert(strstr(gbuf,"--heal-mount")&&strstr(gbuf,"--data-only"));
+    // No bridge snapshot/browse/next/swap files created on stick.
+    const char *forbidden[]={
+        "Engine Library/Database2/.rb-bridge-snapshot",
+        "Engine Library/Database2/.rb-bridge-snapshot.swap",
+        "Engine Library/Database2/.rb-bridge-browse",
+        "Engine Library/Database2/.rb-next.db",
+    };
+    for(unsigned i=0;i<sizeof forbidden/sizeof *forbidden;i++) {
+        join(p,target,forbidden[i]);
+        assert(access(p,F_OK)==-1&&errno==ENOENT);
+    }
+    // Shallow pre-mount walk passes on stock Engine tree and still rejects direct symlink in Database2.
+    char lib[PATH_MAX];join(lib,target,"Engine Library");
+    int libfd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);assert(libfd>=0);
+    assert(!validate_library_shallow(libfd,now_ms()+500));
+    close(libfd);
+    // Normal eager Eject must also run zero rb-bridge cue write-back passes.
+    assert(!unmount_dispatch(&c,real_unmount));
+    assert(access(blog,F_OK)==-1&&errno==ENOENT);
+    assert(access(slog,F_OK)==-1&&errno==ENOENT);
+    join(p,disk,"Engine Library/Database2/m.db");expect_file(p,"stock-engine-mdb");
+    join(p,disk,"Engine Library/Database2/OverviewData/u-stock/1.rgb");expect_file(p,"stock-rgb");
+    join(p,disk,"Engine Library/Artwork/a1.jpg");expect_file(p,"stock-jpg");
+    test_guardian_system[0]=0;test_systemd_run[0]=0;test_rb_bridge[0]=0;test_disk[0]=0;
+    puts("Item 6: stock Engine DJ export stick (no PIONEER/) has 0 rb-bridge, 0 background import, 0 eject write-back, 0 bridge files: PASS");
+}
 int main(int argc,char **argv) {
     if(argc>1&&!strcmp(argv[1],"--mock-lklfuse"))return run_mock_lklfuse(argc,argv);
     char root[]="/tmp/enginex-edisks-tests-XXXXXX";assert(mkdtemp(root));
@@ -2594,7 +2657,7 @@ int main(int argc,char **argv) {
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
     assert(!make_dirs(test_media));test_guardian_window_floor();test_paths_and_copy(root);test_premount_shallow_walk_large_assets(root);test_eject_stops_the_background_import(root);test_eject_stops_the_remount_helper(root);test_eject_runs_cue_writeback(root);test_eject_writeback_overrun(root);test_only_an_eject_marks_the_stick(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_hfs_gen2_lkl_policy(root,argv[0]);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_timeout_starts_import_and_pending_swap_overrides_slow_marker(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_removal_detaches_a_view_in_use(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);test_hfs_view_scale_and_47879b10_253(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_hfs_gen2_lkl_policy(root,argv[0]);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_timeout_starts_import_and_pending_swap_overrides_slow_marker(root);test_stock_engine_stick_unaffected(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_removal_detaches_a_view_in_use(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);test_hfs_view_scale_and_47879b10_253(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;

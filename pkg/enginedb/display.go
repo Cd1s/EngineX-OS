@@ -223,14 +223,20 @@ func ParseDeckCuesAndLoops(track, cues, loops []byte, activeOnLoadLoops int64) (
 			if !displayFinite(p) || p > out.SampleCount {
 				return out, fmt.Errorf("display: invalid cue position")
 			}
-			if p != -1 {
+			// Treat any negative position (-1 unset, or negative pre-roll/sentinel values
+			// such as -420.0) as unset so deck cue write-back never clamps them to sample 0
+			// and fabricates phantom hot cues at 0 + RekordboxOffset().
+			if p >= 0 {
+				if p == 0 {
+					p = 0 // normalize -0.0
+				}
 				col := [4]byte{qraw[off+8], qraw[off+9], qraw[off+10], qraw[off+11]}
 				if col != ([4]byte{}) && col[0] == 0 {
 					col[0] = 255
 				}
 				out.HotCues[slot] = &DeckHotCue{
 					Slot:    slot,
-					Samples: math.Max(p, 0),
+					Samples: p,
 					Name:    name,
 					Color:   col,
 				}
