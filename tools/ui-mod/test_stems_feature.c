@@ -1920,10 +1920,24 @@ static void test_shadow_regrid_native(const char *build_name, const char *off, i
         shadow_queue_event_original = mock_aq_event_orig;
         shadow_queue_connect_original = mock_aq_connect_orig;
         char fake_aq[16] = {0};
-        char audio[160], marker[180], dgram[220];
+        char audio[160], perf[180], marker[180], dgram[220];
         snprintf(audio, sizeof audio, "%s/peer-a/track.wav", dir);
+        snprintf(perf, sizeof perf, "%s.perf", audio);
         snprintf(marker, sizeof marker, "%s.perf.regrid", audio);
         snprintf(dgram, sizeof dgram, "42\t%s", audio);
+        // Valid minimal EXPF v1 sidecar for regrid readiness checks.
+        unsigned char valid_expf[16 + 4 + 20 + 4 + 4 + 4 + 27];
+        memset(valid_expf, 0, sizeof valid_expf);
+        memcpy(valid_expf, "EXPF", 4);
+        uint32_t ver = 1, lt = 20, lb = 4, lo = 27;
+        double bpm = 128.0;
+        memcpy(valid_expf + 4, &ver, 4);
+        memcpy(valid_expf + 8, &bpm, 8);
+        memcpy(valid_expf + 16, &lt, 4);
+        memcpy(valid_expf + 16 + 4 + 20, &lb, 4);
+        memcpy(valid_expf + 16 + 4 + 20 + 4, "GRID", 4);
+        memcpy(valid_expf + 16 + 4 + 20 + 4 + 4, &lo, 4);
+        analysis_file(perf, valid_expf, sizeof valid_expf);
         // Before AnalysisQueue is captured, datagrams do nothing.
         analysis_file(marker, "g2", 2);
         assert(!shadow_regrid_handle_dgram(dgram, strlen(dgram)));
@@ -1935,8 +1949,13 @@ static void test_shadow_regrid_native(const char *build_name, const char *off, i
         assert(!unlink(marker));
         assert(!shadow_regrid_handle_dgram(dgram, strlen(dgram)));
         assert(mock_aq_post_count == 0);
-        // Staged .perf.regrid marker posts one custom QEvent to AnalysisQueue.
+        // Missing .perf beside .perf.regrid is rejected fail-closed.
         analysis_file(marker, "g2", 2);
+        assert(!unlink(perf));
+        assert(!shadow_regrid_handle_dgram(dgram, strlen(dgram)));
+        assert(mock_aq_post_count == 0);
+        // Valid .perf + staged .perf.regrid marker posts one custom QEvent to AnalysisQueue.
+        analysis_file(perf, valid_expf, sizeof valid_expf);
         assert(shadow_regrid_handle_dgram(dgram, strlen(dgram)));
         assert(mock_aq_post_count == 1 && mock_aq_posted_obj == fake_aq && mock_aq_posted_ev != NULL);
         // Unrelated Qt event passes through to stock QObject::event.
@@ -1954,7 +1973,7 @@ static void test_shadow_regrid_native(const char *build_name, const char *off, i
         assert(shadow_analysis_queue == NULL);
         assert(!shadow_regrid_handle_dgram(dgram, strlen(dgram)));
         assert(mock_aq_post_count == 1);
-        assert(!unlink(marker));
+        assert(!unlink(marker) && !unlink(perf));
         if (shadow_regrid_sock_fd >= 0) { close(shadow_regrid_sock_fd); shadow_regrid_sock_fd = -1; }
         assert(!unlink(sock));
     }
@@ -1962,6 +1981,121 @@ static void test_shadow_regrid_native(const char *build_name, const char *off, i
     assert(!rmdir(peer) && !unlink(board) && !rmdir(dir));
     assert(!munmap(image, size));
     printf("Native AnalysisQueue regrid (%s, off: %s, enabled: %d): PASS\n", build_name, *off ? off : "none", expect_enabled);
+}
+
+static void mock_qevent_ctor_bad_offset(void *ev, int type) {
+    uint16_t t = (uint16_t)type;
+    memcpy((unsigned char *)ev + 8, &t, sizeof t);
+}
+
+static void mock_qevent_ctor_too_big(void *ev, int type) {
+    mock_qevent_ctor(ev, type);
+    ((unsigned char *)ev)[36] = 1;
+}
+
+// #346 review proof (Check 4): wrong vtable, addTracks prologue, QEvent ABI or board leaves no socket and no hook change.
+static void test_shadow_regrid_fail_closed_gates(int fault) {
+    enum { add_tracks = 0xab8014, vtable = 0x2b6d1cc,
+           meta_fn = 0x911e04, dtor_d1 = 0x915874, dtor_d0 = 0x915b58,
+           event_plt = 0x160434, connect_plt = 0x160470, size = 0x2d00000 };
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    char *image = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(image != MAP_FAILED);
+    uintptr_t base = (uintptr_t)image;
+    const struct engine_build *selected = NULL;
+    for (size_t i = 0; i < sizeof engine_builds / sizeof *engine_builds; i++) {
+        if (!strcmp(engine_builds[i].name, "5.3.0")) { selected = &engine_builds[i]; break; }
+    }
+    assert(selected != NULL);
+    select_build(selected);
+    char dir[] = "/tmp/regrid-gate-XXXXXX";
+    assert(mkdtemp(dir));
+    char board[128], conf[128], sock[128];
+    snprintf(board, sizeof board, "%s/compatible", dir);
+    snprintf(conf, sizeof conf, "%s/hook-disable.conf", dir);
+    snprintf(sock, sizeof sock, "%s/regrid.sock", dir);
+    analysis_file(board, fault == 5 ? "AZ01" : "JP07", 4);
+    hf_path = conf;
+    hf_reload();
+    product_code_path = board;
+    shadow_regrid_sock_path = sock;
+    const uint32_t add_prefix[] = {0xe16d42f4, 0xe1cd81f0};
+    memcpy(image + add_tracks, add_prefix, sizeof add_prefix);
+    *(uintptr_t *)(image + vtable + 0x00) = base + meta_fn;
+    *(uintptr_t *)(image + vtable + 0x0c) = base + dtor_d1;
+    *(uintptr_t *)(image + vtable + 0x10) = base + dtor_d0;
+    *(uintptr_t *)(image + vtable + 0x14) = base + event_plt;
+    *(uintptr_t *)(image + vtable + 0x28) = base + connect_plt;
+    shadow_post_event = mock_post_event;
+    shadow_qevent_ctor = fault == 3 ? mock_qevent_ctor_bad_offset
+                       : fault == 4 ? mock_qevent_ctor_too_big : mock_qevent_ctor;
+    shadow_qevent_dtor = mock_qevent_dtor;
+    shadow_qevent_reg = mock_qevent_reg;
+    shadow_op_new = mock_op_new;
+    shadow_qobj_event_sym = (void *)(uintptr_t)mock_aq_event_orig;
+    shadow_qobj_connect_sym = (void *)(uintptr_t)mock_aq_connect_orig;
+    if (fault == 1) *(uintptr_t *)(image + vtable + 0x00) ^= 4;
+    if (fault == 2) memset(image + add_tracks, 0, sizeof add_prefix);
+    assert(install_shadow_regrid(base, page) == 0);
+    assert(shadow_regrid_enabled == 0);
+    assert(access(sock, F_OK) != 0);
+    if (fault != 1) assert(*(uintptr_t *)(image + vtable + 0x00) == base + meta_fn);
+    assert(*(uintptr_t *)(image + vtable + 0x0c) == base + dtor_d1);
+    assert(*(uintptr_t *)(image + vtable + 0x10) == base + dtor_d0);
+    assert(*(uintptr_t *)(image + vtable + 0x14) == base + event_plt);
+    assert(*(uintptr_t *)(image + vtable + 0x28) == base + connect_plt);
+    assert(!unlink(board) && !rmdir(dir));
+    assert(!munmap(image, size));
+    printf("Native AnalysisQueue regrid fail-closed gate (fault %d): PASS\n", fault);
+}
+
+// #346 review proof (Finding 1) + oa_replay choke point: missing or corrupt .perf
+// beside .perf.regrid neither arms regrid nor falls through to stock OfflineAnalyzer.
+static void test_shadow_regrid_missing_perf_fallback(void) {
+    static const char root[] = "/tmp/test-oa-regrid";
+    static const char peer[] = "/tmp/test-oa-regrid/peer-f012";
+    static const char audio[] = "/tmp/test-oa-regrid/peer-f012/track.wav";
+    static const char perf[] = "/tmp/test-oa-regrid/peer-f012/track.wav.perf";
+    static const char regrid[] = "/tmp/test-oa-regrid/peer-f012/track.wav.perf.regrid";
+    static const char regrid_run[] = "/tmp/test-oa-regrid/peer-f012/track.wav.perf.regrid.run";
+    static const uint16_t u16[] = u"/tmp/test-oa-regrid/peer-f012/track.wav";
+    struct oa_string qs = {NULL, u16, sizeof u16 / sizeof *u16 - 1};
+    uchar prefs[13] = {0};
+    mkdir(root, 0755);
+    mkdir(peer, 0755);
+    analysis_file(audio, "WAV", 3);
+    analysis_file(regrid, "g2", 2);
+    oa_activate = mock_activate;
+    oa_make_bytes = mock_make_bytes;
+    oa_meta = (void *)&oa_seen;
+    oa_count = 0;
+    const char *old_root = sc_shadow_root;
+    sc_shadow_root = root;
+    // 1. Missing .perf: regrid refuses ready/arm, AND oa_replay skips (never returns 0).
+    int ready = sc_shadow_regrid_ready(audio);
+    int armed = sc_shadow_regrid_arm(audio);
+    int replayed = oa_replay(oa_self, &qs, prefs);
+    assert(!ready && !armed);
+    assert(replayed == 1 && oa_count == 3 &&
+           oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
+    // 2. Corrupt .perf + pre-armed .perf.regrid.run: refuses ready/arm, and oa_replay
+    // unlinks .perf.regrid.run and skips cleanly (never hands copy to OfflineAnalyzer).
+    analysis_file(perf, "BAD!CORRUPT", 11);
+    analysis_file(regrid_run, "g2", 2);
+    assert(!sc_shadow_regrid_ready(audio) && !sc_shadow_regrid_arm(audio));
+    oa_count = 0;
+    assert(oa_replay(oa_self, &qs, prefs) == 1 && oa_count == 3 &&
+           oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
+    assert(access(regrid_run, F_OK) != 0);
+    sc_shadow_root = old_root;
+    unlink(perf);
+    unlink(regrid);
+    unlink(regrid_run);
+    unlink(audio);
+    rmdir(peer);
+    rmdir(root);
+    unlink(OA_LOG);
+    printf("Shadow regrid missing/corrupt .perf fail-closed + oa_replay choke point: PASS\n");
 }
 
 int main(int argc, char **argv) {
@@ -2026,5 +2160,17 @@ int main(int argc, char **argv) {
         assert(waitpid(child, &status, 0) == child);
         assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
+    for (int fault = 1; fault <= 5; fault++) {
+        fflush(NULL);
+        pid_t child = fork(); assert(child >= 0);
+        if (!child) {
+            test_shadow_regrid_fail_closed_gates(fault);
+            exit(0);
+        }
+        int status;
+        assert(waitpid(child, &status, 0) == child);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+    test_shadow_regrid_missing_perf_fallback();
     return 0;
 }

@@ -114,11 +114,53 @@ static int sc_shadow_analysis_staged(const char *path) {
     return !lstat(sidecar, &st) && S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size <= SC_SHADOW_MAX;
 }
 
+// Validate that <copy>.perf exists as a regular file and matches EXPF v1 framing
+// accepted by oa_replay (magic, version 1, finite BPM in (0, 1000), exact 3-part
+// lengths with trackData >= 20 and overview >= 27, total <= 16 MiB).
+static int sc_shadow_perf_valid(const char *path) {
+    char perf[640];
+    if (!sc_shadow_regrid_path(path, perf, sizeof perf, ".perf")) return 0;
+    int fd = open(perf, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return 0;
+    struct stat st;
+    int ok = 0;
+    if (!fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size >= 28 && st.st_size <= (16 << 20)) {
+        size_t size = (size_t)st.st_size, got = 0;
+        unsigned char *b = malloc(size);
+        while (b && got < size) {
+            ssize_t n = read(fd, b + got, size - got);
+            if (n <= 0) break;
+            got += (size_t)n;
+        }
+        if (b && got == size && !memcmp(b, "EXPF", 4)) {
+            uint32_t ver = 0, len[3] = {0, 0, 0};
+            double bpm = 0;
+            memcpy(&ver, b + 4, 4);
+            memcpy(&bpm, b + 8, 8);
+            if (ver == 1 && bpm > 0 && bpm < 1000) {
+                size_t off = 16;
+                int parts_ok = 1;
+                for (int i = 0; i < 3; i++) {
+                    if (size - off < 4) { parts_ok = 0; break; }
+                    memcpy(&len[i], b + off, 4);
+                    off += 4;
+                    if (len[i] > size - off) { parts_ok = 0; break; }
+                    off += len[i];
+                }
+                if (parts_ok && off == size && len[0] >= 20 && len[2] >= 27) ok = 1;
+            }
+        }
+        free(b);
+    }
+    close(fd);
+    return ok;
+}
+
 static int sc_shadow_regrid_ready(const char *path) {
     char marker[640];
     struct stat st;
     if (!sc_shadow_regrid_path(path, marker, sizeof marker, ".perf.regrid")) return 0;
-    return !lstat(marker, &st) && S_ISREG(st.st_mode);
+    return !lstat(marker, &st) && S_ISREG(st.st_mode) && sc_shadow_perf_valid(path);
 }
 
 // Parse a "<trackId>\t<copyPath>" datagram for the native 5.3.0 regrid socket.
@@ -152,19 +194,22 @@ static int sc_shadow_regrid_parse(const char *msg, size_t len, long long *track_
 
 // Atomically move <copy>.perf.regrid -> <copy>.perf.regrid.run when Engine's
 // AnalysisQueue starts an in-place grid update for an already-loaded shadow copy.
+// Refuses to arm when <copy>.perf is missing or corrupt so the copy keeps its old grid.
 static int sc_shadow_regrid_arm(const char *path) {
     char src[640], dst[640];
     struct stat st;
     if (!sc_shadow_regrid_path(path, src, sizeof src, ".perf.regrid") ||
         !sc_shadow_regrid_path(path, dst, sizeof dst, ".perf.regrid.run")) return 0;
+    if (!sc_shadow_perf_valid(path)) return 0;
     return !lstat(src, &st) && S_ISREG(st.st_mode) && !rename(src, dst);
 }
 
 static int sc_shadow_regrid_armed(const char *rel) {
-    char marker[640];
+    char marker[640], full[640];
     struct stat st;
     if ((size_t)snprintf(marker, sizeof marker, "%s/%s.perf.regrid.run", sc_shadow_root, rel) >= sizeof marker) return 0;
-    return !lstat(marker, &st) && S_ISREG(st.st_mode);
+    if ((size_t)snprintf(full, sizeof full, "%s/%s", sc_shadow_root, rel) >= sizeof full) return 0;
+    return !lstat(marker, &st) && S_ISREG(st.st_mode) && sc_shadow_perf_valid(full);
 }
 
 static int sc_shadow_copy_path(void *out, int n, char **values, char **names) {

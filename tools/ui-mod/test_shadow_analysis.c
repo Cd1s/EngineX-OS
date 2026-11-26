@@ -126,16 +126,38 @@ int main(void) {
     assert(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 4);
     sqlite3_finalize(stmt);
     // #346: in-place grid update arms <copy>.perf.regrid -> .perf.regrid.run for
-    // peer-* copies only, and clears isAnalyzed/isBeatGridLocked so AnalysisQueue
-    // replays the updated beatData onto the already-loaded deck without reload.
-    char regrid[300], regrid_run[300], bad_regrid[300];
+    // peer-* copies only when a valid EXPF v1 <copy>.perf exists, and clears
+    // isAnalyzed/isBeatGridLocked so AnalysisQueue replays without reload.
+    char regrid[300], regrid_run[300], bad_regrid[300], perf_file[300];
     snprintf(audio, sizeof audio, "%s/peer-f012/Contents/L'ete.wav", dir);
+    snprintf(perf_file, sizeof perf_file, "%s.perf", audio);
     snprintf(regrid, sizeof regrid, "%s.perf.regrid", audio);
     snprintf(regrid_run, sizeof regrid_run, "%s.perf.regrid.run", audio);
     snprintf(bad_regrid, sizeof bad_regrid, "%s/peer-f012/../outside.wav", dir);
     assert(!sc_shadow_regrid_arm(audio));
     assert(!sc_shadow_regrid_ready(audio));
     out = fopen(regrid, "wb"); assert(out && fputs("g2", out) >= 0 && !fclose(out));
+    // Missing or corrupt .perf must refuse ready & arm (copy keeps old grid).
+    assert(!sc_shadow_regrid_ready(audio));
+    assert(!sc_shadow_regrid_arm(audio));
+    out = fopen(perf_file, "wb"); assert(out && fputs("BAD!", out) >= 0 && !fclose(out));
+    assert(!sc_shadow_regrid_ready(audio));
+    assert(!sc_shadow_regrid_arm(audio));
+    // Write a valid minimal EXPF v1 .perf (track=20B, beats=4B, overview=27B).
+    {
+        unsigned char expf[16 + 4 + 20 + 4 + 4 + 4 + 27];
+        memset(expf, 0, sizeof expf);
+        memcpy(expf, "EXPF", 4);
+        uint32_t ver = 1, lt = 20, lb = 4, lo = 27;
+        double bpm = 128.0;
+        memcpy(expf + 4, &ver, 4);
+        memcpy(expf + 8, &bpm, 8);
+        memcpy(expf + 16, &lt, 4);
+        memcpy(expf + 16 + 4 + 20, &lb, 4);
+        memcpy(expf + 16 + 4 + 20 + 4, "GRID", 4);
+        memcpy(expf + 16 + 4 + 20 + 4 + 4, &lo, 4);
+        out = fopen(perf_file, "wb"); assert(out && fwrite(expf, 1, sizeof expf, out) == sizeof expf && !fclose(out));
+    }
     assert(sc_shadow_regrid_ready(audio));
     assert(!sc_shadow_regrid_ready(bad_regrid));
     // Native regrid socket datagram parser rejects malformed IDs, NULs, control chars, and non-peer paths.
@@ -167,14 +189,34 @@ int main(void) {
     assert(sqlite3_prepare_v2(db, "SELECT isAnalyzed,isBeatGridLocked FROM Track WHERE id=1", -1, &stmt, NULL) == SQLITE_OK);
     assert(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1 && sqlite3_column_int(stmt, 1) == 1);
     sqlite3_finalize(stmt);
-    // Regrid fill (regrid == 1) clears isAnalyzed and isBeatGridLocked for peer-* track 1.
+    // If .perf disappears after arming .regrid.run, regrid fill does NOT clear isAnalyzed/isBeatGridLocked.
+    assert(!unlink(perf_file));
+    assert(!sc_shadow_analysis_fill_ex(&api, db, 1, 1));
+    assert(sqlite3_prepare_v2(db, "SELECT isAnalyzed,isBeatGridLocked FROM Track WHERE id=1", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1 && sqlite3_column_int(stmt, 1) == 1);
+    sqlite3_finalize(stmt);
+    // Restore valid .perf: regrid fill (regrid == 1) clears isAnalyzed and isBeatGridLocked for peer-* track 1.
+    {
+        unsigned char expf[16 + 4 + 20 + 4 + 4 + 4 + 27];
+        memset(expf, 0, sizeof expf);
+        memcpy(expf, "EXPF", 4);
+        uint32_t ver = 1, lt = 20, lb = 4, lo = 27;
+        double bpm = 128.0;
+        memcpy(expf + 4, &ver, 4);
+        memcpy(expf + 8, &bpm, 8);
+        memcpy(expf + 16, &lt, 4);
+        memcpy(expf + 16 + 4 + 20, &lb, 4);
+        memcpy(expf + 16 + 4 + 20 + 4, "GRID", 4);
+        memcpy(expf + 16 + 4 + 20 + 4 + 4, &lo, 4);
+        out = fopen(perf_file, "wb"); assert(out && fwrite(expf, 1, sizeof expf, out) == sizeof expf && !fclose(out));
+    }
     assert(sc_shadow_analysis_fill_ex(&api, db, 1, 1));
     check_flags(db, 0);
     // Non-peer tracks are never touched even with regrid == 1.
     assert(sqlite3_exec(db, "UPDATE Track SET isAnalyzed = 1 WHERE id = 2", NULL, NULL, NULL) == SQLITE_OK);
     assert(!sc_shadow_analysis_fill_ex(&api, db, 2, 1));
     check_flags(db, 2);
-    assert(!unlink(regrid_run));
+    assert(!unlink(regrid_run) && !unlink(perf_file));
     assert(sqlite3_close(usb) == SQLITE_OK && sqlite3_close(db) == SQLITE_OK);
     assert(!unlink(path) && !unlink(stick) && !unlink(sidecar) && !unlink(malformed));
     assert(!rmdir(contents) && !rmdir(cache) && !rmdir(dir));

@@ -3337,6 +3337,24 @@ static char *oa_read_rgb(const char *path, uint32_t *len) {
     return b;
 }
 
+static int oa_is_shadow_path(const char *path) {
+    size_t n = strlen(OA_SHADOW);
+    if (n > 0 && !strncmp(path, OA_SHADOW, n) && path[n] == '/' && !strncmp(path + n + 1, "peer-", 5)) return 1;
+#if !defined(__aarch64__)
+    n = strlen(sc_shadow_root);
+    if (n > 0 && !strncmp(path, sc_shadow_root, n) && path[n] == '/' && !strncmp(path + n + 1, "peer-", 5)) return 1;
+#endif
+    return 0;
+}
+
+static int oa_skip_shadow(void *o, const char *why, const char *path) {
+    oa_emit(o, OA_STARTED, NULL);
+    oa_emit(o, OA_STOPPED, NULL);
+    oa_emit(o, OA_FINISHED, NULL);
+    oa_log(why, path, 0);
+    return 1;
+}
+
 static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
     char path[PATH_MAX];
     struct timespec t0, t1;
@@ -3348,14 +3366,30 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
         oa_log("rgb-stock", path, 0);
         return 0;
     }
+    int is_shadow = oa_is_shadow_path(path);
     char perf[PATH_MAX + 8];
     snprintf(perf, sizeof perf, "%s.perf", path);
     int rekordbox_stream = 0;
 #if !defined(__aarch64__)
-    if (access(perf, F_OK)) rekordbox_stream = sc_rbx_replay_path(path, perf, sizeof perf);
+    if (!is_shadow && access(perf, F_OK)) rekordbox_stream = sc_rbx_replay_path(path, perf, sizeof perf);
 #endif
-    if (!rekordbox_stream && access(perf, F_OK) &&
-        (!oa_shadow_perf(path, perf, sizeof perf) || access(perf, F_OK))) {
+    if (!is_shadow && !rekordbox_stream && access(perf, F_OK)) {
+        if (oa_shadow_perf(path, perf, sizeof perf)) is_shadow = 1;
+    }
+    // An in-place grid update for an already-loaded shadow copy (.perf.regrid.run,
+    // armed by shadow_loaded_on_deck) does not race the initial deck loader, so it
+    // skips oa_settle() and replays immediately (~0.1 ms). Consume the one-shot
+    // before checking .perf so a missing or corrupt .perf cannot leave it armed.
+    char regrid_run[PATH_MAX + 24];
+    int regrid = 0;
+    if (!rekordbox_stream && (size_t)snprintf(regrid_run, sizeof regrid_run, "%s.regrid.run", perf) < sizeof regrid_run) {
+        struct stat rst;
+        if (!lstat(regrid_run, &rst) && S_ISREG(rst.st_mode) && !unlink(regrid_run)) regrid = 1;
+    }
+    if (!rekordbox_stream && access(perf, F_OK)) {
+        // Single fail-closed choke point: never hand a shadow copy (or a regrid
+        // trigger) to Engine's real OfflineAnalyzer when .perf is missing.
+        if (is_shadow || regrid) return oa_skip_shadow(o, "skip-shadow-missing", path);
         int named = 0;
 #if !defined(__aarch64__)
         named = sc_rbx_replay_named(path, OA_ENGINE_COPIES, perf, sizeof perf);
@@ -3365,18 +3399,11 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
             return 0;
         }
     }
-    // An in-place grid update for an already-loaded shadow copy (.perf.regrid.run,
-    // armed by shadow_loaded_on_deck) does not race the initial deck loader, so it
-    // skips oa_settle() and replays immediately (~0.1 ms). Consume the one-shot
-    // before reading .perf so a corrupt .perf cannot leave it armed on disk.
-    char regrid_run[PATH_MAX + 24];
-    int regrid = 0;
-    if (!rekordbox_stream && (size_t)snprintf(regrid_run, sizeof regrid_run, "%s.regrid.run", perf) < sizeof regrid_run) {
-        struct stat rst;
-        if (!lstat(regrid_run, &rst) && S_ISREG(rst.st_mode) && !unlink(regrid_run)) regrid = 1;
-    }
     struct oa_perf p;
     if (!oa_read_perf(perf, &p)) {
+        // Single fail-closed choke point: never hand a shadow copy (or a regrid
+        // trigger) to Engine's real OfflineAnalyzer when .perf is damaged.
+        if (is_shadow || regrid) return oa_skip_shadow(o, "skip-shadow-bad", perf);
         oa_log("bad", perf, 0);
         return 0;
     }
@@ -4065,7 +4092,10 @@ static int bind_shadow_regrid_sock(const char *path) {
     addr.sun_family = AF_UNIX;
     strcpy(addr.sun_path, path);
     unlink(path);
-    if (bind(fd, (struct sockaddr *)&addr, sizeof addr) || chmod(path, 0600)) {
+    mode_t old_mask = umask(0177);
+    int rc = bind(fd, (struct sockaddr *)&addr, sizeof addr);
+    umask(old_mask);
+    if (rc || chmod(path, 0600)) {
         close(fd);
         unlink(path);
         return -1;

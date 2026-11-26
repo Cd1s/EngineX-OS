@@ -1889,16 +1889,55 @@ func perfFromBlobs(bpm float64, track, beats, overview []byte) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// savePerf puts the source's analysis next to a copy, or removes a stale one;
-// without it Engine analyses the copy itself.
-func savePerf(local string, perf []byte) {
+const shadowPerfMax = 16 << 20
+
+// validPerf reports whether b is a well-formed EXPF v1 payload that
+// engine_ui_hook.c's oa_read_perf will replay without falling back.
+func validPerf(b []byte) bool {
+	if len(b) < 28 || len(b) > shadowPerfMax || string(b[:4]) != "EXPF" {
+		return false
+	}
+	if binary.LittleEndian.Uint32(b[4:8]) != 1 {
+		return false
+	}
+	bpm := math.Float64frombits(binary.LittleEndian.Uint64(b[8:16]))
+	if math.IsNaN(bpm) || math.IsInf(bpm, 0) || !(bpm > 0 && bpm < 1000) {
+		return false
+	}
+	off := 16
+	var lens [3]uint32
+	for i := range lens {
+		if len(b)-off < 4 {
+			return false
+		}
+		n := binary.LittleEndian.Uint32(b[off : off+4])
+		off += 4
+		if uint64(n) > uint64(len(b)-off) {
+			return false
+		}
+		lens[i] = n
+		off += int(n)
+	}
+	return off == len(b) && lens[0] >= 20 && lens[1] > 0 && lens[2] >= 27
+}
+
+// savePerf puts the source's analysis next to a copy atomically, or removes a
+// stale one when perf is nil. Returns any write or rename error.
+func savePerf(local string, perf []byte) error {
 	if perf == nil {
-		os.Remove(local + ".perf")
-		return
+		_ = os.Remove(local + ".perf")
+		return nil
 	}
-	if os.WriteFile(local+".perf.tmp", perf, 0o644) != nil || os.Rename(local+".perf.tmp", local+".perf") != nil {
-		os.Remove(local + ".perf.tmp")
+	tmp := local + ".perf.tmp"
+	if err := os.WriteFile(tmp, perf, 0o644); err != nil {
+		_ = os.Remove(tmp)
+		return err
 	}
+	if err := os.Rename(tmp, local+".perf"); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // A source still writing a rekordbox Link track's analysis answers 503: asked again
@@ -2693,16 +2732,28 @@ func (s *Server) shadowRefreshPeerGrid(key string, p peerDeck, local string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		perf, pending := fetchPerfPending(ctx, perfURL)
-		if pending || perf == nil {
+		if pending || perf == nil || !validPerf(perf) {
 			sh.mu.Lock()
 			delete(sh.copyGridBusy, key)
 			sh.copyGridRetry[key] = time.Now().Add(time.Second)
 			sh.mu.Unlock()
 			return
 		}
-		savePerf(local, perf)
+		if err := savePerf(local, perf); err != nil {
+			sh.mu.Lock()
+			delete(sh.copyGridBusy, key)
+			sh.copyGridRetry[key] = time.Now().Add(time.Second)
+			sh.mu.Unlock()
+			return
+		}
 		if playerBoards[imagePrefix(deviceCompatible())] {
-			saveShadowAnalysis(ctx, local, perfURL+"&format=native")
+			if why := saveShadowAnalysis(ctx, local, perfURL+"&format=native"); why == "not written" {
+				sh.mu.Lock()
+				delete(sh.copyGridBusy, key)
+				sh.copyGridRetry[key] = time.Now().Add(time.Second)
+				sh.mu.Unlock()
+				return
+			}
 		}
 		marker := local + ".perf.regrid"
 		if os.WriteFile(marker+".tmp", []byte(gen), 0o644) != nil || os.Rename(marker+".tmp", marker) != nil {
@@ -2853,7 +2904,10 @@ func (s *Server) shadowRefreshPeerPerf(key string, p peerDeck, old string) {
 		if err := os.Link(old, local); err != nil {
 			return "", err
 		}
-		savePerf(local, perf)
+		if err := savePerf(local, perf); err != nil {
+			_ = os.Remove(local)
+			return "", err
+		}
 		saveShadowRGB(ctx, local, perfURL)
 		if playerBoards[imagePrefix(deviceCompatible())] {
 			saveShadowAnalysis(ctx, local, perfURL+"&format=native")

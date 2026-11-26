@@ -552,3 +552,118 @@ func TestShadowDisplayGridEditReusesDecodedWaveform(t *testing.T) {
 	// Avoid unused import warning if binary is referenced later.
 	var _ = binary.LittleEndian
 }
+
+// #346 round-2 regression (Finding 1): savePerf reports write failures, validPerf
+// rejects damaged EXPF payloads, and shadowRefreshPeerGrid never writes
+// .perf.regrid or signals the regrid socket when .perf is corrupt or unwritable.
+func TestShadowRefreshPeerGridFailClosedOnBadOrUnwritablePerf(t *testing.T) {
+	if validPerf([]byte("EXPF")) || validPerf([]byte("BAD!")) {
+		t.Fatal("validPerf accepted truncated/corrupt payload")
+	}
+	// savePerf must return an error when the destination directory does not exist.
+	missingDir := filepath.Join(t.TempDir(), "missing", "track.wav")
+	if err := savePerf(missingDir, []byte("EXPF")); err == nil {
+		t.Fatal("savePerf ignored write error to missing directory")
+	}
+
+	// 1. Corrupt EXPF from source must NOT write .perf.regrid or send socket datagram.
+	sockPath := filepath.Join(t.TempDir(), "regrid.sock")
+	conn, err := net.ListenPacket("unixgram", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var gotDgram atomic.Int32
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			if _, _, err := conn.ReadFrom(buf); err != nil {
+				return
+			}
+			gotDgram.Add(1)
+		}
+	}()
+
+	badSrc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("BAD!CORRUPT"))
+	}))
+	defer badSrc.Close()
+	u, _ := url.Parse(badSrc.URL)
+	port, _ := strconv.Atoi(u.Port())
+
+	s := New(Config{UIDir: filepath.Join(t.TempDir(), "ui"), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	s.shadow.peerPort = port
+	s.shadow.regridSockPath = sockPath
+
+	localDir := filepath.Join(s.shadowDir(), "peer-abc1")
+	if err := os.MkdirAll(localDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	local := filepath.Join(localDir, "track.wav")
+	if err := os.WriteFile(local, []byte("WAV"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.shadow.mu.Lock()
+	s.shadow.files["peer:k1"] = local
+	s.shadow.copyTrackIDs = map[string]int64{local: 42}
+	s.shadowRefreshPeerGrid("peer:k1", peerDeck{
+		deckState: deckState{Deck: 1, Key: "k1", GridGen: "g2"},
+		ip:        "127.0.0.1",
+	}, local)
+	s.shadow.mu.Unlock()
+
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		s.shadow.mu.Lock()
+		busy := s.shadow.copyGridBusy["peer:k1"]
+		s.shadow.mu.Unlock()
+		if !busy {
+			break
+		}
+	}
+	if _, err := os.Stat(local + ".perf.regrid"); !os.IsNotExist(err) {
+		t.Fatalf(".perf.regrid written despite corrupt /perf response: %v", err)
+	}
+	if gotDgram.Load() != 0 {
+		t.Fatalf("sent %d regrid datagrams despite corrupt /perf", gotDgram.Load())
+	}
+
+	// 2. Valid EXPF from source when savePerf fails (destination directory missing)
+	// must NOT write .perf.regrid or send socket datagram.
+	p := gridTestPerf(t, 128, 250, 0)
+	validEXPF, err := perfFromBlobs(128, p.TrackData, p.Beats, p.Overview)
+	if err != nil || !validPerf(validEXPF) {
+		t.Fatalf("fixture EXPF invalid: %v", err)
+	}
+	goodSrc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(validEXPF)
+	}))
+	defer goodSrc.Close()
+	u2, _ := url.Parse(goodSrc.URL)
+	port2, _ := strconv.Atoi(u2.Port())
+	s.shadow.peerPort = port2
+
+	unwritableLocal := filepath.Join(s.shadowDir(), "peer-gone", "track.wav")
+	s.shadow.mu.Lock()
+	s.shadow.files["peer:k2"] = unwritableLocal
+	s.shadow.copyTrackIDs[unwritableLocal] = 43
+	s.shadowRefreshPeerGrid("peer:k2", peerDeck{
+		deckState: deckState{Deck: 1, Key: "k2", GridGen: "g3"},
+		ip:        "127.0.0.1",
+	}, unwritableLocal)
+	s.shadow.mu.Unlock()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		s.shadow.mu.Lock()
+		busy := s.shadow.copyGridBusy["peer:k2"]
+		s.shadow.mu.Unlock()
+		if !busy {
+			break
+		}
+	}
+	if _, err := os.Stat(unwritableLocal + ".perf.regrid"); !os.IsNotExist(err) {
+		t.Fatalf(".perf.regrid written despite savePerf failure: %v", err)
+	}
+	if gotDgram.Load() != 0 {
+		t.Fatalf("sent %d regrid datagrams despite savePerf failure", gotDgram.Load())
+	}
+}
