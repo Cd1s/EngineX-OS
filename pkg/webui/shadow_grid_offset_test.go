@@ -134,3 +134,12 @@ func TestTakePeerPausedFollowUsesTighterDriftDeadband(t *testing.T) {
 		t.Fatalf("paused-follow anchorPos = %v, want %v", pf.peerDecks[2].anchorPos, d.PositionMS)
 	}
 }
+
+func TestShadowPositionFeedAgePreservesSubMillisecondElapsed(t *testing.T) {
+	at := int64(1_700_000_000_000)
+	now := time.UnixMilli(at).Add(940 * time.Microsecond)
+	got := shadowPositionFeedAge(at, now)
+	if got != 940*time.Microsecond {
+		t.Fatalf("shadowPositionFeedAge = %v, want 940us (sub-ms truncation lost feed age)", got)
+	}
+}

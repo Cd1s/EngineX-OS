@@ -1317,7 +1317,7 @@ func (sh *shadowState) playingDriftMS() float64 {
 // two clocks drifting apart or one being slewed; over 300 ms late is a stepped
 // clock and starts over. Called with sh.mu held.
 func (sh *shadowState) peerLate(id string, sent int64, now time.Time) float64 {
-	off := float64(now.UnixMilli() - sent)
+	off := float64(now.UnixMicro())/1000.0 - float64(sent)
 	c, ok := sh.peerClock[id]
 	c.off += now.Sub(c.at).Seconds()
 	if !ok || off < c.off || off > c.off+300 {
@@ -2693,8 +2693,11 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 		if pfx := imagePrefix(deviceCompatible()); pfx == "" || playerBoards[pfx] {
 			d.Master = new(false)
 		}
+		atMS := now.UnixMilli()
 		if d.Playing && !d.Scratch {
-			d.PositionMS, d.Rate = p.carried(now.Sub(p.at))
+			// Carry to the exact millisecond stamped in d.At so the paused-follow
+			// position feed matches d.At without sub-ms truncation jitter.
+			d.PositionMS, d.Rate = p.carried(time.UnixMilli(atMS).Sub(p.at))
 		}
 		d.Progress, d.Error = 0, "" // ours to say, not the peer's
 		// A file of this player's own for a track the peer loaded from this player's
@@ -2748,7 +2751,7 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 		// The key of the source's display data: the QML covers the deck with the
 		// source's cover and key until Engine holds the track.
 		d.Key, d.Ext, d.Net = displayTrackKey(p), "", ""
-		d.At = now.UnixMilli()
+		d.At = atMS
 		out = append(out, d)
 	}
 	var lineFree []int
