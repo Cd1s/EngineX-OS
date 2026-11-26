@@ -2409,7 +2409,7 @@ class ShadowDisplayTest(unittest.TestCase):
     """Run the actual QML JS functions with a fake clock and an Engine that rejects all access."""
 
     def js(self, body):
-        names = ("scDeckLocked", "scPhaseMeterOf", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
+        names = ("scDeckLocked", "scPhaseMeterOf", "scWaveformPositionOf", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
                  "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueProps", "scCueBeatsLeft", "scCueTickFor", "scCueStep", "scCueTableOf", "scCueCount", "scCueWatch", "scCueFeedTick", "scCueFeedLine", "scCuePlayhead",
                  "scShadowApply", "scShadowFeed", "scShadowEmpty", "scShadowScratchLine", "scShadowScratchRelease", "scShadowSpeed", "scShadowCues", "scShadowBeat",
