@@ -49,6 +49,7 @@
 #include "live_tap.h"
 #include "reverb_time.h"
 #include "hook_features.h"
+#include "rekordbox_browse.h"
 #ifndef SC_TAP_PATH
 #define SC_TAP_PATH "/tmp/enginex-broadcast.pcm" // pkg/broadcast DefaultInputPath
 #endif
@@ -2715,6 +2716,7 @@ static void install_rekordbox_rows(uintptr_t base, size_t page);
 static void install_rekordbox_analysis(uintptr_t base, size_t page);
 static void install_shadow_analysis(uintptr_t base, size_t page);
 static void install_shadow_browse(uintptr_t base, size_t page);
+static void install_rekordbox_browse(uintptr_t base, size_t page);
 #endif
 
 static void apply_engine_edits(uintptr_t base, size_t page) {
@@ -2807,6 +2809,7 @@ __attribute__((constructor)) static void edit_engine(void) {
     install_rekordbox_analysis(base, page);
     install_shadow_analysis(base, page);
     if (hf_on(HF_FOUR_DECK)) install_shadow_browse(base, page);
+    install_rekordbox_browse(base, page);
 #else
     if (hf_on(HF_SQLITE_TUNING) || hf_on(HF_TELEMETRY_BLOCK)) install_sqlite_hooks(base, page);
 #endif
@@ -4046,6 +4049,56 @@ A32_ONLY static void install_sqlite_hooks(uintptr_t base, size_t page) {
     }
     fprintf(stderr, "engine-ui-hook: SQLite open/open_v2 hooks installed\n");
 }
+
+A32_ONLY static void install_rekordbox_browse(uintptr_t base, size_t page) {
+    // Verified across Engine 5.3.0 (JP07) and 5.3.0-sclive4 (JP21): sqlite3_api_routines
+    // slots [19]=column_blob, [20]=column_bytes, [28]=column_int, [29]=column_int64,
+    // [38]=column_type share the identical position-independent 8-byte ARM prologue.
+    if (!hf_on(HF_RB_BRIDGE) || !build->sqlite_api) return;
+    const uint32_t *api = (const void *)(base + build->sqlite_api);
+    if (api[55] != base + build->sqlite_exec) return;
+    static const uint32_t col_prologue[] = {0xe16d41f0, 0xe1a04000}; // strd r4,[sp,#-16]!; mov r4,r0
+    static const uint32_t count_body[] = {0xe3500000, 0x11d009b0, 0xe12fff1e};
+    static const uint32_t name_prefix[] = {0xe3a03000, 0xe1a02003};
+    static const uint32_t db_body[] = {0xe3500000, 0x15900000, 0xe12fff1e};
+    static const uint32_t sql_body[] = {0xe3500000, 0x159000d0, 0xe12fff1e};
+    const int hooks[] = {19, 20, 28, 29, 38};
+    for (unsigned i = 0; i < sizeof hooks / sizeof *hooks; i++) {
+        uintptr_t fn = (uintptr_t)api[hooks[i]];
+        if (!fn || memcmp((const void *)fn, col_prologue, sizeof col_prologue)) return;
+    }
+    if (!api[22] || !api[30] || !api[49] || !api[153] || !api[180] ||
+        memcmp((const void *)(uintptr_t)api[22], count_body, sizeof count_body) ||
+        memcmp((const void *)(uintptr_t)api[30], name_prefix, sizeof name_prefix) ||
+        memcmp((const void *)(uintptr_t)api[49], db_body, sizeof db_body) ||
+        memcmp((const void *)(uintptr_t)api[153], sql_body, sizeof sql_body))
+        return;
+
+    void *tr_blob = function_trampoline((uintptr_t)api[19], page);
+    void *tr_bytes = function_trampoline((uintptr_t)api[20], page);
+    void *tr_int = function_trampoline((uintptr_t)api[28], page);
+    void *tr_int64 = function_trampoline((uintptr_t)api[29], page);
+    void *tr_type = function_trampoline((uintptr_t)api[38], page);
+    if (!tr_blob || !tr_bytes || !tr_int || !tr_int64 || !tr_type) return;
+
+    sc_rbb_sq.col_blob = (const void *(*)(void *, int))tr_blob;
+    sc_rbb_sq.col_bytes = (int (*)(void *, int))tr_bytes;
+    sc_rbb_sq.col_int = (int (*)(void *, int))tr_int;
+    sc_rbb_sq.col_int64 = (long long (*)(void *, int))tr_int64;
+    sc_rbb_sq.col_type = (int (*)(void *, int))tr_type;
+    sc_rbb_sq.col_count = (int (*)(void *))(uintptr_t)api[22];
+    sc_rbb_sq.col_name = (const char *(*)(void *, int))(uintptr_t)api[30];
+    sc_rbb_sq.db_handle = (void *(*)(void *))(uintptr_t)api[49];
+    sc_rbb_sq.sql = (const char *(*)(void *))(uintptr_t)api[153];
+    sc_rbb_sq.db_filename = (const char *(*)(void *, const char *))(uintptr_t)api[180];
+
+    redirect_function(HF_RB_BRIDGE, (uintptr_t)api[19], sc_rbb_column_blob_hook, page);
+    redirect_function(HF_RB_BRIDGE, (uintptr_t)api[20], sc_rbb_column_bytes_hook, page);
+    redirect_function(HF_RB_BRIDGE, (uintptr_t)api[28], sc_rbb_column_int_hook, page);
+    redirect_function(HF_RB_BRIDGE, (uintptr_t)api[29], sc_rbb_column_int64_hook, page);
+    redirect_function(HF_RB_BRIDGE, (uintptr_t)api[38], sc_rbb_column_type_hook, page);
+    fprintf(stderr, "engine-ui-hook: rekordbox browse SQLite hooks installed\n");
+}
 #endif
 
 // The sender's prologue: its first instructions do not depend on the PC, so the trampoline copies them.
@@ -4118,8 +4171,15 @@ static int redirected_open(int dirfd, const char *path, int flags, mode_t mode) 
     static void *cache;
     int (*real)(int, const char *, int, ...) = next_symbol(&cache, "openat");
     char mapped[PATH_MAX];
+    char rbb_art[PATH_MAX];
     if (is_engine()) {
         path = stems_processor_path(path);
+        if (hf_on(HF_RB_BRIDGE) && (dirfd == AT_FDCWD || (path && path[0] == '/'))) {
+            sc_rbb_note_path(path);
+            int rgb_fd = sc_rbb_open_rgb(path, flags);
+            if (rgb_fd >= 0) return rgb_fd;
+            if (sc_rbb_map_artwork(path, rbb_art)) path = rbb_art;
+        }
         int copied = sc_copy_profile_read(path, flags, UI_ROOT "/../settings-copy/usb-read",
                                          UI_ROOT "/../settings-copy/usb.profile", mapped, sizeof mapped);
         if (copied < 0) { errno = ESTALE; return -1; }
@@ -4199,7 +4259,14 @@ HF_INTERPOSE(HF_ALWAYS)
 int access(const char *path, int mode) {
     int (*real)(const char *, int) = next_symbol(&access_cache, "access");
     if (!real) { errno = ENOSYS; return -1; }
-    if (is_engine()) path = stems_processor_path(path);
+    char rbb_art[PATH_MAX];
+    if (is_engine()) {
+        path = stems_processor_path(path);
+        if (hf_on(HF_RB_BRIDGE)) {
+            if (sc_rbb_access_rgb(path, mode)) return 0;
+            if (sc_rbb_map_artwork(path, rbb_art)) path = rbb_art;
+        }
+    }
     return real(path, mode);
 }
 
@@ -4208,7 +4275,16 @@ HF_INTERPOSE(HF_ALWAYS)
 int statx(int dirfd, const char *path, int flags, unsigned int mask, struct statx *buf) {
     int (*real)(int, const char *, int, unsigned int, struct statx *) = next_symbol(&statx_cache, "statx");
     if (!real) { errno = ENOSYS; return -1; }
-    if (is_engine()) path = stems_processor_path(path);
+    char rbb_art[PATH_MAX];
+    if (is_engine()) {
+        path = stems_processor_path(path);
+        if (hf_on(HF_RB_BRIDGE) && (dirfd == AT_FDCWD || (path && path[0] == '/'))) {
+#ifdef STATX_BASIC_STATS
+            if (sc_rbb_statx_rgb(path, buf)) return 0;
+#endif
+            if (sc_rbb_map_artwork(path, rbb_art)) path = rbb_art;
+        }
+    }
     return real(dirfd, path, flags, mask, buf);
 }
 
@@ -4219,7 +4295,15 @@ int statx(int dirfd, const char *path, int flags, unsigned int mask, struct stat
 static int stems_stat(void **cache, const char *name, const char *path, struct stat *buf) {
     int (*real)(const char *, struct stat *) = next_symbol(cache, name);
     if (!real) { errno = ENOSYS; return -1; }
-    if (is_engine()) path = stems_processor_path(path);
+    char rbb_art[PATH_MAX];
+    if (is_engine()) {
+        path = stems_processor_path(path);
+        if (hf_on(HF_RB_BRIDGE)) {
+            if ((sizeof(void *) == 8 || !strcmp(name, "__stat64_time64")) && sc_rbb_stat_rgb(path, buf))
+                return 0;
+            if (sc_rbb_map_artwork(path, rbb_art)) path = rbb_art;
+        }
+    }
     return real(path, buf);
 }
 #define STAT_WRAPPER(fn, name) \
