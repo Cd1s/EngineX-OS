@@ -68,24 +68,20 @@ def ns_curl_headers_and_json(side, path):
 
 
 def shadow_ver(side):
-    headers, _ = ns_curl_headers_and_json(side, "/v1/enginex/shadow/decks")
-    st = headers.get("x-shadow-state", "")
-    try:
-        return int(st.split(":", 1)[0])
-    except (ValueError, IndexError):
-        return 0
+    _, body = ns_curl_headers_and_json(side, "/v1/enginex/shadow")
+    return int(body.get("ver", 0))
 
 
 def find_engine_pid(side):
-    """Find the host-visible PID of Engine running inside this twin sandbox side."""
+    """Find the host-visible PID of the real /usr/Engine/Engine binary (not wrapper shells)."""
     work_str = str(twin.WORK.resolve())
     marker = f"{work_str}/{side}/"
     for p in Path("/proc").iterdir():
         if not p.name.isdigit():
             continue
         try:
-            cmd = (p / "cmdline").read_bytes().decode("utf-8", "ignore")
-            if "/usr/Engine/Engine" not in cmd:
+            argv0 = (p / "cmdline").read_bytes().split(b"\x00", 1)[0].decode("utf-8", "ignore")
+            if argv0 != "/usr/Engine/Engine" and not argv0.endswith("/Engine"):
                 continue
             mi = (p / "mountinfo").read_text(errors="ignore")
             if marker in mi:
@@ -365,9 +361,9 @@ def measure_steady_cost(window_s=20.0):
     corr_a_min = (ver_a1 - ver_a0) / dt * 60.0
     corr_b_min = (ver_b1 - ver_b0) / dt * 60.0
 
-    print(f"\n==================== STEADY-PLAY COST ({dt:.1f}s window) ====================", flush=True)
-    print(f"  Unit A (holds Deck 2 copy): corrections={ver_a1 - ver_a0} ({corr_a_min:.1f}/min) | Engine GUI-thread CPU={gui_cpu_a:.2f}%")
-    print(f"  Unit B (holds Deck 1 copy): corrections={ver_b1 - ver_b0} ({corr_b_min:.1f}/min) | Engine GUI-thread CPU={gui_cpu_b:.2f}%", flush=True)
+    print(f"\n==================== STEADY-PLAY COST ({dt:.1f}s window, Engine PIDs A={pid_a} B={pid_b}) ====================", flush=True)
+    print(f"  Unit A (holds Deck 2 copy): ver {ver_a0}->{ver_a1} corrections={ver_a1 - ver_a0} ({corr_a_min:.1f}/min) | Engine GUI-thread CPU={gui_cpu_a:.2f}%")
+    print(f"  Unit B (holds Deck 1 copy): ver {ver_b0}->{ver_b1} corrections={ver_b1 - ver_b0} ({corr_b_min:.1f}/min) | Engine GUI-thread CPU={gui_cpu_b:.2f}%", flush=True)
     return {
         "window_s": dt,
         "corr_a": ver_a1 - ver_a0,
@@ -457,10 +453,13 @@ def main():
     twin.ev("B", 'root.rtTr("/Engine/Deck2/Track/SetSongPosition").value = 0.05; "seekB"')
     time.sleep(0.8)
 
-    # 1. Native same BPM (128.0 vs 128.0), Sync ON, A1=LEAD
-    subprocess.run(["python3", str(Path(__file__).resolve().parent / "twin.py"), "play", "start"], check=True)
+    # 1. Native same BPM (128.0 vs 128.0), Sync ON, A1=LEAD (start A1 first so A1 takes LEAD cleanly)
+    subprocess.run(["python3", str(Path(__file__).resolve().parent / "twin.py"), "play", "A"], check=True)
+    wait_for(lambda: deck_sync_info("A", 1)["master"], 10, "A1 LEAD before B2 starts")
+    subprocess.run(["python3", str(Path(__file__).resolve().parent / "twin.py"), "play", "B"], check=True)
     a1, b2 = ensure_sync_a_lead()
     print(f"Synced 128v128: A1={a1} | B2={b2}", flush=True)
+    assert a1["master"] and not b2["master"] and b2["aligned"], f"128v128 failed to lock Sync: A1={a1} B2={b2}"
     time.sleep(2.5)
     r_native = measure_playing_pair("NATIVE SAME BPM (128 vs 128), SYNC ON, LEAD=A1", "track-a.wav", "track-b128.wav", N_SAMPLES)
     cost = measure_steady_cost(COST_WINDOW_S)
