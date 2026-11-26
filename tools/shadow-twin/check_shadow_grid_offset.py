@@ -191,14 +191,17 @@ def ensure_sync_a_lead():
     return a1, b2
 
 
-def arm_burst(side, n_samples=120, interval_ms=40):
+def arm_burst(side, n_samples=150, interval_ms=40):
+    """Sample local and copy WaveFormPositionItem right on rendered frames (frameSwapped,
+    every 2nd frame -> ~30 Hz) so inter-frame software-GL pauses do not create fake
+    staleness between local cached currentPosition and live shadow_position_hook."""
     js = f"""(() => {{
         const bag = root.scShadowTextAt;
         bag._sgoChk = [];
+        bag._sgoMode = "timer";
         if (bag._sgoChkT) {{ bag._sgoChkT.stop(); bag._sgoChkT.destroy(); bag._sgoChkT = null; }}
-        bag._sgoChkT = Qt.createQmlObject('import QtQml; Timer {{ interval: {interval_ms}; repeat: true; running: true }}', root);
-        bag._sgoChkT.triggered.connect(function() {{
-            if (bag._sgoChk.length >= {n_samples}) {{ bag._sgoChkT.stop(); return; }}
+        if (bag._sgoWin && bag._sgoCb) {{ try {{ bag._sgoWin.frameSwapped.disconnect(bag._sgoCb); }} catch(e) {{}} bag._sgoWin = null; bag._sgoCb = null; }}
+        const take = () => {{
             const now = Date.now();
             const readD = d => {{
                 const g = p => root.rtTr("/Engine/Deck" + d + p) || {{}};
@@ -217,10 +220,30 @@ def arm_burst(side, n_samples=120, interval_ms=40):
                 }};
             }};
             bag._sgoChk.push({{ now, d1: readD(1), d2: readD(2) }});
+        }};
+        const win = (typeof planckQuickView !== "undefined" && planckQuickView && planckQuickView.frameSwapped) ? planckQuickView : null;
+        if (win) {{
+            bag._sgoMode = "frameSwapped";
+            bag._sgoWin = win;
+            let k = 0;
+            bag._sgoCb = function() {{
+                if (bag._sgoChk.length >= {n_samples}) {{
+                    try {{ win.frameSwapped.disconnect(bag._sgoCb); }} catch(e) {{}}
+                    return;
+                }}
+                if ((++k) % 2 === 0) take();
+            }};
+            win.frameSwapped.connect(bag._sgoCb);
+            return "armed:frameSwapped";
+        }}
+        bag._sgoChkT = Qt.createQmlObject('import QtQml; Timer {{ interval: {interval_ms}; repeat: true; running: true }}', root);
+        bag._sgoChkT.triggered.connect(function() {{
+            if (bag._sgoChk.length >= {n_samples}) {{ bag._sgoChkT.stop(); return; }}
+            take();
         }});
-        return "armed";
+        return "armed:timer";
     }})()"""
-    twin.ev(side, js)
+    return twin.ev(side, js)
 
 
 def read_burst(side, n_samples=120):
@@ -239,8 +262,8 @@ def measure_playing_pair(label, fn_a, fn_b, n_samples=120):
     sr_b1, spb_b1, b0_b1 = parse_grid_b0("B", fn_a)
     sr_a2, spb_a2, b0_a2 = parse_grid_b0("A", fn_b)
 
-    arm_burst("A", n_samples, 40)
-    arm_burst("B", n_samples, 40)
+    mode_a = arm_burst("A", n_samples, 40)
+    mode_b = arm_burst("B", n_samples, 40)
     la = read_burst("A", n_samples)
     lb = read_burst("B", n_samples)
 
@@ -317,8 +340,8 @@ def measure_playing_pair(label, fn_a, fn_b, n_samples=120):
     b1_p99 = pct([abs(v) for v in b1_err], 99)
     a2_p99 = pct([abs(v) for v in a2_err], 99)
 
-    print(f"\n==================== {label} ====================", flush=True)
-    print(f"  40ms cadence: A={statistics.mean(dt_a):.1f}ms (max={max(dt_a):.0f}ms) | B={statistics.mean(dt_b):.1f}ms (max={max(dt_b):.0f}ms)")
+    print(f"\n==================== {label} ({mode_a}/{mode_b}) ====================", flush=True)
+    print(f"  Sample cadence: A={statistics.mean(dt_a):.1f}ms (max={max(dt_a):.0f}ms) | B={statistics.mean(dt_b):.1f}ms (max={max(dt_b):.0f}ms)")
     print(f"  Copy PlayState=false: A2={a2_played}/{len(la)} B1={b1_played}/{len(lb)} (OK)")
     print(f"  UNIT A screen (Deck2 copy - Deck1 local): {fmt_stats(a_scr)} -> ahead: {a_lead}")
     print(f"  UNIT B screen (Deck1 copy - Deck2 local): {fmt_stats(b_scr)} -> ahead: {b_lead}")

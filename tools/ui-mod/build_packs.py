@@ -2227,13 +2227,13 @@ SERVICES_MAIN = """
 			} else s.env = s.avg = raw
 			// Engine's own playing waveform draws WaveFormPositionItem.currentPosition
 			// (extrapolated on CLOCK_MONOTONIC_RAW on each render frame), while
-			// TrackPosition lags ~19.5 ms even at 60 Hz. Keep a tight upper envelope
-			// (s.wfEnv) over wfMs - speed*now so a mid-frame or post-stall tick
-			// (frame age delta >= 0) never posts a backward dip; keep TrackPosition
-			// + s.env as the fallback when paused, scratching, held, or when the item
-			// is missing or not yet on this track's timeline.
+			// TrackPosition lags ~19.5 ms even at 60 Hz. A 3-sample median over
+			// wfMs - speed*now keeps zero bias against the rendered frame while
+			// rejecting single-tick frame stalls without delaying jog nudges; keep
+			// TrackPosition + s.env as the fallback when paused, scratching, held,
+			// or when the item is missing or not yet on this track's timeline.
 			let drawMs = NaN
-			s.wfEnv = s.wfAvg = NaN
+			s.wf0 = s.wf1 = NaN
 			if (s.ps && !s.scratch && !s.phaseHold && sr > 0) {
 				const wf = scWaveformPositionOf(d)
 				const wfPos = wf ? wf.currentPosition : NaN
@@ -2242,20 +2242,17 @@ SERVICES_MAIN = """
 					if (Math.abs(ms - s.posMs) <= 250 * Math.max(1, speed)) {
 						const rawWf = ms - speed * now
 						const sameRun = p && p.ps && p.net === s.net && p.pitch === s.pitch && p.sync === s.sync && p.jumps === s.jumps
-						if (sameRun && isFinite(p.wfEnv) && isFinite(p.wfAvg)) {
+						if (sameRun && isFinite(p.wf0) && isFinite(p.wf1)) {
 							const lateTick = now - p.at > scShadowTickTimer.interval + 20
-							if (lateTick) {
-								s.wfAvg = p.wfAvg
-								s.wfEnv = Math.max(rawWf, p.wfEnv)
-							} else {
-								s.wfAvg = p.wfAvg + (rawWf - p.wfAvg) * 0.25
-								const slowWf = p.wfEnv - s.wfAvg - 4 * speed
-								s.wfEnv = Math.max(rawWf, p.wfEnv - (slowWf > 0 ? slowWf * 0.25 : 0.0005 * (now - p.at)))
-							}
+							const cur = lateTick && rawWf < p.wf0 - 4 ? p.wf0 : rawWf
+							const a = p.wf1, b = p.wf0, c = cur
+							const med = a <= b ? (b <= c ? b : (a <= c ? c : a)) : (a <= c ? a : (b <= c ? c : b))
+							s.wf1 = p.wf0; s.wf0 = cur
+							drawMs = med + speed * now
 						} else {
-							s.wfEnv = s.wfAvg = rawWf
+							s.wf0 = s.wf1 = rawWf
+							drawMs = ms
 						}
-						drawMs = s.wfEnv + speed * now
 					}
 				}
 			}

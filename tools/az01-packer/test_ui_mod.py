@@ -4794,18 +4794,24 @@ for(let i=0;i<30;i++) step(80); // 2.4 s
 assert.equal(bodies.length,beforeSteady,'steady play with wfItem triggered extra full posts');
 assert(pings>beforePings,'steady play must keep using /alive pings');
 assert(Math.abs(scShadowPrev[1].lineMs-trueMs)<0.01,'lineMs matches Engine draw position');
-// 2b. Mid-frame age dips (0..10 ms behind now) and a late GUI stall tick keep lineMs pinned to the fresh render line.
+// 2b. Single-tick frame dips (-9 ms) and a late GUI stall tick are rejected with zero positive bias.
 let ageDip = 0;
 globalThis.PlanckGUI = { waveformPositionItem(d){ wfCalls++; return d===1 ? {currentPosition: (trueMs - ageDip) * 48} : null; } };
 const beforeDip = bodies.length;
-for (const d of [6, 9, 2, 0, 8, 1]) { ageDip = d; step(80); assert(Math.abs(scShadowPrev[1].lineMs - trueMs) < 0.5, 'mid-frame dip moved lineMs: ' + (scShadowPrev[1].lineMs - trueMs)); }
-assert.equal(bodies.length, beforeDip, 'mid-frame dips triggered extra full posts');
+for (const d of [0, 9, 0, 0, 8, 0]) { ageDip = d; step(80); assert(Math.abs(scShadowPrev[1].lineMs - trueMs) < 0.01, 'single-tick dip moved lineMs: ' + (scShadowPrev[1].lineMs - trueMs)); }
+assert.equal(bodies.length, beforeDip, 'single-tick dips triggered extra full posts');
+// Symmetric +-1 ms jitter keeps zero mean bias (no upper-envelope positive shift).
+const errs = [];
+for (const j of [-1, 1, -1, 1, 0, -1, 1, 0]) { ageDip = j; step(80); errs.push(scShadowPrev[1].lineMs - trueMs); }
+const meanErr = errs.reduce((a, b) => a + b, 0) / errs.length;
+assert(Math.abs(meanErr) < 0.3, 'median filter introduced bias: ' + meanErr);
+ageDip = 0; step(80); step(80);
 const frozenWf = trueMs * 48;
 globalThis.PlanckGUI = { waveformPositionItem(d){ wfCalls++; return d===1 ? {currentPosition: frozenWf} : null; } };
 const beforeStall = bodies.length;
 now += 110; trueMs += 110; scShadowTick();
 assert.equal(bodies.length, beforeStall, 'stale wfPos during GUI stall triggered a backward post');
-assert(Math.abs(scShadowPrev[1].lineMs - trueMs) < 0.5, 'stale wfPos must carry expected line: ' + scShadowPrev[1].lineMs + ' vs ' + trueMs);
+assert(Math.abs(scShadowPrev[1].lineMs - trueMs) < 0.01, 'stale wfPos must carry expected line: ' + scShadowPrev[1].lineMs + ' vs ' + trueMs);
 globalThis.PlanckGUI={
     waveformPositionItem(d){
         wfCalls++;
