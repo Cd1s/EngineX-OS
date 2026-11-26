@@ -238,7 +238,7 @@ def main():
     # 4) Display-only mode check: switch B to shadow_mode=cdj, edit grid on A, verify /display updates.
     subprocess.run(
         ["ip", "netns", "exec", twin.SIDE_CFG["B"]["netns"], "curl", "-sS", "-X", "POST",
-         "-d", "shadowMode=cdj", "http://127.0.0.1:8080/v1/enginex/ui"],
+         "http://127.0.0.1:8080/v1/enginex/ui?shadowMode=cdj"],
         check=True,
         stdout=subprocess.DEVNULL,
     )
