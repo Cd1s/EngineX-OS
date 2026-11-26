@@ -728,12 +728,15 @@ type dbCandidate struct {
 type trackChange struct {
 	candidate     dbCandidate
 	refs          map[rbstate.LibraryKind]rekordbox.Track
-	cues          []rekordbox.Cue
+	cues          []rekordbox.Cue    // ANLZ layout-repair cues (when anlzCueRepair)
+	anlzCues      [3][]rekordbox.Cue // per-variant merged cues (.DAT, .EXT, .2EX)
+	anlzVariant   [3]bool            // per-variant cue diff flags (.DAT, .EXT, .2EX)
+	oneCues       []rekordbox.Cue    // OneLibrary merged cues (when oneCuesDiff)
 	beats         []rekordbox.Beat
 	bpm           float64
 	analysis      string // set when cuesDiff, anlzCueRepair, or gridDiff
 	cuesDiff      bool
-	anlzCuesDiff  bool // ANLZ cue sections differ from merged deck cues
+	anlzCuesDiff  bool // any ANLZ cue variant differs from merged deck cues
 	oneCuesDiff   bool // OneLibrary cue rows differ from merged deck cues
 	anlzCueRepair bool // ANLZ cue-section layout repair only (does not write m.db or reset OneLibrary marks)
 	repairVariant [3]bool
@@ -1623,7 +1626,7 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 		// missing baseline, another written digest, or a row noted before and changed now is
 		// compared with the ANLZ, so a deleted cue or a loop no longer active on load is written
 		// (port3 regressions) although the import's baseline is unchanged.
-		var orig []rekordbox.Cue
+		var anlzOrig [3][]rekordbox.Cue
 		var origBeats []rekordbox.Beat
 		anlzDiff, oneDiff := false, false
 		hasExplicitCueBase := len(row.track.Written) > 0 || len(row.filledCues) > 0 || len(row.filledWritten) > 0 || len(row.filledWrittenNoMain) > 0 || row.track.Perf == rbstate.PerfDeck
@@ -1633,17 +1636,31 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 			offset, offsetOK := trackRekordboxOffset(resolver, primary.Path)
 			if offsetOK && needsCue {
 				if deck, err := enginedb.ParseDeckCuesAndLoops(row.trackData, row.quickCues, row.loops, row.activeLoops); err == nil {
-					orig = readANLZCues(resolver, primary.AnalysisPath)
-					if len(orig) == 0 {
-						if one, hasOne := change.refs[rbstate.OneLibrary]; hasOne && len(one.Cues) > 0 {
-							orig = one.Cues
+					var anlzExists [3]bool
+					hasANLZCues := false
+					if base, baseOK := anlzBase(primary.AnalysisPath); baseOK {
+						for i, ext := range anlzExts {
+							if cues, ok := readANLZVariantCues(resolver, base, ext, i == 2); ok {
+								anlzOrig[i] = cues
+								anlzExists[i] = true
+								if len(cues) > 0 {
+									hasANLZCues = true
+								}
+							}
 						}
 					}
 					cuesMatchedLegacy := false
 					if takeOver && len(row.track.Written) > 0 {
-						cands := make([]float64, 0, len(orig)*2+1)
+						var allOrig []rekordbox.Cue
+						for i := range anlzOrig {
+							allOrig = append(allOrig, anlzOrig[i]...)
+						}
+						if one, hasOne := change.refs[rbstate.OneLibrary]; hasOne {
+							allOrig = append(allOrig, one.Cues...)
+						}
+						cands := make([]float64, 0, len(allOrig)*2+1)
 						cands = append(cands, 0)
-						for _, c := range orig {
+						for _, c := range allOrig {
 							if c.Loop || c.HotCue != 0 {
 								continue
 							}
@@ -1658,18 +1675,43 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 					}
 					if !cuesMatchedLegacy {
 						legacyMP3 := len(row.track.Written) == 0 && strings.HasSuffix(strings.ToLower(primary.Path), ".mp3")
-						merged := mergeEngineCues(orig, deck, offset, legacyMP3)
-						anlzDiff = !cuesEquivalent(orig, merged)
-						if takeOver && anlzDiff && cuesEquivalent(orig, mergeEngineCues(orig, deck, 0, true)) {
-							anlzDiff = false
+						for i := 0; i < 3; i++ {
+							if !anlzExists[i] {
+								continue
+							}
+							merged := mergeEngineCues(anlzOrig[i], deck, offset, legacyMP3)
+							var changed bool
+							if i == 0 {
+								changed = !cuesEquivalent(projectDATCues(anlzOrig[i]), projectDATCues(merged))
+							} else {
+								changed = !cuesEquivalent(anlzOrig[i], merged)
+							}
+							if takeOver && changed {
+								mergedZero := mergeEngineCues(anlzOrig[i], deck, 0, true)
+								if i == 0 && cuesEquivalent(projectDATCues(anlzOrig[i]), projectDATCues(mergedZero)) {
+									changed = false
+								} else if i > 0 && cuesEquivalent(anlzOrig[i], mergedZero) {
+									changed = false
+								}
+							}
+							if changed {
+								change.anlzVariant[i] = true
+								change.anlzCues[i] = merged
+								anlzDiff = true
+							}
 						}
-						if one, hasOne := change.refs[rbstate.OneLibrary]; hasOne && !cuesEquivalent(one.Cues, merged) {
-							if anlzDiff || len(orig) == 0 || (!takeOver && len(one.Cues) > 0 && !cuesValuesMatchIgnoringMinimalMissing(one.Cues, merged)) {
+						if one, hasOne := change.refs[rbstate.OneLibrary]; hasOne {
+							oneMerged := mergeEngineCues(one.Cues, deck, offset, legacyMP3)
+							oneChanged := !cuesEquivalent(one.Cues, oneMerged)
+							if takeOver && oneChanged && cuesEquivalent(one.Cues, mergeEngineCues(one.Cues, deck, 0, true)) {
+								oneChanged = false
+							}
+							if oneChanged && (anlzDiff || !hasANLZCues || (!takeOver && len(one.Cues) > 0 && !cuesValuesMatchIgnoringMinimalMissing(one.Cues, oneMerged))) {
 								oneDiff = true
+								change.oneCues = oneMerged
 							}
 						}
 						if anlzDiff || oneDiff {
-							change.cues = merged
 							change.anlzCuesDiff = anlzDiff
 							change.oneCuesDiff = oneDiff
 							change.cuesDiff = true
@@ -1706,14 +1748,14 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 			}
 		}
 		if change.cuesDiff || change.gridDiff || metaDiff {
-			change.diff = describeTrackDiff(row, change, primary, orig, origBeats, anlzDiff, oneDiff)
+			change.diff = describeTrackDiff(row, change, primary, anlzOrig, origBeats, anlzDiff, oneDiff)
 			changes = append(changes, change)
 		}
 	}
 	return changes, matched, nil
 }
 
-func describeTrackDiff(row dbCandidate, change trackChange, primary rekordbox.Track, orig []rekordbox.Cue, origBeats []rekordbox.Beat, anlzDiff, oneDiff bool) WriteBackTrackDiff {
+func describeTrackDiff(row dbCandidate, change trackChange, primary rekordbox.Track, anlzOrig [3][]rekordbox.Cue, origBeats []rekordbox.Beat, anlzDiff, oneDiff bool) WriteBackTrackDiff {
 	rel := row.track.Rel
 	if rel == "" {
 		rel = primary.Path
@@ -1742,10 +1784,15 @@ func describeTrackDiff(row dbCandidate, change trackChange, primary rekordbox.Tr
 		}
 	}
 	if anlzDiff {
-		fields = append(fields, fmt.Sprintf("cues:anlz(orig=%d merged=%d)", len(orig), len(change.cues)))
+		for _, idx := range []int{1, 0, 2} {
+			if change.anlzVariant[idx] {
+				fields = append(fields, fmt.Sprintf("cues:anlz(orig=%d merged=%d)", len(anlzOrig[idx]), len(change.anlzCues[idx])))
+				break
+			}
+		}
 	} else if oneDiff {
 		one := change.refs[rbstate.OneLibrary]
-		fields = append(fields, fmt.Sprintf("cues:onelibrary(orig=%d merged=%d)", len(one.Cues), len(change.cues)))
+		fields = append(fields, fmt.Sprintf("cues:onelibrary(orig=%d merged=%d)", len(one.Cues), len(change.oneCues)))
 	}
 	if change.gridDiff {
 		fields = append(fields, fmt.Sprintf("grid:anlz(orig=%d deck=%d bpm=%.2f)", len(origBeats), len(change.beats), change.bpm))
@@ -1808,6 +1855,64 @@ func readANLZCues(r *compat.Resolver, analysisPath string) []rekordbox.Cue {
 		return nil
 	}
 	return merged.Cues
+}
+
+func anlzHasCueSection(raw []byte) bool {
+	if len(raw) < 12 || string(raw[:4]) != "PMAI" {
+		return false
+	}
+	h, n := int(binary.BigEndian.Uint32(raw[4:])), int(binary.BigEndian.Uint32(raw[8:]))
+	if h < 12 || h > n || n > len(raw) {
+		return false
+	}
+	for off := h; off+12 <= n; {
+		sn := int(binary.BigEndian.Uint32(raw[off+8:]))
+		if sn < 12 || off+sn > n {
+			return false
+		}
+		tag := string(raw[off : off+4])
+		if tag == "PCOB" || tag == "PCO2" {
+			return true
+		}
+		off += sn
+	}
+	return false
+}
+
+func readANLZVariantCues(r *compat.Resolver, baseRel, ext string, onlyIfCueSectionPresent bool) ([]rekordbox.Cue, bool) {
+	rel, ok := resolveANLZVariant(r, baseRel, ext)
+	if !ok {
+		return nil, false
+	}
+	b, err := os.ReadFile(r.FullPath(rel))
+	if err != nil {
+		return nil, false
+	}
+	if onlyIfCueSectionPresent && !anlzHasCueSection(b) {
+		return nil, false
+	}
+	a, err := rekordbox.ParseAnalysis(b)
+	if err != nil {
+		return nil, false
+	}
+	return a.Cues, true
+}
+
+func projectDATCues(in []rekordbox.Cue) []rekordbox.Cue {
+	var out []rekordbox.Cue
+	for _, c := range in {
+		if c.HotCue > 3 {
+			continue
+		}
+		out = append(out, rekordbox.Cue{
+			HotCue: c.HotCue,
+			TimeMS: c.TimeMS,
+			EndMS:  c.EndMS,
+			Loop:   c.Loop,
+			Active: c.Active,
+		})
+	}
+	return out
 }
 
 // readANLZBeats is the beat grid of a track's .DAT (PQTZ) merged with .EXT (PQT2 sub-ms).
@@ -2564,7 +2669,7 @@ var (
 )
 
 func uncoloured(c rekordbox.Cue) bool {
-	return c.Color == ([4]byte{}) && c.ColorCode == 0 && c.ColorID == 0
+	return (c.Color == ([4]byte{}) || c.Color == ([4]byte{255, 0, 0, 0})) && c.ColorCode == 0 && c.ColorID == 0
 }
 
 func isEngineDefaultHotCueColor(pad uint32, rgb [4]byte) bool {
@@ -2718,7 +2823,7 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offset float6
 				if atZero(hc.Samples, oc) || legacy && hc.Name == "" && oc.Name == "" && max(oc.TimeMS, start)-min(oc.TimeMS, start) <= 60 {
 					start = oc.TimeMS
 				}
-				if uncoloured(oc) && ((near(oc.TimeMS, start) && oc.Name == "" && name == "") || (name == "" && isEngineDefaultHotCueColor(pad, rgb))) {
+				if uncoloured(oc) && ((near(oc.TimeMS, start) && oc.Name == "" && name == "") || isEngineDefaultHotCueColor(pad, rgb)) {
 					rgb, code = [4]byte{}, 0
 				} else if oc.Color == rgb && oc.ColorCode != 0 {
 					code = oc.ColorCode

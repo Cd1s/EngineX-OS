@@ -72,7 +72,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 				pdbMeta[tr.ID] = ch.candidate.metadata
 			}
 			if kind == rbstate.OneLibrary && ch.oneCuesDiff {
-				oneCues[tr.ID] = ch.cues
+				oneCues[tr.ID] = ch.oneCues
 			}
 			if kind == rbstate.OneLibrary && ch.gridDiff {
 				oneGrids[tr.ID] = rekordbox.GridUpdate{BPM: ch.bpm}
@@ -80,16 +80,22 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 		}
 		if base, ok := anlzBase(ch.analysis); (ch.anlzCuesDiff || ch.anlzCueRepair || ch.gridDiff) && ok {
 			for i, ext := range anlzExts {
-				wantCues := ch.anlzCuesDiff || (ch.anlzCueRepair && ch.repairVariant[i])
+				wantCues := ch.anlzVariant[i] || (ch.anlzCueRepair && ch.repairVariant[i])
 				wantGrid := ch.gridDiff && i < 2
 				if !wantCues && !wantGrid {
 					continue
+				}
+				var variantCues []rekordbox.Cue
+				if ch.anlzVariant[i] {
+					variantCues = ch.anlzCues[i]
+				} else if ch.anlzCueRepair && ch.repairVariant[i] {
+					variantCues = ch.cues
 				}
 				if rel, ok := resolveANLZVariant(p.r, base, ext); ok {
 					if err := add(&target{
 						rel:      rel,
 						key:      ch.candidate.key,
-						cues:     ch.cues,
+						cues:     variantCues,
 						beats:    ch.beats,
 						cuesDiff: wantCues,
 						gridDiff: wantGrid,
