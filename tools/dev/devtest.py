@@ -318,6 +318,7 @@ def exec_plan(plan_path):
                 go_dirs = [d for d in go_dirs if d not in tagged]
         pk = ['./...'] if plan['go_all'] else [f'./{d}' if d != '.' else '.' for d in sorted(set(go_dirs))]
         smb = gotree.smb_tests('.', sorted(gotree.packages('.')) if plan['go_all'] else sorted(set(go_dirs))) if pk else []
+        out['by_name'] = [['go', d, n] for d, n in smb]  # run by name (gorun --only): each must pass itself
         smb_file = os.path.join(tmp, 'smb.txt')
         pathlib.Path(smb_file).write_text(''.join(f'{d} {n}\n' for d, n in smb))
         if plan['gofmt'] is None or plan['gofmt']:
@@ -578,21 +579,20 @@ def verdict(plan, res, accept_incomplete=False):
     errors = [e for r in res.get('runs', []) for e in r.get('errors', [])]
     failed = [x for x in items if x['status'] == 'fail']
     bad_steps = [s for s in res.get('steps', []) if not s['ok']]
-    named = {tuple(c) for c in plan.get('changed_tests', [])}  # the tests the change added or changed
+    named = {tuple(c) for c in plan.get('changed_tests', []) + res.get('by_name', [])}  # changed, or run by name
     missing = []  # selected by name, but no pass
     for kind, where, test in sorted(named):
         mine = [x for x in items if x['kind'] == kind and x['where'] == where and (kind not in ('go', 'py') or x['test'] == test)]
         if not mine:
             missing.append(f'{kind} {where} {test}: no result')
-        elif any(x['status'] in ('skip', 'notrun') for x in mine):  # a failure is counted as a failure below
-            missing.append(f"{kind} {where} {test}: {', '.join(sorted({x['status'] for x in mine if x['status'] in ('skip', 'notrun')}))} "
-                           f"({'; '.join(x['reason'][:120] for x in mine if x['status'] in ('skip', 'notrun'))})")
+        elif any(x['status'] == 'skip' for x in mine):  # a not-run is listed below; a failure fails
+            missing.append(f"{kind} {where} {test}: skip ({'; '.join(x['reason'][:120] for x in mine if x['status'] == 'skip')})")
     missing += [f"{x['kind']} {x['where']} {x['test']}: did not run ({x['reason']})" for x in items if x['status'] == 'notrun']
     missing += [f"manual: {p}: {i['how']}" for p, i in plan.get('manual', {}).items()]
 
     def needs_a_pass(label, mine):  # a selected target: one of its tests must pass
         if not any(x['status'] in ('pass', 'fail', 'notrun') for x in mine):  # a failure fails; a not-run is listed above
-            missing.append(f'{label}: ' + ('; '.join(sorted({f"skip ({x['reason'][:120]})" for x in mine})) or 'no result'))
+            missing.append(f'{label}: ' + ('; '.join(sorted({f"skip ({x['reason'][:120]})" for x in mine})[:3]) or 'no result'))
     for item in plan.get('py', []):
         for spec in item['specs'] or [None]:
             m = spec and pyrun.norm(spec)

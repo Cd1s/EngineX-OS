@@ -10,11 +10,11 @@
  "python": {
   "tools/az01-packer/test_ui_mod.py": {
    "processes": 4,
-   "evidence": "2026-11-27, Oracle-Bogota-arm, 7a979405 + 23722ff6: serial 405 pass (unittest), 4 processes 405 pass, the same ids (results.py --same; review round 2 confirmed on Oracle-Batam-arm)"
+   "evidence": "2026-11-27, Oracle-Bogota-arm, enginex-run sandbox, tree 7a4fa0d9 + 23722ff6 (bp.ROOT restored): one process 405 pass in 495 s, 4 processes 405 pass in 166 s; results.py --same: SAME, sha256 5472152049240a20 and 5472152049240a20"
   }
  },
  "c": {
   "processes": 4,
-  "evidence": "2026-11-26/27, Oracle-Bogota-arm, 7a979405: 37 variants 4 at a time pass (110 s) and one at a time pass; test_shadow_position_follow alone 10 of 10"
+  "evidence": "2026-11-27, Oracle-Bogota-arm, enginex-run sandbox, tree 7a4fa0d9: the 25 variants of the 18 C tests crun builds (the others run through the test that builds them), one at a time 25 pass in 235 s, 4 at a time 25 pass in 98 s; results.py --same: SAME, sha256 d01b49c66ae84558 and d01b49c66ae84558"
  }
 }

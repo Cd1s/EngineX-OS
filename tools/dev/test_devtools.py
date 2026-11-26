@@ -340,6 +340,11 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(rc, devtest.EXIT_INCOMPLETE, 'a selected Go package whose every test skipped proves nothing')
         self.assertIn('go p: skip (needs the lab)', text)
         self.assertNotIn('go q', text)
+        smb = self.res(('go', 'p', 'TestSMB', 'skip', 0, 'no smbd'), ('go', 'p', 'TestOther', 'pass', 0, ''))
+        smb['runs'][0]['packages'], smb['by_name'] = {'p': 'tested'}, [['go', 'p', 'TestSMB']]
+        rc, text = self.report({}, smb)
+        self.assertEqual(rc, devtest.EXIT_INCOMPLETE, 'a Samba test run by name (gorun --only) that skipped')
+        self.assertIn('go p TestSMB: skip (no smbd)', text)
         rc, text = self.report({}, self.res(('py', 'd', 'test_missing', 'notrun', 0, 'no test matches it')))
         self.assertEqual(rc, devtest.EXIT_INCOMPLETE, 'a test requested by name that does not exist is never a pass')
         rc, text = self.report({'sh': ['tests/test_x.sh']}, self.res(('go', 'p', 'T', 'pass', 0, '')))
@@ -580,7 +585,8 @@ class PyrunTest(unittest.TestCase):
         self.assertEqual(sorted(cfg['python']), ['tools/az01-packer/test_ui_mod.py'])
         for name, entry in list(cfg['python'].items()) + [('c', cfg['c'])]:
             self.assertGreater(entry['processes'], 1, name)
-            self.assertRegex(entry['evidence'], r'20\d\d-\d\d-\d\d.*(pass|SAME)', f'{name}: an entry needs its recorded equality run')
+            self.assertRegex(entry['evidence'], r'20\d\d-\d\d-\d\d, .*results\.py --same: SAME, sha256 ([0-9a-f]{16}) and \1$',
+                             f'{name}: an entry needs its recorded serial-vs-split equality run (date, host, tree, both hashes)')
 
     def test_failure_exits_nonzero_and_prints_output(self):
         with tempfile.TemporaryDirectory() as root:
