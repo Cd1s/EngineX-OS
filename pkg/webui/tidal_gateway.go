@@ -2126,6 +2126,10 @@ func fetchFailStatus(err error) int {
 
 func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref trackRef) bool {
 	j := g.s.jobs
+	if isNASKey(trackKey(ref.track)) && ref.gen != j.NASGen() { // also for a cached file (#335)
+		fail(w, http.StatusNotFound, errNASChanged)
+		return false
+	}
 	if ref.file != "" || ref.track.Provider == "spotify" || j == nil || j.File(ref.track) != "" {
 		return true
 	}

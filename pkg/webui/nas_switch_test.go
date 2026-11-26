@@ -638,3 +638,26 @@ func TestReviewImportSlot(t *testing.T) {
 		t.Fatalf("the load of server one's track answered HTTP 200 after the change (its recording=%v)", bytes.Equal(old.body, rig.one))
 	}
 }
+
+// Round 4 (MEDIUM 3): playback info of server one's track that looked it up before the
+// change answered 200 once server two's file was cached under the same track ID.
+func TestReviewWarmPlaybackInfo(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.oneURL)
+	id1 := rig.browse()
+	hook, reached, resume := pauseOnce("lookup")
+	t.Cleanup(resume)
+	rig.s.tidal.pause = hook
+	done := make(chan nasAnswer, 1)
+	go func() {
+		done <- rig.get(fmt.Sprintf("/v1/tracks/%d/playbackinfopostpaywall?audioquality=LOSSLESS&playbackmode=STREAM&assetpresentation=FULL", id1))
+	}()
+	nasWaitFor(t, reached, "the playback info looked up server one's track")
+	rig.saveNAS(rig.twoURL)
+	id2 := rig.browse()
+	rig.plays("server two's row", id2, rig.two)
+	resume()
+	if a := <-done; a.code != http.StatusNotFound {
+		t.Fatalf("playback info of server one's track %d, looked up before the change, answered HTTP %d with server two's file cached, want 404", id1, a.code)
+	}
+}
