@@ -65,10 +65,20 @@ func (s *Server) addStemmed(scope string, t stemmedTrack) error {
 
 // resetNASStems drops the stemmed NAS tracks after the NAS server, share or
 // root changed: a deck loading the new root's track would swap to the old file.
+// A file that does not fully decode is left as it is (a partial read would drop
+// other services' entries).
 func (s *Server) resetNASStems() {
 	s.stemsMu.Lock()
 	defer s.stemsMu.Unlock()
-	all, changed := s.loadStemmed(), false
+	data, err := os.ReadFile(s.stemsFile())
+	if err != nil {
+		return
+	}
+	all, changed := map[string][]stemmedTrack{}, false
+	if err := json.Unmarshal(data, &all); err != nil {
+		log.Printf("webui: NAS changed: Stems lists left as they are, the file does not decode (%T)", err)
+		return
+	}
 	for scope, list := range all {
 		kept := slices.DeleteFunc(slices.Clone(list), func(e stemmedTrack) bool { return isNASProvider(e.Track.Provider) })
 		if len(kept) != len(list) {

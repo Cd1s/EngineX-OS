@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -324,3 +325,40 @@ func TestReviewThreeLoads(t *testing.T) {
 	}
 }
 
+// Review of fb5a1f6f, HIGH 2: the reset rewrote streaming-stems.json from a partial
+// decode, dropping other services' entries. A Stems file that does not decode stays byte
+// for byte, and the log line names no entry.
+func TestNASChangeLeavesAStemsFileItCannotReadAlone(t *testing.T) {
+	uiDir, stateDir := t.TempDir(), t.TempDir()
+	s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, nil)
+	t.Cleanup(s.Close)
+	stems := []byte(`{"nas":[{"track":{"id":"Sets/Opener.flac","provider":"smb"},"path":"/data/stems/opener.flac"}],` +
+		`"spotify":[{"track":{"id":"sp-1","provider":"spotify","title":"Keep Me"},"path":7}]}`)
+	path := filepath.Join(stateDir, "streaming-stems.json")
+	if err := os.WriteFile(path, stems, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+	for _, url := range []string{"http://nas.example:4533", "http://nas.example:4534"} {
+		w := httptest.NewRecorder()
+		body := fmt.Sprintf(`{"protocol":"subsonic","url":%q,"username":"dj","password":"pw","enabled":true}`, url)
+		s.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(body)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("save NAS %s: %d %s", url, w.Code, w.Body.String())
+		}
+	}
+	log.SetOutput(os.Stderr)
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, stems) {
+		t.Fatalf("a NAS change rewrote a Stems file that does not decode (%v):\n%s", err, got)
+	}
+	if !strings.Contains(logs.String(), "Stems lists left as they are") {
+		t.Fatalf("no log line for the Stems file left as it is: %q", logs.String())
+	}
+	for _, entry := range []string{"Opener", "opener", "Keep Me", "sp-1"} {
+		if strings.Contains(logs.String(), entry) {
+			t.Fatalf("the log names a Stems entry (%q): %q", entry, logs.String())
+		}
+	}
+}
