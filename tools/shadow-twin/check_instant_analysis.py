@@ -583,16 +583,24 @@ class DeckFeeder:
 
 
 def deck_state_b():
-    return twin.evj(
+    # Keep JSON short (<75 chars) so Engine's console log never wraps across a string field.
+    s = twin.evj(
         "B",
-        'JSON.stringify({loaded: !!(root.rtTr("/Engine/Deck1/Track/SongLoaded")||{}).state,'
-        'analysed: !!(root.rtTr("/Engine/Deck1/Track/SongAnalyzed")||{}).state,'
-        'play: !!(root.rtTr("/Engine/Deck1/PlayState")||{}).state,'
-        'pos: (root.rtTr("/Engine/Deck1/Track/TrackPosition")||{}).unnormalized||0,'
-        'cue: (root.rtTr("/Engine/Deck1/Track/QuickCue1Name")||{}).string||"",'
-        'bpm: (root.rtTr("/Engine/Deck1/OriginalBPM")||{}).unnormalized||0,'
-        'name: (root.rtTr("/Engine/Deck1/Track/SongName")||{}).string||""})',
+        'JSON.stringify({c:(root.rtTr("/Engine/Deck1/Track/QuickCue1Name")||{}).string||"",'
+        'l:!!(root.rtTr("/Engine/Deck1/Track/SongLoaded")||{}).state,'
+        'a:!!(root.rtTr("/Engine/Deck1/Track/SongAnalyzed")||{}).state,'
+        'p:!!(root.rtTr("/Engine/Deck1/PlayState")||{}).state,'
+        'b:(root.rtTr("/Engine/Deck1/OriginalBPM")||{}).unnormalized||0,'
+        'x:Math.round((root.rtTr("/Engine/Deck1/Track/TrackPosition")||{}).unnormalized||0)})',
     )
+    return {
+        "cue": s["c"],
+        "loaded": s["l"],
+        "analysed": s["a"],
+        "play": s["p"],
+        "bpm": s["b"],
+        "pos": s["x"],
+    }
 
 
 def assert_no_oa_on_b(fname: str):
