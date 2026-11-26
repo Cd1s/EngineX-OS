@@ -180,8 +180,8 @@ def _manual(plan, path, reason):
 def _c_test(plan, path, reason):
     """A C test source selected: run it (c-tests.json), through its script, or report it as manual."""
     entry = C_TESTS['tests'].get(path) or {}
-    if entry.get('via'):
-        return _sh(plan, entry['via'], reason)
+    if entry.get('via'):  # the bash or Python test that builds and runs this source with its own flags
+        return (_py if entry['via'].endswith('.py') else _sh)(plan, entry['via'], f'{reason} (via {path})')
     if entry or os.path.dirname(path) == C_TESTS['default']['dir']:
         plan.c.add(path)
         plan.note('c ' + path, reason)

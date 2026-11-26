@@ -29,7 +29,7 @@ import gotree  # noqa: E402
 import testmap  # noqa: E402
 
 MARK = 'ENGINEX_RESULT_JSON '
-PLAN_NAME = '.enginex-test-plan.json'
+PLAN_PREFIX = '.enginex-test-plan'  # .enginex-test-plan-<pid>.json in the tree for one run (synced with it)
 DEFAULT_INTO = 'agent/5306-batch2'
 SANDBOX_ENGINES = ('e504', 'e530', 'esl4', 'eaz04')
 
@@ -63,9 +63,9 @@ def make_plan(a, root):
         if not base:
             print(f'test.sh: no merge base with origin/{a.into} (git fetch origin {a.into}, or pass --base REF); using HEAD', file=sys.stderr)
             base = 'HEAD'
-        plan['base'] = base
+        plan['base'] = run(['git', '-C', root, 'rev-parse', base]).stdout.strip() or base
         changed = [p for p in git(root, 'diff', '--name-only', '--no-renames', base).splitlines()
-                   + git(root, 'ls-files', '-o', '--exclude-standard').splitlines() if p and p != PLAN_NAME]
+                   + git(root, 'ls-files', '-o', '--exclude-standard').splitlines() if p and not p.startswith(PLAN_PREFIX)]
         sel = testmap.map_paths(sorted(set(changed)), root)
     plan['changed'] = sorted(set(changed))
     plan['go_all'] = sel.go_all
@@ -237,7 +237,8 @@ def exec_plan(plan_path):
             add(s)
         if plan['c']:
             s = Step(f"C tests ({len(plan['c'])})"); out_json = os.path.join(tmp, 'c.json')
-            spawn(s, [sys.executable, os.path.join(HERE, 'crun.py'), '-j', str(budget), '--json', out_json] + plan['c'], env)
+            spawn(s, [sys.executable, os.path.join(HERE, 'crun.py'), '-j', str(budget), '--json', out_json]
+                  + ([] if plan['strict'] else ['--rerun']) + plan['c'], env)
             if os.path.exists(out_json):
                 results['c'] = json.loads(pathlib.Path(out_json).read_text())
                 s.note = f"{len(results['c']['results'])} variants, {len(results['c']['skipped'])} runs skipped"
@@ -379,7 +380,8 @@ def main():
     print('hosts: ' + '; '.join(notes))
     if not host:
         print(f"test.sh: no build host has what this plan needs ({', '.join(plan['needs'])})", file=sys.stderr); return 1
-    plan_path = os.path.join(root, PLAN_NAME)
+    plan_name = f'{PLAN_PREFIX}-{os.getpid()}.json'
+    plan_path = os.path.join(root, plan_name)
     pathlib.Path(plan_path).write_text(json.dumps(plan))
     # One stable remote directory per tree (Go's build cache keys on the path), a private one when it is busy.
     name = 'enginex-test-' + re.sub(r'[^A-Za-z0-9._-]', '_', os.path.basename(root))[:40] + '-' + hashlib.sha1(root.encode()).hexdigest()[:6]
@@ -391,7 +393,7 @@ def main():
     except OSError:
         name += f'-{os.getpid()}'
     mode = 'exclusive' if a.exclusive else 'sandbox'
-    inner = f'bash tools/dev/test.sh --exec {PLAN_NAME}'
+    inner = f'bash tools/dev/test.sh --exec {plan_name}'
     command = f'if command -v enginex-run >/dev/null 2>&1; then enginex-run {mode} -- {inner}; else {inner}; fi'
     print(f'run: {host} ({mode}), /root/build/{name}', flush=True)
     try:
@@ -428,6 +430,7 @@ def report(a, plan, res, host, started):
     for d, r in (res.get('py') or {}).items():
         flaky += [(f"py {d} {x['id']}", x['first_failure']) for x in r.get('flaky', [])]
         skipped += [('py', d, x[0], x[1]) for x in r['skipped']]
+    flaky += [('c ' + x['name'], x['first_failure']) for x in (res.get('c') or {}).get('flaky', [])]
     c_skipped = (res.get('c') or {}).get('skipped', [])
     sh_skipped = res.get('sh_skipped', [])
     changed = [tuple(c) for c in plan['changed_tests']]

@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Build and run C tests the way the release checklist names them (tools/dev/c-tests.json), in parallel.
 
-  crun.py [-j N] [--json OUT] [--list] SRC...
+  crun.py [-j N] [--rerun] [--json OUT] [--list] SRC...
 
 SRC is a C test source (tools/ui-mod/test_*.c, tools/edisksd-hook/test_edisksd_hook.c). Each one expands to its
 variants (for example test_dsp_smooth.c: plain, ASan/UBSan and TSan; test_rt_callback.c: native and armhf, each
 run plain and with `selftest`); every other tools/ui-mod test builds and runs the armhf way with the Engine
 arguments it needs. A run marked `root:` (edisksd-hook's --mounts, inside `unshare -m --propagation private`) is
 skipped with a reason when not root; a variant that needs the firmware lab fails when the lab is missing.
-Exit status: 0 when every variant built and every run passed or was skipped with a reason.
+Each test's runs hold a host-wide lock of that test (/var/tmp/enginex-ctest-<name>.lock): two lanes never run the same
+C test on one host at once (some use fixed paths such as /tmp/enginex-shadow-position-test).
+--rerun: a variant that failed runs once more alone after the others; a pass is reported as FLAKY, not as passed.
+Exit status: 0 when every variant built and every run passed (or passed on the rerun) or was skipped with a reason.
 """
-import argparse, json, os, pathlib, re, shutil, subprocess, sys, tempfile, time
+import argparse, fcntl, json, os, pathlib, re, shutil, subprocess, sys, tempfile, time
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -85,6 +88,17 @@ def run_job(job, work, lab, is_root):
     if rc:
         res.update(ok=False, secs=time.monotonic() - t0, tail='build failed:\n' + text[-4000:])
         return res
+    lock = open(f'/var/tmp/enginex-ctest-{stem}.lock', 'w')
+    fcntl.flock(lock, fcntl.LOCK_EX)  # another lane's run of the same test on this host finishes first
+    try:
+        _runs(job, res, out, lab, is_root, sh)
+    finally:
+        lock.close()
+    res['secs'] = time.monotonic() - t0
+    return res
+
+
+def _runs(job, res, out, lab, is_root, sh):
     for run in job['runs']:
         needs_root = run.startswith('root: ')
         cmd = expand(run[len('root: '):] if needs_root else run, job, out, lab)
@@ -96,14 +110,13 @@ def run_job(job, work, lab, is_root):
         if rc:
             res.update(ok=False, tail=f'{cmd.replace(out, "<bin>")} exited {rc}:\n' + text[-6000:])
             break
-    res['secs'] = time.monotonic() - t0
-    return res
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('srcs', nargs='*'); ap.add_argument('-j', type=int, default=min(os.cpu_count() or 4, 8))
     ap.add_argument('--json'); ap.add_argument('--list', action='store_true')
+    ap.add_argument('--rerun', action='store_true', help='run a failed variant once more alone; a pass is reported as flaky')
     a = ap.parse_args()
     jobs, bad = jobs_for(a.srcs)
     if a.list:
@@ -120,6 +133,14 @@ def main():
     try:
         with ThreadPoolExecutor(max_workers=max(1, a.j)) as pool:
             results = list(pool.map(lambda j: run_job(j, work, lab, is_root), jobs))
+        flaky = []
+        if a.rerun and sum(1 for r in results if not r['ok']) <= 3:  # more means a broken tree or host, not load
+            for i, (job, r) in enumerate(zip(jobs, results)):
+                if not r['ok'] and not r['tail'].startswith(('build failed', 'firmware lab')):
+                    again = run_job(job, work, lab, is_root)
+                    if again['ok']:
+                        flaky.append({'name': r['name'], 'first_failure': r['tail'][-1500:]})
+                        results[i] = dict(again, flaky=True)
     finally:
         shutil.rmtree(work, ignore_errors=True)  # only the directory created above
     for b in bad:
@@ -130,11 +151,13 @@ def main():
         print(f"===== FAILED {r['name']} =====\n{r['tail']}", file=sys.stderr)
     wall = time.monotonic() - t0
     print(f'crun: {len(results)} variants of {len(set(j["src"] for j in jobs))} C tests, {sum(len(r["runs"]) for r in results)} runs, '
-          f'{len(skipped)} skipped, {len(failed)} failed, {wall:.1f}s -> {"OK" if not failed else "FAILED"}')
+          f'{len(skipped)} skipped, {len(failed)} failed, {len(flaky)} flaky (passed on rerun), {wall:.1f}s -> {"OK" if not failed else "FAILED"}')
+    for f in flaky:
+        print(f"crun: flaky (failed once, passed alone): {f['name']}")
     for s in skipped:
         print(f'crun: skipped {s}')
     if a.json:
-        pathlib.Path(a.json).write_text(json.dumps({'ok': not failed, 'wall': round(wall, 1), 'results': results,
+        pathlib.Path(a.json).write_text(json.dumps({'ok': not failed, 'wall': round(wall, 1), 'results': results, 'flaky': flaky,
                                                     'skipped': skipped, 'failed': [r['name'] for r in failed]}, indent=1))
     return 0 if not failed else 1
 

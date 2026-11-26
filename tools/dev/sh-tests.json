@@ -54,12 +54,6 @@
    ],
    "why": "boot state machine with fake Engine and systemd"
   },
-  "tests/test_issue311_firstboot.sh": {
-   "needs": [
-    "lab"
-   ],
-   "why": "#311 first-boot restarts with the boot guard"
-  },
   "tests/test_tier2_arch_guard.sh": {
    "needs": [],
    "why": "sim/qengine/tier2.sh refuses ARM hosts without side effects"
@@ -149,6 +143,10 @@
   "sim/nspawn-boot/test_boot.sh": {
    "how": "enginex-run sandbox -- bash sim/nspawn-boot/test_boot.sh (see its header)",
    "why": "real-image boot smoke test in systemd-nspawn"
+  },
+  "tests/test_issue311_firstboot.sh": {
+   "how": "ISSUE311_RELEASE_ASSETS=<directory with the v5.3.0.5-r1 release assets> bash tests/test_issue311_firstboot.sh",
+   "why": "needs the released v5.3.0.5-r1 assets"
   }
  }
 }
