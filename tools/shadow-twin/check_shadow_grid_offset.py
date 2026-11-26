@@ -192,20 +192,24 @@ def ensure_sync_a_lead():
 
 
 def arm_burst(side, n_samples=150, interval_ms=40):
-    """Sample local and copy WaveFormPositionItem right on rendered frames (frameSwapped,
-    every 2nd frame -> ~30 Hz) so inter-frame software-GL pauses do not create fake
-    staleness between local cached currentPosition and live shadow_position_hook."""
+    """Sample local and copy WaveFormPositionItem on beforeSynchronizing (every 2nd
+    frame -> ~30 Hz), the exact scene-graph sync instant when Engine draws both
+    lanes (before render + swapBuffers vsync wait). Captures wf1/wf2 and Date.now()
+    back-to-back before slower StateMap metadata reads."""
     js = f"""(() => {{
         const bag = root.scShadowTextAt;
         bag._sgoChk = [];
         bag._sgoMode = "timer";
         if (bag._sgoChkT) {{ bag._sgoChkT.stop(); bag._sgoChkT.destroy(); bag._sgoChkT = null; }}
-        if (bag._sgoWin && bag._sgoCb) {{ try {{ bag._sgoWin.frameSwapped.disconnect(bag._sgoCb); }} catch(e) {{}} bag._sgoWin = null; bag._sgoCb = null; }}
+        if (bag._sgoWin && bag._sgoCb) {{ try {{ bag._sgoWin.beforeSynchronizing.disconnect(bag._sgoCb); }} catch(e) {{}} bag._sgoWin = null; bag._sgoCb = null; }}
+        const w1 = PlanckGUI && PlanckGUI.waveformPositionItem ? PlanckGUI.waveformPositionItem(1) : null;
+        const w2 = PlanckGUI && PlanckGUI.waveformPositionItem ? PlanckGUI.waveformPositionItem(2) : null;
         const take = () => {{
+            const wf1 = w1 ? w1.currentPosition : null;
+            const wf2 = w2 ? w2.currentPosition : null;
             const now = Date.now();
-            const readD = d => {{
+            const readD = (d, wfVal) => {{
                 const g = p => root.rtTr("/Engine/Deck" + d + p) || {{}};
-                const wf = PlanckGUI && PlanckGUI.waveformPositionItem ? PlanckGUI.waveformPositionItem(d) : null;
                 const pr = root.scShadowPrev && root.scShadowPrev[d];
                 const at = root.scShadowAt && root.scShadowAt[d];
                 return {{
@@ -214,27 +218,27 @@ def arm_burst(side, n_samples=150, interval_ms=40):
                     bpm: g("/OriginalBPM").unnormalized || 0,
                     curBpm: g("/CurrentBPM").unnormalized || 0,
                     tp: g("/Track/TrackPosition").unnormalized || 0,
-                    wf: wf ? wf.currentPosition : null,
+                    wf: wfVal,
                     pr: pr ? {{ at: pr.at, lineMs: pr.lineMs }} : null,
                     feedAt: at ? (at.feedAt || 0) : 0,
                 }};
             }};
-            bag._sgoChk.push({{ now, d1: readD(1), d2: readD(2) }});
+            bag._sgoChk.push({{ now, d1: readD(1, wf1), d2: readD(2, wf2) }});
         }};
-        const win = (typeof planckQuickView !== "undefined" && planckQuickView && planckQuickView.frameSwapped) ? planckQuickView : null;
+        const win = (typeof planckQuickView !== "undefined" && planckQuickView && planckQuickView.beforeSynchronizing) ? planckQuickView : null;
         if (win) {{
-            bag._sgoMode = "frameSwapped";
+            bag._sgoMode = "beforeSynchronizing";
             bag._sgoWin = win;
             let k = 0;
             bag._sgoCb = function() {{
                 if (bag._sgoChk.length >= {n_samples}) {{
-                    try {{ win.frameSwapped.disconnect(bag._sgoCb); }} catch(e) {{}}
+                    try {{ win.beforeSynchronizing.disconnect(bag._sgoCb); }} catch(e) {{}}
                     return;
                 }}
                 if ((++k) % 2 === 0) take();
             }};
-            win.frameSwapped.connect(bag._sgoCb);
-            return "armed:frameSwapped";
+            win.beforeSynchronizing.connect(bag._sgoCb);
+            return "armed:beforeSynchronizing";
         }}
         bag._sgoChkT = Qt.createQmlObject('import QtQml; Timer {{ interval: {interval_ms}; repeat: true; running: true }}', root);
         bag._sgoChkT.triggered.connect(function() {{
@@ -505,10 +509,14 @@ def main():
         60,
         "A2 132 shadow analyzed",
     )
-    twin.ev("A", 'root.rtTr("/Engine/Deck1/Track/SetSongPosition").value = 0.05; "seekA"')
+    # Keep A1 playing continuously (180 s track) so Engine Link stays phase-locked;
+    # only cue paused B2 before starting it into Sync.
     twin.ev("B", 'root.rtTr("/Engine/Deck2/Track/SetSongPosition").value = 0.05; "seekB"')
     time.sleep(0.4)
     subprocess.run(["python3", str(Path(__file__).resolve().parent / "twin.py"), "play", "B"], check=True)
+    # Re-engage B2 Sync if Engine kept it armed across reload so phase snaps cleanly to A1.
+    twin.ev("B", 'if ((root.rtTr("/Engine/Deck2/SyncMode")||{}).string !== "Off") root.rtPress("/Engine/Deck2/UnSync"); "unsyncB"')
+    time.sleep(0.3)
     a1, b2 = ensure_sync_a_lead()
     print(f"Synced 128v132: A1={a1} | B2={b2}", flush=True)
     time.sleep(2.5)
