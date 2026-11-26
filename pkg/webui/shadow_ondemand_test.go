@@ -257,6 +257,165 @@ func TestShadowOnDemandReusesSingleBuildAndEvictsOnUnload(t *testing.T) {
 	}
 }
 
+func TestShadowOnDemandEvictsInMusicTempTwoDecksAndRebuiltLibrary(t *testing.T) {
+	shadowBeaconOn = false
+	defer func() { shadowBeaconOn = true }()
+	dataRoot := t.TempDir()
+	mediaRoot := t.TempDir()
+	oldData, oldMedia := shadowDataRoot, shadowMediaRoot
+	shadowDataRoot, shadowMediaRoot = dataRoot, mediaRoot
+	defer func() { shadowDataRoot, shadowMediaRoot = oldData, oldMedia }()
+
+	stick, relPath, _, _ := makeOnDemandStickFixture(t, mediaRoot, "ONDE_TEMP")
+	stickAudio := filepath.Join(stick, filepath.FromSlash(relPath))
+	rawAudio, err := os.ReadFile(stickAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tempDir := filepath.Join(dataRoot, "inMusicTempFiles")
+	_ = os.MkdirAll(tempDir, 0o755)
+	tempAudio := filepath.Join(tempDir, "1_"+filepath.Base(relPath))
+	if err := os.WriteFile(tempAudio, rawAudio, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dataLib := filepath.Join(dataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library")
+	_ = os.MkdirAll(filepath.Join(dataLib, "Database2"), 0o755)
+	relToStick, err := filepath.Rel(dataLib, stickAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpDBFile, _, tdb := testlibrary.Create(t)
+	if _, err := tdb.Exec(`INSERT INTO Track(path,filename,isAnalyzed) VALUES(?,?,0)`, filepath.ToSlash(relToStick), filepath.Base(relPath)); err != nil {
+		t.Fatal(err)
+	}
+	_ = tdb.Close()
+	rawTDB, _ := os.ReadFile(tmpDBFile)
+	if err := os.WriteFile(filepath.Join(dataLib, "Database2", "m.db"), rawTDB, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(Config{
+		UIDir:                 t.TempDir(),
+		StateDir:              t.TempDir(),
+		MediaRoot:             mediaRoot,
+		RekordboxOnDemandSock: "-",
+	}, nil)
+	defer s.Close()
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+
+	postDeck := func(body string) {
+		t.Helper()
+		resp, err := http.Post(srv.URL+"/v1/enginex/decks", "application/json", strings.NewReader(body))
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /v1/enginex/decks: %v %v", resp, err)
+		}
+		resp.Body.Close()
+	}
+	getPeerKey := func(deck int) string {
+		t.Helper()
+		resp, err := http.Get(srv.URL + "/peer/decks")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var peer struct{ Decks []deckState }
+		_ = json.NewDecoder(resp.Body).Decode(&peer)
+		for _, d := range peer.Decks {
+			if d.Deck == deck && d.Key != "" {
+				return d.Key
+			}
+		}
+		t.Fatalf("missing key for deck %d: %+v", deck, peer.Decks)
+		return ""
+	}
+	fetchNative := func(deck int, key string) {
+		t.Helper()
+		resp, err := http.Get(srv.URL + "/peer/decks/" + strconv.Itoa(deck) + "/perf?key=" + url.QueryEscape(key) + "&format=native")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(resp.Body)
+			t.Fatalf("deck %d /perf status=%d body=%q", deck, resp.StatusCode, b)
+		}
+	}
+
+	// Both Deck 1 (via inMusicTempFiles) and Deck 2 load the same on-demand track.
+	netTemp := "net://u/(Unknown)/inMusicTempFiles/" + filepath.Base(tempAudio)
+	netUSB := "net://u/ONDE_TEMP/" + relPath
+	postDeck(`[{"deck":1,"net":` + strconv.Quote(netTemp) + `,"bpm":120},{"deck":2,"net":` + strconv.Quote(netUSB) + `,"bpm":120}]`)
+	k1 := getPeerKey(1)
+	k2 := getPeerKey(2)
+	fetchNative(1, k1)
+	fetchNative(2, k2)
+	if got := s.rbOnDemandBuildCount.Load(); got != 1 {
+		t.Fatalf("build count with inMusicTempFiles + deck 2 = %d, want 1", got)
+	}
+
+	// Unloading Deck 2 keeps the cache alive while Deck 1 still holds the track.
+	postDeck(`[{"deck":1,"net":` + strconv.Quote(netTemp) + `,"bpm":120},{"deck":2,"net":""}]`)
+	s.rbOnDemandCacheMu.Lock()
+	kept := len(s.rbOnDemandCache)
+	s.rbOnDemandCacheMu.Unlock()
+	if kept != 1 {
+		t.Fatalf("cache size after unloading 1 of 2 decks = %d, want 1", kept)
+	}
+
+	// Even if Engine deletes the inMusicTempFiles copy right before Deck 1 unloads,
+	// evicting via d.libraryPath drops the cache entry.
+	_ = os.Remove(tempAudio)
+	postDeck(`[{"deck":1,"net":""}]`)
+	s.rbOnDemandCacheMu.Lock()
+	afterUnload := len(s.rbOnDemandCache)
+	s.rbOnDemandCacheMu.Unlock()
+	if afterUnload != 0 {
+		t.Fatalf("inMusicTempFiles unload left %d cache entries, want 0", afterUnload)
+	}
+
+	// Reload on Deck 2, populate cache, then simulate a rebuilt stick m.db (new mtime):
+	// next peer fetch must invalidate and rebuild instead of serving stale data.
+	postDeck(`[{"deck":2,"net":` + strconv.Quote(netUSB) + `,"bpm":120}]`)
+	k2 = getPeerKey(2)
+	fetchNative(2, k2)
+	if got := s.rbOnDemandBuildCount.Load(); got != 2 {
+		t.Fatalf("build count after reload = %d, want 2", got)
+	}
+	mdb := filepath.Join(stick, "Engine Library", "Database2", "m.db")
+	future := time.Now().Add(3 * time.Second)
+	_ = os.Chtimes(mdb, future, future)
+	fetchNative(2, k2)
+	if got := s.rbOnDemandBuildCount.Load(); got != 3 {
+		t.Fatalf("build count after library rebuild = %d, want 3", got)
+	}
+
+	// Mid-flight unload cancels any active flight and advances evictGen so a
+	// completing build cannot repopulate the cache after unload.
+	key := onDemandCacheKey(stick, "../"+relPath)
+	fCtx, fCancel := context.WithCancel(context.Background())
+	defer fCancel()
+	s.rbOnDemandCacheMu.Lock()
+	if s.rbOnDemandFlights == nil {
+		s.rbOnDemandFlights = map[string]*rbOnDemandFlight{}
+	}
+	prevEpoch := s.rbOnDemandEvictGen[key]
+	s.rbOnDemandFlights[key] = &rbOnDemandFlight{done: make(chan struct{}), cancel: fCancel, waiters: 1, epoch: prevEpoch}
+	s.rbOnDemandCacheMu.Unlock()
+	s.evictOnDemandCacheForPath(stickAudio)
+	select {
+	case <-fCtx.Done():
+	default:
+		t.Fatal("evictOnDemandCacheForPath did not cancel active in-flight build")
+	}
+	s.rbOnDemandCacheMu.Lock()
+	if s.rbOnDemandFlights[key] != nil || s.rbOnDemandEvictGen[key] != prevEpoch+1 {
+		s.rbOnDemandCacheMu.Unlock()
+		t.Fatalf("mid-flight eviction did not clear flight or advance epoch")
+	}
+	s.rbOnDemandCacheMu.Unlock()
+}
+
 // Covers all 5 load sources (stock Engine USB, rekordbox on-demand, rekordbox
 // already in m.db with legacy zero-maxima overview, Pro DJ Link, streaming track
 // via stm.db) and verifies zero 404s, proper 503 wait for in-progress analysis,
@@ -488,6 +647,31 @@ func TestShadowNeverReanalysesAllSourcesAndTimings(t *testing.T) {
 		}
 		stmDB.Close()
 		checkBothFormats("streaming-stm-db", key)
+
+		// Also verify URI lookup when d.Path came from gateway cache (not Engine's
+		// download path), so libraryPerfFormat misses and stmURIPerf is required.
+		gwAudio := filepath.Join(t.TempDir(), "gateway-cached-9002.wav")
+		_ = os.WriteFile(gwAudio, []byte("WAV"), 0o644)
+		gid := s.tidal.addTrack(trackRef{
+			track: providers.Track{ID: "gw-9002", Provider: "TIDAL", Title: "StreamGW"},
+			file:  gwAudio,
+			drive: filepath.Dir(gwAudio),
+		})
+		gwURI := "streaming://TIDAL/Track/" + strconv.FormatInt(gid, 10)
+		stmDB2, err := sql.Open("sqlite", stmPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stmDB2.Exec(`INSERT INTO Track(path,filename,uri,title,artist,isAnalyzed,bpmAnalyzed) VALUES('../../../../downloads/TIDAL/s9002.wav','s9002.wav',?,'StreamGW','StreamArtist',1,126)`, gwURI); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stmDB2.Exec(`INSERT OR REPLACE INTO PerformanceData(trackId,trackData,overviewWaveFormData,beatData,quickCues,loops) VALUES((SELECT id FROM Track WHERE uri=?),?,?,?,?,?)`,
+			gwURI, p.TrackData, p.Overview, p.Beats, p.QuickCues, p.Loops); err != nil {
+			t.Fatal(err)
+		}
+		stmDB2.Close()
+		gwKey := postAndKey(`[{"deck":1,"net":"` + gwURI + `","bpm":0}]`)
+		checkBothFormats("streaming-gateway-uri", gwKey)
 	})
 
 	// Source 5: SongLoading=true at t=0ms returns 503 instead of 404, and saveShadowAnalysis retries 503.

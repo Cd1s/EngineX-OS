@@ -214,6 +214,7 @@ type rbOnDemandCacheEntry struct {
 	engineKey int
 	engineLen int
 	fromDeck  bool
+	dbSig     [4]int64
 	at        time.Time
 }
 
@@ -221,13 +222,29 @@ type rbOnDemandFlight struct {
 	done      chan struct{}
 	cancel    context.CancelFunc
 	waiters   int
+	epoch     uint64
 	uuid      string
 	engineID  int64
 	engineKey int
 	engineLen int
 	fromDeck  bool
+	dbSig     [4]int64
 	res       *bridge.OnDemandResult
 	err       error
+}
+
+func onDemandStickSig(mount string) [4]int64 {
+	var sig [4]int64
+	for i, rel := range []string{"Engine Library/Database2/m.db", "PIONEER/rekordbox/exportLibrary.db"} {
+		st, err := os.Stat(filepath.Join(mount, rel))
+		if err != nil {
+			sig[2*i] = -1
+			continue
+		}
+		sig[2*i] = st.Size()
+		sig[2*i+1] = st.ModTime().UnixNano()
+	}
+	return sig
 }
 
 func onDemandCacheKey(mount, enginePath string) string {
@@ -261,18 +278,19 @@ func (s *Server) buildOnDemandCached(ctx context.Context, req bridge.OnDemandReq
 		return b.Build(ctx, req)
 	}
 	now := time.Now()
+	dbSig := onDemandStickSig(req.Mount)
 	s.rbOnDemandCacheMu.Lock()
 	if e := s.rbOnDemandCache[key]; e != nil {
-		if now.Sub(e.at) < rbOnDemandCacheTTL && (forPeer || e.matchesDeck(req)) {
+		if now.Sub(e.at) < rbOnDemandCacheTTL && e.dbSig == dbSig && (forPeer || e.matchesDeck(req)) {
 			res := e.res
 			s.rbOnDemandCacheMu.Unlock()
 			return res, nil
 		}
-		if now.Sub(e.at) >= rbOnDemandCacheTTL {
+		if now.Sub(e.at) >= rbOnDemandCacheTTL || e.dbSig != dbSig {
 			delete(s.rbOnDemandCache, key)
 		}
 	}
-	if f := s.rbOnDemandFlights[key]; f != nil && (forPeer || f.matchesDeck(req)) {
+	if f := s.rbOnDemandFlights[key]; f != nil && f.dbSig == dbSig && (forPeer || f.matchesDeck(req)) {
 		f.waiters++
 		s.rbOnDemandCacheMu.Unlock()
 		return s.waitOnDemandFlight(ctx, f)
@@ -285,11 +303,13 @@ func (s *Server) buildOnDemandCached(ctx context.Context, req bridge.OnDemandReq
 		done:      make(chan struct{}),
 		cancel:    cancel,
 		waiters:   1,
+		epoch:     s.rbOnDemandEvictGen[key],
 		uuid:      req.UUID,
 		engineID:  req.EngineID,
 		engineKey: req.EngineKey,
 		engineLen: req.EngineLen,
 		fromDeck:  !forPeer,
+		dbSig:     dbSig,
 	}
 	if s.rbOnDemandFlights == nil {
 		s.rbOnDemandFlights = map[string]*rbOnDemandFlight{}
@@ -304,7 +324,7 @@ func (s *Server) buildOnDemandCached(ctx context.Context, req bridge.OnDemandReq
 		s.rbOnDemandBuildCount.Add(1)
 		f.res, f.err = b.Build(buildCtx, req)
 		s.rbOnDemandCacheMu.Lock()
-		if f.err == nil && f.res != nil {
+		if f.err == nil && f.res != nil && s.rbOnDemandEvictGen[key] == f.epoch {
 			if s.rbOnDemandCache == nil {
 				s.rbOnDemandCache = map[string]*rbOnDemandCacheEntry{}
 			}
@@ -329,6 +349,7 @@ func (s *Server) buildOnDemandCached(ctx context.Context, req bridge.OnDemandReq
 					engineKey: f.engineKey,
 					engineLen: f.engineLen,
 					fromDeck:  f.fromDeck,
+					dbSig:     f.dbSig,
 					at:        time.Now(),
 				}
 			}
@@ -358,10 +379,20 @@ func (s *Server) waitOnDemandFlight(ctx context.Context, f *rbOnDemandFlight) (*
 }
 
 // evictOnDemandCacheForPath drops the cached on-demand payload when the source
-// deck unloads or switches away from a track.
+// deck unloads or switches away from a track, and cancels any in-flight build
+// so a mid-build unload cannot repopulate the cache.
 func (s *Server) evictOnDemandCacheForPath(srcPath string) {
 	if srcPath == "" {
 		return
+	}
+	if s.shadow != nil {
+		if orig, ok := inMusicTempOrig(srcPath, s.shadow.dataRoot); ok {
+			if st, err := os.Stat(srcPath); err == nil {
+				if real := resolveInMusicTempPath(context.Background(), orig, st.Size(), s.shadow.dataRoot); real != "" {
+					srcPath = real
+				}
+			}
+		}
 	}
 	mediaRoot := filepath.Clean(s.onDemandMediaRoot())
 	sub, err := filepath.Rel(mediaRoot, filepath.Clean(srcPath))
@@ -377,7 +408,17 @@ func (s *Server) evictOnDemandCacheForPath(srcPath string) {
 		return
 	}
 	s.rbOnDemandCacheMu.Lock()
+	if s.rbOnDemandEvictGen == nil {
+		s.rbOnDemandEvictGen = map[string]uint64{}
+	}
+	s.rbOnDemandEvictGen[key]++
 	delete(s.rbOnDemandCache, key)
+	if f := s.rbOnDemandFlights[key]; f != nil {
+		if f.cancel != nil {
+			f.cancel()
+		}
+		delete(s.rbOnDemandFlights, key)
+	}
 	s.rbOnDemandCacheMu.Unlock()
 }
 

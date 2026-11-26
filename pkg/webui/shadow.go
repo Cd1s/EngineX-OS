@@ -181,8 +181,9 @@ type deckState struct {
 	// streamURI keeps the original streaming:// URI for non-rekordbox streaming tracks
 	// (d.Net is cleared when netPathFile returns "") so /perf can read stm.db by uri
 	// and answer 503 while Engine is still analysing the download.
-	streamURI string
-	loadedAt  time.Time
+	streamURI   string
+	libraryPath string
+	loadedAt    time.Time
 	// PerfGen names the analysis /perf serves for a rekordbox Link deck. The
 	// audio copy remains reusable while a changed generation refreshes its sidecars.
 	PerfGen string `json:"perfGen,omitempty"`
@@ -707,7 +708,11 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 						sh.resolved[d.Deck] = c
 					}
 					d.Key = c.key
+					d.libraryPath = c.libraryPath
 					sh.resolveMu.Unlock()
+				}
+				if d.libraryPath == "" {
+					d.libraryPath = d.Path
 				}
 			}
 		}
@@ -773,18 +778,24 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	s.shadow.ownPostAt = postAt
 	var droppedPaths []string
 	for _, prev := range s.shadow.own {
-		if prev.Path == "" {
+		if prev.Path == "" && prev.libraryPath == "" {
 			continue
 		}
 		kept := false
 		for _, cur := range own {
-			if cur.Path == prev.Path {
+			if (prev.Path != "" && (cur.Path == prev.Path || cur.libraryPath == prev.Path)) ||
+				(prev.libraryPath != "" && (cur.libraryPath == prev.libraryPath || cur.Path == prev.libraryPath)) {
 				kept = true
 				break
 			}
 		}
 		if !kept {
-			droppedPaths = append(droppedPaths, prev.Path)
+			if prev.Path != "" {
+				droppedPaths = append(droppedPaths, prev.Path)
+			}
+			if prev.libraryPath != "" && prev.libraryPath != prev.Path {
+				droppedPaths = append(droppedPaths, prev.libraryPath)
+			}
 		}
 	}
 	s.shadow.own, s.shadow.ownAt, s.shadow.ownExport, s.shadow.ownDecks = own, time.Now(), ex, players
