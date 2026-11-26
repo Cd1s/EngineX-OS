@@ -904,10 +904,8 @@ def main():
             stm_rows[t_ms] = (tid, uri, fn)
 
         def run_cell(source_name: str, t_ms: int):
-            set_link("B", "down")
             bg_threads = []
             bg_errors = []
-            # Ensure B unloaded previous track cleanly while link was up before cutting eth0.
             # Choose source-specific deck payload and background source-side completion.
             if source_name == "stock-usb":
                 fname = f"stock-usb-{t_ms}.wav"
@@ -971,21 +969,21 @@ def main():
                 fname = f"Test Artist - {raw_fn}"
                 if t_ms < 1000:
                     def finish_stream_analysis():
-                        time.sleep(0.4)
+                        time.sleep(0.5)
                         update_engine_track(stm_mdb, tid, legacy_blobs, bpm=128.0)
 
                     bg_threads.append(threading.Thread(target=finish_stream_analysis, daemon=True))
             else:
                 raise ValueError(source_name)
 
-            # t = 0: start source load + background source completion; wait t_ms; bring B's eth0 up!
+            # t = 0: start source-side background completion; wait t_ms; then advertise load on A
+            # so B requests /peer/decks/1/perf at t_ms without flapping eth0 carrier/ARP state.
             before_404 = count_b_404s()
             for th in bg_threads:
                 th.start()
-            feeder.set(deck_obj)
             if t_ms > 0:
                 time.sleep(t_ms / 1000.0)
-            set_link("B", "up")
+            feeder.set(deck_obj)
 
             def cell_done():
                 assert_no_oa_on_b(fname)
