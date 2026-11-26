@@ -169,14 +169,18 @@ def deck_sync_info(side, deck):
 
 
 def ensure_sync_a_lead():
-    """Lock A Deck 1 as MASTER/LEAD and B Deck 2 as Sync follower without toggling Sync off."""
+    """Enable Sync on both decks and lock A Deck 1 as MASTER/LEAD, B Deck 2 as Sync follower."""
     a1 = deck_sync_info("A", 1)
-    if not a1["master"]:
-        twin.ev("A", 'root.rtPress("/Engine/Deck1/RequestMaster"); "reqMasterA"')
-        time.sleep(0.6)
+    if a1["sync"] == "Off":
+        twin.ev("A", 'root.rtPress("/Engine/Deck1/Sync"); "syncA"')
+        time.sleep(0.5)
     b2 = deck_sync_info("B", 2)
     if b2["sync"] == "Off":
         twin.ev("B", 'root.rtPress("/Engine/Deck2/Sync"); "syncB"')
+        time.sleep(0.6)
+    a1 = deck_sync_info("A", 1)
+    if not a1["master"]:
+        twin.ev("A", 'root.rtPress("/Engine/Deck1/RequestMaster"); "reqMasterA"')
         time.sleep(0.6)
     for _ in range(32):
         time.sleep(0.25)

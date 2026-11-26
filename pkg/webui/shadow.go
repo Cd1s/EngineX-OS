@@ -247,9 +247,11 @@ type peerLocalFile struct {
 // to the line it has, so more than that must reach it.
 // A paused deck must not move at all.
 const (
-	shadowPlayingDriftMS = 12
-	shadowPausedDriftMS  = 0.5
-	shadowScratchDriftMS = 5
+	shadowPlayingDriftMS      = 12
+	shadowPausedFollowDriftMS = 3.0 // largest deadband keeping paused-follow copy p99 within +/-3 ms
+	shadowPausedDriftMS       = 0.5
+	shadowScratchDriftMS      = 5
+	shadowHalfRTTMaxMS        = 20.0
 )
 
 // A deck's speed is measured over at least shadowSkewSpan of one line, from
@@ -279,6 +281,10 @@ func sameOptionalFloat(a, b *float64) bool {
 // state, tempo and markers, and a playhead on old's anchored line.
 // Seq, At, Beat and Dbg do not count: the display QML does not use them.
 func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
+	return samePeerPictureWithDrift(old, d, now, shadowPlayingDriftMS)
+}
+
+func samePeerPictureWithDrift(old peerDeck, d deckState, now time.Time, playingDriftMS float64) bool {
 	o := old.deckState
 	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.PerfGen != d.PerfGen || o.GridGen != d.GridGen || o.Ext != d.Ext || o.Name != d.Name ||
 		o.Title != d.Title || o.Artist != d.Artist || o.KeyName != d.KeyName || o.Loading != d.Loading || o.Active != d.Active || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
@@ -296,7 +302,7 @@ func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 		return math.Abs(old.anchorPos-d.PositionMS) <= shadowScratchDriftMS
 	}
 	expect := old.anchorPos + float64(now.Sub(old.anchorAt).Microseconds())/1000*old.speed()
-	return math.Abs(expect-d.PositionMS) <= shadowPlayingDriftMS
+	return math.Abs(expect-d.PositionMS) <= playingDriftMS
 }
 
 // precisePos is a CDJ-3000's playhead from its absolute position packets (0x0b,
@@ -429,6 +435,8 @@ type shadowState struct {
 	gridGenQueries      atomic.Uint64
 	peerTaken           map[string]time.Time // when takePeer last accepted an update per peer (as peerSeq)
 	peerClock           map[string]peerClock // per peer (as peerSeq)
+	peerRTT             map[string]peerRTT   // smallest measured HTTP round-trip per peer id/ip
+	pausedFollow        atomic.Bool          // running Engine hook has shadow-paused-follow enabled
 	dbg                 shadowDebug
 	metaOnlyPoll        bool       // the newest compose had a CDJ deck, including cached display assets: 120 ms polls
 	resolveMu           sync.Mutex // cold file resolution, independent of the live position lock
@@ -454,7 +462,7 @@ type shadowState struct {
 }
 
 func newShadowState() *shadowState {
-	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, copyGens: map[string]string{}, copyGridGens: map[string]string{}, copyGridPending: map[string]string{}, copyGridNotifyRetry: map[string]time.Time{}, copyGridTries: map[string]int{}, copyGridBusy: map[string]bool{}, copyGridRetry: map[string]time.Time{}, copyTrackIDs: map[string]int64{}, copyTrackIDBusy: map[string]bool{}, regridSockPath: shadowRegridSockPath, gridGens: map[string]gridGenEntry{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn, model: imagePrefix(deviceCompatible()), askers: map[string]time.Time{}, askNotify: make(chan struct{}), consoleDecks: map[int]peerDeck{}}
+	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, copyGens: map[string]string{}, copyGridGens: map[string]string{}, copyGridPending: map[string]string{}, copyGridNotifyRetry: map[string]time.Time{}, copyGridTries: map[string]int{}, copyGridBusy: map[string]bool{}, copyGridRetry: map[string]time.Time{}, copyTrackIDs: map[string]int64{}, copyTrackIDBusy: map[string]bool{}, regridSockPath: shadowRegridSockPath, gridGens: map[string]gridGenEntry{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, peerRTT: map[string]peerRTT{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn, model: imagePrefix(deviceCompatible()), askers: map[string]time.Time{}, askNotify: make(chan struct{}), consoleDecks: map[int]peerDeck{}}
 }
 
 // shadow-v3: copies under the old "shadow" were analysed by Engine itself,
@@ -1250,6 +1258,58 @@ type peerClock struct {
 	at  time.Time
 }
 
+// peerRTT is the smallest measured HTTP round-trip to a peer, ms, so the
+// receiver compensates half the round trip instead of dropping T_min.
+type peerRTT struct {
+	ms float64
+	at time.Time
+}
+
+func (sh *shadowState) recordPeerRTT(ip, id string, rttMS float64, now time.Time) {
+	if rttMS < 0 || math.IsNaN(rttMS) || math.IsInf(rttMS, 0) {
+		return
+	}
+	update := func(k string) {
+		if k == "" {
+			return
+		}
+		r, ok := sh.peerRTT[k]
+		if !ok || now.Sub(r.at) > shadowPeerSeenTimeout {
+			r.ms = rttMS
+		} else {
+			r.ms += now.Sub(r.at).Seconds()
+			if rttMS < r.ms {
+				r.ms = rttMS
+			}
+		}
+		r.at = now
+		sh.peerRTT[k] = r
+	}
+	update(ip)
+	if id != "" && id != ip {
+		update(id)
+	}
+}
+
+func (sh *shadowState) peerHalfRTT(id, ip string, now time.Time) float64 {
+	for _, k := range [2]string{id, ip} {
+		if k == "" {
+			continue
+		}
+		if r, ok := sh.peerRTT[k]; ok && now.Sub(r.at) <= shadowPeerSeenTimeout {
+			return min(r.ms/2, shadowHalfRTTMaxMS)
+		}
+	}
+	return 0
+}
+
+func (sh *shadowState) playingDriftMS() float64 {
+	if sh.pausedFollow.Load() {
+		return shadowPausedFollowDriftMS
+	}
+	return shadowPlayingDriftMS
+}
+
 // peerLate is how many ms longer than the peer's quickest update this one took
 // to get here (the network, or either suite waiting for the CPU): a playing
 // deck has moved on by that much, and anchoring it at arrival showed the wait
@@ -1291,11 +1351,12 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 		sh.dbg.event("peer-stale", map[string]any{"ip": ip, "seq": seq, "last": last})
 		return
 	}
-	late := 0.0
+	late, halfRTT := 0.0, 0.0
 	if len(decks) > 0 && decks[0].Sent != 0 {
 		late = sh.peerLate(id, decks[0].Sent, now)
+		halfRTT = sh.peerHalfRTT(id, ip, now)
 	}
-	sh.dbg.event("peer", map[string]any{"ip": ip, "seq": seq, "late": late, "decks": slimDecks(decks)})
+	sh.dbg.event("peer", map[string]any{"ip": ip, "seq": seq, "late": late, "halfRtt": halfRTT, "decks": slimDecks(decks)})
 	sh.peerSeq[id] = seq
 	changed := false
 	for slot, v := range sh.peerDecks {
@@ -1305,6 +1366,7 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 		}
 	}
 	sh.peerTaken[id] = now
+	driftMS := sh.playingDriftMS()
 	for _, d := range decks {
 		if d.Deck < 1 || d.Deck > 4 {
 			continue
@@ -1329,7 +1391,7 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 			continue
 		} // all slots belong to other tracks; never overwrite a sibling
 		if d.Playing && !d.Stale && !d.Scratch {
-			d.PositionMS += late * (1 + d.Pitch/100)
+			d.PositionMS += (late + halfRTT) * (1 + d.Pitch/100)
 		}
 		d.Sent, d.Rate = 0, 0
 		p := peerDeck{deckState: d, ip: ip, at: now, anchorPos: d.PositionMS, anchorAt: now}
@@ -1340,7 +1402,7 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 		if d.Scratch {
 			p.refAt = time.Time{}
 		}
-		if ok && samePeerPicture(old, d, now) {
+		if ok && samePeerPictureWithDrift(old, d, now, driftMS) {
 			p.anchorPos, p.anchorAt, p.refPos, p.refAt = old.anchorPos, old.anchorAt, old.refPos, old.refAt
 			// The line's own slope, once it is long enough to tell: anchored anew
 			// with the new speed, which reaches the QML as a few ms to steer over.
@@ -3508,6 +3570,7 @@ func (s *Server) shadowWake() {
 	// Retain older caches for an explicit rollback; starting display discovery
 	// must not delete files from an earlier mode.
 	sh.running = true
+	sh.pausedFollow.Store(runningFeatureOn("shadow-paused-follow"))
 	go s.shadowLoop()
 }
 
@@ -3567,10 +3630,13 @@ func (s *Server) shadowLoop() {
 			return
 		}
 		sh.mu.Unlock()
-		if conn != nil && i%8 == 0 {
-			shadowSendBeacons(conn)
-			if sh.askConsole.Load() {
-				shadowSendAsk(conn)
+		if i%8 == 0 {
+			sh.pausedFollow.Store(runningFeatureOn("shadow-paused-follow"))
+			if conn != nil {
+				shadowSendBeacons(conn)
+				if sh.askConsole.Load() {
+					shadowSendAsk(conn)
+				}
 			}
 		}
 		s.shadowPollPeers()
@@ -3707,6 +3773,7 @@ func (sh *shadowState) prunePeers(now time.Time) {
 			delete(sh.peers, ip)
 			delete(sh.peerSeq, ip)
 			delete(sh.peerClock, ip)
+			delete(sh.peerRTT, ip)
 			delete(sh.peerTaken, ip)
 		}
 	}
@@ -3715,6 +3782,12 @@ func (sh *shadowState) prunePeers(now time.Time) {
 			delete(sh.peerTaken, id)
 			delete(sh.peerSeq, id)
 			delete(sh.peerClock, id)
+			delete(sh.peerRTT, id)
+		}
+	}
+	for k, r := range sh.peerRTT {
+		if now.Sub(r.at) >= shadowPeerSeenTimeout {
+			delete(sh.peerRTT, k)
 		}
 	}
 	if changed {
@@ -3747,6 +3820,7 @@ func (s *Server) shadowPollPeers() {
 		if ask {
 			u += "?console=1"
 		}
+		t0 := time.Now()
 		resp, err := peerClient.Get(u)
 		if err != nil {
 			continue
@@ -3758,9 +3832,20 @@ func (s *Server) shadowPollPeers() {
 			continue
 		}
 		now = time.Now()
+		rttMS := float64(now.Sub(t0).Microseconds()) / 1000.0
 		sh.mu.Lock()
 		sh.peers[ip] = now
-		if console, others := splitConsole(body.Decks); len(console) > 0 {
+		console, others := splitConsole(body.Decks)
+		peerDecks := body.Decks
+		if len(console) > 0 {
+			peerDecks = others
+		}
+		id := ip
+		if len(peerDecks) > 0 && peerDecks[0].Link != "" {
+			id = peerDecks[0].Link
+		}
+		sh.recordPeerRTT(ip, id, rttMS, now)
+		if len(console) > 0 {
 			if ask {
 				sh.takeConsole(ip, console, now)
 			}
