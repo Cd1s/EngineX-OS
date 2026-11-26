@@ -2204,6 +2204,22 @@ func TestWriteBackZeroDecryptOnOnDemandLoad(t *testing.T) {
 		t.Fatalf("post-settle second eject pass modified .rb-bridge-snapshot")
 	}
 
+	runTrackEdit := func(t *testing.T, trackID, delta int64, mutate func()) {
+		t.Helper()
+		var prevEdit int64
+		if err := db.QueryRow(`SELECT COALESCE(lastEditTime,0) FROM Track WHERE id=?`, trackID).Scan(&prevEdit); err != nil {
+			t.Fatal(err)
+		}
+		mutate()
+		var curEdit int64
+		if err := db.QueryRow(`SELECT COALESCE(lastEditTime,0) FROM Track WHERE id=?`, trackID).Scan(&curEdit); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE Track SET lastEditTime=? WHERE id=?`, max(prevEdit, curEdit)+delta, trackID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// Playing/loading an adopted track after Synced is settled can update unadjusted (adj == 0)
 	// defaultMainCue and lastEditTime without any DJ cue edit: SyncedDigest normalization must
 	// still report 0 export decrypts, 0 key derivations, and 0 snapshot writes.
@@ -2220,12 +2236,11 @@ func TestWriteBackZeroDecryptOnOnDemandLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=?`, flippedQC, tr1.EngineID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+5 WHERE id=?`, tr1.EngineID); err != nil {
-		t.Fatal(err)
-	}
+	runTrackEdit(t, tr1.EngineID, 5, func() {
+		if _, err := db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=?`, flippedQC, tr1.EngineID); err != nil {
+			t.Fatal(err)
+		}
+	})
 	settle3, err := WriteBackCues(ctx, root, WriteBackOptions{
 		SkipPreparingCheck: true,
 		OnEject:            true,
@@ -2261,12 +2276,11 @@ func TestWriteBackZeroDecryptOnOnDemandLoad(t *testing.T) {
 			samples float64
 			color   [4]byte
 		}{samples: float64(20000)*44.1 - rbOffset}
-		if _, err := db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=?`, buildEngineQuickCuesBlob(slots), tr1.EngineID); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+100 WHERE id=?`, tr1.EngineID); err != nil {
-			t.Fatal(err)
-		}
+		runTrackEdit(t, tr1.EngineID, 100, func() {
+			if _, err := db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=?`, buildEngineQuickCuesBlob(slots), tr1.EngineID); err != nil {
+				t.Fatal(err)
+			}
+		})
 		r, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, Session: &CueSession{keys: sharedKeys}})
 		if err != nil || readLibsCalls != prevCalls+1 || r.TracksChanged != 1 {
 			t.Fatalf("cue edit write-back = %+v, calls=%d err=%v", r, readLibsCalls-prevCalls, err)
@@ -2275,12 +2289,11 @@ func TestWriteBackZeroDecryptOnOnDemandLoad(t *testing.T) {
 
 	t.Run("2_ActiveLoopToggle", func(t *testing.T) {
 		prevCalls := readLibsCalls
-		if _, err := db.Exec(`UPDATE PerformanceData SET activeOnLoadLoops=1 WHERE trackId=?`, tr2.EngineID); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+100 WHERE id=?`, tr2.EngineID); err != nil {
-			t.Fatal(err)
-		}
+		runTrackEdit(t, tr2.EngineID, 100, func() {
+			if _, err := db.Exec(`UPDATE PerformanceData SET activeOnLoadLoops=1 WHERE trackId=?`, tr2.EngineID); err != nil {
+				t.Fatal(err)
+			}
+		})
 		derivBefore := rekordbox.KeyDerivations()
 		r, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, Session: &CueSession{keys: sharedKeys}})
 		if err != nil || readLibsCalls != prevCalls+1 || r.TracksChanged != 1 {
@@ -2305,13 +2318,12 @@ func TestWriteBackZeroDecryptOnOnDemandLoad(t *testing.T) {
 			idx      int64
 			numBeats uint32
 		}{{pos: 8820, idx: 0, numBeats: 8}, {pos: 8820 + 8*step, idx: 8, numBeats: 0}}
-		if _, err := db.Exec(`UPDATE PerformanceData SET beatData=? WHERE trackId=?`,
-			buildEngineBeatDataBlob(sr, 25*sr, defGrid, adjGrid, true), tr1.EngineID); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+100 WHERE id=?`, tr1.EngineID); err != nil {
-			t.Fatal(err)
-		}
+		runTrackEdit(t, tr1.EngineID, 100, func() {
+			if _, err := db.Exec(`UPDATE PerformanceData SET beatData=? WHERE trackId=?`,
+				buildEngineBeatDataBlob(sr, 25*sr, defGrid, adjGrid, true), tr1.EngineID); err != nil {
+				t.Fatal(err)
+			}
+		})
 		derivBefore := rekordbox.KeyDerivations()
 		r, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, Session: &CueSession{keys: sharedKeys}})
 		if err != nil || readLibsCalls != prevCalls+1 || r.TracksChanged != 1 {
@@ -2324,9 +2336,11 @@ func TestWriteBackZeroDecryptOnOnDemandLoad(t *testing.T) {
 
 	t.Run("4_MetadataEdit", func(t *testing.T) {
 		prevCalls := readLibsCalls
-		if _, err := db.Exec(`UPDATE Track SET comment='DJ Edited Comment', lastEditTime=COALESCE(lastEditTime,0)+100 WHERE id=?`, tr1.EngineID); err != nil {
-			t.Fatal(err)
-		}
+		runTrackEdit(t, tr1.EngineID, 100, func() {
+			if _, err := db.Exec(`UPDATE Track SET comment='DJ Edited Comment' WHERE id=?`, tr1.EngineID); err != nil {
+				t.Fatal(err)
+			}
+		})
 		derivBefore := rekordbox.KeyDerivations()
 		r, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, Session: &CueSession{keys: sharedKeys}})
 		if err != nil || readLibsCalls != prevCalls+1 || r.TracksChanged != 1 {
