@@ -147,7 +147,6 @@ type CueSession struct {
 	snapIdent      fileIdent
 	snap           *rbstate.Snapshot
 	byID           map[int64]*rbstate.Track
-	allSynced      bool
 	bakStampKey    string
 	bakRoot        string
 	bakRootIdent   fileIdent
@@ -165,7 +164,6 @@ func (s *CueSession) invalidateSnapshot() {
 	s.snap = nil
 	s.byID = nil
 	s.snapIdent = fileIdent{}
-	s.allSynced = false
 	s.bakKnown = false
 }
 
@@ -189,16 +187,12 @@ func (s *CueSession) loadSnapshot(dbDir string) (*rbstate.Snapshot, map[int64]*r
 		return nil, nil, err
 	}
 	byID := make(map[int64]*rbstate.Track, len(snap.Tracks))
-	allSynced := true
 	for _, tr := range snap.Tracks {
 		if tr.Native || tr.EngineID == 0 {
 			continue
 		}
 		if byID[tr.EngineID] == nil {
 			byID[tr.EngineID] = tr
-		}
-		if tr.Synced == nil {
-			allSynced = false
 		}
 	}
 	if s != nil && ok {
@@ -207,7 +201,6 @@ func (s *CueSession) loadSnapshot(dbDir string) (*rbstate.Snapshot, map[int64]*r
 		s.snapIdent = ident
 		s.snap = snap
 		s.byID = byID
-		s.allSynced = allSynced
 		s.mu.Unlock()
 	}
 	return snap, byID, nil
@@ -450,22 +443,20 @@ type dbCandidate struct {
 }
 
 type trackChange struct {
-	candidate      dbCandidate
-	refs           map[rbstate.LibraryKind]rekordbox.Track
-	cues           []rekordbox.Cue
-	beats          []rekordbox.Beat
-	bpm            float64
-	analysis       string // set when cuesDiff, anlzCueRepair, or gridDiff
-	cuesDiff       bool
-	anlzCuesDiff   bool // ANLZ cue sections differ from merged deck cues
-	oneCuesDiff    bool // OneLibrary cue rows differ from merged deck cues
-	resetOneMarks  bool // reset cueUpdateCount=NULL and hasModified=0 when cleared back to original backup
-	anlzCueRepair  bool // ANLZ cue-section layout/phantom repair
-	repairVariant  [3]bool
-	restoreVariant [3][]byte
-	gridDiff       bool
-	metadata       map[rbstate.LibraryKind]bool
-	diff           WriteBackTrackDiff
+	candidate     dbCandidate
+	refs          map[rbstate.LibraryKind]rekordbox.Track
+	cues          []rekordbox.Cue
+	beats         []rekordbox.Beat
+	bpm           float64
+	analysis      string // set when cuesDiff, anlzCueRepair, or gridDiff
+	cuesDiff      bool
+	anlzCuesDiff  bool // ANLZ cue sections differ from merged deck cues
+	oneCuesDiff   bool // OneLibrary cue rows differ from merged deck cues
+	anlzCueRepair bool // ANLZ cue-section layout repair only (does not write m.db or reset OneLibrary marks)
+	repairVariant [3]bool
+	gridDiff      bool
+	metadata      map[rbstate.LibraryKind]bool
+	diff          WriteBackTrackDiff
 }
 
 // run is the pass; a non-empty skip is why the gate refused it.
@@ -561,15 +552,14 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 			return "", err
 		}
 	}
-	var mdbCleanups []mdbPhantomCleanup
 	if needRepair {
 		libs, err = p.readRepairLibraries(ctx, libs)
 		if err != nil {
 			return "", err
 		}
-		changes, mdbCleanups = applyRepairChangesWithState(ctx, db, p.r, p.mount, snap, libs, changes)
+		changes = planANLZLayoutRepairs(p.r, p.mount, snap, libs, changes)
 	}
-	if len(cs.rows) == 0 && len(changes) == 0 && len(mdbCleanups) == 0 {
+	if len(cs.rows) == 0 && len(changes) == 0 {
 		// Nothing to compare with the export and no EngineX-written ANLZ files need repair:
 		// no export file of the stick is read or decrypted. Persist baseline Synced digests or
 		// the one-time repair stamp once so future passes skip repeat work.
@@ -612,26 +602,16 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 	if p.opts.DryRun {
 		return "", nil
 	}
-	if len(changes) == 0 && len(mdbCleanups) == 0 {
+	if len(changes) == 0 {
 		err := noteWriteBackWithRepair(p.mount, nil, p.opts.Session.take(cs.insync), nil, needRepair)
 		if err == nil {
 			p.opts.Session.invalidateSnapshot()
 		}
 		return "", err
 	}
-	var written map[string][]rbstate.FileSig
-	var hashes recordHashes
-	if len(changes) > 0 {
-		written, hashes, err = p.write(ctx, libs, changes)
-		if err != nil {
-			return "", err
-		}
-	}
-	if len(mdbCleanups) > 0 {
-		_ = db.Close()
-		if err := applyMDBPhantomCleanups(ctx, mDB, mdbCleanups, cs.insync); err != nil {
-			return "", err
-		}
+	written, hashes, err := p.write(ctx, libs, changes)
+	if err != nil {
+		return "", err
 	}
 	if err := noteWriteBackWithRepair(p.mount, written, p.opts.Session.take(cs.insync), hashes, needRepair); err != nil {
 		return "", err
@@ -1084,38 +1064,29 @@ func (p *pass) readLibraries(ctx context.Context, rows []dbCandidate) (map[rbsta
 func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbstate.LibraryKind]SourceLibrary, rows []dbCandidate) ([]trackChange, map[string]bool, error) {
 	var changes []trackChange
 	matched := make(map[string]bool, len(rows))
+	libIdx := indexSourceLibraries(libs)
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
 			return nil, matched, err
 		}
 		takeOver := row.track.Synced == nil
-		change := trackChange{candidate: row, refs: map[rbstate.LibraryKind]rekordbox.Track{}, metadata: map[rbstate.LibraryKind]bool{}}
-		var primary rekordbox.Track
+		refs, primary, hasRef := lookupLiveTrackRefs(row.track, libIdx)
+		if !hasRef {
+			continue
+		}
+		change := trackChange{candidate: row, refs: refs, metadata: map[rbstate.LibraryKind]bool{}}
 		metaDiff := false
 		matchedAnyMeta := false
-		for _, ref := range row.track.Refs {
-			src, ok := libs[ref.Kind]
-			if !ok || src.Lib == nil {
+		for _, kind := range []rbstate.LibraryKind{rbstate.DeviceLibrary, rbstate.OneLibrary, rbstate.LinkLibrary} {
+			tr, ok := change.refs[kind]
+			if !ok {
 				continue
 			}
-			for _, tr := range src.Lib.Tracks {
-				if tr.ID != ref.ID || rbstate.FoldPath(tr.Path) != row.key || ref.RecordHash != "" && tr.RecordHash != ref.RecordHash {
-					continue
-				}
-				change.refs[ref.Kind] = tr
-				if primary.Path == "" {
-					primary = tr
-				}
-				diff := row.metadata != (rekordbox.Metadata{Genre: tr.Genre, Comment: tr.Comment, Label: tr.Label})
-				if !diff {
-					matchedAnyMeta = true
-				}
-				change.metadata[ref.Kind], metaDiff = diff, metaDiff || diff
-				break
+			diff := row.metadata != (rekordbox.Metadata{Genre: tr.Genre, Comment: tr.Comment, Label: tr.Label})
+			if !diff {
+				matchedAnyMeta = true
 			}
-		}
-		if len(change.refs) == 0 {
-			continue
+			change.metadata[kind], metaDiff = diff, metaDiff || diff
 		}
 		if takeOver && matchedAnyMeta {
 			for k := range change.metadata {
@@ -1351,29 +1322,14 @@ func foldANLZBase(base string) string {
 	return strings.TrimPrefix(rbstate.FoldPath(base), ".")
 }
 
-type mdbPhantomCleanup struct {
-	key          string
-	engineID     int64
-	phantomSlots [8]bool
-}
-
-type mdbCueTruth struct {
-	hasPerf      bool
-	hasPhantoms  bool
-	phantomSlots [8]bool
-	phantomTimes map[uint32]bool
-	hasMainCue   bool
-	mainCueMS    uint32
-	realHotCues  []rekordbox.Cue
-	realHotByPad map[uint32]rekordbox.Cue
-	meta         rekordbox.Metadata
-	quickCuesRaw []byte
-	loopsRaw     []byte
-	activeLoops  int64
+func sameANLZBase(a, b string) bool {
+	ab, aok := anlzBase(a)
+	bb, bok := anlzBase(b)
+	return aok && bok && foldANLZBase(ab) == foldANLZBase(bb)
 }
 
 // stickRepairStamp identifies the stick's export stamp and backup folder names so legacy
-// EngineX repair and phantom-cue cleanup run at most once per export/backup change.
+// EngineX ANLZ cue-layout repair runs at most once per export/backup change.
 func stickRepairStamp(snapStamp, backupRoot string) (string, bool) {
 	entries, err := os.ReadDir(backupRoot)
 	if err != nil {
@@ -1431,35 +1387,6 @@ func readEarliestBackup(backupRoot, rel string) ([]byte, bool) {
 	return nil, false
 }
 
-func readEarliestBackupCues(r *compat.Resolver, backupRoot, base string) ([]rekordbox.Cue, bool) {
-	var merged *rekordbox.Analysis
-	found := false
-	for _, ext := range []string{".DAT", ".EXT"} {
-		rel, ok := resolveANLZVariant(r, base, ext)
-		if !ok {
-			rel = base + ext
-		}
-		raw, hasBak := readEarliestBackup(backupRoot, rel)
-		if !hasBak {
-			continue
-		}
-		a, err := rekordbox.ParseAnalysis(raw)
-		if err != nil {
-			continue
-		}
-		found = true
-		if merged == nil {
-			merged = a
-		} else {
-			merged.Merge(a)
-		}
-	}
-	if !found || merged == nil {
-		return nil, false
-	}
-	return merged.Cues, true
-}
-
 func indexSourceLibraries(libs map[rbstate.LibraryKind]SourceLibrary) map[rbstate.LibraryKind]map[uint32]rekordbox.Track {
 	if libs == nil {
 		return nil
@@ -1478,9 +1405,12 @@ func indexSourceLibraries(libs map[rbstate.LibraryKind]SourceLibrary) map[rbstat
 	return out
 }
 
-func matchCurrentExportRefs(tr *rbstate.Track, libIdx map[rbstate.LibraryKind]map[uint32]rekordbox.Track) (map[rbstate.LibraryKind]rekordbox.Track, rekordbox.Track, bool) {
+func lookupLiveTrackRefs(tr *rbstate.Track, libIdx map[rbstate.LibraryKind]map[uint32]rekordbox.Track) (map[rbstate.LibraryKind]rekordbox.Track, rekordbox.Track, bool) {
 	refs := map[rbstate.LibraryKind]rekordbox.Track{}
 	var primary rekordbox.Track
+	if tr == nil || libIdx == nil {
+		return refs, primary, false
+	}
 	for _, ref := range tr.Refs {
 		byID := libIdx[ref.Kind]
 		if byID == nil {
@@ -1501,311 +1431,52 @@ func matchCurrentExportRefs(tr *rbstate.Track, libIdx map[rbstate.LibraryKind]ma
 	return refs, primary, len(refs) > 0
 }
 
-func inspectMDBTruth(ctx context.Context, db *sql.DB, r *compat.Resolver, tr *rbstate.Track, trackPath string) mdbCueTruth {
-	var truth mdbCueTruth
-	if db == nil || tr == nil || tr.EngineID <= 0 {
-		return truth
+func resolveOwnedTrackAnalysis(tr *rbstate.Track, libIdx map[rbstate.LibraryKind]map[uint32]rekordbox.Track) (analysisPath, trackAudioPath string, refs map[rbstate.LibraryKind]rekordbox.Track, ok bool) {
+	if tr == nil || tr.Native {
+		return "", "", nil, false
 	}
-	var trackData, quickCues, loops []byte
-	var active int64
-	err := db.QueryRowContext(ctx, `SELECT COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,''), p.trackData, p.quickCues, p.loops, COALESCE(p.activeOnLoadLoops,0)
-		FROM Track t LEFT JOIN PerformanceData p ON p.trackId=t.id WHERE t.id=?`, tr.EngineID).
-		Scan(&truth.meta.Genre, &truth.meta.Comment, &truth.meta.Label, &trackData, &quickCues, &loops, &active)
-	if err != nil || len(trackData) == 0 {
-		return truth
+	refs, primary, hasRef := lookupLiveTrackRefs(tr, libIdx)
+	if !hasRef {
+		return "", "", nil, false
 	}
-	deck, err := enginedb.ParseDeckCuesAndLoops(trackData, quickCues, loops, active)
-	if err != nil {
-		return truth
+	analysisPath = cmp.Or(primary.AnalysisPath, tr.AnalysisPath)
+	if _, okBase := anlzBase(analysisPath); !okBase {
+		return "", "", nil, false
 	}
-	if trackPath == "" {
-		trackPath = tr.Rel
-	}
-	offset, ok := trackRekordboxOffset(r, trackPath)
-	if !ok {
-		return truth
-	}
-	truth.hasPerf = true
-	truth.quickCuesRaw, truth.loopsRaw, truth.activeLoops = quickCues, loops, active
-	if deck.MainCue >= 0 {
-		truth.hasMainCue = true
-		truth.mainCueMS = deckSamplesToMS(deck.MainCue, offset, deck.SampleRate)
-	}
-	truth.realHotByPad = map[uint32]rekordbox.Cue{}
-
-	type slotMS struct {
-		slot int
-		ms   uint32
-		hc   *enginedb.DeckHotCue
-	}
-	var nonLoop []slotMS
-	byZeroMS := map[uint32]int{}
-	for s := 0; s < 8; s++ {
-		hc := deck.HotCues[s]
-		if hc == nil {
-			continue
-		}
-		pad := uint32(s + 1)
-		if lp := deck.Loops[s]; lp != nil && near(deckSamplesToMS(hc.Samples, offset, deck.SampleRate), deckSamplesToMS(lp.StartSamples, offset, deck.SampleRate)) {
-			start := deckSamplesToMS(lp.StartSamples, offset, deck.SampleRate)
-			end := max(deckSamplesToMS(lp.EndSamples, offset, deck.SampleRate), start+1)
-			c := rekordbox.Cue{HotCue: pad, TimeMS: start, EndMS: end, Loop: true, Active: lp.Active, Name: lp.Name, Color: cmp.Or(lp.Color, hc.Color), Extended: true}
-			truth.realHotByPad[pad] = c
-			truth.realHotCues = append(truth.realHotCues, c)
-			continue
-		}
-		ms := deckSamplesToMS(hc.Samples, offset, deck.SampleRate)
-		nonLoop = append(nonLoop, slotMS{slot: s, ms: ms, hc: hc})
-		if ms <= 60 {
-			byZeroMS[ms]++
-		}
-	}
-	truth.phantomTimes = map[uint32]bool{}
-	for ms, cnt := range byZeroMS {
-		if cnt >= 2 {
-			truth.phantomTimes[ms] = true
-			truth.hasPhantoms = true
-		}
-	}
-	for _, item := range nonLoop {
-		if truth.phantomTimes[item.ms] {
-			truth.phantomSlots[item.slot] = true
-			continue
-		}
-		pad := uint32(item.slot + 1)
-		rgb, name := item.hc.Color, item.hc.Name
-		if isDefaultEnginePadName(pad, name) {
-			name = ""
-		}
-		var code byte
-		if name != "" {
-			code = rekordbox.NearestCueColorCode(rgb)
-		} else if isEngineDefaultHotCueColor(pad, rgb) {
-			rgb = [4]byte{}
-		}
-		c := rekordbox.Cue{HotCue: pad, TimeMS: item.ms, Name: name, Color: rgb, ColorCode: code, Extended: true}
-		truth.realHotByPad[pad] = c
-		truth.realHotCues = append(truth.realHotCues, c)
-	}
-	return truth
+	trackAudioPath = cmp.Or(primary.Path, tr.Rel, tr.Key)
+	return analysisPath, trackAudioPath, refs, true
 }
 
-func isR1ShiftedFromTruth(cleaned []rekordbox.Cue, truth mdbCueTruth) bool {
-	if !truth.hasPerf {
-		return false
+func anlzFileOwnedByTrack(raw []byte, tr *rbstate.Track, trackAudioPath string) (hasPPTH bool, match bool) {
+	ppth, pok := rekordbox.ParseANLZPath(raw)
+	if !pok {
+		return false, true
 	}
-	byPad := map[uint32]rekordbox.Cue{}
-	for _, c := range cleaned {
-		if c.HotCue >= 1 && c.HotCue <= 8 {
-			byPad[c.HotCue] = c
-		}
+	fppth := rbstate.FoldPath(ppth)
+	if fppth == tr.Key || (tr.Rel != "" && fppth == rbstate.FoldPath(tr.Rel)) || (trackAudioPath != "" && fppth == rbstate.FoldPath(trackAudioPath)) {
+		return true, true
 	}
-	for pad, rc := range truth.realHotByPad {
-		if pad >= 8 {
-			continue
-		}
-		// v5.3.0.5-r1 shifted DisplayCue.I (1-based hot cue pad) by +1 onto pad+1.
-		if shifted, ok := byPad[pad+1]; ok && !truth.realHotByPad[pad+1].Extended && near(shifted.TimeMS, rc.TimeMS) {
-			return true
-		}
-	}
-	if c1, ok := byPad[1]; ok && truth.hasMainCue && !truth.realHotByPad[1].Extended && near(c1.TimeMS, truth.mainCueMS) {
-		return true
-	}
-	return false
+	return true, false
 }
 
-func isShiftedR1Cue(c rekordbox.Cue, truth mdbCueTruth) bool {
-	if c.HotCue == 1 && truth.hasMainCue && near(c.TimeMS, truth.mainCueMS) {
-		return true
-	}
-	if c.HotCue > 1 {
-		if prev, ok := truth.realHotByPad[c.HotCue-1]; ok && near(c.TimeMS, prev.TimeMS) {
-			return true
-		}
-	}
-	return false
-}
-
-func applyMDBTruthToCues(cleaned []rekordbox.Cue, truth mdbCueTruth, hadR1OrPhantom bool) ([]rekordbox.Cue, bool) {
-	if !truth.hasPerf {
-		return cleaned, false
-	}
-	changed := false
-	var base []rekordbox.Cue
-	for _, c := range cleaned {
-		if c.HotCue >= 1 && c.HotCue <= 8 && hadR1OrPhantom {
-			if _, ok := truth.realHotByPad[c.HotCue]; !ok && isShiftedR1Cue(c, truth) {
-				changed = true
-				continue
-			}
-		}
-		base = append(base, c)
-	}
-	byPad := map[uint32]int{}
-	for i, c := range base {
-		if c.HotCue >= 1 && c.HotCue <= 8 {
-			byPad[c.HotCue] = i
-		}
-	}
-	out := base
-	for pad, rc := range truth.realHotByPad {
-		if idx, ok := byPad[pad]; ok {
-			if hadR1OrPhantom {
-				cur := out[idx]
-				if cur.Loop != rc.Loop || !near(cur.TimeMS, rc.TimeMS) || (rc.Loop && !near(cur.EndMS, rc.EndMS)) {
-					out[idx] = rc
-					changed = true
-				}
-			}
-			continue
-		}
-		out = append(out, rc)
-		changed = true
-	}
-	return out, changed
-}
-
-func clearQuickCuePhantomSlots(qcompressed []byte, phantomSlots [8]bool) ([]byte, bool, error) {
-	raw, err := enginedb.QUncompress(qcompressed, 64<<10)
-	if err != nil {
-		return nil, false, err
-	}
-	if len(raw) < 8 || binary.BigEndian.Uint64(raw) > 8 {
-		return nil, false, fmt.Errorf("writeback: invalid quickCues count")
-	}
-	count := int(binary.BigEndian.Uint64(raw))
-	off := 8
-	var out bytes.Buffer
-	out.Write(raw[:8])
-	changed := false
-	negOneBits := math.Float64bits(-1)
-	for slot := 0; slot < count; slot++ {
-		if off >= len(raw) {
-			return nil, false, fmt.Errorf("writeback: truncated quickCues label")
-		}
-		n := int(raw[off])
-		end := off + 1 + n + 12
-		if end > len(raw) {
-			return nil, false, fmt.Errorf("writeback: truncated quickCues entry")
-		}
-		if slot < len(phantomSlots) && phantomSlots[slot] {
-			out.WriteByte(0)
-			var buf [12]byte
-			binary.BigEndian.PutUint64(buf[:8], negOneBits)
-			out.Write(buf[:])
-			changed = true
-		} else {
-			out.Write(raw[off:end])
-		}
-		off = end
-	}
-	if !changed {
-		return qcompressed, false, nil
-	}
-	out.Write(raw[off:])
-	comp, err := enginedb.QCompress(out.Bytes())
-	if err != nil {
-		return nil, false, err
-	}
-	return comp, true, nil
-}
-
-func applyMDBPhantomCleanups(ctx context.Context, mDBPath string, cleanups []mdbPhantomCleanup, insync map[string]noted) error {
-	if len(cleanups) == 0 {
-		return nil
-	}
-	u := (&url.URL{Scheme: "file", Path: mDBPath, RawQuery: "_pragma=busy_timeout(5000)"}).String()
-	rwDB, err := sql.Open("sqlite", u)
-	if err != nil {
-		return err
-	}
-	defer rwDB.Close()
-	rwDB.SetMaxOpenConns(1)
-
-	for _, cl := range cleanups {
-		var qc []byte
-		if err := rwDB.QueryRowContext(ctx, `SELECT quickCues FROM PerformanceData WHERE trackId=?`, cl.engineID).Scan(&qc); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-			return err
-		}
-		nextQC, changed, err := clearQuickCuePhantomSlots(qc, cl.phantomSlots)
-		if err != nil || !changed {
-			continue
-		}
-		if _, err := rwDB.ExecContext(ctx, `UPDATE PerformanceData SET quickCues=? WHERE trackId=?`, nextQC, cl.engineID); err != nil {
-			return err
-		}
-		var edit, active int64
-		var beats, cues, loops []byte
-		var genre, comment, label string
-		if err := rwDB.QueryRowContext(ctx, `SELECT COALESCE(t.lastEditTime,0), COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,''), p.beatData, p.quickCues, p.loops, COALESCE(p.activeOnLoadLoops,0)
-			FROM Track t LEFT JOIN PerformanceData p ON p.trackId=t.id WHERE t.id=?`, cl.engineID).
-			Scan(&edit, &genre, &comment, &label, &beats, &cues, &loops, &active); err == nil {
-			insync[cl.key] = noted{
-				edit:       edit,
-				digest:     enginedb.SyncedDigest(nil, cues, loops, active, genre, comment, label),
-				metaDigest: enginedb.MetadataDigest(genre, comment, label),
-				written:    enginedb.WrittenDigest(beats, cues, loops),
-			}
-		}
-	}
-	return nil
-}
-
-// applyRepairChanges inspects ONLY ANLZ files previously modified by EngineX (with proven
-// current export identity, AnalysisPath, PPTH ownership, and backup provenance) and queues
-// in-place ANLZ layout/phantom repairs plus OneLibrary cue/mark cleanup.
-func applyRepairChanges(r *compat.Resolver, mount string, snap *rbstate.Snapshot, changes []trackChange) []trackChange {
-	out, _ := applyRepairChangesWithState(context.Background(), nil, r, mount, snap, nil, changes)
-	return out
-}
-
-func applyRepairChangesWithState(ctx context.Context, db *sql.DB, r *compat.Resolver, mount string, snap *rbstate.Snapshot, libs map[rbstate.LibraryKind]SourceLibrary, changes []trackChange) ([]trackChange, []mdbPhantomCleanup) {
-	if r == nil || snap == nil {
-		return changes, nil
+// planANLZLayoutRepairs inspects ONLY ANLZ files previously modified by EngineX (with proven
+// current export identity, live AnalysisPath, live and backup PPTH ownership, and backup
+// provenance) and plans in-place cue-section layout repairs (preserving later grids, leaving
+// OneLibrary marks untouched, and never touching phantom hot-cue sets or writing m.db).
+func planANLZLayoutRepairs(r *compat.Resolver, mount string, snap *rbstate.Snapshot, libs map[rbstate.LibraryKind]SourceLibrary, changes []trackChange) []trackChange {
+	if r == nil || snap == nil || len(libs) == 0 {
+		return changes
 	}
 	backupRoot := filepath.Join(mount, ".enginex-backup")
 	backedBases := backedUpANLZBases(backupRoot)
-	oneBackedUp := hasFirstBackup(backupRoot, "PIONEER/rekordbox/exportLibrary.db") || hasFirstBackup(backupRoot, ".PIONEER/rekordbox/exportLibrary.db")
-	if len(backedBases) == 0 && !oneBackedUp {
-		return changes, nil
+	if len(backedBases) == 0 {
+		return changes
 	}
 
 	libIdx := indexSourceLibraries(libs)
 	existingIdx := make(map[string]int, len(changes))
-	var mdbCleanups []mdbPhantomCleanup
 	for i := range changes {
 		existingIdx[changes[i].candidate.key] = i
-		ch := &changes[i]
-		if !ch.cuesDiff {
-			continue
-		}
-		if base, ok := anlzBase(ch.analysis); ok && (backedBases[foldANLZBase(base)] || oneBackedUp) {
-			if cleaned, removed := stripPhantomHotCues(ch.cues); removed {
-				ch.cues = cleaned
-				ch.anlzCuesDiff = true
-				if _, hasOne := ch.refs[rbstate.OneLibrary]; hasOne {
-					ch.oneCuesDiff = true
-				}
-				truth := inspectMDBTruth(ctx, db, r, ch.candidate.track, ch.candidate.track.Rel)
-				if truth.hasPhantoms {
-					mdbCleanups = append(mdbCleanups, mdbPhantomCleanup{
-						key:          ch.candidate.key,
-						engineID:     ch.candidate.engineID,
-						phantomSlots: truth.phantomSlots,
-					})
-				}
-			}
-			if bakCues, hasBak := readEarliestBackupCues(r, backupRoot, base); hasBak && cuesEquivalent(ch.cues, bakCues) && len(ch.cues) == 0 {
-				if one, hasOne := ch.refs[rbstate.OneLibrary]; hasOne && len(phantomHotCueTimes(one.Cues)) > 0 {
-					ch.oneCuesDiff = true
-					ch.resetOneMarks = true
-				}
-			}
-		}
 	}
 
 	keys := make([]string, 0, len(snap.Tracks))
@@ -1816,50 +1487,30 @@ func applyRepairChangesWithState(ctx context.Context, db *sql.DB, r *compat.Reso
 
 	for _, k := range keys {
 		tr := snap.Tracks[k]
-		if tr == nil || tr.Native {
+		analysisPath, trackPath, matchedRefs, ok := resolveOwnedTrackAnalysis(tr, libIdx)
+		if !ok {
 			continue
 		}
-		// BLOCK 1: require current export identity (when libraries are loaded) and ONLY inspect
-		// the track's current AnalysisPath — NEVER historical Built.ANLZ paths.
-		var matchedRefs map[rbstate.LibraryKind]rekordbox.Track
-		analysisPath := tr.AnalysisPath
-		trackPath := cmp.Or(tr.Rel, tr.Key)
-		if libIdx != nil {
-			var primary rekordbox.Track
-			var hasRef bool
-			matchedRefs, primary, hasRef = matchCurrentExportRefs(tr, libIdx)
-			if !hasRef {
-				continue
-			}
-			if primary.AnalysisPath != "" {
-				analysisPath = primary.AnalysisPath
-			}
-			if primary.Path != "" {
-				trackPath = primary.Path
-			}
-		} else {
-			matchedRefs = map[rbstate.LibraryKind]rekordbox.Track{}
-		}
 		base, ok := anlzBase(analysisPath)
-		if !ok || (!backedBases[foldANLZBase(base)] && !oneBackedUp) {
+		if !ok {
 			continue
 		}
 		foldedBase := foldANLZBase(base)
+		if !backedBases[foldedBase] {
+			continue
+		}
 
-		// Check if live buildChanges already handled cue diff on this exact analysis target.
+		// Live cue write-back already rewrites canonical ANLZ cue sections when targeting this path.
 		liveIdx, hasLive := existingIdx[k]
 		if hasLive && changes[liveIdx].cuesDiff {
-			if existingBase, eok := anlzBase(changes[liveIdx].analysis); !eok || foldANLZBase(existingBase) == foldedBase {
+			if changes[liveIdx].analysis == "" || sameANLZBase(changes[liveIdx].analysis, analysisPath) {
 				continue
 			}
 		}
 
-		// Check each ANLZ file individually for PPTH ownership, backup provenance, layout errors, and phantoms.
 		var curRaw [3][]byte
-		var bakRawArr [3][]byte
-		var hasBakArr [3]bool
-		var varBroken [3]bool
-		var varChanged [3]bool
+		var repairVariant [3]bool
+		anyBroken := false
 		hadLegacyB29Zero := false
 		ppthMismatch := false
 		for i, ext := range anlzExts {
@@ -1871,156 +1522,100 @@ func applyRepairChangesWithState(ctx context.Context, db *sql.DB, r *compat.Reso
 			if err != nil {
 				continue
 			}
-			if ppth, pok := rekordbox.ParseANLZPath(raw); pok {
-				fppth := rbstate.FoldPath(ppth)
-				if fppth != tr.Key && (tr.Rel == "" || fppth != rbstate.FoldPath(tr.Rel)) {
-					ppthMismatch = true
-					break
-				}
+			curHas, curMatch := anlzFileOwnedByTrack(raw, tr, trackPath)
+			if !curMatch || (i < 2 && !curHas) {
+				ppthMismatch = true
+				break
 			}
-			curRaw[i] = raw
 			bakRaw, hasBak := readEarliestBackup(backupRoot, rel)
-			bakRawArr[i], hasBakArr[i] = bakRaw, hasBak
 			if !hasBak {
 				continue
 			}
-			if bakPok := func() bool {
-				_, ok := rekordbox.ParseANLZPath(bakRaw)
-				return ok
-			}(); bakPok {
-				if _, curPok := rekordbox.ParseANLZPath(raw); !curPok {
-					ppthMismatch = true
-					break
-				}
+			bakHas, bakMatch := anlzFileOwnedByTrack(bakRaw, tr, trackPath)
+			if !bakMatch || (i < 2 && !bakHas) || (bakHas && !curHas) {
+				ppthMismatch = true
+				break
 			}
-			if !bytes.Equal(raw, bakRaw) {
-				varChanged[i] = true
-				isExt := i > 0
-				if rekordbox.ANLZNeedsCueRepair(raw, isExt) {
-					varBroken[i] = true
-					if i == 1 && extHasLegacyB29Zero(raw) {
-						hadLegacyB29Zero = true
-					}
-				}
-				if a, aerr := rekordbox.ParseAnalysis(raw); aerr == nil && len(phantomHotCueTimes(a.Cues)) > 0 {
-					varBroken[i] = true
+			if bytes.Equal(raw, bakRaw) {
+				continue
+			}
+			if rekordbox.ANLZNeedsCueRepair(raw, i > 0) {
+				curRaw[i] = raw
+				repairVariant[i] = true
+				anyBroken = true
+				if i == 1 && extHasLegacyB29Zero(raw) {
+					hadLegacyB29Zero = true
 				}
 			}
 		}
-		if ppthMismatch {
+		if ppthMismatch || !anyBroken {
 			continue
 		}
 
-		oneRef, hasOne := matchedRefs[rbstate.OneLibrary]
-		oneHasPhantoms := hasOne && len(phantomHotCueTimes(oneRef.Cues)) > 0
-		anyBroken := varBroken[0] || varBroken[1] || varBroken[2]
-		if !anyBroken && !oneHasPhantoms {
+		cues := readANLZCues(r, analysisPath)
+		if isPhantomZeroHotCueSet(cues) {
 			continue
 		}
-
-		anlzCues := readANLZCues(r, analysisPath)
-		cleaned, removedFromANLZ := stripPhantomHotCues(anlzCues)
-		_, removedFromOne := stripPhantomHotCues(oneRef.Cues)
-		removedPhantom := removedFromANLZ || removedFromOne
-
-		truth := inspectMDBTruth(ctx, db, r, tr, trackPath)
-		if truth.hasPhantoms {
-			mdbCleanups = append(mdbCleanups, mdbPhantomCleanup{
-				key:          tr.Key,
-				engineID:     tr.EngineID,
-				phantomSlots: truth.phantomSlots,
-			})
-			removedPhantom = true
-		}
-		hadR1Shift := isR1ShiftedFromTruth(cleaned, truth)
-		cleaned, mdbAdded := applyMDBTruthToCues(cleaned, truth, removedPhantom || hadR1Shift)
-
 		if hadLegacyB29Zero {
-			for i := range cleaned {
-				if cleaned[i].HotCue > 0 && (cleaned[i].Name == "" || isDefaultEnginePadName(cleaned[i].HotCue, cleaned[i].Name)) {
-					cleaned[i].Name = ""
-					if isEngineDefaultHotCueColor(cleaned[i].HotCue, cleaned[i].Color) {
-						cleaned[i].Color = [4]byte{}
-						cleaned[i].ColorCode = 0
+			for i := range cues {
+				if cues[i].HotCue > 0 && (cues[i].Name == "" || isDefaultEnginePadName(cues[i].HotCue, cues[i].Name)) {
+					cues[i].Name = ""
+					if isEngineDefaultHotCueColor(cues[i].HotCue, cues[i].Color) {
+						cues[i].Color = [4]byte{}
+						cues[i].ColorCode = 0
 					} else {
-						cleaned[i].ColorCode = 0
+						cues[i].ColorCode = 0
 					}
 				}
 			}
 		}
 
-		bakCues, hasBakCues := readEarliestBackupCues(r, backupRoot, base)
-		matchesBak := (hasBakCues && cuesEquivalent(cleaned, bakCues)) ||
-			(!hasBakCues && !varChanged[0] && !varChanged[1] && !varChanged[2] && cuesEquivalent(cleaned, anlzCues))
+		plannedAny := false
+		for i := 0; i < 3; i++ {
+			if !repairVariant[i] {
+				continue
+			}
+			nextRaw, chg, rerr := rekordbox.RewriteANLZCues(curRaw[i], cues, i > 0, i == 2)
+			if rerr != nil || !chg || bytes.Equal(nextRaw, curRaw[i]) {
+				repairVariant[i] = false
+				continue
+			}
+			plannedAny = true
+		}
+		if !plannedAny {
+			continue
+		}
 
-		tc := trackChange{
+		hasGridOnSameTarget := hasLive && changes[liveIdx].gridDiff && sameANLZBase(changes[liveIdx].analysis, analysisPath)
+		if hasGridOnSameTarget {
+			changes[liveIdx].cues = cues
+			changes[liveIdx].anlzCueRepair = true
+			changes[liveIdx].repairVariant = repairVariant
+			if changes[liveIdx].analysis == "" {
+				changes[liveIdx].analysis = analysisPath
+			}
+			changes[liveIdx].diff.Fields = append(changes[liveIdx].diff.Fields, "cues:anlz-repair")
+			continue
+		}
+
+		rel := cmp.Or(tr.Rel, tr.Key)
+		changes = append(changes, trackChange{
 			candidate:     dbCandidate{key: tr.Key, engineID: tr.EngineID, track: tr},
 			refs:          matchedRefs,
-			cues:          cleaned,
+			cues:          cues,
 			analysis:      analysisPath,
 			anlzCueRepair: true,
+			repairVariant: repairVariant,
 			metadata:      map[rbstate.LibraryKind]bool{},
 			diff: WriteBackTrackDiff{
 				EngineID: tr.EngineID,
 				Key:      tr.Key,
-				Rel:      cmp.Or(tr.Rel, tr.Key),
+				Rel:      rel,
+				Fields:   []string{"cues:anlz-repair"},
 			},
-		}
-
-		hasGridOnSameTarget := hasLive && changes[liveIdx].gridDiff && foldANLZBase(changes[liveIdx].analysis) == foldedBase
-		anyVariantPlanned := false
-		for i := 0; i < 3; i++ {
-			if !hasBakArr[i] || len(curRaw[i]) == 0 {
-				continue
-			}
-			if matchesBak && varChanged[i] && (removedPhantom || hadR1Shift || anyBroken) {
-				tc.repairVariant[i] = true
-				if !hasGridOnSameTarget {
-					tc.restoreVariant[i] = bakRawArr[i]
-				}
-				anyVariantPlanned = true
-				continue
-			}
-			if varBroken[i] || ((removedFromANLZ || mdbAdded || hadR1Shift) && i < 2) {
-				if nextRaw, chg, rerr := rekordbox.RewriteANLZCues(curRaw[i], cleaned, i > 0, i == 2); rerr == nil && chg && !bytes.Equal(nextRaw, curRaw[i]) {
-					tc.repairVariant[i] = true
-					anyVariantPlanned = true
-				}
-			}
-		}
-
-		if hasOne && (removedPhantom || mdbAdded || hadR1Shift) && !cuesEquivalent(oneRef.Cues, cleaned) {
-			tc.oneCuesDiff = true
-			if matchesBak {
-				tc.resetOneMarks = true
-			}
-		}
-		if !anyVariantPlanned && !tc.oneCuesDiff {
-			continue
-		}
-
-		tag := "cues:anlz-repair"
-		if removedPhantom {
-			tag = "cues:phantom-cleanup"
-		}
-		tc.diff.Fields = append(tc.diff.Fields, tag)
-
-		// BLOCK 1: keep cue repair separate if its analysis target differs from a live grid edit.
-		if hasGridOnSameTarget {
-			changes[liveIdx].cues = tc.cues
-			changes[liveIdx].anlzCueRepair = true
-			changes[liveIdx].repairVariant = tc.repairVariant
-			changes[liveIdx].oneCuesDiff = tc.oneCuesDiff
-			changes[liveIdx].resetOneMarks = tc.resetOneMarks
-			if changes[liveIdx].analysis == "" {
-				changes[liveIdx].analysis = tc.analysis
-			}
-			changes[liveIdx].diff.Fields = append(changes[liveIdx].diff.Fields, tag)
-			continue
-		}
-		changes = append(changes, tc)
+		})
 	}
-	return changes, mdbCleanups
+	return changes
 }
 
 func backedUpANLZBases(backupRoot string) map[string]bool {
@@ -2386,51 +1981,32 @@ func cuesValuesMatchIgnoringMinimalMissing(refCues, merged []rekordbox.Cue) bool
 	return true
 }
 
-// phantomHotCueTimes returns every start timestamp (<= 60 ms) held by 2 or more distinct
-// non-loop hot cue pads (1..8). Single start cues (< 2 pads) and saved loops stay untouched.
-func phantomHotCueTimes(cues []rekordbox.Cue) map[uint32]bool {
-	padsByMS := map[uint32][8]bool{}
+// isPhantomZeroHotCueSet identifies the unedited eight-pad zero-start phantom hot-cue set
+// (Hot Cues 1..8 all starting at identical <= 60 ms); ANLZ layout repair leaves it untouched.
+func isPhantomZeroHotCueSet(cues []rekordbox.Cue) bool {
+	var seen [8]bool
+	var refMS uint32
+	count := 0
 	for _, c := range cues {
-		if c.HotCue < 1 || c.HotCue > 8 || c.Loop || c.TimeMS > 60 {
+		if c.HotCue < 1 || c.HotCue > 8 || c.Loop {
 			continue
 		}
-		seen := padsByMS[c.TimeMS]
-		seen[c.HotCue-1] = true
-		padsByMS[c.TimeMS] = seen
-	}
-	var phantoms map[uint32]bool
-	for ms, seen := range padsByMS {
-		cnt := 0
-		for _, ok := range seen {
-			if ok {
-				cnt++
-			}
+		if c.TimeMS > 60 {
+			return false
 		}
-		if cnt >= 2 {
-			if phantoms == nil {
-				phantoms = map[uint32]bool{}
-			}
-			phantoms[ms] = true
-		}
-	}
-	return phantoms
-}
-
-func stripPhantomHotCues(cues []rekordbox.Cue) ([]rekordbox.Cue, bool) {
-	phantoms := phantomHotCueTimes(cues)
-	if len(phantoms) == 0 {
-		return cues, false
-	}
-	var out []rekordbox.Cue
-	removed := false
-	for _, c := range cues {
-		if c.HotCue >= 1 && c.HotCue <= 8 && !c.Loop && phantoms[c.TimeMS] {
-			removed = true
+		idx := int(c.HotCue - 1)
+		if seen[idx] {
 			continue
 		}
-		out = append(out, c)
+		if count == 0 {
+			refMS = c.TimeMS
+		} else if c.TimeMS != refMS {
+			return false
+		}
+		seen[idx] = true
+		count++
 	}
-	return out, removed
+	return count == 8
 }
 
 func sortedCues(in []rekordbox.Cue) []rekordbox.Cue {

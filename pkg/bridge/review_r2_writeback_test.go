@@ -90,116 +90,165 @@ func rewritePPTHSection(t *testing.T, raw []byte, newPath string) []byte {
 }
 
 func TestReviewRepairNeverUsesSupersededAnalysisPath(t *testing.T) {
-	mount := t.TempDir()
-	old := "PIONEER/USBANLZ/P001/ANLZ0000.DAT"
-	current := "PIONEER/USBANLZ/P002/ANLZ0000.DAT"
-	raw, err := os.ReadFile("../rekordbox/testdata/rb_hot_compact.dat")
+	ctx := context.Background()
+	env := setupPhantomTestStick(t, nil)
+	supersededDAT := "PIONEER/USBANLZ/P099/ANLZ0000.DAT"
+	supersededEXT := "PIONEER/USBANLZ/P099/ANLZ0000.EXT"
+	brokenDAT := swapCompactDATCueOrder(t, env.origDAT)
+	testfixture.Write(t, env.root, supersededDAT, brokenDAT)
+	testfixture.Write(t, env.root, supersededEXT, env.origEXT)
+	testfixture.Write(t, env.root, ".enginex-backup/2000-01-01/"+supersededDAT, env.origDAT)
+	testfixture.Write(t, env.root, ".enginex-backup/2000-01-01/"+supersededEXT, env.origEXT)
+
+	// Move both snapshot Build history and live ownership so P099 is obsolete and P001 (dat1Rel) is current.
+	snap, err := rbstate.Load(env.dbDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	broken := swapCompactDATCueOrder(t, raw)
-	for rel, data := range map[string][]byte{
-		old: broken, current: raw, ".enginex-backup/2000-01-01/" + old: raw,
-	} {
-		writeReviewFixtureFile(t, mount, rel, data)
-	}
-	r, err := compat.NewResolver(mount)
-	if err != nil {
+	snap.Tracks["contents/fixturea/track01.mp3"].Built.ANLZ = []rbstate.FileSig{{Rel: supersededDAT}, {Rel: supersededEXT}}
+	if err := snap.Save(env.dbDir); err != nil {
 		t.Fatal(err)
 	}
-	snap := rbstate.New("review")
-	snap.Tracks["contents/fixturea/track01.mp3"] = &rbstate.Track{
-		Key: "contents/fixturea/track01.mp3", Rel: "Contents/FixtureA/Track01.mp3", EngineID: 1, AnalysisPath: current,
-		Built: rbstate.TrackSig{ANLZ: []rbstate.FileSig{{Rel: old}}},
+	refreshPhantomSnapStamp(t, env)
+
+	res, err := WriteBackCues(ctx, env.root, WriteBackOptions{})
+	if err != nil {
+		t.Fatalf("WriteBackCues: %v", err)
 	}
-	if got := applyRepairChanges(r, mount, snap, nil); len(got) != 0 {
-		t.Fatalf("repair selected obsolete analysis %s although the track now owns %s", got[0].analysis, current)
+	if res.TracksChanged != 0 || res.FilesUpdated != 0 {
+		t.Fatalf("repair touched files even though current AnalysisPath is clean: %+v", res)
+	}
+	if cur, _ := os.ReadFile(filepath.Join(env.root, filepath.FromSlash(supersededDAT))); !bytes.Equal(cur, brokenDAT) {
+		t.Fatalf("repair modified obsolete analysis %s although the track owns %s", supersededDAT, env.dat1Rel)
 	}
 }
 
-func TestReviewRepairRefusesPPTHMismatchAndSeparateGridTarget(t *testing.T) {
-	raw, err := os.ReadFile("../rekordbox/testdata/rb_hot_compact.dat")
-	if err != nil {
-		t.Fatal(err)
-	}
-	extRaw, err := os.ReadFile("../rekordbox/testdata/rb_hot_compact.ext")
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestReviewRepairRefusesPPTHMismatchAndPreservesMergedGrid(t *testing.T) {
+	ctx := context.Background()
 
-	t.Run("PPTHMismatchRefused", func(t *testing.T) {
-		mount := t.TempDir()
-		rel := "PIONEER/USBANLZ/P001/ANLZ0000.DAT"
-		foreign := rewritePPTHSection(t, swapCompactDATCueOrder(t, raw), "/Contents/Foreign/OtherTrack.mp3")
-		writeReviewFixtureFile(t, mount, rel, foreign)
-		writeReviewFixtureFile(t, mount, ".enginex-backup/2000-01-01/"+rel, raw)
-		r, err := compat.NewResolver(mount)
+	t.Run("LivePPTHMismatchRefused", func(t *testing.T) {
+		env := setupPhantomTestStick(t, nil)
+		foreign := rewritePPTHSection(t, swapCompactDATCueOrder(t, env.origDAT), "/Contents/Foreign/OtherTrack.mp3")
+		testfixture.Write(t, env.root, env.dat1Rel, foreign)
+		refreshPhantomSnapStamp(t, env)
+
+		res, err := WriteBackCues(ctx, env.root, WriteBackOptions{})
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("WriteBackCues: %v", err)
 		}
-		snap := rbstate.New("review")
-		snap.Tracks["contents/fixturea/track01.mp3"] = &rbstate.Track{
-			Key: "contents/fixturea/track01.mp3", Rel: "Contents/FixtureA/Track01.mp3", EngineID: 1, AnalysisPath: "/" + rel,
+		if res.TracksChanged != 0 || res.FilesUpdated != 0 {
+			t.Fatalf("repair did not refuse ANLZ with mismatched live PPTH: %+v", res)
 		}
-		if got := applyRepairChanges(r, mount, snap, nil); len(got) != 0 {
-			t.Fatalf("repair did not refuse ANLZ with mismatched PPTH: %+v", got)
+		if cur, _ := os.ReadFile(env.dat1Path); !bytes.Equal(cur, foreign) {
+			t.Fatal("mismatched live PPTH DAT was modified")
 		}
 	})
 
-	t.Run("OnlyBrokenVariantSelectedAndSeparateFromOtherGridTarget", func(t *testing.T) {
-		mount := t.TempDir()
-		datRel := "PIONEER/USBANLZ/P001/ANLZ0000.DAT"
-		extRel := "PIONEER/USBANLZ/P001/ANLZ0000.EXT"
-		// Make EXT swapped while keeping DAT byte-identical to backup.
-		brokenEXT := append([]byte(nil), extRaw...)
+	t.Run("BackupPPTHMismatchRefused", func(t *testing.T) {
+		env := setupPhantomTestStick(t, nil)
+		testfixture.Write(t, env.root, env.dat1Rel, swapCompactDATCueOrder(t, env.origDAT))
+		foreignBak := rewritePPTHSection(t, env.origDAT, "/Contents/Foreign/OtherTrack.mp3")
+		testfixture.Write(t, env.root, filepath.ToSlash(filepath.Join(".enginex-backup", "2026-11-26", env.dat1Rel)), foreignBak)
+		refreshPhantomSnapStamp(t, env)
+
+		res, err := WriteBackCues(ctx, env.root, WriteBackOptions{})
+		if err != nil {
+			t.Fatalf("WriteBackCues: %v", err)
+		}
+		if res.TracksChanged != 0 || res.FilesUpdated != 0 {
+			t.Fatalf("repair did not refuse ANLZ with mismatched backup PPTH: %+v", res)
+		}
+	})
+
+	t.Run("OnlyBrokenVariantSelectedAndLiveGridMergedWithoutClobber", func(t *testing.T) {
+		env := setupPhantomTestStick(t, nil)
+		// Break ONLY EXT PCO2 order while leaving DAT byte-identical to backup.
+		brokenEXT := append([]byte(nil), env.origEXT...)
 		var pco2At []int
-		for pos := int(binary.BigEndian.Uint32(extRaw[4:])); pos+12 <= len(extRaw); {
-			if string(extRaw[pos:pos+4]) == "PCO2" {
+		for pos := int(binary.BigEndian.Uint32(env.origEXT[4:])); pos+12 <= len(env.origEXT); {
+			if string(env.origEXT[pos:pos+4]) == "PCO2" {
 				pco2At = append(pco2At, pos)
 			}
-			pos += int(binary.BigEndian.Uint32(extRaw[pos+8:]))
+			pos += int(binary.BigEndian.Uint32(env.origEXT[pos+8:]))
 		}
 		if len(pco2At) != 2 {
 			t.Fatalf("expected 2 PCO2 sections, got %d", len(pco2At))
 		}
 		binary.BigEndian.PutUint32(brokenEXT[pco2At[0]+12:], 0)
 		binary.BigEndian.PutUint32(brokenEXT[pco2At[1]+12:], 1)
+		testfixture.Write(t, env.root, env.ext1Rel, brokenEXT)
 
-		writeReviewFixtureFile(t, mount, datRel, raw)
-		writeReviewFixtureFile(t, mount, extRel, brokenEXT)
-		writeReviewFixtureFile(t, mount, ".enginex-backup/2000-01-01/"+datRel, raw)
-		writeReviewFixtureFile(t, mount, ".enginex-backup/2000-01-01/"+extRel, extRaw)
-
-		r, err := compat.NewResolver(mount)
+		// Also shift Track 1's live m.db beat grid on the same target (no cue change).
+		r, err := compat.NewResolver(env.root)
 		if err != nil {
 			t.Fatal(err)
 		}
-		tr := &rbstate.Track{
-			Key: "contents/fixturea/track01.mp3", Rel: "Contents/FixtureA/Track01.mp3", EngineID: 1, AnalysisPath: "/" + datRel,
+		offset, ok := trackRekordboxOffset(r, "Contents/FixtureA/Track01.mp3")
+		if !ok {
+			t.Fatal("missing audio offset")
 		}
-		snap := rbstate.New("review")
-		snap.Tracks[tr.Key] = tr
+		const sr = 44100.0
+		const step = 60.0 * sr / 132.0
+		defGrid := []struct {
+			pos      float64
+			idx      int64
+			numBeats uint32
+		}{
+			{pos: 0, idx: 0, numBeats: 8},
+			{pos: 8 * 20671.875, idx: 8, numBeats: 0},
+		}
+		adjGrid := []struct {
+			pos      float64
+			idx      int64
+			numBeats uint32
+		}{
+			{pos: 5000.0, idx: 0, numBeats: 8},
+			{pos: 5000.0 + 8*step, idx: 8, numBeats: 0},
+		}
+		beatBlob := buildEngineBeatDataBlob(sr, 650*sr, defGrid, adjGrid, true)
+		db, err := sql.Open("sqlite", filepath.Join(env.dbDir, "m.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE PerformanceData SET beatData=? WHERE trackId=1`, beatBlob); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE Track SET lastEditTime=lastEditTime+10 WHERE id=1`); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		_ = db.Close()
+		refreshPhantomSnapStamp(t, env)
 
-		// Seed an existing live grid edit on a DIFFERENT analysis path P002.
-		liveGrid := []trackChange{{
-			candidate: dbCandidate{key: tr.Key, engineID: 1, track: tr},
-			analysis:  "/PIONEER/USBANLZ/P002/ANLZ0000.DAT",
-			gridDiff:  true,
-			beats:     []rekordbox.Beat{{Number: 1, BPM: 128, TimeMS: 100}},
-		}}
-		got := applyRepairChanges(r, mount, snap, liveGrid)
-		if len(got) != 2 {
-			t.Fatalf("expected separate cue-repair change alongside live P002 grid change, got %d (%+v)", len(got), got)
+		wantBeats, _, err := decodeEngineBeatGrid(beatBlob, offset)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if got[0].analysis != "/PIONEER/USBANLZ/P002/ANLZ0000.DAT" || got[0].anlzCueRepair {
-			t.Fatalf("live grid change on P002 was polluted by P001 cue repair: %+v", got[0])
+
+		res, err := WriteBackCues(ctx, env.root, WriteBackOptions{})
+		if err != nil {
+			t.Fatalf("WriteBackCues: %v", err)
 		}
-		rep := got[1]
-		if rep.analysis != "/"+datRel || !rep.anlzCueRepair || rep.repairVariant[0] || !rep.repairVariant[1] {
-			t.Fatalf("unexpected per-variant repair plan (want DAT=false EXT=true): %+v", rep)
+		if res.TracksChanged != 1 || res.FilesUpdated != 3 { // DAT grid + EXT cue-repair+grid + exportLibrary.db grid
+			t.Fatalf("unexpected merged repair+grid result: %+v", res)
 		}
-		if !bytes.Equal(rep.restoreVariant[1], extRaw) {
-			t.Fatal("expected exact backup restoration bytes for clean-cues EXT variant")
+		gotDAT, err := os.ReadFile(env.dat1Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gotEXT, err := os.ReadFile(env.ext1Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rekordbox.ANLZNeedsCueRepair(gotEXT, true) {
+			t.Fatal("EXT still needs cue repair after merged grid+repair write")
+		}
+		// Only broken EXT cues + DAT/EXT grid sections changed; DAT cue sections remained untouched.
+		assertANLZNonTargetUnchanged(t, "merged DAT", env.origDAT, gotDAT, map[string]bool{"PQTZ": true})
+		assertANLZNonTargetUnchanged(t, "merged EXT", brokenEXT, gotEXT, map[string]bool{"PCOB": true, "PCO2": true, "PQT2": true})
+		if gotBeats := readANLZBeats(r, env.dat1Rel); !beatsEquivalent(gotBeats, wantBeats, 2.5, 0.05) {
+			t.Fatalf("merged repair clobbered live grid edit: got %+v want %+v", gotBeats, wantBeats)
 		}
 	})
 }
@@ -430,263 +479,6 @@ func setMDBQuickCues(t *testing.T, dbDir string, trackID int64, rbOffset float64
 		buildTestTrackDataBlob(44100, 650*44100), buildEngineQuickCuesBlob(slots), trackID); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func TestWriteBackPhantomCleanupContent76DBRowsWhenANLZAlreadyClean(t *testing.T) {
-	ctx := context.Background()
-	env := setupPhantomTestStick(t, nil)
-
-	// Content-76 leftover state: ANLZ pair is already clean empty layout matching backup,
-	// m.db has no cues, while exportLibrary.db still carries 8x23ms phantom rows + marks.
-	setMDBQuickCues(t, env.dbDir, 1, env.rbOffset, nil)
-	var eight []rekordbox.Cue
-	for pad := uint32(1); pad <= 8; pad++ {
-		eight = append(eight, rekordbox.Cue{HotCue: pad, TimeMS: 23, Name: fmt.Sprintf("Cue %d", pad), ColorCode: byte(pad)})
-	}
-	insertOneLibCues(t, env.onePath, 1, 1, sql.NullInt64{Int64: 1, Valid: true}, sql.NullInt64{}, eight)
-	refreshPhantomSnapStamp(t, env)
-
-	res, err := WriteBackCues(ctx, env.root, WriteBackOptions{})
-	if err != nil {
-		t.Fatalf("WriteBackCues: %v", err)
-	}
-	if res.FilesUpdated != 1 || !res.OneLibraryUpdated {
-		t.Fatalf("expected only exportLibrary.db updated (1 file), got %+v", res)
-	}
-	if cur, _ := os.ReadFile(env.dat1Path); !bytes.Equal(cur, env.origDAT) {
-		t.Fatal("clean DAT was unexpectedly modified")
-	}
-	if cur, _ := os.ReadFile(env.ext1Path); !bytes.Equal(cur, env.origEXT) {
-		t.Fatal("clean EXT was unexpectedly modified")
-	}
-
-	oneDB, err := sql.Open("sqlite", env.onePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cnt, mod int
-	var upd sql.NullInt64
-	if err := oneDB.QueryRow(`SELECT (SELECT count(*) FROM cue WHERE content_id=1), COALESCE(hasModified,0), cueUpdateCount FROM content WHERE content_id=1`).Scan(&cnt, &mod, &upd); err != nil {
-		_ = oneDB.Close()
-		t.Fatal(err)
-	}
-	_ = oneDB.Close()
-	if cnt != 0 || mod != 0 || upd.Valid {
-		t.Fatalf("DB marks/rows not cleared: cues=%d hasModified=%d cueUpdateCount=%v", cnt, mod, upd)
-	}
-
-	// NOTE 8 check: second pass sees RepairStamp match and skips readLibraries completely.
-	readCalls := 0
-	writeBackReadLibsHook = func() { readCalls++ }
-	defer func() { writeBackReadLibsHook = nil }()
-	res2, err := WriteBackCues(ctx, env.root, WriteBackOptions{})
-	if err != nil || res2.FilesUpdated != 0 || res2.TracksChanged != 0 || readCalls != 0 {
-		t.Fatalf("expected 0-read / 0-write post-repair pass, got res=%+v readCalls=%d err=%v", res2, readCalls, err)
-	}
-}
-
-func TestWriteBackPhantomCleanupFullSetAcrossANLZOneLibAndMDB(t *testing.T) {
-	ctx := context.Background()
-	env := setupPhantomTestStick(t, nil)
-
-	var eight []rekordbox.Cue
-	mdbPads := map[int]uint32{}
-	for pad := 0; pad < 8; pad++ {
-		eight = append(eight, rekordbox.Cue{HotCue: uint32(pad + 1), TimeMS: 23, Name: fmt.Sprintf("Cue %d", pad+1), ColorCode: byte(pad + 1)})
-		mdbPads[pad] = 23
-	}
-	brokenDAT, brokenEXT := makeSwappedPairFromCues(t, env.origDAT, env.origEXT, eight)
-	testfixture.Write(t, env.root, env.dat1Rel, brokenDAT)
-	testfixture.Write(t, env.root, env.ext1Rel, brokenEXT)
-	insertOneLibCues(t, env.onePath, 1, 1, sql.NullInt64{Int64: 1, Valid: true}, sql.NullInt64{}, eight)
-	setMDBQuickCues(t, env.dbDir, 1, env.rbOffset, mdbPads)
-	refreshPhantomSnapStamp(t, env)
-
-	res, err := WriteBackCues(ctx, env.root, WriteBackOptions{})
-	if err != nil {
-		t.Fatalf("WriteBackCues: %v", err)
-	}
-	if !res.OneLibraryUpdated || res.FilesUpdated != 3 {
-		t.Fatalf("expected 3 updated files (DAT, EXT, exportLibrary.db), got %+v", res)
-	}
-	if cur, _ := os.ReadFile(env.dat1Path); !bytes.Equal(cur, env.origDAT) {
-		t.Fatal("DAT not restored to clean original")
-	}
-	if cur, _ := os.ReadFile(env.ext1Path); !bytes.Equal(cur, env.origEXT) {
-		t.Fatal("EXT not restored to clean original")
-	}
-	oneDB, _ := sql.Open("sqlite", env.onePath)
-	var cnt, mod int
-	var upd sql.NullInt64
-	if err := oneDB.QueryRow(`SELECT (SELECT count(*) FROM cue WHERE content_id=1), COALESCE(hasModified,0), cueUpdateCount FROM content WHERE content_id=1`).Scan(&cnt, &mod, &upd); err != nil {
-		_ = oneDB.Close()
-		t.Fatal(err)
-	}
-	_ = oneDB.Close()
-	if cnt != 0 || mod != 0 || upd.Valid {
-		t.Fatalf("OneLibrary not cleaned: cnt=%d mod=%d upd=%v", cnt, mod, upd)
-	}
-	mDB, _ := sql.Open("sqlite", filepath.Join(env.dbDir, "m.db"))
-	var td, qc, lp []byte
-	var al int64
-	if err := mDB.QueryRow(`SELECT trackData, quickCues, loops, COALESCE(activeOnLoadLoops,0) FROM PerformanceData WHERE trackId=1`).Scan(&td, &qc, &lp, &al); err != nil {
-		_ = mDB.Close()
-		t.Fatal(err)
-	}
-	_ = mDB.Close()
-	deck, err := enginedb.ParseDeckCuesAndLoops(td, qc, lp, al)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for s, hc := range deck.HotCues {
-		if hc != nil {
-			t.Fatalf("expected m.db phantom slot %d cleared, still set to %+v", s, hc)
-		}
-	}
-}
-
-func TestWriteBackPhantomCleanupPartialSetKeepingRealCue(t *testing.T) {
-	ctx := context.Background()
-	origReal := []rekordbox.Cue{{HotCue: 1, TimeMS: 10000}}
-	env := setupPhantomTestStick(t, origReal)
-
-	partial := []rekordbox.Cue{{HotCue: 1, TimeMS: 10000}}
-	mdbPads := map[int]uint32{0: 10000}
-	for pad := 1; pad < 8; pad++ {
-		partial = append(partial, rekordbox.Cue{HotCue: uint32(pad + 1), TimeMS: 23})
-		mdbPads[pad] = 23
-	}
-	brokenDAT, brokenEXT := makeSwappedPairFromCues(t, env.origDAT, env.origEXT, partial)
-	testfixture.Write(t, env.root, env.dat1Rel, brokenDAT)
-	testfixture.Write(t, env.root, env.ext1Rel, brokenEXT)
-	insertOneLibCues(t, env.onePath, 1, 1, sql.NullInt64{Int64: 1, Valid: true}, sql.NullInt64{}, partial)
-	setMDBQuickCues(t, env.dbDir, 1, env.rbOffset, mdbPads)
-	refreshPhantomSnapStamp(t, env)
-
-	res, err := WriteBackCues(ctx, env.root, WriteBackOptions{})
-	if err != nil {
-		t.Fatalf("WriteBackCues: %v", err)
-	}
-	if !res.OneLibraryUpdated {
-		t.Fatalf("expected OneLibrary updated, got %+v", res)
-	}
-	r, _ := compat.NewResolver(env.root)
-	gotANLZ := readANLZCues(r, env.dat1Rel)
-	if len(gotANLZ) != 1 || gotANLZ[0].HotCue != 1 || gotANLZ[0].TimeMS != 10000 {
-		t.Fatalf("expected real 10000ms Hot Cue 1 kept in ANLZ, got %+v", gotANLZ)
-	}
-	lib, err := rekordbox.ReadSQLiteWhole(context.Background(), env.onePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(lib.Tracks) == 0 || len(lib.Tracks[0].Cues) != 1 || lib.Tracks[0].Cues[0].HotCue != 1 || lib.Tracks[0].Cues[0].TimeMS != 10000 {
-		t.Fatalf("expected real 10000ms Hot Cue 1 kept in OneLibrary, got %+v", lib.Tracks[0].Cues)
-	}
-	// Restored back to original cue set -> DB marks also reset cleanly.
-	oneDB, _ := sql.Open("sqlite", env.onePath)
-	var mod int
-	var upd sql.NullInt64
-	_ = oneDB.QueryRow(`SELECT COALESCE(hasModified,0), cueUpdateCount FROM content WHERE content_id=1`).Scan(&mod, &upd)
-	_ = oneDB.Close()
-	if mod != 0 || upd.Valid {
-		t.Fatalf("expected restored original cue track marks reset, got mod=%d upd=%v", mod, upd)
-	}
-	mDB, _ := sql.Open("sqlite", filepath.Join(env.dbDir, "m.db"))
-	var td, qc, lp []byte
-	var al int64
-	_ = mDB.QueryRow(`SELECT trackData, quickCues, loops, COALESCE(activeOnLoadLoops,0) FROM PerformanceData WHERE trackId=1`).Scan(&td, &qc, &lp, &al)
-	_ = mDB.Close()
-	deck, _ := enginedb.ParseDeckCuesAndLoops(td, qc, lp, al)
-	if deck.HotCues[0] == nil {
-		t.Fatal("real Hot Cue 1 cleared from m.db")
-	}
-	for s := 1; s < 8; s++ {
-		if deck.HotCues[s] != nil {
-			t.Fatalf("phantom slot %d remained in m.db", s)
-		}
-	}
-}
-
-func TestWriteBackPhantomCleanupKeepsSingleCueAtStart(t *testing.T) {
-	ctx := context.Background()
-	single := []rekordbox.Cue{{HotCue: 1, TimeMS: 23}}
-	env := setupPhantomTestStick(t, single)
-
-	brokenDAT, brokenEXT := makeSwappedPairFromCues(t, env.origDAT, env.origEXT, single)
-	testfixture.Write(t, env.root, env.dat1Rel, brokenDAT)
-	testfixture.Write(t, env.root, env.ext1Rel, brokenEXT)
-	insertOneLibCues(t, env.onePath, 1, 1, sql.NullInt64{Int64: 1, Valid: true}, sql.NullInt64{}, single)
-	setMDBQuickCues(t, env.dbDir, 1, env.rbOffset, map[int]uint32{0: 23})
-	refreshPhantomSnapStamp(t, env)
-
-	if _, err := WriteBackCues(ctx, env.root, WriteBackOptions{}); err != nil {
-		t.Fatalf("WriteBackCues: %v", err)
-	}
-	r, _ := compat.NewResolver(env.root)
-	gotANLZ := readANLZCues(r, env.dat1Rel)
-	if len(gotANLZ) != 1 || gotANLZ[0].HotCue != 1 || gotANLZ[0].TimeMS != 23 {
-		t.Fatalf("single cue at start (23ms) must stay, got %+v", gotANLZ)
-	}
-	lib, err := rekordbox.ReadSQLiteWhole(context.Background(), env.onePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(lib.Tracks[0].Cues) != 1 || lib.Tracks[0].Cues[0].TimeMS != 23 {
-		t.Fatalf("single cue at start dropped from OneLibrary: %+v", lib.Tracks[0].Cues)
-	}
-}
-
-func TestWriteBackPhantomCleanupNeverRemovesMDBCueAtAnotherTime(t *testing.T) {
-	ctx := context.Background()
-	t.Run("WithMDBTruth", func(t *testing.T) {
-		env := setupPhantomTestStick(t, nil)
-		// ANLZ holds r1 off-by-one shifted cue on Pad 2 (45000ms) + phantoms on Pads 3..8 at 23ms,
-		// while m.db holds the real Hot Cue 1 at 45000ms.
-		anlzBroken := []rekordbox.Cue{{HotCue: 2, TimeMS: 45000}}
-		mdbPads := map[int]uint32{0: 45000}
-		for pad := 3; pad <= 8; pad++ {
-			anlzBroken = append(anlzBroken, rekordbox.Cue{HotCue: uint32(pad), TimeMS: 23})
-			mdbPads[pad-1] = 23
-		}
-		brokenDAT, brokenEXT := makeSwappedPairFromCues(t, env.origDAT, env.origEXT, anlzBroken)
-		testfixture.Write(t, env.root, env.dat1Rel, brokenDAT)
-		testfixture.Write(t, env.root, env.ext1Rel, brokenEXT)
-		insertOneLibCues(t, env.onePath, 1, 1, sql.NullInt64{Int64: 1, Valid: true}, sql.NullInt64{}, anlzBroken)
-		setMDBQuickCues(t, env.dbDir, 1, env.rbOffset, mdbPads)
-		refreshPhantomSnapStamp(t, env)
-
-		if _, err := WriteBackCues(ctx, env.root, WriteBackOptions{}); err != nil {
-			t.Fatalf("WriteBackCues: %v", err)
-		}
-		r, _ := compat.NewResolver(env.root)
-		gotANLZ := readANLZCues(r, env.dat1Rel)
-		if len(gotANLZ) != 1 || gotANLZ[0].HotCue != 1 || gotANLZ[0].TimeMS != 45000 {
-			t.Fatalf("expected shifted Pad 2 fixed to real m.db Pad 1 @ 45000ms without losing cue, got %+v", gotANLZ)
-		}
-	})
-
-	t.Run("WithoutMDBTruthFixesLayoutAndLeavesCueValues", func(t *testing.T) {
-		env := setupPhantomTestStick(t, nil)
-		// No trackData in m.db -> repair removes phantoms and fixes layout, leaving the real 45000ms cue untouched.
-		db, _ := sql.Open("sqlite", filepath.Join(env.dbDir, "m.db"))
-		_, _ = db.Exec(`UPDATE PerformanceData SET trackData=NULL WHERE trackId=1`)
-		_ = db.Close()
-		anlzBroken := []rekordbox.Cue{{HotCue: 2, TimeMS: 45000}, {HotCue: 3, TimeMS: 23}, {HotCue: 4, TimeMS: 23}}
-		brokenDAT, brokenEXT := makeSwappedPairFromCues(t, env.origDAT, env.origEXT, anlzBroken)
-		testfixture.Write(t, env.root, env.dat1Rel, brokenDAT)
-		testfixture.Write(t, env.root, env.ext1Rel, brokenEXT)
-		insertOneLibCues(t, env.onePath, 1, 1, sql.NullInt64{Int64: 1, Valid: true}, sql.NullInt64{}, anlzBroken)
-		refreshPhantomSnapStamp(t, env)
-
-		if _, err := WriteBackCues(ctx, env.root, WriteBackOptions{}); err != nil {
-			t.Fatalf("WriteBackCues: %v", err)
-		}
-		r, _ := compat.NewResolver(env.root)
-		gotANLZ := readANLZCues(r, env.dat1Rel)
-		if len(gotANLZ) != 1 || gotANLZ[0].HotCue != 2 || gotANLZ[0].TimeMS != 45000 {
-			t.Fatalf("without m.db truth, expected layout repaired and Pad 2 @ 45000ms left intact, got %+v", gotANLZ)
-		}
-	})
 }
 
 func TestWriteBackOneLibraryMinimalCuePredicateKillsMutation(t *testing.T) {
