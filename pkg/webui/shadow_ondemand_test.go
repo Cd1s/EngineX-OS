@@ -374,8 +374,9 @@ func TestShadowOnDemandEvictsInMusicTempTwoDecksAndRebuiltLibrary(t *testing.T) 
 		t.Fatalf("inMusicTempFiles unload left %d cache entries, want 0", afterUnload)
 	}
 
-	// Reload on Deck 2, populate cache, then simulate a rebuilt stick m.db (new mtime):
-	// next peer fetch must invalidate and rebuild instead of serving stale data.
+	// Reload on Deck 2, populate cache, then simulate an ordinary Engine m.db
+	// update (same inode, same Information.uuid, same track row): must NOT
+	// invalidate the cache (FIX 3).
 	postDeck(`[{"deck":2,"net":` + strconv.Quote(netUSB) + `,"bpm":120}]`)
 	k2 = getPeerKey(2)
 	fetchNative(2, k2)
@@ -386,21 +387,38 @@ func TestShadowOnDemandEvictsInMusicTempTwoDecksAndRebuiltLibrary(t *testing.T) 
 	future := time.Now().Add(3 * time.Second)
 	_ = os.Chtimes(mdb, future, future)
 	fetchNative(2, k2)
+	if got := s.rbOnDemandBuildCount.Load(); got != 2 {
+		t.Fatalf("build count after ordinary m.db mtime update = %d, want 2 (no invalidation)", got)
+	}
+	// A real library replacement (new m.db inode via atomic rewrite) MUST invalidate and rebuild.
+	mdbBytes, err := os.ReadFile(mdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mdb+".rebuilt", mdbBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(mdb+".rebuilt", mdb); err != nil {
+		t.Fatal(err)
+	}
+	fetchNative(2, k2)
 	if got := s.rbOnDemandBuildCount.Load(); got != 3 {
-		t.Fatalf("build count after library rebuild = %d, want 3", got)
+		t.Fatalf("build count after replaced m.db inode = %d, want 3", got)
 	}
 
-	// Mid-flight unload cancels any active flight and advances evictGen so a
-	// completing build cannot repopulate the cache after unload.
-	key := onDemandCacheKey(stick, "../"+relPath)
+	// Mid-flight unload cancels any active flight and marks it evicted so a
+	// completing build cannot repopulate the cache after unload (without
+	// growing any unbounded eviction-generation map).
+	trackKey := onDemandCacheKey(stick, "../"+relPath)
 	fCtx, fCancel := context.WithCancel(context.Background())
 	defer fCancel()
+	fakeID := onDemandVerifiedID{mount: stick, trackRel: relPath}
+	flight := &rbOnDemandFlight{done: make(chan struct{}), cancel: fCancel, waiters: 1, trackKey: trackKey}
 	s.rbOnDemandCacheMu.Lock()
 	if s.rbOnDemandFlights == nil {
-		s.rbOnDemandFlights = map[string]*rbOnDemandFlight{}
+		s.rbOnDemandFlights = map[onDemandVerifiedID]*rbOnDemandFlight{}
 	}
-	prevEpoch := s.rbOnDemandEvictGen[key]
-	s.rbOnDemandFlights[key] = &rbOnDemandFlight{done: make(chan struct{}), cancel: fCancel, waiters: 1, epoch: prevEpoch}
+	s.rbOnDemandFlights[fakeID] = flight
 	s.rbOnDemandCacheMu.Unlock()
 	s.evictOnDemandCacheForPath(stickAudio)
 	select {
@@ -409,9 +427,9 @@ func TestShadowOnDemandEvictsInMusicTempTwoDecksAndRebuiltLibrary(t *testing.T) 
 		t.Fatal("evictOnDemandCacheForPath did not cancel active in-flight build")
 	}
 	s.rbOnDemandCacheMu.Lock()
-	if s.rbOnDemandFlights[key] != nil || s.rbOnDemandEvictGen[key] != prevEpoch+1 {
+	if s.rbOnDemandFlights[fakeID] != nil || !flight.evicted {
 		s.rbOnDemandCacheMu.Unlock()
-		t.Fatalf("mid-flight eviction did not clear flight or advance epoch")
+		t.Fatalf("mid-flight eviction did not clear flight or mark evicted")
 	}
 	s.rbOnDemandCacheMu.Unlock()
 }

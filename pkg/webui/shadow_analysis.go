@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
@@ -17,6 +18,16 @@ import (
 
 const shadowAnalysisMagic = "RBXA1" // Same five PerformanceData blobs as the rekordbox bind hook.
 const shadowAnalysisMax = 8 << 20
+const shadowPerfFormatsHeader = "X-EngineX-Perf-Formats"
+
+func peerAdvertisesFormat(header, want string) bool {
+	for _, part := range strings.Split(header, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), want) {
+			return true
+		}
+	}
+	return false
+}
 
 func encodeShadowAnalysis(p enginedb.Performance) ([]byte, error) {
 	// Ensure native shadow blobs carry non-zero overview band maxima and 5.3.0
@@ -88,34 +99,45 @@ func validShadowAnalysis(b []byte) bool {
 	return err == nil && len(p.Beats) != 0
 }
 
-// Publish only a complete file, before shadowFetch publishes the audio path.
-// Older peers ignore format=native and return EXPF; it never becomes a sidecar.
-// The result says why there is none ("" when there is one), for the log.
-func saveShadowAnalysis(ctx context.Context, local, url string) string {
-	out := local + ".analysis"
-	_ = os.Remove(out)
-	var b []byte
+// fetchNativeAnalysisPending fetches a validated native RBXA1 payload before a
+// player publishes a shadow copy. Transient failures (503, 5xx, timeouts, broken
+// connections) retry up to perfRetries and stay pending if exhausted. An older
+// EXPF-only peer is accepted only through explicit capability absence (no
+// X-EngineX-Perf-Formats header advertising native AND a valid EXPF response).
+func fetchNativeAnalysisPending(ctx context.Context, url string) (b []byte, olderEXPFOnly bool, pending bool, why string) {
 	for try := 0; ; try++ {
 		reqCtx, cancel := context.WithTimeout(ctx, perfRequestTimeout)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 		if err != nil {
 			cancel()
-			return "no request"
+			return nil, false, false, "no request"
 		}
 		resp, err := peerFileClient.Do(req)
 		if err != nil {
 			cancel()
-			return "no answer"
-		}
-		if resp.StatusCode == http.StatusServiceUnavailable {
-			resp.Body.Close()
-			cancel()
+			why = "no answer"
 			if try+1 >= perfRetries {
-				return "http 503"
+				return nil, false, true, why
 			}
 			select {
 			case <-ctx.Done():
-				return "no answer"
+				return nil, false, true, "no answer"
+			case <-time.After(perfRetryWait):
+				continue
+			}
+		}
+		formats := resp.Header.Get(shadowPerfFormatsHeader)
+		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode >= 500 {
+			code := resp.StatusCode
+			resp.Body.Close()
+			cancel()
+			why = "http " + strconv.Itoa(code)
+			if try+1 >= perfRetries {
+				return nil, false, true, why
+			}
+			select {
+			case <-ctx.Done():
+				return nil, false, true, "no answer"
 			case <-time.After(perfRetryWait):
 				continue
 			}
@@ -124,31 +146,73 @@ func saveShadowAnalysis(ctx context.Context, local, url string) string {
 			code := resp.StatusCode
 			resp.Body.Close()
 			cancel()
-			return "http " + strconv.Itoa(code)
+			return nil, false, false, "http " + strconv.Itoa(code)
 		}
 		if resp.ContentLength > shadowAnalysisMax {
 			resp.Body.Close()
 			cancel()
-			return "too large"
+			return nil, false, false, "too large"
 		}
 		b, err = io.ReadAll(io.LimitReader(resp.Body, shadowAnalysisMax+1))
 		resp.Body.Close()
 		cancel()
 		if err != nil {
-			return "cut off"
+			why = "cut off"
+			if try+1 >= perfRetries {
+				return nil, false, true, why
+			}
+			select {
+			case <-ctx.Done():
+				return nil, false, true, "no answer"
+			case <-time.After(perfRetryWait):
+				continue
+			}
 		}
-		break
+		if validShadowAnalysis(b) {
+			return b, false, false, ""
+		}
+		if validPerf(b) && formats == "" {
+			return nil, true, false, "not a native analysis"
+		}
+		return nil, false, false, "not a native analysis"
 	}
+}
+
+func writeShadowAnalysis(local string, b []byte) error {
+	out := local + ".analysis"
 	if !validShadowAnalysis(b) {
-		return "not a native analysis"
+		_ = os.Remove(out)
+		return errors.New("not a native analysis")
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(local), ".analysis-*")
 	if err != nil {
-		return "not written"
+		return err
 	}
 	defer os.Remove(tmp.Name())
 	_, err = tmp.Write(b)
-	if closeErr := tmp.Close(); err != nil || closeErr != nil || os.Rename(tmp.Name(), out) != nil {
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), out)
+}
+
+// Publish only a complete file, before shadowFetch publishes the audio path.
+// Older peers ignore format=native and return EXPF; it never becomes a sidecar.
+// The result says why there is none ("" when there is one), for the log.
+func saveShadowAnalysis(ctx context.Context, local, url string) string {
+	out := local + ".analysis"
+	_ = os.Remove(out)
+	b, _, _, why := fetchNativeAnalysisPending(ctx, url)
+	if why != "" {
+		return why
+	}
+	if err := writeShadowAnalysis(local, b); err != nil {
 		return "not written"
 	}
 	return ""

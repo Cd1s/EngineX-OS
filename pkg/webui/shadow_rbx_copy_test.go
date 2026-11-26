@@ -24,6 +24,7 @@ func TestShadowCopyWaitsForTheSourcesAnalysis(t *testing.T) {
 	defer func() { perfRetryWait, perfRetries = oldWait, oldTries }()
 	var mu sync.Mutex
 	audio, pending := 0, true
+	valid := validTestEXPF(128)
 	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -36,7 +37,7 @@ func TestShadowCopyWaitsForTheSourcesAnalysis(t *testing.T) {
 		case r.URL.Query().Get("format") == "native":
 			http.Error(w, "not analysed", http.StatusNotFound)
 		default:
-			w.Write([]byte("EXPF"))
+			w.Write(valid)
 		}
 	}))
 	defer src.Close()
@@ -81,12 +82,13 @@ func TestShadowCopyWaitsForTheSourcesAnalysis(t *testing.T) {
 	mu.Lock()
 	n = audio
 	mu.Unlock()
-	if f == "" || string(got) != "EXPF" || n != 1 {
-		t.Fatalf("copy %q perf %q after %d downloads", f, got, n)
+	if f == "" || !bytes.Equal(got, valid) || n != 1 {
+		t.Fatalf("copy %q perf %d bytes after %d downloads", f, len(got), n)
 	}
 }
 
-// The log says how each copy got its analysis, and which answer left one without.
+// The log says how each copy got its analysis, and refuses to publish when
+// the source has no playable analysis (404).
 func TestShadowCopyLogsHowItWasAnalysed(t *testing.T) {
 	var mu sync.Mutex
 	var out bytes.Buffer // written by the copies' goroutines
@@ -96,6 +98,7 @@ func TestShadowCopyLogsHowItWasAnalysed(t *testing.T) {
 		return out.Write(p)
 	}))
 	defer log.SetOutput(os.Stderr)
+	valid := validTestEXPF(128)
 	analysed := false
 	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -104,7 +107,7 @@ func TestShadowCopyLogsHowItWasAnalysed(t *testing.T) {
 		case r.URL.Path == "/peer/decks/1/audio":
 			w.Write([]byte("AUDIO"))
 		case analysed:
-			w.Write([]byte("EXPF"))
+			w.Write(valid)
 		default:
 			http.Error(w, "not analysed", http.StatusNotFound)
 		}
@@ -114,31 +117,39 @@ func TestShadowCopyLogsHowItWasAnalysed(t *testing.T) {
 	defer s.Close()
 	u, _ := url.Parse(src.URL)
 	s.shadow.peerPort, _ = strconv.Atoi(u.Port())
-	copyOf := func(key string) {
+	copyOf := func(key string) (string, string) {
 		s.shadow.mu.Lock()
 		s.shadowFetchPeer(key, peerDeck{deckState: deckState{Deck: 1, Key: key, Ext: ".m4a", Name: "Song.m4a"}, ip: "127.0.0.1"})
 		s.shadow.mu.Unlock()
 		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
 			s.shadow.mu.Lock()
-			f := s.shadow.files[key]
+			f, busy := s.shadow.files[key], s.shadow.busy[key]
+			var cerr string
+			if cp := s.shadow.copies[key]; cp != nil {
+				cerr = cp.err
+			}
 			s.shadow.mu.Unlock()
-			if f != "" {
-				return
+			if !busy {
+				return f, cerr
 			}
 		}
 		t.Fatal("copy never finished")
+		return "", ""
 	}
-	copyOf("bare")
+	if f, cerr := copyOf("bare"); f != "" || cerr != "no analysis" {
+		t.Fatalf("unanalysed copy: file=%q err=%q, want empty file and \"no analysis\"", f, cerr)
+	}
 	mu.Lock()
 	analysed = true
 	mu.Unlock()
-	copyOf("replayed")
+	if f, cerr := copyOf("replayed"); f == "" || cerr != "" {
+		t.Fatalf("analysed copy: file=%q err=%q", f, cerr)
+	}
 	mu.Lock()
 	got := out.String()
 	mu.Unlock()
 	for _, want := range []string{
 		"shadow: the source gave no analysis (http 404)",
-		`shadow: copy bare "Song.m4a" analysis replay=false fill=false (not a player)`,
 		`shadow: copy replayed "Song.m4a" analysis replay=true fill=false (not a player)`,
 	} {
 		if !strings.Contains(got, want) {

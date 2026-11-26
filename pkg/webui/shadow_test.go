@@ -169,6 +169,7 @@ func TestShadowPerfFromPeer(t *testing.T) {
 	_, root, src := testlibrary.Create(t)
 	os.MkdirAll(filepath.Join(root, "Contents"), 0o755)
 	os.WriteFile(filepath.Join(root, "Contents", "it's.mp3"), []byte("AUDIO"), 0o644)
+	os.WriteFile(filepath.Join(root, "plain.mp3"), []byte("AUDIO"), 0o644)
 	os.WriteFile(filepath.Join(root, "Contents", "raw.mp3"), []byte("AUDIO"), 0o644)
 	// A 5.0.4-style 44-byte trackData (zero peaks) and a one-entry overview.
 	track := bytes.Repeat([]byte{0}, 44)
@@ -176,10 +177,10 @@ func TestShadowPerfFromPeer(t *testing.T) {
 	overview := append(bytes.Repeat([]byte{0}, 24), 100, 50, 25, 7, 7, 7)
 	beats := []byte("GRID")
 	qc := func(b []byte) []byte { c, _ := enginedb.QCompress(b); return c }
-	if _, err := src.Exec(`INSERT INTO Track (path, filename, bpmAnalyzed, isAnalyzed) VALUES ('../Contents/it''s.mp3', 'it''s.mp3', 130.5, 1), ('../Contents/raw.mp3', 'raw.mp3', 120, 0)`); err != nil {
+	if _, err := src.Exec(`INSERT INTO Track (path, filename, bpmAnalyzed, isAnalyzed) VALUES ('../Contents/it''s.mp3', 'it''s.mp3', 130.5, 1), ('../plain.mp3', 'plain.mp3', 124.0, 1), ('../Contents/raw.mp3', 'raw.mp3', 120, 0)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := src.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=? WHERE trackId=(SELECT min(id) FROM Track)`, qc(track), qc(overview), qc(beats)); err != nil {
+	if _, err := src.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=? WHERE trackId IN (SELECT id FROM Track WHERE isAnalyzed=1)`, qc(track), qc(overview), qc(beats)); err != nil {
 		t.Fatal(err)
 	}
 	as := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
@@ -187,12 +188,12 @@ func TestShadowPerfFromPeer(t *testing.T) {
 	a := httptest.NewServer(as)
 	defer a.Close()
 	vol := filepath.Base(root)
-	body := `[{"deck":2,"net":"net://u/` + vol + `/Contents/it's.mp3","playing":true},{"deck":4,"net":"net://u/` + vol + `/Contents/raw.mp3"}]`
+	body := `[{"deck":2,"net":"net://u/` + vol + `/Contents/it's.mp3","playing":true},{"deck":3,"net":"net://u/` + vol + `/plain.mp3"},{"deck":4,"net":"net://u/` + vol + `/Contents/raw.mp3"}]`
 	if resp, err := http.Post(a.URL+"/v1/enginex/decks", "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
 		t.Fatalf("post: %v %v", resp, err)
 	}
 	as.shadow.mu.Lock()
-	key, rawKey := as.shadow.own[0].Key, as.shadow.own[1].Key
+	key, plainKey, rawKey := as.shadow.own[0].Key, as.shadow.own[1].Key, as.shadow.own[2].Key
 	as.shadow.mu.Unlock()
 	if r, _ := http.Get(a.URL + "/peer/decks/2/perf?key=wrong"); r.StatusCode != http.StatusConflict {
 		t.Fatalf("wrong key served: %d", r.StatusCode)
@@ -239,13 +240,28 @@ func TestShadowPerfFromPeer(t *testing.T) {
 	if !bytes.Equal(got, want.Bytes()) || len(peaks) != 68 {
 		t.Fatalf("perf %x\nwant %x", got, want.Bytes())
 	}
-	// An unanalysed source track: no .perf, so Engine analyses the copy.
-	raw := fetched(peerDeck{deckState: deckState{Deck: 4, Key: rawKey, Ext: ".mp3", Name: "raw.mp3"}, ip: "127.0.0.1"})
-	if filepath.Base(filepath.Dir(raw)) == "Contents" {
-		t.Fatalf("copy of a track outside an export under Contents/: %s", raw)
+	plain := fetched(peerDeck{deckState: deckState{Deck: 3, Key: plainKey, Ext: ".mp3", Name: "plain.mp3"}, ip: "127.0.0.1"})
+	if filepath.Base(filepath.Dir(plain)) == "Contents" {
+		t.Fatalf("copy of a track outside an export under Contents/: %s", plain)
 	}
-	if _, err := os.Stat(raw + ".perf"); !os.IsNotExist(err) {
-		t.Fatalf("perf for an unanalysed track: %v", err)
+	// An unanalysed source track must NOT be published bare for OfflineAnalyzer.
+	rawDeck := peerDeck{deckState: deckState{Deck: 4, Key: rawKey, Ext: ".mp3", Name: "raw.mp3"}, ip: "127.0.0.1"}
+	bs.shadow.mu.Lock()
+	bs.shadowFetchPeer("peer:"+rawKey, rawDeck)
+	bs.shadow.mu.Unlock()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		bs.shadow.mu.Lock()
+		busy, gotPath, cp := bs.shadow.busy["peer:"+rawKey], bs.shadow.files["peer:"+rawKey], bs.shadow.copies["peer:"+rawKey]
+		bs.shadow.mu.Unlock()
+		if !busy {
+			if gotPath != "" {
+				t.Fatalf("unanalysed track was published bare: %s", gotPath)
+			}
+			if cp == nil || cp.err != "no analysis" {
+				t.Fatalf("unanalysed copy err=%v, want \"no analysis\"", cp)
+			}
+			break
+		}
 	}
 }
 

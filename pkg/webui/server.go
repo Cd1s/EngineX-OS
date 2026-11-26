@@ -117,9 +117,9 @@ type Server struct {
 	rbOnDemandSock       string
 	rbOnDemandWG         sync.WaitGroup
 	rbOnDemandCacheMu    sync.Mutex
-	rbOnDemandCache      map[string]*rbOnDemandCacheEntry
-	rbOnDemandFlights    map[string]*rbOnDemandFlight
-	rbOnDemandEvictGen   map[string]uint64
+	rbOnDemandCache      map[onDemandVerifiedID]*rbOnDemandCacheEntry
+	rbOnDemandFlights    map[onDemandVerifiedID]*rbOnDemandFlight
+	rbOnDemandDBMeta     map[rbOnDemandDBKey]*rbOnDemandDBSnap
 	rbOnDemandBuildCount atomic.Int64
 
 	mu            sync.Mutex

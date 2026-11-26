@@ -99,7 +99,12 @@ func TestShadowCopyAudioLimit(t *testing.T) {
 }
 
 func TestShadowPeerRejectsOversizedAudio(t *testing.T) {
+	valid := validTestEXPF(128)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/peer/decks/2/perf" {
+			_, _ = w.Write(valid)
+			return
+		}
 		w.Header().Set("Content-Length", "1073741825")
 		fmt.Fprint(w, "tiny")
 	}))

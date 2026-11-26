@@ -93,13 +93,44 @@ type OnDemandResult struct {
 	Timing        OnDemandTiming // per-stage latency breakdown
 }
 
+// OnDemandFileID pins a regular file inside a mounted volume by device, inode, size, and mtime.
+type OnDemandFileID struct {
+	Present bool
+	Dev     uint64
+	Ino     uint64
+	Size    int64
+	ModNS   int64
+}
+
+// OnDemandStickIdentity pins the mounted volume, bridge snapshot generation, live m.db file,
+// Device Library exports, audio file, ANLZ sidecars, and resolved track entry.
+type OnDemandStickIdentity struct {
+	Mount        string
+	MountDev     uint64
+	MountMntID   uint64
+	MountIno     uint64
+	SnapshotUUID string
+	SnapFile     OnDemandFileID
+	DBFile       OnDemandFileID
+	ExportDB     OnDemandFileID
+	ExportPDB    OnDemandFileID
+	AudioFile    OnDemandFileID
+	ANLZFiles    [3]OnDemandFileID
+	TrackKey     string
+	TrackRel     string
+	EngineID     int64
+	RowHash      string
+}
+
 type pinnedMountKey struct {
 	mount string
 	dev   uint64
 	mntID uint64
+	ino   uint64
 }
 
 type cachedOnDemandSnapshot struct {
+	ino   uint64
 	size  int64
 	mtime time.Time
 	snap  *rbstate.Snapshot
@@ -216,19 +247,19 @@ func fdMntID(fd int) (uint64, bool) {
 	return 0, false
 }
 
-func statFDIdentity(fd int) (uint64, uint64, error) {
+func statFDIdentity(fd int) (uint64, uint64, uint64, error) {
 	var stx unix.Statx_t
 	if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH|unix.AT_SYMLINK_NOFOLLOW, unix.STATX_BASIC_STATS|unix.STATX_MNT_ID, &stx); err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	dev := unix.Mkdev(stx.Dev_major, stx.Dev_minor)
 	if stx.Mask&unix.STATX_MNT_ID != 0 {
-		return dev, stx.Mnt_id, nil
+		return dev, stx.Mnt_id, stx.Ino, nil
 	}
 	if mid, ok := fdMntID(fd); ok {
-		return dev, mid, nil
+		return dev, mid, stx.Ino, nil
 	}
-	return 0, 0, errors.New("mount identity unavailable")
+	return 0, 0, 0, errors.New("mount identity unavailable")
 }
 
 func statDirIdentity(dir string) (pinnedMountKey, error) {
@@ -237,11 +268,59 @@ func statDirIdentity(dir string) (pinnedMountKey, error) {
 		return pinnedMountKey{}, err
 	}
 	defer unix.Close(fd)
-	dev, mntID, err := statFDIdentity(fd)
+	dev, mntID, ino, err := statFDIdentity(fd)
 	if err != nil {
 		return pinnedMountKey{}, err
 	}
-	return pinnedMountKey{mount: dir, dev: dev, mntID: mntID}, nil
+	return pinnedMountKey{mount: dir, dev: dev, mntID: mntID, ino: ino}, nil
+}
+
+func statFileInfoID(st os.FileInfo) OnDemandFileID {
+	id := OnDemandFileID{
+		Present: true,
+		Size:    st.Size(),
+		ModNS:   st.ModTime().UnixNano(),
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys != nil {
+		id.Dev = uint64(sys.Dev)
+		id.Ino = uint64(sys.Ino)
+	}
+	return id
+}
+
+func statRootFileID(root *os.Root, rel string) (OnDemandFileID, error) {
+	f, err := openRootFileNonblock(root, rel)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return OnDemandFileID{}, nil
+		}
+		return OnDemandFileID{}, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return OnDemandFileID{}, err
+	}
+	return statFileInfoID(st), nil
+}
+
+func statRootRegularFileID(ctx context.Context, root *os.Root, res *compat.Resolver, rel string) (OnDemandFileID, error) {
+	if rel == "" {
+		return OnDemandFileID{}, nil
+	}
+	f, err := openRootRegular(ctx, root, res, rel)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return OnDemandFileID{}, nil
+		}
+		return OnDemandFileID{}, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return OnDemandFileID{}, err
+	}
+	return statFileInfoID(st), nil
 }
 
 func openPinnedRoot(mediaRoot, mount string, requireMountpoint bool) (*os.Root, pinnedMountKey, error) {
@@ -280,9 +359,9 @@ func openPinnedRoot(mediaRoot, mount string, requireMountpoint bool) (*os.Root, 
 		root.Close()
 		return nil, pinnedMountKey{}, err
 	}
-	dev, mntID, idErr := statFDIdentity(int(dot.Fd()))
+	dev, mntID, ino, idErr := statFDIdentity(int(dot.Fd()))
 	dot.Close()
-	if idErr != nil || dev != dirID.dev || mntID != dirID.mntID {
+	if idErr != nil || dev != dirID.dev || mntID != dirID.mntID || ino != dirID.ino {
 		root.Close()
 		return nil, pinnedMountKey{}, ErrOnDemandUnavailable
 	}
@@ -434,8 +513,15 @@ func (b *OnDemandBuilder) Build(ctx context.Context, req OnDemandRequest) (*OnDe
 	}
 	req.Mount = mount
 	req.EnginePath = cleanRel
-	sfKey := fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%d\x00%x\x00%d",
-		mount, req.UUID, rbstate.FoldPath(cleanRel),
+	dirID, dirErr := statDirIdentity(mount)
+	if dirErr != nil {
+		if errors.Is(dirErr, os.ErrNotExist) || errors.Is(dirErr, syscall.ELOOP) || errors.Is(dirErr, syscall.ENOTDIR) {
+			return nil, ErrOnDemandNotFound
+		}
+		return nil, dirErr
+	}
+	sfKey := fmt.Sprintf("%s\x00%d:%d:%d\x00%s\x00%s\x00%d\x00%d\x00%x\x00%d",
+		mount, dirID.dev, dirID.mntID, dirID.ino, req.UUID, rbstate.FoldPath(cleanRel),
 		req.EngineID, req.EngineKey, math.Float64bits(req.EngineBPM), req.EngineLen)
 
 	b.flightMu.Lock()
@@ -531,8 +617,9 @@ func (b *OnDemandBuilder) loadSnapshot(ctx context.Context, key pinnedMountKey, 
 		f.Close()
 		return nil, nil, fmt.Errorf("%w: snapshot exceeds %d bytes", ErrOnDemandLimit, onDemandMaxSnapshotBytes)
 	}
+	sid := statFileInfoID(st)
 	b.snapMu.Lock()
-	if c := b.snaps[key]; c != nil && c.size == st.Size() && c.mtime.Equal(st.ModTime()) {
+	if c := b.snaps[key]; c != nil && c.ino == sid.Ino && c.size == st.Size() && c.mtime.Equal(st.ModTime()) {
 		b.snapMu.Unlock()
 		f.Close()
 		return c.snap, c.res, nil
@@ -569,8 +656,9 @@ func (b *OnDemandBuilder) loadSnapshot(ctx context.Context, key pinnedMountKey, 
 		if sst.Size() > onDemandMaxSnapshotBytes {
 			return nil, fmt.Errorf("%w: snapshot exceeds %d bytes", ErrOnDemandLimit, onDemandMaxSnapshotBytes)
 		}
+		ssid := statFileInfoID(sst)
 		b.snapMu.Lock()
-		if c := b.snaps[key]; c != nil && c.size == sst.Size() && c.mtime.Equal(sst.ModTime()) {
+		if c := b.snaps[key]; c != nil && c.ino == ssid.Ino && c.size == sst.Size() && c.mtime.Equal(sst.ModTime()) {
 			b.snapMu.Unlock()
 			return c, nil
 		}
@@ -591,7 +679,7 @@ func (b *OnDemandBuilder) loadSnapshot(ctx context.Context, key pinnedMountKey, 
 		if err != nil {
 			return nil, err
 		}
-		entry := &cachedOnDemandSnapshot{size: sst.Size(), mtime: sst.ModTime(), snap: snap, res: res}
+		entry := &cachedOnDemandSnapshot{ino: ssid.Ino, size: sst.Size(), mtime: sst.ModTime(), snap: snap, res: res}
 		b.snapMu.Lock()
 		if len(b.snaps) >= 4 {
 			clear(b.snaps)
@@ -604,6 +692,110 @@ func (b *OnDemandBuilder) loadSnapshot(ctx context.Context, key pinnedMountKey, 
 		return nil, nil, err
 	}
 	return cached.snap, cached.res, nil
+}
+
+// InspectIdentity pins the mounted volume, bridge snapshot generation, Engine DB file,
+// Device Library exports, audio file, ANLZ sidecars, and resolved track entry without
+// reading audio or decoding ANLZ data. Callers use it to key and revalidate cached builds.
+func (b *OnDemandBuilder) InspectIdentity(ctx context.Context, req OnDemandRequest) (OnDemandStickIdentity, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	mount := filepath.Clean(strings.TrimSpace(req.Mount))
+	if mount == "" || mount == "." || !filepath.IsAbs(mount) {
+		return OnDemandStickIdentity{}, ErrOnDemandNotFound
+	}
+	if isVolumeEjecting(mount) {
+		return OnDemandStickIdentity{}, ErrOnDemandUnavailable
+	}
+	cleanRel, err := cleanEnginePath(req.EnginePath)
+	if err != nil {
+		return OnDemandStickIdentity{}, ErrOnDemandNotFound
+	}
+	root, pinnedKey, err := openPinnedRoot(b.cfg.MediaRoot, mount, b.cfg.RequireMountpoint)
+	if err != nil {
+		return OnDemandStickIdentity{}, err
+	}
+	defer root.Close()
+	if isVolumeEjecting(mount) {
+		return OnDemandStickIdentity{}, ErrOnDemandUnavailable
+	}
+	snap, res, err := b.loadSnapshot(ctx, pinnedKey, root)
+	if err != nil {
+		return OnDemandStickIdentity{}, err
+	}
+	if req.UUID != "" && snap.LibraryUUID != req.UUID {
+		return OnDemandStickIdentity{}, ErrOnDemandUUIDMismatch
+	}
+	tr, ok := snap.TrackAt(cleanRel)
+	if !ok || tr == nil || tr.Native {
+		return OnDemandStickIdentity{}, ErrOnDemandNotFound
+	}
+	if req.EngineID > 0 && tr.EngineID > 0 && tr.EngineID != req.EngineID {
+		return OnDemandStickIdentity{}, ErrOnDemandNotFound
+	}
+	snapID, err := statRootFileID(root, filepath.Join(databaseSubdir, rbstate.SnapshotName))
+	if err != nil {
+		return OnDemandStickIdentity{}, err
+	}
+	if !snapID.Present {
+		return OnDemandStickIdentity{}, ErrOnDemandNotFound
+	}
+	dbID, err := statRootFileID(root, filepath.Join(databaseSubdir, "m.db"))
+	if err != nil {
+		return OnDemandStickIdentity{}, err
+	}
+	expDBID, err := statRootFileID(root, "PIONEER/rekordbox/exportLibrary.db")
+	if err != nil {
+		return OnDemandStickIdentity{}, err
+	}
+	expPDBID, err := statRootFileID(root, devicePDB)
+	if err != nil {
+		return OnDemandStickIdentity{}, err
+	}
+	audioRel := tr.Rel
+	if audioRel == "" {
+		audioRel = cleanRel
+	}
+	audioID, err := statRootRegularFileID(ctx, root, res, audioRel)
+	if err != nil {
+		return OnDemandStickIdentity{}, err
+	}
+	if !audioID.Present {
+		return OnDemandStickIdentity{}, ErrOnDemandDegraded
+	}
+	datRel, extRel, ex2Rel := anlzCandidates(tr, "")
+	var anlzIDs [3]OnDemandFileID
+	for i, rel := range []string{datRel, extRel, ex2Rel} {
+		if rel == "" {
+			continue
+		}
+		aid, aerr := statRootRegularFileID(ctx, root, res, rel)
+		if aerr != nil {
+			return OnDemandStickIdentity{}, aerr
+		}
+		anlzIDs[i] = aid
+	}
+	if err := verifyMountPinned(pinnedKey); err != nil {
+		return OnDemandStickIdentity{}, err
+	}
+	return OnDemandStickIdentity{
+		Mount:        mount,
+		MountDev:     pinnedKey.dev,
+		MountMntID:   pinnedKey.mntID,
+		MountIno:     pinnedKey.ino,
+		SnapshotUUID: snap.LibraryUUID,
+		SnapFile:     snapID,
+		DBFile:       dbID,
+		ExportDB:     expDBID,
+		ExportPDB:    expPDBID,
+		AudioFile:    audioID,
+		ANLZFiles:    anlzIDs,
+		TrackKey:     tr.Key,
+		TrackRel:     audioRel,
+		EngineID:     tr.EngineID,
+		RowHash:      tr.Row,
+	}, nil
 }
 
 // findPDBTrackRooted scans ONLY the Track table of PIONEER/rekordbox/export.pdb strictly through
