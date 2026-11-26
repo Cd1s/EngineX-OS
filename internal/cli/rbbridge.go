@@ -132,6 +132,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 		started := false
 		opts := bridge.MountOptions{
 			Full:       *full,
+			OnDemand:   rbOnDemandEnabled(),
 			SmartMatch: uint32(*smart),
 			Settings:   *uiSettings,
 			Publish:    takePublishMark(*mount),

@@ -28,6 +28,7 @@ type MountOptions struct {
 	Deadline   time.Time // the hook's kill; zero for a run by hand, which has no limit
 	Publish    bool      // the job's remount asked for the window: nobody waits, staged data may use all of it
 	Full       bool      // a run by hand: never stat-only, no budget
+	OnDemand   bool      // CDJ direct-read mode (arm32 hook present): hash-only AlbumArt, .rb-bridge-browse, no background perf pass
 	SmartMatch uint32    // adds the list "[Smart Match]" for the track with this rekordbox ID
 	Settings   string    // the deck's settings file (layout, language), "" for the defaults
 	// StartBackground starts the mount's job. It is called before any step that can be long, so a
@@ -322,7 +323,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	}
 	defer unlock()
 	swapped, swapDeadline := swapNext(ctx, mount, dir, st)
-	if swapped {
+	if swapped && !o.OnDemand {
 		// The job drops the records the next library kept in the stage for the deck's loads, and
 		// goes on with what is pending.
 		startBG()
@@ -333,6 +334,9 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	layout := ReadLayout(o.Settings)
 	stamp := rbstate.Stamp(layout, files, staged)
 	head, headErr := rbstate.ReadHeader(dir)
+	if swapped && o.OnDemand && (headErr != nil || !head.Pending.None()) {
+		startBG()
+	}
 	_, nextErr := os.Stat(filepath.Join(dir, rbstate.SnapshotName+".next"))
 	unchanged := headErr == nil && head.Stamp == stamp && head.Rules == rbstate.Rules && errors.Is(nextErr, os.ErrNotExist) &&
 		!o.Full && o.SmartMatch == 0 && libraryUUID(dir) == head.LibraryUUID
@@ -346,7 +350,9 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		res.Pending = head.Pending
 		return res, nil
 	}
-	startBG()
+	if !o.OnDemand {
+		startBG()
+	}
 	rbstate.CleanTemps(dir)
 	if n := CleanWriteBackLeftoversCtx(ctx, mount); n > 0 {
 		log.Printf("rb-bridge: %d files of a write-back pass that was cut short put right", n)
@@ -373,6 +379,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	if !st.fits(ahead) {
 		// Engine gets the stick now, with the library it has; the job reads the exports and
 		// makes the next library, and its remount swaps it in.
+		startBG()
 		log.Printf("rb-bridge: mount leaves the exports to the job: reading them would take about %d ms of the %d ms left", ahead.cost().Milliseconds(), time.Until(st.kill).Milliseconds())
 		res.Pending = head.Pending
 		return res, nil
@@ -443,6 +450,9 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	}
 	chores(ctx, mount, st, false)
 	res.Pending = w.snap.Pending
+	if o.OnDemand && (w.left || !res.Pending.None()) {
+		startBG()
+	}
 	log.Printf("rb-bridge: mount done in %d ms: %d added, %d updated, %d removed, lists changed %v, %d staged tracks applied; pending: %d rows, %d tracks' data, verify %v",
 		time.Since(st.start).Milliseconds(), res.Added, res.Updated, res.Removed, res.PlaylistsChanged, res.Applied,
 		res.Pending.Rows, res.Pending.Perf, res.Pending.Verify)

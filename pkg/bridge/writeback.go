@@ -268,6 +268,7 @@ type dbCandidate struct {
 	writtenDigest       []byte
 	rawWrittenDigest    []byte
 	filledWritten       []byte
+	filledWrittenNoMain []byte
 	filledBeats         []byte
 	filledCues          []byte
 	filledLoops         []byte
@@ -403,46 +404,53 @@ type candidateSet struct {
 }
 
 type filledStageRow struct {
-	id      int64
-	written []byte
-	beats   []byte
-	cues    []byte
-	loops   []byte
+	id            int64
+	written       []byte
+	writtenNoMain []byte
+	beats         []byte
+	cues          []byte
+	loops         []byte
 }
 
 func readFilledStage(snap *rbstate.Snapshot) map[string]filledStageRow {
 	out := map[string]filledStageRow{}
-	stage, err := rbstate.OpenStage(snap.LibraryUUID)
+	root, err := rbstate.StageRoot()
+	if err != nil || snap == nil || snap.LibraryUUID == "" {
+		return out
+	}
+	b, err := os.ReadFile(filepath.Join(root, snap.LibraryUUID, "filled.jsonl"))
 	if err != nil {
 		return out
 	}
-	defer stage.Close()
-	entries, _, err := stage.Entries()
-	if err != nil {
-		return out
-	}
-	b, err := os.ReadFile(filepath.Join(stage.Dir(), "filled.jsonl"))
-	if err != nil {
-		return out
+	var stage *rbstate.Stage
+	var entries map[string]*rbstate.Staged
+	if s, err := rbstate.OpenStage(snap.LibraryUUID); err == nil {
+		stage = s
+		defer stage.Close()
+		entries, _, _ = stage.Entries()
 	}
 	for _, line := range bytes.Split(b, []byte{'\n'}) {
 		var f struct {
-			ID int64  `json:"id"`
-			K  string `json:"k"`
-			WR []byte `json:"wr"`
+			ID   int64  `json:"id"`
+			K    string `json:"k"`
+			WR   []byte `json:"wr"`
+			WRNM []byte `json:"wrnm"`
 		}
-		if json.Unmarshal(line, &f) != nil || f.ID == 0 || f.K == "" || len(f.WR) == 0 {
+		if json.Unmarshal(line, &f) != nil || f.ID == 0 || f.K == "" || (len(f.WR) == 0 && len(f.WRNM) == 0) {
 			continue
 		}
-		e := entries[f.K]
-		if e == nil {
-			continue
+		row := filledStageRow{id: f.ID, written: f.WR, writtenNoMain: f.WRNM}
+		if stage != nil && entries != nil {
+			if e := entries[f.K]; e != nil {
+				if full, err := stage.Read(e); err == nil && full.Digest != nil && bytes.Equal(full.Digest, f.WR) {
+					row.beats, row.cues, row.loops = full.Perf.Beats, full.Perf.QuickCues, full.Perf.Loops
+				} else if len(f.WRNM) == 0 {
+					// Legacy staged entry exists with mismatched/unreadable .bin and no standalone wrnm.
+					continue
+				}
+			}
 		}
-		full, err := stage.Read(e)
-		if err != nil || full.Digest == nil || !bytes.Equal(full.Digest, f.WR) {
-			continue
-		}
-		out[f.K] = filledStageRow{id: f.ID, written: f.WR, beats: full.Perf.Beats, cues: full.Perf.QuickCues, loops: full.Perf.Loops}
+		out[f.K] = row
 	}
 	return out
 }
@@ -494,6 +502,15 @@ func needsCueRead(row dbCandidate) bool {
 	}
 	if len(row.filledCues) > 0 {
 		return !bytes.Equal(writtenDigestIgnoringMainCueTail(row.beatData, row.quickCues, row.loops), writtenDigestIgnoringMainCueTail(row.filledBeats, row.filledCues, row.filledLoops))
+	}
+	if len(row.filledWritten) > 0 || len(row.filledWrittenNoMain) > 0 {
+		if len(row.filledWritten) > 0 && (bytes.Equal(row.writtenDigest, row.filledWritten) || bytes.Equal(row.rawWrittenDigest, row.filledWritten)) {
+			return false
+		}
+		if len(row.filledWrittenNoMain) > 0 && bytes.Equal(writtenDigestIgnoringMainCueTail(row.beatData, row.quickCues, row.loops), row.filledWrittenNoMain) {
+			return false
+		}
+		return true
 	}
 	return len(row.track.Written) == 0 || (!bytes.Equal(row.writtenDigest, row.track.Written) && !bytes.Equal(row.rawWrittenDigest, row.track.Written)) || row.track.Synced != nil
 }
@@ -548,7 +565,8 @@ func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, ses
 		c.writtenDigest = enginedb.WrittenDigest(c.beatData, c.quickCues, c.loops)
 		c.rawWrittenDigest = enginedb.RawWrittenDigest(c.beatData, c.quickCues, c.loops)
 		if f, ok := filled[c.key]; ok && f.id == c.engineID && len(c.track.Written) == 0 {
-			c.filledWritten, c.filledBeats, c.filledCues, c.filledLoops = f.written, f.beats, f.cues, f.loops
+			c.filledWritten, c.filledWrittenNoMain = f.written, f.writtenNoMain
+			c.filledBeats, c.filledCues, c.filledLoops = f.beats, f.cues, f.loops
 		}
 		out.rows = append(out.rows, c)
 	}

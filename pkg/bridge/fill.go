@@ -30,6 +30,7 @@ type FillOptions struct {
 	Progress func(done, total int) // tracks compared so far; never goes down (#328)
 	Stage    *rbstate.Stage        // nil: the stage of the snapshot's library
 	Settings string                // the deck's settings file (layout, language), "" for the defaults
+	OnDemand bool                  // CDJ direct-read mode: publish deferred rows/lists only, skip 24-min background perf pass
 }
 
 type FillResult struct {
@@ -148,8 +149,9 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	}
 	read := time.Now()
 	next := &nextBuild{ctx: ctx, mount: mount, dir: dbDir, view: view.view, live: snap,
-		pace: func(took time.Duration) error { return pace.afterStat(pace.active(), took) },
-		busy: pace.isBusy}
+		pace:     func(took time.Duration) error { return pace.afterStat(pace.active(), took) },
+		busy:     pace.isBusy,
+		onDemand: o.OnDemand}
 	buildNextWhenIdle := func(drop, ready bool) error {
 		for {
 			if err := pace.waitIdle(); err != nil {
@@ -164,9 +166,11 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	}
 	rowsDeferred := false
 	// Rows and lists a window left to the job come first, with what is staged already: they are
-	// what the DJ browses. The performance data follows in the job the swap's window starts.
-	if rows := snap == nil || view.view != nil && Diff(view.view, snap).structural(); rows && view.view != nil && o.Stage == nil {
-		if snap == nil {
+	// what the DJ browses. The performance data follows in the job the swap's window starts
+	// (unless OnDemand is set, in which case load/browse read rekordbox files directly).
+	needsNextRows := snap == nil || (view.view != nil && (Diff(view.view, snap).structural() || (o.OnDemand && (snap.Pending.Rows > 0 || snap.Pending.Lists))))
+	if needsNextRows && view.view != nil && o.Stage == nil {
+		if snap == nil || o.OnDemand {
 			err = buildNextWhenIdle(false, true)
 		} else if pace.isBusy() {
 			err = errDeckBusy
@@ -178,7 +182,7 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 			log.Printf("rb-bridge: rows and lists of %s are in the next library (exports read in %s); publish=%v", mount, read.Sub(loaded).Round(time.Millisecond), res.Publish)
 			return res, nil
 		}
-		if snap != nil && errors.Is(err, errDeckBusy) {
+		if snap != nil && !o.OnDemand && errors.Is(err, errDeckBusy) {
 			rowsDeferred = true
 			log.Printf("rb-bridge: deck active on %s; staging tracks to /data before building next library", mount)
 		} else {
@@ -190,6 +194,29 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	}
 	if snap == nil {
 		return res, fmt.Errorf("snapshot: %w", rbstate.ErrNoSnapshot)
+	}
+	if o.OnDemand {
+		// OnDemand mode: rows and lists are current; no background performance-data pass is run.
+		// If an older snapshot still has Pending.Perf/Verify or lacks .rb-bridge-browse, settle it cleanly when idle.
+		_, browseErr := os.Stat(filepath.Join(dbDir, rbstate.BrowseIndexName))
+		if snap.Pending.Perf > 0 || snap.Pending.Verify || (view.view != nil && snap.Stamp != view.stamp) || errors.Is(browseErr, os.ErrNotExist) {
+			if pace.waitIdle() == nil {
+				if lock, lockErr := rbstate.LockVolume(mount, fillLockWait); lockErr == nil {
+					if current, loadErr := rbstate.Load(dbDir); loadErr == nil && !pace.isBusy() {
+						if view.view != nil {
+							current.Stamp, current.Sources = view.stamp, view.view.Sources
+						}
+						current.Pending.Perf, current.Pending.Verify = 0, false
+						if saveErr := current.Save(dbDir); saveErr == nil {
+							_ = rbstate.SaveBrowseIndex(dbDir, current)
+						}
+					}
+					lock()
+				}
+			}
+		}
+		log.Printf("rb-bridge: on-demand mode for %s: rows/lists current, skipping background perf pass (%s)", mount, time.Since(start).Round(time.Millisecond))
+		return res, nil
 	}
 	if view.view != nil && snap.Stamp != view.stamp && o.Stage == nil && !rowsDeferred {
 		// The window left the exports to the job and they change no row and no list: the snapshot

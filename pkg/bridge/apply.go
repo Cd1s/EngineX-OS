@@ -98,7 +98,7 @@ func (w *window) run() (err error) {
 	if err = w.open(); err != nil {
 		return err
 	}
-	if w.snap.Stamp != w.view.Stamp { // the job compares every track's files with what was built
+	if !w.o.OnDemand && w.snap.Stamp != w.view.Stamp { // the job compares every track's files with what was built
 		w.snap.Pending.Verify, w.dirty = true, true
 	}
 	n := len(w.view.Tracks)
@@ -111,8 +111,8 @@ func (w *window) run() (err error) {
 		return nil
 	}
 	// Staged data is applied in place by the window the job asked for, and by a run without a
-	// kill: an insert gives the DJ the stick.
-	if err == nil && !w.left && (w.next || w.o.Publish || w.st.kill.IsZero()) {
+	// kill: an insert gives the DJ the stick. In OnDemand mode, tracks are read directly at load.
+	if err == nil && !w.o.OnDemand && !w.left && (w.next || w.o.Publish || w.st.kill.IsZero()) {
 		err = w.applyStaged()
 	}
 	if err == nil && (!w.left || w.st.fits(work{commits: 1, tracks: n})) {
@@ -274,7 +274,12 @@ func (w *window) reconcile() (err error) {
 func (w *window) rows(idx []int) []enginedb.TrackRow {
 	rows := make([]enginedb.TrackRow, len(idx))
 	for i, at := range idx {
-		rows[i] = enginedb.TrackRow{Rel: w.view.Tracks[at].Rel, Track: w.view.Tracks[at].Track}
+		vt := &w.view.Tracks[at]
+		var artHash []byte
+		if w.o.OnDemand && vt.Track.ArtworkPath != "" {
+			artHash = rbstate.DirectArtworkHash(vt.Track.ArtworkPath)
+		}
+		rows[i] = enginedb.TrackRow{Rel: vt.Rel, Track: vt.Track, DirectArtHash: artHash}
 	}
 	return rows
 }
@@ -286,6 +291,8 @@ func (w *window) note(vt *ViewTrack, id int64, native bool) *rbstate.Track {
 		Rel:          vt.Rel,
 		AnalysisPath: vt.Track.AnalysisPath,
 		ArtworkPath:  vt.Track.ArtworkPath,
+		Duration:     vt.Track.Duration,
+		SampleRate:   vt.Track.SampleRate,
 		Refs:         vt.Refs,
 		Row:          vt.Hash,
 		Rating:       vt.Track.Rating,
@@ -294,6 +301,11 @@ func (w *window) note(vt *ViewTrack, id int64, native bool) *rbstate.Track {
 	if !native {
 		base := enginedb.FastBaseForTrack(vt.Track)
 		t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = base.Cues, base.Loops, base.Active, true
+		if w.o.OnDemand {
+			// Record initial write-back digest so #321 skips all untouched rows in 0 ms without a perf pass.
+			t.Edit = 0
+			t.Synced = enginedb.SyncedDigest(nil, base.Cues, base.Loops, int64(base.Active), vt.Track.Genre, vt.Track.Comment, vt.Track.Label)
+		}
 	}
 	w.snap.Tracks[vt.Key] = t
 	return t
@@ -364,6 +376,11 @@ func (w *window) commitBatch(b *enginedb.Batch) error {
 func (w *window) saved() {
 	if w.head, w.dirty = w.snap.Header, false; !w.next {
 		dropOldState(w.dir) // of a next library only once it is the stick's (swapNext)
+		if w.o.OnDemand {
+			if err := rbstate.SaveBrowseIndex(w.dir, w.snap); err != nil {
+				log.Printf("rb-bridge: browse index not saved: %v", err)
+			}
+		}
 	}
 }
 
@@ -388,14 +405,16 @@ func (w *window) count() {
 	if w.partial {
 		s.Stamp = "" // a library was unreadable: the next insert reads again, and write-back waits
 	}
-	p := rbstate.Pending{Verify: s.Pending.Verify}
+	p := rbstate.Pending{Verify: s.Pending.Verify && !w.o.OnDemand}
 	for i := range w.view.Tracks {
 		vt := &w.view.Tracks[i]
 		t := s.Tracks[vt.Key]
 		if t != nil {
 			t.Refs = vt.Refs // this export's IDs: a re-export renumbers them, and write-back finds rows by them
-			if t.AnalysisPath != vt.Track.AnalysisPath || t.ArtworkPath != vt.Track.ArtworkPath {
+			if t.AnalysisPath != vt.Track.AnalysisPath || t.ArtworkPath != vt.Track.ArtworkPath ||
+				t.Duration != vt.Track.Duration || t.SampleRate != vt.Track.SampleRate {
 				t.AnalysisPath, t.ArtworkPath = vt.Track.AnalysisPath, vt.Track.ArtworkPath
+				t.Duration, t.SampleRate = vt.Track.Duration, vt.Track.SampleRate
 				w.dirty = true
 			}
 		}
@@ -403,7 +422,7 @@ func (w *window) count() {
 		case t != nil && (t.Native || t.Perf == rbstate.PerfMissing):
 		case t == nil || t.EngineID == 0 || t.Row != vt.Hash:
 			p.Rows++
-		case t.Perf == rbstate.PerfNone:
+		case !w.o.OnDemand && t.Perf == rbstate.PerfNone:
 			p.Perf++
 		}
 	}
@@ -818,7 +837,13 @@ func (w *window) updateRows(idx []int) error {
 		if err != nil {
 			return err
 		}
+		if w.o.OnDemand && vt.Track.ArtworkPath != "" {
+			if err = b.SetDirectCover(w.ctx, t.EngineID, rbstate.DirectArtworkHash(vt.Track.ArtworkPath)); err != nil {
+				return err
+			}
+		}
 		t.Row, t.Rating, t.Refs, t.AnalysisPath, t.ArtworkPath = vt.Hash, vt.Track.Rating, vt.Refs, vt.Track.AnalysisPath, vt.Track.ArtworkPath
+		t.Duration, t.SampleRate = vt.Track.Duration, vt.Track.SampleRate
 		if changed {
 			differed++
 		}

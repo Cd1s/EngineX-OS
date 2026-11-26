@@ -38,8 +38,9 @@ type Library struct {
 
 // TrackRow is a track as the export describes it.
 type TrackRow struct {
-	Rel   string          // the path the row gets, volume-relative
-	Track rekordbox.Track // the export's fields; Cues are the export's own cue rows, if it has any
+	Rel           string          // the path the row gets, volume-relative
+	Track         rekordbox.Track // the export's fields; Cues are the export's own cue rows, if it has any
+	DirectArtHash []byte          // optional 20-byte AlbumArt.hash for on-demand direct-read artwork (albumArt = NULL)
 }
 
 type ListRow struct {
@@ -596,10 +597,51 @@ func (b *Batch) Commit(ctx context.Context) error {
 
 const (
 	libTrackColumns = `length,bpm,year,path,filename,bitrate,bpmAnalyzed,albumArtId,fileBytes,title,artist,album,genre,comment,label,composer,remixer,key,rating,fileType,isAnalyzed,isAvailable,isMetadataImported,pdbImportKey,dateCreated,dateAdded`
-	libTrackTuple   = `(?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,0,1,1,?,?,?)`
+	libTrackTuple   = `(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,1,1,?,?,?)`
 )
 
-// trackArgs are a row's values in libTrackColumns order, without the cover and the three flags.
+// putCoverHash ensures a hash-only AlbumArt row (albumArt = NULL) exists for sum (20 bytes)
+// and returns its id, cached per batch. Zero stick artwork files are read or written.
+func (b *Batch) putCoverHash(ctx context.Context, sum []byte) (int64, error) {
+	if len(sum) != sha1.Size {
+		return 0, nil
+	}
+	var h [sha1.Size]byte
+	copy(h[:], sum)
+	if art, ok := b.covers[h]; ok {
+		return art, nil
+	}
+	var art int64
+	err := b.tx.QueryRowContext(ctx, `SELECT id FROM AlbumArt WHERE hash=? LIMIT 1`, sum).Scan(&art)
+	if errors.Is(err, sql.ErrNoRows) {
+		var res sql.Result
+		if res, err = b.exec(ctx, `INSERT INTO AlbumArt(hash,albumArt) VALUES(?,NULL)`, sum); err == nil {
+			art, err = res.LastInsertId()
+		}
+	}
+	if err != nil {
+		return 0, err
+	}
+	if b.covers == nil {
+		b.covers = map[[sha1.Size]byte]int64{}
+	}
+	b.covers[h] = art
+	return art, nil
+}
+
+// trackArgsWithArt are a row's values in libTrackColumns order, with albumArtId (int64 or nil).
+func (b *Batch) trackArgsWithArt(r *TrackRow, artID any) []any {
+	t := &r.Track
+	bpm := t.BPM
+	if bpm >= 499.5 { // rekordbox's analyser clamps a misparsed AIFF to 500 BPM
+		bpm = 0
+	}
+	return []any{int(t.Duration + 0.5), int(bpm + 0.5), t.Year, "../" + r.Rel, path.Base(r.Rel), t.Bitrate, bpm, artID, t.FileSize,
+		t.Title, t.Artist, t.Album, t.Genre, t.Comment, t.Label, t.Composer, t.Remixer, EngineKey(t.Key), t.Rating,
+		strings.TrimPrefix(strings.ToLower(path.Ext(r.Rel)), "."), int64(t.ID), b.now, b.now}
+}
+
+// trackArgs are a row's values in libTrackColumns order, without albumArtId and the three flags.
 func (b *Batch) trackArgs(r *TrackRow) []any {
 	t := &r.Track
 	bpm := t.BPM
@@ -622,7 +664,15 @@ func (b *Batch) InsertTracks(ctx context.Context, rows []TrackRow) (ids []int64,
 	}
 	insert := `INSERT INTO Track(` + libTrackColumns + `) VALUES` + libTrackTuple
 	for i := range rows {
-		res, e := b.exec(ctx, insert, b.trackArgs(&rows[i])...)
+		var artID any
+		if len(rows[i].DirectArtHash) == sha1.Size {
+			id, e := b.putCoverHash(ctx, rows[i].DirectArtHash)
+			if e != nil {
+				return nil, nil, e
+			}
+			artID = id
+		}
+		res, e := b.exec(ctx, insert, b.trackArgsWithArt(&rows[i], artID)...)
 		if e != nil {
 			var id int64
 			if qe := b.tx.QueryRowContext(ctx, `SELECT id FROM Track WHERE path=?`, "../"+rows[i].Rel).Scan(&id); qe == nil {
@@ -646,7 +696,7 @@ func (b *Batch) InsertTracks(ctx context.Context, rows []TrackRow) (ids []int64,
 const libBatchRows = 100
 
 func (b *Batch) insertTracksBulk(ctx context.Context, rows []TrackRow, ids []int64) error {
-	const cols = 23
+	const cols = 24
 	var trackArgs, perfArgs []any
 	flush := func() error {
 		if n := len(trackArgs) / cols; n > 0 {
@@ -663,9 +713,17 @@ func (b *Batch) insertTracksBulk(ctx context.Context, rows []TrackRow, ids []int
 		return nil
 	}
 	for i := range rows {
+		var artID any
+		if len(rows[i].DirectArtHash) == sha1.Size {
+			id, err := b.putCoverHash(ctx, rows[i].DirectArtHash)
+			if err != nil {
+				return err
+			}
+			artID = id
+		}
 		b.nextTrack++
 		ids[i] = b.nextTrack
-		trackArgs = append(append(trackArgs, ids[i]), b.trackArgs(&rows[i])...)
+		trackArgs = append(append(trackArgs, ids[i]), b.trackArgsWithArt(&rows[i], artID)...)
 		var cues, loops []byte
 		var active, mark any
 		if base := fastBaseOf(rows[i].Track); base.cues != nil {
@@ -679,6 +737,20 @@ func (b *Batch) insertTracksBulk(ctx context.Context, rows []TrackRow, ids []int
 		}
 	}
 	return flush()
+}
+
+// SetDirectCover links a track row to a hash-only AlbumArt row when the track currently has no
+// cover or already points at a hash-only (albumArt IS NULL) cover, preserving embedded BLOB art.
+func (b *Batch) SetDirectCover(ctx context.Context, id int64, sum []byte) error {
+	if len(sum) != sha1.Size {
+		return nil
+	}
+	art, err := b.putCoverHash(ctx, sum)
+	if err != nil {
+		return err
+	}
+	_, err = b.exec(ctx, `UPDATE Track SET albumArtId=? WHERE id=? AND albumArtId IS NOT ? AND (albumArtId IS NULL OR EXISTS(SELECT 1 FROM AlbumArt a WHERE a.id=Track.albumArtId AND a.albumArt IS NULL))`, art, id, art)
+	return err
 }
 
 // UpdateTrack gives the row the export's fields and says whether it held anything else. An

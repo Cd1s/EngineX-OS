@@ -114,7 +114,7 @@ func nextIdentity(ctx context.Context, mount, file string) (uuid string, commit 
 
 // discardNext removes a next library that cannot be gone on with, and its state on the deck.
 func discardNext(dir, uuid string) {
-	for _, name := range []string{rbstate.SwapName, nextDB, nextDB + "-journal", nextDB + "-wal", nextDB + "-shm"} {
+	for _, name := range []string{rbstate.SwapName, rbstate.BrowseSwapName, nextDB, nextDB + "-journal", nextDB + "-wal", nextDB + "-shm"} {
 		if err := rbstate.RemoveFile(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("rb-bridge: %s not removed: %v", name, err)
 		}
@@ -184,6 +184,7 @@ type nextBuild struct {
 	pace     func(time.Duration) error // after each statement and commit, with the time it took
 	busy     func() bool               // true while any deck is playing, cueing, scratching, or loading
 	progress func(done, total int)
+	onDemand bool
 }
 
 func (n *nextBuild) isBusy() bool {
@@ -233,8 +234,8 @@ func (n *nextBuild) build(drop, ready bool) error {
 		if err != nil {
 			return err
 		}
-		w := &window{ctx: n.ctx, mount: n.mount, dir: n.dir, view: n.view, st: newSteps(MountOptions{Full: true}),
-			o: MountOptions{Full: true, Progress: n.progress}, res: &res, next: true, keep: !drop, rest: n.nextPace}
+		w := &window{ctx: n.ctx, mount: n.mount, dir: n.dir, view: n.view, st: newSteps(MountOptions{Full: true, OnDemand: n.onDemand}),
+			o: MountOptions{Full: true, OnDemand: n.onDemand, Progress: n.progress}, res: &res, next: true, keep: !drop, rest: n.nextPace}
 		uuid, commit := nextIdentity(n.ctx, n.mount, next)
 		if _, old := os.Stat(filepath.Join(n.dir, oldStateName)); content || old == nil {
 			err = n.mirror(live, next, liveUUID, uuid, commit)
@@ -269,6 +270,11 @@ func (n *nextBuild) build(drop, ready bool) error {
 	}
 	if n.isBusy() {
 		return errDeckBusy
+	}
+	if n.onDemand {
+		if err := rbstate.SaveBrowseIndexAs(filepath.Join(n.dir, rbstate.BrowseSwapName), snap); err != nil {
+			log.Printf("rb-bridge: swap browse index not saved: %v", err)
+		}
 	}
 	snap.Base = state
 	return snap.SaveAs(swap)
@@ -407,6 +413,9 @@ func reconcileOrphanSwap(ctx context.Context, dir string) bool {
 			log.Printf("rb-bridge: orphan swap snapshot not promoted: %v", err)
 			return false
 		}
+		if bswap := filepath.Join(dir, rbstate.BrowseSwapName); func() bool { _, e := os.Stat(bswap); return e == nil }() {
+			_ = rbstate.RenameFile(bswap, filepath.Join(dir, rbstate.BrowseIndexName))
+		}
 		_ = rbstate.DropNext(dir)
 		dropOldState(dir)
 		_ = os.RemoveAll(nextState(h.LibraryUUID))
@@ -414,6 +423,7 @@ func reconcileOrphanSwap(ctx context.Context, dir string) bool {
 		return true
 	}
 	_ = rbstate.RemoveFile(swap)
+	_ = rbstate.RemoveFile(filepath.Join(dir, rbstate.BrowseSwapName))
 	return false
 }
 
@@ -443,6 +453,9 @@ func swapNext(ctx context.Context, mount, dir string, st *steps) (swapped, deadl
 		if err := rbstate.RenameFile(swap, filepath.Join(dir, rbstate.SnapshotName)); err != nil {
 			log.Printf("rb-bridge: snapshot of the next library not put in place: %v", err)
 			return false
+		}
+		if bswap := filepath.Join(dir, rbstate.BrowseSwapName); func() bool { _, e := os.Stat(bswap); return e == nil }() {
+			_ = rbstate.RenameFile(bswap, filepath.Join(dir, rbstate.BrowseIndexName))
 		}
 		_ = rbstate.DropNext(dir) // of a transaction on the file that is gone
 		dropOldState(dir)

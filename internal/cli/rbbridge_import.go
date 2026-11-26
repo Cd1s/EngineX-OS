@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,6 +27,21 @@ import (
 // data into the stage on /data (bridge v2, FillInBackground) and asks for a remount when a window
 // has something to apply. The edisksd hook stops the job under the same unit name before it
 // unmounts the volume.
+
+// defaultOnDemand enables CDJ direct-read mode on 32-bit ARM decks where libengine-ui-hook.so
+// provides on-demand load and browse hooks; 64-bit AZ04 (arm64) keeps full background fill until
+// an AArch64 hook exists.
+var defaultOnDemand = runtime.GOARCH == "arm"
+
+func rbOnDemandEnabled() bool {
+	switch os.Getenv("ENGINEX_RB_ONDEMAND") {
+	case "1", "true":
+		return true
+	case "0", "false":
+		return false
+	}
+	return defaultOnDemand
+}
 
 // importUnit names the job of the volume mounted at mount: FNV-1a 64 of the path, as the hook
 // computes it (edisksd_hook.c import_unit).
@@ -150,7 +166,11 @@ func convertLocked(ctx context.Context, mount string, rep *usbLoadingReporter) (
 	go func() { defer close(done); refresh(convert, rep) }()
 	defer func() { stop(); <-done }()
 	// Throttled: the job reports its count as each track goes (#328); refresh writes the latest.
-	r, err = bridge.FillInBackground(ctx, mount, bridge.FillOptions{Settings: importSettings, Progress: func(done, total int) { rep.Report(done, total, false) }})
+	r, err = bridge.FillInBackground(ctx, mount, bridge.FillOptions{
+		Settings: importSettings,
+		OnDemand: rbOnDemandEnabled(),
+		Progress: func(done, total int) { rep.Report(done, total, false) },
+	})
 	if err != nil && ctx.Err() == nil && !errors.Is(err, rbstate.ErrNoSnapshot) {
 		rep.Fail(err)
 	}

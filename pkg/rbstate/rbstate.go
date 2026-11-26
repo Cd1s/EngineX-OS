@@ -119,10 +119,12 @@ func (s TrackSig) Equal(o TrackSig) bool {
 // Track is one track of the stick's library.
 type Track struct {
 	Key          string      `json:"k"`
-	EngineID     int64       `json:"id,omitempty"` // Track.id; 0 while the row is not written
-	Rel          string      `json:"p"`            // the row's path without "../"; the export's spelling until Resolved
-	AnalysisPath string      `json:"ap,omitempty"` // volume-relative rekordbox ANLZ .DAT path from the export
-	ArtworkPath  string      `json:"aw,omitempty"` // volume-relative rekordbox artwork path from the export
+	EngineID     int64       `json:"id,omitempty"`  // Track.id; 0 while the row is not written
+	Rel          string      `json:"p"`             // the row's path without "../"; the export's spelling until Resolved
+	AnalysisPath string      `json:"ap,omitempty"`  // volume-relative rekordbox ANLZ .DAT path from the export
+	ArtworkPath  string      `json:"aw,omitempty"`  // volume-relative rekordbox artwork path from the export
+	Duration     float64     `json:"dur,omitempty"` // export duration in seconds (for on-demand overview scaling)
+	SampleRate   int         `json:"sr,omitempty"`  // export sample rate in Hz (for on-demand overview scaling)
 	Resolved     bool        `json:"res,omitempty"`
 	Refs         []SourceRef `json:"refs,omitempty"`
 	Row          string      `json:"row,omitempty"` // the view hash the row was written from
