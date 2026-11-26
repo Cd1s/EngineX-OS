@@ -171,6 +171,15 @@ PY
     fi
 }
 
+# Tests go through tools/dev/test.sh when the merged tree carries it: the path-to-tests map (touched Go packages and
+# their importers, the whole test file of a Python change, the release checklist's C tests, bash tests), on one ARM
+# build host under `enginex-run exclusive`. A target without it keeps targeted_tests and the full run below.
+test_cmd() {
+    if [[ -n ${ENGINEX_TEST_CMD:-} ]]; then printf '%s\n' "$ENGINEX_TEST_CMD"; return 0; fi
+    [[ -x $worktree/tools/dev/test.sh ]] || return 1
+    printf '%s\n' "$worktree/tools/dev/test.sh"
+}
+
 targeted_tests() {
     local host=$1; shift
     local go_pkgs=() py_tests=() file dir test
@@ -397,7 +406,11 @@ for branch in "${branches[@]}"; do
     mapfile -t touched < <(git -C "$worktree" diff --name-only "$pre_merge" HEAD)
     mapfile -t overlays < <(git -C "$worktree" diff --name-only "$base" "origin/$branch" -- rootfs-overlay | grep '\.so$' || true)
     if ((${#overlays[@]})); then rebuild_overlay "$(pick_host 1)" "${branch//[^A-Za-z0-9._-]/_}-${target_head}" "${overlays[@]}"; fi
-    targeted_tests "$(pick_host 0)" "${touched[@]}"
+    if cmd=$(test_cmd); then
+        "$cmd" --tree "$worktree" --base "$pre_merge" --exclusive
+    else
+        targeted_tests "$(pick_host 0)" "${touched[@]}"
+    fi
     if [[ $resolved_branch == "$branch" ]]; then
         merged+=("$branch ($(git -C "$worktree" rev-parse --short "origin/$branch"))")
     else
@@ -405,9 +418,14 @@ for branch in "${branches[@]}"; do
     fi
 done
 
-full_host=$(pick_host 1)
-full_inner='set -eu; test -z "$(gofmt -l .)"; go vet ./...; go test -race -timeout 30m ./...; idx=$(mktemp); rm -f "$idx"; git init -q; GIT_INDEX_FILE="$idx" git add -A; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/az01-packer; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/splash; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/stems; rm -f "$idx"; rm -rf .git; bash tests/test_rootfs_overlay.sh'
-remote_run "$full_host" "$full_inner"
+if cmd=$(test_cmd); then
+    full_host='tools/dev/test.sh --full'
+    "$cmd" --tree "$worktree" --full --exclusive --no-cache
+else
+    full_host=$(pick_host 1)
+    full_inner='set -eu; test -z "$(gofmt -l .)"; go vet ./...; go test -race -timeout 30m ./...; idx=$(mktemp); rm -f "$idx"; git init -q; GIT_INDEX_FILE="$idx" git add -A; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/az01-packer; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/splash; GIT_INDEX_FILE="$idx" python3 -m unittest discover -s tools/stems; rm -f "$idx"; rm -rf .git; bash tests/test_rootfs_overlay.sh'
+    remote_run "$full_host" "$full_inner"
+fi
 git -C "$worktree" push origin "HEAD:$TARGET" >/dev/null
 elapsed=$(( $(date +%s) - started ))
 printf 'Merged %s into %s; targeted tests after each merge; full suites on %s; elapsed %ss.' "${merged[*]}" "$TARGET" "$full_host" "$elapsed"; if ((${#dropped_hunks[@]})); then printf ' Dropped hunks %s.' "${dropped_hunks[*]}"; fi; if ((${#doc_notes[@]})); then printf ' Doc cache decisions %s.' "${doc_notes[*]}"; fi; printf '\n'

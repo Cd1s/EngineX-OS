@@ -31,45 +31,123 @@ def jdump(obj, path):
         json.dump(obj, f)
 
 
-class MapTest(unittest.TestCase):
-    def plan(self, *paths):
-        return testmap.map_paths(list(paths), HERE + '/../..')
+REPO = os.path.normpath(os.path.join(HERE, '..', '..'))
 
-    def test_go_files_map_to_their_package(self):
-        self.assertEqual(self.plan('pkg/webui/shadow.go', 'pkg/webui/x_test.go').go, {'pkg/webui'})
+
+def git_repo(root):
+    def g(*a):
+        subprocess.run(['git', '-C', root, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', *a], check=True, capture_output=True)
+    g('init', '-q')
+    return g
+
+
+class MapTest(unittest.TestCase):
+    """The path-to-tests map on this repository."""
+    def plan(self, *paths):
+        return testmap.map_paths(list(paths), REPO)
+
+    def test_go_files_map_to_their_package_and_only_code_brings_importers(self):
+        p = self.plan('pkg/webui/shadow.go')
+        self.assertEqual(p.go_code, {'pkg/webui'})
+        self.assertIn('pkg/webui', p.go)
+        t = self.plan('pkg/webui/shadow_share_test.go', 'pkg/bridge/testdata/issue328_engine_rows.json')
+        self.assertEqual(t.go_code, set(), 'a _test.go file or testdata changes no other package')
+        self.assertEqual(t.go, {'pkg/webui', 'pkg/bridge'})
         self.assertTrue(self.plan('go.mod').go_all)
 
-    def test_build_packs_maps_to_ui_mod_tests(self):
-        self.assertEqual(self.plan('tools/ui-mod/build_packs.py').py,
-                         {('tools/az01-packer', 'test_ui_mod.py'), ('tools/az01-packer', 'test_ui_perf.py')})
+    def test_go_importers_come_from_the_static_closure(self):
+        import gotree
+        closure = gotree.static_closure(REPO, ['pkg/webui'])
+        self.assertIn('pkg/webui', closure)
+        self.assertIn('cmd/enginex-suite', closure)
+        self.assertNotIn('pkg/bridge', closure, 'pkg/bridge does not import pkg/webui')
 
-    def test_packer_and_stems_modules(self):
+    def test_pack_generator_and_its_test_run_the_whole_test_ui_mod(self):
+        for path in ('tools/ui-mod/build_packs.py', 'tools/az01-packer/test_ui_mod.py', 'tools/ui-mod/i18n.tsv'):
+            self.assertIn(('tools/az01-packer', 'test_ui_mod.py'), self.plan(path).py, path)
+        # A file spec, never a class or a test id: pyrun runs every test of the file.
+        self.assertTrue(all(f.endswith('.py') and '.' not in f[:-3] for _, f in self.plan('tools/ui-mod/build_packs.py').py))
+
+    def test_python_modules_their_tests_and_catch_alls(self):
         self.assertIn(('tools/az01-packer', 'test_az01_packer.py'), self.plan('tools/az01-packer/az01_packer.py').py)
         self.assertEqual(self.plan('tools/az01-packer/test_docs_audit.py').py, {('tools/az01-packer', 'test_docs_audit.py')})
-        self.assertEqual(self.plan('tools/stems/worker.py').py, {('tools/stems', 'test_worker.py')})
+        self.assertEqual(self.plan('tools/stems/score.py').py, {('tools/stems', 'test_score.py'), ('tools/stems', 'test_worker.py')})
+
+    def test_c_changes_run_every_including_test_with_the_checklist_variants(self):
+        dsp = self.plan('tools/ui-mod/dsp_smooth.h')
+        self.assertTrue({'tools/ui-mod/test_dsp_smooth.c', 'tools/ui-mod/test_rt_budget.c'} <= dsp.c)
+        self.assertIn('tools/ui-mod/test_fx_selector.sh', dsp.sh, 'its loop names test_dsp_smooth')
+        hook = self.plan('tools/ui-mod/engine_ui_hook.c')
+        self.assertTrue({'tools/ui-mod/test_stems_feature.c', 'tools/ui-mod/test_az04_hook.c', 'tools/ui-mod/test_rt_callback.c'} <= hook.c)
+        self.assertIn(testmap.OVERLAY, hook.sh, 'the overlay test rebuilds the shipped hook')
+        self.assertIn(('tools/az01-packer', 'test_ui_mod.py'), hook.py)
+        self.assertIn('tools/edisksd-hook/test_edisksd_hook.c', self.plan('tools/edisksd-hook/edisksd_hook.c').c)
+        self.assertIn(testmap.OVERLAY, self.plan('tools/edisksd-hook/edisksd_hook.c').sh)
+
+    def test_a_header_reached_only_through_the_hook_selects_the_hook_tests(self):
+        with tempfile.TemporaryDirectory() as root:
+            g = git_repo(root)
+            write(root, 'tools/ui-mod/stage.h', 'int stage(void);\n')
+            write(root, 'tools/ui-mod/engine_ui_hook.c', '#include "stage.h"\n')
+            write(root, 'tools/ui-mod/test_stems_feature.c', '#include "engine_ui_hook.c"\n')
+            write(root, 'tools/ui-mod/test_other.c', 'int main(void) { return 0; }\n')
+            write(root, 'tests/test_rootfs_overlay.sh', 'sh "$ROOT/tools/ui-mod/build.sh"\n')
+            g('add', '-A'); g('commit', '-qm', 'base')
+            plan = testmap.map_paths(['tools/ui-mod/stage.h'], root)
+            self.assertEqual(plan.c, {'tools/ui-mod/test_stems_feature.c'})
+            self.assertEqual(plan.sh, {testmap.OVERLAY})
+
+    def test_sandbox_helpers_name_their_sandbox_as_manual(self):
+        plan = self.plan('tools/az01-packer/console_link_stub.py')
+        self.assertIn('tools/az01-packer/test_console_link_sandbox.sh', plan.manual)
+        self.assertIn('heavy lock', plan.manual['tools/az01-packer/test_console_link_sandbox.sh']['how'])
 
     def test_overlay_and_dev_tools(self):
-        self.assertEqual(self.plan('rootfs-overlay/usr/local/bin/x').sh, {'tests/test_rootfs_overlay.sh'})
+        self.assertIn(testmap.OVERLAY, self.plan('rootfs-overlay/usr/local/bin/x').sh)
         self.assertIn(('tools/dev', 'test_devtools.py'), self.plan('tools/dev/pyrun.py').py)
+        self.assertIn('tools/dev/test_integrate.sh', self.plan('tools/dev/integrate.sh').sh)
 
-    def test_unmapped_file_runs_nothing(self):
-        self.assertTrue(self.plan('LICENSE').empty())
+    def test_a_file_no_test_names_is_listed_as_unmapped(self):
+        plan = self.plan('no-such-dir/nothing-names-this.bin')
+        self.assertTrue(plan.empty())
+        self.assertEqual(plan.unmapped, ['no-such-dir/nothing-names-this.bin'])
 
-    def test_arm_list_needs_a_reason(self):
-        with tempfile.NamedTemporaryFile('w', suffix='.txt') as f:
-            f.write('py tools/x test_a.B.c\n'); f.flush()
-            with self.assertRaises(SystemExit):
-                devtest.load_arm(f.name)
-        entries = devtest.load_arm(os.path.join(HERE, 'arm-tests.txt'))
-        self.assertTrue(all(e['reason'] for e in entries))
+    def test_every_bash_test_is_classified_once(self):
+        listed = list(testmap.SH_TESTS['auto']) + list(testmap.SH_TESTS['manual'])
+        self.assertEqual(len(listed), len(set(listed)))
+        idx = testmap.index(REPO)
+        scripts = {f for f in idx.files if f.endswith('.sh') and testmap.is_test_file(f)}
+        self.assertEqual(sorted(scripts - set(listed)), [], 'add them to tools/dev/sh-tests.json (auto or manual)')
+        self.assertEqual(sorted(f for f in listed if f not in idx.fileset), [], 'listed files must exist')
+
+    def test_c_recipes_cover_every_c_test_with_the_checklist_variants(self):
+        import crun
+        idx = testmap.index(REPO)
+        srcs = sorted(f for f in idx.files if os.path.dirname(f) in testmap.C_TEST_DIRS and os.path.basename(f).startswith('test_') and f.endswith('.c')
+                      and not (testmap.C_TESTS['tests'].get(f) or {}).get('via'))
+        jobs, bad = crun.jobs_for(srcs)
+        self.assertEqual(bad, [])
+        variants = {}
+        for j in jobs:
+            variants.setdefault(j['src'], {})[j['variant']] = j
+        self.assertEqual(set(variants['tools/ui-mod/test_dsp_smooth.c']), {'plain', 'asan-ubsan', 'tsan'})
+        self.assertEqual(set(variants['tools/ui-mod/test_rt_budget.c']), {'native', 'armhf'})
+        for v in variants['tools/ui-mod/test_rt_callback.c'].values():
+            self.assertIn('{out} selftest', v['runs'])
+        self.assertIn('{out} {e504} {e530} {esl4}', variants['tools/ui-mod/test_stems_feature.c']['armhf']['runs'])
+        self.assertIn('{eaz04}', variants['tools/ui-mod/test_az04_hook.c']['native']['runs'][0])
+        for v in variants['tools/edisksd-hook/test_edisksd_hook.c'].values():
+            self.assertTrue(all(r.startswith('root: unshare -m --propagation private ') for r in v['runs'] if '--mounts' in r),
+                            '--mounts only inside a private mount namespace')
+        self.assertEqual({k for k, e in testmap.C_TESTS['tests'].items() if e.get('checklist')},
+                         {'tools/ui-mod/test_dsp_smooth.c', 'tools/ui-mod/test_stems_feature.c', 'tools/edisksd-hook/test_edisksd_hook.c',
+                          'tools/ui-mod/test_az04_hook.c', 'tools/ui-mod/test_rt_budget.c', 'tools/ui-mod/test_rt_callback.c'})
 
 
 class ChangedTestsTest(unittest.TestCase):
     def test_added_and_edited_tests_are_found(self):
         with tempfile.TemporaryDirectory() as root:
-            def g(*a):
-                subprocess.run(['git', '-C', root, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', *a], check=True, capture_output=True)
-            g('init', '-q')
+            g = git_repo(root)
             write(root, 'p/a_test.go', """\
                 package p
 
@@ -94,49 +172,88 @@ class ChangedTestsTest(unittest.TestCase):
             write(root, 'tools/test_a.py', jtext(root + '/tools/test_a.py').replace('    def test_edited(self):\n        pass', '    def test_edited(self):\n        pass  # changed') )
             write(root, 'tools/test_b.py', "import unittest\nclass B(unittest.TestCase):\n    def test_b(self):\n        pass\n")
             write(root, 'p/oneline_test.go', 'package p\n\nfunc TestOneLine(t *testing.T) { t.Skip("lab") }\n')
-            found = testmap.changed_tests(root, 'HEAD', ['p/a_test.go', 'tools/test_a.py', 'tools/test_b.py', 'p/oneline_test.go'])
+            write(root, 'tools/ui-mod/test_new.c', 'int main(void) { return 0; }\n')
+            write(root, 'tests/test_new.sh', 'true\n')
+            found = testmap.changed_tests(root, 'HEAD', ['p/a_test.go', 'tools/test_a.py', 'tools/test_b.py', 'p/oneline_test.go',
+                                                         'tools/ui-mod/test_new.c', 'tests/test_new.sh'])
             self.assertEqual(found, {('go', 'p', 'TestEdited'), ('go', 'p', 'TestNew'), ('py', 'tools', 'test_a.A.test_edited'),
-                                     ('py', 'tools', 'test_b.B.test_b'), ('go', 'p', 'TestOneLine')})
+                                     ('py', 'tools', 'test_b.B.test_b'), ('go', 'p', 'TestOneLine'),
+                                     ('c', 'tools/ui-mod/test_new.c', '*'), ('sh', 'tests/test_new.sh', '*')})
 
 
 class ReportTest(unittest.TestCase):
-    def report(self, plan_extra, fast):
+    def report(self, plan_extra, res):
         a = type('A', (), {'top': 0, 'report': None})()
-        plan = {'mode': 'targeted', 'base': 'abc', 'changed': ['x'], 'arm': [], 'changed_tests': []}
+        plan = {'mode': 'targeted', 'base': 'abc', 'changed': ['x'], 'changed_tests': [], 'manual': {}, 'unmapped': [],
+                'c': [], 'sh': []}
         plan.update(plan_extra)
         out = io.StringIO()
         with redirect_stdout(out):
-            rc = devtest.report(a, plan, fast, None, {}, 'host', None, 0.0, [], False)
+            rc = devtest.report(a, plan, res, 'host', 0.0)
         return rc, out.getvalue()
 
-    def fast(self, skipped=()):
+    def res(self, skipped=()):
         return {'steps': [{'name': 'go test', 'secs': 1, 'ok': True, 'note': '', 'tail': ''}],
-                'go': {'skipped': [{'pkg': 'p', 'test': t, 'reason': 'lab'} for t in skipped], 'deferred': [], 'tests': {}, 'run': 3},
-                'py': {}}
+                'go': {'skipped': [{'pkg': 'p', 'test': t, 'reason': 'lab'} for t in skipped], 'tests': {}, 'run': 3},
+                'py': {}, 'c': None}
 
     def test_skipped_test_that_the_lane_changed_is_not_proven(self):
-        rc, text = self.report({'changed_tests': [['go', 'p', 'TestNew']]}, self.fast(['TestNew/sub']))
+        rc, text = self.report({'changed_tests': [['go', 'p', 'TestNew']]}, self.res(['TestNew/sub']))
         self.assertEqual(rc, 1)
         self.assertIn('NOT PROVEN', text)
 
     def test_skipped_unrelated_test_is_listed_not_fatal(self):
-        rc, text = self.report({'changed_tests': [['go', 'p', 'TestNew']]}, self.fast(['TestOther']))
+        rc, text = self.report({'changed_tests': [['go', 'p', 'TestNew']]}, self.res(['TestOther']))
         self.assertEqual(rc, 0)
         self.assertIn('skipped: 1', text)
         self.assertIn('TestOther', text)
 
     def test_flaky_pass_is_listed_loudly_and_counts_as_proof(self):
-        fast = self.fast(); fast['go']['flaky'] = [{'test': 'p TestNew', 'first_failure': 'took 900ms'}]
-        rc, text = self.report({'changed_tests': [['go', 'p', 'TestNew']]}, fast)
+        res = self.res(); res['go']['flaky'] = [{'pkg': 'p', 'test': 'TestNew', 'first_failure': 'took 900ms'}]
+        rc, text = self.report({'changed_tests': [['go', 'p', 'TestNew']]}, res)
         self.assertEqual(rc, 0)
         self.assertIn('FLAKY: 1 test(s)', text)
         self.assertIn('took 900ms', text)
 
-    def test_deferred_changed_test_without_arm_run_is_not_proven(self):
-        fast = self.fast(); fast['go']['deferred'] = ['p TestNew']
-        rc, text = self.report({'changed_tests': [['go', 'p', 'TestNew']]}, fast)
+    def test_a_changed_c_test_with_a_skipped_run_is_not_proven(self):
+        res = self.res(); res['c'] = {'results': [{'name': 'tools/ui-mod/test_x.c native', 'ok': True, 'secs': 1, 'runs': [],
+                                                   'skipped': ['unshare ... --mounts (needs root)'], 'tail': ''}], 'skipped': ['x']}
+        rc, text = self.report({'changed_tests': [['c', 'tools/ui-mod/test_x.c', '*']], 'c': ['tools/ui-mod/test_x.c']}, res)
         self.assertEqual(rc, 1)
-        self.assertIn('deferred to the ARM tier', text)
+        self.assertIn('NOT PROVEN: c tools/ui-mod/test_x.c', text)
+
+    def test_manual_sandbox_tests_are_named_with_their_command_not_failed(self):
+        rc, text = self.report({'manual': {'tools/az01-packer/test_x_sandbox.sh': {'how': 'enginex-run sandbox -- bash x', 'why': 'Engine'}}}, self.res())
+        self.assertEqual(rc, 0)
+        self.assertIn('still to run by the lane', text)
+        self.assertIn('enginex-run sandbox -- bash x', text)
+        self.assertIn('1 manual sandbox tests still to run', text)
+
+    def test_a_remote_run_without_a_result_fails(self):
+        res = {'steps': [{'name': 'remote run', 'secs': 1, 'ok': False, 'note': 'exit 1', 'tail': 'sync failed'}], 'go': None, 'py': {}, 'c': None}
+        rc, text = self.report({}, res)
+        self.assertEqual(rc, 1)
+        self.assertIn('sync failed', text)
+
+
+class ShardTest(unittest.TestCase):
+    def test_every_test_in_exactly_one_shard_and_only_heavy_classes_split(self):
+        import pyrun
+        tests = [(f'm.A.t{i}', 'm.A') for i in range(4)] + [(f'm.B.t{i}', 'm.B') for i in range(30)] + [('m.C.t0', 'm.C')]
+        w = {t: (1.0 if t.startswith('m.A') else 10.0 if t.startswith('m.B') else 2.0) for t, _ in tests}
+        shards, load = pyrun.make_shards(tests, w, 4)
+        flat = [t for s in shards for t in s]
+        self.assertEqual(sorted(flat), sorted(t for t, _ in tests))
+        self.assertEqual(len(flat), len(set(flat)))
+        self.assertEqual(sum(1 for s in shards if any(t.startswith('m.A') for t in s)), 1, 'a light class stays whole')
+        self.assertGreater(sum(1 for s in shards if any(t.startswith('m.B') for t in s)), 1, 'a class heavier than a share is split')
+        self.assertLess(max(load) / (sum(load) / len(load)), 1.2)
+
+    def test_weights_prefer_this_hosts_timings_then_the_seed(self):
+        import pyrun
+        w = pyrun.weights_for([('a', 'X'), ('b', 'X'), ('c', 'X')], {'a': 5.0, 'b': 3.0}, {'a': 1.0})
+        self.assertEqual((w['a'], w['b']), (1.0, 3.0))
+        self.assertEqual(w['c'], 3.0, 'unknown tests weigh the median')
 
 
 class StableDirTest(unittest.TestCase):

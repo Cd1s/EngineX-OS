@@ -1,0 +1,154 @@
+{
+ "_doc": [
+  "Every bash test of the repository (tests/*.sh and tools/**/test_*.sh) is in exactly one list (test_devtools.py checks).",
+  "auto: run by tools/dev/test.sh when the plan selects it (and by --full). `needs`: root, gcc14 (the shipped hooks are",
+  "rebuilt with GCC 14), lab (the firmware lab).",
+  "manual: Engine sandboxes, scripts that take the heavy lock themselves, and helpers of another script. test.sh never",
+  "runs them; when a change selects one, the plan and the result name it with its command, and the lane runs it as its",
+  "header says (`enginex-run sandbox|exclusive`, or bare for the self-locking ones)."
+ ],
+ "auto": {
+  "tests/test_rootfs_overlay.sh": {
+   "needs": [
+    "root",
+    "gcc14",
+    "lab"
+   ],
+   "why": "release checklist section 2; rebuilds both hooks and compares them with the shipped .so"
+  },
+  "tools/dev/test_integrate.sh": {
+   "needs": [],
+   "why": "the merge train's own test (fake remote)"
+  },
+  "tools/ui-mod/test_fx_selector.sh": {
+   "needs": [],
+   "why": "native DSP tests with ASan and TSan, armhf golden tests"
+  },
+  "tools/ui-mod/test_rekordbox_unwind.sh": {
+   "needs": [
+    "gcc14"
+   ],
+   "why": "builds the hook with build.sh and drives test_rekordbox_unwind.c against it"
+  },
+  "tools/az01-packer/test_build_release_only_group.sh": {
+   "needs": [],
+   "why": "ONLY_GROUP=SC5000 of build-release.sh with stubs"
+  },
+  "tests/test_backend.sh": {
+   "needs": [
+    "root",
+    "lab"
+   ],
+   "why": "deployment tests in a private mount namespace"
+  },
+  "tests/test_backend_private_flag.sh": {
+   "needs": [
+    "root"
+   ],
+   "why": "test_backend.sh refuses its re-exec flag (in a throwaway namespace)"
+  },
+  "tests/test_boot_safety.sh": {
+   "needs": [
+    "root",
+    "lab"
+   ],
+   "why": "boot state machine with fake Engine and systemd"
+  },
+  "tests/test_issue311_firstboot.sh": {
+   "needs": [
+    "lab"
+   ],
+   "why": "#311 first-boot restarts with the boot guard"
+  },
+  "tests/test_tier2_arch_guard.sh": {
+   "needs": [],
+   "why": "sim/qengine/tier2.sh refuses ARM hosts without side effects"
+  }
+ },
+ "manual": {
+  "tools/az01-packer/test_sclive4_bootstrap.sh": {
+   "how": "JC11S_ROOTFS=<unpacked PRIME4PLUS rootfs> bash tools/az01-packer/test_sclive4_bootstrap.sh; AZ04=1 bash tools/az01-packer/test_sclive4_bootstrap.sh (root, enginex-run sandbox)",
+   "why": "gen-2 boot sandbox, needs a fixture rootfs (release checklist section 2)"
+  },
+  "tools/az01-packer/test_gen2_ssh_password.sh": {
+   "how": "runs inside test_sclive4_bootstrap.sh",
+   "why": "helper of the bootstrap sandbox"
+  },
+  "tools/az01-packer/test_jc11s_firstboot.sh": {
+   "how": "runs inside test_sclive4_bootstrap.sh",
+   "why": "helper of the bootstrap sandbox"
+  },
+  "tools/az01-packer/test_gen2_systemd_activate.sh": {
+   "how": "bash tools/az01-packer/test_gen2_systemd_activate.sh (root, real systemd)",
+   "why": "starts real systemd units in a transient scope"
+  },
+  "tools/az01-packer/test_console_link_sandbox.sh": {
+   "how": "bash tools/az01-packer/test_console_link_sandbox.sh (bare: it takes the heavy lock itself)",
+   "why": "Engine sandbox"
+  },
+  "tools/az01-packer/test_data_full_sandbox.sh": {
+   "how": "bash tools/az01-packer/test_data_full_sandbox.sh (bare: it takes the heavy lock itself)",
+   "why": "Engine sandbox"
+  },
+  "tools/az01-packer/test_controller_qml_compile.sh": {
+   "how": "enginex-run sandbox -- bash tools/az01-packer/test_controller_qml_compile.sh",
+   "why": "Engine sandbox"
+  },
+  "tools/az01-packer/test_beatjump_pads_sandbox.sh": {
+   "how": "enginex-run sandbox -- bash tools/az01-packer/test_beatjump_pads_sandbox.sh",
+   "why": "Engine sandbox"
+  },
+  "tools/az01-packer/test_led_brightness_sandbox.sh": {
+   "how": "enginex-run exclusive -- bash tools/az01-packer/test_led_brightness_sandbox.sh",
+   "why": "Engine sandbox with timing limits"
+  },
+  "tools/az01-packer/test_fx_selector_sandbox.sh": {
+   "how": "enginex-run sandbox -- bash tools/az01-packer/test_fx_selector_sandbox.sh",
+   "why": "Engine sandbox"
+  },
+  "tools/az01-packer/test_prime4_views_sandbox.sh": {
+   "how": "enginex-run sandbox -- bash tools/az01-packer/test_prime4_views_sandbox.sh",
+   "why": "Engine sandbox"
+  },
+  "tools/az01-packer/test_timesync_sandbox.sh": {
+   "how": "enginex-run sandbox -- bash tools/az01-packer/test_timesync_sandbox.sh",
+   "why": "Engine sandbox"
+  },
+  "tools/az01-packer/test_reverb_sandbox.sh": {
+   "how": "enginex-run sandbox -- bash tools/az01-packer/test_reverb_sandbox.sh",
+   "why": "Engine sandbox (PRIME 4)"
+  },
+  "tools/az01-packer/test_mixstream_collection.sh": {
+   "how": "after mixstream-sandbox.sh, as its header says",
+   "why": "Engine sandbox"
+  },
+  "tools/mods/test_mods_chroot.sh": {
+   "how": "sh tools/mods/test_mods_chroot.sh <rootfs-dir> <armv7|arm64> (root)",
+   "why": "Mods in a chroot of an unpacked rootfs"
+  },
+  "tools/az01-packer/test_colorfx_property.c": {
+   "how": "the Color FX sandbox (checklist row naming test_colorfx_property)",
+   "why": "sandbox-only C driver"
+  },
+  "tools/az01-packer/led_brightness_driver.c": {
+   "how": "test_led_brightness_sandbox.sh",
+   "why": "sandbox-only C driver"
+  },
+  "tools/az01-packer/browse-icon-sandbox.sh": {
+   "how": "enginex-run sandbox -- bash tools/az01-packer/browse-icon-sandbox.sh",
+   "why": "Engine sandbox (browse icons)"
+  },
+  "kernel-modules/test_hfsplusx_qemu.sh": {
+   "how": "enginex-run sandbox -- bash kernel-modules/test_hfsplusx_qemu.sh (see its header)",
+   "why": "ARMv7 QEMU stress harness of hfsplusx.ko"
+  },
+  "prototypes/hfs-lkl/test_lklfuse_qemu.sh": {
+   "how": "enginex-run sandbox -- bash prototypes/hfs-lkl/test_lklfuse_qemu.sh (see its header)",
+   "why": "ARMv7 QEMU harness of lklfuse"
+  },
+  "sim/nspawn-boot/test_boot.sh": {
+   "how": "enginex-run sandbox -- bash sim/nspawn-boot/test_boot.sh (see its header)",
+   "why": "real-image boot smoke test in systemd-nspawn"
+  }
+ }
+}

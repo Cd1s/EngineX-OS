@@ -1,27 +1,37 @@
 #!/usr/bin/env python3
-"""Implementation of tools/dev/test.sh: fast tier (pure Go + Python) and ARM tier, one summary, one exit code.
+"""Implementation of tools/dev/test.sh: one ARM build host runs every selected test (Go, Python, C, bash).
 
-  tools/dev/test.sh [--full] [--no-cache] [--base REF] [--into BRANCH] [--no-arm] [--list] [--report DIR]
+  tools/dev/test.sh [--full] [--list [--json]] [--base REF] [--into BRANCH] [--host HOST] [--exclusive]
+                    [--no-cache] [--strict] [--report DIR]
 
-Targeted (default): files changed against the merge base with origin/<BRANCH> (default agent/5306-integration)
-plus uncommitted and untracked files -> gofmt on changed Go files, go vet and go test -race on the touched Go
-packages and everything that imports them, and the mapped Python / shell tests (tools/dev/testmap.py).
---full: every Go package, Python directory and shell test. --no-cache: go test -count=1.
-Fast tier runs on the x86 host ENGINEX_FAST_HOST (here when this is that host, else through remote-build);
-the ARM tier (tools/dev/arm-tests.txt) runs on one of ENGINEX_BUILD_HOSTS under the heavy lock, at the same time.
-Settings come from the environment, else from ~/.config/enginex/dev.env (KEY=VALUE lines).
+Targeted (default): files changed against the merge base with origin/<BRANCH> (default agent/5306-batch2), plus
+uncommitted and untracked files, are mapped to tests by tools/dev/testmap.py: gofmt of the changed Go files, go vet
+and go test -race of the touched packages and every package that imports them (a package whose only change is in
+its _test.go files or testdata runs alone: nothing else compiles those), the whole test file of a Python change
+(the whole tools/az01-packer/test_ui_mod.py for the pack generator, in parallel shards), the C tests of the release
+checklist with all their variants, and the automatic bash tests. Engine sandboxes the change selects are named with
+their commands (the lane runs them; they need `enginex-run`), never silently dropped.
+--full: every Go package, Python directory, C test and automatic bash test (the merge train).
+--list: print the selection and why, and run nothing (needs only git and Python: works anywhere).
+
+The plan is made here; the tree is copied with remote-build to one host of ENGINEX_BUILD_HOSTS (environment or
+~/.config/enginex/dev.env), the least busy one that has what the plan needs (GCC 14 and the firmware lab for C tests
+and the hook rebuild), and runs there inside `enginex-run sandbox` (`--exclusive`: `enginex-run exclusive`, for the
+merge train and timing work), so lanes never slow an exclusive job and never take the heavy lock themselves.
+There `go list` re-checks the Go selection (it can only add packages). One summary, one exit code.
 """
-import pathlib, argparse, hashlib, json, os, re, shutil, socket, subprocess, sys, tempfile, threading, time
+import argparse, hashlib, json, os, pathlib, re, shutil, socket, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import gorun  # noqa: E402
+import gotree  # noqa: E402
 import testmap  # noqa: E402
 
-LOCKS = {}
 MARK = 'ENGINEX_RESULT_JSON '
-LOCK = '/var/lock/enginex-heavy.lock'
 PLAN_NAME = '.enginex-test-plan.json'
+DEFAULT_INTO = 'agent/5306-batch2'
+SANDBOX_ENGINES = ('e504', 'e530', 'esl4', 'eaz04')
 
 
 def load_env():
@@ -41,44 +51,13 @@ def git(root, *args):
     return run(['git', '-C', root, *args]).stdout
 
 
-def load_arm(path):
-    entries = []
-    for n, line in enumerate(pathlib.Path(path).read_text().splitlines(), 1):
-        body, _, reason = line.partition('#')
-        f = body.split()
-        if not f:
-            continue
-        if len(f) < 2 or not reason.strip():
-            raise SystemExit(f'{path}:{n}: need `go <pkg-dir> <Test|*>`, `py <dir> <id>` or `sh <script>`, then `# reason`')
-        entries.append({'kind': f[0], 'target': f[1], 'id': f[2] if len(f) > 2 else '*', 'reason': reason.strip()})
-    return entries
-
-
-def go_closure(root, dirs):
-    """Package dirs plus every package that imports them, directly, transitively or from its tests."""
-    fmt = '{{.ImportPath}}\t{{.Dir}}\t{{join .Imports " "}} {{join .TestImports " "}} {{join .XTestImports " "}}'
-    out = run(['go', 'list', '-e', '-f', fmt, './...'], cwd=root)
-    mod = run(['go', 'list', '-m'], cwd=root).stdout.strip()
-    rel, users = {}, {}
-    for line in out.stdout.splitlines():
-        imp, d, deps = line.split('\t')
-        rel[imp] = os.path.relpath(d, root)
-        for dep in deps.split():
-            users.setdefault(dep, set()).add(imp)
-    want = {imp for imp, d in rel.items() if d in dirs}
-    todo = list(want)
-    while todo:
-        for u in users.get(todo.pop(), ()):
-            if u not in want:
-                want.add(u); todo.append(u)
-    return sorted(rel[i] for i in want)
-
+# ---------------------------------------------------------------- the plan (made where test.sh is called)
 
 def make_plan(a, root):
-    plan = {'mode': 'full' if a.full else 'targeted', 'no_cache': a.no_cache, 'strict': a.strict or a.no_cache, 'base': None, 'changed': []}
-    arm = load_arm(os.path.join(HERE, 'arm-tests.txt'))
+    plan = {'mode': 'full' if a.full else 'targeted', 'no_cache': a.no_cache, 'strict': a.strict or a.no_cache,
+            'base': None, 'changed': [], 'why': {}, 'manual': {}, 'unmapped': []}
     if a.full:
-        sel = testmap.full_plan(); changed = []
+        sel = testmap.full_plan(root); changed = []
     else:
         base = a.base or run(['git', '-C', root, 'merge-base', 'HEAD', f'origin/{a.into}']).stdout.strip()
         if not base:
@@ -87,83 +66,94 @@ def make_plan(a, root):
         plan['base'] = base
         changed = [p for p in git(root, 'diff', '--name-only', '--no-renames', base).splitlines()
                    + git(root, 'ls-files', '-o', '--exclude-standard').splitlines() if p and p != PLAN_NAME]
-        sel = testmap.map_paths(changed, root)
+        sel = testmap.map_paths(sorted(set(changed)), root)
     plan['changed'] = sorted(set(changed))
-    go_dirs = sorted(d for d in sel.go if os.path.isdir(os.path.join(root, d)))
     plan['go_all'] = sel.go_all
-    plan['go'] = [] if sel.go_all else go_closure(root, set(go_dirs)) if go_dirs else []
+    code = sorted(d for d in sel.go_code if os.path.isdir(os.path.join(root, d)))
+    plan['go_code'] = code
+    plan['go_static'] = [] if sel.go_all else sorted(set(gotree.static_closure(root, code)) | {d for d in sel.go if os.path.isdir(os.path.join(root, d))})
+    plan['go'] = plan['go_static']
     plan['gofmt'] = None if a.full else [p for p in plan['changed'] if p.endswith('.go') and os.path.isfile(os.path.join(root, p))]
     by_dir = {}
     for d, f in sel.py:
         by_dir.setdefault(d, set()).add(f)
     plan['py'] = [{'dir': d, 'specs': [] if None in fs else sorted(fs)} for d, fs in sorted(by_dir.items())]  # no specs: whole dir
     plan['sh'] = sorted(sel.sh)
-    go_set = set(plan['go'])
-    py_files = {(d, f) for d, f in sel.py if f}
-    py_dirs_full = {d for d, f in sel.py if f is None}
-    entries = []
-    for e in arm:
-        if e['kind'] == 'go':
-            hit = sel.go_all or e['target'] in go_set
-        elif e['kind'] == 'py':
-            mod = e['id'].split('.')[0]
-            hit = e['target'] in py_dirs_full or (e['target'], mod.removesuffix('.py') + '.py') in py_files
-        else:
-            hit = e['target'] in sel.sh or e['target'] in testmap.FULL_SH and a.full
-        entries.append(dict(e, selected=bool(hit)))
-    plan['arm'] = entries
+    plan['c'] = sorted(sel.c)
+    plan['why'] = {k: v for k, v in sorted(sel.why.items())}
+    plan['manual'] = dict(sorted(sel.manual.items()))
+    plan['unmapped'] = sorted(sel.unmapped)
     plan['changed_tests'] = [] if a.full else sorted(map(list, testmap.changed_tests(root, plan['base'], plan['changed'])))
+    plan['needs'] = needs_of(plan)
     return plan
 
 
-# ---------------------------------------------------------------- execution (fast tier and ARM tier)
+def needs_of(plan):
+    """What the build host must have: gcc14 (the hook rebuild, the C tests' -Werror builds), lab files."""
+    needs = set()
+    sh_auto = testmap.SH_TESTS['auto']
+    for s in plan['sh']:
+        needs |= set(sh_auto.get(s, {}).get('needs', []))
+    if plan['c']:
+        needs.add('gcc14')
+        for src in plan['c']:
+            text = json.dumps(testmap.C_TESTS['tests'].get(src) or testmap.C_TESTS['default']) + testmap.C_TESTS['default_args'].get(src, '')
+            needs |= {'lab:' + e for e in SANDBOX_ENGINES if '{' + e + '}' in text}
+            if '{lab}' in text or 'lab' in (testmap.C_TESTS['tests'].get(src) or testmap.C_TESTS['default']).get('needs', []):
+                needs.add('lab')
+    return sorted(needs)
+
+
+def print_plan(plan):
+    go = ['./...'] if plan['go_all'] else plan['go']
+    print(f"== tools/dev/test.sh {plan['mode']} plan{' vs ' + plan['base'][:12] if plan['base'] else ''}: "
+          f"{len(plan['changed'])} changed files ==")
+    print(f"go test -race ({len(go)} packages): {' '.join(go) if go else '-'}")
+    if plan['go_code']:
+        print(f"  changed Go code in: {' '.join(plan['go_code'])} (their importers are included)")
+    for item in plan['py']:
+        print(f"python {item['dir']}: {' '.join(item['specs']) if item['specs'] else 'every test file'}")
+    print(f"C tests ({len(plan['c'])}, every variant of tools/dev/c-tests.json): {' '.join(plan['c']) or '-'}")
+    print(f"bash tests: {' '.join(plan['sh']) or '-'}")
+    print(f"host needs: {', '.join(plan['needs']) or 'any build host'}")
+    if plan['manual']:
+        print(f"manual (Engine sandboxes this change selects; test.sh does not run them):")
+        for path, info in plan['manual'].items():
+            print(f"  {path}: {info['how']}  [{info['why']}]")
+    if plan['unmapped']:
+        print(f"unmapped (no test names these files): {' '.join(plan['unmapped'][:20])}")
+    if plan['why']:
+        print('why:')
+        for key, reasons in plan['why'].items():
+            print(f"  {key} <- {', '.join(reasons[:3])}{' ...' if len(reasons) > 3 else ''}")
+
+
+# ---------------------------------------------------------------- execution (on the build host)
 
 class Step:
     def __init__(self, name):
-        self.name, self.secs, self.ok, self.note, self.tail = name, 0.0, None, '', ''
+        self.name, self.secs, self.ok, self.note, self.tail, self.out = name, 0.0, None, '', '', ''
 
 
-def spawn(step, cmd, env, cwd=None, quiet=False):
+def spawn(step, cmd, env, cwd=None, timeout=None):
     t0 = time.monotonic()
-    p = subprocess.run(cmd, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+    try:
+        p = subprocess.run(cmd, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                           errors='replace', timeout=timeout)
+        rc, out = p.returncode, p.stdout
+    except subprocess.TimeoutExpired as e:
+        rc, out = 124, (e.stdout or '') if isinstance(e.stdout, str) else ''
+        out += f'\n(timed out after {timeout}s)'
     step.secs = time.monotonic() - t0
-    step.ok = p.returncode == 0
-    lines = p.stdout.splitlines()
-    step.tail = '\n'.join(lines[-150:]) if not step.ok else ''
-    step.out = p.stdout
+    step.ok = rc == 0
+    step.out = out
+    step.tail = '\n'.join(out.splitlines()[-150:]) if not step.ok else ''
     print(f'[{step.name}] {"ok" if step.ok else "FAILED"} {step.secs:.1f}s', file=sys.stderr, flush=True)
-    return p
-
-
-def prepare(plan_path):
-    """Own TMPDIR (world-writable: some tests drop privileges) and a git index for tests that call git ls-files."""
-    os.nice(10)
-    # Same path on every run of this tree, so Go's test cache (keyed on TMPDIR) keeps hitting.
-    tmp, lock = gorun.stable_dir('/var/tmp', 'enginex-fast-' + hashlib.sha1(os.getcwd().encode()).hexdigest()[:8])
-    LOCKS[tmp] = lock
-    env = dict(os.environ, TMPDIR=tmp)
-    made_git = False
-    if not os.path.exists('.git'):
-        subprocess.run(['git', 'init', '-q'], check=True)
-        env['GIT_INDEX_FILE'] = os.path.join(tmp, 'index')
-        subprocess.run(['git', 'add', '-A'], env=env, check=True, capture_output=True)
-        made_git = True
-    return tmp, env, made_git
-
-
-def finish(tmp, made_git):
-    gorun.release_dir(tmp, LOCKS.pop(tmp, None))  # the directory created in prepare()
-    if made_git:
-        shutil.rmtree('.git', ignore_errors=True)
-
-
-def pairs_file(path, rows):
-    pathlib.Path(path).write_text(''.join(f'{d} {t}\n' for d, t in rows))
+    return rc
 
 
 def cpu_budget():
-    """Cores this run may use: the idle cores of this host right now (other agents share it), between 4 and 12.
-    Timing-sensitive tests fail when a shared host is saturated, so the runners never take more than this."""
+    """Cores this run may use: the idle cores of this host right now (other lanes share it), between 2 and 12."""
     if os.environ.get('ENGINEX_CPU_BUDGET'):
         return max(1, int(os.environ['ENGINEX_CPU_BUDGET']))
 
@@ -171,164 +161,178 @@ def cpu_budget():
         v = list(map(int, pathlib.Path('/proc/stat').read_text().splitlines()[0].split()[1:]))
         return sum(v), v[3] + v[4]
     t1, i1 = snap(); time.sleep(1); t2, i2 = snap()
-    return max(4, min(12, int((i2 - i1) / max(1, t2 - t1) * (os.cpu_count() or 4))))
+    return max(2, min(12, round((i2 - i1) / max(1, t2 - t1) * (os.cpu_count() or 4))))
 
 
-def exec_fast(plan):
-    tmp, env, made_git = prepare(None)
+def gcc_major():
+    out = run(['gcc', '-dumpversion']).stdout.strip()
+    return out.split('.')[0] if out else ''
+
+
+def exec_plan(plan_path):
+    plan = json.loads(pathlib.Path(plan_path).read_text())
+    if os.uname().machine not in ('aarch64', 'arm64'):
+        print(MARK + json.dumps({'steps': [{'name': 'host', 'secs': 0, 'ok': False, 'note': '',
+                                            'tail': f'tools/dev/test.sh runs on an ARM build host (this is {os.uname().machine})'}],
+                                 'go': None, 'py': {}, 'c': None}))
+        return 0
+    os.nice(5)
+    name = 'enginex-test-' + hashlib.sha1(os.getcwd().encode()).hexdigest()[:8]
+    tmp, lock = gorun.stable_dir('/var/tmp', name)  # same TMPDIR each run of this tree: Go's test cache keeps hitting
+    env = dict(os.environ, TMPDIR=tmp, GOFLAGS=(os.environ.get('GOFLAGS', '') + ' -buildvcs=false').strip())
+    made_git = False
+    if not os.path.exists('.git'):  # tests that call git ls-files see the tree, as in the dev line's full run
+        subprocess.run(['git', 'init', '-q'], check=True)
+        env['GIT_INDEX_FILE'] = os.path.join(tmp, 'index')
+        subprocess.run(['git', 'add', '-A'], env=env, check=True, capture_output=True)
+        made_git = True
     budget = cpu_budget()
-    has_go, has_py = bool(plan['go'] or plan['go_all']), bool(plan['py'])
-    go_jobs = budget if not has_py else max(2, round(budget * 0.6))
-    py_jobs = budget if not has_go else max(2, budget - go_jobs)
-    go_jobs, py_jobs = int(os.environ.get('ENGINEX_GO_JOBS', go_jobs)), int(os.environ.get('ENGINEX_PY_JOBS', py_jobs))
-    print(f'[fast] cpu budget {budget}: go test {go_jobs} processes, python {py_jobs} workers', file=sys.stderr, flush=True)
-    results = {'steps': [], 'go': None, 'py': {}}
-    lock = threading.Lock()
-    arm_go = [(e['target'], e['id']) for e in plan['arm'] if e['kind'] == 'go']
-    arm_py = [e for e in plan['arm'] if e['kind'] == 'py']
-    arm_sh = {e['target'] for e in plan['arm'] if e['kind'] == 'sh'}
-    defer_go = os.path.join(tmp, 'defer-go.txt'); pairs_file(defer_go, arm_go)
-    state = os.path.expanduser(os.environ.get('ENGINEX_DEV_STATE', '~/.cache/enginex-dev')); os.makedirs(state, exist_ok=True)
+    state = os.path.expanduser(os.environ.get('ENGINEX_DEV_STATE', '~/.cache/enginex-dev'))
+    os.makedirs(state, exist_ok=True)
+    results = {'steps': [], 'go': None, 'py': {}, 'c': None, 'budget': budget, 'host_gcc': gcc_major(),
+               'go_added_by_go_list': [], 'is_root': os.geteuid() == 0}
+    print(f'[exec] {socket.gethostname()}: cpu budget {budget}, gcc {results["host_gcc"]}, root {results["is_root"]}', file=sys.stderr, flush=True)
 
     def add(step):
-        with lock:
-            results['steps'].append({'name': step.name, 'secs': round(step.secs, 1), 'ok': step.ok, 'note': step.note, 'tail': step.tail})
+        results['steps'].append({'name': step.name, 'secs': round(step.secs, 1), 'ok': step.ok, 'note': step.note, 'tail': step.tail})
 
-    def go_chain():
+    try:
+        # Go selection: the plan's static closure, plus whatever `go list` finds that it missed.
         pk = ['./...'] if plan['go_all'] else [f'./{d}' if d != '.' else '.' for d in plan['go']]
+        if plan['go_code'] and not plan['go_all']:
+            gl = gotree.go_list_closure('.', set(plan['go_code']), env=env)
+            if gl is not None:
+                extra = sorted(set(gl) - set(plan['go']))
+                results['go_added_by_go_list'] = extra
+                pk += [f'./{d}' if d != '.' else '.' for d in extra]
         if plan['gofmt'] is None or plan['gofmt']:
             s = Step('gofmt'); spawn(s, ['gofmt', '-l'] + (['.'] if plan['gofmt'] is None else plan['gofmt']), env)
             if s.ok and s.out.strip():
                 s.ok, s.tail = False, 'not gofmt-clean:\n' + s.out
             add(s)
-        if not pk:
-            return
-        vet, gt = Step(f'go vet ({len(pk)} pkg args)'), Step('go test -race')
-        t = threading.Thread(target=lambda: (spawn(vet, ['go', 'vet'] + pk, env), add(vet))); t.start()
-        out_json = os.path.join(tmp, 'go.json')
-        cmd = [sys.executable, os.path.join(HERE, 'gorun.py'), '--seed', os.path.join(HERE, 'go-slow.json'), '--defer', defer_go,
-               '--json', out_json, '--jobs', str(go_jobs), '-p', str(max(2, go_jobs // 2))] + (['--no-cache'] if plan['no_cache'] else []) + ([] if plan['strict'] else ['--rerun']) + pk
-        spawn(gt, cmd, env)
-        if os.path.exists(out_json):
-            results['go'] = json.loads(pathlib.Path(out_json).read_text())
-            gt.note = f"{results['go']['run']} tests"
-        gt.tail = gt.tail or ''
-        add(gt); t.join()
-
-    def py_chain():
+        if pk:
+            s = Step(f'go vet ({len(pk)} pkg args)'); spawn(s, ['go', 'vet'] + pk, env); add(s)
         for item in plan['py']:
             d = item['dir']; s = Step(f'py {d}')
-            defer = os.path.join(tmp, 'defer-py-' + d.replace('/', '_') + '.txt')
-            pathlib.Path(defer).write_text(''.join(f"{e['id']}\n" for e in arm_py if e['target'] == d))
             out_json = os.path.join(tmp, 'py-' + d.replace('/', '_') + '.json')
             cmd = [sys.executable, os.path.join(HERE, 'pyrun.py'), d] + item['specs'] + [
-                '--defer', defer, '--json', out_json, '-j', str(py_jobs)] + ([] if plan['strict'] else ['--rerun']) + [
-                '--timings', os.path.join(state, 'pyrun-' + d.replace('/', '_') + '.json')]
+                '--json', out_json, '-j', str(budget), '--seed', os.path.join(HERE, 'py-slow.json'),
+                '--timings', os.path.join(state, 'pyrun-' + d.replace('/', '_') + '.json')] + ([] if plan['strict'] else ['--rerun'])
             spawn(s, cmd, env)
             if os.path.exists(out_json):
-                results['py'][d] = json.loads(pathlib.Path(out_json).read_text()); s.note = f"{results['py'][d]['run']} tests"
+                results['py'][d] = json.loads(pathlib.Path(out_json).read_text())
+                r = results['py'][d]
+                s.note = f"{r['run']} tests in {len(r.get('shards', []))} shards"
             add(s)
-        for script in plan['sh']:
-            if script in arm_sh:
+        if pk:
+            s = Step('go test -race'); out_json = os.path.join(tmp, 'go.json')
+            cmd = [sys.executable, os.path.join(HERE, 'gorun.py'), '--seed', os.path.join(HERE, 'go-slow.json'),
+                   '--json', out_json, '--jobs', str(budget), '-p', str(max(2, budget // 2))] + (
+                   ['--no-cache'] if plan['no_cache'] else []) + ([] if plan['strict'] else ['--rerun']) + pk
+            spawn(s, cmd, env)
+            if os.path.exists(out_json):
+                results['go'] = json.loads(pathlib.Path(out_json).read_text())
+                g = results['go']
+                s.note = f"{g['run']} tests, {sum(1 for v in g['packages'].values() if v.get('cached'))} packages cached"
+            add(s)
+        if plan['c']:
+            s = Step(f"C tests ({len(plan['c'])})"); out_json = os.path.join(tmp, 'c.json')
+            spawn(s, [sys.executable, os.path.join(HERE, 'crun.py'), '-j', str(budget), '--json', out_json] + plan['c'], env)
+            if os.path.exists(out_json):
+                results['c'] = json.loads(pathlib.Path(out_json).read_text())
+                s.note = f"{len(results['c']['results'])} variants, {len(results['c']['skipped'])} runs skipped"
+            add(s)
+        for script in sorted(plan['sh'], key=lambda x: x == testmap.OVERLAY):  # the overlay test last, without .git
+            info = testmap.SH_TESTS['auto'].get(script, {})
+            s = Step(f'sh {script}')
+            why_not = []
+            if 'root' in info.get('needs', []) and os.geteuid() != 0:
+                why_not.append('needs root')
+            if 'gcc14' in info.get('needs', []) and results['host_gcc'] != '14':
+                why_not.append(f'needs GCC 14 (host has {results["host_gcc"]})')
+            if why_not:
+                s.ok, s.note = True, 'SKIPPED: ' + ', '.join(why_not)
+                results.setdefault('sh_skipped', []).append([script, ', '.join(why_not)])
+                add(s)
                 continue
-            s = Step(f'sh {script}'); spawn(s, ['bash', script], env); add(s)
-
-    try:
-        ts = [threading.Thread(target=go_chain), threading.Thread(target=py_chain)]
-        for t in ts: t.start()
-        for t in ts: t.join()
+            sh_env = dict(env)
+            if script == testmap.OVERLAY and made_git:  # the dev line runs it without the throwaway repository
+                sh_env.pop('GIT_INDEX_FILE', None)
+                shutil.rmtree('.git', ignore_errors=True)
+                made_git = False
+            spawn(s, ['bash', script], sh_env, timeout=int(os.environ.get('ENGINEX_SH_TIMEOUT', '3600')))
+            add(s)
     finally:
-        finish(tmp, made_git)
+        gorun.release_dir(tmp, lock)
+        if made_git:
+            shutil.rmtree('.git', ignore_errors=True)
     print(MARK + json.dumps(results))
     return 0
 
 
-def exec_arm(plan):
-    tmp, env, made_git = prepare(None)
-    print('ENGINEX_LOCK_ACQUIRED', flush=True)
-    results = {'steps': [], 'go': None, 'py': {}}
-    sel = [e for e in plan['arm'] if e['selected']]
+# ---------------------------------------------------------------- host choice and the remote run
+
+def lab_path(root):
+    if os.environ.get('ENGINEX_LAB'):
+        return os.environ['ENGINEX_LAB']
     try:
-        go_rows = [(e['target'], e['id']) for e in sel if e['kind'] == 'go']
-        if go_rows:
-            only = os.path.join(tmp, 'only-go.txt'); pairs_file(only, go_rows)
-            pk = sorted({'./' + d for d, _ in go_rows}); out_json = os.path.join(tmp, 'go.json'); s = Step('arm go test -race')
-            spawn(s, [sys.executable, os.path.join(HERE, 'gorun.py'), '--only', only, '--json', out_json, '-p', '4']
-                  + (['--no-cache'] if plan['no_cache'] else []) + pk, env)
-            if os.path.exists(out_json):
-                results['go'] = json.loads(pathlib.Path(out_json).read_text()); s.note = f"{results['go']['run']} tests"
-            results['steps'].append(vars_of(s))
-        for d in sorted({e['target'] for e in sel if e['kind'] == 'py'}):
-            specs = [e['id'] for e in sel if e['kind'] == 'py' and e['target'] == d]
-            out_json = os.path.join(tmp, 'py.json'); s = Step(f'arm py {d}')
-            spawn(s, [sys.executable, os.path.join(HERE, 'pyrun.py'), d, *specs, '--json', out_json, '-j', '4'], env)
-            if os.path.exists(out_json):
-                results['py'][d] = json.loads(pathlib.Path(out_json).read_text()); s.note = f"{results['py'][d]['run']} tests"
-            results['steps'].append(vars_of(s))
-        for e in sel:
-            if e['kind'] == 'sh':
-                s = Step(f"arm sh {e['target']}"); spawn(s, ['bash', e['target']], env); results['steps'].append(vars_of(s))
-    finally:
-        finish(tmp, made_git)
-    print(MARK + json.dumps(results))
-    return 0
+        m = re.search(r"^legacy_lab='([^']+)'", pathlib.Path(root, 'rootfs-overlay/usr/libexec/enginex-migration').read_text(), re.M)
+        return m.group(1) if m else ''
+    except OSError:
+        return ''
 
 
-def vars_of(s):
-    return {'name': s.name, 'secs': round(s.secs, 1), 'ok': s.ok, 'note': s.note, 'tail': s.tail}
-
-
-# ---------------------------------------------------------------- orchestration
-
-def is_local(host):
-    if os.environ.get('ENGINEX_FAST_FORCE_REMOTE') == '1':
-        return False
-    if host in ('local', 'localhost') or host in {socket.gethostname(), socket.gethostname().split('.')[0], socket.getfqdn()}:
-        return True
+def probe(host, needs, lab):
+    """(score, reason): lower is better; None when the host lacks something the plan needs."""
     sshctl = shutil.which('sshctl')
-    if sshctl:
-        theirs = run([sshctl, 'run', host, '--no-stdin', '--timeout', '20s', '--argv', 'cat', '/proc/sys/kernel/random/boot_id']).stdout.strip()
-        return bool(theirs) and theirs == pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
-    return False
+    if not sshctl:
+        return 0, 'no sshctl: not probed'
+    checks = ' '.join(f"[ -e '{lab}/{testmap.C_TESTS['engines'][n.split(':')[1]]}' ] && echo has:{n} ;" for n in needs if n.startswith('lab:'))
+    script = (". /etc/profile.d/buildtools.sh 2>/dev/null; echo gcc:$(gcc -dumpversion); echo arch:$(uname -m); "
+              f"[ -d '{lab}' ] && echo has:lab; {checks} "
+              "echo load:$(cut -d' ' -f1 /proc/loadavg); echo cpus:$(nproc); "
+              "echo heavy:$(ps -eo args= | grep -c '[f]lock.*enginex-heavy'); echo slots:$(ls /var/lock/enginex-slot*.lock 2>/dev/null | wc -l)")
+    out = run([sshctl, 'run', host, '--no-stdin', '--timeout', '20s', '--argv', 'sh', '-c', script]).stdout
+    kv = dict(line.split(':', 1) for line in out.splitlines() if ':' in line and not line.startswith('ssm'))
+    if not kv:
+        return None, 'unreachable'
+    if kv.get('arch') not in ('aarch64', 'arm64'):
+        return None, f"not ARM ({kv.get('arch')})"
+    have = {line[4:] for line in out.splitlines() if line.startswith('has:')}
+    if 'gcc14' in needs and kv.get('gcc', '').split('.')[0] != '14':
+        return None, f"gcc {kv.get('gcc')}"
+    for n in needs:
+        if (n == 'lab' or n.startswith('lab:')) and n not in have:
+            return None, f'no {n}'
+    try:
+        load, cpus, heavy = float(kv.get('load', 9)), int(kv.get('cpus', 1)), int(kv.get('heavy', 0))
+    except ValueError:
+        return None, 'unparsable probe'
+    return heavy * 10 + load / cpus, f"load {load}/{cpus} cpus, {heavy} heavy-lock jobs"
+
+
+def pick_host(hosts, needs, lab):
+    best, best_score, notes = None, None, []
+    for h in hosts:
+        score, why = probe(h, needs, lab)
+        notes.append(f'{h}: {why}')
+        if score is not None and (best is None or score < best_score):
+            best, best_score = h, score
+    return best, notes
 
 
 def remote(host, name, command, root, timeout):
-    """remote-build to host; returns (returncode, output, seconds until the command line produced output)."""
+    """remote-build to host; returns (returncode, output)."""
     rb = os.environ.get('REMOTE_BUILD_BIN') or shutil.which('remote-build')
     if not rb:
-        return 2, 'remote-build is required\n', 0.0
+        return 2, 'remote-build is required\n'
     env = dict(os.environ, REMOTE_BUILD_HOST=host, REMOTE_BUILD_TIMEOUT=timeout)
-    t0 = time.monotonic()
-    p = subprocess.Popen([rb, '--name', name, '--clean', '--', command], cwd=root, env=env, stdout=subprocess.PIPE,
-                         stderr=subprocess.STDOUT, text=True, errors='replace')
-    lines, acquired = [], 0.0
-    for line in p.stdout:
-        lines.append(line)
-        if line.startswith('ENGINEX_LOCK_ACQUIRED') and not acquired:
-            acquired = time.monotonic() - t0
-    p.wait()
+    p = subprocess.run([rb, '-C', root, '--name', name, '--clean', '--', command], env=env, stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True, errors='replace')
     sshctl = shutil.which('sshctl')
     if sshctl and not os.environ.get('ENGINEX_KEEP_REMOTE'):  # the exact directory remote-build created
         run([sshctl, 'run', host, '--no-stdin', '--timeout', '60s', '--argv', 'rm', '-rf', '--', f'/root/build/{name}'])
-    return p.returncode, ''.join(lines), acquired
-
-
-def pick_arm_host(hosts, gcc14=False):
-    best, score = None, 10 ** 9
-    sshctl = shutil.which('sshctl')
-    for h in hosts:
-        q = 10 ** 6
-        if gcc14 and sshctl:  # the merge train's full run rebuilds hooks, which needs GCC 14
-            ver = run([sshctl, 'run', h, '--no-stdin', '--timeout', '20s', '--argv', 'gcc', '-dumpversion']).stdout.strip()
-            if ver.split('.')[0] != '14':
-                continue
-        if sshctl:
-            out = run([sshctl, 'run', h, '--no-stdin', '--timeout', '20s', '--argv', 'sh', '-c',
-                       "ps -eo args= | awk '/[f]lock \\/var\\/lock\\/enginex-heavy\\.lock/ {n++} END {print n+0}'"]).stdout.strip()
-            q = int(out) if out.isdigit() else q
-        if best is None or q < score:
-            best, score = h, q
-    return best
+    return p.returncode, p.stdout
 
 
 def parse_result(out):
@@ -338,160 +342,143 @@ def parse_result(out):
     return None
 
 
-def sync_clone(root, clone):
-    os.makedirs(clone, exist_ok=True)
-    if not os.path.isdir(os.path.join(clone, '.git')):
-        subprocess.run(['git', 'init', '-q', clone], check=True)
-    subprocess.run(['git', '-C', clone, 'fetch', '-q', root, 'HEAD'], check=True)
-    subprocess.run(['git', '-C', clone, 'checkout', '-q', '--detach', '-f', 'FETCH_HEAD'], check=True)
-    subprocess.run(['git', '-C', clone, 'clean', '-fdxq'], check=True)  # the clone is private to this script
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--full', action='store_true'); ap.add_argument('--no-cache', action='store_true')
     ap.add_argument('--strict', action='store_true', help='no rerun of failed tests (implied by --no-cache)')
-    ap.add_argument('--base'); ap.add_argument('--into', default=os.environ.get('ENGINEX_TEST_TARGET', 'agent/5306-integration'))
-    ap.add_argument('--arm-gcc14', action='store_true', help='pick an ARM host with GCC 14')
-    ap.add_argument('--no-arm', action='store_true', help='do not run the ARM tier (its tests are reported as deferred)')
+    ap.add_argument('--base'); ap.add_argument('--into', default=os.environ.get('ENGINEX_TEST_TARGET', DEFAULT_INTO))
     ap.add_argument('--tree', help='tree under test (default: the git checkout of the current directory)')
-    ap.add_argument('--clone', nargs='?', const='', help='run the fast tier in a persistent clone at a fixed path (Go test cache hits)')
-    ap.add_argument('--list', action='store_true'); ap.add_argument('--report'); ap.add_argument('--top', type=int, default=5)
-    ap.add_argument('--exec-fast'); ap.add_argument('--exec-arm')
+    ap.add_argument('--host', help='this build host (default: the least busy of ENGINEX_BUILD_HOSTS that qualifies)')
+    ap.add_argument('--exclusive', action='store_true', help='enginex-run exclusive instead of sandbox (merge train, timing)')
+    ap.add_argument('--list', action='store_true'); ap.add_argument('--json', action='store_true')
+    ap.add_argument('--report'); ap.add_argument('--top', type=int, default=5)
+    ap.add_argument('--exec', dest='exec_plan')
     a = ap.parse_args()
     load_env()
-    if a.exec_fast or a.exec_arm:
-        plan = json.loads(pathlib.Path(a.exec_fast or a.exec_arm).read_text())
-        return exec_fast(plan) if a.exec_fast else exec_arm(plan)
+    if a.exec_plan:
+        return exec_plan(a.exec_plan)
     root = os.path.abspath(a.tree) if a.tree else git(os.getcwd(), 'rev-parse', '--show-toplevel').strip()
     if not root:
         print('test.sh: not inside a git checkout', file=sys.stderr); return 2
     started = time.monotonic()
     plan = make_plan(a, root)
-    arm_sel = [e for e in plan['arm'] if e['selected']]
-    run_arm = bool(arm_sel) and not a.no_arm
     if a.list:
-        print(json.dumps(plan, indent=1)); return 0
-    host = os.environ.get('ENGINEX_FAST_HOST')
+        print(json.dumps(plan, indent=1) if a.json else '', end='\n' if a.json else '')
+        if not a.json:
+            print_plan(plan)
+        return 0
+    print_plan(plan)
+    nothing = not (plan['go_all'] or plan['go'] or plan['py'] or plan['sh'] or plan['c'])
+    if nothing:
+        return report(a, plan, None, '', started)
+    hosts = [a.host] if a.host else os.environ.get('ENGINEX_BUILD_HOSTS', '').replace(',', ' ').split()
+    if not hosts:
+        print('test.sh: ENGINEX_BUILD_HOSTS is not set (environment or ~/.config/enginex/dev.env)', file=sys.stderr); return 2
+    lab = lab_path(root)
+    host, notes = pick_host(hosts, plan['needs'], lab)
+    print('hosts: ' + '; '.join(notes))
     if not host:
-        print('test.sh: ENGINEX_FAST_HOST is not set (environment or ~/.config/enginex/dev.env)', file=sys.stderr); return 2
-    hosts = os.environ.get('ENGINEX_BUILD_HOSTS', '').replace(',', ' ').split()
-    if run_arm and not hosts:
-        print('test.sh: ENGINEX_BUILD_HOSTS is not set, but the ARM tier is needed', file=sys.stderr); return 2
-    nothing = not (plan['go_all'] or plan['go'] or plan['py'] or plan['sh'] or arm_sel)
+        print(f"test.sh: no build host has what this plan needs ({', '.join(plan['needs'])})", file=sys.stderr); return 1
     plan_path = os.path.join(root, PLAN_NAME)
     pathlib.Path(plan_path).write_text(json.dumps(plan))
-    rows, fast, arm = [], None, None
-    arm_out = {}
-    arm_host = None
+    # One stable remote directory per tree (Go's build cache keys on the path), a private one when it is busy.
+    name = 'enginex-test-' + re.sub(r'[^A-Za-z0-9._-]', '_', os.path.basename(root))[:40] + '-' + hashlib.sha1(root.encode()).hexdigest()[:6]
+    state = os.path.expanduser(os.environ.get('ENGINEX_DEV_STATE', '~/.cache/enginex-dev')); os.makedirs(state, exist_ok=True)
+    guard = open(os.path.join(state, name + '.lock'), 'w')
     try:
-        if nothing:
-            print('test.sh: no mapped tests for the changed files; nothing to run')
-        if run_arm:
-            arm_host = pick_arm_host(hosts, a.arm_gcc14)
-            if not arm_host:
-                print('test.sh: no ARM build host qualifies (GCC 14 required)', file=sys.stderr); return 1
-            name = f'enginex-arm-{os.getpid()}-{int(time.time())}'
-
-            def arm_job():
-                rc, out, waited = remote(arm_host, name, f'flock {LOCK} bash tools/dev/test.sh --exec-arm {PLAN_NAME}', root,
-                                         os.environ.get('ENGINEX_ARM_TIMEOUT', '120m'))
-                arm_out.update(rc=rc, out=out, waited=waited, wall=time.monotonic() - t_arm)
-            t_arm = time.monotonic()
-            arm_thread = threading.Thread(target=arm_job); arm_thread.start()
-        fast_out, fast_wall, fast_where = '', 0.0, host
-        if not nothing and (plan['go_all'] or plan['go'] or plan['py'] or plan['sh']):
-            t0 = time.monotonic()
-            local = is_local(host)
-            if local:
-                cwd = root
-                if a.clone is not None:
-                    clone = a.clone or os.environ.get('ENGINEX_FAST_CLONE') or os.path.expanduser('~/.cache/enginex-fast-clone')
-                    sync_clone(root, clone); cwd = clone
-                p = subprocess.run([sys.executable, os.path.join(HERE, 'devtest.py'), '--exec-fast', plan_path], cwd=cwd,
-                                   stdout=subprocess.PIPE, text=True, errors='replace')
-                rc, fast_out = p.returncode, p.stdout
-            else:
-                name = 'enginex-fast-clone' if a.clone is not None else 'enginex-fast-' + re.sub(r'[^A-Za-z0-9._-]', '_', os.path.basename(root))
-                rc, fast_out, _ = remote(host, name, f'bash tools/dev/test.sh --exec-fast {PLAN_NAME}', root, os.environ.get('ENGINEX_FAST_TIMEOUT', '60m'))
-            fast_wall = time.monotonic() - t0
-            fast = parse_result(fast_out)
-            if fast is None:
-                fast = {'steps': [{'name': 'fast tier', 'secs': round(fast_wall, 1), 'ok': False, 'note': 'no result', 'tail': fast_out[-3000:]}],
-                        'go': None, 'py': {}}
-        if run_arm:
-            arm_thread.join()
-            arm = parse_result(arm_out['out'])
-            if arm is None or arm_out['rc']:
-                arm = arm or {'steps': [], 'go': None, 'py': {}}
-                arm['steps'].append({'name': 'arm tier', 'secs': round(arm_out['wall'], 1), 'ok': False, 'note': 'host ' + str(arm_host),
-                                     'tail': arm_out['out'][-3000:]})
+        import fcntl
+        fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        name += f'-{os.getpid()}'
+    mode = 'exclusive' if a.exclusive else 'sandbox'
+    inner = f'bash tools/dev/test.sh --exec {PLAN_NAME}'
+    command = f'if command -v enginex-run >/dev/null 2>&1; then enginex-run {mode} -- {inner}; else {inner}; fi'
+    print(f'run: {host} ({mode}), /root/build/{name}', flush=True)
+    try:
+        rc, out = remote(host, name, command, root, os.environ.get('ENGINEX_TEST_TIMEOUT', '150m'))
     finally:
         try:
             os.remove(plan_path)
         except OSError:
             pass
-    return report(a, plan, fast, arm, arm_out, host, arm_host, started, arm_sel, run_arm)
+        guard.close()
+    res = parse_result(out)
+    if res is None:
+        res = {'steps': [{'name': 'remote run', 'secs': round(time.monotonic() - started, 1), 'ok': False,
+                          'note': f'host {host}, exit {rc}', 'tail': out[-4000:]}], 'go': None, 'py': {}, 'c': None}
+    res['host'] = host
+    return report(a, plan, res, host, started)
 
 
-def report(a, plan, fast, arm, arm_out, host, arm_host, started, arm_sel, run_arm):
+def report(a, plan, res, host, started):
     ok = True
     print(f"\n== tools/dev/test.sh {plan['mode']}{' vs ' + plan['base'][:12] if plan['base'] else ''}"
-          f" ({len(plan['changed'])} changed files) ==")
-    print(f"{'step':36} {'host':22} {'wall':>8}  result")
-    skipped, deferred, flaky = [], [], []
-    for tier, res, where in (('fast', fast, host), ('arm', arm, arm_host)):
-        if not res:
-            continue
-        for s in res['steps']:
-            ok &= bool(s['ok'])
-            print(f"{s['name'][:36]:36} {str(where)[:22]:22} {s['secs']:7.1f}s  {'ok' if s['ok'] else 'FAILED'}{'  ' + s['note'] if s['note'] else ''}")
-        if res['go']:
-            flaky += [('go ' + x['test'], x['first_failure']) for x in res['go'].get('flaky', [])]
-            skipped += [('go', x['pkg'], x['test'], x['reason']) for x in res['go']['skipped']]
-            deferred += [('go', *x.split(' ', 1)) for x in res['go']['deferred'] if tier == 'fast']
-        for d, r in res['py'].items():
-            flaky += [(f"py {d} {x['id']}", x['first_failure']) for x in r.get('flaky', [])]
-            skipped += [('py', d, x[0], x[1]) for x in r['skipped']]
-            deferred += [('py', d, x) for x in r['deferred'] if tier == 'fast']
-    if run_arm and arm_out:
-        print(f"{'  (arm tier: lock wait incl. sync)':36} {str(arm_host):22} {arm_out['waited']:7.1f}s")
-    if run_arm:  # every fast-tier deferral is an ARM-tier entry in scope, and the ARM tier ran those
-        deferred = []
+          f" ({len(plan['changed'])} changed files){' on ' + host if host else ''} ==")
+    print(f"{'step':40} {'wall':>8}  result")
+    skipped, flaky = [], []
+    res = res or {'steps': [], 'go': None, 'py': {}, 'c': None}
+    for s in res['steps']:
+        ok &= bool(s['ok'])
+        print(f"{s['name'][:40]:40} {s['secs']:7.1f}s  {'ok' if s['ok'] else 'FAILED'}{'  ' + s['note'] if s['note'] else ''}")
+    if res.get('go_added_by_go_list'):
+        print(f"go list added packages the static map missed: {' '.join(res['go_added_by_go_list'])}")
+    if res.get('go'):
+        flaky += [('go ' + x['pkg'] + ' ' + x['test'], x['first_failure']) for x in res['go'].get('flaky', [])]
+        skipped += [('go', x['pkg'], x['test'], x['reason']) for x in res['go']['skipped']]
+    for d, r in (res.get('py') or {}).items():
+        flaky += [(f"py {d} {x['id']}", x['first_failure']) for x in r.get('flaky', [])]
+        skipped += [('py', d, x[0], x[1]) for x in r['skipped']]
+    c_skipped = (res.get('c') or {}).get('skipped', [])
+    sh_skipped = res.get('sh_skipped', [])
     changed = [tuple(c) for c in plan['changed_tests']]
     unproven = []
     for kind, where, test, reason in skipped:
         key = (kind, where, test.split('/')[0] if kind == 'go' else test)
         if key in changed:
             unproven.append(f'{kind} {where} {test} (skipped: {reason or "no reason"})')
-    for d in deferred:
-        key = (d[0], d[1], d[2].split('/')[0]) if d[0] == 'go' else (d[0], d[1], d[2])
-        if key in changed:
-            unproven.append(f'{d[0]} {d[1]} {d[2]} (deferred to the ARM tier, which did not run)')
+    c_res = (res.get('c') or {}).get('results', [])
+    for kind, where, _ in changed:
+        if kind == 'c' and where in plan['c']:
+            mine = [r for r in c_res if r['name'].startswith(where + ' ')]
+            if not mine:
+                unproven.append(f'c {where} (did not run)')
+            elif any(r['skipped'] for r in mine):
+                unproven.append(f"c {where} (skipped: {'; '.join(x for r in mine for x in r['skipped'])[:200]})")
+        if kind == 'sh' and where in plan['sh'] and where in dict(sh_skipped):
+            unproven.append(f'sh {where} (skipped: {dict(sh_skipped)[where]})')
     if unproven:
         ok = False
-        print(f"{'proof of changed tests':36} {'':22} {'':>8}  FAILED  not proven: a test this change added or changed did not run")
+        print(f"{'proof of changed tests':40} {'':>8}  FAILED  not proven: a test this change added or changed did not run")
     if flaky:
         print(f'\nFLAKY: {len(flaky)} test(s) failed in the parallel run and passed alone on a rerun (host load; not proven stable):')
         for name, first in flaky:
             print(f'  {name}\n    first failure: ' + ' | '.join(l.strip() for l in first.splitlines() if l.strip())[:300])
     print(f'\nskipped: {len(skipped)}' + ''.join(f'\n  {k} {w} {t}  [{r[:80]}]' for k, w, t, r in skipped[:40]))
-    print(f'deferred to the ARM tier: {len(deferred)}' + ''.join('\n  ' + ' '.join(d) for d in deferred[:40]))
+    for s in c_skipped:
+        print(f'  C run skipped: {s}')
+    for s, why in sh_skipped:
+        print(f'  bash test skipped: {s} ({why})')
     for u in unproven:
         print('NOT PROVEN: ' + u)
-    for res in (fast, arm):
-        for s in (res or {'steps': []})['steps']:
-            if not s['ok'] and s['tail']:
-                print(f"\n----- {s['name']} (last lines) -----\n{s['tail']}")
-    if fast and fast['go'] and a.top:
+    if plan['manual']:
+        print(f"\nstill to run by the lane ({len(plan['manual'])} Engine sandbox tests this change selects):")
+        for path, info in plan['manual'].items():
+            print(f"  {path}: {info['how']}")
+    if plan['unmapped']:
+        print(f"unmapped changed files (no test names them): {' '.join(plan['unmapped'][:20])}")
+    for s in res['steps']:
+        if not s['ok'] and s['tail']:
+            print(f"\n----- {s['name']} (last lines) -----\n{s['tail']}")
+    if res.get('go') and a.top:
         print(f'\nslowest Go tests (top {a.top}):')
-        for k, v in list(fast['go']['tests'].items())[:a.top]:
+        for k, v in list(res['go']['tests'].items())[:a.top]:
             print(f'  {v:8.1f}s  {k}')
     if a.report:
         os.makedirs(a.report, exist_ok=True)
-        pathlib.Path(a.report, 'test-run.json').write_text(json.dumps({'plan': plan, 'fast': fast, 'arm': arm}, indent=1))
+        pathlib.Path(a.report, 'test-run.json').write_text(json.dumps({'plan': plan, 'result': res}, indent=1))
     wall = time.monotonic() - started
-    print(f"\nRESULT: {'PASS' if ok else 'FAIL'}  (wall {wall:.1f}s)")
+    manual = f", {len(plan['manual'])} manual sandbox tests still to run" if plan['manual'] else ''
+    print(f"\nRESULT: {'PASS' if ok else 'FAIL'}  (wall {wall:.1f}s{manual})")
     return 0 if ok else 1
 
 

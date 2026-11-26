@@ -19,11 +19,21 @@ done
 printf '%s\n' "$cmd" >> "${FAKE_REMOTE_LOG:?}"
 if [[ ${FAKE_FAIL_TARGETED:-0} == 1 && $cmd == *"go test -race"* && $cmd == *pkg/webui* ]]; then exit 42; fi
 MOCK
+# A recording tools/dev/test.sh for the merged trees that carry one (ENGINEX_TEST_CMD).
+cat > "$TMP/bin/test.sh" <<'MOCK'
+#!/usr/bin/env bash
+set -eu
+printf 'test.sh %s\n' "$*" >> "${FAKE_REMOTE_LOG:?}"
+full=0
+for arg in "$@"; do [[ $arg == --full ]] && full=1; done
+if [[ ${FAKE_FAIL_TARGETED:-0} == 1 && $full == 0 ]]; then exit 42; fi
+if [[ ${FAKE_FAIL_FULL:-0} == 1 && $full == 1 ]]; then exit 43; fi
+MOCK
 cat > "$TMP/bin/sshctl" <<'MOCK'
 #!/bin/sh
 exit 0
 MOCK
-chmod +x "$TMP/bin/remote-build" "$TMP/bin/sshctl"
+chmod +x "$TMP/bin/remote-build" "$TMP/bin/sshctl" "$TMP/bin/test.sh"
 
 new_repo() {
     local name=$1
@@ -105,4 +115,37 @@ before=$(git -C "$fail_repo" ls-remote origin refs/heads/agent/5306-integration 
 if FAKE_FAIL_TARGETED=1 run_integrate "$fail_repo" feature-fail; then echo 'targeted failure unexpectedly passed' >&2; exit 1; fi
 after=$(git -C "$fail_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
 [[ $before == "$after" ]]
-printf 'integrate.sh clean merge, refused conflict, and refused targeted failure tests passed\n'
+
+# With tools/dev/test.sh: one targeted run per merged branch against its pre-merge head, then one full run.
+: > "$TMP/remote.log"
+runner_repo=$(new_repo runner)
+git -C "$runner_repo" switch -q -c feature-runner
+printf 'runner\n' > "$runner_repo/runner.txt"
+git -C "$runner_repo" add runner.txt && git -C "$runner_repo" commit -qm runner
+git -C "$runner_repo" push -qu origin feature-runner
+before=$(git -C "$runner_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
+ENGINEX_TEST_CMD="$TMP/bin/test.sh" run_integrate "$runner_repo" feature-runner
+after=$(git -C "$runner_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
+[[ $before != "$after" ]]
+[[ $(grep -c '^test.sh ' "$TMP/remote.log") == 2 ]]
+grep -Eq '^test.sh --tree .* --base [0-9a-f]{40} --exclusive$' "$TMP/remote.log"
+grep -Eq '^test.sh --tree .* --full --exclusive --no-cache$' "$TMP/remote.log"
+! grep -q 'go test -race' "$TMP/remote.log"
+for mode in TARGETED FULL; do
+    fail_repo=$(new_repo "runner-fail-$mode")
+    git -C "$fail_repo" switch -q -c feature-fail
+    printf 'fail\n' > "$fail_repo/fail.txt"
+    git -C "$fail_repo" add fail.txt && git -C "$fail_repo" commit -qm fail
+    git -C "$fail_repo" push -qu origin feature-fail
+    before=$(git -C "$fail_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
+    rc=0
+    if [[ $mode == TARGETED ]]; then
+        FAKE_FAIL_TARGETED=1 ENGINEX_TEST_CMD="$TMP/bin/test.sh" run_integrate "$fail_repo" feature-fail || rc=$?
+    else
+        FAKE_FAIL_FULL=1 ENGINEX_TEST_CMD="$TMP/bin/test.sh" run_integrate "$fail_repo" feature-fail || rc=$?
+    fi
+    [[ $rc != 0 ]] || { echo "test.sh $mode failure unexpectedly passed" >&2; exit 1; }
+    after=$(git -C "$fail_repo" ls-remote origin refs/heads/agent/5306-integration | cut -f1)
+    [[ $before == "$after" ]]
+done
+printf 'integrate.sh clean merge, refused conflict, refused targeted failure, test.sh targeted+full runs, and refused test.sh targeted and full failures passed\n'

@@ -1,0 +1,53 @@
+{
+ "_doc": [
+  "C tests of tools/dev/test.sh (crun.py). Each entry: the source, then variants; each variant has its build and its runs.",
+  "Placeholders: {lab} the firmware lab, {out} this variant's binary, {cc_arm} arm-linux-gnueabihf-gcc,",
+  "{arm_flags} the armhf flags of the release checklist, {e504} {e530} {esl4} {eaz04} the lab's Engine binaries.",
+  "`needs`: root (skipped with a reason otherwise), lab (a firmware lab file), gcc14 (the host's gcc).",
+  "The release checklist (.claude/rules/release-workflow.md section 2) names the explicit entries; every other",
+  "tools/ui-mod/test_*.c builds and runs with `default` (the armhf way the 5.3.0.5 renames ran all of them)."
+ ],
+ "arm_flags": "-O2 -mthumb -march=armv7-a -mfpu=neon -mfloat-abi=hard",
+ "engines": {
+  "e504": "5.0.4/tree/usr/Engine/Engine",
+  "e530": "5.3.0/tree/usr/Engine/Engine",
+  "esl4": "sclive4-rea61-followup/rootfs/usr/Engine/Engine",
+  "eaz04": "systemone-analysis/rootfs/usr/Engine/Engine"
+ },
+ "tests": {
+  "tools/ui-mod/test_dsp_smooth.c": {"checklist": true, "variants": {
+   "plain": {"build": "gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread {src} -lm -o {out}", "runs": ["{out}"]},
+   "asan-ubsan": {"build": "gcc -std=c11 -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined -pthread {src} -lm -o {out}", "runs": ["{out}"]},
+   "tsan": {"build": "gcc -std=c11 -O1 -g -fno-omit-frame-pointer -fsanitize=thread -pthread {src} -lm -o {out}", "runs": ["{out}"]}
+  }},
+  "tools/ui-mod/test_stems_feature.c": {"checklist": true, "needs": ["lab"], "variants": {
+   "armhf": {"build": "{cc_arm} {arm_flags} {src} {lab}/deps-sqlite/sqlite3.o -ldl -lpthread -lm -o {out}", "runs": ["{out} {e504} {e530} {esl4}"]}
+  }},
+  "tools/edisksd-hook/test_edisksd_hook.c": {"checklist": true, "variants": {
+   "native": {"build": "gcc -O2 -Wall -Wextra -Werror -pthread {src} -ldl -lm -o {out}", "runs": ["{out}", "root: unshare -m --propagation private {out} --mounts"]},
+   "armhf": {"build": "{cc_arm} {arm_flags} -Wall -Wextra {src} -ldl -lpthread -lm -o {out}", "runs": ["{out}", "root: unshare -m --propagation private {out} --mounts"]},
+   "asan-ubsan": {"build": "gcc -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined -pthread {src} -ldl -lm -o {out}", "runs": ["{out}"]}
+  }},
+  "tools/ui-mod/test_az04_hook.c": {"checklist": true, "needs": ["lab"], "variants": {
+   "native": {"build": "gcc -O2 {src} -ldl -lpthread -lm -o {out}", "runs": ["{out} {eaz04}"]}
+  }},
+  "tools/ui-mod/test_rt_budget.c": {"checklist": true, "variants": {
+   "native": {"build": "gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread {src} -lm -o {out}", "runs": ["{out}"]},
+   "armhf": {"build": "{cc_arm} -std=c11 {arm_flags} -Wall -Wextra -Werror -pthread {src} -lm -o {out}", "runs": ["{out}"]}
+  }},
+  "tools/ui-mod/test_rt_callback.c": {"checklist": true, "variants": {
+   "native": {"build": "gcc -std=gnu11 -O2 -U_FORTIFY_SOURCE {src} {rt_wrap} -ldl -lpthread -lm -o {out}", "runs": ["{out}", "{out} selftest"]},
+   "armhf": {"build": "{cc_arm} -std=gnu11 {arm_flags} -U_FORTIFY_SOURCE {src} {rt_wrap} -ldl -lpthread -lm -o {out}", "runs": ["{out}", "{out} selftest"]}
+  }},
+  "tools/ui-mod/test_rekordbox_unwind.c": {"via": "tools/ui-mod/test_rekordbox_unwind.sh"}
+ },
+ "rt_wrap": "-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free,--wrap=pthread_mutex_lock,--wrap=pthread_cond_wait,--wrap=read,--wrap=write,--wrap=close,--wrap=usleep,--wrap=nanosleep,--wrap=poll,--wrap=fwrite,--wrap=fputs,--wrap=puts,--wrap=fprintf,--wrap=vfprintf,--wrap=printf,--wrap=fopen,--wrap=readlink,--wrap=dlsym",
+ "default": {"dir": "tools/ui-mod", "needs": ["lab"], "variants": {
+  "armhf": {"build": "{cc_arm} {arm_flags} {src} -ldl -lpthread -lm -o {out}", "runs": ["{out} {args}"]}
+ }},
+ "default_args": {
+  "tools/ui-mod/test_sclive_aux.c": "{e530} {esl4}",
+  "tools/ui-mod/test_mixstream_hook.c": "{e530} {esl4}",
+  "tools/ui-mod/test_shadow_master.c": "{e530}"
+ }
+}
