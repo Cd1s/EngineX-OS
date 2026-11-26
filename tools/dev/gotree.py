@@ -80,8 +80,8 @@ def static_closure(root, dirs):
 
 def tag_only(root, dirs, env=None):
     """{dir: build tags it names} for selected dirs that hold .go files but no package under this host's default build
-    (every file has a //go:build line it does not satisfy). Such a package cannot be tested here as selected: the run
-    is INCOMPLETE, never PASS. None if go list fails."""
+    (every file has a //go:build line it does not satisfy). devtest.py vets the files of one whose lines are plain tag
+    names by file name (as its wrapper builds them); any other is NOT RUN, so the run is INCOMPLETE. None if go list fails."""
     fmt = '{{.Dir}}\t{{len .GoFiles}}\t{{len .TestGoFiles}}\t{{len .XTestGoFiles}}'
     p = subprocess.run(['go', 'list', '-e', '-f', fmt, './...'], cwd=root, capture_output=True, text=True, env=env)
     if p.returncode:

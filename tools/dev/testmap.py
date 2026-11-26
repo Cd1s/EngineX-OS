@@ -2,8 +2,8 @@
 
 map_paths(paths, root) -> Plan: which Go package directories, Python test files, bash tests, C tests and manual
 (sandbox) tests a set of changed files touches, and why. The reverse-dependency closure of Go packages is added by
-devtest.py (tools/dev/gotree.py). changed_tests(...) lists the tests a diff added or changed, so one that did not
-run fails the run as "not proven".
+devtest.py (tools/dev/gotree.py). changed_tests(...) names every test of each changed test file: each must pass,
+so a skip, a not-run or a missing result there keeps the run from PASS.
 
 Rules, in this order (a file can select from several):
   go.mod / go.sum                      every Go package
@@ -28,7 +28,7 @@ Rules, in this order (a file can select from several):
 A selected bash or C file that tools/dev/sh-tests.json lists as manual is reported with its command (an Engine
 sandbox: the lane runs it), never dropped. A file nothing selects is listed as unmapped.
 """
-import ast, json, os, pathlib, re, subprocess
+import json, os, pathlib, re, subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FULL_PY_DIRS = ['tools/az01-packer', 'tools/splash', 'tools/stems', 'tools/dev']  # what --full runs through pyrun
@@ -407,53 +407,10 @@ def full_plan(root='.', keep=None):
 
 # ---------------------------------------------------------------- tests a diff added or changed
 
-def _hunks(root, base, path):
-    """New-file line ranges changed against base (an untracked file is one big hunk)."""
-    tracked = subprocess.run(['git', '-C', root, 'ls-files', '--error-unmatch', path], capture_output=True).returncode == 0
-    if not tracked:
-        return [(1, 10 ** 9)]
-    out = subprocess.run(['git', '-C', root, 'diff', '-U0', '--no-renames', base, '--', path], capture_output=True, text=True).stdout
-    rng = []
-    for m in re.finditer(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@', out, re.M):
-        start, count = int(m.group(1)), int(m.group(2) if m.group(2) is not None else 1)
-        rng.append((start, start + max(count, 1) - 1))
-    return rng
-
-
-def _go_funcs(text):
-    funcs, name, start = [], None, 0
-    for i, line in enumerate(text.splitlines(), 1):
-        m = re.match(r'func (?:\([^)]*\) )?(Test\w*|Example\w*|Fuzz\w*)\(', line)
-        if m:
-            if name:  # the previous function never closed at column 0: it ends where this one starts
-                funcs.append((name, start, i - 1))
-            name, start = m.group(1), i
-            if line.rstrip().endswith('}'):  # one-line function
-                funcs.append((name, i, i)); name = None
-        elif line.startswith('}') and name:
-            funcs.append((name, start, i)); name = None
-    if name:
-        funcs.append((name, start, len(text.splitlines())))
-    return funcs
-
-
-def _py_funcs(text, module):
-    out = []
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return out
-    for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
-        for fn in cls.body:
-            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name.startswith('test'):
-                first = min([fn.lineno] + [d.lineno for d in fn.decorator_list])
-                out.append((f'{module}.{cls.name}.{fn.name}', first, fn.end_lineno))
-    return out
-
-
-def changed_tests(root, base, paths):
-    """Tests a diff added or changed: ('go', pkg-dir, TestName), ('py', dir, 'module.Class.method'), ('c', source, '*')
-    and ('sh', script, '*')."""
+def changed_tests(root, paths):
+    """Every test of each changed test file, each of which must pass: ('go', pkg-dir, TestName) for every top-level Test
+    or Fuzz function of a changed _test.go file (TestMain is none), ('py', dir, module) for a changed Python test file
+    (all of its tests), ('c', source, '*') and ('sh', script, '*')."""
     found = set()
     for path in paths:
         full = os.path.join(root, path)
@@ -462,20 +419,12 @@ def changed_tests(root, base, paths):
         name = os.path.basename(path)
         if re.match(r'test_[^/]*\.c$', name):
             found.add(('c', path, '*'))
-            continue
-        if is_test_file(path) and name.endswith('.sh'):
+        elif is_test_file(path) and name.endswith('.sh'):
             found.add(('sh', path, '*'))
-            continue
-        is_go, is_py = path.endswith('_test.go'), re.match(r'(.*/)?test_[^/]*\.py$', path)
-        if not (is_go or is_py):
-            continue
-        text = pathlib.Path(full).read_text(encoding='utf-8', errors='replace')
-        hunks = _hunks(root, base, path)
-        if is_go:
-            funcs = [(('go', os.path.dirname(path) or '.', n), a, b) for n, a, b in _go_funcs(text)]
-        else:
-            funcs = [(('py', os.path.dirname(path), n), a, b) for n, a, b in _py_funcs(text, os.path.basename(path)[:-3])]
-        for key, a, b in funcs:
-            if any(lo <= b and hi >= a for lo, hi in hunks):
-                found.add(key)
+        elif path.endswith('_test.go'):
+            text = pathlib.Path(full).read_text(encoding='utf-8', errors='replace')
+            found |= {('go', os.path.dirname(path) or '.', n)
+                      for n in re.findall(r'^func ((?:Test|Fuzz)\w*)\(\w+ \*testing\.[TF]\)', text, re.M)}
+        elif re.match(r'(.*/)?test_[^/]*\.py$', path):
+            found.add(('py', os.path.dirname(path), name[:-3]))
     return found

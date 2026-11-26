@@ -22,11 +22,14 @@ exclusive`); a host without enginex-run is refused, never used unlocked. There `
 smbpasswd, one at a time, in a private UTS namespace with hostname localhost.
 
 Result and exit status: PASS (0) only when every selected test produced a pass. FAIL (1): a failure or an error.
-INCOMPLETE (3): nothing failed, but a changed test, a test requested by name, or a selected target (a Python file or
-spec, a Go package with tests, a C test, a bash test) skipped, did not run or has no result, or a sandbox the lane
-runs is listed, or a selected package is built only under a tag. --accept-incomplete turns INCOMPLETE into PASS once
-the lane has run them; the list stays in the output. Other skips (one test of a target that passed) are listed with
-their reason. Tests are never rerun.
+INCOMPLETE (3): nothing failed, but a test of a changed test file (each one counts), a test run by name, or a selected
+target (a Python file or spec, a Go package with tests, a C test, a bash test) skipped, did not run or has no result,
+or a sandbox the lane runs is listed, or a package built only under a constraint other than plain tags. A package
+built only under a tag is vetted by file name, as its wrapper builds it, in narrow and full runs alike (it cannot be
+built as a package). --accept-incomplete turns INCOMPLETE into
+PASS once the lane has run them; the list stays in the output. Other skips (a test the change did not touch, in a
+target that passed) are listed with their reason. Tests are never rerun. Only what tools/dev/split.json lists runs
+in parallel, and only in a tree that meets the entry's prerequisite.
 """
 import argparse, fcntl, filecmp, hashlib, json, os, pathlib, re, shutil, signal, socket, subprocess, sys, time
 
@@ -123,7 +126,7 @@ def make_plan(a, root):
     plan['manual'] = dict(sorted(sel.manual.items()))
     if not plan['fallback']:
         plan['unmapped'] = sorted(sel.unmapped)
-    plan['changed_tests'] = [] if a.full else sorted(map(list, testmap.changed_tests(root, plan['base'], changed)))
+    plan['changed_tests'] = [] if a.full else sorted(map(list, testmap.changed_tests(root, changed)))
     plan['smb'] = gotree.smb_tests(root, sorted(gotree.packages(root)) if sel.go_all else plan['go'])
     # The full run must run everything, the Samba fixture included; a lane that changed a Samba test needs Samba too.
     plan['smb_required'] = bool(plan['smb']) and (plan['mode'] == 'full' or a.require_samba or
@@ -252,6 +255,22 @@ def gcc_major():
     return out.split('.')[0] if out else ''
 
 
+def split_args(split, d):
+    """pyrun's --split arguments for Python directory d: the split.json entries of d whose prerequisite this tree
+    meets (each entry's equality run holds only with it); the others run in one process, with a note saying why."""
+    args, why = [], []
+    for path, v in sorted(split['python'].items()):
+        if os.path.dirname(path) != d:
+            continue
+        need = v.get('requires')
+        text = pathlib.Path(path).read_text(errors='replace') if os.path.isfile(path) else ''
+        if need and text.count(need['text']) < need['count']:
+            why.append(f"{path} runs in one process: {need['why']}")
+        else:
+            args.append(f"--split={os.path.basename(path)[:-3]}={v['processes']}")
+    return args, why
+
+
 def exec_plan(plan_path):
     """Run a plan on this build host; print one MARK line with the steps and every runner's results."""
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):  # stopped: clean up and leave
@@ -298,8 +317,7 @@ def exec_plan(plan_path):
             add(s, r)
             return r
 
-        # Go selection: the plan's static closure, plus whatever `go list` finds that it missed; a directory whose
-        # files build tags exclude here is dropped and named (it has no package on this host).
+        # Go selection: the plan's static closure, plus whatever `go list` finds that it missed.
         go_dirs = list(plan['go'])
         if plan['go_code'] and not plan['go_all']:
             gl = gotree.go_list_closure('.', set(plan['go_code']), env=env)
@@ -307,15 +325,28 @@ def exec_plan(plan_path):
                 extra = sorted(set(gl) - set(go_dirs))
                 out['go_added_by_go_list'] = extra
                 go_dirs += extra
-        if go_dirs and not plan['go_all']:  # a selected package built only under a tag cannot run here as selected
-            tagged = gotree.tag_only('.', go_dirs, env=env)
-            if tagged:
-                r = results.Results()
-                for d, tags in sorted(tagged.items()):
-                    r.add('go', d, '*', 'notrun', 0, f"built only under {' or '.join(tags) or 'a build tag'}; not run by go test here")
-                s = Step(f'go: {len(tagged)} tag-only packages'); s.ok, s.note = True, 'NOT RUN: ' + ' '.join(sorted(tagged))
-                add(s, r.as_dict())
-                go_dirs = [d for d in go_dirs if d not in tagged]
+        # A package built only under a tag (tools/az01-packer's fxselector_sandbox server, tools/shadow-twin's `ignore`
+        # generator) cannot be built as a package, not even with the tag (C fixtures share its directory; `-tags ignore`
+        # pulls in GOROOT's own generators). Its files are vetted by name, the way its wrapper builds them (`go build
+        # FILE.go`, `go run FILE.go`), in a narrow and a full run alike. One with test files, or with a constraint other
+        # than plain tag names (an OS, a negation), is NOT RUN.
+        check = sorted(gotree.packages('.')) if plan['go_all'] else go_dirs
+        tagged = gotree.tag_only('.', check, env=env) if check else {}
+        if tagged is None:
+            s = Step('go list'); s.ok, s.tail = False, 'go list ./... failed: which packages build only under a tag is unknown'
+            add(s)
+            tagged = {}
+        by_file, r = [], results.Results()
+        for d, exprs in sorted(tagged.items()):
+            files = sorted(os.path.join(d, f) for f in os.listdir(d) if f.endswith('.go'))
+            if exprs and all(re.fullmatch(r'[\w.]+', e.strip()) for e in exprs) and not any(f.endswith('_test.go') for f in files):
+                by_file.append((d, exprs, files))
+            else:
+                r.add('go', d, '*', 'notrun', 0, f"built only under {' or '.join(exprs) or 'a build constraint'}: not run here")
+        if r.items:
+            s = Step(f'go: {len(r.items)} constrained packages'); s.ok, s.note = True, 'NOT RUN: ' + ' '.join(x['where'] for x in r.items)
+            add(s, r.as_dict())
+        go_dirs = [d for d in go_dirs if d not in tagged]
         pk = ['./...'] if plan['go_all'] else [f'./{d}' if d != '.' else '.' for d in sorted(set(go_dirs))]
         smb = gotree.smb_tests('.', sorted(gotree.packages('.')) if plan['go_all'] else sorted(set(go_dirs))) if pk else []
         out['by_name'] = [['go', d, n] for d, n in smb]  # run by name (gorun --only): each must pass itself
@@ -330,14 +361,18 @@ def exec_plan(plan_path):
             s = Step(f'go vet ({len(pk)} pkg args)'); spawn(s, ['go', 'vet'] + pk, env); add(s)
         for item in plan['py']:
             d = item['dir']; out_json = os.path.join(tmp, 'py-' + d.replace('/', '_') + '.json')
-            split = [f'--split={os.path.basename(k)[:-3]}={v["processes"]}' for k, v in plan['split']['python'].items()
-                     if os.path.dirname(k) == d]  # only what split.json lists (each with a recorded equality run)
-            runner_step(f'py {d}', [sys.executable, os.path.join(HERE, 'pyrun.py'), d] + item['specs'] + split + [
+            split, why = split_args(plan['split'], d)
+            r = runner_step(f'py {d}', [sys.executable, os.path.join(HERE, 'pyrun.py'), d] + item['specs'] + split + [
                 '--json', out_json, '--seed', os.path.join(HERE, 'py-slow.json')], out_json)
+            r['notes'] += why
         if pk:
             out_json = os.path.join(tmp, 'go.json')
             runner_step('go test -race', [sys.executable, os.path.join(HERE, 'gorun.py'), '--json', out_json]
                         + (['--no-cache'] if plan['no_cache'] else []) + (['--skip', smb_file] if smb else []) + pk, out_json)
+        for d, exprs, files in by_file:
+            s = Step(f'go vet {d} (by file name)'); spawn(s, ['go', 'vet'] + files, env)
+            s.note = s.note or f"built only under {' or '.join(exprs)}: vetted as its wrapper builds it"
+            add(s)
         if smb:
             why = samba_missing()
             if why:
@@ -582,11 +617,13 @@ def verdict(plan, res, accept_incomplete=False):
     named = {tuple(c) for c in plan.get('changed_tests', []) + res.get('by_name', [])}  # changed, or run by name
     missing = []  # selected by name, but no pass
     for kind, where, test in sorted(named):
-        mine = [x for x in items if x['kind'] == kind and x['where'] == where and (kind not in ('go', 'py') or x['test'] == test)]
+        mine = [x for x in items if x['kind'] == kind and x['where'] == where and (
+            kind in ('c', 'sh') or x['test'] == test or kind == 'py' and pyrun.matches(x['test'], [test]))]  # py: a module
         if not mine:
             missing.append(f'{kind} {where} {test}: no result')
         elif any(x['status'] == 'skip' for x in mine):  # a not-run is listed below; a failure fails
-            missing.append(f"{kind} {where} {test}: skip ({'; '.join(x['reason'][:120] for x in mine if x['status'] == 'skip')})")
+            missing.append(f"{kind} {where} {test}: skip (" + '; '.join((x['test'] + ': ' if x['test'] != test else '')
+                           + x['reason'][:120] for x in mine if x['status'] == 'skip')[:600] + ')')
     missing += [f"{x['kind']} {x['where']} {x['test']}: did not run ({x['reason']})" for x in items if x['status'] == 'notrun']
     missing += [f"manual: {p}: {i['how']}" for p, i in plan.get('manual', {}).items()]
 

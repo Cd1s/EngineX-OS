@@ -153,45 +153,36 @@ class MapTest(unittest.TestCase):
 
 
 class ChangedTestsTest(unittest.TestCase):
-    def test_added_and_edited_tests_are_found(self):
+    def test_every_test_of_a_changed_test_file_is_named(self):
+        # Round 3 review: a changed test file counts test by test, not only the tests the diff's lines touch.
         with tempfile.TemporaryDirectory() as root:
-            g = git_repo(root)
             write(root, 'p/a_test.go', """\
                 package p
+
+                func TestMain(m *testing.M) { m.Run() }
 
                 func TestOld(t *testing.T) {
                 	x := 1
                 }
 
-                func TestEdited(t *testing.T) {
-                	y := 1
-                }
+                func TestEdited(t *testing.T) { y := 2 }
+
+                func FuzzParse(f *testing.F) {}
+
+                func helper(t *testing.T) {}
                 """)
-            write(root, 'tools/test_a.py', """\
-                import unittest
-                class A(unittest.TestCase):
-                    def test_old(self):
-                        pass
-                    def test_edited(self):
-                        pass
-                """)
-            g('add', '-A'); g('commit', '-qm', 'base')
-            write(root, 'p/a_test.go', jtext(root + '/p/a_test.go').replace('y := 1', 'y := 2') + '\nfunc TestNew(t *testing.T) {\n}\n')
-            write(root, 'tools/test_a.py', jtext(root + '/tools/test_a.py').replace('    def test_edited(self):\n        pass', '    def test_edited(self):\n        pass  # changed') )
-            write(root, 'tools/test_b.py', "import unittest\nclass B(unittest.TestCase):\n    def test_b(self):\n        pass\n")
-            write(root, 'p/oneline_test.go', 'package p\n\nfunc TestOneLine(t *testing.T) { t.Skip("lab") }\n')
+            write(root, 'tools/test_a.py', 'import unittest\nclass A(unittest.TestCase):\n    def test_old(self):\n        pass\n')
             write(root, 'tools/ui-mod/test_new.c', 'int main(void) { return 0; }\n')
             write(root, 'tests/test_new.sh', 'true\n')
-            found = testmap.changed_tests(root, 'HEAD', ['p/a_test.go', 'tools/test_a.py', 'tools/test_b.py', 'p/oneline_test.go',
-                                                         'tools/ui-mod/test_new.c', 'tests/test_new.sh'])
-            self.assertEqual(found, {('go', 'p', 'TestEdited'), ('go', 'p', 'TestNew'), ('py', 'tools', 'test_a.A.test_edited'),
-                                     ('py', 'tools', 'test_b.B.test_b'), ('go', 'p', 'TestOneLine'),
-                                     ('c', 'tools/ui-mod/test_new.c', '*'), ('sh', 'tests/test_new.sh', '*')})
+            found = testmap.changed_tests(root, ['p/a_test.go', 'tools/test_a.py', 'tools/ui-mod/test_new.c', 'tests/test_new.sh',
+                                                 'p/gone_test.go'])
+            self.assertEqual(found, {('go', 'p', 'TestOld'), ('go', 'p', 'TestEdited'), ('go', 'p', 'FuzzParse'),
+                                     ('py', 'tools', 'test_a'), ('c', 'tools/ui-mod/test_new.c', '*'), ('sh', 'tests/test_new.sh', '*')})
 
 
 def args(**kw):
     """make_plan's arguments, as test.sh passes them."""
-    d = dict(full=False, no_cache=False, rerun=False, base=None, into='x', require_samba=False)
+    d = dict(full=False, no_cache=False, base=None, into='x', require_samba=False)
     d.update(kw)
     return type('A', (), d)()
 
@@ -351,6 +342,19 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(rc, devtest.EXIT_INCOMPLETE, 'a selected bash test with no result')
         self.assertIn('sh tests/test_x.sh: no result', text)
 
+    def test_every_test_of_a_changed_test_file_must_pass(self):
+        # Round 3 review: a skip in a changed file was covered by another test of the same file that passed.
+        plan = {'changed_tests': [['py', 'd', 'test_a']]}
+        both = self.res(('py', 'd', 'test_a.A.test_x', 'skip', 0, 'no lab'), ('py', 'd', 'test_a.A.test_y', 'pass', 0, ''))
+        rc, text = self.report(plan, both)
+        self.assertEqual(rc, devtest.EXIT_INCOMPLETE, 'a skip in a changed test file blocks')
+        self.assertIn('py d test_a: skip (test_a.A.test_x: no lab)', text)
+        rc, _ = self.report(plan, self.res(('py', 'd', 'test_a.A.test_x', 'pass', 0, ''), ('py', 'd', 'test_a.A.test_y', 'pass', 0, '')))
+        self.assertEqual(rc, 0, 'every test of the changed file passed')
+        rc, text = self.report({}, both)
+        self.assertEqual(rc, 0, 'the same skip in a file the change did not touch is listed')
+        self.assertIn('test_a.A.test_x  [no lab]', text)
+
     def test_a_remote_run_without_a_result_fails(self):
         res = {'steps': [{'name': 'remote run', 'secs': 1, 'ok': False, 'note': 'exit 1', 'tail': 'sync failed'}], 'runs': []}
         rc, text = self.report({}, res)
@@ -489,6 +493,47 @@ class SpawnTest(unittest.TestCase):
                 os.kill(pid, 0)
 
 
+ARM = os.uname().machine in ('aarch64', 'arm64')
+
+
+def run_exec(root, **plan):
+    """devtest.py --exec of a plan in the tree root: (verdict status, the run's result, the verdict lines)."""
+    p = dict(mode='targeted', go=[], go_all=False, go_code=[], gofmt=[], py=[], c=[], sh=[], no_cache=True,
+             split={'python': {}, 'c': {'processes': 1}}, changed_tests=[], manual={})
+    p.update(plan)
+    jdump(p, os.path.join(root, 'plan.json'))
+    r = subprocess.run([sys.executable, os.path.join(HERE, 'devtest.py'), '--exec', 'plan.json'], cwd=root, capture_output=True,
+                       text=True, timeout=900)
+    res = devtest.parse_result(r.stdout)
+    assert res is not None, r.stderr[-2000:]
+    status, _, lines, _, _ = devtest.verdict(p, res)
+    return status, res, lines
+
+
+@unittest.skipUnless(ARM, 'exec runs only on the ARM build hosts')
+class SplitPrerequisiteTest(unittest.TestCase):
+    def test_a_split_entry_whose_prerequisite_is_missing_runs_in_one_process(self):
+        # Round 3 review: the test_ui_mod.py split ran on trees without the bp.ROOT fix its equality run had.
+        with tempfile.TemporaryDirectory() as root:
+            write(root, 'tools/x/test_m.py', """\
+                import unittest
+                class A(unittest.TestCase):
+                    def test_a(self): pass
+                class B(unittest.TestCase):
+                    def test_b(self): pass
+                """)
+            split = {'python': {'tools/x/test_m.py': {'processes': 2, 'requires': {'text': '# RESTORED', 'count': 1,
+                                                                                    'why': 'the fix is missing'}}}, 'c': {'processes': 1}}
+            for fixed, processes in ((False, 1), (True, 2)):
+                if fixed:
+                    with open(os.path.join(root, 'tools/x/test_m.py'), 'a') as f:
+                        f.write('# RESTORED\n')
+                status, res, _ = run_exec(root, py=[{'dir': 'tools/x', 'specs': []}], split=split)
+                py = [r for r in res['runs'] if 'processes' in r][0]
+                self.assertEqual((status, py['processes']), ('PASS', processes), f'fixed={fixed}')
+                self.assertEqual(py['notes'], [] if fixed else ['tools/x/test_m.py runs in one process: the fix is missing'])
+
+
 class NoRerunTest(unittest.TestCase):
     def test_a_failed_test_is_never_rerun(self):
         """A failure stands: no runner retries a test, and no result counts a later pass as "flaky"."""
@@ -544,19 +589,18 @@ class PyrunTest(unittest.TestCase):
             self.assertEqual(ids(res, 'skip'), ['test_one.First.test_skipped'])
             self.assertEqual(os.listdir(tmp), ['r.json'], 'worker TMPDIRs must be removed')
 
-    def test_defer_specs_and_a_spec_that_matches_nothing(self):
+    def test_specs_and_a_spec_that_matches_nothing(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as tmp:
             self.make(root)
-            defer = os.path.join(tmp, 'defer.txt'); write(tmp, 'defer.txt', 'test_one.First.test_a  # elsewhere\ntest_two\n')
             out = os.path.join(tmp, 'r.json')
-            self.assertEqual(self.pyrun(root, '--defer', defer, '--json', out, tmpdir=tmp).returncode, 0)
-            self.assertNotIn('test_one.First.test_a', ids(jload(out)))
-            self.assertNotIn('test_two.Third.test_c', ids(jload(out)))
             self.assertEqual(self.pyrun(root, 'test_two.py', '--json', out, tmpdir=tmp).returncode, 0)
             self.assertEqual(ids(jload(out)), ['test_two.Third.test_c'])
             p = self.pyrun(root, 'test_three.py', '--json', out, tmpdir=tmp)
             self.assertEqual(p.returncode, 2, 'a selected file with no test must not pass as zero tests')
             self.assertEqual(ids(jload(out), 'notrun'), ['test_three'])
+            p = self.pyrun(root, '--defer', os.path.join(tmp, 'r.json'), tmpdir=tmp)
+            self.assertEqual(p.returncode, 2, 'no list of tests that do not run here (round 3 review)')
+            self.assertIn('unrecognized arguments: --defer', p.stderr)
 
     def test_only_modules_split_json_lists_are_split(self):
         # Review round 2: a heuristic split a module whose test leaked state despite an unrelated addCleanup. Now only
@@ -587,6 +631,8 @@ class PyrunTest(unittest.TestCase):
             self.assertGreater(entry['processes'], 1, name)
             self.assertRegex(entry['evidence'], r'20\d\d-\d\d-\d\d, .*results\.py --same: SAME, sha256 ([0-9a-f]{16}) and \1$',
                              f'{name}: an entry needs its recorded serial-vs-split equality run (date, host, tree, both hashes)')
+        need = cfg['python']['tools/az01-packer/test_ui_mod.py']['requires']  # the equality run had 23722ff6
+        self.assertEqual((need['text'], need['count']), ("self.addCleanup(setattr, bp, 'ROOT', bp.ROOT)", 3))
 
     def test_failure_exits_nonzero_and_prints_output(self):
         with tempfile.TemporaryDirectory() as root:
@@ -672,6 +718,26 @@ class GorunTest(unittest.TestCase):
             self.assertIn('tool', gotree.static_closure(root, ['a']), 'the static map ignores build tags')
             self.assertEqual(gotree.tag_only(root, ['a', 'tool'], env=dict(os.environ, GOFLAGS='-buildvcs=false')),
                              {'tool': ['fxselector_sandbox']})
+
+    @unittest.skipUnless(ARM, 'exec runs only on the ARM build hosts')
+    def test_a_package_built_only_under_a_tag_is_vetted_in_narrow_and_full_runs(self):
+        # Round 3 review: a tag-only importer was INCOMPLETE in a narrow run but PASS under go_all (dropped by ./...).
+        # It cannot be built as a package (C fixtures beside it, `-tags ignore`), so its files are vetted by name.
+        server = '//go:build fxselector_sandbox\n\npackage main\n\nimport _ "example.test/m/a"\n\nfunc main() {%s}\n'
+        narrow, full = dict(go=['a', 'tool'], go_code=['a']), dict(go_all=True)
+        with tempfile.TemporaryDirectory() as root:
+            self.module(root)
+            for body, want in ((' var s string = 1; _ = s ', 'FAIL'), ('', 'PASS')):
+                write(root, 'tool/server.go', server % body)
+                for mode, plan in (('full', full), ('narrow', narrow)):
+                    status, res, lines = run_exec(root, **plan)
+                    vet = [s for s in res['steps'] if s['name'] == 'go vet tool (by file name)']
+                    self.assertEqual((status, len(vet)), (want, 1), f'{mode}, {want}: {lines} {[s["name"] for s in res["steps"]]}')
+            write(root, 'tool/server.go', '//go:build !linux\n\npackage main\n\nfunc main() {}\n')
+            for mode, plan in (('narrow', narrow), ('full', full)):
+                status, _, lines = run_exec(root, **plan)
+                self.assertEqual(status, 'INCOMPLETE', mode)
+                self.assertIn('go tool *: did not run (built only under !linux: not run here)', lines[-1])
 
     def test_failing_test_fails_the_run(self):
         with tempfile.TemporaryDirectory() as root:

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Run the unittest tests of a directory; split only the modules tools/dev/split.json names.
 
-  pyrun.py DIR [SPEC...] [--split MODULE=N]... [--seed FILE] [--defer FILE] [--json OUT] [--list]
+  pyrun.py DIR [SPEC...] [--split MODULE=N]... [--seed FILE] [--json OUT] [--list]
 
 DIR is discovered exactly like `python3 -m unittest discover -s DIR` (pattern test*.py, DIR on sys.path). SPEC (file,
-module, class or test id) limits the run; a SPEC that matches no test is reported as not run (exit 2). --defer FILE
-names tests (one id, class, module or file per line, `#` comments) that do not run here.
+module, class or test id) limits the run; a SPEC that matches no test is reported as not run (exit 2).
 Every module runs in the serial order, all of them in one process, as `unittest discover` runs them, except a module
 named by --split MODULE=N (devtest.py passes the ones split.json lists): its whole classes are spread over N processes
 that run at the same time, after the serial process (balanced by --seed, seconds per class). Every selected test must
@@ -120,7 +119,7 @@ def main():
     ap.add_argument('dir'); ap.add_argument('specs', nargs='*')
     ap.add_argument('--split', action='append', default=[], metavar='MODULE=N')
     ap.add_argument('--seed', help='seconds per test class (tools/dev/py-slow.json: {dir: {module.Class: secs}})')
-    ap.add_argument('--defer'); ap.add_argument('--json'); ap.add_argument('--list', action='store_true')
+    ap.add_argument('--json'); ap.add_argument('--list', action='store_true')
     ap.add_argument('--worker', nargs=2, metavar=('IDS', 'OUT'))
     a = ap.parse_args()
     if a.worker:
@@ -136,9 +135,6 @@ def main():
             if not any(matches(t[0], [s]) or t[1] == s for t in tests):
                 res.add('py', where, s, 'notrun', 0, 'no test matches it')
         tests = [t for t in tests if matches(t[0], specs) or t[1] in specs]
-    if a.defer:
-        dspecs = [norm(l.split('#')[0]) for l in pathlib.Path(a.defer).read_text().splitlines() if l.split('#')[0].strip()]
-        tests = [t for t in tests if not matches(t[0], dspecs)]
     if a.list:
         print('\n'.join(t[0] for t in tests)); return 0
     split = {m: int(n) for m, n in (s.split('=', 1) for s in a.split)}

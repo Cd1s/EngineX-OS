@@ -4,12 +4,20 @@
   "discover and go test run it. Add an entry only with a recorded equality run: the same tree once serially and once",
   "split, `python3 tools/dev/results.py --same serial.json split.json` printing SAME, on a build host; put the run's",
   "date, host, tree and the two result hashes in `evidence`.",
-  "python: {\"<dir>/<module>.py\": {\"processes\": N}}: the module's whole classes over N processes (pyrun.py --split).",
+  "python: {\"<dir>/<module>.py\": {\"processes\": N, \"requires\": ...}}: the module's whole classes over N processes",
+  "(pyrun.py --split, balanced by tools/dev/py-slow.json as in the equality run). `requires` {text, count, why}: what",
+  "the equality run depended on, checked in the tree under test; when the module holds `text` fewer than `count`",
+  "times, it runs in one process and the run says why.",
   "c: C test variants run at the same time, N at once (crun.py -j); each variant has its own binary and TMPDIR."
  ],
  "python": {
   "tools/az01-packer/test_ui_mod.py": {
    "processes": 4,
+   "requires": {
+    "text": "self.addCleanup(setattr, bp, 'ROOT', bp.ROOT)",
+    "count": 3,
+    "why": "its three ShadowHeadSyncLeadTest tests must restore bp.ROOT (23722ff6); without that a split run differs from the serial one"
+   },
    "evidence": "2026-11-27, Oracle-Bogota-arm, enginex-run sandbox, tree 7a4fa0d9 + 23722ff6 (bp.ROOT restored): one process 405 pass in 495 s, 4 processes 405 pass in 166 s; results.py --same: SAME, sha256 5472152049240a20 and 5472152049240a20"
   }
  },
