@@ -2146,6 +2146,89 @@ static void test_shadow_regrid_missing_perf_fallback(void) {
     printf("Shadow regrid missing/corrupt .perf fail-closed + oa_replay choke point: PASS\n");
 }
 
+// #346/ondemand Check 2 regression: oa_is_shadow_path / oa_shadow_perf decide on the
+// resolved real path and exact peer-<hex>/[Contents/]<file> layout (.., symlinks,
+// cross-mount / non-default copy dirs, and never false-skipping normal tracks).
+static void test_oa_is_shadow_path_edge_cases(void) {
+    oa_activate = mock_activate;
+    oa_make_bytes = mock_make_bytes;
+    oa_meta = (void *)&oa_seen;
+    uchar prefs[13] = {0};
+
+    // 1. '..' entering OA_SHADOW skips via oa_skip_shadow (never reaches OfflineAnalyzer).
+    static const uint16_t dotdot_in[] = u"/tmp/test-oa-replay/sub/../shadow-v3/peer-1/Contents/missing.mp3";
+    struct oa_string ddin = {NULL, dotdot_in, sizeof dotdot_in / sizeof *dotdot_in - 1};
+    oa_count = 0;
+    assert(oa_replay(oa_self, &ddin, prefs) == 1 && oa_count == 3 &&
+           oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
+
+    // 2. '..' escaping OA_SHADOW/peer-* does NOT skip a normal track outside shadow-v3.
+    static const uint16_t dotdot_out[] = u"/tmp/test-oa-replay/shadow-v3/peer-1/../../music/normal.wav";
+    struct oa_string ddout = {NULL, dotdot_out, sizeof dotdot_out / sizeof *dotdot_out - 1};
+    oa_count = 0;
+    assert(oa_replay(oa_self, &ddout, prefs) == 0 && oa_count == 0);
+
+    // 3. Canonicalized symlink target of OA_SHADOW skips via oa_skip_shadow.
+    mkdir("/tmp/test-oa-replay", 0755);
+    mkdir("/tmp/test-oa-replay/shadow-real", 0755);
+    mkdir("/tmp/test-oa-replay/shadow-real/peer-1", 0755);
+    unlink(OA_SHADOW);
+    assert(!symlink("/tmp/test-oa-replay/shadow-real", OA_SHADOW));
+    static const uint16_t sym_canon[] = u"/tmp/test-oa-replay/shadow-real/peer-1/track.wav";
+    struct oa_string sc = {NULL, sym_canon, sizeof sym_canon / sizeof *sym_canon - 1};
+    oa_count = 0;
+    assert(oa_replay(oa_self, &sc, prefs) == 1 && oa_count == 3 &&
+           oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
+    unlink(OA_SHADOW);
+    rmdir("/tmp/test-oa-replay/shadow-real/peer-1");
+    rmdir("/tmp/test-oa-replay/shadow-real");
+
+    // 4. Relocated / non-default copy dir (sc_shadow_root) catches both direct paths
+    //    and Engine's inMusicTempFiles copy, while non-peer subdirs are not skipped.
+    const char *old_root = sc_shadow_root;
+    mkdir("/tmp/test-oa-replay/alt-root", 0755);
+    mkdir("/tmp/test-oa-replay/alt-root/peer-ab12", 0755);
+    mkdir("/tmp/test-oa-replay/alt-root/notpeer", 0755);
+    mkdir("/tmp/test-oa-replay/copies", 0755);
+    analysis_file("/tmp/test-oa-replay/alt-root/peer-ab12/alt.mp3", "ALT55", 5);
+    analysis_file("/tmp/test-oa-replay/alt-root/notpeer/norm.mp3", "NRM55", 5);
+    analysis_file("/tmp/test-oa-replay/copies/id1_alt.mp3", "ALT55", 5);
+    analysis_file("/tmp/test-oa-replay/copies/id2_norm.mp3", "NRM55", 5);
+    sc_shadow_root = "/tmp/test-oa-replay/alt-root";
+    static const uint16_t alt_direct[] = u"/tmp/test-oa-replay/alt-root/peer-ab12/alt.mp3";
+    struct oa_string ad = {NULL, alt_direct, sizeof alt_direct / sizeof *alt_direct - 1};
+    oa_count = 0;
+    assert(oa_replay(oa_self, &ad, prefs) == 1 && oa_count == 3 &&
+           oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
+    static const uint16_t alt_copy[] = u"/tmp/test-oa-replay/copies/id1_alt.mp3";
+    struct oa_string ac = {NULL, alt_copy, sizeof alt_copy / sizeof *alt_copy - 1};
+    oa_count = 0;
+    assert(oa_replay(oa_self, &ac, prefs) == 1 && oa_count == 3 &&
+           oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
+    static const uint16_t non_peer_copy[] = u"/tmp/test-oa-replay/copies/id2_norm.mp3";
+    struct oa_string npc = {NULL, non_peer_copy, sizeof non_peer_copy / sizeof *non_peer_copy - 1};
+    oa_count = 0;
+    assert(oa_replay(oa_self, &npc, prefs) == 0 && oa_count == 0);
+    // 5. Cross-mount /media/<vol>/enginex/shadow-v3/peer-<hex>/ layout is skipped.
+    static const uint16_t cross_mount[] = u"/media/SSD/enginex/shadow-v3/peer-cafe01/Contents/song.flac";
+    struct oa_string cm = {NULL, cross_mount, sizeof cross_mount / sizeof *cross_mount - 1};
+    oa_count = 0;
+    assert(oa_replay(oa_self, &cm, prefs) == 1 && oa_count == 3 &&
+           oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
+    sc_shadow_root = old_root;
+    unlink("/tmp/test-oa-replay/alt-root/peer-ab12/alt.mp3");
+    unlink("/tmp/test-oa-replay/alt-root/notpeer/norm.mp3");
+    unlink("/tmp/test-oa-replay/copies/id1_alt.mp3");
+    unlink("/tmp/test-oa-replay/copies/id2_norm.mp3");
+    rmdir("/tmp/test-oa-replay/alt-root/peer-ab12");
+    rmdir("/tmp/test-oa-replay/alt-root/notpeer");
+    rmdir("/tmp/test-oa-replay/alt-root");
+    rmdir("/tmp/test-oa-replay/copies");
+    rmdir("/tmp/test-oa-replay");
+    unlink(OA_LOG);
+    printf("Shadow path choke-point edge cases (.., symlink, alt-root, cross-mount): PASS\n");
+}
+
 int main(int argc, char **argv) {
     for (size_t b = 0; b < sizeof engine_builds / sizeof *engine_builds; b++) {
         // Hooks and counters are process-global; each build starts pristine.
@@ -2220,5 +2303,6 @@ int main(int argc, char **argv) {
         assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
     test_shadow_regrid_missing_perf_fallback();
+    test_oa_is_shadow_path_edge_cases();
     return 0;
 }

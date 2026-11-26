@@ -3262,28 +3262,125 @@ static void oa_log(const char *what, const char *path, long us) {
     close(fd);
 }
 
-// Engine loads a /data file from its own copy, /data/inMusicTempFiles/<id>_<name>,
-// and analyses that: the .perf is next to the shadow copy with that name and
-// size, in <copy dir>/ or <copy dir>/Contents/ (a rekordbox export's track).
-static int oa_shadow_perf(const char *path, char *out, size_t cap) {
-    const size_t n = strlen(OA_ENGINE_COPIES);
-    const char *name = strncmp(path, OA_ENGINE_COPIES, n) ? NULL : strchr(path + n, '_');
-    struct stat st;
-    if (!name || strchr(name, '/') || stat(path, &st)) return 0;
-    DIR *dir = opendir(OA_SHADOW);
+#if defined(__aarch64__)
+static const char *sc_shadow_root = OA_SHADOW;
+#endif
+
+static int oa_peer_dir_ok(const char *d) {
+    if (!d || strncmp(d, "peer-", 5)) return 0;
+    size_t hash = strspn(d + 5, "0123456789abcdef");
+    return hash > 0 && hash <= 16 && d[5 + hash] == '\0';
+}
+
+static int oa_peer_rel_ok(const char *rel) {
+    if (!rel || strncmp(rel, "peer-", 5)) return 0;
+    size_t hash = strspn(rel + 5, "0123456789abcdef");
+    if (!hash || hash > 16 || rel[5 + hash] != '/') return 0;
+    const char *name = rel + 6 + hash;
+    if (!strncmp(name, "Contents/", 9)) name += 9;
+    return *name && strcmp(name, ".") && strcmp(name, "..") && !strchr(name, '/');
+}
+
+static int oa_clean_path(const char *in, char *out, size_t cap) {
+    if (!in || in[0] != '/' || cap < 2) return 0;
+    size_t o = 0;
+    const char *p = in;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        const char *q = p;
+        while (*q && *q != '/') q++;
+        size_t len = (size_t)(q - p);
+        if (len == 1 && p[0] == '.') {
+            // Skip '.'
+        } else if (len == 2 && p[0] == '.' && p[1] == '.') {
+            while (o > 0 && out[o - 1] != '/') o--;
+            if (o > 0) o--;
+        } else {
+            if (o + 1 + len + 1 > cap) return 0;
+            out[o++] = '/';
+            memcpy(out + o, p, len);
+            o += len;
+        }
+        p = q;
+    }
+    if (o == 0) out[o++] = '/';
+    out[o] = '\0';
+    return 1;
+}
+
+// Resolve symlinks and collapse '.'/'..' even when the leaf (or parent) does not exist yet.
+static int oa_resolve_path(const char *in, char *out, size_t cap) {
+    if (!in || in[0] != '/' || cap < 2) return 0;
+    char rp[PATH_MAX];
+    if (realpath(in, rp)) {
+        size_t n = strlen(rp);
+        if (n + 1 > cap) return 0;
+        memcpy(out, rp, n + 1);
+        return 1;
+    }
+    char clean[PATH_MAX];
+    if (!oa_clean_path(in, clean, sizeof clean)) return 0;
+    if (realpath(clean, rp)) {
+        size_t n = strlen(rp);
+        if (n + 1 > cap) return 0;
+        memcpy(out, rp, n + 1);
+        return 1;
+    }
+    char prefix[PATH_MAX];
+    strcpy(prefix, clean);
+    for (char *slash = strrchr(prefix, '/'); slash && slash > prefix; slash = strrchr(prefix, '/')) {
+        *slash = '\0';
+        if (realpath(prefix, rp)) {
+            const char *suffix = clean + (size_t)(slash - prefix);
+            int n = !strcmp(rp, "/") ? snprintf(out, cap, "%s", suffix) : snprintf(out, cap, "%s%s", rp, suffix);
+            return n > 0 && (size_t)n < cap;
+        }
+    }
+    size_t n = strlen(clean);
+    if (n + 1 > cap) return 0;
+    memcpy(out, clean, n + 1);
+    return 1;
+}
+
+static int oa_shadow_perf_in(const char *root, const char *name, off_t size, char *out, size_t cap) {
+    char rcanon[PATH_MAX];
+    if (!root || !*root || !oa_resolve_path(root, rcanon, sizeof rcanon)) return 0;
+    DIR *dir = opendir(rcanon);
     if (!dir) return 0;
     int found = 0;
     for (struct dirent *e; !found && (e = readdir(dir));) {
-        for (int sub = 0; !found && sub < 2 && e->d_name[0] != '.'; sub++) {
+        if (!oa_peer_dir_ok(e->d_name)) continue;
+        for (int sub = 0; !found && sub < 2; sub++) {
             struct stat copy;
-            int len = snprintf(out, cap, "%s/%s/%s%s", OA_SHADOW, e->d_name, sub ? "Contents/" : "", name + 1);
+            int len = snprintf(out, cap, "%s/%s/%s%s", rcanon, e->d_name, sub ? "Contents/" : "", name);
             found = len > 0 && (size_t)len + 6 <= cap && !stat(out, &copy) &&
-                S_ISREG(copy.st_mode) && copy.st_size == st.st_size;
+                S_ISREG(copy.st_mode) && copy.st_size == size;
         }
     }
     closedir(dir);
     if (found) strcat(out, ".perf");
     return found;
+}
+
+// Engine loads a /data file from its own copy, /data/inMusicTempFiles/<id>_<name>,
+// and analyses that: the .perf is next to the shadow copy with that name and
+// size, in <copy dir>/peer-<hex>/ or .../Contents/ (a rekordbox export's track).
+static int oa_shadow_perf(const char *path, char *out, size_t cap) {
+    char canon[PATH_MAX], croot[PATH_MAX];
+    if (!oa_resolve_path(path, canon, sizeof canon) || !oa_resolve_path(OA_ENGINE_COPIES, croot, sizeof croot)) return 0;
+    size_t n = strlen(croot);
+    if (n <= 1 || strncmp(canon, croot, n) || canon[n] != '/') return 0;
+    const char *base = canon + n + 1;
+    if (strchr(base, '/')) return 0;
+    const char *name = strchr(base, '_');
+    struct stat st;
+    if (!name || !name[1] || stat(canon, &st) || !S_ISREG(st.st_mode)) return 0;
+    if (oa_shadow_perf_in(OA_SHADOW, name + 1, st.st_size, out, cap)) return 1;
+    if (sc_shadow_root && strcmp(sc_shadow_root, OA_SHADOW)) {
+        if (oa_shadow_perf_in(sc_shadow_root, name + 1, st.st_size, out, cap)) return 1;
+    }
+    return 0;
 }
 
 // The stock process() emits: detectionStarted; per block beatData (unless
@@ -3337,13 +3434,21 @@ static char *oa_read_rgb(const char *path, uint32_t *len) {
     return b;
 }
 
+static int oa_match_shadow_root(const char *canon, const char *root) {
+    char rcanon[PATH_MAX];
+    if (!canon || !root || !*root || !oa_resolve_path(root, rcanon, sizeof rcanon)) return 0;
+    size_t n = strlen(rcanon);
+    return n > 1 && !strncmp(canon, rcanon, n) && canon[n] == '/' && oa_peer_rel_ok(canon + n + 1);
+}
+
 static int oa_is_shadow_path(const char *path) {
-    size_t n = strlen(OA_SHADOW);
-    if (n > 0 && !strncmp(path, OA_SHADOW, n) && path[n] == '/' && !strncmp(path + n + 1, "peer-", 5)) return 1;
-#if !defined(__aarch64__)
-    n = strlen(sc_shadow_root);
-    if (n > 0 && !strncmp(path, sc_shadow_root, n) && path[n] == '/' && !strncmp(path + n + 1, "peer-", 5)) return 1;
-#endif
+    char canon[PATH_MAX];
+    if (!oa_resolve_path(path, canon, sizeof canon)) return 0;
+    if (oa_match_shadow_root(canon, OA_SHADOW)) return 1;
+    if (sc_shadow_root && strcmp(sc_shadow_root, OA_SHADOW) && oa_match_shadow_root(canon, sc_shadow_root)) return 1;
+    for (const char *m = strstr(canon, "/enginex/shadow-v3/"); m; m = strstr(m + 1, "/enginex/shadow-v3/")) {
+        if (oa_peer_rel_ok(m + sizeof "/enginex/shadow-v3/" - 1)) return 1;
+    }
     return 0;
 }
 
@@ -3366,9 +3471,11 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
         oa_log("rgb-stock", path, 0);
         return 0;
     }
-    int is_shadow = oa_is_shadow_path(path);
+    char canon[PATH_MAX];
+    const char *rpath = oa_resolve_path(path, canon, sizeof canon) ? canon : path;
+    int is_shadow = oa_is_shadow_path(rpath);
     char perf[PATH_MAX + 8];
-    snprintf(perf, sizeof perf, "%s.perf", path);
+    snprintf(perf, sizeof perf, "%s.perf", rpath);
     int rekordbox_stream = 0;
 #if !defined(__aarch64__)
     if (!is_shadow && access(perf, F_OK)) rekordbox_stream = sc_rbx_replay_path(path, perf, sizeof perf);

@@ -667,3 +667,76 @@ func TestShadowRefreshPeerGridFailClosedOnBadOrUnwritablePerf(t *testing.T) {
 		t.Fatalf("sent %d regrid datagrams despite savePerf failure", gotDgram.Load())
 	}
 }
+
+// #346 GPT round-2 regression (Finding 5): a framed EXPF payload with an
+// unreadable one-byte beat grid must be rejected by validPerf and must never
+// arm .perf.regrid or signal the regrid socket.
+func TestReviewShadowGridRejectsUnreadableBeatData(t *testing.T) {
+	p := gridTestPerf(t, 128, 250, 0)
+	b, err := perfFromBlobs(128, p.TrackData, p.Beats, p.Overview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := int(binary.LittleEndian.Uint32(b[16:20]))
+	beatsLen := 20 + n
+	end := beatsLen + 4 + int(binary.LittleEndian.Uint32(b[beatsLen:]))
+	bad := append([]byte(nil), b[:beatsLen]...)
+	bad = append(bad, 1, 0, 0, 0, 0)
+	bad = append(bad, b[end:]...)
+	if validPerf(bad) {
+		t.Fatal("validPerf accepted EXPF payload with one-byte unreadable beat grid")
+	}
+
+	sockPath := filepath.Join(t.TempDir(), "regrid.sock")
+	conn, err := net.ListenPacket("unixgram", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var gotDgram atomic.Int32
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			if _, _, err := conn.ReadFrom(buf); err != nil {
+				return
+			}
+			gotDgram.Add(1)
+		}
+	}()
+
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bad)
+	}))
+	defer peer.Close()
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	u, _ := url.Parse(peer.URL)
+	s.shadow.peerPort, _ = strconv.Atoi(u.Port())
+	s.shadow.regridSockPath = sockPath
+	local := filepath.Join(t.TempDir(), "copy.wav")
+	const key = "peer:bad-beats"
+	s.shadow.mu.Lock()
+	s.shadow.files[key] = local
+	s.shadow.copyTrackIDs = map[string]int64{local: 42}
+	s.shadowRefreshPeerGrid(key, peerDeck{
+		deckState: deckState{Deck: 1, Key: "bad-beats", GridGen: "g2"},
+		ip:        "127.0.0.1",
+	}, local)
+	s.shadow.mu.Unlock()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		s.shadow.mu.Lock()
+		busy := s.shadow.copyGridBusy[key]
+		s.shadow.mu.Unlock()
+		if busy {
+			continue
+		}
+		if _, err := os.Stat(local + ".perf.regrid"); !os.IsNotExist(err) {
+			t.Fatalf("regrid armed with a one-byte unreadable beat grid: %v", err)
+		}
+		if gotDgram.Load() != 0 {
+			t.Fatalf("sent %d regrid datagrams despite unreadable beat grid", gotDgram.Load())
+		}
+		return
+	}
+	t.Fatal("regrid job did not settle")
+}

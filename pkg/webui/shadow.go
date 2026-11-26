@@ -1892,7 +1892,9 @@ func perfFromBlobs(bpm float64, track, beats, overview []byte) ([]byte, error) {
 const shadowPerfMax = 16 << 20
 
 // validPerf reports whether b is a well-formed EXPF v1 payload that
-// engine_ui_hook.c's oa_read_perf will replay without falling back.
+// engine_ui_hook.c's oa_read_perf will replay without falling back AND whose
+// uncompressed trackData, overview, and beatData parse into a supported
+// non-empty Engine beat grid.
 func validPerf(b []byte) bool {
 	if len(b) < 28 || len(b) > shadowPerfMax || string(b[:4]) != "EXPF" {
 		return false
@@ -1905,8 +1907,8 @@ func validPerf(b []byte) bool {
 		return false
 	}
 	off := 16
-	var lens [3]uint32
-	for i := range lens {
+	var parts [3][]byte
+	for i := range parts {
 		if len(b)-off < 4 {
 			return false
 		}
@@ -1915,10 +1917,26 @@ func validPerf(b []byte) bool {
 		if uint64(n) > uint64(len(b)-off) {
 			return false
 		}
-		lens[i] = n
+		parts[i] = b[off : off+int(n)]
 		off += int(n)
 	}
-	return off == len(b) && lens[0] >= 20 && lens[1] > 0 && lens[2] >= 27
+	if off != len(b) || len(parts[0]) < 20 || len(parts[1]) == 0 || len(parts[2]) < 27 {
+		return false
+	}
+	ct, err := enginedb.QCompress(parts[0])
+	if err != nil {
+		return false
+	}
+	cb, err := enginedb.QCompress(parts[1])
+	if err != nil {
+		return false
+	}
+	co, err := enginedb.QCompress(parts[2])
+	if err != nil {
+		return false
+	}
+	dp, err := enginedb.ParseDisplayPerformance(ct, co, cb, nil, nil)
+	return err == nil && len(dp.Beats) != 0
 }
 
 // savePerf puts the source's analysis next to a copy atomically, or removes a
