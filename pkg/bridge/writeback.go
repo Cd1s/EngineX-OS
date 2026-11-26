@@ -41,6 +41,7 @@ var (
 	writeBackSnapshotLoadHook func()
 	writeBackFilledReadHook   func()
 	writeBackBackupWalkHook   func()
+	writeBackBeforeLockHook   func()
 )
 
 func getUSBPreparingFlagPath() string {
@@ -135,6 +136,27 @@ func statIdent(path string) (fileIdent, bool) {
 	return id, true
 }
 
+type snapHeaderIdent struct {
+	uuid        string
+	stamp       string
+	commit      int64
+	applied     int64
+	repairStamp string
+}
+
+func headerIdent(h *rbstate.Header) snapHeaderIdent {
+	if h == nil {
+		return snapHeaderIdent{}
+	}
+	return snapHeaderIdent{
+		uuid:        h.LibraryUUID,
+		stamp:       h.Stamp,
+		commit:      h.Commit,
+		applied:     h.Applied,
+		repairStamp: h.RepairStamp,
+	}
+}
+
 // CueSession keeps, for a watcher, the rows its passes found in sync without reading the export
 // (they reach the snapshot with the next pass that saves it), the stick's OneLibrary keys,
 // and the parsed snapshot/backup state across idle untouched passes.
@@ -145,6 +167,7 @@ type CueSession struct {
 
 	snapPath       string
 	snapIdent      fileIdent
+	snapHdr        snapHeaderIdent
 	snap           *rbstate.Snapshot
 	byID           map[int64]*rbstate.Track
 	bakStampKey    string
@@ -153,6 +176,21 @@ type CueSession struct {
 	bakKnown       bool
 	bakRepairStamp string
 	bakHasBackups  bool
+}
+
+func (s *CueSession) reset() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.rows = nil
+	s.snap = nil
+	s.byID = nil
+	s.snapPath = ""
+	s.snapIdent = fileIdent{}
+	s.snapHdr = snapHeaderIdent{}
+	s.bakKnown = false
+	s.mu.Unlock()
 }
 
 func (s *CueSession) invalidateSnapshot() {
@@ -164,15 +202,31 @@ func (s *CueSession) invalidateSnapshot() {
 	s.snap = nil
 	s.byID = nil
 	s.snapIdent = fileIdent{}
+	s.snapHdr = snapHeaderIdent{}
 	s.bakKnown = false
 }
 
 func (s *CueSession) loadSnapshot(dbDir string) (*rbstate.Snapshot, map[int64]*rbstate.Track, error) {
+	return s.loadSnapshotHeader(dbDir, nil)
+}
+
+func (s *CueSession) loadSnapshotHeader(dbDir string, wantHdr *rbstate.Header) (*rbstate.Snapshot, map[int64]*rbstate.Track, error) {
 	path := filepath.Join(dbDir, rbstate.SnapshotName)
 	ident, ok := statIdent(path)
+	var want snapHeaderIdent
+	haveWant := wantHdr != nil
+	if haveWant {
+		want = headerIdent(wantHdr)
+	}
 	if s != nil && ok {
+		if !haveWant {
+			if hdr, herr := rbstate.ReadHeader(dbDir); herr == nil {
+				want = headerIdent(&hdr)
+				haveWant = true
+			}
+		}
 		s.mu.Lock()
-		if s.snap != nil && s.snapPath == path && s.snapIdent == ident {
+		if s.snap != nil && s.snapPath == path && s.snapIdent == ident && (!haveWant || s.snapHdr == want) {
 			snap, byID := s.snap, s.byID
 			s.mu.Unlock()
 			return snap, byID, nil
@@ -186,6 +240,9 @@ func (s *CueSession) loadSnapshot(dbDir string) (*rbstate.Snapshot, map[int64]*r
 	if err != nil {
 		return nil, nil, err
 	}
+	if ident2, ok2 := statIdent(path); ok2 {
+		ident, ok = ident2, true
+	}
 	byID := make(map[int64]*rbstate.Track, len(snap.Tracks))
 	for _, tr := range snap.Tracks {
 		if tr.Native || tr.EngineID == 0 {
@@ -195,13 +252,34 @@ func (s *CueSession) loadSnapshot(dbDir string) (*rbstate.Snapshot, map[int64]*r
 			byID[tr.EngineID] = tr
 		}
 	}
-	if s != nil && ok {
+	loadedHdr := headerIdent(&snap.Header)
+	if s != nil {
+		var keysToClear *rekordbox.KeyCache
 		s.mu.Lock()
-		s.snapPath = path
-		s.snapIdent = ident
-		s.snap = snap
-		s.byID = byID
+		if s.snapHdr.uuid != "" && loadedHdr.uuid != "" && s.snapHdr.uuid != loadedHdr.uuid {
+			keysToClear = s.keys
+		}
+		// Any reload from disk clears cached row edit timestamps so a replaced snapshot never
+		// suppresses work (normal saves already drained rows via take()).
+		s.rows = nil
+		s.bakKnown = false
+		if ok {
+			s.snapPath = path
+			s.snapIdent = ident
+			s.snapHdr = loadedHdr
+			s.snap = snap
+			s.byID = byID
+		} else {
+			s.snapPath = ""
+			s.snapIdent = fileIdent{}
+			s.snapHdr = snapHeaderIdent{}
+			s.snap = nil
+			s.byID = nil
+		}
 		s.mu.Unlock()
+		if keysToClear != nil {
+			keysToClear.Clear()
+		}
 	}
 	return snap, byID, nil
 }
@@ -477,8 +555,9 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 			return "conversion is in progress", errConverting
 		}
 	}
-	// Design 1.6: no write unless the snapshot is the export's and nothing is pending.
-	switch st, err := ImportState(p.mount); {
+	// Design 1.6: fast read-only gate check before locking so stock sticks bail immediately.
+	st, err := ImportState(p.mount)
+	switch {
 	case err != nil:
 		return "import state unavailable", nil
 	case !st.Matches():
@@ -486,18 +565,34 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 	case !st.Header.Pending.None():
 		return "import has pending work", nil
 	}
-	dbDir := filepath.Join(p.mount, "Engine Library", "Database2")
-	snap, byID, err := p.opts.Session.loadSnapshot(dbDir)
-	if err != nil {
-		return "snapshot is unavailable", nil
+	if writeBackBeforeLockHook != nil {
+		writeBackBeforeLockHook()
 	}
-
 	if !p.opts.DryRun {
 		unlock, err := rbstate.LockVolume(p.mount, 0)
 		if err != nil {
 			return "", fmt.Errorf("%w: %w", errVolumeBusy, err)
 		}
 		defer unlock()
+		// Re-check import state under the volume lock before binding the snapshot.
+		st, err = ImportState(p.mount)
+		switch {
+		case err != nil:
+			p.opts.Session.reset()
+			return "import state unavailable", nil
+		case !st.Matches():
+			p.opts.Session.reset()
+			return "import stamp does not match the current export", nil
+		case !st.Header.Pending.None():
+			p.opts.Session.reset()
+			return "import has pending work", nil
+		}
+	}
+	dbDir := filepath.Join(p.mount, "Engine Library", "Database2")
+	snap, byID, err := p.opts.Session.loadSnapshotHeader(dbDir, &st.Header)
+	if err != nil {
+		p.opts.Session.reset()
+		return "snapshot is unavailable", nil
 	}
 	if p.keys = p.opts.Session.keys; p.keys == nil {
 		p.keys = newKeyCache()
