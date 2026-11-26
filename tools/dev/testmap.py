@@ -9,7 +9,7 @@ Rules, in this order (a file can select from several):
   go.mod / go.sum                      every Go package
   *.go, testdata/, data files of a Go package with tests     that package (devtest adds every importer)
   tools/ui-mod/build_packs.py, tools/az01-packer/test_ui_mod.py and the pack's data files (not C, not docs)
-                                       the WHOLE test_ui_mod.py (sharded by pyrun, never a subset) + test_ui_perf.py
+                                       the WHOLE test_ui_mod.py (split as tools/dev/split.json records, never a subset) + test_ui_perf.py
   a Python module                      its own test_<name>.py and every test_*.py of its directory that imports it,
                                        plus the directory's catch-all (test_az01_packer.py, tools/stems/test_worker.py,
                                        tools/splash/test_splash_tool.py)
@@ -384,14 +384,24 @@ def map_paths(paths, root='.', deleted=()):
     return plan
 
 
-def full_plan(root='.'):
+def full_plan(root='.', keep=None):
+    """Everything: every Go package, Python directory, C test (own recipe or its driver) and automatic bash test.
+    keep: a narrow plan whose targets stay in (its Engine sandboxes and anything outside the full lists): the
+    fallback for a change set the map does not fully know is a superset of what it did know."""
     plan = Plan()
     plan.go_all = True
     plan.py = {(d, None) for d in FULL_PY_DIRS}  # None: every test file of the directory
     plan.sh = set(FULL_SH)
-    idx = index(root)
-    plan.c = {f for f in idx.files if os.path.dirname(f) in C_TEST_DIRS and re.match(r'test_[^/]*\.c$', os.path.basename(f))
-              and not (C_TESTS['tests'].get(f) or {}).get('via') and (f in C_TESTS['tests'] or not c_drivers(idx, f))}
+    own, drivers = all_c_tests(index(root))
+    plan.c = set(own)
+    for t in drivers:
+        (plan.py.add((os.path.dirname(t), os.path.basename(t))) if t.endswith('.py') else plan.sh.add(t))
+    if keep is not None:
+        plan.py |= {x for x in keep.py if x[0] not in FULL_PY_DIRS}
+        plan.sh |= keep.sh
+        plan.c |= keep.c
+        plan.manual.update(keep.manual)
+        plan.why.update(keep.why)
     return plan
 
 

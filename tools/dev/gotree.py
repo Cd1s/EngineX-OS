@@ -78,18 +78,25 @@ def static_closure(root, dirs):
     return sorted(want)
 
 
-def buildable(root, env=None):
-    """Package dirs that have Go files for this host's build constraints and are not test-only stubs (go list -e).
-    None if go list fails."""
-    fmt = '{{.Dir}}\t{{len .GoFiles}}\t{{len .TestGoFiles}}\t{{len .XTestGoFiles}}\t{{len .IgnoredGoFiles}}'
+def tag_only(root, dirs, env=None):
+    """{dir: build tags it names} for selected dirs that hold .go files but no package under this host's default build
+    (every file has a //go:build line it does not satisfy). Such a package cannot be tested here as selected: the run
+    is INCOMPLETE, never PASS. None if go list fails."""
+    fmt = '{{.Dir}}\t{{len .GoFiles}}\t{{len .TestGoFiles}}\t{{len .XTestGoFiles}}'
     p = subprocess.run(['go', 'list', '-e', '-f', fmt, './...'], cwd=root, capture_output=True, text=True, env=env)
     if p.returncode:
         return None
-    out = set()
-    for line in p.stdout.splitlines():
-        d, gofiles, tests, xtests, _ = line.split('\t')
-        if int(gofiles) or int(tests) or int(xtests):
-            out.add(os.path.relpath(d, root))
+    built = {os.path.relpath(d, root) for d, *n in (line.split('\t') for line in p.stdout.splitlines()) if any(int(x) for x in n)}
+    out = {}
+    for d in dirs:
+        if d in built:
+            continue
+        tags = set()
+        for f in sorted(os.listdir(os.path.join(root, d))) if os.path.isdir(os.path.join(root, d)) else []:
+            if f.endswith('.go'):
+                with open(os.path.join(root, d, f), errors='replace') as fh:
+                    tags |= set(re.findall(r'^//go:build\s+(.+)$', fh.read(4096), re.M))
+        out[d] = sorted(tags)
     return out
 
 
@@ -156,70 +163,3 @@ def smb_tests(root, dirs):
                     grew = True
         out += [[d, n] for n in sorted(users) if re.match(r'(Test|Fuzz)\w', n) and n != 'TestMain']
     return out
-
-
-_PORT_NAME = re.compile(r'^\s*(?:const|var)?\s*\(?\s*([a-z_]\w*Port\w*|[a-z_]\w*port[A-Z]\w*)\s*(?:int\s*)?=\s*([1-9]\d{1,4})\b', re.M)
-_BIND = re.compile(r'\b(?:Listen|ListenUDP|ListenTCP|ListenPacket|ListenMulticastUDP|ListenAndServe|ListenAndServeTLS|ListenUnixgram)\(')
-_LIT_PORT = re.compile(r'"[^"\n]*:[1-9]\d{1,4}"')
-_ADDR_PORT = re.compile(r'\b(?:UDPAddr|TCPAddr)\{[^}]*\bPort:\s*([1-9]\d{1,4}|[A-Za-z_]\w*)')
-_VAR1 = re.compile(r'^var\s+([A-Za-z_]\w*)\b', re.M)
-_VARBLOCK = re.compile(r'^var\s*\((.*?)^\)', re.M | re.S)
-
-
-def split_hazards(root, d):
-    """Why the tests of package dir d must not be split across processes ([] when nothing is found). Statically, and
-    on the safe side (any hit keeps the package in one process, as a serial run has it):
-    - a fixed port is bound in the package (a Listen* call or a net.UDPAddr/TCPAddr with a literal port or a port
-      constant): two processes of its tests could bind it at the same time;
-    - a test function (not TestMain or init, which run in every process) assigns a package-level variable with no
-      defer or t.Cleanup in that function: the tests after it in a serial run see the change, another process not."""
-    try:
-        names = sorted(f for f in os.listdir(os.path.join(root, d)) if f.endswith('.go'))
-    except OSError:
-        return []
-    texts = {}
-    for f in names:
-        try:
-            with open(os.path.join(root, d, f), encoding='utf-8', errors='replace') as fh:
-                texts[f] = fh.read()
-        except OSError:
-            pass
-    ports = {m.group(1) for t in texts.values() for m in _PORT_NAME.finditer(t)}
-    port_ref = re.compile(r'\b(?:' + '|'.join(sorted(ports)) + r')\b') if ports else None
-    out = []
-    for f, t in texts.items():
-        for n, line in enumerate(t.splitlines(), 1):
-            if line.lstrip().startswith('//'):
-                continue
-            m = _ADDR_PORT.search(line)
-            fixed_addr = m and (m.group(1)[0].isdigit() or m.group(1) in ports)
-            if fixed_addr or (_BIND.search(line) and (_LIT_PORT.search(line) or (port_ref and port_ref.search(line)))):
-                out.append(f'{f}:{n} binds a fixed port')
-                break
-    pkgvars = set()
-    for t in texts.values():
-        pkgvars |= set(_VAR1.findall(t))
-        for block in _VARBLOCK.findall(t):
-            for line in block.splitlines():
-                m = re.match(r'\s*([A-Za-z_]\w*)\b', line)
-                if m and not line.strip().startswith('//'):
-                    pkgvars.add(m.group(1))
-    for f, t in texts.items():
-        if not f.endswith('_test.go'):
-            continue
-        starts = [(m.start(), m.group(1)) for m in _FUNC.finditer(t)]
-        for i, (pos, name) in enumerate(starts):
-            if name in ('TestMain', 'init'):
-                continue
-            body = t[pos:starts[i + 1][0] if i + 1 < len(starts) else len(t)]
-            if 'defer' in body or '.Cleanup(' in body:
-                continue
-            sig = body[:body.find('{')] if '{' in body else body
-            local = set(re.findall(r'([A-Za-z_]\w*)\s+[*\[\]\w.]+', sig))
-            local |= set(re.findall(r'\b([A-Za-z_]\w*)\s*(?:,\s*[A-Za-z_]\w*\s*)*:=', body)) | set(re.findall(r'\bvar\s+([A-Za-z_]\w*)', body))
-            for v in sorted(pkgvars - local - {'_'}):
-                if re.search(r'(?<![\w.])' + re.escape(v) + r'(?:\.\w+|\[[^\]]*\])*\s*(?:=|\+=|-=)(?!=)', body):
-                    out.append(f'{f}:{name} changes package variable {v} without restoring it')
-                    break
-    return out
-

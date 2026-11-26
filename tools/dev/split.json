@@ -1,0 +1,20 @@
+{
+ "_doc": [
+  "The only test sets tools/dev/test.sh runs in parallel. Everything not listed here runs serially, as unittest",
+  "discover and go test run it. Add an entry only with a recorded equality run: the same tree once serially and once",
+  "split, `python3 tools/dev/results.py --same serial.json split.json` printing SAME, on a build host; put the run's",
+  "date, host, tree and the two result hashes in `evidence`.",
+  "python: {\"<dir>/<module>.py\": {\"processes\": N}}: the module's whole classes over N processes (pyrun.py --split).",
+  "c: C test variants run at the same time, N at once (crun.py -j); each variant has its own binary and TMPDIR."
+ ],
+ "python": {
+  "tools/az01-packer/test_ui_mod.py": {
+   "processes": 4,
+   "evidence": "2026-11-27, Oracle-Bogota-arm, 7a979405 + 23722ff6: serial 405 pass (unittest), 4 processes 405 pass, the same ids (results.py --same; review round 2 confirmed on Oracle-Batam-arm)"
+  }
+ },
+ "c": {
+  "processes": 4,
+  "evidence": "2026-11-26/27, Oracle-Bogota-arm, 7a979405: 37 variants 4 at a time pass (110 s) and one at a time pass; test_shadow_position_follow alone 10 of 10"
+ }
+}

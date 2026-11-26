@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build and run C tests the way the release checklist names them (tools/dev/c-tests.json), in parallel.
 
-  crun.py [-j N] [--rerun] [--json OUT] [--list] SRC...
+  crun.py [-j N] [--json OUT] [--list] SRC...
 
 SRC is a C test source (tools/ui-mod/test_*.c, tools/edisksd-hook/test_edisksd_hook.c). Each one expands to its
 variants (for example test_dsp_smooth.c: plain, ASan/UBSan and TSan; test_rt_callback.c: native and armhf, each
@@ -9,14 +9,12 @@ run plain and with `selftest`); every other tools/ui-mod test builds and runs th
 arguments it needs. A run marked `root:` (edisksd-hook's --mounts, inside `unshare -m --propagation private`) needs
 root; without it the variant is reported as skipped with the reason. A variant that needs the firmware lab fails
 when the lab is missing.
-Runs at the same time never share anything: as root every run gets private mount and network namespaces, with
-empty /tmp, /run and /dev/shm and a loopback-only network (C tests write fixed paths such as /tmp/test-oa-replay
-and the hook's own paths); without root, or without unshare and ip, the variants run one at a time. Each test also
-holds a host-wide lock while it runs, so two lanes never run the same test on one host at once.
---rerun: a failed variant runs once more alone after the others; a pass is reported as flaky, not as passed.
---json OUT: tools/dev/results.py's format. Exit 0 only when every variant built and every run passed.
+Variants run one at a time unless -j N (devtest.py passes split.json's recorded number); each has its own binary and
+TMPDIR, and each test holds a host-wide lock while it runs, so two lanes never run the same test on one host at once.
+--json OUT: tools/dev/results.py's format. Exit 0 only when every variant built and every run passed; 2 when a run
+could not run here (not root).
 """
-import argparse, fcntl, json, os, pathlib, re, shutil, subprocess, sys, tempfile, time
+import argparse, fcntl, json, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, time
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -25,8 +23,6 @@ import results  # noqa: E402
 
 ROOT = os.environ.get('ENGINEX_TREE') or os.getcwd()  # the tree under test (test.sh runs this from its root)
 CFG = json.loads(pathlib.Path(HERE, 'c-tests.json').read_text())
-ISOLATE = ('mount -t tmpfs -o mode=1777 tmpfs /tmp && mount -t tmpfs -o mode=755 tmpfs /run && '
-           'mount -t tmpfs -o mode=1777 tmpfs /dev/shm && ip link set lo up && cd "$1" && shift && exec bash -c "$@"')
 
 
 def lab_dir():
@@ -74,11 +70,7 @@ def expand(cmd, job, out, lab):
                       rt_wrap=CFG['rt_wrap'], **eng)
 
 
-def can_isolate():
-    return os.geteuid() == 0 and bool(shutil.which('unshare')) and bool(shutil.which('ip'))
-
-
-def run_job(job, work, lab, isolate):
+def run_job(job, work, lab):
     stem = os.path.basename(job['src'])[:-2]
     wd = tempfile.mkdtemp(prefix=f'{stem}-{job["variant"]}-', dir=work)  # this variant's own binary and TMPDIR
     os.chmod(wd, 0o1777)
@@ -94,17 +86,13 @@ def run_job(job, work, lab, isolate):
             shutil.rmtree(wd, ignore_errors=True)
             return res
 
-    def sh(cmd, run):
-        if run and isolate:  # private /tmp, /run, /dev/shm and network for this run only
-            argv = ['unshare', '-m', '-n', '--propagation', 'private', 'bash', '-c', ISOLATE, 'bash', ROOT, cmd]
-            env = dict(os.environ, TMPDIR='/tmp')
-        else:
-            argv, env = ['bash', '-c', cmd], dict(os.environ, TMPDIR=wd)
-        p = subprocess.run(argv, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', env=env)
+    def sh(cmd):
+        p = subprocess.run(['bash', '-c', cmd], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                           errors='replace', env=dict(os.environ, TMPDIR=wd))
         return p.returncode, p.stdout
 
     try:
-        rc, text = sh(expand(job['build'], job, out, lab), False)
+        rc, text = sh(expand(job['build'], job, out, lab))
         if rc:
             res.update(ok=False, secs=time.monotonic() - t0, tail='build failed:\n' + text[-4000:])
             return res
@@ -117,7 +105,7 @@ def run_job(job, work, lab, isolate):
                 if needs_root and os.geteuid() != 0:
                     res['skipped'].append(f'{cmd.replace(out, "<bin>")} (needs root)')
                     continue
-                rc, text = sh(cmd, True)
+                rc, text = sh(cmd)
                 res['runs'].append({'cmd': cmd.replace(out, '<bin>'), 'rc': rc})
                 if rc:
                     res.update(ok=False, tail=f'{cmd.replace(out, "<bin>")} exited {rc}:\n' + text[-6000:])
@@ -132,9 +120,8 @@ def run_job(job, work, lab, isolate):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('srcs', nargs='*'); ap.add_argument('-j', type=int, default=min(os.cpu_count() or 4, 8))
+    ap.add_argument('srcs', nargs='*'); ap.add_argument('-j', type=int, default=1, help='variants at once (split.json)')
     ap.add_argument('--json'); ap.add_argument('--list', action='store_true')
-    ap.add_argument('--rerun', action='store_true', help='run a failed variant once more alone; a pass is reported as flaky')
     a = ap.parse_args()
     jobs, bad = jobs_for(a.srcs)
     if a.list:
@@ -143,47 +130,36 @@ def main():
         for b in bad:
             print(f'{b}: no recipe in tools/dev/c-tests.json')
         return 0 if not bad else 1
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     res = results.Results()
     lab = lab_dir()
-    isolate = can_isolate()
-    workers = a.j if isolate else 1
-    if not isolate:
-        res.notes.append('no private namespaces here (needs root, unshare and ip): the variants ran one at a time')
-    work = tempfile.mkdtemp(prefix='c', dir=os.environ.get('TMPDIR'))
-    os.chmod(work, 0o755)
+    work = os.path.join(os.environ.get('TMPDIR') or tempfile.gettempdir(), f'c{os.getpid()}')  # named before it exists
     t0 = time.monotonic()
-    flaky = []
     try:
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            done = list(pool.map(lambda j: run_job(j, work, lab, isolate), jobs))
-        if a.rerun and sum(1 for r in done if not r['ok']) <= 3:  # more means a broken tree or host, not load
-            for i, (job, r) in enumerate(zip(jobs, done)):
-                if not r['ok'] and not r['tail'].startswith(('build failed', 'firmware lab')):
-                    again = run_job(job, work, lab, isolate)
-                    if again['ok']:
-                        flaky.append((job, r['tail']))
-                        done[i] = again
+        os.makedirs(work); os.chmod(work, 0o755)
+        with ThreadPoolExecutor(max_workers=max(1, a.j)) as pool:
+            done = list(pool.map(lambda j: run_job(j, work, lab), jobs))
     finally:
-        shutil.rmtree(work, ignore_errors=True)  # only the directory created above
+        shutil.rmtree(work, ignore_errors=True)
     for job, r in zip(jobs, done):
-        status = 'fail' if not r['ok'] else 'skip' if r['skipped'] else 'pass'
+        status = 'fail' if not r['ok'] else 'notrun' if r['skipped'] else 'pass'
         reason = r['tail'] if status == 'fail' else '; '.join(r['skipped'])
         res.add('c', job['src'], job['variant'], status, r['secs'], reason)
-    for job, first in flaky:
-        res.flaky_one('c', job['src'], job['variant'], first[-1500:])
     for b in bad:
         res.error(f'{b}: no recipe in tools/dev/c-tests.json')
     res.wall = time.monotonic() - t0
     res.extra['runs'] = {f"{j['src']} {j['variant']}": r['runs'] for j, r in zip(jobs, done)}
     if a.json:
         res.write(a.json)
-    print(res.summary(f'crun ({len(jobs)} variants of {len(set(j["src"] for j in jobs))} C tests, {"isolated" if isolate else "one at a time"})'))
+    print(res.summary(f'crun ({len(jobs)} variants of {len(set(j["src"] for j in jobs))} C tests, {a.j} at a time)'))
     for r in res.items:
         if r['status'] != 'pass':
             print(f"crun: {r['status']} {r['where']} {r['test']}: {r['reason'][-3000:]}", file=sys.stderr)
     for e in res.errors:
         print('crun: ERROR ' + e, file=sys.stderr)
-    return 0 if res.ok() and not any(r['status'] == 'skip' for r in res.items) else 1
+    if not res.ok():
+        return 1
+    return 2 if any(r['status'] == 'notrun' for r in res.items) else 0
 
 
 if __name__ == '__main__':

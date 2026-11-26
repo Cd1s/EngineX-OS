@@ -2,7 +2,7 @@
 """Implementation of tools/dev/test.sh: one ARM build host runs every selected test (Go, Python, C, bash).
 
   tools/dev/test.sh [--full] [--list [--json]] [--base REF] [--into BRANCH] [--tree DIR] [--host HOST] [--exclusive]
-                    [--require-samba] [--rerun] [--no-cache] [--accept-incomplete] [--report DIR]
+                    [--require-samba] [--no-cache] [--accept-incomplete] [--report DIR]
 
 Targeted (default): files changed against the merge base with origin/<BRANCH> (default agent/5306-batch2), plus
 uncommitted and untracked files, are mapped to tests by tools/dev/testmap.py: gofmt of the changed Go files, go vet
@@ -10,7 +10,8 @@ and go test -race of the touched packages and every package that imports them, t
 (the whole tools/az01-packer/test_ui_mod.py for the pack generator), every C test of the release checklist with all
 its variants, and the automatic bash tests. Engine sandboxes the change selects are named with their commands.
 It fails closed: a Git error or an unknown base stops the run (exit 2); no changed file, a file or deletion the map
-does not know, or a selection with nothing in it runs everything (--full) instead.
+does not know, or a selection with nothing in it runs everything instead, keeping every target the narrow plan had
+(its Engine sandboxes included).
 --full: every Go package, Python directory, C test and automatic bash test, on a host that can run all of them
 (the Samba fixture included). --list: print the selection and why; run nothing (needs only git and Python).
 
@@ -20,19 +21,20 @@ exclusive`); a host without enginex-run is refused, never used unlocked. There `
 (it can only add packages). Go tests that start the Samba fixture (internal/testsmb) run on a host with smbd and
 smbpasswd, one at a time, in a private UTS namespace with hostname localhost.
 
-Result and exit status: PASS (0) only when every selected test ran and passed and every test the change added or
-changed ran and passed. FAIL (1): a failure, an error, or a changed test that did not run (NOT PROVEN).
-INCOMPLETE (3): everything that ran passed, but something selected did not run here (Engine sandboxes, Samba
-fixture tests on a host without Samba, changed Go code this host cannot build); --accept-incomplete turns that into
-PASS once the lane has run them, and the list stays in the output. A failed test is never rerun unless --rerun is
-given (lanes only: a pass on the rerun is reported as FLAKY).
+Result and exit status: PASS (0) only when every selected test produced a pass. FAIL (1): a failure or an error.
+INCOMPLETE (3): nothing failed, but a changed test, a test requested by name, or a selected target (a Python file or
+spec, a Go package with tests, a C test, a bash test) skipped, did not run or has no result, or a sandbox the lane
+runs is listed, or a selected package is built only under a tag. --accept-incomplete turns INCOMPLETE into PASS once
+the lane has run them; the list stays in the output. Other skips (one test of a target that passed) are listed with
+their reason. Tests are never rerun.
 """
 import argparse, fcntl, filecmp, hashlib, json, os, pathlib, re, shutil, signal, socket, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import gorun  # noqa: E402
+
 import gotree  # noqa: E402
+import pyrun  # noqa: E402
 import results  # noqa: E402
 import testmap  # noqa: E402
 
@@ -72,7 +74,7 @@ def git(root, *args):
 # ---------------------------------------------------------------- the plan (made where test.sh is called)
 
 def make_plan(a, root):
-    plan = {'mode': 'full' if a.full else 'targeted', 'no_cache': a.no_cache, 'rerun': bool(a.rerun) and not a.no_cache,
+    plan = {'mode': 'full' if a.full else 'targeted', 'no_cache': a.no_cache,
             'base': None, 'changed': [], 'deleted': [], 'why': {}, 'manual': {}, 'unmapped': [], 'fallback': ''}
     changed, deleted = [], []
     if not a.full:
@@ -101,11 +103,11 @@ def make_plan(a, root):
         reason = ('no changed file' if not changed else
                   f"{len(sel.unmapped)} changed files no rule or test knows: {' '.join(sel.unmapped[:8])}" if sel.unmapped else
                   'the change selects no test' if sel.empty() else '')
-        if reason:  # fail closed: run everything instead of passing on a partial or empty selection
+        if reason:  # fail closed: everything, plus every target the narrow plan had (its sandboxes and C drivers)
             plan['fallback'] = reason
             plan['unmapped'] = sorted(sel.unmapped)
             plan['mode'] = 'full'
-            sel = testmap.full_plan(root)
+            sel = testmap.full_plan(root, keep=sel)
     plan['go_all'] = sel.go_all
     code = sorted(d for d in sel.go_code if os.path.isdir(os.path.join(root, d)))
     plan['go_code'] = code
@@ -126,6 +128,7 @@ def make_plan(a, root):
     # The full run must run everything, the Samba fixture included; a lane that changed a Samba test needs Samba too.
     plan['smb_required'] = bool(plan['smb']) and (plan['mode'] == 'full' or a.require_samba or
                                                   any(['go', d, n] in plan['changed_tests'] for d, n in plan['smb']))
+    plan['split'] = json.loads(pathlib.Path(HERE, 'split.json').read_text())
     plan['needs'] = needs_of(plan)
     return plan
 
@@ -181,48 +184,52 @@ class Step:
         self.name, self.secs, self.ok, self.note, self.tail, self.out = name, 0.0, None, '', '', ''
 
 
+STOP = [0]       # the signal that stopped this run (exec on the build host), 0 while it runs
+CURRENT = [None]  # the process group of the step running now
+
+
 def _stop(signum, frame):
-    raise SystemExit(128 + signum)
+    """A stop never raises at an arbitrary point (it could land between creating a file and recording it): it ends the
+    step that runs now, and the run leaves at the next step boundary through its `finally`."""
+    STOP[0] = STOP[0] or signum
+    if CURRENT[0]:
+        try:
+            os.killpg(CURRENT[0], signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def stopped():
+    if STOP[0]:
+        raise SystemExit(128 + STOP[0])
 
 
 def spawn(step, cmd, env, cwd=None, timeout=None):
-    """Run one step in its own process group; on a timeout, a signal or any error the whole group (the runner and
-    every worker it started) is killed, so nothing keeps running on a shared host."""
+    """Run one step in its own process group; on a timeout or a stop the whole group (the runner and every worker it
+    started) is killed, so nothing keeps running on a shared host."""
+    stopped()
     t0 = time.monotonic()
     p = subprocess.Popen(cmd, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                          errors='replace', start_new_session=True)
+    CURRENT[0] = p.pid
     try:
+        if STOP[0]:  # the stop came while the step was being started
+            os.killpg(p.pid, signal.SIGKILL)
         out, _ = p.communicate(timeout=timeout)
         rc = p.returncode
     except subprocess.TimeoutExpired:
         os.killpg(p.pid, signal.SIGKILL)
         out, _ = p.communicate()
         rc, out = 124, (out or '') + f'\n(timed out after {timeout}s)'
-    except BaseException:
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        p.wait()
-        raise
+    finally:
+        CURRENT[0] = None
+    stopped()
     step.secs = time.monotonic() - t0
     step.ok = rc == 0
     step.out = out
     step.tail = '\n'.join(out.splitlines()[-150:]) if not step.ok else ''
     print(f'[{step.name}] {"ok" if step.ok else "FAILED"} {step.secs:.1f}s', file=sys.stderr, flush=True)
     return rc
-
-
-def cpu_budget():
-    """Cores this run may use: the idle cores of this host right now (other lanes share it), between 2 and 12."""
-    if os.environ.get('ENGINEX_CPU_BUDGET'):
-        return max(1, int(os.environ['ENGINEX_CPU_BUDGET']))
-
-    def snap():
-        v = list(map(int, pathlib.Path('/proc/stat').read_text().splitlines()[0].split()[1:]))
-        return sum(v), v[3] + v[4]
-    t1, i1 = snap(); time.sleep(1); t2, i2 = snap()
-    return max(2, min(12, round((i2 - i1) / max(1, t2 - t1) * (os.cpu_count() or 4))))
 
 
 def samba_missing():
@@ -256,8 +263,10 @@ def exec_plan(plan_path):
         if runner is not None:
             out['runs'].append(runner)
 
-    tmp = lock = None
-    made_git = False
+    # Everything this run creates is named before it exists and belongs to this process alone (no lock file, no
+    # shared directory), so `finally` removes it without asking who made it, whatever moment a stop comes at.
+    tmp = f'/var/tmp/x{os.getpid()}'  # short (unix sockets: 108 bytes; fixed C buffers), on disk (not a tmpfs /tmp)
+    made_git = not os.path.exists('.git')  # the staging repository this run makes (tests call git ls-files)
     try:
         plan = json.loads(pathlib.Path(plan_path).read_text())
         if os.uname().machine not in ('aarch64', 'arm64'):
@@ -265,29 +274,23 @@ def exec_plan(plan_path):
             add(s)
             return 0
         os.nice(5)
-        # Short TMPDIR paths (tests bind unix sockets, 108 bytes; C tests build paths in fixed buffers), on disk (a
-        # tmpfs /tmp fills under parallel processes and a page-cache test needs a disk), the same each run of this
-        # tree (Go's test cache keys on TMPDIR).
-        tmp, lock = gorun.stable_dir('/var/tmp', 'x' + hashlib.sha1(os.getcwd().encode()).hexdigest()[:6])
+        shutil.rmtree(tmp, ignore_errors=True)  # a dead process's leftover with this pid
+        os.mkdir(tmp); os.chmod(tmp, 0o1777)
         env = dict(os.environ, TMPDIR=tmp, GOFLAGS=(os.environ.get('GOFLAGS', '') + ' -buildvcs=false').strip())
-        if not os.path.exists('.git'):  # tests that call git ls-files see the tree, as in the dev line's full run
-            made_git = True  # set first: a signal inside git init still removes what it made
+        if made_git:
             env['GIT_INDEX_FILE'] = os.path.join(tmp, 'index')
-            subprocess.run(['git', 'init', '-q'], check=True)
-            subprocess.run(['git', 'add', '-A'], env=env, check=True, capture_output=True)
-        budget = cpu_budget()
-        state = os.path.expanduser(os.environ.get('ENGINEX_DEV_STATE', '~/.cache/enginex-dev'))
-        os.makedirs(state, exist_ok=True)
-        rerun = ['--rerun'] if plan.get('rerun') else []
-        out.update(budget=budget, host_gcc=gcc_major(), is_root=os.geteuid() == 0, host=socket.gethostname())
-        print(f'[exec] {out["host"]}: cpu budget {budget}, gcc {out["host_gcc"]}, root {out["is_root"]}', file=sys.stderr, flush=True)
+            for cmd in (['git', 'init', '-q'], ['git', 'add', '-A']):
+                if spawn(Step(' '.join(cmd)), cmd, env):
+                    raise RuntimeError(f"{' '.join(cmd)} failed")
+        out.update(host_gcc=gcc_major(), is_root=os.geteuid() == 0, host=socket.gethostname())
+        print(f'[exec] {out["host"]}: gcc {out["host_gcc"]}, root {out["is_root"]}', file=sys.stderr, flush=True)
 
         def runner_step(name, cmd, json_path, step_env=None):
             s = Step(name)
             spawn(s, cmd, step_env or env)
             r = results.load(json_path)
             if r is None:  # the runner died before it wrote anything: that is a failure
-                r = {'ok': False, 'results': [], 'flaky': [], 'errors': [f'{name}: no result ({s.tail[-1500:]})'], 'notes': []}
+                r = {'ok': False, 'results': [], 'errors': [f'{name}: no result ({s.tail[-1500:]})'], 'notes': []}
             n = {st: sum(1 for x in r['results'] if x['status'] == st) for st in results.STATUSES}
             s.note = f"{len(r['results'])} tests: {n['pass']} passed, {n['fail']} failed, {n['skip']} skipped"
             if not r.get('ok') and s.ok:
@@ -304,11 +307,15 @@ def exec_plan(plan_path):
                 extra = sorted(set(gl) - set(go_dirs))
                 out['go_added_by_go_list'] = extra
                 go_dirs += extra
-        if go_dirs and not plan['go_all']:
-            ok_dirs = gotree.buildable('.', env=env)
-            if ok_dirs is not None:
-                out['go_not_buildable_here'] = sorted(d for d in go_dirs if d not in ok_dirs)
-                go_dirs = [d for d in go_dirs if d in ok_dirs]
+        if go_dirs and not plan['go_all']:  # a selected package built only under a tag cannot run here as selected
+            tagged = gotree.tag_only('.', go_dirs, env=env)
+            if tagged:
+                r = results.Results()
+                for d, tags in sorted(tagged.items()):
+                    r.add('go', d, '*', 'notrun', 0, f"built only under {' or '.join(tags) or 'a build tag'}; not run by go test here")
+                s = Step(f'go: {len(tagged)} tag-only packages'); s.ok, s.note = True, 'NOT RUN: ' + ' '.join(sorted(tagged))
+                add(s, r.as_dict())
+                go_dirs = [d for d in go_dirs if d not in tagged]
         pk = ['./...'] if plan['go_all'] else [f'./{d}' if d != '.' else '.' for d in sorted(set(go_dirs))]
         smb = gotree.smb_tests('.', sorted(gotree.packages('.')) if plan['go_all'] else sorted(set(go_dirs))) if pk else []
         smb_file = os.path.join(tmp, 'smb.txt')
@@ -322,14 +329,14 @@ def exec_plan(plan_path):
             s = Step(f'go vet ({len(pk)} pkg args)'); spawn(s, ['go', 'vet'] + pk, env); add(s)
         for item in plan['py']:
             d = item['dir']; out_json = os.path.join(tmp, 'py-' + d.replace('/', '_') + '.json')
-            runner_step(f'py {d}', [sys.executable, os.path.join(HERE, 'pyrun.py'), d] + item['specs'] + [
-                '--json', out_json, '-j', str(budget), '--seed', os.path.join(HERE, 'py-slow.json'),
-                '--timings', os.path.join(state, 'pyrun-' + d.replace('/', '_') + '.json')] + rerun, out_json)
+            split = [f'--split={os.path.basename(k)[:-3]}={v["processes"]}' for k, v in plan['split']['python'].items()
+                     if os.path.dirname(k) == d]  # only what split.json lists (each with a recorded equality run)
+            runner_step(f'py {d}', [sys.executable, os.path.join(HERE, 'pyrun.py'), d] + item['specs'] + split + [
+                '--json', out_json, '--seed', os.path.join(HERE, 'py-slow.json')], out_json)
         if pk:
             out_json = os.path.join(tmp, 'go.json')
-            runner_step('go test -race', [sys.executable, os.path.join(HERE, 'gorun.py'), '--seed', os.path.join(HERE, 'go-slow.json'),
-                                          '--json', out_json, '--jobs', str(budget), '-p', str(max(2, budget // 2))]
-                        + (['--no-cache'] if plan['no_cache'] else []) + rerun + (['--defer', smb_file] if smb else []) + pk, out_json)
+            runner_step('go test -race', [sys.executable, os.path.join(HERE, 'gorun.py'), '--json', out_json]
+                        + (['--no-cache'] if plan['no_cache'] else []) + (['--skip', smb_file] if smb else []) + pk, out_json)
         if smb:
             why = samba_missing()
             if why:
@@ -343,12 +350,12 @@ def exec_plan(plan_path):
                 out_json = os.path.join(tmp, 'go-smb.json')
                 pkgs = sorted({f'./{d}' if d != '.' else '.' for d, _ in smb})
                 runner_step(f'go test -race (Samba, private UTS ns, {len(smb)} tests)', uts_localhost(
-                    [sys.executable, os.path.join(HERE, 'gorun.py'), '--only', smb_file, '--json', out_json, '--jobs', '1', '-p', '1']
-                    + (['--no-cache'] if plan['no_cache'] else []) + rerun + pkgs), out_json)
+                    [sys.executable, os.path.join(HERE, 'gorun.py'), '--only', smb_file, '--json', out_json, '-p', '1']
+                    + (['--no-cache'] if plan['no_cache'] else []) + pkgs), out_json)
         if plan['c']:
             out_json = os.path.join(tmp, 'c.json')
-            runner_step(f"C tests ({len(plan['c'])})", [sys.executable, os.path.join(HERE, 'crun.py'), '-j', str(budget), '--json', out_json]
-                        + rerun + plan['c'], out_json)
+            runner_step(f"C tests ({len(plan['c'])})", [sys.executable, os.path.join(HERE, 'crun.py'), '--json', out_json,
+                                                         '-j', str(plan['split']['c']['processes'])] + plan['c'], out_json)
         for script in sorted(plan['sh'], key=lambda x: x == testmap.OVERLAY):  # the overlay test last, without .git
             info = testmap.SH_TESTS['auto'].get(script, {})
             s = Step(f'sh {script}')
@@ -372,11 +379,11 @@ def exec_plan(plan_path):
             r.add('sh', script, '*', 'pass' if rc == 0 else 'fail', s.secs, s.tail if rc else '')
             add(s, r.as_dict())
     finally:
-        if tmp:
-            gorun.release_dir(tmp, lock)
+        shutil.rmtree(tmp, ignore_errors=True)
         if made_git:
             shutil.rmtree('.git', ignore_errors=True)
         print(MARK + json.dumps(out), flush=True)
+    stopped()
     return 0
 
 
@@ -471,8 +478,7 @@ def parse_result(out):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--full', action='store_true'); ap.add_argument('--no-cache', action='store_true')
-    ap.add_argument('--rerun', action='store_true', help='lanes only: rerun a failed test alone once; a pass is reported as FLAKY')
-    ap.add_argument('--strict', action='store_true', help='the default (no rerun); kept for older callers')
+    ap.add_argument('--strict', action='store_true', help='accepted for older callers (tests are never rerun)')
     ap.add_argument('--base'); ap.add_argument('--into', default=os.environ.get('ENGINEX_TEST_TARGET', DEFAULT_INTO))
     ap.add_argument('--tree', help='tree under test (default: the git checkout of the current directory)')
     ap.add_argument('--host', help='this build host (default: the least busy of ENGINEX_BUILD_HOSTS that qualifies)')
@@ -523,7 +529,8 @@ def main(argv=None):
         fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         name += f'-{os.getpid()}'
-    signal.signal(signal.SIGTERM, _stop)
+    # Here a stop may raise anywhere: what this side makes (the plan file, the runner copy) is named before it is made.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
     try:
         pathlib.Path(plan_path).write_text(json.dumps(plan))
         # The tree may not carry this runner yet (a lane branch older than it): run a copy of this one, synced with it.
@@ -565,46 +572,48 @@ def main(argv=None):
 
 
 def verdict(plan, res, accept_incomplete=False):
-    """(status, exit code, lines, results, failed results): the run judged from its steps and runners' results."""
+    """(status, exit code, lines, results, failed results). PASS only when every selected test produced a pass."""
     lines = []
-    steps = res.get('steps', [])
     items = [x for r in res.get('runs', []) for x in r.get('results', [])]
     errors = [e for r in res.get('runs', []) for e in r.get('errors', [])]
-    flaky = [x for r in res.get('runs', []) for x in r.get('flaky', [])]
     failed = [x for x in items if x['status'] == 'fail']
-    bad_steps = [s for s in steps if not s['ok']]
-    unproven = []
-    for kind, where, test in (tuple(c) for c in plan.get('changed_tests', [])):
-        if kind in ('go', 'py'):
-            mine = [x for x in items if x['kind'] == kind and x['where'] == where and x['test'] == test]
-        else:
-            mine = [x for x in items if x['kind'] == kind and x['where'] == where]
+    bad_steps = [s for s in res.get('steps', []) if not s['ok']]
+    named = {tuple(c) for c in plan.get('changed_tests', [])}  # the tests the change added or changed
+    missing = []  # selected by name, but no pass
+    for kind, where, test in sorted(named):
+        mine = [x for x in items if x['kind'] == kind and x['where'] == where and (kind not in ('go', 'py') or x['test'] == test)]
         if not mine:
-            unproven.append(f'{kind} {where} {test}: did not run')
-        elif any(x['status'] != 'pass' for x in mine):
-            unproven.append(f"{kind} {where} {test}: {', '.join(sorted({x['status'] for x in mine}))} "
-                            f"({'; '.join(x['reason'][:120] for x in mine if x['status'] != 'pass')})")
-    incomplete = [f"manual: {p}: {i['how']}" for p, i in plan.get('manual', {}).items()]
-    incomplete += [f"{x['kind']} {x['where']} {x['test']}: NOT RUN ({x['reason']})" for x in items if x['status'] == 'notrun']
-    changed_dirs = {os.path.dirname(p) or '.' for p in plan.get('changed', []) if p.endswith('.go') and not p.endswith('_test.go')}
-    incomplete += [f'go {d}: changed Go code this host cannot build (build tags)' for d in res.get('go_not_buildable_here', []) if d in changed_dirs]
-    if failed or errors or bad_steps or unproven:
+            missing.append(f'{kind} {where} {test}: no result')
+        elif any(x['status'] in ('skip', 'notrun') for x in mine):  # a failure is counted as a failure below
+            missing.append(f"{kind} {where} {test}: {', '.join(sorted({x['status'] for x in mine if x['status'] in ('skip', 'notrun')}))} "
+                           f"({'; '.join(x['reason'][:120] for x in mine if x['status'] in ('skip', 'notrun'))})")
+    missing += [f"{x['kind']} {x['where']} {x['test']}: did not run ({x['reason']})" for x in items if x['status'] == 'notrun']
+    missing += [f"manual: {p}: {i['how']}" for p, i in plan.get('manual', {}).items()]
+
+    def needs_a_pass(label, mine):  # a selected target: one of its tests must pass
+        if not any(x['status'] in ('pass', 'fail', 'notrun') for x in mine):  # a failure fails; a not-run is listed above
+            missing.append(f'{label}: ' + ('; '.join(sorted({f"skip ({x['reason'][:120]})" for x in mine})) or 'no result'))
+    for item in plan.get('py', []):
+        for spec in item['specs'] or [None]:
+            m = spec and pyrun.norm(spec)
+            needs_a_pass(f"py {item['dir']} {spec or '(all)'}", [x for x in items if x['kind'] == 'py' and x['where'] ==
+                         item['dir'].rstrip('/') and (not m or pyrun.matches(x['test'], [m]))])
+    for d in sorted({d for r in res.get('runs', []) for d, k in r.get('packages', {}).items() if k == 'tested'}):
+        needs_a_pass(f'go {d}', [x for x in items if x['kind'] == 'go' and x['where'] == d])
+    for kind in ('c', 'sh'):
+        for where in plan.get(kind, []):
+            needs_a_pass(f'{kind} {where}', [x for x in items if x['kind'] == kind and x['where'] == where])
+    if failed or errors or bad_steps:
         status, code = 'FAIL', 1
-    elif incomplete and not accept_incomplete:
+    elif missing and not accept_incomplete:
         status, code = 'INCOMPLETE', EXIT_INCOMPLETE
     else:
         status, code = 'PASS', 0
-    for u in unproven:
-        lines.append('NOT PROVEN: ' + u)
     for e in errors:
         lines.append('ERROR: ' + e[:3000])
-    if flaky:
-        lines.append(f'FLAKY: {len(flaky)} test(s) failed and then passed alone (--rerun; not proven stable):')
-        lines += [f"  {x['kind']} {x['where']} {x['test']}: " + ' | '.join(l.strip() for l in x['first_failure'].splitlines() if l.strip())[:300]
-                  for x in flaky]
-    if incomplete:
-        lines.append(f"{'accepted as run by the lane' if accept_incomplete else 'INCOMPLETE'}: {len(incomplete)} selected tests did not run here:")
-        lines += ['  ' + i for i in incomplete]
+    if missing:
+        lines.append(f"{'accepted as run by the lane' if accept_incomplete else 'without a pass here'}: {len(missing)} selected tests:")
+        lines += ['  ' + m for m in missing]
     return status, code, lines, items, failed
 
 
@@ -614,8 +623,7 @@ def report(a, plan, res, host, started):
     print(f"{'step':40} {'wall':>8}  result")
     for s in res.get('steps', []):
         print(f"{s['name'][:40]:40} {s['secs']:7.1f}s  {'ok' if s['ok'] else 'FAILED'}{'  ' + s['note'] if s['note'] else ''}")
-    for key, text in (('go_not_buildable_here', 'not Go packages on this host (build tags exclude every file)'),
-                      ('go_added_by_go_list', 'go list added packages the static map missed')):
+    for key, text in (('go_added_by_go_list', 'go list added packages the static map missed'),):
         if res.get(key):
             print(f"{text}: {' '.join(res[key])}")
     for r in res.get('runs', []):

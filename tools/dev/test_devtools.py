@@ -1,4 +1,4 @@
-"""Self-test of tools/dev: path map, changed-test detection, skip accounting, shard and class counts."""
+"""Self-test of tools/dev: path map, changed-test detection, verdicts, runners, stop cleanup."""
 import io, json, os, shutil, subprocess, sys, tempfile, textwrap, time, unittest
 from contextlib import redirect_stdout
 
@@ -239,6 +239,22 @@ class FailClosedPlanTest(unittest.TestCase):
             self.assertEqual(plan['mode'], 'full')
             self.assertEqual(set(plan['unmapped']), {'tools/az01-packer/test_known.py', 'misc/renamed.py'})
 
+    def test_the_full_fallback_keeps_every_narrow_target_sandboxes_included(self):
+        # Review round 2: a sandbox helper selected its sandbox; adding an unmapped file made the plan full and lost it.
+        with tempfile.TemporaryDirectory() as root:
+            g = git_repo(root)
+            write(root, 'tools/az01-packer/test_known.py', 'import unittest\nclass K(unittest.TestCase):\n    def test_k(self): pass\n')
+            g('add', '-A'); g('commit', '-qm', 'base')
+            os.makedirs(os.path.join(root, 'tools/dev'), exist_ok=True)
+            write(root, 'tools/az01-packer/console_link_stub.py', 'x = 1\n')
+            write(root, 'tools/az01-packer/test_console_link_sandbox.sh', 'python3 tools/az01-packer/console_link_stub.py\n')
+            narrow = devtest.make_plan(args(base='HEAD'), root)
+            self.assertIn('tools/az01-packer/test_console_link_sandbox.sh', narrow['manual'])
+            write(root, 'misc/unknown.bin', 'x')
+            full = devtest.make_plan(args(base='HEAD'), root)
+            self.assertEqual(full['mode'], 'full')
+            self.assertIn('tools/az01-packer/test_console_link_sandbox.sh', full['manual'], 'the fallback is a superset')
+
     def test_a_selection_with_nothing_in_it_runs_everything(self):
         plan = testmap.map_paths(['no-such-dir/nothing-names-this.bin'], REPO)
         self.assertTrue(plan.empty())  # devtest turns this into a full run (test_an_unknown_file...)
@@ -248,14 +264,6 @@ class FailClosedPlanTest(unittest.TestCase):
         plan = testmap.map_paths(['tools/ui-mod/master_limiter.h'], REPO)
         self.assertEqual(plan.c, own, 'includes found only through -I or macros would escape an include map')
         self.assertTrue(drivers <= plan.sh | {f'{d}/{f}' for d, f in plan.py})
-
-    def test_reruns_are_off_unless_asked_and_the_full_run_needs_samba(self):
-        with tempfile.TemporaryDirectory() as root:
-            self.repo(root)
-            self.assertFalse(devtest.make_plan(args(base='HEAD'), root)['rerun'])
-        full = devtest.make_plan(args(full=True), REPO)
-        self.assertIn('samba', full['needs'])
-
 
 class ReportTest(unittest.TestCase):
     """The verdict comes from the runners' results (one format); every changed test must have passed (review 1, 2)."""
@@ -269,23 +277,23 @@ class ReportTest(unittest.TestCase):
             rc = devtest.report(a, plan, res, 'host', 0.0)
         return rc, out.getvalue()
 
-    def res(self, *items, errors=(), flaky=()):
+    def res(self, *items, errors=()):
         r = {'results': [dict(zip(('kind', 'where', 'test', 'status', 'secs', 'reason'), i)) for i in items],
-             'errors': list(errors), 'flaky': list(flaky), 'notes': []}
+             'errors': list(errors), 'notes': []}
         return {'steps': [{'name': 'go test', 'secs': 1, 'ok': not errors and all(i[3] != 'fail' for i in items), 'note': '', 'tail': ''}],
                 'runs': [r]}
 
-    def test_a_changed_test_that_did_not_run_is_not_proven(self):
+    def test_a_changed_test_without_a_pass_is_incomplete(self):
         rc, text = self.report({'changed_tests': [['go', 'p', 'TestNew']]}, self.res(('go', 'p', 'TestOld', 'pass', 0, '')))
-        self.assertEqual(rc, 1)
-        self.assertIn('NOT PROVEN: go p TestNew: did not run', text)
+        self.assertEqual(rc, devtest.EXIT_INCOMPLETE)
+        self.assertIn('go p TestNew: no result', text)
         rc, _ = self.report({'changed_tests': [['py', 'd', 'test_a.A.test_x']]}, self.res(('py', 'd', 'test_a.A.test_y', 'pass', 0, '')))
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, devtest.EXIT_INCOMPLETE)
 
     def test_a_changed_test_that_skipped_is_not_proven_an_unrelated_skip_is_listed(self):
         rc, text = self.report({'changed_tests': [['go', 'p', 'TestNew']]}, self.res(('go', 'p', 'TestNew', 'skip', 0, 'lab')))
-        self.assertEqual(rc, 1)
-        self.assertIn('NOT PROVEN: go p TestNew: skip', text)
+        self.assertEqual(rc, devtest.EXIT_INCOMPLETE)
+        self.assertIn('go p TestNew: skip', text)
         rc, text = self.report({'changed_tests': [['go', 'p', 'TestNew']]},
                                self.res(('go', 'p', 'TestNew', 'pass', 0, ''), ('go', 'p', 'TestOther', 'skip', 0, 'lab')))
         self.assertEqual(rc, 0)
@@ -295,13 +303,6 @@ class ReportTest(unittest.TestCase):
         rc, text = self.report({}, self.res(errors=['pkg/x: go test -list failed (exit 1): undefined: y']))
         self.assertEqual(rc, 1)
         self.assertIn('ERROR: pkg/x: go test -list failed', text)
-
-    def test_flaky_is_only_printed_and_comes_in_one_format(self):
-        res = self.res(('go', 'p', 'TestNew', 'pass', 0, ''), flaky=[{'kind': 'go', 'where': 'p', 'test': 'TestNew', 'first_failure': 'took 900ms'}])
-        rc, text = self.report({'changed_tests': [['go', 'p', 'TestNew']]}, res)
-        self.assertEqual(rc, 0)
-        self.assertIn('FLAKY: 1 test(s)', text)
-        self.assertIn('took 900ms', text)
 
     def test_manual_and_not_run_tests_are_incomplete_unless_accepted(self):
         plan = {'manual': {'tools/az01-packer/test_x_sandbox.sh': {'how': 'enginex-run sandbox -- bash x', 'why': 'Engine'}}}
@@ -314,10 +315,36 @@ class ReportTest(unittest.TestCase):
         self.assertIn('accepted as run by the lane', text)
         rc, text = self.report({}, self.res(('go', 'pkg/webui', 'TestSMBNASAPIAndRebootReload', 'notrun', 0, 'no smbpasswd')))
         self.assertEqual(rc, devtest.EXIT_INCOMPLETE)
-        self.assertIn('TestSMBNASAPIAndRebootReload: NOT RUN', text)
+        self.assertIn('TestSMBNASAPIAndRebootReload: did not run (no smbpasswd)', text)
         rc, _ = self.report({'changed_tests': [['go', 'pkg/webui', 'TestSMBNASAPIAndRebootReload']]},
                             self.res(('go', 'pkg/webui', 'TestSMBNASAPIAndRebootReload', 'notrun', 0, 'no smbpasswd')))
-        self.assertEqual(rc, 1, 'a changed Samba test must run')
+        self.assertEqual(rc, devtest.EXIT_INCOMPLETE, 'a changed Samba test must run before PASS')
+
+    def test_a_test_requested_by_name_that_skipped_is_incomplete(self):
+        # Review round 2: a Python test selected by name (a spec) that reported skip, outside changed_tests, gave PASS.
+        one = {'py': [{'dir': 'd', 'specs': ['test_a.A.test_x']}]}
+        rc, text = self.report(one, self.res(('py', 'd', 'test_a.A.test_x', 'skip', 0, 'no lab')))
+        self.assertEqual(rc, devtest.EXIT_INCOMPLETE, 'a test requested by name that skipped is not a pass')
+        self.assertIn('py d test_a.A.test_x: skip (no lab)', text)
+        both = self.res(('py', 'd', 'test_a.A.test_x', 'skip', 0, 'no lab'), ('py', 'd', 'test_a.A.test_y', 'pass', 0, ''))
+        self.assertEqual(self.report(one, both)[0], devtest.EXIT_INCOMPLETE, 'another test passing does not count for it')
+        rc, text = self.report({'py': [{'dir': 'd', 'specs': ['test_a.py']}]}, self.res(('py', 'd', 'test_a.A.test_x', 'skip', 0, 'no lab')))
+        self.assertEqual(rc, devtest.EXIT_INCOMPLETE, 'a selected file whose every test skipped proves nothing')
+        self.assertIn('py d test_a.py: skip (no lab)', text)
+        rc, text = self.report({'py': [{'dir': 'd', 'specs': ['test_a.py']}]}, both)
+        self.assertEqual(rc, 0, 'one skip in a selected file that passed is listed with its reason')
+        self.assertIn('no lab', text)
+        go = self.res(('go', 'p', 'TestA', 'skip', 0, 'needs the lab'))
+        go['runs'][0]['packages'] = {'p': 'tested', 'q': 'no-tests'}
+        rc, text = self.report({}, go)
+        self.assertEqual(rc, devtest.EXIT_INCOMPLETE, 'a selected Go package whose every test skipped proves nothing')
+        self.assertIn('go p: skip (needs the lab)', text)
+        self.assertNotIn('go q', text)
+        rc, text = self.report({}, self.res(('py', 'd', 'test_missing', 'notrun', 0, 'no test matches it')))
+        self.assertEqual(rc, devtest.EXIT_INCOMPLETE, 'a test requested by name that does not exist is never a pass')
+        rc, text = self.report({'sh': ['tests/test_x.sh']}, self.res(('go', 'p', 'T', 'pass', 0, '')))
+        self.assertEqual(rc, devtest.EXIT_INCOMPLETE, 'a selected bash test with no result')
+        self.assertIn('sh tests/test_x.sh: no result', text)
 
     def test_a_remote_run_without_a_result_fails(self):
         res = {'steps': [{'name': 'remote run', 'secs': 1, 'ok': False, 'note': 'exit 1', 'tail': 'sync failed'}], 'runs': []}
@@ -344,26 +371,65 @@ class LockAndCleanupTest(unittest.TestCase):
             self.assertTrue(os.path.exists(mark))
 
     @unittest.skipUnless(os.uname().machine in ('aarch64', 'arm64'), 'exec runs only on the ARM build hosts')
-    def test_a_stop_during_start_up_leaves_no_scratch_and_no_git(self):
-        import hashlib, signal
-        with tempfile.TemporaryDirectory() as tree:
-            plan = {'mode': 'targeted', 'go': [], 'go_all': False, 'go_code': [], 'gofmt': [], 'py': [], 'c': [], 'sh': [],
-                    'no_cache': False, 'rerun': False}
-            jdump(plan, os.path.join(tree, 'plan.json'))
-            write(tree, 'file.txt', 'x\n')
-            env = dict(os.environ); env.pop('ENGINEX_CPU_BUDGET', None)  # cpu_budget() sleeps a second: stop it there
-            p = subprocess.Popen([sys.executable, os.path.join(HERE, 'devtest.py'), '--exec', 'plan.json'], cwd=tree, env=env,
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            scratch = os.path.join('/var/tmp', 'x' + hashlib.sha1(os.path.realpath(tree).encode()).hexdigest()[:6])
-            for _ in range(200):  # until start-up has made its scratch and its .git
-                if os.path.isdir(os.path.join(tree, '.git')) and os.path.isdir(scratch):
-                    break
-                time.sleep(0.01)
-            p.send_signal(signal.SIGTERM)
-            p.communicate(timeout=30)
-            self.assertFalse(os.path.exists(os.path.join(tree, '.git')), 'the staging .git is removed')
-            self.assertFalse(os.path.exists(scratch), 'TMPDIR is removed')
-            self.assertFalse(os.path.exists(scratch + '.lock'), 'its lock file is removed')
+    def test_a_stop_at_any_moment_leaves_no_scratch_lock_or_git(self):
+        # Review round 2: a stop after the TMPDIR was made but before it was recorded left the TMPDIR and its lock.
+        # Stop the run at the moment each piece appears (the TMPDIR, its lock, the staging .git) and after.
+        import signal
+        for when in ('start', 'tmpdir', 'git', 'index'):
+            with tempfile.TemporaryDirectory() as tree:
+                plan = {'mode': 'targeted', 'go': [], 'go_all': False, 'go_code': [], 'gofmt': [], 'py': [], 'c': [], 'sh': [],
+                        'no_cache': False, 'split': {'python': {}, 'c': {'processes': 1}}}
+                jdump(plan, os.path.join(tree, 'plan.json'))
+                write(tree, 'file.txt', 'x\n')
+                p = subprocess.Popen([sys.executable, os.path.join(HERE, 'devtest.py'), '--exec', 'plan.json'], cwd=tree,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                scratch = f'/var/tmp/x{p.pid}'
+                seen = {'start': lambda: True, 'tmpdir': lambda: os.path.isdir(scratch),
+                        'git': lambda: os.path.isdir(os.path.join(tree, '.git')), 'index': lambda: os.path.exists(os.path.join(scratch, 'index'))}[when]
+                for _ in range(5000):
+                    if seen() or p.poll() is not None:
+                        break
+                    time.sleep(0.0005)
+                p.send_signal(signal.SIGINT)
+                p.communicate(timeout=30)
+                left = [x for x in (scratch, os.path.join(tree, '.git')) if os.path.exists(x)]
+                self.assertEqual(left, [], f'stopped at {when}: left {left}')
+
+    INJECT = textwrap.dedent('''\
+        import os, subprocess, sys
+        sys.path.insert(0, sys.argv[1])
+        import devtest
+        real_mkdir = os.mkdir
+        def mkdir(path, *a, **k):  # the interrupt lands the instant the scratch directory exists
+            real_mkdir(path, *a, **k)
+            if sys.argv[2] == 'scratch' and str(path).startswith('/var/tmp/'):
+                open('made', 'w').write(str(path))
+                raise KeyboardInterrupt
+        os.mkdir = mkdir
+        class Popen(subprocess.Popen):  # ... or the instant `git init` has made the staging repository
+            def __init__(self, args, *a, **k):
+                super().__init__(args, *a, **k)
+                if sys.argv[2] == 'git' and list(args[:2]) == ['git', 'init']:
+                    self.wait()
+                    raise KeyboardInterrupt
+        subprocess.Popen = Popen
+        sys.exit(devtest.main(['--exec', 'plan.json']))
+        ''')
+
+    @unittest.skipUnless(os.uname().machine in ('aarch64', 'arm64'), 'exec runs only on the ARM build hosts')
+    def test_an_interrupt_the_instant_a_directory_exists_leaves_nothing(self):
+        # Review round 2: a Ctrl-C after the TMPDIR was made but before it was recorded left the TMPDIR and its lock.
+        for when in ('scratch', 'git'):
+            with tempfile.TemporaryDirectory() as tree:
+                jdump({'mode': 'targeted', 'go': [], 'go_all': False, 'go_code': [], 'gofmt': [], 'py': [], 'c': [], 'sh': [],
+                       'no_cache': False, 'split': {'python': {}, 'c': {'processes': 1}}}, os.path.join(tree, 'plan.json'))
+                p = subprocess.run([sys.executable, '-c', self.INJECT, HERE, when], cwd=tree, capture_output=True, text=True, timeout=60)
+                self.assertIn('KeyboardInterrupt', p.stderr, f'{when}: the interrupt never came')
+                made = jtext(os.path.join(tree, 'made')) if os.path.exists(os.path.join(tree, 'made')) else None
+                left = [x for x in ([made, made + '.lock'] if made else []) + [os.path.join(tree, '.git')] if os.path.exists(x)]
+                for x in left:  # the run's residue goes, whatever the verdict
+                    self.addCleanup(lambda x=x: shutil.rmtree(x) if os.path.isdir(x) else os.unlink(x))
+                self.assertEqual(left, [], f'interrupted at {when}: left {left}')
 
 
 class SambaTest(unittest.TestCase):
@@ -418,78 +484,17 @@ class SpawnTest(unittest.TestCase):
                 os.kill(pid, 0)
 
 
-class ShardTest(unittest.TestCase):
-    """Python processes never split what shares state (review 2)."""
-    def test_classes_stay_whole_and_a_module_with_shared_state_is_one_process(self):
-        import pyrun
-        tests = [(f'm.A.t{i}', 'm', 'm.A') for i in range(4)] + [(f'm.B.t{i}', 'm', 'm.B') for i in range(30)] + \
-                [('m.C.t0', 'm', 'm.C'), ('n.D.t0', 'n', 'n.D'), ('n.E.t0', 'n', 'n.E')]
-        w = {t: (1.0 if '.A.' in t else 10.0 if '.B.' in t else 2.0) for t, *_ in tests}
-        units = pyrun.make_units(tests, w, 4, keep_whole={'n': ['shares state']}, net=set())
-        flat = [t for u in units for t in u[2]]
-        self.assertEqual(sorted(flat), sorted(t for t, *_ in tests))
-        self.assertEqual(len(flat), len(set(flat)))
-        for cls in ('m.A', 'm.B', 'm.C'):
-            self.assertEqual(sum(1 for u in units if any(t.startswith(cls + '.') for t in u[2])), 1, f'{cls} stays whole')
-        self.assertEqual([u[1] for u in units].count('n'), 1, 'module n runs in one process')
-        self.assertTrue(all(len({t.split('.')[0] for t in u[2]}) == 1 for u in units), 'one module per process')
-
-    def test_module_state_hazards_are_found_and_undone_changes_are_not(self):
-        import pyrun
-        with tempfile.TemporaryDirectory() as root:
-            write(root, 'test_leak.py', """\
-                import unittest
-                import helper
-                STATE = {}
-                class A(unittest.TestCase):
-                    def test_sets(self):
-                        helper.MODE = 'x'
-                class B(unittest.TestCase):
-                    def test_fills(self):
-                        STATE['k'] = 1
-                """)
-            write(root, 'test_clean.py', """\
-                import os, unittest
-                import helper
-                class A(unittest.TestCase):
-                    def test_restores(self):
-                        old = helper.MODE
-                        try:
-                            helper.MODE = 'x'
-                        finally:
-                            helper.MODE = old
-                    def test_cleanup(self):
-                        self.addCleanup(setattr, helper, 'MODE', helper.MODE)
-                        helper.MODE = 'y'
-                    def test_files(self):
-                        os.remove('/nonexistent') if False else None
-                """)
-            leak = pyrun.module_hazards(os.path.join(root, 'test_leak.py'))
-            self.assertEqual(len(leak), 2, leak)
-            self.assertEqual(pyrun.module_hazards(os.path.join(root, 'test_clean.py')), [])
-
-    def test_weights_prefer_this_hosts_timings_then_the_seed(self):
-        import pyrun
-        w = pyrun.weights_for([('a', 'm', 'm.X'), ('b', 'm', 'm.X'), ('c', 'm', 'm.X')], {'a': 5.0, 'b': 3.0}, {'a': 1.0})
-        self.assertEqual((w['a'], w['b']), (1.0, 3.0))
-        self.assertEqual(w['c'], 3.0, 'unknown tests weigh the median')
-
-
-class StableDirTest(unittest.TestCase):
-    def test_same_path_every_run_and_no_sharing_while_held(self):
-        import gorun
-        with tempfile.TemporaryDirectory() as base:
-            first, lock = gorun.stable_dir(base, 'scratch')
-            self.assertEqual(first, os.path.join(base, 'scratch'))
-            second, second_lock = gorun.stable_dir(base, 'scratch')  # a concurrent run gets its own directory
-            self.assertNotEqual(second, first)
-            self.assertIsNone(second_lock)
-            shutil.rmtree(second)
-            gorun.release_dir(first, lock)
-            self.assertEqual(os.listdir(base), [], 'the directory and its lock file are removed')
-            again, lock = gorun.stable_dir(base, 'scratch')
-            self.assertEqual(again, first)  # Go's test cache keys on the TMPDIR value
-            gorun.release_dir(again, lock)
+class NoRerunTest(unittest.TestCase):
+    def test_a_failed_test_is_never_rerun(self):
+        """A failure stands: no runner retries a test, and no result counts a later pass as "flaky"."""
+        import results
+        with tempfile.TemporaryDirectory() as tmp:
+            for tool, args in (('devtest.py', []), ('pyrun.py', ['.']), ('gorun.py', ['./...']), ('crun.py', [])):
+                p = subprocess.run([sys.executable, '-I', os.path.join(HERE, tool), *args, '--rerun', '1'], cwd=tmp,
+                                   capture_output=True, text=True, timeout=60)
+                self.assertEqual((tool, p.returncode), (tool, 2), p.stdout[-500:])
+                self.assertIn('unrecognized arguments: --rerun', p.stderr, tool)
+        self.assertNotIn('flaky', results.Results().as_dict())
 
 
 def ids(res, status=None):
@@ -527,7 +532,7 @@ class PyrunTest(unittest.TestCase):
             serial = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', root], capture_output=True, text=True)
             n = int(serial.stderr.split('Ran ')[1].split()[0])
             out = os.path.join(tmp, 'r.json')
-            p = self.pyrun(root, '-j', '3', '--json', out, tmpdir=tmp)
+            p = self.pyrun(root, '--json', out, tmpdir=tmp)
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             res = jload(out)
             self.assertEqual(len(res['results']), n)
@@ -545,7 +550,37 @@ class PyrunTest(unittest.TestCase):
             self.assertEqual(self.pyrun(root, 'test_two.py', '--json', out, tmpdir=tmp).returncode, 0)
             self.assertEqual(ids(jload(out)), ['test_two.Third.test_c'])
             p = self.pyrun(root, 'test_three.py', '--json', out, tmpdir=tmp)
-            self.assertEqual(p.returncode, 1, 'a selected file with no test must not pass as zero tests')
+            self.assertEqual(p.returncode, 2, 'a selected file with no test must not pass as zero tests')
+            self.assertEqual(ids(jload(out), 'notrun'), ['test_three'])
+
+    def test_only_modules_split_json_lists_are_split(self):
+        # Review round 2: a heuristic split a module whose test leaked state despite an unrelated addCleanup. Now only
+        # an explicit --split (from split.json) runs a module in more than one process; everything else runs serially.
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as tmp:
+            write(root, 'test_leak.py', textwrap.dedent("""\
+                import unittest
+                STATE = {}
+                class A(unittest.TestCase):
+                    def test_a(self):
+                        self.addCleanup(lambda: None)
+                        STATE['seen'] = True
+                class B(unittest.TestCase):
+                    def test_b(self):
+                        self.assertTrue(STATE.get('seen'))
+                """))
+            out = os.path.join(tmp, 'r.json')
+            p = self.pyrun(root, '--json', out, tmpdir=tmp)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertEqual(jload(out)['processes'], 1)
+            p = self.pyrun(root, '--split', 'test_leak=2', '--json', out, tmpdir=tmp)
+            self.assertEqual(jload(out)['processes'], 2, 'split.json is the only way to split')
+
+    def test_split_json_entries_carry_their_equality_evidence(self):
+        cfg = jload(os.path.join(HERE, 'split.json'))
+        self.assertEqual(sorted(cfg['python']), ['tools/az01-packer/test_ui_mod.py'])
+        for name, entry in list(cfg['python'].items()) + [('c', cfg['c'])]:
+            self.assertGreater(entry['processes'], 1, name)
+            self.assertRegex(entry['evidence'], r'20\d\d-\d\d-\d\d.*(pass|SAME)', f'{name}: an entry needs its recorded equality run')
 
     def test_failure_exits_nonzero_and_prints_output(self):
         with tempfile.TemporaryDirectory() as root:
@@ -553,66 +588,6 @@ class PyrunTest(unittest.TestCase):
             p = self.pyrun(root)
             self.assertEqual(p.returncode, 1)
             self.assertIn('boom', p.stderr)
-
-    def test_a_module_whose_classes_share_state_runs_in_one_process(self):
-        # The review's probe: class A sets module state that class B reads. Serially it passes; split it must too.
-        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as tmp:
-            write(root, 'test_shared.py', textwrap.dedent("""\
-                import unittest
-                SEEN = None
-                class A(unittest.TestCase):
-                    def test_a(self):
-                        global SEEN
-                        SEEN = 'A ran first'
-                class B(unittest.TestCase):
-                    def test_b(self):
-                        self.assertEqual(SEEN, 'A ran first')
-                """) + ''.join(f"class C{i}(unittest.TestCase):\n    def test_c(self): pass\n" for i in range(6)))
-            out = os.path.join(tmp, 'r.json')
-            p = self.pyrun(root, '-j', '2', '--json', out, tmpdir=tmp)
-            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-            self.assertEqual(len(jload(out)['units']), 1)
-
-    def test_modules_that_bind_a_fixed_port_do_not_run_at_the_same_time(self):
-        import random
-        port = random.randint(41000, 48000)
-        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as tmp:
-            for name in ('test_port_a.py', 'test_port_b.py'):
-                write(root, name, f"""\
-                    import socket, time, unittest
-                    class Port(unittest.TestCase):
-                        def test_holds_the_port(self):
-                            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            s.bind(('127.0.0.1', {port}))
-                            time.sleep(1.0)
-                            s.close()
-                    """)
-            p = self.pyrun(root, '-j', '2', tmpdir=tmp)
-            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-
-    def test_rerun_turns_a_load_failure_into_a_flaky_pass_and_only_with_rerun(self):
-        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as tmp:
-            write(root, 'test_flaky.py', """\
-                import os, unittest
-                class Flaky(unittest.TestCase):
-                    def test_timing(self):
-                        mark = os.environ['FLAKY_MARK']
-                        if not os.path.exists(mark):
-                            open(mark, 'w').close()
-                            self.fail('too slow under load')
-                    def test_steady(self): pass
-                class Broken(unittest.TestCase):
-                    def test_always(self): self.fail('real bug')
-                """)
-            out = os.path.join(tmp, 'r.json')
-            env = {'FLAKY_MARK': os.path.join(tmp, 'mark')}
-            p = self.pyrun(root, 'test_flaky.Flaky', '--rerun', '--json', out, tmpdir=tmp, env=env)
-            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-            self.assertEqual([f['test'] for f in jload(out)['flaky']], ['test_flaky.Flaky.test_timing'])
-            os.remove(os.path.join(tmp, 'mark'))
-            self.assertEqual(self.pyrun(root, 'test_flaky.Flaky', tmpdir=tmp, env=env).returncode, 1, 'without --rerun the failure stands')
-            os.remove(os.path.join(tmp, 'mark'))
-            self.assertEqual(self.pyrun(root, 'test_flaky.Broken', '--rerun', tmpdir=tmp, env=env).returncode, 1, 'a real failure is never excused')
 
     def test_import_error_fails(self):
         with tempfile.TemporaryDirectory() as root:
@@ -648,79 +623,12 @@ class GorunTest(unittest.TestCase):
         return subprocess.run([sys.executable, os.path.join(HERE, 'gorun.py'), '--no-race', '--no-cache', *args], cwd=root,
                               capture_output=True, text=True, env=e)
 
-    def seed(self, root, pkg, shards):
-        path = os.path.join(root, 'seed.json'); jdump({pkg: {'shards': shards, 'tests': {}}}, path)
-        return path
-
-    def test_a_split_run_equals_one_process(self):
+    def test_skip_and_only_account_for_every_test(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as tmp:
             self.module(root)
-            plain, split = os.path.join(tmp, 'p.json'), os.path.join(tmp, 's.json')
-            p1 = self.gorun(root, '--json', plain, './...')
-            p2 = self.gorun(root, '--json', split, '--seed', self.seed(root, 'a', 3), './...')
-            self.assertEqual((p1.returncode, p2.returncode), (0, 0), p1.stdout + p1.stderr + p2.stdout + p2.stderr)
-            a, b = jload(plain), jload(split)
-            self.assertEqual(ids(a), ids(b))
-            self.assertEqual(len(ids(a)), 7)  # TestOne..TestTwoAndAHalf in a, TestB
-            self.assertEqual(ids(b, 'skip'), ['a TestThree'])
-            self.assertGreater(sum(1 for k in b['jobs'] if k.startswith('a#')), 1)
-
-    def test_a_build_error_in_a_listed_package_fails_the_run(self):
-        # The review's probe: `go test -list` of a seeded package failed (a compile error) and the run passed with 0 tests.
-        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as tmp:
-            self.module(root)
-            write(root, 'a/broken_test.go', 'package a\n\nimport "testing"\n\nfunc TestBroken(t *testing.T) { undefinedName() }\n')
-            out = os.path.join(tmp, 'r.json')
-            p = self.gorun(root, '--json', out, '--seed', self.seed(root, 'a', 2), './a')
-            self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
-            self.assertTrue(any('go test -list failed' in e for e in jload(out)['errors']), jload(out)['errors'])
-
-    def test_a_package_that_binds_a_fixed_port_is_not_split(self):
-        import random
-        port = random.randint(41000, 48000)
-        with tempfile.TemporaryDirectory() as root:
-            write(root, 'go.mod', 'module example.test/m\n\ngo 1.21\n')
-            write(root, 'p/p.go', 'package p\n')
-            body = ''.join(f"""
-                func TestHold{i}(t *testing.T) {{
-                	c, err := net.ListenUDP("udp4", &net.UDPAddr{{IP: net.IPv4(127, 0, 0, 1), Port: {port}}})
-                	if err != nil {{
-                		t.Fatal(err)
-                	}}
-                	time.Sleep(time.Second)
-                	c.Close()
-                }}
-                """ for i in range(2))
-            write(root, 'p/p_test.go', 'package p\n\nimport (\n\t"net"\n\t"testing"\n\t"time"\n)\n' + textwrap.dedent(body))
-            p = self.gorun(root, '--seed', self.seed(root, 'p', 2), './p')
-            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-            self.assertIn('p: not split', p.stdout + p.stderr)
-
-    def test_a_package_whose_tests_change_package_state_is_not_split(self):
-        with tempfile.TemporaryDirectory() as root:
-            write(root, 'go.mod', 'module example.test/m\n\ngo 1.21\n')
-            write(root, 'q/q.go', 'package q\n\nvar mode = "stock"\n')
-            write(root, 'q/q_test.go', """\
-                package q
-
-                import "testing"
-
-                func TestA(t *testing.T) { mode = "patched" }
-                func TestB(t *testing.T) {
-                	if mode != "patched" {
-                		t.Fatal("TestB runs after TestA in one process")
-                	}
-                }
-                """)
-            p = self.gorun(root, '--seed', self.seed(root, 'q', 2), './q')
-            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-
-    def test_defer_and_only_account_for_every_test(self):
-        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as tmp:
-            self.module(root)
-            defer = os.path.join(tmp, 'defer.txt'); write(tmp, 'defer.txt', 'a TestThree  # lab\nb *  # whole package\n')
+            skip = os.path.join(tmp, 'skip.txt'); write(tmp, 'skip.txt', 'a TestThree\nb TestB\n')
             out = os.path.join(tmp, 'd.json')
-            p = self.gorun(root, '--defer', defer, '--json', out, './...')
+            p = self.gorun(root, '--skip', skip, '--json', out, './...')
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             self.assertEqual(ids(jload(out)), ['a TestFive', 'a TestFour', 'a TestOne', 'a TestTwo', 'a TestTwoAndAHalf'])
             only = os.path.join(tmp, 'only.txt'); write(tmp, 'only.txt', 'a TestThree\n')
@@ -728,50 +636,36 @@ class GorunTest(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             self.assertEqual(ids(jload(out), 'skip'), ['a TestThree'])
 
-    def test_rerun_turns_a_load_failure_into_a_flaky_pass_and_only_with_rerun(self):
+    def test_only_with_a_name_that_is_not_in_the_listing_exits_2(self):
+        # Review round 2: TestPresent and a tag-excluded TestExcluded were requested; only TestPresent ran, exit 0.
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as tmp:
             self.module(root)
-            write(root, 'b/b_test.go', """\
-                package b
+            write(root, 'a/excluded_test.go', '//go:build some_tag\n\npackage a\n\nimport "testing"\n\nfunc TestExcluded(t *testing.T) {}\n')
+            only = os.path.join(tmp, 'only.txt'); write(tmp, 'only.txt', 'a TestOne\na TestExcluded\n')
+            out = os.path.join(tmp, 'o.json')
+            p = self.gorun(root, '--only', only, '--json', out, './a')
+            self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+            self.assertEqual(ids(jload(out), 'notrun'), ['a TestExcluded'])
+            self.assertEqual(ids(jload(out), 'pass'), ['a TestOne'])
 
-                import (
-                	"os"
-                	"testing"
-                )
-
-                func TestB(t *testing.T) {
-                	mark := os.Getenv("FLAKY_MARK")
-                	if _, err := os.Stat(mark); err != nil {
-                		os.WriteFile(mark, nil, 0o644)
-                		t.Fatal("too slow under load")
-                	}
-                }
-                """)
-            env = {'FLAKY_MARK': os.path.join(tmp, 'mark')}
-            out = os.path.join(tmp, 'f.json')
-            p = self.gorun(root, '--rerun', '--json', out, './...', env=env)
-            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-            self.assertEqual([(f['kind'], f['where'], f['test']) for f in jload(out)['flaky']], [('go', 'b', 'TestB')])
-            os.remove(os.path.join(tmp, 'mark'))
-            self.assertEqual(self.gorun(root, './...', env=env).returncode, 1, 'without --rerun the failure stands')
-
-    def test_every_go_test_process_gets_the_explicit_timeout(self):
-        with tempfile.TemporaryDirectory() as root:
+    def test_a_build_error_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as tmp:
             self.module(root)
-            write(root, 'b/b_test.go', 'package b\n\nimport (\n\t"testing"\n\t"time"\n)\n\nfunc TestB(t *testing.T) { time.Sleep(4 * time.Second) }\n')
-            for extra in ([], ['--seed', self.seed(root, 'b', 1)]):
-                p = self.gorun(root, '--timeout', '1s', *extra, './b')
-                self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
-                self.assertIn('test timed out after 1s', p.stdout + p.stderr)
+            write(root, 'a/broken_test.go', 'package a\n\nimport "testing"\n\nfunc TestBroken(t *testing.T) { undefinedName() }\n')
+            out = os.path.join(tmp, 'r.json')
+            p = self.gorun(root, '--json', out, './a')
+            self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+            self.assertTrue(jload(out)['errors'], 'a package that fails without a failed test is an error')
 
-    def test_a_directory_whose_go_files_are_all_excluded_is_not_a_package_here(self):
+    def test_a_selected_package_built_only_under_a_tag_is_reported_not_dropped(self):
+        # Review round 2: a selected tag-only importer was dropped from the run without a word.
         import gotree
         with tempfile.TemporaryDirectory() as root:
             self.module(root)
-            write(root, 'tool/server.go', '//go:build ignore\n\npackage main\n')
-            self.assertIn('tool', gotree.static_closure(root, ['tool']), 'the static map ignores build tags')
-            ok = gotree.buildable(root, env=dict(os.environ, GOFLAGS='-buildvcs=false'))
-            self.assertEqual(sorted(ok), ['a', 'b'])
+            write(root, 'tool/server.go', '//go:build fxselector_sandbox\n\npackage main\n\nimport _ "example.test/m/a"\n')
+            self.assertIn('tool', gotree.static_closure(root, ['a']), 'the static map ignores build tags')
+            self.assertEqual(gotree.tag_only(root, ['a', 'tool'], env=dict(os.environ, GOFLAGS='-buildvcs=false')),
+                             {'tool': ['fxselector_sandbox']})
 
     def test_failing_test_fails_the_run(self):
         with tempfile.TemporaryDirectory() as root:
