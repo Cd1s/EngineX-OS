@@ -11,6 +11,10 @@ spec = importlib.util.spec_from_file_location("build_packs_perf", Path(__file__)
 packs = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(packs)
 
+_legacy_spec = importlib.util.spec_from_file_location("legacy_names_perf", Path(__file__).with_name("legacy_names.py"))
+legacy = importlib.util.module_from_spec(_legacy_spec)
+_legacy_spec.loader.exec_module(legacy)
+
 
 class DictionaryTest(unittest.TestCase):
     def test_generated_languages_trace_only_one_dictionary(self):
@@ -482,9 +486,10 @@ assert.equal(doubleDestroyed, 0);
             self.assertIn('row.modelData.albumArt === "image://streaming/"', browse_art)
 
     def test_generated_packs_compile_and_contain_s7_fixes_when_lab_present(self):
+        lab = Path(legacy.LAB)
         lab_roots = [
-            ("5.3.0", Path("/root/build/sc5000-lab/5.3.0/qrc"), "Skins/Embedded/"),
-            ("5.0.4", Path("/root/build/sc5000-lab/5.0.4/qrc"), "Skins/EmbeddedCommon/"),
+            ("5.3.0", lab / "5.3.0/qrc", "Skins/Embedded/"),
+            ("5.0.4", lab / "5.0.4/qrc", "Skins/EmbeddedCommon/"),
         ]
         found_any = False
         import tempfile
