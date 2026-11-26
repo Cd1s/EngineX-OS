@@ -95,13 +95,15 @@ def console(markport):
 
 
 def engine_pid():
+    """The Engine process by its command line (its threads rename themselves, so comm is no guide)."""
     for p in os.listdir("/proc"):
         if p.isdigit():
             try:
-                if open("/proc/%s/comm" % p).read().strip() == "Engine":
-                    return int(p)
+                argv0 = open("/proc/%s/cmdline" % p, "rb").read().split(b"\0")[0]
             except OSError:
-                pass
+                continue
+            if argv0 == b"/usr/Engine/Engine":
+                return int(p)
     return 0
 
 

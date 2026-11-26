@@ -117,7 +117,7 @@ else:
     check(ls and all(any(x.get("title") == title for x in lane_of_player(l)) for l in ls[1:]), "Layer A again: the lane shows Deck 1's track")
 
 # Silence: the console's loop asks on for 10 s after its QML's last poll, then nobody asks for 6 s: the QML is told and stops.
-w = window(64, 71)
+w = window(64, 69.5)  # the probe switches the row off at 70
 check(w and all(not (s.get("console") or {}).get("asked") for s in w), "silence: the asks ran out")
 check(w and all((s.get("ownAgeMs") or 0) > 2000 for s in w), "silence: the QML stopped posting (newest post %s ms old)" % ([s.get("ownAgeMs") for s in w][-1:] or "-"))
 
@@ -142,7 +142,8 @@ def rate(a, b, key):
 
 print("cost (Engine CPU, % of one core: all threads / GUI thread):")
 for name, a, b in (("no ask, playing", 3, 14), ("asked, playing", 17, 24), ("asked again later", 38, 44),
-                   ("silence end", 63, 71), ("row off", 76, 87)):
+                   ("silence end", 63, 69.5), ("row off", 76, 87)):
     print("  %-20s %s / %s" % (name, rate(a, b, "cpu"), rate(a, b, "gui")))
+check(all(rate(a, b, "cpu") is not None for a, b in ((3, 14), (17, 24), (76, 87))), "the Engine's CPU time was sampled in every phase")
 print("RESULT|%s|%d failures, %d warnings" % ("PASS" if not failures else "FAIL", len(failures), len(warnings)))
 sys.exit(1 if failures else 0)

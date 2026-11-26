@@ -65,6 +65,8 @@ Item {
                          const x = new XMLHttpRequest(); x.open("POST", "http://127.0.0.1:8080/v1/enginex/ui?shareDecks=0"); x.send()
                          say("ROW off at=" + Date.now()) }],
         [0, function() { if (!at(90)) return false; get(probe.mark + "/done"); say("DONE|play=" + tr("/Engine/Deck1/PlayState").state) }],
+        // A playing deck holds Engine's quit: stop it first.
+        [0, function() { tr("/Engine/Deck1/Play").state = false }],
         [1000, function() { Planck.getProperty("/Client/Quit").translator.state = true }]
     ]
     Timer {
