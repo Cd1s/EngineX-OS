@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
@@ -747,8 +748,10 @@ func TestWriteBackDefaultCueNameStrippedAndCompactPCP2(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Set Pad A with Engine's auto-generated "Cue 1" + pad color (should strip name & emit 48-byte b29=0x03),
-	// and Pad B with explicit user name "Vocal Drop" (should preserve name & emit 88+clen b29=0x01).
+	// Set Pad A with Engine's auto-generated "Cue 1" + default Pad 1 color (must strip name & default
+	// color -> 44-byte uncolored compact b29=0x03 matching compact rekordbox oracle), Pad B with explicit user name
+	// "Vocal Drop" (-> 88+clen b29=0x01), and Pad C with "Cue 3" + custom non-default RGB (-> 48-byte
+	// colored compact b29=0x03).
 	var slots [8]struct {
 		name    string
 		samples float64
@@ -767,6 +770,11 @@ func TestWriteBackDefaultCueNameStrippedAndCompactPCP2(t *testing.T) {
 		samples float64
 		color   [4]byte
 	}{name: "Vocal Drop", samples: 44100 * 20, color: [4]byte{255, 0x30, 0x5a, 0xff}}
+	slots[2] = struct {
+		name    string
+		samples float64
+		color   [4]byte
+	}{name: "Cue 3", samples: 44100 * 30, color: [4]byte{255, 0xff, 0x00, 0x17}}
 
 	if _, err := db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=1`, buildEngineQuickCuesBlob(slots)); err != nil {
 		t.Fatal(err)
@@ -804,21 +812,20 @@ func TestWriteBackDefaultCueNameStrippedAndCompactPCP2(t *testing.T) {
 		case "PCOB":
 			pcobKinds = append(pcobKinds, s.kind)
 			if cnt := binary.BigEndian.Uint16(s.raw[18:20]); cnt != 0 {
-				t.Fatalf("EXT PCOB(%d) should be empty for A/B point cues, got %d entries", s.kind, cnt)
+				t.Fatalf("EXT PCOB(%d) should be empty for A/B/C point cues, got %d entries", s.kind, cnt)
 			}
 		case "PCO2":
 			pco2Kinds = append(pco2Kinds, s.kind)
 			if s.kind == 1 {
 				cnt := int(binary.BigEndian.Uint16(s.raw[16:18]))
-				if cnt != 2 {
-					t.Fatalf("EXT PCO2(1) count=%d, want 2", cnt)
+				if cnt != 3 {
+					t.Fatalf("EXT PCO2(1) count=%d, want 3", cnt)
 				}
-				// Entry 0: Pad A compact 48-byte b29=0x03 with RGB tail.
+				// Entry 0: Pad A compact 44-byte b29=0x03 (default name & default Pad 1 color stripped).
 				off := 20
 				n0 := int(binary.BigEndian.Uint32(s.raw[off+8:]))
-				if n0 != 48 || s.raw[off+29] != 0x03 || binary.BigEndian.Uint32(s.raw[off+40:]) != 0 ||
-					!bytes.Equal(s.raw[off+44:off+48], []byte{0x00, 0xf4, 0xd3, 0x38}) {
-					t.Fatalf("Pad A not compact 48-byte b29=0x03: len=%d b29=0x%02x tail=%x", n0, s.raw[off+29], s.raw[off+44:off+n0])
+				if n0 != 44 || s.raw[off+29] != 0x03 || binary.BigEndian.Uint32(s.raw[off+40:]) != 0 {
+					t.Fatalf("Pad A not compact 44-byte b29=0x03: len=%d b29=0x%02x bytes=%x", n0, s.raw[off+29], s.raw[off:off+n0])
 				}
 				// Entry 1: Pad B full 88+clen b29=0x01 preserving "Vocal Drop".
 				off += n0
@@ -826,6 +833,13 @@ func TestWriteBackDefaultCueNameStrippedAndCompactPCP2(t *testing.T) {
 				clen1 := int(binary.BigEndian.Uint32(s.raw[off+40:]))
 				if s.raw[off+29] != 0x01 || clen1 == 0 || n1 != 88+clen1 {
 					t.Fatalf("Pad B not full 88+clen b29=0x01: len=%d b29=0x%02x clen=%d", n1, s.raw[off+29], clen1)
+				}
+				// Entry 2: Pad C compact 48-byte b29=0x03 preserving custom RGB tail.
+				off += n1
+				n2 := int(binary.BigEndian.Uint32(s.raw[off+8:]))
+				if n2 != 48 || s.raw[off+29] != 0x03 || binary.BigEndian.Uint32(s.raw[off+40:]) != 0 ||
+					!bytes.Equal(s.raw[off+44:off+48], []byte{0x00, 0xff, 0x00, 0x17}) {
+					t.Fatalf("Pad C not compact 48-byte b29=0x03: len=%d b29=0x%02x tail=%x", n2, s.raw[off+29], s.raw[off+44:off+n2])
 				}
 			}
 		}
@@ -993,7 +1007,86 @@ func TestWriteBackSelfRepairsSwappedEngineXFilesOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// DryRun reports ONLY Track 1 with cues:anlz-repair and writes nothing.
+	// Track 3: backed-up swapped file holding the 8x23ms content-76 phantom-cue signature
+	// (PM 17:05: must be excluded from the self-repair pass for now).
+	dat3Rel := "PIONEER/USBANLZ/P003/ANLZ0000.DAT"
+	ext3Rel := "PIONEER/USBANLZ/P003/ANLZ0000.EXT"
+	dat3Path := filepath.Join(root, filepath.FromSlash(dat3Rel))
+	ext3Path := filepath.Join(root, filepath.FromSlash(ext3Rel))
+	testfixture.Write(t, root, filepath.ToSlash(filepath.Join(".enginex-backup", "2026-11-25", dat3Rel)), origDAT1)
+	testfixture.Write(t, root, filepath.ToSlash(filepath.Join(".enginex-backup", "2026-11-25", ext3Rel)), origEXT1)
+	makeSwappedEight23ms := func(raw []byte, isExt bool) []byte {
+		var eight []rekordbox.Cue
+		for pad := uint32(1); pad <= 8; pad++ {
+			eight = append(eight, rekordbox.Cue{
+				HotCue: pad, TimeMS: 23, Name: fmt.Sprintf("Cue %d", pad), ColorCode: byte(pad),
+			})
+		}
+		rewritten, _, rerr := rekordbox.RewriteANLZCues(raw, eight, isExt, false)
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		h := int(binary.BigEndian.Uint32(rewritten[4:]))
+		secs := dumpANLZSections(t, rewritten)
+		var pcob0, pcob1, pco20, pco21 []byte
+		var body [][]byte
+		inserted := false
+		for _, s := range secs {
+			switch {
+			case s.tag == "PCOB" && s.kind == 0:
+				pcob0 = s.raw
+			case s.tag == "PCOB" && s.kind == 1:
+				pcob1 = s.raw
+			case s.tag == "PCO2" && s.kind == 0:
+				pco20 = s.raw
+			case s.tag == "PCO2" && s.kind == 1:
+				pco21 = s.raw
+			default:
+				if !inserted && s.tag != "PPTH" && s.tag != "PVBR" && s.tag != "PQTZ" && s.tag != "PWAV" && s.tag != "PWV2" && s.tag != "PWV3" {
+					inserted = true
+				}
+				body = append(body, s.raw)
+			}
+		}
+		// Place swapped type 0 before type 1 at end so ANLZNeedsCueRepair triggers.
+		body = append(body, pcob0, pcob1)
+		if isExt {
+			body = append(body, pco20, pco21)
+		}
+		total := h
+		for _, b := range body {
+			total += len(b)
+		}
+		out := make([]byte, total)
+		copy(out, rewritten[:h])
+		binary.BigEndian.PutUint32(out[8:], uint32(total))
+		pos := h
+		for _, b := range body {
+			copy(out[pos:], b)
+			pos += len(b)
+		}
+		return out
+	}
+	brokenDAT3 := makeSwappedEight23ms(origDAT1, false)
+	brokenEXT3 := makeSwappedEight23ms(origEXT1, true)
+	testfixture.Write(t, root, dat3Rel, brokenDAT3)
+	testfixture.Write(t, root, ext3Rel, brokenEXT3)
+	dbDir := filepath.Join(root, "Engine Library", "Database2")
+	snap3, err := rbstate.Load(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap3.Tracks["contents/fixturec/track03.mp3"] = &rbstate.Track{
+		Key:          "contents/fixturec/track03.mp3",
+		EngineID:     3,
+		Rel:          "Contents/FixtureC/Track03.mp3",
+		AnalysisPath: dat3Rel,
+	}
+	if err := snap3.Save(dbDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// DryRun reports ONLY Track 1 with cues:anlz-repair (excludes Track 2 unbacked and Track 3 8x23ms) and writes nothing.
 	dryRes, err := WriteBackCues(ctx, root, WriteBackOptions{DryRun: true})
 	if err != nil {
 		t.Fatalf("DryRun: %v", err)
@@ -1006,7 +1099,8 @@ func TestWriteBackSelfRepairsSwappedEngineXFilesOnly(t *testing.T) {
 		t.Fatal("DryRun modified DAT1")
 	}
 
-	// Live pass repairs ONLY Track 1, leaves Track 2 and first-original backups untouched.
+	// Live pass repairs ONLY Track 1 to compact 44-byte minimal layout, leaves Track 2, Track 3 (8x23ms),
+	// and first-original backups untouched.
 	res, err := WriteBackCues(ctx, root, WriteBackOptions{})
 	if err != nil {
 		t.Fatalf("WriteBackCues repair: %v", err)
@@ -1037,7 +1131,7 @@ func TestWriteBackSelfRepairsSwappedEngineXFilesOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	aDat.Merge(aExt)
-	if len(aDat.Cues) != 1 || aDat.Cues[0].HotCue != 1 || aDat.Cues[0].TimeMS != 12000 || aDat.Cues[0].Name != "" || aDat.Cues[0].Color != ([4]byte{255, 0xf4, 0xd3, 0x38}) {
+	if len(aDat.Cues) != 1 || aDat.Cues[0].HotCue != 1 || aDat.Cues[0].TimeMS != 12000 || aDat.Cues[0].Name != "" || aDat.Cues[0].Color != ([4]byte{}) || aDat.Cues[0].ColorCode != 0 {
 		t.Fatalf("repaired cues mismatch: %+v", aDat.Cues)
 	}
 
@@ -1054,6 +1148,13 @@ func TestWriteBackSelfRepairsSwappedEngineXFilesOnly(t *testing.T) {
 	}
 	if cur, _ := os.ReadFile(ext2Path); !bytes.Equal(cur, brokenEXT2) {
 		t.Fatal("third-party Track 2 EXT was modified")
+	}
+	// Content-76 shape Track 3 (8x23ms) must remain byte-for-byte untouched.
+	if cur, _ := os.ReadFile(dat3Path); !bytes.Equal(cur, brokenDAT3) {
+		t.Fatal("excluded 8x23ms Track 3 DAT was modified")
+	}
+	if cur, _ := os.ReadFile(ext3Path); !bytes.Equal(cur, brokenEXT3) {
+		t.Fatal("excluded 8x23ms Track 3 EXT was modified")
 	}
 
 	// Subsequent pass must be a 0-change no-op.
@@ -1394,5 +1495,330 @@ func TestWriteBackUntouchedTrackZeroGridWrites(t *testing.T) {
 		if !bytes.Equal([]byte(pair[0]), after) {
 			t.Fatalf("%s was modified on untouched pass", label)
 		}
+	}
+}
+
+// TestWriteBackZeroWritesOnImportedRepairedTrack reproduces the PM 17:20 P0 bug where a repaired
+// track (minimal 44-byte PCP2 with no name/color) imported into Engine was re-broken within a
+// minute after mount update + CueWatcher, and proves 0 writes across mount update, forced
+// candidate reads, and CueWatcher passes, while genuine deck edits still write the 44-byte layout.
+func TestWriteBackZeroWritesOnImportedRepairedTrack(t *testing.T) {
+	t.Setenv(rbstate.StageEnv, filepath.Join(t.TempDir(), "stage"))
+	t.Cleanup(SetCueRunDirForTest(t.TempDir()))
+	ctx := context.Background()
+	parentDir := t.TempDir()
+	root := filepath.Join(parentDir, "STICK")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rawDAT, err := os.ReadFile(filepath.Join("..", "rekordbox", "testdata", "rb_hot_compact.dat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawEXT, err := os.ReadFile(filepath.Join("..", "rekordbox", "testdata", "rb_hot_compact.ext"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Repaired minimal 44-byte layout with Hot Cue A at 28264 ms (matching compact rekordbox oracle).
+	const cueMS = uint32(28264)
+	repDAT, _, err := rekordbox.RewriteANLZCues(rawDAT, []rekordbox.Cue{{HotCue: 1, TimeMS: cueMS}}, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repEXT, _, err := rekordbox.RewriteANLZCues(rawEXT, []rekordbox.Cue{{HotCue: 1, TimeMS: cueMS}}, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	datRel := "PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT"
+	extRel := "PIONEER/USBANLZ/P001/00000001/ANLZ0000.EXT"
+	testfixture.Write(t, root, datRel, repDAT)
+	testfixture.Write(t, root, extRel, repEXT)
+	testfixture.Write(t, root, "PIONEER/Artwork/00001/a1.jpg", []byte("fakejpg1"))
+	testfixture.Write(t, root, "PIONEER/Artwork/00001/a2.jpg", []byte("fakejpg2"))
+
+	mp3 := makeLAMEFixtureMP3(25000)
+	testfixture.Write(t, root, "Contents/FixtureA/Track01.mp3", mp3)
+	info, err := compat.AudioHeader(filepath.Join(root, "Contents", "FixtureA", "Track01.mp3"))
+	if err != nil || info.RekordboxOffset() <= 0 {
+		t.Fatalf("AudioHeader: info=%+v err=%v", info, err)
+	}
+	rbOffset := float64(info.RekordboxOffset())
+
+	onePath := filepath.Join(root, "PIONEER", "rekordbox", "exportLibrary.db")
+	if err := os.MkdirAll(filepath.Dir(onePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oneDB, err := sql.Open("sqlite", onePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = oneDB.Exec(`
+		PRAGMA journal_mode=DELETE;
+		CREATE TABLE content(
+			content_id integer primary key,
+			title varchar,
+			bpmx100 integer,
+			length integer,
+			path varchar,
+			samplingRate integer,
+			djComment varchar,
+			image_path varchar,
+			analysisDataFilePath varchar,
+			hasModified integer,
+			cueUpdateCount integer,
+			analysisDataUpdateCount integer
+		);
+		CREATE TABLE cue(
+			cue_id integer primary key,
+			content_id integer,
+			kind integer,
+			colorTableIndex integer,
+			cueComment varchar,
+			isActiveLoop integer,
+			beatLoopNumerator integer,
+			beatLoopDenominator integer,
+			inUsec integer,
+			outUsec integer,
+			in150FramePerSec integer,
+			out150FramePerSec integer
+		);
+		INSERT INTO content(content_id, title, bpmx100, length, path, samplingRate, djComment, image_path, analysisDataFilePath, hasModified, cueUpdateCount, analysisDataUpdateCount)
+		VALUES (1, 'Fixture Track 1', 12800, 650, '/Contents/FixtureA/Track01.mp3', 44100, '', '/PIONEER/Artwork/00001/a1.jpg', '/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT', 1, 1, NULL);
+		INSERT INTO cue(cue_id, content_id, kind, colorTableIndex, cueComment, isActiveLoop, beatLoopNumerator, beatLoopDenominator, inUsec, outUsec, in150FramePerSec, out150FramePerSec)
+		VALUES (1, 1, 1, 33, 'Cue 1', 0, 0, 0, 28264000, -1, 4240, -1);
+	`)
+	_ = oneDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ConvertAtMount(ctx, root, MountOptions{OnDemand: true}); err != nil {
+		t.Fatalf("initial ConvertAtMount(OnDemand): %v", err)
+	}
+
+	assertFilesUnchanged := func(label string, wantDAT, wantEXT, wantOne []byte) {
+		t.Helper()
+		if cur, _ := os.ReadFile(filepath.Join(root, filepath.FromSlash(datRel))); !bytes.Equal(cur, wantDAT) {
+			t.Fatalf("%s: DAT was modified!", label)
+		}
+		if cur, _ := os.ReadFile(filepath.Join(root, filepath.FromSlash(extRel))); !bytes.Equal(cur, wantEXT) {
+			t.Fatalf("%s: EXT was modified!", label)
+		}
+		if cur, _ := os.ReadFile(onePath); !bytes.Equal(cur, wantOne) {
+			t.Fatalf("%s: exportLibrary.db was modified!", label)
+		}
+	}
+
+	// Simulate the deck loading the imported track via OnDemandBuilder so trackData != NULL
+	// (required for needsCueRead) while keeping the imported quickCues ("Cue 1" + palette 33).
+	dbDir := filepath.Join(root, "Engine Library", "Database2")
+	mDB, err := sql.Open("sqlite", filepath.Join(dbDir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	odRes, err := NewOnDemandBuilder().Build(ctx, OnDemandRequest{
+		Mount:      root,
+		EnginePath: "../Contents/FixtureA/Track01.mp3",
+		EngineID:   1,
+	})
+	if err != nil {
+		_ = mDB.Close()
+		t.Fatalf("OnDemandBuilder.Build: %v", err)
+	}
+	perf, err := rbstate.DecodePerf(odRes.RBXA1)
+	if err != nil {
+		_ = mDB.Close()
+		t.Fatalf("DecodePerf: %v", err)
+	}
+	if _, err := mDB.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, loops=?, activeOnLoadLoops=?, thirdPartySourceId=NULL WHERE trackId=1`,
+		perf.TrackData, perf.Overview, perf.Beats, perf.Loops, perf.ActiveLoops); err != nil {
+		_ = mDB.Close()
+		t.Fatal(err)
+	}
+	if _, err := mDB.Exec(`UPDATE Track SET isAnalyzed=1 WHERE id=1`); err != nil {
+		_ = mDB.Close()
+		t.Fatal(err)
+	}
+	var loadedEdit int64
+	if err := mDB.QueryRow(`SELECT COALESCE(lastEditTime,0) FROM Track WHERE id=1`).Scan(&loadedEdit); err != nil {
+		_ = mDB.Close()
+		t.Fatal(err)
+	}
+	_ = mDB.Close()
+
+	// Case 1: Re-insert (mount update) on a previously synced PerfDeck row (including SetDirectCover + title update)
+	// must NOT turn the row into a write-back candidate or trigger any writes in CueWatcher / WriteBackCues.
+	snap, err := rbstate.Load(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := snap.Tracks["contents/fixturea/track01.mp3"]
+	if tr == nil || tr.Synced == nil {
+		t.Fatalf("expected synced OnDemand track, got %+v", tr)
+	}
+	tr.Edit = loadedEdit
+	tr.Perf = rbstate.PerfDeck
+	if err := snap.Save(dbDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate metadata + artwork change in exportLibrary.db so ConvertAtMount runs updateRows + SetDirectCover.
+	oneDB, err = sql.Open("sqlite", onePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = oneDB.Exec(`UPDATE content SET title='Fixture Track 1 Updated', djComment='ExportNote', image_path='/PIONEER/Artwork/00001/a2.jpg' WHERE content_id=1`)
+	_ = oneDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(5 * time.Second)
+	_ = os.Chtimes(onePath, future, future)
+
+	updRes, err := ConvertAtMount(ctx, root, MountOptions{OnDemand: true})
+	if err != nil || updRes.Updated != 1 {
+		t.Fatalf("mount update re-insert failed: res=%+v err=%v", updRes, err)
+	}
+
+	snapDAT1 := repDAT
+	snapEXT1 := repEXT
+	snapOne1, err := os.ReadFile(onePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	watcher := NewCueWatcher(parentDir)
+	wRes, err := watcher.Pass(ctx, root)
+	if err != nil {
+		t.Fatalf("CueWatcher.Pass after mount update: %v", err)
+	}
+	if wRes.TracksRead != 0 || wRes.TracksChanged != 0 || wRes.FilesUpdated != 0 || wRes.OneLibraryUpdated {
+		t.Fatalf("mount update turned synced row into write-back candidate: %+v", wRes)
+	}
+	assertFilesUnchanged("Case 1 (after mount update)", snapDAT1, snapEXT1, snapOne1)
+
+	// Case 2: Forced candidate read (Synced == nil and lastEditTime bumped in m.db) where Engine holds
+	// the same hot cue position (28264 ms) — first straight from the imported exportLibrary cue row
+	// (the exact repaired-track crash scenario), then with default name "Cue 1" and various Engine colors
+	// (Pad-1 yellow #f4d338, Engine default green #00ff00, arbitrary #12ab34): ZERO writes!
+	db, err := sql.Open("sqlite", filepath.Join(dbDir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	t.Run("Case2_ZeroWrite_from_imported_mdb", func(t *testing.T) {
+		if _, err := db.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+10 WHERE id=1`); err != nil {
+			t.Fatal(err)
+		}
+		s, err := rbstate.Load(dbDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Tracks["contents/fixturea/track01.mp3"].Synced = nil
+		if err := s.Save(dbDir); err != nil {
+			t.Fatal(err)
+		}
+		live, err := watcher.Pass(ctx, root)
+		if err != nil || live.TracksRead != 1 || live.TracksChanged != 0 || live.FilesUpdated != 0 || live.OneLibraryUpdated {
+			t.Fatalf("imported repaired track triggered write-back or skipped read: %+v err=%v", live, err)
+		}
+		assertFilesUnchanged("Case 2 from imported m.db", snapDAT1, snapEXT1, snapOne1)
+	})
+
+	sampleFor28264 := float64(cueMS)*44.1 - rbOffset
+	for _, tc := range []struct {
+		name  string
+		color [4]byte
+	}{
+		{"pad1_yellow", [4]byte{255, 0xf4, 0xd3, 0x38}},
+		{"engine_green", [4]byte{255, 0x00, 0xff, 0x00}},
+		{"arbitrary_rgb", [4]byte{255, 0x12, 0xab, 0x34}},
+	} {
+		t.Run("Case2_ZeroWrite_"+tc.name, func(t *testing.T) {
+			var slots [8]struct {
+				name    string
+				samples float64
+				color   [4]byte
+			}
+			for i := range slots {
+				slots[i].samples = -1
+			}
+			slots[0] = struct {
+				name    string
+				samples float64
+				color   [4]byte
+			}{name: "Cue 1", samples: sampleFor28264, color: tc.color}
+			if _, err := db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=1`, buildEngineQuickCuesBlob(slots)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+10 WHERE id=1`); err != nil {
+				t.Fatal(err)
+			}
+			s, err := rbstate.Load(dbDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Tracks["contents/fixturea/track01.mp3"].Synced = nil
+			if err := s.Save(dbDir); err != nil {
+				t.Fatal(err)
+			}
+
+			dry, err := WriteBackCues(ctx, root, WriteBackOptions{SkipPreparingCheck: true, DryRun: true})
+			if err != nil || dry.TracksRead != 1 || dry.TracksChanged != 0 || dry.FilesUpdated != 0 {
+				t.Fatalf("DryRun %s wanted 1 read / 0 changes, got %+v err=%v", tc.name, dry, err)
+			}
+			live, err := watcher.Pass(ctx, root)
+			if err != nil || live.TracksRead != 1 || live.TracksChanged != 0 || live.FilesUpdated != 0 || live.OneLibraryUpdated {
+				t.Fatalf("CueWatcher %s wanted 1 read / 0 writes, got %+v err=%v", tc.name, live, err)
+			}
+			assertFilesUnchanged("Case 2 "+tc.name, snapDAT1, snapEXT1, snapOne1)
+		})
+	}
+
+	// Case 3: Genuine deck edit (move Hot Cue A to 45000 ms) still writes exact 44-byte minimal layout.
+	const newCueMS = uint32(45000)
+	var slots [8]struct {
+		name    string
+		samples float64
+		color   [4]byte
+	}
+	for i := range slots {
+		slots[i].samples = -1
+	}
+	slots[0] = struct {
+		name    string
+		samples float64
+		color   [4]byte
+	}{name: "Cue 1", samples: float64(newCueMS)*44.1 - rbOffset, color: [4]byte{255, 0xf4, 0xd3, 0x38}}
+	if _, err := db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=1`, buildEngineQuickCuesBlob(slots)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+100 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+
+	resEdit, err := watcher.Pass(ctx, root)
+	if err != nil || resEdit.TracksChanged != 1 || resEdit.FilesUpdated < 2 {
+		t.Fatalf("Case 3 genuine edit wanted 1 changed track, got %+v err=%v", resEdit, err)
+	}
+	gotDAT, _ := os.ReadFile(filepath.Join(root, filepath.FromSlash(datRel)))
+	gotEXT, _ := os.ReadFile(filepath.Join(root, filepath.FromSlash(extRel)))
+	if rekordbox.ANLZNeedsCueRepair(gotDAT, false) || rekordbox.ANLZNeedsCueRepair(gotEXT, true) {
+		t.Fatal("Case 3 output triggered ANLZNeedsCueRepair")
+	}
+	aDat, err := rekordbox.ParseAnalysis(gotDAT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aExt, err := rekordbox.ParseAnalysis(gotEXT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aDat.Merge(aExt)
+	if len(aDat.Cues) != 1 || aDat.Cues[0].HotCue != 1 || aDat.Cues[0].TimeMS != newCueMS || aDat.Cues[0].Name != "" || aDat.Cues[0].Color != ([4]byte{}) {
+		t.Fatalf("Case 3 cues mismatch: %+v", aDat.Cues)
 	}
 }

@@ -307,6 +307,8 @@ type trackChange struct {
 	bpm           float64
 	analysis      string // set when cuesDiff, anlzCueRepair, or gridDiff
 	cuesDiff      bool
+	anlzCuesDiff  bool // ANLZ cue sections differ from merged deck cues
+	oneCuesDiff   bool // OneLibrary cue rows differ from merged deck cues
 	anlzCueRepair bool // ANLZ cue-section layout repair only (does not rewrite OneLibrary cue rows)
 	gridDiff      bool
 	metadata      map[rbstate.LibraryKind]bool
@@ -870,12 +872,14 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 							anlzDiff = false
 						}
 						if one, hasOne := change.refs[rbstate.OneLibrary]; hasOne && !cuesEquivalent(one.Cues, merged) {
-							if anlzDiff || len(orig) == 0 || (!takeOver && len(one.Cues) > 0) {
+							if anlzDiff || len(orig) == 0 || (!takeOver && len(one.Cues) > 0 && !cuesValuesMatchIgnoringMinimalMissing(one.Cues, merged)) {
 								oneDiff = true
 							}
 						}
 						if anlzDiff || oneDiff {
 							change.cues = merged
+							change.anlzCuesDiff = anlzDiff
+							change.oneCuesDiff = oneDiff
 							change.cuesDiff = true
 							change.analysis = primary.AnalysisPath
 						}
@@ -1133,11 +1137,19 @@ func applyRepairChanges(r *compat.Resolver, mount string, snap *rbstate.Snapshot
 			continue
 		}
 		cues := readANLZCues(r, analysisPath)
+		if isPhantomZeroHotCueSet(cues) {
+			continue
+		}
 		if hadLegacyB29Zero {
 			for i := range cues {
-				if cues[i].HotCue > 0 && isDefaultEnginePadName(cues[i].HotCue, cues[i].Name) {
+				if cues[i].HotCue > 0 && (cues[i].Name == "" || isDefaultEnginePadName(cues[i].HotCue, cues[i].Name)) {
 					cues[i].Name = ""
-					cues[i].ColorCode = 0
+					if isEngineDefaultHotCueColor(cues[i].HotCue, cues[i].Color) {
+						cues[i].Color = [4]byte{}
+						cues[i].ColorCode = 0
+					} else {
+						cues[i].ColorCode = 0
+					}
 				}
 			}
 		}
@@ -1509,6 +1521,57 @@ func cuesEquivalent(a, b []rekordbox.Cue) bool {
 	return true
 }
 
+// cuesValuesMatchIgnoringMinimalMissing reports whether OneLibrary cue rows (refCues) carry the
+// same cue positions and hot-cue slots as merged, ignoring default Engine pad names and colors
+// that minimal 44-byte rekordbox ANLZ entries intentionally omit.
+func cuesValuesMatchIgnoringMinimalMissing(refCues, merged []rekordbox.Cue) bool {
+	na, nb := sortedCues(refCues), sortedCues(merged)
+	if len(na) != len(nb) {
+		return false
+	}
+	for i, x := range na {
+		y := nb[i]
+		if x.HotCue != y.HotCue || x.Loop != y.Loop || x.Active != y.Active || !near(x.TimeMS, y.TimeMS) || (x.Loop && !near(x.EndMS, y.EndMS)) {
+			return false
+		}
+		nameMatch := x.Name == y.Name || (y.HotCue > 0 && y.Name == "" && isDefaultEnginePadName(y.HotCue, x.Name))
+		if !nameMatch {
+			return false
+		}
+		colorMatch := cueColorEquivalent(x, y) || (y.HotCue > 0 && uncoloured(y))
+		if !colorMatch {
+			return false
+		}
+	}
+	return true
+}
+
+func isPhantomZeroHotCueSet(cues []rekordbox.Cue) bool {
+	var seen [8]bool
+	var refMS uint32
+	count := 0
+	for _, c := range cues {
+		if c.HotCue < 1 || c.HotCue > 8 || c.Loop {
+			continue
+		}
+		if c.TimeMS > 60 {
+			return false
+		}
+		idx := int(c.HotCue - 1)
+		if seen[idx] {
+			continue
+		}
+		if count == 0 {
+			refMS = c.TimeMS
+		} else if c.TimeMS != refMS {
+			return false
+		}
+		seen[idx] = true
+		count++
+	}
+	return count == 8
+}
+
 func sortedCues(in []rekordbox.Cue) []rekordbox.Cue {
 	return slices.SortedStableFunc(slices.Values(in), func(a, b rekordbox.Cue) int {
 		loop := func(c rekordbox.Cue) int {
@@ -1526,10 +1589,27 @@ func sortedCues(in []rekordbox.Cue) []rekordbox.Cue {
 var (
 	engineDefaultHotCueColor = [4]byte{255, 0, 255, 0}
 	engineDefaultLoopColor   = [4]byte{255, 255, 127, 0}
+	engineDefaultPadColors   = [8][4]byte{
+		{255, 0xf4, 0xd3, 0x38}, // Pad 1 / Cue 1
+		{255, 0xef, 0x81, 0x30}, // Pad 2 / Cue 2
+		{255, 0xaa, 0x55, 0xc4}, // Pad 3 / Cue 3
+		{255, 0xce, 0x32, 0x39}, // Pad 4 / Cue 4
+		{255, 0x86, 0xc6, 0x4b}, // Pad 5 / Cue 5
+		{255, 0x20, 0xc6, 0x70}, // Pad 6 / Cue 6
+		{255, 0x00, 0xa8, 0xa9}, // Pad 7 / Cue 7
+		{255, 0x15, 0x71, 0xe2}, // Pad 8 / Cue 8
+	}
 )
 
 func uncoloured(c rekordbox.Cue) bool {
 	return c.Color == ([4]byte{}) && c.ColorCode == 0 && c.ColorID == 0
+}
+
+func isEngineDefaultHotCueColor(pad uint32, rgb [4]byte) bool {
+	if rgb == ([4]byte{}) || rgb == engineDefaultHotCueColor {
+		return true
+	}
+	return pad >= 1 && pad <= 8 && rgb == engineDefaultPadColors[pad-1]
 }
 
 // isDefaultEnginePadName reports Engine's auto-generated unnamed hot-cue label ("Cue 1".."Cue 8").
@@ -1593,13 +1673,15 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offset float6
 			var num, den uint16
 			if st, ok := sameLoop(hc.Samples, oc, start, end); hasOrig && oc.Loop && ok {
 				start, num, den = st, oc.LoopNumerator, oc.LoopDenominator
-				if uncoloured(oc) && rgb == engineDefaultLoopColor {
+				if uncoloured(oc) && (name == "" || rgb == engineDefaultLoopColor || isEngineDefaultHotCueColor(pad, rgb)) {
 					rgb, code = [4]byte{}, 0
 				} else if oc.Color == rgb && oc.ColorCode != 0 {
 					code = oc.ColorCode
 				} else if name != "" && code == 0 {
 					code = rekordbox.NearestCueColorCode(rgb)
 				}
+			} else if (!hasOrig || uncoloured(oc)) && name == "" && (rgb == engineDefaultLoopColor || isEngineDefaultHotCueColor(pad, rgb)) {
+				rgb, code = [4]byte{}, 0
 			}
 			out = append(out, rekordbox.Cue{HotCue: pad, TimeMS: start, EndMS: end, Loop: true, Active: lp.Active, Name: name, Color: rgb, ColorCode: code, LoopNumerator: num, LoopDenominator: den, Extended: true})
 			continue
@@ -1617,13 +1699,15 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offset float6
 			if atZero(hc.Samples, oc) || legacy && hc.Name == "" && oc.Name == "" && max(oc.TimeMS, start)-min(oc.TimeMS, start) <= 60 {
 				start = oc.TimeMS
 			}
-			if uncoloured(oc) && near(oc.TimeMS, start) && rgb == engineDefaultHotCueColor {
+			if uncoloured(oc) && ((near(oc.TimeMS, start) && oc.Name == "" && name == "") || (name == "" && isEngineDefaultHotCueColor(pad, rgb))) {
 				rgb, code = [4]byte{}, 0
 			} else if oc.Color == rgb && oc.ColorCode != 0 {
 				code = oc.ColorCode
 			} else if name != "" && code == 0 {
 				code = rekordbox.NearestCueColorCode(rgb)
 			}
+		} else if !hasOrig && name == "" && isEngineDefaultHotCueColor(pad, rgb) {
+			rgb, code = [4]byte{}, 0
 		}
 		out = append(out, rekordbox.Cue{HotCue: pad, TimeMS: start, Name: name, Color: rgb, ColorCode: code, Extended: true})
 	}

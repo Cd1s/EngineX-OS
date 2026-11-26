@@ -1281,3 +1281,164 @@ func TestUpdateOneLibraryAllKeysGridTracking(t *testing.T) {
 		t.Fatalf("got hasMod=%d bpm100=%d cueUpd=%v anlzUpd=%v, want 1, 12800, 1, 2", hasMod, bpm100, cueUpd, anlzUpd)
 	}
 }
+
+// TestRewriteANLZCuesMatchesRekordboxOracleByteForByte verifies that RewriteANLZCues produces
+// byte-identical .DAT and .EXT files to the rekordbox compact hot-cue oracle (for one uncolored,
+// unnamed hot cue A at T = 28264 ms).
+func TestRewriteANLZCuesMatchesRekordboxOracleByteForByte(t *testing.T) {
+	const cueMS = uint32(28264)
+
+	origCompactDAT, err := os.ReadFile(filepath.Join("testdata", "rb_hot_compact.dat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	origCompactEXT, err := os.ReadFile(filepath.Join("testdata", "rb_hot_compact.ext"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	splitRawSecs := func(d []byte) (head []byte, secs []struct {
+		tag string
+		raw []byte
+	}) {
+		hl := int(binary.BigEndian.Uint32(d[4:8]))
+		head = append([]byte(nil), d[:hl]...)
+		for p := hl; p+12 <= len(d); {
+			tLen := int(binary.BigEndian.Uint32(d[p+8 : p+12]))
+			secs = append(secs, struct {
+				tag string
+				raw []byte
+			}{tag: string(d[p : p+4]), raw: append([]byte(nil), d[p:p+tLen]...)})
+			p += tLen
+		}
+		return head, secs
+	}
+	packRawSecs := func(head []byte, secs []struct {
+		tag string
+		raw []byte
+	}) []byte {
+		var body bytes.Buffer
+		for _, s := range secs {
+			body.Write(s.raw)
+		}
+		total := len(head) + body.Len()
+		out := make([]byte, 0, total)
+		out = append(out, head[:8]...)
+		var totalBE [4]byte
+		binary.BigEndian.PutUint32(totalBE[:], uint32(total))
+		out = append(out, totalBE[:]...)
+		out = append(out, head[12:]...)
+		out = append(out, body.Bytes()...)
+		return out
+	}
+
+	// Build empty-cue rekordbox-made originals (preserving all non-cue bytes verbatim) matching the
+	// oracle script's precondition (empty PCOB(1) first in .DAT; empty PCO2(1) first in .EXT).
+	makeEmptyDAT := func(d []byte) []byte {
+		head, secs := splitRawSecs(d)
+		for i := range secs {
+			if secs[i].tag == "PCOB" && binary.BigEndian.Uint32(secs[i].raw[12:16]) == 1 {
+				empty := append([]byte(nil), secs[i].raw[:24]...)
+				binary.BigEndian.PutUint32(empty[8:12], 24)
+				binary.BigEndian.PutUint16(empty[18:20], 0)
+				secs[i].raw = empty
+			}
+		}
+		return packRawSecs(head, secs)
+	}
+	makeEmptyEXT := func(d []byte) []byte {
+		head, secs := splitRawSecs(d)
+		for i := range secs {
+			if secs[i].tag == "PCO2" && binary.BigEndian.Uint32(secs[i].raw[12:16]) == 1 {
+				empty := append([]byte(nil), secs[i].raw[:20]...)
+				binary.BigEndian.PutUint32(empty[8:12], 20)
+				binary.BigEndian.PutUint16(empty[16:18], 0)
+				secs[i].raw = empty
+			}
+		}
+		return packRawSecs(head, secs)
+	}
+
+	emptyDAT := makeEmptyDAT(origCompactDAT)
+	emptyEXT := makeEmptyEXT(origCompactEXT)
+
+	// Verbatim rekordbox compact hot-cue oracle bytes for T = 28264 ms:
+	pcptPrefix, _ := hex.DecodeString("504350540000001c00000038000000010000000100000000ffffffff010003e8")
+	var tBE [4]byte
+	binary.BigEndian.PutUint32(tBE[:], cueMS)
+	oraclePCPT := make([]byte, 0, 56)
+	oraclePCPT = append(oraclePCPT, pcptPrefix...)
+	oraclePCPT = append(oraclePCPT, tBE[:]...)
+	oraclePCPT = append(oraclePCPT, make([]byte, 20)...)
+
+	pcp2Prefix, _ := hex.DecodeString("50435032000000100000002c00000001010003e8")
+	pcp2Suffix, _ := hex.DecodeString("0000000000030000000000000000000000000000")
+	oraclePCP2 := make([]byte, 0, 44)
+	oraclePCP2 = append(oraclePCP2, pcp2Prefix...)
+	oraclePCP2 = append(oraclePCP2, tBE[:]...)
+	oraclePCP2 = append(oraclePCP2, pcp2Suffix...)
+	if len(oraclePCPT) != 56 || len(oraclePCP2) != 44 {
+		t.Fatalf("bad oracle lengths: PCPT=%d PCP2=%d", len(oraclePCPT), len(oraclePCP2))
+	}
+
+	buildOracle := func(orig []byte, isExt bool) []byte {
+		head, secs := splitRawSecs(orig)
+		doneCOB, doneCO2 := false, false
+		for i := range secs {
+			s := secs[i].raw
+			if secs[i].tag == "PCOB" && !isExt && !doneCOB {
+				if binary.BigEndian.Uint32(s[12:16]) != 1 || s[18] != 0 || s[19] != 0 {
+					t.Fatalf("first PCOB must be empty hot list")
+				}
+				h := append([]byte(nil), s[:24]...)
+				binary.BigEndian.PutUint32(h[8:12], 24+56)
+				binary.BigEndian.PutUint16(h[18:20], 1)
+				secs[i].raw = append(h, oraclePCPT...)
+				doneCOB = true
+			} else if secs[i].tag == "PCO2" && !doneCO2 {
+				if binary.BigEndian.Uint32(s[12:16]) != 1 || s[16] != 0 || s[17] != 0 {
+					t.Fatalf("first PCO2 must be empty hot list")
+				}
+				h := append([]byte(nil), s[:20]...)
+				binary.BigEndian.PutUint32(h[8:12], 20+44)
+				binary.BigEndian.PutUint16(h[16:18], 1)
+				secs[i].raw = append(h, oraclePCP2...)
+				doneCO2 = true
+			}
+		}
+		if (!isExt && !doneCOB) || (isExt && !doneCO2) {
+			t.Fatalf("oracle section missing")
+		}
+		return packRawSecs(head, secs)
+	}
+
+	oracleDAT := buildOracle(emptyDAT, false)
+	oracleEXT := buildOracle(emptyEXT, true)
+
+	for _, tc := range []struct {
+		name string
+		dat  []byte
+		ext  []byte
+	}{
+		{"FromEmptyOriginals", emptyDAT, emptyEXT},
+		{"FromExistingCompactHot", origCompactDAT, origCompactEXT},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cues := []Cue{{HotCue: 1, TimeMS: cueMS}}
+			gotDAT, changed, err := RewriteANLZCues(tc.dat, cues, false, false)
+			if err != nil || !changed {
+				t.Fatalf("RewriteANLZCues DAT: changed=%v err=%v", changed, err)
+			}
+			gotEXT, changed, err := RewriteANLZCues(tc.ext, cues, true, false)
+			if err != nil || !changed {
+				t.Fatalf("RewriteANLZCues EXT: changed=%v err=%v", changed, err)
+			}
+			if !bytes.Equal(gotDAT, oracleDAT) {
+				t.Fatalf("DAT differs from rekordbox compact oracle: got %d bytes, want %d bytes", len(gotDAT), len(oracleDAT))
+			}
+			if !bytes.Equal(gotEXT, oracleEXT) {
+				t.Fatalf("EXT differs from rekordbox compact oracle: got %d bytes, want %d bytes", len(gotEXT), len(oracleEXT))
+			}
+		})
+	}
+}

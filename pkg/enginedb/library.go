@@ -788,16 +788,20 @@ func (b *Batch) insertTracksBulk(ctx context.Context, rows []TrackRow, ids []int
 
 // SetDirectCover links a track row to a hash-only AlbumArt row when the track currently has no
 // cover or already points at a hash-only (albumArt IS NULL) cover, preserving embedded BLOB art.
-func (b *Batch) SetDirectCover(ctx context.Context, id int64, sum []byte) error {
+func (b *Batch) SetDirectCover(ctx context.Context, id int64, sum []byte) (bool, error) {
 	if len(sum) != sha1.Size {
-		return nil
+		return false, nil
 	}
 	art, err := b.putCoverHash(ctx, sum)
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, err = b.exec(ctx, `UPDATE Track SET albumArtId=? WHERE id=? AND albumArtId IS NOT ? AND (albumArtId IS NULL OR EXISTS(SELECT 1 FROM AlbumArt a WHERE a.id=Track.albumArtId AND a.albumArt IS NULL))`, art, id, art)
-	return err
+	res, err := b.exec(ctx, `UPDATE Track SET albumArtId=? WHERE id=? AND albumArtId IS NOT ? AND (albumArtId IS NULL OR EXISTS(SELECT 1 FROM AlbumArt a WHERE a.id=Track.albumArtId AND a.albumArt IS NULL))`, art, id, art)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // UpdateTrack gives the row the export's fields and says whether it held anything else. An

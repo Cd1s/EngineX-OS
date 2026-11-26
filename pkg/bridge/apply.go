@@ -366,7 +366,7 @@ func (w *window) noteSync(b *enginedb.Batch, t *rbstate.Track, written bool) err
 		return nil
 	}
 	row := w.index[t.Key]
-	insync := row.Edit == t.Edit && t.Perf != rbstate.PerfDeck
+	insync := row.Edit == t.Edit && (t.Perf != rbstate.PerfDeck || t.Synced != nil)
 	if !written {
 		if !insync {
 			t.Edit, t.Synced = row.Edit, nil
@@ -892,9 +892,11 @@ func (w *window) updateRows(idx []int) error {
 			return err
 		}
 		if w.o.OnDemand && vt.Track.ArtworkPath != "" {
-			if err = b.SetDirectCover(w.ctx, t.EngineID, rbstate.DirectArtworkHash(vt.Track.ArtworkPath)); err != nil {
+			coverChanged, err := b.SetDirectCover(w.ctx, t.EngineID, rbstate.DirectArtworkHash(vt.Track.ArtworkPath))
+			if err != nil {
 				return err
 			}
+			changed = changed || coverChanged
 		}
 		t.Row, t.Rating, t.Refs, t.AnalysisPath, t.ArtworkPath = vt.Hash, vt.Track.Rating, vt.Refs, vt.Track.AnalysisPath, vt.Track.ArtworkPath
 		t.Duration, t.SampleRate = vt.Track.Duration, vt.Track.SampleRate
@@ -994,7 +996,7 @@ func (w *window) applyStaged() error {
 			if t.Perf != rbstate.PerfDeck {
 				t.Perf = rbstate.PerfDegraded
 			}
-			if t.Perf == rbstate.PerfDeck || row.Edit != t.Edit {
+			if (t.Perf == rbstate.PerfDeck && t.Synced == nil) || row.Edit != t.Edit {
 				t.Synced = nil
 			}
 			degraded++
@@ -1011,6 +1013,9 @@ func (w *window) applyStaged() error {
 			}
 			if t.Written, t.Perf = digest, rbstate.PerfApplied; outcome == enginedb.PerfKept || outcome == enginedb.PerfMerged {
 				t.Perf = rbstate.PerfDeck
+				if prev.State != rbstate.PerfDeck {
+					t.Synced = nil
+				}
 				kept++
 			}
 			t.FastCues, t.FastLoops, t.FastActive, t.FastKnown = nil, nil, 0, false

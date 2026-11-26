@@ -70,14 +70,14 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			} else if kind == rbstate.DeviceLibrary && ch.metadata[kind] {
 				pdbMeta[tr.ID] = ch.candidate.metadata
 			}
-			if kind == rbstate.OneLibrary && ch.cuesDiff {
+			if kind == rbstate.OneLibrary && ch.oneCuesDiff {
 				oneCues[tr.ID] = ch.cues
 			}
 			if kind == rbstate.OneLibrary && ch.gridDiff {
 				oneGrids[tr.ID] = rekordbox.GridUpdate{BPM: ch.bpm}
 			}
 		}
-		anlzCues := ch.cuesDiff || ch.anlzCueRepair
+		anlzCues := ch.anlzCuesDiff || ch.anlzCueRepair
 		if base, ok := anlzBase(ch.analysis); (anlzCues || ch.gridDiff) && ok {
 			for i, ext := range anlzExts {
 				if i == 2 && !anlzCues {
