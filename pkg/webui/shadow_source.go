@@ -107,6 +107,7 @@ func (s *Server) shadowSourceLoaded(key string) bool {
 	stable := stableTrackKey(key)
 	s.shadow.mu.Lock()
 	defer s.shadow.mu.Unlock()
+	s.shadow.shareLive(time.Now()) // Share Decks (#329): the work on an ended session's track stops, observed or not
 	for _, d := range s.shadow.own {
 		if (d.Key == key || stableTrackKey(d.Key) == stable) && d.Path != "" {
 			return true

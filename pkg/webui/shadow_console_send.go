@@ -20,14 +20,16 @@ package webui
 //
 // Share Decks (#329) is the same channel the other way round: a player in the Stock layout with the row
 // Share Decks on is shown by a console's Line In view without the 4-deck layout.
-//  1. A console with Line In on, while a channel is on Line / AUX (its deck loop runs), broadcasts
+//  1. A console with Line In on, while its QML polls for a channel on Line / AUX (lineAsking), broadcasts
 //     shadowAskPlayerMagic on shadowAskPort beside its beacon and pulls GET /peer/decks?line=1.
 //  2. A player with the row on listens on that port (the same bound socket), answers with a unicast
 //     beacon, so the console finds it, and serves its decks to a pull with line=1 and to nobody else.
-//  3. An ask or a pull with line=1 is noted (askers); the player's QML is told by the same held request
-//     and samples only then. Its posts go to the consoles that asked, unicast, nowhere else: no deck loop,
-//     no beacon of its own, no Pro DJ Link status, no MASTER claim.
-//  4. Silence ends it, as above. An older unit has no listener and ignores the query.
+//  3. An ask or a pull with line=1 is noted (askers); the first of a run starts a session. The player's QML is
+//     told by the same held request (asked, and the session's id) and samples only then; its posts and pings
+//     carry the id (?share=<id>) and are taken only in that session while it lasts. They go to the consoles
+//     that asked, unicast, nowhere else: no deck loop, no beacon of its own, no Pro DJ Link status, no MASTER.
+//  4. Silence ends it, as above, and with it the session's decks, whoever notices first (a held request, a
+//     pull, a post, the display data or its waveform work). An older unit has no listener and ignores the query.
 
 import (
 	"cmp"
@@ -85,13 +87,30 @@ func (sh *shadowState) askedNow(now time.Time) bool {
 	return asked
 }
 
-// ask notes a player's ask and wakes the QML's held request when it is the first. Called with sh.mu held.
+// ask notes a player's ask and wakes the QML's held request when it is the first. The first ask of a run starts a
+// new session: its id counts up from the clock in ms, so it differs across a restart too. Called with sh.mu held.
 func (sh *shadowState) ask(ip string, now time.Time) {
 	first := !sh.askedNow(now)
 	sh.askers[ip] = now
 	if first {
+		sh.shareSession = max(sh.shareSession+1, uint64(now.UnixMilli()))
 		close(sh.askNotify)
 		sh.askNotify = make(chan struct{})
+	}
+}
+
+// shareAccepts: a Share Decks post or ping is taken only while a console asks and only for the session it was
+// sampled for (the id the held request told the QML). Called with sh.mu held, on a sharing player.
+func (sh *shadowState) shareAccepts(tag string, now time.Time) bool {
+	asked := sh.askedNow(now) // ends a session whose last ask ran out
+	return asked && tag != "" && tag == strconv.FormatUint(sh.shareSession, 10)
+}
+
+// shareLive ends a Share Decks session whose last ask ran out, whoever looks first: the display data and the
+// source-waveform work on its tracks stop even when no held request, pull or post comes. Called with sh.mu held.
+func (sh *shadowState) shareLive(now time.Time) {
+	if sh.shares.Load() {
+		sh.askedNow(now)
 	}
 }
 
@@ -185,14 +204,17 @@ func (s *Server) consoleAskLoop(conn *net.UDPConn) {
 func (s *Server) consoleSendGet(w http.ResponseWriter, r *http.Request) {
 	sh := s.shadow
 	believed := r.URL.Query().Get("asked") == "1"
+	// Share Decks (#329): the QML also says the session it believes; a new session while it is asked is news too
+	// (the last ask ran out and another began within the same second). A console's QML does not say one.
+	session, bySession := r.URL.Query().Get("session"), r.URL.Query().Has("session")
 	deadline := time.NewTimer(consoleAskHold)
 	defer deadline.Stop()
 	for {
 		sh.mu.Lock()
-		asked, changed := sh.askedNow(time.Now()), sh.askNotify
+		asked, changed, current := sh.askedNow(time.Now()), sh.askNotify, sh.shareSession
 		sh.mu.Unlock()
-		if asked != believed {
-			respond(w, map[string]bool{"asked": asked})
+		if asked != believed || bySession && asked && session != strconv.FormatUint(current, 10) {
+			respond(w, map[string]any{"asked": asked, "session": current})
 			return
 		}
 		var expire <-chan time.Time // only while asked: the moment the last ask runs out is not announced by anything else
@@ -205,7 +227,7 @@ func (s *Server) consoleSendGet(w http.ResponseWriter, r *http.Request) {
 		case <-changed:
 		case <-expire:
 		case <-deadline.C:
-			respond(w, map[string]bool{"asked": asked})
+			respond(w, map[string]any{"asked": asked, "session": current})
 			return
 		case <-r.Context().Done():
 			return

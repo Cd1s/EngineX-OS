@@ -1884,25 +1884,38 @@ SERVICES_MAIN = """
 	// held request). Without an asker nothing of this runs: no sampler, no post, one held request to this unit's own
 	// stream-sync, answered at most every 25 s. The screen, the layout and every control stay stock.
 	property bool scShareAsked: false
+	property string scShareSession: "" // the run of asks the sampler works for: its posts carry it, stream-sync takes no other
 	property var scShareAskRequest: null
 	function scShareAskPoll() {
 		if (!scShareLive) return
 		let x = scShareAskRequest
 		if (x && x.readyState > 0 && x.readyState < 4) return
 		x = scShareAskRequest = new XMLHttpRequest()
-		x.open("GET", "http://127.0.0.1:8080/v1/enginex/consolesend?asked=" + (scShareAsked ? 1 : 0))
+		x.open("GET", "http://127.0.0.1:8080/v1/enginex/consolesend?asked=" + (scShareAsked ? 1 : 0) + "&session=" + scShareSession)
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || root.scShareAskRequest !== x || !root.scShareLive) return
 			let ok = false
 			if (x.status === 200) {
-				try { const a = !!JSON.parse(x.responseText).asked; ok = true; if (a !== root.scShareAsked) root.scShareAsked = a } catch (err) { ok = false }
+				try {
+					const r = JSON.parse(x.responseText), a = !!r.asked, session = a ? String(r.session || "") : ""
+					ok = true
+					// A new session while asked (the last ask ran out and another began) starts over, as a new ask does.
+					if (a && root.scShareAsked && session !== root.scShareSession) { root.scShareSession = session; root.scShareRestart() }
+					else root.scShareSession = session
+					if (a !== root.scShareAsked) root.scShareAsked = a
+				} catch (err) { ok = false }
 			}
 			// The next one carries what we believe now, so stream-sync holds it: no loop. A failure stops the sampler
 			// (nobody can be told it asks) and waits.
 			if (ok) root.scShareAskPoll()
-			else { root.scShareAsked = false; scShareAskTimer.restart() }
+			else { root.scShareAsked = false; root.scShareSession = ""; scShareAskTimer.restart() }
 		}
 		x.send()
+	}
+	// Everything the sampler sent belongs to the session before: the next post is a full one for the new session.
+	function scShareRestart() {
+		scShadowSent = []; scShadowMine = []; scShadowOwn.length = 0; scShadowPostFull = true; scShadowPostPending = true
+		if (scShareAsked) scShadowWake()
 	}
 	Timer { id: scShareAskTimer; interval: 5000; onTriggered: root.scShareAskPoll() }
 	onScShareLiveChanged: {
@@ -1912,12 +1925,10 @@ SERVICES_MAIN = """
 			const x = scShareAskRequest
 			if (x && x.readyState > 0 && x.readyState < 4) x.abort()
 			scShareAsked = false
+			scShareSession = ""
 		}
 	}
-	onScShareAskedChanged: {
-		scShadowSent = []; scShadowMine = []; scShadowOwn.length = 0; scShadowPostFull = true; scShadowPostPending = true
-		if (scShareAsked) scShadowWake()
-	}
+	onScShareAskedChanged: scShareRestart()
 	// This unit's Engine Link player number, for its post: a console orders the units it shows by it. Read
 	// when the role is known (or Share Decks is on) and again if the number changes; the sampler only copies it.
 	readonly property int scOwnPlayer: {
@@ -2346,8 +2357,9 @@ SERVICES_MAIN = """
 				(sent.phase !== o.phase && now - scShadowPostAt >= 100)) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
 		}
 		scShadowPostAt = now; scShadowPostPending = false
-		// Share Decks (#329): its posts say so; stream-sync drops one that arrives after the row went off (never a peer's).
-		const tag = scShadowMineRole === "share" ? "?share=1" : ""
+		// Share Decks (#329): its posts carry their session; stream-sync drops one of another session or after the row
+		// went off (never a peer's).
+		const tag = scShadowMineRole === "share" ? "?share=" + scShareSession : ""
 		// Nothing the peer shows changed: ping instead of serialising the decks again
 		// (stream-sync keeps them live and extrapolated). Full post at least every 5 s.
 		if (!edge && !scShadowPostFull && now - scShadowFullAt < 5000 && own.length === scShadowSent.length) {

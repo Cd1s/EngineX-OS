@@ -4421,35 +4421,45 @@ assert(bodies.every(b => b.every(o => o.player === undefined || o.player === 0))
         self.assertIn("readonly property bool scShareLive: scShareDecks && !scFourDeckOn", bp.SERVICES_MAIN)
         poll = self._qml_fn("scShareAskPoll")
         self.assertIn("if (!scShareLive) return", poll)
-        self.assertIn('"http://127.0.0.1:8080/v1/enginex/consolesend?asked=" + (scShareAsked ? 1 : 0)', poll)
+        self.assertIn('"http://127.0.0.1:8080/v1/enginex/consolesend?asked=" + (scShareAsked ? 1 : 0) + "&session=" + scShareSession', poll)
         handler = re.search(r"onScShareLiveChanged: \{(.*?)\n\t\}", bp.SERVICES_MAIN, re.S).group(1)
         self.assertIn("if (scShareLive) scShareAskPoll()", handler)
         self.assertIn("scShareAsked = false", handler)
+        self.assertIn('scShareSession = ""', handler)
         self.assertIn("x.abort()", handler)
-        asked = re.search(r"onScShareAskedChanged: \{(.*?)\n\t\}", bp.SERVICES_MAIN, re.S).group(1)
-        self.assertIn("scShadowMine = []", asked)  # every ask starts with a full post
-        self.assertIn("if (scShareAsked) scShadowWake()", asked)
+        self.assertIn("onScShareAskedChanged: scShareRestart()", bp.SERVICES_MAIN)  # every ask starts with a full post
+        restart = self._qml_fn("scShareRestart")
+        self.assertIn("scShadowMine = []", restart)
+        self.assertIn("if (scShareAsked) scShadowWake()", restart)
         self.js(self._qml_fn("scShareAskPoll") + r"""
-globalThis.scShareLive = false; globalThis.scShareAsked = false; globalThis.scShareAskRequest = null;
+globalThis.scShareLive = false; globalThis.scShareAsked = false; globalThis.scShareAskRequest = null; globalThis.scShareSession = '';
 globalThis.scShareAskTimer = {restarts: 0, restart() { this.restarts++; }};
+let restarts = 0; globalThis.scShareRestart = () => { restarts++; };
 const reqs = [];
 globalThis.XMLHttpRequest = class { constructor() { reqs.push(this); this.readyState = 1; } open(m, url) { this.url = url; assert.equal(m, 'GET'); } send() {}
     answer(status, data) { this.status = status; this.responseText = JSON.stringify(data); this.readyState = 4; this.onreadystatechange(); } };
+const last = () => reqs[reqs.length - 1];
 scShareAskPoll(); assert.equal(reqs.length, 0, 'row off, or the 4-deck layout: no request');
-scShareLive = true; scShareAskPoll(); assert.equal(reqs.length, 1); assert(reqs[0].url.endsWith('/v1/enginex/consolesend?asked=0'));
+scShareLive = true; scShareAskPoll(); assert.equal(reqs.length, 1); assert(last().url.endsWith('/v1/enginex/consolesend?asked=0&session='));
 scShareAskPoll(); assert.equal(reqs.length, 1, 'one held request at a time');
-reqs[0].answer(200, {asked: true}); assert.equal(scShareAsked, true); assert.equal(reqs.length, 2); assert(reqs[1].url.endsWith('asked=1'), 'the next carries what we believe');
-reqs[1].answer(200, {asked: false}); assert.equal(scShareAsked, false); assert.equal(reqs.length, 3);
-reqs[2].answer(500, {}); assert.equal(reqs.length, 3, 'a failure does not loop'); assert.equal(scShareAskTimer.restarts, 1);
+last().answer(200, {asked: true, session: 5}); assert.equal(scShareAsked, true); assert.equal(scShareSession, '5'); assert.equal(reqs.length, 2);
+assert(last().url.endsWith('asked=1&session=5'), 'the next carries what we believe');
+// The last ask ran out and another began before we looked: a new session while asked starts over, as a new ask does.
+let before = restarts; last().answer(200, {asked: true, session: 7});
+assert.equal(scShareSession, '7'); assert.equal(restarts, before + 1, 'a new session restarts the sampler'); assert.equal(scShareAsked, true);
+assert(last().url.endsWith('asked=1&session=7'));
+last().answer(200, {asked: false, session: 7}); assert.equal(scShareAsked, false); assert.equal(scShareSession, '', 'no session while nobody asks');
+const n = reqs.length; last().answer(500, {}); assert.equal(reqs.length, n, 'a failure does not loop'); assert.equal(scShareAskTimer.restarts, 1);
 // A failure while asked stops the sampler at once: nobody can tell it a console still asks.
-scShareAskPoll(); assert.equal(reqs.length, 4); reqs[3].answer(200, {asked: true}); assert.equal(scShareAsked, true); assert.equal(reqs.length, 5);
-reqs[4].answer(503, {}); assert.equal(scShareAsked, false, 'a failed held request must not keep the sampler running'); assert.equal(scShareAskTimer.restarts, 2);
-scShareLive = false; reqs[4].readyState = 1; reqs[4].answer(200, {asked: true}); assert.equal(scShareAsked, false, 'an answer after the row went off is dropped');
+scShareAskPoll(); last().answer(200, {asked: true, session: 9}); assert.equal(scShareAsked, true); assert.equal(scShareSession, '9');
+last().answer(503, {}); assert.equal(scShareAsked, false, 'a failed held request must not keep the sampler running'); assert.equal(scShareAskTimer.restarts, 2);
+assert.equal(scShareSession, '', 'nor keep its session');
+const gone = last(); scShareLive = false; gone.readyState = 1; gone.answer(200, {asked: true, session: 11}); assert.equal(scShareAsked, false, 'an answer after the row went off is dropped');
 """)
 
     def test_only_a_share_post_is_tagged(self):
         post = self._qml_fn("scShadowPost")
-        self.assertIn('const tag = scShadowMineRole === "share" ? "?share=1" : ""', post)
+        self.assertIn('const tag = scShadowMineRole === "share" ? "?share=" + scShareSession : ""', post)
         self.assertIn('post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks/alive" + tag)', post)
         self.assertIn('post.open("POST", "http://127.0.0.1:8080/v1/enginex/decks" + tag)', post)
 
@@ -4459,7 +4469,7 @@ scShareLive = false; reqs[4].readyState = 1; reqs[4].answer(200, {asked: true});
         # of a 4-deck peer's: no poll of the deck loop, no lanes, no MASTER work, no 4-deck Layer.
         self.js(r"""
 scPlayer = true; scFourDeckRole = '';
-globalThis.scShareLive = true; globalThis.scShareAsked = true; globalThis.scOwnPlayer = 3;
+globalThis.scShareLive = true; globalThis.scShareAsked = true; globalThis.scOwnPlayer = 3; globalThis.scShareSession = '42';
 globalThis.scConsoleLine = false; globalThis.scConsoleAsked = false; globalThis.scLineMask = 0;
 globalThis.scConsoleSendDecks = () => { throw Error("a console's deck list is not a player's"); };
 const loaded = {1: true, 2: false};
@@ -4495,7 +4505,7 @@ assert.equal(bodies.length, n + 1); assert.deepEqual(last().map(o => o.deck), [1
 // Heartbeats and posts say they are a share's: stream-sync drops one that arrives after the row went off.
 for (let i = 0; i < 40; i++) tick();
 assert(urls.some(u => u.includes('/decks/alive')), 'a heartbeat between posts');
-assert(urls.every(u => /[/]v1[/]enginex[/]decks([/]alive)?[?]share=1$/.test(u)), 'every share post and ping is tagged: ' + urls.filter(u => !u.endsWith('?share=1')));
+assert(urls.every(u => /[/]v1[/]enginex[/]decks([/]alive)?[?]share=42$/.test(u)), 'every share post and ping carries its session: ' + urls.filter(u => !u.endsWith('?share=42')));
 """)
 
 

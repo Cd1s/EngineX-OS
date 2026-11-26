@@ -415,6 +415,7 @@ type shadowState struct {
 	askConsole   atomic.Bool
 	hears        atomic.Bool
 	shares       atomic.Bool // Share Decks (#329): a player in the Stock layout; the same listener and askers, for a Line In console's ask
+	shareSession uint64      // Share Decks: the id of the current run of asks; a share post and ping carry the one they were sampled for
 	askers       map[string]time.Time
 	askNotify    chan struct{}
 	askConn      *net.UDPConn
@@ -756,9 +757,10 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Share Decks (#329): the row is read once, under the lock its switch takes, so decks posted for sharing never
-	// take the peer path below; a share post (?share=1, the QML's own) after the row went off is dropped.
+	// take the peer path below. A share post (?share=<session>, the QML's own) is taken only in the live session it
+	// was sampled for: one that crossed the end of a session, a new session's start or the row going off is dropped.
 	sharing := s.shadow.shares.Load()
-	if !sharing && r.URL.Query().Get("share") == "1" {
+	if tag := r.URL.Query().Get("share"); sharing && !s.shadow.shareAccepts(tag, time.Now()) || !sharing && tag != "" {
 		s.shadow.mu.Unlock()
 		respond(w, map[string]any{"ok": true})
 		return
@@ -819,14 +821,19 @@ func (s *Server) decksAlive(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	sh := s.shadow
 	sh.mu.Lock()
+	// Share Decks (#329): read once, under the lock its switch takes, as in decksPost: a share ping of another session
+	// (or of none) keeps nothing alive.
+	sharing := sh.shares.Load()
+	if tag := r.URL.Query().Get("share"); sharing && !sh.shareAccepts(tag, now) || !sharing && tag != "" {
+		sh.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if sh.ownAt.IsZero() || now.Sub(sh.ownAt) >= 2*time.Second {
 		sh.mu.Unlock()
 		w.WriteHeader(http.StatusConflict) // stale or unknown: the post brings the state back
 		return
 	}
-	// Share Decks (#329): read once, under the lock its switch takes, as in decksPost. A share ping after the row went
-	// off finds no decks (the switch forgets them) and gets 409 above.
-	sharing := sh.shares.Load()
 	sh.ownAt = now
 	seq := now.UnixNano()
 	for i := range sh.own {
@@ -1334,6 +1341,7 @@ func (s *Server) ownDeck(r *http.Request) (deckState, bool) {
 	n, _ := strconv.Atoi(r.PathValue("n"))
 	s.shadow.mu.Lock()
 	defer s.shadow.mu.Unlock()
+	s.shadow.shareLive(time.Now())
 	for _, d := range s.shadow.own {
 		if d.Deck == n && d.Key != "" && d.Key == r.URL.Query().Get("key") {
 			return d, true
