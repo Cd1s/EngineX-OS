@@ -35,14 +35,57 @@ type window struct {
 	keep bool                      // staged records stay in the stage once applied (until the swap)
 	rest func(time.Duration) error // after each commit, with the time it took: the job's pacing
 
-	lib   *enginedb.Library // nil: the stick has no library to keep, one is built
-	snap  *rbstate.Snapshot
-	index map[string]enginedb.Row // every row of the library by key
-	head  rbstate.Header          // the snapshot's header as the stick has it
-	dirty bool                    // tracks or lists changed outside a commit
-	left  bool                    // work that would not end before the kill was left to the job
-	built bool                    // library was built fresh from exports; holds no legacy artwork
-	took  laps                    // where the time of the commits and of the staged step went
+	lib         *enginedb.Library // nil: the stick has no library to keep, one is built
+	snap        *rbstate.Snapshot
+	index       map[string]enginedb.Row // every row of the library by key
+	head        rbstate.Header          // the snapshot's header as the stick has it
+	dirty       bool                    // tracks or lists changed outside a commit
+	browseDirty bool                    // live snapshot saved or committed in OnDemand mode
+	left        bool                    // work that would not end before the kill was left to the job
+	built       bool                    // library was built fresh from exports; holds no legacy artwork
+	took        laps                    // where the time of the commits and of the staged step went
+}
+
+// syncBrowseIndex writes .rb-bridge-browse once when missing or out of sync with snap.Header,
+// removing any mismatched leftover index if regeneration fails.
+func syncBrowseIndex(dir string, snap *rbstate.Snapshot) error {
+	if snap == nil || snap.LibraryUUID == "" {
+		return nil
+	}
+	if rbstate.BrowseIndexMatches(dir, snap.Header) {
+		return nil
+	}
+	if err := rbstate.SaveBrowseIndex(dir, snap); err != nil {
+		if !rbstate.BrowseIndexMatches(dir, snap.Header) {
+			_ = rbstate.RemoveFile(filepath.Join(dir, rbstate.BrowseIndexName))
+		}
+		return err
+	}
+	return nil
+}
+
+// hydrateOnDemandTracks fills on-demand browse fields (ANLZ/Artwork/duration/rate) on existing
+// snapshot tracks from the export view without rewriting m.db.
+func hydrateOnDemandTracks(snap *rbstate.Snapshot, view *View) bool {
+	if snap == nil || view == nil {
+		return false
+	}
+	changed := false
+	for i := range view.Tracks {
+		vt := &view.Tracks[i]
+		t := snap.Tracks[vt.Key]
+		if t == nil {
+			continue
+		}
+		t.Refs = vt.Refs
+		if t.AnalysisPath != vt.Track.AnalysisPath || t.ArtworkPath != vt.Track.ArtworkPath ||
+			t.Duration != vt.Track.Duration || t.SampleRate != vt.Track.SampleRate {
+			t.AnalysisPath, t.ArtworkPath = vt.Track.AnalysisPath, vt.Track.ArtworkPath
+			t.Duration, t.SampleRate = vt.Track.Duration, vt.Track.SampleRate
+			changed = true
+		}
+	}
+	return changed
 }
 
 // leave notes that the window leaves this work to the job (see work).
@@ -119,6 +162,11 @@ func (w *window) run() (err error) {
 	}
 	if err == nil {
 		err = w.migrateLegacyArtwork()
+	}
+	if !w.next && w.o.OnDemand && (w.browseDirty || (err == nil && w.lib != nil)) {
+		if serr := syncBrowseIndex(w.dir, w.snap); serr != nil && err == nil {
+			err = serr
+		}
 	}
 	return err
 }
@@ -376,9 +424,7 @@ func (w *window) saved() {
 	if w.head, w.dirty = w.snap.Header, false; !w.next {
 		dropOldState(w.dir) // of a next library only once it is the stick's (swapNext)
 		if w.o.OnDemand {
-			if err := rbstate.SaveBrowseIndex(w.dir, w.snap); err != nil {
-				log.Printf("rb-bridge: browse index not saved: %v", err)
-			}
+			w.browseDirty = true
 		}
 	}
 }
@@ -399,6 +445,14 @@ func (w *window) saveIfChanged() error {
 // count fills the snapshot's header (what it was made from, what is pending) and its tracks' refs.
 func (w *window) count() {
 	s := w.snap
+	wantMode := rbstate.ModeFull
+	if w.o.OnDemand {
+		wantMode = rbstate.ModeOnDemand
+	}
+	if s.Mode != wantMode {
+		s.Mode = wantMode
+		w.dirty = true
+	}
 	s.Header.Tracks, s.Header.Lists = len(s.Tracks), len(s.Lists)
 	s.Layout, s.Sources, s.Stamp = w.view.Layout, w.view.Sources, w.view.Stamp
 	if w.partial {
@@ -516,7 +570,8 @@ func (w *window) putLists(b *enginedb.Batch, idx []int) error {
 		return 0
 	}
 	reorder := map[string]bool{}
-	commitCost := work{commits: 1, tracks: len(w.snap.Tracks)}.cost()
+	extraCommit := time.Duration(min(len(idx), 1000)) * 3 * time.Millisecond
+	commitCost := work{commits: 1, tracks: len(w.snap.Tracks)}.cost() + extraCommit
 	for _, at := range idx {
 		if err := w.ctx.Err(); err != nil {
 			return err
@@ -610,7 +665,8 @@ func (w *window) apply(p *Plan) error {
 	for _, at := range p.PutLists {
 		rows.entries += len(w.view.Lists[at].Tracks)
 	}
-	if !w.st.fits(rows) {
+	listDirtyCommit := time.Duration(min(len(p.PutLists)+len(p.RemoveLists), 1000)) * 3 * time.Millisecond
+	if !w.st.fits(rows) || (!w.next && !w.st.kill.IsZero() && time.Until(w.st.kill.Add(-spare)) < rows.cost()+listDirtyCommit) {
 		w.leave(rows, "the rows and lists")
 		return nil
 	}
@@ -622,8 +678,8 @@ func (w *window) apply(p *Plan) error {
 		return err
 	}
 	defer b.Rollback()
-	listAndCommit := work{lists: len(p.PutLists) + len(p.RemoveLists), entries: rows.entries, commits: 1, tracks: len(s.Tracks)}.cost()
-	commitCost := work{commits: 1, tracks: len(s.Tracks)}.cost()
+	commitCost := work{commits: 1, tracks: len(s.Tracks)}.cost() + listDirtyCommit
+	listAndCommit := work{lists: len(p.PutLists) + len(p.RemoveLists), entries: rows.entries, commits: 1, tracks: len(s.Tracks)}.cost() + listDirtyCommit
 	cutRows := false
 	for idx, key := range p.RemoveTracks {
 		if w.rest != nil && idx&15 == 0 {
@@ -735,7 +791,7 @@ func (w *window) apply(p *Plan) error {
 		return err
 	}
 	w.res.PlaylistsChanged = len(p.PutLists)+len(p.RemoveLists) > 0
-	if w.ctx.Err() != nil || (!w.next && !w.st.must(0)) {
+	if w.ctx.Err() != nil || (!w.next && !w.st.must(listDirtyCommit)) {
 		return errWindowDeadline
 	}
 	listBegan := time.Now()

@@ -382,3 +382,102 @@ func TestCleanProlinkCacheMountIDPreparingFailClosedAndByteAccounting(t *testing
 		t.Fatalf("new mount ID on same path/dev did not re-trigger cleanup: cleanCalls=%d", cleanCalls)
 	}
 }
+
+func TestCleanProlinkCacheMountReplacementOutsideHardlinkAndErrorLogging(t *testing.T) {
+	// 1. Mount replacement between watcher selection and cleaner open: expectedMount mismatch stops cleanly.
+	drive := t.TempDir()
+	cacheFile := filepath.Join(drive, ".prolink-cache", "CDJ-1", "keep.bin")
+	if err := os.MkdirAll(filepath.Dir(cacheFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cacheFile, []byte("keep-new-mount"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	key, ok := defaultStatMountKey(drive)
+	if !ok || !key.hasMntID {
+		t.Fatalf("defaultStatMountKey failed: ok=%v key=%+v", ok, key)
+	}
+	staleExpected := mountIdentity{dev: key.dev, mntID: key.mntID + 9999, hasMntID: true}
+	resMismatch, err := cleanProlinkCache(context.Background(), drive, prolinkCleanupOptions{
+		isBusy:        func() bool { return false },
+		isEjecting:    func() bool { return false },
+		expectedMount: &staleExpected,
+		logf:          func(string, ...any) {},
+	})
+	if err != nil || !resMismatch.Stopped || resMismatch.Removed || resMismatch.BytesFreed != 0 {
+		t.Fatalf("expectedMount mismatch res=%+v err=%v; want Stopped=true Removed=false BytesFreed=0", resMismatch, err)
+	}
+	if _, err := os.Stat(cacheFile); err != nil {
+		t.Fatalf("replacement mount .prolink-cache was touched on mount ID mismatch: %v", err)
+	}
+
+	// 2. Outside hard link leaves data allocated -> BytesFreed must be 0 for the outside-linked inode,
+	//    while an internal-only pair counts once when the last link is removed.
+	base := t.TempDir()
+	driveHL := filepath.Join(base, "stick")
+	outsideFile := filepath.Join(base, "outside-asset.dat")
+	if err := os.WriteFile(outsideFile, make([]byte, 1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cacheHL := filepath.Join(driveHL, ".prolink-cache", "CDJ-2")
+	if err := os.MkdirAll(cacheHL, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(outsideFile, filepath.Join(cacheHL, "outside-link.dat")); err != nil {
+		t.Fatal(err)
+	}
+	inA := filepath.Join(cacheHL, "internal-a.dat")
+	if err := os.WriteFile(inA, make([]byte, 250), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(inA, filepath.Join(cacheHL, "internal-b.dat")); err != nil {
+		t.Fatal(err)
+	}
+	resHL, err := cleanProlinkCache(context.Background(), driveHL, prolinkCleanupOptions{
+		isBusy:     func() bool { return false },
+		isEjecting: func() bool { return false },
+		logf:       func(string, ...any) {},
+	})
+	if err != nil || !resHL.Removed || resHL.BytesFreed != 250 {
+		t.Fatalf("outside hardlink accounting = %+v (err=%v), want Removed=true BytesFreed=250", resHL, err)
+	}
+	if _, err := os.Stat(outsideFile); err != nil {
+		t.Fatalf("outside hardlink target missing: %v", err)
+	}
+
+	// 3. Cleanup errors must be logged explicitly while preserving once-per-insert policy.
+	driveErr := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(driveErr, ".prolink-cache"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	cleanCalls := 0
+	var errLogs []string
+	cwErr := &prolinkCleanupWatcher{
+		handled:   map[mountDevKey]bool{},
+		firstSeen: map[mountDevKey]time.Time{},
+		list:      func() []string { return []string{driveErr} },
+		statMount: func(m string) (mountDevKey, bool) {
+			return mountDevKey{mount: m, dev: 11, mntID: 222, hasMntID: true}, true
+		},
+		clean: func(context.Context, string) (prolinkCleanupResult, error) {
+			cleanCalls++
+			return prolinkCleanupResult{BytesFreed: 64}, fmt.Errorf("simulated I/O error")
+		},
+		logf: func(format string, args ...any) {
+			errLogs = append(errLogs, fmt.Sprintf(format, args...))
+		},
+		grace: time.Second,
+		now:   func() time.Time { return now },
+	}
+	cwErr.step(context.Background())
+	now = now.Add(2 * time.Second)
+	cwErr.step(context.Background())
+	cwErr.step(context.Background())
+	if cleanCalls != 1 {
+		t.Fatalf("cleanCalls = %d, want 1 (once-per-insert)", cleanCalls)
+	}
+	if len(errLogs) != 1 || !strings.Contains(errLogs[0], "simulated I/O error") {
+		t.Fatalf("cleanup error was swallowed instead of logged: %v", errLogs)
+	}
+}

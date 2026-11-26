@@ -1,10 +1,14 @@
 package rbstate
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha1"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -36,6 +40,58 @@ func cleanBrowseField(s string) bool {
 	return s != "" && !strings.ContainsAny(s, "\t\r\n\x00")
 }
 
+// BrowseTag binds a .rb-bridge-browse file to a specific snapshot generation, build mode, and export stamp.
+func BrowseTag(h Header) string {
+	return fmt.Sprintf("v1:%d:%d:%s:%s", h.Commit, h.Applied, h.Mode, h.Stamp)
+}
+
+// ReadBrowseHeader reads the RBB1 header line from file without loading track/artwork rows.
+func ReadBrowseHeader(file string) (uuid, tag string, err error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return "", "", err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return "", "", err
+	}
+	if !st.Mode().IsRegular() {
+		return "", "", fmt.Errorf("browse index is not a regular file")
+	}
+	r := bufio.NewReaderSize(io.LimitReader(f, 4096), 4096)
+	line, err := r.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", "", err
+	}
+	if !strings.HasSuffix(line, "\n") {
+		return "", "", fmt.Errorf("browse index header truncated")
+	}
+	if !strings.HasPrefix(line, browseMagic) {
+		return "", "", fmt.Errorf("browse index invalid magic")
+	}
+	rest := strings.TrimRight(line[len(browseMagic):], "\r\n")
+	u, tg, _ := strings.Cut(rest, " ")
+	if u == "" {
+		return "", "", fmt.Errorf("browse index missing uuid")
+	}
+	return u, tg, nil
+}
+
+// BrowseIndexMatchesFile reports whether file is an RBB1 index whose UUID and tag match h.
+func BrowseIndexMatchesFile(file string, h Header) bool {
+	if h.LibraryUUID == "" {
+		return false
+	}
+	uuid, tag, err := ReadBrowseHeader(file)
+	return err == nil && uuid == h.LibraryUUID && tag != "" && tag == BrowseTag(h)
+}
+
+// BrowseIndexMatches reports whether dbDir/.rb-bridge-browse matches snapshot header h.
+func BrowseIndexMatches(dbDir string, h Header) bool {
+	return BrowseIndexMatchesFile(filepath.Join(dbDir, BrowseIndexName), h)
+}
+
 // EncodeBrowseIndex formats the snapshot's track analysis and artwork mappings as a flat text
 // table readable directly by the C browse hook without parsing gob.
 func EncodeBrowseIndex(s *Snapshot) []byte {
@@ -46,6 +102,8 @@ func EncodeBrowseIndex(s *Snapshot) []byte {
 	b.Grow(64 + len(s.Tracks)*96)
 	b.WriteString(browseMagic)
 	b.WriteString(s.LibraryUUID)
+	b.WriteByte(' ')
+	b.WriteString(BrowseTag(s.Header))
 	b.WriteByte('\n')
 
 	tracks := make([]*Track, 0, len(s.Tracks))

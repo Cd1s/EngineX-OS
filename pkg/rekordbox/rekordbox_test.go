@@ -168,3 +168,25 @@ func TestDeviceSQLStringsStartingWithByte03(t *testing.T) {
 		t.Errorf("playlist name garbled: %+v", l.Playlists)
 	}
 }
+
+func TestFindPDBTrackMatchesParsePDBWithoutFullParse(t *testing.T) {
+	b := testfixture.PDB()
+	lib, err := ParsePDB(bytes.NewReader(b), int64(len(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := lib.Tracks[2]
+	got, ok, err := FindPDBTrack(bytes.NewReader(b), int64(len(b)), func(id uint32, trackPath string) bool {
+		return id == want.ID && trackPath == want.Path
+	})
+	if err != nil || !ok {
+		t.Fatalf("FindPDBTrack ok=%v err=%v", ok, err)
+	}
+	if got.ID != want.ID || got.Path != want.Path || got.AnalysisPath != want.AnalysisPath ||
+		got.SampleRate != want.SampleRate || got.Duration != want.Duration || got.BPM != want.BPM {
+		t.Fatalf("FindPDBTrack mismatch: got=%+v want=%+v", got, want)
+	}
+	if _, ok, err := FindPDBTrack(bytes.NewReader(b), int64(len(b)), func(uint32, string) bool { return false }); err != nil || ok {
+		t.Fatalf("missing track: ok=%v err=%v", ok, err)
+	}
+}

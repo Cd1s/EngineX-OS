@@ -8,8 +8,12 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
@@ -568,10 +572,295 @@ func TestOnDemandSymlinkRootConfinementMetadataKeyMemoryLoopsAndAACSBR(t *testin
 	if err != nil {
 		t.Fatalf("OnDemand AAC SBR Build: %v", err)
 	}
-	if !gotAAC.Timing.UsedExport {
-		t.Fatal("expected AAC implicit SBR path to consult export metadata")
+	if gotAAC.Timing.UsedExport {
+		t.Fatal("current snapshot AAC SBR unexpectedly reparsed whole export DB")
 	}
 	if !bytes.Equal(gotAAC.RBXA1, wantAACBytes) {
 		t.Fatalf("OnDemand AAC SBR RBXA1 differs from enginedb.BuildTrack (%d vs %d)", len(gotAAC.RBXA1), len(wantAACBytes))
+	}
+
+	// Legacy snapshot lacking SampleRate falls back to rooted export metadata cleanly.
+	aacTR.SampleRate = 0
+	if err := aacSnap.SaveNext(filepath.Join(aacStick, "Engine Library", "Database2")); err != nil {
+		t.Fatal(err)
+	}
+	if err := rbstate.Promote(filepath.Join(aacStick, "Engine Library", "Database2")); err != nil {
+		t.Fatal(err)
+	}
+	gotAACLegacy, err := NewOnDemandBuilder().Build(ctx, OnDemandRequest{
+		Mount:      aacStick,
+		UUID:       aacSnap.LibraryUUID,
+		EnginePath: "../" + aacTR.Rel,
+		EngineID:   aacTR.EngineID,
+		EngineKey:  ek,
+		EngineBPM:  expTrack.BPM,
+		EngineLen:  int(math.Round(expTrack.Duration)),
+	})
+	if err != nil {
+		t.Fatalf("OnDemand legacy AAC SBR Build: %v", err)
+	}
+	if !gotAACLegacy.Timing.UsedExport {
+		t.Fatal("legacy AAC SBR without snapshot SampleRate did not fall back to export")
+	}
+	if !bytes.Equal(gotAACLegacy.RBXA1, wantAACBytes) {
+		t.Fatalf("legacy AAC SBR RBXA1 differs from enginedb.BuildTrack (%d vs %d)", len(gotAACLegacy.RBXA1), len(wantAACBytes))
+	}
+}
+
+func TestOnDemandConcurrencyLastWaiterCancelSharedMetaFIFOAndLimits(t *testing.T) {
+	ctx := context.Background()
+	stick := t.TempDir()
+	testfixture.LargeExport(t, stick, 2)
+	if _, err := ConvertAtMount(ctx, stick, MountOptions{OnDemand: true}); err != nil {
+		t.Fatal(err)
+	}
+	dbDir := filepath.Join(stick, "Engine Library", "Database2")
+	snap, err := rbstate.Load(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tr1, tr2 *rbstate.Track
+	for _, c := range snap.Tracks {
+		if c.EngineID == 1 {
+			tr1 = c
+		} else if c.EngineID == 2 {
+			tr2 = c
+		}
+	}
+	if tr1 == nil || tr2 == nil {
+		t.Fatal("missing tracks 1 and 2")
+	}
+
+	// 1. Last waiter leaving cancels active build context immediately.
+	enteredANLZ := make(chan struct{})
+	canceledANLZ := make(chan struct{})
+	oldHook := onDemandBuildHook
+	onDemandBuildHook = func(hctx context.Context, stage, _ string) error {
+		if stage == "anlz" {
+			close(enteredANLZ)
+			<-hctx.Done()
+			close(canceledANLZ)
+			return hctx.Err()
+		}
+		return nil
+	}
+	t.Cleanup(func() { onDemandBuildHook = oldHook })
+
+	b := NewOnDemandBuilder()
+	cctx, ccancel := context.WithCancel(ctx)
+	doneCh := make(chan error, 1)
+	go func() {
+		_, err := b.Build(cctx, OnDemandRequest{Mount: stick, UUID: snap.LibraryUUID, EnginePath: "../" + tr1.Rel, EngineID: tr1.EngineID})
+		doneCh <- err
+	}()
+	<-enteredANLZ
+	ccancel()
+	select {
+	case <-canceledANLZ:
+	case <-time.After(time.Second):
+		t.Fatal("last waiter cancellation did not cancel active worker prompt")
+	}
+	<-doneCh
+
+	// 2. Concurrent cold misses share one snapshot load and Caller 1 cancelling does not close Caller 2's root.
+	var snapLoads atomic.Int32
+	gate1 := make(chan struct{})
+	releaseGate := make(chan struct{})
+	onDemandBuildHook = func(hctx context.Context, stage, _ string) error {
+		if stage == "snapshot" {
+			snapLoads.Add(1)
+			close(gate1)
+			select {
+			case <-releaseGate:
+			case <-hctx.Done():
+				return hctx.Err()
+			}
+		}
+		return nil
+	}
+	bShared := NewOnDemandBuilder()
+	ctx1, cancel1 := context.WithCancel(ctx)
+	var err1, err2 error
+	var res2 *OnDemandResult
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err1 = bShared.Build(ctx1, OnDemandRequest{Mount: stick, UUID: snap.LibraryUUID, EnginePath: "../" + tr1.Rel, EngineID: tr1.EngineID})
+	}()
+	go func() {
+		defer wg.Done()
+		<-gate1
+		res2, err2 = bShared.Build(ctx, OnDemandRequest{Mount: stick, UUID: snap.LibraryUUID, EnginePath: "../" + tr2.Rel, EngineID: tr2.EngineID})
+	}()
+	<-gate1
+	// Wait deterministically until caller 2 has joined snapFlight (waiters == 2) before cancelling caller 1.
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		bShared.metaMu.Lock()
+		waiters := 0
+		for _, c := range bShared.snapFlight {
+			waiters = c.waiters
+		}
+		bShared.metaMu.Unlock()
+		if waiters >= 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel1()
+	close(releaseGate)
+	wg.Wait()
+	onDemandBuildHook = nil
+	if !errors.Is(err1, context.Canceled) {
+		t.Fatalf("canceled caller1 err=%v, want context.Canceled", err1)
+	}
+	if err2 != nil || res2 == nil || len(res2.RBXA1) == 0 {
+		t.Fatalf("caller2 failed after shared snapshot load: res=%v err=%v", res2, err2)
+	}
+	if snapLoads.Load() != 1 {
+		t.Fatalf("cold snapshot loads across 2 concurrent tracks = %d, want 1", snapLoads.Load())
+	}
+
+	// 3. RequireMountpoint rejects non-mountpoint subdirectory under MediaRoot.
+	bStrict := NewOnDemandBuilderWithConfig(OnDemandBuilderConfig{
+		MediaRoot:         filepath.Dir(stick),
+		RequireMountpoint: true,
+	})
+	if _, err := bStrict.Build(ctx, OnDemandRequest{Mount: stick, UUID: snap.LibraryUUID, EnginePath: "../" + tr1.Rel}); !errors.Is(err, ErrOnDemandNotFound) {
+		t.Fatalf("RequireMountpoint subdir err=%v, want ErrOnDemandNotFound", err)
+	}
+
+	// 4. FIFO at ANLZ path must fail cleanly without hanging (O_NONBLOCK + IsRegular check).
+	fifoStick := t.TempDir()
+	testfixture.LargeExport(t, fifoStick, 1)
+	if _, err := ConvertAtMount(ctx, fifoStick, MountOptions{OnDemand: true}); err != nil {
+		t.Fatal(err)
+	}
+	fsnap, _ := rbstate.Load(filepath.Join(fifoStick, "Engine Library", "Database2"))
+	var ftr *rbstate.Track
+	for _, c := range fsnap.Tracks {
+		ftr = c
+		break
+	}
+	datRel, extRel, ex2Rel := anlzCandidates(ftr, "")
+	for _, rel := range []string{datRel, extRel, ex2Rel} {
+		if rel == "" {
+			continue
+		}
+		full := filepath.Join(fifoStick, filepath.FromSlash(strings.TrimLeft(rel, "/")))
+		_ = os.Remove(full)
+		if rel == ex2Rel {
+			if err := syscall.Mkfifo(full, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t0 := time.Now()
+	if _, err := NewOnDemandBuilder().Build(ctx, OnDemandRequest{Mount: fifoStick, UUID: fsnap.LibraryUUID, EnginePath: "../" + ftr.Rel}); err == nil || time.Since(t0) > time.Second {
+		t.Fatalf("FIFO ANLZ did not fail fast: err=%v elapsed=%s", err, time.Since(t0))
+	}
+
+	// 5. Oversized ANLZ and snapshot are rejected before reading.
+	bigANLZ := filepath.Join(fifoStick, filepath.FromSlash(strings.TrimLeft(ex2Rel, "/")))
+	_ = os.Remove(bigANLZ)
+	bf, err := os.Create(bigANLZ)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bf.Truncate(onDemandMaxANLZBytes + 4096); err != nil {
+		bf.Close()
+		t.Fatal(err)
+	}
+	bf.Close()
+	if _, err := NewOnDemandBuilder().Build(ctx, OnDemandRequest{Mount: fifoStick, UUID: fsnap.LibraryUUID, EnginePath: "../" + ftr.Rel}); !errors.Is(err, ErrOnDemandLimit) {
+		t.Fatalf("oversized ANLZ err=%v, want ErrOnDemandLimit", err)
+	}
+
+	bigSnapStick := t.TempDir()
+	bigSnapPath := filepath.Join(bigSnapStick, "Engine Library", "Database2", rbstate.SnapshotName)
+	if err := os.MkdirAll(filepath.Dir(bigSnapPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sf, err := os.Create(bigSnapPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sf.Truncate(onDemandMaxSnapshotBytes + 4096); err != nil {
+		sf.Close()
+		t.Fatal(err)
+	}
+	sf.Close()
+	if _, err := NewOnDemandBuilder().Build(ctx, OnDemandRequest{Mount: bigSnapStick, EnginePath: "../Contents/a.mp3"}); !errors.Is(err, ErrOnDemandLimit) {
+		t.Fatalf("oversized snapshot err=%v, want ErrOnDemandLimit", err)
+	}
+
+	// 6. Rooted export fallback refuses symlinked PIONEER/rekordbox/export.pdb pointing outside mount.
+	symStick := t.TempDir()
+	testfixture.LargeExport(t, symStick, 1)
+	if _, err := ConvertAtMount(ctx, symStick, MountOptions{OnDemand: true}); err != nil {
+		t.Fatal(err)
+	}
+	outsideExport := filepath.Join(t.TempDir(), "outside-export.pdb")
+	pdbOrig := filepath.Join(symStick, "PIONEER", "rekordbox", "export.pdb")
+	if err := os.Rename(pdbOrig, outsideExport); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideExport, pdbOrig); err != nil {
+		t.Fatal(err)
+	}
+	symDB := filepath.Join(symStick, "Engine Library", "Database2")
+	symSnap, err := rbstate.Load(symDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var symTR *rbstate.Track
+	for _, c := range symSnap.Tracks {
+		c.AnalysisPath, c.Built.ANLZ = "", nil
+		symTR = c
+	}
+	_ = symSnap.SaveNext(symDB)
+	_ = rbstate.Promote(symDB)
+	if _, err := NewOnDemandBuilder().Build(ctx, OnDemandRequest{Mount: symStick, UUID: symSnap.LibraryUUID, EnginePath: "../" + symTR.Rel}); !errors.Is(err, ErrOnDemandDegraded) {
+		t.Fatalf("symlinked export.pdb in rooted fallback err=%v, want ErrOnDemandDegraded", err)
+	}
+
+	// 7. RD-3 proof (fails on f65d4fdf): an encrypted exportLibrary.db is NEVER opened or decrypted
+	// on the load path even when a legacy snapshot lacks AnalysisPath (0 KeyDerivations, fast ErrOnDemandDegraded).
+	encStick := t.TempDir()
+	encSrc := filepath.Join("..", "rekordbox", "testdata", "sqlcipher4_onelibrary.db")
+	encRaw, err := os.ReadFile(encSrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testfixture.Write(t, encStick, "PIONEER/rekordbox/exportLibrary.db", encRaw)
+	encAudio := filepath.Join(encStick, "Contents", "enc.mp3")
+	buildTestMP3(t, encAudio)
+	encDBDir := filepath.Join(encStick, "Engine Library", "Database2")
+	if err := os.MkdirAll(encDBDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	encSnap := rbstate.New("uuid-enc-only")
+	encSnap.Tracks[rbstate.FoldPath("Contents/enc.mp3")] = &rbstate.Track{
+		Key: rbstate.FoldPath("Contents/enc.mp3"), EngineID: 1, Rel: "Contents/enc.mp3", Row: "r-enc",
+	}
+	if err := encSnap.SaveNext(encDBDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := rbstate.Promote(encDBDir); err != nil {
+		t.Fatal(err)
+	}
+	kdBefore := rekordbox.KeyDerivations()
+	tEnc := time.Now()
+	_, encErr := NewOnDemandBuilder().Build(ctx, OnDemandRequest{
+		Mount:      encStick,
+		UUID:       encSnap.LibraryUUID,
+		EnginePath: "../Contents/enc.mp3",
+		EngineID:   1,
+	})
+	if !errors.Is(encErr, ErrOnDemandDegraded) {
+		t.Fatalf("legacy OneLibrary-only without AnalysisPath: err=%v, want ErrOnDemandDegraded", encErr)
+	}
+	if time.Since(tEnc) > 500*time.Millisecond || rekordbox.KeyDerivations() != kdBefore {
+		t.Fatalf("load path unexpectedly touched/decrypted exportLibrary.db: elapsed=%s kd=%d->%d", time.Since(tEnc), kdBefore, rekordbox.KeyDerivations())
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -35,6 +36,7 @@ type prolinkCleanupOptions struct {
 	isEjecting        func() bool
 	keepalive         func()
 	requireMountpoint bool
+	expectedMount     *mountIdentity
 	statfs            func(int, *unix.Statfs_t) error
 	logf              func(string, ...any)
 }
@@ -147,6 +149,23 @@ type mountIdentity struct {
 	hasMntID bool
 }
 
+func fdMountID(fd int) (uint64, bool) {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/self/fdinfo/%d", fd))
+	if err != nil {
+		return 0, false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(line, "mnt_id:"); ok {
+			id, perr := strconv.ParseUint(strings.TrimSpace(v), 10, 64)
+			if perr == nil {
+				return id, true
+			}
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
 func statxMountNode(dirFD int, name string, flags int) (unix.Statx_t, mountIdentity, error) {
 	var stx unix.Statx_t
 	err := unix.Statx(dirFD, name, flags, unix.STATX_BASIC_STATS|unix.STATX_MNT_ID, &stx)
@@ -158,17 +177,25 @@ func statxMountNode(dirFD int, name string, flags int) (unix.Statx_t, mountIdent
 		mntID:    stx.Mnt_id,
 		hasMntID: stx.Mask&unix.STATX_MNT_ID != 0,
 	}
+	if !id.hasMntID {
+		if flags&unix.AT_EMPTY_PATH != 0 && name == "" && dirFD >= 0 {
+			if mid, ok := fdMountID(dirFD); ok {
+				id.mntID, id.hasMntID = mid, true
+			}
+		} else if name != "" {
+			if pfd, perr := unix.Openat(dirFD, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0); perr == nil {
+				if mid, ok := fdMountID(pfd); ok {
+					id.mntID, id.hasMntID = mid, true
+				}
+				_ = unix.Close(pfd)
+			}
+		}
+	}
 	return stx, id, nil
 }
 
 func sameMountIdentity(a, b mountIdentity) bool {
-	if a.dev != b.dev {
-		return false
-	}
-	if a.hasMntID && b.hasMntID && a.mntID != b.mntID {
-		return false
-	}
-	return true
+	return a.hasMntID && b.hasMntID && a.dev == b.dev && a.mntID == b.mntID
 }
 
 func usbPreparingActive() bool {
@@ -200,7 +227,6 @@ type cleanupWalk struct {
 	keepalive     func()
 	lastKeepalive time.Time
 	statfs        func(int, *unix.Statfs_t) error
-	seenIno       map[uint64]struct{}
 	bytesFreed    int64
 	stopped       bool
 }
@@ -316,28 +342,17 @@ func (w *cleanupWalk) drainOnePass(dirFD int, name string) (hadEntries bool, err
 				}
 				return hadEntries, e
 			}
-			if estx.Mode&unix.S_IFMT == unix.S_IFREG {
-				if estx.Nlink > 1 && w.seenIno == nil {
-					w.seenIno = make(map[uint64]struct{})
-				}
-				counted := true
-				if w.seenIno != nil {
-					if _, dup := w.seenIno[estx.Ino]; dup {
-						counted = false
-					} else if estx.Nlink > 1 {
-						w.seenIno[estx.Ino] = struct{}{}
+			// Count blocks only when unlinking the last link to the inode so an outside hard link
+			// never reports space reclaimed while its data stays allocated.
+			if estx.Mode&unix.S_IFMT == unix.S_IFREG && estx.Nlink == 1 {
+				sz := int64(estx.Size)
+				if estx.Mask&unix.STATX_BLOCKS != 0 {
+					alloc := int64(estx.Blocks) * 512
+					if sz > 4096 && alloc < sz {
+						sz = alloc
 					}
 				}
-				if counted {
-					sz := int64(estx.Size)
-					if estx.Mask&unix.STATX_BLOCKS != 0 {
-						alloc := int64(estx.Blocks) * 512
-						if sz > 4096 && alloc < sz {
-							sz = alloc
-						}
-					}
-					w.bytesFreed += sz
-				}
+				w.bytesFreed += sz
 			}
 		}
 		if errors.Is(rerr, io.EOF) {
@@ -406,9 +421,15 @@ func cleanProlinkCache(ctx context.Context, mount string, opts prolinkCleanupOpt
 	if err != nil {
 		return prolinkCleanupResult{}, err
 	}
+	if !mountID.hasMntID {
+		return prolinkCleanupResult{}, errors.New("mount identity unavailable")
+	}
+	if opts.expectedMount != nil && !sameMountIdentity(mountID, *opts.expectedMount) {
+		return prolinkCleanupResult{Stopped: true}, nil
+	}
 	if opts.requireMountpoint {
 		_, parentID, perr := statxMountNode(unix.AT_FDCWD, filepath.Dir(mount), unix.AT_SYMLINK_NOFOLLOW)
-		if perr != nil || sameMountIdentity(parentID, mountID) {
+		if perr != nil || !parentID.hasMntID || sameMountIdentity(parentID, mountID) {
 			return prolinkCleanupResult{}, nil
 		}
 	}
@@ -446,6 +467,7 @@ func cleanProlinkCache(ctx context.Context, mount string, opts prolinkCleanupOpt
 		statfs:        statfs,
 	}
 	if err := w.cleanDirChild(mountFD, prolinkCacheDirName); err != nil {
+		logf("rb-bridge: error removing leftover %s on %s (%d bytes freed before error): %v", prolinkCacheDirName, mount, w.bytesFreed, err)
 		return prolinkCleanupResult{Stopped: w.stopped, BytesFreed: w.bytesFreed}, err
 	}
 
@@ -465,9 +487,10 @@ func cleanProlinkCache(ctx context.Context, mount string, opts prolinkCleanupOpt
 }
 
 type mountDevKey struct {
-	mount string
-	dev   uint64
-	mntID uint64
+	mount    string
+	dev      uint64
+	mntID    uint64
+	hasMntID bool
 }
 
 type prolinkCleanupWatcher struct {
@@ -479,17 +502,24 @@ type prolinkCleanupWatcher struct {
 	isPreparing   func() bool
 	activityFresh func() bool
 	clean         func(context.Context, string) (prolinkCleanupResult, error)
+	cleanMount    func(context.Context, mountDevKey) (prolinkCleanupResult, error)
 	poke          func()
+	logf          func(string, ...any)
 	grace         time.Duration
 	now           func() time.Time
 }
 
 func defaultStatMountKey(mount string) (mountDevKey, bool) {
-	stx, id, err := statxMountNode(unix.AT_FDCWD, mount, unix.AT_SYMLINK_NOFOLLOW)
-	if err != nil || stx.Mode&unix.S_IFMT != unix.S_IFDIR {
+	fd, err := unix.Open(mount, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
 		return mountDevKey{}, false
 	}
-	return mountDevKey{mount: mount, dev: id.dev, mntID: id.mntID}, true
+	defer unix.Close(fd)
+	stx, id, err := statxMountNode(fd, "", unix.AT_EMPTY_PATH|unix.AT_SYMLINK_NOFOLLOW)
+	if err != nil || stx.Mode&unix.S_IFMT != unix.S_IFDIR || !id.hasMntID {
+		return mountDevKey{}, false
+	}
+	return mountDevKey{mount: mount, dev: id.dev, mntID: id.mntID, hasMntID: true}, true
 }
 
 func newProlinkCleanupWatcher() *prolinkCleanupWatcher {
@@ -503,10 +533,15 @@ func newProlinkCleanupWatcher() *prolinkCleanupWatcher {
 			_, _, fresh := bridge.DeckActivityState()
 			return fresh
 		},
-		clean: func(ctx context.Context, mount string) (prolinkCleanupResult, error) {
-			return cleanProlinkCache(ctx, mount, prolinkCleanupOptions{requireMountpoint: true})
+		cleanMount: func(ctx context.Context, k mountDevKey) (prolinkCleanupResult, error) {
+			exp := mountIdentity{dev: k.dev, mntID: k.mntID, hasMntID: k.hasMntID}
+			return cleanProlinkCache(ctx, k.mount, prolinkCleanupOptions{
+				requireMountpoint: true,
+				expectedMount:     &exp,
+			})
 		},
 		poke:  pokeDeckClock,
+		logf:  log.Printf,
 		grace: prolinkCleanupGraceWait,
 		now:   time.Now,
 	}
@@ -578,9 +613,30 @@ func (cw *prolinkCleanupWatcher) step(ctx context.Context) {
 		if cw.activityFresh != nil && !cw.activityFresh() {
 			continue
 		}
-		_, _ = cw.clean(ctx, k.mount)
-		// Once done (removed or absent) OR paused while busy/ejecting, stop touching the
-		// drive for the remainder of this insert and resume automatically at the next insert.
+		var res prolinkCleanupResult
+		var cerr error
+		if cw.clean != nil {
+			res, cerr = cw.clean(ctx, k.mount)
+		} else if cw.cleanMount != nil {
+			res, cerr = cw.cleanMount(ctx, k)
+		} else {
+			exp := mountIdentity{dev: k.dev, mntID: k.mntID, hasMntID: k.hasMntID}
+			res, cerr = cleanProlinkCache(ctx, k.mount, prolinkCleanupOptions{
+				requireMountpoint: true,
+				expectedMount:     &exp,
+				logf:              cw.logf,
+			})
+		}
+		if cerr != nil {
+			logf := cw.logf
+			if logf == nil {
+				logf = log.Printf
+			}
+			logf("rb-bridge: %s cleanup failed on %s (removed=%v stopped=%v bytesFreed=%d): %v",
+				prolinkCacheDirName, k.mount, res.Removed, res.Stopped, res.BytesFreed, cerr)
+		}
+		// Once done (removed or absent) OR paused while busy/ejecting/failed, stop touching the
+		// drive for the remainder of this mount identity and resume automatically on the next insert.
 		cw.mu.Lock()
 		cw.handled[k] = true
 		cw.mu.Unlock()

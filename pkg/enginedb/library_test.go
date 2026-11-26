@@ -1081,3 +1081,66 @@ func TestLibraryUsesImmediateWriteLock(t *testing.T) {
 		t.Fatal("BeginTx succeeded despite active write transaction; _txlock=immediate not active")
 	}
 }
+
+func TestSetEntriesSuspendsAndRestoresPlaylistEntityDeleteTrigger(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	rows := []TrackRow{
+		{Rel: "Contents/a.mp3", Track: rekordbox.Track{ID: 1, Path: "/Contents/a.mp3", Title: "A"}},
+		{Rel: "Contents/b.mp3", Track: rekordbox.Track{ID: 2, Path: "/Contents/b.mp3", Title: "B"}},
+		{Rel: "Contents/c.mp3", Track: rekordbox.Track{ID: 3, Path: "/Contents/c.mp3", Title: "C"}},
+	}
+	ids, _, _, err := BuildLibrary(ctx, dir, "", rows, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lib, err := OpenLibrary(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lib.Close()
+
+	b, err := lib.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list1, err := b.InsertList(ctx, ListRow{Title: "List1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetEntries(ctx, list1, ids); err != nil {
+		t.Fatal(err)
+	}
+	list2, err := b.InsertList(ctx, ListRow{Title: "List2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetEntries(ctx, list2, ids); err != nil {
+		t.Fatal(err)
+	}
+	// DeleteTrack after SetEntries in the same batch must restore the trigger and relink list2.
+	if err := b.DeleteTrack(ctx, ids[1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var trigCount int
+	if err := lib.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name='trigger_before_delete_PlaylistEntity'`).Scan(&trigCount); err != nil {
+		t.Fatal(err)
+	}
+	if trigCount != 1 {
+		t.Fatalf("trigger_before_delete_PlaylistEntity count = %d, want 1 after Commit", trigCount)
+	}
+	var e1Next, e3ID int64
+	if err := lib.db.QueryRowContext(ctx, `SELECT nextEntityId FROM PlaylistEntity WHERE listId=? AND trackId=?`, list2, ids[0]).Scan(&e1Next); err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.db.QueryRowContext(ctx, `SELECT id FROM PlaylistEntity WHERE listId=? AND trackId=?`, list2, ids[2]).Scan(&e3ID); err != nil {
+		t.Fatal(err)
+	}
+	if e1Next != e3ID {
+		t.Fatalf("list2 entity relink after DeleteTrack: nextEntityId=%d, want %d", e1Next, e3ID)
+	}
+}

@@ -53,6 +53,7 @@ func rbBridgeCtx(ctx context.Context, args []string, stdout io.Writer) error {
 	migrateArt := fs.Bool("migrate-artwork", false, "retired; exits at once (a mount gives covers the hash Engine Link serves)")
 	writebackCues := fs.Bool("writeback-cues", false, "with --mount-path: write modified Engine Hot Cues, Memory Cues, and Loops back to the Rekordbox stick")
 	onEject := fs.Bool("on-eject", false, "with --writeback-cues: invoked by the eject hook before unmounting")
+	dryRun := fs.Bool("dry-run", false, "with --writeback-cues: report tracks and fields that would be written back without modifying the stick")
 	smart := fs.Uint("smart-match", 0, "optional recommendation playlist relative to this Rekordbox track ID")
 	defaultStateFile := "/tmp/enginex-prolink.json"
 	if env := os.Getenv("ENGINEX_PROLINK_STATE"); env != "" {
@@ -110,7 +111,7 @@ func rbBridgeCtx(ctx context.Context, args []string, stdout io.Writer) error {
 		return nil
 	}
 	if *mount != "" && *writebackCues {
-		if *onEject {
+		if *onEject && !*dryRun {
 			// stream-sync's watcher keeps the stick's keys and what it has read (#321).
 			if r, err, ok := finalWriteBack(ctx, *mount); ok {
 				if err != nil {
@@ -120,7 +121,7 @@ func rbBridgeCtx(ctx context.Context, args []string, stdout io.Writer) error {
 				return nil
 			}
 		}
-		r, err := bridge.WriteBackCues(ctx, *mount, bridge.WriteBackOptions{OnEject: *onEject})
+		r, err := bridge.WriteBackCues(ctx, *mount, bridge.WriteBackOptions{OnEject: *onEject, DryRun: *dryRun})
 		if err != nil {
 			return err
 		}

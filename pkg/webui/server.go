@@ -86,6 +86,8 @@ type Config struct {
 	SDHighSpeedRunDir string
 	// RekordboxOnDemandSock overrides /run/enginex/rb-ondemand.sock for the hook's local Unix socket ("-" disables).
 	RekordboxOnDemandSock string
+	// RequireOnDemandMountpoint enforces that resolved volumes are real mountpoints (used under /media or tests).
+	RequireOnDemandMountpoint bool
 	// ApplySDHighSpeed overrides invoking enginex-sd-highspeed in tests.
 	ApplySDHighSpeed func(enabled, playing bool) (pending bool, err error)
 	// ProlinkExport selects the optional read-only CDJ export; zero uses the

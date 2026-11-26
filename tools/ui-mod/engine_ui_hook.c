@@ -3841,13 +3841,11 @@ static int rbx_bind(void *stmt, int i, long long value) {
     if (!rc && i == 1 && value > 0 && !analysis_filling && stmt) {
         const char *sql = rbx_statement_sql(stmt);
         const int track_read = sc_shadow_analysis_bound(sql);
-        // Track WHERE t.id = ? runs on browse/SceneGraph (stage cache only, 0 IPC);
-        // PerformanceData WHERE trackId = ? runs on J:Fetchingperfo (load fallback).
         const int perf_read = !track_read && sc_rbx_analysis_bound(sql);
         const int analysis_read = track_read || perf_read;
         const char *drive = analysis_read && sc_rbs_enabled ? sc_rbs_drive(&rbx_sqlite, rbx_statement_db(stmt)) : NULL;
         if (drive)
-            rbs_fill(rbx_statement_db(stmt), drive, value, perf_read);
+            rbs_fill(rbx_statement_db(stmt), drive, value, 1);
         else if (rbx_prepare_original && analysis_read)
             rbx_fill(rbx_statement_db(stmt), value, NULL, 0);
         if (shadow_analysis_enabled && track_read)
@@ -4171,16 +4169,12 @@ static const char *volatile_path(int dirfd, const char *path, char out[PATH_MAX]
 static const char *stems_processor_path(const char *path);
 
 __attribute__((noinline))
-static int rbb_try_open(int dirfd, const char *path, int flags, char scratch[PATH_MAX], const char **out_path) {
+static int rbb_try_open(int dirfd, const char *path, int flags) {
     if (dirfd != AT_FDCWD && (!path || path[0] != '/')) return -1;
     sc_rbb_note_path(path);
     int rgb_fd = sc_rbb_open_rgb(path, flags);
     if (rgb_fd >= 0) return rgb_fd;
-    if ((flags & O_ACCMODE) == O_RDONLY && !(flags & (O_CREAT | O_TRUNC | O_APPEND | O_DIRECTORY)) &&
-        sc_rbb_map_artwork(path, scratch)) {
-        *out_path = scratch;
-    }
-    return -1;
+    return sc_rbb_open_artwork(path, flags);
 }
 
 static int redirected_open(int dirfd, const char *path, int flags, mode_t mode) {
@@ -4190,13 +4184,8 @@ static int redirected_open(int dirfd, const char *path, int flags, mode_t mode) 
     if (is_engine()) {
         path = stems_processor_path(path);
         if (hf_on(HF_RB_BRIDGE) && sc_rbb_path_has_media_prefix(path)) {
-            const char *art_path = path;
-            int rgb_fd = rbb_try_open(dirfd, path, flags, mapped, &art_path);
-            if (rgb_fd >= 0) return rgb_fd;
-            if (art_path == mapped) {
-                return real ? real(AT_FDCWD, mapped, flags, mode)
-                            : (int)syscall(SYS_openat, AT_FDCWD, mapped, flags, mode);
-            }
+            int rbb_fd = rbb_try_open(dirfd, path, flags);
+            if (rbb_fd >= 0) return rbb_fd;
         }
         int copied = sc_copy_profile_read(path, flags, UI_ROOT "/../settings-copy/usb-read",
                                          UI_ROOT "/../settings-copy/usb.profile", mapped, sizeof mapped);
@@ -4302,7 +4291,8 @@ static int rbb_try_statx(int dirfd, const char *path, int flags, unsigned int ma
         if (sc_rbb_statx_rgb(path, buf)) return 0;
 #endif
         char rbb_art[PATH_MAX];
-        if (sc_rbb_map_artwork(path, rbb_art)) return real(AT_FDCWD, rbb_art, flags, mask, buf);
+        if (sc_rbb_map_artwork(path, rbb_art))
+            return real(AT_FDCWD, rbb_art, flags | AT_SYMLINK_NOFOLLOW, mask, buf);
     }
     return real(dirfd, path, flags, mask, buf);
 }

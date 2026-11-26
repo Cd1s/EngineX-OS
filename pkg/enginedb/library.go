@@ -419,16 +419,18 @@ func (l *Library) HasTrackSequence(ctx context.Context) (bool, error) {
 }
 
 type Batch struct {
-	l          *Library
-	tx         *sql.Tx
-	stmts      map[string]*sql.Stmt
-	saved      []string                  // Engine's own SQL of the indexes and triggers suspended for the batch
-	nextTrack  int64                     // bulk: the next Track.id
-	nextEntity int64                     // the next PlaylistEntity.id, 0 until a list is written
-	lists      bool                      // a list was added: Engine's persist trigger is suspended
-	covers     map[[sha1.Size]byte]int64 // AlbumArt.id of the images this batch has put
-	now        int64
-	commitID   int64
+	l                        *Library
+	tx                       *sql.Tx
+	stmts                    map[string]*sql.Stmt
+	saved                    []string                  // Engine's own SQL of the indexes and triggers suspended for the batch
+	nextTrack                int64                     // bulk: the next Track.id
+	nextEntity               int64                     // the next PlaylistEntity.id, 0 until a list is written
+	lists                    bool                      // a list was added: Engine's persist trigger is suspended
+	listEntities             bool                      // PlaylistEntity bulk delete trigger is suspended
+	playlistEntityTriggerSQL string                    // saved SQL of trigger_before_delete_PlaylistEntity if suspended
+	covers                   map[[sha1.Size]byte]int64 // AlbumArt.id of the images this batch has put
+	now                      int64
+	commitID                 int64
 }
 
 // CommitID is the library's CommitID once this batch is committed.
@@ -538,6 +540,51 @@ func (b *Batch) suspend(ctx context.Context, which string) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// suspendPlaylistEntityDelete drops trigger_before_delete_PlaylistEntity once per batch while
+// whole-list entity replacements or deletions run, avoiding O(N^2) linked-list updates; Commit
+// recreates it (and DeleteTrack restores it early if mixed into the same batch).
+func (b *Batch) suspendPlaylistEntityDelete(ctx context.Context) error {
+	if b.listEntities || b.l.bulk {
+		return nil
+	}
+	var text string
+	err := b.tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND type='trigger' AND name='trigger_before_delete_PlaylistEntity'`).Scan(&text)
+	if errors.Is(err, sql.ErrNoRows) {
+		b.listEntities = true
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err = b.tx.ExecContext(ctx, `DROP TRIGGER "trigger_before_delete_PlaylistEntity"`); err != nil {
+		return err
+	}
+	b.playlistEntityTriggerSQL = text
+	b.saved = append(b.saved, text)
+	b.listEntities = true
+	return nil
+}
+
+func (b *Batch) restorePlaylistEntityDelete(ctx context.Context) error {
+	if !b.listEntities {
+		return nil
+	}
+	if b.playlistEntityTriggerSQL != "" {
+		if _, err := b.tx.ExecContext(ctx, b.playlistEntityTriggerSQL); err != nil {
+			return err
+		}
+		for i, text := range b.saved {
+			if text == b.playlistEntityTriggerSQL {
+				b.saved = append(b.saved[:i], b.saved[i+1:]...)
+				break
+			}
+		}
+		b.playlistEntityTriggerSQL = ""
+	}
+	b.listEntities = false
 	return nil
 }
 
@@ -796,6 +843,9 @@ func (b *Batch) MoveTracks(ctx context.Context, moves map[int64]string) error {
 
 // DeleteTrack removes a row the bridge owns, with its list entries and its performance data.
 func (b *Batch) DeleteTrack(ctx context.Context, id int64) error {
+	if err := b.restorePlaylistEntityDelete(ctx); err != nil {
+		return err
+	}
 	for _, q := range []string{`DELETE FROM PlaylistEntity WHERE trackId=?`, `DELETE FROM PreparelistEntity WHERE trackId=?`, `DELETE FROM Track WHERE id=?`} {
 		if _, err := b.exec(ctx, q, id); err != nil {
 			return err
@@ -919,6 +969,9 @@ func (b *Batch) children(ctx context.Context, parent int64, owned func(int64) bo
 
 // SetEntries makes a list hold exactly these tracks, in this order.
 func (b *Batch) SetEntries(ctx context.Context, list int64, tracks []int64) error {
+	if err := b.suspendPlaylistEntityDelete(ctx); err != nil {
+		return err
+	}
 	if _, err := b.exec(ctx, `DELETE FROM PlaylistEntity WHERE listId=?`, list); err != nil {
 		return err
 	}
@@ -961,6 +1014,9 @@ func (b *Batch) SetEntries(ctx context.Context, list int64, tracks []int64) erro
 // root first, in their order, as "<name> (n)" when the root has the name: the bridge never
 // deletes a list the DJ made on a deck (#252).
 func (b *Batch) DeleteList(ctx context.Context, id int64, owned func(int64) bool) error {
+	if err := b.suspendPlaylistEntityDelete(ctx); err != nil {
+		return err
+	}
 	nodes, err := b.children(ctx, id, owned)
 	if err != nil {
 		return err

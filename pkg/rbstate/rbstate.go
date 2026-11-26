@@ -19,6 +19,11 @@ const (
 	// 5 follows the stamp versions v2-v4 of earlier builds.
 	Rules  = 5
 	Format = 2 // of the snapshot file
+
+	// ModeFull is the full background-perf build mode (and empty legacy default).
+	ModeFull = ""
+	// ModeOnDemand is the CDJ direct-read on-demand mode.
+	ModeOnDemand = "ondemand"
 )
 
 // ErrLocked: another process holds the volume's lock.
@@ -89,6 +94,8 @@ type Header struct {
 	// Base, in a swap snapshot only: the state of the stick's library (enginedb.LibraryState)
 	// whose every row the next library has taken.
 	Base string `json:"base,omitempty"`
+	// Mode distinguishes build modes that share Rules ("" = full perf build, "ondemand" = CDJ direct-read).
+	Mode string `json:"mode,omitempty"`
 }
 
 // PerfState says what a row's performance data is.

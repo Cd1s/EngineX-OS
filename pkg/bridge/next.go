@@ -271,12 +271,17 @@ func (n *nextBuild) build(drop, ready bool) error {
 	if n.isBusy() {
 		return errDeckBusy
 	}
+	snap.Base = state
+	if n.onDemand {
+		snap.Mode = rbstate.ModeOnDemand
+	} else {
+		snap.Mode = rbstate.ModeFull
+	}
 	if n.onDemand {
 		if err := rbstate.SaveBrowseIndexAs(filepath.Join(n.dir, rbstate.BrowseSwapName), snap); err != nil {
-			log.Printf("rb-bridge: swap browse index not saved: %v", err)
+			return err
 		}
 	}
-	snap.Base = state
 	return snap.SaveAs(swap)
 }
 
@@ -399,74 +404,119 @@ func liveIdentityRO(ctx context.Context, file string) (commit int64, uuid string
 	return id.Int64, u.String, true, nil
 }
 
+// LiveLibraryIdentity returns m.db's live UUID and commit ID read-only without mutating the file.
+func LiveLibraryIdentity(ctx context.Context, dbDir string) (uuid string, commit int64, err error) {
+	commit, uuid, exists, err := liveIdentityRO(ctx, filepath.Join(dbDir, "m.db"))
+	if err != nil {
+		return "", 0, err
+	}
+	if !exists {
+		return "", 0, os.ErrNotExist
+	}
+	return uuid, commit, nil
+}
+
+func promoteBrowseSwap(dir string, h rbstate.Header) {
+	bswap := filepath.Join(dir, rbstate.BrowseSwapName)
+	bidx := filepath.Join(dir, rbstate.BrowseIndexName)
+	if h.Mode == rbstate.ModeOnDemand {
+		if rbstate.BrowseIndexMatchesFile(bswap, h) {
+			if err := rbstate.RenameFile(bswap, bidx); err == nil {
+				return
+			}
+		}
+		_ = rbstate.RemoveFile(bswap)
+		if snap, err := rbstate.Load(dir); err == nil {
+			if serr := syncBrowseIndex(dir, snap); serr != nil {
+				log.Printf("rb-bridge: browse index not repaired after swap: %v", serr)
+			}
+			return
+		}
+		_ = rbstate.RemoveFile(bidx)
+		return
+	}
+	_ = rbstate.RemoveFile(bswap)
+	if !rbstate.BrowseIndexMatches(dir, h) {
+		_ = rbstate.RemoveFile(bidx)
+	}
+}
+
 // reconcileOrphanSwap cleans up a leftover .rb-bridge-snapshot.swap when .rb-next.db is already
 // gone (e.g. a mount window killed right between renaming .rb-next.db -> m.db and renaming
 // .rb-bridge-snapshot.swap -> .rb-bridge-snapshot, or a corrupt/stale swap file). It never writes
-// m.db and is safe to call from the background job under LockVolume.
-func reconcileOrphanSwap(ctx context.Context, dir string) bool {
+// m.db and is safe to call from both the mount window and the background job under LockVolume.
+func reconcileOrphanSwap(ctx context.Context, dir string) (bool, error) {
 	live, next, swap := filepath.Join(dir, "m.db"), filepath.Join(dir, nextDB), filepath.Join(dir, rbstate.SwapName)
 	if _, err := os.Stat(next); err == nil || !errors.Is(err, os.ErrNotExist) {
-		return false // active ready swap waits for a mount window, or filesystem stat failed
+		return false, err // active ready swap waits for a mount window, or filesystem stat failed
 	}
 	if _, err := os.Stat(swap); err != nil {
-		return false
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
 	}
 	h, err := rbstate.ReadHeaderFile(swap)
 	if err != nil {
 		if errors.Is(err, rbstate.ErrNoSnapshot) {
 			_ = rbstate.RemoveFile(swap)
 			_ = rbstate.RemoveFile(filepath.Join(dir, rbstate.BrowseSwapName))
+			return false, nil
 		}
-		return false
-	}
-	if h.Rules != rbstate.Rules {
-		_ = rbstate.RemoveFile(swap)
-		_ = rbstate.RemoveFile(filepath.Join(dir, rbstate.BrowseSwapName))
-		return false
+		return false, err
 	}
 	commit, uuid, exists, err := liveIdentityRO(ctx, live)
 	if err != nil {
-		return false // transient DB read failure: keep swap intact for the next check
+		return false, err // transient DB read failure: keep swap intact for the next check
 	}
-	if exists && commit == h.Commit && h.Commit != 0 && (h.LibraryUUID == "" || uuid == h.LibraryUUID) {
+	if exists && h.Rules == rbstate.Rules && h.LibraryUUID != "" && uuid == h.LibraryUUID && h.Commit != 0 && commit == h.Commit {
 		if err := rbstate.RenameFile(swap, filepath.Join(dir, rbstate.SnapshotName)); err != nil {
 			log.Printf("rb-bridge: orphan swap snapshot not promoted: %v", err)
-			return false
+			return false, err
 		}
-		if bswap := filepath.Join(dir, rbstate.BrowseSwapName); func() bool { _, e := os.Stat(bswap); return e == nil }() {
-			_ = rbstate.RenameFile(bswap, filepath.Join(dir, rbstate.BrowseIndexName))
-		}
+		promoteBrowseSwap(dir, h)
 		_ = rbstate.DropNext(dir)
 		dropOldState(dir)
 		_ = os.RemoveAll(nextState(h.LibraryUUID))
 		log.Printf("rb-bridge: promoted leftover swap snapshot from an interrupted swap")
-		return true
+		return true, nil
 	}
 	_ = rbstate.RemoveFile(swap)
 	_ = rbstate.RemoveFile(filepath.Join(dir, rbstate.BrowseSwapName))
-	return false
+	return false, nil
 }
 
 // swapNext makes a next library that is ready the stick's library: m.db first, then its
 // snapshot, each a rename inside Database2. Rows Engine wrote to m.db since the job last looked
 // are taken first (carryOver). It runs at the start of every window; without a swap snapshot it
 // costs one stat.
-func swapNext(ctx context.Context, mount, dir string, st *steps) (swapped, deadlineHit bool) {
+func swapNext(ctx context.Context, mount, dir string, st *steps, onDemand bool, stamp string) (swapped, deadlineHit bool) {
 	live, next, swap := filepath.Join(dir, "m.db"), filepath.Join(dir, nextDB), filepath.Join(dir, rbstate.SwapName)
+	if _, nextStatErr := os.Stat(next); nextStatErr != nil {
+		if errors.Is(nextStatErr, os.ErrNotExist) {
+			promoted, _ := reconcileOrphanSwap(ctx, dir)
+			return promoted, false
+		}
+		return false, false
+	}
 	h, err := rbstate.ReadHeaderFile(swap)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, rbstate.ErrNoSnapshot) {
 			return false, false
 		}
 		if errors.Is(err, rbstate.ErrNoSnapshot) {
-			if _, statErr := os.Stat(swap); statErr == nil {
-				_ = rbstate.RemoveFile(swap)
-			}
+			discardNext(dir, "")
 		}
 		return false, false
 	}
-	if h.Rules != rbstate.Rules {
-		discardNext(dir, h.LibraryUUID) // of a build with other rules
+	wantMode := rbstate.ModeFull
+	if onDemand {
+		wantMode = rbstate.ModeOnDemand
+	}
+	if h.Rules != rbstate.Rules || h.Mode != wantMode || (onDemand && stamp != "" && h.Stamp != stamp) {
+		log.Printf("rb-bridge: discarding stale next library (rules=%d/%d mode=%q/%q stampMatch=%v)",
+			h.Rules, rbstate.Rules, h.Mode, wantMode, stamp == "" || h.Stamp == stamp)
+		discardNext(dir, h.LibraryUUID)
 		return false, false
 	}
 	finish := func() bool {
@@ -474,22 +524,11 @@ func swapNext(ctx context.Context, mount, dir string, st *steps) (swapped, deadl
 			log.Printf("rb-bridge: snapshot of the next library not put in place: %v", err)
 			return false
 		}
-		if bswap := filepath.Join(dir, rbstate.BrowseSwapName); func() bool { _, e := os.Stat(bswap); return e == nil }() {
-			_ = rbstate.RenameFile(bswap, filepath.Join(dir, rbstate.BrowseIndexName))
-		}
+		promoteBrowseSwap(dir, h)
 		_ = rbstate.DropNext(dir) // of a transaction on the file that is gone
 		dropOldState(dir)
 		_ = os.RemoveAll(nextState(h.LibraryUUID))
 		return true
-	}
-	if _, err = os.Stat(next); err != nil {
-		// A window was cut between its two renames: m.db is the next library, or the files are strays.
-		if _, commit := nextIdentity(ctx, mount, live); commit == h.Commit && h.Commit != 0 {
-			log.Printf("rb-bridge: the last window was cut short while it swapped the library in; done now")
-			return finish(), false
-		}
-		_ = rbstate.RemoveFile(swap)
-		return false, false
 	}
 	if enginedb.OpenElsewhere(live) != 0 {
 		return false, false
@@ -656,6 +695,11 @@ func carryOverChecked(ctx context.Context, dir string, h *rbstate.Header, st *st
 	s.Pending.Rows, s.Pending.Lists, s.Base = s.Pending.Rows+len(ch.Tracks), s.Pending.Lists || ch.Lists, m.State
 	if ctx.Err() != nil {
 		return false, true, ctx.Err()
+	}
+	if s.Mode == rbstate.ModeOnDemand {
+		if err = rbstate.SaveBrowseIndexAs(filepath.Join(dir, rbstate.BrowseSwapName), s); err != nil {
+			return false, false, err
+		}
 	}
 	if err = s.SaveAs(swap); err != nil {
 		return false, false, err

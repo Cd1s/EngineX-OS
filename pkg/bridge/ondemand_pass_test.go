@@ -6,11 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
@@ -267,34 +269,119 @@ func TestOnDemandUnchangedUpgradeGeneratesMissingBrowseIndexAndWritebackChecksVe
 	browsePath := filepath.Join(dir, rbstate.BrowseIndexName)
 	_ = os.Remove(browsePath)
 
-	// Mark snapshot Pending=none so unchanged fast-path runs on upgrade to OnDemand.
+	// Simulate an actual legacy base-format snapshot (ModeFull "", Pending.None, empty browse paths)
+	// plus existing artwork and overview files that must survive until replaced.
 	snap, err := rbstate.Load(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	snap.Mode = rbstate.ModeFull
 	snap.Pending = (rbstate.Header{}).Pending
+	for _, c := range snap.Tracks {
+		c.AnalysisPath, c.ArtworkPath, c.Duration, c.SampleRate = "", "", 0, 0
+	}
 	if err := snap.SaveNext(dir); err != nil {
 		t.Fatal(err)
 	}
 	if err := rbstate.Promote(dir); err != nil {
 		t.Fatal(err)
 	}
-	res, err := ConvertAtMount(context.Background(), mount, MountOptions{OnDemand: true})
-	if err != nil || !res.Bypassed {
-		t.Fatalf("OnDemand upgrade bypass = %+v, err=%v", res, err)
+	legacyOV := filepath.Join(dir, "OverviewData", snap.LibraryUUID, "999.rgb")
+	if err := os.MkdirAll(filepath.Dir(legacyOV), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(browsePath); err != nil {
-		t.Fatalf("OnDemand unchanged bypass did not materialize missing %s: %v", rbstate.BrowseIndexName, err)
+	if err := os.WriteFile(legacyOV, []byte("legacy-rgb"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	legacyArt := filepath.Join(filepath.Dir(dir), "Artwork", "legacy.jpg")
+	if err := os.MkdirAll(filepath.Dir(legacyArt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyArt, []byte("legacy-jpg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Upgrading a base-format snapshot in OnDemand mode must NEVER emit a header-only browse stub;
+	// it must hydrate real AnalysisPath rows, set ModeOnDemand, and preserve existing assets.
+	res, err := ConvertAtMount(context.Background(), mount, MountOptions{OnDemand: true})
+	if err != nil || res.Bypassed {
+		t.Fatalf("legacy OnDemand upgrade = %+v, err=%v; want hydration (Bypassed=false)", res, err)
+	}
+	rawBrowse, err := os.ReadFile(browsePath)
+	if err != nil || !strings.Contains(string(rawBrowse), "\nT\t") {
+		t.Fatalf("upgraded browse index missing hydrated T lines: err=%v\n%s", err, rawBrowse)
+	}
+	if _, err := os.Stat(legacyOV); err != nil {
+		t.Fatalf("existing overview file removed during upgrade: %v", err)
+	}
+	if _, err := os.Stat(legacyArt); err != nil {
+		t.Fatalf("existing artwork file removed during upgrade: %v", err)
+	}
+	upgradedSnap, err := rbstate.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upgradedSnap.Mode != rbstate.ModeOnDemand || !rbstate.BrowseIndexMatches(dir, upgradedSnap.Header) {
+		t.Fatalf("upgraded snapshot Mode=%q / mismatched browse index", upgradedSnap.Mode)
+	}
+
+	// Mismatched-tag RBB1 on a current ModeOnDemand snapshot repairs in-window on fast bypass.
+	if err := os.WriteFile(browsePath, []byte("RBB1 "+upgradedSnap.LibraryUUID+" stale-tag\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reRes, err := ConvertAtMount(context.Background(), mount, MountOptions{OnDemand: true})
+	if err != nil || !reRes.Bypassed {
+		t.Fatalf("ModeOnDemand mismatched-browse repair bypass = %+v, err=%v", reRes, err)
+	}
+	if !rbstate.BrowseIndexMatches(dir, upgradedSnap.Header) {
+		t.Fatalf("stale browse tag not repaired on OnDemand bypass")
+	}
+
+	// FillInBackground(OnDemand: true) must also hydrate legacy ModeFull/cleared-path snapshots once.
+	legacyStick := filepath.Join(base, "legacy-fill-stick")
+	testfixture.LargeExport(t, legacyStick, 2)
+	if _, err := ConvertAtMount(context.Background(), legacyStick, MountOptions{OnDemand: false, StartBackground: func() error { return nil }}); err != nil {
+		t.Fatal(err)
+	}
+	legacyDir := dbDir(legacyStick)
+	lsnap, err := rbstate.Load(legacyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lsnap.Mode = rbstate.ModeFull
+	lsnap.Pending = (rbstate.Header{}).Pending
+	for _, c := range lsnap.Tracks {
+		c.AnalysisPath, c.ArtworkPath, c.Duration, c.SampleRate = "", "", 0, 0
+	}
+	if err := lsnap.SaveNext(legacyDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := rbstate.Promote(legacyDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FillInBackground(context.Background(), legacyStick, FillOptions{OnDemand: true}); err != nil {
+		t.Fatalf("FillInBackground(OnDemand legacy hydrate): %v", err)
+	}
+	lsnapAfter, err := rbstate.Load(legacyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lsnapAfter.Mode != rbstate.ModeOnDemand || !rbstate.BrowseIndexMatches(legacyDir, lsnapAfter.Header) {
+		t.Fatalf("FillInBackground did not settle ModeOnDemand/browse tag: mode=%q", lsnapAfter.Mode)
+	}
+	fillBrowse, err := os.ReadFile(filepath.Join(legacyDir, rbstate.BrowseIndexName))
+	if err != nil || !strings.Contains(string(fillBrowse), "\nT\t") {
+		t.Fatalf("FillInBackground wrote unhydrated browse index: err=%v\n%s", err, fillBrowse)
 	}
 
 	// readFilledStage rejects standalone filled.jsonl entries with mismatched rule version or row hash.
 	var tr *rbstate.Track
-	for _, c := range snap.Tracks {
+	for _, c := range upgradedSnap.Tracks {
 		tr = c
 		break
 	}
 	tr.Row = "expected-row-hash"
-	sdir := filepath.Join(stageRoot, snap.LibraryUUID)
+	sdir := filepath.Join(stageRoot, upgradedSnap.LibraryUUID)
 	if err := os.MkdirAll(sdir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +391,172 @@ func TestOnDemandUnchangedUpgradeGeneratesMissingBrowseIndexAndWritebackChecksVe
 	if err := os.WriteFile(filepath.Join(sdir, "filled.jsonl"), append(append(badVer, '\n'), append(badRow, '\n')...), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := readFilledStage(snap); len(got) != 0 {
+	if got := readFilledStage(upgradedSnap); len(got) != 0 {
 		t.Fatalf("readFilledStage accepted stale rule version / row hash: %+v", got)
+	}
+}
+
+// RD-2 regression test (fails on f65d4fdf): when a mount window's remaining budget cannot finish a
+// large playlist rebuild (e.g. 509 lists on UNTITLED), ConvertAtMount leaves the existing library
+// usable, triggers StartBackground, FillInBackground(OnDemand: true) builds .rb-next.db + .swap +
+// .rb-bridge-browse.swap (Publish=true), and the remount window swaps and publishes all 509 lists.
+func TestOnDemandManyListsWindowDefersAndPublishesViaNext(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+	mount := filepath.Join(base, "untitled")
+	testfixture.LargeExport(t, mount, 4)
+
+	// Start with an already-imported earlier library (10 playlists -> now 509 playlists in export).
+	writePlaylists := func(count int) {
+		encodeStr := func(s string) []byte {
+			out := make([]byte, 4+len(s)*2)
+			out[0] = 0x90
+			binary.LittleEndian.PutUint16(out[1:], uint16(len(out)))
+			for i, r := range s {
+				binary.LittleEndian.PutUint16(out[4+2*i:], uint16(r))
+			}
+			return out
+		}
+		largeTrackPath := func(i int) string {
+			return fmt.Sprintf("Contents/Artist%03d/Album%03d/Track%05d.mp3", (i-1)/10, (i-1)/5, i)
+		}
+		const pageSize = 4096
+		types := []uint32{0, 7, 8}
+		rows := make([][][]byte, len(types))
+		for i := 1; i <= 4; i++ {
+			b := make([]byte, 136)
+			binary.LittleEndian.PutUint32(b[8:], 44100)
+			binary.LittleEndian.PutUint32(b[16:], uint32(len(testfixture.MP3WithLAMETag())))
+			binary.LittleEndian.PutUint32(b[48:], 128)
+			binary.LittleEndian.PutUint32(b[56:], 12000)
+			binary.LittleEndian.PutUint32(b[72:], uint32(i))
+			binary.LittleEndian.PutUint16(b[84:], 8)
+			for j := 0; j < 21; j++ {
+				s := ""
+				switch j {
+				case 14:
+					s = "/PIONEER/USBANLZ/P001/ANLZ0000.DAT"
+				case 17:
+					s = fmt.Sprintf("Track %05d", i)
+				case 20:
+					s = "/" + largeTrackPath(i)
+				}
+				binary.LittleEndian.PutUint16(b[94+2*j:], uint16(len(b)))
+				b = append(b, encodeStr(s)...)
+			}
+			rows[0] = append(rows[0], b)
+		}
+		for i := 1; i <= count; i++ {
+			pl := make([]byte, 20)
+			binary.LittleEndian.PutUint32(pl[8:], uint32(i))
+			binary.LittleEndian.PutUint32(pl[12:], uint32(i))
+			pl = append(pl, encodeStr(fmt.Sprintf("Set %03d", i))...)
+			rows[1] = append(rows[1], pl)
+
+			en := make([]byte, 12)
+			binary.LittleEndian.PutUint32(en[0:], 1)
+			binary.LittleEndian.PutUint32(en[4:], uint32((i-1)%4+1))
+			binary.LittleEndian.PutUint32(en[8:], uint32(i))
+			rows[2] = append(rows[2], en)
+		}
+		out := make([]byte, pageSize)
+		binary.LittleEndian.PutUint32(out[4:], pageSize)
+		binary.LittleEndian.PutUint32(out[8:], uint32(len(types)))
+		for ti, typ := range types {
+			first := len(out) / pageSize
+			left := rows[ti]
+			for len(left) > 0 {
+				num := len(out) / pageSize
+				p := make([]byte, pageSize)
+				binary.LittleEndian.PutUint32(p[4:], uint32(num))
+				binary.LittleEndian.PutUint32(p[8:], typ)
+				p[27] = 0x24
+				off, n := 40, 0
+				for n < len(left) && off+len(left[n])+((n+16)/16)*36 <= pageSize {
+					row := left[n]
+					copy(p[off:], row)
+					base := pageSize - (n/16)*36
+					binary.LittleEndian.PutUint16(p[base-6-2*(n%16):], uint16(off-40))
+					binary.LittleEndian.PutUint16(p[base-4:], binary.LittleEndian.Uint16(p[base-4:])|1<<uint(n%16))
+					off += len(row)
+					n++
+				}
+				if n == 0 {
+					t.Fatalf("row exceeds page")
+				}
+				binary.LittleEndian.PutUint16(p[24:], uint16(n))
+				binary.LittleEndian.PutUint16(p[30:], uint16(off-40))
+				left = left[n:]
+				if len(left) > 0 {
+					binary.LittleEndian.PutUint32(p[12:], uint32(num+1))
+				}
+				out = append(out, p...)
+			}
+			h := out[28+16*ti:]
+			binary.LittleEndian.PutUint32(h, typ)
+			binary.LittleEndian.PutUint32(h[8:], uint32(first))
+			binary.LittleEndian.PutUint32(h[12:], uint32(len(out)/pageSize-1))
+		}
+		binary.LittleEndian.PutUint32(out[12:], uint32(len(out)/pageSize))
+		testfixture.Write(t, mount, "PIONEER/rekordbox/export.pdb", out)
+	}
+	writePlaylists(10)
+	if _, err := ConvertAtMount(context.Background(), mount, MountOptions{OnDemand: false}); err != nil {
+		t.Fatalf("initial mount: %v", err)
+	}
+
+	// Re-export with 509 playlists (mirroring UNTITLED 185 -> 509 lists).
+	writePlaylists(509)
+
+	// Give the window spare + 2.5s (enough to stat & parse the 4-track export, NOT enough for 509 lists
+	// whose estimated cost with commit margin is ~4.8s). Must defer cleanly and trigger StartBackground.
+	bgStarted := 0
+	res, err := ConvertAtMount(context.Background(), mount, MountOptions{
+		OnDemand:        true,
+		Deadline:        time.Now().Add(spare + 2500*time.Millisecond),
+		StartBackground: func() error { bgStarted++; return nil },
+	})
+	if err != nil {
+		t.Fatalf("ConvertAtMount timed-out window failed: %v", err)
+	}
+	if !res.Background || bgStarted != 1 {
+		t.Fatalf("expected deferred OnDemand window to trigger StartBackground once, got res=%+v bgStarted=%d", res, bgStarted)
+	}
+	// Live m.db must remain usable with the old 10 playlists intact.
+	if n := query(t, mount, `SELECT count(*) FROM Playlist`)[0][0]; n != "10" {
+		t.Fatalf("live m.db Playlist count = %s, want 10 usable old lists", n)
+	}
+
+	// Background job builds .rb-next.db + .swap + .browse.swap and asks for remount (Publish=true).
+	fillRes, err := FillInBackground(context.Background(), mount, FillOptions{OnDemand: true})
+	if err != nil || !fillRes.Publish {
+		t.Fatalf("FillInBackground(OnDemand) = %+v, err=%v; want Publish=true", fillRes, err)
+	}
+	dir := dbDir(mount)
+	for _, f := range []string{nextDB, rbstate.SwapName, rbstate.BrowseSwapName} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			t.Fatalf("expected pending next artifact %s: %v", f, err)
+		}
+	}
+
+	// Remount window swaps and publishes all 509 playlists cleanly.
+	bgAfter := 0
+	pubRes, err := ConvertAtMount(context.Background(), mount, MountOptions{
+		OnDemand:        true,
+		Publish:         true,
+		Deadline:        time.Now().Add(hookWindow),
+		StartBackground: func() error { bgAfter++; return nil },
+	})
+	if err != nil {
+		t.Fatalf("publish ConvertAtMount: %v", err)
+	}
+	if !pubRes.Pending.None() || bgAfter != 0 {
+		t.Fatalf("published remount result = %+v, bgAfter=%d; want Pending.None() and no BG restart", pubRes, bgAfter)
+	}
+	if n := query(t, mount, `SELECT count(*) FROM Playlist`)[0][0]; n != "509" {
+		t.Fatalf("published Playlist count = %s, want 509", n)
+	}
+	if snap := snapshot(t, mount); snap.Mode != rbstate.ModeOnDemand || !rbstate.BrowseIndexMatches(dir, snap.Header) {
+		t.Fatalf("published snapshot mode=%q or browse index mismatch", snap.Mode)
 	}
 }

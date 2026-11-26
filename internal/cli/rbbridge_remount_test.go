@@ -20,7 +20,9 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 	"golang.org/x/sys/unix"
 )
 
@@ -133,6 +135,7 @@ func newFakeStick(t *testing.T) *fakeStick {
 						}
 					}
 				}
+				_ = os.MkdirAll(f.mount, 0o755)
 				f.mountedNow = true
 			}
 		}
@@ -598,6 +601,58 @@ func TestR4_Block1_RemountDefersAndAbortsOnFailedDeckRowPass(t *testing.T) {
 	})
 }
 
+func seedValidRemountPending(t *testing.T, dbDir string) {
+	t.Helper()
+	ctx := context.Background()
+	tmpLive := t.TempDir()
+	_, uuid, commit1, err := enginedb.BuildLibrary(ctx, tmpLive, "", []enginedb.TrackRow{
+		{Rel: "Contents/a.mp3", Track: rekordbox.Track{Title: "a"}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(tmpLive, "m.db"), filepath.Join(dbDir, "m.db")); err != nil {
+		t.Fatal(err)
+	}
+	liveSnap := rbstate.New(uuid)
+	liveSnap.Commit = commit1
+	if err := liveSnap.Save(dbDir); err != nil {
+		t.Fatal(err)
+	}
+
+	tmpNext := t.TempDir()
+	_, _, commit2, err := enginedb.BuildLibrary(ctx, tmpNext, uuid, []enginedb.TrackRow{
+		{Rel: "Contents/a.mp3", Track: rekordbox.Track{Title: "a"}},
+		{Rel: "Contents/b.mp3", Track: rekordbox.Track{Title: "b"}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextDBConn, err := sql.Open("sqlite", filepath.Join(tmpNext, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit2 = commit1 + 1
+	if _, err := nextDBConn.Exec(`UPDATE Information SET lastRekordBoxLibraryImportReadCounter=?`, commit2); err != nil {
+		_ = nextDBConn.Close()
+		t.Fatal(err)
+	}
+	_ = nextDBConn.Close()
+	if err := os.Rename(filepath.Join(tmpNext, "m.db"), filepath.Join(dbDir, ".rb-next.db")); err != nil {
+		t.Fatal(err)
+	}
+	swapSnap := rbstate.New(uuid)
+	swapSnap.Commit = commit2
+	swapSnap.Applied = 1700000100
+	swapSnap.Mode = rbstate.ModeOnDemand
+	if err := rbstate.SaveBrowseIndexAs(filepath.Join(dbDir, rbstate.BrowseSwapName), swapSnap); err != nil {
+		t.Fatal(err)
+	}
+	if err := swapSnap.SaveAs(filepath.Join(dbDir, rbstate.SwapName)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Real-deck regression (11:45 PM note): when the mount hook rejects or skips rb-bridge during
 // the synthetic remount (leaving .rb-next.db / .rb-bridge-snapshot.swap or pending snapshot
 // untouched), --remount must return an error and must NOT log "published by a remount".
@@ -610,11 +665,7 @@ func TestRemountErrorsWhenMountHookRejectsPublish(t *testing.T) {
 		if err := os.MkdirAll(dbDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		for _, name := range []string{"m.db", ".rb-next.db", rbstate.SwapName, rbstate.BrowseSwapName} {
-			if err := os.WriteFile(filepath.Join(dbDir, name), []byte("stub"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
+		seedValidRemountPending(t, dbDir)
 		oldTake := takeDeckRows
 		takeDeckRows = func(context.Context, string) (bool, error) { return false, nil }
 		t.Cleanup(func() { takeDeckRows = oldTake })
@@ -679,11 +730,7 @@ func TestRemountErrorsWhenMountHookRejectsPublish(t *testing.T) {
 		if err := os.MkdirAll(dbDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		for _, name := range []string{"m.db", ".rb-next.db", rbstate.SwapName, rbstate.BrowseSwapName} {
-			if err := os.WriteFile(filepath.Join(dbDir, name), []byte("stub"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
+		seedValidRemountPending(t, dbDir)
 		oldTake := takeDeckRows
 		takeDeckRows = func(context.Context, string) (bool, error) { return false, nil }
 		t.Cleanup(func() { takeDeckRows = oldTake })
@@ -700,4 +747,72 @@ func TestRemountErrorsWhenMountHookRejectsPublish(t *testing.T) {
 			t.Fatalf("expected publish log on success, got %q", buf.String())
 		}
 	})
+}
+
+func TestRemountCleansEmptyMountDirBeforeAdd(t *testing.T) {
+	f := newFakeStick(t)
+	f.engine("5", "", "")
+
+	// Observe f.mount state the moment "add" arrives (before fakeStick's udisks "add" recreates
+	// the mountpoint directory): cleanupEmptyMountDir must have deleted the leftover empty dir.
+	origMounted := mounted
+	addSawMissingDir := false
+	mounted = func(p string) bool {
+		if b, err := os.ReadFile(f.uevent); err == nil && string(b) == "add" {
+			_, statErr := os.Stat(f.mount)
+			addSawMissingDir = os.IsNotExist(statErr)
+		}
+		return origMounted(p)
+	}
+	t.Cleanup(func() { mounted = origMounted })
+
+	// When "remove" unmounts f.mount and leaves an empty directory behind, remount must remove
+	// that leftover empty directory before writing "add" to uevent so udisks reuses /media/<label>.
+	if err := remount(context.Background(), f.mount, newUSBLoadingReporter(filepath.Join(t.TempDir(), "status"), "usb")); err != nil {
+		t.Fatalf("remount failed: %v", err)
+	}
+	if !addSawMissingDir {
+		t.Fatalf("expected leftover empty mount dir %s to be removed before add arrived", f.mount)
+	}
+
+	// Safety guards: never remove a non-empty directory, a still-mounted directory, or a symlink.
+	nonEmpty := filepath.Join(t.TempDir(), "nonempty")
+	if err := os.MkdirAll(nonEmpty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nonEmpty, "keep.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cleanupEmptyMountDir(context.Background(), nonEmpty)
+	if _, err := os.Stat(nonEmpty); err != nil {
+		t.Fatalf("cleanupEmptyMountDir removed non-empty dir: %v", err)
+	}
+
+	mountedDir := filepath.Join(t.TempDir(), "mounted")
+	if err := os.MkdirAll(mountedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldMounted := mounted
+	mounted = func(m string) bool { return m == mountedDir }
+	t.Cleanup(func() { mounted = oldMounted })
+	cleanupEmptyMountDir(context.Background(), mountedDir)
+	if _, err := os.Stat(mountedDir); err != nil {
+		t.Fatalf("cleanupEmptyMountDir removed still-mounted dir: %v", err)
+	}
+
+	target := filepath.Join(t.TempDir(), "real_empty")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "sym")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	cleanupEmptyMountDir(context.Background(), link)
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("cleanupEmptyMountDir removed symlink: %v", err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("cleanupEmptyMountDir removed symlink target: %v", err)
+	}
 }

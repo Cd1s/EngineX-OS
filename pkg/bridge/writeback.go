@@ -60,18 +60,28 @@ type WriteBackOptions struct {
 	BeforeRename       func(dst string) error // tests: a pull after staging
 	Session            *CueSession
 	Settled            func() error // the watcher's: an error when m.db changed while it was read
+	DryRun             bool         // report would-be changes without locking or modifying the stick
+}
+
+// WriteBackTrackDiff describes why a track counts as a deck edit during write-back.
+type WriteBackTrackDiff struct {
+	EngineID int64    `json:"engineId"`
+	Key      string   `json:"key"`
+	Rel      string   `json:"rel"`
+	Fields   []string `json:"fields"`
 }
 
 // WriteBackResult summarizes one pass.
 type WriteBackResult struct {
-	TracksChecked     int              `json:"tracksChecked"`
-	TracksRead        int              `json:"tracksRead"`
-	TracksChanged     int              `json:"tracksChanged"`
-	FilesUpdated      int              `json:"filesUpdated"`
-	OneLibraryUpdated bool             `json:"oneLibraryUpdated"`
-	BackupDir         string           `json:"backupDir,omitempty"`
-	PhasesMS          map[string]int64 `json:"phasesMs,omitempty"`
-	BytesWritten      int64            `json:"bytesWritten,omitempty"`
+	TracksChecked     int                  `json:"tracksChecked"`
+	TracksRead        int                  `json:"tracksRead"`
+	TracksChanged     int                  `json:"tracksChanged"`
+	Changes           []WriteBackTrackDiff `json:"changes,omitempty"`
+	FilesUpdated      int                  `json:"filesUpdated"`
+	OneLibraryUpdated bool                 `json:"oneLibraryUpdated"`
+	BackupDir         string               `json:"backupDir,omitempty"`
+	PhasesMS          map[string]int64     `json:"phasesMs,omitempty"`
+	BytesWritten      int64                `json:"bytesWritten,omitempty"`
 }
 
 var phaseNames = []string{"candidates", "key", "decrypt", "edit", "encrypt", "write", "total"}
@@ -231,7 +241,9 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 		return res, err
 	}
 	kind, outcome := "manual", "done"
-	if opts.OnEject {
+	if opts.DryRun {
+		kind = "dry-run"
+	} else if opts.OnEject {
 		kind = "eject"
 	} else if opts.Settled != nil {
 		kind = "watcher"
@@ -243,6 +255,13 @@ func WriteBackCues(ctx context.Context, mountPath string, opts WriteBackOptions)
 	log.Printf("rb-bridge: cue write-back of %s %s: %d tracks, %d read, %d changed; ms: candidates %d, key %d, decrypt %d, edit %d, encrypt %d, write %d, total %d; %d files, %d bytes written; pass: %s",
 		mountPath, outcome, res.TracksChecked, res.TracksRead, res.TracksChanged,
 		ms["candidates"], ms["key"], ms["decrypt"], ms["edit"], ms["encrypt"], ms["write"], ms["total"], res.FilesUpdated, res.BytesWritten, kind)
+	for i, ch := range res.Changes {
+		if i >= 20 {
+			log.Printf("rb-bridge: cue write-back %s: ... (%d more changed tracks)", mountPath, len(res.Changes)-20)
+			break
+		}
+		log.Printf("rb-bridge: cue write-back %s changed track %d (%s): %s", mountPath, ch.EngineID, ch.Rel, strings.Join(ch.Fields, ", "))
+	}
 	return res, err
 }
 
@@ -282,6 +301,7 @@ type trackChange struct {
 	analysis  string // set when cuesDiff
 	cuesDiff  bool
 	metadata  map[rbstate.LibraryKind]bool
+	diff      WriteBackTrackDiff
 }
 
 // run is the pass; a non-empty skip is why the gate refused it.
@@ -292,8 +312,10 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 	if st, err := os.Stat(p.mount); err != nil || !st.IsDir() {
 		return "", fmt.Errorf("writeback: mount path unavailable: %s", mountPath)
 	}
-	if fs := (syscall.Statfs_t{}); syscall.Statfs(p.mount, &fs) != nil || fs.Flags&0x1 != 0 { // ST_RDONLY
-		return "", fmt.Errorf("writeback: stick is read-only: %s", p.mount)
+	if !p.opts.DryRun {
+		if fs := (syscall.Statfs_t{}); syscall.Statfs(p.mount, &fs) != nil || fs.Flags&0x1 != 0 { // ST_RDONLY
+			return "", fmt.Errorf("writeback: stick is read-only: %s", p.mount)
+		}
 	}
 	if !p.opts.SkipPreparingCheck && !p.opts.OnEject {
 		if _, err := os.Stat(getUSBPreparingFlagPath()); err == nil {
@@ -315,11 +337,13 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 		return "snapshot is unavailable", nil
 	}
 
-	unlock, err := rbstate.LockVolume(p.mount, 0)
-	if err != nil {
-		return "", fmt.Errorf("%w: %w", errVolumeBusy, err)
+	if !p.opts.DryRun {
+		unlock, err := rbstate.LockVolume(p.mount, 0)
+		if err != nil {
+			return "", fmt.Errorf("%w: %w", errVolumeBusy, err)
+		}
+		defer unlock()
 	}
-	defer unlock()
 	if p.keys = p.opts.Session.keys; p.keys == nil {
 		p.keys = newKeyCache()
 		defer p.keys.Clear()
@@ -346,6 +370,7 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
+	_, _ = db.ExecContext(ctx, "PRAGMA cache_size=-16384")
 
 	started := time.Now()
 	cs, err := readCandidates(ctx, db, snap, p.opts.Session)
@@ -359,7 +384,9 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 		if settle() != nil {
 			return "", errNotQuiet
 		}
-		p.opts.Session.add(cs.insync)
+		if !p.opts.DryRun {
+			p.opts.Session.add(cs.insync)
+		}
 		return "", nil
 	}
 
@@ -380,6 +407,16 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 			cs.insync[row.key] = row.now
 		}
 	}
+	if len(changes) > 0 {
+		p.res.TracksChanged = len(changes)
+		p.res.Changes = make([]WriteBackTrackDiff, 0, len(changes))
+		for _, ch := range changes {
+			p.res.Changes = append(p.res.Changes, ch.diff)
+		}
+	}
+	if p.opts.DryRun {
+		return "", nil
+	}
 	if len(changes) == 0 {
 		return "", NoteWriteBack(p.mount, nil, p.opts.Session.take(cs.insync), nil)
 	}
@@ -392,7 +429,6 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 	}
 	writeBackCut("state")
 	_ = rbstate.RemoveFile(filepath.Join(dbDir, writeBackMarkName))
-	p.res.TracksChanged = len(changes)
 	return "", nil
 }
 
@@ -527,7 +563,32 @@ func needsCueRead(row dbCandidate) bool {
 		}
 		return true
 	}
-	return len(row.track.Written) == 0 || (!bytes.Equal(row.writtenDigest, row.track.Written) && !bytes.Equal(row.rawWrittenDigest, row.track.Written)) || row.track.Synced != nil
+	if len(row.track.Written) == 0 {
+		return true
+	}
+	if bytes.Equal(row.writtenDigest, row.track.Written) || bytes.Equal(row.rawWrittenDigest, row.track.Written) {
+		return row.track.Synced != nil
+	}
+	if row.track.Synced == nil && enginedb.UnadjustedLegacyMatches(row.beatData, row.quickCues, row.loops, nil, row.track.Written) {
+		return false
+	}
+	return true
+}
+
+func appendCandidateRow(c dbCandidate, filled map[string]filledStageRow, out *candidateSet) {
+	out.read++
+	c.now.digest = enginedb.SyncedDigest(nil, c.quickCues, c.loops, c.activeLoops, c.metadata.Genre, c.metadata.Comment, c.metadata.Label)
+	if c.track.Synced != nil && bytes.Equal(c.track.Synced, c.now.digest) {
+		out.insync[c.key] = c.now
+		return
+	}
+	c.writtenDigest = enginedb.WrittenDigest(c.beatData, c.quickCues, c.loops)
+	c.rawWrittenDigest = enginedb.RawWrittenDigest(c.beatData, c.quickCues, c.loops)
+	if f, ok := filled[c.key]; ok && f.id == c.engineID && len(c.track.Written) == 0 {
+		c.filledWritten, c.filledWrittenNoMain = f.written, f.writtenNoMain
+		c.filledBeats, c.filledCues, c.filledLoops = f.beats, f.cues, f.loops
+	}
+	out.rows = append(out.rows, c)
 }
 
 // readCandidates finds the rows a pass has to compare with the export. A row whose lastEditTime
@@ -562,28 +623,54 @@ func readCandidates(ctx context.Context, db *sql.DB, snap *rbstate.Snapshot, ses
 	if err = rows.Close(); err != nil {
 		return out, err
 	}
-	for _, c := range reads {
-		err = db.QueryRowContext(ctx, `SELECT COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,''), p.beatData, p.trackData, p.quickCues, p.loops, COALESCE(p.activeOnLoadLoops,0)
-			FROM Track t LEFT JOIN PerformanceData p ON p.trackId=t.id WHERE t.id=?`, c.engineID).Scan(&c.metadata.Genre, &c.metadata.Comment, &c.metadata.Label, &c.beatData, &c.trackData, &c.quickCues, &c.loops, &c.activeLoops)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
+	if len(reads) > 64 {
+		// On legacy take-overs or large dirty batches, one sequential join replaces N point lookups.
+		byID := make(map[int64]dbCandidate, len(reads))
+		for _, c := range reads {
+			byID[c.engineID] = c
 		}
+		qrows, err := db.QueryContext(ctx, `SELECT t.id, COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,''), p.beatData, p.trackData, p.quickCues, p.loops, COALESCE(p.activeOnLoadLoops,0)
+			FROM Track t LEFT JOIN PerformanceData p ON p.trackId=t.id ORDER BY t.id`)
 		if err != nil {
 			return out, err
 		}
-		out.read++
-		c.now.digest = enginedb.SyncedDigest(nil, c.quickCues, c.loops, c.activeLoops, c.metadata.Genre, c.metadata.Comment, c.metadata.Label)
-		if c.track.Synced != nil && bytes.Equal(c.track.Synced, c.now.digest) {
-			out.insync[c.key] = c.now
-			continue
+		scanned := 0
+		for qrows.Next() {
+			if scanned&255 == 0 {
+				if err := ctx.Err(); err != nil {
+					qrows.Close()
+					return out, err
+				}
+			}
+			scanned++
+			var id int64
+			var c dbCandidate
+			if err = qrows.Scan(&id, &c.metadata.Genre, &c.metadata.Comment, &c.metadata.Label, &c.beatData, &c.trackData, &c.quickCues, &c.loops, &c.activeLoops); err != nil {
+				qrows.Close()
+				return out, err
+			}
+			base, ok := byID[id]
+			if !ok {
+				continue
+			}
+			c.engineID, c.key, c.track, c.now = base.engineID, base.key, base.track, base.now
+			appendCandidateRow(c, filled, &out)
 		}
-		c.writtenDigest = enginedb.WrittenDigest(c.beatData, c.quickCues, c.loops)
-		c.rawWrittenDigest = enginedb.RawWrittenDigest(c.beatData, c.quickCues, c.loops)
-		if f, ok := filled[c.key]; ok && f.id == c.engineID && len(c.track.Written) == 0 {
-			c.filledWritten, c.filledWrittenNoMain = f.written, f.writtenNoMain
-			c.filledBeats, c.filledCues, c.filledLoops = f.beats, f.cues, f.loops
+		if err = qrows.Close(); err != nil {
+			return out, err
 		}
-		out.rows = append(out.rows, c)
+	} else {
+		for _, c := range reads {
+			err = db.QueryRowContext(ctx, `SELECT COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,''), p.beatData, p.trackData, p.quickCues, p.loops, COALESCE(p.activeOnLoadLoops,0)
+				FROM Track t LEFT JOIN PerformanceData p ON p.trackId=t.id WHERE t.id=?`, c.engineID).Scan(&c.metadata.Genre, &c.metadata.Comment, &c.metadata.Label, &c.beatData, &c.trackData, &c.quickCues, &c.loops, &c.activeLoops)
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return out, err
+			}
+			appendCandidateRow(c, filled, &out)
+		}
 	}
 	sort.Slice(out.rows, func(i, j int) bool { return out.rows[i].key < out.rows[j].key })
 	return out, nil
@@ -633,9 +720,11 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 		if err := ctx.Err(); err != nil {
 			return nil, matched, err
 		}
+		takeOver := row.track.Synced == nil
 		change := trackChange{candidate: row, refs: map[rbstate.LibraryKind]rekordbox.Track{}, metadata: map[rbstate.LibraryKind]bool{}}
 		var primary rekordbox.Track
 		metaDiff := false
+		matchedAnyMeta := false
 		for _, ref := range row.track.Refs {
 			src, ok := libs[ref.Kind]
 			if !ok || src.Lib == nil {
@@ -650,6 +739,9 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 					primary = tr
 				}
 				diff := row.metadata != (rekordbox.Metadata{Genre: tr.Genre, Comment: tr.Comment, Label: tr.Label})
+				if !diff {
+					matchedAnyMeta = true
+				}
 				change.metadata[ref.Kind], metaDiff = diff, metaDiff || diff
 				break
 			}
@@ -657,11 +749,19 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 		if len(change.refs) == 0 {
 			continue
 		}
+		if takeOver && matchedAnyMeta {
+			for k := range change.metadata {
+				change.metadata[k] = false
+			}
+			metaDiff = false
+		}
 		matched[row.key] = true
 		// needsCue: a row that still holds the import's written digest needs no ANLZ read. A
 		// missing baseline, another written digest, or a row noted before and changed now is
 		// compared with the ANLZ, so a deleted cue or a loop no longer active on load is written
 		// (port3 regressions) although the import's baseline is unchanged.
+		var orig []rekordbox.Cue
+		anlzDiff, oneDiff := false, false
 		needsCue := needsCueRead(row)
 		if needsCue && primary.AnalysisPath != "" {
 			deck, err := enginedb.ParseDeckCuesAndLoops(row.trackData, row.quickCues, row.loops, row.activeLoops)
@@ -670,21 +770,97 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 				offset, ok = trackRekordboxOffset(resolver, primary.Path)
 			}
 			if ok {
-				orig := readANLZCues(resolver, primary.AnalysisPath)
-				legacyMP3 := len(row.track.Written) == 0 && strings.HasSuffix(strings.ToLower(primary.Path), ".mp3")
-				change.cues = mergeEngineCues(orig, deck, offset, legacyMP3)
-				change.cuesDiff = !cuesEquivalent(orig, change.cues)
-				if one, ok := change.refs[rbstate.OneLibrary]; ok && !cuesEquivalent(one.Cues, change.cues) {
-					change.cuesDiff = true
+				orig = readANLZCues(resolver, primary.AnalysisPath)
+				if len(orig) == 0 {
+					if one, hasOne := change.refs[rbstate.OneLibrary]; hasOne && len(one.Cues) > 0 {
+						orig = one.Cues
+					}
 				}
-				change.analysis = primary.AnalysisPath
+				cuesMatchedLegacy := false
+				if takeOver && len(row.track.Written) > 0 {
+					cands := make([]float64, 0, len(orig)*2+1)
+					cands = append(cands, 0)
+					for _, c := range orig {
+						if c.Loop || c.HotCue != 0 {
+							continue
+						}
+						if pos := math.Round(float64(c.TimeMS)*deck.SampleRate/1000.0 - offset); pos >= 0 {
+							cands = append(cands, pos)
+						}
+						if pos := math.Round(float64(c.TimeMS) * deck.SampleRate / 1000.0); pos >= 0 {
+							cands = append(cands, pos)
+						}
+					}
+					cuesMatchedLegacy = enginedb.UnadjustedLegacyMatches(row.beatData, row.quickCues, row.loops, nil, row.track.Written, cands...)
+				}
+				if !cuesMatchedLegacy {
+					legacyMP3 := len(row.track.Written) == 0 && strings.HasSuffix(strings.ToLower(primary.Path), ".mp3")
+					merged := mergeEngineCues(orig, deck, offset, legacyMP3)
+					anlzDiff = !cuesEquivalent(orig, merged)
+					if takeOver && anlzDiff && cuesEquivalent(orig, mergeEngineCues(orig, deck, 0, true)) {
+						anlzDiff = false
+					}
+					if one, hasOne := change.refs[rbstate.OneLibrary]; hasOne && !cuesEquivalent(one.Cues, merged) {
+						if !takeOver || anlzDiff || len(orig) == 0 {
+							oneDiff = true
+						}
+					}
+					if anlzDiff || oneDiff {
+						change.cues = merged
+						change.cuesDiff = true
+						change.analysis = primary.AnalysisPath
+					}
+				}
 			}
 		}
 		if change.cuesDiff || metaDiff {
+			change.diff = describeTrackDiff(row, change, primary, orig, anlzDiff, oneDiff)
 			changes = append(changes, change)
 		}
 	}
 	return changes, matched, nil
+}
+
+func describeTrackDiff(row dbCandidate, change trackChange, primary rekordbox.Track, orig []rekordbox.Cue, anlzDiff, oneDiff bool) WriteBackTrackDiff {
+	rel := row.track.Rel
+	if rel == "" {
+		rel = primary.Path
+	}
+	var fields []string
+	var genreDone, commentDone, labelDone bool
+	for _, kind := range []rbstate.LibraryKind{rbstate.DeviceLibrary, rbstate.OneLibrary} {
+		if !change.metadata[kind] {
+			continue
+		}
+		tr, ok := change.refs[kind]
+		if !ok {
+			continue
+		}
+		if !genreDone && row.metadata.Genre != tr.Genre {
+			fields = append(fields, fmt.Sprintf("genre(db=%q lib=%q)", row.metadata.Genre, tr.Genre))
+			genreDone = true
+		}
+		if !commentDone && row.metadata.Comment != tr.Comment {
+			fields = append(fields, fmt.Sprintf("comment(db=%q lib=%q)", row.metadata.Comment, tr.Comment))
+			commentDone = true
+		}
+		if !labelDone && row.metadata.Label != tr.Label {
+			fields = append(fields, fmt.Sprintf("label(db=%q lib=%q)", row.metadata.Label, tr.Label))
+			labelDone = true
+		}
+	}
+	if anlzDiff {
+		fields = append(fields, fmt.Sprintf("cues:anlz(orig=%d merged=%d)", len(orig), len(change.cues)))
+	} else if oneDiff {
+		one := change.refs[rbstate.OneLibrary]
+		fields = append(fields, fmt.Sprintf("cues:onelibrary(orig=%d merged=%d)", len(one.Cues), len(change.cues)))
+	}
+	return WriteBackTrackDiff{
+		EngineID: row.engineID,
+		Key:      row.key,
+		Rel:      rel,
+		Fields:   fields,
+	}
 }
 
 // trackRekordboxOffset is the offset rekordbox's cue times have against Engine's samples; false

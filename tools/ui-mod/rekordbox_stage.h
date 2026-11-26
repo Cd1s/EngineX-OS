@@ -921,7 +921,7 @@ static int sc_rbs_ondemand_available(void) {
 }
 
 // Returns 0 if safe for blocking on-demand I/O, -1 on RT audio threads, -2 on Qt GUI threads,
-// -3 on Qt/Engine browse/cache/save worker threads (which must stay non-blocking).
+// -3 on Qt/Engine browse/cache/save/analyzer/import worker threads (which must stay non-blocking).
 static int sc_rbs_thread_safe_for_ondemand(void) {
     int pol = sc_rbs_sched_override ? sc_rbs_sched_override() : sched_getscheduler(0);
     if (pol == SCHED_FIFO || pol == SCHED_RR) return -1;
@@ -929,9 +929,14 @@ static int sc_rbs_thread_safe_for_ondemand(void) {
     char comm[16];
     memset(comm, 0, sizeof comm);
     if (!prctl(PR_GET_NAME, (unsigned long)comm, 0, 0, 0)) {
-        if (!strcmp(comm, "SceneGraph") || !strcmp(comm, "EMain") || !strcmp(comm, "EPlanckApp")) return -2;
+        if (!strcmp(comm, "SceneGraph") || !strcmp(comm, "EMain") ||
+            !strcmp(comm, "EPlanckApp") || !strcmp(comm, "QSGRenderThread"))
+            return -2;
         if (!strcmp(comm, "Thread (pooled)") || !strcmp(comm, "FileCachingThre") ||
-            !strcmp(comm, "QQuickPixmapRea") || !strcmp(comm, "J:Savingtrackda"))
+            !strcmp(comm, "QQuickPixmapRea") || !strcmp(comm, "J:Savingtrackda") ||
+            !strcmp(comm, "Analysis Queue") || !strcmp(comm, "OfflineAnalyzer") ||
+            !strcmp(comm, "J:I:Collecting") || !strcmp(comm, "J:I:Takingfreez") ||
+            !strcmp(comm, "J:Importingtrac") || !strcmp(comm, "J:N:Searching o"))
             return -3;
     }
 #endif
@@ -1250,6 +1255,7 @@ static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const st
 
     size_t sent = 0;
     while (sent < req_len) {
+        if (sc_rbs_mono_ns() >= deadline_ns) break;
         ssize_t w = send(fd, req + sent, req_len - sent, MSG_NOSIGNAL);
         if (w > 0) {
             sent += (size_t)w;
@@ -1275,8 +1281,14 @@ static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const st
         close(fd);
         return -1;
     }
-    const size_t max_total = 16384 + (size_t)SC_RBS_ONDEMAND_MAX_BODY;
+    const size_t max_hdr = 16384;
+    const size_t max_total = max_hdr + (size_t)SC_RBS_ONDEMAND_MAX_BODY;
     for (;;) {
+        if (sc_rbs_mono_ns() >= deadline_ns) {
+            free(buf);
+            close(fd);
+            return -1;
+        }
         if (have == cap) {
             if (cap >= max_total) {
                 free(buf);
@@ -1302,6 +1314,11 @@ static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const st
                 for (size_t i = scan_from; i + 4 <= have; i++) {
                     if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n') {
                         hdr_end = i + 4;
+                        if (hdr_end > max_hdr) {
+                            free(buf);
+                            close(fd);
+                            return -1;
+                        }
                         // Peek Content-Length cleanly with strict validation against 32-bit size_t truncation.
                         const char *p = (const char *)buf, *end = (const char *)buf + i;
                         while (p < end) {
@@ -1336,7 +1353,7 @@ static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const st
                     }
                 }
             }
-            if (!hdr_end && have >= 16384) {
+            if ((!hdr_end && have >= max_hdr) || hdr_end > max_hdr) {
                 free(buf);
                 close(fd);
                 return -1;
@@ -1360,7 +1377,7 @@ static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const st
     }
     close(fd);
 
-    if (!hdr_end || hdr_end < 12) {
+    if (!hdr_end || hdr_end < 12 || hdr_end > max_hdr) {
         free(buf);
         return -1;
     }
@@ -1465,10 +1482,10 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
     static __thread char result[96];
     const char *why = NULL;
     struct timespec t0, t1;
-    // RT audio-thread guard FIRST before any stat/access/malloc/mutex or SQLite calls.
-    int pol = sc_rbs_sched_override ? sc_rbs_sched_override() : sched_getscheduler(0);
-    if (pol == SCHED_FIFO || pol == SCHED_RR) {
-        return sc_rbx_verbose ? "skipped (rt thread)" : NULL;
+    // Thread guard FIRST before any stat/access/malloc/mutex or SQLite calls.
+    const char *thread_skip = sc_rbs_ondemand_skip_reason(sc_rbs_thread_safe_for_ondemand());
+    if (thread_skip) {
+        return sc_rbx_verbose ? thread_skip : NULL;
     }
     clock_gettime(CLOCK_MONOTONIC, &t0);
     struct stat st;
@@ -1535,33 +1552,14 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
         use_ondemand = 1;
     }
 
-    uint64_t od_hash = 0;
-    long long od_deadline = 0;
+    uint64_t pre_od_hash = 0;
     if (use_ondemand) {
-        const char *skip_why = sc_rbs_ondemand_skip_reason(sc_rbs_thread_safe_for_ondemand());
-        if (skip_why) {
-            why = skip_why;
-            goto done;
-        }
-        od_hash = sc_rbs_ondemand_key_hash(uuid, path ? raw_path : NULL, track);
+        pre_od_hash = sc_rbs_ondemand_key_hash(uuid, path ? raw_path : NULL, track);
         pthread_mutex_lock(&sc_rbs_mu);
-        const int neg_hit = sc_rbs_neg_hit_locked(od_hash, sc_rbs_mono_ns());
-        const int timeout_ms = sc_rbs_ondemand_timeout_ms > 0 ? sc_rbs_ondemand_timeout_ms : SC_RBS_ONDEMAND_TIMEOUT_DEFAULT_MS;
+        const int neg_hit = sc_rbs_neg_hit_locked(pre_od_hash, sc_rbs_mono_ns());
         pthread_mutex_unlock(&sc_rbs_mu);
         if (neg_hit) {
             why = "skipped (ondemand cached miss)";
-            goto done;
-        }
-        od_deadline = sc_rbs_mono_ns() + (long long)timeout_ms * 1000000LL;
-        long long peer_track = 0;
-        inflight_slot = sc_rbs_inflight_enter(od_hash, od_deadline, &peer_track);
-        if (inflight_slot == -1) {
-            if (out_track && peer_track > 0) *out_track = peer_track;
-            why = "skipped (row has analysis)";
-            goto done;
-        }
-        if (inflight_slot == -2) {
-            why = "skipped (ondemand busy)";
             goto done;
         }
     }
@@ -1629,55 +1627,54 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
                 why = "skipped (not staged)";
                 goto done;
             }
-            // PerformanceData load fallback: stage missed, try direct on-demand fetch.
-            const char *skip_why = sc_rbs_ondemand_skip_reason(sc_rbs_thread_safe_for_ondemand());
-            if (skip_why) {
-                why = skip_why;
-                goto done;
-            }
             use_ondemand = 1;
-            od_hash = sc_rbs_ondemand_key_hash(uuid, r->path[0] ? r->path : NULL, track);
-            pthread_mutex_lock(&sc_rbs_mu);
-            const int neg_hit = sc_rbs_neg_hit_locked(od_hash, sc_rbs_mono_ns());
-            const int timeout_ms = sc_rbs_ondemand_timeout_ms > 0 ? sc_rbs_ondemand_timeout_ms : SC_RBS_ONDEMAND_TIMEOUT_DEFAULT_MS;
-            pthread_mutex_unlock(&sc_rbs_mu);
-            if (neg_hit) {
-                why = "skipped (ondemand cached miss)";
-                goto done;
-            }
-            od_deadline = sc_rbs_mono_ns() + (long long)timeout_ms * 1000000LL;
-            long long peer_track = 0;
-            inflight_slot = sc_rbs_inflight_enter(od_hash, od_deadline, &peer_track);
-            if (inflight_slot == -1) {
-                if (out_track && peer_track > 0) *out_track = peer_track;
-                why = "skipped (row has analysis)";
-                goto done;
-            }
-            if (inflight_slot == -2) {
-                why = "skipped (ondemand busy)";
-                goto done;
-            }
         }
     }
 
     size_t size = 0;
     unsigned char *b = NULL;
     if (use_ondemand) {
+        // Unify in-flight coalescing on the canonical track ID resolved by sc_rbs_exec_read so
+        // concurrent sc_rbs_fill_path and sc_rbs_fill_perf callers for the same track collapse
+        // to one stream-sync request.
+        const uint64_t od_hash = sc_rbs_ondemand_key_hash(uuid, NULL, track);
+        pthread_mutex_lock(&sc_rbs_mu);
+        const int neg_hit = sc_rbs_neg_hit_locked(od_hash, sc_rbs_mono_ns());
+        const int timeout_ms = sc_rbs_ondemand_timeout_ms > 0 ? sc_rbs_ondemand_timeout_ms : SC_RBS_ONDEMAND_TIMEOUT_DEFAULT_MS;
+        pthread_mutex_unlock(&sc_rbs_mu);
+        if (neg_hit) {
+            why = "skipped (ondemand cached miss)";
+            goto done;
+        }
+        const long long od_deadline = sc_rbs_mono_ns() + (long long)timeout_ms * 1000000LL;
+        long long peer_track = 0;
+        inflight_slot = sc_rbs_inflight_enter(od_hash, od_deadline, &peer_track);
+        if (inflight_slot == -1) {
+            if (out_track && peer_track > 0) *out_track = peer_track;
+            why = "skipped (row has analysis)";
+            goto done;
+        }
+        if (inflight_slot == -2) {
+            why = "skipped (ondemand busy)";
+            goto done;
+        }
         int http_status = 0;
         if (sc_rbs_ondemand_fetch(main, uuid, r, od_deadline, l, &b, &size, &http_status)) {
             if (http_status == 409) {
                 sc_rbs_conn_stale(db, main);
                 why = "skipped (the snapshot names another library)";
-            } else if (http_status == 404 || http_status == 422) {
-                pthread_mutex_lock(&sc_rbs_mu);
-                sc_rbs_neg_put_locked(od_hash, SC_RBS_NEG_TTL_PERM_NS);
-                pthread_mutex_unlock(&sc_rbs_mu);
-                why = "skipped (ondemand degraded/missing)";
             } else {
+                const long long ttl = (http_status == 404 || http_status == 422)
+                                          ? SC_RBS_NEG_TTL_PERM_NS
+                                          : SC_RBS_NEG_TTL_TEMP_NS;
                 pthread_mutex_lock(&sc_rbs_mu);
-                sc_rbs_neg_put_locked(od_hash, SC_RBS_NEG_TTL_TEMP_NS);
+                sc_rbs_neg_put_locked(od_hash, ttl);
+                if (pre_od_hash && pre_od_hash != od_hash)
+                    sc_rbs_neg_put_locked(pre_od_hash, ttl);
                 pthread_mutex_unlock(&sc_rbs_mu);
-                why = "ondemand fetch failed";
+                why = (http_status == 404 || http_status == 422)
+                          ? "skipped (ondemand degraded/missing)"
+                          : "ondemand fetch failed";
             }
             goto done;
         }

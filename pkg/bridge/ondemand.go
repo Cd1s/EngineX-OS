@@ -1,22 +1,38 @@
 package bridge
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
+	"golang.org/x/sys/unix"
+)
+
+const (
+	onDemandMaxSnapshotBytes  = 32 << 20
+	onDemandMaxANLZBytes      = 16 << 20
+	onDemandMaxExportDBBytes  = 64 << 20
+	onDemandMaxRBXA1Bytes     = 4 << 20
+	onDemandGlobalConcurrency = 4
+	onDemandVolumeConcurrency = 2
+	onDemandBuildTimeout      = 3 * time.Second
 )
 
 var (
@@ -26,7 +42,13 @@ var (
 	ErrOnDemandUUIDMismatch = errors.New("bridge: on-demand snapshot uuid mismatch")
 	// ErrOnDemandDegraded indicates the track's audio or ANLZ files are missing, corrupt, or incomplete.
 	ErrOnDemandDegraded = errors.New("bridge: on-demand track degraded or incomplete")
+	// ErrOnDemandUnavailable indicates the volume was ejected, replaced, or unmounted mid-flight.
+	ErrOnDemandUnavailable = errors.New("bridge: on-demand volume unavailable")
+	// ErrOnDemandLimit indicates a stick snapshot, ANLZ, or payload exceeded the deck budget.
+	ErrOnDemandLimit = errors.New("bridge: on-demand budget limit exceeded")
 )
+
+var onDemandBuildHook func(ctx context.Context, stage, mount string) error
 
 // engineKeyToCamelot is the inverse of enginedb.EngineKey (0..23 -> Camelot).
 var engineKeyToCamelot = [24]string{
@@ -71,6 +93,12 @@ type OnDemandResult struct {
 	Timing        OnDemandTiming // per-stage latency breakdown
 }
 
+type pinnedMountKey struct {
+	mount string
+	dev   uint64
+	mntID uint64
+}
+
 type cachedOnDemandSnapshot struct {
 	size  int64
 	mtime time.Time
@@ -78,34 +106,60 @@ type cachedOnDemandSnapshot struct {
 	res   *compat.Resolver
 }
 
-type cachedOnDemandExport struct {
-	sigs   []rbstate.FileSig
-	tracks map[string]rekordbox.Track // folded key -> merged export track
+type onDemandCall struct {
+	waiters int
+	done    chan struct{}
+	cancel  context.CancelFunc
+	res     *OnDemandResult
+	err     error
 }
 
-type onDemandCall struct {
-	done chan struct{}
-	res  *OnDemandResult
-	err  error
+type metaCall[V any] struct {
+	waiters int
+	done    chan struct{}
+	cancel  context.CancelFunc
+	val     V
+	err     error
+}
+
+// OnDemandBuilderConfig configures mount confinement and mountpoint enforcement for OnDemandBuilder.
+type OnDemandBuilderConfig struct {
+	MediaRoot         string
+	RequireMountpoint bool
 }
 
 // OnDemandBuilder reads a single track's rekordbox ANLZ files and audio header directly from the
 // stick and translates them in memory into Engine's RBXA1 format with zero staging writes.
 type OnDemandBuilder struct {
-	snapMu   sync.Mutex
-	snaps    map[string]*cachedOnDemandSnapshot
-	exportMu sync.Mutex
-	exports  map[string]*cachedOnDemandExport
-	flightMu sync.Mutex
-	inflight map[string]*onDemandCall
+	cfg        OnDemandBuilderConfig
+	globalSem  chan struct{}
+	volSemMu   sync.Mutex
+	volSems    map[string]chan struct{}
+	snapMu     sync.Mutex
+	snaps      map[pinnedMountKey]*cachedOnDemandSnapshot
+	flightMu   sync.Mutex
+	inflight   map[string]*onDemandCall
+	metaMu     sync.Mutex
+	snapFlight map[pinnedMountKey]*metaCall[*cachedOnDemandSnapshot]
 }
 
-// NewOnDemandBuilder returns an OnDemandBuilder with bounded per-volume snapshot and fallback caches.
+// NewOnDemandBuilder returns an OnDemandBuilder with bounded per-volume snapshot and flight caches.
 func NewOnDemandBuilder() *OnDemandBuilder {
+	return NewOnDemandBuilderWithConfig(OnDemandBuilderConfig{})
+}
+
+// NewOnDemandBuilderWithConfig returns an OnDemandBuilder enforcing cfg confinement and limits.
+func NewOnDemandBuilderWithConfig(cfg OnDemandBuilderConfig) *OnDemandBuilder {
+	if cfg.MediaRoot != "" {
+		cfg.MediaRoot = filepath.Clean(strings.TrimSpace(cfg.MediaRoot))
+	}
 	return &OnDemandBuilder{
-		snaps:    map[string]*cachedOnDemandSnapshot{},
-		exports:  map[string]*cachedOnDemandExport{},
-		inflight: map[string]*onDemandCall{},
+		cfg:        cfg,
+		globalSem:  make(chan struct{}, onDemandGlobalConcurrency),
+		volSems:    map[string]chan struct{}{},
+		snaps:      map[pinnedMountKey]*cachedOnDemandSnapshot{},
+		inflight:   map[string]*onDemandCall{},
+		snapFlight: map[pinnedMountKey]*metaCall[*cachedOnDemandSnapshot]{},
 	}
 }
 
@@ -140,8 +194,229 @@ func cleanEnginePath(p string) (string, error) {
 	return compat.CleanRelative(p)
 }
 
+func isVolumeEjecting(mount string) bool {
+	_, err := os.Lstat(prolink.EjectingMark(mount))
+	return err == nil
+}
+
+func fdMntID(fd int) (uint64, bool) {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/self/fdinfo/%d", fd))
+	if err != nil {
+		return 0, false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(line, "mnt_id:"); ok {
+			id, perr := strconv.ParseUint(strings.TrimSpace(v), 10, 64)
+			if perr == nil {
+				return id, true
+			}
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+func statFDIdentity(fd int) (uint64, uint64, error) {
+	var stx unix.Statx_t
+	if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH|unix.AT_SYMLINK_NOFOLLOW, unix.STATX_BASIC_STATS|unix.STATX_MNT_ID, &stx); err != nil {
+		return 0, 0, err
+	}
+	dev := unix.Mkdev(stx.Dev_major, stx.Dev_minor)
+	if stx.Mask&unix.STATX_MNT_ID != 0 {
+		return dev, stx.Mnt_id, nil
+	}
+	if mid, ok := fdMntID(fd); ok {
+		return dev, mid, nil
+	}
+	return 0, 0, errors.New("mount identity unavailable")
+}
+
+func statDirIdentity(dir string) (pinnedMountKey, error) {
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return pinnedMountKey{}, err
+	}
+	defer unix.Close(fd)
+	dev, mntID, err := statFDIdentity(fd)
+	if err != nil {
+		return pinnedMountKey{}, err
+	}
+	return pinnedMountKey{mount: dir, dev: dev, mntID: mntID}, nil
+}
+
+func openPinnedRoot(mediaRoot, mount string, requireMountpoint bool) (*os.Root, pinnedMountKey, error) {
+	if mediaRoot != "" {
+		rel, err := filepath.Rel(mediaRoot, mount)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "..") || strings.ContainsRune(filepath.ToSlash(rel), '/') {
+			return nil, pinnedMountKey{}, ErrOnDemandNotFound
+		}
+	}
+	dirID, err := statDirIdentity(mount)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR) {
+			return nil, pinnedMountKey{}, ErrOnDemandNotFound
+		}
+		return nil, pinnedMountKey{}, err
+	}
+	if requireMountpoint {
+		parentDir := mediaRoot
+		if parentDir == "" {
+			parentDir = filepath.Dir(mount)
+		}
+		parentID, perr := statDirIdentity(parentDir)
+		if perr != nil || (parentID.mntID == dirID.mntID && parentID.dev == dirID.dev) {
+			return nil, pinnedMountKey{}, ErrOnDemandNotFound
+		}
+	}
+	root, err := os.OpenRoot(mount)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, pinnedMountKey{}, ErrOnDemandNotFound
+		}
+		return nil, pinnedMountKey{}, err
+	}
+	dot, err := root.Open(".")
+	if err != nil {
+		root.Close()
+		return nil, pinnedMountKey{}, err
+	}
+	dev, mntID, idErr := statFDIdentity(int(dot.Fd()))
+	dot.Close()
+	if idErr != nil || dev != dirID.dev || mntID != dirID.mntID {
+		root.Close()
+		return nil, pinnedMountKey{}, ErrOnDemandUnavailable
+	}
+	return root, dirID, nil
+}
+
+func verifyMountPinned(want pinnedMountKey) error {
+	if isVolumeEjecting(want.mount) {
+		return ErrOnDemandUnavailable
+	}
+	got, err := statDirIdentity(want.mount)
+	if err != nil || got != want {
+		return ErrOnDemandUnavailable
+	}
+	return nil
+}
+
+type ctxReader struct {
+	ctx   context.Context
+	r     io.Reader
+	mount string
+}
+
+func (c *ctxReader) Read(p []byte) (int, error) {
+	if isVolumeEjecting(c.mount) {
+		return 0, ErrOnDemandUnavailable
+	}
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
+type ctxReaderAt struct {
+	ctx   context.Context
+	r     io.ReaderAt
+	mount string
+}
+
+func (c *ctxReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if isVolumeEjecting(c.mount) {
+		return 0, ErrOnDemandUnavailable
+	}
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.ReadAt(p, off)
+}
+
+func runSharedMeta[V any](ctx context.Context, mu *sync.Mutex, flights map[pinnedMountKey]*metaCall[V], key pinnedMountKey, fn func(context.Context) (V, error)) (V, error) {
+	var zero V
+	mu.Lock()
+	if c, ok := flights[key]; ok {
+		c.waiters++
+		mu.Unlock()
+		select {
+		case <-c.done:
+			return c.val, c.err
+		case <-ctx.Done():
+			mu.Lock()
+			c.waiters--
+			if c.waiters == 0 && c.cancel != nil {
+				c.cancel()
+			}
+			mu.Unlock()
+			return zero, ctx.Err()
+		}
+	}
+	buildCtx, cancel := context.WithTimeout(context.Background(), onDemandBuildTimeout)
+	c := &metaCall[V]{waiters: 1, done: make(chan struct{}), cancel: cancel}
+	flights[key] = c
+	mu.Unlock()
+
+	go func() {
+		defer cancel()
+		c.val, c.err = fn(buildCtx)
+		mu.Lock()
+		if flights[key] == c {
+			delete(flights, key)
+		}
+		mu.Unlock()
+		close(c.done)
+	}()
+
+	select {
+	case <-c.done:
+		return c.val, c.err
+	case <-ctx.Done():
+		mu.Lock()
+		c.waiters--
+		if c.waiters == 0 && c.cancel != nil {
+			c.cancel()
+		}
+		mu.Unlock()
+		return zero, ctx.Err()
+	}
+}
+
+func (b *OnDemandBuilder) volSemFor(mount string) chan struct{} {
+	b.volSemMu.Lock()
+	defer b.volSemMu.Unlock()
+	if s := b.volSems[mount]; s != nil {
+		return s
+	}
+	if len(b.volSems) >= 16 {
+		clear(b.volSems)
+	}
+	s := make(chan struct{}, onDemandVolumeConcurrency)
+	b.volSems[mount] = s
+	return s
+}
+
+func (b *OnDemandBuilder) acquireBuildSlots(ctx context.Context, mount string) (func(), error) {
+	vsem := b.volSemFor(mount)
+	select {
+	case vsem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case b.globalSem <- struct{}{}:
+	case <-ctx.Done():
+		<-vsem
+		return nil, ctx.Err()
+	}
+	return func() {
+		<-b.globalSem
+		<-vsem
+	}, nil
+}
+
 // Build reads one track's rekordbox ANLZ + audio header straight from req.Mount and returns its
-// in-memory RBXA1 performance payload. Concurrent requests for the same track are coalesced.
+// in-memory RBXA1 performance payload. Concurrent requests for the same track are coalesced
+// and cancelled immediately when the last waiter leaves.
 func (b *OnDemandBuilder) Build(ctx context.Context, req OnDemandRequest) (*OnDemandResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -149,6 +424,9 @@ func (b *OnDemandBuilder) Build(ctx context.Context, req OnDemandRequest) (*OnDe
 	mount := filepath.Clean(strings.TrimSpace(req.Mount))
 	if mount == "" || mount == "." || !filepath.IsAbs(mount) {
 		return nil, ErrOnDemandNotFound
+	}
+	if isVolumeEjecting(mount) {
+		return nil, ErrOnDemandUnavailable
 	}
 	cleanRel, err := cleanEnginePath(req.EnginePath)
 	if err != nil {
@@ -162,25 +440,33 @@ func (b *OnDemandBuilder) Build(ctx context.Context, req OnDemandRequest) (*OnDe
 
 	b.flightMu.Lock()
 	if call, ok := b.inflight[sfKey]; ok {
+		call.waiters++
 		b.flightMu.Unlock()
 		select {
 		case <-call.done:
 			return call.res, call.err
 		case <-ctx.Done():
+			b.flightMu.Lock()
+			call.waiters--
+			if call.waiters == 0 && call.cancel != nil {
+				call.cancel()
+			}
+			b.flightMu.Unlock()
 			return nil, ctx.Err()
 		}
 	}
-	call := &onDemandCall{done: make(chan struct{})}
+	buildCtx, cancel := context.WithTimeout(context.Background(), onDemandBuildTimeout)
+	call := &onDemandCall{waiters: 1, done: make(chan struct{}), cancel: cancel}
 	b.inflight[sfKey] = call
 	b.flightMu.Unlock()
 
 	go func() {
-		// Detach leader from a single caller's cancellation so a second coalesced caller still completes.
-		buildCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		call.res, call.err = b.buildOnce(buildCtx, req)
+		call.res, call.err = b.buildBounded(buildCtx, req)
 		b.flightMu.Lock()
-		delete(b.inflight, sfKey)
+		if b.inflight[sfKey] == call {
+			delete(b.inflight, sfKey)
+		}
 		b.flightMu.Unlock()
 		close(call.done)
 	}()
@@ -189,139 +475,228 @@ func (b *OnDemandBuilder) Build(ctx context.Context, req OnDemandRequest) (*OnDe
 	case <-call.done:
 		return call.res, call.err
 	case <-ctx.Done():
+		b.flightMu.Lock()
+		call.waiters--
+		if call.waiters == 0 && call.cancel != nil {
+			call.cancel()
+		}
+		b.flightMu.Unlock()
 		return nil, ctx.Err()
 	}
 }
 
-func (b *OnDemandBuilder) loadSnapshot(mount string, root *os.Root) (*rbstate.Snapshot, *compat.Resolver, error) {
+func (b *OnDemandBuilder) buildBounded(ctx context.Context, req OnDemandRequest) (*OnDemandResult, error) {
+	release, err := b.acquireBuildSlots(ctx, req.Mount)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return b.buildOnce(ctx, req)
+}
+
+func generatedExportRooted(root *os.Root) bool {
+	pdbFile, err := openRootFileNonblock(root, devicePDB)
+	if err != nil {
+		return false
+	}
+	st, serr := pdbFile.Stat()
+	pdbFile.Close()
+	if serr != nil {
+		return false
+	}
+	mf, err := openRootFileNonblock(root, "PIONEER/rekordbox/.enginex-generated")
+	if err != nil {
+		return false
+	}
+	defer mf.Close()
+	b, err := io.ReadAll(io.LimitReader(mf, 256))
+	return err == nil && string(b) == fmt.Sprintf("%d:%d", st.Size(), st.ModTime().UnixNano())
+}
+
+func (b *OnDemandBuilder) loadSnapshot(ctx context.Context, key pinnedMountKey, root *os.Root) (*rbstate.Snapshot, *compat.Resolver, error) {
 	relSnap := filepath.Join(databaseSubdir, rbstate.SnapshotName)
-	f, err := root.Open(relSnap)
+	f, err := openRootFileNonblock(root, relSnap)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil, ErrOnDemandNotFound
 		}
 		return nil, nil, err
 	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return nil, nil, err
+	st, serr := f.Stat()
+	if serr != nil {
+		f.Close()
+		return nil, nil, serr
 	}
-	if !st.Mode().IsRegular() {
-		return nil, nil, fmt.Errorf("snapshot is not a regular file")
+	if st.Size() > onDemandMaxSnapshotBytes {
+		f.Close()
+		return nil, nil, fmt.Errorf("%w: snapshot exceeds %d bytes", ErrOnDemandLimit, onDemandMaxSnapshotBytes)
 	}
-	dbDir := filepath.Join(mount, databaseSubdir)
 	b.snapMu.Lock()
-	if c := b.snaps[dbDir]; c != nil && c.size == st.Size() && c.mtime.Equal(st.ModTime()) {
+	if c := b.snaps[key]; c != nil && c.size == st.Size() && c.mtime.Equal(st.ModTime()) {
 		b.snapMu.Unlock()
+		f.Close()
 		return c.snap, c.res, nil
 	}
 	b.snapMu.Unlock()
+	f.Close()
 
-	snap, err := rbstate.LoadReader(f)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, rbstate.ErrNoSnapshot) {
-			return nil, nil, ErrOnDemandNotFound
+	cached, err := runSharedMeta(ctx, &b.metaMu, b.snapFlight, key, func(mctx context.Context) (*cachedOnDemandSnapshot, error) {
+		if onDemandBuildHook != nil {
+			if herr := onDemandBuildHook(mctx, "snapshot", key.mount); herr != nil {
+				return nil, herr
+			}
 		}
-		return nil, nil, err
-	}
-	res, err := compat.NewResolver(mount)
-	if err != nil {
-		return nil, nil, err
-	}
-	b.snapMu.Lock()
-	if len(b.snaps) >= 4 {
-		clear(b.snaps)
-	}
-	b.snaps[dbDir] = &cachedOnDemandSnapshot{size: st.Size(), mtime: st.ModTime(), snap: snap, res: res}
-	b.snapMu.Unlock()
-	return snap, res, nil
-}
-
-func fileSigsEqual(a, b []rbstate.FileSig) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// lookupExportTrack lazily parses the stick's export DB only on rare fallback paths (snapshots
-// predating Track.AnalysisPath or AAC implicit SBR streams advertising core rate <= 24 kHz).
-func (b *OnDemandBuilder) lookupExportTrack(ctx context.Context, mount string, res *compat.Resolver, key string) (rekordbox.Track, bool, error) {
-	sigs, err := FindSources(res, mount)
-	if err != nil || len(sigs) == 0 {
-		return rekordbox.Track{}, false, err
-	}
-	b.exportMu.Lock()
-	if c := b.exports[mount]; c != nil && fileSigsEqual(c.sigs, sigs) {
-		tr, ok := c.tracks[key]
-		b.exportMu.Unlock()
-		return tr, ok, nil
-	}
-	b.exportMu.Unlock()
-
-	libs, _, err := ReadSources(ctx, res, mount, sigs, nil)
-	if err != nil || len(libs) == 0 {
-		return rekordbox.Track{}, false, err
-	}
-	view, err := BuildViewCtx(ctx, libs, "", "")
-	if err != nil {
-		return rekordbox.Track{}, false, err
-	}
-	tracks := make(map[string]rekordbox.Track, len(view.Tracks))
-	for i := range view.Tracks {
-		vt := &view.Tracks[i]
-		tracks[vt.Key] = vt.Track
-	}
-	b.exportMu.Lock()
-	if len(b.exports) >= 2 {
-		clear(b.exports)
-	}
-	b.exports[mount] = &cachedOnDemandExport{sigs: sigs, tracks: tracks}
-	b.exportMu.Unlock()
-	tr, ok := tracks[key]
-	return tr, ok, nil
-}
-
-// openRootRegular opens rel strictly confined within root (refusing symlinks and path escapes),
-// trying the exact path first before falling back to compat.Resolver for case or NFC/NFD differences.
-func openRootRegular(ctx context.Context, root *os.Root, res *compat.Resolver, rel string) (*os.File, error) {
-	clean, err := compat.CleanRelative(rel)
-	if err != nil {
-		return nil, err
-	}
-	openRel := func(sub string) (*os.File, error) {
-		f, err := root.Open(filepath.FromSlash(sub))
+		mroot, mkey, err := openPinnedRoot(b.cfg.MediaRoot, key.mount, b.cfg.RequireMountpoint)
 		if err != nil {
 			return nil, err
 		}
-		st, serr := f.Stat()
-		if serr != nil || !st.Mode().IsRegular() {
-			f.Close()
-			if serr != nil {
-				return nil, serr
-			}
-			return nil, fmt.Errorf("not a regular file: %s", sub)
+		defer mroot.Close()
+		if mkey != key || isVolumeEjecting(key.mount) {
+			return nil, ErrOnDemandUnavailable
 		}
-		return f, nil
+		sf, err := openRootFileNonblock(mroot, relSnap)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, ErrOnDemandNotFound
+			}
+			return nil, err
+		}
+		defer sf.Close()
+		sst, serr := sf.Stat()
+		if serr != nil {
+			return nil, serr
+		}
+		if sst.Size() > onDemandMaxSnapshotBytes {
+			return nil, fmt.Errorf("%w: snapshot exceeds %d bytes", ErrOnDemandLimit, onDemandMaxSnapshotBytes)
+		}
+		b.snapMu.Lock()
+		if c := b.snaps[key]; c != nil && c.size == sst.Size() && c.mtime.Equal(sst.ModTime()) {
+			b.snapMu.Unlock()
+			return c, nil
+		}
+		b.snapMu.Unlock()
+
+		lr := &io.LimitedReader{R: &ctxReader{ctx: mctx, r: sf, mount: key.mount}, N: onDemandMaxSnapshotBytes + 1}
+		snap, err := rbstate.LoadReader(bufio.NewReaderSize(lr, 64<<10))
+		if err != nil {
+			if lr.N <= 0 {
+				return nil, fmt.Errorf("%w: snapshot exceeds %d bytes", ErrOnDemandLimit, onDemandMaxSnapshotBytes)
+			}
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, rbstate.ErrNoSnapshot) {
+				return nil, ErrOnDemandNotFound
+			}
+			return nil, err
+		}
+		res, err := compat.NewResolver(key.mount)
+		if err != nil {
+			return nil, err
+		}
+		entry := &cachedOnDemandSnapshot{size: sst.Size(), mtime: sst.ModTime(), snap: snap, res: res}
+		b.snapMu.Lock()
+		if len(b.snaps) >= 4 {
+			clear(b.snaps)
+		}
+		b.snaps[key] = entry
+		b.snapMu.Unlock()
+		return entry, nil
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-	f, err := openRel(clean)
-	if err == nil {
-		return f, nil
+	return cached.snap, cached.res, nil
+}
+
+// findPDBTrackRooted scans ONLY the Track table of PIONEER/rekordbox/export.pdb strictly through
+// the pinned root fd for legacy snapshots that lack AnalysisPath or AAC SBR SampleRate. It never
+// opens or decrypts exportLibrary.db and never parses playlists or lookup tables on the load path.
+func (b *OnDemandBuilder) findPDBTrackRooted(ctx context.Context, key pinnedMountKey, root *os.Root, res *compat.Resolver, tr *rbstate.Track) (rekordbox.Track, bool, error) {
+	if err := verifyMountPinned(key); err != nil {
+		return rekordbox.Track{}, false, err
 	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+	if generatedExportRooted(root) {
+		return rekordbox.Track{}, false, nil
 	}
-	resolved, err := res.ResolveContext(ctx, clean)
+	f, _, err := openRootRegularWithRel(ctx, root, res, devicePDB)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return rekordbox.Track{}, false, nil
+		}
+		return rekordbox.Track{}, false, err
+	}
+	defer f.Close()
+	st, serr := f.Stat()
+	if serr != nil {
+		return rekordbox.Track{}, false, serr
+	}
+	if st.Size() > onDemandMaxExportDBBytes {
+		return rekordbox.Track{}, false, ErrOnDemandLimit
+	}
+	var wantDeviceID uint32
+	for _, ref := range tr.Refs {
+		if ref.Kind == rbstate.DeviceLibrary && ref.ID != 0 {
+			wantDeviceID = ref.ID
+			break
+		}
+	}
+	foundTrack, ok, err := rekordbox.FindPDBTrack(&ctxReaderAt{ctx: ctx, r: f, mount: key.mount}, st.Size(), func(id uint32, trackPath string) bool {
+		if wantDeviceID != 0 && id == wantDeviceID && rbstate.FoldPath(trackPath) == tr.Key {
+			return true
+		}
+		return rbstate.FoldPath(trackPath) == tr.Key
+	})
+	if err != nil || !ok {
+		return rekordbox.Track{}, false, err
+	}
+	if err := verifyMountPinned(key); err != nil {
+		return rekordbox.Track{}, false, err
+	}
+	return foundTrack, true, nil
+}
+
+func openRootFileNonblock(root *os.Root, sub string) (*os.File, error) {
+	f, err := root.OpenFile(filepath.FromSlash(sub), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
-	return openRel(resolved)
+	st, serr := f.Stat()
+	if serr != nil || !st.Mode().IsRegular() {
+		f.Close()
+		if serr != nil {
+			return nil, serr
+		}
+		return nil, fmt.Errorf("not a regular file: %s", sub)
+	}
+	return f, nil
+}
+
+// openRootRegularWithRel resolves and opens rel strictly confined within root with O_NONBLOCK + IsRegular.
+func openRootRegularWithRel(ctx context.Context, root *os.Root, res *compat.Resolver, rel string) (*os.File, string, error) {
+	clean, err := compat.CleanRelative(rel)
+	if err != nil {
+		return nil, "", err
+	}
+	f, err := openRootFileNonblock(root, clean)
+	if err == nil {
+		return f, clean, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, "", err
+	}
+	resolved, err := res.ResolveContext(ctx, clean)
+	if err != nil {
+		return nil, "", err
+	}
+	f, err = openRootFileNonblock(root, resolved)
+	if err != nil {
+		return nil, "", err
+	}
+	return f, resolved, nil
+}
+
+// openRootRegular opens rel strictly confined within root (refusing symlinks, FIFOs, and path escapes).
+func openRootRegular(ctx context.Context, root *os.Root, res *compat.Resolver, rel string) (*os.File, error) {
+	f, _, err := openRootRegularWithRel(ctx, root, res, rel)
+	return f, err
 }
 
 func anlzCandidates(tr *rbstate.Track, fallbackAnalysisPath string) (datRel, extRel, ex2Rel string) {
@@ -367,24 +742,17 @@ func (b *OnDemandBuilder) buildOnce(ctx context.Context, req OnDemandRequest) (*
 	tStart := time.Now()
 	var timing OnDemandTiming
 
-	mountSt, err := os.Lstat(req.Mount)
-	if err != nil || !mountSt.Mode().IsDir() || mountSt.Mode()&os.ModeSymlink != 0 {
-		if err == nil || errors.Is(err, os.ErrNotExist) {
-			return nil, ErrOnDemandNotFound
-		}
-		return nil, err
-	}
-	root, err := os.OpenRoot(req.Mount)
+	root, pinnedKey, err := openPinnedRoot(b.cfg.MediaRoot, req.Mount, b.cfg.RequireMountpoint)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, ErrOnDemandNotFound
-		}
 		return nil, err
 	}
 	defer root.Close()
+	if isVolumeEjecting(req.Mount) {
+		return nil, ErrOnDemandUnavailable
+	}
 
 	t0 := time.Now()
-	snap, res, err := b.loadSnapshot(req.Mount, root)
+	snap, res, err := b.loadSnapshot(ctx, pinnedKey, root)
 	timing.SnapshotMS = float64(time.Since(t0).Microseconds()) / 1000.0
 	if err != nil {
 		return nil, err
@@ -402,20 +770,24 @@ func (b *OnDemandBuilder) buildOnce(ctx context.Context, req OnDemandRequest) (*
 
 	var expTrack rekordbox.Track
 	var hasExpTrack bool
-	ensureExport := func() {
+	ensureExport := func() error {
 		if hasExpTrack {
-			return
+			return nil
 		}
 		te := time.Now()
-		et, found, _ := b.lookupExportTrack(ctx, req.Mount, res, tr.Key)
+		et, found, lerr := b.findPDBTrackRooted(ctx, pinnedKey, root, res, tr)
 		timing.ExportMS += float64(time.Since(te).Microseconds()) / 1000.0
 		timing.UsedExport = true
+		if lerr != nil {
+			return lerr
+		}
 		if found {
 			expTrack, hasExpTrack = et, true
 		}
+		return nil
 	}
 
-	// Open audio file confined to root (direct stat/open first, zero ReadDir on common case).
+	// Open audio file confined to root (direct nonblocking open first, zero ReadDir on common case).
 	tStat := time.Now()
 	audioRel := tr.Rel
 	if audioRel == "" {
@@ -431,10 +803,14 @@ func (b *OnDemandBuilder) buildOnce(ctx context.Context, req OnDemandRequest) (*
 	}
 	defer audioFile.Close()
 
-	// Determine ANLZ sibling paths; fall back to export DB only when snapshot lacks AnalysisPath.
+	// Determine ANLZ sibling paths; fall back to rooted export DB only when snapshot lacks AnalysisPath.
 	datRel, extRel, ex2Rel := anlzCandidates(tr, "")
 	if datRel == "" && extRel == "" && ex2Rel == "" {
-		ensureExport()
+		if eerr := ensureExport(); eerr != nil {
+			if errors.Is(eerr, ErrOnDemandUnavailable) || errors.Is(eerr, context.Canceled) || errors.Is(eerr, context.DeadlineExceeded) {
+				return nil, eerr
+			}
+		}
 		if hasExpTrack && expTrack.AnalysisPath != "" {
 			datRel, extRel, ex2Rel = anlzCandidates(tr, expTrack.AnalysisPath)
 		}
@@ -443,8 +819,14 @@ func (b *OnDemandBuilder) buildOnce(ctx context.Context, req OnDemandRequest) (*
 		return nil, fmt.Errorf("%w: no analysis path for %s", ErrOnDemandDegraded, tr.Key)
 	}
 
-	// Read ANLZ files unpaced: .2EX first (PWV7 only, skipping PWV6); if PWV7 is present, skip
-	// all waveform bodies in .DAT and .EXT (reading only PQTZ beatgrid and PCOB/PCO2 cues/loops).
+	if onDemandBuildHook != nil {
+		if herr := onDemandBuildHook(ctx, "anlz", req.Mount); herr != nil {
+			return nil, herr
+		}
+	}
+
+	// Read ANLZ files with chunk-level cancellation: .2EX first (PWV7 only); if PWV7 is present,
+	// skip all waveform bodies in .DAT and .EXT.
 	tANLZ := time.Now()
 	var a2ex, aext, adat *rekordbox.Analysis
 	readCount := 0
@@ -460,9 +842,24 @@ func (b *OnDemandBuilder) buildOnce(ctx context.Context, req OnDemandRequest) (*
 			return nil, err
 		}
 		defer f.Close()
-		a, n, err := rekordbox.ReadAnalysisFile(f, skip)
+		st, serr := f.Stat()
+		if serr != nil {
+			return nil, serr
+		}
+		if st.Size() > onDemandMaxANLZBytes {
+			return nil, fmt.Errorf("%w: anlz %s exceeds %d bytes", ErrOnDemandLimit, rel, onDemandMaxANLZBytes)
+		}
+		a, n, err := rekordbox.ReadAnalysisFilePaced(f, skip, 64<<10, func(int, time.Duration) error {
+			if isVolumeEjecting(req.Mount) {
+				return ErrOnDemandUnavailable
+			}
+			return ctx.Err()
+		})
 		timing.ANLZBytes += n
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrOnDemandUnavailable) {
+				return nil, err
+			}
 			var pe *os.PathError
 			if errors.As(err, &pe) {
 				return nil, err
@@ -539,20 +936,32 @@ func (b *OnDemandBuilder) buildOnce(ctx context.Context, req OnDemandRequest) (*
 	}
 
 	// Implicit AAC SBR: core rate <= 24 kHz in header may double in export metadata (trackbuild.go:239).
+	// Use SampleRate/Duration already recorded on current snapshots without reparsing whole exports.
 	if audio.Format == "aac" && audio.SampleRate > 0 && audio.SampleRate <= 24000 && !hasExpTrack {
-		ensureExport()
-		if hasExpTrack {
-			if expTrack.SampleRate > 0 {
-				rt.SampleRate = expTrack.SampleRate
+		if tr.SampleRate > audio.SampleRate {
+			rt.SampleRate = tr.SampleRate
+			if tr.Duration > 0 {
+				rt.Duration = tr.Duration
 			}
-			if expTrack.Duration > 0 {
-				rt.Duration = expTrack.Duration
+		} else if tr.SampleRate == 0 {
+			if eerr := ensureExport(); eerr != nil {
+				if errors.Is(eerr, ErrOnDemandUnavailable) || errors.Is(eerr, context.Canceled) || errors.Is(eerr, context.DeadlineExceeded) {
+					return nil, eerr
+				}
 			}
-			if rt.Key == "" {
-				rt.Key = expTrack.Key
-			}
-			if len(expTrack.Cues) > 0 {
-				merged.Merge(&rekordbox.Analysis{Cues: expTrack.Cues})
+			if hasExpTrack {
+				if expTrack.SampleRate > 0 {
+					rt.SampleRate = expTrack.SampleRate
+				}
+				if expTrack.Duration > 0 {
+					rt.Duration = expTrack.Duration
+				}
+				if rt.Key == "" {
+					rt.Key = expTrack.Key
+				}
+				if len(expTrack.Cues) > 0 {
+					merged.Merge(&rekordbox.Analysis{Cues: expTrack.Cues})
+				}
 			}
 		}
 	}
@@ -606,6 +1015,12 @@ func (b *OnDemandBuilder) buildOnce(ctx context.Context, req OnDemandRequest) (*
 		ActiveLoops: perf.ActiveLoops,
 		Complete:    perf.Complete,
 	})
+	if len(rbxa1) > onDemandMaxRBXA1Bytes {
+		return nil, fmt.Errorf("%w: rbxa1 exceeds %d bytes", ErrOnDemandLimit, onDemandMaxRBXA1Bytes)
+	}
+	if err := verifyMountPinned(pinnedKey); err != nil {
+		return nil, err
+	}
 	timing.EncodeMS = float64(time.Since(tEnc).Microseconds()) / 1000.0
 	timing.TotalMS = float64(time.Since(tStart).Microseconds()) / 1000.0
 

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/jpeg"
 	"io"
@@ -303,5 +304,152 @@ func TestLibraryDisplayReadsUnloadedOnDemandTrackAndDirectArtwork(t *testing.T) 
 	}
 	if !bytes.Equal(asset.Artwork, jpgBuf.Bytes()) {
 		t.Fatalf("expected direct-read artwork bytes (%d), got %d", jpgBuf.Len(), len(asset.Artwork))
+	}
+}
+
+func TestRekordboxOnDemandChmodFailClosedAndMountpointGuard(t *testing.T) {
+	// 1. Failing chmod on the Unix socket must fail closed (close listener, remove socket).
+	sockDir := t.TempDir()
+	sockPath := filepath.Join(sockDir, "rb-ondemand.sock")
+	oldChmod := onDemandChmod
+	onDemandChmod = func(string, os.FileMode) error {
+		return errors.New("chmod EPERM")
+	}
+	t.Cleanup(func() { onDemandChmod = oldChmod })
+
+	srv := New(Config{
+		StateDir:              t.TempDir(),
+		MediaRoot:             t.TempDir(),
+		RekordboxOnDemandSock: sockPath,
+	}, nil)
+	defer srv.Close()
+
+	srv.rbOnDemandMu.Lock()
+	ln := srv.rbOnDemandLn
+	srv.rbOnDemandMu.Unlock()
+	if ln != nil {
+		t.Fatalf("expected Unix listener to stay nil after chmod failure")
+	}
+	if _, err := os.Lstat(sockPath); !os.IsNotExist(err) {
+		t.Fatalf("expected failed-chmod socket to be removed: err=%v", err)
+	}
+
+	// 2. RequireOnDemandMountpoint rejects a non-mountpoint subdirectory under MediaRoot.
+	mediaRoot := t.TempDir()
+	stick := filepath.Join(mediaRoot, "SUBDIR_NOT_MOUNT")
+	if err := os.MkdirAll(stick, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testfixture.LargeExport(t, stick, 1)
+	if _, err := bridge.ConvertAtMount(context.Background(), stick, bridge.MountOptions{OnDemand: true}); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := rbstate.Load(filepath.Join(stick, "Engine Library", "Database2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tr *rbstate.Track
+	for _, c := range snap.Tracks {
+		tr = c
+		break
+	}
+	srv2 := New(Config{
+		StateDir:                  t.TempDir(),
+		MediaRoot:                 mediaRoot,
+		RekordboxOnDemandSock:     "-",
+		RequireOnDemandMountpoint: true,
+	}, nil)
+	defer srv2.Close()
+
+	payload, _ := json.Marshal(rbOnDemandRequest{Mount: stick, UUID: snap.LibraryUUID, Path: "../" + tr.Rel, ID: tr.EngineID})
+	req := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(payload))
+	req.RemoteAddr = "127.0.0.1:1234"
+	rec := httptest.NewRecorder()
+	srv2.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("non-mountpoint with RequireOnDemandMountpoint=true returned status=%d, want 404", rec.Code)
+	}
+}
+
+func TestShadowPeerPerfServesUnanalyzedOnDemandUSBTrack(t *testing.T) {
+	ctx := context.Background()
+	shadowBeaconOn = false
+	defer func() { shadowBeaconOn = true }()
+	mediaRoot := t.TempDir()
+	oldMedia := shadowMediaRoot
+	shadowMediaRoot = mediaRoot
+	defer func() { shadowMediaRoot = oldMedia }()
+
+	stick := filepath.Join(mediaRoot, "ONDE_USB")
+	testfixture.LargeExport(t, stick, 1)
+	// LargeExport pairs 1500ms cues with a 3-frame (52ms) MP3; extend it to 120 frames (~3.1s)
+	// so ParseDisplayPerformance validates all hot/memory cues and loops cleanly.
+	const mp3Frame = 417
+	longMP3 := make([]byte, 120*mp3Frame)
+	for i := 0; i < 120; i++ {
+		copy(longMP3[i*mp3Frame:], []byte{0xff, 0xfb, 0x90, 0})
+	}
+	copy(longMP3[36:], "Xing")
+	binary.BigEndian.PutUint32(longMP3[40:], 3)
+	binary.BigEndian.PutUint32(longMP3[44:], 120)
+	binary.BigEndian.PutUint32(longMP3[48:], uint32(len(longMP3)))
+	copy(longMP3[52:], "LAME3.100")
+	longMP3[73], longMP3[74], longMP3[75] = 0x24, 0, 0
+	testfixture.Write(t, stick, testfixture.LargeTrackPath(1), longMP3)
+	if _, err := bridge.ConvertAtMount(ctx, stick, bridge.MountOptions{OnDemand: true}); err != nil {
+		t.Fatalf("ConvertAtMount(OnDemand): %v", err)
+	}
+
+	s := New(Config{
+		UIDir:                 t.TempDir(),
+		StateDir:              t.TempDir(),
+		MediaRoot:             mediaRoot,
+		RekordboxOnDemandSock: "-",
+	}, nil)
+	defer s.Close()
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+
+	netPath := "net://u/ONDE_USB/" + testfixture.LargeTrackPath(1)
+	body := `[{"deck":1,"net":` + strconv.Quote(netPath) + `,"bpm":120}]`
+	resp, err := http.Post(srv.URL+"/v1/enginex/decks", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("post decks status=%d", resp.StatusCode)
+	}
+
+	dresp, err := http.Get(srv.URL + "/peer/decks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var peer struct{ Decks []deckState }
+	_ = json.NewDecoder(dresp.Body).Decode(&peer)
+	dresp.Body.Close()
+	if len(peer.Decks) != 1 || peer.Decks[0].Key == "" {
+		t.Fatalf("unexpected peer decks: %+v", peer.Decks)
+	}
+
+	get := func(q string) []byte {
+		r, err := http.Get(srv.URL + "/peer/decks/1/perf?key=" + peer.Decks[0].Key + q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		b, _ := io.ReadAll(r.Body)
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("GET /peer/decks/1/perf%s returned %s (%q), want 200 for unanalyzed OnDemand track", q, r.Status, b)
+		}
+		return b
+	}
+	native := get("&format=native")
+	if !validShadowAnalysis(native) {
+		t.Fatalf("native analysis invalid (%d bytes)", len(native))
+	}
+	expf := get("")
+	if !bytes.HasPrefix(expf, []byte("EXPF")) {
+		t.Fatalf("non-native peer perf missing EXPF header (%d bytes)", len(expf))
 	}
 }

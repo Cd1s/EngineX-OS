@@ -6,11 +6,15 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
@@ -279,5 +283,225 @@ func TestNeedsCueReadAcceptsLegacyRawWrittenDigest(t *testing.T) {
 	row.rawWrittenDigest = enginedb.RawWrittenDigest(beats, editedCues, loops)
 	if !needsCueRead(row) {
 		t.Fatal("deck edit on legacy row was ignored by write-back")
+	}
+}
+
+// RD-4 regression test (fails on f65d4fdf):
+//  1. Adopting a legacy library (Synced == nil across > 64 rows) exercises the sequential scan.
+//  2. Untouched legacy take-over tracks (main cue reset to -1 with memory-cue digest, pre-#178
+//     0-offset cues on MP3, or PDB-vs-OneLibrary differences) must NEVER count as deck edits.
+//  3. DryRun reports exact changed tracks and fields without modifying the stick.
+func TestTakeOverNeverWritesBackUntouchedLegacyTracksAndDryRun(t *testing.T) {
+	ctx := context.Background()
+	seedFullImport := func(dir string) {
+		t.Helper()
+		if _, err := ConvertAtMount(ctx, dir, MountOptions{}); err != nil {
+			t.Fatalf("ConvertAtMount(%s): %v", dir, err)
+		}
+		if _, err := FillInBackground(ctx, dir, FillOptions{}); err != nil {
+			t.Fatalf("FillInBackground(%s): %v", dir, err)
+		}
+		if _, err := ConvertAtMount(ctx, dir, MountOptions{Publish: true}); err != nil {
+			t.Fatalf("Publish(%s): %v", dir, err)
+		}
+	}
+	root := t.TempDir()
+	testfixture.LargeExport(t, root, 70)
+	// Extend Track 70 to 120 frames (~3.1s) so its 500..1500ms fixture cues fit within SampleCount.
+	const mp3Frame = 417
+	longMP3 := make([]byte, 120*mp3Frame)
+	for i := 0; i < 120; i++ {
+		copy(longMP3[i*mp3Frame:], []byte{0xff, 0xfb, 0x90, 0})
+	}
+	copy(longMP3[36:], "Xing")
+	binary.BigEndian.PutUint32(longMP3[40:], 3)
+	binary.BigEndian.PutUint32(longMP3[44:], 120)
+	binary.BigEndian.PutUint32(longMP3[48:], uint32(len(longMP3)))
+	copy(longMP3[52:], "LAME3.100")
+	longMP3[73], longMP3[74], longMP3[75] = 0x24, 0, 0
+	testfixture.Write(t, root, testfixture.LargeTrackPath(70), longMP3)
+	seedFullImport(root)
+
+	dbDir := filepath.Join(root, "Engine Library", "Database2")
+	snap, err := rbstate.Load(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(dbDir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Track 1: simulate Engine rewriting main cue to -1 while the r2 snapshot held the ANLZ
+	// memory cue's 250ms sample position (44.1kHz * 0.25s = 11025) as RawWrittenDigest.
+	var beats1, cues1, loops1 []byte
+	if err := db.QueryRow(`SELECT beatData, quickCues, loops FROM PerformanceData WHERE trackId=1`).Scan(&beats1, &cues1, &loops1); err != nil {
+		t.Fatal(err)
+	}
+	rawCues1, err := enginedb.QUncompress(cues1, 8<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyCuesBuf := append([]byte(nil), rawCues1...)
+	offMain := len(legacyCuesBuf) - 17
+	binary.BigEndian.PutUint64(legacyCuesBuf[offMain:], math.Float64bits(11025))
+	legacyCuesBuf[offMain+8] = 0
+	binary.BigEndian.PutUint64(legacyCuesBuf[offMain+9:], math.Float64bits(11025))
+	legacyQC1, err := enginedb.QCompress(legacyCuesBuf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engineZeroBuf := append([]byte(nil), rawCues1...)
+	binary.BigEndian.PutUint64(engineZeroBuf[offMain:], math.Float64bits(-1))
+	engineZeroBuf[offMain+8] = 0
+	binary.BigEndian.PutUint64(engineZeroBuf[offMain+9:], math.Float64bits(-1))
+	engineQC1, err := enginedb.QCompress(engineZeroBuf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=1`, engineQC1); err != nil {
+		t.Fatal(err)
+	}
+
+	// Track 2: simulate pre-#178 0-offset cues on MP3 (without subtracted LAME delay).
+	info, err := enginedb.EncodePerformance(
+		rekordbox.Track{ID: 2, SampleRate: 44100, SampleCount: 120000, Duration: 3, BPM: 120},
+		&rekordbox.Analysis{
+			Beats: []rekordbox.Beat{{Number: 1, BPM: 120, TimeMS: 0}, {Number: 2, BPM: 120, TimeMS: 500}},
+			Cues: []rekordbox.Cue{
+				{HotCue: 2, TimeMS: 500, Name: "B 原有", Color: [4]byte{12, 34, 56, 255}, Extended: true},
+				{HotCue: 8, TimeMS: 1000, EndMS: 1500, Loop: true, Name: "H Loop", Color: [4]byte{99, 88, 77, 255}, Extended: true},
+				{TimeMS: 250, Name: "Mémoire", Color: [4]byte{55, 66, 77, 255}, Extended: true},
+				{TimeMS: 750, EndMS: 1000, Loop: true, Name: "Memory Loop", Color: [4]byte{9, 8, 7, 255}, Extended: true},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE PerformanceData SET quickCues=?, loops=? WHERE trackId=2`, info.QuickCues, info.Loops); err != nil {
+		t.Fatal(err)
+	}
+
+	// Track 70: real deck edit (comment changed + hot cue B moved).
+	var t70Data, t70Cues, t70Loops []byte
+	if err := db.QueryRow(`SELECT trackData, quickCues, loops FROM PerformanceData WHERE trackId=70`).Scan(&t70Data, &t70Cues, &t70Loops); err != nil {
+		t.Fatal(err)
+	}
+	rawCues70, err := enginedb.QUncompress(t70Cues, 8<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Shift hot cue slot 1 (index 1 = B) by +44100 samples (+1000 ms). Slots have variable-length UTF-8 names.
+	hcOff := 8
+	hcOff += 1 + int(rawCues70[hcOff]) + 12 // skip slot 0
+	hcOff += 1 + int(rawCues70[hcOff])      // advance past slot 1 nameLen + UTF-8 name
+	oldSamples := math.Float64frombits(binary.BigEndian.Uint64(rawCues70[hcOff : hcOff+8]))
+	if oldSamples < 0 {
+		t.Fatalf("expected hot cue B set on fixture track 70, got samples=%v", oldSamples)
+	}
+	binary.BigEndian.PutUint64(rawCues70[hcOff:hcOff+8], math.Float64bits(oldSamples+44100))
+	editedQC70, err := enginedb.QCompress(rawCues70)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE PerformanceData SET quickCues=? WHERE trackId=70`, editedQC70); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE Track SET comment='LiveDeckEdit' WHERE id=70`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Emulate legacy take-over snapshot: Synced == nil across all 70 tracks.
+	for _, tr := range snap.Tracks {
+		tr.Synced = nil
+		if tr.EngineID == 1 {
+			tr.Written = enginedb.RawWrittenDigest(beats1, legacyQC1, loops1)
+		} else if tr.EngineID == 2 {
+			tr.Written = []byte("old-mismatch-len")
+		}
+	}
+	if err := snap.Save(dbDir); err != nil {
+		t.Fatal(err)
+	}
+
+	pdbPath := filepath.Join(root, "PIONEER", "rekordbox", "export.pdb")
+	origPDB, err := os.ReadFile(pdbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// DryRun must report ONLY track 70 (1 change, both comment and cues:anlz fields) without writing.
+	dryRes, err := WriteBackCues(ctx, root, WriteBackOptions{DryRun: true})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+	if dryRes.TracksChecked != 70 || dryRes.TracksRead != 70 {
+		t.Fatalf("unexpected checked/read counts: %+v", dryRes)
+	}
+	if dryRes.TracksChanged != 1 || dryRes.FilesUpdated != 0 || len(dryRes.Changes) != 1 {
+		t.Fatalf("DryRun expected 1 change and 0 writes, got %+v", dryRes)
+	}
+	ch := dryRes.Changes[0]
+	joined := strings.Join(ch.Fields, ";")
+	if ch.EngineID != 70 || !strings.Contains(joined, "comment(") || !strings.Contains(joined, "cues:anlz(") {
+		t.Fatalf("DryRun diff attribution unexpected: %+v", ch)
+	}
+	if afterDryPDB, _ := os.ReadFile(pdbPath); !bytes.Equal(afterDryPDB, origPDB) {
+		t.Fatal("DryRun modified export.pdb")
+	}
+
+	// Live write-back updates ONLY track 70.
+	liveRes, err := WriteBackCues(ctx, root, WriteBackOptions{})
+	if err != nil {
+		t.Fatalf("WriteBackCues: %v", err)
+	}
+	if liveRes.TracksChanged != 1 || len(liveRes.Changes) != 1 || liveRes.Changes[0].EngineID != 70 {
+		t.Fatalf("expected only track 70 written back on live pass, got %+v", liveRes)
+	}
+
+	// Dual-library take-over check: if OneLibrary matches m.db metadata and ANLZ matches deck cues
+	// while PDB metadata or OneLibrary cues differ on a take-over (Synced == nil), buildChanges must
+	// not emit spurious changes.
+	kDual := rbstate.FoldPath(testfixture.LargeTrackPath(1))
+	dualDir := t.TempDir()
+	testfixture.LargeExport(t, dualDir, 1)
+	seedFullImport(dualDir)
+	dualDB, err := sql.Open("sqlite", filepath.Join(dualDir, "Engine Library", "Database2", "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bd, td, qc, lp []byte
+	if err := dualDB.QueryRow(`SELECT beatData, trackData, quickCues, loops FROM PerformanceData WHERE trackId=1`).Scan(&bd, &td, &qc, &lp); err != nil {
+		_ = dualDB.Close()
+		t.Fatal(err)
+	}
+	_ = dualDB.Close()
+	anlzRel := "/PIONEER/USBANLZ/P001/ANLZ0000.DAT"
+	dualResolver, err := compat.NewResolver(dualDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dualRow := dbCandidate{
+		engineID:         1,
+		key:              kDual,
+		track:            &rbstate.Track{Key: kDual, Rel: testfixture.LargeTrackPath(1), Written: enginedb.WrittenDigest(bd, qc, lp), Synced: nil, Refs: []rbstate.SourceRef{{Kind: rbstate.DeviceLibrary, ID: 1}, {Kind: rbstate.OneLibrary, ID: 1}}},
+		metadata:         rekordbox.Metadata{Genre: "House"},
+		beatData:         bd,
+		trackData:        td,
+		quickCues:        qc,
+		loops:            lp,
+		writtenDigest:    enginedb.WrittenDigest(bd, qc, lp),
+		rawWrittenDigest: enginedb.RawWrittenDigest(bd, qc, lp),
+	}
+	libs := map[rbstate.LibraryKind]SourceLibrary{
+		rbstate.DeviceLibrary: {Kind: rbstate.DeviceLibrary, Lib: &rekordbox.Library{Tracks: []rekordbox.Track{{ID: 1, Path: testfixture.LargeTrackPath(1), AnalysisPath: anlzRel, Genre: "Tech House"}}}},
+		rbstate.OneLibrary:    {Kind: rbstate.OneLibrary, Lib: &rekordbox.Library{Tracks: []rekordbox.Track{{ID: 1, Path: testfixture.LargeTrackPath(1), AnalysisPath: anlzRel, Genre: "House", Cues: []rekordbox.Cue{{HotCue: 1, TimeMS: 1234, Extended: true}}}}}},
+	}
+	_ = fmt.Sprintf // ensure fmt used cleanly
+	dualChanges, _, err := buildChanges(ctx, dualResolver, libs, []dbCandidate{dualRow})
+	if err != nil || len(dualChanges) != 0 {
+		t.Fatalf("dual-library take-over false positive: changes=%+v err=%v", dualChanges, err)
 	}
 }

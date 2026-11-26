@@ -45,6 +45,7 @@ enum {
     SC_RBB_MAX_INDEX_BYTES = 16 * 1024 * 1024,
     SC_RBB_MAX_SECTION_BYTES = 4 * 1024 * 1024,
     SC_RBB_REFRESH_SECS = 2,
+    SC_RBB_NEG_TTL_SECS = 5,
     SC_RBB_STMT_CACHE_CAP = 8,
     SC_RBB_TLS_BLOB_SLOTS = 4,
 };
@@ -84,6 +85,7 @@ struct sc_rbb_cache_entry {
     uint64_t drive_gen;
     int64_t track_id;
     uint64_t lru_tick;
+    time_t neg_until;
     uint8_t state;   // 0 = empty, 1 = valid, 2 = negative (unreadable ANLZ)
     uint8_t is_mono; // 1 = monochrome source (PWAV/PWV2/PWV3)
     uint8_t rgb_blob[SC_RBB_BLOB_LEN];
@@ -91,6 +93,7 @@ struct sc_rbb_cache_entry {
 
 // Overridable by unit tests. Default matches rekordbox_analysis.h / rekordbox_stage.h.
 static const char *sc_rbb_drives = "/media/";
+static void (*sc_rbb_on_cache_insert_hook)(void);
 static int sc_rbb_active; // relaxed atomic: 1 when at least one drive has .rb-bridge-browse
 static pthread_mutex_t sc_rbb_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t sc_rbb_gen_seq;
@@ -103,14 +106,92 @@ static int sc_rbb_is_sched_other(void) {
     return sched_getscheduler(0) == SCHED_OTHER;
 }
 
+static int sc_rbb_is_gui_thread(void) {
+#ifdef __linux__
+    char comm[16];
+    memset(comm, 0, sizeof comm);
+    if (prctl(PR_GET_NAME, comm, 0, 0, 0) != 0) return 0;
+    return !strcmp(comm, "SceneGraph") || !strcmp(comm, "EMain") ||
+           !strcmp(comm, "EPlanckApp") || !strcmp(comm, "QSGRenderThread");
+#else
+    return 0;
+#endif
+}
+
+static int sc_rbb_thread_allowed(void) {
+    return sc_rbb_is_sched_other() && !sc_rbb_is_gui_thread();
+}
+
 static time_t sc_rbb_mono_sec(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
     return ts.tv_sec;
 }
 
-static int sc_rbb_raw_open_ro(const char *path) {
-    return (int)syscall(SYS_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
+static inline int sc_rbb_raw_open_ro(const char *path) {
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
+        errno = ELOOP;
+        return -1;
+    }
+    return fd;
+}
+
+// Walk rel component-by-component under trusted mount without crossing symlinks or blocking on FIFOs.
+static int sc_rbb_open_under_mount_ro(const char *mount, const char *rel, int cloexec) {
+    if (!mount || !*mount || !rel) return -1;
+    while (*rel == '/') rel++;
+    if (!*rel) return -1;
+    int dirfd = (int)syscall(SYS_openat, AT_FDCWD, mount,
+                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (dirfd < 0) return -1;
+    const char *p = rel;
+    while (*p) {
+        const char *slash = strchr(p, '/');
+        size_t slen = slash ? (size_t)(slash - p) : strlen(p);
+        if (slen == 0 || slen > NAME_MAX ||
+            (slen == 1 && p[0] == '.') ||
+            (slen == 2 && p[0] == '.' && p[1] == '.') ||
+            memchr(p, '\\', slen) != NULL) {
+            close(dirfd);
+            errno = EINVAL;
+            return -1;
+        }
+        char seg[NAME_MAX + 1];
+        memcpy(seg, p, slen);
+        seg[slen] = '\0';
+        if (slash) {
+            while (*slash == '/') slash++;
+            if (!*slash) {
+                close(dirfd);
+                errno = EINVAL;
+                return -1;
+            }
+            int next = (int)syscall(SYS_openat, dirfd, seg,
+                                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+            close(dirfd);
+            if (next < 0) return -1;
+            dirfd = next;
+            p = slash;
+        } else {
+            int oflags = O_RDONLY | O_NOFOLLOW | O_NONBLOCK | (cloexec ? O_CLOEXEC : 0);
+            int fd = (int)syscall(SYS_openat, dirfd, seg, oflags);
+            close(dirfd);
+            if (fd < 0) return -1;
+            struct stat st;
+            if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+                close(fd);
+                errno = ELOOP;
+                return -1;
+            }
+            return fd;
+        }
+    }
+    close(dirfd);
+    return -1;
 }
 
 static uint16_t sc_rbb_be16(const uint8_t *p) {
@@ -265,10 +346,11 @@ static int sc_rbb_parse_index_buf(char *buf, size_t len, char uuid[64],
     if (!nl) return 0;
     *nl = '\0';
     char *u = buf + 5;
-    size_t ulen = strlen(u);
-    while (ulen > 0 && u[ulen - 1] == '\r') u[--ulen] = '\0';
+    size_t ulen = 0;
+    while (u[ulen] && u[ulen] != ' ' && u[ulen] != '\t' && u[ulen] != '\r') ulen++;
     if (ulen == 0 || ulen >= 64) return 0;
-    memcpy(uuid, u, ulen + 1);
+    memcpy(uuid, u, ulen);
+    uuid[ulen] = '\0';
 
     size_t nt = 0, na = 0;
     char *p = nl + 1, *end = buf + len;
@@ -423,23 +505,14 @@ static int sc_rbb_ensure_drive(const char *mount) {
     int prev_has = (slot >= 0) ? sc_rbb_tbl[slot].has_index : 0;
     pthread_mutex_unlock(&sc_rbb_mu);
 
-    char *idx_path = (char *)malloc(PATH_MAX);
-    if (!idx_path) return -1;
-    int pn = snprintf(idx_path, PATH_MAX, "%s/Engine Library/Database2/.rb-bridge-browse", mount);
-    if (pn <= 0 || (size_t)pn >= PATH_MAX) {
-        free(idx_path);
-        return -1;
-    }
-
     struct stat st;
     sc_rbb_in_hook++;
-    int idx_fd = sc_rbb_raw_open_ro(idx_path);
+    int idx_fd = sc_rbb_open_under_mount_ro(mount, "Engine Library/Database2/.rb-bridge-browse", 1);
     int stat_rc = (idx_fd >= 0) ? fstat(idx_fd, &st) : -1;
     if (idx_fd >= 0 && stat_rc != 0) {
         close(idx_fd);
         idx_fd = -1;
     }
-    free(idx_path);
 
     int unchanged = 0;
     char *raw = NULL;
@@ -701,9 +774,9 @@ static int sc_rbb_encode_bins(int kind, const uint8_t *data, uint32_t width, uin
 
 // Scan one ANLZ file for the best matching overview waveform.
 // mode: 0 = .2EX (PWV6 only), 1 = .EXT (PWV4 > PWV5 > PWV3), 2 = .DAT (PWAV > PWV2).
-static int sc_rbb_scan_anlz_file(const char *path, int mode, double dur, uint32_t sr,
+static int sc_rbb_scan_anlz_file(const char *mount, const char *rel_path, int mode, double dur, uint32_t sr,
                                  uint8_t out[SC_RBB_BLOB_LEN], uint8_t *is_mono_out) {
-    int fd = sc_rbb_raw_open_ro(path);
+    int fd = sc_rbb_open_under_mount_ro(mount, rel_path, 1);
     if (fd < 0) return 0;
 
     struct sc_rbb_reader *r = (struct sc_rbb_reader *)calloc(1, sizeof *r);
@@ -796,19 +869,17 @@ static int sc_rbb_scan_anlz_file(const char *path, int mode, double dur, uint32_
 
 static int sc_rbb_build_from_anlz(const char *mount, const char *ap, double dur, uint32_t sr,
                                   uint8_t out[SC_RBB_BLOB_LEN], uint8_t *is_mono_out) {
-    size_t cap = strlen(mount) + strlen(ap) + 16;
+    if (!sc_rbb_safe_rel(ap)) return 0;
+    while (*ap == '/') ap++;
+    size_t cap = strlen(ap) + 16;
     char *base = (char *)malloc(cap);
-    char *path = (char *)malloc(cap);
-    if (!base || !path) {
+    char *rel_path = (char *)malloc(cap);
+    if (!base || !rel_path) {
         free(base);
-        free(path);
+        free(rel_path);
         return 0;
     }
-    if (!sc_rbb_join_rel(base, cap, mount, ap)) {
-        free(base);
-        free(path);
-        return 0;
-    }
+    memcpy(base, ap, strlen(ap) + 1);
     size_t blen = strlen(base);
     int lower_hint = 0;
     if (blen >= 4 && base[blen - 4] == '.') {
@@ -823,20 +894,20 @@ static int sc_rbb_build_from_anlz(const char *mount, const char *ap, double dur,
     for (int mode = 0; mode < 3; mode++) {
         if (blen + 5 > cap) break;
         if (lower_hint) {
-            snprintf(path, cap, "%s%s", base, exts_lower[mode]);
-            if (sc_rbb_scan_anlz_file(path, mode, dur, sr, out, is_mono_out)) {
+            snprintf(rel_path, cap, "%s%s", base, exts_lower[mode]);
+            if (sc_rbb_scan_anlz_file(mount, rel_path, mode, dur, sr, out, is_mono_out)) {
                 ok = 1;
                 break;
             }
         }
-        snprintf(path, cap, "%s%s", base, exts_upper[mode]);
-        if (sc_rbb_scan_anlz_file(path, mode, dur, sr, out, is_mono_out)) {
+        snprintf(rel_path, cap, "%s%s", base, exts_upper[mode]);
+        if (sc_rbb_scan_anlz_file(mount, rel_path, mode, dur, sr, out, is_mono_out)) {
             ok = 1;
             break;
         }
     }
     free(base);
-    free(path);
+    free(rel_path);
     return ok;
 }
 
@@ -853,9 +924,15 @@ static int sc_rbb_fetch_overview(int slot, uint64_t expected_gen, int64_t track_
         return 0;
     }
     uint64_t gen = d->gen;
+    time_t now = sc_rbb_mono_sec();
+    if (!now) now = 1;
     for (int i = 0; i < SC_RBB_CACHE_CAP; i++) {
         if (sc_rbb_cache[i].state != 0 && sc_rbb_cache[i].drive_gen == gen &&
             sc_rbb_cache[i].track_id == track_id) {
+            if (sc_rbb_cache[i].state == 2 && now >= sc_rbb_cache[i].neg_until) {
+                sc_rbb_cache[i].state = 0;
+                break;
+            }
             sc_rbb_cache[i].lru_tick = ++sc_rbb_lru_seq;
             int ok = (sc_rbb_cache[i].state == 1);
             if (ok) memcpy(dst, sc_rbb_cache[i].rgb_blob, SC_RBB_BLOB_LEN);
@@ -887,35 +964,41 @@ static int sc_rbb_fetch_overview(int slot, uint64_t expected_gen, int64_t track_
     sc_rbb_in_hook++;
     int ok = sc_rbb_build_from_anlz(mount, ap, dur, sr, built, &is_mono);
     sc_rbb_in_hook--;
+    if (sc_rbb_on_cache_insert_hook) sc_rbb_on_cache_insert_hook();
 
+    time_t ins_now = sc_rbb_mono_sec();
+    if (!ins_now) ins_now = 1;
     pthread_mutex_lock(&sc_rbb_mu);
-    int victim = 0;
+    int victim = 0, empty = -1, existing = -1;
     uint64_t min_tick = UINT64_MAX;
     for (int i = 0; i < SC_RBB_CACHE_CAP; i++) {
         if (sc_rbb_cache[i].state != 0 && sc_rbb_cache[i].drive_gen == gen &&
             sc_rbb_cache[i].track_id == track_id) {
-            victim = i;
+            existing = i;
             break;
         }
-        if (sc_rbb_cache[i].state == 0) {
-            victim = i;
-            break;
+        if (sc_rbb_cache[i].state == 0 && empty < 0) {
+            empty = i;
         }
-        if (sc_rbb_cache[i].lru_tick < min_tick) {
+        if (sc_rbb_cache[i].state != 0 && sc_rbb_cache[i].lru_tick < min_tick) {
             min_tick = sc_rbb_cache[i].lru_tick;
             victim = i;
         }
     }
+    if (existing >= 0) victim = existing;
+    else if (empty >= 0) victim = empty;
     sc_rbb_cache[victim].drive_gen = gen;
     sc_rbb_cache[victim].track_id = track_id;
     sc_rbb_cache[victim].lru_tick = ++sc_rbb_lru_seq;
     sc_rbb_cache[victim].is_mono = is_mono;
     if (ok) {
         sc_rbb_cache[victim].state = 1;
+        sc_rbb_cache[victim].neg_until = 0;
         memcpy(sc_rbb_cache[victim].rgb_blob, built, SC_RBB_BLOB_LEN);
         memcpy(dst, built, SC_RBB_BLOB_LEN);
     } else {
         sc_rbb_cache[victim].state = 2;
+        sc_rbb_cache[victim].neg_until = ins_now + SC_RBB_NEG_TTL_SECS;
     }
     pthread_mutex_unlock(&sc_rbb_mu);
     free(scratch);
@@ -980,7 +1063,7 @@ static int sc_rbb_lookup_rgb_track(const char *path, int mark_on_disk,
 
 // Note m.db open so sc_rbb_active becomes 1 before Engine's first browse query.
 static void sc_rbb_note_path(const char *path) {
-    if (!path || sc_rbb_in_hook || !sc_rbb_is_sched_other()) return;
+    if (!path || sc_rbb_in_hook || !sc_rbb_thread_allowed()) return;
     char mount[PATH_MAX];
     const char *rel = NULL;
     if (!sc_rbb_parse_mount(path, mount, &rel)) return;
@@ -989,10 +1072,8 @@ static void sc_rbb_note_path(const char *path) {
     }
 }
 
-// Redirect <mount>/Engine Library/Artwork/<stem>.jpg -> <mount>/<aw>.
-// Returns 1 if mapped into out, 0 otherwise.
-static int sc_rbb_map_artwork(const char *path, char out[PATH_MAX]) {
-    if (!path || sc_rbb_in_hook || !sc_rbb_is_sched_other()) return 0;
+static int sc_rbb_resolve_artwork(const char *path, char mount_out[PATH_MAX], char aw_out[PATH_MAX], char full_out[PATH_MAX]) {
+    if (!path || sc_rbb_in_hook || !sc_rbb_thread_allowed()) return 0;
     char mount[PATH_MAX];
     const char *rel = NULL;
     if (!sc_rbb_parse_mount(path, mount, &rel)) return 0;
@@ -1014,16 +1095,68 @@ static int sc_rbb_map_artwork(const char *path, char out[PATH_MAX]) {
     struct sc_rbb_drive *d = &sc_rbb_tbl[slot];
     if (d->used && d->has_index) {
         const struct sc_rbb_art *a = sc_rbb_find_art_locked(d, stem);
-        if (a && sc_rbb_join_rel(out, PATH_MAX, d->mount, a->aw)) ok = 1;
+        if (a && a->aw && strlen(a->aw) < PATH_MAX &&
+            (!full_out || sc_rbb_join_rel(full_out, PATH_MAX, d->mount, a->aw))) {
+            memcpy(mount_out, d->mount, d->mount_len + 1);
+            memcpy(aw_out, a->aw, strlen(a->aw) + 1);
+            ok = 1;
+        }
     }
     pthread_mutex_unlock(&sc_rbb_mu);
     return ok;
 }
 
+// Redirect <mount>/Engine Library/Artwork/<stem>.jpg -> <mount>/<aw>.
+// Validates the target without following symlinks or blocking on FIFOs.
+// Returns 1 if mapped into out, 0 otherwise.
+static int sc_rbb_map_artwork(const char *path, char out[PATH_MAX]) {
+    char *bufs = (char *)malloc(PATH_MAX * 2);
+    if (!bufs) return 0;
+    char *mount_buf = bufs;
+    char *aw_buf = bufs + PATH_MAX;
+    int ok = sc_rbb_resolve_artwork(path, mount_buf, aw_buf, out);
+    if (ok) {
+        sc_rbb_in_hook++;
+        int vfd = sc_rbb_open_under_mount_ro(mount_buf, aw_buf, 1);
+        sc_rbb_in_hook--;
+        if (vfd < 0) {
+            out[0] = '\0';
+            ok = 0;
+        } else {
+            close(vfd);
+        }
+    }
+    free(bufs);
+    return ok;
+}
+
+// Safely open redirected cover artwork without TOCTOU or symlink/FIFO hazards.
+// Returns >= 0 fd if handled, -1 to fall through.
+static int sc_rbb_open_artwork(const char *path, int flags) {
+    if ((flags & O_ACCMODE) != O_RDONLY || (flags & (O_CREAT | O_TRUNC | O_APPEND | O_DIRECTORY)) != 0)
+        return -1;
+    char *bufs = (char *)malloc(PATH_MAX * 2);
+    if (!bufs) return -1;
+    char *mount_buf = bufs;
+    char *aw_buf = bufs + PATH_MAX;
+    int fd = -1;
+    if (sc_rbb_resolve_artwork(path, mount_buf, aw_buf, NULL)) {
+        sc_rbb_in_hook++;
+        fd = sc_rbb_open_under_mount_ro(mount_buf, aw_buf, (flags & O_CLOEXEC) != 0);
+        sc_rbb_in_hook--;
+        if (fd >= 0 && !(flags & O_NONBLOCK)) {
+            int cur = fcntl(fd, F_GETFL);
+            if (cur >= 0 && (cur & O_NONBLOCK)) (void)fcntl(fd, F_SETFL, cur & ~O_NONBLOCK);
+        }
+    }
+    free(bufs);
+    return fd;
+}
+
 // Intercept read-only open of OverviewData/<uuid>/<id>.rgb and return a memfd_create fd.
 // Returns >= 0 fd if handled, -1 to fall through to normal open.
 static int sc_rbb_open_rgb(const char *path, int flags) {
-    if (!path || sc_rbb_in_hook || (flags & O_DIRECTORY) || !sc_rbb_is_sched_other()) return -1;
+    if (!path || sc_rbb_in_hook || (flags & O_DIRECTORY) || !sc_rbb_thread_allowed()) return -1;
     int is_write = (flags & O_ACCMODE) != O_RDONLY || (flags & (O_CREAT | O_TRUNC | O_APPEND)) != 0;
     int slot = -1;
     uint64_t gen = 0;
@@ -1068,7 +1201,7 @@ static int sc_rbb_open_rgb(const char *path, int flags) {
 }
 
 static int sc_rbb_access_rgb(const char *path, int mode) {
-    if (!path || sc_rbb_in_hook || (mode & W_OK) || !sc_rbb_is_sched_other()) return 0;
+    if (!path || sc_rbb_in_hook || (mode & W_OK) || !sc_rbb_thread_allowed()) return 0;
     int slot = -1;
     uint64_t gen = 0;
     int64_t id = 0;
@@ -1077,7 +1210,7 @@ static int sc_rbb_access_rgb(const char *path, int mode) {
 
 #ifdef STATX_BASIC_STATS
 static int sc_rbb_statx_rgb(const char *path, struct statx *buf) {
-    if (!path || !buf || sc_rbb_in_hook || !sc_rbb_is_sched_other()) return 0;
+    if (!path || !buf || sc_rbb_in_hook || !sc_rbb_thread_allowed()) return 0;
     int slot = -1;
     uint64_t gen = 0;
     int64_t id = 0;
@@ -1095,7 +1228,7 @@ static int sc_rbb_statx_rgb(const char *path, struct statx *buf) {
 #endif
 
 static int sc_rbb_stat_rgb(const char *path, struct stat *buf) {
-    if (!path || !buf || sc_rbb_in_hook || !sc_rbb_is_sched_other()) return 0;
+    if (!path || !buf || sc_rbb_in_hook || !sc_rbb_thread_allowed()) return 0;
     int slot = -1;
     uint64_t gen = 0;
     int64_t id = 0;

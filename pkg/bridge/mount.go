@@ -125,7 +125,7 @@ func (w work) cost() time.Duration {
 	us += 0.48 * float64(w.oneLibrary)    // 0.50 s a MiB
 	us += 0.15 * float64(w.deviceLibrary) // 0.16 s a MiB
 	us += 130*float64(w.view) + 100*float64(w.load) + 650*float64(w.build)
-	us += 25000*float64(w.adds) + 30000*float64(w.removes) + 15000*float64(w.updates) + 5000*float64(w.lists) + 120*float64(w.entries)
+	us += 25000*float64(w.adds) + 30000*float64(w.removes) + 15000*float64(w.updates) + 6500*float64(w.lists) + 120*float64(w.entries)
 	us += 33000*float64(w.staged) + 350*float64(w.scan)
 	us += 0.0057 * float64(w.legacyState) // ~6 ms/MiB FAT32 cluster-chain traversal + page scatter on multi-GB legacy state DBs
 	us += float64(w.commits) * (250000 + 65*float64(w.tracks))
@@ -321,7 +321,9 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		return res, err
 	}
 	defer unlock()
-	swapped, swapDeadline := swapNext(ctx, mount, dir, st)
+	layout := ReadLayout(o.Settings)
+	stamp := rbstate.Stamp(layout, files, "")
+	swapped, swapDeadline := swapNext(ctx, mount, dir, st, o.OnDemand, stamp)
 	if swapped && !o.OnDemand {
 		// The job drops the records the next library kept in the stage for the deck's loads, and
 		// goes on with what is pending.
@@ -330,8 +332,6 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	if !swapped && (swapDeadline || deadlineReached()) {
 		return stopAtDeadline()
 	}
-	layout := ReadLayout(o.Settings)
-	stamp := rbstate.Stamp(layout, files, "")
 	head, headErr := rbstate.ReadHeader(dir)
 	if swapped && o.OnDemand && (headErr != nil || !head.Pending.None()) {
 		startBG()
@@ -342,12 +342,14 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	st.done("stat", "%d export files, snapshot %v, unchanged %v", len(files), headErr == nil, unchanged)
 	if unchanged && head.Pending.None() {
 		if o.OnDemand {
-			if _, err := os.Stat(filepath.Join(dir, rbstate.BrowseIndexName)); errors.Is(err, os.ErrNotExist) {
-				if snap, lerr := rbstate.Load(dir); lerr == nil {
-					if serr := rbstate.SaveBrowseIndex(dir, snap); serr == nil {
-						chores(ctx, mount, st, !o.Publish)
-						return MountResult{Bypassed: true, Background: res.Background}, nil
-					}
+			if head.Mode != rbstate.ModeOnDemand {
+				// Base-format snapshot lacks Track.AnalysisPath/ArtworkPath/Duration/SampleRate:
+				// never emit a header-only stub; hydrate from exports in-window or via background job.
+				unchanged = false
+			} else if !rbstate.BrowseIndexMatches(dir, head) {
+				if snap, lerr := rbstate.Load(dir); lerr == nil && syncBrowseIndex(dir, snap) == nil {
+					chores(ctx, mount, st, !o.Publish)
+					return MountResult{Bypassed: true, Background: res.Background}, nil
 				}
 				unchanged = false
 			}

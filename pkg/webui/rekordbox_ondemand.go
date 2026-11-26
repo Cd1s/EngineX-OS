@@ -39,11 +39,17 @@ type rbOnDemandRequest struct {
 	Length int     `json:"length,omitempty"`
 }
 
+var onDemandChmod = os.Chmod
+
 func (s *Server) rbOnDemandBuilder() *bridge.OnDemandBuilder {
 	s.rbOnDemandMu.Lock()
 	defer s.rbOnDemandMu.Unlock()
 	if s.rbOnDemand == nil {
-		s.rbOnDemand = bridge.NewOnDemandBuilder()
+		mediaRoot := filepath.Clean(strings.TrimSpace(s.onDemandMediaRoot()))
+		s.rbOnDemand = bridge.NewOnDemandBuilderWithConfig(bridge.OnDemandBuilderConfig{
+			MediaRoot:         mediaRoot,
+			RequireMountpoint: mediaRoot == "/media" || s.cfg.RequireOnDemandMountpoint,
+		})
 	}
 	return s.rbOnDemand
 }
@@ -88,8 +94,11 @@ func (s *Server) startRekordboxOnDemand() {
 		log.Printf("stream-sync: rb-ondemand listen %s: %v", sock, err)
 		return
 	}
-	if err := os.Chmod(sock, 0o600); err != nil {
-		log.Printf("stream-sync: rb-ondemand chmod %s: %v", sock, err)
+	if err := onDemandChmod(sock, 0o600); err != nil {
+		log.Printf("stream-sync: rb-ondemand chmod %s: %v; refusing insecure socket", sock, err)
+		_ = ln.Close()
+		_ = os.Remove(sock)
+		return
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+RekordboxOnDemandRoute, func(w http.ResponseWriter, r *http.Request) {
@@ -240,9 +249,12 @@ func (s *Server) serveRekordboxOnDemand(w http.ResponseWriter, r *http.Request, 
 		case errors.Is(err, bridge.ErrOnDemandUUIDMismatch):
 			w.Header().Set("X-RB-Status", "uuid_mismatch")
 			fail(w, http.StatusConflict, err)
-		case errors.Is(err, bridge.ErrOnDemandDegraded):
+		case errors.Is(err, bridge.ErrOnDemandDegraded), errors.Is(err, bridge.ErrOnDemandLimit):
 			w.Header().Set("X-RB-Status", "degraded")
 			fail(w, http.StatusUnprocessableEntity, err)
+		case errors.Is(err, bridge.ErrOnDemandUnavailable):
+			w.Header().Set("X-RB-Status", "unavailable")
+			fail(w, http.StatusServiceUnavailable, err)
 		default:
 			w.Header().Set("X-RB-Status", "error")
 			fail(w, http.StatusServiceUnavailable, err)

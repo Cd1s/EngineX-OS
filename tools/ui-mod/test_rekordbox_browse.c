@@ -287,6 +287,54 @@ static void *run_tls_alias_and_gen_test(void *arg) {
     return NULL;
 }
 
+struct gui_hook_arg {
+    const char *thr_name;
+    const char *rgb_path;
+    const char *art_path;
+    const char *note_mdb;
+    int failures;
+};
+
+static uint64_t g_dup_race_gen;
+static void inject_concurrent_dup_slot(void) {
+    pthread_mutex_lock(&sc_rbb_mu);
+    sc_rbb_cache[0].state = 0;
+    sc_rbb_cache[7].drive_gen = g_dup_race_gen;
+    sc_rbb_cache[7].track_id = 29;
+    sc_rbb_cache[7].lru_tick = ++sc_rbb_lru_seq;
+    sc_rbb_cache[7].state = 1;
+    sc_rbb_cache[7].neg_until = 0;
+    pthread_mutex_unlock(&sc_rbb_mu);
+}
+
+static void *run_gui_browse_guard(void *arg) {
+    struct gui_hook_arg *a = (struct gui_hook_arg *)arg;
+#ifdef __linux__
+    assert(prctl(PR_SET_NAME, a->thr_name, 0, 0, 0) == 0);
+#endif
+    char mapped[PATH_MAX];
+    struct stat st;
+    if (a->note_mdb) sc_rbb_note_path(a->note_mdb);
+    int fd = sc_rbb_open_rgb(a->rgb_path, O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        close(fd);
+        a->failures++;
+    }
+    if (sc_rbb_access_rgb(a->rgb_path, R_OK) != 0) a->failures++;
+    if (sc_rbb_stat_rgb(a->rgb_path, &st) != 0) a->failures++;
+#ifdef STATX_BASIC_STATS
+    struct statx stx;
+    if (sc_rbb_statx_rgb(a->rgb_path, &stx) != 0) a->failures++;
+#endif
+    if (sc_rbb_map_artwork(a->art_path, mapped) != 0) a->failures++;
+    int afd = sc_rbb_open_artwork(a->art_path, O_RDONLY | O_CLOEXEC);
+    if (afd >= 0) {
+        close(afd);
+        a->failures++;
+    }
+    return NULL;
+}
+
 int main(void) {
     char root_tpl[] = "/tmp/test_rbb_XXXXXX";
     char *root = mkdtemp(root_tpl);
@@ -521,6 +569,185 @@ int main(void) {
         pthread_t th;
         assert(pthread_create(&th, NULL, run_tls_alias_and_gen_test, &ta) == 0);
         assert(pthread_join(th, NULL) == 0);
+    }
+
+    /* 6. Review proof tests (Findings 2, 4, C-NOTE 5, RBB1 tag). */
+    {
+        int review_failures = 0;
+
+        /* Restore active drive index on slot 0 (step 5 evicted it across UNINDEXED_0..7). */
+        sc_rbb_note_path(mdb_path);
+        assert(__atomic_load_n(&sc_rbb_active, __ATOMIC_RELAXED) == 1);
+
+        /* Proof C (Finding 2): SceneGraph, EMain, EPlanckApp, QSGRenderThread must bypass ALL browse hooks,
+         * and sc_rbb_note_path on a GUI thread must not register unindexed mounts or read .rb-bridge-browse. */
+        char gui_stick[PATH_MAX], gui_dbdir[PATH_MAX], gui_mdb[PATH_MAX], gui_idx[PATH_MAX];
+        path_fmt(gui_stick, sizeof gui_stick, root, "/GUI_STICK");
+        path_fmt(gui_dbdir, sizeof gui_dbdir, gui_stick, "/Engine Library/Database2");
+        mkdir_p(gui_dbdir);
+        path_fmt(gui_mdb, sizeof gui_mdb, gui_dbdir, "/m.db");
+        write_file_all(gui_mdb, "", 0);
+        path_fmt(gui_idx, sizeof gui_idx, gui_dbdir, "/.rb-bridge-browse");
+        char gui_idx_body[256];
+        snprintf(gui_idx_body, sizeof gui_idx_body,
+                 "RBB1 %s tag1\nT\t1\t60.0\t44100\t/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT\n", uuid);
+        write_file_all(gui_idx, gui_idx_body, strlen(gui_idx_body));
+
+        char valid_art[PATH_MAX];
+        path_fmt(valid_art, sizeof valid_art, stick, "/Engine Library/Artwork/JcGzLMZmZphFwIWYUrbI7LyECvA.jpg");
+        path_fmt(rgb_req, sizeof rgb_req, ovdir, "/10.rgb");
+        const char *gui_names[] = {"SceneGraph", "EMain", "EPlanckApp", "QSGRenderThread"};
+        for (size_t i = 0; i < sizeof gui_names / sizeof *gui_names; i++) {
+            struct gui_hook_arg ga = {gui_names[i], rgb_req, valid_art, gui_mdb, 0};
+            pthread_t gth;
+            assert(pthread_create(&gth, NULL, run_gui_browse_guard, &ga) == 0);
+            assert(pthread_join(gth, NULL) == 0);
+            if (ga.failures != 0) {
+                fprintf(stderr, "REVIEW PROOF FAIL (Finding 2): GUI thread %s bypassed browse guard (%d failure(s))\n",
+                        gui_names[i], ga.failures);
+                review_failures += ga.failures;
+            }
+        }
+        pthread_mutex_lock(&sc_rbb_mu);
+        for (int i = 0; i < SC_RBB_MAX_DRIVES; i++) {
+            if (sc_rbb_tbl[i].used && !strcmp(sc_rbb_tbl[i].mount, gui_stick)) {
+                fprintf(stderr, "REVIEW PROOF FAIL (Finding 2): GUI sc_rbb_note_path registered drive %s\n", gui_stick);
+                review_failures++;
+            }
+        }
+        pthread_mutex_unlock(&sc_rbb_mu);
+
+        /* Proof D (Finding 4): Symlinks, intermediate symlink dirs, and FIFOs under PIONEER/ must fail safely. */
+        char outside_anlz[PATH_MAX], link_anlz[PATH_MAX], sym_dir[PATH_MAX], sym_sub[PATH_MAX];
+        char sym_target[PATH_MAX], fifo_anlz[PATH_MAX], outside_art[PATH_MAX], link_art[PATH_MAX];
+        path_fmt(outside_anlz, sizeof outside_anlz, root, "/outside.2EX");
+        write_anlz_pwv6(outside_anlz, 1200, pwv6, 0);
+        path_fmt(link_anlz, sizeof link_anlz, anlzdir, "/ANLZ0026.2EX");
+        assert(symlink(outside_anlz, link_anlz) == 0);
+
+        path_fmt(sym_sub, sizeof sym_sub, root, "/sym_outside_dir");
+        mkdir_p(sym_sub);
+        path_fmt(sym_target, sizeof sym_target, sym_sub, "/ANLZ0027.2EX");
+        write_anlz_pwv6(sym_target, 1200, pwv6, 0);
+        path_fmt(sym_dir, sizeof sym_dir, anlzdir, "/SYMDIR");
+        assert(symlink(sym_sub, sym_dir) == 0);
+
+        path_fmt(fifo_anlz, sizeof fifo_anlz, anlzdir, "/ANLZ0028.2EX");
+        assert(mkfifo(fifo_anlz, 0600) == 0);
+
+        path_fmt(outside_art, sizeof outside_art, root, "/outside.jpg");
+        write_file_all(outside_art, "\xff\xd8\xff\xe0OUTSIDE", 11);
+        path_fmt(link_art, sizeof link_art, artdir, "/sym.jpg");
+        assert(symlink(outside_art, link_art) == 0);
+
+        char idx3[4096];
+        snprintf(idx3, sizeof idx3,
+                 "RBB1 %s v1:99:1700000000:ondemand:st1\n"
+                 "T\t10\t240.000\t44100\t/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT\n"
+                 "T\t26\t120.000\t44100\t/PIONEER/USBANLZ/P001/00000001/ANLZ0026.DAT\n"
+                 "T\t27\t120.000\t44100\t/PIONEER/USBANLZ/P001/00000001/SYMDIR/ANLZ0027.DAT\n"
+                 "T\t28\t120.000\t44100\t/PIONEER/USBANLZ/P001/00000001/ANLZ0028.DAT\n"
+                 "T\t29\t120.000\t44100\t/PIONEER/USBANLZ/P001/00000001/ANLZ0029.DAT\n"
+                 "A\tJcGzLMZmZphFwIWYUrbI7LyECvA\t/PIONEER/Artwork/00001/a1.jpg\n"
+                 "A\tSYMLINKART\t/PIONEER/Artwork/00001/sym.jpg\n",
+                 uuid);
+        write_file_all(idx_path, idx3, strlen(idx3));
+        pthread_mutex_lock(&sc_rbb_mu);
+        for (int i = 0; i < SC_RBB_MAX_DRIVES; i++) {
+            if (sc_rbb_tbl[i].used && sc_rbb_tbl[i].has_index) {
+                sc_rbb_tbl[i].last_check = 0;
+                sc_rbb_tbl[i].idx_size = 0;
+            }
+        }
+        pthread_mutex_unlock(&sc_rbb_mu);
+
+        /* Tagged RBB1 header must still parse pure uuid and open Track 10 + Artwork a1.jpg via sc_rbb_open_artwork. */
+        path_fmt(rgb_req, sizeof rgb_req, ovdir, "/10.rgb");
+        int tagged_fd = sc_rbb_open_rgb(rgb_req, O_RDONLY | O_CLOEXEC);
+        assert(tagged_fd >= 0);
+        close(tagged_fd);
+        int art_fd = sc_rbb_open_artwork(valid_art, O_RDONLY | O_CLOEXEC);
+        assert(art_fd >= 0);
+        int fl = fcntl(art_fd, F_GETFL);
+        assert(fl >= 0 && (fl & O_NONBLOCK) == 0);
+        close(art_fd);
+
+        /* Leaf symlink -> rejected */
+        path_fmt(rgb_req, sizeof rgb_req, ovdir, "/26.rgb");
+        int sym_fd = sc_rbb_open_rgb(rgb_req, O_RDONLY | O_CLOEXEC);
+        if (sym_fd >= 0) {
+            fprintf(stderr, "REVIEW PROOF FAIL (Finding 4): sc_rbb_open_rgb followed ANLZ symlink outside mount (fd=%d)\n", sym_fd);
+            close(sym_fd);
+            review_failures++;
+        }
+
+        /* Intermediate dir symlink -> rejected */
+        path_fmt(rgb_req, sizeof rgb_req, ovdir, "/27.rgb");
+        int symdir_fd = sc_rbb_open_rgb(rgb_req, O_RDONLY | O_CLOEXEC);
+        if (symdir_fd >= 0) {
+            fprintf(stderr, "REVIEW PROOF FAIL (Finding 4): sc_rbb_open_rgb followed intermediate symlink dir (fd=%d)\n", symdir_fd);
+            close(symdir_fd);
+            review_failures++;
+        }
+
+        /* FIFO at ANLZ -> nonblocking rejection (no hang!) */
+        path_fmt(rgb_req, sizeof rgb_req, ovdir, "/28.rgb");
+        assert(sc_rbb_open_rgb(rgb_req, O_RDONLY | O_CLOEXEC) < 0);
+
+        /* Artwork symlink -> rejected by both sc_rbb_map_artwork and sc_rbb_open_artwork */
+        char sym_art_req[PATH_MAX];
+        path_fmt(sym_art_req, sizeof sym_art_req, stick, "/Engine Library/Artwork/SYMLINKART.jpg");
+        assert(sc_rbb_map_artwork(sym_art_req, art_mapped) == 0);
+        assert(sc_rbb_open_artwork(sym_art_req, O_RDONLY | O_CLOEXEC) < 0);
+
+        /* C-NOTE 5a & 5b: Negative-cache TTL expires and duplicate cache slot is avoided even with prior empty slots. */
+        path_fmt(rgb_req, sizeof rgb_req, ovdir, "/29.rgb");
+        assert(sc_rbb_open_rgb(rgb_req, O_RDONLY | O_CLOEXEC) < 0);
+        char p29[PATH_MAX];
+        path_fmt(p29, sizeof p29, anlzdir, "/ANLZ0029.2EX");
+        write_anlz_pwv6(p29, 1200, pwv6, 0);
+        /* Still negatively cached right now: */
+        assert(sc_rbb_open_rgb(rgb_req, O_RDONLY | O_CLOEXEC) < 0);
+        /* Force negative TTL expiry and verify recovery + no duplicate cache slot on concurrent race. */
+        pthread_mutex_lock(&sc_rbb_mu);
+        uint64_t g0 = sc_rbb_tbl[0].gen;
+        int neg_idx = -1;
+        for (int i = 0; i < SC_RBB_CACHE_CAP; i++) {
+            if (sc_rbb_cache[i].state == 2 && sc_rbb_cache[i].drive_gen == g0 && sc_rbb_cache[i].track_id == 29) {
+                neg_idx = i;
+                break;
+            }
+        }
+        assert(neg_idx >= 0);
+        sc_rbb_cache[neg_idx].neg_until = sc_rbb_mono_sec() - 1;
+        pthread_mutex_unlock(&sc_rbb_mu);
+        int rec_fd = sc_rbb_open_rgb(rgb_req, O_RDONLY | O_CLOEXEC);
+        assert(rec_fd >= 0);
+        close(rec_fd);
+        /* Simulate concurrent insert race: clear entry 29 so lookup misses, then while building,
+         * hook populates slot 7 with (g0, 29) and leaves slot 0 empty. Must NOT insert a duplicate! */
+        pthread_mutex_lock(&sc_rbb_mu);
+        for (int i = 0; i < SC_RBB_CACHE_CAP; i++) {
+            if (sc_rbb_cache[i].state != 0 && sc_rbb_cache[i].drive_gen == g0 && sc_rbb_cache[i].track_id == 29)
+                sc_rbb_cache[i].state = 0;
+        }
+        g_dup_race_gen = g0;
+        sc_rbb_on_cache_insert_hook = inject_concurrent_dup_slot;
+        pthread_mutex_unlock(&sc_rbb_mu);
+        rec_fd = sc_rbb_open_rgb(rgb_req, O_RDONLY | O_CLOEXEC);
+        assert(rec_fd >= 0);
+        close(rec_fd);
+        sc_rbb_on_cache_insert_hook = NULL;
+        pthread_mutex_lock(&sc_rbb_mu);
+        int matches_29 = 0;
+        for (int i = 0; i < SC_RBB_CACHE_CAP; i++) {
+            if (sc_rbb_cache[i].state != 0 && sc_rbb_cache[i].drive_gen == g0 && sc_rbb_cache[i].track_id == 29)
+                matches_29++;
+        }
+        pthread_mutex_unlock(&sc_rbb_mu);
+        assert(matches_29 == 1);
+
+        assert(review_failures == 0);
     }
 
     /* Clean up temp dir */

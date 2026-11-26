@@ -47,9 +47,11 @@ static uint64_t test_cache_reserve;
 // Free space left on a stick after a carry-over: none, so a tiny tmpfs stick fills up mid-copy.
 static uint64_t test_carry_slack;
 #define CARRY_SLACK test_carry_slack
-// systemctl for stopping a volume's background import: none (an empty path fails to run) until a test sets one.
+// systemctl / systemd-run for stopping/starting a volume's background import: empty until a test sets one.
 static char test_systemctl[PATH_MAX];
+static char test_systemd_run[PATH_MAX];
 #define SYSTEMCTL_PATH test_systemctl
+#define SYSTEMD_RUN_PATH test_systemd_run
 #include <errno.h>
 #include <sys/stat.h>
 static char test_eio_path[PATH_MAX];
@@ -365,6 +367,33 @@ static void test_premount_shallow_walk_large_assets(const char *root) {
     libfd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);assert(libfd>=0);
     errno=0;assert(validate_library_shallow(libfd,now_ms()-10)==-1&&errno==ETIMEDOUT);
     close(libfd);
+
+    // PIONEER/ shallow validation: valid PIONEER/rekordbox + PIONEER/USBANLZ passes, while
+    // symlinks/FIFOs on PIONEER, PIONEER/USBANLZ, or PIONEER/rekordbox/export.pdb reject (ELOOP).
+    errno=0;assert(validate_pioneer_shallow(vol,now_ms()+500)==0);
+
+    char pio[PATH_MAX],pio_bak[PATH_MAX],anlz_sub[PATH_MAX],sym_pdb[PATH_MAX],pio_fifo[PATH_MAX];
+    join(pio,vol,"PIONEER");join(pio_bak,vol,"PIONEER-bak");
+    join(anlz_sub,vol,"PIONEER/USBANLZ");
+    join(sym_pdb,vol,"PIONEER/rekordbox/sym.pdb");
+    assert(!symlink("/etc/passwd",sym_pdb));
+    errno=0;assert(validate_pioneer_shallow(vol,now_ms()+500)==-1&&errno==ELOOP);
+    unlink(log);
+    rc=after_mount_at(vol,vol,"/dev/sdz1",MOUNT_PRE,now_ms()+2000);
+    assert((rc&CONVERTED)==0&&access(log,F_OK)==-1&&errno==ENOENT);
+    assert(!unlink(sym_pdb));
+
+    join(pio_fifo,vol,"PIONEER/USBANLZ");
+    assert(!symlink("/etc",pio_fifo));
+    errno=0;assert(validate_pioneer_shallow(vol,now_ms()+500)==-1&&errno==ELOOP);
+    assert(!unlink(pio_fifo));
+
+    assert(!rename(pio,pio_bak));
+    assert(!symlink("/etc",pio));
+    errno=0;assert(validate_pioneer_shallow(vol,now_ms()+500)==-1&&errno==ELOOP);
+    assert(!unlink(pio));
+    assert(!rename(pio_bak,pio));
+
     test_rb_bridge[0]=0;
     printf("pre-mount shallow walk on 12,000 OverviewData+Artwork files (%lld ms) + direct symlink rejection: PASS\n",(long long)shallow_ms);
 }
@@ -2512,6 +2541,52 @@ static void test_hfs_gen2_lkl_policy(const char *root,const char *self_exe) {
     test_platform_mode_val=0;test_fsck_bin[0]=0;test_lklfuse_bin[0]=0;test_rb_bridge[0]=0;test_guardian_system[0]=0;test_hfs_target[0]=0;test_disk[0]=0;test_modules_root[0]=0;
     puts("Gen-2 lklfuse policy (fsck-fail->ro, clean->rw+wait, unclean->fsck-y->rw, pull->lazy+kill, lkl-fail->ro, carry-over): PASS");
 }
+// RD-2 proof (fails on f65d4fdf): a mount-window timeout starts the background import unit via
+// systemd-run, and a finished pending swap (.rb-next.db + .swap) bypasses slow_marker so a
+// remount/re-insert publishes it and clears slow_marker.
+static void test_timeout_starts_import_and_pending_swap_overrides_slow_marker(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],blog[PATH_MAX],slog[PATH_MAX],script[PATH_MAX*3],marker[PATH_MAX];
+    join(disk,root,"rd2-disk");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"big-unt-pdb");
+    join(target,MEDIA_ROOT,"UNTITLED");assert(!make_dirs(target));
+    join(blog,root,"rd2-bridge.log");join(slog,root,"rd2-systemd.log");
+    join(test_rb_bridge,root,"rd2-bridge");join(test_systemd_run,root,"rd2-systemd-run");
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"sr $*\" >> '%s'\n",slog);
+    write_file(test_systemd_run,script);assert(!chmod(test_systemd_run,0700));
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"br $*\" >> '%s'\nexit 124\n",blog);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
+    unsigned slow_before=count_runtime("slow-");
+    struct libmnt_context c={.target=target,.source="/dev/sdx1"};
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    assert(count_runtime("slow-")==slow_before+1);
+    char want_unit[64],want_sr[PATH_MAX*2];
+    import_unit(target,want_unit);
+    snprintf(want_sr,sizeof want_sr,"%s/slow-",test_runtime);(void)want_sr;
+    FILE *sf=fopen(slog,"r");assert(sf);char sbuf[4096]={0};size_t sn=fread(sbuf,1,sizeof sbuf-1,sf);fclose(sf);sbuf[sn]=0;
+    assert(strstr(sbuf,want_unit)&&strstr(sbuf,"--import-path")&&strstr(sbuf,target));
+    assert(!umount2(target,UMOUNT_NOFOLLOW));unlink(slog);unlink(blog);
+
+    // Next insert without pending swap honors slow_marker and skips rb-bridge.
+    c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
+    assert(access(blog,F_OK)==-1);
+    assert(!umount2(target,UMOUNT_NOFOLLOW));
+
+    // Pending swap (.rb-next.db + .swap) overrides slow_marker, runs rb-bridge, and clears slow_marker.
+    join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2/.rb-next.db");write_file(p,"next");
+    join(p,disk,"Engine Library/Database2/.rb-bridge-snapshot.swap");write_file(p,"swap");
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"pub $*\" >> '%s'\nrm -f \"$2/Engine Library/Database2/.rb-next.db\" \"$2/Engine Library/Database2/.rb-bridge-snapshot.swap\"\nexit 0\n",blog);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
+    FILE *bf=fopen(blog,"r");assert(bf);char bbuf[4096]={0};size_t bn=fread(bbuf,1,sizeof bbuf-1,bf);fclose(bf);bbuf[bn]=0;
+    assert(strstr(bbuf,"pub --mount-path ")&&strstr(bbuf,target));
+    assert(count_runtime("slow-")==slow_before);
+    assert(!umount2(target,UMOUNT_NOFOLLOW));
+    (void)marker;test_systemd_run[0]=0;test_rb_bridge[0]=0;test_disk[0]=0;
+    puts("RD-2 edisksd timeout -> start_import & pending swap overrides/clears slow_marker: PASS");
+}
 int main(int argc,char **argv) {
     if(argc>1&&!strcmp(argv[1],"--mock-lklfuse"))return run_mock_lklfuse(argc,argv);
     char root[]="/tmp/enginex-edisks-tests-XXXXXX";assert(mkdtemp(root));
@@ -2519,7 +2594,7 @@ int main(int argc,char **argv) {
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
     assert(!make_dirs(test_media));test_guardian_window_floor();test_paths_and_copy(root);test_premount_shallow_walk_large_assets(root);test_eject_stops_the_background_import(root);test_eject_stops_the_remount_helper(root);test_eject_runs_cue_writeback(root);test_eject_writeback_overrun(root);test_only_an_eject_marks_the_stick(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_hfs_gen2_lkl_policy(root,argv[0]);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_removal_detaches_a_view_in_use(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);test_hfs_view_scale_and_47879b10_253(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_hfs_gen2_lkl_policy(root,argv[0]);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_timeout_starts_import_and_pending_swap_overrides_slow_marker(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_removal_detaches_a_view_in_use(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);test_hfs_view_scale_and_47879b10_253(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;

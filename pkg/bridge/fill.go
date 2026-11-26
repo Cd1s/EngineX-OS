@@ -122,7 +122,9 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	if err != nil {
 		return res, fmt.Errorf("volume lock: %w", err)
 	}
-	reconcileOrphanSwap(ctx, dbDir)
+	if _, rerr := reconcileOrphanSwap(ctx, dbDir); rerr != nil {
+		log.Printf("rb-bridge: orphan swap check deferred: %v", rerr)
+	}
 	snap, err := rbstate.Load(dbDir)
 	unlock()
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -164,7 +166,11 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	// Rows and lists a window left to the job come first, with what is staged already: they are
 	// what the DJ browses. The performance data follows in the job the swap's window starts
 	// (unless OnDemand is set, in which case load/browse read rekordbox files directly).
-	needsNextRows := snap == nil || (view.view != nil && (Diff(view.view, snap).structural() || (o.OnDemand && (snap.Pending.Rows > 0 || snap.Pending.Lists))))
+	var diff *Plan
+	if snap != nil && view.view != nil {
+		diff = Diff(view.view, snap)
+	}
+	needsNextRows := snap == nil || (diff != nil && (diff.structural() || (o.OnDemand && (len(diff.UpdateTracks) > 0 || snap.Pending.Rows > 0 || snap.Pending.Lists))))
 	if needsNextRows && view.view != nil && o.Stage == nil {
 		if snap == nil || o.OnDemand {
 			err = buildNextWhenIdle(false, true)
@@ -193,22 +199,51 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	}
 	if o.OnDemand {
 		// OnDemand mode: rows and lists are current; no background performance-data pass is run.
-		// If an older snapshot still has Pending.Perf/Verify or lacks .rb-bridge-browse, settle it cleanly when idle.
-		_, browseErr := os.Stat(filepath.Join(dbDir, rbstate.BrowseIndexName))
-		if snap.Pending.Perf > 0 || snap.Pending.Verify || (view.view != nil && snap.Stamp != view.stamp) || errors.Is(browseErr, os.ErrNotExist) {
-			if pace.waitIdle() == nil {
-				if lock, lockErr := rbstate.LockVolume(mount, fillLockWait); lockErr == nil {
-					if current, loadErr := rbstate.Load(dbDir); loadErr == nil && !pace.isBusy() {
-						if view.view != nil {
-							current.Stamp, current.Sources = view.stamp, view.view.Sources
-						}
-						current.Pending.Perf, current.Pending.Verify = 0, false
-						if saveErr := current.Save(dbDir); saveErr == nil {
-							_ = rbstate.SaveBrowseIndex(dbDir, current)
-						}
+		// Hydrate legacy snapshots missing ModeOnDemand/browse paths, clear stale perf/verify flags,
+		// and ensure .rb-bridge-browse matches the live snapshot generation.
+		needsSettle := snap.Pending.Perf > 0 || snap.Pending.Verify ||
+			snap.Mode != rbstate.ModeOnDemand ||
+			(view.view != nil && snap.Stamp != view.stamp) ||
+			!rbstate.BrowseIndexMatches(dbDir, snap.Header)
+		if needsSettle {
+			if err := pace.waitIdle(); err != nil {
+				return res, err
+			}
+			lock, lockErr := rbstate.LockVolume(mount, fillLockWait)
+			if lockErr != nil {
+				return res, fmt.Errorf("volume lock: %w", lockErr)
+			}
+			var settleErr error
+			current, loadErr := rbstate.Load(dbDir)
+			if loadErr != nil {
+				settleErr = loadErr
+			} else if pace.isBusy() {
+				lock()
+				log.Printf("rb-bridge: deck active while settling on-demand metadata for %s; pausing", mount)
+				return res, nil
+			} else {
+				dirty := current.Pending.Perf > 0 || current.Pending.Verify || current.Mode != rbstate.ModeOnDemand
+				if view.view != nil {
+					if hydrateOnDemandTracks(current, view.view) {
+						dirty = true
 					}
-					lock()
+					if current.Stamp != view.stamp {
+						current.Stamp, current.Sources = view.stamp, view.view.Sources
+						dirty = true
+					}
 				}
+				current.Pending.Perf, current.Pending.Verify = 0, false
+				current.Mode = rbstate.ModeOnDemand
+				if dirty {
+					settleErr = current.Save(dbDir)
+				}
+				if settleErr == nil {
+					settleErr = syncBrowseIndex(dbDir, current)
+				}
+			}
+			lock()
+			if settleErr != nil {
+				return res, settleErr
 			}
 		}
 		log.Printf("rb-bridge: on-demand mode for %s: rows/lists current, skipping background perf pass (%s)", mount, time.Since(start).Round(time.Millisecond))

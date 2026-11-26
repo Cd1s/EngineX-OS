@@ -2,10 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/Cd1s/EngineX-OS/pkg/bridge/bridgetest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +15,11 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge/bridgetest"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 	_ "modernc.org/sqlite"
 )
 
@@ -282,5 +287,190 @@ func TestVerifyRemountPublishedFailsClosedOnStatAndSnapshotErrors(t *testing.T) 
 	}
 	if err := verifyRemountPublished(mount2, remountPending{hadPendingSnap: true, snapCommit: 7}); err == nil {
 		t.Fatal("verifyRemountPublished passed when snapshot header could not be read")
+	}
+
+	// 3. readRemountPending must fail closed on stat error or corrupt swap header.
+	if _, err := readRemountPending(mount1); err == nil {
+		t.Fatal("readRemountPending passed when Database2 stat returned ENOTDIR")
+	}
+	mount3 := t.TempDir()
+	db3 := filepath.Join(mount3, "Engine Library", "Database2")
+	if err := os.MkdirAll(db3, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(db3, rbstate.SwapName), []byte("corrupt-swap"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRemountPending(mount3); err == nil {
+		t.Fatal("readRemountPending passed with corrupt swap snapshot header")
+	}
+
+	// 4. Discarded pending swap (files removed without promoting commit into m.db) must fail with ErrRemountDiscarded.
+	mount4 := t.TempDir()
+	db4 := filepath.Join(mount4, "Engine Library", "Database2")
+	if err := os.MkdirAll(db4, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tmpLive := t.TempDir()
+	_, uuid1, commit1, err := enginedb.BuildLibrary(ctx, tmpLive, "", []enginedb.TrackRow{{Rel: "Contents/a.mp3", Track: rekordbox.Track{Title: "a"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(tmpLive, "m.db"), filepath.Join(db4, "m.db")); err != nil {
+		t.Fatal(err)
+	}
+	liveSnap := rbstate.New(uuid1)
+	liveSnap.Commit = commit1
+	liveSnap.Mode = rbstate.ModeFull
+	if err := liveSnap.Save(db4); err != nil {
+		t.Fatal(err)
+	}
+	tmpNext := t.TempDir()
+	_, _, commit2, err := enginedb.BuildLibrary(ctx, tmpNext, uuid1, []enginedb.TrackRow{
+		{Rel: "Contents/a.mp3", Track: rekordbox.Track{Title: "a"}},
+		{Rel: "Contents/b.mp3", Track: rekordbox.Track{Title: "b"}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextDBConn, err := sql.Open("sqlite", filepath.Join(tmpNext, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit2 = commit1 + 1
+	if _, err := nextDBConn.Exec(`UPDATE Information SET lastRekordBoxLibraryImportReadCounter=?`, commit2); err != nil {
+		_ = nextDBConn.Close()
+		t.Fatal(err)
+	}
+	_ = nextDBConn.Close()
+	if commit2 == commit1 {
+		t.Fatalf("expected distinct commit2 (%d) != commit1 (%d)", commit2, commit1)
+	}
+	if err := os.Rename(filepath.Join(tmpNext, "m.db"), filepath.Join(db4, ".rb-next.db")); err != nil {
+		t.Fatal(err)
+	}
+	swapSnap := rbstate.New(uuid1)
+	swapSnap.Commit = commit2
+	swapSnap.Applied = 1700000100
+	swapSnap.Mode = rbstate.ModeOnDemand
+	if err := rbstate.SaveBrowseIndexAs(filepath.Join(db4, rbstate.BrowseSwapName), swapSnap); err != nil {
+		t.Fatal(err)
+	}
+	if err := swapSnap.SaveAs(filepath.Join(db4, rbstate.SwapName)); err != nil {
+		t.Fatal(err)
+	}
+	pre, err := readRemountPending(mount4)
+	if err != nil || !pre.hadSwap || pre.wantUUID != uuid1 || pre.wantCommit != commit2 {
+		t.Fatalf("readRemountPending = %+v, err=%v", pre, err)
+	}
+	// Simulate discard (pending files removed, live m.db stayed on commit1).
+	_ = os.Remove(filepath.Join(db4, ".rb-next.db"))
+	_ = os.Remove(filepath.Join(db4, rbstate.SwapName))
+	_ = os.Remove(filepath.Join(db4, rbstate.BrowseSwapName))
+	if err := verifyRemountPublished(mount4, pre); !errors.Is(err, ErrRemountDiscarded) {
+		t.Fatalf("verifyRemountPublished on discarded swap = %v, want ErrRemountDiscarded", err)
+	}
+	// Now promote the next identity + snapshot + matching browse index -> must succeed.
+	tmpNext2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(db4, rbstate.SnapshotName), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = tmpNext2
+	if err := swapSnap.Save(db4); err != nil {
+		t.Fatal(err)
+	}
+	if err := rbstate.SaveBrowseIndex(db4, swapSnap); err != nil {
+		t.Fatal(err)
+	}
+	// Put commit2 DB into m.db.
+	tmpPub := t.TempDir()
+	_, _, commitPub, err := enginedb.BuildLibrary(ctx, tmpPub, uuid1, []enginedb.TrackRow{
+		{Rel: "Contents/a.mp3", Track: rekordbox.Track{Title: "a"}},
+		{Rel: "Contents/b.mp3", Track: rekordbox.Track{Title: "b"}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubDBConn, err := sql.Open("sqlite", filepath.Join(tmpPub, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitPub = commit2
+	if _, err := pubDBConn.Exec(`UPDATE Information SET lastRekordBoxLibraryImportReadCounter=?`, commitPub); err != nil {
+		_ = pubDBConn.Close()
+		t.Fatal(err)
+	}
+	_ = pubDBConn.Close()
+	swapSnap.Commit = commitPub
+	if err := swapSnap.Save(db4); err != nil {
+		t.Fatal(err)
+	}
+	if err := rbstate.SaveBrowseIndex(db4, swapSnap); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(tmpPub, "m.db"), filepath.Join(db4, "m.db")); err != nil {
+		t.Fatal(err)
+	}
+	prePub := remountPending{hadNextDB: true, hadSwap: true, hadBrowseSwap: true, wantUUID: uuid1, wantCommit: commitPub, wantMode: rbstate.ModeOnDemand}
+	if err := verifyRemountPublished(mount4, prePub); err != nil {
+		t.Fatalf("verifyRemountPublished on matching promoted state failed: %v", err)
+	}
+}
+
+func TestRBBridgeWriteBackDryRunFlag(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	pdbPath := filepath.Join(root, "PIONEER", "rekordbox", "export.pdb")
+	origPDB, err := os.ReadFile(pdbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RBBridge([]string{"--mount-path", root}, &out); err != nil {
+		t.Fatalf("initial mount import: %v", err)
+	}
+	bridgetest.Import(t, root)
+	// Trigger trigger_after_update_Track has 1-second strftime('%s') granularity; advance past the
+	// import second so lastEditTime strictly moves when Track.genre is edited below.
+	time.Sleep(1100 * time.Millisecond)
+
+	db, err := sql.Open("sqlite", filepath.Join(root, "Engine Library", "Database2", "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE Track SET genre='EditedDryRunGenre' WHERE id=1`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	out.Reset()
+	if err := RBBridge([]string{"--mount-path", root, "--writeback-cues", "--on-eject", "--dry-run"}, &out); err != nil {
+		t.Fatalf("writeback --dry-run: %v", err)
+	}
+	var res struct {
+		TracksChecked int `json:"tracksChecked"`
+		TracksChanged int `json:"tracksChanged"`
+		FilesUpdated  int `json:"filesUpdated"`
+		Changes       []struct {
+			EngineID int64    `json:"engineId"`
+			Rel      string   `json:"rel"`
+			Fields   []string `json:"fields"`
+		} `json:"changes"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("decode dry-run writeback result %q: %v", &out, err)
+	}
+	if res.TracksChanged != 1 || res.FilesUpdated != 0 || len(res.Changes) != 1 || res.Changes[0].EngineID != 1 || len(res.Changes[0].Fields) == 0 {
+		t.Fatalf("unexpected dry-run result: %+v", res)
+	}
+	afterPDB, err := os.ReadFile(pdbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterPDB, origPDB) {
+		t.Fatal("dry-run modified export.pdb on stick")
 	}
 }

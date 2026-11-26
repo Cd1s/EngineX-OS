@@ -10,6 +10,10 @@ import (
 
 func TestEncodeAndSaveBrowseIndex(t *testing.T) {
 	s := New("11111111-2222-3333-4444-555555555555")
+	s.Commit = 7
+	s.Applied = 1700000123
+	s.Mode = ModeOnDemand
+	s.Stamp = "stamp-abc"
 	s.Tracks["contents/a.mp3"] = &Track{
 		Key:          "contents/a.mp3",
 		EngineID:     10,
@@ -47,8 +51,8 @@ func TestEncodeAndSaveBrowseIndex(t *testing.T) {
 	if len(lines) != 4 {
 		t.Fatalf("got %d lines, want 4:\n%s", len(lines), raw)
 	}
-	if lines[0] != "RBB1 11111111-2222-3333-4444-555555555555" {
-		t.Fatalf("header = %q", lines[0])
+	if wantHdr := "RBB1 11111111-2222-3333-4444-555555555555 " + BrowseTag(s.Header); lines[0] != wantHdr {
+		t.Fatalf("header = %q, want %q", lines[0], wantHdr)
 	}
 	if lines[1] != "T\t2\t180.000\t44100\t/PIONEER/USBANLZ/P001/00000002/ANLZ0000.DAT" {
 		t.Fatalf("line 1 = %q", lines[1])
@@ -62,5 +66,25 @@ func TestEncodeAndSaveBrowseIndex(t *testing.T) {
 	}
 	if lines[3] != "A\t"+wantStem+"\t/PIONEER/Artwork/00001/a1.jpg" {
 		t.Fatalf("line 3 = %q, want stem %q", lines[3], wantStem)
+	}
+	if !BrowseIndexMatches(dir, s.Header) {
+		t.Fatalf("BrowseIndexMatches returned false for matching header")
+	}
+	stale := s.Header
+	stale.Commit++
+	if BrowseIndexMatches(dir, stale) {
+		t.Fatalf("BrowseIndexMatches accepted stale commit header")
+	}
+	wrongMode := s.Header
+	wrongMode.Mode = ModeFull
+	if BrowseIndexMatches(dir, wrongMode) {
+		t.Fatalf("BrowseIndexMatches accepted wrong mode header")
+	}
+	// Legacy untagged RBB1 header must not be treated as coherent with a tagged snapshot.
+	if err := os.WriteFile(filepath.Join(dir, BrowseIndexName), []byte("RBB1 "+s.LibraryUUID+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if BrowseIndexMatches(dir, s.Header) {
+		t.Fatalf("BrowseIndexMatches accepted untagged legacy RBB1 header")
 	}
 }
