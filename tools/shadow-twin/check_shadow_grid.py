@@ -114,10 +114,12 @@ def edit_grid_a(js_body, hold_sec=0.0):
 
 
 def beat_diff(a, b):
-    """Compare BeatNumber on A and B adjusted for small TrackPosition delta."""
+    """Compare BeatNumber on paused A and B (either direct or TrackPosition-adjusted,
+    since paused TrackPosition can lag one ~4096-sample decoder frame behind BeatNumber)."""
+    raw = abs(((a["beat"] - b["beat"]) + 2.0) % 4.0 - 2.0)
     dt_beats = (a["pos"] - b["pos"]) / max(1.0, a["sr"]) * (a["bpm"] / 60.0)
-    d = ((a["beat"] - b["beat"] - dt_beats) + 2.0) % 4.0 - 2.0
-    return abs(d)
+    adj = abs(((a["beat"] - b["beat"] - dt_beats) + 2.0) % 4.0 - 2.0)
+    return min(raw, adj)
 
 
 def main():
