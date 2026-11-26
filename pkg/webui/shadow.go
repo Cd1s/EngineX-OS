@@ -435,8 +435,11 @@ type shadowState struct {
 	gridGenQueries      atomic.Uint64
 	peerTaken           map[string]time.Time // when takePeer last accepted an update per peer (as peerSeq)
 	peerClock           map[string]peerClock // per peer (as peerSeq)
-	peerRTT             map[string]peerRTT   // smallest measured HTTP round-trip per peer id/ip
-	pausedFollow        atomic.Bool          // running Engine hook has shadow-paused-follow enabled
+	peerRTT             map[string]peerRTT   // smallest measured UDP echo round-trip per peer ip
+	udpPings            map[string]udpPing   // in-flight UDP echo probe per peer ip
+	udpPingTries        map[string]int       // warm-up probe count per peer ip
+	pingSeq             uint64
+	pausedFollow        atomic.Bool // running Engine hook has shadow-paused-follow enabled
 	dbg                 shadowDebug
 	metaOnlyPoll        bool       // the newest compose had a CDJ deck, including cached display assets: 120 ms polls
 	resolveMu           sync.Mutex // cold file resolution, independent of the live position lock
@@ -462,7 +465,7 @@ type shadowState struct {
 }
 
 func newShadowState() *shadowState {
-	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, copyGens: map[string]string{}, copyGridGens: map[string]string{}, copyGridPending: map[string]string{}, copyGridNotifyRetry: map[string]time.Time{}, copyGridTries: map[string]int{}, copyGridBusy: map[string]bool{}, copyGridRetry: map[string]time.Time{}, copyTrackIDs: map[string]int64{}, copyTrackIDBusy: map[string]bool{}, regridSockPath: shadowRegridSockPath, gridGens: map[string]gridGenEntry{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, peerRTT: map[string]peerRTT{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn, model: imagePrefix(deviceCompatible()), askers: map[string]time.Time{}, askNotify: make(chan struct{}), consoleDecks: map[int]peerDeck{}}
+	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, copyGens: map[string]string{}, copyGridGens: map[string]string{}, copyGridPending: map[string]string{}, copyGridNotifyRetry: map[string]time.Time{}, copyGridTries: map[string]int{}, copyGridBusy: map[string]bool{}, copyGridRetry: map[string]time.Time{}, copyTrackIDs: map[string]int64{}, copyTrackIDBusy: map[string]bool{}, regridSockPath: shadowRegridSockPath, gridGens: map[string]gridGenEntry{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, peerRTT: map[string]peerRTT{}, udpPings: map[string]udpPing{}, udpPingTries: map[string]int{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn, model: imagePrefix(deviceCompatible()), askers: map[string]time.Time{}, askNotify: make(chan struct{}), consoleDecks: map[int]peerDeck{}}
 }
 
 // shadow-v3: copies under the old "shadow" were analysed by Engine itself,
@@ -949,7 +952,11 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"ok": true})
 }
 
-const shadowDecksMagic = "EngineX-decks 1\n"
+const (
+	shadowDecksMagic = "EngineX-decks 1\n"
+	shadowPingMagic  = "EngineX-ping "
+	shadowPongMagic  = "EngineX-pong "
+)
 
 // decksAlive is the QML's heartbeat between posts: nothing changed on its decks
 // since the last post, so it sends no JSON (each serialisation is garbage on
@@ -1258,49 +1265,122 @@ type peerClock struct {
 	at  time.Time
 }
 
-// peerRTT is the smallest measured HTTP round-trip to a peer, ms, so the
-// receiver compensates half the round trip instead of dropping T_min.
+// peerRTT is the smallest measured UDP echo round-trip to a peer IP, ms, so the
+// receiver compensates half the UDP round trip instead of dropping T_min.
 type peerRTT struct {
-	ms float64
-	at time.Time
+	ms      float64
+	at      time.Time
+	samples int
 }
 
-func (sh *shadowState) recordPeerRTT(ip, id string, rttMS float64, now time.Time) {
-	if rttMS < 0 || math.IsNaN(rttMS) || math.IsInf(rttMS, 0) {
+type udpPing struct {
+	nonce string
+	sent  time.Time
+}
+
+const (
+	shadowUDPPingMaxRTT    = 400 * time.Millisecond
+	shadowUDPPingMinGap    = 200 * time.Millisecond
+	shadowUDPPingWarmupMax = 3
+)
+
+func (sh *shadowState) recordPeerRTT(ip string, rttMS float64, now time.Time) {
+	if ip == "" || rttMS < 0 || math.IsNaN(rttMS) || math.IsInf(rttMS, 0) {
 		return
 	}
-	update := func(k string) {
-		if k == "" {
-			return
-		}
-		r, ok := sh.peerRTT[k]
-		if !ok || now.Sub(r.at) > shadowPeerSeenTimeout {
+	r, ok := sh.peerRTT[ip]
+	if !ok || now.Sub(r.at) > shadowPeerSeenTimeout {
+		r = peerRTT{ms: rttMS, samples: 1}
+	} else {
+		r.ms += 0.1 * now.Sub(r.at).Seconds()
+		if rttMS < r.ms {
 			r.ms = rttMS
-		} else {
-			r.ms += 0.1 * now.Sub(r.at).Seconds()
-			if rttMS < r.ms {
-				r.ms = rttMS
-			}
 		}
-		r.at = now
-		sh.peerRTT[k] = r
+		r.samples++
 	}
-	update(ip)
-	if id != "" && id != ip {
-		update(id)
-	}
+	r.at = now
+	sh.peerRTT[ip] = r
 }
 
-func (sh *shadowState) peerHalfRTT(id, ip string, now time.Time) float64 {
-	for _, k := range [2]string{id, ip} {
-		if k == "" {
-			continue
-		}
-		if r, ok := sh.peerRTT[k]; ok && now.Sub(r.at) <= shadowPeerSeenTimeout {
-			return min(r.ms/2, shadowHalfRTTMaxMS)
-		}
+func (sh *shadowState) peerHalfRTT(ip string, now time.Time) float64 {
+	if ip == "" {
+		return 0
+	}
+	if r, ok := sh.peerRTT[ip]; ok && now.Sub(r.at) <= shadowPeerSeenTimeout {
+		return min(r.ms/2, shadowHalfRTTMaxMS)
 	}
 	return 0
+}
+
+// sendUDPPing probes UDP transit on the same socket that carries EngineX-decks.
+// Older peers ignore it; peerHalfRTT then stays 0 instead of guessing from HTTP.
+func (sh *shadowState) sendUDPPing(conn *net.UDPConn, ip string, port int, now time.Time) {
+	if conn == nil || ip == "" {
+		return
+	}
+	dst := net.ParseIP(ip)
+	if dst == nil {
+		return
+	}
+	if port == 0 {
+		port = shadowBeaconPort
+	}
+	sh.mu.Lock()
+	if p, ok := sh.udpPings[ip]; ok && now.Sub(p.sent) < shadowUDPPingMinGap {
+		sh.mu.Unlock()
+		return
+	}
+	sh.pingSeq++
+	nonce := strconv.FormatUint(sh.pingSeq, 16)
+	sh.udpPings[ip] = udpPing{nonce: nonce, sent: now}
+	sh.udpPingTries[ip]++
+	sh.mu.Unlock()
+
+	var buf [len(shadowPingMagic) + 16]byte
+	n := copy(buf[:], shadowPingMagic)
+	n += copy(buf[n:], nonce)
+	_, _ = conn.WriteToUDP(buf[:n], &net.UDPAddr{IP: dst, Port: port})
+}
+
+// handleUDP processes one datagram on the shadow UDP socket: echo probes run
+// directly off the socket (no HTTP, JSON or handler wait), while beacons and
+// deck pushes delegate to receive.
+func (sh *shadowState) handleUDP(conn *net.UDPConn, b []byte, addr *net.UDPAddr, now time.Time) {
+	if addr == nil || addr.IP == nil {
+		return
+	}
+	if rest, ok := bytes.CutPrefix(b, []byte(shadowPingMagic)); ok {
+		if conn != nil && len(rest) > 0 && len(rest) <= 32 {
+			var buf [len(shadowPongMagic) + 32]byte
+			n := copy(buf[:], shadowPongMagic)
+			n += copy(buf[n:], rest)
+			_, _ = conn.WriteToUDP(buf[:n], addr)
+		}
+		return
+	}
+	ip := addr.IP.String()
+	if rest, ok := bytes.CutPrefix(b, []byte(shadowPongMagic)); ok {
+		sh.mu.Lock()
+		if p, ok := sh.udpPings[ip]; ok && p.nonce != "" && string(rest) == p.nonce {
+			delete(sh.udpPings, ip)
+			if rtt := now.Sub(p.sent); rtt >= 0 && rtt <= shadowUDPPingMaxRTT {
+				sh.recordPeerRTT(ip, float64(rtt.Microseconds())/1000.0, now)
+			}
+		}
+		sh.mu.Unlock()
+		return
+	}
+	sh.receive(b, ip, now)
+	if conn != nil {
+		sh.mu.Lock()
+		_, isPeer := sh.peers[ip]
+		cold := isPeer && sh.peerRTT[ip].samples == 0 && sh.udpPingTries[ip] == 0
+		port := cmp.Or(sh.pushPort, shadowBeaconPort)
+		sh.mu.Unlock()
+		if cold {
+			sh.sendUDPPing(conn, ip, port, now)
+		}
+	}
 }
 
 func (sh *shadowState) playingDriftMS() float64 {
@@ -1354,7 +1434,7 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 	late, halfRTT := 0.0, 0.0
 	if len(decks) > 0 && decks[0].Sent != 0 {
 		late = sh.peerLate(id, decks[0].Sent, now)
-		halfRTT = sh.peerHalfRTT(id, ip, now)
+		halfRTT = sh.peerHalfRTT(ip, now)
 	}
 	sh.dbg.event("peer", map[string]any{"ip": ip, "seq": seq, "late": late, "halfRtt": halfRTT, "decks": slimDecks(decks)})
 	sh.peerSeq[id] = seq
@@ -2695,9 +2775,10 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 		}
 		atMS := now.UnixMilli()
 		if d.Playing && !d.Scratch {
-			// Carry to the exact millisecond stamped in d.At so the paused-follow
-			// position feed matches d.At without sub-ms truncation jitter.
-			d.PositionMS, d.Rate = p.carried(time.UnixMilli(atMS).Sub(p.at))
+			// Carry to the exact millisecond stamped in d.At while keeping Go's
+			// monotonic clock reading (immune to local wall-clock steps).
+			carry := now.Sub(p.at) - time.Duration(now.Nanosecond())%time.Millisecond
+			d.PositionMS, d.Rate = p.carried(carry)
 		}
 		d.Progress, d.Error = 0, "" // ours to say, not the peer's
 		// A file of this player's own for a track the peer loaded from this player's
@@ -3601,7 +3682,7 @@ func (s *Server) shadowLoop() {
 					return
 				}
 				if !isLocalIP(addr.IP) {
-					sh.receive(b[:n], addr.IP.String(), time.Now())
+					sh.handleUDP(conn, b[:n], addr, time.Now())
 				}
 			}
 		}()
@@ -3633,13 +3714,28 @@ func (s *Server) shadowLoop() {
 			return
 		}
 		sh.mu.Unlock()
-		if i%8 == 0 {
-			sh.pausedFollow.Store(runningFeatureOn("shadow-paused-follow"))
-			if conn != nil {
+		if conn != nil {
+			if i%8 == 0 {
 				shadowSendBeacons(conn)
 				if sh.askConsole.Load() {
 					shadowSendAsk(conn)
 				}
+			}
+			now := time.Now()
+			sh.mu.Lock()
+			port := cmp.Or(sh.pushPort, shadowBeaconPort)
+			var pingIPs []string
+			for ip, seen := range sh.peers {
+				if now.Sub(seen) >= shadowPeerSeenTimeout {
+					continue
+				}
+				if i%8 == 0 || (sh.peerRTT[ip].samples < shadowUDPPingWarmupMax && sh.udpPingTries[ip] < shadowUDPPingWarmupMax) {
+					pingIPs = append(pingIPs, ip)
+				}
+			}
+			sh.mu.Unlock()
+			for _, ip := range pingIPs {
+				sh.sendUDPPing(conn, ip, port, time.Now())
 			}
 		}
 		s.shadowPollPeers()
@@ -3777,6 +3873,8 @@ func (sh *shadowState) prunePeers(now time.Time) {
 			delete(sh.peerSeq, ip)
 			delete(sh.peerClock, ip)
 			delete(sh.peerRTT, ip)
+			delete(sh.udpPings, ip)
+			delete(sh.udpPingTries, ip)
 			delete(sh.peerTaken, ip)
 		}
 	}
@@ -3785,12 +3883,16 @@ func (sh *shadowState) prunePeers(now time.Time) {
 			delete(sh.peerTaken, id)
 			delete(sh.peerSeq, id)
 			delete(sh.peerClock, id)
-			delete(sh.peerRTT, id)
 		}
 	}
 	for k, r := range sh.peerRTT {
 		if now.Sub(r.at) >= shadowPeerSeenTimeout {
 			delete(sh.peerRTT, k)
+		}
+	}
+	for ip, p := range sh.udpPings {
+		if now.Sub(p.sent) >= shadowPeerSeenTimeout {
+			delete(sh.udpPings, ip)
 		}
 	}
 	if changed {
@@ -3823,7 +3925,6 @@ func (s *Server) shadowPollPeers() {
 		if ask {
 			u += "?console=1"
 		}
-		t0 := time.Now()
 		resp, err := peerClient.Get(u)
 		if err != nil {
 			continue
@@ -3835,20 +3936,9 @@ func (s *Server) shadowPollPeers() {
 			continue
 		}
 		now = time.Now()
-		rttMS := float64(now.Sub(t0).Microseconds()) / 1000.0
 		sh.mu.Lock()
 		sh.peers[ip] = now
-		console, others := splitConsole(body.Decks)
-		peerDecks := body.Decks
-		if len(console) > 0 {
-			peerDecks = others
-		}
-		id := ip
-		if len(peerDecks) > 0 && peerDecks[0].Link != "" {
-			id = peerDecks[0].Link
-		}
-		sh.recordPeerRTT(ip, id, rttMS, now)
-		if len(console) > 0 {
+		if console, others := splitConsole(body.Decks); len(console) > 0 {
 			if ask {
 				sh.takeConsole(ip, console, now)
 			}
