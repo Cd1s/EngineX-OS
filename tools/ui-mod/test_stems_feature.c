@@ -1707,7 +1707,7 @@ static int drive_load_kind(sqlite_bind_int64_fn id_entry, test_bind_text_fn text
     assert(sqlite3_exec(db,
         "CREATE TABLE Information(id INTEGER PRIMARY KEY,uuid TEXT);INSERT INTO Information(uuid) VALUES('lib-x');"
         "CREATE TABLE Track(id INTEGER PRIMARY KEY,path TEXT,pdbImportKey INTEGER,isAnalyzed INTEGER DEFAULT 0,"
-        "isBeatGridLocked INTEGER DEFAULT 0,playOrder INTEGER,length INTEGER,bpm REAL,year INTEGER);"
+        "isBeatGridLocked INTEGER DEFAULT 0,playOrder INTEGER,length INTEGER,bpm REAL,bpmAnalyzed REAL,key INTEGER,year INTEGER);"
         "CREATE TABLE PerformanceData(trackId INTEGER PRIMARY KEY,trackData BLOB,overviewWaveFormData BLOB,"
         "beatData BLOB,quickCues BLOB,loops BLOB,thirdPartySourceId INTEGER,activeOnLoadLoops INTEGER);"
         "INSERT INTO Track(id,path,pdbImportKey) VALUES(1,'../Contents/Staged.mp3',9);"
