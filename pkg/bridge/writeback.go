@@ -1705,13 +1705,13 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 							if i == 0 {
 								changed = !cuesEquivalent(projectDATCues(anlzOrig[i]), projectDATCues(merged))
 							} else {
-								changed = !cuesEquivalent(anlzOrig[i], merged)
+								changed = !cuesEquivalentExactColor(anlzOrig[i], merged)
 							}
 							if takeOver && changed {
 								mergedZero := mergeEngineCuesWithBaseline(anlzOrig[i], deck, 0, true, colorEdits)
 								if i == 0 && cuesEquivalent(projectDATCues(anlzOrig[i]), projectDATCues(mergedZero)) {
 									changed = false
-								} else if i > 0 && cuesEquivalent(anlzOrig[i], mergedZero) {
+								} else if i > 0 && cuesEquivalentExactColor(anlzOrig[i], mergedZero) {
 									changed = false
 								}
 							}
@@ -2567,7 +2567,7 @@ func dominantBeatBPM(beats []rekordbox.Beat) float64 {
 // near: two cue times the same within the rounding of a sample position to milliseconds.
 func near(a, b uint32) bool { return max(a, b)-min(a, b) <= 2 }
 
-func cueColorEquivalent(x, y rekordbox.Cue) bool {
+func cueColorEquivalent(x, y rekordbox.Cue, exactRGB bool) bool {
 	if x.HotCue == 0 {
 		return x.ColorID == y.ColorID
 	}
@@ -2577,9 +2577,6 @@ func cueColorEquivalent(x, y rekordbox.Cue) bool {
 	if uncoloured(x) != uncoloured(y) {
 		return false
 	}
-	if x.Color != ([4]byte{}) && x.Color == y.Color {
-		return true
-	}
 	cx := x.ColorCode
 	if cx == 0 && x.Color != ([4]byte{}) {
 		cx = rekordbox.NearestCueColorCode(x.Color)
@@ -2588,10 +2585,16 @@ func cueColorEquivalent(x, y rekordbox.Cue) bool {
 	if cy == 0 && y.Color != ([4]byte{}) {
 		cy = rekordbox.NearestCueColorCode(y.Color)
 	}
+	if exactRGB {
+		return x.Color == y.Color && cx == cy
+	}
+	if x.Color != ([4]byte{}) && x.Color == y.Color {
+		return true
+	}
 	return cx != 0 && cx == cy
 }
 
-func cuesEquivalent(a, b []rekordbox.Cue) bool {
+func cuesEquivalentWithColorMode(a, b []rekordbox.Cue, exactRGB bool) bool {
 	na, nb := sortedCues(a), sortedCues(b)
 	if len(na) != len(nb) {
 		return false
@@ -2601,11 +2604,19 @@ func cuesEquivalent(a, b []rekordbox.Cue) bool {
 		if x.HotCue != y.HotCue || x.Loop != y.Loop || x.Name != y.Name || x.Active != y.Active || !near(x.TimeMS, y.TimeMS) || x.Loop && !near(x.EndMS, y.EndMS) {
 			return false
 		}
-		if !cueColorEquivalent(x, y) {
+		if !cueColorEquivalent(x, y, exactRGB) {
 			return false
 		}
 	}
 	return true
+}
+
+func cuesEquivalent(a, b []rekordbox.Cue) bool {
+	return cuesEquivalentWithColorMode(a, b, false)
+}
+
+func cuesEquivalentExactColor(a, b []rekordbox.Cue) bool {
+	return cuesEquivalentWithColorMode(a, b, true)
 }
 
 // cuesValuesMatchIgnoringMinimalMissing reports whether OneLibrary cue rows (refCues) carry the
@@ -2625,7 +2636,7 @@ func cuesValuesMatchIgnoringMinimalMissing(refCues, merged []rekordbox.Cue) bool
 		if !nameMatch {
 			return false
 		}
-		colorMatch := cueColorEquivalent(x, y) || (y.HotCue > 0 && uncoloured(y))
+		colorMatch := cueColorEquivalent(x, y, false) || (y.HotCue > 0 && uncoloured(y))
 		if !colorMatch {
 			return false
 		}
@@ -2706,14 +2717,7 @@ func isEngineDefaultLoopColor(pad uint32, rgb [4]byte) bool {
 }
 
 func sameDeckCueColor(a, b [4]byte) bool {
-	if a == b {
-		return true
-	}
-	if a == ([4]byte{}) || b == ([4]byte{}) {
-		return false
-	}
-	ca, cb := rekordbox.NearestCueColorCode(a), rekordbox.NearestCueColorCode(b)
-	return ca != 0 && ca == cb
+	return a == b
 }
 
 type cueColorEdits struct {
