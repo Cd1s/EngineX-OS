@@ -16,8 +16,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
+	"github.com/Cd1s/EngineX-OS/pkg/analyzer"
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
+	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
 )
 
 // nasSwitchRig is OmniSource with its [NAS] lists and two Subsonic servers that use the
@@ -103,6 +106,25 @@ func newNASSwitchRig(t *testing.T, opts ...func(*Pipeline)) *nasSwitchRig {
 	t.Cleanup(rig.release) // before gw.Close, which waits for a held request
 	t.Cleanup(rig.releaseLists)
 	return rig
+}
+
+// withLibrary gives the rig a real Engine library, so a streamed track is queued for import.
+func withLibrary(t *testing.T) func(*Pipeline) {
+	return func(p *Pipeline) {
+		dbPath, libRoot, _ := testlibrary.Create(t)
+		lib, err := analyzer.OpenLibrary(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = lib.Close() })
+		dl := filepath.Join(libRoot, "stream-cache")
+		if err := os.MkdirAll(dl, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		p.Guard = resourceguard.New(resourceguard.Config{Disabled: true})
+		p.Deemix = &deemixclient.Client{DownloadDir: dl, AllowLossy: true}
+		p.Library = lib
+	}
 }
 
 // pauseOnce pauses the first request that reaches point until resume; reached
@@ -580,5 +602,39 @@ func TestReviewStemsLocalAcrossSwitch(t *testing.T) {
 	resume()
 	if a := <-done; a.code != http.StatusNotFound {
 		t.Fatalf("the Stems lookup of server one's track %d, begun before the change, answered HTTP %d after it: %s, want 404", id1, a.code, a.body)
+	}
+}
+
+// Round 4 (HIGH 2): a load of server one's track paused after filing and before queueing
+// the import took the import slot after the NAS moved to server two: server two's track
+// then got no import job. The old load queues nothing now.
+func TestReviewImportSlot(t *testing.T) {
+	rig := newNASSwitchRig(t, withLibrary(t))
+	rig.saveNAS(rig.oneURL)
+	id1 := rig.browse()
+	hook, reached, resume := pauseOnce("filed")
+	t.Cleanup(resume)
+	rig.jobs.pause = hook
+	first := rig.streamAsync(id1)
+	nasWaitFor(t, reached, "server one's download was filed")
+	rig.saveNAS(rig.twoURL)
+	resume()
+	old := <-first
+	id2 := rig.browse()
+	rig.plays("server two's row", id2, rig.two)
+	rig.jobs.mu.Lock()
+	want := rig.jobs.files[trackKey(providers.Track{Provider: "subsonic", ID: "tr-99"})].dl
+	var queued []string
+	for _, v := range rig.jobs.items {
+		if v.dl != nil {
+			queued = append(queued, v.dl.Path)
+		}
+	}
+	rig.jobs.mu.Unlock()
+	if want == nil || len(queued) != 1 || queued[0] != want.Path {
+		t.Fatalf("import jobs after the change: %q, want only server two's download %+v", queued, want)
+	}
+	if old.code == http.StatusOK {
+		t.Fatalf("the load of server one's track answered HTTP 200 after the change (its recording=%v)", bytes.Equal(old.body, rig.one))
 	}
 }

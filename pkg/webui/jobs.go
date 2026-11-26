@@ -352,7 +352,9 @@ func (j *Jobs) FetchAt(wait context.Context, session string, t providers.Track, 
 		}
 		if done {
 			if st, err := os.Stat(f.dl.Path); err == nil && st.Mode().IsRegular() {
-				j.queueImport(session, t, guest, f)
+				if !j.queueImport(session, t, guest, f, gen) {
+					return "", errNASChanged
+				}
 				return f.dl.Path, nil
 			}
 			j.mu.Lock()
@@ -394,11 +396,16 @@ func (j *Jobs) FetchAt(wait context.Context, session string, t providers.Track, 
 	if !j.putFileIfGen(key, f, gen) {
 		return "", errNASChanged
 	}
+	if j.pause != nil {
+		j.pause("filed")
+	}
 	// NetEase in Deemix mode downloaded the Deezer file: Deezer finds it as well.
 	if t.Provider == "netease" && matched.Provider == "deezer" {
 		j.putFile(trackKey(matched), f)
 	}
-	j.queueImport(session, t, guest, f)
+	if !j.queueImport(session, t, guest, f, gen) {
+		return "", errNASChanged
+	}
 	return dl.Path, nil
 }
 
@@ -1035,34 +1042,40 @@ func (j *Jobs) fromSelfHosted(ctx context.Context, t providers.Track) (*deemixcl
 
 // queueImport analyses and imports a streamed file once per target playlist.
 // A full queue only skips library import; the file is still playable.
-func (j *Jobs) queueImport(session string, t providers.Track, guest bool, f fetched) {
+//
+// gen is the NAS generation t was listed at. The check, the playlist mark and the
+// job are one step under j.mu, the lock the reset takes: once the NAS changed, a
+// NAS track queues nothing and queueImport reports false (#335).
+func (j *Jobs) queueImport(session string, t providers.Track, guest bool, f fetched, gen uint64) bool {
 	// No library (no front SD Engine Library): nothing to import into, so do not
 	// queue a job that can only end in "pipeline is not configured".
 	// A DJ set is played, not analysed: decoding hours of audio would exhaust memory.
 	if j.p.Library == nil || tooLongToAnalyse(t, f.dl.Path) {
-		return
+		return true
 	}
-	key := providers.OwnerPlaylist + "\x00" + trackKey(t)
+	playlist := providers.OwnerPlaylist
 	if guest {
-		key = providers.GuestPlaylist + "\x00" + trackKey(t)
+		playlist = providers.GuestPlaylist
 	}
+	key := playlist + "\x00" + trackKey(t)
 	j.mu.Lock()
-	seen := j.queued[key]
-	if !seen && len(j.queued) >= maxJobFiles {
+	defer j.mu.Unlock()
+	if isNASKey(trackKey(t)) && gen != j.nasGen.Load() {
+		return false
+	}
+	if j.queued[key] {
+		return true
+	}
+	if len(j.queued) >= maxJobFiles {
 		for k := range j.queued {
 			delete(j.queued, k)
 			break
 		}
 	}
-	j.queued[key] = true
-	j.mu.Unlock()
-	if !seen {
-		if _, err := j.submit(session, t, guest, f.matched, f.dl); err != nil {
-			j.mu.Lock()
-			delete(j.queued, key)
-			j.mu.Unlock()
-		}
+	if _, err := j.submitLocked(session, t, playlist, f.matched, f.dl); err == nil {
+		j.queued[key] = true
 	}
+	return true
 }
 
 // Lossy reports whether Deemix may deliver MP3 instead of FLAC.
@@ -1105,6 +1118,11 @@ func (j *Jobs) SubmitFile(path, playlist string) (job Job, ok bool, err error) {
 func (j *Jobs) submitTo(session string, t providers.Track, playlist string, matched providers.Track, dl *deemixclient.Download) (Job, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	return j.submitLocked(session, t, playlist, matched, dl)
+}
+
+// submitLocked is submitTo with j.mu held.
+func (j *Jobs) submitLocked(session string, t providers.Track, playlist string, matched providers.Track, dl *deemixclient.Download) (Job, error) {
 	if j.ctx.Err() != nil {
 		return Job{}, errors.New("worker stopped")
 	}
