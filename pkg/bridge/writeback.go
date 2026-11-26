@@ -1589,11 +1589,6 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 							orig = one.Cues
 						}
 					}
-					origPhantom := isPhantomZeroHotCueSet(orig)
-					onePhantom := false
-					if one, hasOne := change.refs[rbstate.OneLibrary]; hasOne && isPhantomZeroHotCueSet(one.Cues) {
-						onePhantom = true
-					}
 					cuesMatchedLegacy := false
 					if takeOver && len(row.track.Written) > 0 {
 						cands := make([]float64, 0, len(orig)*2+1)
@@ -1611,7 +1606,7 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 						}
 						cuesMatchedLegacy = enginedb.UnadjustedLegacyMatches(row.beatData, row.quickCues, row.loops, nil, row.track.Written, cands...)
 					}
-					if !cuesMatchedLegacy && !origPhantom && !onePhantom {
+					if !cuesMatchedLegacy {
 						legacyMP3 := len(row.track.Written) == 0 && strings.HasSuffix(strings.ToLower(primary.Path), ".mp3")
 						merged := mergeEngineCues(orig, deck, offset, legacyMP3)
 						anlzDiff = !cuesEquivalent(orig, merged)

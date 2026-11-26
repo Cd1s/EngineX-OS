@@ -21,6 +21,34 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
+func syncTrackCueBaseline(t *testing.T, dbDir string, trackID int64, key string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(dbDir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var q, l []byte
+	var active int64
+	var genre, comment, label string
+	if err := db.QueryRow(`SELECT p.quickCues, p.loops, COALESCE(p.activeOnLoadLoops,0), COALESCE(t.genre,''), COALESCE(t.comment,''), COALESCE(t.label,'') FROM PerformanceData p JOIN Track t ON p.trackId=t.id WHERE t.id=?`, trackID).
+		Scan(&q, &l, &active, &genre, &comment, &label); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := rbstate.Load(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := snap.Tracks[key]
+	if tr == nil {
+		t.Fatalf("missing snapshot track %q", key)
+	}
+	tr.Synced = enginedb.SyncedDigest(nil, q, l, active, genre, comment, label)
+	if err := snap.Save(dbDir); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReviewR4LegacyPhantomSetSurvivesMetadataEdit(t *testing.T) {
 	env := setupPhantomTestStick(t, nil)
 	var cues []rekordbox.Cue
@@ -35,6 +63,7 @@ func TestReviewR4LegacyPhantomSetSurvivesMetadataEdit(t *testing.T) {
 
 	path := filepath.Join(env.dbDir, "m.db")
 	setMDBQuickCues(t, env.dbDir, 1, env.rbOffset, nil)
+	syncTrackCueBaseline(t, env.dbDir, 1, "contents/fixturea/track01.mp3")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -110,6 +139,7 @@ func TestReviewR4LegacyPhantomSetSurvivesGridAndMetadataEdit(t *testing.T) {
 	}{{2205.0, 0, 16}, {2205.0 + 16*step, 16, 0}}
 
 	setMDBQuickCues(t, env.dbDir, 1, env.rbOffset, nil)
+	syncTrackCueBaseline(t, env.dbDir, 1, "contents/fixturea/track01.mp3")
 	db, err := sql.Open("sqlite", filepath.Join(env.dbDir, "m.db"))
 	if err != nil {
 		t.Fatal(err)
