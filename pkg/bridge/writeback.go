@@ -901,7 +901,7 @@ func (p *pass) run(ctx context.Context, mountPath string) (skip string, err erro
 	for _, row := range cs.rows {
 		if matched[row.key] {
 			n := row.now
-			if len(row.writtenDigest) > 0 {
+			if len(row.beatData) > 0 && len(row.quickCues) > 0 && len(row.loops) > 0 && len(row.writtenDigest) > 0 {
 				n.written = row.writtenDigest
 			}
 			cs.insync[row.key] = n
@@ -1090,6 +1090,43 @@ func filledActiveLoopsDiffer(row dbCandidate) bool {
 	return row.activeLoops != 0
 }
 
+func cueStateMatchesFastBase(row dbCandidate) bool {
+	if row.track == nil || !row.track.FastKnown {
+		return false
+	}
+	return bytes.Equal(
+		enginedb.SyncedDigest(nil, row.quickCues, row.loops, row.activeLoops, "", "", ""),
+		enginedb.SyncedDigest(nil, row.track.FastCues, row.track.FastLoops, int64(row.track.FastActive), "", "", ""),
+	)
+}
+
+func syncedWasUnknownCues(row dbCandidate, refs map[rbstate.LibraryKind]rekordbox.Track) bool {
+	if row.track == nil || len(row.track.Synced) == 0 {
+		return false
+	}
+	matchesUnknownMeta := func(genre, comment, label string) bool {
+		if bytes.Equal(row.track.Synced, enginedb.SyncedDigest(nil, nil, nil, 0, genre, comment, label)) {
+			return true
+		}
+		if len(row.loops) > 0 && bytes.Equal(row.track.Synced, enginedb.SyncedDigest(nil, nil, row.loops, row.activeLoops, genre, comment, label)) {
+			return true
+		}
+		if len(row.quickCues) > 0 && bytes.Equal(row.track.Synced, enginedb.SyncedDigest(nil, row.quickCues, nil, 0, genre, comment, label)) {
+			return true
+		}
+		return false
+	}
+	if matchesUnknownMeta(row.metadata.Genre, row.metadata.Comment, row.metadata.Label) {
+		return true
+	}
+	for _, tr := range refs {
+		if matchesUnknownMeta(tr.Genre, tr.Comment, tr.Label) {
+			return true
+		}
+	}
+	return false
+}
+
 func cueStateMatchesSynced(row dbCandidate, refs map[rbstate.LibraryKind]rekordbox.Track) bool {
 	if row.track == nil || len(row.track.Synced) == 0 {
 		return false
@@ -1103,7 +1140,7 @@ func cueStateMatchesSynced(row dbCandidate, refs map[rbstate.LibraryKind]rekordb
 }
 
 func needsCueRead(row dbCandidate) bool {
-	if len(row.trackData) == 0 {
+	if len(row.trackData) == 0 || (len(row.quickCues) == 0 && len(row.loops) == 0) || row.track == nil {
 		return false
 	}
 	if row.track.Synced != nil && len(row.now.digest) > 0 && bytes.Equal(row.track.Synced, row.now.digest) {
@@ -1128,7 +1165,16 @@ func needsCueRead(row dbCandidate) bool {
 		return true
 	}
 	if len(row.track.Written) == 0 {
-		return true
+		if len(row.track.Synced) > 0 {
+			return true
+		}
+		if row.track.Perf == rbstate.PerfDeck {
+			if row.track.FastKnown {
+				return !cueStateMatchesFastBase(row)
+			}
+			return true
+		}
+		return false
 	}
 	if bytes.Equal(row.writtenDigest, row.track.Written) || bytes.Equal(row.rawWrittenDigest, row.track.Written) {
 		return row.track.Synced != nil
@@ -1155,7 +1201,7 @@ func beatDataBlobsEqual(a, b []byte) bool {
 }
 
 func needsGridRead(row dbCandidate) bool {
-	if len(row.beatData) == 0 {
+	if len(row.beatData) == 0 || row.track == nil {
 		return false
 	}
 	if len(row.filledBeats) > 0 {
@@ -1182,8 +1228,11 @@ func needsGridRead(row dbCandidate) bool {
 		// edits and Engine auto-analysis never trigger spurious grid rewrites.
 		return beatDataHasAdjustedEdit(row.beatData)
 	}
-	// No bridge beatData baseline: only treat explicit deck adjustments (adjusted != default)
-	// as a grid edit so Engine's own auto-analysis never overwrites rekordbox's grid.
+	// Synced does not hash beatData: without a grid baseline (Written, filled stage, or
+	// deck-edited PerfDeck), never overwrite the export beat grid.
+	if row.track.Perf != rbstate.PerfDeck {
+		return false
+	}
 	return beatDataHasAdjustedEdit(row.beatData)
 }
 
@@ -1204,7 +1253,7 @@ func appendCandidateRow(c dbCandidate, filled map[string]filledStageRow, out *ca
 		return
 	}
 	if len(c.track.MetaDigest) > 0 && bytes.Equal(c.track.MetaDigest, c.metaDigest) && !needsCueRead(c) && !needsGridRead(c) {
-		if len(c.track.Written) == 0 && len(c.trackData) > 0 && len(c.writtenDigest) > 0 {
+		if len(c.track.Written) == 0 && len(c.trackData) > 0 && len(c.beatData) > 0 && len(c.quickCues) > 0 && len(c.loops) > 0 && len(c.writtenDigest) > 0 {
 			c.now.written = c.writtenDigest
 		}
 		if c.track.Synced == nil {
@@ -1577,7 +1626,8 @@ func buildChanges(ctx context.Context, resolver *compat.Resolver, libs map[rbsta
 		var orig []rekordbox.Cue
 		var origBeats []rekordbox.Beat
 		anlzDiff, oneDiff := false, false
-		needsCue := needsCueRead(row) && !cueStateMatchesSynced(row, change.refs)
+		hasExplicitCueBase := len(row.track.Written) > 0 || len(row.filledCues) > 0 || len(row.filledWritten) > 0 || len(row.filledWrittenNoMain) > 0 || row.track.Perf == rbstate.PerfDeck
+		needsCue := needsCueRead(row) && !cueStateMatchesSynced(row, change.refs) && (hasExplicitCueBase || !syncedWasUnknownCues(row, change.refs))
 		needsGrid := needsGridRead(row)
 		if (needsCue || needsGrid) && primary.AnalysisPath != "" {
 			offset, offsetOK := trackRekordboxOffset(resolver, primary.Path)
@@ -2532,8 +2582,12 @@ func isDefaultEnginePadName(pad uint32, name string) bool {
 
 // mergeEngineCues is the cue list the export gets for the deck's cues: the deck's hot cues and
 // loops, with what the import had and Engine cannot hold kept (clamped starts, loop fractions,
-// colour codes, no colour), and the imported memory points as they are.
+// colour codes, no colour), and the imported memory points as they are. NULL/missing deck parts
+// (QuickCuesUnknown / LoopsUnknown) mean unknown and never erase the export's corresponding cues.
 func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offset float64, legacy bool) []rekordbox.Cue {
+	if deck.QuickCuesUnknown && deck.LoopsUnknown {
+		return append([]rekordbox.Cue(nil), orig...)
+	}
 	origHot := map[uint32]rekordbox.Cue{}
 	var memPoints, memLoops []rekordbox.Cue
 	for _, c := range orig {
@@ -2562,18 +2616,97 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offset float6
 	}
 	var out []rekordbox.Cue
 	var consumed [8]bool
-	for s := 0; s < 8; s++ {
-		hc := deck.HotCues[s]
-		if hc == nil {
-			continue
+	if deck.QuickCuesUnknown {
+		for s := 0; s < 8; s++ {
+			pad := uint32(s + 1)
+			oc, hasOrig := origHot[pad]
+			if !hasOrig {
+				continue
+			}
+			if oc.Loop && !deck.LoopsUnknown {
+				if lp := deck.Loops[s]; lp != nil && near(oc.TimeMS, toMS(lp.StartSamples)) {
+					consumed[s] = true
+					start, end := oc.TimeMS, max(toMS(lp.EndSamples), oc.TimeMS+1)
+					name, rgb := lp.Name, lp.Color
+					if isDefaultEnginePadName(pad, name) && oc.Name == "" {
+						name = ""
+					}
+					if name == "" {
+						name = oc.Name
+					}
+					code := byte(0)
+					if name != "" {
+						code = rekordbox.NearestCueColorCode(rgb)
+					}
+					var num, den uint16
+					if st, ok := sameLoop(lp.StartSamples, oc, start, end); ok {
+						start, num, den = st, oc.LoopNumerator, oc.LoopDenominator
+						if uncoloured(oc) && (name == "" || rgb == engineDefaultLoopColor || isEngineDefaultHotCueColor(pad, rgb)) {
+							rgb, code = [4]byte{}, 0
+						} else if oc.Color == rgb && oc.ColorCode != 0 {
+							code = oc.ColorCode
+						} else if name == "" && oc.Color != ([4]byte{}) && (rgb == engineDefaultLoopColor || isEngineDefaultHotCueColor(pad, rgb)) {
+							rgb, code = oc.Color, oc.ColorCode
+						} else if name != "" && code == 0 {
+							code = rekordbox.NearestCueColorCode(rgb)
+						}
+					}
+					if near(oc.TimeMS, start) && near(oc.EndMS, end) && oc.Active == lp.Active && oc.Name == name {
+						out = append(out, oc)
+					} else {
+						out = append(out, rekordbox.Cue{HotCue: pad, TimeMS: start, EndMS: end, Loop: true, Active: lp.Active, Name: name, Color: rgb, ColorCode: code, LoopNumerator: num, LoopDenominator: den, Extended: true})
+					}
+					continue
+				}
+			}
+			out = append(out, oc)
 		}
-		pad := uint32(s + 1)
-		start := toMS(hc.Samples)
-		oc, hasOrig := origHot[pad]
-		if lp := deck.Loops[s]; lp != nil && near(start, toMS(lp.StartSamples)) {
-			consumed[s] = true
-			end := max(toMS(lp.EndSamples), start+1)
-			name, rgb := cmp.Or(lp.Name, hc.Name), cmp.Or(lp.Color, hc.Color)
+	} else {
+		for s := 0; s < 8; s++ {
+			hc := deck.HotCues[s]
+			if hc == nil {
+				continue
+			}
+			pad := uint32(s + 1)
+			start := toMS(hc.Samples)
+			oc, hasOrig := origHot[pad]
+			if lp := deck.Loops[s]; lp != nil && near(start, toMS(lp.StartSamples)) {
+				consumed[s] = true
+				end := max(toMS(lp.EndSamples), start+1)
+				name, rgb := cmp.Or(lp.Name, hc.Name), cmp.Or(lp.Color, hc.Color)
+				if isDefaultEnginePadName(pad, name) && (!hasOrig || oc.Name == "") {
+					name = ""
+				}
+				var code byte
+				if name != "" {
+					code = rekordbox.NearestCueColorCode(rgb)
+				}
+				var num, den uint16
+				if st, ok := sameLoop(hc.Samples, oc, start, end); hasOrig && oc.Loop && ok {
+					start, num, den = st, oc.LoopNumerator, oc.LoopDenominator
+					if uncoloured(oc) && (name == "" || rgb == engineDefaultLoopColor || isEngineDefaultHotCueColor(pad, rgb)) {
+						rgb, code = [4]byte{}, 0
+					} else if oc.Color == rgb && oc.ColorCode != 0 {
+						code = oc.ColorCode
+					} else if name != "" && code == 0 {
+						code = rekordbox.NearestCueColorCode(rgb)
+					}
+				} else if (!hasOrig || uncoloured(oc)) && name == "" && (rgb == engineDefaultLoopColor || isEngineDefaultHotCueColor(pad, rgb)) {
+					rgb, code = [4]byte{}, 0
+				}
+				out = append(out, rekordbox.Cue{HotCue: pad, TimeMS: start, EndMS: end, Loop: true, Active: lp.Active, Name: name, Color: rgb, ColorCode: code, LoopNumerator: num, LoopDenominator: den, Extended: true})
+				continue
+			}
+			if deck.LoopsUnknown && hasOrig && oc.Loop && (atZero(hc.Samples, oc) || near(oc.TimeMS, start) || (legacy && hc.Name == "" && oc.Name == "" && max(oc.TimeMS, start)-min(oc.TimeMS, start) <= 60)) {
+				c := oc
+				if hc.Name != "" && !isDefaultEnginePadName(pad, hc.Name) {
+					c.Name = hc.Name
+				}
+				out = append(out, c)
+				continue
+			}
+			rgb := hc.Color
+			name := hc.Name
 			if isDefaultEnginePadName(pad, name) && (!hasOrig || oc.Name == "") {
 				name = ""
 			}
@@ -2581,71 +2714,51 @@ func mergeEngineCues(orig []rekordbox.Cue, deck enginedb.DeckCues, offset float6
 			if name != "" {
 				code = rekordbox.NearestCueColorCode(rgb)
 			}
-			var num, den uint16
-			if st, ok := sameLoop(hc.Samples, oc, start, end); hasOrig && oc.Loop && ok {
-				start, num, den = st, oc.LoopNumerator, oc.LoopDenominator
-				if uncoloured(oc) && (name == "" || rgb == engineDefaultLoopColor || isEngineDefaultHotCueColor(pad, rgb)) {
+			if hasOrig && !oc.Loop {
+				if atZero(hc.Samples, oc) || legacy && hc.Name == "" && oc.Name == "" && max(oc.TimeMS, start)-min(oc.TimeMS, start) <= 60 {
+					start = oc.TimeMS
+				}
+				if uncoloured(oc) && ((near(oc.TimeMS, start) && oc.Name == "" && name == "") || (name == "" && isEngineDefaultHotCueColor(pad, rgb))) {
 					rgb, code = [4]byte{}, 0
 				} else if oc.Color == rgb && oc.ColorCode != 0 {
 					code = oc.ColorCode
 				} else if name != "" && code == 0 {
 					code = rekordbox.NearestCueColorCode(rgb)
 				}
-			} else if (!hasOrig || uncoloured(oc)) && name == "" && (rgb == engineDefaultLoopColor || isEngineDefaultHotCueColor(pad, rgb)) {
+			} else if !hasOrig && name == "" && isEngineDefaultHotCueColor(pad, rgb) {
 				rgb, code = [4]byte{}, 0
 			}
-			out = append(out, rekordbox.Cue{HotCue: pad, TimeMS: start, EndMS: end, Loop: true, Active: lp.Active, Name: name, Color: rgb, ColorCode: code, LoopNumerator: num, LoopDenominator: den, Extended: true})
-			continue
+			out = append(out, rekordbox.Cue{HotCue: pad, TimeMS: start, Name: name, Color: rgb, ColorCode: code, Extended: true})
 		}
-		rgb := hc.Color
-		name := hc.Name
-		if isDefaultEnginePadName(pad, name) && (!hasOrig || oc.Name == "") {
-			name = ""
-		}
-		var code byte
-		if name != "" {
-			code = rekordbox.NearestCueColorCode(rgb)
-		}
-		if hasOrig && !oc.Loop {
-			if atZero(hc.Samples, oc) || legacy && hc.Name == "" && oc.Name == "" && max(oc.TimeMS, start)-min(oc.TimeMS, start) <= 60 {
-				start = oc.TimeMS
-			}
-			if uncoloured(oc) && ((near(oc.TimeMS, start) && oc.Name == "" && name == "") || (name == "" && isEngineDefaultHotCueColor(pad, rgb))) {
-				rgb, code = [4]byte{}, 0
-			} else if oc.Color == rgb && oc.ColorCode != 0 {
-				code = oc.ColorCode
-			} else if name != "" && code == 0 {
-				code = rekordbox.NearestCueColorCode(rgb)
-			}
-		} else if !hasOrig && name == "" && isEngineDefaultHotCueColor(pad, rgb) {
-			rgb, code = [4]byte{}, 0
-		}
-		out = append(out, rekordbox.Cue{HotCue: pad, TimeMS: start, Name: name, Color: rgb, ColorCode: code, Extended: true})
 	}
-	for s, lp := range deck.Loops {
-		if consumed[s] || lp == nil {
-			continue
-		}
-		start, end := toMS(lp.StartSamples), toMS(lp.EndSamples)
-		if end <= start {
-			continue
-		}
-		id := rekordbox.NearestMemoryColorID(lp.Color)
-		var num, den uint16
-		for _, oc := range memLoops {
-			if st, ok := sameLoop(lp.StartSamples, oc, start, end); ok {
-				start, num, den = st, oc.LoopNumerator, oc.LoopDenominator
-				if uncoloured(oc) && lp.Color == engineDefaultLoopColor {
-					id = 0
-				} else if oc.ColorID != 0 {
-					id = oc.ColorID
+	if deck.LoopsUnknown {
+		out = append(out, memLoops...)
+	} else {
+		for s, lp := range deck.Loops {
+			if consumed[s] || lp == nil {
+				continue
+			}
+			start, end := toMS(lp.StartSamples), toMS(lp.EndSamples)
+			if end <= start {
+				continue
+			}
+			id := rekordbox.NearestMemoryColorID(lp.Color)
+			var num, den uint16
+			for _, oc := range memLoops {
+				if st, ok := sameLoop(lp.StartSamples, oc, start, end); ok {
+					start, num, den = st, oc.LoopNumerator, oc.LoopDenominator
+					if uncoloured(oc) && lp.Color == engineDefaultLoopColor {
+						id = 0
+					} else if oc.ColorID != 0 {
+						id = oc.ColorID
+					}
+					break
 				}
-				break
 			}
+			out = append(out, rekordbox.Cue{TimeMS: start, EndMS: end, Loop: true, Active: lp.Active, Name: lp.Name, ColorID: id, LoopNumerator: num, LoopDenominator: den, Extended: true})
 		}
-		out = append(out, rekordbox.Cue{TimeMS: start, EndMS: end, Loop: true, Active: lp.Active, Name: lp.Name, ColorID: id, LoopNumerator: num, LoopDenominator: den, Extended: true})
 	}
-	if deck.MainCue >= 0 && deck.MainCueAdjusted {
+	if !deck.QuickCuesUnknown && deck.MainCue >= 0 && deck.MainCueAdjusted {
 		mainMS := toMS(deck.MainCue)
 		seenMain := false
 		for _, mc := range memPoints {
