@@ -170,7 +170,7 @@ def build_pioneer_section(tag: bytes, hdr_len: int, payload: bytes) -> bytes:
 
 def build_pmai(*sections: bytes) -> bytes:
     body = b"".join(sections)
-    return b"PMAI" + struct.pack(">II", 28, 28 + len(body)) + body
+    return b"PMAI" + struct.pack(">II", 28, 28 + len(body)) + b"\x00" * 16 + body
 
 
 def build_anlz_files(bpm=128.0, duration_s=3.0):
