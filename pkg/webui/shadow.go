@@ -1277,7 +1277,7 @@ func (sh *shadowState) recordPeerRTT(ip, id string, rttMS float64, now time.Time
 		if !ok || now.Sub(r.at) > shadowPeerSeenTimeout {
 			r.ms = rttMS
 		} else {
-			r.ms += now.Sub(r.at).Seconds()
+			r.ms += 0.1 * now.Sub(r.at).Seconds()
 			if rttMS < r.ms {
 				r.ms = rttMS
 			}
@@ -1313,13 +1313,13 @@ func (sh *shadowState) playingDriftMS() float64 {
 // peerLate is how many ms longer than the peer's quickest update this one took
 // to get here (the network, or either suite waiting for the CPU): a playing
 // deck has moved on by that much, and anchoring it at arrival showed the wait
-// as a slip of the picture. The quickest trip may rise 1 ms/s, which follows
-// two clocks drifting apart or one being slewed; over 300 ms late is a stepped
-// clock and starts over. Called with sh.mu held.
+// as a slip of the picture. The quickest trip may rise 0.1 ms/s (100 ppm),
+// which follows two crystal clocks drifting apart without climbing above T_min
+// on a jittery LAN; over 300 ms late is a stepped clock and starts over. Called with sh.mu held.
 func (sh *shadowState) peerLate(id string, sent int64, now time.Time) float64 {
 	off := float64(now.UnixMicro())/1000.0 - float64(sent)
 	c, ok := sh.peerClock[id]
-	c.off += now.Sub(c.at).Seconds()
+	c.off += 0.1 * now.Sub(c.at).Seconds()
 	if !ok || off < c.off || off > c.off+300 {
 		c.off = off
 	}

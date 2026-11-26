@@ -34,8 +34,8 @@ func TestPeerHalfRTTCompensatesMinTransitAndBoundsOutliers(t *testing.T) {
 	d := deckState{Deck: 2, Key: "k", Link: "link-A", Playing: true, PositionMS: 1000, Pitch: 50, Seq: 1, Sent: t0.Add(500 * time.Millisecond).UnixMilli()}
 	sh.takePeer("192.0.2.7", []deckState{d}, t0.Add(502*time.Millisecond))
 	gotPos := sh.peerDecks[2].PositionMS
-	wantPos := 1000 + 2.125*1.5 // ~3.19 ms at +50%
-	if math.Abs(gotPos-wantPos) > 0.3 {
+	wantPos := 1000 + 2.0125*1.5 // ~3.02 ms at +50%
+	if math.Abs(gotPos-wantPos) > 0.15 {
 		t.Fatalf("quickest update pos = %.3f, want ~%.3f (halfRTT not compensated)", gotPos, wantPos)
 	}
 
