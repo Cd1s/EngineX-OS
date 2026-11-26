@@ -706,6 +706,53 @@ func (s *Server) hasWarmOnDemandEntry(trackKey string) bool {
 	return false
 }
 
+// warmOnDemandCachedEntry returns a non-expired cached on-demand entry for
+// trackKey without waiting on in-flight builds or triggering a cold build.
+func (s *Server) warmOnDemandCachedEntry(trackKey string) *rbOnDemandCacheEntry {
+	if trackKey == "" {
+		return nil
+	}
+	now := time.Now()
+	s.rbOnDemandCacheMu.Lock()
+	defer s.rbOnDemandCacheMu.Unlock()
+	for _, e := range s.rbOnDemandCache {
+		if e.trackKey == trackKey && now.Sub(e.at) < rbOnDemandCacheTTL {
+			return e
+		}
+	}
+	return nil
+}
+
+// verifyWarmOnDemandGen verifies that cached entry e still matches the live
+// stick/library/file identity for libPath and returns its precomputed
+// generation digest without ever starting a cold on-demand build.
+func (s *Server) verifyWarmOnDemandGen(ctx context.Context, libPath string, e *rbOnDemandCacheEntry) string {
+	if e == nil || libPath == "" {
+		return ""
+	}
+	b := s.rbOnDemandBuilder()
+	if b == nil {
+		return ""
+	}
+	mount, rel, ok := s.onDemandMountAndRel(libPath)
+	if !ok {
+		return ""
+	}
+	curID, _, _, err := s.resolveOnDemandIdentity(ctx, b, bridge.OnDemandRequest{
+		Mount:      mount,
+		EnginePath: "../" + rel,
+		EngineKey:  -1,
+	}, true)
+	if err != nil || curID != e.id {
+		return ""
+	}
+	_, _, gen, err := s.onDemandEncodings(e)
+	if err != nil {
+		return ""
+	}
+	return gen
+}
+
 func (s *Server) waitOnDemandFlight(ctx context.Context, f *rbOnDemandFlight) (*bridge.OnDemandResult, error) {
 	select {
 	case <-f.done:

@@ -420,6 +420,7 @@ type shadowState struct {
 	resolved            [5]shadowResolvedFile
 	perfMu              sync.Mutex
 	deckPerf            [5]*shadowDeckPerf
+	perfGens            [5]perfGenAt
 	deckEncodeCount     atomic.Int64
 	display             shadowDisplayCache
 	sourceDisplay       shadowSourceCache
@@ -691,9 +692,6 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 					d.libraryPath, d.libraryIdentity = prev.libraryPath, prev.libraryIdentity
 					d.streamURI = prev.streamURI
 					d.rbxAnalysis, d.rbxRow, d.rbx = prev.rbxAnalysis, prev.rbxRow, prev.rbx
-					if d.Key != "" && d.rbxAnalysis != "" {
-						d.PerfGen = s.perfGen(r.Context(), d)
-					}
 					reused = true
 				}
 			}
@@ -779,7 +777,6 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 			if d.Key != "" && d.rbxAnalysis != "" {
 				// One audio file can be two rekordbox rows: the copy is of this row.
 				d.Key = fmt.Sprintf("%x", fnvSum(d.Key+" "+np))
-				d.PerfGen = s.perfGen(r.Context(), d)
 			}
 			s.shadow.mu.Lock()
 			if d.Key != "" {
@@ -804,6 +801,9 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 			if logIt {
 				log.Printf("stream-sync: shadow: deck %d track %q has no local file", d.Deck, np)
 			}
+		}
+		if d.Key != "" {
+			d.PerfGen = s.perfGen(r.Context(), d)
 		}
 		own = append(own, d)
 	}
@@ -892,6 +892,9 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	for deck := 1; deck < len(s.shadow.deckPerf); deck++ {
 		if dp := s.shadow.deckPerf[deck]; dp != nil && dp.key != activeDeckKey[deck] {
 			s.shadow.deckPerf[deck] = nil
+		}
+		if s.shadow.perfGens[deck].key != activeDeckKey[deck] {
+			s.shadow.perfGens[deck] = perfGenAt{}
 		}
 	}
 	s.shadow.perfMu.Unlock()
@@ -1719,27 +1722,8 @@ func (s *Server) ownRGB(ctx context.Context, d deckState) ([]byte, error) {
 	return nil, err
 }
 
-// ownPerfPair resolves one verified load's paired native + EXPF encodings and
-// precomputed generation digest. Concurrent first EXPF and native requests
-// share one sync.Once encoding initializer per verified load.
-func (s *Server) ownPerfPair(ctx context.Context, d deckState) (native, expf []byte, gen string, err error) {
-	libPath, libErr := verifiedDeckLibraryPath(d)
-	// Fast path: warm on-demand entry (verified identity + single sync.Once encoder).
-	if libErr == nil && libPath != "" {
-		if tk := s.canonicalOnDemandTrackKey(libPath); tk != "" && s.hasWarmOnDemandEntry(tk) {
-			if nat, ex, g, analyzed, odErr := s.onDemandPeerPerfPair(ctx, d, libPath, true); odErr == nil && !analyzed {
-				return nat, ex, g, nil
-			} else if errors.Is(odErr, bridge.ErrOnDemandUnavailable) {
-				return nil, nil, "", odErr
-			}
-		}
-	}
-
+func (s *Server) deckPerfSig(d deckState, libPath string, libErr error) (sig shadowDeckPerfSig, hasSource bool, err error) {
 	err = os.ErrNotExist
-	// Snapshot the deck's current on-disk DB / Pro DJ Link source identities so
-	// concurrent EXPF + native requests share one per-deck sync.Once slot across
-	// m.db path, stm.db path, stm.db URI, and Pro DJ Link ANLZ without races.
-	var sig shadowDeckPerfSig
 	if libErr == nil && libPath != "" {
 		lib := engineLibrary(libPath, s.shadow.dataRoot, s.shadow.mediaRoot)
 		if rel, rerr := filepath.Rel(lib, libPath); rerr == nil {
@@ -1766,43 +1750,82 @@ func (s *Server) ownPerfPair(ctx context.Context, d deckState) (native, expf []b
 			err = serr
 		}
 	}
-	if sig.mdbID.ok || sig.stmID.ok || sig.uriSTMID.ok || sig.rbxOK {
-		dp := s.deckPerfSlot(d.Deck, d.Key, sig)
-		dp.enc.once.Do(func() {
-			tryDB := func(mdb, col, val string) bool {
-				nat, ex, g, derr := dbPerfPairByCol(ctx, mdb, col, val)
-				if derr != nil {
-					dp.enc.err = derr
-					return false
-				}
+	hasSource = sig.mdbID.ok || sig.stmID.ok || sig.uriSTMID.ok || sig.rbxOK
+	return sig, hasSource, err
+}
+
+func (s *Server) ownReadyDeckPerfPair(ctx context.Context, d deckState, sig shadowDeckPerfSig) (native, expf []byte, gen string, err error) {
+	dp := s.deckPerfSlot(d.Deck, d.Key, sig)
+	dp.enc.once.Do(func() {
+		tryDB := func(mdb, col, val string) bool {
+			nat, ex, g, derr := dbPerfPairByCol(ctx, mdb, col, val)
+			if derr != nil {
+				dp.enc.err = derr
+				return false
+			}
+			s.shadow.deckEncodeCount.Add(1)
+			dp.enc.native, dp.enc.expf, dp.enc.gen, dp.enc.err = nat, ex, g, nil
+			return true
+		}
+		if sig.mdbID.ok && sig.relPath != "" && tryDB(sig.mdbPath, "path", sig.relPath) {
+			return
+		}
+		if sig.stmID.ok && sig.relPath != "" && tryDB(sig.stmPath, "path", sig.relPath) {
+			return
+		}
+		if sig.uriSTMID.ok && sig.uri != "" && tryDB(sig.uriSTMPath, "uri", sig.uri) {
+			return
+		}
+		if sig.rbxOK {
+			nat, ex, g, rerr := rbxPeerPerfPair(sig.rbxPath, d.BPM)
+			if rerr == nil {
 				s.shadow.deckEncodeCount.Add(1)
 				dp.enc.native, dp.enc.expf, dp.enc.gen, dp.enc.err = nat, ex, g, nil
-				return true
-			}
-			if sig.mdbID.ok && sig.relPath != "" && tryDB(sig.mdbPath, "path", sig.relPath) {
 				return
 			}
-			if sig.stmID.ok && sig.relPath != "" && tryDB(sig.stmPath, "path", sig.relPath) {
-				return
-			}
-			if sig.uriSTMID.ok && sig.uri != "" && tryDB(sig.uriSTMPath, "uri", sig.uri) {
-				return
-			}
-			if sig.rbxOK {
-				nat, ex, g, rerr := rbxPeerPerfPair(sig.rbxPath, d.BPM)
-				if rerr == nil {
-					s.shadow.deckEncodeCount.Add(1)
-					dp.enc.native, dp.enc.expf, dp.enc.gen, dp.enc.err = nat, ex, g, nil
-					return
-				}
-				dp.enc.err = rerr
-			}
-		})
-		if dp.enc.err == nil && len(dp.enc.native) > 0 && len(dp.enc.expf) > 0 {
-			return dp.enc.native, dp.enc.expf, dp.enc.gen, nil
+			dp.enc.err = rerr
 		}
-		if dp.enc.err != nil {
-			err = dp.enc.err
+	})
+	if dp.enc.err == nil && len(dp.enc.native) > 0 && len(dp.enc.expf) > 0 {
+		return dp.enc.native, dp.enc.expf, dp.enc.gen, nil
+	}
+	// Do not pin a failed DB lookup across an in-place SQLite update that keeps
+	// the same coarse filesystem timestamp and size.
+	if s.shadow != nil && d.Deck >= 1 && d.Deck < len(s.shadow.deckPerf) {
+		s.shadow.perfMu.Lock()
+		if s.shadow.deckPerf[d.Deck] == dp {
+			s.shadow.deckPerf[d.Deck] = nil
+		}
+		s.shadow.perfMu.Unlock()
+	}
+	if dp.enc.err != nil {
+		return nil, nil, "", dp.enc.err
+	}
+	return nil, nil, "", os.ErrNotExist
+}
+
+// ownPerfPair resolves one verified load's paired native + EXPF encodings and
+// precomputed generation digest. Concurrent first EXPF and native requests
+// share one sync.Once encoding initializer per verified load.
+func (s *Server) ownPerfPair(ctx context.Context, d deckState) (native, expf []byte, gen string, err error) {
+	libPath, libErr := verifiedDeckLibraryPath(d)
+	// Fast path: warm on-demand entry (verified identity + single sync.Once encoder).
+	if libErr == nil && libPath != "" {
+		if tk := s.canonicalOnDemandTrackKey(libPath); tk != "" && s.hasWarmOnDemandEntry(tk) {
+			if nat, ex, g, analyzed, odErr := s.onDemandPeerPerfPair(ctx, d, libPath, true); odErr == nil && !analyzed {
+				return nat, ex, g, nil
+			} else if errors.Is(odErr, bridge.ErrOnDemandUnavailable) {
+				return nil, nil, "", odErr
+			}
+		}
+	}
+
+	sig, hasSource, err := s.deckPerfSig(d, libPath, libErr)
+	if hasSource {
+		if nat, ex, g, derr := s.ownReadyDeckPerfPair(ctx, d, sig); derr == nil {
+			return nat, ex, g, nil
+		} else {
+			err = derr
 		}
 	}
 	// Verified on-demand rekordbox build.
@@ -1892,55 +1915,58 @@ func (s *Server) onDemandMountAndRel(srcPath string) (mount, rel string, ok bool
 	return mount, rel, true
 }
 
-// perfGen is a bounded hash of the native analysis served for a rekordbox Link
-// deck. It pins the file's stat identity (dev, ino, size, mtime) and reuses the
-// precomputed generation from ownPerfPair so steady-state position posts and
-// /perf responses do zero file reads, zlib work, or per-response hashing.
+// perfGen reports the precomputed generation digest of whatever ready analysis
+// /perf can serve for any source type (m.db, stm.db, Pro DJ Link, or verified
+// warm on-demand cache) without ever triggering a cold on-demand build on the
+// position-post path. Steady-state position posts hit the stat-pinned per-deck
+// cache with zero SQLite queries, file reads, zlib work, or hashing.
 var perfGenEvery = time.Second
 
-var perfGens = struct {
-	sync.Mutex
-	m map[string]perfGenAt
-}{m: map[string]perfGenAt{}}
-
 type perfGenAt struct {
-	gen   string
-	id    shadowFileIdentity
-	hasID bool
-	at    time.Time
+	valid     bool
+	key       string
+	sig       shadowDeckPerfSig
+	warmEntry *rbOnDemandCacheEntry
+	gen       string
+	at        time.Time
 }
 
 func (s *Server) perfGen(ctx context.Context, d deckState) string {
-	idKey := fmt.Sprintf("%d\x00%s\x00%s", d.Deck, d.Path, d.rbxAnalysis)
-	var fileID shadowFileIdentity
-	var hasFileID bool
-	if d.rbxAnalysis != "" {
-		if st, err := os.Stat(d.rbxAnalysis); err == nil && st.Mode().IsRegular() {
-			fileID, hasFileID = shadowIdentity(st), true
+	if s.shadow == nil || d.Key == "" || d.Deck < 1 || d.Deck >= len(s.shadow.perfGens) {
+		return ""
+	}
+	libPath, libErr := verifiedDeckLibraryPath(d)
+	var warmEntry *rbOnDemandCacheEntry
+	if libErr == nil && libPath != "" {
+		warmEntry = s.warmOnDemandCachedEntry(s.canonicalOnDemandTrackKey(libPath))
+	}
+	sig, hasSource, _ := s.deckPerfSig(d, libPath, libErr)
+	s.shadow.perfMu.Lock()
+	g := s.shadow.perfGens[d.Deck]
+	s.shadow.perfMu.Unlock()
+	if g.valid && g.key == d.Key && g.sig == sig && g.warmEntry == warmEntry {
+		if g.gen != "" || !hasSource || time.Since(g.at) < perfGenEvery {
+			if warmEntry == nil || time.Since(g.at) < perfGenEvery {
+				return g.gen
+			}
 		}
 	}
-	perfGens.Lock()
-	g, ok := perfGens.m[idKey]
-	perfGens.Unlock()
-	if ok {
-		if hasFileID && g.hasID && g.id == fileID {
-			return g.gen
-		}
-		if !hasFileID && !g.hasID && time.Since(g.at) < perfGenEvery {
-			return g.gen
+	if g.valid && g.key == d.Key && g.gen != "" && !sig.rbxOK && g.warmEntry == warmEntry && time.Since(g.at) < perfGenEvery {
+		return g.gen
+	}
+	next := perfGenAt{valid: true, key: d.Key, sig: sig, warmEntry: warmEntry, at: time.Now()}
+	if hasSource {
+		if _, _, gen, err := s.ownReadyDeckPerfPair(ctx, d, sig); err == nil && gen != "" {
+			next.gen = gen
 		}
 	}
-	g = perfGenAt{id: fileID, hasID: hasFileID, at: time.Now()}
-	if _, _, gen, err := s.ownPerfPair(ctx, d); err == nil {
-		g.gen = gen
+	if next.gen == "" && warmEntry != nil {
+		next.gen = s.verifyWarmOnDemandGen(ctx, libPath, warmEntry)
 	}
-	perfGens.Lock()
-	if len(perfGens.m) > 64 {
-		clear(perfGens.m)
-	}
-	perfGens.m[idKey] = g
-	perfGens.Unlock()
-	return g.gen
+	s.shadow.perfMu.Lock()
+	s.shadow.perfGens[d.Deck] = next
+	s.shadow.perfMu.Unlock()
+	return next.gen
 }
 
 // streamingDownload is Engine's own download of a streaming track (Engine
@@ -2676,9 +2702,12 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 	local := filepath.Join(dir, name)
 	s.shadowFetchFor(key, p.Key, p.PerfGen, func(ctx context.Context, cp *shadowCopy) (string, error) {
 		// Fail-closed: fetch and validate generation-matched analysis BEFORE
-		// downloading or publishing audio.
+		// downloading or publishing audio, sharing one bounded deadline across
+		// both EXPF and native format fetches.
 		perfURL := strings.Replace(audioURL, "/audio?", "/perf?", 1)
-		pair, err := fetchShadowAnalysisPair(ctx, perfURL)
+		analysisCtx, analysisCancel := context.WithDeadline(ctx, cp.analysisDeadline)
+		pair, err := fetchShadowAnalysisPair(analysisCtx, perfURL)
+		analysisCancel()
 		if err != nil {
 			if errors.Is(err, errAnalysisUnavailable) && pair.noFill != "" && pair.noFill != "not a player" {
 				log.Printf("stream-sync: shadow: copy %s %q native analysis unavailable (%s)", key, name, pair.noFill)
@@ -2759,7 +2788,9 @@ func (s *Server) shadowRefreshPeerPerf(key string, p peerDeck, old string) {
 	local := filepath.Join(dir, filepath.Base(old))
 	gen := p.PerfGen
 	s.shadowFetchFor(key, p.Key, p.PerfGen, func(ctx context.Context, cp *shadowCopy) (string, error) {
-		pair, err := fetchShadowAnalysisPair(ctx, perfURL)
+		analysisCtx, analysisCancel := context.WithDeadline(ctx, cp.analysisDeadline)
+		pair, err := fetchShadowAnalysisPair(analysisCtx, perfURL)
+		analysisCancel()
 		if err != nil {
 			return "", err
 		}
@@ -2832,8 +2863,9 @@ func (s *Server) copyRowBPM(ctx context.Context, local string) (float64, bool) {
 }
 
 // Bounded wait before a persistently 503 source transitions to a visible
-// terminal "no analysis yet" state (retries only on new source generation,
-// deck reload, or explicit retry).
+// terminal "no analysis yet" state (retries only on a new source generation
+// or deck reload). The timeout starts when waiting begins and is shared across
+// both EXPF and native format fetches.
 var (
 	shadowPendingMaxFails = 3
 	shadowPendingTimeout  = 25 * time.Second
@@ -2842,15 +2874,16 @@ var (
 // shadowCopy is one track's copy on its way to this player: how far it is, and
 // after a failure why it failed and when it is tried again.
 type shadowCopy struct {
-	done, total  atomic.Int64 // bytes; total 0: the source did not say
-	fails        int
-	pendingFails int
-	pendingSince time.Time
-	retry        time.Time // no new attempt before this
-	err          string    // the last failure, by kind: never the error's text, which can hold addresses
-	terminal     bool      // true once pending timed out or analysis unavailable; cleared on new gen/key/retry
-	sourceKey    string
-	sourceGen    string
+	done, total      atomic.Int64 // bytes; total 0: the source did not say
+	fails            int
+	pendingFails     int
+	pendingSince     time.Time
+	analysisDeadline time.Time
+	retry            time.Time // no new attempt before this
+	err              string    // the last failure, by kind: never the error's text, which can hold addresses
+	terminal         bool      // true once pending timed out or analysis unavailable; cleared on new gen/key
+	sourceKey        string
+	sourceGen        string
 }
 
 var errShadowUnavailable = errors.New("the source does not have the track")
@@ -2887,50 +2920,6 @@ func (sh *shadowState) copyShown(key string) (float64, string) {
 	return min(1, max(0.01, math.Round(float64(done)/float64(total)*100)/100)), ""
 }
 
-// shadowRetryCopy clears terminal wait/error state for a shadow copy (or all
-// terminal copies when key is empty) and wakes shadow compose for an immediate retry.
-func (s *Server) shadowRetryCopy(key string) int {
-	if s.shadow == nil {
-		return 0
-	}
-	sh := s.shadow
-	sh.mu.Lock()
-	retried := 0
-	for k, c := range sh.copies {
-		if key != "" && k != key {
-			continue
-		}
-		if c != nil && (c.terminal || c.err != "") {
-			c.terminal = false
-			c.pendingFails = 0
-			c.pendingSince = time.Time{}
-			c.retry = time.Time{}
-			c.err = ""
-			retried++
-		}
-	}
-	sh.mu.Unlock()
-	if retried > 0 {
-		s.shadowWake()
-	}
-	return retried
-}
-
-// shadowRetryPost handles POST /v1/enginex/shadow/retry (loopback DJ/UI action)
-// to re-attempt shadow copies that timed out waiting for source analysis.
-func (s *Server) shadowRetryPost(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Key string `json:"key"`
-	}
-	_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body)
-	key := strings.TrimSpace(body.Key)
-	if key == "" {
-		key = strings.TrimSpace(r.URL.Query().Get("key"))
-	}
-	n := s.shadowRetryCopy(key)
-	respond(w, map[string]any{"ok": true, "retried": n})
-}
-
 func (s *Server) shadowFetch(key string, fetch func(context.Context, *shadowCopy) (string, error)) {
 	s.shadowFetchFor(key, "", "", fetch)
 }
@@ -2962,6 +2951,16 @@ func (s *Server) shadowFetchFor(key, sourceKey, sourceGen string, fetch func(con
 		c = &shadowCopy{}
 		sh.copies[key] = c
 	}
+	if c.pendingSince.IsZero() {
+		c.pendingSince = time.Now()
+	}
+	deadline := c.pendingSince.Add(shadowPendingTimeout)
+	if c.pendingFails > 0 && !time.Now().Before(deadline) {
+		c.err = "no analysis yet"
+		c.terminal = true
+		return
+	}
+	c.analysisDeadline = deadline
 	c.sourceKey, c.sourceGen = sourceKey, sourceGen
 	c.done.Store(0)
 	c.total.Store(0)
@@ -2983,26 +2982,33 @@ func (s *Server) shadowFetchFor(key, sourceKey, sourceGen string, fetch func(con
 			var timeout net.Error
 			switch {
 			case errors.Is(err, errPerfPending):
-				if c.pendingSince.IsZero() {
-					c.pendingSince = time.Now()
-				}
 				c.pendingFails++
-				if c.pendingFails >= shadowPendingMaxFails || time.Since(c.pendingSince) >= shadowPendingTimeout {
+				if c.pendingFails >= shadowPendingMaxFails || !time.Now().Before(c.pendingSince.Add(shadowPendingTimeout)) {
 					c.err = "no analysis yet"
 					c.terminal = true
 				} else {
 					c.err = "" // transient initial wait while source finishes analysis
 				}
 			case errors.Is(err, errAnalysisUnavailable):
+				c.pendingFails = 0
+				c.pendingSince = time.Time{}
 				c.err = "no analysis"
 				c.terminal = true
 			case errors.Is(err, errShadowUnavailable):
+				c.pendingFails = 0
+				c.pendingSince = time.Time{}
 				c.err = "unavailable"
 			case ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()): // ctx: a read cut off by the deadline fails with another error
+				c.pendingFails = 0
+				c.pendingSince = time.Time{}
 				c.err = "timeout"
 			case c.done.Load() > 0:
+				c.pendingFails = 0
+				c.pendingSince = time.Time{}
 				c.err = "interrupted"
 			default:
+				c.pendingFails = 0
+				c.pendingSince = time.Time{}
 				c.err = "failed"
 			}
 			c.fails++

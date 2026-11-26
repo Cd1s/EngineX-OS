@@ -452,6 +452,9 @@ func fetchPerfPending(ctx context.Context, url string) (perf []byte, pending boo
 
 func fetchPerfPendingGen(ctx context.Context, url string) (perf []byte, gen string, pending bool) {
 	for try := 0; ; try++ {
+		if ctx.Err() != nil {
+			return nil, "", true
+		}
 		b, hdrGen, status, ok := fetchPerfOnce(ctx, url)
 		switch {
 		case ok && validPerf(b):
@@ -465,7 +468,7 @@ func fetchPerfPendingGen(ctx context.Context, url string) (perf []byte, gen stri
 			log.Printf("stream-sync: shadow: the source gave no analysis (http %d)", status)
 			return nil, "", false
 		}
-		if try+1 >= perfRetries {
+		if try+1 >= perfRetries || ctx.Err() != nil {
 			return nil, "", true
 		}
 		select {
@@ -504,6 +507,9 @@ func fetchPerfOnce(ctx context.Context, url string) ([]byte, string, int, bool) 
 // X-EngineX-Perf-Formats header advertising native AND a valid EXPF response).
 func fetchNativeAnalysisPending(ctx context.Context, url string) (b []byte, gen string, olderEXPFOnly bool, pending bool, why string) {
 	for try := 0; ; try++ {
+		if ctx.Err() != nil {
+			return nil, "", false, true, "no answer"
+		}
 		reqCtx, cancel := context.WithTimeout(ctx, perfRequestTimeout)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 		if err != nil {
@@ -514,7 +520,7 @@ func fetchNativeAnalysisPending(ctx context.Context, url string) (b []byte, gen 
 		if err != nil {
 			cancel()
 			why = "no answer"
-			if try+1 >= perfRetries {
+			if try+1 >= perfRetries || ctx.Err() != nil {
 				return nil, "", false, true, why
 			}
 			select {
@@ -531,7 +537,7 @@ func fetchNativeAnalysisPending(ctx context.Context, url string) (b []byte, gen 
 			resp.Body.Close()
 			cancel()
 			why = "http " + strconv.Itoa(code)
-			if try+1 >= perfRetries {
+			if try+1 >= perfRetries || ctx.Err() != nil {
 				return nil, "", false, true, why
 			}
 			select {
@@ -557,7 +563,7 @@ func fetchNativeAnalysisPending(ctx context.Context, url string) (b []byte, gen 
 		cancel()
 		if err != nil {
 			why = "cut off"
-			if try+1 >= perfRetries {
+			if try+1 >= perfRetries || ctx.Err() != nil {
 				return nil, "", false, true, why
 			}
 			select {
@@ -580,9 +586,12 @@ func fetchNativeAnalysisPending(ctx context.Context, url string) (b []byte, gen 
 // fetchShadowAnalysisPair fetches and validates EXPF + (on player boards) native
 // analysis before publishing or refreshing a shadow copy, requiring matching
 // generation headers whenever native analysis is returned so mixed generations
-// are never installed together.
+// are never installed together. Both format fetches share ctx's deadline.
 func fetchShadowAnalysisPair(ctx context.Context, perfURL string) (shadowAnalysisPair, error) {
 	for attempt := 0; attempt < shadowPairGenRetries; attempt++ {
+		if ctx.Err() != nil {
+			return shadowAnalysisPair{}, errPerfPending
+		}
 		expf, expfGen, pending := fetchPerfPendingGen(ctx, perfURL)
 		if pending {
 			return shadowAnalysisPair{}, errPerfPending

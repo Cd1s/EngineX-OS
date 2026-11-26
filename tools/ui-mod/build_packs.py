@@ -2469,10 +2469,11 @@ SERVICES_MAIN = """
 	}
 	// What a waveform lane says while it has nothing to draw: 0 nothing, 1 the copy
 	// runs, 2 Engine loads the copy, 3 the source still computes the detail waveform,
-	// 4-6 the copy failed (stream-sync tries again by itself): no file, no answer in time, other.
+	// 4-6 the copy failed (stream-sync tries again by itself): no file, no answer in time, other,
+	// 7 the copy stopped waiting for source analysis (no further polling until the source updates).
 	function scShadowBusy(s, meta, detailed) {
 		if (!s || s.stale || s.metadataOnly) return 0
-		if (s.engine) return !s.copying ? 2 : s.error === "" ? 1 : s.error === "unavailable" ? 4 : s.error === "timeout" ? 5 : 6
+		if (s.engine) return !s.copying ? 2 : s.error === "" ? 1 : s.error === "unavailable" ? 4 : s.error === "timeout" ? 5 : (s.error === "no analysis yet" || s.error === "no analysis") ? 7 : 6
 		return s.loading || !meta || (meta.detailPending && !detailed) ? 3 : 0
 	}
 	// Engine mode: what the source deck's header shows and its copy here cannot know. The copy stays
@@ -7805,8 +7806,8 @@ SHADOW_BUSY = r"""
 @RING@                Text { textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
                     color: Style.font02Color; font: Style.fontH1
-                    readonly property int retried: scDisplay.busyState > 3 || ["network", "timeout"].indexOf(scBusy.why) >= 0 ? 1 : 0
-                    text: (["Downloading", "Loading", "Waiting for source analysis", "File unavailable.", "Failed to open file within appropriate time.", "Could not load via network."][scDisplay.busyState - 1] || {streaming: "Streaming: no file to copy from CDJ.", link: "rekordbox Link: no file to copy from CDJ.", media: "CD or 2nd USB: no file to copy from CDJ.", network: "Could not load via network.", timeout: "Failed to open file within appropriate time.", "prolink-off": "Pro DJ Link is off: no CDJ waveform"}[scBusy.why] || " ") + [" ", " " + "Retrying…"][retried]
+                    readonly property int retried: scDisplay.busyState > 3 && scDisplay.busyState < 7 || ["network", "timeout"].indexOf(scBusy.why) >= 0 ? 1 : 0
+                    text: (["Downloading", "Loading", "Waiting for source analysis", "File unavailable.", "Failed to open file within appropriate time.", "Could not load via network.", "No source analysis yet; stopped waiting."][scDisplay.busyState - 1] || {streaming: "Streaming: no file to copy from CDJ.", link: "rekordbox Link: no file to copy from CDJ.", media: "CD or 2nd USB: no file to copy from CDJ.", network: "Could not load via network.", timeout: "Failed to open file within appropriate time.", "prolink-off": "Pro DJ Link is off: no CDJ waveform"}[scBusy.why] || " ") + [" ", " " + "Retrying…"][retried]
                 }
             } }
         }

@@ -1035,9 +1035,15 @@ func TestReviewShadowR2Persistent503TransitionsToVisibleTerminalStateAndRetries(
 		t.Fatalf("new PerfGen did not trigger retry and publish: %+v", d)
 	}
 
-	// Sub-case B: explicit DJ retry action (POST /v1/enginex/shadow/retry) resumes a terminal copy.
+	// Sub-case B: unused POST /v1/enginex/shadow/retry route is removed (not
+	// registered on the gateway mux), and a source reload (new load Key) wakes
+	// a terminal copy cleanly.
+	retryReq := httptest.NewRequest(http.MethodPost, "/v1/enginex/shadow/retry", strings.NewReader(`{"key":"peer:k503a"}`))
+	if _, pat := s.tidal.mux.Handler(retryReq); strings.Contains(pat, "/shadow/retry") {
+		t.Fatalf("unused POST /v1/enginex/shadow/retry still registered: pattern=%q", pat)
+	}
 	ready.Store(false)
-	setPeer("k503b", "")
+	setPeer("k503b-1", "")
 	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
 		d = compose()
 		if d.Error == "no analysis yet" {
@@ -1045,14 +1051,10 @@ func TestReviewShadowR2Persistent503TransitionsToVisibleTerminalStateAndRetries(
 		}
 	}
 	if d.Error != "no analysis yet" {
-		t.Fatalf("k503b did not enter terminal state: %+v", d)
+		t.Fatalf("k503b-1 did not enter terminal state: %+v", d)
 	}
 	ready.Store(true)
-	w := httptest.NewRecorder()
-	s.shadowRetryPost(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/shadow/retry", strings.NewReader(`{"key":"peer:k503b"}`)))
-	if w.Code != http.StatusOK {
-		t.Fatalf("shadowRetryPost status=%d", w.Code)
-	}
+	setPeer("k503b-2", "")
 	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
 		d = compose()
 		if d.Path != "" {
@@ -1060,7 +1062,7 @@ func TestReviewShadowR2Persistent503TransitionsToVisibleTerminalStateAndRetries(
 		}
 	}
 	if d.Path == "" || d.Error != "" {
-		t.Fatalf("explicit shadow retry did not publish copy: %+v", d)
+		t.Fatalf("source reload did not wake terminal copy: %+v", d)
 	}
 }
 
@@ -1234,4 +1236,301 @@ func TestReviewShadowR2RejectsEXPFWithUnreadableBeatGrid(t *testing.T) {
 		return
 	}
 	t.Fatal("copy job did not settle")
+}
+
+// GPT R3 FIX (Finding 1): stock USB (m.db), streaming (stm.db), and rekordbox
+// on-demand sources all advertise analysis readiness via PerfGen in the existing
+// deck state when analysis finishes, waking a terminal copy without reload or
+// extra polling.
+func TestReviewShadowR3OrdinarySourcesWakeTerminalCopyWhenAnalysisFinishes(t *testing.T) {
+	oldBoard := shadowIsPlayerBoard
+	oldWait, oldTries := perfRetryWait, perfRetries
+	oldMaxFails, oldTimeout := shadowPendingMaxFails, shadowPendingTimeout
+	oldEvery := perfGenEvery
+	oldMedia, oldData, oldBeacon := shadowMediaRoot, shadowDataRoot, shadowBeaconOn
+	shadowIsPlayerBoard = func() bool { return true }
+	perfRetryWait, perfRetries = time.Millisecond, 1
+	shadowPendingMaxFails, shadowPendingTimeout = 1, 2*time.Second
+	perfGenEvery = 0
+	shadowBeaconOn = false
+	t.Cleanup(func() {
+		shadowIsPlayerBoard = oldBoard
+		perfRetryWait, perfRetries = oldWait, oldTries
+		shadowPendingMaxFails, shadowPendingTimeout = oldMaxFails, oldTimeout
+		perfGenEvery = oldEvery
+		shadowMediaRoot, shadowDataRoot, shadowBeaconOn = oldMedia, oldData, oldBeacon
+	})
+
+	qc := func(b []byte) []byte { c, _ := enginedb.QCompress(b); return c }
+	trackBlob, beatBlob, ovBlob := validTestPerformanceBlobs(126.0)
+
+	postAndReadPeer := func(t *testing.T, srvURL, body string) deckState {
+		t.Helper()
+		resp, err := http.Post(srvURL+"/v1/enginex/decks", "application/json", strings.NewReader(body))
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("decksPost: %v %v", resp, err)
+		}
+		resp.Body.Close()
+		get, err := http.Get(srvURL + "/peer/decks")
+		if err != nil || get.StatusCode != http.StatusOK {
+			t.Fatalf("peer/decks: %v %v", get, err)
+		}
+		defer get.Body.Close()
+		var out struct{ Decks []deckState }
+		if err := json.NewDecoder(get.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Decks) != 1 {
+			t.Fatalf("expected 1 deck, got %+v", out.Decks)
+		}
+		return out.Decks[0]
+	}
+
+	runCase := func(t *testing.T, src *Server, srcSrv *httptest.Server, postBody string, finishAnalysis func()) {
+		t.Helper()
+		first := postAndReadPeer(t, srcSrv.URL, postBody)
+		if first.Key == "" || first.PerfGen != "" {
+			t.Fatalf("unready source deck: key=%q perfGen=%q (want non-empty key, empty perfGen)", first.Key, first.PerfGen)
+		}
+		dst := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
+		defer dst.Close()
+		dst.shadow.dataRoot = t.TempDir()
+		dst.shadow.mediaRoot = t.TempDir()
+		dst.shadow.copyRetry = 2 * time.Millisecond
+		u, _ := url.Parse(srcSrv.URL)
+		dst.shadow.peerPort, _ = strconv.Atoi(u.Port())
+		feedPeer := func(d deckState) deckState {
+			dst.shadow.mu.Lock()
+			dst.shadow.peerDecks[1] = peerDeck{deckState: d, ip: "127.0.0.1", at: time.Now()}
+			dst.shadow.mu.Unlock()
+			out := dst.shadowComposeLegacy("24", time.Now())
+			if len(out) != 1 {
+				t.Fatalf("expected 1 shadow deck, got %+v", out)
+			}
+			return out[0]
+		}
+		var shown deckState
+		for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			shown = feedPeer(first)
+			if shown.Error == "no analysis yet" || shown.Error == "no analysis" {
+				break
+			}
+		}
+		if (shown.Error != "no analysis yet" && shown.Error != "no analysis") || shown.Path != "" {
+			t.Fatalf("copy did not enter terminal state while unready: %+v", shown)
+		}
+		// Now source finishes analysis for the exact same loaded track (no reload).
+		finishAnalysis()
+		ready := postAndReadPeer(t, srcSrv.URL, postBody)
+		if ready.Key != first.Key {
+			t.Fatalf("load key changed across analysis finish: %q -> %q", first.Key, ready.Key)
+		}
+		if ready.PerfGen == "" {
+			t.Fatalf("source did not advertise non-empty PerfGen after analysis finished: %+v", ready)
+		}
+		for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			shown = feedPeer(ready)
+			if shown.Path != "" {
+				break
+			}
+		}
+		if shown.Path == "" || shown.Error != "" {
+			t.Fatalf("terminal copy did not wake and publish once source advertised PerfGen=%q: %+v", ready.PerfGen, shown)
+		}
+	}
+
+	t.Run("stock-usb-mdb", func(t *testing.T) {
+		media := t.TempDir()
+		shadowMediaRoot = media
+		stick := filepath.Join(media, "USB1")
+		audio := filepath.Join(stick, "Track.flac")
+		_ = os.MkdirAll(filepath.Join(stick, "Engine Library/Database2"), 0o755)
+		_ = os.WriteFile(audio, []byte("AUDIO"), 0o644)
+		dbPath, _, db := testlibrary.Create(t)
+		if _, err := db.Exec(`INSERT INTO Track (path, filename, bpmAnalyzed, isAnalyzed) VALUES ('../Track.flac', 'Track.flac', 0, 0)`); err != nil {
+			t.Fatal(err)
+		}
+		mdb := filepath.Join(stick, "Engine Library/Database2/m.db")
+		copyDB := func() {
+			raw, err := os.ReadFile(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(mdb, raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		copyDB()
+		src := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir(), MediaRoot: media, RekordboxOnDemandSock: "-"}, nil)
+		defer src.Close()
+		srcSrv := httptest.NewServer(src)
+		defer srcSrv.Close()
+		body := `[{"deck":1,"net":"net://u/USB1/Track.flac","songLoading":true,"playing":false,"bpm":126}]`
+		runCase(t, src, srcSrv, body, func() {
+			if _, err := db.Exec(`UPDATE Track SET bpmAnalyzed=126.0, isAnalyzed=1`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?`, qc(trackBlob), qc(ovBlob), qc(beatBlob)); err != nil {
+				t.Fatal(err)
+			}
+			copyDB()
+		})
+	})
+
+	t.Run("streaming-stm-db", func(t *testing.T) {
+		data := t.TempDir()
+		shadowDataRoot = data
+		dbDir := filepath.Join(data, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2")
+		_ = os.MkdirAll(dbDir, 0o755)
+		audio := filepath.Join(data, "AppDataUser/AIR Music Technology/Engine/Engine Library/Stream/s1.flac")
+		_ = os.MkdirAll(filepath.Dir(audio), 0o755)
+		_ = os.WriteFile(audio, []byte("STREAM-AUDIO"), 0o644)
+		const uri = "streaming://TIDAL/Track/9001"
+		dbPath, _, db := testlibrary.Create(t)
+		if _, err := db.Exec(`INSERT INTO Track (path, filename, uri, bpmAnalyzed, isAnalyzed) VALUES ('Stream/s1.flac', 's1.flac', ?, 0, 0)`, uri); err != nil {
+			t.Fatal(err)
+		}
+		stmdb := filepath.Join(dbDir, "stm.db")
+		copyDB := func() {
+			raw, err := os.ReadFile(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(stmdb, raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		copyDB()
+		src := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir(), RekordboxOnDemandSock: "-"}, nil)
+		defer src.Close()
+		srcSrv := httptest.NewServer(src)
+		defer srcSrv.Close()
+		body := `[{"deck":1,"net":` + strconv.Quote(uri) + `,"playing":false,"bpm":126}]`
+		runCase(t, src, srcSrv, body, func() {
+			if _, err := db.Exec(`UPDATE Track SET bpmAnalyzed=126.0, isAnalyzed=1 WHERE uri=?`, uri); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?`, qc(trackBlob), qc(ovBlob), qc(beatBlob)); err != nil {
+				t.Fatal(err)
+			}
+			copyDB()
+		})
+	})
+
+	t.Run("rekordbox-ondemand", func(t *testing.T) {
+		media := t.TempDir()
+		shadowMediaRoot = media
+		stick, rel, _, _ := makeOnDemandStickFixture(t, media, "RB_WAKE")
+		anlzDir := filepath.Join(stick, "PIONEER/USBANLZ")
+		anlzBak := anlzDir + ".bak"
+		if err := os.Rename(anlzDir, anlzBak); err != nil {
+			t.Fatalf("hide USBANLZ: %v", err)
+		}
+		src := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir(), MediaRoot: media, RekordboxOnDemandSock: "-"}, nil)
+		defer src.Close()
+		srcSrv := httptest.NewServer(src)
+		defer srcSrv.Close()
+		body := `[{"deck":1,"net":"net://u/RB_WAKE/` + rel + `","songLoading":true,"playing":false,"bpm":128}]`
+		runCase(t, src, srcSrv, body, func() {
+			if err := os.Rename(anlzBak, anlzDir); err != nil {
+				t.Fatalf("restore USBANLZ: %v", err)
+			}
+			if _, err := src.buildOnDemandEntry(context.Background(), bridge.OnDemandRequest{
+				Mount:      stick,
+				EnginePath: "../" + rel,
+				EngineKey:  -1,
+			}, false); err != nil {
+				t.Fatalf("buildOnDemandEntry: %v", err)
+			}
+		})
+	})
+}
+
+// GPT R3 FIX (Finding 2): shadowPendingTimeout starts when waiting begins (not
+// after the first job fails) and is enforced as one shared deadline across both
+// EXPF and native format fetches.
+func TestReviewShadowR3PendingDeadlineStartsAtWaitBeginAndSpansBothFormats(t *testing.T) {
+	oldBoard := shadowIsPlayerBoard
+	oldWait, oldTries, oldReqTimeout := perfRetryWait, perfRetries, perfRequestTimeout
+	oldMaxFails, oldTimeout := shadowPendingMaxFails, shadowPendingTimeout
+	shadowIsPlayerBoard = func() bool { return true }
+	perfRetryWait = 40 * time.Millisecond
+	perfRetries = 10
+	perfRequestTimeout = 5 * time.Second
+	shadowPendingMaxFails = 5 // must trip on elapsed timeout, not fail count
+	shadowPendingTimeout = 160 * time.Millisecond
+	t.Cleanup(func() {
+		shadowIsPlayerBoard = oldBoard
+		perfRetryWait, perfRetries, perfRequestTimeout = oldWait, oldTries, oldReqTimeout
+		shadowPendingMaxFails, shadowPendingTimeout = oldMaxFails, oldTimeout
+	})
+
+	expf := validTestEXPF(128)
+	var expfHits, nativeHits atomic.Int32
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(shadowPerfFormatsHeader, "expf,native")
+		if r.URL.Query().Get("format") == "native" {
+			nativeHits.Add(1)
+			// Hang longer than the remaining shared deadline (or return 503).
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(2 * time.Second):
+				http.Error(w, "analysing", http.StatusServiceUnavailable)
+			}
+			return
+		}
+		expfHits.Add(1)
+		// Spend ~60% of the total shared budget on EXPF before succeeding so native
+		// must inherit only the remaining ~40% of the same deadline.
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(90 * time.Millisecond):
+		}
+		w.Header().Set(shadowPerfGenHeader, "1111111111111111")
+		_, _ = w.Write(expf)
+	}))
+	defer peer.Close()
+
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	s.shadow.copyRetry = 10 * time.Millisecond
+	u, _ := url.Parse(peer.URL)
+	s.shadow.peerPort, _ = strconv.Atoi(u.Port())
+
+	const key = "peer:shared-deadline"
+	start := time.Now()
+	s.shadow.mu.Lock()
+	s.shadowFetchPeer(key, peerDeck{
+		deckState: deckState{Deck: 1, Key: "shared-deadline", Ext: ".flac", Name: "Song.flac"},
+		ip:        "127.0.0.1",
+	})
+	s.shadow.mu.Unlock()
+
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		s.shadow.mu.Lock()
+		busy := s.shadow.busy[key]
+		c := s.shadow.copies[key]
+		terminal := c != nil && c.terminal
+		cerr := ""
+		if c != nil {
+			cerr = c.err
+		}
+		s.shadow.mu.Unlock()
+		if !busy {
+			elapsed := time.Since(start)
+			if !terminal || cerr != "no analysis yet" {
+				t.Fatalf("first job did not reach terminal \"no analysis yet\" on elapsed shared deadline: terminal=%v err=%q elapsed=%v", terminal, cerr, elapsed)
+			}
+			if elapsed > 450*time.Millisecond {
+				t.Fatalf("shared deadline exceeded: elapsed=%v (want near %v, not perfRetries*perfRequestTimeout)", elapsed, shadowPendingTimeout)
+			}
+			if expfHits.Load() != 1 || nativeHits.Load() != 1 {
+				t.Fatalf("expected 1 EXPF + 1 native request before shared deadline fired, got expf=%d native=%d", expfHits.Load(), nativeHits.Load())
+			}
+			return
+		}
+	}
+	t.Fatal("shared deadline test timed out waiting for copy job to settle")
 }

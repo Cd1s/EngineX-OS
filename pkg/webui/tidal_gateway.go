@@ -408,7 +408,6 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/enginex/clock", s.deckClockGet)
 	g.mux.HandleFunc("POST /v1/enginex/clock", s.deckClockPost)
 	g.mux.HandleFunc("GET /v1/enginex/shadow", s.shadowGet)
-	g.mux.HandleFunc("POST /v1/enginex/shadow/retry", s.shadowRetryPost)
 	g.mux.HandleFunc("GET /v1/enginex/consolesend", s.consoleSendGet)
 	g.mux.HandleFunc("GET /v1/enginex/shadow/display", s.shadowDisplayGet)
 	g.mux.HandleFunc("GET /v1/enginex/shadow/waveform.png", s.shadowWaveformGet)

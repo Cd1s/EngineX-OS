@@ -4256,7 +4256,7 @@ assert.equal(JSON.stringify([{deck: 1, player: 3 || undefined}]), '[{"deck":1,"p
             self.assertEqual(shown(code), text + " ", code)
         self.assertEqual(shown(""), "  ")  # no reason: the blank it always was
         # The code is not a retry, and the line's gate is the one it always had: busyState 0, a live fresh sample with a fallback.
-        self.assertIn('readonly property int retried: scDisplay.busyState > 3 || ["network", "timeout"].indexOf(scBusy.why) >= 0 ? 1 : 0', bp.SHADOW_BUSY)
+        self.assertIn('readonly property int retried: scDisplay.busyState > 3 && scDisplay.busyState < 7 || ["network", "timeout"].indexOf(scBusy.why) >= 0 ? 1 : 0', bp.SHADOW_BUSY)
         self.assertIn('readonly property string why: scDisplay.busyState === 0 && scDisplay.live && scDisplay.sample && !scDisplay.sample.stale && scDisplay.sample.fallback || ""', bp.SHADOW_BUSY)
 
     def test_the_prolink_off_reason_has_its_four_columns_and_a_run_time_lookup(self):
@@ -6364,13 +6364,42 @@ assert.equal(scShadowData(2).progress, 0); assert.equal(scShadowData(2).meta, nu
             self.assertNotIn("@BUSY@", other)
         table = {en: t["zh-Hans"] for en, t in bp.load_dict().items()}
         text = next(l for l in bp.translate(ringed, table, set(), live=True).split("\n") if "busyState - 1" in l)
-        for hans in ("正在下载", "正在加载", "等待源碟机分析波形", "文件不可用。", "未能在规定时间内打开文件。", "无法通过网络加载。", "正在重试…",
+        for hans in ("正在下载", "正在加载", "等待源碟机分析波形", "文件不可用。", "未能在规定时间内打开文件。", "无法通过网络加载。", "源碟机暂无分析数据，已停止等待。", "正在重试…",
                      "流媒体：CDJ 无文件可拷贝。", "rekordbox Link：CDJ 无文件可拷贝。", "CD 或第二 USB：CDJ 无文件可拷贝。"):
             self.assertIn('Math.scI18n.t("%s")' % hans, text)
-        self.assertNotRegex(text, "Downloading|Retrying|no file to copy")
+        self.assertNotRegex(text, "Downloading|Retrying|no file to copy|stopped waiting")
         # The reasons stream-sync gives (cdjFallback) each have a line.
         for why in ("streaming", "link", "media", "network", "timeout"):
             self.assertRegex(text, r"[{ ]%s: " % why)
+
+    def test_stopped_waiting_for_analysis_shows_non_retrying_wording(self):
+        self.js(r"""
+assert.equal(scShadowBusy({engine: true, copying: true, error: 'no analysis yet'}, null, false), 7);
+assert.equal(scShadowBusy({engine: true, copying: true, error: 'no analysis'}, null, false), 7);
+assert.equal(scShadowBusy({engine: true, copying: true, error: 'failed'}, null, false), 6);
+""")
+        line = next(l for l in bp.SHADOW_BUSY.splitlines() if l.strip().startswith("text: (["))
+        retried_line = next(l for l in bp.SHADOW_BUSY.splitlines() if "readonly property int retried:" in l)
+        retried_expr = retried_line.split("retried:", 1)[1].strip()
+        text_expr = line.strip()[len("text: "):]
+        if shutil.which("node"):
+            js = (
+                "const scDisplay = {busyState: 7}; const scBusy = {why: ''}; "
+                "const retried = (%s); console.log(JSON.stringify({retried, text: (%s)}))"
+                % (retried_expr, text_expr)
+            )
+            res = json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
+            self.assertEqual(res["retried"], 0)
+            self.assertEqual(res["text"], "No source analysis yet; stopped waiting. ")
+            self.assertNotIn("Retrying", res["text"])
+            self.assertNotIn("Could not load via network", res["text"])
+        rows = bp.load_dict()
+        en = "No source analysis yet; stopped waiting."
+        self.assertIn(en, rows)
+        for lang in ("zh-Hans", "zh-Hant", "es"):
+            self.assertTrue(rows[en][lang].strip(), lang)
+            translated = bp.translate(line, {k: v[lang] for k, v in rows.items()}, set(), live=True)
+            self.assertNotIn("stopped waiting", translated, lang)
 
     def test_cdj_without_a_file_goes_to_the_display_renderer_with_the_reason(self):
         self.js(self.ENGINE + self.COPY + r"""
