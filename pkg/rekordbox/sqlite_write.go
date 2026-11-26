@@ -103,7 +103,7 @@ func updateOneLibraryCues(ctx context.Context, dbPath string, updates map[uint32
 		return nil
 	}
 	return rewriteOneLibrary(ctx, dbPath, dstPath, kc, tm, func(plainPath string) error {
-		return applyCueUpdatesSQLite(ctx, plainPath, updates)
+		return applyCueUpdatesSQLite(ctx, plainPath, updates, nil)
 	})
 }
 
@@ -135,17 +135,30 @@ func UpdateOneLibraryEditsKeys(ctx context.Context, dbPath string, cues map[uint
 // UpdateOneLibraryAllKeys applies cue, metadata, and beat-grid change-tracking updates to one
 // decrypted or copied SQLite working file before writing the final OneLibrary export.
 func UpdateOneLibraryAllKeys(ctx context.Context, dbPath string, cues map[uint32][]Cue, metadata map[uint32]Metadata, grids map[uint32]GridUpdate, dstPath string, kc *KeyCache) (UpdateTimes, error) {
+	return UpdateOneLibraryWithReset(ctx, dbPath, cues, nil, metadata, grids, dstPath, kc)
+}
+
+// UpdateOneLibraryWithReset applies cue, metadata, and beat-grid updates, resetting cueUpdateCount
+// and hasModified (when no analysis edits remain) for content IDs in resetMarks whose cue list is empty.
+func UpdateOneLibraryWithReset(ctx context.Context, dbPath string, cues map[uint32][]Cue, resetMarks map[uint32]bool, metadata map[uint32]Metadata, grids map[uint32]GridUpdate, dstPath string, kc *KeyCache) (UpdateTimes, error) {
 	var tm UpdateTimes
-	if len(cues) == 0 && len(metadata) == 0 && len(grids) == 0 {
+	if len(cues) == 0 && len(resetMarks) == 0 && len(metadata) == 0 && len(grids) == 0 {
 		return tm, nil
 	}
 	err := rewriteOneLibrary(ctx, dbPath, dstPath, kc, &tm, func(plainPath string) error {
-		if len(cues) > 0 {
-			if err := applyCueUpdatesSQLite(ctx, plainPath, cues); err != nil {
+		if len(cues) > 0 || len(resetMarks) > 0 {
+			if err := applyCueUpdatesSQLite(ctx, plainPath, cues, resetMarks); err != nil {
 				return err
 			}
-			ids := make([]uint32, 0, len(cues))
+			idSet := make(map[uint32]bool, len(cues)+len(resetMarks))
 			for id := range cues {
+				idSet[id] = true
+			}
+			for id := range resetMarks {
+				idSet[id] = true
+			}
+			ids := make([]uint32, 0, len(idSet))
+			for id := range idSet {
 				ids = append(ids, id)
 			}
 			written, err := readSQLiteCuesForIDs(ctx, plainPath, ids)
@@ -260,7 +273,7 @@ func rewriteOneLibrary(ctx context.Context, dbPath, dstPath string, kc *KeyCache
 	return nil
 }
 
-func applyCueUpdatesSQLite(ctx context.Context, plainPath string, updates map[uint32][]Cue) error {
+func applyCueUpdatesSQLite(ctx context.Context, plainPath string, updates map[uint32][]Cue, resetMarks map[uint32]bool) error {
 	u := url.URL{Scheme: "file", Path: plainPath}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
@@ -306,9 +319,31 @@ func applyCueUpdatesSQLite(ctx context.Context, plainPath string, updates map[ui
 	if len(contentSets) > 0 && contentCols["content_id"] {
 		contentUpdateSQL = "UPDATE content SET " + strings.Join(contentSets, ", ") + " WHERE content_id = ?"
 	}
+	var resetSets []string
+	if contentCols["cueupdatecount"] {
+		resetSets = append(resetSets, "cueUpdateCount = NULL")
+	}
+	if contentCols["hasmodified"] {
+		if contentCols["analysisdataupdatecount"] {
+			resetSets = append(resetSets, "hasModified = CASE WHEN COALESCE(analysisDataUpdateCount, 0) = 0 THEN 0 ELSE hasModified END")
+		} else {
+			resetSets = append(resetSets, "hasModified = 0")
+		}
+	}
+	contentResetSQL := ""
+	if len(resetSets) > 0 && contentCols["content_id"] {
+		contentResetSQL = "UPDATE content SET " + strings.Join(resetSets, ", ") + " WHERE content_id = ?"
+	}
 
-	contentIDs := make([]uint32, 0, len(updates))
+	seenIDs := make(map[uint32]bool, len(updates)+len(resetMarks))
 	for id := range updates {
+		seenIDs[id] = true
+	}
+	for id := range resetMarks {
+		seenIDs[id] = true
+	}
+	contentIDs := make([]uint32, 0, len(seenIDs))
+	for id := range seenIDs {
 		contentIDs = append(contentIDs, id)
 	}
 	sort.Slice(contentIDs, func(i, j int) bool { return contentIDs[i] < contentIDs[j] })
@@ -377,7 +412,13 @@ func applyCueUpdatesSQLite(ctx context.Context, plainPath string, updates map[ui
 				return fmt.Errorf("onelibrary: insert cue for %d: %w", contentID, err)
 			}
 		}
-		if contentUpdateSQL != "" {
+		if resetMarks[contentID] {
+			if contentResetSQL != "" {
+				if _, err := tx.ExecContext(ctx, contentResetSQL, contentID); err != nil {
+					return fmt.Errorf("onelibrary: reset content change tracking for %d: %w", contentID, err)
+				}
+			}
+		} else if contentUpdateSQL != "" {
 			if _, err := tx.ExecContext(ctx, contentUpdateSQL, contentID); err != nil {
 				return fmt.Errorf("onelibrary: update content change tracking for %d: %w", contentID, err)
 			}

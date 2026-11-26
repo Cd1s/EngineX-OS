@@ -96,6 +96,8 @@ type Header struct {
 	Base string `json:"base,omitempty"`
 	// Mode distinguishes build modes that share Rules ("" = full perf build, "ondemand" = CDJ direct-read).
 	Mode string `json:"mode,omitempty"`
+	// RepairStamp records that historical .enginex-backup ANLZ/phantom-cue migration has run for this volume state.
+	RepairStamp string `json:"repairStamp,omitempty"`
 }
 
 // PerfState says what a row's performance data is.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"unicode/utf16"
 )
 
@@ -65,6 +66,31 @@ func parseANLZSections(raw []byte) (int, []anlzSection, error) {
 		off += sn
 	}
 	return h, secs, nil
+}
+
+// ParseANLZPath returns the PPTH track path embedded in a rekordbox ANLZ file, if present.
+func ParseANLZPath(raw []byte) (string, bool) {
+	_, secs, err := parseANLZSections(raw)
+	if err != nil {
+		return "", false
+	}
+	for _, s := range secs {
+		if s.tag != "PPTH" || len(s.raw) < 16 {
+			continue
+		}
+		plen := int(be.Uint32(s.raw[12:16]))
+		if plen <= 0 || 16+plen > len(s.raw) || plen%2 != 0 {
+			continue
+		}
+		u := make([]uint16, plen/2)
+		for i := range u {
+			u[i] = be.Uint16(s.raw[16+2*i:])
+		}
+		if p := strings.TrimRight(string(utf16.Decode(u)), "\x00"); p != "" {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 func assembleANLZ(origHeader []byte, secs [][]byte) []byte {

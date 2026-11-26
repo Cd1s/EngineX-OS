@@ -29,6 +29,7 @@ type target struct {
 	key            string           // ANLZ: the track
 	cues           []rekordbox.Cue  // ANLZ cues (when cuesDiff)
 	beats          []rekordbox.Beat // ANLZ beat grid (when gridDiff)
+	rawOverride    []byte           // ANLZ exact replacement bytes (e.g. backup restoration)
 	cuesDiff       bool             // ANLZ: rewrite cue sections
 	gridDiff       bool             // ANLZ: rewrite PQTZ/PQT2 grid section
 	ext            int              // ANLZ: the index in anlzExts
@@ -62,7 +63,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 		targets = append(targets, t)
 		return nil
 	}
-	oneCues, oneMeta, oneGrids, pdbMeta := map[uint32][]rekordbox.Cue{}, map[uint32]rekordbox.Metadata{}, map[uint32]rekordbox.GridUpdate{}, map[uint32]rekordbox.Metadata{}
+	oneCues, oneResets, oneMeta, oneGrids, pdbMeta := map[uint32][]rekordbox.Cue{}, map[uint32]bool{}, map[uint32]rekordbox.Metadata{}, map[uint32]rekordbox.GridUpdate{}, map[uint32]rekordbox.Metadata{}
 	for _, ch := range changes {
 		for kind, tr := range ch.refs {
 			if kind == rbstate.OneLibrary && ch.metadata[kind] {
@@ -72,26 +73,42 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			}
 			if kind == rbstate.OneLibrary && ch.oneCuesDiff {
 				oneCues[tr.ID] = ch.cues
+				if ch.resetOneMarks {
+					oneResets[tr.ID] = true
+				}
 			}
 			if kind == rbstate.OneLibrary && ch.gridDiff {
 				oneGrids[tr.ID] = rekordbox.GridUpdate{BPM: ch.bpm}
 			}
 		}
-		anlzCues := ch.anlzCuesDiff || ch.anlzCueRepair
-		if base, ok := anlzBase(ch.analysis); (anlzCues || ch.gridDiff) && ok {
+		if base, ok := anlzBase(ch.analysis); (ch.anlzCuesDiff || ch.anlzCueRepair || ch.gridDiff) && ok {
 			for i, ext := range anlzExts {
-				if i == 2 && !anlzCues {
+				wantCues := ch.cuesDiff
+				var override []byte
+				if ch.anlzCueRepair {
+					wantCues = ch.repairVariant[i]
+					override = ch.restoreVariant[i]
+					if ch.gridDiff {
+						// Never overwrite a live grid edit with old raw backup bytes; rewrite cues + grid cleanly.
+						override = nil
+					}
+				} else if i == 2 && !ch.cuesDiff {
+					continue
+				}
+				wantGrid := ch.gridDiff && i < 2
+				if !wantCues && len(override) == 0 && !wantGrid {
 					continue
 				}
 				if rel, ok := resolveANLZVariant(p.r, base, ext); ok {
 					if err := add(&target{
-						rel:      rel,
-						key:      ch.candidate.key,
-						cues:     ch.cues,
-						beats:    ch.beats,
-						cuesDiff: anlzCues,
-						gridDiff: ch.gridDiff,
-						ext:      i,
+						rel:         rel,
+						key:         ch.candidate.key,
+						cues:        ch.cues,
+						beats:       ch.beats,
+						rawOverride: override,
+						cuesDiff:    wantCues,
+						gridDiff:    wantGrid,
+						ext:         i,
 					}); err != nil {
 						return nil, nil, err
 					}
@@ -102,7 +119,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 	for _, kind := range []rbstate.LibraryKind{rbstate.OneLibrary, rbstate.DeviceLibrary} {
 		edits := len(pdbMeta)
 		if kind == rbstate.OneLibrary {
-			edits = len(oneCues) + len(oneMeta) + len(oneGrids)
+			edits = len(oneCues) + len(oneResets) + len(oneMeta) + len(oneGrids)
 		}
 		if src, ok := libs[kind]; ok && edits > 0 {
 			if err := add(&target{rel: src.File.Rel, kind: kind}); err != nil {
@@ -158,7 +175,12 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 			if t.kind == 0 {
 				data = raw
 				changed = false
-				if t.cuesDiff {
+				if len(t.rawOverride) > 0 {
+					if !bytes.Equal(data, t.rawOverride) {
+						data = t.rawOverride
+						changed = true
+					}
+				} else if t.cuesDiff {
 					next, c, rerr := rekordbox.RewriteANLZCues(data, t.cues, t.ext > 0, t.ext == 2)
 					if rerr != nil {
 						err = fmt.Errorf("writeback: %s: %w", t.rel, rerr)
@@ -215,7 +237,7 @@ func (p *pass) write(ctx context.Context, libs map[rbstate.LibraryKind]SourceLib
 		if t.kind == rbstate.OneLibrary {
 			_ = f.Close()
 			started := time.Now()
-			upd, err := rekordbox.UpdateOneLibraryAllKeys(ctx, t.full, oneCues, oneMeta, oneGrids, tmp, p.keys)
+			upd, err := rekordbox.UpdateOneLibraryWithReset(ctx, t.full, oneCues, oneResets, oneMeta, oneGrids, tmp, p.keys)
 			p.phase["decrypt"] += upd.Decrypt
 			p.phase["edit"] += upd.Edit
 			p.phase["encrypt"] += time.Since(started) - upd.Decrypt - upd.Edit

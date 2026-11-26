@@ -1009,13 +1009,22 @@ func TestWriteBackSelfRepairsSwappedEngineXFilesOnly(t *testing.T) {
 	}
 
 	// Track 3: backed-up swapped file holding the 8x23ms content-76 phantom-cue signature
-	// (PM 17:05: must be excluded from the self-repair pass for now).
+	// (PM 19:58 item 1: must be cleaned across ANLZ and exportLibrary.db, resetting content marks).
 	dat3Rel := "PIONEER/USBANLZ/P003/ANLZ0000.DAT"
 	ext3Rel := "PIONEER/USBANLZ/P003/ANLZ0000.EXT"
 	dat3Path := filepath.Join(root, filepath.FromSlash(dat3Rel))
 	ext3Path := filepath.Join(root, filepath.FromSlash(ext3Rel))
-	testfixture.Write(t, root, filepath.ToSlash(filepath.Join(".enginex-backup", "2026-11-25", dat3Rel)), origDAT1)
-	testfixture.Write(t, root, filepath.ToSlash(filepath.Join(".enginex-backup", "2026-11-25", ext3Rel)), origEXT1)
+	testfixture.Write(t, root, "Contents/FixtureC/Track03.mp3", makeLAMEFixtureMP3(25000))
+	emptyDAT3, _, err := rekordbox.RewriteANLZCues(rewritePPTHSection(t, origDAT1, "/Contents/FixtureC/Track03.mp3"), nil, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyEXT3, _, err := rekordbox.RewriteANLZCues(rewritePPTHSection(t, origEXT1, "/Contents/FixtureC/Track03.mp3"), nil, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testfixture.Write(t, root, filepath.ToSlash(filepath.Join(".enginex-backup", "2026-11-25", dat3Rel)), emptyDAT3)
+	testfixture.Write(t, root, filepath.ToSlash(filepath.Join(".enginex-backup", "2026-11-25", ext3Rel)), emptyEXT3)
 	makeSwappedEight23ms := func(raw []byte, isExt bool) []byte {
 		var eight []rekordbox.Cue
 		for pad := uint32(1); pad <= 8; pad++ {
@@ -1068,10 +1077,33 @@ func TestWriteBackSelfRepairsSwappedEngineXFilesOnly(t *testing.T) {
 		}
 		return out
 	}
-	brokenDAT3 := makeSwappedEight23ms(origDAT1, false)
-	brokenEXT3 := makeSwappedEight23ms(origEXT1, true)
+	brokenDAT3 := makeSwappedEight23ms(emptyDAT3, false)
+	brokenEXT3 := makeSwappedEight23ms(emptyEXT3, true)
 	testfixture.Write(t, root, dat3Rel, brokenDAT3)
 	testfixture.Write(t, root, ext3Rel, brokenEXT3)
+	onePath3 := filepath.Join(root, "PIONEER", "rekordbox", "exportLibrary.db")
+	oneDB3, err := sql.Open("sqlite", onePath3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = oneDB3.Exec(`
+		INSERT INTO content(content_id, title, bpmx100, length, path, samplingRate, djComment, analysisDataFilePath, hasModified, cueUpdateCount, analysisDataUpdateCount)
+		VALUES (3, 'Fixture Track 3', 12800, 650, '/Contents/FixtureC/Track03.mp3', 44100, '', '/PIONEER/USBANLZ/P003/ANLZ0000.DAT', 1, 1, NULL);
+		INSERT INTO cue(cue_id, content_id, kind, colorTableIndex, cueComment, isActiveLoop, beatLoopNumerator, beatLoopDenominator, inUsec, outUsec, in150FramePerSec, out150FramePerSec)
+		VALUES
+			(301, 3, 1, 1, 'Cue 1', 0, 0, 0, 23000, -1, 3, -1),
+			(302, 3, 2, 2, 'Cue 2', 0, 0, 0, 23000, -1, 3, -1),
+			(303, 3, 3, 3, 'Cue 3', 0, 0, 0, 23000, -1, 3, -1),
+			(304, 3, 4, 4, 'Cue 4', 0, 0, 0, 23000, -1, 3, -1),
+			(305, 3, 5, 5, 'Cue 5', 0, 0, 0, 23000, -1, 3, -1),
+			(306, 3, 6, 6, 'Cue 6', 0, 0, 0, 23000, -1, 3, -1),
+			(307, 3, 7, 7, 'Cue 7', 0, 0, 0, 23000, -1, 3, -1),
+			(308, 3, 8, 8, 'Cue 8', 0, 0, 0, 23000, -1, 3, -1);
+	`)
+	_ = oneDB3.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
 	dbDir := filepath.Join(root, "Engine Library", "Database2")
 	snap3, err := rbstate.Load(dbDir)
 	if err != nil {
@@ -1082,31 +1114,41 @@ func TestWriteBackSelfRepairsSwappedEngineXFilesOnly(t *testing.T) {
 		EngineID:     3,
 		Rel:          "Contents/FixtureC/Track03.mp3",
 		AnalysisPath: dat3Rel,
+		Refs:         []rbstate.SourceRef{{Kind: rbstate.OneLibrary, ID: 3}},
 	}
+	if _, snap3.Header.Stamp, err = exportNow(root, snap3.Header.Layout); err != nil {
+		t.Fatal(err)
+	}
+	r3, err := compat.NewResolver(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap3.Header.Sources, _ = FindSources(r3, root)
 	if err := snap3.Save(dbDir); err != nil {
 		t.Fatal(err)
 	}
 
-	// DryRun reports ONLY Track 1 with cues:anlz-repair (excludes Track 2 unbacked and Track 3 8x23ms) and writes nothing.
+	// DryRun reports Track 1 (cues:anlz-repair) and Track 3 (cues:phantom-cleanup), excludes third-party Track 2, and writes nothing.
 	dryRes, err := WriteBackCues(ctx, root, WriteBackOptions{DryRun: true})
 	if err != nil {
 		t.Fatalf("DryRun: %v", err)
 	}
-	if dryRes.TracksChanged != 1 || dryRes.FilesUpdated != 0 || len(dryRes.Changes) != 1 ||
-		dryRes.Changes[0].EngineID != 1 || strings.Join(dryRes.Changes[0].Fields, ",") != "cues:anlz-repair" {
+	if dryRes.TracksChanged != 2 || dryRes.FilesUpdated != 0 || len(dryRes.Changes) != 2 ||
+		dryRes.Changes[0].EngineID != 1 || strings.Join(dryRes.Changes[0].Fields, ",") != "cues:anlz-repair" ||
+		dryRes.Changes[1].EngineID != 3 || strings.Join(dryRes.Changes[1].Fields, ",") != "cues:phantom-cleanup" {
 		t.Fatalf("unexpected DryRun repair result: %+v", dryRes)
 	}
 	if cur, _ := os.ReadFile(dat1Path); !bytes.Equal(cur, brokenDAT1) {
 		t.Fatal("DryRun modified DAT1")
 	}
 
-	// Live pass repairs ONLY Track 1 to compact 44-byte minimal layout, leaves Track 2, Track 3 (8x23ms),
-	// and first-original backups untouched.
+	// Live pass repairs Track 1 AND strips Track 3's phantom set across ANLZ + exportLibrary.db,
+	// leaving Track 2 and first-original backups untouched.
 	res, err := WriteBackCues(ctx, root, WriteBackOptions{})
 	if err != nil {
 		t.Fatalf("WriteBackCues repair: %v", err)
 	}
-	if res.TracksChanged != 1 || res.FilesUpdated != 2 || res.OneLibraryUpdated {
+	if res.TracksChanged != 2 || res.FilesUpdated != 5 || !res.OneLibraryUpdated {
 		t.Fatalf("unexpected live repair result: %+v", res)
 	}
 
@@ -1150,12 +1192,26 @@ func TestWriteBackSelfRepairsSwappedEngineXFilesOnly(t *testing.T) {
 	if cur, _ := os.ReadFile(ext2Path); !bytes.Equal(cur, brokenEXT2) {
 		t.Fatal("third-party Track 2 EXT was modified")
 	}
-	// Content-76 shape Track 3 (8x23ms) must remain byte-for-byte untouched.
-	if cur, _ := os.ReadFile(dat3Path); !bytes.Equal(cur, brokenDAT3) {
-		t.Fatal("excluded 8x23ms Track 3 DAT was modified")
+	// Phantom-set Track 3 (8x23ms) must now be restored to clean empty cues + DB marks reset.
+	if cur, _ := os.ReadFile(dat3Path); !bytes.Equal(cur, emptyDAT3) {
+		t.Fatal("phantom Track 3 DAT was not restored to clean original")
 	}
-	if cur, _ := os.ReadFile(ext3Path); !bytes.Equal(cur, brokenEXT3) {
-		t.Fatal("excluded 8x23ms Track 3 EXT was modified")
+	if cur, _ := os.ReadFile(ext3Path); !bytes.Equal(cur, emptyEXT3) {
+		t.Fatal("phantom Track 3 EXT was not restored to clean original")
+	}
+	oneCheck3, err := sql.Open("sqlite", onePath3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cnt3, mod3 int
+	var cueUpd3 sql.NullInt64
+	if err := oneCheck3.QueryRow(`SELECT (SELECT count(*) FROM cue WHERE content_id=3), COALESCE(hasModified,0), cueUpdateCount FROM content WHERE content_id=3`).Scan(&cnt3, &mod3, &cueUpd3); err != nil {
+		_ = oneCheck3.Close()
+		t.Fatal(err)
+	}
+	_ = oneCheck3.Close()
+	if cnt3 != 0 || mod3 != 0 || cueUpd3.Valid {
+		t.Fatalf("Track 3 OneLibrary rows/marks not cleaned: cues=%d hasModified=%d cueUpdateCount=%v", cnt3, mod3, cueUpd3)
 	}
 
 	// Subsequent pass must be a 0-change no-op.
