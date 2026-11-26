@@ -690,9 +690,10 @@ func (g *tidalGateway) rbxStageCopy(ip, p string, size, mtime int64, fetch func(
 		if skip[dir] || syscall.Statfs(dir, &fs) != nil || fs.Flags&1 != 0 || !rbxOwnCache(dir, cache) { // ST_RDONLY
 			continue
 		}
-		// One budget for everything staged on the drive: the Pro DJ Link libraries count too.
+		// Budget for on-demand rekordbox playback copies (.rekordbox-cache). Leftover
+		// .prolink-cache directories are untouched and already reflected in fs.Bavail.
 		room := func() int64 {
-			return rbxRoom(&fs, prolink.DirSize(cache)+prolink.DirSize(filepath.Join(dir, prolink.StagedDir)))
+			return rbxRoom(&fs, prolink.DirSize(cache))
 		}
 		for room() < size && dropOldest(cache) {
 			_ = syscall.Statfs(dir, &fs)

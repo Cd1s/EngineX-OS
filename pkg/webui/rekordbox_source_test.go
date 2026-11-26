@@ -825,8 +825,8 @@ func TestRekordboxCacheIsOnTheDrivesVolume(t *testing.T) {
 	}
 }
 
-func TestRekordboxCacheSharesTheDrivesStagingBudget(t *testing.T) {
-	// A 64 GiB drive with 20 GiB free: all staged libraries together may take a tenth of it.
+func TestRekordboxCacheRespectsBudgetAndLeavesProlinkCacheUntouched(t *testing.T) {
+	// A 64 GiB drive with 20 GiB free: .rekordbox-cache may take at most a tenth of it.
 	fs := syscall.Statfs_t{Bsize: 4096, Blocks: 64 << 30 / 4096, Bavail: 20 << 30 / 4096}
 	allowance := int64(64<<30) / 10
 	sparse := func(path string, size int64) {
@@ -837,20 +837,21 @@ func TestRekordboxCacheSharesTheDrivesStagingBudget(t *testing.T) {
 		}
 	}
 	room := func(_ *syscall.Statfs_t, staged int64) int64 { return prolink.StageRoom(&fs, staged) }
-	t.Run("the libraries took it all", func(t *testing.T) {
+	t.Run("active copy fills budget", func(t *testing.T) {
 		e := newRbxEnv(t, nil)
-		sparse(filepath.Join(e.vol, prolink.StagedDir, "player", "audio.flac"), allowance)
+		// An in-flight .fetch- file is never evicted by dropOldest.
+		sparse(filepath.Join(e.vol, rbxCacheDir, ".fetch-busy"), allowance)
 		rbxServe(t, room)
 		if file, err := rbxStageTrack(e); err == nil {
 			t.Fatalf("a second budget was given: %s", file)
 		}
 	})
-	t.Run("an old copy makes room, the libraries stay", func(t *testing.T) {
+	t.Run("old cache copy makes room while leftover .prolink-cache stays intact", func(t *testing.T) {
 		e := newRbxEnv(t, nil)
-		lib := filepath.Join(e.vol, prolink.StagedDir, "player", "audio.flac")
+		leftover := filepath.Join(e.vol, ".prolink-cache", "player", "audio.flac")
 		old := filepath.Join(e.vol, rbxCacheDir, "old.flac")
-		sparse(lib, allowance/2)
-		sparse(old, allowance-allowance/2-4) // 4 bytes short of the budget
+		sparse(leftover, allowance)
+		sparse(old, allowance-4) // 4 bytes short of the budget
 		rbxServe(t, room)
 		file, err := rbxStageTrack(e)
 		if err != nil {
@@ -860,10 +861,10 @@ func TestRekordboxCacheSharesTheDrivesStagingBudget(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 		if _, err := os.Stat(old); err == nil {
-			t.Fatal("the old copy was kept although the staged bytes of both caches fill the budget")
+			t.Fatal("the old cache copy was kept although .rekordbox-cache filled the budget")
 		}
-		if _, err := os.Stat(lib); err != nil {
-			t.Fatalf("a staged library was removed: %v", err)
+		if _, err := os.Stat(leftover); err != nil {
+			t.Fatalf("leftover .prolink-cache was removed: %v", err)
 		}
 	})
 }
