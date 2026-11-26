@@ -771,7 +771,7 @@ func input(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-const consoleLoginPage = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Stream Sync</title><style>body{background:#111;color:#eee;font:16px/1.5 system-ui,sans-serif;margin:0;padding:24px}main{max-width:460px;margin:12vh auto}h1{font-size:28px}label{display:block;font-weight:600}input,button{box-sizing:border-box;width:100%;padding:14px;margin-top:10px;border-radius:6px;font:inherit}input{background:#222;color:#fff;border:1px solid #555}button{background:#287e60;color:white;border:0;font-weight:600;cursor:pointer}p{color:#bbb}</style><main><h1>Stream Sync</h1><form method="post" action="/login"><label for="token" id="label">Console Access Code</label><input id="token" name="token" type="text" placeholder="XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" required><button id="submit">Sign in</button></form><p id="bootFallback" hidden></p><p id="hint">The Console Access Code is shown on the deck screen under Settings → About.</p></main><script>const l=(navigator.language||'en').toLowerCase();const t=l.startsWith('zh')?(l.includes('hant')||/-(tw|hk|mo)/.test(l)?['控制台存取碼','登入','控制台存取碼顯示在碟機螢幕的「設定 → 關於」中。']:['控制台访问码','登录','控制台访问码显示在碟机屏幕的「设置 → 关于」中。']):l.startsWith('es')?['Código de acceso a la consola','Iniciar sesión','El código de acceso a la consola se muestra en la pantalla del deck en Ajustes → Acerca de.']:null;if(t){document.documentElement.lang=l;document.getElementById('label').textContent=t[0];document.getElementById('submit').textContent=t[1];document.getElementById('hint').textContent=t[2]}` + bootLoginNoticeScript + `</script></html>`
+const consoleLoginPage = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Stream Sync</title><style>body{background:#111;color:#eee;font:16px/1.5 system-ui,sans-serif;margin:0;padding:24px}main{max-width:460px;margin:12vh auto}h1{font-size:28px}label{display:block;font-weight:600}input,button{box-sizing:border-box;width:100%;padding:14px;margin-top:10px;border-radius:6px;font:inherit}input{background:#222;color:#fff;border:1px solid #555}button{background:#287e60;color:white;border:0;font-weight:600;cursor:pointer}p{color:#bbb}#loginError{color:#ff8f80}</style><main><h1>Stream Sync</h1><form id="login" method="post" action="/login"><label for="token" id="label">Console Access Code</label><input id="token" name="token" type="text" placeholder="XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" required><button id="submit">Sign in</button></form><p id="loginError" role="alert" hidden></p><p id="bootFallback" hidden></p><p id="hint">The Console Access Code is shown on the deck screen under Settings → About.</p></main><script>const l=(navigator.language||'en').toLowerCase();const t=l.startsWith('zh')?(l.includes('hant')||/-(tw|hk|mo)/.test(l)?['控制台存取碼','登入','控制台存取碼顯示在碟機螢幕的「設定 → 關於」中。']:['控制台访问码','登录','控制台访问码显示在碟机屏幕的「设置 → 关于」中。']):l.startsWith('es')?['Código de acceso a la consola','Iniciar sesión','El código de acceso a la consola se muestra en la pantalla del deck en Ajustes → Acerca de.']:null;if(t){document.documentElement.lang=l;document.getElementById('label').textContent=t[0];document.getElementById('submit').textContent=t[1];document.getElementById('hint').textContent=t[2]}` + consoleLoginScript + bootLoginNoticeScript + `</script></html>`
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
@@ -1246,6 +1246,23 @@ func (s *Server) waveform(w http.ResponseWriter, r *http.Request) {
 func ShutdownContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 5*time.Second)
 }
+
+// The sign-in form posts with fetch, so a refused code shows a short message in the page's language instead of
+// the API's JSON (#344). /login itself still answers JSON (401 wrong code, 429 too many tries, 5xx deck busy) for
+// other clients; a failed request means the deck cannot be reached. Order: en, zh-Hans, zh-Hant, es.
+const consoleLoginScript = `
+const loginLang=l.startsWith('zh')?(l.includes('hant')||/-(tw|hk|mo)/.test(l)?2:1):l.startsWith('es')?3:0;
+const loginErrors={
+wrong:['That access code is not right. Check the code on the deck under Settings → About and try again.','访问码不正确。请在碟机的「设置 → 关于」中核对后重试。','存取碼不正確。請在碟機的「設定 → 關於」中核對後重試。','El código de acceso no es correcto. Compruébalo en el deck en Ajustes → Acerca de y vuelve a intentarlo.'],
+locked:['Too many wrong codes. Wait a minute, then try again.','错误次数过多，请等一分钟后再试。','錯誤次數過多，請等一分鐘後再試。','Demasiados códigos incorrectos. Espera un minuto y vuelve a intentarlo.'],
+busy:['The deck is busy or cannot be reached. Check that it is on and connected, then try again.','碟机正忙或无法连接。请确认碟机已开机并已联网，然后重试。','碟機忙碌中或無法連線。請確認碟機已開機並已連上網路，然後重試。','El deck está ocupado o no responde. Comprueba que está encendido y conectado, y vuelve a intentarlo.'],
+failed:['Sign-in failed. Reload the page and try again.','登录失败，请刷新页面后重试。','登入失敗，請重新整理頁面後再試。','No se pudo iniciar sesión. Recarga la página y vuelve a intentarlo.']};
+function showLoginError(kind){const e=document.getElementById('loginError');e.textContent=loginErrors[kind][loginLang];e.hidden=false}
+document.getElementById('login').addEventListener('submit',async function(ev){ev.preventDefault();const button=document.getElementById('submit');button.disabled=true;document.getElementById('loginError').hidden=true;
+try{const r=await fetch('/login',{method:'POST',body:new URLSearchParams({token:document.getElementById('token').value}),redirect:'manual',cache:'no-store'});
+if(r.type==='opaqueredirect'||r.ok){location.replace('/');return}
+showLoginError(r.status===401?'wrong':r.status===429?'locked':r.status>=500?'busy':'failed')}catch(e){showLoginError('busy')}finally{button.disabled=false}});
+`
 
 // Public notice uses only the fixed booleans from /boot-status.
 const bootLoginNoticeScript = `
