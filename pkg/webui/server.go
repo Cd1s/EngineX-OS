@@ -84,6 +84,8 @@ type Config struct {
 	RestartEngine func() error
 	// SDHighSpeedRunDir overrides /run/enginex for SD high-speed state in tests.
 	SDHighSpeedRunDir string
+	// RekordboxOnDemandSock overrides /run/enginex/rb-ondemand.sock for the hook's local Unix socket ("-" disables).
+	RekordboxOnDemandSock string
 	// ApplySDHighSpeed overrides invoking enginex-sd-highspeed in tests.
 	ApplySDHighSpeed func(enabled, playing bool) (pending bool, err error)
 	// ProlinkExport selects the optional read-only CDJ export; zero uses the
@@ -98,29 +100,35 @@ type Config struct {
 	Factory func(provider string, guest bool, userID string) (providers.Provider, error)
 }
 type Server struct {
-	cfg           Config
-	jobs          *Jobs
-	cueWatch      atomic.Pointer[bridge.CueWatcher] // #321: set by WatchCues
-	rbPriorityMu  sync.Mutex
-	rbPriority    *bridge.PriorityQueue
-	rbDeckLoaded  [5]string // per deck: last prioritized file path
-	rbDeckCue     [5]bool   // per deck: last CUE preview state
-	mu            sync.Mutex
-	sessions      map[string]*Session
-	pending       map[string]pending
-	mux           *http.ServeMux
-	tidal         *tidalGateway
-	uiMu          sync.Mutex
-	copyMu        sync.Mutex
-	copyIncoming  *copyPeerRequest
-	copyOutgoing  *copyPeerRequest
-	copyReceived  *copyBundle
-	logsMu        sync.Mutex
-	fxMu          sync.Mutex // transient FX commands never hold the settings lock
-	stemsMu       sync.Mutex // streaming-stems.json
-	stemsImportMu sync.Mutex // one streamed row at a time is named, recorded and swept
-	rbxPresenceMu sync.Mutex
-	rbxPresence   map[string]*rbxPresence
+	cfg            Config
+	jobs           *Jobs
+	cueWatch       atomic.Pointer[bridge.CueWatcher] // #321: set by WatchCues
+	rbPriorityMu   sync.Mutex
+	rbPriority     *bridge.PriorityQueue
+	rbDeckLoaded   [5]string // per deck: last prioritized file path
+	rbDeckCue      [5]bool   // per deck: last CUE preview state
+	rbOnDemandMu   sync.Mutex
+	rbOnDemand     *bridge.OnDemandBuilder
+	rbOnDemandSrv  *http.Server
+	rbOnDemandLn   net.Listener
+	rbOnDemandSock string
+	rbOnDemandWG   sync.WaitGroup
+	mu             sync.Mutex
+	sessions       map[string]*Session
+	pending        map[string]pending
+	mux            *http.ServeMux
+	tidal          *tidalGateway
+	uiMu           sync.Mutex
+	copyMu         sync.Mutex
+	copyIncoming   *copyPeerRequest
+	copyOutgoing   *copyPeerRequest
+	copyReceived   *copyBundle
+	logsMu         sync.Mutex
+	fxMu           sync.Mutex // transient FX commands never hold the settings lock
+	stemsMu        sync.Mutex // streaming-stems.json
+	stemsImportMu  sync.Mutex // one streamed row at a time is named, recorded and swept
+	rbxPresenceMu  sync.Mutex
+	rbxPresence    map[string]*rbxPresence
 
 	prolinkExport *prolink.Exporter
 	closed        chan struct{}
@@ -362,6 +370,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /v1/enginex/sampler/loop-to-pad", s.handleSamplerLoopToPad)
 	s.mux.HandleFunc("POST /api/rekordbox/writeback", s.handleRekordboxWriteback)
 	s.mux.HandleFunc("POST /v1/enginex/rekordbox/writeback", s.handleRekordboxWriteback)
+	s.mux.HandleFunc("POST "+RekordboxOnDemandRoute, s.handleRekordboxOnDemand)
 	s.automix = newAutomixManager(s.automixConfigPath())
 	s.soundCloudAuth = &providers.SoundCloudAuth{TokenURL: cfg.SoundCloudTokenURL, Path: filepath.Join(cfg.StateDir, "soundcloud-token.json"), HTTP: cfg.HTTP}
 	if cfg.BPM != nil {
@@ -374,6 +383,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.appleMusic.OwnerPath = filepath.Join(cfg.StateDir, "applemusic-owner.json")
 	_ = s.appleMusic.Load()
 	s.tidal = newTidalGateway(s)
+	s.startRekordboxOnDemand()
 	s.RegisterTunnelRoutes()
 	// Resume before accepting requests: a delayed resume could see a newly
 	// enabled tunnel and restart it underneath its first Configure call.
@@ -459,6 +469,7 @@ func (s *Server) Close() {
 	}
 	s.stopHTTPS(true)
 	s.httpsWG.Wait()
+	s.stopRekordboxOnDemand()
 }
 
 // isDeckStateDir reports whether dir is the deck's own state dir (not a test's): the default,
