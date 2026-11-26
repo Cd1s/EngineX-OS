@@ -100,13 +100,34 @@ static int sc_shadow_peer_path(const char *rel) {
     return *name && strcmp(name, ".") && strcmp(name, "..") && !strchr(name, '/');
 }
 
-static int sc_shadow_analysis_staged(const char *path) {
+static int sc_shadow_regrid_path(const char *path, char *out, size_t cap, const char *suffix) {
     const size_t n = strlen(sc_shadow_root);
-    if (strncmp(path, sc_shadow_root, n) || path[n] != '/' || !sc_shadow_peer_path(path + n + 1)) return 0;
+    if (!path || strncmp(path, sc_shadow_root, n) || path[n] != '/' || !sc_shadow_peer_path(path + n + 1)) return 0;
+    return (size_t)snprintf(out, cap, "%s%s", path, suffix) < cap;
+}
+
+static int sc_shadow_analysis_staged(const char *path) {
     char sidecar[640];
-    if ((size_t)snprintf(sidecar, sizeof sidecar, "%s.analysis", path) >= sizeof sidecar) return 0;
+    if (!sc_shadow_regrid_path(path, sidecar, sizeof sidecar, ".analysis")) return 0;
     struct stat st;
     return !lstat(sidecar, &st) && S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size <= SC_SHADOW_MAX;
+}
+
+// Atomically move <copy>.perf.regrid -> <copy>.perf.regrid.run when Engine's
+// AnalysisQueue starts an in-place grid update for an already-loaded shadow copy.
+static int sc_shadow_regrid_arm(const char *path) {
+    char src[640], dst[640];
+    struct stat st;
+    if (!sc_shadow_regrid_path(path, src, sizeof src, ".perf.regrid") ||
+        !sc_shadow_regrid_path(path, dst, sizeof dst, ".perf.regrid.run")) return 0;
+    return !lstat(src, &st) && S_ISREG(st.st_mode) && !rename(src, dst);
+}
+
+static int sc_shadow_regrid_armed(const char *rel) {
+    char marker[640];
+    struct stat st;
+    if ((size_t)snprintf(marker, sizeof marker, "%s/%s.perf.regrid.run", sc_shadow_root, rel) >= sizeof marker) return 0;
+    return !lstat(marker, &st) && S_ISREG(st.st_mode);
 }
 
 static int sc_shadow_copy_path(void *out, int n, char **values, char **names) {
@@ -123,8 +144,23 @@ static int sc_shadow_written(void *out, int n, char **values, char **names) {
     return 0;
 }
 
-// Whether the row was written.
-static int sc_shadow_analysis_fill(const struct sc_shadow_sqlite *q, void *db, long long id) {
+static int sc_shadow_mark_regrid(const struct sc_shadow_sqlite *q, void *db, long long id, const char *path) {
+    size_t pathlen = strlen(path);
+    char *sql = malloc(256 + 2 * pathlen), *p = sql;
+    if (!sql) return 0;
+    p += sprintf(p, "UPDATE main.Track SET isAnalyzed = 0, isBeatGridLocked = 0 WHERE id = %lld "
+                    "AND CAST(path AS BLOB) = X'", id);
+    p = sc_shadow_hex(p, (const unsigned char *)path, pathlen);
+    memcpy(p, "'; SELECT changes()", sizeof "'; SELECT changes()");
+    int updated = 0;
+    if (q->exec(db, sql, sc_shadow_written, &updated, NULL)) updated = 0;
+    free(sql);
+    return updated;
+}
+
+// Whether the row was written. With regrid, also clear isAnalyzed for a peer
+// copy whose .perf.regrid.run marker is armed so AnalysisQueue runs replay.
+static int sc_shadow_analysis_fill_ex(const struct sc_shadow_sqlite *q, void *db, long long id, int regrid) {
     if (!db || id <= 0) return 0;
     const char *main = q->filename(db, "main");
     if (!main || strcmp(main, sc_shadow_library) || access(sc_shadow_root, F_OK)) return 0;
@@ -133,28 +169,35 @@ static int sc_shadow_analysis_fill(const struct sc_shadow_sqlite *q, void *db, l
              "SELECT t.path FROM main.Track t JOIN main.PerformanceData p ON p.trackId=t.id "
              "WHERE t.id=%lld AND t.path GLOB '" SC_SHADOW_REL "peer-*'", id);
     if (q->exec(db, query, sc_shadow_copy_path, path, NULL) || !*path) return 0;
+    const char *rel = path + sizeof SC_SHADOW_REL - 1;
+    const int do_regrid = regrid && sc_shadow_regrid_armed(rel);
     char sidecar[640];
-    if ((size_t)snprintf(sidecar, sizeof sidecar, "%s/%s.analysis", sc_shadow_root,
-                         path + sizeof SC_SHADOW_REL - 1) >= sizeof sidecar) return 0;
-    int fd = open(sidecar, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    if (fd < 0) return 0;
+    if ((size_t)snprintf(sidecar, sizeof sidecar, "%s/%s.analysis", sc_shadow_root, rel) >= sizeof sidecar) return 0;
     int filled = 0;
-    struct stat st;
-    if (!fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size <= SC_SHADOW_MAX) {
-        size_t size = (size_t)st.st_size, at = 0;
-        unsigned char *b = malloc(size);
-        while (b && at < size) {
-            ssize_t got = read(fd, b + at, size - at);
-            if (got <= 0) break;
-            at += (size_t)got;
+    int fd = open(sidecar, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd >= 0) {
+        struct stat st;
+        if (!fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size <= SC_SHADOW_MAX) {
+            size_t size = (size_t)st.st_size, at = 0;
+            unsigned char *b = malloc(size);
+            while (b && at < size) {
+                ssize_t got = read(fd, b + at, size - at);
+                if (got <= 0) break;
+                at += (size_t)got;
+            }
+            char *sql = at == size ? sc_shadow_analysis_sql(b, size, id, path) : NULL;
+            if (sql && q->exec(db, sql, sc_shadow_written, &filled, NULL)) filled = 0;
+            free(sql);
+            free(b);
         }
-        char *sql = at == size ? sc_shadow_analysis_sql(b, size, id, path) : NULL;
-        if (sql && q->exec(db, sql, sc_shadow_written, &filled, NULL)) filled = 0;
-        free(sql);
-        free(b);
+        close(fd);
     }
-    close(fd);
+    if (do_regrid && sc_shadow_mark_regrid(q, db, id, path)) filled = 1;
     return filled;
+}
+
+static inline int sc_shadow_analysis_fill(const struct sc_shadow_sqlite *q, void *db, long long id) {
+    return sc_shadow_analysis_fill_ex(q, db, id, 0);
 }
 
 #endif

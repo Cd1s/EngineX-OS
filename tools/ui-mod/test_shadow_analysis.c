@@ -125,6 +125,32 @@ int main(void) {
     assert(sqlite3_prepare_v2(db, "SELECT count(*) FROM PerformanceData WHERE trackId > 1 AND hex(beatData) = '00'", -1, &stmt, NULL) == SQLITE_OK);
     assert(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 4);
     sqlite3_finalize(stmt);
+    // #346: in-place grid update arms <copy>.perf.regrid -> .perf.regrid.run for
+    // peer-* copies only, and clears isAnalyzed/isBeatGridLocked so AnalysisQueue
+    // replays the updated beatData onto the already-loaded deck without reload.
+    char regrid[256], regrid_run[256], bad_regrid[256];
+    snprintf(audio, sizeof audio, "%s/peer-f012/Contents/L'ete.wav", dir);
+    snprintf(regrid, sizeof regrid, "%s.perf.regrid", audio);
+    snprintf(regrid_run, sizeof regrid_run, "%s.perf.regrid.run", audio);
+    snprintf(bad_regrid, sizeof bad_regrid, "%s/peer-f012/../outside.wav", dir);
+    assert(!sc_shadow_regrid_arm(audio));
+    out = fopen(regrid, "wb"); assert(out && fputs("g2", out) >= 0 && !fclose(out));
+    assert(!sc_shadow_regrid_arm(bad_regrid));
+    assert(sc_shadow_regrid_arm(audio));
+    assert(!sc_shadow_regrid_arm(audio)); // one-shot atomic rename
+    assert(access(regrid, F_OK) != 0 && access(regrid_run, F_OK) == 0);
+    assert(sqlite3_exec(db, "UPDATE Track SET isAnalyzed = 1, isBeatGridLocked = 1 WHERE id = 1", NULL, NULL, NULL) == SQLITE_OK);
+    // Normal fill (regrid == 0) leaves isAnalyzed = 1 even while .regrid.run exists.
+    assert(!sc_shadow_analysis_fill_ex(&api, db, 1, 0));
+    check_flags(db, 1);
+    // Regrid fill (regrid == 1) clears isAnalyzed and isBeatGridLocked for peer-* track 1.
+    assert(sc_shadow_analysis_fill_ex(&api, db, 1, 1));
+    check_flags(db, 0);
+    // Non-peer tracks are never touched even with regrid == 1.
+    assert(sqlite3_exec(db, "UPDATE Track SET isAnalyzed = 1 WHERE id = 2", NULL, NULL, NULL) == SQLITE_OK);
+    assert(!sc_shadow_analysis_fill_ex(&api, db, 2, 1));
+    check_flags(db, 2);
+    assert(!unlink(regrid_run));
     assert(sqlite3_close(usb) == SQLITE_OK && sqlite3_close(db) == SQLITE_OK);
     assert(!unlink(path) && !unlink(stick) && !unlink(sidecar) && !unlink(malformed));
     assert(!rmdir(contents) && !rmdir(cache) && !rmdir(dir));

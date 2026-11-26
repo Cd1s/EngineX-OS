@@ -64,34 +64,40 @@ func validShadowAnalysis(b []byte) bool {
 	return err == nil && len(p.Beats) != 0
 }
 
-// Publish only a complete file, before shadowFetch publishes the audio path.
+// Publish only a complete file, replacing any previous sidecar atomically on
+// success so an in-place refresh never leaves a missing .analysis window.
 // Older peers ignore format=native and return EXPF; it never becomes a sidecar.
 // The result says why there is none ("" when there is one), for the log.
 func saveShadowAnalysis(ctx context.Context, local, url string) string {
 	out := local + ".analysis"
-	_ = os.Remove(out)
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
+		_ = os.Remove(out)
 		return "no request"
 	}
 	resp, err := peerFileClient.Do(req)
 	if err != nil {
+		_ = os.Remove(out)
 		return "no answer"
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		_ = os.Remove(out)
 		return "http " + strconv.Itoa(resp.StatusCode)
 	}
 	if resp.ContentLength > shadowAnalysisMax {
+		_ = os.Remove(out)
 		return "too large"
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, shadowAnalysisMax+1))
 	if err != nil {
+		_ = os.Remove(out)
 		return "cut off"
 	}
 	if !validShadowAnalysis(b) {
+		_ = os.Remove(out)
 		return "not a native analysis"
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(local), ".analysis-*")

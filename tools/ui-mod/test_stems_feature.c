@@ -1298,6 +1298,11 @@ static void test_shadow_replay(void) {
         oa_count = 0;
         assert(oa_replay(oa_self, &qs, prefs) && oa_count == 9);
     }
+    // #346: an armed .perf.regrid.run marker is consumed and skips oa_settle().
+    f = fopen("/tmp/test-oa-replay/\xc3\xa9.flac.perf.regrid.run", "wb"); assert(f); fputs("g2", f); fclose(f);
+    oa_count = 0;
+    assert(oa_replay(oa_self, &qs, prefs) && oa_count == 9 && oa_seen[2] == OA_BEATS);
+    assert(access("/tmp/test-oa-replay/\xc3\xa9.flac.perf.regrid.run", F_OK) != 0);
     // A completed streaming download uses the analysis registered by the
     // rekordbox row fill; the analyzer delivers the imported grid without decoding.
     const char *old_rbx_dir = sc_rbx_dir;
@@ -1669,7 +1674,8 @@ static void test_shadow_rgb_request(void) {
 static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     enum { lock = 0x1d55120, prepare = 0x1d55634, close_v2 = 0x1d21af4, filename = 0x1cb0d94,
            bind = 0x1cdfb90, bind_int = 0x1cdfc28, db_handle = 0x1c9a210, sql_text = 0x1c9a2a0,
-           step = 0x1d6fef8, analyze = 0xe525ec, load = 0xd6b100, size = 0x2d00000 };
+           step = 0x1d6fef8, analyze = 0xe525ec, load = 0xd6b100,
+           queue_loaded = 0xac6870, loaded_slot = 0x2b7d480, loaded_fn = 0xe3b148, size = 0x2d00000 };
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
     char *image = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(image != MAP_FAILED);
@@ -1686,12 +1692,15 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     const uint32_t sql_code[] = {0xe3500000, 0x159000d0, 0xe12fff1e};
     const uint32_t step_code[] = {0xe59f3d88, 0xe16d42f4};
     const uint32_t load_code[] = {0xe24b105c, 0xe1a00007, 0xe59330c8, 0xe12fff33};
+    const uint32_t queue_loaded_code[] = {0xe59330d8, 0xe12fff33};
     memcpy(image + lock, lock_code, sizeof lock_code);
     memcpy(image + analyze, lock_code, sizeof lock_code);
     memcpy(image + db_handle, db_code, sizeof db_code);
     memcpy(image + sql_text, sql_code, sizeof sql_code);
     memcpy(image + step, step_code, sizeof step_code);
     memcpy(image + load, load_code, sizeof load_code);
+    memcpy(image + queue_loaded, queue_loaded_code, sizeof queue_loaded_code);
+    *(uintptr_t *)(image + loaded_slot) = base + loaded_fn;
     *(uint32_t *)(image + prepare + 0x1c) = 0xeb000000u | (((uint32_t)(lock - prepare - 0x1c - 8) >> 2) & 0xffffffu);
     uint32_t *short_bind = (void *)(image + bind_int);
     short_bind[0] = 0xe1a03fc2;
@@ -1736,6 +1745,8 @@ static void test_analysis_dispatch(const char *off, int gateway, int shadow) {
     assert(shadow_analysis_enabled == shadow);
     assert((memcmp(image + step, step_code, sizeof step_code) != 0) == shadow);
     assert((memcmp(image + analyze, lock_code, sizeof lock_code) != 0) == shadow);
+    assert((*(uintptr_t *)(image + loaded_slot) == (uintptr_t)shadow_loaded_on_deck) == shadow);
+    assert((*(uintptr_t *)(image + loaded_slot) == base + loaded_fn) == !shadow);
     if (gateway || shadow) assert(((const uint32_t *)(base + bind))[1] == (uintptr_t)rbx_bind);
     else assert(!memcmp(image + bind, bind_code, sizeof bind_code));
     // The stock consumers use the prepared statement's SQLite handle and SQL.

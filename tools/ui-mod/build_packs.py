@@ -2527,7 +2527,7 @@ SERVICES_MAIN = """
 		if (at.path !== e.path || at.id !== id) {
 			scShadowScratchRelease(d, at)
 			scShadowNudgeDrop(at, now)
-			at = scShadowAt[d] = {path: e.path, id: id, pendingLoad: true, tries: 0, seekAt: 0, seeks: 0, loads: at.loads || 0, jumps: e.jumps, nativeSync: !!at.nativeSync, mirror: at.mirror}
+			at = scShadowAt[d] = {path: e.path, id: id, gridGen: e.gridGen || "", pendingLoad: true, tries: 0, seekAt: 0, seeks: 0, loads: at.loads || 0, jumps: e.jumps, nativeSync: !!at.nativeSync, mirror: at.mirror}
 		}
 		if (at.pendingLoad) {
 			root.scShadowFeed(d, e, null, 0) // the line is the new copy's own until it is loaded
@@ -2550,6 +2550,7 @@ SERVICES_MAIN = """
 		// In the source's loop its line runs on past the loop out: it is back at the loop in.
 		const loopWrap = ms => at.loop && ms > at.loop.out ? at.loop.in + (ms - at.loop.in) % (at.loop.out - at.loop.in) : ms
 		scShadowCues(d, at, e, now)
+		scShadowRegrid(d, at, e, now)
 		// Updates sent before an Engine Link edge arrive after it: skip them, or
 		// they would undo the edge for a moment.
 		if (now - (at.linkAt || 0) < 300 && (e.playing && !e.cue) !== at.linkPS) return
@@ -3345,6 +3346,18 @@ SERVICES_MAIN = """
 			if (/^#[0-9a-f]{6,8}$/i.test(w.c || "") && String(t(q + "Color").color) !== w.c) t(q + "Color").color = w.c
 		}
 		if (isFinite(e.cuePos) && e.cuePos >= 0 && Math.abs(t("CuePosition").value - e.cuePos) > 0.5) t("CuePosition").value = e.cuePos
+	}
+	// #346: when the source edits its beat grid, stream-sync updates the shadow
+	// copy's sidecars in place and bumps gridGen; queueing the local m.db track id
+	// replays the new grid onto the already-loaded deck without reloading it.
+	function scShadowRegrid(d, at, e, now) {
+		if (((scShadowEngineMask >> d) & 1) === 0 || !e.gridGen) return
+		if (e.gridGen === at.gridGen || !(e.gridTrackId > 0) || now < (at.gridAt || 0)) return
+		const q = root.scTr("/Client/Librarian/Analyzer/AddTrackToAnalysisQueue")
+		if (!q) return
+		at.gridGen = e.gridGen
+		at.gridAt = now + 250
+		q.array = [e.gridTrackId]
 	}
 	// The shadow deck's grid is Engine's own analysis of the copy. A whole beat
 	// off (another downbeat) is fixed with Engine's OffsetPhase buttons, one

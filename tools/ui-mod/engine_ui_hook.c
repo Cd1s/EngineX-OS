@@ -3354,10 +3354,19 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
         oa_log("bad", perf, 0);
         return 0;
     }
+    // An in-place grid update for an already-loaded shadow copy (.perf.regrid.run,
+    // armed by shadow_loaded_on_deck) does not race the initial deck loader, so it
+    // skips oa_settle() and replays immediately (~0.1 ms).
+    char regrid_run[PATH_MAX + 24];
+    int regrid = 0;
+    if (!rekordbox_stream && (size_t)snprintf(regrid_run, sizeof regrid_run, "%s.regrid.run", perf) < sizeof regrid_run) {
+        struct stat rst;
+        if (!lstat(regrid_run, &rst) && S_ISREG(rst.st_mode) && !unlink(regrid_run)) regrid = 1;
+    }
     oa_emit(o, OA_STARTED, NULL);
     // The streaming request is for Engine's completed download. The shadow
     // copy has its own loader timing and keeps the existing settle check.
-    int ready = rekordbox_stream ? !__atomic_load_n((uchar *)o + OA_STOP, __ATOMIC_ACQUIRE) : oa_settle(o, p.part[0], p.len[0]);
+    int ready = (rekordbox_stream || regrid) ? !__atomic_load_n((uchar *)o + OA_STOP, __ATOMIC_ACQUIRE) : oa_settle(o, p.part[0], p.len[0]);
     if (!ready) {
         oa_emit(o, OA_STOPPED, NULL);
         oa_emit(o, OA_FINISHED, NULL);
@@ -3876,6 +3885,8 @@ static int (*shadow_step_original)(void *);
 static long long (*shadow_last_insert)(void *);
 static struct sc_shadow_sqlite shadow_sqlite;
 static uintptr_t shadow_deck_load_return;
+static uintptr_t shadow_queue_loaded_return;
+static __thread int shadow_regrid_queued;
 static unsigned (*shadow_analyze_original)(void *, const void *);
 
 // Deck loads can request analysis on EMain even when the library Track is
@@ -3915,11 +3926,38 @@ static unsigned shadow_analyze(void *obj, const void *prefs) {
     return shadow_analyze_original(obj, prefs);
 }
 
+// #346: AnalysisQueue skips any track currently loaded on a deck via
+// LibrarianTrackData::isLoadedOnDeck() (vtable +0xd8, caller 0xac6870).
+// For a peer shadow copy with a staged .perf.regrid marker, arm the one-shot
+// .perf.regrid.run marker, clear in-memory analysisStatus/isAnalyzed and return
+// 0 so AnalysisQueue runs OfflineAnalyzer replay in-place on its own thread
+// with its own refcounted ITrackData (no deck reload, no audio-thread work).
+static unsigned shadow_loaded_on_deck(void *obj) {
+    unsigned char *self = obj;
+    unsigned loaded = self[0xc8];
+    if (loaded && (uintptr_t)__builtin_return_address(0) == shadow_queue_loaded_return) {
+        const struct oa_string *path = (const void *)(self + 0x10);
+        if (path->ptr && path->size > 0 && path->size < 512) {
+            char text[512];
+            if (utf16_to_utf8(path->ptr, path->size, text, sizeof text) && sc_shadow_regrid_arm(text)) {
+                __atomic_store_n((uint32_t *)(self + 0x3c), 0u, __ATOMIC_RELEASE);
+                unsigned char *track = *(unsigned char **)(self + 0x48);
+                if (track) track[0x31d] = 0;
+                shadow_regrid_queued = 1;
+                return 0;
+            }
+        }
+    }
+    return loaded;
+}
+
 static void shadow_fill(void *db, long long id) {
+    int regrid = shadow_regrid_queued;
+    shadow_regrid_queued = 0;
     analysis_filling = 1;
-    int filled = sc_shadow_analysis_fill(&shadow_sqlite, db, id);
+    int filled = sc_shadow_analysis_fill_ex(&shadow_sqlite, db, id, regrid);
     analysis_filling = 0;
-    if (filled) fprintf(stderr, "engine-ui-hook: shadow analysis filled track %lld\n", id);
+    if (filled) fprintf(stderr, "engine-ui-hook: shadow analysis %s track %lld\n", regrid ? "regrid" : "filled", id);
 }
 
 static int shadow_step(void *stmt) {
@@ -3962,6 +4000,14 @@ A32_ONLY static void install_shadow_analysis(uintptr_t base, size_t page) {
     shadow_sqlite.filename = (const char *(*)(void *, const char *))(uintptr_t)api[180];
     redirect_function(HF_FOUR_DECK, step, shadow_step, page);
     redirect_function(HF_FOUR_DECK, analyze, shadow_analyze, page);
+    const uintptr_t queue_loaded_call = base + 0xac6870;
+    const uint32_t queue_loaded_code[] = {0xe59330d8, 0xe12fff33};
+    uintptr_t *loaded_slot = (uintptr_t *)(base + 0x2b7d480);
+    if (!memcmp((const void *)queue_loaded_call, queue_loaded_code, sizeof queue_loaded_code) &&
+        *loaded_slot == base + 0xe3b148) {
+        shadow_queue_loaded_return = queue_loaded_call + sizeof queue_loaded_code;
+        patch_pointer(HF_FOUR_DECK, loaded_slot, (uintptr_t)shadow_loaded_on_deck, page);
+    }
     shadow_analysis_enabled = 1;
     // The gateway already installed the dispatcher when enabled. Shadow alone owns it otherwise.
     if (!rbx_prepare_original) redirect_function(HF_FOUR_DECK, (uintptr_t)api[5], rbx_bind, page);
