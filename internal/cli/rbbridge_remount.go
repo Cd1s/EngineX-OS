@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"golang.org/x/sys/unix"
 )
 
@@ -339,6 +340,7 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 	}
 	rep.Publishing()
 	start := time.Now()
+	pre := readRemountPending(mount)
 	_ = os.WriteFile(publishMark(mount), nil, 0o600)
 	if err = os.WriteFile(uevent, []byte("remove"), 0); err != nil {
 		return fmt.Errorf("remove %s: %w", dev, err)
@@ -360,7 +362,64 @@ func remount(ctx context.Context, mount string, rep *usbLoadingReporter) error {
 	if err = pollUntil(ctx, remountLimit, func() bool { return mounted(mount) }); err != nil {
 		return fmt.Errorf("%s not mounted again", dev)
 	}
+	if err = verifyRemountPublished(mount, pre); err != nil {
+		return err
+	}
 	log.Printf("rb-bridge: %s published by a remount in %s", mount, time.Since(start).Round(10*time.Millisecond))
+	return nil
+}
+
+type remountPending struct {
+	hadNextDB      bool
+	hadSwap        bool
+	hadBrowseSwap  bool
+	hadPendingSnap bool
+	snapCommit     int64
+	snapApplied    int64
+	snapPending    rbstate.Pending
+}
+
+func remountFileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func readRemountPending(mount string) remountPending {
+	dbDir := filepath.Join(mount, "Engine Library", "Database2")
+	p := remountPending{
+		hadNextDB:     remountFileExists(filepath.Join(dbDir, ".rb-next.db")),
+		hadSwap:       remountFileExists(filepath.Join(dbDir, rbstate.SwapName)),
+		hadBrowseSwap: remountFileExists(filepath.Join(dbDir, rbstate.BrowseSwapName)),
+	}
+	if hdr, err := rbstate.ReadHeader(dbDir); err == nil && !hdr.Pending.None() {
+		p.hadPendingSnap = true
+		p.snapCommit = hdr.Commit
+		p.snapApplied = hdr.Applied
+		p.snapPending = hdr.Pending
+	}
+	return p
+}
+
+// verifyRemountPublished confirms the mount hook actually consumed the pending publish
+// artifacts during the remount instead of rejecting/skipping the bridge (for example, after
+// a pre-mount safety-walk timeout or bridge failure).
+func verifyRemountPublished(mount string, pre remountPending) error {
+	dbDir := filepath.Join(mount, "Engine Library", "Database2")
+	if pre.hadNextDB && remountFileExists(filepath.Join(dbDir, ".rb-next.db")) {
+		return fmt.Errorf("%s remounted without publishing pending next library (.rb-next.db still present)", mount)
+	}
+	if pre.hadSwap && remountFileExists(filepath.Join(dbDir, rbstate.SwapName)) {
+		return fmt.Errorf("%s remounted without publishing pending snapshot (%s still present)", mount, rbstate.SwapName)
+	}
+	if pre.hadBrowseSwap && remountFileExists(filepath.Join(dbDir, rbstate.BrowseSwapName)) {
+		return fmt.Errorf("%s remounted without publishing pending browse index (%s still present)", mount, rbstate.BrowseSwapName)
+	}
+	if !pre.hadNextDB && !pre.hadSwap && !pre.hadBrowseSwap && pre.hadPendingSnap {
+		if after, err := rbstate.ReadHeader(dbDir); err == nil &&
+			after.Commit == pre.snapCommit && after.Applied == pre.snapApplied && after.Pending == pre.snapPending {
+			return fmt.Errorf("%s remounted without applying pending library state", mount)
+		}
+	}
 	return nil
 }
 

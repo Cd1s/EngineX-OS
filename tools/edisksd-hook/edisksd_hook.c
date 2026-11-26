@@ -365,6 +365,32 @@ static int seeded_ok(const char *name) {
 // Set in the pre-mount child: edisksd's views carry other mount ids there, so
 // nothing in the cache may be judged unused (and removed) from inside it.
 static int private_ns;
+// Validate direct entries of one directory (no links or special files) within deadline.
+static int validate_dir_shallow(int dirfd,int64_t deadline) {
+    int fd=openat(dirfd,".",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)return -1;
+    DIR *d=fdopendir(fd);if(!d){close(fd);return -1;}
+    int rc=0;struct dirent *e;
+    for(;;) {
+        errno=0;e=readdir(d);if(!e){if(errno)rc=-1;break;}
+        if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+        if(budget(deadline)){rc=-1;break;}
+        struct stat st;
+        if(fstatat(dirfd,e->d_name,&st,AT_SYMLINK_NOFOLLOW)){rc=-1;break;}
+        if(S_ISLNK(st.st_mode)||(!S_ISDIR(st.st_mode)&&!S_ISREG(st.st_mode))){errno=ELOOP;rc=-1;break;}
+    }
+    int saved=errno;closedir(d);errno=saved;return rc;
+}
+// Pre-mount safety walk for Engine Library: validate Engine Library and Database2 top-level
+// entries (catching symlinks/special files on m.db, bridge state, OverviewData, Artwork)
+// without recursively walking multi-thousand-file OverviewData/Artwork/Music asset subtrees
+// that exhaust the 17 s mount window on large USB sticks.
+static int validate_library_shallow(int lib,int64_t deadline) {
+    if(validate_dir_shallow(lib,deadline))return -1;
+    int meta=openat(lib,"Database2",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if(meta<0)return (errno==ENOENT||errno==ENOTDIR)?0:-1;
+    int rc=validate_dir_shallow(meta,deadline);
+    int saved=errno;close(meta);errno=saved;return rc;
+}
 // The top level of a stick's Engine Library: no links or special files. *meta
 // is its Database2 directory, -1 when it has none.
 static int library_top(int lib,int *meta) {
@@ -1862,7 +1888,7 @@ static int after_mount_at(const char *mount_path,const char *label_target,const 
     if(!hfs_ro&&mode!=MOUNT_POST&&!lstat(lib,&existing)) {
         int fd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
         if(fd<0)return 0;
-        int unsafe=copy_tree(fd,-1,deadline,0,NULL);close(fd);
+        int unsafe=validate_library_shallow(fd,deadline);close(fd);
         if(unsafe){note("unsafe library contents rejected on",label_target,errno);return 0;}
     }
     if(hfs_ro&&(pioneer||heal||mode!=MOUNT_PRE)) {

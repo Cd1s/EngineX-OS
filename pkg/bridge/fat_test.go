@@ -1,7 +1,10 @@
 package bridge
 
 import (
+	"bytes"
 	"encoding/binary"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -95,5 +98,66 @@ func TestIssue321FATChainOwned(t *testing.T) {
 	// FAT12 is not read: the caller frees as before.
 	if _, ok := fatChainOwned(newFATVolume(false, 64, 8000), 600, 100); ok {
 		t.Fatal("FAT12 read")
+	}
+}
+
+// Verify buffered 16 KiB FAT window reads across window boundaries and short/EOF tails on a real file.
+func TestIssue321FATChainOwnedBufferedFileAndEOF(t *testing.T) {
+	t.Parallel()
+	const (
+		bps   = 512
+		spc   = 8
+		rsvd  = 32
+		fatSz = 256 // 128 KiB FAT -> spans 8 x 16 KiB windows
+		eoc32 = 0x0fffffff
+	)
+	img := make([]byte, (rsvd+fatSz)*bps)
+	le := binary.LittleEndian
+	le.PutUint16(img[11:], bps)
+	img[13] = spc
+	le.PutUint16(img[14:], rsvd)
+	img[16] = 2
+	le.PutUint32(img[32:], 1<<20)
+	le.PutUint32(img[36:], fatSz)
+	img[510], img[511] = 0x55, 0xaa
+
+	putFAT := func(c uint32, val uint32) {
+		off := rsvd*bps + int(c)*4
+		le.PutUint32(img[off:], val)
+	}
+	// Chain crossing the 16 KiB window boundary (cluster 4095 -> 4096 -> 4097 -> EOC).
+	putFAT(4095, 4096)
+	putFAT(4096, 4097)
+	putFAT(4097, eoc32)
+
+	p := filepath.Join(t.TempDir(), "fat32.img")
+	if err := os.WriteFile(p, img, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	dataStart := int64(rsvd + 2*fatSz)
+	first := dataStart + (4095-2)*spc
+	owned, ok := fatChainOwned(f, first, 3*spc*bps-100)
+	if !ok || !owned {
+		t.Fatalf("cross-window file chain: owned=%v ok=%v, want true/true", owned, ok)
+	}
+
+	// Truncated image ending right after cluster 4097 triggers io.EOF on the 16 KiB window read
+	// yet still has all bytes of cluster 4097 -> must succeed cleanly.
+	trunc := bytes.NewReader(img[:rsvd*bps+4098*4])
+	owned, ok = fatChainOwned(trunc, first, 3*spc*bps-100)
+	if !ok || !owned {
+		t.Fatalf("EOF-tail buffered chain: owned=%v ok=%v, want true/true", owned, ok)
+	}
+
+	// Image truncated BEFORE cluster 4097 -> must report ok=false.
+	short := bytes.NewReader(img[:rsvd*bps+4097*4])
+	if _, ok = fatChainOwned(short, first, 3*spc*bps-100); ok {
+		t.Fatal("truncated FAT before chain end must return ok=false")
 	}
 }

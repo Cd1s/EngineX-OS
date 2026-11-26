@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -31,6 +33,7 @@ type fakeStick struct {
 	events              []string
 	mountedNow          bool
 	unmountOnRemove     bool
+	rejectPublish       bool
 	busy                func() string // what Engine does at a write: "", "copying" or "holding"
 }
 
@@ -107,6 +110,29 @@ func newFakeStick(t *testing.T) *fakeStick {
 			case w == "remove" && f.unmountOnRemove:
 				f.mountedNow = false
 			case w == "add":
+				if !f.rejectPublish {
+					dbDir := filepath.Join(f.mount, "Engine Library", "Database2")
+					swapped := false
+					if _, err := os.Stat(filepath.Join(dbDir, ".rb-next.db")); err == nil {
+						_ = os.Rename(filepath.Join(dbDir, ".rb-next.db"), filepath.Join(dbDir, "m.db"))
+						swapped = true
+					}
+					if _, err := os.Stat(filepath.Join(dbDir, rbstate.SwapName)); err == nil {
+						_ = os.Rename(filepath.Join(dbDir, rbstate.SwapName), filepath.Join(dbDir, rbstate.SnapshotName))
+						swapped = true
+					}
+					if _, err := os.Stat(filepath.Join(dbDir, rbstate.BrowseSwapName)); err == nil {
+						_ = os.Rename(filepath.Join(dbDir, rbstate.BrowseSwapName), filepath.Join(dbDir, rbstate.BrowseIndexName))
+						swapped = true
+					}
+					if !swapped {
+						if snap, err := rbstate.Load(dbDir); err == nil && !snap.Pending.None() {
+							snap.Pending = rbstate.Pending{}
+							snap.Applied++
+							_ = snap.Save(dbDir)
+						}
+					}
+				}
 				f.mountedNow = true
 			}
 		}
@@ -568,6 +594,110 @@ func TestR4_Block1_RemountDefersAndAbortsOnFailedDeckRowPass(t *testing.T) {
 		}
 		if got := strings.Join(f.seen(), " "); got != "remove: add:" {
 			t.Fatalf("uevent writes %q, want remove: add:", got)
+		}
+	})
+}
+
+// Real-deck regression (11:45 PM note): when the mount hook rejects or skips rb-bridge during
+// the synthetic remount (leaving .rb-next.db / .rb-bridge-snapshot.swap or pending snapshot
+// untouched), --remount must return an error and must NOT log "published by a remount".
+func TestRemountErrorsWhenMountHookRejectsPublish(t *testing.T) {
+	t.Run("next_db_and_swap_unconsumed", func(t *testing.T) {
+		f := newFakeStick(t)
+		f.engine("5", "", "")
+		f.rejectPublish = true
+		dbDir := filepath.Join(f.mount, "Engine Library", "Database2")
+		if err := os.MkdirAll(dbDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"m.db", ".rb-next.db", rbstate.SwapName, rbstate.BrowseSwapName} {
+			if err := os.WriteFile(filepath.Join(dbDir, name), []byte("stub"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		oldTake := takeDeckRows
+		takeDeckRows = func(context.Context, string) (bool, error) { return false, nil }
+		t.Cleanup(func() { takeDeckRows = oldTake })
+
+		status := filepath.Join(t.TempDir(), "preparing")
+		t.Setenv("ENGINEX_USB_PREPARING_PATH", status)
+		var buf bytes.Buffer
+		oldOut := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(oldOut) })
+
+		err := runRemount(context.Background(), f.mount)
+		if err == nil || !strings.Contains(err.Error(), "without publishing") {
+			t.Fatalf("expected publish-verification error when mount hook rejects, got err=%v", err)
+		}
+		if strings.Contains(buf.String(), "published by a remount") {
+			t.Fatalf("must not log false publish success, log=%q", buf.String())
+		}
+		var st usbLoadingStatus
+		if b, err := os.ReadFile(status + ".err"); err != nil || json.Unmarshal(b, &st) != nil || st.State != "error" {
+			t.Fatalf("expected error status file, got %q err=%v", b, err)
+		}
+	})
+
+	t.Run("pending_snapshot_unchanged", func(t *testing.T) {
+		f := newFakeStick(t)
+		f.engine("5", "", "")
+		f.rejectPublish = true
+		dbDir := filepath.Join(f.mount, "Engine Library", "Database2")
+		if err := os.MkdirAll(dbDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		snap := rbstate.New("uuid-pending")
+		snap.Commit = 7
+		snap.Applied = 1700000000
+		snap.Pending = rbstate.Pending{Rows: 12, Lists: true}
+		if err := snap.Save(dbDir); err != nil {
+			t.Fatal(err)
+		}
+		oldTake := takeDeckRows
+		takeDeckRows = func(context.Context, string) (bool, error) { return false, nil }
+		t.Cleanup(func() { takeDeckRows = oldTake })
+
+		var buf bytes.Buffer
+		oldOut := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(oldOut) })
+
+		err := runRemount(context.Background(), f.mount)
+		if err == nil || !strings.Contains(err.Error(), "without applying") {
+			t.Fatalf("expected error when pending snapshot unchanged, got err=%v", err)
+		}
+		if strings.Contains(buf.String(), "published by a remount") {
+			t.Fatalf("must not log false publish success, log=%q", buf.String())
+		}
+	})
+
+	t.Run("healthy_mount_hook_consumes_pending", func(t *testing.T) {
+		f := newFakeStick(t)
+		f.engine("5", "", "")
+		dbDir := filepath.Join(f.mount, "Engine Library", "Database2")
+		if err := os.MkdirAll(dbDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"m.db", ".rb-next.db", rbstate.SwapName, rbstate.BrowseSwapName} {
+			if err := os.WriteFile(filepath.Join(dbDir, name), []byte("stub"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		oldTake := takeDeckRows
+		takeDeckRows = func(context.Context, string) (bool, error) { return false, nil }
+		t.Cleanup(func() { takeDeckRows = oldTake })
+
+		var buf bytes.Buffer
+		oldOut := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(oldOut) })
+
+		if err := runRemount(context.Background(), f.mount); err != nil {
+			t.Fatalf("expected healthy remount to succeed, got %v", err)
+		}
+		if !strings.Contains(buf.String(), "published by a remount") {
+			t.Fatalf("expected publish log on success, got %q", buf.String())
 		}
 	})
 }

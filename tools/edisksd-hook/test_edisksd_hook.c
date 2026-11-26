@@ -289,6 +289,72 @@ static void test_paths_and_copy(const char *root) {
     assert(make_dirs(p)==-1&&errno==ELOOP);
     puts("#20/#21/#22/#37: missing library, lossless seed/reuse, changed native DB, identity separation, all symlink components: PASS");
 }
+// Real-deck KDATA regression: a stick with 12,000 files in Database2/OverviewData and Artwork
+// must not blow the 17 s pre-mount window, while direct symlinks in Engine Library/ or
+// Engine Library/Database2/ are still rejected with ELOOP.
+static void test_premount_shallow_walk_large_assets(const char *root) {
+    char vol[PATH_MAX],p[PATH_MAX],ov[PATH_MAX],art[PATH_MAX],log[PATH_MAX],script[PATH_MAX*2];
+    join(vol,MEDIA_ROOT,"LARGE-ASSETS");
+    join(p,vol,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,vol,"PIONEER/rekordbox/export.pdb");write_file(p,"pdb");
+    join(ov,vol,"Engine Library/Database2/OverviewData/u1");assert(!make_dirs(ov));
+    join(art,vol,"Engine Library/Artwork");assert(!make_dirs(art));
+    join(p,vol,"Engine Library/Database2/m.db");write_file(p,"db");
+    int ovfd=open(ov,O_RDONLY|O_DIRECTORY|O_CLOEXEC);assert(ovfd>=0);
+    for(int i=1;i<=7000;i++) {
+        char name[32];snprintf(name,sizeof name,"%d.rgb",i);
+        int f=openat(ovfd,name,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC,0600);assert(f>=0);close(f);
+    }
+    close(ovfd);
+    int artfd=open(art,O_RDONLY|O_DIRECTORY|O_CLOEXEC);assert(artfd>=0);
+    for(int i=1;i<=5000;i++) {
+        char name[32];snprintf(name,sizeof name,"art%05d.jpg",i);
+        int f=openat(artfd,name,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC,0600);assert(f>=0);close(f);
+    }
+    close(artfd);
+
+    char lib[PATH_MAX];join(lib,vol,"Engine Library");
+    int libfd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);assert(libfd>=0);
+    int64_t t0=now_ms();
+    assert(!validate_library_shallow(libfd,t0+500));
+    int64_t shallow_ms=now_ms()-t0;
+    assert(shallow_ms<100);
+    // Contrast: deep copy_tree walks all 12,000 files; a 1 ms deadline trips ETIMEDOUT on slow sticks
+    // and even on tmpfs shallow skips the subtrees completely. Verify after_mount_at runs rb-bridge.
+    close(libfd);
+
+    join(log,root,"large-assets-bridge.log");join(test_rb_bridge,root,"large-assets-bridge");
+    snprintf(script,sizeof script,"#!/bin/sh\necho ran > '%s'\nexit 0\n",log);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    t0=now_ms();
+    int rc=after_mount_at(vol,vol,"/dev/sdz1",MOUNT_PRE,t0+2000);
+    assert((rc&CONVERTED)!=0);
+    assert(now_ms()-t0<500);
+    expect_file(log,"ran\n");
+
+    // Direct symlink inside Engine Library/Database2/ must still be rejected with ELOOP.
+    char badlink[PATH_MAX];join(badlink,vol,"Engine Library/Database2/bad.db");
+    assert(!symlink("/etc/passwd",badlink));
+    unlink(log);
+    libfd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);assert(libfd>=0);
+    errno=0;assert(validate_library_shallow(libfd,now_ms()+500)==-1&&errno==ELOOP);
+    close(libfd);
+    rc=after_mount_at(vol,vol,"/dev/sdz1",MOUNT_PRE,now_ms()+2000);
+    assert((rc&CONVERTED)==0&&access(log,F_OK)==-1&&errno==ENOENT);
+    assert(!unlink(badlink));
+
+    // Direct symlink replacing Engine Library/Artwork must also be rejected with ELOOP.
+    char art_real[PATH_MAX];join(art_real,vol,"Engine Library/Artwork-bak");
+    assert(!rename(art,art_real));
+    assert(!symlink("/etc",art));
+    libfd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);assert(libfd>=0);
+    errno=0;assert(validate_library_shallow(libfd,now_ms()+500)==-1&&errno==ELOOP);
+    close(libfd);
+    assert(!unlink(art));
+    assert(!rename(art_real,art));
+    test_rb_bridge[0]=0;
+    printf("pre-mount shallow walk on 12,000 OverviewData+Artwork files (%lld ms) + direct symlink rejection: PASS\n",(long long)shallow_ms);
+}
 // #301: a first import too large for the mount goes on in a background job that writes its stage on
 // the stick. Eject stops it, under the unit rb-bridge started it as, before the unmount.
 static unsigned stop_seen;static char stop_log[PATH_MAX],stop_unit[64];
@@ -2439,7 +2505,7 @@ int main(int argc,char **argv) {
     join(test_prepare_state,root,"run/enginex-usb-preparing");char prep_run[PATH_MAX];join(prep_run,root,"run");assert(!make_dirs(prep_run));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
-    assert(!make_dirs(test_media));test_guardian_window_floor();test_paths_and_copy(root);test_eject_stops_the_background_import(root);test_eject_stops_the_remount_helper(root);test_eject_runs_cue_writeback(root);test_eject_writeback_overrun(root);test_only_an_eject_marks_the_stick(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
+    assert(!make_dirs(test_media));test_guardian_window_floor();test_paths_and_copy(root);test_premount_shallow_walk_large_assets(root);test_eject_stops_the_background_import(root);test_eject_stops_the_remount_helper(root);test_eject_runs_cue_writeback(root);test_eject_writeback_overrun(root);test_only_an_eject_marks_the_stick(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_only_an_export_makes_a_rekordbox_stick(root);test_monitor_sees_plain_device_mount(root);test_monitor_hides_new_and_old_view_names(root);test_hfs_rw_unit(root);test_hfs_gen2_unit(root);
     if(argc>1&&!strcmp(argv[1],"--mounts")){test_prepare_state_lifecycle(root);test_hfs_rw_policy(root);test_hfs_gen2_lkl_policy(root,argv[0]);test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_removal_detaches_a_view_in_use(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);test_guardian_from_the_data_bundle(root);test_slow_marker_survives_another_port(root);test_hfs_view_scale_and_47879b10_253(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);

@@ -73,12 +73,22 @@ func fatChainOwned(dev io.ReaderAt, first, size int64) (owned, ok bool) {
 				return false, false
 			}
 			nr, err := dev.ReadAt(fatBuf[:wantRead], bufOff)
-			if int64(nr) < pos+width-bufOff && err != nil {
+			bufLen = int64(nr)
+			if pos+width > bufOff+bufLen {
+				// Short read (e.g. non-windowed ReaderAt or truncated image): fall back to an exact read at pos.
+				bufOff, bufLen = -1, 0
+				nr2, err2 := dev.ReadAt(e[:width], pos)
+				if int64(nr2) < width || (err2 != nil && err2 != io.EOF) {
+					return false, false
+				}
+				goto decode
+			}
+			if err != nil && err != io.EOF {
 				return false, false
 			}
-			bufLen = int64(nr)
 		}
 		copy(e[:width], fatBuf[pos-bufOff:pos-bufOff+width])
+	decode:
 		next := int64(le.Uint16(e[:]))
 		end := next >= 0xfff8
 		if width == 4 {
