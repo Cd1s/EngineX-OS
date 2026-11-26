@@ -259,3 +259,113 @@ func TestReviewR5DeckCueEditOnLegacyPhantomTrackWritesDeckCues(t *testing.T) {
 	}
 	t.Fatal("missing Track 1 in OneLibrary")
 }
+
+func TestReviewR5MetadataKeepsExportOnlyPad(t *testing.T) {
+	env := setupPhantomTestStick(t, []rekordbox.Cue{{HotCue: 3, TimeMS: 800, Name: "Export pad"}})
+	setMDBQuickCues(t, env.dbDir, 1, env.rbOffset, nil)
+	insertOneLibCues(t, env.onePath, 1, 1, sql.NullInt64{Valid: true, Int64: 1}, sql.NullInt64{}, []rekordbox.Cue{{HotCue: 3, TimeMS: 800, Name: "Export pad"}})
+	refreshPhantomSnapStamp(t, env)
+	syncTrackCueBaseline(t, env.dbDir, 1, "contents/fixturea/track01.mp3")
+
+	db, err := sql.Open("sqlite", filepath.Join(env.dbDir, "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec("UPDATE Track SET comment='Metadata only' WHERE id=1"); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err = db.Exec("UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+900 WHERE id=1"); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := WriteBackCues(context.Background(), env.root, WriteBackOptions{SkipPreparingCheck: true})
+	if err != nil || res.TracksChanged != 1 {
+		t.Fatalf("write-back: %+v %v", res, err)
+	}
+	one, err := rekordbox.ReadSQLiteWhole(context.Background(), env.onePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range one.Tracks {
+		if v.ID == 1 && (len(v.Cues) != 1 || v.Comment != "Metadata only") {
+			t.Errorf("export has %d cues and comment %q", len(v.Cues), v.Comment)
+		}
+	}
+	dat, _ := os.ReadFile(env.dat1Path)
+	ext, _ := os.ReadFile(env.ext1Path)
+	if !bytes.Equal(env.origDAT, dat) || !bytes.Equal(env.origEXT, ext) {
+		t.Error("metadata-only update rewrote ANLZ with a clean deck cue baseline")
+	}
+}
+
+func TestReviewR5WriterKeepsWALWriteAccess(t *testing.T) {
+	root := t.TempDir()
+	seedRealRekordboxOneLibraryStick(t, root)
+	path := filepath.Join(root, "Engine Library", "Database2", "m.db")
+	writer, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	writer.SetMaxOpenConns(1)
+	for _, s := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA busy_timeout=0",
+		"PRAGMA wal_autocheckpoint=0",
+		"PRAGMA wal_checkpoint(TRUNCATE)",
+		"UPDATE Track SET comment='committed' WHERE id=1",
+		"UPDATE Track SET lastEditTime=COALESCE(lastEditTime,0)+1000 WHERE id=1",
+		"BEGIN IMMEDIATE",
+		"UPDATE Track SET comment='uncommitted' WHERE id=1",
+	} {
+		if _, err = writer.Exec(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func(p string) []byte {
+		b, e := os.ReadFile(p)
+		if e != nil {
+			t.Fatal(e)
+		}
+		return b
+	}
+	mainBefore, walBefore := read(path), read(path+"-wal")
+	if len(walBefore) == 0 {
+		t.Fatal("expected a live WAL")
+	}
+	released := false
+	quiet := func() error {
+		if !released {
+			if !bytes.Equal(mainBefore, read(path)) || !bytes.Equal(walBefore, read(path+"-wal")) {
+				t.Error("watcher changed database or WAL bytes")
+			}
+			if _, e := writer.Exec("COMMIT"); e != nil {
+				t.Fatalf("writer commit without waiting failed: %v", e)
+			}
+			released = true
+		}
+		return nil
+	}
+	_, err = WriteBackCues(context.Background(), root, WriteBackOptions{Settled: quiet, SkipPreparingCheck: true})
+	if err != nil || !released {
+		t.Fatalf("watcher with active writer: %v commit=%v", err, released)
+	}
+	lib, e := rekordbox.ReadSQLiteWhole(context.Background(), filepath.Join(root, "PIONEER", "rekordbox", "exportLibrary.db"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, tr := range lib.Tracks {
+		if tr.ID == 1 {
+			if tr.Comment != "committed" {
+				t.Fatalf("watcher saw %q", tr.Comment)
+			}
+			return
+		}
+	}
+	t.Fatal("missing fixture track")
+}
