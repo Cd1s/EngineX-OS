@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -939,8 +940,14 @@ func bridgeDisplayWave(_ context.Context, file, rel string, id int64, rate, dura
 	if !ok || t.EngineID != id {
 		return nil
 	}
+	files := enginedb.DetailFiles(t.Built.ANLZ)
+	if len(files) == 0 && t.AnalysisPath != "" {
+		ap := strings.TrimLeft(strings.ReplaceAll(t.AnalysisPath, "\\", "/"), "/")
+		base := strings.TrimSuffix(ap, path.Ext(ap))
+		files = []string{base + ".2EX", base + ".EXT"}
+	}
 	// The volume is the directory above Engine Library.
-	a := enginedb.DetailOf(filepath.Dir(filepath.Dir(filepath.Dir(file))), enginedb.DetailFiles(t.Built.ANLZ))
+	a := enginedb.DetailOf(filepath.Dir(filepath.Dir(filepath.Dir(file))), files)
 	w := enginedb.DisplayWaveFromRekordbox(a, rate)
 	if w == nil || math.Abs(float64(len(w.Bands)/3)*w.SamplesPerBin/rate*1000-durationMS) > 100 {
 		return nil
