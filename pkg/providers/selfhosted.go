@@ -365,15 +365,7 @@ func cleanBaseURL(raw string) string {
 	if err != nil {
 		return ""
 	}
-	scheme := strings.ToLower(u.Scheme)
-	if (scheme != "http" && scheme != "https") || u.Host == "" {
-		return ""
-	}
-	return (&url.URL{
-		Scheme: scheme,
-		Host:   u.Host,
-		Path:   strings.TrimRight(u.Path, "/"),
-	}).String()
+	return strings.TrimRight(safeURLRoute(u), "/")
 }
 
 func isSubsonicCoverPath(p string) bool {
@@ -440,17 +432,40 @@ func splitSelfHostedHash(id string) (string, bool) {
 	return id, false
 }
 
-func canonicalSelfHostedQuery(rawQuery string) string {
-	q, err := url.ParseQuery(rawQuery)
-	if rawQuery == "" || err != nil {
-		return rawQuery
+func isEphemeralAuthQueryKey(k string) bool {
+	lk := strings.ToLower(k)
+	switch lk {
+	case "sig", "sign", "signature", "hmac", "token", "tok", "auth", "apikey", "api_key", "jwt",
+		"secret", "pass", "password", "pwd", "credential", "nonce", "ts", "timestamp",
+		"exp", "expires", "expire", "expiration", "ttl", "policy", "key-pair-id",
+		"awsaccesskeyid", "googleaccessid":
+		return true
 	}
+	return strings.HasPrefix(lk, "x-amz-") || strings.HasPrefix(lk, "x-goog-") ||
+		strings.HasSuffix(lk, "token") || strings.HasSuffix(lk, "sig") ||
+		strings.HasSuffix(lk, "signature") || strings.HasSuffix(lk, "_key") || strings.HasSuffix(lk, "-key")
+}
+
+func filterQuery(rawQuery string, drop func(string) bool) string {
+	if rawQuery == "" {
+		return ""
+	}
+	q, _ := url.ParseQuery(rawQuery)
 	for k := range q {
-		if strings.EqualFold(k, "x-plex-token") {
+		if drop(k) {
 			q.Del(k)
 		}
 	}
 	return q.Encode()
+}
+
+func canonicalSelfHostedQuery(q string) string { return filterQuery(q, isEphemeralAuthQueryKey) }
+
+func nasCacheResource(u *url.URL) string {
+	if cq := canonicalSelfHostedQuery(u.RawQuery); cq != "" {
+		return u.Path + "?" + cq
+	}
+	return u.Path
 }
 
 // SanitizeSelfHostedID removes URL authority, userinfo, query, and fragment
@@ -534,16 +549,11 @@ func SanitizeCoverURL(raw string) string {
 		}
 		return raw
 	}
-	changed := false
-	if u.User != nil {
-		u.User = nil
-		changed = true
-	}
+	changed := u.User != nil
+	u.User = nil
 	if u.RawQuery != "" {
 		q, qerr := url.ParseQuery(u.RawQuery)
-		if qerr != nil {
-			changed = true
-		}
+		changed = changed || qerr != nil
 		hasU, hasSecret := false, false
 		for k := range q {
 			switch strings.ToLower(k) {
@@ -556,8 +566,7 @@ func SanitizeCoverURL(raw string) string {
 				hasSecret = true
 			}
 		}
-		subCover := isSubsonicCoverPath(u.Path)
-		if (hasU && hasSecret) || (subCover && (hasU || hasSecret)) {
+		if (hasU && hasSecret) || (isSubsonicCoverPath(u.Path) && (hasU || hasSecret)) {
 			for k := range q {
 				switch strings.ToLower(k) {
 				case "u", "p", "t", "s", "v", "c", "f":
@@ -647,18 +656,15 @@ func (p *SelfHostedProvider) FetchCover(ctx context.Context, rawURL string, maxB
 		return nil, err
 	}
 	reqU := *u
-	reqU.User, reqU.Fragment = nil, ""
-
+	reqU.User, reqU.RawQuery, reqU.Fragment = nil, "", ""
 	if proto == "subsonic" {
-		inQ, _ := url.ParseQuery(reqU.RawQuery)
+		inQ, _ := url.ParseQuery(u.RawQuery)
 		q := p.subsonicAuthParams()
 		q.Set("id", inQ.Get("id"))
 		if sz := strings.TrimSpace(inQ.Get("size")); sz != "" {
 			q.Set("size", sz)
 		}
 		reqU.RawQuery = q.Encode()
-	} else {
-		reqU.RawQuery = ""
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqU.String(), nil)
 	if err != nil {
@@ -687,15 +693,14 @@ func (p *SelfHostedProvider) FetchCover(ctx context.Context, rawURL string, maxB
 			return nil, errors.New("cover: not an image")
 		}
 	}
-	limit := maxBytes
-	if limit <= 0 {
-		limit = 2 << 20
+	if maxBytes <= 0 {
+		maxBytes = 2 << 20
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
 		return nil, safeSelfHostedError(proto, "cover-read", req.URL, err)
 	}
-	if int64(len(data)) > limit {
+	if int64(len(data)) > maxBytes {
 		return nil, errors.New("cover: too large")
 	}
 	if !IsValidCoverImage(data) {
@@ -706,60 +711,44 @@ func (p *SelfHostedProvider) FetchCover(ctx context.Context, rawURL string, maxB
 
 // safeURLRoute returns scheme://host/path with userinfo, query, and fragment stripped.
 func safeURLRoute(u *url.URL) string {
-	if u == nil {
+	if u == nil || u.Host == "" {
 		return ""
 	}
 	scheme := strings.ToLower(u.Scheme)
-	if (scheme != "http" && scheme != "https") || u.Host == "" {
+	if scheme != "http" && scheme != "https" {
 		return ""
 	}
-	return (&url.URL{
-		Scheme: scheme,
-		Host:   u.Host,
-		Path:   u.Path,
-	}).String()
+	return (&url.URL{Scheme: scheme, Host: u.Host, Path: u.Path}).String()
 }
+
+func errAs[T any](err error) bool { var target T; return errors.As(err, &target) }
 
 // classifySelfHostedError maps a transport, redirect, or I/O error to a fixed
 // diagnostic category without copying any bytes from the underlying error text.
 func classifySelfHostedError(err error) (string, error) {
-	if errors.Is(err, context.Canceled) {
-		return "request canceled", context.Canceled
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return "request timed out", context.DeadlineExceeded
-	}
 	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return "request timed out", nil
-	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
-		return "host lookup failed", nil
-	}
-	var certErr *tls.CertificateVerificationError
-	var recErr tls.RecordHeaderError
-	var unknownAuth x509.UnknownAuthorityError
-	var hostErr x509.HostnameError
-	var certInv x509.CertificateInvalidError
-	if errors.As(err, &certErr) || errors.As(err, &recErr) ||
-		errors.As(err, &unknownAuth) || errors.As(err, &hostErr) || errors.As(err, &certInv) {
-		return "TLS handshake failed", nil
-	}
-	if errors.Is(err, syscall.ECONNREFUSED) {
-		return "connection refused", nil
-	}
-	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
-		return "connection reset", nil
-	}
-	if errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) {
-		return "host unreachable", nil
-	}
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return "connection closed", nil
-	}
 	var ue *url.Error
-	if errors.As(err, &ue) && ue.Err != nil {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "request canceled", context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return "request timed out", context.DeadlineExceeded
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return "request timed out", nil
+	case errAs[*net.DNSError](err):
+		return "host lookup failed", nil
+	case errAs[*tls.CertificateVerificationError](err) || errAs[tls.RecordHeaderError](err) ||
+		errAs[x509.UnknownAuthorityError](err) || errAs[x509.HostnameError](err) || errAs[x509.CertificateInvalidError](err):
+		return "TLS handshake failed", nil
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection refused", nil
+	case errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE):
+		return "connection reset", nil
+	case errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH):
+		return "host unreachable", nil
+	case errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF):
+		return "connection closed", nil
+	case errors.As(err, &ue) && ue.Err != nil:
 		inner := ue.Err.Error()
 		switch {
 		case strings.Contains(inner, "Location"), strings.Contains(inner, "redirect"):
@@ -772,13 +761,10 @@ func classifySelfHostedError(err error) (string, error) {
 			return "invalid redirect URL", nil
 		}
 	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	if errAs[*net.OpError](err) {
 		return "connection failed", nil
 	}
-	var pathErr *os.PathError
-	var linkErr *os.LinkError
-	if errors.As(err, &pathErr) || errors.As(err, &linkErr) {
+	if errAs[*os.PathError](err) || errAs[*os.LinkError](err) {
 		return "storage write failed", nil
 	}
 	return "request failed", nil
@@ -790,15 +776,9 @@ func classifySelfHostedError(err error) (string, error) {
 func safeSelfHostedError(proto, op string, reqURL *url.URL, err error) error {
 	category, sentinel := classifySelfHostedError(err)
 	if route := safeURLRoute(reqURL); route != "" {
-		return &selfHostedError{
-			msg:   fmt.Sprintf("%s: %s %s: %s", proto, op, route, category),
-			cause: sentinel,
-		}
+		return &selfHostedError{msg: fmt.Sprintf("%s: %s %s: %s", proto, op, route, category), cause: sentinel}
 	}
-	return &selfHostedError{
-		msg:   fmt.Sprintf("%s: %s: %s", proto, op, category),
-		cause: sentinel,
-	}
+	return &selfHostedError{msg: fmt.Sprintf("%s: %s: %s", proto, op, category), cause: sentinel}
 }
 
 func (p *SelfHostedProvider) subsonicGet(ctx context.Context, action string, extra url.Values, out *subsonicResponse) error {
@@ -1435,11 +1415,7 @@ func (p *SelfHostedProvider) webdavDownloadTrack(ctx context.Context, trackID, d
 			ext = ".mp3"
 		}
 	}
-	cacheRes := targetU.Path
-	if targetU.RawQuery != "" {
-		cacheRes += "?" + targetU.RawQuery
-	}
-	filename := nasCacheFilename(targetU, cacheRes, ext)
+	filename := nasCacheFilename(targetU, nasCacheResource(targetU), ext)
 	outPath, err := saveStreamToFile(destDir, filename, resp.Body)
 	if err != nil {
 		return "", safeSelfHostedError("webdav", "download", targetU, err)
@@ -1542,7 +1518,7 @@ func plexPrivatePart(baseU *url.URL, rawPartKey string) (string, string, bool) {
 		}
 	}
 	priv := cleanPath
-	if enc := canonicalSelfHostedQuery(pu.RawQuery); enc != "" {
+	if enc := filterQuery(pu.RawQuery, func(k string) bool { return strings.EqualFold(k, "x-plex-token") }); enc != "" {
 		priv += "?" + enc
 	}
 	return SanitizeSelfHostedID("plex", priv), priv, true
@@ -1723,16 +1699,8 @@ func (p *SelfHostedProvider) refreshPlexPart(ctx context.Context, trackID string
 		}
 		return p.lookupLocator("plex", trackID)
 	}
-	if p.plexGet(ctx, "/library/all?type=10", &c) == nil {
-		for _, m := range c.MediaContainer.Metadata {
-			p.plexMetadataToTrack(m)
-		}
-		if pk := p.lookupLocator("plex", trackID); pk != "" {
-			return pk
-		}
-	}
 	if pls, err := p.plexPlaylists(ctx); err == nil {
-		for i := 0; i < len(pls) && i < 200; i++ {
+		for i := 0; i < len(pls) && i < 20; i++ {
 			_, _ = p.plexPlaylistTracks(ctx, pls[i].ID)
 			if pk := p.lookupLocator("plex", trackID); pk != "" {
 				return pk
@@ -1757,7 +1725,7 @@ func (p *SelfHostedProvider) plexDownloadTrack(ctx context.Context, trackID, des
 	if strings.HasPrefix(trackID, "/") {
 		_, fallback, _ = plexPrivatePart(baseU, trackID)
 	}
-	resp, reqURL, partKey, err := p.getWithLocator(ctx, "plex", "plex", trackID, fallback, "plex: could not resolve track part key", baseU,
+	resp, reqURL, _, err := p.getWithLocator(ctx, "plex", "plex", trackID, fallback, "plex: could not resolve track part key", baseU,
 		func(pk string) (string, error) {
 			if !strings.HasPrefix(pk, "/") {
 				return "", errors.New("plex: could not resolve track part key")
@@ -1782,7 +1750,7 @@ func (p *SelfHostedProvider) plexDownloadTrack(ctx context.Context, trackID, des
 			ext = ".mp3"
 		}
 	}
-	filename := nasCacheFilename(baseU, strings.TrimRight(baseU.Path, "/")+partKey, ext)
+	filename := nasCacheFilename(baseU, nasCacheResource(reqURL), ext)
 	outPath, err := saveStreamToFile(destDir, filename, resp.Body)
 	if err != nil {
 		return "", safeSelfHostedError("plex", "download", reqURL, err)

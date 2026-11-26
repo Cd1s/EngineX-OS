@@ -184,8 +184,8 @@ type tidalGateway struct {
 	listSeen  map[string]int64
 	albumSeen map[int64]int64
 
-	saving bool       // a save of the track IDs is scheduled
-	saveMu sync.Mutex // keeps saves in order
+	saving, saveBlocked bool       // track-ID save scheduled; blocked on unresolved legacy collision
+	saveMu              sync.Mutex // keeps saves in order
 }
 
 // savedRef is a trackRef on disk. Engine keeps a listing's IDs while stream-sync
@@ -321,6 +321,7 @@ func (g *tidalGateway) loadTracks() {
 	}
 	scrubbed, collision := preflightGatewayMigration(&v)
 	if collision {
+		g.saveBlocked = true
 		log.Printf("stream-sync: skip gateway track migration: id collision")
 	}
 	for _, r := range v.Tracks {
@@ -369,7 +370,7 @@ func (g *tidalGateway) loadTracks() {
 
 // scheduleSave must be called with g.mu held.
 func (g *tidalGateway) scheduleSave() {
-	if !g.saving && g.tracksPath() != "" {
+	if !g.saving && !g.saveBlocked && g.tracksPath() != "" {
 		g.saving = true
 		time.AfterFunc(trackSaveDelay, g.saveTracks)
 	}
@@ -397,6 +398,10 @@ func (g *tidalGateway) saveTracks() {
 	defer g.saveMu.Unlock()
 	g.mu.Lock()
 	g.saving = false
+	if g.saveBlocked {
+		g.mu.Unlock()
+		return
+	}
 	v := savedTracks{Next: g.next, Tracks: make([]savedRef, 0, len(g.tracks))}
 	for id, ref := range g.tracks {
 		v.Tracks = append(v.Tracks, savedRef{id, ref.track, ref.session, ref.guest, ref.file, ref.drive})

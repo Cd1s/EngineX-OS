@@ -121,7 +121,8 @@ func (s *Server) addStemmed(scope string, t stemmedTrack) error {
 		return errors.New("stems state could not be decoded")
 	}
 	if _, collision := scrubStemmedMap(all); collision {
-		log.Printf("stream-sync: skip stems state scrub during update: id collision")
+		log.Printf("stream-sync: skip stems state update: id collision")
+		return errors.New("stems state has unresolved id collision")
 	}
 	list := slices.DeleteFunc(all[scope], func(e stemmedTrack) bool { return sameTrack(e.Track, t.Track) })
 	all[scope] = append([]stemmedTrack{t}, list[:min(len(list), maxStemmed-1)]...)

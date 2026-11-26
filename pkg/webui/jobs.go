@@ -77,7 +77,8 @@ type Jobs struct {
 	fetches map[string]chan struct{}
 	// sources maps trackKey to the file name it was saved as, kept on disk so a
 	// restart finds a Spotify/TIDAL track's Deezer file without asking Deezer.
-	sources map[string]string
+	sources        map[string]string
+	sourcesBlocked bool
 
 	// Playlists each streamed track was queued for, so a guest playing a
 	// track the owner already downloaded still gets it in the guest playlist.
@@ -122,19 +123,23 @@ func trackKey(t providers.Track) string {
 	return t.Provider + ":" + providers.SanitizeSelfHostedID(t.Provider, t.ID)
 }
 
+func (j *Jobs) resolveKeyLocked(t providers.Track) string {
+	key, rawKey := trackKey(t), t.Provider+":"+t.ID
+	if rawKey != key && (j.loadSources()[rawKey] != "" || j.sourcesBlocked) {
+		return rawKey
+	}
+	return key
+}
+
 // File returns a finished download of t that is still on disk, including one
 // saved before a restart.
 func (j *Jobs) File(t providers.Track) string {
-	key, rawKey := trackKey(t), t.Provider+":"+t.ID
 	j.mu.Lock()
-	sources := j.loadSources()
-	if rawKey != key && sources[rawKey] != "" {
-		key = rawKey
-	}
+	key := j.resolveKeyLocked(t)
 	path := ""
 	if f, ok := j.files[key]; ok {
 		path = f.dl.Path
-	} else if name := sources[key]; name != "" && j.p.Deemix != nil {
+	} else if name := j.loadSources()[key]; name != "" && j.p.Deemix != nil {
 		j.mu.Unlock()
 		if !j.reusable(t, name) {
 			return ""
@@ -210,8 +215,8 @@ func (j *Jobs) reusable(t providers.Track, path string) bool {
 
 // dropUnusable forgets an in-memory download that t may no longer reuse.
 func (j *Jobs) dropUnusable(t providers.Track) {
-	key := trackKey(t)
 	j.mu.Lock()
+	key := j.resolveKeyLocked(t)
 	f, ok := j.files[key]
 	j.mu.Unlock()
 	if ok && !j.reusable(t, f.dl.Path) {
@@ -250,6 +255,7 @@ func (j *Jobs) loadSources() map[string]string {
 			}
 		}
 		if _, dup := clean[nk]; nk == "" || dup {
+			j.sourcesBlocked = true
 			log.Printf("stream-sync: skip download source index migration: id collision")
 			return j.sources
 		}
@@ -269,8 +275,15 @@ func (j *Jobs) loadSources() map[string]string {
 func (j *Jobs) saveSource(key, path string) {
 	dir := j.p.Deemix.DownloadDir
 	sources := j.loadSources()
-	if sources[key] == filepath.Base(path) {
+	if j.sourcesBlocked || sources[key] == filepath.Base(path) {
 		return
+	}
+	if p, id, ok := strings.Cut(key, ":"); ok && (p == "plex" || p == "webdav") {
+		c := providers.SanitizeSelfHostedID(p, id)
+		if c == "" {
+			return
+		}
+		key = p + ":" + c
 	}
 	// Only files directly in the download directory (paths may be symlink-resolved).
 	if a, err := os.Stat(path); err != nil {
@@ -284,11 +297,7 @@ func (j *Jobs) saveSource(key, path string) {
 			delete(sources, k)
 		}
 	}
-	b, _ := json.Marshal(sources)
-	tmp := filepath.Join(dir, sourcesFile+".tmp")
-	if os.WriteFile(tmp, b, 0o644) == nil {
-		os.Rename(tmp, filepath.Join(dir, sourcesFile))
-	}
+	_ = providers.SaveJSON(filepath.Join(dir, sourcesFile), sources)
 }
 
 // Fetch downloads t for immediate playback and queues CPU3 analysis and import
@@ -298,13 +307,14 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 	if j.p.Catalog == nil || j.p.Deemix == nil {
 		return "", errors.New("pipeline is not configured")
 	}
-	key := trackKey(t)
 	j.File(t) // loads a download saved before a restart
 	j.dropUnusable(t)
+	var key string
 	for {
 		// Check the cache and claim the download under one lock so a fetch
 		// finishing in between cannot trigger a second download.
 		j.mu.Lock()
+		key = j.resolveKeyLocked(t)
 		f, done := j.files[key]
 		busy, ok := j.fetches[key]
 		if !ok && !done {
@@ -998,11 +1008,11 @@ func (j *Jobs) queueImport(session string, t providers.Track, guest bool, f fetc
 	if j.p.Library == nil || tooLongToAnalyse(t, f.dl.Path) {
 		return
 	}
-	key := providers.OwnerPlaylist + "\x00" + trackKey(t)
-	if guest {
-		key = providers.GuestPlaylist + "\x00" + trackKey(t)
-	}
 	j.mu.Lock()
+	key := providers.OwnerPlaylist + "\x00" + j.resolveKeyLocked(t)
+	if guest {
+		key = providers.GuestPlaylist + "\x00" + j.resolveKeyLocked(t)
+	}
 	seen := j.queued[key]
 	if !seen && len(j.queued) >= maxJobFiles {
 		for k := range j.queued {
@@ -1067,7 +1077,7 @@ func (j *Jobs) submitTo(session string, t providers.Track, playlist string, matc
 	}
 	// Bound retained history and reject duplicate active downloads.
 	for _, v := range j.items {
-		if v.SessionID == session && v.Track.ID == t.ID && (v.State == "queued" || v.State == "matching" || v.State == "downloading" || v.State == "analyzing" || v.State == "importing") {
+		if v.SessionID == session && v.Track.ID == t.ID && (dl == nil || v.dl == nil || v.dl.Path == dl.Path) && (v.State == "queued" || v.State == "matching" || v.State == "downloading" || v.State == "analyzing" || v.State == "importing") {
 			return v, nil
 		}
 	}

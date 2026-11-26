@@ -1932,7 +1932,7 @@ func TestNASLegacyDirtyIDsScrubbedPreservingGatewayIDs(t *testing.T) {
 		t.Fatalf("gateway numeric ID 42 not preserved cleanly: ok=%v track=%+v mapped=%d", ok42, ref42.track, mappedID)
 	}
 	wantDavList := providers.SanitizeSelfHostedID("webdav", dirtyDavList)
-	if !okList || listRef.list.ID != wantDavList || !strings.HasPrefix(listRef.list.ID, "/music/Mixes/;id=") {
+	if !okList || listRef.list.ID != wantDavList || listRef.list.ID != "/music/Mixes/" {
 		t.Fatalf("gateway playlist ID not normalized: ok=%v list=%+v want=%q", okList, listRef.list, wantDavList)
 	}
 
@@ -2267,14 +2267,24 @@ func TestNASRound6TwoStartsLosslessAndIdempotent(t *testing.T) {
 		stemsPath := filepath.Join(state, "streaming-stems.json")
 		srcPath := filepath.Join(downloads, sourcesFile)
 
+		writeIndented := func(path string, v any) {
+			b, err := json.MarshalIndent(v, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, b, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+
 		dirtyPlex := "http://col-u:col-p@nas.local:32400/library/parts/1/a.flac?X-Plex-Token=col-tok"
 		cleanPlex := "/library/parts/1/a.flac"
 		t1 := providers.Track{Provider: "plex", ID: dirtyPlex, Title: "First"}
 		t2 := providers.Track{Provider: "plex", ID: cleanPlex, Title: "Second"}
-		writeJSON(t, gwPath, savedTracks{Next: 10, Tracks: []savedRef{{ID: 1, Track: t1, Session: "nas"}, {ID: 2, Track: t2, Session: "nas"}}})
-		writeJSON(t, stemsPath, map[string][]stemmedTrack{"nas": {{Track: t1, Path: "one.flac"}, {Track: t2, Path: "two.flac"}}})
-		writeJSON(t, srcPath, map[string]string{"plex:" + dirtyPlex: "one.flac", "plex:" + cleanPlex: "two.flac"})
-		writeAudio(t, downloads, "one.flac", "two.flac")
+		writeIndented(gwPath, savedTracks{Next: 10, Tracks: []savedRef{{ID: 1, Track: t1, Session: "nas"}, {ID: 2, Track: t2, Session: "nas"}}})
+		writeIndented(stemsPath, map[string][]stemmedTrack{"nas": {{Track: t1, Path: "one.flac"}, {Track: t2, Path: "two.flac"}}})
+		writeIndented(srcPath, map[string]string{"plex:" + dirtyPlex: "one.flac", "plex:" + cleanPlex: "two.flac"})
+		writeAudio(t, downloads, "one.flac", "two.flac", "fresh.flac")
 		origGW, _ := os.ReadFile(gwPath)
 		origStems, _ := os.ReadFile(stemsPath)
 		origSrc, _ := os.ReadFile(srcPath)
@@ -2297,6 +2307,50 @@ func TestNASRound6TwoStartsLosslessAndIdempotent(t *testing.T) {
 			t.Errorf("colliding download mappings lost: %q vs %q vs %q", got1, got2, got1Again)
 		}
 
+		// Playback Fetch after warming both entries must return each track's own file (reviewer playback probe).
+		if play1, err := jobs.Fetch(context.Background(), "", t1, false); err != nil || play1 != filepath.Join(downloads, "one.flac") {
+			t.Errorf("playback Fetch(t1) = %q (err=%v), want %q", play1, err, filepath.Join(downloads, "one.flac"))
+		}
+		if play2, err := jobs.Fetch(context.Background(), "", t2, false); err != nil || play2 != filepath.Join(downloads, "two.flac") {
+			t.Errorf("playback Fetch(t2) = %q (err=%v), want %q", play2, err, filepath.Join(downloads, "two.flac"))
+		}
+
+		// Cold Fetch in reverse order (t2 before t1) with an Importer must return each file and keep distinct import queue keys.
+		libPath, _, _ := testlibrary.Create(t)
+		lib, err := analyzer.OpenLibrary(libPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lib.Close()
+		jobsImp := NewJobs(Pipeline{
+			Guard:   resourceguard.New(resourceguard.Config{Disabled: true}),
+			Deemix:  &deemixclient.Client{DownloadDir: downloads},
+			Catalog: &providers.Deezer{},
+			Library: lib,
+		})
+		if play2, err := jobsImp.Fetch(context.Background(), "", t2, false); err != nil || play2 != filepath.Join(downloads, "two.flac") {
+			t.Errorf("cold Fetch(t2) = %q (err=%v), want two.flac", play2, err)
+		}
+		if play1, err := jobsImp.Fetch(context.Background(), "", t1, false); err != nil || play1 != filepath.Join(downloads, "one.flac") {
+			t.Errorf("cold Fetch(t1) = %q (err=%v), want one.flac", play1, err)
+		}
+		jobsImp.mu.Lock()
+		queuedCount := len(jobsImp.queued)
+		jobsImp.mu.Unlock()
+		jobsImp.Close()
+		if queuedCount != 2 {
+			t.Errorf("colliding tracks collapsed in import queue: queued=%d want 2", queuedCount)
+		}
+
+		// Normal subsequent writes must never copy unresolved legacy credentials forward on disk.
+		freshTrack := providers.Track{Provider: "deezer", ID: "9001", Title: "Fresh"}
+		s.tidal.addTrack(trackRef{track: freshTrack, session: "nas"})
+		s.tidal.saveTracks()
+		jobs.putFile(trackKey(freshTrack), fetched{matched: freshTrack, dl: &deemixclient.Download{Path: filepath.Join(downloads, "fresh.flac")}})
+		if err := s.addStemmed("nas", stemmedTrack{Track: freshTrack, Path: "fresh.flac"}); err == nil {
+			t.Errorf("addStemmed succeeded on colliding stems state; want refusal")
+		}
+
 		for _, tc := range []struct {
 			name string
 			path string
@@ -2308,7 +2362,7 @@ func TestNASRound6TwoStartsLosslessAndIdempotent(t *testing.T) {
 		} {
 			got, _ := os.ReadFile(tc.path)
 			if !bytes.Equal(got, tc.want) {
-				t.Errorf("colliding %s was modified on startup", tc.name)
+				t.Errorf("colliding %s was modified on startup or subsequent write", tc.name)
 			}
 		}
 		logs := logBuf.String()
@@ -2359,6 +2413,115 @@ func TestNASRound6TwoStartsLosslessAndIdempotent(t *testing.T) {
 		for _, smbDir := range []string{"90s #1 Hits", "Who? Mix"} {
 			if got := providers.SanitizeSelfHostedID(nasScope, smbDir); got != smbDir {
 				t.Errorf("SMB folder %q mangled to %q", smbDir, got)
+			}
+		}
+	})
+
+	t.Run("clean-indented-gateway-untouched-on-close", func(t *testing.T) {
+		ui, state, downloads := t.TempDir(), t.TempDir(), t.TempDir()
+		gwPath := filepath.Join(state, "gateway-tracks.json")
+		indented, err := json.MarshalIndent(savedTracks{
+			Next:   5,
+			Tracks: []savedRef{{ID: 5, Track: providers.Track{Provider: "plex", ID: "/library/parts/5/clean.flac", Title: "Clean"}, Session: "nas"}},
+		}, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(gwPath, indented, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeAudio(t, downloads, "clean.flac")
+		jobs := NewJobs(Pipeline{Deemix: &deemixclient.Client{DownloadDir: downloads}, Catalog: &providers.Deezer{}})
+		s := New(Config{UIDir: ui, StateDir: state}, jobs)
+		// Normal clean saveSource writes .sources.json with mode 0600, never 0644.
+		cleanTrack := providers.Track{Provider: "plex", ID: "/library/parts/5/clean.flac", Title: "Clean"}
+		jobs.putFile(trackKey(cleanTrack), fetched{matched: cleanTrack, dl: &deemixclient.Download{Path: filepath.Join(downloads, "clean.flac")}})
+		if st, err := os.Stat(filepath.Join(downloads, sourcesFile)); err != nil || st.Mode().Perm() != 0o600 {
+			t.Errorf(".sources.json mode = %v (err=%v), want 0600", st.Mode().Perm(), err)
+		}
+		s.Close()
+		jobs.Close()
+		got, err := os.ReadFile(gwPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, indented) {
+			t.Fatalf("clean indented gateway-tracks.json was rewritten on Close")
+		}
+	})
+
+	t.Run("authority-only-id-blocked-all-three-files", func(t *testing.T) {
+		ui, state, downloads := t.TempDir(), t.TempDir(), t.TempDir()
+		gwPath := filepath.Join(state, "gateway-tracks.json")
+		stemsPath := filepath.Join(state, "streaming-stems.json")
+		srcPath := filepath.Join(downloads, sourcesFile)
+
+		writeIndented := func(path string, v any) {
+			b, err := json.MarshalIndent(v, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, b, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Single entry per file (no duplicate sibling): only the nonempty-to-empty ID check can block each migration.
+		authOnly := "http://empty-u:empty-p@nas.local"
+		only := providers.Track{Provider: "plex", ID: authOnly, Title: "AuthorityOnly"}
+		writeIndented(gwPath, savedTracks{Next: 3, Tracks: []savedRef{{ID: 3, Track: only, Session: "nas"}}})
+		writeIndented(stemsPath, map[string][]stemmedTrack{"nas": {{Track: only, Path: "only.flac"}}})
+		writeIndented(srcPath, map[string]string{"plex:" + authOnly: "only.flac"})
+		writeAudio(t, downloads, "only.flac", "other.flac")
+		origGW, _ := os.ReadFile(gwPath)
+		origStems, _ := os.ReadFile(stemsPath)
+		origSrc, _ := os.ReadFile(srcPath)
+
+		var logBuf bytes.Buffer
+		origOut := log.Writer()
+		log.SetOutput(&logBuf)
+		jobs := NewJobs(Pipeline{Deemix: &deemixclient.Client{DownloadDir: downloads}, Catalog: &providers.Deezer{}})
+		s := New(Config{UIDir: ui, StateDir: state}, jobs)
+		log.SetOutput(origOut)
+
+		if got := jobs.File(only); got != filepath.Join(downloads, "only.flac") {
+			t.Errorf("jobs.File(authority-only) = %q, want only.flac", got)
+		}
+		if got, err := jobs.Fetch(context.Background(), "", only, false); err != nil || got != filepath.Join(downloads, "only.flac") {
+			t.Errorf("jobs.Fetch(authority-only) = %q (err=%v), want only.flac", got, err)
+		}
+		other := providers.Track{Provider: "deezer", ID: "77", Title: "Other"}
+		s.tidal.addTrack(trackRef{track: other, session: "nas"})
+		s.tidal.saveTracks()
+		jobs.putFile(trackKey(other), fetched{matched: other, dl: &deemixclient.Download{Path: filepath.Join(downloads, "other.flac")}})
+		if err := s.addStemmed("nas", stemmedTrack{Track: other, Path: "other.flac"}); err == nil {
+			t.Errorf("addStemmed succeeded on authority-only stems state; want refusal")
+		}
+		s.Close()
+		jobs.Close()
+
+		for _, tc := range []struct {
+			name string
+			path string
+			want []byte
+		}{
+			{"gateway-tracks.json", gwPath, origGW},
+			{"streaming-stems.json", stemsPath, origStems},
+			{".sources.json", srcPath, origSrc},
+		} {
+			got, _ := os.ReadFile(tc.path)
+			if !bytes.Equal(got, tc.want) {
+				t.Errorf("authority-only %s was modified", tc.name)
+			}
+		}
+		logs := logBuf.String()
+		for _, wantLog := range []string{"skip gateway track migration", "skip stems state scrub", "skip download source index migration"} {
+			if !strings.Contains(logs, wantLog) {
+				t.Errorf("expected diagnostic %q for authority-only ID: %s", wantLog, logs)
+			}
+		}
+		for _, bad := range []string{"empty-u", "empty-p"} {
+			if strings.Contains(logs, bad) {
+				t.Errorf("authority-only log leaked %q: %s", bad, logs)
 			}
 		}
 	})

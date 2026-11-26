@@ -1395,12 +1395,13 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 
 	t.Run("plex-signed-part-key", func(t *testing.T) {
 		const (
-			plexUser   = "plex-u-secret"
-			plexPass   = "plex-p-secret"
-			plexTok    = "plex-tok-secret"
-			plSig      = "sig-pl-secret"
-			signedPart = "sig-part-secret"
+			plexUser = "plex-u-secret"
+			plexPass = "plex-p-secret"
+			plexTok  = "plex-tok-secret"
 		)
+		var plSig, signedPart atomic.Value
+		plSig.Store("sig-pl-v1")
+		signedPart.Store("sig-part-v1")
 		var srvURL string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tok := r.Header.Get("X-Plex-Token")
@@ -1411,31 +1412,37 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
+			curPlSig := plSig.Load().(string)
+			curPartSig := signedPart.Load().(string)
 			host := strings.TrimPrefix(srvURL, "http://")
 			switch r.URL.Path {
 			case "/playlists":
 				fmt.Fprintf(w, `{"MediaContainer":{"Metadata":[{"key":"http://%s:%s@%s/playlists/5/items?X-Plex-Token=%s&sig=%s","title":"Signed List","leafCount":3}]}}`,
-					plexUser, plexPass, host, plexTok, plSig)
+					plexUser, plexPass, host, plexTok, curPlSig)
 			case "/playlists/5/items":
-				if r.URL.Query().Get("sig") != plSig {
+				if r.URL.Query().Get("sig") != curPlSig {
 					http.Error(w, "missing playlist sig", http.StatusForbidden)
 					return
 				}
 				fmt.Fprintf(w, `{"MediaContainer":{"Metadata":[
 					{"ratingKey":"rk-301","title":"With RatingKey","Media":[{"Part":[{"key":"http://%s:%s@%s/library/parts/301/song.flac?X-Plex-Token=%s&sig=%s"}]}]},
-					{"title":"Edition A","Media":[{"Part":[{"key":"/library/parts/302/other.flac?X-Plex-Token=%s&edition=original"}]}]},
-					{"title":"Edition B","Media":[{"Part":[{"key":"/library/parts/302/other.flac?X-Plex-Token=%s&edition=remix"}]}]}
-				]}}`, plexUser, plexPass, host, plexTok, signedPart, plexTok, plexTok)
+					{"title":"Edition A","Media":[{"Part":[{"key":"/library/parts/302/other.flac?X-Plex-Token=%s&edition=original&sig=%s"}]}]},
+					{"title":"Edition B","Media":[{"Part":[{"key":"/library/parts/302/other.flac?X-Plex-Token=%s&edition=remix&sig=%s"}]}]}
+				]}}`, plexUser, plexPass, host, plexTok, curPartSig, plexTok, curPartSig, plexTok, curPartSig)
 			case "/library/metadata/rk-301":
 				fmt.Fprintf(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"rk-301","title":"With RatingKey","Media":[{"Part":[{"key":"http://%s:%s@%s/library/parts/301/song.flac?X-Plex-Token=%s&sig=%s"}]}]}]}}`,
-					plexUser, plexPass, host, plexTok, signedPart)
+					plexUser, plexPass, host, plexTok, curPartSig)
 			case "/library/parts/301/song.flac":
-				if r.URL.Query().Get("sig") != signedPart {
+				if r.URL.Query().Get("sig") != curPartSig {
 					http.Error(w, "missing private sig", http.StatusForbidden)
 					return
 				}
 				_, _ = w.Write([]byte("SIGNED-PLEX-FLAC-1"))
 			case "/library/parts/302/other.flac":
+				if r.URL.Query().Get("sig") != curPartSig {
+					http.Error(w, "missing edition sig", http.StatusForbidden)
+					return
+				}
 				switch r.URL.Query().Get("edition") {
 				case "original":
 					_, _ = w.Write([]byte("SIGNED-PLEX-ORIGINAL"))
@@ -1458,10 +1465,10 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 		if err != nil || len(pls) != 1 {
 			t.Fatalf("Playlists: len=%d err=%v", len(pls), err)
 		}
-		if !strings.HasPrefix(pls[0].ID, "/playlists/5/items;id=") {
-			t.Fatalf("Playlist ID not hashed cleanly: %q", pls[0].ID)
+		if pls[0].ID != "/playlists/5/items" {
+			t.Errorf("Playlist ID should exclude ephemeral sig: %q", pls[0].ID)
 		}
-		for _, bad := range []string{plexUser, plexPass, plexTok, plSig, "X-Plex-Token", "?", "://"} {
+		for _, bad := range []string{plexUser, plexPass, plexTok, "sig-pl-v1", "X-Plex-Token", "?", "://"} {
 			if strings.Contains(pls[0].ID, bad) {
 				t.Errorf("Playlist ID leaked %q: %q", bad, pls[0].ID)
 			}
@@ -1474,7 +1481,7 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 		}
 		for _, tr := range tracks {
 			for _, field := range []string{tr.ID, tr.Preview, tr.CoverURL} {
-				for _, bad := range []string{plexUser, plexPass, plexTok, signedPart, "X-Plex-Token", "edition", "original", "remix", "?", "://"} {
+				for _, bad := range []string{plexUser, plexPass, plexTok, "sig-part-v1", "X-Plex-Token", "edition", "original", "remix", "?", "://"} {
 					if strings.Contains(field, bad) {
 						t.Errorf("Plex track field leaked %q: %+v", bad, tr)
 					}
@@ -1505,10 +1512,16 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 			t.Fatalf("distinct Plex editions collided on cache file %q", paths[1])
 		}
 
-		// Cold providers (restart/eviction) recover signed playlist, hashed part IDs, and legacy path IDs.
+		// Rotate both playlist and part signatures before cold/warm recovery.
+		plSig.Store("sig-pl-v2")
+		signedPart.Store("sig-part-v2")
+
+		// Cold providers (restart/eviction) recover rotated playlist, hashed part IDs, and legacy path IDs.
 		freshPl := NewSelfHostedProvider(cfg, srv.Client())
 		if coldTracks, err := freshPl.PlaylistTracks(ctx, pls[0].ID); err != nil || len(coldTracks) != 3 {
-			t.Fatalf("cold PlaylistTracks(%q): len=%d err=%v", pls[0].ID, len(coldTracks), err)
+			t.Errorf("cold PlaylistTracks(%q): len=%d err=%v", pls[0].ID, len(coldTracks), err)
+		} else if coldTracks[1].ID != tracks[1].ID || coldTracks[2].ID != tracks[2].ID {
+			t.Errorf("rotated Plex signature changed public track IDs: %q/%q vs %q/%q", coldTracks[1].ID, coldTracks[2].ID, tracks[1].ID, tracks[2].ID)
 		}
 		for i, tc := range []struct{ id, want string }{
 			{tracks[0].ID, "SIGNED-PLEX-FLAC-1"},
@@ -1521,6 +1534,9 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 			if err != nil {
 				t.Fatalf("cold DownloadTrack[%d](%q): %v", i, tc.id, err)
 			}
+			if i == 1 && filepath.Base(fp) != filepath.Base(paths[1]) {
+				t.Errorf("rotated Plex signature changed cache filename: %q vs %q", filepath.Base(fp), filepath.Base(paths[1]))
+			}
 			b, _ := os.ReadFile(fp)
 			if string(b) != tc.want {
 				t.Fatalf("cold DownloadTrack[%d] body=%q want %q", i, string(b), tc.want)
@@ -1532,20 +1548,23 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 		const (
 			davUser = "dav-u-secret"
 			davPass = "dav-p-secret"
-			dirTok  = "dav-dir-secret"
-			fileSig = "dav-file-secret"
 		)
+		var dirTok, fileSig atomic.Value
+		dirTok.Store("dav-dir-v1")
+		fileSig.Store("dav-file-v1")
 		var srvURL string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			curDirTok := dirTok.Load().(string)
+			curFileSig := fileSig.Load().(string)
 			host := strings.TrimPrefix(srvURL, "http://")
 			switch {
 			case r.Method == "PROPFIND" && r.URL.Path == "/music/":
 				fmt.Fprintf(w, `<?xml version="1.0"?><D:multistatus xmlns:D="DAV:">
 					<D:response><D:href>/music/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>
 					<D:response><D:href>http://%s:%s@%s/music/Mixes/?token=%s</D:href><D:propstat><D:prop><D:displayname>Mixes</D:displayname><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>
-				</D:multistatus>`, davUser, davPass, host, dirTok)
+				</D:multistatus>`, davUser, davPass, host, curDirTok)
 			case r.Method == "PROPFIND" && r.URL.Path == "/music/Mixes/":
-				if r.URL.Query().Get("token") != dirTok {
+				if r.URL.Query().Get("token") != curDirTok {
 					http.Error(w, "missing dir token", http.StatusForbidden)
 					return
 				}
@@ -1553,9 +1572,9 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 					<D:response><D:href>/music/Mixes/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>
 					<D:response><D:href>http://%s:%s@%s/music/Mixes/track.flac?edition=original&amp;sig=%s</D:href><D:propstat><D:prop><D:displayname>track.flac</D:displayname></D:prop></D:propstat></D:response>
 					<D:response><D:href>http://%s:%s@%s/music/Mixes/track.flac?edition=remix&amp;sig=%s</D:href><D:propstat><D:prop><D:displayname>track.flac</D:displayname></D:prop></D:propstat></D:response>
-				</D:multistatus>`, davUser, davPass, host, fileSig, davUser, davPass, host, fileSig)
+				</D:multistatus>`, davUser, davPass, host, curFileSig, davUser, davPass, host, curFileSig)
 			case r.Method == "GET" && r.URL.Path == "/music/Mixes/track.flac":
-				if r.URL.Query().Get("sig") != fileSig {
+				if r.URL.Query().Get("sig") != curFileSig {
 					http.Error(w, "missing file sig", http.StatusForbidden)
 					return
 				}
@@ -1586,8 +1605,8 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 		if err != nil || len(pls) != 2 {
 			t.Fatalf("WebDAV Playlists: len=%d err=%v", len(pls), err)
 		}
-		if !strings.HasPrefix(pls[1].ID, "/music/Mixes/;id=") {
-			t.Fatalf("WebDAV Playlist ID not hashed cleanly: %q", pls[1].ID)
+		if pls[1].ID != "/music/Mixes/" {
+			t.Errorf("WebDAV Playlist ID should exclude ephemeral token: %q", pls[1].ID)
 		}
 		tracks, err := p.PlaylistTracks(ctx, pls[1].ID)
 		if err != nil || len(tracks) != 2 {
@@ -1600,7 +1619,7 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 			t.Fatalf("unexpected WebDAV tracks: %+v", tracks)
 		}
 		for _, field := range []string{pls[1].ID, tracks[0].ID, tracks[1].ID, tracks[0].Album} {
-			for _, bad := range []string{davUser, davPass, dirTok, fileSig, "edition", "original", "remix", "?", "://"} {
+			for _, bad := range []string{davUser, davPass, "dav-dir-v1", "dav-file-v1", "edition", "original", "remix", "?", "://"} {
 				if strings.Contains(field, bad) {
 					t.Errorf("WebDAV field leaked %q: %q", bad, field)
 				}
@@ -1621,10 +1640,22 @@ func TestSelfHostedURLShapedIDsStripCredentialsAndResolvePrivateLocator(t *testi
 			t.Fatalf("distinct WebDAV editions collided on cache file %q", fp0)
 		}
 
-		// Cold providers recover signed playlist and both signed tracks after restart/eviction.
+		// Renew both directory token and file signature (reviewer rotation probe):
+		// warm retry and cold restart must keep public IDs stable and still download.
+		dirTok.Store("dav-dir-v2")
+		fileSig.Store("dav-file-v2")
+
+		if fpWarm, err := p.DownloadTrack(ctx, tracks[0].ID, t.TempDir()); err != nil {
+			t.Errorf("warm WebDAV DownloadTrack[0] after sig renewal: %v", err)
+		} else if filepath.Base(fpWarm) != filepath.Base(fp0) {
+			t.Errorf("rotated WebDAV sig changed cache filename: %q vs %q", filepath.Base(fpWarm), filepath.Base(fp0))
+		}
+
 		coldPl := NewSelfHostedProvider(cfg, srv.Client())
 		if coldTracks, err := coldPl.PlaylistTracks(ctx, pls[1].ID); err != nil || len(coldTracks) != 2 {
-			t.Fatalf("cold WebDAV PlaylistTracks(%q): len=%d err=%v", pls[1].ID, len(coldTracks), err)
+			t.Errorf("cold WebDAV PlaylistTracks(%q): len=%d err=%v", pls[1].ID, len(coldTracks), err)
+		} else if coldTracks[0].ID != tracks[0].ID || coldTracks[1].ID != tracks[1].ID {
+			t.Errorf("renewed WebDAV signature changed public track IDs: %q/%q vs %q/%q", coldTracks[0].ID, coldTracks[1].ID, tracks[0].ID, tracks[1].ID)
 		}
 		for i, want := range []string{"SIGNED-DAV-ORIGINAL", "SIGNED-DAV-REMIX"} {
 			cold := NewSelfHostedProvider(cfg, srv.Client())
