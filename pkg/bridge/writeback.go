@@ -2586,9 +2586,9 @@ func cueColorEquivalent(x, y rekordbox.Cue, exactRGB bool) bool {
 		cy = rekordbox.NearestCueColorCode(y.Color)
 	}
 	if exactRGB {
-		return x.Color == y.Color && cx == cy
+		return canonicalCueRGB(x.Color) == canonicalCueRGB(y.Color) && cx == cy
 	}
-	if x.Color != ([4]byte{}) && x.Color == y.Color {
+	if x.Color != ([4]byte{}) && canonicalCueRGB(x.Color) == canonicalCueRGB(y.Color) {
 		return true
 	}
 	return cx != 0 && cx == cy
@@ -2716,8 +2716,17 @@ func isEngineDefaultLoopColor(pad uint32, rgb [4]byte) bool {
 	return rgb == ([4]byte{}) || rgb == engineDefaultLoopColor || isEngineDefaultHotCueColor(pad, rgb)
 }
 
+// canonicalCueRGB normalizes explicit RGB values to opaque (alpha 255) while preserving the
+// all-zero unknown sentinel, so alpha-only storage differences are not treated as colour edits.
+func canonicalCueRGB(c [4]byte) [4]byte {
+	if c == ([4]byte{}) {
+		return [4]byte{}
+	}
+	return [4]byte{255, c[1], c[2], c[3]}
+}
+
 func sameDeckCueColor(a, b [4]byte) bool {
-	return a == b
+	return canonicalCueRGB(a) == canonicalCueRGB(b)
 }
 
 type cueColorEdits struct {
@@ -2915,6 +2924,7 @@ func buildCueColorEdits(row dbCandidate, deck enginedb.DeckCues, offset float64,
 }
 
 func resolveCueColor(pad uint32, isLoop bool, name string, deckRGB [4]byte, oc rekordbox.Cue, hasOrig, edited bool) ([4]byte, byte) {
+	deckRGB = canonicalCueRGB(deckRGB)
 	if hasOrig && oc.Loop == isLoop {
 		if !edited {
 			if uncoloured(oc) {
