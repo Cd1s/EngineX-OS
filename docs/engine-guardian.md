@@ -70,8 +70,14 @@ runs `--watch`, so the flag stays accepted.
 - History supports listId/historylistId references and recognized session date
   columns, with descending ID as a fallback/tiebreaker. An explicit full heal
   retains the newest 50 visible sessions by default (sessions deleted on the
-  deck, `isDeleted`, do not count and are removed); the mount hook's
-  `--data-only` heal never prunes history, as stock Engine keeps every session.
+  deck, `isDeleted`, do not count and are removed) and removes any unreferenced
+  `Track`, `PerformanceData` and `AlbumArt` rows; the mount hook's `--data-only`
+  heal never deletes visible sessions (`isDeleted=0`) and never alters `hm.db`'s
+  schema or adds `sqlite_stat1`, while safely removing soft-deleted
+  `Historylist` tombstones (`isDeleted!=0`), dangling `HistorylistEntity` rows,
+  and orphan `Track`/`PerformanceData`/`AlbumArt` rows (preserving an empty
+  `id=1` sentinel) and compacting freed space within the mount budget and disk
+  headroom.
   The layout matches Engine 5.3.0's `hm.db` (`Historylist.id/startTime`,
   `HistorylistEntity.listId/trackId`). Tracks referenced by any independent trackId table, including
   playlists/preparation lists, survive with their PerformanceData. Unsupported

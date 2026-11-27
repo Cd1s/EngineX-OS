@@ -3,6 +3,7 @@ package dbhealer
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
@@ -249,26 +250,32 @@ func overviewReason(blob []byte) string {
 	return fmt.Sprintf("placeholder sha256=%x; rebuild waveform from audio", sha256.Sum256(blob))
 }
 
-func healPerformance(tx *sql.Tx, r *Report) error {
+func healPerformance(ctx context.Context, tx *sql.Tx, r *Report) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// A data-only pass has already created a TEMP queue. An unqualified IF NOT
 	// EXISTS checks only main, and would add the table Engine objects to.
 	var tempQueue int
-	if err := tx.QueryRow("SELECT count(*) FROM sqlite_temp_master WHERE name='GuardianReanalysis'").Scan(&tempQueue); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_temp_master WHERE name='GuardianReanalysis'").Scan(&tempQueue); err != nil {
 		return err
 	}
 	if tempQueue == 0 {
-		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS GuardianReanalysis(trackId INTEGER NOT NULL,field TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(trackId,field))`); err != nil {
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS GuardianReanalysis(trackId INTEGER NOT NULL,field TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(trackId,field))`); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.Exec("DELETE FROM GuardianReanalysis WHERE trackId NOT IN (SELECT trackId FROM PerformanceData)"); err != nil {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM GuardianReanalysis WHERE trackId NOT IN (SELECT trackId FROM PerformanceData)"); err != nil {
 		return err
 	}
 	// Page by primary key to bound memory even for large libraries. Close each
 	// cursor before issuing writes on the same SQLite connection.
 	var last int64 = math.MinInt64
 	for {
-		rows, err := tx.Query("SELECT p.trackId,substr(p.trackData,1,33554433),substr(p.overviewWaveFormData,1,33554433),substr(p.beatData,1,33554433),substr(p.quickCues,1,33554433),substr(p.loops,1,33554433),COALESCE(t.isAnalyzed,1) FROM PerformanceData p LEFT JOIN Track t ON t.id=p.trackId WHERE p.trackId>? ORDER BY p.trackId LIMIT 250", last)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, "SELECT p.trackId,substr(p.trackData,1,33554433),substr(p.overviewWaveFormData,1,33554433),substr(p.beatData,1,33554433),substr(p.quickCues,1,33554433),substr(p.loops,1,33554433),COALESCE(t.isAnalyzed,1) FROM PerformanceData p LEFT JOIN Track t ON t.id=p.trackId WHERE p.trackId>? ORDER BY p.trackId LIMIT 250", last)
 		if err != nil {
 			return err
 		}
@@ -295,13 +302,16 @@ func healPerformance(tx *sql.Tx, r *Report) error {
 			break
 		}
 		for _, p := range page {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			last = p.id
 			mark := func(field string, e error) error {
-				_, err := tx.Exec("INSERT INTO GuardianReanalysis VALUES(?,?,?) ON CONFLICT(trackId,field) DO UPDATE SET reason=excluded.reason", p.id, field, e.Error())
+				_, err := tx.ExecContext(ctx, "INSERT INTO GuardianReanalysis VALUES(?,?,?) ON CONFLICT(trackId,field) DO UPDATE SET reason=excluded.reason", p.id, field, e.Error())
 				return err
 			}
 			clear := func(field string) error {
-				_, err := tx.Exec("DELETE FROM GuardianReanalysis WHERE trackId=? AND field=?", p.id, field)
+				_, err := tx.ExecContext(ctx, "DELETE FROM GuardianReanalysis WHERE trackId=? AND field=?", p.id, field)
 				return err
 			}
 			var length float64
@@ -342,7 +352,7 @@ func healPerformance(tx *sql.Tx, r *Report) error {
 				// placeholder would show a flat waveform and bump lastEditTime (BH-GC1-12).
 			} else if e != nil || !validOverview(overview) {
 				replacement := placeholder(length)
-				if _, err = tx.Exec("UPDATE PerformanceData SET overviewWaveFormData=? WHERE trackId=?", replacement, p.id); err != nil {
+				if _, err = tx.ExecContext(ctx, "UPDATE PerformanceData SET overviewWaveFormData=? WHERE trackId=?", replacement, p.id); err != nil {
 					return err
 				}
 				if err = mark("overviewWaveFormData", fmt.Errorf("%s", overviewReason(replacement))); err != nil {
@@ -352,12 +362,12 @@ func healPerformance(tx *sql.Tx, r *Report) error {
 			} else {
 				// A new valid waveform written by Engine completes the request;
 				// our own unchanged placeholder remains queued.
-				if _, err = tx.Exec("DELETE FROM GuardianReanalysis WHERE trackId=? AND field='overviewWaveFormData' AND reason<>?", p.id, overviewReason(p.overview)); err != nil {
+				if _, err = tx.ExecContext(ctx, "DELETE FROM GuardianReanalysis WHERE trackId=? AND field='overviewWaveFormData' AND reason<>?", p.id, overviewReason(p.overview)); err != nil {
 					return err
 				}
 			}
 			if cues, ok := healQuickCues(p.cues); ok {
-				if _, err = tx.Exec("UPDATE PerformanceData SET quickCues=? WHERE trackId=?", cues, p.id); err != nil {
+				if _, err = tx.ExecContext(ctx, "UPDATE PerformanceData SET quickCues=? WHERE trackId=?", cues, p.id); err != nil {
 					return err
 				}
 			}
@@ -372,7 +382,7 @@ func healPerformance(tx *sql.Tx, r *Report) error {
 						return err
 					}
 					if n > 0 {
-						if _, err = tx.Exec("UPDATE PerformanceData SET loops=? WHERE trackId=?", loops, p.id); err != nil {
+						if _, err = tx.ExecContext(ctx, "UPDATE PerformanceData SET loops=? WHERE trackId=?", loops, p.id); err != nil {
 							return err
 						}
 						r.Loops += n
