@@ -4589,7 +4589,26 @@ class UiModBuildTest(unittest.TestCase):
                 with self.subTest(lang=lang):
                     mixer = (out / lang / "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/MixerTabContent.qml").read_text()
                     main = (out / lang / "Skins/Embedded/EmbeddedMain.qml").read_text()
-                    self.assertIn('scHasCrossfaderReverse: true && scHasMixer && !scIsAZ04', main)
+                    rev_expr = re.search(r"readonly property bool scHasCrossfaderReverse: (.*)", main)
+                    self.assertIsNotNone(rev_expr)
+                    if shutil.which("node"):
+                        node_script = (
+                            "const assert = require('assert');\n"
+                            "const has = (scBoard, scPlayer) => {\n"
+                            "  const scIsPlayerBoard = !!scPlayer || ['JP07','JP08','JP13','JP14'].includes(scBoard);\n"
+                            "  const scHasMixer = !scIsPlayerBoard;\n"
+                            "  const scIsAZ04 = ['JP24','RMZ2'].includes(scBoard);\n"
+                            f"  return !!({rev_expr.group(1)});\n"
+                            "};\n"
+                            "assert.strictEqual(has('JP24', false), true, 'PRIME 4 G2 exposes Crossfader Reverse');\n"
+                            "assert.strictEqual(has('RMZ2', false), false, 'SYSTEM ONE keeps hardware switch');\n"
+                            "assert.strictEqual(has('JC11S', false), true);\n"
+                            "assert.strictEqual(has('JP21', false), true);\n"
+                            "assert.strictEqual(has('JP07', false), false);\n"
+                        )
+                        checked = subprocess.run(["node", "-e", node_script], capture_output=True, text=True)
+                        self.assertEqual(checked.returncode, 0, checked.stderr)
+                    self.assertIn('scHasCrossfaderReverse: true && scHasMixer && scBoard !== "RMZ2"', main)
                     self.assertIn('scTr("/Engine/Mixer/CrossfaderReverse")', main)
                     self.assertIn('scTr("/Engine/Mixer/CrossfaderPosition")', main)
                     self.assertIn("reverse.state = on", main)

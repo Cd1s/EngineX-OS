@@ -3691,7 +3691,7 @@ SERVICES_MAIN = """
 	property string scUpdateText: ""
 	property bool scBroadcastOn: false
 	property bool scUpfaderEcho: false
-	readonly property bool scHasCrossfaderReverse: @STOCK_FADER_REVERSE@ && scHasMixer && !scIsAZ04
+	readonly property bool scHasCrossfaderReverse: @STOCK_FADER_REVERSE@ && scHasMixer && scBoard !== "RMZ2"
 	readonly property var scCrossfaderReverse: scHasCrossfaderReverse ? scTr("/Engine/Mixer/CrossfaderReverse") : null
 	readonly property var scCrossfaderPosition: scCrossfaderReverse ? scTr("/Engine/Mixer/CrossfaderPosition") : null
 	function scSetCrossfaderReverse(on) {
