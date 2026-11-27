@@ -576,7 +576,16 @@ func TestServersReAddedServerNeverPlaysTheOldRecording(t *testing.T) {
 	if code, got := r.stream(t, rowID(found[0])); code != 200 || !bytes.Equal(got, old) {
 		t.Fatalf("first search result: HTTP %d, %d bytes", code, len(got))
 	}
+	// Removal clears that server's downloads: no file, queue mark or index entry is
+	// kept for its rows (round 3, beside the new identity below).
+	played := refOf(r.s.tidal, rowID(row)).track
 	r.change(t, serverChange{Action: "remove", ID: views[0].ID}, 200)
+	if p := r.s.jobs.File(played); p != "" {
+		t.Errorf("the removed server's row still has its download: %s", p)
+	}
+	if index, err := os.ReadFile(filepath.Join(r.s.jobs.p.Deemix.DownloadDir, sourcesFile)); err == nil && strings.Contains(string(index), views[0].ID) {
+		t.Errorf("the download index still names the removed server: %s", index)
+	}
 	d.audio = testMP3(150) // the recordings at the same paths are replaced
 	gets := d.gets.Load()
 	views = r.change(t, serverChange{Action: "add", Name: "Studio", URL: d.srv.URL + "/music/"}, 200)

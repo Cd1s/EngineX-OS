@@ -383,6 +383,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.scrubStems() // a released file's credentials go before any request
 	s.dropServerStemsLocked(kept)
 	s.stemsMu.Unlock()
+	jobs.dropServers(kept) // downloads of servers no longer set up (a download that finished after its removal)
 	s.tidal = newTidalGateway(s)
 	s.RegisterTunnelRoutes()
 	// Resume before accepting requests: a delayed resume could see a newly
