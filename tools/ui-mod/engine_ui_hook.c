@@ -746,6 +746,8 @@ struct engine_build {
     // StemsPreRenderedPlayback::isEnabled() or Track::isDemoContentTrack().
     uint32_t hide_stemmed_site, hide_stems_feat_slot;
     uint16_t track_is_demo_slot, track_is_stemmed_slot;
+    // #336 S12: RecorderDsp::RecorderDsp site that initializes m_bufferSeconds = 4.0f and m_sleepMs = 100.
+    uint32_t recorder_buf_site;
 };
 static const struct engine_build *build;
 
@@ -969,6 +971,31 @@ static void install_tidal_profile_sso(uintptr_t base, size_t page) {
     if (*slot != base + build->tidal_sso_getter) return;
     patch_pointer(HF_GATEWAY, slot, (uintptr_t)tidal_profile_sso, page);
     fprintf(stderr, "engine-ui-hook: isolated local TIDAL carrier from profile SSO\n");
+}
+
+// #336 S12: stock RecorderDsp::RecorderDsp hardcodes m_bufferSeconds = 4.0f (~1.4 MiB),
+// so a single >= 4 s USB flash FTL GC or writeback stall sets m_overrun = 1 in
+// RecorderDsp::process and aborts recording with "drive speed is too slow to record".
+// Expand to 24.0f (6x stall tolerance; allocated only while recording) while keeping
+// m_sleepMs = 100 ms, player boards (no recorder), and dsp-guards-disabled configs stock.
+static void install_recorder_buffer_guard(uintptr_t base, size_t page) {
+    if (!build || !build->recorder_buf_site || player_board() || !hf_on(HF_DSP_GUARDS)) return;
+    uintptr_t site = base + build->recorder_buf_site;
+#if defined(__aarch64__)
+    static const uchar stock[8]   = {0x00, 0x10, 0xa8, 0xd2, 0x80, 0x0c, 0xc0, 0xf2};
+    static const uchar patched[8] = {0x00, 0x38, 0xa8, 0xd2, 0x80, 0x0c, 0xc0, 0xf2};
+    if (!memcmp((const void *)site, patched, sizeof patched)) return;
+    if (memcmp((const void *)site, stock, sizeof stock)) return;
+    if (try_patch_bytes(HF_DSP_GUARDS, site, patched, 4, page))
+        fprintf(stderr, "engine-ui-hook: recorder buffer expanded (4s -> 24s)\n");
+#else
+    static const uchar stock[12]   = {0x64, 0x10, 0xa0, 0xe3, 0x00, 0x20, 0xa0, 0xe3, 0x80, 0x20, 0x44, 0xe3};
+    static const uchar patched[12] = {0x64, 0x10, 0xa0, 0xe3, 0x00, 0x20, 0xa0, 0xe3, 0xc0, 0x21, 0x44, 0xe3};
+    if (!memcmp((const void *)site, patched, sizeof patched)) return;
+    if (memcmp((const void *)site, stock, sizeof stock)) return;
+    if (try_patch_bytes(HF_DSP_GUARDS, site + 8, patched + 8, 4, page))
+        fprintf(stderr, "engine-ui-hook: recorder buffer expanded (4s -> 24s)\n");
+#endif
 }
 
 static uint32_t stems_feature_jump[2];
@@ -2535,7 +2562,8 @@ static const struct engine_build engine_builds[] = {
      .shadow_owner_slot = 0x2d27a10, .shadow_owner_fn = 0xb0b888,
      .reset_uuid_fn = 0x138cbe0,
      .hide_stemmed_site = 0xe29f98, .hide_stems_feat_slot = 0x2ee6f90,
-     .track_is_demo_slot = 69, .track_is_stemmed_slot = 66},
+     .track_is_demo_slot = 69, .track_is_stemmed_slot = 66,
+     .recorder_buf_site = 0x19ba0f0},
 };
 #else
 static const struct engine_edit edits_504[] = {
@@ -2706,7 +2734,8 @@ static const struct engine_build engine_builds[] = {
      .shadow_position_fn = 0,
      .reset_uuid_fn = 0x12120ec,
      .hide_stemmed_site = 0xca5fc8, .hide_stems_feat_slot = 0x2a91e9c,
-     .track_is_demo_slot = 68, .track_is_stemmed_slot = 65},
+     .track_is_demo_slot = 68, .track_is_stemmed_slot = 65,
+     .recorder_buf_site = 0x18356b0},
     {"5.3.0", "\xbe\x53\x7e\x90\x81\x21\xe7\x61\x64\xdd\xbb\xf9\x73\x0d\x47\x2b\xa0\xb8\xf9\xd4",
      {0xe6a090, 0xe6a0bc, 0xe6a16c, 0xe6a198, 0xe6a1c4, 0xe6a0e8, 0xe6a140, 0x170e714, 0x1710c00,
       0x1710a74, 0x170f110, 0xdde87c, 0xd265cc, 0xd265f8, 0xd26624, 0xf1afa4, 0x16b38e0, 0xf1dd20, 0xf1ede4, 0xf1ab24, 0xc77934},
@@ -2724,7 +2753,8 @@ static const struct engine_build engine_builds[] = {
      .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5},
      .reset_uuid_fn = 0x12da47c,
      .hide_stemmed_site = 0xd4c6f8, .hide_stems_feat_slot = 0x2c97bd4,
-     .track_is_demo_slot = 69, .track_is_stemmed_slot = 66},
+     .track_is_demo_slot = 69, .track_is_stemmed_slot = 66,
+     .recorder_buf_site = 0x1987bc0},
     // feature_object 0x2d0eb78 is StemsPreRenderedPlayback (stored into 0x2d180c8 at 0x360d68, read by PlanckScriptRoot::hasStemsPreRenderedPlayback at 0x9d7808).
     {"5.3.0-sclive4", "\xb9\x46\xc3\xb8\xd9\x9d\x32\x99\x8c\x81\x97\xd5\xdc\x90\x5a\x6b\xdd\xaa\x5d\x2f",
      {0xe774fc, 0xe77528, 0xe775d8, 0xe77604, 0xe77630, 0xe77554, 0xe775ac, 0x17597bc, 0x179b090,
@@ -2743,7 +2773,8 @@ static const struct engine_build engine_builds[] = {
      .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5},
      .reset_uuid_fn = 0x13235b8,
      .hide_stemmed_site = 0xd7edf8, .hide_stems_feat_slot = 0x2d180c8,
-     .track_is_demo_slot = 69, .track_is_stemmed_slot = 66},
+     .track_is_demo_slot = 69, .track_is_stemmed_slot = 66,
+     .recorder_buf_site = 0x19ea77c},
 };
 #endif
 
@@ -2913,6 +2944,7 @@ static void install_hide_title_stems_fix(uintptr_t base, size_t page) {
 static void apply_engine_edits(uintptr_t base, size_t page) {
     install_tidal_profile_sso(base, page);
     install_hide_title_stems_fix(base, page);
+    install_recorder_buffer_guard(base, page);
     // A group is applied only if every site of it is stock or already patched.
     int ready[EDIT_GROUP_COUNT];
     for (unsigned i = 0; i < EDIT_GROUP_COUNT; i++) ready[i] = 1;
