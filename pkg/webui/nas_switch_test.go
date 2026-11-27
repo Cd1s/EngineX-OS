@@ -1518,7 +1518,8 @@ func TestNASStemsForAReplacedRecording(t *testing.T) {
 // are gone, and on e927f45e so was the counter: browsing again handed out ID 1 once more,
 // and the old ID 1 then played another recording. The ceiling kept in gateway-ids.json
 // keeps IDs from repeating; with no ceiling known (the first start after the upgrade) new
-// IDs start in a range of their own.
+// IDs start in a range of their own. A second unreadable start does not repeat the IDs
+// handed out after the first.
 func TestNASIDsNeverRepeatAfterAnUnreadableGatewayFile(t *testing.T) {
 	for _, broken := range []string{"cut short", "not a file", "cut short, no ceiling"} {
 		t.Run(broken, func(t *testing.T) {
@@ -1526,28 +1527,36 @@ func TestNASIDsNeverRepeatAfterAnUnreadableGatewayFile(t *testing.T) {
 			rig.saveNAS(rig.oneURL)
 			old := rig.browse()
 			rig.plays("server one's row", old, rig.one)
-			rig.stop()
 			path := filepath.Join(rig.stateDir, "gateway-tracks.json")
-			raw, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if broken == "not a file" {
-				if err := os.Remove(path); err != nil {
-					t.Fatal(err)
+			lose := func(first bool) {
+				t.Helper()
+				rig.stop()
+				if broken == "not a file" {
+					if first {
+						if err := os.Remove(path); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Mkdir(path, 0o700); err != nil {
+							t.Fatal(err)
+						}
+					}
+				} else {
+					raw, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(path, raw[:len(raw)/2], 0o600); err != nil {
+						t.Fatal(err)
+					}
 				}
-				if err := os.Mkdir(path, 0o700); err != nil {
-					t.Fatal(err)
+				if first && broken == "cut short, no ceiling" { // as on a deck that ran a released version
+					if err := os.Remove(filepath.Join(rig.stateDir, "gateway-ids.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+						t.Fatal(err)
+					}
 				}
-			} else if err := os.WriteFile(path, raw[:len(raw)/2], 0o600); err != nil {
-				t.Fatal(err)
+				rig.start()
 			}
-			if broken == "cut short, no ceiling" { // as on a deck that ran a released version
-				if err := os.Remove(filepath.Join(rig.stateDir, "gateway-ids.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
-					t.Fatal(err)
-				}
-			}
-			rig.start()
+			lose(true)
 			rig.gone("server one's row with its file unreadable", old)
 			rig.saveNAS(rig.twoURL)
 			id := rig.browse()
@@ -1556,6 +1565,15 @@ func TestNASIDsNeverRepeatAfterAnUnreadableGatewayFile(t *testing.T) {
 			}
 			rig.plays("server two's row", id, rig.two)
 			rig.gone("server one's old ID after server two was browsed", old)
+			lose(false)
+			rig.gone("server two's row with its file unreadable again", id)
+			rig.saveNAS(rig.oneURL)
+			again := rig.browse()
+			if again <= id {
+				t.Fatalf("after a second unreadable start server one's row got ID %d, not above %d", again, id)
+			}
+			rig.plays("server one's new row", again, rig.one)
+			rig.gone("server two's ID after server one was browsed again", id)
 		})
 	}
 }
