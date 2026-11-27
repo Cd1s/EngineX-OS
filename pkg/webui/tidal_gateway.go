@@ -1168,11 +1168,11 @@ var artClient = func() *http.Client {
 	return &http.Client{Timeout: 6 * time.Second, Transport: t}
 }()
 
-// artBytes is the cover at address (https, or a rekordbox computer's), from memory or
-// fetched; nil on any failure.
+// artBytes is the cover at address (https, the configured NAS's own origin, or a
+// rekordbox computer's), from memory or fetched; nil on any failure.
 func (g *tidalGateway) artBytes(ctx context.Context, address string) []byte {
 	rbx := strings.HasPrefix(address, rbxCoverScheme)
-	if !rbx && !strings.HasPrefix(address, "https://") {
+	if !rbx && !strings.HasPrefix(address, "https://") && !g.s.onNASOrigin(address) {
 		return nil
 	}
 	g.artMu.Lock()
@@ -1286,8 +1286,13 @@ func (g *tidalGateway) stageAlbumArt(ctx context.Context, id int64, t providers.
 }
 
 // httpsCover upgrades http:// cover links (NetEase serves them on both): the
-// cover embed and the thumbnail proxy accept https only.
+// cover embed and the thumbnail proxy accept https only. A NAS track's cover keeps
+// its scheme: it is a URL of the NAS the DJ configured, its credentials go to that
+// exact origin only, and https on an http NAS's address can be another service (#335).
 func httpsCover(t *providers.Track) {
+	if isNASProvider(t.Provider) {
+		return
+	}
 	for _, p := range []*string{&t.CoverURL, &t.ThumbURL} {
 		if rest, ok := strings.CutPrefix(*p, "http://"); ok {
 			*p = "https://" + rest
@@ -2133,9 +2138,6 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	for i, v := range sources {
 		g.s.cfg.BPM.Enrich(r.Context(), tracks[i])
 		for _, t := range tracks[i] {
-			if v.provider == nasScope {
-				httpsCover(&t)
-			}
 			if id := g.addTrack(trackRef{track: t, session: v.session, guest: v.guest, listing: listing}); id != 0 {
 				trackItems = append(trackItems, g.trackJSON(id, t))
 			}

@@ -1770,6 +1770,68 @@ func TestNASGatewayCredentialsGoAtStartupWhenBothSavesFail(t *testing.T) {
 	rig.plays("the NAS row after the emptied file", ids[0], rig.two)
 }
 
+// Round 10 (round-9 re-check, item 3): a NAS cover keeps its scheme, so its credentials
+// go to the configured origin only. On b6075e5f the gateway turned an http NAS's cover
+// (already signed with the Plex token or Subsonic auth) into https on another port, and
+// authorization accepted that form. Now the row's cover stays http, the deck's art
+// request loads it from the NAS's own origin with the credentials, and the https form
+// carries none.
+func TestNASCoverCredentialsOnlyForTheConfiguredOrigin(t *testing.T) {
+	const pass, token = "nas-pass-r10-335", "nas-token-r10-335"
+	cover := []byte("\xff\xd8\xff\xe0 r10 cover")
+	for _, protocol := range []string{"subsonic", "plex"} {
+		t.Run(protocol, func(t *testing.T) {
+			rig := newNASSwitchRig(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				q := r.URL.Query()
+				switch r.URL.Path {
+				case "/rest/getPlaylists.view":
+					fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlists":{"playlist":[{"id":"pl-42","name":"Club Crate","songCount":1}]}}}`)
+				case "/rest/getPlaylist.view":
+					fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlist":{"id":"pl-42","name":"Club Crate","entry":[{"id":"tr-99","title":"Warehouse Dub","artist":"DJ Test","duration":210,"suffix":"mp3","coverArt":"cv-99"}]}}}`)
+				case "/playlists":
+					fmt.Fprint(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"55","title":"Club Crate","leafCount":1}]}}`)
+				case "/playlists/55/items":
+					fmt.Fprint(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"7","title":"Warehouse Dub","grandparentTitle":"DJ Test","thumb":"/library/metadata/7/thumb","Media":[{"Part":[{"key":"/library/parts/7/file.mp3"}]}]}]}}`)
+				case "/rest/getCoverArt.view", "/library/metadata/7/thumb":
+					if q.Get("t") != "" || q.Get("X-Plex-Token") == token {
+						w.Write(cover)
+						return
+					}
+					http.Error(w, "no auth", http.StatusUnauthorized)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			body := fmt.Sprintf(`{"protocol":%q,"url":%q,"username":"dj","password":%q,"token":%q,"enabled":true}`, protocol, srv.URL, pass, token)
+			w := httptest.NewRecorder()
+			rig.s.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(body)))
+			if w.Code != http.StatusOK {
+				t.Fatalf("save NAS: %d %s", w.Code, w.Body.String())
+			}
+			id := rig.browse()
+			rig.s.tidal.mu.Lock()
+			row := rig.s.tidal.tracks[id].track.CoverURL
+			rig.s.tidal.mu.Unlock()
+			if !strings.HasPrefix(row, srv.URL+"/") {
+				t.Fatalf("the row's cover left the NAS's origin %s: %s", srv.URL, row)
+			}
+			if a := rig.get("/v1/enginex/art?song=Warehouse%20Dub&artist=DJ%20Test"); a.code != http.StatusOK || !bytes.Equal(a.body, cover) {
+				t.Fatalf("the deck's art request: HTTP %d (%d bytes), want the NAS's cover", a.code, len(a.body))
+			}
+			other := strings.Replace(row, "http://", "https://", 1) // the same host and port over TLS: another origin
+			for _, got := range []string{rig.s.nasAuthorize(other), rig.s.nasAuthorize(providers.StripURLAuth(other, protocol == "subsonic"))} {
+				for _, bad := range []string{token, pass, "t=", "u=dj", "X-Plex-Token"} {
+					if strings.Contains(got, bad) {
+						t.Fatalf("credentials (%q) on %s, not the configured origin %s", bad, got, srv.URL)
+					}
+				}
+			}
+		})
+	}
+}
+
 // assertNoNASSecrets reads the saved NAS state files: no password, token, salted hash or
 // userinfo of the NAS in any of them.
 func assertNoNASSecrets(t *testing.T, rig *nasSwitchRig, cfg providers.NASConfig) {

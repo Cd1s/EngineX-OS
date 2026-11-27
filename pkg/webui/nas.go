@@ -370,7 +370,7 @@ func nasRootID(cfg providers.NASConfig) string {
 }
 
 // nasAuthorize adds the NAS's credentials back to address when it is a URL of the
-// configured NAS server: saved cover URLs hold none (#335).
+// configured NAS server's exact origin: saved cover URLs hold none (#335).
 func (s *Server) nasAuthorize(address string) string {
 	if s == nil {
 		return address
@@ -379,6 +379,17 @@ func (s *Server) nasAuthorize(address string) string {
 		return p.AuthorizeURL(address)
 	}
 	return address
+}
+
+// onNASOrigin reports whether address is on the configured NAS's exact origin
+// (scheme, host, effective port): its covers may be fetched over plain http when the
+// NAS itself is http, as its audio is.
+func (s *Server) onNASOrigin(address string) bool {
+	if s == nil {
+		return false
+	}
+	p := s.ownerSelfHosted()
+	return p != nil && p.OnOrigin(address)
 }
 
 // stateIO is nil except in tests that make NAS state file reads or writes fail.
@@ -536,7 +547,6 @@ func (g *tidalGateway) nasTracks(w http.ResponseWriter, r *http.Request, id stri
 	g.enrichRatingsFromDB(r.Context(), tracks)
 	refs := make([]trackRef, 0, len(tracks))
 	for _, t := range tracks {
-		httpsCover(&t)
 		refs = append(refs, trackRef{track: t, session: nasScope, listing: listing})
 	}
 	if role != "" && role != "default" {

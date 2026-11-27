@@ -223,7 +223,6 @@ func (s *Server) driveListTracks(ctx context.Context, listID string) ([]trackRef
 		}
 		refs := make([]trackRef, 0, len(tracks))
 		for _, t := range tracks {
-			httpsCover(&t)
 			refs = append(refs, trackRef{track: t, session: "nas", listing: listing})
 		}
 		return refs, nil
