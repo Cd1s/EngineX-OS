@@ -21,8 +21,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/Cd1s/EngineX-OS/internal/smbclient"
 )
 
 const defaultMaxCache = 5000
@@ -1121,54 +1119,6 @@ func (p *SelfHostedProvider) plexDownloadTrack(ctx context.Context, trackID, des
 // ----------------------------------------------------------------------------
 
 // Keep NAS downloads flat for the source index and the shared cache quota.
-// CachedName is the cache file name (without extension) a download of trackID
-// from this NAS gets: a hash of the server, root and track. An entry of a
-// state file written before #335 round 7 that names this file therefore
-// belongs to this NAS root. ok is false where the name cannot be known without
-// asking the server (a Plex rating key), and for a WebDAV path outside the
-// configured root or on another host.
-func (p *SelfHostedProvider) CachedName(trackID string) (name string, ok bool) {
-	var server *url.URL
-	var resource string
-	switch p.cfg.Protocol {
-	case "smb":
-		u, err := smbclient.Parse(p.cfg.URL)
-		rel, rerr := smbclient.Relative(trackID)
-		if err != nil || rerr != nil {
-			return "", false
-		}
-		server, resource = u, u.Path+"\x00"+rel
-	case "subsonic":
-		u, err := validateBaseURL("subsonic", p.cfg.URL)
-		if err != nil {
-			return "", false
-		}
-		server, resource = u, strings.TrimRight(u.Path, "/")+"\x00subsonic\x00"+trackID
-	case "plex":
-		u, err := validateBaseURL("plex", p.cfg.URL)
-		if err != nil || !strings.HasPrefix(trackID, "/") {
-			return "", false
-		}
-		server, resource = u, strings.TrimRight(u.Path, "/")+trackID
-	case "webdav":
-		base, berr := validateBaseURL("webdav", p.cfg.URL)
-		u, err := resolveWebDAVURL(p.cfg.URL, trackID)
-		if berr != nil || err != nil || !pathUnder(u.Path, base.Path) {
-			return "", false
-		}
-		server, resource = u, u.Path+"\x00"+u.RawQuery
-	default:
-		return "", false
-	}
-	return nasCacheFilename(server, resource, ""), true
-}
-
-// pathUnder tells whether p is root or below it.
-func pathUnder(p, root string) bool {
-	root = strings.TrimSuffix(path.Clean("/"+root), "/") + "/"
-	return strings.HasPrefix(path.Clean("/"+p)+"/", root)
-}
-
 func nasCacheFilename(server *url.URL, resource, ext string) string {
 	host := strings.ToLower(server.Host)
 	if server.Scheme == "http" && server.Port() == "80" {

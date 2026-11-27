@@ -353,62 +353,11 @@ func (s *Server) resetNASIfMoved(before providers.NASConfig) {
 	if s.jobs != nil && s.jobs.pause != nil {
 		s.jobs.pause("reset")
 	}
-	root := newNASOrigin(now)
+	root := nasRootID(now)
 	s.stemsMu.Lock()
 	s.jobs.resetNAS(root, func() { s.resetNASStemsLocked(root) })
 	s.stemsMu.Unlock()
-	s.tidal.resetNAS(root.ID)
-}
-
-// nasOrigin is the NAS root saved NAS state belongs to (#335). ID is recorded in
-// the state files; cfg (protocol and URL, no credentials) tells whether an entry
-// of an older, untagged file belongs to this root too.
-type nasOrigin struct {
-	ID  string
-	cfg providers.NASConfig
-}
-
-func newNASOrigin(cfg providers.NASConfig) nasOrigin {
-	// Enabled: a NAS switched off keeps its root's state, as the reset does.
-	return nasOrigin{nasRootID(cfg), providers.NASConfig{Protocol: cfg.Protocol, URL: cfg.URL, Enabled: true}}
-}
-
-// ownsFile tells whether file (a cache file, or a folder named after one) is the
-// one a download of t from this root gets. Older index entries and Stems paths
-// name that file, and its name hashes the server, root and track, so such an
-// entry belongs to this root.
-func (o nasOrigin) ownsFile(t providers.Track, file string) bool {
-	if !nasConfigReady(o.cfg) || o.cfg.Protocol != t.Provider {
-		return false
-	}
-	want, ok := providers.NewSelfHostedProvider(o.cfg, nil).CachedName(t.ID)
-	base := filepath.Base(file)
-	return ok && strings.TrimSuffix(base, filepath.Ext(base)) == want
-}
-
-// ownsRow tells whether a NAS row of an older, untagged gateway file belongs to
-// this root. The released format stores the track: a WebDAV ID is the file's path
-// on the server, which must be under the root; a Subsonic or Plex row names its
-// server only in its cover URL; an SMB ID is relative to a root it does not name,
-// so it never matches (SMB tracks could not play before #335).
-func (o nasOrigin) ownsRow(t providers.Track) bool {
-	if !nasConfigReady(o.cfg) || o.cfg.Protocol != t.Provider {
-		return false
-	}
-	switch t.Provider {
-	case "webdav":
-		_, ok := providers.NewSelfHostedProvider(o.cfg, nil).CachedName(t.ID)
-		return ok
-	case "subsonic", "plex":
-		cover, err := url.Parse(t.CoverURL)
-		base, berr := url.Parse(strings.TrimSpace(o.cfg.URL))
-		if err != nil || berr != nil || cover.Host == "" || !strings.EqualFold(cover.Host, base.Host) {
-			return false
-		}
-		root := strings.TrimSuffix(path.Clean("/"+base.Path), "/") + "/"
-		return strings.HasPrefix(path.Clean("/"+cover.Path)+"/", root)
-	}
-	return false
+	s.tidal.resetNAS(root)
 }
 
 // nasRootID names the NAS root (protocol, server, port, share and root, as

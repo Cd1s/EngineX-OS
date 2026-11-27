@@ -76,24 +76,10 @@ func (s *Server) loadStemmed() map[string][]stemmedTrack {
 	}
 	for scope, list := range all {
 		all[scope] = slices.DeleteFunc(list, func(e stemmedTrack) bool {
-			return isNASProvider(e.Track.Provider) && e.NASRoot != s.stemsRoot.ID && !(e.NASRoot == "" && s.stemsRoot.ownsStem(e))
+			return isNASProvider(e.Track.Provider) && e.NASRoot != s.stemsRoot // untagged: adoptStems
 		})
 	}
 	return all
-}
-
-// ownsStem tells whether an untagged NAS Stems entry (from before #335 round 7)
-// belongs to this root. The released format stores the stemmed copy's path, in a
-// folder named after the download it was made from (.../Stems/<cache file>/), or
-// the download itself, and the track. 5.3.0.5 named Subsonic downloads after the
-// song ID only, so a Subsonic or Plex entry is also matched by its track's cover
-// URL, which names the server.
-func (o nasOrigin) ownsStem(e stemmedTrack) bool {
-	file := e.Path
-	if dir := filepath.Dir(e.Path); filepath.Base(filepath.Dir(dir)) == "Stems" {
-		file = dir
-	}
-	return o.ownsFile(e.Track, file) || (e.Track.Provider != "webdav" && o.ownsRow(e.Track))
 }
 
 // dropNASStems removes the NAS tracks from every list and tells whether any went.
@@ -106,6 +92,29 @@ func dropNASStems(all map[string][]stemmedTrack) bool {
 		}
 	}
 	return changed
+}
+
+// adoptStems tags the NAS entries written before the root was recorded with the
+// current root, as 5.3.0.5 used them (#335); s.stemsMu must be held. New runs it
+// before any request, so a later root change hides them like any tagged entry.
+func (s *Server) adoptStems() {
+	all, err := s.readStemmed()
+	if err != nil {
+		return
+	}
+	adopt := false
+	for _, list := range all {
+		for i, e := range list {
+			if isNASProvider(e.Track.Provider) && e.NASRoot == "" {
+				list[i].NASRoot, adopt = s.stemsRoot, true
+			}
+		}
+	}
+	if adopt {
+		if err := saveState(s.stemsFile(), all); err != nil {
+			log.Printf("webui: Stems lists not saved (%T)", err)
+		}
+	}
 }
 
 func sameTrack(a, b providers.Track) bool { return a.Provider == b.Provider && a.ID == b.ID }
@@ -129,14 +138,7 @@ func (s *Server) addStemmedAt(scope string, t stemmedTrack, gen uint64) error {
 		return errors.New("the Stems lists cannot be read")
 	}
 	if isNASProvider(t.Track.Provider) {
-		t.NASRoot = s.stemsRoot.ID
-	}
-	for _, list := range all { // older entries of this root are tagged now
-		for i, e := range list {
-			if e.NASRoot == "" && isNASProvider(e.Track.Provider) && s.stemsRoot.ownsStem(e) {
-				list[i].NASRoot = s.stemsRoot.ID
-			}
-		}
+		t.NASRoot = s.stemsRoot
 	}
 	list := slices.DeleteFunc(all[scope], func(e stemmedTrack) bool { return sameTrack(e.Track, t.Track) })
 	all[scope] = append([]stemmedTrack{t}, list[:min(len(list), maxStemmed-1)]...)
@@ -149,7 +151,7 @@ func (s *Server) addStemmedAt(scope string, t stemmedTrack, gen uint64) error {
 // other services' entries). root is the new NAS root: from now on only NAS
 // entries stemmed from it are served, so entries a failed read or write leaves
 // in the file are never used (#335).
-func (s *Server) resetNASStemsLocked(root nasOrigin) {
+func (s *Server) resetNASStemsLocked(root string) {
 	s.stemsRoot = root
 	all, err := s.readStemmed()
 	if err != nil {
