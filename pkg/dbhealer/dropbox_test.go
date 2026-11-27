@@ -1503,7 +1503,7 @@ func TestHealMountTriggerRejectingIdentityPreservesDropboxTrack(t *testing.T) {
 			if err := os.WriteFile(full, []byte("audio-bytes"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db.Exec(`UPDATE Track SET path='../Music/local-dropbox.mp3', filename='local-dropbox.mp3', fileBytes=11, streamingSource='Dropbox', uri='streaming://Dropbox/Track/1', streamingFlags=5 WHERE id=1`); err != nil {
+			if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes,streamingSource,uri,streamingFlags,isAnalyzed) VALUES(1,'../Music/local-dropbox.mp3','local-dropbox.mp3',11,'Dropbox','streaming://Dropbox/Track/1',5,1)`); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := db.Exec(`UPDATE Information SET id=99, uuid='valid-uuid'`); err != nil {
