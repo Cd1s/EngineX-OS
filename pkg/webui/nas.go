@@ -22,7 +22,10 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
-var nasAllowLoopback = testing.Testing()
+// nasAllowLoopback lets tests reach their loopback fixture servers. Atomic: one test
+// switches it off while background work of earlier tests (art staging after a
+// stream) may still read it.
+var nasAllowLoopback = func() *atomic.Bool { v := new(atomic.Bool); v.Store(testing.Testing()); return v }()
 
 func disallowedNASIP(ip net.IP) bool {
 	if ip == nil {
@@ -31,7 +34,7 @@ func disallowedNASIP(ip net.IP) bool {
 	if ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
 		return true
 	}
-	if !nasAllowLoopback && ip.IsLoopback() {
+	if !nasAllowLoopback.Load() && ip.IsLoopback() {
 		return true
 	}
 	return false
@@ -54,7 +57,7 @@ func validateNASURL(raw string) error {
 	if host == "" {
 		return errors.New("invalid url: missing host")
 	}
-	if !nasAllowLoopback && (host == "localhost" || strings.HasSuffix(host, ".localhost")) {
+	if !nasAllowLoopback.Load() && (host == "localhost" || strings.HasSuffix(host, ".localhost")) {
 		return errors.New("invalid url: loopback host is not allowed")
 	}
 	if ip := net.ParseIP(host); ip != nil && disallowedNASIP(ip) {
@@ -64,7 +67,7 @@ func validateNASURL(raw string) error {
 }
 
 func (s *Server) nasHTTPClient() *http.Client {
-	if nasAllowLoopback {
+	if nasAllowLoopback.Load() {
 		return s.cfg.HTTP
 	}
 	base := http.DefaultTransport.(*http.Transport).Clone()

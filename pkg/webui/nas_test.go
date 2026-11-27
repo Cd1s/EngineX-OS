@@ -240,9 +240,9 @@ func TestNASTestAndPlaylists(t *testing.T) {
 }
 
 func TestNASConfigAndProbeRejectLoopbackAndLinkLocal(t *testing.T) {
-	orig := nasAllowLoopback
-	nasAllowLoopback = false
-	t.Cleanup(func() { nasAllowLoopback = orig })
+	orig := nasAllowLoopback.Load()
+	nasAllowLoopback.Store(false)
+	t.Cleanup(func() { nasAllowLoopback.Store(orig) })
 
 	s, _ := newTestServerWithUIDir(t)
 	for _, target := range []string{
