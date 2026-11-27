@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/Cd1s/EngineX-OS/internal/migration"
+	"github.com/Cd1s/EngineX-OS/internal/redirect"
 	"io"
 	"net"
 	"net/http"
@@ -36,8 +37,9 @@ func (c Client) Offers(ctx context.Context) (string, error) {
 			return "", err
 		}
 		req.Header.Set("Authorization", "Bearer "+c.Secret)
-		// One-shot probe: no keep-alive, so no idle socket outlives it (#42).
-		resp, err := (&http.Client{Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}).Do(req)
+		// One-shot probe: no keep-alive, so no idle socket outlives it (#42). The secret
+		// follows a redirect only within the backend's origin (#335 round 11).
+		resp, err := (&http.Client{Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}, CheckRedirect: redirect.SameOrigin}).Do(req)
 		if err != nil {
 			return "", err
 		}
