@@ -96,6 +96,14 @@ func TestNASIDBoundReconcilesWithTheIDsInUse(t *testing.T) {
 			writeGatewayFile(t, rig.stateDir, old-1, nil)
 			writeIDCopies(t, rig.stateDir, "{", fmt.Sprintf(`{"ceiling":%d}`, old-1))
 		}},
+		{"a copy missing", func(t *testing.T, rig *nasSwitchRig, old int64) {
+			writeGatewayFile(t, rig.stateDir, old-1, nil)
+			writeIDCopies(t, rig.stateDir, "", fmt.Sprintf(`{"ceiling":%d}`, old-1))
+		}},
+		{"gateway file unreadable, equal copies", func(t *testing.T, rig *nasSwitchRig, old int64) {
+			rig.unreadable()
+			writeIDCopies(t, rig.stateDir, fmt.Sprintf(`{"ceiling":%d}`, old-1), fmt.Sprintf(`{"ceiling":%d}`, old-1))
+		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			rig, _, old := idRig(t)

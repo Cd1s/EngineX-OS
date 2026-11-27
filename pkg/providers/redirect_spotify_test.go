@@ -2,9 +2,13 @@ package providers
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -116,4 +120,87 @@ func TestProviderClientRedirectRule(t *testing.T) {
 			}
 		}
 	}
+}
+
+// #335 round 12 (round-11 re-check, item 2, the body): a provider's login and token
+// requests carry their credential in the body (Spotify's refresh token, a client
+// secret, a password) and no credential header. Go sends a body again on a 307 or 308,
+// to any origin. On 900f8055 Spotify's token refresh followed such a redirect and the
+// other origin was sent the refresh token. Now a redirect that repeats the body stays
+// on the request's origin, for every request of the shared client.
+func TestRedirectsNeverRepeatABodyOnAnotherOrigin(t *testing.T) {
+	const refresh = "spotify-refresh-r12"
+	var mu sync.Mutex
+	var sent []string // what the other origin was sent: "<method> <body>"
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		sent = append(sent, r.Method+" "+string(b))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"from-elsewhere"}`))
+	}))
+	defer elsewhere.Close()
+	accounts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch strings.Split(r.URL.Path, "/")[1] {
+		case "307":
+			http.Redirect(w, r, elsewhere.URL+"/api/token", http.StatusTemporaryRedirect)
+		case "308":
+			http.Redirect(w, r, elsewhere.URL+"/api/token", http.StatusPermanentRedirect)
+		case "302":
+			http.Redirect(w, r, elsewhere.URL+"/api/token", http.StatusFound)
+		case "same":
+			http.Redirect(w, r, "/final/api/token", http.StatusTemporaryRedirect)
+		case "final":
+			if b, _ := io.ReadAll(r.Body); !strings.Contains(string(b), refresh) {
+				http.Error(w, "the body did not follow the redirect", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"access_token":"fresh"}`))
+		}
+	}))
+	defer accounts.Close()
+	token := func(path string) (Token, error) {
+		s := &Spotify{AccountsURL: accounts.URL + path}
+		return s.doTokenRequest(context.Background(), "client", Token{}, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}})
+	}
+	leaked := func(t *testing.T, before int) {
+		t.Helper()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, v := range sent[before:] {
+			if strings.Contains(v, refresh) {
+				t.Errorf("another origin was sent the refresh token: %q", v)
+			}
+		}
+	}
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(sent)
+	}
+	for _, code := range []string{"307", "308"} {
+		t.Run(code, func(t *testing.T) {
+			before := count()
+			tok, err := token("/" + code)
+			leaked(t, before)
+			if !errors.Is(err, ErrRedirectOffOrigin) || tok.AccessToken != "" {
+				t.Errorf("a token request redirected to another origin: token %q, error %v, want it refused", tok.AccessToken, err)
+			}
+		})
+	}
+	t.Run("within the origin", func(t *testing.T) {
+		if tok, err := token("/same"); err != nil || tok.AccessToken != "fresh" {
+			t.Errorf("a redirect within the origin: token %q, error %v, want the body sent again there", tok.AccessToken, err)
+		}
+	})
+	t.Run("302 sends no body", func(t *testing.T) {
+		// Go turns it into a GET without the body: nothing of ours leaves, as before.
+		before := count()
+		if _, err := token("/302"); err != nil {
+			t.Errorf("a 302 without a credential in its headers: %v, want it followed as before", err)
+		}
+		leaked(t, before)
+	})
 }
