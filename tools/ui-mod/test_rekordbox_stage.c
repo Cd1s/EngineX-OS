@@ -360,7 +360,7 @@ struct link_mock {
     const unsigned char *body;
     size_t body_n;
     char last_data_req[4096];
-    char last_filled_req[2048];
+    char last_filled_req[4096];
     pthread_mutex_t mu;
 };
 

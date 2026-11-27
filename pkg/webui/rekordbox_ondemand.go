@@ -936,9 +936,21 @@ func (s *Server) filledJournalMatchesRow(ctx context.Context, uuid string, engin
 	return false
 }
 
+func lockRepairVolume(mount string) (func(), error) {
+	unlock, err := rbstate.LockVolume(mount, 0)
+	if err != nil {
+		if errors.Is(err, rbstate.ErrLocked) {
+			return nil, bridge.ErrOnDemandUnavailable
+		}
+		return nil, err
+	}
+	return unlock, nil
+}
+
 // verifyRepairCandidate inspects the live m.db row on the stick holder and verifies that it is
 // an unedited stock-Engine-overwritten rekordbox row (never DJ-edited, never filled by us,
-// never a stock Engine track) and matches the exact blobs observed by the caller hook.
+// never synced by #321 write-back, never a stock Engine track) and matches the exact blobs
+// observed by the caller hook. Callers must hold lockRepairVolume(mount).
 func (s *Server) verifyRepairCandidate(ctx context.Context, mount, libUUID, enginePath string, engineID, requireImportKey int64, curBeatsHex, curCuesHex, curLoopsHex string) error {
 	curBeats, err := decodeRepairHex(curBeatsHex, 256)
 	if err != nil {
@@ -969,6 +981,13 @@ func (s *Server) verifyRepairCandidate(ctx context.Context, mount, libUUID, engi
 	if err != nil {
 		return err
 	}
+	// Never repair a row the bridge already applied/wrote, marked deck-owned, or
+	// recorded as edited/synced by #321 write-back.
+	if stickID.PerfState == rbstate.PerfDeck || stickID.PerfState == rbstate.PerfApplied ||
+		len(stickID.Written) > 0 || stickID.Edit != 0 ||
+		stickID.HasBuiltANLZ || stickID.HasSyncedColorTag {
+		return errOnDemandNotRepairable
+	}
 
 	mdb := filepath.Join(stickID.Mount, "Engine Library", "Database2", "m.db")
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
@@ -993,13 +1012,15 @@ func (s *Server) verifyRepairCandidate(ctx context.Context, mount, libUUID, engi
 	}
 
 	var (
-		rowID, importKey int64
-		rowPath          string
-		lockedVal        int
-		row              enginedb.StockOverwrittenRow
+		rowID, importKey      int64
+		rowPath               string
+		genre, comment, label string
+		lockedVal             int
+		row                   enginedb.StockOverwrittenRow
 	)
 	queryByID := `
 		SELECT t.id, t.path, COALESCE(t.pdbImportKey, 0), COALESCE(t.isBeatGridLocked, 0),
+		       COALESCE(t.genre, ''), COALESCE(t.comment, ''), COALESCE(t.label, ''),
 		       p.trackData, p.overviewWaveFormData, p.beatData, p.quickCues, p.loops,
 		       COALESCE(p.activeOnLoadLoops, 0), p.thirdPartySourceId
 		FROM Track t
@@ -1007,6 +1028,7 @@ func (s *Server) verifyRepairCandidate(ctx context.Context, mount, libUUID, engi
 		WHERE t.id = ? LIMIT 1`
 	queryByPath := `
 		SELECT t.id, t.path, COALESCE(t.pdbImportKey, 0), COALESCE(t.isBeatGridLocked, 0),
+		       COALESCE(t.genre, ''), COALESCE(t.comment, ''), COALESCE(t.label, ''),
 		       p.trackData, p.overviewWaveFormData, p.beatData, p.quickCues, p.loops,
 		       COALESCE(p.activeOnLoadLoops, 0), p.thirdPartySourceId
 		FROM Track t
@@ -1016,12 +1038,14 @@ func (s *Server) verifyRepairCandidate(ctx context.Context, mount, libUUID, engi
 	if engineID > 0 {
 		qerr = db.QueryRowContext(ctx, queryByID, engineID).Scan(
 			&rowID, &rowPath, &importKey, &lockedVal,
+			&genre, &comment, &label,
 			&row.TrackData, &row.Overview, &row.Beats, &row.QuickCues, &row.Loops,
 			&row.ActiveOnLoadLoops, &row.ThirdPartySourceID,
 		)
 	} else {
 		qerr = db.QueryRowContext(ctx, queryByPath, "../"+stickID.TrackRel, stickID.TrackRel).Scan(
 			&rowID, &rowPath, &importKey, &lockedVal,
+			&genre, &comment, &label,
 			&row.TrackData, &row.Overview, &row.Beats, &row.QuickCues, &row.Loops,
 			&row.ActiveOnLoadLoops, &row.ThirdPartySourceID,
 		)
@@ -1042,6 +1066,16 @@ func (s *Server) verifyRepairCandidate(ctx context.Context, mount, libUUID, engi
 	}
 	if importKey <= 0 || (requireImportKey > 0 && importKey != requireImportKey) {
 		return bridge.ErrOnDemandNotFound
+	}
+	// OnDemand mounts record an initial mount-time Synced digest with Edit == 0
+	// (pkg/bridge/apply.go:388-392) so #321 skips untouched rows in 0 ms.
+	// Any Synced marker other than that untouched mount-time baseline means #321
+	// write-back touched/synced the row, so it is never repairable.
+	if len(stickID.Synced) > 0 {
+		mountBaseline := enginedb.SyncedDigest(nil, stickID.FastCues, stickID.FastLoops, int64(stickID.FastActive), genre, comment, label)
+		if !bytes.Equal(stickID.Synced, mountBaseline) {
+			return errOnDemandNotRepairable
+		}
 	}
 	row.BeatGridLocked = lockedVal != 0
 	row.FastKnown = stickID.FastKnown
@@ -1130,6 +1164,12 @@ func (s *Server) serveRekordboxOnDemand(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if req.Repair {
+		unlock, err := lockRepairVolume(mount)
+		if err != nil {
+			writeOnDemandError(w, err)
+			return
+		}
+		defer unlock()
 		if err := s.verifyRepairCandidate(r.Context(), mount, strings.TrimSpace(req.UUID), req.Path, req.ID, req.ImportKey, req.CurBeats, req.CurCues, req.CurLoops); err != nil {
 			writeOnDemandError(w, err)
 			return

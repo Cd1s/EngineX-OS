@@ -1179,6 +1179,12 @@ func (s *Server) handlePeerRekordboxOnDemand(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if req.Repair {
+		unlock, err := lockRepairVolume(mount)
+		if err != nil {
+			writeOnDemandError(w, err)
+			return
+		}
+		defer unlock()
 		if err := s.verifyRepairCandidate(ctx, mount, libUUID, req.Path, req.ID, req.ImportKey, req.CurBeats, req.CurCues, req.CurLoops); err != nil {
 			writeOnDemandError(w, err)
 			return

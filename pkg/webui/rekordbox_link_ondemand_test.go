@@ -1726,3 +1726,242 @@ func TestRekordboxStockOverwrittenRepairLocalAndLink(t *testing.T) {
 		t.Fatalf("older peer missing X-RB-Repair = (%d, %q), want (409, not_repairable)", recMixed.Code, recMixed.Header().Get("X-RB-Status"))
 	}
 }
+
+// Fails on 3f7371a9: Round-2 Step 3 review guards (BLOCKs 1, 2, 4):
+//   - BLOCK 1: 1-sample main cue move (beat0+1 vs beat0) is DJ-made -> 409 not_repairable (local & Link)
+//   - BLOCK 2: snapshot write-back Synced marker (non-mount-baseline) or Edit/PerfDeck -> 409 not_repairable
+//     (while an untouched mount-time OnDemand Synced baseline with Edit==0 still repairs cleanly)
+//   - BLOCK 4: while rbstate.LockVolume(stick, 0) is held by write-back, repair returns 503 unavailable
+//     (never 200 X-RB-Repair=1) on both local & Link, then succeeds once unlocked.
+func TestRekordboxRepairRound2Guards(t *testing.T) {
+	mediaRoot, stick, libUUID, tr, importKey := setupLinkOnDemandStick(t, "R2GUARD", 2)
+	stageRoot := t.TempDir()
+	const ownerUUID = "f7f70001-1111-2222-3333-444455556666"
+
+	srvA := New(Config{
+		StateDir:    t.TempDir(),
+		MediaRoot:   mediaRoot,
+		RBStageRoot: stageRoot,
+		LinkUUID:    ownerUUID,
+	}, nil)
+	defer srvA.Close()
+	tsA := httptest.NewServer(srvA)
+	defer tsA.Close()
+	uA, _ := url.Parse(tsA.URL)
+
+	srvB := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
+	defer srvB.Close()
+	srvB.rbLinkPeerCandidates = func(context.Context) []string { return []string{uA.Host} }
+	srvB.rbLinkARPCandidates = func(context.Context) []string { return nil }
+
+	dbDir := filepath.Join(stick, "Engine Library", "Database2")
+	mdb := filepath.Join(dbDir, "m.db")
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	const beat0 = 11391.4248046875
+	stockTD := []byte{0, 0, 0, 68, 0x78, 0x9c}
+	stockOV := bytes.Repeat([]byte{0x55}, 1200)
+	stockBeats := buildTestStockOABeats(t, 44100, 13707967, beat0, 136.0, 704, 0)
+	stockAutoCues := buildTestQuickCues(t, -1, "", beat0, 1, beat0)
+	mainPlusOneCues := buildTestQuickCues(t, -1, "", beat0+1, 1, beat0)
+	mainBothPlusOneCues := buildTestQuickCues(t, -1, "", beat0+1, 1, beat0+1)
+	emptyLoops := buildTestLoops(-1, -1, 0)
+
+	setRow := func(bd, qc, lp []byte) {
+		t.Helper()
+		if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+			stockTD, stockOV, bd, qc, lp, tr.EngineID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE Track SET isAnalyzed=1, isBeatGridLocked=0, pdbImportKey=?, bpmAnalyzed=136.0 WHERE id=?`,
+			importKey, tr.EngineID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	callLocal := func(s *Server, bd, qc, lp []byte) *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(rbOnDemandRequest{
+			DB: mdb, UUID: libUUID, Path: "../" + tr.Rel, ID: tr.EngineID, ImportKey: importKey,
+			Repair: true, CurBeats: hex.EncodeToString(bd), CurCues: hex.EncodeToString(qc), CurLoops: hex.EncodeToString(lp),
+		})
+		req := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(raw))
+		req.RemoteAddr = "127.0.0.1:6300"
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		return rec
+	}
+
+	callLink := func(s *Server, bd, qc, lp []byte) *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(rbOnDemandRequest{
+			DB: "net://" + ownerUUID + "/R2GUARD/Engine Library/Database2/m.db", UUID: libUUID, Path: "../" + tr.Rel, ID: tr.EngineID, ImportKey: importKey,
+			Repair: true, CurBeats: hex.EncodeToString(bd), CurCues: hex.EncodeToString(qc), CurLoops: hex.EncodeToString(lp),
+		})
+		req := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(raw))
+		req.RemoteAddr = "127.0.0.1:6301"
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// BLOCK 1: 1-sample main cue move (beat0+1 vs beat0, and beat0+1 vs beat0+1) -> 409 not_repairable on BOTH local & Link.
+	t.Run("block1_main_cue_exact", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			qc   []byte
+		}{
+			{"main_plus_1_vs_beat0", mainPlusOneCues},
+			{"main_and_def_plus_1", mainBothPlusOneCues},
+		} {
+			setRow(stockBeats, tc.qc, emptyLoops)
+			for _, mode := range []struct {
+				label string
+				rec   *httptest.ResponseRecorder
+			}{
+				{"local", callLocal(srvA, stockBeats, tc.qc, emptyLoops)},
+				{"link", callLink(srvB, stockBeats, tc.qc, emptyLoops)},
+			} {
+				if mode.rec.Code != http.StatusConflict || mode.rec.Header().Get("X-RB-Status") != "not_repairable" {
+					t.Fatalf("BLOCK 1 %s (%s) = (%d, %q), want (409, not_repairable)", tc.name, mode.label, mode.rec.Code, mode.rec.Header().Get("X-RB-Status"))
+				}
+			}
+		}
+	})
+
+	// BLOCK 4: While rbstate.LockVolume(stick, 0) is held by write-back, repair MUST NOT return 200 (must return 503 unavailable).
+	t.Run("block4_volume_lock", func(t *testing.T) {
+		setRow(stockBeats, stockAutoCues, emptyLoops)
+		unlock, err := rbstate.LockVolume(stick, 0)
+		if err != nil {
+			t.Fatalf("LockVolume: %v", err)
+		}
+		defer func() {
+			if unlock != nil {
+				unlock()
+			}
+		}()
+		for _, mode := range []struct {
+			label string
+			rec   *httptest.ResponseRecorder
+		}{
+			{"local", callLocal(srvA, stockBeats, stockAutoCues, emptyLoops)},
+			{"link", callLink(srvB, stockBeats, stockAutoCues, emptyLoops)},
+		} {
+			if mode.rec.Code != http.StatusServiceUnavailable || mode.rec.Header().Get("X-RB-Status") != "unavailable" {
+				t.Fatalf("BLOCK 4 locked (%s) = (%d, %q), want (503, unavailable)", mode.label, mode.rec.Code, mode.rec.Header().Get("X-RB-Status"))
+			}
+		}
+		unlock()
+		unlock = nil
+		// After unlock, exact stock auto-cue at beat0 repairs cleanly again.
+		if rec := callLocal(srvA, stockBeats, stockAutoCues, emptyLoops); rec.Code != http.StatusOK || rec.Header().Get("X-RB-Repair") != "1" {
+			t.Fatalf("after unlock local repair = (%d, %q), want (200, X-RB-Repair=1)", rec.Code, rec.Header().Get("X-RB-Repair"))
+		}
+	})
+
+	// BLOCK 2: Write-back Synced marker in snapshot -> 409 not_repairable on BOTH local & Link.
+	t.Run("block2_synced_marker", func(t *testing.T) {
+		setRow(stockBeats, stockAutoCues, emptyLoops)
+		snap, err := rbstate.Load(dbDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snap.Tracks[tr.Key].Synced = []byte{1, 2, 3, 4}
+		if err := snap.Save(dbDir); err != nil {
+			t.Fatal(err)
+		}
+		for _, mode := range []struct {
+			label string
+			rec   *httptest.ResponseRecorder
+		}{
+			{"local", callLocal(srvA, stockBeats, stockAutoCues, emptyLoops)},
+			{"link", callLink(srvB, stockBeats, stockAutoCues, emptyLoops)},
+		} {
+			if mode.rec.Code != http.StatusConflict || mode.rec.Header().Get("X-RB-Status") != "not_repairable" {
+				t.Fatalf("BLOCK 2 Synced marker (%s) = (%d, %q), want (409, not_repairable)", mode.label, mode.rec.Code, mode.rec.Header().Get("X-RB-Status"))
+			}
+		}
+	})
+
+	// BLOCK 2b: Mount-time OnDemand stick sets initial Synced == SyncedDigest(nil, FastCues, FastLoops, FastActive, genre, comment, label)
+	// with Edit == 0: untouched OnDemand mount still repairs cleanly, whereas post-write-back Edit != 0 or updated Synced rejects with 409.
+	t.Run("block2_ondemand_mount_baseline_vs_writeback", func(t *testing.T) {
+		odRoot := t.TempDir()
+		odStick := filepath.Join(odRoot, "ODSTICK")
+		if err := os.MkdirAll(odStick, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		testfixture.LargeExport(t, odStick, 2)
+		if _, err := bridge.ConvertAtMount(context.Background(), odStick, bridge.MountOptions{OnDemand: true}); err != nil {
+			t.Fatalf("ConvertAtMount(OnDemand): %v", err)
+		}
+		odDBDir := filepath.Join(odStick, "Engine Library", "Database2")
+		odSnap, err := rbstate.Load(odDBDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var odTr *rbstate.Track
+		for _, cand := range odSnap.Tracks {
+			if cand.EngineID == 1 {
+				odTr = cand
+				break
+			}
+		}
+		if odTr == nil || len(odTr.Synced) == 0 || odTr.Edit != 0 {
+			t.Fatalf("expected OnDemand mount to set initial Synced with Edit==0, got %+v", odTr)
+		}
+		odMDB := filepath.Join(odDBDir, "m.db")
+		odDB, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: odMDB}).String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer odDB.Close()
+		var odImportKey int64
+		if err := odDB.QueryRow(`SELECT COALESCE(pdbImportKey, 0) FROM Track WHERE id = ?`, odTr.EngineID).Scan(&odImportKey); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := odDB.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+			stockTD, stockOV, stockBeats, stockAutoCues, emptyLoops, odTr.EngineID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := odDB.Exec(`UPDATE Track SET isAnalyzed=1, isBeatGridLocked=0, bpmAnalyzed=136.0 WHERE id=?`, odTr.EngineID); err != nil {
+			t.Fatal(err)
+		}
+		srvOD := New(Config{StateDir: t.TempDir(), MediaRoot: odRoot, RBStageRoot: t.TempDir()}, nil)
+		defer srvOD.Close()
+		callOD := func() *httptest.ResponseRecorder {
+			raw, _ := json.Marshal(rbOnDemandRequest{
+				DB: odMDB, UUID: odSnap.LibraryUUID, Path: "../" + odTr.Rel, ID: odTr.EngineID, ImportKey: odImportKey,
+				Repair: true, CurBeats: hex.EncodeToString(stockBeats), CurCues: hex.EncodeToString(stockAutoCues), CurLoops: hex.EncodeToString(emptyLoops),
+			})
+			req := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(raw))
+			req.RemoteAddr = "127.0.0.1:6302"
+			rec := httptest.NewRecorder()
+			srvOD.ServeHTTP(rec, req)
+			return rec
+		}
+		if rec := callOD(); rec.Code != http.StatusOK || rec.Header().Get("X-RB-Repair") != "1" {
+			t.Fatalf("OnDemand mount-time baseline Synced should still repair = (%d, %q) body=%s", rec.Code, rec.Header().Get("X-RB-Repair"), rec.Body.String())
+		}
+		// Even with Edit == 0, if Synced moved off the untouched mount-time baseline (e.g., settled after OA), reject 409.
+		odSnap.Tracks[odTr.Key].Synced = enginedb.SyncedDigest(nil, stockAutoCues, emptyLoops, 0, "", "", "")
+		if err := odSnap.Save(odDBDir); err != nil {
+			t.Fatal(err)
+		}
+		if rec := callOD(); rec.Code != http.StatusConflict || rec.Header().Get("X-RB-Status") != "not_repairable" {
+			t.Fatalf("OnDemand post-writeback Synced!=mountBaseline = (%d, %q), want (409, not_repairable)", rec.Code, rec.Header().Get("X-RB-Status"))
+		}
+		// And once #321 write-back records a non-zero Edit (even with original Synced), reject 409.
+		odSnap.Tracks[odTr.Key].Synced = enginedb.SyncedDigest(nil, nil, nil, 0, "", "", "")
+		odSnap.Tracks[odTr.Key].Edit = 1795690063
+		if err := odSnap.Save(odDBDir); err != nil {
+			t.Fatal(err)
+		}
+		if rec := callOD(); rec.Code != http.StatusConflict || rec.Header().Get("X-RB-Status") != "not_repairable" {
+			t.Fatalf("OnDemand post-writeback Edit!=0 = (%d, %q), want (409, not_repairable)", rec.Code, rec.Header().Get("X-RB-Status"))
+		}
+	})
+}

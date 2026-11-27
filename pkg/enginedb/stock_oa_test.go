@@ -161,11 +161,14 @@ func TestIsStockOverwrittenPerformanceSignatures(t *testing.T) {
 		t.Fatal("DJ named cue slot was overwritten")
 	}
 
-	// 7. DJ moved Main Cue (main != def OR main != beat0) -> NEVER touch.
+	// 7. DJ moved Main Cue (main != def OR main != beat0, including 1-sample move) -> NEVER touch.
 	for _, tc := range []struct {
 		name      string
 		main, def float64
 	}{
+		{"moved_1_sample_from_default", beat0 + 1, beat0},
+		{"moved_half_sample_from_default", beat0 + 0.5, beat0},
+		{"moved_1_sample_both_off_beat0", beat0 + 1, beat0 + 1},
 		{"moved_from_default", 220500, beat0},
 		{"moved_both_off_beat0", 220500, 220500},
 	} {

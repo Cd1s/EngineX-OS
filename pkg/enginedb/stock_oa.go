@@ -141,9 +141,11 @@ func isAutoMainAtBeat0(trailer []byte, beat0Sample float64) bool {
 	if !displayFinite(mainPos) || !displayFinite(defPos) {
 		return false
 	}
-	// Stock Engine's auto-cue sets adjustedMain == defaultMain == beat 0 of the OA grid.
-	// Any DJ cue move separates adjustedMain from defaultMain and/or moves it off beat 0.
-	return math.Abs(mainPos-defPos) <= 1.0 && math.Abs(mainPos-beat0Sample) <= 2.0
+	// Stock Engine's auto-cue copies the exact float64 beat-0 position into both
+	// adjustedMain and defaultMain (verified on live SC5000 5.3.0 & real stock-OA row:
+	// mainPos == defPos == beat0, 0.0 sample diff). Allow only float64 ULP rounding
+	// (<= 1e-6 samples) against beat0Sample; any sample move (even 1 sample) is DJ-made.
+	return mainPos == defPos && math.Abs(mainPos-beat0Sample) <= 1e-6
 }
 
 func cuesAreStockOAUnedited(cues []byte, beat0Sample float64, allowAutoMainAtBeat0 bool) bool {
