@@ -157,20 +157,23 @@ type playlistSearcher interface {
 	SearchPlaylists(context.Context, string) ([]providers.Playlist, error)
 }
 type tidalGateway struct {
-	authMu    sync.Mutex
-	refreshMu sync.Mutex // serializes rotating-token grants, including Engine requests
-	browse    *browseCache
-	searches  *searchCache
-	s         *Server
-	catalog   *providers.Deezer
-	mux       *http.ServeMux
-	mu        sync.Mutex
-	ids       map[string]int64
-	tracks    map[int64]trackRef
-	lists     map[string]playlistRef
-	albums    map[int64]albumRef
-	albumIDs  map[string]int64
-	next      int64
+	authMu     sync.Mutex
+	authLoaded bool
+	authCache  tidalAuth
+	authInfo   os.FileInfo
+	refreshMu  sync.Mutex // serializes rotating-token grants, including Engine requests
+	browse     *browseCache
+	searches   *searchCache
+	s          *Server
+	catalog    *providers.Deezer
+	mux        *http.ServeMux
+	mu         sync.Mutex
+	ids        map[string]int64
+	tracks     map[int64]trackRef
+	lists      map[string]playlistRef
+	albums     map[int64]albumRef
+	albumIDs   map[string]int64
+	next       int64
 	// ceiling is the highest track ID both copies of the ceiling reserve, under mu: no
 	// ID above it is handed out before they say so (gateway_ids.go, #335).
 	ceiling int64
@@ -532,6 +535,7 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g := &tidalGateway{browse: newBrowseCache(s.cfg.StateDir), artURLs: map[string]string{}, artCache: map[string][]byte{}, s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, albums: map[int64]albumRef{}, albumIDs: map[string]int64{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}, albumSeen: map[int64]int64{}}
 	g.searches = newSearchCache()
 	g.seedFromStreamingAccounts()
+	_ = g.realAuth()
 	s.stemsMu.Lock()
 	root := s.stemsRoot // New's start-up read of nas.json
 	s.stemsMu.Unlock()
@@ -691,7 +695,10 @@ func (t *tidalRetryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 			}
 			return nil, err
 		}
-		if attempt+1 < maxAttempts && isTransientUpstreamStatus(resp.StatusCode) {
+		// Only idempotent GET/HEAD requests may retry after receiving an HTTP
+		// response. Rotating/single-use /oauth2/token grants must never retry on
+		// 429/502/503/504 because the issuer may already have consumed the grant.
+		if idempotent && attempt+1 < maxAttempts && isTransientUpstreamStatus(resp.StatusCode) {
 			io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			continue
@@ -724,6 +731,7 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 		fail(w, 500, errors.New("invalid upstream"))
 		return
 	}
+	isRefreshGrant := r.Method == http.MethodPost && strings.HasSuffix(clean, "/oauth2/token") && r.Form.Get("grant_type") == "refresh_token"
 	transport := &tidalRetryTransport{base: g.tidalTransport(), backoff: tidalRetryBackoff}
 	proxy := &httputil.ReverseProxy{
 		Transport: transport,
@@ -734,7 +742,27 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if strings.HasSuffix(clean, "/oauth2/token") {
-				return g.tokenResponse(resp, r.Form.Get("refresh_token"), r.Form.Get("client_id"))
+				oauthErr, err := g.tokenResponse(resp, r.Form.Get("refresh_token"), r.Form.Get("client_id"))
+				if err != nil {
+					if isRefreshGrant {
+						return fmt.Errorf("%v: %w", err, errTidalTransient)
+					}
+					return err
+				}
+				if isRefreshGrant && resp.StatusCode != http.StatusOK {
+					// For rotating refresh_token grants, only a confirmed invalid_grant
+					// (400/401) indicates session revocation. Any other non-200 reply
+					// (429/5xx ambiguity, invalid_client, malformed 400, transient 401)
+					// keeps stored credentials and returns non-logout 503.
+					if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized {
+						if oauthErr == "invalid_grant" {
+							return nil
+						}
+						logNonRevocationOAuthError(resp.StatusCode, oauthErr)
+					}
+					return errTidalTransient
+				}
+				return nil
 			}
 			// Handle session/token 401s without leaking transient Wi-Fi refresh
 			// failures as 401: Engine's TidalAPI::handleErrors turns 401 + failed
@@ -763,6 +791,20 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 						if err != nil {
 							return errors.New("could not retry TIDAL request")
 						}
+						if next.StatusCode == http.StatusUnauthorized {
+							nb, nextReadErr := io.ReadAll(io.LimitReader(next.Body, 65537))
+							next.Body.Close()
+							if nextReadErr != nil || len(nb) > 65536 {
+								return errTidalTransient
+							}
+							next.Body = io.NopCloser(bytes.NewReader(nb))
+							if isTidalSessionLogout401(nb) {
+								// Replay after a fresh rotation still returned a
+								// session 401: return non-logout 503 without looping
+								// or deleting the newly stored token pair.
+								return errTidalTransient
+							}
+						}
 						*resp = *next
 						return nil
 					}
@@ -774,8 +816,7 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			if errors.Is(err, errTidalTransient) {
-				log.Print("stream-sync: TIDAL refresh temporarily unavailable, keeping session")
+			if errors.Is(err, errTidalTransient) || isRefreshGrant {
 				tidalTemporarilyUnavailable(w)
 				return
 			}
