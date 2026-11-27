@@ -108,7 +108,7 @@ func boardCapabilities(board string) uiCapabilities {
 		AutoLoopKnob:  !isMixstream,
 		BeatJumpPads:  isMixstream,
 		TrackSkipKeys: !noTrackSkipKeyBoards[board],
-		StemsEq:       !isPlayer && board != "PRIME4G2",
+		StemsEq:       !isPlayer,
 		LineInAux:     board == "SCLIVE4",
 		Gen2:          dataBundleBoards[board],
 		RemoteStems:   !isAZ04,

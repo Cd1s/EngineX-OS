@@ -258,7 +258,7 @@ for (let ch = 1; ch <= 4; ch++) assert.equal(stripModes[ch].index, 0, 'late scPl
 
 // 2. Mixer consoles without native PX selector (PRIME 2, PRIME GO, Mixstream, SC LIVE 4, PRIME 4+, AZ04).
 // Color FX Style follows the hook's channel-knob marker only: the armhf all-in-ones (5.3.0 and Gen-2) have it, AZ04 does not.
-for (const [board, hasStems, colorFx] of [['JC16', true, true], ['JP11', true, true], ['NH08', true, true], ['JP21', true, true], ['JC11S', true, true], ['JP24', false, false], ['RMZ2', true, false]]) {{
+for (const [board, hasStems, colorFx] of [['JC16', true, true], ['JP11', true, true], ['NH08', true, true], ['JP21', true, true], ['JC11S', true, true], ['JP24', true, false], ['RMZ2', true, false]]) {{
     resetUnit(board, {{isPlayer: false, hasStemsLevel: hasStems, hasNHFx: board === 'NH08'}});
     scApply({{
         player: false, fxSelectorAvailable: false, colorFxAvailable: colorFx,
@@ -486,7 +486,7 @@ stemmed[2].state = true;
 stemmed[2].stateChanged.emit();
 assert.equal(stripModes[2].index, 0);
 
-// #176: board without Stems EQ (e.g. JP24 hasStemsLevel=false) never writes ChannelStrip/Mode=1.
+// #176: hardware without Stems EQ (hasStemsLevel=false) never writes ChannelStrip/Mode=1.
 Config.device.name = 'JP24';
 Config.audio.hasStemsLevel = false;
 stemmed[4].state = true;
@@ -496,7 +496,7 @@ scApply({{stemsEqMode: true}});
 stemmed[4].stateChanged.emit();
 songLoaded[4].state = true;
 songLoaded[4].stateChanged.emit();
-assert.equal(stripModes[4].index, 0, '#176 JP24 stays EQ');
+assert.equal(stripModes[4].index, 0, '#176 stays EQ when hasStemsLevel is false');
 assert.equal(stripModes[4].writes, w4);
 
 // Initial sync on first UI load when a stemmed track is already loaded on Deck 4.
