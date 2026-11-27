@@ -218,10 +218,7 @@ static void test_dsp(const char *filename) {
     unsigned active = 0;
     for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
         const uint32_t *at = (const uint32_t *)(image + dsp_hooks[i].offset);
-        if (!dsp_site_active(i)) { // event layouts unverified: stock
-            assert(!memcmp(at, stock + dsp_hooks[i].offset, 16) && (i >= DSP_MIX && i <= DSP_MOTOR_RAMP_TIME));
-            continue;
-        }
+        assert(dsp_site_active(i));
         active++;
         assert(at[0] == 0x58000050 && at[1] == 0xd61f0200 && quad(&at[2]) == (uint64_t)(uintptr_t)dsp_hooks[i].hook);
         const uint32_t *orig = dsp_originals[i], *old = (const uint32_t *)(stock + dsp_hooks[i].offset);
@@ -240,14 +237,99 @@ static void test_dsp(const char *filename) {
             assert(!memcmp(orig, old, 16) && orig[4] == 0x58000050 && orig[5] == 0xd61f0200 && quad(&orig[6]) == back);
         }
     }
-    assert(active == 14);
+    assert(active == 21);
     // the GOT slot the master stub loads is the one the stock adrp/ldr pair addressed
     assert(dsp_originals[DSP_MASTER] && quad(&((const uint32_t *)dsp_originals[DSP_MASTER])[6]) == base + 0x2db8860);
     // handler owner: x5 = +24, x3 = +40 (this = owner + (adjustment >> 1))
     uint64_t handler[8] = {0}; handler[3] = 0x1000; handler[5] = 6;
     assert(dsp_bound_owner(handler) == (void *)0x1003);
     munmap(image, len); free(stock);
-    puts("AZ04 DSP hooks: 14 sites redirected (7 event guards stay stock), stubs for AutoGate/sweep/master rewritten, changed prologue refused: PASS");
+    puts("AZ04 DSP hooks: 21 sites redirected, stubs for AutoGate/sweep/master rewritten, changed prologue refused: PASS");
+}
+
+static unsigned guard_event_calls;
+static void *guard_last_handler;
+static const void *guard_last_event;
+static void count_dsp_event(void *h, const void *e) {
+    guard_event_calls++;
+    guard_last_handler = h;
+    guard_last_event = e;
+}
+
+static void test_dsp_event_guards(void) {
+    struct {
+        unsigned slot;
+        void (*hook)(void *, const void *);
+        size_t off64, off32;
+        int is_double;
+    } cases[] = {
+        {DSP_MIX, hook_fx_mix, 0x18, 0x0c, 0},
+        {DSP_PARAMETER, hook_fx_parameter, 0x30, 0x20, 0},
+        {DSP_NUDGE, hook_playback_nudge, 0x10, 0x08, 1},
+        {DSP_TEMPO, hook_playback_tempo, 0x10, 0x08, 1},
+        {DSP_JUMP, hook_time_stretch_jump, 0x10, 0x08, 1},
+        {DSP_RAMP_TIME, hook_ramp_time, 0x10, 0x08, 1},
+        {DSP_MOTOR_RAMP_TIME, hook_motor_ramp_time, 0x10, 0x08, 1},
+    };
+    unsigned char handler[64] = {0};
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        unsigned slot = cases[i].slot;
+        dsp_originals[slot] = (void *)count_dsp_event;
+        unsigned char ev[64];
+        memset(ev, 0, sizeof ev);
+        guard_event_calls = 0;
+
+        // NULL event must be dropped.
+        cases[i].hook(handler, NULL);
+        assert(guard_event_calls == 0);
+
+        // Finite 64-bit value passes even when the old 32-bit offset holds NaN.
+        if (cases[i].is_double) {
+            double ok = 1.25, bad = (double)NAN;
+            memcpy(ev + cases[i].off64, &ok, sizeof ok);
+            memcpy(ev + cases[i].off32, &bad, sizeof bad);
+        } else {
+            float ok = 0.5f, bad = (float)NAN;
+            memcpy(ev + cases[i].off64, &ok, sizeof ok);
+            memcpy(ev + cases[i].off32, &bad, sizeof bad);
+        }
+        cases[i].hook(handler, ev);
+        assert(guard_event_calls == 1 && guard_last_handler == handler && guard_last_event == ev);
+
+        // NaN, +Inf, -Inf at the 64-bit offset must all be rejected.
+        double bad64[] = {(double)NAN, (double)INFINITY, -(double)INFINITY};
+        for (size_t b = 0; b < 3; b++) {
+            memset(ev, 0, sizeof ev);
+            if (cases[i].is_double) {
+                memcpy(ev + cases[i].off64, &bad64[b], sizeof bad64[b]);
+            } else {
+                float f = (float)bad64[b];
+                memcpy(ev + cases[i].off64, &f, sizeof f);
+            }
+            cases[i].hook(handler, ev);
+            assert(guard_event_calls == 1);
+        }
+
+        // Domain-specific rejections / bounds at 64-bit double offset.
+        if (slot == DSP_TEMPO) {
+            double vals[] = {0.0, -1.0};
+            for (size_t k = 0; k < 2; k++) {
+                memcpy(ev + cases[i].off64, &vals[k], sizeof vals[k]);
+                cases[i].hook(handler, ev);
+                assert(guard_event_calls == 1);
+            }
+        } else if (slot == DSP_RAMP_TIME || slot == DSP_MOTOR_RAMP_TIME) {
+            double neg = -0.1, zero = 0.0;
+            memcpy(ev + cases[i].off64, &neg, sizeof neg);
+            cases[i].hook(handler, ev);
+            assert(guard_event_calls == 1);
+            memcpy(ev + cases[i].off64, &zero, sizeof zero);
+            cases[i].hook(handler, ev);
+            assert(guard_event_calls == 2);
+        }
+    }
+    memset(dsp_originals, 0, sizeof dsp_originals);
+    puts("AZ04 DSP event guards: all 7 handlers validate verified 64-bit struct offsets (NaN/Inf/bounds rejected): PASS");
 }
 
 // The OfflineAnalyzer .perf replay hook: the build identifier and the entry's prologue.
@@ -568,6 +650,7 @@ int main(int argc, char **argv) {
     test_led();
     test_led_replay_on_engine_thread();
     test_stems_processor_fallback();
+    test_dsp_event_guards();
     for (int i = 1; i < argc; i++) { test_engine(argv[i]); test_rec_stream(argv[i]); test_sqlite(argv[i]); test_dsp(argv[i]); test_bt_send(argv[i]); test_shadow_follow_sites(argv[i]); }
     const char *oa = getenv("AZ04_OFFLINE_ANALYZER");
     if (oa) test_offline_analyzer(oa);

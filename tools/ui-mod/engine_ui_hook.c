@@ -1224,13 +1224,21 @@ static void dsp_finite_event(unsigned slot, size_t offset, int is_double,
     ((dsp_event_fn)dsp_originals[slot])(handler, event);
 }
 
-static void hook_fx_mix(void *h, const void *e) { dsp_finite_event(DSP_MIX, 0x0c, 0, h, e); }
-static void hook_fx_parameter(void *h, const void *e) { dsp_finite_event(DSP_PARAMETER, 0x20, 0, h, e); }
-static void hook_playback_nudge(void *h, const void *e) { dsp_finite_event(DSP_NUDGE, 0x08, 1, h, e); }
-static void hook_playback_tempo(void *h, const void *e) { dsp_finite_event(DSP_TEMPO, 0x08, 1, h, e); }
-static void hook_time_stretch_jump(void *h, const void *e) { dsp_finite_event(DSP_JUMP, 0x08, 1, h, e); }
-static void hook_ramp_time(void *h, const void *e) { dsp_finite_event(DSP_RAMP_TIME, 0x08, 1, h, e); }
-static void hook_motor_ramp_time(void *h, const void *e) { dsp_finite_event(DSP_MOTOR_RAMP_TIME, 0x08, 1, h, e); }
+#if defined(__aarch64__)
+// Verified against AZ04 5.3.0 Engine (04033591...): Mix 0xf30444 [x1,#24],
+// Parameter 0xf303b0 [x3,#48], Nudge 0x17a1ec0 / Tempo 0x17bbcec /
+// Jump 0x17adba0 / RampTime 0x17a2a48 / MotorRampTime 0xeace40 [x1,#16].
+enum { DSP_MIX_OFF = 0x18, DSP_PARAM_OFF = 0x30, DSP_DOUBLE_OFF = 0x10 };
+#else
+enum { DSP_MIX_OFF = 0x0c, DSP_PARAM_OFF = 0x20, DSP_DOUBLE_OFF = 0x08 };
+#endif
+static void hook_fx_mix(void *h, const void *e) { dsp_finite_event(DSP_MIX, DSP_MIX_OFF, 0, h, e); }
+static void hook_fx_parameter(void *h, const void *e) { dsp_finite_event(DSP_PARAMETER, DSP_PARAM_OFF, 0, h, e); }
+static void hook_playback_nudge(void *h, const void *e) { dsp_finite_event(DSP_NUDGE, DSP_DOUBLE_OFF, 1, h, e); }
+static void hook_playback_tempo(void *h, const void *e) { dsp_finite_event(DSP_TEMPO, DSP_DOUBLE_OFF, 1, h, e); }
+static void hook_time_stretch_jump(void *h, const void *e) { dsp_finite_event(DSP_JUMP, DSP_DOUBLE_OFF, 1, h, e); }
+static void hook_ramp_time(void *h, const void *e) { dsp_finite_event(DSP_RAMP_TIME, DSP_DOUBLE_OFF, 1, h, e); }
+static void hook_motor_ramp_time(void *h, const void *e) { dsp_finite_event(DSP_MOTOR_RAMP_TIME, DSP_DOUBLE_OFF, 1, h, e); }
 
 static void dsp_sampler_event(unsigned slot, uint32_t kind, void *handler, const void *event) {
     sc_dsp_sampler_mark_event(dsp_bound_owner(handler), kind);
@@ -1917,10 +1925,8 @@ static uintptr_t a64_branch_target(uintptr_t at);
 static void *function_trampoline(uintptr_t entry, size_t page);
 static void redirect_function(int feature, uintptr_t entry, const void *handler, size_t page);
 
-// The event guards (Mix, Parameter, Nudge, Tempo, Jump, RampTime, MotorRampTime) read
-// fields of the event at 32-bit layout offsets; the AZ04 event layouts are not
-// verified (std::string and pointer members move them), so those sites stay stock.
-static int dsp_site_active(unsigned slot) { return slot < DSP_MIX || slot > DSP_MOTOR_RAMP_TIME; }
+// All 21 AZ04 DSP guard and transition sites (including the 7 event guards) are verified and active.
+static int dsp_site_active(unsigned slot) { return slot < DSP_HOOK_COUNT; }
 
 // Builds the stub that runs the displaced prologue of slot i, or NULL if the
 // bytes at its site are not the verified ones.
