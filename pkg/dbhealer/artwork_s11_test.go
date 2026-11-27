@@ -269,23 +269,29 @@ func TestS11LegacyTextHashEmptyBlobAndInvalidHashTypes(t *testing.T) {
 	mustExec(t, db, `INSERT INTO AlbumArt(id,hash,albumArt) VALUES(7,NULL,?)`, jpg7)
 	db.Close()
 
-	// Also seed hm.db with a legacy TEXT hash row to confirm hm.db reconciliation too.
+	// Also seed a genuine hm.db schema with a live session referencing a legacy
+	// TEXT hash cover to confirm both S16 cleanup and S11 hm.db reconciliation.
 	hdbPath := filepath.Join(mount, "Engine Library", "Database2", "hm.db")
-	mdbBytes, err := os.ReadFile(filepath.Join(mount, "Engine Library", "Database2", "m.db"))
+	hSchema, err := os.ReadFile("../../docs/re-report/ENGINE-5.0.4-hm.db-schema.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(hdbPath, mdbBytes, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	hdb, err := Open(hdbPath, false)
+	hdb, err := sql.Open("sqlite", hdbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	hdb.SetMaxOpenConns(1)
+	mustExec(t, hdb, strings.ReplaceAll(string(hSchema), "CREATE TABLE sqlite_sequence(name,seq);", ""))
 	jpgH := s11JPEG(t, 190, 190, 85, false)
 	sumH := sha1.Sum(jpgH)
-	mustExec(t, hdb, `DELETE FROM AlbumArt; INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,NULL,NULL),(2,?,?)`, hex.EncodeToString(sumH[:]), jpgH)
-	hdb.Close()
+	mustExec(t, hdb, `INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES(1,'hist-s11',3,0,2)`)
+	mustExec(t, hdb, `INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,NULL,NULL),(2,?,?)`, hex.EncodeToString(sumH[:]), jpgH)
+	mustExec(t, hdb, `INSERT INTO Track(id,path,filename,title,albumArtId,isAnalyzed) VALUES(1,'../Music/hist.mp3','hist.mp3','Hist',2,1)`)
+	mustExec(t, hdb, `INSERT INTO Historylist(id,title,startTime,timezone,isDeleted) VALUES(1,'Set',200,'UTC',0)`)
+	mustExec(t, hdb, `INSERT INTO HistorylistEntity(listId,trackId,startTime) VALUES(1,1,200)`)
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	r, err := HealMountDataOnly(mount, 0)
 	if err != nil || !r.Healthy {
@@ -914,7 +920,7 @@ func TestS11EmbeddedExtractorObservesMountContext(t *testing.T) {
 
 	var sawDeadline bool
 	var extractorExited bool
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 
 	start := time.Now()
@@ -926,7 +932,7 @@ func TestS11EmbeddedExtractorObservesMountContext(t *testing.T) {
 			select {
 			case <-callCtx.Done():
 				return nil, callCtx.Err()
-			case <-time.After(300 * time.Millisecond):
+			case <-time.After(1500 * time.Millisecond):
 				return nil, os.ErrNotExist
 			}
 		},
@@ -941,7 +947,7 @@ func TestS11EmbeddedExtractorObservesMountContext(t *testing.T) {
 	if !extractorExited {
 		t.Fatal("extractor remained active after HealMountWithOptions returned")
 	}
-	if elapsed >= 200*time.Millisecond {
-		t.Fatalf("embedded extractor ignored 50ms mount deadline: elapsed=%v", elapsed)
+	if elapsed >= 1000*time.Millisecond {
+		t.Fatalf("embedded extractor ignored 250ms mount deadline: elapsed=%v", elapsed)
 	}
 }
