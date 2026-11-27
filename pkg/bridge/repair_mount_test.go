@@ -1341,3 +1341,110 @@ func TestOnDemandMountPendingSaveErrorNotSwallowed(t *testing.T) {
 		})
 	}
 }
+
+// Fails at runtime on b234d361 (reviewer's round-6 BLOCK): when inline building stops
+// before the first row so it enters resetRemainingToImportStub, and the commit context
+// expires at cut("repair next saved"), the rolled-back stub-reset rows MUST stay in the
+// rollback work list so Pending.Perf and Background are recorded durably (and next insert
+// repairs them while preserving DJ edits).
+func TestReviewerLinkR6CommitExpiry(t *testing.T) {
+	t.Run("stub_reset_rollback", func(t *testing.T) {
+		mount := repairStick(t, 3)
+		mountNow(t, mount, MountOptions{OnDemand: true})
+		origSnap, err := rbstate.Load(dbDir(mount))
+		if err != nil {
+			t.Fatal(err)
+		}
+		origCommit := origSnap.Commit
+		tracks := sortedTracksByID(origSnap)
+
+		const beat0 = 11391.4248046875
+		stockBeats := buildTestStockOABeatsMount(t, 44100, 13707967, beat0, 136.0, 704)
+		qcAutoBeat0 := buildTestQuickCuesMount(t, -1, "", beat0, 1, beat0)
+		qcDJHot := buildTestQuickCuesMount(t, 220500, "DJKeep", beat0, 1, beat0)
+		emptyLoops := buildTestEmptyLoopsMount()
+
+		db := openTestMDBRW(t, mount)
+		if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+			[]byte{1}, []byte{1}, stockBeats, qcAutoBeat0, emptyLoops, tracks[0].EngineID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+			[]byte{1}, []byte{1}, stockBeats, qcDJHot, emptyLoops, tracks[1].EngineID); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+
+		oldBudget, oldHook, oldCut := insertBudget, repairBeforeBuild, cut
+		insertBudget = 1500 * time.Millisecond
+		// Stop inline building before the first row so it enters resetRemainingToImportStub.
+		repairBeforeBuild = func(_ context.Context, _ string) error {
+			return errWindowDeadline
+		}
+		paused := false
+		cut = func(step string) {
+			if step == "repair next saved" && !paused {
+				paused = true
+				time.Sleep(1600 * time.Millisecond)
+			}
+		}
+		defer func() { insertBudget, repairBeforeBuild, cut = oldBudget, oldHook, oldCut }()
+
+		bgStarted := false
+		res := mountNow(t, mount, MountOptions{
+			OnDemand:        true,
+			Deadline:        time.Now().Add(17 * time.Second),
+			StartBackground: func() error { bgStarted = true; return nil },
+		})
+		if !paused {
+			t.Fatal(`cut("repair next saved") was not hit`)
+		}
+		if res.Bypassed || res.Applied != 0 || !bgStarted || !res.Background || res.Pending.Perf != 1 {
+			t.Fatalf("stub-reset rollback mount = %+v (bgStarted=%v), want Applied=0 Background=true Pending.Perf=1", res, bgStarted)
+		}
+
+		// SQLite must have rolled back to the original stock-OA row, and .next must be gone.
+		bAfter, qAfter, _, _ := readRowBlobs(t, mount, tracks[0].EngineID)
+		if !bytes.Equal(bAfter, stockBeats) || !bytes.Equal(qAfter, qcAutoBeat0) {
+			t.Fatal("track[0] SQLite row was not rolled back after stub-reset commit timeout")
+		}
+		if _, err := os.Stat(filepath.Join(dbDir(mount), rbstate.SnapshotName+".next")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf(".next file left behind after stub-reset rollback: err=%v", err)
+		}
+
+		// On-disk snapshot must keep original Commit + nil Written + PerfNone and durably record Pending.Perf=1.
+		afterSnap, err := rbstate.Load(dbDir(mount))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if afterSnap.Commit != origCommit {
+			t.Fatalf("snapshot Commit after stub-reset rollback = %d, want last committed %d", afterSnap.Commit, origCommit)
+		}
+		tr0 := afterSnap.Tracks[tracks[0].Key]
+		if tr0 == nil || len(tr0.Written) != 0 || tr0.Perf != rbstate.PerfNone || len(tr0.Built.ANLZ) != 0 {
+			t.Fatalf("track[0] snapshot kept uncommitted provenance after stub-reset rollback: %+v", tr0)
+		}
+		if afterSnap.Pending.Perf != 1 {
+			t.Fatalf("afterSnap.Pending.Perf = %d, want 1", afterSnap.Pending.Perf)
+		}
+
+		// Reinsertion with normal budget repairs track[0], preserves track[1] DJ hot cue, and 3rd insert bypasses.
+		insertBudget, repairBeforeBuild, cut = oldBudget, oldHook, oldCut
+		res2 := mountNow(t, mount, MountOptions{OnDemand: true, Deadline: time.Now().Add(17 * time.Second)})
+		if res2.Bypassed || res2.Applied != 1 || res2.Background || !res2.Pending.None() {
+			t.Fatalf("reinsert after stub-reset rollback = %+v, want Applied=1 Background=false Pending.None", res2)
+		}
+		bRep, qRep, _, _ := readRowBlobs(t, mount, tracks[0].EngineID)
+		if len(bRep) == 0 || bytes.Equal(bRep, stockBeats) || bytes.Equal(qRep, qcAutoBeat0) {
+			t.Fatal("track[0] was not repaired on reinsert after stub-reset rollback")
+		}
+		b1, q1, _, _ := readRowBlobs(t, mount, tracks[1].EngineID)
+		if !bytes.Equal(b1, stockBeats) || !bytes.Equal(q1, qcDJHot) {
+			t.Fatal("track[1] DJ hot cue was modified during recovery")
+		}
+		res3 := mountNow(t, mount, MountOptions{OnDemand: true, Deadline: time.Now().Add(17 * time.Second)})
+		if !res3.Bypassed || res3.Applied != 0 {
+			t.Fatalf("3rd insert = %+v, want Bypassed=true Applied=0", res3)
+		}
+	})
+}

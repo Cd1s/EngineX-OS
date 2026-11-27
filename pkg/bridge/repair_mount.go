@@ -552,6 +552,12 @@ func repairStockOverwrittenAtMount(parentCtx, ctx context.Context, mount, dir st
 		return 0, head.Pending, nil
 	}
 
+	allWork := make([]stockRepairMatch, 0, len(built)+len(remaining))
+	for _, item := range built {
+		allWork = append(allWork, item.match)
+	}
+	allWork = append(allWork, remaining...)
+
 	var lib *enginedb.Library
 	var b *enginedb.Batch
 	txDirty := false
@@ -569,12 +575,7 @@ func repairStockOverwrittenAtMount(parentCtx, ctx context.Context, mount, dir st
 
 	deferOutstanding := func(hardDeadline bool) (int, rbstate.Pending, error) {
 		closeTx()
-		outstanding := make([]stockRepairMatch, 0, len(built)+len(remaining))
-		for _, item := range built {
-			outstanding = append(outstanding, item.match)
-		}
-		outstanding = append(outstanding, remaining...)
-		if len(outstanding) == 0 {
+		if len(allWork) == 0 {
 			return 0, head.Pending, nil
 		}
 		baseSnap := snap
@@ -588,7 +589,7 @@ func repairStockOverwrittenAtMount(parentCtx, ctx context.Context, mount, dir st
 			}
 			baseSnap = reloaded
 		}
-		markRemainingForBackground(baseSnap, outstanding)
+		markRemainingForBackground(baseSnap, allWork)
 		if saveErr := saveDurablePending(parentCtx, dir, baseSnap, st); saveErr != nil {
 			if parentCtx.Err() != nil {
 				return 0, head.Pending, parentCtx.Err()
@@ -600,7 +601,7 @@ func repairStockOverwrittenAtMount(parentCtx, ctx context.Context, mount, dir st
 			return 0, head.Pending, fmt.Errorf("%w: %w", errPendingSave, saveErr)
 		}
 		startBG()
-		st.done("repair", "0 inline, %d stock-overwritten rows recorded durably for background/next insert", len(outstanding))
+		st.done("repair", "0 inline, %d stock-overwritten rows recorded durably for background/next insert", len(allWork))
 		if hardDeadline {
 			return 0, baseSnap.Pending, errWindowDeadline
 		}
