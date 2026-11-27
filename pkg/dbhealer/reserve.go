@@ -141,6 +141,9 @@ func NormalizeDatabase2(dir string) (fixed []string, err error) {
 		if strings.HasPrefix(filepath.Base(p), ".") {
 			continue
 		}
+		if w, we := writable(p); we == nil && !w {
+			continue
+		}
 		ok, e := NormalizeReserve(p)
 		if ok {
 			fixed = append(fixed, filepath.Base(p))

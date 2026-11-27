@@ -223,8 +223,8 @@ func cleanHistoryOrphansTx(ctx context.Context, tx *sql.Tx) (int, error) {
 		return 0, err
 	}
 	trackPK := selectColumn(trackCols, "id")
-	if trackPK == "" {
-		return 0, fmt.Errorf("unsupported Track schema: missing id column")
+	if trackPK == "" || selectColumn(trackCols, "albumArtId") == "" || selectColumn(trackCols, "path") == "" {
+		return 0, fmt.Errorf("unsupported Track schema: missing required column")
 	}
 	perfCols, err := columns(ctx, tx, "PerformanceData")
 	if err != nil {
@@ -238,8 +238,26 @@ func cleanHistoryOrphansTx(ctx context.Context, tx *sql.Tx) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if selectColumn(artCols, "id") == "" {
-		return 0, fmt.Errorf("unsupported AlbumArt schema: missing id column")
+	if selectColumn(artCols, "id") == "" || selectColumn(artCols, "hash") == "" || selectColumn(artCols, "albumArt") == "" {
+		return 0, fmt.Errorf("unsupported AlbumArt schema: missing required column")
+	}
+	plEntityCols, err := columns(ctx, tx, "PlaylistEntity")
+	if err != nil {
+		return 0, err
+	}
+	if selectColumn(plEntityCols, "trackId") == "" {
+		return 0, fmt.Errorf("unsupported PlaylistEntity schema: missing trackId column")
+	}
+	if hasPrep, err := mainTableExists(ctx, tx, "PreparelistEntity"); err != nil {
+		return 0, err
+	} else if hasPrep {
+		prepCols, err := columns(ctx, tx, "PreparelistEntity")
+		if err != nil {
+			return 0, err
+		}
+		if selectColumn(prepCols, "trackId") == "" {
+			return 0, fmt.Errorf("unsupported PreparelistEntity schema: missing trackId column")
+		}
 	}
 
 	softDeleted := selectColumn(sessions, "isDeleted")

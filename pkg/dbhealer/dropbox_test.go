@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1075,4 +1076,198 @@ func TestHealMountURIOnlyNFDDropboxSingleUnitNoStarvation(t *testing.T) {
 			t.Fatalf("track not normalized+localized: path=%+q tagged=%v", path, isTagged(t, db))
 		}
 	})
+}
+
+func TestHealMountDataOnlyPreservesWriteRejectionWhenRecoveryCanceled(t *testing.T) {
+	suffix := time.Now().UnixNano()
+	rejectFn := fmt.Sprintf("dbhealer_write_reject_rec_%d", suffix)
+	cancelFn := fmt.Sprintf("dbhealer_cancel_rec_%d", suffix)
+	var cancelCtx func()
+	if err := sqlite.RegisterScalarFunction(rejectFn, 0, func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
+		return int64(1), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlite.RegisterScalarFunction(cancelFn, 0, func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
+		if cancelCtx != nil {
+			cancelCtx()
+		}
+		return int64(1), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	testlibrary.ExportDrive(t, root)
+	dbPath := filepath.Join(root, "Engine Library", "Database2", "m.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE Track SET path='../Music/Track001.wav', filename='Track001.wav', streamingSource='Dropbox', uri='streaming://Dropbox/Track/1', streamingFlags=5 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO AlbumArt(id,hash,albumArt) VALUES(99, X'0001', X'')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER reject_dropbox_update BEFORE UPDATE OF streamingSource ON Track WHEN OLD.id=1 BEGIN SELECT ` + rejectFn + `(); SELECT RAISE(ABORT,'simulated write rejected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER cancel_during_recovery BEFORE UPDATE OF albumArt ON AlbumArt WHEN OLD.id=99 BEGIN SELECT ` + cancelFn + `(); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cancelCtx = cancel
+
+	rep, err := HealMountDataOnlyContext(ctx, root, 0)
+	if err == nil || !strings.Contains(err.Error(), "simulated write rejected") {
+		t.Fatalf("expected original write rejection error, got rep=%+v err=%v", rep, err)
+	}
+	if rep.Healthy {
+		t.Fatalf("rejected write with canceled recovery reported Healthy=true: %+v", rep)
+	}
+}
+
+func TestHealMountDataOnlyAlreadyCanceledValidatesSchemaAndRepairsIdentity(t *testing.T) {
+	t.Run("future_schema_rejected", func(t *testing.T) {
+		_, root, db := testlibrary.Create(t)
+		if _, err := db.Exec(`UPDATE Information SET schemaVersionMajor=4`); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		rep, err := HealMountDataOnlyContext(ctx, root, 0)
+		if err == nil || rep.Healthy {
+			t.Fatalf("already-canceled context accepted schema 4: rep=%+v err=%v", rep, err)
+		}
+	})
+
+	t.Run("bad_identity_repaired_without_track_pass", func(t *testing.T) {
+		_, root, db := testlibrary.Create(t)
+		full := filepath.Join(root, "Music", "track.mp3")
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("audio"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE Information SET id=99`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes,streamingSource,uri,streamingFlags,isAnalyzed) VALUES(1,'../Music/track.mp3','track.mp3',5,'Dropbox','streaming://Dropbox/Track/1',5,1)`); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		rep, err := HealMountDataOnlyContext(ctx, root, 0)
+		if err != nil || !rep.Healthy {
+			t.Fatalf("already-canceled context failed identity check: rep=%+v err=%v", rep, err)
+		}
+		if rep.DropboxLocalized != 0 {
+			t.Fatalf("already-canceled context ran Dropbox track pass: %+v", rep)
+		}
+		check, err := sql.Open("sqlite", filepath.Join(root, "Engine Library", "Database2", "m.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer check.Close()
+		var infoID int
+		if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
+			t.Fatal(err)
+		}
+		if infoID != 1 {
+			t.Fatalf("Information.id=%d, want 1 under already-canceled context", infoID)
+		}
+	})
+}
+
+func TestHealMountDataOnlyDoesNotOverrunDeadlineWhenLockedAfterBatch(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	full := filepath.Join(root, "Music", "track1.wav")
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes,streamingSource,uri,streamingFlags,isAnalyzed) VALUES(1,'../Music/track1.wav','track1.wav',5,'Dropbox','streaming://Dropbox/Track/1',5,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`WITH RECURSIVE n(i) AS (VALUES(2) UNION ALL SELECT i+1 FROM n WHERE i<=1025)
+		INSERT INTO Track(id,path,isAnalyzed) SELECT i,printf('../Music/%d.wav',i),1 FROM n`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE Information SET id=99`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	dbPath := filepath.Join(root, "Engine Library", "Database2", "m.db")
+	locker, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locker.SetMaxOpenConns(1)
+	defer locker.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+
+	relDone := make(chan struct{})
+	relOnce := false
+	localizeDropboxTrackBatch = func() {
+		if relOnce {
+			return
+		}
+		relOnce = true
+		if _, lerr := locker.Exec("BEGIN EXCLUSIVE"); lerr != nil {
+			close(relDone)
+			t.Errorf("BEGIN EXCLUSIVE: %v", lerr)
+			return
+		}
+		go func() {
+			defer close(relDone)
+			wait := time.Until(deadline) + 180*time.Millisecond
+			if wait > 0 {
+				time.Sleep(wait)
+			}
+			_, _ = locker.Exec("ROLLBACK")
+		}()
+	}
+	t.Cleanup(func() {
+		localizeDropboxTrackBatch = nil
+		if relOnce {
+			<-relDone
+		}
+	})
+
+	rep, err := HealMountDataOnlyContext(ctx, root, 0)
+	overrun := time.Since(deadline)
+	if err != nil || !rep.Healthy {
+		t.Fatalf("locked post-batch mount heal: rep=%+v err=%v", rep, err)
+	}
+	if overrun >= 120*time.Millisecond {
+		t.Fatalf("mount heal overran deadline by %v while deferred identity waited on lock", overrun)
+	}
+
+	check, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var infoID int
+	if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
+		t.Fatal(err)
+	}
+	if infoID != 1 {
+		t.Fatalf("Information.id=%d, want 1", infoID)
+	}
 }

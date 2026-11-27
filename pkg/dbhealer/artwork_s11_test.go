@@ -918,15 +918,15 @@ func TestS11EmbeddedExtractorObservesMountContext(t *testing.T) {
 	mustExec(t, db, `INSERT INTO Track(id,path,albumArtId,isAnalyzed) VALUES(1,'../Music/slow.mp3',2,1)`)
 	db.Close()
 
-	var sawDeadline bool
-	var extractorExited bool
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	var entered, sawDeadline, extractorExited bool
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
+	mountDeadline, _ := ctx.Deadline()
 
-	start := time.Now()
 	r, err := HealMountWithOptions(ctx, mount, MountOptions{
 		DataOnly: true,
 		ExtractEmbeddedArtworkContext: func(callCtx context.Context, _ string) ([]byte, error) {
+			entered = true
 			defer func() { extractorExited = true }()
 			_, sawDeadline = callCtx.Deadline()
 			select {
@@ -937,9 +937,12 @@ func TestS11EmbeddedExtractorObservesMountContext(t *testing.T) {
 			}
 		},
 	})
-	elapsed := time.Since(start)
+	afterDeadline := time.Since(mountDeadline)
 	if err != nil || !r.Healthy {
 		t.Fatalf("HealMountWithOptions: %+v err=%v", r, err)
+	}
+	if !entered {
+		t.Fatal("extractor was never called under 300ms mount budget")
 	}
 	if !sawDeadline {
 		t.Fatal("extractor did not receive mount context deadline")
@@ -947,7 +950,7 @@ func TestS11EmbeddedExtractorObservesMountContext(t *testing.T) {
 	if !extractorExited {
 		t.Fatal("extractor remained active after HealMountWithOptions returned")
 	}
-	if elapsed >= 1000*time.Millisecond {
-		t.Fatalf("embedded extractor ignored 250ms mount deadline: elapsed=%v", elapsed)
+	if afterDeadline >= 150*time.Millisecond {
+		t.Fatalf("embedded extractor overran mount deadline by %v (>= 150ms)", afterDeadline)
 	}
 }

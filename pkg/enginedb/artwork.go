@@ -219,6 +219,12 @@ func (c *ctxReadSeeker) Seek(offset int64, whence int) (int64, error) {
 	return c.rs.Seek(offset, whence)
 }
 
+// ExtractEmbeddedArtwork extracts embedded cover artwork from an audio file (MP3 ID3v2 APIC,
+// FLAC METADATA_BLOCK_PICTURE, or MP4/M4A covr->data atoms), verifying PNG or JPEG headers.
+func ExtractEmbeddedArtwork(audioPath string) ([]byte, error) {
+	return ExtractEmbeddedArtworkContext(context.Background(), audioPath)
+}
+
 // ExtractEmbeddedArtworkContext extracts embedded cover artwork from audioPath while
 // honoring ctx cancellation before opening and during bounded tag/atom reads.
 func ExtractEmbeddedArtworkContext(ctx context.Context, audioPath string) ([]byte, error) {

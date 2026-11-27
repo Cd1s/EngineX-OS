@@ -162,12 +162,18 @@ func appendWarningUnique(r *Report, msg string) {
 //     IFNULL(AlbumArt.albumArt, GET_ALBUM_ART(AlbumArt.hash)) reaches external Artwork files;
 //   - nulls dangling Track.albumArtId references without altering Track.albumArtSourceHash.
 func healArtworkMetadata(ctx context.Context, tx *sql.Tx, r *Report) error {
-	emptyRes, err := tx.ExecContext(ctx, "UPDATE AlbumArt SET albumArt=NULL WHERE albumArt IS NOT NULL AND length(albumArt)=0")
-	if err != nil {
+	var hasEmptyBlob int
+	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM AlbumArt WHERE albumArt IS NOT NULL AND length(albumArt)=0)").Scan(&hasEmptyBlob); err != nil {
 		return err
 	}
-	if n, err := emptyRes.RowsAffected(); err == nil && n > 0 {
-		r.ArtworkReconciled += int(n)
+	if hasEmptyBlob != 0 {
+		emptyRes, err := tx.ExecContext(ctx, "UPDATE AlbumArt SET albumArt=NULL WHERE albumArt IS NOT NULL AND length(albumArt)=0")
+		if err != nil {
+			return err
+		}
+		if n, err := emptyRes.RowsAffected(); err == nil && n > 0 {
+			r.ArtworkReconciled += int(n)
+		}
 	}
 	var hasOrphanRef int
 	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM Track WHERE albumArtId IS NOT NULL AND NOT EXISTS(SELECT 1 FROM AlbumArt WHERE id=Track.albumArtId))").Scan(&hasOrphanRef); err != nil {

@@ -296,9 +296,3 @@ func TestExtractEmbeddedArtworkContextCancelsMidRead(t *testing.T) {
 		t.Fatalf("MP4 reader did not stop promptly after cancel: reads=%d", crsMP4.reads)
 	}
 }
-
-// ExtractEmbeddedArtwork is the cover inside an audio file, read at full speed: what the
-// extractors' own tests call (the job reads it paced, embeddedCover).
-func ExtractEmbeddedArtwork(audioPath string) ([]byte, error) {
-	return embeddedCover(audioPath, ReadOptions{})
-}

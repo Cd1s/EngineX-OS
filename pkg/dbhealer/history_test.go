@@ -764,3 +764,160 @@ func TestS16DataOnlyHistoryRespectsMountDeadlineWhenLocked(t *testing.T) {
 		t.Fatalf("unlocked follow-up left tombstones=%d, want 0", n)
 	}
 }
+
+func TestS16MergeMalformedPlaylistEntityAndAlbumArtColumnsDoNotMutate(t *testing.T) {
+	t.Run("missing_PlaylistEntity_trackId", func(t *testing.T) {
+		mount, hm := stockHistoryMount(t)
+		hdb, err := sql.Open("sqlite", hm)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hdb.SetMaxOpenConns(1)
+		mustExec(t, hdb, "INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,NULL,NULL)")
+		mustExec(t, hdb, "INSERT INTO Track(id,path,filename,title,albumArtId,isAnalyzed) VALUES(1,'../Music/pl.mp3','pl.mp3','PL',1,0),(2,'../Music/dead.mp3','dead.mp3','Dead',1,0)")
+		mustExec(t, hdb, "INSERT INTO Playlist(id,title,parentListId,isPersisted,nextListId) VALUES(1,'Saved',0,1,0)")
+		mustExec(t, hdb, "INSERT INTO PlaylistEntity(id,listId,trackId,databaseUuid,nextEntityId,membershipReference) VALUES(1,1,1,'hist-s16',0,0)")
+		mustExec(t, hdb, "INSERT INTO Historylist(id,title,startTime,timezone,isDeleted) VALUES(1,'Del',100,'UTC',1)")
+		mustExec(t, hdb, "INSERT INTO HistorylistEntity(listId,trackId,startTime) VALUES(1,2,100)")
+		mustExec(t, hdb, "ALTER TABLE PlaylistEntity RENAME COLUMN trackId TO renamedTrackId")
+		if err := hdb.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		r, err := HealMountDataOnly(mount, 0)
+		if err == nil || r.Healthy {
+			t.Fatalf("malformed PlaylistEntity succeeded: rep=%+v err=%v", r, err)
+		}
+		check, err := Open(hm, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer check.Close()
+		var tracks int
+		if err := check.QueryRow("SELECT count(*) FROM Track").Scan(&tracks); err != nil || tracks != 2 {
+			t.Fatalf("malformed PlaylistEntity deleted tracks: count=%d err=%v, want 2", tracks, err)
+		}
+	})
+
+	t.Run("missing_AlbumArt_hash", func(t *testing.T) {
+		mount, hm := stockHistoryMount(t)
+		hdb, err := sql.Open("sqlite", hm)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hdb.SetMaxOpenConns(1)
+		mustExec(t, hdb, "INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,NULL,NULL)")
+		mustExec(t, hdb, "INSERT INTO Track(id,path,filename,title,albumArtId,isAnalyzed) VALUES(1,'../Music/live.mp3','live.mp3','Live',1,0),(2,'../Music/dead.mp3','dead.mp3','Dead',1,0)")
+		mustExec(t, hdb, "INSERT INTO Historylist(id,title,startTime,timezone,isDeleted) VALUES(1,'Keep',200,'UTC',0),(2,'Del',100,'UTC',1)")
+		mustExec(t, hdb, "INSERT INTO HistorylistEntity(listId,trackId,startTime) VALUES(1,1,200),(2,2,100)")
+		mustExec(t, hdb, "PRAGMA foreign_keys=OFF")
+		mustExec(t, hdb, "ALTER TABLE AlbumArt RENAME COLUMN hash TO renamedHash")
+		if err := hdb.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		r, err := HealMountDataOnly(mount, 0)
+		if err == nil || r.Healthy {
+			t.Fatalf("malformed AlbumArt succeeded: rep=%+v err=%v", r, err)
+		}
+		if n := historyCount(t, hm, "WHERE COALESCE(isDeleted,0)<>0"); n != 1 {
+			t.Fatalf("malformed AlbumArt committed tombstone deletion: remaining=%d, want 1", n)
+		}
+		check, err := Open(hm, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer check.Close()
+		var sentinel int
+		if err := check.QueryRow("SELECT count(*) FROM AlbumArt WHERE id=1").Scan(&sentinel); err != nil || sentinel != 1 {
+			t.Fatalf("malformed AlbumArt deleted id=1 sentinel: count=%d err=%v", sentinel, err)
+		}
+	})
+}
+
+func TestS16MergeCleanHistoryZeroWriteUnderBeginImmediate(t *testing.T) {
+	mount, hm := stockHistoryMount(t)
+	hdb, err := sql.Open("sqlite", hm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdb.SetMaxOpenConns(1)
+	mustExec(t, hdb, "INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,NULL,NULL)")
+	mustExec(t, hdb, "INSERT INTO Track(id,path,filename,title,albumArtId,isAnalyzed) VALUES(1,'../Music/live.mp3','live.mp3','Live',1,1)")
+	mustExec(t, hdb, "INSERT INTO Historylist(id,title,startTime,timezone,isDeleted) VALUES(1,'Keep',200,'UTC',0)")
+	mustExec(t, hdb, "INSERT INTO HistorylistEntity(listId,trackId,startTime) VALUES(1,1,200)")
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	locker, err := sql.Open("sqlite", hm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locker.SetMaxOpenConns(1)
+	defer locker.Close()
+	if _, err := locker.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = locker.Exec("ROLLBACK") }()
+
+	r, err := HealMountDataOnly(mount, 0)
+	if err != nil || !r.Healthy {
+		t.Fatalf("clean hm.db attempted unnecessary write under BEGIN IMMEDIATE: rep=%+v err=%v", r, err)
+	}
+}
+
+func TestS16MergeReadOnlyHistoryWithReserveNotRewritten(t *testing.T) {
+	mount, hm := stockHistoryMount(t)
+	seed := reserve12Seed(t, "hm-res12.db")
+	hdb, err := sql.Open("sqlite", seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdb.SetMaxOpenConns(1)
+	schema, err := os.ReadFile("../../docs/re-report/ENGINE-5.0.4-hm.db-schema.sql")
+	if err != nil {
+		hdb.Close()
+		t.Fatal(err)
+	}
+	mustExec(t, hdb, strings.ReplaceAll(string(schema), "CREATE TABLE sqlite_sequence(name,seq);", ""))
+	mustExec(t, hdb, "INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES(1,'hist-res12',3,0,2)")
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+	resBytes, err := os.ReadFile(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(hm, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hm, resBytes, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(hm, 0o644) })
+
+	if r, ok, err := Reserve(hm); err != nil || !ok || r != 12 {
+		t.Fatalf("setup reserve=%d ok=%v err=%v, want 12", r, ok, err)
+	}
+
+	r, err := HealMountDataOnly(mount, 0)
+	if err != nil || !r.Healthy {
+		t.Fatalf("HealMountDataOnly with read-only hm.db: rep=%+v err=%v", r, err)
+	}
+	for _, fixed := range r.ReserveFixed {
+		if fixed == "hm.db" {
+			t.Fatalf("read-only hm.db was rewritten by NormalizeDatabase2: %+v", r.ReserveFixed)
+		}
+	}
+	if !strings.Contains(strings.Join(r.Warnings, "\n"), "history library is read-only") {
+		t.Fatalf("expected read-only history warning, got %v", r.Warnings)
+	}
+	after, err := os.ReadFile(hm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(resBytes) {
+		t.Fatal("mode-0444 hm.db bytes changed during HealMountDataOnly")
+	}
+}

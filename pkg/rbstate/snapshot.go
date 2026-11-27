@@ -114,37 +114,108 @@ func LoadFile(file string) (*Snapshot, error) {
 	return LoadReader(f)
 }
 
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
 // LoadReader reads and validates an encoded snapshot from r.
 func LoadReader(r io.Reader) (*Snapshot, error) {
-	b, err := io.ReadAll(io.LimitReader(r, maxSnapshot+1))
-	if err != nil {
+	return LoadReaderContext(context.Background(), r)
+}
+
+// LoadReaderContext reads and validates an encoded snapshot from r while observing ctx cancellation.
+func LoadReaderContext(ctx context.Context, r io.Reader) (*Snapshot, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if len(b) > maxSnapshot {
-		return nil, fmt.Errorf("rbstate: snapshot larger than %d bytes", maxSnapshot)
+	const chunkSize = 64 << 10
+	var buf bytes.Buffer
+	chunk := make([]byte, chunkSize)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		n, err := r.Read(chunk)
+		if n > 0 {
+			if buf.Len()+n > maxSnapshot {
+				return nil, fmt.Errorf("rbstate: snapshot larger than %d bytes", maxSnapshot)
+			}
+			buf.Write(chunk[:n])
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
 	}
+	b := buf.Bytes()
 	if len(b) == 0 || b[len(b)-1] != '\n' {
 		return nil, ErrNoSnapshot
 	}
 	end := lastLine(b)
 	records, sum, ok := parseEnd(end)
 	body := b[:len(b)-len(end)-1]
-	if !ok || len(end) == 0 || crc32.ChecksumIEEE(body) != sum || !bytes.HasPrefix(body, []byte(snapshotMagic)) {
+	if !ok || len(end) == 0 || !bytes.HasPrefix(body, []byte(snapshotMagic)) {
 		return nil, ErrNoSnapshot
+	}
+	h := crc32.NewIEEE()
+	for off := 0; off < len(body); off += chunkSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		hi := min(off+chunkSize, len(body))
+		h.Write(body[off:hi])
+	}
+	if h.Sum32() != sum {
+		return nil, ErrNoSnapshot
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	s := &Snapshot{Tracks: map[string]*Track{}, Lists: map[string]*List{}}
 	head, rest, _ := bytes.Cut(body[:len(body)-1], []byte{'\n'})
-	if err = json.Unmarshal(head[len(snapshotMagic):], &s.Header); err != nil || s.Format != Format {
+	if err := json.Unmarshal(head[len(snapshotMagic):], &s.Header); err != nil || s.Format != Format {
 		return nil, ErrNoSnapshot
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	var rec snapshotBody
-	if err = gob.NewDecoder(bytes.NewReader(rest)).Decode(&rec); err != nil || len(rec.Lists)+len(rec.Tracks) != records {
+	if err := gob.NewDecoder(&ctxReader{ctx: ctx, r: bytes.NewReader(rest)}).Decode(&rec); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, ErrNoSnapshot
 	}
-	for _, l := range rec.Lists {
+	if len(rec.Lists)+len(rec.Tracks) != records {
+		return nil, ErrNoSnapshot
+	}
+	for i, l := range rec.Lists {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		s.Lists[l.Key] = l
 	}
-	for _, t := range rec.Tracks {
+	for i, t := range rec.Tracks {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		s.Tracks[t.Key] = t
 	}
 	if len(s.Lists)+len(s.Tracks) != records {

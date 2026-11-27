@@ -4,6 +4,7 @@
 package rbstate
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -190,13 +191,32 @@ func (s *Snapshot) TrackAt(enginePath string) (*Track, bool) {
 
 // EngineIDs is the set of Track.id values the bridge owns in the library.
 func (s *Snapshot) EngineIDs() map[int64]bool {
+	ids, _ := s.EngineIDsContext(context.Background())
+	return ids
+}
+
+// EngineIDsContext returns the set of Track.id values the bridge owns while observing ctx.
+func (s *Snapshot) EngineIDsContext(ctx context.Context) (map[int64]bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	ids := make(map[int64]bool, len(s.Tracks))
+	i := 0
 	for _, t := range s.Tracks {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		i++
 		if t.EngineID != 0 && !t.Native {
 			ids[t.EngineID] = true
 		}
 	}
-	return ids
+	return ids, nil
 }
 
 // FoldPath is a track's key: its volume-relative path with forward slashes, without a leading

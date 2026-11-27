@@ -396,9 +396,11 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 	if err != nil {
 		return r, err
 	}
+	checkCtx := ctx
 	if dataOnly && ctx.Err() != nil {
-		r.Healthy = true
-		return r, nil
+		var cancelProbe context.CancelFunc
+		checkCtx, cancelProbe = context.WithTimeout(context.Background(), 25*time.Millisecond)
+		defer cancelProbe()
 	}
 	if rw {
 		// Before Engine opens the volume: a nonzero page reserve breaks every ATTACH.
@@ -406,9 +408,10 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			return r, err
 		}
 	}
-	db, err := openContext(ctx, path, !rw)
+	db, err := openContext(checkCtx, path, !rw)
 	if err != nil {
-		if dataOnly && budgetExpired(ctx, err) {
+		if dataOnly && (isContextStop(checkCtx, err) || budgetExpired(checkCtx, err)) {
+			r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
 			r.Healthy = true
 			return r, nil
 		}
@@ -424,39 +427,24 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 		return r, err
 	}
 	fixed := r.ReserveFixed
-	dbUUID, schemaErr := validateLibrarySchema302(ctx, db)
+	dbUUID, schemaErr := validateAndRepairLibraryIdentity(checkCtx, db)
 	if schemaErr != nil {
-		if isContextStop(ctx, schemaErr) {
-			if idErr := repairLibraryIdentity(db); idErr != nil {
-				_ = db.Close()
-				r.Healthy = false
-				r.Mount = mount
-				return r, idErr
-			}
+		_ = db.Close()
+		if dataOnly && (isContextStop(checkCtx, schemaErr) || budgetExpired(checkCtx, schemaErr)) {
+			r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
 			r.Healthy = true
-			closeErr := db.Close()
 			r.Mount = mount
-			if closeErr != nil {
-				r.Healthy = false
-				return r, closeErr
-			}
 			return r, nil
 		}
-		_ = db.Close()
 		r.Healthy = false
 		r.Mount = mount
 		return r, schemaErr
 	}
-	if dbUUID == "" {
-		if idErr := repairLibraryIdentity(db); idErr != nil {
-			_ = db.Close()
-			r.Healthy = false
-			r.Mount = mount
-			return r, idErr
-		}
-		if refreshedUUID, err := validateLibrarySchema302(context.Background(), db); err == nil {
-			dbUUID = refreshedUUID
-		}
+	if dataOnly && ctx.Err() != nil {
+		closeErr := db.Close()
+		r.Mount = mount
+		r.Healthy = closeErr == nil
+		return r, closeErr
 	}
 	passRes, err := runMountTrackPass(ctx, db, mount, &r, mountTrackPassOptions{
 		runNFD:     true,
@@ -490,9 +478,8 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 		r.Mount = mount
 		r.Healthy = false
 		if healErr != nil {
-			if dataOnly && budgetExpired(ctx, healErr) {
-				r.Healthy = true
-				return r, nil
+			if isContextStop(ctx, healErr) || (dataOnly && budgetExpired(ctx, healErr)) {
+				return r, err
 			}
 			return r, healErr
 		}
@@ -507,14 +494,6 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 		}
 	}
 	if deferBaseHeal {
-		// Preserve GL-010 library identity and schema validation before returning
-		// early from any budgeted data-only mount pass so Engine can still attach.
-		if idErr := repairLibraryIdentity(db); idErr != nil {
-			_ = db.Close()
-			r.Healthy = false
-			r.Mount = mount
-			return r, idErr
-		}
 		r.Healthy = true
 		closeErr := db.Close()
 		r.Mount = mount
@@ -841,10 +820,16 @@ func repairLibraryIdentityTx(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-func repairLibraryIdentity(db *sql.DB) error {
-	rows, err := db.Query("SELECT id, COALESCE(uuid,''), schemaVersionMajor, schemaVersionMinor, schemaVersionPatch FROM Information LIMIT 2")
+func validateAndRepairLibraryIdentity(ctx context.Context, db *sql.DB) (string, error) {
+	if err := clampBusyTimeout(ctx, db); err != nil {
+		return "", err
+	}
+	rows, err := db.QueryContext(ctx, "SELECT id, COALESCE(uuid,''), schemaVersionMajor, schemaVersionMinor, schemaVersionPatch FROM Information LIMIT 2")
 	if err != nil {
-		return err
+		if isContextStop(ctx, err) || budgetExpired(ctx, err) {
+			return "", err
+		}
+		return "", fmt.Errorf("missing library version: %w", err)
 	}
 	type infoRow struct {
 		id                  int
@@ -856,51 +841,48 @@ func repairLibraryIdentity(db *sql.DB) error {
 		var row infoRow
 		if err := rows.Scan(&row.id, &row.uuid, &row.major, &row.minor, &row.patch); err != nil {
 			_ = rows.Close()
-			return err
+			if isContextStop(ctx, err) || budgetExpired(ctx, err) {
+				return "", err
+			}
+			return "", fmt.Errorf("missing library version: %w", err)
 		}
 		infos = append(infos, row)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return err
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if len(infos) == 0 {
-		return fmt.Errorf("missing library version: %w", sql.ErrNoRows)
-	}
-	if infos[0].major != 3 || infos[0].minor != 0 || infos[0].patch != 2 {
-		return fmt.Errorf("unsupported library schema %d.%d.%d (supported 3.0.2)", infos[0].major, infos[0].minor, infos[0].patch)
-	}
-	if len(infos) == 1 && infos[0].id == 1 && strings.TrimSpace(infos[0].uuid) != "" {
-		return nil
-	}
-	return transaction(db, func(tx *sql.Tx) error {
-		return repairLibraryIdentityTx(context.Background(), tx)
-	})
-}
-
-const sqliteInterruptCode = 9 // SQLITE_INTERRUPT
-
-func validateLibrarySchema302(ctx context.Context, db *sql.DB) (string, error) {
-	var dbUUID string
-	var major, minor, patch int
-	err := db.QueryRowContext(
-		ctx,
-		`SELECT COALESCE(uuid,''), schemaVersionMajor, schemaVersionMinor, schemaVersionPatch FROM Information LIMIT 1`,
-	).Scan(&dbUUID, &major, &minor, &patch)
-	if err != nil {
-		if isContextStop(ctx, err) {
+		if isContextStop(ctx, err) || budgetExpired(ctx, err) {
 			return "", err
 		}
 		return "", fmt.Errorf("missing library version: %w", err)
 	}
-	if major != 3 || minor != 0 || patch != 2 {
-		return "", fmt.Errorf("unsupported library schema %d.%d.%d (supported 3.0.2)", major, minor, patch)
+	if err := rows.Close(); err != nil {
+		if isContextStop(ctx, err) || budgetExpired(ctx, err) {
+			return "", err
+		}
+		return "", fmt.Errorf("missing library version: %w", err)
 	}
-	return strings.TrimSpace(dbUUID), nil
+	if len(infos) == 0 {
+		return "", fmt.Errorf("missing library version: %w", sql.ErrNoRows)
+	}
+	if infos[0].major != 3 || infos[0].minor != 0 || infos[0].patch != 2 {
+		return "", fmt.Errorf("unsupported library schema %d.%d.%d (supported 3.0.2)", infos[0].major, infos[0].minor, infos[0].patch)
+	}
+	if len(infos) == 1 && infos[0].id == 1 && strings.TrimSpace(infos[0].uuid) != "" {
+		return strings.TrimSpace(infos[0].uuid), nil
+	}
+	if err := transactionContext(ctx, db, func(tx *sql.Tx) error {
+		return repairLibraryIdentityTx(ctx, tx)
+	}); err != nil {
+		return "", err
+	}
+	var refreshedUUID string
+	if err := db.QueryRowContext(ctx, "SELECT COALESCE(uuid,'') FROM Information LIMIT 1").Scan(&refreshedUUID); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(refreshedUUID), nil
 }
+
+const sqliteInterruptCode = 9 // SQLITE_INTERRUPT
 
 func isContextStop(ctx context.Context, err error) bool {
 	if err == nil {
@@ -1614,11 +1596,25 @@ func bridgeManagedTracksContext(ctx context.Context, mount string) (map[int64]bo
 	}
 	// The rekordbox bridge's snapshot of this library; a library an earlier build imported, and
 	// that no mount has taken over yet, has the state database read below instead.
-	if snap, err := rbstate.Load(filepath.Join(mount, "Engine Library", "Database2")); err == nil {
-		for id := range snap.EngineIDs() {
+	snapPath := filepath.Join(mount, "Engine Library", "Database2", rbstate.SnapshotName)
+	f, openErr := os.Open(snapPath)
+	if openErr == nil {
+		snap, loadErr := rbstate.LoadReaderContext(ctx, f)
+		_ = f.Close()
+		if loadErr != nil {
+			return managed, loadErr
+		}
+		ids, err := snap.EngineIDsContext(ctx)
+		if err != nil {
+			return managed, err
+		}
+		for id := range ids {
 			managed[id] = true
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	} else if !errors.Is(openErr, os.ErrNotExist) {
+		return managed, openErr
+	}
+	if err := ctx.Err(); err != nil {
 		return managed, err
 	}
 	path := filepath.Join(mount, "Engine Library", "Database2", ".rb-bridge-state.db")
@@ -1645,6 +1641,9 @@ func bridgeManagedTracksContext(ctx context.Context, mount string) (map[int64]bo
 	}
 	defer rows.Close()
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return managed, err
+		}
 		var id int64
 		if err := rows.Scan(&id); err != nil {
 			return managed, err
