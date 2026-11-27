@@ -549,30 +549,23 @@ func (s *Server) omniTracks(ctx context.Context, query string) ([]trackRef, erro
 // servers'. Every enabled WebDAV and NAS server is searched beside the drives, each in
 // the NAS search's time budget; the selected source's own search already has its
 // server. selected is closed when the selected source's search, running beside this
-// one, is done.
+// one and never cut, is done (nil: no such search).
 //
-// The deadline: once the drives and djay have answered and serverReadyWait has passed,
-// omniSearch closes ready. Servers, and the selected source, that have not answered
-// then are left out of this answer (their search goes on and is cached for the next
-// one): a slow source never holds back the rows that are ready. omniSearch returns
-// once the servers' and the selected source's searches are done.
-func (g *tidalGateway) omniSearch(ctx context.Context, query string, ready chan struct{}, selected <-chan struct{}) []any {
+// The deadline: the servers are waited for until the drives and djay have answered,
+// serverReadyWait has passed since the start, and the selected source is done. Servers
+// that have not answered then are left out of this answer (their search goes on and is
+// cached for the next one): the extras never make the answer later than the later of
+// "selected source done" and that deadline (WebDAV round 11b). omniSearch returns once
+// the servers' search and the selected source's are done.
+func (g *tidalGateway) omniSearch(ctx context.Context, query string, selected <-chan struct{}) []any {
 	items := []any{}
 	seenFiles := make(map[string]bool)
 	started := time.Now()
 	var webdav []trackRef
-	webdavDone := make(chan struct{})
+	webdavDone, ready := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(webdavDone)
 		webdav = g.serverSearch(ctx, query, "", g.s.scope(), ready)
-	}()
-	searched := make(chan struct{}) // the servers' and the selected source's searches are done
-	go func() {
-		<-webdavDone
-		if selected != nil {
-			<-selected
-		}
-		close(searched)
 	}()
 
 	for _, refs := range each(ctx, g.s.drives(), func(ctx context.Context, d drive) ([]trackRef, error) { return searchDrive(ctx, d, query) }) {
@@ -596,14 +589,24 @@ func (g *tidalGateway) omniSearch(ctx context.Context, query string, ready chan 
 			}
 		}
 	}
+	// Wait for the selected source in full, and for the servers until they have all
+	// answered or the deadline has passed, whichever is first; a server still running
+	// once both waits are over is left out.
 	wait := time.NewTimer(max(0, serverReadyWait-time.Since(started)))
-	select {
-	case <-searched:
-	case <-wait.C:
-		close(ready)
-		<-searched
+	deadline, servers, sel := wait.C, (<-chan struct{})(webdavDone), selected
+	for (deadline != nil && servers != nil) || sel != nil {
+		select {
+		case <-servers:
+			servers = nil
+		case <-deadline:
+			deadline = nil
+		case <-sel:
+			sel = nil
+		}
 	}
 	wait.Stop()
+	close(ready)
+	<-webdavDone
 	for _, ref := range webdav {
 		if id := g.addTrack(ref); id != 0 {
 			items = append(items, g.trackJSON(id, ref.track))

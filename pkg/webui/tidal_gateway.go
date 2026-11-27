@@ -955,52 +955,27 @@ func (g *tidalGateway) sessionByID(id string) *Session {
 // each runs fn for every input concurrently and keeps the successful results in
 // input order. One provider failing must not empty the deck's browser.
 func each[T, R any](ctx context.Context, in []T, fn func(context.Context, T) ([]R, error)) [][]R {
-	return eachUntil(ctx, in, nil, fn)
-}
-
-// eachUntil is each that stops waiting when ready is closed (nil: it waits for every
-// input): inputs that have not answered by then have no result, and their calls are
-// cancelled (a cached search goes on and keeps what it finds for the next search).
-func eachUntil[T, R any](ctx context.Context, in []T, ready <-chan struct{}, fn func(context.Context, T) ([]R, error)) [][]R {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	type answer struct {
-		i int
-		r []R
-	}
-	answers := make(chan answer, len(in)) // a late answer never blocks its sender
+	out := make([][]R, len(in))
+	var wg sync.WaitGroup
 	for i, v := range in {
+		wg.Add(1)
 		go func() {
-			var r []R
+			defer wg.Done()
 			defer func() {
-				if rec := recover(); rec != nil {
-					log.Printf("gateway: provider panic: %v", rec)
+				if r := recover(); r != nil {
+					log.Printf("gateway: provider panic: %v", r)
 				}
-				answers <- answer{i, r}
 			}()
-			var err error
-			r, err = fn(ctx, v)
+			r, err := fn(ctx, v)
+			out[i] = r
 			if err != nil {
 				log.Printf("stream-sync: gateway source failed: %v", err)
 			}
 		}()
 	}
-	out := make([][]R, len(in))
-	for range in {
-		select {
-		case a := <-answers:
-			out[a.i] = a.r
-		case <-ready:
-			for { // what has answered by now still counts
-				select {
-				case a := <-answers:
-					out[a.i] = a.r
-				default:
-					return out
-				}
-			}
-		}
-	}
+	wg.Wait()
 	return out
 }
 func (g *tidalGateway) addPlaylist(ref playlistRef) string { return g.addPlaylistAt(ref, 0) }
@@ -2124,30 +2099,29 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	scope := g.s.scope()
 	empty := map[string]any{"limit": 10, "offset": 0, "totalNumberOfItems": 0, "items": []any{}}
 	if !g.s.omniSource() { // the selected source alone, as before
-		trackItems, listItems := g.selectedSearch(r.Context(), query, scope, nil)
+		trackItems, listItems := g.selectedSearch(r.Context(), query, scope)
 		respond(w, map[string]any{"tracks": page(r, 50, trackItems), "playlists": page(r, 50, listItems), "albums": empty, "artists": empty})
 		return
 	}
-	// OmniSource: the selected source is searched beside the drives, djay and servers,
-	// under the same deadline (WebDAV round 4). What has not answered once the drives
-	// and djay have and serverReadyWait has passed is left out of this answer (its
-	// search goes on and is cached for the next one): ready rows never wait for a slow
-	// source, whichever source is selected.
-	ready, selected := make(chan struct{}), make(chan struct{})
+	// OmniSource: the selected source is what the DJ searched. It is searched beside the
+	// drives, djay and servers and is never cut: the answer waits for it, as without
+	// OmniSource (WebDAV round 11b). OmniSource's extras add no time: the answer goes out
+	// at the later of "selected source done" and OmniSource's deadline, and an extra still
+	// running then is left out (its search goes on and is cached for the next one).
+	selected := make(chan struct{})
 	var trackItems, listItems []any
 	go func() {
 		defer close(selected)
-		trackItems, listItems = g.selectedSearch(r.Context(), query, scope, ready)
+		trackItems, listItems = g.selectedSearch(r.Context(), query, scope)
 	}()
-	omni := g.omniSearch(r.Context(), query, ready, selected) // returns once selected is done
-	trackItems = append(omni, trackItems...)                  // the DJ's own drives first
+	omni := g.omniSearch(r.Context(), query, selected) // returns once selected is done
+	trackItems = append(omni, trackItems...)           // the DJ's own drives first
 	respond(w, map[string]any{"tracks": page(r, 50, trackItems), "playlists": page(r, 50, listItems), "albums": empty, "artists": empty})
 }
 
 // selectedSearch searches the selected source (scope): a streaming service, the NAS
-// slot's SMB server, or a server's own entry. ready (nil: none) ends the wait for
-// answers still missing when it is closed (OmniSource's deadline).
-func (g *tidalGateway) selectedSearch(ctx context.Context, query, scope string, ready <-chan struct{}) (trackItems, listItems []any) {
+// slot's SMB server, or a server's own entry, within each source's own budget.
+func (g *tidalGateway) selectedSearch(ctx context.Context, query, scope string) (trackItems, listItems []any) {
 	type source struct {
 		session, provider string
 		guest             bool
@@ -2189,7 +2163,7 @@ func (g *tidalGateway) selectedSearch(ctx context.Context, query, scope string, 
 	searches.Add(2)
 	go func() {
 		defer searches.Done()
-		tracks = eachUntil(ctx, sources, ready, func(ctx context.Context, v source) ([]providers.Track, error) {
+		tracks = each(ctx, sources, func(ctx context.Context, v source) ([]providers.Track, error) {
 			if p, ok := v.p.(trackSearcher); ok {
 				return g.searchTracks(ctx, v.provider, cacheSession(v), p, query)
 			}
@@ -2198,7 +2172,7 @@ func (g *tidalGateway) selectedSearch(ctx context.Context, query, scope string, 
 	}()
 	go func() {
 		defer searches.Done()
-		lists = eachUntil(ctx, sources, ready, func(ctx context.Context, v source) ([]providers.Playlist, error) {
+		lists = each(ctx, sources, func(ctx context.Context, v source) ([]providers.Playlist, error) {
 			if p, ok := v.p.(playlistSearcher); ok {
 				return g.searchLists(ctx, v.provider, cacheSession(v), p, query)
 			}
@@ -2225,7 +2199,7 @@ func (g *tidalGateway) selectedSearch(ctx context.Context, query, scope string, 
 		}
 	}
 	if _, _, ok := serverScopeOf(scope); ok { // that server, in the NAS search's time budget
-		for _, ref := range g.serverSearch(ctx, query, scope, "", ready) {
+		for _, ref := range g.serverSearch(ctx, query, scope, "", nil) {
 			if id := g.addTrack(ref); id != 0 {
 				trackItems = append(trackItems, g.trackJSON(id, ref.track))
 			}
