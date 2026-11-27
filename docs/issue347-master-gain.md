@@ -53,14 +53,34 @@ boosts rather than attenuates. The pre-existing plain DSP suite passes.
 1. ALSA: the published bundle adds a boot hook without PCM, softvol, DAC or
    mixer gain definitions. The USB routing helper does not set mixer levels.
    Stock speaker initialization includes `amixer ... Master 0dB`, but its udev
-   rules target the speaker-equipped boards rather than JC11S. An effective
-   ALSA configuration comparison remains to be run.
+   rules target the speaker-equipped boards rather than JC11S. In the stock
+   rootfs, a native armhf libasound probe successfully opens the null PCM both
+   before and after loading the published `99-enginex.conf`. Serialized
+   `defaults`, `pcm` and `ctl` subtrees are byte-identical: SHA-256
+   `a41be6bef400d0351597256b6f62e14fe472f6e4b9c7facd1044060dd481a46b`.
+   This checks configuration; it cannot read a physical DAC's mixer state.
 2. EngineX DSP: the measured master wrapper is unity below the knee. The
    Flanger correction clamps its gain to at least unity. Native mixer behavior
    has not yet been excluded by these measurements.
 3. Settings: `master_limiter`, `auto_gain` and `hifi_output` default off, and
    Hi-Fi is forced off on consoles. EngineX also changes the native
-   `Config.audio.hasLimiter` flag; its runtime effect needs separate checking.
+   `Config.audio.hasLimiter` flag on some models. On JC11S, a QML runtime probe
+   finds it already true with all non-UI hook features disabled, with the full
+   released hook and with just `limiter-menu` disabled. All three have native
+   `MasterLimiter` code 13 (stock UI: Off) and channel-1 volume code 102. Neither
+   a master nor a booth software volume property exists in those runs.
+
+## Native-render limitation
+
+The test uses the repository's existing SoC identity shim and ALSA null-card
+fixture; no stock DSP implementation is patched or called directly. A 1 kHz
+WAV is submitted through the existing
+`/Client/Librarian/AddToDatabaseAndLoadToDeck1` URL translator.
+With either `JC11S` or `JC11` as the fixture's card name, the sandbox does not
+open a PCM or reach `SongLoaded`. The native device manager reports an empty
+audio-device ID; the capture has zero blocks. Those zero blocks are a failed
+fixture, not silence or a measured gain difference. The existing
+`restore-bpm-sandbox.sh` also documents incomplete JC11 loading in its sandbox.
 
 ## Remaining work
 
