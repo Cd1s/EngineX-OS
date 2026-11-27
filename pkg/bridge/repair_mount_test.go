@@ -3,8 +3,10 @@ package bridge
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -17,7 +19,24 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
+
+func appendFilledJSONL(t *testing.T, stageDir string, entry rbstate.Filled) {
+	t.Helper()
+	b, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(stageDir, "filled.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func repairStick(t *testing.T, n int) string {
 	t.Helper()
@@ -478,33 +497,333 @@ func TestGen2MountInsertBudgetExhaustedHandsOffToFillInBackground(t *testing.T) 
 	}
 }
 
-// Verifies arm32 OnDemand mounts keep zero mount-time scan/repair cost (left to on-load hook).
-func TestOnDemandMountNeverScansOrRepairsAtMount(t *testing.T) {
-	mount := repairStick(t, 3)
+// Fails at runtime on 8070b7d7: replicates the exact 2,440-row real hardware stick profile
+// (2 idle-settled stock-overwritten rows: 1 aborted empty-cue stub + 1 stock-OA 136 BPM row;
+// 5 EngineX-filled rows including filled.jsonl + 2-beat EngineX row; 2,433 untouched rows)
+// across BOTH OnDemand (arm32) and full (arm64 Gen-2) mounts:
+//   - 1st insert repairs exact 2/2 damaged rows and touches 0 of the other 2,438 rows;
+//   - 2nd insert writes nothing (Bypassed=true, Applied=0, file mtime/size/sha256 unchanged).
+func TestRealStickReplica2440RepairsExact2Of2AndSecondInsertWritesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		onDemand bool
+	}{
+		{"arm32_ondemand", true},
+		{"arm64_gen2_full", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mount := repairStick(t, 2440)
+			mountNow(t, mount, MountOptions{OnDemand: true})
+
+			snap, err := rbstate.Load(dbDir(mount))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tracks := sortedTracksByID(snap)
+			if len(tracks) != 2440 {
+				t.Fatalf("expected 2440 tracks, got %d", len(tracks))
+			}
+
+			const beat0 = 11391.4248046875
+			stockTD := []byte{0, 0, 0, 68, 0x78, 0x9c}
+			stockOV := bytes.Repeat([]byte{0x55}, 1200)
+			stockBeats := buildTestStockOABeatsMount(t, 44100, 13707967, beat0, 136.0, 704)
+			qcAutoBeat0 := buildTestQuickCuesMount(t, -1, "", beat0, 1, beat0)
+			qcUnadjEmpty := buildTestQuickCuesMount(t, -1, "", 0, 0, 0)
+			emptyLoops := buildTestEmptyLoopsMount()
+
+			// 5 EngineX-filled rows (4 normal + 1 tiny 2-beat EngineX row with len(beatData)<=256)
+			// plus filled.jsonl records, matching the real hardware stick's 5 filled tracks.
+			stage, err := rbstate.OpenStage(snap.LibraryUUID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			db := openTestMDBRW(t, mount)
+			for i := 0; i < 5; i++ {
+				nBeats := 24
+				if i == 4 {
+					nBeats = 2
+				}
+				beats := make([]rekordbox.Beat, nBeats)
+				for b := range beats {
+					beats[b] = rekordbox.Beat{Number: uint16(b%4) + 1, BPM: 124, TimeMS: uint32(250 + b*484)}
+				}
+				perf, perr := enginedb.EncodePerformance(
+					rekordbox.Track{SampleRate: 44100, Duration: 20, BPM: 124},
+					&rekordbox.Analysis{Beats: beats},
+				)
+				if perr != nil {
+					t.Fatal(perr)
+				}
+				tr := tracks[i]
+				if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+					perf.TrackData, perf.Overview, perf.Beats, perf.QuickCues, perf.Loops, tr.EngineID); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`UPDATE Track SET isAnalyzed=1 WHERE id=?`, tr.EngineID); err != nil {
+					t.Fatal(err)
+				}
+				appendFilledJSONL(t, stage.Dir(), rbstate.Filled{
+					Key:      tr.Key,
+					EngineID: tr.EngineID,
+					Written:  enginedb.WrittenDigest(perf.Beats, perf.QuickCues, perf.Loops),
+				})
+			}
+			stage.Close()
+
+			// Row #1 (aborted empty-cue stub) and Row #2 (stock OA 136 BPM) — both idle-settled by #321!
+			row1 := tracks[1957]
+			row2 := tracks[1968]
+			if _, err := db.Exec(`UPDATE PerformanceData SET trackData=NULL, overviewWaveFormData=NULL, beatData=NULL, quickCues=?, loops=NULL, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+				qcUnadjEmpty, row1.EngineID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+				stockTD, stockOV, stockBeats, qcAutoBeat0, emptyLoops, row2.EngineID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE Track SET isAnalyzed=1, isBeatGridLocked=0, bpmAnalyzed=136.0 WHERE id=?`, row2.EngineID); err != nil {
+				t.Fatal(err)
+			}
+
+			// Read exact genre/comment/label so idle-settled Synced matches #321's exact SyncedDigest(cur).
+			readTags := func(id int64) (g, c, l string) {
+				if err := db.QueryRow(`SELECT COALESCE(genre,''), COALESCE(comment,''), COALESCE(label,'') FROM Track WHERE id=?`, id).Scan(&g, &c, &l); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			g1, c1, l1 := readTags(row1.EngineID)
+			g2, c2, l2 := readTags(row2.EngineID)
+			snap.Tracks[row1.Key].Edit = 1795689149
+			snap.Tracks[row1.Key].Synced = enginedb.SyncedDigest(nil, qcUnadjEmpty, nil, 0, g1, c1, l1)
+			snap.Tracks[row2.Key].Edit = 1795690063
+			snap.Tracks[row2.Key].Synced = enginedb.SyncedDigest(nil, qcAutoBeat0, emptyLoops, 0, g2, c2, l2)
+			if err := snap.Save(dbDir(mount)); err != nil {
+				t.Fatal(err)
+			}
+			if err := syncBrowseIndex(dbDir(mount), snap); err != nil {
+				t.Fatal(err)
+			}
+
+			// Hash every one of the 2,440 rows before insert so we prove 0 of the other 2,438 rows change.
+			hashAllRows := func() map[int64][32]byte {
+				rows, err := db.Query(`SELECT t.id, COALESCE(t.bpm,0), COALESCE(t.bpmAnalyzed,0), COALESCE(t.isAnalyzed,0), p.trackData, p.overviewWaveFormData, p.beatData, p.quickCues, p.loops, COALESCE(p.activeOnLoadLoops,0) FROM Track t JOIN PerformanceData p ON p.trackId=t.id`)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer rows.Close()
+				out := make(map[int64][32]byte, 2440)
+				for rows.Next() {
+					var id, bpm, an, act int64
+					var bpmA float64
+					var td, ov, bd, qc, lp []byte
+					if err := rows.Scan(&id, &bpm, &bpmA, &an, &td, &ov, &bd, &qc, &lp, &act); err != nil {
+						t.Fatal(err)
+					}
+					h := sha256.New()
+					fmt.Fprintf(h, "%d:%d:%.6f:%d:%d|", id, bpm, bpmA, an, act)
+					for _, b := range [][]byte{td, ov, bd, qc, lp} {
+						fmt.Fprintf(h, "%d:", len(b))
+						h.Write(b)
+					}
+					var sum [32]byte
+					copy(sum[:], h.Sum(nil))
+					out[id] = sum
+				}
+				return out
+			}
+			beforeHashes := hashAllRows()
+			db.Close()
+
+			// 1st insert: must repair exact 2/2 rows inline, touching 0 of the other 2,438 rows.
+			bgStarted := false
+			res1 := mountNow(t, mount, MountOptions{
+				OnDemand:        tc.onDemand,
+				Deadline:        time.Now().Add(17 * time.Second),
+				StartBackground: func() error { bgStarted = true; return nil },
+			})
+			if res1.Bypassed || res1.Applied != 2 || bgStarted || res1.Background || !res1.Pending.None() {
+				t.Fatalf("1st insert (%s) = %+v (bgStarted=%v), want Bypassed=false Applied=2 Background=false Pending.None", tc.name, res1, bgStarted)
+			}
+
+			db = openTestMDBRW(t, mount)
+			afterHashes := hashAllRows()
+			db.Close()
+			changed := 0
+			for id, bh := range beforeHashes {
+				if afterHashes[id] != bh {
+					if id != row1.EngineID && id != row2.EngineID {
+						t.Fatalf("unexpected row id=%d modified among the 2,438 protected rows", id)
+					}
+					changed++
+				}
+			}
+			if changed != 2 {
+				t.Fatalf("changed rows = %d, want exact 2 (row1=%d, row2=%d)", changed, row1.EngineID, row2.EngineID)
+			}
+
+			// Verify both repaired rows are PerfApplied with valid rekordbox PQTZ grids and restored BPM.
+			afterSnap, err := rbstate.Load(dbDir(mount))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, target := range []*rbstate.Track{row1, row2} {
+				b, q, l, bpm := readRowBlobs(t, mount, target.EngineID)
+				if len(b) == 0 || bytes.Equal(b, stockBeats) || enginedb.IsStockOverwrittenPerformance(enginedb.StockOverwrittenRow{
+					TrackData: []byte{1}, Overview: []byte{1}, Beats: b, QuickCues: q, Loops: l,
+				}) {
+					t.Fatalf("target id=%d still broken after repair (beatsLen=%d bpm=%.2f)", target.EngineID, len(b), bpm)
+				}
+				if target == row2 && math.Abs(bpm-136.0) < 0.5 {
+					t.Fatalf("row2 kept stock OA wrong BPM %.2f", bpm)
+				}
+				if st := afterSnap.Tracks[target.Key]; st.Perf != rbstate.PerfApplied || len(st.Written) == 0 || len(st.Built.ANLZ) == 0 {
+					t.Fatalf("target id=%d snapshot not PerfApplied: %+v", target.EngineID, st)
+				}
+			}
+
+			// Record exact file signatures after 1st insert; 2nd insert must write NOTHING.
+			type fileStamp struct {
+				modNS int64
+				size  int64
+				sum   [32]byte
+			}
+			statFiles := func() map[string]fileStamp {
+				out := map[string]fileStamp{}
+				for _, name := range []string{"m.db", rbstate.SnapshotName, rbstate.BrowseIndexName} {
+					p := filepath.Join(dbDir(mount), name)
+					st, err := os.Stat(p)
+					if os.IsNotExist(err) {
+						continue
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					raw, err := os.ReadFile(p)
+					if err != nil {
+						t.Fatal(err)
+					}
+					out[name] = fileStamp{modNS: st.ModTime().UnixNano(), size: st.Size(), sum: sha256.Sum256(raw)}
+				}
+				return out
+			}
+			filesBefore2 := statFiles()
+			time.Sleep(20 * time.Millisecond)
+
+			res2 := mountNow(t, mount, MountOptions{
+				OnDemand:        tc.onDemand,
+				Deadline:        time.Now().Add(17 * time.Second),
+				StartBackground: func() error { bgStarted = true; return nil },
+			})
+			if !res2.Bypassed || res2.Applied != 0 || bgStarted || res2.Background {
+				t.Fatalf("2nd insert (%s) = %+v (bgStarted=%v), want Bypassed=true Applied=0", tc.name, res2, bgStarted)
+			}
+			filesAfter2 := statFiles()
+			if len(filesAfter2) != len(filesBefore2) {
+				t.Fatalf("2nd insert changed file set: before=%v after=%v", filesBefore2, filesAfter2)
+			}
+			for name, prev := range filesBefore2 {
+				if cur := filesAfter2[name]; cur != prev {
+					t.Fatalf("2nd insert wrote %s: before=%+v after=%+v", name, prev, cur)
+				}
+			}
+		})
+	}
+}
+
+// Verifies arm32 OnDemand mounts repair matching rows once at insert and, on budget overflow,
+// reset remaining damaged rows to clean untouched import stubs (0 background perf pass).
+func TestOnDemandMountRepairsOnceAndBudgetOverflowResetsToStub(t *testing.T) {
+	mount := repairStick(t, 4)
 	mountNow(t, mount, MountOptions{OnDemand: true})
 	snap, err := rbstate.Load(dbDir(mount))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := sortedTracksByID(snap)[0]
+	tracks := sortedTracksByID(snap)
 	const beat0 = 11391.4248046875
 	stockBeats := buildTestStockOABeatsMount(t, 44100, 13707967, beat0, 136.0, 704)
 	qcAutoBeat0 := buildTestQuickCuesMount(t, -1, "", beat0, 1, beat0)
+	qcDJHot := buildTestQuickCuesMount(t, 220500, "DJKeep", beat0, 1, beat0)
 	emptyLoops := buildTestEmptyLoopsMount()
 
 	db := openTestMDBRW(t, mount)
+	for _, idx := range []int{0, 1} {
+		if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+			[]byte{1}, []byte{1}, stockBeats, qcAutoBeat0, emptyLoops, tracks[idx].EngineID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE Track SET isAnalyzed=1, bpmAnalyzed=136.0 WHERE id=?`, tracks[idx].EngineID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Track 2: DJ hot cue -> MUST stay untouched.
 	if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
-		[]byte{1}, []byte{1}, stockBeats, qcAutoBeat0, emptyLoops, tr.EngineID); err != nil {
+		[]byte{1}, []byte{1}, stockBeats, qcDJHot, emptyLoops, tracks[2].EngineID); err != nil {
+		t.Fatal(err)
+	}
+	// Track 3: stock-OA blobs BUT recorded in filled.jsonl -> MUST stay untouched.
+	if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+		[]byte{1}, []byte{1}, stockBeats, qcAutoBeat0, emptyLoops, tracks[3].EngineID); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
-	res := mountNow(t, mount, MountOptions{OnDemand: true})
-	if !res.Bypassed || res.Applied != 0 {
-		t.Fatalf("OnDemand mount = %+v, want Bypassed=true Applied=0", res)
+	stage, err := rbstate.OpenStage(snap.LibraryUUID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	bAfter, _, _, _ := readRowBlobs(t, mount, tr.EngineID)
-	if !bytes.Equal(bAfter, stockBeats) {
-		t.Fatal("OnDemand mount unexpectedly modified m.db at mount time")
+	appendFilledJSONL(t, stage.Dir(), rbstate.Filled{
+		Key:      tracks[3].Key,
+		EngineID: tracks[3].EngineID,
+		Written:  enginedb.WrittenDigest(stockBeats, qcAutoBeat0, emptyLoops),
+	})
+	stage.Close()
+
+	// Stop inline build after Track 0 so Track 1 exercises OnDemand budget overflow -> stub reset.
+	seen := 0
+	oldHook := repairBeforeBuild
+	repairBeforeBuild = func(_ context.Context, _ string) error {
+		seen++
+		if seen >= 2 {
+			return errWindowDeadline
+		}
+		return nil
+	}
+	defer func() { repairBeforeBuild = oldHook }()
+
+	bgStarted := false
+	res := mountNow(t, mount, MountOptions{
+		OnDemand:        true,
+		Deadline:        time.Now().Add(17 * time.Second),
+		StartBackground: func() error { bgStarted = true; return nil },
+	})
+	if res.Bypassed || res.Applied != 2 || bgStarted || res.Background || !res.Pending.None() {
+		t.Fatalf("OnDemand insert repair = %+v (bgStarted=%v), want Bypassed=false Applied=2 Background=false Pending.None", res, bgStarted)
+	}
+	// Track 0 repaired inline to full rekordbox data; Track 1 reset to untouched stub (NULL beats/cues/loops, isAnalyzed=0).
+	b0, _, _, _ := readRowBlobs(t, mount, tracks[0].EngineID)
+	if len(b0) == 0 || bytes.Equal(b0, stockBeats) {
+		t.Fatal("track[0] was not repaired inline on OnDemand mount")
+	}
+	b1, q1, l1, _ := readRowBlobs(t, mount, tracks[1].EngineID)
+	if len(b1) != 0 || len(q1) != 0 || len(l1) != 0 {
+		t.Fatalf("track[1] overflow was not reset to clean stub: beats=%d cues=%d loops=%d", len(b1), len(q1), len(l1))
+	}
+	// Track 2 (DJ hot cue) and Track 3 (filled.jsonl) must stay byte-for-byte untouched!
+	b2, q2, _, _ := readRowBlobs(t, mount, tracks[2].EngineID)
+	b3, q3, _, _ := readRowBlobs(t, mount, tracks[3].EngineID)
+	if !bytes.Equal(b2, stockBeats) || !bytes.Equal(q2, qcDJHot) {
+		t.Fatal("track[2] DJ hot cue was modified")
+	}
+	if !bytes.Equal(b3, stockBeats) || !bytes.Equal(q3, qcAutoBeat0) {
+		t.Fatal("track[3] filled.jsonl row was modified")
+	}
+	// 2nd OnDemand mount bypasses cleanly with 0 work.
+	repairBeforeBuild = nil
+	res2 := mountNow(t, mount, MountOptions{OnDemand: true, Deadline: time.Now().Add(17 * time.Second)})
+	if !res2.Bypassed || res2.Applied != 0 {
+		t.Fatalf("2nd OnDemand mount = %+v, want Bypassed=true Applied=0", res2)
 	}
 }

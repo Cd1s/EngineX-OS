@@ -787,58 +787,7 @@ struct sc_rbs_row {
     int key;                // Track.key (0..23) or -1
     double bpm;             // COALESCE(bpmAnalyzed, bpm, 0)
     long long length;       // Track.length (seconds)
-    int repair_cand;        // 1: cheap SQL prefilter says row may be stock-OA-overwritten or empty-cue stub
 };
-
-#define SC_RBS_REPAIR_BEATS_MAX 256
-#define SC_RBS_REPAIR_CUES_MAX  512
-#define SC_RBS_REPAIR_LOOPS_MAX 768
-
-struct sc_rbs_repair_blobs {
-    int rows;
-    int td_null, ov_null, bt_null, qc_null, lp_null;
-    long long active_loops;
-    char beats_hex[SC_RBS_REPAIR_BEATS_MAX * 2 + 1];
-    char cues_hex[SC_RBS_REPAIR_CUES_MAX * 2 + 1];
-    char loops_hex[SC_RBS_REPAIR_LOOPS_MAX * 2 + 1];
-    int too_big;
-};
-
-static int sc_rbs_copy_hex(const char *src, char *dst, size_t max_chars) {
-    if (!src || !src[0]) {
-        dst[0] = 0;
-        return 1;
-    }
-    size_t n = 0;
-    for (; src[n]; n++) {
-        if (n >= max_chars) return 0;
-        char c = src[n];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return 0;
-        dst[n] = c;
-    }
-    if (n & 1) return 0;
-    dst[n] = 0;
-    return 1;
-}
-
-static int sc_rbs_repair_blobs_cb(void *arg, int n, char **v, char **name) {
-    struct sc_rbs_repair_blobs *rb = arg;
-    (void)name;
-    if (n != 9) return 0;
-    rb->rows++;
-    rb->td_null = v[0] && !strcmp(v[0], "1");
-    rb->ov_null = v[1] && !strcmp(v[1], "1");
-    rb->bt_null = v[2] && !strcmp(v[2], "1");
-    rb->qc_null = v[3] && !strcmp(v[3], "1");
-    rb->lp_null = v[4] && !strcmp(v[4], "1");
-    rb->active_loops = v[5] ? strtoll(v[5], NULL, 10) : 0;
-    if (!sc_rbs_copy_hex(v[6], rb->beats_hex, SC_RBS_REPAIR_BEATS_MAX * 2) ||
-        !sc_rbs_copy_hex(v[7], rb->cues_hex, SC_RBS_REPAIR_CUES_MAX * 2) ||
-        !sc_rbs_copy_hex(v[8], rb->loops_hex, SC_RBS_REPAIR_LOOPS_MAX * 2)) {
-        rb->too_big = 1;
-    }
-    return 0;
-}
 
 static double sc_rbs_parse_pos_double(const char *s) {
     if (!s || *s < '0' || *s > '9') return 0.0;
@@ -863,7 +812,7 @@ static double sc_rbs_parse_pos_double(const char *s) {
 static int sc_rbs_row_cb(void *arg, int n, char **v, char **name) {
     struct sc_rbs_row *r = arg;
     (void)name;
-    if (n != 10) return 0;
+    if (n != 9) return 0;
     r->rows++;
     snprintf(r->path, sizeof r->path, "%s", v[0] ? v[0] : "");
     r->import_key = v[1] ? strtoll(v[1], NULL, 10) : 0;
@@ -874,7 +823,6 @@ static int sc_rbs_row_cb(void *arg, int n, char **v, char **name) {
     r->key = v[6] ? (int)strtol(v[6], NULL, 10) : -1;
     r->bpm = v[7] ? sc_rbs_parse_pos_double(v[7]) : 0.0;
     r->length = v[8] ? strtoll(v[8], NULL, 10) : 0;
-    r->repair_cand = v[9] && !strcmp(v[9], "1");
     return 0;
 }
 
@@ -883,19 +831,6 @@ static int sc_rbs_row_cb(void *arg, int n, char **v, char **name) {
 // loads the row, and the DJ edits a row only after a load, so a row in any other state is the deck's.
 #define SC_RBS_UNTOUCHED(t) t "trackData IS NULL AND " t "beatData IS NULL AND " t "overviewWaveFormData IS NULL"
 #define SC_RBS_INSERT_CUES(t) "(" t "thirdPartySourceId = 1 OR (" t "thirdPartySourceId IS NULL AND " t "quickCues IS NULL AND " t "loops IS NULL))"
-// O(1) SQL prefilter for rows that may have been overwritten by stock Engine OfflineAnalyzer
-// (2-marker qCompress beatData: uncompressed length 129..255 => X'00000081'..X'000000FF',
-// compressed length <= 256) or an aborted empty-cue load stub (qCompress quickCues >= 129 B).
-// Normal EngineX-filled rows (>= 5 beats => rawlen >= 274 >= X'00000100'), stock Engine sticks
-// (pdbImportKey IS NULL), and locked beatgrids evaluate to 0 with zero extra SQL or IPC.
-#define SC_RBS_REPAIR_CAND(t, p) \
-    "(CASE WHEN " t "pdbImportKey > 0 AND COALESCE(" t "isBeatGridLocked, 0) = 0 AND " p "thirdPartySourceId IS NULL AND (" \
-    "(" p "trackData IS NULL AND " p "overviewWaveFormData IS NULL AND " p "beatData IS NULL AND " \
-    p "quickCues IS NOT NULL AND length(" p "quickCues) <= 512 AND " p "quickCues >= X'00000081' AND " p "quickCues < X'00001000' AND " \
-    "(" p "loops IS NULL OR length(" p "loops) <= 768)) " \
-    "OR (" p "beatData IS NOT NULL AND length(" p "beatData) <= 256 AND " p "beatData >= X'00000081' AND " p "beatData < X'00000100' AND " \
-    "(" p "quickCues IS NULL OR length(" p "quickCues) <= 512) AND (" p "loops IS NULL OR length(" p "loops) <= 768))" \
-    ") THEN 1 ELSE 0 END)"
 
 static int sc_rbs_changes(void *arg, int n, char **v, char **names) {
     (void)names;
@@ -905,18 +840,12 @@ static int sc_rbs_changes(void *arg, int n, char **v, char **names) {
 
 // The fill: the staged blobs of b (an RBXA1 file: magic, five little-endian uint32 lengths each
 // followed by its bytes, one Complete byte) into the row of track, activeOnLoadLoops active, the
-// import mark cleared, and the Track analysed; only while the row is as the insert left it (or,
-// when repair != NULL, still byte-for-byte identical to the verified stock-overwritten blobs)
-// and the library is uuid's. It ends with "SELECT changes()": 1 when the row was filled. NULL
-// when b is not a whole, complete file with trackData and beatData (why says what is wrong).
-static char *sc_rbs_fill_sql_ex(const unsigned char *b, size_t n, long long track, long long active,
-                                const char *uuid, const struct sc_rbs_repair_blobs *repair,
-                                double repair_bpm, const char **why) {
+// import mark cleared, and the Track analysed; only while the row is as the insert left it and the
+// library is uuid's. It ends with "SELECT changes()": 1 when the row was filled. NULL when b is
+// not a whole, complete file with trackData and beatData (why says what is wrong).
+static char *sc_rbs_fill_sql(const unsigned char *b, size_t n, long long track, long long active, const char *uuid, const char **why) {
     static const char *const columns[] = {"trackData", "overviewWaveFormData", "beatData", "quickCues", "loops"};
-    size_t at = 5, len[5], start[5], total = 1600 + strlen(uuid);
-    if (repair) {
-        total += strlen(repair->beats_hex) + strlen(repair->cues_hex) + strlen(repair->loops_hex) + 256;
-    }
+    size_t at = 5, len[5], start[5], total = 1088 + strlen(uuid);
     *why = "not an RBXA1 file";
     if (n < 5 || memcmp(b, "RBXA1", 5)) return NULL;
     *why = "cut short";
@@ -949,46 +878,11 @@ static char *sc_rbs_fill_sql_ex(const unsigned char *b, size_t n, long long trac
         for (size_t k = 0; k < len[i]; k++) p += sprintf(p, "%02x", b[start[i] + k]);
         p += sprintf(p, "', ");
     }
-    if (!repair) {
-        sprintf(p, "activeOnLoadLoops = %lld, thirdPartySourceId = NULL WHERE trackId = %lld AND %s AND %s AND (SELECT uuid FROM Information) = '%s'; "
-                   "UPDATE Track SET isAnalyzed = 1 WHERE id = %lld AND changes() > 0; SELECT changes(); RELEASE sc_rbs",
-                active, track, SC_RBS_UNTOUCHED(""), SC_RBS_INSERT_CUES(""), uuid, track);
-    } else {
-        // Atomic compare-and-swap against the exact verified blobs and lock/active state: if a DJ
-        // edit landed concurrently on any connection, UPDATE matches 0 rows and leaves the edit intact.
-        p += sprintf(p, "activeOnLoadLoops = %lld, thirdPartySourceId = NULL WHERE trackId = %lld AND COALESCE((SELECT isBeatGridLocked FROM Track WHERE id = %lld), 0) = 0 AND thirdPartySourceId IS NULL AND COALESCE(activeOnLoadLoops, 0) = %lld",
-                     active, track, track, repair->active_loops);
-        if (repair->bt_null) {
-            p += sprintf(p, " AND trackData IS NULL AND overviewWaveFormData IS NULL AND beatData IS NULL");
-        } else {
-            p += sprintf(p, " AND beatData = X'%s'", repair->beats_hex);
-        }
-        if (repair->qc_null) {
-            p += sprintf(p, " AND quickCues IS NULL");
-        } else {
-            p += sprintf(p, " AND quickCues = X'%s'", repair->cues_hex);
-        }
-        if (repair->lp_null) {
-            p += sprintf(p, " AND loops IS NULL");
-        } else {
-            p += sprintf(p, " AND loops = X'%s'", repair->loops_hex);
-        }
-        p += sprintf(p, " AND (SELECT uuid FROM Information) = '%s'; ", uuid);
-        if (repair_bpm >= 20.0 && repair_bpm <= 500.0) {
-            long long bpm_int = (long long)(repair_bpm + 0.5);
-            long long bpm_scaled = (long long)(repair_bpm * 10000.0 + 0.5);
-            sprintf(p, "UPDATE Track SET isAnalyzed = 1, bpm = %lld, bpmAnalyzed = %lld.%04lld WHERE id = %lld AND changes() > 0; SELECT changes(); RELEASE sc_rbs",
-                    bpm_int, bpm_scaled / 10000LL, bpm_scaled % 10000LL, track);
-        } else {
-            sprintf(p, "UPDATE Track SET isAnalyzed = 1 WHERE id = %lld AND changes() > 0; SELECT changes(); RELEASE sc_rbs", track);
-        }
-    }
+    sprintf(p, "activeOnLoadLoops = %lld, thirdPartySourceId = NULL WHERE trackId = %lld AND %s AND %s AND (SELECT uuid FROM Information) = '%s'; "
+               "UPDATE Track SET isAnalyzed = 1 WHERE id = %lld AND changes() > 0; SELECT changes(); RELEASE sc_rbs",
+            active, track, SC_RBS_UNTOUCHED(""), SC_RBS_INSERT_CUES(""), uuid, track);
     *why = NULL;
     return sql;
-}
-
-__attribute__((unused)) static char *sc_rbs_fill_sql(const unsigned char *b, size_t n, long long track, long long active, const char *uuid, const char **why) {
-    return sc_rbs_fill_sql_ex(b, n, track, active, uuid, NULL, 0.0, why);
 }
 
 static void sc_rbs_json_text(FILE *f, const char *s) {
@@ -1129,8 +1023,7 @@ static int sc_rbs_thread_safe_for_ondemand(void) {
             !strcmp(comm, "QQuickPixmapRea") || !strcmp(comm, "J:Savingtrackda") ||
             !strcmp(comm, "Analysis Queue") || !strcmp(comm, "OfflineAnalyzer") ||
             !strcmp(comm, "J:I:Collecting") || !strcmp(comm, "J:I:Takingfreez") ||
-            !strcmp(comm, "J:Importingtrac") || !strcmp(comm, "J:N:Searching o") ||
-            !strcmp(comm, "J:Notifyingremo") || !strcmp(comm, "J:Updatingtrack"))
+            !strcmp(comm, "J:Importingtrac") || !strcmp(comm, "J:N:Searching o"))
             return -3;
     }
 #endif
@@ -1422,16 +1315,13 @@ static int sc_rbs_send_all(int fd, const char *req, size_t req_len, long long de
 }
 
 static int sc_rbs_ondemand_fetch_ex(const char *main_db, const char *uuid, const struct sc_rbs_row *row,
-                                    const struct sc_rbs_repair_blobs *repair,
                                     long long deadline_ns, struct sc_rbs_line *out_line,
                                     unsigned char **out_body, size_t *out_len, int *http_status,
-                                    int *peer_unsupported, int *not_repairable, double *out_bpm) {
+                                    int *peer_unsupported) {
     *out_body = NULL;
     *out_len = 0;
     *http_status = 0;
     if (peer_unsupported) *peer_unsupported = 0;
-    if (not_repairable) *not_repairable = 0;
-    if (out_bpm) *out_bpm = 0.0;
     memset(out_line, 0, sizeof *out_line);
     out_line->rules = -1;
 
@@ -1461,21 +1351,6 @@ static int sc_rbs_ondemand_fetch_ex(const char *main_db, const char *uuid, const
         fprintf(jf, ",\"bpm\":%lld.%04lld", scaled / 10000LL, scaled % 10000LL);
     }
     if (row->length > 0) fprintf(jf, ",\"length\":%lld", row->length);
-    if (repair) {
-        fputs(",\"repair\":true", jf);
-        if (repair->beats_hex[0]) {
-            fputs(",\"curBeats\":", jf);
-            sc_rbs_json_text(jf, repair->beats_hex);
-        }
-        if (repair->cues_hex[0]) {
-            fputs(",\"curCues\":", jf);
-            sc_rbs_json_text(jf, repair->cues_hex);
-        }
-        if (repair->loops_hex[0]) {
-            fputs(",\"curLoops\":", jf);
-            sc_rbs_json_text(jf, repair->loops_hex);
-        }
-    }
     fputc('}', jf);
     if (fclose(jf)) {
         free(jbody);
@@ -1638,8 +1513,7 @@ static int sc_rbs_ondemand_fetch_ex(const char *main_db, const char *uuid, const
     p = first_nl + 1;
     char tmp[64], rb_status[64];
     rb_status[0] = 0;
-    int bad_hdr = 0, repair_acked = 0;
-    double parsed_bpm = 0.0;
+    int bad_hdr = 0;
     while (p < end) {
         const char *nl = memchr(p, '\n', (size_t)(end - p));
         size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
@@ -1649,10 +1523,6 @@ static int sc_rbs_ondemand_fetch_ex(const char *main_db, const char *uuid, const
             } else if (sc_rbs_hdr_match(p, ll, "X-RB-Written", out_line->wr, sizeof out_line->wr)) {
             } else if (sc_rbs_hdr_match(p, ll, "X-RB-Written-NoMain", out_line->wrnm, sizeof out_line->wrnm)) {
             } else if (sc_rbs_hdr_match(p, ll, "X-RB-Row", out_line->row, sizeof out_line->row)) {
-            } else if (sc_rbs_hdr_match(p, ll, "X-RB-Repair", tmp, sizeof tmp)) {
-                if (!strcmp(tmp, "1")) repair_acked = 1;
-            } else if (sc_rbs_hdr_match(p, ll, "X-RB-BPM", tmp, sizeof tmp)) {
-                parsed_bpm = sc_rbs_parse_pos_double(tmp);
             } else if (sc_rbs_hdr_match(p, ll, "X-RB-Active-Loops", tmp, sizeof tmp)) {
                 char *ep = NULL;
                 errno = 0;
@@ -1683,14 +1553,6 @@ static int sc_rbs_ondemand_fetch_ex(const char *main_db, const char *uuid, const
         p = nl + 1;
     }
     if (peer_unsupported && !strcmp(rb_status, "peer_unsupported")) *peer_unsupported = 1;
-    if (not_repairable && !strcmp(rb_status, "not_repairable")) *not_repairable = 1;
-    // Fail closed if a repair request receives 200 without X-RB-Repair: 1 (e.g. older peer
-    // that ignored "repair":true and did not verify the row against DJ edits).
-    if (status == 200 && repair && !repair_acked) {
-        if (not_repairable) *not_repairable = 1;
-        free(buf);
-        return -1;
-    }
     if (status != 200 || bad_hdr) {
         free(buf);
         return -1;
@@ -1716,14 +1578,13 @@ static int sc_rbs_ondemand_fetch_ex(const char *main_db, const char *uuid, const
     free(buf);
     *out_body = body;
     *out_len = body_len;
-    if (out_bpm) *out_bpm = parsed_bpm;
     return 0;
 }
 
 __attribute__((unused)) static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const struct sc_rbs_row *row,
                                  long long deadline_ns, struct sc_rbs_line *out_line,
                                  unsigned char **out_body, size_t *out_len, int *http_status) {
-    return sc_rbs_ondemand_fetch_ex(main_db, uuid, row, NULL, deadline_ns, out_line, out_body, out_len, http_status, NULL, NULL, NULL);
+    return sc_rbs_ondemand_fetch_ex(main_db, uuid, row, deadline_ns, out_line, out_body, out_len, http_status, NULL);
 }
 
 // Notifies local stream-sync that a remote Engine Link fill committed so the stick owner
@@ -1795,26 +1656,6 @@ static int sc_rbs_exec_read(const struct sc_rbx_sqlite *q, void *db, const char 
     for (;;) {
         memset(r, 0, sizeof *r);
         int rc = q->exec(db, sql, sc_rbs_row_cb, r, NULL);
-        if ((rc & 0xff) != 5 /* SQLITE_BUSY */ || sc_rbs_mono_ns() >= deadline) return rc;
-        struct timespec ts = {0, 5000000L};
-        nanosleep(&ts, NULL);
-    }
-}
-
-static int sc_rbs_read_repair_blobs(const struct sc_rbx_sqlite *q, void *db, long long track,
-                                    struct sc_rbs_repair_blobs *rb) {
-    char sql[512];
-    snprintf(sql, sizeof sql,
-             "SELECT p.trackData IS NULL, p.overviewWaveFormData IS NULL, p.beatData IS NULL, p.quickCues IS NULL, p.loops IS NULL, "
-             "COALESCE(p.activeOnLoadLoops, 0), COALESCE(hex(p.beatData), ''), COALESCE(hex(p.quickCues), ''), COALESCE(hex(p.loops), '') "
-             "FROM PerformanceData p JOIN Track t ON t.id = p.trackId "
-             "WHERE p.trackId = %lld AND COALESCE(t.isBeatGridLocked, 0) = 0 AND p.thirdPartySourceId IS NULL",
-             track);
-    __atomic_fetch_add(&sc_rbs_stat_sql_reads, 1ULL, __ATOMIC_RELAXED);
-    const long long deadline = sc_rbs_mono_ns() + 200000000LL;
-    for (;;) {
-        memset(rb, 0, sizeof *rb);
-        int rc = q->exec(db, sql, sc_rbs_repair_blobs_cb, rb, NULL);
         if ((rc & 0xff) != 5 /* SQLITE_BUSY */ || sc_rbs_mono_ns() >= deadline) return rc;
         struct timespec ts = {0, 5000000L};
         nanosleep(&ts, NULL);
@@ -1894,8 +1735,7 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
     }
     struct sc_rbs_line *l = malloc(sizeof *l);
     struct sc_rbs_row *r = malloc(sizeof *r);
-    struct sc_rbs_repair_blobs *rb = NULL;
-    char *key = malloc(SC_RBS_TEXT), *uuid = malloc(SC_RBS_TEXT), *query = malloc(SC_RBS_TEXT * 2 + 1280);
+    char *key = malloc(SC_RBS_TEXT), *uuid = malloc(SC_RBS_TEXT), *query = malloc(SC_RBS_TEXT * 2 + 640);
     int inflight_slot = -1;
     int inflight_filled = 0;
     long long inflight_track = 0;
@@ -1963,12 +1803,12 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
     if (path) {
         char escaped[SC_RBS_TEXT * 2];
         sc_rbs_escape_sql(raw_path, escaped, sizeof escaped);
-        snprintf(query, SC_RBS_TEXT * 2 + 1280,
-                 "SELECT t.path, t.pdbImportKey, (SELECT uuid FROM Information), " SC_RBS_UNTOUCHED("p.") ", " SC_RBS_INSERT_CUES("p.") ", t.id, COALESCE(t.key, -1), COALESCE(t.bpmAnalyzed, t.bpm, 0), COALESCE(t.length, 0), " SC_RBS_REPAIR_CAND("t.", "p.")
+        snprintf(query, SC_RBS_TEXT * 2 + 640,
+                 "SELECT t.path, t.pdbImportKey, (SELECT uuid FROM Information), " SC_RBS_UNTOUCHED("p.") ", " SC_RBS_INSERT_CUES("p.") ", t.id, COALESCE(t.key, -1), COALESCE(t.bpmAnalyzed, t.bpm, 0), COALESCE(t.length, 0)"
                  " FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.path = '%s'", escaped);
     } else {
-        snprintf(query, SC_RBS_TEXT * 2 + 1280,
-                 "SELECT t.path, t.pdbImportKey, (SELECT uuid FROM Information), " SC_RBS_UNTOUCHED("p.") ", " SC_RBS_INSERT_CUES("p.") ", t.id, COALESCE(t.key, -1), COALESCE(t.bpmAnalyzed, t.bpm, 0), COALESCE(t.length, 0), " SC_RBS_REPAIR_CAND("t.", "p.")
+        snprintf(query, SC_RBS_TEXT * 2 + 640,
+                 "SELECT t.path, t.pdbImportKey, (SELECT uuid FROM Information), " SC_RBS_UNTOUCHED("p.") ", " SC_RBS_INSERT_CUES("p.") ", t.id, COALESCE(t.key, -1), COALESCE(t.bpmAnalyzed, t.bpm, 0), COALESCE(t.length, 0)"
                  " FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.id = %lld", track);
     }
     if (sc_rbs_exec_read(q, db, query, r) || r->rows != 1) {
@@ -1995,21 +1835,16 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
         why = "skipped (the snapshot names another library)";
         goto done;
     }
-    int repair_mode = 0;
-    if (!r->empty || !r->insert_cues) {
-        if (r->repair_cand && ondemand_avail) {
-            repair_mode = 1;
-            use_ondemand = 1;
-        } else if (!r->empty) {
-            __atomic_fetch_add(&sc_rbs_stat_skip_filled, 1ULL, __ATOMIC_RELAXED);
-            inflight_filled = 1;
-            inflight_track = track;
-            why = "skipped (row has analysis)";
-            goto done;
-        } else {
-            why = "skipped (row has the deck's cues)";
-            goto done;
-        }
+    if (!r->empty) {
+        __atomic_fetch_add(&sc_rbs_stat_skip_filled, 1ULL, __ATOMIC_RELAXED);
+        inflight_filled = 1;
+        inflight_track = track;
+        why = "skipped (row has analysis)";
+        goto done;
+    }
+    if (!r->insert_cues) {
+        why = "skipped (row has the deck's cues)";
+        goto done;
     }
     if (r->import_key <= 0) {
         __atomic_fetch_add(&sc_rbs_stat_skip_stock, 1ULL, __ATOMIC_RELAXED);
@@ -2047,7 +1882,6 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
 
     size_t size = 0;
     unsigned char *b = NULL;
-    double repair_bpm = 0.0;
     if (use_ondemand) {
         // Unify in-flight coalescing on the canonical track ID resolved by sc_rbs_exec_read so
         // concurrent sc_rbs_fill_path and sc_rbs_fill_perf callers for the same track collapse
@@ -2079,21 +1913,8 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
             why = "skipped (ondemand busy)";
             goto done;
         }
-        if (repair_mode) {
-            rb = malloc(sizeof *rb);
-            if (!rb) {
-                why = "out of memory";
-                goto done;
-            }
-            if (sc_rbs_read_repair_blobs(q, db, track, rb) || rb->rows != 1 || rb->too_big ||
-                (rb->bt_null && (!rb->td_null || !rb->ov_null || rb->qc_null))) {
-                why = "skipped (row changed)";
-                goto done;
-            }
-        }
-        int http_status = 0, peer_unsupported = 0, not_repairable = 0;
-        if (sc_rbs_ondemand_fetch_ex(main, uuid, r, repair_mode ? rb : NULL, od_deadline, l,
-                                     &b, &size, &http_status, &peer_unsupported, &not_repairable, &repair_bpm)) {
+        int http_status = 0, peer_unsupported = 0;
+        if (sc_rbs_ondemand_fetch_ex(main, uuid, r, od_deadline, l, &b, &size, &http_status, &peer_unsupported)) {
             if (is_net && peer_unsupported) {
                 pthread_mutex_lock(&sc_rbs_mu);
                 if (peer_neg_hash) sc_rbs_neg_put_locked(peer_neg_hash, SC_RBS_NEG_TTL_PERM_NS);
@@ -2103,13 +1924,6 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
                 pthread_mutex_unlock(&sc_rbs_mu);
                 sc_rbs_conn_mark_bad(db, main);
                 why = "skipped (peer unsupported)";
-            } else if (not_repairable) {
-                pthread_mutex_lock(&sc_rbs_mu);
-                sc_rbs_neg_put_locked(od_hash, SC_RBS_NEG_TTL_PERM_NS);
-                if (pre_od_hash && pre_od_hash != od_hash)
-                    sc_rbs_neg_put_locked(pre_od_hash, SC_RBS_NEG_TTL_PERM_NS);
-                pthread_mutex_unlock(&sc_rbs_mu);
-                why = "skipped (row not repairable)";
             } else if (http_status == 409) {
                 sc_rbs_conn_stale(db, main);
                 why = "skipped (the snapshot names another library)";
@@ -2143,7 +1957,7 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
         }
     }
     const char *bad = NULL;
-    char *update = sc_rbs_fill_sql_ex(b, size, track, l->active, uuid, repair_mode ? rb : NULL, repair_bpm, &bad);
+    char *update = sc_rbs_fill_sql(b, size, track, l->active, uuid, &bad);
     free(b);
     if (!update) {
         snprintf(result, sizeof result, "skipped (%s file %s)", use_ondemand ? "ondemand" : "staged", bad);
@@ -2174,14 +1988,11 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
     inflight_track = track;
     clock_gettime(CLOCK_MONOTONIC, &t1);
     snprintf(result, sizeof result, "%s (%.1f ms)",
-             repair_mode
-                 ? (is_net ? "repaired link on-demand" : "repaired on-demand")
-                 : (is_net ? "filled link on-demand" : (use_ondemand ? "filled on-demand" : "filled")),
+             is_net ? "filled link on-demand" : (use_ondemand ? "filled on-demand" : "filled"),
              (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6);
     why = result;
 done:
     if (inflight_slot >= 0) sc_rbs_inflight_leave(inflight_slot, inflight_filled, inflight_track);
-    free(rb);
     free(l);
     free(r);
     free(key);

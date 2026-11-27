@@ -1243,6 +1243,7 @@ type PerfPrev struct {
 	Synced            []byte
 	HasBuiltANLZ      bool
 	HasSyncedColorTag bool
+	InFilledJournal   bool
 }
 
 // ApplyPerformance writes a track's staged data unless the deck changed the row since the bridge
@@ -1354,6 +1355,7 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 		Synced:            prev.Synced,
 		HasBuiltANLZ:      prev.HasBuiltANLZ,
 		HasSyncedColorTag: prev.HasSyncedColorTag,
+		InFilledJournal:   prev.InFilledJournal,
 		FastCues:          base.cues,
 		FastLoops:         base.loops,
 		FastActive:        uint32(base.active),
@@ -1396,6 +1398,25 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 		return nil, PerfMerged, nil
 	}
 	return staged, PerfWritten, nil
+}
+
+// ResetToImportStub restores a stock-overwritten row on an OnDemand stick back to the
+// untouched import stub (matching InsertTracks) when a large insert-time repair exceeds
+// the mount window's inline budget, so the existing Step-2 on-demand load hook fills it
+// cleanly on the next load without running stock analysis or a full background build.
+func (b *Batch) ResetToImportStub(ctx context.Context, id int64, fastCues, fastLoops []byte, fastActive uint32) error {
+	var cues, loops any
+	var active, mark any
+	if len(fastCues) > 0 || len(fastLoops) > 0 || fastActive != 0 {
+		cues, loops, active, mark = fastCues, fastLoops, int64(fastActive), 1
+	}
+	if _, err := b.exec(ctx,
+		`UPDATE PerformanceData SET trackData=NULL,overviewWaveFormData=NULL,beatData=NULL,quickCues=?,loops=?,activeOnLoadLoops=?,thirdPartySourceId=? WHERE trackId=?`,
+		cues, loops, active, mark, id); err != nil {
+		return err
+	}
+	_, err := b.exec(ctx, `UPDATE Track SET isAnalyzed=0 WHERE id=?`, id)
+	return err
 }
 
 // PutArtwork gives a track its cover: the AlbumArt row, shared by the tracks of one image (a batch

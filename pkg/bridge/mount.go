@@ -349,14 +349,17 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 			} else if !rbstate.BrowseIndexMatches(dir, head) {
 				if !deadlineReached() && (st.kill.IsZero() || st.fits(work{load: head.Tracks})) {
 					if snap, lerr := rbstate.Load(dir); lerr == nil && syncBrowseIndexCtx(ctx, dir, snap) == nil {
-						chores(ctx, mount, st, !o.Publish)
-						return MountResult{Bypassed: true, Background: res.Background}, nil
+						// Browse index is now synced; still run the ~1.4 ms read-only prefilter below.
+					} else {
+						unchanged = false
 					}
+				} else {
+					unchanged = false
 				}
-				unchanged = false
 			}
-		} else {
-			repaired, pending, rerr := repairStockOverwrittenAtMount(ctx, mount, dir, r, head, st, startBG)
+		}
+		if unchanged {
+			repaired, pending, rerr := repairStockOverwrittenAtMount(ctx, mount, dir, r, head, st, o.OnDemand, startBG)
 			if rerr != nil {
 				if errors.Is(rerr, errWindowDeadline) || deadlineReached() {
 					res.Applied += repaired
@@ -371,8 +374,6 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 				res.Pending = pending
 				return res, nil
 			}
-		}
-		if unchanged {
 			chores(ctx, mount, st, !o.Publish)
 			return MountResult{Bypassed: true, Background: res.Background}, nil
 		}

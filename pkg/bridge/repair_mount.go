@@ -3,6 +3,7 @@ package bridge
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"os"
@@ -18,10 +19,17 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
-// Gen-2 64-bit (PRIME 4 G2 / SYSTEM ONE, !OnDemand) mount-time repair for rekordbox-converted
-// rows that stock Engine OfflineAnalyzer overwrote. Runs strictly inside rbstate.LockVolume
-// and the 4 s insertBudget, shares enginedb.IsRepairableStockOverwritten with the arm32
-// on-load hook path, and hands off any rows left over after budget expiry to FillInBackground.
+// One-time insert-time repair for old-version stock Engine OfflineAnalyzer overwrites across
+// all 16 models (both arm32 OnDemand and arm64 Gen-2). Runs strictly inside rbstate.LockVolume
+// and the 4 s insertBudget:
+//   - Clean sticks cost only the read-only SQL prefilter (~1.4 ms on 2,440 rows, 0 writes).
+//   - Matching rows (verified through enginedb.IsRepairableStockOverwritten, including
+//     filled.jsonl exclusion and the maintainer's idle-settled restore rule) are repaired once
+//     in place to full rekordbox performance data (PQTZ grid, BPM, cues, loops, waveforms, RGB)
+//     and marked PerfApplied with Written/Built set so they are never touched again.
+//   - If an extreme stick overflows the 4 s insertBudget: !OnDemand hands leftover rows to
+//     FillInBackground, while OnDemand resets leftover rows to clean untouched import stubs
+//     so Step 2's normal on-demand load hook fills them on load without a 24-min background pass.
 
 var (
 	repairItemReserve = 500 * time.Millisecond
@@ -44,7 +52,39 @@ func cleanCandidateRel(p string) string {
 	return strings.TrimPrefix(path.Clean("/"+clean), "/")
 }
 
-func filterStockRepairMatches(candidates []enginedb.StockOACandidate, snap *rbstate.Snapshot) []stockRepairMatch {
+func loadFilledJournal(uuid string) map[string]rbstate.Filled {
+	if !validStageUUID(uuid) {
+		return nil
+	}
+	root, err := rbstate.StageRoot()
+	if err != nil {
+		return nil
+	}
+	b, err := os.ReadFile(filepath.Join(root, uuid, "filled.jsonl"))
+	if err != nil {
+		return nil
+	}
+	out := map[string]rbstate.Filled{}
+	for _, line := range bytes.Split(b, []byte{'\n'}) {
+		var f struct {
+			ID   int64  `json:"id"`
+			K    string `json:"k"`
+			WR   []byte `json:"wr"`
+			WRNM []byte `json:"wrnm"`
+		}
+		if json.Unmarshal(line, &f) != nil || f.K == "" || (len(f.WR) == 0 && len(f.WRNM) == 0) {
+			continue
+		}
+		wr := f.WR
+		if len(wr) == 0 {
+			wr = f.WRNM
+		}
+		out[f.K] = rbstate.Filled{EngineID: f.ID, Key: f.K, Written: wr}
+	}
+	return out
+}
+
+func filterStockRepairMatches(candidates []enginedb.StockOACandidate, snap *rbstate.Snapshot, filled map[string]rbstate.Filled) []stockRepairMatch {
 	if len(candidates) == 0 || snap == nil {
 		return nil
 	}
@@ -55,12 +95,14 @@ func filterStockRepairMatches(candidates []enginedb.StockOACandidate, snap *rbst
 		if t == nil || t.EngineID != c.ID {
 			continue
 		}
+		f, hasFilled := filled[key]
+		inFilled := hasFilled && (f.EngineID == 0 || f.EngineID == c.ID)
 		row := c.Row
 		row.FastKnown = t.FastKnown
 		row.FastCues = t.FastCues
 		row.FastLoops = t.FastLoops
 		row.FastActive = t.FastActive
-		prov := enginedb.TrackRepairProvenance(t, c.Genre, c.Comment, c.Label, c.Row.QuickCues, c.Row.Loops, c.Row.ActiveOnLoadLoops)
+		prov := enginedb.TrackRepairProvenance(t, inFilled, c.Genre, c.Comment, c.Label, c.Row.QuickCues, c.Row.Loops, c.Row.ActiveOnLoadLoops)
 		if !enginedb.IsRepairableStockOverwritten(row, prov) {
 			continue
 		}
@@ -233,7 +275,7 @@ func applyBuiltStockRepairs(ctx context.Context, b *enginedb.Batch, built []buil
 			Edit:              t.Edit,
 			Synced:            t.Synced,
 			HasBuiltANLZ:      prevBuiltANLZ,
-			HasSyncedColorTag: len(t.SyncedColorTag) > 0,
+			HasSyncedColorTag: len(t.SyncedColorTag) > 0 || len(t.SyncedHotColors) > 0 || len(t.SyncedLoopColors) > 0,
 		}
 		p := &item.rec.Perf
 		perf := enginedb.Performance{
@@ -287,6 +329,35 @@ func applyBuiltStockRepairs(ctx context.Context, b *enginedb.Batch, built []buil
 	return repaired, overviews, nil
 }
 
+// resetRemainingToImportStub resets over-budget OnDemand rows back to their clean untouched
+// import stub so Step 2's normal on-demand load hook fills them cleanly on load without
+// triggering a full background perf pass.
+func resetRemainingToImportStub(ctx context.Context, b *enginedb.Batch, remaining []stockRepairMatch) (int, error) {
+	resetCount := 0
+	for _, rem := range remaining {
+		t := rem.track
+		c := rem.cand
+		if err := b.ResetToImportStub(ctx, c.ID, t.FastCues, t.FastLoops, t.FastActive); err != nil {
+			return resetCount, err
+		}
+		newEdit, newDigest, err := b.Synced(ctx, c.ID)
+		if err != nil {
+			return resetCount, err
+		}
+		t.Perf = rbstate.PerfNone
+		t.Built = rbstate.TrackSig{}
+		t.Written = nil
+		tagsInSync := len(t.MetaDigest) > 0 && bytes.Equal(t.MetaDigest, enginedb.MetadataDigest(c.Genre, c.Comment, c.Label))
+		if c.LastEditTime == t.Edit || tagsInSync {
+			t.Edit, t.Synced = newEdit, newDigest
+		} else {
+			t.Edit, t.Synced = newEdit, nil
+		}
+		resetCount++
+	}
+	return resetCount, nil
+}
+
 func markRemainingForBackground(snap *rbstate.Snapshot, remaining []stockRepairMatch) {
 	if len(remaining) == 0 || snap == nil {
 		return
@@ -300,7 +371,7 @@ func markRemainingForBackground(snap *rbstate.Snapshot, remaining []stockRepairM
 	}
 }
 
-func repairStockOverwrittenAtMount(ctx context.Context, mount, dir string, r *compat.Resolver, head rbstate.Header, st *steps, startBG func()) (repaired int, pending rbstate.Pending, err error) {
+func repairStockOverwrittenAtMount(ctx context.Context, mount, dir string, r *compat.Resolver, head rbstate.Header, st *steps, onDemand bool, startBG func()) (repaired int, pending rbstate.Pending, err error) {
 	if ctx.Err() != nil {
 		return 0, head.Pending, ctx.Err()
 	}
@@ -323,7 +394,8 @@ func repairStockOverwrittenAtMount(ctx context.Context, mount, dir string, r *co
 	if lerr != nil || snap.LibraryUUID != liveUUID || snap.Rules != rbstate.Rules {
 		return 0, head.Pending, nil
 	}
-	matches := filterStockRepairMatches(candidates, snap)
+	filled := loadFilledJournal(liveUUID)
+	matches := filterStockRepairMatches(candidates, snap, filled)
 	if len(matches) == 0 {
 		return 0, head.Pending, nil
 	}
@@ -360,7 +432,8 @@ func repairStockOverwrittenAtMount(ctx context.Context, mount, dir string, r *co
 		}
 	}
 
-	if len(built) == 0 {
+	// Non-OnDemand with nothing built inline: hand off directly to FillInBackground without opening m.db RW.
+	if len(built) == 0 && !onDemand {
 		if len(remaining) == 0 {
 			return 0, head.Pending, nil
 		}
@@ -374,15 +447,20 @@ func repairStockOverwrittenAtMount(ctx context.Context, mount, dir string, r *co
 		st.done("repair", "0 inline, %d stock-overwritten rows handed to background", len(remaining))
 		return 0, snap.Pending, nil
 	}
+	if len(built) == 0 && len(remaining) == 0 {
+		return 0, head.Pending, nil
+	}
 
 	if !st.kill.IsZero() && time.Until(st.kill) < saveReserve {
-		allRem := make([]stockRepairMatch, 0, len(built)+len(remaining))
-		for _, item := range built {
-			allRem = append(allRem, item.match)
+		if !onDemand {
+			allRem := make([]stockRepairMatch, 0, len(built)+len(remaining))
+			for _, item := range built {
+				allRem = append(allRem, item.match)
+			}
+			allRem = append(allRem, remaining...)
+			markRemainingForBackground(snap, allRem)
+			startBG()
 		}
-		allRem = append(allRem, remaining...)
-		markRemainingForBackground(snap, allRem)
-		startBG()
 		return 0, snap.Pending, errWindowDeadline
 	}
 
@@ -402,11 +480,19 @@ func repairStockOverwrittenAtMount(ctx context.Context, mount, dir string, r *co
 	if aerr != nil {
 		return 0, head.Pending, aerr
 	}
-	if repaired == 0 && len(remaining) == 0 {
+	stubReset := 0
+	if onDemand && len(remaining) > 0 {
+		stubReset, err = resetRemainingToImportStub(ctx, b, remaining)
+		if err != nil {
+			return 0, head.Pending, err
+		}
+		remaining = nil
+	}
+	if repaired == 0 && stubReset == 0 && len(remaining) == 0 {
 		return 0, head.Pending, nil
 	}
 	markRemainingForBackground(snap, remaining)
-	if repaired > 0 {
+	if repaired > 0 || stubReset > 0 {
 		snap.Applied, snap.Commit = time.Now().Unix(), b.CommitID()
 		if !st.kill.IsZero() && time.Until(st.kill) < saveReserve {
 			return 0, snap.Pending, errWindowDeadline
@@ -421,7 +507,7 @@ func repairStockOverwrittenAtMount(ctx context.Context, mount, dir string, r *co
 		}
 		cut("repair committed")
 		if err = rbstate.PromoteCtx(ctx, dir); err != nil {
-			return repaired, snap.Pending, err
+			return repaired + stubReset, snap.Pending, err
 		}
 		cut("repair promoted")
 		for id, body := range overviews {
@@ -430,6 +516,11 @@ func repairStockOverwrittenAtMount(ctx context.Context, mount, dir string, r *co
 			}
 			writeOverview(dir, lib.UUID(), id, body)
 		}
+		if snap.Mode == rbstate.ModeOnDemand && ctx.Err() == nil && (st.kill.IsZero() || time.Until(st.kill) > spare/2) {
+			if serr := syncBrowseIndexCtx(ctx, dir, snap); serr != nil {
+				log.Printf("rb-bridge: browse index sync after mount repair skipped: %v", serr)
+			}
+		}
 	} else if len(remaining) > 0 {
 		if st.kill.IsZero() || time.Until(st.kill) >= saveReserve {
 			if saveErr := snap.SaveCtx(ctx, dir); saveErr != nil {
@@ -437,11 +528,11 @@ func repairStockOverwrittenAtMount(ctx context.Context, mount, dir string, r *co
 			}
 		}
 	}
-	if len(remaining) > 0 {
+	if !onDemand && len(remaining) > 0 {
 		startBG()
 	}
-	st.done("repair", "%d stock-overwritten rows repaired inline, %d left for background", repaired, len(remaining))
-	return repaired, snap.Pending, nil
+	st.done("repair", "%d repaired inline, %d reset to stub, %d left for background", repaired, stubReset, len(remaining))
+	return repaired + stubReset, snap.Pending, nil
 }
 
 func (w *window) repairStockOverwritten() error {
@@ -459,7 +550,8 @@ func (w *window) repairStockOverwritten() error {
 		log.Printf("rb-bridge: window repair prefilter skipped: %v", err)
 		return nil
 	}
-	matches := filterStockRepairMatches(candidates, w.snap)
+	filled := loadFilledJournal(w.lib.UUID())
+	matches := filterStockRepairMatches(candidates, w.snap, filled)
 	if len(matches) == 0 {
 		return nil
 	}
@@ -504,12 +596,12 @@ func (w *window) repairStockOverwritten() error {
 			remaining = append(remaining, m)
 		}
 	}
-	for _, rem := range remaining {
-		rem.track.Perf = rbstate.PerfNone
-		rem.track.Built = rbstate.TrackSig{}
-		w.dirty = true
-	}
-	if len(built) == 0 {
+	if len(built) == 0 && !(w.o.OnDemand && len(remaining) > 0) {
+		for _, rem := range remaining {
+			rem.track.Perf = rbstate.PerfNone
+			rem.track.Built = rbstate.TrackSig{}
+			w.dirty = true
+		}
 		return nil
 	}
 	b, err := w.lib.Begin(w.ctx)
@@ -521,7 +613,21 @@ func (w *window) repairStockOverwritten() error {
 	if err != nil {
 		return err
 	}
-	if repaired == 0 {
+	stubReset := 0
+	if w.o.OnDemand && len(remaining) > 0 {
+		stubReset, err = resetRemainingToImportStub(w.ctx, b, remaining)
+		if err != nil {
+			return err
+		}
+		remaining = nil
+	} else {
+		for _, rem := range remaining {
+			rem.track.Perf = rbstate.PerfNone
+			rem.track.Built = rbstate.TrackSig{}
+			w.dirty = true
+		}
+	}
+	if repaired == 0 && stubReset == 0 {
 		return nil
 	}
 	if err = w.commitBatch(b); err != nil {
@@ -533,7 +639,7 @@ func (w *window) repairStockOverwritten() error {
 		}
 		writeOverview(w.dir, w.lib.UUID(), id, body)
 	}
-	w.res.Applied += repaired
-	w.st.done("repair", "%d stock-overwritten rows repaired inline, %d left for background", repaired, len(remaining))
+	w.res.Applied += repaired + stubReset
+	w.st.done("repair", "%d repaired inline, %d reset to stub, %d left for background", repaired, stubReset, len(remaining))
 	return nil
 }

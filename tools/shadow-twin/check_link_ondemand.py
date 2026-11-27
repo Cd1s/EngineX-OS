@@ -9,8 +9,8 @@ Verifies Layer 4a + Step 3 stock-OA repair on the real SC5000 5.3.0 twin (A hold
   5. Stock Engine stick (pdbImportKey IS NULL: 0 B->A LAN calls on initial load + reload after stock OA)
   6. Unit A not answering (750/800 ms answer budget -> clean stock Engine fallback, no hang)
   7. Older/non-EngineX peer (plain 404 -> cached peer_unsupported -> 2nd load makes 0 LAN calls)
-  8. Step 3 repair of stock-OA-overwritten rekordbox rows (8a local on A + 8b Link on B, 2nd load 0 LAN)
-  9. Step 3 DJ-edit protection (stock-OA row with DJ Hot Cue 1 never touched on Link or local reload)
+  8. Step 3 one-time insert repair of stock-OA-overwritten rekordbox rows (1st mount repairs 2/2, 2nd mount bypasses with 0 writes; 8a local on A + 8b Link on B get PQTZ+cues with 0 LAN)
+  9. Step 3 DJ-edit protection (stock-OA row with DJ Hot Cue 1 untouched at insert + Link/local reload, 0 LAN)
 
 Also checks browse-time LAN cost == 0, and supports --base-only to prove Case 1 fails on 83627d2c.
 """
@@ -1066,14 +1066,75 @@ def main():
         stub_proc.wait(timeout=3)
         stub_proc = None
 
-        # Restore Unit A's real stream-sync and wait past the 3 s transient neg-cache TTL (zero Engine restarts).
+        # Restore Unit A's real stream-sync, then simulate USB re-insert on Unit A:
+        # stop Engine A -> run rb-bridge --mount-path (1st insert repairs Case 6 & Case 8 inline,
+        # skips Case 9 DJ edit; 2nd insert bypasses with 0 writes) -> restart Engine A.
         restart_stream_sync("A")
-        time.sleep(3.5)
+        sdir_a = twin.WORK / "A"
+        subprocess.run(
+            twin.ns_chroot_cmd("A", "pkill -TERM -f '/usr/Engine/Engine' 2>/dev/null || killall -TERM Engine 2>/dev/null || true"),
+            check=False,
+        )
+        dl_stop = time.monotonic() + 8.0
+        while time.monotonic() < dl_stop:
+            chk = subprocess.run(
+                twin.ns_chroot_cmd("A", "pgrep -f '/usr/Engine/Engine' >/dev/null 2>&1"),
+                check=False,
+            )
+            if chk.returncode != 0:
+                break
+            time.sleep(0.15)
+        else:
+            subprocess.run(
+                twin.ns_chroot_cmd("A", "pkill -KILL -f '/usr/Engine/Engine' 2>/dev/null || killall -KILL Engine 2>/dev/null || true"),
+                check=False,
+            )
+            time.sleep(0.5)
 
-        # CASE 8: Step 3 repair of stock-OA-overwritten rekordbox rows (8a local on A + 8b Link on B, then 2nd load 0 LAN).
-        # 8a: Local repair on Unit A of Case 6's stock-OA row.
+        mount_rep_1 = subprocess.run(
+            twin.ns_chroot_cmd("A", "ENGINEX_RB_ONDEMAND=1 ENGINEX_HOOK_REMAINING_MS=17000 /tmp/rb-bridge --mount-path /media/RB_ONDEMAND"),
+            capture_output=True, text=True,
+        )
+        if mount_rep_1.returncode != 0:
+            raise RuntimeError(f"1st insert rb-bridge failed rc={mount_rep_1.returncode}\nstdout={mount_rep_1.stdout}\nstderr={mount_rep_1.stderr}")
+        mount_res_1 = json.loads(mount_rep_1.stdout.strip().splitlines()[-1])
+        mount_rep_2 = subprocess.run(
+            twin.ns_chroot_cmd("A", "ENGINEX_RB_ONDEMAND=1 ENGINEX_HOOK_REMAINING_MS=17000 /tmp/rb-bridge --mount-path /media/RB_ONDEMAND"),
+            capture_output=True, text=True,
+        )
+        if mount_rep_2.returncode != 0:
+            raise RuntimeError(f"2nd insert rb-bridge failed rc={mount_rep_2.returncode}\nstdout={mount_rep_2.stdout}\nstderr={mount_rep_2.stderr}")
+        mount_res_2 = json.loads(mount_rep_2.stdout.strip().splitlines()[-1])
+        print("INSERT_REPAIR:", json.dumps({"run1": mount_res_1, "run2": mount_res_2}), flush=True)
+        assert not mount_res_1.get("Bypassed") and mount_res_1.get("Applied") == 2 and not mount_res_1.get("Background"), f"1st insert repair failed: {mount_res_1}"
+        assert mount_res_2.get("Bypassed") and mount_res_2.get("Applied", 0) == 0 and not mount_res_2.get("Background"), f"2nd insert did not bypass: {mount_res_2}"
+
+        (sdir_a / "tmp/engine_runguard.lock").unlink(missing_ok=True)
+        (sdir_a / "data/enginex/ui/boot-ready").unlink(missing_ok=True)
+        subprocess.run(twin.ns_chroot_cmd("A", "/etc/enginex/engine-ui-guard pre"), check=True)
+        eng_log_a = open(sdir_a / "logs/engine.log", "a")
+        eng_cmd_a = (
+            "exec /usr/bin/env "
+            "HOME=/tmp/home "
+            "LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf:/usr/lib:/usr/qt/lib "
+            "LD_PRELOAD=/tmp/alsa-null-fixture.so:/etc/enginex/libengine-ui-hook.so "
+            "SBX_CARD=JP07 SBX_OUT=4 SBX_IN=2 SBX_CLOCK_HZ=48000 SBX_HEADLESS_VSYNC=1 "
+            "QT_QPA_PLATFORM=eglfs QT_QPA_EGLFS_INTEGRATION=eglfs_kms "
+            "LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe LP_NUM_THREADS=2 "
+            "QML_DISABLE_DISK_CACHE=1 QML_XHR_ALLOW_FILE_READ=1 MALLOC_ARENA_MAX=1 "
+            "/usr/Engine/Engine -d0 -extraDriveDir=/media/RB_ONDEMAND -extraDriveDir=/media/STOCK_USB"
+        )
+        proc_eng_a = subprocess.Popen(twin.ns_chroot_cmd("A", eng_cmd_a), stdout=eng_log_a, stderr=subprocess.STDOUT)
+        (sdir_a / "engine.pid").write_text(str(proc_eng_a.pid))
+        wait_ui_pack_ready("A")
+        time.sleep(2.5)
+        select_source("B", "STOCK_USB", min_rows=1, must_contain="Stock Track")
+        select_source("B", "RB_ONDEMAND", min_rows=9, must_contain="RB Case9")
+
+        # CASE 8: Insert-time repair of stock-OA-overwritten rekordbox rows (8a local on A + 8b Link on B, 0 LAN).
+        # 8a: Local load on Unit A of Case 6's repaired row.
         twin.ev("A", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck1").url="file:///media/RB_ONDEMAND/Contents/RBOD/case6-hang.wav"; "ok"')
-        wait_for(lambda: (s := deck_info("A", 1))["loaded"] and s["analyzed"] and s["fn"] == "case6-hang.wav" and s, timeout=30, label="Case 8a local repair on A")
+        wait_for(lambda: (s := deck_info("A", 1))["loaded"] and s["analyzed"] and s["fn"] == "case6-hang.wav" and s, timeout=30, label="Case 8a local load on A")
         time.sleep(1.0)
         st8a = deck_info("A", 1)
         row8a = read_mdb_row(rb_mdb, "case6-hang.wav")
@@ -1081,10 +1142,10 @@ def main():
         twin.ev("A", 'var t=root.rtTr("/Engine/Deck1/Track/EjectTrack"); if(t) t.state=true; "eject"')
         time.sleep(0.6)
 
-        # 8b: Link repair on Unit B of Case 8's stock-OA row, followed by 2nd load proving 0 LAN calls.
+        # 8b: Link load on Unit B of Case 8's repaired row (0 LAN on-demand calls, 0 B OA).
         lan0 = count_peer_reqs(lan_log)
         t_ld8b, t_an8b, st8b = load_b_row("RB Case8", "case8-linkrep.wav")
-        time.sleep(1.2)
+        time.sleep(1.0)
         st8b = deck_info("B", 2)
         lan8b_1 = count_peer_reqs(lan_log) - lan0
         row8b = read_mdb_row(rb_mdb, "case8-linkrep.wav")
@@ -1095,15 +1156,15 @@ def main():
         load_b_row("RB Case8", "case8-linkrep.wav")
         time.sleep(0.6)
         lan8b_2 = count_peer_reqs(lan_log) - lan1
-        filled_ids8 = read_filled_ids(a_filled_path)
         rec8 = {
-            "case": "8. Step 3 repair stock-OA rows (8a local + 8b Link)",
+            "case": "8. Step 3 insert-time repair (8a local + 8b Link, 0 LAN)",
+            "insert_applied_1": mount_res_1.get("Applied", 0),
+            "insert_bypassed_2": bool(mount_res_2.get("Bypassed")),
             "local_b0_ms": row8a["beat"]["b0_ms"] if row8a and row8a["beat"] else None,
             "local_pqtz_err_ms": round(err8a, 3),
             "local_n_def": row8a["beat"]["n_def"] if row8a and row8a["beat"] else 0,
             "local_cue1": st8a["cue1"],
             "local_cue_kept": st8a["cue1"] == "Case6Cue" and abs(st8a["cue1pos"] - 44100) <= 5,
-            "local_filled_jsonl": 5 in filled_ids8,
             "link_load_ms": t_ld8b,
             "link_analyzed_ms": t_an8b,
             "link_b0_ms": row8b["beat"]["b0_ms"] if row8b and row8b["beat"] else None,
@@ -1111,17 +1172,16 @@ def main():
             "link_n_def": row8b["beat"]["n_def"] if row8b and row8b["beat"] else 0,
             "link_cue1": st8b["cue1"],
             "link_cue_kept": st8b["cue1"] == "Case8Cue" and abs(st8b["cue1pos"] - 44100) <= 5,
-            "link_filled_jsonl": 8 in filled_ids8,
             "link_lan_reqs_1": lan8b_1,
             "link_lan_reqs_2": lan8b_2,
         }
         results.append(rec8)
         print("CASE 8:", json.dumps(rec8), flush=True)
-        assert err8a <= 0.15 and rec8["local_n_def"] >= 20 and rec8["local_cue_kept"] and rec8["local_filled_jsonl"], f"Case 8a failed: {rec8}"
-        assert err8b <= 0.15 and rec8["link_n_def"] >= 20 and rec8["link_cue_kept"] and rec8["link_filled_jsonl"], f"Case 8b failed: {rec8}"
-        assert lan8b_1 == 1 and lan8b_2 == 0, f"Case 8b LAN counts wrong: {rec8}"
+        assert err8a <= 0.15 and rec8["local_n_def"] >= 20 and rec8["local_cue_kept"], f"Case 8a failed: {rec8}"
+        assert err8b <= 0.15 and rec8["link_n_def"] >= 20 and rec8["link_cue_kept"], f"Case 8b failed: {rec8}"
+        assert lan8b_1 == 0 and lan8b_2 == 0, f"Case 8b unexpectedly used LAN on already-repaired row: {rec8}"
 
-        # CASE 9: DJ-edited stock-OA row (Hot Cue 1 "DJ Keep" at 220500) is NEVER overwritten on Link or local reload!
+        # CASE 9: DJ-edited stock-OA row (Hot Cue 1 "DJKeep" at 220500) is NEVER overwritten at insert or Link/local reload!
         twin.ev("B", 'var t=root.rtTr("/Engine/Deck2/Track/EjectTrack"); if(t) t.state=true; "eject"')
         time.sleep(0.5)
         lan9_0 = count_peer_reqs(lan_log)
@@ -1132,21 +1192,19 @@ def main():
         row9_after_b = read_mdb_row(rb_mdb, "case9-djkeep.wav")
         twin.ev("B", 'var t=root.rtTr("/Engine/Deck2/Track/EjectTrack"); if(t) t.state=true; "eject"')
         time.sleep(0.5)
-        # 2nd Link load hits 60 s not_repairable negative cache -> 0 LAN!
         lan9_re = count_peer_reqs(lan_log)
         load_b_row("RB Case9", "case9-djkeep.wav")
         time.sleep(0.6)
         lan9_2 = count_peer_reqs(lan_log) - lan9_re
         twin.ev("B", 'var t=root.rtTr("/Engine/Deck2/Track/EjectTrack"); if(t) t.state=true; "eject"')
         time.sleep(0.5)
-        # Local reload on A also leaves DJ edit completely untouched!
         twin.ev("A", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck1").url="file:///media/RB_ONDEMAND/Contents/RBOD/case9-djkeep.wav"; "ok"')
         wait_for(lambda: (s := deck_info("A", 1))["loaded"] and s["analyzed"] and s["fn"] == "case9-djkeep.wav" and s, timeout=30, label="Case 9 local reload on A")
         time.sleep(0.8)
         st9_a = deck_info("A", 1)
         row9_after_a = read_mdb_row(rb_mdb, "case9-djkeep.wav")
         rec9 = {
-            "case": "9. Step 3 DJ-edited stock-OA row untouched (Link + local)",
+            "case": "9. Step 3 DJ-edited stock-OA row untouched (insert + Link + local)",
             "qc_before": qc9_before,
             "qc_after_dj": row9_dj["qc"],
             "n_def_after_b": row9_after_b["beat"]["n_def"] if row9_after_b and row9_after_b["beat"] else 0,
@@ -1168,11 +1226,12 @@ def main():
         results.append(rec9)
         print("CASE 9:", json.dumps(rec9), flush=True)
         assert rec9["n_def_after_b"] <= 4 and rec9["n_def_after_a"] <= 4 and rec9["dj_cue_preserved"] and not rec9["filled_jsonl"], f"Case 9 overwrote DJ edit: {rec9}"
-        assert lan9_2 == 0, f"Case 9 2nd load did not hit not_repairable cache: {rec9}"
+        assert lan9_1 == 0 and lan9_2 == 0, f"Case 9 unexpectedly triggered LAN on DJ-edited row: {rec9}"
         twin.ev("A", 'var t=root.rtTr("/Engine/Deck1/Track/EjectTrack"); if(t) t.state=true; "eject"')
         time.sleep(0.5)
 
         # CASE 7: Older/non-EngineX peer (verified via /peer/decks, 404/405 without X-RB-Status -> peer_unsupported cached -> 2nd load 0 LAN)
+        a_link_uuid = twin.ev("A", '(root.scTr("/Network/NetworkId") || {string:""}).string').strip()
         old_log = twin.WORK / "stub-old.log"
         stub_proc = start_stub_http_in_a("older404", old_log, a_link_uuid)
         restart_stream_sync("B")

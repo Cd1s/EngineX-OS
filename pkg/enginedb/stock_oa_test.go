@@ -450,6 +450,15 @@ func TestStockRepairProvenanceAndScan(t *testing.T) {
 	}) {
 		t.Fatal("untouched OnDemand mount baseline Synced rejected")
 	}
+	// Maintainer restore rule: idle-settled row (PerfNone, Built.ANLZ==0, Written==nil,
+	// SyncedColorTag==nil, !InFilledJournal, Synced==SyncedDigest(cur)) MUST be allowed.
+	idleSettled := SyncedDigest(nil, qcAutoBeat0, emptyLoops, 0, "House", "", "")
+	if !StockRepairProvenanceAllowed(StockRepairProvenance{
+		PerfState: rbstate.PerfNone, Edit: 1795690063, Synced: idleSettled, Genre: "House",
+		CurCues: qcAutoBeat0, CurLoops: emptyLoops,
+	}) {
+		t.Fatal("maintainer-approved idle-settled provenance rejected")
+	}
 	for _, tc := range []struct {
 		name string
 		prov StockRepairProvenance
@@ -457,16 +466,15 @@ func TestStockRepairProvenanceAndScan(t *testing.T) {
 		{"native", StockRepairProvenance{Native: true}},
 		{"perf_applied", StockRepairProvenance{PerfState: rbstate.PerfApplied}},
 		{"perf_deck", StockRepairProvenance{PerfState: rbstate.PerfDeck}},
+		{"perf_degraded", StockRepairProvenance{PerfState: rbstate.PerfDegraded}},
 		{"perf_missing", StockRepairProvenance{PerfState: rbstate.PerfMissing}},
-		{"written", StockRepairProvenance{Written: []byte{1, 2, 3}}},
-		{"built_anlz", StockRepairProvenance{HasBuiltANLZ: true}},
-		{"synced_color_tag", StockRepairProvenance{HasSyncedColorTag: true}},
-		{"edit_nonzero", StockRepairProvenance{Edit: 1795690063, Synced: mountBaseline, Genre: "House"}},
-		{"synced_writeback", StockRepairProvenance{Synced: []byte{1, 2, 3, 4}, Genre: "House"}},
-		{"synced_idle_settled_strict", StockRepairProvenance{
-			Synced: SyncedDigest(nil, qcAutoBeat0, emptyLoops, 0, "House", "", ""), Genre: "House",
-			CurCues: qcAutoBeat0, CurLoops: emptyLoops,
-		}},
+		{"written", StockRepairProvenance{Written: []byte{1, 2, 3}, Synced: idleSettled, Genre: "House", CurCues: qcAutoBeat0, CurLoops: emptyLoops}},
+		{"built_anlz", StockRepairProvenance{HasBuiltANLZ: true, Synced: idleSettled, Genre: "House", CurCues: qcAutoBeat0, CurLoops: emptyLoops}},
+		{"synced_color_tag", StockRepairProvenance{HasSyncedColorTag: true, Synced: idleSettled, Genre: "House", CurCues: qcAutoBeat0, CurLoops: emptyLoops}},
+		{"in_filled_journal", StockRepairProvenance{InFilledJournal: true, Synced: idleSettled, Genre: "House", CurCues: qcAutoBeat0, CurLoops: emptyLoops}},
+		{"edit_nonzero_no_synced", StockRepairProvenance{Edit: 1795690063, Genre: "House"}},
+		{"edit_nonzero_stale_mount_baseline", StockRepairProvenance{Edit: 1795690063, Synced: mountBaseline, Genre: "House", CurCues: qcAutoBeat0, CurLoops: emptyLoops}},
+		{"synced_writeback_mismatch", StockRepairProvenance{Edit: 1795690063, Synced: []byte{1, 2, 3, 4}, Genre: "House", CurCues: qcAutoBeat0, CurLoops: emptyLoops}},
 	} {
 		if StockRepairProvenanceAllowed(tc.prov) {
 			t.Fatalf("provenance case %q unexpectedly allowed", tc.name)

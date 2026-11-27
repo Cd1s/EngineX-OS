@@ -301,9 +301,9 @@ func loopSlotStrictlyEmpty(slot []byte) bool {
 }
 
 // StockRepairProvenance holds the snapshot provenance fields for a rekordbox-converted
-// row before deciding whether it may be repaired from rekordbox data. Both the on-load
-// hook path (pkg/webui) and the Gen-2 64-bit mount/apply paths (pkg/bridge, pkg/enginedb)
-// call StockRepairProvenanceAllowed so any provenance policy update lives in one place.
+// row before deciding whether it may be repaired from rekordbox data at USB insert
+// (or during background ApplyPerformance). One single function, StockRepairProvenanceAllowed,
+// governs all 16 models (both arm32 OnDemand and arm64 Gen-2).
 type StockRepairProvenance struct {
 	Native            bool
 	PerfState         rbstate.PerfState
@@ -312,6 +312,7 @@ type StockRepairProvenance struct {
 	Synced            []byte
 	HasBuiltANLZ      bool
 	HasSyncedColorTag bool
+	InFilledJournal   bool
 	FastCues          []byte
 	FastLoops         []byte
 	FastActive        uint32
@@ -323,9 +324,9 @@ type StockRepairProvenance struct {
 	CurActiveLoops    int64
 }
 
-// TrackRepairProvenance builds a StockRepairProvenance from a snapshot track and the
-// live m.db row's editable tag and cue/loop fields.
-func TrackRepairProvenance(t *rbstate.Track, genre, comment, label string, curCues, curLoops []byte, curActive int64) StockRepairProvenance {
+// TrackRepairProvenance builds a StockRepairProvenance from a snapshot track, whether
+// the row is recorded in filled.jsonl, and the live m.db row's tag and cue/loop fields.
+func TrackRepairProvenance(t *rbstate.Track, inFilled bool, genre, comment, label string, curCues, curLoops []byte, curActive int64) StockRepairProvenance {
 	if t == nil {
 		return StockRepairProvenance{Native: true}
 	}
@@ -336,7 +337,8 @@ func TrackRepairProvenance(t *rbstate.Track, genre, comment, label string, curCu
 		Edit:              t.Edit,
 		Synced:            t.Synced,
 		HasBuiltANLZ:      len(t.Built.ANLZ) > 0,
-		HasSyncedColorTag: len(t.SyncedColorTag) > 0,
+		HasSyncedColorTag: len(t.SyncedColorTag) > 0 || len(t.SyncedHotColors) > 0 || len(t.SyncedLoopColors) > 0,
+		InFilledJournal:   inFilled,
 		FastCues:          t.FastCues,
 		FastLoops:         t.FastLoops,
 		FastActive:        t.FastActive,
@@ -349,27 +351,37 @@ func TrackRepairProvenance(t *rbstate.Track, genre, comment, label string, curCu
 	}
 }
 
-// StockRepairProvenanceAllowed is the single shared provenance gate for stock-Engine
-// overwrite repair across all models (arm32 on-load hook and arm64 Gen-2 mount/apply).
+// StockRepairProvenanceAllowed is the single shared provenance gate for one-time
+// insert-time repair of old-version stock-Engine overwrites across all 16 models.
 //
-// Strict rule: reject native tracks, bridge-applied/deck-owned/missing states, any
-// Written digest, any previously built ANLZ signature, any synced color tag, any
-// non-zero write-back Edit timestamp, or any Synced digest other than the untouched
-// mount-time OnDemand baseline written by ConvertAtMount.
+// Rejects any native Engine track, any PerfState != PerfNone (PerfApplied/PerfDeck/
+// PerfDegraded/PerfMissing), any Written digest, any previously built ANLZ signature,
+// any synced color tag, and any row already filled in filled.jsonl.
+//
+// Allows:
+//  1. Untouched PerfNone rows with Edit == 0 and either Synced == nil or Synced matching
+//     the mount-time OnDemand baseline.
+//  2. Idle-settled rows (maintainer restore rule): #321 write-back's idle watcher recorded
+//     the stock-OA row without writing anything back (Perf == PerfNone, Built.ANLZ == 0,
+//     Written == nil, SyncedColorTag == nil, !InFilledJournal, Synced == SyncedDigest(cur)).
 func StockRepairProvenanceAllowed(p StockRepairProvenance) bool {
 	if p.Native ||
-		p.PerfState == rbstate.PerfDeck || p.PerfState == rbstate.PerfApplied || p.PerfState == rbstate.PerfMissing ||
-		len(p.Written) > 0 || p.Edit != 0 ||
-		p.HasBuiltANLZ || p.HasSyncedColorTag {
+		p.PerfState != rbstate.PerfNone ||
+		len(p.Written) > 0 ||
+		p.HasBuiltANLZ || p.HasSyncedColorTag || p.InFilledJournal {
 		return false
 	}
-	if len(p.Synced) > 0 {
+	if len(p.Synced) == 0 {
+		return p.Edit == 0
+	}
+	if p.Edit == 0 {
 		mountBaseline := SyncedDigest(nil, p.FastCues, p.FastLoops, int64(p.FastActive), p.Genre, p.Comment, p.Label)
-		if !bytes.Equal(p.Synced, mountBaseline) {
-			return false
+		if bytes.Equal(p.Synced, mountBaseline) {
+			return true
 		}
 	}
-	return true
+	curDigest := SyncedDigest(nil, p.CurCues, p.CurLoops, p.CurActiveLoops, p.Genre, p.Comment, p.Label)
+	return bytes.Equal(p.Synced, curDigest)
 }
 
 // IsRepairableStockOverwritten is the single shared gate requiring both clean snapshot

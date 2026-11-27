@@ -1,12 +1,9 @@
 package webui
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,13 +51,7 @@ type rbOnDemandRequest struct {
 	Key       *int    `json:"key,omitempty"`       // Track.key (0..23) or omitted/null
 	BPM       float64 `json:"bpm,omitempty"`       // Track.bpm / bpmAnalyzed
 	Length    int     `json:"length,omitempty"`
-	Repair    bool    `json:"repair,omitempty"`   // true when requesting repair of a stock-OA-overwritten row
-	CurBeats  string  `json:"curBeats,omitempty"` // hex-encoded PerformanceData.beatData observed by hook
-	CurCues   string  `json:"curCues,omitempty"`  // hex-encoded PerformanceData.quickCues observed by hook
-	CurLoops  string  `json:"curLoops,omitempty"` // hex-encoded PerformanceData.loops observed by hook
 }
-
-var errOnDemandNotRepairable = errors.New("row is not an unedited stock-overwritten rekordbox row")
 
 var onDemandChmod = os.Chmod
 
@@ -866,9 +857,6 @@ func writeOnDemandError(w http.ResponseWriter, err error) {
 	case errors.Is(err, errLinkFillNotCommitted):
 		w.Header().Set("X-RB-Status", "not_committed")
 		fail(w, http.StatusConflict, err)
-	case errors.Is(err, errOnDemandNotRepairable):
-		w.Header().Set("X-RB-Status", "not_repairable")
-		fail(w, http.StatusConflict, err)
 	case errors.Is(err, bridge.ErrOnDemandDegraded), errors.Is(err, bridge.ErrOnDemandLimit):
 		w.Header().Set("X-RB-Status", "degraded")
 		fail(w, http.StatusUnprocessableEntity, err)
@@ -881,234 +869,7 @@ func writeOnDemandError(w http.ResponseWriter, err error) {
 	}
 }
 
-func decodeRepairHex(raw string, maxBytes int) ([]byte, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil, nil
-	}
-	if len(raw) > maxBytes*2 {
-		return nil, errOnDemandNotRepairable
-	}
-	b, err := hex.DecodeString(raw)
-	if err != nil {
-		return nil, errOnDemandNotRepairable
-	}
-	return b, nil
-}
-
-// filledJournalMatchesRow reports whether /data/enginex/rb-stage/<uuid>/filled.jsonl already
-// recorded this row's current (beats, cues, loops) digests as filled by EngineX.
-func (s *Server) filledJournalMatchesRow(ctx context.Context, uuid string, engineID int64, beats, cues, loops []byte) bool {
-	if !validRBStageUUID(uuid) || engineID <= 0 || len(beats) == 0 {
-		return false
-	}
-	root, err := s.rbStageRoot()
-	if err != nil {
-		return false
-	}
-	f, err := os.Open(filepath.Join(root, uuid, "filled.jsonl"))
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	norm := base64.StdEncoding.EncodeToString(enginedb.WrittenDigest(beats, cues, loops))
-	raw := base64.StdEncoding.EncodeToString(enginedb.RawWrittenDigest(beats, cues, loops))
-	noMain := base64.StdEncoding.EncodeToString(linkWrittenDigestNoMain(beats, cues, loops))
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 8<<10), 256<<10)
-	n := 0
-	for sc.Scan() {
-		n++
-		if n&63 == 0 && ctx.Err() != nil {
-			return false
-		}
-		var ln rbFilledJournalLine
-		if json.Unmarshal(sc.Bytes(), &ln) != nil || ln.ID != engineID {
-			continue
-		}
-		if ln.WR != "" && (ln.WR == norm || ln.WR == raw) {
-			return true
-		}
-		if ln.WRNM != "" && ln.WRNM == noMain {
-			return true
-		}
-	}
-	return false
-}
-
-func lockRepairVolume(mount string) (func(), error) {
-	unlock, err := rbstate.LockVolume(mount, 0)
-	if err != nil {
-		if errors.Is(err, rbstate.ErrLocked) {
-			return nil, bridge.ErrOnDemandUnavailable
-		}
-		return nil, err
-	}
-	return unlock, nil
-}
-
-// verifyRepairCandidate inspects the live m.db row on the stick holder and verifies that it is
-// an unedited stock-Engine-overwritten rekordbox row (never DJ-edited, never filled by us,
-// never synced by #321 write-back, never a stock Engine track) and matches the exact blobs
-// observed by the caller hook. Callers must hold lockRepairVolume(mount).
-func (s *Server) verifyRepairCandidate(ctx context.Context, mount, libUUID, enginePath string, engineID, requireImportKey int64, curBeatsHex, curCuesHex, curLoopsHex string) error {
-	curBeats, err := decodeRepairHex(curBeatsHex, 256)
-	if err != nil {
-		return err
-	}
-	curCues, err := decodeRepairHex(curCuesHex, 512)
-	if err != nil {
-		return err
-	}
-	curLoops, err := decodeRepairHex(curLoopsHex, 768)
-	if err != nil {
-		return err
-	}
-	if len(curBeats) == 0 && len(curCues) == 0 && len(curLoops) == 0 {
-		return errOnDemandNotRepairable
-	}
-	b := s.rbOnDemandBuilder()
-	if b == nil {
-		return bridge.ErrOnDemandUnavailable
-	}
-	stickID, err := b.InspectIdentity(ctx, bridge.OnDemandRequest{
-		Mount:      mount,
-		UUID:       libUUID,
-		EnginePath: enginePath,
-		EngineID:   engineID,
-		EngineKey:  -1,
-	})
-	if err != nil {
-		return err
-	}
-
-	mdb := filepath.Join(stickID.Mount, "Engine Library", "Database2", "m.db")
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
-	if err != nil {
-		return bridge.ErrOnDemandUnavailable
-	}
-	defer db.Close()
-
-	var liveUUID string
-	if err := db.QueryRowContext(ctx, `SELECT coalesce(uuid, '') FROM Information LIMIT 1`).Scan(&liveUUID); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return context.DeadlineExceeded
-		}
-		if errors.Is(err, sql.ErrNoRows) {
-			return bridge.ErrOnDemandUUIDMismatch
-		}
-		return bridge.ErrOnDemandUnavailable
-	}
-	liveUUID = strings.TrimSpace(liveUUID)
-	if liveUUID == "" || liveUUID != stickID.SnapshotUUID || (libUUID != "" && liveUUID != libUUID) {
-		return bridge.ErrOnDemandUUIDMismatch
-	}
-
-	var (
-		rowID, importKey      int64
-		rowPath               string
-		genre, comment, label string
-		lockedVal             int
-		row                   enginedb.StockOverwrittenRow
-	)
-	queryByID := `
-		SELECT t.id, t.path, COALESCE(t.pdbImportKey, 0), COALESCE(t.isBeatGridLocked, 0),
-		       COALESCE(t.genre, ''), COALESCE(t.comment, ''), COALESCE(t.label, ''),
-		       p.trackData, p.overviewWaveFormData, p.beatData, p.quickCues, p.loops,
-		       COALESCE(p.activeOnLoadLoops, 0), p.thirdPartySourceId
-		FROM Track t
-		JOIN PerformanceData p ON p.trackId = t.id
-		WHERE t.id = ? LIMIT 1`
-	queryByPath := `
-		SELECT t.id, t.path, COALESCE(t.pdbImportKey, 0), COALESCE(t.isBeatGridLocked, 0),
-		       COALESCE(t.genre, ''), COALESCE(t.comment, ''), COALESCE(t.label, ''),
-		       p.trackData, p.overviewWaveFormData, p.beatData, p.quickCues, p.loops,
-		       COALESCE(p.activeOnLoadLoops, 0), p.thirdPartySourceId
-		FROM Track t
-		JOIN PerformanceData p ON p.trackId = t.id
-		WHERE t.path = ? OR t.path = ? ORDER BY t.id DESC LIMIT 1`
-	var qerr error
-	if engineID > 0 {
-		qerr = db.QueryRowContext(ctx, queryByID, engineID).Scan(
-			&rowID, &rowPath, &importKey, &lockedVal,
-			&genre, &comment, &label,
-			&row.TrackData, &row.Overview, &row.Beats, &row.QuickCues, &row.Loops,
-			&row.ActiveOnLoadLoops, &row.ThirdPartySourceID,
-		)
-	} else {
-		qerr = db.QueryRowContext(ctx, queryByPath, "../"+stickID.TrackRel, stickID.TrackRel).Scan(
-			&rowID, &rowPath, &importKey, &lockedVal,
-			&genre, &comment, &label,
-			&row.TrackData, &row.Overview, &row.Beats, &row.QuickCues, &row.Loops,
-			&row.ActiveOnLoadLoops, &row.ThirdPartySourceID,
-		)
-	}
-	if qerr != nil {
-		if errors.Is(qerr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return context.DeadlineExceeded
-		}
-		if errors.Is(qerr, sql.ErrNoRows) {
-			return bridge.ErrOnDemandNotFound
-		}
-		return bridge.ErrOnDemandUnavailable
-	}
-	cleanRow := strings.TrimPrefix(strings.ReplaceAll(strings.TrimSpace(rowPath), "\\", "/"), "../")
-	cleanRow = strings.TrimPrefix(path.Clean("/"+cleanRow), "/")
-	if rbstate.FoldPath(cleanRow) != stickID.TrackKey {
-		return bridge.ErrOnDemandNotFound
-	}
-	if importKey <= 0 || (requireImportKey > 0 && importKey != requireImportKey) {
-		return bridge.ErrOnDemandNotFound
-	}
-	row.BeatGridLocked = lockedVal != 0
-	row.FastKnown = stickID.FastKnown
-	row.FastCues = stickID.FastCues
-	row.FastLoops = stickID.FastLoops
-	row.FastActive = stickID.FastActive
-	prov := enginedb.StockRepairProvenance{
-		PerfState:         stickID.PerfState,
-		Written:           stickID.Written,
-		Edit:              stickID.Edit,
-		Synced:            stickID.Synced,
-		HasBuiltANLZ:      stickID.HasBuiltANLZ,
-		HasSyncedColorTag: stickID.HasSyncedColorTag,
-		FastCues:          stickID.FastCues,
-		FastLoops:         stickID.FastLoops,
-		FastActive:        stickID.FastActive,
-		Genre:             genre,
-		Comment:           comment,
-		Label:             label,
-		CurCues:           row.QuickCues,
-		CurLoops:          row.Loops,
-		CurActiveLoops:    row.ActiveOnLoadLoops,
-	}
-	if !enginedb.IsRepairableStockOverwritten(row, prov) {
-		return errOnDemandNotRepairable
-	}
-	// Unconditionally require the caller hook's observed blobs to match m.db byte-for-byte
-	// so stale or concurrent edits can never slip through.
-	if !bytes.Equal(row.Beats, curBeats) || !bytes.Equal(row.QuickCues, curCues) || !bytes.Equal(row.Loops, curLoops) {
-		return errOnDemandNotRepairable
-	}
-	if s.filledJournalMatchesRow(ctx, liveUUID, rowID, row.Beats, row.QuickCues, row.Loops) {
-		return errOnDemandNotRepairable
-	}
-	return nil
-}
-
-func rbxa1FirstBPM(rbxa1 []byte) float64 {
-	dec, err := rbstate.DecodePerf(rbxa1)
-	if err != nil || !dec.Complete || len(dec.Beats) == 0 {
-		return 0
-	}
-	return enginedb.BeatDataFirstBPM(dec.Beats)
-}
-
 func writeOnDemandRBXA1(w http.ResponseWriter, res *bridge.OnDemandResult, libUUID, ownLink string) {
-	writeOnDemandRBXA1WithRepair(w, res, libUUID, ownLink, false)
-}
-
-func writeOnDemandRBXA1WithRepair(w http.ResponseWriter, res *bridge.OnDemandResult, libUUID, ownLink string, repair bool) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.Itoa(len(res.RBXA1)))
 	if libUUID != "" {
@@ -1116,12 +877,6 @@ func writeOnDemandRBXA1WithRepair(w http.ResponseWriter, res *bridge.OnDemandRes
 	}
 	if ownLink != "" {
 		w.Header().Set("X-RB-Owner", ownLink)
-	}
-	if repair {
-		w.Header().Set("X-RB-Repair", "1")
-		if bpm := rbxa1FirstBPM(res.RBXA1); bpm > 0 {
-			w.Header().Set("X-RB-BPM", fmt.Sprintf("%.4f", bpm))
-		}
 	}
 	w.Header().Set("X-RB-Key", res.Key)
 	w.Header().Set("X-RB-Written", base64.StdEncoding.EncodeToString(res.Written))
@@ -1144,7 +899,7 @@ func (s *Server) serveRekordboxOnDemand(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	var req rbOnDemandRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
@@ -1161,19 +916,6 @@ func (s *Server) serveRekordboxOnDemand(w http.ResponseWriter, r *http.Request, 
 		w.Header().Set("X-RB-Status", "not_found")
 		fail(w, http.StatusNotFound, errors.New("volume not found"))
 		return
-	}
-
-	if req.Repair {
-		unlock, err := lockRepairVolume(mount)
-		if err != nil {
-			writeOnDemandError(w, err)
-			return
-		}
-		defer unlock()
-		if err := s.verifyRepairCandidate(r.Context(), mount, strings.TrimSpace(req.UUID), req.Path, req.ID, req.ImportKey, req.CurBeats, req.CurCues, req.CurLoops); err != nil {
-			writeOnDemandError(w, err)
-			return
-		}
 	}
 
 	engineKey := -1
@@ -1193,5 +935,5 @@ func (s *Server) serveRekordboxOnDemand(w http.ResponseWriter, r *http.Request, 
 		writeOnDemandError(w, err)
 		return
 	}
-	writeOnDemandRBXA1WithRepair(w, res, strings.TrimSpace(req.UUID), "", req.Repair)
+	writeOnDemandRBXA1(w, res, strings.TrimSpace(req.UUID), "")
 }

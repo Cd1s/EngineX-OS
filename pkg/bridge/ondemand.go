@@ -105,31 +105,21 @@ type OnDemandFileID struct {
 // OnDemandStickIdentity pins the mounted volume, bridge snapshot generation, live m.db file,
 // Device Library exports, audio file, ANLZ sidecars, and resolved track entry.
 type OnDemandStickIdentity struct {
-	Mount             string
-	MountDev          uint64
-	MountMntID        uint64
-	MountIno          uint64
-	SnapshotUUID      string
-	SnapFile          OnDemandFileID
-	DBFile            OnDemandFileID
-	ExportDB          OnDemandFileID
-	ExportPDB         OnDemandFileID
-	AudioFile         OnDemandFileID
-	ANLZFiles         [3]OnDemandFileID
-	TrackKey          string
-	TrackRel          string
-	EngineID          int64
-	RowHash           string
-	FastKnown         bool
-	FastCues          []byte
-	FastLoops         []byte
-	FastActive        uint32
-	PerfState         rbstate.PerfState
-	Written           []byte
-	Synced            []byte
-	Edit              int64
-	HasBuiltANLZ      bool
-	HasSyncedColorTag bool
+	Mount        string
+	MountDev     uint64
+	MountMntID   uint64
+	MountIno     uint64
+	SnapshotUUID string
+	SnapFile     OnDemandFileID
+	DBFile       OnDemandFileID
+	ExportDB     OnDemandFileID
+	ExportPDB    OnDemandFileID
+	AudioFile    OnDemandFileID
+	ANLZFiles    [3]OnDemandFileID
+	TrackKey     string
+	TrackRel     string
+	EngineID     int64
+	RowHash      string
 }
 
 type pinnedMountKey struct {
@@ -790,31 +780,21 @@ func (b *OnDemandBuilder) InspectIdentity(ctx context.Context, req OnDemandReque
 		return OnDemandStickIdentity{}, err
 	}
 	return OnDemandStickIdentity{
-		Mount:             mount,
-		MountDev:          pinnedKey.dev,
-		MountMntID:        pinnedKey.mntID,
-		MountIno:          pinnedKey.ino,
-		SnapshotUUID:      snap.LibraryUUID,
-		SnapFile:          snapID,
-		DBFile:            dbID,
-		ExportDB:          expDBID,
-		ExportPDB:         expPDBID,
-		AudioFile:         audioID,
-		ANLZFiles:         anlzIDs,
-		TrackKey:          tr.Key,
-		TrackRel:          audioRel,
-		EngineID:          tr.EngineID,
-		RowHash:           tr.Row,
-		FastKnown:         tr.FastKnown,
-		FastCues:          tr.FastCues,
-		FastLoops:         tr.FastLoops,
-		FastActive:        tr.FastActive,
-		PerfState:         tr.Perf,
-		Written:           tr.Written,
-		Synced:            tr.Synced,
-		Edit:              tr.Edit,
-		HasBuiltANLZ:      len(tr.Built.ANLZ) > 0,
-		HasSyncedColorTag: len(tr.SyncedColorTag) > 0,
+		Mount:        mount,
+		MountDev:     pinnedKey.dev,
+		MountMntID:   pinnedKey.mntID,
+		MountIno:     pinnedKey.ino,
+		SnapshotUUID: snap.LibraryUUID,
+		SnapFile:     snapID,
+		DBFile:       dbID,
+		ExportDB:     expDBID,
+		ExportPDB:    expPDBID,
+		AudioFile:    audioID,
+		ANLZFiles:    anlzIDs,
+		TrackKey:     tr.Key,
+		TrackRel:     audioRel,
+		EngineID:     tr.EngineID,
+		RowHash:      tr.Row,
 	}, nil
 }
 

@@ -191,7 +191,7 @@ func (w *window) run() (err error) {
 	if err == nil && !w.o.OnDemand && !w.left && (w.next || w.o.Publish || w.st.kill.IsZero()) {
 		err = w.applyStaged()
 	}
-	if err == nil && !w.o.OnDemand && !w.next && !w.built && !w.left && w.lib != nil {
+	if err == nil && !w.next && !w.built && !w.left && w.lib != nil {
 		err = w.repairStockOverwritten()
 	}
 	if err == nil && (!w.left || w.st.fits(work{commits: 1, tracks: n})) {
@@ -1206,6 +1206,8 @@ func (w *window) applyStaged() error {
 		} else {
 			p := &full.Perf
 			perf := enginedb.Performance{TrackData: p.TrackData, Overview: p.Overview, Beats: p.Beats, QuickCues: p.QuickCues, Loops: p.Loops, ActiveLoops: p.ActiveLoops, Complete: p.Complete, Digest: e.Digest}
+			f, inFilled := filled[key]
+			matchedFilled := inFilled && (f.EngineID == 0 || f.EngineID == t.EngineID)
 			prev := enginedb.PerfPrev{
 				State:             t.Perf,
 				Written:           t.Written,
@@ -1216,9 +1218,10 @@ func (w *window) applyStaged() error {
 				Edit:              t.Edit,
 				Synced:            t.Synced,
 				HasBuiltANLZ:      prevBuiltANLZ,
-				HasSyncedColorTag: len(t.SyncedColorTag) > 0,
+				HasSyncedColorTag: len(t.SyncedColorTag) > 0 || len(t.SyncedHotColors) > 0 || len(t.SyncedLoopColors) > 0,
+				InFilledJournal:   matchedFilled,
 			}
-			if f, ok := filled[key]; ok && f.EngineID == t.EngineID && prev.Written == nil && prev.State != rbstate.PerfDeck {
+			if inFilled && f.EngineID == t.EngineID && prev.Written == nil && prev.State != rbstate.PerfDeck {
 				prev.Written = f.Written // the UI hook filled the row from the stage: the bridge's data, as if a window had written it
 			}
 			digest, outcome, err := b.ApplyPerformance(w.ctx, t.EngineID, perf, full.Facts, prev, vt.Track)
