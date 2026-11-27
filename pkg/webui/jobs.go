@@ -259,12 +259,11 @@ func (j *Jobs) loadSources() map[string]string {
 			if b, err := os.ReadFile(filepath.Join(j.p.Deemix.DownloadDir, sourcesFile)); err == nil {
 				json.Unmarshal(b, &j.sources)
 			}
-			// An index from before the root was recorded counts as the current root's, as
-			// 5.3.0.5 used it; the server tags it at startup (adoptSources), so a later
-			// root change hides it like any tagged index (#335).
-			// A Jobs without a server (no root) keeps its index as it is.
-			if root := j.sources[sourcesRootKey]; root != "" && j.nasRoot != "" && root != j.nasRoot {
-				for k := range j.sources { // filed for another NAS root
+			// NAS entries of an index filed for another root, or written before the root was
+			// recorded, are not used (#335; maintainer, 2026-11-27: browse the NAS again once). A Jobs without
+			// a server knows no root and keeps a tagged index as it is.
+			if root := j.sources[sourcesRootKey]; root == "" || (j.nasRoot != "" && root != j.nasRoot) {
+				for k := range j.sources {
 					if isNASKey(k) {
 						delete(j.sources, k)
 					}
@@ -274,28 +273,6 @@ func (j *Jobs) loadSources() map[string]string {
 		}
 	}
 	return j.sources
-}
-
-// adoptSources tags an index written before the NAS root was recorded with the
-// current root; the server runs it before any request (#335). An index tagged for
-// another root is not touched: its NAS entries are not used.
-func (j *Jobs) adoptSources() {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	if j.p.Deemix == nil {
-		return
-	}
-	b, err := os.ReadFile(filepath.Join(j.p.Deemix.DownloadDir, sourcesFile))
-	var saved map[string]string
-	if err != nil || json.Unmarshal(b, &saved) != nil || saved[sourcesRootKey] != "" {
-		return
-	}
-	for k := range j.loadSources() {
-		if isNASKey(k) {
-			j.writeSources()
-			return
-		}
-	}
 }
 
 // saveSource records key's file and drops entries whose file was evicted; j.mu

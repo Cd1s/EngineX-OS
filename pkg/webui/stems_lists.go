@@ -68,7 +68,8 @@ func (s *Server) readStemmed() (map[string][]stemmedTrack, error) {
 
 // loadStemmed is the Stems lists to serve; s.stemsMu must be held. A file that
 // cannot be read in full serves no list (it stays on disk as it is), and a NAS
-// entry serves only for the NAS root it was stemmed from (#335).
+// entry serves only for the NAS root it was stemmed from; one written before the
+// root was recorded is not used (#335; maintainer, 2026-11-27: browse the NAS again once).
 func (s *Server) loadStemmed() map[string][]stemmedTrack {
 	all, err := s.readStemmed()
 	if err != nil {
@@ -76,7 +77,7 @@ func (s *Server) loadStemmed() map[string][]stemmedTrack {
 	}
 	for scope, list := range all {
 		all[scope] = slices.DeleteFunc(list, func(e stemmedTrack) bool {
-			return isNASProvider(e.Track.Provider) && e.NASRoot != s.stemsRoot // untagged: adoptStems
+			return isNASProvider(e.Track.Provider) && (e.NASRoot == "" || e.NASRoot != s.stemsRoot)
 		})
 	}
 	return all
@@ -94,25 +95,22 @@ func dropNASStems(all map[string][]stemmedTrack) bool {
 	return changed
 }
 
-// adoptStems tags the NAS entries written before the root was recorded with the
-// current root, as 5.3.0.5 used them (#335); s.stemsMu must be held. New runs it
-// before any request, so a later root change hides them like any tagged entry.
-func (s *Server) adoptStems() {
+// scrubStems rewrites a Stems file that holds NAS credentials without them:
+// released versions saved cover URLs with the NAS's auth (#335). New runs it
+// before any request, with s.stemsMu held; the entries stay as they are.
+func (s *Server) scrubStems() {
 	all, err := s.readStemmed()
 	if err != nil {
 		return
 	}
-	adopt := false
 	for _, list := range all {
-		for i, e := range list {
-			if isNASProvider(e.Track.Provider) && e.NASRoot == "" {
-				list[i].NASRoot, adopt = s.stemsRoot, true
+		for _, e := range list {
+			if stripTrackAuth(e.Track).CoverURL != e.Track.CoverURL {
+				if err := saveState(s.stemsFile(), stripStemsAuth(all)); err != nil {
+					log.Printf("webui: Stems lists not saved (%T)", err)
+				}
+				return
 			}
-		}
-	}
-	if adopt {
-		if err := saveState(s.stemsFile(), stripStemsAuth(all)); err != nil {
-			log.Printf("webui: Stems lists not saved (%T)", err)
 		}
 	}
 }

@@ -376,7 +376,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	_ = s.appleMusic.Load()
 	s.stemsRoot = nasRootID(s.loadNASConfig()) // before any request
 	s.stemsMu.Lock()
-	s.adoptStems()
+	s.scrubStems() // a released file's credentials go before any request
 	s.stemsMu.Unlock()
 	s.tidal = newTidalGateway(s)
 	s.RegisterTunnelRoutes()
@@ -400,7 +400,6 @@ func New(cfg Config, jobs *Jobs) *Server {
 			jobs.p.Deemix.PreferMP3 = func() bool { return s.quality() == quality320k }
 		}
 		jobs.mu.Unlock()
-		jobs.adoptSources() // before any request (#335)
 	}
 	return s
 }

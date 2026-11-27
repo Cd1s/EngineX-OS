@@ -260,22 +260,15 @@ func (g *tidalGateway) loadTracks(root string) {
 	if err != nil || json.Unmarshal(b, &v) != nil {
 		return
 	}
-	// NAS rows of another root are not used. Those of a file from before the root was
-	// recorded count as the current root's, as 5.3.0.5 used them; the file is tagged
-	// before any request, so a later root change hides them (#335).
-	stale, adopted := v.Root != "" && v.Root != root, false
-	defer func() {
-		if adopted {
-			g.saveTracks()
-		}
-	}()
+	// NAS rows of another root, or of a file from before the root was recorded, are
+	// not used (#335; maintainer, 2026-11-27: browse the NAS again once).
+	stale := v.Root == "" || v.Root != root
 	for _, r := range v.Tracks {
 		g.next = max(g.next, r.ID)
 		ref := trackRef{track: r.Track, session: r.Session, guest: r.Guest, file: r.File, drive: r.Drive}
 		if stale && isNASTrackRef(ref) {
 			continue
 		}
-		adopted = adopted || (v.Root == "" && isNASTrackRef(ref))
 		g.tracks[r.ID], g.ids[refKey(ref)] = ref, r.ID
 		g.seq++
 		g.trackSeen[r.ID] = g.seq
@@ -286,7 +279,6 @@ func (g *tidalGateway) loadTracks(root string) {
 		if stale && isNASListRef(ref) {
 			continue
 		}
-		adopted = adopted || (v.Root == "" && isNASListRef(ref))
 		g.lists[l.ID] = ref
 		g.seq++
 		g.listSeen[l.ID] = g.seq
