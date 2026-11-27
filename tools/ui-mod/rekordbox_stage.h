@@ -1560,7 +1560,7 @@ static int sc_rbs_ondemand_fetch_ex(const char *main_db, const char *uuid, const
     return 0;
 }
 
-static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const struct sc_rbs_row *row,
+__attribute__((unused)) static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const struct sc_rbs_row *row,
                                  long long deadline_ns, struct sc_rbs_line *out_line,
                                  unsigned char **out_body, size_t *out_len, int *http_status) {
     return sc_rbs_ondemand_fetch_ex(main_db, uuid, row, deadline_ns, out_line, out_body, out_len, http_status, NULL);
