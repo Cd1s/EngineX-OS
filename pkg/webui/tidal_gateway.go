@@ -273,16 +273,20 @@ func (g *tidalGateway) loadTracks(root string) {
 	if err == nil {
 		err = json.Unmarshal(b, &v)
 	}
-	tableMax := int64(0)
+	tableMax, tableOK := int64(0), err == nil
 	if err == nil {
-		tableMax = v.Next
+		tableMax = countID(0, v.Next)
 		for _, r := range v.Tracks {
-			tableMax = max(tableMax, r.ID)
+			tableMax = countID(tableMax, r.ID)
+		}
+		if v.Next < 0 || v.Next > maxTrackID || slices.ContainsFunc(v.Tracks, func(r savedRef) bool { return r.ID <= 0 || r.ID > maxTrackID }) {
+			tableOK = false // an ID or counter out of range bounds nothing (#335 round 12)
+			log.Printf("stream-sync: the gateway file holds a track ID or counter out of range: ignored")
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		log.Printf("stream-sync: gateway track IDs cannot be read (%T)", err)
 	}
-	g.loadCeiling(tableMax)
+	g.loadCeiling(tableMax, tableOK)
 	if err != nil {
 		return
 	}
@@ -291,7 +295,6 @@ func (g *tidalGateway) loadTracks(root string) {
 	stale := v.Root == "" || v.Root != root
 	var secrets []string // cover URLs a released file saved with the NAS's auth
 	for _, r := range v.Tracks {
-		g.next = max(g.next, r.ID)
 		if clean := stripTrackAuth(r.Track); clean.CoverURL != r.Track.CoverURL {
 			secrets = append(secrets, r.Track.CoverURL)
 			r.Track = clean
@@ -304,7 +307,6 @@ func (g *tidalGateway) loadTracks(root string) {
 		g.seq++
 		g.trackSeen[r.ID] = g.seq
 	}
-	g.next = max(g.next, v.Next)
 	for _, l := range v.Lists {
 		ref := playlistRef{l.Session, l.Provider, l.List, l.Guest}
 		if stale && isNASListRef(ref) {
