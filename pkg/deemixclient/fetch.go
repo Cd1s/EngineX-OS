@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 const (
@@ -36,11 +38,14 @@ func badName(name string) bool {
 	return name == "" || filepath.Base(name) != name || strings.HasPrefix(name, ".")
 }
 
+// defaultMedia sends no Referer on a redirect, and a request marked as carrying a
+// credential (providers.WithCredential: a signed NAS cover) follows redirects only
+// within its own origin.
 var defaultMedia = func() *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.ResponseHeaderTimeout = mediaFirstByte
 	t.MaxIdleConnsPerHost = partsAtOnce
-	return &http.Client{Transport: t}
+	return &http.Client{Transport: t, CheckRedirect: providers.CheckRedirect(false, nil)}
 }()
 
 var chmodFile = os.Chmod

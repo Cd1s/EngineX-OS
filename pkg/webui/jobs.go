@@ -938,7 +938,8 @@ func (j *Jobs) addCover(ctx context.Context, t providers.Track, dl *deemixclient
 			address = sh.AuthorizeURL(address)
 		}
 	}
-	if err := j.p.Deemix.EmbedCover(ctx, dl.Path, address); err != nil {
+	// A signed NAS cover follows redirects only within its own origin (#335).
+	if err := j.p.Deemix.EmbedCover(credentialContext(ctx, address), dl.Path, address); err != nil {
 		log.Printf("stream-sync: no cover for track %s: %v", t.ID, err)
 	}
 }

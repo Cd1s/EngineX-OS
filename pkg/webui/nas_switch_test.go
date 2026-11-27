@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1516,10 +1518,11 @@ func TestNASStemsForAReplacedRecording(t *testing.T) {
 
 // Round 9 (older, all services): when the gateway file cannot be read at start-up its rows
 // are gone, and on e927f45e so was the counter: browsing again handed out ID 1 once more,
-// and the old ID 1 then played another recording. The ceiling kept in gateway-ids.json
-// keeps IDs from repeating; with no ceiling known (the first start after the upgrade) new
-// IDs start in a range of their own. A second unreadable start does not repeat the IDs
-// handed out after the first.
+// and the old ID 1 then played another recording. The ceiling kept in its two copies keeps
+// IDs from repeating; with no ceiling known (both copies gone, as on a deck that ran a
+// released version) new IDs start above every ID still referenced: Engine's library holds
+// the played row (round 11; round 9 used a range of its own). A second unreadable start
+// does not repeat the IDs handed out after the first.
 func TestNASIDsNeverRepeatAfterAnUnreadableGatewayFile(t *testing.T) {
 	for _, broken := range []string{"cut short", "not a file", "cut short, no ceiling"} {
 		t.Run(broken, func(t *testing.T) {
@@ -1550,9 +1553,8 @@ func TestNASIDsNeverRepeatAfterAnUnreadableGatewayFile(t *testing.T) {
 					}
 				}
 				if first && broken == "cut short, no ceiling" { // as on a deck that ran a released version
-					if err := os.Remove(filepath.Join(rig.stateDir, "gateway-ids.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
-						t.Fatal(err)
-					}
+					removeIDCopies(t, rig.stateDir)
+					floorLibrary(t, old) // Engine's library row of the played track
 				}
 				rig.start()
 			}
@@ -1692,38 +1694,344 @@ func TestNASIDsNeverResolveToAnotherRecordingWhenTheMarkCannotBeSaved(t *testing
 	rig.gone("server two's ID after server one was browsed", ids[0])
 }
 
-// Round 10: gateway-ids.json exists but cannot be read, so the IDs earlier runs handed out
-// are not known (here ID 1, handed out while the gateway file could not be saved). On
-// b6075e5f the counter started at 0 again and the old ID played the other server's
-// recording. Now no new ID is handed out in such a run.
-func TestNASUnreadableIDMarkHandsOutNoID(t *testing.T) {
-	rig := newNASSwitchRig(t)
-	rig.stop()
-	for _, f := range []string{"gateway-tracks.json", "gateway-ids.json"} {
-		if err := os.Remove(filepath.Join(rig.stateDir, f)); err != nil && !errors.Is(err, os.ErrNotExist) {
+// Rounds 10 and 11: a copy of the ceiling cannot be read, and the IDs earlier runs handed
+// out include one the gateway file never saved (ID 1). On b6075e5f the counter started at
+// 0 again and the old ID played the other server's recording; round 10 then handed out no
+// new ID at all in such a run, for as long as the copy stayed unreadable. Round 11: the
+// other copy holds the ceiling and repairs the bad one; with both unreadable, IDs start
+// above every ID still referenced (Engine's library row of the played track). New rows
+// come back either way, and the old ID never plays another recording.
+func TestNASUnreadableIDMarkIsRepairedOrFloored(t *testing.T) {
+	for _, bad := range []string{"one copy", "both copies"} {
+		t.Run(bad, func(t *testing.T) {
+			rig := newNASSwitchRig(t)
+			rig.stop()
+			removeIDCopies(t, rig.stateDir)
+			if err := os.Remove(filepath.Join(rig.stateDir, "gateway-tracks.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			stateIO.Store(&stateFiles{save: failSaving("gateway-tracks.json")}) // the row's ID is reserved, never saved
+			t.Cleanup(func() { stateIO.Store(nil) })
+			rig.start()
+			rig.saveNAS(rig.oneURL)
+			old := rig.browse()
+			rig.plays("server one's row", old, rig.one)
+			rig.stop()
+			stateIO.Store(nil)
+			names := []string{"gateway-ids.json"}
+			if bad == "both copies" {
+				names = append(names, "gateway-ids-2.json")
+				floorLibrary(t, old)
+			}
+			for _, f := range names {
+				if err := os.WriteFile(filepath.Join(rig.stateDir, f), []byte("{\"ceiling\":"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rig.start()
+			rig.saveNAS(rig.twoURL)
+			ids := rig.browseIDs()
+			if a := rig.stream(old); a.code == http.StatusOK && bytes.Equal(a.body, rig.two) {
+				t.Fatalf("server one's old ID %d plays server two's recording (rows %v)", old, ids)
+			}
+			if len(ids) != 1 || ids[0] <= old {
+				t.Fatalf("server two's rows %v: want one row above the old ID %d (no state may stop new rows)", ids, old)
+			}
+			rig.plays("server two's row", ids[0], rig.two)
+			a, b := idCopies(t, rig.stateDir)
+			if a == 0 || a != b || a < ids[0] {
+				t.Fatalf("copies of the ceiling after the start: %d and %d, want both equal and at least %d", a, b, ids[0])
+			}
+		})
+	}
+}
+
+// removeIDCopies removes both copies of the gateway ID ceiling.
+func removeIDCopies(t *testing.T, stateDir string) {
+	t.Helper()
+	for _, f := range []string{"gateway-ids.json", "gateway-ids-2.json"} {
+		if err := os.RemoveAll(filepath.Join(stateDir, f)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	stateIO.Store(&stateFiles{save: failSaving("gateway-tracks.json")}) // the row's ID is reserved, never saved
-	t.Cleanup(func() { stateIO.Store(nil) })
-	rig.start()
-	rig.saveNAS(rig.oneURL)
-	old := rig.browse()
-	rig.plays("server one's row", old, rig.one)
-	rig.stop()
-	stateIO.Store(nil)
-	if err := os.WriteFile(filepath.Join(rig.stateDir, "gateway-ids.json"), []byte("{\"ceiling\":"), 0o600); err != nil {
+}
+
+// idCopies are the ceilings both copies hold, 0 for a copy that is missing or not valid.
+func idCopies(t *testing.T, stateDir string) (int64, int64) {
+	t.Helper()
+	read := func(f string) int64 {
+		n, err := readCeiling(filepath.Join(stateDir, f), 0)
+		if err != nil {
+			return 0
+		}
+		return n
+	}
+	return read("gateway-ids.json"), read("gateway-ids-2.json")
+}
+
+// floorLibrary is Engine's library directory (Database2) for the ID floor of this test,
+// with a stm.db that holds a streaming row per given gateway ID, as Engine keeps a played
+// track.
+func floorLibrary(t *testing.T, ids ...int64) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "Database2")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	libraryRows(t, dir, ids...)
+	old := idFloorLibrary
+	idFloorLibrary = dir
+	t.Cleanup(func() { idFloorLibrary = old })
+	return dir
+}
+
+// libraryRows (re)writes dir's stm.db with a streaming row per gateway ID.
+func libraryRows(t *testing.T, dir string, ids ...int64) {
+	t.Helper()
+	file := filepath.Join(dir, "stm.db")
+	if err := os.RemoveAll(file); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE Track (id INTEGER PRIMARY KEY, uri TEXT, title TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if _, err := db.Exec(`INSERT INTO Track (uri, title) VALUES (?, 'row')`, fmt.Sprintf("streaming://TIDAL/Track/%d", id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Round 11 (round-10 re-check, item 1): a copy of the ceiling counts only when it is
+// {"ceiling": N} and nothing else, N in range and not below the gateway file's IDs.
+//   - On 5ea09903 a truncated mark stopped every new row, on every start (here: two in a
+//     row, the gateway file intact).
+//   - {} or a zero or negative ceiling, with the gateway file unreadable, handed ID 1 to
+//     server two while server one's old ID 1 was still in use; other bad marks stopped
+//     rows or handed out IDs above 2^31.
+//
+// Now each bad mark sits in both copies, rows come back above every ID still in use (the
+// gateway file, or Engine's library row of the played track when the file cannot be
+// read), the old ID never plays server two, and both copies are valid again.
+func TestNASBadIDMarksNeverStopRowsNorRepeatIDs(t *testing.T) {
+	bad := []string{"{", "{}", `{"ceiling":0}`, `{"ceiling":-5}`, `{"ceiling":"9"}`, `{"ceiling":9,"next":3}`,
+		`{"ceiling":9} {"ceiling":9}`, `{"ceiling":4294967296}`, `null`}
+	check := func(t *testing.T, rig *nasSwitchRig, old int64, ids []int64, step string) {
+		t.Helper()
+		if a := rig.stream(old); a.code == http.StatusOK && bytes.Equal(a.body, rig.two) {
+			t.Fatalf("%s: server one's old ID %d plays server two's recording (rows %v)", step, old, ids)
+		}
+		if len(ids) != 1 || ids[0] <= old || ids[0] > maxTrackID {
+			t.Fatalf("%s: server two's rows %v, want one row above the old ID %d (and below 2^31)", step, ids, old)
+		}
+		rig.plays(step+": server two's row", ids[0], rig.two)
+		if a, b := idCopies(t, rig.stateDir); a == 0 || a != b || a < ids[0] {
+			t.Fatalf("%s: copies of the ceiling %d and %d, want both equal and at least %d", step, a, b, ids[0])
+		}
+	}
+	mark := func(t *testing.T, rig *nasSwitchRig, content string) {
+		t.Helper()
+		for _, f := range []string{"gateway-ids.json", "gateway-ids-2.json"} {
+			if err := os.WriteFile(filepath.Join(rig.stateDir, f), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Run("truncated mark, two starts", func(t *testing.T) {
+		rig := newNASSwitchRig(t)
+		rig.saveNAS(rig.oneURL)
+		old := rig.browse()
+		rig.plays("server one's row", old, rig.one)
+		for start := 1; start <= 2; start++ {
+			rig.stop()
+			mark(t, rig, "{")
+			rig.start()
+			rig.saveNAS(map[bool]string{true: rig.twoURL, false: rig.oneURL}[start == 1])
+			ids := rig.browseIDs()
+			if len(ids) != 1 {
+				t.Fatalf("start %d with a truncated mark: rows %v, want one", start, ids)
+			}
+			rig.gone(fmt.Sprintf("start %d: server one's old row after the switch", start), old)
+			old = ids[0]
+		}
+	})
+	for _, m := range bad {
+		t.Run(m, func(t *testing.T) {
+			rig := newNASSwitchRig(t)
+			rig.saveNAS(rig.oneURL)
+			old := rig.browse()
+			rig.plays("server one's row", old, rig.one)
+			floorLibrary(t, old) // Engine's library row of the played track
+			rig.stop()
+			rig.unreadable()
+			mark(t, rig, m)
+			rig.start()
+			rig.saveNAS(rig.twoURL)
+			check(t, rig, old, rig.browseIDs(), "mark "+m)
+		})
+	}
+	t.Run("below the gateway file", func(t *testing.T) {
+		rig := newNASSwitchRig(t)
+		rig.saveNAS(rig.oneURL)
+		old := rig.browse()
+		rig.plays("server one's row", old, rig.one)
+		rig.stop()
+		// The gateway file says IDs up to old+50 were handed out; both copies say old.
+		path := filepath.Join(rig.stateDir, "gateway-tracks.json")
+		var v savedTracks
+		raw, _ := os.ReadFile(path)
+		if err := json.Unmarshal(raw, &v); err != nil {
+			t.Fatal(err)
+		}
+		v.Next = old + 50
+		if err := providers.SaveJSON(path, v); err != nil {
+			t.Fatal(err)
+		}
+		mark(t, rig, fmt.Sprintf(`{"ceiling":%d}`, old))
+		rig.start()
+		rig.saveNAS(rig.twoURL)
+		ids := rig.browseIDs()
+		if len(ids) != 1 || ids[0] <= old+50 {
+			t.Fatalf("rows %v after copies below the gateway file's IDs, want one above %d", ids, old+50)
+		}
+		check(t, rig, old, ids, "copies below the gateway file")
+	})
+}
+
+// Round 11: the second copy. A copy that is missing, bad (truncated, empty object, not a
+// file) or lower than the other is repaired from the greatest valid one at start-up. A
+// reservation counts only when both copies are written: while one cannot be saved no new
+// row gets an ID, and rows come back once it can (storage recovered), with both copies
+// above every ID handed out.
+func TestNASIDMarkHasASecondCopy(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.oneURL)
+	first := rig.browse()
+	if a, b := idCopies(t, rig.stateDir); a == 0 || a != b || a < first {
+		t.Fatalf("copies after the first row: %d and %d, want both at least %d", a, b, first)
+	}
+	for _, c := range []struct{ file, content string }{
+		{"gateway-ids.json", "{"}, {"gateway-ids-2.json", "{}"}, {"gateway-ids.json", fmt.Sprintf(`{"ceiling":%d}`, first)}, {"gateway-ids-2.json", "dir"},
+	} {
+		rig.stop()
+		target := filepath.Join(rig.stateDir, c.file)
+		if c.content == "dir" {
+			if err := os.Remove(target); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.WriteFile(target, []byte(c.content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rig.start()
+		if a, b := idCopies(t, rig.stateDir); a == 0 || a != b || a < first {
+			t.Fatalf("%s holding %q was not repaired: copies %d and %d", c.file, c.content, a, b)
+		}
+	}
+	rig.stop()
+	stateIO.Store(&stateFiles{save: failSaving("gateway-ids-2.json")})
+	t.Cleanup(func() { stateIO.Store(nil) })
 	rig.start()
+	rig.saveNAS(rig.twoURL)
+	if ids := rig.browseIDs(); len(ids) != 0 {
+		t.Fatalf("IDs %v handed out while the second copy could not be saved", ids)
+	}
+	stateIO.Store(nil)
+	ids := rig.browseIDs()
+	if len(ids) != 1 || ids[0] <= first {
+		t.Fatalf("rows %v once both copies can be saved, want one above %d", ids, first)
+	}
+	rig.plays("server two's row", ids[0], rig.two)
+	if a, b := idCopies(t, rig.stateDir); a != b || a < ids[0] {
+		t.Fatalf("copies after the recovery: %d and %d, want both at least %d", a, b, ids[0])
+	}
+}
+
+// Round 11 (round-10 re-check, item 1, third case): both copies missing and the gateway
+// file unreadable, on two starts in a row. On 5ea09903 both starts handed out ID
+// 1073741825 and server one's old row played server two. With every bound of ours lost,
+// IDs start above every ID still referenced: Engine's library rows and our own ID-keyed
+// files (a staged cover and a names entry with higher IDs). A library that cannot be read
+// stops new IDs for that run only: the next start, with the library readable, gives rows.
+func TestNASIDFloorWhenEveryBoundIsLost(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.oneURL)
+	lib := floorLibrary(t) // nothing referenced yet
+	lose := func() {
+		t.Helper()
+		rig.stop()
+		removeIDCopies(t, rig.stateDir)
+		rig.unreadable()
+		rig.start()
+	}
+	lose()
+	old := rig.browse()
+	rig.plays("server one's row", old, rig.one)
+	libraryRows(t, lib, old) // Engine played it
+	lose()
 	rig.saveNAS(rig.twoURL)
 	ids := rig.browseIDs()
 	if a := rig.stream(old); a.code == http.StatusOK && bytes.Equal(a.body, rig.two) {
 		t.Fatalf("server one's old ID %d plays server two's recording (rows %v)", old, ids)
 	}
-	if len(ids) != 0 {
-		t.Fatalf("IDs %v handed out while the IDs of earlier runs are not known", ids)
+	if len(ids) != 1 || ids[0] <= old {
+		t.Fatalf("rows %v with every bound lost, want one above Engine's row %d", ids, old)
 	}
+	rig.plays("server two's row", ids[0], rig.two)
+	libraryRows(t, lib, old, ids[0])
+
+	// Our own files named by an ID: a staged cover and a names entry.
+	cover := filepath.Join(rbxAnalysisDir, strconv.FormatInt(ids[0]+500, 10)+".cover")
+	entry := filepath.Join(rbxAnalysisDir, "names", "9876543", "r11-floor.mp3")
+	if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cover, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(entry, []byte(strconv.FormatInt(ids[0]+900, 10)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(cover); os.RemoveAll(filepath.Dir(entry)) })
+	lose()
+	rig.saveNAS(rig.oneURL)
+	again := rig.browseIDs()
+	if len(again) != 1 || again[0] <= ids[0]+900 {
+		t.Fatalf("rows %v, want one above the names entry's ID %d", again, ids[0]+900)
+	}
+	libraryRows(t, lib, old, ids[0], again[0])
+
+	// Engine's library cannot be read: no new ID in this run; the next start gives rows.
+	rig.stop()
+	removeIDCopies(t, rig.stateDir)
+	rig.unreadable()
+	db := filepath.Join(lib, "stm.db")
+	if err := os.Remove(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(db, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rig.start()
+	rig.saveNAS(rig.twoURL)
+	if got := rig.browseIDs(); len(got) != 0 {
+		t.Fatalf("IDs %v handed out while the IDs in use could not be read", got)
+	}
+	rig.stop()
+	libraryRows(t, lib, old, ids[0], again[0])
+	rig.start()
+	got := rig.browseIDs()
+	if len(got) != 1 || got[0] <= ids[0]+900 {
+		t.Fatalf("rows %v at the next start, want one above every ID in use", got)
+	}
+	rig.plays("server two's row at the next start", got[0], rig.two)
 }
 
 // Round 10 (round-9 re-check, item 2): a released gateway file whose rows hold NAS
@@ -1829,6 +2137,143 @@ func TestNASCoverCredentialsOnlyForTheConfiguredOrigin(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Round 11 (round-10 re-check, item 2): a signed NAS cover follows redirects only within
+// the configured origin, and no redirect carries a Referer. On 5ea09903 the art client
+// followed Go's default policy: a NAS cover redirected to another origin was fetched there
+// with the signed URL (the Subsonic auth or the Plex token) as its Referer. The deck's art
+// request now gets nothing from another origin, and a redirect within the NAS's origin
+// still loads the cover, with no Referer.
+func TestNASCoverRedirectsStayOnTheOrigin(t *testing.T) {
+	const pass, token = "nas-pass-r11-335", "nas-token-r11-335"
+	cover := []byte("\xff\xd8\xff\xe0 r11 cover")
+	for _, c := range []struct{ protocol, to string }{{"subsonic", "elsewhere"}, {"plex", "elsewhere"}, {"subsonic", "home"}, {"plex", "home"}} {
+		t.Run(c.protocol+" to "+c.to, func(t *testing.T) {
+			var mu sync.Mutex
+			var leaked, refs []string
+			elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				leaked = append(leaked, "Referer="+r.Referer()+" Plex="+r.Header.Get("X-Plex-Token"))
+				mu.Unlock()
+				w.Write(cover)
+			}))
+			t.Cleanup(elsewhere.Close)
+			rig := newNASSwitchRig(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/rest/getPlaylists.view":
+					fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlists":{"playlist":[{"id":"pl-42","name":"Club Crate","songCount":1}]}}}`)
+				case "/rest/getPlaylist.view":
+					fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlist":{"id":"pl-42","name":"Club Crate","entry":[{"id":"tr-99","title":"Warehouse Dub","artist":"DJ Test","duration":210,"suffix":"mp3","coverArt":"cv-99"}]}}}`)
+				case "/playlists":
+					fmt.Fprint(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"55","title":"Club Crate","leafCount":1}]}}`)
+				case "/playlists/55/items":
+					fmt.Fprint(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"7","title":"Warehouse Dub","grandparentTitle":"DJ Test","thumb":"/library/metadata/7/thumb","Media":[{"Part":[{"key":"/library/parts/7/file.mp3"}]}]}]}}`)
+				case "/rest/getCoverArt.view", "/library/metadata/7/thumb":
+					target := elsewhere.URL + "/cover.jpg"
+					if c.to == "home" {
+						target = "/moved/cover.jpg"
+					}
+					http.Redirect(w, r, target, http.StatusFound)
+				case "/moved/cover.jpg":
+					mu.Lock()
+					refs = append(refs, r.Referer())
+					mu.Unlock()
+					w.Write(cover)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			body := fmt.Sprintf(`{"protocol":%q,"url":%q,"username":"dj","password":%q,"token":%q,"enabled":true}`, c.protocol, srv.URL, pass, token)
+			w := httptest.NewRecorder()
+			rig.s.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(body)))
+			if w.Code != http.StatusOK {
+				t.Fatalf("save NAS: %d %s", w.Code, w.Body.String())
+			}
+			rig.browse()
+			a := rig.get("/v1/enginex/art?song=Warehouse%20Dub&artist=DJ%20Test")
+			mu.Lock()
+			defer mu.Unlock()
+			if len(leaked) != 0 {
+				t.Fatalf("a NAS cover's redirect reached another origin: %v", leaked)
+			}
+			for _, ref := range refs {
+				if ref != "" {
+					t.Fatalf("a redirect within the NAS's origin carried a Referer: %q", ref)
+				}
+			}
+			if wantCover := c.to == "home"; (a.code == http.StatusOK && bytes.Equal(a.body, cover)) != wantCover {
+				t.Fatalf("the deck's art request: HTTP %d (%d bytes), want the cover=%v", a.code, len(a.body), wantCover)
+			}
+		})
+	}
+}
+
+// Round 11, the same for a cover embedded in a download (Jobs.addCover: the NAS's
+// credentials added back, then the cover fetched over HTTPS). On 5ea09903 the signed cover
+// followed a redirect to another HTTPS origin with the signed URL as its Referer.
+func TestNASCoverEmbedRedirectsStayOnTheOrigin(t *testing.T) {
+	var mu sync.Mutex
+	var leaked []string
+	elsewhere := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		leaked = append(leaked, "Referer="+r.Referer())
+		mu.Unlock()
+		w.Write([]byte("\xff\xd8\xff\xe0 elsewhere"))
+	}))
+	defer elsewhere.Close()
+	nas := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/cover.jpg", http.StatusFound)
+	}))
+	defer nas.Close()
+	dir := t.TempDir()
+	jobs := NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{DownloadDir: dir, AllowLossy: true, Media: nas.Client()}})
+	defer jobs.Close()
+	sh := providers.NewSelfHostedProvider(providers.NASConfig{Protocol: "subsonic", URL: nas.URL, Username: "dj", Password: "pw-r11"}, nil)
+	jobs.mu.Lock()
+	jobs.selfHosted = func() *providers.SelfHostedProvider { return sh }
+	jobs.mu.Unlock()
+	file := filepath.Join(dir, "track.mp3")
+	if err := os.WriteFile(file, testMP3(40), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jobs.addCover(context.Background(), providers.Track{ID: "tr-1", Provider: "subsonic", CoverURL: nas.URL + "/rest/getCoverArt.view?id=cv-1"}, &deemixclient.Download{Path: file})
+	mu.Lock()
+	defer mu.Unlock()
+	if len(leaked) != 0 {
+		t.Fatalf("the signed cover's redirect reached another origin: %v", leaked)
+	}
+}
+
+// Round 11, the class of item 2: the relay probe sends the relay password as a bearer
+// token. On 5ea09903 its client followed a redirect from the configured relay to another
+// origin (here the same host, another port) and Go kept the Authorization header there.
+func TestRelayProbePasswordStaysOnTheRelay(t *testing.T) {
+	var mu sync.Mutex
+	var leaked []string
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		leaked = append(leaked, "Authorization="+r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.Write([]byte(`{"ok":true,"device":"elsewhere","backend":"htdemucs"}`))
+	}))
+	defer elsewhere.Close()
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusFound)
+	}))
+	defer relay.Close()
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	if st := s.probeRelayStems(relay.URL, "relay-pw-r11", nil); st != nil {
+		t.Fatalf("a relay that redirects elsewhere was taken as online: %+v", st)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(leaked) != 0 {
+		t.Fatalf("the relay password followed a redirect to another origin: %v", leaked)
 	}
 }
 

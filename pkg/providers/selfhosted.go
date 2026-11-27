@@ -20,7 +20,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 )
 
 const defaultMaxCache = 5000
@@ -45,13 +44,15 @@ type SelfHostedProvider struct {
 	maxCache     int               // max entries for webdavCache and plexPartMap (<=0 uses defaultMaxCache)
 }
 
+// NewSelfHostedProvider is a provider for the NAS cfg names. Every request it makes
+// carries the NAS's credentials (Subsonic's in the query, Plex's token header, WebDAV's
+// Authorization), so its client follows redirects only within the origin of the
+// request (LockRedirects) and sends no Referer: no credential reaches an origin the DJ
+// did not configure (#335).
 func NewSelfHostedProvider(cfg NASConfig, c *http.Client) *SelfHostedProvider {
-	if c == nil {
-		c = &http.Client{Timeout: 30 * time.Second}
-	}
 	return &SelfHostedProvider{
 		cfg:         cfg,
-		client:      c,
+		client:      LockRedirects(c),
 		webdavCache: make(map[string]Track),
 		plexPartMap: make(map[string]string),
 		maxCache:    defaultMaxCache,
@@ -66,7 +67,7 @@ func (p *SelfHostedProvider) httpClient() *http.Client {
 	if p != nil && p.client != nil {
 		return p.client
 	}
-	return &http.Client{Timeout: 30 * time.Second}
+	return LockRedirects(nil)
 }
 
 func (p *SelfHostedProvider) Playlists(ctx context.Context) ([]Playlist, error) {
