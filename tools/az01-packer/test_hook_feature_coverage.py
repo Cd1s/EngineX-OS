@@ -246,3 +246,31 @@ class HookFeatureCoverageTest(unittest.TestCase):
         )
         self.assertNotEqual(call_opposite, documented_def, 'anchor missing for call_opposite')
         self.assertTrue(any('install_future_a32' in e for e in coverage.check(call_opposite)))
+
+        # Nonconditional directives (#pragma, #define, multi-line #define) are also barriers for AZ04_EXEMPT.
+        for label, directive, fn_name in (
+            ('pragma barrier', '#pragma GCC diagnostic push', 'install_after_pragma'),
+            ('define barrier', '#define REVIEW_TAG 1', 'install_after_define'),
+            ('multiline define barrier', '#define REVIEW_MULTI \\\n    1', 'install_after_multiline_define'),
+        ):
+            with self.subTest(label=label):
+                mutated = source.replace(
+                    '#endif\n\n// The sender\'s prologue',
+                    f'#endif\n\n#if !defined(__aarch64__)\nAZ04_EXEMPT("Batch 2: before directive")\n{directive}\nstatic void {fn_name}(uintptr_t b, size_t p) {{ (void)b; (void)p; }}\n#endif\n\n// The sender\'s prologue',
+                    1,
+                )
+                self.assertNotEqual(mutated, source, f'anchor missing for {label}')
+                self.assertTrue(any(fn_name in e for e in coverage.check(mutated)), label)
+
+        for label, directive in (
+            ('call pragma barrier', '#pragma GCC diagnostic push'),
+            ('call define barrier', '#define REVIEW_CALL_TAG 1'),
+        ):
+            with self.subTest(label=label):
+                call_barrier = documented_def.replace(
+                    '#if !defined(__aarch64__)\n    AZ04_EXEMPT',
+                    f'#if !defined(__aarch64__)\n    AZ04_EXEMPT("Batch 2: before directive")\n{directive}\n    install_future_a32(base, page);\n    AZ04_EXEMPT',
+                    1,
+                )
+                self.assertNotEqual(call_barrier, documented_def, f'anchor missing for {label}')
+                self.assertTrue(any('install_future_a32' in e for e in coverage.check(call_barrier)), label)

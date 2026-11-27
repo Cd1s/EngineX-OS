@@ -135,27 +135,34 @@ def _classify_pp_expr(expr):
 def _line_archs(nocomment_lines):
     stack = []
     archs = []
+    in_pp_cont = False
     for line in nocomment_lines:
-        s = line.strip()
-        m = re.match(r'^#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$', s)
-        if m:
-            kw, rest = m[1], m[2].strip()
-            if kw == 'if':
-                stack.append(_classify_pp_expr(rest))
-            elif kw == 'ifdef':
-                stack.append('a64' if rest == '__aarch64__' else 'other')
-            elif kw == 'ifndef':
-                stack.append('a32' if rest == '__aarch64__' else 'other')
-            elif kw == 'elif' and stack:
-                stack[-1] = _classify_pp_expr(rest)
-            elif kw == 'else' and stack:
-                if stack[-1] == 'a32':
-                    stack[-1] = 'a64'
-                elif stack[-1] == 'a64':
-                    stack[-1] = 'a32'
-            elif kw == 'endif' and stack:
-                stack.pop()
+        if in_pp_cont:
             archs.append('pp')
+            in_pp_cont = line.rstrip().endswith('\\')
+            continue
+        s = line.strip()
+        if s.startswith('#'):
+            m = re.match(r'^#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$', s)
+            if m:
+                kw, rest = m[1], m[2].strip()
+                if kw == 'if':
+                    stack.append(_classify_pp_expr(rest))
+                elif kw == 'ifdef':
+                    stack.append('a64' if rest == '__aarch64__' else 'other')
+                elif kw == 'ifndef':
+                    stack.append('a32' if rest == '__aarch64__' else 'other')
+                elif kw == 'elif' and stack:
+                    stack[-1] = _classify_pp_expr(rest)
+                elif kw == 'else' and stack:
+                    if stack[-1] == 'a32':
+                        stack[-1] = 'a64'
+                    elif stack[-1] == 'a64':
+                        stack[-1] = 'a32'
+                elif kw == 'endif' and stack:
+                    stack.pop()
+            archs.append('pp')
+            in_pp_cont = line.rstrip().endswith('\\')
             continue
         if 'a32' in stack:
             archs.append('a32')
@@ -170,19 +177,26 @@ def _line_pp_branches(nocomment_lines):
     stack = []
     branches = []
     next_id = 0
+    in_pp_cont = False
     for line in nocomment_lines:
-        s = line.strip()
-        m = re.match(r'^#\s*(if|ifdef|ifndef|elif|else|endif)\b', s)
-        if m:
-            kw = m[1]
-            if kw in ('if', 'ifdef', 'ifndef'):
-                next_id += 1
-                stack.append([next_id, 0])
-            elif kw in ('elif', 'else') and stack:
-                stack[-1][1] += 1
-            elif kw == 'endif' and stack:
-                stack.pop()
+        if in_pp_cont:
             branches.append(None)
+            in_pp_cont = line.rstrip().endswith('\\')
+            continue
+        s = line.strip()
+        if s.startswith('#'):
+            m = re.match(r'^#\s*(if|ifdef|ifndef|elif|else|endif)\b', s)
+            if m:
+                kw = m[1]
+                if kw in ('if', 'ifdef', 'ifndef'):
+                    next_id += 1
+                    stack.append([next_id, 0])
+                elif kw in ('elif', 'else') and stack:
+                    stack[-1][1] += 1
+                elif kw == 'endif' and stack:
+                    stack.pop()
+            branches.append(None)
+            in_pp_cont = line.rstrip().endswith('\\')
             continue
         branches.append(tuple(tuple(frame) for frame in stack))
     return branches
