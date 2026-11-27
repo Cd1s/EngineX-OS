@@ -25,7 +25,8 @@ static int exec_counted(void *db, const char *sql, int (*row)(void *, int, char 
     return sqlite3_exec(db, sql, row, arg, err);
 }
 static const char *db_main(void *db, const char *name) { return sqlite3_db_filename(db, name); }
-static const struct sc_rbx_sqlite engine = {exec_counted, db_main};
+static int db_readonly_rw(void *db, const char *name) { return sqlite3_db_readonly(db, name); }
+static const struct sc_rbx_sqlite engine = {exec_counted, db_main, db_readonly_rw};
 
 static char dir[64], schema[1 << 16];
 
@@ -156,7 +157,7 @@ struct lock_holder {
 static int exec_raw(void *db, const char *sql, int (*row)(void *, int, char **, char **), void *arg, char **err) {
     return sqlite3_exec(db, sql, row, arg, err);
 }
-static const struct sc_rbx_sqlite raw_engine = {exec_raw, db_main};
+static const struct sc_rbx_sqlite raw_engine = {exec_raw, db_main, db_readonly_rw};
 
 static void *hold_and_fill(void *arg) {
     struct lock_holder *h = arg;
@@ -316,6 +317,157 @@ static const char *load_perf(sqlite3 *db, long long id) {
     const char *main = sc_rbs_drive(&engine, db);
     assert(main);
     return sc_rbs_fill_perf(&engine, db, main, id);
+}
+
+static const char *net_fake_main = NULL;
+static int net_fake_ro = 0;
+static int net_force_ro_write = 0;
+static const char *net_db_main(void *db, const char *name) {
+    (void)db;
+    return (!strcmp(name, "main") && net_fake_main) ? net_fake_main : NULL;
+}
+static int net_db_readonly(void *db, const char *name) {
+    (void)db;
+    (void)name;
+    return net_fake_ro;
+}
+static int net_exec_counted(void *db, const char *sql, int (*row)(void *, int, char **, char **), void *arg, char **err) {
+    assert(pthread_mutex_trylock(&sc_rbs_mu) == 0);
+    pthread_mutex_unlock(&sc_rbs_mu);
+    statements++;
+    if (net_force_ro_write && !strncmp(sql, "SAVEPOINT sc_rbs", 16)) return SQLITE_READONLY;
+    return sqlite3_exec(db, sql, row, arg, err);
+}
+static const struct sc_rbx_sqlite net_engine = {net_exec_counted, net_db_main, net_db_readonly};
+static const struct sc_rbx_sqlite net_raw_engine = {exec_raw, net_db_main, net_db_readonly};
+
+struct link_mock {
+    int listen_fd;
+    int stop;
+    int data_reqs;
+    int filled_reqs;
+    int status;
+    int delay_ms;
+    char x_rb_status[64];
+    char key[256];
+    char wr[64];
+    char wrnm[64];
+    char row[64];
+    const unsigned char *body;
+    size_t body_n;
+    char last_data_req[2048];
+    char last_filled_req[4096];
+    pthread_mutex_t mu;
+};
+
+static void *link_mock_serve(void *arg) {
+    struct link_mock *m = arg;
+    for (;;) {
+        struct pollfd pfd = {m->listen_fd, POLLIN, 0};
+        int rc = poll(&pfd, 1, 50);
+        if (__atomic_load_n(&m->stop, __ATOMIC_ACQUIRE)) break;
+        if (rc <= 0) continue;
+        int cfd = accept(m->listen_fd, NULL, NULL);
+        if (cfd < 0) continue;
+        char reqbuf[2048];
+        memset(reqbuf, 0, sizeof reqbuf);
+        ssize_t n = recv(cfd, reqbuf, sizeof reqbuf - 1, 0);
+        if (n < 0) n = 0;
+        reqbuf[n] = 0;
+        int is_filled = strstr(reqbuf, "POST " SC_RBS_ONDEMAND_FILLED_ROUTE " ") != NULL;
+
+        pthread_mutex_lock(&m->mu);
+        if (is_filled) {
+            m->filled_reqs++;
+            snprintf(m->last_filled_req, sizeof m->last_filled_req, "%s", reqbuf);
+        } else {
+            m->data_reqs++;
+            snprintf(m->last_data_req, sizeof m->last_data_req, "%s", reqbuf);
+        }
+        int status = m->status;
+        int delay_ms = is_filled ? 0 : m->delay_ms;
+        char xstat[64], key[256], wr[64], wrnm[64], row[64];
+        snprintf(xstat, sizeof xstat, "%s", m->x_rb_status);
+        snprintf(key, sizeof key, "%s", m->key);
+        snprintf(wr, sizeof wr, "%s", m->wr);
+        snprintf(wrnm, sizeof wrnm, "%s", m->wrnm);
+        snprintf(row, sizeof row, "%s", m->row);
+        const unsigned char *body = m->body;
+        size_t body_n = m->body_n;
+        pthread_mutex_unlock(&m->mu);
+
+        if (delay_ms > 0) {
+            struct timespec ts = {delay_ms / 1000, (long)(delay_ms % 1000) * 1000000L};
+            nanosleep(&ts, NULL);
+        }
+        char hdr[1024];
+        int hlen = 0;
+        if (is_filled) {
+            hlen = snprintf(hdr, sizeof hdr,
+                            "HTTP/1.1 202 Accepted\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}");
+            (void)!send(cfd, hdr, (size_t)hlen, MSG_NOSIGNAL);
+        } else if (status == 200) {
+            hlen = snprintf(hdr, sizeof hdr,
+                            "HTTP/1.1 200 OK\r\n"
+                            "Content-Type: application/octet-stream\r\n"
+                            "Content-Length: %zu\r\n"
+                            "X-RB-Key: %s\r\n"
+                            "X-RB-Written: %s\r\n"
+                            "X-RB-Written-NoMain: %s\r\n"
+                            "X-RB-Row: %s\r\n"
+                            "X-RB-Active-Loops: 3\r\n"
+                            "X-RB-Rules: 5\r\n"
+                            "Connection: close\r\n\r\n",
+                            body_n, key, wr, wrnm, row);
+            (void)!send(cfd, hdr, (size_t)hlen, MSG_NOSIGNAL);
+            if (body && body_n) (void)!send(cfd, body, body_n, MSG_NOSIGNAL);
+        } else {
+            hlen = snprintf(hdr, sizeof hdr,
+                            "HTTP/1.1 %d Error\r\n%s%s%sContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                            status,
+                            xstat[0] ? "X-RB-Status: " : "", xstat, xstat[0] ? "\r\n" : "");
+            (void)!send(cfd, hdr, (size_t)hlen, MSG_NOSIGNAL);
+        }
+        close(cfd);
+    }
+    return NULL;
+}
+
+struct net_race_arg {
+    sqlite3 *db;
+    const char *main_db;
+    const char *path;
+    long long perf_id;
+    long long out_id;
+    char res[96];
+};
+
+static void *net_race_worker(void *arg) {
+    struct net_race_arg *a = arg;
+    const char *r = a->perf_id > 0
+                        ? sc_rbs_fill_perf(&net_raw_engine, a->db, a->main_db, a->perf_id)
+                        : sc_rbs_fill_path(&net_raw_engine, a->db, a->main_db, a->path, -1, &a->out_id);
+    snprintf(a->res, sizeof a->res, "%s", r ? r : "");
+    return NULL;
+}
+
+struct net_thr_arg {
+    const char *thr_name;
+    sqlite3 *db;
+    const char *main_db;
+    const char *path;
+    int ok;
+};
+
+static void *net_thr_guard_worker(void *arg) {
+    struct net_thr_arg *a = arg;
+#ifdef __linux__
+    prctl(PR_SET_NAME, (unsigned long)a->thr_name, 0, 0, 0);
+#endif
+    long long out_id = 0;
+    const char *r = sc_rbs_fill_path(&net_engine, a->db, a->main_db, a->path, -1, &out_id);
+    a->ok = (r != NULL && starts(r, "skipped ("));
+    return NULL;
 }
 
 struct gui_guard_arg {
@@ -1369,7 +1521,9 @@ int main(int argc, char **argv) {
         assert(!pthread_join(mt1, NULL));
         assert(!pthread_join(mt2, NULL));
         assert(mmock.requests == 1);
-        assert(starts(ma1.res, "filled on-demand (") && !strcmp(ma2.res, "skipped (row has analysis)"));
+        int m_one_filled = (starts(ma1.res, "filled on-demand (") && !strcmp(ma2.res, "skipped (row has analysis)")) ||
+                           (starts(ma2.res, "filled on-demand (") && !strcmp(ma1.res, "skipped (row has analysis)"));
+        assert(m_one_filled);
         assert(ma1.out_id == od_mixed && !strcmp(text(db, ROW, od_mixed), FILLED));
         sqlite3_close(db_m1);
         sqlite3_close(db_m2);
@@ -1379,6 +1533,285 @@ int main(int argc, char **argv) {
         close(mfd);
         pthread_mutex_destroy(&mmock.mu);
         sc_rbs_ondemand_url = NULL;
+    }
+
+    // 15. Engine Link remote on-demand fill (net://<peer-uuid>/<vol>/Engine Library/Database2/m.db):
+    //     path validation, cold fill + importKey + track-filled notify (no local B journal),
+    //     zero-cost counters for already-filled/stock/read-only/browse/GUI/RT/unsupported-peer,
+    //     answer budget timeout fallback, and concurrent two-connection coalescing.
+    {
+        // 15a. Strict net:// m.db path matching and peer UUID normalization.
+        char pu[128];
+        assert(sc_rbs_is_net_main("net://01234567-89ab-cdef-0123-456789abcdef/USB1/Engine Library/Database2/m.db"));
+        assert(sc_rbs_net_peer_uuid("net://01234567-89ab-cdef-0123-456789abcdef/USB1/Engine Library/Database2/m.db", pu, sizeof pu) &&
+               !strcmp(pu, "01234567-89ab-cdef-0123-456789abcdef"));
+        assert(sc_rbs_is_net_main("net://{AABBCCDD-1122-3344-5566-778899AABBCC}/NEXTLIB/Engine Library/Database2/m.db"));
+        assert(sc_rbs_net_peer_uuid("net://{AABBCCDD-1122-3344-5566-778899AABBCC}/NEXTLIB/Engine Library/Database2/m.db", pu, sizeof pu) &&
+               !strcmp(pu, "aabbccdd-1122-3344-5566-778899aabbcc"));
+        const char *bad_net[] = {
+            "net://bad_host/USB1/Engine Library/Database2/m.db",
+            "net://1111/../../etc/Engine Library/Database2/m.db",
+            "net://1111/../Engine Library/Database2/m.db",
+            "net://1111/./Engine Library/Database2/m.db",
+            "net://1111/a/b/Engine Library/Database2/m.db",
+            "net://1111/USB1/Engine Library/Database2/sm.db",
+            "net://1111/USB1/Engine Library/Database2/stm.db",
+            "net:///USB1/Engine Library/Database2/m.db",
+            "http://1111/USB1/Engine Library/Database2/m.db",
+        };
+        for (size_t i = 0; i < sizeof bad_net / sizeof *bad_net; i++)
+            assert(!sc_rbs_is_net_main(bad_net[i]));
+
+        // Backing SQLite DB simulating a remote peer's m.db (no local bridge snapshot!).
+        sqlite3 *net_db = stick("NET_STICK", "lib-net-a", NULL);
+        long long n_cold = track(net_db, "../Contents/LinkCold.mp3", 1, 1);
+        long long n_stock = track(net_db, "../Contents/LinkStock.mp3", 0, 0);
+        long long n_ro_wr = track(net_db, "../Contents/LinkROWrite.mp3", 1, 1);
+        long long n_unsup = track(net_db, "../Contents/LinkUnsup.mp3", 1, 1);
+        long long n_tmo = track(net_db, "../Contents/LinkTimeout.mp3", 1, 1);
+        long long n_race = track(net_db, "../Contents/LinkRace.mp3", 1, 1);
+
+        int lfd = socket(AF_INET, SOCK_STREAM, 0);
+        assert(lfd >= 0);
+        int one_l = 1;
+        setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one_l, sizeof one_l);
+        struct sockaddr_in lsin;
+        memset(&lsin, 0, sizeof lsin);
+        lsin.sin_family = AF_INET;
+        lsin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        assert(!bind(lfd, (struct sockaddr *)&lsin, sizeof lsin));
+        socklen_t llen = sizeof lsin;
+        assert(!getsockname(lfd, (struct sockaddr *)&lsin, &llen));
+        assert(!listen(lfd, 8));
+        char lurl[128];
+        snprintf(lurl, sizeof lurl, "http://127.0.0.1:%u%s", (unsigned)ntohs(lsin.sin_port), SC_RBS_ONDEMAND_ROUTE);
+
+        struct link_mock lmock;
+        memset(&lmock, 0, sizeof lmock);
+        lmock.listen_fd = lfd;
+        lmock.status = 200;
+        snprintf(lmock.key, sizeof lmock.key, "contents/linkcold.mp3");
+        snprintf(lmock.wr, sizeof lmock.wr, "AAECAwQFBgcICQoLDA0ODw==");
+        snprintf(lmock.wrnm, sizeof lmock.wrnm, "EBESExQVFhcYGRobHB0eHw==");
+        snprintf(lmock.row, sizeof lmock.row, "row-net-a");
+        lmock.body = bin;
+        lmock.body_n = bin_n;
+        pthread_mutex_init(&lmock.mu, NULL);
+        pthread_t lth;
+        assert(!pthread_create(&lth, NULL, link_mock_serve, &lmock));
+        sc_rbs_ondemand_url = lurl;
+
+        // 15b. Cold net:// fill sends importKey+uuid+db, commits row, fires track-filled, writes NO local B journal.
+        net_fake_main = "net://aaaa0001-1111-2222-3333-444455556666/NEXTLIB/Engine Library/Database2/m.db";
+        net_fake_ro = 0;
+        net_force_ro_write = 0;
+        sc_rbs_stats_reset();
+        const char *m_net = sc_rbs_drive(&net_engine, net_db);
+        assert(m_net && !strcmp(m_net, net_fake_main));
+        long long out_id = 0;
+        const char *res = sc_rbs_fill_path(&net_engine, net_db, m_net, "../Contents/LinkCold.mp3", -1, &out_id);
+        assert(starts(res, "filled link on-demand ("));
+        assert(out_id == n_cold && !strcmp(text(net_db, ROW, n_cold), FILLED));
+        assert(lmock.data_reqs == 1 && lmock.filled_reqs == 1);
+        assert(strstr(lmock.last_data_req, "\"importKey\":77") != NULL);
+        assert(strstr(lmock.last_data_req, "\"uuid\":\"lib-net-a\"") != NULL);
+        assert(strstr(lmock.last_data_req, "\"db\":\"net://aaaa0001-1111-2222-3333-444455556666/NEXTLIB/Engine Library/Database2/m.db\"") != NULL);
+        assert(strstr(lmock.last_filled_req, "POST " SC_RBS_ONDEMAND_FILLED_ROUTE " ") != NULL);
+        assert(strstr(lmock.last_filled_req, "\"importKey\":77") != NULL);
+        assert(strstr(lmock.last_filled_req, "\"uuid\":\"lib-net-a\"") != NULL);
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 1);
+        assert(__atomic_load_n(&sc_rbs_stat_filled_notifies, __ATOMIC_RELAXED) == 1);
+        char b_journal[PATH_MAX];
+        snprintf(b_journal, sizeof b_journal, "%s/lib-net-a/filled.jsonl", sc_rbs_root);
+        struct stat jst;
+        assert(stat(b_journal, &jst) != 0); // B never writes its own local filled.jsonl for a remote stick
+
+        // 15c. Zero-cost counter proofs (0 IPC/LAN calls) for already-filled, stock stick, read-only, browse/GUI/RT.
+        // Already-filled row:
+        sc_rbs_stats_reset();
+        res = sc_rbs_fill_path(&net_engine, net_db, m_net, "../Contents/LinkCold.mp3", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (row has analysis)"));
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+        assert(__atomic_load_n(&sc_rbs_stat_skip_filled, __ATOMIC_RELAXED) == 1);
+        assert(lmock.data_reqs == 1);
+
+        // Stock Engine stick (pdbImportKey IS NULL):
+        sc_rbs_stats_reset();
+        res = sc_rbs_fill_path(&net_engine, net_db, m_net, "../Contents/LinkStock.mp3", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (Engine's own row)"));
+        assert(out_id == n_stock && !strcmp(text(net_db, ROW, n_stock), NOTHING));
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+        assert(__atomic_load_n(&sc_rbs_stat_skip_stock, __ATOMIC_RELAXED) == 1);
+        assert(lmock.data_reqs == 1);
+
+        // Read-only remote library (sqlite3_db_readonly != 0): 0 SQL reads and 0 IPC!
+        net_fake_ro = 1;
+        sc_rbs_stats_reset();
+        statements = 0;
+        res = sc_rbs_fill_path(&net_engine, net_db, m_net, "../Contents/LinkROWrite.mp3", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (read-only library)"));
+        assert(statements == 0 && __atomic_load_n(&sc_rbs_stat_sql_reads, __ATOMIC_RELAXED) == 0);
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+        assert(__atomic_load_n(&sc_rbs_stat_skip_readonly, __ATOMIC_RELAXED) == 1);
+        net_fake_ro = 0;
+
+        // Browse / track-scan path (allow_ondemand=0) on net://: 0 SQL and 0 IPC!
+        sc_rbs_stats_reset();
+        statements = 0;
+        res = sc_rbs_fill_track(&net_engine, net_db, m_net, n_ro_wr);
+        assert(res == NULL && statements == 0 && __atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+
+        // RT audio thread (SCHED_RR): 0 SQL and 0 IPC!
+        sc_rbs_sched_override = fake_sched_rr;
+        sc_rbs_stats_reset();
+        statements = 0;
+        res = sc_rbs_fill_path(&net_engine, net_db, m_net, "../Contents/LinkROWrite.mp3", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (rt thread)"));
+        assert(statements == 0 && __atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+        assert(__atomic_load_n(&sc_rbs_stat_skip_thread, __ATOMIC_RELAXED) == 1);
+        sc_rbs_sched_override = NULL;
+
+#ifdef __linux__
+        // GUI, browse, and OfflineAnalyzer threads on net://: 0 SQL and 0 IPC!
+        const char *net_blocked_thr[] = {"EMain", "SceneGraph", "Thread (pooled)", "OfflineAnalyzer"};
+        for (size_t i = 0; i < sizeof net_blocked_thr / sizeof *net_blocked_thr; i++) {
+            sc_rbs_stats_reset();
+            statements = 0;
+            struct net_thr_arg nta = {net_blocked_thr[i], net_db, m_net, "../Contents/LinkROWrite.mp3", 0};
+            pthread_t nt;
+            assert(!pthread_create(&nt, NULL, net_thr_guard_worker, &nta));
+            assert(!pthread_join(nt, NULL));
+            assert(nta.ok && statements == 0 && __atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+            assert(__atomic_load_n(&sc_rbs_stat_skip_thread, __ATOMIC_RELAXED) == 1);
+        }
+#endif
+
+        // 15d. SQLITE_READONLY write failure marks connection bad: 2nd load does 0 SQL and 0 IPC.
+        net_fake_main = "net://aaaa0002-1111-2222-3333-444455556666/ROVOL/Engine Library/Database2/m.db";
+        net_force_ro_write = 1;
+        sc_rbs_stats_reset();
+        res = sc_rbs_fill_path(&net_engine, net_db, net_fake_main, "../Contents/LinkROWrite.mp3", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (read-only library)"));
+        assert(!strcmp(text(net_db, ROW, n_ro_wr), INSERTED));
+        net_force_ro_write = 0;
+        sc_rbs_stats_reset();
+        statements = 0;
+        res = sc_rbs_fill_path(&net_engine, net_db, net_fake_main, "../Contents/LinkROWrite.mp3", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (remote library unavailable)"));
+        assert(statements == 0 && __atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+        assert(__atomic_load_n(&sc_rbs_stat_skip_neg, __ATOMIC_RELAXED) == 1);
+
+        // 15e. Older / non-EngineX peer (X-RB-Status: peer_unsupported) caches peer negative across volumes:
+        //      2nd load on a DIFFERENT volume of the same peer does 0 SQL and 0 IPC!
+        pthread_mutex_lock(&lmock.mu);
+        lmock.status = 404;
+        snprintf(lmock.x_rb_status, sizeof lmock.x_rb_status, "peer_unsupported");
+        pthread_mutex_unlock(&lmock.mu);
+        net_fake_main = "net://bbbb0003-1111-2222-3333-444455556666/VOL1/Engine Library/Database2/m.db";
+        sc_rbs_stats_reset();
+        res = sc_rbs_fill_path(&net_engine, net_db, net_fake_main, "../Contents/LinkUnsup.mp3", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (peer unsupported)"));
+        assert(!strcmp(text(net_db, ROW, n_unsup), INSERTED));
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 1);
+        // Same peer UUID (even uppercase with braces and different volume VOL2): 0 SQL & 0 IPC!
+        net_fake_main = "net://{BBBB0003-1111-2222-3333-444455556666}/VOL2/Engine Library/Database2/m.db";
+        sc_rbs_stats_reset();
+        statements = 0;
+        res = sc_rbs_fill_path(&net_engine, net_db, net_fake_main, "../Contents/LinkUnsup.mp3", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (peer unsupported cached)"));
+        assert(statements == 0 && __atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+        assert(__atomic_load_n(&sc_rbs_stat_skip_neg, __ATOMIC_RELAXED) == 1);
+
+        // 15f. Answer budget timeout (120 ms link budget vs 400 ms hung peer): aborts cleanly for stock fallback.
+        pthread_mutex_lock(&lmock.mu);
+        lmock.status = 200;
+        lmock.x_rb_status[0] = 0;
+        lmock.delay_ms = 400;
+        pthread_mutex_unlock(&lmock.mu);
+        sc_rbs_link_timeout_ms = 120;
+        net_fake_main = "net://cccc0004-1111-2222-3333-444455556666/NEXTLIB/Engine Library/Database2/m.db";
+        struct timespec t_lo0, t_lo1;
+        clock_gettime(CLOCK_MONOTONIC, &t_lo0);
+        res = sc_rbs_fill_path(&net_engine, net_db, net_fake_main, "../Contents/LinkTimeout.mp3", -1, &out_id);
+        clock_gettime(CLOCK_MONOTONIC, &t_lo1);
+        double tmo_ms = (double)(t_lo1.tv_sec - t_lo0.tv_sec) * 1e3 + (double)(t_lo1.tv_nsec - t_lo0.tv_nsec) / 1e6;
+        assert(res && !strcmp(res, "ondemand fetch failed"));
+        assert(tmo_ms >= 90.0 && tmo_ms < 280.0);
+        assert(!strcmp(text(net_db, ROW, n_tmo), INSERTED));
+        sc_rbs_link_timeout_ms = SC_RBS_LINK_TIMEOUT_DEFAULT_MS;
+
+        // 15g. Concurrent two-connection net:// race coalesces to 1 HTTP fetch and 1 filled notify.
+        pthread_mutex_lock(&lmock.mu);
+        lmock.status = 200;
+        lmock.delay_ms = 80;
+        lmock.data_reqs = 0;
+        lmock.filled_reqs = 0;
+        snprintf(lmock.key, sizeof lmock.key, "contents/linkrace.mp3");
+        pthread_mutex_unlock(&lmock.mu);
+        net_fake_main = "net://dddd0005-1111-2222-3333-444455556666/NEXTLIB/Engine Library/Database2/m.db";
+        sqlite3 *nr1 = NULL, *nr2 = NULL;
+        assert(sqlite3_open(sqlite3_db_filename(net_db, "main"), &nr1) == SQLITE_OK);
+        assert(sqlite3_open(sqlite3_db_filename(net_db, "main"), &nr2) == SQLITE_OK);
+        assert(sqlite3_busy_timeout(nr1, 500) == SQLITE_OK);
+        assert(sqlite3_busy_timeout(nr2, 500) == SQLITE_OK);
+        struct net_race_arg ra1 = {nr1, net_fake_main, "../Contents/LinkRace.mp3", 0, 0, ""};
+        struct net_race_arg ra2 = {nr2, net_fake_main, NULL, n_race, 0, ""};
+        pthread_t rt1, rt2;
+        assert(!pthread_create(&rt1, NULL, net_race_worker, &ra1));
+        struct timespec s15 = {0, 15000000L};
+        nanosleep(&s15, NULL);
+        assert(!pthread_create(&rt2, NULL, net_race_worker, &ra2));
+        assert(!pthread_join(rt1, NULL));
+        assert(!pthread_join(rt2, NULL));
+        assert(lmock.data_reqs == 1 && lmock.filled_reqs == 1);
+        int n_one_filled = (starts(ra1.res, "filled link on-demand (") && !strcmp(ra2.res, "skipped (row has analysis)")) ||
+                           (starts(ra2.res, "filled link on-demand (") && !strcmp(ra1.res, "skipped (row has analysis)"));
+        assert(n_one_filled);
+        assert(ra1.out_id == n_race && !strcmp(text(net_db, ROW, n_race), FILLED));
+        sqlite3_close(nr1);
+        sqlite3_close(nr2);
+
+        // 15h. Concurrent two-thread peer_unsupported race puts od_hash into sc_rbs_neg too, so the
+        //      woken waiter bails out inside sc_rbs_inflight_enter with 0 extra IPC calls (ipc_calls == 1).
+        long long n_unsup_race = track(net_db, "../Contents/LinkUnsupRace.mp3", 1, 1);
+        pthread_mutex_lock(&lmock.mu);
+        lmock.status = 404;
+        snprintf(lmock.x_rb_status, sizeof lmock.x_rb_status, "peer_unsupported");
+        lmock.delay_ms = 80;
+        lmock.data_reqs = 0;
+        lmock.filled_reqs = 0;
+        pthread_mutex_unlock(&lmock.mu);
+        sc_rbs_stats_reset();
+        net_fake_main = "net://eeee0006-1111-2222-3333-444455556666/NEXTLIB/Engine Library/Database2/m.db";
+        sqlite3 *nu1 = NULL, *nu2 = NULL;
+        assert(sqlite3_open(sqlite3_db_filename(net_db, "main"), &nu1) == SQLITE_OK);
+        assert(sqlite3_open(sqlite3_db_filename(net_db, "main"), &nu2) == SQLITE_OK);
+        assert(sqlite3_busy_timeout(nu1, 500) == SQLITE_OK);
+        assert(sqlite3_busy_timeout(nu2, 500) == SQLITE_OK);
+        struct net_race_arg ua1 = {nu1, net_fake_main, "../Contents/LinkUnsupRace.mp3", 0, 0, ""};
+        struct net_race_arg ua2 = {nu2, net_fake_main, NULL, n_unsup_race, 0, ""};
+        pthread_t ut1, ut2;
+        assert(!pthread_create(&ut1, NULL, net_race_worker, &ua1));
+        nanosleep(&s15, NULL);
+        assert(!pthread_create(&ut2, NULL, net_race_worker, &ua2));
+        assert(!pthread_join(ut1, NULL));
+        assert(!pthread_join(ut2, NULL));
+        assert(lmock.data_reqs == 1 && lmock.filled_reqs == 0);
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 1);
+        int u_one_unsup = (!strcmp(ua1.res, "skipped (peer unsupported)") && !strcmp(ua2.res, "skipped (ondemand busy)")) ||
+                          (!strcmp(ua2.res, "skipped (peer unsupported)") && !strcmp(ua1.res, "skipped (ondemand busy)"));
+        assert(u_one_unsup);
+        assert(!strcmp(text(net_db, ROW, n_unsup_race), INSERTED));
+        sqlite3_close(nu1);
+        sqlite3_close(nu2);
+
+        __atomic_store_n(&lmock.stop, 1, __ATOMIC_RELEASE);
+        assert(!pthread_join(lth, NULL));
+        close(lfd);
+        pthread_mutex_destroy(&lmock.mu);
+        sqlite3_close(net_db);
+        sc_rbs_ondemand_url = NULL;
+        net_fake_main = NULL;
     }
 
     sqlite3_close(db);

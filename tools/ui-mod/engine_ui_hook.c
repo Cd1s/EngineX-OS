@@ -4059,6 +4059,7 @@ A32_ONLY static void install_rekordbox_analysis(uintptr_t base, size_t page) {
             memcmp((const void *)(uintptr_t)api[153], sql_text, sizeof sql_text)) return;
         rbx_sqlite.exec = sqlite_exec_original;
         rbx_sqlite.filename = (const char *(*)(void *, const char *))(uintptr_t)api[180];
+        rbx_sqlite.db_readonly = (int (*)(void *, const char *))(uintptr_t)api[181];
         rbx_statement_db = (void *(*)(void *))(uintptr_t)api[49];
         rbx_statement_sql = (const char *(*)(void *))(uintptr_t)api[153];
         rbx_bind_original = (sqlite_bind_int64_fn)function_trampoline(bind, page);

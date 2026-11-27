@@ -11,7 +11,7 @@ static int exec_counted(void *db, const char *sql, int (*row)(void *, int, char 
     return sqlite3_exec(db, sql, row, arg, err);
 }
 static const char *db_main(void *db, const char *name) { return sqlite3_db_filename(db, name); }
-static const struct sc_rbx_sqlite sqlite = {exec_counted, db_main};
+static const struct sc_rbx_sqlite sqlite = {exec_counted, db_main, NULL};
 
 static void check_edits(sqlite3 *db, const char *want) {
     sqlite3_stmt *st;

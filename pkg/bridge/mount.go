@@ -340,7 +340,8 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	unchanged := headErr == nil && head.Stamp == stamp && head.Rules == rbstate.Rules && errors.Is(nextErr, os.ErrNotExist) &&
 		!o.Full && o.SmartMatch == 0 && libraryUUID(dir) == head.LibraryUUID
 	st.done("stat", "%d export files, snapshot %v, unchanged %v", len(files), headErr == nil, unchanged)
-	if unchanged && head.Pending.None() {
+	onDemandPendingRepairOnly := o.OnDemand && !head.Pending.None() && head.Pending.Rows == 0 && !head.Pending.Lists && !head.Pending.Verify
+	if unchanged && (head.Pending.None() || onDemandPendingRepairOnly) {
 		if o.OnDemand {
 			if head.Mode != rbstate.ModeOnDemand {
 				// Base-format snapshot lacks Track.AnalysisPath/ArtworkPath/Duration/SampleRate:
@@ -349,14 +350,31 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 			} else if !rbstate.BrowseIndexMatches(dir, head) {
 				if !deadlineReached() && (st.kill.IsZero() || st.fits(work{load: head.Tracks})) {
 					if snap, lerr := rbstate.Load(dir); lerr == nil && syncBrowseIndexCtx(ctx, dir, snap) == nil {
-						chores(ctx, mount, st, !o.Publish)
-						return MountResult{Bypassed: true, Background: res.Background}, nil
+						// Browse index is now synced; still run the ~1.4 ms read-only prefilter below.
+					} else {
+						unchanged = false
 					}
+				} else {
+					unchanged = false
 				}
-				unchanged = false
 			}
 		}
 		if unchanged {
+			repaired, pending, rerr := repairStockOverwrittenAtMount(parentCtx, ctx, mount, dir, r, head, st, o.OnDemand, startBG)
+			if rerr != nil {
+				if errors.Is(rerr, errWindowDeadline) || (deadlineReached() && !errors.Is(rerr, errPendingSave)) {
+					res.Applied += repaired
+					res.Pending = pending
+					return stopAtDeadline()
+				}
+				return res, rerr
+			}
+			if repaired > 0 || !pending.None() {
+				chores(ctx, mount, st, !o.Publish)
+				res.Applied += repaired
+				res.Pending = pending
+				return res, nil
+			}
 			chores(ctx, mount, st, !o.Publish)
 			return MountResult{Bypassed: true, Background: res.Background}, nil
 		}

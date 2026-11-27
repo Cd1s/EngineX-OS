@@ -172,7 +172,9 @@ func FillInBackground(ctx context.Context, mount string, o FillOptions) (FillRes
 	}
 	needsDirectCovers := o.OnDemand && snap != nil && view.view != nil &&
 		hasMissingDirectCovers(ctx, filepath.Join(dbDir, "m.db"), view.view, snap)
-	needsNextRows := snap == nil || (diff != nil && (diff.structural() || (o.OnDemand && (len(diff.UpdateTracks) > 0 || snap.Pending.Rows > 0 || snap.Pending.Lists || needsDirectCovers))))
+	needsStockRepair := o.OnDemand && snap != nil && snap.Pending.Perf > 0 && view.view != nil &&
+		hasPendingStockRepair(ctx, dbDir, snap)
+	needsNextRows := snap == nil || (diff != nil && (diff.structural() || (o.OnDemand && (len(diff.UpdateTracks) > 0 || snap.Pending.Rows > 0 || snap.Pending.Lists || needsDirectCovers || needsStockRepair))))
 	nextSkippedNoRoom := false
 	if needsNextRows && view.view != nil && o.Stage == nil {
 		if snap == nil || o.OnDemand {

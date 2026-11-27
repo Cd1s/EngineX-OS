@@ -86,6 +86,10 @@ type Config struct {
 	SDHighSpeedRunDir string
 	// RekordboxOnDemandSock overrides /run/enginex/rb-ondemand.sock for the hook's local Unix socket ("-" disables).
 	RekordboxOnDemandSock string
+	// RBStageRoot overrides /data/enginex/rb-stage for filled.jsonl writes in tests.
+	RBStageRoot string
+	// LinkUUID optionally overrides this unit's Engine Link UUID (/Network/NetworkId) in tests.
+	LinkUUID string
 	// RequireOnDemandMountpoint enforces that resolved volumes are real mountpoints (used under /media or tests).
 	RequireOnDemandMountpoint bool
 	// ApplySDHighSpeed overrides invoking enginex-sd-highspeed in tests.
@@ -122,6 +126,22 @@ type Server struct {
 	rbOnDemandDBMeta      map[rbOnDemandDBKey]*rbOnDemandDBSnap
 	rbOnDemandBuildCount  atomic.Int64
 	rbOnDemandEncodeCount atomic.Int64
+
+	rbLinkMu             sync.Mutex
+	rbLinkPeers          map[string]rbLinkPeerEntry // normalized Engine Link peer UUID -> IP/host:port
+	rbLinkPeerNeg        map[string]time.Time       // peer UUID -> negative-cache expiry (verified unsupported owner)
+	rbLinkPeerClient     *http.Client
+	rbLinkAnswerBudget   time.Duration                  // test override; 0 uses rbLinkAnswerBudgetDefault (750 ms)
+	rbLinkPeerCandidates func(context.Context) []string // test override for 2-deck TCP peer discovery
+	rbLinkARPCandidates  func(context.Context) []string // test override for 2-deck ARP peer discovery
+	rbLinkProcReadFile   func(string) ([]byte, error)   // test override for /proc file reads
+	rbLinkJournalMu      sync.Mutex                     // guards rbLinkJournals map lookup/eviction only (never held across I/O)
+	rbLinkJournals       map[string]*rbLinkStickJournal // per-stick bounded filled.jsonl dedup & append lock
+	rbLinkJournalCap     int                            // test override; 0 uses rbLinkMaxDedupPerStick
+	rbLinkLANQueued      atomic.Int32                   // bounded queued+active LAN /peer/rekordbox/* admission
+	rbLinkLANSem         chan struct{}                  // bounded concurrent active LAN /peer/rekordbox/* slots
+	rbLinkPeerHTTPCount  atomic.Int64                   // outbound LAN HTTP probes/fetches made by Link relay
+	rbLinkFilledCount    atomic.Int64                   // new remote filled.jsonl entries recorded on stick owner
 
 	mu            sync.Mutex
 	sessions      map[string]*Session
@@ -381,6 +401,10 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/rekordbox/writeback", s.handleRekordboxWriteback)
 	s.mux.HandleFunc("POST /v1/enginex/rekordbox/writeback", s.handleRekordboxWriteback)
 	s.mux.HandleFunc("POST "+RekordboxOnDemandRoute, s.handleRekordboxOnDemand)
+	s.mux.HandleFunc("POST "+RekordboxOnDemandFilledRoute, s.handleRekordboxOnDemandFilled)
+	s.mux.HandleFunc("GET "+RekordboxPeerOnDemandRoute, s.handlePeerRekordboxOnDemand)
+	s.mux.HandleFunc("POST "+RekordboxPeerOnDemandRoute, s.handlePeerRekordboxOnDemand)
+	s.mux.HandleFunc("POST "+RekordboxPeerFilledRoute, s.handlePeerRekordboxFilled)
 	s.automix = newAutomixManager(s.automixConfigPath())
 	s.soundCloudAuth = &providers.SoundCloudAuth{TokenURL: cfg.SoundCloudTokenURL, Path: filepath.Join(cfg.StateDir, "soundcloud-token.json"), HTTP: cfg.HTTP}
 	if cfg.BPM != nil {

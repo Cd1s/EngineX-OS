@@ -151,6 +151,7 @@ static void sc_rbx_link_replay(const char *key, const char *payload) {
 struct sc_rbx_sqlite {
     int (*exec)(void *, const char *, int (*)(void *, int, char **, char **), void *, char **);
     const char *(*filename)(void *, const char *);
+    int (*db_readonly)(void *, const char *);
 };
 
 struct sc_rbx_row {

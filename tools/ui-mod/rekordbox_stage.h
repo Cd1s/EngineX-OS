@@ -48,8 +48,11 @@
 #define SC_RBS_ONDEMAND_SOCK "/run/enginex/rb-ondemand.sock" // stream-sync direct-read Unix socket
 #endif
 #define SC_RBS_ONDEMAND_ROUTE "/v1/enginex/rekordbox/track-data"
+#define SC_RBS_ONDEMAND_FILLED_ROUTE "/v1/enginex/rekordbox/track-filled"
 #define SC_RBS_ONDEMAND_MAX_BODY (4 << 20)
 #define SC_RBS_ONDEMAND_TIMEOUT_DEFAULT_MS 1500
+#define SC_RBS_LINK_TIMEOUT_DEFAULT_MS 800
+#define SC_RBS_FILLED_NOTIFY_TIMEOUT_MS 150
 #define SC_RBS_NEG_SLOTS 64
 #define SC_RBS_INFLIGHT_SLOTS 16
 #define SC_RBS_NEG_TTL_PERM_NS (60LL * 1000000000LL)
@@ -61,8 +64,32 @@ static const char *sc_rbs_root = SC_RBS_ROOT;
 static const char *sc_rbs_ondemand_sock = SC_RBS_ONDEMAND_SOCK;
 static const char *sc_rbs_ondemand_url = NULL; // optional http://127.0.0.1:PORT/... override
 static int sc_rbs_ondemand_timeout_ms = SC_RBS_ONDEMAND_TIMEOUT_DEFAULT_MS;
+static int sc_rbs_link_timeout_ms = SC_RBS_LINK_TIMEOUT_DEFAULT_MS;
 static int sc_rbs_ondemand_env_init;
 static int (*sc_rbs_sched_override)(void);     // test hook for RT thread bailout verification
+
+// Lightweight observability counters (zero-cost bailout proof in C unit tests).
+static unsigned long long sc_rbs_stat_ipc_calls;
+static unsigned long long sc_rbs_stat_filled_notifies;
+static unsigned long long sc_rbs_stat_sql_reads;
+static unsigned long long sc_rbs_stat_sql_writes;
+static unsigned long long sc_rbs_stat_skip_thread;
+static unsigned long long sc_rbs_stat_skip_readonly;
+static unsigned long long sc_rbs_stat_skip_stock;
+static unsigned long long sc_rbs_stat_skip_filled;
+static unsigned long long sc_rbs_stat_skip_neg;
+
+static inline void sc_rbs_stats_reset(void) {
+    __atomic_store_n(&sc_rbs_stat_ipc_calls, 0ULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&sc_rbs_stat_filled_notifies, 0ULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&sc_rbs_stat_sql_reads, 0ULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&sc_rbs_stat_sql_writes, 0ULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&sc_rbs_stat_skip_thread, 0ULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&sc_rbs_stat_skip_readonly, 0ULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&sc_rbs_stat_skip_stock, 0ULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&sc_rbs_stat_skip_filled, 0ULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&sc_rbs_stat_skip_neg, 0ULL, __ATOMIC_RELAXED);
+}
 
 // --- SHA-1, for the stage's file names (<hex SHA-1 of the key>.bin) ---------------------------
 
@@ -582,7 +609,8 @@ static int sc_rbs_find(struct sc_rbs_stage *s, const char *key, int by_rel, off_
 struct sc_rbs_conn {
     void *db;
     char main[PATH_MAX];
-    int known;      // 1: uuid is the snapshot's; -1: the stick had no bridge snapshot at `checked`
+    int is_net;     // 1: Engine Link remote library (net://<peer-uuid>/<vol>/.../m.db)
+    int known;      // local: 1=snapshot uuid, -1=no snapshot; remote: 0=unchecked, 1=ok, -1=bad/ro/unsupported
     time_t checked; // a -1 is looked at again after sc_rbs_recheck seconds
     char uuid[SC_RBS_TEXT];
     unsigned long long touched;
@@ -630,10 +658,51 @@ static int sc_rbs_snapshot_uuid(const char *main, char uuid[SC_RBS_TEXT]) {
     return 0;
 }
 
-// main when db is a drive's library, else NULL.
+// Matches Engine Link's airNfs main library path:
+//   net://<peer-uuid>/<vol>/Engine Library/Database2/m.db
+static int sc_rbs_is_net_main(const char *main) {
+    static const char suffix[] = "/Engine Library/Database2/m.db";
+    if (!main || strncmp(main, "net://", 6)) return 0;
+    const char *host = main + 6;
+    const char *slash = strchr(host, '/');
+    if (!slash || slash == host || (size_t)(slash - host) >= 128) return 0;
+    for (const char *p = host; p < slash; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') ||
+              c == '-' || c == '{' || c == '}'))
+            return 0;
+    }
+    const size_t slen = sizeof suffix - 1;
+    const size_t rest_len = strlen(slash);
+    if (rest_len <= slen + 1 || strcmp(slash + rest_len - slen, suffix)) return 0;
+    const char *vol = slash + 1;
+    const size_t vol_len = rest_len - slen - 1;
+    if (!vol_len || memchr(vol, '/', vol_len)) return 0;
+    if ((vol_len == 1 && vol[0] == '.') || (vol_len == 2 && vol[0] == '.' && vol[1] == '.')) return 0;
+    return 1;
+}
+
+static int sc_rbs_net_peer_uuid(const char *main, char *out, size_t cap) {
+    if (!sc_rbs_is_net_main(main) || cap < 2) return 0;
+    const char *p = main + 6, *slash = strchr(p, '/');
+    size_t n = 0;
+    for (; p < slash && n + 1 < cap; p++) {
+        if (*p == '{' || *p == '}') continue;
+        unsigned char c = (unsigned char)*p;
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + ('a' - 'A'));
+        out[n++] = (char)c;
+    }
+    out[n] = 0;
+    return n > 0;
+}
+
+// main when db is a local drive's library or an Engine Link remote drive's m.db, else NULL.
 static const char *sc_rbs_drive(const struct sc_rbx_sqlite *q, void *db) {
     const char *main = q->filename(db, "main");
-    return main && !strncmp(main, sc_rbx_drives, strlen(sc_rbx_drives)) ? main : NULL;
+    if (!main) return NULL;
+    if (!strncmp(main, sc_rbx_drives, strlen(sc_rbx_drives))) return main;
+    if (sc_rbs_is_net_main(main)) return main;
+    return NULL;
 }
 
 // The cached library of db. Called with sc_rbs_mu held.
@@ -643,15 +712,19 @@ static struct sc_rbs_conn *sc_rbs_conn_of(void *db, const char *main) {
         if (sc_rbs_conns[i].db == db && !strcmp(sc_rbs_conns[i].main, main)) c = &sc_rbs_conns[i];
         if (sc_rbs_conns[i].touched < oldest->touched) oldest = &sc_rbs_conns[i];
     }
+    const int is_net = sc_rbs_is_net_main(main);
     if (!c) {
         c = oldest;
         memset(c, 0, sizeof *c);
         c->db = db;
+        c->is_net = is_net;
         snprintf(c->main, sizeof c->main, "%s", main);
     }
     c->touched = ++sc_rbs_clock;
     const time_t now = time(NULL);
-    if (!c->known || (c->known < 0 && now - c->checked >= sc_rbs_recheck)) {
+    if (is_net) {
+        if (c->known < 0 && now - c->checked >= sc_rbs_recheck) c->known = 0;
+    } else if (!c->known || (c->known < 0 && now - c->checked >= sc_rbs_recheck)) {
         c->known = sc_rbs_snapshot_uuid(main, c->uuid) ? 1 : -1;
         c->checked = now;
     }
@@ -663,6 +736,15 @@ static void sc_rbs_conn_stale(void *db, const char *main) {
     pthread_mutex_lock(&sc_rbs_mu);
     for (unsigned i = 0; i < SC_RBS_CONNS; i++)
         if (sc_rbs_conns[i].db == db && !strcmp(sc_rbs_conns[i].main, main)) sc_rbs_conns[i].known = 0;
+    pthread_mutex_unlock(&sc_rbs_mu);
+}
+
+// Mark a remote connection read-only or unsupported until sc_rbs_recheck expires.
+static void sc_rbs_conn_mark_bad(void *db, const char *main) {
+    pthread_mutex_lock(&sc_rbs_mu);
+    struct sc_rbs_conn *c = sc_rbs_conn_of(db, main);
+    c->known = -1;
+    c->checked = time(NULL);
     pthread_mutex_unlock(&sc_rbs_mu);
 }
 
@@ -908,6 +990,11 @@ static void sc_rbs_ondemand_load_env_locked(void) {
         int v = atoi(env_ms);
         if (v > 0 && v <= 15000) sc_rbs_ondemand_timeout_ms = v;
     }
+    const char *env_link_ms = getenv("ENGINEX_RB_LINK_TIMEOUT_MS");
+    if (env_link_ms && env_link_ms[0]) {
+        int v = atoi(env_link_ms);
+        if (v >= 50 && v <= 1400) sc_rbs_link_timeout_ms = v;
+    }
 }
 
 static int sc_rbs_ondemand_available(void) {
@@ -1127,26 +1214,28 @@ static int sc_rbs_parse_loopback_url(const char *url, int *port, const char **ro
 // Fetches one track's RBXA1 payload and metadata over Unix domain socket or loopback HTTP/1.1
 // with a strict CLOCK_MONOTONIC deadline. Returns 0 on HTTP 200 valid RBXA1, -1 otherwise
 // (*http_status holds the HTTP code when a response was parsed, 0 on transport/timeout error).
-static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const struct sc_rbs_row *row,
-                                 long long deadline_ns, struct sc_rbs_line *out_line,
-                                 unsigned char **out_body, size_t *out_len, int *http_status) {
-    *out_body = NULL;
-    *out_len = 0;
-    *http_status = 0;
-    memset(out_line, 0, sizeof *out_line);
-    out_line->rules = -1;
+static uint64_t sc_rbs_peer_neg_hash(const char *peer_uuid) {
+    char buf[160];
+    int n = snprintf(buf, sizeof buf, "PEER|%s", peer_uuid);
+    if (n <= 0) return 1;
+    if ((size_t)n >= sizeof buf) n = (int)(sizeof buf - 1);
+    return sc_rbs_hash(buf, (size_t)n);
+}
 
+static int sc_rbs_ondemand_connect(long long deadline_ns, const char *default_route, const char **out_route) {
     pthread_mutex_lock(&sc_rbs_mu);
     sc_rbs_ondemand_load_env_locked();
     const char *url = sc_rbs_ondemand_url;
     const char *sock_path = sc_rbs_ondemand_sock;
     pthread_mutex_unlock(&sc_rbs_mu);
 
+    *out_route = default_route;
     int fd = -1;
-    const char *route = SC_RBS_ONDEMAND_ROUTE;
     if (url && url[0]) {
         int port = 0;
-        if (!sc_rbs_parse_loopback_url(url, &port, &route)) return -1;
+        const char *url_route = default_route;
+        if (!sc_rbs_parse_loopback_url(url, &port, &url_route)) return -1;
+        if (!strcmp(default_route, SC_RBS_ONDEMAND_ROUTE)) *out_route = url_route;
         fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
         if (fd < 0) return -1;
         struct sockaddr_in sa;
@@ -1174,7 +1263,9 @@ static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const st
                 return -1;
             }
         }
-    } else if (sock_path && sock_path[0]) {
+        return fd;
+    }
+    if (sock_path && sock_path[0]) {
         struct sockaddr_un su;
         memset(&su, 0, sizeof su);
         if (strlen(sock_path) >= sizeof su.sun_path) return -1;
@@ -1199,9 +1290,45 @@ static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const st
                 return -1;
             }
         }
-    } else {
+        return fd;
+    }
+    return -1;
+}
+
+static int sc_rbs_send_all(int fd, const char *req, size_t req_len, long long deadline_ns) {
+    size_t sent = 0;
+    while (sent < req_len) {
+        if (sc_rbs_mono_ns() >= deadline_ns) return -1;
+        ssize_t w = send(fd, req + sent, req_len - sent, MSG_NOSIGNAL);
+        if (w > 0) {
+            sent += (size_t)w;
+            continue;
+        }
+        if (w < 0 && errno == EINTR) continue;
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (sc_rbs_poll_fd(fd, POLLOUT, deadline_ns) <= 0) return -1;
+            continue;
+        }
         return -1;
     }
+    return 0;
+}
+
+static int sc_rbs_ondemand_fetch_ex(const char *main_db, const char *uuid, const struct sc_rbs_row *row,
+                                    long long deadline_ns, struct sc_rbs_line *out_line,
+                                    unsigned char **out_body, size_t *out_len, int *http_status,
+                                    int *peer_unsupported) {
+    *out_body = NULL;
+    *out_len = 0;
+    *http_status = 0;
+    if (peer_unsupported) *peer_unsupported = 0;
+    memset(out_line, 0, sizeof *out_line);
+    out_line->rules = -1;
+
+    __atomic_fetch_add(&sc_rbs_stat_ipc_calls, 1ULL, __ATOMIC_RELAXED);
+    const char *route = SC_RBS_ONDEMAND_ROUTE;
+    int fd = sc_rbs_ondemand_connect(deadline_ns, SC_RBS_ONDEMAND_ROUTE, &route);
+    if (fd < 0) return -1;
 
     char *jbody = NULL;
     size_t jlen = 0;
@@ -1217,6 +1344,7 @@ static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const st
     fputs(",\"path\":", jf);
     sc_rbs_json_text(jf, row->path);
     fprintf(jf, ",\"id\":%lld", row->id);
+    if (row->import_key > 0) fprintf(jf, ",\"importKey\":%lld", row->import_key);
     if (row->key >= 0 && row->key < 24) fprintf(jf, ",\"key\":%d", row->key);
     if (row->bpm > 0.0 && row->bpm < 10000.0) {
         long long scaled = (long long)(row->bpm * 10000.0 + 0.5);
@@ -1253,23 +1381,9 @@ static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const st
         return -1;
     }
 
-    size_t sent = 0;
-    while (sent < req_len) {
-        if (sc_rbs_mono_ns() >= deadline_ns) break;
-        ssize_t w = send(fd, req + sent, req_len - sent, MSG_NOSIGNAL);
-        if (w > 0) {
-            sent += (size_t)w;
-            continue;
-        }
-        if (w < 0 && errno == EINTR) continue;
-        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            if (sc_rbs_poll_fd(fd, POLLOUT, deadline_ns) <= 0) break;
-            continue;
-        }
-        break;
-    }
+    int send_err = sc_rbs_send_all(fd, req, req_len, deadline_ns);
     free(req);
-    if (sent != req_len) {
+    if (send_err) {
         close(fd);
         return -1;
     }
@@ -1389,10 +1503,6 @@ static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const st
     }
     int status = atoi(sp + 1);
     *http_status = status;
-    if (status != 200) {
-        free(buf);
-        return -1;
-    }
 
     const char *p = (const char *)buf, *end = (const char *)buf + hdr_end - 4;
     const char *first_nl = memchr(p, '\n', (size_t)(end - p));
@@ -1401,21 +1511,51 @@ static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const st
         return -1;
     }
     p = first_nl + 1;
-    char tmp[64];
+    char tmp[64], rb_status[64];
+    rb_status[0] = 0;
+    int bad_hdr = 0;
     while (p < end) {
         const char *nl = memchr(p, '\n', (size_t)(end - p));
         size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
-        if (sc_rbs_hdr_match(p, ll, "X-RB-Key", out_line->key, sizeof out_line->key)) {
-        } else if (sc_rbs_hdr_match(p, ll, "X-RB-Written", out_line->wr, sizeof out_line->wr)) {
-        } else if (sc_rbs_hdr_match(p, ll, "X-RB-Written-NoMain", out_line->wrnm, sizeof out_line->wrnm)) {
-        } else if (sc_rbs_hdr_match(p, ll, "X-RB-Row", out_line->row, sizeof out_line->row)) {
-        } else if (sc_rbs_hdr_match(p, ll, "X-RB-Active-Loops", tmp, sizeof tmp)) {
-            out_line->active = strtoll(tmp, NULL, 10);
-        } else if (sc_rbs_hdr_match(p, ll, "X-RB-Rules", tmp, sizeof tmp)) {
-            out_line->rules = strtoll(tmp, NULL, 10);
+        if (sc_rbs_hdr_match(p, ll, "X-RB-Status", rb_status, sizeof rb_status)) {
+        } else if (status == 200) {
+            if (sc_rbs_hdr_match(p, ll, "X-RB-Key", out_line->key, sizeof out_line->key)) {
+            } else if (sc_rbs_hdr_match(p, ll, "X-RB-Written", out_line->wr, sizeof out_line->wr)) {
+            } else if (sc_rbs_hdr_match(p, ll, "X-RB-Written-NoMain", out_line->wrnm, sizeof out_line->wrnm)) {
+            } else if (sc_rbs_hdr_match(p, ll, "X-RB-Row", out_line->row, sizeof out_line->row)) {
+            } else if (sc_rbs_hdr_match(p, ll, "X-RB-Active-Loops", tmp, sizeof tmp)) {
+                char *ep = NULL;
+                errno = 0;
+                if (tmp[0] < '0' || tmp[0] > '9') {
+                    bad_hdr = 1;
+                } else {
+                    unsigned long long v = strtoull(tmp, &ep, 10);
+                    if (errno == ERANGE || !ep || *ep != '\0' || v > 0xffffffffULL)
+                        bad_hdr = 1;
+                    else
+                        out_line->active = (long long)v;
+                }
+            } else if (sc_rbs_hdr_match(p, ll, "X-RB-Rules", tmp, sizeof tmp)) {
+                char *ep = NULL;
+                errno = 0;
+                if (tmp[0] < '0' || tmp[0] > '9') {
+                    bad_hdr = 1;
+                } else {
+                    long long v = strtoll(tmp, &ep, 10);
+                    if (errno == ERANGE || !ep || *ep != '\0' || v <= 0)
+                        bad_hdr = 1;
+                    else
+                        out_line->rules = v;
+                }
+            }
         }
         if (!nl) break;
         p = nl + 1;
+    }
+    if (peer_unsupported && !strcmp(rb_status, "peer_unsupported")) *peer_unsupported = 1;
+    if (status != 200 || bad_hdr) {
+        free(buf);
+        return -1;
     }
 
     size_t body_len = have - hdr_end;
@@ -1441,7 +1581,77 @@ static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const st
     return 0;
 }
 
+__attribute__((unused)) static int sc_rbs_ondemand_fetch(const char *main_db, const char *uuid, const struct sc_rbs_row *row,
+                                 long long deadline_ns, struct sc_rbs_line *out_line,
+                                 unsigned char **out_body, size_t *out_len, int *http_status) {
+    return sc_rbs_ondemand_fetch_ex(main_db, uuid, row, deadline_ns, out_line, out_body, out_len, http_status, NULL);
+}
+
+// Notifies local stream-sync that a remote Engine Link fill committed so the stick owner
+// records filled.jsonl for #321 eject. Bounded to SC_RBS_FILLED_NOTIFY_TIMEOUT_MS and never
+// fails the committed fill.
+static void sc_rbs_ondemand_notify_filled(const char *main_db, const char *uuid, const struct sc_rbs_row *row) {
+    const long long deadline_ns = sc_rbs_mono_ns() + (long long)SC_RBS_FILLED_NOTIFY_TIMEOUT_MS * 1000000LL;
+    const char *route = SC_RBS_ONDEMAND_FILLED_ROUTE;
+    int fd = sc_rbs_ondemand_connect(deadline_ns, SC_RBS_ONDEMAND_FILLED_ROUTE, &route);
+    if (fd < 0) return;
+
+    char *jbody = NULL;
+    size_t jlen = 0;
+    FILE *jf = open_memstream(&jbody, &jlen);
+    if (!jf) {
+        close(fd);
+        return;
+    }
+    fputs("{\"db\":", jf);
+    sc_rbs_json_text(jf, main_db);
+    fputs(",\"uuid\":", jf);
+    sc_rbs_json_text(jf, uuid);
+    fputs(",\"path\":", jf);
+    sc_rbs_json_text(jf, row->path);
+    fprintf(jf, ",\"id\":%lld", row->id);
+    if (row->import_key > 0) fprintf(jf, ",\"importKey\":%lld", row->import_key);
+    fputc('}', jf);
+    if (fclose(jf)) {
+        free(jbody);
+        close(fd);
+        return;
+    }
+
+    char *req = NULL;
+    size_t req_len = 0;
+    FILE *rf = open_memstream(&req, &req_len);
+    if (!rf) {
+        free(jbody);
+        close(fd);
+        return;
+    }
+    fprintf(rf,
+            "POST %s HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: %zu\r\n"
+            "Connection: close\r\n\r\n",
+            route, jlen);
+    (void)fwrite(jbody, 1, jlen, rf);
+    free(jbody);
+    if (fclose(rf)) {
+        free(req);
+        close(fd);
+        return;
+    }
+    if (!sc_rbs_send_all(fd, req, req_len, deadline_ns)) {
+        __atomic_fetch_add(&sc_rbs_stat_filled_notifies, 1ULL, __ATOMIC_RELAXED);
+        // Wait briefly for stream-sync's immediate 202 response so the request is accepted before close.
+        char resp[64];
+        if (sc_rbs_poll_fd(fd, POLLIN, deadline_ns) > 0) (void)recv(fd, resp, sizeof resp, 0);
+    }
+    free(req);
+    close(fd);
+}
+
 static int sc_rbs_exec_read(const struct sc_rbx_sqlite *q, void *db, const char *sql, struct sc_rbs_row *r) {
+    __atomic_fetch_add(&sc_rbs_stat_sql_reads, 1ULL, __ATOMIC_RELAXED);
     const long long deadline = sc_rbs_mono_ns() + 200000000LL;
     for (;;) {
         memset(r, 0, sizeof *r);
@@ -1453,6 +1663,7 @@ static int sc_rbs_exec_read(const struct sc_rbx_sqlite *q, void *db, const char 
 }
 
 static int sc_rbs_exec_write(const struct sc_rbx_sqlite *q, void *db, const char *sql, int *filled) {
+    __atomic_fetch_add(&sc_rbs_stat_sql_writes, 1ULL, __ATOMIC_RELAXED);
     const long long deadline = sc_rbs_mono_ns() + 200000000LL;
     for (;;) {
         *filled = 0;
@@ -1485,8 +1696,16 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
     // Thread guard FIRST before any stat/access/malloc/mutex or SQLite calls.
     const char *thread_skip = sc_rbs_ondemand_skip_reason(sc_rbs_thread_safe_for_ondemand());
     if (thread_skip) {
+        __atomic_fetch_add(&sc_rbs_stat_skip_thread, 1ULL, __ATOMIC_RELAXED);
         return sc_rbx_verbose ? thread_skip : NULL;
     }
+    // Read-only library guard BEFORE any SQLite statement or IPC/LAN call.
+    if (q->db_readonly && q->db_readonly(db, "main") != 0) {
+        __atomic_fetch_add(&sc_rbs_stat_skip_readonly, 1ULL, __ATOMIC_RELAXED);
+        return sc_rbx_verbose ? "skipped (read-only library)" : NULL;
+    }
+    const int is_net = sc_rbs_is_net_main(main);
+    if (is_net && !allow_ondemand) return NULL;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     struct stat st;
     size_t plen = 0;
@@ -1496,7 +1715,20 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
     } else if (track <= 0) {
         return sc_rbx_verbose ? "skipped (nothing staged on the deck)" : NULL;
     }
-    const int stage_exists = !stat(sc_rbs_root, &st);
+    char peer_uuid[128];
+    uint64_t peer_neg_hash = 0;
+    if (is_net) {
+        if (!sc_rbs_net_peer_uuid(main, peer_uuid, sizeof peer_uuid)) return NULL;
+        peer_neg_hash = sc_rbs_peer_neg_hash(peer_uuid);
+        pthread_mutex_lock(&sc_rbs_mu);
+        const int peer_neg = sc_rbs_neg_hit_locked(peer_neg_hash, sc_rbs_mono_ns());
+        pthread_mutex_unlock(&sc_rbs_mu);
+        if (peer_neg) {
+            __atomic_fetch_add(&sc_rbs_stat_skip_neg, 1ULL, __ATOMIC_RELAXED);
+            return sc_rbx_verbose ? "skipped (peer unsupported cached)" : NULL;
+        }
+    }
+    const int stage_exists = !is_net && !stat(sc_rbs_root, &st);
     const int ondemand_avail = allow_ondemand && sc_rbs_ondemand_available();
     if (!stage_exists && !ondemand_avail) {
         return sc_rbx_verbose ? "skipped (nothing staged on the deck)" : NULL;
@@ -1524,7 +1756,7 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
     struct sc_rbs_conn *c = sc_rbs_conn_of(db, main);
     const int known = c->known;
     snprintf(uuid, SC_RBS_TEXT, "%s", c->uuid);
-    struct sc_rbs_stage *s = (known > 0 && stage_exists) ? sc_rbs_stage_of(uuid) : NULL;
+    struct sc_rbs_stage *s = (!is_net && known > 0 && stage_exists) ? sc_rbs_stage_of(uuid) : NULL;
     const int staged = s != NULL;
     if (staged && path) {
         ascii = sc_rbs_fold(raw_path, key, SC_RBS_TEXT, 1) >= 0;
@@ -1533,11 +1765,12 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
     }
     pthread_mutex_unlock(&sc_rbs_mu);
     if (known < 0) {
-        why = "skipped (no bridge snapshot)";
+        __atomic_fetch_add(&sc_rbs_stat_skip_neg, 1ULL, __ATOMIC_RELAXED);
+        why = is_net ? "skipped (remote library unavailable)" : "skipped (no bridge snapshot)";
         goto done;
     }
 
-    int use_ondemand = 0;
+    int use_ondemand = is_net ? 1 : 0;
     if (!staged) {
         if (!ondemand_avail) {
             why = "skipped (nothing staged for this library)";
@@ -1553,12 +1786,13 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
     }
 
     uint64_t pre_od_hash = 0;
-    if (use_ondemand) {
+    if (use_ondemand && uuid[0]) {
         pre_od_hash = sc_rbs_ondemand_key_hash(uuid, path ? raw_path : NULL, track);
         pthread_mutex_lock(&sc_rbs_mu);
         const int neg_hit = sc_rbs_neg_hit_locked(pre_od_hash, sc_rbs_mono_ns());
         pthread_mutex_unlock(&sc_rbs_mu);
         if (neg_hit) {
+            __atomic_fetch_add(&sc_rbs_stat_skip_neg, 1ULL, __ATOMIC_RELAXED);
             why = "skipped (ondemand cached miss)";
             goto done;
         }
@@ -1583,12 +1817,26 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
     }
     track = r->id;
     if (out_track) *out_track = track;
-    if (strcmp(r->uuid, uuid)) {
+    if (is_net) {
+        if (!sc_rbs_uuid_ok(r->uuid)) {
+            why = "skipped (bad remote library uuid)";
+            goto done;
+        }
+        snprintf(uuid, SC_RBS_TEXT, "%s", r->uuid);
+        pthread_mutex_lock(&sc_rbs_mu);
+        struct sc_rbs_conn *cn = sc_rbs_conn_of(db, main);
+        if (cn->known >= 0) {
+            snprintf(cn->uuid, sizeof cn->uuid, "%s", r->uuid);
+            cn->known = 1;
+        }
+        pthread_mutex_unlock(&sc_rbs_mu);
+    } else if (strcmp(r->uuid, uuid)) {
         sc_rbs_conn_stale(db, main);
         why = "skipped (the snapshot names another library)";
         goto done;
     }
     if (!r->empty) {
+        __atomic_fetch_add(&sc_rbs_stat_skip_filled, 1ULL, __ATOMIC_RELAXED);
         inflight_filled = 1;
         inflight_track = track;
         why = "skipped (row has analysis)";
@@ -1599,6 +1847,7 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
         goto done;
     }
     if (r->import_key <= 0) {
+        __atomic_fetch_add(&sc_rbs_stat_skip_stock, 1ULL, __ATOMIC_RELAXED);
         why = "skipped (Engine's own row)";
         goto done;
     }
@@ -1639,10 +1888,16 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
         // to one stream-sync request.
         const uint64_t od_hash = sc_rbs_ondemand_key_hash(uuid, NULL, track);
         pthread_mutex_lock(&sc_rbs_mu);
+        sc_rbs_ondemand_load_env_locked();
         const int neg_hit = sc_rbs_neg_hit_locked(od_hash, sc_rbs_mono_ns());
-        const int timeout_ms = sc_rbs_ondemand_timeout_ms > 0 ? sc_rbs_ondemand_timeout_ms : SC_RBS_ONDEMAND_TIMEOUT_DEFAULT_MS;
+        int timeout_ms = sc_rbs_ondemand_timeout_ms > 0 ? sc_rbs_ondemand_timeout_ms : SC_RBS_ONDEMAND_TIMEOUT_DEFAULT_MS;
+        if (is_net) {
+            int link_ms = sc_rbs_link_timeout_ms > 0 ? sc_rbs_link_timeout_ms : SC_RBS_LINK_TIMEOUT_DEFAULT_MS;
+            if (link_ms < timeout_ms) timeout_ms = link_ms;
+        }
         pthread_mutex_unlock(&sc_rbs_mu);
         if (neg_hit) {
+            __atomic_fetch_add(&sc_rbs_stat_skip_neg, 1ULL, __ATOMIC_RELAXED);
             why = "skipped (ondemand cached miss)";
             goto done;
         }
@@ -1658,9 +1913,18 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
             why = "skipped (ondemand busy)";
             goto done;
         }
-        int http_status = 0;
-        if (sc_rbs_ondemand_fetch(main, uuid, r, od_deadline, l, &b, &size, &http_status)) {
-            if (http_status == 409) {
+        int http_status = 0, peer_unsupported = 0;
+        if (sc_rbs_ondemand_fetch_ex(main, uuid, r, od_deadline, l, &b, &size, &http_status, &peer_unsupported)) {
+            if (is_net && peer_unsupported) {
+                pthread_mutex_lock(&sc_rbs_mu);
+                if (peer_neg_hash) sc_rbs_neg_put_locked(peer_neg_hash, SC_RBS_NEG_TTL_PERM_NS);
+                sc_rbs_neg_put_locked(od_hash, SC_RBS_NEG_TTL_PERM_NS);
+                if (pre_od_hash && pre_od_hash != od_hash)
+                    sc_rbs_neg_put_locked(pre_od_hash, SC_RBS_NEG_TTL_PERM_NS);
+                pthread_mutex_unlock(&sc_rbs_mu);
+                sc_rbs_conn_mark_bad(db, main);
+                why = "skipped (peer unsupported)";
+            } else if (http_status == 409) {
                 sc_rbs_conn_stale(db, main);
                 why = "skipped (the snapshot names another library)";
             } else {
@@ -1704,18 +1968,27 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
     const int error = sc_rbs_exec_write(q, db, update, &filled);
     free(update);
     if (error) {
-        why = "update failed";
+        if (is_net && (error & 0xff) == 8 /* SQLITE_READONLY */) {
+            sc_rbs_conn_mark_bad(db, main);
+            why = "skipped (read-only library)";
+        } else {
+            why = "update failed";
+        }
         goto done;
     }
     if (!filled) {
         why = "skipped (row changed)";
         goto done;
     }
-    sc_rbs_journal(uuid, track, l);
+    if (is_net)
+        sc_rbs_ondemand_notify_filled(main, uuid, r);
+    else
+        sc_rbs_journal(uuid, track, l);
     inflight_filled = 1;
     inflight_track = track;
     clock_gettime(CLOCK_MONOTONIC, &t1);
-    snprintf(result, sizeof result, "%s (%.1f ms)", use_ondemand ? "filled on-demand" : "filled",
+    snprintf(result, sizeof result, "%s (%.1f ms)",
+             is_net ? "filled link on-demand" : (use_ondemand ? "filled on-demand" : "filled"),
              (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6);
     why = result;
 done:
