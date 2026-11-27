@@ -849,6 +849,10 @@ func TestS16MergeCleanHistoryZeroWriteUnderBeginImmediate(t *testing.T) {
 	if err := hdb.Close(); err != nil {
 		t.Fatal(err)
 	}
+	// Baseline clean state before locking for writes.
+	if r0, err := HealMountDataOnly(mount, 0); err != nil || !r0.Healthy {
+		t.Fatalf("initial clean setup failed: rep=%+v err=%v", r0, err)
+	}
 
 	locker, err := sql.Open("sqlite", hm)
 	if err != nil {
@@ -892,7 +896,10 @@ func TestS16MergeReadOnlyHistoryWithReserveNotRewritten(t *testing.T) {
 	if err := os.Chmod(hm, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(hm, resBytes, 0o444); err != nil {
+	if err := os.WriteFile(hm, resBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(hm, 0o444); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(hm, 0o644) })

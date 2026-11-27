@@ -1250,6 +1250,9 @@ func TestHealMountDataOnlyDoesNotOverrunDeadlineWhenLockedAfterBatch(t *testing.
 
 	rep, err := HealMountDataOnlyContext(ctx, root, 0)
 	overrun := time.Since(deadline)
+	if relOnce {
+		<-relDone
+	}
 	if err != nil || !rep.Healthy {
 		t.Fatalf("locked post-batch mount heal: rep=%+v err=%v", rep, err)
 	}
