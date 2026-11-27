@@ -141,5 +141,12 @@ class WaitUIPackReadyTest(unittest.TestCase):
             self.assertIn("stalled", str(ctx.exception))
 
 
+    def test_proc_stat_rejects_zombie_and_dead_states(self):
+        self.assertTrue(mod._proc_stat_is_alive("1234 (Engine) S 1 1 1 0"))
+        self.assertTrue(mod._proc_stat_is_alive("1234 (nsenter (child)) R 1 1 1 0"))
+        self.assertFalse(mod._proc_stat_is_alive("1234 (nsenter) Z 1 1 1 0"))
+        self.assertFalse(mod._proc_stat_is_alive("1234 (Engine) X 1 1 1 0"))
+
+
 if __name__ == "__main__":
     unittest.main()

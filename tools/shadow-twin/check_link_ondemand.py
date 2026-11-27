@@ -380,7 +380,20 @@ def start_side_custom(side: str, src_dir: Path, extra_args: str = ""):
     (sdir / "tmp/engine_runguard.lock").unlink(missing_ok=True)
     (sdir / "data/enginex/ui/boot-ready").unlink(missing_ok=True)
     subprocess.run(
-        twin.ns_chroot_cmd(side, "touch /run/enginex-rbx-analysis-trace && /etc/enginex/engine-ui-guard pre"),
+        twin.ns_chroot_cmd(
+            side,
+            "if [ ! -e /dev/dri/card0 ] && [ -r /sys/class/drm/card0/dev ]; then "
+            "umount /dev/dri 2>/dev/null || true; "
+            "mount -t tmpfs tmpfs /dev/dri; "
+            "IFS=: read -r maj min < /sys/class/drm/card0/dev; "
+            "mknod -m 666 /dev/dri/card0 c \"$maj\" \"$min\"; "
+            "if [ -r /sys/class/drm/renderD128/dev ]; then "
+            "IFS=: read -r rmaj rmin < /sys/class/drm/renderD128/dev; "
+            "mknod -m 666 /dev/dri/renderD128 c \"$rmaj\" \"$rmin\"; "
+            "fi; "
+            "fi; "
+            "touch /run/enginex-rbx-analysis-trace && /etc/enginex/engine-ui-guard pre",
+        ),
         check=True,
     )
     sync_log = open(sdir / "logs/stream-sync.log", "w")
@@ -415,6 +428,17 @@ def start_side_custom(side: str, src_dir: Path, extra_args: str = ""):
     (sdir / "engine.pid").write_text(str(proc_eng.pid))
 
 
+def _proc_stat_is_alive(stat_text: str) -> bool:
+    """Parse Linux /proc/<pid>/stat and return False for zombie (Z) or dead (X/x) states."""
+    rparen = stat_text.rfind(")")
+    if rparen < 0:
+        return True
+    rest = stat_text[rparen + 1 :].lstrip()
+    if not rest:
+        return True
+    return rest[0] not in ("Z", "X", "x")
+
+
 def _engine_pid_alive(sdir: Path) -> bool:
     pid_file = sdir / "engine.pid"
     if not pid_file.is_file():
@@ -423,6 +447,12 @@ def _engine_pid_alive(sdir: Path) -> bool:
         pid = int(pid_file.read_text().strip())
     except Exception:
         return True
+    stat_path = Path(f"/proc/{pid}/stat")
+    if stat_path.is_file():
+        try:
+            return _proc_stat_is_alive(stat_path.read_text(errors="replace"))
+        except OSError:
+            return False
     try:
         os.kill(pid, 0)
         return True
