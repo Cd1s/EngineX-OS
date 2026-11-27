@@ -872,12 +872,19 @@ String.prototype.arg = function(n) { return this.replace('%1', n); };
 const expr = EXPRESSIONS;
 function run(opts = {}) {
     const calls = [], writes = {};
-    const row = {index: 7, modelData: {trackId: opts.streaming ? 99 : 42},
-                 isStreamingTrack: !!opts.streaming, streamingProviderName: ''};
+    const uri = opts.uri !== undefined ? opts.uri
+        : (opts.streaming ? 'streaming://TIDAL/Track/99' : 'file:///media/USB/42.mp3');
+    const row = {index: 7,
+                 modelData: Object.assign({trackId: opts.streaming ? 99 : 42}, opts.modelUri ? {uri} : {}),
+                 isStreamingTrack: !!opts.streaming, streamingProviderName: opts.provider || ''};
     const trackList = {isStemsList: !!opts.stemsList,
                        pCurrentIndex: {translator: {unnormalized: -1}}};
+    const collectionController = {getTrackUrisFromUniversalIds: ids => 'uri=' + uri};
     const root = {scIsAZ04: !!opts.az04, scScope: opts.scope || '', scTidalLoggedIn: !!opts.tidalLoggedIn, scT: s => s,
-                  scStemStream: id => {calls.push(['stream', id]); return !!opts.streaming;}};
+                  scStemStream: id => {
+                      calls.push(['stream', id]);
+                      return !!/uri=streaming:\/\/TIDAL\/Track\/(\d+)/.exec(collectionController.getTrackUrisFromUniversalIds([id]) || '');
+                  }};
     const Style = {systemBlue01Color: 'blue'};
     const actions = (opts.labels || STOCK).map((label, i) => ({
         display: {label, commitMessage: label, color: 'stock' + i},
@@ -890,6 +897,7 @@ function run(opts = {}) {
     const Planck = {
         librarianController: {stemsQueueManager: {
             startRenderTracks: id => calls.push(['render', id])},
+            collectionController,
             devicesController: {isCurrentDeviceNetworkDrive: !!opts.link}},
         getProperty: path => ({translator: new Proxy({}, {
             set: (o, key, value) => {writes[path] = value; return true;}})})
@@ -953,19 +961,34 @@ const tidalLocal = run({streaming: false, scope: 'tidal', commit: 2});
 assert.deepStrictEqual(tidalLocal.labels, [...stock, 'Stems']);
 assert.deepStrictEqual(tidalLocal.calls, [['stream', 42], ['render', '42']]);
 
-// AZ04 keeps local tracks stock (onboard Stems), while streaming tracks use stock Stems via scStemStream (keeping #332 real TIDAL exclusion).
-const az04Streaming = run({az04: true, streaming: true, commit: 2});
+// AZ04 keeps local tracks stock (onboard Stems), while gateway streaming tracks use stock Stems via scStemStream (keeping #332 real TIDAL exclusion).
+const az04Streaming = run({az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99', commit: 2});
 assert.deepStrictEqual(az04Streaming.labels, [...stock, 'Stems']);
 assert.deepStrictEqual(az04Streaming.colors, ['stock0', 'stock1', 'blue']);
 assert.deepStrictEqual(az04Streaming.calls, [['stream', 99]]);
 
-const az04RealTidal = run({az04: true, streaming: true, scope: 'tidal', tidalLoggedIn: true});
+const az04RealTidal = run({az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99', scope: 'tidal', tidalLoggedIn: true});
 assert.deepStrictEqual(az04RealTidal.labels, stock);
 assert.deepStrictEqual(az04RealTidal.colors, ['stock0', 'stock1']);
 
-const az04GatewayTidal = run({az04: true, streaming: true, scope: 'tidal', tidalLoggedIn: false, commit: 2});
+const az04GatewayTidal = run({az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99', scope: 'tidal', tidalLoggedIn: false, commit: 2});
 assert.deepStrictEqual(az04GatewayTidal.labels, [...stock, 'Stems']);
 assert.deepStrictEqual(az04GatewayTidal.calls, [['stream', 99]]);
+
+// Non-gateway native streaming providers on AZ04 and 32-bit must NOT offer EngineX Stems and must NEVER fall through to local startRenderTracks.
+for (const nonGateway of [
+    {az04: true, streaming: true, provider: 'AppleMusic', uri: 'streaming://AppleMusic/Track/77', commit: 2},
+    {az04: true, streaming: true, provider: 'Beatport', uri: 'streaming://Beatport/Track/88', commit: 2},
+    {az04: true, streaming: true, provider: 'SoundCloud', uri: 'streaming://SoundCloud/Track/55', modelUri: true, commit: 2},
+    {az04: true, streaming: true, provider: 'Dropbox', uri: 'streaming://Dropbox/Track/66', commit: 2},
+    {az04: true, streaming: true, provider: 'Eaas', uri: 'streaming://Eaas/Track/44', commit: 2},
+    {az04: false, streaming: true, provider: 'Beatport', uri: 'streaming://Beatport/Track/88', commit: 2},
+]) {
+    const r = run(nonGateway);
+    assert.deepStrictEqual(r.labels, stock, JSON.stringify(nonGateway));
+    assert.deepStrictEqual(r.colors, ['stock0', 'stock1'], JSON.stringify(nonGateway));
+    assert.deepStrictEqual(r.calls, [['stream', 99]], JSON.stringify(nonGateway));
+}
 
 for (const excluded of [{az04: true, streaming: true, link: true}, {az04: true, streaming: true, stemsList: true}]) {
     assert.deepStrictEqual(run(excluded).labels, stock);
