@@ -31,6 +31,18 @@ func SameOrigin(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
+// NoReferer is the policy of a client whose requests carry no credential header but
+// whose URL may be signed (a media URL a service handed out): a redirect is followed
+// anywhere, as a CDN needs, and never carries a Referer, which Go would build from the
+// signed URL. At most 10 redirects, as Go's default.
+func NoReferer(req *http.Request, via []*http.Request) error {
+	req.Header.Del("Referer")
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	return nil
+}
+
 // sameOrigin reports whether u is on base's origin: the same scheme and host, and the
 // same port once a missing one is read as the scheme's own (80 for http, 443 for
 // https). A URL without a scheme or host is on no origin.

@@ -17,6 +17,10 @@ const (
 	minPreviewSeconds = 10
 )
 
+// previewClient fetches a preview clip, a public URL a service handed out, under the
+// providers' redirect rule: no redirect carries a Referer (a preview URL can be signed).
+var previewClient = &http.Client{CheckRedirect: providers.CheckRedirect(false, nil)}
+
 // PreviewAnalyzer estimates tempo and key from a short public preview clip, under
 // the same resource guard as full analysis. Nothing is kept once it returns.
 func PreviewAnalyzer(guard *resourceguard.Guard) func(context.Context, string) providers.BPMInfo {
@@ -25,7 +29,7 @@ func PreviewAnalyzer(guard *resourceguard.Guard) func(context.Context, string) p
 		if err != nil {
 			return providers.BPMInfo{}
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := previewClient.Do(req)
 		if err != nil {
 			return providers.BPMInfo{}
 		}
