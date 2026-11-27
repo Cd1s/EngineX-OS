@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -355,8 +356,14 @@ func (s *Server) serverLookup(k serverKind, id string) *providers.SelfHostedProv
 }
 
 type serverConn struct {
-	cfg providers.NASConfig
-	p   *providers.SelfHostedProvider
+	cfg  providers.NASConfig
+	kind serverKind
+	p    *providers.SelfHostedProvider
+	// ctx lives as long as the connection: every request to the server is tied
+	// to it, so dropping the connection (the server removed or moved, its kind
+	// switched off) cancels what is still running.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // serverState keeps one provider per server: its track cache is what a search of
@@ -367,17 +374,99 @@ type serverState struct {
 }
 
 func (s *Server) serverProvider(e serverEntry) *providers.SelfHostedProvider {
+	return s.serverConnOf(e).p
+}
+
+func (s *Server) serverConnOf(e serverEntry) *serverConn {
 	s.serverMu.Lock()
 	defer s.serverMu.Unlock()
 	if c := s.serverConns[e.ID]; c != nil && c.cfg == e.cfg {
-		return c.p
+		return c
+	}
+	if c := s.serverConns[e.ID]; c != nil {
+		c.cancel()
 	}
 	if s.serverConns == nil {
 		s.serverConns = map[string]*serverConn{}
 	}
-	p := providers.NewSelfHostedProvider(e.cfg, s.nasHTTPClient())
-	s.serverConns[e.ID] = &serverConn{e.cfg, p}
-	return p
+	ctx, cancel := context.WithCancel(context.Background())
+	c := &serverConn{cfg: e.cfg, kind: e.kind, ctx: ctx, cancel: cancel}
+	hc := s.nasHTTPClient()
+	if e.kind.protocol != "smb" { // SMB dials through the client's own transport (its address policy); its calls take serverCtx
+		bound := http.Client{Timeout: 30 * time.Second} // the provider's own default
+		if hc != nil {
+			bound = *hc
+		}
+		bound.Transport = serverTransport{ctx: ctx, next: transportOf(hc)}
+		hc = &bound
+	}
+	c.p = providers.NewSelfHostedProvider(e.cfg, hc)
+	s.serverConns[e.ID] = c
+	return c
+}
+
+// serverCtx is ctx ended also when e's connection is dropped (its server removed or
+// moved, or its kind switched off).
+func (s *Server) serverCtx(ctx context.Context, e serverEntry) (context.Context, context.CancelFunc) {
+	c := s.serverConnOf(e)
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(c.ctx, cancel)
+	return ctx, func() { stop(); cancel() }
+}
+
+// dropServerConns cancels and forgets the connections drop picks.
+func (s *Server) dropServerConns(drop func(id string, k serverKind) bool) {
+	s.serverMu.Lock()
+	defer s.serverMu.Unlock()
+	for id, c := range s.serverConns {
+		if drop(id, c.kind) {
+			c.cancel()
+			delete(s.serverConns, id)
+		}
+	}
+}
+
+func transportOf(c *http.Client) http.RoundTripper {
+	if c != nil && c.Transport != nil {
+		return c.Transport
+	}
+	return http.DefaultTransport
+}
+
+// serverTransport ends a request when its server's connection is dropped, as well
+// as when the caller gives up.
+type serverTransport struct {
+	ctx  context.Context
+	next http.RoundTripper
+}
+
+func (t serverTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if t.ctx.Err() != nil {
+		return nil, errServerGone
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	stop := context.AfterFunc(t.ctx, cancel)
+	resp, err := t.next.RoundTrip(r.WithContext(ctx))
+	if err != nil {
+		stop()
+		cancel()
+		return nil, err
+	}
+	resp.Body = &serverBody{ReadCloser: resp.Body, done: func() { stop(); cancel() }}
+	return resp, nil
+}
+
+// serverBody keeps a response's request alive until its body is closed.
+type serverBody struct {
+	io.ReadCloser
+	once sync.Once
+	done func()
+}
+
+func (b *serverBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.done)
+	return err
 }
 
 // serverChange is one add, edit or remove, from the deck or the phone page.
@@ -522,17 +611,12 @@ func (s *Server) applyServer(k serverKind, c serverChange) ([]serverView, error)
 }
 
 // forgetServersLocked drops what belonged to servers that are no longer set up in
-// nas.json as it is now (removed, or moved to another address): their connections,
-// gateway rows and lists, Stems entries and downloads. Caller holds uiMu.
+// nas.json as it is now (removed, or moved to another address): their connections
+// (which cancels their requests still running), gateway rows and lists, Stems
+// entries and downloads. Caller holds uiMu.
 func (s *Server) forgetServersLocked() {
 	keep := keptServers(s.loadNASFileLocked())
-	s.serverMu.Lock()
-	for id := range s.serverConns {
-		if !keep[id] {
-			delete(s.serverConns, id)
-		}
-	}
-	s.serverMu.Unlock()
+	s.dropServerConns(func(id string, _ serverKind) bool { return !keep[id] })
 	s.stemsMu.Lock()
 	s.dropServerStemsLocked(keep)
 	s.stemsMu.Unlock()
@@ -767,16 +851,24 @@ func serverRefs(scope string, tracks []providers.Track) []trackRef {
 }
 
 // serverSearch searches servers at once, each within the NAS search's time budget
-// (searchTimeout, through searchTracks and its cache under the server's own key):
-// a slow server adds nothing instead of holding up the others, and a removed
-// server's results are never asked for again. The NAS slot's SMB server is searched
-// as the NAS source of #335 (its rows stamped with the NAS listing). Every row says
-// which server it is from (album). only limits the search to one Sources ID; skip
-// leaves one out (the source whose own search already has it).
-func (g *tidalGateway) serverSearch(ctx context.Context, query, only, skip string) []trackRef {
+// (searchTimeout, through searchTracks and its cache under the server's own key).
+// The NAS slot's SMB server is searched as the NAS source of #335 (its rows stamped
+// with the NAS listing). Every row says which server it is from (album). only limits
+// the search to one Sources ID; skip leaves one out (the source whose own search
+// already has it).
+//
+// ready, when it is closed, ends the wait for servers that have not answered: their
+// rows are left out of this answer, so a slow server never holds back the rows that
+// are ready. Their search goes on within its budget and its result is cached for the
+// next search. A nil ready waits for every server's budget.
+//
+// Each server's search is tied to its connection: a server removed or moved, or its
+// kind switched off, cancels its search, and a server that is no longer set up and
+// on when the answer is put together adds nothing.
+func (g *tidalGateway) serverSearch(ctx context.Context, query, only, skip string, ready <-chan struct{}) []trackRef {
 	type source struct {
 		e       serverEntry
-		p       *providers.SelfHostedProvider
+		c       *serverConn
 		session string
 		listing uint64
 	}
@@ -789,19 +881,63 @@ func (g *tidalGateway) serverSearch(ctx context.Context, query, only, skip strin
 				continue
 			}
 			if !e.qualified() {
-				if p := g.s.ownerSMBSelfHosted(); p != nil {
-					sources = append(sources, source{e, p, fmt.Sprintf("%s@%d", nasScope, listing-1), listing})
+				if g.s.ownerSMBSelfHosted() != nil { // the same connection: same identity and settings
+					sources = append(sources, source{e, g.s.serverConnOf(e), fmt.Sprintf("%s@%d", nasScope, listing-1), listing})
 				}
 				continue
 			}
-			sources = append(sources, source{e: e, p: g.s.serverProvider(e), session: scope})
+			sources = append(sources, source{e: e, c: g.s.serverConnOf(e), session: scope})
 		}
 	}
-	found := each(ctx, sources, func(ctx context.Context, v source) ([]providers.Track, error) {
-		return g.searchTracks(ctx, v.e.kind.scope, v.session, v.p, query)
-	})
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	type answer struct {
+		i      int
+		tracks []providers.Track
+	}
+	answers := make(chan answer, len(sources))
+	for i, v := range sources {
+		go func() {
+			var tracks []providers.Track
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("gateway: provider panic: %v", r)
+				}
+				answers <- answer{i, tracks}
+			}()
+			var err error
+			tracks, err = g.searchTracks(ctx, v.e.kind.scope, v.session, connSearcher{v.c}, query)
+			if err != nil {
+				log.Printf("stream-sync: gateway source failed: %v", err)
+			}
+		}()
+	}
+	found := make([][]providers.Track, len(sources))
+	answered := make([]bool, len(sources))
+wait:
+	for range sources {
+		select {
+		case a := <-answers:
+			found[a.i], answered[a.i] = a.tracks, true
+		case <-ready:
+			break wait
+		case <-ctx.Done():
+			break wait
+		}
+	}
+	// What is set up and on now: a server removed, moved or switched off while its
+	// search ran adds nothing.
+	now := map[string]providers.NASConfig{}
+	for _, k := range serverKinds {
+		for _, e := range g.s.servers(k) {
+			now[e.ID] = e.cfg
+		}
+	}
 	var refs []trackRef
 	for i, v := range sources {
+		if cfg, ok := now[v.e.ID]; !answered[i] || !ok || cfg != v.e.cfg || v.c.ctx.Err() != nil {
+			continue
+		}
 		if v.listing != 0 { // the NAS of #335: bare IDs, its listing stamp
 			for _, t := range found[i] {
 				httpsCover(&t)
@@ -816,6 +952,23 @@ func (g *tidalGateway) serverSearch(ctx context.Context, query, only, skip strin
 	}
 	return refs
 }
+
+// connSearcher searches through a server's connection: dropping the connection
+// cancels the search, even one a cached search's flight runs on its own context.
+type connSearcher struct{ c *serverConn }
+
+func (v connSearcher) Search(ctx context.Context, query string) ([]providers.Track, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(v.c.ctx, cancel)
+	defer stop()
+	return v.c.p.Search(ctx, query)
+}
+
+// serverReadyWait is how long OmniSource's search waits for servers after it starts,
+// once its other sources (the drives, djay) have answered: a server answering later
+// is in the next search, from the cache.
+const serverReadyWait = time.Second
 
 // dropServerStemsLocked removes the Stems entries of servers that are gone
 // (removed, or moved to another address). A file that does not fully decode is

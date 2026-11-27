@@ -23,19 +23,24 @@ import (
 // fakeDAV is a WebDAV server with the same folders as every other one here:
 // /music/intro.mp3 and /music/House/{a,b}.mp3. Its audio says which server it is.
 type fakeDAV struct {
-	srv   *httptest.Server
-	audio []byte
-	finds atomic.Int32 // PROPFIND requests
-	gets  atomic.Int32
+	srv    *httptest.Server
+	audio  []byte
+	finds  atomic.Int32 // PROPFIND requests
+	gets   atomic.Int32
+	active atomic.Int32 // requests being answered now
 }
 
 func newFakeDAV(t *testing.T, audio []byte, hold <-chan struct{}) *fakeDAV {
 	t.Helper()
 	d := &fakeDAV{audio: audio}
 	d.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		d.active.Add(1)
+		defer d.active.Add(-1)
 		switch r.Method {
 		case "PROPFIND":
 			d.finds.Add(1)
+			// Read to the end: only then does a client hang-up end r.Context().
+			io.Copy(io.Discard, r.Body)
 			if hold != nil { // a slow server
 				select {
 				case <-hold:
@@ -601,5 +606,69 @@ func TestServersReAddedServerNeverPlaysTheOldRecording(t *testing.T) {
 	}
 	if views[0].ID == oldID {
 		t.Errorf("the server added again has its old identity %s", oldID)
+	}
+}
+
+// Round 3 (review of the WebDAV branch, item 3): one held server held the ready
+// results of the others for the whole 4 s budget, and switching WebDAV off during the
+// search left its request running and still answered WebDAV rows. Ready rows now come
+// back without waiting out a slow server; switching WebDAV off cancels its requests,
+// and that search answers no WebDAV row.
+func TestServersSlowServerNeverHoldsReadyResults(t *testing.T) {
+	hold := make(chan struct{})
+	fast, slow := newFakeDAV(t, testMP3(120), nil), newFakeDAV(t, testMP3(90), hold)
+	t.Cleanup(func() { close(hold) })
+	nas := nasFile{WebDAV: []savedServer{
+		{Name: "Fast", URL: fast.srv.URL + "/music/", Enabled: true},
+		{Name: "Slow", URL: slow.srv.URL + "/music/", Enabled: true},
+	}}
+	raw, _ := json.Marshal(nas)
+	r := newWebDAVRig(t, string(raw), "sources=deezer\nscope=deezer\nomni_source=1\nwebdav=1\n")
+	start := time.Now()
+	got := webdavTitles(r.search(t, "intro"))
+	if elapsed := time.Since(start); elapsed > searchTimeout/2 {
+		t.Errorf("the fast server's result waited %v for the slow server", elapsed)
+	}
+	if !slices.Equal(got, []string{"intro@Fast"}) {
+		t.Errorf("OmniSource search found %v", got)
+	}
+
+	// Switching WebDAV off cancels the request still running and adds no WebDAV row.
+	waitFor := func(what string, ok func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for !ok() {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	asked := slow.finds.Load()
+	type answer struct {
+		items []gwItem
+	}
+	done := make(chan answer, 1)
+	go func() {
+		var res struct{ Tracks struct{ Items []gwItem } }
+		// "music" is in the fast server's cached paths (it answers at once) and new for
+		// the slow one, which is asked again and held.
+		resp, err := http.Get(r.gw.URL + "/v1/search?query=" + url.QueryEscape("music") + "&limit=50&offset=0")
+		if err == nil {
+			json.NewDecoder(resp.Body).Decode(&res)
+			resp.Body.Close()
+		}
+		done <- answer{res.Tracks.Items}
+	}()
+	waitFor("the slow server to be asked", func() bool { return slow.finds.Load() > asked })
+	if code, _ := uiPost(t, r.gw.URL, "webdav=0"); code != http.StatusOK {
+		t.Fatalf("webdav=0: HTTP %d", code)
+	}
+	waitFor("the slow server's request to be cancelled", func() bool { return slow.active.Load() == 0 })
+	a := <-done
+	for _, it := range a.items {
+		if al := rowAlbum(it); al == "Fast" || al == "Slow" {
+			t.Fatalf("the search answered a WebDAV row after WebDAV was switched off: %v", webdavTitles(a.items))
+		}
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/djay"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -550,12 +551,15 @@ func (g *tidalGateway) omniSearch(ctx context.Context, query string) []any {
 	seenFiles := make(map[string]bool)
 	// Every enabled WebDAV and NAS server is searched beside the drives, each in the
 	// NAS search's time budget; the selected source's own search already has its
-	// server.
+	// server. Servers that have not answered once the drives and djay have, and
+	// serverReadyWait has passed, are left out of this answer: a slow server never
+	// holds back the rows that are ready.
+	started := time.Now()
 	var webdav []trackRef
-	webdavDone := make(chan struct{})
+	webdavDone, ready := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(webdavDone)
-		webdav = g.serverSearch(ctx, query, "", g.s.scope())
+		webdav = g.serverSearch(ctx, query, "", g.s.scope(), ready)
 	}()
 
 	for _, refs := range each(ctx, g.s.drives(), func(ctx context.Context, d drive) ([]trackRef, error) { return searchDrive(ctx, d, query) }) {
@@ -579,7 +583,14 @@ func (g *tidalGateway) omniSearch(ctx context.Context, query string) []any {
 			}
 		}
 	}
-	<-webdavDone
+	wait := time.NewTimer(max(0, serverReadyWait-time.Since(started)))
+	select {
+	case <-webdavDone:
+	case <-wait.C:
+		close(ready)
+		<-webdavDone
+	}
+	wait.Stop()
 	for _, ref := range webdav {
 		if id := g.addTrack(ref); id != 0 {
 			items = append(items, g.trackJSON(id, ref.track))

@@ -1716,6 +1716,13 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, err)
 		return
 	}
+	// A WebDAV or NAS row switched off cancels its servers' requests still running
+	// (a browse, a search, a download): nothing of that kind answers after the switch.
+	if q.Get("webdav") == "0" || q.Get("nas") == "0" {
+		s.dropServerConns(func(_ string, k serverKind) bool {
+			return (k == kindWebDAV && q.Get("webdav") == "0") || (k == kindNAS && q.Get("nas") == "0")
+		})
+	}
 	if v.SdHighSpeed != prevSdHighSpeed && boardCapabilities(imagePrefix(deviceCompatible())).SDHighSpeed {
 		if _, serr := s.applySDHighSpeed(v.SdHighSpeed); serr != nil {
 			s.uiMu.Lock()

@@ -2195,7 +2195,7 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if _, _, ok := serverScopeOf(scope); ok { // that server, in the NAS search's time budget
-		for _, ref := range g.serverSearch(r.Context(), query, scope, "") {
+		for _, ref := range g.serverSearch(r.Context(), query, scope, "", nil) {
 			if id := g.addTrack(ref); id != 0 {
 				trackItems = append(trackItems, g.trackJSON(id, ref.track))
 			}
