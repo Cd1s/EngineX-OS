@@ -159,6 +159,26 @@ func (c *browseCache) drop(key string) {
 	}
 }
 
+// clear forgets every entry; a load still running is not stored.
+func (c *browseCache) clear() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gen == nil {
+		c.gen = map[string]uint64{}
+	}
+	for k := range c.entries {
+		c.gen[k]++
+		delete(c.entries, k)
+	}
+	for k := range c.flights {
+		c.gen[k]++
+	}
+	c.bytes = 0
+}
+
 // start is called under mu. A cancelled browser request cannot cancel another
 // browser's shared fetch, or the refresh of a stale page.
 func (c *browseCache) start(key string, load func(context.Context) (browseData, error)) *browseFlight {

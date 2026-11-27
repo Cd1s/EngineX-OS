@@ -55,9 +55,9 @@ const (
 	rbxArtTime       = 3 * time.Second
 )
 
-// uiScopes are the sources the deck's browser can show: the services, and rekordbox
-// while a computer with rekordbox is on the link.
-var uiScopes = append(slices.Clone(uiServices), rekordboxScope)
+// uiScopes are the sources the deck's browser can show: the services, rekordbox
+// while a computer with rekordbox is on the link, and nas when configured.
+var uiScopes = append(slices.Clone(uiServices), rekordboxScope, nasScope) // and each server's "<kind>:<id>"
 
 type rbxLink interface {
 	Tracks() ([]prolink.RekordboxTrack, error)

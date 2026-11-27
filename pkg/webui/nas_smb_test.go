@@ -82,11 +82,14 @@ func TestNASLegacyURLLoginStaysPrivateAndWorking(t *testing.T) {
 		io.WriteString(w, `<multistatus xmlns="DAV:"><response><href>/music/a.mp3</href><propstat><prop><displayname>a.mp3</displayname></prop></propstat></response></multistatus>`)
 	}))
 	defer backend.Close()
-	s, _ := newTestServerWithUIDir(t)
+	// The legacy file is there when the deck starts: start-up reads which server the
+	// slot names (WebDAV round 5).
+	dir := t.TempDir()
 	cfg := providers.NASConfig{Protocol: "webdav", URL: strings.Replace(backend.URL, "://", "://fixture-user:fixture-password@", 1) + "/music", Enabled: true}
-	if err := providers.SaveJSON(s.nasConfigPath(), cfg); err != nil {
+	if err := providers.SaveJSON(filepath.Join(dir, "nas.json"), cfg); err != nil {
 		t.Fatal(err)
 	}
+	s := New(Config{UIDir: dir, HTTP: http.DefaultClient}, nil)
 	w := httptest.NewRecorder()
 	s.handleNASConfig(w, httptest.NewRequest("GET", "/api/nas", nil))
 	if strings.Contains(w.Body.String(), "fixture-password") || !strings.Contains(w.Body.String(), `"hasPassword":true`) {

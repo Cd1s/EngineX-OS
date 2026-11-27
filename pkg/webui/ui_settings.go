@@ -300,6 +300,19 @@ type uiSettings struct {
 	DeckClock          bool   `json:"deckClock,omitempty"`
 	ConsoleHTTPS       bool   `json:"consoleHttps"`
 	HTTPSPort          int    `json:"httpsPort,omitempty"`
+
+	// WebDAV and NAS (status only): the servers of each kind, without passwords,
+	// with their Sources IDs; WebDAVOn and NASOn are the two rows in Settings ->
+	// Services.
+	WebDAV   []serverView `json:"webdav,omitempty"`
+	NAS      []serverView `json:"nas,omitempty"`
+	WebDAVOn bool         `json:"webdavOn,omitempty"`
+	NASOn    bool         `json:"nasOn,omitempty"`
+	// WebDAVSwitch and NASSwitch are those rows once the DJ used them: "1" on, "0"
+	// off. Empty: on while a server of that kind is set up (a released deck's
+	// carries over; an empty source is not put on every deck).
+	WebDAVSwitch string `json:"-"`
+	NASSwitch    string `json:"-"`
 }
 
 // uiFourDeckRoles are the decks a player plays in the 4-deck layout (#49/#160), RCA A then B.
@@ -414,7 +427,7 @@ func (s *Server) loadUI() uiSettings {
 				v.GitHubRepo = val
 			}
 		case "scope":
-			if val == "" || slices.Contains(uiScopes, val) {
+			if _, _, server := serverScopeOf(val); val == "" || server || slices.Contains(uiScopes, val) {
 				v.Scope = val
 			}
 		case "quality":
@@ -585,6 +598,14 @@ func (s *Server) loadUI() uiSettings {
 			}
 		case "console_https":
 			v.ConsoleHTTPS = val == "1" || strings.EqualFold(val, "true")
+		case "webdav":
+			if val == "0" || val == "1" {
+				v.WebDAVSwitch = val
+			}
+		case "nas":
+			if val == "0" || val == "1" {
+				v.NASSwitch = val
+			}
 		}
 	}
 	if saved { // services added since the file was written start enabled; ones turned off stay off
@@ -622,6 +643,11 @@ func parseUISources(val string) ([]string, error) {
 		}
 	}
 	for _, name := range strings.Split(val, ",") {
+		// rekordbox, NAS and WebDAV are in the status's list but are not switched
+		// here: the deck sends that list back when the DJ flips a service.
+		if _, _, server := serverScopeOf(name); server || name == rekordboxScope || name == nasScope || name == webdavScope {
+			continue
+		}
 		if name != "" && !slices.Contains(uiServices, name) {
 			return nil, errors.New("unknown source: " + name)
 		}
@@ -659,6 +685,12 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nknown=" + strings.Join(uiServices, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\nspotify_source=" + v.SpotifySource + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
 	if v.EngineLighting {
 		text += "engine_lighting=1\n"
+	}
+	if v.WebDAVSwitch != "" { // absent: on while a WebDAV server is set up
+		text += "webdav=" + v.WebDAVSwitch + "\n"
+	}
+	if v.NASSwitch != "" { // absent: on while a NAS server is set up
+		text += "nas=" + v.NASSwitch + "\n"
 	}
 	if v.FourDeckWaveform {
 		text += "four_deck_waveform=1\n"
@@ -905,6 +937,13 @@ func (s *Server) scopeLoggedIn(scope string) bool {
 	if scope == rekordboxScope {
 		return s.rekordboxHost() != nil || len(s.rbxPlayers()) > 0
 	}
+	if scope == nasScope {
+		return s.nasAvailable()
+	}
+	if _, _, server := serverScopeOf(scope); server {
+		_, ok := s.serverByScope(scope)
+		return ok
+	}
 	if scope == "deezer" && s.deezerARLReady() {
 		return true
 	}
@@ -986,6 +1025,23 @@ func (s *Server) isLegacy504Pack() bool {
 func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	v := s.loadUI()
+	nasReady := s.nasAvailableLocked()
+	nf := s.loadNASFileLocked()
+	v.WebDAV, v.NAS = serverViews(kindWebDAV, nf), serverViews(kindNAS, nf)
+	v.WebDAVOn, v.NASOn = serversOn(kindWebDAV, v, nf), serversOn(kindNAS, v, nf)
+	// Every enabled server of a kind that is on is its own entry in Sources (the
+	// slot's SMB server is "nas", added below as before).
+	var serverScopes []string
+	for _, k := range serverKinds {
+		if !serversOn(k, v, nf) {
+			continue
+		}
+		for _, e := range serverEntries(k, nf) {
+			if e.qualified() && nasConfigReady(e.cfg) {
+				serverScopes = append(serverScopes, e.Scope())
+			}
+		}
+	}
 	v.FXSelectorAvailable = s.fxSelectorAvailable()
 	v.ColorFXAvailable = s.colorFXAvailable()
 	// pioneer_fx is the channel knobs' style now; only a PX board without them drops it.
@@ -1022,6 +1078,12 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 		v.LoggedIn = append(v.LoggedIn, rekordboxScope)
 		v.RekordboxName = name
 	}
+	if nasReady {
+		v.Sources = append(slices.Clone(v.Sources), nasScope)
+		v.LoggedIn = append(v.LoggedIn, nasScope)
+	}
+	v.Sources = append(slices.Clone(v.Sources), serverScopes...)
+	v.LoggedIn = append(v.LoggedIn, serverScopes...)
 	relay := s.relayStatusView()
 	v.RelayURL, v.DeemixPasswordSet = relay.RelayURL, relay.PasswordSet
 	v.ProlinkExportActive = s.prolinkExport != nil && s.prolinkExport.Status().Enabled
@@ -1151,7 +1213,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Has("scope") {
 		want := q.Get("scope")
-		if !slices.Contains(uiScopes, want) {
+		if _, _, server := serverScopeOf(want); !server && !slices.Contains(uiScopes, want) {
 			fail(w, 400, errors.New("invalid setting"))
 			return
 		}
@@ -1168,7 +1230,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("spotifySource", q.Get("spotifySource"), uiSpotifySources) || bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiScopes) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) || bad("fxTimeMode", q.Get("fxTimeMode"), uiFxTimeModes) || bad("rbLibraryView", q.Get("rbLibraryView"), uiRbLibraryViews) {
+	if bad("spotifySource", q.Get("spotifySource"), uiSpotifySources) || bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || (bad("scope", q.Get("scope"), uiScopes) && !isServerScope(q.Get("scope"))) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) || bad("fxTimeMode", q.Get("fxTimeMode"), uiFxTimeModes) || bad("rbLibraryView", q.Get("rbLibraryView"), uiRbLibraryViews) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
@@ -1607,6 +1669,30 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		v.RemoteLoad = on == "1"
 	}
+	if q.Has("webdav") {
+		on := q.Get("webdav")
+		if on != "0" && on != "1" {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.WebDAVSwitch = on
+		if k, _, _ := serverScopeOf(v.Scope); on == "0" && k == kindWebDAV {
+			v.Scope = ""
+		}
+	}
+	if q.Has("nas") {
+		on := q.Get("nas")
+		if on != "0" && on != "1" {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.NASSwitch = on
+		if k, _, _ := serverScopeOf(v.Scope); on == "0" && (k == kindNAS || v.Scope == nasScope) {
+			v.Scope = ""
+		}
+	}
 	if q.Has("prolinkShare") {
 		on := q.Get("prolinkShare")
 		if on != "0" && on != "1" {
@@ -1663,6 +1749,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	err := s.saveUI(v, q.Has("prolinkShare"))
 	if err != nil && q.Has("verboseLog") {
 		_ = writeVerboseLog(previousVerbose)
+	}
+	// A WebDAV or NAS row switched off cancels its servers' requests still running (a
+	// browse, a search, a download): nothing of that kind answers after the switch. Under
+	// uiMu, with the save: a search that lists its servers after it finds the kind off,
+	// one that listed them before it has its connections cancelled (connectedServers).
+	if err == nil && (q.Get("webdav") == "0" || q.Get("nas") == "0") {
+		s.dropServerConns(func(_ string, k serverKind) bool {
+			return (k == kindWebDAV && q.Get("webdav") == "0") || (k == kindNAS && q.Get("nas") == "0")
+		})
 	}
 	if err == nil && v.ConsoleHTTPS != prevConsoleHTTPS {
 		if herr := s.applyHTTPS(v.ConsoleHTTPS); herr != nil {

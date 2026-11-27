@@ -618,3 +618,153 @@ func TestSelfHostedSubsonicErrorNotSavedAndWebDAVRelativeBase(t *testing.T) {
 		t.Fatalf("WebDAV DownloadTrack relative failed: %v (requested=%v)", err, requested)
 	}
 }
+
+func TestSelfHostedErrorsRedactCredentials(t *testing.T) {
+	dropSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				_ = conn.Close()
+				return
+			}
+		}
+		panic(http.ErrAbortHandler)
+	}))
+	defer dropSrv.Close()
+
+	const (
+		dummyUser  = "dummy-nas-user"
+		dummyPass  = "dummy-nas-pass-999"
+		dummyToken = "dummy-nas-token-999"
+	)
+	forbidden := []string{dummyPass, dummyToken, dummyUser, "t=", "s=", "p=", "X-Plex-Token", "?"}
+	assertClean := func(t *testing.T, op string, err error, wantSubstr string) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected error from dropped server, got nil", op)
+		}
+		msg := err.Error()
+		for _, bad := range forbidden {
+			if strings.Contains(msg, bad) {
+				t.Errorf("%s error leaked %q: %s", op, bad, msg)
+			}
+		}
+		if wantSubstr != "" && !strings.Contains(msg, wantSubstr) {
+			t.Errorf("%s error missing expected path %q: %s", op, wantSubstr, msg)
+		}
+	}
+
+	ctx := context.Background()
+	t.Run("subsonic-password", func(t *testing.T) {
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "subsonic",
+			URL:      dropSrv.URL,
+			Username: dummyUser,
+			Password: dummyPass,
+			Enabled:  true,
+		}, dropSrv.Client())
+		_, err := p.Playlists(ctx)
+		assertClean(t, "Playlists", err, "/rest/getPlaylists.view")
+		_, err = p.PlaylistTracks(ctx, "pl-1")
+		assertClean(t, "PlaylistTracks", err, "/rest/getPlaylist.view")
+		_, err = p.DownloadTrack(ctx, "tr-1", t.TempDir())
+		assertClean(t, "DownloadTrack", err, "/rest/stream.view")
+	})
+
+	t.Run("subsonic-token", func(t *testing.T) {
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "subsonic",
+			URL:      dropSrv.URL,
+			Username: dummyUser,
+			Token:    dummyToken,
+			Enabled:  true,
+		}, dropSrv.Client())
+		_, err := p.Playlists(ctx)
+		assertClean(t, "Playlists", err, "/rest/getPlaylists.view")
+		_, err = p.PlaylistTracks(ctx, "pl-1")
+		assertClean(t, "PlaylistTracks", err, "/rest/getPlaylist.view")
+		_, err = p.DownloadTrack(ctx, "tr-1", t.TempDir())
+		assertClean(t, "DownloadTrack", err, "/rest/stream.view")
+	})
+
+	t.Run("plex-token", func(t *testing.T) {
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "plex",
+			URL:      dropSrv.URL,
+			Token:    dummyToken,
+			Enabled:  true,
+		}, dropSrv.Client())
+		_, err := p.Playlists(ctx)
+		assertClean(t, "Playlists", err, "/playlists")
+		_, err = p.PlaylistTracks(ctx, "pl-1")
+		assertClean(t, "PlaylistTracks", err, "/playlists/pl-1/items")
+		_, err = p.DownloadTrack(ctx, "/library/parts/1/song.flac", t.TempDir())
+		assertClean(t, "DownloadTrack", err, "/library/parts/1/song.flac")
+	})
+
+	t.Run("webdav-userinfo-and-query", func(t *testing.T) {
+		host := strings.TrimPrefix(dropSrv.URL, "http://")
+		p := NewSelfHostedProvider(NASConfig{
+			Protocol: "webdav",
+			URL:      "http://" + dummyUser + ":" + dummyPass + "@" + host + "/music?X-Plex-Token=" + dummyToken,
+			Enabled:  true,
+		}, dropSrv.Client())
+		_, err := p.Playlists(ctx)
+		assertClean(t, "Playlists", err, "/music")
+		_, err = p.DownloadTrack(ctx, "sub/song.flac", t.TempDir())
+		assertClean(t, "DownloadTrack", err, "/music/sub/song.flac")
+	})
+}
+
+// #335 rounds 9 and 10: a cover URL gets the NAS's credentials only on the configured
+// server's exact origin (scheme, host, effective port): http://host and https://host
+// (ports 80 and 443) are two origins, both ways; an explicit default port is the same as
+// none; https on an http NAS's own port is another origin too (TLS there can be another
+// service; round 10 drops round 9's https relaxation).
+func TestAuthorizeURLKeepsToTheConfiguredOrigin(t *testing.T) {
+	const token, pass = "plex-token-r9-335", "subsonic-pass-r9-335"
+	cases := []struct {
+		protocol, base, cover string
+		want                  bool
+	}{
+		{"plex", "http://nas.example", "https://nas.example/library/metadata/7/thumb", false},
+		{"plex", "https://nas.example", "http://nas.example/library/metadata/7/thumb", false},
+		{"plex", "https://nas.example:80", "http://nas.example/library/metadata/7/thumb", false},
+		{"plex", "https://nas.example:32400", "http://nas.example:32400/library/metadata/7/thumb", false},
+		{"plex", "http://nas.example:32400", "http://nas.example/library/metadata/7/thumb", false},
+		{"plex", "http://nas.example", "http://other.example/library/metadata/7/thumb", false},
+		{"plex", "http://nas.example", "/library/metadata/7/thumb", false},
+		{"plex", "http://nas.example", "http://nas.example/library/metadata/7/thumb", true},
+		{"plex", "http://nas.example:80", "http://NAS.example/library/metadata/7/thumb", true},
+		{"plex", "https://nas.example", "https://nas.example:443/library/metadata/7/thumb", true},
+		{"plex", "http://nas.example:32400/", "http://nas.example:32400/library/metadata/7/thumb", true},
+		{"plex", "http://nas.example:32400", "https://nas.example:32400/library/metadata/7/thumb", false},
+		{"subsonic", "http://nas.example:4533", "https://nas.example:4533/rest/getCoverArt.view?id=cv-99", false},
+		{"subsonic", "http://nas.example", "https://nas.example/rest/getCoverArt.view?id=cv-99", false},
+		{"subsonic", "https://nas.example", "http://nas.example/rest/getCoverArt.view?id=cv-99", false},
+		{"subsonic", "https://nas.example", "https://nas.example/rest/getCoverArt.view?id=cv-99", true},
+	}
+	// Round 10: a provider URL already signed for http://host (port 80) that reaches
+	// https://host (port 443) keeps none of the credentials it carried.
+	signed := NewSelfHostedProvider(NASConfig{Protocol: "plex", URL: "http://nas.example", Token: token}, nil)
+	if got := signed.AuthorizeURL("https://nas.example/library/metadata/7/thumb?X-Plex-Token=" + token); strings.Contains(got, token) {
+		t.Errorf("a URL signed for http://nas.example keeps its token on https://nas.example: %s", got)
+	}
+	sub := NewSelfHostedProvider(NASConfig{Protocol: "subsonic", URL: "http://nas.example", Username: "dj", Password: pass}, nil)
+	if got := sub.AuthorizeURL("https://nas.example/rest/getCoverArt.view?id=cv&u=dj&t=tok&s=salt"); strings.Contains(got, "t=tok") || strings.Contains(got, "u=dj") {
+		t.Errorf("a Subsonic URL signed for http://nas.example keeps its auth on https://nas.example: %s", got)
+	}
+	for _, c := range cases {
+		p := NewSelfHostedProvider(NASConfig{Protocol: c.protocol, URL: c.base, Username: "dj", Password: pass, Token: token}, nil)
+		got := p.AuthorizeURL(c.cover)
+		authorized := strings.Contains(got, token) || strings.Contains(got, "t=") || strings.Contains(got, "u=dj")
+		if authorized != c.want {
+			t.Errorf("%s NAS %s, cover %s: authorized=%v (%s), want %v", c.protocol, c.base, c.cover, authorized, got, c.want)
+		}
+		if !c.want && got != c.cover {
+			t.Errorf("%s NAS %s: a cover of another origin changed: %s -> %s", c.protocol, c.base, c.cover, got)
+		}
+		if p.OnOrigin(c.cover) != c.want {
+			t.Errorf("%s NAS %s, cover %s: OnOrigin=%v, want %v", c.protocol, c.base, c.cover, !c.want, c.want)
+		}
+	}
+}

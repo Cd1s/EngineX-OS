@@ -361,7 +361,9 @@ func (s *Server) probeRelayStems(relay, password string, saved *stems.LANState) 
 		return nil
 	}
 	req.Header.Set("Authorization", "Bearer "+password)
-	resp, err := (&http.Client{Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}).Do(req)
+	// The relay password goes to the configured relay's origin only: Go would keep the
+	// Authorization header on a redirect to a subdomain or another port (#335 round 11).
+	resp, err := (&http.Client{Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}, CheckRedirect: providers.CheckRedirect(true, nil)}).Do(req)
 	if err != nil {
 		return nil
 	}

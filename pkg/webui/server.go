@@ -156,9 +156,19 @@ type Server struct {
 	logsMu        sync.Mutex
 	fxMu          sync.Mutex // transient FX commands never hold the settings lock
 	stemsMu       sync.Mutex // streaming-stems.json
+	stemsRoot     string     // under stemsMu: the NAS root whose NAS Stems entries are served (#335)
 	stemsImportMu sync.Mutex // one streamed row at a time is named, recorded and swept
-	rbxPresenceMu sync.Mutex
-	rbxPresence   map[string]*rbxPresence
+	serverState              // the WebDAV and NAS servers' connections
+	// slotUnknown: at start-up nas.json could not be read, or named no server in the
+	// NAS slot, so nothing says which root the slot's saved rows, downloads and Stems
+	// belong to. They are kept as saved and the slot is not served, until a save names
+	// its server (resetNASIfMoved); the next start reads the file again (WebDAV rounds
+	// 4 and 5).
+	slotUnknown atomic.Bool
+	// nasFileErrLogged: an unreadable nas.json was logged once.
+	nasFileErrLogged atomic.Bool
+	rbxPresenceMu    sync.Mutex
+	rbxPresence      map[string]*rbxPresence
 
 	prolinkExport *prolink.Exporter
 	closed        chan struct{}
@@ -350,6 +360,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /v1/enginex/nas", s.handleNASConfig)
 	s.mux.HandleFunc("POST /v1/enginex/nas", s.handleNASConfig)
 	s.mux.HandleFunc("POST /v1/enginex/nas/test", s.handleNASTest)
+	s.mux.HandleFunc("GET /v1/enginex/servers/{kind}", s.handleServers)
+	s.mux.HandleFunc("POST /v1/enginex/servers/{kind}", s.handleServers)
 	s.mux.HandleFunc("GET /api/mods", s.handleMods)
 	s.mux.HandleFunc("POST /api/mods", s.handleMods)
 	s.mux.HandleFunc("POST /api/mods/upload", s.handleModsUpload)
@@ -416,6 +428,28 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.loadAppleMusicHelper()
 	s.appleMusic.OwnerPath = filepath.Join(cfg.StateDir, "applemusic-owner.json")
 	_ = s.appleMusic.Load()
+	// The NAS slot's root before any request. Start-up drops nothing of any server,
+	// whatever nas.json holds (WebDAV round 5): a server's rows, downloads and Stems
+	// entries name its own identity, which no other server gets, so they are served
+	// only for that server and need no clean-up; only the action that removes a server
+	// clears them (forgetServersLocked). The NAS slot's bare rows (#335: SMB, Subsonic,
+	// Plex) name no server but a root: they are kept as saved unless nas.json was read in
+	// full and names the slot's server.
+	s.uiMu.Lock()
+	startNAS, startErr := s.readNASFileLocked()
+	s.uiMu.Unlock()
+	if startErr != nil {
+		log.Printf("webui: %v at start-up: NAS and server state kept as saved, the NAS slot is off in this run", startErr)
+	}
+	if startErr != nil || !slotNamed(startNAS.NASConfig) {
+		s.slotUnknown.Store(true)
+		s.stemsRoot = unknownNASRoot
+	} else {
+		s.stemsRoot = nasRootID(startNAS.NASConfig)
+	}
+	s.stemsMu.Lock()
+	s.scrubStems() // a released file's credentials go before any request
+	s.stemsMu.Unlock()
 	s.tidal = newTidalGateway(s)
 	s.startRekordboxOnDemand()
 	s.RegisterTunnelRoutes()
@@ -433,6 +467,14 @@ func New(cfg Config, jobs *Jobs) *Server {
 		jobs.spotify = s.ownerSpotify
 		jobs.applemusic = func() *providers.AppleMusic { return s.appleMusic }
 		jobs.selfHosted = s.ownerSelfHosted
+		jobs.server = s.serverLookup
+		if s.slotUnknown.Load() {
+			// The slot's root is not known: the index keeps the root it was filed under
+			// (its NAS entries stay on disk) and none of them is used in this run.
+			jobs.keepNASAsSavedLocked()
+		} else {
+			jobs.nasRoot = s.stemsRoot
+		}
 		jobs.bpm = cfg.BPM
 		if jobs.p.Deemix != nil {
 			jobs.p.Deemix.PreferMP3 = func() bool { return s.quality() == quality320k }

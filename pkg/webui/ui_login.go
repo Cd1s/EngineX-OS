@@ -378,6 +378,10 @@ func (s *Server) ownerSession(provider string) (*Session, error) {
 
 func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 	provider := r.URL.Query().Get("provider")
+	if k, ok := kindOf(provider); ok {
+		s.serversLoginStart(w, k)
+		return
+	}
 	if !slices.Contains(loginServices, provider) {
 		fail(w, 400, errors.New("unsupported provider"))
 		return
@@ -467,6 +471,10 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 	flow := s.loginFlow(r.URL.Query().Get("provider"))
 	if flow == nil {
 		fail(w, 404, errors.New("no login in progress"))
+		return
+	}
+	if _, ok := kindOf(flow.Provider); ok {
+		s.serversLoginStatus(w, flow)
 		return
 	}
 	s.mu.Lock()
@@ -614,6 +622,12 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 		phonePage(w, r, soundCloudPhonePage(lang, action))
 	case "beatport":
 		phonePage(w, r, beatportPhonePage(lang, action))
+	case webdavScope, nasScope:
+		k, _ := kindOf(flow.Provider)
+		s.uiMu.Lock()
+		views := serverViews(k, s.loadNASFileLocked())
+		s.uiMu.Unlock()
+		phonePage(w, r, serversPhonePage(lang, k, action, views))
 	case "applemusic":
 		s.mu.Lock()
 		pendingHelper := flow.helperPending
@@ -747,6 +761,10 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 8192)
 	if err := r.ParseForm(); err != nil {
 		fail(w, 400, errors.New("invalid form"))
+		return
+	}
+	if k, ok := kindOf(flow.Provider); ok {
+		s.serversPhonePost(w, r, flow, k)
 		return
 	}
 	session := s.sessionOf(flow)

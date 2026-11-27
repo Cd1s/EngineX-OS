@@ -438,8 +438,15 @@ func TestSelfHosted252RestartCache(t *testing.T) {
 			}
 			restarted := webui.NewJobs(webui.Pipeline{Deemix: &deemixclient.Client{DownloadDir: dir, AllowLossy: true}})
 			defer restarted.Close()
-			if got := restarted.File(tr); got != saved {
-				t.Fatalf("cache lost after restart: got %q, want %q", got, saved)
+			want := saved
+			if legacy {
+				// #335, maintainer decision 2026-11-27: 「重新浏览一次没事」 (re-browsing once is
+				// fine). An index from before the NAS root was recorded is not used after the
+				// upgrade; such a track downloads once more.
+				want = ""
+			}
+			if got := restarted.File(tr); got != want {
+				t.Fatalf("cache after restart: got %q, want %q", got, want)
 			}
 		})
 	}

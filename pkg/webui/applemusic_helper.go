@@ -35,7 +35,9 @@ func (s *Server) loadAppleMusicHelper() {
 	if cfg.URL == "" {
 		cfg.URL = s.cfg.AppleMusicHelperURL
 	}
-	if cfg.Token == "" && !saved.TokenCleared {
+	// The configured default token goes only to the configured helper's origin, never
+	// to another helper the DJ saved (WebDAV round 4).
+	if cfg.Token == "" && !saved.TokenCleared && providers.SameOrigin(cfg.URL, s.cfg.AppleMusicHelperURL) {
 		cfg.Token = s.cfg.AppleMusicHelperToken
 	}
 	s.appleMusic.SetHelper(cfg.URL, cfg.LoginURL, cfg.Token)
@@ -142,13 +144,23 @@ func (s *Server) appleMusicHelperSave(w http.ResponseWriter, r *http.Request) {
 	s.appleMusicHelperMu.Lock()
 	cfg := s.appleMusic.HelperConfig()
 	tokenCleared := s.appleMusicHelperTokenCleared
+	moved := !providers.SameOrigin(in.HelperURL, cfg.URL)
 	cfg.URL, cfg.LoginURL = in.HelperURL, in.HelperLoginURL
-	if in.ClearToken {
-		cfg.Token = ""
-		tokenCleared = true
-	} else if in.HelperToken != "" {
-		cfg.Token = in.HelperToken
-		tokenCleared = false
+	switch {
+	case in.ClearToken:
+		cfg.Token, tokenCleared = "", true
+	case in.HelperToken != "":
+		cfg.Token, tokenCleared = in.HelperToken, false
+	case in.HelperURL == "":
+		// No helper of the DJ's: the configured one with its own token from the next
+		// start (loadAppleMusicHelper). No saved token waits for the next address.
+		cfg.Token, tokenCleared = "", false
+	case moved:
+		// An empty token keeps the saved one only for the same helper (scheme, host and
+		// port: the rule of every editor that keeps a saved credential). A helper moved
+		// to another address never gets the old one's token, nor the configured default
+		// (as a relay's new helper address, relay.go; WebDAV round 4).
+		cfg.Token, tokenCleared = "", true
 	}
 	err := providers.SaveJSON(s.appleMusicHelperPath(), appleMusicHelperSettings{cfg, tokenCleared})
 	if err == nil {

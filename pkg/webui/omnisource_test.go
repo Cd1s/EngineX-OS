@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
+	"github.com/Cd1s/EngineX-OS/internal/testsmb"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
@@ -99,13 +100,20 @@ func omniServer(t *testing.T, root string, on bool) (*Server, string) {
 	return omniServerScope(t, root, on, "deezer")
 }
 
-func omniServerScope(t *testing.T, root string, on bool, scope string) (*Server, string) {
+// omniServerScope is a deck with scope selected and OmniSource on or off. nas, when
+// given, is the NAS in nas.json's slot when the deck starts.
+func omniServerScope(t *testing.T, root string, on bool, scope string, nas ...providers.NASConfig) (*Server, string) {
 	ui := t.TempDir()
 	conf := "scope=" + scope + "\n"
 	if on {
 		conf += "omni_source=1\n"
 	}
 	os.WriteFile(filepath.Join(ui, "settings.conf"), []byte(conf), 0o644)
+	for _, cfg := range nas {
+		if err := providers.SaveJSON(filepath.Join(ui, "nas.json"), cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s := New(Config{AccessToken: "code", UIDir: ui, StateDir: t.TempDir(), DeezerURL: fakeDeezer(t).URL, MediaRoot: filepath.Dir(root)}, nil)
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
@@ -276,10 +284,7 @@ func TestOmniSourceCarrierOpenSequence(t *testing.T) {
 	for _, scope := range []string{"soundcloud", "spotify"} {
 		for _, omni := range []bool{false, true} {
 			t.Run(scope+fmt.Sprintf("/omni=%t", omni), func(t *testing.T) {
-				s, base := omniServerScope(t, root, omni, scope)
-				if err := providers.SaveJSON(s.nasConfigPath(), providers.NASConfig{Protocol: "subsonic", URL: nasBackend.URL, Enabled: true}); err != nil {
-					t.Fatal(err)
-				}
+				s, base := omniServerScope(t, root, omni, scope, providers.NASConfig{Protocol: "subsonic", URL: nasBackend.URL, Enabled: true})
 				s.mu.Lock()
 				s.sessions["own"] = &Session{ID: "own", Provider: scope, Ready: true, p: carrierProvider(t, scope), expires: time.Now().Add(time.Hour)}
 				merged := map[string]string{"soundcloud": "spotify", "spotify": "soundcloud"}[scope]
@@ -537,4 +542,155 @@ func TestOmniSourceDjayIntegration(t *testing.T) {
 	if resp.StatusCode != 200 || !bytes.Equal(body, []byte("ID3 mp3 data")) {
 		t.Fatalf("unexpected stream response: %d, body=%q", resp.StatusCode, body)
 	}
+}
+
+// TestOmniSourceReporter59PlaylistsAndUnconfiguredDeezer models the #335 PRIME 4
+// setup: 59 NAS playlists (paginated across >50 items), a local USB drive,
+// SoundCloud Likes + user playlist, Spotify Liked Songs + user playlist, and an
+// unconfigured real Deezer session that logs its user-ID failure on every list
+// refresh. Toggling OmniSource live from 0 to 1 keeps every playlist openable.
+func TestOmniSourceReporter59PlaylistsAndUnconfiguredDeezer(t *testing.T) {
+	_, root, _ := omniDrive(t)
+
+	// 59 Subsonic playlists (always runs, even without smbd).
+	subsonicSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/rest/getPlaylists.view":
+			pls := make([]map[string]any, 59)
+			for i := range pls {
+				pls[i] = map[string]any{"id": fmt.Sprintf("nas-%02d", i+1), "name": fmt.Sprintf("Folder %02d", i+1), "songCount": 1}
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"subsonic-response": map[string]any{
+					"status":    "ok",
+					"version":   "1.16.1",
+					"playlists": map[string]any{"playlist": pls},
+				},
+			})
+		case "/rest/getPlaylist.view":
+			id := r.URL.Query().Get("id")
+			json.NewEncoder(w).Encode(map[string]any{
+				"subsonic-response": map[string]any{
+					"status":  "ok",
+					"version": "1.16.1",
+					"playlist": map[string]any{
+						"id":        id,
+						"name":      id,
+						"songCount": 1,
+						"entry":     []map[string]any{{"id": "tr-" + id, "title": "Track " + id, "artist": "NAS", "suffix": "mp3", "duration": 180}},
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer subsonicSrv.Close()
+
+	runCase := func(t *testing.T, nasCfg providers.NASConfig, wantNASFirst, wantNASLast string) {
+		for _, scope := range []string{"soundcloud", "spotify"} {
+			t.Run(scope, func(t *testing.T) {
+				s, base := omniServerScope(t, root, false, scope, nasCfg)
+				scProv := carrierProvider(t, "soundcloud")
+				spProv := carrierProvider(t, "spotify")
+				s.mu.Lock()
+				s.sessions["sc-owner"] = &Session{ID: "sc-owner", Provider: "soundcloud", Ready: true, p: scProv, expires: time.Now().Add(time.Hour)}
+				s.sessions["sp-owner"] = &Session{ID: "sp-owner", Provider: "spotify", Ready: true, p: spProv, expires: time.Now().Add(time.Hour)}
+				// Real unconfigured Deezer session: reproduces "deezer: set a public user ID or open a playlist ID".
+				s.sessions["dz-unconfigured"] = &Session{ID: "dz-unconfigured", Provider: "deezer", Ready: true, p: &providers.Deezer{BaseURL: s.tidal.catalog.BaseURL}, expires: time.Now().Add(time.Hour)}
+				s.mu.Unlock()
+
+				// 1. OmniSource OFF: open scope, verify own liked/user playlist opens.
+				if code, _ := uiPost(t, base, "scope="+scope); code != http.StatusOK {
+					t.Fatalf("omni=0 scope=%s status=%d", scope, code)
+				}
+				var offList tidalList
+				tidalGet(t, base, "/v1/users/1/playlists?limit=50&offset=0", 200, &offList)
+				if len(offList.Items) < 2 {
+					t.Fatalf("omni=0 playlists=%d, want >=2", len(offList.Items))
+				}
+				var firstOff tidalPlaylist
+				json.Unmarshal(offList.Items[0], &firstOff)
+				var offTracks tidalList
+				tidalGet(t, base, "/v1/playlists/"+firstOff.UUID, 200, nil)
+				tidalGet(t, base, "/v1/playlists/"+firstOff.UUID+"/tracks?limit=50&offset=0", 200, &offTracks)
+				if len(offTracks.Items) != 1 {
+					t.Fatalf("omni=0 open %q tracks=%d", firstOff.Title, len(offTracks.Items))
+				}
+
+				// 2. Toggle OmniSource ON live, re-open scope, and paginate across >50 playlists + /favorites/playlists.
+				if code, v := uiPost(t, base, "omniSource=1"); code != http.StatusOK || !v.OmniSource {
+					t.Fatalf("toggle omniSource=1: code=%d omni=%t", code, v.OmniSource)
+				}
+				if code, _ := uiPost(t, base, "scope="+scope); code != http.StatusOK {
+					t.Fatalf("omni=1 scope=%s status=%d", scope, code)
+				}
+				var p1, p2, fav tidalList
+				tidalGet(t, base, "/v1/users/1/playlists?limit=50&offset=0", 200, &p1)
+				tidalGet(t, base, "/v1/users/1/playlists?limit=50&offset=50", 200, &p2)
+				tidalGet(t, base, "/v1/users/1/favorites/playlists?limit=50&offset=0", 200, &fav)
+				allItems := append(append([]json.RawMessage{}, p1.Items...), p2.Items...)
+				if len(allItems) < 62 {
+					t.Fatalf("omni=1 total items=%d (p1=%d p2=%d), want >=62", len(allItems), len(p1.Items), len(p2.Items))
+				}
+
+				byTitle := map[string]string{}
+				for _, raw := range allItems {
+					var pl tidalPlaylist
+					json.Unmarshal(raw, &pl)
+					byTitle[pl.Title] = pl.UUID
+				}
+				// Verify own liked list, own playlist, merged service liked + playlist, USB, and NAS playlists all open.
+				wantTitles := []string{
+					firstOff.Title,
+					"Own",
+					"[USB: " + filepath.Base(root) + "] Club",
+					wantNASFirst,
+					wantNASLast,
+				}
+				if scope == "soundcloud" {
+					wantTitles = append(wantTitles, "[Spotify] Own")
+				} else {
+					wantTitles = append(wantTitles, "[SoundCloud] Own")
+				}
+				for _, title := range wantTitles {
+					id := byTitle[title]
+					if id == "" {
+						t.Fatalf("omni=1 listing missing %q", title)
+					}
+					tidalGet(t, base, "/v1/playlists/"+id, 200, nil)
+					var tr1, tr2 tidalList
+					tidalGet(t, base, "/v1/playlists/"+id+"/tracks?limit=50&offset=0", 200, &tr1)
+					tidalGet(t, base, "/v1/playlists/"+id+"/items?limit=50&offset=0", 200, &tr2)
+					if len(tr1.Items) == 0 || len(tr2.Items) == 0 {
+						t.Fatalf("omni=1 playlist %q returned empty tracks/items (%d/%d)", title, len(tr1.Items), len(tr2.Items))
+					}
+				}
+			})
+		}
+	}
+
+	t.Run("subsonic-59", func(t *testing.T) {
+		runCase(t, providers.NASConfig{Protocol: "subsonic", URL: subsonicSrv.URL, Enabled: true}, "[NAS] Folder 01", "[NAS] Folder 59")
+	})
+	t.Run("smb-59", func(t *testing.T) {
+		smbSrv := testsmb.Start(t)
+		mp3 := []byte("ID3\x03\x00\x00\x00\x00\x00\x00" + strings.Repeat("\xff\xfb\x90\x00", 64))
+		if err := os.WriteFile(filepath.Join(smbSrv.Root, "RootTrack.mp3"), mp3, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for i := 1; i <= 58; i++ {
+			dir := filepath.Join(smbSrv.Root, fmt.Sprintf("Set %02d", i))
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if i == 58 {
+				if err := os.WriteFile(filepath.Join(dir, "LateTrack.mp3"), mp3, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		runCase(t, providers.NASConfig{Protocol: "smb", URL: smbSrv.URL, Username: smbSrv.User, Password: smbSrv.Password, Enabled: true}, "[NAS] Root", "[NAS] Set 58")
+	})
 }

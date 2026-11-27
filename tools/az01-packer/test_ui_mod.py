@@ -16133,5 +16133,299 @@ assert.strictEqual(sent.length, 2);
                 self.assertEqual(res.returncode, 0, f"{version}: {res.stderr}")
 
 
+class NASSeparateSourceTest(unittest.TestCase):
+    """Issue #335: configured NAS has its own Sources entry without OmniSource."""
+
+    def test_nas_separate_source_entry(self):
+        main = bp.SERVICES_MAIN
+        services = main[main.index("readonly property var scServices: ["):]
+        services = services[:services.index("\n\t]")]
+        self.assertIn('{ id: "nas", name: "NAS" }', services)
+        self.assertLess(services.index('id: "nas"'), services.index('id: "tidal"'))
+
+        self.assertIn('if (id === "nas") return "qrc:/@ICONS@/SourceNetwork.png"', main)
+        for rel in ("5.0.4/qrc/UIKit.1/UIKit/Icons/SourceNetwork.png", "5.3.0/qrc/Skins/UIKit/Icons/SourceNetwork.png"):
+            if (LAB / rel.split("/", 1)[0] / "qrc").is_dir():
+                self.assertTrue((LAB / rel).is_file(), f"stock icon missing: {rel}")
+
+        # QR login button in Sources footer is hidden for NAS; streaming switches exclude NAS.
+        vis_line = re.search(r"visible:\s*modelData\.id[^\n]+", bp.SOURCE_FOOTER)
+        self.assertIsNotNone(vis_line)
+        self.assertIn('modelData.id !== "nas"', vis_line.group(0))
+        sw_line = re.search(r"model:\s*root\.scServices[^\n]+", bp.STREAM_SWITCHES)
+        self.assertIsNotNone(sw_line)
+
+        def extract_fn(src, name):
+            start = src.index(f"function {name}(")
+            depth = 0
+            for idx in range(start, len(src)):
+                if src[idx] == "{":
+                    depth += 1
+                elif src[idx] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return src[start:idx + 1]
+            raise AssertionError(f"unclosed {name}")
+
+        sw_expr = sw_line.group(0).split(":", 1)[1].split("//", 1)[0].strip()
+        vis_expr = vis_line.group(0).split(":", 1)[1].strip()
+        fn_block = "\n".join([
+            extract_fn(main, "scIcon").replace("@ICONS@", "Skins/UIKit/Icons"),
+            extract_fn(main, "scBrand"),
+            extract_fn(main, "scNoteService"),
+            extract_fn(main, "scServiceOf"),
+            extract_fn(main, "scOwnService"),
+            extract_fn(main, "scSlotIcon"),
+            extract_fn(main, "scRowIcon"),
+        ])
+        for version, open_code in (("5.3.0", bp.TIDAL_OPEN_530), ("5.0.4", bp.TIDAL_OPEN_504)):
+            with self.subTest(version=version):
+                script = f"""
+const assert = require('assert');
+const posts = [], logins = [];
+let selects = 0;
+const tp = {{loggedIn: true, loginToService() {{ this.loggedIn = true; }}}};
+globalThis.root = globalThis;
+globalThis.Planck = {{librarianController: {{
+    streamingInterfaceController: {{logoutOfProvider() {{}}}},
+    streamingPlaylistsController: {{invalidateUI() {{}}}}
+}}}};
+const scServices = [
+    {{id: 'rekordbox', name: 'rekordbox'}},
+    {{id: 'nas', name: 'NAS'}},
+    {{id: 'tidal', name: 'TIDAL'}},
+    {{id: 'spotify', name: 'Spotify'}},
+];
+const scRowLabels = {{'rekordbox': 'rekordbox', '网易云音乐': 'netease', 'Apple Music': 'applemusic'}};
+Object.assign(globalThis, {{
+    scServices, scRowLabels, scDeckService: {{}}, scShadowHead: {{}},
+    scUiLoaded: true, scSources: ['nas', 'spotify'], scLoggedIn: ['spotify'],
+    scScope: 'spotify', scScopePending: 0, scTidalLoggedIn: false, scTidalSynthetic: false,
+    scTidalLoginPending: false, scTidalLogoutPending: false, scAskedAt: 0,
+    scLogin: '', scLoginOpen: '', scLoginStatus: '', scLoginLocal: false, scLoginSerial: 0,
+    scProviders: {{count: 1, objectAt() {{ return {{tidalProvider: tp}}; }}}},
+    scEnsureTidal() {{}},
+    scSelectTidal() {{ selects++; return true; }},
+    scEnterTimer: {{start() {{}}}},
+    scLoginBegin(id) {{ logins.push(id); }},
+    scCall(q, done) {{ if (q) posts.push(q); if (done) done({{}}); }}
+}});
+{fn_block}
+{open_code}
+// 1. STREAM_SWITCHES excludes nas; SOURCE_FOOTER hides login action for nas.
+const switched = ({sw_expr}).map(s => s.id);
+assert.ok(!switched.includes('nas'), 'nas must not appear in streaming switches: ' + switched);
+assert.ok(switched.includes('spotify'), 'streaming services remain in switches');
+for (const modelData of scServices) {{
+    const showLogin = ({vis_expr});
+    if (modelData.id === 'nas' || modelData.id === 'rekordbox' || modelData.id === 'tidal') {{
+        assert.strictEqual(showLogin, false, modelData.id + ' must hide login button');
+    }} else {{
+        assert.strictEqual(showLogin, true, modelData.id + ' must show login button');
+    }}
+}}
+// 2. Unavailable nas neither changes scope nor opens QR login.
+scOpen('nas');
+assert.strictEqual(scScope, 'spotify');
+assert.deepStrictEqual(posts, []);
+assert.deepStrictEqual(logins, []);
+// 3. Available nas switches scope to nas and selects TIDAL carrier without QR login.
+scLoggedIn = ['nas', 'spotify'];
+scOpen('nas');
+assert.strictEqual(scScope, 'nas');
+assert.deepStrictEqual(posts, ['scope=nas']);
+assert.deepStrictEqual(logins, []);
+assert.strictEqual(selects, 1);
+// 4. Icon, row icon, deck service header and carrier branding all recognize NAS.
+const nasIcon = 'qrc:/Skins/UIKit/Icons/SourceNetwork.png';
+assert.strictEqual(scIcon('nas'), nasIcon);
+assert.strictEqual(scRowIcon('qrc:/Skins/UIKit/Icons/SourceTIDAL.png', 'NAS [124 BPM 8A]'), nasIcon);
+assert.strictEqual(scServiceOf({{getResponseHeader(k) {{ return k === 'X-Enginex-Provider' ? 'nas' : ''; }}}}), 'nas');
+scNoteService(1, 'nas');
+scScope = 'spotify';
+assert.strictEqual(scSlotIcon('TIDAL', 1), nasIcon);
+assert.strictEqual(scBrand('TIDAL Error', 1), 'NAS Error');
+"""
+                res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, f"{version}: {res.stderr}")
+
+
+class ServersUITest(unittest.TestCase):
+    """WebDAV and NAS servers (maintainer, 2026-11-27): their rows under Cloud in Settings > Services,
+    several servers of each kind added, edited and removed in the QR panel (phone page or Engine's own
+    text input, "Enter manually"), and one named entry per server in the Source list."""
+
+    @staticmethod
+    def extract_fn(src, name):
+        start = src.index(f"function {name}(")
+        depth = 0
+        for idx in range(start, len(src)):
+            if src[idx] == "{":
+                depth += 1
+            elif src[idx] == "}":
+                depth -= 1
+                if depth == 0:
+                    return src[start:idx + 1]
+        raise AssertionError(f"unclosed {name}")
+
+    def test_rows_panel_and_source_entries(self):
+        main = bp.SERVICES_MAIN
+        services = main[main.index("readonly property var scServices: ["):]
+        services = services[:services.index("\n\t]")]
+        self.assertIn('{ id: "webdav", name: "WebDAV" }', services)
+        self.assertLess(services.index('id: "nas"'), services.index('id: "webdav"'))
+        self.assertLess(services.index('id: "webdav"'), services.index('id: "tidal"'))
+        self.assertTrue((REPO / "tools/ui-mod/icons/webdav.png").is_file())
+        # Services: the streaming switches stay services; NAS and WebDAV sit under Cloud, with Dropbox.
+        model = re.search(r"model:\s*root\.scServices[^\n]+", bp.STREAM_SWITCHES).group(0)
+        self.assertIn('.filter(s => s.id !== "nas").filter(s => s.id !== "webdav")', model)
+        for row in ("NAS", "WebDAV", "WebDAV Servers", "NAS Servers"):
+            self.assertNotIn(f'text: "{row}"', bp.STREAM_SWITCHES)
+        cloud = bp.CLOUD_ENTRIES
+        nas = cloud.split('text: "NAS"', 1)[1].split("}", 1)[0]
+        self.assertIn("checkedExternally: root.scNasOn", nas)
+        self.assertIn('root.scSwitchServers("nas", !root.scNasOn)', nas)
+        webdav = cloud.split('text: "WebDAV"', 1)[1].split("}", 1)[0]
+        self.assertIn("checkedExternally: root.scWebdavOn", webdav)
+        self.assertIn('root.scSwitchServers("webdav", !root.scWebdavOn)', webdav)
+        for kind, label in (("nas", "NAS Servers"), ("webdav", "WebDAV Servers")):
+            row = cloud.split(f'text: "{label}"', 1)[1].split("}", 1)[0]
+            self.assertIn(f'root.scLoginBegin("{kind}")', row)
+        src = (REPO / "tools/ui-mod/build_packs.py").read_text(encoding="utf-8")
+        self.assertIn("""prefs + "Entries/CloudServices.qml": [""", src)
+        # The Source list: one entry per enabled server, with its name; no login button on a server.
+        self.assertIn("model: root.scSourceEntries", bp.SOURCE_FOOTER)
+        self.assertIn('modelData.kind !== "nas" && modelData.kind !== "webdav"', bp.SOURCE_FOOTER)
+        # The panel, for both kinds: the servers, typing one in ("Enter manually"), done; hidden while Engine's input is up.
+        self.assertIn('visible: root.scLogin !== "" && !root.scServerTyping', bp.LOGIN_DIALOG)
+        self.assertIn('root.scLogin === "webdav" || root.scLogin === "nas"', bp.LOGIN_DIALOG)
+        self.assertIn("model: parent.parent.serverList", bp.LOGIN_DIALOG)
+        self.assertIn("root.scServerEdit(root.scLogin, null)", bp.LOGIN_DIALOG)
+        self.assertIn("root.scServerEdit(root.scLogin, modelData)", bp.LOGIN_DIALOG)
+        self.assertIn('root.scT("Enter manually")', bp.LOGIN_DIALOG)
+        self.assertNotIn("Add on this deck", src)
+        self.assertNotIn("echoMode", bp.LOGIN_DIALOG)  # no field of our own: Engine's input takes the password
+        self.assertIn("ScMsg.TextInputDialog", bp.SERVER_INPUT)
+        self.assertIn('import "Items/MessageBoxes" as ScMsg', src)
+        # Every string the rows and the panel show is translated in four languages.
+        rows = {l.split("\t")[0]: l.split("\t")[1:] for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
+        self.assertEqual(rows["Enter manually"], ["手动输入", "手動輸入", "Introducir manualmente"])
+        for text in ("WebDAV Servers", "NAS Servers", "Edit", "Enter manually", "Tap again to remove", "Add WebDAV server",
+                     "Edit WebDAV server", "Add NAS server", "Edit NAS server", "Server address", "Name (optional)",
+                     "Leave empty to keep the saved password", "Next", "This server is already added",
+                     "No more servers can be added", "Enter the server address with http:// or https://",
+                     "Enter the server address with smb://", "Could not save the server",
+                     "Username", "Password", "Remove", "Done", "Cancel", "Scan with your phone camera."):
+            self.assertIn(text, rows, text)
+            self.assertEqual(len([v for v in rows[text] if v.strip()]), 3, text)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the panel's functions")
+    def test_source_entries_deck_entry_and_switches(self):
+        main = bp.SERVICES_MAIN
+        fns = "\n".join(self.extract_fn(main, n) for n in ("scServersOf", "scFindObject", "scServerField", "scServerEdit", "scServerNext", "scServerStop", "scServerSave", "scSwitchServers"))
+        entries = main.split("readonly property var scSourceEntries: {", 1)[1].split("\n\t}\n", 1)[0]
+        script = r"""
+const assert = require('assert');
+const posts = [], logins = [], opened = [], xhrs = [];
+globalThis.root = globalThis;
+globalThis.Qt = {callLater(f) { f(); }};
+globalThis.TextInput = {Password: 2, Normal: 0};
+class XMLHttpRequest {
+    open(m, u) { this.method = m; this.url = u; }
+    setRequestHeader() {}
+    send(body) { this.body = body; xhrs.push(this); }
+    answer(status, text) { this.readyState = 4; this.status = status; this.responseText = text; this.onreadystatechange(); }
+}
+globalThis.XMLHttpRequest = XMLHttpRequest;
+Object.assign(globalThis, {
+    scT(s) { return s; },
+    scServices: [{id: 'rekordbox', name: 'rekordbox'}, {id: 'nas', name: 'NAS'}, {id: 'webdav', name: 'WebDAV'}, {id: 'tidal', name: 'TIDAL'}, {id: 'spotify', name: 'Spotify'}],
+    scSources: [], scWebdav: [], scNasServers: [], scServerTyping: false, scServerError: '', scServerKind: 'webdav', scServerDraft: {}, scServerStep: 0,
+    scServerSteps: ['url', 'username', 'password', 'name'], scServerInput: {}, scLoginOpen: 'x',
+    openDialogComponent(c) { opened.push(c); },
+    scLoginBegin(id) { logins.push(id); },
+    scCall(q) { posts.push(q); },
+});
+""" + fns + "\nfunction scSourceEntries() {" + entries + "\n}\n" + r"""
+// The Source list: the services on and one entry per enabled server, named, in the place of its kind.
+scSources = ['nas', 'nas:b2', 'webdav:a1', 'spotify'];
+scNasServers = [{id: 'n1', name: 'Studio NAS', scope: 'nas'}, {id: 'b2', name: 'Club NAS', scope: 'nas:b2'}, {id: 'c3', name: 'Off NAS', scope: 'nas:c3'}];
+scWebdav = [{id: 'a1', name: 'Studio', scope: 'webdav:a1'}];
+assert.deepStrictEqual(scSourceEntries().map(e => e.id + '=' + e.name + '/' + e.kind),
+    ['nas=Studio NAS/nas', 'nas:b2=Club NAS/nas', 'webdav:a1=Studio/webdav', 'spotify=Spotify/spotify']);
+// Turning a kind on with no server opens the panel to add one; with servers it does not.
+scNasServers = []; scWebdav = [];
+scSwitchServers('nas', true);
+assert.deepStrictEqual(posts, ['nas=1']);
+assert.deepStrictEqual(logins, ['nas']);
+assert.strictEqual(scLoginOpen, '');
+scWebdav = [{id: 'a'}];
+scSwitchServers('webdav', false);
+assert.deepStrictEqual(posts, ['nas=1', 'webdav=0']);
+assert.deepStrictEqual(logins, ['nas']);
+// Typing a NAS on the deck: one field after another in Engine's input, the password masked.
+const input = {objectName: 'EmbeddedTextInput', children: [], echoMode: 0};
+const field = () => ({children: [{objectName: '', children: [input]}]});
+scServerEdit('nas', null);
+assert.strictEqual(scServerTyping, true);
+let f = field();
+scServerField(f);
+assert.strictEqual(f.title, 'Add NAS server');
+assert.strictEqual(f.label, 'Server address');
+assert.strictEqual(f.text, 'smb://');
+assert.strictEqual(f.doneButtonTitle, 'Next');
+scServerNext('smb://nas.example/music');
+scServerNext('dj');
+f = field(); scServerField(f);
+assert.strictEqual(f.label, 'Password');
+assert.strictEqual(input.echoMode, 2);
+scServerNext('pw');
+f = field(); scServerField(f);
+assert.strictEqual(f.label, 'Name (optional)');
+assert.strictEqual(f.placeholder, 'nas.example');
+assert.strictEqual(f.doneButtonTitle, 'Done');
+scServerNext('Studio NAS');
+assert.strictEqual(scServerTyping, false);
+assert.strictEqual(opened.length, 4);
+assert.strictEqual(xhrs[0].url, 'http://127.0.0.1:8080/v1/enginex/servers/nas');
+assert.deepStrictEqual(JSON.parse(xhrs[0].body), {action: 'add', id: '', name: 'Studio NAS', url: 'smb://nas.example/music', username: 'dj', password: 'pw'});
+xhrs[0].answer(200, JSON.stringify({servers: [{id: 'n1', name: 'Studio NAS', scope: 'nas', url: 'smb://nas.example/music', username: 'dj', hasPassword: true}]}));
+assert.strictEqual(scNasServers.length, 1);
+assert.strictEqual(posts[posts.length - 1], '');
+// Editing a WebDAV server keeps the saved password when its field is left empty.
+scServerEdit('webdav', {id: 'a1', name: 'Studio', url: 'https://dav.example/music', username: 'dj', hasPassword: true});
+f = field(); scServerField(f);
+assert.strictEqual(f.title, 'Edit WebDAV server');
+assert.strictEqual(f.text, 'https://dav.example/music');
+scServerNext('https://dav.example/music'); scServerNext('dj');
+f = field(); scServerField(f);
+assert.strictEqual(f.placeholder, 'Leave empty to keep the saved password');
+scServerNext(''); scServerNext('Studio');
+assert.strictEqual(xhrs[1].url, 'http://127.0.0.1:8080/v1/enginex/servers/webdav');
+assert.deepStrictEqual(JSON.parse(xhrs[1].body), {action: 'edit', id: 'a1', name: 'Studio', url: 'https://dav.example/music', username: 'dj', password: ''});
+// WebDAV round 3: another address does not keep the saved password, so the hint is not shown.
+scServerEdit('webdav', {id: 'a1', name: 'Studio', url: 'https://dav.example/music', username: 'dj', hasPassword: true});
+scServerNext('https://other.example/music'); scServerNext('dj');
+f = field(); scServerField(f);
+assert.strictEqual(f.placeholder, '');
+scServerStop();
+// Refusals say why, in the words of the kind.
+xhrs[1].answer(409, '{"error":"this server is already added"}');
+assert.strictEqual(scServerError, 'This server is already added');
+scServerSave('nas', {action: 'add', url: 'http://x'});
+xhrs[2].answer(400, '{"error":"bad"}');
+assert.strictEqual(scServerError, 'Enter the server address with smb://');
+scServerSave('webdav', {action: 'add', url: 'ftp://x'});
+xhrs[3].answer(400, '{"error":"bad"}');
+assert.strictEqual(scServerError, 'Enter the server address with http:// or https://');
+// Cancel in Engine's input ends the entry and brings the panel back.
+scServerEdit('webdav', null);
+scServerStop();
+assert.strictEqual(scServerTyping, false);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

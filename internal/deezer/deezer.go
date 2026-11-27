@@ -19,9 +19,10 @@ import (
 	"regexp"
 	"strconv"
 	"time"
-)
 
-import "golang.org/x/crypto/blowfish"
+	"github.com/Cd1s/EngineX-OS/internal/redirect"
+	"golang.org/x/crypto/blowfish"
+)
 
 const (
 	deezerGW  = "https://www.deezer.com/ajax/gw-light.php"
@@ -50,7 +51,10 @@ func Login(ctx context.Context, arl string) (*Session, error) {
 	jar, _ := cookiejar.New(nil)
 	u, _ := url.Parse("https://www.deezer.com/")
 	jar.SetCookies(u, []*http.Cookie{{Name: "arl", Value: arl, Path: "/", Domain: ".deezer.com"}})
-	s := &Session{hc: &http.Client{Timeout: 30 * time.Second, Jar: jar}}
+	// The account client: every request of it carries the account (the ARL cookie of the
+	// jar, the API token in the query, the licence and track tokens in a body), so a
+	// redirect is followed only within the origin that was asked (#335 round 13).
+	s := &Session{hc: &http.Client{Timeout: 30 * time.Second, Jar: jar, CheckRedirect: redirect.SameOrigin}}
 	var r struct {
 		Results struct {
 			CheckForm string `json:"checkForm"`
@@ -224,7 +228,9 @@ func (s *Session) fetchDecrypt(ctx context.Context, srcURL, sngID, dst string) e
 		return errors.New("deezer: invalid media URL")
 	}
 	req.Header.Set("User-Agent", userAgent)
-	hc := &http.Client{Timeout: 5 * time.Minute, Transport: s.hc.Transport}
+	// The media client has no cookie jar: the CDN gets the signed URL and nothing of the
+	// account, and may redirect to another host, without the signed URL as a Referer.
+	hc := &http.Client{Timeout: 5 * time.Minute, Transport: s.hc.Transport, CheckRedirect: redirect.NoReferer}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return err
