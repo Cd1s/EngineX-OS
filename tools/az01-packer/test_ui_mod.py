@@ -15235,5 +15235,160 @@ assert.strictEqual(scBrand('TIDAL Error', 1), 'NAS Error');
                 self.assertEqual(res.returncode, 0, f"{version}: {res.stderr}")
 
 
+class WebDAVSourceUITest(unittest.TestCase):
+    """WebDAV as its own source (maintainer, 2026-11-27): WebDAV and NAS rows in Settings > Services,
+    several servers added, edited and removed in the QR panel (phone page or Engine's own text input),
+    and one WebDAV entry in the Source list."""
+
+    @staticmethod
+    def extract_fn(src, name):
+        start = src.index(f"function {name}(")
+        depth = 0
+        for idx in range(start, len(src)):
+            if src[idx] == "{":
+                depth += 1
+            elif src[idx] == "}":
+                depth -= 1
+                if depth == 0:
+                    return src[start:idx + 1]
+        raise AssertionError(f"unclosed {name}")
+
+    def test_rows_panel_and_source_entry(self):
+        main = bp.SERVICES_MAIN
+        services = main[main.index("readonly property var scServices: ["):]
+        services = services[:services.index("\n\t]")]
+        self.assertIn('{ id: "webdav", name: "WebDAV" }', services)
+        self.assertLess(services.index('id: "nas"'), services.index('id: "webdav"'))
+        self.assertLess(services.index('id: "webdav"'), services.index('id: "tidal"'))
+        self.assertIn('if (id === "webdav") return "qrc:/@ICONS@/SourceNetwork.png"', main)
+        # Services: the streaming switches stay services; NAS and WebDAV are rows of their own with their own keys.
+        model = re.search(r"model:\s*root\.scServices[^\n]+", bp.STREAM_SWITCHES).group(0)
+        self.assertIn('.filter(s => s.id !== "webdav")', model)
+        nas = bp.STREAM_SWITCHES.split('text: "NAS"', 1)[1].split("}", 1)[0]
+        self.assertIn("root.scNasSetUp", nas)
+        self.assertIn('root.scCall("nas=" +', nas)
+        webdav = bp.STREAM_SWITCHES.split('text: "WebDAV"', 1)[1].split("}", 1)[0]
+        self.assertIn('checkedExternally: root.scSources.indexOf("webdav") >= 0', webdav)
+        self.assertIn("root.scSwitchWebdav(", webdav)
+        servers = bp.STREAM_SWITCHES.split('text: "WebDAV Servers"', 1)[1].split("}", 1)[0]
+        self.assertIn('root.scLoginBegin("webdav")', servers)
+        self.assertIn('root.scSources.indexOf("webdav") >= 0', servers)
+        # The Source list: WebDAV opens like a service; its button is for the servers, not a login.
+        self.assertIn('modelData.id === "webdav" ? "Servers"', bp.SOURCE_FOOTER)
+        # The panel: the servers, adding one on the deck, done; hidden while Engine's text input is up.
+        self.assertIn('visible: root.scLogin !== "" && !root.scWebdavTyping', bp.LOGIN_DIALOG)
+        self.assertIn("model: root.scWebdav", bp.LOGIN_DIALOG)
+        self.assertIn("root.scWebdavEdit(null)", bp.LOGIN_DIALOG)
+        self.assertIn("root.scWebdavEdit(modelData)", bp.LOGIN_DIALOG)
+        self.assertNotIn("echoMode", bp.LOGIN_DIALOG)  # no field of our own: Engine's input takes the password
+        self.assertIn("ScMsg.TextInputDialog", bp.WEBDAV_INPUT)
+        self.assertIn('import "Items/MessageBoxes" as ScMsg', (REPO / "tools/ui-mod/build_packs.py").read_text(encoding="utf-8"))
+        # Every string the rows and the panel show is translated in four languages.
+        rows = {l.split("\t")[0]: l.split("\t")[1:] for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
+        for text in ("WebDAV Servers", "Edit", "Servers", "Add on this deck", "Tap again to remove", "Add WebDAV server",
+                     "Edit WebDAV server", "Server address", "Name (optional)", "Leave empty to keep the saved password", "Next",
+                     "This server is already added", "No more servers can be added",
+                     "Enter the server address with http:// or https://", "Could not save the server",
+                     "Username", "Password", "Remove", "Done", "Cancel", "Scan with your phone camera."):
+            self.assertIn(text, rows, text)
+            self.assertEqual(len([v for v in rows[text] if v.strip()]), 3, text)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the panel's functions")
+    def test_deck_entry_adds_edits_and_switches(self):
+        main = bp.SERVICES_MAIN
+        fns = "\n".join(self.extract_fn(main, n) for n in ("scFindObject", "scWebdavField", "scWebdavEdit", "scWebdavNext", "scWebdavStop", "scWebdavSave", "scSwitchWebdav"))
+        script = r"""
+const assert = require('assert');
+const posts = [], logins = [], opened = [], xhrs = [];
+globalThis.root = globalThis;
+globalThis.Qt = {callLater(f) { f(); }};
+globalThis.TextInput = {Password: 2, Normal: 0};
+class XMLHttpRequest {
+    open(m, u) { this.method = m; this.url = u; }
+    setRequestHeader() {}
+    send(body) { this.body = body; xhrs.push(this); }
+    answer(status, text) { this.readyState = 4; this.status = status; this.responseText = text; this.onreadystatechange(); }
+}
+globalThis.XMLHttpRequest = XMLHttpRequest;
+Object.assign(globalThis, {
+    scT(s) { return s; },
+    scWebdav: [], scWebdavTyping: false, scWebdavError: '', scWebdavDraft: {}, scWebdavStep: 0,
+    scWebdavSteps: ['url', 'username', 'password', 'name'], scWebdavInput: {}, scLoginOpen: 'x',
+    openDialogComponent(c) { opened.push(c); },
+    scLoginBegin(id) { logins.push(id); },
+    scCall(q) { posts.push(q); },
+});
+""" + fns + r"""
+// Turning WebDAV on with no server opens the panel to add one; with servers it does not.
+scSwitchWebdav(true);
+assert.deepStrictEqual(posts, ['webdav=1']);
+assert.deepStrictEqual(logins, ['webdav']);
+assert.strictEqual(scLoginOpen, '');
+scWebdav = [{id: 'a'}];
+scSwitchWebdav(false);
+assert.deepStrictEqual(posts, ['webdav=1', 'webdav=0']);
+assert.deepStrictEqual(logins, ['webdav']);
+// Adding on the deck: one field after another in Engine's input, the password masked.
+const input = {objectName: 'EmbeddedTextInput', children: [], echoMode: 0};
+const field = () => ({children: [{objectName: '', children: [input]}]});
+scWebdavEdit(null);
+assert.strictEqual(scWebdavTyping, true);
+assert.strictEqual(opened.length, 1);
+let f = field();
+scWebdavField(f);
+assert.strictEqual(f.title, 'Add WebDAV server');
+assert.strictEqual(f.label, 'Server address');
+assert.strictEqual(f.text, 'https://');
+assert.strictEqual(f.doneButtonTitle, 'Next');
+scWebdavNext('https://dav.example/music');
+scWebdavNext('dj');
+f = field();
+scWebdavField(f);
+assert.strictEqual(f.label, 'Password');
+assert.strictEqual(f.text, '');
+assert.strictEqual(input.echoMode, 2);
+scWebdavNext('pw');
+f = field();
+scWebdavField(f);
+assert.strictEqual(f.label, 'Name (optional)');
+assert.strictEqual(f.placeholder, 'dav.example');
+assert.strictEqual(f.doneButtonTitle, 'Done');
+assert.strictEqual(opened.length, 4);
+scWebdavNext('');
+assert.strictEqual(scWebdavTyping, false);
+assert.strictEqual(xhrs.length, 1);
+assert.strictEqual(xhrs[0].method, 'POST');
+assert.strictEqual(xhrs[0].url, 'http://127.0.0.1:8080/v1/enginex/webdav');
+assert.deepStrictEqual(JSON.parse(xhrs[0].body), {action: 'add', id: '', name: '', url: 'https://dav.example/music', username: 'dj', password: 'pw'});
+xhrs[0].answer(200, JSON.stringify({servers: [{id: 'b', name: 'dav.example', url: 'https://dav.example/music', username: 'dj', hasPassword: true}]}));
+assert.strictEqual(scWebdav.length, 1);
+assert.strictEqual(posts[posts.length - 1], '');
+// Editing keeps the saved password when its field is left empty.
+scWebdavEdit(scWebdav[0]);
+f = field(); scWebdavField(f);
+assert.strictEqual(f.title, 'Edit WebDAV server');
+assert.strictEqual(f.text, 'https://dav.example/music');
+scWebdavNext('https://dav.example/music');
+scWebdavNext('dj');
+f = field(); scWebdavField(f);
+assert.strictEqual(f.placeholder, 'Leave empty to keep the saved password');
+scWebdavNext('');
+scWebdavNext('Studio');
+assert.deepStrictEqual(JSON.parse(xhrs[1].body), {action: 'edit', id: 'b', name: 'Studio', url: 'https://dav.example/music', username: 'dj', password: ''});
+// Refusals say why.
+xhrs[1].answer(409, '{"error":"this server is already added"}');
+assert.strictEqual(scWebdavError, 'This server is already added');
+scWebdavSave({action: 'add', url: 'ftp://x'});
+xhrs[2].answer(400, '{"error":"bad"}');
+assert.strictEqual(scWebdavError, 'Enter the server address with http:// or https://');
+// Cancel in Engine's input ends the entry and brings the panel back.
+scWebdavEdit(null);
+scWebdavStop();
+assert.strictEqual(scWebdavTyping, false);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

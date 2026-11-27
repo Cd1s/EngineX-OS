@@ -122,7 +122,7 @@ func sourceFailedTitle(provider string, err error) string {
 
 var (
 	tidalNS        = uuid.MustParse("6f1c5a52-3c55-4c2e-9d0b-5c5000000000")
-	providerLabels = map[string]string{"netease": "网易云音乐", "spotify": "Spotify", "deezer": "Deezer", "soundcloud": "SoundCloud", "beatport": "Beatport", localProvider: "USB/SD", "applemusic": "Apple Music", rekordboxScope: "rekordbox", "nas": "NAS", webdavScope: "WebDAV"}
+	providerLabels = map[string]string{"netease": "网易云音乐", "spotify": "Spotify", "deezer": "Deezer", "soundcloud": "SoundCloud", "beatport": "Beatport", localProvider: "USB/SD", "applemusic": "Apple Music", rekordboxScope: "rekordbox", "nas": "NAS", "webdav": "WebDAV"}
 	providerOrder  = map[string]int{"netease": 0, "spotify": 1, "deezer": 2, "soundcloud": 3, "beatport": 4, "applemusic": 5}
 )
 

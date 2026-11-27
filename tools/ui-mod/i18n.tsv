@@ -798,3 +798,18 @@ Scan to open the console	扫码打开控制台	掃碼開啟控制台	Escanea par
 Scan the QR code at the bottom of About / Update to open the console	可在「关于 / 更新」最下方扫码进入控制台	可在「關於 / 更新」最下方掃碼進入控制台	Escanea el código QR al final de Acerca de / Actualizar para abrir la consola
 Starting…	正在启动…	正在啟動…	Iniciando…
 Error	错误	錯誤	Error
+WebDAV Servers	WebDAV 服务器	WebDAV 伺服器	Servidores WebDAV
+Edit	编辑	編輯	Editar
+Servers	服务器	伺服器	Servidores
+Add on this deck	在碟机上添加	在碟機上新增	Añadir en este deck
+Tap again to remove	再点一次移除	再點一次移除	Toca otra vez para quitar
+Add WebDAV server	添加 WebDAV 服务器	新增 WebDAV 伺服器	Añadir servidor WebDAV
+Edit WebDAV server	编辑 WebDAV 服务器	編輯 WebDAV 伺服器	Editar servidor WebDAV
+Server address	服务器地址	伺服器位址	Dirección del servidor
+Name (optional)	名称（可选）	名稱（選填）	Nombre (opcional)
+Leave empty to keep the saved password	留空则保留已保存的密码	留空則保留已儲存的密碼	Déjala vacía para conservar la contraseña guardada
+Next	下一步	下一步	Siguiente
+This server is already added	这个服务器已经添加过	這個伺服器已經新增過	Este servidor ya está añadido
+No more servers can be added	不能再添加更多服务器	無法再新增更多伺服器	No se pueden añadir más servidores
+Enter the server address with http:// or https://	请填写以 http:// 或 https:// 开头的服务器地址	請填寫以 http:// 或 https:// 開頭的伺服器位址	Escribe la dirección del servidor con http:// o https://
+Could not save the server	未能保存服务器	未能儲存伺服器	No se ha podido guardar el servidor

@@ -3867,6 +3867,7 @@ SERVICES_MAIN = """
 	readonly property var scServices: [
 		{ id: "rekordbox", name: scRekordboxName ? "rekordbox (" + scRekordboxName + ")" : "rekordbox" },
 		{ id: "nas", name: "NAS" },
+		{ id: "webdav", name: "WebDAV" },
 		{ id: "tidal", name: "TIDAL" },
 		{ id: "netease", name: scT("NetEase Cloud Music") },
 		{ id: "spotify", name: "Spotify" },
@@ -3895,6 +3896,7 @@ SERVICES_MAIN = """
 		if (id === "beatport") return "qrc:/@ICONS@/SourceBeatport%20LINKColored.png"
 		if (id === "rekordbox") return "qrc:/@ICONS@/SourceEngineRemoteLibrary.png"
 		if (id === "nas") return "qrc:/@ICONS@/SourceNetwork.png"
+		if (id === "webdav") return "qrc:/@ICONS@/SourceNetwork.png" // a network share as well; its name tells it from NAS
 		return "file:///data/enginex/ui/icons/" + id + ".png"
 	}
 	// The gateway appends " [128 BPM 8A]" to a row's label; see labelWithBPM.
@@ -4410,6 +4412,8 @@ SERVICES_MAIN = """
 		scTidalSynthetic = !!v.tidalSynthetic
 		if (v.scope !== undefined) scScope = v.scope
 		scRekordboxName = v.rekordboxName || ""
+		scNasSetUp = !!v.nasSetUp
+		if (JSON.stringify(v.webdav || []) !== JSON.stringify(scWebdav)) scWebdav = v.webdav || []
 		scBroadcastOn = !!v.broadcastEnabled
 		const prevUpfaderEcho = scUpfaderEcho
 		scUpfaderEcho = !!v.upfaderEcho
@@ -4682,6 +4686,91 @@ SERVICES_MAIN = """
 				if (v.status === "done") scLoginDone()
 				else scLoginStatus = v.status
 			})
+		}
+	}
+	// WebDAV (maintainer, 2026-11-27): several servers, each its own entry under the
+	// WebDAV source. They are added, edited and removed in the QR panel: on the phone
+	// page the code opens, or here with the stock text input of Engine, one field after
+	// another. The gateway keeps them, with their passwords, in the owner settings.
+	property bool scNasSetUp: false
+	property var scWebdav: []
+	property bool scWebdavTyping: false
+	property string scWebdavError: ""
+	property var scWebdavDraft: ({})
+	property int scWebdavStep: 0
+	readonly property var scWebdavSteps: ["url", "username", "password", "name"]
+@WEBDAV_INPUT@
+	function scFindObject(item, name) {
+		if (!item) return null
+		if (item.objectName === name) return item
+		for (let i = 0; i < item.children.length; i++) {
+			const found = scFindObject(item.children[i], name)
+			if (found) return found
+		}
+		return null
+	}
+	// One step of the entry on the deck: title, label, text and placeholder of the field.
+	function scWebdavField(field) {
+		const d = scWebdavDraft, step = scWebdavSteps[scWebdavStep]
+		field.title = root.scT(d.id ? "Edit WebDAV server" : "Add WebDAV server")
+		field.label = root.scT({url: "Server address", username: "Username", password: "Password", name: "Name (optional)"}[step])
+		field.text = step === "password" ? "" : String(d[step] || (step === "url" ? "https://" : ""))
+		field.placeholder = step === "url" ? "https://" : step === "password" && d.hasPassword ? root.scT("Leave empty to keep the saved password")
+			: step === "name" ? String(d.url || "").replace(/^[a-z]+:\\/\\//i, "").split("/")[0] : ""
+		field.doneButtonTitle = root.scT(scWebdavStep < scWebdavSteps.length - 1 ? "Next" : "Done")
+		field.cancelButtonTitle = root.scT("Cancel")
+		if (step === "password") {
+			const input = scFindObject(field, "EmbeddedTextInput")
+			if (input) input.echoMode = TextInput.Password
+		}
+	}
+	// Add (no server) or edit a WebDAV server on the deck.
+	function scWebdavEdit(server) {
+		if (!scWebdavInput) return
+		scWebdavError = ""
+		scWebdavDraft = server ? {id: server.id, url: server.url || "", username: server.username || "", password: "", name: server.name || "", hasPassword: !!server.hasPassword}
+			: {id: "", url: "", username: "", password: "", name: "", hasPassword: false}
+		scWebdavStep = 0
+		scWebdavTyping = true
+		root.openDialogComponent(scWebdavInput)
+	}
+	function scWebdavNext(text) {
+		const d = Object.assign({}, scWebdavDraft)
+		d[scWebdavSteps[scWebdavStep]] = String(text)
+		scWebdavDraft = d
+		if (scWebdavStep < scWebdavSteps.length - 1) {
+			scWebdavStep++
+			Qt.callLater(function() { root.openDialogComponent(scWebdavInput) })
+			return
+		}
+		scWebdavTyping = false
+		scWebdavSave({action: d.id ? "edit" : "add", id: d.id, name: d.name, url: d.url, username: d.username, password: d.password})
+	}
+	function scWebdavStop() { scWebdavTyping = false }
+	function scWebdavSave(change) {
+		const x = new XMLHttpRequest()
+		x.open("POST", "http://127.0.0.1:8080/v1/enginex/webdav")
+		x.setRequestHeader("Content-Type", "application/json")
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4) return
+			if (x.status === 200) {
+				scWebdavError = ""
+				scWebdav = JSON.parse(x.responseText).servers || []
+				scCall("")
+				return
+			}
+			scWebdavError = root.scT(x.status === 400 ? "Enter the server address with http:// or https://"
+				: x.status === 409 ? (String(x.responseText).indexOf("already") >= 0 ? "This server is already added" : "No more servers can be added")
+				: "Could not save the server")
+		}
+		x.send(JSON.stringify(change))
+	}
+	// The WebDAV row in Settings > Services. Turned on with no server yet, it opens the panel to add one.
+	function scSwitchWebdav(on) {
+		scCall("webdav=" + (on ? 1 : 0))
+		if (on && scWebdav.length === 0) {
+			root.scLoginOpen = ""
+			scLoginBegin("webdav")
 		}
 	}
 	// The playlists are one level down; open them so a source never looks empty.
@@ -5440,11 +5529,21 @@ USB_PREPARING_BANNER = """
 		}
 """
 
+# One field of a WebDAV server typed on the deck: Engine's TextInputDialog, as Track
+# Info's metadata edit uses it. A step closed without Done (Cancel) ends the entry.
+WEBDAV_INPUT = """	readonly property Component scWebdavInput: ScMsg.TextInputDialog {
+		property bool scDone: false
+		onDone: text => { scDone = true; root.scWebdavNext(text) }
+		Component.onCompleted: root.scWebdavField(field)
+		Component.onDestruction: if (!scDone) root.scWebdavStop()
+	}
+"""
+
 LOGIN_DIALOG = """
 		Rectangle {
 			anchors.fill: parent
 			z: 1000000
-			visible: root.scLogin !== ""
+			visible: root.scLogin !== "" && !root.scWebdavTyping // the stock text input of Engine opens below this panel
 			color: "#e0000000"
 			readonly property var service: root.scServices.find(s => s.id === root.scLogin)
 			MouseArea { anchors.fill: parent }
@@ -5501,10 +5600,12 @@ LOGIN_DIALOG = """
 				Text {
 					x: 620; y: 240
 					width: 380
+					visible: root.scLogin !== "webdav" || root.scWebdav.length === 0
 					wrapMode: Text.WordWrap
 					color: Style.font02Color
 					font: Style.fontH1
 					text: {
+						if (root.scLogin === "webdav" && root.scWebdavError) return root.scWebdavError
 						if (root.scLoginStatus === "error") return root.scT("Couldn't load the login code. Tap the code to retry.")
 						if (root.scLoginStatus === "expired") return root.scT("The QR code expired.")
 						if (root.scLoginStatus === "scanned") return root.scT("Confirm on your phone")
@@ -5516,6 +5617,7 @@ LOGIN_DIALOG = """
 					x: 620; y: 520
 					width: 380; height: 80
 					radius: 16
+					visible: root.scLogin !== "webdav"
 					color: closeArea.pressed ? Style.focus02Color : Style.surface03Color
 					Text {
 						anchors.centerIn: parent
@@ -5527,6 +5629,104 @@ LOGIN_DIALOG = """
 						id: closeArea
 						anchors.fill: parent
 						onClicked: { root.scLogin = ""; root.scLoginOpen = "" }
+					}
+				}
+				// WebDAV: the servers (tap one to edit it on the deck), adding one here, done.
+				Text {
+					x: 620; y: 240
+					width: 380
+					visible: root.scLogin === "webdav" && root.scWebdav.length > 0
+					wrapMode: Text.WordWrap
+					maximumLineCount: 2
+					elide: Text.ElideRight
+					color: Style.font02Color
+					font: Style.fontH2
+					text: root.scWebdavError || root.scT("Scan with your phone camera.")
+				}
+				ListView {
+					x: 620; y: 310
+					width: 380; height: 196
+					visible: root.scLogin === "webdav"
+					clip: true
+					spacing: 8
+					model: root.scWebdav
+					delegate: Rectangle {
+						id: scServer
+						width: 380; height: 60
+						radius: 12
+						property bool armed: false
+						color: editArea.pressed ? Style.focus02Color : Style.surface03Color
+						Text {
+							x: 16
+							width: 380 - 16 - 150
+							anchors.verticalCenter: parent.verticalCenter
+							elide: Text.ElideRight
+							text: modelData.name
+							color: Style.font02Color
+							font: Style.fontH2
+						}
+						MouseArea {
+							id: editArea
+							anchors { left: parent.left; top: parent.top; bottom: parent.bottom; right: removeArea.left }
+							onClicked: root.scWebdavEdit(modelData)
+						}
+						MouseArea {
+							id: removeArea
+							anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
+							width: 150
+							onClicked: {
+								if (scServer.armed) root.scWebdavSave({action: "remove", id: modelData.id})
+								else scServer.armed = true
+							}
+							Text {
+								anchors.centerIn: parent
+								width: 140
+								horizontalAlignment: Text.AlignHCenter
+								wrapMode: Text.WordWrap
+								text: root.scT(scServer.armed ? "Tap again to remove" : "Remove")
+								color: Style.font02Color
+								font: Style.fontH3
+							}
+						}
+					}
+				}
+				Rectangle {
+					x: 620; y: 520
+					width: 182; height: 80
+					radius: 16
+					visible: root.scLogin === "webdav" && !!root.scWebdavInput
+					color: addArea.pressed ? Style.focus02Color : Style.surface03Color
+					Text {
+						anchors.centerIn: parent
+						width: 170
+						horizontalAlignment: Text.AlignHCenter
+						wrapMode: Text.WordWrap
+						text: root.scT("Add on this deck")
+						color: Style.font02Color
+						font: Style.fontH2
+					}
+					MouseArea {
+						id: addArea
+						anchors.fill: parent
+						onClicked: root.scWebdavEdit(null)
+					}
+				}
+				Rectangle {
+					x: 818; y: 520
+					width: 182; height: 80
+					radius: 16
+					visible: root.scLogin === "webdav"
+					color: doneArea.pressed ? Style.focus02Color : Style.surface03Color
+					Text {
+						anchors.centerIn: parent
+						text: root.scT("Done")
+						color: Style.font02Color
+						font: Style.fontH1
+					}
+					MouseArea {
+						id: doneArea
+						anchors.fill: parent
+						onClicked: { root.scWebdavError = ""; root.scLoginDone() }
 					}
 				}
 			}
@@ -5756,7 +5956,7 @@ SOURCE_FOOTER = """
 					onClicked: { root.scLoginOpen = ""; root.scLoginBegin(modelData.id) }
 					Text {
 						anchors.centerIn: parent
-						text: root.scT(root.scLoggedIn.indexOf(modelData.id) >= 0 ? "Switch account" : "Scan to log in")
+						text: root.scT(modelData.id === "webdav" ? "Servers" : root.scLoggedIn.indexOf(modelData.id) >= 0 ? "Switch account" : "Scan to log in")
 						color: Style.font02Color
 						font: Style.fontH3
 					}
@@ -5837,7 +6037,7 @@ BLUETOOTH_SELECT = [
 
 STREAM_SWITCHES = """
 	Repeater {
-		model: root.scServices.filter(s => s.id !== "rekordbox").filter(s => s.id !== "nas") // libraries, not services to switch
+		model: root.scServices.filter(s => s.id !== "rekordbox").filter(s => s.id !== "nas").filter(s => s.id !== "webdav") // libraries, not services to switch
 		SwitchEntry {
 			text: modelData.name
 			visible: !root.scOff("gateway")
@@ -5846,6 +6046,32 @@ STREAM_SWITCHES = """
 			checked: root.scSources.indexOf(modelData.id) >= 0
 			onClicked: root.scSetSource(modelData.id, !(root.scSources.indexOf(modelData.id) >= 0))
 		}
+	}
+	// The libraries: NAS (an SMB share set up in the console; the row turns it on and off) and WebDAV.
+	SwitchEntry {
+		text: "NAS"
+		objectName: "EngineX_NASSwitch"
+		visible: !root.scOff("gateway") && root.scNasSetUp
+		icon.source: root.scIcon("nas")
+		icon.useOriginal: true
+		checkedExternally: root.scSources.indexOf("nas") >= 0
+		onClicked: root.scCall("nas=" + (root.scSources.indexOf("nas") >= 0 ? 0 : 1))
+	}
+	SwitchEntry {
+		text: "WebDAV"
+		objectName: "EngineX_WebDAVSwitch"
+		visible: !root.scOff("gateway")
+		icon.source: root.scIcon("webdav")
+		icon.useOriginal: true
+		checkedExternally: root.scSources.indexOf("webdav") >= 0
+		onClicked: root.scSwitchWebdav(!(root.scSources.indexOf("webdav") >= 0))
+	}
+	PrefsButtonEntry {
+		text: "WebDAV Servers"
+		objectName: "EngineX_WebDAVServers"
+		buttonText: "Edit"
+		visible: !root.scOff("gateway") && root.scSources.indexOf("webdav") >= 0
+		onClicked: { root.scLoginOpen = ""; root.scLoginBegin("webdav") }
 	}
 """
 
@@ -7943,7 +8169,8 @@ def edits(dev: bool):
                      .replace("@STOCK_FADER_REVERSE@", "true" if v53() else "false")
                      .replace("@TIDAL_SELECT@", TIDAL_SELECT_530 if v53() else "")
                      .replace("@TIDAL_PAIRING@", TIDAL_PAIRING_530 if v53() else "")
-                     .replace("@TIDAL_LOGIN_PENDING@", "\tproperty bool scTidalLoginPending: false" if v53() else ""))
+                     .replace("@TIDAL_LOGIN_PENDING@", "\tproperty bool scTidalLoginPending: false" if v53() else "")
+                     .replace("@WEBDAV_INPUT@", WEBDAV_INPUT if v53() else "\treadonly property Component scWebdavInput: null"))
     services = (services_main + FX_CONTROLLER + (SETTINGS_COPY_MAIN if v53() else "")).replace("@ICONS@", "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons") + (SMART_SYNC_MAIN if v53() else "")
     out = PatchDict({
         # The file name shadows the native SoundSwitch context object.
@@ -7981,6 +8208,9 @@ def edits(dev: bool):
         ROOT + "Items/MessageBoxes/UnsupportedStorageDeviceDetectedMessageBox.qml": [(
             "function onUnsupportedStorageDeviceDetected(name) {\n", "function onUnsupportedStorageDeviceDetected(name) {\n			return\n")],
         ROOT + "EmbeddedMain.qml": [
+            # Engine's own text input (Items/MessageBoxes/TextInputDialog.qml) for WebDAV
+            # servers typed on the deck; qualified, so no stock name changes meaning.
+            *([('import "Items/Base"\n', 'import "Items/Base"\nimport "Items/MessageBoxes" as ScMsg\n')] if v53() else []),
             # The actual main view has finished loading and the stock splash has
             # disappeared. Do not equate resource registration with UI readiness.
             ('objectName: "SplashScreenLoader"', 'objectName: "SplashScreenLoader"' + BOOT_READY),
