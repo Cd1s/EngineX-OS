@@ -271,7 +271,7 @@ def oa_cpu_ticks(side: str) -> int:
             "  name=$(cat \"$f\" 2>/dev/null || true); "
             "  case \"$name\" in OfflineAnalyzer*) "
             "    st=$(cat \"${f%/comm}/stat\" 2>/dev/null || true); "
-            "    rest=${st#*) }; "
+            "    rest=${st##*) }; "
             "    set -- $rest; "
             "    tot=$((tot + ${12:-0} + ${13:-0})); "
             "  ;; esac; "
@@ -790,24 +790,25 @@ def main():
         select_source("B", "STOCK_USB", min_rows=1, must_contain="Stock Track")
         oa_b0 = oa_cpu_ticks("B")
         lan0 = count_peer_reqs(lan_log)
+        t5_0 = now_ms()
         t_ld, t_an, st = load_b_row("Stock Track", "stock-track.wav")
-        time.sleep(1.5)
+        row5 = wait_for(lambda: (r := read_mdb_row(stock_mdb, "stock-track.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.15, label="Case 5 stock OA commit")
+        t_db5 = now_ms() - t5_0
         oa_b_d = oa_cpu_ticks("B") - oa_b0
         lan_d = count_peer_reqs(lan_log) - lan0
-        row5 = read_mdb_row(stock_mdb, "stock-track.wav")
         rec5 = {
             "case": "5. Stock Engine stick",
             "b_oa_ticks": oa_b_d,
             "lan_reqs": lan_d,
             "load_ms": t_ld,
-            "analyzed_ms": t_an,
+            "analyzed_ms": max(t_an, t_db5),
             "b0_ms": row5["beat"]["b0_ms"] if row5 and row5["beat"] else None,
             "n_def": row5["beat"]["n_def"] if row5 and row5["beat"] else 0,
             "analyzed_db": row5["analyzed"] if row5 else 0,
         }
         results.append(rec5)
         print("CASE 5:", json.dumps(rec5), flush=True)
-        assert lan_d == 0 and row5["analyzed"] == 1 and row5["beat"]["n_def"] <= 4, f"Case 5 failed: {rec5}"
+        assert lan_d == 0 and row5["analyzed"] == 1 and row5["beat"]["n_def"] <= 4 and oa_b_d > 0, f"Case 5 failed: {rec5}"
 
         # Switch back to RB_ONDEMAND for Cases 6 & 7
         select_source("B", "RB_ONDEMAND", min_rows=7, must_contain="RB Case6")
@@ -818,17 +819,18 @@ def main():
         restart_stream_sync("B")
         oa_b0 = oa_cpu_ticks("B")
         lan0 = count_peer_reqs(lan_log)
+        t6_0 = now_ms()
         t_ld, t_an, st = load_b_row("RB Case6", "case6-hang.wav")
-        time.sleep(1.5)
+        row6 = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case6-hang.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.15, label="Case 6 fallback OA commit")
+        t_db6 = now_ms() - t6_0
         oa_b_d = oa_cpu_ticks("B") - oa_b0
         lan_d = count_peer_reqs(lan_log) - lan0
-        row6 = read_mdb_row(rb_mdb, "case6-hang.wav")
         rec6 = {
             "case": "6. A not answering (budget timeout)",
             "b_oa_ticks": oa_b_d,
             "lan_reqs": lan_d,
             "load_ms": t_ld,
-            "analyzed_ms": t_an,
+            "analyzed_ms": max(t_an, t_db6),
             "b0_ms": row6["beat"]["b0_ms"] if row6 and row6["beat"] else None,
             "n_def": row6["beat"]["n_def"] if row6 and row6["beat"] else 0,
             "analyzed_db": row6["analyzed"] if row6 else 0,
@@ -836,31 +838,33 @@ def main():
         }
         results.append(rec6)
         print("CASE 6:", json.dumps(rec6), flush=True)
-        assert lan_d >= 1 and row6["analyzed"] == 1 and row6["beat"]["n_def"] <= 4 and not rec6["filled_jsonl"], f"Case 6 failed: {rec6}"
+        assert lan_d >= 1 and row6["analyzed"] == 1 and row6["beat"]["n_def"] <= 4 and oa_b_d > 0 and not rec6["filled_jsonl"], f"Case 6 failed: {rec6}"
         stub_proc.terminate()
         stub_proc.wait(timeout=3)
         stub_proc = None
 
-        # CASE 7: Older/non-EngineX peer (plain 404 without X-RB-Status -> peer_unsupported cached -> 2nd load 0 LAN)
+        # CASE 7: Older/non-EngineX peer (405 without X-RB-Status -> peer_unsupported cached -> 2nd load 0 LAN)
         old_log = twin.WORK / "stub-old.log"
         stub_proc = start_stub_http_in_a("older404", old_log)
         restart_stream_sync("B")
         oa_b0 = oa_cpu_ticks("B")
         lan0 = count_peer_reqs(lan_log)
+        t7a_0 = now_ms()
         t_ld7a, t_an7a, _ = load_b_row("RB Case7a", "case7a-older1.wav")
-        time.sleep(1.2)
+        row7a = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case7a-older1.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.15, label="Case 7a fallback OA commit")
+        t_db7a = now_ms() - t7a_0
         lan_d7a = count_peer_reqs(lan_log) - lan0
         oa_b_d7a = oa_cpu_ticks("B") - oa_b0
-        row7a = read_mdb_row(rb_mdb, "case7a-older1.wav")
 
         # Second load on the SAME older peer must make 0 LAN requests (hook + Go cached peer_unsupported!)
         lan1 = count_peer_reqs(lan_log)
         oa_b1 = oa_cpu_ticks("B")
+        t7b_0 = now_ms()
         t_ld7b, t_an7b, _ = load_b_row("RB Case7b", "case7b-older2.wav")
-        time.sleep(1.2)
+        row7b = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case7b-older2.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.15, label="Case 7b fallback OA commit")
+        t_db7b = now_ms() - t7b_0
         lan_d7b = count_peer_reqs(lan_log) - lan1
         oa_b_d7b = oa_cpu_ticks("B") - oa_b1
-        row7b = read_mdb_row(rb_mdb, "case7b-older2.wav")
         rec7 = {
             "case": "7. Older/non-EngineX peer (1st + cached 2nd)",
             "b_oa_ticks_1": oa_b_d7a,
@@ -868,14 +872,16 @@ def main():
             "lan_reqs_1": lan_d7a,
             "lan_reqs_2": lan_d7b,
             "load_ms_1": t_ld7a,
-            "analyzed_ms_1": t_an7a,
+            "analyzed_ms_1": max(t_an7a, t_db7a),
             "load_ms_2": t_ld7b,
-            "analyzed_ms_2": t_an7b,
+            "analyzed_ms_2": max(t_an7b, t_db7b),
+            "b0_ms": (row7a["beat"]["b0_ms"], row7b["beat"]["b0_ms"]),
+            "n_def": (row7a["beat"]["n_def"], row7b["beat"]["n_def"]),
             "analyzed_db": (row7a["analyzed"], row7b["analyzed"]),
         }
         results.append(rec7)
         print("CASE 7:", json.dumps(rec7), flush=True)
-        assert lan_d7a == 1 and lan_d7b == 0 and row7a["analyzed"] == 1 and row7b["analyzed"] == 1, f"Case 7 failed: {rec7}"
+        assert lan_d7a == 1 and lan_d7b == 0 and row7a["analyzed"] == 1 and row7b["analyzed"] == 1 and oa_b_d7a > 0 and oa_b_d7b > 0, f"Case 7 failed: {rec7}"
 
         print("\n=== LINK ON-DEMAND 7-CASE MATRIX: PASS ===", flush=True)
         print(json.dumps(results, indent=2), flush=True)
@@ -884,10 +890,13 @@ def main():
         if eng_b.is_file():
             rblines = [
                 ln for ln in eng_b.read_text(errors="replace").splitlines()
-                if "rekordbox stage" in ln and "skipped (gui thread)" not in ln and "skipped (browse thread)" not in ln
+                if "rekordbox stage" in ln
+                and "skipped (gui thread)" not in ln
+                and "skipped (browse thread)" not in ln
+                and "skipped (row has analysis)" not in ln
             ]
             print("HOOK B LOGS (rekordbox stage key events):", flush=True)
-            for ln in rblines[-40:]:
+            for ln in rblines:
                 print(" ", ln, flush=True)
         if stub_proc is not None:
             stub_proc.terminate()
