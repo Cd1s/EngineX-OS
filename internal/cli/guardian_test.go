@@ -660,3 +660,71 @@ func TestGuardianS11RecoversMissingArtworkFromEmbeddedMP3(t *testing.T) {
 		t.Fatalf("untagged track albumArtId modified: %v err=%v", t4Art, err)
 	}
 }
+
+func TestGuardianDataOnlyLocalizesOfflineDropboxTracks(t *testing.T) {
+	mount := mountFixture(t)
+	dbPath := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+	audio := filepath.Join(mount, "Music", "offline-dropbox.mp3")
+	if err := os.MkdirAll(filepath.Dir(audio), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(audio, []byte("audio-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes,streamingSource,uri,streamingFlags,isAnalyzed) VALUES
+		(2,'../Music/offline-dropbox.mp3','offline-dropbox.mp3',11,'Dropbox','streaming://Dropbox/Track/offline-dropbox.mp3',5,1),
+		(3,'../Music/cloud-only.mp3','cloud-only.mp3',11,'Dropbox','streaming://Dropbox/Track/cloud-only.mp3',5,1),
+		(4,'../Music/offline-dropbox.mp3.tidal','offline-dropbox.mp3.tidal',11,'TIDAL','streaming://TIDAL/Track/99',1,1)`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// --status stays strictly read-only.
+	var out, errOut bytes.Buffer
+	if code := Guardian([]string{"--status", "--heal-mount", mount}, &out, &errOut); code != 0 {
+		t.Fatalf("status code=%d out=%s err=%s", code, &out, &errOut)
+	}
+	var results []guardianResult
+	if err := json.Unmarshal(out.Bytes(), &results); err != nil || len(results) != 1 || results[0].DropboxLocalized != 0 {
+		t.Fatalf("status unexpectedly localized: %s err=%v", &out, err)
+	}
+
+	// --data-only localizes only the local-on-SD Dropbox track.
+	out.Reset()
+	errOut.Reset()
+	if code := Guardian([]string{"--heal-mount", mount, "--data-only"}, &out, &errOut); code != 0 {
+		t.Fatalf("data-only code=%d out=%s err=%s", code, &out, &errOut)
+	}
+	if err := json.Unmarshal(out.Bytes(), &results); err != nil || len(results) != 1 || !results[0].Healthy || results[0].DropboxLocalized != 1 {
+		t.Fatalf("data-only result=%s err=%v", &out, err)
+	}
+
+	check, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var src2, uri2 sql.NullString
+	var flags2 int
+	if err := check.QueryRow(`SELECT streamingSource, uri, COALESCE(streamingFlags,0) FROM Track WHERE id=2`).Scan(&src2, &uri2, &flags2); err != nil {
+		t.Fatal(err)
+	}
+	if src2.Valid || uri2.Valid || flags2 != 0 {
+		t.Fatalf("local dropbox track not cleared: src=%+v uri=%+v flags=%d", src2, uri2, flags2)
+	}
+	var src3, src4 string
+	if err := check.QueryRow(`SELECT COALESCE(streamingSource,'') FROM Track WHERE id=3`).Scan(&src3); err != nil {
+		t.Fatal(err)
+	}
+	if err := check.QueryRow(`SELECT COALESCE(streamingSource,'') FROM Track WHERE id=4`).Scan(&src4); err != nil {
+		t.Fatal(err)
+	}
+	if src3 != "Dropbox" || src4 != "TIDAL" {
+		t.Fatalf("protected tracks altered: id3=%q id4=%q", src3, src4)
+	}
+}
