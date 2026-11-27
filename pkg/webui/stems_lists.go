@@ -77,7 +77,7 @@ func (s *Server) loadStemmed() map[string][]stemmedTrack {
 	}
 	for scope, list := range all {
 		all[scope] = slices.DeleteFunc(list, func(e stemmedTrack) bool {
-			return isNASProvider(e.Track.Provider) && (e.NASRoot == "" || e.NASRoot != s.stemsRoot)
+			return isNASTrack(e.Track.Provider, e.Track.ID) && (e.NASRoot == "" || e.NASRoot != s.stemsRoot)
 		})
 	}
 	return all
@@ -87,7 +87,7 @@ func (s *Server) loadStemmed() map[string][]stemmedTrack {
 func dropNASStems(all map[string][]stemmedTrack) bool {
 	changed := false
 	for scope, list := range all {
-		kept := slices.DeleteFunc(slices.Clone(list), func(e stemmedTrack) bool { return isNASProvider(e.Track.Provider) })
+		kept := slices.DeleteFunc(slices.Clone(list), func(e stemmedTrack) bool { return isNASTrack(e.Track.Provider, e.Track.ID) })
 		if len(kept) != len(list) {
 			all[scope], changed = kept, true
 		}
@@ -139,14 +139,14 @@ func (s *Server) addStemmed(scope string, t stemmedTrack) error {
 func (s *Server) addStemmedAt(scope string, t stemmedTrack, gen uint64) error {
 	s.stemsMu.Lock()
 	defer s.stemsMu.Unlock()
-	if isNASProvider(t.Track.Provider) && gen != s.jobs.NASGen() {
+	if isNASTrack(t.Track.Provider, t.Track.ID) && gen != s.jobs.NASGen() {
 		return errNASChanged
 	}
 	all, err := s.readStemmed()
 	if err != nil { // never rewrite the file from a partial read
 		return errors.New("the Stems lists cannot be read")
 	}
-	if isNASProvider(t.Track.Provider) {
+	if isNASTrack(t.Track.Provider, t.Track.ID) {
 		t.NASRoot = s.stemsRoot
 	}
 	list := slices.DeleteFunc(all[scope], func(e stemmedTrack) bool { return sameTrack(e.Track, t.Track) })
@@ -172,6 +172,31 @@ func (s *Server) resetNASStemsLocked(root string) {
 	}
 	if err := saveState(s.stemsFile(), stripStemsAuth(all)); err != nil {
 		log.Printf("webui: NAS changed: Stems lists not saved; the old NAS entries stay unused (%T)", err)
+	}
+}
+
+// dropWebDAVStemsLocked removes the Stems entries of WebDAV servers that are gone
+// (removed, or moved to another address). A file that does not fully decode is
+// left as it is. Caller holds stemsMu.
+func (s *Server) dropWebDAVStemsLocked(keep map[string]bool) {
+	all, err := s.readStemmed()
+	if err != nil {
+		return
+	}
+	changed := false
+	for scope, list := range all {
+		kept := slices.DeleteFunc(slices.Clone(list), func(e stemmedTrack) bool {
+			server, ok := webdavRowServer(e.Track)
+			return ok && !keep[server]
+		})
+		if len(kept) != len(list) {
+			all[scope], changed = kept, true
+		}
+	}
+	if changed {
+		if err := saveState(s.stemsFile(), stripStemsAuth(all)); err != nil {
+			log.Printf("webui: WebDAV servers changed: Stems lists not saved (%T)", err)
+		}
 	}
 }
 
@@ -395,7 +420,7 @@ func (s *Server) stemmedPath(t providers.Track) string {
 // after it bumps the generation: a NAS row of an older one gets nothing (#335).
 func (s *Server) stemmedPathAt(t providers.Track, gen uint64) string {
 	s.stemsMu.Lock()
-	if isNASProvider(t.Provider) && gen != s.jobs.NASGen() {
+	if isNASTrack(t.Provider, t.ID) && gen != s.jobs.NASGen() {
 		s.stemsMu.Unlock()
 		return ""
 	}
@@ -437,7 +462,7 @@ func (g *tidalGateway) stemsListTracks(w http.ResponseWriter, r *http.Request, s
 			continue
 		}
 		ref := trackRef{track: e.Track, session: e.Session, guest: e.Guest}
-		if isNASProvider(e.Track.Provider) {
+		if isNASTrack(e.Track.Provider, e.Track.ID) {
 			ref.listing = listing
 		}
 		items = append(items, g.refItems([]trackRef{ref})...)

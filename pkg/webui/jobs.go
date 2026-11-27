@@ -110,6 +110,7 @@ type Jobs struct {
 	spotify       func() *providers.Spotify
 	applemusic    func() *providers.AppleMusic
 	selfHosted    func() *providers.SelfHostedProvider
+	webdav        func(server string) *providers.SelfHostedProvider // a WebDAV source server, by its ID
 	bpm           *providers.BPMStore
 }
 type fetched struct {
@@ -325,8 +326,8 @@ func (j *Jobs) NASGen() uint64 {
 }
 
 func isNASKey(key string) bool {
-	p, _, ok := strings.Cut(key, ":")
-	return ok && isNASProvider(p)
+	p, id, ok := strings.Cut(key, ":")
+	return ok && isNASTrack(p, id)
 }
 
 // resetNAS forgets every NAS download, queue mark and index entry after the NAS
@@ -891,10 +892,7 @@ func (j *Jobs) addCover(ctx context.Context, t providers.Track, dl *deemixclient
 	}
 	address := t.CoverURL
 	if isNASProvider(t.Provider) { // a saved row's cover holds no credentials: the NAS's are added back (#335)
-		j.mu.Lock()
-		lookup := j.selfHosted
-		j.mu.Unlock()
-		if sh := lookupNAS(lookup); sh != nil {
+		if sh := j.selfHostedFor(t); sh != nil {
 			address = sh.AuthorizeURL(address)
 		}
 	}
@@ -1072,21 +1070,35 @@ func (j *Jobs) fromNetease(ctx context.Context, n *providers.Netease, t provider
 	return t, dl, nil
 }
 
+// selfHostedFor is the server a NAS or WebDAV track is on: a WebDAV source track
+// names its server; any other is the NAS slot's. nil when that server is gone,
+// disabled or switched off.
+func (j *Jobs) selfHostedFor(t providers.Track) *providers.SelfHostedProvider {
+	j.mu.Lock()
+	nas, webdav := j.selfHosted, j.webdav
+	j.mu.Unlock()
+	if server, ok := webdavRowServer(t); ok {
+		if webdav == nil {
+			return nil
+		}
+		return webdav(server)
+	}
+	return lookupNAS(nas)
+}
+
 func (j *Jobs) fromSelfHosted(ctx context.Context, t providers.Track) (*deemixclient.Download, error) {
 	if j.p.Deemix == nil {
 		return nil, errors.New("nas: download cache unavailable")
 	}
-	j.mu.Lock()
-	lookup := j.selfHosted
-	j.mu.Unlock()
-	var sh *providers.SelfHostedProvider
-	if lookup != nil {
-		sh = lookup()
-	}
+	sh := j.selfHostedFor(t)
 	if sh == nil {
 		return nil, fmt.Errorf("%s: NAS server is not enabled", t.Provider)
 	}
-	p, err := sh.DownloadTrack(ctx, t.ID, j.p.Deemix.DownloadDir)
+	ref := t.ID
+	if _, raw, ok := webdavSplit(t.ID); ok && t.Provider == webdavScope {
+		ref = raw // the path on that server
+	}
+	p, err := sh.DownloadTrack(ctx, ref, j.p.Deemix.DownloadDir)
 	if err != nil {
 		return nil, err
 	}

@@ -120,6 +120,7 @@ type Server struct {
 	stemsMu       sync.Mutex // streaming-stems.json
 	stemsRoot     string     // under stemsMu: the NAS root whose NAS Stems entries are served (#335)
 	stemsImportMu sync.Mutex // one streamed row at a time is named, recorded and swept
+	webdavState              // the WebDAV source's connections
 	rbxPresenceMu sync.Mutex
 	rbxPresence   map[string]*rbxPresence
 
@@ -313,6 +314,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /v1/enginex/nas", s.handleNASConfig)
 	s.mux.HandleFunc("POST /v1/enginex/nas", s.handleNASConfig)
 	s.mux.HandleFunc("POST /v1/enginex/nas/test", s.handleNASTest)
+	s.mux.HandleFunc("GET /v1/enginex/webdav", s.handleWebDAV)
+	s.mux.HandleFunc("POST /v1/enginex/webdav", s.handleWebDAV)
 	s.mux.HandleFunc("GET /api/mods", s.handleMods)
 	s.mux.HandleFunc("POST /api/mods", s.handleMods)
 	s.mux.HandleFunc("POST /api/mods/upload", s.handleModsUpload)
@@ -394,6 +397,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 		jobs.spotify = s.ownerSpotify
 		jobs.applemusic = func() *providers.AppleMusic { return s.appleMusic }
 		jobs.selfHosted = s.ownerSelfHosted
+		jobs.webdav = s.webdavLookup
 		jobs.nasRoot = s.stemsRoot
 		jobs.bpm = cfg.BPM
 		if jobs.p.Deemix != nil {

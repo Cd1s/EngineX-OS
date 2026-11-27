@@ -293,6 +293,16 @@ type uiSettings struct {
 	DeckClock          bool   `json:"deckClock,omitempty"`
 	ConsoleHTTPS       bool   `json:"consoleHttps"`
 	HTTPSPort          int    `json:"httpsPort,omitempty"`
+
+	// NASSetUp (status only): an SMB NAS is set up, so the NAS row in Settings ->
+	// Services has something to turn on or off.
+	NASSetUp bool `json:"nasSetUp,omitempty"`
+	// WebDAV (status only): the WebDAV source's servers, without passwords.
+	WebDAV []webdavView `json:"webdav,omitempty"`
+	// WebDAVSwitch is the WebDAV row in Settings -> Services once the DJ used it:
+	// "1" on, "0" off. Empty: WebDAV is on while a WebDAV server is set up (a
+	// released deck's carries over; an empty source is not put on every deck).
+	WebDAVSwitch string `json:"-"`
 }
 
 // uiFourDeckRoles are the decks a player plays in the 4-deck layout (#49/#160), RCA A then B.
@@ -572,6 +582,10 @@ func (s *Server) loadUI() uiSettings {
 			}
 		case "console_https":
 			v.ConsoleHTTPS = val == "1" || strings.EqualFold(val, "true")
+		case "webdav":
+			if val == "0" || val == "1" {
+				v.WebDAVSwitch = val
+			}
 		}
 	}
 	if saved { // services added since the file was written start enabled; ones turned off stay off
@@ -606,6 +620,11 @@ func parseUISources(val string) ([]string, error) {
 		}
 	}
 	for _, name := range strings.Split(val, ",") {
+		// rekordbox, NAS and WebDAV are in the status's list but are not switched
+		// here: the deck sends that list back when the DJ flips a service.
+		if name == rekordboxScope || name == nasScope || name == webdavScope {
+			continue
+		}
 		if name != "" && !slices.Contains(uiServices, name) {
 			return nil, errors.New("unknown source: " + name)
 		}
@@ -643,6 +662,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nknown=" + strings.Join(uiServices, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\nspotify_source=" + v.SpotifySource + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
 	if v.EngineLighting {
 		text += "engine_lighting=1\n"
+	}
+	if v.WebDAVSwitch != "" { // absent: on while a WebDAV server is set up
+		text += "webdav=" + v.WebDAVSwitch + "\n"
 	}
 	if v.FourDeckWaveform {
 		text += "four_deck_waveform=1\n"
@@ -886,6 +908,9 @@ func (s *Server) scopeLoggedIn(scope string) bool {
 	if scope == nasScope {
 		return s.nasAvailable()
 	}
+	if scope == webdavScope {
+		return len(s.webdavServers()) > 0
+	}
 	if scope == "deezer" && s.deezerARLReady() {
 		return true
 	}
@@ -968,6 +993,11 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	v := s.loadUI()
 	nasReady := s.nasAvailableLocked()
+	nf := s.loadNASFileLocked()
+	v.NASSetUp = nf.Protocol == "smb" && nf.URL != ""
+	v.WebDAV = webdavViews(nf)
+	webdavShown := webdavOn(v, nf)
+	webdavReady := webdavShown && slices.ContainsFunc(webdavEntries(nf), func(e webdavEntry) bool { return nasConfigReady(e.cfg) })
 	v.FXSelectorAvailable = s.fxSelectorAvailable()
 	v.ColorFXAvailable = s.colorFXAvailable()
 	// pioneer_fx is the channel knobs' style now; only a PX board without them drops it.
@@ -1007,6 +1037,12 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	if nasReady {
 		v.Sources = append(slices.Clone(v.Sources), nasScope)
 		v.LoggedIn = append(v.LoggedIn, nasScope)
+	}
+	if webdavShown {
+		v.Sources = append(slices.Clone(v.Sources), webdavScope)
+	}
+	if webdavReady {
+		v.LoggedIn = append(v.LoggedIn, webdavScope)
 	}
 	relay := s.relayStatusView()
 	v.RelayURL, v.DeemixPasswordSet = relay.RelayURL, relay.PasswordSet
@@ -1111,6 +1147,10 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Has("timezone") && len(q) == 1 {
 		s.timezoneUpdate(w, q.Get("timezone"))
+		return
+	}
+	if q.Has("nas") && len(q) == 1 {
+		s.nasSwitch(w, r, q.Get("nas"))
 		return
 	}
 	// The switch belongs to the deck: not from the LAN console API. Tunnels
@@ -1568,6 +1608,18 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.RemoteLoad = on == "1"
+	}
+	if q.Has("webdav") {
+		on := q.Get("webdav")
+		if on != "0" && on != "1" {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.WebDAVSwitch = on
+		if on == "0" && v.Scope == webdavScope {
+			v.Scope = ""
+		}
 	}
 	if q.Has("prolinkShare") {
 		on := q.Get("prolinkShare")

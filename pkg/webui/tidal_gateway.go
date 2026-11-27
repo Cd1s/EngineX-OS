@@ -373,7 +373,36 @@ func stripTrackAuth(t providers.Track) providers.Track {
 }
 
 func isNASTrackRef(ref trackRef) bool {
-	return isNASProvider(ref.track.Provider) || ref.session == nasScope
+	return isNASTrack(ref.track.Provider, ref.track.ID) || ref.session == nasScope
+}
+
+// dropWebDAV forgets the rows and lists of WebDAV servers that are gone (removed,
+// or moved to another address): such an ID answers 404 and is browsed again.
+func (g *tidalGateway) dropWebDAV(keep map[string]bool) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	changed := false
+	for id, ref := range g.tracks {
+		if server, ok := webdavRowServer(ref.track); ok && !keep[server] {
+			delete(g.ids, refKey(ref))
+			delete(g.tracks, id)
+			delete(g.trackSeen, id)
+			changed = true
+		}
+	}
+	for id, ref := range g.lists {
+		if server, _, ok := webdavSplit(ref.list.ID); ok && ref.provider == webdavScope && !keep[server] {
+			delete(g.lists, id)
+			delete(g.listSeen, id)
+			changed = true
+		}
+	}
+	g.mu.Unlock()
+	if changed {
+		g.saveTracks()
+	}
 }
 
 func isNASListRef(ref playlistRef) bool {
@@ -442,6 +471,8 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/enginex/nas", s.handleNASConfig)
 	g.mux.HandleFunc("POST /v1/enginex/nas", s.handleNASConfig)
 	g.mux.HandleFunc("POST /v1/enginex/nas/test", s.handleNASTest)
+	g.mux.HandleFunc("GET /v1/enginex/webdav", s.handleWebDAV)
+	g.mux.HandleFunc("POST /v1/enginex/webdav", s.handleWebDAV)
 	g.mux.HandleFunc("GET /v1/enginex/mods", s.handleMods)
 	g.mux.HandleFunc("POST /v1/enginex/mods", s.handleMods)
 	g.mux.HandleFunc("POST /v1/enginex/mods/upload", s.handleModsUpload)

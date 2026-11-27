@@ -53,6 +53,22 @@ var phoneText = map[string][4]string{
 	"howTo":           {"Show me how", "查看教程", "查看教學", "Ver cómo se hace"},
 	"privacy":         {"Everything you enter stays on this deck.", "填写的内容只保存在这台碟机上。", "填寫的內容只儲存在這台碟機上。", "Todo lo que introduces se queda en este deck."},
 	"open":            {"Connect %s", "连接 %s", "連接 %s", "Conectar %s"},
+	"wdIntro":         {"Add the WebDAV servers to browse on the deck. Each one is its own entry under WebDAV.", "添加要在碟机上浏览的 WebDAV 服务器，每个服务器在 WebDAV 下单独列出。", "新增要在碟機上瀏覽的 WebDAV 伺服器，每個伺服器在 WebDAV 下單獨列出。", "Añade los servidores WebDAV que quieres explorar en el deck. Cada uno aparece por separado en WebDAV."},
+	"wdName":          {"Name (optional)", "名称（可选）", "名稱（選填）", "Nombre (opcional)"},
+	"wdURL":           {"Address (https://host/folder)", "地址（https://主机/文件夹）", "位址（https://主機/資料夾）", "Dirección (https://servidor/carpeta)"},
+	"wdUser":          {"Username", "用户名", "使用者名稱", "Usuario"},
+	"wdPassword":      {"Password", "密码", "密碼", "Contraseña"},
+	"wdKeep":          {"Password (leave empty to keep it)", "密码（留空则不变）", "密碼（留空則不變）", "Contraseña (vacía para conservarla)"},
+	"wdAdd":           {"Add server", "添加服务器", "新增伺服器", "Añadir servidor"},
+	"wdSave":          {"Save", "保存", "儲存", "Guardar"},
+	"wdRemove":        {"Remove", "移除", "移除", "Eliminar"},
+	"wdSaved":         {"Saved", "已保存", "已儲存", "Guardado"},
+	"wdSavedHint":     {"Go back to the deck. The QR code closes by itself.", "回到碟机即可：二维码会自动关闭。", "回到碟機即可：QR Code 會自動關閉。", "Vuelve al deck. El código QR se cierra solo."},
+	"wdBadURL":        {"Enter the server address with http:// or https://", "请填写以 http:// 或 https:// 开头的服务器地址", "請填寫以 http:// 或 https:// 開頭的伺服器位址", "Escribe la dirección del servidor con http:// o https://"},
+	"wdDuplicate":     {"This server is already added", "这个服务器已经添加过", "這個伺服器已經新增過", "Este servidor ya está añadido"},
+	"wdFull":          {"No more servers can be added", "不能再添加更多服务器", "無法再新增更多伺服器", "No se pueden añadir más servidores"},
+	"wdGone":          {"This server is no longer in the list", "这个服务器已不在列表中", "這個伺服器已不在列表中", "Este servidor ya no está en la lista"},
+	"wdFailed":        {"Could not save", "未能保存", "未能儲存", "No se ha podido guardar"},
 	"badForm":         {"Please fill in one of the fields", "请至少填写一项", "請至少填寫一項", "Rellena al menos uno de los campos"},
 	"deezerFLAC":      {"Enter your Deezer ARL to recognise your account and playlists automatically and enable lossless FLAC downloads.", "填入您的 Deezer ARL 即可自动识别账号歌单并启用 FLAC 无损下载。", "填入您的 Deezer ARL 即可自動識別帳號歌單並啟用 FLAC 無損下載。", "Introduce tu ARL de Deezer para reconocer tu cuenta y tus listas automáticamente y activar las descargas FLAC sin pérdidas."},
 	"deezerARL":       {"Log in with your ARL (recommended)", "用 ARL 登录（推荐）", "用 ARL 登入（推薦）", "Inicia sesión con tu ARL (recomendado)"},
@@ -141,7 +157,7 @@ func phonePage(w http.ResponseWriter, r *http.Request, body string) {
 		`body{background:#111;color:#eee;font:17px/1.5 system-ui,sans-serif;padding:16px 20px 40px;max-width:560px;margin:auto}` +
 		`nav{text-align:right;font-size:14px;color:#888}nav a{color:#9cf}` +
 		`input,textarea,select,button,a.b{display:block;width:100%;box-sizing:border-box;font:inherit;padding:14px;margin:10px 0;border-radius:10px;border:1px solid #444;background:#1c1c1c;color:#eee;text-align:center;text-decoration:none}` +
-		`button,a.b{background:#2a6;border:0;color:#fff;font-weight:600}a.b.alt{background:#333}` +
+		`button,a.b{background:#2a6;border:0;color:#fff;font-weight:600}a.b.alt,button.alt{background:#333}` +
 		`.note{background:#1d2a3a;border-left:4px solid #4af;padding:10px 12px;border-radius:6px}` +
 		`details{background:#1a1a1a;border-radius:10px;padding:8px 12px;margin:12px 0}summary{cursor:pointer;color:#9cf}` +
 		`.helper-status{border-left:4px solid #ca5;background:#292416;padding:12px;border-radius:6px}.helper-status.ready{border-color:#2a6;background:#152b20}.helper-qr{display:block;max-width:100%;width:240px;margin:12px auto}` +
@@ -168,7 +184,7 @@ func phoneMessage(w http.ResponseWriter, r *http.Request, flow *loginFlow, title
 }
 
 func serviceName(provider string) string {
-	return map[string]string{"deezer": "Deezer", "soundcloud": "SoundCloud", "beatport": "Beatport", "spotify": "Spotify", "applemusic": "Apple Music"}[provider]
+	return map[string]string{"deezer": "Deezer", "soundcloud": "SoundCloud", "beatport": "Beatport", "spotify": "Spotify", "applemusic": "Apple Music", webdavScope: "WebDAV"}[provider]
 }
 
 func phoneHeading(lang int, provider string) string {
@@ -201,6 +217,31 @@ func beatportPhonePage(lang int, action string) string {
 	return phoneHeading(lang, "beatport") + `<p>` + tr(lang, "bpIntro") + `</p>` +
 		`<form method="post" action="` + a + `"><input name="user" placeholder="` + tr(lang, "bpUser") + `" autocomplete="username" autocapitalize="off"><input name="password" type="password" placeholder="` + tr(lang, "bpPassword") + `" autocomplete="current-password"><button>` + tr(lang, "connect") + `</button>` +
 		`<details><summary>` + tr(lang, "bpAdvanced") + `</summary><input name="token" placeholder="` + tr(lang, "bpTokenPh") + `" autocomplete="off" autocapitalize="off"></details></form>`
+}
+
+// webdavPhonePage lists the WebDAV servers to edit or remove and has the form to
+// add one. A saved password is never sent to the page: empty keeps it.
+func webdavPhonePage(lang int, action string, servers []webdavView) string {
+	a := html.EscapeString(action)
+	hidden := func(name, value string) string {
+		return `<input type="hidden" name="` + name + `" value="` + html.EscapeString(value) + `">`
+	}
+	fields := func(v webdavView, password string) string {
+		return `<input name="name" value="` + html.EscapeString(v.Name) + `" placeholder="` + tr(lang, "wdName") + `" autocomplete="off">` +
+			`<input name="url" value="` + html.EscapeString(v.URL) + `" placeholder="` + tr(lang, "wdURL") + `" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false">` +
+			`<input name="user" value="` + html.EscapeString(v.Username) + `" placeholder="` + tr(lang, "wdUser") + `" autocomplete="off" autocapitalize="off">` +
+			`<input name="password" type="password" placeholder="` + tr(lang, password) + `" autocomplete="new-password">`
+	}
+	var b strings.Builder
+	b.WriteString(phoneHeading(lang, webdavScope) + `<p>` + tr(lang, "wdIntro") + `</p>`)
+	for _, v := range servers {
+		b.WriteString(`<details><summary>` + html.EscapeString(v.Name) + `</summary>` +
+			`<form method="post" action="` + a + `">` + hidden("action", "edit") + hidden("id", v.ID) + fields(v, "wdKeep") + `<button>` + tr(lang, "wdSave") + `</button></form>` +
+			`<form method="post" action="` + a + `">` + hidden("action", "remove") + hidden("id", v.ID) + `<button class="alt">` + tr(lang, "wdRemove") + `</button></form></details>`)
+	}
+	b.WriteString(`<h3>` + tr(lang, "wdAdd") + `</h3><form method="post" action="` + a + `">` + hidden("action", "add") + fields(webdavView{}, "wdPassword") + `<button>` + tr(lang, "wdAdd") + `</button></form>` +
+		`<small>` + tr(lang, "privacy") + `</small>`)
+	return b.String()
 }
 
 // amBookmarklet runs on music.apple.com and copies the signed-in media-user-token.

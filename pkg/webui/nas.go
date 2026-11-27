@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -125,26 +126,10 @@ func (s *Server) nasConfigPath() string {
 	return filepath.Join(s.uiDir(), "nas.json")
 }
 
+// loadNASConfigLocked is nas.json's NAS slot (the WebDAV list beside it is the
+// WebDAV source's, see webdav_source.go).
 func (s *Server) loadNASConfigLocked() providers.NASConfig {
-	var cfg providers.NASConfig
-	if b, err := os.ReadFile(s.nasConfigPath()); err == nil {
-		_ = json.Unmarshal(b, &cfg)
-	}
-	// Older configs could keep Basic Auth in the URL. Preserve that login without
-	// returning its credentials in a URL or overwriting explicit auth fields.
-	if u, err := url.Parse(strings.TrimSpace(cfg.URL)); err == nil && u.User != nil {
-		if cfg.Username == "" {
-			cfg.Username = u.User.Username()
-		}
-		if cfg.Password == "" {
-			if pass, ok := u.User.Password(); ok && pass != "" {
-				cfg.Password = pass
-			}
-		}
-		u.User = nil
-		cfg.URL = u.String()
-	}
-	return cfg
+	return s.loadNASFileLocked().NASConfig
 }
 
 func (s *Server) loadNASConfig() providers.NASConfig {
@@ -181,10 +166,13 @@ func (s *Server) handleNASConfig(w http.ResponseWriter, r *http.Request) {
 		s.uiMu.Lock()
 		defer s.uiMu.Unlock()
 		defer s.resetNASIfMoved(s.loadNASConfigLocked())
-		if err := os.Remove(s.nasConfigPath()); err != nil && !os.IsNotExist(err) {
+		f := s.loadNASFileLocked() // the WebDAV list stays
+		f.NASConfig, f.Name = providers.NASConfig{}, ""
+		if err := s.saveNASFileLocked(f); err != nil {
 			fail(w, http.StatusInternalServerError, errors.New("could not remove NAS configuration"))
 			return
 		}
+		s.forgetWebDAV(webdavEntries(f))
 		respond(w, toNASConfigView(providers.NASConfig{}))
 	default:
 		fail(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -251,10 +239,26 @@ func (s *Server) handleNASConfigPost(w http.ResponseWriter, r *http.Request) {
 		newCfg.Token = in.Token
 	}
 
-	if err := providers.SaveJSON(s.nasConfigPath(), newCfg); err != nil {
+	// The slot is one network source, as before; the WebDAV list beside it stays. A
+	// WebDAV server the slot held moves to that list when another kind of source
+	// takes the slot, and a WebDAV server already in the list is not added twice.
+	f := s.loadNASFileLocked()
+	if proto == webdavScope && slices.ContainsFunc(f.WebDAV, func(v webdavServer) bool { return webdavRoot(v.URL) == webdavRoot(targetURL) }) {
+		fail(w, http.StatusConflict, errWebDAVDuplicate)
+		return
+	}
+	if proto != webdavScope && f.Protocol == webdavScope && f.URL != "" && !slices.ContainsFunc(f.WebDAV, func(v webdavServer) bool { return webdavRoot(v.URL) == webdavRoot(f.URL) }) {
+		f.WebDAV = append([]webdavServer{{Name: f.Name, URL: f.URL, Username: f.Username, Password: f.Password, Enabled: f.Enabled}}, f.WebDAV...)
+	}
+	if nasTarget(newCfg) != nasTarget(f.NASConfig) {
+		f.Name = ""
+	}
+	f.NASConfig = newCfg
+	if err := s.saveNASFileLocked(f); err != nil {
 		fail(w, http.StatusInternalServerError, errors.New("could not save nas configuration"))
 		return
 	}
+	s.forgetWebDAV(webdavEntries(f))
 
 	respond(w, toNASConfigView(newCfg))
 }
