@@ -5,6 +5,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,7 +26,9 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 func setupLinkOnDemandStick(t *testing.T, volName string, trackCount int) (mediaRoot, stick, libUUID string, tr *rbstate.Track, importKey int64) {
@@ -1352,5 +1357,372 @@ func TestParseNetDBPathAndProcNetTCP(t *testing.T) {
 	gotARP := parseProcNetARPLANPeers(arp, map[string]bool{"10.99.0.2": true})
 	if len(gotARP) != 1 || gotARP[0] != "10.99.0.1" {
 		t.Fatalf("parseProcNetARPLANPeers = %v, want [10.99.0.1]", gotARP)
+	}
+}
+
+func buildTestStockOABeats(t *testing.T, sr, samples, beat0Sample, bpm float64, totalBeats int64, adjShift float64) []byte {
+	t.Helper()
+	spb := sr * 60.0 / bpm
+	p0 := beat0Sample - 4*spb
+	b0 := int64(-4)
+	b1 := totalBeats
+	p1 := beat0Sample + float64(b1)*spb
+	next0 := uint32(b1 - b0)
+	var b bytes.Buffer
+	_ = binary.Write(&b, binary.BigEndian, sr)
+	_ = binary.Write(&b, binary.BigEndian, samples)
+	b.WriteByte(1)
+	for _, shift := range []float64{0, adjShift} {
+		_ = binary.Write(&b, binary.BigEndian, uint64(2))
+		_ = binary.Write(&b, binary.LittleEndian, p0+shift)
+		_ = binary.Write(&b, binary.LittleEndian, b0)
+		_ = binary.Write(&b, binary.LittleEndian, next0)
+		_ = binary.Write(&b, binary.LittleEndian, uint32(0))
+		_ = binary.Write(&b, binary.LittleEndian, p1+shift)
+		_ = binary.Write(&b, binary.LittleEndian, b1)
+		_ = binary.Write(&b, binary.LittleEndian, uint32(0))
+		_ = binary.Write(&b, binary.LittleEndian, uint32(0xd4a9b300))
+	}
+	b.Write(make([]byte, 9))
+	out, err := enginedb.QCompress(b.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func buildTestQuickCues(t *testing.T, hot0Pos float64, hot0Name string, mainPos float64, mainAdj byte, defPos float64) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	_ = binary.Write(&b, binary.BigEndian, uint64(8))
+	for i := 0; i < 8; i++ {
+		if i == 0 {
+			b.WriteByte(byte(len(hot0Name)))
+			b.WriteString(hot0Name)
+			_ = binary.Write(&b, binary.BigEndian, hot0Pos)
+		} else {
+			b.WriteByte(0)
+			_ = binary.Write(&b, binary.BigEndian, float64(-1))
+		}
+		b.Write([]byte{0, 0, 0, 0})
+	}
+	_ = binary.Write(&b, binary.BigEndian, mainPos)
+	b.WriteByte(mainAdj)
+	_ = binary.Write(&b, binary.BigEndian, defPos)
+	out, err := enginedb.QCompress(b.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func buildTestLoops(slot0Start, slot0End float64, setFlag byte) []byte {
+	var b bytes.Buffer
+	b.WriteByte(8)
+	b.Write(make([]byte, 7))
+	for i := 0; i < 8; i++ {
+		b.WriteByte(0)
+		if i == 0 {
+			_ = binary.Write(&b, binary.LittleEndian, slot0Start)
+			_ = binary.Write(&b, binary.LittleEndian, slot0End)
+			b.Write([]byte{setFlag, setFlag, 0, 0, 0, 0})
+		} else {
+			_ = binary.Write(&b, binary.LittleEndian, float64(-1))
+			_ = binary.Write(&b, binary.LittleEndian, float64(-1))
+			b.Write(make([]byte, 6))
+		}
+	}
+	return b.Bytes()
+}
+
+// Fails on eccb70ee: Step 3 repairs stock-Engine-overwritten rekordbox rows (local & Link)
+// while never touching any DJ-made cue, loop, active loop, moved main cue, grid edit, grid lock,
+// already EngineX-filled row, or stock Engine stick.
+func TestRekordboxStockOverwrittenRepairLocalAndLink(t *testing.T) {
+	mediaRoot, stick, libUUID, tr, importKey := setupLinkOnDemandStick(t, "REPAIRUSB", 2)
+	stageRoot := t.TempDir()
+	const ownerUUID = "f5f50001-1111-2222-3333-444455556666"
+
+	srvA := New(Config{
+		StateDir:    t.TempDir(),
+		MediaRoot:   mediaRoot,
+		RBStageRoot: stageRoot,
+		LinkUUID:    ownerUUID,
+	}, nil)
+	defer srvA.Close()
+	tsA := httptest.NewServer(srvA)
+	defer tsA.Close()
+	uA, _ := url.Parse(tsA.URL)
+
+	srvB := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
+	defer srvB.Close()
+	srvB.rbLinkPeerCandidates = func(context.Context) []string { return []string{uA.Host} }
+	srvB.rbLinkARPCandidates = func(context.Context) []string { return nil }
+
+	mdb := filepath.Join(stick, "Engine Library", "Database2", "m.db")
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	const beat0 = 11391.4248046875
+	stockTD := []byte{0, 0, 0, 68, 0x78, 0x9c}
+	stockOV := bytes.Repeat([]byte{0x55}, 1200)
+	stockBeats := buildTestStockOABeats(t, 44100, 13707967, beat0, 136.0, 704, 0)
+	stockAutoCues := buildTestQuickCues(t, -1, "", beat0, 1, beat0)
+	stockUnadjCues := buildTestQuickCues(t, -1, "", 0, 0, 0)
+	emptyLoops := buildTestLoops(-1, -1, 0)
+
+	setRow := func(td, ov, bd, qc, lp []byte, active, locked int, thirdParty any, importK any) {
+		t.Helper()
+		if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=?, thirdPartySourceId=? WHERE trackId=?`,
+			td, ov, bd, qc, lp, active, thirdParty, tr.EngineID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE Track SET isAnalyzed=?, isBeatGridLocked=?, pdbImportKey=?, bpmAnalyzed=? WHERE id=?`,
+			func() int {
+				if len(bd) > 0 {
+					return 1
+				}
+				return 0
+			}(), locked, importK, 136.0, tr.EngineID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	callLocal := func(bd, qc, lp []byte) *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(rbOnDemandRequest{
+			DB:        mdb,
+			UUID:      libUUID,
+			Path:      "../" + tr.Rel,
+			ID:        tr.EngineID,
+			ImportKey: importKey,
+			Repair:    true,
+			CurBeats:  hex.EncodeToString(bd),
+			CurCues:   hex.EncodeToString(qc),
+			CurLoops:  hex.EncodeToString(lp),
+		})
+		req := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(raw))
+		req.RemoteAddr = "127.0.0.1:6200"
+		rec := httptest.NewRecorder()
+		srvA.ServeHTTP(rec, req)
+		return rec
+	}
+
+	callLink := func(bd, qc, lp []byte) *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(rbOnDemandRequest{
+			DB:        "net://" + ownerUUID + "/REPAIRUSB/Engine Library/Database2/m.db",
+			UUID:      libUUID,
+			Path:      "../" + tr.Rel,
+			ID:        tr.EngineID,
+			ImportKey: importKey,
+			Repair:    true,
+			CurBeats:  hex.EncodeToString(bd),
+			CurCues:   hex.EncodeToString(qc),
+			CurLoops:  hex.EncodeToString(lp),
+		})
+		req := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(raw))
+		req.RemoteAddr = "127.0.0.1:6201"
+		rec := httptest.NewRecorder()
+		srvB.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. Stock Engine OA row (exact auto-cue at beat 0 layout) -> repaired locally AND over Link!
+	setRow(stockTD, stockOV, stockBeats, stockAutoCues, emptyLoops, 0, 0, nil, importKey)
+	recLoc := callLocal(stockBeats, stockAutoCues, emptyLoops)
+	if recLoc.Code != http.StatusOK || recLoc.Header().Get("X-RB-Repair") != "1" {
+		t.Fatalf("local repair = (%d, X-RB-Repair=%q) body=%s", recLoc.Code, recLoc.Header().Get("X-RB-Repair"), recLoc.Body.String())
+	}
+	assertValidOnDemandResponse(t, recLoc.Header(), recLoc.Body.Bytes(), tr)
+	bpmVal, err := strconv.ParseFloat(recLoc.Header().Get("X-RB-BPM"), 64)
+	if err != nil || bpmVal < 20 || bpmVal > 500 {
+		t.Fatalf("X-RB-BPM = %q, want valid positive BPM", recLoc.Header().Get("X-RB-BPM"))
+	}
+
+	recLink := callLink(stockBeats, stockAutoCues, emptyLoops)
+	if recLink.Code != http.StatusOK || recLink.Header().Get("X-RB-Repair") != "1" {
+		t.Fatalf("link repair = (%d, X-RB-Repair=%q) body=%s", recLink.Code, recLink.Header().Get("X-RB-Repair"), recLink.Body.String())
+	}
+	if !bytes.Equal(recLink.Body.Bytes(), recLoc.Body.Bytes()) {
+		t.Fatal("link repair RBXA1 differed from local repair RBXA1")
+	}
+
+	// 2. Aborted partial-load empty-cue stub (NULL td/ov/bd/loops + empty unadjusted quickCues) -> repaired!
+	setRow(nil, nil, nil, stockUnadjCues, nil, 0, 0, nil, importKey)
+	recStub := callLink(nil, stockUnadjCues, nil)
+	if recStub.Code != http.StatusOK || recStub.Header().Get("X-RB-Repair") != "1" {
+		t.Fatalf("aborted stub repair = (%d, X-RB-Repair=%q) body=%s", recStub.Code, recStub.Header().Get("X-RB-Repair"), recStub.Body.String())
+	}
+
+	// 3. Stale hook blob mismatch -> rejected 409 not_repairable.
+	setRow(stockTD, stockOV, stockBeats, stockAutoCues, emptyLoops, 0, 0, nil, importKey)
+	if rec := callLink(stockBeats, stockUnadjCues, emptyLoops); rec.Code != http.StatusConflict || rec.Header().Get("X-RB-Status") != "not_repairable" {
+		t.Fatalf("stale blob mismatch = (%d, %q), want (409, not_repairable)", rec.Code, rec.Header().Get("X-RB-Status"))
+	}
+	if rec := callLocal(nil, nil, nil); rec.Code != http.StatusConflict || rec.Header().Get("X-RB-Status") != "not_repairable" {
+		t.Fatalf("empty repair blobs = (%d, %q), want (409, not_repairable)", rec.Code, rec.Header().Get("X-RB-Status"))
+	}
+
+	// 4. Every DJ edit MUST be rejected (409 not_repairable) on BOTH local and Link:
+	djCases := []struct {
+		name   string
+		bd     []byte
+		qc     []byte
+		lp     []byte
+		active int
+		locked int
+	}{
+		{"dj_hot_cue", stockBeats, buildTestQuickCues(t, 44100, "", beat0, 1, beat0), emptyLoops, 0, 0},
+		{"dj_named_cue", stockBeats, buildTestQuickCues(t, -1, "Drop", beat0, 1, beat0), emptyLoops, 0, 0},
+		{"dj_moved_main_cue", stockBeats, buildTestQuickCues(t, -1, "", 220500, 1, beat0), emptyLoops, 0, 0},
+		{"dj_saved_loop", stockBeats, stockAutoCues, buildTestLoops(44100, 88200, 1), 0, 0},
+		{"dj_active_loop", stockBeats, stockAutoCues, emptyLoops, 1, 0},
+		{"dj_edited_grid", buildTestStockOABeats(t, 44100, 13707967, beat0, 136.0, 704, 15.0), stockAutoCues, emptyLoops, 0, 0},
+		{"dj_locked_grid", stockBeats, stockAutoCues, emptyLoops, 0, 1},
+	}
+	for _, tc := range djCases {
+		setRow(stockTD, stockOV, tc.bd, tc.qc, tc.lp, tc.active, tc.locked, nil, importKey)
+		for _, mode := range []struct {
+			label string
+			rec   *httptest.ResponseRecorder
+		}{
+			{"local", callLocal(tc.bd, tc.qc, tc.lp)},
+			{"link", callLink(tc.bd, tc.qc, tc.lp)},
+		} {
+			if mode.rec.Code != http.StatusConflict || mode.rec.Header().Get("X-RB-Status") != "not_repairable" {
+				t.Fatalf("DJ case %s (%s) = (%d, %q), want (409, not_repairable)", tc.name, mode.label, mode.rec.Code, mode.rec.Header().Get("X-RB-Status"))
+			}
+		}
+	}
+
+	// 5. After committing the repaired RBXA1 row (EngineX-filled PQTZ) -> rejected 409 not_repairable.
+	commitRBXA1ToStick(t, stick, tr.EngineID, recLink.Body.Bytes())
+	var curBD, curQC, curLP []byte
+	if err := db.QueryRow(`SELECT beatData, quickCues, loops FROM PerformanceData WHERE trackId=?`, tr.EngineID).Scan(&curBD, &curQC, &curLP); err != nil {
+		t.Fatal(err)
+	}
+	if rec := callLocal(curBD, curQC, curLP); rec.Code != http.StatusConflict || rec.Header().Get("X-RB-Status") != "not_repairable" {
+		t.Fatalf("already EngineX-filled row = (%d, %q), want (409, not_repairable)", rec.Code, rec.Header().Get("X-RB-Status"))
+	}
+
+	// 6. Stock Engine row (pdbImportKey IS NULL) -> rejected 404 not_found.
+	setRow(stockTD, stockOV, stockBeats, stockAutoCues, emptyLoops, 0, 0, nil, nil)
+	if rec := callLocal(stockBeats, stockAutoCues, emptyLoops); rec.Code != http.StatusNotFound {
+		t.Fatalf("stock Engine row (pdbImportKey=NULL) = %d, want 404", rec.Code)
+	}
+
+	// 7. Row already recorded in filled.jsonl (even with stock-shaped digest) -> rejected 409 not_repairable.
+	setRow(stockTD, stockOV, stockBeats, stockAutoCues, emptyLoops, 0, 0, nil, importKey)
+	if err := os.MkdirAll(filepath.Join(stageRoot, libUUID), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	jLine, _ := json.Marshal(rbFilledJournalLine{
+		ID:  tr.EngineID,
+		Key: tr.Key,
+		WR:  base64.StdEncoding.EncodeToString(enginedb.WrittenDigest(stockBeats, stockAutoCues, emptyLoops)),
+		V:   5,
+	})
+	if err := os.WriteFile(filepath.Join(stageRoot, libUUID, "filled.jsonl"), append(jLine, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if rec := callLocal(stockBeats, stockAutoCues, emptyLoops); rec.Code != http.StatusConflict || rec.Header().Get("X-RB-Status") != "not_repairable" {
+		t.Fatalf("filled.jsonl matched row = (%d, %q), want (409, not_repairable)", rec.Code, rec.Header().Get("X-RB-Status"))
+	}
+	_ = os.Remove(filepath.Join(stageRoot, libUUID, "filled.jsonl"))
+
+	// 8. OneLibrary FastBase + stock OA -> repaired; DJ edit over FastBase -> rejected.
+	fbTrack := rekordbox.Track{
+		SampleRate: 44100, Duration: 180, BPM: 136,
+		Cues: []rekordbox.Cue{{HotCue: 1, TimeMS: 1000, Name: "Intro"}},
+	}
+	fb := enginedb.FastBaseForTrack(fbTrack)
+	dbDir := filepath.Join(stick, "Engine Library", "Database2")
+	snap, err := rbstate.Load(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapTr := snap.Tracks[tr.Key]
+	snapTr.FastKnown = true
+	snapTr.FastCues = fb.Cues
+	snapTr.FastLoops = fb.Loops
+	snapTr.FastActive = fb.Active
+	if err := snap.Save(dbDir); err != nil {
+		t.Fatal(err)
+	}
+	// Reset builder snapshot cache by using a fresh server instance against the updated snapshot.
+	srvFast := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: stageRoot, LinkUUID: ownerUUID}, nil)
+	defer srvFast.Close()
+	setRow(stockTD, stockOV, stockBeats, fb.Cues, fb.Loops, int(fb.Active), 0, nil, importKey)
+	fastRaw, _ := json.Marshal(rbOnDemandRequest{
+		DB: mdb, UUID: libUUID, Path: "../" + tr.Rel, ID: tr.EngineID, ImportKey: importKey,
+		Repair: true, CurBeats: hex.EncodeToString(stockBeats), CurCues: hex.EncodeToString(fb.Cues), CurLoops: hex.EncodeToString(fb.Loops),
+	})
+	reqFast := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(fastRaw))
+	reqFast.RemoteAddr = "127.0.0.1:6202"
+	recFast := httptest.NewRecorder()
+	srvFast.ServeHTTP(recFast, reqFast)
+	if recFast.Code != http.StatusOK || recFast.Header().Get("X-RB-Repair") != "1" {
+		t.Fatalf("OneLibrary FastBase + stock OA = (%d, %q) body=%s", recFast.Code, recFast.Header().Get("X-RB-Repair"), recFast.Body.String())
+	}
+	// DJ adds Hot Cue 2 over OneLibrary FastBase -> rejected!
+	fbTrackDJ := fbTrack
+	fbTrackDJ.Cues = append(append([]rekordbox.Cue(nil), fbTrack.Cues...), rekordbox.Cue{HotCue: 2, TimeMS: 3000, Name: "DJ2"})
+	fbDJ := enginedb.FastBaseForTrack(fbTrackDJ)
+	setRow(stockTD, stockOV, stockBeats, fbDJ.Cues, fb.Loops, int(fb.Active), 0, nil, importKey)
+	fastDJRaw, _ := json.Marshal(rbOnDemandRequest{
+		DB: mdb, UUID: libUUID, Path: "../" + tr.Rel, ID: tr.EngineID, ImportKey: importKey,
+		Repair: true, CurBeats: hex.EncodeToString(stockBeats), CurCues: hex.EncodeToString(fbDJ.Cues), CurLoops: hex.EncodeToString(fb.Loops),
+	})
+	reqFastDJ := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(fastDJRaw))
+	reqFastDJ.RemoteAddr = "127.0.0.1:6203"
+	recFastDJ := httptest.NewRecorder()
+	srvFast.ServeHTTP(recFastDJ, reqFastDJ)
+	if recFastDJ.Code != http.StatusConflict || recFastDJ.Header().Get("X-RB-Status") != "not_repairable" {
+		t.Fatalf("DJ edit on OneLibrary FastBase = (%d, %q), want (409, not_repairable)", recFastDJ.Code, recFastDJ.Header().Get("X-RB-Status"))
+	}
+
+	// 9. Mixed-version older peer replying 200 OK WITHOUT X-RB-Repair: 1 must fail closed at Unit B relay!
+	const oldOwner = "f6f60001-1111-2222-3333-444455556666"
+	oldPeer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("X-RB-Status", "owner")
+			w.Header().Set("X-RB-UUID", libUUID)
+			w.Header().Set("X-RB-Owner", oldOwner)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("X-RB-UUID", libUUID)
+		w.Header().Set("X-RB-Owner", oldOwner)
+		w.Header().Set("X-RB-Key", tr.Key)
+		w.Header().Set("X-RB-Written", "AAECAwQFBgcICQoLDA0ODw==")
+		w.Header().Set("X-RB-Rules", "5")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(recLink.Body.Bytes())
+	}))
+	defer oldPeer.Close()
+	uOld, _ := url.Parse(oldPeer.URL)
+	srvBMixed := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
+	defer srvBMixed.Close()
+	srvBMixed.rbLinkPeerCandidates = func(context.Context) []string { return []string{uOld.Host} }
+	mixedRaw, _ := json.Marshal(rbOnDemandRequest{
+		DB:        "net://" + oldOwner + "/REPAIRUSB/Engine Library/Database2/m.db",
+		UUID:      libUUID,
+		Path:      "../" + tr.Rel,
+		ID:        tr.EngineID,
+		ImportKey: importKey,
+		Repair:    true,
+		CurBeats:  hex.EncodeToString(stockBeats),
+		CurCues:   hex.EncodeToString(stockAutoCues),
+		CurLoops:  hex.EncodeToString(emptyLoops),
+	})
+	reqMixed := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(mixedRaw))
+	reqMixed.RemoteAddr = "127.0.0.1:6204"
+	recMixed := httptest.NewRecorder()
+	srvBMixed.ServeHTTP(recMixed, reqMixed)
+	if recMixed.Code != http.StatusConflict || recMixed.Header().Get("X-RB-Status") != "not_repairable" {
+		t.Fatalf("older peer missing X-RB-Repair = (%d, %q), want (409, not_repairable)", recMixed.Code, recMixed.Header().Get("X-RB-Status"))
 	}
 }

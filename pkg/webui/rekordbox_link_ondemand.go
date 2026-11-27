@@ -65,6 +65,10 @@ type rbPeerOnDemandRequest struct {
 	Path      string `json:"path"`
 	ID        int64  `json:"id,omitempty"`
 	ImportKey int64  `json:"importKey"`
+	Repair    bool   `json:"repair,omitempty"`
+	CurBeats  string `json:"curBeats,omitempty"`
+	CurCues   string `json:"curCues,omitempty"`
+	CurLoops  string `json:"curLoops,omitempty"`
 }
 
 type rbPeerFilledRequest struct {
@@ -783,7 +787,7 @@ func writeOnDemandProxyResponse(w http.ResponseWriter, out rbLinkFetchOutcome) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.Itoa(len(out.body)))
 	for _, h := range []string{
-		"X-RB-UUID", "X-RB-Owner",
+		"X-RB-UUID", "X-RB-Owner", "X-RB-Repair", "X-RB-BPM",
 		"X-RB-Key", "X-RB-Written", "X-RB-Written-NoMain",
 		"X-RB-Row", "X-RB-Active-Loops", "X-RB-Rules", "X-RB-Timing-Ms",
 	} {
@@ -818,6 +822,10 @@ func (s *Server) serveRekordboxLinkRelay(w http.ResponseWriter, r *http.Request,
 		Path:      req.Path,
 		ID:        req.ID,
 		ImportKey: req.ImportKey,
+		Repair:    req.Repair,
+		CurBeats:  req.CurBeats,
+		CurCues:   req.CurCues,
+		CurLoops:  req.CurLoops,
 	})
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err)
@@ -869,6 +877,10 @@ func (s *Server) serveRekordboxLinkRelay(w http.ResponseWriter, r *http.Request,
 		}
 		if out.status == http.StatusOK {
 			s.setCachedLinkPeer(peerUUID, owner.endpoint, time.Now())
+			if req.Repair && strings.TrimSpace(out.headers.Get("X-RB-Repair")) != "1" {
+				writeOnDemandError(w, errOnDemandNotRepairable)
+				return
+			}
 			writeOnDemandProxyResponse(w, out)
 			return
 		}
@@ -1059,7 +1071,7 @@ func decodePeerJSON(ctx context.Context, w http.ResponseWriter, r *http.Request,
 	if dl, ok := ctx.Deadline(); ok {
 		deadlineSet = rc.SetReadDeadline(dl) == nil
 	}
-	err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(dst)
+	err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(dst)
 	if err == nil {
 		if deadlineSet {
 			_ = rc.SetReadDeadline(time.Time{})
@@ -1166,6 +1178,12 @@ func (s *Server) handlePeerRekordboxOnDemand(w http.ResponseWriter, r *http.Requ
 		writeOnDemandError(w, bridge.ErrOnDemandNotFound)
 		return
 	}
+	if req.Repair {
+		if err := s.verifyRepairCandidate(ctx, mount, libUUID, req.Path, req.ID, req.ImportKey, req.CurBeats, req.CurCues, req.CurLoops); err != nil {
+			writeOnDemandError(w, err)
+			return
+		}
+	}
 
 	// Never forward caller-supplied BPM/Key/Length: resolveOnDemandIdentityWithImportKey
 	// keys and builds strictly from this owner's own m.db Track row.
@@ -1180,7 +1198,7 @@ func (s *Server) handlePeerRekordboxOnDemand(w http.ResponseWriter, r *http.Requ
 		writeOnDemandError(w, err)
 		return
 	}
-	writeOnDemandRBXA1(w, res, libUUID, ownLink)
+	writeOnDemandRBXA1WithRepair(w, res, libUUID, ownLink, req.Repair)
 }
 
 func (s *Server) rbStageRoot() (string, error) {

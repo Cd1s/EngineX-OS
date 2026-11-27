@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Live dual-unit Engine Link on-demand rekordbox matrix check (7 cases).
+"""Live dual-unit Engine Link on-demand rekordbox matrix check (9 cases).
 
-Verifies Layer 4a on the real SC5000 5.3.0 twin (A holds USB sticks, B loads over Engine Link):
+Verifies Layer 4a + Step 3 stock-OA repair on the real SC5000 5.3.0 twin (A holds USB sticks, B loads over Engine Link):
   1. Cold Link load with 4-deck shadow ON (instant PQTZ grid, cues kept, 0 B OA, A filled.jsonl)
   2. Pre-filled on A before B opens remote source (0 B->A on-demand LAN calls, 0 B OA)
   3. Filled on A after B browses remote source (0 B->A on-demand LAN calls, 0 B OA)
   4. Cold Link load with 4-deck shadow OFF / 2-deck mode (/proc/net/tcp peer discovery, 0 B OA)
-  5. Stock Engine stick (pdbImportKey IS NULL: 0 B->A on-demand LAN calls, stock OA unchanged)
+  5. Stock Engine stick (pdbImportKey IS NULL: 0 B->A LAN calls on initial load + reload after stock OA)
   6. Unit A not answering (750/800 ms answer budget -> clean stock Engine fallback, no hang)
   7. Older/non-EngineX peer (plain 404 -> cached peer_unsupported -> 2nd load makes 0 LAN calls)
+  8. Step 3 repair of stock-OA-overwritten rekordbox rows (8a local on A + 8b Link on B, 2nd load 0 LAN)
+  9. Step 3 DJ-edit protection (stock-OA row with DJ Hot Cue 1 never touched on Link or local reload)
 
 Also checks browse-time LAN cost == 0, and supports --base-only to prove Case 1 fails on 83627d2c.
 """
@@ -738,7 +740,7 @@ def main():
         twin.write_instance_configs(s, "auto", src_dir, ver_info)
         twin.start_namespace_holder(s, src_dir)
 
-    # 1. Mount /media/RB_ONDEMAND on Unit A (7 tracks: cases 1,2,3,4,6,7a,7b)
+    # 1. Mount /media/RB_ONDEMAND on Unit A (9 tracks: cases 1,2,3,4,6/8a,7a,7b,8b,9)
     rb_vol = twin.WORK / "A/tmp/vols/RB_ONDEMAND"
     rb_vol.mkdir(parents=True, exist_ok=True)
     subprocess.run(
@@ -753,6 +755,8 @@ def main():
         (5, "RB Case6 HangA",    "Contents/RBOD/case6-hang.wav",     "/PIONEER/USBANLZ/P005/ANLZ0000.DAT", 128.0, 10.0, 290.0, "Case6Cue"),
         (6, "RB Case7a Older1",  "Contents/RBOD/case7a-older1.wav",  "/PIONEER/USBANLZ/P006/ANLZ0000.DAT", 128.0, 10.0, 300.0, "Case7aCue"),
         (7, "RB Case7b Older2",  "Contents/RBOD/case7b-older2.wav",  "/PIONEER/USBANLZ/P007/ANLZ0000.DAT", 128.0, 10.0, 310.0, "Case7bCue"),
+        (8, "RB Case8 LinkRep",  "Contents/RBOD/case8-linkrep.wav",  "/PIONEER/USBANLZ/P008/ANLZ0000.DAT", 128.0, 10.0, 320.0, "Case8Cue"),
+        (9, "RB Case9 DJKeep",   "Contents/RBOD/case9-djkeep.wav",   "/PIONEER/USBANLZ/P009/ANLZ0000.DAT", 128.0, 10.0, 330.0, "Case9Cue"),
     ]
     pdb_specs = []
     for tid, title, rel, anlz, bpm, dur, b0_ms, cue in rb_tracks:
@@ -828,7 +832,7 @@ def main():
 
         # Browse RB_ONDEMAND on B and verify 0 LAN on-demand calls during browse!
         lan_before_browse = count_peer_reqs(lan_log)
-        select_source("B", "RB_ONDEMAND", min_rows=7)
+        select_source("B", "RB_ONDEMAND", min_rows=9)
         time.sleep(0.5)
         lan_browse_delta = count_peer_reqs(lan_log) - lan_before_browse
         assert lan_browse_delta == 0, f"browse triggered {lan_browse_delta} LAN /peer/rekordbox/track-data calls"
@@ -971,7 +975,8 @@ def main():
             subprocess.run(["ip", "netns", "exec", twin.SIDE_CFG["B"]["netns"], "iptables", "-D", "INPUT", "-p", "udp", "--dport", "50199", "-j", "DROP"], check=False)
             subprocess.run(["ip", "netns", "exec", twin.SIDE_CFG["B"]["netns"], "iptables", "-D", "OUTPUT", "-p", "udp", "--dport", "50199", "-j", "DROP"], check=False)
 
-        # CASE 5: Stock Engine stick (pdbImportKey IS NULL) -> 0 LAN on-demand calls, stock OA runs normally
+        # CASE 5: Stock Engine stick (pdbImportKey IS NULL) -> 0 LAN on-demand calls, stock OA runs normally;
+        #         reloading after stock OA also does 0 LAN calls and never touches the stock Engine row.
         select_source("B", "STOCK_USB", min_rows=1, must_contain="Stock Track")
         lan0 = count_peer_reqs(lan_log)
         t5_0 = now_ms()
@@ -979,26 +984,37 @@ def main():
         row5 = wait_for(lambda: stock_oa_committed(stock_mdb, "B", "stock-track.wav"), timeout=25, interval=0.35, label="Case 5 stock OA commit")
         t_db5 = now_ms() - t5_0
         lan_d = count_peer_reqs(lan_log) - lan0
+        twin.ev("B", 'var t=root.rtTr("/Engine/Deck2/Track/EjectTrack"); if(t) t.state=true; "eject"')
+        time.sleep(0.6)
+        lan5_re = count_peer_reqs(lan_log, method="ANY")
+        load_b_row("Stock Track", "stock-track.wav")
+        time.sleep(0.6)
+        lan5_re_d = count_peer_reqs(lan_log, method="ANY") - lan5_re
+        row5_re = read_mdb_row(stock_mdb, "stock-track.wav")
         rec5 = {
-            "case": "5. Stock Engine stick",
+            "case": "5. Stock Engine stick (cold + post-OA reload)",
             "b_oa_count": 1 if row5["ov"] >= 500 and row5["beat"]["n_def"] <= 4 else 0,
             "lan_reqs": lan_d,
+            "reload_lan_reqs": lan5_re_d,
             "load_ms": t_ld,
             "analyzed_ms": max(t_an, t_db5),
             "b0_ms": row5["beat"]["b0_ms"] if row5 and row5["beat"] else None,
             "n_def": row5["beat"]["n_def"] if row5 and row5["beat"] else 0,
+            "n_def_reload": row5_re["beat"]["n_def"] if row5_re and row5_re["beat"] else 0,
             "ov": row5["ov"] if row5 else 0,
             "analyzed_db": row5["analyzed"] if row5 else 0,
         }
         results.append(rec5)
         print("CASE 5:", json.dumps(rec5), flush=True)
-        assert lan_d == 0 and row5["ov"] >= 500 and row5["beat"]["n_def"] <= 4, f"Case 5 failed: {rec5}"
+        assert lan_d == 0 and lan5_re_d == 0 and row5["ov"] >= 500 and row5["beat"]["n_def"] <= 4 and row5_re["beat"]["n_def"] <= 4, f"Case 5 failed: {rec5}"
 
-        # Switch back to RB_ONDEMAND for Cases 6 & 7
-        select_source("B", "RB_ONDEMAND", min_rows=7, must_contain="RB Case6")
+        # Switch back to RB_ONDEMAND for Cases 6, 8, 9, 7
+        select_source("B", "RB_ONDEMAND", min_rows=9, must_contain="RB Case9")
         a_link_uuid = twin.ev("A", '(root.scTr("/Network/NetworkId") || {string:""}).string').strip()
 
-        # CASE 6: Unit A not answering (hung :8080 -> 750/800 ms budget -> clean stock Engine fallback)
+        # CASE 6: Unit A not answering (hung :8080 -> 750/800 ms budget -> clean stock Engine fallback).
+        # Also overwrite Case 8 (Link repair target) and Case 9 (DJ-edit target) with genuine stock OA
+        # while A's :8080 is hung so Cases 8 & 9 test real Engine 5.3.0 stock-OA rows on m.db.
         hang_log = twin.WORK / "stub-hang.log"
         stub_proc = start_stub_http_in_a("hang", hang_log, a_link_uuid)
         restart_stream_sync("B")
@@ -1023,9 +1039,138 @@ def main():
         results.append(rec6)
         print("CASE 6:", json.dumps(rec6), flush=True)
         assert lan_d >= 1 and row6["ov"] >= 500 and row6["beat"]["n_def"] <= 4 and not rec6["filled_jsonl"], f"Case 6 failed: {rec6}"
+
+        # Seed Case 8 and Case 9 with genuine stock Engine 5.3.0 OA while A's :8080 is hung.
+        load_b_row("RB Case8", "case8-linkrep.wav")
+        row8_pre = wait_for(lambda: stock_oa_committed(rb_mdb, "B", "case8-linkrep.wav"), timeout=25, interval=0.35, label="Case 8 stock OA seed")
+        load_b_row("RB Case9", "case9-djkeep.wav")
+        row9_pre = wait_for(lambda: stock_oa_committed(rb_mdb, "B", "case9-djkeep.wav"), timeout=25, interval=0.35, label="Case 9 stock OA seed")
+        assert row8_pre["beat"]["n_def"] <= 4 and row9_pre["beat"]["n_def"] <= 4
+
+        # Set a real DJ Hot Cue 1 on Case 9 while it is loaded on B Deck 2, then eject so Engine flushes quickCues.
+        qc9_before = row9_pre["qc"]
+        twin.ev(
+            "B",
+            'root.rtTr("/Engine/Deck2/Track/QuickCue1SetPosition").value = 220500; '
+            'root.rtTr("/Engine/Deck2/Track/QuickCue1Name").string = "DJKeep"; "dj_cue"',
+        )
+        time.sleep(0.5)
+        twin.ev("B", 'var t=root.rtTr("/Engine/Deck2/Track/EjectTrack"); if(t) t.state=true; "eject"')
+        row9_dj = wait_for(
+            lambda: (r := read_mdb_row(rb_mdb, "case9-djkeep.wav")) and r["qc"] > qc9_before and r,
+            timeout=15,
+            interval=0.25,
+            label="Case 9 DJ hot cue flush to m.db",
+        )
         stub_proc.terminate()
         stub_proc.wait(timeout=3)
         stub_proc = None
+
+        # Restore Unit A's real stream-sync and wait past the 3 s transient neg-cache TTL (zero Engine restarts).
+        restart_stream_sync("A")
+        time.sleep(3.5)
+
+        # CASE 8: Step 3 repair of stock-OA-overwritten rekordbox rows (8a local on A + 8b Link on B, then 2nd load 0 LAN).
+        # 8a: Local repair on Unit A of Case 6's stock-OA row.
+        twin.ev("A", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck1").url="file:///media/RB_ONDEMAND/Contents/RBOD/case6-hang.wav"; "ok"')
+        wait_for(lambda: (s := deck_info("A", 1))["loaded"] and s["analyzed"] and s["fn"] == "case6-hang.wav" and s, timeout=30, label="Case 8a local repair on A")
+        time.sleep(1.0)
+        st8a = deck_info("A", 1)
+        row8a = read_mdb_row(rb_mdb, "case6-hang.wav")
+        err8a = abs((row8a["beat"]["b0_ms"] or 0.0) - 290.0) if row8a and row8a["beat"] else 999.0
+        twin.ev("A", 'var t=root.rtTr("/Engine/Deck1/Track/EjectTrack"); if(t) t.state=true; "eject"')
+        time.sleep(0.6)
+
+        # 8b: Link repair on Unit B of Case 8's stock-OA row, followed by 2nd load proving 0 LAN calls.
+        lan0 = count_peer_reqs(lan_log)
+        t_ld8b, t_an8b, st8b = load_b_row("RB Case8", "case8-linkrep.wav")
+        time.sleep(1.2)
+        st8b = deck_info("B", 2)
+        lan8b_1 = count_peer_reqs(lan_log) - lan0
+        row8b = read_mdb_row(rb_mdb, "case8-linkrep.wav")
+        err8b = abs((row8b["beat"]["b0_ms"] or 0.0) - 320.0) if row8b and row8b["beat"] else 999.0
+        twin.ev("B", 'var t=root.rtTr("/Engine/Deck2/Track/EjectTrack"); if(t) t.state=true; "eject"')
+        time.sleep(0.6)
+        lan1 = count_peer_reqs(lan_log)
+        load_b_row("RB Case8", "case8-linkrep.wav")
+        time.sleep(0.6)
+        lan8b_2 = count_peer_reqs(lan_log) - lan1
+        filled_ids8 = read_filled_ids(a_filled_path)
+        rec8 = {
+            "case": "8. Step 3 repair stock-OA rows (8a local + 8b Link)",
+            "local_b0_ms": row8a["beat"]["b0_ms"] if row8a and row8a["beat"] else None,
+            "local_pqtz_err_ms": round(err8a, 3),
+            "local_n_def": row8a["beat"]["n_def"] if row8a and row8a["beat"] else 0,
+            "local_cue1": st8a["cue1"],
+            "local_cue_kept": st8a["cue1"] == "Case6Cue" and abs(st8a["cue1pos"] - 44100) <= 5,
+            "local_filled_jsonl": 5 in filled_ids8,
+            "link_load_ms": t_ld8b,
+            "link_analyzed_ms": t_an8b,
+            "link_b0_ms": row8b["beat"]["b0_ms"] if row8b and row8b["beat"] else None,
+            "link_pqtz_err_ms": round(err8b, 3),
+            "link_n_def": row8b["beat"]["n_def"] if row8b and row8b["beat"] else 0,
+            "link_cue1": st8b["cue1"],
+            "link_cue_kept": st8b["cue1"] == "Case8Cue" and abs(st8b["cue1pos"] - 44100) <= 5,
+            "link_filled_jsonl": 8 in filled_ids8,
+            "link_lan_reqs_1": lan8b_1,
+            "link_lan_reqs_2": lan8b_2,
+        }
+        results.append(rec8)
+        print("CASE 8:", json.dumps(rec8), flush=True)
+        assert err8a <= 0.15 and rec8["local_n_def"] >= 20 and rec8["local_cue_kept"] and rec8["local_filled_jsonl"], f"Case 8a failed: {rec8}"
+        assert err8b <= 0.15 and rec8["link_n_def"] >= 20 and rec8["link_cue_kept"] and rec8["link_filled_jsonl"], f"Case 8b failed: {rec8}"
+        assert lan8b_1 == 1 and lan8b_2 == 0, f"Case 8b LAN counts wrong: {rec8}"
+
+        # CASE 9: DJ-edited stock-OA row (Hot Cue 1 "DJ Keep" at 220500) is NEVER overwritten on Link or local reload!
+        twin.ev("B", 'var t=root.rtTr("/Engine/Deck2/Track/EjectTrack"); if(t) t.state=true; "eject"')
+        time.sleep(0.5)
+        lan9_0 = count_peer_reqs(lan_log)
+        load_b_row("RB Case9", "case9-djkeep.wav")
+        time.sleep(1.0)
+        st9_b = deck_info("B", 2)
+        lan9_1 = count_peer_reqs(lan_log) - lan9_0
+        row9_after_b = read_mdb_row(rb_mdb, "case9-djkeep.wav")
+        twin.ev("B", 'var t=root.rtTr("/Engine/Deck2/Track/EjectTrack"); if(t) t.state=true; "eject"')
+        time.sleep(0.5)
+        # 2nd Link load hits 60 s not_repairable negative cache -> 0 LAN!
+        lan9_re = count_peer_reqs(lan_log)
+        load_b_row("RB Case9", "case9-djkeep.wav")
+        time.sleep(0.6)
+        lan9_2 = count_peer_reqs(lan_log) - lan9_re
+        twin.ev("B", 'var t=root.rtTr("/Engine/Deck2/Track/EjectTrack"); if(t) t.state=true; "eject"')
+        time.sleep(0.5)
+        # Local reload on A also leaves DJ edit completely untouched!
+        twin.ev("A", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck1").url="file:///media/RB_ONDEMAND/Contents/RBOD/case9-djkeep.wav"; "ok"')
+        wait_for(lambda: (s := deck_info("A", 1))["loaded"] and s["analyzed"] and s["fn"] == "case9-djkeep.wav" and s, timeout=30, label="Case 9 local reload on A")
+        time.sleep(0.8)
+        st9_a = deck_info("A", 1)
+        row9_after_a = read_mdb_row(rb_mdb, "case9-djkeep.wav")
+        rec9 = {
+            "case": "9. Step 3 DJ-edited stock-OA row untouched (Link + local)",
+            "qc_before": qc9_before,
+            "qc_after_dj": row9_dj["qc"],
+            "n_def_after_b": row9_after_b["beat"]["n_def"] if row9_after_b and row9_after_b["beat"] else 0,
+            "n_def_after_a": row9_after_a["beat"]["n_def"] if row9_after_a and row9_after_a["beat"] else 0,
+            "cue1_b": st9_b["cue1"],
+            "cue1pos_b": st9_b["cue1pos"],
+            "cue1_a": st9_a["cue1"],
+            "cue1pos_a": st9_a["cue1pos"],
+            "dj_cue_preserved": (
+                st9_b["cue1"] == "DJKeep"
+                and abs(st9_b["cue1pos"] - 220500) <= 5
+                and st9_a["cue1"] == "DJKeep"
+                and abs(st9_a["cue1pos"] - 220500) <= 5
+            ),
+            "filled_jsonl": 9 in read_filled_ids(a_filled_path),
+            "lan_reqs_1": lan9_1,
+            "lan_reqs_2": lan9_2,
+        }
+        results.append(rec9)
+        print("CASE 9:", json.dumps(rec9), flush=True)
+        assert rec9["n_def_after_b"] <= 4 and rec9["n_def_after_a"] <= 4 and rec9["dj_cue_preserved"] and not rec9["filled_jsonl"], f"Case 9 overwrote DJ edit: {rec9}"
+        assert lan9_2 == 0, f"Case 9 2nd load did not hit not_repairable cache: {rec9}"
+        twin.ev("A", 'var t=root.rtTr("/Engine/Deck1/Track/EjectTrack"); if(t) t.state=true; "eject"')
+        time.sleep(0.5)
 
         # CASE 7: Older/non-EngineX peer (verified via /peer/decks, 404/405 without X-RB-Status -> peer_unsupported cached -> 2nd load 0 LAN)
         old_log = twin.WORK / "stub-old.log"
@@ -1066,7 +1211,7 @@ def main():
         print("CASE 7:", json.dumps(rec7), flush=True)
         assert lan_d7a == 1 and lan_d7b == 0 and row7a["ov"] >= 500 and row7b["ov"] >= 500 and row7a["beat"]["n_def"] <= 4 and row7b["beat"]["n_def"] <= 4, f"Case 7 failed: {rec7}"
 
-        print("\n=== LINK ON-DEMAND 7-CASE MATRIX: PASS ===", flush=True)
+        print("\n=== LINK ON-DEMAND 9-CASE MATRIX: PASS ===", flush=True)
         print(json.dumps(results, indent=2), flush=True)
     finally:
         eng_b = twin.WORK / "B/logs/engine.log"

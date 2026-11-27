@@ -120,6 +120,10 @@ type OnDemandStickIdentity struct {
 	TrackRel     string
 	EngineID     int64
 	RowHash      string
+	FastKnown    bool
+	FastCues     []byte
+	FastLoops    []byte
+	FastActive   uint32
 }
 
 type pinnedMountKey struct {
@@ -795,6 +799,10 @@ func (b *OnDemandBuilder) InspectIdentity(ctx context.Context, req OnDemandReque
 		TrackRel:     audioRel,
 		EngineID:     tr.EngineID,
 		RowHash:      tr.Row,
+		FastKnown:    tr.FastKnown,
+		FastCues:     tr.FastCues,
+		FastLoops:    tr.FastLoops,
+		FastActive:   tr.FastActive,
 	}, nil
 }
 

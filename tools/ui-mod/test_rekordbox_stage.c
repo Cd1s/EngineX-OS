@@ -349,13 +349,17 @@ struct link_mock {
     int status;
     int delay_ms;
     char x_rb_status[64];
+    int x_rb_repair;
+    char x_rb_bpm[32];
+    sqlite3 *mutate_db;
+    const char *mutate_sql;
     char key[256];
     char wr[64];
     char wrnm[64];
     char row[64];
     const unsigned char *body;
     size_t body_n;
-    char last_data_req[2048];
+    char last_data_req[4096];
     char last_filled_req[2048];
     pthread_mutex_t mu;
 };
@@ -369,7 +373,7 @@ static void *link_mock_serve(void *arg) {
         if (rc <= 0) continue;
         int cfd = accept(m->listen_fd, NULL, NULL);
         if (cfd < 0) continue;
-        char reqbuf[2048];
+        char reqbuf[4096];
         memset(reqbuf, 0, sizeof reqbuf);
         ssize_t n = recv(cfd, reqbuf, sizeof reqbuf - 1, 0);
         if (n < 0) n = 0;
@@ -386,16 +390,27 @@ static void *link_mock_serve(void *arg) {
         }
         int status = m->status;
         int delay_ms = is_filled ? 0 : m->delay_ms;
-        char xstat[64], key[256], wr[64], wrnm[64], row[64];
+        int xrepair = m->x_rb_repair;
+        char xstat[64], xbpm[32], key[256], wr[64], wrnm[64], row[64];
         snprintf(xstat, sizeof xstat, "%s", m->x_rb_status);
+        snprintf(xbpm, sizeof xbpm, "%s", m->x_rb_bpm);
         snprintf(key, sizeof key, "%s", m->key);
         snprintf(wr, sizeof wr, "%s", m->wr);
         snprintf(wrnm, sizeof wrnm, "%s", m->wrnm);
         snprintf(row, sizeof row, "%s", m->row);
         const unsigned char *body = m->body;
         size_t body_n = m->body_n;
+        sqlite3 *mdb = is_filled ? NULL : m->mutate_db;
+        const char *msql = is_filled ? NULL : m->mutate_sql;
+        if (msql) {
+            m->mutate_db = NULL;
+            m->mutate_sql = NULL;
+        }
         pthread_mutex_unlock(&m->mu);
 
+        if (mdb && msql) {
+            assert(sqlite3_exec(mdb, msql, NULL, NULL, NULL) == SQLITE_OK);
+        }
         if (delay_ms > 0) {
             struct timespec ts = {delay_ms / 1000, (long)(delay_ms % 1000) * 1000000L};
             nanosleep(&ts, NULL);
@@ -411,6 +426,7 @@ static void *link_mock_serve(void *arg) {
                             "HTTP/1.1 200 OK\r\n"
                             "Content-Type: application/octet-stream\r\n"
                             "Content-Length: %zu\r\n"
+                            "%s%s%s%s"
                             "X-RB-Key: %s\r\n"
                             "X-RB-Written: %s\r\n"
                             "X-RB-Written-NoMain: %s\r\n"
@@ -418,7 +434,10 @@ static void *link_mock_serve(void *arg) {
                             "X-RB-Active-Loops: 3\r\n"
                             "X-RB-Rules: 5\r\n"
                             "Connection: close\r\n\r\n",
-                            body_n, key, wr, wrnm, row);
+                            body_n,
+                            xrepair ? "X-RB-Repair: 1\r\n" : "",
+                            xbpm[0] ? "X-RB-BPM: " : "", xbpm, xbpm[0] ? "\r\n" : "",
+                            key, wr, wrnm, row);
             (void)!send(cfd, hdr, (size_t)hlen, MSG_NOSIGNAL);
             if (body && body_n) (void)!send(cfd, body, body_n, MSG_NOSIGNAL);
         } else {
@@ -1672,8 +1691,8 @@ int main(int argc, char **argv) {
         sc_rbs_sched_override = NULL;
 
 #ifdef __linux__
-        // GUI, browse, and OfflineAnalyzer threads on net://: 0 SQL and 0 IPC!
-        const char *net_blocked_thr[] = {"EMain", "SceneGraph", "Thread (pooled)", "OfflineAnalyzer"};
+        // GUI, browse, notification, metadata-update, and OfflineAnalyzer threads on net://: 0 SQL and 0 IPC!
+        const char *net_blocked_thr[] = {"EMain", "SceneGraph", "Thread (pooled)", "OfflineAnalyzer", "J:Notifyingremo", "J:Updatingtrack"};
         for (size_t i = 0; i < sizeof net_blocked_thr / sizeof *net_blocked_thr; i++) {
             sc_rbs_stats_reset();
             statements = 0;
@@ -1810,6 +1829,231 @@ int main(int argc, char **argv) {
         close(lfd);
         pthread_mutex_destroy(&lmock.mu);
         sqlite3_close(net_db);
+        sc_rbs_ondemand_url = NULL;
+        net_fake_main = NULL;
+    }
+
+    // 16. Step 3: Repair stock-Engine-overwritten rekordbox rows (local & Link) with atomic CAS
+    //     and zero browse/play/already-filled/DJ-edit/stock-stick cost. Fails on eccb70ee.
+    {
+        sc_rbs_ondemand_reset();
+        char rep_stage[PATH_MAX];
+        snprintf(rep_stage, sizeof rep_stage, "%s/rep-stage", dir);
+        sc_rbs_root = rep_stage;
+        sc_rbs_ondemand_sock = "";
+
+        // Build a valid RBXA1 whose beatData header has rawlen=0x000003e2 (>= 256, multi-beat EngineX)
+        // so the 2nd load after repair skips via O(1) SQL prefilter with 0 IPC!
+        unsigned char rep_bin[512];
+        const unsigned char rep_bt[] = {0x00, 0x00, 0x03, 0xe2, 0x78, 0x9c, 0xaa, 0xbb};
+        const unsigned char rep_td[] = {0x00, 0x00, 0x00, 0x44, 0x78, 0x9c, 0x11, 0x22};
+        const unsigned char rep_ov[] = {0x00, 0x00, 0x0c, 0x1b, 0x78, 0x9c, 0x33, 0x44};
+        const unsigned char rep_qc[] = {0x00, 0x00, 0x00, 0x85, 0x78, 0x9c, 0x55, 0x66};
+        const unsigned char rep_lp[] = {0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        size_t rep_bin_n = 0;
+        memcpy(rep_bin + rep_bin_n, "RBXA1", 5);
+        rep_bin_n += 5;
+        const unsigned char *parts[5] = {rep_td, rep_ov, rep_bt, rep_qc, rep_lp};
+        const size_t plens[5] = {sizeof rep_td, sizeof rep_ov, sizeof rep_bt, sizeof rep_qc, sizeof rep_lp};
+        for (int i = 0; i < 5; i++) {
+            uint32_t v = (uint32_t)plens[i];
+            rep_bin[rep_bin_n++] = (unsigned char)v;
+            rep_bin[rep_bin_n++] = (unsigned char)(v >> 8);
+            rep_bin[rep_bin_n++] = (unsigned char)(v >> 16);
+            rep_bin[rep_bin_n++] = (unsigned char)(v >> 24);
+            memcpy(rep_bin + rep_bin_n, parts[i], plens[i]);
+            rep_bin_n += plens[i];
+        }
+        rep_bin[rep_bin_n++] = 1;
+
+        int rfd = socket(AF_INET, SOCK_STREAM, 0);
+        assert(rfd >= 0);
+        int one_r = 1;
+        setsockopt(rfd, SOL_SOCKET, SO_REUSEADDR, &one_r, sizeof one_r);
+        struct sockaddr_in rsin;
+        memset(&rsin, 0, sizeof rsin);
+        rsin.sin_family = AF_INET;
+        rsin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        assert(!bind(rfd, (struct sockaddr *)&rsin, sizeof rsin));
+        socklen_t rlen = sizeof rsin;
+        assert(!getsockname(rfd, (struct sockaddr *)&rsin, &rlen));
+        assert(!listen(rfd, 8));
+        char rurl[128];
+        snprintf(rurl, sizeof rurl, "http://127.0.0.1:%u%s", (unsigned)ntohs(rsin.sin_port), SC_RBS_ONDEMAND_ROUTE);
+
+        struct link_mock rmock;
+        memset(&rmock, 0, sizeof rmock);
+        rmock.listen_fd = rfd;
+        rmock.status = 200;
+        rmock.x_rb_repair = 1;
+        snprintf(rmock.x_rb_bpm, sizeof rmock.x_rb_bpm, "128.2500");
+        snprintf(rmock.key, sizeof rmock.key, "contents/repaired-oa.flac");
+        snprintf(rmock.wr, sizeof rmock.wr, "AAECAwQFBgcICQoLDA0ODw==");
+        snprintf(rmock.wrnm, sizeof rmock.wrnm, "EBESExQVFhcYGRobHB0eHw==");
+        snprintf(rmock.row, sizeof rmock.row, "row-rep");
+        rmock.body = rep_bin;
+        rmock.body_n = rep_bin_n;
+        pthread_mutex_init(&rmock.mu, NULL);
+        pthread_t rth;
+        assert(!pthread_create(&rth, NULL, link_mock_serve, &rmock));
+        sc_rbs_ondemand_url = rurl;
+
+        sqlite3 *rep_db = stick("REP_STICK", "lib-rep-a", "lib-rep-a");
+        long long r_local = track(rep_db, "../Contents/Repaired-OA.flac", 1, 0);
+        long long r_stub = track(rep_db, "../Contents/Repaired-Stub.flac", 1, 0);
+        long long r_link = track(rep_db, "../Contents/Repaired-Link.flac", 1, 0);
+        long long r_locked = track(rep_db, "../Contents/Repaired-Locked.flac", 1, 0);
+        long long r_stock = track(rep_db, "../Contents/Repaired-Stock.flac", 0, 0);
+        long long r_dj = track(rep_db, "../Contents/Repaired-DJ.flac", 1, 0);
+        long long r_oldpeer = track(rep_db, "../Contents/Repaired-OldPeer.flac", 1, 0);
+        long long r_cas = track(rep_db, "../Contents/Repaired-CAS.flac", 1, 0);
+
+        // Populate stock-OA-shaped rows (qCompress beatData rawlen=138 => X'0000008a...', quickCues rawlen=129 => X'00000081...').
+        char sqlbuf[512];
+        const long long oa_ids[] = {r_local, r_link, r_locked, r_stock, r_dj, r_oldpeer, r_cas};
+        for (size_t i = 0; i < sizeof oa_ids / sizeof *oa_ids; i++) {
+            snprintf(sqlbuf, sizeof sqlbuf,
+                     "UPDATE PerformanceData SET trackData = X'00000044789c', overviewWaveFormData = X'00000c1b789c', "
+                     "beatData = X'0000008a789c11223344', quickCues = X'00000081789c5566', loops = X'0800000000000000', "
+                     "activeOnLoadLoops = 0, thirdPartySourceId = NULL WHERE trackId = %lld; "
+                     "UPDATE Track SET isAnalyzed = 1, bpm = 68, bpmAnalyzed = 68.0 WHERE id = %lld;",
+                     oa_ids[i], oa_ids[i]);
+            assert(sqlite3_exec(rep_db, sqlbuf, NULL, NULL, NULL) == SQLITE_OK);
+        }
+        // Aborted partial load stub (Row 1958 shape: NULL td/ov/bd/loops + 26 B quickCues starting with 00000081).
+        snprintf(sqlbuf, sizeof sqlbuf,
+                 "UPDATE PerformanceData SET trackData = NULL, overviewWaveFormData = NULL, beatData = NULL, "
+                 "quickCues = X'00000081789c9988', loops = NULL, activeOnLoadLoops = 0, thirdPartySourceId = NULL WHERE trackId = %lld;",
+                 r_stub);
+        assert(sqlite3_exec(rep_db, sqlbuf, NULL, NULL, NULL) == SQLITE_OK);
+        // Locked beatgrid on r_locked.
+        snprintf(sqlbuf, sizeof sqlbuf, "UPDATE Track SET isBeatGridLocked = 1 WHERE id = %lld;", r_locked);
+        assert(sqlite3_exec(rep_db, sqlbuf, NULL, NULL, NULL) == SQLITE_OK);
+
+        // 16a. Local repair of stock-OA row: sends repair=true + blobs, commits RBXA1 + BPM, journals filled.jsonl,
+        //      and 2nd load skips at SQL prefilter with 0 IPC!
+        sc_rbs_stats_reset();
+        long long out_id = 0;
+        const char *res = load_path(rep_db, "../Contents/Repaired-OA.flac", -1, &out_id);
+        assert(starts(res, "repaired on-demand (") && out_id == r_local);
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 1);
+        assert(strstr(rmock.last_data_req, "\"repair\":true") != NULL);
+        assert(strstr(rmock.last_data_req, "\"curBeats\":\"0000008A789C11223344\"") != NULL);
+        assert(strstr(rmock.last_data_req, "\"curCues\":\"00000081789C5566\"") != NULL);
+        assert(strstr(rmock.last_data_req, "\"curLoops\":\"0800000000000000\"") != NULL);
+        assert(!strcmp(text(rep_db, "SELECT hex(beatData) || '|' || bpm || '|' || printf('%%.4f', bpmAnalyzed) FROM PerformanceData p JOIN Track t ON t.id = p.trackId WHERE t.id = %lld", r_local),
+                       "000003E2789CAABB|128|128.2500"));
+        char rep_jpath[PATH_MAX + 64];
+        snprintf(rep_jpath, sizeof rep_jpath, "%s/lib-rep-a/%s", rep_stage, SC_RBS_JOURNAL);
+        struct stat rjst;
+        assert(stat(rep_jpath, &rjst) == 0);
+        // 2nd load: repaired beatData has rawlen=0x03e2 >= 0x0100 -> 0 IPC!
+        sc_rbs_stats_reset();
+        res = load_path(rep_db, "../Contents/Repaired-OA.flac", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (row has analysis)"));
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+
+        // 16b. Aborted empty-cue stub repair succeeds on 1st load, 0 IPC on 2nd load.
+        sc_rbs_stats_reset();
+        res = load_path(rep_db, "../Contents/Repaired-Stub.flac", -1, &out_id);
+        assert(starts(res, "repaired on-demand (") && out_id == r_stub);
+        assert(strstr(rmock.last_data_req, "\"repair\":true") != NULL);
+        assert(strstr(rmock.last_data_req, "\"curBeats\"") == NULL);
+        assert(strstr(rmock.last_data_req, "\"curCues\":\"00000081789C9988\"") != NULL);
+        sc_rbs_stats_reset();
+        res = load_path(rep_db, "../Contents/Repaired-Stub.flac", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (row has analysis)"));
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+
+        // 16c. Link (net://) repair commits RBXA1 + BPM, fires track-filled, and 2nd load does 0 IPC!
+        net_fake_main = "net://f7f70001-1111-2222-3333-444455556666/REP_STICK/Engine Library/Database2/m.db";
+        net_fake_ro = 0;
+        net_force_ro_write = 0;
+        pthread_mutex_lock(&rmock.mu);
+        rmock.filled_reqs = 0;
+        pthread_mutex_unlock(&rmock.mu);
+        sc_rbs_stats_reset();
+        res = sc_rbs_fill_path(&net_engine, rep_db, net_fake_main, "../Contents/Repaired-Link.flac", -1, &out_id);
+        assert(starts(res, "repaired link on-demand (") && out_id == r_link);
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 1);
+        assert(rmock.filled_reqs == 1);
+        assert(!strcmp(text(rep_db, "SELECT hex(beatData) || '|' || printf('%%.4f', bpmAnalyzed) FROM PerformanceData p JOIN Track t ON t.id = p.trackId WHERE t.id = %lld", r_link),
+                       "000003E2789CAABB|128.2500"));
+        sc_rbs_stats_reset();
+        res = sc_rbs_fill_path(&net_engine, rep_db, net_fake_main, "../Contents/Repaired-Link.flac", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (row has analysis)"));
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+
+        // 16d. Locked beatgrid, stock Engine stick, and browse scan (allow_ondemand=0) do ZERO IPC!
+        sc_rbs_stats_reset();
+        res = load_path(rep_db, "../Contents/Repaired-Locked.flac", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (row has analysis)"));
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+        sc_rbs_stats_reset();
+        res = load_path(rep_db, "../Contents/Repaired-Stock.flac", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (row has analysis)"));
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+        sc_rbs_stats_reset();
+        res = load(rep_db, r_dj); // browse / track-scan path (allow_ondemand=0)
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+
+        // 16e. 409 X-RB-Status: not_repairable (DJ edit) leaves row untouched, negative-caches (2nd load 0 IPC),
+        //      and does NOT mark the connection stale.
+        pthread_mutex_lock(&rmock.mu);
+        rmock.status = 409;
+        snprintf(rmock.x_rb_status, sizeof rmock.x_rb_status, "not_repairable");
+        pthread_mutex_unlock(&rmock.mu);
+        sc_rbs_stats_reset();
+        res = load_path(rep_db, "../Contents/Repaired-DJ.flac", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (row not repairable)"));
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 1);
+        assert(!strcmp(text(rep_db, "SELECT hex(beatData) FROM PerformanceData WHERE trackId = %lld", r_dj), "0000008A789C11223344"));
+        sc_rbs_stats_reset();
+        statements = 0;
+        res = load_path(rep_db, "../Contents/Repaired-DJ.flac", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (ondemand cached miss)"));
+        assert(statements == 0 && __atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+
+        // 16f. Older peer replying 200 OK WITHOUT X-RB-Repair: 1 fails closed, leaves row untouched, caches miss.
+        pthread_mutex_lock(&rmock.mu);
+        rmock.status = 200;
+        rmock.x_rb_status[0] = 0;
+        rmock.x_rb_repair = 0;
+        pthread_mutex_unlock(&rmock.mu);
+        sc_rbs_stats_reset();
+        res = sc_rbs_fill_path(&net_engine, rep_db, net_fake_main, "../Contents/Repaired-OldPeer.flac", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (row not repairable)"));
+        assert(!strcmp(text(rep_db, "SELECT hex(beatData) FROM PerformanceData WHERE trackId = %lld", r_oldpeer), "0000008A789C11223344"));
+        sc_rbs_stats_reset();
+        res = sc_rbs_fill_path(&net_engine, rep_db, net_fake_main, "../Contents/Repaired-OldPeer.flac", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (ondemand cached miss)"));
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 0);
+
+        // 16g. Concurrent CAS race: another connection writes a DJ hot cue while HTTP reply is in flight ->
+        //      atomic CAS matches 0 rows, returns "skipped (row changed)", DJ hot cue preserved byte-for-byte!
+        sqlite3 *cas_db = NULL;
+        assert(sqlite3_open(sqlite3_db_filename(rep_db, "main"), &cas_db) == SQLITE_OK);
+        assert(sqlite3_busy_timeout(cas_db, 500) == SQLITE_OK);
+        char cas_mut[256];
+        snprintf(cas_mut, sizeof cas_mut,
+                 "UPDATE PerformanceData SET quickCues = X'00000081789CDDDD' WHERE trackId = %lld;", r_cas);
+        pthread_mutex_lock(&rmock.mu);
+        rmock.status = 200;
+        rmock.x_rb_repair = 1;
+        rmock.mutate_db = cas_db;
+        rmock.mutate_sql = cas_mut;
+        pthread_mutex_unlock(&rmock.mu);
+        res = load_path(rep_db, "../Contents/Repaired-CAS.flac", -1, &out_id);
+        assert(res && !strcmp(res, "skipped (row changed)"));
+        assert(!strcmp(text(rep_db, "SELECT hex(beatData) || '|' || hex(quickCues) FROM PerformanceData WHERE trackId = %lld", r_cas),
+                       "0000008A789C11223344|00000081789CDDDD"));
+        sqlite3_close(cas_db);
+
+        __atomic_store_n(&rmock.stop, 1, __ATOMIC_RELEASE);
+        assert(!pthread_join(rth, NULL));
+        close(rfd);
+        pthread_mutex_destroy(&rmock.mu);
+        sqlite3_close(rep_db);
         sc_rbs_ondemand_url = NULL;
         net_fake_main = NULL;
     }
