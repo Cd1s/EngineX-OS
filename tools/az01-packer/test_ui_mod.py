@@ -879,11 +879,12 @@ function run(opts = {}) {
                  isStreamingTrack: !!opts.streaming, streamingProviderName: opts.provider || ''};
     const trackList = {isStemsList: !!opts.stemsList,
                        pCurrentIndex: {translator: {unnormalized: -1}}};
-    const collectionController = {getTrackUrisFromUniversalIds: ids => 'uri=' + uri};
+    const lookup = opts.rawLookup !== undefined ? opts.rawLookup : ('uri=' + uri);
+    const collectionController = {getTrackUrisFromUniversalIds: ids => lookup};
     const root = {scIsAZ04: !!opts.az04, scScope: opts.scope || '', scTidalLoggedIn: !!opts.tidalLoggedIn, scT: s => s,
                   scStemStream: id => {
                       calls.push(['stream', id]);
-                      return !!/(?:^|[?&\s])uri=streaming:\/\/TIDAL\/Track\/(\d+)(?:$|[?&\r\n])/.exec(collectionController.getTrackUrisFromUniversalIds([id]) || '');
+                      return !!/(?:^|[?&\r\n])uri=streaming:\/\/TIDAL\/Track\/(\d+)(?:#streaming%3A%2F%2FTIDAL%2FTrack%2F\1)?(?:$|[\r\n])/.exec(collectionController.getTrackUrisFromUniversalIds([id]) || '');
                   }};
     const Style = {systemBlue01Color: 'blue'};
     const actions = (opts.labels || STOCK).map((label, i) => ({
@@ -975,7 +976,7 @@ const az04GatewayTidal = run({az04: true, streaming: true, provider: 'TIDAL', ur
 assert.deepStrictEqual(az04GatewayTidal.labels, [...stock, 'Stems']);
 assert.deepStrictEqual(az04GatewayTidal.calls, [['stream', 99]]);
 
-// Non-gateway native streaming providers and malformed TIDAL URIs on AZ04 and 32-bit must NOT offer EngineX Stems and must NEVER fall through to local startRenderTracks.
+// Non-gateway native streaming providers and malformed/suffixed TIDAL URIs on AZ04 and 32-bit must NOT offer EngineX Stems and must NEVER fall through to local startRenderTracks.
 for (const nonGateway of [
     {az04: true, streaming: true, provider: 'AppleMusic', uri: 'streaming://AppleMusic/Track/77', commit: 2},
     {az04: true, streaming: true, provider: 'Beatport', uri: 'streaming://Beatport/Track/88', commit: 2},
@@ -986,9 +987,17 @@ for (const nonGateway of [
     {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/123abc', modelUri: true, commit: 2},
     {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99/extra', commit: 2},
     {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99-alt', modelUri: true, commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99?trackId=99', commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99?foo=bar', modelUri: true, commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99&other=1', commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99#frag', modelUri: true, commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', rawLookup: 'file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/99?foo%3Dbar#streaming%3A%2F%2FTIDAL%2FTrack%2F99%3Ffoo%3Dbar', commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', rawLookup: 'file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/99%26foo%3Dbar#streaming%3A%2F%2FTIDAL%2FTrack%2F99%26foo%3Dbar', commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', rawLookup: 'file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/99#streaming%3A%2F%2FTIDAL%2FTrack%2F100', commit: 2},
     {az04: false, streaming: true, provider: 'Beatport', uri: 'streaming://Beatport/Track/88', commit: 2},
     {az04: false, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99preview', commit: 2},
     {az04: false, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/123abc', modelUri: true, commit: 2},
+    {az04: false, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99?trackId=99', commit: 2},
 ]) {
     const r = run(nonGateway);
     assert.deepStrictEqual(r.labels, stock, JSON.stringify(nonGateway));
@@ -996,10 +1005,14 @@ for (const nonGateway of [
     assert.deepStrictEqual(r.calls, [['stream', 99]], JSON.stringify(nonGateway));
 }
 
-// A genuine gateway TIDAL URI with Engine query params (?trackId=...) still resolves through lookup on 5.3.0 / AZ04.
-const az04QueryGateway = run({az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99?trackId=99', commit: 2});
-assert.deepStrictEqual(az04QueryGateway.labels, [...stock, 'Stems']);
-assert.deepStrictEqual(az04QueryGateway.calls, [['stream', 99]]);
+// Engine's real getTrackUrisFromUniversalIds QUrl wrapper (?databaseUuid=...&trackId=...&uri=streaming://TIDAL/Track/N#streaming%3A%2F%2FTIDAL%2FTrack%2FN) resolves cleanly.
+const az04RealWrapperGateway = run({
+    az04: true, streaming: true, provider: 'TIDAL',
+    rawLookup: 'file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/99#streaming%3A%2F%2FTIDAL%2FTrack%2F99',
+    commit: 2,
+});
+assert.deepStrictEqual(az04RealWrapperGateway.labels, [...stock, 'Stems']);
+assert.deepStrictEqual(az04RealWrapperGateway.calls, [['stream', 99]]);
 
 for (const excluded of [{az04: true, streaming: true, link: true}, {az04: true, streaming: true, stemsList: true}]) {
     assert.deepStrictEqual(run(excluded).labels, stock);
@@ -1078,6 +1091,12 @@ for (const bad of [
     'uri=streaming://TIDAL/Track/123abc',
     'uri=streaming://TIDAL/Track/123/extra',
     'uri=streaming://TIDAL/Track/99-alt?trackId=99',
+    'uri=streaming://TIDAL/Track/123?trackId=5',
+    'uri=streaming://TIDAL/Track/123&extra=1',
+    'uri=streaming://TIDAL/Track/123#frag',
+    'file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/99?foo%3Dbar#streaming%3A%2F%2FTIDAL%2FTrack%2F99%3Ffoo%3Dbar',
+    'file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/99%26foo%3Dbar#streaming%3A%2F%2FTIDAL%2FTrack%2F99%26foo%3Dbar',
+    'file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/99#streaming%3A%2F%2FTIDAL%2FTrack%2F100',
 ]) {{
     currentUri = bad;
     assert.strictEqual(scStemState(1), '', bad);
@@ -1087,7 +1106,7 @@ assert.strictEqual(xhrs.length, 0);
 
 for (const [good, expectedId] of [
     ['uri=streaming://TIDAL/Track/99', '99'],
-    ['uri=streaming://TIDAL/Track/123?trackId=5', '123'],
+    ['file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/123#streaming%3A%2F%2FTIDAL%2FTrack%2F123', '123'],
 ]) {{
     currentUri = good;
     assert.notStrictEqual(scStemState(1), '', good);
@@ -1104,6 +1123,8 @@ const legacyCheck = uri => {{
 assert.strictEqual(legacyCheck('streaming://TIDAL/Track/99'), true);
 assert.strictEqual(legacyCheck('streaming://TIDAL/Track/99preview'), false);
 assert.strictEqual(legacyCheck('streaming://TIDAL/Track/123abc'), false);
+assert.strictEqual(legacyCheck('streaming://TIDAL/Track/99?trackId=99'), false);
+assert.strictEqual(legacyCheck('streaming://TIDAL/Track/99&extra=1'), false);
 """
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)

@@ -5247,11 +5247,12 @@ SERVICES_MAIN = """
 		return mark === done + 1 ? "render" : "wait"
 	}
 	// A track list row's state, by Engine's id for the row.
+	// Engine serializes getTrackUrisFromUniversalIds lines as QUrl("<file>?databaseUuid=...&trackId=...&uri=<uri>#<encoded(uri)>").
 	function scStemState(uid) {
 		if (typeof root !== "undefined" && root && root.scScope === "tidal" && root.scTidalLoggedIn) return ""
 		const rows = scStemRows, total = scStemTotal, done = scStemDone
 		if (!uid || !Object.keys(rows).length) return ""
-		const m = /(?:^|[?&\\s])uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)(?:$|[?&\\r\\n])/.exec(Planck.librarianController.collectionController.getTrackUrisFromUniversalIds([uid]) || "")
+		const m = /(?:^|[?&\\r\\n])uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)(?:#streaming%3A%2F%2FTIDAL%2FTrack%2F\\1)?(?:$|[\\r\\n])/.exec(Planck.librarianController.collectionController.getTrackUrisFromUniversalIds([uid]) || "")
 		return m ? scStemPlace(rows[m[1]], total, done) : ""
 	}
 	// What is left at the speed seen so far; nothing before 10 s and 1 % of it.
@@ -5298,7 +5299,7 @@ SERVICES_MAIN = """
 	}
 	function scStemStream(uid) {
 		const lib = Planck.librarianController.collectionController
-		const m = /(?:^|[?&\\s])uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)(?:$|[?&\\r\\n])/.exec(lib.getTrackUrisFromUniversalIds([uid]) || "")
+		const m = /(?:^|[?&\\r\\n])uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)(?:#streaming%3A%2F%2FTIDAL%2FTrack%2F\\1)?(?:$|[\\r\\n])/.exec(lib.getTrackUrisFromUniversalIds([uid]) || "")
 		if (!m) return false
 		if (typeof root !== "undefined" && root && root.scScope === "tidal" && root.scTidalLoggedIn) return true
 		// The service's track id from the row's uri: every row of one track, in any list, has it (the rows' own ids are per list),
@@ -8883,7 +8884,7 @@ def edits(dev: bool):
             swipe_edits = [
                 (f"    readonly property list<string> actionLabels: {a}.map(action => action.display.label)\n",
                  '    property bool scStemBusy: false\n'
-                 '    readonly property bool scStem: !(typeof trackList !== "undefined" && trackList && trackList.isStemsList) && !Planck.librarianController.devicesController.isCurrentDeviceNetworkDrive && ((row.isStreamingTrack || row.streamingProviderName || /^streaming:\\/\\//i.test(String(row.modelData && row.modelData.uri || ""))) ? !(typeof root !== "undefined" && root && root.scScope === "tidal" && root.scTidalLoggedIn) && (row.modelData && row.modelData.uri ? /^streaming:\\/\\/TIDAL\\/Track\\/\\d+$/.test(String(row.modelData.uri)) : !!(row.modelData && row.modelData.trackId > 0 && Planck.librarianController && Planck.librarianController.collectionController && Planck.librarianController.collectionController.getTrackUrisFromUniversalIds && /(?:^|[?&\\s])uri=streaming:\\/\\/TIDAL\\/Track\\/\\d+(?:$|[?&\\r\\n])/.test(String(Planck.librarianController.collectionController.getTrackUrisFromUniversalIds([row.modelData.trackId]) || "")))) : !(typeof root !== "undefined" && root && root.scIsAZ04) && !!(row.modelData && row.modelData.trackId > 0)) && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
+                 '    readonly property bool scStem: !(typeof trackList !== "undefined" && trackList && trackList.isStemsList) && !Planck.librarianController.devicesController.isCurrentDeviceNetworkDrive && ((row.isStreamingTrack || row.streamingProviderName || /^streaming:\\/\\//i.test(String(row.modelData && row.modelData.uri || ""))) ? !(typeof root !== "undefined" && root && root.scScope === "tidal" && root.scTidalLoggedIn) && (row.modelData && row.modelData.uri ? /^streaming:\\/\\/TIDAL\\/Track\\/\\d+$/.test(String(row.modelData.uri)) : !!(row.modelData && row.modelData.trackId > 0 && Planck.librarianController && Planck.librarianController.collectionController && Planck.librarianController.collectionController.getTrackUrisFromUniversalIds && /(?:^|[?&\\r\\n])uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)(?:#streaming%3A%2F%2FTIDAL%2FTrack%2F\\1)?(?:$|[\\r\\n])/.test(String(Planck.librarianController.collectionController.getTrackUrisFromUniversalIds([row.modelData.trackId]) || "")))) : !(typeof root !== "undefined" && root && root.scIsAZ04) && !!(row.modelData && row.modelData.trackId > 0)) && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
                  f"    readonly property int scDeck: root.scSwipeDeck({right})\n"
                  "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
                  f"    readonly property list<string> actionLabels: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : scLabel(action.display.label)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
