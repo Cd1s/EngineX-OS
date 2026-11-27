@@ -2081,3 +2081,50 @@ func TestRunTransactionContextHonorsDeadlineWhenPoolBusy(t *testing.T) {
 		t.Fatalf("runTransactionContext overran deadline while waiting on busy pool: %v", elapsed)
 	}
 }
+
+func TestRunTransactionContextDoesNotWaitForQueuedUnrelatedBorrower(t *testing.T) {
+	_, _, db := testlibrary.Create(t)
+	db.SetMaxOpenConns(1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	inTx := make(chan struct{})
+	borrowerQueued := make(chan struct{})
+	borrowerDone := make(chan error, 1)
+	go func() {
+		<-inTx
+		close(borrowerQueued)
+		otherConn, err := db.Conn(context.Background())
+		if err != nil {
+			borrowerDone <- err
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+		borrowerDone <- otherConn.Close()
+	}()
+
+	var cancelAt time.Time
+	go func() {
+		<-borrowerQueued
+		time.Sleep(25 * time.Millisecond)
+		cancelAt = time.Now()
+		cancel()
+	}()
+
+	err := runTransactionContext(ctx, db, func(*sql.Tx) error {
+		close(inTx)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	returnedAfterCancel := time.Since(cancelAt)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runTransactionContext err=%v, want Canceled", err)
+	}
+	if returnedAfterCancel >= 120*time.Millisecond {
+		t.Fatalf("runTransactionContext waited %v behind queued unrelated borrower (>= 120ms)", returnedAfterCancel)
+	}
+	if berr := <-borrowerDone; berr != nil {
+		t.Fatalf("queued unrelated borrower failed: %v", berr)
+	}
+}

@@ -10,12 +10,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
+	sqlite "modernc.org/sqlite"
 )
 
 func TestReserveDeadlineCannotRemoveLiveDatabase(t *testing.T) {
@@ -583,50 +585,6 @@ func TestNormalizeReserveRejectsEstablishedWALReader(t *testing.T) {
 		os.Exit(0)
 	}
 
-	setupWALReserve12 := func(t *testing.T) (string, string, uint64) {
-		t.Helper()
-		seed := reserve12Library(t)
-		raw, err := os.ReadFile(seed)
-		if err != nil {
-			t.Fatal(err)
-		}
-		dbDir := filepath.Join(t.TempDir(), "Engine Library", "Database2")
-		if err := os.MkdirAll(dbDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		mPath := filepath.Join(dbDir, "m.db")
-		if err := os.WriteFile(mPath, raw, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		wdb, err := sql.Open("sqlite", mPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		wdb.SetMaxOpenConns(1)
-		var mode string
-		if err := wdb.QueryRow("PRAGMA journal_mode=WAL").Scan(&mode); err != nil || !strings.EqualFold(mode, "wal") {
-			wdb.Close()
-			t.Fatalf("enable WAL mode=%q err=%v", mode, err)
-		}
-		if err := wdb.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := os.Stat(mPath + "-wal"); err == nil {
-			if err := os.Truncate(mPath+"-wal", 0); err != nil {
-				t.Fatal(err)
-			}
-		} else if errors.Is(err, os.ErrNotExist) {
-			if err := os.WriteFile(mPath+"-wal", nil, 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
-		info, err := os.Stat(mPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return dbDir, mPath, info.Sys().(*syscall.Stat_t).Ino
-	}
-
 	assertRejectedAndPreserved := func(t *testing.T, dbDir, mPath string, beforeIno uint64) {
 		t.Helper()
 		fixed, err := NormalizeDatabase2(dbDir)
@@ -649,7 +607,7 @@ func TestNormalizeReserveRejectsEstablishedWALReader(t *testing.T) {
 	}
 
 	t.Run("same_process", func(t *testing.T) {
-		dbDir, mPath, beforeIno := setupWALReserve12(t)
+		dbDir, mPath, beforeIno := setupWALReserve12Fixture(t)
 		reader, err := sql.Open("sqlite", mPath)
 		if err != nil {
 			t.Fatal(err)
@@ -668,7 +626,7 @@ func TestNormalizeReserveRejectsEstablishedWALReader(t *testing.T) {
 	})
 
 	t.Run("cross_process", func(t *testing.T) {
-		dbDir, mPath, beforeIno := setupWALReserve12(t)
+		dbDir, mPath, beforeIno := setupWALReserve12Fixture(t)
 		cmd := exec.Command(os.Args[0], "-test.run=^TestNormalizeReserveRejectsEstablishedWALReader$")
 		cmd.Env = append(os.Environ(), "ENGINEX_WAL_READER_DB="+mPath)
 		stdin, err := cmd.StdinPipe()
@@ -736,5 +694,420 @@ func TestNormalizeReservePreservesStockDatetimeColumns(t *testing.T) {
 	}
 	if typCreated != "integer" || createdVal != wantInt {
 		t.Fatalf("DATETIME int mangled: type=%s val=%d want=%d", typCreated, createdVal, wantInt)
+	}
+}
+
+func setupWALReserve12Fixture(t *testing.T) (string, string, uint64) {
+	t.Helper()
+	seed := reserve12Library(t)
+	raw, err := os.ReadFile(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbDir := filepath.Join(t.TempDir(), "Engine Library", "Database2")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mPath := filepath.Join(dbDir, "m.db")
+	if err := os.WriteFile(mPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wdb, err := sql.Open("sqlite", mPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wdb.SetMaxOpenConns(1)
+	var mode string
+	if err := wdb.QueryRow("PRAGMA journal_mode=WAL").Scan(&mode); err != nil || !strings.EqualFold(mode, "wal") {
+		wdb.Close()
+		t.Fatalf("enable WAL mode=%q err=%v", mode, err)
+	}
+	if err := wdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(mPath + "-wal"); err == nil {
+		if err := os.Truncate(mPath+"-wal", 0); err != nil {
+			t.Fatal(err)
+		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		if err := os.WriteFile(mPath+"-wal", nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := os.Stat(mPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dbDir, mPath, info.Sys().(*syscall.Stat_t).Ino
+}
+
+func attemptConcurrentExternalWriteBusy(t *testing.T, dbPath, stage string) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestNormalizeDatabase2BlocksArrivingProcessWriterAfterCopyStarts$")
+	cmd.Env = append(os.Environ(), "ENGINEX_RESERVE_CONCURRENT_WRITER_DB="+dbPath)
+	out, werr := cmd.CombinedOutput()
+	if werr == nil {
+		t.Fatalf("%s: concurrent external writer unexpectedly acquired lock and committed", stage)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(werr, &exitErr) || exitErr.ExitCode() != 12 {
+		t.Fatalf("%s: expected busy exit code 12, got %v output=%s", stage, werr, string(out))
+	}
+}
+
+func TestNormalizeDatabase2OverlappingCheckPreservesRebuildLock(t *testing.T) {
+	_, mount, db := testlibrary.Create(t)
+	db.Close()
+	seed := reserve12Library(t)
+	raw, err := os.ReadFile(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbDir := filepath.Join(mount, "Engine Library", "Database2")
+	mPath := filepath.Join(dbDir, "m.db")
+	if err := os.WriteFile(mPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reserveBeforeCopy = func(p string) {
+		if p != mPath {
+			return
+		}
+		if runtime.GOOS == "linux" && !sqlite.OFDLockingEnabled() {
+			t.Fatalf("expected OFD locking enabled on Linux")
+		}
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		fixed2, err2 := NormalizeDatabase2Context(ctx2, dbDir)
+		cancel2()
+		if err2 == nil || len(fixed2) != 0 {
+			t.Fatalf("overlapping NormalizeDatabase2 unexpectedly succeeded: fixed=%v err=%v", fixed2, err2)
+		}
+		attemptConcurrentExternalWriteBusy(t, mPath, "after_overlapping_normalize")
+	}
+	t.Cleanup(func() { reserveBeforeCopy = nil })
+
+	fixed, err := NormalizeDatabase2(dbDir)
+	if err != nil || len(fixed) != 1 || fixed[0] != "m.db" {
+		t.Fatalf("NormalizeDatabase2 failed: fixed=%v err=%v", fixed, err)
+	}
+	for _, p := range []string{mPath, mPath + ".pre-reserve"} {
+		chk, oerr := Open(p, true)
+		if oerr != nil {
+			t.Fatal(oerr)
+		}
+		var gotUUID string
+		if qerr := chk.QueryRow("SELECT uuid FROM Information").Scan(&gotUUID); qerr != nil {
+			chk.Close()
+			t.Fatal(qerr)
+		}
+		chk.Close()
+		if gotUUID != "test-library" {
+			t.Fatalf("%s uuid=%q, want test-library", p, gotUUID)
+		}
+	}
+}
+
+func TestFailedNormalizationPreservesUnrelatedSameProcessLock(t *testing.T) {
+	_, mount, db := testlibrary.Create(t)
+	db.Close()
+	seed := reserve12Library(t)
+	raw, err := os.ReadFile(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbDir := filepath.Join(mount, "Engine Library", "Database2")
+	mPath := filepath.Join(dbDir, "m.db")
+	if err := os.WriteFile(mPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	locker, err := sql.Open("sqlite", mPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locker.SetMaxOpenConns(1)
+	defer locker.Close()
+	if _, err := locker.Exec("BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = locker.Exec("ROLLBACK")
+		}
+	}()
+
+	if r, ok, rerr := Reserve(mPath); rerr != nil || !ok || r != 12 {
+		t.Fatalf("Reserve while locked: r=%d ok=%v err=%v", r, ok, rerr)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	fixed, nerr := NormalizeDatabase2Context(ctx, dbDir)
+	cancel()
+	if nerr == nil || len(fixed) != 0 {
+		t.Fatalf("NormalizeDatabase2Context unexpectedly succeeded while locked: fixed=%v err=%v", fixed, nerr)
+	}
+
+	attemptConcurrentExternalWriteBusy(t, mPath, "after_failed_normalization")
+
+	if _, err := locker.Exec("UPDATE Information SET uuid='locker-owned'"); err != nil {
+		t.Fatalf("locker update failed after failed normalization: %v", err)
+	}
+	if _, err := locker.Exec("COMMIT"); err != nil {
+		t.Fatalf("locker commit failed after failed normalization: %v", err)
+	}
+	committed = true
+	if r, ok, rerr := Reserve(mPath); rerr != nil || !ok || r != 12 {
+		t.Fatalf("m.db reserve changed after failed normalization: r=%d ok=%v err=%v", r, ok, rerr)
+	}
+	if _, serr := os.Stat(mPath + ".pre-reserve"); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("m.db.pre-reserve created on failed normalization: err=%v", serr)
+	}
+}
+
+func TestNormalizeReserveWALDoesNotRemoveNewWriterSHM(t *testing.T) {
+	dbDir, mPath, _ := setupWALReserve12Fixture(t)
+
+	var newWriter *sql.DB
+	var shmInfo os.FileInfo
+	newWriterCommitted := false
+	t.Cleanup(func() {
+		reserveBeforeRename = nil
+		reserveAfterRename = nil
+		if newWriter != nil {
+			if !newWriterCommitted {
+				_, _ = newWriter.Exec("ROLLBACK")
+			}
+			_ = newWriter.Close()
+		}
+	})
+
+	reserveBeforeRename = func(p string) {
+		if p != mPath {
+			return
+		}
+		for _, suffix := range []string{"-shm", "-wal"} {
+			if _, err := os.Stat(p + suffix); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("old sidecar %s still present before rename: err=%v", suffix, err)
+			}
+		}
+		attemptConcurrentExternalWriteBusy(t, mPath, "before_wal_rename")
+	}
+	reserveAfterRename = func(p string) {
+		if p != mPath {
+			return
+		}
+		var oerr error
+		newWriter, oerr = sql.Open("sqlite", mPath)
+		if oerr != nil {
+			t.Fatal(oerr)
+		}
+		newWriter.SetMaxOpenConns(1)
+		if _, err := newWriter.Exec("PRAGMA busy_timeout=1"); err != nil {
+			t.Fatal(err)
+		}
+		var mode string
+		if err := newWriter.QueryRow("PRAGMA journal_mode=WAL").Scan(&mode); err != nil || !strings.EqualFold(mode, "wal") {
+			t.Fatalf("post-rename writer failed to enter WAL mode=%q err=%v", mode, err)
+		}
+		if _, err := newWriter.Exec("UPDATE Track SET comment='post-rename-wal' WHERE id=5"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := newWriter.Exec("BEGIN IMMEDIATE"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := newWriter.Exec("UPDATE Track SET filename='held-writer.mp3' WHERE id=5"); err != nil {
+			t.Fatal(err)
+		}
+		var serr error
+		shmInfo, serr = os.Stat(mPath + "-shm")
+		if serr != nil || shmInfo.Size() == 0 {
+			t.Fatalf("new WAL writer -shm missing after rename: info=%v err=%v", shmInfo, serr)
+		}
+	}
+
+	fixed, err := NormalizeDatabase2(dbDir)
+	if err != nil || len(fixed) != 1 || fixed[0] != "m.db" {
+		t.Fatalf("NormalizeDatabase2 WAL failed: fixed=%v err=%v", fixed, err)
+	}
+	shmAfter, serr := os.Stat(mPath + "-shm")
+	if serr != nil {
+		t.Fatalf("new WAL writer -shm was removed: err=%v", serr)
+	}
+	if !os.SameFile(shmInfo, shmAfter) {
+		t.Fatalf("new WAL writer -shm inode changed")
+	}
+
+	attemptConcurrentExternalWriteBusy(t, mPath, "post_normalize_while_new_wal_writer_held")
+
+	if _, err := newWriter.Exec("COMMIT"); err != nil {
+		t.Fatalf("held WAL writer commit failed: %v", err)
+	}
+	newWriterCommitted = true
+	if err := newWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	newWriter = nil
+
+	if r, ok, rerr := Reserve(mPath); rerr != nil || !ok || r != 0 {
+		t.Fatalf("rebuilt reserve=%d ok=%v err=%v", r, ok, rerr)
+	}
+	chk, err := Open(mPath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chk.Close()
+	var filename, comment string
+	if err := chk.QueryRow("SELECT filename, comment FROM Track WHERE id=5").Scan(&filename, &comment); err != nil {
+		t.Fatal(err)
+	}
+	if filename != "held-writer.mp3" || comment != "post-rename-wal" {
+		t.Fatalf("post-rename WAL updates lost: filename=%q comment=%q", filename, comment)
+	}
+}
+
+func TestNormalizeReservePreservesUTF16LibrariesAndDatetime(t *testing.T) {
+	const wantPath = "../Music/Café.mp3"
+	const wantTitle = "Café Track"
+	const wantUUID = "utf16-uuid-café"
+	const wantTextDT = "2024-03-01 12:34:56.021"
+	const wantIntDT int64 = 1700000000
+
+	for _, enc := range []string{"UTF-8", "UTF-16le", "UTF-16be"} {
+		t.Run(enc, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "m.db")
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustExec(t, db, fmt.Sprintf("PRAGMA encoding=%q; CREATE TABLE __seed(x); DROP TABLE __seed; VACUUM; PRAGMA user_version=4194305", enc))
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil || len(raw) != 4096 {
+				t.Fatalf("seed len=%d err=%v", len(raw), err)
+			}
+			raw[20] = 12
+			raw[105], raw[106] = 0x0f, 0xf4
+			if err := os.WriteFile(path, raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			db, err = sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			db.SetMaxOpenConns(1)
+			schema, err := os.ReadFile("testdata/engine-5.0.4.sql")
+			if err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			mustExec(t, db, strings.ReplaceAll(string(schema), "CREATE TABLE sqlite_sequence(name,seq);", ""))
+			mustExec(t, db, "INSERT INTO Information(uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES(?,3,0,2)", wantUUID)
+			mustExec(t, db, "INSERT INTO Track(id,path,filename,title,lastEditTime,dateCreated,isAnalyzed) VALUES(5,?,?,?,?,?,1)",
+				wantPath, "Café.mp3", wantTitle, wantTextDT, wantIntDT)
+			var beforeEnc, beforeLastHex string
+			if err := db.QueryRow("PRAGMA main.encoding").Scan(&beforeEnc); err != nil || !strings.EqualFold(beforeEnc, enc) {
+				db.Close()
+				t.Fatalf("setup encoding=%q want %q err=%v", beforeEnc, enc, err)
+			}
+			var beforeJul float64
+			if err := db.QueryRow("SELECT hex(CAST(lastEditTime AS BLOB)), julianday(lastEditTime) FROM Track WHERE id=5").Scan(&beforeLastHex, &beforeJul); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			if fixed, err := NormalizeReserve(path); err != nil || !fixed {
+				t.Fatalf("NormalizeReserve(%s) = %v, %v", enc, fixed, err)
+			}
+			if r, ok, rerr := Reserve(path); rerr != nil || !ok || r != 0 {
+				t.Fatalf("reserve after rebuild = %d ok=%v err=%v", r, ok, rerr)
+			}
+
+			out, err := Open(path, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer out.Close()
+			var afterEnc, check, gotUUID, gotTitle, typLast, gotLastHex, gotLastText, typCreated string
+			var gotIntDT int64
+			var pathMatches int
+			var afterJul float64
+			if err := out.QueryRow("PRAGMA main.encoding").Scan(&afterEnc); err != nil || !strings.EqualFold(afterEnc, enc) {
+				t.Fatalf("rebuilt encoding=%q want %q err=%v", afterEnc, enc, err)
+			}
+			if err := out.QueryRow("PRAGMA integrity_check").Scan(&check); err != nil || check != "ok" {
+				t.Fatalf("integrity_check=%q err=%v", check, err)
+			}
+			if err := out.QueryRow("SELECT uuid FROM Information").Scan(&gotUUID); err != nil || gotUUID != wantUUID {
+				t.Fatalf("uuid=%q want %q err=%v", gotUUID, wantUUID, err)
+			}
+			if err := out.QueryRow("SELECT title, typeof(lastEditTime), hex(CAST(lastEditTime AS BLOB)), CASE WHEN 1 THEN lastEditTime END, julianday(lastEditTime), typeof(dateCreated), dateCreated FROM Track WHERE id=5").Scan(&gotTitle, &typLast, &gotLastHex, &gotLastText, &afterJul, &typCreated, &gotIntDT); err != nil {
+				t.Fatal(err)
+			}
+			if gotTitle != wantTitle || strings.ContainsRune(gotTitle, '\x00') {
+				t.Fatalf("title corrupted: %q (%x)", gotTitle, []byte(gotTitle))
+			}
+			if typLast != "text" || gotLastHex != beforeLastHex || gotLastText != wantTextDT || afterJul != beforeJul || typCreated != "integer" || gotIntDT != wantIntDT {
+				t.Fatalf("datetime mismatch: got (%s, %s, %q, %v, %s, %d) want (text, %s, %q, %v, integer, %d)", typLast, gotLastHex, gotLastText, afterJul, typCreated, gotIntDT, beforeLastHex, wantTextDT, beforeJul, wantIntDT)
+			}
+			if err := out.QueryRow("SELECT count(*) FROM Track WHERE path=?", wantPath).Scan(&pathMatches); err != nil || pathMatches != 1 {
+				t.Fatalf("path lookup count=%d want 1 err=%v", pathMatches, err)
+			}
+		})
+	}
+}
+
+func TestNormalizeReserveWideAuxiliaryTable(t *testing.T) {
+	path := reserve12Library(t)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	colDefs := make([]string, 1000)
+	colNames := make([]string, 1000)
+	vals := make([]any, 1000)
+	placeholders := make([]string, 1000)
+	for i := range colDefs {
+		name := fmt.Sprintf("c%d", i)
+		colNames[i] = name
+		colDefs[i] = name + " TEXT"
+		vals[i] = fmt.Sprintf("v%d", i)
+		placeholders[i] = "?"
+	}
+	vals[0] = "first"
+	vals[500] = "mid"
+	vals[999] = "last"
+	mustExec(t, db, "CREATE TABLE WideAux("+strings.Join(colDefs, ",")+")")
+	if _, err := db.Exec("INSERT INTO WideAux("+strings.Join(colNames, ",")+") VALUES("+strings.Join(placeholders, ",")+")", vals...); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if fixed, err := NormalizeReserve(path); err != nil || !fixed {
+		t.Fatalf("NormalizeReserve on 1000-col table = %v, %v", fixed, err)
+	}
+	if r, ok, rerr := Reserve(path); rerr != nil || !ok || r != 0 {
+		t.Fatalf("reserve=%d ok=%v err=%v", r, ok, rerr)
+	}
+	out, err := Open(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	var c0, c500, c999 string
+	if err := out.QueryRow("SELECT c0, c500, c999 FROM WideAux").Scan(&c0, &c500, &c999); err != nil {
+		t.Fatal(err)
+	}
+	if c0 != "first" || c500 != "mid" || c999 != "last" {
+		t.Fatalf("WideAux values=(%q,%q,%q), want (first,mid,last)", c0, c500, c999)
 	}
 }

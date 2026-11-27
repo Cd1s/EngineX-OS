@@ -162,7 +162,7 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			r, err = dbhealer.InspectMount(m)
 		case *reserve:
 			r.Mount, r.CheckedAt = m, time.Now().UTC()
-			r.ReserveFixed, err = dbhealer.NormalizeDatabase2(filepath.Join(m, "Engine Library", "Database2"))
+			r.ReserveFixed, err = dbhealer.NormalizeMountReserve(m)
 			r.Healthy = err == nil
 			if err == nil && *fixGrids {
 				runMP3Fix(guardianRemaining(commandStart, *deadline), false)

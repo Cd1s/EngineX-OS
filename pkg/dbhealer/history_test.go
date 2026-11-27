@@ -1186,3 +1186,79 @@ func TestHealMountFullCancelDuringHistoryPruneRollsBackSessionDelete(t *testing.
 		t.Fatalf("canceled history prune deleted visible session: remaining=%d want 2", sessions)
 	}
 }
+
+func TestHealMountFullCancelDuringHistoryVacuumRecordsHistoryPruned(t *testing.T) {
+	mount, hm := stockHistoryMount(t)
+	hdb, err := sql.Open("sqlite", hm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdb.SetMaxOpenConns(1)
+	mustExec(t, hdb, "INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,NULL,NULL)")
+	mustExec(t, hdb, "INSERT INTO Track(id,path,filename,title,albumArtId,isAnalyzed) VALUES(10,'../Music/s1.mp3','s1.mp3','S1',1,1),(11,'../Music/s2.mp3','s2.mp3','S2',1,1)")
+	mustExec(t, hdb, "INSERT INTO Historylist(id,title,startTime,timezone,isDeleted) VALUES(1,'Old',100,'UTC',0),(2,'New',200,'UTC',0)")
+	mustExec(t, hdb, "INSERT INTO HistorylistEntity(listId,trackId,startTime) VALUES(1,10,100),(2,11,200)")
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var blocker *sql.DB
+	var timer *time.Timer
+	t.Cleanup(func() {
+		historyBeforeVacuum = nil
+		if timer != nil {
+			timer.Stop()
+		}
+		if blocker != nil {
+			_, _ = blocker.Exec("ROLLBACK")
+			_ = blocker.Close()
+		}
+	})
+	historyBeforeVacuum = func(p string) {
+		var oerr error
+		blocker, oerr = sql.Open("sqlite", p)
+		if oerr != nil {
+			t.Fatal(oerr)
+		}
+		blocker.SetMaxOpenConns(1)
+		if _, err := blocker.Exec("BEGIN"); err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		if err := blocker.QueryRow("SELECT count(*) FROM Historylist WHERE COALESCE(isDeleted,0)=0").Scan(&n); err != nil || n != 1 {
+			t.Fatalf("expected 1 visible session committed before VACUUM, got %d err=%v", n, err)
+		}
+		timer = time.AfterFunc(25*time.Millisecond, cancel)
+	}
+
+	rep, err := HealMountWithOptions(ctx, mount, MountOptions{MaxSessions: 1, DataOnly: false})
+	if err == nil || !strings.Contains(err.Error(), "history pruned; compaction failed") {
+		t.Fatalf("expected post-prune compaction failure error, got rep=%+v err=%v", rep, err)
+	}
+	if rep.Healthy {
+		t.Fatalf("expected Healthy=false on compaction failure, got %+v", rep)
+	}
+	if !rep.HistoryPruned {
+		t.Fatalf("expected HistoryPruned=true when delete committed before VACUUM failed: rep=%+v", rep)
+	}
+
+	_, _ = blocker.Exec("ROLLBACK")
+	_ = blocker.Close()
+	blocker = nil
+
+	check, err := Open(hm, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var sessions int
+	if err := check.QueryRow(`SELECT count(*) FROM Historylist WHERE COALESCE(isDeleted,0)=0`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 1 {
+		t.Fatalf("expected 1 visible session remaining on disk, got %d", sessions)
+	}
+}

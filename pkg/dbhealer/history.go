@@ -499,37 +499,49 @@ func PruneHistoryDB(path string, maxSessions int) error {
 	return PruneHistoryDBContext(context.Background(), path, maxSessions)
 }
 
+var historyBeforeVacuum func(string)
+
 // PruneHistoryDBContext is PruneHistoryDB while honoring ctx cancellation across prune statements and compaction.
 func PruneHistoryDBContext(ctx context.Context, path string, maxSessions int) error {
+	_, err := pruneHistoryDBContext(ctx, path, maxSessions)
+	return err
+}
+
+func pruneHistoryDBContext(ctx context.Context, path string, maxSessions int) (pruned bool, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return false, err
 	}
 	if maxSessions < 0 {
-		return fmt.Errorf("maxSessions must not be negative")
+		return false, fmt.Errorf("maxSessions must not be negative")
 	}
 	if maxSessions == 0 {
 		maxSessions = DefaultMaxSessions
 	}
 	rw, err := writable(path)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !rw {
-		return fmt.Errorf("history library is read-only")
+		return false, fmt.Errorf("history library is read-only")
 	}
 	db, err := openContext(ctx, path, false)
 	if err != nil {
-		return err
+		return false, err
 	}
-	defer db.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = db.Close()
+		}
+	}()
 	if err = verifyHistoryHeader(ctx, db, false); err != nil {
-		return err
+		return false, err
 	}
 	if err = tuneContext(ctx, db, false); err != nil {
-		return err
+		return false, err
 	}
 	deleted := int64(0)
 	err = transactionContext(ctx, db, func(tx *sql.Tx) error {
@@ -640,17 +652,30 @@ func PruneHistoryDBContext(ctx context.Context, path string, maxSessions int) er
 		return ctx.Err()
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
+	committedDelete := deleted > 0
 	if err := ctx.Err(); err != nil {
-		return err
+		if committedDelete {
+			return true, fmt.Errorf("history pruned; compaction failed: %w", err)
+		}
+		return false, err
 	}
 	if deleted > 0 {
+		if historyBeforeVacuum != nil {
+			historyBeforeVacuum(path)
+		}
 		_, err = db.ExecContext(ctx, "VACUUM")
 		if err != nil {
-			return fmt.Errorf("history pruned; compaction failed: %w", err)
+			return true, fmt.Errorf("history pruned; compaction failed: %w", err)
 		}
 	}
-	_, err = db.ExecContext(ctx, "PRAGMA optimize")
-	return err
+	if _, err = db.ExecContext(ctx, "PRAGMA optimize"); err != nil {
+		return committedDelete, err
+	}
+	closed = true
+	if err = db.Close(); err != nil {
+		return committedDelete, err
+	}
+	return true, nil
 }

@@ -264,46 +264,54 @@ func transaction(db *sql.DB, f func(*sql.Tx) error) error {
 }
 
 func transactionContext(ctx context.Context, db *sql.DB, f func(*sql.Tx) error) error {
-	if err := clampBusyTimeout(ctx, db); err != nil {
-		return err
+	if ctx != nil {
+		if _, ok := ctx.Deadline(); ok {
+			busyMS, err := effectiveBusyTimeoutMS(ctx)
+			if err != nil {
+				return err
+			}
+			return transactionContextWithBusy(ctx, db, busyMS, f)
+		}
 	}
 	return runTransactionContext(ctx, db, f)
 }
 
 func transactionContextWithBusy(ctx context.Context, db *sql.DB, busyMS int, f func(*sql.Tx) error) error {
-	if err := clampBusyTimeoutMS(ctx, db, busyMS); err != nil {
-		return err
-	}
-	return runTransactionContext(ctx, db, f)
+	return runTransactionContextWithBusy(ctx, db, busyMS, true, f)
 }
 
 func runTransactionContext(ctx context.Context, db *sql.DB, f func(*sql.Tx) error) error {
+	return runTransactionContextWithBusy(ctx, db, 0, false, f)
+}
+
+func runTransactionContextWithBusy(ctx context.Context, db *sql.DB, busyMS int, setBusy bool, f func(*sql.Tx) error) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// Pass ctx to BeginTx so pool-slot waits and COMMIT lock waits interrupt on
-	// cancellation. When awaitDone rolls back asynchronously, wait for a pool
-	// connection to confirm SQLite ROLLBACK and journal cleanup have finished
-	// before returning.
-	tx, err := db.BeginTx(ctx, nil)
+	// Pin the transaction's own connection so defer conn.Close() synchronizes with
+	// any asynchronous awaitDone rollback via conn's closemu without queuing behind
+	// unrelated pool borrowers.
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
 	}
-	waitPoolCleanup := func() {
-		if c, cerr := db.Conn(context.Background()); cerr == nil {
-			_ = c.Close()
+	defer func() { _ = conn.Close() }()
+	if setBusy {
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", busyMS)); err != nil {
+			return err
 		}
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
 	committed := false
 	defer func() {
-		if committed {
-			return
-		}
-		if rerr := tx.Rollback(); errors.Is(rerr, sql.ErrTxDone) {
-			waitPoolCleanup()
+		if !committed {
+			_ = tx.Rollback()
 		}
 	}()
 	if err = f(tx); err != nil {
@@ -314,7 +322,6 @@ func runTransactionContext(ctx context.Context, db *sql.DB, f func(*sql.Tx) erro
 	}
 	if err = tx.Commit(); err != nil {
 		if errors.Is(err, sql.ErrTxDone) {
-			waitPoolCleanup()
 			if cerr := ctx.Err(); cerr != nil {
 				return cerr
 			}
@@ -1049,11 +1056,14 @@ func finishHistoryHeal(
 			r.Warnings = append(r.Warnings, "history: "+warning)
 		}
 		// An explicit full heal prunes to the newest visible sessions and compacts.
-		if err := PruneHistoryDBContext(ctx, history, maxSessions); err != nil {
+		pruned, err := pruneHistoryDBContext(ctx, history, maxSessions)
+		if pruned {
+			r.HistoryPruned = true
+		}
+		if err != nil {
 			r.Healthy = false
 			return r, fmt.Errorf("history: %w", err)
 		}
-		r.HistoryPruned = true
 		hdb, e = openContext(ctx, history, false)
 		if e != nil {
 			return r, e
