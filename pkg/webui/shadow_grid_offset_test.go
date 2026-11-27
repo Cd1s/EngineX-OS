@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -678,5 +680,189 @@ func TestPausedFollowWireAndSuiteLifecycle(t *testing.T) {
 			t.Fatalf("%s: persisted fourDeckWaveform lost: %s", tc.name, w.Body.String())
 		}
 		s.Close()
+	}
+}
+
+func TestUDPPingPongOverlappingSendAndReceive(t *testing.T) {
+	aConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aConn.Close()
+	bConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bConn.Close()
+
+	a := newShadowState()
+	bAddr := bConn.LocalAddr().(*net.UDPAddr)
+	t0 := time.Now()
+	a.receive([]byte("EngineX-shadow 1"), "127.0.0.1", t0)
+	p := a.findEchoPeer("127.0.0.1")
+	if p == nil {
+		t.Fatal("missing echo peer")
+	}
+
+	// Deterministic overlap: send seq1 at t0, overwrite with seq2 at t0+250ms before
+	// pong1 arrives. A late pong1 must be dropped without clobbering seq2, and pong2
+	// must then measure against seq2's own send timestamp.
+	readPingSeq := func() string {
+		t.Helper()
+		buf := make([]byte, 128)
+		bConn.SetReadDeadline(time.Now().Add(time.Second))
+		n, _, err := bConn.ReadFromUDP(buf)
+		if err != nil {
+			t.Fatalf("read ping: %v", err)
+		}
+		return string(buf[len(shadowPingMagic):n])
+	}
+	if !a.sendUDPPingPeer(aConn, p, bAddr.Port, t0) {
+		t.Fatal("first ping rate-limited")
+	}
+	seq1 := readPingSeq()
+	t2 := t0.Add(250 * time.Millisecond)
+	if !a.sendUDPPingPeer(aConn, p, bAddr.Port, t2) {
+		t.Fatal("second ping rate-limited")
+	}
+	seq2 := readPingSeq()
+
+	a.handleUDP(aConn, []byte(shadowPongMagic+seq1), bAddr, t2.Add(2*time.Millisecond))
+	if got := a.peerHalfRTT("127.0.0.1", t2.Add(2*time.Millisecond)); got != 0 {
+		t.Fatalf("superseded pong1 recorded halfRTT = %.3f ms, want 0", got)
+	}
+	a.handleUDP(aConn, []byte(shadowPongMagic+seq2), bAddr, t2.Add(8*time.Millisecond))
+	if got := a.peerHalfRTT("127.0.0.1", t2.Add(8*time.Millisecond)); math.Abs(got-4.0) > 0.05 {
+		t.Fatalf("pong2 halfRTT = %.3f ms, want 4.0 ms (pong1 must not have cleared seq2)", got)
+	}
+
+	// Concurrent overlap stress: sender emits probes spaced 205 ms apart while receiver
+	// delivers every pong with a true RTT of 207 ms (halfRTT clamped to shadowHalfRTTMaxMS).
+	// If nonce and send timestamp ever tear across send(k+1) and handleUDP(pong_k), the
+	// receiver computes (t_k + 207 ms) - (t_k + 205 ms) = 2 ms -> halfRTT = 1.0 ms.
+	a2 := newShadowState()
+	tBase := time.Now()
+	a2.receive([]byte("EngineX-shadow 1"), "127.0.0.1", tBase)
+	p2 := a2.findEchoPeer("127.0.0.1")
+
+	stopDrain := make(chan struct{})
+	var drainWG sync.WaitGroup
+	drainWG.Add(1)
+	go func() {
+		defer drainWG.Done()
+		buf := make([]byte, 128)
+		for {
+			select {
+			case <-stopDrain:
+				return
+			default:
+			}
+			bConn.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+			_, _, _ = bConn.ReadFromUDP(buf)
+		}
+	}()
+
+	type probe struct {
+		seq   uint64
+		tSend time.Time
+	}
+	const iters = 15000
+	ch := make(chan probe, 1)
+	var badHalfRTTMilli atomic.Int64
+	var rxWG sync.WaitGroup
+	rxWG.Add(1)
+	go func() {
+		defer rxWG.Done()
+		var pkt [len(shadowPongMagic) + 16]byte
+		copy(pkt[:], shadowPongMagic)
+		for pr := range ch {
+			n := len(shadowPongMagic) + len(strconv.AppendUint(pkt[len(shadowPongMagic):len(shadowPongMagic)], pr.seq, 16))
+			tRecv := pr.tSend.Add(207 * time.Millisecond)
+			a2.handleUDP(aConn, pkt[:n], bAddr, tRecv)
+			if got := a2.peerHalfRTT("127.0.0.1", tRecv); got > 0 && got < shadowHalfRTTMaxMS-0.5 {
+				badHalfRTTMilli.Store(int64(got * 1000))
+			}
+		}
+	}()
+
+	for i := 1; i <= iters; i++ {
+		tSend := tBase.Add(time.Duration(i) * 205 * time.Millisecond)
+		if !a2.sendUDPPingPeer(aConn, p2, bAddr.Port, tSend) {
+			t.Fatalf("send %d unexpectedly skipped", i)
+		}
+		select {
+		case ch <- probe{seq: uint64(i), tSend: tSend}:
+		default:
+		}
+	}
+	close(ch)
+	rxWG.Wait()
+	close(stopDrain)
+	drainWG.Wait()
+
+	if bad := badHalfRTTMilli.Load(); bad != 0 {
+		t.Fatalf("overlapping send/receive tore nonce+timestamp and recorded bogus halfRTT = %.3f ms (true RTT was 207 ms)", float64(bad)/1000.0)
+	}
+}
+
+func TestUDPPingPongAcceptedZeroAllocs(t *testing.T) {
+	aConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aConn.Close()
+	bConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bConn.Close()
+	bAddr := bConn.LocalAddr().(*net.UDPAddr)
+
+	const runs = 64
+	const total = runs + 1 // 1 warmup + runs measured by testing.AllocsPerRun
+	states := make([]*shadowState, total)
+	pongs := make([][]byte, total)
+	t0 := time.Now()
+	sentAt := t0.Add(time.Second)
+	recvAt := sentAt.Add(4 * time.Millisecond)
+	buf := make([]byte, 128)
+	for i := range total {
+		sh := newShadowState()
+		sh.receive([]byte("EngineX-shadow 1"), "127.0.0.1", t0)
+		p := sh.findEchoPeer("127.0.0.1")
+		if p == nil || !sh.sendUDPPingPeer(aConn, p, bAddr.Port, sentAt) {
+			t.Fatalf("arm ping %d failed", i)
+		}
+		bConn.SetReadDeadline(time.Now().Add(time.Second))
+		n, _, err := bConn.ReadFromUDP(buf)
+		if err != nil {
+			t.Fatalf("read ping %d: %v", i, err)
+		}
+		rest := buf[len(shadowPingMagic):n]
+		pong := make([]byte, len(shadowPongMagic)+len(rest))
+		copy(pong, shadowPongMagic)
+		copy(pong[len(shadowPongMagic):], rest)
+		states[i] = sh
+		pongs[i] = pong
+	}
+
+	peerAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: bAddr.Port}
+	idx := 0
+	allocs := testing.AllocsPerRun(runs, func() {
+		sh := states[idx]
+		pkt := pongs[idx]
+		idx++
+		sh.handleUDP(nil, pkt, peerAddr, recvAt)
+	})
+	if idx != total {
+		t.Fatalf("ran %d times, want %d", idx, total)
+	}
+	for i, sh := range states {
+		if got := sh.peerHalfRTT("127.0.0.1", recvAt); math.Abs(got-2.0) > 0.05 {
+			t.Fatalf("state %d accepted UDP pong halfRTT = %.3f ms, want 2.0 ms", i, got)
+		}
+	}
+	if allocs != 0 {
+		t.Fatalf("accepted UDP pong allocated %.2f allocs/run, want 0", allocs)
 	}
 }

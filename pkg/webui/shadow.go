@@ -957,6 +957,11 @@ const (
 	shadowPongMagic  = "EngineX-pong "
 )
 
+var (
+	shadowPingPrefix = []byte(shadowPingMagic)
+	shadowPongPrefix = []byte(shadowPongMagic)
+)
+
 // decksAlive is the QML's heartbeat between posts: nothing changed on its decks
 // since the last post, so it sends no JSON (each serialisation is garbage on
 // Engine's GUI-thread heap). Its decks stay fresh for the peer, which extrapolates
@@ -1264,27 +1269,57 @@ type peerClock struct {
 	at  time.Time
 }
 
-// peerRTT is the smallest measured UDP echo round-trip to a peer IP, ms, so the
-// receiver compensates half the UDP round trip instead of dropping T_min.
-type peerRTT struct {
-	ms      float64
-	at      time.Time
-	samples int
+const (
+	// pendingProbe packs a non-zero 20-bit nonce (high bits) and 44-bit monotonic
+	// send timestamp in microseconds since sh.boot (low bits) into one atomic word
+	// so send and pong consume never tear across separate fields.
+	udpPingSentBits  = 44
+	udpPingSentMask  = (uint64(1) << udpPingSentBits) - 1
+	udpPingNonceMask = (uint64(1) << (64 - udpPingSentBits)) - 1
+
+	// rttState packs sample count (high 4 bits, 0 = none, 1..15), running-min RTT
+	// in microseconds (20 bits, 0..1,000,000 us), and monotonic timestamp in ms
+	// since sh.boot (low 40 bits, ~34.8 years) into one atomic word (0 heap allocs).
+	udpRTTAtBits       = 40
+	udpRTTAtMask       = (uint64(1) << udpRTTAtBits) - 1
+	udpRTTUSBits       = 20
+	udpRTTUSMask       = (uint64(1) << udpRTTUSBits) - 1
+	udpRTTUSShift      = udpRTTAtBits
+	udpRTTSamplesShift = udpRTTAtBits + udpRTTUSBits
+	udpRTTSamplesMax   = 15
+	udpRTTMaxStoredUS  = 1_000_000
+)
+
+func packUDPPendingPing(nonce uint64, sentUS int64) uint64 {
+	return ((nonce & udpPingNonceMask) << udpPingSentBits) | (uint64(sentUS) & udpPingSentMask)
+}
+
+func packUDPRTT(samples, rttUS uint64, atMS int64) uint64 {
+	if samples > udpRTTSamplesMax {
+		samples = udpRTTSamplesMax
+	}
+	if rttUS > udpRTTMaxStoredUS {
+		rttUS = udpRTTMaxStoredUS
+	}
+	return (samples << udpRTTSamplesShift) | (rttUS << udpRTTUSShift) | (uint64(atMS) & udpRTTAtMask)
+}
+
+func unpackUDPRTT(w uint64) (samples int, rttUS uint64, atMS uint64) {
+	return int(w >> udpRTTSamplesShift), (w >> udpRTTUSShift) & udpRTTUSMask, w & udpRTTAtMask
 }
 
 // udpEchoPeer holds lock-free per-peer UDP echo and RTT state. Peer membership
 // updates copy-on-write sh.echoPeers under sh.mu; the UDP receive path only uses
-// atomic loads and CAS.
+// atomic loads and CAS with zero heap allocations.
 type udpEchoPeer struct {
-	ip            string
-	ip4           [4]byte
-	hasIP4        bool
-	lastReplyNS   atomic.Int64            // monotonic offset ns from sh.boot; math.MinInt64 = never
-	lastPingNS    atomic.Int64            // monotonic offset ns from sh.boot; math.MinInt64 = never
-	pingTries     atomic.Int32            // warm-up probe count
-	pendingSentNS atomic.Int64            // monotonic offset ns from sh.boot for pendingSeq
-	pendingSeq    atomic.Uint64           // one-shot nonce; 0 = none in flight
-	rtt           atomic.Pointer[peerRTT] // running-min UDP echo RTT
+	ip           string
+	ip4          [4]byte
+	hasIP4       bool
+	lastReplyNS  atomic.Int64  // monotonic offset ns from sh.boot; math.MinInt64 = never
+	lastPingNS   atomic.Int64  // monotonic offset ns from sh.boot; math.MinInt64 = never
+	pingTries    atomic.Int32  // warm-up probe count
+	pendingProbe atomic.Uint64 // packed (nonce<<44 | sentUS); 0 = none in flight
+	rttState     atomic.Uint64 // packed (samples<<60 | rttUS<<40 | atMS); 0 = none
 }
 
 func newUDPEchoPeer(ip string) *udpEchoPeer {
@@ -1298,23 +1333,34 @@ func newUDPEchoPeer(ip string) *udpEchoPeer {
 	return p
 }
 
-func (p *udpEchoPeer) recordRTT(rttMS float64, now time.Time) {
-	if rttMS < 0 || math.IsNaN(rttMS) || math.IsInf(rttMS, 0) {
-		return
+func (p *udpEchoPeer) recordRTTUS(rttUS uint64, nowMS int64) {
+	if rttUS > udpRTTMaxStoredUS {
+		rttUS = udpRTTMaxStoredUS
 	}
+	nowAt := uint64(nowMS) & udpRTTAtMask
+	timeoutMS := uint64(shadowPeerSeenTimeout / time.Millisecond)
 	for {
-		old := p.rtt.Load()
-		var next peerRTT
-		if old == nil || now.Sub(old.at) > shadowPeerSeenTimeout {
-			next = peerRTT{ms: rttMS, at: now, samples: 1}
+		old := p.rttState.Load()
+		samples, oldUS, oldAt := unpackUDPRTT(old)
+		elapsedMS := (nowAt - oldAt) & udpRTTAtMask
+		var nextSamples, nextUS uint64
+		if samples == 0 || elapsedMS > timeoutMS {
+			nextSamples = 1
+			nextUS = rttUS
 		} else {
-			ms := old.ms + 0.1*now.Sub(old.at).Seconds()
-			if rttMS < ms {
-				ms = rttMS
+			decayedUS := oldUS + elapsedMS/10 // 0.1 ms/s = 1 us per 10 ms
+			if rttUS < decayedUS {
+				nextUS = rttUS
+			} else {
+				nextUS = decayedUS
 			}
-			next = peerRTT{ms: ms, at: now, samples: old.samples + 1}
+			nextSamples = uint64(samples) + 1
+			if nextSamples > udpRTTSamplesMax {
+				nextSamples = udpRTTSamplesMax
+			}
 		}
-		if p.rtt.CompareAndSwap(old, &next) {
+		next := packUDPRTT(nextSamples, nextUS, nowMS)
+		if p.rttState.CompareAndSwap(old, next) {
 			return
 		}
 	}
@@ -1418,16 +1464,20 @@ func (sh *shadowState) pruneEchoPeersLocked(now time.Time, dropped map[string]bo
 	if cur == nil || len(*cur) == 0 {
 		return
 	}
+	nowAt := uint64(now.Sub(sh.boot).Milliseconds()) & udpRTTAtMask
+	timeoutMS := uint64(shadowPeerSeenTimeout / time.Millisecond)
 	var kept []*udpEchoPeer
 	changed := false
 	for _, p := range *cur {
-		r := p.rtt.Load()
-		if r != nil && now.Sub(r.at) >= shadowPeerSeenTimeout {
-			p.rtt.Store(nil)
-			r = nil
+		w := p.rttState.Load()
+		samples, _, atMS := unpackUDPRTT(w)
+		if samples > 0 && (nowAt-atMS)&udpRTTAtMask >= timeoutMS {
+			if p.rttState.CompareAndSwap(w, 0) {
+				samples = 0
+			}
 		}
 		_, alive := sh.peers[p.ip]
-		if dropped[p.ip] || (!alive && r == nil) {
+		if dropped[p.ip] || (!alive && samples == 0) {
 			changed = true
 			continue
 		}
@@ -1448,7 +1498,8 @@ func (sh *shadowState) recordPeerRTT(ip string, rttMS float64, now time.Time) {
 		p = sh.ensureEchoPeerLocked(ip)
 		sh.mu.Unlock()
 	}
-	p.recordRTT(rttMS, now)
+	rttUS := uint64(math.Round(rttMS * 1000.0))
+	p.recordRTTUS(rttUS, now.Sub(sh.boot).Milliseconds())
 }
 
 func (sh *shadowState) peerHalfRTT(ip string, now time.Time) float64 {
@@ -1456,8 +1507,13 @@ func (sh *shadowState) peerHalfRTT(ip string, now time.Time) float64 {
 	if p == nil {
 		return 0
 	}
-	if r := p.rtt.Load(); r != nil && now.Sub(r.at) <= shadowPeerSeenTimeout {
-		return min(r.ms/2, shadowHalfRTTMaxMS)
+	samples, rttUS, atMS := unpackUDPRTT(p.rttState.Load())
+	if samples == 0 {
+		return 0
+	}
+	nowAt := uint64(now.Sub(sh.boot).Milliseconds()) & udpRTTAtMask
+	if (nowAt-atMS)&udpRTTAtMask <= uint64(shadowPeerSeenTimeout/time.Millisecond) {
+		return min(float64(rttUS)/2000.0, shadowHalfRTTMaxMS)
 	}
 	return 0
 }
@@ -1480,7 +1536,8 @@ func (sh *shadowState) sendUDPPingPeer(conn *net.UDPConn, p *udpEchoPeer, port i
 	if port == 0 {
 		port = shadowBeaconPort
 	}
-	nowNS := now.Sub(sh.boot).Nanoseconds()
+	elapsed := now.Sub(sh.boot)
+	nowNS := elapsed.Nanoseconds()
 	for {
 		prev := p.lastPingNS.Load()
 		if prev != math.MinInt64 && nowNS-prev < int64(shadowUDPPingMinGap) {
@@ -1490,12 +1547,11 @@ func (sh *shadowState) sendUDPPingPeer(conn *net.UDPConn, p *udpEchoPeer, port i
 			break
 		}
 	}
-	seq := sh.pingSeq.Add(1)
-	if seq == 0 {
-		seq = sh.pingSeq.Add(1)
+	seq := sh.pingSeq.Add(1) & udpPingNonceMask
+	for seq == 0 {
+		seq = sh.pingSeq.Add(1) & udpPingNonceMask
 	}
-	p.pendingSentNS.Store(nowNS)
-	p.pendingSeq.Store(seq)
+	p.pendingProbe.Store(packUDPPendingPing(seq, elapsed.Microseconds()))
 	p.pingTries.Add(1)
 
 	var buf [len(shadowPingMagic) + 16]byte
@@ -1520,12 +1576,13 @@ func (sh *shadowState) sendUDPPing(conn *net.UDPConn, ip string, port int, now t
 
 // handleUDP processes one datagram on the shadow UDP socket: echo probes and
 // replies run lock-free off atomic per-peer state (known peers only, bounded
-// reply rate), while beacons and deck pushes delegate once to receiveWithEcho.
+// reply rate, zero heap allocations on accepted pongs), while beacons and deck
+// pushes delegate once to receiveWithEcho.
 func (sh *shadowState) handleUDP(conn *net.UDPConn, b []byte, addr *net.UDPAddr, now time.Time) {
 	if addr == nil || addr.IP == nil {
 		return
 	}
-	if rest, ok := bytes.CutPrefix(b, []byte(shadowPingMagic)); ok {
+	if rest, ok := bytes.CutPrefix(b, shadowPingPrefix); ok {
 		if conn == nil || len(rest) == 0 || len(rest) > 32 {
 			return
 		}
@@ -1549,18 +1606,28 @@ func (sh *shadowState) handleUDP(conn *net.UDPConn, b []byte, addr *net.UDPAddr,
 		_, _ = conn.WriteToUDP(buf[:n], addr)
 		return
 	}
-	if rest, ok := bytes.CutPrefix(b, []byte(shadowPongMagic)); ok {
+	if rest, ok := bytes.CutPrefix(b, shadowPongPrefix); ok {
 		p := sh.findEchoPeerIP(addr.IP)
 		if p == nil {
 			return
 		}
 		seq, ok := parseHexUint64(rest)
-		if !ok || seq == 0 || !p.pendingSeq.CompareAndSwap(seq, 0) {
+		if !ok || seq == 0 || seq > udpPingNonceMask {
 			return
 		}
-		rtt := time.Duration(now.Sub(sh.boot).Nanoseconds() - p.pendingSentNS.Load())
-		if rtt >= 0 && rtt <= shadowUDPPingMaxRTT {
-			p.recordRTT(float64(rtt.Microseconds())/1000.0, now)
+		word := p.pendingProbe.Load()
+		if (word >> udpPingSentBits) != seq {
+			return
+		}
+		if !p.pendingProbe.CompareAndSwap(word, 0) {
+			return
+		}
+		elapsed := now.Sub(sh.boot)
+		nowUS := uint64(elapsed.Microseconds()) & udpPingSentMask
+		sentUS := word & udpPingSentMask
+		rttUS := (nowUS - sentUS) & udpPingSentMask
+		if rttUS <= uint64(shadowUDPPingMaxRTT/time.Microsecond) {
+			p.recordRTTUS(rttUS, elapsed.Milliseconds())
 		}
 		return
 	}
@@ -3918,10 +3985,7 @@ func (s *Server) shadowLoop() {
 					continue
 				}
 				p := sh.ensureEchoPeerLocked(ip)
-				samples := 0
-				if r := p.rtt.Load(); r != nil {
-					samples = r.samples
-				}
+				samples, _, _ := unpackUDPRTT(p.rttState.Load())
 				if i%8 == 0 || (samples < shadowUDPPingWarmupMax && int(p.pingTries.Load()) < shadowUDPPingWarmupMax) {
 					pingPeers = append(pingPeers, p)
 				}
@@ -4000,7 +4064,7 @@ func (sh *shadowState) receiveWithEcho(b []byte, ip string, now time.Time) (cold
 	if !beacon {
 		sh.takePeer(ip, decks, now)
 	}
-	if p != nil && p.rtt.Load() == nil && p.pingTries.Load() == 0 {
+	if p != nil && p.rttState.Load() == 0 && p.pingTries.Load() == 0 {
 		return p, cmp.Or(sh.pushPort, shadowBeaconPort)
 	}
 	return nil, 0
