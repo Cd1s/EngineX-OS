@@ -98,6 +98,9 @@ def check(source):
 
 
 def _logical_preprocessing_lines(source):
+    # shortcut: a token after a multi-line comment or leading backslash-newline splice on the same logical line
+    # is reported at the logical line's starting physical line (where the comment/splice begins). Map each token's
+    # physical line if diagnostics ever need exact per-token pinpointing across multi-line comments or splices.
     # C translation phase 2: splice \<newline> physically anywhere in the source before comments/directives.
     p2_lines = []
     p2_line_phys = []
