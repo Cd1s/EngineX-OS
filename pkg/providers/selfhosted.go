@@ -166,12 +166,14 @@ func StripURLAuth(raw string, subsonic bool) string {
 }
 
 // AuthorizeURL is raw with this NAS's credentials when it is a URL of the configured
-// server (same host and port): Subsonic auth parameters, or the Plex token. Any other
-// URL comes back unchanged, so no credential goes to another host.
+// server (nasOrigin: same host and effective port, same scheme or its https form):
+// Subsonic auth parameters, or the Plex token. Any other URL comes back unchanged, so no
+// credential goes to another server: not to another host, not from http://host (port 80)
+// to https://host (port 443) or back, and never over plain http to an https NAS (#335).
 func (p *SelfHostedProvider) AuthorizeURL(raw string) string {
 	u, err := url.Parse(raw)
 	base, berr := url.Parse(strings.TrimSpace(p.cfg.URL))
-	if raw == "" || err != nil || berr != nil || !strings.EqualFold(u.Hostname(), base.Hostname()) || u.Port() != base.Port() {
+	if raw == "" || err != nil || berr != nil || !nasOrigin(u, base) {
 		return raw
 	}
 	q := u.Query()
@@ -191,6 +193,33 @@ func (p *SelfHostedProvider) AuthorizeURL(raw string) string {
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// nasOrigin reports whether u is a URL of the NAS at base: the same host, the same
+// port once a missing one is read as its scheme's own (80 for http, 443 for https),
+// and the same scheme, or https where the NAS is http. The gateway stores every cover
+// as https (httpsCover), so the saved cover of an http NAS is its https form; that
+// goes to the same host and port and sends nothing in clear text. The reverse, plain
+// http to an https NAS, would. A URL without a scheme or host is no NAS's.
+func nasOrigin(u, base *url.URL) bool {
+	if u.Hostname() == "" || !strings.EqualFold(u.Hostname(), base.Hostname()) || effectivePort(u) == "" || effectivePort(u) != effectivePort(base) {
+		return false
+	}
+	scheme, nas := strings.ToLower(u.Scheme), strings.ToLower(base.Scheme)
+	return scheme == nas || (nas == "http" && scheme == "https")
+}
+
+func effectivePort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	}
+	return ""
 }
 
 func (p *SelfHostedProvider) subsonicAuthParams() url.Values {

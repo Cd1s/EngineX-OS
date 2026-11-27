@@ -17,6 +17,7 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"hash/crc32"
 	"io"
+	"io/fs"
 	"log"
 	"math"
 	"net"
@@ -170,6 +171,10 @@ type tidalGateway struct {
 	albums    map[int64]albumRef
 	albumIDs  map[string]int64
 	next      int64
+	// ceiling is the highest track ID gateway-ids.json allows, under mu: no ID above
+	// it is handed out before the file says so, so IDs never repeat even when the
+	// gateway file is lost or cannot be read (#335).
+	ceiling int64
 
 	rbxBrowse rbxPrefetchQueue
 
@@ -252,19 +257,40 @@ func (g *tidalGateway) tracksPath() string {
 }
 
 // loadTracks restores the IDs of the previous run, and its counter, so an old ID
-// never names a different track.
+// never names a different track. The counter also starts above gateway-ids.json's
+// ceiling, so a file that is lost or cannot be read does not bring old IDs back: a
+// gateway file that exists but cannot be read, with no ceiling known, starts a new
+// ID range above any a released version handed out (#335).
 func (g *tidalGateway) loadTracks(root string) {
 	g.nasRoot = root
-	b, err := os.ReadFile(g.tracksPath())
+	path := g.tracksPath()
+	if path == "" {
+		return
+	}
+	g.loadCeiling()
+	b, err := readState(path)
 	var v savedTracks
-	if err != nil || json.Unmarshal(b, &v) != nil {
+	if err == nil {
+		err = json.Unmarshal(b, &v)
+	}
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			if g.ceiling == 0 {
+				g.next = max(g.next, freshIDRange)
+			}
+			log.Printf("stream-sync: gateway track IDs cannot be read (%T); new IDs start at %d", err, g.next+1)
+		}
 		return
 	}
 	// NAS rows of another root, or of a file from before the root was recorded, are
 	// not used (#335; maintainer, 2026-11-27: browse the NAS again once).
 	stale := v.Root == "" || v.Root != root
+	secret := false // a released file saved cover URLs with the NAS's auth
 	for _, r := range v.Tracks {
 		g.next = max(g.next, r.ID)
+		if clean := stripTrackAuth(r.Track); clean.CoverURL != r.Track.CoverURL {
+			secret, r.Track = true, clean
+		}
 		ref := trackRef{track: r.Track, session: r.Session, guest: r.Guest, file: r.File, drive: r.Drive}
 		if stale && isNASTrackRef(ref) {
 			continue
@@ -290,6 +316,87 @@ func (g *tidalGateway) loadTracks(root string) {
 		g.seq++
 		g.albumSeen[al.ID] = g.seq
 	}
+	if secret {
+		g.scrubTracks(path)
+	}
+}
+
+// freshIDRange is where track IDs start after a gateway file that cannot be read when
+// no ceiling is known (the first start after an upgrade): above the IDs a released
+// version handed out, which count up from 1, and below 2^31 like album IDs.
+const freshIDRange = 1 << 30
+
+// idBlock is how many track IDs one write of gateway-ids.json reserves.
+const idBlock = 1024
+
+func (g *tidalGateway) idsPath() string {
+	if g.s == nil || g.s.cfg.StateDir == "" {
+		return ""
+	}
+	return filepath.Join(g.s.cfg.StateDir, "gateway-ids.json")
+}
+
+type savedCeiling struct {
+	Ceiling int64 `json:"ceiling"`
+}
+
+// loadCeiling reads gateway-ids.json: the counter starts at its ceiling.
+func (g *tidalGateway) loadCeiling() {
+	b, err := readState(g.idsPath())
+	var v savedCeiling
+	if err == nil {
+		err = json.Unmarshal(b, &v)
+	}
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("stream-sync: gateway ID ceiling cannot be read (%T)", err)
+		}
+		return
+	}
+	g.ceiling = max(v.Ceiling, 0)
+	g.next = max(g.next, g.ceiling)
+}
+
+// nextID hands out a new track ID, with g.mu held. Before the counter passes the
+// saved ceiling a new one is written; when that fails the ID is still given (the
+// gateway file records the counter too) and the next ID tries again.
+func (g *tidalGateway) nextID() int64 {
+	g.next++
+	if g.next > g.ceiling && g.idsPath() != "" {
+		ceiling := g.next + idBlock - 1
+		if err := saveState(g.idsPath(), savedCeiling{ceiling}); err != nil {
+			log.Printf("stream-sync: gateway ID ceiling not saved (%T)", err)
+		} else {
+			g.ceiling = ceiling
+		}
+	}
+	return g.next
+}
+
+// scrubTracks rewrites, at start-up, a gateway file whose rows hold NAS credentials
+// without them (released versions saved cover URLs with the NAS's auth; #335). The
+// write is atomic. When it fails the file is removed once the ID ceiling is saved,
+// so no credential stays on disk and no ID repeats; the rows stay in memory and are
+// saved again.
+func (g *tidalGateway) scrubTracks(path string) {
+	err := g.writeTracks()
+	if err == nil {
+		return
+	}
+	log.Printf("stream-sync: gateway track IDs holding NAS credentials not rewritten (%T)", err)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	ceiling := g.next + idBlock
+	if serr := saveState(g.idsPath(), savedCeiling{ceiling}); serr != nil {
+		log.Printf("stream-sync: gateway ID ceiling not saved (%T): the file stays until a save works", serr)
+		g.scheduleSave()
+		return
+	}
+	g.ceiling = ceiling
+	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+		log.Printf("stream-sync: gateway track IDs holding NAS credentials not removed (%T)", rerr)
+	}
+	g.scheduleSave()
 }
 
 // scheduleSave must be called with g.mu held.
@@ -302,9 +409,16 @@ func (g *tidalGateway) scheduleSave() {
 
 // saveTracks writes the track IDs. Run by a timer after changes, and by Close.
 func (g *tidalGateway) saveTracks() {
+	if err := g.writeTracks(); err != nil {
+		log.Printf("stream-sync: save gateway track IDs: %v", err)
+	}
+}
+
+// writeTracks is saveTracks, reporting a failed write.
+func (g *tidalGateway) writeTracks() error {
 	path := g.tracksPath()
 	if path == "" {
-		return
+		return nil
 	}
 	g.saveMu.Lock()
 	defer g.saveMu.Unlock()
@@ -325,11 +439,9 @@ func (g *tidalGateway) saveTracks() {
 	sort.Slice(v.Albums, func(a, b int) bool { return g.albumSeen[v.Albums[a].ID] < g.albumSeen[v.Albums[b].ID] })
 	g.mu.Unlock()
 	if _, err := os.Stat(filepath.Dir(path)); err != nil {
-		return // the state dir is gone (a test that ended)
+		return nil // the state dir is gone (a test that ended)
 	}
-	if err := saveState(path, v); err != nil {
-		log.Printf("stream-sync: save gateway track IDs: %v", err)
-	}
+	return saveState(path, v)
 }
 
 // resetNAS forgets the NAS rows (standalone NAS and OmniSource's [NAS] lists)
@@ -994,8 +1106,7 @@ func (g *tidalGateway) addTrack(ref trackRef) int64 {
 	}
 	id := g.ids[key]
 	if id == 0 {
-		g.next++
-		id = g.next
+		id = g.nextID()
 		g.ids[key] = id
 	}
 	g.scheduleSave()
