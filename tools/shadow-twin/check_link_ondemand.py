@@ -597,7 +597,7 @@ def main():
     stock_mdb = stock_vol / "Engine Library/Database2/m.db"
     stock_mdb.parent.mkdir(parents=True, exist_ok=True)
     stock_mdb.unlink(missing_ok=True)
-    make_click_wav(stock_vol / "Music/stock-track.wav", seconds=10.0, bpm=128.0)
+    stock_sz = make_click_wav(stock_vol / "Music/stock-track.wav", seconds=10.0, bpm=128.0)
     schema_sql = (src_dir / "pkg/enginedb/schema.sql").read_text()
     with closing(sqlite3.connect(rb_mdb.as_uri() + "?mode=ro", uri=True)) as src_conn:
         info_row = src_conn.execute(
@@ -610,8 +610,19 @@ def main():
             ("stock-engine-uuid-1111", info_row[0], info_row[1], info_row[2]),
         )
         conn.execute(
-            "INSERT INTO Track(path, filename, title, bpm, length, pdbImportKey, isAnalyzed) "
-            "VALUES('../Music/stock-track.wav', 'stock-track.wav', 'Stock Track', 128, 10, NULL, 0)"
+            "INSERT INTO Track(path, filename, title, artist, bpm, length, fileBytes, fileType, "
+            "isAvailable, isMetadataImported, pdbImportKey, isAnalyzed, originDatabaseUuid, originTrackId) "
+            "VALUES('../Music/stock-track.wav', 'stock-track.wav', 'Stock Track', 'Stock Artist', "
+            "128, 10, ?, 'wav', 1, 1, NULL, 0, 'stock-engine-uuid-1111', 1)",
+            (stock_sz,),
+        )
+        conn.execute(
+            "INSERT INTO Playlist(id, title, parentListId, isPersisted, nextListId, isExplicitlyExported) "
+            "VALUES(1, 'Stock List', 0, 1, 0, 1)"
+        )
+        conn.execute(
+            "INSERT INTO PlaylistEntity(listId, trackId, databaseUuid, nextEntityId, membershipReference) "
+            "VALUES(1, 1, 'stock-engine-uuid-1111', 0, 0)"
         )
         conn.commit()
 
@@ -876,9 +887,9 @@ def main():
     finally:
         eng_b = twin.WORK / "B/logs/engine.log"
         if eng_b.is_file():
-            rblines = [ln for ln in eng_b.read_text(errors="replace").splitlines() if "rekordbox:" in ln]
-            print("HOOK B LOGS (rekordbox):", flush=True)
-            for ln in rblines[-35:]:
+            rblines = [ln for ln in eng_b.read_text(errors="replace").splitlines() if "rekordbox stage" in ln]
+            print("HOOK B LOGS (rekordbox stage):", flush=True)
+            for ln in rblines[-40:]:
                 print(" ", ln, flush=True)
         if stub_proc is not None:
             stub_proc.terminate()
