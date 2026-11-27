@@ -737,6 +737,9 @@ struct engine_build {
     // that holds its metaObject() and that function. QML asks an object for its meta
     // object before it can call anything on it, so the owner is known by then.
     uint32_t shadow_owner_slot, shadow_owner_fn;
+    // S19: Database::resetUuid() updates Information.uuid and m_uuid without
+    // updating OverviewData/<uuid> or m_overviewDataDir.
+    uint32_t reset_uuid_fn;
 };
 static const struct engine_build *build;
 
@@ -2516,7 +2519,8 @@ static const struct engine_build engine_builds[] = {
      .shadow_array_offset = 0x450, .shadow_position_prefix_size = 16,
      .shadow_position_prefix = {0x5f, 0x24, 0x03, 0xd5, 0x00, 0x48, 0x40, 0xbd,
                                 0x00, 0x00, 0x38, 0x1e, 0xc0, 0x03, 0x5f, 0xd6},
-     .shadow_owner_slot = 0x2d27a10, .shadow_owner_fn = 0xb0b888},
+     .shadow_owner_slot = 0x2d27a10, .shadow_owner_fn = 0xb0b888,
+     .reset_uuid_fn = 0x138cbe0},
 };
 #else
 static const struct engine_edit edits_504[] = {
@@ -2672,7 +2676,8 @@ static const struct engine_build engine_builds[] = {
      0x842644, 0x29bc83c, 0x258e185, 0x8429b0, 0xe51b3340,
      0x29980a4, 0x1c91f74, 0x1cba858, 0x1cba874, 0,
      {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}, 0x4bc, 0, 0, 0,
-     .shadow_position_fn = 0},
+     .shadow_position_fn = 0,
+     .reset_uuid_fn = 0x12120ec},
     {"5.3.0", "\xbe\x53\x7e\x90\x81\x21\xe7\x61\x64\xdd\xbb\xf9\x73\x0d\x47\x2b\xa0\xb8\xf9\xd4",
      {0xe6a090, 0xe6a0bc, 0xe6a16c, 0xe6a198, 0xe6a1c4, 0xe6a0e8, 0xe6a140, 0x170e714, 0x1710c00,
       0x1710a74, 0x170f110, 0xdde87c, 0xd265cc, 0xd265f8, 0xd26624, 0xf1afa4, 0x16b38e0, 0xf1dd20, 0xf1ede4, 0xf1ab24, 0xc77934},
@@ -2687,7 +2692,8 @@ static const struct engine_build engine_builds[] = {
      .shadow_array_offset = 0x244, .shadow_position_prefix_size = 8,
      .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5},
      .shadow_capture_site = 0xa1746c,
-     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5}},
+     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5},
+     .reset_uuid_fn = 0x12da47c},
     // feature_object 0x2d0eb78 is StemsPreRenderedPlayback (stored into 0x2d180c8 at 0x360d68, read by PlanckScriptRoot::hasStemsPreRenderedPlayback at 0x9d7808).
     {"5.3.0-sclive4", "\xb9\x46\xc3\xb8\xd9\x9d\x32\x99\x8c\x81\x97\xd5\xdc\x90\x5a\x6b\xdd\xaa\x5d\x2f",
      {0xe774fc, 0xe77528, 0xe775d8, 0xe77604, 0xe77630, 0xe77554, 0xe775ac, 0x17597bc, 0x179b090,
@@ -2703,7 +2709,8 @@ static const struct engine_build engine_builds[] = {
      .shadow_array_offset = 0x244, .shadow_position_prefix_size = 8,
      .shadow_position_prefix = {0x0a, 0x7a, 0xd0, 0xed, 0x04, 0xb0, 0x2d, 0xe5},
      .shadow_capture_site = 0xa3c264,
-     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5}},
+     .shadow_capture_prefix = {0x04, 0x30, 0x96, 0xe5, 0x00, 0x30, 0x93, 0xe5},
+     .reset_uuid_fn = 0x13235b8},
 };
 #endif
 
@@ -2747,6 +2754,7 @@ static int edit_state(uintptr_t base, const struct engine_edit *e) {
 }
 
 static void install_sqlite_hooks(uintptr_t base, size_t page);
+static void install_uuid_overview_hook(uintptr_t base, size_t page);
 static void install_bt_send(uintptr_t base, size_t page);
 #if !defined(__aarch64__)
 static void install_rekordbox_rows(uintptr_t base, size_t page);
@@ -2857,6 +2865,7 @@ __attribute__((constructor)) static void edit_engine(void) {
 #else
     if (hf_on(HF_SQLITE_TUNING) || hf_on(HF_TELEMETRY_BLOCK)) install_sqlite_hooks(base, page);
 #endif
+    install_uuid_overview_hook(base, page);
     int dsp_ready = hf_on(HF_DSP_GUARDS) && install_dsp_hooks(base, page);
     if (dsp_ready) {
         if (hf_on(HF_BLUETOOTH)) install_bt_send(base, page);
@@ -4583,6 +4592,177 @@ static void install_bt_send(uintptr_t base, size_t page) {
     bt_send_orig = function_trampoline(entry, page);
     redirect_function(HF_BLUETOOTH, entry, hook_bt_send, page);
     fprintf(stderr, "engine-ui-hook: Bluetooth output sender hooked\n");
+}
+
+#if defined(__aarch64__)
+#define S19_DB_OVERVIEW_DIR_OFF 0xa8u
+#define S19_DB_UUID_OFF         0xc8u
+#else
+#define S19_DB_OVERVIEW_DIR_OFF 0x6cu
+#define S19_DB_UUID_OFF         0x84u
+#endif
+
+static void (*reset_uuid_orig)(void *);
+
+static int s19_valid_uuid_part(const char *s, size_t len) {
+    if (!s || !len || len >= 128) return 0;
+    if (len == 1 && s[0] == '.') return 0;
+    if (len == 2 && s[0] == '.' && s[1] == '.') return 0;
+    for (size_t i = 0; i < len; i++) {
+        if (!s[i] || s[i] == '/' || s[i] == '\\') return 0;
+    }
+    return 1;
+}
+
+static int s19_cxx_string(const void *field, char *out, size_t cap, char **raw_ptr_out, size_t *len_out) {
+    if (!field || !out || !cap) return 0;
+    char *ptr = NULL;
+    size_t len = 0;
+    memcpy(&ptr, field, sizeof ptr);
+    memcpy(&len, (const char *)field + sizeof ptr, sizeof len);
+    if ((uintptr_t)ptr < 4096 || !len || len >= cap) return 0;
+    memcpy(out, ptr, len);
+    out[len] = 0;
+    if (raw_ptr_out) *raw_ptr_out = ptr;
+    if (len_out) *len_out = len;
+    return 1;
+}
+
+static int s19_join_path(char *dst, size_t cap, const char *dir, const char *name) {
+    size_t dlen = strlen(dir), nlen = strlen(name);
+    if (dlen + 1 + nlen >= cap) return 0;
+    memcpy(dst, dir, dlen);
+    dst[dlen] = '/';
+    memcpy(dst + dlen + 1, name, nlen + 1);
+    return 1;
+}
+
+static int s19_dir_is_empty(const char *path) {
+    DIR *d = opendir(path);
+    if (!d) return -1;
+    int empty = 1;
+    struct dirent *e;
+    errno = 0;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) {
+            empty = 0;
+            break;
+        }
+    }
+    int err = errno;
+    closedir(d);
+    return err ? -1 : empty;
+}
+
+static int s19_migrate_overview_dir(const char *old_dir, const char *new_dir) {
+    struct stat ost;
+    if (lstat(old_dir, &ost) != 0) return errno == ENOENT ? 0 : -1;
+    if (!S_ISDIR(ost.st_mode)) return -1;
+
+    struct stat nst;
+    if (lstat(new_dir, &nst) != 0) {
+        if (errno != ENOENT) return -1;
+        return rename(old_dir, new_dir) == 0 ? 1 : -1;
+    }
+    if (!S_ISDIR(nst.st_mode)) return -1;
+
+    int empty = s19_dir_is_empty(new_dir);
+    if (empty < 0) return -1;
+    if (empty == 1) {
+        if (rmdir(new_dir) == 0 && rename(old_dir, new_dir) == 0) return 1;
+    }
+
+    DIR *d = opendir(old_dir);
+    if (!d) return -1;
+    int moved = 0, failed = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char src[PATH_MAX], dst[PATH_MAX];
+        if (!s19_join_path(src, sizeof src, old_dir, e->d_name) ||
+            !s19_join_path(dst, sizeof dst, new_dir, e->d_name)) {
+            failed = 1;
+            continue;
+        }
+        struct stat sst;
+        if (lstat(src, &sst) != 0 || !S_ISREG(sst.st_mode)) continue;
+        struct stat dst_st;
+        if (lstat(dst, &dst_st) == 0 || errno != ENOENT) continue;
+        if (rename(src, dst) != 0) {
+            failed = 1;
+            continue;
+        }
+        moved++;
+    }
+    closedir(d);
+    if (rmdir(old_dir) != 0) {
+        // Non-fatal if existing files remained in old_dir during merge.
+    }
+    return failed && !moved ? -1 : moved;
+}
+
+static void hook_database_reset_uuid(void *db) {
+    if (!db || !reset_uuid_orig) return;
+    if (!hf_on(HF_SQLITE_TUNING)) {
+        reset_uuid_orig(db);
+        return;
+    }
+    char old_uuid[128], old_dir[PATH_MAX];
+    size_t old_len = 0, dir_len = 0;
+    int valid_pre = s19_cxx_string((const char *)db + S19_DB_UUID_OFF, old_uuid, sizeof old_uuid, NULL, &old_len) &&
+                    s19_valid_uuid_part(old_uuid, old_len) &&
+                    s19_cxx_string((const char *)db + S19_DB_OVERVIEW_DIR_OFF, old_dir, sizeof old_dir, NULL, &dir_len) &&
+                    dir_len >= 14 + old_len &&
+                    !memcmp(old_dir + dir_len - 14 - old_len, "/OverviewData/", 14) &&
+                    !memcmp(old_dir + dir_len - old_len, old_uuid, old_len);
+
+    reset_uuid_orig(db);
+    if (!valid_pre) return;
+
+    char new_uuid[128];
+    size_t new_len = 0;
+    if (!s19_cxx_string((const char *)db + S19_DB_UUID_OFF, new_uuid, sizeof new_uuid, NULL, &new_len) ||
+        !s19_valid_uuid_part(new_uuid, new_len))
+        return;
+    if (new_len == old_len && !memcmp(old_uuid, new_uuid, old_len)) return;
+
+    size_t prefix_len = dir_len - old_len;
+    if (prefix_len + new_len >= PATH_MAX) return;
+    char new_dir[PATH_MAX];
+    memcpy(new_dir, old_dir, prefix_len);
+    memcpy(new_dir + prefix_len, new_uuid, new_len + 1);
+
+    int rc = s19_migrate_overview_dir(old_dir, new_dir);
+    if (rc >= 0 && new_len == old_len) {
+        char check_dir[PATH_MAX], *dir_ptr = NULL;
+        size_t cur_len = 0;
+        if (s19_cxx_string((const char *)db + S19_DB_OVERVIEW_DIR_OFF, check_dir, sizeof check_dir, &dir_ptr, &cur_len) &&
+            cur_len == dir_len && !memcmp(check_dir, old_dir, dir_len)) {
+            memcpy(dir_ptr + prefix_len, new_uuid, new_len);
+        }
+    }
+    fprintf(stderr, "engine-ui-hook: resetUuid overview %s -> %s (rc=%d)\n", old_uuid, new_uuid, rc);
+}
+
+static void install_uuid_overview_hook(uintptr_t base, size_t page) {
+    if (!build || !build->reset_uuid_fn || !hf_on(HF_SQLITE_TUNING)) return;
+    uintptr_t entry = base + build->reset_uuid_fn;
+#if defined(__aarch64__)
+    static const uint32_t prefix[] = {0xd503233f, 0xa9ba7bfd, 0x52800003, 0x910003fd};
+    if (memcmp((const void *)entry, prefix, sizeof prefix)) return;
+    reset_uuid_orig = (void (*)(void *))function_trampoline(entry, page);
+#else
+    static const uint32_t prefix[] = {0xe59fc4a4, 0xe16d42f4};
+    if (memcmp((const void *)entry, prefix, sizeof prefix)) return;
+    // Relocate the entry PC-relative GOT literal load at +8+0x4a4; the body still adds its original PC.
+    const uint32_t stub[] = {
+        0xe59fc008u, prefix[1], 0xe51ff004u, (uint32_t)(entry + 8), *(const uint32_t *)(entry + 8 + 0x4a4)
+    };
+    reset_uuid_orig = (void (*)(void *))rx_code(stub, sizeof stub, page);
+#endif
+    if (!reset_uuid_orig) return;
+    redirect_function(HF_SQLITE_TUNING, entry, hook_database_reset_uuid, page);
+    fprintf(stderr, "engine-ui-hook: Database::resetUuid overview hook installed\n");
 }
 
 static const char *volatile_path(int dirfd, const char *path, char out[PATH_MAX]) {

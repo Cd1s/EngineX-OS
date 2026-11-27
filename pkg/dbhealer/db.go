@@ -25,23 +25,24 @@ import (
 const DefaultMaxSessions = 50
 
 type Report struct {
-	Mount             string    `json:"mount"`
-	ReadOnly          bool      `json:"read_only"`
-	Healthy           bool      `json:"healthy"`
-	PlaylistEntities  int       `json:"playlist_entities_relinked"`
-	Playlists         int       `json:"playlists_relinked"`
-	Waveforms         int       `json:"waveforms_replaced"`
-	Loops             int       `json:"loops_aligned"`
-	Artwork           int       `json:"artwork_resized"`
-	OrphanArtwork     int       `json:"orphan_artwork_references"`
-	ReanalysisPending int       `json:"reanalysis_pending"`
-	PathsNormalized   int       `json:"paths_normalized"`
-	HistoryPruned     bool      `json:"history_pruned"`
-	HistoryCleaned    int       `json:"history_cleaned,omitempty"`
-	HistoryCompacted  bool      `json:"history_compacted,omitempty"`
-	ReserveFixed      []string  `json:"reserve_fixed,omitempty"`
-	Warnings          []string  `json:"warnings,omitempty"`
-	CheckedAt         time.Time `json:"checked_at"`
+	Mount                string    `json:"mount"`
+	ReadOnly             bool      `json:"read_only"`
+	Healthy              bool      `json:"healthy"`
+	PlaylistEntities     int       `json:"playlist_entities_relinked"`
+	Playlists            int       `json:"playlists_relinked"`
+	Waveforms            int       `json:"waveforms_replaced"`
+	Loops                int       `json:"loops_aligned"`
+	Artwork              int       `json:"artwork_resized"`
+	OrphanArtwork        int       `json:"orphan_artwork_references"`
+	ReanalysisPending    int       `json:"reanalysis_pending"`
+	PathsNormalized      int       `json:"paths_normalized"`
+	RGBOverviewsMigrated int       `json:"rgb_overviews_migrated,omitempty"`
+	HistoryPruned        bool      `json:"history_pruned"`
+	HistoryCleaned       int       `json:"history_cleaned,omitempty"`
+	HistoryCompacted     bool      `json:"history_compacted,omitempty"`
+	ReserveFixed         []string  `json:"reserve_fixed,omitempty"`
+	Warnings             []string  `json:"warnings,omitempty"`
+	CheckedAt            time.Time `json:"checked_at"`
 }
 
 func effectiveBusyTimeoutMS(ctx context.Context) (int, error) {
@@ -397,6 +398,7 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		r.Mount = mount
 		return r, err
 	}
+	reconcileOverviewDataDir(ctx, db, filepath.Dir(path), &r)
 	closeErr := db.Close()
 	r.Mount = mount
 	log.Printf("dbhealer: mount %s normalized %d track paths, %d remaining", mount, r.PathsNormalized, remaining)
