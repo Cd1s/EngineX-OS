@@ -1280,14 +1280,15 @@ const (
 	// rttState packs sample count (high 4 bits, 0 = none, 1..15), running-min RTT
 	// in microseconds (20 bits, 0..1,000,000 us), and monotonic timestamp in ms
 	// since sh.boot (low 40 bits, ~34.8 years) into one atomic word (0 heap allocs).
-	udpRTTAtBits       = 40
-	udpRTTAtMask       = (uint64(1) << udpRTTAtBits) - 1
-	udpRTTUSBits       = 20
-	udpRTTUSMask       = (uint64(1) << udpRTTUSBits) - 1
-	udpRTTUSShift      = udpRTTAtBits
-	udpRTTSamplesShift = udpRTTAtBits + udpRTTUSBits
-	udpRTTSamplesMax   = 15
-	udpRTTMaxStoredUS  = 1_000_000
+	udpRTTAtBits         = 40
+	udpRTTAtMask         = (uint64(1) << udpRTTAtBits) - 1
+	udpRTTUSBits         = 20
+	udpRTTUSMask         = (uint64(1) << udpRTTUSBits) - 1
+	udpRTTUSShift        = udpRTTAtBits
+	udpRTTSamplesShift   = udpRTTAtBits + udpRTTUSBits
+	udpRTTSamplesMax     = 15
+	udpRTTMaxStoredUS    = 1_000_000
+	udpRTTFutureWindowMS = 5_000 // concurrent sample recorded slightly after caller's now snapshot
 )
 
 func packUDPPendingPing(nonce uint64, sentUS int64) uint64 {
@@ -1306,6 +1307,24 @@ func packUDPRTT(samples, rttUS uint64, atMS int64) uint64 {
 
 func unpackUDPRTT(w uint64) (samples int, rttUS uint64, atMS uint64) {
 	return int(w >> udpRTTSamplesShift), (w >> udpRTTUSShift) & udpRTTUSMask, w & udpRTTAtMask
+}
+
+// udpRTTAgeMS returns the signed modular difference (nowAt - sampleAt) in the
+// 40-bit millisecond ring (~34.8 years).
+func udpRTTAgeMS(nowAt, sampleAt uint64) int64 {
+	const shift = 64 - udpRTTAtBits
+	return int64((nowAt-sampleAt)<<shift) >> shift
+}
+
+// udpRTTExpired reports whether sampleAt has expired relative to nowAt. A sample
+// recorded after the caller's snapshot within udpRTTFutureWindowMS is treated as
+// fresh; legitimate 40-bit clock wraps keep their true positive age.
+func udpRTTExpired(nowAt, sampleAt uint64, timeoutMS int64) bool {
+	age := udpRTTAgeMS(nowAt, sampleAt)
+	if age < 0 {
+		return -age > udpRTTFutureWindowMS
+	}
+	return age >= timeoutMS
 }
 
 // udpEchoPeer holds lock-free per-peer UDP echo and RTT state. Peer membership
@@ -1338,16 +1357,23 @@ func (p *udpEchoPeer) recordRTTUS(rttUS uint64, nowMS int64) {
 		rttUS = udpRTTMaxStoredUS
 	}
 	nowAt := uint64(nowMS) & udpRTTAtMask
-	timeoutMS := uint64(shadowPeerSeenTimeout / time.Millisecond)
+	timeoutMS := int64(shadowPeerSeenTimeout / time.Millisecond)
 	for {
 		old := p.rttState.Load()
 		samples, oldUS, oldAt := unpackUDPRTT(old)
-		elapsedMS := (nowAt - oldAt) & udpRTTAtMask
+		ageMS := udpRTTAgeMS(nowAt, oldAt)
 		var nextSamples, nextUS uint64
-		if samples == 0 || elapsedMS > timeoutMS {
+		nextAtMS := nowMS
+		if samples == 0 || ageMS > timeoutMS || (ageMS < 0 && -ageMS > udpRTTFutureWindowMS) {
 			nextSamples = 1
 			nextUS = rttUS
 		} else {
+			var elapsedMS uint64
+			if ageMS > 0 {
+				elapsedMS = uint64(ageMS)
+			} else {
+				nextAtMS = int64(oldAt)
+			}
 			decayedUS := oldUS + elapsedMS/10 // 0.1 ms/s = 1 us per 10 ms
 			if rttUS < decayedUS {
 				nextUS = rttUS
@@ -1359,7 +1385,7 @@ func (p *udpEchoPeer) recordRTTUS(rttUS uint64, nowMS int64) {
 				nextSamples = udpRTTSamplesMax
 			}
 		}
-		next := packUDPRTT(nextSamples, nextUS, nowMS)
+		next := packUDPRTT(nextSamples, nextUS, nextAtMS)
 		if p.rttState.CompareAndSwap(old, next) {
 			return
 		}
@@ -1465,13 +1491,13 @@ func (sh *shadowState) pruneEchoPeersLocked(now time.Time, dropped map[string]bo
 		return
 	}
 	nowAt := uint64(now.Sub(sh.boot).Milliseconds()) & udpRTTAtMask
-	timeoutMS := uint64(shadowPeerSeenTimeout / time.Millisecond)
+	timeoutMS := int64(shadowPeerSeenTimeout / time.Millisecond)
 	var kept []*udpEchoPeer
 	changed := false
 	for _, p := range *cur {
 		w := p.rttState.Load()
 		samples, _, atMS := unpackUDPRTT(w)
-		if samples > 0 && (nowAt-atMS)&udpRTTAtMask >= timeoutMS {
+		if samples > 0 && udpRTTExpired(nowAt, atMS, timeoutMS) {
 			if p.rttState.CompareAndSwap(w, 0) {
 				samples = 0
 			}
@@ -1512,7 +1538,7 @@ func (sh *shadowState) peerHalfRTT(ip string, now time.Time) float64 {
 		return 0
 	}
 	nowAt := uint64(now.Sub(sh.boot).Milliseconds()) & udpRTTAtMask
-	if (nowAt-atMS)&udpRTTAtMask <= uint64(shadowPeerSeenTimeout/time.Millisecond) {
+	if !udpRTTExpired(nowAt, atMS, int64(shadowPeerSeenTimeout/time.Millisecond)) {
 		return min(float64(rttUS)/2000.0, shadowHalfRTTMaxMS)
 	}
 	return 0

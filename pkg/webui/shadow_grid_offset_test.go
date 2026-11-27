@@ -866,3 +866,80 @@ func TestUDPPingPongAcceptedZeroAllocs(t *testing.T) {
 		t.Fatalf("accepted UDP pong allocated %.2f allocs/run, want 0", allocs)
 	}
 }
+
+func TestUDPPingPongPrunePreservesNewerSample(t *testing.T) {
+	sh := newShadowState()
+	t0 := time.Now()
+	sh.receive([]byte("EngineX-shadow 1"), "127.0.0.1", t0)
+
+	// Poll takes its snapshot tPoll, then a concurrent UDP pong records a fresh
+	// 4 ms RTT (half RTT = 2 ms) 1 ms later before prunePeers(tPoll) runs.
+	tPoll := t0.Add(time.Second)
+	tSample := tPoll.Add(time.Millisecond)
+	sh.recordPeerRTT("127.0.0.1", 4.0, tSample)
+
+	// Both peerHalfRTT(tPoll) and prunePeers(tPoll) must treat the newer sample as fresh.
+	if got := sh.peerHalfRTT("127.0.0.1", tPoll); math.Abs(got-2.0) > 0.05 {
+		t.Fatalf("peerHalfRTT(tPoll) before prune = %.3f ms, want 2.0 ms", got)
+	}
+	sh.prunePeers(tPoll)
+	if got := sh.peerHalfRTT("127.0.0.1", tSample); math.Abs(got-2.0) > 0.05 {
+		t.Fatalf("prunePeers(tPoll) cleared newer sample: halfRTT = %.3f ms, want 2.0 ms", got)
+	}
+
+	// Slightly out-of-order recordPeerRTT must keep running-min instead of resetting.
+	sh.recordPeerRTT("127.0.0.1", 20.0, tPoll)
+	if got := sh.peerHalfRTT("127.0.0.1", tSample); math.Abs(got-2.0) > 0.05 {
+		t.Fatalf("out-of-order recordPeerRTT reset running-min: halfRTT = %.3f ms, want 2.0 ms", got)
+	}
+
+	// Direct prune across 40-bit ms wrap: preserve fresh wrapped sample and 1 ms ahead
+	// across wrap, and clear expired wrapped & ancient half-ring samples.
+	const ring = uint64(1) << udpRTTAtBits
+	p := sh.findEchoPeer("127.0.0.1")
+
+	// Sample 1 ms ahead right across the 40-bit wrap (nowAt = ring-1, sampleAt = 0): fresh.
+	p.rttState.Store(packUDPRTT(1, 4000, 0))
+	sh.boot = t0.Add(-time.Duration(ring-1) * time.Millisecond)
+	sh.prunePeers(t0)
+	if got := sh.peerHalfRTT("127.0.0.1", t0); math.Abs(got-2.0) > 0.05 {
+		t.Fatalf("prunePeers cleared sample 1 ms ahead across 40-bit wrap: halfRTT = %.3f ms, want 2.0 ms", got)
+	}
+
+	// Legitimate fresh wrap (sample 5 ms before wrap, now 5 ms after wrap -> age 10 ms): fresh.
+	p.rttState.Store(packUDPRTT(1, 4000, int64(ring-5)))
+	sh.boot = t0.Add(-5 * time.Millisecond)
+	sh.prunePeers(t0)
+	if got := sh.peerHalfRTT("127.0.0.1", t0); math.Abs(got-2.0) > 0.05 {
+		t.Fatalf("prunePeers cleared fresh wrapped sample: halfRTT = %.3f ms, want 2.0 ms", got)
+	}
+
+	// Legitimate expired wrap (sample 10 s before wrap, now 6 s after wrap -> age 16 s): expired.
+	p.rttState.Store(packUDPRTT(1, 4000, int64(ring-10000)))
+	sh.boot = t0.Add(-6000 * time.Millisecond)
+	sh.prunePeers(t0)
+	if got := sh.peerHalfRTT("127.0.0.1", t0); got != 0 {
+		t.Fatalf("prunePeers kept expired wrapped sample: halfRTT = %.3f ms, want 0", got)
+	}
+}
+
+func TestUDPPingPongAgeWrapWindow(t *testing.T) {
+	const ring = uint64(1) << udpRTTAtBits
+	timeoutMS := int64(shadowPeerSeenTimeout / time.Millisecond)
+
+	if udpRTTExpired(ring-1, 0, timeoutMS) {
+		t.Fatal("sample 1 ms ahead across 40-bit wrap marked expired")
+	}
+	if udpRTTExpired(5, ring-5, timeoutMS) {
+		t.Fatal("legitimate 10 ms wrap marked expired")
+	}
+	if !udpRTTExpired(6000, ring-10000, timeoutMS) {
+		t.Fatal("legitimate 16 s wrap not expired")
+	}
+	if !udpRTTExpired(1000, 1000+udpRTTFutureWindowMS+1, timeoutMS) {
+		t.Fatal("sample outside small future window not expired")
+	}
+	if !udpRTTExpired(1<<39, 0, timeoutMS) {
+		t.Fatal("ancient half-ring sample not expired")
+	}
+}
