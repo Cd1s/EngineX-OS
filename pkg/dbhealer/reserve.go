@@ -2,6 +2,7 @@ package dbhealer
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -12,7 +13,10 @@ import (
 	"strings"
 )
 
-var sqliteMagic = []byte("SQLite format 3\x00")
+var (
+	sqliteMagic     = []byte("SQLite format 3\x00")
+	reserveWritable = writable
+)
 
 // Reserve reports header byte 20 of a plain SQLite file; ok is false for a
 // missing file or anything that is not a SQLite database.
@@ -38,7 +42,18 @@ func Reserve(path string) (reserve byte, ok bool, err error) {
 // rows so nothing fires. The caller must make sure Engine does not hold the file.
 // The old file stays beside it as <path>.pre-reserve.
 func NormalizeReserve(path string) (bool, error) {
+	return NormalizeReserveContext(context.Background(), path)
+}
+
+// NormalizeReserveContext is NormalizeReserve while honoring ctx cancellation before rebuild steps and backup copies.
+func NormalizeReserveContext(ctx context.Context, path string) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if r, ok, err := Reserve(path); err != nil || !ok || r == 0 {
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
 		return false, err
 	}
 	for _, suffix := range []string{"-wal", "-journal"} {
@@ -52,7 +67,7 @@ func NormalizeReserve(path string) (bool, error) {
 	}
 	tmp := path + ".reserve-rebuild"
 	os.Remove(tmp)
-	if err = rebuildPlain(path, tmp); err != nil {
+	if err = rebuildPlainContext(ctx, path, tmp); err != nil {
 		os.Remove(tmp)
 		return false, fmt.Errorf("%s: %w", path, err)
 	}
@@ -67,7 +82,7 @@ func NormalizeReserve(path string) (bool, error) {
 	// Never move the live name out of the way: the CLI deadline can end this
 	// process between any two syscalls. Publish a durable backup first, then
 	// atomically replace the still-present original with the rebuilt database.
-	if err = backupReserve(path); err != nil {
+	if err = backupReserveContext(ctx, path); err != nil {
 		os.Remove(tmp)
 		return false, err
 	}
@@ -78,6 +93,16 @@ func NormalizeReserve(path string) (bool, error) {
 }
 
 func backupReserve(path string) error {
+	return backupReserveContext(context.Background(), path)
+}
+
+func backupReserveContext(ctx context.Context, path string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	tmp := path + ".pre-reserve.tmp"
 	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -99,7 +124,29 @@ func backupReserve(path string) error {
 		if err != nil {
 			return err
 		}
-		_, err = io.Copy(dst, src)
+		buf := make([]byte, 64<<10)
+		for {
+			if err = ctx.Err(); err != nil {
+				break
+			}
+			var n int
+			n, err = src.Read(buf)
+			if n > 0 {
+				if _, werr := dst.Write(buf[:n]); werr != nil {
+					err = werr
+					break
+				}
+			}
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					err = nil
+				}
+				break
+			}
+		}
+		if err == nil {
+			err = ctx.Err()
+		}
 		if err == nil {
 			err = dst.Sync()
 		}
@@ -109,6 +156,9 @@ func backupReserve(path string) error {
 		if err != nil {
 			return err
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := os.Rename(tmp, path+".pre-reserve"); err != nil {
 		return err
@@ -133,18 +183,38 @@ func syncFile(path string) error {
 // NormalizeDatabase2 fixes every Engine library file in dir (Database2); names
 // starting with "." belong to other tools.
 func NormalizeDatabase2(dir string) (fixed []string, err error) {
+	return NormalizeDatabase2Context(context.Background(), dir)
+}
+
+// NormalizeDatabase2Context fixes every writable Engine library file in dir while
+// honoring ctx cancellation and propagating writability check errors.
+func NormalizeDatabase2Context(ctx context.Context, dir string) (fixed []string, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	names, err := filepath.Glob(filepath.Join(dir, "*.db"))
 	if err != nil {
 		return nil, err
 	}
 	for _, p := range names {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fixed, errors.Join(err, ctxErr)
+		}
 		if strings.HasPrefix(filepath.Base(p), ".") {
 			continue
 		}
-		if w, we := writable(p); we == nil && !w {
+		w, we := reserveWritable(p)
+		if we != nil {
+			err = errors.Join(err, we)
 			continue
 		}
-		ok, e := NormalizeReserve(p)
+		if !w {
+			continue
+		}
+		ok, e := NormalizeReserveContext(ctx, p)
 		if ok {
 			fixed = append(fixed, filepath.Base(p))
 		}
@@ -156,7 +226,13 @@ func NormalizeDatabase2(dir string) (fixed []string, err error) {
 // fileURI keeps '#', '?' and '%' in a stick label part of the path for SQLite.
 func fileURI(p string) string { return "file:" + (&url.URL{Path: filepath.ToSlash(p)}).EscapedPath() }
 
-func rebuildPlain(src, dst string) error {
+func rebuildPlainContext(ctx context.Context, src, dst string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	db, err := sql.Open("sqlite", fileURI(dst))
 	if err != nil {
 		return err
@@ -165,24 +241,24 @@ func rebuildPlain(src, dst string) error {
 	db.SetMaxOpenConns(1)
 	// Escaped: a stick label with '#' or '?' cut the URI there, ATTACHed an empty
 	// file and the empty rebuild replaced the library (BH-GC1-1).
-	if _, err = db.Exec("ATTACH DATABASE ? AS old", fileURI(src)+"?mode=ro&immutable=1"); err != nil {
+	if _, err = db.ExecContext(ctx, "ATTACH DATABASE ? AS old", fileURI(src)+"?mode=ro&immutable=1"); err != nil {
 		return err
 	}
 	// Properties that must survive; page_size and auto_vacuum have to be set first.
 	var pageSize, autoVacuum, userVersion, appID int64
 	for pragma, v := range map[string]*int64{"page_size": &pageSize, "auto_vacuum": &autoVacuum, "user_version": &userVersion, "application_id": &appID} {
-		if err = db.QueryRow("PRAGMA old." + pragma).Scan(v); err != nil {
+		if err = db.QueryRowContext(ctx, "PRAGMA old."+pragma).Scan(v); err != nil {
 			return err
 		}
 	}
 	for _, s := range []string{fmt.Sprintf("PRAGMA main.page_size=%d", pageSize), fmt.Sprintf("PRAGMA main.auto_vacuum=%d", autoVacuum)} {
-		if _, err = db.Exec(s); err != nil {
+		if _, err = db.ExecContext(ctx, s); err != nil {
 			return err
 		}
 	}
 	type object struct{ typ, name, sql string }
 	var objects []object
-	rows, err := db.Query("SELECT type,name,sql FROM old.sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY rowid")
+	rows, err := db.QueryContext(ctx, "SELECT type,name,sql FROM old.sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY rowid")
 	if err != nil {
 		return err
 	}
@@ -200,7 +276,7 @@ func rebuildPlain(src, dst string) error {
 	if len(objects) == 0 {
 		return errors.New("source has no schema; refusing to replace it with an empty database")
 	}
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -208,14 +284,14 @@ func rebuildPlain(src, dst string) error {
 	var tables []object
 	for _, o := range objects {
 		if o.typ == "table" {
-			if _, err = tx.Exec(o.sql); err != nil {
+			if _, err = tx.ExecContext(ctx, o.sql); err != nil {
 				return fmt.Errorf("create %s: %w", o.name, err)
 			}
 			tables = append(tables, o)
 		}
 	}
 	for _, t := range tables {
-		cols, e := tableColumns(tx, t.name)
+		cols, e := tableColumnsContext(ctx, tx, t.name)
 		if e != nil {
 			return e
 		}
@@ -224,34 +300,34 @@ func rebuildPlain(src, dst string) error {
 			// Keep rowids: other tables and Engine refer to them.
 			list = "rowid," + list
 		}
-		if _, err = tx.Exec(fmt.Sprintf("INSERT INTO main.%s(%s) SELECT %s FROM old.%s", quote(t.name), list, list, quote(t.name))); err != nil {
+		if _, err = tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO main.%s(%s) SELECT %s FROM old.%s", quote(t.name), list, list, quote(t.name))); err != nil {
 			return fmt.Errorf("copy %s: %w", t.name, err)
 		}
 	}
 	var hasSeq int
-	if err = tx.QueryRow("SELECT count(*) FROM old.sqlite_master WHERE name='sqlite_sequence'").Scan(&hasSeq); err != nil {
+	if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM old.sqlite_master WHERE name='sqlite_sequence'").Scan(&hasSeq); err != nil {
 		return err
 	}
 	if hasSeq > 0 {
 		// SQLite makes sqlite_sequence with the first AUTOINCREMENT table and keeps it
 		// when the last one is dropped: the old file can have it and the new one not.
 		// Its rows then name no table, so there is nothing to carry over (BH2-A1-5).
-		if err = tx.QueryRow("SELECT count(*) FROM main.sqlite_master WHERE name='sqlite_sequence'").Scan(&hasSeq); err != nil {
+		if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM main.sqlite_master WHERE name='sqlite_sequence'").Scan(&hasSeq); err != nil {
 			return err
 		}
 	}
 	if hasSeq > 0 {
-		if _, err = tx.Exec("DELETE FROM main.sqlite_sequence"); err != nil {
+		if _, err = tx.ExecContext(ctx, "DELETE FROM main.sqlite_sequence"); err != nil {
 			return err
 		}
-		if _, err = tx.Exec("INSERT INTO main.sqlite_sequence SELECT name,seq FROM old.sqlite_sequence"); err != nil {
+		if _, err = tx.ExecContext(ctx, "INSERT INTO main.sqlite_sequence SELECT name,seq FROM old.sqlite_sequence"); err != nil {
 			return err
 		}
 	}
 	for _, typ := range []string{"index", "view", "trigger"} {
 		for _, o := range objects {
 			if o.typ == typ {
-				if _, err = tx.Exec(o.sql); err != nil {
+				if _, err = tx.ExecContext(ctx, o.sql); err != nil {
 					return fmt.Errorf("create %s %s: %w", typ, o.name, err)
 				}
 			}
@@ -259,7 +335,7 @@ func rebuildPlain(src, dst string) error {
 	}
 	for _, t := range tables {
 		var a, b int64
-		if err = tx.QueryRow(fmt.Sprintf("SELECT (SELECT count(*) FROM old.%[1]s),(SELECT count(*) FROM main.%[1]s)", quote(t.name))).Scan(&a, &b); err != nil {
+		if err = tx.QueryRowContext(ctx, fmt.Sprintf("SELECT (SELECT count(*) FROM old.%[1]s),(SELECT count(*) FROM main.%[1]s)", quote(t.name))).Scan(&a, &b); err != nil {
 			return err
 		}
 		if a != b {
@@ -267,7 +343,7 @@ func rebuildPlain(src, dst string) error {
 		}
 	}
 	var made int
-	if err = tx.QueryRow("SELECT count(*) FROM main.sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").Scan(&made); err != nil {
+	if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM main.sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").Scan(&made); err != nil {
 		return err
 	}
 	if made != len(objects) {
@@ -277,15 +353,15 @@ func rebuildPlain(src, dst string) error {
 		return err
 	}
 	for _, s := range []string{fmt.Sprintf("PRAGMA main.user_version=%d", userVersion), fmt.Sprintf("PRAGMA main.application_id=%d", appID)} {
-		if _, err = db.Exec(s); err != nil {
+		if _, err = db.ExecContext(ctx, s); err != nil {
 			return err
 		}
 	}
-	if _, err = db.Exec("DETACH DATABASE old"); err != nil {
+	if _, err = db.ExecContext(ctx, "DETACH DATABASE old"); err != nil {
 		return err
 	}
 	var check string
-	if err = db.QueryRow("PRAGMA main.integrity_check").Scan(&check); err != nil || check != "ok" {
+	if err = db.QueryRowContext(ctx, "PRAGMA main.integrity_check").Scan(&check); err != nil || check != "ok" {
 		return fmt.Errorf("rebuilt database integrity: %v %w", check, err)
 	}
 	if err = db.Close(); err != nil {
@@ -297,8 +373,8 @@ func rebuildPlain(src, dst string) error {
 	return nil
 }
 
-func tableColumns(tx *sql.Tx, table string) ([]string, error) {
-	rows, err := tx.Query("SELECT name FROM pragma_table_info(?, 'old')", table)
+func tableColumnsContext(ctx context.Context, tx *sql.Tx, table string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, "SELECT name FROM pragma_table_info(?, 'old')", table)
 	if err != nil {
 		return nil, err
 	}

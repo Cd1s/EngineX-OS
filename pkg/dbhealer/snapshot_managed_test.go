@@ -154,7 +154,7 @@ func TestBridgeManagedTracksContextHonorsDeadlineOnLargeSnapshot(t *testing.T) {
 
 	dbDir := filepath.Join(root, "Engine Library", "Database2")
 	snap := rbstate.New(libUUID)
-	for i := 1; i <= 40000; i++ {
+	for i := 1; i <= 60000; i++ {
 		rel := fmt.Sprintf("Music/Track-%05d.mp3", i)
 		key := rbstate.FoldPath(rel)
 		snap.Tracks[key] = &rbstate.Track{
@@ -175,15 +175,18 @@ func TestBridgeManagedTracksContextHonorsDeadlineOnLargeSnapshot(t *testing.T) {
 		t.Fatalf("canceled bridgeManagedTracksContext: len=%d err=%v, want context.Canceled", len(ids), err)
 	}
 
-	tightCtx, cancelTight := context.WithTimeout(context.Background(), 1*time.Millisecond)
+	tightCtx, cancelTight := context.WithTimeout(context.Background(), 2*time.Millisecond)
 	defer cancelTight()
-	start := time.Now()
+	deadline, _ := tightCtx.Deadline()
 	ids, err = bridgeManagedTracksContext(tightCtx, root)
-	elapsed := time.Since(start)
-	if err == nil && elapsed > 10*time.Millisecond {
-		t.Fatalf("large snapshot exceeded 1ms budget without error: len=%d elapsed=%v", len(ids), elapsed)
+	overrun := time.Since(deadline)
+	if err == nil {
+		t.Fatalf("60k snapshot exceeded 2ms budget without cancellation error: len=%d overrun=%v", len(ids), overrun)
 	}
-	if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 		t.Fatalf("unexpected error on tight deadline: %v", err)
+	}
+	if overrun >= 50*time.Millisecond {
+		t.Fatalf("large snapshot exceeded tight deadline by %v (>= 50ms)", overrun)
 	}
 }

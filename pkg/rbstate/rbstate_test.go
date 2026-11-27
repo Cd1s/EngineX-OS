@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -500,5 +501,55 @@ func TestReplaceFileCtxHonorsDeadlineAtEveryCutPoint(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSnapshotLargeChunkedRoundTripAndCancelMidDecode(t *testing.T) {
+	s := New("11111111-2222-3333-4444-555555555555")
+	for i := 0; i < 600; i++ {
+		k := fmt.Sprintf("list/%04d", i)
+		s.Lists[k] = &List{Key: k, EngineID: int64(i + 1), Hash: "h"}
+	}
+	for i := 1; i <= 60000; i++ {
+		rel := fmt.Sprintf("Music/Artist-%03d/Track-%05d.mp3", i%200, i)
+		k := FoldPath(rel)
+		s.Tracks[k] = &Track{Key: k, EngineID: int64(i), Rel: rel}
+	}
+
+	raw, err := s.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseStart := time.Now()
+	got, err := LoadReaderContext(context.Background(), bytes.NewReader(raw))
+	baseline := time.Since(baseStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Lists) != 600 || len(got.Tracks) != 60000 {
+		t.Fatalf("decoded counts: lists=%d tracks=%d", len(got.Lists), len(got.Tracks))
+	}
+	reencoded, err := got.Encode()
+	if err != nil || !bytes.Equal(raw, reencoded) {
+		t.Fatalf("round-trip encode mismatch: err=%v len(%d vs %d)", err, len(raw), len(reencoded))
+	}
+
+	timeout := baseline / 3
+	if timeout < 2*time.Millisecond {
+		timeout = 2 * time.Millisecond
+	}
+	if timeout > 30*time.Millisecond {
+		timeout = 30 * time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	_, err = LoadReaderContext(ctx, bytes.NewReader(raw))
+	overrun := time.Since(deadline)
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		t.Fatalf("chunked decode mid-cancel err=%v (baseline=%v timeout=%v)", err, baseline, timeout)
+	}
+	if overrun >= 50*time.Millisecond {
+		t.Fatalf("chunked decode overran deadline by %v (>= 50ms)", overrun)
 	}
 }

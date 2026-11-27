@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1272,4 +1273,210 @@ func TestHealMountDataOnlyDoesNotOverrunDeadlineWhenLockedAfterBatch(t *testing.
 	if infoID != 1 {
 		t.Fatalf("Information.id=%d, want 1", infoID)
 	}
+}
+
+func TestHealMountDataOnlyFailedProbeOnLockedFutureSchemaReportsUnhealthy(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	if _, err := db.Exec(`UPDATE Information SET schemaVersionMajor=4`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	dbPath := filepath.Join(root, "Engine Library", "Database2", "m.db")
+	locker, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locker.SetMaxOpenConns(1)
+	defer locker.Close()
+	if _, err := locker.Exec("BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = locker.Exec("ROLLBACK") }()
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	rep, err := HealMountDataOnlyContext(canceled, root, 0)
+	if err == nil || rep.Healthy {
+		t.Fatalf("canceled locked schema-4 probe reported healthy: rep=%+v err=%v", rep, err)
+	}
+
+	liveCtx, cancelLive := context.WithTimeout(context.Background(), 45*time.Millisecond)
+	defer cancelLive()
+	rep, err = HealMountDataOnlyContext(liveCtx, root, 0)
+	if err == nil || rep.Healthy {
+		t.Fatalf("45ms locked schema-4 probe reported healthy: rep=%+v err=%v", rep, err)
+	}
+}
+
+func TestHealMountDataOnlyCanceledProbeDoesNotRebuildReserveOnSchemaError(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	if _, err := db.Exec(`UPDATE Information SET schemaVersionMajor=4`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	seed := reserve12Seed(t, "hm-res12.db")
+	hdb, err := sql.Open("sqlite", seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdb.SetMaxOpenConns(1)
+	schema, err := os.ReadFile("../../docs/re-report/ENGINE-5.0.4-hm.db-schema.sql")
+	if err != nil {
+		hdb.Close()
+		t.Fatal(err)
+	}
+	mustExec(t, hdb, strings.ReplaceAll(string(schema), "CREATE TABLE sqlite_sequence(name,seq);", ""))
+	mustExec(t, hdb, "INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES(1,'hist-res12',3,0,2)")
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+	hm := filepath.Join(root, "Engine Library", "Database2", "hm.db")
+	raw, err := os.ReadFile(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hm, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	rep, err := HealMountDataOnlyContext(canceled, root, 0)
+	elapsed := time.Since(start)
+	if err == nil || rep.Healthy {
+		t.Fatalf("canceled probe accepted schema-4 m.db: rep=%+v err=%v", rep, err)
+	}
+	if elapsed >= 100*time.Millisecond {
+		t.Fatalf("canceled probe took %v (unexpected reserve rebuild)", elapsed)
+	}
+	if r, ok, rerr := Reserve(hm); rerr != nil || !ok || r != 12 {
+		t.Fatalf("hm.db reserve modified: r=%d ok=%v err=%v", r, ok, rerr)
+	}
+	if _, serr := os.Stat(hm + ".pre-reserve"); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("hm.db.pre-reserve created on canceled invalid m.db: err=%v", serr)
+	}
+}
+
+func TestHealMountFullHealRollsBackIdentityOnMissingPerformanceData(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		dropTable string
+	}{
+		{name: "missing_PerformanceData", dropTable: "PerformanceData"},
+		{name: "mid_tx_failure_missing_PlaylistEntity", dropTable: "PlaylistEntity"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, root, db := testlibrary.Create(t)
+			if _, err := db.Exec(`UPDATE Information SET id=99, uuid='nonempty-uuid'`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`DROP TABLE ` + tc.dropTable); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+
+			rep, err := HealMountWithOptions(context.Background(), root, MountOptions{MaxSessions: 0, DataOnly: false})
+			if err == nil || rep.Healthy {
+				t.Fatalf("full heal on dropped %s succeeded: rep=%+v err=%v", tc.dropTable, rep, err)
+			}
+			check, err := Open(filepath.Join(root, "Engine Library", "Database2", "m.db"), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer check.Close()
+			var infoID int
+			if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
+				t.Fatal(err)
+			}
+			if infoID != 99 {
+				t.Fatalf("failed full heal (%s) mutated Information.id to %d, want 99", tc.dropTable, infoID)
+			}
+		})
+	}
+}
+
+func TestHealMountRejectsAmbiguousInformationAndRepairsTabUUID(t *testing.T) {
+	t.Run("two_rows_second_future_schema", func(t *testing.T) {
+		_, root, db := testlibrary.Create(t)
+		if _, err := db.Exec(`UPDATE Information SET id=98, uuid='valid-uuid'`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES(99,'',4,0,2)`); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+
+		canceled, cancel := context.WithCancel(context.Background())
+		cancel()
+		rep, err := HealMountDataOnlyContext(canceled, root, 0)
+		if err == nil || rep.Healthy {
+			t.Fatalf("canceled mount accepted row 99 future schema: rep=%+v err=%v", rep, err)
+		}
+		check, err := Open(filepath.Join(root, "Engine Library", "Database2", "m.db"), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer check.Close()
+		var gotUUID string
+		if err := check.QueryRow(`SELECT uuid FROM Information WHERE id=99`).Scan(&gotUUID); err != nil {
+			t.Fatal(err)
+		}
+		if gotUUID != "" {
+			t.Fatalf("future-schema row 99 got UUID %q", gotUUID)
+		}
+	})
+
+	t.Run("two_rows_both_supported", func(t *testing.T) {
+		_, root, db := testlibrary.Create(t)
+		if _, err := db.Exec(`INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES(2,'',3,0,2)`); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+
+		rep, err := HealMountDataOnly(root, 0)
+		if err == nil || !strings.Contains(err.Error(), "ambiguous") || rep.Healthy {
+			t.Fatalf("expected ambiguous identity error, got rep=%+v err=%v", rep, err)
+		}
+		check, err := Open(filepath.Join(root, "Engine Library", "Database2", "m.db"), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer check.Close()
+		var gotUUID string
+		if err := check.QueryRow(`SELECT uuid FROM Information WHERE id=2`).Scan(&gotUUID); err != nil {
+			t.Fatal(err)
+		}
+		if gotUUID != "" {
+			t.Fatalf("ambiguous row 2 mutated to UUID %q", gotUUID)
+		}
+	})
+
+	t.Run("tab_only_uuid_repaired", func(t *testing.T) {
+		_, root, db := testlibrary.Create(t)
+		if _, err := db.Exec(`UPDATE Information SET id=99, uuid=?`, "\t"); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+
+		rep, err := HealMountDataOnly(root, 0)
+		if err != nil || !rep.Healthy {
+			t.Fatalf("tab-only uuid heal failed: rep=%+v err=%v", rep, err)
+		}
+		check, err := Open(filepath.Join(root, "Engine Library", "Database2", "m.db"), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer check.Close()
+		var id int
+		var gotUUID string
+		if err := check.QueryRow(`SELECT id, uuid FROM Information`).Scan(&id, &gotUUID); err != nil {
+			t.Fatal(err)
+		}
+		if id != 1 || strings.TrimSpace(gotUUID) == "" {
+			t.Fatalf("tab-only identity not repaired: id=%d uuid=%q", id, gotUUID)
+		}
+	})
 }

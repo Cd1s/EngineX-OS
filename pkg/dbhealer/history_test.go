@@ -928,3 +928,70 @@ func TestS16MergeReadOnlyHistoryWithReserveNotRewritten(t *testing.T) {
 		t.Fatal("mode-0444 hm.db bytes changed during HealMountDataOnly")
 	}
 }
+
+func TestS16MergeMalformedLowercasePreparelistEntityPreservesTrack(t *testing.T) {
+	t.Run("missing_trackId_column_fails_before_delete", func(t *testing.T) {
+		mount, hdb, _ := newS16HistoryMount(t)
+		mustExec(t, hdb, `INSERT INTO AlbumArt VALUES(1,NULL,X'')`)
+		mustExec(t, hdb, `INSERT INTO Track VALUES(10,'../Music/prep.mp3',NULL,X'01',0)`)
+		mustExec(t, hdb, `INSERT INTO PerformanceData VALUES(10,X'01')`)
+		mustExec(t, hdb, `CREATE TABLE preparelistentity(id INTEGER PRIMARY KEY, track_ref INTEGER);
+			INSERT INTO preparelistentity VALUES(1, 10)`)
+		hdb.Close()
+
+		r, err := HealMountDataOnly(mount, 0)
+		if err == nil || r.Healthy {
+			t.Fatalf("malformed lowercase preparelistentity succeeded: rep=%+v err=%v", r, err)
+		}
+		if r.HistoryCleaned != 0 {
+			t.Fatalf("expected HistoryCleaned=0 on schema failure, got %d", r.HistoryCleaned)
+		}
+
+		check, err := Open(filepath.Join(mount, "Engine Library", "Database2", "hm.db"), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer check.Close()
+		var tracks, perf, prep int
+		if err := check.QueryRow(`SELECT count(*) FROM Track WHERE id=10`).Scan(&tracks); err != nil {
+			t.Fatal(err)
+		}
+		if err := check.QueryRow(`SELECT count(*) FROM PerformanceData WHERE trackId=10`).Scan(&perf); err != nil {
+			t.Fatal(err)
+		}
+		if err := check.QueryRow(`SELECT count(*) FROM preparelistentity WHERE track_ref=10`).Scan(&prep); err != nil {
+			t.Fatal(err)
+		}
+		if tracks != 1 || perf != 1 || prep != 1 {
+			t.Fatalf("malformed schema mutated rows: tracks=%d perf=%d prep=%d", tracks, perf, prep)
+		}
+	})
+
+	t.Run("valid_lowercase_preparelistentity_keeps_referenced_track", func(t *testing.T) {
+		mount, hdb, _ := newS16HistoryMount(t)
+		mustExec(t, hdb, `INSERT INTO AlbumArt VALUES(1,NULL,X'')`)
+		mustExec(t, hdb, `INSERT INTO Track VALUES(10,'../Music/prep.mp3',NULL,X'01',0)`)
+		mustExec(t, hdb, `INSERT INTO PerformanceData VALUES(10,X'01')`)
+		mustExec(t, hdb, `INSERT INTO Track VALUES(11,'../Music/dead.mp3',NULL,X'02',0)`)
+		mustExec(t, hdb, `INSERT INTO PerformanceData VALUES(11,X'02')`)
+		mustExec(t, hdb, `CREATE TABLE preparelistentity(id INTEGER PRIMARY KEY, trackId INTEGER);
+			INSERT INTO preparelistentity VALUES(1, 10)`)
+		hdb.Close()
+
+		r, err := HealMountDataOnly(mount, 0)
+		if err != nil || !r.Healthy {
+			t.Fatalf("lowercase preparelistentity clean failed: rep=%+v err=%v", r, err)
+		}
+		check, err := Open(filepath.Join(mount, "Engine Library", "Database2", "hm.db"), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer check.Close()
+		var kept, removed int
+		_ = check.QueryRow(`SELECT count(*) FROM Track WHERE id=10`).Scan(&kept)
+		_ = check.QueryRow(`SELECT count(*) FROM Track WHERE id=11`).Scan(&removed)
+		if kept != 1 || removed != 0 {
+			t.Fatalf("lowercase preparelistentity track disposition: kept=%d removed=%d", kept, removed)
+		}
+	})
+}

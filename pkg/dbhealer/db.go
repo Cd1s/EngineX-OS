@@ -241,12 +241,12 @@ func healWithPreHealAndResizedContext(ctx context.Context, db *sql.DB, dataOnly 
 	if check != "ok" {
 		return r, nil, fmt.Errorf("database integrity: %s", check)
 	}
-	var major, minor, patch int
-	if err := db.QueryRowContext(ctx, "SELECT schemaVersionMajor,schemaVersionMinor,schemaVersionPatch FROM Information LIMIT 1").Scan(&major, &minor, &patch); err != nil {
-		return r, nil, fmt.Errorf("missing library version: %w", err)
+	infos, err := readLibraryIdentityRows(ctx, db)
+	if err != nil {
+		return r, nil, err
 	}
-	if major != 3 || minor != 0 || patch != 2 {
-		return r, nil, fmt.Errorf("unsupported library schema %d.%d.%d (supported 3.0.2)", major, minor, patch)
+	if _, err := validateLibraryIdentityRows(infos); err != nil {
+		return r, nil, err
 	}
 	if dataOnly {
 		// PRAGMA optimize could add sqlite_stat1, and the queue must stay out of
@@ -258,10 +258,10 @@ func healWithPreHealAndResizedContext(ctx context.Context, db *sql.DB, dataOnly 
 		return r, nil, err
 	}
 	var resized map[int64]bool
-	err := transactionContext(ctx, db, func(tx *sql.Tx) error {
+	err = transactionContext(ctx, db, func(tx *sql.Tx) error {
 		// An unrecognized future schema is not a license to rewrite its blobs.
 		var schema string
-		if err := tx.QueryRowContext(ctx, "SELECT sql FROM main.sqlite_master WHERE type='table' AND name='PerformanceData'").Scan(&schema); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT sql FROM main.sqlite_master WHERE type='table' AND name='PerformanceData' COLLATE NOCASE").Scan(&schema); err != nil {
 			return fmt.Errorf("unsupported library schema: %w", err)
 		}
 		if preHeal != nil {
@@ -396,29 +396,7 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 	if err != nil {
 		return r, err
 	}
-	checkCtx := ctx
-	if dataOnly && ctx.Err() != nil {
-		var cancelProbe context.CancelFunc
-		checkCtx, cancelProbe = context.WithTimeout(context.Background(), 25*time.Millisecond)
-		defer cancelProbe()
-	}
-	if rw {
-		// Before Engine opens the volume: a nonzero page reserve breaks every ATTACH.
-		if r.ReserveFixed, err = NormalizeDatabase2(filepath.Dir(path)); err != nil {
-			return r, err
-		}
-	}
-	db, err := openContext(checkCtx, path, !rw)
-	if err != nil {
-		if dataOnly && (isContextStop(checkCtx, err) || budgetExpired(checkCtx, err)) {
-			r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
-			r.Healthy = true
-			return r, nil
-		}
-		return r, err
-	}
 	if !rw {
-		db.Close()
 		r, err = InspectMount(mount)
 		if res, ok, _ := Reserve(path); ok && res != 0 {
 			r.Warnings = append(r.Warnings, fmt.Sprintf("m.db page reserve is %d: Engine 5.3.0 cannot ATTACH it; rebuild on writable media", res))
@@ -426,25 +404,133 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 		r.Warnings = append(r.Warnings, "read-only media: inspected without repairs or journal writes")
 		return r, err
 	}
-	fixed := r.ReserveFixed
-	dbUUID, schemaErr := validateAndRepairLibraryIdentity(checkCtx, db)
-	if schemaErr != nil {
-		_ = db.Close()
-		if dataOnly && (isContextStop(checkCtx, schemaErr) || budgetExpired(checkCtx, schemaErr)) {
-			r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
-			r.Healthy = true
-			r.Mount = mount
-			return r, nil
-		}
-		r.Healthy = false
-		r.Mount = mount
-		return r, schemaErr
-	}
+	checkCtx := ctx
 	if dataOnly && ctx.Err() != nil {
-		closeErr := db.Close()
-		r.Mount = mount
-		r.Healthy = closeErr == nil
-		return r, closeErr
+		var cancelProbe context.CancelFunc
+		checkCtx, cancelProbe = context.WithTimeout(context.Background(), 25*time.Millisecond)
+		defer cancelProbe()
+	}
+	var db *sql.DB
+	var dbUUID string
+	var needsIdentityRepair bool
+	mainRes, mainResOK, resErr := Reserve(path)
+	if resErr != nil {
+		return r, resErr
+	}
+	if mainResOK && mainRes != 0 {
+		// Validate schema and identity read-only before rewriting reserve or touching siblings.
+		roDB, roErr := openContext(checkCtx, path, true)
+		if roErr != nil {
+			if dataOnly && (isContextStop(checkCtx, roErr) || budgetExpired(checkCtx, roErr)) {
+				r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
+			}
+			r.Healthy = false
+			r.Mount = mount
+			return r, roErr
+		}
+		var schemaErr error
+		dbUUID, needsIdentityRepair, schemaErr = validateLibraryIdentityReadOnly(checkCtx, roDB)
+		if schemaErr == nil && !dataOnly {
+			schemaErr = hasPerformanceDataTable(checkCtx, roDB)
+		}
+		roCloseErr := roDB.Close()
+		if schemaErr != nil {
+			if dataOnly && (isContextStop(checkCtx, schemaErr) || budgetExpired(checkCtx, schemaErr)) {
+				r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
+			}
+			r.Healthy = false
+			r.Mount = mount
+			return r, schemaErr
+		}
+		if roCloseErr != nil {
+			r.Healthy = false
+			r.Mount = mount
+			return r, roCloseErr
+		}
+		if dataOnly && ctx.Err() != nil {
+			r.Warnings = append(r.Warnings, fmt.Sprintf("m.db page reserve is %d: mount budget exceeded before rebuild", mainRes))
+			r.Healthy = false
+			r.Mount = mount
+			return r, ctx.Err()
+		}
+		// Before Engine opens the volume: a nonzero page reserve breaks every ATTACH.
+		if r.ReserveFixed, err = NormalizeDatabase2Context(ctx, filepath.Dir(path)); err != nil {
+			r.Healthy = false
+			r.Mount = mount
+			return r, err
+		}
+		db, err = openContext(ctx, path, false)
+		if err != nil {
+			if dataOnly && (isContextStop(ctx, err) || budgetExpired(ctx, err)) {
+				r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
+			}
+			r.Healthy = false
+			r.Mount = mount
+			return r, err
+		}
+	} else {
+		db, err = openContext(checkCtx, path, false)
+		if err != nil {
+			if dataOnly && (isContextStop(checkCtx, err) || budgetExpired(checkCtx, err)) {
+				r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
+			}
+			r.Healthy = false
+			r.Mount = mount
+			return r, err
+		}
+		var schemaErr error
+		dbUUID, needsIdentityRepair, schemaErr = validateLibraryIdentityReadOnly(checkCtx, db)
+		if schemaErr == nil && !dataOnly {
+			schemaErr = hasPerformanceDataTable(checkCtx, db)
+		}
+		if schemaErr != nil {
+			_ = db.Close()
+			if dataOnly && (isContextStop(checkCtx, schemaErr) || budgetExpired(checkCtx, schemaErr)) {
+				r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
+			}
+			r.Healthy = false
+			r.Mount = mount
+			return r, schemaErr
+		}
+		if dataOnly && ctx.Err() != nil {
+			if needsIdentityRepair {
+				var repairErr error
+				dbUUID, repairErr = validateAndRepairLibraryIdentity(checkCtx, db)
+				if repairErr != nil {
+					_ = db.Close()
+					if isContextStop(checkCtx, repairErr) || budgetExpired(checkCtx, repairErr) {
+						r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
+					}
+					r.Healthy = false
+					r.Mount = mount
+					return r, repairErr
+				}
+			}
+			closeErr := db.Close()
+			r.Mount = mount
+			r.Healthy = closeErr == nil
+			return r, closeErr
+		}
+		// Before Engine opens the volume: a nonzero page reserve breaks every ATTACH.
+		if r.ReserveFixed, err = NormalizeDatabase2Context(ctx, filepath.Dir(path)); err != nil {
+			_ = db.Close()
+			r.Healthy = false
+			r.Mount = mount
+			return r, err
+		}
+	}
+	fixed := r.ReserveFixed
+	if dataOnly && needsIdentityRepair {
+		var repairErr error
+		if dbUUID, repairErr = validateAndRepairLibraryIdentity(ctx, db); repairErr != nil {
+			_ = db.Close()
+			if isContextStop(ctx, repairErr) || budgetExpired(ctx, repairErr) {
+				r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
+			}
+			r.Healthy = false
+			r.Mount = mount
+			return r, repairErr
+		}
 	}
 	passRes, err := runMountTrackPass(ctx, db, mount, &r, mountTrackPassOptions{
 		runNFD:     true,
@@ -792,94 +878,146 @@ type trackPathCandidate struct {
 
 var normalizeTrackPathBatch func()
 
-func repairLibraryIdentityTx(ctx context.Context, tx *sql.Tx) error {
-	var infoCount int
-	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM Information").Scan(&infoCount); err != nil {
-		return err
-	}
-	if infoCount == 1 {
-		var badID int
-		if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM Information WHERE id<>1)").Scan(&badID); err != nil {
-			return err
-		}
-		if badID != 0 {
-			if _, err := tx.ExecContext(ctx, "UPDATE Information SET id=1 WHERE id<>1"); err != nil {
-				return err
-			}
-		}
-	}
-	var emptyUUID int
-	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM Information WHERE uuid IS NULL OR trim(uuid)='')").Scan(&emptyUUID); err != nil {
-		return err
-	}
-	if emptyUUID != 0 {
-		if _, err := tx.ExecContext(ctx, "UPDATE Information SET uuid=? WHERE uuid IS NULL OR trim(uuid)=''", uuid.NewString()); err != nil {
-			return err
-		}
-	}
-	return nil
+type libraryInfoRow struct {
+	id                  int
+	uuid                string
+	major, minor, patch int
 }
 
-func validateAndRepairLibraryIdentity(ctx context.Context, db *sql.DB) (string, error) {
-	if err := clampBusyTimeout(ctx, db); err != nil {
-		return "", err
-	}
-	rows, err := db.QueryContext(ctx, "SELECT id, COALESCE(uuid,''), schemaVersionMajor, schemaVersionMinor, schemaVersionPatch FROM Information LIMIT 2")
+func readLibraryIdentityRows(ctx context.Context, q sqlQuerier) ([]libraryInfoRow, error) {
+	rows, err := q.QueryContext(ctx, "SELECT id, COALESCE(uuid,''), schemaVersionMajor, schemaVersionMinor, schemaVersionPatch FROM Information ORDER BY id LIMIT 2")
 	if err != nil {
 		if isContextStop(ctx, err) || budgetExpired(ctx, err) {
-			return "", err
+			return nil, err
 		}
-		return "", fmt.Errorf("missing library version: %w", err)
+		return nil, fmt.Errorf("missing library version: %w", err)
 	}
-	type infoRow struct {
-		id                  int
-		uuid                string
-		major, minor, patch int
-	}
-	var infos []infoRow
+	var infos []libraryInfoRow
 	for rows.Next() {
-		var row infoRow
+		var row libraryInfoRow
 		if err := rows.Scan(&row.id, &row.uuid, &row.major, &row.minor, &row.patch); err != nil {
 			_ = rows.Close()
 			if isContextStop(ctx, err) || budgetExpired(ctx, err) {
-				return "", err
+				return nil, err
 			}
-			return "", fmt.Errorf("missing library version: %w", err)
+			return nil, fmt.Errorf("missing library version: %w", err)
 		}
 		infos = append(infos, row)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
 		if isContextStop(ctx, err) || budgetExpired(ctx, err) {
-			return "", err
+			return nil, err
 		}
-		return "", fmt.Errorf("missing library version: %w", err)
+		return nil, fmt.Errorf("missing library version: %w", err)
 	}
 	if err := rows.Close(); err != nil {
 		if isContextStop(ctx, err) || budgetExpired(ctx, err) {
-			return "", err
+			return nil, err
 		}
-		return "", fmt.Errorf("missing library version: %w", err)
+		return nil, fmt.Errorf("missing library version: %w", err)
 	}
+	return infos, nil
+}
+
+func validateLibraryIdentityRows(infos []libraryInfoRow) (libraryInfoRow, error) {
 	if len(infos) == 0 {
-		return "", fmt.Errorf("missing library version: %w", sql.ErrNoRows)
+		return libraryInfoRow{}, fmt.Errorf("missing library version: %w", sql.ErrNoRows)
 	}
-	if infos[0].major != 3 || infos[0].minor != 0 || infos[0].patch != 2 {
-		return "", fmt.Errorf("unsupported library schema %d.%d.%d (supported 3.0.2)", infos[0].major, infos[0].minor, infos[0].patch)
+	for _, row := range infos {
+		if row.major != 3 || row.minor != 0 || row.patch != 2 {
+			return libraryInfoRow{}, fmt.Errorf("unsupported library schema %d.%d.%d (supported 3.0.2)", row.major, row.minor, row.patch)
+		}
 	}
-	if len(infos) == 1 && infos[0].id == 1 && strings.TrimSpace(infos[0].uuid) != "" {
-		return strings.TrimSpace(infos[0].uuid), nil
+	if len(infos) > 1 {
+		return libraryInfoRow{}, fmt.Errorf("ambiguous library identity: Information has multiple rows")
+	}
+	return infos[0], nil
+}
+
+func hasPerformanceDataTable(ctx context.Context, q sqlQuerier) error {
+	var count int
+	if err := q.QueryRowContext(ctx, "SELECT count(*) FROM main.sqlite_master WHERE type='table' AND name='PerformanceData' COLLATE NOCASE").Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		return fmt.Errorf("unsupported library schema: missing PerformanceData table")
+	}
+	return nil
+}
+
+func repairLibraryIdentityTx(ctx context.Context, tx *sql.Tx) error {
+	infos, err := readLibraryIdentityRows(ctx, tx)
+	if err != nil {
+		return err
+	}
+	row, err := validateLibraryIdentityRows(infos)
+	if err != nil {
+		return err
+	}
+	targetID := row.id
+	if row.id != 1 {
+		if _, err := tx.ExecContext(ctx, "UPDATE Information SET id=1 WHERE id=?", row.id); err != nil {
+			return err
+		}
+		targetID = 1
+	}
+	if strings.TrimSpace(row.uuid) == "" {
+		if _, err := tx.ExecContext(ctx, "UPDATE Information SET uuid=? WHERE id=?", uuid.NewString(), targetID); err != nil {
+			return err
+		}
+	}
+	afterInfos, err := readLibraryIdentityRows(ctx, tx)
+	if err != nil {
+		return err
+	}
+	after, err := validateLibraryIdentityRows(afterInfos)
+	if err != nil {
+		return err
+	}
+	if after.id != 1 || strings.TrimSpace(after.uuid) == "" {
+		return fmt.Errorf("library identity repair failed")
+	}
+	return nil
+}
+
+func validateLibraryIdentityReadOnly(ctx context.Context, db *sql.DB) (string, bool, error) {
+	if err := clampBusyTimeout(ctx, db); err != nil {
+		return "", false, err
+	}
+	infos, err := readLibraryIdentityRows(ctx, db)
+	if err != nil {
+		return "", false, err
+	}
+	row, err := validateLibraryIdentityRows(infos)
+	if err != nil {
+		return "", false, err
+	}
+	trimmed := strings.TrimSpace(row.uuid)
+	return trimmed, row.id != 1 || trimmed == "", nil
+}
+
+func validateAndRepairLibraryIdentity(ctx context.Context, db *sql.DB) (string, error) {
+	dbUUID, needsRepair, err := validateLibraryIdentityReadOnly(ctx, db)
+	if err != nil {
+		return "", err
+	}
+	if !needsRepair {
+		return dbUUID, nil
 	}
 	if err := transactionContext(ctx, db, func(tx *sql.Tx) error {
 		return repairLibraryIdentityTx(ctx, tx)
 	}); err != nil {
 		return "", err
 	}
-	var refreshedUUID string
-	if err := db.QueryRowContext(ctx, "SELECT COALESCE(uuid,'') FROM Information LIMIT 1").Scan(&refreshedUUID); err != nil {
+	dbUUID, stillNeedsRepair, err := validateLibraryIdentityReadOnly(ctx, db)
+	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(refreshedUUID), nil
+	if stillNeedsRepair {
+		return "", fmt.Errorf("library identity repair failed")
+	}
+	return dbUUID, nil
 }
 
 const sqliteInterruptCode = 9 // SQLITE_INTERRUPT

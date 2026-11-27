@@ -827,8 +827,11 @@ func TestS11ArtworkPhaseRespectsMountDeadlineAndStreamsBlobs(t *testing.T) {
 		elapsedLock := time.Since(startLock)
 		cancelLock()
 		_, _ = locker.Exec(`ROLLBACK`)
-		if err != nil || !r.Healthy {
-			t.Fatalf("locked m.db short-deadline heal failed: %+v err=%v", r, err)
+		if err == nil || r.Healthy {
+			t.Fatalf("locked m.db must not report healthy: %+v err=%v", r, err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) && !isSQLiteBusy(err) {
+			t.Fatalf("locked m.db unexpected error: %v", err)
 		}
 		if elapsedLock >= 1500*time.Millisecond {
 			t.Fatalf("locked m.db blew past 200ms mount deadline: elapsed=%v", elapsedLock)

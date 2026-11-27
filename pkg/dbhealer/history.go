@@ -3,6 +3,7 @@ package dbhealer
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -53,12 +54,21 @@ func selectColumn(cols map[string]string, names ...string) string {
 	return ""
 }
 
-func mainTableExists(ctx context.Context, q sqlQuerier, name string) (bool, error) {
-	var count int
-	if err := q.QueryRowContext(ctx, "SELECT count(*) FROM main.sqlite_master WHERE type='table' AND name=?", name).Scan(&count); err != nil {
-		return false, err
+func mainTableName(ctx context.Context, q sqlQuerier, name string) (string, bool, error) {
+	var actual string
+	err := q.QueryRowContext(ctx, "SELECT name FROM main.sqlite_master WHERE type='table' AND name=? COLLATE NOCASE LIMIT 1", name).Scan(&actual)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
 	}
-	return count > 0, nil
+	if err != nil {
+		return "", false, err
+	}
+	return actual, true, nil
+}
+
+func mainTableExists(ctx context.Context, q sqlQuerier, name string) (bool, error) {
+	_, ok, err := mainTableName(ctx, q, name)
+	return ok, err
 }
 
 func listMainTables(ctx context.Context, q sqlQuerier) ([]string, error) {
@@ -117,7 +127,8 @@ func trackReferenceQuery(ctx context.Context, q sqlQuerier) (string, error) {
 	}
 	var refs []string
 	for _, table := range tables {
-		if table == "Track" || table == "PerformanceData" || strings.HasPrefix(table, "Guardian") || strings.HasPrefix(table, "sqlite_") {
+		if strings.EqualFold(table, "Track") || strings.EqualFold(table, "PerformanceData") ||
+			strings.HasPrefix(strings.ToLower(table), "guardian") || strings.HasPrefix(strings.ToLower(table), "sqlite_") {
 			continue
 		}
 		cols, e := columns(ctx, q, table)
@@ -155,7 +166,8 @@ func albumArtOrphanWhere(ctx context.Context, q sqlQuerier) (string, bool, error
 	}
 	var refs []string
 	for _, table := range tables {
-		if table == "AlbumArt" || strings.HasPrefix(table, "Guardian") || strings.HasPrefix(table, "sqlite_") {
+		if strings.EqualFold(table, "AlbumArt") ||
+			strings.HasPrefix(strings.ToLower(table), "guardian") || strings.HasPrefix(strings.ToLower(table), "sqlite_") {
 			continue
 		}
 		cols, e := columns(ctx, q, table)
@@ -248,10 +260,10 @@ func cleanHistoryOrphansTx(ctx context.Context, tx *sql.Tx) (int, error) {
 	if selectColumn(plEntityCols, "trackId") == "" {
 		return 0, fmt.Errorf("unsupported PlaylistEntity schema: missing trackId column")
 	}
-	if hasPrep, err := mainTableExists(ctx, tx, "PreparelistEntity"); err != nil {
+	if prepTable, hasPrep, err := mainTableName(ctx, tx, "PreparelistEntity"); err != nil {
 		return 0, err
 	} else if hasPrep {
-		prepCols, err := columns(ctx, tx, "PreparelistEntity")
+		prepCols, err := columns(ctx, tx, prepTable)
 		if err != nil {
 			return 0, err
 		}
@@ -353,15 +365,15 @@ func cleanHistoryOrphansTx(ctx context.Context, tx *sql.Tx) (int, error) {
 			return 0, err
 		}
 	}
-	if hasQueue, e := mainTableExists(ctx, tx, "GuardianReanalysis"); e != nil {
+	if queueTable, hasQueue, e := mainTableName(ctx, tx, "GuardianReanalysis"); e != nil {
 		return 0, e
 	} else if hasQueue {
-		queueCols, e := columns(ctx, tx, "GuardianReanalysis")
+		queueCols, e := columns(ctx, tx, queueTable)
 		if e != nil {
 			return 0, e
 		}
 		if col := selectColumn(queueCols, "trackId"); col != "" {
-			if err = execDelete("DELETE FROM main.GuardianReanalysis WHERE " + col + " NOT IN (SELECT " + trackPK + " FROM Track)"); err != nil {
+			if err = execDelete("DELETE FROM main." + quote(queueTable) + " WHERE " + col + " NOT IN (SELECT " + trackPK + " FROM Track)"); err != nil {
 				return 0, err
 			}
 		}

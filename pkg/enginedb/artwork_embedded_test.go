@@ -157,62 +157,47 @@ func wrapAtom(fourcc string, payload []byte) []byte {
 func TestExtractEmbeddedArtwork(t *testing.T) {
 	tmp := t.TempDir()
 
-	// 1. MP3 ID3v2.3 with JPEG
 	mp3v3 := filepath.Join(tmp, "test_v3.mp3")
 	createTestMP3(t, mp3v3, 3, testJPEG)
-	art, err := ExtractEmbeddedArtwork(mp3v3)
-	if err != nil {
-		t.Fatalf("MP3 v2.3 failed: %v", err)
-	}
-	if !bytes.Equal(art, testJPEG) {
-		t.Fatalf("MP3 v2.3 art mismatch")
-	}
-
-	// 2. MP3 ID3v2.4 with PNG
 	mp3v4 := filepath.Join(tmp, "test_v4.mp3")
 	createTestMP3(t, mp3v4, 4, testPNG)
-	art, err = ExtractEmbeddedArtwork(mp3v4)
-	if err != nil {
-		t.Fatalf("MP3 v2.4 failed: %v", err)
-	}
-	if !bytes.Equal(art, testPNG) {
-		t.Fatalf("MP3 v2.4 art mismatch")
-	}
-
-	// 3. FLAC with JPEG
 	flacPath := filepath.Join(tmp, "test.flac")
 	createTestFLAC(t, flacPath, testJPEG)
-	art, err = ExtractEmbeddedArtwork(flacPath)
-	if err != nil {
-		t.Fatalf("FLAC failed: %v", err)
-	}
-	if !bytes.Equal(art, testJPEG) {
-		t.Fatalf("FLAC art mismatch")
-	}
-
-	// 4. MP4/M4A with PNG
 	m4aPath := filepath.Join(tmp, "test.m4a")
 	createTestMP4(t, m4aPath, testPNG)
-	art, err = ExtractEmbeddedArtwork(m4aPath)
-	if err != nil {
-		t.Fatalf("MP4/M4A failed: %v", err)
-	}
-	if !bytes.Equal(art, testPNG) {
-		t.Fatalf("MP4/M4A art mismatch")
-	}
-
-	// 5. File without artwork
 	noArtPath := filepath.Join(tmp, "no_art.mp3")
 	if err := os.WriteFile(noArtPath, []byte("fake-audio-only"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ExtractEmbeddedArtwork(noArtPath); err == nil {
-		t.Errorf("expected error for file without artwork")
-	}
+	missingPath := filepath.Join(tmp, "does_not_exist.mp3")
 
-	// 6. Nonexistent file
-	if _, err := ExtractEmbeddedArtwork(filepath.Join(tmp, "does_not_exist.mp3")); err == nil {
-		t.Errorf("expected error for missing file")
+	for _, entry := range []struct {
+		name string
+		fn   func(string) ([]byte, error)
+	}{
+		{name: "ExtractEmbeddedArtwork", fn: ExtractEmbeddedArtwork},
+		{name: "embeddedCover", fn: func(p string) ([]byte, error) { return embeddedCover(p, ReadOptions{}) }},
+	} {
+		t.Run(entry.name, func(t *testing.T) {
+			if art, err := entry.fn(mp3v3); err != nil || !bytes.Equal(art, testJPEG) {
+				t.Fatalf("MP3 v2.3 failed: err=%v len=%d", err, len(art))
+			}
+			if art, err := entry.fn(mp3v4); err != nil || !bytes.Equal(art, testPNG) {
+				t.Fatalf("MP3 v2.4 failed: err=%v len=%d", err, len(art))
+			}
+			if art, err := entry.fn(flacPath); err != nil || !bytes.Equal(art, testJPEG) {
+				t.Fatalf("FLAC failed: err=%v len=%d", err, len(art))
+			}
+			if art, err := entry.fn(m4aPath); err != nil || !bytes.Equal(art, testPNG) {
+				t.Fatalf("MP4/M4A failed: err=%v len=%d", err, len(art))
+			}
+			if _, err := entry.fn(noArtPath); err == nil {
+				t.Errorf("expected error for file without artwork")
+			}
+			if _, err := entry.fn(missingPath); err == nil {
+				t.Errorf("expected error for missing file")
+			}
+		})
 	}
 }
 

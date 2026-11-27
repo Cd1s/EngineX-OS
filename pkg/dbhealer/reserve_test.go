@@ -3,11 +3,13 @@ package dbhealer
 import (
 	"bytes"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -249,5 +251,45 @@ func normalizeUnderLabel(t *testing.T, label string) {
 	}
 	if after := count(); after != before {
 		t.Fatalf("tracks %d -> %d", before, after)
+	}
+}
+
+func TestNormalizeDatabase2PropagatesWritableErrorWithoutRebuilding(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "Engine Library", "Database2")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seed := reserve12Library(t)
+	raw, err := os.ReadFile(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hm := filepath.Join(dir, "hm.db")
+	if err := os.WriteFile(hm, raw, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(hm, 0o644) })
+
+	origWritable := reserveWritable
+	reserveWritable = func(p string) (bool, error) {
+		if filepath.Base(p) == "hm.db" {
+			return false, syscall.EIO
+		}
+		return origWritable(p)
+	}
+	t.Cleanup(func() { reserveWritable = origWritable })
+
+	fixed, err := NormalizeDatabase2(dir)
+	if !errors.Is(err, syscall.EIO) {
+		t.Fatalf("NormalizeDatabase2 err=%v, want EIO", err)
+	}
+	if len(fixed) != 0 {
+		t.Fatalf("NormalizeDatabase2 unexpectedly rebuilt files: %v", fixed)
+	}
+	if r, ok, rerr := Reserve(hm); rerr != nil || !ok || r != 12 {
+		t.Fatalf("mode-0444 hm.db reserve changed: r=%d ok=%v err=%v", r, ok, rerr)
+	}
+	if _, serr := os.Stat(hm + ".pre-reserve"); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("pre-reserve backup created on EIO: err=%v", serr)
 	}
 }
