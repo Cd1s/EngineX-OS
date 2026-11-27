@@ -206,8 +206,9 @@ func localIPv4Set() map[string]bool {
 }
 
 // parseProcNetTCPLANPeers extracts up to maxPeers unique private/link-local remote
-// IPv4 endpoints from Linux /proc/net/tcp ESTABLISHED (01) sockets. Used strictly on
-// demand when 4-deck shadow discovery has no peer entry (2-deck mode).
+// IPv4 endpoints from Linux /proc/net/tcp or /proc/net/tcp6 (IPv4-mapped ::ffff:a.b.c.d)
+// ESTABLISHED (01) sockets. Used strictly on demand when 4-deck shadow discovery has
+// no peer entry (2-deck mode).
 func parseProcNetTCPLANPeers(content string, ownIPs map[string]bool, maxPeers int) []string {
 	if maxPeers <= 0 {
 		return nil
@@ -221,15 +222,69 @@ func parseProcNetTCPLANPeers(content string, ownIPs map[string]bool, maxPeers in
 			continue
 		}
 		remHost, _, ok := strings.Cut(fields[2], ":")
-		if !ok || len(remHost) != 8 {
+		if !ok {
 			continue
 		}
-		v, err := strconv.ParseUint(remHost, 16, 32)
+		var v4Hex string
+		switch len(remHost) {
+		case 8:
+			v4Hex = remHost
+		case 32:
+			upper := strings.ToUpper(remHost)
+			if strings.HasPrefix(upper, "0000000000000000FFFF0000") || strings.HasPrefix(upper, "00000000000000000000FFFF") {
+				v4Hex = remHost[24:32]
+			} else {
+				continue
+			}
+		default:
+			continue
+		}
+		v, err := strconv.ParseUint(v4Hex, 16, 32)
 		if err != nil {
 			continue
 		}
 		ip := net.IPv4(byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
 		if ip.IsLoopback() || ip.IsUnspecified() || (!ip.IsPrivate() && !ip.IsLinkLocalUnicast()) {
+			continue
+		}
+		s := ip.String()
+		if ownIPs[s] || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+		if len(out) >= maxPeers {
+			break
+		}
+	}
+	return out
+}
+
+// parseProcNetARPLANPeers extracts up to maxPeers unique complete (0x2) private/link-local
+// IPv4 neighbors from Linux /proc/net/arp as a last-resort 2-deck fallback.
+func parseProcNetARPLANPeers(content string, ownIPs map[string]bool, maxPeers int) []string {
+	if maxPeers <= 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	sc := bufio.NewScanner(strings.NewReader(content))
+	first := true
+	for sc.Scan() {
+		if first {
+			first = false
+			continue
+		}
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 6 {
+			continue
+		}
+		flags, err := strconv.ParseUint(strings.TrimPrefix(strings.ToLower(fields[2]), "0x"), 16, 32)
+		if err != nil || flags&0x2 == 0 || fields[3] == "00:00:00:00:00:00" {
+			continue
+		}
+		ip := net.ParseIP(fields[0]).To4()
+		if ip == nil || ip.IsLoopback() || ip.IsUnspecified() || (!ip.IsPrivate() && !ip.IsLinkLocalUnicast()) {
 			continue
 		}
 		s := ip.String()
@@ -275,7 +330,8 @@ func (s *Server) discoverLinkPeerCandidates(peerUUID string) []string {
 		s.shadow.mu.Unlock()
 	}
 
-	// 3. On-demand fallback for 2-deck (shadow OFF) mode: active LAN TCP peers from /proc/net/tcp.
+	// 3. On-demand fallback for 2-deck (shadow OFF) mode: active LAN TCP peers from
+	//    /proc/net/tcp and /proc/net/tcp6 (Qt dual-stack sockets), then complete /proc/net/arp entries.
 	if len(out) == 0 {
 		s.rbLinkMu.Lock()
 		fn := s.rbLinkPeerCandidates
@@ -284,9 +340,21 @@ func (s *Server) discoverLinkPeerCandidates(peerUUID string) []string {
 			for _, ep := range fn() {
 				add(ep)
 			}
-		} else if raw, err := os.ReadFile("/proc/net/tcp"); err == nil {
-			for _, ip := range parseProcNetTCPLANPeers(string(raw), localIPv4Set(), rbLinkMaxProbePeers) {
-				add(ip)
+		} else {
+			own := localIPv4Set()
+			for _, p := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+				if raw, err := os.ReadFile(p); err == nil {
+					for _, ip := range parseProcNetTCPLANPeers(string(raw), own, rbLinkMaxProbePeers) {
+						add(ip)
+					}
+				}
+			}
+			if len(out) == 0 {
+				if raw, err := os.ReadFile("/proc/net/arp"); err == nil {
+					for _, ip := range parseProcNetARPLANPeers(string(raw), own, rbLinkMaxProbePeers) {
+						add(ip)
+					}
+				}
 			}
 		}
 	}
@@ -497,8 +565,8 @@ func (s *Server) serveRekordboxLinkRelay(w http.ResponseWriter, r *http.Request,
 
 	cands := s.discoverLinkPeerCandidates(peerUUID)
 	if len(cands) == 0 {
-		w.Header().Set("X-RB-Status", "peer_unsupported")
-		fail(w, http.StatusNotFound, errors.New("no LAN peer found"))
+		w.Header().Set("X-RB-Status", "unavailable")
+		fail(w, http.StatusServiceUnavailable, errors.New("no LAN peer found"))
 		return
 	}
 

@@ -801,7 +801,7 @@ def main():
         }
         results.append(rec5)
         print("CASE 5:", json.dumps(rec5), flush=True)
-        assert lan_d == 0 and row5["analyzed"] == 1 and oa_b_d >= 10, f"Case 5 failed: {rec5}"
+        assert lan_d == 0 and row5["analyzed"] == 1 and row5["beat"]["n_def"] <= 4, f"Case 5 failed: {rec5}"
 
         # Switch back to RB_ONDEMAND for Cases 6 & 7
         select_source("B", "RB_ONDEMAND", min_rows=7)
@@ -830,7 +830,7 @@ def main():
         }
         results.append(rec6)
         print("CASE 6:", json.dumps(rec6), flush=True)
-        assert lan_d >= 1 and row6["analyzed"] == 1 and oa_b_d >= 10 and not rec6["filled_jsonl"], f"Case 6 failed: {rec6}"
+        assert lan_d >= 1 and row6["analyzed"] == 1 and row6["beat"]["n_def"] <= 4 and not rec6["filled_jsonl"], f"Case 6 failed: {rec6}"
         stub_proc.terminate()
         stub_proc.wait(timeout=3)
         stub_proc = None
@@ -871,15 +871,15 @@ def main():
         print("CASE 7:", json.dumps(rec7), flush=True)
         assert lan_d7a == 1 and lan_d7b == 0 and row7a["analyzed"] == 1 and row7b["analyzed"] == 1, f"Case 7 failed: {rec7}"
 
+        print("\n=== LINK ON-DEMAND 7-CASE MATRIX: PASS ===", flush=True)
+        print(json.dumps(results, indent=2), flush=True)
+    finally:
         eng_b = twin.WORK / "B/logs/engine.log"
         if eng_b.is_file():
             rblines = [ln for ln in eng_b.read_text(errors="replace").splitlines() if "rekordbox:" in ln]
             print("HOOK B LOGS (rekordbox):", flush=True)
-            for ln in rblines[-30:]:
+            for ln in rblines[-35:]:
                 print(" ", ln, flush=True)
-        print("\n=== LINK ON-DEMAND 7-CASE MATRIX: PASS ===", flush=True)
-        print(json.dumps(results, indent=2), flush=True)
-    finally:
         if stub_proc is not None:
             stub_proc.terminate()
             try:

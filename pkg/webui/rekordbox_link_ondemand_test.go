@@ -596,4 +596,29 @@ func TestParseNetDBPathAndProcNetTCP(t *testing.T) {
 	if len(got) != 2 || got[0] != "10.99.0.1" || got[1] != "169.254.12.34" {
 		t.Fatalf("parseProcNetTCPLANPeers = %v, want [10.99.0.1 169.254.12.34]", got)
 	}
+
+	// /proc/net/tcp6 IPv4-mapped ::ffff:10.99.0.1 (Qt dual-stack socket) + pure IPv6 skipped.
+	sample6 := strings.Join([]string{
+		"  sl  local_address                         remote_address                        st",
+		"   0: 0000000000000000FFFF00000200630A:C350 0000000000000000FFFF00000100630A:C351 01",
+		"   1: 00000000000000000000000000000001:C350 00000000000000000000000000000001:C351 01",
+		"   2: 0000000000000000FFFF00000200630A:C350 0000000000000000FFFF00000100007F:C351 01",
+	}, "\n")
+	got6 := parseProcNetTCPLANPeers(sample6, map[string]bool{"10.99.0.2": true}, 4)
+	if len(got6) != 1 || got6[0] != "10.99.0.1" {
+		t.Fatalf("parseProcNetTCPLANPeers(tcp6) = %v, want [10.99.0.1]", got6)
+	}
+
+	// /proc/net/arp complete (0x2) private/link-local fallback.
+	arp := strings.Join([]string{
+		"IP address       HW type     Flags       HW address            Mask     Device",
+		"10.99.0.1        0x1         0x2         aa:bb:cc:dd:ee:01     *        eth0",
+		"10.99.0.2        0x1         0x2         aa:bb:cc:dd:ee:02     *        eth0",
+		"192.168.1.50     0x1         0x0         00:00:00:00:00:00     *        eth0",
+		"8.8.8.8          0x1         0x2         aa:bb:cc:dd:ee:03     *        eth0",
+	}, "\n")
+	gotARP := parseProcNetARPLANPeers(arp, map[string]bool{"10.99.0.2": true}, 4)
+	if len(gotARP) != 1 || gotARP[0] != "10.99.0.1" {
+		t.Fatalf("parseProcNetARPLANPeers = %v, want [10.99.0.1]", gotARP)
+	}
 }
