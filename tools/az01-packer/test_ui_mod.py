@@ -883,7 +883,7 @@ function run(opts = {}) {
     const root = {scIsAZ04: !!opts.az04, scScope: opts.scope || '', scTidalLoggedIn: !!opts.tidalLoggedIn, scT: s => s,
                   scStemStream: id => {
                       calls.push(['stream', id]);
-                      return !!/uri=streaming:\/\/TIDAL\/Track\/(\d+)/.exec(collectionController.getTrackUrisFromUniversalIds([id]) || '');
+                      return !!/(?:^|[?&\s])uri=streaming:\/\/TIDAL\/Track\/(\d+)(?:$|[?&\r\n])/.exec(collectionController.getTrackUrisFromUniversalIds([id]) || '');
                   }};
     const Style = {systemBlue01Color: 'blue'};
     const actions = (opts.labels || STOCK).map((label, i) => ({
@@ -975,20 +975,31 @@ const az04GatewayTidal = run({az04: true, streaming: true, provider: 'TIDAL', ur
 assert.deepStrictEqual(az04GatewayTidal.labels, [...stock, 'Stems']);
 assert.deepStrictEqual(az04GatewayTidal.calls, [['stream', 99]]);
 
-// Non-gateway native streaming providers on AZ04 and 32-bit must NOT offer EngineX Stems and must NEVER fall through to local startRenderTracks.
+// Non-gateway native streaming providers and malformed TIDAL URIs on AZ04 and 32-bit must NOT offer EngineX Stems and must NEVER fall through to local startRenderTracks.
 for (const nonGateway of [
     {az04: true, streaming: true, provider: 'AppleMusic', uri: 'streaming://AppleMusic/Track/77', commit: 2},
     {az04: true, streaming: true, provider: 'Beatport', uri: 'streaming://Beatport/Track/88', commit: 2},
     {az04: true, streaming: true, provider: 'SoundCloud', uri: 'streaming://SoundCloud/Track/55', modelUri: true, commit: 2},
     {az04: true, streaming: true, provider: 'Dropbox', uri: 'streaming://Dropbox/Track/66', commit: 2},
     {az04: true, streaming: true, provider: 'Eaas', uri: 'streaming://Eaas/Track/44', commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99preview', commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/123abc', modelUri: true, commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99/extra', commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99-alt', modelUri: true, commit: 2},
     {az04: false, streaming: true, provider: 'Beatport', uri: 'streaming://Beatport/Track/88', commit: 2},
+    {az04: false, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99preview', commit: 2},
+    {az04: false, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/123abc', modelUri: true, commit: 2},
 ]) {
     const r = run(nonGateway);
     assert.deepStrictEqual(r.labels, stock, JSON.stringify(nonGateway));
     assert.deepStrictEqual(r.colors, ['stock0', 'stock1'], JSON.stringify(nonGateway));
     assert.deepStrictEqual(r.calls, [['stream', 99]], JSON.stringify(nonGateway));
 }
+
+// A genuine gateway TIDAL URI with Engine query params (?trackId=...) still resolves through lookup on 5.3.0 / AZ04.
+const az04QueryGateway = run({az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99?trackId=99', commit: 2});
+assert.deepStrictEqual(az04QueryGateway.labels, [...stock, 'Stems']);
+assert.deepStrictEqual(az04QueryGateway.calls, [['stream', 99]]);
 
 for (const excluded of [{az04: true, streaming: true, link: true}, {az04: true, streaming: true, stemsList: true}]) {
     assert.deepStrictEqual(run(excluded).labels, stock);
@@ -1021,6 +1032,81 @@ assert.deepStrictEqual([takes(true, true, false), takes(true, true, true), takes
 """.replace("GATE", json.dumps(gate.group(1)))
                         checked = subprocess.run(["node"], input=script, capture_output=True, text=True)
                         self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for gateway URI validation")
+    def test_gateway_uri_requires_whole_digit_id(self):
+        state_fn = re.search(r"function scStemState\(uid\) \{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+        place_fn = re.search(r"function scStemPlace\(mark, total, done\) \{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+        stream_fn = re.search(r"function scStemStream\(uid\) \{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/EmbeddedCommon/"
+            legacy_edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        legacy_qml = next(new for _, new in legacy_edits["Skins/EmbeddedCommon/Views/BrowseView/Components/Components/SwipeLeftItem.qml"]
+                          if "readonly property bool scStem:" in new)
+        legacy_expr = re.search(r"readonly property bool scStem: (.*)", legacy_qml).group(1)
+
+        script = f"""
+const assert = require('assert');
+String.prototype.arg = function(v) {{ return this.replace(/%1/g, v); }};
+const xhrs = [];
+class XMLHttpRequest {{
+    open(m, u) {{ xhrs.push(u); }}
+    send() {{}}
+}}
+const scStemRows = {{'99': 1, '123': 'wait'}}, scStemTotal = 1, scStemDone = 0;
+let currentUri = '';
+const Planck = {{
+    librarianController: {{collectionController: {{getTrackUrisFromUniversalIds: () => currentUri}}}},
+    getProperty: () => ({{translator: {{state: false}}}}),
+}};
+const root = {{
+    scScope: '', scTidalLoggedIn: false, scStemMax: 8,
+    scDeckList: () => [1, 2], scDeckLocked: () => false,
+    scStemPending: () => ({{}}), scStemAsk: () => 1, scStemMark: () => {{}},
+    scStemFull: false, scStemWait: false,
+}};
+{place_fn}
+{state_fn}
+{stream_fn}
+
+for (const bad of [
+    'uri=streaming://TIDAL/Track/99preview',
+    'uri=streaming://TIDAL/Track/123abc',
+    'uri=streaming://TIDAL/Track/123/extra',
+    'uri=streaming://TIDAL/Track/99-alt?trackId=99',
+]) {{
+    currentUri = bad;
+    assert.strictEqual(scStemState(1), '', bad);
+    assert.strictEqual(scStemStream(1), false, bad);
+}}
+assert.strictEqual(xhrs.length, 0);
+
+for (const [good, expectedId] of [
+    ['uri=streaming://TIDAL/Track/99', '99'],
+    ['uri=streaming://TIDAL/Track/123?trackId=5', '123'],
+]) {{
+    currentUri = good;
+    assert.notStrictEqual(scStemState(1), '', good);
+    const before = xhrs.length;
+    assert.strictEqual(scStemStream(1), true, good);
+    assert.strictEqual(xhrs.length, before + 1);
+    assert.ok(xhrs[xhrs.length - 1].endsWith('id=' + expectedId), xhrs[xhrs.length - 1]);
+}}
+
+const legacyCheck = uri => {{
+    const row = {{modelData: {{uri}}}}, leftActions = [];
+    return eval({json.dumps(legacy_expr)});
+}};
+assert.strictEqual(legacyCheck('streaming://TIDAL/Track/99'), true);
+assert.strictEqual(legacyCheck('streaming://TIDAL/Track/99preview'), false);
+assert.strictEqual(legacyCheck('streaming://TIDAL/Track/123abc'), false);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
 
 
 class TrackListArtworkPlaceholderAndReaderPriorityTest(unittest.TestCase):
