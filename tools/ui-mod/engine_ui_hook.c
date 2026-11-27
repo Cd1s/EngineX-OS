@@ -2322,7 +2322,7 @@ A32_ONLY static void prepare_reverb_time(uintptr_t base, size_t page) {
     }
 }
 
-AZ04_EXEMPT("stock AZ04: getConfig already provides Stems/SweepFX/4-deck/StemsEQ; Limiter/Zoom30 are in edits_az04")
+AZ04_EXEMPT("stock AZ04: getConfig already provides Stems/SweepFX/StemsEQ (and 4-deck on JP24); Limiter/Zoom30 are in edits_az04")
 A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
     // getConfig's common return path runs after every model's constructor.
     uint32_t code[] = {
@@ -2492,7 +2492,7 @@ static const int az04_exempt_features[] __attribute__((unused)) = {
     HF_STEMS_EQ, AZ04_EXEMPT("stock AZ04: Config.audio.hasStemsLevel is 1 natively")
     HF_SWEEP_FX, AZ04_EXEMPT("Batch 2: stock AZ04 has Sweep FX; Color FX knob hooks awaiting AZ04 RE")
     HF_AUX_INPUT, AZ04_EXEMPT("hardware N/A: JP21 SC LIVE 4 AUX input only")
-    HF_FOUR_DECK, AZ04_EXEMPT("Batch 3: stock AZ04 consoles have 4 decks; shadow browse/regrid awaiting AZ04 RE")
+    HF_FOUR_DECK, AZ04_EXEMPT("Batch 3: PRIME 4 G2 is 4-deck stock and SYSTEM ONE is 2-deck; shadow browse/regrid awaiting AZ04 RE")
     HF_REVERB_TAIL, AZ04_EXEMPT("Batch 2: Reverb tail hook awaiting AZ04 RE")
 };
 
@@ -2833,7 +2833,7 @@ __attribute__((constructor)) static void edit_engine(void) {
 #if !defined(__aarch64__)
     AZ04_EXEMPT("hardware N/A: JP21 SC LIVE 4 AUX input only")
     prepare_aux(base, page);
-    AZ04_EXEMPT("stock AZ04: getConfig already provides Stems/SweepFX/4-deck/StemsEQ; Limiter/Zoom30 are in edits_az04")
+    AZ04_EXEMPT("stock AZ04: getConfig already provides Stems/SweepFX/StemsEQ (and 4-deck on JP24); Limiter/Zoom30 are in edits_az04")
     prepare_config(base, page);
     AZ04_EXEMPT("Batch 3: player-only shadow sync play")
     prepare_shadow_sync_play(base, page);

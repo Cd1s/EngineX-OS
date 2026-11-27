@@ -166,32 +166,89 @@ def _line_archs(nocomment_lines):
     return archs
 
 
+_EXEMPT_STR_RE = re.compile(r'\bAZ04_EXEMPT\s*\(\s*"((?:\\.|[^"\\])*)"\s*\)')
+
+
+def _valid_exempt_matches(line):
+    return [m for m in _EXEMPT_STR_RE.finditer(line) if m[1].strip()]
+
+
 def _valid_az04_exempt_on_line(line):
-    matches = list(re.finditer(r'\bAZ04_EXEMPT\s*\(([^)]*)\)', line))
-    if not matches:
-        return False, False
-    for m in matches:
-        arg = m[1].strip()
-        s = re.fullmatch(r'"((?:\\.|[^"\\])*)"', arg)
-        if not s or not s[1].strip():
-            return False, True
-    return True, False
+    matches = _valid_exempt_matches(line)
+    # Remove valid AZ04_EXEMPT("non-empty") annotations; any remaining AZ04_EXEMPT token is malformed.
+    stripped = _EXEMPT_STR_RE.sub(lambda m: '' if m[1].strip() else m[0], line)
+    if re.search(r'\bAZ04_EXEMPT\b', stripped):
+        return False, True
+    return bool(matches), False
 
 
-def _has_az04_exempt(nocomment_lines, start_idx, end_idx=None):
-    if end_idx is None:
-        end_idx = start_idx
-    for idx in range(start_idx, end_idx + 1):
-        ok, _ = _valid_az04_exempt_on_line(nocomment_lines[idx])
-        if ok:
+def _is_standalone_exempt_line(line):
+    matches = _valid_exempt_matches(line)
+    if len(matches) != 1:
+        return None
+    stripped = _EXEMPT_STR_RE.sub('', line)
+    if stripped.strip():
+        return None
+    return matches[0]
+
+
+def _consume_exempt_for_def(nocomment_lines, clean_lines, hdr_idx, open_idx, fn_name, consumed):
+    fn_re = re.compile(rf'\b{re.escape(fn_name)}\s*\(')
+    for li in range(hdr_idx, open_idx + 1):
+        standalone = _is_standalone_exempt_line(nocomment_lines[li])
+        if standalone is not None:
+            if (li, standalone.start()) not in consumed:
+                consumed.add((li, standalone.start()))
+                return True
+            continue
+        fn_m = fn_re.search(clean_lines[li])
+        if not fn_m:
+            continue
+        seg_start = max(
+            clean_lines[li].rfind(';', 0, fn_m.start()),
+            clean_lines[li].rfind('{', 0, fn_m.start()),
+            clean_lines[li].rfind('}', 0, fn_m.start()),
+        ) + 1
+        candidates = [
+            m for m in _valid_exempt_matches(nocomment_lines[li])
+            if seg_start <= m.start() and m.end() <= fn_m.start() and (li, m.start()) not in consumed
+        ]
+        if candidates:
+            consumed.add((li, candidates[-1].start()))
             return True
-    p = start_idx - 1
+    p = hdr_idx - 1
     while p >= 0 and not nocomment_lines[p].strip():
         p -= 1
     if p >= 0:
-        ok, _ = _valid_az04_exempt_on_line(nocomment_lines[p])
-        if ok:
+        standalone = _is_standalone_exempt_line(nocomment_lines[p])
+        if standalone is not None and (p, standalone.start()) not in consumed:
+            consumed.add((p, standalone.start()))
             return True
+    return False
+
+
+def _consume_exempt_for_call(nocomment_lines, clean_lines, li, call_col, consumed):
+    seg_start = max(
+        clean_lines[li].rfind(';', 0, call_col),
+        clean_lines[li].rfind('{', 0, call_col),
+        clean_lines[li].rfind('}', 0, call_col),
+    ) + 1
+    inline = [
+        m for m in _valid_exempt_matches(nocomment_lines[li])
+        if seg_start <= m.start() and m.end() <= call_col and (li, m.start()) not in consumed
+    ]
+    if inline:
+        consumed.add((li, inline[-1].start()))
+        return True
+    if seg_start == 0:
+        p = li - 1
+        while p >= 0 and not nocomment_lines[p].strip():
+            p -= 1
+        if p >= 0:
+            standalone = _is_standalone_exempt_line(nocomment_lines[p])
+            if standalone is not None and (p, standalone.start()) not in consumed:
+                consumed.add((p, standalone.start()))
+                return True
     return False
 
 
@@ -272,7 +329,7 @@ def check_az04_parity(source, clean, _functions):
     for idx, line in enumerate(nocomment_lines):
         if re.search(r'^#\s*define\s+AZ04_EXEMPT\b', line):
             continue
-        if 'AZ04_EXEMPT' in line:
+        if re.search(r'\bAZ04_EXEMPT\b', clean_lines[idx]):
             ok, bad = _valid_az04_exempt_on_line(line)
             if bad or not ok:
                 fail_line(idx, 'AZ04_EXEMPT requires a non-empty string literal reason')
@@ -287,12 +344,13 @@ def check_az04_parity(source, clean, _functions):
         if re.fullmatch(r'(?:install|prepare)_[a-z0-9_]+', name):
             installer_archs.setdefault(name, set()).add(f_arch)
 
+    consumed_exempts = set()
     for name, hdr_idx, open_idx, _end_idx, f_arch in fn_info:
         if f_arch != 'a32' or not re.fullmatch(r'(?:install|prepare)_[a-z0-9_]+', name):
             continue
         if 'a64' in installer_archs[name] or 'common' in installer_archs[name]:
             continue
-        if not _has_az04_exempt(nocomment_lines, hdr_idx, open_idx):
+        if not _consume_exempt_for_def(nocomment_lines, clean_lines, hdr_idx, open_idx, name, consumed_exempts):
             fail_line(open_idx, f'A32-only installer {name} needs AZ04_EXEMPT("reason") or an AZ04 implementation')
 
     call_re = re.compile(r'\b((?:install|prepare)_[a-z0-9_]+)\s*\(')
@@ -302,10 +360,12 @@ def check_az04_parity(source, clean, _functions):
         calls = []
         for li in range(open_idx + 1, end_idx + 1):
             for m in call_re.finditer(clean_lines[li]):
-                calls.append((m[1], li))
-        non_a32 = {c for c, li in calls if archs[li] in ('a64', 'common')}
-        for callee, li in calls:
-            if archs[li] == 'a32' and callee not in non_a32 and not _has_az04_exempt(nocomment_lines, li):
+                calls.append((m[1], li, m.start()))
+        non_a32 = {c for c, li, _col in calls if archs[li] in ('a64', 'common')}
+        for callee, li, call_col in calls:
+            if archs[li] == 'a32' and callee not in non_a32 and not _consume_exempt_for_call(
+                nocomment_lines, clean_lines, li, call_col, consumed_exempts
+            ):
                 fail_line(li, f'A32-only call to {callee} in {fn_name} needs AZ04_EXEMPT("reason") or an AZ04 call')
 
     # Check A32-only HF_* features against AZ04/common sites or az04_exempt_features[].
@@ -322,16 +382,21 @@ def check_az04_parity(source, clean, _functions):
         exempt_table_lines.update(range(ex_s, ex_e + 1))
         for li in range(ex_s + 1, ex_e):
             line = nocomment_lines[li]
-            for fm in re.finditer(r'\bHF_([A-Z_0-9]+)\b(?!\s*\()', line):
+            fms = list(re.finditer(r'\bHF_([A-Z_0-9]+)\b(?!\s*\()', line))
+            if not fms:
+                continue
+            avail = [m for m in _valid_exempt_matches(line) if (li, m.start()) not in consumed_exempts]
+            for fm in fms:
                 fid = fm[1]
                 if fid in ('ALWAYS', 'COUNT'):
                     fail_line(li, f'HF_{fid} does not belong in az04_exempt_features')
                     continue
-                ok, _ = _valid_az04_exempt_on_line(line)
-                if not ok:
-                    fail_line(li, f'az04_exempt_features entry HF_{fid} needs AZ04_EXEMPT("reason")')
-                else:
+                if avail:
+                    m = avail.pop(0)
+                    consumed_exempts.add((li, m.start()))
                     exempt_features.add(fid)
+                else:
+                    fail_line(li, f'az04_exempt_features entry HF_{fid} needs AZ04_EXEMPT("reason")')
 
     a32_features = {}
     az04_features = set()
@@ -356,6 +421,227 @@ def check_az04_parity(source, clean, _functions):
                 first_li,
                 f'HF_{fid} has no AZ04 site and is not documented in az04_exempt_features[]',
             )
+    errors.extend(_check_az04_build_descriptors(nocomment, nocomment_lines, clean_lines, offsets, archs, fn_info))
+    return errors
+
+
+def _split_top_level_commas(text):
+    items = []
+    depth = 0
+    in_quote = None
+    escaped = False
+    start = 0
+    for i, ch in enumerate(text):
+        if in_quote:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == in_quote:
+                in_quote = None
+            continue
+        if ch in ('"', "'"):
+            in_quote = ch
+        elif ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth -= 1
+        elif ch == ',' and depth == 0:
+            part = text[start:i].strip()
+            if part:
+                items.append(part)
+            start = i + 1
+    tail = text[start:].strip()
+    if tail:
+        items.append(tail)
+    return items
+
+
+def _extract_brace_block(text, open_pos):
+    depth = 0
+    in_quote = None
+    escaped = False
+    for i in range(open_pos, len(text)):
+        ch = text[i]
+        if in_quote:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == in_quote:
+                in_quote = None
+            continue
+        if ch in ('"', "'"):
+            in_quote = ch
+        elif ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return text[open_pos + 1:i], i
+    return None, -1
+
+
+def _parse_engine_build_struct(nocomment):
+    m = re.search(r'\bstruct\s+engine_build\s*\{', nocomment)
+    if not m:
+        return set(), 21
+    body, _ = _extract_brace_block(nocomment, m.end() - 1)
+    if body is None:
+        return set(), 21
+    dsp_m = re.search(r'\buint32_t\s+dsp\s*\[\s*(\d+)\s*\]', body)
+    dsp_count = int(dsp_m[1]) if dsp_m else 21
+    fields = set()
+    for stmt in body.split(';'):
+        stmt = stmt.strip()
+        if not stmt:
+            continue
+        for decl in stmt.split(','):
+            decl = re.sub(r'\[[^\]]*\]', '', decl).strip()
+            fm = re.search(r'\b([A-Za-z_]\w*)$', decl)
+            if fm:
+                fields.add(fm[1])
+    return fields, dsp_count
+
+
+def _required_az04_build_fields(nocomment_lines, clean_lines, archs, fn_info, struct_fields):
+    required = {
+        'name', 'id', 'dsp', 'edits', 'edit_count',
+        'sqlite_api', 'sqlite_exec', 'sqlite_open', 'sqlite_open_v2', 'sqlite_opendb', 'sqlite_prefix',
+        'bt_send', 'tidal_sso_slot', 'tidal_sso_getter',
+        'shadow_vtable_a', 'shadow_vtable_b', 'shadow_vtable_slot', 'shadow_position_fn',
+        'shadow_array_offset', 'shadow_position_prefix_size', 'shadow_position_prefix',
+        'shadow_owner_slot', 'shadow_owner_fn',
+    }
+    a32_only_fields = {'shadow_capture_site', 'shadow_capture_prefix'}
+    for fn_name, hdr_idx, open_idx, end_idx, f_arch in fn_info:
+        if f_arch not in ('common', 'a64'):
+            continue
+        fn_span = '\n'.join(clean_lines[li] for li in range(hdr_idx, end_idx + 1) if archs[li] != 'a32')
+        has_b_ptr = bool(re.search(r'\bstruct\s+engine_build\s*\*\s*b\b', fn_span))
+        for fm in re.finditer(r'\bbuild->([A-Za-z_]\w*)', fn_span):
+            if fm[1] in struct_fields:
+                required.add(fm[1])
+        if has_b_ptr:
+            for fm in re.finditer(r'\bb->([A-Za-z_]\w*)', fn_span):
+                if fm[1] in struct_fields:
+                    required.add(fm[1])
+    return required - a32_only_fields
+
+
+def _is_zero_scalar(expr):
+    s = expr.strip()
+    while s.startswith('(') and s.endswith(')'):
+        inner = s[1:-1].strip()
+        if not inner:
+            break
+        s = inner
+    if re.fullmatch(r'(?:NULL|\(\s*void\s*\*\s*\)\s*0+)', s):
+        return True
+    m = re.fullmatch(r'([+-]?(?:0[xX][0-9A-Fa-f]+|0[bB][01]+|\d+))[uUlL]*', s)
+    if m:
+        return int(m[1], 0) == 0
+    return False
+
+
+def _is_c_string_expr(expr):
+    return bool(re.fullmatch(r'(?:"(?:\\.|[^"\\])*"\s*)+', expr.strip()))
+
+
+def _c_string_nonempty(expr):
+    parts = re.findall(r'"((?:\\.|[^"\\])*)"', expr.strip())
+    return bool(''.join(parts))
+
+
+def _check_az04_build_descriptors(nocomment, nocomment_lines, clean_lines, offsets, archs, fn_info):
+    errors = []
+    struct_fields, dsp_count = _parse_engine_build_struct(nocomment)
+    required = _required_az04_build_fields(nocomment_lines, clean_lines, archs, fn_info, struct_fields)
+
+    a64_tables = []
+    for tm in re.finditer(r'\bstatic\s+const\s+struct\s+engine_build\s+engine_builds\s*\[\s*\]\s*=\s*\{', nocomment):
+        decl_li = _line_of_pos(offsets, tm.start())
+        if archs[decl_li] == 'a64':
+            a64_tables.append((tm, decl_li))
+
+    if not a64_tables:
+        errors.append('1: missing AArch64 engine_builds[] table for AZ04')
+        return errors
+
+    row_count = 0
+    for tm, decl_li in a64_tables:
+        table_body, _ = _extract_brace_block(nocomment, tm.end() - 1)
+        if table_body is None:
+            errors.append(f'{decl_li + 1}: unterminated AArch64 engine_builds[] initializer')
+            continue
+        for entry in _split_top_level_commas(table_body):
+            if not entry.startswith('{') or not entry.endswith('}'):
+                errors.append(f'{decl_li + 1}: AArch64 engine_builds[] entry must be a brace initializer')
+                continue
+            row_count += 1
+            entry_body = entry[1:-1]
+            fields = {}
+            bad_item = False
+            for item in _split_top_level_commas(entry_body):
+                im = re.fullmatch(r'\s*\.([A-Za-z_]\w*)\s*=\s*(.+)', item, re.S)
+                if not im:
+                    errors.append(f'{decl_li + 1}: AArch64 engine_builds[] entry must use designated .field = value initializers')
+                    bad_item = True
+                    continue
+                fname, fval = im[1], im[2].strip()
+                if fname in fields:
+                    errors.append(f'{decl_li + 1}: AArch64 engine_builds[] has duplicate .{fname}')
+                fields[fname] = fval
+            if bad_item:
+                continue
+
+            name_val = fields.get('name', '')
+            if _is_c_string_expr(name_val) and _c_string_nonempty(name_val):
+                build_name = ''.join(re.findall(r'"((?:\\.|[^"\\])*)"', name_val))
+            else:
+                build_name = '<unnamed>'
+
+            for field in sorted(required):
+                if field not in fields:
+                    errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" missing required descriptor field .{field}')
+                    continue
+                val = fields[field]
+                if field == 'dsp':
+                    if not (val.startswith('{') and val.endswith('}')):
+                        errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" .dsp must be a brace initializer')
+                    else:
+                        slots = _split_top_level_commas(val[1:-1])
+                        if len(slots) != dsp_count or any(_is_zero_scalar(s) for s in slots):
+                            errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" .dsp must provide {dsp_count} non-zero offsets')
+                elif field == 'sqlite_prefix':
+                    if not (val.startswith('{') and val.endswith('}')):
+                        errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" .sqlite_prefix must be a brace initializer')
+                    else:
+                        slots = _split_top_level_commas(val[1:-1])
+                        if len(slots) < 2 or not _is_c_string_expr(slots[1]) or not _c_string_nonempty(slots[1]):
+                            errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" .sqlite_prefix[1] (sqlite_opendb prologue) must be non-empty')
+                elif field == 'shadow_position_prefix':
+                    if not (val.startswith('{') and val.endswith('}')):
+                        errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" .shadow_position_prefix must be a brace initializer')
+                    else:
+                        bytes_items = _split_top_level_commas(val[1:-1])
+                        size_expr = fields.get('shadow_position_prefix_size', '0')
+                        size_m = re.fullmatch(r'(0[xX][0-9A-Fa-f]+|\d+)[uUlL]*', size_expr.strip())
+                        min_len = int(size_m[1], 0) if size_m else 1
+                        if len(bytes_items) < max(1, min_len) or all(_is_zero_scalar(b) for b in bytes_items):
+                            errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" .shadow_position_prefix must be non-zero')
+                elif val.startswith('{') and val.endswith('}'):
+                    elems = _split_top_level_commas(val[1:-1])
+                    if not elems or all(_is_zero_scalar(e) for e in elems):
+                        errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" has zero/empty required descriptor field .{field}')
+                elif _is_c_string_expr(val):
+                    if not _c_string_nonempty(val):
+                        errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" has empty string in required descriptor field .{field}')
+                elif _is_zero_scalar(val):
+                    errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" has zero/empty required descriptor field .{field}')
+
+    if row_count == 0:
+        errors.append(f'{a64_tables[0][1] + 1}: AArch64 engine_builds[] must list at least one AZ04 build')
     return errors
 
 

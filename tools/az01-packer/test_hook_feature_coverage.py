@@ -108,3 +108,97 @@ class HookFeatureCoverageTest(unittest.TestCase):
         )
         self.assertNotEqual(removed_reverb, source, 'anchor missing for removed_reverb')
         self.assertTrue(any('HF_REVERB_TAIL' in e for e in coverage.check(removed_reverb)))
+
+    def test_az04_exempt_strict_per_installer_binding(self):
+        source = (ROOT / 'tools/ui-mod/engine_ui_hook.c').read_text()
+        documented_def = source.replace(
+            '#endif\n\n// The sender\'s prologue',
+            '#endif\n\n#if !defined(__aarch64__)\nAZ04_EXEMPT("Batch 2: planned AZ04 port")\nstatic void install_future_a32(uintptr_t base, size_t page) { (void)base; (void)page; }\n#endif\n\n// The sender\'s prologue',
+            1,
+        )
+        self.assertNotEqual(documented_def, source, 'anchor missing for documented_def')
+
+        # An unannotated call immediately after an inline-exempt call (engine_ui_hook.c:2854) must fail.
+        line_borrow = documented_def.replace(
+            '    AZ04_EXEMPT("Batch 3: peer shadow browse deferral awaiting AZ04 RE") if (hf_on(HF_FOUR_DECK)) install_shadow_browse(base, page);\n',
+            '    AZ04_EXEMPT("Batch 3: peer shadow browse deferral awaiting AZ04 RE") if (hf_on(HF_FOUR_DECK)) install_shadow_browse(base, page);\n    install_future_a32(base, page);\n',
+            1,
+        )
+        self.assertNotEqual(line_borrow, documented_def, 'anchor missing for line_borrow')
+        self.assertTrue(any('install_future_a32' in e for e in coverage.check(line_borrow)))
+
+        # A second unannotated call on the SAME line after an inline-exempt call must fail.
+        same_line_two_calls = documented_def.replace(
+            '    AZ04_EXEMPT("Batch 3: peer shadow browse deferral awaiting AZ04 RE") if (hf_on(HF_FOUR_DECK)) install_shadow_browse(base, page);\n',
+            '    AZ04_EXEMPT("Batch 3: peer shadow browse deferral awaiting AZ04 RE") if (hf_on(HF_FOUR_DECK)) install_shadow_browse(base, page); install_future_a32(base, page);\n',
+            1,
+        )
+        self.assertNotEqual(same_line_two_calls, documented_def, 'anchor missing for same_line_two_calls')
+        self.assertTrue(any('install_future_a32' in e for e in coverage.check(same_line_two_calls)))
+
+        # Two consecutive unannotated calls cannot share one standalone AZ04_EXEMPT line.
+        standalone_shared = documented_def.replace(
+            '    AZ04_EXEMPT("Batch 2: rekordbox USB browse on-demand awaiting AZ04 RE")\n    install_rekordbox_browse(base, page);\n',
+            '    AZ04_EXEMPT("Batch 2: rekordbox USB browse on-demand awaiting AZ04 RE")\n    install_rekordbox_browse(base, page);\n    install_future_a32(base, page);\n',
+            1,
+        )
+        self.assertNotEqual(standalone_shared, documented_def, 'anchor missing for standalone_shared')
+        self.assertTrue(any('install_future_a32' in e for e in coverage.check(standalone_shared)))
+
+        # Multiple HF_* entries on one line in az04_exempt_features[] cannot share a single AZ04_EXEMPT.
+        shared_feature_exempt = source.replace(
+            '    HF_REVERB_TAIL, AZ04_EXEMPT("Batch 2: Reverb tail hook awaiting AZ04 RE")\n',
+            '    HF_REVERB_TAIL, HF_AUX_INPUT, AZ04_EXEMPT("shared")\n',
+            1,
+        )
+        self.assertNotEqual(shared_feature_exempt, source, 'anchor missing for shared_feature_exempt')
+        self.assertTrue(coverage.check(shared_feature_exempt))
+
+        # An unannotated A32-only installer definition on the line after an inline-exempt definition must fail.
+        def_borrow = source.replace(
+            '#endif\n\n// The sender\'s prologue',
+            '#endif\n\n#if !defined(__aarch64__)\nAZ04_EXEMPT("Batch 2: first") static void install_first_a32(uintptr_t b, size_t p) { (void)b; (void)p; }\nstatic void install_second_a32(uintptr_t b, size_t p) { (void)b; (void)p; }\n#endif\n\n// The sender\'s prologue',
+            1,
+        )
+        self.assertNotEqual(def_borrow, source, 'anchor missing for def_borrow')
+        self.assertTrue(any('install_second_a32' in e for e in coverage.check(def_borrow)))
+
+    def test_az04_build_descriptor_completeness(self):
+        source = (ROOT / 'tools/ui-mod/engine_ui_hook.c').read_text()
+        self.assertEqual(coverage.check(source), [])
+
+        cases = [
+            ('remove .bt_send', '     .bt_send = 0x102eb20,\n', '', 'bt_send'),
+            ('zero .bt_send', '     .bt_send = 0x102eb20,\n', '     .bt_send = 0,\n', 'bt_send'),
+            ('remove .tidal_sso', '     .tidal_sso_slot = 0x2d52870, .tidal_sso_getter = 0x713b80,\n', '', ('tidal_sso_slot', 'tidal_sso_getter')),
+            ('remove .shadow_owner_slot', '.shadow_owner_slot = 0x2d27a10, ', '', 'shadow_owner_slot'),
+            ('remove .sqlite_opendb', '.sqlite_opendb = 0x1b8b060,\n', '', 'sqlite_opendb'),
+            ('empty .sqlite_prefix[1]',
+             '.sqlite_prefix = {"", "\\x3f\\x23\\x03\\xd5\\xff\\x43\\x02\\xd1\\xfd\\x7b\\x03\\xa9\\xfd\\xc3\\x00\\x91", ""},',
+             '.sqlite_prefix = {"", "", ""},',
+             'sqlite_prefix'),
+            ('zero .dsp slot', '             0xff08c0, 0xfda420, 0xd30e68},', '             0xff08c0, 0xfda420, 0},', 'dsp'),
+            ('short .dsp array', '             0xff08c0, 0xfda420, 0xd30e68},', '             0xff08c0, 0xfda420},', 'dsp'),
+        ]
+        for label, old, new, expected_fields in cases:
+            expected = (expected_fields,) if isinstance(expected_fields, str) else expected_fields
+            with self.subTest(label=label):
+                mutated = source.replace(old, new, 1)
+                self.assertNotEqual(mutated, source, f'anchor missing for {label}')
+                errs = coverage.check(mutated)
+                for field in expected:
+                    self.assertTrue(any(field in e for e in errs), (label, field, errs))
+
+        # A new build->field read in a shared/A64 installer must also be required on 5.3.0-az04.
+        future_field = source.replace(
+            '    uint32_t bt_send;\n',
+            '    uint32_t bt_send;\n    uint32_t future_a64_hook;\n',
+            1,
+        ).replace(
+            '    uintptr_t entry = base + build->bt_send;\n',
+            '    uintptr_t entry = base + build->bt_send;\n    if (!build->future_a64_hook) return;\n',
+            1,
+        )
+        self.assertNotEqual(future_field, source, 'anchor missing for future_field')
+        errs = coverage.check(future_field)
+        self.assertTrue(any('future_a64_hook' in e for e in errs), errs)
