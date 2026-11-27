@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/Cd1s/EngineX-OS/internal/migration"
+	"github.com/Cd1s/EngineX-OS/internal/redirect"
 	"io"
 	"math"
 	"net"
@@ -850,8 +851,12 @@ func (b *Broadcaster) UpdateMetadata(artist, title string) error {
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
 	}
+	// The server's password follows a redirect only within the configured server's
+	// origin (Go keeps it on another port or a subdomain), with no Referer (#335 round 11).
+	locked := *client
+	locked.CheckRedirect = redirect.SameOrigin
 
-	resp, err := client.Do(req)
+	resp, err := locked.Do(req)
 	if err != nil {
 		b.mu.Lock()
 		b.lastError = sanitizeError(err, cfg.Password)
