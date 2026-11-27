@@ -516,7 +516,7 @@ def start_namespace_holder(side: str, src_dir: Path) -> int:
 
     screen_cfg = {
         "device": "/dev/dri/card0",
-        "headless": "1280x800",
+        "headless": os.environ.get("SHADOW_TWIN_HEADLESS", "1280x800"),
         "hwcursor": False,
     }
     (sdir / "ScreenConfiguration.json").write_text(json.dumps(screen_cfg, indent=2))

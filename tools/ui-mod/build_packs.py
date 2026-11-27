@@ -2091,6 +2091,10 @@ SERVICES_MAIN = """
 	function scPhaseMeterOf(d) {
 		return typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views && PlanckGUI.views.getPhaseMeter ? PlanckGUI.views.getPhaseMeter(d - 1) : null
 	}
+	// The stock waveform position item of deck d, what this deck's waveform draws (null before Engine builds it).
+	function scWaveformPositionOf(d) {
+		return typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.waveformPositionItem ? PlanckGUI.waveformPositionItem(d) : null
+	}
 	property var scShadowTextAt: ({})
 	function scShadowProperties(d) {
 		let p = scShadowDeckProperties[d]
@@ -2282,7 +2286,39 @@ SERVICES_MAIN = """
 				s.rise = raw - p.env > 2
 				s.env = Math.max(s.rise && !p.rise ? p.env + 2 : raw, p.env - (slow > 0 ? slow * 0.2 : 0.0005 * (now - p.at)))
 			} else s.env = s.avg = raw
-			s.lineMs = s.ps ? s.env + speed * now : s.posMs
+			// Engine's own playing waveform draws WaveFormPositionItem.currentPosition
+			// (extrapolated on CLOCK_MONOTONIC_RAW on each render frame), while
+			// TrackPosition lags ~19.5 ms even at 60 Hz. A 3-sample median over
+			// wfMs - speed*now keeps zero bias against the rendered frame while
+			// rejecting single-tick frame stalls without delaying jog nudges; keep
+			// TrackPosition + s.env as the fallback when paused, scratching, held,
+			// or when the item is missing or not yet on this track's timeline.
+			let drawMs = NaN
+			s.wf0 = s.wf1 = NaN
+			if (s.ps && !s.scratch && !s.phaseHold && sr > 0) {
+				const wf = scWaveformPositionOf(d)
+				const wfPos = wf ? wf.currentPosition : NaN
+				if (isFinite(wfPos)) {
+					const ms = wfPos / sr * 1000
+					if (Math.abs(ms - s.posMs) <= 250 * Math.max(1, speed)) {
+						const rawWf = ms - speed * now
+						const sameRun = p && p.ps && p.net === s.net && p.pitch === s.pitch && p.sync === s.sync && p.jumps === s.jumps
+						if (sameRun && isFinite(p.wf0) && isFinite(p.wf1)) {
+							const lateTick = now - p.at > scShadowTickTimer.interval + 20
+							const cur = lateTick && rawWf < p.wf0 - 4 ? p.wf0 : rawWf
+							const a = p.wf1, b = p.wf0, c = cur
+							const med = a <= b ? (b <= c ? b : (a <= c ? c : a)) : (a <= c ? a : (b <= c ? c : b))
+							s.wf1 = p.wf0; s.wf0 = cur
+							drawMs = med + speed * now
+						} else {
+							s.wf0 = s.wf1 = rawWf
+							drawMs = ms
+						}
+					}
+				}
+			}
+			s.wfLive = isFinite(drawMs)
+			s.lineMs = s.wfLive ? drawMs : (s.ps ? s.env + speed * now : s.posMs)
 			// A jog nudge moves the line off the one the peer carries on: post it at once,
 			// not at the next heartbeat (25 Hz for 2 s, so the peer follows the nudge).
 			const sent = scShadowSent[n]
@@ -2416,7 +2452,7 @@ SERVICES_MAIN = """
 					onLine = Math.abs(o.positionMs - sent.positionMs) <= 6
 				} else {
 					const expect = sent.positionMs + (o.playing ? (o.at - sent.at) * (1 + o.pitch / 100) : 0)
-					onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
+					onLine = Math.abs(o.positionMs - expect) <= (o.playing ? (s.wfLive ? 2 : 15) : 0.5)
 				}
 			}
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.masterPress !== o.masterPress || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||

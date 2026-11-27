@@ -247,9 +247,11 @@ type peerLocalFile struct {
 // to the line it has, so more than that must reach it.
 // A paused deck must not move at all.
 const (
-	shadowPlayingDriftMS = 12
-	shadowPausedDriftMS  = 0.5
-	shadowScratchDriftMS = 5
+	shadowPlayingDriftMS      = 12
+	shadowPausedFollowDriftMS = 2.0 // chosen from 60 FPS twin sweep: largest deadband keeping p99 within +/-3 ms
+	shadowPausedDriftMS       = 0.5
+	shadowScratchDriftMS      = 5
+	shadowHalfRTTMaxMS        = 20.0
 )
 
 // A deck's speed is measured over at least shadowSkewSpan of one line, from
@@ -279,6 +281,10 @@ func sameOptionalFloat(a, b *float64) bool {
 // state, tempo and markers, and a playhead on old's anchored line.
 // Seq, At, Beat and Dbg do not count: the display QML does not use them.
 func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
+	return samePeerPictureWithDrift(old, d, now, shadowPlayingDriftMS)
+}
+
+func samePeerPictureWithDrift(old peerDeck, d deckState, now time.Time, playingDriftMS float64) bool {
 	o := old.deckState
 	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.PerfGen != d.PerfGen || o.GridGen != d.GridGen || o.Ext != d.Ext || o.Name != d.Name ||
 		o.Title != d.Title || o.Artist != d.Artist || o.KeyName != d.KeyName || o.Loading != d.Loading || o.Active != d.Active || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
@@ -296,7 +302,7 @@ func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 		return math.Abs(old.anchorPos-d.PositionMS) <= shadowScratchDriftMS
 	}
 	expect := old.anchorPos + float64(now.Sub(old.anchorAt).Microseconds())/1000*old.speed()
-	return math.Abs(expect-d.PositionMS) <= shadowPlayingDriftMS
+	return math.Abs(expect-d.PositionMS) <= playingDriftMS
 }
 
 // precisePos is a CDJ-3000's playhead from its absolute position packets (0x0b,
@@ -429,6 +435,10 @@ type shadowState struct {
 	gridGenQueries      atomic.Uint64
 	peerTaken           map[string]time.Time // when takePeer last accepted an update per peer (as peerSeq)
 	peerClock           map[string]peerClock // per peer (as peerSeq)
+	boot                time.Time            // monotonic time base for lock-free UDP echo timestamps
+	echoPeers           atomic.Pointer[[]*udpEchoPeer]
+	pingSeq             atomic.Uint64
+	pausedFollow        atomic.Bool // running Engine hook has shadow-paused-follow enabled
 	dbg                 shadowDebug
 	metaOnlyPoll        bool       // the newest compose had a CDJ deck, including cached display assets: 120 ms polls
 	resolveMu           sync.Mutex // cold file resolution, independent of the live position lock
@@ -456,7 +466,7 @@ type shadowState struct {
 }
 
 func newShadowState() *shadowState {
-	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, copyGens: map[string]string{}, copyGridGens: map[string]string{}, copyGridPending: map[string]string{}, copyGridNotifyRetry: map[string]time.Time{}, copyGridTries: map[string]int{}, copyGridBusy: map[string]bool{}, copyGridRetry: map[string]time.Time{}, copyTrackIDs: map[string]int64{}, copyTrackIDBusy: map[string]bool{}, regridSockPath: shadowRegridSockPath, gridGens: map[string]gridGenEntry{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn, model: imagePrefix(deviceCompatible()), askers: map[string]time.Time{}, askNotify: make(chan struct{}), consoleDecks: map[int]peerDeck{}}
+	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, copyGens: map[string]string{}, copyGridGens: map[string]string{}, copyGridPending: map[string]string{}, copyGridNotifyRetry: map[string]time.Time{}, copyGridTries: map[string]int{}, copyGridBusy: map[string]bool{}, copyGridRetry: map[string]time.Time{}, copyTrackIDs: map[string]int64{}, copyTrackIDBusy: map[string]bool{}, regridSockPath: shadowRegridSockPath, gridGens: map[string]gridGenEntry{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, boot: time.Now(), dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn, model: imagePrefix(deviceCompatible()), askers: map[string]time.Time{}, askNotify: make(chan struct{}), consoleDecks: map[int]peerDeck{}}
 }
 
 // shadow-v3: copies under the old "shadow" were analysed by Engine itself,
@@ -957,7 +967,16 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"ok": true})
 }
 
-const shadowDecksMagic = "EngineX-decks 1\n"
+const (
+	shadowDecksMagic = "EngineX-decks 1\n"
+	shadowPingMagic  = "EngineX-ping "
+	shadowPongMagic  = "EngineX-pong "
+)
+
+var (
+	shadowPingPrefix = []byte(shadowPingMagic)
+	shadowPongPrefix = []byte(shadowPongMagic)
+)
 
 // decksAlive is the QML's heartbeat between posts: nothing changed on its decks
 // since the last post, so it sends no JSON (each serialisation is garbage on
@@ -1279,16 +1298,417 @@ type peerClock struct {
 	at  time.Time
 }
 
+const (
+	// pendingProbe packs a non-zero 20-bit nonce (high bits) and 44-bit monotonic
+	// send timestamp in microseconds since sh.boot (low bits) into one atomic word
+	// so send and pong consume never tear across separate fields.
+	udpPingSentBits  = 44
+	udpPingSentMask  = (uint64(1) << udpPingSentBits) - 1
+	udpPingNonceMask = (uint64(1) << (64 - udpPingSentBits)) - 1
+
+	// rttState packs sample count (high 4 bits, 0 = none, 1..15), running-min RTT
+	// in microseconds (20 bits, 0..1,000,000 us), and monotonic timestamp in ms
+	// since sh.boot (low 40 bits, ~34.8 years) into one atomic word (0 heap allocs).
+	udpRTTAtBits         = 40
+	udpRTTAtMask         = (uint64(1) << udpRTTAtBits) - 1
+	udpRTTUSBits         = 20
+	udpRTTUSMask         = (uint64(1) << udpRTTUSBits) - 1
+	udpRTTUSShift        = udpRTTAtBits
+	udpRTTSamplesShift   = udpRTTAtBits + udpRTTUSBits
+	udpRTTSamplesMax     = 15
+	udpRTTMaxStoredUS    = 1_000_000
+	udpRTTFutureWindowMS = 5_000 // concurrent sample recorded slightly after caller's now snapshot
+)
+
+func packUDPPendingPing(nonce uint64, sentUS int64) uint64 {
+	return ((nonce & udpPingNonceMask) << udpPingSentBits) | (uint64(sentUS) & udpPingSentMask)
+}
+
+func packUDPRTT(samples, rttUS uint64, atMS int64) uint64 {
+	if samples > udpRTTSamplesMax {
+		samples = udpRTTSamplesMax
+	}
+	if rttUS > udpRTTMaxStoredUS {
+		rttUS = udpRTTMaxStoredUS
+	}
+	return (samples << udpRTTSamplesShift) | (rttUS << udpRTTUSShift) | (uint64(atMS) & udpRTTAtMask)
+}
+
+func unpackUDPRTT(w uint64) (samples int, rttUS uint64, atMS uint64) {
+	return int(w >> udpRTTSamplesShift), (w >> udpRTTUSShift) & udpRTTUSMask, w & udpRTTAtMask
+}
+
+// udpRTTAgeMS returns the signed modular difference (nowAt - sampleAt) in the
+// 40-bit millisecond ring (~34.8 years).
+func udpRTTAgeMS(nowAt, sampleAt uint64) int64 {
+	const shift = 64 - udpRTTAtBits
+	return int64((nowAt-sampleAt)<<shift) >> shift
+}
+
+// udpRTTExpired reports whether sampleAt has expired relative to nowAt. A sample
+// recorded after the caller's snapshot within udpRTTFutureWindowMS is treated as
+// fresh; legitimate 40-bit clock wraps keep their true positive age.
+func udpRTTExpired(nowAt, sampleAt uint64, timeoutMS int64) bool {
+	age := udpRTTAgeMS(nowAt, sampleAt)
+	if age < 0 {
+		return -age > udpRTTFutureWindowMS
+	}
+	return age >= timeoutMS
+}
+
+// udpEchoPeer holds lock-free per-peer UDP echo and RTT state. Peer membership
+// updates copy-on-write sh.echoPeers under sh.mu; the UDP receive path only uses
+// atomic loads and CAS with zero heap allocations.
+type udpEchoPeer struct {
+	ip           string
+	ip4          [4]byte
+	hasIP4       bool
+	lastReplyNS  atomic.Int64  // monotonic offset ns from sh.boot; math.MinInt64 = never
+	lastPingNS   atomic.Int64  // monotonic offset ns from sh.boot; math.MinInt64 = never
+	pingTries    atomic.Int32  // warm-up probe count
+	pendingProbe atomic.Uint64 // packed (nonce<<44 | sentUS); 0 = none in flight
+	rttState     atomic.Uint64 // packed (samples<<60 | rttUS<<40 | atMS); 0 = none
+}
+
+func newUDPEchoPeer(ip string) *udpEchoPeer {
+	p := &udpEchoPeer{ip: ip}
+	if ip4 := net.ParseIP(ip).To4(); ip4 != nil {
+		copy(p.ip4[:], ip4)
+		p.hasIP4 = true
+	}
+	p.lastReplyNS.Store(math.MinInt64)
+	p.lastPingNS.Store(math.MinInt64)
+	return p
+}
+
+func (p *udpEchoPeer) recordRTTUS(rttUS uint64, nowMS int64) {
+	if rttUS > udpRTTMaxStoredUS {
+		rttUS = udpRTTMaxStoredUS
+	}
+	nowAt := uint64(nowMS) & udpRTTAtMask
+	timeoutMS := int64(shadowPeerSeenTimeout / time.Millisecond)
+	for {
+		old := p.rttState.Load()
+		samples, oldUS, oldAt := unpackUDPRTT(old)
+		ageMS := udpRTTAgeMS(nowAt, oldAt)
+		var nextSamples, nextUS uint64
+		nextAtMS := nowMS
+		if samples == 0 || ageMS > timeoutMS || (ageMS < 0 && -ageMS > udpRTTFutureWindowMS) {
+			nextSamples = 1
+			nextUS = rttUS
+		} else {
+			var elapsedMS uint64
+			if ageMS > 0 {
+				elapsedMS = uint64(ageMS)
+			} else {
+				nextAtMS = int64(oldAt)
+			}
+			decayedUS := oldUS + elapsedMS/10 // 0.1 ms/s = 1 us per 10 ms
+			if rttUS < decayedUS {
+				nextUS = rttUS
+			} else {
+				nextUS = decayedUS
+			}
+			nextSamples = uint64(samples) + 1
+			if nextSamples > udpRTTSamplesMax {
+				nextSamples = udpRTTSamplesMax
+			}
+		}
+		next := packUDPRTT(nextSamples, nextUS, nextAtMS)
+		if p.rttState.CompareAndSwap(old, next) {
+			return
+		}
+	}
+}
+
+func parseHexUint64(b []byte) (uint64, bool) {
+	if len(b) == 0 || len(b) > 16 {
+		return 0, false
+	}
+	var v uint64
+	for _, c := range b {
+		var d byte
+		switch {
+		case c >= '0' && c <= '9':
+			d = c - '0'
+		case c >= 'a' && c <= 'f':
+			d = c - 'a' + 10
+		case c >= 'A' && c <= 'F':
+			d = c - 'A' + 10
+		default:
+			return 0, false
+		}
+		v = (v << 4) | uint64(d)
+	}
+	return v, true
+}
+
+const (
+	shadowUDPPingMaxRTT      = 400 * time.Millisecond
+	shadowUDPPingMinGap      = 200 * time.Millisecond
+	shadowUDPPingReplyMinGap = 200 * time.Millisecond
+	shadowUDPPingWarmupMax   = 3
+)
+
+func (sh *shadowState) findEchoPeer(ip string) *udpEchoPeer {
+	if ip == "" {
+		return nil
+	}
+	list := sh.echoPeers.Load()
+	if list == nil {
+		return nil
+	}
+	for _, p := range *list {
+		if p.ip == ip {
+			return p
+		}
+	}
+	return nil
+}
+
+func (sh *shadowState) findEchoPeerIP(ip net.IP) *udpEchoPeer {
+	if ip == nil {
+		return nil
+	}
+	list := sh.echoPeers.Load()
+	if list == nil {
+		return nil
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		for _, p := range *list {
+			if p.hasIP4 && p.ip4[0] == ip4[0] && p.ip4[1] == ip4[1] && p.ip4[2] == ip4[2] && p.ip4[3] == ip4[3] {
+				return p
+			}
+		}
+		return nil
+	}
+	s := ip.String()
+	for _, p := range *list {
+		if p.ip == s {
+			return p
+		}
+	}
+	return nil
+}
+
+// ensureEchoPeerLocked returns the peer entry for ip, adding it copy-on-write.
+// Called with sh.mu held.
+func (sh *shadowState) ensureEchoPeerLocked(ip string) *udpEchoPeer {
+	if ip == "" {
+		return nil
+	}
+	if p := sh.findEchoPeer(ip); p != nil {
+		return p
+	}
+	p := newUDPEchoPeer(ip)
+	var next []*udpEchoPeer
+	if cur := sh.echoPeers.Load(); cur != nil {
+		next = make([]*udpEchoPeer, len(*cur)+1)
+		copy(next, *cur)
+		next[len(*cur)] = p
+	} else {
+		next = []*udpEchoPeer{p}
+	}
+	sh.echoPeers.Store(&next)
+	return p
+}
+
+// pruneEchoPeersLocked drops expired/pruned peers from sh.echoPeers. Called with sh.mu held.
+func (sh *shadowState) pruneEchoPeersLocked(now time.Time, dropped map[string]bool) {
+	cur := sh.echoPeers.Load()
+	if cur == nil || len(*cur) == 0 {
+		return
+	}
+	nowAt := uint64(now.Sub(sh.boot).Milliseconds()) & udpRTTAtMask
+	timeoutMS := int64(shadowPeerSeenTimeout / time.Millisecond)
+	var kept []*udpEchoPeer
+	changed := false
+	for _, p := range *cur {
+		w := p.rttState.Load()
+		samples, _, atMS := unpackUDPRTT(w)
+		if samples > 0 && udpRTTExpired(nowAt, atMS, timeoutMS) {
+			if p.rttState.CompareAndSwap(w, 0) {
+				samples = 0
+			}
+		}
+		_, alive := sh.peers[p.ip]
+		if dropped[p.ip] || (!alive && samples == 0) {
+			changed = true
+			continue
+		}
+		kept = append(kept, p)
+	}
+	if changed {
+		sh.echoPeers.Store(&kept)
+	}
+}
+
+func (sh *shadowState) recordPeerRTT(ip string, rttMS float64, now time.Time) {
+	if ip == "" || rttMS < 0 || math.IsNaN(rttMS) || math.IsInf(rttMS, 0) {
+		return
+	}
+	p := sh.findEchoPeer(ip)
+	if p == nil {
+		sh.mu.Lock()
+		p = sh.ensureEchoPeerLocked(ip)
+		sh.mu.Unlock()
+	}
+	rttUS := uint64(math.Round(rttMS * 1000.0))
+	p.recordRTTUS(rttUS, now.Sub(sh.boot).Milliseconds())
+}
+
+func (sh *shadowState) peerHalfRTT(ip string, now time.Time) float64 {
+	p := sh.findEchoPeer(ip)
+	if p == nil {
+		return 0
+	}
+	samples, rttUS, atMS := unpackUDPRTT(p.rttState.Load())
+	if samples == 0 {
+		return 0
+	}
+	nowAt := uint64(now.Sub(sh.boot).Milliseconds()) & udpRTTAtMask
+	if !udpRTTExpired(nowAt, atMS, int64(shadowPeerSeenTimeout/time.Millisecond)) {
+		return min(float64(rttUS)/2000.0, shadowHalfRTTMaxMS)
+	}
+	return 0
+}
+
+// sendUDPPingPeer probes UDP transit on the same socket that carries EngineX-decks
+// without acquiring sh.mu. Older peers ignore it; peerHalfRTT then stays 0.
+func (sh *shadowState) sendUDPPingPeer(conn *net.UDPConn, p *udpEchoPeer, port int, now time.Time) bool {
+	if conn == nil || p == nil {
+		return false
+	}
+	var dst net.IP
+	if p.hasIP4 {
+		dst = net.IPv4(p.ip4[0], p.ip4[1], p.ip4[2], p.ip4[3])
+	} else {
+		dst = net.ParseIP(p.ip)
+	}
+	if dst == nil {
+		return false
+	}
+	if port == 0 {
+		port = shadowBeaconPort
+	}
+	elapsed := now.Sub(sh.boot)
+	nowNS := elapsed.Nanoseconds()
+	for {
+		prev := p.lastPingNS.Load()
+		if prev != math.MinInt64 && nowNS-prev < int64(shadowUDPPingMinGap) {
+			return false
+		}
+		if p.lastPingNS.CompareAndSwap(prev, nowNS) {
+			break
+		}
+	}
+	seq := sh.pingSeq.Add(1) & udpPingNonceMask
+	for seq == 0 {
+		seq = sh.pingSeq.Add(1) & udpPingNonceMask
+	}
+	p.pendingProbe.Store(packUDPPendingPing(seq, elapsed.Microseconds()))
+	p.pingTries.Add(1)
+
+	var buf [len(shadowPingMagic) + 16]byte
+	n := copy(buf[:], shadowPingMagic)
+	n += len(strconv.AppendUint(buf[n:n], seq, 16))
+	_, _ = conn.WriteToUDP(buf[:n], &net.UDPAddr{IP: dst, Port: port})
+	return true
+}
+
+func (sh *shadowState) sendUDPPing(conn *net.UDPConn, ip string, port int, now time.Time) {
+	if conn == nil || ip == "" {
+		return
+	}
+	p := sh.findEchoPeer(ip)
+	if p == nil {
+		sh.mu.Lock()
+		p = sh.ensureEchoPeerLocked(ip)
+		sh.mu.Unlock()
+	}
+	sh.sendUDPPingPeer(conn, p, port, now)
+}
+
+// handleUDP processes one datagram on the shadow UDP socket: echo probes and
+// replies run lock-free off atomic per-peer state (known peers only, bounded
+// reply rate, zero heap allocations on accepted pongs), while beacons and deck
+// pushes delegate once to receiveWithEcho.
+func (sh *shadowState) handleUDP(conn *net.UDPConn, b []byte, addr *net.UDPAddr, now time.Time) {
+	if addr == nil || addr.IP == nil {
+		return
+	}
+	if rest, ok := bytes.CutPrefix(b, shadowPingPrefix); ok {
+		if conn == nil || len(rest) == 0 || len(rest) > 32 {
+			return
+		}
+		p := sh.findEchoPeerIP(addr.IP)
+		if p == nil {
+			return // only answer known peers
+		}
+		nowNS := now.Sub(sh.boot).Nanoseconds()
+		for {
+			prev := p.lastReplyNS.Load()
+			if prev != math.MinInt64 && nowNS-prev < int64(shadowUDPPingReplyMinGap) {
+				return // rate-limited per peer: drop
+			}
+			if p.lastReplyNS.CompareAndSwap(prev, nowNS) {
+				break
+			}
+		}
+		var buf [len(shadowPongMagic) + 32]byte
+		n := copy(buf[:], shadowPongMagic)
+		n += copy(buf[n:], rest)
+		_, _ = conn.WriteToUDP(buf[:n], addr)
+		return
+	}
+	if rest, ok := bytes.CutPrefix(b, shadowPongPrefix); ok {
+		p := sh.findEchoPeerIP(addr.IP)
+		if p == nil {
+			return
+		}
+		seq, ok := parseHexUint64(rest)
+		if !ok || seq == 0 || seq > udpPingNonceMask {
+			return
+		}
+		word := p.pendingProbe.Load()
+		if (word >> udpPingSentBits) != seq {
+			return
+		}
+		if !p.pendingProbe.CompareAndSwap(word, 0) {
+			return
+		}
+		elapsed := now.Sub(sh.boot)
+		nowUS := uint64(elapsed.Microseconds()) & udpPingSentMask
+		sentUS := word & udpPingSentMask
+		rttUS := (nowUS - sentUS) & udpPingSentMask
+		if rttUS <= uint64(shadowUDPPingMaxRTT/time.Microsecond) {
+			p.recordRTTUS(rttUS, elapsed.Milliseconds())
+		}
+		return
+	}
+	coldPeer, port := sh.receiveWithEcho(b, addr.IP.String(), now)
+	if conn != nil && coldPeer != nil {
+		sh.sendUDPPingPeer(conn, coldPeer, port, now)
+	}
+}
+
+func (sh *shadowState) playingDriftMS() float64 {
+	if sh.pausedFollow.Load() {
+		return shadowPausedFollowDriftMS
+	}
+	return shadowPlayingDriftMS
+}
+
 // peerLate is how many ms longer than the peer's quickest update this one took
 // to get here (the network, or either suite waiting for the CPU): a playing
 // deck has moved on by that much, and anchoring it at arrival showed the wait
-// as a slip of the picture. The quickest trip may rise 1 ms/s, which follows
-// two clocks drifting apart or one being slewed; over 300 ms late is a stepped
-// clock and starts over. Called with sh.mu held.
+// as a slip of the picture. The quickest trip may rise 0.1 ms/s (100 ppm),
+// which follows two crystal clocks drifting apart without climbing above T_min
+// on a jittery LAN; over 300 ms late is a stepped clock and starts over. Called with sh.mu held.
 func (sh *shadowState) peerLate(id string, sent int64, now time.Time) float64 {
-	off := float64(now.UnixMilli() - sent)
+	off := float64(now.UnixMicro())/1000.0 - float64(sent)
 	c, ok := sh.peerClock[id]
-	c.off += now.Sub(c.at).Seconds()
+	c.off += 0.1 * now.Sub(c.at).Seconds()
 	if !ok || off < c.off || off > c.off+300 {
 		c.off = off
 	}
@@ -1320,11 +1740,12 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 		sh.dbg.event("peer-stale", map[string]any{"ip": ip, "seq": seq, "last": last})
 		return
 	}
-	late := 0.0
+	late, halfRTT := 0.0, 0.0
 	if len(decks) > 0 && decks[0].Sent != 0 {
 		late = sh.peerLate(id, decks[0].Sent, now)
+		halfRTT = sh.peerHalfRTT(ip, now)
 	}
-	sh.dbg.event("peer", map[string]any{"ip": ip, "seq": seq, "late": late, "decks": slimDecks(decks)})
+	sh.dbg.event("peer", map[string]any{"ip": ip, "seq": seq, "late": late, "halfRtt": halfRTT, "decks": slimDecks(decks)})
 	sh.peerSeq[id] = seq
 	changed := false
 	for slot, v := range sh.peerDecks {
@@ -1334,6 +1755,7 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 		}
 	}
 	sh.peerTaken[id] = now
+	driftMS := sh.playingDriftMS()
 	for _, d := range decks {
 		if d.Deck < 1 || d.Deck > 4 {
 			continue
@@ -1358,7 +1780,7 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 			continue
 		} // all slots belong to other tracks; never overwrite a sibling
 		if d.Playing && !d.Stale && !d.Scratch {
-			d.PositionMS += late * (1 + d.Pitch/100)
+			d.PositionMS += (late + halfRTT) * (1 + d.Pitch/100)
 		}
 		d.Sent, d.Rate = 0, 0
 		p := peerDeck{deckState: d, ip: ip, at: now, anchorPos: d.PositionMS, anchorAt: now}
@@ -1369,7 +1791,7 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 		if d.Scratch {
 			p.refAt = time.Time{}
 		}
-		if ok && samePeerPicture(old, d, now) {
+		if ok && samePeerPictureWithDrift(old, d, now, driftMS) {
 			p.anchorPos, p.anchorAt, p.refPos, p.refAt = old.anchorPos, old.anchorAt, old.refPos, old.refAt
 			// The line's own slope, once it is long enough to tell: anchored anew
 			// with the new speed, which reaches the QML as a few ms to steer over.
@@ -2686,8 +3108,13 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 		if pfx := imagePrefix(deviceCompatible()); pfx == "" || playerBoards[pfx] {
 			d.Master = new(false)
 		}
+		atMS := now.UnixMilli()
 		if d.Playing && !d.Scratch {
-			d.PositionMS, d.Rate = p.carried(now.Sub(p.at))
+			// Carry to the exact millisecond stamped in d.At while keeping Go's
+			// monotonic clock reading (immune to local wall-clock steps) and
+			// never walking backward when composed in the same ms as receipt.
+			carry := max(time.Duration(0), now.Sub(p.at)-time.Duration(now.Nanosecond())%time.Millisecond)
+			d.PositionMS, d.Rate = p.carried(carry)
 		}
 		d.Progress, d.Error = 0, "" // ours to say, not the peer's
 		// A file of this player's own for a track the peer loaded from this player's
@@ -2741,7 +3168,7 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 		// The key of the source's display data: the QML covers the deck with the
 		// source's cover and key until Engine holds the track.
 		d.Key, d.Ext, d.Net = displayTrackKey(p), "", ""
-		d.At = now.UnixMilli()
+		d.At = atMS
 		out = append(out, d)
 	}
 	var lineFree []int
@@ -3563,6 +3990,7 @@ func (s *Server) shadowWake() {
 	// Retain older caches for an explicit rollback; starting display discovery
 	// must not delete files from an earlier mode.
 	sh.running = true
+	sh.pausedFollow.Store(runningFeatureOn("shadow-paused-follow"))
 	go s.shadowLoop()
 }
 
@@ -3590,7 +4018,7 @@ func (s *Server) shadowLoop() {
 					return
 				}
 				if !isLocalIP(addr.IP) {
-					sh.receive(b[:n], addr.IP.String(), time.Now())
+					sh.handleUDP(conn, b[:n], addr, time.Now())
 				}
 			}
 		}()
@@ -3623,13 +4051,33 @@ func (s *Server) shadowLoop() {
 		}
 		askPlayers := sh.lineAsking(time.Now())
 		sh.mu.Unlock()
-		if conn != nil && i%8 == 0 {
-			shadowSendBeacons(conn)
-			if sh.askConsole.Load() {
-				shadowSendAsk(conn)
+		if conn != nil {
+			if i%8 == 0 {
+				shadowSendBeacons(conn)
+				if sh.askConsole.Load() {
+					shadowSendAsk(conn)
+				}
+				if askPlayers {
+					shadowSendAskPlayers(conn) // a console with a channel on Line: a player in the Stock layout with Share Decks answers
+				}
 			}
-			if askPlayers {
-				shadowSendAskPlayers(conn) // a console with a channel on Line: a player in the Stock layout with Share Decks answers
+			now := time.Now()
+			sh.mu.Lock()
+			port := cmp.Or(sh.pushPort, shadowBeaconPort)
+			var pingPeers []*udpEchoPeer
+			for ip, seen := range sh.peers {
+				if now.Sub(seen) >= shadowPeerSeenTimeout {
+					continue
+				}
+				p := sh.ensureEchoPeerLocked(ip)
+				samples, _, _ := unpackUDPRTT(p.rttState.Load())
+				if i%8 == 0 || (samples < shadowUDPPingWarmupMax && int(p.pingTries.Load()) < shadowUDPPingWarmupMax) {
+					pingPeers = append(pingPeers, p)
+				}
+			}
+			sh.mu.Unlock()
+			for _, p := range pingPeers {
+				sh.sendUDPPingPeer(conn, p, port, time.Now())
 			}
 		}
 		s.shadowPollPeers()
@@ -3679,23 +4127,32 @@ func shadowBroadcast(conn *net.UDPConn, msg []byte, port int) {
 
 // receive takes a datagram on the beacon port: a beacon or a peer's decks.
 func (sh *shadowState) receive(b []byte, ip string, now time.Time) {
+	_, _ = sh.receiveWithEcho(b, ip, now)
+}
+
+func (sh *shadowState) receiveWithEcho(b []byte, ip string, now time.Time) (coldPeer *udpEchoPeer, port int) {
 	var decks []deckState
 	beacon := string(b) == "EngineX-shadow 1"
 	if !beacon {
 		rest, ok := bytes.CutPrefix(b, []byte(shadowDecksMagic))
 		if !ok || json.Unmarshal(rest, &decks) != nil {
-			return
+			return nil, 0
 		}
 		if console, _ := splitConsole(decks); len(console) > 0 {
-			return // a console's decks come by the pull of a player that asked, never as a peer's
+			return nil, 0 // a console's decks come by the pull of a player that asked, never as a peer's
 		}
 	}
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	sh.peers[ip] = now
+	p := sh.ensureEchoPeerLocked(ip)
 	if !beacon {
 		sh.takePeer(ip, decks, now)
 	}
+	if p != nil && p.rttState.Load() == 0 && p.pingTries.Load() == 0 {
+		return p, cmp.Or(sh.pushPort, shadowBeaconPort)
+	}
+	return nil, 0
 }
 
 func shadowBeacon() *net.UDPConn {
@@ -3761,12 +4218,17 @@ func (sh *shadowState) prunePeers(now time.Time) {
 	if len(sh.consoleDecks) == 0 {
 		sh.consoleIP = ""
 	}
+	var dropped map[string]bool
 	for ip, seen := range sh.peers {
 		if now.Sub(seen) >= shadowPeerSeenTimeout {
 			delete(sh.peers, ip)
 			delete(sh.peerSeq, ip)
 			delete(sh.peerClock, ip)
 			delete(sh.peerTaken, ip)
+			if dropped == nil {
+				dropped = map[string]bool{}
+			}
+			dropped[ip] = true
 		}
 	}
 	for id, taken := range sh.peerTaken {
@@ -3776,6 +4238,7 @@ func (sh *shadowState) prunePeers(now time.Time) {
 			delete(sh.peerClock, id)
 		}
 	}
+	sh.pruneEchoPeersLocked(now, dropped)
 	if changed {
 		sh.ver++
 		close(sh.notify)
@@ -3822,6 +4285,7 @@ func (s *Server) shadowPollPeers() {
 		now = time.Now()
 		sh.mu.Lock()
 		sh.peers[ip] = now
+		sh.ensureEchoPeerLocked(ip)
 		if console, others := splitConsole(body.Decks); len(console) > 0 {
 			if ask {
 				sh.takeConsole(ip, console, now)

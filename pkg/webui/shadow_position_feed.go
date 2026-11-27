@@ -49,8 +49,11 @@ var shadowPositionFeed struct {
 // shadowPositionFeedAge is how long ago at was, by this process's clock; a time that is
 // missing, ahead or older than a feed stays useful for counts as now.
 func shadowPositionFeedAge(at int64, now time.Time) time.Duration {
-	age := time.Duration(now.UnixMilli()-at) * time.Millisecond
-	if at <= 0 || age < 0 || age > 2*time.Second {
+	if at <= 0 {
+		return 0
+	}
+	age := now.Sub(time.UnixMilli(at))
+	if age < 0 || age > 2*time.Second {
 		return 0
 	}
 	return age
