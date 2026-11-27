@@ -523,6 +523,9 @@ func (s *Server) nasAvailable() bool {
 
 // ownerSelfHosted is the slot's server: nil when it is not ready, or when it is an
 // SMB or WebDAV server whose kind is switched off in Services (off stops its work).
+// An SMB or WebDAV server is its connection's provider: switching its kind off, or
+// another slot, drops the connection, which ends its requests still running (a
+// browse, a search, a download; WebDAV round 4).
 func (s *Server) ownerSelfHosted() *providers.SelfHostedProvider {
 	if s.slotUnknown.Load() {
 		return nil // the slot's root is not known in this run
@@ -534,8 +537,11 @@ func (s *Server) ownerSelfHosted() *providers.SelfHostedProvider {
 	if !nasConfigReady(f.NASConfig) {
 		return nil
 	}
-	if k, ok := kindOfProvider(f.Protocol); ok && !serversOn(k, v, f) {
-		return nil
+	if k, ok := kindOfProvider(f.Protocol); ok {
+		if !serversOn(k, v, f) {
+			return nil
+		}
+		return s.serverProvider(serverEntry{kind: k, ID: idOf(f.SlotID, k, f.URL), cfg: f.NASConfig, slot: true, idx: -1})
 	}
 	return providers.NewSelfHostedProvider(f.NASConfig, s.nasHTTPClient())
 }
@@ -543,6 +549,17 @@ func (s *Server) ownerSelfHosted() *providers.SelfHostedProvider {
 // ownerSMBSelfHosted is ownerSelfHosted for the standalone NAS entry: nil
 // unless the NAS is SMB.
 func (s *Server) ownerSMBSelfHosted() *providers.SelfHostedProvider {
+	if c := s.ownerSMBConn(); c != nil {
+		return c.p
+	}
+	return nil
+}
+
+// ownerSMBConn is the connection of the slot's SMB server, nil unless it is ready and
+// NAS is on. One provider per server, as for the other NAS servers: a search also
+// finds what was browsed; another address is another connection. Switching NAS off
+// drops it, which ends its requests still running.
+func (s *Server) ownerSMBConn() *serverConn {
 	if s.slotUnknown.Load() {
 		return nil // the slot's root is not known in this run
 	}
@@ -551,9 +568,7 @@ func (s *Server) ownerSMBSelfHosted() *providers.SelfHostedProvider {
 	on := serversOn(kindNAS, s.loadUI(), f)
 	s.uiMu.Unlock()
 	if smbNASConfigReady(f.NASConfig) && on {
-		// One provider per server, as for the other NAS servers: a search also
-		// finds what was browsed. Another address is another provider.
-		return s.serverProvider(serverEntry{kind: kindNAS, ID: idOf(f.SlotID, kindNAS, f.URL), cfg: f.NASConfig, slot: true, idx: -1})
+		return s.serverConnOf(serverEntry{kind: kindNAS, ID: idOf(f.SlotID, kindNAS, f.URL), cfg: f.NASConfig, slot: true, idx: -1})
 	}
 	return nil
 }

@@ -955,27 +955,52 @@ func (g *tidalGateway) sessionByID(id string) *Session {
 // each runs fn for every input concurrently and keeps the successful results in
 // input order. One provider failing must not empty the deck's browser.
 func each[T, R any](ctx context.Context, in []T, fn func(context.Context, T) ([]R, error)) [][]R {
+	return eachUntil(ctx, in, nil, fn)
+}
+
+// eachUntil is each that stops waiting when ready is closed (nil: it waits for every
+// input): inputs that have not answered by then have no result, and their calls are
+// cancelled (a cached search goes on and keeps what it finds for the next search).
+func eachUntil[T, R any](ctx context.Context, in []T, ready <-chan struct{}, fn func(context.Context, T) ([]R, error)) [][]R {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	out := make([][]R, len(in))
-	var wg sync.WaitGroup
+	type answer struct {
+		i int
+		r []R
+	}
+	answers := make(chan answer, len(in)) // a late answer never blocks its sender
 	for i, v := range in {
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
+			var r []R
 			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("gateway: provider panic: %v", r)
+				if rec := recover(); rec != nil {
+					log.Printf("gateway: provider panic: %v", rec)
 				}
+				answers <- answer{i, r}
 			}()
-			r, err := fn(ctx, v)
-			out[i] = r
+			var err error
+			r, err = fn(ctx, v)
 			if err != nil {
 				log.Printf("stream-sync: gateway source failed: %v", err)
 			}
 		}()
 	}
-	wg.Wait()
+	out := make([][]R, len(in))
+	for range in {
+		select {
+		case a := <-answers:
+			out[a.i] = a.r
+		case <-ready:
+			for { // what has answered by now still counts
+				select {
+				case a := <-answers:
+					out[a.i] = a.r
+				default:
+					return out
+				}
+			}
+		}
+	}
 	return out
 }
 func (g *tidalGateway) addPlaylist(ref playlistRef) string { return g.addPlaylistAt(ref, 0) }
@@ -2096,18 +2121,47 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 		respond(w, map[string]any{"tracks": none, "playlists": none, "albums": none, "artists": none})
 		return
 	}
+	scope := g.s.scope()
+	empty := map[string]any{"limit": 10, "offset": 0, "totalNumberOfItems": 0, "items": []any{}}
+	if !g.s.omniSource() { // the selected source alone, as before
+		trackItems, listItems := g.selectedSearch(r.Context(), query, scope, nil)
+		respond(w, map[string]any{"tracks": page(r, 50, trackItems), "playlists": page(r, 50, listItems), "albums": empty, "artists": empty})
+		return
+	}
+	// OmniSource: the selected source is searched beside the drives, djay and servers,
+	// under the same deadline (WebDAV round 4). What has not answered once the drives
+	// and djay have and serverReadyWait has passed is left out of this answer (its
+	// search goes on and is cached for the next one): ready rows never wait for a slow
+	// source, whichever source is selected.
+	ready, selected := make(chan struct{}), make(chan struct{})
+	var trackItems, listItems []any
+	go func() {
+		defer close(selected)
+		trackItems, listItems = g.selectedSearch(r.Context(), query, scope, ready)
+	}()
+	omni := g.omniSearch(r.Context(), query, ready, selected) // returns once selected is done
+	trackItems = append(omni, trackItems...)                  // the DJ's own drives first
+	respond(w, map[string]any{"tracks": page(r, 50, trackItems), "playlists": page(r, 50, listItems), "albums": empty, "artists": empty})
+}
+
+// selectedSearch searches the selected source (scope): a streaming service, the NAS
+// slot's SMB server, or a server's own entry. ready (nil: none) ends the wait for
+// answers still missing when it is closed (OmniSource's deadline).
+func (g *tidalGateway) selectedSearch(ctx context.Context, query, scope string, ready <-chan struct{}) (trackItems, listItems []any) {
 	type source struct {
 		session, provider string
 		guest             bool
 		p                 any
 	}
-	scope := g.s.scope()
 	sources := []source{}
 	listing := uint64(0) // set for a NAS search, the only source then
+	var slot *serverConn
 	if scope == nasScope {
 		listing = g.s.jobs.NASGen() + 1 // before the NAS settings are read (#335)
-		if nasProv := g.s.ownerSMBSelfHosted(); nasProv != nil {
-			sources = append(sources, source{session: nasScope, provider: nasScope, p: nasProv})
+		// Through the slot's connection: switching NAS off, or another slot, drops it,
+		// which cancels this search and closes its SMB connections (WebDAV round 4).
+		if slot = g.s.ownerSMBConn(); slot != nil {
+			sources = append(sources, source{session: nasScope, provider: nasScope, p: connSearcher{slot}})
 		}
 	} else {
 		// Gateway search deliberately requires a login, including services whose
@@ -2135,7 +2189,7 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	searches.Add(2)
 	go func() {
 		defer searches.Done()
-		tracks = each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Track, error) {
+		tracks = eachUntil(ctx, sources, ready, func(ctx context.Context, v source) ([]providers.Track, error) {
 			if p, ok := v.p.(trackSearcher); ok {
 				return g.searchTracks(ctx, v.provider, cacheSession(v), p, query)
 			}
@@ -2144,7 +2198,7 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	}()
 	go func() {
 		defer searches.Done()
-		lists = each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Playlist, error) {
+		lists = eachUntil(ctx, sources, ready, func(ctx context.Context, v source) ([]providers.Playlist, error) {
 			if p, ok := v.p.(playlistSearcher); ok {
 				return g.searchLists(ctx, v.provider, cacheSession(v), p, query)
 			}
@@ -2152,9 +2206,12 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 		})
 	}()
 	searches.Wait()
-	trackItems, listItems := []any{}, []any{}
+	if slot != nil && slot.ctx.Err() != nil {
+		return []any{}, []any{} // NAS switched off (or the slot changed) during the search: nothing of it
+	}
+	trackItems, listItems = []any{}, []any{}
 	for i, v := range sources {
-		g.s.cfg.BPM.Enrich(r.Context(), tracks[i])
+		g.s.cfg.BPM.Enrich(ctx, tracks[i])
 		for _, t := range tracks[i] {
 			if id := g.addTrack(trackRef{track: t, session: v.session, guest: v.guest, listing: listing}); id != 0 {
 				trackItems = append(trackItems, g.trackJSON(id, t))
@@ -2168,17 +2225,13 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if _, _, ok := serverScopeOf(scope); ok { // that server, in the NAS search's time budget
-		for _, ref := range g.serverSearch(r.Context(), query, scope, "", nil) {
+		for _, ref := range g.serverSearch(ctx, query, scope, "", ready) {
 			if id := g.addTrack(ref); id != 0 {
 				trackItems = append(trackItems, g.trackJSON(id, ref.track))
 			}
 		}
 	}
-	if g.s.omniSource() { // the DJ's own drives first
-		trackItems = append(g.omniSearch(r.Context(), query), trackItems...)
-	}
-	empty := map[string]any{"limit": 10, "offset": 0, "totalNumberOfItems": 0, "items": []any{}}
-	respond(w, map[string]any{"tracks": page(r, 50, trackItems), "playlists": page(r, 50, listItems), "albums": empty, "artists": empty})
+	return trackItems, listItems
 }
 func (g *tidalGateway) lookup(w http.ResponseWriter, raw string) (int64, trackRef, bool) {
 	id, err := strconv.ParseInt(raw, 10, 64)

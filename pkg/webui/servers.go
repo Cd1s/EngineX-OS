@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -428,26 +429,63 @@ func (s *Server) serverConnOf(e serverEntry) *serverConn {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &serverConn{cfg: e.cfg, kind: e.kind, ctx: ctx, cancel: cancel}
 	hc := s.nasHTTPClient()
-	if e.kind.protocol != "smb" { // SMB dials through the client's own transport (its address policy); its calls take serverCtx
-		bound := http.Client{Timeout: 30 * time.Second} // the provider's own default
-		if hc != nil {
-			bound = *hc
-		}
-		bound.Transport = serverTransport{ctx: ctx, next: transportOf(hc)}
-		hc = &bound
+	bound := http.Client{Timeout: 30 * time.Second} // the provider's own default
+	if hc != nil {
+		bound = *hc
 	}
-	c.p = providers.NewSelfHostedProvider(e.cfg, hc)
+	if e.kind.protocol == "smb" {
+		// SMB dials through the client's transport (its address policy): every
+		// connection it opens closes when this one is dropped (WebDAV round 4).
+		bound.Transport = smbBoundTransport(ctx, transportOf(hc))
+	} else {
+		bound.Transport = serverTransport{ctx: ctx, next: transportOf(hc)}
+	}
+	c.p = providers.NewSelfHostedProvider(e.cfg, &bound)
 	s.serverConns[e.ID] = c
 	return c
 }
 
-// serverCtx is ctx ended also when e's connection is dropped (its server removed or
-// moved, or its kind switched off).
-func (s *Server) serverCtx(ctx context.Context, e serverEntry) (context.Context, context.CancelFunc) {
-	c := s.serverConnOf(e)
-	ctx, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(c.ctx, cancel)
-	return ctx, func() { stop(); cancel() }
+// smbBoundTransport is next (an *http.Transport, else the default one) whose dials are
+// tied to ctx, the connection of an SMB server: the SMB client dials through it (its
+// address policy). None starts once ctx is done, and each connection it made closes
+// when ctx is done, which ends a browse, search or download running on it.
+func smbBoundTransport(ctx context.Context, next http.RoundTripper) *http.Transport {
+	base, ok := next.(*http.Transport)
+	if !ok || base == nil {
+		base = http.DefaultTransport.(*http.Transport)
+	}
+	t := base.Clone()
+	dial := t.DialContext
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: 10 * time.Second}).DialContext
+	}
+	t.DialContext = func(dctx context.Context, network, addr string) (net.Conn, error) {
+		if ctx.Err() != nil {
+			return nil, errServerGone
+		}
+		dctx, cancel := context.WithCancel(dctx)
+		stopDial := context.AfterFunc(ctx, cancel)
+		conn, err := dial(dctx, network, addr)
+		stopDial()
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		return &boundConn{Conn: conn, stop: context.AfterFunc(ctx, func() { conn.Close() })}, nil
+	}
+	return t
+}
+
+// boundConn is a connection that smbBoundTransport closes when its server's
+// connection is dropped.
+type boundConn struct {
+	net.Conn
+	stop func() bool
+}
+
+func (c *boundConn) Close() error {
+	c.stop()
+	return c.Conn.Close()
 }
 
 // dropServerConns cancels and forgets the connections drop picks.
