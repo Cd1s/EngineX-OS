@@ -166,15 +166,19 @@ func StripURLAuth(raw string, subsonic bool) string {
 }
 
 // AuthorizeURL is raw with this NAS's credentials when it is a URL of the configured
-// server (nasOrigin: same host and effective port, same scheme or its https form):
-// Subsonic auth parameters, or the Plex token. Any other URL comes back unchanged, so no
-// credential goes to another server: not to another host, not from http://host (port 80)
-// to https://host (port 443) or back, and never over plain http to an https NAS (#335).
+// server's exact origin (OnOrigin: scheme, host and effective port): Subsonic auth
+// parameters, or the Plex token. A URL of this NAS's host on another scheme or port
+// comes back without any of them, even ones it carried, and any other URL comes back
+// unchanged: no credential goes to an origin the DJ did not configure, not from
+// http://host to https://host on the same port, nor between ports 80 and 443 (#335).
 func (p *SelfHostedProvider) AuthorizeURL(raw string) string {
 	u, err := url.Parse(raw)
 	base, berr := url.Parse(strings.TrimSpace(p.cfg.URL))
-	if raw == "" || err != nil || berr != nil || !nasOrigin(u, base) {
+	if raw == "" || err != nil || berr != nil || u.Hostname() == "" || !strings.EqualFold(u.Hostname(), base.Hostname()) {
 		return raw
+	}
+	if !sameOrigin(u, base) {
+		return StripURLAuth(raw, p.cfg.Protocol == "subsonic")
 	}
 	q := u.Query()
 	switch p.cfg.Protocol {
@@ -195,18 +199,22 @@ func (p *SelfHostedProvider) AuthorizeURL(raw string) string {
 	return u.String()
 }
 
-// nasOrigin reports whether u is a URL of the NAS at base: the same host, the same
-// port once a missing one is read as its scheme's own (80 for http, 443 for https),
-// and the same scheme, or https where the NAS is http. The gateway stores every cover
-// as https (httpsCover), so the saved cover of an http NAS is its https form; that
-// goes to the same host and port and sends nothing in clear text. The reverse, plain
-// http to an https NAS, would. A URL without a scheme or host is no NAS's.
-func nasOrigin(u, base *url.URL) bool {
-	if u.Hostname() == "" || !strings.EqualFold(u.Hostname(), base.Hostname()) || effectivePort(u) == "" || effectivePort(u) != effectivePort(base) {
+// OnOrigin reports whether raw is a URL of the configured server's exact origin:
+// the same scheme, host and effective port.
+func (p *SelfHostedProvider) OnOrigin(raw string) bool {
+	u, err := url.Parse(raw)
+	base, berr := url.Parse(strings.TrimSpace(p.cfg.URL))
+	return raw != "" && err == nil && berr == nil && sameOrigin(u, base)
+}
+
+// sameOrigin reports whether u is on base's origin: the same scheme and host, and
+// the same port once a missing one is read as the scheme's own (80 for http, 443
+// for https). A URL without a scheme or host is on no origin.
+func sameOrigin(u, base *url.URL) bool {
+	if u.Scheme == "" || u.Hostname() == "" || effectivePort(u) == "" {
 		return false
 	}
-	scheme, nas := strings.ToLower(u.Scheme), strings.ToLower(base.Scheme)
-	return scheme == nas || (nas == "http" && scheme == "https")
+	return strings.EqualFold(u.Scheme, base.Scheme) && strings.EqualFold(u.Hostname(), base.Hostname()) && effectivePort(u) == effectivePort(base)
 }
 
 func effectivePort(u *url.URL) string {

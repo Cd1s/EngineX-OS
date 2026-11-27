@@ -715,11 +715,11 @@ func TestSelfHostedErrorsRedactCredentials(t *testing.T) {
 	})
 }
 
-// #335 round 9: a cover URL gets the NAS's credentials only on the configured server:
-// http://host and https://host (ports 80 and 443) are two servers, both ways; an explicit
-// default port is the same as none; the https form of an http NAS (the gateway stores
-// covers as https) keeps its host and port, while plain http to an https NAS never gets
-// them.
+// #335 rounds 9 and 10: a cover URL gets the NAS's credentials only on the configured
+// server's exact origin (scheme, host, effective port): http://host and https://host
+// (ports 80 and 443) are two origins, both ways; an explicit default port is the same as
+// none; https on an http NAS's own port is another origin too (TLS there can be another
+// service; round 10 drops round 9's https relaxation).
 func TestAuthorizeURLKeepsToTheConfiguredOrigin(t *testing.T) {
 	const token, pass = "plex-token-r9-335", "subsonic-pass-r9-335"
 	cases := []struct {
@@ -737,10 +737,21 @@ func TestAuthorizeURLKeepsToTheConfiguredOrigin(t *testing.T) {
 		{"plex", "http://nas.example:80", "http://NAS.example/library/metadata/7/thumb", true},
 		{"plex", "https://nas.example", "https://nas.example:443/library/metadata/7/thumb", true},
 		{"plex", "http://nas.example:32400/", "http://nas.example:32400/library/metadata/7/thumb", true},
-		{"plex", "http://nas.example:32400", "https://nas.example:32400/library/metadata/7/thumb", true},
+		{"plex", "http://nas.example:32400", "https://nas.example:32400/library/metadata/7/thumb", false},
+		{"subsonic", "http://nas.example:4533", "https://nas.example:4533/rest/getCoverArt.view?id=cv-99", false},
 		{"subsonic", "http://nas.example", "https://nas.example/rest/getCoverArt.view?id=cv-99", false},
 		{"subsonic", "https://nas.example", "http://nas.example/rest/getCoverArt.view?id=cv-99", false},
 		{"subsonic", "https://nas.example", "https://nas.example/rest/getCoverArt.view?id=cv-99", true},
+	}
+	// Round 10: a provider URL already signed for http://host (port 80) that reaches
+	// https://host (port 443) keeps none of the credentials it carried.
+	signed := NewSelfHostedProvider(NASConfig{Protocol: "plex", URL: "http://nas.example", Token: token}, nil)
+	if got := signed.AuthorizeURL("https://nas.example/library/metadata/7/thumb?X-Plex-Token=" + token); strings.Contains(got, token) {
+		t.Errorf("a URL signed for http://nas.example keeps its token on https://nas.example: %s", got)
+	}
+	sub := NewSelfHostedProvider(NASConfig{Protocol: "subsonic", URL: "http://nas.example", Username: "dj", Password: pass}, nil)
+	if got := sub.AuthorizeURL("https://nas.example/rest/getCoverArt.view?id=cv&u=dj&t=tok&s=salt"); strings.Contains(got, "t=tok") || strings.Contains(got, "u=dj") {
+		t.Errorf("a Subsonic URL signed for http://nas.example keeps its auth on https://nas.example: %s", got)
 	}
 	for _, c := range cases {
 		p := NewSelfHostedProvider(NASConfig{Protocol: c.protocol, URL: c.base, Username: "dj", Password: pass, Token: token}, nil)
@@ -751,6 +762,9 @@ func TestAuthorizeURLKeepsToTheConfiguredOrigin(t *testing.T) {
 		}
 		if !c.want && got != c.cover {
 			t.Errorf("%s NAS %s: a cover of another origin changed: %s -> %s", c.protocol, c.base, c.cover, got)
+		}
+		if p.OnOrigin(c.cover) != c.want {
+			t.Errorf("%s NAS %s, cover %s: OnOrigin=%v, want %v", c.protocol, c.base, c.cover, !c.want, c.want)
 		}
 	}
 }

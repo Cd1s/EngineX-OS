@@ -223,7 +223,6 @@ func (s *Server) driveListTracks(ctx context.Context, listID string) ([]trackRef
 		}
 		refs := make([]trackRef, 0, len(tracks))
 		for _, t := range tracks {
-			httpsCover(&t)
 			refs = append(refs, trackRef{track: t, session: "nas", listing: listing})
 		}
 		return refs, nil
@@ -564,7 +563,9 @@ func (g *tidalGateway) omniSearch(ctx context.Context, query string) []any {
 			if ref.file != "" {
 				seenFiles[ref.file] = true
 			}
-			items = append(items, g.trackJSON(g.addTrack(ref), ref.track))
+			if id := g.addTrack(ref); id != 0 { // 0: no ID may be handed out now (#335)
+				items = append(items, g.trackJSON(id, ref.track))
+			}
 		}
 	}
 	if djayRefs, err := g.s.omniTracks(ctx, query); err == nil {
@@ -573,7 +574,9 @@ func (g *tidalGateway) omniSearch(ctx context.Context, query string) []any {
 				continue
 			}
 			seenFiles[ref.file] = true
-			items = append(items, g.trackJSON(g.addTrack(ref), ref.track))
+			if id := g.addTrack(ref); id != 0 {
+				items = append(items, g.trackJSON(id, ref.track))
+			}
 		}
 	}
 	<-webdavDone
