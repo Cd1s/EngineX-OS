@@ -105,8 +105,9 @@ it after the vendor prerequisites. Runtime mode never rewrites the rootfs.
 IRQs and their threads keep the placement stock gives them (#298), and guardian runs with
 idle CPU/I/O scheduling on CPU 3. Missing hardware utilities are tolerated;
 gigabit negotiation failure falls back to 100 Mbps. Wi-Fi power saving is
-turned off on service execution. Networking reconnections may require repeating
-runtime tuning; network manager ownership is not changed.
+turned off on service execution; `stream-sync` persists `power_save off` and
+per-interface ARP isolation across transient failures, `wlan0` down/up cycles,
+and driver/SDIO interface resets without changing network manager ownership.
 
 Hosts entries block known inmusicbrands.com/PostHog endpoints. The staged
 `dnsmasq.d` file additionally blocks subdomains **only on images actually using

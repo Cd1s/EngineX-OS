@@ -191,16 +191,38 @@ func bluetoothPowerOff(ctx context.Context) error {
 	return err
 }
 
-// DisableWiFiPowerSave waits for wlan0 to be up, then applies once. Announcing
-// routes or reconnecting is not evidence that this driver resets power saving.
+type wifiInterfaceState struct {
+	up    bool
+	index int
+}
+
+func readWiFiInterfaceState() wifiInterfaceState {
+	iface, err := net.InterfaceByName("wlan0")
+	if err != nil {
+		return wifiInterfaceState{}
+	}
+	return wifiInterfaceState{up: iface.Flags&net.FlagUp != 0, index: iface.Index}
+}
+
+func readWiFiPowerSaveOn() bool {
+	on, err := wifi.GetPowerSave("wlan0")
+	return err == nil && on
+}
+
+// DisableWiFiPowerSave keeps 802.11 power saving off on wlan0 until ctx ends.
+// Stock kernel 6.18 initializes wdev->ps=1 on new wireless interfaces and a
+// BCM4339 firmware/SDIO reset re-probes wlan0 with a new ifindex and power
+// saving re-enabled; wpa_supplicant can also set power_save. Steady-state
+// passes read only interface state and kernel wdev->ps (no driver I/O or iw
+// fork) and write only on first UP, retry after error, DOWN->UP, ifindex
+// change, or kernel power_save flipping back on.
 func DisableWiFiPowerSave(ctx context.Context) {
 	if guardHostCommand("iw") != nil {
 		return
 	}
-	disableWiFiPowerSave(ctx, 5*time.Second, func() bool {
-		iface, err := net.InterfaceByName("wlan0")
-		return err == nil && iface.Flags&net.FlagUp != 0
-	}, func() error { return setWiFiPowerSaveOff(ctx) })
+	disableWiFiPowerSave(ctx, 5*time.Second, readWiFiInterfaceState, readWiFiPowerSaveOn, func() error {
+		return setWiFiPowerSaveOff(ctx)
+	})
 }
 
 func setWiFiPowerSaveOff(ctx context.Context) error {
@@ -216,20 +238,54 @@ func setWiFiPowerSaveOff(ctx context.Context) error {
 	return wifi.SetPowerSave("wlan0", false)
 }
 
-func disableWiFiPowerSave(ctx context.Context, every time.Duration, up func() bool, disable func() error) {
+func disableWiFiPowerSave(ctx context.Context, every time.Duration, state func() wifiInterfaceState, psOn func() bool, disable func() error) {
 	tick := time.NewTicker(every)
 	defer tick.Stop()
+	applied, everApplied, errLogged := false, false, false
+	prevIndex := 0
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		if up() {
-			if err := disable(); err != nil {
-				log.Printf("stream-sync: could not disable Wi-Fi power saving: %v", err)
-			} else {
-				log.Print("stream-sync: Wi-Fi power saving disabled on wlan0")
+		st := state()
+		if !st.up {
+			applied = false
+			errLogged = false
+			if st.index == 0 {
+				prevIndex = 0
 			}
-			return
+		} else {
+			reason := ""
+			switch {
+			case applied && st.index != prevIndex:
+				reason = "interface reset"
+			case !applied:
+				reason = "interface up"
+			case psOn != nil && psOn():
+				reason = "power_save re-enabled"
+			}
+			if reason != "" {
+				if err := disable(); err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					applied = false
+					if !errLogged {
+						errLogged = true
+						log.Printf("stream-sync: could not disable Wi-Fi power saving: %v", err)
+					}
+				} else {
+					applied = true
+					prevIndex = st.index
+					errLogged = false
+					if !everApplied {
+						everApplied = true
+						log.Print("stream-sync: Wi-Fi power saving disabled on wlan0")
+					} else {
+						log.Printf("stream-sync: Wi-Fi power saving re-disabled on wlan0 (%s)", reason)
+					}
+				}
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -345,6 +401,21 @@ func ownARPAddress(conf string) error {
 	return nil
 }
 
+// ownARPReady reports whether eth0 and wlan0 already carry arp_announce=2 and
+// arp_ignore=1 so steady-state guard passes stay read-only while an interface
+// reset (which restores kernel defaults 0/0) is detected before DHCP completes.
+func ownARPReady(conf string) bool {
+	for _, dev := range []string{"eth0", "wlan0"} {
+		for _, want := range [][2]string{{"arp_announce", "2"}, {"arp_ignore", "1"}} {
+			b, err := os.ReadFile(filepath.Join(conf, dev, want[0]))
+			if err != nil || strings.TrimSpace(string(b)) != want[1] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // GuardRoutes keeps two things right until ctx ends, whenever connman sets them up again:
 // no gateway-less default route on eth0 (the cable keeps its link-local address, so Link
 // and direct connections are unaffected), and the cable before Wi-Fi where both reach the
@@ -365,16 +436,24 @@ func guardRoutes(ctx context.Context, conf string, every time.Duration) {
 		// From the start, not from the first shared subnet on: a pass comes up to 5 s
 		// after the second address, and until then either interface asked and answered
 		// for the other's. At boot stream-sync is up seconds before connman has an
-		// address, so neither ever does. Tried again until both interfaces are there;
-		// guardRoutesOnce still sets them before the cable goes first, for an interface
-		// that came back later.
-		if !own {
+		// address, so neither ever does. Tried again until both interfaces are there,
+		// and re-applied if an interface reset restores stock 0/0 defaults;
+		// guardRoutesOnce still sets them before the cable goes first.
+		if !own || !ownARPReady(conf) {
 			err := ownARPAddress(conf)
-			if own = err == nil; own {
-				log.Printf("stream-sync: eth0 and wlan0 ask and answer by ARP for their own address only")
-			} else if !said {
-				said = true
-				log.Printf("stream-sync: eth0 and wlan0 keep the stock ARP settings for now: %v", err)
+			if err == nil {
+				if !own {
+					log.Printf("stream-sync: eth0 and wlan0 ask and answer by ARP for their own address only")
+				} else {
+					log.Printf("stream-sync: restored ARP settings on eth0 and wlan0 after interface reset")
+				}
+				own, said = true, false
+			} else {
+				own = false
+				if !said {
+					said = true
+					log.Printf("stream-sync: eth0 and wlan0 keep the stock ARP settings for now: %v", err)
+				}
 			}
 		}
 		guardRoutesOnce(ctx, conf)
