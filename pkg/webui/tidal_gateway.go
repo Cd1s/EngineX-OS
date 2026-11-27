@@ -262,8 +262,9 @@ func (g *tidalGateway) tracksPath() string {
 
 // loadTracks restores the IDs of the previous run and the counter (gateway_ids.go), so
 // an old ID never names a different track. When the NAS slot's root is not known
-// (nas.json could not be read: known is false), its rows are kept with the root they
-// were saved under, and none of them is served in this run (WebDAV round 4).
+// (nas.json could not be read, or names no server in the slot: known is false), its
+// rows are kept with the root they were saved under, and none of them is served until
+// a save names the slot's server (WebDAV rounds 4 and 5).
 func (g *tidalGateway) loadTracks(root string, known bool) {
 	g.nasRoot = root
 	path := g.tracksPath()
@@ -467,17 +468,17 @@ func isNASTrackRef(ref trackRef) bool {
 	return isNASTrack(ref.track.Provider, ref.track.ID) || ref.session == nasScope
 }
 
-// dropServers forgets the rows and lists of WebDAV and NAS servers that are gone
+// dropServers forgets the rows and lists of the WebDAV and NAS servers in gone
 // (removed, or moved to another address): such an ID answers 404 and is browsed
 // again.
-func (g *tidalGateway) dropServers(keep map[string]bool) {
+func (g *tidalGateway) dropServers(gone map[string]bool) {
 	if g == nil {
 		return
 	}
 	g.mu.Lock()
 	changed := false
 	for id, ref := range g.tracks {
-		if _, server, ok := rowServer(ref.track); ok && !keep[server] {
+		if _, server, ok := rowServer(ref.track); ok && gone[server] {
 			delete(g.ids, refKey(ref))
 			delete(g.tracks, id)
 			delete(g.trackSeen, id)
@@ -486,7 +487,7 @@ func (g *tidalGateway) dropServers(keep map[string]bool) {
 	}
 	for id, ref := range g.lists {
 		_, isServer := kindOfProvider(ref.provider)
-		if server, _, named := splitServerID(ref.list.ID); isServer && named && !keep[server] {
+		if server, _, named := splitServerID(ref.list.ID); isServer && named && gone[server] {
 			delete(g.lists, id)
 			delete(g.listSeen, id)
 			changed = true
@@ -536,9 +537,6 @@ func newTidalGateway(s *Server) *tidalGateway {
 	root := s.stemsRoot // New's start-up read of nas.json
 	s.stemsMu.Unlock()
 	g.loadTracks(root, !s.slotUnknown.Load())
-	if s.startKept != nil {
-		g.dropServers(s.startKept) // rows of a server no longer set up
-	}
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
 	g.mux.HandleFunc("POST /v1/enginex/login", s.loginStart)

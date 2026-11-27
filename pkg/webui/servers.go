@@ -214,7 +214,8 @@ func (s *Server) loadNASFileLocked() nasFile {
 // saveNASFileLocked writes nas.json, or removes it once it holds nothing. A slot
 // that now names another server (another protocol or address, or none) gets a new
 // identity: every writer of the slot (the console card, the deck and the phone,
-// the mounts page) goes through here.
+// the mounts page) goes through here. What belonged to a server this save removed
+// is dropped (forgetServersLocked). Caller holds uiMu.
 func (s *Server) saveNASFileLocked(f *nasFile) error {
 	old, err := s.readNASFileLocked()
 	if err != nil {
@@ -230,9 +231,11 @@ func (s *Server) saveNASFileLocked(f *nasFile) error {
 		if err := os.Remove(s.nasConfigPath()); err != nil && !os.IsNotExist(err) {
 			return err
 		}
-		return nil
+	} else if err := providers.SaveJSON(s.nasConfigPath(), f); err != nil {
+		return err
 	}
-	return providers.SaveJSON(s.nasConfigPath(), f)
+	s.forgetServersLocked(old, *f)
+	return nil
 }
 
 func serverRoot(k serverKind, raw string) string {
@@ -627,7 +630,6 @@ func (s *Server) applyServer(k serverKind, c serverChange) ([]serverView, error)
 		if err := s.saveNASFileLocked(&f); err != nil {
 			return nil, err
 		}
-		s.forgetServersLocked()
 		return serverViews(k, f), nil
 	}
 	if c.Action != "add" && c.Action != "edit" {
@@ -685,50 +687,40 @@ func (s *Server) applyServer(k serverKind, c serverChange) ([]serverView, error)
 	if err := s.saveNASFileLocked(&f); err != nil {
 		return nil, err
 	}
-	s.forgetServersLocked()
 	return serverViews(k, f), nil
 }
 
-// forgetServersLocked drops what belonged to servers that are no longer set up in
-// nas.json as it is now (removed, or moved to another address): their connections
-// (which cancels their requests still running), gateway rows and lists, Stems
-// entries and downloads. Caller holds uiMu.
-func (s *Server) forgetServersLocked() {
-	f, err := s.readNASFileLocked()
-	if err != nil {
-		log.Printf("webui: servers not cleaned up: %v", err)
+// forgetServersLocked drops what belonged to the servers a save removed: those old
+// names and now does not (a server removed, or moved to another address, which is a
+// new identity). Their connections (which cancels their requests still running),
+// gateway rows and lists, Stems entries and downloads go. It is the only place that
+// deletes a server's state: start-up deletes none, and a save that removes no server
+// deletes none, whatever else the stores hold (WebDAV round 5). Caller holds uiMu.
+func (s *Server) forgetServersLocked(old, now nasFile) {
+	gone := serverIDs(old)
+	for id := range serverIDs(now) {
+		delete(gone, id)
+	}
+	if len(gone) == 0 {
 		return
 	}
-	keep := keptServers(f)
-	s.dropServerConns(func(id string, _ serverKind) bool { return !keep[id] })
+	s.dropServerConns(func(id string, _ serverKind) bool { return gone[id] })
 	s.stemsMu.Lock()
-	s.dropServerStemsLocked(keep)
+	s.dropServerStemsLocked(gone)
 	s.stemsMu.Unlock()
-	s.tidal.dropServers(keep)
-	s.jobs.dropServers(keep)
+	s.tidal.dropServers(gone)
+	s.jobs.dropServers(gone)
 }
 
-func keptServers(f nasFile) map[string]bool {
-	keep := map[string]bool{}
+// serverIDs are the identities of the servers f names (on or off).
+func serverIDs(f nasFile) map[string]bool {
+	ids := map[string]bool{}
 	for _, k := range serverKinds {
 		for _, e := range serverEntries(k, f) {
-			keep[e.ID] = true
+			ids[e.ID] = true
 		}
 	}
-	return keep
-}
-
-// serversKept are the IDs of the servers set up (on or off): what rows, Stems
-// entries and searches may still name. An error when nas.json cannot be read: then
-// nothing of any server is dropped.
-func (s *Server) serversKept() (map[string]bool, error) {
-	s.uiMu.Lock()
-	f, err := s.readNASFileLocked()
-	s.uiMu.Unlock()
-	if err != nil {
-		return nil, err
-	}
-	return keptServers(f), nil
+	return ids
 }
 
 // serverAddresses are the addresses (serverRoot) of a kind's servers set up: a
@@ -1062,10 +1054,10 @@ func (v connSearcher) Search(ctx context.Context, query string) ([]providers.Tra
 // is in the next search, from the cache.
 const serverReadyWait = time.Second
 
-// dropServerStemsLocked removes the Stems entries of servers that are gone
-// (removed, or moved to another address). A file that does not fully decode is
-// left as it is. Caller holds stemsMu.
-func (s *Server) dropServerStemsLocked(keep map[string]bool) {
+// dropServerStemsLocked removes the Stems entries of the servers in gone (removed,
+// or moved to another address). A file that does not fully decode is left as it
+// is. Caller holds stemsMu.
+func (s *Server) dropServerStemsLocked(gone map[string]bool) {
 	all, err := s.readStemmed()
 	if err != nil {
 		return
@@ -1074,7 +1066,7 @@ func (s *Server) dropServerStemsLocked(keep map[string]bool) {
 	for scope, list := range all {
 		kept := slices.DeleteFunc(slices.Clone(list), func(e stemmedTrack) bool {
 			_, server, ok := rowServer(e.Track)
-			return ok && !keep[server]
+			return ok && gone[server]
 		})
 		if len(kept) != len(list) {
 			all[scope], changed = kept, true

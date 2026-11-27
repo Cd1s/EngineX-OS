@@ -100,13 +100,20 @@ func omniServer(t *testing.T, root string, on bool) (*Server, string) {
 	return omniServerScope(t, root, on, "deezer")
 }
 
-func omniServerScope(t *testing.T, root string, on bool, scope string) (*Server, string) {
+// omniServerScope is a deck with scope selected and OmniSource on or off. nas, when
+// given, is the NAS in nas.json's slot when the deck starts.
+func omniServerScope(t *testing.T, root string, on bool, scope string, nas ...providers.NASConfig) (*Server, string) {
 	ui := t.TempDir()
 	conf := "scope=" + scope + "\n"
 	if on {
 		conf += "omni_source=1\n"
 	}
 	os.WriteFile(filepath.Join(ui, "settings.conf"), []byte(conf), 0o644)
+	for _, cfg := range nas {
+		if err := providers.SaveJSON(filepath.Join(ui, "nas.json"), cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s := New(Config{AccessToken: "code", UIDir: ui, StateDir: t.TempDir(), DeezerURL: fakeDeezer(t).URL, MediaRoot: filepath.Dir(root)}, nil)
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
@@ -277,10 +284,7 @@ func TestOmniSourceCarrierOpenSequence(t *testing.T) {
 	for _, scope := range []string{"soundcloud", "spotify"} {
 		for _, omni := range []bool{false, true} {
 			t.Run(scope+fmt.Sprintf("/omni=%t", omni), func(t *testing.T) {
-				s, base := omniServerScope(t, root, omni, scope)
-				if err := providers.SaveJSON(s.nasConfigPath(), providers.NASConfig{Protocol: "subsonic", URL: nasBackend.URL, Enabled: true}); err != nil {
-					t.Fatal(err)
-				}
+				s, base := omniServerScope(t, root, omni, scope, providers.NASConfig{Protocol: "subsonic", URL: nasBackend.URL, Enabled: true})
 				s.mu.Lock()
 				s.sessions["own"] = &Session{ID: "own", Provider: scope, Ready: true, p: carrierProvider(t, scope), expires: time.Now().Add(time.Hour)}
 				merged := map[string]string{"soundcloud": "spotify", "spotify": "soundcloud"}[scope]
@@ -587,10 +591,7 @@ func TestOmniSourceReporter59PlaylistsAndUnconfiguredDeezer(t *testing.T) {
 	runCase := func(t *testing.T, nasCfg providers.NASConfig, wantNASFirst, wantNASLast string) {
 		for _, scope := range []string{"soundcloud", "spotify"} {
 			t.Run(scope, func(t *testing.T) {
-				s, base := omniServerScope(t, root, false, scope)
-				if err := providers.SaveJSON(s.nasConfigPath(), nasCfg); err != nil {
-					t.Fatal(err)
-				}
+				s, base := omniServerScope(t, root, false, scope, nasCfg)
 				scProv := carrierProvider(t, "soundcloud")
 				spProv := carrierProvider(t, "spotify")
 				s.mu.Lock()

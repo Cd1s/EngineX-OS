@@ -722,7 +722,6 @@ func (s *Server) syncMountToNAS(m RemoteMount) {
 		}
 		f.NASConfig = nasCfg
 		_ = s.saveNASFileLocked(&f)
-		s.forgetServersLocked()
 	}
 }
 
@@ -995,7 +994,6 @@ func (s *Server) handleMountsDelete(w http.ResponseWriter, r *http.Request) {
 		} else if f, err := s.readNASFileLocked(); err == nil { // the server lists stay
 			f.NASConfig, f.Name = providers.NASConfig{}, ""
 			_ = s.saveNASFileLocked(&f)
-			s.forgetServersLocked()
 		}
 	}
 

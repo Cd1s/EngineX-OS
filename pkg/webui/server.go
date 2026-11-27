@@ -121,18 +121,16 @@ type Server struct {
 	stemsRoot     string     // under stemsMu: the NAS root whose NAS Stems entries are served (#335)
 	stemsImportMu sync.Mutex // one streamed row at a time is named, recorded and swept
 	serverState              // the WebDAV and NAS servers' connections
-	// slotUnknown: nas.json could not be read at start-up, so the root the NAS slot's
-	// saved rows, downloads and Stems belong to is not known. They are kept as saved
-	// and the slot is not served in this run, until its settings are saved again
-	// (resetNASIfMoved); the next start reads the file again (WebDAV round 4).
+	// slotUnknown: at start-up nas.json could not be read, or named no server in the
+	// NAS slot, so nothing says which root the slot's saved rows, downloads and Stems
+	// belong to. They are kept as saved and the slot is not served, until a save names
+	// its server (resetNASIfMoved); the next start reads the file again (WebDAV rounds
+	// 4 and 5).
 	slotUnknown atomic.Bool
 	// nasFileErrLogged: an unreadable nas.json was logged once.
 	nasFileErrLogged atomic.Bool
-	// startKept are the servers nas.json named at start-up; nil when it could not be
-	// read, and then no server's state is dropped at start-up.
-	startKept     map[string]bool
-	rbxPresenceMu sync.Mutex
-	rbxPresence   map[string]*rbxPresence
+	rbxPresenceMu    sync.Mutex
+	rbxPresence      map[string]*rbxPresence
 
 	prolinkExport *prolink.Exporter
 	closed        chan struct{}
@@ -387,27 +385,28 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.loadAppleMusicHelper()
 	s.appleMusic.OwnerPath = filepath.Join(cfg.StateDir, "applemusic-owner.json")
 	_ = s.appleMusic.Load()
-	// The servers and the NAS slot's root before any request. No clean-up of any server
-	// or NAS state runs unless nas.json was read in full (WebDAV round 4).
+	// The NAS slot's root before any request. Start-up drops nothing of any server,
+	// whatever nas.json holds (WebDAV round 5): a server's rows, downloads and Stems
+	// entries name its own identity, which no other server gets, so they are served
+	// only for that server and need no clean-up; only the action that removes a server
+	// clears them (forgetServersLocked). The NAS slot's bare rows (#335: SMB, Subsonic,
+	// Plex) name no server but a root: they are kept as saved unless nas.json was read in
+	// full and names the slot's server.
 	s.uiMu.Lock()
 	startNAS, startErr := s.readNASFileLocked()
 	s.uiMu.Unlock()
-	var kept map[string]bool
 	if startErr != nil {
 		log.Printf("webui: %v at start-up: NAS and server state kept as saved, the NAS slot is off in this run", startErr)
+	}
+	if startErr != nil || !slotNamed(startNAS.NASConfig) {
 		s.slotUnknown.Store(true)
 		s.stemsRoot = unknownNASRoot
 	} else {
 		s.stemsRoot = nasRootID(startNAS.NASConfig)
-		kept = keptServers(startNAS)
 	}
 	s.stemsMu.Lock()
 	s.scrubStems() // a released file's credentials go before any request
-	if kept != nil {
-		s.dropServerStemsLocked(kept)
-	}
 	s.stemsMu.Unlock()
-	s.startKept = kept
 	s.tidal = newTidalGateway(s)
 	s.RegisterTunnelRoutes()
 	// Resume before accepting requests: a delayed resume could see a newly
@@ -425,7 +424,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 		jobs.applemusic = func() *providers.AppleMusic { return s.appleMusic }
 		jobs.selfHosted = s.ownerSelfHosted
 		jobs.server = s.serverLookup
-		if startErr != nil {
+		if s.slotUnknown.Load() {
 			// The slot's root is not known: the index keeps the root it was filed under
 			// (its NAS entries stay on disk) and none of them is used in this run.
 			jobs.keepNASAsSavedLocked()
@@ -437,13 +436,6 @@ func New(cfg Config, jobs *Jobs) *Server {
 			jobs.p.Deemix.PreferMP3 = func() bool { return s.quality() == quality320k }
 		}
 		jobs.mu.Unlock()
-		if startErr == nil {
-			// Downloads of servers no longer set up (one that finished after its server
-			// was removed). Only now: the index is read once, filtered by the NAS root set
-			// above; read before it, an index of another root would keep its NAS entries.
-			// Never when nas.json could not be read: then no server's state is dropped.
-			jobs.dropServers(kept)
-		}
 	}
 	return s
 }

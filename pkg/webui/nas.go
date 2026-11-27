@@ -179,7 +179,6 @@ func (s *Server) handleNASConfig(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusInternalServerError, errors.New("could not remove NAS configuration"))
 			return
 		}
-		s.forgetServersLocked()
 		respond(w, toNASConfigView(providers.NASConfig{}))
 	default:
 		fail(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -284,7 +283,6 @@ func (s *Server) handleNASConfigPost(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, errors.New("could not save nas configuration"))
 		return
 	}
-	s.forgetServersLocked()
 
 	respond(w, toNASConfigView(newCfg))
 }
@@ -389,7 +387,9 @@ func (s *Server) resetNASIfMoved(before providers.NASConfig) {
 	}
 	root := nasRootID(now.NASConfig)
 	if s.slotUnknown.Load() {
-		s.adoptNASRoot(root)
+		if slotNamed(now.NASConfig) { // else the slot's state stays as saved, as at start-up
+			s.adoptNASRoot(root)
+		}
 		return
 	}
 	if nasTarget(now.NASConfig) == nasTarget(before) {
@@ -405,10 +405,11 @@ func (s *Server) resetNASIfMoved(before providers.NASConfig) {
 }
 
 // adoptNASRoot ends a run that started without the NAS slot's root (nas.json could not
-// be read at start-up), at the first save that read the file in full: every store
-// keeps the slot's entries filed under root, as a start-up with this file would, and
-// drops those of another root. Nothing of the slot ran before (it is off while its
-// root is unknown), so no generation changes. Caller holds uiMu (WebDAV round 4).
+// be read at start-up, or named no server in the slot), at the first save that names
+// the slot's server: every store keeps the slot's entries filed under root, as a
+// start-up with this file would, and drops those of another root. Nothing of the slot
+// ran before (it is off while its root is unknown), so no generation changes. Caller
+// holds uiMu (WebDAV rounds 4 and 5).
 func (s *Server) adoptNASRoot(root string) {
 	s.stemsMu.Lock()
 	s.stemsRoot = root // NAS Stems entries are filtered by their root when read
@@ -418,9 +419,16 @@ func (s *Server) adoptNASRoot(root string) {
 	s.slotUnknown.Store(false)
 }
 
-// unknownNASRoot is the NAS root of a run that could not read nas.json at start-up:
-// no saved NAS entry has it, so none is served (WebDAV round 4).
+// unknownNASRoot is the NAS root of a run that started without the slot's server (nas.json
+// unreadable, or naming none): no saved NAS entry has it, so none is served (WebDAV
+// round 4).
 const unknownNASRoot = "unknown"
+
+// slotNamed: cfg names a server for the NAS slot. Only then does nas.json say which
+// root the slot's saved state belongs to.
+func slotNamed(cfg providers.NASConfig) bool {
+	return isNASProvider(cfg.Protocol) && strings.TrimSpace(cfg.URL) != ""
+}
 
 // nasRootID names the NAS root (protocol, server, port, share and root, as
 // nasTarget) without credentials or a readable server name. Each saved NAS state

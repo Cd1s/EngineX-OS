@@ -387,30 +387,30 @@ func (j *Jobs) resetNAS(root string, also func()) {
 	}
 }
 
-// dropServers forgets the downloads of WebDAV and NAS servers that are gone
+// dropServers forgets the downloads of the WebDAV and NAS servers in gone
 // (removed, or moved to another address): their files, queue marks and index
 // entries. Their cache files stay until the cache trims them; nothing finds them
 // under that server again, and a server added again has a new identity, so work
 // still running for the old one cannot hand its audio to the new one (#335).
-func (j *Jobs) dropServers(keep map[string]bool) {
+func (j *Jobs) dropServers(gone map[string]bool) {
 	if j == nil {
 		return
 	}
-	gone := func(key string) bool {
+	dropped := func(key string) bool {
 		provider, id, _ := strings.Cut(key, ":")
 		_, isServer := kindOfProvider(provider)
 		server, _, ok := splitServerID(id)
-		return isServer && ok && !keep[server]
+		return isServer && ok && gone[server]
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	for k := range j.files {
-		if gone(k) {
+		if dropped(k) {
 			delete(j.files, k)
 		}
 	}
 	for k := range j.queued {
-		if _, tk, _ := strings.Cut(k, "\x00"); gone(tk) {
+		if _, tk, _ := strings.Cut(k, "\x00"); dropped(tk) {
 			delete(j.queued, k)
 		}
 	}
@@ -419,7 +419,7 @@ func (j *Jobs) dropServers(keep map[string]bool) {
 	}
 	changed := false
 	for k := range j.loadSources() {
-		if gone(k) {
+		if dropped(k) {
 			delete(j.sources, k)
 			changed = true
 		}
@@ -430,9 +430,9 @@ func (j *Jobs) dropServers(keep map[string]bool) {
 }
 
 // keepNASAsSavedLocked is the start-up of a run whose NAS root is not known (nas.json
-// could not be read); j.mu must be held. The index keeps the root it was filed under,
-// so its NAS entries stay on disk for the next start, and none of them is used in
-// this run (FileAt) until adoptNAS.
+// could not be read, or names no server in the slot); j.mu must be held. The index
+// keeps the root it was filed under, so its NAS entries stay on disk for the next
+// start, and none of them is used in this run (FileAt) until adoptNAS.
 func (j *Jobs) keepNASAsSavedLocked() {
 	j.nasUnknown = true
 	j.nasRoot = ""
