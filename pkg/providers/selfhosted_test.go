@@ -714,3 +714,43 @@ func TestSelfHostedErrorsRedactCredentials(t *testing.T) {
 		assertClean(t, "DownloadTrack", err, "/music/sub/song.flac")
 	})
 }
+
+// #335 round 9: a cover URL gets the NAS's credentials only on the configured server:
+// http://host and https://host (ports 80 and 443) are two servers, both ways; an explicit
+// default port is the same as none; the https form of an http NAS (the gateway stores
+// covers as https) keeps its host and port, while plain http to an https NAS never gets
+// them.
+func TestAuthorizeURLKeepsToTheConfiguredOrigin(t *testing.T) {
+	const token, pass = "plex-token-r9-335", "subsonic-pass-r9-335"
+	cases := []struct {
+		protocol, base, cover string
+		want                  bool
+	}{
+		{"plex", "http://nas.example", "https://nas.example/library/metadata/7/thumb", false},
+		{"plex", "https://nas.example", "http://nas.example/library/metadata/7/thumb", false},
+		{"plex", "https://nas.example:80", "http://nas.example/library/metadata/7/thumb", false},
+		{"plex", "https://nas.example:32400", "http://nas.example:32400/library/metadata/7/thumb", false},
+		{"plex", "http://nas.example:32400", "http://nas.example/library/metadata/7/thumb", false},
+		{"plex", "http://nas.example", "http://other.example/library/metadata/7/thumb", false},
+		{"plex", "http://nas.example", "/library/metadata/7/thumb", false},
+		{"plex", "http://nas.example", "http://nas.example/library/metadata/7/thumb", true},
+		{"plex", "http://nas.example:80", "http://NAS.example/library/metadata/7/thumb", true},
+		{"plex", "https://nas.example", "https://nas.example:443/library/metadata/7/thumb", true},
+		{"plex", "http://nas.example:32400/", "http://nas.example:32400/library/metadata/7/thumb", true},
+		{"plex", "http://nas.example:32400", "https://nas.example:32400/library/metadata/7/thumb", true},
+		{"subsonic", "http://nas.example", "https://nas.example/rest/getCoverArt.view?id=cv-99", false},
+		{"subsonic", "https://nas.example", "http://nas.example/rest/getCoverArt.view?id=cv-99", false},
+		{"subsonic", "https://nas.example", "https://nas.example/rest/getCoverArt.view?id=cv-99", true},
+	}
+	for _, c := range cases {
+		p := NewSelfHostedProvider(NASConfig{Protocol: c.protocol, URL: c.base, Username: "dj", Password: pass, Token: token}, nil)
+		got := p.AuthorizeURL(c.cover)
+		authorized := strings.Contains(got, token) || strings.Contains(got, "t=") || strings.Contains(got, "u=dj")
+		if authorized != c.want {
+			t.Errorf("%s NAS %s, cover %s: authorized=%v (%s), want %v", c.protocol, c.base, c.cover, authorized, got, c.want)
+		}
+		if !c.want && got != c.cover {
+			t.Errorf("%s NAS %s: a cover of another origin changed: %s -> %s", c.protocol, c.base, c.cover, got)
+		}
+	}
+}
