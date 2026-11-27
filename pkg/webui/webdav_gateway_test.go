@@ -402,3 +402,38 @@ func TestWebDAVSearchEveryEnabledServerWithinTheBudget(t *testing.T) {
 		t.Fatal("WebDAV switched off was still searched")
 	}
 }
+
+// WebDAV rows are outside the NAS slot's generation and root (#335): when the
+// console moves the SMB NAS to another share, WebDAV rows keep playing from
+// their download and keep their Stems entries.
+func TestWebDAVRowsSurviveAnSMBNASChange(t *testing.T) {
+	d := newFakeDAV(t, testMP3(120), nil)
+	nas := nasFile{NASConfig: providers.NASConfig{Protocol: "smb", URL: "smb://nas.example/a", Enabled: true},
+		WebDAV: []webdavServer{{Name: "Studio", URL: d.srv.URL + "/music/", Enabled: true}}}
+	raw, _ := json.Marshal(nas)
+	r := newWebDAVRig(t, string(raw), "sources=\nscope=\nomni_source=0\n")
+	uiPost(t, r.gw.URL, "scope=webdav")
+	row := r.tracks(t, r.lists(t)["[Studio] House"])["a"]
+	if code, _ := r.stream(t, rowID(row)); code != 200 {
+		t.Fatalf("WebDAV row before the NAS change: HTTP %d", code)
+	}
+	ref := refOf(r.s.tidal, rowID(row))
+	if err := r.s.addStemmedAt(webdavScope, stemmedTrack{Track: ref.track, Session: webdavScope, Path: "/x/a"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	gen := r.s.jobs.NASGen()
+	w := httptest.NewRecorder()
+	r.s.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/api/nas", strings.NewReader(`{"protocol":"smb","url":"smb://nas.example/b","enabled":true}`)))
+	if w.Code != 200 || r.s.jobs.NASGen() == gen {
+		t.Fatalf("the SMB NAS did not move: HTTP %d, generation %d -> %d", w.Code, gen, r.s.jobs.NASGen())
+	}
+	if code, body := r.stream(t, rowID(row)); code != 200 || len(body) != len(d.audio) {
+		t.Fatalf("WebDAV row after the SMB NAS moved: HTTP %d", code)
+	}
+	if n := d.gets.Load(); n != 1 {
+		t.Fatalf("the WebDAV track downloaded %d times, want 1 (its download was dropped with the NAS)", n)
+	}
+	if got := r.s.stemmed(webdavScope); len(got) != 1 {
+		t.Fatalf("WebDAV Stems entries after the SMB NAS moved: %d, want 1", len(got))
+	}
+}
