@@ -88,6 +88,27 @@ Establish a measured cause before changing production audio code. Add a
 regression that fails before that change, retain #54/#58, and run the required
 DSP sanitizers, native/armhf real-time tests and both bootstrap fixtures.
 
+## Baseline validation
+
+All commands ran on the designated ARM test machine. The real-time and
+bootstrap checks ran under `enginex-run exclusive`; no heavy lock was taken
+directly.
+
+| Check | Result |
+| --- | --- |
+| `test_dsp_smooth.c`, plain | PASS |
+| `test_dsp_smooth.c`, ASan/UBSan | PASS |
+| `test_dsp_smooth.c`, TSan | PASS |
+| `test_rt_budget.c`, native and armhf | PASS; zero misses in both |
+| `test_rt_callback.c`, native and armhf, including guard self-tests | PASS |
+| `test_sclive4_bootstrap.sh` with explicit `JC11S_ROOTFS` | PASS for SCLIVE4 and PRIME4PLUS; 18 PASS markers, no skipped JC11S warning |
+
+The freshly rebuilt armhf hook also equals the released hook byte for byte
+(`5077d7caf6c6...`), excluding a stale committed hook as the explanation for the
+source-level callback measurements. These are baseline checks, not evidence
+that #347 is fixed. No fail-before regression exists yet because no measured
+cause has been identified.
+
 ## Three-step owner check
 
 1. At a safe monitor level, use one fixed 1 kHz test file and record channel
