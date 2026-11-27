@@ -748,6 +748,9 @@ struct engine_build {
     uint16_t track_is_demo_slot, track_is_stemmed_slot;
     // #336 S12: RecorderDsp::RecorderDsp site that initializes m_bufferSeconds = 4.0f and m_sleepMs = 100.
     uint32_t recorder_buf_site;
+    // #336 S9 (t/71431): LoopRegion::isLengthMultipleOf broken zero-rem divide and
+    // SyncModifier::onJump entry for integer-beat wrap delta snapping.
+    uint32_t loop_mult_div_site, sync_on_jump_site;
 };
 static const struct engine_build *build;
 
@@ -2563,7 +2566,8 @@ static const struct engine_build engine_builds[] = {
      .reset_uuid_fn = 0x138cbe0,
      .hide_stemmed_site = 0xe29f98, .hide_stems_feat_slot = 0x2ee6f90,
      .track_is_demo_slot = 69, .track_is_stemmed_slot = 66,
-     .recorder_buf_site = 0x19ba0f0},
+     .recorder_buf_site = 0x19ba0f0,
+     .loop_mult_div_site = 0x19204d8, .sync_on_jump_site = 0x17c6d60},
 };
 #else
 static const struct engine_edit edits_504[] = {
@@ -2735,7 +2739,8 @@ static const struct engine_build engine_builds[] = {
      .reset_uuid_fn = 0x12120ec,
      .hide_stemmed_site = 0xca5fc8, .hide_stems_feat_slot = 0x2a91e9c,
      .track_is_demo_slot = 68, .track_is_stemmed_slot = 65,
-     .recorder_buf_site = 0x18356b0},
+     .recorder_buf_site = 0x18356b0,
+     .loop_mult_div_site = 0x1775abc, .sync_on_jump_site = 0x15211c0},
     {"5.3.0", "\xbe\x53\x7e\x90\x81\x21\xe7\x61\x64\xdd\xbb\xf9\x73\x0d\x47\x2b\xa0\xb8\xf9\xd4",
      {0xe6a090, 0xe6a0bc, 0xe6a16c, 0xe6a198, 0xe6a1c4, 0xe6a0e8, 0xe6a140, 0x170e714, 0x1710c00,
       0x1710a74, 0x170f110, 0xdde87c, 0xd265cc, 0xd265f8, 0xd26624, 0xf1afa4, 0x16b38e0, 0xf1dd20, 0xf1ede4, 0xf1ab24, 0xc77934},
@@ -2754,7 +2759,8 @@ static const struct engine_build engine_builds[] = {
      .reset_uuid_fn = 0x12da47c,
      .hide_stemmed_site = 0xd4c6f8, .hide_stems_feat_slot = 0x2c97bd4,
      .track_is_demo_slot = 69, .track_is_stemmed_slot = 66,
-     .recorder_buf_site = 0x1987bc0},
+     .recorder_buf_site = 0x1987bc0,
+     .loop_mult_div_site = 0x18bad9c, .sync_on_jump_site = 0x1735548},
     // feature_object 0x2d0eb78 is StemsPreRenderedPlayback (stored into 0x2d180c8 at 0x360d68, read by PlanckScriptRoot::hasStemsPreRenderedPlayback at 0x9d7808).
     {"5.3.0-sclive4", "\xb9\x46\xc3\xb8\xd9\x9d\x32\x99\x8c\x81\x97\xd5\xdc\x90\x5a\x6b\xdd\xaa\x5d\x2f",
      {0xe774fc, 0xe77528, 0xe775d8, 0xe77604, 0xe77630, 0xe77554, 0xe775ac, 0x17597bc, 0x179b090,
@@ -2774,7 +2780,8 @@ static const struct engine_build engine_builds[] = {
      .reset_uuid_fn = 0x13235b8,
      .hide_stemmed_site = 0xd7edf8, .hide_stems_feat_slot = 0x2d180c8,
      .track_is_demo_slot = 69, .track_is_stemmed_slot = 66,
-     .recorder_buf_site = 0x19ea77c},
+     .recorder_buf_site = 0x19ea77c,
+     .loop_mult_div_site = 0x191a9e4, .sync_on_jump_site = 0x17ab900},
 };
 #endif
 
@@ -2941,10 +2948,136 @@ static void install_hide_title_stems_fix(uintptr_t base, size_t page) {
     }
 }
 
+/* #336 S9 (t/71431): Auto-loop beat-grid desync on wrap in Bar/Beat Sync.
+ *
+ * 1. LoopRegion::isLengthMultipleOf checks the lower-wrap remainder with
+ *    vdiv/fdiv (0.0 - rem) / rem = -1.0 and compares |-1.0| <= 1e-5, which
+ *    always fails for any positive remainder >= DBL_EPSILON. Changing the
+ *    divisor register from d0 (rem) to d8 (period, preserved throughout the
+ *    function) makes the lower check symmetric with the upper check.
+ * 2. SyncModifier::onJump checks fmod(|delta|, 4.0) <= 1e-12 with no upper-wrap
+ *    guard, so a 1-ULP-short wrap (-31.99999999999997) produces rem = 3.99999999999997
+ *    and fires ResetSyncLeadPhase / RequestSwitchToTempoSync. Snapping nonzero
+ *    jump deltas within 1e-4 beats (~2.2 samples @ 120 BPM) of an integer beat
+ *    keeps both lead and follower phase-locked while leaving genuine off-grid
+ *    and sub-beat jumps untouched.
+ */
+typedef void (*sync_on_jump_fn)(void *, void *, double);
+static sync_on_jump_fn sync_on_jump_original;
+
+static double snap_integer_beat_delta(double delta) {
+    if (!isfinite(delta)) return delta;
+    double a = fabs(delta);
+    if (a < 0.5 || a > 1e9) return delta;
+    double nearest = (double)(int32_t)(a + 0.5);
+    if (fabs(a - nearest) <= 1e-4) return delta < 0.0 ? -nearest : nearest;
+    return delta;
+}
+
+static void hook_sync_on_jump(void *self, void *jump_info, double delta) {
+    sync_on_jump_fn orig = __atomic_load_n(&sync_on_jump_original, __ATOMIC_ACQUIRE);
+    if (orig) orig(self, jump_info, snap_integer_beat_delta(delta));
+}
+
+static void install_autoloop_sync_fix(uintptr_t base, size_t page) {
+    if (!build || !hf_on(HF_DSP_GUARDS)) return;
+    int patched = 0;
+    if (build->loop_mult_div_site) {
+        uintptr_t div_at = base + build->loop_mult_div_site;
+#if defined(__aarch64__)
+        static const uint32_t stock_div[5] = {
+            0x1e601842u, /* fdiv d2, d2, d0 */
+            0x90002501u, /* adrp x1, 0x1dc0000 */
+            0xfd45c824u, /* ldr d4, [x1, #2960] (1e-5) */
+            0x1e60c042u, /* fabs d2, d2 */
+            0x1e642050u, /* fcmpe d2, d4 */
+        };
+        uint32_t fixed_div = 0x1e681842u; /* fdiv d2, d2, d8 */
+#else
+        static const uint32_t stock_div[5] = {
+            0xeec03b80u, /* vdiv.f64 d19, d16, d0 */
+            0xeddf4b24u, /* vldr d20, [pc, #144] (1e-5) */
+            0xeef03be3u, /* vabs.f64 d19, d19 */
+            0xeef43be4u, /* vcmpe.f64 d19, d20 */
+            0xeef1fa10u, /* vmrs APSR_nzcv, fpscr */
+        };
+        uint32_t fixed_div = 0xeec03b88u; /* vdiv.f64 d19, d16, d8 */
+#endif
+        if (!memcmp((const void *)div_at, stock_div, sizeof stock_div) &&
+            try_patch_bytes(HF_DSP_GUARDS, div_at, &fixed_div, sizeof fixed_div, page)) {
+            patched = 1;
+        }
+    }
+    if (build->sync_on_jump_site) {
+        uintptr_t oj_at = base + build->sync_on_jump_site;
+#if defined(__aarch64__)
+        static const uint32_t stock_oj[4] = {
+            0xd503233fu, /* paciasp */
+            0xd10283ffu, /* sub sp, sp, #0xa0 */
+            0xd000af82u, /* adrp x2, 0x2db8000 */
+            0xf9443042u, /* ldr x2, [x2, #2144] */
+        };
+        if (!memcmp((const void *)oj_at, stock_oj, sizeof stock_oj)) {
+            const uint32_t *p = (const uint32_t *)oj_at;
+            int64_t imm21 = (int64_t)((((p[2] >> 5) & 0x7ffffu) << 2) | ((p[2] >> 29) & 3u));
+            if (imm21 & (1LL << 20)) imm21 |= ~((1LL << 21) - 1);
+            uintptr_t got_addr = (((oj_at + 8) & ~(uintptr_t)0xfffu) + (uintptr_t)(imm21 << 12)) +
+                                 (uintptr_t)(((p[3] >> 10) & 0xfffu) * 8u);
+            uint32_t tramp_code[10] = {
+                p[0], p[1],
+                0x58000082u, /* ldr x2, [pc, #16] */
+                0xf9400042u, /* ldr x2, [x2] */
+                0x58000090u, /* ldr x16, [pc, #16] */
+                0xd61f0200u, /* br x16 */
+                0, 0, 0, 0
+            };
+            uint64_t got64 = (uint64_t)got_addr, back64 = (uint64_t)(oj_at + 16);
+            memcpy(&tramp_code[6], &got64, 8);
+            memcpy(&tramp_code[8], &back64, 8);
+            void *tramp = rx_code(tramp_code, sizeof tramp_code, page);
+            sync_on_jump_fn prev = __atomic_load_n(&sync_on_jump_original, __ATOMIC_RELAXED);
+            __atomic_store_n(&sync_on_jump_original, (sync_on_jump_fn)tramp, __ATOMIC_RELEASE);
+            uint32_t jump[4] = {0x58000050u, 0xd61f0200u, 0, 0};
+            uint64_t to = (uint64_t)(uintptr_t)hook_sync_on_jump;
+            memcpy(&jump[2], &to, 8);
+            if (try_patch_bytes(HF_DSP_GUARDS, oj_at, jump, sizeof jump, page)) {
+                patched = 1;
+            } else {
+                __atomic_store_n(&sync_on_jump_original, prev, __ATOMIC_RELEASE);
+                munmap(tramp, page);
+            }
+        }
+#else
+        static const uint32_t stock_oj[4] = {
+            0xe16d42f0u, /* strd r4, [sp, #-32]! */
+            0xe1cd60f8u, /* strd r6, [sp, #8] */
+            0xe58db018u, /* str fp, [sp, #24] */
+            0xe1cd81f0u, /* strd r8, [sp, #16] */
+        };
+        if (!memcmp((const void *)oj_at, stock_oj, sizeof stock_oj)) {
+            const uint32_t *p = (const uint32_t *)oj_at;
+            uint32_t tramp_code[4] = {p[0], p[1], 0xe51ff004u, (uint32_t)(oj_at + 8)};
+            void *tramp = rx_code(tramp_code, sizeof tramp_code, page);
+            sync_on_jump_fn prev = __atomic_load_n(&sync_on_jump_original, __ATOMIC_RELAXED);
+            __atomic_store_n(&sync_on_jump_original, (sync_on_jump_fn)tramp, __ATOMIC_RELEASE);
+            uint32_t jump[2] = {0xe51ff004u, (uint32_t)(uintptr_t)hook_sync_on_jump};
+            if (try_patch_bytes(HF_DSP_GUARDS, oj_at, jump, sizeof jump, page)) {
+                patched = 1;
+            } else {
+                __atomic_store_n(&sync_on_jump_original, prev, __ATOMIC_RELEASE);
+                munmap(tramp, page);
+            }
+        }
+#endif
+    }
+    if (patched) fprintf(stderr, "engine-ui-hook: auto-loop sync precision fix installed\n");
+}
+
 static void apply_engine_edits(uintptr_t base, size_t page) {
     install_tidal_profile_sso(base, page);
     install_hide_title_stems_fix(base, page);
     install_recorder_buffer_guard(base, page);
+    install_autoloop_sync_fix(base, page);
     // A group is applied only if every site of it is stock or already patched.
     int ready[EDIT_GROUP_COUNT];
     for (unsigned i = 0; i < EDIT_GROUP_COUNT; i++) ready[i] = 1;
