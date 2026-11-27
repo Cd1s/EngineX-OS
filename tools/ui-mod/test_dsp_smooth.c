@@ -32,6 +32,15 @@ static void test_finite(void)
     CHECK(sc_dsp_read_f32(raw, 5) == 0.0f);
     CHECK(sc_dsp_read_f64(raw, 9) == -2.5);
     CHECK(sc_dsp_read_f32(NULL, 0) == 0.0f && sc_dsp_read_f64(NULL, 8) == 0.0);
+
+    float m0[4] = {0.25f, NAN, INFINITY, -0.5f};
+    float m1[4] = {-INFINITY, 1.0f, -1.0f, NAN};
+    float *mout[2] = {m0, m1};
+    CHECK(sc_dsp_sanitize_master_planar(mout, 2, 4) == 4);
+    CHECK(m0[0] == 0.25f && m0[1] == 0.0f && m0[2] == 0.0f && m0[3] == -0.5f);
+    CHECK(m1[0] == 0.0f && m1[1] == 1.0f && m1[2] == -1.0f && m1[3] == 0.0f);
+    CHECK(sc_dsp_sanitize_master_planar(mout, 2, 4) == 0);
+    CHECK(sc_dsp_sanitize_master_planar(NULL, 2, 4) == 0);
 }
 
 static float phase_of(const unsigned char *gate)

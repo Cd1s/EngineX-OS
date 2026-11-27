@@ -307,6 +307,30 @@ static inline void sc_dsp_fx_common_post_process(struct sc_dsp_chain *chain,
     __atomic_store_n(&chain->ramp_remaining, left, __ATOMIC_RELAXED);
 }
 
+/* Master-bus output sanitizer (#336 S13): stock Engine's float-to-S32_LE
+ * conversion multiplies by 2^31-1 without checking finiteness, so +/-Inf slams
+ * the DAC rail (loud pop) and NaN outputs silence or poisons downstream state.
+ * Replaces any non-finite sample (NaN / +/-Inf) with 0.0f across all active
+ * output channels while leaving finite samples untouched. */
+static inline uint32_t sc_dsp_sanitize_master_planar(float *const *out, int out_channels, int frames)
+{
+    if (!out || out_channels <= 0 || frames <= 0)
+        return 0;
+    uint32_t bad = 0;
+    for (int ch = 0; ch < out_channels; ch++) {
+        float *buf = out[ch];
+        if (!buf)
+            continue;
+        for (int i = 0; i < frames; i++) {
+            if (!sc_dsp_finite_f32(buf[i])) {
+                buf[i] = 0.0f;
+                bad++;
+            }
+        }
+    }
+    return bad;
+}
+
 /* Mean square of a stereo block; non-finite samples count as silence. */
 static inline float sc_dsp_block_energy(float *const *buf, uint32_t frames)
 {
