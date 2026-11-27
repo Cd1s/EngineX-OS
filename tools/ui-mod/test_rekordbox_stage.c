@@ -25,7 +25,8 @@ static int exec_counted(void *db, const char *sql, int (*row)(void *, int, char 
     return sqlite3_exec(db, sql, row, arg, err);
 }
 static const char *db_main(void *db, const char *name) { return sqlite3_db_filename(db, name); }
-static const struct sc_rbx_sqlite engine = {exec_counted, db_main};
+static int db_readonly_rw(void *db, const char *name) { return sqlite3_db_readonly(db, name); }
+static const struct sc_rbx_sqlite engine = {exec_counted, db_main, db_readonly_rw};
 
 static char dir[64], schema[1 << 16];
 
@@ -156,7 +157,7 @@ struct lock_holder {
 static int exec_raw(void *db, const char *sql, int (*row)(void *, int, char **, char **), void *arg, char **err) {
     return sqlite3_exec(db, sql, row, arg, err);
 }
-static const struct sc_rbx_sqlite raw_engine = {exec_raw, db_main};
+static const struct sc_rbx_sqlite raw_engine = {exec_raw, db_main, db_readonly_rw};
 
 static void *hold_and_fill(void *arg) {
     struct lock_holder *h = arg;
