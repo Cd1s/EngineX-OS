@@ -296,10 +296,12 @@ while True:
     return subprocess.Popen(["ip", "netns", "exec", netns, "python3", "-c", code, str(log_file)])
 
 
-def count_peer_reqs(log_file: Path, route: str = "/peer/rekordbox/track-data") -> int:
+def count_peer_reqs(log_file: Path, route: str = "/peer/rekordbox/track-data", method: str = "POST") -> int:
     if not log_file.is_file():
         return 0
-    return sum(1 for ln in log_file.read_text(errors="replace").splitlines() if f"POST {route} " in ln)
+    if method == "ANY":
+        return sum(1 for ln in log_file.read_text(errors="replace").splitlines() if f" {route}" in ln and ("POST " in ln or "GET " in ln))
+    return sum(1 for ln in log_file.read_text(errors="replace").splitlines() if f"{method} {route}" in ln)
 
 
 def read_filled_ids(stage_file: Path) -> set[int]:
@@ -490,14 +492,15 @@ def load_b_row(title_sub: str, expected_fn: str, timeout: float = 45.0):
     return t_loaded, t_analyzed, final_state
 
 
-def start_stub_http_in_a(mode: str, log_path: Path):
+def start_stub_http_in_a(mode: str, log_path: Path, a_link_uuid: str = ""):
     """Run an HTTP stub on A's :8080 inside A's netns (mode: 'hang' or 'older404')."""
     subprocess.run(twin.ns_chroot_cmd("A", "pkill -TERM -f '/tmp/stream-sync|shadow-twin-sync' 2>/dev/null || true"), check=False)
     time.sleep(0.4)
     subprocess.run(twin.ns_chroot_cmd("A", "pkill -KILL -f '/tmp/stream-sync|shadow-twin-sync' 2>/dev/null || true"), check=False)
     stub_code = f"""
-import http.server, socketserver, time
+import http.server, json, socketserver, time
 log = open({str(log_path)!r}, "w", buffering=1)
+link_id = {a_link_uuid!r}
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", "0"))
@@ -512,9 +515,30 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(405)
             self.send_header("Content-Length", "18")
             self.end_headers()
-            self.wfile.write(b"Method Not Allowed")
+            try: self.wfile.write(b"Method Not Allowed")
+            except Exception: pass
     def do_GET(self):
-        self.send_response(404); self.end_headers()
+        log.write(f"{{int(time.time()*1000)}} GET {{self.path}}\\n")
+        if {mode!r} == "hang":
+            time.sleep(3.0)
+            try:
+                self.send_response(503); self.end_headers()
+            except Exception: pass
+            return
+        if self.path.startswith("/peer/decks") and link_id:
+            body = json.dumps({{"decks": [{{"deck": 1, "link": link_id}}]}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try: self.wfile.write(body)
+            except Exception: pass
+            return
+        self.send_response(404)
+        self.send_header("Content-Length", "9")
+        self.end_headers()
+        try: self.wfile.write(b"Not Found")
+        except Exception: pass
     def log_message(self, *a): pass
 socketserver.TCPServer.allow_reuse_address = True
 with socketserver.ThreadingTCPServer(("0.0.0.0", 8080), H) as srv:
@@ -794,17 +818,18 @@ def main():
 
         # Switch back to RB_ONDEMAND for Cases 6 & 7
         select_source("B", "RB_ONDEMAND", min_rows=7, must_contain="RB Case6")
+        a_link_uuid = twin.ev("A", '(root.scTr("/Network/NetworkId") || {string:""}).string').strip()
 
         # CASE 6: Unit A not answering (hung :8080 -> 750/800 ms budget -> clean stock Engine fallback)
         hang_log = twin.WORK / "stub-hang.log"
-        stub_proc = start_stub_http_in_a("hang", hang_log)
+        stub_proc = start_stub_http_in_a("hang", hang_log, a_link_uuid)
         restart_stream_sync("B")
-        lan0 = count_peer_reqs(lan_log)
+        lan0 = count_peer_reqs(lan_log, method="ANY")
         t6_0 = now_ms()
         t_ld, t_an, st = load_b_row("RB Case6", "case6-hang.wav")
         row6 = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case6-hang.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.15, label="Case 6 fallback OA commit")
         t_db6 = now_ms() - t6_0
-        lan_d = count_peer_reqs(lan_log) - lan0
+        lan_d = count_peer_reqs(lan_log, method="ANY") - lan0
         rec6 = {
             "case": "6. A not answering (budget timeout)",
             "b_oa_count": 1 if row6["analyzed"] == 1 and row6["beat"]["n_def"] <= 4 else 0,
@@ -823,24 +848,24 @@ def main():
         stub_proc.wait(timeout=3)
         stub_proc = None
 
-        # CASE 7: Older/non-EngineX peer (405 without X-RB-Status -> peer_unsupported cached -> 2nd load 0 LAN)
+        # CASE 7: Older/non-EngineX peer (verified via /peer/decks, 404/405 without X-RB-Status -> peer_unsupported cached -> 2nd load 0 LAN)
         old_log = twin.WORK / "stub-old.log"
-        stub_proc = start_stub_http_in_a("older404", old_log)
+        stub_proc = start_stub_http_in_a("older404", old_log, a_link_uuid)
         restart_stream_sync("B")
-        lan0 = count_peer_reqs(lan_log)
+        lan0 = count_peer_reqs(lan_log, method="ANY")
         t7a_0 = now_ms()
         t_ld7a, t_an7a, _ = load_b_row("RB Case7a", "case7a-older1.wav")
         row7a = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case7a-older1.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.15, label="Case 7a fallback OA commit")
         t_db7a = now_ms() - t7a_0
-        lan_d7a = count_peer_reqs(lan_log) - lan0
+        lan_d7a = count_peer_reqs(lan_log, method="ANY") - lan0
 
         # Second load on the SAME older peer must make 0 LAN requests (hook + Go cached peer_unsupported!)
-        lan1 = count_peer_reqs(lan_log)
+        lan1 = count_peer_reqs(lan_log, method="ANY")
         t7b_0 = now_ms()
         t_ld7b, t_an7b, _ = load_b_row("RB Case7b", "case7b-older2.wav")
         row7b = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case7b-older2.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.15, label="Case 7b fallback OA commit")
         t_db7b = now_ms() - t7b_0
-        lan_d7b = count_peer_reqs(lan_log) - lan1
+        lan_d7b = count_peer_reqs(lan_log, method="ANY") - lan1
         rec7 = {
             "case": "7. Older/non-EngineX peer (1st + cached 2nd)",
             "b_oa_count": (

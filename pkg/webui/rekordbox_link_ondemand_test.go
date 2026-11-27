@@ -65,16 +65,40 @@ func setupLinkOnDemandStick(t *testing.T, volName string, trackCount int) (media
 	return mediaRoot, stick, snap.LibraryUUID, tr, importKey
 }
 
+// commitRBXA1ToStick simulates Unit B's SQLite hook (sc_rbs_fill_sql) committing an RBXA1 payload
+// onto Unit A's m.db over Engine Link airNfs so Unit A can verify the committed row before journaling.
+func commitRBXA1ToStick(t *testing.T, stick string, engineID int64, rbxa1 []byte) {
+	t.Helper()
+	dec, err := rbstate.DecodePerf(rbxa1)
+	if err != nil {
+		t.Fatalf("DecodePerf: %v", err)
+	}
+	mdb := filepath.Join(stick, "Engine Library", "Database2", "m.db")
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=? WHERE trackId=?`,
+		dec.TrackData, dec.Overview, dec.Beats, dec.QuickCues, dec.Loops, dec.ActiveLoops, engineID); err != nil {
+		t.Fatalf("commit PerformanceData: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE Track SET isAnalyzed = 1 WHERE id = ?`, engineID); err != nil {
+		t.Fatalf("commit Track.isAnalyzed: %v", err)
+	}
+}
+
 func TestRekordboxLinkOnDemand4DeckSingleFlightAndFilledJournal(t *testing.T) {
 	mediaRoot, stick, libUUID, tr, importKey := setupLinkOnDemandStick(t, "NEXTLIB", 2)
 	stageRoot := t.TempDir()
 	t.Setenv(rbstate.StageEnv, stageRoot)
 
-	// Unit A owns the mounted stick.
+	const ownerUUID = "aaaa0001-1111-2222-3333-444455556666"
 	srvA := New(Config{
 		StateDir:    t.TempDir(),
 		MediaRoot:   mediaRoot,
 		RBStageRoot: stageRoot,
+		LinkUUID:    ownerUUID,
 	}, nil)
 	defer srvA.Close()
 	tsA := httptest.NewServer(srvA)
@@ -86,7 +110,6 @@ func TestRekordboxLinkOnDemand4DeckSingleFlightAndFilledJournal(t *testing.T) {
 		portA = portA*10 + int(c-'0')
 	}
 
-	// Unit B has no stick mounted locally, knows Unit A via 4-deck shadow peerDecks.
 	sockB := filepath.Join(t.TempDir(), "rb-ondemand.sock")
 	srvB := New(Config{
 		StateDir:              t.TempDir(),
@@ -98,13 +121,13 @@ func TestRekordboxLinkOnDemand4DeckSingleFlightAndFilledJournal(t *testing.T) {
 	srvB.shadow.peerPort = portA
 	srvB.shadow.peers[hostA] = time.Now()
 	srvB.shadow.peerDecks[1] = peerDeck{
-		deckState: deckState{Deck: 1, Link: "{AAAA0001-1111-2222-3333-444455556666}"},
+		deckState: deckState{Deck: 1, Link: "{" + strings.ToUpper(ownerUUID) + "}"},
 		ip:        hostA,
 		at:        time.Now(),
 	}
 	srvB.shadow.mu.Unlock()
 
-	netDB := "net://aaaa0001-1111-2222-3333-444455556666/NEXTLIB/Engine Library/Database2/m.db"
+	netDB := "net://" + ownerUUID + "/NEXTLIB/Engine Library/Database2/m.db"
 	key0 := 0
 	reqBody, _ := json.Marshal(rbOnDemandRequest{
 		DB:        netDB,
@@ -116,7 +139,7 @@ func TestRekordboxLinkOnDemand4DeckSingleFlightAndFilledJournal(t *testing.T) {
 		BPM:       128.0,
 	})
 
-	// 1. Unit B's hook queries Unix socket for net:// track -> Unit A builds once and replies RBXA1.
+	// 1. Unit B queries Unix socket for net:// track -> Unit A builds once and replies verified RBXA1.
 	unixClient := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -134,6 +157,12 @@ func TestRekordboxLinkOnDemand4DeckSingleFlightAndFilledJournal(t *testing.T) {
 		t.Fatalf("B status=%d body=%s", resp.StatusCode, string(bodyB))
 	}
 	assertValidOnDemandResponse(t, resp.Header, bodyB, tr)
+	if got := resp.Header.Get("X-RB-UUID"); got != libUUID {
+		t.Fatalf("X-RB-UUID = %q, want %q", got, libUUID)
+	}
+	if got := resp.Header.Get("X-RB-Owner"); got != ownerUUID {
+		t.Fatalf("X-RB-Owner = %q, want %q", got, ownerUUID)
+	}
 	if got := srvB.rbLinkPeerHTTPCount.Load(); got != 1 {
 		t.Fatalf("B peer HTTP count = %d, want 1", got)
 	}
@@ -164,7 +193,9 @@ func TestRekordboxLinkOnDemand4DeckSingleFlightAndFilledJournal(t *testing.T) {
 		t.Fatalf("A local load did not reuse cache shared with B: buildCount=%d, want 1", got)
 	}
 
-	// 3. Unit B notifies track-filled -> 202 immediately -> Unit A appends filled.jsonl with verified digests.
+	// 3. Commit the RBXA1 blobs into Unit A's m.db (as B's SQLite hook does), then notify track-filled.
+	commitRBXA1ToStick(t, stick, tr.EngineID, bodyB)
+
 	filledBody, _ := json.Marshal(rbOnDemandRequest{
 		DB:        netDB,
 		UUID:      libUUID,
@@ -188,7 +219,6 @@ func TestRekordboxLinkOnDemand4DeckSingleFlightAndFilledJournal(t *testing.T) {
 		t.Fatalf("A filled count = %d, want 1", got)
 	}
 
-	// Verify filled.jsonl parses via rbstate.Stage.Filled() and carries complete #321 fields.
 	st, err := rbstate.OpenStage(libUUID)
 	if err != nil {
 		t.Fatalf("OpenStage: %v", err)
@@ -217,24 +247,174 @@ func TestRekordboxLinkOnDemand4DeckSingleFlightAndFilledJournal(t *testing.T) {
 	}
 }
 
+// Fails on c76b2ede: stale caller BPM/Key/Length created a different single-flight key and built twice.
+func TestRekordboxLinkOnDemandSingleFlightIgnoresCallerMetadata(t *testing.T) {
+	mediaRoot, stick, libUUID, tr, importKey := setupLinkOnDemandStick(t, "SFLIGHT", 1)
+	srvA := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: t.TempDir()}, nil)
+	defer srvA.Close()
+
+	// 1. Peer request with stale positive BPM (99.0) and stale Key/Length JSON fields (must be ignored).
+	rawPeer1 := map[string]any{
+		"uuid":      libUUID,
+		"path":      "../" + tr.Rel,
+		"id":        tr.EngineID,
+		"importKey": importKey,
+		"bpm":       99.0,
+		"key":       11,
+		"length":    777,
+	}
+	b1, _ := json.Marshal(rawPeer1)
+	req1 := httptest.NewRequest(http.MethodPost, RekordboxPeerOnDemandRoute, bytes.NewReader(b1))
+	req1.RemoteAddr = "192.168.1.20:5000"
+	rec1 := httptest.NewRecorder()
+	srvA.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("peer1 status=%d body=%s", rec1.Code, rec1.Body.String())
+	}
+
+	// 2. Direct forPeer=true build with a DIFFERENT stale positive BPM (140.5) must hit the exact same flight/cache.
+	res2, err := srvA.buildOnDemandCachedWithImportKey(context.Background(), bridge.OnDemandRequest{
+		Mount:      stick,
+		UUID:       libUUID,
+		EnginePath: "../" + tr.Rel,
+		EngineID:   tr.EngineID,
+		EngineKey:  5,
+		EngineBPM:  140.5,
+		EngineLen:  999,
+	}, true, importKey)
+	if err != nil {
+		t.Fatalf("peer2 build: %v", err)
+	}
+	if !bytes.Equal(rec1.Body.Bytes(), res2.RBXA1) {
+		t.Fatal("stale caller metadata changed RBXA1 payload")
+	}
+
+	// 3. Local load on Unit A with stale BPM also reuses the owner-row-keyed cache (build count stays 1).
+	localBody, _ := json.Marshal(rbOnDemandRequest{
+		DB:   filepath.Join(stick, "Engine Library", "Database2", "m.db"),
+		UUID: libUUID,
+		Path: "../" + tr.Rel,
+		ID:   tr.EngineID,
+		BPM:  75.0,
+	})
+	reqLocal := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(localBody))
+	reqLocal.RemoteAddr = "127.0.0.1:5001"
+	recLocal := httptest.NewRecorder()
+	srvA.ServeHTTP(recLocal, reqLocal)
+	if recLocal.Code != http.StatusOK {
+		t.Fatalf("local status=%d body=%s", recLocal.Code, recLocal.Body.String())
+	}
+	if got := srvA.rbOnDemandBuildCount.Load(); got != 1 {
+		t.Fatalf("same owner row built %d times with differing caller BPM, want 1", got)
+	}
+}
+
+// Fails on c76b2ede: track-filled previously wrote filled.jsonl with isAnalyzed=0 and wrote duplicate lines.
+func TestRekordboxLinkOnDemandFilledRequiresCommitAndDeduplicates(t *testing.T) {
+	mediaRoot, stick, libUUID, tr, importKey := setupLinkOnDemandStick(t, "FILLVER", 1)
+	stageRoot := t.TempDir()
+	srvA := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: stageRoot}, nil)
+	defer srvA.Close()
+
+	// Build RBXA1 first.
+	peerBody, _ := json.Marshal(rbPeerOnDemandRequest{
+		UUID: libUUID, Path: "../" + tr.Rel, ID: tr.EngineID, ImportKey: importKey,
+	})
+	reqData := httptest.NewRequest(http.MethodPost, RekordboxPeerOnDemandRoute, bytes.NewReader(peerBody))
+	reqData.RemoteAddr = "192.168.1.30:4000"
+	recData := httptest.NewRecorder()
+	srvA.ServeHTTP(recData, reqData)
+	if recData.Code != http.StatusOK {
+		t.Fatalf("track-data status=%d body=%s", recData.Code, recData.Body.String())
+	}
+
+	postFilled := func() *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(rbPeerFilledRequest{
+			UUID: libUUID, Path: "../" + tr.Rel, ID: tr.EngineID, ImportKey: importKey,
+		})
+		req := httptest.NewRequest(http.MethodPost, RekordboxPeerFilledRoute, bytes.NewReader(raw))
+		req.RemoteAddr = "192.168.1.30:4001"
+		rec := httptest.NewRecorder()
+		srvA.ServeHTTP(rec, req)
+		return rec
+	}
+
+	jpath := filepath.Join(stageRoot, libUUID, "filled.jsonl")
+
+	// 1. Uncommitted row (isAnalyzed=0): MUST reject (409 not_committed) and write NO filled.jsonl.
+	if rec := postFilled(); rec.Code != http.StatusConflict || rec.Header().Get("X-RB-Status") != "not_committed" {
+		t.Fatalf("uncommitted track-filled = (%d, %q), want (409, not_committed)", rec.Code, rec.Header().Get("X-RB-Status"))
+	}
+	if _, err := os.Stat(jpath); !os.IsNotExist(err) {
+		t.Fatalf("uncommitted track-filled created filled.jsonl: err=%v", err)
+	}
+
+	// 2. isAnalyzed=1 but wrong beatData digest (e.g. stock OA row): MUST reject and write NO filled.jsonl.
+	mdb := filepath.Join(stick, "Engine Library", "Database2", "m.db")
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`UPDATE PerformanceData SET beatData = X'01020304', quickCues = X'0506', loops = X'0708' WHERE trackId = ?`, tr.EngineID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`UPDATE Track SET isAnalyzed = 1 WHERE id = ?`, tr.EngineID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if rec := postFilled(); rec.Code != http.StatusConflict || rec.Header().Get("X-RB-Status") != "not_committed" {
+		t.Fatalf("mismatched-digest track-filled = (%d, %q), want (409, not_committed)", rec.Code, rec.Header().Get("X-RB-Status"))
+	}
+	if _, err := os.Stat(jpath); !os.IsNotExist(err) {
+		t.Fatalf("mismatched-digest track-filled created filled.jsonl: err=%v", err)
+	}
+
+	// 3. Commit the real RBXA1 blobs + isAnalyzed=1 -> first notify appends 1 line, repeats deduplicate
+	//    both in-memory and across an in-memory reset (restart).
+	commitRBXA1ToStick(t, stick, tr.EngineID, recData.Body.Bytes())
+	for i := 0; i < 3; i++ {
+		if i == 2 {
+			srvA.rbLinkJournalMu.Lock()
+			srvA.rbLinkFilledSeen = nil // simulate restart: must still dedup against filled.jsonl on disk
+			srvA.rbLinkJournalMu.Unlock()
+		}
+		if rec := postFilled(); rec.Code != http.StatusOK {
+			t.Fatalf("committed track-filled #%d status=%d body=%s", i, rec.Code, rec.Body.String())
+		}
+	}
+	if got := srvA.rbLinkFilledCount.Load(); got != 1 {
+		t.Fatalf("rbLinkFilledCount = %d after 3 notices, want 1", got)
+	}
+	raw, err := os.ReadFile(jpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(raw), []byte("\n"))
+	if len(lines) != 1 {
+		t.Fatalf("filled.jsonl has %d lines after 3 notices, want 1", len(lines))
+	}
+}
+
 func TestRekordboxLinkOnDemand2DeckShadowOffFallback(t *testing.T) {
 	mediaRoot, _, libUUID, tr, importKey := setupLinkOnDemandStick(t, "STICK2D", 1)
-	srvA := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: t.TempDir()}, nil)
+	const ownerUUID = "bbbb0002-1111-2222-3333-444455556666"
+	srvA := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: t.TempDir(), LinkUUID: ownerUUID}, nil)
 	defer srvA.Close()
 	tsA := httptest.NewServer(srvA)
 	defer tsA.Close()
 	uA, _ := url.Parse(tsA.URL)
 
-	// Unit B has shadow OFF (zero shadow.peers / shadow.peerDecks): uses on-demand peer candidates.
 	srvB := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
 	defer srvB.Close()
 	var candCalls atomic.Int32
-	srvB.rbLinkPeerCandidates = func() []string {
+	srvB.rbLinkPeerCandidates = func(context.Context) []string {
 		candCalls.Add(1)
 		return []string{uA.Host}
 	}
 
-	netDB := "net://bbbb0002-1111-2222-3333-444455556666/STICK2D/Engine Library/Database2/m.db"
+	netDB := "net://" + ownerUUID + "/STICK2D/Engine Library/Database2/m.db"
 	payload, _ := json.Marshal(rbOnDemandRequest{
 		DB:        netDB,
 		UUID:      libUUID,
@@ -257,11 +437,138 @@ func TestRekordboxLinkOnDemand2DeckShadowOffFallback(t *testing.T) {
 	}
 }
 
+// Fails on c76b2ede:
+//  1. Unrelated shadow peer prevented 2-deck fallback from being tried.
+//  2. Unrelated TCP peer skipped ARP fallback and poisoned the 60 s peer negative cache.
+//  3. Bare RBXA1 reply without verified owner UUID header was accepted.
+func TestRekordboxLinkOnDemandOwnerResolutionTiersAndVerification(t *testing.T) {
+	mediaRoot, _, libUUID, tr, importKey := setupLinkOnDemandStick(t, "OWNTIERS", 1)
+	const ownerUUID = "f00d0001-1111-2222-3333-444455556666"
+	srvA := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: t.TempDir(), LinkUUID: ownerUUID}, nil)
+	defer srvA.Close()
+	tsA := httptest.NewServer(srvA)
+	defer tsA.Close()
+	uA, _ := url.Parse(tsA.URL)
+
+	// Unrelated EngineX peer (no stick mounted, different Link UUID).
+	srvUnrelated := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir(), LinkUUID: "99990001-1111-2222-3333-444455556666"}, nil)
+	defer srvUnrelated.Close()
+	tsUnrel := httptest.NewServer(srvUnrelated)
+	defer tsUnrel.Close()
+	uUnrel, _ := url.Parse(tsUnrel.URL)
+	unrelHost, unrelPortStr, _ := net.SplitHostPort(uUnrel.Host)
+	unrelPort := 0
+	for _, c := range unrelPortStr {
+		unrelPort = unrelPort*10 + int(c-'0')
+	}
+
+	// Unrelated non-EngineX HTTP server returning plain 405 (must NEVER negative-cache ownerUUID).
+	unrel405 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	defer unrel405.Close()
+	u405, _ := url.Parse(unrel405.URL)
+
+	// Rogue server replying 200 OK with RBXA1 magic but missing/wrong owner UUID headers.
+	rogue := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("X-RB-Status", "owner")
+			w.Header().Set("X-RB-UUID", "wrong-stick-uuid")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("X-RB-Key", tr.Key)
+		w.Header().Set("X-RB-Written", "AAECAwQFBgcICQoLDA0ODw==")
+		w.Header().Set("X-RB-Rules", "5")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("RBXA1\x01\x00\x00\x00\x00"))
+	}))
+	defer rogue.Close()
+	uRogue, _ := url.Parse(rogue.URL)
+
+	reqPayload, _ := json.Marshal(rbOnDemandRequest{
+		DB:        "net://" + ownerUUID + "/OWNTIERS/Engine Library/Database2/m.db",
+		UUID:      libUUID,
+		Path:      "../" + tr.Rel,
+		ID:        tr.EngineID,
+		ImportKey: importKey,
+	})
+
+	// Subcase A: 1 unrelated shadow peer in shadow.peers (no exact peerDecks match) + real owner in 2-deck fallback.
+	srvB1 := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
+	defer srvB1.Close()
+	srvB1.shadow.mu.Lock()
+	srvB1.shadow.peerPort = unrelPort
+	srvB1.shadow.peers[unrelHost] = time.Now()
+	srvB1.shadow.mu.Unlock()
+	srvB1.rbLinkPeerCandidates = func(context.Context) []string { return []string{uA.Host} }
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(reqPayload))
+	req1.RemoteAddr = "127.0.0.1:5000"
+	srvB1.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("unrelated shadow peer blocked 2-deck fallback: status=%d body=%s", rec1.Code, rec1.Body.String())
+	}
+	assertValidOnDemandResponse(t, rec1.Header(), rec1.Body.Bytes(), tr)
+
+	// Subcase B: TCP fallback has only unrelated 405 + rogue bare-RBXA1; real owner is in ARP fallback.
+	srvB2 := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
+	defer srvB2.Close()
+	srvB2.rbLinkPeerCandidates = func(context.Context) []string { return []string{u405.Host, uRogue.Host} }
+	srvB2.rbLinkARPCandidates = func(context.Context) []string { return []string{uA.Host} }
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(reqPayload))
+	req2.RemoteAddr = "127.0.0.1:5001"
+	srvB2.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("unrelated TCP peers blocked ARP fallback or rogue won: status=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+	assertValidOnDemandResponse(t, rec2.Header(), rec2.Body.Bytes(), tr)
+	if srvB2.isLinkPeerNegCached(ownerUUID, time.Now()) {
+		t.Fatal("unrelated 405 server poisoned negative cache for ownerUUID")
+	}
+
+	// Subcase C: Direct POST reply from rogue server without X-RB-UUID (even if endpoint came from peerDecks) is REJECTED.
+	srvB3 := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
+	defer srvB3.Close()
+	rHost, rPortStr, _ := net.SplitHostPort(uRogue.Host)
+	rPort := 0
+	for _, c := range rPortStr {
+		rPort = rPort*10 + int(c-'0')
+	}
+	srvB3.shadow.mu.Lock()
+	srvB3.shadow.peerPort = rPort
+	srvB3.shadow.peerDecks[1] = peerDeck{deckState: deckState{Deck: 1, Link: ownerUUID}, ip: rHost, at: time.Now()}
+	srvB3.shadow.mu.Unlock()
+	srvB3.rbLinkPeerCandidates = func(context.Context) []string { return nil }
+	srvB3.rbLinkARPCandidates = func(context.Context) []string { return nil }
+	rec3 := httptest.NewRecorder()
+	req3 := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(reqPayload))
+	req3.RemoteAddr = "127.0.0.1:5002"
+	srvB3.ServeHTTP(rec3, req3)
+	if rec3.Code == http.StatusOK {
+		t.Fatalf("accepted unverified bare RBXA1 reply without requested owner UUID")
+	}
+
+	// Subcase D: Unrelated 405 server alone (not verified owner) must NOT negative-cache ownerUUID.
+	srvB4 := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
+	defer srvB4.Close()
+	srvB4.rbLinkPeerCandidates = func(context.Context) []string { return []string{u405.Host} }
+	srvB4.rbLinkARPCandidates = func(context.Context) []string { return nil }
+	rec4 := httptest.NewRecorder()
+	req4 := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(reqPayload))
+	req4.RemoteAddr = "127.0.0.1:5003"
+	srvB4.ServeHTTP(rec4, req4)
+	if rec4.Code == http.StatusOK || rec4.Header().Get("X-RB-Status") == "peer_unsupported" || srvB4.isLinkPeerNegCached(ownerUUID, time.Now()) {
+		t.Fatalf("unverified 405 negative-cached ownerUUID: code=%d hdr=%q neg=%v",
+			rec4.Code, rec4.Header().Get("X-RB-Status"), srvB4.isLinkPeerNegCached(ownerUUID, time.Now()))
+	}
+}
+
 func TestRekordboxLinkOnDemandIdentityAndSecurity(t *testing.T) {
 	mediaRoot, stick, libUUID, tr, importKey := setupLinkOnDemandStick(t, "SECUSB", 1)
 	stageRoot := t.TempDir()
 
-	// Insert a stock Engine row (pdbImportKey IS NULL) on the same stick.
 	mdb := filepath.Join(stick, "Engine Library", "Database2", "m.db")
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String())
 	if err != nil {
@@ -273,7 +580,8 @@ func TestRekordboxLinkOnDemandIdentityAndSecurity(t *testing.T) {
 	}
 	db.Close()
 
-	srvA := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: stageRoot}, nil)
+	const ownerUUID = "aaaa9999-1111-2222-3333-444455556666"
+	srvA := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: stageRoot, LinkUUID: ownerUUID}, nil)
 	defer srvA.Close()
 
 	postPeer := func(route string, body any, remoteAddr string, headers map[string]string) *httptest.ResponseRecorder {
@@ -300,68 +608,100 @@ func TestRekordboxLinkOnDemandIdentityAndSecurity(t *testing.T) {
 	if rec := postPeer(RekordboxPeerOnDemandRoute, rbPeerOnDemandRequest{UUID: "wrong-uuid", VolHint: "SECUSB", Path: "../" + tr.Rel, ImportKey: importKey}, "192.168.1.20:9999", nil); rec.Code != http.StatusNotFound || rec.Header().Get("X-RB-Status") != "not_found" {
 		t.Fatalf("wrong UUID: status=%d hdr=%q, want 404/not_found", rec.Code, rec.Header().Get("X-RB-Status"))
 	}
-	// 4. Right UUID, wrong importKey -> 404 with X-RB-Status: not_found.
+	// 4. Right UUID, wrong importKey -> 404 AND must NOT call NoteLoading (priority queue stays untouched)!
 	if rec := postPeer(RekordboxPeerOnDemandRoute, rbPeerOnDemandRequest{UUID: libUUID, VolHint: "SECUSB", Path: "../" + tr.Rel, ImportKey: importKey + 999}, "192.168.1.20:9999", nil); rec.Code != http.StatusNotFound || rec.Header().Get("X-RB-Status") != "not_found" {
 		t.Fatalf("wrong importKey: status=%d hdr=%q, want 404/not_found", rec.Code, rec.Header().Get("X-RB-Status"))
 	}
-	// 5. Stock Engine row (NULL pdbImportKey) -> 404.
+	srvA.rbPriorityMu.Lock()
+	priAfterInvalid := srvA.rbPriority
+	srvA.rbPriorityMu.Unlock()
+	if priAfterInvalid != nil {
+		t.Fatal("invalid importKey LAN request invoked NoteLoading before track validation")
+	}
+	// 5. Right UUID + importKey, wrong owner UUID -> 404.
+	if rec := postPeer(RekordboxPeerOnDemandRoute, rbPeerOnDemandRequest{UUID: libUUID, Owner: "bbbb0000-1111-2222-3333-444455556666", Path: "../" + tr.Rel, ImportKey: importKey}, "192.168.1.20:9999", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("wrong owner UUID: status=%d, want 404", rec.Code)
+	}
+	// 6. Stock Engine row (NULL pdbImportKey) -> 404.
 	if rec := postPeer(RekordboxPeerOnDemandRoute, rbPeerOnDemandRequest{UUID: libUUID, VolHint: "SECUSB", Path: "../Contents/StockEngine.mp3", ImportKey: 1}, "192.168.1.20:9999", nil); rec.Code != http.StatusNotFound {
 		t.Fatalf("stock row: status=%d, want 404", rec.Code)
 	}
-	// 6. Non-LAN public IP -> 403.
+	// 7. Non-LAN public IP -> 403.
 	if rec := postPeer(RekordboxPeerOnDemandRoute, rbPeerOnDemandRequest{UUID: libUUID, Path: "../" + tr.Rel, ImportKey: importKey}, "8.8.8.8:1234", nil); rec.Code != http.StatusForbidden {
 		t.Fatalf("public IP: status=%d, want 403", rec.Code)
 	}
-	// 7. External relay header -> 404 (lanOnly guard in ServeHTTP).
+	// 8. External relay header -> 404 (lanOnly guard in ServeHTTP).
 	if rec := postPeer(RekordboxPeerOnDemandRoute, rbPeerOnDemandRequest{UUID: libUUID, Path: "../" + tr.Rel, ImportKey: importKey}, "192.168.1.20:1234", map[string]string{"Cf-Connecting-Ip": "1.2.3.4"}); rec.Code != http.StatusNotFound {
 		t.Fatalf("relayed request: status=%d, want 404", rec.Code)
 	}
-	// 8. ForwardHandler hides both peer routes (404).
-	for _, route := range []string{RekordboxPeerOnDemandRoute, RekordboxPeerFilledRoute} {
-		req := httptest.NewRequest(http.MethodPost, route, strings.NewReader(`{}`))
+	// 9. ForwardHandler hides both peer routes (GET & POST -> 404).
+	for _, tc := range []struct{ method, route string }{
+		{http.MethodGet, RekordboxPeerOnDemandRoute + "?uuid=" + libUUID},
+		{http.MethodPost, RekordboxPeerOnDemandRoute},
+		{http.MethodPost, RekordboxPeerFilledRoute},
+	} {
+		req := httptest.NewRequest(tc.method, tc.route, strings.NewReader(`{}`))
 		req.RemoteAddr = "127.0.0.1:1234"
 		rec := httptest.NewRecorder()
 		srvA.ForwardHandler().ServeHTTP(rec, req)
 		if rec.Code != http.StatusNotFound {
-			t.Fatalf("ForwardHandler %s: status=%d, want 404", route, rec.Code)
+			t.Fatalf("ForwardHandler %s %s: status=%d, want 404", tc.method, tc.route, rec.Code)
 		}
 	}
-	// 9. Forged /peer/rekordbox/track-filled with wrong importKey must fail and write NO filled.jsonl.
+	// 10. LAN admission cap returns 503 busy before touching stick/builder.
+	srvA.rbLinkLANQueued.Store(rbLinkMaxQueuedLAN)
+	if rec := postPeer(RekordboxPeerOnDemandRoute, rbPeerOnDemandRequest{UUID: libUUID, Path: "../" + tr.Rel, ImportKey: importKey}, "192.168.1.20:9999", nil); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("X-RB-Status") != "busy" {
+		t.Fatalf("saturated admission = (%d, %q), want (503, busy)", rec.Code, rec.Header().Get("X-RB-Status"))
+	}
+	srvA.rbLinkLANQueued.Store(0)
+
+	// 11. Forged /peer/rekordbox/track-filled with wrong importKey must fail and write NO filled.jsonl.
 	if rec := postPeer(RekordboxPeerFilledRoute, rbPeerFilledRequest{UUID: libUUID, Path: "../" + tr.Rel, ID: tr.EngineID, ImportKey: importKey + 1}, "192.168.1.20:9999", nil); rec.Code != http.StatusNotFound {
 		t.Fatalf("forged track-filled: status=%d, want 404", rec.Code)
 	}
 	if _, err := os.Stat(filepath.Join(stageRoot, libUUID, "filled.jsonl")); !os.IsNotExist(err) {
 		t.Fatalf("forged track-filled created filled.jsonl: err=%v", err)
 	}
-	// 10. Valid peer request with matching UUID + importKey succeeds even without VolHint.
-	if rec := postPeer(RekordboxPeerOnDemandRoute, rbPeerOnDemandRequest{UUID: libUUID, Path: "../" + tr.Rel, ID: tr.EngineID, ImportKey: importKey}, "192.168.1.20:9999", nil); rec.Code != http.StatusOK {
+	// 12. Valid peer request with matching UUID + importKey succeeds even without VolHint.
+	if rec := postPeer(RekordboxPeerOnDemandRoute, rbPeerOnDemandRequest{UUID: libUUID, Owner: ownerUUID, Path: "../" + tr.Rel, ID: tr.EngineID, ImportKey: importKey}, "192.168.1.20:9999", nil); rec.Code != http.StatusOK {
 		t.Fatalf("valid peer request without VolHint: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestRekordboxLinkOnDemandOlderAndNonEngineXPeerNegativeCache(t *testing.T) {
-	// Older EngineX peer returns plain 404 without X-RB-Status.
-	var olderHits atomic.Int32
+	const olderUUID = "cccc0001-1111-2222-3333-444455556666"
+	const nonEXUUID = "cccc0002-1111-2222-3333-444455556666"
+
+	// Older EngineX peer answers GET /peer/decks with its Link UUID and returns 405/404 without X-RB-Status.
+	var olderDataHits atomic.Int32
 	olderPeer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		olderHits.Add(1)
+		if r.URL.Path == "/peer/decks" {
+			respond(w, map[string]any{"decks": []map[string]any{{"deck": 1, "link": "{" + strings.ToUpper(olderUUID) + "}"}}})
+			return
+		}
+		olderDataHits.Add(1)
 		http.NotFound(w, r)
 	}))
 	defer olderPeer.Close()
 	uOlder, _ := url.Parse(olderPeer.URL)
 
-	// Non-EngineX peer: closed TCP port (ECONNREFUSED).
+	// Verified peer (in peerDecks) with closed TCP port (ECONNREFUSED).
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	closedAddr := ln.Addr().String()
 	ln.Close()
+	cHost, cPortStr, _ := net.SplitHostPort(closedAddr)
+	cPort := 0
+	for _, c := range cPortStr {
+		cPort = cPort*10 + int(c-'0')
+	}
 
 	srvB := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
 	defer srvB.Close()
 
-	call := func(peerUUID string, ep string) (int, string) {
-		srvB.rbLinkPeerCandidates = func() []string { return []string{ep} }
+	call := func(peerUUID string) (int, string) {
 		body, _ := json.Marshal(rbOnDemandRequest{
 			DB:        "net://" + peerUUID + "/USB1/Engine Library/Database2/m.db",
 			UUID:      "lib-old-1",
@@ -376,41 +716,42 @@ func TestRekordboxLinkOnDemandOlderAndNonEngineXPeerNegativeCache(t *testing.T) 
 		return rec.Code, rec.Header().Get("X-RB-Status")
 	}
 
-	// Older EngineX peer: 1st call probes once, 2nd call hits negative cache with 0 LAN requests.
-	code, st := call("cccc0001-1111-2222-3333-444455556666", uOlder.Host)
+	// 1. Older EngineX peer verified via GET /peer/decks: 1st call negative-caches, 2nd call does 0 LAN requests.
+	srvB.rbLinkPeerCandidates = func(context.Context) []string { return []string{uOlder.Host} }
+	srvB.rbLinkARPCandidates = func(context.Context) []string { return nil }
+	code, st := call(olderUUID)
 	if code != http.StatusNotFound || st != "peer_unsupported" {
 		t.Fatalf("older peer 1st call = (%d, %q), want (404, peer_unsupported)", code, st)
 	}
-	if got := srvB.rbLinkPeerHTTPCount.Load(); got != 1 || olderHits.Load() != 1 {
-		t.Fatalf("older peer 1st hits: client=%d server=%d, want 1/1", got, olderHits.Load())
+	hits1 := srvB.rbLinkPeerHTTPCount.Load()
+	if olderDataHits.Load() != 1 || hits1 != 1 {
+		t.Fatalf("older peer 1st hits: client=%d server=%d, want 1/1", hits1, olderDataHits.Load())
 	}
-	code, st = call("cccc0001-1111-2222-3333-444455556666", uOlder.Host)
+	code, st = call(olderUUID)
 	if code != http.StatusNotFound || st != "peer_unsupported" {
 		t.Fatalf("older peer 2nd call = (%d, %q), want (404, peer_unsupported)", code, st)
 	}
-	if got := srvB.rbLinkPeerHTTPCount.Load(); got != 1 || olderHits.Load() != 1 {
-		t.Fatalf("older peer 2nd call was not zero-cost cached: client=%d server=%d, want 1/1", got, olderHits.Load())
+	if srvB.rbLinkPeerHTTPCount.Load() != hits1 || olderDataHits.Load() != 1 {
+		t.Fatalf("older peer 2nd call was not zero-cost cached: client=%d server=%d", srvB.rbLinkPeerHTTPCount.Load(), olderDataHits.Load())
 	}
 
-	// Non-EngineX peer (ECONNREFUSED): 1st call probes once, 2nd call does 0 LAN requests.
-	code, st = call("cccc0002-1111-2222-3333-444455556666", closedAddr)
+	// 2. Verified peer in peerDecks whose port refuses connection: 1st call probes once & neg-caches, 2nd call does 0 LAN.
+	srvB.shadow.mu.Lock()
+	srvB.shadow.peerPort = cPort
+	srvB.shadow.peerDecks[2] = peerDeck{deckState: deckState{Deck: 2, Link: nonEXUUID}, ip: cHost, at: time.Now()}
+	srvB.shadow.mu.Unlock()
+	code, st = call(nonEXUUID)
 	if code != http.StatusNotFound || st != "peer_unsupported" {
-		t.Fatalf("non-EngineX 1st call = (%d, %q), want (404, peer_unsupported)", code, st)
+		t.Fatalf("verified closed peer 1st call = (%d, %q), want (404, peer_unsupported)", code, st)
 	}
-	if got := srvB.rbLinkPeerHTTPCount.Load(); got != 2 {
-		t.Fatalf("non-EngineX 1st count = %d, want 2", got)
-	}
-	code, st = call("cccc0002-1111-2222-3333-444455556666", closedAddr)
-	if code != http.StatusNotFound || st != "peer_unsupported" {
-		t.Fatalf("non-EngineX 2nd call = (%d, %q), want (404, peer_unsupported)", code, st)
-	}
-	if got := srvB.rbLinkPeerHTTPCount.Load(); got != 2 {
-		t.Fatalf("non-EngineX 2nd call was not zero-cost cached: count=%d, want 2", got)
+	hits2 := srvB.rbLinkPeerHTTPCount.Load()
+	code, st = call(nonEXUUID)
+	if code != http.StatusNotFound || st != "peer_unsupported" || srvB.rbLinkPeerHTTPCount.Load() != hits2 {
+		t.Fatalf("verified closed peer 2nd call not cached: (%d, %q) hits=%d vs %d", code, st, srvB.rbLinkPeerHTTPCount.Load(), hits2)
 	}
 }
 
 func TestRekordboxLinkOnDemandAnswerBudgetTimeoutAndNoRedirect(t *testing.T) {
-	// 1. Slow/unresponsive peer aborts within rbLinkAnswerBudget (504 timeout) without permanent neg cache.
 	slowPeer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-time.After(600 * time.Millisecond):
@@ -423,7 +764,8 @@ func TestRekordboxLinkOnDemandAnswerBudgetTimeoutAndNoRedirect(t *testing.T) {
 	srvB := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
 	defer srvB.Close()
 	srvB.rbLinkAnswerBudget = 120 * time.Millisecond
-	srvB.rbLinkPeerCandidates = func() []string { return []string{uSlow.Host} }
+	srvB.rbLinkPeerCandidates = func(context.Context) []string { return []string{uSlow.Host} }
+	srvB.rbLinkARPCandidates = func(context.Context) []string { return nil }
 
 	body, _ := json.Marshal(rbOnDemandRequest{
 		DB:        "net://dddd0001-1111-2222-3333-444455556666/USB1/Engine Library/Database2/m.db",
@@ -448,7 +790,6 @@ func TestRekordboxLinkOnDemandAnswerBudgetTimeoutAndNoRedirect(t *testing.T) {
 		t.Fatal("timeout must not permanently negative-cache peer as unsupported")
 	}
 
-	// 2. Peer returning 302 redirect must NOT be followed.
 	var redirTargetHits atomic.Int32
 	targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		redirTargetHits.Add(1)
@@ -461,7 +802,7 @@ func TestRekordboxLinkOnDemandAnswerBudgetTimeoutAndNoRedirect(t *testing.T) {
 	defer redirPeer.Close()
 	uRedir, _ := url.Parse(redirPeer.URL)
 
-	srvB.rbLinkPeerCandidates = func() []string { return []string{uRedir.Host} }
+	srvB.rbLinkPeerCandidates = func(context.Context) []string { return []string{uRedir.Host} }
 	req2 := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(body))
 	req2.RemoteAddr = "127.0.0.1:5555"
 	rec2 := httptest.NewRecorder()
@@ -471,10 +812,73 @@ func TestRekordboxLinkOnDemandAnswerBudgetTimeoutAndNoRedirect(t *testing.T) {
 	}
 }
 
+// Fails on c76b2ede: /proc discovery had no ctx deadline check, and owner LAN handler had no server-side deadline.
+func TestRekordboxLinkOnDemandDiscoveryAndServerDeadlines(t *testing.T) {
+	// 1. Cancelled context stops /proc reads immediately (0 reads).
+	srvB := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
+	defer srvB.Close()
+	var reads atomic.Int32
+	srvB.rbLinkProcReadFile = func(string) ([]byte, error) {
+		reads.Add(1)
+		return nil, os.ErrNotExist
+	}
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := srvB.discoverEngineLinkTCPPeers(cancelledCtx); len(got) != 0 {
+		t.Fatalf("cancelled TCP discovery returned %v", got)
+	}
+	if got := srvB.discoverARPLANPeers(cancelledCtx); len(got) != 0 {
+		t.Fatalf("cancelled ARP discovery returned %v", got)
+	}
+	if reads.Load() != 0 {
+		t.Fatalf("cancelled /proc discovery performed %d reads, want 0", reads.Load())
+	}
+
+	// 2. Owner server-side deadline enforces rbLinkBudget even when client provides no timeout.
+	mediaRoot, stick, libUUID, tr, importKey := setupLinkOnDemandStick(t, "SRVDL", 1)
+	srvA := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: t.TempDir()}, nil)
+	defer srvA.Close()
+	srvA.rbLinkAnswerBudget = 80 * time.Millisecond
+
+	// Hold an EXCLUSIVE SQLite lock on m.db so Unit A's lookupOnDemandDBMeta blocks on busy_timeout(500).
+	mdb := filepath.Join(stick, "Engine Library", "Database2", "m.db")
+	lockDB, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockDB.Close()
+	lockConn, err := lockDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockConn.Close()
+	if _, err := lockConn.ExecContext(context.Background(), `BEGIN EXCLUSIVE`); err != nil {
+		t.Fatal(err)
+	}
+	defer lockConn.ExecContext(context.Background(), `ROLLBACK`)
+
+	raw, _ := json.Marshal(rbPeerOnDemandRequest{
+		UUID: libUUID, Path: "../" + tr.Rel, ID: tr.EngineID, ImportKey: importKey,
+	})
+	t0 := time.Now()
+	req := httptest.NewRequest(http.MethodPost, RekordboxPeerOnDemandRoute, bytes.NewReader(raw))
+	req.RemoteAddr = "192.168.1.40:5000"
+	rec := httptest.NewRecorder()
+	srvA.ServeHTTP(rec, req)
+	elapsed := time.Since(t0)
+	if rec.Code != http.StatusGatewayTimeout || rec.Header().Get("X-RB-Status") != "timeout" {
+		t.Fatalf("owner server deadline = (%d, %q) in %v, want (504, timeout)", rec.Code, rec.Header().Get("X-RB-Status"), elapsed)
+	}
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("owner server deadline took %v, want ~80 ms (< 300 ms)", elapsed)
+	}
+}
+
 func TestRekordboxLinkOnDemandConcurrentTwoUnits(t *testing.T) {
-	mediaRoot, _, libUUID, tr, importKey := setupLinkOnDemandStick(t, "CONCUSB", 2)
+	mediaRoot, stick, libUUID, tr, importKey := setupLinkOnDemandStick(t, "CONCUSB", 2)
 	stageRoot := t.TempDir()
-	srvA := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: stageRoot}, nil)
+	const ownerUUID = "eeee0001-1111-2222-3333-444455556666"
+	srvA := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: stageRoot, LinkUUID: ownerUUID}, nil)
 	defer srvA.Close()
 	tsA := httptest.NewServer(srvA)
 	defer tsA.Close()
@@ -482,13 +886,13 @@ func TestRekordboxLinkOnDemandConcurrentTwoUnits(t *testing.T) {
 
 	srvB1 := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
 	defer srvB1.Close()
-	srvB1.rbLinkPeerCandidates = func() []string { return []string{uA.Host} }
+	srvB1.rbLinkPeerCandidates = func(context.Context) []string { return []string{uA.Host} }
 
 	srvB2 := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
 	defer srvB2.Close()
-	srvB2.rbLinkPeerCandidates = func() []string { return []string{uA.Host} }
+	srvB2.rbLinkPeerCandidates = func(context.Context) []string { return []string{uA.Host} }
 
-	netDB := "net://eeee0001-1111-2222-3333-444455556666/CONCUSB/Engine Library/Database2/m.db"
+	netDB := "net://" + ownerUUID + "/CONCUSB/Engine Library/Database2/m.db"
 	payload, _ := json.Marshal(rbOnDemandRequest{
 		DB:        netDB,
 		UUID:      libUUID,
@@ -520,11 +924,6 @@ func TestRekordboxLinkOnDemandConcurrentTwoUnits(t *testing.T) {
 				return
 			}
 			bodies[idx] = append([]byte(nil), rec.Body.Bytes()...)
-			// Also notify track-filled concurrently.
-			fReq := httptest.NewRequest(http.MethodPost, RekordboxOnDemandFilledRoute, bytes.NewReader(payload))
-			fReq.RemoteAddr = "127.0.0.1:6000"
-			fRec := httptest.NewRecorder()
-			s.ServeHTTP(fRec, fReq)
 		}(i, srv)
 	}
 	close(start)
@@ -538,23 +937,48 @@ func TestRekordboxLinkOnDemandConcurrentTwoUnits(t *testing.T) {
 	if got := srvA.rbOnDemandBuildCount.Load(); got != 1 {
 		t.Fatalf("concurrent 2-unit load built %d times, want 1 (single-flight)", got)
 	}
+
+	// Commit once on Unit A's stick, then fire 6 concurrent track-filled notices -> deduplicated to 1 line!
+	commitRBXA1ToStick(t, stick, tr.EngineID, bodies[0])
+	var fwg sync.WaitGroup
+	fStart := make(chan struct{})
+	for i := range workers {
+		fwg.Add(1)
+		srv := srvB1
+		if i%2 == 1 {
+			srv = srvB2
+		}
+		go func(s *Server) {
+			defer fwg.Done()
+			<-fStart
+			fReq := httptest.NewRequest(http.MethodPost, RekordboxOnDemandFilledRoute, bytes.NewReader(payload))
+			fReq.RemoteAddr = "127.0.0.1:6000"
+			fRec := httptest.NewRecorder()
+			s.ServeHTTP(fRec, fReq)
+		}(srv)
+	}
+	close(fStart)
+	fwg.Wait()
+
 	deadline := time.Now().Add(2 * time.Second)
-	for srvA.rbLinkFilledCount.Load() < workers && time.Now().Before(deadline) {
+	for srvA.rbLinkFilledCount.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if got := srvA.rbLinkFilledCount.Load(); got != 1 {
+		t.Fatalf("concurrent track-filled recorded %d entries, want 1 (deduplicated)", got)
 	}
 	raw, err := os.ReadFile(filepath.Join(stageRoot, libUUID, "filled.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := bytes.Split(bytes.TrimSpace(raw), []byte("\n"))
-	if len(lines) < workers {
-		t.Fatalf("filled.jsonl lines = %d, want >= %d", len(lines), workers)
+	if len(lines) != 1 {
+		t.Fatalf("filled.jsonl lines = %d, want 1 (deduplicated)", len(lines))
 	}
-	for i, line := range lines {
-		var m map[string]any
-		if err := json.Unmarshal(line, &m); err != nil {
-			t.Fatalf("corrupted filled.jsonl line %d: %v (%s)", i, err, string(line))
-		}
+	var m map[string]any
+	if err := json.Unmarshal(lines[0], &m); err != nil {
+		t.Fatalf("corrupted filled.jsonl line: %v (%s)", err, string(lines[0]))
 	}
 }
 
@@ -575,41 +999,40 @@ func TestParseNetDBPathAndProcNetTCP(t *testing.T) {
 		}
 	}
 
-	// /proc/net/tcp little-endian IPv4:
-	//   10.99.0.1     -> 0100630A (ESTABLISHED 01, keep)
-	//   169.254.12.34 -> 220CFEA9 (ESTABLISHED 01, keep)
-	//   127.0.0.1     -> 0100007F (loopback, skip)
-	//   8.8.8.8       -> 08080808 (public, skip)
-	//   10.99.0.2     -> 0200630A (own IP, skip)
-	//   192.168.1.9   -> 0901A8C0 (LISTEN 0A, skip)
+	// Only Engine Link service sockets (owned by Engine inode AND ephemeral ports >=1024 excluding 8080/8443)
+	// are accepted; >4 peers are all returned without silent truncation.
 	sample := strings.Join([]string{
 		"  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
-		"   0: 0200630A:C350 0100630A:1F90 01 00000000:00000000 00:00000000 00000000     0        0 100",
-		"   1: 0200630A:C351 0100630A:C352 01 00000000:00000000 00:00000000 00000000     0        0 101",
-		"   2: 0200630A:C352 0100007F:1F90 01 00000000:00000000 00:00000000 00000000     0        0 102",
-		"   3: 0200630A:C353 08080808:01BB 01 00000000:00000000 00:00000000 00000000     0        0 103",
-		"   4: 0200630A:C354 0200630A:1F90 01 00000000:00000000 00:00000000 00000000     0        0 104",
-		"   5: 00000000:1F90 0901A8C0:0000 0A 00000000:00000000 00:00000000 00000000     0        0 105",
-		"   6: 0200630A:C355 220CFEA9:C350 01 00000000:00000000 00:00000000 00000000     0        0 106",
+		"   0: 0200630A:C350 0100630A:1F90 01 00000000:00000000 00:00000000 00000000     0        0 100", // :8080 stream-sync (skip)
+		"   1: 0200630A:C351 0300630A:0016 01 00000000:00000000 00:00000000 00000000     0        0 101", // :22 SSH (skip)
+		"   2: 0200630A:C352 0400630A:01BD 01 00000000:00000000 00:00000000 00000000     0        0 102", // :445 SMB (skip)
+		"   3: 0200630A:C353 0500630A:C352 01 00000000:00000000 00:00000000 00000000     0        0 999", // non-Engine inode (skip)
+		"   4: 0200630A:C354 0100630A:B6C7 01 00000000:00000000 00:00000000 00000000     0        0 201", // Engine Link 10.99.0.1
+		"   5: 0200630A:C355 0A00630A:B6C8 01 00000000:00000000 00:00000000 00000000     0        0 202", // Engine Link 10.99.0.10
+		"   6: 0200630A:C356 0B00630A:B6C9 01 00000000:00000000 00:00000000 00000000     0        0 203", // Engine Link 10.99.0.11
+		"   7: 0200630A:C357 0C00630A:B6CA 01 00000000:00000000 00:00000000 00000000     0        0 204", // Engine Link 10.99.0.12
+		"   8: 0200630A:C358 220CFEA9:B6CB 01 00000000:00000000 00:00000000 00000000     0        0 205", // Engine Link 169.254.12.34 (5th!)
+		"   9: 0200630A:C359 08080808:B6CC 01 00000000:00000000 00:00000000 00000000     0        0 206", // public IP (skip)
 	}, "\n")
-	got := parseProcNetTCPLANPeers(sample, map[string]bool{"10.99.0.2": true}, 4)
-	if len(got) != 2 || got[0] != "10.99.0.1" || got[1] != "169.254.12.34" {
-		t.Fatalf("parseProcNetTCPLANPeers = %v, want [10.99.0.1 169.254.12.34]", got)
+	inodes := map[string]bool{"100": true, "101": true, "102": true, "201": true, "202": true, "203": true, "204": true, "205": true, "206": true}
+	got := parseProcNetTCPLANPeers(sample, map[string]bool{"10.99.0.2": true}, inodes)
+	want := []string{"10.99.0.1", "10.99.0.10", "10.99.0.11", "10.99.0.12", "169.254.12.34"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("parseProcNetTCPLANPeers = %v, want %v", got, want)
 	}
 
-	// /proc/net/tcp6 IPv4-mapped ::ffff:10.99.0.1 (Qt dual-stack socket) + pure IPv6 skipped.
+	// /proc/net/tcp6 IPv4-mapped ::ffff:10.99.0.1 (Qt dual-stack Engine Link socket) + pure IPv6 skipped.
 	sample6 := strings.Join([]string{
-		"  sl  local_address                         remote_address                        st",
-		"   0: 0000000000000000FFFF00000200630A:C350 0000000000000000FFFF00000100630A:C351 01",
-		"   1: 00000000000000000000000000000001:C350 00000000000000000000000000000001:C351 01",
-		"   2: 0000000000000000FFFF00000200630A:C350 0000000000000000FFFF00000100007F:C351 01",
+		"  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode",
+		"   0: 0000000000000000FFFF00000200630A:C350 0000000000000000FFFF00000100630A:B6C7 01 00000000:00000000 00:00000000 00000000 0 0 301",
+		"   1: 00000000000000000000000000000001:C350 00000000000000000000000000000001:B6C7 01 00000000:00000000 00:00000000 00000000 0 0 302",
+		"   2: 0000000000000000FFFF00000200630A:C350 0000000000000000FFFF00000100007F:B6C7 01 00000000:00000000 00:00000000 00000000 0 0 303",
 	}, "\n")
-	got6 := parseProcNetTCPLANPeers(sample6, map[string]bool{"10.99.0.2": true}, 4)
+	got6 := parseProcNetTCPLANPeers(sample6, map[string]bool{"10.99.0.2": true}, map[string]bool{"301": true, "302": true, "303": true})
 	if len(got6) != 1 || got6[0] != "10.99.0.1" {
 		t.Fatalf("parseProcNetTCPLANPeers(tcp6) = %v, want [10.99.0.1]", got6)
 	}
 
-	// /proc/net/arp complete (0x2) private/link-local fallback.
 	arp := strings.Join([]string{
 		"IP address       HW type     Flags       HW address            Mask     Device",
 		"10.99.0.1        0x1         0x2         aa:bb:cc:dd:ee:01     *        eth0",
@@ -617,7 +1040,7 @@ func TestParseNetDBPathAndProcNetTCP(t *testing.T) {
 		"192.168.1.50     0x1         0x0         00:00:00:00:00:00     *        eth0",
 		"8.8.8.8          0x1         0x2         aa:bb:cc:dd:ee:03     *        eth0",
 	}, "\n")
-	gotARP := parseProcNetARPLANPeers(arp, map[string]bool{"10.99.0.2": true}, 4)
+	gotARP := parseProcNetARPLANPeers(arp, map[string]bool{"10.99.0.2": true})
 	if len(gotARP) != 1 || gotARP[0] != "10.99.0.1" {
 		t.Fatalf("parseProcNetARPLANPeers = %v, want [10.99.0.1]", gotARP)
 	}

@@ -1513,6 +1513,7 @@ static int sc_rbs_ondemand_fetch_ex(const char *main_db, const char *uuid, const
     p = first_nl + 1;
     char tmp[64], rb_status[64];
     rb_status[0] = 0;
+    int bad_hdr = 0;
     while (p < end) {
         const char *nl = memchr(p, '\n', (size_t)(end - p));
         size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
@@ -1523,16 +1524,36 @@ static int sc_rbs_ondemand_fetch_ex(const char *main_db, const char *uuid, const
             } else if (sc_rbs_hdr_match(p, ll, "X-RB-Written-NoMain", out_line->wrnm, sizeof out_line->wrnm)) {
             } else if (sc_rbs_hdr_match(p, ll, "X-RB-Row", out_line->row, sizeof out_line->row)) {
             } else if (sc_rbs_hdr_match(p, ll, "X-RB-Active-Loops", tmp, sizeof tmp)) {
-                out_line->active = strtoll(tmp, NULL, 10);
+                char *ep = NULL;
+                errno = 0;
+                if (tmp[0] < '0' || tmp[0] > '9') {
+                    bad_hdr = 1;
+                } else {
+                    unsigned long long v = strtoull(tmp, &ep, 10);
+                    if (errno == ERANGE || !ep || *ep != '\0' || v > 0xffffffffULL)
+                        bad_hdr = 1;
+                    else
+                        out_line->active = (long long)v;
+                }
             } else if (sc_rbs_hdr_match(p, ll, "X-RB-Rules", tmp, sizeof tmp)) {
-                out_line->rules = strtoll(tmp, NULL, 10);
+                char *ep = NULL;
+                errno = 0;
+                if (tmp[0] < '0' || tmp[0] > '9') {
+                    bad_hdr = 1;
+                } else {
+                    long long v = strtoll(tmp, &ep, 10);
+                    if (errno == ERANGE || !ep || *ep != '\0' || v <= 0)
+                        bad_hdr = 1;
+                    else
+                        out_line->rules = v;
+                }
             }
         }
         if (!nl) break;
         p = nl + 1;
     }
     if (peer_unsupported && !strcmp(rb_status, "peer_unsupported")) *peer_unsupported = 1;
-    if (status != 200) {
+    if (status != 200 || bad_hdr) {
         free(buf);
         return -1;
     }
@@ -1897,6 +1918,9 @@ static const char *sc_rbs_fill(const struct sc_rbx_sqlite *q, void *db, const ch
             if (is_net && peer_unsupported) {
                 pthread_mutex_lock(&sc_rbs_mu);
                 if (peer_neg_hash) sc_rbs_neg_put_locked(peer_neg_hash, SC_RBS_NEG_TTL_PERM_NS);
+                sc_rbs_neg_put_locked(od_hash, SC_RBS_NEG_TTL_PERM_NS);
+                if (pre_od_hash && pre_od_hash != od_hash)
+                    sc_rbs_neg_put_locked(pre_od_hash, SC_RBS_NEG_TTL_PERM_NS);
                 pthread_mutex_unlock(&sc_rbs_mu);
                 sc_rbs_conn_mark_bad(db, main);
                 why = "skipped (peer unsupported)";

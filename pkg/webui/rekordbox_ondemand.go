@@ -377,6 +377,9 @@ func (s *Server) lookupOnDemandDBMeta(ctx context.Context, stickID bridge.OnDema
 
 	var liveUUID string
 	if err := db.QueryRowContext(ctx, `SELECT coalesce(uuid, '') FROM Information LIMIT 1`).Scan(&liveUUID); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", rbOnDemandTrackMeta{}, context.DeadlineExceeded
+		}
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", rbOnDemandTrackMeta{}, bridge.ErrOnDemandUUIDMismatch
 		}
@@ -417,12 +420,18 @@ func (s *Server) lookupOnDemandDBMeta(ctx context.Context, stickID bridge.OnDema
 	if stickID.EngineID > 0 {
 		matched, err = readRow(`SELECT id, path, COALESCE(pdbImportKey, 0), COALESCE(key, -1), COALESCE(bpmAnalyzed, bpm, 0), COALESCE(length, 0), COALESCE(isAnalyzed, 0) FROM Track WHERE id = ? LIMIT 1`, stickID.EngineID)
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return "", rbOnDemandTrackMeta{}, context.DeadlineExceeded
+			}
 			return "", rbOnDemandTrackMeta{}, bridge.ErrOnDemandUnavailable
 		}
 	}
 	if !matched {
 		matched, err = readRow(`SELECT id, path, COALESCE(pdbImportKey, 0), COALESCE(key, -1), COALESCE(bpmAnalyzed, bpm, 0), COALESCE(length, 0), COALESCE(isAnalyzed, 0) FROM Track WHERE path = ? OR path = ? ORDER BY id DESC LIMIT 1`, "../"+stickID.TrackRel, stickID.TrackRel)
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return "", rbOnDemandTrackMeta{}, context.DeadlineExceeded
+			}
 			return "", rbOnDemandTrackMeta{}, bridge.ErrOnDemandUnavailable
 		}
 	}
@@ -513,16 +522,11 @@ func (s *Server) resolveOnDemandIdentityWithImportKey(ctx context.Context, b *br
 		if requireImportKey > 0 && (tm.importKey <= 0 || tm.importKey != requireImportKey) {
 			return onDemandVerifiedID{}, bridge.OnDemandRequest{}, false, bridge.ErrOnDemandNotFound
 		}
+		// Always key and build from the owner's own m.db Track row, never caller metadata.
 		canonical.EngineID = tm.id
-		if canonical.EngineKey < 0 {
-			canonical.EngineKey = tm.key
-		}
-		if canonical.EngineBPM <= 0 {
-			canonical.EngineBPM = tm.bpm
-		}
-		if canonical.EngineLen <= 0 {
-			canonical.EngineLen = tm.length
-		}
+		canonical.EngineKey = tm.key
+		canonical.EngineBPM = tm.bpm
+		canonical.EngineLen = tm.length
 	}
 	id := onDemandVerifiedID{
 		mount:         stickID.Mount,
@@ -632,6 +636,9 @@ func (s *Server) buildOnDemandEntryCheckedWithImportKey(ctx context.Context, req
 	}
 	s.rbOnDemandFlights[id] = f
 	s.rbOnDemandCacheMu.Unlock()
+	// Yield any active background pass only after stick + row identity has been verified
+	// and a cold build is actually starting.
+	s.rbPriorityQueue().NoteLoading(now)
 
 	go func() {
 		defer cancel()
@@ -836,6 +843,52 @@ func (s *Server) evictOnDemandCacheForPath(srcPath string) {
 	s.evictOnDemandCacheForTrackKey(s.canonicalOnDemandTrackKey(srcPath))
 }
 
+func writeOnDemandError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		w.Header().Set("X-RB-Status", "timeout")
+		fail(w, http.StatusGatewayTimeout, err)
+	case errors.Is(err, bridge.ErrOnDemandNotFound):
+		w.Header().Set("X-RB-Status", "not_found")
+		fail(w, http.StatusNotFound, err)
+	case errors.Is(err, bridge.ErrOnDemandUUIDMismatch):
+		w.Header().Set("X-RB-Status", "uuid_mismatch")
+		fail(w, http.StatusConflict, err)
+	case errors.Is(err, errLinkFillNotCommitted):
+		w.Header().Set("X-RB-Status", "not_committed")
+		fail(w, http.StatusConflict, err)
+	case errors.Is(err, bridge.ErrOnDemandDegraded), errors.Is(err, bridge.ErrOnDemandLimit):
+		w.Header().Set("X-RB-Status", "degraded")
+		fail(w, http.StatusUnprocessableEntity, err)
+	case errors.Is(err, bridge.ErrOnDemandUnavailable):
+		w.Header().Set("X-RB-Status", "unavailable")
+		fail(w, http.StatusServiceUnavailable, err)
+	default:
+		w.Header().Set("X-RB-Status", "error")
+		fail(w, http.StatusServiceUnavailable, err)
+	}
+}
+
+func writeOnDemandRBXA1(w http.ResponseWriter, res *bridge.OnDemandResult, libUUID, ownLink string) {
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.Itoa(len(res.RBXA1)))
+	if libUUID != "" {
+		w.Header().Set("X-RB-UUID", libUUID)
+	}
+	if ownLink != "" {
+		w.Header().Set("X-RB-Owner", ownLink)
+	}
+	w.Header().Set("X-RB-Key", res.Key)
+	w.Header().Set("X-RB-Written", base64.StdEncoding.EncodeToString(res.Written))
+	w.Header().Set("X-RB-Written-NoMain", base64.StdEncoding.EncodeToString(res.WrittenNoMain))
+	w.Header().Set("X-RB-Row", res.RowHash)
+	w.Header().Set("X-RB-Active-Loops", strconv.FormatUint(uint64(res.ActiveLoops), 10))
+	w.Header().Set("X-RB-Rules", strconv.Itoa(res.Rules))
+	w.Header().Set("X-RB-Timing-Ms", fmt.Sprintf("%.2f", res.Timing.TotalMS))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(res.RBXA1)
+}
+
 func (s *Server) serveRekordboxOnDemand(w http.ResponseWriter, r *http.Request, fromUnix bool) {
 	if r.Method != http.MethodPost {
 		fail(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -865,9 +918,6 @@ func (s *Server) serveRekordboxOnDemand(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Yield any active background pass cleanly (zero-cost no-op when no pass is running).
-	s.rbPriorityQueue().NoteLoading(time.Now())
-
 	engineKey := -1
 	if req.Key != nil {
 		engineKey = *req.Key
@@ -882,35 +932,8 @@ func (s *Server) serveRekordboxOnDemand(w http.ResponseWriter, r *http.Request, 
 		EngineLen:  req.Length,
 	}, false)
 	if err != nil {
-		switch {
-		case errors.Is(err, bridge.ErrOnDemandNotFound):
-			w.Header().Set("X-RB-Status", "not_found")
-			fail(w, http.StatusNotFound, err)
-		case errors.Is(err, bridge.ErrOnDemandUUIDMismatch):
-			w.Header().Set("X-RB-Status", "uuid_mismatch")
-			fail(w, http.StatusConflict, err)
-		case errors.Is(err, bridge.ErrOnDemandDegraded), errors.Is(err, bridge.ErrOnDemandLimit):
-			w.Header().Set("X-RB-Status", "degraded")
-			fail(w, http.StatusUnprocessableEntity, err)
-		case errors.Is(err, bridge.ErrOnDemandUnavailable):
-			w.Header().Set("X-RB-Status", "unavailable")
-			fail(w, http.StatusServiceUnavailable, err)
-		default:
-			w.Header().Set("X-RB-Status", "error")
-			fail(w, http.StatusServiceUnavailable, err)
-		}
+		writeOnDemandError(w, err)
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.Itoa(len(res.RBXA1)))
-	w.Header().Set("X-RB-Key", res.Key)
-	w.Header().Set("X-RB-Written", base64.StdEncoding.EncodeToString(res.Written))
-	w.Header().Set("X-RB-Written-NoMain", base64.StdEncoding.EncodeToString(res.WrittenNoMain))
-	w.Header().Set("X-RB-Row", res.RowHash)
-	w.Header().Set("X-RB-Active-Loops", strconv.FormatUint(uint64(res.ActiveLoops), 10))
-	w.Header().Set("X-RB-Rules", strconv.Itoa(res.Rules))
-	w.Header().Set("X-RB-Timing-Ms", fmt.Sprintf("%.2f", res.Timing.TotalMS))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(res.RBXA1)
+	writeOnDemandRBXA1(w, res, strings.TrimSpace(req.UUID), "")
 }

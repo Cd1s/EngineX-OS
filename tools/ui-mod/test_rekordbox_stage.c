@@ -1521,7 +1521,9 @@ int main(int argc, char **argv) {
         assert(!pthread_join(mt1, NULL));
         assert(!pthread_join(mt2, NULL));
         assert(mmock.requests == 1);
-        assert(starts(ma1.res, "filled on-demand (") && !strcmp(ma2.res, "skipped (row has analysis)"));
+        int m_one_filled = (starts(ma1.res, "filled on-demand (") && !strcmp(ma2.res, "skipped (row has analysis)")) ||
+                           (starts(ma2.res, "filled on-demand (") && !strcmp(ma1.res, "skipped (row has analysis)"));
+        assert(m_one_filled);
         assert(ma1.out_id == od_mixed && !strcmp(text(db, ROW, od_mixed), FILLED));
         sqlite3_close(db_m1);
         sqlite3_close(db_m2);
@@ -1762,10 +1764,46 @@ int main(int argc, char **argv) {
         assert(!pthread_join(rt1, NULL));
         assert(!pthread_join(rt2, NULL));
         assert(lmock.data_reqs == 1 && lmock.filled_reqs == 1);
-        assert(starts(ra1.res, "filled link on-demand (") && !strcmp(ra2.res, "skipped (row has analysis)"));
+        int n_one_filled = (starts(ra1.res, "filled link on-demand (") && !strcmp(ra2.res, "skipped (row has analysis)")) ||
+                           (starts(ra2.res, "filled link on-demand (") && !strcmp(ra1.res, "skipped (row has analysis)"));
+        assert(n_one_filled);
         assert(ra1.out_id == n_race && !strcmp(text(net_db, ROW, n_race), FILLED));
         sqlite3_close(nr1);
         sqlite3_close(nr2);
+
+        // 15h. Concurrent two-thread peer_unsupported race puts od_hash into sc_rbs_neg too, so the
+        //      woken waiter bails out inside sc_rbs_inflight_enter with 0 extra IPC calls (ipc_calls == 1).
+        long long n_unsup_race = track(net_db, "../Contents/LinkUnsupRace.mp3", 1, 1);
+        pthread_mutex_lock(&lmock.mu);
+        lmock.status = 404;
+        snprintf(lmock.x_rb_status, sizeof lmock.x_rb_status, "peer_unsupported");
+        lmock.delay_ms = 80;
+        lmock.data_reqs = 0;
+        lmock.filled_reqs = 0;
+        pthread_mutex_unlock(&lmock.mu);
+        sc_rbs_stats_reset();
+        net_fake_main = "net://eeee0006-1111-2222-3333-444455556666/NEXTLIB/Engine Library/Database2/m.db";
+        sqlite3 *nu1 = NULL, *nu2 = NULL;
+        assert(sqlite3_open(sqlite3_db_filename(net_db, "main"), &nu1) == SQLITE_OK);
+        assert(sqlite3_open(sqlite3_db_filename(net_db, "main"), &nu2) == SQLITE_OK);
+        assert(sqlite3_busy_timeout(nu1, 500) == SQLITE_OK);
+        assert(sqlite3_busy_timeout(nu2, 500) == SQLITE_OK);
+        struct net_race_arg ua1 = {nu1, net_fake_main, "../Contents/LinkUnsupRace.mp3", 0, 0, ""};
+        struct net_race_arg ua2 = {nu2, net_fake_main, NULL, n_unsup_race, 0, ""};
+        pthread_t ut1, ut2;
+        assert(!pthread_create(&ut1, NULL, net_race_worker, &ua1));
+        nanosleep(&s15, NULL);
+        assert(!pthread_create(&ut2, NULL, net_race_worker, &ua2));
+        assert(!pthread_join(ut1, NULL));
+        assert(!pthread_join(ut2, NULL));
+        assert(lmock.data_reqs == 1 && lmock.filled_reqs == 0);
+        assert(__atomic_load_n(&sc_rbs_stat_ipc_calls, __ATOMIC_RELAXED) == 1);
+        int u_one_unsup = (!strcmp(ua1.res, "skipped (peer unsupported)") && !strcmp(ua2.res, "skipped (ondemand busy)")) ||
+                          (!strcmp(ua2.res, "skipped (peer unsupported)") && !strcmp(ua1.res, "skipped (ondemand busy)"));
+        assert(u_one_unsup);
+        assert(!strcmp(text(net_db, ROW, n_unsup_race), INSERTED));
+        sqlite3_close(nu1);
+        sqlite3_close(nu2);
 
         __atomic_store_n(&lmock.stop, 1, __ATOMIC_RELEASE);
         assert(!pthread_join(lth, NULL));
