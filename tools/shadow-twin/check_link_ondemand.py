@@ -518,10 +518,10 @@ class H(http.server.BaseHTTPRequestHandler):
                 self.send_response(503); self.end_headers()
             except Exception: pass
         else:
-            self.send_response(404)
-            self.send_header("Content-Length", "19")
+            self.send_response(405)
+            self.send_header("Content-Length", "18")
             self.end_headers()
-            self.wfile.write(b"404 page not found\\n")
+            self.wfile.write(b"Method Not Allowed")
     def do_GET(self):
         self.send_response(404); self.end_headers()
     def log_message(self, *a): pass
@@ -555,13 +555,13 @@ def main():
         check=True,
     )
     rb_tracks = [
-        (1, "RB Case1 Cold4D",   "Contents/RBOD/case1-cold4d.wav",   "/PIONEER/USBANLZ/P001/ANLZ0000.DAT", 128.0, 20.0, 250.0, "Case1 Cue"),
-        (2, "RB Case2 Prefill",  "Contents/RBOD/case2-prefill.wav",  "/PIONEER/USBANLZ/P002/ANLZ0000.DAT", 128.0, 14.0, 260.0, "Case2 Cue"),
-        (3, "RB Case3 Latefill", "Contents/RBOD/case3-latefill.wav", "/PIONEER/USBANLZ/P003/ANLZ0000.DAT", 128.0, 14.0, 270.0, "Case3 Cue"),
-        (4, "RB Case4 Cold2D",   "Contents/RBOD/case4-cold2d.wav",   "/PIONEER/USBANLZ/P004/ANLZ0000.DAT", 128.0, 14.0, 280.0, "Case4 Cue"),
-        (5, "RB Case6 HangA",    "Contents/RBOD/case6-hang.wav",     "/PIONEER/USBANLZ/P005/ANLZ0000.DAT", 128.0, 10.0, 290.0, "Case6 Cue"),
-        (6, "RB Case7a Older1",  "Contents/RBOD/case7a-older1.wav",  "/PIONEER/USBANLZ/P006/ANLZ0000.DAT", 128.0, 10.0, 300.0, "Case7a Cue"),
-        (7, "RB Case7b Older2",  "Contents/RBOD/case7b-older2.wav",  "/PIONEER/USBANLZ/P007/ANLZ0000.DAT", 128.0, 10.0, 310.0, "Case7b Cue"),
+        (1, "RB Case1 Cold4D",   "Contents/RBOD/case1-cold4d.wav",   "/PIONEER/USBANLZ/P001/ANLZ0000.DAT", 128.0, 20.0, 250.0, "Case1Cue"),
+        (2, "RB Case2 Prefill",  "Contents/RBOD/case2-prefill.wav",  "/PIONEER/USBANLZ/P002/ANLZ0000.DAT", 128.0, 14.0, 260.0, "Case2Cue"),
+        (3, "RB Case3 Latefill", "Contents/RBOD/case3-latefill.wav", "/PIONEER/USBANLZ/P003/ANLZ0000.DAT", 128.0, 14.0, 270.0, "Case3Cue"),
+        (4, "RB Case4 Cold2D",   "Contents/RBOD/case4-cold2d.wav",   "/PIONEER/USBANLZ/P004/ANLZ0000.DAT", 128.0, 14.0, 280.0, "Case4Cue"),
+        (5, "RB Case6 HangA",    "Contents/RBOD/case6-hang.wav",     "/PIONEER/USBANLZ/P005/ANLZ0000.DAT", 128.0, 10.0, 290.0, "Case6Cue"),
+        (6, "RB Case7a Older1",  "Contents/RBOD/case7a-older1.wav",  "/PIONEER/USBANLZ/P006/ANLZ0000.DAT", 128.0, 10.0, 300.0, "Case7aCue"),
+        (7, "RB Case7b Older2",  "Contents/RBOD/case7b-older2.wav",  "/PIONEER/USBANLZ/P007/ANLZ0000.DAT", 128.0, 10.0, 310.0, "Case7bCue"),
     ]
     pdb_specs = []
     for tid, title, rel, anlz, bpm, dur, b0_ms, cue in rb_tracks:
@@ -662,7 +662,7 @@ def main():
             "b0_ms": row1["beat"]["b0_ms"] if row1 and row1["beat"] else None,
             "pqtz_err_ms": round(err1, 3),
             "n_def": row1["beat"]["n_def"] if row1 and row1["beat"] else 0,
-            "cue_kept": st["cue1"] == "Case1 Cue" and row1["qc"] > 26,
+            "cue_kept": st["cue1"] == "Case1Cue" and abs(st["cue1pos"] - 44100) <= 5 and row1["qc"] > 26,
             "filled_jsonl": 1 in filled_ids,
         }
         results.append(rec1)
@@ -693,7 +693,7 @@ def main():
             "b0_ms": row2["beat"]["b0_ms"] if row2 and row2["beat"] else None,
             "pqtz_err_ms": round(err2, 3),
             "n_def": row2["beat"]["n_def"] if row2 and row2["beat"] else 0,
-            "cue_kept": st["cue1"] == "Case2 Cue" and row2["qc"] > 26,
+            "cue_kept": st["cue1"] == "Case2Cue" and abs(st["cue1pos"] - 44100) <= 5 and row2["qc"] > 26,
             "filled_jsonl": 2 in read_filled_ids(a_filled_path),
         }
         results.append(rec2)
@@ -723,7 +723,7 @@ def main():
             "b0_ms": row3["beat"]["b0_ms"] if row3 and row3["beat"] else None,
             "pqtz_err_ms": round(err3, 3),
             "n_def": row3["beat"]["n_def"] if row3 and row3["beat"] else 0,
-            "cue_kept": st["cue1"] == "Case3 Cue" and row3["qc"] > 26,
+            "cue_kept": st["cue1"] == "Case3Cue" and abs(st["cue1pos"] - 44100) <= 5 and row3["qc"] > 26,
             "filled_jsonl": 3 in read_filled_ids(a_filled_path),
         }
         results.append(rec3)
@@ -754,7 +754,7 @@ def main():
                 "b0_ms": row4["beat"]["b0_ms"] if row4 and row4["beat"] else None,
                 "pqtz_err_ms": round(err4, 3),
                 "n_def": row4["beat"]["n_def"] if row4 and row4["beat"] else 0,
-                "cue_kept": st["cue1"] == "Case4 Cue" and row4["qc"] > 26,
+                "cue_kept": st["cue1"] == "Case4Cue" and abs(st["cue1pos"] - 44100) <= 5 and row4["qc"] > 26,
                 "filled_jsonl": 4 in filled_ids,
             }
             results.append(rec4)
@@ -855,6 +855,12 @@ def main():
         print("CASE 7:", json.dumps(rec7), flush=True)
         assert lan_d7a == 1 and lan_d7b == 0 and row7a["analyzed"] == 1 and row7b["analyzed"] == 1, f"Case 7 failed: {rec7}"
 
+        eng_b = twin.WORK / "B/logs/engine.log"
+        if eng_b.is_file():
+            rblines = [ln for ln in eng_b.read_text(errors="replace").splitlines() if "rekordbox:" in ln]
+            print("HOOK B LOGS (rekordbox):", flush=True)
+            for ln in rblines[-30:]:
+                print(" ", ln, flush=True)
         print("\n=== LINK ON-DEMAND 7-CASE MATRIX: PASS ===", flush=True)
         print(json.dumps(results, indent=2), flush=True)
     finally:
