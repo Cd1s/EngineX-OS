@@ -2,11 +2,11 @@
  *
  * Build & run on ARM build host (native aarch64 and armhf):
  *   gcc -std=gnu11 -O2 -Wall -Wextra -Werror -U_FORTIFY_SOURCE tools/ui-mod/test_s12_recorder_buffer.c -ldl -lpthread -lm -o /tmp/test_s12_64
- *   /tmp/test_s12_64 /root/build/sc5000-lab/systemone-analysis/rootfs/usr/Engine/Engine
+ *   /tmp/test_s12_64 $ENGINEX_LAB/systemone-analysis/rootfs/usr/Engine/Engine
  *   arm-linux-gnueabihf-gcc -std=gnu11 -O2 -Wall -Wextra -Werror -U_FORTIFY_SOURCE tools/ui-mod/test_s12_recorder_buffer.c -ldl -lpthread -lm -o /tmp/test_s12_32
- *   /tmp/test_s12_32 /root/build/sc5000-lab/5.0.4/tree/usr/Engine/Engine \
- *                    /root/build/sc5000-lab/5.3.0/tree/usr/Engine/Engine \
- *                    /root/build/sc5000-lab/sclive4-rea61-followup/rootfs/usr/Engine/Engine
+ *   /tmp/test_s12_32 $ENGINEX_LAB/5.0.4/tree/usr/Engine/Engine \
+ *                    $ENGINEX_LAB/5.3.0/tree/usr/Engine/Engine \
+ *                    $ENGINEX_LAB/sclive4-rea61-followup/rootfs/usr/Engine/Engine
  */
 #define _GNU_SOURCE
 #define ENGINE_UI_HOOK_TEST

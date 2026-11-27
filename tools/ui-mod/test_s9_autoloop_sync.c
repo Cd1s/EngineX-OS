@@ -7,14 +7,14 @@
  * Build & run on ARM build host (native aarch64 and armhf):
  *   gcc -std=gnu11 -O2 -Wall -Wextra -Werror -U_FORTIFY_SOURCE \
  *       tools/ui-mod/test_s9_autoloop_sync.c -ldl -lpthread -lm -o /tmp/test_s9_64
- *   /tmp/test_s9_64 /root/build/sc5000-lab/systemone-analysis/rootfs/usr/Engine/Engine
+ *   /tmp/test_s9_64 $ENGINEX_LAB/systemone-analysis/rootfs/usr/Engine/Engine
  *
  *   arm-linux-gnueabihf-gcc -std=gnu11 -O2 -Wall -Wextra -Werror -U_FORTIFY_SOURCE \
  *       -mthumb -march=armv7-a -mfpu=neon -mfloat-abi=hard \
  *       tools/ui-mod/test_s9_autoloop_sync.c -ldl -lpthread -lm -o /tmp/test_s9_32
- *   /tmp/test_s9_32 /root/build/sc5000-lab/5.0.4/tree/usr/Engine/Engine \
- *                   /root/build/sc5000-lab/5.3.0/tree/usr/Engine/Engine \
- *                   /root/build/sc5000-lab/sclive4-rea61-followup/rootfs/usr/Engine/Engine
+ *   /tmp/test_s9_32 $ENGINEX_LAB/5.0.4/tree/usr/Engine/Engine \
+ *                   $ENGINEX_LAB/5.3.0/tree/usr/Engine/Engine \
+ *                   $ENGINEX_LAB/sclive4-rea61-followup/rootfs/usr/Engine/Engine
  */
 #define _GNU_SOURCE
 #define ENGINE_UI_HOOK_TEST
