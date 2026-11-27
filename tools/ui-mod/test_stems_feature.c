@@ -1046,9 +1046,9 @@ static void test_patch_files(const char *filename) {
         const uint32_t ring_loads[] = {0xe5970000u | 5u << 12 | BT_RING_WR, 0xe5970000u | 10u << 12 | BT_RING_SIZE}; // ldr r5, [r7, #0x34]; ldr sl, [r7, #0x2c]
         assert(!memcmp(image + build->bt_send + 0xa8, ring_loads, sizeof ring_loads));
     }
-    if (!strcmp(build->name, "5.0.4")) assert(build->edit_count == 17); // +1: #207 Reverb decay
+    if (!strcmp(build->name, "5.0.4")) assert(build->edit_count == 19); // +1: #207 Reverb decay, +2: #336 S17 InstantDouble
     if (!strcmp(build->name, "5.3.0")) {
-        assert(build->edit_count == 30);
+        assert(build->edit_count == 32);
         // #49: consoles (isConsole +0x23a != 0) skip 0x193f6cc; players have
         // isConsole == 0, and when four_deck_waveform=1 clears isPlayer (+0x239),
         // 0x193f6d8 must still branch unconditionally to Layer A / Layer B (0x193fc18).
@@ -1070,7 +1070,7 @@ static void test_patch_files(const char *filename) {
         }
         assert(sampler_patched);
     }
-    if (!strcmp(build->name, "5.3.0-sclive4")) assert(build->edit_count == 32);
+    if (!strcmp(build->name, "5.3.0-sclive4")) assert(build->edit_count == 34);
     for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
         size_t bytes;
         const void *expected = dsp_expected(i, &bytes);
@@ -1624,7 +1624,7 @@ static void test_rec_stream(const char *filename) {
             unsigned applied = 0;
             for (size_t i = 0; i < build->edit_count; i++)
                 applied += edit_state((uintptr_t)image, &build->edits[i]) == 2;
-            assert(applied == (!strcmp(board, "JC11") ? 29 : 20));
+            assert(applied == (!strcmp(board, "JC11") ? 31 : 22));
             assert(DSP_HOOK_COUNT == 21);
             printf("Default gate compatibility (%s): %u edits, %u DSP sites: PASS\n", board, applied, (unsigned)DSP_HOOK_COUNT);
         }
@@ -1642,6 +1642,106 @@ static void test_rec_stream(const char *filename) {
     product_code_path = saved;
     unlink(code_path);
     printf("#206 recording with streaming tracks (%s): 8 sites stock->patched on all-in-ones, untouched on JP07/JP08/JP13/JP14, none on a 1-site mismatch: PASS\n", build->name);
+}
+
+// #336 S17: multi-unit Instant Double remote TrackLength handling.
+// Stock doLoad() passes defaultValue=0 to QJsonValue::toInt(int), and doPositionSync() only
+// skips < 0 (5.3.0/5.3.0-sclive4) or == -1 (5.0.4), so empty/missing JSON or uninitialized 0
+// triggers a false StreamingQualityMismatch even on local USB/SSD tracks.
+static int eval_arm_toint_default(const char *image, uint32_t off, size_t page) {
+    uint32_t ins;
+    memcpy(&ins, image + off, 4);
+    uint32_t code[] = {ins, 0xe1a00001u, 0xe12fff1eu}; // <mov/mvn r1, #0>; mov r0, r1; bx lr
+    int (*fn)(void) = rx_code(code, sizeof code, page);
+    int rc = fn();
+    assert(!munmap((void *)fn, page));
+    return rc;
+}
+
+static int eval_arm_sync_guard(const char *image, uint32_t cmp_off, int use_r6,
+                               int32_t remote_len, uint32_t local_lo, uint32_t local_hi, size_t page) {
+    uint32_t cmp_ins, br_ins;
+    memcpy(&cmp_ins, image + cmp_off, 4);
+    memcpy(&br_ins, image + cmp_off + 4, 4);
+    uint32_t code[] = {
+        use_r6 ? 0xe52d6004u : 0xe52da004u, // str r6/sl, [sp, #-4]!
+        use_r6 ? 0xe1a06000u : 0xe1a0a000u, // mov r6/sl, r0
+        cmp_ins,                            // cmp sl, #0  OR  cmn r6, #1 / cmp r6, #0
+        (br_ins & 0xff000000u) | 5u,        // b<cc> skip (index 10)
+        use_r6 ? 0xe1a03fc6u : 0xe1a03fcau, // asr r3, r6/sl, #31
+        0xe1520003u,                        // cmp r2, r3
+        use_r6 ? 0x01510006u : 0x0151000au, // cmpeq r1, r6/sl
+        0x03a00000u,                        // moveq r0, #0 (match)
+        0x13a00001u,                        // movne r0, #1 (StreamingQualityMismatch)
+        0xea000000u,                        // b epilogue (index 11)
+        0xe3a00000u,                        // skip: mov r0, #0
+        use_r6 ? 0xe49d6004u : 0xe49da004u, // ldr r6/sl, [sp], #4
+        0xe12fff1eu,                        // bx lr
+    };
+    int (*fn)(int32_t, uint32_t, uint32_t) = rx_code(code, sizeof code, page);
+    int rc = fn(remote_len, local_lo, local_hi);
+    assert(!munmap((void *)fn, page));
+    return rc;
+}
+
+static void test_instant_double_track_length(const char *filename) {
+    size_t len, page = (size_t)sysconf(_SC_PAGESIZE);
+    char *image = rec_stream_image(filename, &len);
+    const int is_504 = !strcmp(build->name, "5.0.4");
+    const int is_sclive = !strcmp(build->name, "5.3.0-sclive4");
+    const uint32_t toint_off = is_504 ? 0xc48544u : (is_sclive ? 0xcfc47cu : 0xcf3674u);
+    const uint32_t cmp_off = is_504 ? 0xc37248u : (is_sclive ? 0xd12c9cu : 0xcefc78u);
+    const uint32_t want_br_imm = is_504 ? 0x00ffffdau : 0x00000070u;
+
+    // Context pins on the real stock binary:
+    // doLoad(): mov r1, #0; mov r0, r5; bl QJsonValue::toInt; str r0, [r4, #220/#208]
+    uint32_t load_ctx[4];
+    memcpy(load_ctx, image + toint_off, sizeof load_ctx);
+    assert(load_ctx[0] == 0xe3a01000u && load_ctx[1] == 0xe1a00005u && (load_ctx[2] >> 24) == 0xebu);
+    assert(load_ctx[3] == (is_504 ? 0xe58400d0u : 0xe58400dcu));
+    // doPositionSync(): cmp/cmn + blt/beq right after TrackData::getLengthInSamples() / ldr m_remoteTrackLength
+    uint32_t sync_ctx[2];
+    memcpy(sync_ctx, image + cmp_off, sizeof sync_ctx);
+    assert((sync_ctx[1] & 0x00ffffffu) == want_br_imm);
+    assert(is_504 ? (sync_ctx[0] == 0xe3760001u && (sync_ctx[1] >> 28) == 0x0u)
+                  : (sync_ctx[0] == 0xe35a0000u && (sync_ctx[1] >> 28) == 0xbu));
+
+    // Stock behavior executes the bug: default=0 and remoteLen=0 triggers false mismatch!
+    assert(eval_arm_toint_default(image, toint_off, page) == 0);
+    assert(eval_arm_sync_guard(image, cmp_off, is_504, 0, 10584000u, 0u, page) == 1);
+    assert(eval_arm_sync_guard(image, cmp_off, is_504, -1, 10584000u, 0u, page) == 0);
+
+    apply_engine_edits((uintptr_t)image, page);
+
+    // Patched behavior: missing JSON returns -1, and remoteLen <= 0 skips mismatch while
+    // preserving genuine positive streaming quality mismatches.
+    uint32_t patched_br;
+    memcpy(&patched_br, image + cmp_off + 4, 4);
+    assert((patched_br & 0x00ffffffu) == want_br_imm);
+    assert(eval_arm_toint_default(image, toint_off, page) == -1);
+    assert(eval_arm_sync_guard(image, cmp_off, is_504, -1, 10584000u, 0u, page) == 0);
+    assert(eval_arm_sync_guard(image, cmp_off, is_504, 0, 10584000u, 0u, page) == 0);
+    assert(eval_arm_sync_guard(image, cmp_off, is_504, 10584000, 10584000u, 0u, page) == 0);
+    assert(eval_arm_sync_guard(image, cmp_off, is_504, 10583000, 10584000u, 0u, page) == 1);
+    munmap(image, len);
+
+    // Switching instant-double off in hook-disable.conf leaves both sites stock.
+    char off_path[] = "/tmp/id-off-XXXXXX";
+    int ofd = mkstemp(off_path); assert(ofd >= 0);
+    assert(write(ofd, "instant-double\n", 15) == 15);
+    close(ofd);
+    const char *saved_hf = hf_path;
+    hf_path = off_path;
+    hf_reload();
+    image = rec_stream_image(filename, &len);
+    apply_engine_edits((uintptr_t)image, page);
+    assert(eval_arm_toint_default(image, toint_off, page) == 0);
+    assert(eval_arm_sync_guard(image, cmp_off, is_504, 0, 10584000u, 0u, page) == 1);
+    munmap(image, len);
+    hf_path = saved_hf;
+    hf_reload();
+    unlink(off_path);
+    printf("#336 S17 InstantDouble remote TrackLength (%s): toInt(-1) and <=0 guard skip missing/zero, keep positive mismatch, switchable: PASS\n", build->name);
 }
 
 static const char *analysis_filename(void *db, const char *name) {
@@ -2342,7 +2442,7 @@ int main(int argc, char **argv) {
     test_stems_processor_fallback();
     test_stems_processor_prefers_enginex();
     test_alsa_boot_hook();
-    for (int i = 1; i < argc; i++) { test_patch_files(argv[i]); test_rec_stream(argv[i]); }
+    for (int i = 1; i < argc; i++) { test_patch_files(argv[i]); test_rec_stream(argv[i]); test_instant_double_track_length(argv[i]); }
     // rb-bridge also owns the bind site (the stage fill for a drive's rows): with all three off
     // it is left as Engine has it.
     static const struct { const char *off; int gateway, shadow, stage; } cases[] = {

@@ -40,6 +40,7 @@
     X(REC_STREAMING, "rec-streaming") \
     X(AUX_INPUT, "aux-input") \
     X(FOUR_DECK, "four-deck") \
+    X(INSTANT_DOUBLE, "instant-double") \
     X(DSP_GUARDS, "dsp-guards") \
     X(HIFI_OUTPUT, "hifi-output") \
     X(REVERB_TAIL, "reverb-tail") \

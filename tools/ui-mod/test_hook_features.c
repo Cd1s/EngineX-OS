@@ -141,6 +141,16 @@ static void test_reverb_tail_switch(void) {
     puts("the longer Reverb tail (#207) has its own switch on every build: PASS");
 }
 
+static void test_instant_double_switch(void) {
+    unsigned sites = 0;
+    for (unsigned b = 0; b < sizeof engine_builds / sizeof *engine_builds; b++)
+        for (unsigned i = 0; i < engine_builds[b].edit_count; i++)
+            if (engine_builds[b].edits[i].feature == HF_INSTANT_DOUBLE) sites++;
+    assert(sites == 6); // 2 each on 5.0.4, 5.3.0 and 5.3.0-sclive4
+    assert(!strcmp(hf_names[HF_INSTANT_DOUBLE], "instant-double"));
+    puts("InstantDouble remote TrackLength fix (#336 S17) has its own switch on every armhf build: PASS");
+}
+
 static uint32_t noop_master_cb(void *host, void *ctx, int ic, const float *const *in, int oc, float *const *out, int frames) {
     (void)host; (void)ctx; (void)ic; (void)in; (void)oc; (void)out; (void)frames;
     return 0;
@@ -324,6 +334,7 @@ int main(void) {
     test_edits_skip();
     test_config_lines();
     test_reverb_tail_switch();
+    test_instant_double_switch();
     test_hifi_output_switch();
     test_runtime_hooks();
     test_publish();

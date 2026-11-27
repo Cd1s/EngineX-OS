@@ -18,14 +18,14 @@ if [ "$AZ04" != 1 ] && [ -n "$JC11S_ROOTFS" ] && [ ! -d "$JC11S_ROOTFS" ]; then
 fi
 if [ "$BOOTSTRAP_MODEL" = PRIME4PLUS ]; then
     ROOTFS="${JC11S_ROOTFS:?set JC11S_ROOTFS to the unpacked official PRIME4PLUS rootfs}"
-    # JC11S uses the same Engine/edit table as SC LIVE 4, including #166 SweepFX.
-    PREFIX=PRIME4PLUS VARLIB=data/system/var/overlay/lib PROFILE=5.3.0-sclive4 EDITS=29
+    # JC11S uses the same Engine/edit table as SC LIVE 4, including #166 SweepFX and #336 S17 InstantDouble.
+    PREFIX=PRIME4PLUS VARLIB=data/system/var/overlay/lib PROFILE=5.3.0-sclive4 EDITS=31
 elif [ "$AZ04" = 1 ]; then
     ROOTFS="${ROOTFS:-${ENGINEX_LAB}/systemone-analysis/rootfs}"
-    PREFIX=PRIME4G2 VARLIB=data/system/var-lib PROFILE=5.3.0-az04 EDITS=26
+    PREFIX=PRIME4G2 VARLIB=data/system/var-lib PROFILE=5.3.0-az04 EDITS=28
 else
     ROOTFS="${ROOTFS:-${ENGINEX_LAB}/sclive4-rea61-followup/rootfs}"  # or another unpacked gen2 rootfs
-    PREFIX=SCLIVE4 VARLIB=data/system/var/overlay/lib PROFILE=5.3.0-sclive4 EDITS=29
+    PREFIX=SCLIVE4 VARLIB=data/system/var/overlay/lib PROFILE=5.3.0-sclive4 EDITS=31
 fi
 QRC="${QRC:-${ENGINEX_LAB}/5.3.0/qrc}"  # AZ04's QML is byte-identical to it
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

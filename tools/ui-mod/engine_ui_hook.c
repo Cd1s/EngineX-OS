@@ -2474,6 +2474,13 @@ static const struct engine_edit edits_az04[] = {
     // #159 StreamingProviderInterface::connectedSSO() -> true, isDisconnectedFromProfile() -> false
     {0xc9cab4u, "\x00\x58\x64\x39", "\x20\x00\x80\x52", 4, EDIT_ONE, HF_SSO},
     {0xc9cb0cu, "\xe0\x03\x01\x2a", "\x00\x00\x80\x52", 4, EDIT_ONE, HF_SSO},
+    // #336 S17 InstantDoubleControl::doLoad(): QJsonValue::toInt(0) -> toInt(-1) so missing/empty
+    // RemoteProperties/.../Track/TrackLength keeps the unknown sentinel (-1).
+    {0xdbb578u, "\x01\x00\x80\x52", "\x01\x00\x80\x12", 4, EDIT_ONE, HF_INSTANT_DOUBLE},
+    // #336 S17 InstantDoubleControl::doPositionSync(): tbnz w2, #31, +0x1a4; cmp x0, w2, sxtw
+    // -> cmp w2, #0; ccmp x0, x2, #4, gt (ldr w2, [sp] at 0xdb8c14 zero-extends w2 into x2, so
+    // for w2 > 0 x2 == sxtw(w2); for w2 <= 0 Z=1 makes b.eq 0xdb8dbc skip false mismatch).
+    {0xdb8c18u, "\x22\x0d\xf8\x37\x1f\xc0\x22\xeb", "\x5f\x00\x00\x71\x04\xc0\x42\xfa", 8, EDIT_ONE, HF_INSTANT_DOUBLE},
     // #206 Recording with streaming tracks (all-in-ones only; the group is never ready on
     // the JP07/JP08/JP13/JP14 players, which have no recorder). All 8 sites or none.
     // AbstractCollectionModel streamingFlags: skip BlocksRecording (0x20) bit
@@ -2560,6 +2567,10 @@ static const struct engine_edit edits_504[] = {
     {0x16728c0u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE, HF_READONLY_STICKS},
     // #207 Reverb (Classic) decay formula: vsub s14, s14, s15; vldr s16, =0.65
     {0x1639278u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB, HF_REVERB_TAIL},
+    // #336 S17 InstantDoubleControl: toInt(0) -> toInt(-1) in doLoad(), and cmn r6,#1; beq -> cmp r6,#0; ble
+    // in doPositionSync() so missing/zero remote TrackLength never false-triggers StreamingQualityMismatch.
+    {0xc48544u, "\x00\x10\xa0\xe3", "\x00\x10\xe0\xe3", 4, EDIT_ONE, HF_INSTANT_DOUBLE},
+    {0xc37248u, "\x01\x00\x76\xe3\xda\xff\xff\x0a", "\x00\x00\x56\xe3\xda\xff\xff\xda", 8, EDIT_ONE, HF_INSTANT_DOUBLE},
 };
 
 // 5.3.0 (BuildID be537e90...): sites found by RTTI/vtable slots (DSP), the QML
@@ -2603,6 +2614,11 @@ static const struct engine_edit edits_530[] = {
     {0x193f6d8u, "\x4e\x01\x00\x1a", "\x4e\x01\x00\xea", 4, EDIT_ONE, HF_FOUR_DECK},
     // #207 Reverb (Classic) decay formula: vsub s14, s14, s15; vldr s16, =0.65
     {0x1725630u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB, HF_REVERB_TAIL},
+    // #336 S17 InstantDoubleControl: toInt(0) -> toInt(-1) in doLoad() and blt -> ble in doPositionSync()
+    // so missing/empty or uninitialized (0) remote TrackLength skips StreamingQualityMismatch while
+    // preserving genuine positive streaming quality mismatches.
+    {0xcf3674u, "\x00\x10\xa0\xe3", "\x00\x10\xe0\xe3", 4, EDIT_ONE, HF_INSTANT_DOUBLE},
+    {0xcefc7cu, "\x70\x00\x00\xba", "\x70\x00\x00\xda", 4, EDIT_ONE, HF_INSTANT_DOUBLE},
     // #206 Recording with streaming tracks (all-in-ones only; the group is never ready on
     // the JP07/JP08/JP13/JP14 players, which have no recorder). All 8 sites or none.
     // AbstractCollectionModel streamingFlags: skip BlocksRecording (0x20) bit
@@ -2650,6 +2666,9 @@ static const struct engine_edit edits_sclive[] = {
     {0xbf9234u, "\x01\x00\x20\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE, HF_SSO},
     // #207 Reverb (Classic) decay formula: vsub s14, s14, s15; vldr s16, =0.65
     {0x177b088u, "\x67\x7a\x37\xee\x5f\x8a\x9f\xed", (const char *)reverb_time_jump, 8, EDIT_REVERB, HF_REVERB_TAIL},
+    // #336 S17 InstantDoubleControl: toInt(0) -> toInt(-1) in doLoad() and blt -> ble in doPositionSync().
+    {0xcfc47cu, "\x00\x10\xa0\xe3", "\x00\x10\xe0\xe3", 4, EDIT_ONE, HF_INSTANT_DOUBLE},
+    {0xd12ca0u, "\x70\x00\x00\xba", "\x70\x00\x00\xda", 4, EDIT_ONE, HF_INSTANT_DOUBLE},
     // #206 Recording with streaming tracks (all-in-ones only; the group is never ready on
     // the JP07/JP08/JP13/JP14 players, which have no recorder). All 8 sites or none.
     // AbstractCollectionModel streamingFlags: skip BlocksRecording (0x20) bit

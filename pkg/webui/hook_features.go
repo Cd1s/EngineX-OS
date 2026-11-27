@@ -45,6 +45,7 @@ var hookFeatures = []hookFeature{
 	{Name: "rec-streaming", Group: "engine", About: "#206: load and record streaming tracks during a recording"},
 	{Name: "aux-input", Group: "engine", About: "#171: AUX/MIC2 input and mixer menu of the SC LIVE 4"},
 	{Name: "four-deck", Group: "engine", About: "#49: 4-deck layout on players, MASTER rule for shadow decks (Gen-1 5.3.0)"},
+	{Name: "instant-double", Group: "engine", About: "#336 S17: treat missing or zero remote TrackLength as unknown on multi-unit Instant Double so local/Link tracks do not false-trigger Streaming quality mismatch"},
 	{Name: "limiter-menu", Group: "engine", About: "shows the hidden stock Master Limiter menu"},
 	{Name: "filesystems", Group: "drives", About: "unknown file systems and HFS+ allowed, config disableHfsPlus=0"},
 	{Name: "readonly-sticks", Group: "drives", About: "write-protected sticks are not ejected or reported read-only"},
