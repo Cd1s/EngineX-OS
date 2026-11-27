@@ -259,27 +259,43 @@ def wait_for(fn, timeout: float = 45.0, interval: float = 0.1, label: str = "con
     raise AssertionError(f"timeout waiting for {label}")
 
 
+def engine_host_pid(side: str) -> int:
+    """Find the host PID of side's /usr/Engine/Engine process from engine.pid's process tree."""
+    root_pid = int((twin.WORK / side / "engine.pid").read_text().strip())
+    queue = [root_pid]
+    seen = set()
+    while queue:
+        pid = queue.pop(0)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode("latin1", "replace")
+            if "/usr/Engine/Engine" in cmdline:
+                return pid
+            for ch in Path(f"/proc/{pid}/task").glob("*/children"):
+                for tok in ch.read_text().split():
+                    queue.append(int(tok))
+        except OSError:
+            continue
+    return root_pid
+
+
 def oa_cpu_ticks(side: str) -> int:
     """Sum utime+stime ticks across OfflineAnalyzer threads of side's Engine process."""
-    out = subprocess.check_output(
-        twin.ns_chroot_cmd(
-            side,
-            "EPID=$(pgrep -f '^/usr/Engine/Engine' | head -n1); "
-            "tot=0; "
-            "for f in /proc/$EPID/task/*/comm; do "
-            "  [ -r \"$f\" ] || continue; "
-            "  name=$(cat \"$f\" 2>/dev/null || true); "
-            "  case \"$name\" in OfflineAnalyzer*) "
-            "    st=$(cat \"${f%/comm}/stat\" 2>/dev/null || true); "
-            "    rest=${st##*) }; "
-            "    set -- $rest; "
-            "    tot=$((tot + ${12:-0} + ${13:-0})); "
-            "  ;; esac; "
-            "done; echo $tot",
-        ),
-        text=True,
-    ).strip()
-    return int(out or "0")
+    pid = engine_host_pid(side)
+    tot = 0
+    for comm_p in Path(f"/proc/{pid}/task").glob("*/comm"):
+        try:
+            name = comm_p.read_text().strip()
+            if not name.startswith("OfflineAnalyzer"):
+                continue
+            stat_txt = comm_p.with_name("stat").read_text()
+            fields = stat_txt.rsplit(") ", 1)[1].split()
+            tot += int(fields[11]) + int(fields[12])
+        except (OSError, IndexError, ValueError):
+            continue
+    return tot
 
 
 def start_lan_counter(netns: str, log_file: Path):
