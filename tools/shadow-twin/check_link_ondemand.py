@@ -646,6 +646,7 @@ def main():
         lan0 = count_peer_reqs(lan_log)
         t_ld, t_an, st = load_b_row("RB Case1", "case1-cold4d.wav")
         time.sleep(1.5)
+        st = deck_info("B", 2)
         oa_b_d = oa_cpu_ticks("B") - oa_b0
         oa_a_d = oa_cpu_ticks("A") - oa_a0
         lan_d = count_peer_reqs(lan_log) - lan0
@@ -662,6 +663,9 @@ def main():
             "b0_ms": row1["beat"]["b0_ms"] if row1 and row1["beat"] else None,
             "pqtz_err_ms": round(err1, 3),
             "n_def": row1["beat"]["n_def"] if row1 and row1["beat"] else 0,
+            "cue1": st["cue1"],
+            "cue1pos": st["cue1pos"],
+            "qc": row1["qc"] if row1 else 0,
             "cue_kept": st["cue1"] == "Case1Cue" and abs(st["cue1pos"] - 44100) <= 5 and row1["qc"] > 26,
             "filled_jsonl": 1 in filled_ids,
         }
@@ -680,6 +684,7 @@ def main():
         lan0 = count_peer_reqs(lan_log)
         t_ld, t_an, st = load_b_row("RB Case2", "case2-prefill.wav")
         time.sleep(0.8)
+        st = deck_info("B", 2)
         oa_b_d = oa_cpu_ticks("B") - oa_b0
         lan_d = count_peer_reqs(lan_log) - lan0
         row2 = read_mdb_row(rb_mdb, "case2-prefill.wav")
@@ -693,6 +698,9 @@ def main():
             "b0_ms": row2["beat"]["b0_ms"] if row2 and row2["beat"] else None,
             "pqtz_err_ms": round(err2, 3),
             "n_def": row2["beat"]["n_def"] if row2 and row2["beat"] else 0,
+            "cue1": st["cue1"],
+            "cue1pos": st["cue1pos"],
+            "qc": row2["qc"] if row2 else 0,
             "cue_kept": st["cue1"] == "Case2Cue" and abs(st["cue1pos"] - 44100) <= 5 and row2["qc"] > 26,
             "filled_jsonl": 2 in read_filled_ids(a_filled_path),
         }
@@ -710,6 +718,7 @@ def main():
         lan0 = count_peer_reqs(lan_log)
         t_ld, t_an, st = load_b_row("RB Case3", "case3-latefill.wav")
         time.sleep(0.8)
+        st = deck_info("B", 2)
         oa_b_d = oa_cpu_ticks("B") - oa_b0
         lan_d = count_peer_reqs(lan_log) - lan0
         row3 = read_mdb_row(rb_mdb, "case3-latefill.wav")
@@ -723,6 +732,9 @@ def main():
             "b0_ms": row3["beat"]["b0_ms"] if row3 and row3["beat"] else None,
             "pqtz_err_ms": round(err3, 3),
             "n_def": row3["beat"]["n_def"] if row3 and row3["beat"] else 0,
+            "cue1": st["cue1"],
+            "cue1pos": st["cue1pos"],
+            "qc": row3["qc"] if row3 else 0,
             "cue_kept": st["cue1"] == "Case3Cue" and abs(st["cue1pos"] - 44100) <= 5 and row3["qc"] > 26,
             "filled_jsonl": 3 in read_filled_ids(a_filled_path),
         }
@@ -740,6 +752,7 @@ def main():
             lan0 = count_peer_reqs(lan_log)
             t_ld, t_an, st = load_b_row("RB Case4", "case4-cold2d.wav")
             time.sleep(1.2)
+            st = deck_info("B", 2)
             oa_b_d = oa_cpu_ticks("B") - oa_b0
             lan_d = count_peer_reqs(lan_log) - lan0
             row4 = read_mdb_row(rb_mdb, "case4-cold2d.wav")
@@ -754,6 +767,9 @@ def main():
                 "b0_ms": row4["beat"]["b0_ms"] if row4 and row4["beat"] else None,
                 "pqtz_err_ms": round(err4, 3),
                 "n_def": row4["beat"]["n_def"] if row4 and row4["beat"] else 0,
+                "cue1": st["cue1"],
+                "cue1pos": st["cue1pos"],
+                "qc": row4["qc"] if row4 else 0,
                 "cue_kept": st["cue1"] == "Case4Cue" and abs(st["cue1pos"] - 44100) <= 5 and row4["qc"] > 26,
                 "filled_jsonl": 4 in filled_ids,
             }
