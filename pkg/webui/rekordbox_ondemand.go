@@ -30,20 +30,27 @@ import (
 const (
 	// RekordboxOnDemandRoute serves single-track direct-read RBXA1 performance payloads.
 	RekordboxOnDemandRoute = "/v1/enginex/rekordbox/track-data"
+	// RekordboxOnDemandFilledRoute records that a remote Engine Link load committed a track fill.
+	RekordboxOnDemandFilledRoute = "/v1/enginex/rekordbox/track-filled"
+	// RekordboxPeerOnDemandRoute serves single-track RBXA1 payloads over the LAN to another EngineX deck.
+	RekordboxPeerOnDemandRoute = "/peer/rekordbox/track-data"
+	// RekordboxPeerFilledRoute notifies the stick owner to append filled.jsonl after a remote Link fill.
+	RekordboxPeerFilledRoute = "/peer/rekordbox/track-filled"
 	// DefaultRekordboxOnDemandSock is the local Unix domain socket for the Engine UI hook.
 	DefaultRekordboxOnDemandSock = "/run/enginex/rb-ondemand.sock"
 	rekordboxOnDemandSockEnv     = "ENGINEX_RB_ONDEMAND_SOCK"
 )
 
 type rbOnDemandRequest struct {
-	DB     string  `json:"db,omitempty"`    // sqlite3_db_filename(db, "main")
-	Mount  string  `json:"mount,omitempty"` // mounted volume root
-	UUID   string  `json:"uuid,omitempty"`  // Information.uuid from m.db
-	Path   string  `json:"path"`            // Track.path from m.db ("../Contents/...")
-	ID     int64   `json:"id,omitempty"`    // Track.id from m.db
-	Key    *int    `json:"key,omitempty"`   // Track.key (0..23) or omitted/null
-	BPM    float64 `json:"bpm,omitempty"`   // Track.bpm / bpmAnalyzed
-	Length int     `json:"length,omitempty"`
+	DB        string  `json:"db,omitempty"`        // sqlite3_db_filename(db, "main")
+	Mount     string  `json:"mount,omitempty"`     // mounted volume root
+	UUID      string  `json:"uuid,omitempty"`      // Information.uuid from m.db
+	Path      string  `json:"path"`                // Track.path from m.db ("../Contents/...")
+	ID        int64   `json:"id,omitempty"`        // Track.id from m.db
+	ImportKey int64   `json:"importKey,omitempty"` // Track.pdbImportKey from m.db
+	Key       *int    `json:"key,omitempty"`       // Track.key (0..23) or omitted/null
+	BPM       float64 `json:"bpm,omitempty"`       // Track.bpm / bpmAnalyzed
+	Length    int     `json:"length,omitempty"`
 }
 
 var onDemandChmod = os.Chmod
@@ -110,6 +117,9 @@ func (s *Server) startRekordboxOnDemand() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+RekordboxOnDemandRoute, func(w http.ResponseWriter, r *http.Request) {
 		s.serveRekordboxOnDemand(w, r, true)
+	})
+	mux.HandleFunc("POST "+RekordboxOnDemandFilledRoute, func(w http.ResponseWriter, r *http.Request) {
+		s.serveRekordboxFilledNotify(w, r, true)
 	})
 	srv := &http.Server{
 		Handler:           mux,
@@ -238,6 +248,7 @@ type onDemandVerifiedID struct {
 	trackRel      string
 	rowHash       string
 	engineID      int64
+	importKey     int64
 	engineKey     int
 	engineBPMBits uint64
 	engineLen     int
@@ -258,12 +269,13 @@ type rbOnDemandDBKey struct {
 }
 
 type rbOnDemandTrackMeta struct {
-	found    bool
-	id       int64
-	key      int
-	bpm      float64
-	length   int
-	analyzed bool
+	found     bool
+	id        int64
+	importKey int64
+	key       int
+	bpm       float64
+	length    int
+	analyzed  bool
 }
 
 type rbOnDemandDBSnap struct {
@@ -374,11 +386,11 @@ func (s *Server) lookupOnDemandDBMeta(ctx context.Context, stickID bridge.OnDema
 
 	var tm rbOnDemandTrackMeta
 	readRow := func(query string, args ...any) (bool, error) {
-		var id int64
+		var id, importKey int64
 		var rowPath string
 		var keyVal, lengthVal, analyzedVal int
 		var bpmVal float64
-		err := db.QueryRowContext(ctx, query, args...).Scan(&id, &rowPath, &keyVal, &bpmVal, &lengthVal, &analyzedVal)
+		err := db.QueryRowContext(ctx, query, args...).Scan(&id, &rowPath, &importKey, &keyVal, &bpmVal, &lengthVal, &analyzedVal)
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
@@ -391,24 +403,25 @@ func (s *Server) lookupOnDemandDBMeta(ctx context.Context, stickID bridge.OnDema
 			return false, nil
 		}
 		tm = rbOnDemandTrackMeta{
-			found:    true,
-			id:       id,
-			key:      keyVal,
-			bpm:      bpmVal,
-			length:   lengthVal,
-			analyzed: analyzedVal != 0,
+			found:     true,
+			id:        id,
+			importKey: importKey,
+			key:       keyVal,
+			bpm:       bpmVal,
+			length:    lengthVal,
+			analyzed:  analyzedVal != 0,
 		}
 		return true, nil
 	}
 	var matched bool
 	if stickID.EngineID > 0 {
-		matched, err = readRow(`SELECT id, path, COALESCE(key, -1), COALESCE(bpmAnalyzed, bpm, 0), COALESCE(length, 0), COALESCE(isAnalyzed, 0) FROM Track WHERE id = ? LIMIT 1`, stickID.EngineID)
+		matched, err = readRow(`SELECT id, path, COALESCE(pdbImportKey, 0), COALESCE(key, -1), COALESCE(bpmAnalyzed, bpm, 0), COALESCE(length, 0), COALESCE(isAnalyzed, 0) FROM Track WHERE id = ? LIMIT 1`, stickID.EngineID)
 		if err != nil {
 			return "", rbOnDemandTrackMeta{}, bridge.ErrOnDemandUnavailable
 		}
 	}
 	if !matched {
-		matched, err = readRow(`SELECT id, path, COALESCE(key, -1), COALESCE(bpmAnalyzed, bpm, 0), COALESCE(length, 0), COALESCE(isAnalyzed, 0) FROM Track WHERE path = ? OR path = ? ORDER BY id DESC LIMIT 1`, "../"+stickID.TrackRel, stickID.TrackRel)
+		matched, err = readRow(`SELECT id, path, COALESCE(pdbImportKey, 0), COALESCE(key, -1), COALESCE(bpmAnalyzed, bpm, 0), COALESCE(length, 0), COALESCE(isAnalyzed, 0) FROM Track WHERE path = ? OR path = ? ORDER BY id DESC LIMIT 1`, "../"+stickID.TrackRel, stickID.TrackRel)
 		if err != nil {
 			return "", rbOnDemandTrackMeta{}, bridge.ErrOnDemandUnavailable
 		}
@@ -454,6 +467,10 @@ func (s *Server) lookupOnDemandDBMeta(ctx context.Context, stickID bridge.OnDema
 }
 
 func (s *Server) resolveOnDemandIdentity(ctx context.Context, b *bridge.OnDemandBuilder, req bridge.OnDemandRequest, forPeer bool) (onDemandVerifiedID, bridge.OnDemandRequest, bool, error) {
+	return s.resolveOnDemandIdentityWithImportKey(ctx, b, req, forPeer, 0)
+}
+
+func (s *Server) resolveOnDemandIdentityWithImportKey(ctx context.Context, b *bridge.OnDemandBuilder, req bridge.OnDemandRequest, forPeer bool, requireImportKey int64) (onDemandVerifiedID, bridge.OnDemandRequest, bool, error) {
 	stickID, err := b.InspectIdentity(ctx, req)
 	if err != nil {
 		return onDemandVerifiedID{}, bridge.OnDemandRequest{}, false, err
@@ -478,6 +495,9 @@ func (s *Server) resolveOnDemandIdentity(ctx context.Context, b *bridge.OnDemand
 		EngineLen:  req.EngineLen,
 	}
 	if !tm.found {
+		if requireImportKey > 0 {
+			return onDemandVerifiedID{}, bridge.OnDemandRequest{}, false, bridge.ErrOnDemandNotFound
+		}
 		if forPeer {
 			// Defer peer answers until m.db holds the track row metadata needed to
 			// produce the exact same canonical payload as the source deck's own call.
@@ -488,6 +508,9 @@ func (s *Server) resolveOnDemandIdentity(ctx context.Context, b *bridge.OnDemand
 		}
 	} else {
 		if canonical.EngineID > 0 && canonical.EngineID != tm.id {
+			return onDemandVerifiedID{}, bridge.OnDemandRequest{}, false, bridge.ErrOnDemandNotFound
+		}
+		if requireImportKey > 0 && (tm.importKey <= 0 || tm.importKey != requireImportKey) {
 			return onDemandVerifiedID{}, bridge.OnDemandRequest{}, false, bridge.ErrOnDemandNotFound
 		}
 		canonical.EngineID = tm.id
@@ -519,6 +542,7 @@ func (s *Server) resolveOnDemandIdentity(ctx context.Context, b *bridge.OnDemand
 		trackRel:      stickID.TrackRel,
 		rowHash:       stickID.RowHash,
 		engineID:      canonical.EngineID,
+		importKey:     tm.importKey,
 		engineKey:     canonical.EngineKey,
 		engineBPMBits: math.Float64bits(canonical.EngineBPM),
 		engineLen:     canonical.EngineLen,
@@ -537,17 +561,29 @@ func (s *Server) buildOnDemandCached(ctx context.Context, req bridge.OnDemandReq
 	return entry.res, nil
 }
 
+func (s *Server) buildOnDemandCachedWithImportKey(ctx context.Context, req bridge.OnDemandRequest, forPeer bool, requireImportKey int64) (*bridge.OnDemandResult, error) {
+	entry, _, err := s.buildOnDemandEntryCheckedWithImportKey(ctx, req, forPeer, false, requireImportKey)
+	if err != nil {
+		return nil, err
+	}
+	return entry.res, nil
+}
+
 func (s *Server) buildOnDemandEntry(ctx context.Context, req bridge.OnDemandRequest, forPeer bool) (*rbOnDemandCacheEntry, error) {
-	entry, _, err := s.buildOnDemandEntryChecked(ctx, req, forPeer, false)
+	entry, _, err := s.buildOnDemandEntryCheckedWithImportKey(ctx, req, forPeer, false, 0)
 	return entry, err
 }
 
 func (s *Server) buildOnDemandEntryChecked(ctx context.Context, req bridge.OnDemandRequest, forPeer, skipIfDBAnalyzed bool) (*rbOnDemandCacheEntry, bool, error) {
+	return s.buildOnDemandEntryCheckedWithImportKey(ctx, req, forPeer, skipIfDBAnalyzed, 0)
+}
+
+func (s *Server) buildOnDemandEntryCheckedWithImportKey(ctx context.Context, req bridge.OnDemandRequest, forPeer, skipIfDBAnalyzed bool, requireImportKey int64) (*rbOnDemandCacheEntry, bool, error) {
 	b := s.rbOnDemandBuilder()
 	if b == nil {
 		return nil, false, os.ErrNotExist
 	}
-	id, canonical, dbAnalyzed, err := s.resolveOnDemandIdentity(ctx, b, req, forPeer)
+	id, canonical, dbAnalyzed, err := s.resolveOnDemandIdentityWithImportKey(ctx, b, req, forPeer, requireImportKey)
 	if err != nil {
 		return nil, false, err
 	}
@@ -572,7 +608,7 @@ func (s *Server) buildOnDemandEntryChecked(ctx context.Context, req bridge.OnDem
 			return nil, dbAnalyzed, werr
 		}
 		// Revalidate identity before authorizing a waiter/peer response.
-		postID, _, _, verr := s.resolveOnDemandIdentity(ctx, b, req, forPeer)
+		postID, _, _, verr := s.resolveOnDemandIdentityWithImportKey(ctx, b, req, forPeer, requireImportKey)
 		if verr != nil || postID != id {
 			return nil, dbAnalyzed, bridge.ErrOnDemandUnavailable
 		}
@@ -602,7 +638,7 @@ func (s *Server) buildOnDemandEntryChecked(ctx context.Context, req bridge.OnDem
 		s.rbOnDemandBuildCount.Add(1)
 		res, berr := b.Build(buildCtx, canonical)
 		if berr == nil && res != nil {
-			postID, _, _, verr := s.resolveOnDemandIdentity(buildCtx, b, canonical, forPeer)
+			postID, _, _, verr := s.resolveOnDemandIdentityWithImportKey(buildCtx, b, canonical, forPeer, requireImportKey)
 			if verr != nil || postID != id {
 				res, berr = nil, bridge.ErrOnDemandUnavailable
 			}
@@ -644,7 +680,7 @@ func (s *Server) buildOnDemandEntryChecked(ctx context.Context, req bridge.OnDem
 	if werr != nil {
 		return nil, dbAnalyzed, werr
 	}
-	postID, _, _, verr := s.resolveOnDemandIdentity(ctx, b, req, forPeer)
+	postID, _, _, verr := s.resolveOnDemandIdentityWithImportKey(ctx, b, req, forPeer, requireImportKey)
 	if verr != nil || postID != id {
 		return nil, dbAnalyzed, bridge.ErrOnDemandUnavailable
 	}
@@ -816,6 +852,10 @@ func (s *Server) serveRekordboxOnDemand(w http.ResponseWriter, r *http.Request, 
 	}
 	if strings.TrimSpace(req.Path) == "" {
 		fail(w, http.StatusBadRequest, errors.New("missing path"))
+		return
+	}
+	if strings.TrimSpace(req.Mount) == "" && strings.HasPrefix(strings.TrimSpace(req.DB), "net://") {
+		s.serveRekordboxLinkRelay(w, r, req)
 		return
 	}
 	mount, ok := resolveOnDemandMount(req.Mount, req.DB, s.onDemandMediaRoot())
