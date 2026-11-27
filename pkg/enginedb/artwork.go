@@ -313,6 +313,7 @@ func extractEmbeddedArtworkFromReadSeeker(ctx context.Context, rs io.ReadSeeker,
 
 	return nil, ErrNoArtwork
 }
+
 // maxArtworkBytes bounds what one file's tag or cover atom may make us read: a 10-byte header must
 // not allocate 256 MiB on a 32-bit deck with 1-2 GB of RAM (BH-GC1-14).
 const maxArtworkBytes = 32 << 20
