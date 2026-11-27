@@ -358,12 +358,20 @@ func TrackRepairProvenance(t *rbstate.Track, inFilled bool, genre, comment, labe
 // PerfDegraded/PerfMissing), any Written digest, any previously built ANLZ signature,
 // any synced color tag, and any row already filled in filled.jsonl.
 //
-// Allows:
-//  1. Untouched PerfNone rows with Edit == 0 and either Synced == nil or Synced matching
-//     the mount-time OnDemand baseline.
-//  2. Idle-settled rows (maintainer restore rule): #321 write-back's idle watcher recorded
-//     the stock-OA row without writing anything back (Perf == PerfNone, Built.ANLZ == 0,
-//     Written == nil, SyncedColorTag == nil, !InFilledJournal, Synced == SyncedDigest(cur)).
+// The live row is checked by IsStockOverwrittenPerformance so any surviving DJ hot cue,
+// loop, active loop, main-cue offset, grid edit, or beat-grid lock blocks repair.
+// Among rows passing those invariants, exactly three provenance states are accepted:
+//  1. Nil Synced (Edit == 0, len(Synced) == 0): older pre-#321 or non-OnDemand snapshot
+//     rows that have never been written back.
+//  2. Mount-baseline Synced (Edit == 0, Synced == SyncedDigest(nil, FastCues, FastLoops,
+//     FastActive, genre, comment, label)): untouched OnDemand mount baseline before
+//     #321's idle watcher has settled the live row.
+//  3. Idle-settled Synced (Synced == SyncedDigest(nil, CurCues, CurLoops, CurActiveLoops,
+//     genre, comment, label)): #321 write-back's idle watcher recorded the current live
+//     stock-OA row without writing anything back (maintainer's restore rule).
+//
+// Any other Synced state — including a mismatched non-baseline Synced digest at Edit == 0
+// or Edit != 0, or Edit != 0 with nil/stale mount-baseline Synced — is refused.
 func StockRepairProvenanceAllowed(p StockRepairProvenance) bool {
 	if p.Native ||
 		p.PerfState != rbstate.PerfNone ||

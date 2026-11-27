@@ -441,23 +441,48 @@ func TestStockRepairProvenanceAndScan(t *testing.T) {
 	oaBeats := buildStockOABeats(t, sr, 13707967, beat0, 136.0, 704, 0, 9)
 	qcAutoBeat0 := buildQuickCuesBlob(t, emptyPos, emptyNames, beat0, 1, beat0)
 	mountBaseline := SyncedDigest(nil, nil, nil, 0, "House", "", "")
-
-	if !StockRepairProvenanceAllowed(StockRepairProvenance{PerfState: rbstate.PerfNone}) {
-		t.Fatal("clean PerfNone provenance rejected")
-	}
-	if !StockRepairProvenanceAllowed(StockRepairProvenance{
-		PerfState: rbstate.PerfNone, Synced: mountBaseline, Genre: "House",
-	}) {
-		t.Fatal("untouched OnDemand mount baseline Synced rejected")
-	}
-	// Maintainer restore rule: idle-settled row (PerfNone, Built.ANLZ==0, Written==nil,
-	// SyncedColorTag==nil, !InFilledJournal, Synced==SyncedDigest(cur)) MUST be allowed.
 	idleSettled := SyncedDigest(nil, qcAutoBeat0, emptyLoops, 0, "House", "", "")
-	if !StockRepairProvenanceAllowed(StockRepairProvenance{
-		PerfState: rbstate.PerfNone, Edit: 1795690063, Synced: idleSettled, Genre: "House",
-		CurCues: qcAutoBeat0, CurLoops: emptyLoops,
-	}) {
-		t.Fatal("maintainer-approved idle-settled provenance rejected")
+	stockRow := StockOverwrittenRow{
+		TrackData: []byte{1}, Overview: []byte{1}, Beats: oaBeats,
+		QuickCues: qcAutoBeat0, Loops: emptyLoops,
+	}
+
+	// Explicitly verify each of the three PM-approved accepted provenance states
+	// (nil Synced, mount-baseline Synced, idle-settled current Synced).
+	for _, tc := range []struct {
+		name string
+		prov StockRepairProvenance
+	}{
+		{
+			name: "nil_synced_pre321",
+			prov: StockRepairProvenance{
+				PerfState: rbstate.PerfNone, Edit: 0, Synced: nil, Genre: "House",
+				CurCues: qcAutoBeat0, CurLoops: emptyLoops,
+			},
+		},
+		{
+			name: "mount_baseline_synced",
+			prov: StockRepairProvenance{
+				PerfState: rbstate.PerfNone, Edit: 0, Synced: mountBaseline, Genre: "House",
+				CurCues: qcAutoBeat0, CurLoops: emptyLoops,
+			},
+		},
+		{
+			name: "idle_settled_current_synced",
+			prov: StockRepairProvenance{
+				PerfState: rbstate.PerfNone, Edit: 1795690063, Synced: idleSettled, Genre: "House",
+				CurCues: qcAutoBeat0, CurLoops: emptyLoops,
+			},
+		},
+	} {
+		t.Run("accept_"+tc.name, func(t *testing.T) {
+			if !StockRepairProvenanceAllowed(tc.prov) {
+				t.Fatalf("accepted provenance state %q was rejected", tc.name)
+			}
+			if !IsRepairableStockOverwritten(stockRow, tc.prov) {
+				t.Fatalf("accepted provenance state %q with stock-OA row was rejected", tc.name)
+			}
+		})
 	}
 	for _, tc := range []struct {
 		name string
@@ -474,11 +499,17 @@ func TestStockRepairProvenanceAndScan(t *testing.T) {
 		{"in_filled_journal", StockRepairProvenance{InFilledJournal: true, Synced: idleSettled, Genre: "House", CurCues: qcAutoBeat0, CurLoops: emptyLoops}},
 		{"edit_nonzero_no_synced", StockRepairProvenance{Edit: 1795690063, Genre: "House"}},
 		{"edit_nonzero_stale_mount_baseline", StockRepairProvenance{Edit: 1795690063, Synced: mountBaseline, Genre: "House", CurCues: qcAutoBeat0, CurLoops: emptyLoops}},
+		{"edit_zero_mismatched_non_baseline_synced", StockRepairProvenance{Edit: 0, Synced: []byte{1, 2, 3, 4}, Genre: "House", CurCues: qcAutoBeat0, CurLoops: emptyLoops}},
 		{"synced_writeback_mismatch", StockRepairProvenance{Edit: 1795690063, Synced: []byte{1, 2, 3, 4}, Genre: "House", CurCues: qcAutoBeat0, CurLoops: emptyLoops}},
 	} {
-		if StockRepairProvenanceAllowed(tc.prov) {
-			t.Fatalf("provenance case %q unexpectedly allowed", tc.name)
-		}
+		t.Run("reject_"+tc.name, func(t *testing.T) {
+			if StockRepairProvenanceAllowed(tc.prov) {
+				t.Fatalf("provenance case %q unexpectedly allowed", tc.name)
+			}
+			if IsRepairableStockOverwritten(stockRow, tc.prov) {
+				t.Fatalf("provenance case %q unexpectedly allowed by IsRepairableStockOverwritten", tc.name)
+			}
+		})
 	}
 
 	dir := t.TempDir()

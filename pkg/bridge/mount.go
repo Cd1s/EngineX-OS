@@ -340,7 +340,8 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	unchanged := headErr == nil && head.Stamp == stamp && head.Rules == rbstate.Rules && errors.Is(nextErr, os.ErrNotExist) &&
 		!o.Full && o.SmartMatch == 0 && libraryUUID(dir) == head.LibraryUUID
 	st.done("stat", "%d export files, snapshot %v, unchanged %v", len(files), headErr == nil, unchanged)
-	if unchanged && head.Pending.None() {
+	onDemandPendingRepairOnly := o.OnDemand && !head.Pending.None() && head.Pending.Rows == 0 && !head.Pending.Lists && !head.Pending.Verify
+	if unchanged && (head.Pending.None() || onDemandPendingRepairOnly) {
 		if o.OnDemand {
 			if head.Mode != rbstate.ModeOnDemand {
 				// Base-format snapshot lacks Track.AnalysisPath/ArtworkPath/Duration/SampleRate:
@@ -359,7 +360,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 			}
 		}
 		if unchanged {
-			repaired, pending, rerr := repairStockOverwrittenAtMount(ctx, mount, dir, r, head, st, o.OnDemand, startBG)
+			repaired, pending, rerr := repairStockOverwrittenAtMount(parentCtx, ctx, mount, dir, r, head, st, o.OnDemand, startBG)
 			if rerr != nil {
 				if errors.Is(rerr, errWindowDeadline) || deadlineReached() {
 					res.Applied += repaired

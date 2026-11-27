@@ -32,9 +32,63 @@ import (
 //     so Step 2's normal on-demand load hook fills them on load without a 24-min background pass.
 
 var (
-	repairItemReserve = 500 * time.Millisecond
-	repairBeforeBuild func(ctx context.Context, key string) error
+	repairItemReserve   = 500 * time.Millisecond
+	repairCommitReserve = 750 * time.Millisecond // bounded fallback window reserved inside insertBudget for stub reset + commit
+	repairFlushReserve  = 250 * time.Millisecond // minimum margin left before finishLimit required to open/commit m.db
+	repairBeforeBuild   func(ctx context.Context, key string) error
 )
+
+// repairDeadlines computes the hard commit ceiling (finishLimit), the earlier inline-build
+// cutoff (inlineLimit = finishLimit - commitReserve) that reserves a bounded fallback window
+// inside the budget for OnDemand stub reset + commit, and the minimum flush reserve.
+func repairDeadlines(ctx context.Context, st *steps) (finishLimit, inlineLimit time.Time, flushRes time.Duration) {
+	if !st.optional.IsZero() {
+		finishLimit = st.optional
+	}
+	if dl, ok := ctx.Deadline(); ok && (finishLimit.IsZero() || dl.Before(finishLimit)) {
+		finishLimit = dl
+	}
+	if finishLimit.IsZero() {
+		return time.Time{}, time.Time{}, 0
+	}
+	commitRes := repairCommitReserve
+	if insertBudget > 0 && insertBudget/2 < commitRes {
+		commitRes = insertBudget / 2
+	}
+	flushRes = repairFlushReserve
+	if commitRes/2 < flushRes {
+		flushRes = commitRes / 2
+	}
+	inlineLimit = finishLimit.Add(-commitRes)
+	return finishLimit, inlineLimit, flushRes
+}
+
+func saveDurablePending(parentCtx context.Context, dir string, snap *rbstate.Snapshot, st *steps) error {
+	if snap == nil || parentCtx.Err() != nil {
+		return parentCtx.Err()
+	}
+	if !st.kill.IsZero() && time.Until(st.kill) < saveReserve {
+		return errWindowDeadline
+	}
+	saveCtx, cancel := context.WithTimeout(parentCtx, saveReserve)
+	defer cancel()
+	return snap.SaveCtx(saveCtx, dir)
+}
+
+// hasPendingStockRepair reports whether an OnDemand stick with durably recorded Pending.Perf > 0
+// still has stock-OA-overwritten rows needing repair (used by FillInBackground to decide whether
+// to build a clean next library while idle).
+func hasPendingStockRepair(ctx context.Context, dbDir string, snap *rbstate.Snapshot) bool {
+	if snap == nil || snap.Pending.Perf <= 0 || snap.LibraryUUID == "" || snap.Rules != rbstate.Rules {
+		return false
+	}
+	liveUUID, candidates, err := enginedb.ScanStockOACandidatesRO(ctx, filepath.Join(dbDir, "m.db"))
+	if err != nil || liveUUID != snap.LibraryUUID || len(candidates) == 0 {
+		return false
+	}
+	filled := loadFilledJournal(liveUUID)
+	return len(filterStockRepairMatches(candidates, snap, filled)) > 0
+}
 
 type stockRepairMatch struct {
 	cand  enginedb.StockOACandidate
@@ -239,7 +293,9 @@ func buildStockRepairTrack(ctx context.Context, mount string, r *compat.Resolver
 	}
 	src.Sig.Row = tr.Row
 
-	rec, err = enginedb.BuildTrack(r, rt, src, enginedb.ReadOptions{})
+	rec, err = enginedb.BuildTrack(r, rt, src, enginedb.ReadOptions{
+		Pause: func(int, time.Duration) error { return ctx.Err() },
+	})
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, rt, false, true, ctx.Err()
@@ -331,18 +387,25 @@ func applyBuiltStockRepairs(ctx context.Context, b *enginedb.Batch, built []buil
 
 // resetRemainingToImportStub resets over-budget OnDemand rows back to their clean untouched
 // import stub so Step 2's normal on-demand load hook fills them cleanly on load without
-// triggering a full background perf pass.
-func resetRemainingToImportStub(ctx context.Context, b *enginedb.Batch, remaining []stockRepairMatch) (int, error) {
+// triggering a full background perf pass. Stops before finishLimit - flushRes (or saveReserve
+// before kill) and returns any un-reset tail so the caller can commit inside the budget and
+// record leftovers durably.
+func resetRemainingToImportStub(ctx context.Context, b *enginedb.Batch, remaining []stockRepairMatch, finishLimit time.Time, flushRes time.Duration, st *steps) (int, []stockRepairMatch, error) {
 	resetCount := 0
-	for _, rem := range remaining {
+	for i, rem := range remaining {
+		if ctx.Err() != nil ||
+			(!finishLimit.IsZero() && time.Until(finishLimit) < flushRes) ||
+			(!st.kill.IsZero() && time.Until(st.kill) < saveReserve) {
+			return resetCount, remaining[i:], nil
+		}
 		t := rem.track
 		c := rem.cand
 		if err := b.ResetToImportStub(ctx, c.ID, t.FastCues, t.FastLoops, t.FastActive); err != nil {
-			return resetCount, err
+			return resetCount, remaining[i:], err
 		}
 		newEdit, newDigest, err := b.Synced(ctx, c.ID)
 		if err != nil {
-			return resetCount, err
+			return resetCount, remaining[i:], err
 		}
 		t.Perf = rbstate.PerfNone
 		t.Built = rbstate.TrackSig{}
@@ -355,7 +418,7 @@ func resetRemainingToImportStub(ctx context.Context, b *enginedb.Batch, remainin
 		}
 		resetCount++
 	}
-	return resetCount, nil
+	return resetCount, nil, nil
 }
 
 func markRemainingForBackground(snap *rbstate.Snapshot, remaining []stockRepairMatch) {
@@ -371,11 +434,22 @@ func markRemainingForBackground(snap *rbstate.Snapshot, remaining []stockRepairM
 	}
 }
 
-func repairStockOverwrittenAtMount(ctx context.Context, mount, dir string, r *compat.Resolver, head rbstate.Header, st *steps, onDemand bool, startBG func()) (repaired int, pending rbstate.Pending, err error) {
+func clearStaleOnDemandPending(parentCtx context.Context, dir string, snap *rbstate.Snapshot, st *steps) (rbstate.Pending, error) {
+	if snap == nil || snap.Pending.Perf <= 0 {
+		return rbstate.Pending{}, nil
+	}
+	snap.Pending.Perf = 0
+	if err := saveDurablePending(parentCtx, dir, snap, st); err != nil {
+		return rbstate.Pending{Perf: 1}, nil
+	}
+	return snap.Pending, nil
+}
+
+func repairStockOverwrittenAtMount(parentCtx, ctx context.Context, mount, dir string, r *compat.Resolver, head rbstate.Header, st *steps, onDemand bool, startBG func()) (repaired int, pending rbstate.Pending, err error) {
 	if ctx.Err() != nil {
 		return 0, head.Pending, ctx.Err()
 	}
-	if !st.kill.IsZero() && !st.must(200*time.Millisecond) {
+	if !st.kill.IsZero() && time.Until(st.kill) < saveReserve {
 		return 0, head.Pending, nil
 	}
 	mdb := filepath.Join(dir, "m.db")
@@ -387,7 +461,16 @@ func repairStockOverwrittenAtMount(ctx context.Context, mount, dir string, r *co
 		log.Printf("rb-bridge: mount repair prefilter skipped: %v", serr)
 		return 0, head.Pending, nil
 	}
-	if liveUUID == "" || liveUUID != head.LibraryUUID || len(candidates) == 0 {
+	if liveUUID == "" || liveUUID != head.LibraryUUID {
+		return 0, head.Pending, nil
+	}
+	if len(candidates) == 0 {
+		if onDemand && head.Pending.Perf > 0 {
+			if snap, lerr := rbstate.Load(dir); lerr == nil && snap.LibraryUUID == liveUUID && snap.Rules == rbstate.Rules {
+				p, _ := clearStaleOnDemandPending(parentCtx, dir, snap, st)
+				return 0, p, nil
+			}
+		}
 		return 0, head.Pending, nil
 	}
 	snap, lerr := rbstate.Load(dir)
@@ -397,30 +480,55 @@ func repairStockOverwrittenAtMount(ctx context.Context, mount, dir string, r *co
 	filled := loadFilledJournal(liveUUID)
 	matches := filterStockRepairMatches(candidates, snap, filled)
 	if len(matches) == 0 {
+		if onDemand && head.Pending.Perf > 0 {
+			p, _ := clearStaleOnDemandPending(parentCtx, dir, snap, st)
+			return 0, p, nil
+		}
 		return 0, head.Pending, nil
 	}
+
+	finishLimit, inlineLimit, flushRes := repairDeadlines(ctx, st)
 
 	var built []builtStockRepair
 	var remaining []stockRepairMatch
 	for idx, m := range matches {
-		if ctx.Err() != nil || !st.more(repairItemReserve) || (!st.kill.IsZero() && !st.must(saveReserve)) {
+		if ctx.Err() != nil ||
+			(!inlineLimit.IsZero() && !time.Now().Before(inlineLimit)) ||
+			(!st.kill.IsZero() && !st.must(saveReserve)) {
 			remaining = append(remaining, matches[idx:]...)
 			break
 		}
+		buildCtx := ctx
+		var buildCancel context.CancelFunc
+		if !inlineLimit.IsZero() {
+			buildCtx, buildCancel = context.WithDeadline(ctx, inlineLimit)
+		}
 		if repairBeforeBuild != nil {
-			if herr := repairBeforeBuild(ctx, m.track.Key); herr != nil {
-				if errors.Is(herr, errWindowDeadline) {
+			herr := repairBeforeBuild(buildCtx, m.track.Key)
+			if herr != nil {
+				if buildCancel != nil {
+					buildCancel()
+				}
+				if errors.Is(herr, errWindowDeadline) || errors.Is(herr, context.DeadlineExceeded) || buildCtx.Err() != nil {
 					remaining = append(remaining, matches[idx:]...)
 					break
 				}
 				return 0, head.Pending, herr
 			}
-			if ctx.Err() != nil || !st.more(repairItemReserve) || (!st.kill.IsZero() && !st.must(saveReserve)) {
+			if ctx.Err() != nil ||
+				(!inlineLimit.IsZero() && !time.Now().Before(inlineLimit)) ||
+				(!st.kill.IsZero() && !st.must(saveReserve)) {
+				if buildCancel != nil {
+					buildCancel()
+				}
 				remaining = append(remaining, matches[idx:]...)
 				break
 			}
 		}
-		rec, rt, ok, deferBG, berr := buildStockRepairTrack(ctx, mount, r, m.cand, m.track, nil)
+		rec, rt, ok, deferBG, berr := buildStockRepairTrack(buildCtx, mount, r, m.cand, m.track, nil)
+		if buildCancel != nil {
+			buildCancel()
+		}
 		if berr != nil {
 			remaining = append(remaining, matches[idx:]...)
 			break
@@ -432,103 +540,141 @@ func repairStockOverwrittenAtMount(ctx context.Context, mount, dir string, r *co
 		}
 	}
 
-	// Non-OnDemand with nothing built inline: hand off directly to FillInBackground without opening m.db RW.
-	if len(built) == 0 && !onDemand {
-		if len(remaining) == 0 {
-			return 0, head.Pending, nil
-		}
-		markRemainingForBackground(snap, remaining)
-		if st.kill.IsZero() || time.Until(st.kill) >= saveReserve {
-			if saveErr := snap.SaveCtx(ctx, dir); saveErr != nil {
-				return 0, head.Pending, saveErr
-			}
-		}
-		startBG()
-		st.done("repair", "0 inline, %d stock-overwritten rows handed to background", len(remaining))
-		return 0, snap.Pending, nil
-	}
 	if len(built) == 0 && len(remaining) == 0 {
+		if onDemand && head.Pending.Perf > 0 {
+			p, _ := clearStaleOnDemandPending(parentCtx, dir, snap, st)
+			return 0, p, nil
+		}
 		return 0, head.Pending, nil
 	}
 
-	if !st.kill.IsZero() && time.Until(st.kill) < saveReserve {
-		if !onDemand {
-			allRem := make([]stockRepairMatch, 0, len(built)+len(remaining))
-			for _, item := range built {
-				allRem = append(allRem, item.match)
-			}
-			allRem = append(allRem, remaining...)
-			markRemainingForBackground(snap, allRem)
-			startBG()
+	deferOutstanding := func(hardDeadline bool) (int, rbstate.Pending, error) {
+		outstanding := make([]stockRepairMatch, 0, len(built)+len(remaining))
+		for _, item := range built {
+			outstanding = append(outstanding, item.match)
 		}
-		return 0, snap.Pending, errWindowDeadline
+		outstanding = append(outstanding, remaining...)
+		if len(outstanding) == 0 {
+			return 0, head.Pending, nil
+		}
+		markRemainingForBackground(snap, outstanding)
+		if saveErr := saveDurablePending(parentCtx, dir, snap, st); saveErr != nil && parentCtx.Err() != nil {
+			return 0, snap.Pending, parentCtx.Err()
+		}
+		startBG()
+		st.done("repair", "0 inline, %d stock-overwritten rows recorded durably for background/next insert", len(outstanding))
+		if hardDeadline {
+			return 0, snap.Pending, errWindowDeadline
+		}
+		return 0, snap.Pending, nil
 	}
 
-	lib, oerr := enginedb.OpenLibraryFile(ctx, mdb, mount)
+	// Non-OnDemand with nothing built inline: hand off directly to FillInBackground without opening m.db RW.
+	if len(built) == 0 && !onDemand {
+		return deferOutstanding(ctx.Err() != nil)
+	}
+
+	hardExpired := ctx.Err() != nil || (!st.kill.IsZero() && time.Until(st.kill) < saveReserve)
+	softExhausted := !finishLimit.IsZero() && time.Until(finishLimit) < flushRes
+	if hardExpired || softExhausted {
+		return deferOutstanding(hardExpired)
+	}
+
+	commitCtx := ctx
+	var commitCancel context.CancelFunc
+	if !finishLimit.IsZero() {
+		commitCtx, commitCancel = context.WithDeadline(ctx, finishLimit)
+		defer commitCancel()
+	}
+
+	lib, oerr := enginedb.OpenLibraryFile(commitCtx, mdb, mount)
 	if oerr != nil {
+		if errors.Is(oerr, context.DeadlineExceeded) || commitCtx.Err() != nil {
+			return deferOutstanding(ctx.Err() != nil)
+		}
 		return 0, head.Pending, oerr
 	}
 	defer lib.Close()
 
-	b, berr := lib.Begin(ctx)
+	b, berr := lib.Begin(commitCtx)
 	if berr != nil {
+		if errors.Is(berr, context.DeadlineExceeded) || commitCtx.Err() != nil {
+			return deferOutstanding(ctx.Err() != nil)
+		}
 		return 0, head.Pending, berr
 	}
 	defer b.Rollback()
 
-	repaired, overviews, aerr := applyBuiltStockRepairs(ctx, b, built)
+	repaired, overviews, aerr := applyBuiltStockRepairs(commitCtx, b, built)
 	if aerr != nil {
+		if errors.Is(aerr, context.DeadlineExceeded) || commitCtx.Err() != nil {
+			return deferOutstanding(ctx.Err() != nil)
+		}
 		return 0, head.Pending, aerr
 	}
 	stubReset := 0
 	if onDemand && len(remaining) > 0 {
-		stubReset, err = resetRemainingToImportStub(ctx, b, remaining)
+		var unreset []stockRepairMatch
+		stubReset, unreset, err = resetRemainingToImportStub(commitCtx, b, remaining, finishLimit, flushRes, st)
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || commitCtx.Err() != nil {
+				return deferOutstanding(ctx.Err() != nil)
+			}
 			return 0, head.Pending, err
 		}
-		remaining = nil
+		remaining = unreset
 	}
-	if repaired == 0 && stubReset == 0 && len(remaining) == 0 {
-		return 0, head.Pending, nil
+	if repaired == 0 && stubReset == 0 {
+		if len(remaining) == 0 {
+			return 0, head.Pending, nil
+		}
+		return deferOutstanding(ctx.Err() != nil)
 	}
-	markRemainingForBackground(snap, remaining)
-	if repaired > 0 || stubReset > 0 {
-		snap.Applied, snap.Commit = time.Now().Unix(), b.CommitID()
-		if !st.kill.IsZero() && time.Until(st.kill) < saveReserve {
-			return 0, snap.Pending, errWindowDeadline
+	if len(remaining) > 0 {
+		markRemainingForBackground(snap, remaining)
+	} else if onDemand {
+		snap.Pending.Perf = 0
+	}
+	snap.Applied, snap.Commit = time.Now().Unix(), b.CommitID()
+	if commitCtx.Err() != nil || (!st.kill.IsZero() && time.Until(st.kill) < saveReserve) {
+		return deferOutstanding(ctx.Err() != nil || (!st.kill.IsZero() && time.Until(st.kill) < saveReserve))
+	}
+	if err = snap.SaveNextCtx(commitCtx, dir); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || commitCtx.Err() != nil {
+			return deferOutstanding(ctx.Err() != nil)
 		}
-		if err = snap.SaveNextCtx(ctx, dir); err != nil {
-			return 0, head.Pending, err
+		return 0, head.Pending, err
+	}
+	cut("repair next saved")
+	if err = b.Commit(commitCtx); err != nil {
+		_ = rbstate.DropNext(dir)
+		if errors.Is(err, context.DeadlineExceeded) || commitCtx.Err() != nil {
+			return deferOutstanding(ctx.Err() != nil)
 		}
-		cut("repair next saved")
-		if err = b.Commit(ctx); err != nil {
-			_ = rbstate.DropNext(dir)
-			return 0, head.Pending, err
+		return 0, head.Pending, err
+	}
+	cut("repair committed")
+	promoteCtx, promoteCancel := context.WithTimeout(parentCtx, saveReserve)
+	err = rbstate.PromoteCtx(promoteCtx, dir)
+	promoteCancel()
+	if err != nil {
+		return repaired + stubReset, snap.Pending, err
+	}
+	cut("repair promoted")
+	for id, body := range overviews {
+		if commitCtx.Err() != nil || (!finishLimit.IsZero() && !time.Now().Before(finishLimit)) {
+			break
 		}
-		cut("repair committed")
-		if err = rbstate.PromoteCtx(ctx, dir); err != nil {
-			return repaired + stubReset, snap.Pending, err
-		}
-		cut("repair promoted")
-		for id, body := range overviews {
-			if ctx.Err() != nil || !st.more(0) {
-				break
-			}
-			writeOverview(dir, lib.UUID(), id, body)
-		}
-		if snap.Mode == rbstate.ModeOnDemand && ctx.Err() == nil && (st.kill.IsZero() || time.Until(st.kill) > spare/2) {
-			if serr := syncBrowseIndexCtx(ctx, dir, snap); serr != nil {
-				log.Printf("rb-bridge: browse index sync after mount repair skipped: %v", serr)
-			}
-		}
-	} else if len(remaining) > 0 {
-		if st.kill.IsZero() || time.Until(st.kill) >= saveReserve {
-			if saveErr := snap.SaveCtx(ctx, dir); saveErr != nil {
-				return 0, head.Pending, saveErr
-			}
+		writeOverview(dir, lib.UUID(), id, body)
+	}
+	if snap.Mode == rbstate.ModeOnDemand && commitCtx.Err() == nil &&
+		(finishLimit.IsZero() || time.Now().Before(finishLimit)) &&
+		(st.kill.IsZero() || time.Until(st.kill) > spare/2) {
+		if serr := syncBrowseIndexCtx(commitCtx, dir, snap); serr != nil {
+			log.Printf("rb-bridge: browse index sync after mount repair skipped: %v", serr)
 		}
 	}
-	if !onDemand && len(remaining) > 0 {
+	if len(remaining) > 0 {
 		startBG()
 	}
 	st.done("repair", "%d repaired inline, %d reset to stub, %d left for background", repaired, stubReset, len(remaining))
@@ -539,7 +685,7 @@ func (w *window) repairStockOverwritten() error {
 	if w.ctx.Err() != nil || w.lib == nil || w.snap == nil {
 		return nil
 	}
-	if !w.st.kill.IsZero() && !w.st.must(200*time.Millisecond) {
+	if !w.next && !w.st.kill.IsZero() && !w.st.must(200*time.Millisecond) {
 		return nil
 	}
 	candidates, err := w.lib.ScanStockOACandidates(w.ctx)
@@ -559,22 +705,49 @@ func (w *window) repairStockOverwritten() error {
 	if err != nil {
 		return err
 	}
+	var finishLimit, inlineLimit time.Time
+	var flushRes time.Duration
+	if !w.next {
+		finishLimit, inlineLimit, flushRes = repairDeadlines(w.ctx, w.st)
+	}
+
 	var built []builtStockRepair
 	var remaining []stockRepairMatch
 	for idx, m := range matches {
-		if w.ctx.Err() != nil || !w.st.more(repairItemReserve) || (!w.st.kill.IsZero() && !w.st.must(saveReserve)) {
+		if w.rest != nil {
+			if err := w.rest(0); err != nil {
+				return err
+			}
+		}
+		if w.ctx.Err() != nil ||
+			(!inlineLimit.IsZero() && !time.Now().Before(inlineLimit)) ||
+			(!w.next && !w.st.kill.IsZero() && !w.st.must(saveReserve)) {
 			remaining = append(remaining, matches[idx:]...)
 			break
 		}
+		buildCtx := w.ctx
+		var buildCancel context.CancelFunc
+		if !inlineLimit.IsZero() {
+			buildCtx, buildCancel = context.WithDeadline(w.ctx, inlineLimit)
+		}
 		if repairBeforeBuild != nil {
-			if herr := repairBeforeBuild(w.ctx, m.track.Key); herr != nil {
-				if errors.Is(herr, errWindowDeadline) {
+			herr := repairBeforeBuild(buildCtx, m.track.Key)
+			if herr != nil {
+				if buildCancel != nil {
+					buildCancel()
+				}
+				if errors.Is(herr, errWindowDeadline) || errors.Is(herr, context.DeadlineExceeded) || buildCtx.Err() != nil {
 					remaining = append(remaining, matches[idx:]...)
 					break
 				}
 				return herr
 			}
-			if w.ctx.Err() != nil || !w.st.more(repairItemReserve) || (!w.st.kill.IsZero() && !w.st.must(saveReserve)) {
+			if w.ctx.Err() != nil ||
+				(!inlineLimit.IsZero() && !time.Now().Before(inlineLimit)) ||
+				(!w.next && !w.st.kill.IsZero() && !w.st.must(saveReserve)) {
+				if buildCancel != nil {
+					buildCancel()
+				}
 				remaining = append(remaining, matches[idx:]...)
 				break
 			}
@@ -585,7 +758,10 @@ func (w *window) repairStockOverwritten() error {
 				vt = v
 			}
 		}
-		rec, rt, ok, deferBG, berr := buildStockRepairTrack(w.ctx, w.mount, r, m.cand, m.track, vt)
+		rec, rt, ok, deferBG, berr := buildStockRepairTrack(buildCtx, w.mount, r, m.cand, m.track, vt)
+		if buildCancel != nil {
+			buildCancel()
+		}
 		if berr != nil {
 			remaining = append(remaining, matches[idx:]...)
 			break
@@ -596,12 +772,28 @@ func (w *window) repairStockOverwritten() error {
 			remaining = append(remaining, m)
 		}
 	}
-	if len(built) == 0 && !(w.o.OnDemand && len(remaining) > 0) {
-		for _, rem := range remaining {
+	noteWindowRemaining := func(remList []stockRepairMatch) {
+		for _, rem := range remList {
 			rem.track.Perf = rbstate.PerfNone
 			rem.track.Built = rbstate.TrackSig{}
 			w.dirty = true
 		}
+		if w.o.OnDemand && len(remList) > 0 {
+			w.pendingRepairs += len(remList)
+			w.dirty = true
+		}
+	}
+	if !w.next && (w.ctx.Err() != nil || (!finishLimit.IsZero() && time.Until(finishLimit) < flushRes) || (!w.st.kill.IsZero() && time.Until(w.st.kill) < saveReserve)) {
+		allRem := make([]stockRepairMatch, 0, len(built)+len(remaining))
+		for _, item := range built {
+			allRem = append(allRem, item.match)
+		}
+		allRem = append(allRem, remaining...)
+		noteWindowRemaining(allRem)
+		return nil
+	}
+	if len(built) == 0 && !(w.o.OnDemand && len(remaining) > 0) {
+		noteWindowRemaining(remaining)
 		return nil
 	}
 	b, err := w.lib.Begin(w.ctx)
@@ -615,18 +807,14 @@ func (w *window) repairStockOverwritten() error {
 	}
 	stubReset := 0
 	if w.o.OnDemand && len(remaining) > 0 {
-		stubReset, err = resetRemainingToImportStub(w.ctx, b, remaining)
+		var unreset []stockRepairMatch
+		stubReset, unreset, err = resetRemainingToImportStub(w.ctx, b, remaining, finishLimit, flushRes, w.st)
 		if err != nil {
 			return err
 		}
-		remaining = nil
-	} else {
-		for _, rem := range remaining {
-			rem.track.Perf = rbstate.PerfNone
-			rem.track.Built = rbstate.TrackSig{}
-			w.dirty = true
-		}
+		remaining = unreset
 	}
+	noteWindowRemaining(remaining)
 	if repaired == 0 && stubReset == 0 {
 		return nil
 	}
@@ -634,7 +822,12 @@ func (w *window) repairStockOverwritten() error {
 		return err
 	}
 	for id, body := range overviews {
-		if w.ctx.Err() != nil || !w.st.more(0) {
+		if w.rest != nil {
+			if w.rest(0) != nil {
+				break
+			}
+		}
+		if w.ctx.Err() != nil || (!w.next && !finishLimit.IsZero() && !time.Now().Before(finishLimit)) {
 			break
 		}
 		writeOverview(w.dir, w.lib.UUID(), id, body)

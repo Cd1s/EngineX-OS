@@ -827,3 +827,338 @@ func TestOnDemandMountRepairsOnceAndBudgetOverflowResetsToStub(t *testing.T) {
 		t.Fatalf("2nd OnDemand mount = %+v, want Bypassed=true Applied=0", res2)
 	}
 }
+
+// Verifies at insert level all three PM-approved provenance states (Edit==0+nil Synced,
+// Edit==0+mount baseline Synced, idle-settled current Synced) are repaired while a
+// mismatched non-baseline Synced digest (even at Edit==0) is strictly refused.
+func TestMountRepairProvenanceThreeAcceptedStatesAndMismatchedSyncedRefused(t *testing.T) {
+	mount := repairStick(t, 5)
+	mountNow(t, mount, MountOptions{OnDemand: true})
+	snap, err := rbstate.Load(dbDir(mount))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracks := sortedTracksByID(snap)
+
+	const beat0 = 11391.4248046875
+	stockBeats := buildTestStockOABeatsMount(t, 44100, 13707967, beat0, 136.0, 704)
+	qcAutoBeat0 := buildTestQuickCuesMount(t, -1, "", beat0, 1, beat0)
+	emptyLoops := buildTestEmptyLoopsMount()
+
+	db := openTestMDBRW(t, mount)
+	readTags := func(id int64) (g, c, l string) {
+		if err := db.QueryRow(`SELECT COALESCE(genre,''), COALESCE(comment,''), COALESCE(label,'') FROM Track WHERE id=?`, id).Scan(&g, &c, &l); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	for i := 0; i < 4; i++ {
+		if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+			[]byte{1}, []byte{1}, stockBeats, qcAutoBeat0, emptyLoops, tracks[i].EngineID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE Track SET isAnalyzed=1, bpmAnalyzed=136.0 WHERE id=?`, tracks[i].EngineID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// State 1: older pre-#321 / non-OnDemand snapshot row (Edit==0, Synced==nil) -> REPAIR.
+	snap.Tracks[tracks[0].Key].Edit = 0
+	snap.Tracks[tracks[0].Key].Synced = nil
+	// State 2: untouched OnDemand mount baseline (Edit==0, Synced==mountBaseline) -> REPAIR.
+	g1, c1, l1 := readTags(tracks[1].EngineID)
+	snap.Tracks[tracks[1].Key].Edit = 0
+	snap.Tracks[tracks[1].Key].Synced = enginedb.SyncedDigest(nil, tracks[1].FastCues, tracks[1].FastLoops, int64(tracks[1].FastActive), g1, c1, l1)
+	// State 3: idle-settled row (maintainer restore rule: Synced==SyncedDigest(cur)) -> REPAIR.
+	g2, c2, l2 := readTags(tracks[2].EngineID)
+	snap.Tracks[tracks[2].Key].Edit = 1795690063
+	snap.Tracks[tracks[2].Key].Synced = enginedb.SyncedDigest(nil, qcAutoBeat0, emptyLoops, 0, g2, c2, l2)
+	// Rejected: mismatched non-baseline Synced at Edit==0 -> REFUSED.
+	snap.Tracks[tracks[3].Key].Edit = 0
+	snap.Tracks[tracks[3].Key].Synced = []byte{9, 8, 7, 6}
+	db.Close()
+	if err := snap.Save(dbDir(mount)); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncBrowseIndex(dbDir(mount), snap); err != nil {
+		t.Fatal(err)
+	}
+
+	res := mountNow(t, mount, MountOptions{OnDemand: true, Deadline: time.Now().Add(17 * time.Second)})
+	if res.Bypassed || res.Applied != 3 || res.Background || !res.Pending.None() {
+		t.Fatalf("mount repair = %+v, want Bypassed=false Applied=3 Background=false Pending.None", res)
+	}
+	for i := 0; i < 3; i++ {
+		b, q, _, _ := readRowBlobs(t, mount, tracks[i].EngineID)
+		if len(b) == 0 || bytes.Equal(b, stockBeats) || bytes.Equal(q, qcAutoBeat0) {
+			t.Fatalf("accepted provenance track[%d] was not repaired", i)
+		}
+	}
+	b3, q3, _, _ := readRowBlobs(t, mount, tracks[3].EngineID)
+	if !bytes.Equal(b3, stockBeats) || !bytes.Equal(q3, qcAutoBeat0) {
+		t.Fatal("mismatched non-baseline Synced track[3] was unexpectedly modified")
+	}
+	res2 := mountNow(t, mount, MountOptions{OnDemand: true, Deadline: time.Now().Add(17 * time.Second)})
+	if !res2.Bypassed || res2.Applied != 0 {
+		t.Fatalf("2nd mount = %+v, want Bypassed=true Applied=0", res2)
+	}
+}
+
+// Fails at runtime on cb636815: verifies the soft insertBudget reserves a bounded fallback
+// window for OnDemand stub-reset + commit (finishing strictly inside insertBudget), and when
+// an uninterruptible slow build consumes the soft window, no unbounded reset/commit runs past
+// insertBudget — instead outstanding rows are recorded durably for background or next insert.
+func TestOnDemandMountSoftDeadlineBoundedFallbackAndCutoff(t *testing.T) {
+	setupStick := func(t *testing.T) (string, []*rbstate.Track, []byte, []byte, []byte) {
+		t.Helper()
+		mount := repairStick(t, 4)
+		mountNow(t, mount, MountOptions{OnDemand: true})
+		snap, err := rbstate.Load(dbDir(mount))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tracks := sortedTracksByID(snap)
+		const beat0 = 11391.4248046875
+		stockBeats := buildTestStockOABeatsMount(t, 44100, 13707967, beat0, 136.0, 704)
+		qcAutoBeat0 := buildTestQuickCuesMount(t, -1, "", beat0, 1, beat0)
+		qcDJHot := buildTestQuickCuesMount(t, 220500, "DJKeep", beat0, 1, beat0)
+		emptyLoops := buildTestEmptyLoopsMount()
+
+		db := openTestMDBRW(t, mount)
+		for _, idx := range []int{0, 1} {
+			if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+				[]byte{1}, []byte{1}, stockBeats, qcAutoBeat0, emptyLoops, tracks[idx].EngineID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+			[]byte{1}, []byte{1}, stockBeats, qcDJHot, emptyLoops, tracks[2].EngineID); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+		return mount, tracks, stockBeats, qcDJHot, qcAutoBeat0
+	}
+
+	t.Run("reserved_fallback_finishes_within_insert_budget", func(t *testing.T) {
+		mount, tracks, stockBeats, qcDJHot, _ := setupStick(t)
+		oldBudget := insertBudget
+		insertBudget = 1200 * time.Millisecond
+		defer func() { insertBudget = oldBudget }()
+
+		seen := 0
+		oldHook := repairBeforeBuild
+		repairBeforeBuild = func(ctx context.Context, _ string) error {
+			seen++
+			if seen == 2 {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(2 * time.Second):
+					return nil
+				}
+			}
+			return nil
+		}
+		defer func() { repairBeforeBuild = oldHook }()
+
+		t0 := time.Now()
+		bgStarted := false
+		res := mountNow(t, mount, MountOptions{
+			OnDemand:        true,
+			Deadline:        time.Now().Add(17 * time.Second),
+			StartBackground: func() error { bgStarted = true; return nil },
+		})
+		elapsed := time.Since(t0)
+		if elapsed >= insertBudget {
+			t.Fatalf("soft-deadline fallback overran insertBudget: elapsed=%v budget=%v res=%+v", elapsed, insertBudget, res)
+		}
+		if res.Bypassed || res.Applied != 2 || bgStarted || res.Background || !res.Pending.None() {
+			t.Fatalf("soft-deadline bounded fallback = %+v (bgStarted=%v elapsed=%v), want Applied=2 Background=false Pending.None", res, bgStarted, elapsed)
+		}
+		b0, _, _, _ := readRowBlobs(t, mount, tracks[0].EngineID)
+		if len(b0) == 0 || bytes.Equal(b0, stockBeats) {
+			t.Fatal("track[0] was not repaired inline")
+		}
+		b1, q1, l1, _ := readRowBlobs(t, mount, tracks[1].EngineID)
+		if len(b1) != 0 || len(q1) != 0 || len(l1) != 0 {
+			t.Fatalf("track[1] was not reset to untouched stub inside reserved window: beats=%d cues=%d loops=%d", len(b1), len(q1), len(l1))
+		}
+		b2, q2, _, _ := readRowBlobs(t, mount, tracks[2].EngineID)
+		if !bytes.Equal(b2, stockBeats) || !bytes.Equal(q2, qcDJHot) {
+			t.Fatal("track[2] DJ hot cue was modified")
+		}
+	})
+
+	t.Run("uninterruptible_slow_build_past_soft_cutoff_defers_durably", func(t *testing.T) {
+		mount, tracks, stockBeats, qcDJHot, _ := setupStick(t)
+		oldBudget := insertBudget
+		insertBudget = 1200 * time.Millisecond
+		defer func() { insertBudget = oldBudget }()
+
+		seen := 0
+		oldHook := repairBeforeBuild
+		repairBeforeBuild = func(_ context.Context, _ string) error {
+			seen++
+			if seen == 2 {
+				// Simulate an uninterruptible slow read consuming the remaining soft window.
+				time.Sleep(1100 * time.Millisecond)
+			}
+			return nil
+		}
+		defer func() { repairBeforeBuild = oldHook }()
+
+		bgStarted := false
+		res := mountNow(t, mount, MountOptions{
+			OnDemand:        true,
+			Deadline:        time.Now().Add(17 * time.Second),
+			StartBackground: func() error { bgStarted = true; return nil },
+		})
+		if res.Bypassed || res.Applied != 0 || !bgStarted || !res.Background || res.Pending.Perf < 2 {
+			t.Fatalf("post-soft-cutoff mount = %+v (bgStarted=%v), want Applied=0 Background=true Pending.Perf>=2", res, bgStarted)
+		}
+		onDisk, err := rbstate.Load(dbDir(mount))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if onDisk.Pending.Perf < 2 {
+			t.Fatalf("on-disk Pending.Perf = %d, want >= 2 durably recorded", onDisk.Pending.Perf)
+		}
+
+		// Recovery on the next insert with normal budget repairs both rows and preserves DJ edit.
+		insertBudget = oldBudget
+		repairBeforeBuild = nil
+		res2 := mountNow(t, mount, MountOptions{OnDemand: true, Deadline: time.Now().Add(17 * time.Second)})
+		if res2.Bypassed || res2.Applied != 2 || res2.Background || !res2.Pending.None() {
+			t.Fatalf("recovery next insert = %+v, want Applied=2 Background=false Pending.None", res2)
+		}
+		for _, idx := range []int{0, 1} {
+			b, _, _, _ := readRowBlobs(t, mount, tracks[idx].EngineID)
+			if len(b) == 0 || bytes.Equal(b, stockBeats) {
+				t.Fatalf("track[%d] not repaired on next insert", idx)
+			}
+		}
+		b2, q2, _, _ := readRowBlobs(t, mount, tracks[2].EngineID)
+		if !bytes.Equal(b2, stockBeats) || !bytes.Equal(q2, qcDJHot) {
+			t.Fatal("track[2] DJ hot cue was modified during recovery")
+		}
+	})
+}
+
+// Fails at runtime on cb636815: when the hard mount context (Deadline - spare) expires
+// during OnDemand candidate work, outstanding rows must be recorded durably in the snapshot
+// so either FillInBackground(OnDemand: true) + Publish remount OR the next insert repairs them.
+func TestOnDemandMountHardDeadlineRecordsPendingAndRecovers(t *testing.T) {
+	setupExpiredMount := func(t *testing.T) (string, []*rbstate.Track, []byte, []byte) {
+		t.Helper()
+		mount := repairStick(t, 4)
+		mountNow(t, mount, MountOptions{OnDemand: true})
+		snap, err := rbstate.Load(dbDir(mount))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tracks := sortedTracksByID(snap)
+		const beat0 = 11391.4248046875
+		stockBeats := buildTestStockOABeatsMount(t, 44100, 13707967, beat0, 136.0, 704)
+		qcAutoBeat0 := buildTestQuickCuesMount(t, -1, "", beat0, 1, beat0)
+		qcDJHot := buildTestQuickCuesMount(t, 220500, "DJKeep", beat0, 1, beat0)
+		emptyLoops := buildTestEmptyLoopsMount()
+
+		db := openTestMDBRW(t, mount)
+		for _, idx := range []int{0, 1} {
+			if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+				[]byte{1}, []byte{1}, stockBeats, qcAutoBeat0, emptyLoops, tracks[idx].EngineID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+			[]byte{1}, []byte{1}, stockBeats, qcDJHot, emptyLoops, tracks[2].EngineID); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+
+		// Choose Deadline so st.owed = now + 850 ms (enters candidate work) and mount ctx
+		// expires at Deadline - spare = now + 1600 ms while 3 s spare remains before kill.
+		kill := time.Now().Add(commitReserve + 850*time.Millisecond)
+		mountCtxLimit := kill.Add(-spare)
+		oldHook := repairBeforeBuild
+		repairBeforeBuild = func(_ context.Context, _ string) error {
+			if wait := time.Until(mountCtxLimit) + 60*time.Millisecond; wait > 0 {
+				time.Sleep(wait)
+			}
+			return nil
+		}
+		defer func() { repairBeforeBuild = oldHook }()
+
+		bgStarted := false
+		res := mountNow(t, mount, MountOptions{
+			OnDemand:        true,
+			Deadline:        kill,
+			StartBackground: func() error { bgStarted = true; return nil },
+		})
+		if res.Bypassed || res.Applied != 0 || !bgStarted || !res.Background || res.Pending.Perf != 2 {
+			t.Fatalf("hard-deadline OnDemand mount = %+v (bgStarted=%v), want Applied=0 Background=true Pending.Perf=2", res, bgStarted)
+		}
+		onDisk, err := rbstate.Load(dbDir(mount))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if onDisk.Pending.Perf != 2 {
+			t.Fatalf("on-disk snapshot Pending.Perf = %d, want 2 durably recorded", onDisk.Pending.Perf)
+		}
+		return mount, tracks, stockBeats, qcDJHot
+	}
+
+	t.Run("recover_via_background_build", func(t *testing.T) {
+		mount, tracks, stockBeats, qcDJHot := setupExpiredMount(t)
+		fres, err := FillInBackground(context.Background(), mount, FillOptions{OnDemand: true})
+		if err != nil || !fres.Publish {
+			t.Fatalf("FillInBackground(OnDemand: true) = (%+v, %v), want Publish=true", fres, err)
+		}
+		pubRes := mountNow(t, mount, MountOptions{OnDemand: true, Publish: true})
+		if !pubRes.Pending.None() || pubRes.Background {
+			t.Fatalf("publish remount after OnDemand background repair = %+v, want Pending.None Background=false", pubRes)
+		}
+		for _, idx := range []int{0, 1} {
+			b, _, _, _ := readRowBlobs(t, mount, tracks[idx].EngineID)
+			if len(b) == 0 || bytes.Equal(b, stockBeats) {
+				t.Fatalf("track[%d] not repaired by OnDemand background build + publish", idx)
+			}
+		}
+		b2, q2, _, _ := readRowBlobs(t, mount, tracks[2].EngineID)
+		if !bytes.Equal(b2, stockBeats) || !bytes.Equal(q2, qcDJHot) {
+			t.Fatal("track[2] DJ hot cue was modified by OnDemand background build")
+		}
+		finalSnap, err := rbstate.Load(dbDir(mount))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !finalSnap.Pending.None() {
+			t.Fatalf("final snapshot still has pending work: %+v", finalSnap.Pending)
+		}
+		reinsert := mountNow(t, mount, MountOptions{OnDemand: true, Deadline: time.Now().Add(17 * time.Second)})
+		if !reinsert.Bypassed || reinsert.Applied != 0 {
+			t.Fatalf("post-recovery insert = %+v, want Bypassed=true Applied=0", reinsert)
+		}
+	})
+
+	t.Run("recover_via_next_insert", func(t *testing.T) {
+		mount, tracks, stockBeats, qcDJHot := setupExpiredMount(t)
+		reinsert := mountNow(t, mount, MountOptions{OnDemand: true, Deadline: time.Now().Add(17 * time.Second)})
+		if reinsert.Bypassed || reinsert.Applied != 2 || reinsert.Background || !reinsert.Pending.None() {
+			t.Fatalf("next-insert recovery = %+v, want Applied=2 Background=false Pending.None", reinsert)
+		}
+		for _, idx := range []int{0, 1} {
+			b, _, _, _ := readRowBlobs(t, mount, tracks[idx].EngineID)
+			if len(b) == 0 || bytes.Equal(b, stockBeats) {
+				t.Fatalf("track[%d] not repaired on next insert", idx)
+			}
+		}
+		b2, q2, _, _ := readRowBlobs(t, mount, tracks[2].EngineID)
+		if !bytes.Equal(b2, stockBeats) || !bytes.Equal(q2, qcDJHot) {
+			t.Fatal("track[2] DJ hot cue was modified on next-insert recovery")
+		}
+		third := mountNow(t, mount, MountOptions{OnDemand: true, Deadline: time.Now().Add(17 * time.Second)})
+		if !third.Bypassed || third.Applied != 0 {
+			t.Fatalf("3rd insert = %+v, want Bypassed=true Applied=0", third)
+		}
+	})
+}

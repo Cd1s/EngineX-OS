@@ -36,16 +36,17 @@ type window struct {
 	keep bool                      // staged records stay in the stage once applied (until the swap)
 	rest func(time.Duration) error // after each commit, with the time it took: the job's pacing
 
-	lib           *enginedb.Library // nil: the stick has no library to keep, one is built
-	snap          *rbstate.Snapshot
-	index         map[string]enginedb.Row // every row of the library by key
-	head          rbstate.Header          // the snapshot's header as the stick has it
-	dirty         bool                    // tracks or lists changed outside a commit
-	browseDirty   bool                    // live snapshot saved or committed in OnDemand mode
-	left          bool                    // work that would not end before the kill was left to the job
-	built         bool                    // library was built fresh from exports; holds no legacy artwork
-	missingCovers int                     // tracks with artwork missing AlbumArt linkage left for next/window
-	took          laps                    // where the time of the commits and of the staged step went
+	lib            *enginedb.Library // nil: the stick has no library to keep, one is built
+	snap           *rbstate.Snapshot
+	index          map[string]enginedb.Row // every row of the library by key
+	head           rbstate.Header          // the snapshot's header as the stick has it
+	dirty          bool                    // tracks or lists changed outside a commit
+	browseDirty    bool                    // live snapshot saved or committed in OnDemand mode
+	left           bool                    // work that would not end before the kill was left to the job
+	built          bool                    // library was built fresh from exports; holds no legacy artwork
+	missingCovers  int                     // tracks with artwork missing AlbumArt linkage left for next/window
+	pendingRepairs int                     // stock-OA rows left over on an OnDemand mount that hit its deadline
+	took           laps                    // where the time of the commits and of the staged step went
 }
 
 // syncBrowseIndex writes .rb-bridge-browse once when missing or out of sync with snap.Header,
@@ -191,7 +192,7 @@ func (w *window) run() (err error) {
 	if err == nil && !w.o.OnDemand && !w.left && (w.next || w.o.Publish || w.st.kill.IsZero()) {
 		err = w.applyStaged()
 	}
-	if err == nil && !w.next && !w.built && !w.left && w.lib != nil {
+	if err == nil && !w.built && !w.left && w.lib != nil {
 		err = w.repairStockOverwritten()
 	}
 	if err == nil && (!w.left || w.st.fits(work{commits: 1, tracks: n})) {
@@ -555,6 +556,9 @@ func (w *window) count() {
 		if l := s.Lists[w.view.Lists[i].Key]; l == nil || l.Hash != w.view.Lists[i].Hash {
 			p.Lists = true
 		}
+	}
+	if w.o.OnDemand && w.pendingRepairs > 0 {
+		p.Perf += w.pendingRepairs
 	}
 	s.Pending = p
 }
