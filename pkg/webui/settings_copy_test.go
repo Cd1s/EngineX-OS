@@ -40,9 +40,14 @@ func TestSettingsCopyAllowlistAndModel(t *testing.T) {
 	if slices.Contains(skipped, "sdHighSpeed") {
 		t.Errorf("sdHighSpeed unexpectedly skipped on RK3288 board: %v", skipped)
 	}
-	az04Got, az04Skipped, err := copyUIMerge(destination, payload, "PRIME4G2")
+	az04Dest := destination
+	az04Dest.StemsEqMode = false
+	az04Got, az04Skipped, err := copyUIMerge(az04Dest, payload, "PRIME4G2")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !az04Got.StemsEqMode || slices.Contains(az04Skipped, "stemsEqMode") {
+		t.Fatalf("stemsEqMode must be supported and copied on PRIME4G2: got=%+v skipped=%v", az04Got, az04Skipped)
 	}
 	if az04Got.SdHighSpeed || !slices.Contains(az04Skipped, "sdHighSpeed") {
 		t.Fatalf("sdHighSpeed must be skipped on AZ04 board: got=%+v skipped=%v", az04Got, az04Skipped)

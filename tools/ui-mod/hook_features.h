@@ -75,6 +75,7 @@ static const char *const hf_names[HF_COUNT] = {
 #define HF_CONFIG(feature, word) (hf_on(feature) ? (uint32_t)(word) : UINT32_C(0xe320f000))
 #define HF_CONFIG_COPY(feature, dst, src, size) do { if (hf_on(feature)) memcpy(dst, src, size); } while (0)
 #define HF_INTERPOSE(feature) _Static_assert((feature) >= HF_ALWAYS && (feature) < HF_COUNT, "missing hook feature");
+#define AZ04_EXEMPT(reason)
 
 #ifndef ENGINEX_HOOK_DISABLE
 #define ENGINEX_HOOK_DISABLE ""

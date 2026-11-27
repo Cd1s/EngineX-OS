@@ -266,8 +266,7 @@ grep -q 'engine-ui-hook: Engine $PROFILE' '$TMP/stage2.log'
 test \$(grep -c 'engine-ui-hook: applied 0x' '$TMP/stage2.log') -eq $EDITS
 grep -Eq 'engine-ui-hook: .*packs/en: [1-9][0-9]* files' '$TMP/stage2.log'
 if [ '$AZ04' = 1 ]; then
-    # AArch64 DSP guards: 14 of the 21 sites (the 7 event guards need an unverified event layout).
-    grep -q 'engine-ui-hook: 14 DSP guards/transitions installed' '$TMP/stage2.log'
+    grep -q 'engine-ui-hook: 21 DSP guards/transitions installed' '$TMP/stage2.log'
     grep -q 'engine-ui-hook: SQLite open/open_v2 hooks installed' '$TMP/stage2.log'
 else
     grep -q 'engine-ui-hook: 21 DSP guards/transitions installed' '$TMP/stage2.log'

@@ -947,7 +947,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			player:    false,
 			caps: uiCapabilities{
 				Mixer: true, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
-				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: true, RemoteStems: false, JogWheel: true,
+				TrackSkipKeys: true, StemsEq: true, LineInAux: false, Gen2: true, RemoteStems: false, JogWheel: true,
 			},
 		},
 		{

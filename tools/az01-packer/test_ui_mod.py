@@ -818,6 +818,12 @@ class PrimeGoSwipeStemsTest(unittest.TestCase):
                     self.assertIn(f"!{side}Actions.some(", replacements)
                     self.assertIn(f"actionIndex >= {side}Actions.length", replacements)
                     self.assertIn('.concat(scStem ? [root.scT("Stems")] : [])', replacements)
+            bp.ROOT = "Skins/EmbeddedCommon/"
+            legacy_edits = bp.edits(False)
+            legacy_path = bp.ROOT + "Views/BrowseView/Components/Components/SwipeLeftItem.qml"
+            self.assertIn(legacy_path, legacy_edits)
+            legacy_scstem = next(new for _, new in legacy_edits[legacy_path] if "readonly property bool scStem:" in new)
+            self.assertNotIn("scIsAZ04", legacy_scstem)
         finally:
             bp.ROOT = old_root
 
@@ -866,12 +872,20 @@ String.prototype.arg = function(n) { return this.replace('%1', n); };
 const expr = EXPRESSIONS;
 function run(opts = {}) {
     const calls = [], writes = {};
-    const row = {index: 7, modelData: {trackId: opts.streaming ? 99 : 42},
-                 isStreamingTrack: !!opts.streaming, streamingProviderName: ''};
+    const uri = opts.uri !== undefined ? opts.uri
+        : (opts.streaming ? 'streaming://TIDAL/Track/99' : 'file:///media/USB/42.mp3');
+    const row = {index: 7,
+                 modelData: Object.assign({trackId: opts.streaming ? 99 : 42}, opts.modelUri ? {uri} : {}),
+                 isStreamingTrack: !!opts.streaming, streamingProviderName: opts.provider || ''};
     const trackList = {isStemsList: !!opts.stemsList,
                        pCurrentIndex: {translator: {unnormalized: -1}}};
+    const lookup = opts.rawLookup !== undefined ? opts.rawLookup : ('uri=' + uri);
+    const collectionController = {getTrackUrisFromUniversalIds: ids => lookup};
     const root = {scIsAZ04: !!opts.az04, scScope: opts.scope || '', scTidalLoggedIn: !!opts.tidalLoggedIn, scT: s => s,
-                  scStemStream: id => {calls.push(['stream', id]); return !!opts.streaming;}};
+                  scStemStream: id => {
+                      calls.push(['stream', id]);
+                      return !!/(?:^|[?&\r\n])uri=streaming:\/\/TIDAL\/Track\/(\d+)(?:#streaming%3A%2F%2FTIDAL%2FTrack%2F\1)?(?:$|[\r\n])/.exec(collectionController.getTrackUrisFromUniversalIds([id]) || '');
+                  }};
     const Style = {systemBlue01Color: 'blue'};
     const actions = (opts.labels || STOCK).map((label, i) => ({
         display: {label, commitMessage: label, color: 'stock' + i},
@@ -884,6 +898,7 @@ function run(opts = {}) {
     const Planck = {
         librarianController: {stemsQueueManager: {
             startRenderTracks: id => calls.push(['render', id])},
+            collectionController,
             devicesController: {isCurrentDeviceNetworkDrive: !!opts.link}},
         getProperty: path => ({translator: new Proxy({}, {
             set: (o, key, value) => {writes[path] = value; return true;}})})
@@ -946,6 +961,62 @@ assert.deepStrictEqual(gatewayTrackInTidalScope.calls, [['stream', 99]]);
 const tidalLocal = run({streaming: false, scope: 'tidal', commit: 2});
 assert.deepStrictEqual(tidalLocal.labels, [...stock, 'Stems']);
 assert.deepStrictEqual(tidalLocal.calls, [['stream', 42], ['render', '42']]);
+
+// AZ04 keeps local tracks stock (onboard Stems), while gateway streaming tracks use stock Stems via scStemStream (keeping #332 real TIDAL exclusion).
+const az04Streaming = run({az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99', commit: 2});
+assert.deepStrictEqual(az04Streaming.labels, [...stock, 'Stems']);
+assert.deepStrictEqual(az04Streaming.colors, ['stock0', 'stock1', 'blue']);
+assert.deepStrictEqual(az04Streaming.calls, [['stream', 99]]);
+
+const az04RealTidal = run({az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99', scope: 'tidal', tidalLoggedIn: true});
+assert.deepStrictEqual(az04RealTidal.labels, stock);
+assert.deepStrictEqual(az04RealTidal.colors, ['stock0', 'stock1']);
+
+const az04GatewayTidal = run({az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99', scope: 'tidal', tidalLoggedIn: false, commit: 2});
+assert.deepStrictEqual(az04GatewayTidal.labels, [...stock, 'Stems']);
+assert.deepStrictEqual(az04GatewayTidal.calls, [['stream', 99]]);
+
+// Non-gateway native streaming providers and malformed/suffixed TIDAL URIs on AZ04 and 32-bit must NOT offer EngineX Stems and must NEVER fall through to local startRenderTracks.
+for (const nonGateway of [
+    {az04: true, streaming: true, provider: 'AppleMusic', uri: 'streaming://AppleMusic/Track/77', commit: 2},
+    {az04: true, streaming: true, provider: 'Beatport', uri: 'streaming://Beatport/Track/88', commit: 2},
+    {az04: true, streaming: true, provider: 'SoundCloud', uri: 'streaming://SoundCloud/Track/55', modelUri: true, commit: 2},
+    {az04: true, streaming: true, provider: 'Dropbox', uri: 'streaming://Dropbox/Track/66', commit: 2},
+    {az04: true, streaming: true, provider: 'Eaas', uri: 'streaming://Eaas/Track/44', commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99preview', commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/123abc', modelUri: true, commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99/extra', commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99-alt', modelUri: true, commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99?trackId=99', commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99?foo=bar', modelUri: true, commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99&other=1', commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99#frag', modelUri: true, commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', rawLookup: 'file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/99?foo%3Dbar#streaming%3A%2F%2FTIDAL%2FTrack%2F99%3Ffoo%3Dbar', commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', rawLookup: 'file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/99%26foo%3Dbar#streaming%3A%2F%2FTIDAL%2FTrack%2F99%26foo%3Dbar', commit: 2},
+    {az04: true, streaming: true, provider: 'TIDAL', rawLookup: 'file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/99#streaming%3A%2F%2FTIDAL%2FTrack%2F100', commit: 2},
+    {az04: false, streaming: true, provider: 'Beatport', uri: 'streaming://Beatport/Track/88', commit: 2},
+    {az04: false, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99preview', commit: 2},
+    {az04: false, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/123abc', modelUri: true, commit: 2},
+    {az04: false, streaming: true, provider: 'TIDAL', uri: 'streaming://TIDAL/Track/99?trackId=99', commit: 2},
+]) {
+    const r = run(nonGateway);
+    assert.deepStrictEqual(r.labels, stock, JSON.stringify(nonGateway));
+    assert.deepStrictEqual(r.colors, ['stock0', 'stock1'], JSON.stringify(nonGateway));
+    assert.deepStrictEqual(r.calls, [['stream', 99]], JSON.stringify(nonGateway));
+}
+
+// Engine's real getTrackUrisFromUniversalIds QUrl wrapper (?databaseUuid=...&trackId=...&uri=streaming://TIDAL/Track/N#streaming%3A%2F%2FTIDAL%2FTrack%2FN) resolves cleanly.
+const az04RealWrapperGateway = run({
+    az04: true, streaming: true, provider: 'TIDAL',
+    rawLookup: 'file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/99#streaming%3A%2F%2FTIDAL%2FTrack%2F99',
+    commit: 2,
+});
+assert.deepStrictEqual(az04RealWrapperGateway.labels, [...stock, 'Stems']);
+assert.deepStrictEqual(az04RealWrapperGateway.calls, [['stream', 99]]);
+
+for (const excluded of [{az04: true, streaming: true, link: true}, {az04: true, streaming: true, stemsList: true}]) {
+    assert.deepStrictEqual(run(excluded).labels, stock);
+}
 """
                             stock = [f"Deck {deck}", "Prepare" if side == "left" else "Load"]
                             for key, value in (
@@ -974,6 +1045,89 @@ assert.deepStrictEqual([takes(true, true, false), takes(true, true, true), takes
 """.replace("GATE", json.dumps(gate.group(1)))
                         checked = subprocess.run(["node"], input=script, capture_output=True, text=True)
                         self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for gateway URI validation")
+    def test_gateway_uri_requires_whole_digit_id(self):
+        state_fn = re.search(r"function scStemState\(uid\) \{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+        place_fn = re.search(r"function scStemPlace\(mark, total, done\) \{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+        stream_fn = re.search(r"function scStemStream\(uid\) \{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/EmbeddedCommon/"
+            legacy_edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        legacy_qml = next(new for _, new in legacy_edits["Skins/EmbeddedCommon/Views/BrowseView/Components/Components/SwipeLeftItem.qml"]
+                          if "readonly property bool scStem:" in new)
+        legacy_expr = re.search(r"readonly property bool scStem: (.*)", legacy_qml).group(1)
+
+        script = f"""
+const assert = require('assert');
+String.prototype.arg = function(v) {{ return this.replace(/%1/g, v); }};
+const xhrs = [];
+class XMLHttpRequest {{
+    open(m, u) {{ xhrs.push(u); }}
+    send() {{}}
+}}
+const scStemRows = {{'99': 1, '123': 'wait'}}, scStemTotal = 1, scStemDone = 0;
+let currentUri = '';
+const Planck = {{
+    librarianController: {{collectionController: {{getTrackUrisFromUniversalIds: () => currentUri}}}},
+    getProperty: () => ({{translator: {{state: false}}}}),
+}};
+const root = {{
+    scScope: '', scTidalLoggedIn: false, scStemMax: 8,
+    scDeckList: () => [1, 2], scDeckLocked: () => false,
+    scStemPending: () => ({{}}), scStemAsk: () => 1, scStemMark: () => {{}},
+    scStemFull: false, scStemWait: false,
+}};
+{place_fn}
+{state_fn}
+{stream_fn}
+
+for (const bad of [
+    'uri=streaming://TIDAL/Track/99preview',
+    'uri=streaming://TIDAL/Track/123abc',
+    'uri=streaming://TIDAL/Track/123/extra',
+    'uri=streaming://TIDAL/Track/99-alt?trackId=99',
+    'uri=streaming://TIDAL/Track/123?trackId=5',
+    'uri=streaming://TIDAL/Track/123&extra=1',
+    'uri=streaming://TIDAL/Track/123#frag',
+    'file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/99?foo%3Dbar#streaming%3A%2F%2FTIDAL%2FTrack%2F99%3Ffoo%3Dbar',
+    'file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/99%26foo%3Dbar#streaming%3A%2F%2FTIDAL%2FTrack%2F99%26foo%3Dbar',
+    'file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/99#streaming%3A%2F%2FTIDAL%2FTrack%2F100',
+]) {{
+    currentUri = bad;
+    assert.strictEqual(scStemState(1), '', bad);
+    assert.strictEqual(scStemStream(1), false, bad);
+}}
+assert.strictEqual(xhrs.length, 0);
+
+for (const [good, expectedId] of [
+    ['uri=streaming://TIDAL/Track/99', '99'],
+    ['file:///tmp/t.flac?databaseUuid=uuid&trackId=42&uri=streaming://TIDAL/Track/123#streaming%3A%2F%2FTIDAL%2FTrack%2F123', '123'],
+]) {{
+    currentUri = good;
+    assert.notStrictEqual(scStemState(1), '', good);
+    const before = xhrs.length;
+    assert.strictEqual(scStemStream(1), true, good);
+    assert.strictEqual(xhrs.length, before + 1);
+    assert.ok(xhrs[xhrs.length - 1].endsWith('id=' + expectedId), xhrs[xhrs.length - 1]);
+}}
+
+const legacyCheck = uri => {{
+    const row = {{modelData: {{uri}}}}, leftActions = [];
+    return eval({json.dumps(legacy_expr)});
+}};
+assert.strictEqual(legacyCheck('streaming://TIDAL/Track/99'), true);
+assert.strictEqual(legacyCheck('streaming://TIDAL/Track/99preview'), false);
+assert.strictEqual(legacyCheck('streaming://TIDAL/Track/123abc'), false);
+assert.strictEqual(legacyCheck('streaming://TIDAL/Track/99?trackId=99'), false);
+assert.strictEqual(legacyCheck('streaming://TIDAL/Track/99&extra=1'), false);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
 
 
 class TrackListArtworkPlaceholderAndReaderPriorityTest(unittest.TestCase):
@@ -4589,7 +4743,26 @@ class UiModBuildTest(unittest.TestCase):
                 with self.subTest(lang=lang):
                     mixer = (out / lang / "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/MixerTabContent.qml").read_text()
                     main = (out / lang / "Skins/Embedded/EmbeddedMain.qml").read_text()
-                    self.assertIn('scHasCrossfaderReverse: true && scHasMixer && !scIsAZ04', main)
+                    rev_expr = re.search(r"readonly property bool scHasCrossfaderReverse: (.*)", main)
+                    self.assertIsNotNone(rev_expr)
+                    if shutil.which("node"):
+                        node_script = (
+                            "const assert = require('assert');\n"
+                            "const has = (scBoard, scPlayer) => {\n"
+                            "  const scIsPlayerBoard = !!scPlayer || ['JP07','JP08','JP13','JP14'].includes(scBoard);\n"
+                            "  const scHasMixer = !scIsPlayerBoard;\n"
+                            "  const scIsAZ04 = ['JP24','RMZ2'].includes(scBoard);\n"
+                            f"  return !!({rev_expr.group(1)});\n"
+                            "};\n"
+                            "assert.strictEqual(has('JP24', false), true, 'PRIME 4 G2 exposes Crossfader Reverse');\n"
+                            "assert.strictEqual(has('RMZ2', false), false, 'SYSTEM ONE keeps hardware switch');\n"
+                            "assert.strictEqual(has('JC11S', false), true);\n"
+                            "assert.strictEqual(has('JP21', false), true);\n"
+                            "assert.strictEqual(has('JP07', false), false);\n"
+                        )
+                        checked = subprocess.run(["node", "-e", node_script], capture_output=True, text=True)
+                        self.assertEqual(checked.returncode, 0, checked.stderr)
+                    self.assertIn('scHasCrossfaderReverse: true && scHasMixer && scBoard !== "RMZ2"', main)
                     self.assertIn('scTr("/Engine/Mixer/CrossfaderReverse")', main)
                     self.assertIn('scTr("/Engine/Mixer/CrossfaderPosition")', main)
                     self.assertIn("reverse.state = on", main)
@@ -12263,10 +12436,11 @@ const shown = (sideScreens, az04, streamed) => {{
 // Review: a local track's render keeps stock's behaviour, the indicator only on units with side screens.
 assert.equal(shown(false, false, false), false);
 assert.equal(shown(true, false, false), true);
-// A streamed row's Stems in Engine's queue: shown on first-generation units, whatever list is open.
+// A streamed row's Stems in Engine's queue: shown on all units (including AZ04), whatever list is open.
 assert.equal(shown(false, false, true), true);
-// AZ04 keeps stock in every case.
-assert.equal(shown(false, true, true), false);
+// AZ04 local tracks without side screens stay stock, while AZ04 streamed rows show the render indicator.
+assert.equal(shown(false, true, false), false);
+assert.equal(shown(false, true, true), true);
 assert.equal(shown(true, true, false), true);
 """
                             res = subprocess.run(["node", "-e", indicator], capture_output=True, text=True)

@@ -100,9 +100,10 @@ static void fake_cfx_process(void *node, int ins, float **in, int outs, float **
 }
 #endif
 
+static unsigned event_calls;
 static unsigned long long fake_clock(void) { return clock_ns; }
 static void fake_sender(void *self, const float *const *in, int frames) { (void)self; (void)in; (void)frames; }
-static void fake_event(void *h, const void *e) { (void)h; (void)e; }
+static void fake_event(void *h, const void *e) { (void)h; (void)e; event_calls++; }
 static void fake_process(void *self, float *const *in, float *const *o, uint32_t frames) {
     (void)self; (void)in; (void)o; (void)frames;
 }
@@ -158,8 +159,14 @@ int main(int argc, char **argv) {
     memcpy(handler + (sizeof(void *) == 8 ? 24 : 0x0c), &bound, sizeof bound);
     const double one = 1.0;
     const float half = 0.5f;
+#if defined(__aarch64__)
+    memcpy(event + 0x10, &one, sizeof one);
+    memcpy(event + 0x18, &half, sizeof half);
+    memcpy(event + 0x30, &half, sizeof half);
+#else
     memcpy(event + 0x08, &one, sizeof one);
     memcpy(event + 0x20, &half, sizeof half);
+#endif
     hook_test_clock = fake_clock;
     bt_send_orig = fake_sender;
     stream_rate = 44100;
@@ -189,6 +196,7 @@ int main(int argc, char **argv) {
     static unsigned long long best[SIZES][LAYOUTS][BLOCKS];
     unsigned misses = 0, blocks = 0;
     unsigned long long worst = 0, worst_budget = 1;
+    event_calls = 0;
     /* Pass 0 makes the state resident, as Engine's locked memory is on a deck; the others are timed. */
     for (int pass = 0; pass < PASSES; pass++)
         for (unsigned n = 0; n < SIZES; n++)
@@ -223,6 +231,7 @@ int main(int argc, char **argv) {
                 }
             }
     assert(bt_render == 48000 && bt_idle < BT_IDLE); /* the Bluetooth path really ran */
+    assert(event_calls == (unsigned)(PASSES * SIZES * LAYOUTS * BLOCKS * 15));
 #if !defined(__aarch64__)
     assert(sc_pfx_routes[0].dsp.mode == SC_PFX_FLANGER && sc_pfx_routes[0].dsp.wet > 0.99f); /* and so did the Jet Flanger */
     assert(cfx_peak > 0.85f); /* and a channel knob's Color FX */
