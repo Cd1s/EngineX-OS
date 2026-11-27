@@ -274,6 +274,36 @@ def oa_log_analyse_count(side: str) -> int:
     return sum(1 for ln in out.splitlines() if " analyse " in ln)
 
 
+def engine_oa_done(side: str, filename: str) -> bool:
+    """Return True once stock Engine logs OfflineAnalyzer completion for filename."""
+    eng_log = twin.WORK / side / "logs/engine.log"
+    if not eng_log.is_file():
+        return False
+    needle = f'Analyzed "{filename}" in '
+    for ln in eng_log.read_text(errors="replace").splitlines():
+        if "OfflineAnalyzer (" in ln and needle in ln:
+            return True
+    return False
+
+
+def stock_oa_committed(mdb: Path, side: str, filename: str):
+    """Return the m.db row once stock OfflineAnalyzer finished and wrote its PerformanceData blobs.
+
+    Stock Engine commits PerformanceData (J:Savingtrackda, 1152-byte overview + 2-marker beatgrid)
+    and Track.isAnalyzed=1 (J:Savingtrack) in two separate transactions over airNfs; when Unit A's
+    Engine concurrently reads m.db, J:Savingtrack can defer while PerformanceData is already final.
+    Require BOTH OfflineAnalyzer completion in Engine's log AND final stock PerformanceData in m.db.
+    """
+    if not engine_oa_done(side, filename):
+        return None
+    r = read_mdb_row(mdb, filename)
+    if not r or not r["beat"]:
+        return None
+    if r["ov"] >= 500 and r["beat"]["n_def"] <= 4:
+        return r
+    return None
+
+
 def start_lan_counter(netns: str, log_file: Path):
     """Capture B<->A HTTP POST /peer/rekordbox/ requests on eth0."""
     code = r"""
@@ -694,6 +724,7 @@ def main():
         results.append(rec1)
         print("CASE 1:", json.dumps(rec1), flush=True)
         assert b_oa_1 == 0 and oa_a_d == 0, f"Case 1 ran OfflineAnalyzer: {rec1}"
+        assert row1 and row1["analyzed"] == 1, f"Case 1 isAnalyzed!=1: {row1}"
         assert err1 <= 0.15 and rec1["n_def"] >= 20, f"Case 1 grid mismatch vs PQTZ: {rec1}"
         assert rec1["cue_kept"], f"Case 1 lost rekordbox cue: state={st} row={row1}"
         assert rec1["filled_jsonl"], f"Case 1 missing Track 1 in A filled.jsonl ({a_filled_path})"
@@ -727,7 +758,7 @@ def main():
         }
         results.append(rec2)
         print("CASE 2:", json.dumps(rec2), flush=True)
-        assert lan_d == 0 and b_oa_2 == 0 and err2 <= 0.15 and rec2["cue_kept"], f"Case 2 failed: {rec2}"
+        assert lan_d == 0 and b_oa_2 == 0 and row2["analyzed"] == 1 and err2 <= 0.15 and rec2["cue_kept"], f"Case 2 failed: {rec2}"
 
         # CASE 3: Filled on A AFTER B browsed -> 0 LAN reqs, 0 B OA
         twin.ev("A", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck1").url="file:///media/RB_ONDEMAND/Contents/RBOD/case3-latefill.wav"; "ok"')
@@ -760,7 +791,7 @@ def main():
         }
         results.append(rec3)
         print("CASE 3:", json.dumps(rec3), flush=True)
-        assert lan_d == 0 and b_oa_3 == 0 and err3 <= 0.15 and rec3["cue_kept"], f"Case 3 failed: {rec3}"
+        assert lan_d == 0 and b_oa_3 == 0 and row3["analyzed"] == 1 and err3 <= 0.15 and rec3["cue_kept"], f"Case 3 failed: {rec3}"
 
         # CASE 4: Cold Link load with shadow OFF / 2-deck mode (block UDP 50199 + restart B stream-sync so shadow.peers is empty)
         twin.ev("B", 'scShadowTickTimer.stop(); var t=root.rtTr("/Engine/Deck2/Track/EjectTrack"); if(t) t.state=true; "stopped"')
@@ -794,7 +825,7 @@ def main():
             }
             results.append(rec4)
             print("CASE 4:", json.dumps(rec4), flush=True)
-            assert b_oa_4 == 0 and lan_d == 1 and err4 <= 0.15 and rec4["n_def"] >= 20 and rec4["cue_kept"] and rec4["filled_jsonl"], f"Case 4 failed: {rec4}"
+            assert b_oa_4 == 0 and lan_d == 1 and row4["analyzed"] == 1 and err4 <= 0.15 and rec4["n_def"] >= 20 and rec4["cue_kept"] and rec4["filled_jsonl"], f"Case 4 failed: {rec4}"
         finally:
             subprocess.run(["ip", "netns", "exec", twin.SIDE_CFG["B"]["netns"], "iptables", "-D", "INPUT", "-p", "udp", "--dport", "50199", "-j", "DROP"], check=False)
             subprocess.run(["ip", "netns", "exec", twin.SIDE_CFG["B"]["netns"], "iptables", "-D", "OUTPUT", "-p", "udp", "--dport", "50199", "-j", "DROP"], check=False)
@@ -804,22 +835,23 @@ def main():
         lan0 = count_peer_reqs(lan_log)
         t5_0 = now_ms()
         t_ld, t_an, st = load_b_row("Stock Track", "stock-track.wav")
-        row5 = wait_for(lambda: (r := read_mdb_row(stock_mdb, "stock-track.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.35, label="Case 5 stock OA commit")
+        row5 = wait_for(lambda: stock_oa_committed(stock_mdb, "B", "stock-track.wav"), timeout=25, interval=0.35, label="Case 5 stock OA commit")
         t_db5 = now_ms() - t5_0
         lan_d = count_peer_reqs(lan_log) - lan0
         rec5 = {
             "case": "5. Stock Engine stick",
-            "b_oa_count": 1 if row5["analyzed"] == 1 and row5["beat"]["n_def"] <= 4 else 0,
+            "b_oa_count": 1 if row5["ov"] >= 500 and row5["beat"]["n_def"] <= 4 else 0,
             "lan_reqs": lan_d,
             "load_ms": t_ld,
             "analyzed_ms": max(t_an, t_db5),
             "b0_ms": row5["beat"]["b0_ms"] if row5 and row5["beat"] else None,
             "n_def": row5["beat"]["n_def"] if row5 and row5["beat"] else 0,
+            "ov": row5["ov"] if row5 else 0,
             "analyzed_db": row5["analyzed"] if row5 else 0,
         }
         results.append(rec5)
         print("CASE 5:", json.dumps(rec5), flush=True)
-        assert lan_d == 0 and row5["analyzed"] == 1 and row5["beat"]["n_def"] <= 4, f"Case 5 failed: {rec5}"
+        assert lan_d == 0 and row5["ov"] >= 500 and row5["beat"]["n_def"] <= 4, f"Case 5 failed: {rec5}"
 
         # Switch back to RB_ONDEMAND for Cases 6 & 7
         select_source("B", "RB_ONDEMAND", min_rows=7, must_contain="RB Case6")
@@ -832,23 +864,24 @@ def main():
         lan0 = count_peer_reqs(lan_log, method="ANY")
         t6_0 = now_ms()
         t_ld, t_an, st = load_b_row("RB Case6", "case6-hang.wav")
-        row6 = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case6-hang.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.35, label="Case 6 fallback OA commit")
+        row6 = wait_for(lambda: stock_oa_committed(rb_mdb, "B", "case6-hang.wav"), timeout=25, interval=0.35, label="Case 6 fallback OA commit")
         t_db6 = now_ms() - t6_0
         lan_d = count_peer_reqs(lan_log, method="ANY") - lan0
         rec6 = {
             "case": "6. A not answering (budget timeout)",
-            "b_oa_count": 1 if row6["analyzed"] == 1 and row6["beat"]["n_def"] <= 4 else 0,
+            "b_oa_count": 1 if row6["ov"] >= 500 and row6["beat"]["n_def"] <= 4 else 0,
             "lan_reqs": lan_d,
             "load_ms": t_ld,
             "analyzed_ms": max(t_an, t_db6),
             "b0_ms": row6["beat"]["b0_ms"] if row6 and row6["beat"] else None,
             "n_def": row6["beat"]["n_def"] if row6 and row6["beat"] else 0,
+            "ov": row6["ov"] if row6 else 0,
             "analyzed_db": row6["analyzed"] if row6 else 0,
             "filled_jsonl": 5 in read_filled_ids(a_filled_path),
         }
         results.append(rec6)
         print("CASE 6:", json.dumps(rec6), flush=True)
-        assert lan_d >= 1 and row6["analyzed"] == 1 and row6["beat"]["n_def"] <= 4 and not rec6["filled_jsonl"], f"Case 6 failed: {rec6}"
+        assert lan_d >= 1 and row6["ov"] >= 500 and row6["beat"]["n_def"] <= 4 and not rec6["filled_jsonl"], f"Case 6 failed: {rec6}"
         stub_proc.terminate()
         stub_proc.wait(timeout=3)
         stub_proc = None
@@ -860,7 +893,7 @@ def main():
         lan0 = count_peer_reqs(lan_log, method="ANY")
         t7a_0 = now_ms()
         t_ld7a, t_an7a, _ = load_b_row("RB Case7a", "case7a-older1.wav")
-        row7a = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case7a-older1.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.35, label="Case 7a fallback OA commit")
+        row7a = wait_for(lambda: stock_oa_committed(rb_mdb, "B", "case7a-older1.wav"), timeout=25, interval=0.35, label="Case 7a fallback OA commit")
         t_db7a = now_ms() - t7a_0
         lan_d7a = count_peer_reqs(lan_log, method="ANY") - lan0
 
@@ -868,14 +901,14 @@ def main():
         lan1 = count_peer_reqs(lan_log, method="ANY")
         t7b_0 = now_ms()
         t_ld7b, t_an7b, _ = load_b_row("RB Case7b", "case7b-older2.wav")
-        row7b = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case7b-older2.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.35, label="Case 7b fallback OA commit")
+        row7b = wait_for(lambda: stock_oa_committed(rb_mdb, "B", "case7b-older2.wav"), timeout=25, interval=0.35, label="Case 7b fallback OA commit")
         t_db7b = now_ms() - t7b_0
         lan_d7b = count_peer_reqs(lan_log, method="ANY") - lan1
         rec7 = {
             "case": "7. Older/non-EngineX peer (1st + cached 2nd)",
             "b_oa_count": (
-                1 if row7a["analyzed"] == 1 and row7a["beat"]["n_def"] <= 4 else 0,
-                1 if row7b["analyzed"] == 1 and row7b["beat"]["n_def"] <= 4 else 0,
+                1 if row7a["ov"] >= 500 and row7a["beat"]["n_def"] <= 4 else 0,
+                1 if row7b["ov"] >= 500 and row7b["beat"]["n_def"] <= 4 else 0,
             ),
             "lan_reqs_1": lan_d7a,
             "lan_reqs_2": lan_d7b,
@@ -885,11 +918,12 @@ def main():
             "analyzed_ms_2": max(t_an7b, t_db7b),
             "b0_ms": (row7a["beat"]["b0_ms"], row7b["beat"]["b0_ms"]),
             "n_def": (row7a["beat"]["n_def"], row7b["beat"]["n_def"]),
+            "ov": (row7a["ov"], row7b["ov"]),
             "analyzed_db": (row7a["analyzed"], row7b["analyzed"]),
         }
         results.append(rec7)
         print("CASE 7:", json.dumps(rec7), flush=True)
-        assert lan_d7a == 1 and lan_d7b == 0 and row7a["analyzed"] == 1 and row7b["analyzed"] == 1 and row7a["beat"]["n_def"] <= 4 and row7b["beat"]["n_def"] <= 4, f"Case 7 failed: {rec7}"
+        assert lan_d7a == 1 and lan_d7b == 0 and row7a["ov"] >= 500 and row7b["ov"] >= 500 and row7a["beat"]["n_def"] <= 4 and row7b["beat"]["n_def"] <= 4, f"Case 7 failed: {rec7}"
 
         print("\n=== LINK ON-DEMAND 7-CASE MATRIX: PASS ===", flush=True)
         print(json.dumps(results, indent=2), flush=True)
