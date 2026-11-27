@@ -189,19 +189,28 @@ func NormalizeDatabase2(dir string) (fixed []string, err error) {
 // NormalizeDatabase2Context fixes every writable Engine library file in dir while
 // honoring ctx cancellation and propagating writability check errors.
 func NormalizeDatabase2Context(ctx context.Context, dir string) (fixed []string, err error) {
+	fixed, _, err = normalizeDatabase2(ctx, dir, false)
+	return fixed, err
+}
+
+func normalizeMountDatabase2(ctx context.Context, dir string) (fixed []string, pendingReserve bool, err error) {
+	return normalizeDatabase2(ctx, dir, true)
+}
+
+func normalizeDatabase2(ctx context.Context, dir string, guardHistorySchema bool) (fixed []string, pendingReserve bool, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	names, err := filepath.Glob(filepath.Join(dir, "*.db"))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	for _, p := range names {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return fixed, errors.Join(err, ctxErr)
+			return fixed, pendingReserve, errors.Join(err, ctxErr)
 		}
 		if strings.HasPrefix(filepath.Base(p), ".") {
 			continue
@@ -214,13 +223,79 @@ func NormalizeDatabase2Context(ctx context.Context, dir string) (fixed []string,
 		if !w {
 			continue
 		}
-		ok, e := NormalizeReserveContext(ctx, p)
-		if ok {
+		res, ok, rerr := Reserve(p)
+		if rerr != nil {
+			err = errors.Join(err, rerr)
+			continue
+		}
+		if !ok || res == 0 {
+			continue
+		}
+		if guardHistorySchema && strings.EqualFold(filepath.Base(p), "hm.db") {
+			hdb, herr := openReadOnlyLocking(ctx, p, probeBusyTimeoutMS(ctx))
+			if herr != nil {
+				if isContextStop(ctx, herr) || budgetExpired(ctx, herr) || isSQLiteBusy(herr) {
+					pendingReserve = true
+				}
+				err = errors.Join(err, herr)
+				continue
+			}
+			infos, ierr := readLibraryIdentityRows(ctx, hdb)
+			if ierr == nil {
+				_, ierr = validateLibraryIdentityRows(infos)
+			}
+			closeErr := hdb.Close()
+			if ierr != nil {
+				if isContextStop(ctx, ierr) || budgetExpired(ctx, ierr) || isSQLiteBusy(ierr) {
+					pendingReserve = true
+					err = errors.Join(err, ierr)
+				}
+				// Leave unsupported history schemas untouched; history validation reports them.
+				continue
+			}
+			if closeErr != nil {
+				err = errors.Join(err, closeErr)
+				continue
+			}
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			pendingReserve = true
+			return fixed, true, errors.Join(err, ctxErr)
+		}
+		rebuilt, e := NormalizeReserveContext(ctx, p)
+		if e != nil {
+			pendingReserve = true
+			err = errors.Join(err, e)
+		} else if rebuilt {
 			fixed = append(fixed, filepath.Base(p))
 		}
-		err = errors.Join(err, e)
 	}
-	return fixed, err
+	return fixed, pendingReserve, err
+}
+
+func onlyContextError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if multi, ok := err.(interface{ Unwrap() []error }); ok {
+		subs := multi.Unwrap()
+		if len(subs) == 0 {
+			return false
+		}
+		for _, sub := range subs {
+			if !onlyContextError(sub) {
+				return false
+			}
+		}
+		return true
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if inner := errors.Unwrap(err); inner != nil {
+		return onlyContextError(inner)
+	}
+	return false
 }
 
 // fileURI keeps '#', '?' and '%' in a stick label part of the path for SQLite.
@@ -239,9 +314,12 @@ func rebuildPlainContext(ctx context.Context, src, dst string) error {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
+	if _, err = db.ExecContext(ctx, "PRAGMA busy_timeout=1"); err != nil {
+		return err
+	}
 	// Escaped: a stick label with '#' or '?' cut the URI there, ATTACHed an empty
 	// file and the empty rebuild replaced the library (BH-GC1-1).
-	if _, err = db.ExecContext(ctx, "ATTACH DATABASE ? AS old", fileURI(src)+"?mode=ro&immutable=1"); err != nil {
+	if _, err = db.ExecContext(ctx, "ATTACH DATABASE ? AS old", fileURI(src)+"?mode=ro"); err != nil {
 		return err
 	}
 	// Properties that must survive; page_size and auto_vacuum have to be set first.

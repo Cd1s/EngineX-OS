@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1489,4 +1490,168 @@ func TestHealMountRejectsAmbiguousInformationAndRepairsTabUUID(t *testing.T) {
 			t.Fatalf("tab-only identity not repaired: id=%d uuid=%q", id, gotUUID)
 		}
 	})
+}
+
+func TestHealMountTriggerRejectingIdentityPreservesDropboxTrack(t *testing.T) {
+	for _, dataOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dataOnly_%t", dataOnly), func(t *testing.T) {
+			_, root, db := testlibrary.Create(t)
+			full := filepath.Join(root, "Music", "local-dropbox.mp3")
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, []byte("audio-bytes"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE Track SET path='../Music/local-dropbox.mp3', filename='local-dropbox.mp3', fileBytes=11, streamingSource='Dropbox', uri='streaming://Dropbox/Track/1', streamingFlags=5 WHERE id=1`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE Information SET id=99, uuid='valid-uuid'`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`CREATE TRIGGER reject_info_id BEFORE UPDATE ON Information BEGIN SELECT RAISE(ABORT,'identity update blocked'); END`); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+
+			rep, err := HealMountWithOptions(context.Background(), root, MountOptions{DataOnly: dataOnly})
+			if err == nil || rep.Healthy {
+				t.Fatalf("expected error on rejected identity update: rep=%+v err=%v", rep, err)
+			}
+			check, err := Open(filepath.Join(root, "Engine Library", "Database2", "m.db"), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer check.Close()
+			var infoID int
+			if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
+				t.Fatal(err)
+			}
+			if infoID != 99 {
+				t.Fatalf("Information.id=%d, want 99", infoID)
+			}
+			var src, uri string
+			var flags int
+			if err := check.QueryRow(`SELECT COALESCE(streamingSource,''), COALESCE(uri,''), COALESCE(streamingFlags,0) FROM Track WHERE id=1`).Scan(&src, &uri, &flags); err != nil {
+				t.Fatal(err)
+			}
+			if src != "Dropbox" || uri != "streaming://Dropbox/Track/1" || flags != 5 {
+				t.Fatalf("Dropbox track mutated despite identity failure: src=%q uri=%q flags=%d", src, uri, flags)
+			}
+		})
+	}
+}
+
+func TestHealMountDataOnlyLiveCancelDuringLockedProbeAbortsPromptlyWithoutWrite(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	if _, err := db.Exec(`UPDATE Information SET id=99`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	dbPath := filepath.Join(root, "Engine Library", "Database2", "m.db")
+	locker, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locker.SetMaxOpenConns(1)
+	defer locker.Close()
+	if _, err := locker.Exec("BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+
+	unlocked := make(chan struct{})
+	unlockTimer := time.AfterFunc(150*time.Millisecond, func() {
+		defer close(unlocked)
+		_, _ = locker.Exec("ROLLBACK")
+	})
+	t.Cleanup(func() {
+		unlockTimer.Stop()
+		_, _ = locker.Exec("ROLLBACK")
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	var (
+		mu       sync.Mutex
+		cancelAt time.Time
+	)
+	cancelTimer := time.AfterFunc(35*time.Millisecond, func() {
+		mu.Lock()
+		cancelAt = time.Now()
+		mu.Unlock()
+		cancel()
+	})
+	defer cancelTimer.Stop()
+
+	rep, err := HealMountDataOnlyContext(ctx, root, 0)
+	doneAt := time.Now()
+	if !unlockTimer.Stop() {
+		<-unlocked
+	}
+	if !errors.Is(err, context.Canceled) || rep.Healthy {
+		t.Fatalf("live cancel during locked probe: rep=%+v err=%v, want context.Canceled & Healthy=false", rep, err)
+	}
+	mu.Lock()
+	cAt := cancelAt
+	mu.Unlock()
+	if cAt.IsZero() {
+		t.Fatal("cancel timer did not fire")
+	}
+	if sinceCancel := doneAt.Sub(cAt); sinceCancel >= 80*time.Millisecond {
+		t.Fatalf("live cancel took %v after cancel (>= 80ms)", sinceCancel)
+	}
+
+	check, err := Open(dbPath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var infoID int
+	if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
+		t.Fatal(err)
+	}
+	if infoID != 99 {
+		t.Fatalf("Information.id=%d after live cancel, want 99", infoID)
+	}
+}
+
+func TestHealMountDataOnlyDeadlineDuringCleanReserveScanRemainsHealthy(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	db.Close()
+	dbDir := filepath.Join(root, "Engine Library", "Database2")
+	hm := filepath.Join(dbDir, "hm.db")
+	hdb, err := sql.Open("sqlite", hm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdb.SetMaxOpenConns(1)
+	schema, err := os.ReadFile("../../docs/re-report/ENGINE-5.0.4-hm.db-schema.sql")
+	if err != nil {
+		hdb.Close()
+		t.Fatal(err)
+	}
+	mustExec(t, hdb, strings.ReplaceAll(string(schema), "CREATE TABLE sqlite_sequence(name,seq);", ""))
+	mustExec(t, hdb, "INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES(1,'hist-clean',3,0,2)")
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	origWritable := reserveWritable
+	delayed := false
+	reserveWritable = func(p string) (bool, error) {
+		if !delayed {
+			delayed = true
+			time.Sleep(100 * time.Millisecond)
+		}
+		return origWritable(p)
+	}
+	t.Cleanup(func() { reserveWritable = origWritable })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	rep, err := HealMountDataOnlyContext(ctx, root, 0)
+	if err != nil || !rep.Healthy {
+		t.Fatalf("deadline during clean zero-reserve scan failed: rep=%+v err=%v", rep, err)
+	}
 }

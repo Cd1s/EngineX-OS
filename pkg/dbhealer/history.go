@@ -27,17 +27,15 @@ type sqlQuerier interface {
 func quote(name string) string { return `"` + strings.ReplaceAll(name, `"`, `""`) + `"` }
 
 func columns(ctx context.Context, q sqlQuerier, table string) (map[string]string, error) {
-	rows, err := q.QueryContext(ctx, "PRAGMA table_info("+quote(table)+")")
+	rows, err := q.QueryContext(ctx, "SELECT name FROM pragma_table_info(?, 'main')", table)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := map[string]string{}
 	for rows.Next() {
-		var cid, notnull, pk int
-		var name, kind string
-		var def any
-		if err = rows.Scan(&cid, &name, &kind, &notnull, &def, &pk); err != nil {
+		var name string
+		if err = rows.Scan(&name); err != nil {
 			return nil, err
 		}
 		out[strings.ToLower(name)] = name

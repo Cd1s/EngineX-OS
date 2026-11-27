@@ -3,11 +3,13 @@ package rbstate
 import (
 	"bytes"
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -504,52 +506,86 @@ func TestReplaceFileCtxHonorsDeadlineAtEveryCutPoint(t *testing.T) {
 	}
 }
 
-func TestSnapshotLargeChunkedRoundTripAndCancelMidDecode(t *testing.T) {
-	s := New("11111111-2222-3333-4444-555555555555")
-	for i := 0; i < 600; i++ {
+func TestSnapshotFormat2CompatibilityAndCancelMidDecode(t *testing.T) {
+	// 1. Over-512 snapshot remains a single Format-2 gob body readable by target decoders.
+	s513 := New("11111111-2222-3333-4444-555555555555")
+	for i := 0; i < 513; i++ {
 		k := fmt.Sprintf("list/%04d", i)
-		s.Lists[k] = &List{Key: k, EngineID: int64(i + 1), Hash: "h"}
+		s513.Lists[k] = &List{Key: k, EngineID: int64(i + 1), Hash: "h"}
+		rel := fmt.Sprintf("Music/Track-%05d.mp3", i+1)
+		tk := FoldPath(rel)
+		s513.Tracks[tk] = &Track{Key: tk, EngineID: int64(i + 1), Rel: rel}
 	}
-	for i := 1; i <= 60000; i++ {
-		rel := fmt.Sprintf("Music/Artist-%03d/Track-%05d.mp3", i%200, i)
-		k := FoldPath(rel)
-		s.Tracks[k] = &Track{Key: k, EngineID: int64(i), Rel: rel}
+	raw513, err := s513.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := lastLine(raw513)
+	body513 := raw513[:len(raw513)-len(end)-1]
+	_, rest513, _ := bytes.Cut(body513[:len(body513)-1], []byte{'\n'})
+	var legacyRec snapshotBody
+	if err := gob.NewDecoder(bytes.NewReader(rest513)).Decode(&legacyRec); err != nil {
+		t.Fatalf("legacy single-body decode failed on 513-track snapshot: %v", err)
+	}
+	if len(legacyRec.Lists) != 513 || len(legacyRec.Tracks) != 513 {
+		t.Fatalf("legacy decoded counts: lists=%d tracks=%d", len(legacyRec.Lists), len(legacyRec.Tracks))
+	}
+	got513, err := LoadReaderContext(context.Background(), bytes.NewReader(raw513))
+	if err != nil || len(got513.Lists) != 513 || len(got513.Tracks) != 513 {
+		t.Fatalf("LoadReaderContext 513 mismatch: err=%v lists=%d tracks=%d", err, len(got513.Lists), len(got513.Tracks))
 	}
 
-	raw, err := s.Encode()
+	// 2. 200,000-track single-body Format-2 snapshot cancels promptly mid-decode.
+	sBig := New("11111111-2222-3333-4444-555555555555")
+	for i := 1; i <= 200000; i++ {
+		rel := fmt.Sprintf("Music/Artist-%03d/Track-%06d.mp3", i%250, i)
+		k := FoldPath(rel)
+		sBig.Tracks[k] = &Track{Key: k, EngineID: int64(i), Rel: rel}
+	}
+	rawBig, err := sBig.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
 	baseStart := time.Now()
-	got, err := LoadReaderContext(context.Background(), bytes.NewReader(raw))
+	gotBig, err := LoadReaderContext(context.Background(), bytes.NewReader(rawBig))
 	baseline := time.Since(baseStart)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Lists) != 600 || len(got.Tracks) != 60000 {
-		t.Fatalf("decoded counts: lists=%d tracks=%d", len(got.Lists), len(got.Tracks))
-	}
-	reencoded, err := got.Encode()
-	if err != nil || !bytes.Equal(raw, reencoded) {
-		t.Fatalf("round-trip encode mismatch: err=%v len(%d vs %d)", err, len(raw), len(reencoded))
+	if err != nil || len(gotBig.Tracks) != 200000 {
+		t.Fatalf("200k round-trip failed: err=%v tracks=%d", err, len(gotBig.Tracks))
 	}
 
-	timeout := baseline / 3
-	if timeout < 2*time.Millisecond {
-		timeout = 2 * time.Millisecond
+	delay := baseline / 3
+	if delay < 5*time.Millisecond {
+		delay = 5 * time.Millisecond
 	}
-	if timeout > 30*time.Millisecond {
-		timeout = 30 * time.Millisecond
+	if delay > 30*time.Millisecond {
+		delay = 30 * time.Millisecond
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	deadline, _ := ctx.Deadline()
-	_, err = LoadReaderContext(ctx, bytes.NewReader(raw))
-	overrun := time.Since(deadline)
-	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
-		t.Fatalf("chunked decode mid-cancel err=%v (baseline=%v timeout=%v)", err, baseline, timeout)
+	var (
+		mu       sync.Mutex
+		cancelAt time.Time
+	)
+	timer := time.AfterFunc(delay, func() {
+		mu.Lock()
+		cancelAt = time.Now()
+		mu.Unlock()
+		cancel()
+	})
+	defer timer.Stop()
+
+	_, err = LoadReaderContext(ctx, bytes.NewReader(rawBig))
+	doneAt := time.Now()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("mid-decode cancel err=%v, want context.Canceled (baseline=%v delay=%v)", err, baseline, delay)
 	}
-	if overrun >= 50*time.Millisecond {
-		t.Fatalf("chunked decode overran deadline by %v (>= 50ms)", overrun)
+	mu.Lock()
+	cAt := cancelAt
+	mu.Unlock()
+	if cAt.IsZero() {
+		t.Fatal("cancel timer never fired before 200k decode completed")
+	}
+	if sinceCancel := doneAt.Sub(cAt); sinceCancel >= 50*time.Millisecond {
+		t.Fatalf("200k decode returned %v after cancel (>= 50ms)", sinceCancel)
 	}
 }

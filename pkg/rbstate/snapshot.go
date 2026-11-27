@@ -28,9 +28,8 @@ import (
 // and one write (replica, 2026-11-24). A file without its E line is no snapshot.
 
 const (
-	snapshotMagic    = "RBS2 "
-	maxSnapshot      = 256 << 20
-	snapshotGobBatch = 512
+	snapshotMagic = "RBS2 "
+	maxSnapshot   = 256 << 20
 )
 
 type snapshotBody struct {
@@ -193,50 +192,62 @@ func LoadReaderContext(ctx context.Context, r io.Reader) (*Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	dec := gob.NewDecoder(&ctxReader{ctx: ctx, r: bytes.NewReader(rest)})
-	decodedRecords := 0
-	chunks := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		var rec snapshotBody
-		if err := dec.Decode(&rec); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
+	var rec snapshotBody
+	if ctx.Done() == nil {
+		if err := gob.NewDecoder(bytes.NewReader(rest)).Decode(&rec); err != nil {
 			return nil, ErrNoSnapshot
 		}
-		chunks++
-		decodedRecords += len(rec.Lists) + len(rec.Tracks)
-		for i, l := range rec.Lists {
-			if i&255 == 0 {
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
-			}
-			if l == nil {
-				return nil, ErrNoSnapshot
-			}
-			s.Lists[l.Key] = l
+	} else {
+		type decodeResult struct {
+			rec snapshotBody
+			err error
 		}
-		for i, t := range rec.Tracks {
-			if i&255 == 0 {
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
+		ch := make(chan decodeResult, 1)
+		go func() {
+			var r snapshotBody
+			err := gob.NewDecoder(&ctxReader{ctx: ctx, r: bytes.NewReader(rest)}).Decode(&r)
+			ch <- decodeResult{rec: r, err: err}
+		}()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case res := <-ch:
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
-			if t == nil {
+			if res.err != nil {
 				return nil, ErrNoSnapshot
 			}
-			s.Tracks[t.Key] = t
+			rec = res.rec
 		}
 	}
-	if chunks == 0 || decodedRecords != records || len(s.Lists)+len(s.Tracks) != records {
-		return nil, ErrNoSnapshot // missing stream, count mismatch, or repeated key
+	if len(rec.Lists)+len(rec.Tracks) != records {
+		return nil, ErrNoSnapshot
+	}
+	for i, l := range rec.Lists {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		if l == nil {
+			return nil, ErrNoSnapshot
+		}
+		s.Lists[l.Key] = l
+	}
+	for i, t := range rec.Tracks {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		if t == nil {
+			return nil, ErrNoSnapshot
+		}
+		s.Tracks[t.Key] = t
+	}
+	if len(s.Lists)+len(s.Tracks) != records {
+		return nil, ErrNoSnapshot // an empty or repeated key
 	}
 	return s, nil
 }
@@ -254,33 +265,15 @@ func (s *Snapshot) Encode() ([]byte, error) {
 	b.WriteString(snapshotMagic)
 	b.Write(head)
 	b.WriteByte('\n')
-	lists := make([]*List, 0, len(s.Lists))
+	rec := snapshotBody{Lists: make([]*List, 0, len(s.Lists)), Tracks: make([]*Track, 0, len(s.Tracks))}
 	for _, k := range slices.Sorted(maps.Keys(s.Lists)) {
-		lists = append(lists, s.Lists[k])
+		rec.Lists = append(rec.Lists, s.Lists[k])
 	}
-	tracks := make([]*Track, 0, len(s.Tracks))
 	for _, k := range slices.Sorted(maps.Keys(s.Tracks)) {
-		tracks = append(tracks, s.Tracks[k])
+		rec.Tracks = append(rec.Tracks, s.Tracks[k])
 	}
-	enc := gob.NewEncoder(&b)
-	if len(lists) <= snapshotGobBatch && len(tracks) <= snapshotGobBatch {
-		rec := snapshotBody{Lists: lists, Tracks: tracks}
-		if err = enc.Encode(&rec); err != nil {
-			return nil, err
-		}
-	} else {
-		for i := 0; i < len(lists); i += snapshotGobBatch {
-			hi := min(i+snapshotGobBatch, len(lists))
-			if err = enc.Encode(&snapshotBody{Lists: lists[i:hi]}); err != nil {
-				return nil, err
-			}
-		}
-		for i := 0; i < len(tracks); i += snapshotGobBatch {
-			hi := min(i+snapshotGobBatch, len(tracks))
-			if err = enc.Encode(&snapshotBody{Tracks: tracks[i:hi]}); err != nil {
-				return nil, err
-			}
-		}
+	if err = gob.NewEncoder(&b).Encode(&rec); err != nil {
+		return nil, err
 	}
 	b.WriteByte('\n')
 	fmt.Fprintf(&b, "E %d %08x\n", len(s.Lists)+len(s.Tracks), crc32.ChecksumIEEE(b.Bytes()))

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
 )
 
 func historyDB(t *testing.T, column string) (*sql.DB, string) {
@@ -1004,4 +1006,82 @@ func TestS16MergeMalformedLowercasePreparelistEntityPreservesTrack(t *testing.T)
 			t.Fatalf("lowercase preparelistentity track disposition: kept=%d removed=%d", kept, removed)
 		}
 	})
+}
+
+func TestS16MergeMainGuardianReanalysisNotShadowedByTempTable(t *testing.T) {
+	mount, hm := stockHistoryMount(t)
+	hdb, err := sql.Open("sqlite", hm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdb.SetMaxOpenConns(1)
+	mustExec(t, hdb, "INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,NULL,NULL)")
+	mustExec(t, hdb, "INSERT INTO Track(id,path,filename,title,albumArtId,isAnalyzed) VALUES(10,'../Music/live.mp3','live.mp3','Live',1,1),(11,'../Music/dead.mp3','dead.mp3','Dead',1,1)")
+	mustExec(t, hdb, "INSERT INTO Historylist(id,title,startTime,timezone,isDeleted) VALUES(1,'Keep',200,'UTC',0),(2,'Del',100,'UTC',1)")
+	mustExec(t, hdb, "INSERT INTO HistorylistEntity(listId,trackId,startTime) VALUES(1,10,200),(2,11,100)")
+	mustExec(t, hdb, `CREATE TABLE guardianreanalysis(id INTEGER PRIMARY KEY, originalTrackId INTEGER);
+		INSERT INTO guardianreanalysis VALUES(1, 10)`)
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := HealMountDataOnly(mount, 0)
+	if err != nil || !r.Healthy || r.HistoryCleaned == 0 {
+		t.Fatalf("data-only heal with main.guardianreanalysis failed: rep=%+v err=%v", r, err)
+	}
+	check, err := Open(hm, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var rows int
+	if err := check.QueryRow(`SELECT count(*) FROM guardianreanalysis WHERE id=1 AND originalTrackId=10`).Scan(&rows); err != nil || rows != 1 {
+		t.Fatalf("live main.guardianreanalysis row was deleted/missing: rows=%d err=%v", rows, err)
+	}
+}
+
+func TestHealMountDoesNotRebuildUnsupportedReserve12HistoryDB(t *testing.T) {
+	_, mount, mdb := testlibrary.Create(t)
+	mdb.Close()
+
+	seed := reserve12Seed(t, "hm-res12-unsupported.db")
+	hdb, err := sql.Open("sqlite", seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdb.SetMaxOpenConns(1)
+	schema, err := os.ReadFile("../../docs/re-report/ENGINE-5.0.4-hm.db-schema.sql")
+	if err != nil {
+		hdb.Close()
+		t.Fatal(err)
+	}
+	mustExec(t, hdb, strings.ReplaceAll(string(schema), "CREATE TABLE sqlite_sequence(name,seq);", ""))
+	mustExec(t, hdb, "INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES(1,'hist-v4',4,0,2)")
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+	hm := filepath.Join(mount, "Engine Library", "Database2", "hm.db")
+	raw, err := os.ReadFile(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hm, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := HealMountDataOnly(mount, 0)
+	if err == nil || r.Healthy {
+		t.Fatalf("expected error on schema-4 hm.db: rep=%+v err=%v", r, err)
+	}
+	for _, f := range r.ReserveFixed {
+		if f == "hm.db" {
+			t.Fatalf("unsupported hm.db reserve was rebuilt: %+v", r.ReserveFixed)
+		}
+	}
+	if res, ok, rerr := Reserve(hm); rerr != nil || !ok || res != 12 {
+		t.Fatalf("unsupported hm.db reserve modified: res=%d ok=%v err=%v", res, ok, rerr)
+	}
+	if _, serr := os.Stat(hm + ".pre-reserve"); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("hm.db.pre-reserve created on unsupported schema: err=%v", serr)
+	}
 }

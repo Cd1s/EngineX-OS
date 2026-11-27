@@ -2,6 +2,7 @@ package dbhealer
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -11,6 +12,9 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
+
+	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
 )
 
 func TestReserveDeadlineCannotRemoveLiveDatabase(t *testing.T) {
@@ -291,5 +295,55 @@ func TestNormalizeDatabase2PropagatesWritableErrorWithoutRebuilding(t *testing.T
 	}
 	if _, serr := os.Stat(hm + ".pre-reserve"); !errors.Is(serr, os.ErrNotExist) {
 		t.Fatalf("pre-reserve backup created on EIO: err=%v", serr)
+	}
+}
+
+func TestHealMountDoesNotRebuildLockedReserve12MainDB(t *testing.T) {
+	_, mount, db := testlibrary.Create(t)
+	db.Close()
+	seed := reserve12Library(t)
+	raw, err := os.ReadFile(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mPath := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+	if err := os.WriteFile(mPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Stat(mPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeIno := beforeInfo.Sys().(*syscall.Stat_t).Ino
+
+	locker, err := sql.Open("sqlite", mPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locker.SetMaxOpenConns(1)
+	defer locker.Close()
+	if _, err := locker.Exec("BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = locker.Exec("ROLLBACK") }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	rep, err := HealMountDataOnlyContext(ctx, mount, 0)
+	if err == nil || rep.Healthy || len(rep.ReserveFixed) != 0 {
+		t.Fatalf("locked reserve-12 m.db unexpectedly succeeded/rebuilt: rep=%+v err=%v", rep, err)
+	}
+	afterInfo, err := os.Stat(mPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterIno := afterInfo.Sys().(*syscall.Stat_t).Ino; afterIno != beforeIno {
+		t.Fatalf("locked m.db inode changed: %d -> %d", beforeIno, afterIno)
+	}
+	if r, ok, rerr := Reserve(mPath); rerr != nil || !ok || r != 12 {
+		t.Fatalf("locked m.db reserve changed: r=%d ok=%v err=%v", r, ok, rerr)
+	}
+	if _, serr := os.Stat(mPath + ".pre-reserve"); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("m.db.pre-reserve created while exclusively locked: err=%v", serr)
 	}
 }

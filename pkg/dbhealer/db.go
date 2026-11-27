@@ -85,7 +85,16 @@ func identityProbeContext(ctx context.Context, dataOnly bool) (context.Context, 
 		return context.WithTimeout(context.Background(), minDataOnlyProbeTimeout)
 	}
 	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < minDataOnlyProbeTimeout {
-		return context.WithTimeout(context.Background(), minDataOnlyProbeTimeout)
+		probeCtx, cancelProbe := context.WithTimeout(context.Background(), minDataOnlyProbeTimeout)
+		stopWatch := context.AfterFunc(ctx, func() {
+			if errors.Is(ctx.Err(), context.Canceled) {
+				cancelProbe()
+			}
+		})
+		return probeCtx, func() {
+			stopWatch()
+			cancelProbe()
+		}
 	}
 	return ctx, func() {}
 }
@@ -180,6 +189,14 @@ func openContext(ctx context.Context, path string, readOnly bool) (*sql.DB, erro
 }
 
 func openWithBusyTimeout(ctx context.Context, path string, readOnly bool, busyMS int) (*sql.DB, error) {
+	return openDatabaseWithOptions(ctx, path, readOnly, readOnly, busyMS)
+}
+
+func openReadOnlyLocking(ctx context.Context, path string, busyMS int) (*sql.DB, error) {
+	return openDatabaseWithOptions(ctx, path, true, false, busyMS)
+}
+
+func openDatabaseWithOptions(ctx context.Context, path string, readOnly, immutable bool, busyMS int) (*sql.DB, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -203,7 +220,9 @@ func openWithBusyTimeout(ctx context.Context, path string, readOnly bool, busyMS
 			}
 		}
 		q.Set("mode", "ro")
-		q.Set("immutable", "1")
+		if immutable {
+			q.Set("immutable", "1")
+		}
 		q.Add("_pragma", "query_only(1)")
 	} else {
 		q.Add("_pragma", "foreign_keys(1)")
@@ -468,6 +487,7 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 		r.Warnings = append(r.Warnings, "read-only media: inspected without repairs or journal writes")
 		return r, err
 	}
+	enteredCanceled := ctx.Err() != nil
 	busyMS := probeBusyTimeoutMS(ctx)
 	checkCtx, cancelProbe := identityProbeContext(ctx, dataOnly)
 	defer cancelProbe()
@@ -479,8 +499,8 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 		return r, resErr
 	}
 	if mainResOK && mainRes != 0 {
-		// Validate schema and identity read-only before rewriting reserve or touching siblings.
-		roDB, roErr := openWithBusyTimeout(checkCtx, path, true, busyMS)
+		// Validate schema and identity with lock-respecting read-only open before rewriting reserve.
+		roDB, roErr := openReadOnlyLocking(checkCtx, path, busyMS)
 		if roErr != nil {
 			if dataOnly && (isContextStop(checkCtx, roErr) || budgetExpired(checkCtx, roErr) || isSQLiteBusy(roErr)) {
 				r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
@@ -508,6 +528,11 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			r.Mount = mount
 			return r, roCloseErr
 		}
+		if !enteredCanceled && errors.Is(ctx.Err(), context.Canceled) {
+			r.Healthy = false
+			r.Mount = mount
+			return r, ctx.Err()
+		}
 		if dataOnly && ctx.Err() != nil {
 			r.Warnings = append(r.Warnings, fmt.Sprintf("m.db page reserve is %d: mount budget exceeded before rebuild", mainRes))
 			r.Healthy = false
@@ -515,7 +540,7 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			return r, ctx.Err()
 		}
 		// Before Engine opens the volume: a nonzero page reserve breaks every ATTACH.
-		if r.ReserveFixed, err = NormalizeDatabase2Context(ctx, filepath.Dir(path)); err != nil {
+		if r.ReserveFixed, _, err = normalizeMountDatabase2(ctx, filepath.Dir(path)); err != nil {
 			r.Healthy = false
 			r.Mount = mount
 			return r, err
@@ -553,6 +578,12 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			r.Mount = mount
 			return r, schemaErr
 		}
+		if !enteredCanceled && errors.Is(ctx.Err(), context.Canceled) {
+			_ = db.Close()
+			r.Healthy = false
+			r.Mount = mount
+			return r, ctx.Err()
+		}
 		if dataOnly && ctx.Err() != nil {
 			if needsIdentityRepair {
 				var repairErr error
@@ -573,7 +604,31 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			return r, closeErr
 		}
 		// Before Engine opens the volume: a nonzero page reserve breaks every ATTACH.
-		if r.ReserveFixed, err = NormalizeDatabase2Context(ctx, filepath.Dir(path)); err != nil {
+		var pendingReserve bool
+		if r.ReserveFixed, pendingReserve, err = normalizeMountDatabase2(ctx, filepath.Dir(path)); err != nil {
+			if dataOnly && !pendingReserve && onlyContextError(err) {
+				if !enteredCanceled && errors.Is(ctx.Err(), context.Canceled) {
+					_ = db.Close()
+					r.Healthy = false
+					r.Mount = mount
+					return r, ctx.Err()
+				}
+				if needsIdentityRepair {
+					var repairErr error
+					dbUUID, repairErr = validateAndRepairLibraryIdentityWithBusy(checkCtx, db, probeBusyTimeoutMS(ctx))
+					if repairErr != nil {
+						_ = db.Close()
+						r.Healthy = false
+						r.Mount = mount
+						return r, repairErr
+					}
+				}
+				r.Warnings = append(r.Warnings, "mount budget exceeded during reserve scan")
+				closeErr := db.Close()
+				r.Mount = mount
+				r.Healthy = closeErr == nil
+				return r, closeErr
+			}
 			_ = db.Close()
 			r.Healthy = false
 			r.Mount = mount
@@ -581,7 +636,68 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 		}
 	}
 	fixed := r.ReserveFixed
-	if dataOnly && needsIdentityRepair {
+	if !dataOnly {
+		// Full heal validates and commits m.db repairs atomically before touching Track sync fields.
+		var resizedIDs map[int64]bool
+		r, resizedIDs, err = healWithResizedContext(ctx, db, false)
+		r.ReserveFixed = fixed
+		if err != nil {
+			_ = db.Close()
+			r.Healthy = false
+			r.Mount = mount
+			return r, err
+		}
+		var uerr error
+		if dbUUID, _, uerr = validateLibraryIdentityReadOnlyWithBusy(ctx, db, probeBusyTimeoutMS(ctx)); uerr != nil {
+			_ = db.Close()
+			r.Healthy = false
+			r.Mount = mount
+			return r, uerr
+		}
+		passRes, perr := runMountTrackPass(ctx, db, mount, &r, mountTrackPassOptions{
+			runNFD:     true,
+			runDropbox: true,
+			dataOnly:   false,
+			dbUUID:     dbUUID,
+			pageSize:   mountDiscoveryPageSize,
+		})
+		r.ReserveFixed = fixed
+		if perr != nil {
+			_ = db.Close()
+			r.Healthy = false
+			r.Mount = mount
+			return r, perr
+		}
+		artCache := newArtworkDirCache()
+		extractEmbedded := resolveEmbeddedArtworkExtractor(opts)
+		if ctx.Err() == nil {
+			if artErr := reconcileArtwork(ctx, db, mount, resizedIDs, extractEmbedded, artCache, &r); artErr != nil {
+				_ = db.Close()
+				r.Healthy = false
+				r.Mount = mount
+				return r, artErr
+			}
+		}
+		reconcileOverviewDataDir(ctx, db, filepath.Dir(path), &r)
+		closeErr := db.Close()
+		r.Mount = mount
+		log.Printf("dbhealer: mount %s normalized %d track paths, %d remaining", mount, r.PathsNormalized, passRes.nfdRemaining)
+		if r.DropboxLocalized > 0 || passRes.dropboxRemaining > 0 {
+			log.Printf("dbhealer: mount %s localized %d dropbox tracks, %d remaining", mount, r.DropboxLocalized, passRes.dropboxRemaining)
+		}
+		if closeErr != nil {
+			r.Healthy = false
+			return r, closeErr
+		}
+		return finishHistoryHeal(ctx, path, mount, maxSessions, false, extractEmbedded, artCache, r)
+	}
+	if !enteredCanceled && errors.Is(ctx.Err(), context.Canceled) {
+		_ = db.Close()
+		r.Healthy = false
+		r.Mount = mount
+		return r, ctx.Err()
+	}
+	if needsIdentityRepair {
 		var repairErr error
 		if dbUUID, repairErr = validateAndRepairLibraryIdentityWithBusy(checkCtx, db, probeBusyTimeoutMS(ctx)); repairErr != nil {
 			_ = db.Close()
@@ -593,7 +709,13 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			return r, repairErr
 		}
 	}
-	if dataOnly && ctx.Err() != nil {
+	if ctx.Err() != nil {
+		if !enteredCanceled && errors.Is(ctx.Err(), context.Canceled) {
+			_ = db.Close()
+			r.Healthy = false
+			r.Mount = mount
+			return r, ctx.Err()
+		}
 		closeErr := db.Close()
 		r.Mount = mount
 		r.Healthy = closeErr == nil
@@ -711,6 +833,18 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 	if closeErr != nil {
 		return r, closeErr
 	}
+	return finishHistoryHeal(ctx, path, mount, maxSessions, dataOnly, extractEmbedded, artCache, r)
+}
+
+func finishHistoryHeal(
+	ctx context.Context,
+	path, mount string,
+	maxSessions int,
+	dataOnly bool,
+	extractEmbedded func(context.Context, string) ([]byte, error),
+	artCache *artworkDirCache,
+	r Report,
+) (Report, error) {
 	history := filepath.Join(filepath.Dir(path), "hm.db")
 	if _, e := os.Stat(history); e == nil {
 		if ctx.Err() != nil {
@@ -812,7 +946,7 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			r.Warnings = append(r.Warnings, "history: "+warning)
 		}
 		// An explicit full heal prunes to the newest visible sessions and compacts.
-		if err = PruneHistoryDB(history, maxSessions); err != nil {
+		if err := PruneHistoryDB(history, maxSessions); err != nil {
 			r.Healthy = false
 			return r, fmt.Errorf("history: %w", err)
 		}
