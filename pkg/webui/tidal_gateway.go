@@ -253,18 +253,20 @@ func (g *tidalGateway) tracksPath() string {
 
 // loadTracks restores the IDs of the previous run, and its counter, so an old ID
 // never names a different track.
-func (g *tidalGateway) loadTracks(root string) {
-	g.nasRoot = root
+func (g *tidalGateway) loadTracks(root nasOrigin) {
+	g.nasRoot = root.ID
 	b, err := os.ReadFile(g.tracksPath())
 	var v savedTracks
 	if err != nil || json.Unmarshal(b, &v) != nil {
 		return
 	}
-	stale := v.Root == "" || v.Root != root // NAS rows of another root, or an unknown one, are not used (#335)
+	// NAS rows and lists of another root are not used (#335). A file from before
+	// the root was recorded keeps the NAS rows that show they are from this root.
+	stale := v.Root != root.ID
 	for _, r := range v.Tracks {
 		g.next = max(g.next, r.ID)
 		ref := trackRef{track: r.Track, session: r.Session, guest: r.Guest, file: r.File, drive: r.Drive}
-		if stale && isNASTrackRef(ref) {
+		if stale && isNASTrackRef(ref) && (v.Root != "" || !root.ownsRow(ref.track)) {
 			continue
 		}
 		g.tracks[r.ID], g.ids[refKey(ref)] = ref, r.ID
@@ -402,7 +404,7 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g := &tidalGateway{browse: newBrowseCache(s.cfg.StateDir), artURLs: map[string]string{}, artCache: map[string][]byte{}, s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, albums: map[int64]albumRef{}, albumIDs: map[string]int64{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}, albumSeen: map[int64]int64{}}
 	g.searches = newSearchCache()
 	g.seedFromStreamingAccounts()
-	g.loadTracks(nasRootID(s.loadNASConfig()))
+	g.loadTracks(newNASOrigin(s.loadNASConfig()))
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
 	g.mux.HandleFunc("POST /v1/enginex/login", s.loginStart)

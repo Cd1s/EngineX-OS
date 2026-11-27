@@ -118,7 +118,7 @@ type Server struct {
 	logsMu        sync.Mutex
 	fxMu          sync.Mutex // transient FX commands never hold the settings lock
 	stemsMu       sync.Mutex // streaming-stems.json
-	stemsRoot     string     // under stemsMu: the NAS root whose NAS Stems entries are served (#335)
+	stemsRoot     nasOrigin  // under stemsMu: the NAS root whose NAS Stems entries are served (#335)
 	stemsImportMu sync.Mutex // one streamed row at a time is named, recorded and swept
 	rbxPresenceMu sync.Mutex
 	rbxPresence   map[string]*rbxPresence
@@ -374,7 +374,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.loadAppleMusicHelper()
 	s.appleMusic.OwnerPath = filepath.Join(cfg.StateDir, "applemusic-owner.json")
 	_ = s.appleMusic.Load()
-	s.stemsRoot = nasRootID(s.loadNASConfig()) // before any request
+	s.stemsRoot = newNASOrigin(s.loadNASConfig()) // before any request
 	s.tidal = newTidalGateway(s)
 	s.RegisterTunnelRoutes()
 	// Resume before accepting requests: a delayed resume could see a newly

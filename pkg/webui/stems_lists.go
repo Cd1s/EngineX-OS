@@ -76,10 +76,24 @@ func (s *Server) loadStemmed() map[string][]stemmedTrack {
 	}
 	for scope, list := range all {
 		all[scope] = slices.DeleteFunc(list, func(e stemmedTrack) bool {
-			return isNASProvider(e.Track.Provider) && (e.NASRoot == "" || e.NASRoot != s.stemsRoot)
+			return isNASProvider(e.Track.Provider) && e.NASRoot != s.stemsRoot.ID && !(e.NASRoot == "" && s.stemsRoot.ownsStem(e))
 		})
 	}
 	return all
+}
+
+// ownsStem tells whether an untagged NAS Stems entry (from before #335 round 7)
+// belongs to this root. The released format stores the stemmed copy's path, in a
+// folder named after the download it was made from (.../Stems/<cache file>/), or
+// the download itself, and the track. 5.3.0.5 named Subsonic downloads after the
+// song ID only, so a Subsonic or Plex entry is also matched by its track's cover
+// URL, which names the server.
+func (o nasOrigin) ownsStem(e stemmedTrack) bool {
+	file := e.Path
+	if dir := filepath.Dir(e.Path); filepath.Base(filepath.Dir(dir)) == "Stems" {
+		file = dir
+	}
+	return o.ownsFile(e.Track, file) || (e.Track.Provider != "webdav" && o.ownsRow(e.Track))
 }
 
 // dropNASStems removes the NAS tracks from every list and tells whether any went.
@@ -115,7 +129,14 @@ func (s *Server) addStemmedAt(scope string, t stemmedTrack, gen uint64) error {
 		return errors.New("the Stems lists cannot be read")
 	}
 	if isNASProvider(t.Track.Provider) {
-		t.NASRoot = s.stemsRoot
+		t.NASRoot = s.stemsRoot.ID
+	}
+	for _, list := range all { // older entries of this root are tagged now
+		for i, e := range list {
+			if e.NASRoot == "" && isNASProvider(e.Track.Provider) && s.stemsRoot.ownsStem(e) {
+				list[i].NASRoot = s.stemsRoot.ID
+			}
+		}
 	}
 	list := slices.DeleteFunc(all[scope], func(e stemmedTrack) bool { return sameTrack(e.Track, t.Track) })
 	all[scope] = append([]stemmedTrack{t}, list[:min(len(list), maxStemmed-1)]...)
@@ -128,7 +149,7 @@ func (s *Server) addStemmedAt(scope string, t stemmedTrack, gen uint64) error {
 // other services' entries). root is the new NAS root: from now on only NAS
 // entries stemmed from it are served, so entries a failed read or write leaves
 // in the file are never used (#335).
-func (s *Server) resetNASStemsLocked(root string) {
+func (s *Server) resetNASStemsLocked(root nasOrigin) {
 	s.stemsRoot = root
 	all, err := s.readStemmed()
 	if err != nil {

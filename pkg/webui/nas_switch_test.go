@@ -3,6 +3,7 @@ package webui
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1286,4 +1288,226 @@ func TestNASStemsReadErrorNeverRewritesTheFile(t *testing.T) {
 	if after, _ := os.ReadFile(s.stemsFile()); err == nil || !bytes.Equal(after, before) {
 		t.Fatalf("a Stems write while the file could not be read: err=%v, file now %s (was %s)", err, after, before)
 	}
+}
+
+// releasedCacheName is a NAS download's cache file name as the released version and
+// later name it: "nas-" and the SHA-256 of scheme://host (no default port), NUL, and
+// the protocol's resource string.
+func releasedCacheName(server, resource, ext string) string {
+	u, err := url.Parse(server)
+	if err != nil {
+		panic(err)
+	}
+	host := strings.ToLower(u.Host)
+	host = strings.TrimSuffix(strings.TrimSuffix(host, ":80"), ":443")
+	sum := sha256.Sum256([]byte(u.Scheme + "://" + host + "\x00" + resource))
+	return fmt.Sprintf("nas-%x%s", sum, ext)
+}
+
+// writeReleasedState writes the three NAS state files in the released format (no NAS
+// root recorded): one gateway row (id 1) for t, its cached download named cache with
+// audio, and a Stems entry for its stemmed copy, which is made.
+func writeReleasedState(t *testing.T, stateDir, dlDir, scope string, track providers.Track, cache string, audio []byte) (stemPath string) {
+	t.Helper()
+	write := func(path string, body []byte) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key, _ := json.Marshal(track.Provider + ":" + track.ID)
+	write(filepath.Join(dlDir, cache), audio)
+	write(filepath.Join(dlDir, sourcesFile), []byte(fmt.Sprintf(`{%s:%q}`, key, cache)))
+	row, _ := json.Marshal(track)
+	write(filepath.Join(stateDir, "gateway-tracks.json"), []byte(fmt.Sprintf(`{"next":1,"tracks":[{"id":1,"track":%s,"session":"nas"}],"lists":[]}`, row)))
+	stemPath = filepath.Join(dlDir, "Stems", strings.TrimSuffix(cache, filepath.Ext(cache)), "DJ Test - "+track.Title+filepath.Ext(cache))
+	write(stemPath, audio)
+	stems, _ := json.Marshal(map[string][]stemmedTrack{scope: {{Track: track, Session: nasScope, Path: stemPath}}})
+	write(filepath.Join(stateDir, "streaming-stems.json"), stems)
+	return stemPath
+}
+
+// Round 7 (PM decision): state files of the released version record no NAS root. Their
+// NAS entries are kept when their own data shows they are from the current root: an
+// upgrade keeps its [NAS] rows, cached downloads and Stems rows, and tags them at the
+// next save. Entries that do not show it, or show another root, are never used.
+func TestNASUpgradeFromReleasedStateFiles(t *testing.T) {
+	t.Run("webdav same root", func(t *testing.T) {
+		var requests atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			http.NotFound(w, r)
+		}))
+		t.Cleanup(srv.Close)
+		uiDir, stateDir, dlDir := t.TempDir(), t.TempDir(), t.TempDir()
+		cfg := fmt.Sprintf(`{"protocol":"webdav","url":%q,"username":"dj","password":"pw","enabled":true}`, srv.URL+"/music/")
+		if err := os.WriteFile(filepath.Join(uiDir, "nas.json"), []byte(cfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		audio := testMP3(120)
+		track := providers.Track{ID: "/music/Deep/synths.mp3", Title: "Synths", Provider: "webdav"}
+		cache := releasedCacheName(srv.URL, "/music/Deep/synths.mp3\x00", ".mp3")
+		stemPath := writeReleasedState(t, stateDir, dlDir, "webdav", track, cache, audio)
+		jobs := NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{DownloadDir: dlDir, AllowLossy: true}})
+		t.Cleanup(jobs.Close)
+		s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, jobs)
+		t.Cleanup(s.Close)
+		gw := httptest.NewServer(s)
+		t.Cleanup(gw.Close)
+
+		resp, err := http.Get(gw.URL + "/v1/stream/1.mp3")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || !bytes.Equal(got, audio) || requests.Load() != 0 {
+			t.Fatalf("the upgraded [NAS] row: HTTP %d, cached audio=%v, NAS requests %d (want 200, true, 0: no download)",
+				resp.StatusCode, bytes.Equal(got, audio), requests.Load())
+		}
+		var local struct {
+			Path string `json:"path"`
+		}
+		tidalGet(t, gw.URL, "/v1/enginex/stems/local?id=1", 200, &local)
+		if local.Path != stemPath {
+			t.Fatalf("the upgraded Stems row: %q, want %q", local.Path, stemPath)
+		}
+
+		// Tagged at the next save.
+		root := nasRootID(s.loadNASConfig())
+		s.tidal.saveTracks()
+		jobs.mu.Lock()
+		jobs.writeSources()
+		jobs.mu.Unlock()
+		if err := s.addStemmed("spotify", stemmedTrack{Track: providers.Track{Provider: "spotify", ID: "sp-1"}, Path: filepath.Join(stateDir, "sp-1.flac")}); err != nil {
+			t.Fatal(err)
+		}
+		var gateway struct {
+			Root   string `json:"nasRoot"`
+			Tracks []struct {
+				ID int64 `json:"id"`
+			} `json:"tracks"`
+		}
+		var index map[string]string
+		var stems map[string][]stemmedTrack
+		for path, v := range map[string]any{filepath.Join(stateDir, "gateway-tracks.json"): &gateway, filepath.Join(dlDir, sourcesFile): &index, filepath.Join(stateDir, "streaming-stems.json"): &stems} {
+			raw, err := os.ReadFile(path)
+			if err != nil || json.Unmarshal(raw, v) != nil {
+				t.Fatalf("read %s: %v", filepath.Base(path), err)
+			}
+		}
+		if gateway.Root != root || len(gateway.Tracks) != 1 || index[sourcesRootKey] != root || index["webdav:"+track.ID] != cache ||
+			len(stems["webdav"]) != 1 || stems["webdav"][0].NASRoot != root {
+			t.Fatalf("not tagged at the next save: gateway %q (%d rows), index %v, Stems %+v; root %q", gateway.Root, len(gateway.Tracks), index, stems["webdav"], root)
+		}
+	})
+
+	t.Run("webdav another root of the same server", func(t *testing.T) {
+		uiDir, stateDir, dlDir := t.TempDir(), t.TempDir(), t.TempDir()
+		const server = "http://127.0.0.1:9"
+		cfg := fmt.Sprintf(`{"protocol":"webdav","url":%q,"enabled":true}`, server+"/other/")
+		if err := os.WriteFile(filepath.Join(uiDir, "nas.json"), []byte(cfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		track := providers.Track{ID: "/music/Deep/synths.mp3", Title: "Synths", Provider: "webdav"}
+		writeReleasedState(t, stateDir, dlDir, "webdav", track, releasedCacheName(server, "/music/Deep/synths.mp3\x00", ".mp3"), testMP3(120))
+		jobs := NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{DownloadDir: dlDir, AllowLossy: true}})
+		t.Cleanup(jobs.Close)
+		s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, jobs)
+		t.Cleanup(s.Close)
+		s.tidal.mu.Lock()
+		_, row := s.tidal.tracks[1]
+		s.tidal.mu.Unlock()
+		file, stem := jobs.File(track), s.stemmedPath(track)
+		if row || file != "" || stem != "" {
+			t.Fatalf("state of root /music/ used under root /other/: row %v, cached file %q, stemmed copy %q", row, file, stem)
+		}
+	})
+
+	// The rig's two Subsonic servers use the same song ID for different recordings. 5.3.0.5
+	// named a Subsonic download "subsonic-<song ID>" (no server in it); the development line
+	// since 636ef9e8 names it like the other NAS downloads (a hash of server and song).
+	released := func(rig *nasSwitchRig, server string, audio []byte, cache string) string {
+		track := providers.Track{ID: "tr-99", Title: "Warehouse Dub", Artist: "DJ Test", Provider: "subsonic",
+			CoverURL: strings.Replace(server, "http://", "https://", 1) + "/rest/getCoverArt.view?id=cv-99"}
+		return writeReleasedState(rig.t, rig.stateDir, rig.p.Deemix.DownloadDir, "subsonic", track, cache, audio)
+	}
+	hashed := func(server string) string { return releasedCacheName(server, "\x00subsonic\x00tr-99", ".mp3") }
+	stemStays := func(t *testing.T, rig *nasSwitchRig, stemPath string) {
+		t.Helper()
+		var local struct {
+			Path string `json:"path"`
+		}
+		tidalGet(t, rig.gw.URL, "/v1/enginex/stems/local?id=1", 200, &local)
+		if local.Path != stemPath {
+			t.Fatalf("the upgraded Stems row: %q, want %q", local.Path, stemPath)
+		}
+	}
+	t.Run("subsonic same root, 5.3.0.5 files", func(t *testing.T) {
+		rig := newNASSwitchRig(t)
+		rig.saveNAS(rig.twoURL)
+		rig.stop()
+		stemPath := released(rig, rig.twoURL, rig.two, "subsonic-tr-99.mp3")
+		rig.start()
+		// The row and its Stems row stay (their track's cover URL names the server); the
+		// cached download names no server, so it is fetched once more.
+		rig.plays("the upgraded [NAS] row", 1, rig.two)
+		if n := rig.twoDownloads.Load(); n != 1 {
+			t.Fatalf("the upgraded row downloaded its track %d times, want 1 (a 5.3.0.5 Subsonic cache name names no server)", n)
+		}
+		stemStays(t, rig, stemPath)
+	})
+	t.Run("subsonic same root, development-line files", func(t *testing.T) {
+		rig := newNASSwitchRig(t)
+		rig.saveNAS(rig.twoURL)
+		rig.stop()
+		stemPath := released(rig, rig.twoURL, rig.two, hashed(rig.twoURL))
+		rig.start()
+		rig.plays("the upgraded [NAS] row", 1, rig.two)
+		if n := rig.twoDownloads.Load(); n != 0 {
+			t.Fatalf("the upgraded row downloaded its track again (%d times)", n)
+		}
+		stemStays(t, rig, stemPath)
+	})
+	for _, cache := range []string{"subsonic-tr-99.mp3", "hashed"} {
+		t.Run("subsonic another root, the review's HIGH 1 shape, "+cache, func(t *testing.T) {
+			rig := newNASSwitchRig(t)
+			rig.saveNAS(rig.twoURL)
+			rig.stop()
+			name := cache
+			if cache == "hashed" {
+				name = hashed(rig.oneURL)
+			}
+			released(rig, rig.oneURL, rig.one, name) // server one's state; the NAS is server two
+			rig.start()
+			rig.gone("server one's released row", 1)
+			id2 := rig.browse()
+			rig.plays("server two's new row", id2, rig.two)
+			if a := rig.get(fmt.Sprintf("/v1/enginex/stems/local?id=%d", id2)); a.code != http.StatusNotFound {
+				t.Fatalf("server two's new row %d got server one's released stemmed copy: HTTP %d %s", id2, a.code, a.body)
+			}
+		})
+	}
+
+	t.Run("smb rows name no root", func(t *testing.T) {
+		uiDir, stateDir := t.TempDir(), t.TempDir()
+		if err := os.WriteFile(filepath.Join(uiDir, "nas.json"), []byte(`{"protocol":"smb","url":"smb://127.0.0.1/music/rootB","enabled":true}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		row := `{"next":1,"tracks":[{"id":1,"track":{"id":"Sets/SameTrack.flac","provider":"smb","title":"SameTrack"},"session":"nas"}]}`
+		if err := os.WriteFile(filepath.Join(stateDir, "gateway-tracks.json"), []byte(row), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir}, nil)
+		t.Cleanup(s.Close)
+		s.tidal.mu.Lock()
+		_, kept := s.tidal.tracks[1]
+		s.tidal.mu.Unlock()
+		if kept {
+			t.Fatal("a released SMB row (a path relative to a root it does not name) was kept")
+		}
+	})
 }
