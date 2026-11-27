@@ -2,10 +2,13 @@ package enginedb
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"math"
+	"path/filepath"
 	"testing"
 
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
@@ -315,5 +318,217 @@ func TestIsStockOverwrittenPerformanceSignatures(t *testing.T) {
 		FastKnown: true, FastCues: fb.Cues, FastLoops: fb.Loops, FastActive: fb.Active,
 	}) {
 		t.Fatal("DJ hot cue deletion on OneLibrary row was overwritten")
+	}
+}
+
+// Fails at runtime on 8070b7d7: ApplyPerformance previously routed stock Engine 5.3.0 OA's
+// auto-main-cue at beat 0 through mergeFast, returning PerfMerged (keeping stock OA's wrong
+// main cue and marking the track PerfDeck) instead of PerfWritten.
+func TestApplyPerformanceRepairsStockOAAutoMainCue(t *testing.T) {
+	ctx := context.Background()
+	emptyPos := [8]float64{-1, -1, -1, -1, -1, -1, -1, -1}
+	var emptyNames [8]string
+	emptyLoops := buildLoopsBlob(t, -1, -1, 0, 0, "")
+	const sr = 44100.0
+	const beat0 = 11391.4248046875
+	oaBeats := buildStockOABeats(t, sr, 13707967, beat0, 136.0, 704, 0, 9)
+	qcAutoBeat0 := buildQuickCuesBlob(t, emptyPos, emptyNames, beat0, 1, beat0)
+	qcMoved1 := buildQuickCuesBlob(t, emptyPos, emptyNames, beat0+1, 1, beat0)
+	hotPos := emptyPos
+	hotPos[0] = 220500
+	hotNames := emptyNames
+	hotNames[0] = "DJKeep"
+	qcDJHot := buildQuickCuesBlob(t, hotPos, hotNames, beat0, 1, beat0)
+
+	dir := t.TempDir()
+	rbTrack := rekordbox.Track{ID: 10, Path: "/Contents/a.flac", SampleRate: 44100, Duration: 60, BPM: 128, Genre: "House"}
+	rbTrack2 := rbTrack
+	rbTrack2.ID, rbTrack2.Path = 11, "/Contents/b.flac"
+	rbTrack3 := rbTrack
+	rbTrack3.ID, rbTrack3.Path = 12, "/Contents/c.flac"
+	ids, _, _, err := BuildLibrary(ctx, dir, "", []TrackRow{
+		{Rel: "Contents/a.flac", Track: rbTrack},
+		{Rel: "Contents/b.flac", Track: rbTrack2},
+		{Rel: "Contents/c.flac", Track: rbTrack3},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lib, err := OpenLibrary(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lib.Close()
+
+	for i, qc := range [][]byte{qcAutoBeat0, qcMoved1, qcDJHot} {
+		if _, err := lib.db.ExecContext(ctx,
+			`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+			[]byte{1}, []byte{1}, oaBeats, qc, emptyLoops, ids[i]); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lib.db.ExecContext(ctx, `UPDATE Track SET isAnalyzed=1, isBeatGridLocked=0, bpmAnalyzed=136.0 WHERE id=?`, ids[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rbBeats := make([]rekordbox.Beat, 20)
+	for i := range rbBeats {
+		rbBeats[i] = rekordbox.Beat{Number: uint16(i%4) + 1, BPM: 128, TimeMS: uint32(300 + i*469)}
+	}
+	rbPerf, err := EncodePerformance(rbTrack, &rekordbox.Analysis{
+		Beats: rbBeats,
+		Cues:  []rekordbox.Cue{{HotCue: 1, TimeMS: 1000, Name: "RBHot1"}, {HotCue: 0, TimeMS: 300}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := rbstate.Facts{Duration: 60, SampleRate: 44100, BPM: 128}
+
+	b, err := lib.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Rollback()
+
+	// Row 1: untouched stock OA auto-main-cue at beat0 -> PerfWritten (repaired cleanly).
+	d1, out1, err := b.ApplyPerformance(ctx, ids[0], rbPerf, facts, PerfPrev{State: rbstate.PerfNone}, rbTrack)
+	if err != nil || out1 != PerfWritten || len(d1) == 0 {
+		t.Fatalf("row 1 stock-OA ApplyPerformance = (len=%d, out=%d, err=%v), want (non-empty, PerfWritten, nil)", len(d1), out1, err)
+	}
+	// Row 2: 1-sample main cue move -> MUST stay PerfMerged (DJ edit kept).
+	d2, out2, err := b.ApplyPerformance(ctx, ids[1], rbPerf, facts, PerfPrev{State: rbstate.PerfNone}, rbTrack2)
+	if err != nil || out2 != PerfMerged || d2 != nil {
+		t.Fatalf("row 2 1-sample main cue ApplyPerformance = (d=%x, out=%d, err=%v), want (nil, PerfMerged, nil)", d2, out2, err)
+	}
+	// Row 3: DJ hot cue -> MUST stay PerfMerged (DJ cue kept).
+	d3, out3, err := b.ApplyPerformance(ctx, ids[2], rbPerf, facts, PerfPrev{State: rbstate.PerfNone}, rbTrack3)
+	if err != nil || out3 != PerfMerged || d3 != nil {
+		t.Fatalf("row 3 DJ hot cue ApplyPerformance = (d=%x, out=%d, err=%v), want (nil, PerfMerged, nil)", d3, out3, err)
+	}
+	if err := b.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotBeats1, gotCues1 []byte
+	var gotBPM1 float64
+	if err := lib.db.QueryRowContext(ctx,
+		`SELECT p.beatData, p.quickCues, t.bpmAnalyzed FROM PerformanceData p JOIN Track t ON t.id=p.trackId WHERE t.id=?`,
+		ids[0]).Scan(&gotBeats1, &gotCues1, &gotBPM1); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotBeats1, rbPerf.Beats) || !bytes.Equal(gotCues1, rbPerf.QuickCues) || math.Abs(gotBPM1-128) > 0.01 {
+		t.Fatalf("row 1 repaired data mismatch: beatsEq=%v cuesEq=%v bpm=%.2f", bytes.Equal(gotBeats1, rbPerf.Beats), bytes.Equal(gotCues1, rbPerf.QuickCues), gotBPM1)
+	}
+	var gotCues2 []byte
+	if err := lib.db.QueryRowContext(ctx, `SELECT quickCues FROM PerformanceData WHERE trackId=?`, ids[1]).Scan(&gotCues2); err != nil {
+		t.Fatal(err)
+	}
+	_, tr2, ok := cueSlots(gotCues2)
+	if !ok || tr2[8] != 1 || math.Abs(displayFloat(tr2[0:8], big)-(beat0+1)) > 1e-6 {
+		t.Fatalf("row 2 DJ +1 sample main cue was lost: ok=%v trailer=%x", ok, tr2)
+	}
+}
+
+// Tests the shared StockRepairProvenanceAllowed gate, ScanStockOACandidatesRO prefilter,
+// and ApplyPerformance respecting write-back Synced provenance.
+func TestStockRepairProvenanceAndScan(t *testing.T) {
+	ctx := context.Background()
+	emptyPos := [8]float64{-1, -1, -1, -1, -1, -1, -1, -1}
+	var emptyNames [8]string
+	emptyLoops := buildLoopsBlob(t, -1, -1, 0, 0, "")
+	const sr = 44100.0
+	const beat0 = 11391.4248046875
+	oaBeats := buildStockOABeats(t, sr, 13707967, beat0, 136.0, 704, 0, 9)
+	qcAutoBeat0 := buildQuickCuesBlob(t, emptyPos, emptyNames, beat0, 1, beat0)
+	mountBaseline := SyncedDigest(nil, nil, nil, 0, "House", "", "")
+
+	if !StockRepairProvenanceAllowed(StockRepairProvenance{PerfState: rbstate.PerfNone}) {
+		t.Fatal("clean PerfNone provenance rejected")
+	}
+	if !StockRepairProvenanceAllowed(StockRepairProvenance{
+		PerfState: rbstate.PerfNone, Synced: mountBaseline, Genre: "House",
+	}) {
+		t.Fatal("untouched OnDemand mount baseline Synced rejected")
+	}
+	for _, tc := range []struct {
+		name string
+		prov StockRepairProvenance
+	}{
+		{"native", StockRepairProvenance{Native: true}},
+		{"perf_applied", StockRepairProvenance{PerfState: rbstate.PerfApplied}},
+		{"perf_deck", StockRepairProvenance{PerfState: rbstate.PerfDeck}},
+		{"perf_missing", StockRepairProvenance{PerfState: rbstate.PerfMissing}},
+		{"written", StockRepairProvenance{Written: []byte{1, 2, 3}}},
+		{"built_anlz", StockRepairProvenance{HasBuiltANLZ: true}},
+		{"synced_color_tag", StockRepairProvenance{HasSyncedColorTag: true}},
+		{"edit_nonzero", StockRepairProvenance{Edit: 1795690063, Synced: mountBaseline, Genre: "House"}},
+		{"synced_writeback", StockRepairProvenance{Synced: []byte{1, 2, 3, 4}, Genre: "House"}},
+		{"synced_idle_settled_strict", StockRepairProvenance{
+			Synced: SyncedDigest(nil, qcAutoBeat0, emptyLoops, 0, "House", "", ""), Genre: "House",
+			CurCues: qcAutoBeat0, CurLoops: emptyLoops,
+		}},
+	} {
+		if StockRepairProvenanceAllowed(tc.prov) {
+			t.Fatalf("provenance case %q unexpectedly allowed", tc.name)
+		}
+	}
+
+	dir := t.TempDir()
+	rbTrack := rekordbox.Track{ID: 10, Path: "/Contents/a.flac", SampleRate: 44100, Duration: 60, BPM: 128, Genre: "House"}
+	ids, wantUUID, _, err := BuildLibrary(ctx, dir, "", []TrackRow{{Rel: "Contents/a.flac", Track: rbTrack}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lib, err := OpenLibrary(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lib.Close()
+	if _, err := lib.db.ExecContext(ctx,
+		`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+		[]byte{1}, []byte{1}, oaBeats, qcAutoBeat0, emptyLoops, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	// Also insert a native stock Engine row (pdbImportKey=0) which the SQL prefilter must ignore.
+	if _, err := lib.db.ExecContext(ctx,
+		`INSERT INTO Track(path, filename, isAnalyzed, isAvailable, isBeatGridLocked, pdbImportKey) VALUES('../Native/n.mp3', 'n.mp3', 1, 1, 0, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.db.ExecContext(ctx,
+		`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=? WHERE trackId=(SELECT id FROM Track WHERE path='../Native/n.mp3')`,
+		[]byte{1}, []byte{1}, oaBeats, qcAutoBeat0, emptyLoops); err != nil {
+		t.Fatal(err)
+	}
+
+	gotUUID, cands, err := ScanStockOACandidatesRO(ctx, filepath.Join(dir, "m.db"))
+	if err != nil {
+		t.Fatalf("ScanStockOACandidatesRO: %v", err)
+	}
+	if gotUUID != wantUUID || len(cands) != 1 || cands[0].ID != ids[0] {
+		t.Fatalf("ScanStockOACandidatesRO = (uuid=%q, cands=%+v), want (%q, [id=%d])", gotUUID, cands, wantUUID, ids[0])
+	}
+
+	// ApplyPerformance must NOT take the repair shortcut when write-back Synced marker is set.
+	rbBeats := make([]rekordbox.Beat, 20)
+	for i := range rbBeats {
+		rbBeats[i] = rekordbox.Beat{Number: uint16(i%4) + 1, BPM: 128, TimeMS: uint32(300 + i*469)}
+	}
+	rbPerf, err := EncodePerformance(rbTrack, &rekordbox.Analysis{
+		Beats: rbBeats,
+		Cues:  []rekordbox.Cue{{HotCue: 1, TimeMS: 1000, Name: "RBHot1"}, {HotCue: 0, TimeMS: 300}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := lib.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Rollback()
+	d, out, err := b.ApplyPerformance(ctx, ids[0], rbPerf, rbstate.Facts{Duration: 60, SampleRate: 44100, BPM: 128}, PerfPrev{
+		State: rbstate.PerfNone, Synced: []byte{1, 2, 3, 4},
+	}, rbTrack)
+	if err != nil || out != PerfMerged || d != nil {
+		t.Fatalf("ApplyPerformance with write-back Synced = (d=%x, out=%d, err=%v), want (nil, PerfMerged, nil)", d, out, err)
 	}
 }

@@ -355,6 +355,22 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 				}
 				unchanged = false
 			}
+		} else {
+			repaired, pending, rerr := repairStockOverwrittenAtMount(ctx, mount, dir, r, head, st, startBG)
+			if rerr != nil {
+				if errors.Is(rerr, errWindowDeadline) || deadlineReached() {
+					res.Applied += repaired
+					res.Pending = pending
+					return stopAtDeadline()
+				}
+				return res, rerr
+			}
+			if repaired > 0 || !pending.None() {
+				chores(ctx, mount, st, !o.Publish)
+				res.Applied += repaired
+				res.Pending = pending
+				return res, nil
+			}
 		}
 		if unchanged {
 			chores(ctx, mount, st, !o.Publish)

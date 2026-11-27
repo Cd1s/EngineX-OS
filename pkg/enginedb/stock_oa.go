@@ -2,8 +2,13 @@ package enginedb
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"math"
+	"net/url"
+	"strings"
+
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
 
 // StockOverwrittenRow describes the existing PerformanceData + Track lock state of a
@@ -293,6 +298,177 @@ func loopSlotStrictlyEmpty(slot []byte) bool {
 	}
 	start, end, set := loopAt(slot)
 	return start < 0 && end < 0 && set[0] == 0 && set[1] == 0
+}
+
+// StockRepairProvenance holds the snapshot provenance fields for a rekordbox-converted
+// row before deciding whether it may be repaired from rekordbox data. Both the on-load
+// hook path (pkg/webui) and the Gen-2 64-bit mount/apply paths (pkg/bridge, pkg/enginedb)
+// call StockRepairProvenanceAllowed so any provenance policy update lives in one place.
+type StockRepairProvenance struct {
+	Native            bool
+	PerfState         rbstate.PerfState
+	Written           []byte
+	Edit              int64
+	Synced            []byte
+	HasBuiltANLZ      bool
+	HasSyncedColorTag bool
+	FastCues          []byte
+	FastLoops         []byte
+	FastActive        uint32
+	Genre             string
+	Comment           string
+	Label             string
+	CurCues           []byte
+	CurLoops          []byte
+	CurActiveLoops    int64
+}
+
+// TrackRepairProvenance builds a StockRepairProvenance from a snapshot track and the
+// live m.db row's editable tag and cue/loop fields.
+func TrackRepairProvenance(t *rbstate.Track, genre, comment, label string, curCues, curLoops []byte, curActive int64) StockRepairProvenance {
+	if t == nil {
+		return StockRepairProvenance{Native: true}
+	}
+	return StockRepairProvenance{
+		Native:            t.Native,
+		PerfState:         t.Perf,
+		Written:           t.Written,
+		Edit:              t.Edit,
+		Synced:            t.Synced,
+		HasBuiltANLZ:      len(t.Built.ANLZ) > 0,
+		HasSyncedColorTag: len(t.SyncedColorTag) > 0,
+		FastCues:          t.FastCues,
+		FastLoops:         t.FastLoops,
+		FastActive:        t.FastActive,
+		Genre:             genre,
+		Comment:           comment,
+		Label:             label,
+		CurCues:           curCues,
+		CurLoops:          curLoops,
+		CurActiveLoops:    curActive,
+	}
+}
+
+// StockRepairProvenanceAllowed is the single shared provenance gate for stock-Engine
+// overwrite repair across all models (arm32 on-load hook and arm64 Gen-2 mount/apply).
+//
+// Strict rule: reject native tracks, bridge-applied/deck-owned/missing states, any
+// Written digest, any previously built ANLZ signature, any synced color tag, any
+// non-zero write-back Edit timestamp, or any Synced digest other than the untouched
+// mount-time OnDemand baseline written by ConvertAtMount.
+func StockRepairProvenanceAllowed(p StockRepairProvenance) bool {
+	if p.Native ||
+		p.PerfState == rbstate.PerfDeck || p.PerfState == rbstate.PerfApplied || p.PerfState == rbstate.PerfMissing ||
+		len(p.Written) > 0 || p.Edit != 0 ||
+		p.HasBuiltANLZ || p.HasSyncedColorTag {
+		return false
+	}
+	if len(p.Synced) > 0 {
+		mountBaseline := SyncedDigest(nil, p.FastCues, p.FastLoops, int64(p.FastActive), p.Genre, p.Comment, p.Label)
+		if !bytes.Equal(p.Synced, mountBaseline) {
+			return false
+		}
+	}
+	return true
+}
+
+// IsRepairableStockOverwritten is the single shared gate requiring both clean snapshot
+// provenance (StockRepairProvenanceAllowed) and an unedited stock-Engine overwrite
+// signature (IsStockOverwrittenPerformance).
+func IsRepairableStockOverwritten(row StockOverwrittenRow, prov StockRepairProvenance) bool {
+	return StockRepairProvenanceAllowed(prov) && IsStockOverwrittenPerformance(row)
+}
+
+// StockOACandidate is one candidate row returned by the read-only SQLite prefilter scan
+// for stock-Engine-overwritten rekordbox tracks on non-on-demand (Gen-2 64-bit) mounts.
+type StockOACandidate struct {
+	ID           int64
+	Path         string
+	ImportKey    int64
+	LastEditTime int64
+	Genre        string
+	Comment      string
+	Label        string
+	Key          int
+	BPM          float64
+	Length       int
+	Row          StockOverwrittenRow
+}
+
+const stockOACandidateQuery = `
+	SELECT t.id, COALESCE(t.path, ''), COALESCE(t.pdbImportKey, 0), COALESCE(t.lastEditTime, 0),
+	       COALESCE(t.isBeatGridLocked, 0),
+	       COALESCE(t.genre, ''), COALESCE(t.comment, ''), COALESCE(t.label, ''),
+	       COALESCE(t.key, -1), COALESCE(t.bpmAnalyzed, t.bpm, 0), COALESCE(t.length, 0),
+	       p.trackData, p.overviewWaveFormData, p.beatData, p.quickCues, p.loops,
+	       COALESCE(p.activeOnLoadLoops, 0), p.thirdPartySourceId
+	FROM Track t
+	JOIN PerformanceData p ON p.trackId = t.id
+	WHERE COALESCE(t.pdbImportKey, 0) > 0
+	  AND COALESCE(t.isBeatGridLocked, 0) = 0
+	  AND (p.thirdPartySourceId IS NULL OR p.thirdPartySourceId = 0)
+	  AND (
+	        (p.beatData IS NOT NULL AND length(p.beatData) <= 256)
+	     OR (p.trackData IS NULL AND p.overviewWaveFormData IS NULL AND p.beatData IS NULL
+	         AND (p.quickCues IS NOT NULL OR p.loops IS NOT NULL))
+	  )
+	ORDER BY t.id`
+
+func scanStockOACandidatesDB(ctx context.Context, db *sql.DB) ([]StockOACandidate, error) {
+	rows, err := db.QueryContext(ctx, stockOACandidateQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StockOACandidate
+	for rows.Next() {
+		var (
+			c         StockOACandidate
+			lockedVal int
+		)
+		if err := rows.Scan(
+			&c.ID, &c.Path, &c.ImportKey, &c.LastEditTime,
+			&lockedVal,
+			&c.Genre, &c.Comment, &c.Label,
+			&c.Key, &c.BPM, &c.Length,
+			&c.Row.TrackData, &c.Row.Overview, &c.Row.Beats, &c.Row.QuickCues, &c.Row.Loops,
+			&c.Row.ActiveOnLoadLoops, &c.Row.ThirdPartySourceID,
+		); err != nil {
+			return nil, err
+		}
+		c.Row.BeatGridLocked = lockedVal != 0
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// ScanStockOACandidatesRO opens m.db read-only and returns Information.uuid plus every
+// rekordbox-imported row matching the cheap SQL prefilter for stock-Engine overwrites.
+func ScanStockOACandidatesRO(ctx context.Context, dbPath string) (string, []StockOACandidate, error) {
+	dsn := (&url.URL{Scheme: "file", Path: dbPath}).String() + "?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return "", nil, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var liveUUID string
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(uuid, '') FROM Information LIMIT 1`).Scan(&liveUUID); err != nil {
+		return "", nil, err
+	}
+	cands, err := scanStockOACandidatesDB(ctx, db)
+	if err != nil {
+		return "", nil, err
+	}
+	return strings.TrimSpace(liveUUID), cands, nil
+}
+
+// ScanStockOACandidates runs the read-only stock-OA candidate prefilter on an open Library.
+func (l *Library) ScanStockOACandidates(ctx context.Context) ([]StockOACandidate, error) {
+	if l == nil || l.db == nil {
+		return nil, nil
+	}
+	return scanStockOACandidatesDB(ctx, l.db)
 }
 
 // BeatDataFirstBPM returns the opening BPM of an Engine qCompress beatData blob, or 0 if invalid.

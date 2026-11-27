@@ -981,13 +981,6 @@ func (s *Server) verifyRepairCandidate(ctx context.Context, mount, libUUID, engi
 	if err != nil {
 		return err
 	}
-	// Never repair a row the bridge already applied/wrote, marked deck-owned, or
-	// recorded as edited/synced by #321 write-back.
-	if stickID.PerfState == rbstate.PerfDeck || stickID.PerfState == rbstate.PerfApplied ||
-		len(stickID.Written) > 0 || stickID.Edit != 0 ||
-		stickID.HasBuiltANLZ || stickID.HasSyncedColorTag {
-		return errOnDemandNotRepairable
-	}
 
 	mdb := filepath.Join(stickID.Mount, "Engine Library", "Database2", "m.db")
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
@@ -1067,22 +1060,29 @@ func (s *Server) verifyRepairCandidate(ctx context.Context, mount, libUUID, engi
 	if importKey <= 0 || (requireImportKey > 0 && importKey != requireImportKey) {
 		return bridge.ErrOnDemandNotFound
 	}
-	// OnDemand mounts record an initial mount-time Synced digest with Edit == 0
-	// (pkg/bridge/apply.go:388-392) so #321 skips untouched rows in 0 ms.
-	// Any Synced marker other than that untouched mount-time baseline means #321
-	// write-back touched/synced the row, so it is never repairable.
-	if len(stickID.Synced) > 0 {
-		mountBaseline := enginedb.SyncedDigest(nil, stickID.FastCues, stickID.FastLoops, int64(stickID.FastActive), genre, comment, label)
-		if !bytes.Equal(stickID.Synced, mountBaseline) {
-			return errOnDemandNotRepairable
-		}
-	}
 	row.BeatGridLocked = lockedVal != 0
 	row.FastKnown = stickID.FastKnown
 	row.FastCues = stickID.FastCues
 	row.FastLoops = stickID.FastLoops
 	row.FastActive = stickID.FastActive
-	if !enginedb.IsStockOverwrittenPerformance(row) {
+	prov := enginedb.StockRepairProvenance{
+		PerfState:         stickID.PerfState,
+		Written:           stickID.Written,
+		Edit:              stickID.Edit,
+		Synced:            stickID.Synced,
+		HasBuiltANLZ:      stickID.HasBuiltANLZ,
+		HasSyncedColorTag: stickID.HasSyncedColorTag,
+		FastCues:          stickID.FastCues,
+		FastLoops:         stickID.FastLoops,
+		FastActive:        stickID.FastActive,
+		Genre:             genre,
+		Comment:           comment,
+		Label:             label,
+		CurCues:           row.QuickCues,
+		CurLoops:          row.Loops,
+		CurActiveLoops:    row.ActiveOnLoadLoops,
+	}
+	if !enginedb.IsRepairableStockOverwritten(row, prov) {
 		return errOnDemandNotRepairable
 	}
 	// Unconditionally require the caller hook's observed blobs to match m.db byte-for-byte

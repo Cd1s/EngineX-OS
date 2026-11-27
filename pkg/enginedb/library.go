@@ -1233,12 +1233,16 @@ func (b *Batch) DeleteList(ctx context.Context, id int64, owned func(int64) bool
 
 // PerfPrev is what the snapshot knows of a row before staged data is applied.
 type PerfPrev struct {
-	State      rbstate.PerfState
-	Written    []byte // the digest of what the bridge last wrote, nil for a row only the export filled
-	FastKnown  bool
-	FastCues   []byte
-	FastLoops  []byte
-	FastActive uint32
+	State             rbstate.PerfState
+	Written           []byte // the digest of what the bridge last wrote, nil for a row only the export filled
+	FastKnown         bool
+	FastCues          []byte
+	FastLoops         []byte
+	FastActive        uint32
+	Edit              int64
+	Synced            []byte
+	HasBuiltANLZ      bool
+	HasSyncedColorTag bool
 }
 
 // ApplyPerformance writes a track's staged data unless the deck changed the row since the bridge
@@ -1246,19 +1250,21 @@ type PerfPrev struct {
 // the deck's from now on) and what it did. Four cases:
 //   - the row holds the staged data already (a window cut after its commit): nothing is written;
 //   - the row holds what the bridge wrote before: all of it is replaced;
-//   - the export alone filled the row and the deck worked on it since: the DJ's hot cues, loops,
-//     adjusted main cue, locked or adjusted grid stay (#328, mergeFast);
+//   - the export alone filled the row and the deck worked on it since: an unedited stock-Engine
+//     overwrite (verified by IsRepairableStockOverwritten) is cleanly replaced with rekordbox's
+//     data, while any DJ hot cues, loops, adjusted main cue, locked or adjusted grid stay (#328, mergeFast);
 //   - the deck changed a row the bridge wrote in full: its grid, cues and loops stay, moved from
 //     an older offset rule to this one (#178, realignKept); waveforms and track data are staged.
 func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f rbstate.Facts, prev PerfPrev, export rekordbox.Track) (digest []byte, outcome Outcome, err error) {
 	var row deckRow
 	var trackData, overview []byte
-	st, err := b.stmt(ctx, `SELECT p.beatData,p.quickCues,p.loops,p.activeOnLoadLoops,p.thirdPartySourceId,p.trackData,p.overviewWaveFormData,COALESCE(t.isBeatGridLocked,0)
+	var genre, comment, label string
+	st, err := b.stmt(ctx, `SELECT p.beatData,p.quickCues,p.loops,p.activeOnLoadLoops,p.thirdPartySourceId,p.trackData,p.overviewWaveFormData,COALESCE(t.isBeatGridLocked,0),COALESCE(t.genre,''),COALESCE(t.comment,''),COALESCE(t.label,'')
 		FROM PerformanceData p JOIN Track t ON t.id=p.trackId WHERE p.trackId=?`)
 	if err != nil {
 		return nil, 0, err
 	}
-	if err = st.QueryRowContext(ctx, id).Scan(&row.beats, &row.cues, &row.loops, &row.active, &row.mark, &trackData, &overview, &row.locked); err != nil {
+	if err = st.QueryRowContext(ctx, id).Scan(&row.beats, &row.cues, &row.loops, &row.active, &row.mark, &trackData, &overview, &row.locked, &genre, &comment, &label); err != nil {
 		return nil, 0, fmt.Errorf("track %d: %w", id, err)
 	}
 	staged := p.Digest
@@ -1325,6 +1331,48 @@ func (b *Batch) ApplyPerformance(ctx context.Context, id int64, p Performance, f
 	base := fastBaseOf(export)
 	if prev.FastKnown {
 		base = fastBase{cues: prev.FastCues, loops: prev.FastLoops, active: int64(prev.FastActive)}
+	}
+	fastKnown := prev.FastKnown || len(base.cues) > 0 || len(base.loops) > 0 || base.active != 0
+	stockRow := StockOverwrittenRow{
+		TrackData:          trackData,
+		Overview:           overview,
+		Beats:              row.beats,
+		QuickCues:          row.cues,
+		Loops:              row.loops,
+		ActiveOnLoadLoops:  row.active.Int64,
+		ThirdPartySourceID: row.mark,
+		BeatGridLocked:     row.locked,
+		FastKnown:          fastKnown,
+		FastCues:           base.cues,
+		FastLoops:          base.loops,
+		FastActive:         uint32(base.active),
+	}
+	prov := StockRepairProvenance{
+		PerfState:         prev.State,
+		Written:           prev.Written,
+		Edit:              prev.Edit,
+		Synced:            prev.Synced,
+		HasBuiltANLZ:      prev.HasBuiltANLZ,
+		HasSyncedColorTag: prev.HasSyncedColorTag,
+		FastCues:          base.cues,
+		FastLoops:         base.loops,
+		FastActive:        uint32(base.active),
+		Genre:             genre,
+		Comment:           comment,
+		Label:             label,
+		CurCues:           row.cues,
+		CurLoops:          row.loops,
+		CurActiveLoops:    row.active.Int64,
+	}
+	if IsRepairableStockOverwritten(stockRow, prov) {
+		if _, err = b.exec(ctx, `UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,beatData=?,quickCues=?,loops=?,activeOnLoadLoops=?,thirdPartySourceId=NULL WHERE trackId=?`,
+			p.TrackData, p.Overview, p.Beats, p.QuickCues, p.Loops, p.ActiveLoops, id); err != nil {
+			return nil, 0, err
+		}
+		if err = facts(false); err != nil {
+			return nil, 0, err
+		}
+		return staged, PerfWritten, nil
 	}
 	m := mergeFast(row, base, p)
 	or := func(deck, staged []byte) []byte {
