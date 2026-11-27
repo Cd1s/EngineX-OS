@@ -362,7 +362,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 		if unchanged {
 			repaired, pending, rerr := repairStockOverwrittenAtMount(parentCtx, ctx, mount, dir, r, head, st, o.OnDemand, startBG)
 			if rerr != nil {
-				if errors.Is(rerr, errWindowDeadline) || deadlineReached() {
+				if errors.Is(rerr, errWindowDeadline) || (deadlineReached() && !errors.Is(rerr, errPendingSave)) {
 					res.Applied += repaired
 					res.Pending = pending
 					return stopAtDeadline()

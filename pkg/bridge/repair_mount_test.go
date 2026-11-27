@@ -1162,3 +1162,182 @@ func TestOnDemandMountHardDeadlineRecordsPendingAndRecovers(t *testing.T) {
 		}
 	})
 }
+
+// Fails at runtime on dc7a8b2e (reviewer's round-5 BLOCK): pausing at cut("repair next saved")
+// until the transaction's soft-budget context expires rolls back SQLite; the pending snapshot
+// saved after rollback MUST be based on the last committed snapshot (original Commit, nil
+// Written, PerfNone) so the next insert repairs the row instead of bypassing it.
+func TestReviewerR5CommitExpiryKeepsPendingRecoverable(t *testing.T) {
+	mount := repairStick(t, 3)
+	mountNow(t, mount, MountOptions{OnDemand: true})
+	origSnap, err := rbstate.Load(dbDir(mount))
+	if err != nil {
+		t.Fatal(err)
+	}
+	origCommit := origSnap.Commit
+	tracks := sortedTracksByID(origSnap)
+
+	const beat0 = 11391.4248046875
+	stockBeats := buildTestStockOABeatsMount(t, 44100, 13707967, beat0, 136.0, 704)
+	qcAutoBeat0 := buildTestQuickCuesMount(t, -1, "", beat0, 1, beat0)
+	qcDJHot := buildTestQuickCuesMount(t, 220500, "DJKeep", beat0, 1, beat0)
+	emptyLoops := buildTestEmptyLoopsMount()
+
+	db := openTestMDBRW(t, mount)
+	if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+		[]byte{1}, []byte{1}, stockBeats, qcAutoBeat0, emptyLoops, tracks[0].EngineID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+		[]byte{1}, []byte{1}, stockBeats, qcDJHot, emptyLoops, tracks[1].EngineID); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	oldBudget, oldCut := insertBudget, cut
+	insertBudget = 1500 * time.Millisecond
+	paused := false
+	cut = func(step string) {
+		if step == "repair next saved" && !paused {
+			paused = true
+			time.Sleep(1600 * time.Millisecond)
+		}
+	}
+	defer func() { insertBudget, cut = oldBudget, oldCut }()
+
+	bgStarted := false
+	res := mountNow(t, mount, MountOptions{
+		OnDemand:        true,
+		Deadline:        time.Now().Add(17 * time.Second),
+		StartBackground: func() error { bgStarted = true; return nil },
+	})
+	if !paused {
+		t.Fatal(`cut("repair next saved") was not hit`)
+	}
+	if res.Bypassed || res.Applied != 0 || !bgStarted || !res.Background || res.Pending.Perf != 1 {
+		t.Fatalf("commit-expired mount = %+v (bgStarted=%v), want Applied=0 Background=true Pending.Perf=1", res, bgStarted)
+	}
+
+	// SQLite must have rolled back to the stock grid, and .rb-bridge-snapshot.next must be gone.
+	bAfter, _, _, _ := readRowBlobs(t, mount, tracks[0].EngineID)
+	if !bytes.Equal(bAfter, stockBeats) {
+		t.Fatal("track[0] SQLite row was not rolled back after commit timeout")
+	}
+	if _, err := os.Stat(filepath.Join(dbDir(mount), rbstate.SnapshotName+".next")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf(".next file left behind after rollback: err=%v", err)
+	}
+
+	// Snapshot on disk must reflect the last committed snapshot (original Commit, nil Written, PerfNone) + Pending.Perf=1.
+	afterSnap, err := rbstate.Load(dbDir(mount))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterSnap.Commit != origCommit {
+		t.Fatalf("snapshot Commit after rollback = %d, want last committed %d", afterSnap.Commit, origCommit)
+	}
+	tr0 := afterSnap.Tracks[tracks[0].Key]
+	if tr0 == nil || len(tr0.Written) != 0 || tr0.Perf != rbstate.PerfNone || len(tr0.Built.ANLZ) != 0 {
+		t.Fatalf("track[0] snapshot kept uncommitted provenance after rollback: %+v", tr0)
+	}
+	if afterSnap.Pending.Perf != 1 {
+		t.Fatalf("afterSnap.Pending.Perf = %d, want 1", afterSnap.Pending.Perf)
+	}
+
+	// Next insert with normal budget MUST repair track[0] instead of bypassing it, and keep track[1] DJ hot cue untouched.
+	insertBudget, cut = oldBudget, oldCut
+	res2 := mountNow(t, mount, MountOptions{OnDemand: true, Deadline: time.Now().Add(17 * time.Second)})
+	if res2.Bypassed || res2.Applied != 1 || res2.Background || !res2.Pending.None() {
+		t.Fatalf("recovery next insert = %+v, want Bypassed=false Applied=1 Background=false Pending.None", res2)
+	}
+	bRep, qRep, _, _ := readRowBlobs(t, mount, tracks[0].EngineID)
+	if len(bRep) == 0 || bytes.Equal(bRep, stockBeats) || bytes.Equal(qRep, qcAutoBeat0) {
+		t.Fatal("track[0] stayed broken on next insert after commit-expiry rollback")
+	}
+	b1, q1, _, _ := readRowBlobs(t, mount, tracks[1].EngineID)
+	if !bytes.Equal(b1, stockBeats) || !bytes.Equal(q1, qcDJHot) {
+		t.Fatal("track[1] DJ hot cue was modified during recovery")
+	}
+	res3 := mountNow(t, mount, MountOptions{OnDemand: true, Deadline: time.Now().Add(17 * time.Second)})
+	if !res3.Bypassed || res3.Applied != 0 {
+		t.Fatalf("3rd insert = %+v, want Bypassed=true Applied=0", res3)
+	}
+}
+
+// Fails at runtime on dc7a8b2e: a pending-save error in deferOutstanding while parentCtx is live
+// must NOT be swallowed (at either soft cutoff or hard mount-context deadline).
+func TestOnDemandMountPendingSaveErrorNotSwallowed(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		hardDeadline bool
+	}{
+		{"soft_cutoff", false},
+		{"hard_deadline", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mount := repairStick(t, 3)
+			mountNow(t, mount, MountOptions{OnDemand: true})
+			snap, err := rbstate.Load(dbDir(mount))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tracks := sortedTracksByID(snap)
+
+			const beat0 = 11391.4248046875
+			stockBeats := buildTestStockOABeatsMount(t, 44100, 13707967, beat0, 136.0, 704)
+			qcAutoBeat0 := buildTestQuickCuesMount(t, -1, "", beat0, 1, beat0)
+			emptyLoops := buildTestEmptyLoopsMount()
+			db := openTestMDBRW(t, mount)
+			if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?, quickCues=?, loops=?, activeOnLoadLoops=0, thirdPartySourceId=NULL WHERE trackId=?`,
+				[]byte{1}, []byte{1}, stockBeats, qcAutoBeat0, emptyLoops, tracks[0].EngineID); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+
+			snapPath := filepath.Join(dbDir(mount), rbstate.SnapshotName)
+			blockSnapshotSave := func() {
+				// Replacing the snapshot file with a non-empty directory makes atomic os.Rename
+				// fail with EISDIR/ENOTEMPTY deterministically even when tests run as root.
+				_ = os.Remove(snapPath)
+				if err := os.MkdirAll(snapPath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(snapPath, "block"), []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			oldBudget, oldHook := insertBudget, repairBeforeBuild
+			defer func() { insertBudget, repairBeforeBuild = oldBudget, oldHook }()
+
+			var dl time.Time
+			if tc.hardDeadline {
+				dl = time.Now().Add(commitReserve + 850*time.Millisecond)
+				ctxLimit := dl.Add(-spare)
+				repairBeforeBuild = func(_ context.Context, _ string) error {
+					blockSnapshotSave()
+					if wait := time.Until(ctxLimit) + 60*time.Millisecond; wait > 0 {
+						time.Sleep(wait)
+					}
+					return nil
+				}
+			} else {
+				insertBudget = 1200 * time.Millisecond
+				dl = time.Now().Add(17 * time.Second)
+				repairBeforeBuild = func(_ context.Context, _ string) error {
+					blockSnapshotSave()
+					time.Sleep(1100 * time.Millisecond)
+					return nil
+				}
+			}
+
+			res, err := ConvertAtMount(context.Background(), mount, MountOptions{
+				OnDemand:        true,
+				Deadline:        dl,
+				StartBackground: func() error { return nil },
+			})
+			if err == nil {
+				t.Fatalf("ConvertAtMount(%s) swallowed pending-save error: res=%+v err=nil", tc.name, res)
+			}
+		})
+	}
+}

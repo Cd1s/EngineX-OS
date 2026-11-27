@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path"
@@ -36,6 +37,7 @@ var (
 	repairCommitReserve = 750 * time.Millisecond // bounded fallback window reserved inside insertBudget for stub reset + commit
 	repairFlushReserve  = 250 * time.Millisecond // minimum margin left before finishLimit required to open/commit m.db
 	repairBeforeBuild   func(ctx context.Context, key string) error
+	errPendingSave      = errors.New("rb-bridge: save pending repair snapshot")
 )
 
 // repairDeadlines computes the hard commit ceiling (finishLimit), the earlier inline-build
@@ -426,8 +428,10 @@ func markRemainingForBackground(snap *rbstate.Snapshot, remaining []stockRepairM
 		return
 	}
 	for _, rem := range remaining {
-		rem.track.Perf = rbstate.PerfNone
-		rem.track.Built = rbstate.TrackSig{}
+		if t := snap.Tracks[rem.track.Key]; t != nil {
+			t.Perf = rbstate.PerfNone
+			t.Built = rbstate.TrackSig{}
+		}
 	}
 	if snap.Pending.Perf < len(remaining) {
 		snap.Pending.Perf = len(remaining)
@@ -548,7 +552,23 @@ func repairStockOverwrittenAtMount(parentCtx, ctx context.Context, mount, dir st
 		return 0, head.Pending, nil
 	}
 
+	var lib *enginedb.Library
+	var b *enginedb.Batch
+	txDirty := false
+	closeTx := func() {
+		if b != nil {
+			b.Rollback()
+			b = nil
+		}
+		if lib != nil {
+			_ = lib.Close()
+			lib = nil
+		}
+	}
+	defer closeTx()
+
 	deferOutstanding := func(hardDeadline bool) (int, rbstate.Pending, error) {
+		closeTx()
 		outstanding := make([]stockRepairMatch, 0, len(built)+len(remaining))
 		for _, item := range built {
 			outstanding = append(outstanding, item.match)
@@ -557,16 +577,34 @@ func repairStockOverwrittenAtMount(parentCtx, ctx context.Context, mount, dir st
 		if len(outstanding) == 0 {
 			return 0, head.Pending, nil
 		}
-		markRemainingForBackground(snap, outstanding)
-		if saveErr := saveDurablePending(parentCtx, dir, snap, st); saveErr != nil && parentCtx.Err() != nil {
-			return 0, snap.Pending, parentCtx.Err()
+		baseSnap := snap
+		if txDirty {
+			// A rolled-back transaction may have mutated snap in memory (Written, Edit, Synced,
+			// Commit, Applied). Reload the last committed snapshot from disk so we never persist
+			// uncommitted provenance.
+			reloaded, rerr := rbstate.Load(dir)
+			if rerr != nil {
+				return 0, head.Pending, fmt.Errorf("%w: reload committed snapshot: %w", errPendingSave, rerr)
+			}
+			baseSnap = reloaded
+		}
+		markRemainingForBackground(baseSnap, outstanding)
+		if saveErr := saveDurablePending(parentCtx, dir, baseSnap, st); saveErr != nil {
+			if parentCtx.Err() != nil {
+				return 0, head.Pending, parentCtx.Err()
+			}
+			if errors.Is(saveErr, errWindowDeadline) {
+				startBG()
+				return 0, head.Pending, errWindowDeadline
+			}
+			return 0, head.Pending, fmt.Errorf("%w: %w", errPendingSave, saveErr)
 		}
 		startBG()
 		st.done("repair", "0 inline, %d stock-overwritten rows recorded durably for background/next insert", len(outstanding))
 		if hardDeadline {
-			return 0, snap.Pending, errWindowDeadline
+			return 0, baseSnap.Pending, errWindowDeadline
 		}
-		return 0, snap.Pending, nil
+		return 0, baseSnap.Pending, nil
 	}
 
 	// Non-OnDemand with nothing built inline: hand off directly to FillInBackground without opening m.db RW.
@@ -587,24 +625,25 @@ func repairStockOverwrittenAtMount(parentCtx, ctx context.Context, mount, dir st
 		defer commitCancel()
 	}
 
-	lib, oerr := enginedb.OpenLibraryFile(commitCtx, mdb, mount)
+	var oerr error
+	lib, oerr = enginedb.OpenLibraryFile(commitCtx, mdb, mount)
 	if oerr != nil {
 		if errors.Is(oerr, context.DeadlineExceeded) || commitCtx.Err() != nil {
 			return deferOutstanding(ctx.Err() != nil)
 		}
 		return 0, head.Pending, oerr
 	}
-	defer lib.Close()
 
-	b, berr := lib.Begin(commitCtx)
+	var berr error
+	b, berr = lib.Begin(commitCtx)
 	if berr != nil {
 		if errors.Is(berr, context.DeadlineExceeded) || commitCtx.Err() != nil {
 			return deferOutstanding(ctx.Err() != nil)
 		}
 		return 0, head.Pending, berr
 	}
-	defer b.Rollback()
 
+	txDirty = true
 	repaired, overviews, aerr := applyBuiltStockRepairs(commitCtx, b, built)
 	if aerr != nil {
 		if errors.Is(aerr, context.DeadlineExceeded) || commitCtx.Err() != nil {
@@ -640,6 +679,7 @@ func repairStockOverwrittenAtMount(parentCtx, ctx context.Context, mount, dir st
 		return deferOutstanding(ctx.Err() != nil || (!st.kill.IsZero() && time.Until(st.kill) < saveReserve))
 	}
 	if err = snap.SaveNextCtx(commitCtx, dir); err != nil {
+		_ = rbstate.DropNext(dir)
 		if errors.Is(err, context.DeadlineExceeded) || commitCtx.Err() != nil {
 			return deferOutstanding(ctx.Err() != nil)
 		}
@@ -653,6 +693,7 @@ func repairStockOverwrittenAtMount(parentCtx, ctx context.Context, mount, dir st
 		}
 		return 0, head.Pending, err
 	}
+	b = nil
 	cut("repair committed")
 	promoteCtx, promoteCancel := context.WithTimeout(parentCtx, saveReserve)
 	err = rbstate.PromoteCtx(promoteCtx, dir)
