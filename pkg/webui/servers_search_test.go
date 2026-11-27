@@ -96,14 +96,16 @@ func waitUntil(d time.Duration, ok func() bool) bool {
 // out. On 12cb4faa (round 4) a selected source slower than the deadline was cut: a
 // login answering after 1.5 s was missing from the first answer.
 //
-// WebDAV round 5 (round-11 re-check, item 5): no bound here depends on the host's
-// speed. What each case checks is what the code controls: which hits are in the answer,
-// that it does not come before the selected source is done, and that it does not wait
-// for a stuck extra (late). The exact times are TestOmniSourceTimingRule's, on a clock
-// that does not depend on the host.
+// WebDAV rounds 5 and 13: no bound here depends on the host's speed. What each case
+// checks over real sockets is which hits are in the answer and that it does not come
+// before the selected source is done. When it comes is not checked here: an answer that
+// waited for a busy server would come at that server's search budget (4 s), which no
+// bound that is safe on a loaded host tells from 1 s. The exact times, with servers
+// still busy at the cut and the settings slow or locked, are
+// TestSearchReplyTimesWithBusyServers' and TestOmniSearchNeverWaitsForTheSettings', on a
+// clock that does not depend on the host.
 func TestServersOmniSourceWaitsForTheSelectedSourceOnly(t *testing.T) {
-	// late: an answer that waits for a stuck extra comes at that extra's own budget
-	// (15 s), on any host. One that comes before late did not wait for it.
+	// late only says that an answer came at all.
 	const late = 10 * time.Second
 	timed := func(t *testing.T, r *webdavRig, query string) ([]string, time.Duration) {
 		t.Helper()
