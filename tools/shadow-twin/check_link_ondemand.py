@@ -210,8 +210,6 @@ def parse_beat_blob(blob: bytes | None):
 
 
 def read_mdb_row(mdb: Path, filename: str):
-    if (mdb.parent / (mdb.name + "-journal")).exists():
-        return None
     try:
         # immutable=1 takes zero POSIX locks on m.db so host-side inspection never causes
         # SQLITE_BUSY on Engine Link's airNfs J:Savingtrackda commits over fltx.
