@@ -174,8 +174,8 @@ type tidalGateway struct {
 	// ceiling is the highest track ID both copies of the ceiling reserve, under mu: no
 	// ID above it is handed out before they say so (gateway_ids.go, #335).
 	ceiling int64
-	// idsUnknown: no valid copy of the ceiling and the IDs still in use cannot be read
-	// either; no new ID is handed out in this run, the next start tries again (#335).
+	// idsUnknown: the IDs still in use cannot be read yet; no new ID is handed out until
+	// they can (retryBound, #335).
 	idsUnknown bool
 	// ceilingFailing: the last reservation could not be saved (logged once).
 	ceilingFailing bool
@@ -276,20 +276,19 @@ func (g *tidalGateway) loadTracks(root string, known bool) {
 	if err == nil {
 		err = json.Unmarshal(b, &v)
 	}
-	tableMax, tableOK := int64(0), err == nil
+	tableMax := int64(0)
 	if err == nil {
 		tableMax = countID(0, v.Next)
 		for _, r := range v.Tracks {
 			tableMax = countID(tableMax, r.ID)
 		}
 		if v.Next < 0 || v.Next > maxTrackID || slices.ContainsFunc(v.Tracks, func(r savedRef) bool { return r.ID <= 0 || r.ID > maxTrackID }) {
-			tableOK = false // an ID or counter out of range bounds nothing (#335 round 12)
-			log.Printf("stream-sync: the gateway file holds a track ID or counter out of range: ignored")
+			log.Printf("stream-sync: the gateway file holds a track ID or counter out of range: ignored") // it bounds nothing (#335)
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		log.Printf("stream-sync: gateway track IDs cannot be read (%T)", err)
 	}
-	g.loadCeiling(tableMax, tableOK)
+	g.loadCeiling(tableMax) // the file is one input of the bound, never the bound (#335 round 13)
 	if err != nil {
 		return
 	}

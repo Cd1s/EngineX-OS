@@ -20,27 +20,30 @@ import (
 	"time"
 )
 
-// Gateway track IDs never name two recordings (#335 rounds 9-11).
+// Gateway track IDs never name two recordings (#335 rounds 9-13).
 //
 // Engine keeps a gateway row's numeric ID in its library (streaming://TIDAL/Track/<id>)
 // and in the lists it shows, and asks for it again later, also after stream-sync
-// restarted. So an ID is handed out only below a ceiling saved first in two
-// independently readable files, gateway-ids.json and gateway-ids-2.json; a
-// reservation counts only when both are written. At start-up the ceiling is the
-// greatest one of a valid copy, and a missing or bad copy is repaired from it. A copy
-// is valid when it is {"ceiling": N} and nothing else, with 0 < N <= maxTrackID and N
-// at least the highest ID the gateway file holds (when that file can be read).
+// restarted. One rule covers every ID, with no state of our own files trusted over what
+// is still in use:
 //
-// Only the gateway file read in full with both copies valid and equal is a safe bound.
-// Otherwise (the file unreadable or holding an ID out of range, a copy missing or not
-// valid, the copies disagreeing) the counter starts above max(every valid copy, the
-// file's in-range IDs, every gateway ID still referenced: Engine's library rows and our
-// own files named by an ID, the analysis and cover cache), found before any copy is
-// repaired or any ID handed out (#335 round 12). A value above maxTrackID is never
-// handed out, so it bounds nothing and is ignored. Only when the IDs in use cannot be
-// read does this run hand out no new ID, and the next start tries again. All of this is
-// start-up work: browsing and playing hand out IDs below the ceiling and write both
-// copies once per idBlock IDs.
+//   - nextID is the only place that hands out an ID. It hands one out only below a
+//     ceiling saved first in two independently readable files, gateway-ids.json and
+//     gateway-ids-2.json; a reservation counts only when both are written.
+//   - loadCeiling is the only place that sets the counter. At every start it is the
+//     greatest of: every valid copy of the ceiling ({"ceiling": N} and nothing else,
+//     0 < N <= maxTrackID), the gateway file's counter and IDs, and every gateway ID
+//     still referenced (Engine's library rows and our own files named by an ID, the
+//     analysis and cover cache). The copies are rewritten when they do not both hold it.
+//     So a gateway file or copies that are missing, emptied, older than the library or
+//     wrong in any other way can only waste IDs, never repeat one.
+//   - A value above maxTrackID is never handed out, so it bounds nothing and is ignored.
+//   - While the IDs in use cannot be read no new ID is handed out; they are read again
+//     until they can be (retryBound).
+//
+// All of this is start-up work (one read of the uri column of each library database):
+// browsing and playing hand out IDs below the ceiling and write both copies once per
+// idBlock IDs.
 
 const (
 	// idBlock is how many track IDs one reservation covers.
@@ -63,9 +66,8 @@ type savedCeiling struct {
 
 // readCeiling is one copy's ceiling. It is an error when the copy is missing
 // (fs.ErrNotExist), cannot be read, or is not valid: anything but one object
-// {"ceiling": N}, N outside 1..maxTrackID, or N below least (the highest ID the
-// gateway file holds).
-func readCeiling(file string, least int64) (int64, error) {
+// {"ceiling": N}, or N outside 1..maxTrackID.
+func readCeiling(file string) (int64, error) {
 	b, err := readState(file)
 	if err != nil {
 		return 0, err
@@ -84,14 +86,10 @@ func readCeiling(file string, least int64) (int64, error) {
 	if v.Ceiling == nil {
 		return 0, errors.New("no ceiling in it")
 	}
-	n := *v.Ceiling
-	if n <= 0 || n > maxTrackID {
-		return 0, fmt.Errorf("ceiling %d out of range", n)
+	if n := *v.Ceiling; n > 0 && n <= maxTrackID {
+		return n, nil
 	}
-	if n < least {
-		return 0, fmt.Errorf("ceiling %d below the gateway file's ID %d", n, least)
-	}
-	return n, nil
+	return 0, fmt.Errorf("ceiling %d out of range", *v.Ceiling)
 }
 
 // saveCeilingCopy writes one copy atomically. Anything but a regular file at its path
@@ -115,41 +113,75 @@ func (g *tidalGateway) reserve(n int64) error {
 	return nil
 }
 
+// idRetry is how long retryBound waits before it reads the IDs in use again (doubling,
+// up to a minute).
+const idRetry = 5 * time.Second
+
 // loadCeiling sets the counter at start-up (see the top of this file). tableMax is the
-// highest in-range ID the gateway file holds (0 when none or unreadable); tableOK says
-// the file was read in full with every ID in range.
-func (g *tidalGateway) loadCeiling(tableMax int64, tableOK bool) {
+// highest in-range ID or counter the gateway file holds (0 when none or unreadable).
+func (g *tidalGateway) loadCeiling(tableMax int64) {
 	paths := g.idsPaths()
 	if paths == nil {
 		return
 	}
-	g.next = max(g.next, tableMax)
 	copies := make([]int64, len(paths))
 	for i, file := range paths {
-		n, err := readCeiling(file, tableMax)
+		n, err := readCeiling(file)
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			log.Printf("stream-sync: gateway ID ceiling copy %d not used: %v", i+1, err)
 		}
 		copies[i] = n
 	}
-	if tableOK && copies[0] > 0 && copies[0] == copies[1] {
-		g.ceiling, g.next = copies[0], max(g.next, copies[0])
-		return
+	g.next = max(g.next, tableMax, slices.Max(copies))
+	in := idsInUse{library: idFloorLibrary, cache: rbxAnalysisDir}
+	if in.library == "" {
+		in.library = filepath.Join(shadowDataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2")
 	}
-	floor, err := referencedFloor(max(tableMax, slices.Max(copies)))
+	floor, err := in.floor(g.next)
 	if err != nil {
 		g.idsUnknown = true
-		log.Printf("stream-sync: no safe gateway ID bound and the IDs in use cannot be read (%v): no new track IDs in this run; the next start tries again", err)
+		log.Printf("stream-sync: the gateway IDs in use cannot be read (%v): no new track IDs until they can", err)
+		go g.retryBound(in, copies, idRetry)
 		return
 	}
-	g.next = max(g.next, floor)
-	g.ceiling = g.next // the first new ID reserves above it in both copies first
-	if g.next > 0 {
-		if err := g.reserve(g.next); err != nil { // repair: both copies with the bound found
-			log.Printf("stream-sync: gateway ID ceiling copies not repaired (%T); the next reservation writes them", err)
+	g.setBound(floor, copies)
+}
+
+// setBound starts the counter at bound, the greatest ID that can be in use, and rewrites
+// the copies of the ceiling (as read: copies) unless both hold it. Caller holds g.mu,
+// except at start-up.
+func (g *tidalGateway) setBound(bound int64, copies []int64) {
+	g.next, g.ceiling, g.idsUnknown = bound, bound, false // the first new ID reserves above it first
+	if bound == 0 || !slices.ContainsFunc(copies, func(n int64) bool { return n != bound }) {
+		return
+	}
+	if err := g.reserve(bound); err != nil {
+		log.Printf("stream-sync: gateway ID ceiling copies not rewritten (%T); the next reservation writes them", err)
+	}
+	log.Printf("stream-sync: gateway ID ceiling set from the IDs in use: new track IDs start above %d", bound)
+}
+
+// retryBound reads the IDs in use again, after wait and then at growing intervals, until
+// they can be read or the server closes: only then are new IDs handed out (#335 round
+// 13: every start needs them, so a library that is busy for a moment must not cost the
+// run its new rows).
+func (g *tidalGateway) retryBound(in idsInUse, copies []int64, wait time.Duration) {
+	for ; ; wait = min(2*wait, time.Minute) {
+		select {
+		case <-g.s.closed:
+			return
+		case <-time.After(wait):
+		}
+		g.mu.Lock()
+		next := g.next
+		g.mu.Unlock()
+		if floor, err := in.floor(next); err == nil {
+			g.mu.Lock()
+			g.setBound(max(floor, g.next), copies)
+			g.mu.Unlock()
+			return
 		}
 	}
-	log.Printf("stream-sync: gateway ID bound reconciled with the IDs in use: new track IDs start above %d", g.next)
 }
 
 // countID is top raised to n when n can be a track ID this gateway hands out
@@ -188,25 +220,24 @@ func (g *tidalGateway) nextID() int64 {
 	return g.next
 }
 
-// referencedFloor is the highest gateway track ID that can still be referenced: in
-// Engine's library (a row whose uri is streaming://TIDAL/Track/<id>, in stm.db, m.db
-// or hm.db), in the gateway file (tableMax) and in the analysis and cover cache, whose
-// files are named by an ID. A library database or cache that exists but cannot be
-// read is an error.
-func referencedFloor(tableMax int64) (int64, error) {
-	floor := tableMax
-	lib := idFloorLibrary
-	if lib == "" {
-		lib = filepath.Join(shadowDataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2")
-	}
-	for _, name := range []string{"stm.db", "m.db", "hm.db"} {
-		n, err := libraryMaxStreamingID(filepath.Join(lib, name))
+// idsInUse are the places outside our own ID files that still name gateway track IDs:
+// Engine's library directory (Database2) and the analysis and cover cache.
+type idsInUse struct{ library, cache string }
+
+// floor is the highest gateway track ID that can still be referenced: least (what our
+// own files say), Engine's library (a row whose uri is streaming://TIDAL/Track/<id>, in
+// any of its databases) and the analysis and cover cache, whose files are named by an
+// ID. A library database or cache that exists but cannot be read is an error.
+func (in idsInUse) floor(least int64) (int64, error) {
+	floor := least
+	for _, name := range []string{"stm.db", "m.db", "hm.db", "sm.db"} {
+		n, err := libraryMaxStreamingID(filepath.Join(in.library, name))
 		if err != nil {
 			return 0, fmt.Errorf("%s: %w", name, err)
 		}
 		floor = max(floor, n)
 	}
-	n, err := cachedMaxID(rbxAnalysisDir)
+	n, err := cachedMaxID(in.cache)
 	if err != nil {
 		return 0, fmt.Errorf("analysis cache: %w", err)
 	}
@@ -214,8 +245,8 @@ func referencedFloor(tableMax int64) (int64, error) {
 }
 
 // idFloorLibrary is Engine's library directory (Database2) the floor reads; "" is the
-// deck's own, under shadowDataRoot. Only tests set it, so background work that reads
-// shadowDataRoot never races with them.
+// deck's own, under shadowDataRoot. Only tests set it. It is read at start-up only
+// (loadCeiling), never by background work.
 var idFloorLibrary string
 
 const streamingTrackURI = "streaming://TIDAL/Track/"
