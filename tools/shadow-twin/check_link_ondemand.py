@@ -448,7 +448,7 @@ def browse_rows(side: str):
     )
 
 
-def select_source(side: str, volume_name: str, min_rows: int):
+def select_source(side: str, volume_name: str, min_rows: int, must_contain: str = ""):
     srcs = wait_for(
         lambda: (s := list_sources(side)) and any(volume_name in json.dumps(x) for x in s) and s,
         timeout=25,
@@ -463,12 +463,16 @@ def select_source(side: str, volume_name: str, min_rows: int):
         f'bsc.select(m.index({idx}, 0)); '
         f'root.rtTr("/GUI/ShowBrowseView").state = true; "sel"',
     )
-    return wait_for(
-        lambda: (b := browse_rows(side)) and b["n"] >= min_rows and b,
-        timeout=25,
-        interval=0.25,
-        label=f"{side} browse rows for {volume_name}",
-    )
+    try:
+        return wait_for(
+            lambda: (b := browse_rows(side)) and b["n"] >= min_rows and (not must_contain or must_contain in json.dumps(b["rows"])) and b,
+            timeout=25,
+            interval=0.25,
+            label=f"{side} browse rows for {volume_name}",
+        )
+    except AssertionError:
+        print(f"SELECT_SOURCE DIAG {volume_name}: sources={json.dumps(list_sources(side))} browse={json.dumps(browse_rows(side))}", flush=True)
+        raise
 
 
 def load_b_row(title_sub: str, expected_fn: str, timeout: float = 45.0):
@@ -596,33 +600,23 @@ def main():
     )
     stock_mdb = stock_vol / "Engine Library/Database2/m.db"
     stock_mdb.parent.mkdir(parents=True, exist_ok=True)
-    stock_mdb.unlink(missing_ok=True)
+    shutil.copy2(rb_mdb, stock_mdb)
     stock_sz = make_click_wav(stock_vol / "Music/stock-track.wav", seconds=10.0, bpm=128.0)
-    schema_sql = (src_dir / "pkg/enginedb/schema.sql").read_text()
-    with closing(sqlite3.connect(rb_mdb.as_uri() + "?mode=ro", uri=True)) as src_conn:
-        info_row = src_conn.execute(
-            "SELECT schemaVersionMajor, schemaVersionMinor, schemaVersionPatch FROM Information LIMIT 1"
-        ).fetchone()
     with closing(sqlite3.connect(stock_mdb)) as conn:
-        conn.executescript(schema_sql)
+        conn.execute("UPDATE Information SET uuid = 'stock-engine-uuid-1111'")
+        conn.execute("DELETE FROM PlaylistEntity WHERE trackId > 1")
+        conn.execute("DELETE FROM Track WHERE id > 1")
+        conn.execute("UPDATE Playlist SET title = 'Stock List' WHERE id = 1")
+        conn.execute("UPDATE PlaylistEntity SET databaseUuid = 'stock-engine-uuid-1111', nextEntityId = 0 WHERE trackId = 1")
         conn.execute(
-            "INSERT INTO Information(uuid, schemaVersionMajor, schemaVersionMinor, schemaVersionPatch) VALUES(?, ?, ?, ?)",
-            ("stock-engine-uuid-1111", info_row[0], info_row[1], info_row[2]),
-        )
-        conn.execute(
-            "INSERT INTO Track(path, filename, title, artist, bpm, length, fileBytes, fileType, "
-            "isAvailable, isMetadataImported, pdbImportKey, isAnalyzed, originDatabaseUuid, originTrackId) "
-            "VALUES('../Music/stock-track.wav', 'stock-track.wav', 'Stock Track', 'Stock Artist', "
-            "128, 10, ?, 'wav', 1, 1, NULL, 0, 'stock-engine-uuid-1111', 1)",
+            "UPDATE Track SET path = '../Music/stock-track.wav', filename = 'stock-track.wav', "
+            "title = 'Stock Track', artist = 'Stock Artist', length = 10, fileBytes = ?, "
+            "pdbImportKey = NULL, isAnalyzed = 0, originDatabaseUuid = 'stock-engine-uuid-1111' WHERE id = 1",
             (stock_sz,),
         )
         conn.execute(
-            "INSERT INTO Playlist(id, title, parentListId, isPersisted, nextListId, isExplicitlyExported) "
-            "VALUES(1, 'Stock List', 0, 1, 0, 1)"
-        )
-        conn.execute(
-            "INSERT INTO PlaylistEntity(listId, trackId, databaseUuid, nextEntityId, membershipReference) "
-            "VALUES(1, 1, 'stock-engine-uuid-1111', 0, 0)"
+            "UPDATE PerformanceData SET trackData = NULL, overviewWaveFormData = NULL, beatData = NULL, "
+            "quickCues = NULL, loops = NULL, thirdPartySourceId = NULL, activeOnLoadLoops = NULL WHERE trackId = 1"
         )
         conn.commit()
 
@@ -792,7 +786,7 @@ def main():
             subprocess.run(["ip", "netns", "exec", twin.SIDE_CFG["B"]["netns"], "iptables", "-D", "OUTPUT", "-p", "udp", "--dport", "50199", "-j", "DROP"], check=False)
 
         # CASE 5: Stock Engine stick (pdbImportKey IS NULL) -> 0 LAN on-demand calls, stock OA runs normally
-        select_source("B", "STOCK_USB", min_rows=1)
+        select_source("B", "STOCK_USB", min_rows=1, must_contain="Stock Track")
         oa_b0 = oa_cpu_ticks("B")
         lan0 = count_peer_reqs(lan_log)
         t_ld, t_an, st = load_b_row("Stock Track", "stock-track.wav")
@@ -815,7 +809,7 @@ def main():
         assert lan_d == 0 and row5["analyzed"] == 1 and row5["beat"]["n_def"] <= 4, f"Case 5 failed: {rec5}"
 
         # Switch back to RB_ONDEMAND for Cases 6 & 7
-        select_source("B", "RB_ONDEMAND", min_rows=7)
+        select_source("B", "RB_ONDEMAND", min_rows=7, must_contain="RB Case6")
 
         # CASE 6: Unit A not answering (hung :8080 -> 750/800 ms budget -> clean stock Engine fallback)
         hang_log = twin.WORK / "stub-hang.log"
