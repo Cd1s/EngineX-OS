@@ -35,6 +35,9 @@ func HasCredential(ctx context.Context) bool {
 //     the origin of its first URL: the same scheme, host and effective port. Go's own
 //     rule would follow it anywhere and keep an Authorization header on a subdomain or
 //     another port, and any other header (Plex's X-Plex-Token) everywhere.
+//   - A redirect that sends the request's body again (307 and 308) is followed only
+//     within that origin too: a body is a login or a token request (a password, a
+//     refresh token, a client secret), and nothing says which part of it is secret.
 //   - At most 10 redirects, as Go's default.
 func CheckRedirect(always bool, next func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
@@ -42,7 +45,8 @@ func CheckRedirect(always bool, next func(*http.Request, []*http.Request) error)
 		if len(via) >= 10 {
 			return errors.New("stopped after 10 redirects")
 		}
-		if (always || HasCredential(req.Context()) || carriesCredential(via[0])) && !sameOrigin(req.URL, via[0].URL) {
+		resent := req.Body != nil && req.Body != http.NoBody // Go set it: this hop repeats the body
+		if (always || resent || HasCredential(req.Context()) || carriesCredential(via[0])) && !sameOrigin(req.URL, via[0].URL) {
 			return ErrRedirectOffOrigin
 		}
 		if next != nil {
