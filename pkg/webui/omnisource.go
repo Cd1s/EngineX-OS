@@ -548,7 +548,9 @@ func (g *tidalGateway) omniSearch(ctx context.Context, query string) []any {
 			if ref.file != "" {
 				seenFiles[ref.file] = true
 			}
-			items = append(items, g.trackJSON(g.addTrack(ref), ref.track))
+			if id := g.addTrack(ref); id != 0 { // 0: no ID may be handed out now (#335)
+				items = append(items, g.trackJSON(id, ref.track))
+			}
 		}
 	}
 	if djayRefs, err := g.s.omniTracks(ctx, query); err == nil {
@@ -557,7 +559,9 @@ func (g *tidalGateway) omniSearch(ctx context.Context, query string) []any {
 				continue
 			}
 			seenFiles[ref.file] = true
-			items = append(items, g.trackJSON(g.addTrack(ref), ref.track))
+			if id := g.addTrack(ref); id != 0 {
+				items = append(items, g.trackJSON(id, ref.track))
+			}
 		}
 	}
 	return items

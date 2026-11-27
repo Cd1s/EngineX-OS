@@ -171,10 +171,15 @@ type tidalGateway struct {
 	albums    map[int64]albumRef
 	albumIDs  map[string]int64
 	next      int64
-	// ceiling is the highest track ID gateway-ids.json allows, under mu: no ID above
+	// ceiling is the highest track ID gateway-ids.json reserves, under mu: no ID above
 	// it is handed out before the file says so, so IDs never repeat even when the
 	// gateway file is lost or cannot be read (#335).
 	ceiling int64
+	// idsUnknown: gateway-ids.json exists but cannot be read, so the IDs earlier runs
+	// handed out are not known; no new ID is handed out in this run (#335).
+	idsUnknown bool
+	// ceilingFailing: the last reservation could not be saved (logged once).
+	ceilingFailing bool
 
 	rbxBrowse rbxPrefetchQueue
 
@@ -257,17 +262,19 @@ func (g *tidalGateway) tracksPath() string {
 }
 
 // loadTracks restores the IDs of the previous run, and its counter, so an old ID
-// never names a different track. The counter also starts above gateway-ids.json's
-// ceiling, so a file that is lost or cannot be read does not bring old IDs back: a
-// gateway file that exists but cannot be read, with no ceiling known, starts a new
-// ID range above any a released version handed out (#335).
+// never names a different track. Every ID is handed out below a ceiling saved in
+// gateway-ids.json first (nextID), so the counter starts at that ceiling and a
+// gateway file that is lost or cannot be read does not bring old IDs back. With no
+// ceiling saved yet, IDs come from the gateway file as before (a released version's),
+// or, when it exists but cannot be read, from a new range above any ID a released
+// version handed out: no later version handed one out without a saved ceiling (#335).
 func (g *tidalGateway) loadTracks(root string) {
 	g.nasRoot = root
 	path := g.tracksPath()
 	if path == "" {
 		return
 	}
-	g.loadCeiling()
+	saved := g.loadCeiling()
 	b, err := readState(path)
 	var v savedTracks
 	if err == nil {
@@ -275,10 +282,10 @@ func (g *tidalGateway) loadTracks(root string) {
 	}
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			if g.ceiling == 0 {
+			if !saved {
 				g.next = max(g.next, freshIDRange)
 			}
-			log.Printf("stream-sync: gateway track IDs cannot be read (%T); new IDs start at %d", err, g.next+1)
+			log.Printf("stream-sync: gateway track IDs cannot be read (%T); new IDs start above %d", err, g.next)
 		}
 		return
 	}
@@ -340,63 +347,77 @@ type savedCeiling struct {
 	Ceiling int64 `json:"ceiling"`
 }
 
-// loadCeiling reads gateway-ids.json: the counter starts at its ceiling.
-func (g *tidalGateway) loadCeiling() {
+// loadCeiling reads gateway-ids.json: the counter starts at its ceiling. It reports
+// whether a ceiling was ever saved: false only when the file does not exist. One
+// that exists but cannot be read leaves the IDs earlier runs handed out unknown, and
+// no new ID is handed out (idsUnknown).
+func (g *tidalGateway) loadCeiling() bool {
 	b, err := readState(g.idsPath())
 	var v savedCeiling
 	if err == nil {
 		err = json.Unmarshal(b, &v)
 	}
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			log.Printf("stream-sync: gateway ID ceiling cannot be read (%T)", err)
+		if errors.Is(err, fs.ErrNotExist) {
+			return false
 		}
-		return
+		g.idsUnknown = true
+		log.Printf("stream-sync: gateway ID ceiling cannot be read (%T): no new track IDs until it can", err)
+		return true
 	}
 	g.ceiling = max(v.Ceiling, 0)
 	g.next = max(g.next, g.ceiling)
+	return true
 }
 
-// nextID hands out a new track ID, with g.mu held. Before the counter passes the
-// saved ceiling a new one is written; when that fails the ID is still given (the
-// gateway file records the counter too) and the next ID tries again.
+// nextID hands out a new track ID, with g.mu held, or 0 when none may be handed out.
+// An ID is handed out only below a ceiling saved in gateway-ids.json: before the
+// counter passes it a new one is saved, and while that fails no ID is handed out.
+// So a run whose state cannot be saved never hands out an ID a later run hands out
+// again, which would make an old ID in Engine name another recording (#335).
 func (g *tidalGateway) nextID() int64 {
-	g.next++
-	if g.next > g.ceiling && g.idsPath() != "" {
-		ceiling := g.next + idBlock - 1
-		if err := saveState(g.idsPath(), savedCeiling{ceiling}); err != nil {
-			log.Printf("stream-sync: gateway ID ceiling not saved (%T)", err)
-		} else {
-			g.ceiling = ceiling
-		}
+	if g.idsPath() == "" { // no state at all: IDs last as long as the process
+		g.next++
+		return g.next
 	}
+	if g.idsUnknown {
+		return 0
+	}
+	if g.next >= g.ceiling {
+		ceiling := g.next + idBlock
+		if err := saveState(g.idsPath(), savedCeiling{ceiling}); err != nil {
+			if !g.ceilingFailing {
+				log.Printf("stream-sync: gateway ID ceiling not saved (%T): no new track IDs until it is", err)
+			}
+			g.ceilingFailing = true
+			return 0
+		}
+		g.ceiling, g.ceilingFailing = ceiling, false
+	}
+	g.next++
 	return g.next
 }
 
 // scrubTracks rewrites, at start-up, a gateway file whose rows hold NAS credentials
 // without them (released versions saved cover URLs with the NAS's auth; #335). The
-// write is atomic. When it fails the file is removed once the ID ceiling is saved,
-// so no credential stays on disk and no ID repeats; the rows stay in memory and are
-// saved again.
+// write is atomic. When it fails the file is emptied in place (truncating needs no
+// free space), so no credential stays on disk. An empty file reads as one that
+// cannot be read: the next start takes IDs from the saved ceiling, or with none saved
+// from the new range above every ID a released version handed out, and this run
+// hands out no ID without a saved ceiling (nextID), so no ID repeats. The rows stay
+// in memory and are saved again.
 func (g *tidalGateway) scrubTracks(path string) {
 	err := g.writeTracks()
 	if err == nil {
 		return
 	}
-	log.Printf("stream-sync: gateway track IDs holding NAS credentials not rewritten (%T)", err)
+	log.Printf("stream-sync: gateway track IDs holding NAS credentials not rewritten (%T): emptied", err)
+	if terr := os.Truncate(path, 0); terr != nil && !errors.Is(terr, fs.ErrNotExist) {
+		log.Printf("stream-sync: gateway track IDs holding NAS credentials not emptied (%T)", terr)
+	}
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	ceiling := g.next + idBlock
-	if serr := saveState(g.idsPath(), savedCeiling{ceiling}); serr != nil {
-		log.Printf("stream-sync: gateway ID ceiling not saved (%T): the file stays until a save works", serr)
-		g.scheduleSave()
-		return
-	}
-	g.ceiling = ceiling
-	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
-		log.Printf("stream-sync: gateway track IDs holding NAS credentials not removed (%T)", rerr)
-	}
 	g.scheduleSave()
+	g.mu.Unlock()
 }
 
 // scheduleSave must be called with g.mu held.

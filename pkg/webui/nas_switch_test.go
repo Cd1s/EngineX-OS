@@ -1606,6 +1606,170 @@ func TestNASGatewayCredentialsGoAtStartupWhenTheRewriteFails(t *testing.T) {
 	}
 }
 
+// browseIDs is browse for a listing that may hand out no row: the IDs of the [NAS] Club
+// Crate rows, none when no ID may be handed out.
+func (rig *nasSwitchRig) browseIDs() []int64 {
+	rig.t.Helper()
+	var lists, tracks struct {
+		Items []map[string]any `json:"items"`
+	}
+	tidalGet(rig.t, rig.gw.URL, "/v1/users/1/playlists?limit=50&offset=0", 200, &lists)
+	found := false
+	for _, it := range lists.Items {
+		if it["title"] == "[NAS] Club Crate" {
+			found = true
+			tidalGet(rig.t, rig.gw.URL, "/v1/playlists/"+it["uuid"].(string)+"/tracks?limit=50&offset=0", 200, &tracks)
+		}
+	}
+	if !found {
+		rig.t.Fatalf("no [NAS] Club Crate list: %+v", lists.Items)
+	}
+	var ids []int64
+	for _, it := range tracks.Items {
+		ids = append(ids, int64(it["id"].(float64)))
+	}
+	return ids
+}
+
+// unreadable makes the rig's gateway file one that cannot be read (cut to half a byte
+// of JSON), as the round-9 re-check did between runs.
+func (rig *nasSwitchRig) unreadable() {
+	rig.t.Helper()
+	if err := os.WriteFile(filepath.Join(rig.stateDir, "gateway-tracks.json"), []byte("{"), 0o600); err != nil {
+		rig.t.Fatal(err)
+	}
+}
+
+// Round 10 (round-9 re-check, item 1): the gateway file cannot be read and the ID mark
+// cannot be saved. On b6075e5f a run handed out an ID it could not reserve, the next run
+// handed it out again, and server one's old ID played server two's recording. An ID is
+// now handed out only under a saved mark: while none can be saved no row gets one, and
+// once one can, IDs start above every ID handed out before.
+func TestNASIDsNeverResolveToAnotherRecordingWhenTheMarkCannotBeSaved(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.oneURL)
+	rig.stop()
+	if err := os.Remove(filepath.Join(rig.stateDir, "gateway-ids.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	rig.unreadable()
+	stateIO.Store(&stateFiles{save: failSaving("gateway-ids.json")})
+	t.Cleanup(func() { stateIO.Store(nil) })
+	rig.start()
+	oneIDs := rig.browseIDs()
+	for _, id := range oneIDs {
+		rig.plays("server one's row while no mark can be saved", id, rig.one)
+	}
+	rig.saveNAS(rig.twoURL)
+	rig.stop()
+	rig.unreadable()
+	rig.start()
+	twoIDs := rig.browseIDs()
+	for _, old := range oneIDs {
+		if a := rig.stream(old); a.code == http.StatusOK && bytes.Equal(a.body, rig.two) {
+			t.Fatalf("server one's old ID %d plays server two's recording (server two's rows: %v)", old, twoIDs)
+		}
+	}
+	if len(oneIDs)+len(twoIDs) != 0 {
+		t.Fatalf("IDs handed out while no mark could be saved: server one %v, server two %v", oneIDs, twoIDs)
+	}
+	// The mark can be saved again: rows come back, above every ID handed out before.
+	stateIO.Store(nil)
+	ids := rig.browseIDs()
+	if len(ids) != 1 {
+		t.Fatalf("no row once the mark can be saved: %v", ids)
+	}
+	rig.plays("server two's row once the mark is saved", ids[0], rig.two)
+	rig.stop()
+	rig.unreadable()
+	rig.start()
+	rig.saveNAS(rig.oneURL)
+	again := rig.browseIDs()
+	if len(again) != 1 || again[0] <= ids[0] {
+		t.Fatalf("after another unreadable start server one's row got %v, not above %d", again, ids[0])
+	}
+	rig.plays("server one's new row", again[0], rig.one)
+	rig.gone("server two's ID after server one was browsed", ids[0])
+}
+
+// Round 10: gateway-ids.json exists but cannot be read, so the IDs earlier runs handed out
+// are not known (here ID 1, handed out while the gateway file could not be saved). On
+// b6075e5f the counter started at 0 again and the old ID played the other server's
+// recording. Now no new ID is handed out in such a run.
+func TestNASUnreadableIDMarkHandsOutNoID(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.stop()
+	for _, f := range []string{"gateway-tracks.json", "gateway-ids.json"} {
+		if err := os.Remove(filepath.Join(rig.stateDir, f)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	stateIO.Store(&stateFiles{save: failSaving("gateway-tracks.json")}) // the row's ID is reserved, never saved
+	t.Cleanup(func() { stateIO.Store(nil) })
+	rig.start()
+	rig.saveNAS(rig.oneURL)
+	old := rig.browse()
+	rig.plays("server one's row", old, rig.one)
+	rig.stop()
+	stateIO.Store(nil)
+	if err := os.WriteFile(filepath.Join(rig.stateDir, "gateway-ids.json"), []byte("{\"ceiling\":"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rig.start()
+	rig.saveNAS(rig.twoURL)
+	ids := rig.browseIDs()
+	if a := rig.stream(old); a.code == http.StatusOK && bytes.Equal(a.body, rig.two) {
+		t.Fatalf("server one's old ID %d plays server two's recording (rows %v)", old, ids)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("IDs %v handed out while the IDs of earlier runs are not known", ids)
+	}
+}
+
+// Round 10 (round-9 re-check, item 2): a released gateway file whose rows hold NAS
+// credentials, and neither its rewrite nor the ID mark can be saved. On b6075e5f the file
+// kept the credential. It is now emptied in place at start-up; no new ID is handed out
+// until a mark is saved, and IDs then start above the emptied file's.
+func TestNASGatewayCredentialsGoAtStartupWhenBothSavesFail(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.twoURL)
+	old := rig.browse()
+	rig.stop()
+	path := filepath.Join(rig.stateDir, "gateway-tracks.json")
+	row := fmt.Sprintf(`{"next":%d,"tracks":[{"id":%d,"track":{"id":"x","provider":"subsonic","title":"Old","coverUrl":"https://127.0.0.1:1/rest/getCoverArt.view?id=cv&u=dj&t=r10marker335&s=salt"},"session":"nas"}]}`, old+5000, old)
+	if err := os.WriteFile(path, []byte(row), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(rig.stateDir, "gateway-ids.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	fail := func(path string, v any) error {
+		if b := filepath.Base(path); b == "gateway-tracks.json" || b == "gateway-ids.json" {
+			return errors.New("disk full")
+		}
+		return providers.SaveJSON(path, v)
+	}
+	stateIO.Store(&stateFiles{save: fail})
+	t.Cleanup(func() { stateIO.Store(nil) })
+	rig.start()
+	if raw, err := os.ReadFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	} else if strings.Contains(string(raw), "r10marker335") {
+		t.Fatalf("right after start-up the gateway file still holds the NAS credential: %s", raw)
+	}
+	if ids := rig.browseIDs(); len(ids) != 0 {
+		t.Fatalf("IDs %v handed out while no mark could be saved", ids)
+	}
+	rig.stop()
+	stateIO.Store(nil)
+	rig.start()
+	ids := rig.browseIDs()
+	if len(ids) != 1 || ids[0] <= old+5000 {
+		t.Fatalf("after the emptied file the NAS row got %v, not above the old counter %d", ids, old+5000)
+	}
+	rig.plays("the NAS row after the emptied file", ids[0], rig.two)
+}
+
 // assertNoNASSecrets reads the saved NAS state files: no password, token, salted hash or
 // userinfo of the NAS in any of them.
 func assertNoNASSecrets(t *testing.T, rig *nasSwitchRig, cfg providers.NASConfig) {
