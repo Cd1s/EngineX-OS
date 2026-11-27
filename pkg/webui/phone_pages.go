@@ -53,7 +53,10 @@ var phoneText = map[string][4]string{
 	"howTo":           {"Show me how", "查看教程", "查看教學", "Ver cómo se hace"},
 	"privacy":         {"Everything you enter stays on this deck.", "填写的内容只保存在这台碟机上。", "填寫的內容只儲存在這台碟機上。", "Todo lo que introduces se queda en este deck."},
 	"open":            {"Connect %s", "连接 %s", "連接 %s", "Conectar %s"},
-	"wdIntro":         {"Add the WebDAV servers to browse on the deck. Each one is its own entry under WebDAV.", "添加要在碟机上浏览的 WebDAV 服务器，每个服务器在 WebDAV 下单独列出。", "新增要在碟機上瀏覽的 WebDAV 伺服器，每個伺服器在 WebDAV 下單獨列出。", "Añade los servidores WebDAV que quieres explorar en el deck. Cada uno aparece por separado en WebDAV."},
+	"wdIntro":         {"Add the WebDAV servers to browse on the deck. Each one is its own entry in Sources, under its name.", "添加要在碟机上浏览的 WebDAV 服务器，每个服务器以它的名称在来源里单独列出。", "新增要在碟機上瀏覽的 WebDAV 伺服器，每個伺服器以它的名稱在來源裡單獨列出。", "Añade los servidores WebDAV que quieres explorar en el deck. Cada uno aparece en Fuente con su nombre."},
+	"nasIntro":        {"Add the NAS (SMB) servers to browse on the deck. Each one is its own entry in Sources, under its name.", "添加要在碟机上浏览的 NAS（SMB）服务器，每个服务器以它的名称在来源里单独列出。", "新增要在碟機上瀏覽的 NAS（SMB）伺服器，每個伺服器以它的名稱在來源裡單獨列出。", "Añade los servidores NAS (SMB) que quieres explorar en el deck. Cada uno aparece en Fuente con su nombre."},
+	"nasURL":          {"Address (smb://host/share/folder)", "地址（smb://主机/共享/文件夹）", "位址（smb://主機/共享/資料夾）", "Dirección (smb://servidor/recurso/carpeta)"},
+	"nasBadURL":       {"Enter the server address with smb://", "请填写以 smb:// 开头的服务器地址", "請填寫以 smb:// 開頭的伺服器位址", "Escribe la dirección del servidor con smb://"},
 	"wdName":          {"Name (optional)", "名称（可选）", "名稱（選填）", "Nombre (opcional)"},
 	"wdURL":           {"Address (https://host/folder)", "地址（https://主机/文件夹）", "位址（https://主機/資料夾）", "Dirección (https://servidor/carpeta)"},
 	"wdUser":          {"Username", "用户名", "使用者名稱", "Usuario"},
@@ -184,7 +187,7 @@ func phoneMessage(w http.ResponseWriter, r *http.Request, flow *loginFlow, title
 }
 
 func serviceName(provider string) string {
-	return map[string]string{"deezer": "Deezer", "soundcloud": "SoundCloud", "beatport": "Beatport", "spotify": "Spotify", "applemusic": "Apple Music", webdavScope: "WebDAV"}[provider]
+	return map[string]string{"deezer": "Deezer", "soundcloud": "SoundCloud", "beatport": "Beatport", "spotify": "Spotify", "applemusic": "Apple Music", webdavScope: "WebDAV", nasScope: "NAS"}[provider]
 }
 
 func phoneHeading(lang int, provider string) string {
@@ -219,27 +222,31 @@ func beatportPhonePage(lang int, action string) string {
 		`<details><summary>` + tr(lang, "bpAdvanced") + `</summary><input name="token" placeholder="` + tr(lang, "bpTokenPh") + `" autocomplete="off" autocapitalize="off"></details></form>`
 }
 
-// webdavPhonePage lists the WebDAV servers to edit or remove and has the form to
-// add one. A saved password is never sent to the page: empty keeps it.
-func webdavPhonePage(lang int, action string, servers []webdavView) string {
+// serversPhonePage lists a kind's servers to edit or remove and has the form to add
+// one. A saved password is never sent to the page: empty keeps it.
+func serversPhonePage(lang int, k serverKind, action string, servers []serverView) string {
+	intro, address := "wdIntro", "wdURL"
+	if k == kindNAS {
+		intro, address = "nasIntro", "nasURL"
+	}
 	a := html.EscapeString(action)
 	hidden := func(name, value string) string {
 		return `<input type="hidden" name="` + name + `" value="` + html.EscapeString(value) + `">`
 	}
-	fields := func(v webdavView, password string) string {
+	fields := func(v serverView, password string) string {
 		return `<input name="name" value="` + html.EscapeString(v.Name) + `" placeholder="` + tr(lang, "wdName") + `" autocomplete="off">` +
-			`<input name="url" value="` + html.EscapeString(v.URL) + `" placeholder="` + tr(lang, "wdURL") + `" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false">` +
+			`<input name="url" value="` + html.EscapeString(v.URL) + `" placeholder="` + tr(lang, address) + `" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false">` +
 			`<input name="user" value="` + html.EscapeString(v.Username) + `" placeholder="` + tr(lang, "wdUser") + `" autocomplete="off" autocapitalize="off">` +
 			`<input name="password" type="password" placeholder="` + tr(lang, password) + `" autocomplete="new-password">`
 	}
 	var b strings.Builder
-	b.WriteString(phoneHeading(lang, webdavScope) + `<p>` + tr(lang, "wdIntro") + `</p>`)
+	b.WriteString(phoneHeading(lang, k.scope) + `<p>` + tr(lang, intro) + `</p>`)
 	for _, v := range servers {
 		b.WriteString(`<details><summary>` + html.EscapeString(v.Name) + `</summary>` +
 			`<form method="post" action="` + a + `">` + hidden("action", "edit") + hidden("id", v.ID) + fields(v, "wdKeep") + `<button>` + tr(lang, "wdSave") + `</button></form>` +
 			`<form method="post" action="` + a + `">` + hidden("action", "remove") + hidden("id", v.ID) + `<button class="alt">` + tr(lang, "wdRemove") + `</button></form></details>`)
 	}
-	b.WriteString(`<h3>` + tr(lang, "wdAdd") + `</h3><form method="post" action="` + a + `">` + hidden("action", "add") + fields(webdavView{}, "wdPassword") + `<button>` + tr(lang, "wdAdd") + `</button></form>` +
+	b.WriteString(`<h3>` + tr(lang, "wdAdd") + `</h3><form method="post" action="` + a + `">` + hidden("action", "add") + fields(serverView{}, "wdPassword") + `<button>` + tr(lang, "wdAdd") + `</button></form>` +
 		`<small>` + tr(lang, "privacy") + `</small>`)
 	return b.String()
 }

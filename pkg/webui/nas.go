@@ -166,13 +166,13 @@ func (s *Server) handleNASConfig(w http.ResponseWriter, r *http.Request) {
 		s.uiMu.Lock()
 		defer s.uiMu.Unlock()
 		defer s.resetNASIfMoved(s.loadNASConfigLocked())
-		f := s.loadNASFileLocked() // the WebDAV list stays
+		f := s.loadNASFileLocked() // the server lists stay
 		f.NASConfig, f.Name = providers.NASConfig{}, ""
 		if err := s.saveNASFileLocked(f); err != nil {
 			fail(w, http.StatusInternalServerError, errors.New("could not remove NAS configuration"))
 			return
 		}
-		s.forgetWebDAV(webdavEntries(f))
+		s.forgetServersLocked(f)
 		respond(w, toNASConfigView(providers.NASConfig{}))
 	default:
 		fail(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -239,16 +239,19 @@ func (s *Server) handleNASConfigPost(w http.ResponseWriter, r *http.Request) {
 		newCfg.Token = in.Token
 	}
 
-	// The slot is one network source, as before; the WebDAV list beside it stays. A
-	// WebDAV server the slot held moves to that list when another kind of source
-	// takes the slot, and a WebDAV server already in the list is not added twice.
+	// The slot is one network source, as before; the server lists beside it stay. A
+	// WebDAV or SMB server the slot held moves to its list when another kind of
+	// source takes the slot, and a server already in a list is not added twice.
 	f := s.loadNASFileLocked()
-	if proto == webdavScope && slices.ContainsFunc(f.WebDAV, func(v webdavServer) bool { return webdavRoot(v.URL) == webdavRoot(targetURL) }) {
-		fail(w, http.StatusConflict, errWebDAVDuplicate)
+	listed := func(k serverKind, raw string) bool {
+		return slices.ContainsFunc(*f.list(k), func(v savedServer) bool { return serverRoot(k, v.URL) == serverRoot(k, raw) })
+	}
+	if k, ok := kindOfProvider(proto); ok && listed(k, targetURL) {
+		fail(w, http.StatusConflict, errServerDuplicate)
 		return
 	}
-	if proto != webdavScope && f.Protocol == webdavScope && f.URL != "" && !slices.ContainsFunc(f.WebDAV, func(v webdavServer) bool { return webdavRoot(v.URL) == webdavRoot(f.URL) }) {
-		f.WebDAV = append([]webdavServer{{Name: f.Name, URL: f.URL, Username: f.Username, Password: f.Password, Enabled: f.Enabled}}, f.WebDAV...)
+	if k, ok := kindOfProvider(f.Protocol); ok && proto != f.Protocol && f.URL != "" && !listed(k, f.URL) {
+		*f.list(k) = append([]savedServer{{Name: f.Name, URL: f.URL, Username: f.Username, Password: f.Password, Enabled: f.Enabled}}, *f.list(k)...)
 	}
 	if nasTarget(newCfg) != nasTarget(f.NASConfig) {
 		f.Name = ""
@@ -258,7 +261,7 @@ func (s *Server) handleNASConfigPost(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, errors.New("could not save nas configuration"))
 		return
 	}
-	s.forgetWebDAV(webdavEntries(f))
+	s.forgetServersLocked(f)
 
 	respond(w, toNASConfigView(newCfg))
 }
@@ -436,8 +439,10 @@ func smbNASConfigReady(cfg providers.NASConfig) bool {
 	return cfg.Protocol == "smb" && nasConfigReady(cfg)
 }
 
+// nasAvailableLocked: the slot's SMB server is ready and NAS is on in Services.
 func (s *Server) nasAvailableLocked() bool {
-	return smbNASConfigReady(s.loadNASConfigLocked())
+	f := s.loadNASFileLocked()
+	return smbNASConfigReady(f.NASConfig) && serversOn(kindNAS, s.loadUI(), f)
 }
 
 func (s *Server) nasAvailable() bool {
@@ -446,19 +451,33 @@ func (s *Server) nasAvailable() bool {
 	return s.nasAvailableLocked()
 }
 
+// ownerSelfHosted is the slot's server: nil when it is not ready, or when it is an
+// SMB or WebDAV server whose kind is switched off in Services (off stops its work).
 func (s *Server) ownerSelfHosted() *providers.SelfHostedProvider {
-	cfg := s.loadNASConfig()
-	if !nasConfigReady(cfg) {
+	s.uiMu.Lock()
+	f := s.loadNASFileLocked()
+	v := s.loadUI()
+	s.uiMu.Unlock()
+	if !nasConfigReady(f.NASConfig) {
 		return nil
 	}
-	return providers.NewSelfHostedProvider(cfg, s.nasHTTPClient())
+	if k, ok := kindOfProvider(f.Protocol); ok && !serversOn(k, v, f) {
+		return nil
+	}
+	return providers.NewSelfHostedProvider(f.NASConfig, s.nasHTTPClient())
 }
 
 // ownerSMBSelfHosted is ownerSelfHosted for the standalone NAS entry: nil
 // unless the NAS is SMB.
 func (s *Server) ownerSMBSelfHosted() *providers.SelfHostedProvider {
-	if cfg := s.loadNASConfig(); smbNASConfigReady(cfg) {
-		return providers.NewSelfHostedProvider(cfg, s.nasHTTPClient())
+	s.uiMu.Lock()
+	f := s.loadNASFileLocked()
+	on := serversOn(kindNAS, s.loadUI(), f)
+	s.uiMu.Unlock()
+	if smbNASConfigReady(f.NASConfig) && on {
+		// One provider per server, as for the other NAS servers: a search also
+		// finds what was browsed. Another address is another provider.
+		return s.serverProvider(serverEntry{kind: kindNAS, ID: serverRoot(kindNAS, f.URL), cfg: f.NASConfig, slot: true, idx: -1})
 	}
 	return nil
 }

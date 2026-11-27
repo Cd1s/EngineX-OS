@@ -435,13 +435,13 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 			}
 		}
 	}
-	webdav := g.s.webdavKept()
+	kept := g.s.serversKept()
 	for _, m := range g.s.loadMounts() {
 		if !m.Mounted && !m.Enabled {
 			continue
 		}
-		if strings.EqualFold(m.Protocol, webdavScope) && webdav[webdavRoot(mountWebDAVURL(m))] {
-			continue // a WebDAV server of the WebDAV source: listed there, once
+		if strings.EqualFold(m.Protocol, webdavScope) && kept[serverRoot(kindWebDAV, mountWebDAVURL(m))] {
+			continue // a WebDAV server: its own entry in Sources, listed once
 		}
 		hasEngineLib := false
 		for _, d := range drives {
@@ -549,15 +549,14 @@ func (s *Server) omniTracks(ctx context.Context, query string) ([]trackRef, erro
 func (g *tidalGateway) omniSearch(ctx context.Context, query string) []any {
 	items := []any{}
 	seenFiles := make(map[string]bool)
-	// The WebDAV servers are searched beside the drives, each in the NAS search's
-	// time budget; the WebDAV source's own search already has them.
+	// Every enabled WebDAV and NAS server is searched beside the drives, each in the
+	// NAS search's time budget; the selected source's own search already has its
+	// server.
 	var webdav []trackRef
 	webdavDone := make(chan struct{})
 	go func() {
 		defer close(webdavDone)
-		if g.s.scope() != webdavScope {
-			webdav = g.webdavSearchRefs(ctx, query)
-		}
+		webdav = g.serverSearch(ctx, query, "", g.s.scope())
 	}()
 
 	for _, refs := range each(ctx, g.s.drives(), func(ctx context.Context, d drive) ([]trackRef, error) { return searchDrive(ctx, d, query) }) {

@@ -110,7 +110,7 @@ type Jobs struct {
 	spotify       func() *providers.Spotify
 	applemusic    func() *providers.AppleMusic
 	selfHosted    func() *providers.SelfHostedProvider
-	webdav        func(server string) *providers.SelfHostedProvider // a WebDAV source server, by its ID
+	server        func(k serverKind, id string) *providers.SelfHostedProvider // a server a row names
 	bpm           *providers.BPMStore
 }
 type fetched struct {
@@ -1070,18 +1070,18 @@ func (j *Jobs) fromNetease(ctx context.Context, n *providers.Netease, t provider
 	return t, dl, nil
 }
 
-// selfHostedFor is the server a NAS or WebDAV track is on: a WebDAV source track
-// names its server; any other is the NAS slot's. nil when that server is gone,
+// selfHostedFor is the server a NAS or WebDAV track is on: a row that names its
+// server is on that one; any other is the NAS slot's. nil when that server is gone,
 // disabled or switched off.
 func (j *Jobs) selfHostedFor(t providers.Track) *providers.SelfHostedProvider {
 	j.mu.Lock()
-	nas, webdav := j.selfHosted, j.webdav
+	nas, server := j.selfHosted, j.server
 	j.mu.Unlock()
-	if server, ok := webdavRowServer(t); ok {
-		if webdav == nil {
+	if k, id, ok := rowServer(t); ok {
+		if server == nil {
 			return nil
 		}
-		return webdav(server)
+		return server(k, id)
 	}
 	return lookupNAS(nas)
 }
@@ -1091,15 +1091,15 @@ func (j *Jobs) fromSelfHosted(ctx context.Context, t providers.Track) (*deemixcl
 		return nil, errors.New("nas: download cache unavailable")
 	}
 	sh := j.selfHostedFor(t)
-	if _, ok := webdavRowServer(t); ok && sh == nil {
-		return nil, errWebDAVServerGone
+	if _, _, ok := rowServer(t); ok && sh == nil {
+		return nil, errServerGone
 	}
 	if sh == nil {
 		return nil, fmt.Errorf("%s: NAS server is not enabled", t.Provider)
 	}
 	ref := t.ID
-	if _, raw, ok := webdavSplit(t.ID); ok && t.Provider == webdavScope {
-		ref = raw // the path on that server
+	if _, _, ok := rowServer(t); ok {
+		_, ref, _ = splitServerID(t.ID) // the path on that server
 	}
 	p, err := sh.DownloadTrack(ctx, ref, j.p.Deemix.DownloadDir)
 	if err != nil {

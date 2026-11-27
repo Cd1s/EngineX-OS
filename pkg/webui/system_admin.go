@@ -696,13 +696,13 @@ func (s *Server) syncMountToNAS(m RemoteMount) {
 			Password: m.Password,
 			Enabled:  m.Enabled,
 		}
-		f := s.loadNASFileLocked() // the WebDAV list stays
+		f := s.loadNASFileLocked() // the server lists stay
 		if nasTarget(nasCfg) != nasTarget(f.NASConfig) {
 			f.Name = ""
 		}
 		f.NASConfig = nasCfg
 		_ = s.saveNASFileLocked(f)
-		s.forgetWebDAV(webdavEntries(f))
+		s.forgetServersLocked(f)
 	}
 }
 
@@ -955,10 +955,10 @@ func (s *Server) handleMountsDelete(w http.ResponseWriter, r *http.Request) {
 		if left != nil {
 			s.syncMountToNAS(*left)
 		} else {
-			f := s.loadNASFileLocked() // the WebDAV list stays
+			f := s.loadNASFileLocked() // the server lists stay
 			f.NASConfig, f.Name = providers.NASConfig{}, ""
 			_ = s.saveNASFileLocked(f)
-			s.forgetWebDAV(webdavEntries(f))
+			s.forgetServersLocked(f)
 		}
 	}
 

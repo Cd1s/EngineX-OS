@@ -35,7 +35,8 @@ type stemmedTrack struct {
 
 const maxStemmed = 500
 
-func stemsListID(scope string) string { return "enginex-stems-" + scope }
+// stemsListID is a scope's Stems list; a server's scope ("<kind>:<id>") without its colon.
+func stemsListID(scope string) string { return "enginex-stems-" + strings.ReplaceAll(scope, ":", "-") }
 
 func isStemsListID(id, scope string) bool {
 	return id == stemsListID(scope) || id == migration.StemsListPrefix+scope
@@ -172,31 +173,6 @@ func (s *Server) resetNASStemsLocked(root string) {
 	}
 	if err := saveState(s.stemsFile(), stripStemsAuth(all)); err != nil {
 		log.Printf("webui: NAS changed: Stems lists not saved; the old NAS entries stay unused (%T)", err)
-	}
-}
-
-// dropWebDAVStemsLocked removes the Stems entries of WebDAV servers that are gone
-// (removed, or moved to another address). A file that does not fully decode is
-// left as it is. Caller holds stemsMu.
-func (s *Server) dropWebDAVStemsLocked(keep map[string]bool) {
-	all, err := s.readStemmed()
-	if err != nil {
-		return
-	}
-	changed := false
-	for scope, list := range all {
-		kept := slices.DeleteFunc(slices.Clone(list), func(e stemmedTrack) bool {
-			server, ok := webdavRowServer(e.Track)
-			return ok && !keep[server]
-		})
-		if len(kept) != len(list) {
-			all[scope], changed = kept, true
-		}
-	}
-	if changed {
-		if err := saveState(s.stemsFile(), stripStemsAuth(all)); err != nil {
-			log.Printf("webui: WebDAV servers changed: Stems lists not saved (%T)", err)
-		}
 	}
 }
 

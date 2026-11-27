@@ -378,8 +378,8 @@ func (s *Server) ownerSession(provider string) (*Session, error) {
 
 func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 	provider := r.URL.Query().Get("provider")
-	if provider == webdavScope {
-		s.webdavLoginStart(w)
+	if k, ok := kindOf(provider); ok {
+		s.serversLoginStart(w, k)
 		return
 	}
 	if !slices.Contains(loginServices, provider) {
@@ -473,8 +473,8 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, errors.New("no login in progress"))
 		return
 	}
-	if flow.Provider == webdavScope {
-		s.webdavLoginStatus(w, flow)
+	if _, ok := kindOf(flow.Provider); ok {
+		s.serversLoginStatus(w, flow)
 		return
 	}
 	s.mu.Lock()
@@ -622,11 +622,12 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 		phonePage(w, r, soundCloudPhonePage(lang, action))
 	case "beatport":
 		phonePage(w, r, beatportPhonePage(lang, action))
-	case webdavScope:
+	case webdavScope, nasScope:
+		k, _ := kindOf(flow.Provider)
 		s.uiMu.Lock()
-		views := webdavViews(s.loadNASFileLocked())
+		views := serverViews(k, s.loadNASFileLocked())
 		s.uiMu.Unlock()
-		phonePage(w, r, webdavPhonePage(lang, action, views))
+		phonePage(w, r, serversPhonePage(lang, k, action, views))
 	case "applemusic":
 		s.mu.Lock()
 		pendingHelper := flow.helperPending
@@ -762,8 +763,8 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errors.New("invalid form"))
 		return
 	}
-	if flow.Provider == webdavScope {
-		s.webdavPhonePost(w, r, flow)
+	if k, ok := kindOf(flow.Provider); ok {
+		s.serversPhonePost(w, r, flow, k)
 		return
 	}
 	session := s.sessionOf(flow)

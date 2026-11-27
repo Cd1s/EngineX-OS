@@ -800,8 +800,6 @@ Starting…	正在启动…	正在啟動…	Iniciando…
 Error	错误	錯誤	Error
 WebDAV Servers	WebDAV 服务器	WebDAV 伺服器	Servidores WebDAV
 Edit	编辑	編輯	Editar
-Servers	服务器	伺服器	Servidores
-Add on this deck	在碟机上添加	在碟機上新增	Añadir en este deck
 Tap again to remove	再点一次移除	再點一次移除	Toca otra vez para quitar
 Add WebDAV server	添加 WebDAV 服务器	新增 WebDAV 伺服器	Añadir servidor WebDAV
 Edit WebDAV server	编辑 WebDAV 服务器	編輯 WebDAV 伺服器	Editar servidor WebDAV
@@ -813,3 +811,8 @@ This server is already added	这个服务器已经添加过	這個伺服器已�
 No more servers can be added	不能再添加更多服务器	無法再新增更多伺服器	No se pueden añadir más servidores
 Enter the server address with http:// or https://	请填写以 http:// 或 https:// 开头的服务器地址	請填寫以 http:// 或 https:// 開頭的伺服器位址	Escribe la dirección del servidor con http:// o https://
 Could not save the server	未能保存服务器	未能儲存伺服器	No se ha podido guardar el servidor
+NAS Servers	NAS 服务器	NAS 伺服器	Servidores NAS
+Add NAS server	添加 NAS 服务器	新增 NAS 伺服器	Añadir servidor NAS
+Edit NAS server	编辑 NAS 服务器	編輯 NAS 伺服器	Editar servidor NAS
+Enter manually	手动输入	手動輸入	Introducir manualmente
+Enter the server address with smb://	请填写以 smb:// 开头的服务器地址	請填寫以 smb:// 開頭的伺服器位址	Escribe la dirección del servidor con smb://

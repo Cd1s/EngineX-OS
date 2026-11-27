@@ -120,7 +120,7 @@ type Server struct {
 	stemsMu       sync.Mutex // streaming-stems.json
 	stemsRoot     string     // under stemsMu: the NAS root whose NAS Stems entries are served (#335)
 	stemsImportMu sync.Mutex // one streamed row at a time is named, recorded and swept
-	webdavState              // the WebDAV source's connections
+	serverState              // the WebDAV and NAS servers' connections
 	rbxPresenceMu sync.Mutex
 	rbxPresence   map[string]*rbxPresence
 
@@ -314,8 +314,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /v1/enginex/nas", s.handleNASConfig)
 	s.mux.HandleFunc("POST /v1/enginex/nas", s.handleNASConfig)
 	s.mux.HandleFunc("POST /v1/enginex/nas/test", s.handleNASTest)
-	s.mux.HandleFunc("GET /v1/enginex/webdav", s.handleWebDAV)
-	s.mux.HandleFunc("POST /v1/enginex/webdav", s.handleWebDAV)
+	s.mux.HandleFunc("GET /v1/enginex/servers/{kind}", s.handleServers)
+	s.mux.HandleFunc("POST /v1/enginex/servers/{kind}", s.handleServers)
 	s.mux.HandleFunc("GET /api/mods", s.handleMods)
 	s.mux.HandleFunc("POST /api/mods", s.handleMods)
 	s.mux.HandleFunc("POST /api/mods/upload", s.handleModsUpload)
@@ -378,9 +378,10 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.appleMusic.OwnerPath = filepath.Join(cfg.StateDir, "applemusic-owner.json")
 	_ = s.appleMusic.Load()
 	s.stemsRoot = nasRootID(s.loadNASConfig()) // before any request
+	kept := s.serversKept()
 	s.stemsMu.Lock()
 	s.scrubStems() // a released file's credentials go before any request
-	s.dropWebDAVStemsLocked(s.webdavKept())
+	s.dropServerStemsLocked(kept)
 	s.stemsMu.Unlock()
 	s.tidal = newTidalGateway(s)
 	s.RegisterTunnelRoutes()
@@ -398,7 +399,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 		jobs.spotify = s.ownerSpotify
 		jobs.applemusic = func() *providers.AppleMusic { return s.appleMusic }
 		jobs.selfHosted = s.ownerSelfHosted
-		jobs.webdav = s.webdavLookup
+		jobs.server = s.serverLookup
 		jobs.nasRoot = s.stemsRoot
 		jobs.bpm = cfg.BPM
 		if jobs.p.Deemix != nil {

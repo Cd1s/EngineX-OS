@@ -376,16 +376,17 @@ func isNASTrackRef(ref trackRef) bool {
 	return isNASTrack(ref.track.Provider, ref.track.ID) || ref.session == nasScope
 }
 
-// dropWebDAV forgets the rows and lists of WebDAV servers that are gone (removed,
-// or moved to another address): such an ID answers 404 and is browsed again.
-func (g *tidalGateway) dropWebDAV(keep map[string]bool) {
+// dropServers forgets the rows and lists of WebDAV and NAS servers that are gone
+// (removed, or moved to another address): such an ID answers 404 and is browsed
+// again.
+func (g *tidalGateway) dropServers(keep map[string]bool) {
 	if g == nil {
 		return
 	}
 	g.mu.Lock()
 	changed := false
 	for id, ref := range g.tracks {
-		if server, ok := webdavRowServer(ref.track); ok && !keep[server] {
+		if _, server, ok := rowServer(ref.track); ok && !keep[server] {
 			delete(g.ids, refKey(ref))
 			delete(g.tracks, id)
 			delete(g.trackSeen, id)
@@ -393,7 +394,8 @@ func (g *tidalGateway) dropWebDAV(keep map[string]bool) {
 		}
 	}
 	for id, ref := range g.lists {
-		if server, _, ok := webdavSplit(ref.list.ID); ok && ref.provider == webdavScope && !keep[server] {
+		_, isServer := kindOfProvider(ref.provider)
+		if server, _, named := splitServerID(ref.list.ID); isServer && named && !keep[server] {
 			delete(g.lists, id)
 			delete(g.listSeen, id)
 			changed = true
@@ -440,7 +442,7 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.searches = newSearchCache()
 	g.seedFromStreamingAccounts()
 	g.loadTracks(nasRootID(s.loadNASConfig()))
-	g.dropWebDAV(s.webdavKept()) // rows of a server no longer set up
+	g.dropServers(s.serversKept()) // rows of a server no longer set up
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
 	g.mux.HandleFunc("POST /v1/enginex/login", s.loginStart)
@@ -472,8 +474,8 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/enginex/nas", s.handleNASConfig)
 	g.mux.HandleFunc("POST /v1/enginex/nas", s.handleNASConfig)
 	g.mux.HandleFunc("POST /v1/enginex/nas/test", s.handleNASTest)
-	g.mux.HandleFunc("GET /v1/enginex/webdav", s.handleWebDAV)
-	g.mux.HandleFunc("POST /v1/enginex/webdav", s.handleWebDAV)
+	g.mux.HandleFunc("GET /v1/enginex/servers/{kind}", s.handleServers)
+	g.mux.HandleFunc("POST /v1/enginex/servers/{kind}", s.handleServers)
 	g.mux.HandleFunc("GET /v1/enginex/mods", s.handleMods)
 	g.mux.HandleFunc("POST /v1/enginex/mods", s.handleMods)
 	g.mux.HandleFunc("POST /v1/enginex/mods/upload", s.handleModsUpload)
@@ -1201,7 +1203,7 @@ func playlistJSON(id, title, description string, count int) map[string]any {
 	return map[string]any{"uuid": id, "title": title, "numberOfTracks": count, "numberOfVideos": 0, "description": description, "duration": 0, "lastUpdated": now, "created": now, "type": "USER", "publicPlaylist": false, "url": "http://enginex.lan:8080", "image": "", "squareImage": "", "popularity": 0}
 }
 func (g *tidalGateway) refJSON(id string, ref playlistRef) map[string]any {
-	if ref.provider == listNoticeProvider || ref.provider == rekordboxScope || ref.provider == nasScope || ref.provider == webdavScope {
+	if _, server := kindOfProvider(ref.provider); server || ref.provider == listNoticeProvider || ref.provider == rekordboxScope || ref.provider == nasScope {
 		return playlistJSON(id, ref.list.Title, "", ref.list.Count)
 	}
 	label := providerLabels[ref.provider]
@@ -1228,8 +1230,8 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 		g.nasPlaylistsPage(w, r)
 		return
 	}
-	if scope == webdavScope {
-		g.webdavPlaylistsPage(w, r)
+	if _, _, ok := serverScopeOf(scope); ok {
+		g.serverPlaylistsPage(w, r, scope)
 		return
 	}
 	sessions := []*Session{}
@@ -1356,8 +1358,8 @@ func playlistOpenSourceID(ref *playlistRef) string {
 	if ref.provider == nasScope {
 		return fmt.Sprintf("nas:%q", path.Base(id))
 	}
-	if ref.provider == webdavScope {
-		return fmt.Sprintf("webdav:%q", path.Base(id))
+	if k, ok := kindOfProvider(ref.provider); ok {
+		return fmt.Sprintf("%s:%q", k.scope, path.Base(id))
 	}
 	if ref.provider != localProvider {
 		return id
@@ -1708,8 +1710,8 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		g.nasTracks(w, r, id, ref, role, order)
 		return
 	}
-	if ref.provider == webdavScope {
-		g.webdavTracks(w, r, id, ref, role, order)
+	if _, ok := kindOfProvider(ref.provider); ok {
+		g.serverTracks(w, r, id, ref, role, order)
 		return
 	}
 	if ref.provider == localProvider {
@@ -2058,8 +2060,8 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if scope == webdavScope { // every enabled server, each in the NAS search's time budget
-		for _, ref := range g.webdavSearchRefs(r.Context(), query) {
+	if _, _, ok := serverScopeOf(scope); ok { // that server, in the NAS search's time budget
+		for _, ref := range g.serverSearch(r.Context(), query, scope, "") {
 			if id := g.addTrack(ref); id != 0 {
 				trackItems = append(trackItems, g.trackJSON(id, ref.track))
 			}
@@ -2211,7 +2213,7 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 // isolation. Other variable-codec sources download before returning a manifest.
 // fetchFailStatus: a NAS track listed before the NAS changed is gone (#335).
 func fetchFailStatus(err error) int {
-	if errors.Is(err, errNASChanged) || errors.Is(err, errWebDAVServerGone) {
+	if errors.Is(err, errNASChanged) || errors.Is(err, errServerGone) {
 		return http.StatusNotFound
 	}
 	return http.StatusBadGateway
@@ -2322,8 +2324,12 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 		reserve = d.MinFree
 	}
 	p = stemsImportFile(p, ref.track, reserve)
-	// The row joins the Stems list of the service it was stemmed from.
+	// The row joins the Stems list of the service it was stemmed from (a server's
+	// row: that server's entry in Sources).
 	stemsScope := gatewayProvider(ref.track.Provider)
+	if scope := rowScope(ref.track); scope != "" {
+		stemsScope = scope
+	}
 	if v := g.sessionByID(ref.session); v != nil && v.Provider != "" {
 		stemsScope = v.Provider
 	}
