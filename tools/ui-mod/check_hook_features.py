@@ -97,13 +97,85 @@ def check(source):
     return errors
 
 
-def _nocomment_preserve_strings(source):
-    return re.sub(
-        r'"(?:\\.|[^"\\])*"|\x27(?:\\.|[^\x27\\])*\x27|/\*.*?\*/|//[^\n]*',
-        lambda m: m[0] if m[0][0] in ('"', "'") else re.sub(r'[^\n]', ' ', m[0]),
-        source,
-        flags=re.S,
-    )
+def _logical_preprocessing_lines(source):
+    # C translation phase 2: splice \<newline> physically anywhere in the source before comments/directives.
+    p2_lines = []
+    p2_line_phys = []
+    cur = []
+    cur_phys = None
+    for phys_idx, raw in enumerate(source.splitlines(True)):
+        if cur_phys is None:
+            cur_phys = phys_idx
+        if raw.endswith('\\\r\n'):
+            cur.append(raw[:-3])
+        elif raw.endswith('\\\n'):
+            cur.append(raw[:-2])
+        elif raw.endswith('\r\n'):
+            cur.append(raw[:-2] + '\n')
+            p2_lines.append(''.join(cur))
+            p2_line_phys.append(cur_phys)
+            cur = []
+            cur_phys = None
+        else:
+            cur.append(raw)
+            p2_lines.append(''.join(cur))
+            p2_line_phys.append(cur_phys)
+            cur = []
+            cur_phys = None
+    if cur:
+        p2_lines.append(''.join(cur))
+        p2_line_phys.append(cur_phys)
+
+    p2_text = ''.join(p2_lines)
+    p2_offsets = _line_offsets(p2_text)
+    if not p2_line_phys:
+        p2_line_phys = [0]
+
+    def phys_at(p2_pos):
+        li = _line_of_pos(p2_offsets, min(p2_pos, max(0, len(p2_text) - 1)))
+        if p2_pos >= p2_offsets[-1]:
+            return p2_line_phys[-1] + 1
+        return p2_line_phys[li]
+
+    # C translation phase 3: replace each /* ... */ or // ... comment with a single space.
+    token_re = re.compile(r'"(?:\\.|[^"\\])*"|\x27(?:\\.|[^\x27\\])*\x27|/\*.*?\*/|//[^\n]*', re.S)
+    nc_parts = []
+    cl_parts = []
+    phys_lines = [p2_line_phys[0]]
+
+    def emit_plain(seg, start_pos):
+        nc_parts.append(seg)
+        cl_parts.append(seg)
+        idx = seg.find('\n')
+        while idx != -1:
+            phys_lines.append(phys_at(start_pos + idx + 1))
+            idx = seg.find('\n', idx + 1)
+
+    pos = 0
+    for m in token_re.finditer(p2_text):
+        if m.start() > pos:
+            emit_plain(p2_text[pos:m.start()], pos)
+        tok = m[0]
+        if tok[0] in ('"', "'"):
+            nc_parts.append(tok)
+            cl_parts.append(re.sub(r'[^\n]', ' ', tok))
+            idx = tok.find('\n')
+            while idx != -1:
+                phys_lines.append(phys_at(m.start() + idx + 1))
+                idx = tok.find('\n', idx + 1)
+        else:
+            nc_parts.append(' ')
+            cl_parts.append(' ')
+        pos = m.end()
+    if pos < len(p2_text):
+        emit_plain(p2_text[pos:], pos)
+
+    nocomment = ''.join(nc_parts)
+    clean = ''.join(cl_parts)
+    nocomment_lines = nocomment.splitlines()
+    clean_lines = clean.splitlines()
+    phys_lines = phys_lines[:len(nocomment_lines)]
+    return nocomment, nocomment_lines, clean_lines, phys_lines
 
 
 def _line_offsets(source):
@@ -135,15 +207,11 @@ def _classify_pp_expr(expr):
 def _line_archs(nocomment_lines):
     stack = []
     archs = []
-    in_pp_cont = False
+    dir_re = re.compile(r'^(?:#|%:)\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$')
     for line in nocomment_lines:
-        if in_pp_cont:
-            archs.append('pp')
-            in_pp_cont = line.rstrip().endswith('\\')
-            continue
-        s = line.strip()
-        if s.startswith('#'):
-            m = re.match(r'^#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$', s)
+        s = line.lstrip()
+        if s.startswith('#') or s.startswith('%:'):
+            m = dir_re.match(s)
             if m:
                 kw, rest = m[1], m[2].strip()
                 if kw == 'if':
@@ -162,7 +230,6 @@ def _line_archs(nocomment_lines):
                 elif kw == 'endif' and stack:
                     stack.pop()
             archs.append('pp')
-            in_pp_cont = line.rstrip().endswith('\\')
             continue
         if 'a32' in stack:
             archs.append('a32')
@@ -177,15 +244,11 @@ def _line_pp_branches(nocomment_lines):
     stack = []
     branches = []
     next_id = 0
-    in_pp_cont = False
+    dir_re = re.compile(r'^(?:#|%:)\s*(if|ifdef|ifndef|elif|else|endif)\b')
     for line in nocomment_lines:
-        if in_pp_cont:
-            branches.append(None)
-            in_pp_cont = line.rstrip().endswith('\\')
-            continue
-        s = line.strip()
-        if s.startswith('#'):
-            m = re.match(r'^#\s*(if|ifdef|ifndef|elif|else|endif)\b', s)
+        s = line.lstrip()
+        if s.startswith('#') or s.startswith('%:'):
+            m = dir_re.match(s)
             if m:
                 kw = m[1]
                 if kw in ('if', 'ifdef', 'ifndef'):
@@ -196,7 +259,6 @@ def _line_pp_branches(nocomment_lines):
                 elif kw == 'endif' and stack:
                     stack.pop()
             branches.append(None)
-            in_pp_cont = line.rstrip().endswith('\\')
             continue
         branches.append(tuple(tuple(frame) for frame in stack))
     return branches
@@ -363,21 +425,19 @@ def _top_level_functions(nocomment_lines, clean_lines, archs, branches):
     return functions
 
 
-def check_az04_parity(source, clean, _functions):
+def check_az04_parity(source, _clean, _functions):
     errors = []
-    offsets = _line_offsets(source)
-    nocomment = _nocomment_preserve_strings(source)
-    nocomment_lines = nocomment.splitlines()
-    clean_lines = clean.splitlines()
+    nocomment, nocomment_lines, clean_lines, phys_lines = _logical_preprocessing_lines(source)
+    offsets = _line_offsets(nocomment)
     archs = _line_archs(nocomment_lines)
     branches = _line_pp_branches(nocomment_lines)
 
     def fail_line(idx, message):
-        errors.append(f'{idx + 1}: {message}')
+        errors.append(f'{phys_lines[idx] + 1}: {message}')
 
     # Validate every AZ04_EXEMPT("reason") has a non-empty string reason.
     for idx, line in enumerate(nocomment_lines):
-        if re.search(r'^#\s*define\s+AZ04_EXEMPT\b', line):
+        if re.search(r'^(?:#|%:)\s*define\s+AZ04_EXEMPT\b', line.lstrip()):
             continue
         if re.search(r'\bAZ04_EXEMPT\b', clean_lines[idx]):
             ok, bad = _valid_az04_exempt_on_line(line)
@@ -471,7 +531,7 @@ def check_az04_parity(source, clean, _functions):
                 first_li,
                 f'HF_{fid} has no AZ04 site and is not documented in az04_exempt_features[]',
             )
-    errors.extend(_check_az04_build_descriptors(nocomment, nocomment_lines, clean_lines, offsets, archs, fn_info))
+    errors.extend(_check_az04_build_descriptors(nocomment, nocomment_lines, clean_lines, offsets, phys_lines, archs, fn_info))
     return errors
 
 
@@ -603,7 +663,7 @@ def _c_string_nonempty(expr):
     return bool(''.join(parts))
 
 
-def _check_az04_build_descriptors(nocomment, nocomment_lines, clean_lines, offsets, archs, fn_info):
+def _check_az04_build_descriptors(nocomment, nocomment_lines, clean_lines, offsets, phys_lines, archs, fn_info):
     errors = []
     struct_fields, dsp_count = _parse_engine_build_struct(nocomment)
     required = _required_az04_build_fields(nocomment_lines, clean_lines, archs, fn_info, struct_fields)
@@ -620,13 +680,14 @@ def _check_az04_build_descriptors(nocomment, nocomment_lines, clean_lines, offse
 
     row_count = 0
     for tm, decl_li in a64_tables:
+        pno = phys_lines[decl_li] + 1
         table_body, _ = _extract_brace_block(nocomment, tm.end() - 1)
         if table_body is None:
-            errors.append(f'{decl_li + 1}: unterminated AArch64 engine_builds[] initializer')
+            errors.append(f'{pno}: unterminated AArch64 engine_builds[] initializer')
             continue
         for entry in _split_top_level_commas(table_body):
             if not entry.startswith('{') or not entry.endswith('}'):
-                errors.append(f'{decl_li + 1}: AArch64 engine_builds[] entry must be a brace initializer')
+                errors.append(f'{pno}: AArch64 engine_builds[] entry must be a brace initializer')
                 continue
             row_count += 1
             entry_body = entry[1:-1]
@@ -635,12 +696,12 @@ def _check_az04_build_descriptors(nocomment, nocomment_lines, clean_lines, offse
             for item in _split_top_level_commas(entry_body):
                 im = re.fullmatch(r'\s*\.([A-Za-z_]\w*)\s*=\s*(.+)', item, re.S)
                 if not im:
-                    errors.append(f'{decl_li + 1}: AArch64 engine_builds[] entry must use designated .field = value initializers')
+                    errors.append(f'{pno}: AArch64 engine_builds[] entry must use designated .field = value initializers')
                     bad_item = True
                     continue
                 fname, fval = im[1], im[2].strip()
                 if fname in fields:
-                    errors.append(f'{decl_li + 1}: AArch64 engine_builds[] has duplicate .{fname}')
+                    errors.append(f'{pno}: AArch64 engine_builds[] has duplicate .{fname}')
                 fields[fname] = fval
             if bad_item:
                 continue
@@ -653,45 +714,45 @@ def _check_az04_build_descriptors(nocomment, nocomment_lines, clean_lines, offse
 
             for field in sorted(required):
                 if field not in fields:
-                    errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" missing required descriptor field .{field}')
+                    errors.append(f'{pno}: AZ04 build "{build_name}" missing required descriptor field .{field}')
                     continue
                 val = fields[field]
                 if field == 'dsp':
                     if not (val.startswith('{') and val.endswith('}')):
-                        errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" .dsp must be a brace initializer')
+                        errors.append(f'{pno}: AZ04 build "{build_name}" .dsp must be a brace initializer')
                     else:
                         slots = _split_top_level_commas(val[1:-1])
                         if len(slots) != dsp_count or any(_is_zero_scalar(s) for s in slots):
-                            errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" .dsp must provide {dsp_count} non-zero offsets')
+                            errors.append(f'{pno}: AZ04 build "{build_name}" .dsp must provide {dsp_count} non-zero offsets')
                 elif field == 'sqlite_prefix':
                     if not (val.startswith('{') and val.endswith('}')):
-                        errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" .sqlite_prefix must be a brace initializer')
+                        errors.append(f'{pno}: AZ04 build "{build_name}" .sqlite_prefix must be a brace initializer')
                     else:
                         slots = _split_top_level_commas(val[1:-1])
                         if len(slots) < 2 or not _is_c_string_expr(slots[1]) or not _c_string_nonempty(slots[1]):
-                            errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" .sqlite_prefix[1] (sqlite_opendb prologue) must be non-empty')
+                            errors.append(f'{pno}: AZ04 build "{build_name}" .sqlite_prefix[1] (sqlite_opendb prologue) must be non-empty')
                 elif field == 'shadow_position_prefix':
                     if not (val.startswith('{') and val.endswith('}')):
-                        errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" .shadow_position_prefix must be a brace initializer')
+                        errors.append(f'{pno}: AZ04 build "{build_name}" .shadow_position_prefix must be a brace initializer')
                     else:
                         bytes_items = _split_top_level_commas(val[1:-1])
                         size_expr = fields.get('shadow_position_prefix_size', '0')
                         size_m = re.fullmatch(r'(0[xX][0-9A-Fa-f]+|\d+)[uUlL]*', size_expr.strip())
                         min_len = int(size_m[1], 0) if size_m else 1
                         if len(bytes_items) < max(1, min_len) or all(_is_zero_scalar(b) for b in bytes_items):
-                            errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" .shadow_position_prefix must be non-zero')
+                            errors.append(f'{pno}: AZ04 build "{build_name}" .shadow_position_prefix must be non-zero')
                 elif val.startswith('{') and val.endswith('}'):
                     elems = _split_top_level_commas(val[1:-1])
                     if not elems or all(_is_zero_scalar(e) for e in elems):
-                        errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" has zero/empty required descriptor field .{field}')
+                        errors.append(f'{pno}: AZ04 build "{build_name}" has zero/empty required descriptor field .{field}')
                 elif _is_c_string_expr(val):
                     if not _c_string_nonempty(val):
-                        errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" has empty string in required descriptor field .{field}')
+                        errors.append(f'{pno}: AZ04 build "{build_name}" has empty string in required descriptor field .{field}')
                 elif _is_zero_scalar(val):
-                    errors.append(f'{decl_li + 1}: AZ04 build "{build_name}" has zero/empty required descriptor field .{field}')
+                    errors.append(f'{pno}: AZ04 build "{build_name}" has zero/empty required descriptor field .{field}')
 
     if row_count == 0:
-        errors.append(f'{a64_tables[0][1] + 1}: AArch64 engine_builds[] must list at least one AZ04 build')
+        errors.append(f'{phys_lines[a64_tables[0][1]] + 1}: AArch64 engine_builds[] must list at least one AZ04 build')
     return errors
 
 

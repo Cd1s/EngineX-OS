@@ -247,11 +247,12 @@ class HookFeatureCoverageTest(unittest.TestCase):
         self.assertNotEqual(call_opposite, documented_def, 'anchor missing for call_opposite')
         self.assertTrue(any('install_future_a32' in e for e in coverage.check(call_opposite)))
 
-        # Nonconditional directives (#pragma, #define, multi-line #define) are also barriers for AZ04_EXEMPT.
+        # Nonconditional directives (#pragma, #define, multi-line #define, macro-body comments, %: digraph) are also barriers for AZ04_EXEMPT.
         for label, directive, fn_name in (
             ('pragma barrier', '#pragma GCC diagnostic push', 'install_after_pragma'),
             ('define barrier', '#define REVIEW_TAG 1', 'install_after_define'),
             ('multiline define barrier', '#define REVIEW_MULTI \\\n    1', 'install_after_multiline_define'),
+            ('digraph define barrier', '%:define REVIEW_MACRO 1', 'install_review_digraph'),
         ):
             with self.subTest(label=label):
                 mutated = source.replace(
@@ -262,14 +263,27 @@ class HookFeatureCoverageTest(unittest.TestCase):
                 self.assertNotEqual(mutated, source, f'anchor missing for {label}')
                 self.assertTrue(any(fn_name in e for e in coverage.check(mutated)), label)
 
-        for label, directive in (
-            ('call pragma barrier', '#pragma GCC diagnostic push'),
-            ('call define barrier', '#define REVIEW_CALL_TAG 1'),
+        for label, snippet, fn_name in (
+            ('define block-comment backslash barrier', '#define REVIEW_MACRO /* comment \\\n*/ AZ04_EXEMPT("Review marker")\nstatic void install_review_pp(void) {}', 'install_review_pp'),
+            ('define multiline block-comment barrier', '#define REVIEW_MACRO /* comment\n*/ AZ04_EXEMPT("Review marker")\nstatic void install_review_pp_nobackslash(void) {}', 'install_review_pp_nobackslash'),
+        ):
+            with self.subTest(label=label):
+                mutated = source.replace(
+                    '#endif\n\n// The sender\'s prologue',
+                    f'#endif\n\n#if !defined(__aarch64__)\n{snippet}\n#endif\n\n// The sender\'s prologue',
+                    1,
+                )
+                self.assertNotEqual(mutated, source, f'anchor missing for {label}')
+                self.assertTrue(any(fn_name in e for e in coverage.check(mutated)), label)
+
+        for label, body_prefix in (
+            ('call macro continuation barrier', '#define REVIEW_CALL_TAG \\\n    AZ04_EXEMPT("Batch 2: inside macro body")'),
+            ('call block-comment macro barrier', '#define REVIEW_CALL_TAG /* comment \\\n*/ AZ04_EXEMPT("Batch 2: inside macro body")'),
         ):
             with self.subTest(label=label):
                 call_barrier = documented_def.replace(
                     '#if !defined(__aarch64__)\n    AZ04_EXEMPT',
-                    f'#if !defined(__aarch64__)\n    AZ04_EXEMPT("Batch 2: before directive")\n{directive}\n    install_future_a32(base, page);\n    AZ04_EXEMPT',
+                    f'#if !defined(__aarch64__)\n{body_prefix}\n    install_future_a32(base, page);\n    AZ04_EXEMPT',
                     1,
                 )
                 self.assertNotEqual(call_barrier, documented_def, f'anchor missing for {label}')
