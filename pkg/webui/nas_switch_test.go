@@ -1356,6 +1356,7 @@ func TestNASUpgradeFromReleasedStateFiles(t *testing.T) {
 				CoverURL: strings.Replace(auth, "http://", "https://", 1)}
 			writeReleasedState(t, rig.stateDir, rig.p.Deemix.DownloadDir, "subsonic", track, cache, rig.two)
 			rig.start()
+			assertNoNASSecrets(t, rig, cfg) // round 9: right after start-up, before any request or save
 			rig.gone("the released [NAS] row after the upgrade", 1)
 			id := rig.browse()
 			rig.plays("the NAS browsed again", id, rig.two)
@@ -1418,6 +1419,80 @@ func TestNASStemsForAReplacedRecording(t *testing.T) {
 				t.Fatalf("the earlier copy changed or went (err %v): Engine may still have it as a track", err)
 			}
 		})
+	}
+}
+
+// Round 9 (older, all services): when the gateway file cannot be read at start-up its rows
+// are gone, and on e927f45e so was the counter: browsing again handed out ID 1 once more,
+// and the old ID 1 then played another recording. The ceiling kept in gateway-ids.json
+// keeps IDs from repeating; with no ceiling known (the first start after the upgrade) new
+// IDs start in a range of their own.
+func TestNASIDsNeverRepeatAfterAnUnreadableGatewayFile(t *testing.T) {
+	for _, broken := range []string{"cut short", "not a file", "cut short, no ceiling"} {
+		t.Run(broken, func(t *testing.T) {
+			rig := newNASSwitchRig(t)
+			rig.saveNAS(rig.oneURL)
+			old := rig.browse()
+			rig.plays("server one's row", old, rig.one)
+			rig.stop()
+			path := filepath.Join(rig.stateDir, "gateway-tracks.json")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if broken == "not a file" {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(path, raw[:len(raw)/2], 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if broken == "cut short, no ceiling" { // as on a deck that ran a released version
+				if err := os.Remove(filepath.Join(rig.stateDir, "gateway-ids.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
+			}
+			rig.start()
+			rig.gone("server one's row with its file unreadable", old)
+			rig.saveNAS(rig.twoURL)
+			id := rig.browse()
+			if id <= old {
+				t.Fatalf("server two's row got ID %d, not above the old ID %d", id, old)
+			}
+			rig.plays("server two's row", id, rig.two)
+			rig.gone("server one's old ID after server two was browsed", old)
+		})
+	}
+}
+
+// Round 9: a released gateway file whose rows hold NAS credentials loses them at start-up,
+// before any request, even when the rewrite fails: the file is then removed (its rows
+// stay in memory), and IDs still never repeat.
+func TestNASGatewayCredentialsGoAtStartupWhenTheRewriteFails(t *testing.T) {
+	rig := newNASSwitchRig(t)
+	rig.saveNAS(rig.twoURL)
+	old := rig.browse()
+	rig.stop()
+	const marker = "t=r9marker335"
+	path := filepath.Join(rig.stateDir, "gateway-tracks.json")
+	row := fmt.Sprintf(`{"next":%d,"tracks":[{"id":%d,"track":{"id":"x","provider":"subsonic","title":"Old","coverUrl":"https://127.0.0.1:1/rest/getCoverArt.view?id=cv&u=dj&%s&s=salt"},"session":"nas"}]}`, old, old, marker)
+	if err := os.WriteFile(path, []byte(row), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateIO.Store(&stateFiles{save: failSaving("gateway-tracks.json")})
+	t.Cleanup(func() { stateIO.Store(nil) })
+	rig.start()
+	if raw, err := os.ReadFile(path); err == nil && strings.Contains(string(raw), "r9marker335") {
+		t.Fatalf("right after start-up the gateway file still holds the NAS credential: %s", raw)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	stateIO.Store(nil)
+	if id := rig.browse(); id <= old {
+		t.Fatalf("after the file went the NAS row got ID %d, not above the old ID %d", id, old)
 	}
 }
 
@@ -1555,6 +1630,7 @@ func TestNASSavedStateHoldsNoCredentials(t *testing.T) {
 				t.Fatal(err)
 			}
 			rig.start()
+			check("right after start-up, before any request or save") // round 9
 			rig.s.tidal.saveTracks()
 			check("after migrating an older file")
 		})
