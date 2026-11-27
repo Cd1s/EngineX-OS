@@ -24,16 +24,16 @@ import (
 const DefaultMaxSessions = 50
 
 type Report struct {
-	Mount             string    `json:"mount"`
-	ReadOnly          bool      `json:"read_only"`
-	Healthy           bool      `json:"healthy"`
-	PlaylistEntities  int       `json:"playlist_entities_relinked"`
-	Playlists         int       `json:"playlists_relinked"`
-	Waveforms         int       `json:"waveforms_replaced"`
-	Loops             int       `json:"loops_aligned"`
-	Artwork           int       `json:"artwork_resized"`
-	OrphanArtwork     int       `json:"orphan_artwork_references"`
-	ReanalysisPending int       `json:"reanalysis_pending"`
+	Mount              string    `json:"mount"`
+	ReadOnly           bool      `json:"read_only"`
+	Healthy            bool      `json:"healthy"`
+	PlaylistEntities   int       `json:"playlist_entities_relinked"`
+	Playlists          int       `json:"playlists_relinked"`
+	Waveforms          int       `json:"waveforms_replaced"`
+	Loops              int       `json:"loops_aligned"`
+	Artwork            int       `json:"artwork_resized"`
+	OrphanArtwork      int       `json:"orphan_artwork_references"`
+	ReanalysisPending  int       `json:"reanalysis_pending"`
 	PathsNormalized    int       `json:"paths_normalized"`
 	HistoryPruned      bool      `json:"history_pruned"`
 	RestoredFromBackup bool      `json:"restored_from_backup,omitempty"`
@@ -41,11 +41,32 @@ type Report struct {
 	ReserveFixed       []string  `json:"reserve_fixed,omitempty"`
 	Warnings           []string  `json:"warnings,omitempty"`
 	CheckedAt          time.Time `json:"checked_at"`
+	// BaseHealDeferred reports that path normalization stopped early under a
+	// mount budget before base heal ran; callers deferring snapshot publication
+	// skip snapshotting until a subsequent mount completes base heal.
+	BaseHealDeferred bool `json:"-"`
+}
+
+// MountOptions configures HealMountWithOptions.
+type MountOptions struct {
+	DataOnly      bool
+	DeferSnapshot bool
 }
 
 // Open never creates a missing library. A single connection keeps connection-local
 // tuning consistent. Read-only opens never recover or create a journal.
 func Open(path string, readOnly bool) (*sql.DB, error) {
+	return OpenContext(context.Background(), path, readOnly)
+}
+
+// OpenContext opens an existing SQLite database with caller cancellation.
+func OpenContext(ctx context.Context, path string, readOnly bool) (*sql.DB, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(path); err != nil {
 		return nil, err
 	}
@@ -70,6 +91,7 @@ func Open(path string, readOnly bool) (*sql.DB, error) {
 		q.Add("_pragma", "query_only(1)")
 	} else {
 		q.Add("_pragma", "foreign_keys(1)")
+		q.Add("_pragma", "synchronous(FULL)")
 	}
 	u.RawQuery = q.Encode()
 	db, err := sql.Open("sqlite", u.String())
@@ -78,7 +100,7 @@ func Open(path string, readOnly bool) (*sql.DB, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	if err = db.Ping(); err != nil {
+	if err = db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -86,13 +108,20 @@ func Open(path string, readOnly bool) (*sql.DB, error) {
 }
 
 func Tune(db *sql.DB, readOnly bool) error {
+	return tuneContext(context.Background(), db, readOnly)
+}
+
+func tuneContext(ctx context.Context, db *sql.DB, readOnly bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	if readOnly {
 		return nil
 	}
 	for _, p := range []string{"PRAGMA synchronous=FULL", "PRAGMA mmap_size=134217728", "PRAGMA temp_store=MEMORY", "PRAGMA optimize"} {
-		if _, err := db.Exec(p); err != nil {
+		if _, err := db.ExecContext(ctx, p); err != nil {
 			return err
 		}
 	}
@@ -100,7 +129,14 @@ func Tune(db *sql.DB, readOnly bool) error {
 }
 
 func transaction(db *sql.DB, f func(*sql.Tx) error) error {
-	tx, err := db.Begin()
+	return transactionContext(context.Background(), db, f)
+}
+
+func transactionContext(ctx context.Context, db *sql.DB, f func(*sql.Tx) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -111,6 +147,73 @@ func transaction(db *sql.DB, f func(*sql.Tx) error) error {
 	return tx.Commit()
 }
 
+// checkSchemaVersion probes the Information table layout and version after
+// integrity has been confirmed (or when called standalone). Intact databases
+// with unknown or future schemas return errUnsupportedSchema; operational I/O
+// or cancellation errors are returned unchanged.
+func checkSchemaVersion(ctx context.Context, db *sql.DB) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var hasInfo int
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='Information'").Scan(&hasInfo); err != nil {
+		return err
+	}
+	if hasInfo == 0 {
+		return fmt.Errorf("%w: Information table not found", errUnsupportedSchema)
+	}
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info("Information")`)
+	if err != nil {
+		return err
+	}
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, kind string
+		var def any
+		if serr := rows.Scan(&cid, &name, &kind, &notnull, &def, &pk); serr != nil {
+			rows.Close()
+			return serr
+		}
+		cols[strings.ToLower(name)] = true
+	}
+	if rerr := rows.Err(); rerr != nil {
+		rows.Close()
+		return rerr
+	}
+	rows.Close()
+	for _, want := range []string{"schemaversionmajor", "schemaversionminor", "schemaversionpatch"} {
+		if !cols[want] {
+			return fmt.Errorf("%w: Information table lacks %s", errUnsupportedSchema, want)
+		}
+	}
+	var major, minor, patch int
+	if err := db.QueryRowContext(ctx, "SELECT schemaVersionMajor,schemaVersionMinor,schemaVersionPatch FROM Information LIMIT 1").Scan(&major, &minor, &patch); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: Information table is empty", errUnsupportedSchema)
+		}
+		return err
+	}
+	if major != 3 || minor != 0 || patch != 2 {
+		return fmt.Errorf("%w %d.%d.%d (supported 3.0.2)", errUnsupportedSchema, major, minor, patch)
+	}
+	return nil
+}
+
+func checkIntegrityAndSchema(ctx context.Context, db *sql.DB) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var check string
+	if err := db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&check); err != nil {
+		return err
+	}
+	if check != "ok" {
+		return fmt.Errorf("database integrity: %s (%w)", check, errDatabaseCorrupt)
+	}
+	return checkSchemaVersion(ctx, db)
+}
+
 // Heal runs all m.db mutations atomically. Integrity errors are reported; a
 // corrupt library is never replaced with an empty one.
 func Heal(db *sql.DB) (Report, error) { return heal(db, false) }
@@ -118,47 +221,56 @@ func Heal(db *sql.DB) (Report, error) { return heal(db, false) }
 // heal with dataOnly leaves Engine's views, triggers and indexes byte-identical:
 // Engine compares its schema on attach, then drops and recreates anything altered.
 func heal(db *sql.DB, dataOnly bool) (Report, error) {
+	return healContext(context.Background(), db, dataOnly, false)
+}
+
+func healContext(ctx context.Context, db *sql.DB, dataOnly, preChecked bool) (Report, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	r := Report{CheckedAt: time.Now().UTC()}
-	var check string
-	if err := db.QueryRow("PRAGMA quick_check").Scan(&check); err != nil {
+	if err := ctx.Err(); err != nil {
 		return r, err
 	}
-	if check != "ok" {
-		return r, fmt.Errorf("database integrity: %s (%w)", check, errDatabaseCorrupt)
-	}
-	var major, minor, patch int
-	if err := db.QueryRow("SELECT schemaVersionMajor,schemaVersionMinor,schemaVersionPatch FROM Information LIMIT 1").Scan(&major, &minor, &patch); err != nil {
-		return r, fmt.Errorf("missing library version: %w (%w)", err, errDatabaseCorrupt)
-	}
-	if major != 3 || minor != 0 || patch != 2 {
-		return r, fmt.Errorf("%w %d.%d.%d (supported 3.0.2)", errUnsupportedSchema, major, minor, patch)
-	}
-	if dataOnly {
-		// PRAGMA optimize could add sqlite_stat1, and the queue must stay out of
-		// the file: Engine drops unknown tables on attach.
-		if _, err := db.Exec("CREATE TEMP TABLE IF NOT EXISTS GuardianReanalysis(trackId INTEGER NOT NULL,field TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(trackId,field))"); err != nil {
+	if !preChecked {
+		if err := checkIntegrityAndSchema(ctx, db); err != nil {
 			return r, err
 		}
-	} else if err := Tune(db, false); err != nil {
+	}
+	if dataOnly {
+		// Enforce FULL synchronous durability on writable mount connections
+		// without running PRAGMA optimize (which could create sqlite_stat1).
+		if _, err := db.ExecContext(ctx, "PRAGMA synchronous=FULL"); err != nil {
+			return r, err
+		}
+		// The reanalysis queue must stay out of the file: Engine drops unknown
+		// tables on attach.
+		if _, err := db.ExecContext(ctx, "CREATE TEMP TABLE IF NOT EXISTS GuardianReanalysis(trackId INTEGER NOT NULL,field TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(trackId,field))"); err != nil {
+			return r, err
+		}
+	} else if err := tuneContext(ctx, db, false); err != nil {
 		return r, err
 	}
-	err := transaction(db, func(tx *sql.Tx) error {
+	err := transactionContext(ctx, db, func(tx *sql.Tx) error {
 		// An unrecognized future schema is not a license to rewrite its blobs.
 		var schema string
-		if err := tx.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='PerformanceData'").Scan(&schema); err != nil {
-			return fmt.Errorf("%w: %v", errUnsupportedSchema, err)
+		if err := tx.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name='PerformanceData'").Scan(&schema); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: PerformanceData table not found", errUnsupportedSchema)
+			}
+			return err
 		}
 		// GL-010: Engine rejects libraries where Information.id != 1 or uuid is empty.
 		var infoCount int
-		if err := tx.QueryRow("SELECT count(*) FROM Information").Scan(&infoCount); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM Information").Scan(&infoCount); err != nil {
 			return err
 		}
 		if infoCount == 1 {
-			if _, err := tx.Exec("UPDATE Information SET id=1 WHERE id<>1"); err != nil {
+			if _, err := tx.ExecContext(ctx, "UPDATE Information SET id=1 WHERE id<>1"); err != nil {
 				return err
 			}
 		}
-		if _, err := tx.Exec("UPDATE Information SET uuid=? WHERE uuid IS NULL OR trim(uuid)=''", uuid.NewString()); err != nil {
+		if _, err := tx.ExecContext(ctx, "UPDATE Information SET uuid=? WHERE uuid IS NULL OR trim(uuid)=''", uuid.NewString()); err != nil {
 			return err
 		}
 		var err error
@@ -184,7 +296,7 @@ func heal(db *sql.DB, dataOnly bool) (Report, error) {
 		if err = healArtwork(tx, &r); err != nil {
 			return err
 		}
-		return tx.QueryRow("SELECT count(*) FROM GuardianReanalysis").Scan(&r.ReanalysisPending)
+		return tx.QueryRowContext(ctx, "SELECT count(*) FROM GuardianReanalysis").Scan(&r.ReanalysisPending)
 	})
 	r.Healthy = err == nil
 	return r, err
@@ -206,9 +318,24 @@ func writable(path string) (bool, error) {
 	return fs.Flags&1 == 0 && s.Mode().Perm()&0222 != 0 && d.Mode().Perm()&0222 != 0, nil
 }
 
+func writableDir(dir string) (bool, error) {
+	d, err := os.Stat(dir)
+	if err != nil {
+		return false, err
+	}
+	if !d.IsDir() {
+		return false, nil
+	}
+	var fs syscall.Statfs_t
+	if err = syscall.Statfs(dir, &fs); err != nil {
+		return false, err
+	}
+	return fs.Flags&1 == 0 && d.Mode().Perm()&0222 != 0, nil
+}
+
 // HealMount only opens Engine's two known database names; it never scans music.
 func HealMount(mount string, maxSessions int) (Report, error) {
-	return healMount(mount, maxSessions, false)
+	return HealMountWithOptions(context.Background(), mount, maxSessions, MountOptions{})
 }
 
 // HealMountDataOnly is HealMount without schema edits, for libraries Engine will
@@ -218,31 +345,106 @@ func HealMountDataOnly(mount string, maxSessions int) (Report, error) {
 }
 
 func healMount(mount string, maxSessions int, dataOnly bool) (Report, error) {
-	return healMountContext(context.Background(), mount, maxSessions, dataOnly)
+	return HealMountWithOptions(context.Background(), mount, maxSessions, MountOptions{DataOnly: dataOnly})
 }
 
 // HealMountDataOnlyContext is the mount hook heal with a caller-owned budget.
 // The base heal commits first. Path normalization then commits in batches and
 // stops cleanly when the caller's budget expires.
 func HealMountDataOnlyContext(ctx context.Context, mount string, maxSessions int) (Report, error) {
-	return healMountContext(ctx, mount, maxSessions, true)
+	return HealMountWithOptions(ctx, mount, maxSessions, MountOptions{DataOnly: true})
 }
 
-func healMountContext(ctx context.Context, mount string, maxSessions int, dataOnly bool) (Report, error) {
+// HealMountWithOptions heals mount with explicit data-only and snapshot
+// deferral controls. Callers such as engine-guardian pass DeferSnapshot: true
+// so queued edits and MP3 grid fixes finish before PublishMountSnapshot saves
+// the verified generation.
+func HealMountWithOptions(ctx context.Context, mount string, maxSessions int, opts MountOptions) (Report, error) {
+	return healMountContext(ctx, mount, maxSessions, opts)
+}
+
+func healMountContext(ctx context.Context, mount string, maxSessions int, opts MountOptions) (Report, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	dataOnly := opts.DataOnly
 	r := Report{Mount: mount, CheckedAt: time.Now().UTC()}
 	if maxSessions < 0 {
 		return r, fmt.Errorf("maxSessions must not be negative")
 	}
+	path := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+	dbDir := filepath.Dir(path)
+	var restored bool
+	var restoreWarnings []string
+	var reserveFixed []string
+	softBudgetStop := func(err error) (Report, error, bool) {
+		if !dataOnly || !errors.Is(err, context.DeadlineExceeded) {
+			return r, err, false
+		}
+		if _, _, magicOK, herr := readSQLiteHeader(path); herr != nil || !magicOK {
+			return r, err, false
+		}
+		r.Healthy = true
+		r.BaseHealDeferred = true
+		r.ReserveFixed = reserveFixed
+		r.RestoredFromBackup = restored
+		r.Warnings = append(append([]string(nil), restoreWarnings...), r.Warnings...)
+		r.Mount = mount
+		return r, nil, true
+	}
+	if err := ctx.Err(); err != nil {
+		if sr, serr, ok := softBudgetStop(err); ok {
+			return sr, serr
+		}
+		return r, err
+	}
 	if libraryInUse(mount) {
 		return r, errLibraryInUse
 	}
-	path := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+
 	rw, err := writable(path)
 	if err != nil {
-		return r, err
+		if errors.Is(err, os.ErrNotExist) {
+			// Recover a missing m.db ONLY when Engine Library/Database2 already
+			// exists as a writable directory AND a verified snapshot (or staged
+			// interrupted restore) is present under /.enginex-backup/db/. Never
+			// create a database for an unrelated empty drive.
+			dirRW, derr := writableDir(dbDir)
+			if derr == nil && dirRW {
+				if meta, completed, ferr := finishInterruptedRestore(ctx, mount, path); ferr != nil {
+					return r, ferr
+				} else if completed {
+					restored = true
+					restoreWarnings = append(restoreWarnings, fmt.Sprintf(
+						"completed interrupted restore of missing m.db from verified snapshot (%d tracks, %d playlists)",
+						meta.Tracks, meta.Playlists,
+					))
+					rw, err = writable(path)
+				} else if qrel, meta, ok, rerr := restoreMainSnapshot(ctx, mount, path, "missing live m.db"); rerr != nil {
+					return r, rerr
+				} else if ok {
+					restored = true
+					if qrel != "" {
+						restoreWarnings = append(restoreWarnings, fmt.Sprintf(
+							"recovered missing m.db from verified snapshot (%d tracks, %d playlists); leftover files quarantined in %s",
+							meta.Tracks, meta.Playlists, qrel,
+						))
+					} else {
+						restoreWarnings = append(restoreWarnings, fmt.Sprintf(
+							"recovered missing m.db from verified snapshot (%d tracks, %d playlists)",
+							meta.Tracks, meta.Playlists,
+						))
+					}
+					rw, err = writable(path)
+				}
+			}
+		}
+		if err != nil {
+			return r, err
+		}
 	}
 	if !rw {
-		db, err := Open(path, true)
+		db, err := OpenContext(ctx, path, true)
 		if err != nil {
 			return r, err
 		}
@@ -255,14 +457,30 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		return r, err
 	}
 
+	if !restored {
+		if meta, completed, ferr := finishInterruptedRestore(ctx, mount, path); ferr != nil {
+			return r, ferr
+		} else if completed {
+			restored = true
+			restoreWarnings = append(restoreWarnings, fmt.Sprintf(
+				"completed interrupted restore of m.db from verified snapshot (%d tracks, %d playlists)",
+				meta.Tracks, meta.Playlists,
+			))
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		if sr, serr, ok := softBudgetStop(err); ok {
+			return sr, serr
+		}
+		return r, err
+	}
+
 	// Before Engine opens the volume: a nonzero page reserve breaks every ATTACH.
-	var restored bool
-	var restoreWarnings []string
-	var reserveFixed []string
-	reserveFixed, err = NormalizeDatabase2(filepath.Dir(path))
+	reserveFixed, err = NormalizeDatabase2(dbDir)
 	if err != nil {
-		if isStructuralCorruption(err) && strings.Contains(err.Error(), path) {
-			if qrel, meta, ok, rerr := restoreMainSnapshot(mount, path, err.Error()); rerr != nil {
+		if !restored && isStructuralCorruption(err) && strings.Contains(err.Error(), path) {
+			if qrel, meta, ok, rerr := restoreMainSnapshot(ctx, mount, path, err.Error()); rerr != nil {
 				return r, rerr
 			} else if ok {
 				restored = true
@@ -270,7 +488,7 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 					"recovered corrupt m.db from verified snapshot (%d tracks, %d playlists); damaged copy quarantined in %s",
 					meta.Tracks, meta.Playlists, qrel,
 				))
-				reserveFixed, err = NormalizeDatabase2(filepath.Dir(path))
+				reserveFixed, err = NormalizeDatabase2(dbDir)
 			}
 		}
 		if err != nil {
@@ -278,19 +496,34 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		}
 	}
 
-	var stats mainDBStats
-	var statsErr error
+	var preStats *mainDBStats
+	var hdrSizeBefore int64
+	var hdrCounterBefore uint32
 	for attempt := 0; attempt < 2; attempt++ {
+		if err := ctx.Err(); err != nil {
+			if sr, serr, ok := softBudgetStop(err); ok {
+				return sr, serr
+			}
+			return r, err
+		}
 		var db *sql.DB
 		var openErr error
-		if _, _, magicOK, hdrErr := readSQLiteHeader(path); hdrErr == nil && !magicOK {
+		hdrSize, hdrCounter, magicOK, hdrErr := readSQLiteHeader(path)
+		if hdrErr != nil {
+			return r, hdrErr
+		}
+		hdrSizeBefore, hdrCounterBefore = hdrSize, hdrCounter
+		if !magicOK {
 			openErr = fmt.Errorf("m.db has invalid or truncated SQLite header (%w)", errDatabaseCorrupt)
 		} else {
-			db, openErr = Open(path, false)
+			db, openErr = OpenContext(ctx, path, false)
 		}
 		if openErr != nil {
+			if sr, serr, ok := softBudgetStop(openErr); ok {
+				return sr, serr
+			}
 			if attempt == 0 && !restored && isStructuralCorruption(openErr) {
-				if qrel, meta, ok, rerr := restoreMainSnapshot(mount, path, openErr.Error()); rerr != nil {
+				if qrel, meta, ok, rerr := restoreMainSnapshot(ctx, mount, path, openErr.Error()); rerr != nil {
 					return r, rerr
 				} else if ok {
 					restored = true
@@ -304,36 +537,133 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 			return r, openErr
 		}
 
-		// Detect logical table collapse (t/71200: quick_check ok & schema 3.0.2,
-		// but playlists wiped to 0 and tracks collapsed while audio files stay
-		// on disk) before mutating the database.
-		if attempt == 0 && !restored {
-			if prev, hasPrev := loadSnapshotMeta(mount); hasPrev {
-				var qcheck string
-				var maj, min, pat int
-				if db.QueryRow("PRAGMA quick_check").Scan(&qcheck) == nil && qcheck == "ok" &&
-					db.QueryRow("SELECT schemaVersionMajor,schemaVersionMinor,schemaVersionPatch FROM Information LIMIT 1").Scan(&maj, &min, &pat) == nil &&
-					maj == 3 && min == 0 && pat == 2 {
-					if curStats, serr := readMainDBStats(db); serr == nil && isLogicalCollapse(prev, curStats) {
-						if snapPath, _, verr := verifySnapshot(mount); verr == nil && missingTracksStillOnDisk(mount, snapPath, db) {
-							_ = db.Close()
-							reason := fmt.Sprintf("logical collapse (%d->%d tracks, %d->0 playlists with audio files intact on disk)",
-								prev.Tracks, curStats.Tracks, prev.Playlists)
-							qrel, _, ok, rerr := restoreMainSnapshot(mount, path, reason)
-							if rerr != nil {
+		// Gate extra scans on the 100-byte header change counter so unchanged
+		// healthy inserts never pay for a duplicate PRAGMA quick_check or extra
+		// row-count scan. When changed, verify integrity and schema ONCE before
+		// mutating m.db and reuse that result inside healContext.
+		preChecked := false
+		preStats = nil
+		manifest, hasManifest := loadSnapshotManifest(mount)
+		headerUnchanged := hasManifest && manifest.Current != nil &&
+			!hasPendingJournal(path) &&
+			manifest.Current.Size == hdrSize &&
+			manifest.Current.ChangeCounter == hdrCounter &&
+			snapshotGenFilePresent(mount, *manifest.Current)
+
+		if attempt == 0 && !restored && hasManifest && manifest.Current != nil && !headerUnchanged {
+			if chkErr := checkIntegrityAndSchema(ctx, db); chkErr != nil {
+				_ = db.Close()
+				if sr, serr, ok := softBudgetStop(chkErr); ok {
+					return sr, serr
+				}
+				if isStructuralCorruption(chkErr) {
+					if qrel, meta, ok, rerr := restoreMainSnapshot(ctx, mount, path, chkErr.Error()); rerr != nil {
+						return r, rerr
+					} else if ok {
+						restored = true
+						restoreWarnings = append(restoreWarnings, fmt.Sprintf(
+							"recovered corrupt m.db from verified snapshot (%d tracks, %d playlists); damaged copy quarantined in %s",
+							meta.Tracks, meta.Playlists, qrel,
+						))
+						continue
+					}
+				}
+				r.ReserveFixed = reserveFixed
+				r.RestoredFromBackup = restored
+				r.Warnings = append(append([]string(nil), restoreWarnings...), r.Warnings...)
+				r.Mount = mount
+				return r, chkErr
+			}
+			preChecked = true
+			if curStats, serr := readMainDBStats(ctx, db); serr != nil {
+				if ctx.Err() != nil || isOperationalIOError(serr) {
+					_ = db.Close()
+					if sr, berr, ok := softBudgetStop(serr); ok {
+						return sr, berr
+					}
+					return r, serr
+				}
+			} else {
+				cp := curStats
+				preStats = &cp
+				prev := *manifest.Current
+				if isLogicalCollapse(prev, curStats) {
+					if snapPath, _, verr := verifyGeneration(ctx, mount, prev); verr == nil && missingTracksStillOnDisk(ctx, mount, snapPath, db) {
+						_ = db.Close()
+						reason := fmt.Sprintf("logical collapse (%d->%d tracks, %d->0 playlists with audio files intact on disk)",
+							prev.Tracks, curStats.Tracks, prev.Playlists)
+						qrel, _, ok, rerr := restoreMainSnapshot(ctx, mount, path, reason)
+						if rerr != nil {
+							return r, rerr
+						}
+						if ok {
+							restored = true
+							restoreWarnings = append(restoreWarnings, fmt.Sprintf(
+								"recovered truncated m.db (%d->%d tracks, %d->0 playlists) from verified snapshot; damaged copy quarantined in %s",
+								prev.Tracks, curStats.Tracks, prev.Playlists, qrel,
+							))
+							continue
+						}
+						return r, fmt.Errorf("%s (%w)", reason, errDatabaseCorrupt)
+					} else if ctx.Err() != nil {
+						_ = db.Close()
+						if sr, berr, ok := softBudgetStop(ctx.Err()); ok {
+							return sr, berr
+						}
+						return r, ctx.Err()
+					}
+				}
+			}
+		} else {
+			// Guard future/unrecognized schemas before normalizeTrackPaths can
+			// mutate Track rows, without adding a full-DB scan on healthy 3.0.2
+			// databases.
+			if serr := checkSchemaVersion(ctx, db); serr != nil {
+				if sr, berr, ok := softBudgetStop(serr); ok {
+					_ = db.Close()
+					return sr, berr
+				}
+				if errors.Is(serr, errUnsupportedSchema) {
+					// Confirm structural integrity before declaring future schema.
+					if chkErr := checkIntegrityAndSchema(ctx, db); chkErr != nil {
+						_ = db.Close()
+						if sr, berr, ok := softBudgetStop(chkErr); ok {
+							return sr, berr
+						}
+						if attempt == 0 && !restored && isStructuralCorruption(chkErr) {
+							if qrel, meta, ok, rerr := restoreMainSnapshot(ctx, mount, path, chkErr.Error()); rerr != nil {
 								return r, rerr
-							}
-							if ok {
+							} else if ok {
 								restored = true
 								restoreWarnings = append(restoreWarnings, fmt.Sprintf(
-									"recovered truncated m.db (%d->%d tracks, %d->0 playlists) from verified snapshot; damaged copy quarantined in %s",
-									prev.Tracks, curStats.Tracks, prev.Playlists, qrel,
+									"recovered corrupt m.db from verified snapshot (%d tracks, %d playlists); damaged copy quarantined in %s",
+									meta.Tracks, meta.Playlists, qrel,
 								))
 								continue
 							}
-							return r, fmt.Errorf("%s (%w)", reason, errDatabaseCorrupt)
 						}
+						r.ReserveFixed = reserveFixed
+						r.RestoredFromBackup = restored
+						r.Warnings = append(append([]string(nil), restoreWarnings...), r.Warnings...)
+						r.Mount = mount
+						return r, chkErr
 					}
+				} else if attempt == 0 && !restored && isStructuralCorruption(serr) {
+					_ = db.Close()
+					if qrel, meta, ok, rerr := restoreMainSnapshot(ctx, mount, path, serr.Error()); rerr != nil {
+						return r, rerr
+					} else if ok {
+						restored = true
+						restoreWarnings = append(restoreWarnings, fmt.Sprintf(
+							"recovered corrupt m.db from verified snapshot (%d tracks, %d playlists); damaged copy quarantined in %s",
+							meta.Tracks, meta.Playlists, qrel,
+						))
+						continue
+					}
+					return r, serr
+				} else if ctx.Err() != nil || isOperationalIOError(serr) {
+					_ = db.Close()
+					return r, serr
 				}
 			}
 		}
@@ -345,11 +675,15 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 			// A path-pass database error means the library may be damaged. Run the
 			// existing base heal so it remains the recovery path for corruption.
 			pathsFixed := r.PathsNormalized
-			hr, healErr := heal(db, dataOnly)
+			hr, healErr := healContext(ctx, db, dataOnly, preChecked)
 			_ = db.Close()
 			if healErr != nil {
+				if sr, berr, ok := softBudgetStop(healErr); ok {
+					sr.PathsNormalized = pathsFixed
+					return sr, berr
+				}
 				if attempt == 0 && !restored && isStructuralCorruption(healErr) {
-					if qrel, meta, ok, rerr := restoreMainSnapshot(mount, path, healErr.Error()); rerr != nil {
+					if qrel, meta, ok, rerr := restoreMainSnapshot(ctx, mount, path, healErr.Error()); rerr != nil {
 						return r, rerr
 					} else if ok {
 						restored = true
@@ -376,6 +710,7 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		}
 		if ctx.Err() != nil || (r.PathsNormalized != pathsBefore && time.Since(pathStart) >= time.Second) {
 			r.Healthy = true
+			r.BaseHealDeferred = true
 			r.ReserveFixed = reserveFixed
 			r.RestoredFromBackup = restored
 			r.Warnings = append(append([]string(nil), restoreWarnings...), r.Warnings...)
@@ -388,11 +723,15 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 			return r, nil
 		}
 		pathsFixed := r.PathsNormalized
-		hr, healErr := heal(db, dataOnly)
+		hr, healErr := healContext(ctx, db, dataOnly, preChecked)
 		if healErr != nil {
 			_ = db.Close()
+			if sr, berr, ok := softBudgetStop(healErr); ok {
+				sr.PathsNormalized = pathsFixed
+				return sr, berr
+			}
 			if attempt == 0 && !restored && isStructuralCorruption(healErr) {
-				if qrel, meta, ok, rerr := restoreMainSnapshot(mount, path, healErr.Error()); rerr != nil {
+				if qrel, meta, ok, rerr := restoreMainSnapshot(ctx, mount, path, healErr.Error()); rerr != nil {
 					return r, rerr
 				} else if ok {
 					restored = true
@@ -410,9 +749,8 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 			hr.Mount = mount
 			return hr, healErr
 		}
-		stats, statsErr = readMainDBStats(db)
 		if st, werr := os.Stat(path + "-wal"); werr == nil && st.Size() > 0 {
-			_, _ = db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+			_, _ = db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
 		}
 		closeErr := db.Close()
 		r = hr
@@ -428,7 +766,7 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		break
 	}
 
-	history := filepath.Join(filepath.Dir(path), "hm.db")
+	history := filepath.Join(dbDir, "hm.db")
 	if _, e := os.Stat(history); e == nil {
 		if ctx.Err() != nil {
 			return r, nil
@@ -442,25 +780,30 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		} else {
 			var hdb *sql.DB
 			var hopenErr error
-			if _, _, magicOK, hdrErr := readSQLiteHeader(history); hdrErr == nil && !magicOK {
+			if _, _, magicOK, hdrErr := readSQLiteHeader(history); hdrErr != nil {
+				hopenErr = hdrErr
+			} else if !magicOK {
 				hopenErr = fmt.Errorf("hm.db has invalid or truncated SQLite header (%w)", errDatabaseCorrupt)
 			} else {
-				hdb, hopenErr = Open(history, false)
+				hdb, hopenErr = OpenContext(ctx, history, false)
 			}
 			var hr Report
 			var he error
 			if hopenErr != nil {
 				he = hopenErr
 			} else {
-				hr, he = heal(hdb, dataOnly)
+				hr, he = healContext(ctx, hdb, dataOnly, false)
 				ce := hdb.Close()
 				if he == nil && ce != nil {
 					he = ce
 				}
 			}
 			if he != nil {
+				if ctx.Err() != nil {
+					return r, nil
+				}
 				if isStructuralCorruption(he) {
-					qrel, qerr := quarantineDBSet(mount, history)
+					qrel, qerr := quarantineDBSet(ctx, mount, history)
 					if qerr != nil {
 						r.Healthy = false
 						return r, fmt.Errorf("history repair: %w (quarantine failed: %v)", he, qerr)
@@ -497,12 +840,12 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 					r.ReanalysisPending += hr.ReanalysisPending
 					r.PathsNormalized += hr.PathsNormalized
 				} else {
-					hdb, e = Open(history, false)
+					hdb, e = OpenContext(ctx, history, false)
 					if e != nil {
 						return r, e
 					}
 					var pending int
-					e = hdb.QueryRow("SELECT count(*) FROM GuardianReanalysis").Scan(&pending)
+					e = hdb.QueryRowContext(ctx, "SELECT count(*) FROM GuardianReanalysis").Scan(&pending)
 					ce := hdb.Close()
 					if e != nil {
 						return r, e
@@ -518,9 +861,16 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		return r, e
 	}
 
-	checkAndQuarantineSidecars(ctx, mount, filepath.Dir(path), &r)
-	if statsErr == nil {
-		maybeSaveMainSnapshot(ctx, mount, path, stats, &r)
+	checkAndQuarantineSidecars(ctx, mount, dbDir, &r)
+	if !opts.DeferSnapshot {
+		var known *mainDBStats
+		if preStats != nil {
+			if postSize, postCounter, postOK, herr := readSQLiteHeader(path); herr == nil && postOK &&
+				postSize == hdrSizeBefore && postCounter == hdrCounterBefore {
+				known = preStats
+			}
+		}
+		maybeSaveMainSnapshot(ctx, mount, path, known, &r)
 	}
 	return r, nil
 }
@@ -565,22 +915,34 @@ type trackPathCandidate struct {
 var normalizeTrackPathBatch func()
 
 func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Report) (int, error) {
-	candidates, bridgeManaged, err := collectTrackPathCandidates(db, mount)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	candidates, bridgeManaged, err := collectTrackPathCandidates(ctx, db, mount)
 	if err != nil {
+		if ctx.Err() != nil {
+			return 0, nil
+		}
 		return 0, err
 	}
 	eligible := candidates[:0]
 	claimed := map[string]int64{}
 	for _, candidate := range candidates {
+		if ctx.Err() != nil {
+			return len(candidates), nil
+		}
 		if bridgeManaged[candidate.id] {
 			continue
 		}
 		var other int64
-		err := db.QueryRow(`SELECT id FROM Track WHERE path=?`, candidate.nfcPath).Scan(&other)
+		err := db.QueryRowContext(ctx, `SELECT id FROM Track WHERE path=?`, candidate.nfcPath).Scan(&other)
 		if err == nil && other != candidate.id {
 			continue
 		}
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			if ctx.Err() != nil {
+				return len(candidates), nil
+			}
 			return 0, err
 		}
 		if other, collision := claimed[candidate.nfcPath]; collision && other != candidate.id {
@@ -680,16 +1042,24 @@ func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Repor
 	return remaining, nil
 }
 
-func collectTrackPathCandidates(db *sql.DB, mount string) ([]trackPathCandidate, map[int64]bool, error) {
-	rows, err := db.Query(`SELECT id, path FROM Track WHERE path IS NOT NULL AND path <> ''`)
+func collectTrackPathCandidates(ctx context.Context, db *sql.DB, mount string) ([]trackPathCandidate, map[int64]bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rows, err := db.QueryContext(ctx, `SELECT id, path FROM Track WHERE path IS NOT NULL AND path <> ''`)
 	if err != nil {
 		return nil, nil, err
 	}
 	candidates := []trackPathCandidate{}
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
 		var id int64
 		var path string
 		if err := rows.Scan(&id, &path); err != nil {
+			rows.Close()
 			return nil, nil, err
 		}
 		if !norm.NFC.IsNormalString(path) {
@@ -697,6 +1067,7 @@ func collectTrackPathCandidates(db *sql.DB, mount string) ([]trackPathCandidate,
 		}
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return nil, nil, err
 	}
 	if err := rows.Close(); err != nil {
@@ -704,8 +1075,11 @@ func collectTrackPathCandidates(db *sql.DB, mount string) ([]trackPathCandidate,
 	}
 	streamingCandidates := candidates[:0]
 	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		var streaming string
-		if err := db.QueryRow(`SELECT COALESCE(streamingSource,'') FROM Track WHERE id=?`, candidate.id).Scan(&streaming); err != nil {
+		if err := db.QueryRowContext(ctx, `SELECT COALESCE(streamingSource,'') FROM Track WHERE id=?`, candidate.id).Scan(&streaming); err != nil {
 			return nil, nil, err
 		}
 		if streaming == "" {
@@ -716,8 +1090,11 @@ func collectTrackPathCandidates(db *sql.DB, mount string) ([]trackPathCandidate,
 	if len(candidates) == 0 {
 		return candidates, map[int64]bool{}, nil
 	}
-	bridgeManaged, err := bridgeManagedTracks(mount)
+	bridgeManaged, err := bridgeManagedTracks(ctx, mount)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
 		for _, candidate := range candidates {
 			bridgeManaged[candidate.id] = true
 		}
@@ -726,8 +1103,14 @@ func collectTrackPathCandidates(db *sql.DB, mount string) ([]trackPathCandidate,
 	return candidates, bridgeManaged, err
 }
 
-func bridgeManagedTracks(mount string) (map[int64]bool, error) {
+func bridgeManagedTracks(ctx context.Context, mount string) (map[int64]bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	managed := map[int64]bool{}
+	if err := ctx.Err(); err != nil {
+		return managed, err
+	}
 	path := filepath.Join(mount, "Engine Library", "Database2", ".rb-bridge-state.db")
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return managed, nil
@@ -740,18 +1123,21 @@ func bridgeManagedTracks(mount string) (map[int64]bool, error) {
 	}
 	defer db.Close()
 	var exists int
-	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='BridgeState'`).Scan(&exists); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='BridgeState'`).Scan(&exists); err != nil {
 		return managed, err
 	}
 	if exists == 0 {
 		return managed, nil
 	}
-	rows, err := db.Query(`SELECT trackId FROM BridgeState`)
+	rows, err := db.QueryContext(ctx, `SELECT trackId FROM BridgeState`)
 	if err != nil {
 		return managed, err
 	}
 	defer rows.Close()
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return managed, err
+		}
 		var id int64
 		if err := rows.Scan(&id); err != nil {
 			return managed, err

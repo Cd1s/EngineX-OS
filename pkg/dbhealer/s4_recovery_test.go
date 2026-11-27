@@ -1,13 +1,16 @@
 package dbhealer
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -122,15 +125,21 @@ func TestS4SavesRollingSnapshotAndFastSkipsUnchanged(t *testing.T) {
 	if len(db2Entries) != 1 || db2Entries[0].Name() != "m.db" {
 		t.Fatalf("unexpected files in Database2: %v", db2Entries)
 	}
-	snapPath := filepath.Join(mount, ".enginex-backup", "db", "m.db")
 	metaPath := filepath.Join(mount, ".enginex-backup", "db", "m.db.meta")
 	meta1, err := os.ReadFile(metaPath)
 	if err != nil {
 		t.Fatalf("expected rolling snapshot metadata at %s: %v", metaPath, err)
 	}
+	snapPath, snapMeta, err := verifySnapshot(mount)
+	if err != nil {
+		t.Fatalf("expected verified rolling snapshot: %v", err)
+	}
+	if snapMeta.File != "m.db.gen-1" {
+		t.Fatalf("expected generation snapshot file m.db.gen-1, got %q", snapMeta.File)
+	}
 	st1, err := os.Stat(snapPath)
 	if err != nil || st1.Size() < 100 {
-		t.Fatalf("expected rolling snapshot m.db at %s: %v", snapPath, err)
+		t.Fatalf("expected rolling snapshot file at %s: %v", snapPath, err)
 	}
 
 	// Second pass on unchanged m.db must fast-skip without rewriting snapshot.
@@ -352,17 +361,20 @@ func TestS4DoesNotUndoIntentionalSyncManagerRemoval(t *testing.T) {
 	if tracks != 5 || playlists != 0 || entities != 0 {
 		t.Fatalf("intentional removal counts=(%d,%d,%d), want (5,0,0)", tracks, playlists, entities)
 	}
-	// Anti-clobber guard must preserve the prior populated snapshot.
-	rawMeta, err := os.ReadFile(filepath.Join(mount, ".enginex-backup", "db", "m.db.meta"))
-	if err != nil {
-		t.Fatalf("prior snapshot meta missing: %v", err)
+	// Confirmed intentional deletion updates current to 5/0 while retaining
+	// the prior 30/4 generation independently under previous.
+	manifest, ok := loadSnapshotManifest(mount)
+	if !ok || manifest.Current == nil || manifest.Previous == nil {
+		t.Fatalf("expected current and previous generations in manifest, got %+v (ok=%v)", manifest, ok)
 	}
-	var meta map[string]any
-	if err := json.Unmarshal(rawMeta, &meta); err != nil {
-		t.Fatal(err)
+	if manifest.Current.Tracks != 5 || manifest.Current.Playlists != 0 {
+		t.Fatalf("current generation = (%d,%d), want (5,0)", manifest.Current.Tracks, manifest.Current.Playlists)
 	}
-	if int(meta["tracks"].(float64)) != 30 || int(meta["playlists"].(float64)) != 4 {
-		t.Fatalf("anti-clobber guard failed, snapshot overwritten: %s", rawMeta)
+	if manifest.Previous.Tracks != 30 || manifest.Previous.Playlists != 4 {
+		t.Fatalf("previous generation = (%d,%d), want (30,4)", manifest.Previous.Tracks, manifest.Previous.Playlists)
+	}
+	if _, _, err := verifyGeneration(context.Background(), mount, *manifest.Previous); err != nil {
+		t.Fatalf("previous generation not independently verifiable: %v", err)
 	}
 }
 
@@ -435,4 +447,264 @@ func TestS4TuneUsesFullSynchronous(t *testing.T) {
 	if syncMode != 2 {
 		t.Fatalf("PRAGMA synchronous=%d, want 2 (FULL) for rollback-journal durability", syncMode)
 	}
+}
+
+func TestS4DurableQuarantineSyncErrorAndRestartableSwap(t *testing.T) {
+	t.Run("quarantine_dir_sync_error_preserves_live_and_journals", func(t *testing.T) {
+		mount, dbPath := seedVerifiedS4Library(t, 24, 4)
+		damaged := []byte("corrupt-live-db")
+		journal := []byte("original-live-journal")
+		if err := os.WriteFile(dbPath, damaged, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dbPath+"-journal", journal, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		origSync := syncDirFn
+		t.Cleanup(func() { syncDirFn = origSync })
+		syncErr := errors.New("injected quarantine dir fsync failure")
+		syncDirFn = func(dir string) error {
+			if strings.HasPrefix(filepath.Base(dir), "corrupt-") {
+				return syncErr
+			}
+			return origSync(dir)
+		}
+		r, err := HealMountDataOnly(mount, 0)
+		if err == nil || !strings.Contains(err.Error(), syncErr.Error()) || r.RestoredFromBackup {
+			t.Fatalf("expected quarantine sync error without restore: r=%+v err=%v", r, err)
+		}
+		gotDB, err := os.ReadFile(dbPath)
+		if err != nil || string(gotDB) != string(damaged) {
+			t.Fatalf("live m.db altered after failed quarantine dir sync: %q %v", gotDB, err)
+		}
+		gotJ, err := os.ReadFile(dbPath + "-journal")
+		if err != nil || string(gotJ) != string(journal) {
+			t.Fatalf("live m.db-journal detached after failed quarantine dir sync: %q %v", gotJ, err)
+		}
+	})
+
+	t.Run("sidecar_quarantine_dir_sync_error_preserves_live_and_journals", func(t *testing.T) {
+		mount, dbPath := seedVerifiedS4Library(t, 12, 2)
+		db2 := filepath.Dir(dbPath)
+		smPath := filepath.Join(db2, "sm.db")
+		if err := os.WriteFile(smPath, []byte("corrupt-sm"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(smPath+"-journal", []byte("sm-journal"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		origSync := syncDirFn
+		t.Cleanup(func() { syncDirFn = origSync })
+		syncDirFn = func(dir string) error {
+			if strings.HasPrefix(filepath.Base(dir), "corrupt-") {
+				return errors.New("injected sidecar quarantine sync error")
+			}
+			return origSync(dir)
+		}
+		r, err := HealMountDataOnly(mount, 0)
+		if err != nil || !r.Healthy {
+			t.Fatalf("healthy m.db should still pass when sidecar quarantine fails: %+v %v", r, err)
+		}
+		if len(r.QuarantinedDBs) != 0 {
+			t.Fatalf("sidecar reported quarantined despite dir sync failure: %v", r.QuarantinedDBs)
+		}
+		if _, err := os.Stat(smPath); err != nil {
+			t.Fatalf("sm.db removed despite quarantine dir sync failure: %v", err)
+		}
+		if _, err := os.Stat(smPath + "-journal"); err != nil {
+			t.Fatalf("sm.db-journal removed despite quarantine dir sync failure: %v", err)
+		}
+	})
+
+	t.Run("interrupted_swap_completes_on_next_mount", func(t *testing.T) {
+		mount, dbPath := seedVerifiedS4Library(t, 24, 4)
+		snapPath, _, err := verifySnapshot(mount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapBytes, err := os.ReadFile(snapPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Simulate interruption after staging .m.db.restore.tmp and before final rename.
+		tmp := filepath.Join(filepath.Dir(dbPath), ".m.db.restore.tmp")
+		if err := os.WriteFile(tmp, snapBytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dbPath, []byte("corrupt-interrupted"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dbPath+"-journal", []byte("stale-journal"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		r, err := HealMountDataOnly(mount, 0)
+		if err != nil || !r.Healthy || !r.RestoredFromBackup {
+			t.Fatalf("interrupted swap did not complete on restart: %+v %v", r, err)
+		}
+		if _, err := os.Stat(tmp); !os.IsNotExist(err) {
+			t.Fatalf("staging file remained after restart completion: %v", err)
+		}
+		if _, err := os.Stat(dbPath + "-journal"); !os.IsNotExist(err) {
+			t.Fatalf("stale journal remained after restart completion: %v", err)
+		}
+		if n, p, e := queryCounts(t, dbPath); n != 24 || p != 4 || e != 24 {
+			t.Fatalf("restored counts=(%d,%d,%d), want (24,4,24)", n, p, e)
+		}
+	})
+
+	t.Run("legacy_single_file_snapshot_compatibility", func(t *testing.T) {
+		mount, dbPath := seedPopulatedS4Mount(t, 20, 3)
+		// Construct a legacy v1 flat m.db + m.db.meta backup layout.
+		dir := snapshotDir(mount)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		legacySnap := filepath.Join(dir, "m.db")
+		sum, size, err := copyFileChunked(context.Background(), dbPath, legacySnap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, ctr, ok, err := readSQLiteHeader(dbPath)
+		if err != nil || !ok {
+			t.Fatalf("header read: ok=%v err=%v", ok, err)
+		}
+		db, err := Open(dbPath, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stats, err := readMainDBStats(context.Background(), db)
+		db.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacyMeta := map[string]any{
+			"uuid":              stats.UUID,
+			"size":              size,
+			"change_counter":    ctr,
+			"sha256":            sum,
+			"tracks":            stats.Tracks,
+			"playlists":         stats.Playlists,
+			"playlist_entities": stats.PlaylistEntities,
+			"saved_at":          time.Now().UTC().Format(time.RFC3339),
+		}
+		raw, err := json.Marshal(legacyMeta)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(snapshotMetaPath(mount), raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(dbPath, 0); err != nil {
+			t.Fatal(err)
+		}
+		r, err := HealMountDataOnly(mount, 0)
+		if err != nil || !r.Healthy || !r.RestoredFromBackup {
+			t.Fatalf("legacy v1 snapshot restore failed: %+v %v", r, err)
+		}
+		if n, p, e := queryCounts(t, dbPath); n != 20 || p != 3 || e != 20 {
+			t.Fatalf("legacy restored counts=(%d,%d,%d), want (20,3,20)", n, p, e)
+		}
+	})
+}
+
+func TestS4SafetyBoundariesUUIDOperationalIOAndEmptyDrive(t *testing.T) {
+	t.Run("uuid_mismatch_refuses_overwrite_even_when_live_corrupt", func(t *testing.T) {
+		mount, dbPath := seedVerifiedS4Library(t, 24, 4)
+		// Replace live m.db with a different UUID and corrupt a Track data page
+		// while leaving Information.uuid readable.
+		marker := strings.Repeat("CORRUPT_TRACK_PAYLOAD_", 200)
+		editS4DB(t, dbPath,
+			"UPDATE Information SET uuid='different-library-uuid'",
+			fmt.Sprintf("UPDATE Track SET comment='%s' WHERE id=1", marker),
+		)
+		raw, err := os.ReadFile(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		idx := strings.Index(string(raw), "CORRUPT_TRACK_PAYLOAD_")
+		if idx < 4096 {
+			t.Fatalf("marker not found outside header page: idx=%d", idx)
+		}
+		pageStart := (idx / 4096) * 4096
+		for i := pageStart; i < pageStart+4096 && i < len(raw); i++ {
+			raw[i] = 0xAA
+		}
+		if err := os.WriteFile(dbPath, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		preUUID, preReadable, preErr := readLiveUUIDIfReadable(context.Background(), dbPath)
+		if preErr != nil || !preReadable || preUUID != "different-library-uuid" {
+			t.Fatalf("setup: expected readable live UUID, got uuid=%q readable=%v err=%v", preUUID, preReadable, preErr)
+		}
+		r, err := HealMountDataOnly(mount, 0)
+		if err == nil || r.RestoredFromBackup || !strings.Contains(err.Error(), "differs from snapshot uuid") {
+			t.Fatalf("expected uuid mismatch refusal, got r=%+v err=%v", r, err)
+		}
+		gotUUID, readable, uerr := readLiveUUIDIfReadable(context.Background(), dbPath)
+		if uerr != nil || !readable || gotUUID != "different-library-uuid" {
+			t.Fatalf("live database UUID was altered: uuid=%q readable=%v err=%v", gotUUID, readable, uerr)
+		}
+	})
+
+	t.Run("operational_header_read_error_not_misclassified_as_corruption", func(t *testing.T) {
+		dirPath := t.TempDir()
+		_, _, ok, err := readSQLiteHeader(dirPath)
+		if ok || !errors.Is(err, syscall.EISDIR) {
+			t.Fatalf("expected EISDIR error from readSQLiteHeader on directory, got ok=%v err=%v", ok, err)
+		}
+		if isStructuralCorruption(err) {
+			t.Fatalf("operational read error must not be classified as structural corruption: %v", err)
+		}
+	})
+
+	t.Run("empty_drive_and_missing_snapshot_never_create_db", func(t *testing.T) {
+		emptyDrive := t.TempDir()
+		if _, err := HealMountDataOnly(emptyDrive, 0); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("empty drive: want ErrNotExist, got %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(emptyDrive, "Engine Library")); !os.IsNotExist(err) {
+			t.Fatalf("empty drive should not create Engine Library: %v", err)
+		}
+
+		noSnapDrive := t.TempDir()
+		db2 := filepath.Join(noSnapDrive, "Engine Library", "Database2")
+		if err := os.MkdirAll(db2, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := HealMountDataOnly(noSnapDrive, 0); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("missing m.db without snapshot: want ErrNotExist, got %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(db2, "m.db")); !os.IsNotExist(err) {
+			t.Fatalf("missing m.db without snapshot should not create m.db: %v", err)
+		}
+	})
+
+	t.Run("intentional_full_clear_updates_current_and_keeps_populated", func(t *testing.T) {
+		mount, path := seedVerifiedS4Library(t, 12, 2)
+		editS4DB(t, path, "DELETE FROM PlaylistEntity", "DELETE FROM Playlist", "DELETE FROM Track")
+		for i := 1; i <= 12; i++ {
+			if err := os.Remove(filepath.Join(mount, "Music", fmt.Sprintf("track-%02d.mp3", i))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if r, err := HealMountDataOnly(mount, 0); err != nil || !r.Healthy || r.RestoredFromBackup {
+			t.Fatalf("intentional full clear heal: %+v %v", r, err)
+		}
+		m, ok := loadSnapshotManifest(mount)
+		if !ok || m.Current == nil || m.Populated == nil {
+			t.Fatalf("expected both current and populated in manifest: %+v (ok=%v)", m, ok)
+		}
+		if m.Current.Tracks != 0 || m.Current.Playlists != 0 {
+			t.Fatalf("current = (%d,%d), want (0,0)", m.Current.Tracks, m.Current.Playlists)
+		}
+		if m.Populated.Tracks != 12 || m.Populated.Playlists != 2 {
+			t.Fatalf("populated = (%d,%d), want (12,2)", m.Populated.Tracks, m.Populated.Playlists)
+		}
+		if _, _, err := verifyGeneration(context.Background(), mount, *m.Current); err != nil {
+			t.Fatalf("current generation verification failed: %v", err)
+		}
+		if _, _, err := verifyGeneration(context.Background(), mount, *m.Populated); err != nil {
+			t.Fatalf("populated generation verification failed: %v", err)
+		}
+	})
 }

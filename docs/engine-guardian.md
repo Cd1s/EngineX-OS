@@ -80,8 +80,36 @@ runs `--watch`, so the flag stays accepted.
   verification against an unavailable real history database.
 - Read-only media is inspected without repair. Pending WAL/journal data requires
   recovery on writable media first; immutable reads never silently ignore it.
-  Tuning sets synchronous=FULL, mmap_size=128 MiB and temp_store=MEMORY without
-  forcing journal_mode=WAL. No journal tuning is attempted on read-only media.
+  Explicit full-heal tuning sets `synchronous=FULL`, `mmap_size=128 MiB` and
+  `temp_store=MEMORY` without forcing `journal_mode=WAL`; mount-hook
+  `--data-only` repairs also enforce `PRAGMA synchronous=FULL` on writable
+  connections without running `PRAGMA optimize` (so `sqlite_stat1` is never
+  added). No journal tuning is attempted on read-only media.
+- Crash-safe rolling snapshots live under `/.enginex-backup/db/` using distinct
+  generation files (`m.db.gen-<N>`) published atomically via `m.db.meta` (which
+  tracks `current`, `previous`, and `populated` generations, with backward
+  compatibility for legacy single-file `m.db` snapshots). Unchanged healthy
+  mounts fast-skip using the 100-byte SQLite header change counter with zero
+  bytes copied and no duplicate `PRAGMA quick_check`. Intact unrecognized or
+  future schemas are preserved unchanged, operational read errors are returned
+  unchanged, and snapshots never overwrite a live database whose readable UUID
+  differs. Before modifying live paths, damaged files and journals are copied
+  and `fsync`ed into `/.enginex-backup/db/corrupt-<stamp>/`, and verified
+  restores stage through `Database2/.m.db.restore.tmp` so interrupted swaps
+  complete cleanly on restart.
+- On mount, `engine-guardian --heal-mount` recovers/heals the database first,
+  then replays queued Web Console edits (`enginex-pending.json`), then runs
+  MP3 beat-grid migration (reconciling `.enginex-mp3-grid-stamp` / cursor when
+  restoring an earlier generation), and publishes the verified snapshot only
+  after those steps complete.
+- Missing live `m.db` boundary: `dbhealer` / `engine-guardian --heal-mount`
+  recovers a missing `m.db` when `Engine Library/Database2` already exists on a
+  writable volume and a verified snapshot exists in `/.enginex-backup/db/`
+  (never creating a database on an unrelated empty drive without a verified
+  snapshot). `edisksd-hook`'s automatic pre-mount trigger still gates on an
+  existing `Engine Library/Database2/m.db` filename on non-rekordbox Engine
+  drives, so a stock-unlinked missing `m.db` requires an explicit
+  `engine-guardian --heal-mount` invocation.
 
 ## Overlay integration
 

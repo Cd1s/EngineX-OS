@@ -176,21 +176,9 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			err = ferr
 			r.Healthy = err == nil
 		default:
-			// Edits the Web Console queued while Engine had this library open
-			// (Relocate, Hot Cues): this runs from the mount hook before Engine
-			// opens it again.
 			if enginedb.LibraryInUse(m) {
 				r.Mount, r.CheckedAt, err = m, time.Now().UTC(), enginedb.ErrLibraryInUse
 				break
-			}
-			if n, perr := enginedb.ApplyPending(context.Background(), m); perr != nil {
-				if errors.Is(perr, enginedb.ErrLibraryInUse) {
-					r.Mount, r.CheckedAt, err = m, time.Now().UTC(), perr
-					break
-				}
-				fmt.Fprintln(errOut, "engine-guardian: queued library edits not applied:", perr)
-			} else if n > 0 {
-				fmt.Fprintf(errOut, "engine-guardian: applied %d queued library edits\n", n)
 			}
 			mountCtx := context.Background()
 			cancelMount := func() {}
@@ -202,18 +190,71 @@ func Guardian(args []string, out, errOut io.Writer) int {
 				mountCtx, cancelMount = context.WithTimeout(context.Background(), remaining)
 			}
 			budgetExpired := false
+			r, err = dbhealer.HealMountWithOptions(mountCtx, m, *sessions, dbhealer.MountOptions{
+				DataOnly:      *dataOnly,
+				DeferSnapshot: true,
+			})
 			if *dataOnly {
-				r, err = dbhealer.HealMountDataOnlyContext(mountCtx, m, *sessions)
 				budgetExpired = mountCtx.Err() != nil
-			} else {
-				r, err = dbhealer.HealMount(m, *sessions)
 			}
 			cancelMount()
-			if err == nil && !budgetExpired {
+			if err != nil || budgetExpired {
+				break
+			}
+			// Replay edits the Web Console queued while Engine had this library
+			// open (Relocate, Hot Cues, Track Metadata) only after recovery has
+			// restored any damaged m.db so acknowledged edits are never lost.
+			if !r.ReadOnly && !r.BaseHealDeferred {
+				pendingCtx := context.Background()
+				cancelPending := func() {}
+				if *deadline > 0 {
+					remaining := guardianRemaining(commandStart, *deadline)
+					if remaining <= 0 {
+						budgetExpired = true
+					} else {
+						pendingCtx, cancelPending = context.WithTimeout(context.Background(), remaining)
+					}
+				}
+				if !budgetExpired {
+					if n, perr := enginedb.ApplyPending(pendingCtx, m); perr != nil {
+						if errors.Is(perr, enginedb.ErrLibraryInUse) {
+							err = perr
+						} else {
+							fmt.Fprintln(errOut, "engine-guardian: queued library edits not applied:", perr)
+						}
+					} else if n > 0 {
+						fmt.Fprintf(errOut, "engine-guardian: applied %d queued library edits\n", n)
+					}
+				}
+				cancelPending()
+				if err != nil || budgetExpired {
+					break
+				}
+			}
+			if !r.BaseHealDeferred {
 				remaining := guardianRemaining(commandStart, *deadline)
 				if *deadline == 0 || remaining >= 500*time.Millisecond {
 					runMP3Fix(remaining, *dataOnly)
 				}
+			}
+			// Publish the verified snapshot only after queued edits and MP3 grid
+			// repairs complete so future restores preserve both and never pair a
+			// pre-grid snapshot with an obsolete completion stamp.
+			if !r.ReadOnly && !r.BaseHealDeferred {
+				snapCtx := context.Background()
+				cancelSnap := func() {}
+				if *deadline > 0 {
+					remaining := guardianRemaining(commandStart, *deadline)
+					if remaining <= 0 {
+						budgetExpired = true
+					} else {
+						snapCtx, cancelSnap = context.WithTimeout(context.Background(), remaining)
+					}
+				}
+				if !budgetExpired {
+					dbhealer.PublishMountSnapshot(snapCtx, m, &r)
+				}
+				cancelSnap()
 			}
 		}
 		if err == nil && !*status {

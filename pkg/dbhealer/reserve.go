@@ -23,7 +23,13 @@ func Reserve(path string) (reserve byte, ok bool, err error) {
 	}
 	defer f.Close()
 	h := make([]byte, 100)
-	if n, _ := f.Read(h); n < 100 || !bytes.HasPrefix(h, sqliteMagic) {
+	if _, err := io.ReadFull(f, h); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	if !bytes.HasPrefix(h, sqliteMagic) {
 		return 0, false, nil
 	}
 	return h[20], true, nil
