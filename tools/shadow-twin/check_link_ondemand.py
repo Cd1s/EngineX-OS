@@ -596,19 +596,23 @@ def main():
     )
     stock_mdb = stock_vol / "Engine Library/Database2/m.db"
     stock_mdb.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(rb_mdb, stock_mdb)
+    stock_mdb.unlink(missing_ok=True)
     make_click_wav(stock_vol / "Music/stock-track.wav", seconds=10.0, bpm=128.0)
+    schema_sql = (src_dir / "pkg/enginedb/schema.sql").read_text()
+    with closing(sqlite3.connect(rb_mdb.as_uri() + "?mode=ro", uri=True)) as src_conn:
+        info_row = src_conn.execute(
+            "SELECT schemaVersionMajor, schemaVersionMinor, schemaVersionPatch FROM Information LIMIT 1"
+        ).fetchone()
     with closing(sqlite3.connect(stock_mdb)) as conn:
-        conn.execute("UPDATE Information SET uuid = 'stock-engine-uuid-1111'")
-        conn.execute("DELETE FROM PlaylistEntity")
-        conn.execute("DELETE FROM Playlist")
-        conn.execute("DELETE FROM PerformanceData")
-        conn.execute("DELETE FROM Track")
+        conn.executescript(schema_sql)
         conn.execute(
-            "INSERT INTO Track(id, path, filename, title, bpm, length, pdbImportKey, isAnalyzed) "
-            "VALUES(1, '../Music/stock-track.wav', 'stock-track.wav', 'Stock Track', 128, 10, NULL, 0)"
+            "INSERT INTO Information(uuid, schemaVersionMajor, schemaVersionMinor, schemaVersionPatch) VALUES(?, ?, ?, ?)",
+            ("stock-engine-uuid-1111", info_row[0], info_row[1], info_row[2]),
         )
-        conn.execute("INSERT OR IGNORE INTO PerformanceData(trackId) VALUES(1)")
+        conn.execute(
+            "INSERT INTO Track(path, filename, title, bpm, length, pdbImportKey, isAnalyzed) "
+            "VALUES('../Music/stock-track.wav', 'stock-track.wav', 'Stock Track', 128, 10, NULL, 0)"
+        )
         conn.commit()
 
     lan_log = twin.WORK / "lan-peer-reqs.log"
