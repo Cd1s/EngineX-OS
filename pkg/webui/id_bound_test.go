@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
@@ -32,6 +33,14 @@ func writeIDCopies(t *testing.T, stateDir, one, two string) {
 func writeGatewayFile(t *testing.T, stateDir string, next int64, rows []savedRef) {
 	t.Helper()
 	if err := providers.SaveJSON(filepath.Join(stateDir, "gateway-tracks.json"), savedTracks{Next: next, Tracks: rows}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeRawGatewayFile replaces the gateway file with content as it is.
+func writeRawGatewayFile(t *testing.T, stateDir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(stateDir, "gateway-tracks.json"), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -104,6 +113,28 @@ func TestNASIDBoundReconcilesWithTheIDsInUse(t *testing.T) {
 			rig.unreadable()
 			writeIDCopies(t, rig.stateDir, fmt.Sprintf(`{"ceiling":%d}`, old-1), fmt.Sprintf(`{"ceiling":%d}`, old-1))
 		}},
+		// Round 13 (round-12 re-check, item 1): our own files agree with each other and
+		// are all behind Engine's library. On d5f60ddf a gateway file that read as a table
+		// (null and {} decode as an empty one; an older file is one) with two equal copies
+		// was trusted without looking at the library.
+		{"gateway file null, equal copies", func(t *testing.T, rig *nasSwitchRig, old int64) {
+			writeRawGatewayFile(t, rig.stateDir, "null")
+			writeIDCopies(t, rig.stateDir, fmt.Sprintf(`{"ceiling":%d}`, old-1), fmt.Sprintf(`{"ceiling":%d}`, old-1))
+		}},
+		{"gateway file {}, equal copies", func(t *testing.T, rig *nasSwitchRig, old int64) {
+			writeRawGatewayFile(t, rig.stateDir, "{}")
+			writeIDCopies(t, rig.stateDir, fmt.Sprintf(`{"ceiling":%d}`, old-1), fmt.Sprintf(`{"ceiling":%d}`, old-1))
+		}},
+		{"an older gateway file and copies", func(t *testing.T, rig *nasSwitchRig, old int64) {
+			writeGatewayFile(t, rig.stateDir, old-1, nil) // as saved before server one's row
+			writeIDCopies(t, rig.stateDir, fmt.Sprintf(`{"ceiling":%d}`, old-1), fmt.Sprintf(`{"ceiling":%d}`, old-1))
+		}},
+		{"no gateway file, equal copies", func(t *testing.T, rig *nasSwitchRig, old int64) {
+			if err := os.Remove(filepath.Join(rig.stateDir, "gateway-tracks.json")); err != nil {
+				t.Fatal(err)
+			}
+			writeIDCopies(t, rig.stateDir, fmt.Sprintf(`{"ceiling":%d}`, old-1), fmt.Sprintf(`{"ceiling":%d}`, old-1))
+		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			rig, _, old := idRig(t)
@@ -167,4 +198,41 @@ func TestNASIDOutOfRangeValuesNeverStopRows(t *testing.T) {
 		rig.start()
 		check(t, rig, old, rig.twoURL, "start")
 	})
+}
+
+// #335 round 13: every start reads the IDs in use, so a library that cannot be read for
+// a moment (Engine is writing it) must not cost the run its new rows. On d5f60ddf a
+// start that could not read them handed out no ID until the next start. Now they are
+// read again until they can be, and new IDs start above every one of them.
+func TestNASIDsComeBackOnceTheIDsInUseCanBeRead(t *testing.T) {
+	rig, lib, old := idRig(t)
+	removeIDCopies(t, rig.stateDir)
+	rig.unreadable()
+	db := filepath.Join(lib, "stm.db")
+	if err := os.Remove(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(db, 0o700); err != nil { // every read of it fails
+		t.Fatal(err)
+	}
+	rig.start()
+	rig.saveNAS(rig.twoURL)
+	if got := rig.browseIDs(); len(got) != 0 {
+		t.Fatalf("IDs %v handed out while the IDs in use could not be read", got)
+	}
+	libraryRows(t, lib, old) // readable again, in the same run
+	var got []int64
+	for deadline := time.Now().Add(30 * time.Second); len(got) == 0; got = rig.browseIDs() {
+		if time.Now().After(deadline) {
+			t.Fatal("no row in this run after the IDs in use could be read again")
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if len(got) != 1 || got[0] <= old {
+		t.Fatalf("rows %v, want one above Engine's row %d", got, old)
+	}
+	rig.plays("server two's row", got[0], rig.two)
+	if a := rig.stream(old); a.code == http.StatusOK && bytes.Equal(a.body, rig.two) {
+		t.Fatalf("server one's ID %d, still in Engine's library, plays server two's recording", old)
+	}
 }

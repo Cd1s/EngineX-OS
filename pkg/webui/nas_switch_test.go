@@ -1760,7 +1760,7 @@ func removeIDCopies(t *testing.T, stateDir string) {
 func idCopies(t *testing.T, stateDir string) (int64, int64) {
 	t.Helper()
 	read := func(f string) int64 {
-		n, err := readCeiling(filepath.Join(stateDir, f), 0)
+		n, err := readCeiling(filepath.Join(stateDir, f))
 		if err != nil {
 			return 0
 		}
