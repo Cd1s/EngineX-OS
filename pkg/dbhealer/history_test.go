@@ -3,6 +3,7 @@ package dbhealer
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
+	"modernc.org/sqlite"
 )
 
 func historyDB(t *testing.T, column string) (*sql.DB, string) {
@@ -1131,5 +1133,56 @@ func TestReserveRejectsSchema302HistoryMissingAlbumArtHash(t *testing.T) {
 	}
 	if _, serr := os.Stat(hm + ".pre-reserve"); !errors.Is(serr, os.ErrNotExist) {
 		t.Fatalf("hm.db.pre-reserve created on missing AlbumArt.hash: err=%v", serr)
+	}
+}
+
+func TestHealMountFullCancelDuringHistoryPruneRollsBackSessionDelete(t *testing.T) {
+	fnName := fmt.Sprintf("dbhealer_prune_cancel_%d", time.Now().UnixNano())
+	var signal func()
+	if err := sqlite.RegisterScalarFunction(fnName, 0, func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
+		if signal != nil {
+			signal()
+		}
+		return int64(1), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mount, hm := stockHistoryMount(t)
+	hdb, err := sql.Open("sqlite", hm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdb.SetMaxOpenConns(1)
+	mustExec(t, hdb, "INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,NULL,NULL)")
+	mustExec(t, hdb, "INSERT INTO Track(id,path,filename,title,albumArtId,isAnalyzed) VALUES(10,'../Music/s1.mp3','s1.mp3','S1',1,1),(11,'../Music/s2.mp3','s2.mp3','S2',1,1)")
+	mustExec(t, hdb, "INSERT INTO Historylist(id,title,startTime,timezone,isDeleted) VALUES(1,'Old',100,'UTC',0),(2,'New',200,'UTC',0)")
+	mustExec(t, hdb, "INSERT INTO HistorylistEntity(listId,trackId,startTime) VALUES(1,10,100),(2,11,200)")
+	mustExec(t, hdb, `CREATE TRIGGER cancel_on_history_del BEFORE DELETE ON Historylist BEGIN SELECT `+fnName+`(); END`)
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	signal = cancel
+	t.Cleanup(func() { signal = nil })
+
+	rep, err := HealMountWithOptions(ctx, mount, MountOptions{MaxSessions: 1, DataOnly: false})
+	if !errors.Is(err, context.Canceled) || rep.Healthy || rep.HistoryPruned {
+		t.Fatalf("cancel during history prune succeeded/marked pruned: rep=%+v err=%v", rep, err)
+	}
+
+	check, err := Open(hm, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var sessions int
+	if err := check.QueryRow(`SELECT count(*) FROM Historylist WHERE COALESCE(isDeleted,0)=0`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 2 {
+		t.Fatalf("canceled history prune deleted visible session: remaining=%d want 2", sessions)
 	}
 }

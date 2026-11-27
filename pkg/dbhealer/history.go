@@ -496,6 +496,17 @@ func compactHistoryIfNeeded(ctx context.Context, db *sql.DB, path string, change
 // referenced by playlists/preparation lists, and the performance data of those
 // tracks. Unknown history layouts fail before any deletion.
 func PruneHistoryDB(path string, maxSessions int) error {
+	return PruneHistoryDBContext(context.Background(), path, maxSessions)
+}
+
+// PruneHistoryDBContext is PruneHistoryDB while honoring ctx cancellation across prune statements and compaction.
+func PruneHistoryDBContext(ctx context.Context, path string, maxSessions int) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if maxSessions < 0 {
 		return fmt.Errorf("maxSessions must not be negative")
 	}
@@ -509,8 +520,7 @@ func PruneHistoryDB(path string, maxSessions int) error {
 	if !rw {
 		return fmt.Errorf("history library is read-only")
 	}
-	ctx := context.Background()
-	db, err := Open(path, false)
+	db, err := openContext(ctx, path, false)
 	if err != nil {
 		return err
 	}
@@ -518,11 +528,11 @@ func PruneHistoryDB(path string, maxSessions int) error {
 	if err = verifyHistoryHeader(ctx, db, false); err != nil {
 		return err
 	}
-	if err = Tune(db, false); err != nil {
+	if err = tuneContext(ctx, db, false); err != nil {
 		return err
 	}
 	deleted := int64(0)
-	err = transaction(db, func(tx *sql.Tx) error {
+	err = transactionContext(ctx, db, func(tx *sql.Tx) error {
 		sessions, err := columns(ctx, tx, "Historylist")
 		if err != nil {
 			return err
@@ -542,7 +552,7 @@ func PruneHistoryDB(path string, maxSessions int) error {
 		if timestamp != "" {
 			ordering = timestamp + " DESC," + ordering
 		}
-		if _, err = tx.Exec("CREATE TEMP TABLE guardian_keep_history(id INTEGER PRIMARY KEY)"); err != nil {
+		if _, err = tx.ExecContext(ctx, "CREATE TEMP TABLE guardian_keep_history(id INTEGER PRIMARY KEY)"); err != nil {
 			return err
 		}
 		// The newest visible sessions: one the DJ deleted on the deck (isDeleted)
@@ -551,16 +561,24 @@ func PruneHistoryDB(path string, maxSessions int) error {
 		if softDeleted := selectColumn(sessions, "isDeleted"); softDeleted != "" {
 			visible = " WHERE COALESCE(" + softDeleted + ",0)=0"
 		}
-		if _, err = tx.Exec("INSERT INTO guardian_keep_history SELECT "+id+" FROM Historylist"+visible+" ORDER BY "+ordering+" LIMIT ?", maxSessions); err != nil {
+		if _, err = tx.ExecContext(ctx, "INSERT INTO guardian_keep_history SELECT "+id+" FROM Historylist"+visible+" ORDER BY "+ordering+" LIMIT ?", maxSessions); err != nil {
 			return err
 		}
 		execDelete := func(q string) error {
-			res, e := tx.Exec(q)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			res, e := tx.ExecContext(ctx, q)
 			if e != nil {
 				return e
 			}
 			n, e := res.RowsAffected()
-			deleted += n
+			if e == nil {
+				deleted += n
+			}
+			if cerr := ctx.Err(); cerr != nil {
+				return cerr
+			}
 			return e
 		}
 		entityWhere := listID + " IS NULL OR " + listID + " NOT IN (SELECT id FROM guardian_keep_history)"
@@ -581,7 +599,7 @@ func PruneHistoryDB(path string, maxSessions int) error {
 		if err = execDelete("DELETE FROM Historylist WHERE " + id + " NOT IN (SELECT id FROM guardian_keep_history)"); err != nil {
 			return err
 		}
-		if _, err = tx.Exec("DROP TABLE guardian_keep_history"); err != nil {
+		if _, err = tx.ExecContext(ctx, "DROP TABLE guardian_keep_history"); err != nil {
 			return err
 		}
 		// Any table with trackId can retain a track (including optional Engine tables).
@@ -619,17 +637,20 @@ func PruneHistoryDB(path string, maxSessions int) error {
 				return err
 			}
 		}
-		return nil
+		return ctx.Err()
 	})
 	if err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if deleted > 0 {
-		_, err = db.Exec("VACUUM")
+		_, err = db.ExecContext(ctx, "VACUUM")
 		if err != nil {
 			return fmt.Errorf("history pruned; compaction failed: %w", err)
 		}
 	}
-	_, err = db.Exec("PRAGMA optimize")
+	_, err = db.ExecContext(ctx, "PRAGMA optimize")
 	return err
 }

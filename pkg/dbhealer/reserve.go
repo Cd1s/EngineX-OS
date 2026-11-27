@@ -14,8 +14,11 @@ import (
 )
 
 var (
-	sqliteMagic     = []byte("SQLite format 3\x00")
-	reserveWritable = writable
+	sqliteMagic         = []byte("SQLite format 3\x00")
+	reserveWritable     = writable
+	reserveLink         = os.Link
+	reserveBeforeCopy   func(string)
+	reserveBeforeRename func(string)
 )
 
 // Reserve reports header byte 20 of a plain SQLite file; ok is false for a
@@ -26,8 +29,17 @@ func Reserve(path string) (reserve byte, ok bool, err error) {
 		return 0, false, err
 	}
 	defer f.Close()
+	return readReserveFromFile(f)
+}
+
+func readReserveFromFile(f *os.File) (reserve byte, ok bool, err error) {
 	h := make([]byte, 100)
-	if n, _ := f.Read(h); n < 100 || !bytes.HasPrefix(h, sqliteMagic) {
+	if n, rerr := f.ReadAt(h, 0); n < 100 {
+		if rerr != nil && !errors.Is(rerr, io.EOF) {
+			return 0, false, rerr
+		}
+		return 0, false, nil
+	} else if !bytes.HasPrefix(h, sqliteMagic) {
 		return 0, false, nil
 	}
 	return h[20], true, nil
@@ -54,16 +66,24 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if r, ok, err := Reserve(path); err != nil || !ok || r == 0 {
+	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	if err := ctx.Err(); err != nil {
+	// Hold origFile across lock acquisition through atomic os.Rename so no extra
+	// open/close on path drops POSIX fcntl locks held by srcConn on Linux.
+	origFile, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer origFile.Close()
+
+	if r, ok, err := readReserveFromFile(origFile); err != nil || !ok || r == 0 {
 		return false, err
 	}
 	if err := checkNoPendingJournals(path); err != nil {
 		return false, err
 	}
-	info, err := os.Stat(path)
+	info, err := origFile.Stat()
 	if err != nil {
 		return false, err
 	}
@@ -80,8 +100,24 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 	}
 	defer srcConn.Close()
 
-	if _, err = srcConn.ExecContext(ctx, "PRAGMA busy_timeout=1"); err != nil {
+	if _, err = srcConn.ExecContext(ctx, "PRAGMA main.busy_timeout=1"); err != nil {
 		return false, err
+	}
+	if _, err = srcConn.ExecContext(ctx, "PRAGMA main.locking_mode=EXCLUSIVE"); err != nil {
+		return false, err
+	}
+	var jmode string
+	if err = srcConn.QueryRowContext(ctx, "PRAGMA main.journal_mode").Scan(&jmode); err != nil {
+		return false, err
+	}
+	if strings.EqualFold(jmode, "wal") {
+		var busy, logFrames, ckptFrames int
+		if err = srcConn.QueryRowContext(ctx, "PRAGMA main.wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &ckptFrames); err != nil {
+			return false, err
+		}
+		if busy != 0 {
+			return false, fmt.Errorf("%s is busy (active WAL reader or writer)", path)
+		}
 	}
 	// Hold BEGIN EXCLUSIVE from validation/copy through atomic os.Rename so no
 	// concurrent BEGIN IMMEDIATE/EXCLUSIVE writer or reader can mutate or be stranded on the replaced inode.
@@ -92,7 +128,14 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 		_, _ = srcConn.ExecContext(context.Background(), "ROLLBACK")
 	}()
 
-	if r, ok, err := Reserve(path); err != nil || !ok || r == 0 {
+	stPath, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	if !os.SameFile(info, stPath) {
+		return false, fmt.Errorf("%s changed before lock acquisition", path)
+	}
+	if r, ok, err := readReserveFromFile(origFile); err != nil || !ok || r == 0 {
 		return false, err
 	}
 	if err := checkNoPendingJournals(path); err != nil {
@@ -102,6 +145,9 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 		if err := validate(ctx, srcConn); err != nil {
 			return false, err
 		}
+	}
+	if reserveBeforeCopy != nil {
+		reserveBeforeCopy(path)
 	}
 
 	tmp := path + ".reserve-rebuild"
@@ -121,12 +167,21 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 	// Never move the live name out of the way: the CLI deadline can end this
 	// process between any two syscalls. Publish a durable backup first, then
 	// atomically replace the still-present original while still holding BEGIN EXCLUSIVE.
-	if err = backupReserveContext(ctx, path); err != nil {
+	if err = backupReserveFromFileContext(ctx, path, origFile, info); err != nil {
 		os.Remove(tmp)
 		return false, err
 	}
+	if reserveBeforeRename != nil {
+		reserveBeforeRename(path)
+	}
 	if err = os.Rename(tmp, path); err != nil {
 		return false, err
+	}
+	if strings.EqualFold(jmode, "wal") {
+		_ = os.Remove(path + "-shm")
+		if st, serr := os.Stat(path + "-wal"); serr == nil && st.Size() == 0 {
+			_ = os.Remove(path + "-wal")
+		}
 	}
 	return true, nil
 }
@@ -147,6 +202,19 @@ func backupReserve(path string) error {
 }
 
 func backupReserveContext(ctx context.Context, path string) error {
+	origFile, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer origFile.Close()
+	info, err := origFile.Stat()
+	if err != nil {
+		return err
+	}
+	return backupReserveFromFileContext(ctx, path, origFile, info)
+}
+
+func backupReserveFromFileContext(ctx context.Context, path string, origFile *os.File, info os.FileInfo) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -159,21 +227,14 @@ func backupReserveContext(ctx context.Context, path string) error {
 	}
 	defer os.Remove(tmp)
 	// Internal ext4 needs no second full copy. Removable filesystems may not
-	// support hard links, so copy without ever renaming the source there.
-	if err := os.Link(path, tmp); err != nil {
-		src, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer src.Close()
-		info, err := src.Stat()
-		if err != nil {
-			return err
-		}
+	// support hard links, so copy via the already-open origFile without ever
+	// calling open/close on path (which would release fcntl locks on Linux).
+	if err := reserveLink(path, tmp); err != nil {
 		dst, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
 		if err != nil {
 			return err
 		}
+		src := io.NewSectionReader(origFile, 0, info.Size())
 		buf := make([]byte, 64<<10)
 		for {
 			if err = ctx.Err(); err != nil {
@@ -292,11 +353,45 @@ func normalizeDatabase2(ctx context.Context, dir string, cleanPaths map[string]b
 	if err := ctx.Err(); err != nil {
 		return nil, true, err
 	}
+	// Validate m.db before touching any sibling database even if m.db has reserve 0
+	// or follows another file alphabetically.
+	mPath := filepath.Join(dir, "m.db")
+	if !cleanPaths[mPath] {
+		if _, ok, rerr := Reserve(mPath); rerr != nil {
+			if !errors.Is(rerr, os.ErrNotExist) {
+				return nil, true, rerr
+			}
+		} else if ok {
+			roDB, roErr := openReadOnlyLocking(ctx, mPath, probeBusyTimeoutMS(ctx))
+			if roErr != nil {
+				return nil, true, roErr
+			}
+			verr := validateMainLibrarySchemaForReserve(ctx, roDB)
+			cerr := roDB.Close()
+			if verr != nil {
+				return nil, true, verr
+			}
+			if cerr != nil {
+				return nil, true, cerr
+			}
+		}
+	}
 	names, err := filepath.Glob(filepath.Join(dir, "*.db"))
 	if err != nil {
 		return nil, true, err
 	}
+	ordered := make([]string, 0, len(names))
 	for _, p := range names {
+		if strings.EqualFold(filepath.Base(p), "m.db") {
+			ordered = append(ordered, p)
+		}
+	}
+	for _, p := range names {
+		if !strings.EqualFold(filepath.Base(p), "m.db") {
+			ordered = append(ordered, p)
+		}
+	}
+	for _, p := range ordered {
 		base := filepath.Base(p)
 		if strings.HasPrefix(base, ".") || cleanPaths[p] {
 			continue
@@ -442,14 +537,8 @@ func rebuildPlainFromConnContext(ctx context.Context, srcConn *sql.Conn, dst str
 		if e != nil {
 			return e
 		}
-		list := strings.Join(cols, ",")
-		numCols := len(cols)
-		if !strings.Contains(strings.ToUpper(t.sql), "WITHOUT ROWID") {
-			// Keep rowids: other tables and Engine refer to them.
-			list = "rowid," + list
-			numCols++
-		}
-		if err = copyTableRowsFromConn(ctx, srcConn, tx, t.name, list, numCols); err != nil {
+		hasRowID := !strings.Contains(strings.ToUpper(t.sql), "WITHOUT ROWID")
+		if err = copyTableRowsFromConn(ctx, srcConn, tx, t.name, cols, hasRowID); err != nil {
 			return fmt.Errorf("copy %s: %w", t.name, err)
 		}
 	}
@@ -542,24 +631,40 @@ func rebuildPlainFromConnContext(ctx context.Context, srcConn *sql.Conn, dst str
 	return nil
 }
 
-func copyTableRowsFromConn(ctx context.Context, srcConn *sql.Conn, dstTx *sql.Tx, table, colList string, numCols int) error {
-	rows, err := srcConn.QueryContext(ctx, fmt.Sprintf("SELECT %s FROM main.%s", colList, quote(table)))
+func copyTableRowsFromConn(ctx context.Context, srcConn *sql.Conn, dstTx *sql.Tx, table string, cols []string, hasRowID bool) error {
+	insertCols := make([]string, 0, len(cols)+1)
+	selectExprs := make([]string, 0, len(cols)*2+1)
+	if hasRowID {
+		// Keep rowids: other tables and Engine refer to them.
+		insertCols = append(insertCols, "rowid")
+		selectExprs = append(selectExprs, "rowid")
+	}
+	for _, col := range cols {
+		insertCols = append(insertCols, col)
+		// Select typeof + untyped CASE expression so modernc.org/sqlite never parses
+		// declared DATETIME columns into Go time.Time (which mangles stored text bytes).
+		selectExprs = append(selectExprs, "typeof("+col+")", "CASE typeof("+col+") WHEN 'text' THEN CAST("+col+" AS BLOB) ELSE "+col+" END")
+	}
+
+	rows, err := srcConn.QueryContext(ctx, fmt.Sprintf("SELECT %s FROM main.%s", strings.Join(selectExprs, ","), quote(table)))
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", numCols), ",")
-	insStmt, err := dstTx.PrepareContext(ctx, fmt.Sprintf("INSERT INTO main.%s(%s) VALUES(%s)", quote(table), colList, placeholders))
+	numInsert := len(insertCols)
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", numInsert), ",")
+	insStmt, err := dstTx.PrepareContext(ctx, fmt.Sprintf("INSERT INTO main.%s(%s) VALUES(%s)", quote(table), strings.Join(insertCols, ","), placeholders))
 	if err != nil {
 		return err
 	}
 	defer insStmt.Close()
 
-	vals := make([]any, numCols)
-	scanDest := make([]any, numCols)
-	for i := range vals {
-		scanDest[i] = &vals[i]
+	rawVals := make([]any, len(selectExprs))
+	scanDest := make([]any, len(selectExprs))
+	for i := range rawVals {
+		scanDest[i] = &rawVals[i]
 	}
+	bindVals := make([]any, numInsert)
 	for rowIdx := 0; rows.Next(); rowIdx++ {
 		if rowIdx&255 == 0 {
 			if err := ctx.Err(); err != nil {
@@ -569,19 +674,44 @@ func copyTableRowsFromConn(ctx context.Context, srcConn *sql.Conn, dstTx *sql.Tx
 		if err := rows.Scan(scanDest...); err != nil {
 			return err
 		}
-		for i, v := range vals {
-			if b, ok := v.([]byte); ok {
-				if b == nil {
-					// Preserve zero-length X'' BLOB values; typed nil []byte becomes SQL NULL in database/sql.
-					vals[i] = []byte{}
-				} else {
-					cp := make([]byte, len(b))
-					copy(cp, b)
-					vals[i] = cp
-				}
-			}
+		srcPos := 0
+		dstPos := 0
+		if hasRowID {
+			bindVals[0] = rawVals[0]
+			srcPos = 1
+			dstPos = 1
 		}
-		if _, err := insStmt.ExecContext(ctx, vals...); err != nil {
+		for dstPos < numInsert {
+			typ, _ := rawVals[srcPos].(string)
+			val := rawVals[srcPos+1]
+			srcPos += 2
+			switch typ {
+			case "null":
+				bindVals[dstPos] = nil
+			case "text":
+				if b, ok := val.([]byte); ok {
+					bindVals[dstPos] = string(b)
+				} else {
+					bindVals[dstPos] = val
+				}
+			case "blob":
+				if b, ok := val.([]byte); ok {
+					if b == nil {
+						bindVals[dstPos] = []byte{}
+					} else {
+						cp := make([]byte, len(b))
+						copy(cp, b)
+						bindVals[dstPos] = cp
+					}
+				} else {
+					bindVals[dstPos] = val
+				}
+			default:
+				bindVals[dstPos] = val
+			}
+			dstPos++
+		}
+		if _, err := insStmt.ExecContext(ctx, bindVals...); err != nil {
 			return err
 		}
 	}

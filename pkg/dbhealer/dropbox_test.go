@@ -1694,6 +1694,9 @@ func TestHealMountFullCancelMidDropboxPassReturnsErrorAndRollsBack(t *testing.T)
 	if !errors.Is(err, context.Canceled) || rep.Healthy {
 		t.Fatalf("canceled full heal returned rep=%+v err=%v, want context.Canceled & Healthy=false", rep, err)
 	}
+	if rep.DropboxLocalized != 0 || rep.PathsNormalized != 0 || rep.PlaylistEntities != 0 || rep.Playlists != 0 {
+		t.Fatalf("rolled-back full heal leaked non-zero counters in report: %+v", rep)
+	}
 	if _, serr := os.Stat(dropboxCursorPath(root)); !errors.Is(serr, os.ErrNotExist) {
 		t.Fatalf("canceled full heal left cursor file behind: err=%v", serr)
 	}
@@ -1716,6 +1719,16 @@ func TestHealMountFullCancelMidDropboxPassReturnsErrorAndRollsBack(t *testing.T)
 }
 
 func TestHealMountFullDropboxTriggerRejectionRollsBackIdentity(t *testing.T) {
+	fnName := fmt.Sprintf("dbhealer_full_reject_%d", time.Now().UnixNano())
+	var signal func()
+	if err := sqlite.RegisterScalarFunction(fnName, 0, func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
+		if signal != nil {
+			signal()
+		}
+		return int64(1), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	for _, cancelOnTrigger := range []bool{false, true} {
 		t.Run(fmt.Sprintf("cancel_%t", cancelOnTrigger), func(t *testing.T) {
 			_, root, db := testlibrary.Create(t)
@@ -1732,22 +1745,25 @@ func TestHealMountFullDropboxTriggerRejectionRollsBackIdentity(t *testing.T) {
 			if _, err := db.Exec(`UPDATE Information SET id=99, uuid='valid-uuid'`); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db.Exec(`CREATE TRIGGER reject_track_upd BEFORE UPDATE ON Track BEGIN SELECT RAISE(ABORT,'track update blocked'); END`); err != nil {
+			if _, err := db.Exec(`CREATE TRIGGER reject_track_upd BEFORE UPDATE OF streamingSource ON Track BEGIN SELECT ` + fnName + `(); SELECT RAISE(ABORT,'track update blocked'); END`); err != nil {
 				t.Fatal(err)
 			}
 			db.Close()
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			signal = nil
 			if cancelOnTrigger {
-				// Simulate cancellation racing right after the track update error.
-				localizeDropboxTrackBatch = func() { cancel() }
-				t.Cleanup(func() { localizeDropboxTrackBatch = nil })
+				signal = cancel
 			}
+			t.Cleanup(func() { signal = nil })
 
 			rep, err := HealMountWithOptions(ctx, root, MountOptions{DataOnly: false})
-			if err == nil || rep.Healthy {
-				t.Fatalf("expected full heal error when Track update is rejected: rep=%+v err=%v", rep, err)
+			if err == nil || rep.Healthy || !strings.Contains(err.Error(), "track update blocked") {
+				t.Fatalf("expected full heal trigger rejection error, got rep=%+v err=%v", rep, err)
+			}
+			if cancelOnTrigger && !errors.Is(ctx.Err(), context.Canceled) {
+				t.Fatalf("trigger cancel hook never fired: ctx.Err=%v", ctx.Err())
 			}
 
 			check, err := Open(filepath.Join(root, "Engine Library", "Database2", "m.db"), true)
@@ -1924,5 +1940,144 @@ func TestHealMountDataOnlyReserve12UnsupportedHistorySurvivesTrackDeadline(t *te
 	}
 	if _, serr := os.Stat(hm + ".pre-reserve"); !errors.Is(serr, os.ErrNotExist) {
 		t.Fatalf("hm.db.pre-reserve created on unsupported schema: err=%v", serr)
+	}
+}
+
+func TestHealMountFullCancelWhileCommitWaitsOnReaderRollsBack(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	full := filepath.Join(root, "Music", "commit-wait.mp3")
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte("audio-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes,streamingSource,uri,streamingFlags,isAnalyzed) VALUES(1,'../Music/commit-wait.mp3','commit-wait.mp3',11,'Dropbox','streaming://Dropbox/Track/1',5,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE Information SET id=99, uuid='valid-uuid'`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	dbPath := filepath.Join(root, "Engine Library", "Database2", "m.db")
+	reader, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader.SetMaxOpenConns(1)
+	defer reader.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var (
+		mu       sync.Mutex
+		cancelAt time.Time
+	)
+	readerReleased := make(chan struct{})
+	readerStarted := false
+	localizeDropboxTrackBatch = func() {
+		if readerStarted {
+			return
+		}
+		readerStarted = true
+		if _, rerr := reader.Exec("BEGIN"); rerr != nil {
+			close(readerReleased)
+			t.Errorf("reader BEGIN: %v", rerr)
+			return
+		}
+		var n int
+		if rerr := reader.QueryRow("SELECT count(*) FROM Track").Scan(&n); rerr != nil {
+			close(readerReleased)
+			t.Errorf("reader SELECT: %v", rerr)
+			return
+		}
+		time.AfterFunc(30*time.Millisecond, func() {
+			mu.Lock()
+			cancelAt = time.Now()
+			mu.Unlock()
+			cancel()
+		})
+		time.AfterFunc(220*time.Millisecond, func() {
+			defer close(readerReleased)
+			_, _ = reader.Exec("ROLLBACK")
+		})
+	}
+	t.Cleanup(func() {
+		localizeDropboxTrackBatch = nil
+		if readerStarted {
+			<-readerReleased
+		}
+		_, _ = reader.Exec("ROLLBACK")
+	})
+
+	rep, err := HealMountWithOptions(ctx, root, MountOptions{DataOnly: false})
+	doneAt := time.Now()
+	if !errors.Is(err, context.Canceled) || rep.Healthy || rep.DropboxLocalized != 0 {
+		t.Fatalf("cancel during COMMIT lock wait failed: rep=%+v err=%v", rep, err)
+	}
+	if readerStarted {
+		<-readerReleased
+	}
+	mu.Lock()
+	cAt := cancelAt
+	mu.Unlock()
+	if cAt.IsZero() {
+		t.Fatal("cancel timer did not fire")
+	}
+	if sinceCancel := doneAt.Sub(cAt); sinceCancel >= 150*time.Millisecond {
+		t.Fatalf("COMMIT cancel waited %v for reader release (>= 150ms)", sinceCancel)
+	}
+
+	check, err := Open(dbPath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var infoID int
+	var src string
+	if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
+		t.Fatal(err)
+	}
+	if err := check.QueryRow(`SELECT COALESCE(streamingSource,'') FROM Track WHERE id=1`).Scan(&src); err != nil {
+		t.Fatal(err)
+	}
+	if infoID != 99 || src != "Dropbox" {
+		t.Fatalf("canceled COMMIT mutated DB: infoID=%d src=%q, want 99 and Dropbox", infoID, src)
+	}
+}
+
+func TestRunTransactionContextHonorsDeadlineWhenPoolBusy(t *testing.T) {
+	_, _, db := testlibrary.Create(t)
+	db.SetMaxOpenConns(1)
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	time.AfterFunc(180*time.Millisecond, func() {
+		defer close(released)
+		_ = conn.Close()
+	})
+	t.Cleanup(func() { <-released })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	called := false
+	start := time.Now()
+	err = runTransactionContext(ctx, db, func(*sql.Tx) error {
+		called = true
+		return nil
+	})
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runTransactionContext err=%v, want DeadlineExceeded", err)
+	}
+	if called {
+		t.Fatal("transaction callback ran after pool acquisition deadline expired")
+	}
+	if elapsed >= 120*time.Millisecond {
+		t.Fatalf("runTransactionContext overran deadline while waiting on busy pool: %v", elapsed)
 	}
 }

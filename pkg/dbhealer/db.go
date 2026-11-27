@@ -278,24 +278,51 @@ func transactionContextWithBusy(ctx context.Context, db *sql.DB, busyMS int, f f
 }
 
 func runTransactionContext(ctx context.Context, db *sql.DB, f func(*sql.Tx) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// Own rollback explicitly after f(tx) closes any tx-scoped prepared statements;
-	// Go's BeginTx(ctx) awaitDone goroutine races live statements and can discard
-	// the SQLite connection before journal cleanup completes.
-	tx, err := db.BeginTx(context.Background(), nil)
+	// Pass ctx to BeginTx so pool-slot waits and COMMIT lock waits interrupt on
+	// cancellation. When awaitDone rolls back asynchronously, wait for a pool
+	// connection to confirm SQLite ROLLBACK and journal cleanup have finished
+	// before returning.
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	waitPoolCleanup := func() {
+		if c, cerr := db.Conn(context.Background()); cerr == nil {
+			_ = c.Close()
+		}
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rerr := tx.Rollback(); errors.Is(rerr, sql.ErrTxDone) {
+			waitPoolCleanup()
+		}
+	}()
 	if err = f(tx); err != nil {
 		return err
 	}
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		if errors.Is(err, sql.ErrTxDone) {
+			waitPoolCleanup()
+			if cerr := ctx.Err(); cerr != nil {
+				return cerr
+			}
+		}
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // Heal runs all m.db mutations atomically. Integrity errors are reported; a
@@ -360,7 +387,9 @@ func healWithHooksAndResizedContext(
 		return r, nil, err
 	}
 	var resized map[int64]bool
+	var txReport Report
 	err = transactionContext(ctx, db, func(tx *sql.Tx) error {
+		txReport = r
 		// An unrecognized future schema is not a license to rewrite its blobs.
 		var schema string
 		if err := tx.QueryRowContext(ctx, "SELECT sql FROM main.sqlite_master WHERE type='table' AND name='PerformanceData' COLLATE NOCASE").Scan(&schema); err != nil {
@@ -381,10 +410,10 @@ func healWithHooksAndResizedContext(
 				return err
 			}
 		}
-		if r.PlaylistEntities, err = healChains(ctx, tx, false); err != nil {
+		if txReport.PlaylistEntities, err = healChains(ctx, tx, false); err != nil {
 			return err
 		}
-		if r.Playlists, err = healChains(ctx, tx, true); err != nil {
+		if txReport.Playlists, err = healChains(ctx, tx, true); err != nil {
 			return err
 		}
 		if !dataOnly {
@@ -392,22 +421,22 @@ func healWithHooksAndResizedContext(
 				return err
 			}
 		}
-		if err = healPerformance(ctx, tx, &r); err != nil {
+		if err = healPerformance(ctx, tx, &txReport); err != nil {
 			return err
 		}
-		if err = healArtworkMetadata(ctx, tx, &r); err != nil {
+		if err = healArtworkMetadata(ctx, tx, &txReport); err != nil {
 			return err
 		}
 		if !dataOnly {
-			if resized, err = resizeOversizedArtworkBlobsTx(ctx, tx, &r); err != nil {
+			if resized, err = resizeOversizedArtworkBlobsTx(ctx, tx, &txReport); err != nil {
 				return err
 			}
 		}
-		if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM GuardianReanalysis").Scan(&r.ReanalysisPending); err != nil {
+		if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM GuardianReanalysis").Scan(&txReport.ReanalysisPending); err != nil {
 			return err
 		}
 		if postHeal != nil {
-			if err := postHeal(ctx, tx, &r); err != nil {
+			if err := postHeal(ctx, tx, &txReport); err != nil {
 				return err
 			}
 		}
@@ -417,6 +446,7 @@ func healWithHooksAndResizedContext(
 		r.Healthy = false
 		return r, nil, err
 	}
+	r = txReport
 	if dataOnly && ctx.Err() == nil {
 		if resized, err = resizeOversizedArtworkBlobsMount(ctx, db, &r); err != nil {
 			r.Healthy = false
@@ -1019,17 +1049,17 @@ func finishHistoryHeal(
 			r.Warnings = append(r.Warnings, "history: "+warning)
 		}
 		// An explicit full heal prunes to the newest visible sessions and compacts.
-		if err := PruneHistoryDB(history, maxSessions); err != nil {
+		if err := PruneHistoryDBContext(ctx, history, maxSessions); err != nil {
 			r.Healthy = false
 			return r, fmt.Errorf("history: %w", err)
 		}
 		r.HistoryPruned = true
-		hdb, e = Open(history, false)
+		hdb, e = openContext(ctx, history, false)
 		if e != nil {
 			return r, e
 		}
 		var pending int
-		e = hdb.QueryRow("SELECT count(*) FROM GuardianReanalysis").Scan(&pending)
+		e = hdb.QueryRowContext(ctx, "SELECT count(*) FROM GuardianReanalysis").Scan(&pending)
 		ce = hdb.Close()
 		if e != nil {
 			return r, e

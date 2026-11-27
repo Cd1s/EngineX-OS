@@ -798,3 +798,82 @@ func TestGuardianNormalizeReserveRejectsUnsupportedHistoryDB(t *testing.T) {
 		t.Fatalf("--normalize-reserve created hm.db.pre-reserve on schema-4 hm.db: err=%v", serr)
 	}
 }
+
+func TestGuardianNormalizeReserveRejectsUnsupportedMainBeforeHistory(t *testing.T) {
+	for _, mainRes := range []byte{0, 12} {
+		t.Run(fmt.Sprintf("main_reserve_%d", mainRes), func(t *testing.T) {
+			mount := filepath.Join(t.TempDir(), "USB")
+			dbDir := filepath.Join(mount, "Engine Library", "Database2")
+			if err := os.MkdirAll(dbDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mPath := filepath.Join(dbDir, "m.db")
+			seedEmptyWithReserve := func(p string, reserve byte, schemaRel string, major int) {
+				db, err := sql.Open("sqlite", p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec("PRAGMA user_version=4194305"); err != nil {
+					db.Close()
+					t.Fatal(err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if reserve != 0 {
+					raw, err := os.ReadFile(p)
+					if err != nil || len(raw) != 4096 {
+						t.Fatalf("seed %s len=%d err=%v", p, len(raw), err)
+					}
+					raw[20] = reserve
+					raw[105], raw[106] = 0x0f, 0xf4
+					if err := os.WriteFile(p, raw, 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				db, err = sql.Open("sqlite", p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				db.SetMaxOpenConns(1)
+				schema, err := os.ReadFile(schemaRel)
+				if err != nil {
+					db.Close()
+					t.Fatal(err)
+				}
+				modSchema := strings.ReplaceAll(string(schema), "CREATE TABLE sqlite_sequence(name,seq);", "")
+				if _, err := db.Exec(modSchema); err != nil {
+					db.Close()
+					t.Fatal(err)
+				}
+				if _, err := db.Exec("INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES(1,'u-test',?,0,2)", major); err != nil {
+					db.Close()
+					t.Fatal(err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			seedEmptyWithReserve(mPath, mainRes, "../../pkg/dbhealer/testdata/engine-5.0.4.sql", 4)
+			hmPath := filepath.Join(dbDir, "hm.db")
+			seedEmptyWithReserve(hmPath, 12, "../../docs/re-report/ENGINE-5.0.4-hm.db-schema.sql", 3)
+
+			var out, errOut bytes.Buffer
+			code := Guardian([]string{"--heal-mount", mount, "--normalize-reserve"}, &out, &errOut)
+			if code == 0 {
+				t.Fatalf("--normalize-reserve unexpectedly succeeded with schema-4 m.db: out=%s err=%s", &out, &errOut)
+			}
+			var results []guardianResult
+			if err := json.Unmarshal(out.Bytes(), &results); err != nil || len(results) != 1 || results[0].Healthy {
+				t.Fatalf("expected unhealthy result, got out=%s err=%v", &out, err)
+			}
+			if res, ok, rerr := dbhealer.Reserve(hmPath); rerr != nil || !ok || res != 12 {
+				t.Fatalf("hm.db reserve was rewritten despite schema-4 m.db: res=%d ok=%v err=%v", res, ok, rerr)
+			}
+			if _, serr := os.Stat(hmPath + ".pre-reserve"); !os.IsNotExist(serr) {
+				t.Fatalf("hm.db.pre-reserve created despite schema-4 m.db: err=%v", serr)
+			}
+		})
+	}
+}
