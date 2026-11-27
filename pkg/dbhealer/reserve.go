@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ var (
 	sqliteMagic         = []byte("SQLite format 3\x00")
 	reserveWritable     = writable
 	reserveLink         = os.Link
+	reserveRename       = os.Rename
 	reserveBeforeCopy   func(string)
 	reserveBeforeRename func(string)
 	reserveAfterRename  func(string)
@@ -96,13 +98,23 @@ func registerActiveReserveFile(key fileDevIno, f *os.File) func() {
 // Reserve reports header byte 20 of a plain SQLite file; ok is false for a
 // missing file or anything that is not a SQLite database.
 func Reserve(path string) (reserve byte, ok bool, err error) {
-	if st, serr := os.Stat(path); serr != nil {
+	st, serr := os.Stat(path)
+	if serr != nil {
 		return 0, false, serr
-	} else if key, okKey := statDevIno(st); okKey {
+	}
+	if st.IsDir() {
+		return 0, false, &os.PathError{Op: "read", Path: path, Err: syscall.EISDIR}
+	}
+	if key, okKey := statDevIno(st); okKey {
 		if f, release := pinActiveReserveFile(key); f != nil {
 			defer release()
 			return readReserveFromFile(f)
 		}
+	}
+	if !sqlite.OFDLockingEnabled() {
+		// Under POSIX F_SETLK fallback, opening and closing path inside this process
+		// would drop any same-process SQLite locks on the inode; inspect in a child PID.
+		return readReserveHeaderIsolated(path)
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -112,6 +124,13 @@ func Reserve(path string) (reserve byte, ok bool, err error) {
 	return readReserveFromFile(f)
 }
 
+func parseReserveHeader(h []byte) (reserve byte, ok bool) {
+	if len(h) < 100 || !bytes.HasPrefix(h, sqliteMagic) {
+		return 0, false
+	}
+	return h[20], true
+}
+
 func readReserveFromFile(f *os.File) (reserve byte, ok bool, err error) {
 	h := make([]byte, 100)
 	if n, rerr := f.ReadAt(h, 0); n < 100 {
@@ -119,10 +138,25 @@ func readReserveFromFile(f *os.File) (reserve byte, ok bool, err error) {
 			return 0, false, rerr
 		}
 		return 0, false, nil
-	} else if !bytes.HasPrefix(h, sqliteMagic) {
-		return 0, false, nil
 	}
-	return h[20], true, nil
+	r, ok := parseReserveHeader(h)
+	return r, ok, nil
+}
+
+func readReserveHeaderIsolated(path string) (reserve byte, ok bool, err error) {
+	cmd := exec.Command("/bin/sh", "-c", `exec < "$1" && exec dd bs=100 count=1 2>/dev/null`, "_", path)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	if runErr := cmd.Run(); runErr != nil {
+		msg := strings.TrimSpace(errBuf.String())
+		if msg != "" {
+			return 0, false, fmt.Errorf("read reserve header %s: %w (%s)", path, runErr, msg)
+		}
+		return 0, false, fmt.Errorf("read reserve header %s: %w", path, runErr)
+	}
+	r, ok := parseReserveHeader(outBuf.Bytes())
+	return r, ok, nil
 }
 
 // NormalizeReserve rebuilds a plain library whose per-page reserve byte is not 0.
@@ -271,41 +305,37 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 		os.Remove(tmp)
 		return false, err
 	}
+	if reserveBeforeRename != nil {
+		reserveBeforeRename(path)
+	}
+	if err = ctx.Err(); err != nil {
+		os.Remove(tmp)
+		return false, err
+	}
 	if strings.EqualFold(jmode, "wal") {
-		// Leave WAL mode before os.Rename while still holding locking_mode=EXCLUSIVE
-		// so SQLite cleanly removes the old -wal/-shm sidecars without touching
-		// pathnames created after the new inode is published.
-		if _, err = srcConn.ExecContext(ctx, "ROLLBACK"); err != nil {
+		// Keep sqlite3WalClose from unlinking path+"-wal" or path+"-shm" when
+		// srcDB.Close() runs after os.Rename publishes the new inode (where a new
+		// WAL writer may already own those pathnames).
+		if err = srcConn.Raw(func(dc any) error {
+			fc, ok := dc.(sqlite.FileControl)
+			if !ok {
+				return errors.New("sqlite driver connection does not support FileControl")
+			}
+			_, ferr := fc.FileControlPersistWAL("main", 1)
+			return ferr
+		}); err != nil {
 			os.Remove(tmp)
 			return false, err
 		}
-		inTx = false
-		var newMode string
-		if err = srcConn.QueryRowContext(ctx, "PRAGMA main.journal_mode=DELETE").Scan(&newMode); err != nil {
-			os.Remove(tmp)
-			return false, err
-		}
-		if !strings.EqualFold(newMode, "delete") {
-			os.Remove(tmp)
-			return false, fmt.Errorf("%s: failed to exit WAL mode before replacement (mode=%q)", path, newMode)
-		}
-		if _, err = srcConn.ExecContext(ctx, "BEGIN EXCLUSIVE"); err != nil {
-			os.Remove(tmp)
-			return false, err
-		}
-		inTx = true
-		// An earlier read-only open (without locking_mode=EXCLUSIVE) can leave
-		// an unowned -shm/0-byte -wal file; remove it here while exclusively locked
-		// and in DELETE mode, before os.Rename exposes path to new connections.
+		// Clean up any stale pre-existing -shm / 0-byte -wal (e.g. from the read-only
+		// preflight) BEFORE os.Rename while still holding BEGIN EXCLUSIVE on path,
+		// without mutating path's header bytes or hardlinked .pre-reserve backup.
 		_ = os.Remove(path + "-shm")
 		if st, serr := os.Stat(path + "-wal"); serr == nil && st.Size() == 0 {
 			_ = os.Remove(path + "-wal")
 		}
 	}
-	if reserveBeforeRename != nil {
-		reserveBeforeRename(path)
-	}
-	if err = os.Rename(tmp, path); err != nil {
+	if err = reserveRename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return false, err
 	}
@@ -706,12 +736,13 @@ func rebuildPlainFromConnContext(ctx context.Context, srcConn *sql.Conn, dst str
 		}
 	}
 	for _, t := range tables {
-		cols, e := tableColumnsContext(ctx, srcConn, t.name)
+		cols, hasRowIDAlias, e := tableColumnsContext(ctx, srcConn, t.name, t.sql)
 		if e != nil {
 			return e
 		}
-		hasRowID := !strings.Contains(strings.ToUpper(t.sql), "WITHOUT ROWID")
-		if err = copyTableRowsFromConn(ctx, srcConn, tx, t.name, cols, hasRowID); err != nil {
+		normSQL := strings.Join(strings.Fields(strings.ToUpper(t.sql)), " ")
+		needExplicitRowID := !strings.Contains(normSQL, "WITHOUT ROWID") && !hasRowIDAlias
+		if err = copyTableRowsFromConn(ctx, srcConn, tx, t.name, cols, needExplicitRowID); err != nil {
 			return fmt.Errorf("copy %s: %w", t.name, err)
 		}
 	}
@@ -875,19 +906,38 @@ func copyTableRowsFromConn(ctx context.Context, srcConn *sql.Conn, dstTx *sql.Tx
 	return insStmt.Close()
 }
 
-func tableColumnsContext(ctx context.Context, q sqlQuerier, table string) ([]string, error) {
-	rows, err := q.QueryContext(ctx, "SELECT name FROM pragma_table_info(?, 'main')", table)
+func tableColumnsContext(ctx context.Context, q sqlQuerier, table, createSQL string) ([]string, bool, error) {
+	rows, err := q.QueryContext(ctx, "SELECT name, type, pk FROM pragma_table_info(?, 'main') ORDER BY cid", table)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	var cols []string
+	var pkCount int
+	var pkType string
+	hasLiteralRowID := false
 	for rows.Next() {
-		var c string
-		if err = rows.Scan(&c); err != nil {
-			return nil, err
+		var c, colType string
+		var pk int
+		if err = rows.Scan(&c, &colType, &pk); err != nil {
+			return nil, false, err
 		}
 		cols = append(cols, quote(c))
+		if strings.EqualFold(c, "rowid") {
+			hasLiteralRowID = true
+		}
+		if pk > 0 {
+			pkCount++
+			pkType = colType
+		}
 	}
-	return cols, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	normSQL := strings.Join(strings.Fields(strings.ToUpper(createSQL)), " ")
+	isIntPKAlias := pkCount == 1 &&
+		strings.EqualFold(strings.TrimSpace(pkType), "INTEGER") &&
+		!strings.Contains(normSQL, "WITHOUT ROWID") &&
+		!strings.Contains(normSQL, "PRIMARY KEY DESC")
+	return cols, isIntPKAlias || hasLiteralRowID, nil
 }
