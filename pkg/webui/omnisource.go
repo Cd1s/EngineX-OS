@@ -214,7 +214,7 @@ func (s *Server) driveListTracks(ctx context.Context, listID string) ([]trackRef
 	if rawID, ok := strings.CutPrefix(listID, "nas\x00"); ok {
 		listing := s.jobs.NASGen() + 1 // before the NAS settings are read (#335)
 		nasProv := s.ownerSelfHosted()
-		if nasProv == nil {
+		if nasProv == nil || nasProv.Config().Protocol == webdavScope { // WebDAV is its own source
 			return nil, fmt.Errorf("nas provider is not enabled")
 		}
 		tracks, err := nasProv.PlaylistTracks(ctx, rawID)
@@ -423,7 +423,9 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 		}
 	}
 	nasListing := g.s.jobs.NASGen() + 1 // before the NAS settings are read (#335)
-	if nasLists, nasProv := g.s.nasPlaylists(ctx); nasProv != nil {
+	// A WebDAV server is listed once, under the WebDAV source. A slot that changes
+	// after this check bumps the generation, so its lists are refused (#335).
+	if nasLists, nasProv := g.s.omniNASPlaylists(ctx); nasProv != nil {
 		for _, p := range nasLists {
 			p.ID = "nas\x00" + p.ID
 			p.Title = "[NAS] " + p.Title
@@ -433,9 +435,13 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 			}
 		}
 	}
+	webdav := g.s.webdavKept()
 	for _, m := range g.s.loadMounts() {
 		if !m.Mounted && !m.Enabled {
 			continue
+		}
+		if strings.EqualFold(m.Protocol, webdavScope) && webdav[webdavRoot(mountWebDAVURL(m))] {
+			continue // a WebDAV server of the WebDAV source: listed there, once
 		}
 		hasEngineLib := false
 		for _, d := range drives {
@@ -543,6 +549,17 @@ func (s *Server) omniTracks(ctx context.Context, query string) ([]trackRef, erro
 func (g *tidalGateway) omniSearch(ctx context.Context, query string) []any {
 	items := []any{}
 	seenFiles := make(map[string]bool)
+	// The WebDAV servers are searched beside the drives, each in the NAS search's
+	// time budget; the WebDAV source's own search already has them.
+	var webdav []trackRef
+	webdavDone := make(chan struct{})
+	go func() {
+		defer close(webdavDone)
+		if g.s.scope() != webdavScope {
+			webdav = g.webdavSearchRefs(ctx, query)
+		}
+	}()
+
 	for _, refs := range each(ctx, g.s.drives(), func(ctx context.Context, d drive) ([]trackRef, error) { return searchDrive(ctx, d, query) }) {
 		for _, ref := range refs {
 			if ref.file != "" {
@@ -558,6 +575,12 @@ func (g *tidalGateway) omniSearch(ctx context.Context, query string) []any {
 			}
 			seenFiles[ref.file] = true
 			items = append(items, g.trackJSON(g.addTrack(ref), ref.track))
+		}
+	}
+	<-webdavDone
+	for _, ref := range webdav {
+		if id := g.addTrack(ref); id != 0 {
+			items = append(items, g.trackJSON(id, ref.track))
 		}
 	}
 	return items

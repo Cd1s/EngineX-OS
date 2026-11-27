@@ -122,7 +122,7 @@ func sourceFailedTitle(provider string, err error) string {
 
 var (
 	tidalNS        = uuid.MustParse("6f1c5a52-3c55-4c2e-9d0b-5c5000000000")
-	providerLabels = map[string]string{"netease": "网易云音乐", "spotify": "Spotify", "deezer": "Deezer", "soundcloud": "SoundCloud", "beatport": "Beatport", localProvider: "USB/SD", "applemusic": "Apple Music", rekordboxScope: "rekordbox", "nas": "NAS"}
+	providerLabels = map[string]string{"netease": "网易云音乐", "spotify": "Spotify", "deezer": "Deezer", "soundcloud": "SoundCloud", "beatport": "Beatport", localProvider: "USB/SD", "applemusic": "Apple Music", rekordboxScope: "rekordbox", "nas": "NAS", webdavScope: "WebDAV"}
 	providerOrder  = map[string]int{"netease": 0, "spotify": 1, "deezer": 2, "soundcloud": 3, "beatport": 4, "applemusic": 5}
 )
 
@@ -440,6 +440,7 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.searches = newSearchCache()
 	g.seedFromStreamingAccounts()
 	g.loadTracks(nasRootID(s.loadNASConfig()))
+	g.dropWebDAV(s.webdavKept()) // rows of a server no longer set up
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
 	g.mux.HandleFunc("POST /v1/enginex/login", s.loginStart)
@@ -1200,7 +1201,7 @@ func playlistJSON(id, title, description string, count int) map[string]any {
 	return map[string]any{"uuid": id, "title": title, "numberOfTracks": count, "numberOfVideos": 0, "description": description, "duration": 0, "lastUpdated": now, "created": now, "type": "USER", "publicPlaylist": false, "url": "http://enginex.lan:8080", "image": "", "squareImage": "", "popularity": 0}
 }
 func (g *tidalGateway) refJSON(id string, ref playlistRef) map[string]any {
-	if ref.provider == listNoticeProvider || ref.provider == rekordboxScope || ref.provider == nasScope {
+	if ref.provider == listNoticeProvider || ref.provider == rekordboxScope || ref.provider == nasScope || ref.provider == webdavScope {
 		return playlistJSON(id, ref.list.Title, "", ref.list.Count)
 	}
 	label := providerLabels[ref.provider]
@@ -1225,6 +1226,10 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 	}
 	if scope == nasScope {
 		g.nasPlaylistsPage(w, r)
+		return
+	}
+	if scope == webdavScope {
+		g.webdavPlaylistsPage(w, r)
 		return
 	}
 	sessions := []*Session{}
@@ -1350,6 +1355,9 @@ func playlistOpenSourceID(ref *playlistRef) string {
 	id := ref.list.ID
 	if ref.provider == nasScope {
 		return fmt.Sprintf("nas:%q", path.Base(id))
+	}
+	if ref.provider == webdavScope {
+		return fmt.Sprintf("webdav:%q", path.Base(id))
 	}
 	if ref.provider != localProvider {
 		return id
@@ -1700,6 +1708,10 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		g.nasTracks(w, r, id, ref, role, order)
 		return
 	}
+	if ref.provider == webdavScope {
+		g.webdavTracks(w, r, id, ref, role, order)
+		return
+	}
 	if ref.provider == localProvider {
 		refs, err := g.s.driveListTracks(r.Context(), ref.list.ID)
 		if err != nil {
@@ -2046,6 +2058,13 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if scope == webdavScope { // every enabled server, each in the NAS search's time budget
+		for _, ref := range g.webdavSearchRefs(r.Context(), query) {
+			if id := g.addTrack(ref); id != 0 {
+				trackItems = append(trackItems, g.trackJSON(id, ref.track))
+			}
+		}
+	}
 	if g.s.omniSource() { // the DJ's own drives first
 		trackItems = append(g.omniSearch(r.Context(), query), trackItems...)
 	}
@@ -2192,7 +2211,7 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 // isolation. Other variable-codec sources download before returning a manifest.
 // fetchFailStatus: a NAS track listed before the NAS changed is gone (#335).
 func fetchFailStatus(err error) int {
-	if errors.Is(err, errNASChanged) {
+	if errors.Is(err, errNASChanged) || errors.Is(err, errWebDAVServerGone) {
 		return http.StatusNotFound
 	}
 	return http.StatusBadGateway

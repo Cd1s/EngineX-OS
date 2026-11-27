@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -249,6 +250,9 @@ var (
 	errWebDAVDuplicate = errors.New("this server is already added")
 	errWebDAVFull      = errors.New("no more servers can be added")
 	errWebDAVGone      = errors.New("this server is no longer in the list")
+	// errWebDAVServerGone: a row's server was removed, moved to another address,
+	// or WebDAV is off. The row answers 404 and is browsed again.
+	errWebDAVServerGone = errors.New("webdav: the server of this row is not set up or not on")
 )
 
 func webdavChangeStatus(err error) int {
@@ -462,4 +466,161 @@ func (s *Server) nasSwitch(w http.ResponseWriter, r *http.Request, val string) {
 type webdavState struct {
 	webdavMu    sync.Mutex
 	webdavConns map[string]*webdavConn
+}
+
+// omniNASPlaylists are OmniSource's [NAS] lists: none for a WebDAV server in the
+// NAS slot, which the WebDAV source lists.
+func (s *Server) omniNASPlaylists(ctx context.Context) ([]providers.Playlist, *providers.SelfHostedProvider) {
+	if s.loadNASConfig().Protocol == webdavScope {
+		return nil, nil
+	}
+	return s.nasPlaylists(ctx)
+}
+
+// webdavListTimeout bounds one server's folder listing, so a slow server shows a
+// row saying so instead of holding up the others.
+const webdavListTimeout = 10 * time.Second
+
+// webdavKept are the IDs of the servers set up (on or off): what their rows,
+// Stems entries and searches may still name.
+func (s *Server) webdavKept() map[string]bool {
+	s.uiMu.Lock()
+	f := s.loadNASFileLocked()
+	s.uiMu.Unlock()
+	keep := map[string]bool{}
+	for _, e := range webdavEntries(f) {
+		keep[e.ID] = true
+	}
+	return keep
+}
+
+// webdavPlaylistsPage is the WebDAV source: every enabled server's folders, each
+// titled with its server's name ("[Studio] House") the way OmniSource names each
+// source's lists. The servers are asked at once.
+func (g *tidalGateway) webdavPlaylistsPage(w http.ResponseWriter, r *http.Request) {
+	favorites := strings.HasSuffix(r.URL.Path, "/favorites/playlists")
+	items := []any{}
+	add := func(v map[string]any) {
+		if favorites {
+			flat := map[string]any{"item": v}
+			for k, f := range v {
+				flat[k] = f
+			}
+			v = flat
+		}
+		items = append(items, v)
+	}
+	if n := len(g.s.stemmed(webdavScope)); n > 0 {
+		add(playlistJSON(stemsListID(webdavScope), "Stems", "", n))
+	}
+	servers := g.s.webdavServers()
+	if len(servers) == 0 {
+		add(playlistJSON(hintPlaylist, sourceFailedTitle(webdavScope, errors.New("not configured")), "", 0))
+		respond(w, page(r, 100, items))
+		return
+	}
+	lists := make([][]providers.Playlist, len(servers))
+	failed := make([]error, len(servers))
+	var wg sync.WaitGroup
+	for i, e := range servers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(r.Context(), webdavListTimeout)
+			defer cancel()
+			lists[i], failed[i] = g.s.webdavProvider(e).Playlists(ctx)
+		}()
+	}
+	wg.Wait()
+	for i, e := range servers {
+		if failed[i] != nil && len(lists[i]) == 0 {
+			ref := playlistRef{provider: listNoticeProvider, list: providers.Playlist{ID: webdavScope + "-" + e.ID, Title: "[" + e.Name + "] " + sourceFailedTitle(webdavScope, failed[i])}}
+			add(g.refJSON(g.addPlaylist(ref), ref))
+			continue
+		}
+		for _, pl := range lists[i] {
+			pl.ID = webdavTrackID(e.ID, pl.ID)
+			pl.Title = "[" + e.Name + "] " + pl.Title
+			ref := playlistRef{session: webdavScope, provider: webdavScope, list: pl}
+			add(g.refJSON(g.addPlaylist(ref), ref))
+		}
+	}
+	respond(w, page(r, 100, items))
+}
+
+// webdavTracks lists one folder of the server the list names. A list of a server
+// that is gone, disabled or switched off answers 404.
+func (g *tidalGateway) webdavTracks(w http.ResponseWriter, r *http.Request, id string, ref playlistRef, role, order string) {
+	server, raw, _ := webdavSplit(ref.list.ID)
+	var e webdavEntry
+	for _, v := range g.s.webdavServers() {
+		if v.ID == server {
+			e = v
+		}
+	}
+	if e.ID == "" {
+		err := errors.New("webdav server is not enabled")
+		g.logPlaylistOpenFailure(r, http.StatusNotFound, id, &ref, err)
+		fail(w, http.StatusNotFound, err)
+		return
+	}
+	tracks, err := g.s.webdavProvider(e).PlaylistTracks(r.Context(), raw)
+	if err != nil {
+		g.logPlaylistOpenFailure(r, http.StatusBadGateway, id, &ref, err)
+		fail(w, http.StatusBadGateway, err)
+		return
+	}
+	if len(tracks) > maxPlaylistTracks {
+		err := errors.New("playlist too large")
+		g.logPlaylistOpenFailure(r, http.StatusBadRequest, id, &ref, err)
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	tracks = webdavTracksOf(e, tracks) // named before tempo and ratings are looked up by ID
+	g.s.cfg.BPM.Enrich(r.Context(), tracks)
+	g.enrichRatingsFromDB(r.Context(), tracks)
+	refs := webdavRefs(tracks)
+	if role != "" && role != "default" {
+		sortStreamingTracks(refs, role, order)
+	}
+	respond(w, page(r, 500, g.refItems(refs)))
+}
+
+// webdavTracksOf are a server's tracks as its rows carry them: the ID names the
+// server (so tempo, ratings, downloads and Stems never cross to another server
+// with the same folders), the album column shows its name.
+func webdavTracksOf(e webdavEntry, tracks []providers.Track) []providers.Track {
+	out := make([]providers.Track, len(tracks))
+	for i, t := range tracks {
+		t.ID = webdavTrackID(e.ID, t.ID)
+		t.Album = e.Name
+		out[i] = t
+	}
+	return out
+}
+
+func webdavRefs(tracks []providers.Track) []trackRef {
+	refs := make([]trackRef, 0, len(tracks))
+	for _, t := range tracks {
+		refs = append(refs, trackRef{track: t, session: webdavScope})
+	}
+	return refs
+}
+
+// webdavSearchRefs searches every enabled server at once, each within the NAS
+// search's time budget (searchTimeout, through searchTracks and its cache under
+// the server's own key): a slow server adds nothing instead of holding up the
+// others, and a removed server's results are never asked for again.
+func (g *tidalGateway) webdavSearchRefs(ctx context.Context, query string) []trackRef {
+	servers := g.s.webdavServers()
+	found := each(ctx, servers, func(ctx context.Context, e webdavEntry) ([]providers.Track, error) {
+		return g.searchTracks(ctx, webdavScope, webdavScope+":"+e.ID, g.s.webdavProvider(e), query)
+	})
+	var refs []trackRef
+	for i, e := range servers {
+		tracks := webdavTracksOf(e, found[i])
+		g.s.cfg.BPM.Enrich(ctx, tracks)
+		refs = append(refs, webdavRefs(tracks)...)
+	}
+	return refs
 }

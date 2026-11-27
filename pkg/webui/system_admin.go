@@ -672,18 +672,23 @@ func (s *Server) unmountRemote(ctx context.Context, m *RemoteMount) error {
 	return err
 }
 
+// mountWebDAVURL is the address of a WebDAV mount.
+func mountWebDAVURL(m RemoteMount) string {
+	scheme := "http"
+	if m.Port == 443 || strings.HasPrefix(m.Host, "https://") {
+		scheme = "https"
+	}
+	cleanHost := strings.TrimPrefix(strings.TrimPrefix(m.Host, "http://"), "https://")
+	urlStr := fmt.Sprintf("%s://%s", scheme, cleanHost)
+	if m.Port > 0 && m.Port != 80 && m.Port != 443 && !strings.Contains(cleanHost, ":") {
+		urlStr = fmt.Sprintf("%s://%s:%d", scheme, cleanHost, m.Port)
+	}
+	return fmt.Sprintf("%s/%s", strings.TrimSuffix(urlStr, "/"), strings.TrimPrefix(m.RemotePath, "/"))
+}
+
 func (s *Server) syncMountToNAS(m RemoteMount) {
 	if strings.ToLower(m.Protocol) == "webdav" {
-		scheme := "http"
-		if m.Port == 443 || strings.HasPrefix(m.Host, "https://") {
-			scheme = "https"
-		}
-		cleanHost := strings.TrimPrefix(strings.TrimPrefix(m.Host, "http://"), "https://")
-		urlStr := fmt.Sprintf("%s://%s", scheme, cleanHost)
-		if m.Port > 0 && m.Port != 80 && m.Port != 443 && !strings.Contains(cleanHost, ":") {
-			urlStr = fmt.Sprintf("%s://%s:%d", scheme, cleanHost, m.Port)
-		}
-		urlStr = fmt.Sprintf("%s/%s", strings.TrimSuffix(urlStr, "/"), strings.TrimPrefix(m.RemotePath, "/"))
+		urlStr := mountWebDAVURL(m)
 		nasCfg := providers.NASConfig{
 			Protocol: "webdav",
 			URL:      urlStr,

@@ -1091,6 +1091,9 @@ func (j *Jobs) fromSelfHosted(ctx context.Context, t providers.Track) (*deemixcl
 		return nil, errors.New("nas: download cache unavailable")
 	}
 	sh := j.selfHostedFor(t)
+	if _, ok := webdavRowServer(t); ok && sh == nil {
+		return nil, errWebDAVServerGone
+	}
 	if sh == nil {
 		return nil, fmt.Errorf("%s: NAS server is not enabled", t.Provider)
 	}

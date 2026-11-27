@@ -380,6 +380,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.stemsRoot = nasRootID(s.loadNASConfig()) // before any request
 	s.stemsMu.Lock()
 	s.scrubStems() // a released file's credentials go before any request
+	s.dropWebDAVStemsLocked(s.webdavKept())
 	s.stemsMu.Unlock()
 	s.tidal = newTidalGateway(s)
 	s.RegisterTunnelRoutes()
