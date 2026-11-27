@@ -2140,6 +2140,143 @@ func TestNASCoverCredentialsOnlyForTheConfiguredOrigin(t *testing.T) {
 	}
 }
 
+// Round 11 (round-10 re-check, item 2): a signed NAS cover follows redirects only within
+// the configured origin, and no redirect carries a Referer. On 5ea09903 the art client
+// followed Go's default policy: a NAS cover redirected to another origin was fetched there
+// with the signed URL (the Subsonic auth or the Plex token) as its Referer. The deck's art
+// request now gets nothing from another origin, and a redirect within the NAS's origin
+// still loads the cover, with no Referer.
+func TestNASCoverRedirectsStayOnTheOrigin(t *testing.T) {
+	const pass, token = "nas-pass-r11-335", "nas-token-r11-335"
+	cover := []byte("\xff\xd8\xff\xe0 r11 cover")
+	for _, c := range []struct{ protocol, to string }{{"subsonic", "elsewhere"}, {"plex", "elsewhere"}, {"subsonic", "home"}, {"plex", "home"}} {
+		t.Run(c.protocol+" to "+c.to, func(t *testing.T) {
+			var mu sync.Mutex
+			var leaked, refs []string
+			elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				leaked = append(leaked, "Referer="+r.Referer()+" Plex="+r.Header.Get("X-Plex-Token"))
+				mu.Unlock()
+				w.Write(cover)
+			}))
+			t.Cleanup(elsewhere.Close)
+			rig := newNASSwitchRig(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/rest/getPlaylists.view":
+					fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlists":{"playlist":[{"id":"pl-42","name":"Club Crate","songCount":1}]}}}`)
+				case "/rest/getPlaylist.view":
+					fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlist":{"id":"pl-42","name":"Club Crate","entry":[{"id":"tr-99","title":"Warehouse Dub","artist":"DJ Test","duration":210,"suffix":"mp3","coverArt":"cv-99"}]}}}`)
+				case "/playlists":
+					fmt.Fprint(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"55","title":"Club Crate","leafCount":1}]}}`)
+				case "/playlists/55/items":
+					fmt.Fprint(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"7","title":"Warehouse Dub","grandparentTitle":"DJ Test","thumb":"/library/metadata/7/thumb","Media":[{"Part":[{"key":"/library/parts/7/file.mp3"}]}]}]}}`)
+				case "/rest/getCoverArt.view", "/library/metadata/7/thumb":
+					target := elsewhere.URL + "/cover.jpg"
+					if c.to == "home" {
+						target = "/moved/cover.jpg"
+					}
+					http.Redirect(w, r, target, http.StatusFound)
+				case "/moved/cover.jpg":
+					mu.Lock()
+					refs = append(refs, r.Referer())
+					mu.Unlock()
+					w.Write(cover)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			body := fmt.Sprintf(`{"protocol":%q,"url":%q,"username":"dj","password":%q,"token":%q,"enabled":true}`, c.protocol, srv.URL, pass, token)
+			w := httptest.NewRecorder()
+			rig.s.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(body)))
+			if w.Code != http.StatusOK {
+				t.Fatalf("save NAS: %d %s", w.Code, w.Body.String())
+			}
+			rig.browse()
+			a := rig.get("/v1/enginex/art?song=Warehouse%20Dub&artist=DJ%20Test")
+			mu.Lock()
+			defer mu.Unlock()
+			if len(leaked) != 0 {
+				t.Fatalf("a NAS cover's redirect reached another origin: %v", leaked)
+			}
+			for _, ref := range refs {
+				if ref != "" {
+					t.Fatalf("a redirect within the NAS's origin carried a Referer: %q", ref)
+				}
+			}
+			if wantCover := c.to == "home"; (a.code == http.StatusOK && bytes.Equal(a.body, cover)) != wantCover {
+				t.Fatalf("the deck's art request: HTTP %d (%d bytes), want the cover=%v", a.code, len(a.body), wantCover)
+			}
+		})
+	}
+}
+
+// Round 11, the same for a cover embedded in a download (Jobs.addCover: the NAS's
+// credentials added back, then the cover fetched over HTTPS). On 5ea09903 the signed cover
+// followed a redirect to another HTTPS origin with the signed URL as its Referer.
+func TestNASCoverEmbedRedirectsStayOnTheOrigin(t *testing.T) {
+	var mu sync.Mutex
+	var leaked []string
+	elsewhere := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		leaked = append(leaked, "Referer="+r.Referer())
+		mu.Unlock()
+		w.Write([]byte("\xff\xd8\xff\xe0 elsewhere"))
+	}))
+	defer elsewhere.Close()
+	nas := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/cover.jpg", http.StatusFound)
+	}))
+	defer nas.Close()
+	dir := t.TempDir()
+	jobs := NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{DownloadDir: dir, AllowLossy: true, Media: nas.Client()}})
+	defer jobs.Close()
+	sh := providers.NewSelfHostedProvider(providers.NASConfig{Protocol: "subsonic", URL: nas.URL, Username: "dj", Password: "pw-r11"}, nil)
+	jobs.mu.Lock()
+	jobs.selfHosted = func() *providers.SelfHostedProvider { return sh }
+	jobs.mu.Unlock()
+	file := filepath.Join(dir, "track.mp3")
+	if err := os.WriteFile(file, testMP3(40), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jobs.addCover(context.Background(), providers.Track{ID: "tr-1", Provider: "subsonic", CoverURL: nas.URL + "/rest/getCoverArt.view?id=cv-1"}, &deemixclient.Download{Path: file})
+	mu.Lock()
+	defer mu.Unlock()
+	if len(leaked) != 0 {
+		t.Fatalf("the signed cover's redirect reached another origin: %v", leaked)
+	}
+}
+
+// Round 11, the class of item 2: the relay probe sends the relay password as a bearer
+// token. On 5ea09903 its client followed a redirect from the configured relay to another
+// origin (here the same host, another port) and Go kept the Authorization header there.
+func TestRelayProbePasswordStaysOnTheRelay(t *testing.T) {
+	var mu sync.Mutex
+	var leaked []string
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		leaked = append(leaked, "Authorization="+r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.Write([]byte(`{"ok":true,"device":"elsewhere","backend":"htdemucs"}`))
+	}))
+	defer elsewhere.Close()
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusFound)
+	}))
+	defer relay.Close()
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	if st := s.probeRelayStems(relay.URL, "relay-pw-r11", nil); st != nil {
+		t.Fatalf("a relay that redirects elsewhere was taken as online: %+v", st)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(leaked) != 0 {
+		t.Fatalf("the relay password followed a redirect to another origin: %v", leaked)
+	}
+}
+
 // assertNoNASSecrets reads the saved NAS state files: no password, token, salted hash or
 // userinfo of the NAS in any of them.
 func assertNoNASSecrets(t *testing.T, rig *nasSwitchRig, cfg providers.NASConfig) {

@@ -18,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 const maxCoverBytes = 2 << 20
@@ -129,7 +131,11 @@ func (c *Client) fetchCover(ctx context.Context, address string) ([]byte, string
 	if err != nil {
 		return nil, "", errors.New("cover: invalid address")
 	}
-	resp, err := c.media().Do(req)
+	// The same redirect policy with any media client: no Referer, and a cover marked as
+	// carrying a credential stays within its origin.
+	hc := *c.media()
+	hc.CheckRedirect = providers.CheckRedirect(false, hc.CheckRedirect)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, "", errors.New("cover: transfer failed")
 	}

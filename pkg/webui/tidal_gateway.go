@@ -1093,11 +1093,13 @@ func (g *tidalGateway) art(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// artClient pools connections: a list opens a dozen covers from one CDN at once.
+// artClient pools connections: a list opens a dozen covers from one CDN at once. No
+// redirect carries a Referer, and a cover URL that carries a credential (a signed NAS
+// cover, marked by artBytes) follows redirects only within its own origin (#335).
 var artClient = func() *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.MaxIdleConnsPerHost = 8
-	return &http.Client{Timeout: 6 * time.Second, Transport: t}
+	return &http.Client{Timeout: 6 * time.Second, Transport: t, CheckRedirect: providers.CheckRedirect(false, nil)}
 }()
 
 // artBytes is the cover at address (https, the configured NAS's own origin, or a
@@ -1116,7 +1118,8 @@ func (g *tidalGateway) artBytes(ctx context.Context, address string) []byte {
 	if rbx {
 		data = g.rbxArt(ctx, address)
 	} else {
-		data = fetchArt(ctx, g.s.nasAuthorize(address)) // a saved row's NAS cover holds no credentials (#335)
+		signed := g.s.nasAuthorize(address) // a saved row's NAS cover holds no credentials (#335)
+		data = fetchArt(credentialContext(ctx, signed), signed)
 	}
 	if data == nil {
 		return nil
@@ -1132,6 +1135,15 @@ func (g *tidalGateway) artBytes(ctx context.Context, address string) []byte {
 		g.artAge = append(g.artAge, address)
 	}
 	return data
+}
+
+// credentialContext marks ctx (providers.WithCredential) when address carries a
+// credential, so its redirects stay within its origin.
+func credentialContext(ctx context.Context, address string) context.Context {
+	if providers.StripURLAuth(address, true) != address {
+		return providers.WithCredential(ctx)
+	}
+	return ctx
 }
 
 func fetchArt(ctx context.Context, address string) []byte {
