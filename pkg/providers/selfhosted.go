@@ -208,6 +208,14 @@ func (p *SelfHostedProvider) OnOrigin(raw string) bool {
 	return raw != "" && err == nil && berr == nil && sameOrigin(u, base)
 }
 
+// SameOrigin reports whether URLs a and b are on one origin (sameOrigin): where a
+// credential saved for one of them may also go.
+func SameOrigin(a, b string) bool {
+	ua, err := url.Parse(strings.TrimSpace(a))
+	ub, berr := url.Parse(strings.TrimSpace(b))
+	return err == nil && berr == nil && sameOrigin(ua, ub)
+}
+
 // sameOrigin reports whether u is on base's origin: the same scheme and host, and
 // the same port once a missing one is read as the scheme's own (80 for http, 443
 // for https). A URL without a scheme or host is on no origin.
