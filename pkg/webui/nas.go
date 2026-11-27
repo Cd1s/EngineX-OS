@@ -383,9 +383,10 @@ func (s *Server) nasAuthorize(address string) string {
 
 // onNASOrigin reports whether address is on the configured NAS's exact origin
 // (scheme, host, effective port): its covers may be fetched over plain http when the
-// NAS itself is http, as its audio is.
+// NAS itself is http, as its audio is. Only an http:// address is asked about: an
+// empty one (a row without a cover) or any other never reads the NAS settings.
 func (s *Server) onNASOrigin(address string) bool {
-	if s == nil {
+	if s == nil || !strings.HasPrefix(address, "http://") {
 		return false
 	}
 	p := s.ownerSelfHosted()
