@@ -383,7 +383,6 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.scrubStems() // a released file's credentials go before any request
 	s.dropServerStemsLocked(kept)
 	s.stemsMu.Unlock()
-	jobs.dropServers(kept) // downloads of servers no longer set up (a download that finished after its removal)
 	s.tidal = newTidalGateway(s)
 	s.RegisterTunnelRoutes()
 	// Resume before accepting requests: a delayed resume could see a newly
@@ -407,6 +406,10 @@ func New(cfg Config, jobs *Jobs) *Server {
 			jobs.p.Deemix.PreferMP3 = func() bool { return s.quality() == quality320k }
 		}
 		jobs.mu.Unlock()
+		// Downloads of servers no longer set up (one that finished after its server was
+		// removed). Only now: the index is read once, filtered by the NAS root set above;
+		// read before it, an index of another root would keep its NAS entries (#335).
+		jobs.dropServers(kept)
 	}
 	return s
 }
