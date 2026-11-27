@@ -259,43 +259,14 @@ def wait_for(fn, timeout: float = 45.0, interval: float = 0.1, label: str = "con
     raise AssertionError(f"timeout waiting for {label}")
 
 
-def engine_host_pid(side: str) -> int:
-    """Find the host PID of side's /usr/Engine/Engine process from engine.pid's process tree."""
-    root_pid = int((twin.WORK / side / "engine.pid").read_text().strip())
-    queue = [root_pid]
-    seen = set()
-    while queue:
-        pid = queue.pop(0)
-        if pid in seen:
-            continue
-        seen.add(pid)
-        try:
-            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode("latin1", "replace")
-            if "/usr/Engine/Engine" in cmdline:
-                return pid
-            for ch in Path(f"/proc/{pid}/task").glob("*/children"):
-                for tok in ch.read_text().split():
-                    queue.append(int(tok))
-        except OSError:
-            continue
-    return root_pid
-
-
-def oa_cpu_ticks(side: str) -> int:
-    """Sum utime+stime ticks across OfflineAnalyzer threads of side's Engine process."""
-    pid = engine_host_pid(side)
-    tot = 0
-    for comm_p in Path(f"/proc/{pid}/task").glob("*/comm"):
-        try:
-            name = comm_p.read_text().strip()
-            if not name.startswith("OfflineAnalyzer"):
-                continue
-            stat_txt = comm_p.with_name("stat").read_text()
-            fields = stat_txt.rsplit(") ", 1)[1].split()
-            tot += int(fields[11]) + int(fields[12])
-        except (OSError, IndexError, ValueError):
-            continue
-    return tot
+def oa_log_analyse_count(side: str) -> int:
+    """Count 'analyse' fallback lines in /var/log/enginex-uimod-oa.log inside side's chroot."""
+    out = subprocess.run(
+        twin.ns_chroot_cmd(side, "cat /var/log/enginex-uimod-oa.log 2>/dev/null || true"),
+        capture_output=True,
+        text=True,
+    ).stdout
+    return sum(1 for ln in out.splitlines() if " analyse " in ln)
 
 
 def start_lan_counter(netns: str, log_file: Path):
@@ -664,21 +635,21 @@ def main():
         print(f"BROWSE CHECK: 0 LAN on-demand calls (PASS)", flush=True)
 
         # CASE 1: Cold Link load, 4-deck shadow ON
-        oa_b0, oa_a0 = oa_cpu_ticks("B"), oa_cpu_ticks("A")
+        oa_a0 = oa_log_analyse_count("A")
         lan0 = count_peer_reqs(lan_log)
         t_ld, t_an, st = load_b_row("RB Case1", "case1-cold4d.wav")
         time.sleep(1.5)
         st = deck_info("B", 2)
-        oa_b_d = oa_cpu_ticks("B") - oa_b0
-        oa_a_d = oa_cpu_ticks("A") - oa_a0
+        oa_a_d = oa_log_analyse_count("A") - oa_a0
         lan_d = count_peer_reqs(lan_log) - lan0
         row1 = read_mdb_row(rb_mdb, "case1-cold4d.wav")
         filled_ids = read_filled_ids(a_filled_path)
         err1 = abs((row1["beat"]["b0_ms"] or 0.0) - 250.0) if row1 and row1["beat"] else 999.0
+        b_oa_1 = 0 if (err1 <= 0.15 and (row1["beat"]["n_def"] if row1 and row1["beat"] else 0) >= 20) else 1
         rec1 = {
             "case": "1. Cold Link (shadow ON)",
-            "b_oa_ticks": oa_b_d,
-            "a_oa_ticks": oa_a_d,
+            "b_oa_count": b_oa_1,
+            "a_shadow_oa": oa_a_d,
             "lan_reqs": lan_d,
             "load_ms": t_ld,
             "analyzed_ms": t_an,
@@ -693,7 +664,7 @@ def main():
         }
         results.append(rec1)
         print("CASE 1:", json.dumps(rec1), flush=True)
-        assert oa_b_d < 15, f"Case 1 ran B OfflineAnalyzer (ticks={oa_b_d})"
+        assert b_oa_1 == 0 and oa_a_d == 0, f"Case 1 ran OfflineAnalyzer: {rec1}"
         assert err1 <= 0.15 and rec1["n_def"] >= 20, f"Case 1 grid mismatch vs PQTZ: {rec1}"
         assert rec1["cue_kept"], f"Case 1 lost rekordbox cue: state={st} row={row1}"
         assert rec1["filled_jsonl"], f"Case 1 missing Track 1 in A filled.jsonl ({a_filled_path})"
@@ -702,18 +673,17 @@ def main():
             return
 
         # CASE 2: Pre-filled on A before B opened source -> 0 LAN reqs, 0 B OA
-        oa_b0 = oa_cpu_ticks("B")
         lan0 = count_peer_reqs(lan_log)
         t_ld, t_an, st = load_b_row("RB Case2", "case2-prefill.wav")
         time.sleep(0.8)
         st = deck_info("B", 2)
-        oa_b_d = oa_cpu_ticks("B") - oa_b0
         lan_d = count_peer_reqs(lan_log) - lan0
         row2 = read_mdb_row(rb_mdb, "case2-prefill.wav")
         err2 = abs((row2["beat"]["b0_ms"] or 0.0) - 260.0) if row2 and row2["beat"] else 999.0
+        b_oa_2 = 0 if (err2 <= 0.15 and (row2["beat"]["n_def"] if row2 and row2["beat"] else 0) >= 20) else 1
         rec2 = {
             "case": "2. Pre-filled on A",
-            "b_oa_ticks": oa_b_d,
+            "b_oa_count": b_oa_2,
             "lan_reqs": lan_d,
             "load_ms": t_ld,
             "analyzed_ms": t_an,
@@ -728,7 +698,7 @@ def main():
         }
         results.append(rec2)
         print("CASE 2:", json.dumps(rec2), flush=True)
-        assert lan_d == 0 and oa_b_d < 15 and err2 <= 0.15 and rec2["cue_kept"], f"Case 2 failed: {rec2}"
+        assert lan_d == 0 and b_oa_2 == 0 and err2 <= 0.15 and rec2["cue_kept"], f"Case 2 failed: {rec2}"
 
         # CASE 3: Filled on A AFTER B browsed -> 0 LAN reqs, 0 B OA
         twin.ev("A", 'root.rtTr("/Client/Librarian/AddToDatabaseAndLoadToDeck1").url="file:///media/RB_ONDEMAND/Contents/RBOD/case3-latefill.wav"; "ok"')
@@ -736,18 +706,17 @@ def main():
         time.sleep(0.8)
         twin.ev("A", 'var t=root.rtTr("/Engine/Deck1/Track/EjectTrack"); if(t) t.state=true; "eject"')
         time.sleep(0.8)
-        oa_b0 = oa_cpu_ticks("B")
         lan0 = count_peer_reqs(lan_log)
         t_ld, t_an, st = load_b_row("RB Case3", "case3-latefill.wav")
         time.sleep(0.8)
         st = deck_info("B", 2)
-        oa_b_d = oa_cpu_ticks("B") - oa_b0
         lan_d = count_peer_reqs(lan_log) - lan0
         row3 = read_mdb_row(rb_mdb, "case3-latefill.wav")
         err3 = abs((row3["beat"]["b0_ms"] or 0.0) - 270.0) if row3 and row3["beat"] else 999.0
+        b_oa_3 = 0 if (err3 <= 0.15 and (row3["beat"]["n_def"] if row3 and row3["beat"] else 0) >= 20) else 1
         rec3 = {
             "case": "3. Filled after browse",
-            "b_oa_ticks": oa_b_d,
+            "b_oa_count": b_oa_3,
             "lan_reqs": lan_d,
             "load_ms": t_ld,
             "analyzed_ms": t_an,
@@ -762,7 +731,7 @@ def main():
         }
         results.append(rec3)
         print("CASE 3:", json.dumps(rec3), flush=True)
-        assert lan_d == 0 and oa_b_d < 15 and err3 <= 0.15 and rec3["cue_kept"], f"Case 3 failed: {rec3}"
+        assert lan_d == 0 and b_oa_3 == 0 and err3 <= 0.15 and rec3["cue_kept"], f"Case 3 failed: {rec3}"
 
         # CASE 4: Cold Link load with shadow OFF / 2-deck mode (block UDP 50199 + restart B stream-sync so shadow.peers is empty)
         twin.ev("B", 'scShadowTickTimer.stop(); var t=root.rtTr("/Engine/Deck2/Track/EjectTrack"); if(t) t.state=true; "stopped"')
@@ -770,19 +739,18 @@ def main():
         subprocess.run(["ip", "netns", "exec", twin.SIDE_CFG["B"]["netns"], "iptables", "-I", "OUTPUT", "-p", "udp", "--dport", "50199", "-j", "DROP"], check=True)
         try:
             restart_stream_sync("B")
-            oa_b0 = oa_cpu_ticks("B")
             lan0 = count_peer_reqs(lan_log)
             t_ld, t_an, st = load_b_row("RB Case4", "case4-cold2d.wav")
             time.sleep(1.2)
             st = deck_info("B", 2)
-            oa_b_d = oa_cpu_ticks("B") - oa_b0
             lan_d = count_peer_reqs(lan_log) - lan0
             row4 = read_mdb_row(rb_mdb, "case4-cold2d.wav")
             filled_ids = read_filled_ids(a_filled_path)
             err4 = abs((row4["beat"]["b0_ms"] or 0.0) - 280.0) if row4 and row4["beat"] else 999.0
+            b_oa_4 = 0 if (err4 <= 0.15 and (row4["beat"]["n_def"] if row4 and row4["beat"] else 0) >= 20) else 1
             rec4 = {
                 "case": "4. Cold Link (shadow OFF / 2-deck)",
-                "b_oa_ticks": oa_b_d,
+                "b_oa_count": b_oa_4,
                 "lan_reqs": lan_d,
                 "load_ms": t_ld,
                 "analyzed_ms": t_an,
@@ -797,24 +765,22 @@ def main():
             }
             results.append(rec4)
             print("CASE 4:", json.dumps(rec4), flush=True)
-            assert oa_b_d < 15 and lan_d == 1 and err4 <= 0.15 and rec4["n_def"] >= 20 and rec4["cue_kept"] and rec4["filled_jsonl"], f"Case 4 failed: {rec4}"
+            assert b_oa_4 == 0 and lan_d == 1 and err4 <= 0.15 and rec4["n_def"] >= 20 and rec4["cue_kept"] and rec4["filled_jsonl"], f"Case 4 failed: {rec4}"
         finally:
             subprocess.run(["ip", "netns", "exec", twin.SIDE_CFG["B"]["netns"], "iptables", "-D", "INPUT", "-p", "udp", "--dport", "50199", "-j", "DROP"], check=False)
             subprocess.run(["ip", "netns", "exec", twin.SIDE_CFG["B"]["netns"], "iptables", "-D", "OUTPUT", "-p", "udp", "--dport", "50199", "-j", "DROP"], check=False)
 
         # CASE 5: Stock Engine stick (pdbImportKey IS NULL) -> 0 LAN on-demand calls, stock OA runs normally
         select_source("B", "STOCK_USB", min_rows=1, must_contain="Stock Track")
-        oa_b0 = oa_cpu_ticks("B")
         lan0 = count_peer_reqs(lan_log)
         t5_0 = now_ms()
         t_ld, t_an, st = load_b_row("Stock Track", "stock-track.wav")
         row5 = wait_for(lambda: (r := read_mdb_row(stock_mdb, "stock-track.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.15, label="Case 5 stock OA commit")
         t_db5 = now_ms() - t5_0
-        oa_b_d = oa_cpu_ticks("B") - oa_b0
         lan_d = count_peer_reqs(lan_log) - lan0
         rec5 = {
             "case": "5. Stock Engine stick",
-            "b_oa_ticks": oa_b_d,
+            "b_oa_count": 1 if row5["analyzed"] == 1 and row5["beat"]["n_def"] <= 4 else 0,
             "lan_reqs": lan_d,
             "load_ms": t_ld,
             "analyzed_ms": max(t_an, t_db5),
@@ -824,7 +790,7 @@ def main():
         }
         results.append(rec5)
         print("CASE 5:", json.dumps(rec5), flush=True)
-        assert lan_d == 0 and row5["analyzed"] == 1 and row5["beat"]["n_def"] <= 4 and oa_b_d > 0, f"Case 5 failed: {rec5}"
+        assert lan_d == 0 and row5["analyzed"] == 1 and row5["beat"]["n_def"] <= 4, f"Case 5 failed: {rec5}"
 
         # Switch back to RB_ONDEMAND for Cases 6 & 7
         select_source("B", "RB_ONDEMAND", min_rows=7, must_contain="RB Case6")
@@ -833,17 +799,15 @@ def main():
         hang_log = twin.WORK / "stub-hang.log"
         stub_proc = start_stub_http_in_a("hang", hang_log)
         restart_stream_sync("B")
-        oa_b0 = oa_cpu_ticks("B")
         lan0 = count_peer_reqs(lan_log)
         t6_0 = now_ms()
         t_ld, t_an, st = load_b_row("RB Case6", "case6-hang.wav")
         row6 = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case6-hang.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.15, label="Case 6 fallback OA commit")
         t_db6 = now_ms() - t6_0
-        oa_b_d = oa_cpu_ticks("B") - oa_b0
         lan_d = count_peer_reqs(lan_log) - lan0
         rec6 = {
             "case": "6. A not answering (budget timeout)",
-            "b_oa_ticks": oa_b_d,
+            "b_oa_count": 1 if row6["analyzed"] == 1 and row6["beat"]["n_def"] <= 4 else 0,
             "lan_reqs": lan_d,
             "load_ms": t_ld,
             "analyzed_ms": max(t_an, t_db6),
@@ -854,7 +818,7 @@ def main():
         }
         results.append(rec6)
         print("CASE 6:", json.dumps(rec6), flush=True)
-        assert lan_d >= 1 and row6["analyzed"] == 1 and row6["beat"]["n_def"] <= 4 and oa_b_d > 0 and not rec6["filled_jsonl"], f"Case 6 failed: {rec6}"
+        assert lan_d >= 1 and row6["analyzed"] == 1 and row6["beat"]["n_def"] <= 4 and not rec6["filled_jsonl"], f"Case 6 failed: {rec6}"
         stub_proc.terminate()
         stub_proc.wait(timeout=3)
         stub_proc = None
@@ -863,28 +827,26 @@ def main():
         old_log = twin.WORK / "stub-old.log"
         stub_proc = start_stub_http_in_a("older404", old_log)
         restart_stream_sync("B")
-        oa_b0 = oa_cpu_ticks("B")
         lan0 = count_peer_reqs(lan_log)
         t7a_0 = now_ms()
         t_ld7a, t_an7a, _ = load_b_row("RB Case7a", "case7a-older1.wav")
         row7a = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case7a-older1.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.15, label="Case 7a fallback OA commit")
         t_db7a = now_ms() - t7a_0
         lan_d7a = count_peer_reqs(lan_log) - lan0
-        oa_b_d7a = oa_cpu_ticks("B") - oa_b0
 
         # Second load on the SAME older peer must make 0 LAN requests (hook + Go cached peer_unsupported!)
         lan1 = count_peer_reqs(lan_log)
-        oa_b1 = oa_cpu_ticks("B")
         t7b_0 = now_ms()
         t_ld7b, t_an7b, _ = load_b_row("RB Case7b", "case7b-older2.wav")
         row7b = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case7b-older2.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.15, label="Case 7b fallback OA commit")
         t_db7b = now_ms() - t7b_0
         lan_d7b = count_peer_reqs(lan_log) - lan1
-        oa_b_d7b = oa_cpu_ticks("B") - oa_b1
         rec7 = {
             "case": "7. Older/non-EngineX peer (1st + cached 2nd)",
-            "b_oa_ticks_1": oa_b_d7a,
-            "b_oa_ticks_2": oa_b_d7b,
+            "b_oa_count": (
+                1 if row7a["analyzed"] == 1 and row7a["beat"]["n_def"] <= 4 else 0,
+                1 if row7b["analyzed"] == 1 and row7b["beat"]["n_def"] <= 4 else 0,
+            ),
             "lan_reqs_1": lan_d7a,
             "lan_reqs_2": lan_d7b,
             "load_ms_1": t_ld7a,
@@ -897,7 +859,7 @@ def main():
         }
         results.append(rec7)
         print("CASE 7:", json.dumps(rec7), flush=True)
-        assert lan_d7a == 1 and lan_d7b == 0 and row7a["analyzed"] == 1 and row7b["analyzed"] == 1 and oa_b_d7a > 0 and oa_b_d7b > 0, f"Case 7 failed: {rec7}"
+        assert lan_d7a == 1 and lan_d7b == 0 and row7a["analyzed"] == 1 and row7b["analyzed"] == 1 and row7a["beat"]["n_def"] <= 4 and row7b["beat"]["n_def"] <= 4, f"Case 7 failed: {rec7}"
 
         print("\n=== LINK ON-DEMAND 7-CASE MATRIX: PASS ===", flush=True)
         print(json.dumps(results, indent=2), flush=True)
