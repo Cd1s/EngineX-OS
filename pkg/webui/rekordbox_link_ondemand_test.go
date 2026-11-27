@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -377,7 +379,7 @@ func TestRekordboxLinkOnDemandFilledRequiresCommitAndDeduplicates(t *testing.T) 
 	for i := 0; i < 3; i++ {
 		if i == 2 {
 			srvA.rbLinkJournalMu.Lock()
-			srvA.rbLinkFilledSeen = nil // simulate restart: must still dedup against filled.jsonl on disk
+			srvA.rbLinkJournals = nil // simulate restart: must still dedup against filled.jsonl on disk
 			srvA.rbLinkJournalMu.Unlock()
 		}
 		if rec := postFilled(); rec.Code != http.StatusOK {
@@ -735,19 +737,326 @@ func TestRekordboxLinkOnDemandOlderAndNonEngineXPeerNegativeCache(t *testing.T) 
 		t.Fatalf("older peer 2nd call was not zero-cost cached: client=%d server=%d", srvB.rbLinkPeerHTTPCount.Load(), olderDataHits.Load())
 	}
 
-	// 2. Verified peer in peerDecks whose port refuses connection: 1st call probes once & neg-caches, 2nd call does 0 LAN.
+	// 2. Refused connection on a peerDecks endpoint is transient (e.g. restarting or moved),
+	//    NEVER negative-cached as peer_unsupported (60 s neg-cache requires explicit verified reply).
 	srvB.shadow.mu.Lock()
 	srvB.shadow.peerPort = cPort
 	srvB.shadow.peerDecks[2] = peerDeck{deckState: deckState{Deck: 2, Link: nonEXUUID}, ip: cHost, at: time.Now()}
 	srvB.shadow.mu.Unlock()
+	srvB.rbLinkPeerCandidates = func(context.Context) []string { return nil }
+	srvB.rbLinkARPCandidates = func(context.Context) []string { return nil }
 	code, st = call(nonEXUUID)
-	if code != http.StatusNotFound || st != "peer_unsupported" {
-		t.Fatalf("verified closed peer 1st call = (%d, %q), want (404, peer_unsupported)", code, st)
+	if code == http.StatusOK || st == "peer_unsupported" || srvB.isLinkPeerNegCached(nonEXUUID, time.Now()) {
+		t.Fatalf("refused connection must be transient, got (%d, %q) neg=%v", code, st, srvB.isLinkPeerNegCached(nonEXUUID, time.Now()))
 	}
-	hits2 := srvB.rbLinkPeerHTTPCount.Load()
-	code, st = call(nonEXUUID)
-	if code != http.StatusNotFound || st != "peer_unsupported" || srvB.rbLinkPeerHTTPCount.Load() != hits2 {
-		t.Fatalf("verified closed peer 2nd call not cached: (%d, %q) hits=%d vs %d", code, st, srvB.rbLinkPeerHTTPCount.Load(), hits2)
+}
+
+// Fails on 91c54855: a refused, timed-out, or reassigned cached owner address returned
+// 404 peer_unsupported / 504 without clearing the stale cache and rediscovering the moved owner.
+func TestRekordboxLinkOnDemandCachedOwnerMovedRefusedAndTimeout(t *testing.T) {
+	mediaRoot, _, libUUID, tr, importKey := setupLinkOnDemandStick(t, "MOVED", 1)
+	const ownerUUID = "f1f10001-1111-2222-3333-444455556666"
+
+	srvNew := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: t.TempDir(), LinkUUID: ownerUUID}, nil)
+	defer srvNew.Close()
+	tsNew := httptest.NewServer(srvNew)
+	defer tsNew.Close()
+	uNew, _ := url.Parse(tsNew.URL)
+
+	reqBody, _ := json.Marshal(rbOnDemandRequest{
+		DB:        "net://" + ownerUUID + "/MOVED/Engine Library/Database2/m.db",
+		UUID:      libUUID,
+		Path:      "../" + tr.Rel,
+		ID:        tr.EngineID,
+		ImportKey: importKey,
+	})
+	doLoad := func(srv *Server) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(reqBody))
+		req.RemoteAddr = "127.0.0.1:6100"
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Subcase A: Cached owner moved and old address now refuses connections (ECONNREFUSED).
+	srvOld := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: t.TempDir(), LinkUUID: ownerUUID}, nil)
+	defer srvOld.Close()
+	tsOld := httptest.NewServer(srvOld)
+	uOld, _ := url.Parse(tsOld.URL)
+
+	srvB := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
+	defer srvB.Close()
+	var activePeer atomic.Value
+	activePeer.Store(uOld.Host)
+	srvB.rbLinkPeerCandidates = func(context.Context) []string { return []string{activePeer.Load().(string)} }
+	srvB.rbLinkARPCandidates = func(context.Context) []string { return nil }
+
+	if rec := doLoad(srvB); rec.Code != http.StatusOK {
+		t.Fatalf("warm cache load failed: %d %s", rec.Code, rec.Body.String())
+	}
+	if ep, ok := srvB.getCachedLinkPeer(ownerUUID, time.Now()); !ok || ep != uOld.Host {
+		t.Fatalf("cached peer = (%q, %v), want %q", ep, ok, uOld.Host)
+	}
+
+	// Shut down old owner (causes ECONNREFUSED on cached address) and expose moved owner in discovery.
+	tsOld.Close()
+	activePeer.Store(uNew.Host)
+
+	recMoved := doLoad(srvB)
+	if recMoved.Code != http.StatusOK {
+		t.Fatalf("moved owner after refused cached addr = (%d, %q, %s), want 200 OK",
+			recMoved.Code, recMoved.Header().Get("X-RB-Status"), recMoved.Body.String())
+	}
+	assertValidOnDemandResponse(t, recMoved.Header(), recMoved.Body.Bytes(), tr)
+	if srvB.isLinkPeerNegCached(ownerUUID, time.Now()) {
+		t.Fatal("refused cached address poisoned 60s negative cache")
+	}
+	if ep, ok := srvB.getCachedLinkPeer(ownerUUID, time.Now()); !ok || ep != uNew.Host {
+		t.Fatalf("cache not updated to moved owner: (%q, %v), want %q", ep, ok, uNew.Host)
+	}
+
+	// Subcase B: Cached owner address now hangs/times out; clear cache and rediscover within remaining budget.
+	hangSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(2 * time.Second):
+		case <-r.Context().Done():
+		}
+	}))
+	defer hangSrv.Close()
+	uHang, _ := url.Parse(hangSrv.URL)
+
+	srvB2 := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
+	defer srvB2.Close()
+	srvB2.rbLinkAnswerBudget = 240 * time.Millisecond
+	srvB2.setCachedLinkPeer(ownerUUID, uHang.Host, time.Now())
+	srvB2.rbLinkPeerCandidates = func(context.Context) []string { return []string{uNew.Host} }
+	srvB2.rbLinkARPCandidates = func(context.Context) []string { return nil }
+
+	t0 := time.Now()
+	recTimeoutMoved := doLoad(srvB2)
+	elapsed := time.Since(t0)
+	if recTimeoutMoved.Code != http.StatusOK {
+		t.Fatalf("moved owner after timed-out cached addr = (%d, %q, %s) in %v, want 200 OK",
+			recTimeoutMoved.Code, recTimeoutMoved.Header().Get("X-RB-Status"), recTimeoutMoved.Body.String(), elapsed)
+	}
+	assertValidOnDemandResponse(t, recTimeoutMoved.Header(), recTimeoutMoved.Body.Bytes(), tr)
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("rediscovery after cached timeout took %v, exceeded budget", elapsed)
+	}
+	if srvB2.isLinkPeerNegCached(ownerUUID, time.Now()) {
+		t.Fatal("timed-out cached address poisoned negative cache")
+	}
+	if ep, ok := srvB2.getCachedLinkPeer(ownerUUID, time.Now()); !ok || ep != uNew.Host {
+		t.Fatalf("cache not updated after cached timeout: (%q, %v), want %q", ep, ok, uNew.Host)
+	}
+
+	// Subcase C: Cached address reassigned to an unrelated 405 HTTP server -> NOT neg-cached, rediscovers real owner.
+	reassigned405 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	defer reassigned405.Close()
+	uReassigned, _ := url.Parse(reassigned405.URL)
+
+	srvB3 := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
+	defer srvB3.Close()
+	srvB3.setCachedLinkPeer(ownerUUID, uReassigned.Host, time.Now())
+	srvB3.rbLinkPeerCandidates = func(context.Context) []string { return []string{uNew.Host} }
+	srvB3.rbLinkARPCandidates = func(context.Context) []string { return nil }
+
+	recReassigned := doLoad(srvB3)
+	if recReassigned.Code != http.StatusOK {
+		t.Fatalf("reassigned cached 405 server blocked rediscovery: (%d, %q, %s)",
+			recReassigned.Code, recReassigned.Header().Get("X-RB-Status"), recReassigned.Body.String())
+	}
+	assertValidOnDemandResponse(t, recReassigned.Header(), recReassigned.Body.Bytes(), tr)
+	if srvB3.isLinkPeerNegCached(ownerUUID, time.Now()) {
+		t.Fatal("reassigned unverified 405 server poisoned negative cache")
+	}
+}
+
+// Fails on 91c54855: replyMatchesOwner treated X-RB-Owner as optional, allowing a discovery
+// reply with only X-RB-UUID (no X-RB-Owner) to establish the peer cache.
+func TestRekordboxLinkOnDemandDiscoveryRequiresOwnerHeaders(t *testing.T) {
+	mediaRoot, _, libUUID, tr, importKey := setupLinkOnDemandStick(t, "REQHDR", 1)
+	const ownerUUID = "f2f20001-1111-2222-3333-444455556666"
+
+	// Peer replying 200 owner with X-RB-UUID ONLY (missing X-RB-Owner) must be rejected.
+	missingOwnerHdr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("X-RB-Status", "owner")
+			w.Header().Set("X-RB-UUID", libUUID)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("X-RB-UUID", libUUID)
+		w.Header().Set("X-RB-Key", tr.Key)
+		w.Header().Set("X-RB-Written", "AAECAwQFBgcICQoLDA0ODw==")
+		w.Header().Set("X-RB-Rules", "5")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("RBXA1\x01\x00\x00\x00\x00"))
+	}))
+	defer missingOwnerHdr.Close()
+	uMissing, _ := url.Parse(missingOwnerHdr.URL)
+
+	// Real unit lacking its Link UUID must NOT answer GET discovery as owner.
+	srvNoLink := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: t.TempDir()}, nil)
+	defer srvNoLink.Close()
+	tsNoLink := httptest.NewServer(srvNoLink)
+	defer tsNoLink.Close()
+	uNoLink, _ := url.Parse(tsNoLink.URL)
+
+	// Real owner with LinkUUID set returns BOTH X-RB-UUID and X-RB-Owner.
+	srvReal := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: t.TempDir(), LinkUUID: ownerUUID}, nil)
+	defer srvReal.Close()
+	tsReal := httptest.NewServer(srvReal)
+	defer tsReal.Close()
+	uReal, _ := url.Parse(tsReal.URL)
+
+	srvB := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir()}, nil)
+	defer srvB.Close()
+	srvB.rbLinkPeerCandidates = func(context.Context) []string { return []string{uMissing.Host, uNoLink.Host} }
+	srvB.rbLinkARPCandidates = func(context.Context) []string { return []string{uReal.Host} }
+
+	body, _ := json.Marshal(rbOnDemandRequest{
+		DB:        "net://" + ownerUUID + "/REQHDR/Engine Library/Database2/m.db",
+		UUID:      libUUID,
+		Path:      "../" + tr.Rel,
+		ID:        tr.EngineID,
+		ImportKey: importKey,
+	})
+	req := httptest.NewRequest(http.MethodPost, RekordboxOnDemandRoute, bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:6101"
+	rec := httptest.NewRecorder()
+	srvB.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("discovery with missing-owner-header candidate failed: %d %s", rec.Code, rec.Body.String())
+	}
+	assertValidOnDemandResponse(t, rec.Header(), rec.Body.Bytes(), tr)
+	if ep, ok := srvB.getCachedLinkPeer(ownerUUID, time.Now()); !ok || ep != uReal.Host {
+		t.Fatalf("cached peer = (%q, %v), want verified %q (not %q)", ep, ok, uReal.Host, uMissing.Host)
+	}
+	if replyMatchesOwner(http.Header{"X-Rb-Uuid": {libUUID}}, ownerUUID, libUUID) {
+		t.Fatal("replyMatchesOwner accepted missing X-RB-Owner")
+	}
+}
+
+// Fails on 91c54855: owner LAN endpoints did not set a socket read deadline on request body
+// decoding, so a stalled body blocked past the 750 ms server budget.
+func TestRekordboxLinkOnDemandServerBodyReadDeadline(t *testing.T) {
+	mediaRoot, _, _, _, _ := setupLinkOnDemandStick(t, "BODYDL", 1)
+	srvA := New(Config{StateDir: t.TempDir(), MediaRoot: mediaRoot, RBStageRoot: t.TempDir(), LinkUUID: "f3f30001-1111-2222-3333-444455556666"}, nil)
+	defer srvA.Close()
+	srvA.rbLinkAnswerBudget = 80 * time.Millisecond
+	tsA := httptest.NewServer(srvA)
+	defer tsA.Close()
+	uA, _ := url.Parse(tsA.URL)
+
+	for _, route := range []string{RekordboxPeerOnDemandRoute, RekordboxPeerFilledRoute} {
+		conn, err := net.DialTimeout("tcp", uA.Host, time.Second)
+		if err != nil {
+			t.Fatalf("%s dial: %v", route, err)
+		}
+		_, err = fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Length: 64\r\nContent-Type: application/json\r\n\r\n{\"uuid\":\"partial", route, uA.Host)
+		if err != nil {
+			conn.Close()
+			t.Fatalf("%s write: %v", route, err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(400 * time.Millisecond))
+		t0 := time.Now()
+		buf := make([]byte, 512)
+		n, rerr := conn.Read(buf)
+		elapsed := time.Since(t0)
+		conn.Close()
+		if rerr != nil || n == 0 {
+			t.Fatalf("%s stalled body did not receive server timeout response in %v: n=%d err=%v", route, elapsed, n, rerr)
+		}
+		respHead := string(buf[:n])
+		if !strings.Contains(respHead, "504 ") || !strings.Contains(respHead, "X-Rb-Status: timeout") {
+			t.Fatalf("%s stalled body response = %q, want 504 with X-Rb-Status: timeout", route, respHead)
+		}
+		if elapsed > 300*time.Millisecond {
+			t.Fatalf("%s stalled body took %v, want ~80 ms", route, elapsed)
+		}
+	}
+}
+
+// Fails on 91c54855: journal dedup used one global mutex across sticks and an unbounded map.
+func TestRekordboxLinkOnDemandBoundedPerStickJournalDedup(t *testing.T) {
+	stageRoot := t.TempDir()
+	srv := New(Config{StateDir: t.TempDir(), MediaRoot: t.TempDir(), RBStageRoot: stageRoot}, nil)
+	defer srv.Close()
+	srv.rbLinkJournalCap = 4
+
+	makeRes := func(i int) *bridge.OnDemandResult {
+		return &bridge.OnDemandResult{
+			Key:     fmt.Sprintf("track-%d.mp3", i),
+			Written: []byte{byte(i), 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
+			Rules:   5,
+			RowHash: fmt.Sprintf("hash-%d", i),
+		}
+	}
+
+	// 1. Per-stick isolation: holding stick A's lock MUST NOT block stick B's append.
+	jA := srv.stickJournal("stick-a")
+	jA.mu.Lock()
+	doneB := make(chan error, 1)
+	go func() {
+		appended, err := srv.appendRemoteFilledJournal(context.Background(), "stick-b", 1, makeRes(1))
+		if err == nil && !appended {
+			err = errors.New("expected stick-b append")
+		}
+		doneB <- err
+	}()
+	select {
+	case err := <-doneB:
+		jA.mu.Unlock()
+		if err != nil {
+			t.Fatalf("stick-b failed while stick-a locked: %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		jA.mu.Unlock()
+		t.Fatal("stick-b blocked waiting on stick-a's journal lock")
+	}
+
+	// 2. Bounded per-stick seen cap: inserting 12 distinct keys keeps in-memory map <= cap (4)
+	//    and still deduplicates recent keys without appending duplicates.
+	for i := 1; i <= 12; i++ {
+		appended, err := srv.appendRemoteFilledJournal(context.Background(), "stick-cap", int64(i), makeRes(i))
+		if err != nil || !appended {
+			t.Fatalf("stick-cap append %d = (%v, %v)", i, appended, err)
+		}
+	}
+	jCap := srv.stickJournal("stick-cap")
+	jCap.mu.Lock()
+	seenLen := len(jCap.seen)
+	orderLen := len(jCap.order)
+	jCap.mu.Unlock()
+	if seenLen > 4 || orderLen > 4 {
+		t.Fatalf("stick-cap dedup index grew unbounded: seen=%d order=%d, want <= 4", seenLen, orderLen)
+	}
+	if appended, err := srv.appendRemoteFilledJournal(context.Background(), "stick-cap", 12, makeRes(12)); err != nil || appended {
+		t.Fatalf("recent key duplicate = (%v, %v), want (false, nil)", appended, err)
+	}
+
+	// 3. Tracked stick map is capped at rbLinkMaxTrackedSticks (16).
+	for i := 0; i < rbLinkMaxTrackedSticks+8; i++ {
+		_, err := srv.appendRemoteFilledJournal(context.Background(), fmt.Sprintf("stick-many-%02d", i), 1, makeRes(i+1))
+		if err != nil {
+			t.Fatalf("stick-many-%02d: %v", i, err)
+		}
+	}
+	srv.rbLinkJournalMu.Lock()
+	stickCount := len(srv.rbLinkJournals)
+	srv.rbLinkJournalMu.Unlock()
+	if stickCount > rbLinkMaxTrackedSticks {
+		t.Fatalf("tracked stick journals = %d, want <= %d", stickCount, rbLinkMaxTrackedSticks)
+	}
+
+	// 4. Cancelled context aborts journal append immediately without touching disk.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := srv.appendRemoteFilledJournal(cancelled, "stick-cancel", 1, makeRes(1)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled journal append err = %v, want context.Canceled", err)
 	}
 }
 

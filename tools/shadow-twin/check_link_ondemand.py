@@ -360,18 +360,25 @@ def start_side_custom(side: str, src_dir: Path, extra_args: str = ""):
     sdir = twin.WORK / side
     for f in ("shadow-twin-sync", "stream-sync", "alsa-null-fixture.so", "alsa-clock.txt"):
         (sdir / "tmp" / f).unlink(missing_ok=True)
-    hook_so = src_dir / "rootfs-overlay/etc/enginex/libengine-ui-hook.so"
-    shutil.copy2(hook_so, sdir / "tmp/libengine-ui-hook.so")
-    subprocess.run(
-        twin.ns_chroot_cmd(side, "cp -f /tmp/libengine-ui-hook.so /etc/enginex/libengine-ui-hook.so && chmod 755 /etc/enginex/libengine-ui-hook.so"),
-        check=True,
-    )
+    # Sync /etc/enginex overlay files (libengine-ui-hook.so, engine-ui-guard, etc.) into the live chroot.
+    etc_ov = src_dir / "rootfs-overlay/etc/enginex"
+    if etc_ov.is_dir():
+        for f in etc_ov.iterdir():
+            if f.is_file():
+                dst = sdir / "tmp" / f.name
+                shutil.copy2(f, dst)
+                subprocess.run(
+                    twin.ns_chroot_cmd(side, f"cp -f /tmp/{f.name} /etc/enginex/{f.name} && chmod 755 /etc/enginex/{f.name}"),
+                    check=True,
+                )
+                dst.unlink(missing_ok=True)
     shutil.copy2(twin.WORK / "bin/enginex-suite", sdir / "tmp/shadow-twin-sync")
     (sdir / "tmp/stream-sync").symlink_to("shadow-twin-sync")
     shutil.copy2(twin.WORK / "bin/alsa-null-fixture.so", sdir / "tmp/alsa-null-fixture.so")
     (sdir / "tmp/home").mkdir(parents=True, exist_ok=True)
     (sdir / "tmp/ui-eval.js").write_text("noop\nvoid 0;\n")
     (sdir / "tmp/engine_runguard.lock").unlink(missing_ok=True)
+    (sdir / "data/enginex/ui/boot-ready").unlink(missing_ok=True)
     subprocess.run(
         twin.ns_chroot_cmd(side, "touch /run/enginex-rbx-analysis-trace && /etc/enginex/engine-ui-guard pre"),
         check=True,
@@ -406,6 +413,110 @@ def start_side_custom(side: str, src_dir: Path, extra_args: str = ""):
     )
     proc_eng = subprocess.Popen(twin.ns_chroot_cmd(side, eng_cmd), stdout=eng_log, stderr=subprocess.STDOUT)
     (sdir / "engine.pid").write_text(str(proc_eng.pid))
+
+
+def _engine_pid_alive(sdir: Path) -> bool:
+    pid_file = sdir / "engine.pid"
+    if not pid_file.is_file():
+        return True
+    try:
+        pid = int(pid_file.read_text().strip())
+    except Exception:
+        return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _ui_pack_acknowledged(sdir: Path) -> bool:
+    """Return True once the EngineX UI pack wrote data/enginex/ui/boot-ready == boot-token."""
+    ui_dir = sdir / "data/enginex/ui"
+    tok_f = ui_dir / "boot-token"
+    rdy_f = ui_dir / "boot-ready"
+    if not tok_f.is_file() or not rdy_f.is_file():
+        return False
+    tok = tok_f.read_text(errors="replace").strip()
+    rdy = rdy_f.read_text(errors="replace").strip()
+    return bool(tok) and tok == rdy
+
+
+def wait_ui_pack_ready(
+    side: str,
+    *,
+    sdir: Path | None = None,
+    stall_timeout: float = 60.0,
+    max_wait: float = 180.0,
+    poll_interval: float = 0.25,
+    evj_fn=None,
+    alive_fn=None,
+    now_fn=time.monotonic,
+    sleep_fn=time.sleep,
+) -> dict:
+    """Wait until Engine finishes loading its UI packs and QML bootstrap responds.
+
+    Unlike twin.wait_engine_ready's fixed 55 s cutoff, this watches actual UI-pack readiness
+    (boot-ready == boot-token or SchedulerManager + live QML bootstrap), fails fast if Engine
+    exits, and keeps waiting while Engine is alive and making log/boot progress up to max_wait.
+    """
+    side_dir = sdir if sdir is not None else (twin.WORK / side)
+    log_path = side_dir / "logs/engine.log"
+    run_evj = evj_fn if evj_fn is not None else twin.evj
+    check_alive = alive_fn if alive_fn is not None else (lambda: _engine_pid_alive(side_dir))
+
+    t0 = now_fn()
+    hard_deadline = t0 + max_wait
+    last_progress = t0
+    last_log_size = -1
+    pack_ready = False
+
+    def diag_tail() -> str:
+        tail = ""
+        if log_path.is_file():
+            lines = log_path.read_text(errors="replace").splitlines()
+            tail = " | ".join(lines[-6:])
+        return f"elapsed={now_fn() - t0:.1f}s log_bytes={max(last_log_size, 0)} boot_ack={_ui_pack_acknowledged(side_dir)} tail={tail!r}"
+
+    while True:
+        now = now_fn()
+        if not check_alive():
+            raise RuntimeError(f"{side}: Engine exited before UI packs became ready ({diag_tail()})")
+
+        if log_path.is_file():
+            sz = log_path.stat().st_size
+            if sz > last_log_size:
+                last_log_size = sz
+                last_progress = now
+
+        if not pack_ready:
+            if _ui_pack_acknowledged(side_dir):
+                pack_ready = True
+                last_progress = now
+            elif log_path.is_file():
+                txt = log_path.read_text(errors="replace")
+                if "SchedulerManager:" in txt:
+                    pack_ready = True
+                    last_progress = now
+
+        if pack_ready:
+            try:
+                res = run_evj(side, twin.BOOTSTRAP_JS, name="boot", timeout=6.0)
+                if isinstance(res, dict) and res.get("role"):
+                    sleep_fn(1.5)
+                    res2 = run_evj(side, twin.BOOTSTRAP_JS, name="boot2", timeout=6.0)
+                    return res2 if isinstance(res2, dict) and res2.get("role") else res
+            except Exception:
+                pass
+
+        now = now_fn()
+        if now >= hard_deadline:
+            raise TimeoutError(f"{side}: Engine UI packs did not become ready within {max_wait:.0f}s ({diag_tail()})")
+        if now - last_progress >= stall_timeout:
+            raise TimeoutError(f"{side}: Engine UI pack load stalled for {stall_timeout:.0f}s without progress ({diag_tail()})")
+        sleep_fn(poll_interval)
 
 
 def restart_stream_sync(side: str):
@@ -674,7 +785,7 @@ def main():
     try:
         start_side_custom("A", src_dir, extra_args="-extraDriveDir=/media/RB_ONDEMAND -extraDriveDir=/media/STOCK_USB")
         start_side_custom("B", src_dir, extra_args="")
-        twin.both(twin.wait_engine_ready)
+        twin.both(wait_ui_pack_ready)
         time.sleep(2.5)
 
         # Pre-fill Case 2 track on Unit A BEFORE Unit B opens the remote source.

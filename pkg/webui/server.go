@@ -135,8 +135,9 @@ type Server struct {
 	rbLinkPeerCandidates func(context.Context) []string // test override for 2-deck TCP peer discovery
 	rbLinkARPCandidates  func(context.Context) []string // test override for 2-deck ARP peer discovery
 	rbLinkProcReadFile   func(string) ([]byte, error)   // test override for /proc file reads
-	rbLinkJournalMu      sync.Mutex                     // serializes filled.jsonl appends on stick owner
-	rbLinkFilledSeen     map[string]bool                // in-memory dedup of committed filled.jsonl entries
+	rbLinkJournalMu      sync.Mutex                     // guards rbLinkJournals map lookup/eviction only (never held across I/O)
+	rbLinkJournals       map[string]*rbLinkStickJournal // per-stick bounded filled.jsonl dedup & append lock
+	rbLinkJournalCap     int                            // test override; 0 uses rbLinkMaxDedupPerStick
 	rbLinkLANQueued      atomic.Int32                   // bounded queued+active LAN /peer/rekordbox/* admission
 	rbLinkLANSem         chan struct{}                  // bounded concurrent active LAN /peer/rekordbox/* slots
 	rbLinkPeerHTTPCount  atomic.Int64                   // outbound LAN HTTP probes/fetches made by Link relay

@@ -37,7 +37,19 @@ const (
 	rbLinkMaxConcurrentLAN    = 4
 	rbLinkMaxQueuedLAN        = 16
 	rbLinkMaxBodyBytes        = 4 << 20
+	rbLinkMaxTrackedSticks    = 16
+	rbLinkMaxDedupPerStick    = 4096
 )
+
+type rbLinkStickJournal struct {
+	mu      sync.Mutex
+	loaded  bool
+	size    int64
+	mtimeNS int64
+	seen    map[string]struct{}
+	order   []string
+	lastUse time.Time
+}
 
 var errLinkFillNotCommitted = errors.New("track fill not committed in library")
 
@@ -224,7 +236,7 @@ func (s *Server) rbLinkHTTPClient() *http.Client {
 				return http.ErrUseLastResponse
 			},
 			Transport: &http.Transport{
-				DialContext:         (&net.Dialer{Timeout: 350 * time.Millisecond}).DialContext,
+				DialContext:         (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext,
 				MaxIdleConnsPerHost: 4,
 				IdleConnTimeout:     30 * time.Second,
 			},
@@ -510,28 +522,31 @@ func (s *Server) setLinkPeerNegCached(peerUUID string, now time.Time) {
 	delete(s.rbLinkPeers, peerUUID)
 }
 
-func isConnRefused(err error) bool {
+func isTimeoutErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	return errors.Is(err, syscall.ECONNREFUSED) || strings.Contains(strings.ToLower(err.Error()), "connection refused")
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 func replyMatchesOwner(h http.Header, peerUUID, libUUID string) bool {
 	if strings.TrimSpace(h.Get("X-RB-UUID")) != libUUID {
 		return false
 	}
-	if rawOwner := strings.TrimSpace(h.Get("X-RB-Owner")); rawOwner != "" {
-		return normalizeLinkUUID(rawOwner) == peerUUID
-	}
-	return true
+	rawOwner := strings.TrimSpace(h.Get("X-RB-Owner"))
+	return rawOwner != "" && normalizeLinkUUID(rawOwner) == peerUUID
 }
 
 type rbLinkOwnerResult struct {
 	endpoint    string
-	verified    bool // true when endpoint is verified as peerUUID or verified owner of libUUID
-	unsupported bool // true only when verified peerUUID does not support Link on-demand
-	notFound    bool // true only when verified peerUUID confirmed stick is not mounted there
+	verified    bool // true when endpoint is live-verified for this request (probe or shadow.peerDecks)
+	fromCache   bool // true when endpoint came from local cache (past verification, not present)
+	unsupported bool // true only when a NOW-verified peerUUID explicitly replied not-supported
+	notFound    bool // true only when a NOW-verified peerUUID confirmed stick is not mounted there
 	timedOut    bool
 }
 
@@ -587,7 +602,7 @@ func (s *Server) probeLinkOwner(ctx context.Context, endpoint, peerUUID, libUUID
 	resp, err := s.rbLinkHTTPClient().Do(req)
 	if err != nil {
 		return rbLinkOwnerResult{
-			timedOut: errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded),
+			timedOut: isTimeoutErr(err) || errors.Is(ctx.Err(), context.DeadlineExceeded),
 		}
 	}
 	defer resp.Body.Close()
@@ -618,7 +633,7 @@ func (s *Server) probeLinkOwner(ctx context.Context, endpoint, peerUUID, libUUID
 func (s *Server) resolveLinkOwner(ctx context.Context, peerUUID, libUUID, volHint, excludeEP string) rbLinkOwnerResult {
 	now := time.Now()
 	if ep, ok := s.getCachedLinkPeer(peerUUID, now); ok && ep != excludeEP {
-		return rbLinkOwnerResult{endpoint: ep, verified: true}
+		return rbLinkOwnerResult{endpoint: ep, fromCache: true}
 	}
 
 	var shadowPeers []string
@@ -739,9 +754,8 @@ func (s *Server) fetchFromLinkPeer(ctx context.Context, endpoint, peerUUID, libU
 	resp, err := s.rbLinkHTTPClient().Do(httpReq)
 	if err != nil {
 		return rbLinkFetchOutcome{
-			unsupported: isConnRefused(err),
-			timedOut:    errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded),
-			err:         err,
+			timedOut: isTimeoutErr(err) || errors.Is(ctx.Err(), context.DeadlineExceeded),
+			err:      err,
 		}
 	}
 	defer resp.Body.Close()
@@ -751,7 +765,7 @@ func (s *Server) fetchFromLinkPeer(ctx context.Context, endpoint, peerUUID, libU
 		body, rerr := io.ReadAll(io.LimitReader(resp.Body, rbLinkMaxBodyBytes+1))
 		if rerr != nil {
 			return rbLinkFetchOutcome{
-				timedOut: errors.Is(rerr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded),
+				timedOut: isTimeoutErr(rerr) || errors.Is(ctx.Err(), context.DeadlineExceeded),
 				err:      rerr,
 			}
 		}
@@ -813,8 +827,11 @@ func (s *Server) serveRekordboxLinkRelay(w http.ResponseWriter, r *http.Request,
 	ctx, cancel := context.WithTimeout(r.Context(), s.rbLinkBudget())
 	defer cancel()
 
-	// Resolve verified owner (retrying once without stale cached endpoint if cache moved).
+	// Resolve verified owner; a refused, timed-out, or reassigned cached address is transient,
+	// so clear it and rediscover within the remaining shared budget. Only an explicit
+	// not-supported HTTP reply from the NOW-verified owner sets the 60 s negative cache.
 	excludeEP := ""
+	priorTimedOut := false
 	for attempt := 0; attempt < 2; attempt++ {
 		owner := s.resolveLinkOwner(ctx, peerUUID, libUUID, volHint, excludeEP)
 		if owner.unsupported && owner.verified {
@@ -829,7 +846,7 @@ func (s *Server) serveRekordboxLinkRelay(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		if owner.endpoint == "" {
-			if owner.timedOut || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if priorTimedOut || owner.timedOut || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				writeOnDemandError(w, context.DeadlineExceeded)
 				return
 			}
@@ -837,17 +854,25 @@ func (s *Server) serveRekordboxLinkRelay(w http.ResponseWriter, r *http.Request,
 			return
 		}
 
-		out := s.fetchFromLinkPeer(ctx, owner.endpoint, peerUUID, libUUID, peerPayload)
+		fetchCtx := ctx
+		var fetchCancel context.CancelFunc
+		if owner.fromCache && attempt == 0 {
+			if dl, ok := ctx.Deadline(); ok {
+				if rem := time.Until(dl); rem > 30*time.Millisecond {
+					fetchCtx, fetchCancel = context.WithTimeout(ctx, rem*2/3)
+				}
+			}
+		}
+		out := s.fetchFromLinkPeer(fetchCtx, owner.endpoint, peerUUID, libUUID, peerPayload)
+		if fetchCancel != nil {
+			fetchCancel()
+		}
 		if out.status == http.StatusOK {
 			s.setCachedLinkPeer(peerUUID, owner.endpoint, time.Now())
 			writeOnDemandProxyResponse(w, out)
 			return
 		}
-		if out.timedOut || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			writeOnDemandError(w, context.DeadlineExceeded)
-			return
-		}
-		if out.unsupported && owner.verified {
+		if out.unsupported && s.peerDecksHasLink(ctx, owner.endpoint, peerUUID) {
 			s.setLinkPeerNegCached(peerUUID, time.Now())
 			w.Header().Set("X-RB-Status", "peer_unsupported")
 			fail(w, http.StatusNotFound, errors.New("peer does not support link on-demand"))
@@ -858,11 +883,20 @@ func (s *Server) serveRekordboxLinkRelay(w http.ResponseWriter, r *http.Request,
 			fail(w, out.status, errors.New("peer: "+out.rbStatus))
 			return
 		}
-		// Stale cached endpoint or moved stick: clear cache and re-resolve once excluding it.
+
+		// Transient connection error, timeout, or stale/moved endpoint: clear cache and
+		// rediscover within the remaining shared budget (never negative-cache as unsupported).
 		s.clearCachedLinkPeer(peerUUID, owner.endpoint)
-		if attempt == 0 && excludeEP == "" {
+		if out.timedOut {
+			priorTimedOut = true
+		}
+		if attempt == 0 && excludeEP == "" && ctx.Err() == nil {
 			excludeEP = owner.endpoint
 			continue
+		}
+		if priorTimedOut || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			writeOnDemandError(w, context.DeadlineExceeded)
+			return
 		}
 		if out.rbStatus == "not_found" {
 			writeOnDemandError(w, bridge.ErrOnDemandNotFound)
@@ -918,19 +952,31 @@ func (s *Server) serveRekordboxFilledNotify(w http.ResponseWriter, r *http.Reque
 				case <-ctx.Done():
 				}
 			}()
-			owner := s.resolveLinkOwner(ctx, peerUUID, libUUID, volHint, "")
-			if !owner.verified || owner.endpoint == "" || owner.unsupported || owner.notFound {
+			excludeEP := ""
+			for attempt := 0; attempt < 2; attempt++ {
+				owner := s.resolveLinkOwner(ctx, peerUUID, libUUID, volHint, excludeEP)
+				if (!owner.verified && !owner.fromCache) || owner.endpoint == "" || owner.unsupported || owner.notFound {
+					return
+				}
+				httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.linkPeerURL(owner.endpoint, RekordboxPeerFilledRoute), bytes.NewReader(body))
+				if err != nil {
+					return
+				}
+				httpReq.Header.Set("Content-Type", "application/json")
+				resp, err := s.rbLinkHTTPClient().Do(httpReq)
+				if err == nil {
+					_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<10))
+					resp.Body.Close()
+					if resp.StatusCode == http.StatusOK {
+						return
+					}
+				}
+				s.clearCachedLinkPeer(peerUUID, owner.endpoint)
+				if attempt == 0 && excludeEP == "" && ctx.Err() == nil {
+					excludeEP = owner.endpoint
+					continue
+				}
 				return
-			}
-			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.linkPeerURL(owner.endpoint, RekordboxPeerFilledRoute), bytes.NewReader(body))
-			if err != nil {
-				return
-			}
-			httpReq.Header.Set("Content-Type", "application/json")
-			resp, err := s.rbLinkHTTPClient().Do(httpReq)
-			if err == nil {
-				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<10))
-				resp.Body.Close()
 			}
 		}(payload)
 	}
@@ -1004,8 +1050,34 @@ func lookupLiveLibraryUUID(ctx context.Context, mount string) (string, error) {
 	return strings.TrimSpace(liveUUID), nil
 }
 
+// decodePeerJSON enforces ctx's deadline on the underlying TCP read so a stalled request body
+// cannot outlive the server-side budget. On error, it closes the connection instead of clearing
+// the read deadline so net/http flushes the error response immediately without draining r.Body.
+func decodePeerJSON(ctx context.Context, w http.ResponseWriter, r *http.Request, dst any) bool {
+	rc := http.NewResponseController(w)
+	deadlineSet := false
+	if dl, ok := ctx.Deadline(); ok {
+		deadlineSet = rc.SetReadDeadline(dl) == nil
+	}
+	err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(dst)
+	if err == nil {
+		if deadlineSet {
+			_ = rc.SetReadDeadline(time.Time{})
+		}
+		return true
+	}
+	w.Header().Set("Connection", "close")
+	if isTimeoutErr(err) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		writeOnDemandError(w, context.DeadlineExceeded)
+		return false
+	}
+	w.Header().Set("X-RB-Status", "bad_request")
+	fail(w, http.StatusBadRequest, err)
+	return false
+}
+
 // handlePeerRekordboxOnDemand answers LAN peers on RekordboxPeerOnDemandRoute:
-//   - GET  (?uuid=&owner=&vol=): zero-build owner verification returning X-RB-Status: owner + X-RB-UUID (+ X-RB-Owner).
+//   - GET  (?uuid=&owner=&vol=): zero-build owner verification returning X-RB-Status: owner + X-RB-UUID + X-RB-Owner.
 //   - POST (JSON): verified single-flight RBXA1 build keyed strictly by the owner's own m.db row values.
 func (s *Server) handlePeerRekordboxOnDemand(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
@@ -1040,12 +1112,14 @@ func (s *Server) handlePeerRekordboxOnDemand(w http.ResponseWriter, r *http.Requ
 			fail(w, http.StatusBadRequest, errors.New("valid uuid required"))
 			return
 		}
-		if ownLink != "" {
-			w.Header().Set("X-RB-Owner", ownLink)
-			if reqOwner != "" && reqOwner != ownLink {
-				writeOnDemandError(w, bridge.ErrOnDemandNotFound)
-				return
-			}
+		if ownLink == "" {
+			writeOnDemandError(w, bridge.ErrOnDemandUnavailable)
+			return
+		}
+		w.Header().Set("X-RB-Owner", ownLink)
+		if reqOwner != "" && reqOwner != ownLink {
+			writeOnDemandError(w, bridge.ErrOnDemandNotFound)
+			return
 		}
 		mount, ok := s.findMountedStickByUUID(libUUID, volHint)
 		if !ok {
@@ -1068,9 +1142,7 @@ func (s *Server) handlePeerRekordboxOnDemand(w http.ResponseWriter, r *http.Requ
 	}
 
 	var req rbPeerOnDemandRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&req); err != nil {
-		w.Header().Set("X-RB-Status", "bad_request")
-		fail(w, http.StatusBadRequest, err)
+	if !decodePeerJSON(ctx, w, r, &req) {
 		return
 	}
 	libUUID := strings.TrimSpace(req.UUID)
@@ -1078,6 +1150,10 @@ func (s *Server) handlePeerRekordboxOnDemand(w http.ResponseWriter, r *http.Requ
 	if !validRBStageUUID(libUUID) || strings.TrimSpace(req.Path) == "" || req.ImportKey <= 0 {
 		w.Header().Set("X-RB-Status", "bad_request")
 		fail(w, http.StatusBadRequest, errors.New("uuid, path, and positive importKey required"))
+		return
+	}
+	if reqOwner != "" && ownLink == "" {
+		writeOnDemandError(w, bridge.ErrOnDemandUnavailable)
 		return
 	}
 	if ownLink != "" && reqOwner != "" && reqOwner != ownLink {
@@ -1219,9 +1295,63 @@ func filledJournalDedupKey(uuid string, line rbFilledJournalLine) string {
 		uuid, line.ID, line.Key, line.WR, line.WRNM, line.AL, line.V, line.W)
 }
 
-func (s *Server) appendRemoteFilledJournal(uuid string, engineID int64, res *bridge.OnDemandResult) (bool, error) {
+func (s *Server) stickJournal(uuid string) *rbLinkStickJournal {
+	now := time.Now()
+	s.rbLinkJournalMu.Lock()
+	defer s.rbLinkJournalMu.Unlock()
+	if s.rbLinkJournals == nil {
+		s.rbLinkJournals = map[string]*rbLinkStickJournal{}
+	}
+	if j, ok := s.rbLinkJournals[uuid]; ok {
+		j.lastUse = now
+		return j
+	}
+	if len(s.rbLinkJournals) >= rbLinkMaxTrackedSticks {
+		var oldestKey string
+		var oldestAt time.Time
+		for k, v := range s.rbLinkJournals {
+			if oldestKey == "" || v.lastUse.Before(oldestAt) {
+				oldestKey = k
+				oldestAt = v.lastUse
+			}
+		}
+		if oldestKey != "" {
+			delete(s.rbLinkJournals, oldestKey)
+		}
+	}
+	j := &rbLinkStickJournal{
+		seen:    map[string]struct{}{},
+		lastUse: now,
+	}
+	s.rbLinkJournals[uuid] = j
+	return j
+}
+
+func (j *rbLinkStickJournal) record(key string, capLimit int) {
+	if capLimit <= 0 {
+		capLimit = rbLinkMaxDedupPerStick
+	}
+	if j.seen == nil {
+		j.seen = map[string]struct{}{}
+	}
+	if _, ok := j.seen[key]; ok {
+		return
+	}
+	for len(j.order) >= capLimit && len(j.order) > 0 {
+		evict := j.order[0]
+		j.order = j.order[1:]
+		delete(j.seen, evict)
+	}
+	j.seen[key] = struct{}{}
+	j.order = append(j.order, key)
+}
+
+func (s *Server) appendRemoteFilledJournal(ctx context.Context, uuid string, engineID int64, res *bridge.OnDemandResult) (bool, error) {
 	if !validRBStageUUID(uuid) || engineID <= 0 || res == nil || res.Key == "" || len(res.Written) == 0 {
 		return false, errors.New("invalid filled journal entry")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	root, err := s.rbStageRoot()
 	if err != nil {
@@ -1240,29 +1370,68 @@ func (s *Server) appendRemoteFilledJournal(uuid string, engineID int64, res *bri
 		line.WRNM = base64.StdEncoding.EncodeToString(res.WrittenNoMain)
 	}
 	dedupKey := filledJournalDedupKey(uuid, line)
+	capLimit := s.rbLinkJournalCap
+	if capLimit <= 0 {
+		capLimit = rbLinkMaxDedupPerStick
+	}
 
-	s.rbLinkJournalMu.Lock()
-	defer s.rbLinkJournalMu.Unlock()
-	if s.rbLinkFilledSeen[dedupKey] {
-		return false, nil
+	j := s.stickJournal(uuid)
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	dir := filepath.Join(root, uuid)
 	jpath := filepath.Join(dir, "filled.jsonl")
-	if rf, err := os.Open(jpath); err == nil {
-		sc := bufio.NewScanner(rf)
-		sc.Buffer(make([]byte, 0, 8<<10), 256<<10)
-		for sc.Scan() {
-			var existing rbFilledJournalLine
-			if json.Unmarshal(sc.Bytes(), &existing) == nil && filledJournalDedupKey(uuid, existing) == dedupKey {
-				_ = rf.Close()
-				if s.rbLinkFilledSeen == nil {
-					s.rbLinkFilledSeen = map[string]bool{}
-				}
-				s.rbLinkFilledSeen[dedupKey] = true
-				return false, nil
+	st, statErr := os.Stat(jpath)
+	if statErr == nil {
+		if !j.loaded || st.Size() != j.size || st.ModTime().UnixNano() != j.mtimeNS {
+			rf, err := os.Open(jpath)
+			if err != nil {
+				return false, err
 			}
+			j.seen = map[string]struct{}{}
+			j.order = j.order[:0]
+			sc := bufio.NewScanner(rf)
+			sc.Buffer(make([]byte, 0, 8<<10), 256<<10)
+			linesRead := 0
+			for sc.Scan() {
+				linesRead++
+				if linesRead&63 == 0 {
+					if err := ctx.Err(); err != nil {
+						_ = rf.Close()
+						return false, err
+					}
+				}
+				var existing rbFilledJournalLine
+				if json.Unmarshal(sc.Bytes(), &existing) == nil {
+					j.record(filledJournalDedupKey(uuid, existing), capLimit)
+				}
+			}
+			scanErr := sc.Err()
+			_ = rf.Close()
+			if scanErr != nil {
+				return false, scanErr
+			}
+			j.loaded = true
+			j.size = st.Size()
+			j.mtimeNS = st.ModTime().UnixNano()
 		}
-		_ = rf.Close()
+	} else if os.IsNotExist(statErr) {
+		if !j.loaded || j.size != 0 {
+			j.seen = map[string]struct{}{}
+			j.order = j.order[:0]
+			j.loaded = true
+			j.size = 0
+			j.mtimeNS = 0
+		}
+	} else {
+		return false, statErr
+	}
+
+	if _, dup := j.seen[dedupKey]; dup {
+		return false, nil
 	}
 
 	raw, err := json.Marshal(line)
@@ -1278,6 +1447,12 @@ func (s *Server) appendRemoteFilledJournal(uuid string, engineID int64, res *bri
 		return false, err
 	}
 	_, werr := f.Write(raw)
+	if werr == nil {
+		if fst, err := f.Stat(); err == nil {
+			j.size = fst.Size()
+			j.mtimeNS = fst.ModTime().UnixNano()
+		}
+	}
 	cerr := f.Close()
 	if werr != nil {
 		return false, werr
@@ -1285,10 +1460,8 @@ func (s *Server) appendRemoteFilledJournal(uuid string, engineID int64, res *bri
 	if cerr != nil {
 		return false, cerr
 	}
-	if s.rbLinkFilledSeen == nil {
-		s.rbLinkFilledSeen = map[string]bool{}
-	}
-	s.rbLinkFilledSeen[dedupKey] = true
+	j.loaded = true
+	j.record(dedupKey, capLimit)
 	return true, nil
 }
 
@@ -1318,9 +1491,7 @@ func (s *Server) handlePeerRekordboxFilled(w http.ResponseWriter, r *http.Reques
 	defer release()
 
 	var req rbPeerFilledRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&req); err != nil {
-		w.Header().Set("X-RB-Status", "bad_request")
-		fail(w, http.StatusBadRequest, err)
+	if !decodePeerJSON(ctx, w, r, &req) {
 		return
 	}
 	libUUID := strings.TrimSpace(req.UUID)
@@ -1330,7 +1501,12 @@ func (s *Server) handlePeerRekordboxFilled(w http.ResponseWriter, r *http.Reques
 		fail(w, http.StatusBadRequest, errors.New("uuid, path, id, and positive importKey required"))
 		return
 	}
-	if ownLink := s.ownLinkUUID(); ownLink != "" && reqOwner != "" && reqOwner != ownLink {
+	ownLink := s.ownLinkUUID()
+	if reqOwner != "" && ownLink == "" {
+		writeOnDemandError(w, bridge.ErrOnDemandUnavailable)
+		return
+	}
+	if ownLink != "" && reqOwner != "" && reqOwner != ownLink {
 		w.Header().Set("X-RB-Owner", ownLink)
 		writeOnDemandError(w, bridge.ErrOnDemandNotFound)
 		return
@@ -1355,8 +1531,12 @@ func (s *Server) handlePeerRekordboxFilled(w http.ResponseWriter, r *http.Reques
 		writeOnDemandError(w, err)
 		return
 	}
-	appended, err := s.appendRemoteFilledJournal(libUUID, req.ID, res)
+	appended, err := s.appendRemoteFilledJournal(ctx, libUUID, req.ID, res)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeOnDemandError(w, context.DeadlineExceeded)
+			return
+		}
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
