@@ -197,22 +197,96 @@ func rowExists(ctx context.Context, q sqlQuerier, table, where string) (bool, er
 }
 
 // cleanHistoryOrphansTx removes only provably dead rows from hm.db inside the
-// caller's rollbackable heal transaction, after validating the complete
-// required hm.db schema, without touching any visible play history session
-// (COALESCE(isDeleted,0)=0) or altering hm.db's schema / sqlite_stat1
-// (BH-F52-2, BH-GC1-13).
-func cleanHistoryOrphansTx(ctx context.Context, tx *sql.Tx) (int, error) {
+// validateHistoryLayout checks the core 3.0.2 hm.db tables and required columns.
+func validateHistoryLayout(ctx context.Context, q sqlQuerier) error {
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return err
 	}
 	for _, req := range []string{"Information", "Historylist", "HistorylistEntity", "Track", "PerformanceData", "AlbumArt", "Playlist", "PlaylistEntity"} {
-		ok, err := mainTableExists(ctx, tx, req)
+		ok, err := mainTableExists(ctx, q, req)
 		if err != nil {
-			return 0, err
+			return err
 		}
 		if !ok {
-			return 0, fmt.Errorf("unsupported history schema: missing %s table", req)
+			return fmt.Errorf("unsupported history schema: missing %s table", req)
 		}
+	}
+	sessions, err := columns(ctx, q, "Historylist")
+	if err != nil {
+		return err
+	}
+	entities, err := columns(ctx, q, "HistorylistEntity")
+	if err != nil {
+		return err
+	}
+	idCol := selectColumn(sessions, "id")
+	listIDCol := selectColumn(entities, "listId", "historylistId")
+	trackIDCol := selectColumn(entities, "trackId")
+	if idCol == "" || listIDCol == "" || trackIDCol == "" {
+		return fmt.Errorf("unsupported Historylist/HistorylistEntity schema")
+	}
+	trackCols, err := columns(ctx, q, "Track")
+	if err != nil {
+		return err
+	}
+	trackPK := selectColumn(trackCols, "id")
+	if trackPK == "" || selectColumn(trackCols, "albumArtId") == "" || selectColumn(trackCols, "path") == "" {
+		return fmt.Errorf("unsupported Track schema: missing required column")
+	}
+	perfCols, err := columns(ctx, q, "PerformanceData")
+	if err != nil {
+		return err
+	}
+	if selectColumn(perfCols, "trackId") == "" {
+		return fmt.Errorf("unsupported PerformanceData schema: missing trackId column")
+	}
+	artCols, err := columns(ctx, q, "AlbumArt")
+	if err != nil {
+		return err
+	}
+	if selectColumn(artCols, "id") == "" || selectColumn(artCols, "hash") == "" || selectColumn(artCols, "albumArt") == "" {
+		return fmt.Errorf("unsupported AlbumArt schema: missing required column")
+	}
+	plEntityCols, err := columns(ctx, q, "PlaylistEntity")
+	if err != nil {
+		return err
+	}
+	if selectColumn(plEntityCols, "trackId") == "" {
+		return fmt.Errorf("unsupported PlaylistEntity schema: missing trackId column")
+	}
+	if prepTable, hasPrep, err := mainTableName(ctx, q, "PreparelistEntity"); err != nil {
+		return err
+	} else if hasPrep {
+		prepCols, err := columns(ctx, q, prepTable)
+		if err != nil {
+			return err
+		}
+		if selectColumn(prepCols, "trackId") == "" {
+			return fmt.Errorf("unsupported PreparelistEntity schema: missing trackId column")
+		}
+	}
+	return nil
+}
+
+func validateHistorySchema(ctx context.Context, q sqlQuerier) error {
+	infos, err := readLibraryIdentityRows(ctx, q)
+	if err != nil {
+		return err
+	}
+	if _, err := validateLibraryIdentityRows(infos); err != nil {
+		return err
+	}
+	return validateHistoryLayout(ctx, q)
+}
+
+// cleanHistoryOrphansTx removes soft-deleted history tombstones and unreachable
+// Track/PerformanceData/AlbumArt rows inside the caller's rollbackable heal
+// transaction, after validating the complete required hm.db schema, without
+// touching any visible play history session (COALESCE(isDeleted,0)=0) or
+// altering hm.db's schema / sqlite_stat1 (BH-F52-2, BH-GC1-13).
+func cleanHistoryOrphansTx(ctx context.Context, tx *sql.Tx) (int, error) {
+	if err := validateHistoryLayout(ctx, tx); err != nil {
+		return 0, err
 	}
 	sessions, err := columns(ctx, tx, "Historylist")
 	if err != nil {
@@ -225,50 +299,16 @@ func cleanHistoryOrphansTx(ctx context.Context, tx *sql.Tx) (int, error) {
 	idCol := selectColumn(sessions, "id")
 	listIDCol := selectColumn(entities, "listId", "historylistId")
 	trackIDCol := selectColumn(entities, "trackId")
-	if idCol == "" || listIDCol == "" || trackIDCol == "" {
-		return 0, fmt.Errorf("unsupported Historylist/HistorylistEntity schema")
-	}
 	trackCols, err := columns(ctx, tx, "Track")
 	if err != nil {
 		return 0, err
 	}
 	trackPK := selectColumn(trackCols, "id")
-	if trackPK == "" || selectColumn(trackCols, "albumArtId") == "" || selectColumn(trackCols, "path") == "" {
-		return 0, fmt.Errorf("unsupported Track schema: missing required column")
-	}
 	perfCols, err := columns(ctx, tx, "PerformanceData")
 	if err != nil {
 		return 0, err
 	}
 	perfTrackCol := selectColumn(perfCols, "trackId")
-	if perfTrackCol == "" {
-		return 0, fmt.Errorf("unsupported PerformanceData schema: missing trackId column")
-	}
-	artCols, err := columns(ctx, tx, "AlbumArt")
-	if err != nil {
-		return 0, err
-	}
-	if selectColumn(artCols, "id") == "" || selectColumn(artCols, "hash") == "" || selectColumn(artCols, "albumArt") == "" {
-		return 0, fmt.Errorf("unsupported AlbumArt schema: missing required column")
-	}
-	plEntityCols, err := columns(ctx, tx, "PlaylistEntity")
-	if err != nil {
-		return 0, err
-	}
-	if selectColumn(plEntityCols, "trackId") == "" {
-		return 0, fmt.Errorf("unsupported PlaylistEntity schema: missing trackId column")
-	}
-	if prepTable, hasPrep, err := mainTableName(ctx, tx, "PreparelistEntity"); err != nil {
-		return 0, err
-	} else if hasPrep {
-		prepCols, err := columns(ctx, tx, prepTable)
-		if err != nil {
-			return 0, err
-		}
-		if selectColumn(prepCols, "trackId") == "" {
-			return 0, fmt.Errorf("unsupported PreparelistEntity schema: missing trackId column")
-		}
-	}
 
 	softDeleted := selectColumn(sessions, "isDeleted")
 	visibleSub := "SELECT " + idCol + " FROM Historylist"

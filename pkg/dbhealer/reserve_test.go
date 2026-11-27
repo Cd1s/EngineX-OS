@@ -347,3 +347,114 @@ func TestHealMountDoesNotRebuildLockedReserve12MainDB(t *testing.T) {
 		t.Fatalf("m.db.pre-reserve created while exclusively locked: err=%v", serr)
 	}
 }
+
+func TestHealMountDoesNotRebuildReserve12UnderImmediateWriter(t *testing.T) {
+	_, mount, db := testlibrary.Create(t)
+	db.Close()
+	seed := reserve12Library(t)
+	raw, err := os.ReadFile(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mPath := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+	if err := os.WriteFile(mPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Stat(mPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeIno := beforeInfo.Sys().(*syscall.Stat_t).Ino
+
+	writer, err := sql.Open("sqlite", mPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.SetMaxOpenConns(1)
+	defer writer.Close()
+	if _, err := writer.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = writer.Exec("ROLLBACK")
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	rep, err := HealMountDataOnlyContext(ctx, mount, 0)
+	if err == nil || rep.Healthy || len(rep.ReserveFixed) != 0 {
+		t.Fatalf("immediate-locked reserve-12 m.db unexpectedly succeeded/rebuilt: rep=%+v err=%v", rep, err)
+	}
+	afterInfo, err := os.Stat(mPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterIno := afterInfo.Sys().(*syscall.Stat_t).Ino; afterIno != beforeIno {
+		t.Fatalf("immediate-locked m.db inode changed: %d -> %d", beforeIno, afterIno)
+	}
+	if r, ok, rerr := Reserve(mPath); rerr != nil || !ok || r != 12 {
+		t.Fatalf("immediate-locked m.db reserve changed: r=%d ok=%v err=%v", r, ok, rerr)
+	}
+	if _, serr := os.Stat(mPath + ".pre-reserve"); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("m.db.pre-reserve created while immediate writer held reservation: err=%v", serr)
+	}
+	if _, err := writer.Exec("UPDATE Track SET filename='updated.mp3' WHERE id=5"); err != nil {
+		t.Fatalf("writer update failed after aborted reserve rebuild: %v", err)
+	}
+	if _, err := writer.Exec("COMMIT"); err != nil {
+		t.Fatalf("writer commit failed after aborted reserve rebuild: %v", err)
+	}
+	committed = true
+}
+
+func TestNormalizeReservePreservesSQLiteStorageTypes(t *testing.T) {
+	path := reserve12Seed(t, "types.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	mustExec(t, db, `CREATE TABLE Types(id INTEGER PRIMARY KEY, val_null BLOB, val_empty_str TEXT, val_empty_blob BLOB, val_int INTEGER, val_real REAL, val_blob BLOB);
+		INSERT INTO Types(id,val_null,val_empty_str,val_empty_blob,val_int,val_real,val_blob) VALUES(1, NULL, '', X'', 42, 3.25, X'0001ff');`)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if fixed, err := NormalizeReserve(path); err != nil || !fixed {
+		t.Fatalf("NormalizeReserve = %v, %v", fixed, err)
+	}
+	out, err := Open(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	var got string
+	if err := out.QueryRow(`SELECT typeof(val_null)||'|'||typeof(val_empty_str)||':'||length(val_empty_str)||'|'||typeof(val_empty_blob)||':'||length(val_empty_blob)||'|'||typeof(val_int)||':'||val_int||'|'||typeof(val_real)||'|'||typeof(val_blob)||':'||hex(val_blob) FROM Types WHERE id=1`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	want := "null|text:0|blob:0|integer:42|real|blob:0001FF"
+	if got != want {
+		t.Fatalf("storage types mismatch: got %q want %q", got, want)
+	}
+}
+
+func TestOnlyContextErrorRejectsWrappedJoinedEIO(t *testing.T) {
+	wrappedJoined := &os.PathError{
+		Op:   "stat",
+		Path: "hm.db",
+		Err:  errors.Join(context.DeadlineExceeded, syscall.EIO),
+	}
+	if onlyContextError(wrappedJoined) {
+		t.Fatal("onlyContextError returned true for PathError wrapping joined DeadlineExceeded + EIO")
+	}
+	pureWrappedJoined := &os.PathError{
+		Op:   "stat",
+		Path: "hm.db",
+		Err:  errors.Join(context.DeadlineExceeded, context.Canceled),
+	}
+	if !onlyContextError(pureWrappedJoined) {
+		t.Fatal("onlyContextError returned false for PathError wrapping only context errors")
+	}
+}

@@ -123,6 +123,9 @@ func (c *ctxReader) Read(p []byte) (int, error) {
 	if err := c.ctx.Err(); err != nil {
 		return 0, err
 	}
+	if len(p) > 4096 {
+		p = p[:4096]
+	}
 	return c.r.Read(p)
 }
 
@@ -192,64 +195,89 @@ func LoadReaderContext(ctx context.Context, r io.Reader) (*Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	var rec snapshotBody
-	if ctx.Done() == nil {
-		if err := gob.NewDecoder(bytes.NewReader(rest)).Decode(&rec); err != nil {
-			return nil, ErrNoSnapshot
-		}
-	} else {
-		type decodeResult struct {
-			rec snapshotBody
-			err error
-		}
-		ch := make(chan decodeResult, 1)
-		go func() {
-			var r snapshotBody
-			err := gob.NewDecoder(&ctxReader{ctx: ctx, r: bytes.NewReader(rest)}).Decode(&r)
-			ch <- decodeResult{rec: r, err: err}
-		}()
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case res := <-ch:
-			if err := ctx.Err(); err != nil {
-				return nil, err
+	bodies, err := decodeSnapshotPayload(ctx, rest)
+	if err != nil {
+		return nil, err
+	}
+	decodedRecords := 0
+	for _, rec := range bodies {
+		decodedRecords += len(rec.Lists) + len(rec.Tracks)
+		for i, l := range rec.Lists {
+			if i&255 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
 			}
-			if res.err != nil {
+			if l == nil {
 				return nil, ErrNoSnapshot
 			}
-			rec = res.rec
+			s.Lists[l.Key] = l
 		}
-	}
-	if len(rec.Lists)+len(rec.Tracks) != records {
-		return nil, ErrNoSnapshot
-	}
-	for i, l := range rec.Lists {
-		if i&255 == 0 {
-			if err := ctx.Err(); err != nil {
-				return nil, err
+		for i, t := range rec.Tracks {
+			if i&255 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
 			}
-		}
-		if l == nil {
-			return nil, ErrNoSnapshot
-		}
-		s.Lists[l.Key] = l
-	}
-	for i, t := range rec.Tracks {
-		if i&255 == 0 {
-			if err := ctx.Err(); err != nil {
-				return nil, err
+			if t == nil {
+				return nil, ErrNoSnapshot
 			}
+			s.Tracks[t.Key] = t
 		}
-		if t == nil {
-			return nil, ErrNoSnapshot
-		}
-		s.Tracks[t.Key] = t
 	}
-	if len(s.Lists)+len(s.Tracks) != records {
-		return nil, ErrNoSnapshot // an empty or repeated key
+	if decodedRecords != records || len(s.Lists)+len(s.Tracks) != records {
+		return nil, ErrNoSnapshot // an empty, mismatched, or repeated key
 	}
 	return s, nil
+}
+
+func decodeSnapshotPayload(ctx context.Context, rest []byte) ([]snapshotBody, error) {
+	if ctx.Done() == nil {
+		return decodeSnapshotBodies(ctx, rest)
+	}
+	type decodeResult struct {
+		bodies []snapshotBody
+		err    error
+	}
+	ch := make(chan decodeResult, 1)
+	go func() {
+		bodies, err := decodeSnapshotBodies(ctx, rest)
+		ch <- decodeResult{bodies: bodies, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-ch:
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return res.bodies, res.err
+	}
+}
+
+func decodeSnapshotBodies(ctx context.Context, rest []byte) ([]snapshotBody, error) {
+	dec := gob.NewDecoder(&ctxReader{ctx: ctx, r: bytes.NewReader(rest)})
+	var bodies []snapshotBody
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		var rec snapshotBody
+		if err := dec.Decode(&rec); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			return nil, ErrNoSnapshot
+		}
+		bodies = append(bodies, rec)
+	}
+	if len(bodies) == 0 {
+		return nil, ErrNoSnapshot
+	}
+	return bodies, nil
 }
 
 // Encode is the snapshot as Save writes it.

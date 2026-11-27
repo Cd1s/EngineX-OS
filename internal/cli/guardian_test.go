@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/dbhealer"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
@@ -726,5 +727,74 @@ func TestGuardianDataOnlyLocalizesOfflineDropboxTracks(t *testing.T) {
 	}
 	if src3 != "Dropbox" || src4 != "TIDAL" {
 		t.Fatalf("protected tracks altered: id3=%q id4=%q", src3, src4)
+	}
+}
+
+func TestGuardianNormalizeReserveRejectsUnsupportedHistoryDB(t *testing.T) {
+	mount := mountFixture(t)
+	dbDir := filepath.Join(mount, "Engine Library", "Database2")
+	hm := filepath.Join(dbDir, "hm.db")
+
+	hdb, err := sql.Open("sqlite", hm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hdb.Exec("PRAGMA user_version=4194305"); err != nil {
+		hdb.Close()
+		t.Fatal(err)
+	}
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(hm)
+	if err != nil || len(raw) != 4096 {
+		t.Fatalf("seed hm.db len=%d err=%v", len(raw), err)
+	}
+	raw[20] = 12
+	raw[105], raw[106] = 0x0f, 0xf4
+	if err := os.WriteFile(hm, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hdb, err = sql.Open("sqlite", hm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdb.SetMaxOpenConns(1)
+	schema, err := os.ReadFile("../../docs/re-report/ENGINE-5.0.4-hm.db-schema.sql")
+	if err != nil {
+		hdb.Close()
+		t.Fatal(err)
+	}
+	modSchema := strings.ReplaceAll(string(schema), "CREATE TABLE sqlite_sequence(name,seq);", "")
+	if _, err := hdb.Exec(modSchema); err != nil {
+		hdb.Close()
+		t.Fatal(err)
+	}
+	if _, err := hdb.Exec("INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES(1,'hist-v4',4,0,2)"); err != nil {
+		hdb.Close()
+		t.Fatal(err)
+	}
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if res, ok, rerr := dbhealer.Reserve(hm); rerr != nil || !ok || res != 12 {
+		t.Fatalf("setup hm.db reserve=%d ok=%v err=%v", res, ok, rerr)
+	}
+
+	var out, errOut bytes.Buffer
+	code := Guardian([]string{"--heal-mount", mount, "--normalize-reserve"}, &out, &errOut)
+	if code == 0 {
+		t.Fatalf("--normalize-reserve unexpectedly succeeded on schema-4 hm.db: code=%d out=%s err=%s", code, &out, &errOut)
+	}
+	var results []guardianResult
+	if err := json.Unmarshal(out.Bytes(), &results); err != nil || len(results) != 1 || results[0].Healthy || results[0].Error == "" {
+		t.Fatalf("expected unhealthy guardian result on schema-4 hm.db, got out=%s err=%v", &out, err)
+	}
+	if res, ok, rerr := dbhealer.Reserve(hm); rerr != nil || !ok || res != 12 {
+		t.Fatalf("--normalize-reserve modified schema-4 hm.db reserve: res=%d ok=%v err=%v", res, ok, rerr)
+	}
+	if _, serr := os.Stat(hm + ".pre-reserve"); !os.IsNotExist(serr) {
+		t.Fatalf("--normalize-reserve created hm.db.pre-reserve on schema-4 hm.db: err=%v", serr)
 	}
 }

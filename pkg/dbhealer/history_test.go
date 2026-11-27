@@ -1085,3 +1085,51 @@ func TestHealMountDoesNotRebuildUnsupportedReserve12HistoryDB(t *testing.T) {
 		t.Fatalf("hm.db.pre-reserve created on unsupported schema: err=%v", serr)
 	}
 }
+
+func TestReserveRejectsSchema302HistoryMissingAlbumArtHash(t *testing.T) {
+	_, mount, mdb := testlibrary.Create(t)
+	mdb.Close()
+
+	seed := reserve12Seed(t, "hm-res12-nohash.db")
+	hdb, err := sql.Open("sqlite", seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdb.SetMaxOpenConns(1)
+	schema, err := os.ReadFile("../../docs/re-report/ENGINE-5.0.4-hm.db-schema.sql")
+	if err != nil {
+		hdb.Close()
+		t.Fatal(err)
+	}
+	modSchema := strings.ReplaceAll(string(schema), "CREATE TABLE sqlite_sequence(name,seq);", "")
+	modSchema = strings.ReplaceAll(modSchema, "\thash TEXT,\n", "")
+	modSchema = strings.ReplaceAll(modSchema, "CREATE INDEX index_AlbumArt_hash ON AlbumArt (hash);", "")
+	mustExec(t, hdb, modSchema)
+	mustExec(t, hdb, "INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES(1,'hist-302-nohash',3,0,2)")
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	hm := filepath.Join(mount, "Engine Library", "Database2", "hm.db")
+	raw, err := os.ReadFile(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hm, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if fixed, err := NormalizeDatabase2(filepath.Dir(hm)); err == nil || len(fixed) != 0 {
+		t.Fatalf("NormalizeDatabase2 rebuilt 3.0.2 hm.db missing AlbumArt.hash: fixed=%v err=%v", fixed, err)
+	}
+	r, err := HealMountDataOnly(mount, 0)
+	if err == nil || r.Healthy {
+		t.Fatalf("HealMountDataOnly succeeded on 3.0.2 hm.db missing AlbumArt.hash: rep=%+v err=%v", r, err)
+	}
+	if res, ok, rerr := Reserve(hm); rerr != nil || !ok || res != 12 {
+		t.Fatalf("3.0.2 hm.db missing AlbumArt.hash reserve modified: res=%d ok=%v err=%v", res, ok, rerr)
+	}
+	if _, serr := os.Stat(hm + ".pre-reserve"); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("hm.db.pre-reserve created on missing AlbumArt.hash: err=%v", serr)
+	}
+}

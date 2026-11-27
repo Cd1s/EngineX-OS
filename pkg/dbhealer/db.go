@@ -278,12 +278,21 @@ func transactionContextWithBusy(ctx context.Context, db *sql.DB, busyMS int, f f
 }
 
 func runTransactionContext(ctx context.Context, db *sql.DB, f func(*sql.Tx) error) error {
-	tx, err := db.BeginTx(ctx, nil)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Own rollback explicitly after f(tx) closes any tx-scoped prepared statements;
+	// Go's BeginTx(ctx) awaitDone goroutine races live statements and can discard
+	// the SQLite connection before journal cleanup completes.
+	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	if err = f(tx); err != nil {
+		return err
+	}
+	if err = ctx.Err(); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -309,10 +318,20 @@ func healContext(ctx context.Context, db *sql.DB, dataOnly bool, preHeal func(co
 }
 
 func healWithResizedContext(ctx context.Context, db *sql.DB, dataOnly bool) (Report, map[int64]bool, error) {
-	return healWithPreHealAndResizedContext(ctx, db, dataOnly, nil)
+	return healWithHooksAndResizedContext(ctx, db, dataOnly, nil, nil)
 }
 
 func healWithPreHealAndResizedContext(ctx context.Context, db *sql.DB, dataOnly bool, preHeal func(context.Context, *sql.Tx) error) (Report, map[int64]bool, error) {
+	return healWithHooksAndResizedContext(ctx, db, dataOnly, preHeal, nil)
+}
+
+func healWithHooksAndResizedContext(
+	ctx context.Context,
+	db *sql.DB,
+	dataOnly bool,
+	preHeal func(context.Context, *sql.Tx) error,
+	postHeal func(context.Context, *sql.Tx, *Report) error,
+) (Report, map[int64]bool, error) {
 	r := Report{CheckedAt: time.Now().UTC()}
 	if err := clampBusyTimeout(ctx, db); err != nil {
 		return r, nil, err
@@ -384,7 +403,15 @@ func healWithPreHealAndResizedContext(ctx context.Context, db *sql.DB, dataOnly 
 				return err
 			}
 		}
-		return tx.QueryRowContext(ctx, "SELECT count(*) FROM GuardianReanalysis").Scan(&r.ReanalysisPending)
+		if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM GuardianReanalysis").Scan(&r.ReanalysisPending); err != nil {
+			return err
+		}
+		if postHeal != nil {
+			if err := postHeal(ctx, tx, &r); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		r.Healthy = false
@@ -465,19 +492,29 @@ func HealMountWithOptions(ctx context.Context, mount string, opts MountOptions) 
 }
 
 func healMountContext(ctx context.Context, mount string, opts MountOptions) (Report, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	enteredCanceled := ctx.Err() != nil
 	maxSessions := opts.MaxSessions
 	dataOnly := opts.DataOnly
 	r := Report{Mount: mount, CheckedAt: time.Now().UTC()}
 	if maxSessions < 0 {
 		return r, fmt.Errorf("maxSessions must not be negative")
 	}
-	if libraryInUse(mount) {
+	if mountLibraryInUse(mount) {
 		return r, errLibraryInUse
+	}
+	if !enteredCanceled && errors.Is(ctx.Err(), context.Canceled) {
+		return r, ctx.Err()
 	}
 	path := filepath.Join(mount, "Engine Library", "Database2", "m.db")
 	rw, err := writable(path)
 	if err != nil {
 		return r, err
+	}
+	if !enteredCanceled && errors.Is(ctx.Err(), context.Canceled) {
+		return r, ctx.Err()
 	}
 	if !rw {
 		r, err = InspectMount(mount)
@@ -487,7 +524,6 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 		r.Warnings = append(r.Warnings, "read-only media: inspected without repairs or journal writes")
 		return r, err
 	}
-	enteredCanceled := ctx.Err() != nil
 	busyMS := probeBusyTimeoutMS(ctx)
 	checkCtx, cancelProbe := identityProbeContext(ctx, dataOnly)
 	defer cancelProbe()
@@ -540,7 +576,7 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			return r, ctx.Err()
 		}
 		// Before Engine opens the volume: a nonzero page reserve breaks every ATTACH.
-		if r.ReserveFixed, _, err = normalizeMountDatabase2(ctx, filepath.Dir(path)); err != nil {
+		if r.ReserveFixed, _, err = normalizeMountDatabase2(ctx, filepath.Dir(path), nil); err != nil {
 			r.Healthy = false
 			r.Mount = mount
 			return r, err
@@ -585,6 +621,18 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			return r, ctx.Err()
 		}
 		if dataOnly && ctx.Err() != nil {
+			if pendingOther, sibErr := anySiblingReserveNonZero(filepath.Dir(path), map[string]bool{path: true}); sibErr != nil {
+				_ = db.Close()
+				r.Healthy = false
+				r.Mount = mount
+				return r, sibErr
+			} else if pendingOther {
+				_ = db.Close()
+				r.Warnings = append(r.Warnings, "database page reserve is non-zero: mount budget exceeded before rebuild")
+				r.Healthy = false
+				r.Mount = mount
+				return r, ctx.Err()
+			}
 			if needsIdentityRepair {
 				var repairErr error
 				dbUUID, repairErr = validateAndRepairLibraryIdentityWithBusy(checkCtx, db, busyMS)
@@ -605,7 +653,7 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 		}
 		// Before Engine opens the volume: a nonzero page reserve breaks every ATTACH.
 		var pendingReserve bool
-		if r.ReserveFixed, pendingReserve, err = normalizeMountDatabase2(ctx, filepath.Dir(path)); err != nil {
+		if r.ReserveFixed, pendingReserve, err = normalizeMountDatabase2(ctx, filepath.Dir(path), map[string]bool{path: true}); err != nil {
 			if dataOnly && !pendingReserve && onlyContextError(err) {
 				if !enteredCanceled && errors.Is(ctx.Err(), context.Canceled) {
 					_ = db.Close()
@@ -637,9 +685,24 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 	}
 	fixed := r.ReserveFixed
 	if !dataOnly {
-		// Full heal validates and commits m.db repairs atomically before touching Track sync fields.
-		var resizedIDs map[int64]bool
-		r, resizedIDs, err = healWithResizedContext(ctx, db, false)
+		// Full heal validates and commits m.db repairs and Track sync updates
+		// inside a single rollbackable transaction so any schema/trigger/cancel
+		// failure leaves zero partial mutations behind.
+		var (
+			resizedIDs map[int64]bool
+			passRes    mountTrackPassResult
+			hadCursor  bool
+		)
+		postHeal := func(ctx context.Context, tx *sql.Tx, rep *Report) error {
+			var uerr error
+			if dbUUID, _, uerr = validateLibraryIdentityReadOnlyWithBusy(ctx, tx, probeBusyTimeoutMS(ctx)); uerr != nil {
+				return uerr
+			}
+			var perr error
+			passRes, hadCursor, perr = runMountTrackPassTx(ctx, tx, mount, rep, dbUUID, mountDiscoveryPageSize)
+			return perr
+		}
+		r, resizedIDs, err = healWithHooksAndResizedContext(ctx, db, false, nil, postHeal)
 		r.ReserveFixed = fixed
 		if err != nil {
 			_ = db.Close()
@@ -647,38 +710,36 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			r.Mount = mount
 			return r, err
 		}
-		var uerr error
-		if dbUUID, _, uerr = validateLibraryIdentityReadOnlyWithBusy(ctx, db, probeBusyTimeoutMS(ctx)); uerr != nil {
-			_ = db.Close()
-			r.Healthy = false
-			r.Mount = mount
-			return r, uerr
-		}
-		passRes, perr := runMountTrackPass(ctx, db, mount, &r, mountTrackPassOptions{
-			runNFD:     true,
-			runDropbox: true,
-			dataOnly:   false,
-			dbUUID:     dbUUID,
-			pageSize:   mountDiscoveryPageSize,
-		})
-		r.ReserveFixed = fixed
-		if perr != nil {
-			_ = db.Close()
-			r.Healthy = false
-			r.Mount = mount
-			return r, perr
+		if hadCursor {
+			removeDropboxCursor(mount)
 		}
 		artCache := newArtworkDirCache()
 		extractEmbedded := resolveEmbeddedArtworkExtractor(opts)
-		if ctx.Err() == nil {
-			if artErr := reconcileArtwork(ctx, db, mount, resizedIDs, extractEmbedded, artCache, &r); artErr != nil {
-				_ = db.Close()
-				r.Healthy = false
-				r.Mount = mount
-				return r, artErr
-			}
+		if cerr := ctx.Err(); cerr != nil {
+			_ = db.Close()
+			r.Healthy = false
+			r.Mount = mount
+			return r, cerr
+		}
+		if artErr := reconcileArtwork(ctx, db, mount, resizedIDs, extractEmbedded, artCache, &r); artErr != nil {
+			_ = db.Close()
+			r.Healthy = false
+			r.Mount = mount
+			return r, artErr
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			_ = db.Close()
+			r.Healthy = false
+			r.Mount = mount
+			return r, cerr
 		}
 		reconcileOverviewDataDir(ctx, db, filepath.Dir(path), &r)
+		if cerr := ctx.Err(); cerr != nil {
+			_ = db.Close()
+			r.Healthy = false
+			r.Mount = mount
+			return r, cerr
+		}
 		closeErr := db.Close()
 		r.Mount = mount
 		log.Printf("dbhealer: mount %s normalized %d track paths, %d remaining", mount, r.PathsNormalized, passRes.nfdRemaining)
@@ -847,7 +908,11 @@ func finishHistoryHeal(
 ) (Report, error) {
 	history := filepath.Join(filepath.Dir(path), "hm.db")
 	if _, e := os.Stat(history); e == nil {
-		if ctx.Err() != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			if !dataOnly {
+				r.Healthy = false
+				return r, cerr
+			}
 			return r, nil
 		}
 		historyRW, e := writable(history)
@@ -921,8 +986,12 @@ func finishHistoryHeal(
 			return r, e
 		}
 		hr, resizedH, e := healWithResizedContext(ctx, hdb, false)
-		if e == nil && ctx.Err() == nil {
-			e = reconcileArtwork(ctx, hdb, mount, resizedH, extractEmbedded, artCache, &hr)
+		if e == nil {
+			if cerr := ctx.Err(); cerr != nil {
+				e = cerr
+			} else {
+				e = reconcileArtwork(ctx, hdb, mount, resizedH, extractEmbedded, artCache, &hr)
+			}
 		}
 		ce := hdb.Close()
 		if e != nil {
@@ -934,6 +1003,10 @@ func finishHistoryHeal(
 		}
 		if ce != nil {
 			return r, ce
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			r.Healthy = false
+			return r, cerr
 		}
 		r.PlaylistEntities += hr.PlaylistEntities
 		r.Playlists += hr.Playlists
@@ -971,7 +1044,10 @@ func finishHistoryHeal(
 	return r, nil
 }
 
-var errLibraryInUse = errors.New("Engine has this drive's library open")
+var (
+	errLibraryInUse   = errors.New("Engine has this drive's library open")
+	mountLibraryInUse = libraryInUse
+)
 
 type fileDevIno struct {
 	dev uint64
@@ -1194,11 +1270,13 @@ func repairLibraryIdentityTx(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-func validateLibraryIdentityReadOnlyWithBusy(ctx context.Context, db *sql.DB, busyMS int) (string, bool, error) {
-	if err := clampBusyTimeoutMS(ctx, db, busyMS); err != nil {
-		return "", false, err
+func validateLibraryIdentityReadOnlyWithBusy(ctx context.Context, q sqlQuerier, busyMS int) (string, bool, error) {
+	if db, ok := q.(*sql.DB); ok {
+		if err := clampBusyTimeoutMS(ctx, db, busyMS); err != nil {
+			return "", false, err
+		}
 	}
-	infos, err := readLibraryIdentityRows(ctx, db)
+	infos, err := readLibraryIdentityRows(ctx, q)
 	if err != nil {
 		return "", false, err
 	}
@@ -1282,6 +1360,11 @@ type mountTrackPassResult struct {
 
 const mountDiscoveryPageSize = 1024
 
+type sqlStmtQuerier interface {
+	sqlQuerier
+	PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
+}
+
 func isASCII(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] >= 0x80 {
@@ -1291,10 +1374,10 @@ func isASCII(s string) bool {
 	return true
 }
 
-func prepareMountPageScanStmt(ctx context.Context, db *sql.DB, runNFD, runDropbox bool) (*sql.Stmt, error) {
+func prepareMountPageScanStmt(ctx context.Context, q sqlStmtQuerier, runNFD, runDropbox bool) (*sql.Stmt, error) {
 	switch {
 	case runNFD && runDropbox:
-		return db.PrepareContext(ctx,
+		return q.PrepareContext(ctx,
 			`SELECT COUNT(*), COALESCE(MAX(id), 0),
 			        COALESCE(SUM(CASE WHEN path <> '' AND (
 			            octet_length(path) <> length(path)
@@ -1304,13 +1387,13 @@ func prepareMountPageScanStmt(ctx context.Context, db *sql.DB, runNFD, runDropbo
 			 FROM (SELECT id, path, streamingSource, uri FROM Track WHERE id > ? ORDER BY id LIMIT ?)`,
 		)
 	case runDropbox:
-		return db.PrepareContext(ctx,
+		return q.PrepareContext(ctx,
 			`SELECT COUNT(*), COALESCE(MAX(id), 0),
 			        COALESCE(SUM(CASE WHEN path <> '' AND (streamingSource <> '' OR uri <> '') THEN 1 ELSE 0 END), 0)
 			 FROM (SELECT id, path, streamingSource, uri FROM Track WHERE id > ? ORDER BY id LIMIT ?)`,
 		)
 	default:
-		return db.PrepareContext(ctx,
+		return q.PrepareContext(ctx,
 			`SELECT COUNT(*), COALESCE(MAX(id), 0),
 			        COALESCE(SUM(CASE WHEN path <> ''
 			            AND COALESCE(streamingSource,'') = ''
@@ -1321,10 +1404,10 @@ func prepareMountPageScanStmt(ctx context.Context, db *sql.DB, runNFD, runDropbo
 	}
 }
 
-func prepareMountPageDetailStmt(ctx context.Context, db *sql.DB, runNFD, runDropbox bool) (*sql.Stmt, error) {
+func prepareMountPageDetailStmt(ctx context.Context, q sqlStmtQuerier, runNFD, runDropbox bool) (*sql.Stmt, error) {
 	switch {
 	case runNFD && runDropbox:
-		return db.PrepareContext(ctx,
+		return q.PrepareContext(ctx,
 			`SELECT id, COALESCE(path,''), COALESCE(streamingSource,''), COALESCE(uri,''), COALESCE(fileBytes,0)
 			 FROM Track
 			 WHERE id > ? AND id <= ?
@@ -1333,7 +1416,7 @@ func prepareMountPageDetailStmt(ctx context.Context, db *sql.DB, runNFD, runDrop
 			 ORDER BY id`,
 		)
 	case runDropbox:
-		return db.PrepareContext(ctx,
+		return q.PrepareContext(ctx,
 			`SELECT id, COALESCE(path,''), COALESCE(streamingSource,''), COALESCE(uri,''), COALESCE(fileBytes,0)
 			 FROM Track
 			 WHERE id > ? AND id <= ?
@@ -1342,7 +1425,7 @@ func prepareMountPageDetailStmt(ctx context.Context, db *sql.DB, runNFD, runDrop
 			 ORDER BY id`,
 		)
 	default:
-		return db.PrepareContext(ctx,
+		return q.PrepareContext(ctx,
 			`SELECT id, COALESCE(path,''), COALESCE(streamingSource,''), '', 0
 			 FROM Track
 			 WHERE id > ? AND id <= ?
@@ -1356,7 +1439,7 @@ func prepareMountPageDetailStmt(ctx context.Context, db *sql.DB, runNFD, runDrop
 
 func scanMountTrackPage(
 	ctx context.Context,
-	db *sql.DB,
+	q sqlStmtQuerier,
 	pageStmt *sql.Stmt,
 	detailStmt **sql.Stmt,
 	afterID int64,
@@ -1387,7 +1470,7 @@ func scanMountTrackPage(
 	}
 	if *detailStmt == nil {
 		var err error
-		*detailStmt, err = prepareMountPageDetailStmt(ctx, db, runNFD, runDropbox)
+		*detailStmt, err = prepareMountPageDetailStmt(ctx, q, runNFD, runDropbox)
 		if err != nil {
 			return page, err
 		}
@@ -1472,6 +1555,28 @@ func discoverMountTrackCandidates(ctx context.Context, db *sql.DB, collectDropbo
 }
 
 func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report, opts mountTrackPassOptions) (mountTrackPassResult, error) {
+	res, _, err := runMountTrackPassCore(ctx, db, nil, mount, r, opts)
+	return res, err
+}
+
+func runMountTrackPassTx(ctx context.Context, tx *sql.Tx, mount string, r *Report, dbUUID string, pageSize int) (mountTrackPassResult, bool, error) {
+	return runMountTrackPassCore(ctx, tx, tx, mount, r, mountTrackPassOptions{
+		runNFD:     true,
+		runDropbox: true,
+		dataOnly:   false,
+		dbUUID:     dbUUID,
+		pageSize:   pageSize,
+	})
+}
+
+func runMountTrackPassCore(
+	ctx context.Context,
+	q sqlStmtQuerier,
+	outerTx *sql.Tx,
+	mount string,
+	r *Report,
+	opts mountTrackPassOptions,
+) (mountTrackPassResult, bool, error) {
 	var res mountTrackPassResult
 	pageSize := opts.pageSize
 	if pageSize <= 0 {
@@ -1481,26 +1586,32 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 	var hadCursor bool
 	if opts.runDropbox {
 		startAfterID, hadCursor = readDropboxCursor(mount, opts.dbUUID)
-		res.resumed = hadCursor && startAfterID > 0
+		if outerTx != nil {
+			startAfterID = 0
+		}
+		res.resumed = outerTx == nil && hadCursor && startAfterID > 0
 	}
 	completedID := startAfterID
 	saveCursorIfAdvanced := func(cursorID int64) {
-		if opts.runDropbox && cursorID > startAfterID {
+		if outerTx == nil && opts.runDropbox && cursorID > startAfterID {
 			writeDropboxCursor(mount, opts.dbUUID, cursorID)
 		}
 	}
-	if ctx.Err() != nil {
+	if err := ctx.Err(); err != nil {
 		res.stoppedEarly = true
-		return res, nil
+		if outerTx != nil {
+			return res, hadCursor, err
+		}
+		return res, hadCursor, nil
 	}
 
-	pageStmt, err := prepareMountPageScanStmt(ctx, db, opts.runNFD, opts.runDropbox)
+	pageStmt, err := prepareMountPageScanStmt(ctx, q, opts.runNFD, opts.runDropbox)
 	if err != nil {
-		if isContextStop(ctx, err) {
+		if outerTx == nil && isContextStop(ctx, err) {
 			res.stoppedEarly = true
-			return res, nil
+			return res, hadCursor, nil
 		}
-		return res, err
+		return res, hadCursor, err
 	}
 	defer pageStmt.Close()
 
@@ -1541,26 +1652,29 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 
 	afterID := startAfterID
 	for {
-		if ctx.Err() != nil {
+		if err := ctx.Err(); err != nil {
 			saveCursorIfAdvanced(completedID)
 			res.stoppedEarly = true
-			return res, nil
+			if outerTx != nil {
+				return res, hadCursor, err
+			}
+			return res, hadCursor, nil
 		}
-		page, err := scanMountTrackPage(ctx, db, pageStmt, &detailStmt, afterID, pageSize, opts.runNFD, opts.runDropbox)
+		page, err := scanMountTrackPage(ctx, q, pageStmt, &detailStmt, afterID, pageSize, opts.runNFD, opts.runDropbox)
 		if err != nil {
-			if isContextStop(ctx, err) {
+			if outerTx == nil && isContextStop(ctx, err) {
 				saveCursorIfAdvanced(completedID)
 				res.stoppedEarly = true
-				return res, nil
+				return res, hadCursor, nil
 			}
-			return res, err
+			return res, hadCursor, err
 		}
 		res.scannedRows += page.count
 		if page.count == 0 {
-			if opts.runDropbox && hadCursor {
+			if outerTx == nil && opts.runDropbox && hadCursor {
 				removeDropboxCursor(mount)
 			}
-			return res, nil
+			return res, hadCursor, nil
 		}
 
 		// Interleave #322 NFD normalization and S22 Dropbox localization in
@@ -1577,12 +1691,15 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 		}
 		ni, di := 0, 0
 		for ni < len(nfdSlice) || di < len(dropboxSlice) {
-			if ctx.Err() != nil {
+			if err := ctx.Err(); err != nil {
 				saveCursorIfAdvanced(completedID)
 				res.nfdRemaining = len(nfdSlice) - ni
 				res.dropboxRemaining = len(dropboxSlice) - di
 				res.stoppedEarly = true
-				return res, nil
+				if outerTx != nil {
+					return res, hadCursor, err
+				}
+				return res, hadCursor, nil
 			}
 			if di < len(dropboxSlice) && (ni >= len(nfdSlice) || dropboxSlice[di].id < nfdSlice[ni].id) {
 				end := di
@@ -1591,14 +1708,14 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 				}
 				bridgeOK, berr := ensureBridge()
 				if berr != nil {
-					if isContextStop(ctx, berr) {
+					if outerTx == nil && isContextStop(ctx, berr) {
 						saveCursorIfAdvanced(completedID)
 						res.nfdRemaining = len(nfdSlice) - ni
 						res.dropboxRemaining = len(dropboxSlice) - di
 						res.stoppedEarly = true
-						return res, nil
+						return res, hadCursor, nil
 					}
-					return res, berr
+					return res, hadCursor, berr
 				}
 				if !bridgeOK {
 					ni = len(nfdSlice)
@@ -1606,10 +1723,10 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 					break
 				}
 				dbRem, examinedID, interrupted, derr := processDropboxCandidates(
-					ctx, db, mount, r, dropboxSlice[di:end], bridgeManaged, safeDirs, claimedNFC,
+					ctx, q, outerTx, mount, r, dropboxSlice[di:end], bridgeManaged, safeDirs, claimedNFC,
 				)
 				if derr != nil {
-					if isContextStop(ctx, derr) {
+					if outerTx == nil && isContextStop(ctx, derr) {
 						if examinedID > completedID {
 							completedID = examinedID
 						}
@@ -1617,9 +1734,9 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 						res.nfdRemaining = len(nfdSlice) - ni
 						res.dropboxRemaining = (len(dropboxSlice) - end) + dbRem
 						res.stoppedEarly = true
-						return res, nil
+						return res, hadCursor, nil
 					}
-					return res, derr
+					return res, hadCursor, derr
 				}
 				if examinedID > completedID {
 					completedID = examinedID
@@ -1630,6 +1747,15 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 					}
 				}
 				di = end - dbRem
+				if outerTx != nil {
+					if err := ctx.Err(); err != nil {
+						res.nfdRemaining = len(nfdSlice) - ni
+						res.dropboxRemaining = len(dropboxSlice) - di
+						res.stoppedEarly = true
+						return res, hadCursor, err
+					}
+					continue
+				}
 				dropboxSlow := opts.dataOnly && r.DropboxLocalized != dropboxBefore && time.Since(passStart) >= time.Second
 				if interrupted || dbRem > 0 || ctx.Err() != nil || dropboxSlow {
 					nfdRemTotal := len(nfdSlice) - ni
@@ -1644,7 +1770,7 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 					res.nfdRemaining = nfdRemTotal
 					res.dropboxRemaining = dbRemTotal
 					res.stoppedEarly = true
-					return res, nil
+					return res, hadCursor, nil
 				}
 				continue
 			}
@@ -1656,14 +1782,14 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 			}
 			bridgeOK, berr := ensureBridge()
 			if berr != nil {
-				if isContextStop(ctx, berr) {
+				if outerTx == nil && isContextStop(ctx, berr) {
 					saveCursorIfAdvanced(completedID)
 					res.nfdRemaining = len(nfdSlice) - ni
 					res.dropboxRemaining = len(dropboxSlice) - di
 					res.stoppedEarly = true
-					return res, nil
+					return res, hadCursor, nil
 				}
-				return res, berr
+				return res, hadCursor, berr
 			}
 			if !bridgeOK {
 				ni = len(nfdSlice)
@@ -1671,10 +1797,10 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 				break
 			}
 			nfdRem, nfdLastID, _, nfdInterrupted, nerr := normalizeTrackPathsBatch(
-				ctx, db, mount, nfdSlice[ni:end], bridgeManaged, claimedNFC, dirs, r,
+				ctx, q, outerTx, mount, nfdSlice[ni:end], bridgeManaged, claimedNFC, dirs, r,
 			)
 			if nerr != nil {
-				if isContextStop(ctx, nerr) {
+				if outerTx == nil && isContextStop(ctx, nerr) {
 					if nfdLastID > completedID {
 						completedID = nfdLastID
 					}
@@ -1682,9 +1808,9 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 					res.nfdRemaining = (len(nfdSlice) - end) + nfdRem
 					res.dropboxRemaining = len(dropboxSlice) - di
 					res.stoppedEarly = true
-					return res, nil
+					return res, hadCursor, nil
 				}
-				return res, nerr
+				return res, hadCursor, nerr
 			}
 			if nfdLastID > completedID {
 				completedID = nfdLastID
@@ -1696,6 +1822,15 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 				ni = end
 			} else {
 				ni = end - nfdRem
+			}
+			if outerTx != nil {
+				if err := ctx.Err(); err != nil {
+					res.nfdRemaining = len(nfdSlice) - ni
+					res.dropboxRemaining = len(dropboxSlice) - di
+					res.stoppedEarly = true
+					return res, hadCursor, err
+				}
+				continue
 			}
 			nfdSlow := opts.dataOnly && r.PathsNormalized != nfdBefore && time.Since(passStart) >= time.Second
 			if nfdInterrupted || nfdRem > 0 || ctx.Err() != nil || nfdSlow {
@@ -1711,17 +1846,17 @@ func runMountTrackPass(ctx context.Context, db *sql.DB, mount string, r *Report,
 				res.nfdRemaining = nfdRemTotal
 				res.dropboxRemaining = dbRemTotal
 				res.stoppedEarly = true
-				return res, nil
+				return res, hadCursor, nil
 			}
 		}
 
 		completedID = page.lastID
 		afterID = page.lastID
 		if page.eof {
-			if opts.runDropbox && hadCursor {
+			if outerTx == nil && opts.runDropbox && hadCursor {
 				removeDropboxCursor(mount)
 			}
-			return res, nil
+			return res, hadCursor, nil
 		}
 	}
 }
@@ -1745,7 +1880,7 @@ func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Repor
 		}
 	}
 	rem, _, _, _, err := normalizeTrackPathsBatch(
-		ctx, db, mount, candidates, bridgeManaged,
+		ctx, db, nil, mount, candidates, bridgeManaged,
 		map[string]int64{}, make(map[string]map[string]bool), r,
 	)
 	return rem, err
@@ -1753,7 +1888,8 @@ func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Repor
 
 func normalizeTrackPathsBatch(
 	ctx context.Context,
-	db *sql.DB,
+	q sqlQuerier,
+	outerTx *sql.Tx,
 	mount string,
 	candidates []trackPathCandidate,
 	bridgeManaged map[int64]bool,
@@ -1764,10 +1900,14 @@ func normalizeTrackPathsBatch(
 	if len(candidates) == 0 {
 		return 0, 0, nil, false, nil
 	}
+	db, _ := q.(*sql.DB)
 	allCandidates := candidates
 	eligible := make([]trackPathCandidate, 0, len(candidates))
 	for i, candidate := range candidates {
-		if ctx.Err() != nil {
+		if err := ctx.Err(); err != nil {
+			if outerTx != nil {
+				return len(candidates) - i, lastCompletedID, nil, true, err
+			}
 			return len(candidates) - i, lastCompletedID, nil, true, nil
 		}
 		if bridgeManaged[candidate.id] {
@@ -1777,7 +1917,7 @@ func normalizeTrackPathsBatch(
 			continue
 		}
 		var other int64
-		err := db.QueryRowContext(ctx, `SELECT id FROM Track WHERE path=?`, candidate.nfcPath).Scan(&other)
+		err := q.QueryRowContext(ctx, `SELECT id FROM Track WHERE path=?`, candidate.nfcPath).Scan(&other)
 		if err == nil && other != candidate.id {
 			if len(eligible) == 0 && candidate.id > lastCompletedID {
 				lastCompletedID = candidate.id
@@ -1818,13 +1958,19 @@ func normalizeTrackPathsBatch(
 	}
 	rewritten = map[int64]string{}
 	for start := 0; start < len(candidates); start += 64 {
-		if ctx.Err() != nil {
+		if err := ctx.Err(); err != nil {
+			if outerTx != nil {
+				return len(candidates) - start, lastCompletedID, rewritten, true, err
+			}
 			return len(candidates) - start, lastCompletedID, rewritten, true, nil
 		}
 		end := min(start+64, len(candidates))
-		tx, err := db.Begin()
-		if err != nil {
-			return len(candidates) - start, lastCompletedID, rewritten, false, err
+		tx := outerTx
+		if tx == nil {
+			tx, err = db.Begin()
+			if err != nil {
+				return len(candidates) - start, lastCompletedID, rewritten, false, err
+			}
 		}
 		next := start
 		batchFixed := 0
@@ -1874,14 +2020,18 @@ func normalizeTrackPathsBatch(
 				if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 					continue
 				}
-				_ = tx.Rollback()
+				if outerTx == nil {
+					_ = tx.Rollback()
+				}
 				return len(candidates) - start, lastCompletedID, rewritten, false, err
 			}
 			batchFixed++
 			batchRewritten = append(batchRewritten, candidate)
 		}
-		if err := tx.Commit(); err != nil {
-			return len(candidates) - start, lastCompletedID, rewritten, false, err
+		if outerTx == nil {
+			if err := tx.Commit(); err != nil {
+				return len(candidates) - start, lastCompletedID, rewritten, false, err
+			}
 		}
 		if batchLastID > lastCompletedID {
 			lastCompletedID = batchLastID
@@ -1899,10 +2049,16 @@ func normalizeTrackPathsBatch(
 			normalizeTrackPathBatch()
 		}
 		if next < end {
+			if outerTx != nil {
+				return len(candidates) - next, lastCompletedID, rewritten, true, ctx.Err()
+			}
 			return len(candidates) - next, lastCompletedID, rewritten, true, nil
 		}
 		remaining = len(candidates) - end
-		if ctx.Err() != nil {
+		if err := ctx.Err(); err != nil {
+			if outerTx != nil {
+				return remaining, lastCompletedID, rewritten, true, err
+			}
 			return remaining, lastCompletedID, rewritten, true, nil
 		}
 	}

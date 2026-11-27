@@ -47,6 +47,10 @@ func NormalizeReserve(path string) (bool, error) {
 
 // NormalizeReserveContext is NormalizeReserve while honoring ctx cancellation before rebuild steps and backup copies.
 func NormalizeReserveContext(ctx context.Context, path string) (bool, error) {
+	return normalizeReserveContext(ctx, path, nil)
+}
+
+func normalizeReserveContext(ctx context.Context, path string, validate func(context.Context, sqlQuerier) error) (bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -56,18 +60,53 @@ func NormalizeReserveContext(ctx context.Context, path string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	for _, suffix := range []string{"-wal", "-journal"} {
-		if s, e := os.Stat(path + suffix); e == nil && s.Size() > 0 {
-			return false, fmt.Errorf("%s has pending %s; let Engine recover it first", path, suffix)
-		}
+	if err := checkNoPendingJournals(path); err != nil {
+		return false, err
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return false, err
 	}
+	srcDB, err := sql.Open("sqlite", fileURI(path))
+	if err != nil {
+		return false, err
+	}
+	defer srcDB.Close()
+	srcDB.SetMaxOpenConns(1)
+
+	srcConn, err := srcDB.Conn(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer srcConn.Close()
+
+	if _, err = srcConn.ExecContext(ctx, "PRAGMA busy_timeout=1"); err != nil {
+		return false, err
+	}
+	// Hold BEGIN EXCLUSIVE from validation/copy through atomic os.Rename so no
+	// concurrent BEGIN IMMEDIATE/EXCLUSIVE writer or reader can mutate or be stranded on the replaced inode.
+	if _, err = srcConn.ExecContext(ctx, "BEGIN EXCLUSIVE"); err != nil {
+		return false, err
+	}
+	defer func() {
+		_, _ = srcConn.ExecContext(context.Background(), "ROLLBACK")
+	}()
+
+	if r, ok, err := Reserve(path); err != nil || !ok || r == 0 {
+		return false, err
+	}
+	if err := checkNoPendingJournals(path); err != nil {
+		return false, err
+	}
+	if validate != nil {
+		if err := validate(ctx, srcConn); err != nil {
+			return false, err
+		}
+	}
+
 	tmp := path + ".reserve-rebuild"
 	os.Remove(tmp)
-	if err = rebuildPlainContext(ctx, path, tmp); err != nil {
+	if err = rebuildPlainFromConnContext(ctx, srcConn, tmp); err != nil {
 		os.Remove(tmp)
 		return false, fmt.Errorf("%s: %w", path, err)
 	}
@@ -81,7 +120,7 @@ func NormalizeReserveContext(ctx context.Context, path string) (bool, error) {
 	}
 	// Never move the live name out of the way: the CLI deadline can end this
 	// process between any two syscalls. Publish a durable backup first, then
-	// atomically replace the still-present original with the rebuilt database.
+	// atomically replace the still-present original while still holding BEGIN EXCLUSIVE.
 	if err = backupReserveContext(ctx, path); err != nil {
 		os.Remove(tmp)
 		return false, err
@@ -90,6 +129,17 @@ func NormalizeReserveContext(ctx context.Context, path string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func checkNoPendingJournals(path string) error {
+	for _, suffix := range []string{"-wal", "-journal"} {
+		if s, e := os.Stat(path + suffix); e == nil && s.Size() > 0 {
+			return fmt.Errorf("%s has pending %s; let Engine recover it first", path, suffix)
+		} else if e != nil && !errors.Is(e, os.ErrNotExist) {
+			return e
+		}
+	}
+	return nil
 }
 
 func backupReserve(path string) error {
@@ -187,36 +237,76 @@ func NormalizeDatabase2(dir string) (fixed []string, err error) {
 }
 
 // NormalizeDatabase2Context fixes every writable Engine library file in dir while
-// honoring ctx cancellation and propagating writability check errors.
+// honoring ctx cancellation and propagating writability and schema check errors.
 func NormalizeDatabase2Context(ctx context.Context, dir string) (fixed []string, err error) {
-	fixed, _, err = normalizeDatabase2(ctx, dir, false)
+	fixed, _, err = normalizeDatabase2(ctx, dir, nil)
 	return fixed, err
 }
 
-func normalizeMountDatabase2(ctx context.Context, dir string) (fixed []string, pendingReserve bool, err error) {
-	return normalizeDatabase2(ctx, dir, true)
+func normalizeMountDatabase2(ctx context.Context, dir string, cleanPaths map[string]bool) (fixed []string, incompleteOrPending bool, err error) {
+	return normalizeDatabase2(ctx, dir, cleanPaths)
 }
 
-func normalizeDatabase2(ctx context.Context, dir string, guardHistorySchema bool) (fixed []string, pendingReserve bool, err error) {
-	if ctx == nil {
-		ctx = context.Background()
+func validateMainLibrarySchemaForReserve(ctx context.Context, q sqlQuerier) error {
+	infos, err := readLibraryIdentityRows(ctx, q)
+	if err != nil {
+		return err
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, false, err
+	if _, err := validateLibraryIdentityRows(infos); err != nil {
+		return err
 	}
+	return hasPerformanceDataTable(ctx, q)
+}
+
+func anySiblingReserveNonZero(dir string, skip map[string]bool) (bool, error) {
 	names, err := filepath.Glob(filepath.Join(dir, "*.db"))
 	if err != nil {
-		return nil, false, err
+		return true, err
 	}
 	for _, p := range names {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return fixed, pendingReserve, errors.Join(err, ctxErr)
-		}
-		if strings.HasPrefix(filepath.Base(p), ".") {
+		if strings.HasPrefix(filepath.Base(p), ".") || skip[p] {
 			continue
 		}
 		w, we := reserveWritable(p)
 		if we != nil {
+			return true, we
+		}
+		if !w {
+			continue
+		}
+		res, ok, rerr := Reserve(p)
+		if rerr != nil {
+			return true, rerr
+		}
+		if ok && res != 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func normalizeDatabase2(ctx context.Context, dir string, cleanPaths map[string]bool) (fixed []string, incompleteOrPending bool, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, true, err
+	}
+	names, err := filepath.Glob(filepath.Join(dir, "*.db"))
+	if err != nil {
+		return nil, true, err
+	}
+	for _, p := range names {
+		base := filepath.Base(p)
+		if strings.HasPrefix(base, ".") || cleanPaths[p] {
+			continue
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fixed, true, errors.Join(err, ctxErr)
+		}
+		w, we := reserveWritable(p)
+		if we != nil {
+			incompleteOrPending = true
 			err = errors.Join(err, we)
 			continue
 		}
@@ -225,52 +315,32 @@ func normalizeDatabase2(ctx context.Context, dir string, guardHistorySchema bool
 		}
 		res, ok, rerr := Reserve(p)
 		if rerr != nil {
+			incompleteOrPending = true
 			err = errors.Join(err, rerr)
 			continue
 		}
 		if !ok || res == 0 {
 			continue
 		}
-		if guardHistorySchema && strings.EqualFold(filepath.Base(p), "hm.db") {
-			hdb, herr := openReadOnlyLocking(ctx, p, probeBusyTimeoutMS(ctx))
-			if herr != nil {
-				if isContextStop(ctx, herr) || budgetExpired(ctx, herr) || isSQLiteBusy(herr) {
-					pendingReserve = true
-				}
-				err = errors.Join(err, herr)
-				continue
-			}
-			infos, ierr := readLibraryIdentityRows(ctx, hdb)
-			if ierr == nil {
-				_, ierr = validateLibraryIdentityRows(infos)
-			}
-			closeErr := hdb.Close()
-			if ierr != nil {
-				if isContextStop(ctx, ierr) || budgetExpired(ctx, ierr) || isSQLiteBusy(ierr) {
-					pendingReserve = true
-					err = errors.Join(err, ierr)
-				}
-				// Leave unsupported history schemas untouched; history validation reports them.
-				continue
-			}
-			if closeErr != nil {
-				err = errors.Join(err, closeErr)
-				continue
-			}
+		var validate func(context.Context, sqlQuerier) error
+		switch {
+		case strings.EqualFold(base, "hm.db"):
+			validate = validateHistorySchema
+		case strings.EqualFold(base, "m.db"):
+			validate = validateMainLibrarySchemaForReserve
 		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			pendingReserve = true
-			return fixed, true, errors.Join(err, ctxErr)
-		}
-		rebuilt, e := NormalizeReserveContext(ctx, p)
+		rebuilt, e := normalizeReserveContext(ctx, p, validate)
 		if e != nil {
-			pendingReserve = true
+			incompleteOrPending = true
 			err = errors.Join(err, e)
 		} else if rebuilt {
-			fixed = append(fixed, filepath.Base(p))
+			fixed = append(fixed, base)
 		}
 	}
-	return fixed, pendingReserve, err
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = errors.Join(err, ctxErr)
+	}
+	return fixed, incompleteOrPending, err
 }
 
 func onlyContextError(err error) bool {
@@ -279,35 +349,66 @@ func onlyContextError(err error) bool {
 	}
 	if multi, ok := err.(interface{ Unwrap() []error }); ok {
 		subs := multi.Unwrap()
-		if len(subs) == 0 {
-			return false
-		}
+		nonNil := 0
 		for _, sub := range subs {
+			if sub == nil {
+				continue
+			}
+			nonNil++
 			if !onlyContextError(sub) {
 				return false
 			}
 		}
-		return true
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return true
+		return nonNil > 0
 	}
 	if inner := errors.Unwrap(err); inner != nil {
 		return onlyContextError(inner)
 	}
-	return false
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // fileURI keeps '#', '?' and '%' in a stick label part of the path for SQLite.
 func fileURI(p string) string { return "file:" + (&url.URL{Path: filepath.ToSlash(p)}).EscapedPath() }
 
-func rebuildPlainContext(ctx context.Context, src, dst string) error {
+func rebuildPlainFromConnContext(ctx context.Context, srcConn *sql.Conn, dst string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Properties that must survive; page_size and auto_vacuum have to be set first.
+	var pageSize, autoVacuum, userVersion, appID int64
+	for pragma, v := range map[string]*int64{"page_size": &pageSize, "auto_vacuum": &autoVacuum, "user_version": &userVersion, "application_id": &appID} {
+		if err := srcConn.QueryRowContext(ctx, "PRAGMA main."+pragma).Scan(v); err != nil {
+			return err
+		}
+	}
+	type object struct{ typ, name, sql string }
+	var objects []object
+	rows, err := srcConn.QueryContext(ctx, "SELECT type,name,sql FROM main.sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY rowid")
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var o object
+		if err = rows.Scan(&o.typ, &o.name, &o.sql); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		objects = append(objects, o)
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if len(objects) == 0 {
+		return errors.New("source has no schema; refusing to replace it with an empty database")
+	}
+
 	db, err := sql.Open("sqlite", fileURI(dst))
 	if err != nil {
 		return err
@@ -317,42 +418,10 @@ func rebuildPlainContext(ctx context.Context, src, dst string) error {
 	if _, err = db.ExecContext(ctx, "PRAGMA busy_timeout=1"); err != nil {
 		return err
 	}
-	// Escaped: a stick label with '#' or '?' cut the URI there, ATTACHed an empty
-	// file and the empty rebuild replaced the library (BH-GC1-1).
-	if _, err = db.ExecContext(ctx, "ATTACH DATABASE ? AS old", fileURI(src)+"?mode=ro"); err != nil {
-		return err
-	}
-	// Properties that must survive; page_size and auto_vacuum have to be set first.
-	var pageSize, autoVacuum, userVersion, appID int64
-	for pragma, v := range map[string]*int64{"page_size": &pageSize, "auto_vacuum": &autoVacuum, "user_version": &userVersion, "application_id": &appID} {
-		if err = db.QueryRowContext(ctx, "PRAGMA old."+pragma).Scan(v); err != nil {
-			return err
-		}
-	}
 	for _, s := range []string{fmt.Sprintf("PRAGMA main.page_size=%d", pageSize), fmt.Sprintf("PRAGMA main.auto_vacuum=%d", autoVacuum)} {
 		if _, err = db.ExecContext(ctx, s); err != nil {
 			return err
 		}
-	}
-	type object struct{ typ, name, sql string }
-	var objects []object
-	rows, err := db.QueryContext(ctx, "SELECT type,name,sql FROM old.sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY rowid")
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var o object
-		if err = rows.Scan(&o.typ, &o.name, &o.sql); err != nil {
-			rows.Close()
-			return err
-		}
-		objects = append(objects, o)
-	}
-	if err = rows.Close(); err != nil {
-		return err
-	}
-	if len(objects) == 0 {
-		return errors.New("source has no schema; refusing to replace it with an empty database")
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -369,21 +438,23 @@ func rebuildPlainContext(ctx context.Context, src, dst string) error {
 		}
 	}
 	for _, t := range tables {
-		cols, e := tableColumnsContext(ctx, tx, t.name)
+		cols, e := tableColumnsContext(ctx, srcConn, t.name)
 		if e != nil {
 			return e
 		}
 		list := strings.Join(cols, ",")
+		numCols := len(cols)
 		if !strings.Contains(strings.ToUpper(t.sql), "WITHOUT ROWID") {
 			// Keep rowids: other tables and Engine refer to them.
 			list = "rowid," + list
+			numCols++
 		}
-		if _, err = tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO main.%s(%s) SELECT %s FROM old.%s", quote(t.name), list, list, quote(t.name))); err != nil {
+		if err = copyTableRowsFromConn(ctx, srcConn, tx, t.name, list, numCols); err != nil {
 			return fmt.Errorf("copy %s: %w", t.name, err)
 		}
 	}
 	var hasSeq int
-	if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM old.sqlite_master WHERE name='sqlite_sequence'").Scan(&hasSeq); err != nil {
+	if err = srcConn.QueryRowContext(ctx, "SELECT count(*) FROM main.sqlite_master WHERE name='sqlite_sequence'").Scan(&hasSeq); err != nil {
 		return err
 	}
 	if hasSeq > 0 {
@@ -398,7 +469,27 @@ func rebuildPlainContext(ctx context.Context, src, dst string) error {
 		if _, err = tx.ExecContext(ctx, "DELETE FROM main.sqlite_sequence"); err != nil {
 			return err
 		}
-		if _, err = tx.ExecContext(ctx, "INSERT INTO main.sqlite_sequence SELECT name,seq FROM old.sqlite_sequence"); err != nil {
+		seqRows, err := srcConn.QueryContext(ctx, "SELECT name,seq FROM main.sqlite_sequence")
+		if err != nil {
+			return err
+		}
+		for seqRows.Next() {
+			var seqName string
+			var seqVal int64
+			if err = seqRows.Scan(&seqName, &seqVal); err != nil {
+				_ = seqRows.Close()
+				return err
+			}
+			if _, err = tx.ExecContext(ctx, "INSERT INTO main.sqlite_sequence(name,seq) VALUES(?,?)", seqName, seqVal); err != nil {
+				_ = seqRows.Close()
+				return err
+			}
+		}
+		if err = seqRows.Err(); err != nil {
+			_ = seqRows.Close()
+			return err
+		}
+		if err = seqRows.Close(); err != nil {
 			return err
 		}
 	}
@@ -413,7 +504,10 @@ func rebuildPlainContext(ctx context.Context, src, dst string) error {
 	}
 	for _, t := range tables {
 		var a, b int64
-		if err = tx.QueryRowContext(ctx, fmt.Sprintf("SELECT (SELECT count(*) FROM old.%[1]s),(SELECT count(*) FROM main.%[1]s)", quote(t.name))).Scan(&a, &b); err != nil {
+		if err = srcConn.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM main.%s", quote(t.name))).Scan(&a); err != nil {
+			return err
+		}
+		if err = tx.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM main.%s", quote(t.name))).Scan(&b); err != nil {
 			return err
 		}
 		if a != b {
@@ -435,9 +529,6 @@ func rebuildPlainContext(ctx context.Context, src, dst string) error {
 			return err
 		}
 	}
-	if _, err = db.ExecContext(ctx, "DETACH DATABASE old"); err != nil {
-		return err
-	}
 	var check string
 	if err = db.QueryRowContext(ctx, "PRAGMA main.integrity_check").Scan(&check); err != nil || check != "ok" {
 		return fmt.Errorf("rebuilt database integrity: %v %w", check, err)
@@ -451,8 +542,60 @@ func rebuildPlainContext(ctx context.Context, src, dst string) error {
 	return nil
 }
 
-func tableColumnsContext(ctx context.Context, tx *sql.Tx, table string) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, "SELECT name FROM pragma_table_info(?, 'old')", table)
+func copyTableRowsFromConn(ctx context.Context, srcConn *sql.Conn, dstTx *sql.Tx, table, colList string, numCols int) error {
+	rows, err := srcConn.QueryContext(ctx, fmt.Sprintf("SELECT %s FROM main.%s", colList, quote(table)))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", numCols), ",")
+	insStmt, err := dstTx.PrepareContext(ctx, fmt.Sprintf("INSERT INTO main.%s(%s) VALUES(%s)", quote(table), colList, placeholders))
+	if err != nil {
+		return err
+	}
+	defer insStmt.Close()
+
+	vals := make([]any, numCols)
+	scanDest := make([]any, numCols)
+	for i := range vals {
+		scanDest[i] = &vals[i]
+	}
+	for rowIdx := 0; rows.Next(); rowIdx++ {
+		if rowIdx&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		if err := rows.Scan(scanDest...); err != nil {
+			return err
+		}
+		for i, v := range vals {
+			if b, ok := v.([]byte); ok {
+				if b == nil {
+					// Preserve zero-length X'' BLOB values; typed nil []byte becomes SQL NULL in database/sql.
+					vals[i] = []byte{}
+				} else {
+					cp := make([]byte, len(b))
+					copy(cp, b)
+					vals[i] = cp
+				}
+			}
+		}
+		if _, err := insStmt.ExecContext(ctx, vals...); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	return insStmt.Close()
+}
+
+func tableColumnsContext(ctx context.Context, q sqlQuerier, table string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, "SELECT name FROM pragma_table_info(?, 'main')", table)
 	if err != nil {
 		return nil, err
 	}

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1653,5 +1654,275 @@ func TestHealMountDataOnlyDeadlineDuringCleanReserveScanRemainsHealthy(t *testin
 	rep, err := HealMountDataOnlyContext(ctx, root, 0)
 	if err != nil || !rep.Healthy {
 		t.Fatalf("deadline during clean zero-reserve scan failed: rep=%+v err=%v", rep, err)
+	}
+}
+
+func TestHealMountFullCancelMidDropboxPassReturnsErrorAndRollsBack(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	if _, err := db.Exec(`UPDATE Information SET id=99, uuid='valid-uuid'`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 70; i++ {
+		rel := fmt.Sprintf("../Music/CancelFull/track-%03d.mp3", i)
+		full := filepath.Join(root, "Engine Library", filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("audio-data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(
+			`INSERT INTO Track(id,path,filename,fileBytes,streamingSource,uri,streamingFlags,isAnalyzed) VALUES(?,?,?,10,'Dropbox',?,5,1)`,
+			i, rel, filepath.Base(rel), fmt.Sprintf("streaming://Dropbox/Track/%d", i),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	localizeDropboxTrackBatch = func() {
+		if calls.Add(1) == 1 {
+			cancel()
+		}
+	}
+	t.Cleanup(func() { localizeDropboxTrackBatch = nil })
+
+	rep, err := HealMountWithOptions(ctx, root, MountOptions{DataOnly: false})
+	if !errors.Is(err, context.Canceled) || rep.Healthy {
+		t.Fatalf("canceled full heal returned rep=%+v err=%v, want context.Canceled & Healthy=false", rep, err)
+	}
+	if _, serr := os.Stat(dropboxCursorPath(root)); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("canceled full heal left cursor file behind: err=%v", serr)
+	}
+
+	check, err := Open(filepath.Join(root, "Engine Library", "Database2", "m.db"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var infoID, stillDropbox int
+	if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
+		t.Fatal(err)
+	}
+	if err := check.QueryRow(`SELECT count(*) FROM Track WHERE streamingSource='Dropbox'`).Scan(&stillDropbox); err != nil {
+		t.Fatal(err)
+	}
+	if infoID != 99 || stillDropbox != 70 {
+		t.Fatalf("canceled full heal partially committed: infoID=%d stillDropbox=%d, want 99 and 70", infoID, stillDropbox)
+	}
+}
+
+func TestHealMountFullDropboxTriggerRejectionRollsBackIdentity(t *testing.T) {
+	for _, cancelOnTrigger := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancel_%t", cancelOnTrigger), func(t *testing.T) {
+			_, root, db := testlibrary.Create(t)
+			full := filepath.Join(root, "Music", "reject-track.mp3")
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, []byte("audio-bytes"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes,streamingSource,uri,streamingFlags,isAnalyzed) VALUES(1,'../Music/reject-track.mp3','reject-track.mp3',11,'Dropbox','streaming://Dropbox/Track/1',5,1)`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE Information SET id=99, uuid='valid-uuid'`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`CREATE TRIGGER reject_track_upd BEFORE UPDATE ON Track BEGIN SELECT RAISE(ABORT,'track update blocked'); END`); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if cancelOnTrigger {
+				// Simulate cancellation racing right after the track update error.
+				localizeDropboxTrackBatch = func() { cancel() }
+				t.Cleanup(func() { localizeDropboxTrackBatch = nil })
+			}
+
+			rep, err := HealMountWithOptions(ctx, root, MountOptions{DataOnly: false})
+			if err == nil || rep.Healthy {
+				t.Fatalf("expected full heal error when Track update is rejected: rep=%+v err=%v", rep, err)
+			}
+
+			check, err := Open(filepath.Join(root, "Engine Library", "Database2", "m.db"), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer check.Close()
+			var infoID int
+			var src string
+			if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
+				t.Fatal(err)
+			}
+			if err := check.QueryRow(`SELECT COALESCE(streamingSource,'') FROM Track WHERE id=1`).Scan(&src); err != nil {
+				t.Fatal(err)
+			}
+			if infoID != 99 || src != "Dropbox" {
+				t.Fatalf("rejected full heal left partial commit: infoID=%d src=%q, want 99 and Dropbox", infoID, src)
+			}
+		})
+	}
+}
+
+func TestHealMountDataOnlyLiveCancelDuringLibraryInUseDoesNotWrite(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	if _, err := db.Exec(`UPDATE Information SET id=99`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	origInUse := mountLibraryInUse
+	mountLibraryInUse = func(m string) bool {
+		cancel()
+		return false
+	}
+	t.Cleanup(func() { mountLibraryInUse = origInUse })
+
+	rep, err := HealMountDataOnlyContext(ctx, root, 0)
+	if !errors.Is(err, context.Canceled) || rep.Healthy {
+		t.Fatalf("live cancel during libraryInUse: rep=%+v err=%v, want context.Canceled & Healthy=false", rep, err)
+	}
+	check, err := Open(filepath.Join(root, "Engine Library", "Database2", "m.db"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var infoID int
+	if err := check.QueryRow(`SELECT id FROM Information`).Scan(&infoID); err != nil {
+		t.Fatal(err)
+	}
+	if infoID != 99 {
+		t.Fatalf("Information.id=%d after live cancel during libraryInUse, want 99", infoID)
+	}
+}
+
+func TestHealMountDataOnlyDeadlineBeforeUnvisitedReserve12FileFails(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	db.Close()
+	dbDir := filepath.Join(root, "Engine Library", "Database2")
+
+	aux := filepath.Join(dbDir, "aux.db")
+	adb, err := sql.Open("sqlite", aux)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, adb, "CREATE TABLE t(x INT);")
+	if err := adb.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	seed := reserve12Seed(t, "hm-res12-pending.db")
+	hdb, err := sql.Open("sqlite", seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdb.SetMaxOpenConns(1)
+	schema, err := os.ReadFile("../../docs/re-report/ENGINE-5.0.4-hm.db-schema.sql")
+	if err != nil {
+		hdb.Close()
+		t.Fatal(err)
+	}
+	mustExec(t, hdb, strings.ReplaceAll(string(schema), "CREATE TABLE sqlite_sequence(name,seq);", ""))
+	mustExec(t, hdb, "INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES(1,'hist-res12',3,0,2)")
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+	hm := filepath.Join(dbDir, "hm.db")
+	raw, err := os.ReadFile(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hm, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origWritable := reserveWritable
+	reserveWritable = func(p string) (bool, error) {
+		if filepath.Base(p) == "aux.db" {
+			time.Sleep(110 * time.Millisecond)
+		}
+		return origWritable(p)
+	}
+	t.Cleanup(func() { reserveWritable = origWritable })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 70*time.Millisecond)
+	defer cancel()
+	rep, err := HealMountDataOnlyContext(ctx, root, 0)
+	if err == nil || rep.Healthy {
+		t.Fatalf("incomplete reserve scan before reserve-12 hm.db reported healthy: rep=%+v err=%v", rep, err)
+	}
+	if r, ok, rerr := Reserve(hm); rerr != nil || !ok || r != 12 {
+		t.Fatalf("unvisited hm.db reserve changed: r=%d ok=%v err=%v", r, ok, rerr)
+	}
+}
+
+func TestHealMountDataOnlyReserve12UnsupportedHistorySurvivesTrackDeadline(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	for i := 1; i <= 70; i++ {
+		rel := fmt.Sprintf("../Music/SlowV4/track-%03d.mp3", i)
+		full := filepath.Join(root, "Engine Library", filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("audio-bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(
+			`INSERT INTO Track(id,path,filename,fileBytes,streamingSource,uri,streamingFlags,isAnalyzed) VALUES(?,?,?,11,'Dropbox',?,5,1)`,
+			i, rel, filepath.Base(rel), fmt.Sprintf("streaming://Dropbox/Track/%d", i),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	dbDir := filepath.Join(root, "Engine Library", "Database2")
+
+	seed := reserve12Seed(t, "hm-res12-v4-track.db")
+	hdb, err := sql.Open("sqlite", seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdb.SetMaxOpenConns(1)
+	schema, err := os.ReadFile("../../docs/re-report/ENGINE-5.0.4-hm.db-schema.sql")
+	if err != nil {
+		hdb.Close()
+		t.Fatal(err)
+	}
+	mustExec(t, hdb, strings.ReplaceAll(string(schema), "CREATE TABLE sqlite_sequence(name,seq);", ""))
+	mustExec(t, hdb, "INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES(1,'hist-v4',4,0,2)")
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+	hm := filepath.Join(dbDir, "hm.db")
+	raw, err := os.ReadFile(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hm, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	localizeDropboxTrackBatch = func() { time.Sleep(150 * time.Millisecond) }
+	t.Cleanup(func() { localizeDropboxTrackBatch = nil })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+	rep, err := HealMountDataOnlyContext(ctx, root, 0)
+	if err == nil || rep.Healthy {
+		t.Fatalf("unsupported reserve-12 hm.db returned healthy: rep=%+v err=%v", rep, err)
+	}
+	if r, ok, rerr := Reserve(hm); rerr != nil || !ok || r != 12 {
+		t.Fatalf("unsupported hm.db reserve changed: r=%d ok=%v err=%v", r, ok, rerr)
+	}
+	if _, serr := os.Stat(hm + ".pre-reserve"); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("hm.db.pre-reserve created on unsupported schema: err=%v", serr)
 	}
 }

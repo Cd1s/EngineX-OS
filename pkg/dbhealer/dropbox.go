@@ -78,7 +78,8 @@ func localizeDropboxTracks(ctx context.Context, db *sql.DB, mount string, r *Rep
 
 func processDropboxCandidates(
 	ctx context.Context,
-	db *sql.DB,
+	q sqlQuerier,
+	outerTx *sql.Tx,
 	mount string,
 	r *Report,
 	candidates []dropboxTrackCandidate,
@@ -86,8 +87,12 @@ func processDropboxCandidates(
 	safeDirs map[string]bool,
 	claimedNFC map[string]int64,
 ) (remaining int, lastExaminedID int64, interrupted bool, err error) {
+	db, _ := q.(*sql.DB)
 	for start := 0; start < len(candidates); start += 64 {
 		if ctx.Err() != nil {
+			if outerTx != nil {
+				return len(candidates) - start, lastExaminedID, true, ctx.Err()
+			}
 			return len(candidates) - start, lastExaminedID, true, nil
 		}
 		end := min(start+64, len(candidates))
@@ -105,9 +110,9 @@ func processDropboxCandidates(
 				}
 				continue
 			}
-			upd, ok, err := resolveDropboxCandidate(ctx, db, mount, candidate, safeDirs, claimedNFC)
+			upd, ok, err := resolveDropboxCandidate(ctx, q, mount, candidate, safeDirs, claimedNFC)
 			if err != nil {
-				if isContextStop(ctx, err) {
+				if outerTx == nil && isContextStop(ctx, err) {
 					next--
 					break
 				}
@@ -122,7 +127,12 @@ func processDropboxCandidates(
 		}
 
 		if len(updates) > 0 {
-			fixed, normalized, err := applyDropboxUpdates(db, updates)
+			var fixed, normalized int
+			if outerTx != nil {
+				fixed, normalized, err = applyDropboxUpdatesTx(outerTx, updates)
+			} else {
+				fixed, normalized, err = applyDropboxUpdates(db, updates)
+			}
 			if err != nil {
 				return len(candidates) - start, lastExaminedID, false, err
 			}
@@ -136,10 +146,16 @@ func processDropboxCandidates(
 			localizeDropboxTrackBatch()
 		}
 		if next < end {
+			if outerTx != nil {
+				return len(candidates) - next, lastExaminedID, true, ctx.Err()
+			}
 			return len(candidates) - next, lastExaminedID, true, nil
 		}
 		remaining = len(candidates) - end
-		if ctx.Err() != nil && remaining > 0 {
+		if ctx.Err() != nil && (outerTx != nil || remaining > 0) {
+			if outerTx != nil {
+				return remaining, lastExaminedID, true, ctx.Err()
+			}
 			return remaining, lastExaminedID, true, nil
 		}
 	}
@@ -148,7 +164,7 @@ func processDropboxCandidates(
 
 func resolveDropboxCandidate(
 	ctx context.Context,
-	db *sql.DB,
+	q sqlQuerier,
 	mount string,
 	candidate dropboxTrackCandidate,
 	safeDirs map[string]bool,
@@ -172,7 +188,7 @@ func resolveDropboxCandidate(
 		return dropboxResolvedUpdate{}, false, nil
 	}
 	var other int64
-	err := db.QueryRowContext(ctx, `SELECT id FROM Track WHERE path=?`, nfcPath).Scan(&other)
+	err := q.QueryRowContext(ctx, `SELECT id FROM Track WHERE path=?`, nfcPath).Scan(&other)
 	if err == nil && other != candidate.id {
 		return dropboxResolvedUpdate{}, false, nil
 	}
@@ -193,6 +209,18 @@ func applyDropboxUpdates(db *sql.DB, updates []dropboxResolvedUpdate) (fixed, no
 	if err != nil {
 		return 0, 0, err
 	}
+	fixed, normalized, err = applyDropboxUpdatesTx(tx, updates)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return fixed, normalized, nil
+}
+
+func applyDropboxUpdatesTx(tx *sql.Tx, updates []dropboxResolvedUpdate) (fixed, normalized int, err error) {
 	for _, upd := range updates {
 		var res sql.Result
 		if !upd.renamePath {
@@ -237,7 +265,6 @@ func applyDropboxUpdates(db *sql.DB, updates []dropboxResolvedUpdate) (fixed, no
 			if upd.renamePath && strings.Contains(err.Error(), "UNIQUE constraint failed") {
 				continue
 			}
-			_ = tx.Rollback()
 			return 0, 0, err
 		}
 		if n, err := res.RowsAffected(); err == nil && n > 0 {
@@ -246,9 +273,6 @@ func applyDropboxUpdates(db *sql.DB, updates []dropboxResolvedUpdate) (fixed, no
 				normalized++
 			}
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, 0, err
 	}
 	return fixed, normalized, nil
 }

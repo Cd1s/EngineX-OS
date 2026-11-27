@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"strings"
@@ -533,6 +535,42 @@ func TestSnapshotFormat2CompatibilityAndCancelMidDecode(t *testing.T) {
 	got513, err := LoadReaderContext(context.Background(), bytes.NewReader(raw513))
 	if err != nil || len(got513.Lists) != 513 || len(got513.Tracks) != 513 {
 		t.Fatalf("LoadReaderContext 513 mismatch: err=%v lists=%d tracks=%d", err, len(got513.Lists), len(got513.Tracks))
+	}
+
+	// 1b. Reader also accepts R3-style multi-gob chunked 513-track snapshots.
+	s513.Format, s513.Rules = Format, Rules
+	s513.Header.Tracks, s513.Header.Lists = len(s513.Tracks), len(s513.Lists)
+	head513, err := json.Marshal(&s513.Header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var multi bytes.Buffer
+	multi.WriteString(snapshotMagic)
+	multi.Write(head513)
+	multi.WriteByte('\n')
+	enc := gob.NewEncoder(&multi)
+	listSlice := make([]*List, 0, len(s513.Lists))
+	for _, l := range s513.Lists {
+		listSlice = append(listSlice, l)
+	}
+	if err := enc.Encode(snapshotBody{Lists: listSlice}); err != nil {
+		t.Fatal(err)
+	}
+	trackSlice := make([]*Track, 0, len(s513.Tracks))
+	for _, tr := range s513.Tracks {
+		trackSlice = append(trackSlice, tr)
+	}
+	if err := enc.Encode(snapshotBody{Tracks: trackSlice[:512]}); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Encode(snapshotBody{Tracks: trackSlice[512:]}); err != nil {
+		t.Fatal(err)
+	}
+	multi.WriteByte('\n')
+	fmt.Fprintf(&multi, "E %d %08x\n", len(listSlice)+len(trackSlice), crc32.ChecksumIEEE(multi.Bytes()))
+	gotMulti, err := LoadReaderContext(context.Background(), bytes.NewReader(multi.Bytes()))
+	if err != nil || len(gotMulti.Lists) != 513 || len(gotMulti.Tracks) != 513 {
+		t.Fatalf("LoadReaderContext multi-gob 513 mismatch: err=%v lists=%d tracks=%d", err, len(gotMulti.Lists), len(gotMulti.Tracks))
 	}
 
 	// 2. 200,000-track single-body Format-2 snapshot cancels promptly mid-decode.
