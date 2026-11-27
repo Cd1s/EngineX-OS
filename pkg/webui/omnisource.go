@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -551,57 +552,127 @@ func (s *Server) omniTracks(ctx context.Context, query string) ([]trackRef, erro
 // search already has its server. selected is closed when the selected source's search,
 // running beside this one and never cut, is done (nil: no such search).
 //
-// Every extra (the drives' listing and each drive's library, djay, the servers) runs
-// beside the selected source and under one deadline (omniWait). One that has not
-// answered by then is left out of this answer: a server's search goes on and is cached
-// for the next one, a drive's or djay's ends with the request. So no extra makes the
-// answer later than the later of "selected source done" and the deadline (WebDAV
-// rounds 11b and 5).
+// Every extra (the drives' listing and each drive's library, djay, each server) runs
+// beside the selected source and files its rows (omniRows) the moment it has them. At
+// the cut (omniWait) the answer takes the rows filed so far and returns: it waits for no
+// extra after that, whatever one is busy with or waiting for (a server that does not
+// answer, a slow drive, the settings lock while a save runs). What is filed later is
+// dropped; a server's search goes on and is cached for the next one, a drive's or
+// djay's ends with the request. So no extra makes the answer later than the later of
+// "selected source done" and the deadline (WebDAV rounds 11b, 5 and 13).
 func (g *tidalGateway) omniSearch(ctx context.Context, query string, selected <-chan struct{}) []any {
-	cut := make(chan struct{})
-	var drives [][]trackRef
-	var djay, servers []trackRef
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel() // ends the drives' and djay's searches still running
+	var found omniRows
+	search := func(group, pos, n int, find func() ([]trackRef, error)) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("gateway: provider panic: %v", r)
+			}
+		}()
+		refs, err := find()
+		if err != nil {
+			log.Printf("stream-sync: gateway source failed: %v", err)
+		}
+		found.put(group, pos, n, refs, nil)
+	}
 	var extras sync.WaitGroup
 	extras.Go(func() {
-		list := eachUntil(ctx, []func() []drive{g.s.drives}, func(_ context.Context, list func() []drive) ([]drive, error) { return list(), nil }, cut)[0]
-		drives = eachUntil(ctx, list, func(ctx context.Context, d drive) ([]trackRef, error) { return searchDrive(ctx, d, query) }, cut)
+		drives := g.s.drives()
+		for i, d := range drives {
+			extras.Go(func() {
+				search(omniDrives, i, len(drives), func() ([]trackRef, error) { return searchDrive(ctx, d, query) })
+			})
+		}
 	})
-	extras.Go(func() { djay = eachUntil(ctx, []string{query}, g.s.omniTracks, cut)[0] })
-	extras.Go(func() { servers = g.serverSearch(ctx, query, "", g.s.scope(), cut) })
+	extras.Go(func() {
+		search(omniDjay, 0, 1, func() ([]trackRef, error) { return g.s.omniTracks(ctx, query) })
+	})
+	extras.Go(func() {
+		g.serverSearch(ctx, query, "", g.s.scope(), func(pos, n int, refs []trackRef, live func() bool) {
+			found.put(omniServers, pos, n, refs, live)
+		})
+	})
 	answered := make(chan struct{})
 	go func() {
 		extras.Wait()
 		close(answered)
 	}()
 	omniWait(serverReadyWait, selected, answered)
-	close(cut)
-	<-answered // after the cut every extra returns at once, with what has answered
+	rows := found.take() // nothing below waits for an extra
 
 	items := []any{}
 	seenFiles := make(map[string]bool)
-	add := func(ref trackRef) {
-		if id := g.addTrack(ref); id != 0 { // 0: no ID may be handed out now (#335)
-			items = append(items, g.trackJSON(id, ref.track))
-		}
-	}
-	for _, refs := range drives {
-		for _, ref := range refs {
-			if ref.file != "" {
-				seenFiles[ref.file] = true
+	for group, sources := range rows {
+		for _, refs := range sources {
+			for _, ref := range refs {
+				if group != omniServers && ref.file != "" { // a file on a drive is listed once
+					if group == omniDjay && seenFiles[ref.file] {
+						continue
+					}
+					seenFiles[ref.file] = true
+				}
+				if id := g.addTrack(ref); id != 0 { // 0: no ID may be handed out now (#335)
+					items = append(items, g.trackJSON(id, ref.track))
+				}
 			}
-			add(ref)
 		}
-	}
-	for _, ref := range djay {
-		if !seenFiles[ref.file] {
-			seenFiles[ref.file] = true
-			add(ref)
-		}
-	}
-	for _, ref := range servers {
-		add(ref)
 	}
 	return items
+}
+
+// The groups of OmniSource's extras, in the order of their rows in an answer.
+const (
+	omniDrives = iota
+	omniDjay
+	omniServers
+	omniGroups
+)
+
+// omniRows are the rows OmniSource's extras have found so far. An extra files its rows
+// with put; the search ends the collection with take. The lock is held for a slice
+// assignment only, never while anything is searched or read, so take never waits.
+type omniRows struct {
+	mu    sync.Mutex
+	taken bool
+	rows  [omniGroups][]omniSource // per group, in its sources' own order
+}
+
+// omniSource is one extra's rows; live (nil: always) says whether they may still be used
+// when the answer is put together.
+type omniSource struct {
+	refs []trackRef
+	live func() bool
+}
+
+// put files refs as the rows of the pos-th of a group's n sources. Rows filed after take
+// are dropped.
+func (r *omniRows) put(group, pos, n int, refs []trackRef, live func() bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.taken {
+		return
+	}
+	if r.rows[group] == nil {
+		r.rows[group] = make([]omniSource, n)
+	}
+	r.rows[group][pos] = omniSource{refs, live}
+}
+
+// take ends the collection and returns what was filed by sources that are still live.
+func (r *omniRows) take() (out [omniGroups][][]trackRef) {
+	r.mu.Lock()
+	r.taken = true
+	rows := r.rows
+	r.mu.Unlock()
+	for group, sources := range rows {
+		for _, v := range sources {
+			if v.live == nil || v.live() {
+				out[group] = append(out[group], v.refs)
+			}
+		}
+	}
+	return out
 }
 
 // omniWait is OmniSource's timing rule. It returns once the selected source's search

@@ -370,6 +370,28 @@ func (s *Server) servers(k serverKind) []serverEntry {
 	return slices.DeleteFunc(serverEntries(k, f), func(e serverEntry) bool { return !nasConfigReady(e.cfg) || (unknown && e.slot) })
 }
 
+// connectedServers are the servers that are searched now (as servers), each with its
+// connection. The settings are read and the connections made in one step under uiMu,
+// the lock every save holds while it cancels the connections of the servers it changed
+// (forgetServersLocked). So a connection that is still live later says its server is
+// still set up and on as it was here, and nobody has to read the settings again to know.
+func (s *Server) connectedServers(want func(serverEntry) bool) (entries []serverEntry, conns []*serverConn) {
+	s.uiMu.Lock()
+	defer s.uiMu.Unlock()
+	f, v, unknown := s.loadNASFileLocked(), s.loadUI(), s.slotUnknown.Load()
+	for _, k := range serverKinds {
+		if !serversOn(k, v, f) {
+			continue
+		}
+		for _, e := range serverEntries(k, f) {
+			if nasConfigReady(e.cfg) && !(unknown && e.slot) && want(e) {
+				entries, conns = append(entries, e), append(conns, s.serverConnOf(e))
+			}
+		}
+	}
+	return entries, conns
+}
+
 // serverByScope is the enabled server a Sources ID names.
 func (s *Server) serverByScope(scope string) (serverEntry, bool) {
 	k, id, ok := serverScopeOf(scope)
@@ -697,14 +719,31 @@ func (s *Server) applyServer(k serverKind, c serverChange) ([]serverView, error)
 // deletes a server's state: start-up deletes none, and a save that removes no server
 // deletes none, whatever else the stores hold (WebDAV round 5). Caller holds uiMu.
 func (s *Server) forgetServersLocked(old, now nasFile) {
+	// A connection lives exactly as long as its server is set up as it was: removed,
+	// moved, switched off or given other credentials, it is cancelled here, by the save.
+	// So "is this server still the one that was searched" is asked of the connection
+	// (serverSearch) and never needs the settings again (WebDAV round 13).
+	set := map[string]providers.NASConfig{}
+	for _, k := range serverKinds {
+		for _, e := range serverEntries(k, now) {
+			set[e.ID] = e.cfg
+		}
+	}
+	s.serverMu.Lock()
+	for id, c := range s.serverConns {
+		if cfg, ok := set[id]; !ok || cfg != c.cfg {
+			c.cancel()
+			delete(s.serverConns, id)
+		}
+	}
+	s.serverMu.Unlock()
 	gone := serverIDs(old)
-	for id := range serverIDs(now) {
+	for id := range set {
 		delete(gone, id)
 	}
 	if len(gone) == 0 {
 		return
 	}
-	s.dropServerConns(func(id string, _ serverKind) bool { return gone[id] })
 	s.stemsMu.Lock()
 	s.dropServerStemsLocked(gone)
 	s.stemsMu.Unlock()
@@ -935,21 +974,23 @@ func serverRefs(scope string, tracks []providers.Track) []trackRef {
 }
 
 // serverSearch searches servers at once, each within the NAS search's time budget
-// (searchTimeout, through searchTracks and its cache under the server's own key).
-// The NAS slot's SMB server is searched as the NAS source of #335 (its rows stamped
-// with the NAS listing). Every row says which server it is from (album). only limits
-// the search to one Sources ID; skip leaves one out (the source whose own search
-// already has it).
+// (searchTimeout, through searchTracks and its cache under the server's own key), and
+// returns once every server has answered. The NAS slot's SMB server is searched as the
+// NAS source of #335 (its rows stamped with the NAS listing). Every row says which
+// server it is from (album). only limits the search to one Sources ID; skip leaves one
+// out (the source whose own search already has it).
 //
-// ready, when it is closed, ends the wait for servers that have not answered: their
-// rows are left out of this answer, so a slow server never holds back the rows that
-// are ready. Their search goes on within its budget and its result is cached for the
-// next search. A nil ready waits for every server's budget.
+// Each server's rows go to add, in the order of the servers (pos, of n), as soon as that
+// server has answered: a caller that stops listening (OmniSource at its deadline) has
+// the rows of every server that answered by then, and a server answering later is
+// cached for the next search.
 //
-// Each server's search is tied to its connection: a server removed or moved, or its
-// kind switched off, cancels its search, and a server that is no longer set up and
-// on when the answer is put together adds nothing.
-func (g *tidalGateway) serverSearch(ctx context.Context, query, only, skip string, ready <-chan struct{}) []trackRef {
+// Each server's search is tied to its connection (connectedServers): a server removed,
+// moved or changed, or its kind switched off, cancels the connection. live, given with
+// the rows, says whether the connection still stands: the caller asks it when it puts
+// its answer together, so such a server adds nothing, also when it had answered before.
+// live reads no settings, so an answer never waits for a save.
+func (g *tidalGateway) serverSearch(ctx context.Context, query, only, skip string, add func(pos, n int, refs []trackRef, live func() bool)) {
 	type source struct {
 		e       serverEntry
 		c       *serverConn
@@ -958,83 +999,51 @@ func (g *tidalGateway) serverSearch(ctx context.Context, query, only, skip strin
 	}
 	var sources []source
 	listing := g.s.jobs.NASGen() + 1 // before the NAS settings are read (#335)
-	for _, k := range serverKinds {
-		for _, e := range g.s.servers(k) {
-			scope := e.Scope()
-			if (only != "" && scope != only) || scope == skip {
-				continue
-			}
-			if !e.qualified() {
-				if g.s.ownerSMBSelfHosted() != nil { // the same connection: same identity and settings
-					sources = append(sources, source{e, g.s.serverConnOf(e), fmt.Sprintf("%s@%d", nasScope, listing-1), listing})
-				}
-				continue
-			}
-			sources = append(sources, source{e: e, c: g.s.serverConnOf(e), session: scope})
+	entries, conns := g.s.connectedServers(func(e serverEntry) bool {
+		scope := e.Scope()
+		return (only == "" || scope == only) && scope != skip
+	})
+	for i, e := range entries {
+		if e.qualified() {
+			sources = append(sources, source{e: e, c: conns[i], session: e.Scope()})
+		} else { // the slot's SMB server, on the slot's own connection (ownerSMBConn)
+			sources = append(sources, source{e, conns[i], fmt.Sprintf("%s@%d", nasScope, listing-1), listing})
 		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	type answer struct {
-		i      int
-		tracks []providers.Track
-	}
-	answers := make(chan answer, len(sources))
+	var searches sync.WaitGroup
 	for i, v := range sources {
-		go func() {
-			var tracks []providers.Track
+		searches.Go(func() {
 			defer func() {
 				if r := recover(); r != nil {
 					log.Printf("gateway: provider panic: %v", r)
 				}
-				answers <- answer{i, tracks}
 			}()
-			var err error
-			tracks, err = g.searchTracks(ctx, v.e.kind.scope, v.session, connSearcher{v.c}, query)
+			tracks, err := g.searchTracks(ctx, v.e.kind.scope, v.session, connSearcher{v.c}, query)
 			if err != nil {
 				log.Printf("stream-sync: gateway source failed: %v", err)
 			}
-		}()
-	}
-	found := make([][]providers.Track, len(sources))
-	answered := make([]bool, len(sources))
-wait:
-	for range sources {
-		select {
-		case a := <-answers:
-			found[a.i], answered[a.i] = a.tracks, true
-		case <-ready:
-			break wait
-		case <-ctx.Done():
-			break wait
-		}
-	}
-	// What is set up and on now: a server removed, moved or switched off while its
-	// search ran adds nothing.
-	now := map[string]providers.NASConfig{}
-	for _, k := range serverKinds {
-		for _, e := range g.s.servers(k) {
-			now[e.ID] = e.cfg
-		}
-	}
-	var refs []trackRef
-	for i, v := range sources {
-		if cfg, ok := now[v.e.ID]; !answered[i] || !ok || cfg != v.e.cfg || v.c.ctx.Err() != nil {
-			continue
-		}
-		if v.listing != 0 { // the NAS of #335: bare IDs, its listing stamp
-			for _, t := range found[i] {
-				httpsCover(&t)
-				t.Album = v.e.Name
-				refs = append(refs, trackRef{track: t, session: nasScope, listing: v.listing})
+			live := func() bool { return v.c.ctx.Err() == nil }
+			if !live() {
+				return // removed, moved or switched off while its search ran
 			}
-			continue
-		}
-		tracks := serverTracksOf(v.e, found[i])
-		g.s.cfg.BPM.Enrich(ctx, tracks)
-		refs = append(refs, serverRefs(v.e.Scope(), tracks)...)
+			var refs []trackRef
+			if v.listing != 0 { // the NAS of #335: bare IDs, its listing stamp
+				for _, t := range tracks {
+					httpsCover(&t)
+					t.Album = v.e.Name
+					refs = append(refs, trackRef{track: t, session: nasScope, listing: v.listing})
+				}
+			} else {
+				tracks = serverTracksOf(v.e, tracks)
+				g.s.cfg.BPM.Enrich(ctx, tracks)
+				refs = serverRefs(v.e.Scope(), tracks)
+			}
+			add(i, len(sources), refs, live)
+		})
 	}
-	return refs
+	searches.Wait()
 }
 
 // connSearcher searches through a server's connection: dropping the connection

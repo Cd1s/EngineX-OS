@@ -1704,6 +1704,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	if err != nil && q.Has("verboseLog") {
 		_ = writeVerboseLog(previousVerbose)
 	}
+	// A WebDAV or NAS row switched off cancels its servers' requests still running (a
+	// browse, a search, a download): nothing of that kind answers after the switch. Under
+	// uiMu, with the save: a search that lists its servers after it finds the kind off,
+	// one that listed them before it has its connections cancelled (connectedServers).
+	if err == nil && (q.Get("webdav") == "0" || q.Get("nas") == "0") {
+		s.dropServerConns(func(_ string, k serverKind) bool {
+			return (k == kindWebDAV && q.Get("webdav") == "0") || (k == kindNAS && q.Get("nas") == "0")
+		})
+	}
 	if err == nil && v.ConsoleHTTPS != prevConsoleHTTPS {
 		if herr := s.applyHTTPS(v.ConsoleHTTPS); herr != nil {
 			v.ConsoleHTTPS = prevConsoleHTTPS
@@ -1715,13 +1724,6 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fail(w, 500, err)
 		return
-	}
-	// A WebDAV or NAS row switched off cancels its servers' requests still running
-	// (a browse, a search, a download): nothing of that kind answers after the switch.
-	if q.Get("webdav") == "0" || q.Get("nas") == "0" {
-		s.dropServerConns(func(_ string, k serverKind) bool {
-			return (k == kindWebDAV && q.Get("webdav") == "0") || (k == kindNAS && q.Get("nas") == "0")
-		})
 	}
 	if v.SdHighSpeed != prevSdHighSpeed && boardCapabilities(imagePrefix(deviceCompatible())).SDHighSpeed {
 		if _, serr := s.applySDHighSpeed(v.SdHighSpeed); serr != nil {

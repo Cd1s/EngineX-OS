@@ -2,7 +2,6 @@ package webui
 
 import (
 	"context"
-	"slices"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -55,61 +54,35 @@ func TestOmniSourceTimingRule(t *testing.T) {
 	}
 }
 
-// eachUntil is what puts the drives' listing, each drive and djay under that deadline:
-// at the cut it returns what has answered, leaves the rest out and ends their context.
-// Without a cut it is each: every input is waited for, within the 15 s budget.
-func TestEachUntilLeavesOutWhatHasNotAnswered(t *testing.T) {
-	const stuck = time.Duration(-1)
-	work := func(ended *time.Duration, start time.Time, left chan struct{}) func(context.Context, time.Duration) ([]string, error) {
-		return func(ctx context.Context, d time.Duration) ([]string, error) {
-			if d == stuck {
-				<-ctx.Done()
-				*ended = time.Since(start)
-				close(left)
-				return nil, ctx.Err()
-			}
-			select {
-			case <-time.After(d):
-				return []string{d.String()}, nil
-			case <-ctx.Done():
-				return nil, ctx.Err()
+// omniRows is what lets the answer leave at the cut without waiting for any extra: rows
+// filed before take are in the answer, in their group's own order; rows filed after it
+// are dropped; and rows of a source that is no longer live when the answer is put
+// together (a server switched off after it answered) are left out.
+func TestOmniRowsTakeEndsTheCollection(t *testing.T) {
+	ref := func(title string) []trackRef { return []trackRef{{file: title}} }
+	titles := func(rows [][]trackRef) (out []string) {
+		for _, refs := range rows {
+			for _, ref := range refs {
+				out = append(out, ref.file)
 			}
 		}
+		return out
 	}
-	in := []time.Duration{2100 * time.Millisecond, 10 * time.Millisecond, stuck}
-	t.Run("cut after 1 s", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			cut := make(chan struct{})
-			time.AfterFunc(time.Second, func() { close(cut) })
-			var ended time.Duration
-			left := make(chan struct{})
-			start := time.Now()
-			out := eachUntil(context.Background(), in, work(&ended, start, left), cut)
-			if took := time.Since(start); took != time.Second {
-				t.Errorf("returned after %v, want at the cut (1 s)", took)
-			}
-			if len(out) != 3 || out[0] != nil || !slices.Equal(out[1], []string{"10ms"}) || out[2] != nil {
-				t.Errorf("results %v, want only the input that answered before the cut", out)
-			}
-			<-left // the work left out sees its context end
-			if ended != time.Second {
-				t.Errorf("the work left out had its context ended after %v, want at the cut (1 s)", ended)
-			}
-		})
-	})
-	t.Run("no cut", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			var ended time.Duration
-			start := time.Now()
-			out := each(context.Background(), in, work(&ended, start, make(chan struct{})))
-			if took := time.Since(start); took != 15*time.Second {
-				t.Errorf("returned after %v, want once every input was done (the stuck one at its 15 s budget)", took)
-			}
-			if len(out) != 3 || !slices.Equal(out[0], []string{"2.1s"}) || !slices.Equal(out[1], []string{"10ms"}) || out[2] != nil {
-				t.Errorf("results %v, want both inputs that answered", out)
-			}
-		})
-	})
+	on := true
+	var found omniRows
+	found.put(omniServers, 2, 3, ref("server three"), func() bool { return true })
+	found.put(omniServers, 0, 3, ref("server one"), func() bool { return on })
+	found.put(omniDrives, 0, 1, ref("drive"), nil)
+	on = false // server one is switched off after it answered
+	got := found.take()
+	found.put(omniServers, 1, 3, ref("late server"), nil)
+	found.put(omniDjay, 0, 1, ref("late djay"), nil)
+	if d, s := titles(got[omniDrives]), titles(got[omniServers]); len(d) != 1 || d[0] != "drive" || got[omniDjay] != nil || len(s) != 1 || s[0] != "server three" {
+		t.Errorf("rows taken: drives %v, djay %v, servers %v; want the drive's and the third server's", d, got[omniDjay], s)
+	}
+	if again := found.take(); again[omniDjay] != nil || len(titles(again[omniServers])) != 1 {
+		t.Errorf("rows filed after the answer left were kept: %v", again)
+	}
 }
 
 // omniSearch adds no wait of its own: with no drive, djay library or server to search,
