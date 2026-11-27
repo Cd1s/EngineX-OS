@@ -202,3 +202,47 @@ class HookFeatureCoverageTest(unittest.TestCase):
         self.assertNotEqual(future_field, source, 'anchor missing for future_field')
         errs = coverage.check(future_field)
         self.assertTrue(any('future_a64_hook' in e for e in errs), errs)
+
+    def test_az04_exempt_stays_within_preprocessor_branch(self):
+        source = (ROOT / 'tools/ui-mod/engine_ui_hook.c').read_text()
+
+        # Reviewer case: AZ04_EXEMPT alone in #if defined(__aarch64__) must not cover #else installer.
+        opposite_arm = source.replace(
+            '#endif\n\n// The sender\'s prologue',
+            '#endif\n\n#if defined(__aarch64__)\nAZ04_EXEMPT("Batch 2: A64 annotation")\n#else\nstatic void install_review_opposite(void) {}\n#endif\n\n// The sender\'s prologue',
+            1,
+        )
+        self.assertNotEqual(opposite_arm, source, 'anchor missing for opposite_arm')
+        self.assertTrue(any('install_review_opposite' in e for e in coverage.check(opposite_arm)))
+
+        # Annotation inside a closed #if 0 ... #endif arm must not cover the installer after #endif.
+        after_endif = source.replace(
+            '#endif\n\n// The sender\'s prologue',
+            '#endif\n\n#if !defined(__aarch64__)\n#if 0\nAZ04_EXEMPT("Batch 2: disabled arm")\n#endif\nstatic void install_after_endif(uintptr_t b, size_t p) { (void)b; (void)p; }\n#endif\n\n// The sender\'s prologue',
+            1,
+        )
+        self.assertNotEqual(after_endif, source, 'anchor missing for after_endif')
+        self.assertTrue(any('install_after_endif' in e for e in coverage.check(after_endif)))
+
+        # Annotation outside #if !defined(__aarch64__) immediately above #if must not cross into the block.
+        outside_guard = source.replace(
+            '#endif\n\n// The sender\'s prologue',
+            '#endif\n\nAZ04_EXEMPT("Batch 2: outside guard")\n#if !defined(__aarch64__)\nstatic void install_inside_guard(uintptr_t b, size_t p) { (void)b; (void)p; }\n#endif\n\n// The sender\'s prologue',
+            1,
+        )
+        self.assertNotEqual(outside_guard, source, 'anchor missing for outside_guard')
+        self.assertTrue(any('install_inside_guard' in e for e in coverage.check(outside_guard)))
+
+        # Inside edit_engine(), an annotation in another #if/#else branch must not cover a following A32-only call.
+        documented_def = source.replace(
+            '#endif\n\n// The sender\'s prologue',
+            '#endif\n\n#if !defined(__aarch64__)\nAZ04_EXEMPT("Batch 2: planned AZ04 port")\nstatic void install_future_a32(uintptr_t base, size_t page) { (void)base; (void)page; }\n#endif\n\n// The sender\'s prologue',
+            1,
+        )
+        call_opposite = documented_def.replace(
+            '#if !defined(__aarch64__)\n    AZ04_EXEMPT',
+            '#if !defined(__aarch64__)\n#if defined(OTHER_BRANCH)\n    AZ04_EXEMPT("Batch 2: other branch")\n#else\n    install_future_a32(base, page);\n#endif\n    AZ04_EXEMPT',
+            1,
+        )
+        self.assertNotEqual(call_opposite, documented_def, 'anchor missing for call_opposite')
+        self.assertTrue(any('install_future_a32' in e for e in coverage.check(call_opposite)))

@@ -166,6 +166,28 @@ def _line_archs(nocomment_lines):
     return archs
 
 
+def _line_pp_branches(nocomment_lines):
+    stack = []
+    branches = []
+    next_id = 0
+    for line in nocomment_lines:
+        s = line.strip()
+        m = re.match(r'^#\s*(if|ifdef|ifndef|elif|else|endif)\b', s)
+        if m:
+            kw = m[1]
+            if kw in ('if', 'ifdef', 'ifndef'):
+                next_id += 1
+                stack.append([next_id, 0])
+            elif kw in ('elif', 'else') and stack:
+                stack[-1][1] += 1
+            elif kw == 'endif' and stack:
+                stack.pop()
+            branches.append(None)
+            continue
+        branches.append(tuple(tuple(frame) for frame in stack))
+    return branches
+
+
 _EXEMPT_STR_RE = re.compile(r'\bAZ04_EXEMPT\s*\(\s*"((?:\\.|[^"\\])*)"\s*\)')
 
 
@@ -192,9 +214,12 @@ def _is_standalone_exempt_line(line):
     return matches[0]
 
 
-def _consume_exempt_for_def(nocomment_lines, clean_lines, hdr_idx, open_idx, fn_name, consumed):
+def _consume_exempt_for_def(nocomment_lines, clean_lines, archs, branches, hdr_idx, open_idx, fn_name, consumed):
     fn_re = re.compile(rf'\b{re.escape(fn_name)}\s*\(')
+    target_branch = branches[open_idx]
     for li in range(hdr_idx, open_idx + 1):
+        if branches[li] != target_branch or any(archs[k] == 'pp' for k in range(li + 1, open_idx + 1)):
+            continue
         standalone = _is_standalone_exempt_line(nocomment_lines[li])
         if standalone is not None:
             if (li, standalone.start()) not in consumed:
@@ -218,8 +243,11 @@ def _consume_exempt_for_def(nocomment_lines, clean_lines, hdr_idx, open_idx, fn_
             return True
     p = hdr_idx - 1
     while p >= 0 and not nocomment_lines[p].strip():
+        if archs[p] == 'pp':
+            p = -1
+            break
         p -= 1
-    if p >= 0:
+    if p >= 0 and archs[p] != 'pp' and branches[p] == target_branch:
         standalone = _is_standalone_exempt_line(nocomment_lines[p])
         if standalone is not None and (p, standalone.start()) not in consumed:
             consumed.add((p, standalone.start()))
@@ -227,7 +255,7 @@ def _consume_exempt_for_def(nocomment_lines, clean_lines, hdr_idx, open_idx, fn_
     return False
 
 
-def _consume_exempt_for_call(nocomment_lines, clean_lines, li, call_col, consumed):
+def _consume_exempt_for_call(nocomment_lines, clean_lines, archs, branches, li, call_col, consumed):
     seg_start = max(
         clean_lines[li].rfind(';', 0, call_col),
         clean_lines[li].rfind('{', 0, call_col),
@@ -243,8 +271,11 @@ def _consume_exempt_for_call(nocomment_lines, clean_lines, li, call_col, consume
     if seg_start == 0:
         p = li - 1
         while p >= 0 and not nocomment_lines[p].strip():
+            if archs[p] == 'pp':
+                p = -1
+                break
             p -= 1
-        if p >= 0:
+        if p >= 0 and archs[p] != 'pp' and branches[p] == branches[li]:
             standalone = _is_standalone_exempt_line(nocomment_lines[p])
             if standalone is not None and (p, standalone.start()) not in consumed:
                 consumed.add((p, standalone.start()))
@@ -277,7 +308,7 @@ def _fn_name_before_brace(text):
     return None
 
 
-def _top_level_functions(nocomment_lines, clean_lines, archs):
+def _top_level_functions(nocomment_lines, clean_lines, archs, branches):
     functions = []
     depth = 0
     in_fn = None
@@ -291,7 +322,7 @@ def _top_level_functions(nocomment_lines, clean_lines, archs):
             hdr_start = idx
             for back in range(idx, max(-1, idx - 6), -1):
                 if archs[back] == 'pp':
-                    continue
+                    break
                 t = clean_lines[back]
                 if back < idx and (';' in t or '}' in t or '{' in t):
                     break
@@ -301,7 +332,11 @@ def _top_level_functions(nocomment_lines, clean_lines, archs):
             before_brace = hdr.split('{', 1)[0]
             name = _fn_name_before_brace(before_brace)
             if name and name not in ('if', 'for', 'while', 'switch', 'sizeof', '__attribute__', '_Static_assert'):
-                hdr_nocom = '\n'.join(nocomment_lines[max(0, hdr_start - 1):idx + 1])
+                hdr_nocom = '\n'.join(
+                    nocomment_lines[li]
+                    for li in range(max(0, hdr_start - 1), idx + 1)
+                    if archs[li] != 'pp' and branches[li] == branches[idx]
+                )
                 is_a32_only = bool(re.search(r'\bA32_ONLY\b', hdr_nocom)) or archs[idx] == 'a32'
                 f_arch = 'a32' if is_a32_only else archs[idx]
                 in_fn = [name, hdr_start, idx, f_arch]
@@ -321,6 +356,7 @@ def check_az04_parity(source, clean, _functions):
     nocomment_lines = nocomment.splitlines()
     clean_lines = clean.splitlines()
     archs = _line_archs(nocomment_lines)
+    branches = _line_pp_branches(nocomment_lines)
 
     def fail_line(idx, message):
         errors.append(f'{idx + 1}: {message}')
@@ -335,7 +371,7 @@ def check_az04_parity(source, clean, _functions):
                 fail_line(idx, 'AZ04_EXEMPT requires a non-empty string literal reason')
 
     # Classify top-level function spans and check A32-only installer definitions + calls.
-    fn_info = _top_level_functions(nocomment_lines, clean_lines, archs)
+    fn_info = _top_level_functions(nocomment_lines, clean_lines, archs, branches)
     fn_arch_by_line = {}
     installer_archs = {}
     for name, hdr_idx, open_idx, end_idx, f_arch in fn_info:
@@ -350,7 +386,7 @@ def check_az04_parity(source, clean, _functions):
             continue
         if 'a64' in installer_archs[name] or 'common' in installer_archs[name]:
             continue
-        if not _consume_exempt_for_def(nocomment_lines, clean_lines, hdr_idx, open_idx, name, consumed_exempts):
+        if not _consume_exempt_for_def(nocomment_lines, clean_lines, archs, branches, hdr_idx, open_idx, name, consumed_exempts):
             fail_line(open_idx, f'A32-only installer {name} needs AZ04_EXEMPT("reason") or an AZ04 implementation')
 
     call_re = re.compile(r'\b((?:install|prepare)_[a-z0-9_]+)\s*\(')
@@ -364,7 +400,7 @@ def check_az04_parity(source, clean, _functions):
         non_a32 = {c for c, li, _col in calls if archs[li] in ('a64', 'common')}
         for callee, li, call_col in calls:
             if archs[li] == 'a32' and callee not in non_a32 and not _consume_exempt_for_call(
-                nocomment_lines, clean_lines, li, call_col, consumed_exempts
+                nocomment_lines, clean_lines, archs, branches, li, call_col, consumed_exempts
             ):
                 fail_line(li, f'A32-only call to {callee} in {fn_name} needs AZ04_EXEMPT("reason") or an AZ04 call')
 
