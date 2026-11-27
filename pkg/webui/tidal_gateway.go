@@ -320,7 +320,7 @@ func (g *tidalGateway) saveTracks() {
 	g.saving = false
 	v := savedTracks{Next: g.next, Root: g.nasRoot, Tracks: make([]savedRef, 0, len(g.tracks))}
 	for id, ref := range g.tracks {
-		v.Tracks = append(v.Tracks, savedRef{id, ref.track, ref.session, ref.guest, ref.file, ref.drive})
+		v.Tracks = append(v.Tracks, savedRef{id, stripTrackAuth(ref.track), ref.session, ref.guest, ref.file, ref.drive})
 	}
 	sort.Slice(v.Tracks, func(a, b int) bool { return g.trackSeen[v.Tracks[a].ID] < g.trackSeen[v.Tracks[b].ID] })
 	for id, ref := range g.lists {
@@ -372,6 +372,12 @@ func (g *tidalGateway) resetNAS(root string) {
 	if changed {
 		g.saveTracks()
 	}
+}
+
+// stripTrackAuth is t as it is saved: its cover URL without credentials (#335).
+func stripTrackAuth(t providers.Track) providers.Track {
+	t.CoverURL = providers.StripURLAuth(t.CoverURL, t.Provider == "subsonic")
+	return t
 }
 
 func isNASTrackRef(ref trackRef) bool {
@@ -1054,7 +1060,7 @@ func (g *tidalGateway) artBytes(ctx context.Context, address string) []byte {
 	if rbx {
 		data = g.rbxArt(ctx, address)
 	} else {
-		data = fetchArt(ctx, address)
+		data = fetchArt(ctx, g.s.nasAuthorize(address)) // a saved row's NAS cover holds no credentials (#335)
 	}
 	if data == nil {
 		return nil

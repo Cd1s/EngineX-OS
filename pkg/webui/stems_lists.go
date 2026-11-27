@@ -111,10 +111,21 @@ func (s *Server) adoptStems() {
 		}
 	}
 	if adopt {
-		if err := saveState(s.stemsFile(), all); err != nil {
+		if err := saveState(s.stemsFile(), stripStemsAuth(all)); err != nil {
 			log.Printf("webui: Stems lists not saved (%T)", err)
 		}
 	}
+}
+
+// stripStemsAuth is the Stems lists as they are saved: cover URLs without
+// credentials (#335).
+func stripStemsAuth(all map[string][]stemmedTrack) map[string][]stemmedTrack {
+	for _, list := range all {
+		for i := range list {
+			list[i].Track = stripTrackAuth(list[i].Track)
+		}
+	}
+	return all
 }
 
 func sameTrack(a, b providers.Track) bool { return a.Provider == b.Provider && a.ID == b.ID }
@@ -142,7 +153,7 @@ func (s *Server) addStemmedAt(scope string, t stemmedTrack, gen uint64) error {
 	}
 	list := slices.DeleteFunc(all[scope], func(e stemmedTrack) bool { return sameTrack(e.Track, t.Track) })
 	all[scope] = append([]stemmedTrack{t}, list[:min(len(list), maxStemmed-1)]...)
-	return saveState(s.stemsFile(), all)
+	return saveState(s.stemsFile(), stripStemsAuth(all))
 }
 
 // resetNASStems drops the stemmed NAS tracks after the NAS server, share or
@@ -161,7 +172,7 @@ func (s *Server) resetNASStemsLocked(root string) {
 	if !dropNASStems(all) {
 		return
 	}
-	if err := saveState(s.stemsFile(), all); err != nil {
+	if err := saveState(s.stemsFile(), stripStemsAuth(all)); err != nil {
 		log.Printf("webui: NAS changed: Stems lists not saved; the old NAS entries stay unused (%T)", err)
 	}
 }

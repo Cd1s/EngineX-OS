@@ -901,11 +901,27 @@ func soundCloudSearch(t providers.Track) string {
 
 // addCover embeds the artwork, which Engine reads from the file for its screens. A
 // missing cover is not worth failing a track over.
+func lookupNAS(f func() *providers.SelfHostedProvider) *providers.SelfHostedProvider {
+	if f == nil {
+		return nil
+	}
+	return f()
+}
+
 func (j *Jobs) addCover(ctx context.Context, t providers.Track, dl *deemixclient.Download) {
 	if t.CoverURL == "" {
 		return
 	}
-	if err := j.p.Deemix.EmbedCover(ctx, dl.Path, t.CoverURL); err != nil {
+	address := t.CoverURL
+	if isNASProvider(t.Provider) { // a saved row's cover holds no credentials: the NAS's are added back (#335)
+		j.mu.Lock()
+		lookup := j.selfHosted
+		j.mu.Unlock()
+		if sh := lookupNAS(lookup); sh != nil {
+			address = sh.AuthorizeURL(address)
+		}
+	}
+	if err := j.p.Deemix.EmbedCover(ctx, dl.Path, address); err != nil {
 		log.Printf("stream-sync: no cover for track %s: %v", t.ID, err)
 	}
 }

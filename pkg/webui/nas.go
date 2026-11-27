@@ -369,6 +369,18 @@ func nasRootID(cfg providers.NASConfig) string {
 	return hex.EncodeToString(sum[:16])
 }
 
+// nasAuthorize adds the NAS's credentials back to address when it is a URL of the
+// configured NAS server: saved cover URLs hold none (#335).
+func (s *Server) nasAuthorize(address string) string {
+	if s == nil {
+		return address
+	}
+	if p := s.ownerSelfHosted(); p != nil {
+		return p.AuthorizeURL(address)
+	}
+	return address
+}
+
 // stateIO is nil except in tests that make NAS state file reads or writes fail.
 var stateIO atomic.Pointer[stateFiles]
 

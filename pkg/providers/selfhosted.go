@@ -138,6 +138,61 @@ func (p *SelfHostedProvider) DownloadTrack(ctx context.Context, trackID, destDir
 // Subsonic / Navidrome (OpenSubsonic REST API)
 // ----------------------------------------------------------------------------
 
+// StripURLAuth is raw without credentials, as it is saved: no userinfo and no Plex
+// token, and for a Subsonic track's URL no u, t, s, p or apiKey. Other URLs come back
+// unchanged; one that does not parse is dropped. AuthorizeURL adds the NAS's
+// credentials back at use.
+func StripURLAuth(raw string, subsonic bool) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	q, changed := u.Query(), u.User != nil
+	for k := range q {
+		auth := subsonic && (k == "u" || k == "t" || k == "s" || k == "p" || k == "apiKey")
+		if auth || strings.EqualFold(k, "X-Plex-Token") {
+			q.Del(k)
+			changed = true
+		}
+	}
+	if !changed {
+		return raw
+	}
+	u.User, u.RawQuery = nil, q.Encode()
+	return u.String()
+}
+
+// AuthorizeURL is raw with this NAS's credentials when it is a URL of the configured
+// server (same host and port): Subsonic auth parameters, or the Plex token. Any other
+// URL comes back unchanged, so no credential goes to another host.
+func (p *SelfHostedProvider) AuthorizeURL(raw string) string {
+	u, err := url.Parse(raw)
+	base, berr := url.Parse(strings.TrimSpace(p.cfg.URL))
+	if raw == "" || err != nil || berr != nil || !strings.EqualFold(u.Hostname(), base.Hostname()) || u.Port() != base.Port() {
+		return raw
+	}
+	q := u.Query()
+	switch p.cfg.Protocol {
+	case "subsonic":
+		for k, v := range p.subsonicAuthParams() {
+			q[k] = v
+		}
+	case "plex":
+		tok := p.plexToken()
+		if tok == "" {
+			return raw
+		}
+		q.Set("X-Plex-Token", tok)
+	default:
+		return raw
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 func (p *SelfHostedProvider) subsonicAuthParams() url.Values {
 	q := make(url.Values)
 	q.Set("v", "1.16.1")

@@ -1343,6 +1343,8 @@ func writeReleasedState(t *testing.T, stateDir, dlDir, scope string, track provi
 // Round 8 (PM decision): an upgrade from released-format state files (no NAS root)
 // keeps everything: the [NAS] row plays its cached file without a download, and the
 // Stems row stays. A root change after the upgrade hides them like any tagged state.
+// The Subsonic row's cover URL is the one the provider builds, with its credentials;
+// the saved files hold none afterwards, and the cover still works.
 func TestNASUpgradeFromReleasedStateFiles(t *testing.T) {
 	t.Run("webdav same root", func(t *testing.T) {
 		var requests atomic.Int32
@@ -1422,8 +1424,14 @@ func TestNASUpgradeFromReleasedStateFiles(t *testing.T) {
 			if format == "hashed cache name" {
 				cache = releasedCacheName(rig.twoURL, "\x00subsonic\x00tr-99", ".mp3")
 			}
+			// The cover as the released provider stored it: the NAS URL with its auth.
+			cfg := rig.s.loadNASConfig()
+			auth := providers.NewSelfHostedProvider(cfg, nil).AuthorizeURL(rig.twoURL + "/rest/getCoverArt.view?id=cv-99")
+			if !strings.Contains(auth, "t=") || !strings.Contains(auth, "s=") {
+				t.Fatalf("the provider's cover URL carries no credentials: %s", auth)
+			}
 			track := providers.Track{ID: "tr-99", Title: "Warehouse Dub", Artist: "DJ Test", Provider: "subsonic",
-				CoverURL: strings.Replace(rig.twoURL, "http://", "https://", 1) + "/rest/getCoverArt.view?id=cv-99"}
+				CoverURL: strings.Replace(auth, "http://", "https://", 1)}
 			stemPath := writeReleasedState(t, rig.stateDir, rig.p.Deemix.DownloadDir, "subsonic", track, cache, rig.two)
 			rig.start()
 			rig.plays("the upgraded [NAS] row", 1, rig.two)
@@ -1437,6 +1445,11 @@ func TestNASUpgradeFromReleasedStateFiles(t *testing.T) {
 			if local.Path != stemPath {
 				t.Fatalf("the upgraded Stems row: %q, want %q", local.Path, stemPath)
 			}
+			rig.s.tidal.saveTracks()
+			assertNoNASSecrets(t, rig, cfg)
+			if got := rig.s.nasAuthorize("https://" + strings.TrimPrefix(rig.twoURL, "http://") + "/rest/getCoverArt.view?id=cv-99"); !strings.Contains(got, "t=") {
+				t.Fatalf("the cover URL gets no credentials back at use: %s", got)
+			}
 			rig.saveNAS(rig.oneURL)
 			rig.gone("the upgraded row after a root change", 1)
 			id1 := rig.browse()
@@ -1444,6 +1457,146 @@ func TestNASUpgradeFromReleasedStateFiles(t *testing.T) {
 			if a := rig.get(fmt.Sprintf("/v1/enginex/stems/local?id=%d", id1)); a.code != http.StatusNotFound {
 				t.Fatalf("server one's row %d got the upgraded Stems copy after the root change: HTTP %d %s", id1, a.code, a.body)
 			}
+		})
+	}
+}
+
+// assertNoNASSecrets reads the saved NAS state files: no password, token, salted hash or
+// userinfo of the NAS in any of them.
+func assertNoNASSecrets(t *testing.T, rig *nasSwitchRig, cfg providers.NASConfig) {
+	t.Helper()
+	files := []string{filepath.Join(rig.stateDir, "gateway-tracks.json"), filepath.Join(rig.stateDir, "streaming-stems.json"),
+		filepath.Join(rig.p.Deemix.DownloadDir, sourcesFile)}
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", filepath.Base(f), err)
+		}
+		text := string(raw)
+		for _, bad := range []string{"t=", "s=", "p=", "u=" + cfg.Username, "X-Plex-Token", "apiKey", "@"} {
+			if cfg.Password != "" && strings.Contains(text, cfg.Password) || strings.Contains(text, bad) {
+				t.Fatalf("%s holds NAS credentials (%q): %s", filepath.Base(f), bad, text)
+			}
+		}
+	}
+}
+
+// Round 8: no NAS credential in a saved state file (it was in v5.3.0.5-r1 too). The
+// provider builds cover URLs with the NAS's auth: Subsonic u/t/s (password) or u/p
+// (token), the Plex token. After a real browse, a stream, a Stems source and a save, and
+// after migrating a file that holds such a URL, no saved file holds a credential, and
+// the cover still loads with the credentials added back at use.
+func TestNASSavedStateHoldsNoCredentials(t *testing.T) {
+	const pass, token = "nas-pass-r8-335", "nas-token-r8-335"
+	cover := []byte("\xff\xd8\xff\xe0 cover")
+	nas := func(protocol string) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			q := r.URL.Query()
+			switch r.URL.Path {
+			case "/rest/getPlaylists.view":
+				fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlists":{"playlist":[{"id":"pl-42","name":"Club Crate","songCount":1}]}}}`)
+			case "/rest/getPlaylist.view":
+				fmt.Fprint(w, `{"subsonic-response":{"status":"ok","playlist":{"id":"pl-42","name":"Club Crate","entry":[{"id":"tr-99","title":"Warehouse Dub","artist":"DJ Test","duration":210,"suffix":"mp3","coverArt":"cv-99"}]}}}`)
+			case "/rest/download.view", "/library/parts/7/file.mp3":
+				w.Header().Set("Content-Type", "audio/mpeg")
+				w.Write(testMP3(120))
+			case "/rest/getCoverArt.view", "/library/metadata/7/thumb":
+				if q.Get("t") != "" || q.Get("X-Plex-Token") == token {
+					w.Write(cover)
+					return
+				}
+				http.Error(w, "no auth", http.StatusUnauthorized)
+			case "/playlists":
+				fmt.Fprint(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"55","title":"Club Crate","leafCount":1}]}}`)
+			case "/playlists/55/items":
+				fmt.Fprint(w, `{"MediaContainer":{"Metadata":[{"ratingKey":"7","title":"Warehouse Dub","grandparentTitle":"DJ Test","thumb":"/library/metadata/7/thumb","Media":[{"Part":[{"key":"/library/parts/7/file.mp3"}]}]}]}}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+	for _, protocol := range []string{"subsonic", "plex"} {
+		t.Run(protocol, func(t *testing.T) {
+			rig := newNASSwitchRig(t)
+			server := nas(protocol)
+			body := fmt.Sprintf(`{"protocol":%q,"url":%q,"username":"dj","password":%q,"token":%q,"enabled":true}`, protocol, server, pass, token)
+			w := httptest.NewRecorder()
+			rig.s.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/v1/enginex/nas", strings.NewReader(body)))
+			if w.Code != http.StatusOK {
+				t.Fatalf("save NAS: %d %s", w.Code, w.Body.String())
+			}
+			id := rig.browse()
+			rig.s.tidal.mu.Lock()
+			row := rig.s.tidal.tracks[id].track.CoverURL
+			rig.s.tidal.mu.Unlock()
+			if !strings.Contains(row, pass) && !strings.Contains(row, "t=") && !strings.Contains(row, token) {
+				t.Fatalf("the provider's cover URL carries no credentials, so the test proves nothing: %s", row)
+			}
+			if a := rig.stream(id); a.code != http.StatusOK {
+				t.Fatalf("stream: HTTP %d", a.code)
+			}
+			if a := rig.get(fmt.Sprintf("/v1/enginex/stems/source?id=%d", id)); a.code != http.StatusOK {
+				t.Fatalf("Stems source: HTTP %d %s", a.code, a.body)
+			}
+			rig.s.tidal.saveTracks()
+			check := func(step string) {
+				t.Helper()
+				for _, f := range []string{filepath.Join(rig.stateDir, "gateway-tracks.json"), filepath.Join(rig.stateDir, "streaming-stems.json"),
+					filepath.Join(rig.p.Deemix.DownloadDir, sourcesFile)} {
+					raw, err := os.ReadFile(f)
+					if err != nil {
+						t.Fatalf("%s: read %s: %v", step, filepath.Base(f), err)
+					}
+					for _, bad := range []string{pass, token, "t=", "s=", "p=", "u=dj", "X-Plex-Token", "apiKey", "dj@", "dj:"} {
+						if strings.Contains(string(raw), bad) {
+							t.Fatalf("%s: %s holds a NAS credential (%q): %s", step, filepath.Base(f), bad, raw)
+						}
+					}
+				}
+			}
+			check("after a save")
+			// The saved cover URL alone is refused by the NAS; with the credentials added
+			// back at use (nasAuthorize) it loads. The fixture NAS is plain http, the gateway
+			// stores covers as https: the scheme is put back for the fetch.
+			saved := providers.StripURLAuth(row, protocol == "subsonic")
+			get := func(address string) (int, []byte) {
+				resp, err := http.Get(strings.Replace(address, "https://", "http://", 1))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer resp.Body.Close()
+				data, _ := io.ReadAll(resp.Body)
+				return resp.StatusCode, data
+			}
+			if code, _ := get(saved); code != http.StatusUnauthorized {
+				t.Fatalf("the saved cover URL without credentials answered HTTP %d, want 401: %s", code, saved)
+			}
+			if code, data := get(rig.s.nasAuthorize(saved)); code != http.StatusOK || !bytes.Equal(data, cover) {
+				t.Fatalf("the saved cover URL with the credentials added back answered HTTP %d", code)
+			}
+			// Never to another host: credentials are added only for the configured server.
+			for _, other := range []string{"https://cdn.example/cover.jpg", strings.Replace(saved, "127.0.0.1", "localhost", 1)} {
+				if got := rig.s.nasAuthorize(other); got != other {
+					t.Fatalf("credentials added to another host's URL: %s -> %s", other, got)
+				}
+			}
+
+			// An older file with the credentialed URL is rewritten without it.
+			rig.stop()
+			legacy, _ := json.Marshal(row)
+			old := fmt.Sprintf(`{"next":1,"tracks":[{"id":1,"track":{"id":"x","provider":%q,"title":"Old","coverUrl":%s},"session":"nas"}]}`, protocol, legacy)
+			if err := os.WriteFile(filepath.Join(rig.stateDir, "gateway-tracks.json"), []byte(old), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stems := fmt.Sprintf(`{%q:[{"track":{"id":"x","provider":%q,"coverUrl":%s},"path":"/x"}]}`, protocol, protocol, legacy)
+			if err := os.WriteFile(filepath.Join(rig.stateDir, "streaming-stems.json"), []byte(stems), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			rig.start()
+			rig.s.tidal.saveTracks()
+			check("after migrating an older file")
 		})
 	}
 }
