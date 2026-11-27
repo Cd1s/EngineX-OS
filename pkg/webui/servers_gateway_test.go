@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -209,7 +210,10 @@ func TestServersTwoWebDAVWithTheSameFoldersNeverMix(t *testing.T) {
 		t.Fatalf("downloads: Studio %d, Club %d", a.gets.Load(), b.gets.Load())
 	}
 	refA, refB := refOf(r.s.tidal, rowID(ia)), refOf(r.s.tidal, rowID(ib))
-	if refA.track.ID == refB.track.ID || !strings.HasPrefix(refA.track.ID, serverRoot(kindWebDAV, a.srv.URL+"/music/")+":") {
+	// Each row carries its server's identity (round 3: given when the server is added,
+	// not derived from its address).
+	if refA.track.ID == refB.track.ID || !strings.HasPrefix(refA.track.ID, strings.TrimPrefix(studio, "webdav:")+":") ||
+		!strings.HasPrefix(refB.track.ID, strings.TrimPrefix(club, "webdav:")+":") {
 		t.Fatalf("track IDs: %q %q", refA.track.ID, refB.track.ID)
 	}
 	// Each row's Stems entry joins its own server's Stems list.
@@ -475,7 +479,7 @@ func TestServersSeveralNASNeverMix(t *testing.T) {
 	r := newWebDAVRig(t, string(raw), "sources=\nscope=\nomni_source=1\n")
 	views := r.changeKind(t, nasScope, serverChange{Action: "add", Name: "Club NAS", URL: two.URL, Username: two.User, Password: two.Password}, 200)
 	club := scopeOf(views, "Club NAS")
-	if scopeOf(views, "Studio NAS") != nasScope || club != "nas:"+serverRoot(kindNAS, two.URL) {
+	if scopeOf(views, "Studio NAS") != nasScope || !strings.HasPrefix(club, "nas:") || !isRootID(strings.TrimPrefix(club, "nas:")) {
 		t.Fatalf("NAS servers: %+v", views)
 	}
 	if v := r.status(t); !slices.Contains(serverSources(v), nasScope) || !slices.Contains(serverSources(v), club) {
@@ -504,8 +508,9 @@ func TestServersSeveralNASNeverMix(t *testing.T) {
 		t.Fatalf("search over both NAS: %v", got)
 	}
 	// Moving NAS 1 (the console's server) to another share: only its rows go; NAS 2 plays on.
+	// Another address takes no saved password along (round 3), so the console sends it.
 	w := httptest.NewRecorder()
-	r.s.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/api/nas", strings.NewReader(`{"protocol":"smb","url":"`+one.URL+`/Set","username":"`+one.User+`","enabled":true}`)))
+	r.s.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/api/nas", strings.NewReader(`{"protocol":"smb","url":"`+one.URL+`/Set","username":"`+one.User+`","password":"`+one.Password+`","enabled":true}`)))
 	if w.Code != 200 {
 		t.Fatalf("console move of NAS 1: %d %s", w.Code, w.Body.String())
 	}
@@ -540,5 +545,61 @@ func TestServersSeveralNASNeverMix(t *testing.T) {
 	}
 	if got := r.search(t, "Opener"); len(got) != 0 {
 		t.Fatalf("search with NAS off found %v", webdavTitles(got))
+	}
+}
+
+// Round 3 (review of the WebDAV branch, item 2): remove a server, replace its
+// recording, add the same address again. On ed0e55a9 a fresh browse played the old
+// audio with no new download, and a search returned the old filename with no request
+// to the server: the download index and the search cache outlived the server under
+// its address-derived ID. A server added again now has a new identity, and removal
+// forgets its downloads.
+func TestServersReAddedServerNeverPlaysTheOldRecording(t *testing.T) {
+	d := newFakeDAV(t, testMP3(120), nil)
+	old := d.audio
+	r := newWebDAVRig(t, "", "sources=\nscope=\nomni_source=0\nwebdav=1\n")
+	views := r.change(t, serverChange{Action: "add", Name: "Studio", URL: d.srv.URL + "/music/"}, 200)
+	scope := scopeOf(views, "Studio")
+	row := r.tracks(t, r.open(t, scope)["House"])["a"]
+	if code, got := r.stream(t, rowID(row)); code != 200 || !bytes.Equal(got, old) {
+		t.Fatalf("first play: HTTP %d, %d bytes", code, len(got))
+	}
+	found := r.search(t, "intro")
+	if len(found) != 1 {
+		t.Fatalf("first search: %d rows", len(found))
+	}
+	if code, got := r.stream(t, rowID(found[0])); code != 200 || !bytes.Equal(got, old) {
+		t.Fatalf("first search result: HTTP %d, %d bytes", code, len(got))
+	}
+	r.change(t, serverChange{Action: "remove", ID: views[0].ID}, 200)
+	d.audio = testMP3(150) // the recordings at the same paths are replaced
+	gets := d.gets.Load()
+	views = r.change(t, serverChange{Action: "add", Name: "Studio", URL: d.srv.URL + "/music/"}, 200)
+	oldID := strings.TrimPrefix(scope, "webdav:")
+	scope = scopeOf(views, "Studio")
+	if code, _ := uiPost(t, r.gw.URL, "scope="+scope); code != http.StatusOK {
+		t.Fatalf("scope=%s: HTTP %d", scope, code)
+	}
+	// A search right away asks the server again (no result cached for the removed one),
+	// and its row plays the new recording.
+	finds := d.finds.Load()
+	found = r.search(t, "intro")
+	if len(found) != 1 || d.finds.Load() == finds {
+		t.Errorf("search after the server was added again: %d rows, %d requests to the server (the removed server's cached result?)", len(found), d.finds.Load()-finds)
+	}
+	if len(found) == 1 {
+		if code, got := r.stream(t, rowID(found[0])); code != 200 || !bytes.Equal(got, d.audio) {
+			t.Errorf("the search result plays %d bytes (HTTP %d), the old recording=%v", len(got), code, bytes.Equal(got, old))
+		}
+	}
+	row = r.tracks(t, r.open(t, scope)["House"])["a"]
+	if code, got := r.stream(t, rowID(row)); code != 200 || !bytes.Equal(got, d.audio) {
+		t.Errorf("the browsed row plays %d bytes (HTTP %d), the old recording=%v", len(got), code, bytes.Equal(got, old))
+	}
+	if n := d.gets.Load() - gets; n != 2 {
+		t.Errorf("downloads after the server was added again: %d, want 2 (each row once, nothing from before)", n)
+	}
+	if views[0].ID == oldID {
+		t.Errorf("the server added again has its old identity %s", oldID)
 	}
 }

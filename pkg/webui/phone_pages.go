@@ -61,7 +61,7 @@ var phoneText = map[string][4]string{
 	"wdURL":           {"Address (https://host/folder)", "地址（https://主机/文件夹）", "位址（https://主機/資料夾）", "Dirección (https://servidor/carpeta)"},
 	"wdUser":          {"Username", "用户名", "使用者名稱", "Usuario"},
 	"wdPassword":      {"Password", "密码", "密碼", "Contraseña"},
-	"wdKeep":          {"Password (leave empty to keep it)", "密码（留空则不变）", "密碼（留空則不變）", "Contraseña (vacía para conservarla)"},
+	"wdKeep":          {"Password (empty keeps it while the address stays the same)", "密码（地址不变时留空则不变）", "密碼（位址不變時留空則不變）", "Contraseña (vacía la conserva si la dirección no cambia)"},
 	"wdAdd":           {"Add server", "添加服务器", "新增伺服器", "Añadir servidor"},
 	"wdSave":          {"Save", "保存", "儲存", "Guardar"},
 	"wdRemove":        {"Remove", "移除", "移除", "Eliminar"},

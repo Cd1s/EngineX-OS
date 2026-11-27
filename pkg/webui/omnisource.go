@@ -434,12 +434,12 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 			}
 		}
 	}
-	kept := g.s.serversKept()
+	servers := g.s.serverAddresses(kindWebDAV)
 	for _, m := range g.s.loadMounts() {
 		if !m.Mounted && !m.Enabled {
 			continue
 		}
-		if strings.EqualFold(m.Protocol, webdavScope) && kept[serverRoot(kindWebDAV, mountWebDAVURL(m))] {
+		if strings.EqualFold(m.Protocol, webdavScope) && servers[serverRoot(kindWebDAV, mountWebDAVURL(m))] {
 			continue // a WebDAV server: its own entry in Sources, listed once
 		}
 		hasEngineLib := false

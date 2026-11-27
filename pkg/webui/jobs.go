@@ -379,6 +379,48 @@ func (j *Jobs) resetNAS(root string, also func()) {
 	}
 }
 
+// dropServers forgets the downloads of WebDAV and NAS servers that are gone
+// (removed, or moved to another address): their files, queue marks and index
+// entries. Their cache files stay until the cache trims them; nothing finds them
+// under that server again, and a server added again has a new identity, so work
+// still running for the old one cannot hand its audio to the new one (#335).
+func (j *Jobs) dropServers(keep map[string]bool) {
+	if j == nil {
+		return
+	}
+	gone := func(key string) bool {
+		provider, id, _ := strings.Cut(key, ":")
+		_, isServer := kindOfProvider(provider)
+		server, _, ok := splitServerID(id)
+		return isServer && ok && !keep[server]
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	for k := range j.files {
+		if gone(k) {
+			delete(j.files, k)
+		}
+	}
+	for k := range j.queued {
+		if _, tk, _ := strings.Cut(k, "\x00"); gone(tk) {
+			delete(j.queued, k)
+		}
+	}
+	if j.p.Deemix == nil {
+		return
+	}
+	changed := false
+	for k := range j.loadSources() {
+		if gone(k) {
+			delete(j.sources, k)
+			changed = true
+		}
+	}
+	if changed {
+		j.writeSources()
+	}
+}
+
 // Fetch downloads t for immediate playback and queues CPU3 analysis and import
 // of the same file. Playback never waits for analysis. Concurrent requests for
 // one track share a download; it continues if the waiting caller gives up.

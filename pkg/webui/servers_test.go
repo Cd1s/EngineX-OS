@@ -3,6 +3,7 @@ package webui
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -349,7 +350,7 @@ func TestServersConsoleSlotAndList(t *testing.T) {
 	}
 	// The slot's SMB server named on the deck, then moved to the SMB list when the
 	// console puts Subsonic in the slot: same ID and name, now "nas:<id>".
-	nas := serverRoot(kindNAS, "smb://nas.example/music")
+	nas := v.NAS[0].ID // the server the console put in the slot (round 3: a new identity, not its address's)
 	r.changeKind(t, nasScope, serverChange{Action: "edit", ID: nas, Name: "Studio NAS", URL: "smb://nas.example/music", Username: "dj"}, 200)
 	post(`{"protocol":"smb","url":"smb://nas.example/music/","enabled":true}`, 200) // the same server again: stays in the slot
 	r.changeKind(t, nasScope, serverChange{Action: "add", URL: "smb://club.example/sets"}, 200)
@@ -451,7 +452,7 @@ func TestServersPhonePage(t *testing.T) {
 				t.Fatal("phone password not saved in nas.json")
 			}
 			u = start()
-			phone := serverRoot(k, c.addURL)
+			phone := views[1].ID // the server the phone added (round 3: its own identity)
 			form(url.Values{"action": {"edit"}, "id": {phone}, "name": {"Phone 2"}, "url": {c.addURL}, "user": {"me"}})
 			if fl := r.file(t); (*fl.list(k))[0].Name != "Phone 2" || (*fl.list(k))[0].Password != "phone-pw" {
 				t.Fatalf("phone edit: %+v", *fl.list(k))
@@ -464,4 +465,74 @@ func TestServersPhonePage(t *testing.T) {
 			tidalGet(t, r.gw.URL, "/icons/"+c.kind, 200, nil)
 		})
 	}
+}
+
+// Round 3 (review of the WebDAV branch, item 1): a server moved to another address
+// with the password field left empty kept the old password, in all four places
+// (WebDAV and SMB, the slot and the list), and the console card kept the slot's
+// password and token the same way. A new address never takes the old credentials;
+// an empty field keeps them only for the same address.
+func TestServersNewAddressNeverTakesTheOldPassword(t *testing.T) {
+	const marker = "old-pass-r3-marker"
+	type place struct {
+		name, kind, fixture, from, to string
+	}
+	slotWebDAV := fmt.Sprintf(`{"protocol":"webdav","url":"https://dav.example/Music/","username":"dj","password":%q,"enabled":true}`, marker)
+	slotSMB := fmt.Sprintf(`{"protocol":"smb","url":"smb://nas.example/music","username":"dj","password":%q,"enabled":true}`, marker)
+	listWebDAV := fmt.Sprintf(`{"webdav":[{"url":"https://club.example/dav/","username":"dj","password":%q,"enabled":true}]}`, marker)
+	listSMB := fmt.Sprintf(`{"smb":[{"url":"smb://club.example/sets","username":"dj","password":%q,"enabled":true}]}`, marker)
+	for _, c := range []place{
+		{"webdav slot", webdavScope, slotWebDAV, "https://dav.example/Music/", "https://other.example/Music/"},
+		{"smb slot", nasScope, slotSMB, "smb://nas.example/music", "smb://other.example/music"},
+		{"webdav list", webdavScope, listWebDAV, "https://club.example/dav/", "https://other.example/dav/"},
+		{"smb list", nasScope, listSMB, "smb://club.example/sets", "smb://other.example/sets"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newWebDAVRig(t, c.fixture, "")
+			k, _ := kindOf(c.kind)
+			id := serverViews(k, r.file(t))[0].ID
+			// The same address with the field empty keeps the password.
+			list := r.changeKind(t, c.kind, serverChange{Action: "edit", ID: id, Name: "Same", URL: c.from, Username: "dj"}, 200)
+			if list[0].ID != id || !list[0].HasPassword {
+				t.Fatalf("the same address lost its password or identity: %+v", list)
+			}
+			// Another address with the field empty: no password, and none anywhere in nas.json.
+			list = r.changeKind(t, c.kind, serverChange{Action: "edit", ID: id, Name: "Moved", URL: c.to, Username: "dj"}, 200)
+			if len(list) != 1 || list[0].HasPassword {
+				t.Fatalf("the server moved to %s still has a password: %+v", c.to, list)
+			}
+			raw, err := os.ReadFile(filepath.Join(r.uiDir, "nas.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(raw), marker) {
+				t.Fatalf("the old password stays in nas.json for the new address: %s", raw)
+			}
+			if list[0].ID == id {
+				t.Fatalf("the server moved to another address kept its identity %s", id)
+			}
+		})
+	}
+	t.Run("console card", func(t *testing.T) {
+		const token = "old-token-r3-marker"
+		fixture := fmt.Sprintf(`{"protocol":"plex","url":"http://plex.example:32400","username":"dj","password":%q,"token":%q,"enabled":true}`, marker, token)
+		r := newWebDAVRig(t, fixture, "")
+		post := func(body string) {
+			t.Helper()
+			w := httptest.NewRecorder()
+			r.s.handleNASConfig(w, httptest.NewRequest(http.MethodPost, "/api/nas", strings.NewReader(body)))
+			if w.Code != http.StatusOK {
+				t.Fatalf("console POST %s: %d %s", body, w.Code, w.Body.String())
+			}
+		}
+		post(`{"protocol":"plex","url":"http://plex.example:32400/","username":"dj","password":"***","token":"***","enabled":true}`)
+		if f := r.file(t); f.Password != marker || f.Token != token {
+			t.Fatalf("the same server lost its password or token: %+v", f.NASConfig)
+		}
+		post(`{"protocol":"plex","url":"http://other.example:32400","username":"dj","password":"","token":"","enabled":true}`)
+		f := r.file(t)
+		if f.Password != "" || f.Token != "" {
+			t.Fatalf("the console's new address kept the old credentials: password %v, token %v", f.Password != "", f.Token != "")
+		}
+	})
 }

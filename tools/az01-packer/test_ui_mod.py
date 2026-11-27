@@ -15388,6 +15388,12 @@ assert.strictEqual(f.placeholder, 'Leave empty to keep the saved password');
 scServerNext(''); scServerNext('Studio');
 assert.strictEqual(xhrs[1].url, 'http://127.0.0.1:8080/v1/enginex/servers/webdav');
 assert.deepStrictEqual(JSON.parse(xhrs[1].body), {action: 'edit', id: 'a1', name: 'Studio', url: 'https://dav.example/music', username: 'dj', password: ''});
+// WebDAV round 3: another address does not keep the saved password, so the hint is not shown.
+scServerEdit('webdav', {id: 'a1', name: 'Studio', url: 'https://dav.example/music', username: 'dj', hasPassword: true});
+scServerNext('https://other.example/music'); scServerNext('dj');
+f = field(); scServerField(f);
+assert.strictEqual(f.placeholder, '');
+scServerStop();
 // Refusals say why, in the words of the kind.
 xhrs[1].answer(409, '{"error":"this server is already added"}');
 assert.strictEqual(scServerError, 'This server is already added');

@@ -4737,7 +4737,9 @@ SERVICES_MAIN = """
 		field.title = root.scT(d.id ? (nas ? "Edit NAS server" : "Edit WebDAV server") : (nas ? "Add NAS server" : "Add WebDAV server"))
 		field.label = root.scT({url: "Server address", username: "Username", password: "Password", name: "Name (optional)"}[step])
 		field.text = step === "password" ? "" : String(d[step] || (step === "url" ? scheme : ""))
-		field.placeholder = step === "url" ? scheme : step === "password" && d.hasPassword ? root.scT("Leave empty to keep the saved password")
+		// An empty password keeps the saved one only for the same address (the server
+		// refuses to carry it to another one), so the hint shows only then.
+		field.placeholder = step === "url" ? scheme : step === "password" && d.hasPassword && d.url === d.from ? root.scT("Leave empty to keep the saved password")
 			: step === "name" ? String(d.url || "").replace(/^[a-z]+:\\/\\//i, "").split("/")[0] : ""
 		field.doneButtonTitle = root.scT(scServerStep < scServerSteps.length - 1 ? "Next" : "Done")
 		field.cancelButtonTitle = root.scT("Cancel")
@@ -4751,8 +4753,8 @@ SERVICES_MAIN = """
 		if (!scServerInput) return
 		scServerKind = kind
 		scServerError = ""
-		scServerDraft = server ? {id: server.id, url: server.url || "", username: server.username || "", password: "", name: server.name || "", hasPassword: !!server.hasPassword}
-			: {id: "", url: "", username: "", password: "", name: "", hasPassword: false}
+		scServerDraft = server ? {id: server.id, url: server.url || "", from: server.url || "", username: server.username || "", password: "", name: server.name || "", hasPassword: !!server.hasPassword}
+			: {id: "", url: "", from: "", username: "", password: "", name: "", hasPassword: false}
 		scServerStep = 0
 		scServerTyping = true
 		root.openDialogComponent(scServerInput)

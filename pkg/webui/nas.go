@@ -168,11 +168,11 @@ func (s *Server) handleNASConfig(w http.ResponseWriter, r *http.Request) {
 		defer s.resetNASIfMoved(s.loadNASConfigLocked())
 		f := s.loadNASFileLocked() // the server lists stay
 		f.NASConfig, f.Name = providers.NASConfig{}, ""
-		if err := s.saveNASFileLocked(f); err != nil {
+		if err := s.saveNASFileLocked(&f); err != nil {
 			fail(w, http.StatusInternalServerError, errors.New("could not remove NAS configuration"))
 			return
 		}
-		s.forgetServersLocked(f)
+		s.forgetServersLocked()
 		respond(w, toNASConfigView(providers.NASConfig{}))
 	default:
 		fail(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -225,16 +225,21 @@ func (s *Server) handleNASConfigPost(w http.ResponseWriter, r *http.Request) {
 		Enabled:  in.Enabled,
 	}
 
-	// Preserve existing password if incoming is empty or "***"
+	// An empty or "***" password or token keeps the saved one only for the same
+	// server (protocol and address): one moved to another address never takes the
+	// old one's credentials along.
+	same := nasTarget(newCfg) == nasTarget(existing)
 	if in.Password == "" || in.Password == "***" {
-		newCfg.Password = existing.Password
+		if same {
+			newCfg.Password = existing.Password
+		}
 	} else {
 		newCfg.Password = in.Password
 	}
-
-	// Preserve existing token if incoming is empty or "***"
 	if in.Token == "" || in.Token == "***" {
-		newCfg.Token = existing.Token
+		if same {
+			newCfg.Token = existing.Token
+		}
 	} else {
 		newCfg.Token = in.Token
 	}
@@ -251,17 +256,18 @@ func (s *Server) handleNASConfigPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if k, ok := kindOfProvider(f.Protocol); ok && proto != f.Protocol && f.URL != "" && !listed(k, f.URL) {
-		*f.list(k) = append([]savedServer{{Name: f.Name, URL: f.URL, Username: f.Username, Password: f.Password, Enabled: f.Enabled}}, *f.list(k)...)
+		moved := savedServer{ID: idOf(f.SlotID, k, f.URL), Name: f.Name, URL: f.URL, Username: f.Username, Password: f.Password, Enabled: f.Enabled}
+		*f.list(k) = append([]savedServer{moved}, *f.list(k)...) // the same server: its identity and rows stay
 	}
 	if nasTarget(newCfg) != nasTarget(f.NASConfig) {
 		f.Name = ""
 	}
 	f.NASConfig = newCfg
-	if err := s.saveNASFileLocked(f); err != nil {
+	if err := s.saveNASFileLocked(&f); err != nil {
 		fail(w, http.StatusInternalServerError, errors.New("could not save nas configuration"))
 		return
 	}
-	s.forgetServersLocked(f)
+	s.forgetServersLocked()
 
 	respond(w, toNASConfigView(newCfg))
 }
@@ -488,7 +494,7 @@ func (s *Server) ownerSMBSelfHosted() *providers.SelfHostedProvider {
 	if smbNASConfigReady(f.NASConfig) && on {
 		// One provider per server, as for the other NAS servers: a search also
 		// finds what was browsed. Another address is another provider.
-		return s.serverProvider(serverEntry{kind: kindNAS, ID: serverRoot(kindNAS, f.URL), cfg: f.NASConfig, slot: true, idx: -1})
+		return s.serverProvider(serverEntry{kind: kindNAS, ID: idOf(f.SlotID, kindNAS, f.URL), cfg: f.NASConfig, slot: true, idx: -1})
 	}
 	return nil
 }

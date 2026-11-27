@@ -2,6 +2,8 @@ package webui
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -74,6 +76,10 @@ func kindOfProvider(provider string) (serverKind, bool) {
 
 // savedServer is one server in nas.json's "webdav" or "smb" list.
 type savedServer struct {
+	// ID is the server's identity, given when it is added or moved to another
+	// address (newServerID). A server saved without one (earlier files) is
+	// known by its address (serverRoot).
+	ID       string `json:"id,omitempty"`
 	Name     string `json:"name,omitempty"`
 	URL      string `json:"url"`
 	Username string `json:"username,omitempty"`
@@ -82,12 +88,35 @@ type savedServer struct {
 }
 
 // nasFile is nas.json: the NAS slot as before (its fields at the top level), the
-// DJ's name for the server in that slot, and the two lists.
+// DJ's name for the server in that slot, its identity, and the two lists.
 type nasFile struct {
 	providers.NASConfig
-	Name   string        `json:"name,omitempty"`
+	Name string `json:"name,omitempty"`
+	// SlotID is the slot server's identity once its address changed in this
+	// version (saveNASFileLocked); before that it is known by its address.
+	SlotID string        `json:"slotId,omitempty"`
 	WebDAV []savedServer `json:"webdav,omitempty"`
 	SMB    []savedServer `json:"smb,omitempty"`
+}
+
+// newServerID is a new server identity, in the form of a root ID: a server added
+// again, or moved to another address, is never the server it was, so nothing an
+// earlier one left (a download, a cached search, a row a browse still adds) is
+// used for it.
+func newServerID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err) // crypto/rand does not fail on Linux
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// idOf is a server's identity: the one saved, else its address's.
+func idOf(saved string, k serverKind, raw string) string {
+	if isRootID(saved) {
+		return saved
+	}
+	return serverRoot(k, raw)
 }
 
 func (f *nasFile) list(k serverKind) *[]savedServer {
@@ -151,8 +180,17 @@ func (s *Server) loadNASFileLocked() nasFile {
 	return f
 }
 
-// saveNASFileLocked writes nas.json, or removes it once it holds nothing.
-func (s *Server) saveNASFileLocked(f nasFile) error {
+// saveNASFileLocked writes nas.json, or removes it once it holds nothing. A slot
+// that now names another server (another protocol or address, or none) gets a new
+// identity: every writer of the slot (the console card, the deck and the phone,
+// the mounts page) goes through here.
+func (s *Server) saveNASFileLocked(f *nasFile) error {
+	if old := s.loadNASFileLocked(); nasTarget(old.NASConfig) != nasTarget(f.NASConfig) {
+		f.SlotID = ""
+		if _, ok := kindOfProvider(f.Protocol); ok && strings.TrimSpace(f.URL) != "" {
+			f.SlotID = newServerID()
+		}
+	}
 	if f.Protocol == "" && f.URL == "" && len(f.WebDAV) == 0 && len(f.SMB) == 0 {
 		if err := os.Remove(s.nasConfigPath()); err != nil && !os.IsNotExist(err) {
 			return err
@@ -177,7 +215,8 @@ func serverHost(raw string) string {
 func serverEntries(k serverKind, f nasFile) []serverEntry {
 	var out []serverEntry
 	add := func(e serverEntry) {
-		if strings.TrimSpace(e.cfg.URL) == "" || slices.ContainsFunc(out, func(v serverEntry) bool { return v.ID == e.ID }) {
+		root := serverRoot(k, e.cfg.URL)
+		if strings.TrimSpace(e.cfg.URL) == "" || slices.ContainsFunc(out, func(v serverEntry) bool { return v.ID == e.ID || serverRoot(k, v.cfg.URL) == root }) {
 			return
 		}
 		if e.Name == "" {
@@ -186,11 +225,11 @@ func serverEntries(k serverKind, f nasFile) []serverEntry {
 		out = append(out, e)
 	}
 	if f.Protocol == k.protocol {
-		add(serverEntry{kind: k, ID: serverRoot(k, f.URL), Name: strings.TrimSpace(f.Name), cfg: f.NASConfig, slot: true, idx: -1})
+		add(serverEntry{kind: k, ID: idOf(f.SlotID, k, f.URL), Name: strings.TrimSpace(f.Name), cfg: f.NASConfig, slot: true, idx: -1})
 	}
 	for i, v := range *f.list(k) {
 		cfg := providers.NASConfig{Protocol: k.protocol, URL: v.URL, Username: v.Username, Password: v.Password, Enabled: v.Enabled}
-		add(serverEntry{kind: k, ID: serverRoot(k, v.URL), Name: strings.TrimSpace(v.Name), cfg: cfg, idx: i})
+		add(serverEntry{kind: k, ID: idOf(v.ID, k, v.URL), Name: strings.TrimSpace(v.Name), cfg: cfg, idx: i})
 	}
 	return out
 }
@@ -417,10 +456,10 @@ func (s *Server) applyServer(k serverKind, c serverChange) ([]serverView, error)
 		} else {
 			*list = slices.Delete(*list, cur.idx, cur.idx+1)
 		}
-		if err := s.saveNASFileLocked(f); err != nil {
+		if err := s.saveNASFileLocked(&f); err != nil {
 			return nil, err
 		}
-		s.forgetServersLocked(f)
+		s.forgetServersLocked()
 		return serverViews(k, f), nil
 	}
 	if c.Action != "add" && c.Action != "edit" {
@@ -430,45 +469,63 @@ func (s *Server) applyServer(k serverKind, c serverChange) ([]serverView, error)
 	if err := validServerURL(k, raw); err != nil {
 		return nil, err
 	}
-	id := serverRoot(k, raw)
-	if slices.ContainsFunc(all, func(e serverEntry) bool { return e.ID == id && (cur == nil || e.ID != cur.ID) }) {
+	root := serverRoot(k, raw)
+	if slices.ContainsFunc(all, func(e serverEntry) bool {
+		return serverRoot(e.kind, e.cfg.URL) == root && (cur == nil || e.ID != cur.ID)
+	}) {
 		return nil, errServerDuplicate
 	}
 	name, user := strings.TrimSpace(c.Name), strings.TrimSpace(c.Username)
 	if r := []rune(name); len(r) > 64 {
 		name = string(r[:64])
 	}
-	password := c.Password
+	// An empty password field keeps the saved password (and the slot's token) only
+	// for the same address: a server moved to another address never takes the old
+	// one's credentials along.
+	password, token := c.Password, ""
+	same := cur != nil && serverRoot(k, cur.cfg.URL) == root
+	keep := same && (password == "" || password == "***")
+	if password == "***" {
+		password = ""
+	}
 	switch {
 	case c.Action == "add":
 		if len(entries) >= maxServers {
 			return nil, errServerFull
 		}
-		*list = append(*list, savedServer{Name: name, URL: raw, Username: user, Password: password, Enabled: true})
+		*list = append(*list, savedServer{ID: newServerID(), Name: name, URL: raw, Username: user, Password: password, Enabled: true})
 	case cur.slot:
-		if password == "" || password == "***" {
+		if keep {
 			password = f.Password
 		}
-		f.NASConfig = providers.NASConfig{Protocol: k.protocol, URL: raw, Username: user, Password: password, Token: f.Token, Enabled: true}
-		f.Name = name
-	default:
-		if password == "" || password == "***" {
-			password = (*list)[cur.idx].Password
+		if same {
+			token = f.Token
 		}
-		(*list)[cur.idx] = savedServer{Name: name, URL: raw, Username: user, Password: password, Enabled: true}
+		f.NASConfig = providers.NASConfig{Protocol: k.protocol, URL: raw, Username: user, Password: password, Token: token, Enabled: true}
+		f.Name = name // a new address gets a new identity (saveNASFileLocked)
+	default:
+		v := (*list)[cur.idx]
+		if keep {
+			password = v.Password
+		}
+		id := v.ID
+		if !same {
+			id = newServerID()
+		}
+		(*list)[cur.idx] = savedServer{ID: id, Name: name, URL: raw, Username: user, Password: password, Enabled: true}
 	}
-	if err := s.saveNASFileLocked(f); err != nil {
+	if err := s.saveNASFileLocked(&f); err != nil {
 		return nil, err
 	}
-	s.forgetServersLocked(f)
+	s.forgetServersLocked()
 	return serverViews(k, f), nil
 }
 
-// forgetServersLocked drops what belonged to servers that are no longer set up
-// (removed, or moved to another address): their gateway rows and lists, their
-// Stems entries and their connections. Caller holds uiMu.
-func (s *Server) forgetServersLocked(f nasFile) {
-	keep := keptServers(f)
+// forgetServersLocked drops what belonged to servers that are no longer set up in
+// nas.json as it is now (removed, or moved to another address): their connections,
+// gateway rows and lists, Stems entries and downloads. Caller holds uiMu.
+func (s *Server) forgetServersLocked() {
+	keep := keptServers(s.loadNASFileLocked())
 	s.serverMu.Lock()
 	for id := range s.serverConns {
 		if !keep[id] {
@@ -480,6 +537,7 @@ func (s *Server) forgetServersLocked(f nasFile) {
 	s.dropServerStemsLocked(keep)
 	s.stemsMu.Unlock()
 	s.tidal.dropServers(keep)
+	s.jobs.dropServers(keep)
 }
 
 func keptServers(f nasFile) map[string]bool {
@@ -499,6 +557,20 @@ func (s *Server) serversKept() map[string]bool {
 	f := s.loadNASFileLocked()
 	s.uiMu.Unlock()
 	return keptServers(f)
+}
+
+// serverAddresses are the addresses (serverRoot) of a kind's servers set up: a
+// server's identity is not its address (newServerID), so "is this address a
+// server's" asks here.
+func (s *Server) serverAddresses(k serverKind) map[string]bool {
+	s.uiMu.Lock()
+	f := s.loadNASFileLocked()
+	s.uiMu.Unlock()
+	out := map[string]bool{}
+	for _, e := range serverEntries(k, f) {
+		out[serverRoot(k, e.cfg.URL)] = true
+	}
+	return out
 }
 
 // handleServers is the deck's list (GET) and change (POST) of a kind's servers:
