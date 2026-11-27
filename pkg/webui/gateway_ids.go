@@ -31,13 +31,16 @@ import (
 // is valid when it is {"ceiling": N} and nothing else, with 0 < N <= maxTrackID and N
 // at least the highest ID the gateway file holds (when that file can be read).
 //
-// With no valid copy left (both lost, or a deck that ran a version without them), the
-// counter starts above every gateway ID that can still be referenced: Engine's library
-// rows, the gateway file's IDs and our own files named by an ID (the analysis and cover
-// cache); both copies are saved before the first new ID. Only when that floor cannot be
-// read either does this run hand out no new ID, and the next start tries again. All of
-// this is start-up work: browsing and playing hand out IDs below the ceiling and write
-// both copies once per idBlock IDs.
+// Only the gateway file read in full with both copies valid and equal is a safe bound.
+// Otherwise (the file unreadable or holding an ID out of range, a copy missing or not
+// valid, the copies disagreeing) the counter starts above max(every valid copy, the
+// file's in-range IDs, every gateway ID still referenced: Engine's library rows and our
+// own files named by an ID, the analysis and cover cache), found before any copy is
+// repaired or any ID handed out (#335 round 12). A value above maxTrackID is never
+// handed out, so it bounds nothing and is ignored. Only when the IDs in use cannot be
+// read does this run hand out no new ID, and the next start tries again. All of this is
+// start-up work: browsing and playing hand out IDs below the ceiling and write both
+// copies once per idBlock IDs.
 
 const (
 	// idBlock is how many track IDs one reservation covers.
@@ -112,47 +115,50 @@ func (g *tidalGateway) reserve(n int64) error {
 	return nil
 }
 
-// loadCeiling sets the counter at start-up: from the greatest valid copy of the
-// ceiling (repairing the other), or with none valid from the floor of the IDs that can
-// still be referenced. tableMax is the highest ID the gateway file holds, 0 when it
-// holds none or cannot be read.
-func (g *tidalGateway) loadCeiling(tableMax int64) {
+// loadCeiling sets the counter at start-up (see the top of this file). tableMax is the
+// highest in-range ID the gateway file holds (0 when none or unreadable); tableOK says
+// the file was read in full with every ID in range.
+func (g *tidalGateway) loadCeiling(tableMax int64, tableOK bool) {
 	paths := g.idsPaths()
 	if paths == nil {
 		return
 	}
-	best := int64(0)
-	found := make([]int64, len(paths))
+	g.next = max(g.next, tableMax)
+	copies := make([]int64, len(paths))
 	for i, file := range paths {
 		n, err := readCeiling(file, tableMax)
-		if err != nil {
-			if !errors.Is(err, fs.ErrNotExist) {
-				log.Printf("stream-sync: gateway ID ceiling copy %d not used: %v", i+1, err)
-			}
-			continue
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("stream-sync: gateway ID ceiling copy %d not used: %v", i+1, err)
 		}
-		found[i], best = n, max(best, n)
+		copies[i] = n
 	}
-	if best > 0 {
-		g.ceiling, g.next = best, max(g.next, best)
-		for i, file := range paths {
-			if found[i] != best {
-				if err := saveCeilingCopy(file, best); err != nil {
-					log.Printf("stream-sync: gateway ID ceiling copy %d not repaired (%T); the next reservation writes it", i+1, err)
-				}
-			}
-		}
+	if tableOK && copies[0] > 0 && copies[0] == copies[1] {
+		g.ceiling, g.next = copies[0], max(g.next, copies[0])
 		return
 	}
-	floor, err := referencedFloor(tableMax)
+	floor, err := referencedFloor(max(tableMax, slices.Max(copies)))
 	if err != nil {
 		g.idsUnknown = true
-		log.Printf("stream-sync: no gateway ID ceiling and the IDs in use cannot be read (%v): no new track IDs in this run; the next start tries again", err)
+		log.Printf("stream-sync: no safe gateway ID bound and the IDs in use cannot be read (%v): no new track IDs in this run; the next start tries again", err)
 		return
 	}
 	g.next = max(g.next, floor)
-	g.ceiling = g.next // nothing reserved yet: the first new ID saves both copies first
-	log.Printf("stream-sync: no gateway ID ceiling: new track IDs start above %d", g.next)
+	g.ceiling = g.next // the first new ID reserves above it in both copies first
+	if g.next > 0 {
+		if err := g.reserve(g.next); err != nil { // repair: both copies with the bound found
+			log.Printf("stream-sync: gateway ID ceiling copies not repaired (%T); the next reservation writes them", err)
+		}
+	}
+	log.Printf("stream-sync: gateway ID bound reconciled with the IDs in use: new track IDs start above %d", g.next)
+}
+
+// countID is top raised to n when n can be a track ID this gateway hands out
+// (1..maxTrackID); a larger value can never collide with a new ID and is ignored.
+func countID(top, n int64) int64 {
+	if n > 0 && n <= maxTrackID {
+		return max(top, n)
+	}
+	return top
 }
 
 // nextID hands out a new track ID, with g.mu held, or 0 when none may be handed out
@@ -257,7 +263,7 @@ func libraryMaxStreamingID(file string) (int64, error) {
 			continue
 		}
 		if id, err := strconv.ParseInt(path.Base(uri[len(streamingTrackURI):]), 10, 64); err == nil {
-			top = max(top, id)
+			top = countID(top, id)
 		}
 	}
 	return top, rows.Err()
@@ -280,7 +286,7 @@ func cachedMaxID(dir string) (int64, error) {
 		for _, ext := range []string{".bin", ".cover"} {
 			if base, ok := strings.CutSuffix(e.Name(), ext); ok {
 				if id, err := strconv.ParseInt(base, 10, 64); err == nil {
-					top = max(top, id)
+					top = countID(top, id)
 				}
 			}
 		}
@@ -318,7 +324,7 @@ func cachedMaxID(dir string) (int64, error) {
 				continue
 			}
 			if id, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); err == nil {
-				top = max(top, id)
+				top = countID(top, id)
 			}
 		}
 	}
