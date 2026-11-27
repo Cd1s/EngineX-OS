@@ -1810,6 +1810,7 @@ static const void *dsp_expected(unsigned slot, size_t *size) {
 
 
 #if !defined(__aarch64__)
+AZ04_EXEMPT("Batch 3 / hardware N/A: player PX selector; AZ04 consoles have no native PX selector")
 static int install_px_scope(uintptr_t base, size_t page, const char *version) {
     if (strcmp(version, "5.3.0")) return 0;
     char product[8] = {0};
@@ -1845,6 +1846,7 @@ static int install_px_scope(uintptr_t base, size_t page, const char *version) {
     unlink(UI_ROOT "/fx-selector.ack");
     return 1;
 }
+AZ04_EXEMPT("Batch 2: Color FX channel knob hooks awaiting AZ04 RE")
 static int install_cfx_scope(uintptr_t base, size_t page, const char *version) {
     uintptr_t value, value_slot, process;
     if (!strcmp(version, "5.3.0")) value = base + 0xd8ba3c, value_slot = base + 0x2b1e488, process = base + 0xec127c;
@@ -2187,6 +2189,7 @@ static void sclive_aux_changed(void *control, void *property, uintptr_t a, uintp
     }
 }
 
+AZ04_EXEMPT("hardware N/A: JP21 SC LIVE 4 AUX input only")
 A32_ONLY static void prepare_aux(uintptr_t base, size_t page) {
     aux_ready = 0;
     aux_process_jump[1] = aux_control_jump[1] = aux_init_jump[1] = 0;
@@ -2296,6 +2299,7 @@ A32_ONLY static void *shadow_sync_play_code(uintptr_t resume, size_t page) {
     return rx_code(code, sizeof code, page);
 }
 
+AZ04_EXEMPT("Batch 3: player-only shadow sync play")
 A32_ONLY static void prepare_shadow_sync_play(uintptr_t base, size_t page) {
     static const uint32_t expected[] = {0xe5d02020, 0xe5910000, 0xe2831004, 0xe3520000};
     uintptr_t site = base + 0x16fbc38u;
@@ -2305,6 +2309,7 @@ A32_ONLY static void prepare_shadow_sync_play(uintptr_t base, size_t page) {
 }
 
 // #207: the build's edit table names the site; a build without one keeps the stock decay.
+AZ04_EXEMPT("Batch 2: Reverb tail hook awaiting AZ04 RE")
 A32_ONLY static void prepare_reverb_time(uintptr_t base, size_t page) {
     for (unsigned i = 0; i < build->edit_count; i++) {
         if (build->edits[i].replacement != (const char *)reverb_time_jump) continue;
@@ -2317,6 +2322,7 @@ A32_ONLY static void prepare_reverb_time(uintptr_t base, size_t page) {
     }
 }
 
+AZ04_EXEMPT("stock AZ04: getConfig already provides Stems/SweepFX/4-deck/StemsEQ; Limiter/Zoom30 are in edits_az04")
 A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
     // getConfig's common return path runs after every model's constructor.
     uint32_t code[] = {
@@ -2400,6 +2406,7 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
     config_jump[1] = (uint32_t)(uintptr_t)rx_code(code, sizeof code, page);
 }
 
+AZ04_EXEMPT("stock AZ04: onboard Stems Pro; Batch 2 covers rekordbox analysis")
 A32_ONLY static void prepare_stems_feature(uintptr_t base, size_t page) {
     // The old 0x8429b0 exit misses models configured False; intercept before that split.
     uint32_t code[] = {
@@ -2479,6 +2486,14 @@ static const struct engine_edit edits_az04[] = {
     {0x97f53cu, "\x20\x26\x00\x36", "\x31\x01\x00\x14", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
     // TrackListModel: skip /Engine/Mixer/Recorder/Active load-disable override
     {0xd7a2f8u, "\x60\x1f\x00\x37", "\x1f\x20\x03\xd5", 4, EDIT_REC_STREAM, HF_REC_STREAMING},
+};
+
+static const int az04_exempt_features[] __attribute__((unused)) = {
+    HF_STEMS_EQ, AZ04_EXEMPT("stock AZ04: Config.audio.hasStemsLevel is 1 natively")
+    HF_SWEEP_FX, AZ04_EXEMPT("Batch 2: stock AZ04 has Sweep FX; Color FX knob hooks awaiting AZ04 RE")
+    HF_AUX_INPUT, AZ04_EXEMPT("hardware N/A: JP21 SC LIVE 4 AUX input only")
+    HF_FOUR_DECK, AZ04_EXEMPT("Batch 3: stock AZ04 consoles have 4 decks; shadow browse/regrid awaiting AZ04 RE")
+    HF_REVERB_TAIL, AZ04_EXEMPT("Batch 2: Reverb tail hook awaiting AZ04 RE")
 };
 
 static const struct engine_build engine_builds[] = {
@@ -2816,21 +2831,28 @@ __attribute__((constructor)) static void edit_engine(void) {
     if (!install_shadow_position_hooks(base, page)) hf_runtime_off(HF_SHADOW_PAUSED_FOLLOW);
     hf_publish();
 #if !defined(__aarch64__)
+    AZ04_EXEMPT("hardware N/A: JP21 SC LIVE 4 AUX input only")
     prepare_aux(base, page);
+    AZ04_EXEMPT("stock AZ04: getConfig already provides Stems/SweepFX/4-deck/StemsEQ; Limiter/Zoom30 are in edits_az04")
     prepare_config(base, page);
+    AZ04_EXEMPT("Batch 3: player-only shadow sync play")
     prepare_shadow_sync_play(base, page);
+    AZ04_EXEMPT("Batch 2: Reverb tail hook awaiting AZ04 RE")
     prepare_reverb_time(base, page);
     uint32_t expected_feature[2] = {build->feature_displaced ? build->feature_displaced : 0xe51b3340, 0xe3540000};
     if (build->feature_true && hf_on(HF_STEMS) && !memcmp((const void *)(base + build->feature_site), expected_feature, 8))
-        prepare_stems_feature(base, page);
+        AZ04_EXEMPT("stock AZ04: onboard Stems Pro; Batch 2 covers rekordbox analysis") prepare_stems_feature(base, page);
 #endif
     apply_engine_edits(base, page);
 #if !defined(__aarch64__)
     install_sqlite_hooks(base, page);
-    if (hf_on(HF_GATEWAY)) install_rekordbox_rows(base, page);
+    AZ04_EXEMPT("Batch 2: rekordbox BPM/Key row hooks awaiting AZ04 RE") if (hf_on(HF_GATEWAY)) install_rekordbox_rows(base, page);
+    AZ04_EXEMPT("Batch 2: rekordbox on-demand and Link analysis awaiting AZ04 RE")
     install_rekordbox_analysis(base, page);
+    AZ04_EXEMPT("Batch 3: peer shadow instant analysis awaiting AZ04 RE")
     install_shadow_analysis(base, page);
-    if (hf_on(HF_FOUR_DECK)) install_shadow_browse(base, page);
+    AZ04_EXEMPT("Batch 3: peer shadow browse deferral awaiting AZ04 RE") if (hf_on(HF_FOUR_DECK)) install_shadow_browse(base, page);
+    AZ04_EXEMPT("Batch 2: rekordbox USB browse on-demand awaiting AZ04 RE")
     install_rekordbox_browse(base, page);
 #else
     if (hf_on(HF_SQLITE_TUNING) || hf_on(HF_TELEMETRY_BLOCK)) install_sqlite_hooks(base, page);
@@ -2839,7 +2861,9 @@ __attribute__((constructor)) static void edit_engine(void) {
     if (dsp_ready) {
         if (hf_on(HF_BLUETOOTH)) install_bt_send(base, page);
 #if !defined(__aarch64__)
+        AZ04_EXEMPT("Batch 3 / hardware N/A: player PX selector; AZ04 consoles have no native PX selector")
         fx_selector_supported = install_px_scope(base, page, build->name);
+        AZ04_EXEMPT("Batch 2: Color FX channel knob hooks awaiting AZ04 RE")
         cfx_installed = install_cfx_scope(base, page, build->name);
 #endif
         __atomic_store_n(&echo_player_bypass, player_board(), __ATOMIC_RELAXED);
@@ -3888,6 +3912,7 @@ static void hide_browser_for_user_load(void *controller, const uint32_t *track) 
     stock_hide_browser(controller);
 }
 
+AZ04_EXEMPT("Batch 3: peer shadow browse deferral awaiting AZ04 RE")
 static void install_shadow_browse(uintptr_t base, size_t page) {
     if (strcmp(build->name, "5.3.0") || !four_deck_pad_on) return;
     // Both native load notifications call hideBrowser(controller) after checking
@@ -3934,6 +3959,7 @@ static void rekordbox_track_decode(void *json, void *track, uintptr_t r2, uintpt
     }
 }
 
+AZ04_EXEMPT("Batch 2: rekordbox BPM/Key row hooks awaiting AZ04 RE")
 A32_ONLY static void install_rekordbox_rows(uintptr_t base, size_t page) {
     if (strcmp(build->name, "5.3.0")) return;
     const uint32_t prefix[] = {0xe59f2cf8, 0xe59f3cf8, 0xe16d42f4, 0xe1cd81f0};
@@ -4032,6 +4058,7 @@ static int rbx_bind_text(void *stmt, int i, const char *text, int n, void (*dtor
     return rbx_bind_text_original(stmt, i, text, n, dtor);
 }
 
+AZ04_EXEMPT("Batch 2: rekordbox on-demand and Link analysis awaiting AZ04 RE")
 A32_ONLY static void install_rekordbox_analysis(uintptr_t base, size_t page) {
     const int gateway = hf_on(HF_GATEWAY);
     const int shadow = hf_on(HF_FOUR_DECK) && !strcmp(build->name, "5.3.0") && player_board();
@@ -4269,6 +4296,7 @@ static int bind_shadow_regrid_sock(const char *path) {
     return fd;
 }
 
+AZ04_EXEMPT("Batch 3: shadow live regrid awaiting AZ04 RE")
 A32_ONLY static int install_shadow_regrid(uintptr_t base, size_t page) {
     // Strictly SC5000 5.3.0 (exact BuildID) with both shadow and OA replay enabled.
     if (strcmp(build->name, "5.3.0") || !player_board() || !hf_on(HF_FOUR_DECK) || !hf_on(HF_RB_BRIDGE)) return 0;
@@ -4418,6 +4446,7 @@ static int shadow_step(void *stmt) {
     return rc;
 }
 
+AZ04_EXEMPT("Batch 3: peer shadow instant analysis awaiting AZ04 RE")
 A32_ONLY static void install_shadow_analysis(uintptr_t base, size_t page) {
     // Same Gen-1 SQLite bind site as the rekordbox analysis hook. bind_int
     // sign-extends r2 into r3 then branches to bind_int64.
@@ -4489,6 +4518,7 @@ A32_ONLY static void install_sqlite_hooks(uintptr_t base, size_t page) {
     fprintf(stderr, "engine-ui-hook: SQLite open/open_v2 hooks installed\n");
 }
 
+AZ04_EXEMPT("Batch 2: rekordbox USB browse on-demand awaiting AZ04 RE")
 A32_ONLY static void install_rekordbox_browse(uintptr_t base, size_t page) {
     // Verified across Engine 5.3.0 (JP07) and 5.3.0-sclive4 (JP21): sqlite3_api_routines
     // slots [19]=column_blob, [20]=column_bytes, [28]=column_int, [29]=column_int64,
