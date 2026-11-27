@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"unicode/utf8"
@@ -197,6 +198,12 @@ func (s *Server) stemmedAt(scope string) (uint64, []stemmedTrack) {
 // and its Stems belong to that file. When anything fails Engine gets the
 // cache file, as before.
 //
+// A NAS file can change behind the same path, so for a NAS track an earlier file
+// is kept only when it holds the audio being played (the download, cache); else
+// the new one goes to a directory beside it, base.2, base.3 and so on. The old one
+// is never used for this audio, and stays while Engine has it as a track with its
+// own Stems: the sweep removes it when nothing refers to it (#335).
+//
 // The stream cache keeps reserve bytes of its volume free by evicting its own
 // files. Nothing may evict a file Engine has imported, so none is added that
 // would leave less: no copy that does not fit above the reserve (the name is
@@ -212,10 +219,23 @@ func stemsImportFile(cache string, t providers.Track, reserve int64) string {
 	if name == "" {
 		return cache
 	}
-	dir := filepath.Join(filepath.Dir(cache), "Stems", strings.TrimSuffix(filepath.Base(cache), ext))
-	named := filepath.Join(dir, name+ext)
-	if st, err := os.Stat(named); err == nil && st.Mode().IsRegular() {
-		return named
+	base := filepath.Join(filepath.Dir(cache), "Stems", strings.TrimSuffix(filepath.Base(cache), ext))
+	dir, named := base, ""
+	for n := 1; ; n++ {
+		if n > 1 {
+			dir = base + "." + strconv.Itoa(n)
+		}
+		named = filepath.Join(dir, name+ext)
+		st, err := os.Stat(named)
+		if err != nil {
+			break // a free name
+		}
+		if st.Mode().IsRegular() && (!isNASProvider(t.Provider) || sameAudio(named, cache)) {
+			return named
+		}
+		if n == maxStemsCopies {
+			return cache
+		}
 	}
 	room := func(need int64) bool {
 		free, _, _, err := stemsFreeSpace(filepath.Dir(cache))
@@ -245,6 +265,17 @@ func stemsImportFile(cache string, t providers.Track, reserve int64) string {
 }
 
 var stemsFreeSpace = freeSpace
+
+// maxStemsCopies bounds a NAS track's Stems import files (base, base.2 and so on): past
+// it Engine gets the download itself.
+const maxStemsCopies = 8
+
+// sameAudio reports whether the import file named holds the audio of the download
+// cache; an error is a no.
+func sameAudio(named, cache string) bool {
+	ok, err := deemixclient.SameAudio(named, cache)
+	return err == nil && ok
+}
 
 // sweepStemsSources removes the imported files under root that nothing refers
 // to any more: in no service's Stems list (the record dropped off the end of

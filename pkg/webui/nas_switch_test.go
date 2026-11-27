@@ -1371,6 +1371,56 @@ func TestNASUpgradeFromReleasedStateFiles(t *testing.T) {
 	}
 }
 
+// Round 9: Stems for a replaced recording. Same NAS root and track ID, other audio: the
+// released Stems copy has the name a new import file of that track gets, and it holds the
+// old recording. A Stems request for the row browsed again gets a file of the audio the
+// row plays; the old file stays where it is (Engine may have it as a track with its own
+// Stems). A copy that already holds the audio being played is kept: no second render.
+func TestNASStemsForAReplacedRecording(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		old  func(*nasSwitchRig) []byte
+		kept bool
+	}{
+		{"other audio", func(rig *nasSwitchRig) []byte { return rig.one }, false},
+		{"the same audio", func(rig *nasSwitchRig) []byte { return rig.two }, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rig := newNASSwitchRig(t)
+			rig.saveNAS(rig.twoURL)
+			rig.stop()
+			old := c.old(rig)
+			track := providers.Track{ID: "tr-99", Title: "Warehouse Dub", Artist: "DJ Test", Provider: "subsonic"}
+			cache := releasedCacheName(rig.twoURL, "\x00subsonic\x00tr-99", ".mp3") // the name the new download gets too
+			stemPath := writeReleasedState(t, rig.stateDir, rig.p.Deemix.DownloadDir, "subsonic", track, cache, old)
+			rig.start()
+			rig.gone("the released row", 1)
+			id := rig.browse()
+			rig.plays("the NAS browsed again", id, rig.two)
+			a := rig.get(fmt.Sprintf("/v1/enginex/stems/source?id=%d", id))
+			var v struct {
+				Path string `json:"path"`
+			}
+			if a.code != http.StatusOK || json.Unmarshal(a.body, &v) != nil {
+				t.Fatalf("Stems source: HTTP %d %s", a.code, a.body)
+			}
+			got, err := os.ReadFile(v.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.HasSuffix(got, rig.two) {
+				t.Fatalf("the Stems file holds other audio than the row plays: %d bytes, the old recording=%v", len(got), bytes.Equal(got, old))
+			}
+			if (v.Path == stemPath) != c.kept {
+				t.Fatalf("Stems file %s, the earlier copy %s: kept=%v, want %v", v.Path, stemPath, v.Path == stemPath, c.kept)
+			}
+			if data, err := os.ReadFile(stemPath); err != nil || !bytes.Equal(data, old) {
+				t.Fatalf("the earlier copy changed or went (err %v): Engine may still have it as a track", err)
+			}
+		})
+	}
+}
+
 // assertNoNASSecrets reads the saved NAS state files: no password, token, salted hash or
 // userinfo of the NAS in any of them.
 func assertNoNASSecrets(t *testing.T, rig *nasSwitchRig, cfg providers.NASConfig) {
