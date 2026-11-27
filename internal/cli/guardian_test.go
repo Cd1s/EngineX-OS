@@ -2,10 +2,16 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"database/sql"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"math"
 	"os"
 	"os/exec"
@@ -519,5 +525,138 @@ func TestGuardianCheckCopy(t *testing.T) {
 	}
 	if code := Guardian([]string{"--check-copy", lib, "--heal-mount", lib}, &out, &errOut); code != 2 {
 		t.Fatalf("combined with --heal-mount: code=%d", code)
+	}
+}
+
+func TestGuardianS11RecoversMissingArtworkFromEmbeddedMP3(t *testing.T) {
+	mount := mountFixture(t)
+	musicDir := filepath.Join(mount, "Music")
+	if err := os.MkdirAll(musicDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	makeMP3WithArt := func(name string, mime string, art []byte) {
+		t.Helper()
+		var body bytes.Buffer
+		body.WriteByte(0) // ISO-8859-1
+		body.WriteString(mime)
+		body.WriteByte(0)
+		body.WriteByte(3) // front cover
+		body.WriteByte(0) // empty description
+		body.Write(art)
+
+		var frame bytes.Buffer
+		frame.WriteString("APIC")
+		var fsz [4]byte
+		binary.BigEndian.PutUint32(fsz[:], uint32(body.Len()))
+		frame.Write(fsz[:])
+		frame.Write([]byte{0, 0})
+		frame.Write(body.Bytes())
+
+		sz := frame.Len()
+		var hdr [10]byte
+		copy(hdr[:3], "ID3")
+		hdr[3] = 3
+		hdr[6] = byte((sz >> 21) & 0x7f)
+		hdr[7] = byte((sz >> 14) & 0x7f)
+		hdr[8] = byte((sz >> 7) & 0x7f)
+		hdr[9] = byte(sz & 0x7f)
+
+		var mp3 bytes.Buffer
+		mp3.Write(hdr[:])
+		mp3.Write(frame.Bytes())
+		mp3.Write([]byte{0xFF, 0xFB, 0x90, 0x00, 0, 0, 0, 0})
+		if err := os.WriteFile(filepath.Join(musicDir, name), mp3.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Track 2: migrated AlbumArt (albumArt=NULL, 20-byte BLOB hash), missing Artwork/<b64>.jpg, valid embedded JPEG.
+	var jpgBuf bytes.Buffer
+	img1 := image.NewRGBA(image.Rect(0, 0, 200, 200))
+	for y := 0; y < 200; y++ {
+		for x := 0; x < 200; x++ {
+			img1.SetRGBA(x, y, color.RGBA{uint8(x), uint8(y), 120, 255})
+		}
+	}
+	if err := jpeg.Encode(&jpgBuf, img1, &jpeg.Options{Quality: 85}); err != nil {
+		t.Fatal(err)
+	}
+	sum2 := sha1.Sum(jpgBuf.Bytes())
+	makeMP3WithArt("covered.mp3", "image/jpeg", jpgBuf.Bytes())
+
+	// Track 3: migrated AlbumArt (albumArt=NULL, 20-byte BLOB hash), missing Artwork/<b64>.jpg, oversized embedded PNG -> downscaled JPEG.
+	var pngBuf bytes.Buffer
+	img2 := image.NewRGBA(image.Rect(0, 0, 1600, 800))
+	if err := png.Encode(&pngBuf, img2); err != nil {
+		t.Fatal(err)
+	}
+	sum3 := sha1.Sum(pngBuf.Bytes())
+	makeMP3WithArt("oversized.mp3", "image/png", pngBuf.Bytes())
+
+	// Track 4: untagged WAV with missing Artwork/<b64>.jpg -> Track.albumArtId must NOT be cleared.
+	if err := os.WriteFile(filepath.Join(musicDir, "untagged.wav"), []byte("RIFF\x24\x00\x00\x00WAVEfmt "), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum4 := sha1.Sum([]byte("missing-wav-cover"))
+
+	dbPath := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []struct {
+		q    string
+		args []any
+	}{
+		{q: `INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,NULL,NULL)`},
+		{q: `INSERT INTO AlbumArt(id,hash,albumArt) VALUES(2,?,NULL)`, args: []any{sum2[:]}},
+		{q: `INSERT INTO AlbumArt(id,hash,albumArt) VALUES(3,?,NULL)`, args: []any{sum3[:]}},
+		{q: `INSERT INTO AlbumArt(id,hash,albumArt) VALUES(4,?,NULL)`, args: []any{sum4[:]}},
+		{q: `INSERT INTO Track(id,path,albumArtId,isAnalyzed) VALUES(2,'../Music/covered.mp3',2,1)`},
+		{q: `INSERT INTO Track(id,path,albumArtId,isAnalyzed) VALUES(3,'../Music/oversized.mp3',3,1)`},
+		{q: `INSERT INTO Track(id,path,albumArtId,isAnalyzed) VALUES(4,'../Music/untagged.wav',4,1)`},
+	} {
+		if _, err := db.Exec(stmt.q, stmt.args...); err != nil {
+			db.Close()
+			t.Fatalf("%s: %v", stmt.q, err)
+		}
+	}
+	db.Close()
+
+	var out, errOut bytes.Buffer
+	if code := Guardian([]string{"--heal-mount", mount, "--data-only", "--timeout", "10s"}, &out, &errOut); code != 0 {
+		t.Fatalf("guardian code=%d out=%s err=%s", code, &out, &errOut)
+	}
+
+	art2 := filepath.Join(mount, "Engine Library", "Artwork", base64.RawURLEncoding.EncodeToString(sum2[:])+".jpg")
+	got2, err := os.ReadFile(art2)
+	if err != nil || !bytes.Equal(got2, jpgBuf.Bytes()) {
+		t.Fatalf("embedded JPEG cover not reconstructed at %s: len=%d err=%v", art2, len(got2), err)
+	}
+
+	art3 := filepath.Join(mount, "Engine Library", "Artwork", base64.RawURLEncoding.EncodeToString(sum3[:])+".jpg")
+	got3, err := os.ReadFile(art3)
+	if err != nil {
+		t.Fatalf("oversized embedded PNG cover not reconstructed at %s: %v", art3, err)
+	}
+	dec3, fmt3, err := image.Decode(bytes.NewReader(got3))
+	if err != nil || fmt3 != "jpeg" || dec3.Bounds().Dx() != 512 || dec3.Bounds().Dy() != 256 {
+		var b image.Rectangle
+		if dec3 != nil {
+			b = dec3.Bounds()
+		}
+		t.Fatalf("oversized embedded PNG not downscaled JPEG: fmt=%q bounds=%v err=%v", fmt3, b, err)
+	}
+
+	// Track 4's albumArtId must remain preserved (never destructively nulled).
+	check, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var t4Art sql.NullInt64
+	if err := check.QueryRow(`SELECT albumArtId FROM Track WHERE id=4`).Scan(&t4Art); err != nil || !t4Art.Valid || t4Art.Int64 != 4 {
+		t.Fatalf("untagged track albumArtId modified: %v err=%v", t4Art, err)
 	}
 }

@@ -61,12 +61,27 @@ runs `--watch`, so the flag stays accepted.
   are reanchored. All labels, colors, flags and unset slots survive. Unknown
   layouts and free loops are preserved. Playback-time phase accumulation inside
   the closed-source Engine executable cannot be changed by this database tool.
-- Artwork larger than 1024 pixels on either axis or 1 MiB is converted to JPEG
-  within 512x512, maintaining aspect ratio. SHA-1 hashes are updated in AlbumArt
-  and referencing Track rows. Corrupt images and images exceeding the 64-megapixel
-  decode budget are preserved with warnings. External Artwork files are not
-  rewritten; the database blob remains the fallback source. Dangling albumArtId
-  references become NULL, preserving albumArtSourceHash for external artwork.
+- Artwork reconciliation aligns both `AlbumArt` blobs and post-5.0 external
+  `Engine Library/Artwork/<base64url(hash)>.jpg` files with Engine 5.3.0's
+  `IFNULL(AlbumArt.albumArt, GET_ALBUM_ART(AlbumArt.hash))` read path. Any
+  artwork larger than 1024 pixels on either axis or 1 MiB (including external
+  files below 256 KiB and PNG/GIF payloads stored with a `.jpg` extension) is
+  converted to JPEG within 512x512, maintaining aspect ratio and compositing
+  alpha over white. Existing `AlbumArt.hash` values on resized DB blobs are
+  preserved for bridge deduplication; empty non-NULL `AlbumArt.albumArt`
+  (`X''`) is normalized to `NULL`; legacy 40-char hex `TEXT` hashes are
+  upgraded to 20-byte `BLOB` hashes once the external JPEG exists; invalid
+  numeric hashes that cause `GET_ALBUM_ART` to throw are recovered from
+  populated blobs or embedded audio tags (or cleared to `NULL` if
+  unrecoverable). Missing or zero-byte external files are reconstructed
+  atomically from `AlbumArt.albumArt` or referenced tracks' embedded audio tags
+  under the mount timeout budget. The stock `id=1` `NULL` sentinel and
+  `image://streaming/` / `image://fileart/` URI rows are preserved. Corrupt
+  images, symlinks, and images exceeding the 36-megapixel (`<= 32 MiB`) decode
+  budget are preserved with warnings. Dangling `albumArtId` references become
+  `NULL`, preserving `albumArtSourceHash`. In `--data-only` mount mode, DB blob
+  resizing streams rows one at a time and stops cleanly when the mount deadline
+  expires, deferring remaining covers to the next mount.
 - History supports listId/historylistId references and recognized session date
   columns, with descending ID as a fallback/tiebreaker. An explicit full heal
   retains the newest 50 visible sessions by default (sessions deleted on the

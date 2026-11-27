@@ -33,6 +33,7 @@ type Report struct {
 	Waveforms            int       `json:"waveforms_replaced"`
 	Loops                int       `json:"loops_aligned"`
 	Artwork              int       `json:"artwork_resized"`
+	ArtworkReconciled    int       `json:"artwork_reconciled,omitempty"`
 	OrphanArtwork        int       `json:"orphan_artwork_references"`
 	ReanalysisPending    int       `json:"reanalysis_pending"`
 	PathsNormalized      int       `json:"paths_normalized"`
@@ -97,6 +98,18 @@ func historyBudgetExpired(ctx context.Context, err error) bool {
 	}
 	if deadline, ok := ctx.Deadline(); ok && isSQLiteBusy(err) && time.Until(deadline) <= 50*time.Millisecond {
 		return true
+	}
+	return false
+}
+
+func budgetExpired(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	if err != nil && strings.Contains(err.Error(), "SQLITE_BUSY") {
+		if d, ok := ctx.Deadline(); ok && time.Until(d) <= 25*time.Millisecond {
+			return true
+		}
 	}
 	return false
 }
@@ -190,42 +203,56 @@ func transactionContext(ctx context.Context, db *sql.DB, f func(*sql.Tx) error) 
 
 // Heal runs all m.db mutations atomically. Integrity errors are reported; a
 // corrupt library is never replaced with an empty one.
-func Heal(db *sql.DB) (Report, error) { return heal(db, false) }
+func Heal(db *sql.DB) (Report, error) {
+	r, _, err := healWithResizedContext(context.Background(), db, false)
+	return r, err
+}
 
 // heal with dataOnly leaves Engine's views, triggers and indexes byte-identical:
 // Engine compares its schema on attach, then drops and recreates anything altered.
 func heal(db *sql.DB, dataOnly bool) (Report, error) {
-	return healContext(context.Background(), db, dataOnly, nil)
+	r, _, err := healWithResizedContext(context.Background(), db, dataOnly)
+	return r, err
 }
 
 func healContext(ctx context.Context, db *sql.DB, dataOnly bool, preHeal func(context.Context, *sql.Tx) error) (Report, error) {
+	r, _, err := healWithPreHealAndResizedContext(ctx, db, dataOnly, preHeal)
+	return r, err
+}
+
+func healWithResizedContext(ctx context.Context, db *sql.DB, dataOnly bool) (Report, map[int64]bool, error) {
+	return healWithPreHealAndResizedContext(ctx, db, dataOnly, nil)
+}
+
+func healWithPreHealAndResizedContext(ctx context.Context, db *sql.DB, dataOnly bool, preHeal func(context.Context, *sql.Tx) error) (Report, map[int64]bool, error) {
 	r := Report{CheckedAt: time.Now().UTC()}
 	if err := clampBusyTimeout(ctx, db); err != nil {
-		return r, err
+		return r, nil, err
 	}
 	var check string
 	if err := db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&check); err != nil {
-		return r, err
+		return r, nil, err
 	}
 	if check != "ok" {
-		return r, fmt.Errorf("database integrity: %s", check)
+		return r, nil, fmt.Errorf("database integrity: %s", check)
 	}
 	var major, minor, patch int
 	if err := db.QueryRowContext(ctx, "SELECT schemaVersionMajor,schemaVersionMinor,schemaVersionPatch FROM Information LIMIT 1").Scan(&major, &minor, &patch); err != nil {
-		return r, fmt.Errorf("missing library version: %w", err)
+		return r, nil, fmt.Errorf("missing library version: %w", err)
 	}
 	if major != 3 || minor != 0 || patch != 2 {
-		return r, fmt.Errorf("unsupported library schema %d.%d.%d (supported 3.0.2)", major, minor, patch)
+		return r, nil, fmt.Errorf("unsupported library schema %d.%d.%d (supported 3.0.2)", major, minor, patch)
 	}
 	if dataOnly {
 		// PRAGMA optimize could add sqlite_stat1, and the queue must stay out of
 		// the file: Engine drops unknown tables on attach.
 		if _, err := db.ExecContext(ctx, "CREATE TEMP TABLE IF NOT EXISTS GuardianReanalysis(trackId INTEGER NOT NULL,field TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(trackId,field))"); err != nil {
-			return r, err
+			return r, nil, err
 		}
 	} else if err := tuneContext(ctx, db, false); err != nil {
-		return r, err
+		return r, nil, err
 	}
+	var resized map[int64]bool
 	err := transactionContext(ctx, db, func(tx *sql.Tx) error {
 		// An unrecognized future schema is not a license to rewrite its blobs.
 		var schema string
@@ -282,13 +309,28 @@ func healContext(ctx context.Context, db *sql.DB, dataOnly bool, preHeal func(co
 		if err = healPerformance(ctx, tx, &r); err != nil {
 			return err
 		}
-		if err = healArtwork(ctx, tx, &r); err != nil {
+		if err = healArtworkMetadata(ctx, tx, &r); err != nil {
 			return err
+		}
+		if !dataOnly {
+			if resized, err = resizeOversizedArtworkBlobsTx(ctx, tx, &r); err != nil {
+				return err
+			}
 		}
 		return tx.QueryRowContext(ctx, "SELECT count(*) FROM GuardianReanalysis").Scan(&r.ReanalysisPending)
 	})
-	r.Healthy = err == nil
-	return r, err
+	if err != nil {
+		r.Healthy = false
+		return r, nil, err
+	}
+	if dataOnly && ctx.Err() == nil {
+		if resized, err = resizeOversizedArtworkBlobsMount(ctx, db, &r); err != nil {
+			r.Healthy = false
+			return r, resized, err
+		}
+	}
+	r.Healthy = true
+	return r, resized, nil
 }
 
 func writable(path string) (bool, error) {
@@ -307,9 +349,33 @@ func writable(path string) (bool, error) {
 	return fs.Flags&1 == 0 && s.Mode().Perm()&0222 != 0 && d.Mode().Perm()&0222 != 0, nil
 }
 
+// MountOptions configures a mount-time heal pass.
+type MountOptions struct {
+	MaxSessions                   int
+	DataOnly                      bool
+	ExtractEmbeddedArtwork        func(audioPath string) ([]byte, error)
+	ExtractEmbeddedArtworkContext func(ctx context.Context, audioPath string) ([]byte, error)
+}
+
+func resolveEmbeddedArtworkExtractor(opts MountOptions) func(context.Context, string) ([]byte, error) {
+	if opts.ExtractEmbeddedArtworkContext != nil {
+		return opts.ExtractEmbeddedArtworkContext
+	}
+	if opts.ExtractEmbeddedArtwork != nil {
+		legacy := opts.ExtractEmbeddedArtwork
+		return func(ctx context.Context, audioPath string) ([]byte, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return legacy(audioPath)
+		}
+	}
+	return nil
+}
+
 // HealMount only opens Engine's two known database names; it never scans music.
 func HealMount(mount string, maxSessions int) (Report, error) {
-	return healMount(mount, maxSessions, false)
+	return HealMountWithOptions(context.Background(), mount, MountOptions{MaxSessions: maxSessions})
 }
 
 // HealMountDataOnly is HealMount without schema edits, for libraries Engine will
@@ -318,18 +384,22 @@ func HealMountDataOnly(mount string, maxSessions int) (Report, error) {
 	return HealMountDataOnlyContext(context.Background(), mount, maxSessions)
 }
 
-func healMount(mount string, maxSessions int, dataOnly bool) (Report, error) {
-	return healMountContext(context.Background(), mount, maxSessions, dataOnly)
-}
-
 // HealMountDataOnlyContext is the mount hook heal with a caller-owned budget.
 // The base heal commits first. Path normalization then commits in batches and
 // stops cleanly when the caller's budget expires.
 func HealMountDataOnlyContext(ctx context.Context, mount string, maxSessions int) (Report, error) {
-	return healMountContext(ctx, mount, maxSessions, true)
+	return HealMountWithOptions(ctx, mount, MountOptions{MaxSessions: maxSessions, DataOnly: true})
 }
 
-func healMountContext(ctx context.Context, mount string, maxSessions int, dataOnly bool) (Report, error) {
+// HealMountWithOptions runs the mount heal with caller-supplied budget and optional
+// embedded-artwork fallback for missing post-5.0 Artwork/<hash>.jpg files.
+func HealMountWithOptions(ctx context.Context, mount string, opts MountOptions) (Report, error) {
+	return healMountContext(ctx, mount, opts)
+}
+
+func healMountContext(ctx context.Context, mount string, opts MountOptions) (Report, error) {
+	maxSessions := opts.MaxSessions
+	dataOnly := opts.DataOnly
 	r := Report{Mount: mount, CheckedAt: time.Now().UTC()}
 	if maxSessions < 0 {
 		return r, fmt.Errorf("maxSessions must not be negative")
@@ -342,14 +412,22 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 	if err != nil {
 		return r, err
 	}
+	if dataOnly && ctx.Err() != nil {
+		r.Healthy = true
+		return r, nil
+	}
 	if rw {
 		// Before Engine opens the volume: a nonzero page reserve breaks every ATTACH.
 		if r.ReserveFixed, err = NormalizeDatabase2(filepath.Dir(path)); err != nil {
 			return r, err
 		}
 	}
-	db, err := Open(path, !rw)
+	db, err := openContext(ctx, path, !rw)
 	if err != nil {
+		if dataOnly && budgetExpired(ctx, err) {
+			r.Healthy = true
+			return r, nil
+		}
 		return r, err
 	}
 	if !rw {
@@ -366,15 +444,25 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 	pathStart := time.Now()
 	remaining, err := normalizeTrackPaths(ctx, db, mount, &r)
 	if err != nil {
+		if dataOnly && budgetExpired(ctx, err) {
+			_ = db.Close()
+			r.Healthy = true
+			r.Mount = mount
+			return r, nil
+		}
 		// A path-pass database error means the library may be damaged. Run the
 		// existing base heal so it remains the recovery path for corruption.
 		pathsFixed := r.PathsNormalized
-		r, healErr := heal(db, dataOnly)
+		r, _, healErr := healWithResizedContext(ctx, db, dataOnly)
 		r.ReserveFixed = fixed
 		r.PathsNormalized = pathsFixed
 		_ = db.Close()
 		r.Mount = mount
 		if healErr != nil {
+			if dataOnly && budgetExpired(ctx, healErr) {
+				r.Healthy = true
+				return r, nil
+			}
 			return r, healErr
 		}
 		return r, err
@@ -390,13 +478,31 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		return r, nil
 	}
 	pathsFixed := r.PathsNormalized
-	r, err = heal(db, dataOnly)
+	var resizedIDs map[int64]bool
+	r, resizedIDs, err = healWithResizedContext(ctx, db, dataOnly)
 	r.ReserveFixed = fixed
 	r.PathsNormalized = pathsFixed
 	if err != nil {
 		_ = db.Close()
 		r.Mount = mount
+		if dataOnly && budgetExpired(ctx, err) {
+			r.Healthy = true
+			return r, nil
+		}
 		return r, err
+	}
+	artCache := newArtworkDirCache()
+	extractEmbedded := resolveEmbeddedArtworkExtractor(opts)
+	if ctx.Err() == nil {
+		if artErr := reconcileArtwork(ctx, db, mount, resizedIDs, extractEmbedded, artCache, &r); artErr != nil {
+			_ = db.Close()
+			r.Mount = mount
+			if dataOnly && budgetExpired(ctx, artErr) {
+				r.Healthy = true
+				return r, nil
+			}
+			return r, artErr
+		}
 	}
 	reconcileOverviewDataDir(ctx, db, filepath.Dir(path), &r)
 	closeErr := db.Close()
@@ -421,7 +527,7 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		if dataOnly {
 			hdb, e := openContext(ctx, history, false)
 			if e != nil {
-				if historyBudgetExpired(ctx, e) {
+				if historyBudgetExpired(ctx, e) || budgetExpired(ctx, e) {
 					r.Warnings = append(r.Warnings, "history: skipped (mount budget exceeded)")
 					return r, nil
 				}
@@ -433,14 +539,17 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 			// deleting any visible play history session (isDeleted=0) or altering
 			// hm.db's schema (BH-F52-2, BH-GC1-13).
 			var cleaned int
-			hr, e := healContext(ctx, hdb, true, func(ctx context.Context, tx *sql.Tx) error {
+			hr, resizedH, e := healWithPreHealAndResizedContext(ctx, hdb, true, func(ctx context.Context, tx *sql.Tx) error {
 				var cleanErr error
 				cleaned, cleanErr = cleanHistoryOrphansTx(ctx, tx)
 				return cleanErr
 			})
+			if e == nil && ctx.Err() == nil {
+				e = reconcileArtwork(ctx, hdb, mount, resizedH, extractEmbedded, artCache, &hr)
+			}
 			if e != nil {
 				ce := hdb.Close()
-				if historyBudgetExpired(ctx, e) {
+				if historyBudgetExpired(ctx, e) || budgetExpired(ctx, e) {
 					r.Warnings = append(r.Warnings, "history: skipped (mount budget exceeded)")
 					if ce != nil {
 						return r, ce
@@ -456,13 +565,14 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 			r.Waveforms += hr.Waveforms
 			r.Loops += hr.Loops
 			r.Artwork += hr.Artwork
+			r.ArtworkReconciled += hr.ArtworkReconciled
 			r.OrphanArtwork += hr.OrphanArtwork
 			r.ReanalysisPending += hr.ReanalysisPending
 			r.PathsNormalized += hr.PathsNormalized
 			for _, warning := range hr.Warnings {
 				r.Warnings = append(r.Warnings, "history: "+warning)
 			}
-			compactHistoryIfNeeded(ctx, hdb, history, cleaned > 0 || hr.Artwork > 0, &r)
+			compactHistoryIfNeeded(ctx, hdb, history, cleaned > 0 || hr.Artwork > 0 || hr.ArtworkReconciled > 0, &r)
 			ce := hdb.Close()
 			if r.HistoryCleaned > 0 || r.HistoryCompacted {
 				log.Printf("dbhealer: mount %s cleaned %d dead history rows (compacted=%v)", mount, r.HistoryCleaned, r.HistoryCompacted)
@@ -472,13 +582,19 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 			}
 			return r, nil
 		}
-		hdb, e := Open(history, false)
+		hdb, e := openContext(ctx, history, false)
 		if e != nil {
 			return r, e
 		}
-		hr, e := heal(hdb, false)
+		hr, resizedH, e := healWithResizedContext(ctx, hdb, false)
+		if e == nil && ctx.Err() == nil {
+			e = reconcileArtwork(ctx, hdb, mount, resizedH, extractEmbedded, artCache, &hr)
+		}
 		ce := hdb.Close()
 		if e != nil {
+			if dataOnly && budgetExpired(ctx, e) {
+				return r, nil
+			}
 			r.Healthy = false
 			return r, fmt.Errorf("history repair: %w", e)
 		}
@@ -490,6 +606,7 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 		r.Waveforms += hr.Waveforms
 		r.Loops += hr.Loops
 		r.Artwork += hr.Artwork
+		r.ArtworkReconciled += hr.ArtworkReconciled
 		r.OrphanArtwork += hr.OrphanArtwork
 		for _, warning := range hr.Warnings {
 			r.Warnings = append(r.Warnings, "history: "+warning)
@@ -570,7 +687,7 @@ type trackPathCandidate struct {
 var normalizeTrackPathBatch func()
 
 func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Report) (int, error) {
-	candidates, bridgeManaged, err := collectTrackPathCandidates(db, mount)
+	candidates, bridgeManaged, err := collectTrackPathCandidates(ctx, db, mount)
 	if err != nil {
 		return 0, err
 	}
@@ -685,8 +802,8 @@ func normalizeTrackPaths(ctx context.Context, db *sql.DB, mount string, r *Repor
 	return remaining, nil
 }
 
-func collectTrackPathCandidates(db *sql.DB, mount string) ([]trackPathCandidate, map[int64]bool, error) {
-	rows, err := db.Query(`SELECT id, path FROM Track WHERE path IS NOT NULL AND path <> ''`)
+func collectTrackPathCandidates(ctx context.Context, db *sql.DB, mount string) ([]trackPathCandidate, map[int64]bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id, path FROM Track WHERE path IS NOT NULL AND path <> ''`)
 	if err != nil {
 		return nil, nil, err
 	}

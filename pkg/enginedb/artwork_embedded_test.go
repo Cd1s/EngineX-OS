@@ -2,7 +2,9 @@ package enginedb
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -211,6 +213,87 @@ func TestExtractEmbeddedArtwork(t *testing.T) {
 	// 6. Nonexistent file
 	if _, err := ExtractEmbeddedArtwork(filepath.Join(tmp, "does_not_exist.mp3")); err == nil {
 		t.Errorf("expected error for missing file")
+	}
+}
+
+type cancelAfterReadsSeeker struct {
+	*bytes.Reader
+	cancelAt int
+	reads    int
+	cancel   context.CancelFunc
+}
+
+func (c *cancelAfterReadsSeeker) Read(p []byte) (int, error) {
+	c.reads++
+	if c.reads >= c.cancelAt {
+		c.cancel()
+	}
+	return c.Reader.Read(p)
+}
+
+func TestExtractEmbeddedArtworkContextCancelsMidRead(t *testing.T) {
+	tmp := t.TempDir()
+	mp3Path := filepath.Join(tmp, "big.mp3")
+	largePayload := append(append([]byte(nil), testJPEG...), bytes.Repeat([]byte{0x11}, 512<<10)...)
+	createTestMP3(t, mp3Path, 3, largePayload)
+
+	// 1. Pre-canceled context returns context.Canceled immediately without opening.
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := ExtractEmbeddedArtworkContext(canceled, mp3Path); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-canceled ExtractEmbeddedArtworkContext err=%v, want context.Canceled", err)
+	}
+
+	// 2. Active context extracts cleanly.
+	got, err := ExtractEmbeddedArtworkContext(context.Background(), mp3Path)
+	if err != nil || !bytes.Equal(got, largePayload) {
+		t.Fatalf("ExtractEmbeddedArtworkContext active failed: len=%d err=%v", len(got), err)
+	}
+
+	// 3. Mid-read cancellation during chunked MP3 ID3 tag read stops promptly without reading whole tag.
+	mp3Bytes, err := os.ReadFile(mp3Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctxMP3, cancelMP3 := context.WithCancel(context.Background())
+	crsMP3 := &cancelAfterReadsSeeker{Reader: bytes.NewReader(mp3Bytes), cancelAt: 3, cancel: cancelMP3}
+	if _, err := extractEmbeddedArtworkFromReadSeeker(ctxMP3, crsMP3, ".mp3"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("mid-read MP3 cancellation err=%v, want context.Canceled", err)
+	}
+	if crsMP3.reads > 4 {
+		t.Fatalf("MP3 reader did not stop promptly after cancel: reads=%d", crsMP3.reads)
+	}
+
+	// 4. Mid-read cancellation during chunked FLAC METADATA_BLOCK_PICTURE read stops promptly.
+	flacPath := filepath.Join(tmp, "big.flac")
+	createTestFLAC(t, flacPath, largePayload)
+	flacBytes, err := os.ReadFile(flacPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctxFLAC, cancelFLAC := context.WithCancel(context.Background())
+	crsFLAC := &cancelAfterReadsSeeker{Reader: bytes.NewReader(flacBytes), cancelAt: 4, cancel: cancelFLAC}
+	if _, err := extractEmbeddedArtworkFromReadSeeker(ctxFLAC, crsFLAC, ".flac"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("mid-read FLAC cancellation err=%v, want context.Canceled", err)
+	}
+	if crsFLAC.reads > 5 {
+		t.Fatalf("FLAC reader did not stop promptly after cancel: reads=%d", crsFLAC.reads)
+	}
+
+	// 5. Mid-read cancellation during MP4 atom / covr read stops promptly.
+	m4aPath := filepath.Join(tmp, "big.m4a")
+	createTestMP4(t, m4aPath, largePayload)
+	m4aBytes, err := os.ReadFile(m4aPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctxMP4, cancelMP4 := context.WithCancel(context.Background())
+	crsMP4 := &cancelAfterReadsSeeker{Reader: bytes.NewReader(m4aBytes), cancelAt: 6, cancel: cancelMP4}
+	if _, err := extractEmbeddedArtworkFromReadSeeker(ctxMP4, crsMP4, ".m4a"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("mid-read MP4 cancellation err=%v, want context.Canceled", err)
+	}
+	if crsMP4.reads > 7 {
+		t.Fatalf("MP4 reader did not stop promptly after cancel: reads=%d", crsMP4.reads)
 	}
 }
 
