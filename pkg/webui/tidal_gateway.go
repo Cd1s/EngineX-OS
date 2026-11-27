@@ -955,27 +955,43 @@ func (g *tidalGateway) sessionByID(id string) *Session {
 // each runs fn for every input concurrently and keeps the successful results in
 // input order. One provider failing must not empty the deck's browser.
 func each[T, R any](ctx context.Context, in []T, fn func(context.Context, T) ([]R, error)) [][]R {
+	return eachUntil(ctx, in, fn, nil)
+}
+
+// eachUntil is each that stops waiting once cut is closed (nil: never): an input whose
+// fn has not returned by then has no result, and the context fn was given is ended.
+func eachUntil[T, R any](ctx context.Context, in []T, fn func(context.Context, T) ([]R, error), cut <-chan struct{}) [][]R {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	out := make([][]R, len(in))
-	var wg sync.WaitGroup
+	type answer struct {
+		i int
+		r []R
+	}
+	answers := make(chan answer, len(in))
 	for i, v := range in {
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
+			var r []R
 			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("gateway: provider panic: %v", r)
+				if p := recover(); p != nil {
+					log.Printf("gateway: provider panic: %v", p)
 				}
+				answers <- answer{i, r}
 			}()
-			r, err := fn(ctx, v)
-			out[i] = r
-			if err != nil {
+			var err error
+			if r, err = fn(ctx, v); err != nil {
 				log.Printf("stream-sync: gateway source failed: %v", err)
 			}
 		}()
 	}
-	wg.Wait()
+	out := make([][]R, len(in))
+	for range in {
+		select {
+		case a := <-answers:
+			out[a.i] = a.r
+		case <-cut:
+			return out
+		}
+	}
 	return out
 }
 func (g *tidalGateway) addPlaylist(ref playlistRef) string { return g.addPlaylistAt(ref, 0) }
@@ -2107,7 +2123,7 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	// drives, djay and servers and is never cut: the answer waits for it, as without
 	// OmniSource (WebDAV round 11b). OmniSource's extras add no time: the answer goes out
 	// at the later of "selected source done" and OmniSource's deadline, and an extra still
-	// running then is left out (its search goes on and is cached for the next one).
+	// running then (a drive, djay or a server) is left out (omniSearch).
 	selected := make(chan struct{})
 	var trackItems, listItems []any
 	go func() {

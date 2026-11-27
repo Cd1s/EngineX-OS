@@ -95,7 +95,16 @@ func waitUntil(d time.Duration, ok func() bool) bool {
 // of "selected source done" and the deadline, and an extra still running then is left
 // out. On 12cb4faa (round 4) a selected source slower than the deadline was cut: a
 // login answering after 1.5 s was missing from the first answer.
+//
+// WebDAV round 5 (round-11 re-check, item 5): no bound here depends on the host's
+// speed. What each case checks is what the code controls: which hits are in the answer,
+// that it does not come before the selected source is done, and that it does not wait
+// for a stuck extra (late). The exact times are TestOmniSourceTimingRule's, on a clock
+// that does not depend on the host.
 func TestServersOmniSourceWaitsForTheSelectedSourceOnly(t *testing.T) {
+	// late: an answer that waits for a stuck extra comes at that extra's own budget
+	// (15 s), on any host. One that comes before late did not wait for it.
+	const late = 10 * time.Second
 	timed := func(t *testing.T, r *webdavRig, query string) ([]string, time.Duration) {
 		t.Helper()
 		start := time.Now()
@@ -119,13 +128,14 @@ func TestServersOmniSourceWaitsForTheSelectedSourceOnly(t *testing.T) {
 		r.s.mu.Lock()
 		r.s.sessions["sp-owner"] = &Session{ID: "sp-owner", Provider: "spotify", Ready: true, p: slow}
 		r.s.mu.Unlock()
+		armed := time.Now() // the login answers 1.5 s after this, never sooner
 		time.AfterFunc(1500*time.Millisecond, release)
-		got, took := timed(t, r, "intro")
+		got, _ := timed(t, r, "intro")
 		if !slices.Equal(got, []string{"intro slow@", "intro@Fast"}) {
 			t.Errorf("first answer with the selected login answering after 1.5 s: %v (the selected source cut by OmniSource's deadline?)", got)
 		}
-		if took > 2200*time.Millisecond {
-			t.Errorf("the answer came %v after the start, want right after the selected source (1.5 s)", took)
+		if took := time.Since(armed); took < 1500*time.Millisecond || took >= late {
+			t.Errorf("the answer came %v after the login was set to answer in 1.5 s, want with it", took)
 		}
 	})
 	t.Run("slow extra server adds no time", func(t *testing.T) {
@@ -140,13 +150,14 @@ func TestServersOmniSourceWaitsForTheSelectedSourceOnly(t *testing.T) {
 		if code, _ := uiPost(t, r.gw.URL, "scope="+scopeOf(views, "Selected")); code != http.StatusOK {
 			t.Fatalf("selecting the server: HTTP %d", code)
 		}
+		armed := time.Now() // the selected server answers 1.5 s after this, never sooner
 		time.AfterFunc(1500*time.Millisecond, selRelease)
-		got, took := timed(t, r, "intro")
+		got, _ := timed(t, r, "intro")
 		if !slices.Equal(got, []string{"intro@Fast", "intro@Selected"}) {
 			t.Errorf("first answer: %v, want the selected server's and the fast extra's hits, not the stuck one's", got)
 		}
-		if took < 1400*time.Millisecond || took > 2200*time.Millisecond {
-			t.Errorf("the answer came %v after the start, want right after the selected server (1.5 s): the stuck extra adds no time", took)
+		if took := time.Since(armed); took < 1500*time.Millisecond || took >= late {
+			t.Errorf("the answer came %v after the selected server was set to answer in 1.5 s, want with it: the stuck extra adds no time", took)
 		}
 	})
 	t.Run("selected server out of its budget, fast extra", func(t *testing.T) {
@@ -167,8 +178,8 @@ func TestServersOmniSourceWaitsForTheSelectedSourceOnly(t *testing.T) {
 		if !slices.Equal(got, []string{"intro@Fast"}) {
 			t.Errorf("first answer: %v, want the fast extra's hit", got)
 		}
-		if took < searchTimeout-300*time.Millisecond || took > searchTimeout+700*time.Millisecond {
-			t.Errorf("the answer came %v after the start, want with the selected server's own budget (%v), nothing after it", took, searchTimeout)
+		if took < searchTimeout-300*time.Millisecond || took >= late {
+			t.Errorf("the answer came %v after the start, want with the selected server's own budget (%v), not with the stuck extra's", took, searchTimeout)
 		}
 	})
 	t.Run("fast selected server, slow extra", func(t *testing.T) {
@@ -185,8 +196,8 @@ func TestServersOmniSourceWaitsForTheSelectedSourceOnly(t *testing.T) {
 		if !slices.Equal(got, []string{"intro@Selected"}) {
 			t.Errorf("first answer: %v, want the selected server's hit only", got)
 		}
-		if took > serverReadyWait+700*time.Millisecond {
-			t.Errorf("the answer came %v after the start, want at OmniSource's deadline (%v)", took, serverReadyWait)
+		if took < serverReadyWait || took >= late {
+			t.Errorf("the answer came %v after the start, want at OmniSource's deadline (%v), not with the stuck extra's budget", took, serverReadyWait)
 		}
 	})
 }

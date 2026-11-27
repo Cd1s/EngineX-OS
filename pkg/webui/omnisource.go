@@ -545,72 +545,82 @@ func (s *Server) omniTracks(ctx context.Context, query string) ([]trackRef, erro
 	return out, nil
 }
 
-// omniSearch returns the drives' matches as track rows, drive by drive, then the
-// servers'. Every enabled WebDAV and NAS server is searched beside the drives, each in
-// the NAS search's time budget; the selected source's own search already has its
-// server. selected is closed when the selected source's search, running beside this
-// one and never cut, is done (nil: no such search).
+// omniSearch returns what OmniSource adds to a search as track rows: the drives'
+// matches drive by drive, then djay's, then the servers'. Every enabled WebDAV and NAS
+// server is searched, each in the NAS search's time budget; the selected source's own
+// search already has its server. selected is closed when the selected source's search,
+// running beside this one and never cut, is done (nil: no such search).
 //
-// The deadline: the servers are waited for until the drives and djay have answered,
-// serverReadyWait has passed since the start, and the selected source is done. Servers
-// that have not answered then are left out of this answer (their search goes on and is
-// cached for the next one): the extras never make the answer later than the later of
-// "selected source done" and that deadline (WebDAV round 11b). omniSearch returns once
-// the servers' search and the selected source's are done.
+// Every extra (the drives' listing and each drive's library, djay, the servers) runs
+// beside the selected source and under one deadline (omniWait). One that has not
+// answered by then is left out of this answer: a server's search goes on and is cached
+// for the next one, a drive's or djay's ends with the request. So no extra makes the
+// answer later than the later of "selected source done" and the deadline (WebDAV
+// rounds 11b and 5).
 func (g *tidalGateway) omniSearch(ctx context.Context, query string, selected <-chan struct{}) []any {
+	cut := make(chan struct{})
+	var drives [][]trackRef
+	var djay, servers []trackRef
+	var extras sync.WaitGroup
+	extras.Go(func() {
+		list := eachUntil(ctx, []func() []drive{g.s.drives}, func(_ context.Context, list func() []drive) ([]drive, error) { return list(), nil }, cut)[0]
+		drives = eachUntil(ctx, list, func(ctx context.Context, d drive) ([]trackRef, error) { return searchDrive(ctx, d, query) }, cut)
+	})
+	extras.Go(func() { djay = eachUntil(ctx, []string{query}, g.s.omniTracks, cut)[0] })
+	extras.Go(func() { servers = g.serverSearch(ctx, query, "", g.s.scope(), cut) })
+	answered := make(chan struct{})
+	go func() {
+		extras.Wait()
+		close(answered)
+	}()
+	omniWait(serverReadyWait, selected, answered)
+	close(cut)
+	<-answered // after the cut every extra returns at once, with what has answered
+
 	items := []any{}
 	seenFiles := make(map[string]bool)
-	started := time.Now()
-	var webdav []trackRef
-	webdavDone, ready := make(chan struct{}), make(chan struct{})
-	go func() {
-		defer close(webdavDone)
-		webdav = g.serverSearch(ctx, query, "", g.s.scope(), ready)
-	}()
-
-	for _, refs := range each(ctx, g.s.drives(), func(ctx context.Context, d drive) ([]trackRef, error) { return searchDrive(ctx, d, query) }) {
+	add := func(ref trackRef) {
+		if id := g.addTrack(ref); id != 0 { // 0: no ID may be handed out now (#335)
+			items = append(items, g.trackJSON(id, ref.track))
+		}
+	}
+	for _, refs := range drives {
 		for _, ref := range refs {
 			if ref.file != "" {
 				seenFiles[ref.file] = true
 			}
-			if id := g.addTrack(ref); id != 0 { // 0: no ID may be handed out now (#335)
-				items = append(items, g.trackJSON(id, ref.track))
-			}
+			add(ref)
 		}
 	}
-	if djayRefs, err := g.s.omniTracks(ctx, query); err == nil {
-		for _, ref := range djayRefs {
-			if seenFiles[ref.file] {
-				continue
-			}
+	for _, ref := range djay {
+		if !seenFiles[ref.file] {
 			seenFiles[ref.file] = true
-			if id := g.addTrack(ref); id != 0 {
-				items = append(items, g.trackJSON(id, ref.track))
-			}
+			add(ref)
 		}
 	}
-	// Wait for the selected source in full, and for the servers until they have all
-	// answered or the deadline has passed, whichever is first; a server still running
-	// once both waits are over is left out.
-	wait := time.NewTimer(max(0, serverReadyWait-time.Since(started)))
-	deadline, servers, sel := wait.C, (<-chan struct{})(webdavDone), selected
-	for (deadline != nil && servers != nil) || sel != nil {
-		select {
-		case <-servers:
-			servers = nil
-		case <-deadline:
-			deadline = nil
-		case <-sel:
-			sel = nil
-		}
-	}
-	wait.Stop()
-	close(ready)
-	<-webdavDone
-	for _, ref := range webdav {
-		if id := g.addTrack(ref); id != 0 {
-			items = append(items, g.trackJSON(id, ref.track))
-		}
+	for _, ref := range servers {
+		add(ref)
 	}
 	return items
+}
+
+// omniWait is OmniSource's timing rule. It returns once the selected source's search
+// is done (selected is closed; nil: none runs) and the extras have either all answered
+// (answered is closed) or had wait since the call. So the extras never cut the selected
+// source, and never make an answer later than the later of "selected source done" and
+// that deadline.
+func omniWait(wait time.Duration, selected, answered <-chan struct{}) {
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	limit := deadline.C
+	for (limit != nil && answered != nil) || selected != nil {
+		select {
+		case <-answered:
+			answered = nil
+		case <-limit:
+			limit = nil
+		case <-selected:
+			selected = nil
+		}
+	}
 }
