@@ -210,13 +210,20 @@ def parse_beat_blob(blob: bytes | None):
 
 
 def read_mdb_row(mdb: Path, filename: str):
-    with closing(sqlite3.connect(mdb.as_uri() + "?mode=ro", uri=True)) as conn:
-        r = conn.execute(
-            "SELECT t.id, t.isAnalyzed, t.pdbImportKey, p.thirdPartySourceId, "
-            "length(p.trackData), length(p.overviewWaveFormData), length(p.beatData), length(p.quickCues), p.beatData "
-            "FROM Track t LEFT JOIN PerformanceData p ON t.id = p.trackId WHERE t.filename = ? ORDER BY t.id DESC LIMIT 1",
-            (filename,),
-        ).fetchone()
+    if (mdb.parent / (mdb.name + "-journal")).exists():
+        return None
+    try:
+        # immutable=1 takes zero POSIX locks on m.db so host-side inspection never causes
+        # SQLITE_BUSY on Engine Link's airNfs J:Savingtrackda commits over fltx.
+        with closing(sqlite3.connect(mdb.as_uri() + "?mode=ro&immutable=1", uri=True)) as conn:
+            r = conn.execute(
+                "SELECT t.id, t.isAnalyzed, t.pdbImportKey, p.thirdPartySourceId, "
+                "length(p.trackData), length(p.overviewWaveFormData), length(p.beatData), length(p.quickCues), p.beatData "
+                "FROM Track t LEFT JOIN PerformanceData p ON t.id = p.trackId WHERE t.filename = ? ORDER BY t.id DESC LIMIT 1",
+                (filename,),
+            ).fetchone()
+    except sqlite3.DatabaseError:
+        return None
     if not r:
         return None
     return {
@@ -799,7 +806,7 @@ def main():
         lan0 = count_peer_reqs(lan_log)
         t5_0 = now_ms()
         t_ld, t_an, st = load_b_row("Stock Track", "stock-track.wav")
-        row5 = wait_for(lambda: (r := read_mdb_row(stock_mdb, "stock-track.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.15, label="Case 5 stock OA commit")
+        row5 = wait_for(lambda: (r := read_mdb_row(stock_mdb, "stock-track.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.35, label="Case 5 stock OA commit")
         t_db5 = now_ms() - t5_0
         lan_d = count_peer_reqs(lan_log) - lan0
         rec5 = {
@@ -827,7 +834,7 @@ def main():
         lan0 = count_peer_reqs(lan_log, method="ANY")
         t6_0 = now_ms()
         t_ld, t_an, st = load_b_row("RB Case6", "case6-hang.wav")
-        row6 = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case6-hang.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.15, label="Case 6 fallback OA commit")
+        row6 = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case6-hang.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.35, label="Case 6 fallback OA commit")
         t_db6 = now_ms() - t6_0
         lan_d = count_peer_reqs(lan_log, method="ANY") - lan0
         rec6 = {
@@ -855,7 +862,7 @@ def main():
         lan0 = count_peer_reqs(lan_log, method="ANY")
         t7a_0 = now_ms()
         t_ld7a, t_an7a, _ = load_b_row("RB Case7a", "case7a-older1.wav")
-        row7a = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case7a-older1.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.15, label="Case 7a fallback OA commit")
+        row7a = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case7a-older1.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.35, label="Case 7a fallback OA commit")
         t_db7a = now_ms() - t7a_0
         lan_d7a = count_peer_reqs(lan_log, method="ANY") - lan0
 
@@ -863,7 +870,7 @@ def main():
         lan1 = count_peer_reqs(lan_log, method="ANY")
         t7b_0 = now_ms()
         t_ld7b, t_an7b, _ = load_b_row("RB Case7b", "case7b-older2.wav")
-        row7b = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case7b-older2.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.15, label="Case 7b fallback OA commit")
+        row7b = wait_for(lambda: (r := read_mdb_row(rb_mdb, "case7b-older2.wav")) and r["analyzed"] == 1 and r, timeout=25, interval=0.35, label="Case 7b fallback OA commit")
         t_db7b = now_ms() - t7b_0
         lan_d7b = count_peer_reqs(lan_log, method="ANY") - lan1
         rec7 = {
