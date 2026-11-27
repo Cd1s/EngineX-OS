@@ -546,8 +546,10 @@ static int seed_library(const char *target,const char *identity,char library[PAT
         if(src>=0&&copy_tree(src,-1,deadline,0,&bytes)){close(src);return -1;} // validate reused native trees too
         // A changed PC-authored database gets a separate seed rather than
         // overwriting an older sidecar containing deck-authored cues.
-        const char *files[]={"Database2/m.db","Database2/m.db-wal"};
-        for(unsigned i=0;src>=0&&i<2;i++) {
+        // Include m.db-journal (Engine OS's rollback journal) alongside m.db-wal;
+        // absent files hit ENOENT and skip hashing, keeping clean-stick seeds stable.
+        const char *files[]={"Database2/m.db","Database2/m.db-wal","Database2/m.db-journal"};
+        for(unsigned i=0;src>=0&&i<sizeof files/sizeof *files;i++) {
             char db[PATH_MAX];
             if(path_join(db,sizeof db,native,files[i])||safe_path(db,1)){if(errno==ENOENT)continue;close(src);return -1;}
             if(lstat(db,&st)){if(errno==ENOENT)continue;close(src);return -1;}
