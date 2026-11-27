@@ -818,6 +818,12 @@ class PrimeGoSwipeStemsTest(unittest.TestCase):
                     self.assertIn(f"!{side}Actions.some(", replacements)
                     self.assertIn(f"actionIndex >= {side}Actions.length", replacements)
                     self.assertIn('.concat(scStem ? [root.scT("Stems")] : [])', replacements)
+            bp.ROOT = "Skins/EmbeddedCommon/"
+            legacy_edits = bp.edits(False)
+            legacy_path = bp.ROOT + "Views/BrowseView/Components/Components/SwipeLeftItem.qml"
+            self.assertIn(legacy_path, legacy_edits)
+            legacy_scstem = next(new for _, new in legacy_edits[legacy_path] if "readonly property bool scStem:" in new)
+            self.assertNotIn("scIsAZ04", legacy_scstem)
         finally:
             bp.ROOT = old_root
 
@@ -946,6 +952,24 @@ assert.deepStrictEqual(gatewayTrackInTidalScope.calls, [['stream', 99]]);
 const tidalLocal = run({streaming: false, scope: 'tidal', commit: 2});
 assert.deepStrictEqual(tidalLocal.labels, [...stock, 'Stems']);
 assert.deepStrictEqual(tidalLocal.calls, [['stream', 42], ['render', '42']]);
+
+// AZ04 keeps local tracks stock (onboard Stems), while streaming tracks use stock Stems via scStemStream (keeping #332 real TIDAL exclusion).
+const az04Streaming = run({az04: true, streaming: true, commit: 2});
+assert.deepStrictEqual(az04Streaming.labels, [...stock, 'Stems']);
+assert.deepStrictEqual(az04Streaming.colors, ['stock0', 'stock1', 'blue']);
+assert.deepStrictEqual(az04Streaming.calls, [['stream', 99]]);
+
+const az04RealTidal = run({az04: true, streaming: true, scope: 'tidal', tidalLoggedIn: true});
+assert.deepStrictEqual(az04RealTidal.labels, stock);
+assert.deepStrictEqual(az04RealTidal.colors, ['stock0', 'stock1']);
+
+const az04GatewayTidal = run({az04: true, streaming: true, scope: 'tidal', tidalLoggedIn: false, commit: 2});
+assert.deepStrictEqual(az04GatewayTidal.labels, [...stock, 'Stems']);
+assert.deepStrictEqual(az04GatewayTidal.calls, [['stream', 99]]);
+
+for (const excluded of [{az04: true, streaming: true, link: true}, {az04: true, streaming: true, stemsList: true}]) {
+    assert.deepStrictEqual(run(excluded).labels, stock);
+}
 """
                             stock = [f"Deck {deck}", "Prepare" if side == "left" else "Load"]
                             for key, value in (
@@ -12282,10 +12306,11 @@ const shown = (sideScreens, az04, streamed) => {{
 // Review: a local track's render keeps stock's behaviour, the indicator only on units with side screens.
 assert.equal(shown(false, false, false), false);
 assert.equal(shown(true, false, false), true);
-// A streamed row's Stems in Engine's queue: shown on first-generation units, whatever list is open.
+// A streamed row's Stems in Engine's queue: shown on all units (including AZ04), whatever list is open.
 assert.equal(shown(false, false, true), true);
-// AZ04 keeps stock in every case.
-assert.equal(shown(false, true, true), false);
+// AZ04 local tracks without side screens stay stock, while AZ04 streamed rows show the render indicator.
+assert.equal(shown(false, true, false), false);
+assert.equal(shown(false, true, true), true);
 assert.equal(shown(true, true, false), true);
 """
                             res = subprocess.run(["node", "-e", indicator], capture_output=True, text=True)

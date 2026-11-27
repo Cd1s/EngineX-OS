@@ -8685,7 +8685,7 @@ def edits(dev: bool):
         # Engine offers streamed rows only Prepare; add Stems (see scStemStream).
         out[v + "BrowseView/Components/Components/SwipeLeftItem.qml"] = [
             ("	readonly property list<string> actionLabels: leftActions.map( action => action.display.label )\n",
-             '	readonly property bool scStem: !(typeof root !== "undefined" && root && (root.scIsAZ04 || (root.scScope === "tidal" && root.scTidalLoggedIn))) && String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/") && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
+             '	readonly property bool scStem: !(typeof root !== "undefined" && root && root.scScope === "tidal" && root.scTidalLoggedIn) && String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/") && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
              "	readonly property list<string> actionLabels: leftActions.map( action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : action.display.label ).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
             ("leftActions.map( action => action.display.commitMessage )", "leftActions.map( action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : action.display.commitMessage ).concat(scStem ? [root.scT(\"Stems\")] : [])"),
             ("leftActions.map( action => action.display.color )", "leftActions.map( action => action.display.color ).concat(scStem ? [Style.systemBlue01Color] : [])"),
@@ -8883,7 +8883,7 @@ def edits(dev: bool):
             swipe_edits = [
                 (f"    readonly property list<string> actionLabels: {a}.map(action => action.display.label)\n",
                  '    property bool scStemBusy: false\n'
-                 '    readonly property bool scStem: !(typeof root !== "undefined" && root && root.scIsAZ04) && !(typeof trackList !== "undefined" && trackList && trackList.isStemsList) && !Planck.librarianController.devicesController.isCurrentDeviceNetworkDrive && ((row.isStreamingTrack || row.streamingProviderName || String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/")) ? !(typeof root !== "undefined" && root && root.scScope === "tidal" && root.scTidalLoggedIn) : !!(row.modelData && row.modelData.trackId > 0)) && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
+                 '    readonly property bool scStem: !(typeof trackList !== "undefined" && trackList && trackList.isStemsList) && !Planck.librarianController.devicesController.isCurrentDeviceNetworkDrive && ((row.isStreamingTrack || row.streamingProviderName || String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/")) ? !(typeof root !== "undefined" && root && root.scScope === "tidal" && root.scTidalLoggedIn) : !(typeof root !== "undefined" && root && root.scIsAZ04) && !!(row.modelData && row.modelData.trackId > 0)) && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
                  f"    readonly property int scDeck: root.scSwipeDeck({right})\n"
                  "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
                  f"    readonly property list<string> actionLabels: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : scLabel(action.display.label)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
@@ -10608,10 +10608,10 @@ def edits(dev: bool):
         # running whatever list is open. Stock shows it on units with side
         # screens only, and that stays so for a local track's render: it is
         # added only while a streamed row's Stems are in Engine's queue (the
-        # row may be in a list that is not open). AZ04 keeps stock.
+        # row may be in a list that is not open).
         out.setdefault(v + "EmbeddedView.qml", []).extend([(
             "showBrowerViewStemsRenderIndicator: Config.device.hasSideScreens\n",
-            'showBrowerViewStemsRenderIndicator: Config.device.hasSideScreens || (typeof root !== "undefined" && !!root && !root.scIsAZ04 && !!root.scStemStreamed)\n',
+            'showBrowerViewStemsRenderIndicator: Config.device.hasSideScreens || (typeof root !== "undefined" && !!root && !!root.scStemStreamed)\n',
         )])
     if v53():
         out.setdefault(v + "Profiles/ProfilesLogin.qml", []).extend([
