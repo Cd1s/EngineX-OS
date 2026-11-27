@@ -295,13 +295,20 @@ func (s *Server) handleNASTest(w http.ResponseWriter, r *http.Request) {
 				Username: strings.TrimSpace(in.Username),
 				Enabled:  in.Enabled,
 			}
+			// A test of another server never gets the saved password or token: an
+			// empty field means the saved one only for the same server (#335 round 11).
+			same := nasTarget(cfg) == nasTarget(existing)
 			if in.Password == "" || in.Password == "***" {
-				cfg.Password = existing.Password
+				if same {
+					cfg.Password = existing.Password
+				}
 			} else {
 				cfg.Password = in.Password
 			}
 			if in.Token == "" || in.Token == "***" {
-				cfg.Token = existing.Token
+				if same {
+					cfg.Token = existing.Token
+				}
 			} else {
 				cfg.Token = in.Token
 			}

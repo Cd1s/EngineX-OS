@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -672,6 +673,21 @@ func (s *Server) unmountRemote(ctx context.Context, m *RemoteMount) error {
 	return err
 }
 
+// mountTarget is where a mount's credentials go: its protocol, the scheme of a WebDAV
+// mount, its server, port and remote path (a trailing or doubled slash does not count).
+func mountTarget(m RemoteMount) string {
+	host := strings.ToLower(strings.TrimSpace(m.Host))
+	scheme := ""
+	if strings.EqualFold(m.Protocol, "webdav") {
+		scheme = "http"
+		if m.Port == 443 || strings.HasPrefix(host, "https://") {
+			scheme = "https"
+		}
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(host, "http://"), "https://"), "/")
+	return strings.Join([]string{strings.ToLower(m.Protocol), scheme, host, strconv.Itoa(m.Port), path.Clean("/" + strings.TrimSpace(m.RemotePath))}, "\x00")
+}
+
 // mountWebDAVURL is the address of a WebDAV mount.
 func mountWebDAVURL(m RemoteMount) string {
 	scheme := "http"
@@ -841,8 +857,8 @@ func (s *Server) handleMountsPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pass := in.Password
-	if (pass == "" || pass == "***") && existingIdx >= 0 {
-		pass = list[existingIdx].Password
+	if pass == "***" {
+		pass = ""
 	}
 
 	m := RemoteMount{
@@ -857,6 +873,12 @@ func (s *Server) handleMountsPost(w http.ResponseWriter, r *http.Request) {
 		MountPoint: mountPoint,
 		Enabled:    enabled,
 		Options:    strings.TrimSpace(in.Options),
+	}
+	// An empty or "***" password keeps the saved one only for the same server, port and
+	// path (the rule of every other editor): a mount moved to another address never takes
+	// the old one's password along, and neither does the NAS source it syncs to.
+	if pass == "" && existingIdx >= 0 && mountTarget(list[existingIdx]) == mountTarget(m) {
+		m.Password = list[existingIdx].Password
 	}
 
 	// BH-GC2-14: a share switched off is unmounted, a changed one is mounted afresh, and a mount

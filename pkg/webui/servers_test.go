@@ -2,6 +2,7 @@ package webui
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,8 +13,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/Cd1s/EngineX-OS/pkg/broadcast"
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
 )
 
@@ -533,6 +536,116 @@ func TestServersNewAddressNeverTakesTheOldPassword(t *testing.T) {
 		f := r.file(t)
 		if f.Password != "" || f.Token != "" {
 			t.Fatalf("the console's new address kept the old credentials: password %v, token %v", f.Password != "", f.Token != "")
+		}
+	})
+}
+
+// Round 4 (round-10 re-check, item 3) and its class: every editor that keeps a saved
+// credential keeps it only for the same address.
+//   - The console Mounts card: on 7a1424de a mount moved to another host with its
+//     password field left empty kept the old password, for WebDAV and SMB alike, and the
+//     WebDAV mount copied it into nas.json. Now another host, port or remote path takes
+//     no password along (SFTP too); the same address with the field empty or "***" keeps
+//     it.
+//   - The NAS card's test of a server: on 7a1424de a test of another address was sent the
+//     saved password and token.
+//   - The broadcast settings: a changed scheme counts as another address too.
+func TestEditorsNeverTakeASavedCredentialToANewAddress(t *testing.T) {
+	const marker = "mount-pass-r4-marker"
+	for _, proto := range []string{"webdav", "smb", "sftp"} {
+		t.Run("mounts "+proto, func(t *testing.T) {
+			r := newWebDAVRigAt(t, t.TempDir(), t.TempDir(), t.TempDir())
+			mountPoint := filepath.Join(t.TempDir(), "Share")
+			post := func(body map[string]any) {
+				t.Helper()
+				b, _ := json.Marshal(body)
+				w := httptest.NewRecorder()
+				r.s.handleMounts(w, httptest.NewRequest(http.MethodPost, "/api/mounts", bytes.NewReader(b)))
+				if w.Code != http.StatusOK {
+					t.Fatalf("mounts POST %v: %d %s", body, w.Code, w.Body.String())
+				}
+			}
+			password := func() string {
+				for _, m := range r.s.loadMounts() {
+					if m.ID == "m1" {
+						return m.Password
+					}
+				}
+				t.Fatal("the mount is gone")
+				return ""
+			}
+			mount := func(change map[string]any) map[string]any {
+				m := map[string]any{"id": "m1", "name": "Share", "protocol": proto, "host": "nas.example", "remotePath": "/music", "username": "dj", "password": "", "enabled": false, "mountPoint": mountPoint}
+				for k, v := range change {
+					m[k] = v
+				}
+				return m
+			}
+			post(mount(map[string]any{"password": marker}))
+			for _, keep := range []map[string]any{{}, {"password": "***"}, {"remotePath": "music/"}, {"host": "NAS.example"}} {
+				post(mount(keep))
+				if password() != marker {
+					t.Fatalf("the same address (%v) lost its password", keep)
+				}
+			}
+			for _, moved := range []map[string]any{{"host": "other.example"}, {"port": 8443}, {"remotePath": "/other"}, {"host": "other.example", "password": "***"}} {
+				post(mount(map[string]any{"password": marker})) // back at the first address with its password
+				post(mount(moved))
+				if got := password(); got != "" {
+					t.Fatalf("the mount moved (%v) kept the old password", moved)
+				}
+				if raw, err := os.ReadFile(filepath.Join(r.uiDir, "nas.json")); err == nil && strings.Contains(string(raw), marker) {
+					t.Fatalf("the mount moved (%v): nas.json holds the old password", moved)
+				}
+			}
+		})
+	}
+	for _, protocol := range []string{"webdav", "plex"} {
+		t.Run("nas test "+protocol, func(t *testing.T) {
+			var mu sync.Mutex
+			var sent []string
+			other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				sent = append(sent, r.Header.Get("Authorization")+" "+r.Header.Get("X-Plex-Token")+" "+r.URL.RawQuery)
+				mu.Unlock()
+				http.Error(w, "no", http.StatusUnauthorized)
+			}))
+			defer other.Close()
+			saved := fmt.Sprintf(`{"protocol":%q,"url":"http://nas.example/music/","username":"dj","password":%q,"token":%q,"enabled":true}`, protocol, marker, marker)
+			r := newWebDAVRig(t, saved, "")
+			body := fmt.Sprintf(`{"protocol":%q,"url":%q,"username":"dj","password":"","token":"***","enabled":true}`, protocol, other.URL+"/music/")
+			w := httptest.NewRecorder()
+			r.s.handleNASTest(w, httptest.NewRequest(http.MethodPost, "/api/nas/test", strings.NewReader(body)))
+			mu.Lock()
+			defer mu.Unlock()
+			if len(sent) == 0 {
+				t.Fatalf("the test never reached the other server (HTTP %d %s)", w.Code, w.Body.String())
+			}
+			for _, s := range sent {
+				if strings.Contains(s, marker) || strings.Contains(s, "Basic "+base64.StdEncoding.EncodeToString([]byte("dj:"+marker))) {
+					t.Fatalf("the test of another server was sent the saved credential: %q", s)
+				}
+			}
+		})
+	}
+	t.Run("broadcast scheme", func(t *testing.T) {
+		s, _ := newTestServer(t)
+		post := func(payload map[string]any) broadcast.Status {
+			t.Helper()
+			body, _ := json.Marshal(payload)
+			resp := doAuthRequest(t, s, "POST", "/api/broadcast", body)
+			defer resp.Body.Close()
+			var st broadcast.Status
+			if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&st) != nil {
+				t.Fatalf("broadcast POST: HTTP %d", resp.StatusCode)
+			}
+			return st
+		}
+		if st := post(map[string]any{"protocol": "icecast", "serverUrl": "http://cast.example:8000", "mountpoint": "/club", "password": marker}); !st.PasswordSet {
+			t.Fatal("the password was not saved")
+		}
+		if st := post(map[string]any{"serverUrl": "https://cast.example:8000"}); st.PasswordSet {
+			t.Fatal("the broadcast password stayed for another scheme on the same host and port")
 		}
 	})
 }
