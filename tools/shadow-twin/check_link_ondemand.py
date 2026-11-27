@@ -602,17 +602,18 @@ def main():
     stock_mdb.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(rb_mdb, stock_mdb)
     stock_sz = make_click_wav(stock_vol / "Music/stock-track.wav", seconds=10.0, bpm=128.0)
+    stock_uuid = "11111111-2222-4333-8444-555555555555"
     with closing(sqlite3.connect(stock_mdb)) as conn:
-        conn.execute("UPDATE Information SET uuid = 'stock-engine-uuid-1111'")
+        conn.execute("UPDATE Information SET uuid = ?", (stock_uuid,))
         conn.execute("DELETE FROM PlaylistEntity WHERE trackId > 1")
         conn.execute("DELETE FROM Track WHERE id > 1")
         conn.execute("UPDATE Playlist SET title = 'Stock List' WHERE id = 1")
-        conn.execute("UPDATE PlaylistEntity SET databaseUuid = 'stock-engine-uuid-1111', nextEntityId = 0 WHERE trackId = 1")
+        conn.execute("UPDATE PlaylistEntity SET databaseUuid = ?, nextEntityId = 0 WHERE trackId = 1", (stock_uuid,))
         conn.execute(
             "UPDATE Track SET path = '../Music/stock-track.wav', filename = 'stock-track.wav', "
             "title = 'Stock Track', artist = 'Stock Artist', length = 10, fileBytes = ?, "
-            "pdbImportKey = NULL, isAnalyzed = 0, originDatabaseUuid = 'stock-engine-uuid-1111' WHERE id = 1",
-            (stock_sz,),
+            "pdbImportKey = NULL, isAnalyzed = 0, originDatabaseUuid = ? WHERE id = 1",
+            (stock_sz, stock_uuid),
         )
         conn.execute(
             "UPDATE PerformanceData SET trackData = NULL, overviewWaveFormData = NULL, beatData = NULL, "
@@ -881,8 +882,11 @@ def main():
     finally:
         eng_b = twin.WORK / "B/logs/engine.log"
         if eng_b.is_file():
-            rblines = [ln for ln in eng_b.read_text(errors="replace").splitlines() if "rekordbox stage" in ln]
-            print("HOOK B LOGS (rekordbox stage):", flush=True)
+            rblines = [
+                ln for ln in eng_b.read_text(errors="replace").splitlines()
+                if "rekordbox stage" in ln and "skipped (gui thread)" not in ln and "skipped (browse thread)" not in ln
+            ]
+            print("HOOK B LOGS (rekordbox stage key events):", flush=True)
             for ln in rblines[-40:]:
                 print(" ", ln, flush=True)
         if stub_proc is not None:
