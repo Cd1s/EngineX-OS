@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
@@ -159,10 +160,25 @@ type serverView struct {
 	Scope       string `json:"scope"`
 }
 
-func (s *Server) loadNASFileLocked() nasFile {
+// errNASFile: nas.json exists but cannot be read or decoded. Nothing that would write
+// it, or clean up after the servers it names, runs then (WebDAV round 4).
+var errNASFile = errors.New("the network source settings cannot be read")
+
+// readNASFileLocked is nas.json: an empty file when there is none, an error (errNASFile)
+// when it cannot be read or decoded. Writers and clean-ups use it and stop on an
+// error, so a file that cannot be read is never overwritten and the state of the
+// servers it names is never dropped.
+func (s *Server) readNASFileLocked() (nasFile, error) {
 	var f nasFile
-	if b, err := os.ReadFile(s.nasConfigPath()); err == nil {
-		_ = json.Unmarshal(b, &f)
+	b, err := readState(s.nasConfigPath())
+	if errors.Is(err, fs.ErrNotExist) {
+		return f, nil
+	}
+	if err == nil {
+		err = json.Unmarshal(b, &f)
+	}
+	if err != nil {
+		return nasFile{}, fmt.Errorf("%w (%T)", errNASFile, err)
 	}
 	// Older configs could keep Basic Auth in the URL. Preserve that login without
 	// returning its credentials in a URL or overwriting explicit auth fields.
@@ -178,6 +194,19 @@ func (s *Server) loadNASFileLocked() nasFile {
 		u.User = nil
 		f.URL = u.String()
 	}
+	return f, nil
+}
+
+// loadNASFileLocked is nas.json for reading only: no server at all when it cannot be
+// read (logged), so nothing of its servers is used then.
+func (s *Server) loadNASFileLocked() nasFile {
+	f, err := s.readNASFileLocked()
+	if err != nil && s.nasFileErrLogged.CompareAndSwap(false, true) {
+		log.Printf("webui: %v: no network source is used until it can be read", err)
+	}
+	if err == nil {
+		s.nasFileErrLogged.Store(false)
+	}
 	return f
 }
 
@@ -186,7 +215,11 @@ func (s *Server) loadNASFileLocked() nasFile {
 // identity: every writer of the slot (the console card, the deck and the phone,
 // the mounts page) goes through here.
 func (s *Server) saveNASFileLocked(f *nasFile) error {
-	if old := s.loadNASFileLocked(); nasTarget(old.NASConfig) != nasTarget(f.NASConfig) {
+	old, err := s.readNASFileLocked()
+	if err != nil {
+		return err // a file that cannot be read is never overwritten
+	}
+	if nasTarget(old.NASConfig) != nasTarget(f.NASConfig) {
 		f.SlotID = ""
 		if _, ok := kindOfProvider(f.Protocol); ok && strings.TrimSpace(f.URL) != "" {
 			f.SlotID = newServerID()
@@ -327,7 +360,10 @@ func (s *Server) servers(k serverKind) []serverEntry {
 	if !on {
 		return nil
 	}
-	return slices.DeleteFunc(serverEntries(k, f), func(e serverEntry) bool { return !nasConfigReady(e.cfg) })
+	// The NAS slot is off while its root is not known (nas.json could not be read at
+	// start-up): its saved rows may belong to another root.
+	unknown := s.slotUnknown.Load()
+	return slices.DeleteFunc(serverEntries(k, f), func(e serverEntry) bool { return !nasConfigReady(e.cfg) || (unknown && e.slot) })
 }
 
 // serverByScope is the enabled server a Sources ID names.
@@ -496,6 +532,8 @@ func serverChangeStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, errServerDuplicate), errors.Is(err, errServerFull):
 		return http.StatusConflict
+	case errors.Is(err, errNASFile):
+		return http.StatusInternalServerError
 	}
 	return http.StatusBadRequest
 }
@@ -523,8 +561,11 @@ func validServerURL(k serverKind, raw string) error {
 func (s *Server) applyServer(k serverKind, c serverChange) ([]serverView, error) {
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
-	defer s.resetNASIfMoved(s.loadNASConfigLocked())
-	f := s.loadNASFileLocked()
+	f, err := s.readNASFileLocked()
+	if err != nil {
+		return nil, err // never overwrite a file that cannot be read
+	}
+	defer s.resetNASIfMoved(f.NASConfig)
 	entries := serverEntries(k, f)
 	all := append(serverEntries(kindWebDAV, f), serverEntries(kindNAS, f)...)
 	var cur *serverEntry
@@ -615,7 +656,12 @@ func (s *Server) applyServer(k serverKind, c serverChange) ([]serverView, error)
 // (which cancels their requests still running), gateway rows and lists, Stems
 // entries and downloads. Caller holds uiMu.
 func (s *Server) forgetServersLocked() {
-	keep := keptServers(s.loadNASFileLocked())
+	f, err := s.readNASFileLocked()
+	if err != nil {
+		log.Printf("webui: servers not cleaned up: %v", err)
+		return
+	}
+	keep := keptServers(f)
 	s.dropServerConns(func(id string, _ serverKind) bool { return !keep[id] })
 	s.stemsMu.Lock()
 	s.dropServerStemsLocked(keep)
@@ -635,12 +681,16 @@ func keptServers(f nasFile) map[string]bool {
 }
 
 // serversKept are the IDs of the servers set up (on or off): what rows, Stems
-// entries and searches may still name.
-func (s *Server) serversKept() map[string]bool {
+// entries and searches may still name. An error when nas.json cannot be read: then
+// nothing of any server is dropped.
+func (s *Server) serversKept() (map[string]bool, error) {
 	s.uiMu.Lock()
-	f := s.loadNASFileLocked()
+	f, err := s.readNASFileLocked()
 	s.uiMu.Unlock()
-	return keptServers(f)
+	if err != nil {
+		return nil, err
+	}
+	return keptServers(f), nil
 }
 
 // serverAddresses are the addresses (serverRoot) of a kind's servers set up: a
@@ -667,8 +717,12 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet {
 		s.uiMu.Lock()
-		f := s.loadNASFileLocked()
+		f, err := s.readNASFileLocked()
 		s.uiMu.Unlock()
+		if err != nil {
+			fail(w, http.StatusInternalServerError, errNASFile) // not an empty list: an edit would overwrite the file
+			return
+		}
 		respond(w, map[string]any{"servers": serverViews(k, f)})
 		return
 	}

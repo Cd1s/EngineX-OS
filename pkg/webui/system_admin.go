@@ -712,7 +712,11 @@ func (s *Server) syncMountToNAS(m RemoteMount) {
 			Password: m.Password,
 			Enabled:  m.Enabled,
 		}
-		f := s.loadNASFileLocked() // the server lists stay
+		f, err := s.readNASFileLocked() // the server lists stay
+		if err != nil {
+			log.Printf("webui: mount not synced to the network sources: %v", err)
+			return // a file that cannot be read is never overwritten
+		}
 		if nasTarget(nasCfg) != nasTarget(f.NASConfig) {
 			f.Name = ""
 		}
@@ -838,7 +842,14 @@ func (s *Server) handleMountsPost(w http.ResponseWriter, r *http.Request) {
 
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
-	defer s.resetNASIfMoved(s.loadNASConfigLocked())
+	// A WebDAV mount is synced to nas.json: nothing changes when that cannot be read
+	// (WebDAV round 4), so the two files never disagree.
+	nf, nasErr := s.readNASFileLocked()
+	if nasErr != nil && strings.EqualFold(proto, "webdav") {
+		fail(w, http.StatusInternalServerError, errNASFile)
+		return
+	}
+	defer s.resetNASIfMoved(nf.NASConfig)
 
 	list := s.loadMountsLocked()
 	id := in.ID
@@ -942,7 +953,8 @@ func (s *Server) handleMountsDelete(w http.ResponseWriter, r *http.Request) {
 
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
-	defer s.resetNASIfMoved(s.loadNASConfigLocked())
+	nf, nasErr := s.readNASFileLocked()
+	defer s.resetNASIfMoved(nf.NASConfig)
 
 	list := s.loadMountsLocked()
 	found := -1
@@ -958,6 +970,10 @@ func (s *Server) handleMountsDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	target := list[found]
+	if nasErr != nil && strings.EqualFold(target.Protocol, "webdav") {
+		fail(w, http.StatusInternalServerError, errNASFile) // its NAS source cannot be dropped: nothing changes
+		return
+	}
 	_ = s.unmountRemote(r.Context(), &target)
 	list = append(list[:found], list[found+1:]...)
 
@@ -976,8 +992,7 @@ func (s *Server) handleMountsDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		if left != nil {
 			s.syncMountToNAS(*left)
-		} else {
-			f := s.loadNASFileLocked() // the server lists stay
+		} else if f, err := s.readNASFileLocked(); err == nil { // the server lists stay
 			f.NASConfig, f.Name = providers.NASConfig{}, ""
 			_ = s.saveNASFileLocked(&f)
 			s.forgetServersLocked()

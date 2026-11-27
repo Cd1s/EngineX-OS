@@ -168,8 +168,12 @@ func (s *Server) handleNASConfig(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.uiMu.Lock()
 		defer s.uiMu.Unlock()
-		defer s.resetNASIfMoved(s.loadNASConfigLocked())
-		f := s.loadNASFileLocked() // the server lists stay
+		f, err := s.readNASFileLocked() // the server lists stay
+		if err != nil {
+			fail(w, http.StatusInternalServerError, errNASFile) // never overwrite a file that cannot be read
+			return
+		}
+		defer s.resetNASIfMoved(f.NASConfig)
 		f.NASConfig, f.Name = providers.NASConfig{}, ""
 		if err := s.saveNASFileLocked(&f); err != nil {
 			fail(w, http.StatusInternalServerError, errors.New("could not remove NAS configuration"))
@@ -183,8 +187,14 @@ func (s *Server) handleNASConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNASConfigGet(w http.ResponseWriter, r *http.Request) {
-	cfg := s.loadNASConfig()
-	respond(w, toNASConfigView(cfg))
+	s.uiMu.Lock()
+	f, err := s.readNASFileLocked()
+	s.uiMu.Unlock()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, errNASFile) // not "nothing set up": an edit would overwrite it
+		return
+	}
+	respond(w, toNASConfigView(f.NASConfig))
 }
 
 func (s *Server) handleNASConfigPost(w http.ResponseWriter, r *http.Request) {
@@ -218,9 +228,14 @@ func (s *Server) handleNASConfigPost(w http.ResponseWriter, r *http.Request) {
 
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
-	defer s.resetNASIfMoved(s.loadNASConfigLocked())
+	f, err := s.readNASFileLocked()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, errNASFile) // never overwrite a file that cannot be read
+		return
+	}
+	defer s.resetNASIfMoved(f.NASConfig)
 
-	existing := s.loadNASConfigLocked()
+	existing := f.NASConfig
 	newCfg := providers.NASConfig{
 		Protocol: proto,
 		URL:      targetURL,
@@ -250,7 +265,6 @@ func (s *Server) handleNASConfigPost(w http.ResponseWriter, r *http.Request) {
 	// The slot is one network source, as before; the server lists beside it stay. A
 	// WebDAV or SMB server the slot held moves to its list when another kind of
 	// source takes the slot, and a server already in a list is not added twice.
-	f := s.loadNASFileLocked()
 	listed := func(k serverKind, raw string) bool {
 		return slices.ContainsFunc(*f.list(k), func(v savedServer) bool { return serverRoot(k, v.URL) == serverRoot(k, raw) })
 	}
@@ -369,19 +383,44 @@ func isNASProvider(p string) bool {
 // Every generation check is made under one of those locks, or under g.mu
 // against rows the gateway reset then drops, together with the action it guards.
 func (s *Server) resetNASIfMoved(before providers.NASConfig) {
-	now := s.loadNASConfigLocked()
-	if nasTarget(now) == nasTarget(before) {
+	now, err := s.readNASFileLocked()
+	if err != nil {
+		return // nothing was saved: the file cannot be read
+	}
+	root := nasRootID(now.NASConfig)
+	if s.slotUnknown.Load() {
+		s.adoptNASRoot(root)
+		return
+	}
+	if nasTarget(now.NASConfig) == nasTarget(before) {
 		return
 	}
 	if s.jobs != nil && s.jobs.pause != nil {
 		s.jobs.pause("reset")
 	}
-	root := nasRootID(now)
 	s.stemsMu.Lock()
 	s.jobs.resetNAS(root, func() { s.resetNASStemsLocked(root) })
 	s.stemsMu.Unlock()
 	s.tidal.resetNAS(root)
 }
+
+// adoptNASRoot ends a run that started without the NAS slot's root (nas.json could not
+// be read at start-up), at the first save that read the file in full: every store
+// keeps the slot's entries filed under root, as a start-up with this file would, and
+// drops those of another root. Nothing of the slot ran before (it is off while its
+// root is unknown), so no generation changes. Caller holds uiMu (WebDAV round 4).
+func (s *Server) adoptNASRoot(root string) {
+	s.stemsMu.Lock()
+	s.stemsRoot = root // NAS Stems entries are filtered by their root when read
+	s.stemsMu.Unlock()
+	s.jobs.adoptNAS(root)
+	s.tidal.adoptNAS(root)
+	s.slotUnknown.Store(false)
+}
+
+// unknownNASRoot is the NAS root of a run that could not read nas.json at start-up:
+// no saved NAS entry has it, so none is served (WebDAV round 4).
+const unknownNASRoot = "unknown"
 
 // nasRootID names the NAS root (protocol, server, port, share and root, as
 // nasTarget) without credentials or a readable server name. Each saved NAS state
@@ -469,6 +508,9 @@ func smbNASConfigReady(cfg providers.NASConfig) bool {
 
 // nasAvailableLocked: the slot's SMB server is ready and NAS is on in Services.
 func (s *Server) nasAvailableLocked() bool {
+	if s.slotUnknown.Load() {
+		return false
+	}
 	f := s.loadNASFileLocked()
 	return smbNASConfigReady(f.NASConfig) && serversOn(kindNAS, s.loadUI(), f)
 }
@@ -482,6 +524,9 @@ func (s *Server) nasAvailable() bool {
 // ownerSelfHosted is the slot's server: nil when it is not ready, or when it is an
 // SMB or WebDAV server whose kind is switched off in Services (off stops its work).
 func (s *Server) ownerSelfHosted() *providers.SelfHostedProvider {
+	if s.slotUnknown.Load() {
+		return nil // the slot's root is not known in this run
+	}
 	s.uiMu.Lock()
 	f := s.loadNASFileLocked()
 	v := s.loadUI()
@@ -498,6 +543,9 @@ func (s *Server) ownerSelfHosted() *providers.SelfHostedProvider {
 // ownerSMBSelfHosted is ownerSelfHosted for the standalone NAS entry: nil
 // unless the NAS is SMB.
 func (s *Server) ownerSMBSelfHosted() *providers.SelfHostedProvider {
+	if s.slotUnknown.Load() {
+		return nil // the slot's root is not known in this run
+	}
 	s.uiMu.Lock()
 	f := s.loadNASFileLocked()
 	on := serversOn(kindNAS, s.loadUI(), f)

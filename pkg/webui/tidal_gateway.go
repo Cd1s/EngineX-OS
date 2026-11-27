@@ -261,8 +261,10 @@ func (g *tidalGateway) tracksPath() string {
 }
 
 // loadTracks restores the IDs of the previous run and the counter (gateway_ids.go), so
-// an old ID never names a different track.
-func (g *tidalGateway) loadTracks(root string) {
+// an old ID never names a different track. When the NAS slot's root is not known
+// (nas.json could not be read: known is false), its rows are kept with the root they
+// were saved under, and none of them is served in this run (WebDAV round 4).
+func (g *tidalGateway) loadTracks(root string, known bool) {
 	g.nasRoot = root
 	path := g.tracksPath()
 	if path == "" {
@@ -289,6 +291,9 @@ func (g *tidalGateway) loadTracks(root string) {
 	// NAS rows of another root, or of a file from before the root was recorded, are
 	// not used (#335; maintainer, 2026-11-27: browse the NAS again once).
 	stale := v.Root == "" || v.Root != root
+	if !known {
+		g.nasRoot, stale = v.Root, false
+	}
 	var secrets []string // cover URLs a released file saved with the NAS's auth
 	for _, r := range v.Tracks {
 		g.next = max(g.next, r.ID)
@@ -431,6 +436,25 @@ func (g *tidalGateway) resetNAS(root string) {
 	}
 }
 
+// adoptNAS ends a run that kept the NAS slot's rows under the root they were saved with
+// (loadTracks, nas.json unreadable at start-up) once the root is read: they stay when
+// that is root, as at a start-up with it, and go otherwise (WebDAV round 4).
+func (g *tidalGateway) adoptNAS(root string) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	same := g.nasRoot == root
+	g.mu.Unlock()
+	if !same {
+		g.resetNAS(root)
+		return
+	}
+	if g.searches != nil {
+		g.searches.clear() // searches made while the slot was off
+	}
+}
+
 // stripTrackAuth is t as it is saved: its cover URL without credentials (#335).
 func stripTrackAuth(t providers.Track) providers.Track {
 	t.CoverURL = providers.StripURLAuth(t.CoverURL, t.Provider == "subsonic")
@@ -506,8 +530,13 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g := &tidalGateway{browse: newBrowseCache(s.cfg.StateDir), artURLs: map[string]string{}, artCache: map[string][]byte{}, s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, albums: map[int64]albumRef{}, albumIDs: map[string]int64{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}, albumSeen: map[int64]int64{}}
 	g.searches = newSearchCache()
 	g.seedFromStreamingAccounts()
-	g.loadTracks(nasRootID(s.loadNASConfig()))
-	g.dropServers(s.serversKept()) // rows of a server no longer set up
+	s.stemsMu.Lock()
+	root := s.stemsRoot // New's start-up read of nas.json
+	s.stemsMu.Unlock()
+	g.loadTracks(root, !s.slotUnknown.Load())
+	if s.startKept != nil {
+		g.dropServers(s.startKept) // rows of a server no longer set up
+	}
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
 	g.mux.HandleFunc("POST /v1/enginex/login", s.loginStart)

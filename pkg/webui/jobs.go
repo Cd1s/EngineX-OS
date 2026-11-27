@@ -95,6 +95,10 @@ type Jobs struct {
 	// nasRoot is the current NAS root (nasRootID), under mu: the index file records
 	// it, and NAS entries the file holds for another root are not used (#335).
 	nasRoot string
+	// nasUnknown, under mu: the NAS root is not known in this run (nas.json could not
+	// be read at start-up). The index keeps the root it was filed under, and none of
+	// its NAS entries is used until a NAS reset sets the root (WebDAV round 4).
+	nasUnknown bool
 	// pause is nil except in tests that order two loads of one track.
 	pause func(point string)
 
@@ -153,6 +157,10 @@ func (j *Jobs) FileAt(t providers.Track, gen uint64) string {
 		return ""
 	}
 	path := ""
+	if isNASKey(key) && j.nasUnknown {
+		j.mu.Unlock()
+		return ""
+	}
 	if f, ok := j.files[key]; ok {
 		path = f.dl.Path
 	} else if name := j.loadSources()[key]; name != "" && j.p.Deemix != nil {
@@ -347,7 +355,7 @@ func (j *Jobs) resetNAS(root string, also func()) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.nasGen.Add(1)
-	j.nasRoot = root
+	j.nasRoot, j.nasUnknown = root, false
 	if j.pause != nil {
 		j.pause("reset-bumped")
 	}
@@ -412,6 +420,51 @@ func (j *Jobs) dropServers(keep map[string]bool) {
 	changed := false
 	for k := range j.loadSources() {
 		if gone(k) {
+			delete(j.sources, k)
+			changed = true
+		}
+	}
+	if changed {
+		j.writeSources()
+	}
+}
+
+// keepNASAsSavedLocked is the start-up of a run whose NAS root is not known (nas.json
+// could not be read); j.mu must be held. The index keeps the root it was filed under,
+// so its NAS entries stay on disk for the next start, and none of them is used in
+// this run (FileAt) until adoptNAS.
+func (j *Jobs) keepNASAsSavedLocked() {
+	j.nasUnknown = true
+	j.nasRoot = ""
+	if j.p.Deemix == nil {
+		return
+	}
+	if b, err := readState(filepath.Join(j.p.Deemix.DownloadDir, sourcesFile)); err == nil {
+		var saved map[string]string
+		if json.Unmarshal(b, &saved) == nil {
+			j.nasRoot = saved[sourcesRootKey]
+		}
+	}
+}
+
+// adoptNAS ends a run whose NAS root was not known (keepNASAsSavedLocked) once the
+// root is read: the index's NAS entries stay when it was filed under root, as at a
+// start-up with that root, and go otherwise. No NAS work ran while the root was not
+// known, so the generation stays.
+func (j *Jobs) adoptNAS(root string) {
+	if j == nil {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	same := j.nasRoot == root
+	j.nasRoot, j.nasUnknown = root, false
+	if same || j.p.Deemix == nil {
+		return
+	}
+	changed := false
+	for k := range j.loadSources() {
+		if isNASKey(k) {
 			delete(j.sources, k)
 			changed = true
 		}
