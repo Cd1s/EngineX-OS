@@ -51,6 +51,45 @@ type Report struct {
 	CheckedAt            time.Time `json:"checked_at"`
 }
 
+const minDataOnlyProbeTimeout = 500 * time.Millisecond
+
+func probeBusyTimeoutMS(ctx context.Context) int {
+	if ctx == nil {
+		return 3000
+	}
+	if ctx.Err() != nil {
+		return 1
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			return 1
+		}
+		ms := int(rem / time.Millisecond)
+		if ms < 1 {
+			return 1
+		}
+		if ms > 3000 {
+			return 3000
+		}
+		return ms
+	}
+	return 3000
+}
+
+func identityProbeContext(ctx context.Context, dataOnly bool) (context.Context, context.CancelFunc) {
+	if !dataOnly {
+		return ctx, func() {}
+	}
+	if ctx.Err() != nil {
+		return context.WithTimeout(context.Background(), minDataOnlyProbeTimeout)
+	}
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < minDataOnlyProbeTimeout {
+		return context.WithTimeout(context.Background(), minDataOnlyProbeTimeout)
+	}
+	return ctx, func() {}
+}
+
 func effectiveBusyTimeoutMS(ctx context.Context) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -74,6 +113,14 @@ func effectiveBusyTimeoutMS(ctx context.Context) (int, error) {
 	return busyMS, nil
 }
 
+func clampBusyTimeoutMS(ctx context.Context, db *sql.DB, busyMS int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, err := db.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", busyMS))
+	return err
+}
+
 func clampBusyTimeout(ctx context.Context, db *sql.DB) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -85,8 +132,7 @@ func clampBusyTimeout(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", busyMS))
-	return err
+	return clampBusyTimeoutMS(ctx, db, busyMS)
 }
 
 func isSQLiteBusy(err error) bool {
@@ -128,6 +174,13 @@ func Open(path string, readOnly bool) (*sql.DB, error) {
 func openContext(ctx context.Context, path string, readOnly bool) (*sql.DB, error) {
 	busyMS, err := effectiveBusyTimeoutMS(ctx)
 	if err != nil {
+		return nil, err
+	}
+	return openWithBusyTimeout(ctx, path, readOnly, busyMS)
+}
+
+func openWithBusyTimeout(ctx context.Context, path string, readOnly bool, busyMS int) (*sql.DB, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -195,6 +248,17 @@ func transactionContext(ctx context.Context, db *sql.DB, f func(*sql.Tx) error) 
 	if err := clampBusyTimeout(ctx, db); err != nil {
 		return err
 	}
+	return runTransactionContext(ctx, db, f)
+}
+
+func transactionContextWithBusy(ctx context.Context, db *sql.DB, busyMS int, f func(*sql.Tx) error) error {
+	if err := clampBusyTimeoutMS(ctx, db, busyMS); err != nil {
+		return err
+	}
+	return runTransactionContext(ctx, db, f)
+}
+
+func runTransactionContext(ctx context.Context, db *sql.DB, f func(*sql.Tx) error) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -404,12 +468,9 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 		r.Warnings = append(r.Warnings, "read-only media: inspected without repairs or journal writes")
 		return r, err
 	}
-	checkCtx := ctx
-	if dataOnly && ctx.Err() != nil {
-		var cancelProbe context.CancelFunc
-		checkCtx, cancelProbe = context.WithTimeout(context.Background(), 25*time.Millisecond)
-		defer cancelProbe()
-	}
+	busyMS := probeBusyTimeoutMS(ctx)
+	checkCtx, cancelProbe := identityProbeContext(ctx, dataOnly)
+	defer cancelProbe()
 	var db *sql.DB
 	var dbUUID string
 	var needsIdentityRepair bool
@@ -419,9 +480,9 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 	}
 	if mainResOK && mainRes != 0 {
 		// Validate schema and identity read-only before rewriting reserve or touching siblings.
-		roDB, roErr := openContext(checkCtx, path, true)
+		roDB, roErr := openWithBusyTimeout(checkCtx, path, true, busyMS)
 		if roErr != nil {
-			if dataOnly && (isContextStop(checkCtx, roErr) || budgetExpired(checkCtx, roErr)) {
+			if dataOnly && (isContextStop(checkCtx, roErr) || budgetExpired(checkCtx, roErr) || isSQLiteBusy(roErr)) {
 				r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
 			}
 			r.Healthy = false
@@ -429,13 +490,13 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			return r, roErr
 		}
 		var schemaErr error
-		dbUUID, needsIdentityRepair, schemaErr = validateLibraryIdentityReadOnly(checkCtx, roDB)
+		dbUUID, needsIdentityRepair, schemaErr = validateLibraryIdentityReadOnlyWithBusy(checkCtx, roDB, busyMS)
 		if schemaErr == nil && !dataOnly {
 			schemaErr = hasPerformanceDataTable(checkCtx, roDB)
 		}
 		roCloseErr := roDB.Close()
 		if schemaErr != nil {
-			if dataOnly && (isContextStop(checkCtx, schemaErr) || budgetExpired(checkCtx, schemaErr)) {
+			if dataOnly && (isContextStop(checkCtx, schemaErr) || budgetExpired(checkCtx, schemaErr) || isSQLiteBusy(schemaErr)) {
 				r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
 			}
 			r.Healthy = false
@@ -461,7 +522,7 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 		}
 		db, err = openContext(ctx, path, false)
 		if err != nil {
-			if dataOnly && (isContextStop(ctx, err) || budgetExpired(ctx, err)) {
+			if dataOnly && (isContextStop(ctx, err) || budgetExpired(ctx, err) || isSQLiteBusy(err)) {
 				r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
 			}
 			r.Healthy = false
@@ -469,9 +530,9 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			return r, err
 		}
 	} else {
-		db, err = openContext(checkCtx, path, false)
+		db, err = openWithBusyTimeout(checkCtx, path, false, busyMS)
 		if err != nil {
-			if dataOnly && (isContextStop(checkCtx, err) || budgetExpired(checkCtx, err)) {
+			if dataOnly && (isContextStop(checkCtx, err) || budgetExpired(checkCtx, err) || isSQLiteBusy(err)) {
 				r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
 			}
 			r.Healthy = false
@@ -479,13 +540,13 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			return r, err
 		}
 		var schemaErr error
-		dbUUID, needsIdentityRepair, schemaErr = validateLibraryIdentityReadOnly(checkCtx, db)
+		dbUUID, needsIdentityRepair, schemaErr = validateLibraryIdentityReadOnlyWithBusy(checkCtx, db, busyMS)
 		if schemaErr == nil && !dataOnly {
 			schemaErr = hasPerformanceDataTable(checkCtx, db)
 		}
 		if schemaErr != nil {
 			_ = db.Close()
-			if dataOnly && (isContextStop(checkCtx, schemaErr) || budgetExpired(checkCtx, schemaErr)) {
+			if dataOnly && (isContextStop(checkCtx, schemaErr) || budgetExpired(checkCtx, schemaErr) || isSQLiteBusy(schemaErr)) {
 				r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
 			}
 			r.Healthy = false
@@ -495,10 +556,10 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 		if dataOnly && ctx.Err() != nil {
 			if needsIdentityRepair {
 				var repairErr error
-				dbUUID, repairErr = validateAndRepairLibraryIdentity(checkCtx, db)
+				dbUUID, repairErr = validateAndRepairLibraryIdentityWithBusy(checkCtx, db, busyMS)
 				if repairErr != nil {
 					_ = db.Close()
-					if isContextStop(checkCtx, repairErr) || budgetExpired(checkCtx, repairErr) {
+					if isContextStop(checkCtx, repairErr) || budgetExpired(checkCtx, repairErr) || isSQLiteBusy(repairErr) {
 						r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
 					}
 					r.Healthy = false
@@ -522,15 +583,33 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 	fixed := r.ReserveFixed
 	if dataOnly && needsIdentityRepair {
 		var repairErr error
-		if dbUUID, repairErr = validateAndRepairLibraryIdentity(ctx, db); repairErr != nil {
+		if dbUUID, repairErr = validateAndRepairLibraryIdentityWithBusy(checkCtx, db, probeBusyTimeoutMS(ctx)); repairErr != nil {
 			_ = db.Close()
-			if isContextStop(ctx, repairErr) || budgetExpired(ctx, repairErr) {
+			if isContextStop(checkCtx, repairErr) || budgetExpired(checkCtx, repairErr) || isSQLiteBusy(repairErr) {
 				r.Warnings = append(r.Warnings, "mount budget exceeded before schema and identity check")
 			}
 			r.Healthy = false
 			r.Mount = mount
 			return r, repairErr
 		}
+	}
+	if dataOnly && ctx.Err() != nil {
+		closeErr := db.Close()
+		r.Mount = mount
+		r.Healthy = closeErr == nil
+		return r, closeErr
+	}
+	if err := clampBusyTimeout(ctx, db); err != nil {
+		_ = db.Close()
+		if dataOnly && (isContextStop(ctx, err) || budgetExpired(ctx, err) || isSQLiteBusy(err)) {
+			r.Warnings = append(r.Warnings, "mount budget exceeded before track pass")
+			r.Healthy = true
+			r.Mount = mount
+			return r, nil
+		}
+		r.Healthy = false
+		r.Mount = mount
+		return r, err
 	}
 	passRes, err := runMountTrackPass(ctx, db, mount, &r, mountTrackPassOptions{
 		runNFD:     true,
@@ -981,8 +1060,8 @@ func repairLibraryIdentityTx(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-func validateLibraryIdentityReadOnly(ctx context.Context, db *sql.DB) (string, bool, error) {
-	if err := clampBusyTimeout(ctx, db); err != nil {
+func validateLibraryIdentityReadOnlyWithBusy(ctx context.Context, db *sql.DB, busyMS int) (string, bool, error) {
+	if err := clampBusyTimeoutMS(ctx, db, busyMS); err != nil {
 		return "", false, err
 	}
 	infos, err := readLibraryIdentityRows(ctx, db)
@@ -997,20 +1076,20 @@ func validateLibraryIdentityReadOnly(ctx context.Context, db *sql.DB) (string, b
 	return trimmed, row.id != 1 || trimmed == "", nil
 }
 
-func validateAndRepairLibraryIdentity(ctx context.Context, db *sql.DB) (string, error) {
-	dbUUID, needsRepair, err := validateLibraryIdentityReadOnly(ctx, db)
+func validateAndRepairLibraryIdentityWithBusy(ctx context.Context, db *sql.DB, busyMS int) (string, error) {
+	dbUUID, needsRepair, err := validateLibraryIdentityReadOnlyWithBusy(ctx, db, busyMS)
 	if err != nil {
 		return "", err
 	}
 	if !needsRepair {
 		return dbUUID, nil
 	}
-	if err := transactionContext(ctx, db, func(tx *sql.Tx) error {
+	if err := transactionContextWithBusy(ctx, db, busyMS, func(tx *sql.Tx) error {
 		return repairLibraryIdentityTx(ctx, tx)
 	}); err != nil {
 		return "", err
 	}
-	dbUUID, stillNeedsRepair, err := validateLibraryIdentityReadOnly(ctx, db)
+	dbUUID, stillNeedsRepair, err := validateLibraryIdentityReadOnlyWithBusy(ctx, db, busyMS)
 	if err != nil {
 		return "", err
 	}

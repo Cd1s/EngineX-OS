@@ -1296,16 +1296,26 @@ func TestHealMountDataOnlyFailedProbeOnLockedFutureSchemaReportsUnhealthy(t *tes
 
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
+	startCanceled := time.Now()
 	rep, err := HealMountDataOnlyContext(canceled, root, 0)
+	elapsedCanceled := time.Since(startCanceled)
 	if err == nil || rep.Healthy {
 		t.Fatalf("canceled locked schema-4 probe reported healthy: rep=%+v err=%v", rep, err)
+	}
+	if elapsedCanceled >= 200*time.Millisecond {
+		t.Fatalf("canceled locked probe took %v (>= 200ms)", elapsedCanceled)
 	}
 
 	liveCtx, cancelLive := context.WithTimeout(context.Background(), 45*time.Millisecond)
 	defer cancelLive()
+	startLive := time.Now()
 	rep, err = HealMountDataOnlyContext(liveCtx, root, 0)
+	elapsedLive := time.Since(startLive)
 	if err == nil || rep.Healthy {
 		t.Fatalf("45ms locked schema-4 probe reported healthy: rep=%+v err=%v", rep, err)
+	}
+	if elapsedLive >= 250*time.Millisecond {
+		t.Fatalf("45ms locked probe took %v (>= 250ms)", elapsedLive)
 	}
 }
 
@@ -1349,7 +1359,7 @@ func TestHealMountDataOnlyCanceledProbeDoesNotRebuildReserveOnSchemaError(t *tes
 	if err == nil || rep.Healthy {
 		t.Fatalf("canceled probe accepted schema-4 m.db: rep=%+v err=%v", rep, err)
 	}
-	if elapsed >= 100*time.Millisecond {
+	if elapsed >= 500*time.Millisecond {
 		t.Fatalf("canceled probe took %v (unexpected reserve rebuild)", elapsed)
 	}
 	if r, ok, rerr := Reserve(hm); rerr != nil || !ok || r != 12 {
