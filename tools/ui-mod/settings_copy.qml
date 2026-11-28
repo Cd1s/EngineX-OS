@@ -15,6 +15,9 @@
     property string scCopySaveDrive: ""
     property string scCopyClearedUSBID: ""
     property double scCopyLoadStarted: 0
+    property var scShareState: ({peers: [], undo: false, lastCopy: null})
+    property bool scShareStatusBusy: false
+    property bool scShareBusy: false
     Repeater {
         id: scCopySources
         model: Planck.librarianController ? Planck.librarianController.browserSourceControllerPtr().connectedSourceModel() : null
@@ -218,6 +221,83 @@
                 scCopyRequest("failed", {id: op.id, loading: false}, function(ok) { if (!ok) scCopyClearedUSBID = "" })
             }
             if (op.phase === "failed" && scCopySeenDone !== op.id) { scCopySeenDone = op.id; scCopyNotice(op.error) }
+        })
+        scSharePoll()
+    }
+    function scShareRequest(body, done) {
+        const x = new XMLHttpRequest()
+        const request = {x: x, at: Date.now(), done: false, callback: done}
+        scCopyRequests.push(request)
+        x.onreadystatechange = function() {
+            if (x.readyState !== 4 || request.done) return
+            request.done = true
+            let value = null
+            try { value = JSON.parse(x.responseText) } catch (e) {}
+            if (done) done(x.status === 200 ? value : null, value && value.error ? String(value.error) : scT("Settings request failed"), x.status)
+        }
+        x.open(body ? "POST" : "GET", "http://127.0.0.1:8080/v1/enginex/deck-share")
+        if (body) {
+            x.setRequestHeader("Content-Type", "application/json")
+            x.send(JSON.stringify(body))
+        } else x.send()
+    }
+    function scSharePoll() {
+        if (scShareStatusBusy) return
+        scShareStatusBusy = true
+        scShareRequest(null, function(state) {
+            scShareStatusBusy = false
+            if (!state) return
+            scShareState = state
+        })
+    }
+    function scShareBegin(peer) {
+        if (!scServerInput || root.isQuitting || scShareBusy) return
+        scServerKind = "deckshare"
+        scServerError = ""
+        scServerDraft = {peer: String(peer || "")}
+        scServerStep = 0
+        scServerTyping = true
+        const dlg = scServerInput.createObject(root)
+        if (dlg && scServerDlgs.indexOf(dlg) < 0) scServerDlgs = scServerDlgs.concat([dlg])
+    }
+    function scShareSummaryText(sum) {
+        if (!sum) return scT("Nothing copied")
+        const lines = []
+        if (sum.copied && sum.copied.length) lines.push(scT("Copied") + ": " + sum.copied.join(", "))
+        if (sum.webdav && sum.webdav.length) lines.push("WebDAV: " + sum.webdav.join(", "))
+        if (sum.nas && sum.nas.length) lines.push("NAS: " + sum.nas.join(", "))
+        if (sum.skipped && sum.skipped.length) lines.push(scT("Skipped") + ": " + sum.skipped.join(", "))
+        return lines.length ? lines.join("\n") : scT("Nothing copied")
+    }
+    function scShareSubmit(peer, code) {
+        scShareBusy = true
+        scShareRequest({action: "pull", peer: String(peer || ""), code: String(code || "")}, function(res, error) {
+            scShareBusy = false
+            if (!res) {
+                PlanckGUI.views.prompts.post({title: scT("Copy logins failed"), message: scCopyEscape(scT(error)), options: Prompt.Ok})
+                return
+            }
+            scShareState = Object.assign({}, scShareState, {undo: !!res.undo, lastCopy: res.summary || null})
+            scSharePoll()
+            root.scCall("")
+            PlanckGUI.views.prompts.post({title: scT("Logins copied"), message: scCopyEscape(scShareSummaryText(res.summary)), options: Prompt.Ok})
+        })
+    }
+    function scShareUndo() {
+        const sum = scShareState.lastCopy ? scShareSummaryText(scShareState.lastCopy) : ""
+        const prompt = PlanckGUI.views.prompts.post({title: scT("Undo copied logins"), message: scCopyEscape(sum || scT("Undo copied logins")), options: Prompt.Cancel | Prompt.Ok})
+        prompt.finished.connect(function(role) {
+            if (role !== Prompt.AcceptRole) return
+            scShareRequest({action: "undo"}, function(res, error) {
+                if (!res) {
+                    PlanckGUI.views.prompts.post({title: scT("Copy logins failed"), message: scCopyEscape(scT(error)), options: Prompt.Ok})
+                    return
+                }
+                scShareState = Object.assign({}, scShareState, {undo: false, lastCopy: null})
+                scSharePoll()
+                root.scCall("")
+                PlanckGUI.views.prompts.post({title: scT("Undo copied logins"), message: scCopyEscape(scT("Previous logins restored")), options: Prompt.Ok})
+            })
         })
     }
     Timer { interval: 1000; repeat: true; running: true; onTriggered: root.scCopyPoll() }

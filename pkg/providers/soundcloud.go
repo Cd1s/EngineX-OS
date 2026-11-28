@@ -105,6 +105,18 @@ func (a *SoundCloudAuth) load() {
 	}
 }
 
+// Reload refreshes cached credentials from disk.
+func (a *SoundCloudAuth) Reload() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.loaded = false
+	a.saved = soundCloudToken{}
+	a.load()
+}
+
 type soundCloudTokenResponse struct {
 	Access  string `json:"access_token"`
 	Refresh string `json:"refresh_token"`

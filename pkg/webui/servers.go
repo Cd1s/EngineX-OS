@@ -235,6 +235,8 @@ func (s *Server) saveNASFileLocked(f *nasFile) error {
 		return err
 	}
 	s.forgetServersLocked(old, *f)
+	s.setPeerLocalTargets(s.localEnabledTargetHashesLocked(s.loadUI(), *f))
+	s.notifySharePeers()
 	return nil
 }
 

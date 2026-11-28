@@ -503,8 +503,11 @@ func nasTarget(cfg providers.NASConfig) string {
 }
 
 func gatewayProvider(p string) string {
-	if p == "smb" {
+	switch p {
+	case "smb", peerSMBProvider:
 		return nasScope
+	case peerWebDAVProvider:
+		return "webdav"
 	}
 	return p
 }

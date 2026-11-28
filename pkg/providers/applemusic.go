@@ -183,6 +183,42 @@ func (a *AppleMusic) Load() error {
 	return nil
 }
 
+// Reload refreshes the owner login from disk, resetting memory if the file was removed.
+func (a *AppleMusic) Reload() error {
+	if a == nil {
+		return nil
+	}
+	err := a.Load()
+	if errors.Is(err, os.ErrNotExist) {
+		if fp := forgotMarkerPath(a.OwnerPath); fp != "" {
+			if _, ferr := os.Stat(fp); errors.Is(ferr, os.ErrNotExist) {
+				a.mu.Lock()
+				a.owner = AppleMusicOwner{}
+				a.ownerForgot = false
+				a.forgotHash = ""
+				a.helperSignedIn = false
+				a.helperDevToken = ""
+				a.helperProbedAt = time.Time{}
+				a.web = ""
+				a.webAt = time.Time{}
+				a.credGen++
+				a.mu.Unlock()
+				return nil
+			}
+		}
+		a.mu.Lock()
+		a.credGen++
+		a.mu.Unlock()
+		return nil
+	}
+	if err == nil {
+		a.mu.Lock()
+		a.credGen++
+		a.mu.Unlock()
+	}
+	return err
+}
+
 // SetOwner checks and saves a login from the phone page. Links that do not
 // open are refused, so a typo never becomes an empty playlist on the deck.
 func (a *AppleMusic) SetOwner(ctx context.Context, o AppleMusicOwner) error {

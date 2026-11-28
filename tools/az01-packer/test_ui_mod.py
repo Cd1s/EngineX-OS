@@ -16340,7 +16340,7 @@ globalThis.XMLHttpRequest = XMLHttpRequest;
 Object.assign(globalThis, {
     scT(s) { return s; },
     scServices: [{id: 'rekordbox', name: 'rekordbox'}, {id: 'nas', name: 'NAS'}, {id: 'webdav', name: 'WebDAV'}, {id: 'tidal', name: 'TIDAL'}, {id: 'spotify', name: 'Spotify'}],
-    scSources: [], scWebdav: [], scNasServers: [], scServerTyping: false, scServerDlgs: [], isQuitting: false, scServerError: '', scServerKind: 'webdav', scServerDraft: {}, scServerStep: 0,
+    scSources: [], scWebdav: [], scNasServers: [], scLinkedServers: [], scServerTyping: false, scServerDlgs: [], isQuitting: false, scServerError: '', scServerKind: 'webdav', scServerDraft: {}, scServerStep: 0,
     scServerSteps: ['url', 'username', 'password', 'name'], scLoginOpen: 'x',
     scServerInput: {createObject(p) { opened.push(p); }},
     scLoginBegin(id) { logins.push(id); },
@@ -16730,6 +16730,64 @@ for (const kind of ['webdav', 'nas']) {
     assert.strictEqual(scServerDlgs.length, lenBeforeDrain);
     assert.strictEqual(scServerTyping, false);
 }
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run deck-share JS logic")
+    def test_deck_share_and_link_servers_ui(self):
+        main = bp.SERVICES_MAIN
+        self.assertIn('objectName: "EngineX_DeckShare"', bp.SETTINGS_COPY_ENTRIES)
+        self.assertIn('objectName: "EngineX_UndoDeckShare"', bp.SETTINGS_COPY_ENTRIES)
+        self.assertIn('/v1/enginex/deck-share', bp.SETTINGS_COPY_MAIN)
+        for fn in ("scShareBegin", "scShareSubmit", "scShareUndo", "scShareSummaryText"):
+            self.assertIn("function " + fn, bp.SETTINGS_COPY_MAIN)
+
+        rows = {}
+        for line in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines():
+            if line and not line.startswith("#"):
+                cols = line.split("\t")
+                rows[cols[0]] = cols[1:]
+        for text in ("Copy logins from another deck", "Undo copied logins", "Device code", "Copy",
+                     "Logins copied", "Copy logins failed", "Previous logins restored", "Copied", "Skipped", "Nothing copied"):
+            self.assertIn(text, rows, text)
+            self.assertEqual(len([c for c in rows[text] if c.strip()]), 3, text)
+
+        fns = "\n".join(self.extract_fn(main, n) for n in ("scIcon", "scServersOf", "scFindObject", "scServerField", "scServerNext"))
+        entries = main.split("readonly property var scSourceEntries: {", 1)[1].split("\n\t}\n", 1)[0]
+        script = r"""
+const assert = require('assert');
+globalThis.root = globalThis;
+globalThis.TextInput = {Password: 2, Normal: 0};
+const submitted = [];
+Object.assign(globalThis, {
+    scT(s) { return s; },
+    scServices: [{id: 'nas', name: 'NAS'}, {id: 'webdav', name: 'WebDAV'}, {id: 'spotify', name: 'Spotify'}],
+    scSources: ['linkwebdav:abcd1234:11112222333344445555666677778888', 'linknas:abcd1234:99990000111122223333444455556666'],
+    scWebdav: [], scNasServers: [],
+    scLinkedServers: [
+        {id: '11112222333344445555666677778888', kind: 'webdav', name: 'Deck A Dav', scope: 'linkwebdav:abcd1234:11112222333344445555666677778888'},
+        {id: '99990000111122223333444455556666', kind: 'nas', name: 'Deck A NAS', scope: 'linknas:abcd1234:99990000111122223333444455556666'},
+    ],
+    scServerTyping: true, scServerKind: 'deckshare', scServerDraft: {peer: '192.168.100.1'}, scServerStep: 0, scServerSteps: ['url'],
+    scShareSubmit(peer, code) { submitted.push([peer, code]); },
+});
+""" + fns + "\nfunction scSourceEntries() {" + entries + "\n}\n" + r"""
+assert.deepStrictEqual(scSourceEntries().map(e => e.id + '=' + e.name + ':' + !!e.linked), [
+    'linknas:abcd1234:99990000111122223333444455556666=Deck A NAS:true',
+    'linkwebdav:abcd1234:11112222333344445555666677778888=Deck A Dav:true',
+]);
+assert.strictEqual(scIcon('linknas:abcd1234:x'), 'qrc:/@ICONS@/SourceNetwork.png');
+assert.strictEqual(scIcon('linkwebdav:abcd1234:x'), 'file:///data/enginex/ui/icons/webdav.png');
+const input = {objectName: 'EmbeddedTextInput', children: [], echoMode: 2};
+const field = {children: [input]};
+scServerField(field);
+assert.strictEqual(input.echoMode, 0);
+assert.strictEqual(field.placeholder, 'XXXX-XXXX');
+assert.strictEqual(field.doneButtonTitle, 'Copy');
+scServerNext('AB12-CD34');
+assert.strictEqual(scServerTyping, false);
+assert.deepStrictEqual(submitted, [['192.168.100.1', 'AB12-CD34']]);
 """
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)

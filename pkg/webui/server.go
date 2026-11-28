@@ -211,6 +211,18 @@ type Server struct {
 	httpsLn   net.Listener
 	httpsPort int
 	httpsWG   sync.WaitGroup
+
+	shareApplyMu         sync.Mutex
+	shareMu              sync.Mutex
+	sharePeersMap        map[string]time.Time
+	shareBeaconConn      *net.UDPConn
+	shareGrants          map[string]deckShareGrant
+	sharePeerPorts       map[string]int
+	shareLastProbe       time.Time
+	shareNeighborProbing bool
+	peerServers          peerServersState
+	peerTrackSem         chan struct{}
+	scopeAtom            atomic.Value
 }
 
 func New(cfg Config, jobs *Jobs) *Server {
@@ -271,6 +283,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.prolinkExport = prolink.NewExporter(exportCfg)
 	s.closed = make(chan struct{})
 	s.applyShadowFlags(s.loadUI())
+	s.startDeckShareBeacon()
 	if isDeckStateDir(cfg.StateDir) { // on the deck, not in tests
 		go serveSpotifyConnectMDNS(s.closed)
 	}
@@ -314,6 +327,15 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/settings-copy", s.settingsCopyControl)
 	s.mux.HandleFunc("POST /peer/settings-copy/request", s.settingsCopyRequest)
 	s.mux.HandleFunc("GET /api/settings-copy/transfer", s.settingsCopyTransfer)
+	s.mux.HandleFunc("GET /api/deck-share", s.deckShareStatus)
+	s.mux.HandleFunc("POST /api/deck-share", s.deckShareControl)
+	s.mux.HandleFunc("POST /peer/deck-share/request", s.handlePeerDeckShareRequest)
+	s.mux.HandleFunc("GET /peer/deck-share/transfer", s.handlePeerDeckShareTransfer)
+	s.mux.HandleFunc("GET /peer/servers", s.handlePeerServersList)
+	s.mux.HandleFunc("GET /peer/servers/{kind}/{id}/playlists", s.handlePeerServerPlaylists)
+	s.mux.HandleFunc("GET /peer/servers/{kind}/{id}/tracks", s.handlePeerServerTracks)
+	s.mux.HandleFunc("GET /peer/servers/{kind}/{id}/search", s.handlePeerServerSearch)
+	s.mux.HandleFunc("GET /peer/servers/{kind}/{id}/track", s.handlePeerServerTrack)
 	s.mux.HandleFunc("GET /api/console-qr", s.consoleQR)
 	s.mux.HandleFunc("POST /api/sessions", s.createSession)
 	s.mux.HandleFunc("DELETE /api/sessions/{id}", s.deleteSession)
@@ -437,7 +459,11 @@ func New(cfg Config, jobs *Jobs) *Server {
 	// full and names the slot's server.
 	s.uiMu.Lock()
 	startNAS, startErr := s.readNASFileLocked()
+	startUI := s.loadUI()
 	s.uiMu.Unlock()
+	if startErr == nil {
+		s.setPeerLocalTargets(s.localEnabledTargetHashesLocked(startUI, startNAS))
+	}
 	if startErr != nil {
 		log.Printf("webui: %v at start-up: NAS and server state kept as saved, the NAS slot is off in this run", startErr)
 	}
@@ -468,6 +494,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 		jobs.applemusic = func() *providers.AppleMusic { return s.appleMusic }
 		jobs.selfHosted = s.ownerSelfHosted
 		jobs.server = s.serverLookup
+		jobs.peerServer = s.downloadPeerServerTrack
+		jobs.peerAlive = s.peerTrackLive
 		if s.slotUnknown.Load() {
 			// The slot's root is not known: the index keeps the root it was filed under
 			// (its NAS entries stay on disk) and none of them is used in this run.
@@ -518,6 +546,7 @@ func (s *Server) tryExport() {
 func (s *Server) Close() {
 	s.closeOnce.Do(func() { close(s.closed) })
 	s.askClose() // Line In's and Share Decks' listener (#329)
+	s.closeDeckShareBeacon()
 	s.lanProbeWG.Wait()
 	s.mu.Lock()
 	var closers []interface{ Close() }
