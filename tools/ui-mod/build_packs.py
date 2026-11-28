@@ -4931,15 +4931,8 @@ SERVICES_MAIN = """
 			: {id: "", url: "", from: "", username: "", password: "", name: "", hasPassword: false}
 		scServerStep = 0
 		scServerTyping = true
-		const dlg = root.openDialogComponent(scServerInput)
-		if (dlg) {
-			if (scServerDlgs.indexOf(dlg) < 0) scServerDlgs = scServerDlgs.concat([dlg])
-			if (typeof Overlay !== "undefined" && Overlay.overlay) {
-				if (dlg.parent !== Overlay.overlay) dlg.parent = Overlay.overlay
-				if (dlg.z !== ZValues.Modal) dlg.z = ZValues.Modal
-				if (dlg.field && dlg.field.forceActiveFocus) dlg.field.forceActiveFocus()
-			}
-		}
+		const dlg = scServerInput.createObject(root)
+		if (dlg && scServerDlgs.indexOf(dlg) < 0) scServerDlgs = scServerDlgs.concat([dlg])
 	}
 	function scServerNext(text) {
 		const d = Object.assign({}, scServerDraft)
@@ -4949,15 +4942,8 @@ SERVICES_MAIN = """
 			scServerStep++
 			Qt.callLater(function() {
 				if (root.isQuitting || !scServerTyping) { scServerStop(); return }
-				const dlg = root.openDialogComponent(scServerInput)
-				if (dlg) {
-					if (scServerDlgs.indexOf(dlg) < 0) scServerDlgs = scServerDlgs.concat([dlg])
-					if (typeof Overlay !== "undefined" && Overlay.overlay) {
-						if (dlg.parent !== Overlay.overlay) dlg.parent = Overlay.overlay
-						if (dlg.z !== ZValues.Modal) dlg.z = ZValues.Modal
-						if (dlg.field && dlg.field.forceActiveFocus) dlg.field.forceActiveFocus()
-					}
-				}
+				const dlg = scServerInput.createObject(root)
+				if (dlg && scServerDlgs.indexOf(dlg) < 0) scServerDlgs = scServerDlgs.concat([dlg])
 			})
 			return
 		}
@@ -5750,29 +5736,67 @@ USB_PREPARING_BANNER = """
 		}
 """
 
-# One field of a WebDAV or NAS server typed on the deck: Engine's TextInputDialog, as
-# Track Info's metadata edit uses it. Raised into Overlay.overlay at ZValues.Modal so
-# it renders above ControlCenter (Settings, ZValues.ControlCenter) and below Keyboard.
-# A step closed without Done (Cancel) ends the entry.
-SERVER_INPUT = """	readonly property Component scServerInput: ScMsg.TextInputDialog {
-		parent: Overlay.overlay ? Overlay.overlay : root.foreground
+# One field of a WebDAV or NAS server typed on the deck: stock EmbeddedTextInputLayout
+# inside a Popup at ZValues.Modal (parent: root, as ColorWheelDialog / SettingsOverlay use)
+# so QQuickOverlay routes touch above ControlCenter (Drawer, ZValues.ControlCenter) while
+# modal: false leaves the virtual Keyboard (ZValues.Keyboard) touchable and background
+# AIRMouseEventBlocker + MouseArea blocks pass-through to Settings underneath.
+SERVER_INPUT = """	readonly property Component scServerInput: Popup {
+		id: scServerPopup
+		parent: root
+		anchors.centerIn: parent
+		width: uiContainer.width
+		height: uiContainer.height
+		padding: 0
 		z: ZValues.Modal
+		modal: false
+		dim: false
+		focus: true
+		closePolicy: Popup.NoAutoClose
 		property bool scDone: false
-		MouseArea { anchors.fill: parent; z: -1 }
+		property bool scClosing: false
+		readonly property alias field: scServerFieldLayout
+		background: Rectangle {
+			color: Style.surface01Color
+			AIRMouseEventBlocker { anchors.fill: parent }
+			MouseArea { anchors.fill: parent }
+		}
+		contentItem: ScInput.EmbeddedTextInputLayout {
+			id: scServerFieldLayout
+			objectName: "EmbeddedTextInputLayout"
+			onDone: text => {
+				if (scServerPopup.scClosing) return
+				scServerPopup.scDone = true
+				scServerPopup.scClosing = true
+				root.scServerNext(text)
+				scServerPopup.close()
+				scServerPopup.destroy()
+			}
+			onCancelled: {
+				if (scServerPopup.scClosing) return
+				scServerPopup.scClosing = true
+				root.scServerStop()
+				scServerPopup.close()
+				scServerPopup.destroy()
+			}
+		}
 		Connections {
 			target: root
 			function onIsQuittingChanged() {
-				if (root.isQuitting) {
+				if (root.isQuitting && !scServerPopup.scClosing) {
+					scServerPopup.scClosing = true
 					root.scServerStop()
-					close()
+					scServerPopup.close()
+					scServerPopup.destroy()
 				}
 			}
 		}
-		onDone: text => { scDone = true; root.scServerNext(text) }
 		Component.onCompleted: {
-			if (root.isQuitting) { close(); return }
+			if (root.isQuitting) { scClosing = true; destroy(); return }
 			if (root.scServerDlgs.indexOf(this) < 0) root.scServerDlgs = root.scServerDlgs.concat([this])
 			root.scServerField(field)
+			open()
+			field.forceActiveFocus()
 		}
 		Component.onDestruction: {
 			root.scServerDlgs = root.scServerDlgs.filter(d => d !== this)
@@ -5781,14 +5805,27 @@ SERVER_INPUT = """	readonly property Component scServerInput: ScMsg.TextInputDia
 	}
 """
 
-LOGIN_LAYER_530 = """			parent: Overlay.overlay ? Overlay.overlay : uiContainer
-			anchors.fill: parent
-			z: ZValues.Modal"""
+LOGIN_LAYER_530 = """			AIRMouseEventBlocker { anchors.fill: parent }"""
 
 LOGIN_LAYER_504 = """			anchors.fill: parent
 			z: 1000000"""
 
-LOGIN_QUIT_530 = """			Connections {
+LOGIN_POPUP_OPEN_530 = """
+		Popup {
+			id: scLoginPopup
+			parent: root
+			anchors.centerIn: parent
+			width: uiContainer.width
+			height: uiContainer.height
+			padding: 0
+			z: ZValues.Modal
+			modal: false
+			dim: false
+			focus: true
+			closePolicy: Popup.NoAutoClose
+			visible: root.scLogin !== "" && !root.scServerTyping
+			background: null
+			Connections {
 				target: root
 				function onIsQuittingChanged() {
 					if (root.isQuitting) {
@@ -5798,7 +5835,9 @@ LOGIN_QUIT_530 = """			Connections {
 					}
 				}
 			}
-"""
+			contentItem:"""
+
+LOGIN_POPUP_CLOSE_530 = "\n\t\t}"
 
 LOGIN_DIALOG = """
 		Rectangle {
@@ -5808,7 +5847,7 @@ LOGIN_DIALOG = """
 			readonly property var service: root.scServices.find(s => s.id === root.scLogin)
 			readonly property bool servers: root.scLogin === "webdav" || root.scLogin === "nas"
 			readonly property var serverList: root.scServersOf(root.scLogin)
-@LOGIN_QUIT@			MouseArea { anchors.fill: parent }
+			MouseArea { anchors.fill: parent }
 			Rectangle {
 				anchors.centerIn: parent
 				width: 1040; height: 660
@@ -8519,13 +8558,13 @@ def edits(dev: bool):
         ROOT + "Items/MessageBoxes/UnsupportedStorageDeviceDetectedMessageBox.qml": [(
             "function onUnsupportedStorageDeviceDetected(name) {\n", "function onUnsupportedStorageDeviceDetected(name) {\n			return\n")],
         ROOT + "EmbeddedMain.qml": [
-            # Engine's own text input (Items/MessageBoxes/TextInputDialog.qml) for WebDAV and
-            # NAS servers typed on the deck; qualified, so no stock name changes meaning.
-            *([('import "Items/Base"\n', 'import "Items/Base"\nimport "Items/MessageBoxes" as ScMsg\n'),
+            # Stock EmbeddedTextInputLayout inside a Popup for WebDAV and NAS servers typed on the
+            # deck; qualified, so no stock name changes meaning.
+            *([('import "Items/Base"\n', 'import "Items/Base"\nimport "Items/EmbeddedTextInput" as ScInput\n'),
                ('    readonly property bool messageBoxOpen: root.foreground.children.some(child => child instanceof DialogBase)\n',
                 '    readonly property bool messageBoxOpen: root.foreground.children.some(child => child instanceof DialogBase) || root.scLogin !== "" || root.scServerTyping || root.scServerDlgs.length > 0\n'),
                ('    function destroyForegroundChildren() {\n',
-                '    function destroyForegroundChildren() {\n        const dlgs = root.scServerDlgs.slice()\n        root.scServerDlgs = []\n        for (let j = 0; j < dlgs.length; ++j) { const d = dlgs[j]; if (d && d.destroy) d.destroy() }\n        root.scServerStop()\n        root.scLogin = ""\n        root.scLoginOpen = ""\n'),
+                '    function destroyForegroundChildren() {\n        const dlgs = root.scServerDlgs.slice()\n        for (let j = 0; j < dlgs.length; ++j) { const d = dlgs[j]; if (d) { if (d.close) d.close(); if (d.destroy) d.destroy() } }\n        root.scServerStop()\n        root.scLogin = ""\n        root.scLoginOpen = ""\n'),
                ('    readonly property bool foregroundHasChildren: foreground.children.length > 0\n',
                 '    readonly property bool foregroundHasChildren: foreground.children.length > 0 || root.scLogin !== "" || root.scServerTyping || root.scServerDlgs.length > 0\n')] if v53() else []),
             # The actual main view has finished loading and the stock splash has
@@ -8536,7 +8575,7 @@ def edits(dev: bool):
             # the same way about the same centre, or its top bar sits above the screen.
             ("		Overlay.overlay.anchors.fill = uiContainer\n",
              "		Overlay.overlay.anchors.fill = uiContainer\n		Overlay.overlay.scale = Qt.binding(function() { return uiContainer.scale })\n"),
-            ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG.replace("@LOGIN_LAYER@", LOGIN_LAYER_530 if v53() else LOGIN_LAYER_504).replace("@LOGIN_QUIT@", LOGIN_QUIT_530 if v53() else "") + USB_PREPARING_BANNER),
+            ("		id: uiContainer\n", "		id: uiContainer\n" + (LOGIN_POPUP_OPEN_530 + LOGIN_DIALOG.replace("@LOGIN_LAYER@", LOGIN_LAYER_530) + LOGIN_POPUP_CLOSE_530 if v53() else LOGIN_DIALOG.replace("@LOGIN_LAYER@", LOGIN_LAYER_504)) + USB_PREPARING_BANNER),
             # UI Scale: QT_SCALE_FACTOR leaves a black band under EGLFS (nativeScreenSize and
             # defaultScreenSize drift apart), so scale uiContainer itself: it is centred in its
             # parent and scales about its centre, so width*scale stays the screen size and
