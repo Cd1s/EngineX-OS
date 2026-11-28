@@ -4874,7 +4874,7 @@ SERVICES_MAIN = """
 	property var scWebdav: []
 	property var scNasServers: []
 	property bool scServerTyping: false
-	property var scServerDlg: null
+	property var scServerDlgs: []
 	property string scServerError: ""
 	property string scServerKind: "webdav"
 	property var scServerDraft: ({})
@@ -4933,7 +4933,7 @@ SERVICES_MAIN = """
 		scServerTyping = true
 		const dlg = root.openDialogComponent(scServerInput)
 		if (dlg) {
-			scServerDlg = dlg
+			if (scServerDlgs.indexOf(dlg) < 0) scServerDlgs = scServerDlgs.concat([dlg])
 			if (typeof Overlay !== "undefined" && Overlay.overlay) {
 				if (dlg.parent !== Overlay.overlay) dlg.parent = Overlay.overlay
 				if (dlg.z !== ZValues.Modal) dlg.z = ZValues.Modal
@@ -4951,7 +4951,7 @@ SERVICES_MAIN = """
 				if (root.isQuitting || !scServerTyping) { scServerStop(); return }
 				const dlg = root.openDialogComponent(scServerInput)
 				if (dlg) {
-					scServerDlg = dlg
+					if (scServerDlgs.indexOf(dlg) < 0) scServerDlgs = scServerDlgs.concat([dlg])
 					if (typeof Overlay !== "undefined" && Overlay.overlay) {
 						if (dlg.parent !== Overlay.overlay) dlg.parent = Overlay.overlay
 						if (dlg.z !== ZValues.Modal) dlg.z = ZValues.Modal
@@ -4964,7 +4964,7 @@ SERVICES_MAIN = """
 		scServerTyping = false
 		scServerSave(scServerKind, {action: d.id ? "edit" : "add", id: d.id, name: d.name, url: d.url, username: d.username, password: d.password})
 	}
-	function scServerStop() { scServerTyping = false; scServerDlg = null }
+	function scServerStop() { scServerTyping = false }
 	function scServerSave(kind, change) {
 		const x = new XMLHttpRequest()
 		x.open("POST", "http://127.0.0.1:8080/v1/enginex/servers/" + kind)
@@ -5771,11 +5771,11 @@ SERVER_INPUT = """	readonly property Component scServerInput: ScMsg.TextInputDia
 		onDone: text => { scDone = true; root.scServerNext(text) }
 		Component.onCompleted: {
 			if (root.isQuitting) { close(); return }
-			root.scServerDlg = this
+			if (root.scServerDlgs.indexOf(this) < 0) root.scServerDlgs = root.scServerDlgs.concat([this])
 			root.scServerField(field)
 		}
 		Component.onDestruction: {
-			if (root.scServerDlg === this) root.scServerDlg = null
+			root.scServerDlgs = root.scServerDlgs.filter(d => d !== this)
 			if (!scDone) root.scServerStop()
 		}
 	}
@@ -5788,15 +5788,7 @@ LOGIN_LAYER_530 = """			parent: Overlay.overlay ? Overlay.overlay : uiContainer
 LOGIN_LAYER_504 = """			anchors.fill: parent
 			z: 1000000"""
 
-LOGIN_DIALOG = """
-		Rectangle {
-@LOGIN_LAYER@
-			visible: root.scLogin !== "" && !root.scServerTyping // both share Overlay.overlay (ZValues.Modal); hide the panel while the text input is open
-			color: "#e0000000"
-			readonly property var service: root.scServices.find(s => s.id === root.scLogin)
-			readonly property bool servers: root.scLogin === "webdav" || root.scLogin === "nas"
-			readonly property var serverList: root.scServersOf(root.scLogin)
-			Connections {
+LOGIN_QUIT_530 = """			Connections {
 				target: root
 				function onIsQuittingChanged() {
 					if (root.isQuitting) {
@@ -5806,7 +5798,17 @@ LOGIN_DIALOG = """
 					}
 				}
 			}
-			MouseArea { anchors.fill: parent }
+"""
+
+LOGIN_DIALOG = """
+		Rectangle {
+@LOGIN_LAYER@
+			visible: root.scLogin !== "" && !root.scServerTyping // the stock text input of Engine opens below this panel
+			color: "#e0000000"
+			readonly property var service: root.scServices.find(s => s.id === root.scLogin)
+			readonly property bool servers: root.scLogin === "webdav" || root.scLogin === "nas"
+			readonly property var serverList: root.scServersOf(root.scLogin)
+@LOGIN_QUIT@			MouseArea { anchors.fill: parent }
 			Rectangle {
 				anchors.centerIn: parent
 				width: 1040; height: 660
@@ -8521,11 +8523,11 @@ def edits(dev: bool):
             # NAS servers typed on the deck; qualified, so no stock name changes meaning.
             *([('import "Items/Base"\n', 'import "Items/Base"\nimport "Items/MessageBoxes" as ScMsg\n'),
                ('    readonly property bool messageBoxOpen: root.foreground.children.some(child => child instanceof DialogBase)\n',
-                '    readonly property bool messageBoxOpen: root.foreground.children.some(child => child instanceof DialogBase) || root.scLogin !== "" || root.scServerTyping\n'),
+                '    readonly property bool messageBoxOpen: root.foreground.children.some(child => child instanceof DialogBase) || root.scLogin !== "" || root.scServerTyping || root.scServerDlgs.length > 0\n'),
                ('    function destroyForegroundChildren() {\n',
-                '    function destroyForegroundChildren() {\n        if (root.scServerDlg) { const d = root.scServerDlg; root.scServerDlg = null; d.destroy() }\n        root.scServerStop()\n        root.scLogin = ""\n        root.scLoginOpen = ""\n'),
+                '    function destroyForegroundChildren() {\n        const dlgs = root.scServerDlgs.slice()\n        root.scServerDlgs = []\n        for (let j = 0; j < dlgs.length; ++j) { const d = dlgs[j]; if (d && d.destroy) d.destroy() }\n        root.scServerStop()\n        root.scLogin = ""\n        root.scLoginOpen = ""\n'),
                ('    readonly property bool foregroundHasChildren: foreground.children.length > 0\n',
-                '    readonly property bool foregroundHasChildren: foreground.children.length > 0 || root.scLogin !== "" || root.scServerTyping\n')] if v53() else []),
+                '    readonly property bool foregroundHasChildren: foreground.children.length > 0 || root.scLogin !== "" || root.scServerTyping || root.scServerDlgs.length > 0\n')] if v53() else []),
             # The actual main view has finished loading and the stock splash has
             # disappeared. Do not equate resource registration with UI readiness.
             ('objectName: "SplashScreenLoader"', 'objectName: "SplashScreenLoader"' + BOOT_READY),
@@ -8534,7 +8536,7 @@ def edits(dev: bool):
             # the same way about the same centre, or its top bar sits above the screen.
             ("		Overlay.overlay.anchors.fill = uiContainer\n",
              "		Overlay.overlay.anchors.fill = uiContainer\n		Overlay.overlay.scale = Qt.binding(function() { return uiContainer.scale })\n"),
-            ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG.replace("@LOGIN_LAYER@", LOGIN_LAYER_530 if v53() else LOGIN_LAYER_504) + USB_PREPARING_BANNER),
+            ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG.replace("@LOGIN_LAYER@", LOGIN_LAYER_530 if v53() else LOGIN_LAYER_504).replace("@LOGIN_QUIT@", LOGIN_QUIT_530 if v53() else "") + USB_PREPARING_BANNER),
             # UI Scale: QT_SCALE_FACTOR leaves a black band under EGLFS (nativeScreenSize and
             # defaultScreenSize drift apart), so scale uiContainer itself: it is centred in its
             # parent and scales about its centre, so width*scale stays the screen size and

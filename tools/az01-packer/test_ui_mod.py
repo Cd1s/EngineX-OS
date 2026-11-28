@@ -16444,14 +16444,18 @@ assert.strictEqual(scServerTyping, false);
         self.assertIn("z: ZValues.Modal", bp.SERVER_INPUT)
         self.assertIn("MouseArea { anchors.fill: parent; z: -1 }", bp.SERVER_INPUT)
         self.assertIn("if (root.isQuitting)", bp.SERVER_INPUT)
-        self.assertIn("root.scServerDlg = this", bp.SERVER_INPUT)
-        self.assertIn('root.scLogin !== "" || root.scServerTyping', joined_530)
-        self.assertIn('readonly property bool foregroundHasChildren: foreground.children.length > 0 || root.scLogin !== "" || root.scServerTyping', joined_530)
-        self.assertIn("if (root.scServerDlg)", joined_530)
+        self.assertIn("root.scServerDlgs.indexOf(this)", bp.SERVER_INPUT)
+        self.assertIn("root.scServerDlgs.filter(d => d !== this)", bp.SERVER_INPUT)
+        self.assertIn('root.scLogin !== "" || root.scServerTyping || root.scServerDlgs.length > 0', joined_530)
+        self.assertIn('readonly property bool foregroundHasChildren: foreground.children.length > 0 || root.scLogin !== "" || root.scServerTyping || root.scServerDlgs.length > 0', joined_530)
+        self.assertIn("const dlgs = root.scServerDlgs.slice()", joined_530)
+        self.assertIn("onIsQuittingChanged", joined_530)
 
         joined_504 = "\n".join(new for _old, new in edits_504)
         self.assertIn("readonly property Component scServerInput: null", joined_504)
         self.assertNotIn("z: ZValues.Modal", joined_504)
+        self.assertNotIn("onIsQuittingChanged", joined_504)
+        self.assertIn("z: 1000000", joined_504)
 
         stock_em = LAB / "5.3.0/qrc/Skins/Embedded/EmbeddedMain.qml"
         if stock_em.is_file():
@@ -16463,9 +16467,10 @@ assert.strictEqual(scServerTyping, false);
                     patched = bp.patch(patched, old, new, str(stock_em))
             finally:
                 bp.ROOT = old_root
-            self.assertIn('readonly property bool messageBoxOpen: root.foreground.children.some(child => child instanceof DialogBase) || root.scLogin !== "" || root.scServerTyping', patched)
-            self.assertIn('readonly property bool foregroundHasChildren: foreground.children.length > 0 || root.scLogin !== "" || root.scServerTyping', patched)
-            self.assertIn("if (root.scServerDlg)", patched)
+            self.assertIn('readonly property bool messageBoxOpen: root.foreground.children.some(child => child instanceof DialogBase) || root.scLogin !== "" || root.scServerTyping || root.scServerDlgs.length > 0', patched)
+            self.assertIn('readonly property bool foregroundHasChildren: foreground.children.length > 0 || root.scLogin !== "" || root.scServerTyping || root.scServerDlgs.length > 0', patched)
+            self.assertIn("const dlgs = root.scServerDlgs.slice()", patched)
+            self.assertIn("onIsQuittingChanged", patched)
             self.assertIn("parent: Overlay.overlay ? Overlay.overlay : uiContainer", patched)
             self.assertIn("parent: Overlay.overlay ? Overlay.overlay : root.foreground", patched)
 
@@ -16495,7 +16500,7 @@ Object.assign(globalThis, {
     scT(s) { return s; },
     scWebdav: [{id: 'w1', name: 'Studio', url: 'https://dav.example/music', username: 'dj', hasPassword: true}],
     scNasServers: [{id: 'n1', name: 'NAS', url: 'smb://nas.example/music', username: 'dj', hasPassword: true}],
-    scServerTyping: false, scServerDlg: null, isQuitting: false, scServerError: '', scServerKind: 'webdav', scServerDraft: {}, scServerStep: 0,
+    scServerTyping: false, scServerDlgs: [], isQuitting: false, scServerError: '', scServerKind: 'webdav', scServerDraft: {}, scServerStep: 0,
     scServerSteps: ['url', 'username', 'password', 'name'], scServerInput: {},
     scCall() {},
     openDialogComponent() {
@@ -16515,7 +16520,7 @@ assert.strictEqual(dialogs[0].parent, overlay);
 assert.strictEqual(dialogs[0].z, ZValues.Modal);
 assert.ok(dialogs[0].z > ZValues.ControlCenter && dialogs[0].z < ZValues.Keyboard);
 assert.strictEqual(dialogs[0].field.focused, true);
-assert.strictEqual(scServerDlg, dialogs[0]);
+assert.ok(scServerDlgs.includes(dialogs[0]));
 nextParent = overlay;
 scServerNext('https://dav.example/music');
 scServerNext('dj');
@@ -16552,7 +16557,7 @@ assert.strictEqual(dialogs[dialogs.length - 1].parent, overlay);
 assert.strictEqual(dialogs[dialogs.length - 1].z, ZValues.Modal);
 scServerStop();
 assert.strictEqual(scServerTyping, false);
-assert.strictEqual(scServerDlg, null);
+assert.ok(scServerDlgs.includes(dialogs[dialogs.length - 1]));
 
 // Queued Qt.callLater Next never reopens a dialog after shutdown starts (WebDAV & NAS).
 defer = true;
@@ -16566,7 +16571,130 @@ for (const kind of ['webdav', 'nas']) {
     queued.shift()();
     assert.strictEqual(dialogs.length, countAfterOpen);
     assert.strictEqual(scServerTyping, false);
-    assert.strictEqual(scServerDlg, null);
+}
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the panel's functions")
+    def test_server_dialog_teardown_during_next_transition(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits_530 = bp.edits(False)["Skins/Embedded/EmbeddedMain.qml"]
+        finally:
+            bp.ROOT = old_root
+        dfc_patch = next((new for old, new in edits_530 if old == "    function destroyForegroundChildren() {\n"), None)
+        self.assertIsNotNone(dfc_patch)
+
+        main = bp.SERVICES_MAIN
+        fns = "\n".join(self.extract_fn(main, n) for n in ("scServerEdit", "scServerNext", "scServerStop"))
+        script = r"""
+const assert = require('assert');
+const overlay = {name: 'overlay'};
+const foreground = {children: []};
+globalThis.Overlay = {overlay};
+globalThis.ZValues = {ControlCenter: 3, Modal: 4, Keyboard: 6};
+const queued = [];
+globalThis.Qt = {callLater(f) { queued.push(f); }};
+globalThis.root = globalThis;
+Object.assign(globalThis, {
+    scLogin: 'webdav',
+    scLoginOpen: 'webdav',
+    scServerTyping: false,
+    scServerDlg: null,
+    scServerDlgs: [],
+    isQuitting: false,
+    scServerError: '',
+    scServerKind: 'webdav',
+    scServerDraft: {},
+    scServerStep: 0,
+    scServerSteps: ['url', 'username', 'password', 'name'],
+    scServerInput: {},
+    foreground,
+    openDialogComponent() {
+        const d = {
+            parent: overlay,
+            z: 0,
+            scDone: false,
+            closing: false,
+            destroyed: false,
+            field: {focused: false, forceActiveFocus() { this.focused = true; }},
+            dismiss() { this.closing = true; },
+            destroy() {
+                if (this.destroyed) return;
+                this.destroyed = true;
+                if (scServerDlg === this) scServerDlg = null;
+                if (Array.isArray(scServerDlgs)) scServerDlgs = scServerDlgs.filter(x => x !== this);
+                if (!this.scDone) scServerStop();
+            },
+        };
+        if (scServerDlg !== undefined) scServerDlg = d;
+        if (Array.isArray(scServerDlgs) && scServerDlgs.indexOf(d) < 0) scServerDlgs = scServerDlgs.concat([d]);
+        return d;
+    },
+});
+""" + fns + "\n" + dfc_patch + """        for (var i = 0; i < foreground.children.length; ++i) foreground.children[i].destroy()
+    }
+""" + r"""
+for (const kind of ['webdav', 'nas']) {
+    // Interleaving: step 0 closes with 150ms delayedClose while Qt.callLater opens step 1; teardown must destroy both.
+    scLogin = kind; scLoginOpen = kind; isQuitting = false; queued.length = 0;
+    let stockDestroyed = false;
+    foreground.children = [{destroy() { stockDestroyed = true; }}];
+    scServerEdit(kind, null);
+    const d0 = scServerDlgs[scServerDlgs.length - 1];
+    d0.scDone = true;
+    scServerNext(kind === 'nas' ? 'smb://x' : 'https://x');
+    d0.dismiss();
+    assert.strictEqual(queued.length, 1);
+    assert.strictEqual(d0.destroyed, false);
+    queued.shift()();
+    const d1 = scServerDlgs[scServerDlgs.length - 1];
+    assert.notStrictEqual(d1, d0);
+    assert.strictEqual(d0.destroyed, false);
+    assert.strictEqual(d1.destroyed, false);
+    destroyForegroundChildren();
+    assert.strictEqual(stockDestroyed, true);
+    assert.strictEqual(d0.destroyed, true);
+    assert.strictEqual(d1.destroyed, true);
+    assert.strictEqual(scServerDlgs.length, 0);
+    assert.strictEqual(scServerTyping, false);
+    assert.strictEqual(scLogin, '');
+    assert.strictEqual(scLoginOpen, '');
+
+    // Normal timer expiration on d0 only removes d0, keeping d1 tracked until teardown.
+    scLogin = kind; scLoginOpen = kind; queued.length = 0; foreground.children = [];
+    scServerEdit(kind, null);
+    const step0 = scServerDlgs[0];
+    step0.scDone = true;
+    scServerNext(kind === 'nas' ? 'smb://x' : 'https://x');
+    step0.dismiss();
+    queued.shift()();
+    const step1 = scServerDlgs[scServerDlgs.length - 1];
+    step0.destroy();
+    assert.strictEqual(scServerDlgs.length, 1);
+    assert.strictEqual(scServerDlgs[0], step1);
+    destroyForegroundChildren();
+    assert.strictEqual(step1.destroyed, true);
+    assert.strictEqual(scServerDlgs.length, 0);
+
+    // Interleaving: teardown fires after Next dismissed step 0 while Qt.callLater is still queued.
+    scLogin = kind; scLoginOpen = kind; queued.length = 0; foreground.children = [];
+    scServerEdit(kind, null);
+    const q0 = scServerDlgs[scServerDlgs.length - 1];
+    q0.scDone = true;
+    scServerNext(kind === 'nas' ? 'smb://x' : 'https://x');
+    q0.dismiss();
+    assert.strictEqual(queued.length, 1);
+    destroyForegroundChildren();
+    assert.strictEqual(q0.destroyed, true);
+    assert.strictEqual(scServerDlgs.length, 0);
+    assert.strictEqual(scServerTyping, false);
+    const lenBeforeDrain = scServerDlgs.length;
+    queued.shift()();
+    assert.strictEqual(scServerDlgs.length, lenBeforeDrain);
+    assert.strictEqual(scServerTyping, false);
 }
 """
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
