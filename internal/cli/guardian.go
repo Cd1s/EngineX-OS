@@ -14,6 +14,7 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/pkg/dbhealer"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	"github.com/Cd1s/EngineX-OS/pkg/webui"
 )
 
@@ -51,6 +52,16 @@ func guardianRemaining(start time.Time, deadline time.Duration) time.Duration {
 		return 0
 	}
 	return time.Until(start.Add(deadline))
+}
+
+// guardianLockWait is how long a run waits for a volume's lock: two seconds, or what is left of
+// its --timeout when that is less.
+func guardianLockWait(start time.Time, deadline time.Duration) time.Duration {
+	wait := 2 * time.Second
+	if deadline > 0 {
+		wait = max(0, min(wait, guardianRemaining(start, deadline)))
+	}
+	return wait
 }
 
 // Guardian heals or inspects Engine OS 5.0.4 libraries once and prints JSON.
@@ -142,11 +153,21 @@ func Guardian(args []string, out, errOut io.Writer) int {
 		var r dbhealer.Report
 		var mp3Report *enginedb.MP3GridReport
 		var err error
+		// Every mode but --status changes the library. The volume's lock is taken once for the
+		// mount and handed to each step, so no other EngineX program writes between them. Busy
+		// after the wait: nothing is touched, the run fails and the next mount tries again.
+		hold, release := context.Background(), func() {}
+		var lockErr error
+		if !*status {
+			if hold, release, lockErr = rbstate.HoldVolume(hold, m, guardianLockWait(commandStart, *deadline)); lockErr != nil {
+				hold, release = context.Background(), func() {}
+			}
+		}
 		runMP3Fix := func(budget time.Duration, mountOnly bool) {
 			if budget < 0 {
 				return
 			}
-			mr, ferr := enginedb.FixMP3Grids(context.Background(), m, enginedb.MP3GridOptions{
+			mr, ferr := enginedb.FixMP3Grids(hold, m, enginedb.MP3GridOptions{
 				Budget: mp3GridBudget(budget, mountOnly),
 			})
 			mp3Report = &mr
@@ -158,18 +179,20 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			}
 		}
 		switch {
+		case lockErr != nil:
+			r.Mount, r.CheckedAt, err = m, time.Now().UTC(), fmt.Errorf("lock volume %s: %w", m, lockErr)
 		case *status: // read-only, so it wins over --reserve
 			r, err = dbhealer.InspectMount(m)
 		case *reserve:
 			r.Mount, r.CheckedAt = m, time.Now().UTC()
-			r.ReserveFixed, err = dbhealer.NormalizeMountReserve(m)
+			r.ReserveFixed, err = dbhealer.NormalizeMountReserveContext(hold, m)
 			r.Healthy = err == nil
 			if err == nil && *fixGrids {
 				runMP3Fix(guardianRemaining(commandStart, *deadline), false)
 			}
 		case *fixGrids && !*dataOnly:
 			r.Mount, r.CheckedAt = m, time.Now().UTC()
-			mr, ferr := enginedb.FixMP3Grids(context.Background(), m, enginedb.MP3GridOptions{
+			mr, ferr := enginedb.FixMP3Grids(hold, m, enginedb.MP3GridOptions{
 				Budget: mp3GridBudget(*deadline, false),
 			})
 			mp3Report = &mr
@@ -183,7 +206,7 @@ func Guardian(args []string, out, errOut io.Writer) int {
 				r.Mount, r.CheckedAt, err = m, time.Now().UTC(), enginedb.ErrLibraryInUse
 				break
 			}
-			if n, perr := enginedb.ApplyPending(context.Background(), m); perr != nil {
+			if n, perr := enginedb.ApplyPending(hold, m); perr != nil {
 				if errors.Is(perr, enginedb.ErrLibraryInUse) {
 					r.Mount, r.CheckedAt, err = m, time.Now().UTC(), perr
 					break
@@ -192,14 +215,14 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			} else if n > 0 {
 				fmt.Fprintf(errOut, "engine-guardian: applied %d queued library edits\n", n)
 			}
-			mountCtx := context.Background()
+			mountCtx := hold
 			cancelMount := func() {}
 			if *deadline > 0 {
 				remaining := guardianRemaining(commandStart, *deadline)
 				if remaining < 0 {
 					remaining = 0
 				}
-				mountCtx, cancelMount = context.WithTimeout(context.Background(), remaining)
+				mountCtx, cancelMount = context.WithTimeout(hold, remaining)
 			}
 			budgetExpired := false
 			opts := dbhealer.MountOptions{
@@ -211,7 +234,7 @@ func Guardian(args []string, out, errOut io.Writer) int {
 				r, err = dbhealer.HealMountWithOptions(mountCtx, m, opts)
 				budgetExpired = mountCtx.Err() != nil
 			} else {
-				r, err = dbhealer.HealMountWithOptions(context.Background(), m, opts)
+				r, err = dbhealer.HealMountWithOptions(hold, m, opts)
 			}
 			cancelMount()
 			if err == nil && !budgetExpired {
@@ -232,6 +255,7 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			res.Error, res.Healthy, code = err.Error(), false, 1
 		}
 		results = append(results, res)
+		release()
 	}
 	if err := json.NewEncoder(out).Encode(results); err != nil {
 		fmt.Fprintln(errOut, err)

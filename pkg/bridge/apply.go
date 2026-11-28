@@ -604,20 +604,30 @@ func (w *window) build() error {
 	if !w.next && enginedb.OpenElsewhere(w.file()) != 0 {
 		return enginedb.ErrLibraryInUse
 	}
-	if err = cleanSQLiteSidecars(w.file()); err != nil {
-		return err
+	// The copy to the stick takes seconds. What it may replace is decided after it, under an
+	// exclusive hold on the library that goes, and the hold lasts to the snapshot's promotion.
+	var hold *enginedb.LibraryHold
+	defer func() { hold.Release() }()
+	last := func() (err error) {
+		if hold, err = w.holdForInstall(); err != nil {
+			return err
+		}
+		return cleanSQLiteSidecars(w.file())
 	}
 	const installFlushBytes = 16 << 20
 	install := func() error {
 		src := filepath.Join(tmp, "m.db")
 		if w.rest != nil {
-			return rbstate.InstallFilePaced(src, w.file(), playingReadChunk, installFlushBytes, func(_ int, took time.Duration) error {
+			return rbstate.InstallFilePacedChecked(src, w.file(), playingReadChunk, installFlushBytes, func(_ int, took time.Duration) error {
 				return w.rest(took)
-			})
+			}, last)
 		}
-		return rbstate.InstallFile(src, w.file())
+		return rbstate.InstallFileChecked(src, w.file(), last)
 	}
-	if err = w.commit(commitID, install); err != nil {
+	err = w.commit(commitID, install)
+	hold.Release()
+	hold = nil
+	if err != nil {
 		return err
 	}
 	w.st.done("install", "library copied to the stick")
@@ -634,6 +644,43 @@ func (w *window) build() error {
 	}
 	log.Printf("rb-bridge: first import of %d tracks published from the export; grids and waveforms follow", len(ids))
 	return nil
+}
+
+// holdForInstall takes the hold on the library a first library replaces, and checks under it
+// that the replacement is still right: nobody else has the file open, and it is still without a
+// track and a list (Engine's skeleton, or a library emptied on the deck). A stick without m.db
+// has nothing to hold; there the volume's lock alone orders our programs. The next library is
+// the job's own file and needs neither.
+func (w *window) holdForInstall() (*enginedb.LibraryHold, error) {
+	if w.next {
+		return nil, nil
+	}
+	live := w.file()
+	if enginedb.OpenElsewhere(live) != 0 {
+		return nil, enginedb.ErrLibraryInUse
+	}
+	if err := checkSQLiteSidecars(live); err != nil {
+		return nil, err // work in a sidecar: not ours to recover by opening the file
+	}
+	hold, err := enginedb.HoldLibrary(w.ctx, live)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	empty, err := hold.Empty(w.ctx)
+	if err == nil && !empty {
+		err = fmt.Errorf("%w: it has tracks or lists now", enginedb.ErrLibraryChanged)
+	}
+	if err == nil && enginedb.OpenElsewhere(live) != 0 {
+		err = enginedb.ErrLibraryInUse
+	}
+	if err != nil {
+		hold.Release()
+		return nil, err
+	}
+	return hold, nil
 }
 
 // putLists writes the view's lists at idx and notes them. Entries are the tracks that have a row;

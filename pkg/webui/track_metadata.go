@@ -80,9 +80,17 @@ func (s *Server) handleTrackMetadata(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, errors.New("track is not in the Engine library"))
 		return
 	}
+	// The edit is written, or queued, under the volume's lock. Busy: nothing is written and the
+	// caller is told so (#336 Go review R13).
+	ctx, release, err := enginedb.HoldForEdit(r.Context(), driveDir)
+	if err != nil {
+		fail(w, http.StatusConflict, err)
+		return
+	}
+	defer release()
 	pending := false
 	if enginedb.LibraryInUse(driveDir) {
-		err := enginedb.QueuePending(driveDir, func(p *enginedb.Pending) {
+		err := enginedb.QueuePending(ctx, driveDir, func(p *enginedb.Pending) {
 			p.TrackMetadata = append(p.TrackMetadata, enginedb.PendingTrackMetadata{
 				TrackID: trackID,
 				Genre:   req.Genre,
@@ -96,13 +104,13 @@ func (s *Server) handleTrackMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 		pending = true
 	} else {
-		db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: dbPath}).String()+"?_pragma=busy_timeout(1000)")
+		db, err := enginedb.OpenLibraryRW(ctx, driveDir, "_pragma=busy_timeout(1000)")
 		if err != nil {
 			fail(w, http.StatusConflict, err)
 			return
 		}
 		db.SetMaxOpenConns(1)
-		result, execErr := db.ExecContext(r.Context(), `UPDATE Track SET genre=?, comment=?, label=? WHERE id=?`, req.Genre, req.Comment, req.Label, trackID)
+		result, execErr := db.ExecContext(ctx, `UPDATE Track SET genre=?, comment=?, label=? WHERE id=?`, req.Genre, req.Comment, req.Label, trackID)
 		_ = db.Close()
 		if execErr != nil {
 			fail(w, http.StatusConflict, execErr)

@@ -221,7 +221,7 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 	// The volume lock first: every bridge window and job section holds it from its last look
 	// at the library through its rename and snapshot promotion, so neither side can publish
 	// over what the other has just validated. Everything below is checked again under it.
-	unlockVolume, err := lockLibraryVolume(path)
+	unlockVolume, err := lockLibraryVolume(ctx, path)
 	if err != nil {
 		return false, fmt.Errorf("lock volume of %s: %w", path, err)
 	}
@@ -385,15 +385,16 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 
 // lockLibraryVolume takes the lock of the volume whose library path belongs to, the one
 // rbstate.LockVolume gives the bridge: path is a file of <mount>/Engine Library/Database2.
-// A file anywhere else is no volume's library; no bridge publishes there and the directory
-// lock alone applies.
-func lockLibraryVolume(path string) (unlock func(), err error) {
+// A ctx that holds it already (the mount's heal) is reused. A file anywhere else is no
+// volume's library; no bridge publishes there and the directory lock alone applies.
+func lockLibraryVolume(ctx context.Context, path string) (unlock func(), err error) {
 	dir := filepath.Dir(path)
 	lib := filepath.Dir(dir)
 	if !strings.EqualFold(filepath.Base(dir), "Database2") || !strings.EqualFold(filepath.Base(lib), "Engine Library") {
 		return func() {}, nil
 	}
-	return rbstate.LockVolume(filepath.Dir(lib), 0)
+	_, unlock, err = rbstate.HoldVolume(ctx, filepath.Dir(lib), 0)
+	return unlock, err
 }
 
 func ensureSameLiveFile(path string, origInfo os.FileInfo) error {

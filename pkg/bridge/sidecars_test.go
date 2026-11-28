@@ -10,8 +10,8 @@ import (
 
 // cleanSQLiteSidecars before a replacement (the swap of the next library, the first library's
 // install): it removes the stale sidecars it checked and nothing else (#336 Go review R11,
-// finding 2, as a class). A sidecar made or written after the check is the work of whoever
-// opened the database meanwhile.
+// finding 2, as a class). A sidecar made, written or taken away after the check is the work of
+// whoever opened the database meanwhile, and stops the replacement (review R12, finding 1).
 func TestCleanSQLiteSidecarsRemovesOnlyWhatItChecked(t *testing.T) {
 	defer func() { sidecarsChecked = nil }()
 	newDB := func(t *testing.T) string {
@@ -61,8 +61,10 @@ func TestCleanSQLiteSidecarsRemovesOnlyWhatItChecked(t *testing.T) {
 		if !ran {
 			t.Fatal("the check hook never ran")
 		}
-		if err != nil {
-			t.Errorf("cleanSQLiteSidecars: %v, want nil: it checked no sidecar and removes none", err)
+		// Review R12 (finding 1): keeping them is not enough. With nil the caller renamed its new
+		// file in under the other writer's -wal, and SQLite replayed that into it.
+		if err == nil {
+			t.Error("cleanSQLiteSidecars: nil, want an error: a sidecar that appears after the check stops the replacement")
 		}
 		for _, suffix := range []string{"-wal", "-journal"} {
 			if b, rerr := os.ReadFile(db + suffix); rerr != nil || !bytes.Equal(b, frames) {
@@ -71,6 +73,27 @@ func TestCleanSQLiteSidecarsRemovesOnlyWhatItChecked(t *testing.T) {
 		}
 		if _, serr := os.Lstat(db + "-shm"); serr != nil {
 			t.Errorf("m.db-shm was absent at the check and is gone: %v", serr)
+		}
+	})
+
+	t.Run("a checked sidecar that went away stops the replacement", func(t *testing.T) {
+		db := newDB(t)
+		write(t, db+"-journal", make([]byte, 512))
+		sidecarsChecked = func(p string) {
+			if p != db {
+				return
+			}
+			// SQLite deletes a stale journal when a writer commits; that writer may be in WAL mode.
+			if err := os.Remove(db + "-journal"); err != nil {
+				t.Fatal(err)
+			}
+			write(t, db+"-wal", frames)
+		}
+		if err := cleanSQLiteSidecars(db); err == nil {
+			t.Error("cleanSQLiteSidecars: nil, want an error: the -journal it checked is gone, so somebody wrote")
+		}
+		if b, rerr := os.ReadFile(db + "-wal"); rerr != nil || !bytes.Equal(b, frames) {
+			t.Errorf("m.db-wal made after the check is gone or changed: %v", rerr)
 		}
 	})
 

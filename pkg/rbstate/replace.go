@@ -70,19 +70,29 @@ func ReplaceFileCtx(ctx context.Context, dst string, data []byte) error {
 }
 
 // InstallFile copies src, a file on another file system, to dst as ReplaceFile writes.
-func InstallFile(src, dst string) error {
+func InstallFile(src, dst string) error { return InstallFileChecked(src, dst, nil) }
+
+// InstallFileChecked is InstallFile with a last check: it runs when the copy is whole and
+// synced, right before the rename over dst, and its error leaves dst as it is. The copy can
+// take seconds; what the rename may replace is decided after it, not before.
+func InstallFileChecked(src, dst string, last func() error) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	return writeAndRename(dst, func(f *os.File) error { _, err := io.Copy(f, in); return err })
+	return writeAndRenameLast(context.Background(), dst, func(f *os.File) error { _, err := io.Copy(f, in); return err }, last)
 }
 
 // InstallFilePaced copies src to dst in bounded chunks, calling pace before each chunk,
 // before every incremental flushBytes sync, and before the final sync/rename. If pace returns
 // an error (e.g. a deck became active), the temp file is closed and removed without fsync.
 func InstallFilePaced(src, dst string, chunk int, flushBytes int64, pace func(n int, took time.Duration) error) error {
+	return InstallFilePacedChecked(src, dst, chunk, flushBytes, pace, nil)
+}
+
+// InstallFilePacedChecked is InstallFilePaced with the last check of InstallFileChecked.
+func InstallFilePacedChecked(src, dst string, chunk int, flushBytes int64, pace func(n int, took time.Duration) error, last func() error) error {
 	if pace != nil {
 		if err := pace(0, 0); err != nil {
 			return err
@@ -167,6 +177,11 @@ func InstallFilePaced(src, dst string, chunk int, flushBytes int64, pace func(n 
 	}
 	if err == nil {
 		cut("temp " + dst)
+		if last != nil {
+			err = last()
+		}
+	}
+	if err == nil {
 		err = RenameFile(tmp.Name(), dst)
 	}
 	if err != nil {
@@ -183,6 +198,10 @@ func writeAndRename(dst string, write func(*os.File) error) error {
 }
 
 func writeAndRenameCtx(ctx context.Context, dst string, write func(*os.File) error) error {
+	return writeAndRenameLast(ctx, dst, write, nil)
+}
+
+func writeAndRenameLast(ctx context.Context, dst string, write func(*os.File) error, last func() error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -209,6 +228,11 @@ func writeAndRenameCtx(ctx context.Context, dst string, write func(*os.File) err
 	}
 	if err == nil {
 		cut("temp " + dst)
+		if last != nil {
+			err = last()
+		}
+	}
+	if err == nil {
 		err = RenameFileCtx(ctx, tmp.Name(), dst)
 	}
 	if err != nil {

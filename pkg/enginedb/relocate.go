@@ -114,17 +114,23 @@ func Relocate(ctx context.Context, opts RelocateOptions) (RelocateResult, error)
 	if opts.DryRun || len(res.Moves) == 0 {
 		return res, nil
 	}
+	// The scan only read. The write, or the queue entry, is made under the volume's lock.
+	ctx, release, err := HoldForEdit(ctx, opts.Root)
+	if err != nil {
+		return res, err
+	}
+	defer release()
 	// Engine may have opened the drive while it was scanned.
 	if LibraryInUse(opts.Root) {
 		// No write while Engine has m.db open (BH-GC1-3).
-		if err = QueuePending(opts.Root, func(p *Pending) { p.Relocate = append(p.Relocate, res.Moves...) }); err != nil {
+		if err = QueuePending(ctx, opts.Root, func(p *Pending) { p.Relocate = append(p.Relocate, res.Moves...) }); err != nil {
 			return res, err
 		}
 		res.Queued = true
 		return res, nil
 	}
 	ro.Close()
-	if db, err = sql.Open("sqlite", u.String()+"?_pragma=busy_timeout(5000)"); err != nil {
+	if db, err = OpenLibraryRW(ctx, opts.Root, "_pragma=busy_timeout(5000)"); err != nil {
 		return res, err
 	}
 	defer db.Close()

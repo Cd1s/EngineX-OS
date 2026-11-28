@@ -528,6 +528,17 @@ func HealMountWithOptions(ctx context.Context, mount string, opts MountOptions) 
 	return healMountContext(ctx, mount, opts)
 }
 
+// HealLockWait is how long a heal waits for the volume's lock when its caller does not hold it.
+var HealLockWait = 2 * time.Second
+
+func healLockWait(ctx context.Context) time.Duration {
+	wait := HealLockWait
+	if deadline, ok := ctx.Deadline(); ok {
+		wait = max(0, min(wait, time.Until(deadline)))
+	}
+	return wait
+}
+
 func healMountContext(ctx context.Context, mount string, opts MountOptions) (Report, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -549,6 +560,16 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 	rw, err := writable(path)
 	if err != nil {
 		return r, err
+	}
+	if rw {
+		// Everything below writes the library in place or replaces it: under the volume's lock,
+		// as every writer of a volume's library (#336 Go review R13). A caller that holds it
+		// (engine-guardian takes it once for the mount) hands it down in ctx.
+		var release func()
+		if ctx, release, err = rbstate.HoldVolume(ctx, mount, healLockWait(ctx)); err != nil {
+			return r, fmt.Errorf("lock volume %s: %w", mount, err)
+		}
+		defer release()
 	}
 	if !enteredCanceled && errors.Is(ctx.Err(), context.Canceled) {
 		return r, ctx.Err()

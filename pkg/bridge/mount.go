@@ -301,6 +301,14 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	if len(files) == 0 || !writableLibrary(mount) {
 		return MountResult{Bypassed: true}, nil
 	}
+	// The volume's lock before the first look at the library, and to the end of the window: what
+	// is decided below is decided about a library no other EngineX program changes meanwhile.
+	// A window that does not get it has touched nothing and cleans nothing up (#336 review R13).
+	var unlock func()
+	if ctx, unlock, err = rbstate.HoldVolume(ctx, mount, lockWait); err != nil {
+		return res, err
+	}
+	defer unlock()
 	_, hadLibrary := os.Lstat(filepath.Join(mount, "Engine Library"))
 	dir, err := compat.SafeOutputDir(mount, databaseSubdir)
 	if err != nil {
@@ -308,6 +316,7 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 	}
 	if errors.Is(hadLibrary, os.ErrNotExist) {
 		// A first import that fails leaves no Engine Library: Engine then shows the export itself (#53).
+		// Deferred after the unlock, so it runs before it: inside the lock.
 		defer func() {
 			if _, e := os.Stat(filepath.Join(dir, "m.db")); err != nil && e != nil {
 				_ = rbstate.DropNext(dir)
@@ -316,11 +325,6 @@ func ConvertAtMount(ctx context.Context, mount string, o MountOptions) (res Moun
 			}
 		}()
 	}
-	unlock, err := rbstate.LockVolume(mount, lockWait)
-	if err != nil {
-		return res, err
-	}
-	defer unlock()
 	layout := ReadLayout(o.Settings)
 	stamp := rbstate.Stamp(layout, files, "")
 	swapped, swapDeadline := swapNext(ctx, mount, dir, st, o.OnDemand, stamp)

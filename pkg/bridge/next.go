@@ -224,8 +224,17 @@ func (n *nextBuild) build(drop, ready bool) error {
 		return err
 	}
 	live, next, swap := filepath.Join(n.dir, "m.db"), filepath.Join(n.dir, nextDB), filepath.Join(n.dir, rbstate.SwapName)
-	if err := rbstate.RemoveFile(swap); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err // not ready while it is written
+	// The next library belongs to a window while its swap snapshot is there, and to the job
+	// while it is not. The two changes of owner are made under the volume's lock: here the
+	// job takes it back (a window that is swapping it in finishes first), and offer gives a
+	// finished one to the windows. The build in between is the job's own and needs no lock.
+	if err := n.locked(func() error {
+		if err := rbstate.RemoveFile(swap); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err // not ready while it is written
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	start := time.Now()
 	var res MountResult
@@ -260,7 +269,16 @@ func (n *nextBuild) build(drop, ready bool) error {
 			return err
 		}
 		if snap = w.snap; enginedb.LibraryState(live) == state {
-			break
+			if !ready {
+				break
+			}
+			offered, err := n.offer(snap, state, live, swap)
+			if err != nil {
+				return err
+			}
+			if offered {
+				break
+			}
 		}
 		if pass == 3 {
 			return fmt.Errorf("the stick's library kept changing while the next one was made")
@@ -268,24 +286,57 @@ func (n *nextBuild) build(drop, ready bool) error {
 	}
 	log.Printf("rb-bridge: next library in %s: %d rows added, %d updated, %d removed, lists changed %v, %d staged tracks applied; pending: %d rows, %d tracks' data",
 		time.Since(start).Round(time.Millisecond), res.Added, res.Updated, res.Removed, res.PlaylistsChanged, res.Applied, snap.Pending.Rows, snap.Pending.Perf)
-	if !ready {
-		return nil
+	return nil
+}
+
+// locked runs step under the volume's lock. A ctx that holds it already (a test's) is reused.
+func (n *nextBuild) locked(step func() error) error {
+	_, release, err := rbstate.HoldVolume(n.ctx, n.mount, fillLockWait)
+	if err != nil {
+		return fmt.Errorf("volume lock: %w", err)
 	}
-	if n.isBusy() {
-		return errDeckBusy
-	}
-	snap.Base = state
-	if n.onDemand {
-		snap.Mode = rbstate.ModeOnDemand
-	} else {
-		snap.Mode = rbstate.ModeFull
-	}
-	if n.onDemand {
-		if err := rbstate.SaveBrowseIndexAsCtx(n.ctx, filepath.Join(n.dir, rbstate.BrowseSwapName), snap); err != nil {
+	t := time.Now()
+	defer func() {
+		release()
+		if nextLockHeld != nil {
+			nextLockHeld(time.Since(t))
+		}
+	}()
+	return step()
+}
+
+// nextLockHeld, in tests, is told how long each locked step of the build held the lock.
+var nextLockHeld func(time.Duration)
+
+// offer makes the finished next library ready for a window, under the volume's lock: its swap
+// snapshot is written only if the stick's library is still the one the build read. It reports
+// false when a window changed that library meanwhile; the build then goes round again.
+func (n *nextBuild) offer(snap *rbstate.Snapshot, state, live, swap string) (offered bool, err error) {
+	err = n.locked(func() error {
+		if n.isBusy() {
+			return errDeckBusy
+		}
+		if enginedb.LibraryState(live) != state {
+			return nil
+		}
+		snap.Base = state
+		if n.onDemand {
+			snap.Mode = rbstate.ModeOnDemand
+		} else {
+			snap.Mode = rbstate.ModeFull
+		}
+		if n.onDemand {
+			if err := rbstate.SaveBrowseIndexAsCtx(n.ctx, filepath.Join(n.dir, rbstate.BrowseSwapName), snap); err != nil {
+				return err
+			}
+		}
+		if err := snap.SaveAsCtx(n.ctx, swap); err != nil {
 			return err
 		}
-	}
-	return snap.SaveAsCtx(n.ctx, swap)
+		offered = true
+		return nil
+	})
+	return offered, err
 }
 
 // mirror makes the next library from the stick's (every row of it, once) or takes the rows Engine
@@ -562,17 +613,36 @@ func swapNext(ctx context.Context, mount, dir string, st *steps, onDemand bool, 
 			return false, hit
 		}
 	}
+	// The exclusive hold on the library that goes, from here to the snapshot's promotion: no
+	// SQLite connection of any process reads or writes it meanwhile, or makes a sidecar of it.
+	// Every check is repeated under it; a library that is not the one the next one was made
+	// from (or carried over from, just above) stays, and the job takes its changes first.
+	hold, err := enginedb.HoldLibrary(ctx, live)
+	if err != nil {
+		log.Printf("rb-bridge: next library not swapped in, the stick's library is not free: %v", err)
+		return false, false
+	}
+	defer hold.Release()
+	if !hold.Is(h.Base) {
+		log.Printf("rb-bridge: the stick's library changed after the next one was made; the job takes the changes first")
+		return false, false
+	}
 	if enginedb.OpenElsewhere(live) != 0 {
 		return false, false
 	}
 	if err := cleanSQLiteSidecars(live); err != nil {
+		log.Printf("rb-bridge: next library not swapped in: %v", err)
 		return false, false
 	}
 	if err := cleanSQLiteSidecars(next); err != nil {
+		log.Printf("rb-bridge: next library not swapped in: %v", err)
 		return false, false
 	}
 	cut("before swap")
-	if err = rbstate.RenameFile(next, live); err != nil {
+	if err = hold.Same(); err == nil {
+		err = rbstate.RenameFile(next, live)
+	}
+	if err != nil {
 		log.Printf("rb-bridge: next library not swapped in: %v", err)
 		return false, false
 	}
@@ -604,12 +674,15 @@ type sidecar struct {
 func sqliteSidecars(db string) (seen []sidecar, err error) {
 	for _, suffix := range []string{"-journal", "-wal", "-shm"} {
 		path := db + suffix
-		st, err := os.Stat(path)
+		st, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
 			return nil, err
+		}
+		if !st.Mode().IsRegular() {
+			return nil, fmt.Errorf("sqlite sidecar is not a regular file: %s", path)
 		}
 		seen = append(seen, sidecar{path, st})
 		if suffix == "-shm" {
@@ -645,10 +718,12 @@ func sqliteSidecars(db string) (seen []sidecar, err error) {
 var sidecarsChecked func(db string)
 
 // cleanSQLiteSidecars verifies no sidecar holds uncheckpointed work, then removes the stale
-// sidecars it checked. Caller holds the volume lock and must confirm OpenElsewhere(db) == 0
-// first. A sidecar that was not there at the check, or is another file or changed since, is
-// the work of whoever opened the database meanwhile: it is never removed, and one that
-// changed stops the caller's replacement.
+// sidecars it checked, and ends with none left. The caller holds the volume's lock, and for a
+// live library the exclusive hold on it. Any change after the check is the work of whoever
+// opened the database meanwhile and stops the caller's replacement: a sidecar that appeared,
+// changed, became another file or went away (SQLite deletes a stale journal when it writes).
+// Nothing but what was checked is removed. A -wal left beside a new file would be replayed
+// into it, whatever database it was made for (#336 Go review R12, finding 1).
 func cleanSQLiteSidecars(db string) error {
 	seen, err := sqliteSidecars(db)
 	if err != nil {
@@ -658,19 +733,23 @@ func cleanSQLiteSidecars(db string) error {
 		sidecarsChecked(db)
 	}
 	for _, s := range seen {
-		cur, err := os.Stat(s.path)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
+		cur, err := os.Lstat(s.path)
 		if err != nil {
-			return err
+			return fmt.Errorf("sqlite sidecar changed after it was checked: %s: %w", s.path, err)
 		}
 		if !os.SameFile(s.info, cur) || cur.Size() != s.info.Size() || !cur.ModTime().Equal(s.info.ModTime()) {
 			return fmt.Errorf("sqlite sidecar changed after it was checked: %s", s.path)
 		}
-		if err := rbstate.RemoveFile(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := rbstate.RemoveFile(s.path); err != nil {
 			return err
 		}
+	}
+	left, err := sqliteSidecars(db)
+	if err != nil {
+		return err
+	}
+	if len(left) != 0 {
+		return fmt.Errorf("sqlite sidecar appeared after the check: %s", left[0].path)
 	}
 	return nil
 }

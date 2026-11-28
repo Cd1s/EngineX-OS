@@ -18,6 +18,7 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/pkg/analyzer"
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
 )
@@ -1446,6 +1447,16 @@ func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error 
 	}
 	if j.pause != nil {
 		j.pause("import")
+	}
+	// The import writes the library in place: under its volume's lock, like every writer of a
+	// volume's library (#336 Go review R13). Busy: the job fails with that message.
+	if lib, ok := j.p.Library.(interface{ Root() string }); ok {
+		held, release, herr := enginedb.HoldForEdit(ctx, lib.Root())
+		if herr != nil {
+			return herr
+		}
+		defer release()
+		ctx = held
 	}
 	id, err := j.p.Library.Import(ctx, analyzer.Import{Path: dl.Path, Title: v.Track.Title, Artist: v.Track.Artist, Album: v.Track.Album, Comment: dl.Quality.Comment(), Format: audio.Format, Playlist: v.Playlist, Result: res})
 	if err != nil {

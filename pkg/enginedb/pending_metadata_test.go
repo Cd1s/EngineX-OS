@@ -16,7 +16,7 @@ func TestApplyPendingTrackMetadata(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO Track(id, path, filename, genre, comment, label) VALUES(2, '../Music/song.mp3', 'song.mp3', 'Old Genre', 'Old Comment', 'Old Label')`); err != nil {
 		t.Fatal(err)
 	}
-	if err := QueuePending(root, func(p *Pending) {
+	if err := QueuePending(context.Background(), root, func(p *Pending) {
 		p.TrackMetadata = append(p.TrackMetadata, PendingTrackMetadata{
 			TrackID: 2,
 			Genre:   "New Genre",
@@ -45,7 +45,7 @@ func TestApplyPendingTrackMetadata(t *testing.T) {
 func TestApplyPendingKeepsMetadataForMissingTrack(t *testing.T) {
 	_, root, db := testlibrary.Create(t)
 	defer db.Close()
-	if err := QueuePending(root, func(p *Pending) {
+	if err := QueuePending(context.Background(), root, func(p *Pending) {
 		p.TrackMetadata = append(p.TrackMetadata, PendingTrackMetadata{
 			TrackID: 404,
 			Genre:   "Still queued",

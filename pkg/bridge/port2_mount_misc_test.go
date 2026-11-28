@@ -505,7 +505,7 @@ func TestPort2QueuedHotCueAppliesAtMount(t *testing.T) {
 	if err := db.QueryRow(`SELECT trackId FROM PerformanceData WHERE quickCues IS NOT NULL ORDER BY trackId LIMIT 1`).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
-	if err := enginedb.QueuePending(mount, func(p *enginedb.Pending) {
+	if err := enginedb.QueuePending(context.Background(), mount, func(p *enginedb.Pending) {
 		p.HotCues = append(p.HotCues, enginedb.PendingCue{TrackID: id, Index: 7, Label: "queued on the deck", Color: "#FF0000"})
 	}); err != nil {
 		t.Fatal(err)

@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -99,7 +98,14 @@ func writePending(path string, p Pending) error {
 }
 
 // QueuePending adds edits to the drive's queue. root holds "Engine Library".
-func QueuePending(root string, add func(*Pending)) error {
+func QueuePending(ctx context.Context, root string, add func(*Pending)) error {
+	// The queue is read, changed and written back: under the volume's lock, or an edit queued
+	// while another process applies the queue is lost with it.
+	_, release, err := HoldForEdit(ctx, root)
+	if err != nil {
+		return err
+	}
+	defer release()
 	pendingMu.Lock()
 	defer pendingMu.Unlock()
 	path := pendingPath(root)
@@ -119,9 +125,17 @@ func QueuePending(root string, add func(*Pending)) error {
 // is skipped; so is a Hot Cue edit for a track without cue data. It refuses
 // while another process has the library open.
 func ApplyPending(ctx context.Context, root string) (int, error) {
+	path := pendingPath(root)
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return 0, nil // nothing queued: a look takes no lock
+	}
+	ctx, release, err := HoldForEdit(ctx, root)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
 	pendingMu.Lock()
 	defer pendingMu.Unlock()
-	path := pendingPath(root)
 	if err := safeFile(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return 0, nil
@@ -139,10 +153,7 @@ func ApplyPending(ctx context.Context, root string) (int, error) {
 		return 0, ErrLibraryInUse
 	}
 	dbPath := filepath.Join(root, "Engine Library", "Database2", "m.db")
-	if err := safeFile(dbPath); err != nil {
-		return 0, err
-	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: dbPath}).String()+"?_pragma=busy_timeout(5000)")
+	db, err := OpenLibraryRW(ctx, root, "_pragma=busy_timeout(5000)")
 	if err != nil {
 		return 0, err
 	}

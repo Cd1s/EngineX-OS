@@ -188,18 +188,19 @@ func readHotCuesFromDB(dbPath string, trackID int64) ([]HotCueSlot, bool) {
 // syncHotCueToDB writes the edit into the drive's m.db, or queues it there when
 // Engine has the library open (no outside writer while Engine does, BH-GC2-1).
 // It reports whether the edit was queued.
-func (s *Server) syncHotCueToDB(driveDir string, trackID int64, slotIndex int, label, colorHex string, posMS *float64) bool {
+// The caller holds the volume's lock in ctx.
+func (s *Server) syncHotCueToDB(ctx context.Context, driveDir string, trackID int64, slotIndex int, label, colorHex string, posMS *float64) bool {
 	dbPath := filepath.Join(driveDir, "Engine Library", "Database2", "m.db")
 	if st, err := os.Stat(dbPath); err != nil || st.Size() == 0 {
 		return false
 	}
 	if enginedb.LibraryInUse(driveDir) {
-		err := enginedb.QueuePending(driveDir, func(p *enginedb.Pending) {
+		err := enginedb.QueuePending(ctx, driveDir, func(p *enginedb.Pending) {
 			p.HotCues = append(p.HotCues, enginedb.PendingCue{TrackID: trackID, Index: slotIndex, Label: label, Color: colorHex, PositionMS: posMS})
 		})
 		return err == nil
 	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: dbPath}).String()+"?_pragma=busy_timeout(1000)")
+	db, err := enginedb.OpenLibraryRW(ctx, driveDir, "_pragma=busy_timeout(1000)")
 	if err != nil {
 		return false
 	}
@@ -314,6 +315,14 @@ func (s *Server) handleHotCuesPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The cue file and the library are written under the volume's lock. Busy: nothing is
+	// written and the caller is told so (#336 Go review R13).
+	ctx, release, err := enginedb.HoldForEdit(r.Context(), driveDir)
+	if err != nil {
+		fail(w, http.StatusConflict, err)
+		return
+	}
+	defer release()
 	hotCuesMu.Lock()
 	defer hotCuesMu.Unlock()
 
@@ -378,7 +387,7 @@ func (s *Server) handleHotCuesPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pending := s.syncHotCueToDB(driveDir, trackID, req.Index, req.Label, req.Color, req.PositionMS)
+	pending := s.syncHotCueToDB(ctx, driveDir, trackID, req.Index, req.Label, req.Color, req.PositionMS)
 
 	respond(w, hotCuesResponse{
 		Drive:   req.Drive,

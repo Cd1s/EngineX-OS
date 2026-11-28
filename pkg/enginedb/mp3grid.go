@@ -416,6 +416,13 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 		r.Bypassed = true
 		return r, nil
 	}
+	// The grids are written in place, batch after batch: all of it under the volume's lock.
+	ctx, release, err := HoldForEdit(ctx, root)
+	if err != nil {
+		r.Interrupted = true
+		return r, err
+	}
+	defer release()
 	if LibraryInUse(root) {
 		r.Interrupted = true
 		return r, ErrLibraryInUse
@@ -443,8 +450,7 @@ func FixMP3Grids(ctx context.Context, root string, opts MP3GridOptions) (MP3Grid
 		rootReal = rootAbs
 	}
 
-	u := url.URL{Scheme: "file", Path: dbPath}
-	db, err := sql.Open("sqlite", u.String()+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(3000)")
+	db, err := OpenLibraryRW(ctx, root, "_pragma=foreign_keys(1)&_pragma=busy_timeout(3000)")
 	if err != nil {
 		return r, err
 	}
