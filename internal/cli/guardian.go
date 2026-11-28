@@ -54,12 +54,13 @@ func guardianRemaining(start time.Time, deadline time.Duration) time.Duration {
 	return time.Until(start.Add(deadline))
 }
 
-// guardianLockWait is how long a run waits for a volume's lock: two seconds, or what is left of
-// its --timeout when that is less.
+// guardianLockWait is how long a run waits for a volume's lock: two seconds, or half of what is
+// left of its --timeout when that is less, so a run that is refused still ends with its own
+// answer before the hard stop of that timeout.
 func guardianLockWait(start time.Time, deadline time.Duration) time.Duration {
 	wait := 2 * time.Second
 	if deadline > 0 {
-		wait = max(0, min(wait, guardianRemaining(start, deadline)))
+		wait = max(0, min(wait, guardianRemaining(start, deadline)/2))
 	}
 	return wait
 }
