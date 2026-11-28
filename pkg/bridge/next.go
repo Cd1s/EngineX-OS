@@ -533,6 +533,11 @@ func swapNext(ctx context.Context, mount, dir string, st *steps, onDemand bool, 
 		_ = os.RemoveAll(nextState(h.LibraryUUID))
 		return true
 	}
+	unlockDir, lockErr := rbstate.LockDatabaseDir(dir, 0)
+	if lockErr != nil {
+		return false, false
+	}
+	defer unlockDir()
 	if enginedb.OpenElsewhere(live) != 0 {
 		return false, false
 	}

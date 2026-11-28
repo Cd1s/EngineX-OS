@@ -1451,11 +1451,18 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 					ok  bool
 					err error
 				}
+				type normResult struct {
+					fixed []string
+					err   error
+				}
 				headerPaused := make(chan struct{})
 				headerRelease := make(chan struct{})
+				beforeRenameReached := make(chan struct{})
 				reserveDone := make(chan reserveResult, 1)
+				normDone := make(chan normResult, 1)
 				var overlapArmed atomic.Bool
 				var overlapStarted atomic.Bool
+				var beforeOnce atomic.Bool
 
 				origAfterHeader := reserveAfterHeaderRead
 				reserveAfterHeaderRead = func(p string) {
@@ -1468,7 +1475,7 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 
 				origBeforeRename := reserveBeforeRename
 				reserveBeforeRename = func(p string) {
-					if p != mPath {
+					if p != mPath || !beforeOnce.CompareAndSwap(false, true) {
 						return
 					}
 					overlapArmed.Store(true)
@@ -1477,6 +1484,7 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 						reserveDone <- reserveResult{r: r, ok: ok, err: rerr}
 					}()
 					<-headerPaused
+					close(beforeRenameReached)
 				}
 				defer func() { reserveBeforeRename = origBeforeRename }()
 
@@ -1484,11 +1492,11 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 				reserveRename = func(string, string) error { return syscall.EIO }
 				defer func() { reserveRename = origRename }()
 
-				fixed, nerr := NormalizeDatabase2Context(context.Background(), dbDir)
-				if !errors.Is(nerr, syscall.EIO) || len(fixed) != 0 {
-					close(headerRelease)
-					t.Fatalf("expected EIO rename failure, got fixed=%v err=%v", fixed, nerr)
-				}
+				go func() {
+					fixed, nerr := NormalizeDatabase2Context(context.Background(), dbDir)
+					normDone <- normResult{fixed: fixed, err: nerr}
+				}()
+				<-beforeRenameReached
 
 				owner2, err := sql.Open("sqlite", mPath)
 				if err != nil {
@@ -1497,9 +1505,18 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 				}
 				owner2.SetMaxOpenConns(1)
 				defer owner2.Close()
-				if _, err := owner2.Exec("BEGIN EXCLUSIVE"); err != nil {
-					close(headerRelease)
-					t.Fatal(err)
+
+				// Acquire BEGIN EXCLUSIVE as soon as normalization releases its lock,
+				// without waiting on normDone before releasing the overlapping probe.
+				lockDeadline := time.Now().Add(3 * time.Second)
+				for {
+					if _, execErr := owner2.Exec("BEGIN EXCLUSIVE"); execErr == nil {
+						break
+					} else if !time.Now().Before(lockDeadline) {
+						close(headerRelease)
+						t.Fatalf("owner2 did not acquire BEGIN EXCLUSIVE after EIO rollback: %v", execErr)
+					}
+					time.Sleep(10 * time.Millisecond)
 				}
 				attemptConcurrentExternalWriteBusy(t, mPath, "posix_before_overlap_release_"+name)
 
@@ -1508,6 +1525,10 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 				res := <-reserveDone
 				if res.err != nil || !res.ok || res.r != 12 {
 					t.Fatalf("overlapping POSIX Reserve: r=%d ok=%v err=%v", res.r, res.ok, res.err)
+				}
+				nres := <-normDone
+				if !errors.Is(nres.err, syscall.EIO) || len(nres.fixed) != 0 {
+					t.Fatalf("expected EIO rename failure, got fixed=%v err=%v", nres.fixed, nres.err)
 				}
 
 				attemptConcurrentExternalWriteBusy(t, mPath, "posix_after_overlap_release_"+name)
@@ -2437,4 +2458,383 @@ func TestNormalizeReserveSidecarObstructionsAbortPublication(t *testing.T) {
 			t.Fatalf(".reserve-rebuild left after failure: err=%v", serr)
 		}
 	})
+}
+
+func TestPOSIXFallbackOPathPinClosePreservesLock(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("O_PATH/POSIX fcntl lock behavior is Linux specific")
+	}
+	if mPath := os.Getenv("ENGINEX_RESERVE_OPATH_PIN_DB"); mPath != "" {
+		_, err := sqlite.OFDLocking(false)
+		if err != nil || sqlite.OFDLockingEnabled() {
+			t.Fatalf("failed to disable OFD locking: enabled=%v err=%v", sqlite.OFDLockingEnabled(), err)
+		}
+		owner, err := sql.Open("sqlite", mPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner.SetMaxOpenConns(1)
+		defer owner.Close()
+		if _, err := owner.Exec("BEGIN EXCLUSIVE"); err != nil {
+			t.Fatal(err)
+		}
+		attemptConcurrentExternalWriteBusy(t, mPath, "before_opath_pin_close")
+
+		pin, err := openInodePin(mPath)
+		if err != nil || pin == nil {
+			t.Fatalf("openInodePin(%s) = (%v, %v)", mPath, pin, err)
+		}
+		outFile, err := os.CreateTemp(t.TempDir(), "pin-copy-*")
+		if err != nil {
+			pin.Close()
+			t.Fatal(err)
+		}
+		copyErr := copyFileFromPinIsolated(context.Background(), pin, mPath, outFile)
+		_ = outFile.Close()
+		closeErr := pin.Close()
+		if copyErr != nil || closeErr != nil {
+			t.Fatalf("copy/close pin failed: copy=%v close=%v", copyErr, closeErr)
+		}
+
+		attemptConcurrentExternalWriteBusy(t, mPath, "after_opath_pin_close")
+		if _, err := owner.Exec("UPDATE Information SET uuid='opath-pin-ok'"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := owner.Exec("COMMIT"); err != nil {
+			t.Fatal(err)
+		}
+		if err := owner.Close(); err != nil {
+			t.Fatal(err)
+		}
+		chk, err := Open(mPath, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer chk.Close()
+		var gotUUID string
+		if err := chk.QueryRow("SELECT uuid FROM Information").Scan(&gotUUID); err != nil {
+			t.Fatal(err)
+		}
+		if gotUUID != "opath-pin-ok" {
+			t.Fatalf("uuid=%q want opath-pin-ok", gotUUID)
+		}
+		return
+	}
+
+	mPath := reserve12Library(t)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPOSIXFallbackOPathPinClosePreservesLock$", "-test.v")
+	cmd.Env = append(os.Environ(), "ENGINEX_RESERVE_OPATH_PIN_DB="+mPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("O_PATH pin child failed: %v\n%s", err, string(out))
+	}
+	if !bytes.Contains(out, []byte("--- PASS: TestPOSIXFallbackOPathPinClosePreservesLock")) {
+		t.Fatalf("O_PATH pin child did not pass:\n%s", string(out))
+	}
+}
+
+func TestNormalizeReserveAbortsWhenLiveFileAtomicallyReplaced(t *testing.T) {
+	for _, forceCopy := range []bool{false, true} {
+		name := "hardlink"
+		if forceCopy {
+			name = "copy_fallback"
+		}
+		t.Run(name, func(t *testing.T) {
+			mPath := reserve12Library(t)
+			_, mount, incDB := testlibrary.Create(t)
+			if _, err := incDB.Exec(`UPDATE Information SET uuid='incoming-zero-db'`); err != nil {
+				t.Fatal(err)
+			}
+			incDB.Close()
+			incoming := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+			incomingBytes, err := os.ReadFile(incoming)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if forceCopy {
+				origLink := reserveLink
+				reserveLink = func(string, string) error { return syscall.EXDEV }
+				defer func() { reserveLink = origLink }()
+			}
+			var renameCalls atomic.Int32
+			origRename := reserveRename
+			reserveRename = func(oldPath, newPath string) error {
+				renameCalls.Add(1)
+				return origRename(oldPath, newPath)
+			}
+			defer func() { reserveRename = origRename }()
+
+			origBeforeRename := reserveBeforeRename
+			reserveBeforeRename = func(p string) {
+				if p == mPath {
+					if rerr := os.Rename(incoming, mPath); rerr != nil {
+						t.Fatal(rerr)
+					}
+				}
+			}
+			defer func() { reserveBeforeRename = origBeforeRename }()
+
+			fixed, err := NormalizeReserve(mPath)
+			if err == nil || fixed {
+				t.Fatalf("expected abort when live file replaced, got fixed=%v err=%v", fixed, err)
+			}
+			if renameCalls.Load() != 0 {
+				t.Fatalf("expected 0 rename calls, got %d", renameCalls.Load())
+			}
+			gotBytes, rerr := os.ReadFile(mPath)
+			if rerr != nil || !bytes.Equal(gotBytes, incomingBytes) {
+				t.Fatalf("incoming replacement file overwritten: err=%v", rerr)
+			}
+			if _, serr := os.Stat(mPath + ".reserve-rebuild"); !errors.Is(serr, os.ErrNotExist) {
+				t.Fatalf(".reserve-rebuild left after replacement abort: err=%v", serr)
+			}
+		})
+	}
+}
+
+func TestNormalizeReserveReplacementWALWriterKeepsExclusion(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("WAL shared memory exclusion test is Linux specific")
+	}
+	mPath := reserve12Library(t)
+	_, mount, incDB := testlibrary.Create(t)
+	incDB.Close()
+	incoming := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+
+	var replDB *sql.DB
+	var shmBefore os.FileInfo
+	origBeforeRename := reserveBeforeRename
+	reserveBeforeRename = func(p string) {
+		if p != mPath {
+			return
+		}
+		if err := os.Rename(incoming, mPath); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		replDB, err = sql.Open("sqlite", mPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replDB.SetMaxOpenConns(1)
+		mustExec(t, replDB, "PRAGMA journal_mode=WAL")
+		mustExec(t, replDB, "UPDATE Information SET uuid='replacement-wal-init'")
+		mustExec(t, replDB, "BEGIN IMMEDIATE")
+		attemptConcurrentExternalWriteBusy(t, mPath, "replacement_wal_before_resume")
+		shmBefore, err = os.Stat(mPath + "-shm")
+		if err != nil {
+			t.Fatal(err)
+		}
+		walInfo, werr := os.Stat(mPath + "-wal")
+		if werr != nil || walInfo.Size() == 0 {
+			t.Fatalf("expected nonempty replacement -wal: info=%v err=%v", walInfo, werr)
+		}
+	}
+	defer func() {
+		reserveBeforeRename = origBeforeRename
+		if replDB != nil {
+			_ = replDB.Close()
+		}
+	}()
+
+	var renameCalls atomic.Int32
+	origRename := reserveRename
+	reserveRename = func(oldPath, newPath string) error {
+		renameCalls.Add(1)
+		return origRename(oldPath, newPath)
+	}
+	defer func() { reserveRename = origRename }()
+
+	fixed, err := NormalizeReserve(mPath)
+	if err == nil || fixed {
+		t.Fatalf("expected NormalizeReserve to abort on replacement WAL DB, got fixed=%v err=%v", fixed, err)
+	}
+	if renameCalls.Load() != 0 {
+		t.Fatalf("expected 0 rename calls, got %d", renameCalls.Load())
+	}
+	shmAfter, serr := os.Stat(mPath + "-shm")
+	if serr != nil {
+		t.Fatalf("replacement -shm removed on aborted rebuild: %v", serr)
+	}
+	if !os.SameFile(shmBefore, shmAfter) {
+		t.Fatalf("replacement -shm inode changed during aborted rebuild")
+	}
+	attemptConcurrentExternalWriteBusy(t, mPath, "replacement_wal_after_abort")
+
+	mustExec(t, replDB, "UPDATE Information SET uuid='replacement-wal-committed'")
+	mustExec(t, replDB, "COMMIT")
+	if err := replDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	replDB = nil
+
+	chk, err := Open(mPath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chk.Close()
+	var gotUUID string
+	if err := chk.QueryRow("SELECT uuid FROM Information").Scan(&gotUUID); err != nil {
+		t.Fatal(err)
+	}
+	if gotUUID != "replacement-wal-committed" {
+		t.Fatalf("uuid=%q want replacement-wal-committed", gotUUID)
+	}
+}
+
+func TestNormalizeReserveCopyFallbackBacksUpOriginalInode(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("O_PATH copy fallback inode preservation test is Linux specific")
+	}
+	mPath := reserve12Library(t)
+	wantOrigBytes, err := os.ReadFile(mPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, mount, incDB := testlibrary.Create(t)
+	if _, err := incDB.Exec(`UPDATE Information SET uuid='incoming-during-exdev'`); err != nil {
+		t.Fatal(err)
+	}
+	incDB.Close()
+	incoming := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+	incomingBytes, err := os.ReadFile(incoming)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	origLink := reserveLink
+	reserveLink = func(oldPath, newPath string) error {
+		if oldPath == mPath {
+			if rerr := os.Rename(incoming, mPath); rerr != nil {
+				return rerr
+			}
+			return syscall.EXDEV
+		}
+		return origLink(oldPath, newPath)
+	}
+	defer func() { reserveLink = origLink }()
+
+	origRename := reserveRename
+	reserveRename = func(oldPath, newPath string) error {
+		return syscall.EIO
+	}
+	defer func() { reserveRename = origRename }()
+
+	fixed, err := NormalizeReserve(mPath)
+	if err == nil || fixed {
+		t.Fatalf("expected failure when live file replaced during EXDEV backup, got fixed=%v err=%v", fixed, err)
+	}
+	liveBytes, rerr := os.ReadFile(mPath)
+	if rerr != nil || !bytes.Equal(liveBytes, incomingBytes) {
+		t.Fatalf("live m.db altered from incoming replacement: err=%v", rerr)
+	}
+	preBytes, perr := os.ReadFile(mPath + ".pre-reserve")
+	if perr != nil {
+		t.Fatalf("missing .pre-reserve after EXDEV backup: %v", perr)
+	}
+	if !bytes.Equal(preBytes, wantOrigBytes) {
+		t.Fatalf(".pre-reserve backed up wrong database (len=%d vs orig=%d incoming=%d)", len(preBytes), len(wantOrigBytes), len(incomingBytes))
+	}
+}
+
+func TestNormalizeReserveTableNamedPragmaTableXinfo(t *testing.T) {
+	path := reserve12Library(t)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	mustExec(t, db, `CREATE TABLE pragma_table_xinfo(k TEXT PRIMARY KEY, v TEXT);
+		INSERT INTO pragma_table_xinfo(k, v) VALUES('a', 'xinfo-ok');
+		CREATE TABLE pragma_table_info(k TEXT PRIMARY KEY, v TEXT);
+		INSERT INTO pragma_table_info(k, v) VALUES('b', 'info-ok');`)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fixed, err := NormalizeReserve(path)
+	if err != nil || !fixed {
+		t.Fatalf("NormalizeReserve = (%v, %v), want (true, nil)", fixed, err)
+	}
+	if r, ok, rerr := Reserve(path); rerr != nil || !ok || r != 0 {
+		t.Fatalf("Reserve = (%d, %v, %v), want (0, true, nil)", r, ok, rerr)
+	}
+	out, err := Open(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	var vx, vi string
+	if err := out.QueryRow(`SELECT v FROM pragma_table_xinfo WHERE k='a'`).Scan(&vx); err != nil || vx != "xinfo-ok" {
+		t.Fatalf("pragma_table_xinfo row=%q err=%v", vx, err)
+	}
+	if err := out.QueryRow(`SELECT v FROM pragma_table_info WHERE k='b'`).Scan(&vi); err != nil || vi != "info-ok" {
+		t.Fatalf("pragma_table_info row=%q err=%v", vi, err)
+	}
+}
+
+func TestReserveUnreadableFilePreservesPermissionError(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("POSIX/unprivileged EACCES test is Linux specific")
+	}
+	if target := os.Getenv("ENGINEX_RESERVE_EACCES_PATH"); target != "" {
+		if _, err := sqlite.OFDLocking(false); err != nil {
+			t.Fatal(err)
+		}
+		r, ok, err := Reserve(target)
+		if err == nil || ok || r != 0 {
+			t.Fatalf("Reserve on unreadable file = (%d, %v, %v), want error", r, ok, err)
+		}
+		if !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("errors.Is(err, os.ErrPermission) = false for err=%v", err)
+		}
+		var pe *os.PathError
+		if !errors.As(err, &pe) || pe.Path != target {
+			t.Fatalf("errors.As(err, *os.PathError) = %v (%+v), want Path=%s", errors.As(err, &pe), pe, target)
+		}
+		return
+	}
+
+	dir, err := os.MkdirTemp("", "reserve-eacces-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "m.db")
+	if err := os.WriteFile(target, []byte("not-readable"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	binPath := os.Args[0]
+	if os.Geteuid() == 0 {
+		// go test places compiled test binaries under a 0700 cache dir; copy the
+		// executable into the 0755 scratch dir so unprivileged nobody can exec it.
+		rawBin, berr := os.ReadFile(os.Args[0])
+		if berr != nil {
+			t.Fatal(berr)
+		}
+		binPath = filepath.Join(dir, "dbhealer.test")
+		if werr := os.WriteFile(binPath, rawBin, 0o755); werr != nil {
+			t.Fatal(werr)
+		}
+	}
+	cmd := exec.Command(binPath, "-test.run=^TestReserveUnreadableFilePreservesPermissionError$", "-test.v")
+	cmd.Env = append(os.Environ(), "ENGINEX_RESERVE_EACCES_PATH="+target)
+	if os.Geteuid() == 0 {
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Credential: &syscall.Credential{Uid: 65534, Gid: 65534},
+		}
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("EACCES child failed: %v\n%s", err, string(out))
+	}
+	if !bytes.Contains(out, []byte("--- PASS: TestReserveUnreadableFilePreservesPermissionError")) {
+		t.Fatalf("EACCES child did not pass:\n%s", string(out))
+	}
 }

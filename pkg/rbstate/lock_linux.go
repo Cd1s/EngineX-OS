@@ -28,19 +28,34 @@ func LockVolume(mount string, wait time.Duration) (unlock func(), err error) {
 	if err != nil {
 		return nil, err
 	}
+	return flockFile(f, wait)
+}
+
+// LockDatabaseDir takes an exclusive flock on Database2 directory dir itself (creating zero
+// files on the volume) so bridge swapNext and dbhealer reserve rebuilds coordinate before
+// replacing m.db.
+func LockDatabaseDir(dir string, wait time.Duration) (unlock func(), err error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	return flockFile(f, wait)
+}
+
+func flockFile(f *os.File, wait time.Duration) (func(), error) {
 	deadline := time.Now().Add(wait)
 	for {
-		if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
 			return func() { _ = f.Close() }, nil // the close releases the lock
-		}
-		if errors.Is(err, syscall.EWOULDBLOCK) && time.Now().Before(deadline) {
+		} else if errors.Is(err, syscall.EWOULDBLOCK) && time.Now().Before(deadline) {
 			time.Sleep(20 * time.Millisecond)
 			continue
+		} else {
+			_ = f.Close()
+			if errors.Is(err, syscall.EWOULDBLOCK) {
+				return nil, ErrLocked
+			}
+			return nil, err
 		}
-		_ = f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, ErrLocked
-		}
-		return nil, err
 	}
 }

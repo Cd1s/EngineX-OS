@@ -5,16 +5,20 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/pkg/dbhealer"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 )
@@ -1046,6 +1050,227 @@ func TestInsertPathOrphanSwapReconciliationAndCarryOverBrowseIndex(t *testing.T)
 		}
 		if !rbstate.BrowseIndexMatches(dir, liveHdr.Header) {
 			t.Fatalf("live %s does not match promoted snapshot after interrupted swap", rbstate.BrowseIndexName)
+		}
+	})
+}
+
+func rewriteLibraryAsReserve12(t *testing.T, livePath string) {
+	t.Helper()
+	src, err := sql.Open("sqlite", livePath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	src.SetMaxOpenConns(1)
+
+	seedPath := filepath.Join(t.TempDir(), "res12-seed.db")
+	seedDB, err := sql.Open("sqlite", seedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seedDB.Exec("PRAGMA user_version=4194305"); err != nil {
+		seedDB.Close()
+		t.Fatal(err)
+	}
+	if err := seedDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(seedPath)
+	if err != nil || len(raw) != 4096 {
+		t.Fatalf("seed file len=%d err=%v", len(raw), err)
+	}
+	raw[20] = 12
+	raw[105], raw[106] = 0x0f, 0xf4
+	if err := os.WriteFile(seedPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dst, err := sql.Open("sqlite", seedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst.SetMaxOpenConns(1)
+	defer dst.Close()
+
+	// Create tables before triggers so Track insert triggers do not populate PerformanceData early.
+	var tblStmts, postStmts []string
+	schemaRows, err := src.Query(`SELECT type, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY rowid`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for schemaRows.Next() {
+		var typ, s string
+		if err := schemaRows.Scan(&typ, &s); err != nil {
+			schemaRows.Close()
+			t.Fatal(err)
+		}
+		if typ == "table" {
+			tblStmts = append(tblStmts, s)
+		} else {
+			postStmts = append(postStmts, s)
+		}
+	}
+	if err := schemaRows.Err(); err != nil {
+		schemaRows.Close()
+		t.Fatal(err)
+	}
+	_ = schemaRows.Close()
+
+	for _, s := range tblStmts {
+		if _, err := dst.Exec(s); err != nil {
+			t.Fatalf("exec %q: %v", s, err)
+		}
+	}
+	if _, err := dst.Exec("ATTACH DATABASE ? AS src", livePath); err != nil {
+		t.Fatal(err)
+	}
+	tblRows, err := dst.Query(`SELECT name FROM main.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tables []string
+	for tblRows.Next() {
+		var name string
+		if err := tblRows.Scan(&name); err != nil {
+			tblRows.Close()
+			t.Fatal(err)
+		}
+		tables = append(tables, name)
+	}
+	if err := tblRows.Err(); err != nil {
+		tblRows.Close()
+		t.Fatal(err)
+	}
+	_ = tblRows.Close()
+	for _, tbl := range tables {
+		q := `"` + strings.ReplaceAll(tbl, `"`, `""`) + `"`
+		if _, err := dst.Exec("INSERT INTO main." + q + " SELECT * FROM src." + q); err != nil {
+			t.Fatalf("copy table %s: %v", tbl, err)
+		}
+	}
+	if _, err := dst.Exec("DETACH DATABASE src"); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range postStmts {
+		if _, err := dst.Exec(s); err != nil {
+			t.Fatalf("exec post %q: %v", s, err)
+		}
+	}
+	if err := dst.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_ = src.Close()
+	if err := rbstate.RenameFile(seedPath, livePath); err != nil {
+		t.Fatal(err)
+	}
+	if r, ok, rerr := dbhealer.Reserve(livePath); rerr != nil || !ok || r != 12 {
+		t.Fatalf("rewritten live reserve = (%d, %v, %v), want (12, true, nil)", r, ok, rerr)
+	}
+}
+
+func TestSwapNextCoordinatesWithReserveNormalize(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("LockDatabaseDir flock coordination is Linux specific")
+	}
+	if target := os.Getenv("ENGINEX_BRIDGE_NORMALIZE_CHILD"); target != "" {
+		fixed, err := dbhealer.NormalizeReserve(target)
+		if err == nil || fixed {
+			t.Fatalf("expected locked NormalizeReserve failure, got fixed=%v err=%v", fixed, err)
+		}
+		if !errors.Is(err, rbstate.ErrLocked) {
+			t.Fatalf("NormalizeReserve err=%v, want errors.Is(rbstate.ErrLocked)", err)
+		}
+		return
+	}
+
+	t.Run("paused_swapNext_blocks_child_NormalizeReserve", func(t *testing.T) {
+		mount := nextStick(t, 4)
+		dir := dbDir(mount)
+		live := filepath.Join(dir, "m.db")
+		rewriteLibraryAsReserve12(t, live)
+
+		// Stage a replacement library with an updated track title on top of the reserve-12 live base.
+		r, err := newResolver(mount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := rbstate.Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, err := readJobView(context.Background(), r, mount, s.Layout, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		v.view.Tracks[0].Track.Title = "updated-bridge-track-r11"
+		v.view.Tracks[0].Hash = "updated-bridge-hash-r11"
+		nb := &nextBuild{ctx: context.Background(), mount: mount, dir: dir, view: v.view, live: s}
+		if err := nb.build(false, true); err != nil {
+			t.Fatalf("nextBuild.build: %v", err)
+		}
+
+		cutRan := false
+		prevCut := cut
+		defer func() { cut = prevCut }()
+		cut = func(step string) {
+			if step != "before swap" {
+				return
+			}
+			cutRan = true
+			cmd := exec.Command(os.Args[0], "-test.run=^TestSwapNextCoordinatesWithReserveNormalize$", "-test.v")
+			cmd.Env = append(os.Environ(), "ENGINEX_BRIDGE_NORMALIZE_CHILD="+live)
+			out, cerr := cmd.CombinedOutput()
+			if cerr != nil {
+				t.Fatalf("concurrent child NormalizeReserve unexpectedly failed assertion: %v\n%s", cerr, string(out))
+			}
+		}
+
+		swapped, _ := swapNext(context.Background(), mount, dir, newSteps(MountOptions{}), false, "")
+		if !cutRan {
+			t.Fatal("cut(before swap) never ran")
+		}
+		if !swapped {
+			t.Fatal("swapNext returned swapped=false")
+		}
+		if _, serr := os.Stat(live + ".pre-reserve"); !os.IsNotExist(serr) {
+			t.Fatalf("unexpected .pre-reserve created while swapNext held LockDatabaseDir: err=%v", serr)
+		}
+		chk, err := sql.Open("sqlite", live+"?mode=ro")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer chk.Close()
+		var gotTitle string
+		if err := chk.QueryRow("SELECT title FROM Track ORDER BY id LIMIT 1").Scan(&gotTitle); err != nil {
+			t.Fatal(err)
+		}
+		if gotTitle != "updated-bridge-track-r11" {
+			t.Fatalf("live Track title=%q after swap, want updated-bridge-track-r11", gotTitle)
+		}
+	})
+
+	t.Run("held_LockDatabaseDir_defers_swapNext", func(t *testing.T) {
+		mount := nextStick(t, 4)
+		dir := dbDir(mount)
+		makeNextOf(t, mount, func(v *View) {
+			v.Tracks[0].Track.Title = "deferred-bridge-track-r11"
+			v.Tracks[0].Hash = "deferred-bridge-hash-r11"
+		})
+		unlockDir, err := rbstate.LockDatabaseDir(dir, 0)
+		if err != nil {
+			t.Fatalf("LockDatabaseDir: %v", err)
+		}
+		swapped, _ := swapNext(context.Background(), mount, dir, newSteps(MountOptions{}), false, "")
+		unlockDir()
+		if swapped {
+			t.Fatal("swapNext swapped while LockDatabaseDir was held")
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, nextDB)); statErr != nil {
+			t.Fatalf("staged nextDB missing after deferred swapNext: %v", statErr)
+		}
+		swapped, _ = swapNext(context.Background(), mount, dir, newSteps(MountOptions{}), false, "")
+		if !swapped {
+			t.Fatal("swapNext did not complete after releasing LockDatabaseDir")
 		}
 	})
 }

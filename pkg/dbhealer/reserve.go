@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/rbstate"
 	sqlite "modernc.org/sqlite"
 )
 
@@ -58,6 +59,9 @@ func reserveHeaderContext(ctx context.Context, path string) (reserve byte, ok bo
 	if !st.Mode().IsRegular() {
 		return 0, false, &os.PathError{Op: "read", Path: path, Err: syscall.ESPIPE}
 	}
+	if err := checkReadablePath(path); err != nil {
+		return 0, false, err
+	}
 	// Never open or close path in the parent process for header inspection: even if
 	// sqlite.OFDLockingEnabled() is still true before the first lock attempt, a later
 	// connection falling back to POSIX F_SETLK on EINVAL must never have its lock
@@ -97,13 +101,23 @@ func configureIsolatedCommand(cmd *exec.Cmd) {
 }
 
 func readReserveHeaderIsolated(ctx context.Context, path string) (reserve byte, ok bool, err error) {
+	return readReserveHeaderFromPinIsolated(ctx, nil, path)
+}
+
+func readReserveHeaderFromPinIsolated(ctx context.Context, pin *os.File, path string) (reserve byte, ok bool, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		return 0, false, err
 	}
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", `exec < "$1" && exec dd bs=100 count=1 2>/dev/null`, "_", path)
+	var cmd *exec.Cmd
+	if pin != nil {
+		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", `exec < /proc/self/fd/3 && exec dd bs=100 count=1 2>/dev/null`)
+		cmd.ExtraFiles = []*os.File{pin}
+	} else {
+		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", `exec < "$1" && exec dd bs=100 count=1 2>/dev/null`, "_", path)
+	}
 	configureIsolatedCommand(cmd)
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
@@ -112,7 +126,15 @@ func readReserveHeaderIsolated(ctx context.Context, path string) (reserve byte, 
 		if cerr := ctx.Err(); cerr != nil {
 			return 0, false, cerr
 		}
+		if pin == nil {
+			if aerr := checkReadablePath(path); aerr != nil {
+				return 0, false, aerr
+			}
+		}
 		msg := strings.TrimSpace(errBuf.String())
+		if strings.Contains(strings.ToLower(msg), "permission denied") {
+			return 0, false, &os.PathError{Op: "open", Path: path, Err: syscall.EACCES}
+		}
 		if msg != "" {
 			return 0, false, fmt.Errorf("read reserve header %s: %w (%s)", path, runErr, msg)
 		}
@@ -125,14 +147,20 @@ func readReserveHeaderIsolated(ctx context.Context, path string) (reserve byte, 
 	return r, ok, nil
 }
 
-func copyFileIsolated(ctx context.Context, srcPath string, dst *os.File) error {
+func copyFileFromPinIsolated(ctx context.Context, pin *os.File, srcPath string, dst *os.File) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", `exec < "$1" && exec cat`, "_", srcPath)
+	var cmd *exec.Cmd
+	if pin != nil {
+		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", `exec < /proc/self/fd/3 && exec cat`)
+		cmd.ExtraFiles = []*os.File{pin}
+	} else {
+		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", `exec < "$1" && exec cat`, "_", srcPath)
+	}
 	configureIsolatedCommand(cmd)
 	var errBuf bytes.Buffer
 	cmd.Stdout = dst
@@ -187,6 +215,11 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 	if err := checkNoPendingJournals(path); err != nil {
 		return false, err
 	}
+	unlockDir, err := rbstate.LockDatabaseDir(filepath.Dir(path), 0)
+	if err != nil {
+		return false, fmt.Errorf("lock %s: %w", filepath.Dir(path), err)
+	}
+	defer unlockDir()
 	info, err := os.Stat(path)
 	if err != nil {
 		return false, err
@@ -233,15 +266,27 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 		_, _ = srcConn.ExecContext(context.Background(), "ROLLBACK")
 	}()
 
+	origPin, perr := openInodePin(path)
+	if perr != nil {
+		return false, perr
+	}
+	var origInfo os.FileInfo
+	if origPin != nil {
+		defer origPin.Close()
+		if origInfo, err = origPin.Stat(); err != nil {
+			return false, err
+		}
+	} else if origInfo, err = os.Stat(path); err != nil {
+		return false, err
+	}
 	stPath, serr := os.Stat(path)
 	if serr != nil {
 		return false, serr
 	}
-	if !os.SameFile(info, stPath) {
+	if !os.SameFile(info, origInfo) || !os.SameFile(origInfo, stPath) {
 		return false, fmt.Errorf("%s changed before lock acquisition", path)
 	}
-	origInfo := stPath
-	r, ok, err = readReserveHeaderIsolated(ctx, path)
+	r, ok, err = readReserveHeaderFromPinIsolated(ctx, origPin, path)
 	if err != nil {
 		return false, err
 	}
@@ -280,7 +325,7 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 	// Never move the live name out of the way: the CLI deadline can end this
 	// process between any two syscalls. Publish a durable backup first, then
 	// atomically replace the still-present original while still holding BEGIN EXCLUSIVE.
-	if err = backupReserveFromFileContext(ctx, path, origInfo); err != nil {
+	if err = backupReserveFromFileContext(ctx, path, origPin, origInfo); err != nil {
 		os.Remove(tmp)
 		return false, err
 	}
@@ -288,6 +333,10 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 		reserveBeforeRename(path)
 	}
 	if err = ctx.Err(); err != nil {
+		os.Remove(tmp)
+		return false, err
+	}
+	if err = ensureSameLiveFile(path, origInfo); err != nil {
 		os.Remove(tmp)
 		return false, err
 	}
@@ -307,9 +356,9 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 			return false, err
 		}
 	}
-	// Remove any stale pre-existing -shm / 0-byte -wal and reject obstructing sidecars
-	// (such as directories or dangling symlinks) BEFORE os.Rename regardless of journal mode.
-	if err = cleanupReserveSidecars(path); err != nil {
+	// Verify the live inode and complete sidecar set BEFORE unlinking any sidecar,
+	// so a replacement WAL writer can never lose its active -shm.
+	if err = cleanupReserveSidecars(path, origInfo); err != nil {
 		os.Remove(tmp)
 		return false, err
 	}
@@ -321,6 +370,17 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 		reserveAfterRename(path)
 	}
 	return true, nil
+}
+
+func ensureSameLiveFile(path string, origInfo os.FileInfo) error {
+	cur, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(origInfo, cur) {
+		return fmt.Errorf("%s was replaced during reserve rebuild; aborting publication", path)
+	}
+	return nil
 }
 
 func checkSidecarRegular(path, suffix string, checkNonEmpty bool) error {
@@ -349,23 +409,28 @@ func checkNoPendingJournals(path string) error {
 	return checkSidecarRegular(path, "-shm", false)
 }
 
-func cleanupReserveSidecars(path string) error {
-	if err := checkSidecarRegular(path, "-shm", false); err != nil {
-		return fmt.Errorf("%s-shm: %w", path, err)
-	}
-	if remErr := os.Remove(path + "-shm"); remErr != nil && !errors.Is(remErr, os.ErrNotExist) {
-		return fmt.Errorf("%s-shm: %w", path, remErr)
+func cleanupReserveSidecars(path string, origInfo os.FileInfo) error {
+	// Phase 1: read-only validation of live inode ownership and all sidecars before unlinking anything.
+	if err := ensureSameLiveFile(path, origInfo); err != nil {
+		return err
 	}
 	if err := checkSidecarRegular(path, "-wal", true); err != nil {
 		return fmt.Errorf("%s-wal: %w", path, err)
 	}
-	if remErr := os.Remove(path + "-wal"); remErr != nil && !errors.Is(remErr, os.ErrNotExist) {
-		return fmt.Errorf("%s-wal: %w", path, remErr)
-	}
 	if err := checkSidecarRegular(path, "-journal", true); err != nil {
 		return fmt.Errorf("%s-journal: %w", path, err)
 	}
-	return nil
+	if err := checkSidecarRegular(path, "-shm", false); err != nil {
+		return fmt.Errorf("%s-shm: %w", path, err)
+	}
+	// Phase 2: remove only stale regular -shm / 0-byte -wal, then re-verify ownership.
+	if remErr := os.Remove(path + "-shm"); remErr != nil && !errors.Is(remErr, os.ErrNotExist) {
+		return fmt.Errorf("%s-shm: %w", path, remErr)
+	}
+	if remErr := os.Remove(path + "-wal"); remErr != nil && !errors.Is(remErr, os.ErrNotExist) {
+		return fmt.Errorf("%s-wal: %w", path, remErr)
+	}
+	return ensureSameLiveFile(path, origInfo)
 }
 
 func backupReserve(path string) error {
@@ -373,14 +438,24 @@ func backupReserve(path string) error {
 }
 
 func backupReserveContext(ctx context.Context, path string) error {
-	info, err := os.Stat(path)
+	pin, err := openInodePin(path)
 	if err != nil {
 		return err
 	}
-	return backupReserveFromFileContext(ctx, path, info)
+	var info os.FileInfo
+	if pin != nil {
+		defer pin.Close()
+		info, err = pin.Stat()
+	} else {
+		info, err = os.Stat(path)
+	}
+	if err != nil {
+		return err
+	}
+	return backupReserveFromFileContext(ctx, path, pin, info)
 }
 
-func backupReserveFromFileContext(ctx context.Context, path string, info os.FileInfo) error {
+func backupReserveFromFileContext(ctx context.Context, path string, origPin *os.File, info os.FileInfo) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -393,14 +468,26 @@ func backupReserveFromFileContext(ctx context.Context, path string, info os.File
 	}
 	defer os.Remove(tmp)
 	// Internal ext4 needs no second full copy. Removable filesystems may not
-	// support hard links, so copy via an isolated child process that never closes
-	// an fd in the parent process under POSIX locking.
-	if err := reserveLink(path, tmp); err != nil {
+	// support hard links, so copy from origPin via an isolated child process that
+	// never closes a normal fd in the parent process under POSIX locking.
+	linkErr := reserveLink(path, tmp)
+	if linkErr == nil {
+		tmpInfo, lerr := os.Lstat(tmp)
+		if lerr != nil || !os.SameFile(info, tmpInfo) {
+			_ = os.Remove(tmp)
+			if lerr != nil {
+				linkErr = lerr
+			} else {
+				linkErr = fmt.Errorf("%s replaced before backup hard link", path)
+			}
+		}
+	}
+	if linkErr != nil {
 		dst, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
 		if err != nil {
 			return err
 		}
-		err = copyFileIsolated(ctx, path, dst)
+		err = copyFileFromPinIsolated(ctx, origPin, path, dst)
 		if err == nil {
 			err = dst.Sync()
 		}
@@ -969,10 +1056,11 @@ func copyTableRowsFromConn(ctx context.Context, srcConn *sql.Conn, dstTx *sql.Tx
 }
 
 func inspectTableCopySpec(ctx context.Context, srcConn *sql.Conn, table string) (tableCopySpec, error) {
-	// Use pragma_table_xinfo so generated/hidden columns (hidden != 0) still
+	// Use PRAGMA table_xinfo so generated/hidden columns (hidden != 0) still
 	// register as user-defined identifiers when choosing an unshadowed physical
-	// rowid alias, while keeping only writable ordinary columns in spec.cols.
-	rows, err := srcConn.QueryContext(ctx, "SELECT name, type, pk, hidden FROM pragma_table_xinfo(?, 'main') ORDER BY cid", table)
+	// rowid alias, while keeping only writable ordinary columns in spec.cols
+	// even if a user table is named pragma_table_xinfo.
+	rows, err := srcConn.QueryContext(ctx, fmt.Sprintf("PRAGMA main.table_xinfo(%s)", quote(table)))
 	if err != nil {
 		return tableCopySpec{}, err
 	}
@@ -982,9 +1070,10 @@ func inspectTableCopySpec(ctx context.Context, srcConn *sql.Conn, table string) 
 	var pkCount int
 	var pkType string
 	for rows.Next() {
+		var cid, notnull, pk, hidden int
 		var c, colType string
-		var pk, hidden int
-		if err = rows.Scan(&c, &colType, &pk, &hidden); err != nil {
+		var dflt any
+		if err = rows.Scan(&cid, &c, &colType, &notnull, &dflt, &pk, &hidden); err != nil {
 			return tableCopySpec{}, err
 		}
 		userCols[asciiLower(c)] = true

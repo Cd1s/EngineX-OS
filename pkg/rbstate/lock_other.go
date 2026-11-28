@@ -8,3 +8,8 @@ import "time"
 func LockVolume(mount string, wait time.Duration) (unlock func(), err error) {
 	return func() {}, nil
 }
+
+// LockDatabaseDir is a no-op off Linux, where no deck runs.
+func LockDatabaseDir(dir string, wait time.Duration) (unlock func(), err error) {
+	return func() {}, nil
+}
