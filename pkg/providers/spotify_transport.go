@@ -88,10 +88,10 @@ func (n *spotifyProtocol) countryCode(ctx context.Context) string {
 // A caller's request context bounds the body; a slow transfer is not aborted by
 // the JSON client's 30-second total timeout. Keep its transport and test hooks.
 func spotifyMediaClient(c *http.Client) *http.Client {
+	media := *client(c) // the providers' redirect rule
 	if c == nil {
 		c = http.DefaultClient
 	}
-	media := *c
 	media.Timeout = 0
 	transport := c.Transport
 	if transport == nil {

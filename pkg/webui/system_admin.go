@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -672,18 +673,38 @@ func (s *Server) unmountRemote(ctx context.Context, m *RemoteMount) error {
 	return err
 }
 
-func (s *Server) syncMountToNAS(m RemoteMount) {
-	if strings.ToLower(m.Protocol) == "webdav" {
-		scheme := "http"
-		if m.Port == 443 || strings.HasPrefix(m.Host, "https://") {
+// mountTarget is where a mount's credentials go: its protocol, the scheme of a WebDAV
+// mount, its server, port and remote path (a trailing or doubled slash does not count).
+func mountTarget(m RemoteMount) string {
+	host := strings.ToLower(strings.TrimSpace(m.Host))
+	scheme := ""
+	if strings.EqualFold(m.Protocol, "webdav") {
+		scheme = "http"
+		if m.Port == 443 || strings.HasPrefix(host, "https://") {
 			scheme = "https"
 		}
-		cleanHost := strings.TrimPrefix(strings.TrimPrefix(m.Host, "http://"), "https://")
-		urlStr := fmt.Sprintf("%s://%s", scheme, cleanHost)
-		if m.Port > 0 && m.Port != 80 && m.Port != 443 && !strings.Contains(cleanHost, ":") {
-			urlStr = fmt.Sprintf("%s://%s:%d", scheme, cleanHost, m.Port)
-		}
-		urlStr = fmt.Sprintf("%s/%s", strings.TrimSuffix(urlStr, "/"), strings.TrimPrefix(m.RemotePath, "/"))
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(host, "http://"), "https://"), "/")
+	return strings.Join([]string{strings.ToLower(m.Protocol), scheme, host, strconv.Itoa(m.Port), path.Clean("/" + strings.TrimSpace(m.RemotePath))}, "\x00")
+}
+
+// mountWebDAVURL is the address of a WebDAV mount.
+func mountWebDAVURL(m RemoteMount) string {
+	scheme := "http"
+	if m.Port == 443 || strings.HasPrefix(m.Host, "https://") {
+		scheme = "https"
+	}
+	cleanHost := strings.TrimPrefix(strings.TrimPrefix(m.Host, "http://"), "https://")
+	urlStr := fmt.Sprintf("%s://%s", scheme, cleanHost)
+	if m.Port > 0 && m.Port != 80 && m.Port != 443 && !strings.Contains(cleanHost, ":") {
+		urlStr = fmt.Sprintf("%s://%s:%d", scheme, cleanHost, m.Port)
+	}
+	return fmt.Sprintf("%s/%s", strings.TrimSuffix(urlStr, "/"), strings.TrimPrefix(m.RemotePath, "/"))
+}
+
+func (s *Server) syncMountToNAS(m RemoteMount) {
+	if strings.ToLower(m.Protocol) == "webdav" {
+		urlStr := mountWebDAVURL(m)
 		nasCfg := providers.NASConfig{
 			Protocol: "webdav",
 			URL:      urlStr,
@@ -691,7 +712,16 @@ func (s *Server) syncMountToNAS(m RemoteMount) {
 			Password: m.Password,
 			Enabled:  m.Enabled,
 		}
-		_ = providers.SaveJSON(s.nasConfigPath(), nasCfg)
+		f, err := s.readNASFileLocked() // the server lists stay
+		if err != nil {
+			log.Printf("webui: mount not synced to the network sources: %v", err)
+			return // a file that cannot be read is never overwritten
+		}
+		if nasTarget(nasCfg) != nasTarget(f.NASConfig) {
+			f.Name = ""
+		}
+		f.NASConfig = nasCfg
+		_ = s.saveNASFileLocked(&f)
 	}
 }
 
@@ -811,6 +841,14 @@ func (s *Server) handleMountsPost(w http.ResponseWriter, r *http.Request) {
 
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
+	// A WebDAV mount is synced to nas.json: nothing changes when that cannot be read
+	// (WebDAV round 4), so the two files never disagree.
+	nf, nasErr := s.readNASFileLocked()
+	if nasErr != nil && strings.EqualFold(proto, "webdav") {
+		fail(w, http.StatusInternalServerError, errNASFile)
+		return
+	}
+	defer s.resetNASIfMoved(nf.NASConfig)
 
 	list := s.loadMountsLocked()
 	id := in.ID
@@ -829,8 +867,8 @@ func (s *Server) handleMountsPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pass := in.Password
-	if (pass == "" || pass == "***") && existingIdx >= 0 {
-		pass = list[existingIdx].Password
+	if pass == "***" {
+		pass = ""
 	}
 
 	m := RemoteMount{
@@ -845,6 +883,12 @@ func (s *Server) handleMountsPost(w http.ResponseWriter, r *http.Request) {
 		MountPoint: mountPoint,
 		Enabled:    enabled,
 		Options:    strings.TrimSpace(in.Options),
+	}
+	// An empty or "***" password keeps the saved one only for the same server, port and
+	// path (the rule of every other editor): a mount moved to another address never takes
+	// the old one's password along, and neither does the NAS source it syncs to.
+	if pass == "" && existingIdx >= 0 && mountTarget(list[existingIdx]) == mountTarget(m) {
+		m.Password = list[existingIdx].Password
 	}
 
 	// BH-GC2-14: a share switched off is unmounted, a changed one is mounted afresh, and a mount
@@ -908,6 +952,8 @@ func (s *Server) handleMountsDelete(w http.ResponseWriter, r *http.Request) {
 
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
+	nf, nasErr := s.readNASFileLocked()
+	defer s.resetNASIfMoved(nf.NASConfig)
 
 	list := s.loadMountsLocked()
 	found := -1
@@ -923,6 +969,10 @@ func (s *Server) handleMountsDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	target := list[found]
+	if nasErr != nil && strings.EqualFold(target.Protocol, "webdav") {
+		fail(w, http.StatusInternalServerError, errNASFile) // its NAS source cannot be dropped: nothing changes
+		return
+	}
 	_ = s.unmountRemote(r.Context(), &target)
 	list = append(list[:found], list[found+1:]...)
 
@@ -941,8 +991,9 @@ func (s *Server) handleMountsDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		if left != nil {
 			s.syncMountToNAS(*left)
-		} else {
-			_ = os.Remove(s.nasConfigPath())
+		} else if f, err := s.readNASFileLocked(); err == nil { // the server lists stay
+			f.NASConfig, f.Name = providers.NASConfig{}, ""
+			_ = s.saveNASFileLocked(&f)
 		}
 	}
 

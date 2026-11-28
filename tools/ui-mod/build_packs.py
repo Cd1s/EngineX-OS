@@ -470,7 +470,7 @@ TIDAL_OPEN_530 = """	function scTidalProvider() {
 	function scOpen(id) {
 		if (!id || !scUiLoaded || scSources.indexOf(id) < 0) return
 		if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) {
-			if (id !== "rekordbox") {
+			if (id !== "rekordbox" && id !== "nas") {
 				root.scLoginOpen = id
 				scLoginBegin(id)
 			}
@@ -503,7 +503,7 @@ TIDAL_OPEN_504 = """
 	function scOpen(id) {
 		if (!id || !scUiLoaded || scSources.indexOf(id) < 0) return
 		if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) {
-			if (id !== "rekordbox") {
+			if (id !== "rekordbox" && id !== "nas") {
 				root.scLoginOpen = id
 				scLoginBegin(id)
 			}
@@ -4031,9 +4031,11 @@ SERVICES_MAIN = """
 	property string scRekordboxName: "" // the computer with rekordbox on Pro DJ Link, while there is one
 	// "Apple Music (EngineX)" is the third-party service on the gateway; Engine's own Apple Music is a row of its own and keeps its name (#323).
 	// The Sources list shows these in this order after the drives and Link sources:
-	// the computer with rekordbox is a library on the link, so it comes before the services.
+	// the computer with rekordbox and a configured NAS are local libraries, so they come before the services.
 	readonly property var scServices: [
 		{ id: "rekordbox", name: scRekordboxName ? "rekordbox (" + scRekordboxName + ")" : "rekordbox" },
+		{ id: "nas", name: "NAS" },
+		{ id: "webdav", name: "WebDAV" },
 		{ id: "tidal", name: "TIDAL" },
 		{ id: "netease", name: scT("NetEase Cloud Music") },
 		{ id: "spotify", name: "Spotify" },
@@ -4061,6 +4063,9 @@ SERVICES_MAIN = """
 		if (id === "soundcloud") return "qrc:/@ICONS@/SourceSoundCloudColored.png"
 		if (id === "beatport") return "qrc:/@ICONS@/SourceBeatport%20LINKColored.png"
 		if (id === "rekordbox") return "qrc:/@ICONS@/SourceEngineRemoteLibrary.png"
+		if (id === "nas") return "qrc:/@ICONS@/SourceNetwork.png"
+		if (id.indexOf("nas:") === 0) return "qrc:/@ICONS@/SourceNetwork.png" // the entry of a NAS server in Sources
+		if (id.indexOf("webdav:") === 0) return "file:///data/enginex/ui/icons/webdav.png" // the entry of a WebDAV server
 		return "file:///data/enginex/ui/icons/" + id + ".png"
 	}
 	// The gateway appends " [128 BPM 8A]" to a row's label; see labelWithBPM.
@@ -4579,6 +4584,10 @@ SERVICES_MAIN = """
 		scTidalSynthetic = !!v.tidalSynthetic
 		if (v.scope !== undefined) scScope = v.scope
 		scRekordboxName = v.rekordboxName || ""
+		scWebdavOn = !!v.webdavOn
+		scNasOn = !!v.nasOn
+		if (JSON.stringify(v.webdav || []) !== JSON.stringify(scWebdav)) scWebdav = v.webdav || []
+		if (JSON.stringify(v.nas || []) !== JSON.stringify(scNasServers)) scNasServers = v.nas || []
 		scBroadcastOn = !!v.broadcastEnabled
 		const prevUpfaderEcho = scUpfaderEcho
 		scUpfaderEcho = !!v.upfaderEcho
@@ -4853,6 +4862,115 @@ SERVICES_MAIN = """
 				if (v.status === "done") scLoginDone()
 				else scLoginStatus = v.status
 			})
+		}
+	}
+	// WebDAV and NAS servers (maintainer, 2026-11-27): several of each, each its own
+	// entry in Sources under its name. They are added, edited and removed in the QR
+	// panel: on the phone page the code opens, or here with the stock text input of
+	// Engine, one field after another. The gateway keeps them, with their passwords, in
+	// the owner settings.
+	property bool scWebdavOn: false
+	property bool scNasOn: false
+	property var scWebdav: []
+	property var scNasServers: []
+	property bool scServerTyping: false
+	property string scServerError: ""
+	property string scServerKind: "webdav"
+	property var scServerDraft: ({})
+	property int scServerStep: 0
+	readonly property var scServerSteps: ["url", "username", "password", "name"]
+@SERVER_INPUT@
+	function scServersOf(kind) { return kind === "nas" ? scNasServers : scWebdav }
+	// The Sources list: the services switched on, and one entry per enabled server
+	// (its Sources ID and its name) where its kind is listed.
+	readonly property var scSourceEntries: {
+		const out = []
+		for (const s of scServices) {
+			if (s.id === "nas" || s.id === "webdav") {
+				for (const v of scServersOf(s.id)) {
+					if (scSources.indexOf(v.scope) >= 0) out.push({id: v.scope, name: v.name, kind: s.id})
+				}
+			} else if (scSources.indexOf(s.id) >= 0) out.push({id: s.id, name: s.name, kind: s.id})
+		}
+		return out
+	}
+	function scFindObject(item, name) {
+		if (!item) return null
+		if (item.objectName === name) return item
+		for (let i = 0; i < item.children.length; i++) {
+			const found = scFindObject(item.children[i], name)
+			if (found) return found
+		}
+		return null
+	}
+	// One step of the entry on the deck: title, label, text and placeholder of the field.
+	function scServerField(field) {
+		const d = scServerDraft, step = scServerSteps[scServerStep], nas = scServerKind === "nas"
+		const scheme = nas ? "smb://" : "https://"
+		field.title = root.scT(d.id ? (nas ? "Edit NAS server" : "Edit WebDAV server") : (nas ? "Add NAS server" : "Add WebDAV server"))
+		field.label = root.scT({url: "Server address", username: "Username", password: "Password", name: "Name (optional)"}[step])
+		field.text = step === "password" ? "" : String(d[step] || (step === "url" ? scheme : ""))
+		// An empty password keeps the saved one only for the same address (the server
+		// refuses to carry it to another one), so the hint shows only then.
+		field.placeholder = step === "url" ? scheme : step === "password" && d.hasPassword && d.url === d.from ? root.scT("Leave empty to keep the saved password")
+			: step === "name" ? String(d.url || "").replace(/^[a-z]+:\\/\\//i, "").split("/")[0] : ""
+		field.doneButtonTitle = root.scT(scServerStep < scServerSteps.length - 1 ? "Next" : "Done")
+		field.cancelButtonTitle = root.scT("Cancel")
+		if (step === "password") {
+			const input = scFindObject(field, "EmbeddedTextInput")
+			if (input) input.echoMode = TextInput.Password
+		}
+	}
+	// Add (no server) or edit a server of a kind on the deck.
+	function scServerEdit(kind, server) {
+		if (!scServerInput) return
+		scServerKind = kind
+		scServerError = ""
+		scServerDraft = server ? {id: server.id, url: server.url || "", from: server.url || "", username: server.username || "", password: "", name: server.name || "", hasPassword: !!server.hasPassword}
+			: {id: "", url: "", from: "", username: "", password: "", name: "", hasPassword: false}
+		scServerStep = 0
+		scServerTyping = true
+		root.openDialogComponent(scServerInput)
+	}
+	function scServerNext(text) {
+		const d = Object.assign({}, scServerDraft)
+		d[scServerSteps[scServerStep]] = String(text)
+		scServerDraft = d
+		if (scServerStep < scServerSteps.length - 1) {
+			scServerStep++
+			Qt.callLater(function() { root.openDialogComponent(scServerInput) })
+			return
+		}
+		scServerTyping = false
+		scServerSave(scServerKind, {action: d.id ? "edit" : "add", id: d.id, name: d.name, url: d.url, username: d.username, password: d.password})
+	}
+	function scServerStop() { scServerTyping = false }
+	function scServerSave(kind, change) {
+		const x = new XMLHttpRequest()
+		x.open("POST", "http://127.0.0.1:8080/v1/enginex/servers/" + kind)
+		x.setRequestHeader("Content-Type", "application/json")
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4) return
+			if (x.status === 200) {
+				scServerError = ""
+				const servers = JSON.parse(x.responseText).servers || []
+				if (kind === "nas") scNasServers = servers
+				else scWebdav = servers
+				scCall("")
+				return
+			}
+			scServerError = root.scT(x.status === 400 ? (kind === "nas" ? "Enter the server address with smb://" : "Enter the server address with http:// or https://")
+				: x.status === 409 ? (String(x.responseText).indexOf("already") >= 0 ? "This server is already added" : "No more servers can be added")
+				: "Could not save the server")
+		}
+		x.send(JSON.stringify(change))
+	}
+	// The WebDAV and NAS rows in Settings > Services. Turned on with no server yet, a row opens the panel to add one.
+	function scSwitchServers(kind, on) {
+		scCall(kind + "=" + (on ? 1 : 0))
+		if (on && scServersOf(kind).length === 0) {
+			root.scLoginOpen = ""
+			scLoginBegin(kind)
 		}
 	}
 	// The playlists are one level down; open them so a source never looks empty.
@@ -5612,13 +5730,25 @@ USB_PREPARING_BANNER = """
 		}
 """
 
+# One field of a WebDAV or NAS server typed on the deck: Engine's TextInputDialog, as
+# Track Info's metadata edit uses it. A step closed without Done (Cancel) ends the entry.
+SERVER_INPUT = """	readonly property Component scServerInput: ScMsg.TextInputDialog {
+		property bool scDone: false
+		onDone: text => { scDone = true; root.scServerNext(text) }
+		Component.onCompleted: root.scServerField(field)
+		Component.onDestruction: if (!scDone) root.scServerStop()
+	}
+"""
+
 LOGIN_DIALOG = """
 		Rectangle {
 			anchors.fill: parent
 			z: 1000000
-			visible: root.scLogin !== ""
+			visible: root.scLogin !== "" && !root.scServerTyping // the stock text input of Engine opens below this panel
 			color: "#e0000000"
 			readonly property var service: root.scServices.find(s => s.id === root.scLogin)
+			readonly property bool servers: root.scLogin === "webdav" || root.scLogin === "nas"
+			readonly property var serverList: root.scServersOf(root.scLogin)
 			MouseArea { anchors.fill: parent }
 			Rectangle {
 				anchors.centerIn: parent
@@ -5673,10 +5803,12 @@ LOGIN_DIALOG = """
 				Text {
 					x: 620; y: 240
 					width: 380
+					visible: !parent.parent.servers || parent.parent.serverList.length === 0
 					wrapMode: Text.WordWrap
 					color: Style.font02Color
 					font: Style.fontH1
 					text: {
+						if (parent.parent.servers && root.scServerError) return root.scServerError
 						if (root.scLoginStatus === "error") return root.scT("Couldn't load the login code. Tap the code to retry.")
 						if (root.scLoginStatus === "expired") return root.scT("The QR code expired.")
 						if (root.scLoginStatus === "scanned") return root.scT("Confirm on your phone")
@@ -5688,6 +5820,7 @@ LOGIN_DIALOG = """
 					x: 620; y: 520
 					width: 380; height: 80
 					radius: 16
+					visible: !parent.parent.servers
 					color: closeArea.pressed ? Style.focus02Color : Style.surface03Color
 					Text {
 						anchors.centerIn: parent
@@ -5699,6 +5832,104 @@ LOGIN_DIALOG = """
 						id: closeArea
 						anchors.fill: parent
 						onClicked: { root.scLogin = ""; root.scLoginOpen = "" }
+					}
+				}
+				// WebDAV or NAS: the servers (tap one to edit it on the deck), typing one in, done.
+				Text {
+					x: 620; y: 240
+					width: 380
+					visible: parent.parent.servers && parent.parent.serverList.length > 0
+					wrapMode: Text.WordWrap
+					maximumLineCount: 2
+					elide: Text.ElideRight
+					color: Style.font02Color
+					font: Style.fontH2
+					text: root.scServerError || root.scT("Scan with your phone camera.")
+				}
+				ListView {
+					x: 620; y: 310
+					width: 380; height: 196
+					visible: parent.parent.servers
+					clip: true
+					spacing: 8
+					model: parent.parent.serverList
+					delegate: Rectangle {
+						id: scServer
+						width: 380; height: 60
+						radius: 12
+						property bool armed: false
+						color: editArea.pressed ? Style.focus02Color : Style.surface03Color
+						Text {
+							x: 16
+							width: 380 - 16 - 150
+							anchors.verticalCenter: parent.verticalCenter
+							elide: Text.ElideRight
+							text: modelData.name
+							color: Style.font02Color
+							font: Style.fontH2
+						}
+						MouseArea {
+							id: editArea
+							anchors { left: parent.left; top: parent.top; bottom: parent.bottom; right: removeArea.left }
+							onClicked: root.scServerEdit(root.scLogin, modelData)
+						}
+						MouseArea {
+							id: removeArea
+							anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
+							width: 150
+							onClicked: {
+								if (scServer.armed) root.scServerSave(root.scLogin, {action: "remove", id: modelData.id})
+								else scServer.armed = true
+							}
+							Text {
+								anchors.centerIn: parent
+								width: 140
+								horizontalAlignment: Text.AlignHCenter
+								wrapMode: Text.WordWrap
+								text: root.scT(scServer.armed ? "Tap again to remove" : "Remove")
+								color: Style.font02Color
+								font: Style.fontH3
+							}
+						}
+					}
+				}
+				Rectangle {
+					x: 620; y: 520
+					width: 182; height: 80
+					radius: 16
+					visible: parent.parent.servers && !!root.scServerInput
+					color: addArea.pressed ? Style.focus02Color : Style.surface03Color
+					Text {
+						anchors.centerIn: parent
+						width: 170
+						horizontalAlignment: Text.AlignHCenter
+						wrapMode: Text.WordWrap
+						text: root.scT("Enter manually")
+						color: Style.font02Color
+						font: Style.fontH2
+					}
+					MouseArea {
+						id: addArea
+						anchors.fill: parent
+						onClicked: root.scServerEdit(root.scLogin, null)
+					}
+				}
+				Rectangle {
+					x: 818; y: 520
+					width: 182; height: 80
+					radius: 16
+					visible: parent.parent.servers
+					color: doneArea.pressed ? Style.focus02Color : Style.surface03Color
+					Text {
+						anchors.centerIn: parent
+						text: root.scT("Done")
+						color: Style.font02Color
+						font: Style.fontH1
+					}
+					MouseArea {
+						id: doneArea
+						anchors.fill: parent
+						onClicked: { root.scServerError = ""; root.scLoginDone() }
 					}
 				}
 			}
@@ -5894,7 +6125,7 @@ SOURCE_FOOTER = """
 		}
 		Repeater {
 			id: scFooterRepeater
-			model: root.scServices.filter(s => root.scSources.indexOf(s.id) >= 0)
+			model: root.scSourceEntries // the services switched on and one entry per server
 			MouseArea {
 				width: connectedSource.width
 				height: 108
@@ -5924,7 +6155,7 @@ SOURCE_FOOTER = """
 				MouseArea {
 					anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
 					width: 140
-					visible: modelData.id !== "tidal" && modelData.id !== "rekordbox"
+					visible: modelData.id !== "tidal" && modelData.id !== "rekordbox" && modelData.id !== "nas" && modelData.kind !== "nas" && modelData.kind !== "webdav"
 					onClicked: { root.scLoginOpen = ""; root.scLoginBegin(modelData.id) }
 					Text {
 						anchors.centerIn: parent
@@ -6009,7 +6240,7 @@ BLUETOOTH_SELECT = [
 
 STREAM_SWITCHES = """
 	Repeater {
-		model: root.scServices.filter(s => s.id !== "rekordbox") // a computer on the link, not a service to switch
+		model: root.scServices.filter(s => s.id !== "rekordbox").filter(s => s.id !== "nas").filter(s => s.id !== "webdav") // libraries, not services to switch
 		SwitchEntry {
 			text: modelData.name
 			visible: !root.scOff("gateway")
@@ -6018,6 +6249,45 @@ STREAM_SWITCHES = """
 			checked: root.scSources.indexOf(modelData.id) >= 0
 			onClicked: root.scSetSource(modelData.id, !(root.scSources.indexOf(modelData.id) >= 0))
 		}
+	}
+"""
+
+# Settings > Services > Cloud (maintainer, 2026-11-27: under Cloud, with Dropbox, not with the
+# streaming services): NAS and WebDAV, each turned on and off for all its servers, and the
+# button that opens the panel where its servers are added, edited and removed.
+CLOUD_ENTRIES = """
+	labelVisible: true
+	SwitchEntry {
+		text: "NAS"
+		objectName: "EngineX_NASSwitch"
+		visible: !root.scOff("gateway")
+		icon.source: root.scIcon("nas")
+		icon.useOriginal: true
+		checkedExternally: root.scNasOn
+		onClicked: root.scSwitchServers("nas", !root.scNasOn)
+	}
+	PrefsButtonEntry {
+		text: "NAS Servers"
+		objectName: "EngineX_NASServers"
+		buttonText: "Edit"
+		visible: !root.scOff("gateway") && root.scNasOn
+		onClicked: { root.scLoginOpen = ""; root.scLoginBegin("nas") }
+	}
+	SwitchEntry {
+		text: "WebDAV"
+		objectName: "EngineX_WebDAVSwitch"
+		visible: !root.scOff("gateway")
+		icon.source: root.scIcon("webdav")
+		icon.useOriginal: true
+		checkedExternally: root.scWebdavOn
+		onClicked: root.scSwitchServers("webdav", !root.scWebdavOn)
+	}
+	PrefsButtonEntry {
+		text: "WebDAV Servers"
+		objectName: "EngineX_WebDAVServers"
+		buttonText: "Edit"
+		visible: !root.scOff("gateway") && root.scWebdavOn
+		onClicked: { root.scLoginOpen = ""; root.scLoginBegin("webdav") }
 	}
 """
 
@@ -8151,7 +8421,8 @@ def edits(dev: bool):
                      .replace("@STOCK_FADER_REVERSE@", "true" if v53() else "false")
                      .replace("@TIDAL_SELECT@", TIDAL_SELECT_530 if v53() else "")
                      .replace("@TIDAL_PAIRING@", TIDAL_PAIRING_530 if v53() else "")
-                     .replace("@TIDAL_LOGIN_PENDING@", "\tproperty bool scTidalLoginPending: false" if v53() else ""))
+                     .replace("@TIDAL_LOGIN_PENDING@", "\tproperty bool scTidalLoginPending: false" if v53() else "")
+                     .replace("@SERVER_INPUT@", SERVER_INPUT if v53() else "\treadonly property Component scServerInput: null"))
     services = (services_main + FX_CONTROLLER + (SETTINGS_COPY_MAIN if v53() else "")).replace("@ICONS@", "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons") + (SMART_SYNC_MAIN if v53() else "")
     out = PatchDict({
         # The file name shadows the native SoundSwitch context object.
@@ -8189,6 +8460,9 @@ def edits(dev: bool):
         ROOT + "Items/MessageBoxes/UnsupportedStorageDeviceDetectedMessageBox.qml": [(
             "function onUnsupportedStorageDeviceDetected(name) {\n", "function onUnsupportedStorageDeviceDetected(name) {\n			return\n")],
         ROOT + "EmbeddedMain.qml": [
+            # Engine's own text input (Items/MessageBoxes/TextInputDialog.qml) for WebDAV and
+            # NAS servers typed on the deck; qualified, so no stock name changes meaning.
+            *([('import "Items/Base"\n', 'import "Items/Base"\nimport "Items/MessageBoxes" as ScMsg\n')] if v53() else []),
             # The actual main view has finished loading and the stock splash has
             # disappeared. Do not equate resource registration with UI readiness.
             ('objectName: "SplashScreenLoader"', 'objectName: "SplashScreenLoader"' + BOOT_READY),
@@ -8348,6 +8622,9 @@ def edits(dev: bool):
 \t\t\t""" + ("CrossfaderCalibration {}" if v53() else "CrossfaderCalibration { }")),
         ],
         **({v + "Bluetooth/BluetoothSelect.qml": BLUETOOTH_SELECT} if v53() else {}),
+        prefs + "Entries/CloudServices.qml": [
+            ('	label: "Cloud"\n', '	label: "Cloud"\n' + CLOUD_ENTRIES),
+        ],
         prefs + "Entries/StreamingServices.qml": [
             ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(provider.name) < 0\n'),
             ('import "Base"\n', 'import QtQuick.Layouts 1.12\nimport "Base"\n'),

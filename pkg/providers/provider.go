@@ -57,11 +57,17 @@ type Provider interface {
 const GuestPlaylist = "[Guest / 临时加歌]"
 const OwnerPlaylist = "[Stream / 临时下载]"
 
+// client is the HTTP client of every provider request: c (nil: one with a 30 s
+// timeout) with the redirect rule of CheckRedirect in front of its own policy, so a
+// request that carries a credential follows redirects only within its first URL's
+// origin and no redirect carries a Referer (#335 round 12). c is not changed.
 func client(c *http.Client) *http.Client {
-	if c != nil {
-		return c
+	if c == nil {
+		c = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &http.Client{Timeout: 30 * time.Second}
+	lc := *c
+	lc.CheckRedirect = CheckRedirect(false, c.CheckRedirect)
+	return &lc
 }
 
 // JSON performs bounded HTTP I/O and deliberately omits response bodies from

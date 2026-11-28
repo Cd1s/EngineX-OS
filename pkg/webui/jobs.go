@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -55,6 +56,9 @@ type Job struct {
 	// Set when the TIDAL gateway already downloaded the file for playback.
 	matched providers.Track
 	dl      *deemixclient.Download
+	// nasGen is the NAS generation the track was listed at: a NAS job of an older
+	// one imports nothing and absorbs no newer job (#335).
+	nasGen uint64
 }
 type Pipeline struct {
 	Guard   *resourceguard.Guard
@@ -82,6 +86,21 @@ type Jobs struct {
 	// Playlists each streamed track was queued for, so a guest playing a
 	// track the owner already downloaded still gets it in the guest playlist.
 	queued map[string]bool
+	// nasGen counts NAS server, share or root changes: a NAS track listed before
+	// one is neither played nor filed (#335).
+	nasGen atomic.Uint64
+	// importMu is held across a NAS job's last generation check and its library
+	// import; the reset takes it too, so no import of the old NAS ends after it.
+	importMu sync.Mutex
+	// nasRoot is the current NAS root (nasRootID), under mu: the index file records
+	// it, and NAS entries the file holds for another root are not used (#335).
+	nasRoot string
+	// nasUnknown, under mu: the NAS root is not known in this run (nas.json could not
+	// be read at start-up). The index keeps the root it was filed under, and none of
+	// its NAS entries is used until a NAS reset sets the root (WebDAV round 4).
+	nasUnknown bool
+	// pause is nil except in tests that order two loads of one track.
+	pause func(point string)
 
 	// netease returns the NetEase login a session may fetch audio with, or nil.
 	netease func(session string, guest bool) *providers.Netease
@@ -95,6 +114,7 @@ type Jobs struct {
 	spotify       func() *providers.Spotify
 	applemusic    func() *providers.AppleMusic
 	selfHosted    func() *providers.SelfHostedProvider
+	server        func(k serverKind, id string) *providers.SelfHostedProvider // a server a row names
 	bpm           *providers.BPMStore
 }
 type fetched struct {
@@ -123,9 +143,24 @@ func trackKey(t providers.Track) string { return t.Provider + ":" + t.ID }
 // File returns a finished download of t that is still on disk, including one
 // saved before a restart.
 func (j *Jobs) File(t providers.Track) string {
+	return j.FileAt(t, j.NASGen())
+}
+
+// FileAt is File for a track listed at NAS generation gen: a NAS track gets
+// nothing once the NAS changed since. The check and the lookup are one step
+// under j.mu, which the reset takes (#335).
+func (j *Jobs) FileAt(t providers.Track, gen uint64) string {
 	key := trackKey(t)
 	j.mu.Lock()
+	if isNASKey(key) && gen != j.nasGen.Load() {
+		j.mu.Unlock()
+		return ""
+	}
 	path := ""
+	if isNASKey(key) && j.nasUnknown {
+		j.mu.Unlock()
+		return ""
+	}
 	if f, ok := j.files[key]; ok {
 		path = f.dl.Path
 	} else if name := j.loadSources()[key]; name != "" && j.p.Deemix != nil {
@@ -140,7 +175,9 @@ func (j *Jobs) File(t providers.Track) string {
 		// Recently used: Trim evicts by modification time.
 		now := time.Now()
 		os.Chtimes(dl.Path, now, now)
-		j.putFile(key, fetched{t, dl})
+		if !j.putFileIfGen(key, fetched{t, dl}, gen) {
+			return ""
+		}
 		return dl.Path
 	} else if j.p.Deemix != nil {
 		// A finished provider file may predate the source index (or have been
@@ -219,6 +256,10 @@ func (j *Jobs) dropUnusable(t providers.Track) {
 
 const sourcesFile = ".sources.json"
 
+// sourcesRootKey holds the NAS root in the index file; without a ":" it is
+// never a track key.
+const sourcesRootKey = "nasRoot"
+
 // loadSources reads the saved index once; j.mu must be held.
 func (j *Jobs) loadSources() map[string]string {
 	if j.sources == nil {
@@ -227,6 +268,17 @@ func (j *Jobs) loadSources() map[string]string {
 			if b, err := os.ReadFile(filepath.Join(j.p.Deemix.DownloadDir, sourcesFile)); err == nil {
 				json.Unmarshal(b, &j.sources)
 			}
+			// NAS entries of an index filed for another root, or written before the root was
+			// recorded, are not used (#335; maintainer, 2026-11-27: browse the NAS again once). A Jobs without
+			// a server knows no root and keeps a tagged index as it is.
+			if root := j.sources[sourcesRootKey]; root == "" || (j.nasRoot != "" && root != j.nasRoot) {
+				for k := range j.sources {
+					if isNASKey(k) {
+						delete(j.sources, k)
+					}
+				}
+			}
+			delete(j.sources, sourcesRootKey)
 		}
 	}
 	return j.sources
@@ -252,10 +304,173 @@ func (j *Jobs) saveSource(key, path string) {
 			delete(sources, k)
 		}
 	}
-	b, _ := json.Marshal(sources)
-	tmp := filepath.Join(dir, sourcesFile+".tmp")
-	if os.WriteFile(tmp, b, 0o644) == nil {
-		os.Rename(tmp, filepath.Join(dir, sourcesFile))
+	j.writeSources()
+}
+
+// writeSources stores the source index owner-only and atomically; j.mu must be held.
+func (j *Jobs) writeSources() {
+	out := map[string]string{sourcesRootKey: j.nasRoot}
+	for k, v := range j.sources {
+		out[k] = v
+	}
+	if err := saveState(filepath.Join(j.p.Deemix.DownloadDir, sourcesFile), out); err != nil {
+		log.Printf("webui: source index not saved (%T)", err)
+	}
+}
+
+var errNASChanged = errors.New("the NAS changed since this track was listed")
+
+// nasMoved reports whether v is a NAS job and the NAS changed since its track was listed.
+func (j *Jobs) nasMoved(v Job) bool {
+	return isNASKey(trackKey(v.Track)) && v.nasGen != j.nasGen.Load()
+}
+
+// NASGen is the NAS generation; it changes when the NAS server, share or root does.
+func (j *Jobs) NASGen() uint64 {
+	if j == nil {
+		return 0
+	}
+	return j.nasGen.Load()
+}
+
+func isNASKey(key string) bool {
+	p, id, ok := strings.Cut(key, ":")
+	return ok && isNASTrack(p, id)
+}
+
+// resetNAS forgets every NAS download, queue mark and index entry after the NAS
+// server, share or root changed: the same track ID may name another file now.
+//
+// also runs under the same locks right after the bump (the Stems reset), so the
+// generation and the state it guards change in one step.
+func (j *Jobs) resetNAS(root string, also func()) {
+	if j == nil {
+		if also != nil {
+			also()
+		}
+		return
+	}
+	j.importMu.Lock() // waits for an import running now; later ones see the new generation
+	defer j.importMu.Unlock()
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.nasGen.Add(1)
+	j.nasRoot, j.nasUnknown = root, false
+	if j.pause != nil {
+		j.pause("reset-bumped")
+	}
+	if also != nil {
+		also()
+	}
+	for k := range j.files {
+		if isNASKey(k) {
+			delete(j.files, k)
+		}
+	}
+	for k := range j.queued {
+		if _, tk, _ := strings.Cut(k, "\x00"); isNASKey(tk) {
+			delete(j.queued, k)
+		}
+	}
+	if j.p.Deemix == nil {
+		return
+	}
+	changed := false
+	for k := range j.loadSources() {
+		if isNASKey(k) {
+			delete(j.sources, k)
+			changed = true
+		}
+	}
+	if changed {
+		j.writeSources()
+	}
+}
+
+// dropServers forgets the downloads of the WebDAV and NAS servers in gone
+// (removed, or moved to another address): their files, queue marks and index
+// entries. Their cache files stay until the cache trims them; nothing finds them
+// under that server again, and a server added again has a new identity, so work
+// still running for the old one cannot hand its audio to the new one (#335).
+func (j *Jobs) dropServers(gone map[string]bool) {
+	if j == nil {
+		return
+	}
+	dropped := func(key string) bool {
+		provider, id, _ := strings.Cut(key, ":")
+		_, isServer := kindOfProvider(provider)
+		server, _, ok := splitServerID(id)
+		return isServer && ok && gone[server]
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	for k := range j.files {
+		if dropped(k) {
+			delete(j.files, k)
+		}
+	}
+	for k := range j.queued {
+		if _, tk, _ := strings.Cut(k, "\x00"); dropped(tk) {
+			delete(j.queued, k)
+		}
+	}
+	if j.p.Deemix == nil {
+		return
+	}
+	changed := false
+	for k := range j.loadSources() {
+		if dropped(k) {
+			delete(j.sources, k)
+			changed = true
+		}
+	}
+	if changed {
+		j.writeSources()
+	}
+}
+
+// keepNASAsSavedLocked is the start-up of a run whose NAS root is not known (nas.json
+// could not be read, or names no server in the slot); j.mu must be held. The index
+// keeps the root it was filed under, so its NAS entries stay on disk for the next
+// start, and none of them is used in this run (FileAt) until adoptNAS.
+func (j *Jobs) keepNASAsSavedLocked() {
+	j.nasUnknown = true
+	j.nasRoot = ""
+	if j.p.Deemix == nil {
+		return
+	}
+	if b, err := readState(filepath.Join(j.p.Deemix.DownloadDir, sourcesFile)); err == nil {
+		var saved map[string]string
+		if json.Unmarshal(b, &saved) == nil {
+			j.nasRoot = saved[sourcesRootKey]
+		}
+	}
+}
+
+// adoptNAS ends a run whose NAS root was not known (keepNASAsSavedLocked) once the
+// root is read: the index's NAS entries stay when it was filed under root, as at a
+// start-up with that root, and go otherwise. No NAS work ran while the root was not
+// known, so the generation stays.
+func (j *Jobs) adoptNAS(root string) {
+	if j == nil {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	same := j.nasRoot == root
+	j.nasRoot, j.nasUnknown = root, false
+	if same || j.p.Deemix == nil {
+		return
+	}
+	changed := false
+	for k := range j.loadSources() {
+		if isNASKey(k) {
+			delete(j.sources, k)
+			changed = true
+		}
+	}
+	if changed {
+		j.writeSources()
 	}
 }
 
@@ -263,6 +478,12 @@ func (j *Jobs) saveSource(key, path string) {
 // of the same file. Playback never waits for analysis. Concurrent requests for
 // one track share a download; it continues if the waiting caller gives up.
 func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, guest bool) (string, error) {
+	return j.FetchAt(wait, session, t, guest, j.NASGen())
+}
+
+// FetchAt is Fetch for a track listed at NAS generation gen: once the NAS server,
+// share or root changed since, a NAS track is neither played nor filed (#335).
+func (j *Jobs) FetchAt(wait context.Context, session string, t providers.Track, guest bool, gen uint64) (string, error) {
 	if j.p.Catalog == nil || j.p.Deemix == nil {
 		return "", errors.New("pipeline is not configured")
 	}
@@ -273,15 +494,21 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 		// Check the cache and claim the download under one lock so a fetch
 		// finishing in between cannot trigger a second download.
 		j.mu.Lock()
+		moved := isNASKey(key) && gen != j.nasGen.Load()
 		f, done := j.files[key]
 		busy, ok := j.fetches[key]
-		if !ok && !done {
+		if !ok && !done && !moved {
 			j.fetches[key] = make(chan struct{})
 		}
 		j.mu.Unlock()
+		if moved {
+			return "", errNASChanged
+		}
 		if done {
 			if st, err := os.Stat(f.dl.Path); err == nil && st.Mode().IsRegular() {
-				j.queueImport(session, t, guest, f)
+				if !j.queueImport(session, t, guest, f, gen) {
+					return "", errNASChanged
+				}
 				return f.dl.Path, nil
 			}
 			j.mu.Lock()
@@ -294,8 +521,14 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 		if !ok {
 			break
 		}
+		if j.pause != nil {
+			j.pause("wait")
+		}
 		select {
 		case <-busy:
+			if j.pause != nil {
+				j.pause("woke")
+			}
 		case <-wait.Done():
 			return "", wait.Err()
 		}
@@ -314,18 +547,40 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 	}
 	j.addCover(ctx, t, dl)
 	f := fetched{matched, dl}
-	j.putFile(key, f)
+	if !j.putFileIfGen(key, f, gen) {
+		return "", errNASChanged
+	}
+	if j.pause != nil {
+		j.pause("filed")
+	}
 	// NetEase in Deemix mode downloaded the Deezer file: Deezer finds it as well.
 	if t.Provider == "netease" && matched.Provider == "deezer" {
 		j.putFile(trackKey(matched), f)
 	}
-	j.queueImport(session, t, guest, f)
+	if !j.queueImport(session, t, guest, f, gen) {
+		return "", errNASChanged
+	}
 	return dl.Path, nil
 }
 
 func (j *Jobs) putFile(key string, f fetched) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	j.putFileLocked(key, f)
+}
+
+// putFileIfGen is putFile for a download that began at NAS generation gen.
+func (j *Jobs) putFileIfGen(key string, f fetched, gen uint64) bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if isNASKey(key) && gen != j.nasGen.Load() {
+		return false
+	}
+	j.putFileLocked(key, f)
+	return true
+}
+
+func (j *Jobs) putFileLocked(key string, f fetched) {
 	if _, ok := j.files[key]; !ok && len(j.files) >= maxJobFiles {
 		for k := range j.files {
 			if j.fetches[k] == nil {
@@ -378,7 +633,7 @@ func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, g
 		return matched, dl, nil
 	case "netease":
 		return j.fromNeteaseMode(ctx, session, t, guest, progress)
-	case "webdav", "subsonic", "plex":
+	case "webdav", "subsonic", "plex", "smb":
 		dl, err := j.fromSelfHosted(ctx, t)
 		return t, dl, err
 	}
@@ -719,11 +974,25 @@ func soundCloudSearch(t providers.Track) string {
 
 // addCover embeds the artwork, which Engine reads from the file for its screens. A
 // missing cover is not worth failing a track over.
+func lookupNAS(f func() *providers.SelfHostedProvider) *providers.SelfHostedProvider {
+	if f == nil {
+		return nil
+	}
+	return f()
+}
+
 func (j *Jobs) addCover(ctx context.Context, t providers.Track, dl *deemixclient.Download) {
 	if t.CoverURL == "" {
 		return
 	}
-	if err := j.p.Deemix.EmbedCover(ctx, dl.Path, t.CoverURL); err != nil {
+	address := t.CoverURL
+	if isNASProvider(t.Provider) { // a saved row's cover holds no credentials: the NAS's are added back (#335)
+		if sh := j.selfHostedFor(t); sh != nil {
+			address = sh.AuthorizeURL(address)
+		}
+	}
+	// A signed NAS cover follows redirects only within its own origin (#335).
+	if err := j.p.Deemix.EmbedCover(credentialContext(ctx, address), dl.Path, address); err != nil {
 		log.Printf("stream-sync: no cover for track %s: %v", t.ID, err)
 	}
 }
@@ -897,21 +1166,38 @@ func (j *Jobs) fromNetease(ctx context.Context, n *providers.Netease, t provider
 	return t, dl, nil
 }
 
+// selfHostedFor is the server a NAS or WebDAV track is on: a row that names its
+// server is on that one; any other is the NAS slot's. nil when that server is gone,
+// disabled or switched off.
+func (j *Jobs) selfHostedFor(t providers.Track) *providers.SelfHostedProvider {
+	j.mu.Lock()
+	nas, server := j.selfHosted, j.server
+	j.mu.Unlock()
+	if k, id, ok := rowServer(t); ok {
+		if server == nil {
+			return nil
+		}
+		return server(k, id)
+	}
+	return lookupNAS(nas)
+}
+
 func (j *Jobs) fromSelfHosted(ctx context.Context, t providers.Track) (*deemixclient.Download, error) {
 	if j.p.Deemix == nil {
 		return nil, errors.New("nas: download cache unavailable")
 	}
-	j.mu.Lock()
-	lookup := j.selfHosted
-	j.mu.Unlock()
-	var sh *providers.SelfHostedProvider
-	if lookup != nil {
-		sh = lookup()
+	sh := j.selfHostedFor(t)
+	if _, _, ok := rowServer(t); ok && sh == nil {
+		return nil, errServerGone
 	}
 	if sh == nil {
 		return nil, fmt.Errorf("%s: NAS server is not enabled", t.Provider)
 	}
-	p, err := sh.DownloadTrack(ctx, t.ID, j.p.Deemix.DownloadDir)
+	ref := t.ID
+	if _, _, ok := rowServer(t); ok {
+		_, ref, _ = splitServerID(t.ID) // the path on that server
+	}
+	p, err := sh.DownloadTrack(ctx, ref, j.p.Deemix.DownloadDir)
 	if err != nil {
 		return nil, err
 	}
@@ -941,34 +1227,40 @@ func (j *Jobs) fromSelfHosted(ctx context.Context, t providers.Track) (*deemixcl
 
 // queueImport analyses and imports a streamed file once per target playlist.
 // A full queue only skips library import; the file is still playable.
-func (j *Jobs) queueImport(session string, t providers.Track, guest bool, f fetched) {
+//
+// gen is the NAS generation t was listed at. The check, the playlist mark and the
+// job are one step under j.mu, the lock the reset takes: once the NAS changed, a
+// NAS track queues nothing and queueImport reports false (#335).
+func (j *Jobs) queueImport(session string, t providers.Track, guest bool, f fetched, gen uint64) bool {
 	// No library (no front SD Engine Library): nothing to import into, so do not
 	// queue a job that can only end in "pipeline is not configured".
 	// A DJ set is played, not analysed: decoding hours of audio would exhaust memory.
-	if j.p.Library == nil || tooLongToAnalyse(t, f.dl.Path) {
-		return
-	}
-	key := providers.OwnerPlaylist + "\x00" + trackKey(t)
+	playlist := providers.OwnerPlaylist
 	if guest {
-		key = providers.GuestPlaylist + "\x00" + trackKey(t)
+		playlist = providers.GuestPlaylist
 	}
+	key := playlist + "\x00" + trackKey(t)
 	j.mu.Lock()
-	seen := j.queued[key]
-	if !seen && len(j.queued) >= maxJobFiles {
+	defer j.mu.Unlock()
+	if isNASKey(trackKey(t)) && gen != j.nasGen.Load() {
+		return false // also when nothing would be imported: the load answers 404
+	}
+	if j.p.Library == nil || tooLongToAnalyse(t, f.dl.Path) {
+		return true
+	}
+	if j.queued[key] {
+		return true
+	}
+	if len(j.queued) >= maxJobFiles {
 		for k := range j.queued {
 			delete(j.queued, k)
 			break
 		}
 	}
-	j.queued[key] = true
-	j.mu.Unlock()
-	if !seen {
-		if _, err := j.submit(session, t, guest, f.matched, f.dl); err != nil {
-			j.mu.Lock()
-			delete(j.queued, key)
-			j.mu.Unlock()
-		}
+	if _, err := j.submitLocked(session, t, playlist, f.matched, f.dl, gen); err == nil {
+		j.queued[key] = true
 	}
+	return true
 }
 
 // Lossy reports whether Deemix may deliver MP3 instead of FLAC.
@@ -1011,12 +1303,17 @@ func (j *Jobs) SubmitFile(path, playlist string) (job Job, ok bool, err error) {
 func (j *Jobs) submitTo(session string, t providers.Track, playlist string, matched providers.Track, dl *deemixclient.Download) (Job, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	return j.submitLocked(session, t, playlist, matched, dl, j.nasGen.Load())
+}
+
+// submitLocked is submitTo with j.mu held, for a track listed at NAS generation gen.
+func (j *Jobs) submitLocked(session string, t providers.Track, playlist string, matched providers.Track, dl *deemixclient.Download, gen uint64) (Job, error) {
 	if j.ctx.Err() != nil {
 		return Job{}, errors.New("worker stopped")
 	}
 	// Bound retained history and reject duplicate active downloads.
 	for _, v := range j.items {
-		if v.SessionID == session && v.Track.ID == t.ID && (v.State == "queued" || v.State == "matching" || v.State == "downloading" || v.State == "analyzing" || v.State == "importing") {
+		if v.SessionID == session && v.Track.ID == t.ID && (v.nasGen == gen || !isNASKey(trackKey(t))) && (v.State == "queued" || v.State == "matching" || v.State == "downloading" || v.State == "analyzing" || v.State == "importing") {
 			return v, nil
 		}
 	}
@@ -1030,7 +1327,7 @@ func (j *Jobs) submitTo(session string, t providers.Track, playlist string, matc
 		delete(j.results, old)
 		j.order = j.order[1:]
 	}
-	job := Job{ID: providers.RandomID(), SessionID: session, Track: t, Playlist: playlist, State: "queued", matched: matched, dl: dl}
+	job := Job{ID: providers.RandomID(), SessionID: session, Track: t, Playlist: playlist, State: "queued", matched: matched, dl: dl, nasGen: gen}
 	j.items[job.ID] = job
 	j.order = append(j.order, job.ID)
 	select {
@@ -1083,6 +1380,12 @@ func (j *Jobs) worker() {
 	}
 }
 func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error {
+	if j.pause != nil {
+		j.pause("run")
+	}
+	if j.nasMoved(v) {
+		return errNASChanged
+	}
 	if j.p.Catalog == nil || j.p.Deemix == nil || j.p.Library == nil {
 		return errors.New("pipeline is not configured")
 	}
@@ -1135,6 +1438,14 @@ func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error 
 	}
 	if !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
 		return errors.New("download changed during analysis; retry after the downloader finishes")
+	}
+	j.importMu.Lock()
+	defer j.importMu.Unlock()
+	if j.nasMoved(v) { // the NAS changed during the analysis
+		return errNASChanged
+	}
+	if j.pause != nil {
+		j.pause("import")
 	}
 	id, err := j.p.Library.Import(ctx, analyzer.Import{Path: dl.Path, Title: v.Track.Title, Artist: v.Track.Artist, Album: v.Track.Album, Comment: dl.Quality.Comment(), Format: audio.Format, Playlist: v.Playlist, Result: res})
 	if err != nil {

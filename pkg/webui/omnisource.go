@@ -12,12 +12,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/djay"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -212,8 +214,9 @@ func (s *Server) driveListTracks(ctx context.Context, listID string) ([]trackRef
 	}
 
 	if rawID, ok := strings.CutPrefix(listID, "nas\x00"); ok {
+		listing := s.jobs.NASGen() + 1 // before the NAS settings are read (#335)
 		nasProv := s.ownerSelfHosted()
-		if nasProv == nil {
+		if nasProv == nil || nasProv.Config().Protocol == webdavScope { // WebDAV is its own source
 			return nil, fmt.Errorf("nas provider is not enabled")
 		}
 		tracks, err := nasProv.PlaylistTracks(ctx, rawID)
@@ -222,8 +225,7 @@ func (s *Server) driveListTracks(ctx context.Context, listID string) ([]trackRef
 		}
 		refs := make([]trackRef, 0, len(tracks))
 		for _, t := range tracks {
-			httpsCover(&t)
-			refs = append(refs, trackRef{track: t, session: "nas"})
+			refs = append(refs, trackRef{track: t, session: "nas", listing: listing})
 		}
 		return refs, nil
 	}
@@ -421,17 +423,26 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 			add(g.refJSON(g.addPlaylist(ref), ref))
 		}
 	}
-	if nasLists, nasProv := g.s.nasPlaylists(ctx); nasProv != nil {
+	nasListing := g.s.jobs.NASGen() + 1 // before the NAS settings are read (#335)
+	// A WebDAV server is listed once, under the WebDAV source. A slot that changes
+	// after this check bumps the generation, so its lists are refused (#335).
+	if nasLists, nasProv := g.s.omniNASPlaylists(ctx); nasProv != nil {
 		for _, p := range nasLists {
 			p.ID = "nas\x00" + p.ID
 			p.Title = "[NAS] " + p.Title
 			ref := playlistRef{"nas", localProvider, p, false}
-			add(g.refJSON(g.addPlaylist(ref), ref))
+			if id := g.addPlaylistAt(ref, nasListing); id != "" {
+				add(g.refJSON(id, ref))
+			}
 		}
 	}
+	servers := g.s.serverAddresses(kindWebDAV)
 	for _, m := range g.s.loadMounts() {
 		if !m.Mounted && !m.Enabled {
 			continue
+		}
+		if strings.EqualFold(m.Protocol, webdavScope) && servers[serverRoot(kindWebDAV, mountWebDAVURL(m))] {
+			continue // a WebDAV server: its own entry in Sources, listed once
 		}
 		hasEngineLib := false
 		for _, d := range drives {
@@ -535,26 +546,152 @@ func (s *Server) omniTracks(ctx context.Context, query string) ([]trackRef, erro
 	return out, nil
 }
 
-// omniSearch returns the drives' matches as track rows, drive by drive.
-func (g *tidalGateway) omniSearch(ctx context.Context, query string) []any {
+// omniSearch returns what OmniSource adds to a search as track rows: the drives'
+// matches drive by drive, then djay's, then the servers'. Every enabled WebDAV and NAS
+// server is searched, each in the NAS search's time budget; the selected source's own
+// search already has its server. selected is closed when the selected source's search,
+// running beside this one and never cut, is done (nil: no such search).
+//
+// Every extra (the drives' listing and each drive's library, djay, each server) runs
+// beside the selected source and files its rows (omniRows) the moment it has them. At
+// the cut (omniWait) the answer takes the rows filed so far and returns: it waits for no
+// extra after that, whatever one is busy with or waiting for (a server that does not
+// answer, a slow drive, the settings lock while a save runs). What is filed later is
+// dropped; a server's search goes on and is cached for the next one, a drive's or
+// djay's ends with the request. So no extra makes the answer later than the later of
+// "selected source done" and the deadline (WebDAV rounds 11b, 5 and 13).
+func (g *tidalGateway) omniSearch(ctx context.Context, query string, selected <-chan struct{}) []any {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel() // ends the drives' and djay's searches still running
+	var found omniRows
+	search := func(group, pos, n int, find func() ([]trackRef, error)) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("gateway: provider panic: %v", r)
+			}
+		}()
+		refs, err := find()
+		if err != nil {
+			log.Printf("stream-sync: gateway source failed: %v", err)
+		}
+		found.put(group, pos, n, refs, nil)
+	}
+	var extras sync.WaitGroup
+	extras.Go(func() {
+		drives := g.s.drives()
+		for i, d := range drives {
+			extras.Go(func() {
+				search(omniDrives, i, len(drives), func() ([]trackRef, error) { return searchDrive(ctx, d, query) })
+			})
+		}
+	})
+	extras.Go(func() {
+		search(omniDjay, 0, 1, func() ([]trackRef, error) { return g.s.omniTracks(ctx, query) })
+	})
+	extras.Go(func() {
+		g.serverSearch(ctx, query, "", g.s.scope(), func(pos, n int, refs []trackRef, live func() bool) {
+			found.put(omniServers, pos, n, refs, live)
+		})
+	})
+	answered := make(chan struct{})
+	go func() {
+		extras.Wait()
+		close(answered)
+	}()
+	omniWait(serverReadyWait, selected, answered)
+	rows := found.take() // nothing below waits for an extra
+
 	items := []any{}
 	seenFiles := make(map[string]bool)
-	for _, refs := range each(ctx, g.s.drives(), func(ctx context.Context, d drive) ([]trackRef, error) { return searchDrive(ctx, d, query) }) {
-		for _, ref := range refs {
-			if ref.file != "" {
-				seenFiles[ref.file] = true
+	for group, sources := range rows {
+		for _, refs := range sources {
+			for _, ref := range refs {
+				if group != omniServers && ref.file != "" { // a file on a drive is listed once
+					if group == omniDjay && seenFiles[ref.file] {
+						continue
+					}
+					seenFiles[ref.file] = true
+				}
+				if id := g.addTrack(ref); id != 0 { // 0: no ID may be handed out now (#335)
+					items = append(items, g.trackJSON(id, ref.track))
+				}
 			}
-			items = append(items, g.trackJSON(g.addTrack(ref), ref.track))
-		}
-	}
-	if djayRefs, err := g.s.omniTracks(ctx, query); err == nil {
-		for _, ref := range djayRefs {
-			if seenFiles[ref.file] {
-				continue
-			}
-			seenFiles[ref.file] = true
-			items = append(items, g.trackJSON(g.addTrack(ref), ref.track))
 		}
 	}
 	return items
+}
+
+// The groups of OmniSource's extras, in the order of their rows in an answer.
+const (
+	omniDrives = iota
+	omniDjay
+	omniServers
+	omniGroups
+)
+
+// omniRows are the rows OmniSource's extras have found so far. An extra files its rows
+// with put; the search ends the collection with take. The lock is held for a slice
+// assignment only, never while anything is searched or read, so take never waits.
+type omniRows struct {
+	mu    sync.Mutex
+	taken bool
+	rows  [omniGroups][]omniSource // per group, in its sources' own order
+}
+
+// omniSource is one extra's rows; live (nil: always) says whether they may still be used
+// when the answer is put together.
+type omniSource struct {
+	refs []trackRef
+	live func() bool
+}
+
+// put files refs as the rows of the pos-th of a group's n sources. Rows filed after take
+// are dropped.
+func (r *omniRows) put(group, pos, n int, refs []trackRef, live func() bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.taken {
+		return
+	}
+	if r.rows[group] == nil {
+		r.rows[group] = make([]omniSource, n)
+	}
+	r.rows[group][pos] = omniSource{refs, live}
+}
+
+// take ends the collection and returns what was filed by sources that are still live.
+func (r *omniRows) take() (out [omniGroups][][]trackRef) {
+	r.mu.Lock()
+	r.taken = true
+	rows := r.rows
+	r.mu.Unlock()
+	for group, sources := range rows {
+		for _, v := range sources {
+			if v.live == nil || v.live() {
+				out[group] = append(out[group], v.refs)
+			}
+		}
+	}
+	return out
+}
+
+// omniWait is OmniSource's timing rule. It returns once the selected source's search
+// is done (selected is closed; nil: none runs) and the extras have either all answered
+// (answered is closed) or had wait since the call. So the extras never cut the selected
+// source, and never make an answer later than the later of "selected source done" and
+// that deadline.
+func omniWait(wait time.Duration, selected, answered <-chan struct{}) {
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	limit := deadline.C
+	for (limit != nil && answered != nil) || selected != nil {
+		select {
+		case <-answered:
+			answered = nil
+		case <-limit:
+			limit = nil
+		case <-selected:
+			selected = nil
+		}
+	}
 }

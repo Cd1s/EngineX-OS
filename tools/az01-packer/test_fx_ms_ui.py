@@ -160,6 +160,7 @@ Object.assign(root, {{
     scScope: 'deezer', scBroadcastOn: false, scCueCountdown: true, scDualColumn: false,
     scTracklistWaveform: true, scSyncGuardPct: 0, scSwapLoopOrder: false,
     scLedBrightness: 100, scUIScale: 100,
+    scWebdavOn: false, scNasOn: false, scWebdav: [], scNasServers: [],
     scLastGoodTimeZone: '', scPendingTimeZone: '', scRestoringTimeZone: false,
 }});
 let stemsEqVal = false;
@@ -424,6 +425,7 @@ Object.assign(root, {{
     scScope: 'deezer', scBroadcastOn: false, scCueCountdown: true, scDualColumn: false,
     scTracklistWaveform: true, scSyncGuardPct: 0, scSwapLoopOrder: false,
     scLedBrightness: 100, scUIScale: 100,
+    scWebdavOn: false, scNasOn: false, scWebdav: [], scNasServers: [],
     scLastGoodTimeZone: '', scPendingTimeZone: '', scRestoringTimeZone: false,
 }});
 let stemsEqVal = false;

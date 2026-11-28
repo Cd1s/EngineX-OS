@@ -261,3 +261,81 @@ func appendID3(in io.Reader, out io.Writer, frames func(tag id3Tag) []byte) erro
 	_, err = io.Copy(out, r)
 	return err
 }
+
+// SameAudio reports whether the files a and b hold the same audio: one file, or the
+// same bytes after the tags CopyTagged and EmbedCover write (a FLAC's metadata
+// blocks, an MP3's ID3v2 tag). A Stems import file made from a download, linked or
+// tagged, holds that download's audio; a new download of other audio does not match.
+func SameAudio(a, b string) (bool, error) {
+	fa, err := os.Open(a)
+	if err != nil {
+		return false, err
+	}
+	defer fa.Close()
+	fb, err := os.Open(b)
+	if err != nil {
+		return false, err
+	}
+	defer fb.Close()
+	sa, err := fa.Stat()
+	if err != nil {
+		return false, err
+	}
+	sb, err := fb.Stat()
+	if err != nil {
+		return false, err
+	}
+	if os.SameFile(sa, sb) {
+		return true, nil
+	}
+	startA, startB := audioStart(fa), audioStart(fb)
+	if sa.Size()-startA != sb.Size()-startB {
+		return false, nil
+	}
+	if _, err := fa.Seek(startA, io.SeekStart); err != nil {
+		return false, err
+	}
+	if _, err := fb.Seek(startB, io.SeekStart); err != nil {
+		return false, err
+	}
+	bufA, bufB := make([]byte, 64<<10), make([]byte, 64<<10)
+	for {
+		n, errA := io.ReadFull(fa, bufA)
+		m, errB := io.ReadFull(fb, bufB)
+		if n != m || !bytes.Equal(bufA[:n], bufB[:m]) {
+			return false, nil
+		}
+		if errA == io.EOF || errA == io.ErrUnexpectedEOF {
+			return errB == io.EOF || errB == io.ErrUnexpectedEOF, nil
+		}
+		if errA != nil {
+			return false, errA
+		}
+		if errB != nil {
+			return false, errB
+		}
+	}
+}
+
+// audioStart is where f's audio begins: after a FLAC's metadata blocks or an MP3's
+// ID3v2 tag, as CopyTagged and EmbedCover write them; 0 for anything else.
+func audioStart(f *os.File) int64 {
+	r := bufio.NewReader(f)
+	head, _ := r.Peek(4)
+	switch {
+	case string(head) == "fLaC":
+		r.Discard(4)
+		if blocks, err := readFLACBlocks(r); err == nil {
+			n := int64(4)
+			for _, b := range blocks {
+				n += 4 + int64(len(b.data))
+			}
+			return n
+		}
+	case len(head) >= 3 && string(head[:3]) == "ID3":
+		if tag, _, err := readID3(r); err == nil {
+			return 10 + int64(len(tag.frames))
+		}
+	}
+	return 0
+}

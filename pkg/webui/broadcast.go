@@ -108,7 +108,8 @@ func broadcastHost(raw string) string {
 	if err != nil {
 		return strings.ToLower(raw)
 	}
-	return strings.ToLower(u.Host)
+	// The scheme too: the rule of every editor that keeps a saved credential.
+	return strings.ToLower(u.Scheme + "://" + u.Host)
 }
 
 // broadcastGet handles GET /api/broadcast.
