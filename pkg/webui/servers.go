@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -581,6 +582,7 @@ type serverChange struct {
 var (
 	errWebDAVURL       = errors.New("enter the server address with http:// or https://")
 	errNASURL          = errors.New("enter the server address with smb://")
+	errWebDAVNotDAV    = errors.New("this address is not a WebDAV server")
 	errServerDuplicate = errors.New("this server is already added")
 	errServerFull      = errors.New("no more servers can be added")
 	errServerGoneList  = errors.New("this server is no longer in the list")
@@ -589,12 +591,25 @@ var (
 	errServerGone = errors.New("the server of this row is not set up or not on")
 )
 
+const webdavSaveProbeTimeout = 3 * time.Second
+
+func sanitizeLogErr(err error) string {
+	err = providers.RedactURLError(err)
+	errText := fmt.Sprint(err)
+	if strings.ContainsAny(errText, "\r\n\x1b") {
+		return fmt.Sprintf("%q", errText)
+	}
+	return errText
+}
+
 func serverChangeStatus(err error) int {
 	switch {
 	case errors.Is(err, errServerGoneList):
 		return http.StatusNotFound
 	case errors.Is(err, errServerDuplicate), errors.Is(err, errServerFull):
 		return http.StatusConflict
+	case errors.Is(err, errWebDAVNotDAV):
+		return http.StatusUnprocessableEntity
 	case errors.Is(err, errNASFile):
 		return http.StatusInternalServerError
 	}
@@ -617,33 +632,71 @@ func validServerURL(k serverKind, raw string) error {
 	return nil
 }
 
+func webdavFallbackURL(raw string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", false
+	}
+	p := strings.TrimRight(u.Path, "/")
+	if strings.EqualFold(path.Base(p), "dav") {
+		return "", false
+	}
+	u.Path = p + "/dav/"
+	u.RawPath = ""
+	return u.String(), true
+}
+
+func (s *Server) resolveWebDAVSaveURL(ctx context.Context, cfg providers.NASConfig) (string, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, webdavSaveProbeTimeout)
+	defer cancel()
+
+	client := s.nasHTTPClient()
+	switch providers.NewSelfHostedProvider(cfg, client).ProbeWebDAV(probeCtx) {
+	case providers.WebDAVProbeOK, providers.WebDAVProbeUnreachable:
+		return cfg.URL, nil
+	case providers.WebDAVProbeWebPage:
+		davURL, ok := webdavFallbackURL(cfg.URL)
+		if !ok || validServerURL(kindWebDAV, davURL) != nil {
+			return "", errWebDAVNotDAV
+		}
+		davCfg := cfg
+		davCfg.URL = davURL
+		if providers.NewSelfHostedProvider(davCfg, client).ProbeWebDAVStrict207(probeCtx) {
+			return davURL, nil
+		}
+		return "", errWebDAVNotDAV
+	default:
+		return cfg.URL, nil
+	}
+}
+
+func findServerEntry(entries []serverEntry, id string) *serverEntry {
+	for i := range entries {
+		if entries[i].ID == id {
+			return &entries[i]
+		}
+	}
+	return nil
+}
+
 // applyServer makes one change to a kind's servers in nas.json. An empty password on
 // an edit keeps the saved one. The rows and Stems entries of a server that is
 // removed or moved to another address go with it; a change of the slot's SMB server
 // resets the NAS of #335 (resetNASIfMoved).
-func (s *Server) applyServer(k serverKind, c serverChange) ([]serverView, error) {
-	s.uiMu.Lock()
-	defer s.uiMu.Unlock()
-	f, err := s.readNASFileLocked()
-	if err != nil {
-		return nil, err // never overwrite a file that cannot be read
-	}
-	defer s.resetNASIfMoved(f.NASConfig)
-	entries := serverEntries(k, f)
-	all := append(serverEntries(kindWebDAV, f), serverEntries(kindNAS, f)...)
-	var cur *serverEntry
-	if c.Action != "add" {
-		for i := range entries {
-			if entries[i].ID == c.ID {
-				cur = &entries[i]
-			}
+func (s *Server) applyServer(ctx context.Context, k serverKind, c serverChange) ([]serverView, error) {
+	if c.Action == "remove" {
+		s.uiMu.Lock()
+		defer s.uiMu.Unlock()
+		f, err := s.readNASFileLocked()
+		if err != nil {
+			return nil, err // never overwrite a file that cannot be read
 		}
+		defer s.resetNASIfMoved(f.NASConfig)
+		cur := findServerEntry(serverEntries(k, f), c.ID)
 		if cur == nil {
 			return nil, errServerGoneList
 		}
-	}
-	list := f.list(k)
-	if c.Action == "remove" {
+		list := f.list(k)
 		if cur.slot {
 			f.NASConfig, f.Name = providers.NASConfig{}, ""
 		} else {
@@ -657,26 +710,104 @@ func (s *Server) applyServer(k serverKind, c serverChange) ([]serverView, error)
 	if c.Action != "add" && c.Action != "edit" {
 		return nil, errors.New("unknown action")
 	}
-	raw := strings.TrimSpace(c.URL)
-	if err := validServerURL(k, raw); err != nil {
+
+	inputRaw := strings.TrimSpace(c.URL)
+	if err := validServerURL(k, inputRaw); err != nil {
 		return nil, err
 	}
+	name, user := strings.TrimSpace(c.Name), strings.TrimSpace(c.Username)
+	if r := []rune(name); len(r) > 64 {
+		name = string(r[:64])
+	}
+	probePass := c.Password
+	if probePass == "***" {
+		probePass = ""
+	}
+
+	raw := inputRaw
+	if k == kindWebDAV {
+		s.uiMu.Lock()
+		f, err := s.readNASFileLocked()
+		if err != nil {
+			s.uiMu.Unlock()
+			return nil, err
+		}
+		entries := serverEntries(k, f)
+		all := append(serverEntries(kindWebDAV, f), serverEntries(kindNAS, f)...)
+		var cur *serverEntry
+		if c.Action == "edit" {
+			cur = findServerEntry(entries, c.ID)
+			if cur == nil {
+				s.uiMu.Unlock()
+				return nil, errServerGoneList
+			}
+		} else {
+			if len(entries) >= maxServers {
+				s.uiMu.Unlock()
+				return nil, errServerFull
+			}
+			inRoot := serverRoot(k, inputRaw)
+			if slices.ContainsFunc(all, func(e serverEntry) bool { return serverRoot(e.kind, e.cfg.URL) == inRoot }) {
+				s.uiMu.Unlock()
+				return nil, errServerDuplicate
+			}
+		}
+		probeCfg := providers.NASConfig{
+			Protocol: k.protocol,
+			URL:      inputRaw,
+			Username: user,
+			Password: probePass,
+			Enabled:  true,
+		}
+		// Reuse saved credentials only when probing the same configured address.
+		if cur != nil && serverRoot(k, cur.cfg.URL) == serverRoot(k, inputRaw) && (c.Password == "" || c.Password == "***") {
+			probeCfg.Password = cur.cfg.Password
+			if cur.slot {
+				probeCfg.Token = f.Token
+			}
+		}
+		s.uiMu.Unlock()
+
+		resolvedRaw, err := s.resolveWebDAVSaveURL(ctx, probeCfg)
+		if err != nil {
+			return nil, err
+		}
+		if err := validServerURL(k, resolvedRaw); err != nil {
+			return nil, err
+		}
+		raw = resolvedRaw
+	}
+
+	s.uiMu.Lock()
+	defer s.uiMu.Unlock()
+	f, err := s.readNASFileLocked()
+	if err != nil {
+		return nil, err // never overwrite a file that cannot be read
+	}
+	defer s.resetNASIfMoved(f.NASConfig)
+	entries := serverEntries(k, f)
+	all := append(serverEntries(kindWebDAV, f), serverEntries(kindNAS, f)...)
+	var cur *serverEntry
+	if c.Action == "edit" {
+		cur = findServerEntry(entries, c.ID)
+		if cur == nil {
+			return nil, errServerGoneList
+		}
+	}
+	list := f.list(k)
 	root := serverRoot(k, raw)
 	if slices.ContainsFunc(all, func(e serverEntry) bool {
 		return serverRoot(e.kind, e.cfg.URL) == root && (cur == nil || e.ID != cur.ID)
 	}) {
 		return nil, errServerDuplicate
 	}
-	name, user := strings.TrimSpace(c.Name), strings.TrimSpace(c.Username)
-	if r := []rune(name); len(r) > 64 {
-		name = string(r[:64])
-	}
 	// An empty password field keeps the saved password (and the slot's token) only
-	// for the same address: a server moved to another address never takes the old
-	// one's credentials along.
+	// for the same address (or same-origin auto-/dav/ upgrade from that address): a server
+	// moved to another address never takes the old one's credentials along.
 	password, token := c.Password, ""
 	same := cur != nil && serverRoot(k, cur.cfg.URL) == root
-	keep := same && (password == "" || password == "***")
+	sameAutoDAV := cur != nil && k == kindWebDAV && raw != inputRaw && serverRoot(k, cur.cfg.URL) == serverRoot(k, inputRaw) && providers.SameOrigin(cur.cfg.URL, raw)
+	keep := (same || sameAutoDAV) && (password == "" || password == "***")
 	if password == "***" {
 		password = ""
 	}
@@ -690,7 +821,7 @@ func (s *Server) applyServer(k serverKind, c serverChange) ([]serverView, error)
 		if keep {
 			password = f.Password
 		}
-		if same {
+		if same || sameAutoDAV {
 			token = f.Token
 		}
 		f.NASConfig = providers.NASConfig{Protocol: k.protocol, URL: raw, Username: user, Password: password, Token: token, Enabled: true}
@@ -801,7 +932,7 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, errors.New("invalid JSON request"))
 		return
 	}
-	views, err := s.applyServer(k, c)
+	views, err := s.applyServer(r.Context(), k, c)
 	if err != nil {
 		fail(w, serverChangeStatus(err), err)
 		return
@@ -849,8 +980,8 @@ func (s *Server) serversLoginStatus(w http.ResponseWriter, flow *loginFlow) {
 func (s *Server) serversPhonePost(w http.ResponseWriter, r *http.Request, flow *loginFlow, k serverKind) {
 	lang := phoneLang(r)
 	c := serverChange{Action: r.Form.Get("action"), ID: r.Form.Get("id"), Name: r.Form.Get("name"), URL: r.Form.Get("url"), Username: r.Form.Get("user"), Password: r.Form.Get("password")}
-	if _, err := s.applyServer(k, c); err != nil {
-		key := map[error]string{errWebDAVURL: "wdBadURL", errNASURL: "nasBadURL", errServerDuplicate: "wdDuplicate", errServerFull: "wdFull", errServerGoneList: "wdGone"}[err]
+	if _, err := s.applyServer(r.Context(), k, c); err != nil {
+		key := map[error]string{errWebDAVURL: "wdBadURL", errNASURL: "nasBadURL", errWebDAVNotDAV: "wdNotDAV", errServerDuplicate: "wdDuplicate", errServerFull: "wdFull", errServerGoneList: "wdGone"}[err]
 		if key == "" {
 			key = "wdFailed"
 		}
@@ -900,6 +1031,9 @@ func (g *tidalGateway) serverPlaylistsPage(w http.ResponseWriter, r *http.Reques
 	ctx, cancel := context.WithTimeout(r.Context(), serverListTimeout)
 	lists, err := g.s.serverProvider(e).Playlists(ctx)
 	cancel()
+	if err != nil {
+		log.Printf("stream-sync: server list failed scope=%s provider=%s error=%s", scope, k.protocol, sanitizeLogErr(err))
+	}
 	if err != nil && len(lists) == 0 {
 		add(playlistJSON(hintPlaylist, sourceFailedTitle(k.scope, err), "", 0))
 		respond(w, page(r, 100, items))
@@ -1022,7 +1156,7 @@ func (g *tidalGateway) serverSearch(ctx context.Context, query, only, skip strin
 			}()
 			tracks, err := g.searchTracks(ctx, v.e.kind.scope, v.session, connSearcher{v.c}, query)
 			if err != nil {
-				log.Printf("stream-sync: gateway source failed: %v", err)
+				log.Printf("stream-sync: gateway source failed: %s", sanitizeLogErr(err))
 			}
 			live := func() bool { return v.c.ctx.Err() == nil }
 			if !live() {

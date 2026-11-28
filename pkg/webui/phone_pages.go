@@ -71,6 +71,7 @@ var phoneText = map[string][4]string{
 	"wdDuplicate":     {"This server is already added", "这个服务器已经添加过", "這個伺服器已經新增過", "Este servidor ya está añadido"},
 	"wdFull":          {"No more servers can be added", "不能再添加更多服务器", "無法再新增更多伺服器", "No se pueden añadir más servidores"},
 	"wdGone":          {"This server is no longer in the list", "这个服务器已不在列表中", "這個伺服器已不在列表中", "Este servidor ya no está en la lista"},
+	"wdNotDAV":        {"This address is not a WebDAV server", "这个地址不是 WebDAV 服务器", "這個位址不是 WebDAV 伺服器", "Esta dirección no es un servidor WebDAV"},
 	"wdFailed":        {"Could not save", "未能保存", "未能儲存", "No se ha podido guardar"},
 	"badForm":         {"Please fill in one of the fields", "请至少填写一项", "請至少填寫一項", "Rellena al menos uno de los campos"},
 	"deezerFLAC":      {"Enter your Deezer ARL to recognise your account and playlists automatically and enable lossless FLAC downloads.", "填入您的 Deezer ARL 即可自动识别账号歌单并启用 FLAC 无损下载。", "填入您的 Deezer ARL 即可自動識別帳號歌單並啟用 FLAC 無損下載。", "Introduce tu ARL de Deezer para reconocer tu cuenta y tus listas automáticamente y activar las descargas FLAC sin pérdidas."},

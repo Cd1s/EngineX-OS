@@ -4,12 +4,16 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -766,5 +770,262 @@ func TestAuthorizeURLKeepsToTheConfiguredOrigin(t *testing.T) {
 		if p.OnOrigin(c.cover) != c.want {
 			t.Errorf("%s NAS %s, cover %s: OnOrigin=%v, want %v", c.protocol, c.base, c.cover, !c.want, c.want)
 		}
+	}
+}
+
+func TestSelfHostedWebDAVCloudreveRedirectAndHTML(t *testing.T) {
+	const (
+		user        = "dav-dj"
+		pass        = "pw-secret-cloudreve"
+		signedQuery = "sig=signed-secret"
+	)
+
+	type recordedReq struct {
+		path   string
+		query  string
+		auth   string
+		cookie string
+		ref    string
+	}
+	var mu sync.Mutex
+	var cdnReqs []recordedReq
+
+	var cdn *httptest.Server
+	cdn = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		cdnReqs = append(cdnReqs, recordedReq{
+			path:   r.URL.Path,
+			query:  r.URL.RawQuery,
+			auth:   r.Header.Get("Authorization"),
+			cookie: r.Header.Get("Cookie"),
+			ref:    r.Referer(),
+		})
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/storage/signed200.mp3":
+			if r.URL.RawQuery != signedQuery {
+				http.Error(w, "missing signature", http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Content-Type", "audio/mpeg")
+			w.Write([]byte("CLOUDREVE-200"))
+		case "/storage/signed206.mp3":
+			if r.URL.RawQuery != signedQuery {
+				http.Error(w, "missing signature", http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Content-Type", "audio/mpeg")
+			w.Header().Set("Content-Range", "bytes 0-12/13")
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write([]byte("CLOUDREVE-206"))
+		case "/storage/hop1.mp3":
+			http.Redirect(w, r, cdn.URL+"/storage/hop2.mp3?"+signedQuery, http.StatusFound)
+		case "/storage/hop2.mp3":
+			w.Header().Set("Content-Type", "audio/mpeg")
+			w.Write([]byte("CLOUDREVE-HOP"))
+		case "/storage/partial.mp3":
+			w.Header().Set("Content-Type", "audio/mpeg")
+			w.Header().Set("Content-Range", "bytes 0-3/100")
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write([]byte("PART"))
+		case "/storage/fail.mp3":
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+					return
+				}
+			}
+			panic(http.ErrAbortHandler)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cdn.Close()
+
+	var sameOriginSawAuth bool
+	var sameOriginSawRef string
+	cloudreve := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "PROPFIND" && (r.URL.Path == "/" || r.URL.Path == ""):
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `<!doctype html><html><body>Cloudreve Web UI</body></html>`)
+		case r.Method == "PROPFIND" && strings.TrimSuffix(r.URL.Path, "/") == "/dav":
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.WriteHeader(http.StatusMultiStatus)
+			fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response><D:href>/dav/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+  <D:response><D:href>/dav/Tracks/</D:href><D:propstat><D:prop><D:displayname>Tracks</D:displayname><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+  <D:response><D:href>/dav/song.mp3</D:href><D:propstat><D:prop><D:displayname>Song 200</D:displayname></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+</D:multistatus>`)
+		case r.Method == "PROPFIND" && strings.TrimSuffix(r.URL.Path, "/") == "/dav/Tracks":
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.WriteHeader(http.StatusMultiStatus)
+			fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response><D:href>/dav/Tracks/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+  <D:response><D:href>/dav/Tracks/track206.mp3</D:href><D:propstat><D:prop><D:displayname>Track 206</D:displayname></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+  <D:response><D:href>/dav/Tracks/hop.mp3</D:href><D:propstat><D:prop><D:displayname>Track Hop</D:displayname></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+  <D:response><D:href>/dav/Tracks/alias.mp3</D:href><D:propstat><D:prop><D:displayname>Alias</D:displayname></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+  <D:response><D:href>/dav/Tracks/partial.mp3</D:href><D:propstat><D:prop><D:displayname>Partial</D:displayname></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+  <D:response><D:href>/dav/Tracks/fail.mp3</D:href><D:propstat><D:prop><D:displayname>Fail</D:displayname></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+</D:multistatus>`)
+		case r.Method == http.MethodGet && r.URL.Path == "/dav/song.mp3":
+			http.Redirect(w, r, cdn.URL+"/storage/signed200.mp3?"+signedQuery, http.StatusFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/dav/Tracks/track206.mp3":
+			http.Redirect(w, r, cdn.URL+"/storage/signed206.mp3?"+signedQuery, http.StatusFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/dav/Tracks/hop.mp3":
+			http.Redirect(w, r, cdn.URL+"/storage/hop1.mp3?"+signedQuery, http.StatusFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/dav/Tracks/alias.mp3":
+			http.Redirect(w, r, "/dav/Tracks/real.mp3", http.StatusFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/dav/Tracks/real.mp3":
+			u, pw, ok := r.BasicAuth()
+			mu.Lock()
+			sameOriginSawAuth = ok && u == user && pw == pass
+			sameOriginSawRef = r.Referer()
+			mu.Unlock()
+			w.Write([]byte("SAME-ORIGIN-MP3"))
+		case r.Method == http.MethodGet && r.URL.Path == "/dav/Tracks/partial.mp3":
+			http.Redirect(w, r, cdn.URL+"/storage/partial.mp3?"+signedQuery, http.StatusFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/dav/Tracks/fail.mp3":
+			http.Redirect(w, r, cdn.URL+"/storage/fail.mp3?"+signedQuery, http.StatusFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/dav/Tracks/badscheme.mp3":
+			http.Redirect(w, r, "ftp://cdn.example/audio.mp3", http.StatusFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/dav/Tracks/userinfo.mp3":
+			http.Redirect(w, r, strings.Replace(cdn.URL, "http://", "http://baduser:badpass@", 1)+"/storage/signed200.mp3", http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cloudreve.Close()
+
+	ctx := context.Background()
+
+	// 1. Bare host returning HTML is rejected with ErrNotWebDAV, not an empty list.
+	bare := NewSelfHostedProvider(NASConfig{Protocol: "webdav", URL: cloudreve.URL + "/", Username: user, Password: pass, Enabled: true}, nil)
+	if lists, err := bare.Playlists(ctx); !errors.Is(err, ErrNotWebDAV) || len(lists) != 0 {
+		t.Fatalf("bare HTML host Playlists = (%v, %v), want ErrNotWebDAV", lists, err)
+	}
+	if got := bare.ProbeWebDAV(ctx); got != WebDAVProbeWebPage {
+		t.Fatalf("ProbeWebDAV(/) = %v, want WebDAVProbeWebPage", got)
+	}
+
+	// OpenList-shaped server answers 405 on PROPFIND / and 207 on PROPFIND /dav/.
+	openlist := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "PROPFIND" && (r.URL.Path == "/" || r.URL.Path == ""):
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		case r.Method == "PROPFIND" && strings.TrimSuffix(r.URL.Path, "/") == "/dav":
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusMultiStatus)
+			fmt.Fprint(w, `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/dav/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer openlist.Close()
+	olBare := NewSelfHostedProvider(NASConfig{Protocol: "webdav", URL: openlist.URL, Username: user, Password: pass, Enabled: true}, nil)
+	if lists, err := olBare.Playlists(ctx); !errors.Is(err, ErrNotWebDAV) || len(lists) != 0 {
+		t.Fatalf("405 bare host Playlists = (%v, %v), want ErrNotWebDAV", lists, err)
+	}
+	if got := olBare.ProbeWebDAV(ctx); got != WebDAVProbeWebPage {
+		t.Fatalf("ProbeWebDAV(405 /) = %v, want WebDAVProbeWebPage", got)
+	}
+	olDAV := NewSelfHostedProvider(NASConfig{Protocol: "webdav", URL: openlist.URL + "/dav/", Username: user, Password: pass, Enabled: true}, nil)
+	if got := olDAV.ProbeWebDAV(ctx); got != WebDAVProbeOK || !olDAV.ProbeWebDAVStrict207(ctx) {
+		t.Fatalf("ProbeWebDAV(openlist /dav/) = %v, strict207=%v", got, olDAV.ProbeWebDAVStrict207(ctx))
+	}
+
+	// 2. /dav/ works with cookies in jar + Basic auth without leaking credentials to second origin.
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{cloudreve.URL, cdn.URL} {
+		u, _ := url.Parse(raw)
+		jar.SetCookies(u, []*http.Cookie{{Name: "cloudreve_session", Value: "secret-cookie-val"}})
+	}
+	cli := &http.Client{Jar: jar}
+	p := NewSelfHostedProvider(NASConfig{Protocol: "webdav", URL: cloudreve.URL + "/dav/", Username: user, Password: pass, Enabled: true}, cli)
+	if got := p.ProbeWebDAV(ctx); got != WebDAVProbeOK || !p.ProbeWebDAVStrict207(ctx) {
+		t.Fatalf("ProbeWebDAV(/dav/) = %v, strict207=%v", got, p.ProbeWebDAVStrict207(ctx))
+	}
+	pls, err := p.Playlists(ctx)
+	if err != nil || len(pls) != 2 {
+		t.Fatalf("Playlists(/dav/) = (%+v, %v)", pls, err)
+	}
+	for _, c := range []struct {
+		id, want string
+	}{
+		{"/dav/song.mp3", "CLOUDREVE-200"},
+		{"/dav/Tracks/track206.mp3", "CLOUDREVE-206"},
+		{"/dav/Tracks/hop.mp3", "CLOUDREVE-HOP"},
+	} {
+		dest, err := p.DownloadTrack(ctx, c.id, t.TempDir())
+		if err != nil {
+			t.Fatalf("DownloadTrack(%s) failed: %v", c.id, err)
+		}
+		gotBytes, _ := os.ReadFile(dest)
+		if string(gotBytes) != c.want {
+			t.Fatalf("DownloadTrack(%s) bytes = %q, want %q", c.id, gotBytes, c.want)
+		}
+	}
+	mu.Lock()
+	snapshot := append([]recordedReq(nil), cdnReqs...)
+	cdnReqs = nil
+	mu.Unlock()
+	if len(snapshot) != 4 {
+		t.Fatalf("expected 4 CDN storage requests (200, 206, hop1, hop2), got %d", len(snapshot))
+	}
+	for _, r := range snapshot {
+		if r.auth != "" || r.cookie != "" || r.ref != "" {
+			t.Fatalf("storage server received leaked headers on %s: auth=%q cookie=%q ref=%q", r.path, r.auth, r.cookie, r.ref)
+		}
+	}
+
+	// 3. Same-origin redirect keeps Basic auth and strips Referer; never dials CDN.
+	dest, err := p.DownloadTrack(ctx, "/dav/Tracks/alias.mp3", t.TempDir())
+	if err != nil {
+		t.Fatalf("same-origin DownloadTrack failed: %v", err)
+	}
+	mu.Lock()
+	sawAuth, sawRef := sameOriginSawAuth, sameOriginSawRef
+	mu.Unlock()
+	if b, _ := os.ReadFile(dest); string(b) != "SAME-ORIGIN-MP3" || !sawAuth || sawRef != "" {
+		t.Fatalf("same-origin redirect mismatch: body=%q auth=%v ref=%q", b, sawAuth, sawRef)
+	}
+
+	// 4. Incomplete 206 fails; signed transport failure redacts query secrets; invalid schemes/userinfo/blocked targets are rejected before dialing CDN.
+	if _, err := p.DownloadTrack(ctx, "/dav/Tracks/partial.mp3", t.TempDir()); err == nil {
+		t.Fatal("expected incomplete 206 download to fail")
+	}
+	_, err = p.DownloadTrack(ctx, "/dav/Tracks/fail.mp3", t.TempDir())
+	if err == nil || strings.Contains(err.Error(), "signed-secret") || strings.Contains(err.Error(), pass) {
+		t.Fatalf("failed download leaked secret or succeeded: %v", err)
+	}
+	mu.Lock()
+	cdnReqs = nil
+	mu.Unlock()
+	if _, err := p.DownloadTrack(ctx, "/dav/Tracks/badscheme.mp3", t.TempDir()); err == nil {
+		t.Fatal("expected ftp:// redirect to fail")
+	}
+	if _, err := p.DownloadTrack(ctx, "/dav/Tracks/userinfo.mp3", t.TempDir()); err == nil {
+		t.Fatal("expected userinfo redirect to fail")
+	}
+	blockedCli := &http.Client{
+		CheckRedirect: func(r *http.Request, via []*http.Request) error {
+			return errors.New("blocked by address check")
+		},
+	}
+	blocked := NewSelfHostedProvider(NASConfig{Protocol: "webdav", URL: cloudreve.URL + "/dav/", Username: user, Password: pass, Enabled: true}, blockedCli)
+	if _, err := blocked.DownloadTrack(ctx, "/dav/song.mp3", t.TempDir()); err == nil {
+		t.Fatal("expected CheckRedirect address check failure")
+	}
+	mu.Lock()
+	afterBlocked := len(cdnReqs)
+	mu.Unlock()
+	if afterBlocked != 0 {
+		t.Fatalf("disallowed/blocked redirects dialed CDN %d times", afterBlocked)
 	}
 }

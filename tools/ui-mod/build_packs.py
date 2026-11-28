@@ -4967,6 +4967,7 @@ SERVICES_MAIN = """
 			}
 			scServerError = root.scT(x.status === 400 ? (kind === "nas" ? "Enter the server address with smb://" : "Enter the server address with http:// or https://")
 				: x.status === 409 ? (String(x.responseText).indexOf("already") >= 0 ? "This server is already added" : "No more servers can be added")
+				: x.status === 422 ? "This address is not a WebDAV server"
 				: "Could not save the server")
 		}
 		x.send(JSON.stringify(change))

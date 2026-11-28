@@ -5,18 +5,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testsmb"
+	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
@@ -678,6 +682,279 @@ func TestServersSlowServerNeverHoldsReadyResults(t *testing.T) {
 	for _, it := range a.items {
 		if al := rowAlbum(it); al == "Fast" || al == "Slow" {
 			t.Fatalf("the search answered a WebDAV row after WebDAV was switched off: %v", webdavTitles(a.items))
+		}
+	}
+}
+
+type redirectMockRT func(*http.Request) (*http.Response, error)
+
+func (f redirectMockRT) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestServersWebDAVCloudreveSaveListDownloadAndLogging(t *testing.T) {
+	const (
+		davPass     = "cloudreve-pass-99"
+		signedQuery = "sig=signed-secret"
+	)
+	audioBytes := testMP3(120)
+
+	type reqSeen struct {
+		path, auth, cookie, ref string
+	}
+	var mu sync.Mutex
+	var storageReqs []reqSeen
+
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		storageReqs = append(storageReqs, reqSeen{
+			path:   r.URL.Path,
+			auth:   r.Header.Get("Authorization"),
+			cookie: r.Header.Get("Cookie"),
+			ref:    r.Referer(),
+		})
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/signed/intro.mp3":
+			w.Header().Set("Content-Type", "audio/mpeg")
+			w.Write(audioBytes)
+		case "/drop/bad.mp3":
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+					return
+				}
+			}
+			panic(http.ErrAbortHandler)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer storage.Close()
+
+	cloudreve := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "PROPFIND" && (r.URL.Path == "/" || r.URL.Path == ""):
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			fmt.Fprint(w, `<!doctype html><html><title>Cloudreve</title></html>`)
+		case r.Method == "PROPFIND" && strings.TrimSuffix(r.URL.Path, "/") == "/dav":
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusMultiStatus)
+			io.WriteString(w, davXML("/dav/", "/dav/House/", "/dav/intro.mp3", "/dav/bad.mp3"))
+		case r.Method == http.MethodGet && r.URL.Path == "/dav/intro.mp3":
+			http.Redirect(w, r, storage.URL+"/signed/intro.mp3?"+signedQuery, http.StatusFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/dav/bad.mp3":
+			http.Redirect(w, r, storage.URL+"/drop/bad.mp3?"+signedQuery, http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cloudreve.Close()
+
+	webOnly := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PROPFIND" && (r.URL.Path == "/" || r.URL.Path == "") {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, `<html>Just a website</html>`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer webOnly.Close()
+
+	openlistDAV := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "PROPFIND" && (r.URL.Path == "/" || r.URL.Path == ""):
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		case r.Method == "PROPFIND" && strings.TrimSuffix(r.URL.Path, "/") == "/dav":
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusMultiStatus)
+			io.WriteString(w, davXML("/dav/", "/dav/House/"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer openlistDAV.Close()
+
+	method405Only := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PROPFIND" && (r.URL.Path == "/" || r.URL.Path == "") {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer method405Only.Close()
+
+	var otherHostHits atomic.Int32
+	otherServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			if _, pw, ok := r.BasicAuth(); !ok || pw != "" {
+				otherHostHits.Add(1)
+			}
+		}
+		http.NotFound(w, r)
+	}))
+	defer otherServer.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{cloudreve.URL, storage.URL} {
+		u, _ := url.Parse(raw)
+		jar.SetCookies(u, []*http.Cookie{{Name: "session", Value: "secret-cookie"}})
+	}
+
+	uiDir, stateDir, dlDir := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("sources=\nscope=\nomni_source=0\nwebdav=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{DownloadDir: dlDir, AllowLossy: true}})
+	t.Cleanup(jobs.Close)
+	s := New(Config{AccessToken: "code", UIDir: uiDir, StateDir: stateDir, HTTP: &http.Client{Jar: jar}}, jobs)
+	t.Cleanup(s.Close)
+	gw := httptest.NewServer(s)
+	t.Cleanup(gw.Close)
+	r := &webdavRig{s: s, gw: gw, uiDir: uiDir}
+
+	// 1. Saving bare host auto-resolves /dav/, lists folders, and streams redirected track cleanly.
+	views := r.change(t, serverChange{Action: "add", Name: "Cloudreve", URL: cloudreve.URL, Username: "dj", Password: davPass}, 200)
+	if len(views) != 1 || views[0].URL != cloudreve.URL+"/dav/" {
+		t.Fatalf("saved view = %+v, want %s/dav/", views, cloudreve.URL)
+	}
+	lists := r.open(t, views[0].Scope)
+	tracks := r.tracks(t, lists["Root"])
+	intro := tracks["intro"]
+	if intro == nil {
+		t.Fatalf("missing intro track in Root: %v", tracks)
+	}
+	if code, got := r.stream(t, rowID(intro)); code != http.StatusOK || !bytes.Equal(got, audioBytes) {
+		t.Fatalf("Cloudreve stream = (HTTP %d, %d bytes), want 200 (%d bytes)", code, len(got), len(audioBytes))
+	}
+	mu.Lock()
+	seenIntro := append([]reqSeen(nil), storageReqs...)
+	storageReqs = nil
+	mu.Unlock()
+	if len(seenIntro) != 1 || seenIntro[0].auth != "" || seenIntro[0].cookie != "" || seenIntro[0].ref != "" {
+		t.Fatalf("storage saw unexpected headers: %+v", seenIntro)
+	}
+
+	// 2. Saving a plain web page without /dav/ is refused with 422 and shown on phone page.
+	r.change(t, serverChange{Action: "add", Name: "Web", URL: webOnly.URL}, http.StatusUnprocessableEntity)
+	loginResp, err := http.Post(r.gw.URL+"/v1/enginex/login?provider=webdav", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lf loginFlow
+	_ = json.NewDecoder(loginResp.Body).Decode(&lf)
+	loginResp.Body.Close()
+	phoneURL, _ := url.Parse(lf.Target)
+	formResp, err := http.PostForm(r.gw.URL+phoneURL.RequestURI(), url.Values{"action": {"add"}, "url": {webOnly.URL}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	formBody, _ := io.ReadAll(formResp.Body)
+	formResp.Body.Close()
+	if !strings.Contains(string(formBody), tr(0, "wdNotDAV")) {
+		t.Fatalf("phone page did not show wdNotDAV message: %.300s", formBody)
+	}
+	olViews := r.change(t, serverChange{Action: "add", Name: "OpenList", URL: openlistDAV.URL, Username: "dj", Password: davPass}, 200)
+	var olView *serverView
+	for i := range olViews {
+		if olViews[i].Name == "OpenList" {
+			olView = &olViews[i]
+			break
+		}
+	}
+	if olView == nil || olView.URL != openlistDAV.URL+"/dav/" {
+		t.Fatalf("OpenList 405 bare host did not resolve /dav/: %+v", olViews)
+	}
+	r.change(t, serverChange{Action: "remove", ID: olView.ID}, 200)
+	r.change(t, serverChange{Action: "add", Name: "Method405", URL: method405Only.URL}, http.StatusUnprocessableEntity)
+
+	// 3. Unreachable WebDAV server still saves as today.
+	deadSrv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := deadSrv.URL
+	deadSrv.Close()
+	r.change(t, serverChange{Action: "add", Name: "Offline", URL: deadURL + "/dav/"}, 200)
+
+	// 4. Editing a pre-saved bare-host Cloudreve server keeps password on /dav/ upgrade, never leaks to changed URL.
+	preSaved := fmt.Sprintf(`{"webdav":[{"id":"0123456789abcdef0123456789abcdef","name":"LegacyCloud","url":%q,"username":"dj","password":%q,"enabled":true}]}`, cloudreve.URL, davPass)
+	rEdit := newWebDAVRig(t, preSaved, "sources=\nscope=\nomni_source=0\nwebdav=1\n")
+	edited := rEdit.change(t, serverChange{Action: "edit", ID: "0123456789abcdef0123456789abcdef", Name: "LegacyCloud", URL: cloudreve.URL, Username: "dj"}, 200)
+	if edited[0].URL != cloudreve.URL+"/dav/" || !edited[0].HasPassword || rEdit.file(t).WebDAV[0].Password != davPass {
+		t.Fatalf("auto-/dav/ edit did not preserve password: %+v file=%+v", edited, rEdit.file(t).WebDAV)
+	}
+	// Editing URL to another reachable host with empty password never sends the old password during save probe.
+	rEdit.change(t, serverChange{Action: "edit", ID: edited[0].ID, Name: "Moved", URL: otherServer.URL, Username: "dj"}, 200)
+	if otherHostHits.Load() != 0 || rEdit.file(t).WebDAV[0].Password != "" {
+		t.Fatalf("changed-host edit sent or kept old password: hits=%d pw=%q", otherHostHits.Load(), rEdit.file(t).WebDAV[0].Password)
+	}
+
+	// 5. List and download failures each log once with URL query/credentials redacted.
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	badTrack := tracks["bad"]
+	if badTrack == nil {
+		t.Fatalf("missing bad track in Root: %v", tracks)
+	}
+	code, _ := r.stream(t, rowID(badTrack))
+	log.SetOutput(os.Stderr)
+	if code == http.StatusOK {
+		t.Fatalf("expected failed download status, got 200")
+	}
+	dlLog := logBuf.String()
+	if strings.Count(dlLog, "stream-sync: webdav download failed") != 1 {
+		t.Fatalf("expected 1 webdav download failure log, got:\n%s", dlLog)
+	}
+	if strings.Contains(dlLog, "signed-secret") || strings.Contains(dlLog, davPass) {
+		t.Fatalf("download log leaked secret:\n%s", dlLog)
+	}
+
+	htmlRig := newWebDAVRig(t, fmt.Sprintf(`{"webdav":[{"url":%q,"username":"dj","password":%q,"enabled":true}]}`, webOnly.URL, davPass), "sources=\nscope=\nomni_source=0\nwebdav=1\n")
+	htmlID := serverViews(kindWebDAV, htmlRig.file(t))[0].Scope
+	logBuf.Reset()
+	log.SetOutput(&logBuf)
+	listMap := htmlRig.open(t, htmlID)
+	log.SetOutput(os.Stderr)
+	listLog := logBuf.String()
+	foundHint := false
+	for title := range listMap {
+		if strings.Contains(title, "not a WebDAV address") {
+			foundHint = true
+		}
+	}
+	if !foundHint {
+		t.Fatalf("expected not a WebDAV address hint title, got: %v", listMap)
+	}
+	if strings.Count(listLog, "stream-sync: server list failed") != 1 {
+		t.Fatalf("expected 1 server list failure log, got:\n%s", listLog)
+	}
+	if strings.Contains(listLog, davPass) {
+		t.Fatalf("list failure log leaked password:\n%s", listLog)
+	}
+
+	// 6. When loopback is disallowed, nasHTTPClient address check rejects loopback/link-local redirect targets before dialing.
+	origLoopback := nasAllowLoopback.Load()
+	nasAllowLoopback.Store(false)
+	t.Cleanup(func() { nasAllowLoopback.Store(origLoopback) })
+	nasCheck := r.s.nasHTTPClient().CheckRedirect
+	for _, target := range []string{"http://127.0.0.1:6595/secret.mp3", "http://169.254.169.254/latest/secret.mp3"} {
+		dialedOffOrigin := false
+		rt := redirectMockRT(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host == "cloudreve.example" {
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header:     http.Header{"Location": {target}},
+					Body:       http.NoBody,
+					Request:    req,
+				}, nil
+			}
+			dialedOffOrigin = true
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+		})
+		prov := providers.NewSelfHostedProvider(providers.NASConfig{Protocol: "webdav", URL: "https://cloudreve.example/dav/", Username: "dj", Password: davPass, Enabled: true}, &http.Client{Transport: rt, CheckRedirect: nasCheck})
+		if _, err := prov.DownloadTrack(t.Context(), "/dav/intro.mp3", t.TempDir()); err == nil || dialedOffOrigin {
+			t.Fatalf("redirect target %s was not rejected before dialing (err=%v, dialed=%v)", target, err, dialedOffOrigin)
 		}
 	}
 }

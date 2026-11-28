@@ -16315,6 +16315,7 @@ class ServersUITest(unittest.TestCase):
                      "Leave empty to keep the saved password", "Next", "This server is already added",
                      "No more servers can be added", "Enter the server address with http:// or https://",
                      "Enter the server address with smb://", "Could not save the server",
+                     "This address is not a WebDAV server",
                      "Username", "Password", "Remove", "Done", "Cancel", "Scan with your phone camera."):
             self.assertIn(text, rows, text)
             self.assertEqual(len([v for v in rows[text] if v.strip()]), 3, text)
@@ -16418,6 +16419,9 @@ assert.strictEqual(scServerError, 'Enter the server address with smb://');
 scServerSave('webdav', {action: 'add', url: 'ftp://x'});
 xhrs[3].answer(400, '{"error":"bad"}');
 assert.strictEqual(scServerError, 'Enter the server address with http:// or https://');
+scServerSave('webdav', {action: 'add', url: 'https://html.example'});
+xhrs[4].answer(422, '{"error":"this address is not a WebDAV server"}');
+assert.strictEqual(scServerError, 'This address is not a WebDAV server');
 // Cancel in Engine's input ends the entry and brings the panel back.
 scServerEdit('webdav', null);
 scServerStop();

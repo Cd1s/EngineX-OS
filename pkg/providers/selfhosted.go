@@ -18,6 +18,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -34,15 +35,19 @@ type NASConfig struct {
 }
 
 type SelfHostedProvider struct {
-	cfg          NASConfig
-	client       *http.Client
-	mu           sync.RWMutex
-	webdavCache  map[string]Track  // href/ID -> Track
-	webdavKeys   []string          // FIFO eviction queue
-	plexPartMap  map[string]string // ratingKey -> Part.key or Part.key -> Part.key
-	plexPartKeys []string          // FIFO eviction queue
-	maxCache     int               // max entries for webdavCache and plexPartMap (<=0 uses defaultMaxCache)
+	cfg               NASConfig
+	client            *http.Client
+	baseCheckRedirect func(*http.Request, []*http.Request) error
+	mu                sync.RWMutex
+	webdavCache       map[string]Track  // href/ID -> Track
+	webdavKeys        []string          // FIFO eviction queue
+	plexPartMap       map[string]string // ratingKey -> Part.key or Part.key -> Part.key
+	plexPartKeys      []string          // FIFO eviction queue
+	maxCache          int               // max entries for webdavCache and plexPartMap (<=0 uses defaultMaxCache)
 }
+
+// ErrNotWebDAV reports that an HTTP server returned HTML or non-DAV markup instead of a WebDAV multistatus response.
+var ErrNotWebDAV = errors.New("webdav: address is not a WebDAV server")
 
 // NewSelfHostedProvider is a provider for the NAS cfg names. Every request it makes
 // carries the NAS's credentials (Subsonic's in the query, Plex's token header, WebDAV's
@@ -50,13 +55,23 @@ type SelfHostedProvider struct {
 // request (LockRedirects) and sends no Referer: no credential reaches an origin the DJ
 // did not configure (#335).
 func NewSelfHostedProvider(cfg NASConfig, c *http.Client) *SelfHostedProvider {
-	return &SelfHostedProvider{
-		cfg:         cfg,
-		client:      LockRedirects(c),
-		webdavCache: make(map[string]Track),
-		plexPartMap: make(map[string]string),
-		maxCache:    defaultMaxCache,
+	var baseCheck func(*http.Request, []*http.Request) error
+	if c != nil {
+		baseCheck = c.CheckRedirect
 	}
+	return &SelfHostedProvider{
+		cfg:               cfg,
+		client:            LockRedirects(c),
+		baseCheckRedirect: baseCheck,
+		webdavCache:       make(map[string]Track),
+		plexPartMap:       make(map[string]string),
+		maxCache:          defaultMaxCache,
+	}
+}
+
+// RedactURLError strips query parameters, fragments, and userinfo from any *url.Error URL in err.
+func RedactURLError(err error) error {
+	return redactURLError(err)
 }
 
 func (p *SelfHostedProvider) Config() NASConfig {
@@ -605,7 +620,16 @@ func (p *SelfHostedProvider) setWebDAVAuth(req *http.Request) {
 	}
 }
 
-func (p *SelfHostedProvider) webdavPropfind(ctx context.Context, targetURL string) ([]davResponse, error) {
+// WebDAVProbeResult classifies a WebDAV endpoint probe during server save.
+type WebDAVProbeResult int
+
+const (
+	WebDAVProbeUnreachable WebDAVProbeResult = iota
+	WebDAVProbeOK
+	WebDAVProbeWebPage
+)
+
+func (p *SelfHostedProvider) webdavPropfindResponse(ctx context.Context, targetURL string) (*http.Response, error) {
 	if _, err := validateBaseURL("webdav", targetURL); err != nil {
 		return nil, err
 	}
@@ -629,21 +653,92 @@ func (p *SelfHostedProvider) webdavPropfind(ctx context.Context, targetURL strin
 	if err != nil {
 		return nil, fmt.Errorf("webdav: propfind %w", redactURLError(err))
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("webdav: propfind HTTP %d", resp.StatusCode)
-	}
+	return resp, nil
+}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+func isHTMLContentType(ct string) bool {
+	if ct == "" {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		mediaType = strings.ToLower(strings.TrimSpace(strings.Split(ct, ";")[0]))
+	}
+	return mediaType == "text/html" || mediaType == "application/xhtml+xml"
+}
+
+func parseDavMultistatus(statusCode int, contentType string, r io.Reader) ([]davResponse, bool, error) {
+	if statusCode != http.StatusMultiStatus && isHTMLContentType(contentType) {
+		_, _ = io.Copy(io.Discard, io.LimitReader(r, 4<<10))
+		return nil, true, ErrNotWebDAV
+	}
+	body, err := io.ReadAll(io.LimitReader(r, 16<<20))
+	if err != nil {
+		return nil, false, redactURLError(err)
+	}
+	var multi davMultistatus
+	if err := xml.Unmarshal(body, &multi); err != nil || multi.XMLName.Local != "multistatus" || (statusCode != http.StatusMultiStatus && !strings.EqualFold(multi.XMLName.Space, "DAV:")) {
+		return nil, statusCode >= 200 && statusCode < 300, ErrNotWebDAV
+	}
+	return multi.Responses, false, nil
+}
+
+func (p *SelfHostedProvider) webdavPropfind(ctx context.Context, targetURL string) ([]davResponse, error) {
+	resp, err := p.webdavPropfindResponse(ctx, targetURL)
 	if err != nil {
 		return nil, err
 	}
-
-	var multi davMultistatus
-	if err := xml.Unmarshal(body, &multi); err != nil {
-		return nil, fmt.Errorf("webdav: invalid XML: %w", err)
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return nil, fmt.Errorf("%w (HTTP %d)", ErrNotWebDAV, resp.StatusCode)
 	}
-	return multi.Responses, nil
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("webdav: propfind HTTP %d", resp.StatusCode)
+	}
+	responses, _, err := parseDavMultistatus(resp.StatusCode, resp.Header.Get("Content-Type"), resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return responses, nil
+}
+
+// ProbeWebDAV probes the configured WebDAV URL with Depth 1 PROPFIND (origin-locked).
+func (p *SelfHostedProvider) ProbeWebDAV(ctx context.Context) WebDAVProbeResult {
+	resp, err := p.webdavPropfindResponse(ctx, p.cfg.URL)
+	if err != nil {
+		return WebDAVProbeUnreachable
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return WebDAVProbeWebPage
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return WebDAVProbeUnreachable
+	}
+	_, isWebPage, err := parseDavMultistatus(resp.StatusCode, resp.Header.Get("Content-Type"), resp.Body)
+	if err == nil {
+		return WebDAVProbeOK
+	}
+	if isWebPage {
+		return WebDAVProbeWebPage
+	}
+	return WebDAVProbeUnreachable
+}
+
+// ProbeWebDAVStrict207 probes the configured WebDAV URL and returns true only for a valid 207 Multi-Status DAV reply.
+func (p *SelfHostedProvider) ProbeWebDAVStrict207(ctx context.Context) bool {
+	resp, err := p.webdavPropfindResponse(ctx, p.cfg.URL)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMultiStatus {
+		return false
+	}
+	_, _, err = parseDavMultistatus(resp.StatusCode, resp.Header.Get("Content-Type"), resp.Body)
+	return err == nil
 }
 
 func isDavCollection(resp davResponse) bool {
@@ -877,6 +972,72 @@ func (p *SelfHostedProvider) filenameSearch(query string) []Track {
 	return out
 }
 
+func isRedirectStatus(code int) bool {
+	switch code {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	}
+	return false
+}
+
+func isComplete206(resp *http.Response) bool {
+	if resp.StatusCode != http.StatusPartialContent {
+		return false
+	}
+	cr := strings.TrimSpace(resp.Header.Get("Content-Range"))
+	if cr == "" {
+		return !strings.HasPrefix(strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type"))), "multipart/")
+	}
+	unitAndRange, totalStr, ok := strings.Cut(cr, "/")
+	if !ok || totalStr == "*" {
+		return false
+	}
+	total, err := strconv.ParseInt(strings.TrimSpace(totalStr), 10, 64)
+	if err != nil || total <= 0 {
+		return false
+	}
+	if resp.ContentLength >= 0 && total != resp.ContentLength {
+		return false
+	}
+	unit, rangePart, ok := strings.Cut(strings.TrimSpace(unitAndRange), " ")
+	if !ok || !strings.EqualFold(unit, "bytes") {
+		return false
+	}
+	startStr, endStr, ok := strings.Cut(strings.TrimSpace(rangePart), "-")
+	if !ok {
+		return false
+	}
+	start, err1 := strconv.ParseInt(strings.TrimSpace(startStr), 10, 64)
+	end, err2 := strconv.ParseInt(strings.TrimSpace(endStr), 10, 64)
+	return err1 == nil && err2 == nil && start == 0 && end+1 == total
+}
+
+func (p *SelfHostedProvider) offOriginDownloadClient() *http.Client {
+	c2 := *p.httpClient()
+	// Clear any cookie jar so stored cookies are never sent to redirect storage hosts.
+	c2.Jar = nil
+	c2.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		req.Header.Del("Authorization")
+		req.Header.Del("Proxy-Authorization")
+		req.Header.Del("Cookie")
+		req.Header.Del("Referer")
+		if len(via) >= 5 {
+			return errors.New("webdav: too many redirects")
+		}
+		if _, err := validateBaseURL("webdav", req.URL.String()); err != nil {
+			return err
+		}
+		if req.URL.User != nil {
+			return errors.New("webdav: redirect URL must not contain userinfo")
+		}
+		if p.baseCheckRedirect != nil {
+			return p.baseCheckRedirect(req, via)
+		}
+		return nil
+	}
+	return &c2
+}
+
 func (p *SelfHostedProvider) webdavDownloadTrack(ctx context.Context, trackID, destDir string) (string, error) {
 	targetU, err := resolveWebDAVURL(p.cfg.URL, trackID)
 	if err != nil {
@@ -889,12 +1050,58 @@ func (p *SelfHostedProvider) webdavDownloadTrack(ctx context.Context, trackID, d
 	}
 	p.setWebDAVAuth(req)
 
-	resp, err := p.httpClient().Do(req)
+	// Same-origin redirects stay as they are (without Referer); off-origin redirects
+	// stop before following so credentials never leave the configured WebDAV origin.
+	c1 := *p.httpClient()
+	c1.CheckRedirect = func(nextReq *http.Request, via []*http.Request) error {
+		nextReq.Header.Del("Referer")
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		if !sameOrigin(nextReq.URL, via[0].URL) {
+			return http.ErrUseLastResponse
+		}
+		if p.baseCheckRedirect != nil {
+			return p.baseCheckRedirect(nextReq, via)
+		}
+		return nil
+	}
+
+	resp, err := c1.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("webdav: download %w", redactURLError(err))
 	}
+
+	if isRedirectStatus(resp.StatusCode) {
+		loc, locErr := resp.Location()
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		resp.Body.Close()
+		if locErr != nil || sameOrigin(loc, targetU) {
+			return "", fmt.Errorf("webdav: download HTTP %d", resp.StatusCode)
+		}
+		if _, err := validateBaseURL("webdav", loc.String()); err != nil {
+			return "", err
+		}
+		if loc.User != nil {
+			return "", errors.New("webdav: redirect URL must not contain userinfo")
+		}
+		offReq, err := http.NewRequestWithContext(ctx, http.MethodGet, loc.String(), nil)
+		if err != nil {
+			return "", redactURLError(err)
+		}
+		if p.baseCheckRedirect != nil {
+			if err := p.baseCheckRedirect(offReq, []*http.Request{req}); err != nil {
+				return "", fmt.Errorf("webdav: download %w", redactURLError(err))
+			}
+		}
+		resp, err = p.offOriginDownloadClient().Do(offReq)
+		if err != nil {
+			return "", fmt.Errorf("webdav: download %w", redactURLError(err))
+		}
+	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+
+	if resp.StatusCode != http.StatusOK && !isComplete206(resp) {
 		return "", fmt.Errorf("webdav: download HTTP %d", resp.StatusCode)
 	}
 
@@ -909,7 +1116,11 @@ func (p *SelfHostedProvider) webdavDownloadTrack(ctx context.Context, trackID, d
 		}
 	}
 	filename := nasCacheFilename(targetU, targetU.Path+"\x00"+targetU.RawQuery, ext)
-	return saveStreamToFile(destDir, filename, resp.Body)
+	saved, err := saveStreamToFile(destDir, filename, resp.Body)
+	if err != nil {
+		return "", redactURLError(err)
+	}
+	return saved, nil
 }
 
 // ----------------------------------------------------------------------------

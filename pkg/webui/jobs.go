@@ -1199,6 +1199,9 @@ func (j *Jobs) fromSelfHosted(ctx context.Context, t providers.Track) (*deemixcl
 	}
 	p, err := sh.DownloadTrack(ctx, ref, j.p.Deemix.DownloadDir)
 	if err != nil {
+		if t.Provider == webdavScope {
+			log.Printf("stream-sync: webdav download failed: %s", sanitizeLogErr(err))
+		}
 		return nil, err
 	}
 	ext := strings.ToLower(filepath.Ext(p))

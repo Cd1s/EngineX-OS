@@ -100,6 +100,9 @@ func sourceFailedTitle(provider string, err error) string {
 	if label == "" {
 		label = provider
 	}
+	if errors.Is(err, providers.ErrNotWebDAV) {
+		return label + ": not a WebDAV address (try /dav/) / 不是 WebDAV 地址（试试 /dav/）"
+	}
 	var st providers.StatusError
 	if !errors.As(err, &st) {
 		return label + ": failed to load / 加载失败"
@@ -1492,10 +1495,7 @@ func (g *tidalGateway) logPlaylistOpenFailure(r *http.Request, status int, id st
 	if ref != nil {
 		provider = ref.provider
 	}
-	errText := fmt.Sprint(err)
-	if strings.ContainsAny(errText, "\r\n\x1b") {
-		errText = fmt.Sprintf("%q", errText)
-	}
+	errText := sanitizeLogErr(err)
 	log.Printf("stream-sync: playlist open failed route=%s status=%d scope=%s playlist=%s provider=%s session=%s source_id=%s error=%s", r.URL.Path, status, g.s.scope(), id, provider, playlistOpenSession(ref), playlistOpenSourceID(ref), errText)
 }
 func (g *tidalGateway) trackJSON(id int64, t providers.Track) map[string]any {

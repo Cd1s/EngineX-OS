@@ -3,7 +3,10 @@ package providers
 import (
 	"context"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"sync"
 	"testing"
 )
@@ -30,13 +33,19 @@ func (s *seen) all() []*http.Request {
 // NAS's credentials (Subsonic in the query, Plex's X-Plex-Token header, WebDAV's
 // Authorization). On 5ea09903 its client followed a redirect to any origin: another
 // server got the Subsonic auth in the Referer, the Plex token header, and (same host,
-// another port) the WebDAV Authorization. Now a redirect is followed only within the
-// configured origin, and no redirect carries a Referer.
+// another port) the WebDAV Authorization. Now credentialed API/PROPFIND redirects stay
+// within the configured origin without a Referer, and WebDAV track download redirects to
+// another origin are followed manually without Authorization, Cookie, or Referer.
 func TestSelfHostedRedirectsStayOnTheOrigin(t *testing.T) {
 	const pass, token = "nas-pass-r11-335", "plex-token-r11-335"
 	other := &seen{}
 	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		other.add(r)
+		if r.URL.Path == "/music/a.mp3" {
+			w.Header().Set("Content-Type", "audio/mpeg")
+			w.Write([]byte("OFF-ORIGIN-AUDIO"))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{}`))
 	}))
@@ -45,7 +54,7 @@ func TestSelfHostedRedirectsStayOnTheOrigin(t *testing.T) {
 	nas := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		home.add(r)
 		switch r.URL.Path {
-		case "/rest/getPlaylists.view", "/playlists", "/music/a.mp3":
+		case "/rest/getPlaylists.view", "/playlists", "/music/", "/music/a.mp3":
 			http.Redirect(w, r, elsewhere.URL+r.URL.Path+"?"+r.URL.RawQuery, http.StatusFound)
 		case "/same/rest/getPlaylists.view":
 			http.Redirect(w, r, "/same/rest/getPlaylists2.view?"+r.URL.RawQuery, http.StatusFound)
@@ -65,10 +74,7 @@ func TestSelfHostedRedirectsStayOnTheOrigin(t *testing.T) {
 	}{
 		{"subsonic", NASConfig{Protocol: "subsonic", URL: nas.URL, Username: "dj", Password: pass}, func(p *SelfHostedProvider) error { _, err := p.Playlists(ctx); return err }},
 		{"plex", NASConfig{Protocol: "plex", URL: nas.URL, Token: token}, func(p *SelfHostedProvider) error { _, err := p.Playlists(ctx); return err }},
-		{"webdav", NASConfig{Protocol: "webdav", URL: nas.URL + "/music/", Username: "dj", Password: pass}, func(p *SelfHostedProvider) error {
-			_, err := p.DownloadTrack(ctx, "/music/a.mp3", t.TempDir())
-			return err
-		}},
+		{"webdav propfind", NASConfig{Protocol: "webdav", URL: nas.URL + "/music/", Username: "dj", Password: pass}, func(p *SelfHostedProvider) error { _, err := p.Playlists(ctx); return err }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			before := len(other.all())
@@ -83,6 +89,45 @@ func TestSelfHostedRedirectsStayOnTheOrigin(t *testing.T) {
 			}
 		})
 	}
+	t.Run("webdav download off-origin strips credentials", func(t *testing.T) {
+		for _, authCfg := range []struct {
+			label string
+			cfg   NASConfig
+		}{
+			{"basic", NASConfig{Protocol: "webdav", URL: nas.URL + "/music/", Username: "dj", Password: pass}},
+			{"bearer", NASConfig{Protocol: "webdav", URL: nas.URL + "/music/", Token: token}},
+		} {
+			t.Run(authCfg.label, func(t *testing.T) {
+				jar, err := cookiejar.New(nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, raw := range []string{nas.URL, elsewhere.URL} {
+					u, _ := url.Parse(raw)
+					jar.SetCookies(u, []*http.Cookie{{Name: "session", Value: "secret-cookie"}})
+				}
+				cli := &http.Client{Jar: jar}
+				before := len(other.all())
+				dest, err := NewSelfHostedProvider(authCfg.cfg, cli).DownloadTrack(ctx, "/music/a.mp3", t.TempDir())
+				if err != nil {
+					t.Fatalf("webdav off-origin DownloadTrack failed: %v", err)
+				}
+				gotBytes, rerr := os.ReadFile(dest)
+				if rerr != nil || string(gotBytes) != "OFF-ORIGIN-AUDIO" {
+					t.Fatalf("downloaded bytes = %q (%v)", gotBytes, rerr)
+				}
+				got := other.all()[before:]
+				if len(got) != 1 {
+					t.Fatalf("expected 1 off-origin storage request, got %d", len(got))
+				}
+				r := got[0]
+				if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" || r.Referer() != "" {
+					t.Fatalf("off-origin WebDAV download leaked credentials: Authorization=%q Cookie=%q Referer=%q",
+						r.Header.Get("Authorization"), r.Header.Get("Cookie"), r.Referer())
+				}
+			})
+		}
+	})
 	// A redirect within the origin is followed, and carries no Referer.
 	p := NewSelfHostedProvider(NASConfig{Protocol: "subsonic", URL: nas.URL + "/same", Username: "dj", Password: pass}, nil)
 	lists, err := p.Playlists(ctx)
