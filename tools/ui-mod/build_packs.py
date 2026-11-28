@@ -4930,7 +4930,12 @@ SERVICES_MAIN = """
 			: {id: "", url: "", from: "", username: "", password: "", name: "", hasPassword: false}
 		scServerStep = 0
 		scServerTyping = true
-		root.openDialogComponent(scServerInput)
+		const dlg = root.openDialogComponent(scServerInput)
+		if (dlg && typeof Overlay !== "undefined" && Overlay.overlay) {
+			if (dlg.parent !== Overlay.overlay) dlg.parent = Overlay.overlay
+			if (dlg.z !== ZValues.Modal) dlg.z = ZValues.Modal
+			if (dlg.field && dlg.field.forceActiveFocus) dlg.field.forceActiveFocus()
+		}
 	}
 	function scServerNext(text) {
 		const d = Object.assign({}, scServerDraft)
@@ -4938,7 +4943,14 @@ SERVICES_MAIN = """
 		scServerDraft = d
 		if (scServerStep < scServerSteps.length - 1) {
 			scServerStep++
-			Qt.callLater(function() { root.openDialogComponent(scServerInput) })
+			Qt.callLater(function() {
+				const dlg = root.openDialogComponent(scServerInput)
+				if (dlg && typeof Overlay !== "undefined" && Overlay.overlay) {
+					if (dlg.parent !== Overlay.overlay) dlg.parent = Overlay.overlay
+					if (dlg.z !== ZValues.Modal) dlg.z = ZValues.Modal
+					if (dlg.field && dlg.field.forceActiveFocus) dlg.field.forceActiveFocus()
+				}
+			})
 			return
 		}
 		scServerTyping = false
@@ -5731,20 +5743,35 @@ USB_PREPARING_BANNER = """
 """
 
 # One field of a WebDAV or NAS server typed on the deck: Engine's TextInputDialog, as
-# Track Info's metadata edit uses it. A step closed without Done (Cancel) ends the entry.
+# Track Info's metadata edit uses it. Raised into Overlay.overlay at ZValues.Modal so
+# it renders above ControlCenter (Settings, ZValues.ControlCenter) and below Keyboard.
+# A step closed without Done (Cancel) ends the entry.
 SERVER_INPUT = """	readonly property Component scServerInput: ScMsg.TextInputDialog {
+		parent: Overlay.overlay ? Overlay.overlay : root.foreground
+		z: ZValues.Modal
 		property bool scDone: false
+		MouseArea { anchors.fill: parent; z: -1 }
+		Connections {
+			target: root
+			function onIsQuittingChanged() { if (root.isQuitting) close() }
+		}
 		onDone: text => { scDone = true; root.scServerNext(text) }
 		Component.onCompleted: root.scServerField(field)
 		Component.onDestruction: if (!scDone) root.scServerStop()
 	}
 """
 
+LOGIN_LAYER_530 = """			parent: Overlay.overlay ? Overlay.overlay : uiContainer
+			anchors.fill: parent
+			z: ZValues.Modal"""
+
+LOGIN_LAYER_504 = """			anchors.fill: parent
+			z: 1000000"""
+
 LOGIN_DIALOG = """
 		Rectangle {
-			anchors.fill: parent
-			z: 1000000
-			visible: root.scLogin !== "" && !root.scServerTyping // the stock text input of Engine opens below this panel
+@LOGIN_LAYER@
+			visible: root.scLogin !== "" && !root.scServerTyping // both share Overlay.overlay (ZValues.Modal); hide the panel while the text input is open
 			color: "#e0000000"
 			readonly property var service: root.scServices.find(s => s.id === root.scLogin)
 			readonly property bool servers: root.scLogin === "webdav" || root.scLogin === "nas"
@@ -8462,7 +8489,9 @@ def edits(dev: bool):
         ROOT + "EmbeddedMain.qml": [
             # Engine's own text input (Items/MessageBoxes/TextInputDialog.qml) for WebDAV and
             # NAS servers typed on the deck; qualified, so no stock name changes meaning.
-            *([('import "Items/Base"\n', 'import "Items/Base"\nimport "Items/MessageBoxes" as ScMsg\n')] if v53() else []),
+            *([('import "Items/Base"\n', 'import "Items/Base"\nimport "Items/MessageBoxes" as ScMsg\n'),
+               ('    readonly property bool messageBoxOpen: root.foreground.children.some(child => child instanceof DialogBase)\n',
+                '    readonly property bool messageBoxOpen: root.foreground.children.some(child => child instanceof DialogBase) || root.scLogin !== "" || root.scServerTyping\n')] if v53() else []),
             # The actual main view has finished loading and the stock splash has
             # disappeared. Do not equate resource registration with UI readiness.
             ('objectName: "SplashScreenLoader"', 'objectName: "SplashScreenLoader"' + BOOT_READY),
@@ -8471,7 +8500,7 @@ def edits(dev: bool):
             # the same way about the same centre, or its top bar sits above the screen.
             ("		Overlay.overlay.anchors.fill = uiContainer\n",
              "		Overlay.overlay.anchors.fill = uiContainer\n		Overlay.overlay.scale = Qt.binding(function() { return uiContainer.scale })\n"),
-            ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG + USB_PREPARING_BANNER),
+            ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG.replace("@LOGIN_LAYER@", LOGIN_LAYER_530 if v53() else LOGIN_LAYER_504) + USB_PREPARING_BANNER),
             # UI Scale: QT_SCALE_FACTOR leaves a black band under EGLFS (nativeScreenSize and
             # defaultScreenSize drift apart), so scale uiContainer itself: it is centred in its
             # parent and scales about its centre, so width*scale stays the screen size and

@@ -16426,6 +16426,128 @@ assert.strictEqual(scServerTyping, false);
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is required to run the panel's functions")
+    def test_server_panel_and_text_input_layer_above_settings_overlay(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits_530 = bp.edits(False)["Skins/Embedded/EmbeddedMain.qml"]
+            bp.ROOT = "Skins/EmbeddedCommon/"
+            edits_504 = bp.edits(False)["Skins/EmbeddedCommon/EmbeddedMain.qml"]
+        finally:
+            bp.ROOT = old_root
+
+        joined_530 = "\n".join(new for _old, new in edits_530)
+        self.assertIn("parent: Overlay.overlay ? Overlay.overlay : uiContainer", joined_530)
+        self.assertIn("z: ZValues.Modal", joined_530)
+        self.assertIn("parent: Overlay.overlay ? Overlay.overlay : root.foreground", bp.SERVER_INPUT)
+        self.assertIn("z: ZValues.Modal", bp.SERVER_INPUT)
+        self.assertIn("MouseArea { anchors.fill: parent; z: -1 }", bp.SERVER_INPUT)
+        self.assertIn("function onIsQuittingChanged() { if (root.isQuitting) close() }", bp.SERVER_INPUT)
+        self.assertIn('root.scLogin !== "" || root.scServerTyping', joined_530)
+
+        joined_504 = "\n".join(new for _old, new in edits_504)
+        self.assertIn("readonly property Component scServerInput: null", joined_504)
+        self.assertNotIn("z: ZValues.Modal", joined_504)
+
+        stock_em = LAB / "5.3.0/qrc/Skins/Embedded/EmbeddedMain.qml"
+        if stock_em.is_file():
+            patched = stock_em.read_text(encoding="utf-8")
+            old_root = bp.ROOT
+            try:
+                bp.ROOT = "Skins/Embedded/"
+                for old, new in edits_530:
+                    patched = bp.patch(patched, old, new, str(stock_em))
+            finally:
+                bp.ROOT = old_root
+            self.assertIn('readonly property bool messageBoxOpen: root.foreground.children.some(child => child instanceof DialogBase) || root.scLogin !== "" || root.scServerTyping', patched)
+            self.assertIn("parent: Overlay.overlay ? Overlay.overlay : uiContainer", patched)
+            self.assertIn("parent: Overlay.overlay ? Overlay.overlay : root.foreground", patched)
+
+        main = bp.SERVICES_MAIN
+        fns = "\n".join(self.extract_fn(main, n) for n in ("scServersOf", "scFindObject", "scServerField", "scServerEdit", "scServerNext", "scServerStop", "scServerSave"))
+        script = r"""
+const assert = require('assert');
+const foreground = {name: 'foreground'};
+const overlay = {name: 'overlay'};
+globalThis.Overlay = {overlay};
+globalThis.ZValues = {ControlCenter: 3, Modal: 4, Keyboard: 6};
+globalThis.Qt = {callLater(f) { f(); }};
+globalThis.TextInput = {Password: 2, Normal: 0};
+const xhrs = [], dialogs = [];
+let nextParent = foreground;
+class XMLHttpRequest {
+    open(m, u) { this.method = m; this.url = u; }
+    setRequestHeader() {}
+    send(body) { this.body = body; xhrs.push(this); }
+    answer(status, text) { this.readyState = 4; this.status = status; this.responseText = text; this.onreadystatechange(); }
+}
+globalThis.XMLHttpRequest = XMLHttpRequest;
+globalThis.root = globalThis;
+Object.assign(globalThis, {
+    scT(s) { return s; },
+    scWebdav: [{id: 'w1', name: 'Studio', url: 'https://dav.example/music', username: 'dj', hasPassword: true}],
+    scNasServers: [{id: 'n1', name: 'NAS', url: 'smb://nas.example/music', username: 'dj', hasPassword: true}],
+    scServerTyping: false, scServerError: '', scServerKind: 'webdav', scServerDraft: {}, scServerStep: 0,
+    scServerSteps: ['url', 'username', 'password', 'name'], scServerInput: {},
+    scCall() {},
+    openDialogComponent() {
+        const d = {parent: nextParent, z: 0, field: {focused: false, forceActiveFocus() { this.focused = true; }}};
+        dialogs.push(d);
+        return d;
+    },
+});
+""" + fns + r"""
+const input = {objectName: 'EmbeddedTextInput', children: [], echoMode: 0};
+const field = () => ({children: [{objectName: '', children: [input]}]});
+
+// WebDAV Edit from Settings: both dialogs stuck in foreground AND dialogs already in Overlay.overlay with z=0 are raised to ZValues.Modal.
+nextParent = foreground;
+scServerEdit('webdav', scWebdav[0]);
+assert.strictEqual(dialogs[0].parent, overlay);
+assert.strictEqual(dialogs[0].z, ZValues.Modal);
+assert.ok(dialogs[0].z > ZValues.ControlCenter && dialogs[0].z < ZValues.Keyboard);
+assert.strictEqual(dialogs[0].field.focused, true);
+nextParent = overlay;
+scServerNext('https://dav.example/music');
+scServerNext('dj');
+let f = field(); scServerField(f);
+assert.strictEqual(input.echoMode, TextInput.Password);
+scServerNext('');
+scServerNext('Studio');
+assert.strictEqual(dialogs.length, 4);
+for (const d of dialogs) {
+    assert.strictEqual(d.parent, overlay);
+    assert.strictEqual(d.z, ZValues.Modal);
+    assert.strictEqual(d.field.focused, true);
+}
+assert.strictEqual(xhrs[0].url, 'http://127.0.0.1:8080/v1/enginex/servers/webdav');
+
+// NAS Add + Cancel + failed save error text still work when dialog starts in Overlay.overlay with z=0.
+const beforeAdd = dialogs.length;
+nextParent = overlay;
+scServerEdit('nas', null);
+scServerNext('http://bad');
+scServerNext('dj');
+scServerNext('pw');
+scServerNext('Bad NAS');
+for (let i = beforeAdd; i < dialogs.length; i++) {
+    assert.strictEqual(dialogs[i].parent, overlay);
+    assert.strictEqual(dialogs[i].z, ZValues.Modal);
+}
+xhrs[1].answer(400, '{"error":"bad"}');
+assert.strictEqual(scServerError, 'Enter the server address with smb://');
+
+nextParent = foreground;
+scServerEdit('webdav', null);
+assert.strictEqual(dialogs[dialogs.length - 1].parent, overlay);
+assert.strictEqual(dialogs[dialogs.length - 1].z, ZValues.Modal);
+scServerStop();
+assert.strictEqual(scServerTyping, false);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
