@@ -77,21 +77,21 @@ func (s *Server) fxSelectorUpdate(w http.ResponseWriter, r *http.Request, q url.
 	u, ue := strconv.Atoi(q.Get("fxUnit"))
 	m, me := strconv.Atoi(q.Get("fxMode"))
 	if ue != nil || me != nil || u < 1 || u > 6 || m < 0 || m > 6 {
-		fail(w, http.StatusBadRequest, errors.New("invalid FX unit or mode"))
+		s.failUI(w, http.StatusBadRequest, errors.New("invalid FX unit or mode"))
 		return
 	}
 	if !s.lockFXSelector(r.Context()) {
-		fail(w, http.StatusConflict, errors.New("FX selection already pending"))
+		s.failUI(w, http.StatusConflict, errors.New("FX selection already pending"))
 		return
 	}
 	defer s.fxMu.Unlock()
 	if !s.fxSelectorAvailable() {
-		fail(w, http.StatusServiceUnavailable, errors.New("FX selector hook unavailable"))
+		s.failUI(w, http.StatusServiceUnavailable, errors.New("FX selector hook unavailable"))
 		return
 	}
 	var nonce [8]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
-		fail(w, http.StatusInternalServerError, errors.New("cannot create FX handshake"))
+		s.failUI(w, http.StatusInternalServerError, errors.New("cannot create FX handshake"))
 		return
 	}
 	// Distinct exponents and unit bits prevent cross-unit challenge matches.
@@ -111,7 +111,7 @@ func (s *Server) fxSelectorUpdate(w http.ResponseWriter, r *http.Request, q url.
 		}
 	}
 	if err != nil {
-		fail(w, http.StatusInternalServerError, errors.New("cannot notify FX selector hook"))
+		s.failUI(w, http.StatusInternalServerError, errors.New("cannot notify FX selector hook"))
 		return
 	}
 	acked := false
@@ -131,6 +131,8 @@ func (s *Server) fxSelectorUpdate(w http.ResponseWriter, r *http.Request, q url.
 		fields := strings.Fields(string(b))
 		if len(fields) == 7 && strings.Join(fields[:6], " ") == strings.TrimSpace(command) && (fields[6] == "0" || fields[6] == "1") {
 			acked = true
+			endMut := s.beginUIMutation()
+			endMut(true)
 			respond(w, map[string]any{"fxSelectorReady": true, "fxBind": m > 0 && fields[6] == "0", "fxChallengeA": math.Float32frombits(a), "fxChallengeB": math.Float32frombits(btoken)})
 			return
 		}
@@ -138,7 +140,7 @@ func (s *Server) fxSelectorUpdate(w http.ResponseWriter, r *http.Request, q url.
 		case <-r.Context().Done():
 			return
 		case <-timer.C:
-			fail(w, http.StatusGatewayTimeout, errors.New("FX selector hook did not acknowledge"))
+			s.failUI(w, http.StatusGatewayTimeout, errors.New("FX selector hook did not acknowledge"))
 			return
 		case <-tick.C:
 		}

@@ -60,6 +60,20 @@ func (g *tidalGateway) hasRealAuth() bool {
 func (g *tidalGateway) clearRealAuth() error {
 	g.authMu.Lock()
 	defer g.authMu.Unlock()
+	var endMut func(bool)
+	if g.s != nil {
+		endMut = g.s.beginUIMutation()
+		committed := false
+		defer func() { endMut(committed) }()
+		err := os.Remove(g.authPath())
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err == nil {
+			committed = true
+		}
+		return err
+	}
 	err := os.Remove(g.authPath())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -127,6 +141,12 @@ func (g *tidalGateway) updateRealAuth(in tidalAuth, fillOnly bool) error {
 		err = closeErr
 	}
 	if err != nil {
+		return err
+	}
+	if g.s != nil {
+		endMut := g.s.beginUIMutation()
+		err := os.Rename(f.Name(), g.authPath()) // CreateTemp uses 0600, including replacements.
+		endMut(err == nil)
 		return err
 	}
 	return os.Rename(f.Name(), g.authPath()) // CreateTemp uses 0600, including replacements.

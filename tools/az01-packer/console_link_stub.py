@@ -25,7 +25,7 @@ UNITS = [  # the linked units: player one is an SC6000, player two a CDJ-3000
     {"player": 2, "model": "CDJ-3000", "title": "Linked player two", "artist": "CDJ-3000", "bpm": 124.0, "color": (255, 150, 40, 255)},
     {"player": 3, "model": "SC5000", "title": "Linked player three", "artist": "SC5000 deck 3", "bpm": 128.0, "color": (90, 220, 120, 255)},
 ]
-state = {"consoleLineView": False, "units": 2, "cdjoff": False, "asked": False, "row": False}  # units: how many of the linked units are on the network (the probe sets it per phase: POST /ctl?units=N&cdjoff=0|1: with 1 the only unit is the CDJ, Pro DJ Link off)
+state = {"consoleLineView": False, "units": 2, "cdjoff": False, "asked": False, "row": False, "uiRev": 1}  # units: how many of the linked units are on the network (the probe sets it per phase: POST /ctl?units=N&cdjoff=0|1: with 1 the only unit is the CDJ, Pro DJ Link off)
 counts = collections.Counter()
 lock = threading.Lock()
 version = {"n": 1, "sig": ""}
@@ -85,9 +85,9 @@ def consoleLanes():
 def ui():
     if MODE == "player":
         return {"version": "5.3.0.6", "player": True, "fourDeckWaveform": True, "fourDeckRole": "12", "fourDeckRoleActive": "12", "pairedView": False,
-                "shadowMode": "auto", "sources": ["tidal"], "consoleDecks": state["row"], "consoleLineView": False}
+                "shadowMode": "auto", "sources": ["tidal"], "consoleDecks": state["row"], "consoleLineView": False, "rev": state["uiRev"]}
     return {"version": "5.3.0.6", "player": False, "fourDeckWaveform": False, "fourDeckRole": "auto", "pairedView": False,
-            "shadowMode": "auto", "sources": ["tidal"], "consoleLineView": state["consoleLineView"]}
+            "shadowMode": "auto", "sources": ["tidal"], "consoleLineView": state["consoleLineView"], "rev": state["uiRev"]}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -109,7 +109,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with lock:
             counts["GET " + u.path] += 1
         if u.path == "/v1/enginex/ui":
-            return self.reply(ui())
+            return self.reply(ui(), {"X-UI-Rev": str(state["uiRev"])})
         if u.path == "/v1/enginex/views":
             return self.reply({"active": 1, "views": {}})
         if u.path == "/v1/enginex/consolesend":
@@ -177,7 +177,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for k, v in urllib.parse.parse_qs(u.query).items():
                 if k == "consoleLineView":
                     state["consoleLineView"] = v[0] in ("1", "true")
-            return self.reply(ui())
+            state["uiRev"] += 1
+            return self.reply(ui(), {"X-UI-Rev": str(state["uiRev"])})
         return self.reply({"ok": True})
 
 

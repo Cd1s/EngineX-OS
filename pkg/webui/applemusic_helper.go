@@ -93,19 +93,28 @@ func (s *Server) syncAppleMusicSession(clearDeleted bool, prevGen uint64) {
 	readyNow := s.appleMusic.Ready()
 	credChanged := s.appleMusic.CredGen() != prevGen
 	var sessionIDs []string
+	bumped := false
+	endMut := s.beginUIMutation()
 	s.mu.Lock()
 	if clearDeleted {
+		if s.ownerDeleted["applemusic"] {
+			bumped = true
+		}
 		delete(s.ownerDeleted, "applemusic")
 	}
 	for _, v := range s.sessions {
 		if !v.Guest && v.Provider == "applemusic" {
 			if readyNow && !s.ownerDeleted["applemusic"] {
+				if !v.Ready {
+					bumped = true
+				}
 				v.Ready = true
 			}
 			sessionIDs = append(sessionIDs, v.ID)
 		}
 	}
 	s.mu.Unlock()
+	endMut(bumped || credChanged)
 	if credChanged && s.tidal != nil {
 		for _, id := range sessionIDs {
 			s.tidal.dropAppleMusicBrowse(id)

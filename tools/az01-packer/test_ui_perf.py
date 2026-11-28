@@ -241,14 +241,14 @@ const Planck = {librarianController: {streamingPlaylistsController: {invalidateU
 function scEnsureTidal() {}
 function scApply(v) { if (v.loggedIn) scLoggedIn = v.loggedIn; }
 ''' + fn + r'''
-// External WebUI / helper sign-in adds active scope -> closes QR, invalidates playlists, enters list.
+// External WebUI / helper sign-in adds active scope -> closes QR and invalidates playlists passively (never auto-enters).
 scUiPoll.headers = {'X-UI-Digest': 'd1'};
 scUiPoll.responseText = JSON.stringify({loggedIn: ['spotify', 'applemusic']});
 scUiPollReply();
 assert.equal(scLogin, '');
 assert.equal(invalidated, 1);
-assert.equal(entered, 1);
-assert.equal(scEnterTries, 8);
+assert.equal(entered, 0);
+assert.equal(scEnterTries, 0);
 
 // "Switch account" opens QR while already logged in -> unchanged membership must not close QR.
 scLogin = 'applemusic';
@@ -257,7 +257,7 @@ scUiPoll.responseText = JSON.stringify({loggedIn: ['spotify', 'applemusic']});
 scUiPollReply();
 assert.equal(scLogin, 'applemusic');
 assert.equal(invalidated, 1);
-assert.equal(entered, 1);
+assert.equal(entered, 0);
 
 // Remote logout removes active scope -> invalidates stale playlists without auto-entering.
 scLogin = '';
@@ -265,7 +265,7 @@ scUiPoll.headers = {'X-UI-Digest': 'd3'};
 scUiPoll.responseText = JSON.stringify({loggedIn: ['spotify']});
 scUiPollReply();
 assert.equal(invalidated, 2);
-assert.equal(entered, 1);
+assert.equal(entered, 0);
 '''
         result = subprocess.run(["node"], input=script, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)

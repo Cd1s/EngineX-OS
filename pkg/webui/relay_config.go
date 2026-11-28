@@ -426,11 +426,13 @@ func (s *Server) updateRelayConfigLocked(relay, password *string) error {
 	if password != nil {
 		v.Password = *password
 	}
-	if err := providers.SaveJSON(s.relayConfigPath(), v); err != nil {
-		return err
+	endMut := s.beginUIMutation()
+	err := providers.SaveJSON(s.relayConfigPath(), v)
+	if err == nil {
+		s.kickRelayRefresh(old, v.RelayURL)
 	}
-	s.kickRelayRefresh(old, v.RelayURL)
-	return nil
+	endMut(err == nil)
+	return err
 }
 
 func relayHost(raw string) string {

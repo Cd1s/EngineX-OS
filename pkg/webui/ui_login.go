@@ -54,6 +54,8 @@ type loginFlow struct {
 	amInitCredGen uint64
 	UserCode      string `json:"userCode,omitempty"`
 	Error         string `json:"error,omitempty"`
+	Rev           int64  `json:"rev,omitempty"`
+	Epoch         string `json:"epoch,omitempty"`
 }
 
 // DefaultSpotifyClientID is the public Spotify Desktop client ID, so the deck's
@@ -358,21 +360,29 @@ func (s *Server) ownerSession(provider string) (*Session, error) {
 	if provider == "spotify" && s.spotifyOwnerClosing {
 		return nil, errors.New("spotify: logout in progress")
 	}
+	endMut := s.beginUIMutation()
+	committed := false
+	defer func() { endMut(committed) }()
+	wasDeleted := s.ownerDeleted[provider]
 	delete(s.ownerDeleted, provider)
 	for _, v := range s.sessions {
 		if !v.Guest && v.Provider == provider {
+			committed = wasDeleted
 			return v, nil
 		}
 	}
 	if len(s.sessions) >= 16 {
+		committed = wasDeleted
 		return nil, errors.New("too many sessions")
 	}
 	p, err := s.makeProvider(provider, false, "")
 	if err != nil {
+		committed = wasDeleted
 		return nil, err
 	}
 	v := &Session{ID: providers.RandomID(), Provider: provider, Ready: ready(p), p: p, tracks: map[string]providers.Track{}, expires: time.Now().Add(8 * time.Hour)}
 	s.sessions[v.ID] = v
+	committed = wasDeleted || v.Ready
 	return v, nil
 }
 
@@ -383,7 +393,7 @@ func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !slices.Contains(loginServices, provider) {
-		fail(w, 400, errors.New("unsupported provider"))
+		s.failUI(w, 400, errors.New("unsupported provider"))
 		return
 	}
 	var amWasReady bool
@@ -397,7 +407,7 @@ func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 	}
 	session, err := s.ownerSession(provider)
 	if err != nil {
-		fail(w, 500, err)
+		s.failUI(w, 500, err)
 		return
 	}
 	flow := &loginFlow{
@@ -425,7 +435,7 @@ func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 	} else if n, ok := session.p.(*providers.Netease); ok {
 		q, err := n.BeginQR(r.Context())
 		if err != nil {
-			fail(w, 502, err)
+			s.failUI(w, 502, err)
 			return
 		}
 		flow.key, flow.Target = q.Key, q.URL
@@ -448,8 +458,13 @@ func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.logins[provider] = flow
+	snapshot := *flow
 	s.mu.Unlock()
-	respond(w, flow)
+	rev, epoch := s.snapshotUIRevEpoch()
+	snapshot.Rev = rev
+	snapshot.Epoch = epoch
+	s.setUIRevHeaders(w, rev, epoch)
+	respond(w, &snapshot)
 }
 
 func (s *Server) loginFlow(provider string) *loginFlow {
@@ -470,7 +485,7 @@ func hasAppleMusicHelper(p providers.Provider, helperPending bool) bool {
 func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 	flow := s.loginFlow(r.URL.Query().Get("provider"))
 	if flow == nil {
-		fail(w, 404, errors.New("no login in progress"))
+		s.failUI(w, 404, errors.New("no login in progress"))
 		return
 	}
 	if _, ok := kindOf(flow.Provider); ok {
@@ -508,7 +523,7 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 		code, err := session.p.(*providers.Netease).PollQR(r.Context(), key)
 		if err != nil {
 			log.Printf("stream-sync: NetEase QR check failed: %v", err)
-			fail(w, 502, err)
+			s.failUI(w, 502, err)
 			return
 		}
 		previous := status
@@ -538,10 +553,13 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 				s.mu.Unlock()
 			}
 			if st.SignedIn && ready(session.p) && (!amWasReady || helperPending || amSawSignOut || credGen != amInitCredGen) {
+				endMut := s.beginUIMutation()
 				s.mu.Lock()
 				flow.helperPending = false
+				wasDeleted := s.ownerDeleted["applemusic"]
 				delete(s.ownerDeleted, "applemusic")
 				s.mu.Unlock()
+				endMut(wasDeleted)
 				if s.tidal != nil && (credGen != amInitCredGen || !amWasReady) {
 					s.tidal.dropAppleMusicBrowse(session.ID)
 				}
@@ -560,6 +578,7 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 			status = "done"
 		}
 	}
+	endMut := s.beginUIMutation()
 	s.mu.Lock()
 	if flow.Status != initialStatus && (flow.Status == "linked" || flow.Status == "done") {
 		status = flow.Status
@@ -570,12 +589,21 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	flow.Status = status
 	flow.Error = loginError
+	becameDone := false
 	if status == "done" && session != nil {
+		if !session.Ready || initialStatus != "done" {
+			becameDone = true
+		}
 		session.Ready = true
 		flow.token = ""
 	}
 	snapshot := *flow
 	s.mu.Unlock()
+	endMut(becameDone)
+	rev, epoch := s.snapshotUIRevEpoch()
+	snapshot.Rev = rev
+	snapshot.Epoch = epoch
+	s.setUIRevHeaders(w, rev, epoch)
 	respond(w, &snapshot)
 }
 
@@ -719,19 +747,25 @@ func (s *Server) sessionOf(flow *loginFlow) *Session {
 }
 
 func (s *Server) saveDeezerOwner(p *providers.Deezer, owner deezerOwner) error {
+	endMut := s.beginUIMutation()
+	committed := false
+	defer func() { endMut(committed) }()
 	if err := providers.SaveJSON(s.deezerOwnerPath(), owner); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	p.UserID, p.ARL = owner.UserID, owner.ARL
 	s.mu.Unlock()
+	committed = true
 	return nil
 }
 
 func (s *Server) finishPhoneLogin(w http.ResponseWriter, r *http.Request, flow *loginFlow) {
+	endMut := s.beginUIMutation()
 	s.mu.Lock()
 	flow.Status, flow.token = "linked", ""
 	s.mu.Unlock()
+	endMut(true)
 	lang := phoneLang(r)
 	phoneMessage(w, r, nil, tr(lang, "done"), tr(lang, "doneHint"))
 }
@@ -1181,12 +1215,14 @@ func (s *Server) spotifyConnectPost(w http.ResponseWriter, r *http.Request) {
 			}
 			err = session.p.(*providers.Spotify).ConnectZeroconf(r.Context(), userName, inner)
 			if err == nil {
+				endMut := s.beginUIMutation()
 				s.mu.Lock()
 				session.Ready = true
 				if flow := s.logins["spotify"]; flow != nil {
 					flow.Status = "linked"
 				}
 				s.mu.Unlock()
+				endMut(true)
 			}
 		}
 		if errors.Is(err, providers.ErrSpotifyPairingBusy) {
@@ -1221,12 +1257,14 @@ func (s *Server) spotifyConnectPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		endMut := s.beginUIMutation()
 		s.mu.Lock()
 		session.Ready = true
 		if flow := s.logins["spotify"]; flow != nil {
 			flow.Status = "linked"
 		}
 		s.mu.Unlock()
+		endMut(true)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

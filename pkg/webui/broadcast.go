@@ -212,6 +212,9 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate first: a rejected config must not be persisted and reloaded at next boot.
+	endMut := s.beginUIMutation()
+	committed := false
+	defer func() { endMut(committed) }()
 	if err := b.Configure(cfg); err != nil {
 		fail(w, 400, err)
 		return
@@ -224,6 +227,8 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, errors.New("could not save broadcast settings"))
 		return
 	}
+	committed = true
+	endMut(true)
 	respond(w, b.Status())
 }
 
@@ -267,12 +272,19 @@ func (s *Server) SetBroadcastEnabled(on bool) error {
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
 
+	endMut := s.beginUIMutation()
+	committed := false
+	defer func() { endMut(committed) }()
 	cfg := s.loadBroadcastConfig()
 	cfg.Enabled = on
 	if err := providers.SaveJSON(s.broadcastConfigPath(), cfg); err != nil {
 		return err
 	}
-	return s.broadcaster().SetEnabled(on)
+	if err := s.broadcaster().SetEnabled(on); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // RegisterBroadcastRoutes registers broadcast routes on the server's mux.

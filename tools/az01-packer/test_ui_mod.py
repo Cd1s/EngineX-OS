@@ -9794,12 +9794,19 @@ assert.equal(scScope, 'deezer');
 assert.deepEqual(posts, []);
 assert.deepEqual(logins, ['netease']);
 
-// 6. Completing QR login after tapping an unlogged service opens it once scLoggedIn updates.
+// 6. Completing QR login closes the dialog and refreshes state without auto-opening a source;
+//    one explicit tap afterward selects it immediately.
 scSources = ['netease', 'deezer'];
 scOpen('netease');
 assert.equal(scScope, 'deezer');
 assert.deepEqual(posts, []);
 scLoginDone();
+assert.equal(scLogin, '');
+assert.equal(scLoginOpen, '');
+assert.equal(scScope, 'deezer');
+assert.deepEqual(posts, []);
+assert.equal(selects, 0);
+scOpen('netease');
 assert.equal(scScope, 'netease');
 assert.deepEqual(posts, ['scope=netease']);
 assert.equal(selects, 1);
@@ -9830,7 +9837,7 @@ assert.equal(reqs[1].method, 'GET');
 reqs[1].finish(200, {scope: 'deezer'});
 assert.equal(scScope, 'deezer', 'resync restores server scope after 409');
 """)
-        # 8. External console login while QR dialog is open for scLoginOpen closes dialog and opens that service.
+        # 8. External console login while QR dialog is open closes dialog and refreshes state without auto-opening.
         self.run_js("""
 let opened = [];
 globalThis.scUiLoaded = true;
@@ -9848,14 +9855,15 @@ globalThis.scApply = v => { if (v.loggedIn) scLoggedIn = v.loggedIn; };
 globalThis.scOpen = id => opened.push(id);
 globalThis.scUiPoll = {
     readyState: 4, status: 200,
-    responseText: JSON.stringify({scope: 'deezer', sources: ['deezer', 'spotify'], loggedIn: ['deezer', 'spotify']}),
-    getResponseHeader: () => 'd2',
+    responseText: JSON.stringify({scope: 'deezer', sources: ['deezer', 'spotify'], loggedIn: ['deezer', 'spotify'], rev: 2}),
+    getResponseHeader: (k) => k === 'X-UI-Rev' ? '2' : 'd2',
 };
 """ + self.function(bp.SERVICES_MAIN, "scUiPollReply") + """
 scUiPollReply();
 assert.equal(scLogin, '', 'external login closes QR dialog');
 assert.equal(scLoginOpen, '');
-assert.deepEqual(opened, ['spotify'], 'external login opens the requested service');
+assert.deepEqual(scLoggedIn, ['deezer', 'spotify']);
+assert.deepEqual(opened, [], 'external login refreshes state without auto-opening');
 """)
 
     def test_unfocused_source_activate_does_not_open_first_footer_service(self):

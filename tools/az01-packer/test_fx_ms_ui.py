@@ -513,6 +513,79 @@ assert.equal(stripModes[4].index, 1, 'initial sync applies Stems on already-load
         result = subprocess.run(["node", "-e", script], text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_knob_keeps_last_step_while_another_setting_is_slow(self):
+        """#162/#336 E4: FX ms knob steps queued behind a slow setting keep the final value."""
+        helpers = "\n".join(function(bp.SERVICES_MAIN, n) for n in (
+            "scSameItems", "scFxMsInteger", "scFxMsApply", "scApplyQuery",
+            "scUiSyncPending", "scUiFlush", "scCall", "scUiPollReply",
+        ))
+        knob = "\n".join(function(bp.FX_CONTROLLER, n) for n in ("scFxMsSet", "scFxMsFlush", "scFxMsExpire"))
+        script = f"""
+const assert = require('node:assert/strict'), reqs = [];
+let now = 100000;
+Date.now = () => now;
+globalThis.root = globalThis;
+Object.assign(root, {{
+    scClientId: 'qml-fx', scUiWriteSeq: 0, scUiAppliedSeq: 0, scScopeNeedRefresh: false,
+    scUiWriteGen: 0, scUiPollGen: 0, scUiPending: 0, scUiQueue: [], scUiSending: false,
+    scUiSendingAt: 0, scUiSendToken: 0, scUiSendXhr: null, scUiHadError: false,
+    scScope: '', scScopePending: 0, scUiPoll: null, scUiPollScope: '', scUiPollAt: 0,
+    scUiDigest: '', scUiAppliedAt: 0, scUiLoaded: true, scLoggedIn: [], scSources: [],
+    scSdHighSpeed: false, scFxTimeMode: 'ms', scFxTimeMs: 500,
+    scFxMsSending: false, scFxMsRequest: 0, scFxMsWanted: -1, scFxMsSent: -1,
+}});
+class XMLHttpRequest {{
+    constructor() {{ this.readyState = 0; this.headers = {{}}; }}
+    open(method, url) {{ Object.assign(this, {{method, url, readyState: 1}}); }}
+    setRequestHeader(k, v) {{ this.headers[k] = v; }}
+    send() {{ reqs.push(this); }}
+    abort() {{ this.readyState = 0; }}
+    getResponseHeader() {{ return this.digest || ''; }}
+    finish(data, digest, status = 200) {{
+        Object.assign(this, {{readyState: 4, status, responseText: JSON.stringify(data), digest}});
+        this.onreadystatechange();
+    }}
+}}
+function scEnsureTidal() {{}}
+function scOpen(id) {{ scScope = id; }}
+function scApply(v) {{
+    if (v.fxTimeMs !== undefined) scFxMsApply('ms', v.fxTimeMs);
+}}
+{helpers}
+{knob}
+let deadline = 0, persisted = 500;
+const scFxMsTimeout = {{ restart() {{ deadline = now + 2000; }}, stop() {{ deadline = 0; }} }};
+function completeKnobWrites() {{
+    let x;
+    while ((x = reqs.find(q => q.method === 'POST' && q.readyState !== 4 && q.url.includes('?fxTimeMs=')))) {{
+        persisted = Number(x.url.split('=').at(-1));
+        x.finish({{fxTimeMs: persisted}}, String(persisted));
+    }}
+}}
+scCall('sdHighSpeed=1');
+const slow = reqs[0];
+scFxMsSet(510);
+scFxMsSet(520);
+completeKnobWrites();
+now += 2100;
+if (deadline && now >= deadline) scFxMsExpire();
+slow.finish({{fxTimeMs: persisted}}, 'sd-ready');
+completeKnobWrites();
+assert.equal(persisted, 520, 'the last knob step was discarded while waiting for the unrelated write');
+// Even if scFxMsExpire fires while a knob write is genuinely in flight, a newer scFxMsWanted is preserved.
+scFxMsSet(530);
+const hung530 = reqs.at(-1);
+scFxMsSet(540);
+now += 2100;
+scFxMsExpire();
+assert.equal(scFxMsSending, true, 'expiry immediately re-queues preserved newer step');
+hung530.finish({{fxTimeMs: 530}}, '530');
+completeKnobWrites();
+assert.equal(persisted, 540, 'preserved newer knob step persisted after expiry');
+"""
+        result = subprocess.run(["node", "-e", script], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

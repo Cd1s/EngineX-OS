@@ -755,7 +755,11 @@ func relayedFromOutside(r *http.Request) bool {
 func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() || relayedFromOutside(r) {
-		fail(w, 403, errors.New("the streaming gateway is local to the deck"))
+		if g.s != nil && isUIServicesRoute(path.Clean(r.URL.Path)) {
+			g.s.failUI(w, 403, errors.New("the streaming gateway is local to the deck"))
+		} else {
+			fail(w, 403, errors.New("the streaming gateway is local to the deck"))
+		}
 		return
 	}
 	clean := path.Clean(r.URL.Path)

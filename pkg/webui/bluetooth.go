@@ -53,7 +53,24 @@ func (s *Server) handleBluetooth(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 		return
 	}
+	var clientID string
+	var writeSeq int64
+	var hasWriteSeq bool
+	if r.Method == http.MethodPost {
+		clientID, writeSeq, hasWriteSeq = parseClientWriteSeq(r)
+	}
 	s.uiMu.Lock()
+	if r.Method == http.MethodPost {
+		if r.Context().Err() != nil {
+			s.uiMu.Unlock()
+			return
+		}
+		if hasWriteSeq && s.btWriteSeq.stale(clientID, writeSeq) {
+			s.uiMu.Unlock()
+			fail(w, http.StatusConflict, errors.New("stale write sequence"))
+			return
+		}
+	}
 	v := s.loadUI()
 	save := v.BtOut >= len(layers) // a pair this model has no name for (a hand-edited file): the hook would still send it
 	if save {
@@ -69,11 +86,18 @@ func (s *Server) handleBluetooth(w http.ResponseWriter, r *http.Request) {
 		v.BtOut, save = i, true
 	}
 	if save {
+		if r.Method == http.MethodPost && r.Context().Err() != nil {
+			s.uiMu.Unlock()
+			return
+		}
 		if err := s.saveUI(v); err != nil {
 			s.uiMu.Unlock()
 			fail(w, http.StatusInternalServerError, err)
 			return
 		}
+	}
+	if r.Method == http.MethodPost && hasWriteSeq {
+		s.btWriteSeq.record(clientID, writeSeq)
 	}
 	s.uiMu.Unlock()
 	respond(w, bluetoothStatus{AssignLayer: layers[v.BtOut], Layers: layers})

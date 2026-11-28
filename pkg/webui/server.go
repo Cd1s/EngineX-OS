@@ -7,8 +7,10 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/Cd1s/EngineX-OS/internal/migration"
 	"io"
 	"log"
@@ -18,7 +20,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -170,6 +174,18 @@ type Server struct {
 	rbxPresenceMu    sync.Mutex
 	rbxPresence      map[string]*rbxPresence
 
+	uiWriteSeq     writeSeqTracker
+	btWriteSeq     writeSeqTracker
+	tunnelWriteMu  sync.Mutex
+	tunnelWriteSeq writeSeqTracker
+	uiEpoch        string
+	uiEpochOnce    sync.Once
+	uiRevMu        sync.Mutex
+	uiRevInit      atomic.Bool
+	uiRev          atomic.Int64
+	uiMutActive    atomic.Int64
+	uiMutGen       atomic.Uint64
+
 	prolinkExport *prolink.Exporter
 	closed        chan struct{}
 	closeOnce     sync.Once
@@ -225,6 +241,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 		cfg.AccessToken = GenerateAccessCode()
 	}
 	s := &Server{cfg: cfg, jobs: jobs, sessions: map[string]*Session{}, pending: map[string]pending{}, mux: http.NewServeMux(), ownerDeleted: map[string]bool{}, logins: map[string]*loginFlow{}, authFails: map[string]*authStrike{}}
+	s.uiEpoch = newUIEpoch()
+	s.initUIRev()
 	s.shadow = newShadowState()
 	s.remote = newRemoteLoader(time.Now)
 	// The board never changes while running: read it once.
@@ -793,7 +811,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if origin := r.Header.Get("Origin"); origin != "" && origin != "null" && !strings.HasPrefix(r.URL.Path, "/m/") && r.URL.Path != "/spotify-connect" {
 			u, e := url.Parse(origin)
 			if e != nil || u.Host != r.Host {
-				fail(w, 403, errors.New("same-origin request required"))
+				if isUIServicesRoute(r.URL.Path) {
+					s.failUI(w, 403, errors.New("same-origin request required"))
+				} else {
+					fail(w, 403, errors.New("same-origin request required"))
+				}
 				return
 			}
 		}
@@ -802,10 +824,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// after the source screen authenticates and approves this exact request.
 	if strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/settings-copy/transfer" {
 		if ok, locked := s.authorized(w, r); locked {
-			fail(w, http.StatusTooManyRequests, errAuthLocked)
+			if isUIServicesRoute(r.URL.Path) {
+				s.failUI(w, http.StatusTooManyRequests, errAuthLocked)
+			} else {
+				fail(w, http.StatusTooManyRequests, errAuthLocked)
+			}
 			return
 		} else if !ok {
-			fail(w, 401, errors.New("console login required"))
+			if isUIServicesRoute(r.URL.Path) {
+				s.failUI(w, 401, errors.New("console login required"))
+			} else {
+				fail(w, 401, errors.New("console login required"))
+			}
 			return
 		}
 	}
@@ -986,6 +1016,211 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	respond(w, out)
 }
+
+var (
+	uiEpochCounter  atomic.Uint64
+	uiRevDefaultDir = defaultUIDir
+)
+
+func newUIEpoch() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return fmt.Sprintf("%x-%s", time.Now().UnixNano(), hex.EncodeToString(b[:]))
+	}
+	return fmt.Sprintf("%x-%x", time.Now().UnixNano(), uiEpochCounter.Add(1))
+}
+
+func isUIServicesRoute(path string) bool {
+	return path == "/v1/enginex/ui" || path == "/api/ui" || path == "/v1/enginex/login"
+}
+
+func (s *Server) currentUIEpoch() string {
+	s.uiEpochOnce.Do(func() {
+		if s.uiEpoch == "" {
+			s.uiEpoch = newUIEpoch()
+		}
+	})
+	return s.uiEpoch
+}
+
+func (s *Server) uiRevPath() string {
+	if s.cfg.UIDir != "" {
+		return filepath.Join(s.cfg.UIDir, "ui.rev")
+	}
+	if s.cfg.StateDir != "" && !isDeckStateDir(s.cfg.StateDir) {
+		return ""
+	}
+	return filepath.Join(uiRevDefaultDir, "ui.rev")
+}
+
+func (s *Server) persistUIRevLocked(rev int64) {
+	path := s.uiRevPath()
+	if path == "" || rev <= 0 {
+		return
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(dir, ".ui-rev-*")
+	if err != nil {
+		return
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err = tmp.WriteString(strconv.FormatInt(rev, 10) + "\n"); err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmpName, 0o644)
+	}
+	if err != nil {
+		return
+	}
+	_ = os.Rename(tmpName, path)
+}
+
+func (s *Server) initUIRevLocked() {
+	if s.uiRevInit.Load() {
+		return
+	}
+	seed := int64(1)
+	persisted := false
+	if path := s.uiRevPath(); path != "" {
+		if b, err := os.ReadFile(path); err == nil {
+			if n, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); perr == nil && n > 0 {
+				seed = n + 1
+				persisted = true
+			}
+		}
+	}
+	if cur := s.uiRev.Load(); cur < seed {
+		s.uiRev.Store(seed)
+	}
+	if persisted {
+		s.persistUIRevLocked(s.uiRev.Load())
+	}
+	s.uiRevInit.Store(true)
+}
+
+func (s *Server) initUIRev() {
+	if s.uiRevInit.Load() {
+		return
+	}
+	s.uiRevMu.Lock()
+	s.initUIRevLocked()
+	s.uiRevMu.Unlock()
+}
+
+func (s *Server) currentUIRev() int64 {
+	if !s.uiRevInit.Load() {
+		s.initUIRev()
+	}
+	if cur := s.uiRev.Load(); cur > 0 {
+		return cur
+	}
+	s.uiRevMu.Lock()
+	defer s.uiRevMu.Unlock()
+	s.initUIRevLocked()
+	if cur := s.uiRev.Load(); cur > 0 {
+		return cur
+	}
+	s.uiRev.Store(1)
+	return 1
+}
+
+func (s *Server) bumpUIRev() int64 {
+	s.uiRevMu.Lock()
+	defer s.uiRevMu.Unlock()
+	s.initUIRevLocked()
+	cur := s.uiRev.Load()
+	next := cur + 1
+	if cur <= 0 {
+		next = 2
+	}
+	s.uiRev.Store(next)
+	s.persistUIRevLocked(next)
+	return next
+}
+
+// beginUIMutation brackets any mutation that changes state visible in uiStatus
+// or login replies. Readers retry if a mutation overlaps snapshot collection.
+func (s *Server) beginUIMutation() func(commit bool) {
+	s.uiMutActive.Add(1)
+	s.uiMutGen.Add(1)
+	done := false
+	return func(commit bool) {
+		if done {
+			return
+		}
+		done = true
+		if commit {
+			s.bumpUIRev()
+		}
+		s.uiMutGen.Add(1)
+		s.uiMutActive.Add(-1)
+	}
+}
+
+func (s *Server) readUISnapshot(collect func(rev int64, epoch string)) {
+	epoch := s.currentUIEpoch()
+	for spins := 0; ; spins++ {
+		if s.uiMutActive.Load() != 0 {
+			if spins < 8 {
+				runtime.Gosched()
+			} else {
+				time.Sleep(time.Millisecond)
+			}
+			continue
+		}
+		g1 := s.uiMutGen.Load()
+		if s.uiMutActive.Load() != 0 {
+			continue
+		}
+		rev := s.currentUIRev()
+		collect(rev, epoch)
+		if s.uiMutActive.Load() == 0 && s.uiMutGen.Load() == g1 {
+			return
+		}
+		if spins < 8 {
+			runtime.Gosched()
+		} else {
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func (s *Server) snapshotUIRevEpoch() (int64, string) {
+	var rev int64
+	var epoch string
+	s.readUISnapshot(func(r int64, e string) {
+		rev, epoch = r, e
+	})
+	return rev, epoch
+}
+
+func (s *Server) setUIRevHeaders(w http.ResponseWriter, rev int64, epoch string) {
+	w.Header().Set("X-UI-Rev", strconv.FormatInt(rev, 10))
+	if epoch != "" {
+		w.Header().Set("X-UI-Epoch", epoch)
+	}
+}
+
+func (s *Server) failUI(w http.ResponseWriter, status int, err error) {
+	rev, epoch := s.snapshotUIRevEpoch()
+	w.Header().Set("Content-Type", "application/json")
+	s.setUIRevHeaders(w, rev, epoch)
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{
+		"error": err.Error(),
+		"rev":   rev,
+		"epoch": epoch,
+	})
+}
+
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	var v struct {
 		Provider string `json:"provider"`
@@ -1018,16 +1253,54 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	// One owner per service prevents concurrent credential replacement; guests
 	// are independent and cannot reuse the owner's cookie/token file.
 	if !v.Guest {
+		endMut := s.beginUIMutation()
+		committed := false
+		defer func() { endMut(committed) }()
+		wasDeleted := s.ownerDeleted[v.Provider]
 		delete(s.ownerDeleted, v.Provider)
 		for _, old := range s.sessions {
 			if !old.Guest && old.Provider == v.Provider {
+				wasReady := old.Ready
 				if ready(old.p) {
 					old.Ready = true
 				}
+				if (old.Ready && !wasReady) || wasDeleted {
+					committed = true
+				}
+				endMut(committed)
 				respond(w, old)
 				return
 			}
 		}
+		p, err := s.makeProvider(v.Provider, v.Guest, v.UserID)
+		if err != nil {
+			if wasDeleted {
+				committed = true
+			}
+			endMut(committed)
+			fail(w, 400, err)
+			return
+		}
+		session := &Session{ID: providers.RandomID(), Provider: v.Provider, Guest: v.Guest, p: p, tracks: map[string]providers.Track{}, expires: time.Now().Add(8 * time.Hour), Ready: v.Provider == "deezer"}
+		if sp, ok := p.(*providers.Spotify); ok {
+			session.Ready = ready(sp)
+		}
+		if np, ok := p.(*providers.Netease); ok {
+			session.Ready = np.LoggedIn()
+		}
+		if bp, ok := p.(*providers.Beatport); ok {
+			session.Ready = bp.Ready()
+		}
+		if am, ok := p.(*providers.AppleMusic); ok {
+			session.Ready = am.Ready()
+		}
+		s.sessions[session.ID] = session
+		if session.Ready || wasDeleted {
+			committed = true
+		}
+		endMut(committed)
+		respond(w, session)
+		return
 	}
 	p, err := s.makeProvider(v.Provider, v.Guest, v.UserID)
 	if err != nil {
@@ -1054,7 +1327,9 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	id := r.PathValue("id")
 	session := s.sessions[id]
+	var endMut func(bool)
 	if session != nil && !session.Guest {
+		endMut = s.beginUIMutation()
 		s.ownerDeleted[session.Provider] = true
 		if session.Provider == "spotify" {
 			s.spotifyOwnerClosing = true
@@ -1072,6 +1347,9 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.Unlock()
+	if endMut != nil {
+		defer endMut(true)
+	}
 	if session != nil && !session.Guest && session.Provider == "spotify" {
 		defer func() { s.mu.Lock(); s.spotifyOwnerClosing = false; s.mu.Unlock() }()
 	}
@@ -1159,9 +1437,13 @@ func (s *Server) pollLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, 502, err)
 		return
 	}
+	endMut := s.beginUIMutation()
 	s.mu.Lock()
+	wasReady := v.Ready
 	v.Ready = code == 803
+	committed := !v.Guest && v.Ready && !wasReady
 	s.mu.Unlock()
+	endMut(committed)
 	respond(w, map[string]int{"code": code})
 }
 func (s *Server) qr(w http.ResponseWriter, r *http.Request) {
@@ -1206,9 +1488,12 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		fail(w, 502, err)
 		return
 	}
+	endMut := s.beginUIMutation()
 	s.mu.Lock()
 	v.Ready = true
+	committed := !v.Guest
 	s.mu.Unlock()
+	endMut(committed)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	io.WriteString(w, "<meta name=viewport content=width=device-width><p>Spotify 已登录，可以回到 EngineX OS 控制台浏览歌单。</p>")
 }

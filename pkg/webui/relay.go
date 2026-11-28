@@ -104,7 +104,10 @@ func (s *Server) relayStatus(ctx context.Context, session *Session, token, statu
 	case "scanned":
 		return "scanned"
 	case "done":
-		if err := s.relayCollect(session, v); err != nil {
+		endMut := s.beginUIMutation()
+		err := s.relayCollect(session, v)
+		endMut(err == nil)
+		if err != nil {
 			log.Printf("stream-sync: relay login not saved: %v", err)
 			return status
 		}

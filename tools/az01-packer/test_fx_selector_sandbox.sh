@@ -95,11 +95,57 @@ Item {
 QML
 fi
 printf 'lang=en\npioneer_fx=spiral\n' > "$R/data/enginex/ui/settings.conf"
-chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/dbus.log" 2>&1 || true
+server=""
+dbus_started=0
+dbus_pid=""
+fx_cleanup() {
+    local rc=$?
+    local dbus_err=0
+    if [ -n "$server" ]; then
+        kill "$server" 2>/dev/null || true
+    fi
+    if [ "$dbus_started" = 1 ]; then
+        if [ -z "$dbus_pid" ]; then
+            echo "FXSBX FAIL|$PRODUCT|dbus_cleanup_pid_lost|" >&2
+            dbus_err=1
+        else
+            kill "$dbus_pid" 2>/dev/null || true
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                if [ ! -e "$R/proc/$dbus_pid/stat" ]; then break; fi
+                local st
+                st=$(awk '{print $3}' "$R/proc/$dbus_pid/stat" 2>/dev/null || true)
+                if [ "$st" = Z ]; then break; fi
+                sleep 0.05
+            done
+            if [ -e "$R/proc/$dbus_pid/stat" ]; then
+                local st
+                st=$(awk '{print $3}' "$R/proc/$dbus_pid/stat" 2>/dev/null || true)
+                if [ -n "$st" ] && [ "$st" != Z ]; then
+                    kill -9 "$dbus_pid" 2>/dev/null || true
+                    echo "FXSBX FAIL|$PRODUCT|dbus_cleanup_still_live=$dbus_pid|" >&2
+                    dbus_err=1
+                fi
+            fi
+        fi
+    fi
+    if [ "$dbus_err" != 0 ]; then
+        [ "$rc" -ne 0 ] && exit "$rc"
+        exit 1
+    fi
+    return "$rc"
+}
+trap fx_cleanup EXIT
+
+dbus_started=1
+dbus_pid=$(chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile --print-pid=1 3>&- 4>&- 9>&- 2>"$W/dbus.log" || true)
+dbus_pid=${dbus_pid%%[!0-9]*}
+if [ -z "$dbus_pid" ] || ! kill -0 "$dbus_pid" 2>/dev/null; then
+    echo "FXSBX FAIL|$PRODUCT|dbus_pid_unusable=$dbus_pid|" >&2
+    exit 1
+fi
 if [ "${FX_READY_READONLY:-0}" = 1 ]; then mount -o remount,ro "$R/run"; fi
 "$W/ui-server" "$R/data/enginex/ui" "$R/tmp/fx-state" > "$W/http.log" 2>&1 &
 server=$!
-trap 'kill "$server" 2>/dev/null || true' EXIT
 preload=/etc/enginex/libengine-ui-hook.so:/tmp/libfx-native-test.so
 if [ "${FX_CONFIG_ONLY:-0}" = 1 ]; then preload=/etc/enginex/libengine-ui-hook.so; fi
 set +e

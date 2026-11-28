@@ -69,9 +69,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "fourDeckRoleActive": "12",
                 "pairedView": False,
                 "sources": ["tidal"],
+                "rev": 1,
             }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+            self.send_header("X-UI-Rev", "1")
             self.end_headers()
             self.wfile.write(body)
             return

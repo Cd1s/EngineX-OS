@@ -67,7 +67,9 @@ FX_CONTROLLER = r'''
     Timer { id: scFxMsTimeout; interval: 2000; onTriggered: root.scFxMsExpire() }
     function scFxMsExpire() {
         ++scFxMsRequest
-        scFxMsSending = false; scFxMsWanted = -1; scFxMsSent = -1
+        scFxMsSending = false; scFxMsSent = -1
+        if (scFxTimeMode !== "ms") { scFxMsWanted = -1; return }
+        if (scFxMsWanted >= 10) scFxMsFlush()
     }
     property int scFxMsWanted: -1
     property int scFxMsSent: -1
@@ -78,13 +80,15 @@ FX_CONTROLLER = r'''
         const ms = scFxMsWanted
         scFxMsWanted = -1; scFxMsSent = ms; scFxMsSending = true
         const request = ++scFxMsRequest
-        scFxMsTimeout.restart()
+        if (typeof scUiQueue === "undefined") scFxMsTimeout.restart()
         scCall("fxTimeMs=" + ms, function() {
             if (request !== scFxMsRequest) return
             scFxMsTimeout.stop()
             scFxMsSending = false; scFxMsSent = -1
             if (scFxMsWanted === scFxTimeMs) scFxMsWanted = -1
             scFxMsFlush()
+        }, function() {
+            if (request === scFxMsRequest) scFxMsTimeout.restart()
         })
     }
     function scFxMsSet(ms) {
@@ -469,10 +473,17 @@ TIDAL_OPEN_530 = """	function scTidalProvider() {
 	}
 	function scOpen(id) {
 		if (!id || !scUiLoaded || scSources.indexOf(id) < 0) return
+		const _ro = typeof root !== "undefined" && root ? root : null
+		const pendingSource = typeof scSourceWritePending === "function" ? scSourceWritePending(id) : (!!(typeof scUiSending !== "undefined" && scUiSending && _ro && new RegExp("(?:^|&)(?:sources=|source_" + id + "=)").test(_ro.scUiSendingQuery || "")) || (typeof scUiQueue !== "undefined" && Array.isArray(scUiQueue) && scUiQueue.some(q => q && new RegExp("(?:^|&)(?:sources=|source_" + id + "=)").test(q.query || ""))))
+		if (pendingSource) {
+			if (_ro && id !== "rekordbox") _ro.scPendingTap = id
+			return
+		}
+		if (_ro) _ro.scPendingTap = ""
 		if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) {
 			if (id !== "rekordbox" && id !== "nas") {
 				root.scLoginOpen = id
-				scLoginBegin(id)
+				if (typeof scLogin === "undefined" || scLogin !== id || (typeof scLoginStatus !== "undefined" && (scLoginStatus === "expired" || scLoginStatus === "error"))) scLoginBegin(id)
 			}
 			return
 		}
@@ -483,7 +494,10 @@ TIDAL_OPEN_530 = """	function scTidalProvider() {
 		if (scScopePending) return // Send source changes in order; keep the latest intent.
 		scEnsureTidal()
 		scCall("scope=" + id, function() {
-			if (scScope !== id) { scOpen(scScope); return }
+			if (scScope !== id || scSources.indexOf(id) < 0) {
+				if (scScope && scScope !== id && scSources.indexOf(scScope) >= 0) scOpen(scScope)
+				return
+			}
 			const tp = scTidalProvider()
 			console.warn("EngineX load step=carrier action=open scope=" + id + " loggedIn=" + !!(tp && tp.loggedIn))
 			scTidalLoginPending = !!(id === "tidal" && scUiLoaded && !root.scTidalLoggedIn && (root.scTidalSynthetic || (tp && !tp.loggedIn)))
@@ -502,10 +516,17 @@ TIDAL_OPEN_530 = """	function scTidalProvider() {
 TIDAL_OPEN_504 = """
 	function scOpen(id) {
 		if (!id || !scUiLoaded || scSources.indexOf(id) < 0) return
+		const _ro = typeof root !== "undefined" && root ? root : null
+		const pendingSource = typeof scSourceWritePending === "function" ? scSourceWritePending(id) : (!!(typeof scUiSending !== "undefined" && scUiSending && _ro && new RegExp("(?:^|&)(?:sources=|source_" + id + "=)").test(_ro.scUiSendingQuery || "")) || (typeof scUiQueue !== "undefined" && Array.isArray(scUiQueue) && scUiQueue.some(q => q && new RegExp("(?:^|&)(?:sources=|source_" + id + "=)").test(q.query || ""))))
+		if (pendingSource) {
+			if (_ro && id !== "rekordbox") _ro.scPendingTap = id
+			return
+		}
+		if (_ro) _ro.scPendingTap = ""
 		if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) {
 			if (id !== "rekordbox" && id !== "nas") {
 				root.scLoginOpen = id
-				scLoginBegin(id)
+				if (typeof scLogin === "undefined" || scLogin !== id || (typeof scLoginStatus !== "undefined" && (scLoginStatus === "expired" || scLoginStatus === "error"))) scLoginBegin(id)
 			}
 			return
 		}
@@ -515,7 +536,10 @@ TIDAL_OPEN_504 = """
 		if (scScopePending) return
 		scEnsureTidal()
 		scCall("scope=" + id, function() {
-			if (scScope !== id) { scOpen(scScope); return }
+			if (scScope !== id || scSources.indexOf(id) < 0) {
+				if (scScope && scScope !== id && scSources.indexOf(scScope) >= 0) scOpen(scScope)
+				return
+			}
 			Planck.librarianController.streamingPlaylistsController.invalidateUI()
 			scSelectPending = !scSelectTidal()
 			scEnterTries = 8
@@ -3628,7 +3652,16 @@ SERVICES_MAIN = """
 			message: root.scT("Restart Engine to apply? Playback will stop."),
 			options: Prompt.Cancel | Prompt.Ok
 		})
-		prompt.finished.connect(function(r) { if (r === Prompt.AcceptRole) scCall(query, function() { Planck.quit(QuitReasons.AnalyticsChange, false) }) })
+		prompt.finished.connect(function(r) {
+			if (r === Prompt.AcceptRole) scCall(query, function(reply, drained) {
+				if (drained === false || (typeof scUiPending !== "undefined" && scUiPending > 0) || (typeof root !== "undefined" && root && root.scBtSending)) {
+					if (typeof root !== "undefined" && root) root.scRestartPending = true
+					return
+				}
+				if (typeof root !== "undefined" && root) root.scRestartPending = false
+				Planck.quit(QuitReasons.AnalyticsChange, false)
+			})
+		})
 	}
 	property string scUpdateRepo: "Cd1s/EngineX-OS"
 	// #79: only GET /v1/enginex/ui (loopback) carries these; shown in Settings -> About.
@@ -3638,6 +3671,13 @@ SERVICES_MAIN = """
 	property string scRemoteAccessStatus: "stopped"
 	property string scRemoteAccessUrl: ""
 	property string scRemoteAccessError: ""
+	property int scTunnelPending: 0
+	property bool scTunnelSending: false
+	property var scTunnelQueued: null
+	property real scTunnelSendingAt: 0
+	property int scTunnelSendToken: 0
+	property var scTunnelSendXhr: null
+	property int scTunnelWriteSeq: 0
 	function scTunnelApply(v) {
 		if (!v) return
 		scRemoteAccess = !!v.enabled
@@ -3645,19 +3685,80 @@ SERVICES_MAIN = """
 		scRemoteAccessUrl = String(v.publicUrl || "")
 		scRemoteAccessError = String(v.error || "")
 	}
-	function scTunnelToggle(next) {
+	function scTunnelSend(next) {
+		scTunnelSending = true
+		scTunnelSendingAt = Date.now()
+		const token = ++scTunnelSendToken
 		const x = new XMLHttpRequest()
+		scTunnelSendXhr = x
 		x.open("POST", "http://127.0.0.1:8080/v1/enginex/tunnel")
-		x.setRequestHeader("Content-Type", "application/json")
+		if (typeof x.setRequestHeader === "function") {
+			x.setRequestHeader("Content-Type", "application/json")
+			const cid = typeof scClientId !== "undefined" && scClientId ? scClientId : ""
+			const seq = typeof scTunnelWriteSeq !== "undefined" ? ++scTunnelWriteSeq : 0
+			if (cid && seq > 0) {
+				x.setRequestHeader("X-UI-Client-Id", cid)
+				x.setRequestHeader("X-UI-Write-Seq", String(seq))
+			}
+		}
 		x.onreadystatechange = function() {
-			if (x.readyState !== 4) return
+			if (x.readyState !== 4 || token !== scTunnelSendToken) return
+			scTunnelSending = false
+			scTunnelSendXhr = null
+			if (scTunnelQueued !== null) {
+				const queued = scTunnelQueued
+				scTunnelQueued = null
+				scTunnelSend(queued)
+				return
+			}
+			scTunnelPending = 0
+			if (typeof scUiWriteGen !== "undefined") scUiWriteGen++
+			if (typeof scUiSyncPending === "function") scUiSyncPending()
+			if (typeof root !== "undefined" && root && root.scScopeNeedRefresh && typeof scUiPending !== "undefined" && scUiPending === 0 && !scScopePending)
+				root.scScopeNeedRefresh = false
+			let v = null
 			try {
-				const v = JSON.parse(x.responseText)
-				if (x.status === 200) { root.scTunnelApply(v); root.scCall("") }
-				else if (v && v.error) { root.scRemoteAccessStatus = "error"; root.scRemoteAccessError = String(v.error) }
+				const parsed = JSON.parse(x.responseText)
+				if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) v = parsed
 			} catch (e) {}
+			if (x.status === 200 && v) {
+				root.scTunnelApply(v)
+			} else if (v && v.error) {
+				root.scRemoteAccessStatus = "error"; root.scRemoteAccessError = String(v.error)
+			}
+			if (typeof root !== "undefined" && root && root.scRestartPending) {
+				if ((typeof scUiPending === "undefined" || scUiPending === 0) && !root.scBtSending) {
+					root.scRestartPending = false
+					if (typeof Planck !== "undefined" && Planck && typeof Planck.quit === "function")
+						Planck.quit(QuitReasons.AnalyticsChange, false)
+				}
+				return
+			}
+			scUiDigest = ""
+			root.scCall("")
 		}
 		x.send(JSON.stringify({enabled: !!next}))
+	}
+	function scTunnelToggle(next) {
+		const want = !!next
+		scRemoteAccess = want
+		scRemoteAccessStatus = want ? "starting" : "stopped"
+		scRemoteAccessError = ""
+		if (typeof scUiWriteGen !== "undefined") scUiWriteGen++
+		scTunnelPending = 1
+		if (typeof scUiSyncPending === "function") scUiSyncPending()
+		if (scTunnelSending && Date.now() - scTunnelSendingAt < 15000) {
+			scTunnelQueued = want
+			return
+		}
+		if (scTunnelSending) {
+			scTunnelSendToken++
+			if (scTunnelSendXhr) { try { scTunnelSendXhr.abort() } catch (e) {} }
+			scTunnelSendXhr = null
+			scTunnelSending = false
+		}
+		scTunnelQueued = null
+		scTunnelSend(want)
 	}
 	function scTunnelHost(u) {
 		return String(u || "").split("://").pop().split("/")[0]
@@ -3856,16 +3957,19 @@ SERVICES_MAIN = """
 	// timer), so the pads follow the picker within a fraction of a second, not after its 10 s HTTP poll. The level
 	// is published 200 ms after the last change (restarted by each pick): the hook's 80 ms settings poll must hold
 	// the level before the controller resends the LEDs, or that resend would go out at the old one. 0 = not yet.
+	property int scLedBrightnessSaved: 0
 	property bool scPadBrightnessSynced: false
 	readonly property var scPadBrightnessPropRef: Planck.createProperty("EngineXPadBrightness", 0.0, 0)
 	readonly property var scPadBrightnessProp: scPadBrightnessPropRef && Planck.getProperty("/GUI/Scripted/EngineXPadBrightness")
 	function scSyncPadBrightness() {
 		const p = scPadBrightnessProp && scPadBrightnessProp.translator ? scPadBrightnessProp : Planck.getProperty("/GUI/Scripted/EngineXPadBrightness")
 		if (!p || !p.translator || !scUiLoaded) { scPadBrightnessSynced = false; return }
-		p.translator.value = Math.max(20, Math.min(100, scLedBrightness)) / 100
+		const saved = typeof scLedBrightnessSaved !== "undefined" && scLedBrightnessSaved > 0 ? scLedBrightnessSaved : scLedBrightness
+		p.translator.value = Math.max(20, Math.min(100, saved)) / 100
 		scPadBrightnessSynced = true
 	}
 	onScLedBrightnessChanged: scPadBrightnessDelay.restart()
+	onScLedBrightnessSavedChanged: scPadBrightnessDelay.restart()
 	Timer {
 		id: scPadBrightnessDelay
 		interval: 200; repeat: false
@@ -4400,67 +4504,374 @@ SERVICES_MAIN = """
 	// The names are the API's; the panel shows them as the deck names its outputs.
 	property var scBtLayers: []
 	property string scBtLayer: ""
+	property int scBtGen: 0
+	property int scBtReadSeq: 0
+	property int scBtAppliedReadSeq: 0
+	property bool scBtSending: false
+	property string scBtQueued: ""
+	property real scBtSendingAt: 0
+	property int scBtSendToken: 0
+	property var scBtSendXhr: null
+	property int scBtWriteSeq: 0
+	property bool scBtReload: false
 	function scBtLabel(name) { return name === "Master" ? "Main" : name }
 	function scBtLabels(names) { return names.map(scBtLabel) }
 	function scBtReply(x) {
-		if (x.readyState !== 4 || x.status !== 200) return
-		const r = JSON.parse(x.responseText)
+		if (x.readyState !== 4 || x.status !== 200) return false
+		let r = null
+		try {
+			const parsed = JSON.parse(x.responseText)
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) r = parsed
+		} catch (e) {}
+		if (!r) return false
 		scBtLayers = r.layers || []
 		scBtLayer = r.assignLayer || ""
+		return true
 	}
 	function scBtLoad() {
+		if (root.scBtSending) {
+			if (Date.now() - (root.scBtSendingAt || 0) < 10000) {
+				root.scBtReload = true
+				return
+			}
+			root.scBtSendToken = (root.scBtSendToken || 0) + 1
+			if (typeof root.scBtSendXhr !== "undefined" && root.scBtSendXhr) {
+				try { root.scBtSendXhr.abort() } catch (e) {}
+				root.scBtSendXhr = null
+			}
+			root.scBtSending = false
+			root.scBtGen = (root.scBtGen || 0) + 1
+			if (root.scBtQueued) {
+				const queued = root.scBtQueued
+				root.scBtQueued = ""
+				root.scBtReload = true
+				scBtSend(queued, root.scBtGen || 0)
+				return
+			}
+			if (root.scRestartPending) {
+				if (typeof scUiPending === "undefined" || scUiPending === 0) {
+					root.scRestartPending = false
+					if (typeof Planck !== "undefined" && Planck && typeof Planck.quit === "function")
+						Planck.quit(QuitReasons.AnalyticsChange, false)
+				}
+				return
+			}
+		}
+		const gen = root.scBtGen || 0
+		const readSeq = (root.scBtReadSeq || 0) + 1
+		root.scBtReadSeq = readSeq
 		const x = new XMLHttpRequest()
 		x.open("GET", "http://127.0.0.1:8080/v1/enginex/bluetooth")
-		x.onreadystatechange = function() { scBtReply(x) }
-		x.send()
-	}
-	function scBtSet(name) {
-		const x = new XMLHttpRequest()
-		x.open("POST", "http://127.0.0.1:8080/v1/enginex/bluetooth?assignLayer=" + encodeURIComponent(name))
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4) return
-			if (x.status === 200) scBtReply(x)
-			else scBtLoad()
+			if ((root.scBtGen || 0) !== gen || root.scBtSending || readSeq <= (root.scBtAppliedReadSeq || 0) || x.status !== 200) return
+			if (scBtReply(x)) root.scBtAppliedReadSeq = readSeq
 		}
 		x.send()
 	}
-	function scCall(query, done) {
+	function scBtSend(name, gen) {
+		root.scBtSending = true
+		root.scBtSendingAt = Date.now()
+		const token = (root.scBtSendToken || 0) + 1
+		root.scBtSendToken = token
+		const x = new XMLHttpRequest()
+		root.scBtSendXhr = x
+		x.open("POST", "http://127.0.0.1:8080/v1/enginex/bluetooth?assignLayer=" + encodeURIComponent(name))
+		if (typeof x.setRequestHeader === "function") {
+			const cid = typeof scClientId !== "undefined" && scClientId ? scClientId : (typeof root !== "undefined" && root && root.scClientId ? root.scClientId : "")
+			const seq = typeof root.scBtWriteSeq !== "undefined" ? (root.scBtWriteSeq = (root.scBtWriteSeq || 0) + 1) : 0
+			if (cid && seq > 0) {
+				x.setRequestHeader("X-UI-Client-Id", cid)
+				x.setRequestHeader("X-UI-Write-Seq", String(seq))
+			}
+		}
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4 || token !== root.scBtSendToken) return
+			root.scBtSending = false
+			root.scBtSendXhr = null
+			if (root.scBtQueued) {
+				const queued = root.scBtQueued
+				root.scBtQueued = ""
+				scBtSend(queued, root.scBtGen || 0)
+				return
+			}
+			const reload = !!root.scBtReload
+			root.scBtReload = false
+			let ok = false
+			if (x.status === 200) {
+				if ((root.scBtGen || 0) === gen) ok = scBtReply(x)
+				else {
+					try {
+						const parsed = JSON.parse(x.responseText)
+						ok = !!(parsed && typeof parsed === "object" && !Array.isArray(parsed))
+					} catch (e) {}
+				}
+			}
+			root.scBtGen = (root.scBtGen || 0) + 1
+			if (root.scRestartPending) {
+				if (typeof scUiPending === "undefined" || scUiPending === 0) {
+					root.scRestartPending = false
+					if (typeof Planck !== "undefined" && Planck && typeof Planck.quit === "function")
+						Planck.quit(QuitReasons.AnalyticsChange, false)
+				}
+				return
+			}
+			if (!ok || reload) scBtLoad()
+		}
+		x.send()
+	}
+	function scBtSet(name) {
+		const gen = (root.scBtGen || 0) + 1
+		root.scBtGen = gen
+		scBtLayer = name
+		if (root.scBtSending && Date.now() - (root.scBtSendingAt || 0) < 10000) {
+			root.scBtQueued = name
+			return
+		}
+		if (root.scBtSending) {
+			root.scBtSendToken = (root.scBtSendToken || 0) + 1
+			if (typeof root.scBtSendXhr !== "undefined" && root.scBtSendXhr) {
+				try { root.scBtSendXhr.abort() } catch (e) {}
+				root.scBtSendXhr = null
+			}
+			root.scBtSending = false
+		}
+		root.scBtQueued = ""
+		scBtSend(name, gen)
+	}
+	function scCall(query, done, onSend) {
 		if (!query && !done) {
+			if (typeof scUiSending !== "undefined" && scUiSending && Date.now() - scUiSendingAt >= 20000) {
+				scUiSendToken++
+				if (typeof scUiWriteGen !== "undefined") scUiWriteGen++
+				if (scUiSendXhr) { try { scUiSendXhr.abort() } catch (e) {} }
+				scUiSendXhr = null
+				scUiSending = false
+				if (typeof root !== "undefined" && root) {
+					const abortedQuery = root.scUiSendingQuery || ""
+					root.scUiSendingQuery = ""
+					if (root.scPendingTap) {
+						const pt = root.scPendingTap
+						const touched = new RegExp("(?:^|&)(?:sources=|source_" + pt + "=)").test(abortedQuery)
+						const ptPending = typeof scSourceWritePending === "function" ? scSourceWritePending(pt) : (typeof scUiQueue !== "undefined" && Array.isArray(scUiQueue) && scUiQueue.some(q => q && new RegExp("(?:^|&)(?:sources=|source_" + pt + "=)").test(q.query || "")))
+						if (touched && !ptPending) root.scPendingTap = ""
+					}
+				}
+				scUiHadError = true
+				if (typeof scUiQueue !== "undefined" && scUiQueue.length > 0) {
+					scUiFlush()
+				} else {
+					scUiHadError = false
+					if (typeof scUiSyncPending === "function") scUiSyncPending()
+					scUiDigest = ""
+				}
+			}
+			if (typeof scTunnelSending !== "undefined" && scTunnelSending && Date.now() - scTunnelSendingAt >= 15000) {
+				scTunnelSendToken++
+				if (typeof scUiWriteGen !== "undefined") scUiWriteGen++
+				if (typeof scTunnelSendXhr !== "undefined" && scTunnelSendXhr) { try { scTunnelSendXhr.abort() } catch (e) {} scTunnelSendXhr = null }
+				scTunnelSending = false
+				if (typeof scTunnelQueued !== "undefined" && scTunnelQueued !== null && typeof scTunnelSend === "function") {
+					const queued = scTunnelQueued
+					scTunnelQueued = null
+					scTunnelSend(queued)
+				} else {
+					if (typeof scTunnelPending !== "undefined") scTunnelPending = 0
+					if (typeof scUiSyncPending === "function") scUiSyncPending()
+					scUiDigest = ""
+				}
+			}
+			if (typeof root !== "undefined" && root && root.scBtSending && Date.now() - (root.scBtSendingAt || 0) >= 10000) {
+				root.scBtSendToken = (root.scBtSendToken || 0) + 1
+				root.scBtGen = (root.scBtGen || 0) + 1
+				if (typeof root.scBtSendXhr !== "undefined" && root.scBtSendXhr) {
+					try { root.scBtSendXhr.abort() } catch (e) {}
+					root.scBtSendXhr = null
+				}
+				root.scBtSending = false
+				if (root.scBtQueued && typeof scBtSend === "function") {
+					const queued = root.scBtQueued
+					root.scBtQueued = ""
+					scBtSend(queued, root.scBtGen || 0)
+				} else if (root.scRestartPending) {
+					root.scBtReload = false
+				} else if (typeof scBtLoad === "function") {
+					root.scBtReload = false
+					scBtLoad()
+				}
+			}
+			if (typeof root !== "undefined" && root && root.scRestartPending) {
+				if ((typeof scUiPending === "undefined" || scUiPending === 0) && !root.scBtSending) {
+					root.scRestartPending = false
+					if (typeof Planck !== "undefined" && Planck && typeof Planck.quit === "function")
+						Planck.quit(QuitReasons.AnalyticsChange, false)
+				}
+				return
+			}
+			if (typeof scUiPending !== "undefined" && scUiPending > 0) return
 			if (!scUiPoll) {
 				scUiPoll = new XMLHttpRequest()
 				scUiPoll.onreadystatechange = scUiPollReply
 			}
 			if (scUiPoll.readyState !== 0 && scUiPoll.readyState !== 4) {
-				if (Date.now() - scUiPollAt < 10000) return
+				const stale = typeof scUiWriteGen !== "undefined" && scUiPollGen !== scUiWriteGen
+				if (!stale && Date.now() - scUiPollAt < 10000) return
 				scUiPoll.abort()
 			}
 			scUiPollAt = Date.now()
 			scUiPollScope = scScopePending ? "" : scScope
+			if (typeof scUiWriteGen !== "undefined") scUiPollGen = scUiWriteGen
 			scUiPoll.open("GET", "http://127.0.0.1:8080/v1/enginex/ui")
 			scUiPoll.send()
 			return
 		}
+		const scopeChange = query && query.indexOf("scope=") === 0
+		const fxChange = query && (query.indexOf("fxUnit=") === 0 || query.indexOf("fxMode=") === 0)
+		if (query && !scopeChange && !fxChange && typeof scUiQueue !== "undefined") {
+			scUiWriteGen++
+			if (typeof scApplyQuery === "function") scApplyQuery(query)
+			const eq = query.indexOf("=")
+			const canCoalesce = !done && !onSend && eq > 0 && query.indexOf("&") < 0 && scUiQueue.length > 0 && !scUiQueue[scUiQueue.length - 1].done && !scUiQueue[scUiQueue.length - 1].onSend
+			if (canCoalesce && scUiQueue[scUiQueue.length - 1].query.indexOf("&") < 0 && scUiQueue[scUiQueue.length - 1].query.slice(0, eq + 1) === query.slice(0, eq + 1)) {
+				scUiQueue[scUiQueue.length - 1].query = query
+			} else {
+				scUiQueue.push({query: query, done: done, onSend: onSend})
+			}
+			scUiSyncPending()
+			scUiFlush()
+			return
+		}
 		// An old source reply must not reopen real TIDAL and log out its carrier.
 		const scope = scScopePending ? "" : scScope
-		const scopeChange = query && query.indexOf("scope=") === 0
-		if (scopeChange) scScopePending++
+		const _r = typeof root !== "undefined" && root ? root : null
+		const readGen = typeof scUiWriteGen !== "undefined" ? scUiWriteGen : 0
+		const startedDuringWrite = typeof scUiPending !== "undefined" && scUiPending > 0
+		if (scopeChange) {
+			if (_r) {
+				_r.scScopeNeedRefresh = false
+				_r.scLoginOpen = ""
+				_r.scPendingTap = ""
+			}
+			scScopePending++
+		}
 		const x = new XMLHttpRequest()
 		x.open(query ? "POST" : "GET", "http://127.0.0.1:8080/v1/enginex/ui" + (query ? "?" + query : ""))
+		let settled = false
 		x.onreadystatechange = function() {
-			if (x.readyState !== 4) return
+			if (x.readyState !== 4 || settled) return
+			settled = true
 			if (scopeChange) scScopePending--
-			if (x.status !== 200) {
+			let reply = null
+			if (x.status === 200) {
+				try {
+					const parsed = JSON.parse(x.responseText)
+					if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) reply = parsed
+				} catch (e) {}
+			}
+			if (x.status !== 200 || !reply) {
 				if (scopeChange) {
 					if (scope !== scScope) scOpen(scScope)
-					else { scUiDigest = ""; scCall("", function() {}) }
+					else {
+						if (typeof scUiDigest !== "undefined") scUiDigest = ""
+						if (typeof scUiPending !== "undefined" && scUiPending > 0) {
+							if (_r) _r.scScopeNeedRefresh = true
+						} else {
+							scCall("", function() {})
+						}
+					}
+				} else if (!query && done) {
+					done(null, false, true)
 				}
 				return
 			}
-			const reply = JSON.parse(x.responseText)
-			if (scope !== scScope || scScopePending) delete reply.scope
-			if (!reply.fxSelectorReady) scApply(reply)
-			if (done) done(reply)
+			if (reply.fxSelectorReady) {
+				if (done) done(reply, typeof scUiWriteGen === "undefined" || readGen === scUiWriteGen)
+				return
+			}
+			const revEnforced = !!(_r && typeof _r.scUiRev === "number")
+			const rev = typeof scUiReplyRev === "function" ? scUiReplyRev(x, reply) : 0
+			const bodyEp = reply && typeof reply.epoch === "string" ? reply.epoch.trim() : ""
+			const hdrEp = typeof x.getResponseHeader === "function" ? String(x.getResponseHeader("X-UI-Epoch") || "").trim() : ""
+			const epoch = bodyEp || hdrEp
+			if (revEnforced && (rev <= 0 || (bodyEp && hdrEp && bodyEp !== hdrEp))) {
+				if (typeof scUiDigest !== "undefined") scUiDigest = ""
+				if (typeof scUiPending !== "undefined" && scUiPending > 0) {
+					if (_r) _r.scScopeNeedRefresh = true
+				} else {
+					scCall("")
+				}
+				return
+			}
+			let versionAction = "accept"
+			if (revEnforced) {
+				const curEpoch = _r.scUiEpoch || ""
+				const retired = _r.scRetiredEpochs || (_r.scRetiredEpochs = {})
+				if (epoch) {
+					if (retired[epoch]) versionAction = "stale"
+					else if (curEpoch && epoch !== curEpoch) versionAction = "epoch_reset"
+					else if (rev < (_r.scUiRev || 0)) versionAction = "stale"
+				} else if (rev < (_r.scUiRev || 0)) {
+					versionAction = "stale"
+				}
+			}
+			if (versionAction === "stale") return
+			const scopeStripped = scope !== scScope || scScopePending > 0
+			if (scopeStripped) delete reply.scope
+			const freshForCallback = typeof scUiWriteGen === "undefined" || readGen === scUiWriteGen
+			const freshRead = !startedDuringWrite && (typeof scUiPending === "undefined" || scUiPending === 0) && freshForCallback
+			let pendingTap = ""
+			if (freshRead) {
+				if (revEnforced) {
+					const curEpoch = _r.scUiEpoch || ""
+					const retired = _r.scRetiredEpochs || (_r.scRetiredEpochs = {})
+					if (versionAction === "epoch_reset") {
+						if (curEpoch) retired[curEpoch] = true
+						_r.scUiEpoch = epoch
+						_r.scUiRev = rev
+						if (typeof scUiDigest !== "undefined") scUiDigest = ""
+					} else {
+						if (epoch && !curEpoch) _r.scUiEpoch = epoch
+						if (rev > (_r.scUiRev || 0)) _r.scUiRev = rev
+					}
+					_r.scUiLowPollCount = 0
+					_r.scUiLowPollLast = 0
+				}
+				if (typeof scUiAppliedSeq !== "undefined") scUiAppliedSeq++
+				const prevLoggedIn = typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) ? scLoggedIn.slice() : null
+				scApply(reply)
+				if (typeof scSyncLoginDialog === "function") scSyncLoginDialog(reply, prevLoggedIn)
+				else if (typeof scLogin !== "undefined" && scLogin && ((Array.isArray(reply.sources) && reply.sources.indexOf(scLogin) < 0) || ((!Array.isArray(prevLoggedIn) || prevLoggedIn.indexOf(scLogin) < 0) && Array.isArray(reply.loggedIn) && reply.loggedIn.indexOf(scLogin) >= 0))) {
+					scLogin = ""
+					if (typeof scLoginOpen !== "undefined") scLoginOpen = ""
+					if (_r) { _r.scLoginOpen = ""; _r.scLoginReqGen = (_r.scLoginReqGen || 0) + 1 }
+				}
+				const authSources = Array.isArray(reply.sources)
+				const authLogin = Array.isArray(reply.loggedIn)
+				if (_r && _r.scPendingTap) {
+					const pt = _r.scPendingTap
+					const ptPending = typeof scSourceWritePending === "function" ? scSourceWritePending(pt) : false
+					if (!ptPending) {
+						if (authSources && reply.sources.indexOf(pt) < 0) {
+							_r.scPendingTap = ""
+						} else if (authSources && authLogin && reply.sources.indexOf(pt) >= 0) {
+							pendingTap = pt
+							_r.scPendingTap = ""
+						}
+					}
+				}
+				const hasSources = reply.sources === undefined || authSources
+				const hasLogin = typeof scLoggedIn === "undefined" || authLogin
+				if (!pendingTap && !(_r && _r.scPendingTap) && hasSources && hasLogin && !scopeStripped && !scScopePending && typeof x.getResponseHeader === "function") {
+					const dig = x.getResponseHeader("X-UI-Digest") || ""
+					if (dig && typeof scUiDigest !== "undefined") { scUiDigest = dig; scUiAppliedAt = Date.now() }
+				} else if (((_r && _r.scPendingTap) || !hasSources || !hasLogin) && typeof scUiDigest !== "undefined") {
+					scUiDigest = ""
+				}
+			}
+			if (done) done(reply, freshForCallback)
+			if (pendingTap) scOpen(pendingTap)
 		}
+		if (onSend) onSend()
 		x.send()
 	}
 	property bool scUsbPreparing: false
@@ -4501,34 +4912,534 @@ SERVICES_MAIN = """
 	property real scUiPollAt: 0
 	property string scUiDigest: ""
 	property real scUiAppliedAt: 0
+	property string scClientId: "qml-" + Date.now() + "-" + Math.floor(Math.random() * 1000000)
+	property int scUiWriteSeq: 0
+	property int scUiAppliedSeq: 0
+	property int scUiRev: 0
+	property string scUiEpoch: ""
+	property var scRetiredEpochs: ({})
+	property int scUiLowPollCount: 0
+	property int scUiLowPollLast: 0
+	property int scLoginReqGen: 0
+	property string scPendingTap: ""
+	property bool scScopeNeedRefresh: false
+	property int scUiWriteGen: 0
+	property int scUiPollGen: 0
+	property int scUiPending: 0
+	property var scUiQueue: []
+	property bool scUiSending: false
+	property real scUiSendingAt: 0
+	property int scUiSendToken: 0
+	property var scUiSendXhr: null
+	property string scUiSendingQuery: ""
+	property bool scUiHadError: false
+	property bool scRestartPending: false
+	function scUiReplyRev(xhr, reply) {
+		const parse = function(v) {
+			if (typeof v === "number") return Number.isInteger(v) && v > 0 && v <= 9007199254740991 ? v : 0
+			if (typeof v === "string") {
+				const s = v.trim()
+				if (!/^[1-9][0-9]*$/.test(s)) return 0
+				const n = Number(s)
+				return Number.isSafeInteger(n) && n > 0 ? n : 0
+			}
+			return 0
+		}
+		const hasBody = !!(reply && typeof reply === "object" && Object.prototype.hasOwnProperty.call(reply, "rev"))
+		const bodyRev = hasBody ? parse(reply.rev) : 0
+		const hdrRaw = xhr && typeof xhr.getResponseHeader === "function" ? String(xhr.getResponseHeader("X-UI-Rev") || "").trim() : ""
+		const hdrRev = hdrRaw ? parse(hdrRaw) : 0
+		if (hasBody && bodyRev <= 0) return 0
+		if (hdrRaw && hdrRev <= 0) return 0
+		if (bodyRev > 0 && hdrRev > 0 && bodyRev !== hdrRev) return 0
+		return bodyRev > 0 ? bodyRev : hdrRev
+	}
+	function scSourceWritePending(id) {
+		const _r = typeof root !== "undefined" && root ? root : null
+		const pat = id ? new RegExp("(?:^|&)(?:sources=|source_" + id + "=)") : /(?:^|&)(?:sources=|source_)/
+		if (typeof scUiSending !== "undefined" && scUiSending && _r && pat.test(_r.scUiSendingQuery || "")) return true
+		if (typeof scUiQueue !== "undefined" && Array.isArray(scUiQueue) && scUiQueue.some(q => q && pat.test(q.query || ""))) return true
+		return false
+	}
+	function scSyncLoginDialog(v, prevLoggedIn) {
+		if (!v || typeof scLogin === "undefined" || !scLogin) return
+		const id = scLogin
+		const disabled = Array.isArray(v.sources) && v.sources.indexOf(id) < 0
+		const wasIn = Array.isArray(prevLoggedIn) && prevLoggedIn.indexOf(id) >= 0
+		const signedIn = !wasIn && Array.isArray(v.loggedIn) && v.loggedIn.indexOf(id) >= 0
+		if (disabled || signedIn) {
+			scLogin = ""
+			if (typeof scLoginOpen !== "undefined") scLoginOpen = ""
+			if (typeof root !== "undefined" && root) {
+				root.scLoginOpen = ""
+				root.scLoginReqGen = (root.scLoginReqGen || 0) + 1
+			}
+		}
+	}
+	function scUiSyncPending() {
+		scUiPending = (scUiSending ? 1 : 0) + scUiQueue.length + (typeof scTunnelPending !== "undefined" ? scTunnelPending : 0)
+	}
+	function scApplyQuery(query) {
+		if (!query) return
+		const parts = String(query).split("&")
+		for (let i = 0; i < parts.length; i++) {
+			const eq = parts[i].indexOf("=")
+			if (eq < 0) continue
+			const key = parts[i].slice(0, eq)
+			const val = decodeURIComponent(parts[i].slice(eq + 1))
+			const on = val === "1" || val === "true"
+			if (key === "lang" && val) scLang = val
+			else if (key === "waveform" && val) scWave = val
+			else if (key === "quality" && val) scQuality = val
+			else if (key === "neteaseMode" && val) scNeteaseMode = val
+			else if (key === "broadcast") scBroadcastOn = on
+			else if (key === "prolinkShare") scProlinkShare = on
+			else if (key === "remoteLoad") scRemoteLoad = on
+			else if (key === "bpmDecimals") scBpmDecimals = parseInt(val) === 1 ? 1 : 2
+			else if (key === "restoreBpmOnUnsync") scRestoreBpmOnUnsync = on
+			else if (key === "masterLimiter") scMasterLimiter = on
+			else if (key === "autoGain") scAutoGain = on
+			else if (key === "hifiOutput") scHifiOutput = scIsPlayerBoard && on
+			else if (key === "upfaderEcho") {
+				scUpfaderEcho = on
+				if (scHasMixer && scTransitionFxView && !!scTransitionFxView.enabled !== on)
+					scTransitionFxView.enabled = on
+			}
+			else if (key === "stemsEqMode") scStemsEqMode = on
+			else if (key === "pioneerFx") scPioneerFx = val || "off"
+			else if (key === "fxTimeMode") scFxMsApply(val, scFxTimeMs)
+			else if (key === "fxTimeMs") scFxMsApply(scFxTimeMode, val)
+			else if (key === "beatJumpPads") scBeatJumpPads = on
+			else if (key === "pitchBendBeatJump") scPitchBendBeatJump = on
+			else if (key === "swapLoopOrder") scSwapLoopOrder = on
+			else if (key === "syncGuardPct") scSyncGuardPct = parseInt(val) || 0
+			else if (key === "browserDualColumn") scDualColumn = on
+			else if (key === "tracklistWaveform") scTracklistWaveform = on
+			else if (key === "omniSource") scOmniSource = on
+			else if (key === "cueCountdown") scCueCountdown = on
+			else if (key === "uiScale") scUIScale = parseInt(val) || 100
+			else if (key === "sdHighSpeed") scSdHighSpeed = on
+			else if (key === "ledBrightness") scLedBrightness = parseInt(val) || 100
+			else if (key === "pairedView" && scIsPlayerBoard && scFourDeckOn) scPairedSetting = on
+			else if (key === "shadowMode" && val) scShadowMode = val
+			else if (key === "consoleLineView") scConsoleLine = scConsoleLineBoard && on
+			else if (key === "consoleDecks") scShowConsole = scIsPlayerBoard && scFourDeckOn && on
+			else if (key === "shareDecks") scShareDecks = scIsPlayerBoard && on
+			else if (key === "rbLibraryView" && val) scRbLibraryView = val
+			else if (key === "jogInvertLeft") { scReverseJogLeft = on; if (typeof scSyncReverseJog === "function") scSyncReverseJog(true) }
+			else if (key === "jogInvertRight") { scReverseJogRight = on; if (typeof scSyncReverseJog === "function") scSyncReverseJog(true) }
+			else if (key === "sources") {
+				const configurable = ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"]
+				const list = val ? val.split(",").filter(Boolean) : []
+				const extras = Array.isArray(scSources) ? scSources.filter(s => configurable.indexOf(s) < 0 && list.indexOf(s) < 0) : []
+				const next = list.concat(extras)
+				if (!scSameItems(scSources, next)) scSources = next
+			}
+			else if (key.indexOf("source_") === 0) {
+				const configurable = ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"]
+				const id = key.slice(7)
+				if (configurable.indexOf(id) >= 0 && Array.isArray(scSources)) {
+					const saved = scSources.filter(s => configurable.indexOf(s) >= 0 && s !== id)
+					if (on) saved.push(id)
+					const extras = scSources.filter(s => configurable.indexOf(s) < 0)
+					const next = saved.concat(extras)
+					if (!scSameItems(scSources, next)) scSources = next
+				}
+			}
+			else if (key.indexOf("mixstreamFx") === 0 && key.length === 12) {
+				const idx = parseInt(key.slice(11)) - 1
+				if (idx >= 0 && idx < 4 && val) {
+					const next = (scMixstreamFx && scMixstreamFx.length === 4 ? scMixstreamFx : ["Echo", "Flanger", "Delay", "Phaser"]).slice()
+					next[idx] = val
+					scMixstreamFx = next
+				}
+			}
+		}
+	}
+	function scUiFlush() {
+		if (scUiSending) {
+			if (Date.now() - scUiSendingAt < 20000) return
+			scUiSendToken++
+			scUiWriteGen++
+			if (scUiSendXhr) { try { scUiSendXhr.abort() } catch (e) {} }
+			scUiSendXhr = null
+			scUiSending = false
+			if (typeof root !== "undefined" && root) {
+				const abortedQuery = root.scUiSendingQuery || ""
+				root.scUiSendingQuery = ""
+				if (root.scPendingTap) {
+					const pt = root.scPendingTap
+					const touched = new RegExp("(?:^|&)(?:sources=|source_" + pt + "=)").test(abortedQuery)
+					const ptPending = typeof scSourceWritePending === "function" ? scSourceWritePending(pt) : scUiQueue.some(q => q && new RegExp("(?:^|&)(?:sources=|source_" + pt + "=)").test(q.query || ""))
+					if (touched && !ptPending) root.scPendingTap = ""
+				}
+			}
+			scUiHadError = true
+		}
+		if (!scUiQueue.length) {
+			scUiSyncPending()
+			if (scUiPending === 0 && typeof root !== "undefined" && root && !root.scBtSending && root.scRestartPending) {
+				root.scRestartPending = false
+				if (typeof Planck !== "undefined" && Planck && typeof Planck.quit === "function")
+					Planck.quit(QuitReasons.AnalyticsChange, false)
+			}
+			return
+		}
+		const item = scUiQueue.shift()
+		scUiSending = true
+		scUiSendingAt = Date.now()
+		scUiSyncPending()
+		const token = ++scUiSendToken
+		const gen = scUiWriteGen
+		const _rf = typeof root !== "undefined" && root ? root : null
+		if (_rf) _rf.scUiSendingQuery = item.query || ""
+		const scope = scScopePending ? "" : scScope
+		const x = new XMLHttpRequest()
+		scUiSendXhr = x
+		x.open("POST", "http://127.0.0.1:8080/v1/enginex/ui?" + item.query)
+		if (typeof x.setRequestHeader === "function") {
+			const cid = typeof scClientId !== "undefined" && scClientId ? scClientId : ""
+			const seq = typeof scUiWriteSeq !== "undefined" ? ++scUiWriteSeq : 0
+			if (cid && seq > 0) {
+				x.setRequestHeader("X-UI-Client-Id", cid)
+				x.setRequestHeader("X-UI-Write-Seq", String(seq))
+			}
+		}
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4 || token !== scUiSendToken) return
+			scUiSending = false
+			if (_rf) _rf.scUiSendingQuery = ""
+			scUiSendXhr = null
+			let reply = null
+			if (x.status === 200) {
+				try {
+					const parsed = JSON.parse(x.responseText)
+					if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) reply = parsed
+				} catch (e) {}
+			}
+			if (x.status !== 200 || !reply) {
+				if (_rf && _rf.scPendingTap) {
+					const pt = _rf.scPendingTap
+					const touchesTap = new RegExp("(?:^|&)(?:sources=|source_" + pt + "=)").test(item.query || "")
+					const ptPending = typeof scSourceWritePending === "function" ? scSourceWritePending(pt) : scUiQueue.some(q => q && new RegExp("(?:^|&)(?:sources=|source_" + pt + "=)").test(q.query || ""))
+					if (touchesTap && !ptPending) _rf.scPendingTap = ""
+				}
+				scUiHadError = true
+				if (scUiQueue.length > 0) { scUiFlush(); return }
+				scUiHadError = false
+				scUiWriteGen++
+				scUiSyncPending()
+				if (typeof root !== "undefined" && root && root.scRestartPending) {
+					if (scUiPending === 0 && !root.scBtSending) {
+						root.scRestartPending = false
+						if (typeof Planck !== "undefined" && Planck && typeof Planck.quit === "function")
+							Planck.quit(QuitReasons.AnalyticsChange, false)
+					}
+					return
+				}
+				if (typeof root !== "undefined" && root && root.scScopeNeedRefresh) root.scScopeNeedRefresh = false
+				scUiDigest = ""
+				scCall("")
+				return
+			}
+			if (reply.fxSelectorReady) {
+				if (scUiQueue.length > 0) {
+					if (item.done) item.done(reply, false)
+					scUiFlush()
+					return
+				}
+				scUiHadError = false
+				scUiSyncPending()
+				if (item.done) item.done(reply, true)
+				if (typeof root !== "undefined" && root && root.scRestartPending) {
+					if (scUiPending === 0 && !root.scBtSending) {
+						root.scRestartPending = false
+						if (typeof Planck !== "undefined" && Planck && typeof Planck.quit === "function")
+							Planck.quit(QuitReasons.AnalyticsChange, false)
+					}
+					return
+				}
+				if (scUiPending === 0 && typeof root !== "undefined" && root && root.scScopeNeedRefresh && !scScopePending) {
+					root.scScopeNeedRefresh = false
+					scUiDigest = ""
+					scCall("")
+				}
+				return
+			}
+			const revEnforced = !!(_rf && typeof _rf.scUiRev === "number")
+			const rev = typeof scUiReplyRev === "function" ? scUiReplyRev(x, reply) : 0
+			const bodyEp = reply && typeof reply.epoch === "string" ? reply.epoch.trim() : ""
+			const hdrEp = typeof x.getResponseHeader === "function" ? String(x.getResponseHeader("X-UI-Epoch") || "").trim() : ""
+			const epoch = bodyEp || hdrEp
+			let versionAction = "accept"
+			if (revEnforced) {
+				if (rev <= 0 || (bodyEp && hdrEp && bodyEp !== hdrEp)) {
+					versionAction = "invalid"
+				} else {
+					const curEpoch = _rf.scUiEpoch || ""
+					const retired = _rf.scRetiredEpochs || (_rf.scRetiredEpochs = {})
+					if (epoch) {
+						if (retired[epoch]) versionAction = "stale"
+						else if (curEpoch && epoch !== curEpoch) versionAction = "epoch_reset"
+						else if (rev < (_rf.scUiRev || 0)) versionAction = "stale"
+					} else if (rev < (_rf.scUiRev || 0)) {
+						versionAction = "stale"
+					}
+				}
+			}
+			if (versionAction === "invalid" || versionAction === "stale") {
+				if (scUiQueue.length > 0) { scUiFlush(); return }
+				scUiHadError = false
+				scUiWriteGen++
+				scUiSyncPending()
+				if (typeof root !== "undefined" && root && root.scRestartPending) {
+					if (scUiPending === 0 && !root.scBtSending) {
+						root.scRestartPending = false
+						if (typeof Planck !== "undefined" && Planck && typeof Planck.quit === "function")
+							Planck.quit(QuitReasons.AnalyticsChange, false)
+					}
+					return
+				}
+				scUiDigest = ""
+				scCall("")
+				return
+			}
+			const scopeStripped = scope !== scScope || scScopePending > 0
+			if (scopeStripped) delete reply.scope
+			if (reply.ledBrightness !== undefined && typeof scLedBrightnessSaved !== "undefined") {
+				const confirmedBrt = parseInt(reply.ledBrightness) || 100
+				if (scLedBrightnessSaved !== confirmedBrt) {
+					scLedBrightnessSaved = confirmedBrt
+					if (typeof scPadBrightnessDelay !== "undefined" && scPadBrightnessDelay)
+						scPadBrightnessDelay.restart()
+				}
+			}
+			if (revEnforced) {
+				const curEpoch = _rf.scUiEpoch || ""
+				const retired = _rf.scRetiredEpochs || (_rf.scRetiredEpochs = {})
+				if (versionAction === "epoch_reset") {
+					if (curEpoch) retired[curEpoch] = true
+					_rf.scUiEpoch = epoch
+					_rf.scUiRev = rev
+					scUiDigest = ""
+				} else {
+					if (epoch && !curEpoch) _rf.scUiEpoch = epoch
+					if (rev > (_rf.scUiRev || 0)) _rf.scUiRev = rev
+				}
+				_rf.scUiLowPollCount = 0
+				_rf.scUiLowPollLast = 0
+			}
+			if (scUiQueue.length > 0) {
+				let openTarget = ""
+				const prevLoggedIn = typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) ? scLoggedIn.slice() : null
+				if (Array.isArray(reply.loggedIn) && typeof scLoggedIn !== "undefined" && (typeof scSameItems !== "function" || !scSameItems(scLoggedIn, reply.loggedIn)))
+					scLoggedIn = reply.loggedIn
+				if (typeof scSyncLoginDialog === "function") scSyncLoginDialog(reply, prevLoggedIn)
+				else if (typeof scLogin !== "undefined" && scLogin && ((Array.isArray(reply.sources) && reply.sources.indexOf(scLogin) < 0) || ((!Array.isArray(prevLoggedIn) || prevLoggedIn.indexOf(scLogin) < 0) && Array.isArray(reply.loggedIn) && reply.loggedIn.indexOf(scLogin) >= 0))) {
+					scLogin = ""
+					if (typeof scLoginOpen !== "undefined") scLoginOpen = ""
+					if (_rf) { _rf.scLoginOpen = ""; _rf.scLoginReqGen = (_rf.scLoginReqGen || 0) + 1 }
+				}
+				if (_rf && _rf.scPendingTap) {
+					const pt = _rf.scPendingTap
+					const ptPending = typeof scSourceWritePending === "function" ? scSourceWritePending(pt) : scUiQueue.some(q => q && new RegExp("(?:^|&)(?:sources=|source_" + pt + "=)").test(q.query || ""))
+					if (!ptPending) {
+						if (Array.isArray(reply.sources) && reply.sources.indexOf(pt) < 0) {
+							_rf.scPendingTap = ""
+						} else if (Array.isArray(reply.sources) && reply.sources.indexOf(pt) >= 0 && Array.isArray(reply.loggedIn)) {
+							openTarget = pt
+							_rf.scPendingTap = ""
+						}
+					}
+				}
+				if (item.done) item.done(reply, false)
+				scUiFlush()
+				if (openTarget) scOpen(openTarget)
+				return
+			}
+			scUiHadError = false
+			scUiSyncPending()
+			let pendingTap = ""
+			if (scUiPending === 0 && gen === scUiWriteGen) {
+				scUiWriteGen++
+				if (typeof scUiAppliedSeq !== "undefined") scUiAppliedSeq++
+				const prevLoggedIn = typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) ? scLoggedIn.slice() : null
+				scApply(reply)
+				if (typeof scSyncLoginDialog === "function") scSyncLoginDialog(reply, prevLoggedIn)
+				else if (typeof scLogin !== "undefined" && scLogin && ((Array.isArray(reply.sources) && reply.sources.indexOf(scLogin) < 0) || ((!Array.isArray(prevLoggedIn) || prevLoggedIn.indexOf(scLogin) < 0) && Array.isArray(reply.loggedIn) && reply.loggedIn.indexOf(scLogin) >= 0))) {
+					scLogin = ""
+					if (typeof scLoginOpen !== "undefined") scLoginOpen = ""
+					if (_rf) { _rf.scLoginOpen = ""; _rf.scLoginReqGen = (_rf.scLoginReqGen || 0) + 1 }
+				}
+				const authSources = Array.isArray(reply.sources)
+				const authLogin = Array.isArray(reply.loggedIn)
+				const hasSources = reply.sources === undefined || authSources
+				const hasLogin = typeof scLoggedIn === "undefined" || authLogin
+				if (_rf && _rf.scPendingTap) {
+					const pt = _rf.scPendingTap
+					if (authSources && reply.sources.indexOf(pt) < 0) {
+						_rf.scPendingTap = ""
+					} else if (authSources && authLogin && reply.sources.indexOf(pt) >= 0) {
+						pendingTap = pt
+						_rf.scPendingTap = ""
+					}
+				}
+				if (!pendingTap && !(_rf && _rf.scPendingTap) && hasSources && hasLogin && !scopeStripped && !scScopePending && typeof x.getResponseHeader === "function") {
+					const dig = x.getResponseHeader("X-UI-Digest") || ""
+					if (dig && typeof scUiDigest !== "undefined") { scUiDigest = dig; scUiAppliedAt = Date.now() }
+				} else if (((_rf && _rf.scPendingTap) || !hasSources || !hasLogin) && typeof scUiDigest !== "undefined") {
+					scUiDigest = ""
+				}
+			}
+			if (item.done) item.done(reply, true)
+			if (typeof root !== "undefined" && root && root.scRestartPending) {
+				if (scUiPending === 0 && !root.scBtSending) {
+					root.scRestartPending = false
+					if (typeof Planck !== "undefined" && Planck && typeof Planck.quit === "function")
+						Planck.quit(QuitReasons.AnalyticsChange, false)
+				}
+				return
+			}
+			if (pendingTap) scOpen(pendingTap)
+			if (scUiPending === 0 && typeof root !== "undefined" && root && root.scScopeNeedRefresh && !scScopePending) {
+				root.scScopeNeedRefresh = false
+				scUiDigest = ""
+				scCall("")
+			}
+		}
+		if (item.onSend) item.onSend()
+		x.send()
+	}
 	function scUiPollReply() {
-		if (scUiPoll.readyState !== 4 || scUiPoll.status !== 200 || scScopePending || scUiPollScope !== scScope) return
+		if (scUiPoll.readyState !== 4 || scUiPoll.status !== 200) return
+		if (typeof scUiPending !== "undefined" && (scUiPending > 0 || scUiPollGen !== scUiWriteGen)) return
+		const scopeStripped = !!(scScopePending || scUiPollScope !== scScope)
+		const _rp = typeof root !== "undefined" && root ? root : null
+		const revEnforced = !!(_rp && typeof _rp.scUiRev === "number")
+		const hdrEpoch = typeof scUiPoll.getResponseHeader === "function" ? String(scUiPoll.getResponseHeader("X-UI-Epoch") || "").trim() : ""
+		const hdrRevRaw = typeof scUiPoll.getResponseHeader === "function" ? String(scUiPoll.getResponseHeader("X-UI-Rev") || "").trim() : ""
+		const hdrRev = hdrRevRaw ? (typeof scUiReplyRev === "function" ? scUiReplyRev(scUiPoll, null) : (/^[1-9][0-9]*$/.test(hdrRevRaw) ? Number(hdrRevRaw) : 0)) : 0
+		if (revEnforced) {
+			const curEpoch = _rp.scUiEpoch || ""
+			const retired = _rp.scRetiredEpochs || (_rp.scRetiredEpochs = {})
+			if (hdrEpoch && retired[hdrEpoch]) return
+			if (hdrRevRaw && hdrRev <= 0) {
+				if (typeof scUiDigest !== "undefined") scUiDigest = ""
+				if (typeof scCall === "function") scCall("")
+				return
+			}
+			if (hdrRev > 0 && hdrRev < (_rp.scUiRev || 0) && (!hdrEpoch ? true : (!curEpoch || hdrEpoch === curEpoch))) {
+				if (hdrEpoch || curEpoch) return
+				const lowLast = _rp.scUiLowPollLast || 0
+				const lowCnt = lowLast > 0 && hdrRev >= lowLast ? ((_rp.scUiLowPollCount || 0) + 1) : 1
+				if (lowCnt < 3) {
+					_rp.scUiLowPollLast = hdrRev
+					_rp.scUiLowPollCount = lowCnt
+					return
+				}
+			}
+		}
+		const epochChanged = !!(revEnforced && hdrEpoch && (_rp.scUiEpoch || "") && hdrEpoch !== _rp.scUiEpoch)
+		const prevDigest = typeof scUiDigest !== "undefined" ? scUiDigest : ""
+		const needTapSync = !!(_rp && _rp.scPendingTap)
+		if ((needTapSync || epochChanged) && typeof scUiDigest !== "undefined") scUiDigest = ""
 		// Unchanged settings (stream-sync's digest): skip the parse and the writes,
 		// but re-apply every 30 s in case a local change raced a reply.
 		const digest = scUiPoll.getResponseHeader("X-UI-Digest") || "", now = Date.now()
-		if (digest && digest === scUiDigest && now - scUiAppliedAt < 30000) { scEnsureTidal(); if (typeof scDeckClockWatch === "function") scDeckClockWatch(); return }
+		if (!scopeStripped && digest && digest === scUiDigest && now - scUiAppliedAt < 30000 && (!revEnforced || (hdrRev > 0 && hdrRev >= (_rp.scUiRev || 0)))) {
+			if (revEnforced) { _rp.scUiLowPollCount = 0; _rp.scUiLowPollLast = 0 }
+			scEnsureTidal(); if (typeof scDeckClockWatch === "function") scDeckClockWatch(); return
+		}
 		const prevScope = scScope
 		const wasLoaded = typeof scUiLoaded !== "undefined" && scUiLoaded
 		const wasIn = wasLoaded && prevScope && prevScope !== "tidal" && Array.isArray(scLoggedIn) ? scLoggedIn.indexOf(prevScope) >= 0 : null
-		scApply(JSON.parse(scUiPoll.responseText))
-		scUiDigest = digest; scUiAppliedAt = now
-		if (typeof scLoginOpen !== "undefined" && scLoginOpen && Array.isArray(scLoggedIn) && scLoggedIn.indexOf(scLoginOpen) >= 0 && typeof scSources !== "undefined" && Array.isArray(scSources) && scSources.indexOf(scLoginOpen) >= 0) {
-			const target = scLoginOpen
-			scLogin = ""
-			scLoginOpen = ""
-			scOpen(target)
+		let reply = null
+		try {
+			const parsed = JSON.parse(scUiPoll.responseText)
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) reply = parsed
+		} catch (e) {}
+		if (!reply) {
+			if (needTapSync && typeof scUiDigest !== "undefined") scUiDigest = prevDigest
 			return
 		}
-		if (wasIn !== null && scScope === prevScope && Array.isArray(scLoggedIn) && (scLoggedIn.indexOf(prevScope) >= 0) !== wasIn) {
-			const nowIn = !wasIn
-			if (nowIn && typeof scLogin !== "undefined" && scLogin === prevScope) scLogin = ""
-			if (typeof Planck !== "undefined" && Planck && Planck.librarianController && Planck.librarianController.streamingPlaylistsController)
-				Planck.librarianController.streamingPlaylistsController.invalidateUI()
-			if (nowIn && typeof scEnterTimer !== "undefined" && scEnterTimer) {
-				scEnterTries = 8
-				scEnterTimer.start()
+		const rev = typeof scUiReplyRev === "function" ? scUiReplyRev(scUiPoll, reply) : 0
+		const bodyEp = reply && typeof reply.epoch === "string" ? reply.epoch.trim() : ""
+		const epoch = bodyEp || hdrEpoch
+		if (revEnforced && (rev <= 0 || (bodyEp && hdrEpoch && bodyEp !== hdrEpoch))) {
+			if (typeof scUiDigest !== "undefined") scUiDigest = ""
+			if (typeof scCall === "function") scCall("")
+			return
+		}
+		let versionAction = "accept"
+		if (revEnforced) {
+			const curEpoch = _rp.scUiEpoch || ""
+			const retired = _rp.scRetiredEpochs || (_rp.scRetiredEpochs = {})
+			if (epoch) {
+				if (retired[epoch]) versionAction = "stale"
+				else if (curEpoch && epoch !== curEpoch) versionAction = "epoch_reset"
+				else if (rev < (_rp.scUiRev || 0)) versionAction = "stale"
+			} else if (rev < (_rp.scUiRev || 0)) {
+				if (curEpoch) {
+					versionAction = "stale"
+				} else {
+					const lowLast = _rp.scUiLowPollLast || 0
+					const lowCnt = lowLast > 0 && rev >= lowLast ? ((_rp.scUiLowPollCount || 0) + 1) : 1
+					_rp.scUiLowPollLast = rev
+					_rp.scUiLowPollCount = lowCnt
+					versionAction = lowCnt >= 3 ? "epoch_reset" : "stale"
+				}
 			}
 		}
+		if (versionAction === "stale") {
+			if (needTapSync && typeof scUiDigest !== "undefined") scUiDigest = prevDigest
+			return
+		}
+		if (scopeStripped) delete reply.scope
+		if (revEnforced) {
+			const curEpoch = _rp.scUiEpoch || ""
+			const retired = _rp.scRetiredEpochs || (_rp.scRetiredEpochs = {})
+			if (versionAction === "epoch_reset") {
+				if (curEpoch) retired[curEpoch] = true
+				_rp.scUiEpoch = epoch
+				_rp.scUiRev = rev
+				if (typeof scUiDigest !== "undefined") scUiDigest = ""
+			} else {
+				if (epoch && !curEpoch) _rp.scUiEpoch = epoch
+				if (rev > (_rp.scUiRev || 0)) _rp.scUiRev = rev
+			}
+			_rp.scUiLowPollCount = 0
+			_rp.scUiLowPollLast = 0
+		}
+		if (typeof scUiAppliedSeq !== "undefined") scUiAppliedSeq++
+		const prevLoggedIn = typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) ? scLoggedIn.slice() : null
+		scApply(reply)
+		if (typeof scSyncLoginDialog === "function") scSyncLoginDialog(reply, prevLoggedIn)
+		else if (typeof scLogin !== "undefined" && scLogin && ((Array.isArray(reply.sources) && reply.sources.indexOf(scLogin) < 0) || ((!Array.isArray(prevLoggedIn) || prevLoggedIn.indexOf(scLogin) < 0) && Array.isArray(reply.loggedIn) && reply.loggedIn.indexOf(scLogin) >= 0))) {
+			scLogin = ""
+			if (typeof scLoginOpen !== "undefined") scLoginOpen = ""
+			if (_rp) { _rp.scLoginOpen = ""; _rp.scLoginReqGen = (_rp.scLoginReqGen || 0) + 1 }
+		}
+		const authSources = Array.isArray(reply.sources)
+		const authLogin = Array.isArray(reply.loggedIn)
+		const hasSources = reply.sources === undefined || authSources
+		const hasLogin = typeof scLoggedIn === "undefined" || authLogin
+		let pendingTap = ""
+		if (_rp && _rp.scPendingTap) {
+			const pt = _rp.scPendingTap
+			if (authSources && reply.sources.indexOf(pt) < 0) {
+				_rp.scPendingTap = ""
+			} else if (authSources && authLogin && reply.sources.indexOf(pt) >= 0) {
+				pendingTap = pt
+				_rp.scPendingTap = ""
+			}
+		}
+		if (pendingTap) scOpen(pendingTap)
+		if (!scopeStripped && wasIn !== null && scScope === prevScope && Array.isArray(scLoggedIn) && (scLoggedIn.indexOf(prevScope) >= 0) !== wasIn) {
+			if (typeof Planck !== "undefined" && Planck && Planck.librarianController && Planck.librarianController.streamingPlaylistsController)
+				Planck.librarianController.streamingPlaylistsController.invalidateUI()
+		}
+		if (!(_rp && _rp.scPendingTap) && hasSources && hasLogin && !scopeStripped && !scScopePending) { scUiDigest = digest; scUiAppliedAt = now }
+		else if ((_rp && _rp.scPendingTap) || !hasSources || !hasLogin) { scUiDigest = "" }
 	}
 	function scApply(v) {
 		scUsbPreparing = !!v.usbPreparing
@@ -4578,8 +5489,8 @@ SERVICES_MAIN = """
 		scShadowMode = v.shadowMode || "auto"
 		scRbLibraryView = v.rbLibraryView || "folders"
 		scKeepPlayhead(v.playhead || 0)
-		if (v.sources && !scSameItems(scSources, v.sources)) scSources = v.sources
-		if (v.loggedIn && !scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
+		if (Array.isArray(v.sources) && !scSameItems(scSources, v.sources)) scSources = v.sources
+		if (Array.isArray(v.loggedIn) && !scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
 		scTidalLoggedIn = !!v.tidalLoggedIn
 		scTidalSynthetic = !!v.tidalSynthetic
 		if (v.scope !== undefined) scScope = v.scope
@@ -4617,8 +5528,8 @@ SERVICES_MAIN = """
 			else if (v.sd_high_speed !== undefined) scSdHighSpeed = v.sd_high_speed === "1" || v.sd_high_speed === 1 || v.sd_high_speed === true
 			scSdHighSpeedPending = !!v.sdHighSpeedPending
 			if (typeof scSyncReverseJog === "function") scSyncReverseJog(true)
-			if (v.ledBrightness !== undefined) scLedBrightness = parseInt(v.ledBrightness) || 100
-			else if (v.led_brightness !== undefined) scLedBrightness = parseInt(v.led_brightness) || 100
+			if (v.ledBrightness !== undefined) { const brt = parseInt(v.ledBrightness) || 100; scLedBrightness = brt; if (typeof scLedBrightnessSaved !== "undefined") scLedBrightnessSaved = brt }
+			else if (v.led_brightness !== undefined) { const brt = parseInt(v.led_brightness) || 100; scLedBrightness = brt; if (typeof scLedBrightnessSaved !== "undefined") scLedBrightnessSaved = brt }
 			if (v.uiScale !== undefined) scUIScale = parseInt(v.uiScale) || 100
 			else if (v.ui_scale !== undefined) scUIScale = parseInt(v.ui_scale) || 100
 			if (v.stemsEqMode !== undefined) scStemsEqMode = !!v.stemsEqMode
@@ -4726,7 +5637,7 @@ SERVICES_MAIN = """
 			else if (key === "jog_invert_right") root.scReverseJogRight = val === "1" || val === "true"
 			else if (key === "sd_high_speed") root.scSdHighSpeed = val === "1" || val === "true"
 			else if (key === "hifi_output") root.scHifiOutput = root.scIsPlayerBoard && (val === "1" || val === "true")
-			else if (key === "led_brightness") root.scLedBrightness = parseInt(val) || 100
+			else if (key === "led_brightness") { const brt = parseInt(val) || 100; root.scLedBrightness = brt; if (typeof root.scLedBrightnessSaved !== "undefined") root.scLedBrightnessSaved = brt }
 			else if (key === "ui_scale") root.scUIScale = parseInt(val) || 100
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
 			else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"
@@ -4785,9 +5696,21 @@ SERVICES_MAIN = """
 	}
 	function scSetSource(id, on) {
 		if (!scUiLoaded) return
-		const list = scSources.filter(s => s !== id)
-		if (on) list.push(id)
-		scCall("sources=" + list.join(","))
+		const configurable = ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"]
+		if (configurable.indexOf(id) < 0) return
+		if (!on && typeof root !== "undefined" && root) {
+			if (typeof scLogin !== "undefined" && scLogin === id) {
+				scLogin = ""
+				root.scLoginReqGen = (root.scLoginReqGen || 0) + 1
+			}
+			if (root.scLoginOpen === id) root.scLoginOpen = ""
+			if (root.scPendingTap === id) root.scPendingTap = ""
+		}
+		const saved = scSources.filter(s => configurable.indexOf(s) >= 0 && s !== id)
+		if (on) saved.push(id)
+		const extras = scSources.filter(s => configurable.indexOf(s) < 0)
+		scSources = saved.concat(extras)
+		scCall("source_" + id + "=" + (on ? "1" : "0"))
 	}
 	// Every service is backed by Engine's TIDAL provider; the gateway follows the scope.
 @TIDAL_OPEN@
@@ -4819,16 +5742,66 @@ SERVICES_MAIN = """
 	property bool scLoginLocal: false
 	property int scLoginSerial: 0
 	function scLoginRequest(method, id, done) {
+		const _rl = typeof root !== "undefined" && root ? root : null
+		const gen = _rl ? (_rl.scLoginReqGen || 0) : 0
 		const x = new XMLHttpRequest()
 		x.open(method, "http://127.0.0.1:8080/v1/enginex/login?provider=" + id)
 		x.onreadystatechange = function() {
-			if (x.readyState !== 4 || scLogin !== id) return
-			if (x.status === 200) done(JSON.parse(x.responseText))
-			else scLoginStatus = "error"
+			if (x.readyState !== 4 || scLogin !== id || (_rl && (_rl.scLoginReqGen || 0) !== gen)) return
+			if (x.status !== 200) { scLoginStatus = "error"; return }
+			let v = null
+			try {
+				const parsed = JSON.parse(x.responseText)
+				if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) v = parsed
+			} catch (e) {}
+			if (!v) { scLoginStatus = "error"; return }
+			const revEnforced = !!(_rl && typeof _rl.scUiRev === "number")
+			const rev = typeof scUiReplyRev === "function" ? scUiReplyRev(x, v) : 0
+			const bodyEp = v && typeof v.epoch === "string" ? v.epoch.trim() : ""
+			const hdrEp = typeof x.getResponseHeader === "function" ? String(x.getResponseHeader("X-UI-Epoch") || "").trim() : ""
+			const epoch = bodyEp || hdrEp
+			if (revEnforced && (rev <= 0 || (bodyEp && hdrEp && bodyEp !== hdrEp))) {
+				if (typeof scUiDigest !== "undefined") scUiDigest = ""
+				if (typeof scCall === "function") scCall("")
+				return
+			}
+			let versionAction = "accept"
+			if (revEnforced) {
+				const curEpoch = _rl.scUiEpoch || ""
+				const retired = _rl.scRetiredEpochs || (_rl.scRetiredEpochs = {})
+				if (epoch) {
+					if (retired[epoch]) versionAction = "stale"
+					else if (curEpoch && epoch !== curEpoch) versionAction = "epoch_reset"
+					else if (rev < (_rl.scUiRev || 0)) versionAction = "stale"
+				} else if (rev < (_rl.scUiRev || 0)) {
+					versionAction = "stale"
+				}
+			}
+			if (versionAction === "stale") return
+			if (revEnforced) {
+				const curEpoch = _rl.scUiEpoch || ""
+				const retired = _rl.scRetiredEpochs || (_rl.scRetiredEpochs = {})
+				if (versionAction === "epoch_reset") {
+					if (curEpoch) retired[curEpoch] = true
+					_rl.scUiEpoch = epoch
+					_rl.scUiRev = rev
+					if (typeof scUiDigest !== "undefined") scUiDigest = ""
+				} else {
+					if (epoch && !curEpoch) _rl.scUiEpoch = epoch
+					if (rev > (_rl.scUiRev || 0)) _rl.scUiRev = rev
+				}
+				_rl.scUiLowPollCount = 0
+				_rl.scUiLowPollLast = 0
+			}
+			done(v)
 		}
 		x.send()
 	}
 	function scLoginBegin(id) {
+		if (typeof root !== "undefined" && root) {
+			root.scLoginReqGen = (root.scLoginReqGen || 0) + 1
+			root.scPendingTap = ""
+		}
 		scLogin = id
 		scLoginStatus = "starting"
 		scLoginRequest("POST", id, function(v) {
@@ -4838,18 +5811,15 @@ SERVICES_MAIN = """
 		})
 	}
 	function scLoginDone() {
-		const target = root.scLoginOpen
+		const closedId = scLogin
+		if (typeof root !== "undefined" && root) {
+			root.scLoginReqGen = (root.scLoginReqGen || 0) + 1
+			root.scLoginOpen = ""
+			if (root.scPendingTap === closedId) root.scPendingTap = ""
+		}
 		scLogin = ""
-		root.scLoginOpen = ""
-		scCall("", function() {
-			if (target && scSources.indexOf(target) >= 0 && scLoggedIn.indexOf(target) >= 0) {
-				scOpen(target)
-				return
-			}
-			Planck.librarianController.streamingPlaylistsController.invalidateUI()
-			scEnterTries = 8
-			scEnterTimer.start()
-		})
+		if (typeof scUiDigest !== "undefined") scUiDigest = ""
+		scCall("")
 	}
 	Timer {
 		interval: 2000; repeat: true
@@ -5831,7 +6801,7 @@ LOGIN_DIALOG = """
 					MouseArea {
 						id: closeArea
 						anchors.fill: parent
-						onClicked: { root.scLogin = ""; root.scLoginOpen = "" }
+						onClicked: { root.scLogin = ""; root.scLoginOpen = ""; root.scLoginReqGen = (root.scLoginReqGen || 0) + 1 }
 					}
 				}
 				// WebDAV or NAS: the servers (tap one to edit it on the deck), typing one in, done.
@@ -6246,7 +7216,7 @@ STREAM_SWITCHES = """
 			visible: !root.scOff("gateway")
 			icon.source: root.scIcon(modelData.id)
 			icon.useOriginal: true
-			checked: root.scSources.indexOf(modelData.id) >= 0
+			checkedExternally: root.scSources.indexOf(modelData.id) >= 0
 			onClicked: root.scSetSource(modelData.id, !(root.scSources.indexOf(modelData.id) >= 0))
 		}
 	}
@@ -8554,6 +9524,15 @@ def edits(dev: bool):
         v + "BrowseView/Components/Components/StemsIcon.qml": [(
             "visible: (Planck.hasStemsPreRenderedPlayback() || (!!row.modelData.isDemoTrack && Config.device.hasDemoContentPreRenderedStems) ) && row.modelData.stems !== 0",
             'visible: (typeof root !== "undefined" && root && root.scIsAZ04 ? (Planck.hasStemsPreRenderedPlayback() || (!!row.modelData.isDemoTrack && Config.device.hasDemoContentPreRenderedStems)) : true) && row.modelData.stems !== 0')],
+        prefs + "Entries/Base/SwitchEntry.qml": [
+            ("        onToggled: parent.clicked()\n",
+             "        Component.onCompleted: if (checked !== checkedExternally) checked = checkedExternally\n"
+             "        onCheckedExternallyChanged: if (checked !== checkedExternally) checked = checkedExternally\n"
+             "        onToggled: {\n"
+             "            parent.clicked()\n"
+             "            if (checked !== checkedExternally) checked = checkedExternally\n"
+             "        }\n"),
+        ],
         prefs + "Entries/Base/ListEntry.qml": [
             ("function isSelected(text) {", "function isSelected(value) {"),
             ("return entry.currentValue === text\n", "return entry.currentValue === value\n"),
@@ -9297,6 +10276,15 @@ def edits(dev: bool):
             ],
             v + "MixerMenu/Pages/MicrophonePage/Items/MixerMenuMicFxSpeed.qml": [
                 ("        label: `${entry.effectName} Speed`\n", "        label: root.scT(`${entry.effectName} Speed`)\n"),
+            ],
+            "Skins/UIKit/Elements/Settings/Entries/SwitchEntry.qml": [
+                ("        onToggled: parent.clicked()\n",
+                 "        Component.onCompleted: if (checked !== checkedExternally) checked = checkedExternally\n"
+                 "        onCheckedExternallyChanged: if (checked !== checkedExternally) checked = checkedExternally\n"
+                 "        onToggled: {\n"
+                 "            parent.clicked()\n"
+                 "            if (checked !== checkedExternally) checked = checkedExternally\n"
+                 "        }\n"),
             ],
             "Skins/UIKit/Elements/Settings/Entries/ListEntry.qml": [
                 ("function isSelected(text) {", "function isSelected(value) {"),

@@ -227,6 +227,9 @@ func (s *Server) saveNASFileLocked(f *nasFile) error {
 			f.SlotID = newServerID()
 		}
 	}
+	endMut := s.beginUIMutation()
+	committed := false
+	defer func() { endMut(committed) }()
 	if f.Protocol == "" && f.URL == "" && len(f.WebDAV) == 0 && len(f.SMB) == 0 {
 		if err := os.Remove(s.nasConfigPath()); err != nil && !os.IsNotExist(err) {
 			return err
@@ -235,6 +238,7 @@ func (s *Server) saveNASFileLocked(f *nasFile) error {
 		return err
 	}
 	s.forgetServersLocked(old, *f)
+	committed = true
 	return nil
 }
 
@@ -826,21 +830,34 @@ func (s *Server) serversLoginStart(w http.ResponseWriter, k serverKind) {
 	}
 	s.mu.Lock()
 	s.logins[k.scope] = flow
+	snapshot := *flow
 	s.mu.Unlock()
-	respond(w, flow)
+	rev, epoch := s.snapshotUIRevEpoch()
+	snapshot.Rev = rev
+	snapshot.Epoch = epoch
+	s.setUIRevHeaders(w, rev, epoch)
+	respond(w, &snapshot)
 }
 
 // serversLoginStatus: done once the phone page saved a change (its token is spent).
 func (s *Server) serversLoginStatus(w http.ResponseWriter, flow *loginFlow) {
+	endMut := s.beginUIMutation()
 	s.mu.Lock()
+	becameDone := false
 	if flow.Status == "linked" {
 		flow.Status = "done"
+		becameDone = true
 	}
 	if flow.Status != "done" && time.Now().After(flow.expires) {
 		flow.Status = "expired"
 	}
 	snapshot := *flow
 	s.mu.Unlock()
+	endMut(becameDone)
+	rev, epoch := s.snapshotUIRevEpoch()
+	snapshot.Rev = rev
+	snapshot.Epoch = epoch
+	s.setUIRevHeaders(w, rev, epoch)
 	respond(w, &snapshot)
 }
 
@@ -857,9 +874,11 @@ func (s *Server) serversPhonePost(w http.ResponseWriter, r *http.Request, flow *
 		phoneMessage(w, r, flow, tr(lang, key), "")
 		return
 	}
+	endMut := s.beginUIMutation()
 	s.mu.Lock()
 	flow.Status, flow.token = "linked", ""
 	s.mu.Unlock()
+	endMut(true)
 	phoneMessage(w, r, nil, tr(lang, "wdSaved"), tr(lang, "wdSavedHint"))
 }
 

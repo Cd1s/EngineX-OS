@@ -117,7 +117,60 @@ func boardCapabilities(board string) uiCapabilities {
 	}
 }
 
-const defaultUIDir = "/data/enginex/ui"
+const (
+	defaultUIDir           = "/data/enginex/ui"
+	maxTrackedWriteClients = 64
+)
+
+// writeSeqTracker enforces monotonic per-client write ordering under the caller's write lock,
+// preventing a delayed or timed-out POST from overwriting a newer committed setting.
+type writeSeqTracker struct {
+	seqs  map[string]int64
+	order []string
+}
+
+func parseClientWriteSeq(r *http.Request) (clientID string, seq int64, ok bool) {
+	clientID = strings.TrimSpace(r.Header.Get("X-UI-Client-Id"))
+	raw := strings.TrimSpace(r.Header.Get("X-UI-Write-Seq"))
+	if clientID == "" || raw == "" || len(clientID) > 64 {
+		return "", 0, false
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n <= 0 {
+		return "", 0, false
+	}
+	return clientID, n, true
+}
+
+func (t *writeSeqTracker) stale(clientID string, seq int64) bool {
+	if clientID == "" || seq <= 0 || t.seqs == nil {
+		return false
+	}
+	last, ok := t.seqs[clientID]
+	return ok && seq <= last
+}
+
+func (t *writeSeqTracker) record(clientID string, seq int64) {
+	if clientID == "" || seq <= 0 {
+		return
+	}
+	if t.seqs == nil {
+		t.seqs = make(map[string]int64)
+	}
+	if last, ok := t.seqs[clientID]; ok {
+		if seq > last {
+			t.seqs[clientID] = seq
+		}
+		return
+	}
+	if len(t.order) >= maxTrackedWriteClients {
+		evict := t.order[0]
+		t.order = t.order[1:]
+		delete(t.seqs, evict)
+	}
+	t.order = append(t.order, clientID)
+	t.seqs[clientID] = seq
+}
 
 var (
 	uiLanguages      = []string{"en", "zh-Hans", "zh-Hant", "es"}
@@ -313,6 +366,8 @@ type uiSettings struct {
 	// carries over; an empty source is not put on every deck).
 	WebDAVSwitch string `json:"-"`
 	NASSwitch    string `json:"-"`
+	Rev          int64  `json:"rev,omitempty"`
+	Epoch        string `json:"epoch,omitempty"`
 }
 
 // uiFourDeckRoles are the decks a player plays in the 4-deck layout (#49/#160), RCA A then B.
@@ -656,10 +711,12 @@ func parseUISources(val string) ([]string, error) {
 }
 
 func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
+	endMut := s.beginUIMutation()
 	defer func() {
 		if err == nil {
 			s.applyShadowFlags(v)
 		}
+		endMut(err == nil)
 	}()
 	was := false
 	if s.prolinkExport != nil && (v.ProlinkShare != s.loadUI().ProlinkShare || len(exportRequested) > 0 && exportRequested[0]) {
@@ -1023,49 +1080,69 @@ func (s *Server) isLegacy504Pack() bool {
 }
 
 func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
-	s.uiMu.Lock()
-	v := s.loadUI()
-	nasReady := s.nasAvailableLocked()
-	nf := s.loadNASFileLocked()
-	v.WebDAV, v.NAS = serverViews(kindWebDAV, nf), serverViews(kindNAS, nf)
-	v.WebDAVOn, v.NASOn = serversOn(kindWebDAV, v, nf), serversOn(kindNAS, v, nf)
-	// Every enabled server of a kind that is on is its own entry in Sources (the
-	// slot's SMB server is "nas", added below as before).
-	var serverScopes []string
-	for _, k := range serverKinds {
-		if !serversOn(k, v, nf) {
-			continue
-		}
-		for _, e := range serverEntries(k, nf) {
-			if e.qualified() && nasConfigReady(e.cfg) {
-				serverScopes = append(serverScopes, e.Scope())
+	var (
+		v            uiSettings
+		nasReady     bool
+		serverScopes []string
+		relay        relayConfigStatus
+		tunnelStatus TunnelStatus
+	)
+	s.readUISnapshot(func(rev int64, epoch string) {
+		s.uiMu.Lock()
+		v = s.loadUI()
+		nasReady = s.nasAvailableLocked()
+		nf := s.loadNASFileLocked()
+		v.WebDAV, v.NAS = serverViews(kindWebDAV, nf), serverViews(kindNAS, nf)
+		v.WebDAVOn, v.NASOn = serversOn(kindWebDAV, v, nf), serversOn(kindNAS, v, nf)
+		// Every enabled server of a kind that is on is its own entry in Sources (the
+		// slot's SMB server is "nas", added below as before).
+		serverScopes = nil
+		for _, k := range serverKinds {
+			if !serversOn(k, v, nf) {
+				continue
+			}
+			for _, e := range serverEntries(k, nf) {
+				if e.qualified() && nasConfigReady(e.cfg) {
+					serverScopes = append(serverScopes, e.Scope())
+				}
 			}
 		}
-	}
-	v.FXSelectorAvailable = s.fxSelectorAvailable()
-	v.ColorFXAvailable = s.colorFXAvailable()
-	// pioneer_fx is the channel knobs' style now; only a PX board without them drops it.
-	if v.FXSelectorAvailable && !v.ColorFXAvailable {
-		if err := s.migratePioneerFX(); err != nil {
-			log.Printf("FX selector settings migration: %v", err)
+		v.FXSelectorAvailable = s.fxSelectorAvailable()
+		v.ColorFXAvailable = s.colorFXAvailable()
+		// pioneer_fx is the channel knobs' style now; only a PX board without them drops it.
+		if v.FXSelectorAvailable && !v.ColorFXAvailable {
+			if err := s.migratePioneerFX(); err != nil {
+				log.Printf("FX selector settings migration: %v", err)
+			}
+			v.PioneerFx = "off"
 		}
-		v.PioneerFx = "off"
-	}
-	s.uiMu.Unlock()
-	v.TidalLoggedIn = s.tidal != nil && s.tidal.hasRealAuth()
-	v.TidalSynthetic = s.tidal != nil && s.tidal.isSyntheticAccountOnly()
-	v.BroadcastEnabled = s.BroadcastEnabled()
+		v.TimeZone = s.loadSavedTimeZoneLocked()
+		s.uiMu.Unlock()
+		v.TidalLoggedIn = s.tidal != nil && s.tidal.hasRealAuth()
+		v.TidalSynthetic = s.tidal != nil && s.tidal.isSyntheticAccountOnly()
+		v.BroadcastEnabled = s.BroadcastEnabled()
+		v.LoggedIn = []string{}
+		if s.tidal != nil {
+			for _, session := range s.tidal.sources() {
+				if !session.Guest && ready(session.p) && !slices.Contains(v.LoggedIn, session.Provider) {
+					v.LoggedIn = append(v.LoggedIn, session.Provider)
+				}
+			}
+		}
+		if !slices.Contains(v.LoggedIn, "deezer") && s.deezerARLReady() {
+			v.LoggedIn = append(v.LoggedIn, "deezer")
+		}
+		relay = s.relayStatusView()
+		v.RelayURL, v.DeemixPasswordSet = relay.RelayURL, relay.PasswordSet
+		v.ProlinkExportActive = s.prolinkExport != nil && s.prolinkExport.Status().Enabled
+		if r.URL.Path == "/v1/enginex/ui" {
+			tunnelStatus = s.TunnelManager().Status("")
+		}
+		v.Rev = rev
+		v.Epoch = epoch
+	})
 	if ver := s.installedVersion(); ver != "" && ver != "dev" {
 		v.Version = ver
-	}
-	v.LoggedIn = []string{}
-	for _, session := range s.tidal.sources() {
-		if !session.Guest && ready(session.p) && !slices.Contains(v.LoggedIn, session.Provider) {
-			v.LoggedIn = append(v.LoggedIn, session.Provider)
-		}
-	}
-	if !slices.Contains(v.LoggedIn, "deezer") && s.deezerARLReady() {
-		v.LoggedIn = append(v.LoggedIn, "deezer")
 	}
 	name := ""
 	if host := s.rekordboxHost(); host != nil { // not saved: the source is there while the computer is
@@ -1084,9 +1161,6 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	v.Sources = append(slices.Clone(v.Sources), serverScopes...)
 	v.LoggedIn = append(v.LoggedIn, serverScopes...)
-	relay := s.relayStatusView()
-	v.RelayURL, v.DeemixPasswordSet = relay.RelayURL, relay.PasswordSet
-	v.ProlinkExportActive = s.prolinkExport != nil && s.prolinkExport.Status().Enabled
 	board := imagePrefix(deviceCompatible())
 	v.Board = board
 	v.BuildTag = currentBuildTag()
@@ -1104,7 +1178,6 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	v.SdHighSpeedPending = s.sdHighSpeedPending(v.SdHighSpeed)
 	v.FourDeckRoleActive = s.activeRole(v)
-	v.TimeZone = s.savedTimeZone()
 	now := time.Now()
 	v.DeckClock = s.deckClockWanted(now)
 	if v.DeckClock {
@@ -1147,18 +1220,20 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 			// ShadowPausedFollow: the running hook moves a paused shadow deck's line;
 			// always sent (also false) so a running UI clears stale true state.
 			ShadowPausedFollow bool `json:"shadowPausedFollow"`
-		}{v, s.cfg.AccessToken, consoleLink, s.TunnelManager().Status(""), relay.LANStems, featuresOff, pausedFollow})
+		}{v, s.cfg.AccessToken, consoleLink, tunnelStatus, relay.LANStems, featuresOff, pausedFollow})
 		if err != nil {
-			fail(w, http.StatusInternalServerError, err)
+			s.failUI(w, http.StatusInternalServerError, err)
 			return
 		}
 		// The Engine UI polls this every 3 s; an unchanged digest spares it the
 		// JSON.parse and ~40 property writes (V4 garbage on the GUI thread).
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-UI-Digest", strconv.FormatUint(fnvSum(string(body)), 16))
+		s.setUIRevHeaders(w, v.Rev, v.Epoch)
 		w.Write(append(body, '\n'))
 		return
 	}
+	s.setUIRevHeaders(w, v.Rev, v.Epoch)
 	respond(w, v)
 }
 
@@ -1184,7 +1259,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		dec := json.NewDecoder(r.Body)
 		// Exactly one value: anything but white space after it is a bad request too.
 		if err := dec.Decode(&body); err != nil || dec.Decode(new(any)) != io.EOF {
-			fail(w, http.StatusBadRequest, errors.New("invalid settings JSON"))
+			s.failUI(w, http.StatusBadRequest, errors.New("invalid settings JSON"))
 			return
 		}
 		for k, v := range body {
@@ -1204,25 +1279,35 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	// The switch belongs to the deck: not from the LAN console API. Tunnels
 	// never reach /v1 (the gateway refuses relayed requests, ForwardHandler).
 	if (q.Has("remoteLoad") || q.Has("remote_load")) && strings.HasPrefix(r.URL.Path, "/api/") {
-		fail(w, 403, errors.New("remoteLoad can only be changed on the deck"))
+		s.failUI(w, 403, errors.New("remoteLoad can only be changed on the deck"))
 		return
 	}
 	if q.Has("relayUrl") && !validRelayURL(q.Get("relayUrl")) {
-		fail(w, 400, errInvalidRelayURL)
+		s.failUI(w, 400, errInvalidRelayURL)
 		return
 	}
 	if q.Has("scope") {
 		want := q.Get("scope")
 		if _, _, server := serverScopeOf(want); !server && !slices.Contains(uiScopes, want) {
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		if !s.scopeLoggedIn(want) {
-			fail(w, http.StatusConflict, errors.New("source is not logged in"))
+			s.failUI(w, http.StatusConflict, errors.New("source is not logged in"))
 			return
 		}
 	}
+	clientID, writeSeq, hasWriteSeq := parseClientWriteSeq(r)
 	s.uiMu.Lock()
+	if r.Context().Err() != nil {
+		s.uiMu.Unlock()
+		return
+	}
+	if hasWriteSeq && s.uiWriteSeq.stale(clientID, writeSeq) {
+		s.uiMu.Unlock()
+		s.failUI(w, http.StatusConflict, errors.New("stale write sequence"))
+		return
+	}
 	v := s.loadUI()
 	prevShadowMode := v.ShadowMode
 	prevConsoleHTTPS := v.ConsoleHTTPS
@@ -1232,7 +1317,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if bad("spotifySource", q.Get("spotifySource"), uiSpotifySources) || bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || (bad("scope", q.Get("scope"), uiScopes) && !isServerScope(q.Get("scope"))) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) || bad("fxTimeMode", q.Get("fxTimeMode"), uiFxTimeModes) || bad("rbLibraryView", q.Get("rbLibraryView"), uiRbLibraryViews) {
 		s.uiMu.Unlock()
-		fail(w, 400, errors.New("invalid setting"))
+		s.failUI(w, 400, errors.New("invalid setting"))
 		return
 	}
 	if q.Has("consoleHttps") || q.Has("console_https") {
@@ -1243,7 +1328,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(param)
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.ConsoleHTTPS = b
@@ -1256,7 +1341,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(param)
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.EngineLighting = b
@@ -1271,7 +1356,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("verboseLog"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.VerboseLog = b
@@ -1280,7 +1365,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("fourDeckWaveform"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.FourDeckWaveform = b
@@ -1293,7 +1378,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("consoleLineView"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.ConsoleLineView = b && consoleLineBoards[imagePrefix(deviceCompatible())]
@@ -1302,7 +1387,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("consoleDecks"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.ConsoleDecks = b && v.FourDeckWaveform && playerBoards[imagePrefix(deviceCompatible())]
@@ -1311,7 +1396,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("shareDecks"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.ShareDecks = b && playerBoards[imagePrefix(deviceCompatible())]
@@ -1320,7 +1405,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("pairedView"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.PairedView = b
@@ -1332,7 +1417,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("prolinkWaveform"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.ProlinkWaveform = b
@@ -1341,7 +1426,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("upfaderEcho"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.UpfaderEcho = b
@@ -1350,7 +1435,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("crossfaderReverse"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.CrossfaderReverse = b
@@ -1359,7 +1444,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("cueCountdown"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.CueCountdown = b
@@ -1372,7 +1457,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		n, err := strconv.Atoi(strings.TrimSpace(param))
 		if err != nil || (n != 1 && n != 2) {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.BpmDecimals = n
@@ -1381,7 +1466,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("browserDualColumn"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.BrowserDualColumn = b
@@ -1394,7 +1479,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(param)
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.TracklistWaveform = b
@@ -1403,7 +1488,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("swapLoopOrder"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.SwapLoopOrder = b
@@ -1412,7 +1497,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("stemsEqMode"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.StemsEqMode = b
@@ -1421,7 +1506,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("beatJumpPads"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.BeatJumpPads = b
@@ -1430,7 +1515,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("pitchBendBeatJump"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.PitchBendBeatJump = b
@@ -1439,7 +1524,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("restoreBpmOnUnsync"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.RestoreBpmOnUnsync = b
@@ -1453,7 +1538,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		fx, ok := parseMixstreamFx(q.Get("mixstreamFx"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.MixstreamFx = fx
@@ -1464,7 +1549,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			fx := strings.TrimSpace(q.Get(key))
 			if !slices.Contains(uiMixstreamFxChoices, fx) {
 				s.uiMu.Unlock()
-				fail(w, 400, errors.New("invalid setting"))
+				s.failUI(w, 400, errors.New("invalid setting"))
 				return
 			}
 			v.MixstreamFx[i] = fx
@@ -1475,7 +1560,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("jogInvertLeft"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		if jogSupported {
@@ -1488,7 +1573,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("jogInvertRight"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		if jogSupported {
@@ -1505,7 +1590,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(param)
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.SdHighSpeed = b
@@ -1514,7 +1599,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		n, err := strconv.Atoi(q.Get("syncGuardPct"))
 		if err != nil || !slices.Contains(uiSyncGuardPcts, n) {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.SyncGuardPct = n
@@ -1523,7 +1608,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		n, err := strconv.Atoi(q.Get("ledBrightness"))
 		if err != nil || n < 20 || n > 100 {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.LedBrightness = n
@@ -1532,7 +1617,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		n, err := strconv.Atoi(q.Get("uiScale"))
 		if err != nil || !slices.Contains(uiUIScales, n) {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.UIScale = n
@@ -1553,7 +1638,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		n, err := uiFxTimeInteger(q.Get("fxTimeMs"))
 		if err != nil || n < 10 || n > 4000 {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.FxTimeMs = int(n)
@@ -1566,7 +1651,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		b, ok := parseBoolParam(q.Get("broadcast"))
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		hasBroadcast = true
@@ -1594,7 +1679,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		f, err := strconv.ParseFloat(q.Get("playhead"), 64)
 		if err != nil || !validPlayhead(f) {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.Playhead = f
@@ -1603,7 +1688,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		on := q.Get("autoAnalyze")
 		if on != "0" && on != "1" {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.AutoAnalyze = on == "1"
@@ -1612,7 +1697,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		on := q.Get("masterLimiter")
 		if on != "0" && on != "1" {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.MasterLimiter = on == "1"
@@ -1621,7 +1706,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		on := q.Get("autoGain")
 		if on != "0" && on != "1" {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.AutoGain = on == "1"
@@ -1634,7 +1719,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		on, ok := parseBoolParam(raw)
 		if !ok {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		board := imagePrefix(deviceCompatible())
@@ -1643,7 +1728,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	if q.Has("rekordboxShare") {
 		if !validRekordboxShare(q.Get("rekordboxShare")) {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.RekordboxShare = strings.TrimSpace(q.Get("rekordboxShare"))
@@ -1652,7 +1737,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		on := q.Get("omniSource")
 		if on != "0" && on != "1" {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.OmniSource = on == "1"
@@ -1664,7 +1749,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		if on != "0" && on != "1" {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.RemoteLoad = on == "1"
@@ -1673,7 +1758,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		on := q.Get("webdav")
 		if on != "0" && on != "1" {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.WebDAVSwitch = on
@@ -1685,7 +1770,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		on := q.Get("nas")
 		if on != "0" && on != "1" {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.NASSwitch = on
@@ -1697,7 +1782,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		on := q.Get("prolinkShare")
 		if on != "0" && on != "1" {
 			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
+			s.failUI(w, 400, errors.New("invalid setting"))
 			return
 		}
 		v.ProlinkShare = on == "1"
@@ -1706,21 +1791,63 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		list, err := parseUISources(q.Get("sources"))
 		if err != nil {
 			s.uiMu.Unlock()
-			fail(w, 400, err)
+			s.failUI(w, 400, err)
 			return
 		}
 		v.Sources = list
+	}
+	var sourceKeys []string
+	for k := range q {
+		if strings.HasPrefix(k, "source_") {
+			sourceKeys = append(sourceKeys, k)
+		}
+	}
+	slices.Sort(sourceKeys)
+	for _, k := range sourceKeys {
+		id := strings.TrimPrefix(k, "source_")
+		if !slices.Contains(uiServices, id) {
+			s.uiMu.Unlock()
+			s.failUI(w, http.StatusBadRequest, errors.New("unknown source: "+id))
+			return
+		}
+		on, ok := parseBoolParam(q.Get(k))
+		if !ok {
+			s.uiMu.Unlock()
+			s.failUI(w, http.StatusBadRequest, errors.New("invalid setting"))
+			return
+		}
+		have := make(map[string]bool, len(v.Sources)+1)
+		for _, src := range v.Sources {
+			have[src] = true
+		}
+		if on {
+			have[id] = true
+		} else {
+			delete(have, id)
+		}
+		next := make([]string, 0, len(have))
+		for _, svc := range uiServices {
+			if have[svc] {
+				next = append(next, svc)
+			}
+		}
+		v.Sources = next
 	}
 	if q.Has("scope") {
 		want := q.Get("scope")
 		if slices.Contains(uiServices, want) && !slices.Contains(v.Sources, want) {
 			s.uiMu.Unlock()
-			fail(w, http.StatusConflict, errors.New("source is disabled"))
+			s.failUI(w, http.StatusConflict, errors.New("source is disabled"))
 			return
 		}
 		v.Scope = want
 	}
+	if r.Context().Err() != nil {
+		s.uiMu.Unlock()
+		return
+	}
 	// Relay settings are written only once every field is known to be valid (#9).
+	endMut := s.beginUIMutation()
 	if q.Has("relayUrl") || q.Has("deemixPassword") {
 		var relay, password *string
 		if q.Has("relayUrl") {
@@ -1730,16 +1857,18 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			password = ptrTo(q.Get("deemixPassword"))
 		}
 		if err := s.updateRelayConfigLocked(relay, password); err != nil {
+			endMut(false)
 			s.uiMu.Unlock()
-			fail(w, 500, errors.New("could not save the relay settings"))
+			s.failUI(w, 500, errors.New("could not save the relay settings"))
 			return
 		}
 	}
 	previousVerbose := s.loadUI().VerboseLog
 	if q.Has("verboseLog") {
 		if err := writeVerboseLog(v.VerboseLog); err != nil {
+			endMut(false)
 			s.uiMu.Unlock()
-			fail(w, 500, errors.New("could not save logging configuration"))
+			s.failUI(w, 500, errors.New("could not save logging configuration"))
 			return
 		}
 	}
@@ -1766,9 +1895,13 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			err = herr
 		}
 	}
+	if err == nil && hasWriteSeq {
+		s.uiWriteSeq.record(clientID, writeSeq)
+	}
+	endMut(false)
 	s.uiMu.Unlock()
 	if err != nil {
-		fail(w, 500, err)
+		s.failUI(w, 500, err)
 		return
 	}
 	if v.SdHighSpeed != prevSdHighSpeed && boardCapabilities(imagePrefix(deviceCompatible())).SDHighSpeed {
@@ -1777,7 +1910,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			v.SdHighSpeed = prevSdHighSpeed
 			_ = s.saveUI(v)
 			s.uiMu.Unlock()
-			fail(w, 500, serr)
+			s.failUI(w, 500, serr)
 			return
 		}
 	}
@@ -1790,14 +1923,14 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasBroadcast {
 		if err := s.SetBroadcastEnabled(bcastOn); err != nil {
-			fail(w, 400, err)
+			s.failUI(w, 400, err)
 			return
 		}
 	}
-	if q.Get("restart") == "1" {
+	if q.Get("restart") == "1" && r.Context().Err() == nil {
 		if err := s.restartEngine(); err != nil {
 			log.Printf("stream-sync: restart Engine: %v", err)
-			fail(w, 500, errors.New("settings saved, but Engine did not restart"))
+			s.failUI(w, 500, errors.New("settings saved, but Engine did not restart"))
 			return
 		}
 	}

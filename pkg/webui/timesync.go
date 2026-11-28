@@ -165,12 +165,16 @@ func (s *Server) saveTimeZoneLocked(raw string) (saved bool, current string, err
 
 func (s *Server) timezoneUpdate(w http.ResponseWriter, raw string) {
 	s.uiMu.Lock()
+	endMut := s.beginUIMutation()
 	saved, cur, err := s.saveTimeZoneLocked(raw)
+	endMut(err == nil && saved)
 	s.uiMu.Unlock()
 	if err != nil {
-		fail(w, http.StatusInternalServerError, err)
+		s.failUI(w, http.StatusInternalServerError, err)
 		return
 	}
+	rev, epoch := s.snapshotUIRevEpoch()
+	s.setUIRevHeaders(w, rev, epoch)
 	respond(w, struct {
 		FXSelectorReady bool   `json:"fxSelectorReady"`
 		TimeZoneSaved   bool   `json:"timezoneSaved"`
