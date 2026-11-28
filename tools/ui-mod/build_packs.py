@@ -4874,6 +4874,7 @@ SERVICES_MAIN = """
 	property var scWebdav: []
 	property var scNasServers: []
 	property bool scServerTyping: false
+	property var scServerDlg: null
 	property string scServerError: ""
 	property string scServerKind: "webdav"
 	property var scServerDraft: ({})
@@ -4923,7 +4924,7 @@ SERVICES_MAIN = """
 	}
 	// Add (no server) or edit a server of a kind on the deck.
 	function scServerEdit(kind, server) {
-		if (!scServerInput) return
+		if (!scServerInput || root.isQuitting) return
 		scServerKind = kind
 		scServerError = ""
 		scServerDraft = server ? {id: server.id, url: server.url || "", from: server.url || "", username: server.username || "", password: "", name: server.name || "", hasPassword: !!server.hasPassword}
@@ -4931,10 +4932,13 @@ SERVICES_MAIN = """
 		scServerStep = 0
 		scServerTyping = true
 		const dlg = root.openDialogComponent(scServerInput)
-		if (dlg && typeof Overlay !== "undefined" && Overlay.overlay) {
-			if (dlg.parent !== Overlay.overlay) dlg.parent = Overlay.overlay
-			if (dlg.z !== ZValues.Modal) dlg.z = ZValues.Modal
-			if (dlg.field && dlg.field.forceActiveFocus) dlg.field.forceActiveFocus()
+		if (dlg) {
+			scServerDlg = dlg
+			if (typeof Overlay !== "undefined" && Overlay.overlay) {
+				if (dlg.parent !== Overlay.overlay) dlg.parent = Overlay.overlay
+				if (dlg.z !== ZValues.Modal) dlg.z = ZValues.Modal
+				if (dlg.field && dlg.field.forceActiveFocus) dlg.field.forceActiveFocus()
+			}
 		}
 	}
 	function scServerNext(text) {
@@ -4944,11 +4948,15 @@ SERVICES_MAIN = """
 		if (scServerStep < scServerSteps.length - 1) {
 			scServerStep++
 			Qt.callLater(function() {
+				if (root.isQuitting || !scServerTyping) { scServerStop(); return }
 				const dlg = root.openDialogComponent(scServerInput)
-				if (dlg && typeof Overlay !== "undefined" && Overlay.overlay) {
-					if (dlg.parent !== Overlay.overlay) dlg.parent = Overlay.overlay
-					if (dlg.z !== ZValues.Modal) dlg.z = ZValues.Modal
-					if (dlg.field && dlg.field.forceActiveFocus) dlg.field.forceActiveFocus()
+				if (dlg) {
+					scServerDlg = dlg
+					if (typeof Overlay !== "undefined" && Overlay.overlay) {
+						if (dlg.parent !== Overlay.overlay) dlg.parent = Overlay.overlay
+						if (dlg.z !== ZValues.Modal) dlg.z = ZValues.Modal
+						if (dlg.field && dlg.field.forceActiveFocus) dlg.field.forceActiveFocus()
+					}
 				}
 			})
 			return
@@ -4956,7 +4964,7 @@ SERVICES_MAIN = """
 		scServerTyping = false
 		scServerSave(scServerKind, {action: d.id ? "edit" : "add", id: d.id, name: d.name, url: d.url, username: d.username, password: d.password})
 	}
-	function scServerStop() { scServerTyping = false }
+	function scServerStop() { scServerTyping = false; scServerDlg = null }
 	function scServerSave(kind, change) {
 		const x = new XMLHttpRequest()
 		x.open("POST", "http://127.0.0.1:8080/v1/enginex/servers/" + kind)
@@ -5753,11 +5761,23 @@ SERVER_INPUT = """	readonly property Component scServerInput: ScMsg.TextInputDia
 		MouseArea { anchors.fill: parent; z: -1 }
 		Connections {
 			target: root
-			function onIsQuittingChanged() { if (root.isQuitting) close() }
+			function onIsQuittingChanged() {
+				if (root.isQuitting) {
+					root.scServerStop()
+					close()
+				}
+			}
 		}
 		onDone: text => { scDone = true; root.scServerNext(text) }
-		Component.onCompleted: root.scServerField(field)
-		Component.onDestruction: if (!scDone) root.scServerStop()
+		Component.onCompleted: {
+			if (root.isQuitting) { close(); return }
+			root.scServerDlg = this
+			root.scServerField(field)
+		}
+		Component.onDestruction: {
+			if (root.scServerDlg === this) root.scServerDlg = null
+			if (!scDone) root.scServerStop()
+		}
 	}
 """
 
@@ -5776,6 +5796,16 @@ LOGIN_DIALOG = """
 			readonly property var service: root.scServices.find(s => s.id === root.scLogin)
 			readonly property bool servers: root.scLogin === "webdav" || root.scLogin === "nas"
 			readonly property var serverList: root.scServersOf(root.scLogin)
+			Connections {
+				target: root
+				function onIsQuittingChanged() {
+					if (root.isQuitting) {
+						root.scServerStop()
+						root.scLogin = ""
+						root.scLoginOpen = ""
+					}
+				}
+			}
 			MouseArea { anchors.fill: parent }
 			Rectangle {
 				anchors.centerIn: parent
@@ -8491,7 +8521,11 @@ def edits(dev: bool):
             # NAS servers typed on the deck; qualified, so no stock name changes meaning.
             *([('import "Items/Base"\n', 'import "Items/Base"\nimport "Items/MessageBoxes" as ScMsg\n'),
                ('    readonly property bool messageBoxOpen: root.foreground.children.some(child => child instanceof DialogBase)\n',
-                '    readonly property bool messageBoxOpen: root.foreground.children.some(child => child instanceof DialogBase) || root.scLogin !== "" || root.scServerTyping\n')] if v53() else []),
+                '    readonly property bool messageBoxOpen: root.foreground.children.some(child => child instanceof DialogBase) || root.scLogin !== "" || root.scServerTyping\n'),
+               ('    function destroyForegroundChildren() {\n',
+                '    function destroyForegroundChildren() {\n        if (root.scServerDlg) { const d = root.scServerDlg; root.scServerDlg = null; d.destroy() }\n        root.scServerStop()\n        root.scLogin = ""\n        root.scLoginOpen = ""\n'),
+               ('    readonly property bool foregroundHasChildren: foreground.children.length > 0\n',
+                '    readonly property bool foregroundHasChildren: foreground.children.length > 0 || root.scLogin !== "" || root.scServerTyping\n')] if v53() else []),
             # The actual main view has finished loading and the stock splash has
             # disappeared. Do not equate resource registration with UI readiness.
             ('objectName: "SplashScreenLoader"', 'objectName: "SplashScreenLoader"' + BOOT_READY),

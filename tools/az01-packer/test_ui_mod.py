@@ -16443,8 +16443,11 @@ assert.strictEqual(scServerTyping, false);
         self.assertIn("parent: Overlay.overlay ? Overlay.overlay : root.foreground", bp.SERVER_INPUT)
         self.assertIn("z: ZValues.Modal", bp.SERVER_INPUT)
         self.assertIn("MouseArea { anchors.fill: parent; z: -1 }", bp.SERVER_INPUT)
-        self.assertIn("function onIsQuittingChanged() { if (root.isQuitting) close() }", bp.SERVER_INPUT)
+        self.assertIn("if (root.isQuitting)", bp.SERVER_INPUT)
+        self.assertIn("root.scServerDlg = this", bp.SERVER_INPUT)
         self.assertIn('root.scLogin !== "" || root.scServerTyping', joined_530)
+        self.assertIn('readonly property bool foregroundHasChildren: foreground.children.length > 0 || root.scLogin !== "" || root.scServerTyping', joined_530)
+        self.assertIn("if (root.scServerDlg)", joined_530)
 
         joined_504 = "\n".join(new for _old, new in edits_504)
         self.assertIn("readonly property Component scServerInput: null", joined_504)
@@ -16461,6 +16464,8 @@ assert.strictEqual(scServerTyping, false);
             finally:
                 bp.ROOT = old_root
             self.assertIn('readonly property bool messageBoxOpen: root.foreground.children.some(child => child instanceof DialogBase) || root.scLogin !== "" || root.scServerTyping', patched)
+            self.assertIn('readonly property bool foregroundHasChildren: foreground.children.length > 0 || root.scLogin !== "" || root.scServerTyping', patched)
+            self.assertIn("if (root.scServerDlg)", patched)
             self.assertIn("parent: Overlay.overlay ? Overlay.overlay : uiContainer", patched)
             self.assertIn("parent: Overlay.overlay ? Overlay.overlay : root.foreground", patched)
 
@@ -16472,7 +16477,9 @@ const foreground = {name: 'foreground'};
 const overlay = {name: 'overlay'};
 globalThis.Overlay = {overlay};
 globalThis.ZValues = {ControlCenter: 3, Modal: 4, Keyboard: 6};
-globalThis.Qt = {callLater(f) { f(); }};
+const queued = [];
+let defer = false;
+globalThis.Qt = {callLater(f) { if (defer) queued.push(f); else f(); }};
 globalThis.TextInput = {Password: 2, Normal: 0};
 const xhrs = [], dialogs = [];
 let nextParent = foreground;
@@ -16488,7 +16495,7 @@ Object.assign(globalThis, {
     scT(s) { return s; },
     scWebdav: [{id: 'w1', name: 'Studio', url: 'https://dav.example/music', username: 'dj', hasPassword: true}],
     scNasServers: [{id: 'n1', name: 'NAS', url: 'smb://nas.example/music', username: 'dj', hasPassword: true}],
-    scServerTyping: false, scServerError: '', scServerKind: 'webdav', scServerDraft: {}, scServerStep: 0,
+    scServerTyping: false, scServerDlg: null, isQuitting: false, scServerError: '', scServerKind: 'webdav', scServerDraft: {}, scServerStep: 0,
     scServerSteps: ['url', 'username', 'password', 'name'], scServerInput: {},
     scCall() {},
     openDialogComponent() {
@@ -16508,6 +16515,7 @@ assert.strictEqual(dialogs[0].parent, overlay);
 assert.strictEqual(dialogs[0].z, ZValues.Modal);
 assert.ok(dialogs[0].z > ZValues.ControlCenter && dialogs[0].z < ZValues.Keyboard);
 assert.strictEqual(dialogs[0].field.focused, true);
+assert.strictEqual(scServerDlg, dialogs[0]);
 nextParent = overlay;
 scServerNext('https://dav.example/music');
 scServerNext('dj');
@@ -16544,6 +16552,22 @@ assert.strictEqual(dialogs[dialogs.length - 1].parent, overlay);
 assert.strictEqual(dialogs[dialogs.length - 1].z, ZValues.Modal);
 scServerStop();
 assert.strictEqual(scServerTyping, false);
+assert.strictEqual(scServerDlg, null);
+
+// Queued Qt.callLater Next never reopens a dialog after shutdown starts (WebDAV & NAS).
+defer = true;
+for (const kind of ['webdav', 'nas']) {
+    isQuitting = false;
+    scServerEdit(kind, null);
+    const countAfterOpen = dialogs.length;
+    scServerNext(kind === 'nas' ? 'smb://x' : 'https://x');
+    assert.strictEqual(queued.length, 1);
+    isQuitting = true;
+    queued.shift()();
+    assert.strictEqual(dialogs.length, countAfterOpen);
+    assert.strictEqual(scServerTyping, false);
+    assert.strictEqual(scServerDlg, null);
+}
 """
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
