@@ -193,7 +193,59 @@ var (
 	uiFxTimeModes         = []string{"beats", "ms"}
 	uiMixstreamFxDefaults = []string{"Echo", "Flanger", "Delay", "Phaser"}
 	uiMixstreamFxChoices  = []string{"Echo", "Flanger", "Delay", "Phaser"}
+	// Stock Search.qml menuRoles order (5.3.0 & 5.0.4). Embedded Engine resets search
+	// constraints to Title + Artist on every start; settings.conf persists custom selections.
+	uiSearchFields        = []string{"song", "artist", "album", "length", "key", "comment", "bpm", "genre", "label", "year", "dateImported", "filename"}
+	uiDefaultSearchFields = []string{"song", "artist"}
 )
+
+func parseSearchFields(val string) ([]string, bool) {
+	trimmed := strings.TrimSpace(val)
+	if trimmed == "" {
+		return slices.Clone(uiDefaultSearchFields), true
+	}
+	seen := make(map[string]bool)
+	for _, part := range strings.Split(trimmed, ",") {
+		p := strings.TrimSpace(part)
+		if p == "" || !slices.Contains(uiSearchFields, p) {
+			return nil, false
+		}
+		seen[p] = true
+	}
+	if len(seen) == 0 {
+		return nil, false
+	}
+	out := make([]string, 0, len(seen))
+	for _, role := range uiSearchFields {
+		if seen[role] {
+			out = append(out, role)
+		}
+	}
+	return out, true
+}
+
+func parseSearchFieldsFile(val string) []string {
+	seen := make(map[string]bool)
+	for _, part := range strings.Split(val, ",") {
+		p := strings.TrimSpace(part)
+		if slices.Contains(uiSearchFields, p) {
+			seen[p] = true
+		}
+	}
+	if len(seen) == 0 {
+		return uiDefaultSearchFields
+	}
+	out := make([]string, 0, len(seen))
+	for _, role := range uiSearchFields {
+		if seen[role] {
+			out = append(out, role)
+		}
+	}
+	if slices.Equal(out, uiDefaultSearchFields) {
+		return uiDefaultSearchFields
+	}
+	return out
+}
 
 func parseMixstreamFx(val string) ([]string, bool) {
 	parts := strings.Split(val, ",")
@@ -308,17 +360,18 @@ type uiSettings struct {
 	DebugTelemetry bool `json:"debugTelemetry"`
 	VerboseLog     bool `json:"verboseLog"`
 
-	StreamSortRole    string `json:"streamSortRole,omitempty"`
-	StreamSortOrder   string `json:"streamSortOrder,omitempty"`
-	BrowserDualColumn bool   `json:"browserDualColumn"`
-	TracklistWaveform bool   `json:"tracklistWaveform"`
-	RbLibraryView     string `json:"rbLibraryView"`
-	CueCountdown      bool   `json:"cueCountdown"`
-	BpmDecimals       int    `json:"bpmDecimals"`
-	SyncGuardPct      int    `json:"syncGuardPct"`
-	BtOut             int    `json:"btOut"` // output pair Bluetooth audio out sends (bt_out=, engine_ui_hook.c; 0 = Master / Layer A), named per model in bluetooth.go
-	SwapLoopOrder     bool   `json:"swapLoopOrder"`
-	LedBrightness     int    `json:"ledBrightness"`
+	StreamSortRole    string   `json:"streamSortRole,omitempty"`
+	StreamSortOrder   string   `json:"streamSortOrder,omitempty"`
+	SearchFields      []string `json:"searchFields"`
+	BrowserDualColumn bool     `json:"browserDualColumn"`
+	TracklistWaveform bool     `json:"tracklistWaveform"`
+	RbLibraryView     string   `json:"rbLibraryView"`
+	CueCountdown      bool     `json:"cueCountdown"`
+	BpmDecimals       int      `json:"bpmDecimals"`
+	SyncGuardPct      int      `json:"syncGuardPct"`
+	BtOut             int      `json:"btOut"` // output pair Bluetooth audio out sends (bt_out=, engine_ui_hook.c; 0 = Master / Layer A), named per model in bluetooth.go
+	SwapLoopOrder     bool     `json:"swapLoopOrder"`
+	LedBrightness     int      `json:"ledBrightness"`
 	// UIScale enlarges or shrinks Engine's whole interface; it takes effect at the next
 	// Engine start, so the Control Center row asks before applying it.
 	UIScale             int      `json:"uiScale"`
@@ -455,7 +508,7 @@ func (s *Server) loadUI() uiSettings {
 	v := uiSettings{
 		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, NeteaseMode: neteaseOfficial, SpotifySource: "auto", GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ShadowMode: "auto", ProlinkWaveform: true,
 		TracklistWaveform: true, RbLibraryView: "folders", CueCountdown: true, BpmDecimals: 2,
-		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
+		StreamSortRole: "default", StreamSortOrder: "asc", SearchFields: uiDefaultSearchFields, LedBrightness: 100, PioneerFx: "off", UIScale: 100,
 		FxTimeMode: "beats", FxTimeMs: 500, MixstreamFx: slices.Clone(uiMixstreamFxDefaults),
 		// BeatJumpPads is off by default on every board, the four players' Shift + LOOP pad mode included (they have
 		// physical Beat Jump buttons): only beat_jump_pads=1 turns it on.
@@ -581,6 +634,8 @@ func (s *Server) loadUI() uiSettings {
 			if slices.Contains(uiStreamSortOrders, val) {
 				v.StreamSortOrder = val
 			}
+		case "search_fields":
+			v.SearchFields = parseSearchFieldsFile(val)
 		case "cue_countdown":
 			v.CueCountdown = val != "0" && !strings.EqualFold(val, "false")
 		case "bpm_decimals":
@@ -814,6 +869,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.StreamSortOrder != "" && v.StreamSortOrder != "asc" {
 		text += "stream_sort_order=" + v.StreamSortOrder + "\n"
+	}
+	if len(v.SearchFields) > 0 && !slices.Equal(v.SearchFields, uiDefaultSearchFields) {
+		text += "search_fields=" + strings.Join(v.SearchFields, ",") + "\n"
 	}
 	if !v.CueCountdown {
 		text += "cue_countdown=0\n"
@@ -1627,6 +1685,19 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Has("streamSortOrder") {
 		v.StreamSortOrder = q.Get("streamSortOrder")
+	}
+	if q.Has("searchFields") || q.Has("search_fields") {
+		param := q.Get("searchFields")
+		if !q.Has("searchFields") {
+			param = q.Get("search_fields")
+		}
+		fields, ok := parseSearchFields(param)
+		if !ok {
+			s.uiMu.Unlock()
+			s.failUI(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.SearchFields = fields
 	}
 	if q.Has("pioneerFx") {
 		v.PioneerFx = q.Get("pioneerFx")

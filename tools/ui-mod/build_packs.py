@@ -4095,6 +4095,97 @@ SERVICES_MAIN = """
 			scCall("playhead=" + p.translator.value)
 		}
 	}
+	readonly property var scSearchFieldOrder: ["song", "artist", "album", "length", "key", "comment", "bpm", "genre", "label", "year", "dateImported", "filename"]
+	property var scSearchFields: ["song", "artist"]
+	property bool scSearchFieldsRestored: false
+	property bool scSearchFieldsRetry: false
+	property real scSearchFieldsRetryAt: 0
+	property int scSearchFieldsVersion: 0
+	property int scResetAllCount: 0
+	readonly property var scResetAllProp: Planck.getProperty("/Client/Preferences/ResetAll")
+	// S23 (#336): stock embedded Engine resets search-filter fields to Title+Artist on every boot.
+	// settings.conf persists them across restarts while leaving /Client/Librarian/SearchAll to
+	// stock PlanckClientState.json. Writes ride E4's single-flight scUiFlush queue (with
+	// X-UI-Client-Id / X-UI-Write-Seq and epoch/rev gating) so rapid or delayed taps never revert.
+	function scNormalizeSearchFields(raw) {
+		const list = Array.isArray(raw) ? raw : (typeof raw === "string" ? raw.split(",") : [])
+		const seen = {}
+		for (let i = 0; i < list.length; i++) {
+			const r = String(list[i] || "").trim()
+			if (r) seen[r] = true
+		}
+		const out = []
+		for (let i = 0; i < scSearchFieldOrder.length; i++) {
+			const r = scSearchFieldOrder[i]
+			if (seen[r]) out.push(r)
+		}
+		return out.length ? out : ["song", "artist"]
+	}
+	function scSearchFieldsWritePending() {
+		const _r = typeof root !== "undefined" && root ? root : null
+		const pat = /(?:^|&)(?:searchFields|search_fields)=/
+		if (typeof scUiSending !== "undefined" && scUiSending && _r && pat.test(_r.scUiSendingQuery || "")) return true
+		if (typeof scUiQueue !== "undefined" && Array.isArray(scUiQueue) && scUiQueue.some(q => q && pat.test(q.query || ""))) return true
+		return false
+	}
+	function scSyncSearchFields(saved) {
+		const sameAsCurrent = Array.isArray(saved) && scSameItems(scSearchFields, saved)
+		if (typeof scSearchFieldsWritePending === "function" && scSearchFieldsWritePending()) return
+		if (scSearchFieldsRetry) {
+			const matches = sameAsCurrent || scSameItems(scSearchFields, scNormalizeSearchFields(saved))
+			if (matches) {
+				scSearchFieldsRetry = false
+			} else if (Date.now() - scSearchFieldsRetryAt >= 3000) {
+				scSearchFieldsRetryAt = Date.now()
+				scCall("searchFields=" + encodeURIComponent(scSearchFields.join(",")))
+			}
+			return
+		}
+		if (sameAsCurrent && scSearchFieldsRestored) return
+		const fields = sameAsCurrent ? scSearchFields : scNormalizeSearchFields(saved)
+		const first = !scSearchFieldsRestored
+		const changed = !sameAsCurrent && !scSameItems(scSearchFields, fields)
+		if (changed) scSearchFields = fields
+		scSearchFieldsRestored = true
+		if (!first && !changed) return
+		const ctrl = typeof Planck !== "undefined" && Planck ? Planck.librarianController : null
+		if (!ctrl || typeof ctrl.searchConstraintRolesList !== "function" || typeof ctrl.setSearchConstraint !== "function") return
+		const rawCur = ctrl.searchConstraintRolesList()
+		if (Array.isArray(rawCur) && scSameItems(rawCur, fields)) return
+		const cur = scNormalizeSearchFields(rawCur)
+		if (!scSameItems(cur, fields)) {
+			ctrl.setSearchConstraint(fields)
+			scSearchFieldsVersion++
+		}
+	}
+	function scSaveSearchFields(raw) {
+		const fields = scNormalizeSearchFields(raw)
+		if (!scSameItems(scSearchFields, fields)) scSearchFields = fields
+		scSearchFieldsRestored = true
+		scSearchFieldsRetry = true
+		scSearchFieldsRetryAt = Date.now()
+		if (typeof scUiDigest !== "undefined") scUiDigest = ""
+		scCall("searchFields=" + encodeURIComponent(fields.join(",")))
+	}
+	function scResetSearchFields() {
+		const ctrl = typeof Planck !== "undefined" && Planck ? Planck.librarianController : null
+		if (ctrl && typeof ctrl.resetSearchConstraintsToDefaults === "function") {
+			ctrl.resetSearchConstraintsToDefaults()
+		}
+		scSaveSearchFields(["song", "artist"])
+		scSearchFieldsVersion++
+	}
+	Connections {
+		target: root.scResetAllProp && root.scResetAllProp.translator ? root.scResetAllProp.translator : null
+		function onStateChanged() {
+			const tr = root.scResetAllProp ? root.scResetAllProp.translator : null
+			if (!tr || !tr.state) return
+			const n = tr.stateTrueCount || 0
+			if (n === root.scResetAllCount) return
+			root.scResetAllCount = n
+			root.scResetSearchFields()
+		}
+	}
 	// On a 4-deck unit this deck's own pair (12 / 24) wins; root.decks is undefined in Engine 5.3.0.
 	function scDeckList() {
 		if (root.scFourDeckRole !== "") return root.scFourDeckRole.split("").map(c => parseInt(c)).filter(d => d >= 1 && d <= 4)
@@ -4861,10 +4952,11 @@ SERVICES_MAIN = """
 				}
 				const hasSources = reply.sources === undefined || authSources
 				const hasLogin = typeof scLoggedIn === "undefined" || authLogin
-				if (!pendingTap && !(_r && _r.scPendingTap) && hasSources && hasLogin && !scopeStripped && !scScopePending && typeof x.getResponseHeader === "function") {
+				const sfRetry = typeof scSearchFieldsRetry !== "undefined" && scSearchFieldsRetry
+				if (!pendingTap && !(_r && _r.scPendingTap) && !sfRetry && hasSources && hasLogin && !scopeStripped && !scScopePending && typeof x.getResponseHeader === "function") {
 					const dig = x.getResponseHeader("X-UI-Digest") || ""
 					if (dig && typeof scUiDigest !== "undefined") { scUiDigest = dig; scUiAppliedAt = Date.now() }
-				} else if (((_r && _r.scPendingTap) || !hasSources || !hasLogin) && typeof scUiDigest !== "undefined") {
+				} else if (((_r && _r.scPendingTap) || sfRetry || !hasSources || !hasLogin) && typeof scUiDigest !== "undefined") {
 					scUiDigest = ""
 				}
 			}
@@ -5026,6 +5118,13 @@ SERVICES_MAIN = """
 			else if (key === "consoleDecks") scShowConsole = scIsPlayerBoard && scFourDeckOn && on
 			else if (key === "shareDecks") scShareDecks = scIsPlayerBoard && on
 			else if (key === "rbLibraryView" && val) scRbLibraryView = val
+			else if (key === "searchFields" || key === "search_fields") {
+				if (typeof scNormalizeSearchFields === "function") {
+					const next = scNormalizeSearchFields(val)
+					if (!scSameItems(scSearchFields, next)) scSearchFields = next
+					scSearchFieldsRestored = true
+				}
+			}
 			else if (key === "jogInvertLeft") { scReverseJogLeft = on; if (typeof scSyncReverseJog === "function") scSyncReverseJog(true) }
 			else if (key === "jogInvertRight") { scReverseJogRight = on; if (typeof scSyncReverseJog === "function") scSyncReverseJog(true) }
 			else if (key === "sources") {
@@ -5284,10 +5383,11 @@ SERVICES_MAIN = """
 						_rf.scPendingTap = ""
 					}
 				}
-				if (!pendingTap && !(_rf && _rf.scPendingTap) && hasSources && hasLogin && !scopeStripped && !scScopePending && typeof x.getResponseHeader === "function") {
+				const sfRetry = typeof scSearchFieldsRetry !== "undefined" && scSearchFieldsRetry
+				if (!pendingTap && !(_rf && _rf.scPendingTap) && !sfRetry && hasSources && hasLogin && !scopeStripped && !scScopePending && typeof x.getResponseHeader === "function") {
 					const dig = x.getResponseHeader("X-UI-Digest") || ""
 					if (dig && typeof scUiDigest !== "undefined") { scUiDigest = dig; scUiAppliedAt = Date.now() }
-				} else if (((_rf && _rf.scPendingTap) || !hasSources || !hasLogin) && typeof scUiDigest !== "undefined") {
+				} else if (((_rf && _rf.scPendingTap) || sfRetry || !hasSources || !hasLogin) && typeof scUiDigest !== "undefined") {
 					scUiDigest = ""
 				}
 			}
@@ -5438,8 +5538,9 @@ SERVICES_MAIN = """
 			if (typeof Planck !== "undefined" && Planck && Planck.librarianController && Planck.librarianController.streamingPlaylistsController)
 				Planck.librarianController.streamingPlaylistsController.invalidateUI()
 		}
-		if (!(_rp && _rp.scPendingTap) && hasSources && hasLogin && !scopeStripped && !scScopePending) { scUiDigest = digest; scUiAppliedAt = now }
-		else if ((_rp && _rp.scPendingTap) || !hasSources || !hasLogin) { scUiDigest = "" }
+		const sfRetry = typeof scSearchFieldsRetry !== "undefined" && scSearchFieldsRetry
+		if (!(_rp && _rp.scPendingTap) && !sfRetry && hasSources && hasLogin && !scopeStripped && !scScopePending) { scUiDigest = digest; scUiAppliedAt = now }
+		else if ((_rp && _rp.scPendingTap) || sfRetry || !hasSources || !hasLogin) { scUiDigest = "" }
 	}
 	function scApply(v) {
 		scUsbPreparing = !!v.usbPreparing
@@ -5489,6 +5590,10 @@ SERVICES_MAIN = """
 		scShadowMode = v.shadowMode || "auto"
 		scRbLibraryView = v.rbLibraryView || "folders"
 		scKeepPlayhead(v.playhead || 0)
+		if (typeof scSyncSearchFields === "function") {
+			if (v && v.searchFields !== undefined) scSyncSearchFields(v.searchFields)
+			else if (v && v.search_fields !== undefined) scSyncSearchFields(v.search_fields)
+		}
 		if (Array.isArray(v.sources) && !scSameItems(scSources, v.sources)) scSources = v.sources
 		if (Array.isArray(v.loggedIn) && !scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
 		scTidalLoggedIn = !!v.tidalLoggedIn
@@ -5620,6 +5725,7 @@ SERVICES_MAIN = """
 		root.scSdHighSpeed = false
 		root.scHifiOutput = false
 		root.scBeatJumpPads = false // off unless beat_jump_pads=1, on the four players too (they have physical Beat Jump buttons)
+		let searchFields = ["song", "artist"]
 		let restoreBpm = false // assigned once below: no Off/On blink on the controller's centre LED
 		for (const line of (text || "").split("\\n")) {
 			const eq = line.indexOf("=")
@@ -5650,10 +5756,15 @@ SERVICES_MAIN = """
 			else if (key === "fx_time_mode" && line.trim().indexOf("fx_time_mode=") === 0) fxMode = line.trim().slice(13) === "ms" ? "ms" : "beats"
 			else if (key === "fx_time_ms" && line.trim().indexOf("fx_time_ms=") === 0) fxMs = scFxMsInteger(line.trim().slice(11))
 			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"
+			else if (key === "search_fields") {
+				const sf = val.split(",").map(s => s.trim()).filter(Boolean)
+				if (sf.length > 0) searchFields = sf
+			}
 		}
 		root.scRestoreBpmOnUnsync = restoreBpm
 		if (typeof scSyncReverseJog === "function") scSyncReverseJog(true)
 		if (typeof scSyncBpmDecimals === "function") scSyncBpmDecimals()
+		if (typeof scSyncSearchFields === "function") scSyncSearchFields(searchFields)
 		scFxMsApply(fxMode, fxMs)
 	}
 	function scSyncBroadcastMeta() {
@@ -12362,6 +12473,149 @@ def legacy_qml_fixes():
             "					})\n"
             "				}\n",
         )],
+        # S23 (#336): stock embedded Engine resets SearchMenuDialog field checkboxes to Title+Artist
+        # on every boot. Sync from Engine without saving on mount, persist user edits via
+        # root.scSaveSearchFields, and re-sync whenever EmbeddedMain restores saved fields or ResetAll runs.
+        v + "BrowseView/Components/Search.qml": [
+            (
+                "    ActionTranslatorStateChangeNotifier {\n"
+                "        prop: Planck.getProperty(\"/Client/Preferences/ResetAll\")\n"
+                "        enabled: prop && prop.translator.state\n"
+                "        onChanged: {\n"
+                "            Planck.librarianController.resetSearchConstraintsToDefaults()\n"
+                "        }\n"
+                "    }\n" if v53() else
+                "\tActionTranslatorStateChangeNotifier {\n"
+                "\t\tprop: Planck.getProperty(\"/Client/Preferences/ResetAll\")\n"
+                "\t\tenabled: prop && prop.translator.state\n"
+                "\t\tonChanged: {\n"
+                "\t\t\tPlanck.librarianController.resetSearchConstraintsToDefaults()\n"
+                "\t\t}\n"
+                "\t}\n",
+                "    property bool scSyncingSearchFields: false\n"
+                "    function scSyncFromEngine() {\n"
+                "        scSyncingSearchFields = true\n"
+                "        try {\n"
+                "            var currentSearchConstraints = Planck.librarianController.searchConstraintRolesList()\n"
+                "            var currentSearchConstraintsObj = ({})\n"
+                "            for (var roleIndex = 0; roleIndex < currentSearchConstraints.length; ++roleIndex) {\n"
+                "                currentSearchConstraintsObj[currentSearchConstraints[roleIndex]] = true\n"
+                "            }\n"
+                "            searchConstraints = currentSearchConstraintsObj\n"
+                "            if (dialog) {\n"
+                "                dialog.searchConstraint = searchConstraints\n"
+                "            }\n"
+                "        } finally {\n"
+                "            scSyncingSearchFields = false\n"
+                "        }\n"
+                "    }\n\n"
+                "    Connections {\n"
+                "        target: typeof root !== \"undefined\" ? root : null\n"
+                "        ignoreUnknownSignals: true\n"
+                "        function onScSearchFieldsVersionChanged() {\n"
+                "            search.scSyncFromEngine()\n"
+                "        }\n"
+                "    }\n\n"
+                "    ActionTranslatorStateChangeNotifier {\n"
+                "        prop: Planck.getProperty(\"/Client/Preferences/ResetAll\")\n"
+                "        enabled: prop && prop.translator.state\n"
+                "        onChanged: {\n"
+                "            Planck.librarianController.resetSearchConstraintsToDefaults()\n"
+                "            search.scSyncFromEngine()\n"
+                "            if (typeof root !== \"undefined\" && root && root.scSaveSearchFields && (typeof root.scSameItems !== \"function\" || !root.scSameItems(root.scSearchFields, [\"song\", \"artist\"]))) {\n"
+                "                root.scSaveSearchFields([\"song\", \"artist\"])\n"
+                "            }\n"
+                "        }\n"
+                "    }\n" if v53() else
+                "\tproperty bool scSyncingSearchFields: false\n"
+                "\tfunction scSyncFromEngine() {\n"
+                "\t\tscSyncingSearchFields = true\n"
+                "\t\ttry {\n"
+                "\t\t\tvar currentSearchConstraints = Planck.librarianController.searchConstraintRolesList()\n"
+                "\t\t\tvar currentSearchConstraintsObj = ({})\n"
+                "\t\t\tfor (var roleIndex = 0; roleIndex < currentSearchConstraints.length; ++roleIndex) {\n"
+                "\t\t\t\tcurrentSearchConstraintsObj[currentSearchConstraints[roleIndex]] = true\n"
+                "\t\t\t}\n"
+                "\t\t\tsearchConstraints = currentSearchConstraintsObj\n"
+                "\t\t\tif (dialog) {\n"
+                "\t\t\t\tdialog.searchConstraint = searchConstraints\n"
+                "\t\t\t}\n"
+                "\t\t} finally {\n"
+                "\t\t\tscSyncingSearchFields = false\n"
+                "\t\t}\n"
+                "\t}\n\n"
+                "\tConnections {\n"
+                "\t\ttarget: typeof root !== \"undefined\" ? root : null\n"
+                "\t\tignoreUnknownSignals: true\n"
+                "\t\tfunction onScSearchFieldsVersionChanged() {\n"
+                "\t\t\tsearch.scSyncFromEngine()\n"
+                "\t\t}\n"
+                "\t}\n\n"
+                "\tActionTranslatorStateChangeNotifier {\n"
+                "\t\tprop: Planck.getProperty(\"/Client/Preferences/ResetAll\")\n"
+                "\t\tenabled: prop && prop.translator.state\n"
+                "\t\tonChanged: {\n"
+                "\t\t\tPlanck.librarianController.resetSearchConstraintsToDefaults()\n"
+                "\t\t\tsearch.scSyncFromEngine()\n"
+                "\t\t\tif (typeof root !== \"undefined\" && root && root.scSaveSearchFields && (typeof root.scSameItems !== \"function\" || !root.scSameItems(root.scSearchFields, [\"song\", \"artist\"]))) {\n"
+                "\t\t\t\troot.scSaveSearchFields([\"song\", \"artist\"])\n"
+                "\t\t\t}\n"
+                "\t\t}\n"
+                "\t}\n",
+            ),
+            (
+                "            dialog.searchConstraintChanged.connect(function () {\n"
+                "                searchConstraints = dialog.searchConstraint\n"
+                "            })\n" if v53() else
+                "\t\t\tdialog.searchConstraintChanged.connect(function() {\n"
+                "\t\t\t\tsearchConstraints = dialog.searchConstraint\n"
+                "\t\t\t})\n",
+                "            dialog.searchConstraintChanged.connect(function () {\n"
+                "                if (search.scSyncingSearchFields) return\n"
+                "                searchConstraints = dialog.searchConstraint\n"
+                "                if (typeof root !== \"undefined\" && root && root.scSaveSearchFields) {\n"
+                "                    const constraints = Object.keys(searchConstraints)\n"
+                "                    if (constraints.length > 0) {\n"
+                "                        root.scSaveSearchFields(constraints)\n"
+                "                    }\n"
+                "                }\n"
+                "            })\n" if v53() else
+                "\t\t\tdialog.searchConstraintChanged.connect(function() {\n"
+                "\t\t\t\tif (search.scSyncingSearchFields) return\n"
+                "\t\t\t\tsearchConstraints = dialog.searchConstraint\n"
+                "\t\t\t\tif (typeof root !== \"undefined\" && root && root.scSaveSearchFields) {\n"
+                "\t\t\t\t\tconst constraints = Object.keys(searchConstraints)\n"
+                "\t\t\t\t\tif (constraints.length > 0) {\n"
+                "\t\t\t\t\t\troot.scSaveSearchFields(constraints)\n"
+                "\t\t\t\t\t}\n"
+                "\t\t\t\t}\n"
+                "\t\t\t})\n",
+            ),
+            (
+                "    Component.onCompleted: {\n"
+                "        var currentSearchConstraints = Planck.librarianController.searchConstraintRolesList()\n"
+                "        var currentSearchConstraintsObj = {}\n"
+                "        for (var roleIndex = 0; roleIndex < currentSearchConstraints.length; ++roleIndex) {\n"
+                "            currentSearchConstraintsObj[currentSearchConstraints[roleIndex]] = true\n"
+                "        }\n"
+                "        searchConstraints = currentSearchConstraintsObj\n"
+                "    }\n" if v53() else
+                "\tComponent.onCompleted: {\n"
+                "\t\tvar currentSearchConstraints = Planck.librarianController.searchConstraintRolesList()\n"
+                "\t\tvar currentSearchConstraintsObj = ({})\n"
+                "\t\tfor(var roleIndex = 0; roleIndex < currentSearchConstraints.length; ++roleIndex) {\n"
+                "\t\t\tcurrentSearchConstraintsObj[currentSearchConstraints[roleIndex]] = true\n"
+                "\t\t}\n"
+                "\t\tsearchConstraints = currentSearchConstraintsObj\n"
+                "\t}\n",
+                "    Component.onCompleted: {\n"
+                "        search.scSyncFromEngine()\n"
+                "    }\n" if v53() else
+                "\tComponent.onCompleted: {\n"
+                "\t\tsearch.scSyncFromEngine()\n"
+                "\t}\n",
+            ),
+        ],
         # CF013: after logging out of a cloud drive the Account button still said
         # LOG OUT and could not log back in. Only an explicit loggedIn === false
         # switches it: if the provider type has no such property the stock
