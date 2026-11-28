@@ -590,20 +590,36 @@ var mirrorLibrary = enginedb.MirrorLibrary // a variable for the test of the loo
 // WAL or active rollback journal. An all-zero rollback journal is SQLite's committed PERSIST
 // journal and is safe to replace.
 func checkSQLiteSidecars(db string) error {
-	for _, suffix := range []string{"-journal", "-wal"} {
+	_, err := sqliteSidecars(db)
+	return err
+}
+
+// sidecar is a sidecar entry of a database as a check found it.
+type sidecar struct {
+	path string
+	info os.FileInfo
+}
+
+// sqliteSidecars is checkSQLiteSidecars that also returns the sidecar entries that exist.
+func sqliteSidecars(db string) (seen []sidecar, err error) {
+	for _, suffix := range []string{"-journal", "-wal", "-shm"} {
 		path := db + suffix
 		st, err := os.Stat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return err
+			return nil, err
+		}
+		seen = append(seen, sidecar{path, st})
+		if suffix == "-shm" {
+			continue // the index of a WAL: it holds no work of its own
 		}
 		active := st.Size() > 0
 		if suffix == "-journal" && active {
 			f, e := os.Open(path)
 			if e != nil {
-				return e
+				return nil, e
 			}
 			var header [28]byte
 			_, e = io.ReadFull(f, header[:])
@@ -619,21 +635,40 @@ func checkSQLiteSidecars(db string) error {
 			}
 		}
 		if active {
-			return fmt.Errorf("sqlite sidecar has uncheckpointed work: %s", path)
+			return nil, fmt.Errorf("sqlite sidecar has uncheckpointed work: %s", path)
 		}
 	}
-	return nil
+	return seen, nil
 }
 
-// cleanSQLiteSidecars verifies no sidecar holds uncheckpointed work, then removes stale sidecars
-// that cannot belong to a replacement database. Caller must confirm OpenElsewhere(db) == 0 first.
+// sidecarsChecked, in tests, runs between cleanSQLiteSidecars' check and its removals.
+var sidecarsChecked func(db string)
+
+// cleanSQLiteSidecars verifies no sidecar holds uncheckpointed work, then removes the stale
+// sidecars it checked. Caller holds the volume lock and must confirm OpenElsewhere(db) == 0
+// first. A sidecar that was not there at the check, or is another file or changed since, is
+// the work of whoever opened the database meanwhile: it is never removed, and one that
+// changed stops the caller's replacement.
 func cleanSQLiteSidecars(db string) error {
-	if err := checkSQLiteSidecars(db); err != nil {
+	seen, err := sqliteSidecars(db)
+	if err != nil {
 		return err
 	}
-	for _, suffix := range []string{"-journal", "-wal", "-shm"} {
-		path := db + suffix
-		if err := rbstate.RemoveFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if sidecarsChecked != nil {
+		sidecarsChecked(db)
+	}
+	for _, s := range seen {
+		cur, err := os.Stat(s.path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(s.info, cur) || cur.Size() != s.info.Size() || !cur.ModTime().Equal(s.info.ModTime()) {
+			return fmt.Errorf("sqlite sidecar changed after it was checked: %s", s.path)
+		}
+		if err := rbstate.RemoveFile(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}

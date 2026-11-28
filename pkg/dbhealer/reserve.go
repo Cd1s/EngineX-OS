@@ -36,6 +36,9 @@ var (
 	reserveAfterRename     func(string)
 )
 
+// reserveBeforeSidecarUnlink, in tests, runs between the cleanup's validation and its unlinks.
+var reserveBeforeSidecarUnlink func(string)
+
 // Reserve reports header byte 20 of a plain SQLite file; ok is false for a
 // missing file or anything that is not a SQLite database.
 func Reserve(path string) (reserve byte, ok bool, err error) {
@@ -215,6 +218,14 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 	if err := checkNoPendingJournals(path); err != nil {
 		return false, err
 	}
+	// The volume lock first: every bridge window and job section holds it from its last look
+	// at the library through its rename and snapshot promotion, so neither side can publish
+	// over what the other has just validated. Everything below is checked again under it.
+	unlockVolume, err := lockLibraryVolume(path)
+	if err != nil {
+		return false, fmt.Errorf("lock volume of %s: %w", path, err)
+	}
+	defer unlockVolume()
 	unlockDir, err := rbstate.LockDatabaseDir(filepath.Dir(path), 0)
 	if err != nil {
 		return false, fmt.Errorf("lock %s: %w", filepath.Dir(path), err)
@@ -372,6 +383,19 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 	return true, nil
 }
 
+// lockLibraryVolume takes the lock of the volume whose library path belongs to, the one
+// rbstate.LockVolume gives the bridge: path is a file of <mount>/Engine Library/Database2.
+// A file anywhere else is no volume's library; no bridge publishes there and the directory
+// lock alone applies.
+func lockLibraryVolume(path string) (unlock func(), err error) {
+	dir := filepath.Dir(path)
+	lib := filepath.Dir(dir)
+	if !strings.EqualFold(filepath.Base(dir), "Database2") || !strings.EqualFold(filepath.Base(lib), "Engine Library") {
+		return func() {}, nil
+	}
+	return rbstate.LockVolume(filepath.Dir(lib), 0)
+}
+
 func ensureSameLiveFile(path string, origInfo os.FileInfo) error {
 	cur, err := os.Stat(path)
 	if err != nil {
@@ -384,20 +408,26 @@ func ensureSameLiveFile(path string, origInfo os.FileInfo) error {
 }
 
 func checkSidecarRegular(path, suffix string, checkNonEmpty bool) error {
+	_, err := statSidecar(path, suffix, checkNonEmpty)
+	return err
+}
+
+// statSidecar is checkSidecarRegular that also returns the entry it checked, nil when there is none.
+func statSidecar(path, suffix string, checkNonEmpty bool) (os.FileInfo, error) {
 	lst, err := os.Lstat(path + suffix)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
 	if !lst.Mode().IsRegular() {
-		return fmt.Errorf("%s%s is not a regular file (%s)", path, suffix, lst.Mode())
+		return nil, fmt.Errorf("%s%s is not a regular file (%s)", path, suffix, lst.Mode())
 	}
 	if checkNonEmpty && lst.Size() > 0 {
-		return fmt.Errorf("%s has pending %s; let Engine recover it first", path, suffix)
+		return nil, fmt.Errorf("%s has pending %s; let Engine recover it first", path, suffix)
 	}
-	return nil
+	return lst, nil
 }
 
 func checkNoPendingJournals(path string) error {
@@ -409,26 +439,58 @@ func checkNoPendingJournals(path string) error {
 	return checkSidecarRegular(path, "-shm", false)
 }
 
+// cleanupReserveSidecars removes the original library's stale -shm and empty -wal before the
+// rename. The caller holds the volume lock. It unlinks only an entry it validated: a name
+// that was absent then, or that names another file or holds work now, belongs to whoever
+// made it (the writer of a library put in place meanwhile) and stays where it is.
 func cleanupReserveSidecars(path string, origInfo os.FileInfo) error {
 	// Phase 1: read-only validation of live inode ownership and all sidecars before unlinking anything.
 	if err := ensureSameLiveFile(path, origInfo); err != nil {
 		return err
 	}
-	if err := checkSidecarRegular(path, "-wal", true); err != nil {
+	type sidecar struct {
+		suffix string
+		info   os.FileInfo
+	}
+	var seen []sidecar
+	wal, err := statSidecar(path, "-wal", true)
+	if err != nil {
 		return fmt.Errorf("%s-wal: %w", path, err)
 	}
 	if err := checkSidecarRegular(path, "-journal", true); err != nil {
 		return fmt.Errorf("%s-journal: %w", path, err)
 	}
-	if err := checkSidecarRegular(path, "-shm", false); err != nil {
+	shm, err := statSidecar(path, "-shm", false)
+	if err != nil {
 		return fmt.Errorf("%s-shm: %w", path, err)
 	}
-	// Phase 2: remove only stale regular -shm / 0-byte -wal, then re-verify ownership.
-	if remErr := os.Remove(path + "-shm"); remErr != nil && !errors.Is(remErr, os.ErrNotExist) {
-		return fmt.Errorf("%s-shm: %w", path, remErr)
+	if shm != nil {
+		seen = append(seen, sidecar{"-shm", shm})
 	}
-	if remErr := os.Remove(path + "-wal"); remErr != nil && !errors.Is(remErr, os.ErrNotExist) {
-		return fmt.Errorf("%s-wal: %w", path, remErr)
+	if wal != nil {
+		seen = append(seen, sidecar{"-wal", wal})
+	}
+	if reserveBeforeSidecarUnlink != nil {
+		reserveBeforeSidecarUnlink(path)
+	}
+	// Phase 2: remove only the validated stale -shm / 0-byte -wal, then re-verify ownership.
+	for _, s := range seen {
+		if err := ensureSameLiveFile(path, origInfo); err != nil {
+			return err
+		}
+		cur, err := statSidecar(path, s.suffix, s.suffix == "-wal")
+		if err != nil {
+			return fmt.Errorf("%s%s: %w", path, s.suffix, err)
+		}
+		if cur == nil {
+			continue
+		}
+		if !os.SameFile(s.info, cur) {
+			return fmt.Errorf("%s%s was replaced during reserve rebuild; aborting publication", path, s.suffix)
+		}
+		if remErr := os.Remove(path + s.suffix); remErr != nil && !errors.Is(remErr, os.ErrNotExist) {
+			return fmt.Errorf("%s%s: %w", path, s.suffix, remErr)
+		}
 	}
 	return ensureSameLiveFile(path, origInfo)
 }

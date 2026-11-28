@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -1459,7 +1460,15 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 				headerRelease := make(chan struct{})
 				beforeRenameReached := make(chan struct{})
 				reserveDone := make(chan reserveResult, 1)
+				probeEarly := make(chan reserveResult, 1)
 				normDone := make(chan normResult, 1)
+				// Every wait below also watches its worker's result and this deadline, so a
+				// regression reports its own error instead of hanging (R11 Standards).
+				waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer waitCancel()
+				var releaseOnce sync.Once
+				releaseHeader := func() { releaseOnce.Do(func() { close(headerRelease) }) }
+				defer releaseHeader() // a failed test never leaves the probe paused
 				var overlapArmed atomic.Bool
 				var overlapStarted atomic.Bool
 				var beforeOnce atomic.Bool
@@ -1483,7 +1492,13 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 						r, ok, rerr := Reserve(mPath)
 						reserveDone <- reserveResult{r: r, ok: ok, err: rerr}
 					}()
-					<-headerPaused
+					select {
+					case <-headerPaused:
+					case res := <-reserveDone:
+						// The probe ended without reaching its pause: hand its result on.
+						probeEarly <- res
+					case <-waitCtx.Done():
+					}
 					close(beforeRenameReached)
 				}
 				defer func() { reserveBeforeRename = origBeforeRename }()
@@ -1496,11 +1511,23 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 					fixed, nerr := NormalizeDatabase2Context(context.Background(), dbDir)
 					normDone <- normResult{fixed: fixed, err: nerr}
 				}()
-				<-beforeRenameReached
+				select {
+				case <-beforeRenameReached:
+				case nres := <-normDone:
+					t.Fatalf("normalization returned before its rename hook: fixed=%v err=%v", nres.fixed, nres.err)
+				case <-waitCtx.Done():
+					t.Fatal("normalization did not reach its rename hook")
+				}
+				select {
+				case res := <-probeEarly:
+					t.Fatalf("overlapping POSIX Reserve returned before its pause: r=%d ok=%v err=%v", res.r, res.ok, res.err)
+				case <-waitCtx.Done():
+					t.Fatal("overlapping POSIX Reserve did not reach its pause")
+				case <-headerPaused:
+				}
 
 				owner2, err := sql.Open("sqlite", mPath)
 				if err != nil {
-					close(headerRelease)
 					t.Fatal(err)
 				}
 				owner2.SetMaxOpenConns(1)
@@ -1513,20 +1540,34 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 					if _, execErr := owner2.Exec("BEGIN EXCLUSIVE"); execErr == nil {
 						break
 					} else if !time.Now().Before(lockDeadline) {
-						close(headerRelease)
-						t.Fatalf("owner2 did not acquire BEGIN EXCLUSIVE after EIO rollback: %v", execErr)
+						select {
+						case nres := <-normDone:
+							t.Fatalf("owner2 did not acquire BEGIN EXCLUSIVE after EIO rollback: %v (normalization: fixed=%v err=%v)", execErr, nres.fixed, nres.err)
+						default:
+							t.Fatalf("owner2 did not acquire BEGIN EXCLUSIVE after EIO rollback: %v (normalization still running)", execErr)
+						}
 					}
 					time.Sleep(10 * time.Millisecond)
 				}
 				attemptConcurrentExternalWriteBusy(t, mPath, "posix_before_overlap_release_"+name)
 
 				// Release the overlapping Reserve(mPath) while owner2 holds BEGIN EXCLUSIVE.
-				close(headerRelease)
-				res := <-reserveDone
+				releaseHeader()
+				var res reserveResult
+				select {
+				case res = <-reserveDone:
+				case <-waitCtx.Done():
+					t.Fatal("overlapping POSIX Reserve did not return after its release")
+				}
 				if res.err != nil || !res.ok || res.r != 12 {
 					t.Fatalf("overlapping POSIX Reserve: r=%d ok=%v err=%v", res.r, res.ok, res.err)
 				}
-				nres := <-normDone
+				var nres normResult
+				select {
+				case nres = <-normDone:
+				case <-waitCtx.Done():
+					t.Fatal("normalization did not return after its rename failed")
+				}
 				if !errors.Is(nres.err, syscall.EIO) || len(nres.fixed) != 0 {
 					t.Fatalf("expected EIO rename failure, got fixed=%v err=%v", nres.fixed, nres.err)
 				}
@@ -1559,9 +1600,16 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 		return
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain$", "-test.v")
+	// The child has a deadline: a child that hangs is killed and its output reported.
+	childCtx, childCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer childCancel()
+	cmd := exec.CommandContext(childCtx, os.Args[0], "-test.run=^TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain$", "-test.v")
 	cmd.Env = append(os.Environ(), "ENGINEX_RESERVE_POSIX_DRAIN_TEST=1")
+	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()
+	if childCtx.Err() != nil {
+		t.Fatalf("POSIX drain child passed its deadline: %v\n%s", err, string(out))
+	}
 	if err != nil {
 		t.Fatalf("POSIX drain child failed: %v\n%s", err, string(out))
 	}
