@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -1463,6 +1464,11 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 				var overlapArmed atomic.Bool
 				var overlapStarted atomic.Bool
 				var beforeOnce atomic.Bool
+				var releaseHeaderOnce sync.Once
+				releaseHeader := func() {
+					releaseHeaderOnce.Do(func() { close(headerRelease) })
+				}
+				defer releaseHeader()
 
 				origAfterHeader := reserveAfterHeaderRead
 				reserveAfterHeaderRead = func(p string) {
@@ -1483,7 +1489,13 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 						r, ok, rerr := Reserve(mPath)
 						reserveDone <- reserveResult{r: r, ok: ok, err: rerr}
 					}()
-					<-headerPaused
+					select {
+					case <-headerPaused:
+					case r := <-reserveDone:
+						t.Fatalf("overlapping Reserve exited before pause: r=%d ok=%v err=%v", r.r, r.ok, r.err)
+					case <-time.After(10 * time.Second):
+						t.Fatalf("timed out waiting for overlapping Reserve to pause after header read")
+					}
 					close(beforeRenameReached)
 				}
 				defer func() { reserveBeforeRename = origBeforeRename }()
@@ -1496,11 +1508,19 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 					fixed, nerr := NormalizeDatabase2Context(context.Background(), dbDir)
 					normDone <- normResult{fixed: fixed, err: nerr}
 				}()
-				<-beforeRenameReached
+				select {
+				case <-beforeRenameReached:
+				case nres := <-normDone:
+					releaseHeader()
+					t.Fatalf("NormalizeDatabase2Context exited before rename hook: fixed=%v err=%v", nres.fixed, nres.err)
+				case <-time.After(10 * time.Second):
+					releaseHeader()
+					t.Fatalf("timed out waiting for beforeRenameReached")
+				}
 
 				owner2, err := sql.Open("sqlite", mPath)
 				if err != nil {
-					close(headerRelease)
+					releaseHeader()
 					t.Fatal(err)
 				}
 				owner2.SetMaxOpenConns(1)
@@ -1513,7 +1533,7 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 					if _, execErr := owner2.Exec("BEGIN EXCLUSIVE"); execErr == nil {
 						break
 					} else if !time.Now().Before(lockDeadline) {
-						close(headerRelease)
+						releaseHeader()
 						t.Fatalf("owner2 did not acquire BEGIN EXCLUSIVE after EIO rollback: %v", execErr)
 					}
 					time.Sleep(10 * time.Millisecond)
@@ -1521,12 +1541,22 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 				attemptConcurrentExternalWriteBusy(t, mPath, "posix_before_overlap_release_"+name)
 
 				// Release the overlapping Reserve(mPath) while owner2 holds BEGIN EXCLUSIVE.
-				close(headerRelease)
-				res := <-reserveDone
+				releaseHeader()
+				var res reserveResult
+				select {
+				case res = <-reserveDone:
+				case <-time.After(10 * time.Second):
+					t.Fatalf("timed out waiting for overlapping POSIX Reserve")
+				}
 				if res.err != nil || !res.ok || res.r != 12 {
 					t.Fatalf("overlapping POSIX Reserve: r=%d ok=%v err=%v", res.r, res.ok, res.err)
 				}
-				nres := <-normDone
+				var nres normResult
+				select {
+				case nres = <-normDone:
+				case <-time.After(10 * time.Second):
+					t.Fatalf("timed out waiting for NormalizeDatabase2Context result")
+				}
 				if !errors.Is(nres.err, syscall.EIO) || len(nres.fixed) != 0 {
 					t.Fatalf("expected EIO rename failure, got fixed=%v err=%v", nres.fixed, nres.err)
 				}
@@ -1559,7 +1589,10 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 		return
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain$", "-test.v")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain$", "-test.v")
+	configureIsolatedCommand(cmd)
 	cmd.Env = append(os.Environ(), "ENGINEX_RESERVE_POSIX_DRAIN_TEST=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -2836,5 +2869,91 @@ func TestReserveUnreadableFilePreservesPermissionError(t *testing.T) {
 	}
 	if !bytes.Contains(out, []byte("--- PASS: TestReserveUnreadableFilePreservesPermissionError")) {
 		t.Fatalf("EACCES child did not pass:\n%s", string(out))
+	}
+}
+
+func TestNormalizeReserveSidecarCleanupPreservesPostValidationWALCommit(t *testing.T) {
+	if target := os.Getenv("ENGINEX_RESERVE_POST_VALIDATION_WAL_CHILD"); target != "" {
+		db, err := sql.Open("sqlite", target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.SetMaxOpenConns(1)
+		mustExec(t, db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL")
+		mustExec(t, db, "UPDATE Information SET uuid='post-validation-wal-writer'")
+		mustExec(t, db, "BEGIN IMMEDIATE")
+		// Exit intentionally without db.Close() so the committed WAL frame and -shm remain active on disk.
+		os.Exit(0)
+	}
+
+	cases := []struct {
+		name           string
+		presetSidecars bool
+	}{
+		{name: "delete_mode_absent_sidecars", presetSidecars: false},
+		{name: "wal_mode_present_sidecars_replaced", presetSidecars: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mPath := reserve12Library(t)
+			if tc.presetSidecars {
+				if err := os.WriteFile(mPath+"-wal", nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(mPath+"-shm", []byte("stale-shm"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var hooked atomic.Bool
+			var childErr error
+			var childOut []byte
+			origHook := reserveBeforeSidecarUnlink
+			reserveBeforeSidecarUnlink = func(p string) {
+				if p != mPath || !hooked.CompareAndSwap(false, true) {
+					return
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestNormalizeReserveSidecarCleanupPreservesPostValidationWALCommit$", "-test.v")
+				configureIsolatedCommand(cmd)
+				cmd.Env = append(os.Environ(), "ENGINEX_RESERVE_POST_VALIDATION_WAL_CHILD="+mPath)
+				childOut, childErr = cmd.CombinedOutput()
+			}
+			defer func() { reserveBeforeSidecarUnlink = origHook }()
+
+			fixed, err := NormalizeReserve(mPath)
+			if !hooked.Load() {
+				t.Fatal("reserveBeforeSidecarUnlink hook was not reached")
+			}
+			if childErr != nil {
+				t.Fatalf("post-validation WAL child failed: %v\n%s", childErr, string(childOut))
+			}
+			if err == nil || fixed {
+				t.Fatalf("NormalizeReserve unexpectedly succeeded after post-validation WAL commit: fixed=%v err=%v", fixed, err)
+			}
+
+			walInfo, werr := os.Stat(mPath + "-wal")
+			if werr != nil || walInfo.Size() == 0 {
+				t.Fatalf("expected non-empty preserved -wal after abort, stat=(%v, %v)", walInfo, werr)
+			}
+			if _, serr := os.Stat(mPath + "-shm"); serr != nil {
+				t.Fatalf("expected preserved -shm after abort, err=%v", serr)
+			}
+
+			chk, err := Open(mPath, true)
+			if err != nil {
+				t.Fatalf("open after preserved WAL abort: %v", err)
+			}
+			defer chk.Close()
+			var gotUUID string
+			if qerr := chk.QueryRow("SELECT uuid FROM Information").Scan(&gotUUID); qerr != nil {
+				t.Fatal(qerr)
+			}
+			if gotUUID != "post-validation-wal-writer" {
+				t.Fatalf("Information.uuid = %q, want post-validation-wal-writer (preserved WAL commit)", gotUUID)
+			}
+		})
 	}
 }

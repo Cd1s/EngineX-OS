@@ -1274,3 +1274,167 @@ func TestSwapNextCoordinatesWithReserveNormalize(t *testing.T) {
 		}
 	})
 }
+
+func writeReserve12EmptySkeleton(t *testing.T, livePath string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(livePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seedPath := filepath.Join(t.TempDir(), "skeleton-res12.db")
+	seedDB, err := sql.Open("sqlite", seedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seedDB.Exec("PRAGMA user_version=4194305"); err != nil {
+		seedDB.Close()
+		t.Fatal(err)
+	}
+	if err := seedDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(seedPath)
+	if err != nil || len(raw) != 4096 {
+		t.Fatalf("skeleton seed len=%d err=%v", len(raw), err)
+	}
+	raw[20] = 12
+	raw[105], raw[106] = 0x0f, 0xf4
+	if err := os.WriteFile(livePath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	schemaRaw, err := os.ReadFile(filepath.Join("..", "dbhealer", "testdata", "engine-5.0.4.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := strings.ReplaceAll(string(schemaRaw), "CREATE TABLE sqlite_sequence(name,seq);", "")
+	dst, err := sql.Open("sqlite", livePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst.SetMaxOpenConns(1)
+	if _, err := dst.Exec(schema); err != nil {
+		dst.Close()
+		t.Fatalf("apply skeleton schema: %v", err)
+	}
+	if _, err := dst.Exec("INSERT INTO Information(uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES('first-import-skeleton',3,0,2)"); err != nil {
+		dst.Close()
+		t.Fatalf("insert Information: %v", err)
+	}
+	if err := dst.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if r, ok, rerr := dbhealer.Reserve(livePath); rerr != nil || !ok || r != 12 {
+		t.Fatalf("skeleton reserve = (%d, %v, %v), want (12, true, nil)", r, ok, rerr)
+	}
+}
+
+func TestFirstImportCoordinatesWithReserveNormalize(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("LockDatabaseDir flock coordination is Linux specific")
+	}
+	if target := os.Getenv("ENGINEX_FIRST_IMPORT_NORMALIZE_CHILD"); target != "" {
+		fixed, err := dbhealer.NormalizeMountReserve(target)
+		if err == nil || len(fixed) != 0 {
+			t.Fatalf("expected locked NormalizeMountReserve failure, got fixed=%v err=%v", fixed, err)
+		}
+		if !errors.Is(err, rbstate.ErrLocked) {
+			t.Fatalf("NormalizeMountReserve err=%v, want errors.Is(rbstate.ErrLocked)", err)
+		}
+		return
+	}
+
+	t.Run("paused_first_import_blocks_child_NormalizeMountReserve", func(t *testing.T) {
+		base := t.TempDir()
+		t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+		mount := filepath.Join(base, "stick")
+		testfixture.LargeExport(t, mount, 4)
+		dir := dbDir(mount)
+		live := filepath.Join(dir, "m.db")
+		writeReserve12EmptySkeleton(t, live)
+
+		hookRan := false
+		restoreCut := rbstate.SetCutHooks(func(step string) {
+			if step != "temp "+live || hookRan {
+				return
+			}
+			hookRan = true
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestFirstImportCoordinatesWithReserveNormalize$", "-test.v")
+			cmd.Env = append(os.Environ(), "ENGINEX_FIRST_IMPORT_NORMALIZE_CHILD="+mount)
+			out, cerr := cmd.CombinedOutput()
+			if cerr != nil {
+				t.Fatalf("concurrent child NormalizeMountReserve failed assertion: %v\n%s", cerr, string(out))
+			}
+		}, nil)
+		defer restoreCut()
+
+		if _, err := ConvertAtMount(context.Background(), mount, MountOptions{}); err != nil {
+			t.Fatalf("ConvertAtMount failed: %v", err)
+		}
+		if !hookRan {
+			t.Fatal("temp cut hook was never reached during first-import publication")
+		}
+		if r, ok, rerr := dbhealer.Reserve(live); rerr != nil || !ok || r != 0 {
+			t.Fatalf("published live reserve = (%d, %v, %v), want (0, true, nil)", r, ok, rerr)
+		}
+		lib, err := enginedb.OpenLibraryFile(context.Background(), live, mount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lib.Close()
+		tracks, _, err := lib.Counts(context.Background())
+		if err != nil || tracks != 4 {
+			t.Fatalf("published tracks=%d err=%v, want 4", tracks, err)
+		}
+	})
+
+	t.Run("held_LockDatabaseDir_blocks_first_import", func(t *testing.T) {
+		base := t.TempDir()
+		t.Setenv(rbstate.StageEnv, filepath.Join(base, "stage"))
+		mount := filepath.Join(base, "stick")
+		testfixture.LargeExport(t, mount, 4)
+		dir := dbDir(mount)
+		live := filepath.Join(dir, "m.db")
+		writeReserve12EmptySkeleton(t, live)
+
+		unlockDir, err := rbstate.LockDatabaseDir(dir, 0)
+		if err != nil {
+			t.Fatalf("LockDatabaseDir: %v", err)
+		}
+		lockedUnlocked := false
+		defer func() {
+			if !lockedUnlocked {
+				unlockDir()
+			}
+		}()
+
+		_, cerr := ConvertAtMount(context.Background(), mount, MountOptions{})
+		unlockDir()
+		lockedUnlocked = true
+		if cerr == nil || !errors.Is(cerr, rbstate.ErrLocked) {
+			t.Fatalf("ConvertAtMount while LockDatabaseDir held = %v, want errors.Is(rbstate.ErrLocked)", cerr)
+		}
+		if r, ok, rerr := dbhealer.Reserve(live); rerr != nil || !ok || r != 12 {
+			t.Fatalf("skeleton reserve changed under lock: (%d, %v, %v)", r, ok, rerr)
+		}
+		if _, serr := rbstate.Load(dir); !errors.Is(serr, os.ErrNotExist) {
+			t.Fatalf("rbstate snapshot unexpectedly written while LockDatabaseDir held: %v", serr)
+		}
+
+		if _, err := ConvertAtMount(context.Background(), mount, MountOptions{}); err != nil {
+			t.Fatalf("ConvertAtMount after releasing LockDatabaseDir failed: %v", err)
+		}
+		if r, ok, rerr := dbhealer.Reserve(live); rerr != nil || !ok || r != 0 {
+			t.Fatalf("published reserve after unlock = (%d, %v, %v), want (0, true, nil)", r, ok, rerr)
+		}
+		lib, err := enginedb.OpenLibraryFile(context.Background(), live, mount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lib.Close()
+		tracks, _, err := lib.Counts(context.Background())
+		if err != nil || tracks != 4 {
+			t.Fatalf("published tracks=%d err=%v, want 4", tracks, err)
+		}
+	})
+}

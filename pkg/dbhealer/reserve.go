@@ -26,14 +26,15 @@ func init() {
 }
 
 var (
-	sqliteMagic            = []byte("SQLite format 3\x00")
-	reserveWritable        = writable
-	reserveLink            = os.Link
-	reserveRename          = os.Rename
-	reserveAfterHeaderRead func(string)
-	reserveBeforeCopy      func(string)
-	reserveBeforeRename    func(string)
-	reserveAfterRename     func(string)
+	sqliteMagic                = []byte("SQLite format 3\x00")
+	reserveWritable            = writable
+	reserveLink                = os.Link
+	reserveRename              = os.Rename
+	reserveAfterHeaderRead     func(string)
+	reserveBeforeCopy          func(string)
+	reserveBeforeSidecarUnlink func(string)
+	reserveBeforeRename        func(string)
+	reserveAfterRename         func(string)
 )
 
 // Reserve reports header byte 20 of a plain SQLite file; ok is false for a
@@ -383,30 +384,74 @@ func ensureSameLiveFile(path string, origInfo os.FileInfo) error {
 	return nil
 }
 
-func checkSidecarRegular(path, suffix string, checkNonEmpty bool) error {
+func checkSidecarRegular(path, suffix string, checkNonEmpty bool) (os.FileInfo, error) {
 	lst, err := os.Lstat(path + suffix)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
 	if !lst.Mode().IsRegular() {
-		return fmt.Errorf("%s%s is not a regular file (%s)", path, suffix, lst.Mode())
+		return nil, fmt.Errorf("%s%s is not a regular file (%s)", path, suffix, lst.Mode())
 	}
 	if checkNonEmpty && lst.Size() > 0 {
-		return fmt.Errorf("%s has pending %s; let Engine recover it first", path, suffix)
+		return nil, fmt.Errorf("%s has pending %s; let Engine recover it first", path, suffix)
 	}
-	return nil
+	return lst, nil
 }
 
 func checkNoPendingJournals(path string) error {
 	for _, suffix := range []string{"-wal", "-journal"} {
-		if err := checkSidecarRegular(path, suffix, true); err != nil {
+		if _, err := checkSidecarRegular(path, suffix, true); err != nil {
 			return err
 		}
 	}
-	return checkSidecarRegular(path, "-shm", false)
+	_, err := checkSidecarRegular(path, "-shm", false)
+	return err
+}
+
+func verifyReserveSidecarState(path string, origInfo, walInfo, shmInfo os.FileInfo) error {
+	if err := ensureSameLiveFile(path, origInfo); err != nil {
+		return err
+	}
+	if lst, err := os.Lstat(path + "-journal"); err == nil {
+		return fmt.Errorf("%s-journal appeared after validation (%s); aborting publication", path, lst.Mode())
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%s-journal: %w", path, err)
+	}
+	for _, item := range []struct {
+		suffix string
+		info   os.FileInfo
+		wal    bool
+	}{
+		{suffix: "-wal", info: walInfo, wal: true},
+		{suffix: "-shm", info: shmInfo},
+	} {
+		cur, lerr := os.Lstat(path + item.suffix)
+		if item.info == nil {
+			if lerr == nil {
+				return fmt.Errorf("%s%s appeared after validation (%s); aborting publication", path, item.suffix, cur.Mode())
+			}
+			if !errors.Is(lerr, os.ErrNotExist) {
+				return fmt.Errorf("%s%s: %w", path, item.suffix, lerr)
+			}
+			continue
+		}
+		if lerr != nil {
+			if errors.Is(lerr, os.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("%s%s: %w", path, item.suffix, lerr)
+		}
+		if !os.SameFile(item.info, cur) {
+			return fmt.Errorf("%s%s was replaced after validation; aborting publication", path, item.suffix)
+		}
+		if item.wal && cur.Size() > 0 {
+			return fmt.Errorf("%s has pending -wal; let Engine recover it first", path)
+		}
+	}
+	return nil
 }
 
 func cleanupReserveSidecars(path string, origInfo os.FileInfo) error {
@@ -414,21 +459,45 @@ func cleanupReserveSidecars(path string, origInfo os.FileInfo) error {
 	if err := ensureSameLiveFile(path, origInfo); err != nil {
 		return err
 	}
-	if err := checkSidecarRegular(path, "-wal", true); err != nil {
+	walInfo, err := checkSidecarRegular(path, "-wal", true)
+	if err != nil {
 		return fmt.Errorf("%s-wal: %w", path, err)
 	}
-	if err := checkSidecarRegular(path, "-journal", true); err != nil {
+	if _, err := checkSidecarRegular(path, "-journal", true); err != nil {
 		return fmt.Errorf("%s-journal: %w", path, err)
 	}
-	if err := checkSidecarRegular(path, "-shm", false); err != nil {
+	shmInfo, err := checkSidecarRegular(path, "-shm", false)
+	if err != nil {
 		return fmt.Errorf("%s-shm: %w", path, err)
 	}
-	// Phase 2: remove only stale regular -shm / 0-byte -wal, then re-verify ownership.
-	if remErr := os.Remove(path + "-shm"); remErr != nil && !errors.Is(remErr, os.ErrNotExist) {
-		return fmt.Errorf("%s-shm: %w", path, remErr)
+	if reserveBeforeSidecarUnlink != nil {
+		reserveBeforeSidecarUnlink(path)
 	}
-	if remErr := os.Remove(path + "-wal"); remErr != nil && !errors.Is(remErr, os.ErrNotExist) {
-		return fmt.Errorf("%s-wal: %w", path, remErr)
+	// Phase 2: validate nothing changed post-Phase 1 before unlinking only observed stale sidecars.
+	if err := verifyReserveSidecarState(path, origInfo, walInfo, shmInfo); err != nil {
+		return err
+	}
+	if shmInfo == nil && walInfo == nil {
+		return nil
+	}
+	for _, item := range []struct {
+		suffix  string
+		info    os.FileInfo
+		walInfo os.FileInfo
+		shmInfo os.FileInfo
+	}{
+		{suffix: "-shm", info: shmInfo, walInfo: walInfo, shmInfo: shmInfo},
+		{suffix: "-wal", info: walInfo, walInfo: walInfo},
+	} {
+		if item.info == nil {
+			continue
+		}
+		if err := verifyReserveSidecarState(path, origInfo, item.walInfo, item.shmInfo); err != nil {
+			return err
+		}
+		if remErr := os.Remove(path + item.suffix); remErr != nil && !errors.Is(remErr, os.ErrNotExist) {
+			return fmt.Errorf("%s%s: %w", path, item.suffix, remErr)
+		}
 	}
 	return ensureSameLiveFile(path, origInfo)
 }
