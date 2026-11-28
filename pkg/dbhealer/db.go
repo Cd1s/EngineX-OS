@@ -553,17 +553,39 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 	if !enteredCanceled && errors.Is(ctx.Err(), context.Canceled) {
 		return r, ctx.Err()
 	}
-	if !rw {
-		r, err = InspectMount(mount)
-		if res, ok, _ := Reserve(path); ok && res != 0 {
-			r.Warnings = append(r.Warnings, fmt.Sprintf("m.db page reserve is %d: Engine 5.3.0 cannot ATTACH it; rebuild on writable media", res))
-		}
-		r.Warnings = append(r.Warnings, "read-only media: inspected without repairs or journal writes")
-		return r, err
-	}
 	busyMS := probeBusyTimeoutMS(ctx)
 	checkCtx, cancelProbe := identityProbeContext(ctx, dataOnly)
 	defer cancelProbe()
+	if !rw {
+		r, err = inspectMountContext(checkCtx, mount)
+		if err != nil {
+			r.Healthy = false
+			r.Mount = mount
+			if !isContextStop(checkCtx, err) {
+				if res, ok, rerr := reserveHeaderContext(checkCtx, path); rerr == nil && ok && res != 0 {
+					r.Warnings = append(r.Warnings, fmt.Sprintf("m.db page reserve is %d: Engine 5.3.0 cannot ATTACH it; rebuild on writable media", res))
+				}
+				r.Warnings = append(r.Warnings, "read-only media: inspected without repairs or journal writes")
+			}
+			return r, err
+		}
+		res, ok, resErr := reserveHeaderContext(checkCtx, path)
+		if resErr != nil {
+			r.Healthy = false
+			r.Mount = mount
+			return r, resErr
+		}
+		if !enteredCanceled && errors.Is(ctx.Err(), context.Canceled) {
+			r.Healthy = false
+			r.Mount = mount
+			return r, ctx.Err()
+		}
+		if ok && res != 0 {
+			r.Warnings = append(r.Warnings, fmt.Sprintf("m.db page reserve is %d: Engine 5.3.0 cannot ATTACH it; rebuild on writable media", res))
+		}
+		r.Warnings = append(r.Warnings, "read-only media: inspected without repairs or journal writes")
+		return r, nil
+	}
 	var db *sql.DB
 	var dbUUID string
 	var needsIdentityRepair bool
@@ -613,7 +635,7 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			return r, ctx.Err()
 		}
 		// Before Engine opens the volume: a nonzero page reserve breaks every ATTACH.
-		if r.ReserveFixed, _, err = normalizeMountDatabase2(ctx, filepath.Dir(path), nil); err != nil {
+		if r.ReserveFixed, _, err = normalizeMountDatabase2(ctx, ctx, filepath.Dir(path), nil); err != nil {
 			r.Healthy = false
 			r.Mount = mount
 			return r, err
@@ -658,7 +680,7 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 			return r, ctx.Err()
 		}
 		if dataOnly && ctx.Err() != nil {
-			if pendingOther, sibErr := anySiblingReserveNonZero(filepath.Dir(path), map[string]bool{path: true}); sibErr != nil {
+			if pendingOther, sibErr := anySiblingReserveNonZero(checkCtx, filepath.Dir(path), map[string]bool{path: true}); sibErr != nil {
 				_ = db.Close()
 				r.Healthy = false
 				r.Mount = mount
@@ -690,7 +712,7 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 		}
 		// Before Engine opens the volume: a nonzero page reserve breaks every ATTACH.
 		var pendingReserve bool
-		if r.ReserveFixed, pendingReserve, err = normalizeMountDatabase2(ctx, filepath.Dir(path), map[string]bool{path: true}); err != nil {
+		if r.ReserveFixed, pendingReserve, err = normalizeMountDatabase2(ctx, checkCtx, filepath.Dir(path), map[string]bool{path: true}); err != nil {
 			if dataOnly && !pendingReserve && onlyContextError(err) {
 				if !enteredCanceled && errors.Is(ctx.Err(), context.Canceled) {
 					_ = db.Close()
@@ -2215,7 +2237,17 @@ func trackPath(mount, path string) (string, bool) {
 // InspectMount returns a JSON-ready integrity report without altering databases,
 // cache state, or sidecars. Pending writable recovery is reported as an error.
 func InspectMount(mount string) (Report, error) {
+	return inspectMountContext(context.Background(), mount)
+}
+
+func inspectMountContext(ctx context.Context, mount string) (Report, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	r := Report{Mount: mount, CheckedAt: time.Now().UTC()}
+	if err := ctx.Err(); err != nil {
+		return r, err
+	}
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	rw, err := writable(filepath.Join(dir, "m.db"))
 	if err != nil {
@@ -2223,28 +2255,33 @@ func InspectMount(mount string) (Report, error) {
 	}
 	r.ReadOnly = !rw
 	for _, name := range []string{"m.db", "hm.db"} {
+		if cerr := ctx.Err(); cerr != nil {
+			return r, cerr
+		}
 		path := filepath.Join(dir, name)
 		if _, e := os.Stat(path); errors.Is(e, os.ErrNotExist) && name == "hm.db" {
 			continue
 		} else if e != nil {
 			return r, e
 		}
-		db, e := Open(path, true)
+		db, e := openContext(ctx, path, true)
 		if e != nil {
 			return r, fmt.Errorf("%s: %w", name, e)
 		}
 		var check string
-		e = db.QueryRow("PRAGMA quick_check").Scan(&check)
+		e = db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&check)
 		if e == nil && check != "ok" {
 			e = fmt.Errorf("integrity: %s", check)
 		}
 		if e == nil {
 			var exists int
-			e = db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='GuardianReanalysis' AND type='table'").Scan(&exists)
+			e = db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE name='GuardianReanalysis' AND type='table'").Scan(&exists)
 			if e == nil && exists != 0 {
 				var pending int
-				e = db.QueryRow("SELECT count(*) FROM GuardianReanalysis").Scan(&pending)
-				r.ReanalysisPending += pending
+				e = db.QueryRowContext(ctx, "SELECT count(*) FROM GuardianReanalysis").Scan(&pending)
+				if e == nil {
+					r.ReanalysisPending += pending
+				}
 			}
 		}
 		closeErr := db.Close()
@@ -2254,6 +2291,9 @@ func InspectMount(mount string) (Report, error) {
 		if closeErr != nil {
 			return r, closeErr
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return r, err
 	}
 	r.Healthy = true
 	return r, nil

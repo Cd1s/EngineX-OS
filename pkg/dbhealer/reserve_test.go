@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1444,35 +1445,72 @@ func TestPOSIXFallbackPreservesNewOwnerLockDuringDelayedDrain(t *testing.T) {
 					reserveLink = func(string, string) error { return syscall.EXDEV }
 					defer func() { reserveLink = origLink }()
 				}
+
+				type reserveResult struct {
+					r   byte
+					ok  bool
+					err error
+				}
+				headerPaused := make(chan struct{})
+				headerRelease := make(chan struct{})
+				reserveDone := make(chan reserveResult, 1)
+				var overlapArmed atomic.Bool
+				var overlapStarted atomic.Bool
+
+				origAfterHeader := reserveAfterHeaderRead
+				reserveAfterHeaderRead = func(p string) {
+					if overlapArmed.Load() && p == mPath && overlapStarted.CompareAndSwap(false, true) {
+						close(headerPaused)
+						<-headerRelease
+					}
+				}
+				defer func() { reserveAfterHeaderRead = origAfterHeader }()
+
+				origBeforeRename := reserveBeforeRename
+				reserveBeforeRename = func(p string) {
+					if p != mPath {
+						return
+					}
+					overlapArmed.Store(true)
+					go func() {
+						r, ok, rerr := Reserve(mPath)
+						reserveDone <- reserveResult{r: r, ok: ok, err: rerr}
+					}()
+					<-headerPaused
+				}
+				defer func() { reserveBeforeRename = origBeforeRename }()
+
 				origRename := reserveRename
 				reserveRename = func(string, string) error { return syscall.EIO }
 				defer func() { reserveRename = origRename }()
 
 				fixed, nerr := NormalizeDatabase2Context(context.Background(), dbDir)
 				if !errors.Is(nerr, syscall.EIO) || len(fixed) != 0 {
+					close(headerRelease)
 					t.Fatalf("expected EIO rename failure, got fixed=%v err=%v", fixed, nerr)
-				}
-				reserveFilesMu.Lock()
-				entries := len(reserveFiles)
-				reserveFilesMu.Unlock()
-				if entries != 0 {
-					t.Fatalf("expected reserveFiles empty in POSIX mode, got %d entries", entries)
 				}
 
 				owner2, err := sql.Open("sqlite", mPath)
 				if err != nil {
+					close(headerRelease)
 					t.Fatal(err)
 				}
 				owner2.SetMaxOpenConns(1)
 				defer owner2.Close()
 				if _, err := owner2.Exec("BEGIN EXCLUSIVE"); err != nil {
+					close(headerRelease)
 					t.Fatal(err)
 				}
-				// Re-check Reserve while second same-process owner holds BEGIN EXCLUSIVE in POSIX mode.
-				if r, ok, rerr := Reserve(mPath); rerr != nil || !ok || r != 12 {
-					t.Fatalf("POSIX Reserve under second owner: r=%d ok=%v err=%v", r, ok, rerr)
+				attemptConcurrentExternalWriteBusy(t, mPath, "posix_before_overlap_release_"+name)
+
+				// Release the overlapping Reserve(mPath) while owner2 holds BEGIN EXCLUSIVE.
+				close(headerRelease)
+				res := <-reserveDone
+				if res.err != nil || !res.ok || res.r != 12 {
+					t.Fatalf("overlapping POSIX Reserve: r=%d ok=%v err=%v", res.r, res.ok, res.err)
 				}
-				attemptConcurrentExternalWriteBusy(t, mPath, "posix_second_owner_"+name)
+
+				attemptConcurrentExternalWriteBusy(t, mPath, "posix_after_overlap_release_"+name)
 				if _, err := owner2.Exec("UPDATE Information SET uuid='second-owner-ok'"); err != nil {
 					t.Fatal(err)
 				}
@@ -1787,4 +1825,616 @@ func TestNormalizeReserveWALSidecarRemovalFailureAbortsPublication(t *testing.T)
 	if _, serr := os.Stat(mPath + ".reserve-rebuild"); !errors.Is(serr, os.ErrNotExist) {
 		t.Fatalf(".reserve-rebuild left after -shm cleanup failure: err=%v", serr)
 	}
+}
+
+func TestNormalizeReserveHeaderReadSafeAcrossFirstPOSIXFallback(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("POSIX fcntl lock fallback test is Linux specific")
+	}
+	if zeroDB := os.Getenv("ENGINEX_RESERVE_FIRST_FALLBACK_DB"); zeroDB != "" {
+		if !sqlite.OFDLockingEnabled() {
+			t.Fatalf("expected OFDLockingEnabled()=true before first SQLite connection")
+		}
+		paused := make(chan struct{})
+		release := make(chan struct{})
+		var pausedOnce atomic.Bool
+
+		origAfter := reserveAfterHeaderRead
+		reserveAfterHeaderRead = func(p string) {
+			if p == zeroDB && pausedOnce.CompareAndSwap(false, true) {
+				close(paused)
+				<-release
+			}
+		}
+		defer func() { reserveAfterHeaderRead = origAfter }()
+
+		type normRes struct {
+			fixed bool
+			err   error
+		}
+		done := make(chan normRes, 1)
+		go func() {
+			fixed, err := NormalizeReserveContext(context.Background(), zeroDB)
+			done <- normRes{fixed: fixed, err: err}
+		}()
+		<-paused
+
+		// Simulate the driver's first lock attempt falling back to POSIX F_SETLK.
+		if _, err := sqlite.OFDLocking(false); err != nil {
+			close(release)
+			t.Fatal(err)
+		}
+		owner2, err := sql.Open("sqlite", zeroDB)
+		if err != nil {
+			close(release)
+			t.Fatal(err)
+		}
+		owner2.SetMaxOpenConns(1)
+		defer owner2.Close()
+		if _, err := owner2.Exec("BEGIN EXCLUSIVE"); err != nil {
+			close(release)
+			t.Fatal(err)
+		}
+		attemptConcurrentExternalWriteBusy(t, zeroDB, "before_pre_fallback_header_return")
+
+		close(release)
+		res := <-done
+		if res.err != nil || res.fixed {
+			t.Fatalf("NormalizeReserveContext on reserve-0 DB = (%v, %v), want (false, nil)", res.fixed, res.err)
+		}
+
+		// Returning from the earlier header read must not drop owner2's POSIX lock.
+		attemptConcurrentExternalWriteBusy(t, zeroDB, "after_pre_fallback_header_return")
+		if _, err := owner2.Exec("UPDATE Information SET uuid='first-fallback-ok'"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := owner2.Exec("COMMIT"); err != nil {
+			t.Fatal(err)
+		}
+		if err := owner2.Close(); err != nil {
+			t.Fatal(err)
+		}
+		chk, err := Open(zeroDB, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer chk.Close()
+		var gotUUID string
+		if err := chk.QueryRow("SELECT uuid FROM Information").Scan(&gotUUID); err != nil {
+			t.Fatal(err)
+		}
+		if gotUUID != "first-fallback-ok" {
+			t.Fatalf("uuid=%q after commit under POSIX fallback, want first-fallback-ok", gotUUID)
+		}
+		return
+	}
+
+	_, mount, db := testlibrary.Create(t)
+	db.Close()
+	zeroDB := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestNormalizeReserveHeaderReadSafeAcrossFirstPOSIXFallback$", "-test.v")
+	cmd.Env = append(os.Environ(), "ENGINEX_RESERVE_FIRST_FALLBACK_DB="+zeroDB)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("first POSIX fallback child failed: %v\n%s", err, string(out))
+	}
+	if !bytes.Contains(out, []byte("--- PASS: TestNormalizeReserveHeaderReadSafeAcrossFirstPOSIXFallback")) {
+		t.Fatalf("first POSIX fallback child did not pass:\n%s", string(out))
+	}
+}
+
+func TestNormalizeReservePreservesRowIDWithUnicodeDottedI(t *testing.T) {
+	path := reserve12Library(t)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	mustExec(t, db, `CREATE TABLE AuxDotted("rowİd" TEXT, _rowid_ TEXT, oid TEXT, name TEXT);
+		CREATE TABLE AuxDottedRef(aux_rid INTEGER, label TEXT);
+		INSERT INTO AuxDotted(rowid, "rowİd", _rowid_, oid, name) VALUES(41, 'u1', 'u2', 'u3', 'alpha'),(99, 'v1', 'v2', 'v3', 'beta');
+		INSERT INTO AuxDottedRef(aux_rid, label) VALUES(41, 'first'),(99, 'second');`)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixed, err := NormalizeReserve(path)
+	if err != nil || !fixed {
+		t.Fatalf("NormalizeReserve = (%v, %v), want (true, nil)", fixed, err)
+	}
+	if r, ok, rerr := Reserve(path); rerr != nil || !ok || r != 0 {
+		t.Fatalf("post-rebuild Reserve = (%d, %v, %v), want (0, true, nil)", r, ok, rerr)
+	}
+	out, err := Open(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	var matches int
+	if err := out.QueryRow(`SELECT count(*) FROM AuxDottedRef r JOIN AuxDotted a ON a.rowid = r.aux_rid`).Scan(&matches); err != nil || matches != 2 {
+		t.Fatalf("AuxDotted rowid join matches=%d want 2 err=%v", matches, err)
+	}
+	var got string
+	if err := out.QueryRow(`SELECT group_concat(a.rowid||':'||a."rowİd"||':'||a.name, ',') FROM (SELECT rowid, "rowİd", name FROM AuxDotted ORDER BY rowid) a`).Scan(&got); err != nil || got != "41:u1:alpha,99:v1:beta" {
+		t.Fatalf("AuxDotted rows=%q want 41:u1:alpha,99:v1:beta err=%v", got, err)
+	}
+}
+
+func TestNormalizeReserveGeneratedRowidColumn(t *testing.T) {
+	t.Run("without_rowid_generated_rowid", func(t *testing.T) {
+		path := reserve12Library(t)
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.SetMaxOpenConns(1)
+		mustExec(t, db, `CREATE TABLE WrGenRowID(k TEXT PRIMARY KEY, note TEXT, rowid INT GENERATED ALWAYS AS (length(k)) STORED) WITHOUT ROWID;
+			INSERT INTO WrGenRowID(k, note) VALUES('alpha', 'a'),('beta22', 'b');`)
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if fixed, err := NormalizeReserve(path); err != nil || !fixed {
+			t.Fatalf("NormalizeReserve = (%v, %v), want (true, nil)", fixed, err)
+		}
+		if r, ok, rerr := Reserve(path); rerr != nil || !ok || r != 0 {
+			t.Fatalf("Reserve = (%d, %v, %v), want (0, true, nil)", r, ok, rerr)
+		}
+		out, err := Open(path, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer out.Close()
+		var got string
+		if err := out.QueryRow(`SELECT group_concat(k||':'||note||':'||rowid, ',') FROM (SELECT k, note, rowid FROM WrGenRowID ORDER BY k)`).Scan(&got); err != nil || got != "alpha:a:5,beta22:b:6" {
+			t.Fatalf("WrGenRowID=%q want alpha:a:5,beta22:b:6 err=%v", got, err)
+		}
+	})
+
+	t.Run("rowid_table_generated_rowid", func(t *testing.T) {
+		path := reserve12Library(t)
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.SetMaxOpenConns(1)
+		mustExec(t, db, `CREATE TABLE RtGenRowID(note TEXT, rowid INT GENERATED ALWAYS AS (length(note)) STORED);
+			INSERT INTO RtGenRowID(_rowid_, note) VALUES(41, 'alpha'),(99, 'hi');`)
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if fixed, err := NormalizeReserve(path); err != nil || !fixed {
+			t.Fatalf("NormalizeReserve = (%v, %v), want (true, nil)", fixed, err)
+		}
+		out, err := Open(path, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer out.Close()
+		var got string
+		if err := out.QueryRow(`SELECT group_concat(_rowid_||':'||note||':'||rowid, ',') FROM (SELECT _rowid_, note, rowid FROM RtGenRowID ORDER BY _rowid_)`).Scan(&got); err != nil || got != "41:alpha:5,99:hi:2" {
+			t.Fatalf("RtGenRowID=%q want 41:alpha:5,99:hi:2 err=%v", got, err)
+		}
+	})
+}
+
+func TestNormalizeReserve2000ColsStreamingTailBlobs(t *testing.T) {
+	path := reserve12Library(t)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	colDefs := make([]string, 2000)
+	colDefs[0] = "c0 INTEGER"
+	for i := 1; i < 1999; i++ {
+		colDefs[i] = fmt.Sprintf("c%d TEXT", i)
+	}
+	colDefs[1999] = "c1999 BLOB NOT NULL"
+	mustExec(t, db, "CREATE TABLE W2000Blobs("+strings.Join(colDefs, ",")+")")
+	stmt, err := db.Prepare("INSERT INTO W2000Blobs(rowid, c0, c1999) VALUES(?, ?, ?)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRowids := make([]int64, 16)
+	wantBlobs := make([][]byte, 16)
+	for i := range wantRowids {
+		rid := int64(41 + i*37)
+		wantRowids[i] = rid
+		payload := bytes.Repeat([]byte{byte(i + 17), byte(250 - i)}, 8<<10)
+		wantBlobs[i] = payload
+		if _, err := stmt.Exec(rid, i*10, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if fixed, err := NormalizeReserve(path); err != nil || !fixed {
+		t.Fatalf("NormalizeReserve = (%v, %v), want (true, nil)", fixed, err)
+	}
+	out, err := Open(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	rows, err := out.Query("SELECT _rowid_, c0, c1999 FROM W2000Blobs ORDER BY _rowid_")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	idx := 0
+	for rows.Next() {
+		var rid, c0 int64
+		var got []byte
+		if err := rows.Scan(&rid, &c0, &got); err != nil {
+			t.Fatal(err)
+		}
+		if idx >= len(wantRowids) || rid != wantRowids[idx] || c0 != int64(idx*10) || !bytes.Equal(got, wantBlobs[idx]) {
+			t.Fatalf("row %d mismatch: rid=%d (want %d) c0=%d blobEq=%v", idx, rid, wantRowids[idx], c0, bytes.Equal(got, wantBlobs[idx]))
+		}
+		idx++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if idx != len(wantRowids) {
+		t.Fatalf("copied %d rows, want %d", idx, len(wantRowids))
+	}
+}
+
+func setupFilteredSlowDD(t *testing.T, targetSuffix, delaySec, markerPath string) {
+	t.Helper()
+	realDD, err := exec.LookPath("dd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	wrapper := filepath.Join(binDir, "dd")
+	script := fmt.Sprintf(`#!/bin/sh
+target=$(readlink /proc/$$/fd/0 2>/dev/null || true)
+case "$target" in
+  *"$ENGINEX_SLOW_DD_TARGET")
+    : > "$ENGINEX_SLOW_DD_MARKER"
+    sleep "$ENGINEX_SLOW_DD_DELAY"
+    ;;
+esac
+exec %q "$@"
+`, realDD)
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ENGINEX_SLOW_DD_TARGET", targetSuffix)
+	t.Setenv("ENGINEX_SLOW_DD_DELAY", delaySec)
+	t.Setenv("ENGINEX_SLOW_DD_MARKER", markerPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func createCleanMountWithSibling(t *testing.T) (mount, dbDir, mPath, hmPath string) {
+	t.Helper()
+	_, mount, db := testlibrary.Create(t)
+	db.Close()
+	dbDir = filepath.Join(mount, "Engine Library", "Database2")
+	mPath = filepath.Join(dbDir, "m.db")
+	hmPath = filepath.Join(dbDir, "hm.db")
+	hdb, err := sql.Open("sqlite", hmPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdb.SetMaxOpenConns(1)
+	schema, err := os.ReadFile("../../docs/re-report/ENGINE-5.0.4-hm.db-schema.sql")
+	if err != nil {
+		hdb.Close()
+		t.Fatal(err)
+	}
+	mustExec(t, hdb, strings.ReplaceAll(string(schema), "CREATE TABLE sqlite_sequence(name,seq);", ""))
+	mustExec(t, hdb, "INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES(1,'hist-clean',3,0,2)")
+	if err := hdb.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return mount, dbDir, mPath, hmPath
+}
+
+func waitForSlowDDMarkerOrDone[T any](t *testing.T, marker string, done <-chan T) time.Time {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			return time.Now()
+		}
+		select {
+		case res := <-done:
+			t.Fatalf("call returned early before slow dd marker appeared: %+v", res)
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+	t.Fatalf("timed out waiting for slow dd marker %s", marker)
+	return time.Time{}
+}
+
+func TestMountAndDirectoryScansHonorCancellationDuringSlowHeaderRead(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("POSIX/procfs dd wrapper test is Linux specific")
+	}
+	if sub := os.Getenv("ENGINEX_RESERVE_SLOW_SCAN_SUBTEST"); sub != "" {
+		_, err := sqlite.OFDLocking(false)
+		if err != nil || sqlite.OFDLockingEnabled() {
+			t.Fatalf("failed to disable OFD locking: enabled=%v err=%v", sqlite.OFDLockingEnabled(), err)
+		}
+		marker := filepath.Join(t.TempDir(), "dd.started")
+		mount, dbDir, mPath, _ := createCleanMountWithSibling(t)
+		target := "/hm.db"
+		if sub == "read_only_mount_live_cancel" {
+			target = "/m.db"
+			if err := os.Chmod(mPath, 0o444); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(mPath, 0o644) })
+		}
+		setupFilteredSlowDD(t, target, "0.95", marker)
+
+		switch sub {
+		case "normalize_database2_live_cancel":
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			type resT struct {
+				fixed []string
+				err   error
+			}
+			done := make(chan resT, 1)
+			go func() {
+				fixed, err := NormalizeDatabase2Context(ctx, dbDir)
+				done <- resT{fixed: fixed, err: err}
+			}()
+			waitForSlowDDMarkerOrDone(t, marker, done)
+			cAt := time.Now()
+			cancel()
+			res := <-done
+			if elapsed := time.Since(cAt); elapsed >= 250*time.Millisecond {
+				t.Fatalf("NormalizeDatabase2Context took %v after cancel (>= 250ms)", elapsed)
+			}
+			if !errors.Is(res.err, context.Canceled) {
+				t.Fatalf("NormalizeDatabase2Context err=%v, want context.Canceled", res.err)
+			}
+
+		case "full_mount_heal_live_cancel", "data_only_mount_heal_live_cancel", "read_only_mount_live_cancel":
+			dataOnly := sub == "data_only_mount_heal_live_cancel"
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			type resT struct {
+				rep Report
+				err error
+			}
+			done := make(chan resT, 1)
+			go func() {
+				rep, err := HealMountWithOptions(ctx, mount, MountOptions{DataOnly: dataOnly})
+				done <- resT{rep: rep, err: err}
+			}()
+			waitForSlowDDMarkerOrDone(t, marker, done)
+			cAt := time.Now()
+			cancel()
+			res := <-done
+			if elapsed := time.Since(cAt); elapsed >= 250*time.Millisecond {
+				t.Fatalf("%s took %v after cancel (>= 250ms)", sub, elapsed)
+			}
+			if res.rep.Healthy || !errors.Is(res.err, context.Canceled) {
+				t.Fatalf("%s = (Healthy=%v, err=%v), want (false, context.Canceled)", sub, res.rep.Healthy, res.err)
+			}
+
+		case "data_only_already_canceled_bounded":
+			canceled, cancel := context.WithCancel(context.Background())
+			cancel()
+			start := time.Now()
+			rep, err := HealMountDataOnlyContext(canceled, mount, 0)
+			elapsed := time.Since(start)
+			if elapsed >= 750*time.Millisecond {
+				t.Fatalf("already-canceled data-only waited %v (>= 750ms)", elapsed)
+			}
+			if rep.Healthy || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("already-canceled data-only with slow sibling = (Healthy=%v, err=%v), want (false, context.DeadlineExceeded)", rep.Healthy, err)
+			}
+
+		default:
+			t.Fatalf("unknown subtest %q", sub)
+		}
+		return
+	}
+
+	for _, sub := range []string{
+		"normalize_database2_live_cancel",
+		"full_mount_heal_live_cancel",
+		"data_only_mount_heal_live_cancel",
+		"data_only_already_canceled_bounded",
+		"read_only_mount_live_cancel",
+	} {
+		t.Run(sub, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestMountAndDirectoryScansHonorCancellationDuringSlowHeaderRead$", "-test.v")
+			cmd.Env = append(os.Environ(), "ENGINEX_RESERVE_SLOW_SCAN_SUBTEST="+sub)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s subprocess failed: %v\n%s", sub, err, string(out))
+			}
+			if !bytes.Contains(out, []byte("--- PASS: TestMountAndDirectoryScansHonorCancellationDuringSlowHeaderRead")) {
+				t.Fatalf("%s subprocess did not pass:\n%s", sub, string(out))
+			}
+		})
+	}
+}
+
+func TestNormalizeReserveCancelDuringFinalHeaderVerifyPreservesErrorIdentity(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("procfs dd wrapper test is Linux specific")
+	}
+	if os.Getenv("ENGINEX_RESERVE_FINAL_VERIFY_CANCEL") == "1" {
+		mPath := reserve12Library(t)
+		marker := filepath.Join(t.TempDir(), "verify.started")
+		setupFilteredSlowDD(t, ".reserve-rebuild", "0.85", marker)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		type resT struct {
+			fixed bool
+			err   error
+		}
+		done := make(chan resT, 1)
+		go func() {
+			fixed, err := NormalizeReserveContext(ctx, mPath)
+			done <- resT{fixed: fixed, err: err}
+		}()
+		waitForSlowDDMarkerOrDone(t, marker, done)
+		cAt := time.Now()
+		cancel()
+		res := <-done
+		if elapsed := time.Since(cAt); elapsed >= 250*time.Millisecond {
+			t.Fatalf("final header verify cancel took %v (>= 250ms)", elapsed)
+		}
+		if res.fixed || !errors.Is(res.err, context.Canceled) {
+			t.Fatalf("NormalizeReserveContext = (%v, %v), want (false, errors.Is context.Canceled)", res.fixed, res.err)
+		}
+		if _, serr := os.Stat(mPath + ".reserve-rebuild"); !errors.Is(serr, os.ErrNotExist) {
+			t.Fatalf(".reserve-rebuild left after cancel: err=%v", serr)
+		}
+		if r, ok, rerr := Reserve(mPath); rerr != nil || !ok || r != 12 {
+			t.Fatalf("live reserve changed after cancel: (%d, %v, %v)", r, ok, rerr)
+		}
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestNormalizeReserveCancelDuringFinalHeaderVerifyPreservesErrorIdentity$", "-test.v")
+	cmd.Env = append(os.Environ(), "ENGINEX_RESERVE_FINAL_VERIFY_CANCEL=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("final verify cancel subprocess failed: %v\n%s", err, string(out))
+	}
+	if !bytes.Contains(out, []byte("--- PASS: TestNormalizeReserveCancelDuringFinalHeaderVerifyPreservesErrorIdentity")) {
+		t.Fatalf("final verify cancel subprocess did not pass:\n%s", string(out))
+	}
+}
+
+func TestNormalizeReserveSidecarObstructionsAbortPublication(t *testing.T) {
+	t.Run("delete_mode_preexisting_nonempty_shm_dir", func(t *testing.T) {
+		mPath := reserve12Library(t)
+		beforeBytes, err := os.ReadFile(mPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(mPath+"-shm", "keep"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		var renameCalls atomic.Int32
+		origRename := reserveRename
+		reserveRename = func(oldPath, newPath string) error {
+			renameCalls.Add(1)
+			return origRename(oldPath, newPath)
+		}
+		t.Cleanup(func() { reserveRename = origRename })
+
+		fixed, err := NormalizeReserve(mPath)
+		if err == nil || fixed {
+			t.Fatalf("expected DELETE -shm dir rejection, got fixed=%v err=%v", fixed, err)
+		}
+		if renameCalls.Load() != 0 {
+			t.Fatalf("expected 0 rename calls, got %d", renameCalls.Load())
+		}
+		afterBytes, rerr := os.ReadFile(mPath)
+		if rerr != nil || !bytes.Equal(afterBytes, beforeBytes) {
+			t.Fatalf("live DB bytes altered: err=%v", rerr)
+		}
+		if r, ok, rr := Reserve(mPath); rr != nil || !ok || r != 12 {
+			t.Fatalf("reserve changed: (%d, %v, %v)", r, ok, rr)
+		}
+		if _, serr := os.Stat(mPath + ".reserve-rebuild"); !errors.Is(serr, os.ErrNotExist) {
+			t.Fatalf(".reserve-rebuild left after failure: err=%v", serr)
+		}
+	})
+
+	t.Run("delete_mode_late_nonempty_shm_dir", func(t *testing.T) {
+		mPath := reserve12Library(t)
+		beforeBytes, err := os.ReadFile(mPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		origBeforeRename := reserveBeforeRename
+		reserveBeforeRename = func(p string) {
+			if p == mPath {
+				if mkErr := os.MkdirAll(filepath.Join(mPath+"-shm", "keep"), 0o755); mkErr != nil {
+					t.Fatal(mkErr)
+				}
+			}
+		}
+		t.Cleanup(func() { reserveBeforeRename = origBeforeRename })
+
+		var renameCalls atomic.Int32
+		origRename := reserveRename
+		reserveRename = func(oldPath, newPath string) error {
+			renameCalls.Add(1)
+			return origRename(oldPath, newPath)
+		}
+		t.Cleanup(func() { reserveRename = origRename })
+
+		fixed, err := NormalizeReserve(mPath)
+		if err == nil || fixed {
+			t.Fatalf("expected late DELETE -shm dir rejection, got fixed=%v err=%v", fixed, err)
+		}
+		if renameCalls.Load() != 0 {
+			t.Fatalf("expected 0 rename calls, got %d", renameCalls.Load())
+		}
+		afterBytes, rerr := os.ReadFile(mPath)
+		if rerr != nil || !bytes.Equal(afterBytes, beforeBytes) {
+			t.Fatalf("live DB bytes altered: err=%v", rerr)
+		}
+		if r, ok, rr := Reserve(mPath); rr != nil || !ok || r != 12 {
+			t.Fatalf("reserve changed: (%d, %v, %v)", r, ok, rr)
+		}
+		if _, serr := os.Stat(mPath + ".reserve-rebuild"); !errors.Is(serr, os.ErrNotExist) {
+			t.Fatalf(".reserve-rebuild left after failure: err=%v", serr)
+		}
+	})
+
+	t.Run("wal_mode_late_dangling_wal_symlink", func(t *testing.T) {
+		_, mPath, _ := setupWALReserve12Fixture(t)
+		beforeBytes, err := os.ReadFile(mPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		origBeforeRename := reserveBeforeRename
+		reserveBeforeRename = func(p string) {
+			if p != mPath {
+				return
+			}
+			_ = os.Remove(mPath + "-wal")
+			if symErr := os.Symlink("/nonexistent-wal-target", mPath+"-wal"); symErr != nil {
+				t.Fatal(symErr)
+			}
+		}
+		t.Cleanup(func() { reserveBeforeRename = origBeforeRename })
+
+		var renameCalls atomic.Int32
+		origRename := reserveRename
+		reserveRename = func(oldPath, newPath string) error {
+			renameCalls.Add(1)
+			return origRename(oldPath, newPath)
+		}
+		t.Cleanup(func() { reserveRename = origRename })
+
+		fixed, err := NormalizeReserve(mPath)
+		if err == nil || fixed {
+			t.Fatalf("expected late dangling -wal symlink rejection, got fixed=%v err=%v", fixed, err)
+		}
+		if renameCalls.Load() != 0 {
+			t.Fatalf("expected 0 rename calls, got %d", renameCalls.Load())
+		}
+		afterBytes, rerr := os.ReadFile(mPath)
+		if rerr != nil || !bytes.Equal(afterBytes, beforeBytes) {
+			t.Fatalf("live WAL bytes altered: err=%v", rerr)
+		}
+		if r, ok, rr := Reserve(mPath); rr != nil || !ok || r != 12 {
+			t.Fatalf("reserve changed: (%d, %v, %v)", r, ok, rr)
+		}
+		if _, serr := os.Stat(mPath + ".reserve-rebuild"); !errors.Is(serr, os.ErrNotExist) {
+			t.Fatalf(".reserve-rebuild left after failure: err=%v", serr)
+		}
+	})
 }
