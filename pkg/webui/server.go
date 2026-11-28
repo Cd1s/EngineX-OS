@@ -175,6 +175,10 @@ type Server struct {
 	closeOnce     sync.Once
 	lanProbeWG    sync.WaitGroup
 
+	streamOvMu sync.Mutex
+	streamOv   *streamOverviewQueue
+	streamOvWG sync.WaitGroup
+
 	updateMu    sync.Mutex
 	updateCache updateStatus
 
@@ -546,6 +550,7 @@ func (s *Server) Close() {
 	s.stopHTTPS(true)
 	s.httpsWG.Wait()
 	s.stopRekordboxOnDemand()
+	s.stopStreamOverview()
 }
 
 // isDeckStateDir reports whether dir is the deck's own state dir (not a test's): the default,

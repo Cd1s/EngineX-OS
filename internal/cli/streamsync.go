@@ -170,6 +170,7 @@ func StreamSync(args []string) error {
 		}
 	}
 	webui.DropStaleRekordboxAnalysis(build)
+	webui.DropStaleStreamOverviews(build)
 	go watchEngineTemp(ctx)
 	go watchPersistentClock(ctx)
 	go ui.WatchCues(ctx) // #321: cue edits back to rekordbox sticks, a few seconds after Engine writes them

@@ -12,6 +12,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <elf.h>
 #include <limits.h>
 #include <link.h>
 #include <netdb.h>
@@ -51,6 +52,7 @@
 #include "live_tap.h"
 #include "reverb_time.h"
 #include "hook_features.h"
+#include "stream_overview.h"
 #include "rekordbox_browse.h"
 #ifndef SC_TAP_PATH
 #define SC_TAP_PATH "/tmp/enginex-broadcast.pcm" // pkg/broadcast DefaultInputPath
@@ -3590,8 +3592,176 @@ static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
 }
 
 // BeatDetectionRunner::process(const QString &path, const AnalysisPreferences &prefs, int overviewSize)
+#if defined(__aarch64__)
+#define OA_R_SYM(info) ELF64_R_SYM(info)
+#else
+#define OA_R_SYM(info) ELF32_R_SYM(info)
+#endif
+
+static uintptr_t *oa_stream_ov_slot;
+static __thread struct {
+    int active;
+    int emitted;
+    void *obj;
+    char path[PATH_MAX];
+    struct sc_stream_ov_accum accum;
+} oa_stream_ov_ctx;
+
+static uintptr_t oa_dyn_ptr(uintptr_t val, uintptr_t base, uintptr_t map_start, uintptr_t map_end) {
+    if (val >= map_start && val < map_end) return val;
+    if (base + val >= map_start && base + val < map_end) return base + val;
+    return 0;
+}
+
+struct oa_got_lookup {
+    void *target;
+    uintptr_t *slot;
+};
+
+static int oa_got_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size;
+    struct oa_got_lookup *q = data;
+    uintptr_t base = info->dlpi_addr;
+    uintptr_t min_v = UINTPTR_MAX, max_v = 0;
+    const ElfW(Phdr) *dyn_ph = NULL;
+    for (ElfW(Half) i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+        if (ph->p_type == PT_LOAD) {
+            if (ph->p_vaddr < min_v) min_v = ph->p_vaddr;
+            if (ph->p_vaddr + ph->p_memsz > max_v) max_v = ph->p_vaddr + ph->p_memsz;
+        } else if (ph->p_type == PT_DYNAMIC) {
+            dyn_ph = ph;
+        }
+    }
+    if (!dyn_ph || min_v >= max_v) return 1;
+    uintptr_t map_start = base + min_v, map_end = base + max_v;
+    const ElfW(Dyn) *dyn = (const ElfW(Dyn) *)(base + dyn_ph->p_vaddr);
+    uintptr_t strtab_raw = 0, symtab_raw = 0, jmprel_raw = 0;
+    size_t pltrelsz = 0;
+    ElfW(Sxword) pltrel = 0;
+    for (; dyn->d_tag != DT_NULL; dyn++) {
+        switch (dyn->d_tag) {
+        case DT_STRTAB: strtab_raw = (uintptr_t)dyn->d_un.d_ptr; break;
+        case DT_SYMTAB: symtab_raw = (uintptr_t)dyn->d_un.d_ptr; break;
+        case DT_JMPREL: jmprel_raw = (uintptr_t)dyn->d_un.d_ptr; break;
+        case DT_PLTRELSZ: pltrelsz = (size_t)dyn->d_un.d_val; break;
+        case DT_PLTREL: pltrel = (ElfW(Sxword))dyn->d_un.d_val; break;
+        }
+    }
+    const char *strtab = (const char *)oa_dyn_ptr(strtab_raw, base, map_start, map_end);
+    const ElfW(Sym) *symtab = (const ElfW(Sym) *)oa_dyn_ptr(symtab_raw, base, map_start, map_end);
+    uintptr_t jmprel = oa_dyn_ptr(jmprel_raw, base, map_start, map_end);
+    if (!strtab || !symtab || !jmprel || !pltrelsz) return 1;
+
+    size_t entsz = (pltrel == DT_RELA) ? sizeof(ElfW(Rela)) : (pltrel == DT_REL) ? sizeof(ElfW(Rel)) : 0;
+    if (!entsz) return 1;
+    for (size_t off = 0; off + entsz <= pltrelsz; off += entsz) {
+        uintptr_t r_off = 0;
+        size_t sym_idx = 0;
+        if (pltrel == DT_RELA) {
+            const ElfW(Rela) *r = (const ElfW(Rela) *)(jmprel + off);
+            r_off = (uintptr_t)r->r_offset;
+            sym_idx = (size_t)OA_R_SYM(r->r_info);
+        } else {
+            const ElfW(Rel) *r = (const ElfW(Rel) *)(jmprel + off);
+            r_off = (uintptr_t)r->r_offset;
+            sym_idx = (size_t)OA_R_SYM(r->r_info);
+        }
+        const char *name = strtab + symtab[sym_idx].st_name;
+        if (!strcmp(name, "_ZN11QMetaObject8activateEP7QObjectPKS_iPPv")) {
+            uintptr_t addr = base + r_off;
+            if (addr >= map_start && addr + sizeof(uintptr_t) <= map_end) {
+                uintptr_t *slot = (uintptr_t *)addr;
+                if (*slot == (uintptr_t)q->target) q->slot = slot;
+            }
+            break;
+        }
+    }
+    return 1; // main executable is always first
+}
+
+static uintptr_t *oa_find_activate_got(void *target) {
+    struct oa_got_lookup q = {target, NULL};
+    dl_iterate_phdr(oa_got_cb, &q);
+    return q.slot;
+}
+
+static int oa_emit_raw_ov(void *sender, const void *meta, const uchar *data, size_t len) {
+    struct oa_bytes b = {0, 0, 0};
+    oa_make_bytes(&b, (const char *)data, (ssize_t)len);
+    int ok = b.ptr && b.size == (ssize_t)len;
+    if (ok) {
+        void *ov_args[2] = {NULL, &b};
+        oa_activate(sender, meta, OA_OVERVIEW, ov_args);
+    }
+    if (b.d && __atomic_sub_fetch(b.d, 1, __ATOMIC_ACQ_REL) == 0) free(b.d);
+    return ok;
+}
+
+static void oa_activate_stream_ov(void *sender, const void *meta, int signal, void **args) {
+    if (oa_stream_ov_ctx.active && sender == oa_stream_ov_ctx.obj && meta == oa_meta &&
+        oa_activate && oa_make_bytes) {
+        if (signal == OA_OVERVIEW && !oa_stream_ov_ctx.accum.passthrough && !oa_stream_ov_ctx.emitted &&
+            args && args[1]) {
+            const struct oa_bytes *chunk = (const struct oa_bytes *)args[1];
+            if (sc_stream_ov_accum_push(&oa_stream_ov_ctx.accum, (const uchar *)chunk->ptr,
+                                        chunk->size > 0 ? (size_t)chunk->size : 0)) {
+                return;
+            }
+            oa_stream_ov_ctx.accum.passthrough = 1;
+            size_t pre_len = 0;
+            if (sc_stream_ov_accum_finish(&oa_stream_ov_ctx.accum, &pre_len))
+                oa_emit_raw_ov(sender, meta, oa_stream_ov_ctx.accum.raw, pre_len);
+        } else if ((signal == OA_DONE || signal == OA_STOPPED || signal == OA_FINISHED) &&
+                   !oa_stream_ov_ctx.accum.passthrough && !oa_stream_ov_ctx.emitted &&
+                   oa_stream_ov_ctx.accum.bins > 0) {
+            oa_stream_ov_ctx.emitted = 1;
+            int swapped = 0, status = 0;
+            if (signal == OA_DONE && oa_stream_ov_ctx.accum.bins == SC_STREAM_OV_BINS &&
+                !__atomic_load_n((uchar *)sender + OA_STOP, __ATOMIC_ACQUIRE)) {
+                uchar raw[SC_STREAM_OV_RAW_LEN];
+                if (sc_stream_ov_read_raw(oa_stream_ov_ctx.path, raw, &status) &&
+                    oa_emit_raw_ov(sender, meta, raw, sizeof raw)) {
+                    swapped = 1;
+                    oa_log("stream-ov-swap", oa_stream_ov_ctx.path, 0);
+                }
+            }
+            if (!swapped) {
+                size_t out_len = 0;
+                if (sc_stream_ov_accum_finish(&oa_stream_ov_ctx.accum, &out_len))
+                    oa_emit_raw_ov(sender, meta, oa_stream_ov_ctx.accum.raw, out_len);
+                oa_log(oa_stream_ov_ctx.accum.bins != SC_STREAM_OV_BINS ? "stream-ov-partial" :
+                       (status < 0 ? "stream-ov-bad" : "stream-ov-miss"),
+                       oa_stream_ov_ctx.path, (long)oa_stream_ov_ctx.accum.bins);
+            }
+        }
+    }
+    oa_activate(sender, meta, signal, args);
+}
+
 static void oa_process(void *o, const struct oa_string *path, const uchar *prefs, int overview_size) {
-    if (!oa_replay(o, path, prefs)) oa_orig(o, path, prefs, overview_size);
+    if (hf_on(HF_RB_BRIDGE) && oa_replay(o, path, prefs)) return;
+    int armed = 0;
+    char utf8[PATH_MAX];
+    if (hf_on(HF_GATEWAY) && oa_stream_ov_slot && prefs && !prefs[12] && path && path->size > 0 &&
+        utf16_to_utf8(path->ptr, path->size, utf8, sizeof utf8) &&
+        sc_stream_ov_download_key(utf8, sc_stream_ov_downloads)) {
+        int is_rbx = 0;
+#if !defined(__aarch64__)
+        char rbx_perf[PATH_MAX + 8];
+        if (sc_rbx_replay_path(utf8, rbx_perf, sizeof rbx_perf)) is_rbx = 1;
+#endif
+        if (!is_rbx) {
+            oa_stream_ov_ctx.obj = o;
+            oa_stream_ov_ctx.emitted = 0;
+            sc_stream_ov_accum_reset(&oa_stream_ov_ctx.accum);
+            snprintf(oa_stream_ov_ctx.path, sizeof oa_stream_ov_ctx.path, "%s", utf8);
+            oa_stream_ov_ctx.active = 1;
+            armed = 1;
+        }
+    }
+    oa_orig(o, path, prefs, overview_size);
+    if (armed) oa_stream_ov_ctx.active = 0;
 }
 
 static int oa_main_bias(struct dl_phdr_info *info, size_t size, void *out) {
@@ -3601,7 +3771,7 @@ static int oa_main_bias(struct dl_phdr_info *info, size_t size, void *out) {
 }
 
 static void oa_install(void) {
-    if (!hf_on(HF_RB_BRIDGE)) return;
+    if (!hf_on(HF_RB_BRIDGE) && !hf_on(HF_GATEWAY)) return;
     uintptr_t base = 0;
     dl_iterate_phdr(oa_main_bias, &base);
     const uintptr_t *meta = (const uintptr_t *)(base + OA_META), entry = base + OA_PROCESS_FN;
@@ -3630,8 +3800,19 @@ static void oa_install(void) {
     __builtin___clear_cache(stub, (char *)stub + sizeof orig);
     oa_meta = meta;
     oa_orig = (oa_process_fn)stub;
-    if (!try_patch_bytes(HF_RB_BRIDGE, entry, jump, sizeof jump, page)) return;
-    oa_log("installed", "", 0);
+    if (hf_on(HF_RB_BRIDGE)) {
+        if (!try_patch_bytes(HF_RB_BRIDGE, entry, jump, sizeof jump, page)) return;
+    } else {
+        if (!try_patch_bytes(HF_GATEWAY, entry, jump, sizeof jump, page)) return;
+    }
+    if (hf_on(HF_GATEWAY)) {
+        uintptr_t *slot = oa_find_activate_got((void *)oa_activate);
+        if (slot) {
+            patch_pointer(HF_GATEWAY, slot, (uintptr_t)oa_activate_stream_ov, page);
+            oa_stream_ov_slot = slot;
+        }
+    }
+    oa_log("installed", oa_stream_ov_slot ? "stream-ov" : "", 0);
 }
 
 // #55: Engine analyses in OfflineAnalyzer child processes, which inherit this
@@ -4007,6 +4188,14 @@ static void rbx_fill(void *db, long long track, const char *sql, int n) {
     if (result) fprintf(stderr, "engine-ui-hook: rekordbox analysis for track %lld (%lld): %s\n", track, id, result);
 }
 
+static void stream_ov_fill(void *db, long long track) {
+    struct sc_stream_ov_sqlite q = {rbx_sqlite.exec, rbx_sqlite.filename};
+    analysis_filling = 1;
+    const char *result = sc_stream_ov_fill_track(&q, db, track);
+    analysis_filling = 0;
+    if (result) fprintf(stderr, "engine-ui-hook: stream overview for track %lld: %s\n", track, result);
+}
+
 static void rbs_fill(void *db, const char *main, long long track, int allow_ondemand) {
     analysis_filling = 1;
     const char *result = allow_ondemand ? sc_rbs_fill_perf(&rbx_sqlite, db, main, track)
@@ -4038,8 +4227,10 @@ static int rbx_bind(void *stmt, int i, long long value) {
         const char *drive = analysis_read && sc_rbs_enabled ? sc_rbs_drive(&rbx_sqlite, rbx_statement_db(stmt)) : NULL;
         if (drive)
             rbs_fill(rbx_statement_db(stmt), drive, value, 1);
-        else if (rbx_prepare_original && analysis_read)
+        else if (rbx_prepare_original && analysis_read) {
             rbx_fill(rbx_statement_db(stmt), value, NULL, 0);
+            if (perf_read) stream_ov_fill(rbx_statement_db(stmt), value);
+        }
         if (shadow_analysis_enabled && track_read)
             shadow_fill(rbx_statement_db(stmt), value);
     }

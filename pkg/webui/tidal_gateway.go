@@ -2415,12 +2415,22 @@ func (g *tidalGateway) playbackInfo(w http.ResponseWriter, r *http.Request) {
 		mime = localMIMEs[localCodecs[strings.ToLower(path.Ext(ref.file))]]
 	}
 	manifest, _ := json.Marshal(map[string]any{"mimeType": mime, "codecs": codec, "encryptionType": "NONE", "urls": []string{address}})
+	if ref.file == "" && ref.track.Provider != rekordboxScope && ref.track.Provider != localProvider && g.s.jobs != nil {
+		if p := g.s.jobs.FileAt(ref.track, ref.gen); p != "" {
+			g.s.enqueueStreamOverview(id, ref.track.Provider, p)
+		}
+	}
 	log.Printf("stream-sync: load track=%d provider=%s step=manifest codec=%s mime=%s", id, ref.track.Provider, codec, mime)
 	respond(w, map[string]any{"trackId": id, "assetPresentation": "FULL", "audioMode": "STEREO", "audioQuality": "LOSSLESS", "manifestMimeType": "application/vnd.tidal.bts", "manifestHash": "", "manifest": base64.StdEncoding.EncodeToString(manifest), "albumReplayGain": 0, "albumPeakAmplitude": 1, "trackReplayGain": 0, "trackPeakAmplitude": 1})
 }
 func (g *tidalGateway) streamURL(w http.ResponseWriter, r *http.Request) {
 	if id, ref, ok := g.playable(w, r, r.PathValue("id")); ok && g.knownCodec(w, r, ref) {
 		address, codec := g.streamTarget(r, id, ref)
+		if ref.file == "" && ref.track.Provider != rekordboxScope && ref.track.Provider != localProvider && g.s.jobs != nil {
+			if p := g.s.jobs.FileAt(ref.track, ref.gen); p != "" {
+				g.s.enqueueStreamOverview(id, ref.track.Provider, p)
+			}
+		}
 		log.Printf("stream-sync: load track=%d provider=%s scope=%s step=manifest api=streamurl codec=%s", id, ref.track.Provider, g.s.scope(), codec)
 		respond(w, map[string]any{"url": address, "codec": codec, "soundQuality": "LOSSLESS", "trackId": id})
 	}
@@ -2645,6 +2655,7 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "audio/wav")
 	}
 	log.Printf("stream-sync: load track=%d provider=%s step=stream result=ready elapsed=%s canceled=%t mime=%s", id, ref.track.Provider, time.Since(started).Round(time.Millisecond), r.Context().Err() != nil, w.Header().Get("Content-Type"))
+	g.s.enqueueStreamOverview(id, ref.track.Provider, p)
 	g.stageAlbumArtLater(id, ref.track)
 	http.ServeFile(w, r, p)
 }
