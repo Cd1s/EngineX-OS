@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -92,6 +93,8 @@ type LibraryHold struct {
 	info os.FileInfo
 	db   *sql.DB
 	conn *sql.Conn
+
+	replaced bool
 }
 
 // HoldLibrary takes the hold on path. ErrLibraryInUse when another connection has the library
@@ -211,10 +214,26 @@ func (h *LibraryHold) Empty(ctx context.Context) (bool, error) {
 	return !has, err
 }
 
-// Release ends the hold. After a rename over the path the held file has no name any more.
+// Replaced tells the hold that its holder has renamed another file over the path: the held
+// file is the replaced one now, and Release retires it.
+func (h *LibraryHold) Replaced() {
+	if h != nil {
+		h.replaced = true
+	}
+}
+
+// Release ends the hold. A file its holder replaced is retired first, for a process that
+// opened it just before the rename (rbstate.RetireReplaced).
 func (h *LibraryHold) Release() {
 	if h == nil {
 		return
+	}
+	if h.replaced && h.pin != nil && h.conn != nil {
+		if emptied, err := rbstate.RetireReplaced(h.pin); err != nil {
+			log.Printf("enginedb: the replaced library %s could not be retired: %v", h.path, err)
+		} else if emptied {
+			log.Printf("enginedb: another process had opened %s just before it was replaced; the replaced file was emptied for it", h.path)
+		}
 	}
 	if h.conn != nil {
 		_, _ = h.conn.ExecContext(context.Background(), "ROLLBACK")

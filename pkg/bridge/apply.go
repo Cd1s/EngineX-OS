@@ -615,14 +615,19 @@ func (w *window) build() error {
 		return cleanSQLiteSidecars(w.file())
 	}
 	const installFlushBytes = 16 << 20
-	install := func() error {
+	install := func() (err error) {
 		src := filepath.Join(tmp, "m.db")
 		if w.rest != nil {
-			return rbstate.InstallFilePacedChecked(src, w.file(), playingReadChunk, installFlushBytes, func(_ int, took time.Duration) error {
+			err = rbstate.InstallFilePacedChecked(src, w.file(), playingReadChunk, installFlushBytes, func(_ int, took time.Duration) error {
 				return w.rest(took)
 			}, last)
+		} else {
+			err = rbstate.InstallFileChecked(src, w.file(), last)
 		}
-		return rbstate.InstallFileChecked(src, w.file(), last)
+		if err == nil {
+			hold.Replaced() // the rename is done: the held file is the replaced one
+		}
+		return err
 	}
 	err = w.commit(commitID, install)
 	hold.Release()
@@ -662,14 +667,17 @@ func (w *window) holdForInstall() (*enginedb.LibraryHold, error) {
 	if err := checkSQLiteSidecars(live); err != nil {
 		return nil, err // work in a sidecar: not ours to recover by opening the file
 	}
-	hold, err := enginedb.HoldLibrary(w.ctx, live)
+	// The copy is on the stick; like the rename that follows, the hold and its checks are not
+	// cut by the window's deadline (the hold has its own limit of a millisecond).
+	ctx := context.WithoutCancel(w.ctx)
+	hold, err := enginedb.HoldLibrary(ctx, live)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	empty, err := hold.Empty(w.ctx)
+	empty, err := hold.Empty(ctx)
 	if err == nil && !empty {
 		err = fmt.Errorf("%w: it has tracks or lists now", enginedb.ErrLibraryChanged)
 	}

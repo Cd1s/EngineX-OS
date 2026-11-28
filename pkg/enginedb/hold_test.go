@@ -337,3 +337,243 @@ func TestEditsInPlaceAreRefusedAsBusyWhileTheVolumeIsLocked(t *testing.T) {
 		t.Errorf("ApplyPending with the lock free: applied=%d err=%v comment=%q", n, err, comment())
 	}
 }
+
+const holdLateGoEnv = "ENGINEX_HOLD_LATE_GO"
+
+// TestHoldLateChild opens the library now, whatever its first read says, and goes on when told to.
+func TestHoldLateChild(t *testing.T) {
+	path := os.Getenv(holdChildEnv)
+	if path == "" || os.Getenv(holdChildOpEnv) != "late" && os.Getenv(holdChildOpEnv) != "late-ro" {
+		t.Skip("a child of the hold tests")
+	}
+	dsn := "file:" + path + "?_pragma=busy_timeout(100)"
+	if os.Getenv(holdChildOpEnv) == "late-ro" {
+		dsn = "file:" + path + "?mode=ro&_pragma=busy_timeout(100)"
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		fmt.Println("LATE ERR", err)
+		return
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var n int
+	err = db.QueryRow("SELECT count(*) FROM Track").Scan(&n)
+	fmt.Printf("LATE OPENED n=%d err=%v\n", n, err)
+	for end := time.Now().Add(time.Minute); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		if _, e := os.Stat(os.Getenv(holdLateGoEnv)); e == nil {
+			break
+		}
+	}
+	err = db.QueryRow("SELECT count(*) FROM Track").Scan(&n)
+	fmt.Printf("LATE READ n=%d err=%v\n", n, err)
+	if os.Getenv(holdChildOpEnv) == "late" {
+		if _, err = db.Exec("INSERT INTO Track(title) VALUES('late-writer')"); err != nil {
+			fmt.Println("LATE WRITE REFUSED", err)
+		} else {
+			fmt.Println("LATE WRITE COMMITTED")
+		}
+	}
+	fmt.Println("LATE DONE")
+	time.Sleep(90 * time.Second)
+}
+
+// A program that opens the old library after the publisher's last open-file scan and before its
+// rename cannot read or write under the hold, but has the file open and goes on afterwards.
+// Measured before this was closed: on a WAL library its write then succeeded, made a -wal
+// beside the new library, and the next connection read the old file's rows instead of the new
+// library's. The replaced file is emptied for it before the hold ends.
+func TestAReplacedLibraryIsEmptiedForAProgramThatOpenedItJustBeforeTheRename(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the decks' locking is Linux's")
+	}
+	for _, tc := range []struct{ mode, op string }{{"WAL", "late"}, {"WAL", "late-ro"}, {"DELETE", "late"}} {
+		t.Run(tc.mode+" "+tc.op, func(t *testing.T) {
+			live := holdLibrary(t, tc.mode)
+			seed, err := sql.Open("sqlite", "file:"+live)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = seed.Exec("INSERT INTO Track(title) VALUES('old-1'),('old-2'),('old-3')"); err != nil {
+				t.Fatal(err)
+			}
+			seed.Close()
+			repl := holdLibrary(t, "DELETE")
+			rdb, err := sql.Open("sqlite", "file:"+repl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = rdb.Exec("INSERT INTO Track(title) VALUES('new-1')"); err != nil {
+				t.Fatal(err)
+			}
+			rdb.Close()
+
+			h, err := HoldLibrary(context.Background(), live)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer h.Release()
+			if pid := OpenElsewhere(live); pid != 0 {
+				t.Fatalf("fixture: process %d has the library open", pid)
+			}
+			// The late opener: after the scan, before the rename.
+			goFile := filepath.Join(t.TempDir(), "go")
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHoldLateChild$", "-test.v")
+			cmd.Env = append(os.Environ(), holdChildEnv+"="+live, holdChildOpEnv+"="+tc.op, holdLateGoEnv+"="+goFile)
+			out, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+			lines := make(chan string, 8)
+			go func() {
+				buf, rest := make([]byte, 4096), ""
+				for {
+					n, rerr := out.Read(buf)
+					rest += string(buf[:n])
+					for i := strings.Index(rest, "\n"); i >= 0; i = strings.Index(rest, "\n") {
+						if strings.HasPrefix(rest[:i], "LATE ") {
+							lines <- rest[:i]
+						}
+						rest = rest[i+1:]
+					}
+					if rerr != nil {
+						close(lines)
+						return
+					}
+				}
+			}()
+			var said []string
+			until := func(prefix string) {
+				t.Helper()
+				for {
+					select {
+					case line, ok := <-lines:
+						if !ok {
+							t.Fatalf("the late opener ended before %q; it said %v", prefix, said)
+						}
+						said = append(said, line)
+						if strings.HasPrefix(line, prefix) {
+							return
+						}
+					case <-ctx.Done():
+						t.Fatalf("the late opener never said %q; it said %v", prefix, said)
+					}
+				}
+			}
+			until("LATE OPENED")
+			if !strings.Contains(said[len(said)-1], "SQLITE_BUSY") {
+				t.Errorf("the late opener read under the hold: %s", said[len(said)-1])
+			}
+			// The publication, as a publisher does it: the old file's stale sidecars go (the hold on
+			// a WAL library keeps an empty -wal), then the rename.
+			for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+				if err = os.Remove(live + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
+			}
+			if err = os.Rename(repl, live); err != nil {
+				t.Fatal(err)
+			}
+			h.Replaced()
+			h.Release()
+			if err = os.WriteFile(goFile, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			until("LATE DONE")
+			t.Logf("late opener: %v", said)
+			for _, line := range said {
+				if line == "LATE WRITE COMMITTED" {
+					t.Errorf("the late opener's write into the replaced library was reported committed")
+				}
+			}
+			for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+				if _, err := os.Lstat(live + suffix); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("the late opener made m.db%s beside the new library: %v", suffix, err)
+				}
+			}
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			chk, err := sql.Open("sqlite", "file:"+live)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer chk.Close()
+			var titles []string
+			rows, err := chk.Query("SELECT title FROM Track ORDER BY id")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for rows.Next() {
+				var s string
+				_ = rows.Scan(&s)
+				titles = append(titles, s)
+			}
+			rows.Close()
+			if len(titles) != 1 || titles[0] != "new-1" {
+				t.Errorf("the published library holds %v, want its own [new-1]", titles)
+			}
+		})
+	}
+}
+
+// A hold that ends without a replacement of the holder's own leaves the file as it is, even when
+// the file lost its name meanwhile and another process has it open: only the holder's own
+// replacement retires it.
+func TestOnlyAReplacedLibraryIsRetired(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the decks' locking is Linux's")
+	}
+	live := holdLibrary(t, "DELETE")
+	before, err := os.ReadFile(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another process has the library open (a rollback-journal library can still be held).
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	stay := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHoldChild$", "-test.v")
+	stay.Env = append(os.Environ(), holdChildEnv+"="+live, holdChildOpEnv+"=stay")
+	out, err := stay.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = stay.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stay.Process.Kill(); _ = stay.Wait() }()
+	buf, seen := make([]byte, 4096), ""
+	for !strings.Contains(seen, "HOLD-CHILD OK") {
+		n, rerr := out.Read(buf)
+		seen += string(buf[:n])
+		if rerr != nil {
+			t.Fatalf("the other process ended early: %v\n%s", rerr, seen)
+		}
+	}
+	if OpenElsewhere(live) == 0 {
+		t.Fatal("fixture: the other process does not have the library open")
+	}
+	h, err := HoldLibrary(context.Background(), live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keep, err := os.Open(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer keep.Close()
+	if err = os.Remove(live); err != nil { // the file has no name any more, and not by the holder's doing
+		t.Fatal(err)
+	}
+	h.Release()
+	after := make([]byte, len(before)+1)
+	n, _ := keep.ReadAt(after, 0)
+	if n != len(before) || string(after[:n]) != string(before) {
+		t.Errorf("a file its holder did not replace was changed at the release: %d bytes, want %d", n, len(before))
+	}
+}

@@ -31,6 +31,7 @@ import (
 const (
 	r13WriterEnv     = "ENGINEX_R13_WRITER"
 	r13WriterModeEnv = "ENGINEX_R13_WRITER_MODE"
+	r13WriterGoEnv   = "ENGINEX_R13_WRITER_GO"
 	r13WindowEnv     = "ENGINEX_R13_WINDOW"
 	r13DJTrack       = `INSERT INTO Track(path,filename,title) VALUES('../Music/dj-live.mp3','dj-live.mp3','DJ Live Track')`
 )
@@ -52,6 +53,21 @@ func TestR13WriterChild(t *testing.T) {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
+	if os.Getenv(r13WriterModeEnv) == "late" {
+		// It opens the library now, whatever its first read says, and writes when told to.
+		var n int
+		err = db.QueryRow("SELECT count(*) FROM Track").Scan(&n)
+		fmt.Printf("R13-WRITER OPENED tracks=%d err=%v\n", n, err)
+		for end := time.Now().Add(time.Minute); ; time.Sleep(5 * time.Millisecond) {
+			if _, e := os.Stat(os.Getenv(r13WriterGoEnv)); e == nil {
+				break
+			}
+			if time.Now().After(end) {
+				fail("wait", errors.New("never told to go on"))
+				return
+			}
+		}
+	}
 	if os.Getenv(r13WriterModeEnv) == "wal" {
 		var mode string
 		if err = db.QueryRow("PRAGMA journal_mode=WAL").Scan(&mode); err != nil {
@@ -596,5 +612,127 @@ func TestR13ARefusedWindowLeavesTheFirstImportAlone(t *testing.T) {
 	}
 	if snap, lerr := rbstate.Load(dir); lerr != nil || len(snap.Tracks) != 4 {
 		t.Errorf("the bridge does not own its 4 tracks after the next insert: %v", lerr)
+	}
+}
+
+// r13LateOpener starts a writer that opens db now and writes when told to: write tells it, and
+// reports whether it was told its row is committed.
+func r13LateOpener(t *testing.T, db string) (write func() bool, stop func()) {
+	t.Helper()
+	goFile := filepath.Join(t.TempDir(), "go")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestR13WriterChild$", "-test.v")
+	cmd.Env = append(os.Environ(), r13WriterEnv+"="+db, r13WriterModeEnv+"=late", r13WriterGoEnv+"="+goFile)
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	stop = func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		cancel()
+	}
+	lines := make(chan string, 8)
+	go func() {
+		sc := bufio.NewScanner(out)
+		for sc.Scan() {
+			if strings.HasPrefix(sc.Text(), "R13-WRITER ") {
+				lines <- sc.Text()
+			}
+		}
+		close(lines)
+	}()
+	next := func(what string) string {
+		select {
+		case line, ok := <-lines:
+			if !ok {
+				stop()
+				t.Fatalf("the late opener ended before %s", what)
+			}
+			t.Logf("late opener: %s", line)
+			return line
+		case <-ctx.Done():
+			stop()
+			t.Fatalf("the late opener said nothing about %s", what)
+		}
+		return ""
+	}
+	if line := next("its open"); !strings.HasPrefix(line, "R13-WRITER OPENED") {
+		stop()
+		t.Fatalf("the late opener did not open the library: %s", line)
+	}
+	return func() bool {
+		if err := os.WriteFile(goFile, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return next("its write") == "R13-WRITER COMMITTED"
+	}, stop
+}
+
+// What the hold alone leaves open, measured for review R13. A program opens the old library after
+// the window's last open-file scan and before its rename, and goes on after the swap. On a WAL
+// library its write makes a -wal beside the new library, and SQLite replays the old file's pages
+// into it. The replaced file is therefore emptied for such a program before the hold ends.
+func TestR13SwapUnderAProgramThatOpensTheLibraryJustBeforeTheRename(t *testing.T) {
+	for _, mode := range []string{"WAL", "DELETE"} {
+		t.Run(mode+" library", func(t *testing.T) {
+			mount := nextStick(t, 4)
+			dir := dbDir(mount)
+			live := filepath.Join(dir, "m.db")
+			if mode == "WAL" {
+				engineWrites(t, mount, "PRAGMA journal_mode=WAL")
+			}
+			makeNextOf(t, mount, func(v *View) {
+				v.Tracks[0].Track.Title = "bridge-next-title"
+				v.Tracks[0].Hash = "bridge-next-hash"
+			})
+			var write func() bool
+			var stop func()
+			prevCut := cut
+			defer func() { cut = prevCut }()
+			cut = func(step string) {
+				if step == "before swap" && stop == nil { // the scans are done, the rename is next
+					write, stop = r13LateOpener(t, live)
+				}
+			}
+			unlock, err := rbstate.LockVolume(mount, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			swapped, _ := swapNext(context.Background(), mount, dir, newSteps(MountOptions{}), false, "")
+			unlock()
+			if stop == nil {
+				t.Fatal("the swap never reached its rename")
+			}
+			committed := write()
+			left := ""
+			for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+				if st, err := os.Lstat(live + suffix); err == nil && (suffix != "-wal" || st.Size() > 0) {
+					left += " m.db" + suffix
+				}
+			}
+			stop()
+			if got := r13Integrity(t, live); got != "ok" {
+				t.Fatalf("the library is corrupt after the swap (swapped=%v, late opener committed=%v): %s", swapped, committed, got)
+			}
+			next := r13Count(t, live, `SELECT count(*) FROM Track WHERE title='bridge-next-title'`)
+			dj := r13Count(t, live, `SELECT count(*) FROM Track WHERE title='DJ Live Track'`)
+			if swapped && next != 1 {
+				t.Errorf("the swap reported success but the library is not the next one (next title rows=%d, late opener committed=%v, its sidecars:%s)", next, committed, left)
+			}
+			if committed && dj != 1 {
+				t.Errorf("the late opener was told its track is committed and it is not in the library (swapped=%v)", swapped)
+			}
+			if swapped && left != "" {
+				t.Errorf("the late opener left sidecars of the old file beside the new library:%s", left)
+			}
+			if !swapped {
+				t.Error("the window did not swap the ready next library in")
+			}
+		})
 	}
 }

@@ -114,7 +114,8 @@ func nextIdentity(ctx context.Context, mount, file string) (uuid string, commit 
 
 // discardNext removes a next library that cannot be gone on with, and its state on the deck.
 func discardNext(dir, uuid string) {
-	for _, name := range []string{rbstate.SwapName, rbstate.BrowseSwapName, nextDB, nextDB + "-journal", nextDB + "-wal", nextDB + "-shm"} {
+	for _, name := range []string{rbstate.SwapName, rbstate.BrowseSwapName, rbstate.SwapName + jobDraft, rbstate.BrowseSwapName + jobDraft,
+		nextDB, nextDB + "-journal", nextDB + "-wal", nextDB + "-shm"} {
 		if err := rbstate.RemoveFile(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("rb-bridge: %s not removed: %v", name, err)
 		}
@@ -308,10 +309,39 @@ func (n *nextBuild) locked(step func() error) error {
 // nextLockHeld, in tests, is told how long each locked step of the build held the lock.
 var nextLockHeld func(time.Duration)
 
-// offer makes the finished next library ready for a window, under the volume's lock: its swap
-// snapshot is written only if the stick's library is still the one the build read. It reports
-// false when a window changed that library meanwhile; the build then goes round again.
+// jobDraft is the suffix of the swap snapshot and browse index while the job writes them: names
+// no window reads. They get their real names under the volume's lock.
+const jobDraft = ".job"
+
+// offer makes the finished next library ready for a window. Its swap snapshot is megabytes on a
+// large library, so it is written first, under a name of the job's own; under the volume's lock
+// it only gets its name, and only if the stick's library is still the one the build read. It
+// reports false when a window changed that library meanwhile; the build then goes round again.
 func (n *nextBuild) offer(snap *rbstate.Snapshot, state, live, swap string) (offered bool, err error) {
+	if n.isBusy() {
+		return false, errDeckBusy
+	}
+	browse := filepath.Join(n.dir, rbstate.BrowseSwapName)
+	snap.Base = state
+	if n.onDemand {
+		snap.Mode = rbstate.ModeOnDemand
+	} else {
+		snap.Mode = rbstate.ModeFull
+	}
+	defer func() {
+		if !offered {
+			_ = rbstate.RemoveFile(swap + jobDraft)
+			_ = rbstate.RemoveFile(browse + jobDraft)
+		}
+	}()
+	if n.onDemand {
+		if err = rbstate.SaveBrowseIndexAsCtx(n.ctx, browse+jobDraft, snap); err != nil {
+			return false, err
+		}
+	}
+	if err = snap.SaveAsCtx(n.ctx, swap+jobDraft); err != nil {
+		return false, err
+	}
 	err = n.locked(func() error {
 		if n.isBusy() {
 			return errDeckBusy
@@ -319,18 +349,12 @@ func (n *nextBuild) offer(snap *rbstate.Snapshot, state, live, swap string) (off
 		if enginedb.LibraryState(live) != state {
 			return nil
 		}
-		snap.Base = state
 		if n.onDemand {
-			snap.Mode = rbstate.ModeOnDemand
-		} else {
-			snap.Mode = rbstate.ModeFull
-		}
-		if n.onDemand {
-			if err := rbstate.SaveBrowseIndexAsCtx(n.ctx, filepath.Join(n.dir, rbstate.BrowseSwapName), snap); err != nil {
+			if err := rbstate.RenameFileCtx(n.ctx, browse+jobDraft, browse); err != nil {
 				return err
 			}
 		}
-		if err := snap.SaveAsCtx(n.ctx, swap); err != nil {
+		if err := rbstate.RenameFileCtx(n.ctx, swap+jobDraft, swap); err != nil {
 			return err
 		}
 		offered = true
@@ -617,13 +641,20 @@ func swapNext(ctx context.Context, mount, dir string, st *steps, onDemand bool, 
 	// SQLite connection of any process reads or writes it meanwhile, or makes a sidecar of it.
 	// Every check is repeated under it; a library that is not the one the next one was made
 	// from (or carried over from, just above) stays, and the job takes its changes first.
-	hold, err := enginedb.HoldLibrary(ctx, live)
+	// Not under the window's deadline: the swap is a few file operations whatever the library's
+	// size, and the hold has its own limit of a millisecond for a library that is busy.
+	hold, err := enginedb.HoldLibrary(context.WithoutCancel(ctx), live)
+	if errors.Is(err, os.ErrNotExist) {
+		// A stick without a library (the job made its first one): there is no file to hold, and
+		// the volume's lock alone orders our programs. hold stays nil.
+		hold, err = nil, nil
+	}
 	if err != nil {
 		log.Printf("rb-bridge: next library not swapped in, the stick's library is not free: %v", err)
 		return false, false
 	}
 	defer hold.Release()
-	if !hold.Is(h.Base) {
+	if (hold != nil && !hold.Is(h.Base)) || (hold == nil && h.Base != enginedb.LibraryState(live)) {
 		log.Printf("rb-bridge: the stick's library changed after the next one was made; the job takes the changes first")
 		return false, false
 	}
@@ -639,13 +670,19 @@ func swapNext(ctx context.Context, mount, dir string, st *steps, onDemand bool, 
 		return false, false
 	}
 	cut("before swap")
-	if err = hold.Same(); err == nil {
+	if hold != nil {
+		err = hold.Same()
+	} else if _, e := os.Lstat(live); !errors.Is(e, os.ErrNotExist) {
+		err = fmt.Errorf("%w: a library appeared where there was none", enginedb.ErrLibraryChanged)
+	}
+	if err == nil {
 		err = rbstate.RenameFile(next, live)
 	}
 	if err != nil {
 		log.Printf("rb-bridge: next library not swapped in: %v", err)
 		return false, false
 	}
+	hold.Replaced()
 	cut("swapped")
 	if !finish() {
 		return false, false

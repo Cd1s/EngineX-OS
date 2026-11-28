@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"os/exec"
@@ -377,6 +378,7 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 		os.Remove(tmp)
 		return false, err
 	}
+	retireReserveOriginal(ctx, path, origPin)
 	if reserveAfterRename != nil {
 		reserveAfterRename(path)
 	}
@@ -395,6 +397,60 @@ func lockLibraryVolume(ctx context.Context, path string) (unlock func(), err err
 	}
 	_, unlock, err = rbstate.HoldVolume(ctx, filepath.Dir(lib), 0)
 	return unlock, err
+}
+
+// retireReserveOriginal retires the original after the rebuilt library took its name, while the
+// exclusive lock on it is still held (rbstate.RetireReplaced): a process that opened it just
+// before the rename finds it empty. The original lives on as <path>.pre-reserve when the
+// backup is a hard link; the backup is then made a file of its own first, so that it stays
+// whole. When that copy cannot be made the original is left as it is.
+func retireReserveOriginal(ctx context.Context, path string, origPin *os.File) {
+	if origPin == nil || !rbstate.ReplacedHeldElsewhere(origPin) {
+		return
+	}
+	if st, err := origPin.Stat(); err != nil {
+		return
+	} else if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Nlink != 0 {
+		if err := unshareReserveBackup(ctx, path, origPin, st); err != nil {
+			log.Printf("dbhealer: %s: the backup could not be made a file of its own: %v", path, err)
+			return
+		}
+	}
+	if _, err := rbstate.RetireReplaced(origPin); err != nil {
+		log.Printf("dbhealer: %s: the replaced original could not be retired: %v", path, err)
+	}
+}
+
+// unshareReserveBackup replaces the hard-linked backup by a copy of the original.
+func unshareReserveBackup(ctx context.Context, path string, origPin *os.File, info os.FileInfo) error {
+	tmp := path + ".pre-reserve.tmp"
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	defer os.Remove(tmp)
+	dst, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	err = copyFileFromPinIsolated(ctx, origPin, path, dst)
+	if err == nil {
+		err = dst.Sync()
+	}
+	if closeErr := dst.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if err = os.Rename(tmp, path+".pre-reserve"); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func ensureSameLiveFile(path string, origInfo os.FileInfo) error {
