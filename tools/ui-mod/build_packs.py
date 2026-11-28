@@ -3681,12 +3681,12 @@ SERVICES_MAIN = """
 		void lang
 		const host = st && st.online ? String(st.hostname || st.endpoint || "") : ""
 		if (!host) return scT("On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network.")
-		const en = scLang === "en"
+		const sp = scLang === "zh-Hans" || scLang === "zh-Hant" ? "" : " "
 		// #238: only the neural model is worth leaving the deck for. A service without it
 		// offers hpss (so did every service that does not name its backend), and
 		// stems-processor then separates on the deck: the line says which one is used.
-		if (st.backend === "htdemucs") return scT("High-quality stems:") + (en ? " " : "") + host + " (htdemucs)"
-		return scT("On-deck stems (basic quality): %1 only offers hpss, which is not used.").replace("%1", () => host) + (en ? " " : "") + scT("For high-quality stems, that computer needs the htdemucs model.")
+		if (st.backend === "htdemucs") return scT("High-quality stems:") + sp + host + " (htdemucs)"
+		return scT("On-deck stems (basic quality): %1 only offers hpss, which is not used.").replace("%1", () => host) + sp + scT("For high-quality stems, that computer needs the htdemucs model.")
 	}
 	property string scUpdateText: ""
 	property bool scBroadcastOn: false

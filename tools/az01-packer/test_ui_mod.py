@@ -8461,16 +8461,16 @@ class StemsHqHintAndInstallerTest(unittest.TestCase):
         online_prefix = "High-quality stems:"
         basic_hint = "For high-quality stems, that computer needs the htdemucs model."
         on_deck = "On-deck stems (basic quality): %1 only offers hpss, which is not used."
-        for lang in ("zh-Hans", "zh-Hant"):
+        for lang in ("zh-Hans", "zh-Hant", "es"):
             self.assertIn("%1", rows[on_deck][lang])
             self.assertIn("hpss", rows[on_deck][lang])
-        self.assertIn("htdemucs", rows[basic_hint]["zh-Hans"])
+            self.assertIn("htdemucs", rows[basic_hint][lang])
+            self.assertIn("EngineX Stems", rows[offline_en][lang])
         self.assertIn(offline_en, rows)
         self.assertIn(online_prefix, rows)
-        self.assertIn("EngineX Stems", rows[offline_en]["zh-Hans"])
-        self.assertIn("EngineX Stems", rows[offline_en]["zh-Hant"])
         self.assertEqual(rows[online_prefix]["zh-Hans"], "高音质分轨：")
         self.assertEqual(rows[online_prefix]["zh-Hant"], "高音質分軌：")
+        self.assertEqual(rows[online_prefix]["es"], "Stems de alta calidad:")
         self.assertIn('LibraryTabContent.qml"].append', SRC)
         self.assertIn("root.scLanStemsLine(root.scLanStemsInfo, root.scLang)", SRC)
         fn = re.search(r"function scLanStemsLine\([^)]*\)\s*\{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
@@ -8498,6 +8498,10 @@ scLang = 'zh-Hant';
 assert.equal(scLanStemsLine(null, scLang), rows[{json.dumps(offline_en)}]['zh-Hant']);
 assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'htdemucs'}}, scLang), '高音質分軌：studio-mac (htdemucs)');
 assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hpss'}}, scLang), '本機分軌（基礎音質）：studio-mac 只提供 hpss，不會使用。如需高音質分軌，該電腦需要安裝 htdemucs 模型。');
+scLang = 'es';
+assert.equal(scLanStemsLine(null, scLang), rows[{json.dumps(offline_en)}]['es']);
+assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'htdemucs'}}, scLang), 'Stems de alta calidad: studio-mac (htdemucs)');
+assert.equal(scLanStemsLine({{online: true, endpoint: 'http://192.168.1.9:17890'}}, scLang), 'Stems en el deck (calidad básica): http://192.168.1.9:17890 solo ofrece hpss, que no se utiliza. Para stems de alta calidad, ese ordenador necesita el modelo htdemucs.');
 // #238 review: a relay that only offers hpss plus a home computer with the neural model.
 // The deck is told about the renderer the track goes to (pkg/webui
 // TestStemsStatusShowsTheRendererInUse): the computer, and only the relay when it is alone.
@@ -8507,6 +8511,7 @@ for (const [lang, used, notUsed] of [
     ['en', 'High-quality stems: studio-pc (htdemucs)', 'On-deck stems (basic quality): relay-box only offers hpss, which is not used. For high-quality stems, that computer needs the htdemucs model.'],
     ['zh-Hans', '高音质分轨：studio-pc (htdemucs)', '本机分轨（基础音质）：relay-box 只提供 hpss，不会使用。如需高音质分轨，该电脑需要安装 htdemucs 模型。'],
     ['zh-Hant', '高音質分軌：studio-pc (htdemucs)', '本機分軌（基礎音質）：relay-box 只提供 hpss，不會使用。如需高音質分軌，該電腦需要安裝 htdemucs 模型。'],
+    ['es', 'Stems de alta calidad: studio-pc (htdemucs)', 'Stems en el deck (calidad básica): relay-box solo ofrece hpss, que no se utiliza. Para stems de alta calidad, ese ordenador necesita el modelo htdemucs.'],
 ]) {{
     scLang = lang;
     assert.equal(scLanStemsLine(computer, lang), used);
@@ -8515,6 +8520,300 @@ for (const [lang, used, notUsed] of [
 """
         r = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_web_console_stems_status_matches_issue238_across_four_languages(self):
+        html = (REPO / "pkg/webui/index.html").read_text(encoding="utf-8")
+        t_match = re.search(r"const\s+T\s*=\s*\{", html)
+        self.assertIsNotNone(t_match, "missing translation table in pkg/webui/index.html")
+        t_start = t_match.start()
+        t_end_rel = html.find("\n};\n", t_start)
+        self.assertGreaterEqual(t_end_rel, 0, "unterminated translation table in pkg/webui/index.html")
+        t_table = html[t_start : t_end_rel + 4]
+        t_fn = re.search(r"(?m)^function t\(k,\.\.\.a\)\{[^\n]+", html).group(0)
+        relay_vars = re.search(r"(?m)^let relayTimer=[^\n]+", html)
+        self.assertIsNotNone(relay_vars, "pkg/webui/index.html must declare relayTimer/relayUrlDirty state")
+        stems_fn = re.search(r"(?m)^function stemsLine\([^\n]+", html)
+        self.assertIsNotNone(stems_fn, "pkg/webui/index.html must define stemsLine() for #238 Stems status")
+        show_relay = re.search(r"(?m)^async function showRelay\([^\n]+", html).group(0)
+        script = f"""
+const assert = require('assert');
+{t_table}
+const LANGS = ['en', 'zh-Hans', 'zh-Hant', 'es'];
+let lang = 'en';
+{t_fn}
+{relay_vars.group(0)}
+{stems_fn.group(0)}
+let lastUI = {{capabilities: {{remoteStems: true}}}};
+let relayResp = {{}};
+const els = {{relayUrl: {{value: ''}}, relayState: {{textContent: ''}}}};
+const $ = id => els[id];
+const document = {{activeElement: null}};
+const setVal = (id, x) => {{ els[id].value = x; }};
+async function api() {{ return relayResp; }}
+{show_relay}
+(async () => {{
+  for (const [l, hq, hpss, unavail, deck] of [
+    ['en', 'High-quality stems: studio-pc (htdemucs)', 'On-deck stems (basic quality): relay-box only offers hpss, which is not used (needs htdemucs)', 'On-deck stems (basic quality); studio-pc unavailable (use htdemucs on a LAN PC for high quality)', 'On-deck stems (basic quality); run EngineX Stems (htdemucs) on a LAN PC for high quality'],
+    ['zh-Hans', '高音质分轨：studio-pc（htdemucs）', '本机分轨（基础音质）：relay-box 只提供 hpss，不会使用（需 htdemucs）', '本机分轨（基础音质）；studio-pc 暂不可用（局域网电脑运行 htdemucs 可获高音质）', '本机分轨（基础音质）；如需高音质请在局域网电脑运行 EngineX Stems（htdemucs）'],
+    ['zh-Hant', '高音質分軌：studio-pc（htdemucs）', '本機分軌（基礎音質）：relay-box 只提供 hpss，不會使用（需 htdemucs）', '本機分軌（基礎音質）；studio-pc 暫不可用（區域網路電腦執行 htdemucs 可獲高音質）', '本機分軌（基礎音質）；如需高音質請在區域網路電腦執行 EngineX Stems（htdemucs）'],
+    ['es', 'Stems de alta calidad: studio-pc (htdemucs)', 'Stems en el deck (calidad básica): relay-box solo ofrece hpss, que no se utiliza (necesita htdemucs)', 'Stems en el deck (calidad básica); studio-pc no disponible (usa htdemucs en un PC de la red para alta calidad)', 'Stems en el deck (calidad básica); ejecuta EngineX Stems (htdemucs) en un PC de la red para alta calidad'],
+  ]) {{
+    lang = l;
+    lastUI = {{capabilities: {{remoteStems: true}}}};
+    relayResp = {{relayUrl: '', deemixPasswordSet: false, lanStems: {{online: true, hostname: 'studio-pc', backend: 'htdemucs'}}}};
+    await showRelay();
+    assert.equal(els.relayState.textContent, t('pwUnset') + ' · ' + hq);
+
+    relayResp = {{relayUrl: '', deemixPasswordSet: true, lanStems: {{online: true, hostname: 'relay-box', backend: 'hpss', relay: true}}}};
+    await showRelay();
+    assert.equal(els.relayState.textContent, t('pwSet') + ' · ' + hpss);
+
+    // #336 E3: a reachable busy relay (HTTP 200 ok:true, busy:true -> online:false) uses neutral "unavailable".
+    relayResp = {{relayUrl: '', deemixPasswordSet: false, lanStems: {{online: false, hostname: 'studio-pc', backend: 'htdemucs', relay: true}}}};
+    await showRelay();
+    assert.equal(els.relayState.textContent, t('pwUnset') + ' · ' + unavail);
+    assert.ok(!/offline|离线|離線|desconectado/i.test(els.relayState.textContent), l + ' called busy renderer offline');
+
+    relayResp = {{relayUrl: '', deemixPasswordSet: false, lanStems: null}};
+    await showRelay();
+    assert.equal(els.relayState.textContent, t('pwUnset') + ' · ' + deck);
+  }}
+  lang = 'en';
+  // Endpoint fallback when hostname is absent, unnamed backend treated as hpss, and $& preserved verbatim.
+  assert.equal(stemsLine({{online: true, endpoint: 'http://192.168.1.9:17890', backend: 'htdemucs'}}, true), 'High-quality stems: http://192.168.1.9:17890 (htdemucs)');
+  assert.equal(stemsLine({{online: true, endpoint: 'http://192.168.1.9:17890'}}, true), 'On-deck stems (basic quality): http://192.168.1.9:17890 only offers hpss, which is not used (needs htdemucs)');
+  assert.ok(stemsLine({{online: true, hostname: 'a$&b', backend: 'hpss'}}, true).includes('a$&b only offers hpss'));
+  // AZ04 units use stock neural Stems and omit EngineX basic-quality/LAN Stems status.
+  lastUI = {{capabilities: {{remoteStems: false}}}};
+  relayResp = {{relayUrl: '', deemixPasswordSet: false, lanStems: null}};
+  await showRelay();
+  assert.equal(els.relayState.textContent, t('pwUnset'));
+}})().catch(e => {{ console.error(e); process.exit(1); }});
+"""
+        r = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_web_console_relay_card_live_refresh_and_preserves_unsaved_edits(self):
+        html = (REPO / "pkg/webui/index.html").read_text(encoding="utf-8")
+        self.assertTrue('<details class="card" id="relayCard">' in html, "pkg/webui/index.html missing id=\"relayCard\"")
+        t_match = re.search(r"const\s+T\s*=\s*\{", html)
+        self.assertIsNotNone(t_match)
+        t_start = t_match.start()
+        t_end_rel = html.find("\n};\n", t_start)
+        self.assertGreaterEqual(t_end_rel, 0)
+        t_table = html[t_start : t_end_rel + 4]
+        t_fn = re.search(r"(?m)^function t\(k,\.\.\.a\)\{[^\n]+", html).group(0)
+        set_val = re.search(r"(?m)^const setVal=[^\n]+", html).group(0)
+        relay_vars = re.search(r"(?m)^let relayTimer=[^\n]+", html)
+        self.assertIsNotNone(relay_vars, "missing relayTimer/relayUrlDirty declarations")
+        stems_fn = re.search(r"(?m)^function stemsLine\([^\n]+", html).group(0)
+        show_relay = re.search(r"(?m)^async function showRelay\([^\n]+", html).group(0)
+        sync_poll = re.search(r"(?m)^function syncRelayPoll\(\)[^\n]+", html)
+        self.assertIsNotNone(sync_poll, "missing syncRelayPoll() for Relay card toggle/polling")
+        save_relay = re.search(r"(?m)^async function saveRelay\(\)[^\n]+", html).group(0)
+        self.assertIn("$('relayUrl').oninput=()=>{relayUrlDirty=true};", html)
+        self.assertIn("$('relayCard').ontoggle=syncRelayPoll;", html)
+        script = f"""
+const assert = require('assert');
+{t_table}
+const LANGS = ['en', 'zh-Hans', 'zh-Hant', 'es'];
+let lang = 'en';
+{t_fn}
+const els = {{
+  relayCard: {{open: false, ontoggle: null}},
+  relayUrl: {{value: '', oninput: null}},
+  relayPassword: {{value: ''}},
+  relayState: {{textContent: ''}},
+}};
+const $ = id => els[id];
+const document = {{activeElement: null, hidden: false}};
+let lastUI = {{capabilities: {{remoteStems: true}}}};
+let timers = [], nextTimerId = 1;
+function setInterval(fn, ms) {{
+  const id = nextTimerId++;
+  timers.push({{id, fn, ms}});
+  return id;
+}}
+function clearInterval(id) {{
+  timers = timers.filter(t => t.id !== id);
+}}
+let relayResp = {{relayUrl: 'https://saved.example', deemixPasswordSet: false, lanStems: null}};
+let apiCalls = [];
+let pendingResolvers = [];
+async function api(path, opts) {{
+  apiCalls.push({{path, method: (opts && opts.method) || 'GET', body: opts && opts.body}});
+  if (opts && opts.method === 'POST') {{
+    const body = JSON.parse(opts.body);
+    relayResp = {{...relayResp, relayUrl: body.relayUrl, deemixPasswordSet: !!body.deemixPassword || relayResp.deemixPasswordSet}};
+    return relayResp;
+  }}
+  if (relayResp && relayResp._defer) {{
+    return new Promise(res => pendingResolvers.push(res));
+  }}
+  return relayResp;
+}}
+{set_val}
+{relay_vars.group(0)}
+{stems_fn}
+{show_relay}
+{sync_poll.group(0)}
+els.relayUrl.oninput = () => {{ relayUrlDirty = true; }};
+els.relayCard.ontoggle = syncRelayPoll;
+{save_relay}
+(async () => {{
+  // 1. Cold start with closed card: 1 startup read, 0 background poll timers.
+  await showRelay();
+  assert.equal(apiCalls.length, 1);
+  assert.equal(timers.length, 0);
+  assert.ok(els.relayState.textContent.includes('basic quality'));
+  assert.equal(els.relayUrl.value, 'https://saved.example');
+
+  // 2. Worker comes up after cold start; opening Relay card fetches immediately & starts bounded poll.
+  relayResp = {{relayUrl: 'https://saved.example', deemixPasswordSet: false, lanStems: {{online: true, hostname: 'B', backend: 'htdemucs'}}}};
+  els.relayCard.open = true;
+  els.relayCard.ontoggle();
+  await new Promise(r => setImmediate(r));
+  assert.equal(apiCalls.length, 2);
+  assert.equal(timers.length, 1);
+  assert.ok(timers[0].ms >= 5000 && timers[0].ms <= 10000);
+  assert.ok(els.relayState.textContent.includes('High-quality stems: B (htdemucs)'));
+
+  // 3. User edits URL + password and blurs URL; bounded poll updates status (busy -> unavailable) without clobbering edits.
+  els.relayUrl.value = 'https://unsaved-draft.example';
+  els.relayUrl.oninput();
+  els.relayPassword.value = 'unsaved-secret';
+  document.activeElement = els.relayPassword;
+  relayResp = {{relayUrl: 'https://saved.example', deemixPasswordSet: true, lanStems: {{online: false, hostname: 'B', backend: 'htdemucs', relay: true}}}};
+  timers[0].fn();
+  await new Promise(r => setImmediate(r));
+  assert.equal(apiCalls.length, 3);
+  assert.ok(els.relayState.textContent.includes('B unavailable'));
+  assert.ok(!/offline/i.test(els.relayState.textContent));
+  assert.equal(els.relayUrl.value, 'https://unsaved-draft.example');
+  assert.equal(els.relayPassword.value, 'unsaved-secret');
+
+  // 4. Hidden tab skips interval poll.
+  document.hidden = true;
+  timers[0].fn();
+  await new Promise(r => setImmediate(r));
+  assert.equal(apiCalls.length, 3);
+  document.hidden = false;
+
+  // 5. Out-of-order response guard: older slow refresh never overwrites a newer refresh.
+  relayResp = {{_defer: true}};
+  const slow = showRelay(true);
+  const fast = showRelay(true);
+  assert.equal(pendingResolvers.length, 2);
+  pendingResolvers[1]({{relayUrl: 'https://saved.example', deemixPasswordSet: false, lanStems: {{online: true, hostname: 'NEW', backend: 'htdemucs'}}}});
+  await fast;
+  assert.ok(els.relayState.textContent.includes('High-quality stems: NEW (htdemucs)'));
+  pendingResolvers[0]({{relayUrl: 'https://saved.example', deemixPasswordSet: false, lanStems: null}});
+  await slow;
+  assert.ok(els.relayState.textContent.includes('High-quality stems: NEW (htdemucs)'));
+
+  // 6. Collapsing Relay card immediately stops polling.
+  els.relayCard.open = false;
+  els.relayCard.ontoggle();
+  assert.equal(timers.length, 0);
+
+  // 7. saveRelay clears dirty flag & password and refreshes saved URL cleanly.
+  relayResp = {{relayUrl: 'https://unsaved-draft.example', deemixPasswordSet: true, lanStems: {{online: true, hostname: 'B', backend: 'htdemucs'}}}};
+  await saveRelay();
+  assert.equal(els.relayPassword.value, '');
+  assert.equal(relayUrlDirty, false);
+  assert.equal(els.relayUrl.value, 'https://unsaved-draft.example');
+}})().catch(e => {{ console.error(e); process.exit(1); }});
+"""
+        r = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    @unittest.skipUnless(
+        shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome"),
+        "chromium is required for the browser lifecycle test",
+    )
+    def test_web_console_relay_card_chromium_lifecycle(self):
+        from html import unescape
+        browser = shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome")
+        page = (REPO / "pkg/webui/index.html").read_text(encoding="utf-8")
+        probe = r"""<script>
+let worker = null, serverUrl = 'https://saved.example', reads = 0, ticks = 0;
+window.fetch = async input => {
+  const route = String(input).split('?')[0];
+  let body = {};
+  if (route === '/api/ui') body = {language:'en', capabilities:{remoteStems:true}};
+  if (route === '/api/relay') { reads++; body = {relayUrl:serverUrl, deemixPasswordSet:false, lanStems:worker}; }
+  if (route === '/api/jobs') ticks++;
+  if (['/api/sessions','/api/drives'].includes(route)) body = [];
+  if (route === '/api/hook-features') body = {features:[]};
+  return {ok:true, json:async()=>body};
+};
+const status = () => document.getElementById('relayState').textContent;
+let startText, initialReads, afterOpenText, afterOpenReads, afterBusyPollText, draftUrl, draftPw, readsAtClose, readsAfterClose;
+setTimeout(() => {
+  startText = status(); initialReads = reads;
+  worker = {online:true, hostname:'B', backend:'htdemucs'};
+}, 1000);
+setTimeout(() => {
+  document.getElementById('relayState').closest('details').querySelector('summary').click();
+}, 2000);
+setTimeout(() => {
+  afterOpenText = status(); afterOpenReads = reads;
+  // Switch worker to reachable busy (online:false) and type unsaved edits while unfocused.
+  worker = {online:false, hostname:'B', backend:'htdemucs', relay:true};
+  serverUrl = 'https://server-changed.example';
+  const urlEl = document.getElementById('relayUrl');
+  const pwEl = document.getElementById('relayPassword');
+  urlEl.value = 'https://unsaved.example';
+  urlEl.dispatchEvent(new Event('input', {bubbles:true}));
+  pwEl.value = 'draft-pw';
+  pwEl.focus();
+}, 3500);
+setTimeout(() => {
+  afterBusyPollText = status();
+  draftUrl = document.getElementById('relayUrl').value;
+  draftPw = document.getElementById('relayPassword').value;
+  document.getElementById('relayState').closest('details').querySelector('summary').click();
+  readsAtClose = reads;
+}, 12000);
+setTimeout(() => {
+  readsAfterClose = reads;
+  const out = document.createElement('pre');
+  out.id = 'e3-browser-result';
+  out.textContent = JSON.stringify({
+    startText, initialReads, afterOpenText, afterOpenReads,
+    afterBusyPollText, draftUrl, draftPw, readsAtClose, readsAfterClose, ticks
+  });
+  document.body.appendChild(out);
+}, 35000);
+</script>"""
+        with tempfile.TemporaryDirectory(prefix="f336-e3-chromium-") as directory:
+            work = Path(directory)
+            html_file = work / "console.html"
+            html_file.write_text(page.replace("<script>", probe + "<script>", 1), encoding="utf-8")
+            dom = subprocess.check_output(
+                [
+                    browser, "--headless", "--no-sandbox", "--disable-gpu",
+                    "--disable-background-networking", "--disable-dev-shm-usage",
+                    "--user-data-dir=" + str(work / "browser"),
+                    "--virtual-time-budget=36000", "--dump-dom",
+                    html_file.as_uri() + "?lang=en",
+                ],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+        match = re.search(r'<pre id="e3-browser-result">([^<]+)</pre>', dom)
+        self.assertIsNotNone(match, "Chromium did not finish lifecycle observation")
+        obs = json.loads(unescape(match.group(1)))
+        self.assertIn("basic quality", obs["startText"])
+        self.assertEqual(obs["initialReads"], 1)
+        self.assertIn("High-quality stems: B (htdemucs)", obs["afterOpenText"])
+        self.assertGreaterEqual(obs["afterOpenReads"], 2)
+        self.assertIn("B unavailable", obs["afterBusyPollText"])
+        self.assertNotIn("offline", obs["afterBusyPollText"].lower())
+        self.assertEqual(obs["draftUrl"], "https://unsaved.example")
+        self.assertEqual(obs["draftPw"], "draft-pw")
+        self.assertEqual(obs["readsAfterClose"], obs["readsAtClose"], "collapsed Relay card must stop polling")
+        self.assertGreaterEqual(obs["ticks"], 10)
 
     def test_home_worker_scripts_default_to_demucs_and_keep_hpss(self):
         import os
