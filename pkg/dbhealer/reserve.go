@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	sqlite "modernc.org/sqlite"
 )
@@ -98,6 +99,16 @@ func registerActiveReserveFile(key fileDevIno, f *os.File) func() {
 // Reserve reports header byte 20 of a plain SQLite file; ok is false for a
 // missing file or anything that is not a SQLite database.
 func Reserve(path string) (reserve byte, ok bool, err error) {
+	return reserveHeaderContext(context.Background(), path)
+}
+
+func reserveHeaderContext(ctx context.Context, path string) (reserve byte, ok bool, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
 	st, serr := os.Stat(path)
 	if serr != nil {
 		return 0, false, serr
@@ -105,23 +116,47 @@ func Reserve(path string) (reserve byte, ok bool, err error) {
 	if st.IsDir() {
 		return 0, false, &os.PathError{Op: "read", Path: path, Err: syscall.EISDIR}
 	}
-	if key, okKey := statDevIno(st); okKey {
-		if f, release := pinActiveReserveFile(key); f != nil {
-			defer release()
-			return readReserveFromFile(f)
-		}
+	if !st.Mode().IsRegular() {
+		return 0, false, &os.PathError{Op: "read", Path: path, Err: syscall.ESPIPE}
 	}
 	if !sqlite.OFDLockingEnabled() {
 		// Under POSIX F_SETLK fallback, opening and closing path inside this process
 		// would drop any same-process SQLite locks on the inode; inspect in a child PID.
-		return readReserveHeaderIsolated(path)
+		r, ok, err := readReserveHeaderIsolated(ctx, path)
+		if err != nil {
+			return 0, false, err
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			return 0, false, cerr
+		}
+		return r, ok, nil
+	}
+	if key, okKey := statDevIno(st); okKey {
+		if f, release := pinActiveReserveFile(key); f != nil {
+			defer release()
+			r, ok, err := readReserveFromFile(f)
+			if err != nil {
+				return 0, false, err
+			}
+			if cerr := ctx.Err(); cerr != nil {
+				return 0, false, cerr
+			}
+			return r, ok, nil
+		}
 	}
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, false, err
 	}
 	defer f.Close()
-	return readReserveFromFile(f)
+	r, ok, err := readReserveFromFile(f)
+	if err != nil {
+		return 0, false, err
+	}
+	if cerr := ctx.Err(); cerr != nil {
+		return 0, false, cerr
+	}
+	return r, ok, nil
 }
 
 func parseReserveHeader(h []byte) (reserve byte, ok bool) {
@@ -143,20 +178,69 @@ func readReserveFromFile(f *os.File) (reserve byte, ok bool, err error) {
 	return r, ok, nil
 }
 
-func readReserveHeaderIsolated(path string) (reserve byte, ok bool, err error) {
-	cmd := exec.Command("/bin/sh", "-c", `exec < "$1" && exec dd bs=100 count=1 2>/dev/null`, "_", path)
+func configureIsolatedCommand(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 50 * time.Millisecond
+}
+
+func readReserveHeaderIsolated(ctx context.Context, path string) (reserve byte, ok bool, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", `exec < "$1" && exec dd bs=100 count=1 2>/dev/null`, "_", path)
+	configureIsolatedCommand(cmd)
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 	if runErr := cmd.Run(); runErr != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return 0, false, cerr
+		}
 		msg := strings.TrimSpace(errBuf.String())
 		if msg != "" {
 			return 0, false, fmt.Errorf("read reserve header %s: %w (%s)", path, runErr, msg)
 		}
 		return 0, false, fmt.Errorf("read reserve header %s: %w", path, runErr)
 	}
+	if cerr := ctx.Err(); cerr != nil {
+		return 0, false, cerr
+	}
 	r, ok := parseReserveHeader(outBuf.Bytes())
 	return r, ok, nil
+}
+
+func copyFileIsolated(ctx context.Context, srcPath string, dst *os.File) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", `exec < "$1" && exec cat`, "_", srcPath)
+	configureIsolatedCommand(cmd)
+	var errBuf bytes.Buffer
+	cmd.Stdout = dst
+	cmd.Stderr = &errBuf
+	if runErr := cmd.Run(); runErr != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		msg := strings.TrimSpace(errBuf.String())
+		if msg != "" {
+			return fmt.Errorf("copy %s: %w (%s)", srcPath, runErr, msg)
+		}
+		return fmt.Errorf("copy %s: %w", srcPath, runErr)
+	}
+	return ctx.Err()
 }
 
 // NormalizeReserve rebuilds a plain library whose per-page reserve byte is not 0.
@@ -183,8 +267,15 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	if r, ok, err := Reserve(path); err != nil || !ok || r == 0 {
+	r, ok, err := reserveHeaderContext(ctx, path)
+	if err != nil {
 		return false, err
+	}
+	if cerr := ctx.Err(); cerr != nil {
+		return false, cerr
+	}
+	if !ok || r == 0 {
+		return false, nil
 	}
 	if err := checkNoPendingJournals(path); err != nil {
 		return false, err
@@ -194,8 +285,9 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 		return false, err
 	}
 
-	// Close origFile last (after ROLLBACK and srcDB.Close) so an extra descriptor
-	// close on path cannot strip active SQLite locks under POSIX fcntl semantics.
+	// In OFD mode, close origFile last (after ROLLBACK and srcDB.Close). Under POSIX
+	// fallback, never open origFile in the parent process at all so teardown can
+	// never release a subsequent owner's POSIX fcntl lock.
 	var cleanupOrigFile func()
 	defer func() {
 		if cleanupOrigFile != nil {
@@ -240,37 +332,55 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 	if _, err = srcConn.ExecContext(ctx, "BEGIN EXCLUSIVE"); err != nil {
 		return false, err
 	}
-	inTx := true
 	defer func() {
-		if inTx {
-			_, _ = srcConn.ExecContext(context.Background(), "ROLLBACK")
-		}
+		_, _ = srcConn.ExecContext(context.Background(), "ROLLBACK")
 	}()
 
-	origFile, err := os.Open(path)
-	if err != nil {
-		return false, err
-	}
-	origInfo, err := origFile.Stat()
-	if err != nil {
-		cleanupOrigFile = func() { _ = origFile.Close() }
-		return false, err
-	}
-	if key, okKey := statDevIno(origInfo); okKey {
-		cleanupOrigFile = registerActiveReserveFile(key, origFile)
-	} else {
-		cleanupOrigFile = func() { _ = origFile.Close() }
-	}
+	var origFile *os.File
+	var origInfo os.FileInfo
+	if sqlite.OFDLockingEnabled() {
+		origFile, err = os.Open(path)
+		if err != nil {
+			return false, err
+		}
+		origInfo, err = origFile.Stat()
+		if err != nil {
+			cleanupOrigFile = func() { _ = origFile.Close() }
+			return false, err
+		}
+		if key, okKey := statDevIno(origInfo); okKey {
+			cleanupOrigFile = registerActiveReserveFile(key, origFile)
+		} else {
+			cleanupOrigFile = func() { _ = origFile.Close() }
+		}
 
-	stPath, err := os.Stat(path)
+		stPath, err := os.Stat(path)
+		if err != nil {
+			return false, err
+		}
+		if !os.SameFile(info, origInfo) || !os.SameFile(origInfo, stPath) {
+			return false, fmt.Errorf("%s changed before lock acquisition", path)
+		}
+		r, ok, err = readReserveFromFile(origFile)
+	} else {
+		stPath, serr := os.Stat(path)
+		if serr != nil {
+			return false, serr
+		}
+		if !os.SameFile(info, stPath) {
+			return false, fmt.Errorf("%s changed before lock acquisition", path)
+		}
+		origInfo = stPath
+		r, ok, err = readReserveHeaderIsolated(ctx, path)
+	}
 	if err != nil {
 		return false, err
 	}
-	if !os.SameFile(info, origInfo) || !os.SameFile(origInfo, stPath) {
-		return false, fmt.Errorf("%s changed before lock acquisition", path)
+	if cerr := ctx.Err(); cerr != nil {
+		return false, cerr
 	}
-	if r, ok, err := readReserveFromFile(origFile); err != nil || !ok || r == 0 {
-		return false, err
+	if !ok || r == 0 {
+		return false, nil
 	}
 	if err := checkNoPendingJournals(path); err != nil {
 		return false, err
@@ -327,12 +437,22 @@ func normalizeReserveContext(ctx context.Context, path string, validate func(con
 			os.Remove(tmp)
 			return false, err
 		}
-		// Clean up any stale pre-existing -shm / 0-byte -wal (e.g. from the read-only
-		// preflight) BEFORE os.Rename while still holding BEGIN EXCLUSIVE on path,
-		// without mutating path's header bytes or hardlinked .pre-reserve backup.
-		_ = os.Remove(path + "-shm")
-		if st, serr := os.Stat(path + "-wal"); serr == nil && st.Size() == 0 {
-			_ = os.Remove(path + "-wal")
+		// Clean up any stale pre-existing -shm / 0-byte -wal BEFORE os.Rename
+		// while still holding BEGIN EXCLUSIVE on path, propagating any error.
+		if remErr := os.Remove(path + "-shm"); remErr != nil && !errors.Is(remErr, os.ErrNotExist) {
+			os.Remove(tmp)
+			return false, fmt.Errorf("%s-shm: %w", path, remErr)
+		}
+		if st, serr := os.Stat(path + "-wal"); serr != nil {
+			if !errors.Is(serr, os.ErrNotExist) {
+				os.Remove(tmp)
+				return false, fmt.Errorf("%s-wal: %w", path, serr)
+			}
+		} else if st.Size() == 0 {
+			if remErr := os.Remove(path + "-wal"); remErr != nil && !errors.Is(remErr, os.ErrNotExist) {
+				os.Remove(tmp)
+				return false, fmt.Errorf("%s-wal: %w", path, remErr)
+			}
 		}
 	}
 	if err = reserveRename(tmp, path); err != nil {
@@ -361,6 +481,13 @@ func backupReserve(path string) error {
 }
 
 func backupReserveContext(ctx context.Context, path string) error {
+	if !sqlite.OFDLockingEnabled() {
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		return backupReserveFromFileContext(ctx, path, nil, info)
+	}
 	origFile, err := os.Open(path)
 	if err != nil {
 		return err
@@ -386,36 +513,40 @@ func backupReserveFromFileContext(ctx context.Context, path string, origFile *os
 	}
 	defer os.Remove(tmp)
 	// Internal ext4 needs no second full copy. Removable filesystems may not
-	// support hard links, so copy via the already-open origFile without ever
-	// calling open/close on path (which would release fcntl locks on Linux).
+	// support hard links, so copy via the already-open origFile (OFD mode) or
+	// an isolated child process (POSIX fallback mode).
 	if err := reserveLink(path, tmp); err != nil {
 		dst, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
 		if err != nil {
 			return err
 		}
-		src := io.NewSectionReader(origFile, 0, info.Size())
-		buf := make([]byte, 64<<10)
-		for {
-			if err = ctx.Err(); err != nil {
-				break
-			}
-			var n int
-			n, err = src.Read(buf)
-			if n > 0 {
-				if _, werr := dst.Write(buf[:n]); werr != nil {
-					err = werr
+		if origFile == nil {
+			err = copyFileIsolated(ctx, path, dst)
+		} else {
+			src := io.NewSectionReader(origFile, 0, info.Size())
+			buf := make([]byte, 64<<10)
+			for {
+				if err = ctx.Err(); err != nil {
+					break
+				}
+				var n int
+				n, err = src.Read(buf)
+				if n > 0 {
+					if _, werr := dst.Write(buf[:n]); werr != nil {
+						err = werr
+						break
+					}
+				}
+				if err != nil {
+					if errors.Is(err, io.EOF) {
+						err = nil
+					}
 					break
 				}
 			}
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					err = nil
-				}
-				break
+			if err == nil {
+				err = ctx.Err()
 			}
-		}
-		if err == nil {
-			err = ctx.Err()
 		}
 		if err == nil {
 			err = dst.Sync()
@@ -481,7 +612,7 @@ func normalizeMountDatabase2(ctx context.Context, dir string, cleanPaths map[str
 }
 
 func validateMainDBForReserve(ctx context.Context, mPath string) (hasHeader bool, err error) {
-	_, ok, rerr := Reserve(mPath)
+	_, ok, rerr := reserveHeaderContext(ctx, mPath)
 	if rerr != nil {
 		return false, fmt.Errorf("main library %s: %w", mPath, rerr)
 	}
@@ -736,13 +867,11 @@ func rebuildPlainFromConnContext(ctx context.Context, srcConn *sql.Conn, dst str
 		}
 	}
 	for _, t := range tables {
-		cols, hasRowIDAlias, e := tableColumnsContext(ctx, srcConn, t.name, t.sql)
+		spec, e := inspectTableCopySpec(ctx, srcConn, t.name)
 		if e != nil {
 			return e
 		}
-		normSQL := strings.Join(strings.Fields(strings.ToUpper(t.sql)), " ")
-		needExplicitRowID := !strings.Contains(normSQL, "WITHOUT ROWID") && !hasRowIDAlias
-		if err = copyTableRowsFromConn(ctx, srcConn, tx, t.name, cols, needExplicitRowID); err != nil {
+		if err = copyTableRowsFromConn(ctx, srcConn, tx, t.name, spec); err != nil {
 			return fmt.Errorf("copy %s: %w", t.name, err)
 		}
 	}
@@ -829,22 +958,82 @@ func rebuildPlainFromConnContext(ctx context.Context, srcConn *sql.Conn, dst str
 	if err = db.Close(); err != nil {
 		return err
 	}
-	if r, _, e := Reserve(dst); e != nil || r != 0 {
+	if r, _, e := reserveHeaderContext(ctx, dst); e != nil || r != 0 {
 		return fmt.Errorf("rebuilt database still has reserve %d: %v", r, e)
 	}
 	return nil
 }
 
-func copyTableRowsFromConn(ctx context.Context, srcConn *sql.Conn, dstTx *sql.Tx, table string, cols []string, hasRowID bool) error {
-	insertCols := make([]string, 0, len(cols)+1)
-	selectExprs := make([]string, 0, len(cols)+1)
-	if hasRowID {
-		// Keep rowids: other tables and Engine refer to them.
-		insertCols = append(insertCols, "rowid")
-		selectExprs = append(selectExprs, "rowid")
+type tableCopySpec struct {
+	cols              []string
+	explicitRowidExpr string
+}
+
+func normalizeScannedValue(val any) any {
+	b, ok := val.([]byte)
+	if !ok {
+		return val
 	}
-	for _, col := range cols {
-		insertCols = append(insertCols, col)
+	if b == nil {
+		return []byte{}
+	}
+	cp := make([]byte, len(b))
+	copy(cp, b)
+	return cp
+}
+
+func readTailColumnByRowID(ctx context.Context, srcConn *sql.Conn, table, rowidExpr, tailCol string) (map[int64]any, error) {
+	rows, err := srcConn.QueryContext(ctx, fmt.Sprintf("SELECT %s, CASE WHEN 1 THEN %s END FROM main.%s", rowidExpr, tailCol, quote(table)))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[int64]any)
+	for rowIdx := 0; rows.Next(); rowIdx++ {
+		if rowIdx&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		var rid int64
+		var val any
+		if err := rows.Scan(&rid, &val); err != nil {
+			return nil, err
+		}
+		out[rid] = normalizeScannedValue(val)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, rows.Close()
+}
+
+func copyTableRowsFromConn(ctx context.Context, srcConn *sql.Conn, dstTx *sql.Tx, table string, spec tableCopySpec) error {
+	insertCols := make([]string, 0, len(spec.cols)+1)
+	if spec.explicitRowidExpr != "" {
+		// Keep rowids when not already aliased by INTEGER PRIMARY KEY; other tables and Engine refer to them.
+		insertCols = append(insertCols, spec.explicitRowidExpr)
+	}
+	insertCols = append(insertCols, spec.cols...)
+
+	var tailByRowID map[int64]any
+	selectCols := spec.cols
+	if spec.explicitRowidExpr != "" && len(spec.cols) >= 2000 {
+		// SQLite caps SELECT result width at SQLITE_MAX_COLUMN (2000) while INSERT
+		// allows an explicit rowid target plus all 2000 columns; fetch the last column separately.
+		var err error
+		tailByRowID, err = readTailColumnByRowID(ctx, srcConn, table, spec.explicitRowidExpr, spec.cols[len(spec.cols)-1])
+		if err != nil {
+			return err
+		}
+		selectCols = spec.cols[:len(spec.cols)-1]
+	}
+
+	selectExprs := make([]string, 0, len(selectCols)+1)
+	if spec.explicitRowidExpr != "" {
+		selectExprs = append(selectExprs, spec.explicitRowidExpr)
+	}
+	for _, col := range selectCols {
 		// Wrap each column in a trivial CASE expression so sqlite3_column_decltype
 		// is empty (stopping modernc.org/sqlite from parsing DATETIME columns into
 		// time.Time) while still keeping one projection column per table column and
@@ -865,8 +1054,9 @@ func copyTableRowsFromConn(ctx context.Context, srcConn *sql.Conn, dstTx *sql.Tx
 	}
 	defer insStmt.Close()
 
-	rawVals := make([]any, numInsert)
-	scanDest := make([]any, numInsert)
+	numSelect := len(selectExprs)
+	rawVals := make([]any, numSelect)
+	scanDest := make([]any, numSelect)
 	for i := range rawVals {
 		scanDest[i] = &rawVals[i]
 	}
@@ -881,17 +1071,18 @@ func copyTableRowsFromConn(ctx context.Context, srcConn *sql.Conn, dstTx *sql.Tx
 			return err
 		}
 		for i, val := range rawVals {
-			if b, ok := val.([]byte); ok {
-				if b == nil {
-					bindVals[i] = []byte{}
-				} else {
-					cp := make([]byte, len(b))
-					copy(cp, b)
-					bindVals[i] = cp
-				}
-			} else {
-				bindVals[i] = val
+			bindVals[i] = normalizeScannedValue(val)
+		}
+		if tailByRowID != nil {
+			rid, ok := rawVals[0].(int64)
+			if !ok {
+				return fmt.Errorf("unexpected rowid type %T", rawVals[0])
 			}
+			tailVal, exists := tailByRowID[rid]
+			if !exists {
+				return fmt.Errorf("missing tail column value for rowid %d", rid)
+			}
+			bindVals[numSelect] = tailVal
 		}
 		if _, err := insStmt.ExecContext(ctx, bindVals...); err != nil {
 			return err
@@ -906,38 +1097,79 @@ func copyTableRowsFromConn(ctx context.Context, srcConn *sql.Conn, dstTx *sql.Tx
 	return insStmt.Close()
 }
 
-func tableColumnsContext(ctx context.Context, q sqlQuerier, table, createSQL string) ([]string, bool, error) {
-	rows, err := q.QueryContext(ctx, "SELECT name, type, pk FROM pragma_table_info(?, 'main') ORDER BY cid", table)
+func inspectTableCopySpec(ctx context.Context, srcConn *sql.Conn, table string) (tableCopySpec, error) {
+	rows, err := srcConn.QueryContext(ctx, "SELECT name, type, pk FROM pragma_table_info(?, 'main') ORDER BY cid", table)
 	if err != nil {
-		return nil, false, err
+		return tableCopySpec{}, err
 	}
 	defer rows.Close()
 	var cols []string
+	userCols := make(map[string]bool)
 	var pkCount int
 	var pkType string
-	hasLiteralRowID := false
 	for rows.Next() {
 		var c, colType string
 		var pk int
 		if err = rows.Scan(&c, &colType, &pk); err != nil {
-			return nil, false, err
+			return tableCopySpec{}, err
 		}
 		cols = append(cols, quote(c))
-		if strings.EqualFold(c, "rowid") {
-			hasLiteralRowID = true
-		}
+		userCols[strings.ToLower(c)] = true
 		if pk > 0 {
 			pkCount++
 			pkType = colType
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, false, err
+		return tableCopySpec{}, err
 	}
-	normSQL := strings.Join(strings.Fields(strings.ToUpper(createSQL)), " ")
+	if err := rows.Close(); err != nil {
+		return tableCopySpec{}, err
+	}
+
+	idxRows, err := srcConn.QueryContext(ctx, fmt.Sprintf("PRAGMA main.index_list(%s)", quote(table)))
+	if err != nil {
+		return tableCopySpec{}, err
+	}
+	defer idxRows.Close()
+	hasPKIndex := false
+	for idxRows.Next() {
+		var seq int
+		var name, origin string
+		var uniq, partial int
+		if err = idxRows.Scan(&seq, &name, &uniq, &origin, &partial); err != nil {
+			return tableCopySpec{}, err
+		}
+		if origin == "pk" {
+			hasPKIndex = true
+		}
+	}
+	if err := idxRows.Err(); err != nil {
+		return tableCopySpec{}, err
+	}
+	if err := idxRows.Close(); err != nil {
+		return tableCopySpec{}, err
+	}
+
+	var rowidExpr string
+	for _, cand := range []string{"rowid", "_rowid_", "oid"} {
+		if userCols[cand] {
+			continue
+		}
+		probeRows, qerr := srcConn.QueryContext(ctx, fmt.Sprintf("SELECT main.%s.%s FROM main.%s LIMIT 0", quote(table), cand, quote(table)))
+		if qerr == nil {
+			_ = probeRows.Close()
+			rowidExpr = cand
+			break
+		}
+	}
+
 	isIntPKAlias := pkCount == 1 &&
 		strings.EqualFold(strings.TrimSpace(pkType), "INTEGER") &&
-		!strings.Contains(normSQL, "WITHOUT ROWID") &&
-		!strings.Contains(normSQL, "PRIMARY KEY DESC")
-	return cols, isIntPKAlias || hasLiteralRowID, nil
+		!hasPKIndex
+	spec := tableCopySpec{cols: cols}
+	if !isIntPKAlias && rowidExpr != "" {
+		spec.explicitRowidExpr = rowidExpr
+	}
+	return spec, nil
 }

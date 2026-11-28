@@ -567,7 +567,7 @@ func healMountContext(ctx context.Context, mount string, opts MountOptions) (Rep
 	var db *sql.DB
 	var dbUUID string
 	var needsIdentityRepair bool
-	mainRes, mainResOK, resErr := Reserve(path)
+	mainRes, mainResOK, resErr := reserveHeaderContext(checkCtx, path)
 	if resErr != nil {
 		return r, resErr
 	}
