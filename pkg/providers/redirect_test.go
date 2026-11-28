@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -65,10 +66,6 @@ func TestSelfHostedRedirectsStayOnTheOrigin(t *testing.T) {
 	}{
 		{"subsonic", NASConfig{Protocol: "subsonic", URL: nas.URL, Username: "dj", Password: pass}, func(p *SelfHostedProvider) error { _, err := p.Playlists(ctx); return err }},
 		{"plex", NASConfig{Protocol: "plex", URL: nas.URL, Token: token}, func(p *SelfHostedProvider) error { _, err := p.Playlists(ctx); return err }},
-		{"webdav", NASConfig{Protocol: "webdav", URL: nas.URL + "/music/", Username: "dj", Password: pass}, func(p *SelfHostedProvider) error {
-			_, err := p.DownloadTrack(ctx, "/music/a.mp3", t.TempDir())
-			return err
-		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			before := len(other.all())
@@ -83,6 +80,23 @@ func TestSelfHostedRedirectsStayOnTheOrigin(t *testing.T) {
 			}
 		})
 	}
+	// WebDAV downloads are the exception: a server that keeps its files on OneDrive or S3
+	// (Cloudreve) answers every track GET with a signed URL on another origin. The download
+	// follows it in a fresh request that carries none of the login.
+	t.Run("webdav download", func(t *testing.T) {
+		before := len(other.all())
+		p := NewSelfHostedProvider(NASConfig{Protocol: "webdav", URL: nas.URL + "/music/", Username: "dj", Password: pass}, nil)
+		if _, err := p.DownloadTrack(ctx, "/music/a.mp3", t.TempDir()); err != nil {
+			t.Fatalf("download through the signed redirect: %v", err)
+		}
+		got := other.all()[before:]
+		if len(got) != 1 {
+			t.Fatalf("the other origin got %d requests, want the one download", len(got))
+		}
+		if r := got[0]; r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" || r.Referer() != "" || strings.Contains(r.URL.String(), pass) {
+			t.Fatalf("the login reached the other origin: query %q, Referer %q, Authorization %v", r.URL.RawQuery, r.Referer(), r.Header.Get("Authorization") != "")
+		}
+	})
 	// A redirect within the origin is followed, and carries no Referer.
 	p := NewSelfHostedProvider(NASConfig{Protocol: "subsonic", URL: nas.URL + "/same", Username: "dj", Password: pass}, nil)
 	lists, err := p.Playlists(ctx)
