@@ -59,6 +59,7 @@ func isConsoleModel(model string) bool { return consoleLineBoards[model] }
 // applyShadowFlags is called once at start and after every save: the loop, the pulls and the compose
 // read these flags, not the settings file.
 func (s *Server) applyShadowFlags(v uiSettings) {
+	s.scopeAtom.Store(v.Scope)
 	sh := s.shadow
 	sh.askConsole.Store(v.ConsoleDecks && playerBoards[sh.model])
 	s.consoleAskSync(v.ConsoleLineView && consoleLineBoards[sh.model])

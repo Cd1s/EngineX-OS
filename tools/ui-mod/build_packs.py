@@ -470,7 +470,7 @@ TIDAL_OPEN_530 = """	function scTidalProvider() {
 	function scOpen(id) {
 		if (!id || !scUiLoaded || scSources.indexOf(id) < 0) return
 		if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) {
-			if (id !== "rekordbox" && id !== "nas") {
+			if (id !== "rekordbox" && id !== "nas" && id.indexOf("linkwebdav:") !== 0 && id.indexOf("linknas:") !== 0) {
 				root.scLoginOpen = id
 				scLoginBegin(id)
 			}
@@ -503,7 +503,7 @@ TIDAL_OPEN_504 = """
 	function scOpen(id) {
 		if (!id || !scUiLoaded || scSources.indexOf(id) < 0) return
 		if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) {
-			if (id !== "rekordbox" && id !== "nas") {
+			if (id !== "rekordbox" && id !== "nas" && id.indexOf("linkwebdav:") !== 0 && id.indexOf("linknas:") !== 0) {
 				root.scLoginOpen = id
 				scLoginBegin(id)
 			}
@@ -4064,8 +4064,8 @@ SERVICES_MAIN = """
 		if (id === "beatport") return "qrc:/@ICONS@/SourceBeatport%20LINKColored.png"
 		if (id === "rekordbox") return "qrc:/@ICONS@/SourceEngineRemoteLibrary.png"
 		if (id === "nas") return "qrc:/@ICONS@/SourceNetwork.png"
-		if (id.indexOf("nas:") === 0) return "qrc:/@ICONS@/SourceNetwork.png" // the entry of a NAS server in Sources
-		if (id.indexOf("webdav:") === 0) return "file:///data/enginex/ui/icons/webdav.png" // the entry of a WebDAV server
+		if (id.indexOf("nas:") === 0 || id.indexOf("linknas:") === 0) return "qrc:/@ICONS@/SourceNetwork.png" // the entry of a NAS server in Sources
+		if (id.indexOf("webdav:") === 0 || id.indexOf("linkwebdav:") === 0) return "file:///data/enginex/ui/icons/webdav.png" // the entry of a WebDAV server
 		return "file:///data/enginex/ui/icons/" + id + ".png"
 	}
 	// The gateway appends " [128 BPM 8A]" to a row's label; see labelWithBPM.
@@ -4588,6 +4588,7 @@ SERVICES_MAIN = """
 		scNasOn = !!v.nasOn
 		if (JSON.stringify(v.webdav || []) !== JSON.stringify(scWebdav)) scWebdav = v.webdav || []
 		if (JSON.stringify(v.nas || []) !== JSON.stringify(scNasServers)) scNasServers = v.nas || []
+		if (JSON.stringify(v.linkedServers || []) !== JSON.stringify(scLinkedServers)) scLinkedServers = v.linkedServers || []
 		scBroadcastOn = !!v.broadcastEnabled
 		const prevUpfaderEcho = scUpfaderEcho
 		scUpfaderEcho = !!v.upfaderEcho
@@ -4873,6 +4874,7 @@ SERVICES_MAIN = """
 	property bool scNasOn: false
 	property var scWebdav: []
 	property var scNasServers: []
+	property var scLinkedServers: []
 	property bool scServerTyping: false
 	property var scServerDlgs: []
 	property string scServerError: ""
@@ -4886,10 +4888,14 @@ SERVICES_MAIN = """
 	// (its Sources ID and its name) where its kind is listed.
 	readonly property var scSourceEntries: {
 		const out = []
+		const linked = typeof scLinkedServers !== "undefined" ? scLinkedServers : []
 		for (const s of scServices) {
 			if (s.id === "nas" || s.id === "webdav") {
 				for (const v of scServersOf(s.id)) {
 					if (scSources.indexOf(v.scope) >= 0) out.push({id: v.scope, name: v.name, kind: s.id})
+				}
+				for (const lv of linked) {
+					if (lv.kind === s.id && scSources.indexOf(lv.scope) >= 0) out.push({id: lv.scope, name: lv.name, kind: s.id, linked: true})
 				}
 			} else if (scSources.indexOf(s.id) >= 0) out.push({id: s.id, name: s.name, kind: s.id})
 		}
@@ -4906,6 +4912,17 @@ SERVICES_MAIN = """
 	}
 	// One step of the entry on the deck: title, label, text and placeholder of the field.
 	function scServerField(field) {
+		if (scServerKind === "deckshare") {
+			const input = scFindObject(field, "EmbeddedTextInput")
+			if (input) input.echoMode = TextInput.Normal
+			field.title = root.scT("Copy logins from another deck")
+			field.label = root.scT("Device code") + (scServerDraft.peer ? " (" + scServerDraft.peer + ")" : "")
+			field.text = ""
+			field.placeholder = "XXXX-XXXX"
+			field.doneButtonTitle = root.scT("Copy")
+			field.cancelButtonTitle = root.scT("Cancel")
+			return
+		}
 		const d = scServerDraft, step = scServerSteps[scServerStep], nas = scServerKind === "nas"
 		const scheme = nas ? "smb://" : "https://"
 		field.title = root.scT(d.id ? (nas ? "Edit NAS server" : "Edit WebDAV server") : (nas ? "Add NAS server" : "Add WebDAV server"))
@@ -4935,6 +4952,11 @@ SERVICES_MAIN = """
 		if (dlg && scServerDlgs.indexOf(dlg) < 0) scServerDlgs = scServerDlgs.concat([dlg])
 	}
 	function scServerNext(text) {
+		if (scServerKind === "deckshare") {
+			scServerTyping = false
+			if (typeof root.scShareSubmit === "function") root.scShareSubmit(scServerDraft.peer || "", String(text))
+			return
+		}
 		const d = Object.assign({}, scServerDraft)
 		d[scServerSteps[scServerStep]] = String(text)
 		scServerDraft = d
@@ -6684,6 +6706,20 @@ SETTINGS_COPY_ENTRIES = """
             buttonText: "Undo"
             enabled: !!root.scCopyState.undo || !!root.scCopyState.rollback
             onClicked: root.scCopyUndo()
+        },
+        EntryBase.ListEntry {
+            text: "Copy logins from another deck"
+            objectName: "EngineX_DeckShare"
+            values: ["Select a deck"].concat(root.scShareState.peers || [])
+            currentValue: values[0]
+            onSelected: function(index) { if (index > 0) root.scShareBegin(values[index]) }
+        },
+        EntryBase.PrefsButtonEntry {
+            text: "Undo copied logins"
+            objectName: "EngineX_UndoDeckShare"
+            buttonText: "Undo"
+            enabled: !!root.scShareState.undo
+            onClicked: root.scShareUndo()
         },
 """
 

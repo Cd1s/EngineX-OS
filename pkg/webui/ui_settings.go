@@ -304,10 +304,11 @@ type uiSettings struct {
 	// WebDAV and NAS (status only): the servers of each kind, without passwords,
 	// with their Sources IDs; WebDAVOn and NASOn are the two rows in Settings ->
 	// Services.
-	WebDAV   []serverView `json:"webdav,omitempty"`
-	NAS      []serverView `json:"nas,omitempty"`
-	WebDAVOn bool         `json:"webdavOn,omitempty"`
-	NASOn    bool         `json:"nasOn,omitempty"`
+	WebDAV        []serverView       `json:"webdav,omitempty"`
+	NAS           []serverView       `json:"nas,omitempty"`
+	LinkedServers []linkedServerView `json:"linkedServers,omitempty"`
+	WebDAVOn      bool               `json:"webdavOn,omitempty"`
+	NASOn         bool               `json:"nasOn,omitempty"`
 	// WebDAVSwitch and NASSwitch are those rows once the DJ used them: "1" on, "0"
 	// off. Empty: on while a server of that kind is set up (a released deck's
 	// carries over; an empty source is not put on every deck).
@@ -427,7 +428,7 @@ func (s *Server) loadUI() uiSettings {
 				v.GitHubRepo = val
 			}
 		case "scope":
-			if _, _, server := serverScopeOf(val); val == "" || server || slices.Contains(uiScopes, val) {
+			if _, _, server := serverScopeOf(val); val == "" || server || isPeerServerScope(val) || slices.Contains(uiScopes, val) {
 				v.Scope = val
 			}
 		case "quality":
@@ -645,7 +646,7 @@ func parseUISources(val string) ([]string, error) {
 	for _, name := range strings.Split(val, ",") {
 		// rekordbox, NAS and WebDAV are in the status's list but are not switched
 		// here: the deck sends that list back when the DJ flips a service.
-		if _, _, server := serverScopeOf(name); server || name == rekordboxScope || name == nasScope || name == webdavScope {
+		if _, _, server := serverScopeOf(name); server || isPeerServerScope(name) || name == rekordboxScope || name == nasScope || name == webdavScope {
 			continue
 		}
 		if name != "" && !slices.Contains(uiServices, name) {
@@ -944,6 +945,10 @@ func (s *Server) scopeLoggedIn(scope string) bool {
 		_, ok := s.serverByScope(scope)
 		return ok
 	}
+	if k, pk, sid, ok := parsePeerServerScope(scope); ok {
+		_, _, alive := s.peerServerEndpoint(k, pk, sid)
+		return alive
+	}
 	if scope == "deezer" && s.deezerARLReady() {
 		return true
 	}
@@ -1042,6 +1047,8 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	localTargets := s.localEnabledTargetHashesLocked(v, nf)
+	s.setPeerLocalTargets(localTargets)
 	v.FXSelectorAvailable = s.fxSelectorAvailable()
 	v.ColorFXAvailable = s.colorFXAvailable()
 	// pioneer_fx is the channel knobs' style now; only a PX board without them drops it.
@@ -1084,6 +1091,13 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	v.Sources = append(slices.Clone(v.Sources), serverScopes...)
 	v.LoggedIn = append(v.LoggedIn, serverScopes...)
+	if linked := s.linkedServerViews(localTargets); len(linked) > 0 {
+		v.LinkedServers = linked
+		for _, lv := range linked {
+			v.Sources = append(slices.Clone(v.Sources), lv.Scope)
+			v.LoggedIn = append(v.LoggedIn, lv.Scope)
+		}
+	}
 	relay := s.relayStatusView()
 	v.RelayURL, v.DeemixPasswordSet = relay.RelayURL, relay.PasswordSet
 	v.ProlinkExportActive = s.prolinkExport != nil && s.prolinkExport.Status().Enabled
@@ -1213,7 +1227,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Has("scope") {
 		want := q.Get("scope")
-		if _, _, server := serverScopeOf(want); !server && !slices.Contains(uiScopes, want) {
+		if _, _, server := serverScopeOf(want); !server && !isPeerServerScope(want) && !slices.Contains(uiScopes, want) {
 			fail(w, 400, errors.New("invalid setting"))
 			return
 		}
@@ -1230,7 +1244,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("spotifySource", q.Get("spotifySource"), uiSpotifySources) || bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || (bad("scope", q.Get("scope"), uiScopes) && !isServerScope(q.Get("scope"))) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) || bad("fxTimeMode", q.Get("fxTimeMode"), uiFxTimeModes) || bad("rbLibraryView", q.Get("rbLibraryView"), uiRbLibraryViews) {
+	if bad("spotifySource", q.Get("spotifySource"), uiSpotifySources) || bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || (bad("scope", q.Get("scope"), uiScopes) && !isServerScope(q.Get("scope")) && !isPeerServerScope(q.Get("scope"))) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) || bad("fxTimeMode", q.Get("fxTimeMode"), uiFxTimeModes) || bad("rbLibraryView", q.Get("rbLibraryView"), uiRbLibraryViews) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
@@ -1754,6 +1768,9 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	// browse, a search, a download): nothing of that kind answers after the switch. Under
 	// uiMu, with the save: a search that lists its servers after it finds the kind off,
 	// one that listed them before it has its connections cancelled (connectedServers).
+	if err == nil && (q.Has("webdav") || q.Has("nas")) {
+		s.setPeerLocalTargets(s.localEnabledTargetHashesLocked(v, s.loadNASFileLocked()))
+	}
 	if err == nil && (q.Get("webdav") == "0" || q.Get("nas") == "0") {
 		s.dropServerConns(func(_ string, k serverKind) bool {
 			return (k == kindWebDAV && q.Get("webdav") == "0") || (k == kindNAS && q.Get("nas") == "0")
@@ -1770,6 +1787,9 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fail(w, 500, err)
 		return
+	}
+	if q.Has("webdav") || q.Has("nas") {
+		s.notifySharePeers()
 	}
 	if v.SdHighSpeed != prevSdHighSpeed && boardCapabilities(imagePrefix(deviceCompatible())).SDHighSpeed {
 		if _, serr := s.applySDHighSpeed(v.SdHighSpeed); serr != nil {

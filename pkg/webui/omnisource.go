@@ -593,6 +593,12 @@ func (g *tidalGateway) omniSearch(ctx context.Context, query string, selected <-
 			found.put(omniServers, pos, n, refs, live)
 		})
 	})
+	extras.Go(func() {
+		skipScope, _ := g.s.scopeAtom.Load().(string)
+		g.peerServerSearch(ctx, query, skipScope, func(pos, n int, refs []trackRef) {
+			found.put(omniPeerServers, pos, n, refs, nil)
+		})
+	})
 	answered := make(chan struct{})
 	go func() {
 		extras.Wait()
@@ -606,7 +612,7 @@ func (g *tidalGateway) omniSearch(ctx context.Context, query string, selected <-
 	for group, sources := range rows {
 		for _, refs := range sources {
 			for _, ref := range refs {
-				if group != omniServers && ref.file != "" { // a file on a drive is listed once
+				if group != omniServers && group != omniPeerServers && ref.file != "" { // a file on a drive is listed once
 					if group == omniDjay && seenFiles[ref.file] {
 						continue
 					}
@@ -626,6 +632,7 @@ const (
 	omniDrives = iota
 	omniDjay
 	omniServers
+	omniPeerServers
 	omniGroups
 )
 

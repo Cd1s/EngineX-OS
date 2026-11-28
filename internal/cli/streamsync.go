@@ -59,6 +59,17 @@ func StreamSync(args []string) error {
 	clientID := fs.String("spotify-client-id", "", "registered Spotify public PKCE client ID")
 	redirect := fs.String("spotify-redirect-url", "", "exact registered HTTPS callback URL (or device loopback for local browser)")
 	netease := fs.String("netease-url", "", "optional NeteaseCloudMusicApi-compatible service; empty talks to music.163.com")
+	deezerURL := fs.String("deezer-url", "", "optional Deezer API base URL (tests)")
+	deezerGatewayURL := fs.String("deezer-gateway-url", "", "optional Deezer gateway URL (tests)")
+	spotifyBaseURL := fs.String("spotify-api-url", "", "optional Spotify API base URL (tests)")
+	spotifyAccountsURL := fs.String("spotify-accounts-url", "", "optional Spotify accounts base URL (tests)")
+	soundCloudURL := fs.String("soundcloud-url", "", "optional SoundCloud API base URL (tests)")
+	soundCloudTokenURL := fs.String("soundcloud-token-url", "", "optional SoundCloud token URL (tests)")
+	appleMusicURL := fs.String("applemusic-url", "", "optional Apple Music API base URL (tests)")
+	appleMusicWebURL := fs.String("applemusic-web-url", "", "optional Apple Music web base URL (tests)")
+	beatportURL := fs.String("beatport-url", "", "optional Beatport API base URL (tests)")
+	tidalAPIURL := fs.String("tidal-api-url", "", "optional TIDAL API base URL (tests)")
+	tidalAuthURL := fs.String("tidal-auth-url", "", "optional TIDAL auth base URL (tests)")
 	fs.IntVar(&cfg.CPU, "cpu", 3, "dedicated background CPU")
 	fs.DurationVar(&cfg.ThrottleWork, "throttle-work", cfg.ThrottleWork, "work interval before cooperative sleep")
 	fs.DurationVar(&cfg.ThrottleSleep, "throttle-sleep", cfg.ThrottleSleep, "cooperative sleep interval")
@@ -134,7 +145,7 @@ func StreamSync(args []string) error {
 		dl.HTTP = deemixclient.UnixHTTP(*socket)
 	}
 	bpm := &providers.BPMStore{Path: filepath.Join(*state, "bpm-cache.json"), ConfigPath: filepath.Join(*state, "bpm-config.json"), PreviewBPM: webui.PreviewAnalyzer(guard)}
-	jobs := webui.NewJobs(webui.Pipeline{Guard: guard, Catalog: &providers.Deezer{}, Deemix: dl, Library: importer})
+	jobs := webui.NewJobs(webui.Pipeline{Guard: guard, Catalog: &providers.Deezer{BaseURL: *deezerURL, GatewayURL: *deezerGatewayURL}, Deemix: dl, Library: importer})
 	defer jobs.Close()
 	newToken, explicitToken := false, *token != ""
 	if !explicitToken {
@@ -142,7 +153,7 @@ func StreamSync(args []string) error {
 			return err
 		}
 	}
-	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, HTTPSAddr: *httpsListen, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state, RelayURL: *relay, BPM: bpm, AppleMusicHelperURL: os.Getenv("ENGINEX_AM_HELPER"), AppleMusicHelperToken: os.Getenv("ENGINEX_AM_TOKEN")}, jobs)
+	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, HTTPSAddr: *httpsListen, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, SpotifyBaseURL: *spotifyBaseURL, SpotifyAccountsURL: *spotifyAccountsURL, NeteaseURL: *netease, DeezerURL: *deezerURL, DeezerGatewayURL: *deezerGatewayURL, SoundCloudURL: *soundCloudURL, SoundCloudTokenURL: *soundCloudTokenURL, AppleMusicURL: *appleMusicURL, AppleMusicWebURL: *appleMusicWebURL, BeatportURL: *beatportURL, TidalAPIURL: *tidalAPIURL, TidalAuthURL: *tidalAuthURL, StateDir: *state, RelayURL: *relay, BPM: bpm, AppleMusicHelperURL: os.Getenv("ENGINEX_AM_HELPER"), AppleMusicHelperToken: os.Getenv("ENGINEX_AM_TOKEN")}, jobs)
 	defer ui.Close()
 	// This is the one intentional local credential output: the operator needs
 	// it to pair the touch/phone console. No provider credentials are logged.

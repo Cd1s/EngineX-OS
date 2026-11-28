@@ -115,6 +115,8 @@ type Jobs struct {
 	applemusic    func() *providers.AppleMusic
 	selfHosted    func() *providers.SelfHostedProvider
 	server        func(k serverKind, id string) *providers.SelfHostedProvider // a server a row names
+	peerServer    func(ctx context.Context, provider, trackID, destDir string) (string, error)
+	peerAlive     func(t providers.Track) bool
 	bpm           *providers.BPMStore
 }
 type fetched struct {
@@ -150,6 +152,9 @@ func (j *Jobs) File(t providers.Track) string {
 // nothing once the NAS changed since. The check and the lookup are one step
 // under j.mu, which the reset takes (#335).
 func (j *Jobs) FileAt(t providers.Track, gen uint64) string {
+	if j.peerAlive != nil && !j.peerAlive(t) {
+		return ""
+	}
 	key := trackKey(t)
 	j.mu.Lock()
 	if isNASKey(key) && gen != j.nasGen.Load() {
@@ -635,6 +640,9 @@ func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, g
 		return j.fromNeteaseMode(ctx, session, t, guest, progress)
 	case "webdav", "subsonic", "plex", "smb":
 		dl, err := j.fromSelfHosted(ctx, t)
+		return t, dl, err
+	case peerWebDAVProvider, peerSMBProvider:
+		dl, err := j.fromPeerServer(ctx, t)
 		return t, dl, err
 	}
 	return providers.Track{}, nil, fmt.Errorf("%s: no audio source for this service", t.Provider)
@@ -1201,6 +1209,24 @@ func (j *Jobs) fromSelfHosted(ctx context.Context, t providers.Track) (*deemixcl
 	if err != nil {
 		return nil, err
 	}
+	return j.finishDownloadedTrack(p)
+}
+
+func (j *Jobs) fromPeerServer(ctx context.Context, t providers.Track) (*deemixclient.Download, error) {
+	if j.p.Deemix == nil {
+		return nil, errors.New("nas: download cache unavailable")
+	}
+	if j.peerServer == nil {
+		return nil, errServerGone
+	}
+	p, err := j.peerServer(ctx, t.Provider, t.ID, j.p.Deemix.DownloadDir)
+	if err != nil {
+		return nil, err
+	}
+	return j.finishDownloadedTrack(p)
+}
+
+func (j *Jobs) finishDownloadedTrack(p string) (*deemixclient.Download, error) {
 	ext := strings.ToLower(filepath.Ext(p))
 	if ext == ".m4a" || ext == ".aac" {
 		mp4Path := strings.TrimSuffix(p, filepath.Ext(p)) + ".mp4"

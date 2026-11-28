@@ -826,3 +826,13 @@ Add NAS server	添加 NAS 服务器	新增 NAS 伺服器	Añadir servidor NAS
 Edit NAS server	编辑 NAS 服务器	編輯 NAS 伺服器	Editar servidor NAS
 Enter manually	手动输入	手動輸入	Introducir manualmente
 Enter the server address with smb://	请填写以 smb:// 开头的服务器地址	請填寫以 smb:// 開頭的伺服器位址	Escribe la dirección del servidor con smb://
+Copy logins from another deck	从另一台设备复制登录信息	從另一台裝置複製登入資訊	Copiar inicios de sesión de otro deck
+Undo copied logins	撤销复制的登录信息	復原複製的登入資訊	Deshacer inicios de sesión copiados
+Device code	设备代码	裝置代碼	Código del dispositivo
+Copy	复制	複製	Copiar
+Logins copied	登录信息已复制	登入資訊已複製	Inicios de sesión copiados
+Copy logins failed	复制登录信息失败	複製登入資訊失敗	Error al copiar inicios de sesión
+Previous logins restored	已恢复之前的登录信息	已還原先前的登入資訊	Inicios de sesión anteriores restaurados
+Copied	已复制	已複製	Copiados
+Skipped	已跳过	已略過	Omitidos
+Nothing copied	未复制任何内容	未複製任何內容	No se copió nada

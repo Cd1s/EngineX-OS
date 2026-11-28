@@ -38,6 +38,8 @@ func TestRemoteConsoleForwardHasNoLANRoutes(t *testing.T) {
 	for _, p := range []string{
 		"/peer/decks", "//peer/decks", "/x/../peer/decks", "/%70eer/decks", "/peer",
 		"/peer/decks/1/audio?key=k", "/peer/decks/1/perf?key=k", "/peer/decks/1/display?key=k",
+		"/peer/servers", "/peer/servers/webdav/0123456789abcdef0123456789abcdef/playlists",
+		"/peer/deck-share/transfer",
 		"/spotify-connect", "/spotify-connect?action=getInfo", "//spotify-connect",
 		"/./peer/decks", "/peer/./decks", "/%2e/peer/decks", "/peer/decks/", "/peer/decks;x",
 		"/live.wav", "/live.wav?format=pcm", "//live.wav", "/x/../live.wav", "/live.mp3", "/live-header.wav",
@@ -48,7 +50,7 @@ func TestRemoteConsoleForwardHasNoLANRoutes(t *testing.T) {
 			}
 		}
 	}
-	for _, p := range []string{"/peer/settings-copy/request", "/spotify-connect"} {
+	for _, p := range []string{"/peer/settings-copy/request", "/peer/deck-share/request", "/spotify-connect"} {
 		if got := do("POST", forward.URL+p); got != http.StatusNotFound {
 			t.Errorf("forwarded POST %s: %d, want 404", p, got)
 		}

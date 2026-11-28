@@ -549,6 +549,8 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/enginex/settings-copy", s.settingsCopyStatus)
 	g.mux.HandleFunc("POST /v1/enginex/settings-copy", s.settingsCopyControl)
 	g.mux.HandleFunc("POST /v1/enginex/settings-copy/prestart", s.settingsCopyPrestart)
+	g.mux.HandleFunc("GET /v1/enginex/deck-share", s.deckShareStatus)
+	g.mux.HandleFunc("POST /v1/enginex/deck-share", s.deckShareControl)
 	g.mux.HandleFunc("GET /v1/enginex/library-status", s.libraryStatusGet)
 	g.mux.HandleFunc("GET /v1/enginex/update", s.update)
 	g.mux.HandleFunc("POST /v1/enginex/ui", s.uiUpdate)
@@ -1314,7 +1316,7 @@ func playlistJSON(id, title, description string, count int) map[string]any {
 	return map[string]any{"uuid": id, "title": title, "numberOfTracks": count, "numberOfVideos": 0, "description": description, "duration": 0, "lastUpdated": now, "created": now, "type": "USER", "publicPlaylist": false, "url": "http://enginex.lan:8080", "image": "", "squareImage": "", "popularity": 0}
 }
 func (g *tidalGateway) refJSON(id string, ref playlistRef) map[string]any {
-	if _, server := kindOfProvider(ref.provider); server || ref.provider == listNoticeProvider || ref.provider == rekordboxScope || ref.provider == nasScope {
+	if _, server := kindOfProvider(ref.provider); server || isPeerServerProvider(ref.provider) || ref.provider == listNoticeProvider || ref.provider == rekordboxScope || ref.provider == nasScope {
 		return playlistJSON(id, ref.list.Title, "", ref.list.Count)
 	}
 	label := providerLabels[ref.provider]
@@ -1343,6 +1345,10 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, _, ok := serverScopeOf(scope); ok {
 		g.serverPlaylistsPage(w, r, scope)
+		return
+	}
+	if isPeerServerScope(scope) {
+		g.peerServerPlaylistsPage(w, r, scope)
 		return
 	}
 	sessions := []*Session{}
@@ -1471,6 +1477,9 @@ func playlistOpenSourceID(ref *playlistRef) string {
 	}
 	if k, ok := kindOfProvider(ref.provider); ok {
 		return fmt.Sprintf("%s:%q", k.scope, path.Base(id))
+	}
+	if k, ok := kindOfPeerProvider(ref.provider); ok {
+		return fmt.Sprintf("link%s:%q", k.scope, path.Base(id))
 	}
 	if ref.provider != localProvider {
 		return id
@@ -1823,6 +1832,10 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, ok := kindOfProvider(ref.provider); ok {
 		g.serverTracks(w, r, id, ref, role, order)
+		return
+	}
+	if isPeerServerProvider(ref.provider) {
+		g.peerServerTracks(w, r, id, ref, role, order)
 		return
 	}
 	if ref.provider == localProvider {
@@ -2212,6 +2225,13 @@ func (g *tidalGateway) selectedSearch(ctx context.Context, query, scope string) 
 			}
 		}
 	}
+	if k, peerKey, serverID, ok := parsePeerServerScope(scope); ok {
+		for _, ref := range g.peerServerSearchOne(ctx, query, k, peerKey, serverID) {
+			if id := g.addTrack(ref); id != 0 {
+				trackItems = append(trackItems, g.trackJSON(id, ref.track))
+			}
+		}
+	}
 	return trackItems, listItems
 }
 func (g *tidalGateway) lookup(w http.ResponseWriter, raw string) (int64, trackRef, bool) {
@@ -2366,6 +2386,10 @@ func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref tr
 		fail(w, http.StatusNotFound, errNASChanged)
 		return false
 	}
+	if !g.s.peerTrackLive(ref.track) {
+		fail(w, http.StatusNotFound, errServerGone)
+		return false
+	}
 	if g.pause != nil {
 		g.pause("codec")
 	}
@@ -2374,7 +2398,7 @@ func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref tr
 	}
 	// These providers can deliver different codecs regardless of the quality setting.
 	switch ref.track.Provider {
-	case "soundcloud", "beatport", "webdav", "subsonic", "plex", "smb":
+	case "soundcloud", "beatport", "webdav", "subsonic", "plex", "smb", peerWebDAVProvider, peerSMBProvider:
 	default:
 		if !j.Lossy() {
 			return true
@@ -2454,6 +2478,10 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 	}
 	if g.s.jobs == nil {
 		fail(w, 503, errors.New("worker unavailable"))
+		return
+	}
+	if !g.s.peerTrackLive(ref.track) {
+		fail(w, http.StatusNotFound, errServerGone)
 		return
 	}
 	http.NewResponseController(w).SetWriteDeadline(time.Time{})
@@ -2634,6 +2662,10 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	}
 	if g.s.jobs == nil {
 		fail(w, 503, errors.New("worker unavailable"))
+		return
+	}
+	if !g.s.peerTrackLive(ref.track) {
+		fail(w, http.StatusNotFound, errServerGone)
 		return
 	}
 	// A first play waits for Deemix; lift the server's 2-minute write limit.
