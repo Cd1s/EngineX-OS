@@ -8611,7 +8611,10 @@ async function api() {{ return relayResp; }}
         sync_poll = re.search(r"(?m)^function syncRelayPoll\(\)[^\n]+", html)
         self.assertIsNotNone(sync_poll, "missing syncRelayPoll() for Relay card toggle/polling")
         save_relay = re.search(r"(?m)^async function saveRelay\(\)[^\n]+", html).group(0)
-        self.assertIn("$('relayUrl').oninput=()=>{relayUrlDirty=true};", html)
+        url_oninput = re.search(r"(?m)^\$\('relayUrl'\)\.oninput=[^\n]+", html)
+        pw_oninput = re.search(r"(?m)^\$\('relayPassword'\)\.oninput=[^\n]+", html)
+        self.assertIsNotNone(url_oninput, "missing relayUrl oninput edit tracker")
+        self.assertIsNotNone(pw_oninput, "missing relayPassword oninput edit tracker")
         self.assertIn("$('relayCard').ontoggle=syncRelayPoll;", html)
         script = f"""
 const assert = require('assert');
@@ -8622,7 +8625,7 @@ let lang = 'en';
 const els = {{
   relayCard: {{open: false, ontoggle: null}},
   relayUrl: {{value: '', oninput: null}},
-  relayPassword: {{value: ''}},
+  relayPassword: {{value: '', oninput: null}},
   relayState: {{textContent: ''}},
 }};
 const $ = id => els[id];
@@ -8657,7 +8660,8 @@ async function api(path, opts) {{
 {stems_fn}
 {show_relay}
 {sync_poll.group(0)}
-els.relayUrl.oninput = () => {{ relayUrlDirty = true; }};
+{url_oninput.group(0)}
+{pw_oninput.group(0)}
 els.relayCard.ontoggle = syncRelayPoll;
 {save_relay}
 (async () => {{
@@ -8814,6 +8818,293 @@ setTimeout(() => {
         self.assertEqual(obs["draftPw"], "draft-pw")
         self.assertEqual(obs["readsAfterClose"], obs["readsAtClose"], "collapsed Relay card must stop polling")
         self.assertGreaterEqual(obs["ticks"], 10)
+
+    def test_web_console_relay_card_interleavings_node(self):
+        html = (REPO / "pkg/webui/index.html").read_text(encoding="utf-8")
+        t_match = re.search(r"const\s+T\s*=\s*\{", html)
+        self.assertIsNotNone(t_match)
+        t_start = t_match.start()
+        t_end_rel = html.find("\n};\n", t_start)
+        self.assertGreaterEqual(t_end_rel, 0)
+        t_table = html[t_start : t_end_rel + 4]
+        t_fn = re.search(r"(?m)^function t\(k,\.\.\.a\)\{[^\n]+", html).group(0)
+        set_val = re.search(r"(?m)^const setVal=[^\n]+", html).group(0)
+        relay_vars = re.search(r"(?m)^let relayTimer=[^\n]+", html).group(0)
+        stems_fn = re.search(r"(?m)^function stemsLine\([^\n]+", html).group(0)
+        show_relay = re.search(r"(?m)^async function showRelay\([^\n]+", html).group(0)
+        sync_poll = re.search(r"(?m)^function syncRelayPoll\(\)[^\n]+", html).group(0)
+        url_oninput = re.search(r"(?m)^\$\('relayUrl'\)\.oninput=[^\n]+", html).group(0)
+        pw_oninput = re.search(r"(?m)^\$\('relayPassword'\)\.oninput=[^\n]+", html).group(0)
+        save_relay = re.search(r"(?m)^async function saveRelay\(\)[^\n]+", html).group(0)
+        script = f"""
+const assert = require('assert');
+{t_table}
+const LANGS = ['en', 'zh-Hans', 'zh-Hant', 'es'];
+let lang = 'en';
+{t_fn}
+const els = {{
+  relayCard: {{open: false, ontoggle: null}},
+  relayUrl: {{value: '', oninput: null}},
+  relayPassword: {{value: '', oninput: null}},
+  relayState: {{textContent: ''}},
+}};
+const $ = id => els[id];
+const document = {{activeElement: null, hidden: false}};
+let lastUI = {{capabilities: {{remoteStems: true}}}};
+let timers = [], nextTimerId = 1;
+function setInterval(fn, ms) {{
+  const id = nextTimerId++;
+  timers.push({{id, fn, ms}});
+  return id;
+}}
+function clearInterval(id) {{
+  timers = timers.filter(t => t.id !== id);
+}}
+let gets = 0, pendingGets = 0, peakGets = 0, posts = [];
+let nextGetHandler = null, nextPostHandler = null;
+async function api(path, opts) {{
+  if (opts && opts.method === 'POST') {{
+    const body = JSON.parse(opts.body);
+    posts.push(body);
+    if (nextPostHandler) {{
+      const h = nextPostHandler;
+      nextPostHandler = null;
+      return await h(body);
+    }}
+    return {{relayUrl: body.relayUrl, deemixPasswordSet: !!body.deemixPassword, lanStems: null}};
+  }}
+  gets++;
+  pendingGets++;
+  peakGets = Math.max(peakGets, pendingGets);
+  try {{
+    if (nextGetHandler) {{
+      const h = nextGetHandler;
+      nextGetHandler = null;
+      return await h();
+    }}
+    return {{relayUrl: 'https://example.invalid/initial', deemixPasswordSet: false, lanStems: null}};
+  }} finally {{
+    pendingGets--;
+  }}
+}}
+{set_val}
+{relay_vars}
+{stems_fn}
+{show_relay}
+{sync_poll}
+{url_oninput}
+{pw_oninput}
+els.relayCard.ontoggle = syncRelayPoll;
+{save_relay}
+function type(id, val) {{
+  els[id].value = val;
+  if (els[id].oninput) els[id].oninput();
+}}
+(async () => {{
+  // 1. Opening Relay card while startup GET is pending coalesces (peak === 1) and hydrates clean URL.
+  let resolveStart;
+  nextGetHandler = () => new Promise(res => {{ resolveStart = res; }});
+  const startup = showRelay();
+  assert.equal(gets, 1);
+  assert.equal(peakGets, 1);
+  els.relayCard.open = true;
+  els.relayCard.ontoggle();
+  assert.equal(gets, 1, 'card open must coalesce with in-flight startup GET');
+  assert.equal(peakGets, 1);
+  assert.equal(timers.length, 1);
+  // Interval tick while startup GET is still pending also skips overlapping GET.
+  timers[0].fn();
+  assert.equal(gets, 1);
+  assert.equal(peakGets, 1);
+  resolveStart({{relayUrl: 'https://example.invalid/initial', deemixPasswordSet: false, lanStems: null}});
+  await startup;
+  assert.equal(els.relayUrl.value, 'https://example.invalid/initial');
+  assert.equal(relayHydrated, true);
+
+  // 2. If startup GET failed before hydration, the first successful status-only read hydrates clean URL.
+  relayHydrated = false;
+  relayUrlDirty = false;
+  els.relayUrl.value = '';
+  nextGetHandler = async () => {{ throw new Error('network down'); }};
+  await assert.rejects(() => showRelay());
+  assert.equal(relayBusy, false);
+  assert.equal(relayHydrated, false);
+  nextGetHandler = async () => ({{relayUrl: 'https://example.invalid/recovered', deemixPasswordSet: true, lanStems: null}});
+  await showRelay(true);
+  assert.equal(els.relayUrl.value, 'https://example.invalid/recovered');
+  assert.equal(relayHydrated, true);
+
+  // 3. First hydration never wipes a dirty draft typed before the response lands.
+  relayHydrated = false;
+  relayUrlDirty = false;
+  els.relayUrl.value = '';
+  let resolveSlow;
+  nextGetHandler = () => new Promise(res => {{ resolveSlow = res; }});
+  const pendingFirst = showRelay(true);
+  type('relayUrl', 'https://example.invalid/typed-early');
+  resolveSlow({{relayUrl: 'https://example.invalid/server', deemixPasswordSet: false, lanStems: null}});
+  await pendingFirst;
+  assert.equal(els.relayUrl.value, 'https://example.invalid/typed-early');
+  assert.equal(relayUrlDirty, true);
+
+  // 4. Both URL and password edited while Save POST is pending: neither newer edit is discarded.
+  relayHydrated = true;
+  type('relayUrl', 'https://example.invalid/initial/a');
+  type('relayPassword', '1');
+  let resolvePost;
+  nextPostHandler = () => new Promise(res => {{ resolvePost = res; }});
+  const save1 = saveRelay();
+  type('relayUrl', 'https://example.invalid/initial/b');
+  type('relayPassword', '2');
+  nextGetHandler = async () => ({{relayUrl: 'https://example.invalid/initial/a', deemixPasswordSet: true, lanStems: null}});
+  resolvePost({{relayUrl: 'https://example.invalid/initial/a', deemixPasswordSet: true, lanStems: null}});
+  await save1;
+  assert.equal(els.relayUrl.value, 'https://example.invalid/initial/b');
+  assert.equal(els.relayPassword.value, '2');
+  assert.equal(relayUrlDirty, true);
+
+  // 5. Only URL edited during pending Save POST: URL draft kept, submitted password cleared.
+  type('relayUrl', 'https://example.invalid/only-url-1');
+  type('relayPassword', 'pw-a');
+  nextPostHandler = () => new Promise(res => {{ resolvePost = res; }});
+  const save2 = saveRelay();
+  type('relayUrl', 'https://example.invalid/only-url-2');
+  nextGetHandler = async () => ({{relayUrl: 'https://example.invalid/only-url-1', deemixPasswordSet: true, lanStems: null}});
+  resolvePost({{relayUrl: 'https://example.invalid/only-url-1', deemixPasswordSet: true, lanStems: null}});
+  await save2;
+  assert.equal(els.relayUrl.value, 'https://example.invalid/only-url-2');
+  assert.equal(els.relayPassword.value, '');
+  assert.equal(relayUrlDirty, true);
+
+  // 6. Only password edited during pending Save POST: URL dirty cleared & refreshed, newer password kept.
+  type('relayUrl', 'https://example.invalid/only-pw-1');
+  type('relayPassword', 'pw-1');
+  nextPostHandler = () => new Promise(res => {{ resolvePost = res; }});
+  const save3 = saveRelay();
+  type('relayPassword', 'pw-2');
+  nextGetHandler = async () => ({{relayUrl: 'https://example.invalid/only-pw-1', deemixPasswordSet: true, lanStems: null}});
+  resolvePost({{relayUrl: 'https://example.invalid/only-pw-1', deemixPasswordSet: true, lanStems: null}});
+  await save3;
+  assert.equal(els.relayUrl.value, 'https://example.invalid/only-pw-1');
+  assert.equal(els.relayPassword.value, 'pw-2');
+  assert.equal(relayUrlDirty, false);
+
+  // 7. Failed Save POST (HTTP 400) preserves both URL dirty state and typed password.
+  type('relayUrl', 'https://example.invalid/bad');
+  type('relayPassword', 'pw-keep');
+  nextPostHandler = async () => {{ throw new Error('empty URL'); }};
+  await assert.rejects(() => saveRelay());
+  assert.equal(els.relayUrl.value, 'https://example.invalid/bad');
+  assert.equal(els.relayPassword.value, 'pw-keep');
+  assert.equal(relayUrlDirty, true);
+}})().catch(e => {{ console.error(e); process.exit(1); }});
+"""
+        r = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    @unittest.skipUnless(
+        shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome"),
+        "chromium is required for the browser interleaving test",
+    )
+    def test_web_console_relay_card_chromium_interleavings(self):
+        from html import unescape
+        browser = shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome")
+        page = (REPO / "pkg/webui/index.html").read_text(encoding="utf-8")
+        probe_template = r"""<script>
+const scenario = 'SCENARIO', original = 'https://example.invalid/initial';
+const draftA = original + '/a', draftB = original + '/b';
+let stored = original, gets = 0, pending = 0, peak = 0, posts = 0;
+let submittedOriginal = false, submittedEmpty = false, initialHydrated = false;
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+const field = id => document.getElementById(id);
+const card = () => field('relayState').closest('details');
+function type(id, value) {
+  const el = field(id); el.focus(); el.value = value;
+  el.dispatchEvent(new Event('input', {bubbles:true})); el.blur();
+}
+window.fetch = async (input, opts={}) => {
+  const path = String(input).split('?')[0];
+  let body = {};
+  if (path === '/api/relay') {
+    if (opts.method === 'POST') {
+      const sent = JSON.parse(opts.body); posts++;
+      submittedOriginal = sent.relayUrl === original;
+      submittedEmpty = sent.relayUrl === '';
+      if (submittedEmpty) return {ok:false, status:400, json:async()=>({error:'empty URL'})};
+      if (scenario === 'save') await wait(2500);
+      stored = sent.relayUrl;
+    } else {
+      gets++; pending++; peak = Math.max(peak, pending);
+      if ((scenario === 'open' || scenario === 'open_dirty') && gets === 1) await wait(FIRST_DELAY);
+      pending--;
+    }
+    body = {relayUrl:stored, lanStems:null};
+  }
+  if (path === '/api/ui') body = {language:'en', capabilities:{remoteStems:true}};
+  if (['/api/drives','/api/sessions'].includes(path)) body = [];
+  if (path === '/api/hook-features') body = {features:[]};
+  return {ok:true, json:async()=>body};
+};
+setTimeout(()=>card().querySelector('summary').click(), 300);
+if (scenario === 'open') {
+  setTimeout(()=>{
+    initialHydrated = field('relayUrl').value === original;
+    type('relayPassword','1'); card().querySelector('button').click();
+  }, 7200);
+} else if (scenario === 'open_dirty') {
+  setTimeout(()=>{ type('relayUrl', draftB); }, 500);
+} else {
+  setTimeout(()=>{
+    initialHydrated = field('relayUrl').value === original;
+    type('relayUrl',draftA); type('relayPassword','1');
+    card().querySelector('button').click();
+  }, 1100);
+  setTimeout(()=>{ type('relayUrl',draftB); type('relayPassword','2'); }, 1400);
+}
+setTimeout(()=>{
+  const result = {gets,peak,posts,initialHydrated,submittedOriginal,submittedEmpty,
+    keptURL:field('relayUrl').value===draftB, keptPassword:field('relayPassword').value==='2'};
+  const el=document.createElement('pre'); el.id='e3-interleaving';
+  el.textContent=JSON.stringify(result); document.body.appendChild(el);
+}, 8500);
+</script>"""
+        for scenario, first_delay in (("open", 650), ("open", 6500), ("save", 0), ("open_dirty", 1500)):
+            with self.subTest(scenario=scenario, first_delay=first_delay):
+                probe = probe_template.replace("SCENARIO", scenario).replace("FIRST_DELAY", str(first_delay))
+                with tempfile.TemporaryDirectory(prefix="f336-e3-interleave-") as directory:
+                    root = Path(directory)
+                    html_file = root / "console.html"
+                    html_file.write_text(page.replace("<script>", probe + "<script>", 1), encoding="utf-8")
+                    dom = subprocess.check_output(
+                        [
+                            browser, "--headless", "--no-sandbox", "--disable-gpu",
+                            "--disable-background-networking", "--disable-dev-shm-usage",
+                            "--user-data-dir=" + str(root / "browser"),
+                            "--virtual-time-budget=9500", "--dump-dom",
+                            html_file.as_uri() + "?lang=en",
+                        ],
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                    )
+                match = re.search(r'<pre id="e3-interleaving">([^<]+)</pre>', dom)
+                self.assertIsNotNone(match, f"Chromium did not finish {scenario} ({first_delay}ms)")
+                obs = json.loads(unescape(match.group(1)))
+                self.assertEqual(obs["peak"], 1, f"{scenario} ({first_delay}ms) overlapped relay GETs: {obs}")
+                if scenario == "open":
+                    self.assertEqual(obs["posts"], 1, obs)
+                    self.assertGreaterEqual(obs["gets"], 2, obs)
+                    self.assertTrue(obs["initialHydrated"], f"open ({first_delay}ms) left URL blank: {obs}")
+                    self.assertTrue(obs["submittedOriginal"], f"password-only save lost URL: {obs}")
+                    self.assertFalse(obs["submittedEmpty"], obs)
+                elif scenario == "open_dirty":
+                    self.assertGreaterEqual(obs["gets"], 2, obs)
+                    self.assertTrue(obs["keptURL"], f"startup hydration wiped early dirty draft: {obs}")
+                else:
+                    self.assertEqual(obs["posts"], 1, obs)
+                    self.assertGreaterEqual(obs["gets"], 2, obs)
+                    self.assertTrue(obs["initialHydrated"], obs)
+                    self.assertTrue(obs["keptURL"], f"pending save discarded newer URL draft: {obs}")
+                    self.assertTrue(obs["keptPassword"], f"pending save discarded newer password draft: {obs}")
 
     def test_home_worker_scripts_default_to_demucs_and_keep_hpss(self):
         import os

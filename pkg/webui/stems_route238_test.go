@@ -117,11 +117,13 @@ func extractConsoleTable(page string) (string, error) {
 // === false) omit the suffix; and the Relay card refreshes live while open
 // without clobbering unsaved inputs.
 func TestConsoleStemsStatusMatchesIssue238(t *testing.T) {
-	if _, err := extractConsoleTable("const T = {\na:['1','2','3','4']\n};\n"); err != nil {
-		t.Fatalf("extractConsoleTable rejected spaced table marker: %v", err)
+	for _, bad := range []string{"no translation table here", "const T = {\nmissing terminator"} {
+		if _, err := extractConsoleTable(bad); err == nil {
+			t.Fatalf("extractConsoleTable accepted malformed input %q", bad)
+		}
 	}
-	if _, err := extractConsoleTable("no translation table here"); err == nil {
-		t.Fatal("extractConsoleTable accepted input without translation table")
+	if _, err := extractConsoleTable("const  T \t= {\na:['1','2','3','4']\n};\n"); err != nil {
+		t.Fatalf("extractConsoleTable rejected spaced table marker: %v", err)
 	}
 
 	b, err := assets.ReadFile("index.html")
@@ -140,7 +142,11 @@ func TestConsoleStemsStatusMatchesIssue238(t *testing.T) {
 		"stemsDeck:[",
 		"function syncRelayPoll()",
 		"$('relayCard').ontoggle=syncRelayPoll",
+		"$('relayPassword').oninput=",
 		"relayUrlDirty",
+		"relayHydrated",
+		"relayUrlGen",
+		"relayPwGen",
 	} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("pkg/webui/index.html missing %q", want)
@@ -269,6 +275,33 @@ console.log(JSON.stringify(out));
 		}
 		if !strings.Contains(line, "B") || !strings.Contains(line, check.need) || !strings.Contains(line, "htdemucs") {
 			t.Fatalf("%s busy status missing expected guidance (%q): %q", l, check.need, line)
+		}
+	}
+}
+
+// #336 E3 R2 Finding 1 server guard: POST /api/relay rejects an empty relayUrl
+// with HTTP 400 and preserves the previously configured URL and password.
+func TestRelayConfigPostRejectsEmptyURLAndPreservesPriorConfig(t *testing.T) {
+	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
+	defer s.Close()
+	savedURL := "https://example.invalid/initial"
+	savedPW := "keep-secret"
+	if err := s.updateRelayConfig(&savedURL, &savedPW); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{
+		`{"relayUrl":""}`,
+		`{"relayUrl":"","deemixPassword":"attempted-overwrite"}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/api/relay", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		s.relayConfigPost(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("body=%s: got HTTP %d, want %d", body, w.Code, http.StatusBadRequest)
+		}
+		cfg := s.loadRelayConfig()
+		if cfg.RelayURL != savedURL || cfg.Password != savedPW {
+			t.Fatalf("body=%s: config mutated to URL=%q passwordSet=%t", body, cfg.RelayURL, cfg.Password != "")
 		}
 	}
 }
