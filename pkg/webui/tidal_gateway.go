@@ -157,23 +157,24 @@ type playlistSearcher interface {
 	SearchPlaylists(context.Context, string) ([]providers.Playlist, error)
 }
 type tidalGateway struct {
-	authMu     sync.Mutex
-	authLoaded bool
-	authCache  tidalAuth
-	authInfo   os.FileInfo
-	refreshMu  sync.Mutex // serializes rotating-token grants, including Engine requests
-	browse     *browseCache
-	searches   *searchCache
-	s          *Server
-	catalog    *providers.Deezer
-	mux        *http.ServeMux
-	mu         sync.Mutex
-	ids        map[string]int64
-	tracks     map[int64]trackRef
-	lists      map[string]playlistRef
-	albums     map[int64]albumRef
-	albumIDs   map[string]int64
-	next       int64
+	authMu         sync.Mutex
+	authLoaded     bool
+	authCache      tidalAuth
+	authInfo       os.FileInfo
+	uncertainGrant string
+	refreshMu      sync.Mutex // serializes rotating-token grants, including Engine requests
+	browse         *browseCache
+	searches       *searchCache
+	s              *Server
+	catalog        *providers.Deezer
+	mux            *http.ServeMux
+	mu             sync.Mutex
+	ids            map[string]int64
+	tracks         map[int64]trackRef
+	lists          map[string]playlistRef
+	albums         map[int64]albumRef
+	albumIDs       map[string]int64
+	next           int64
 	// ceiling is the highest track ID both copies of the ceiling reserve, under mu: no
 	// ID above it is handed out before they say so (gateway_ids.go, #335).
 	ceiling int64
@@ -673,10 +674,14 @@ func (t *tidalRetryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	} else if tokenGrant {
 		maxAttempts = 3
 	}
+	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		out := req
 		if attempt > 0 {
 			if !sleepContext(req.Context(), t.backoff*time.Duration(attempt)) {
+				if lastErr != nil {
+					return nil, lastErr
+				}
 				return nil, req.Context().Err()
 			}
 			out = req.Clone(req.Context())
@@ -690,6 +695,7 @@ func (t *tidalRetryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 		}
 		resp, err := base.RoundTrip(out)
 		if err != nil {
+			lastErr = err
 			if attempt+1 < maxAttempts && req.Context().Err() == nil && (idempotent || isSafePreConnectError(err)) {
 				continue
 			}
@@ -742,23 +748,41 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if strings.HasSuffix(clean, "/oauth2/token") {
-				oauthErr, err := g.tokenResponse(resp, r.Form.Get("refresh_token"), r.Form.Get("client_id"))
+				refreshTok := r.Form.Get("refresh_token")
+				oauthErr, saved, err := g.tokenResponse(resp, refreshTok, r.Form.Get("client_id"))
 				if err != nil {
 					if isRefreshGrant {
+						if oauthErr != "invalid_grant" {
+							g.markRefreshUncertain(refreshTok)
+						}
 						return fmt.Errorf("%v: %w", err, errTidalTransient)
 					}
 					return err
 				}
-				if isRefreshGrant && resp.StatusCode != http.StatusOK {
+				if isRefreshGrant {
+					if resp.StatusCode == http.StatusOK {
+						if !saved {
+							g.markRefreshUncertain(refreshTok)
+							return errTidalTransient
+						}
+						return nil
+					}
 					// For rotating refresh_token grants, only a confirmed invalid_grant
-					// (400/401) indicates session revocation. Any other non-200 reply
-					// (429/5xx ambiguity, invalid_client, malformed 400, transient 401)
-					// keeps stored credentials and returns non-logout 503.
+					// (400/401) indicates session revocation; normalize it to HTTP 401
+					// to match the internal clear-and-401 contract. Any other non-200
+					// reply (429/5xx ambiguity, invalid_client, malformed 400, transient
+					// 401) keeps stored credentials and returns non-logout 503.
 					if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized {
 						if oauthErr == "invalid_grant" {
+							resp.StatusCode = http.StatusUnauthorized
+							resp.Status = fmt.Sprintf("%d %s", http.StatusUnauthorized, http.StatusText(http.StatusUnauthorized))
 							return nil
 						}
 						logNonRevocationOAuthError(resp.StatusCode, oauthErr)
+						return errTidalTransient
+					}
+					if isAmbiguousRefreshStatus(resp.StatusCode) {
+						g.markRefreshUncertain(refreshTok)
 					}
 					return errTidalTransient
 				}
@@ -775,47 +799,57 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 					return errTidalTransient
 				}
 				resp.Body = io.NopCloser(bytes.NewReader(b))
-				if isTidalSessionLogout401(b) && g.hasRealAuth() {
-					failedToken := strings.TrimSpace(strings.TrimPrefix(resp.Request.Header.Get("Authorization"), "Bearer "))
-					a, err := g.refreshRealAuth(r.Context(), failedToken)
-					if err != nil {
-						if errors.Is(err, errTidalAuthInvalid) {
-							return nil // genuine invalid_grant / no refresh token -> let Engine see 401
-						}
+				if isTidalSessionLogout401(b) {
+					cur, state := g.loadRealAuth()
+					if state == authStoreError {
 						return errTidalTransient
 					}
-					if r.Method == http.MethodGet || r.Method == http.MethodHead {
-						retry := resp.Request.Clone(r.Context())
-						retry.Header.Set("Authorization", "Bearer "+a.AccessToken)
-						next, err := transport.RoundTrip(retry)
+					if state == authStoreLoaded && (!isSyntheticTidalToken(cur.RefreshToken) || !isSyntheticTidalToken(cur.AccessToken)) {
+						failedToken := strings.TrimSpace(strings.TrimPrefix(resp.Request.Header.Get("Authorization"), "Bearer "))
+						a, err := g.refreshRealAuth(r.Context(), failedToken)
 						if err != nil {
-							return errors.New("could not retry TIDAL request")
-						}
-						if next.StatusCode == http.StatusUnauthorized {
-							nb, nextReadErr := io.ReadAll(io.LimitReader(next.Body, 65537))
-							next.Body.Close()
-							if nextReadErr != nil || len(nb) > 65536 {
-								return errTidalTransient
+							if errors.Is(err, errTidalAuthInvalid) {
+								return nil // genuine invalid_grant / confirmed missing refresh -> let Engine see 401
 							}
-							next.Body = io.NopCloser(bytes.NewReader(nb))
-							if isTidalSessionLogout401(nb) {
-								// Replay after a fresh rotation still returned a
-								// session 401: return non-logout 503 without looping
-								// or deleting the newly stored token pair.
-								return errTidalTransient
-							}
+							return errTidalTransient
 						}
-						*resp = *next
-						return nil
+						if r.Method == http.MethodGet || r.Method == http.MethodHead {
+							retry := resp.Request.Clone(r.Context())
+							retry.Header.Set("Authorization", "Bearer "+a.AccessToken)
+							next, err := transport.RoundTrip(retry)
+							if err != nil {
+								return errors.New("could not retry TIDAL request")
+							}
+							if next.StatusCode == http.StatusUnauthorized {
+								nb, nextReadErr := io.ReadAll(io.LimitReader(next.Body, 65537))
+								next.Body.Close()
+								if nextReadErr != nil || len(nb) > 65536 {
+									return errTidalTransient
+								}
+								next.Body = io.NopCloser(bytes.NewReader(nb))
+								if isTidalSessionLogout401(nb) {
+									// Replay after a fresh rotation still returned a session
+									// 401 (or a bodyless HEAD 401 per RFC 9110 §9.3.2 where
+									// track subStatus is unobservable): return non-logout 503
+									// without looping or deleting the newly stored token pair.
+									return errTidalTransient
+								}
+							}
+							*resp = *next
+							return nil
+						}
+						// Non-idempotent API request got a session 401 and we rotated to a
+						// fresh token; return 503 so Engine stays logged in and keeps decks.
+						return errTidalTransient
 					}
-					// Non-idempotent API request got a session 401 and we rotated to a
-					// fresh token; return 503 so Engine stays logged in and keeps decks.
-					return errTidalTransient
 				}
 			}
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			if isRefreshGrant && !errors.Is(err, errTidalTransient) && !isSafePreConnectError(err) {
+				g.markRefreshUncertain(r.Form.Get("refresh_token"))
+			}
 			if errors.Is(err, errTidalTransient) || isRefreshGrant {
 				tidalTemporarilyUnavailable(w)
 				return

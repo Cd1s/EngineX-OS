@@ -1244,8 +1244,8 @@ func TestTidalCaptureBeforeSyntheticReplyAndInvalidGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Errorf("invalid grant response=%d", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("invalid grant response=%d, want 401", resp.StatusCode)
 	}
 	tidalGet(t, srv.URL, "/v1/enginex/ui", 200, &v)
 	if v["tidalLoggedIn"] != false {

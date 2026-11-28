@@ -5,6 +5,8 @@ package webui
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +30,14 @@ type tidalAuth struct {
 	ClientID     string `json:"clientId,omitempty"`
 }
 
+type authLoadState int
+
+const (
+	authStoreMissing authLoadState = iota // tidal-auth.json confirmed absent (or no StateDir)
+	authStoreLoaded                       // tidal-auth.json opened, read, and parsed cleanly as JSON
+	authStoreError                        // tidal-auth.json exists or failed stat/open/read/JSON parse
+)
+
 func isSyntheticTidalToken(tok string) bool {
 	switch strings.TrimSpace(tok) {
 	case "", "enginex", "enginex-token", "enginex-refresh", migration.Token, migration.RefreshToken:
@@ -43,12 +53,105 @@ func (g *tidalGateway) authPath() string {
 	return filepath.Join(g.s.cfg.StateDir, "tidal-auth.json")
 }
 
+func (g *tidalGateway) uncertainPath() string {
+	if g.s == nil || g.s.cfg.StateDir == "" {
+		return ""
+	}
+	return filepath.Join(g.s.cfg.StateDir, "tidal-refresh-uncertain")
+}
+
+func refreshGrantDigest(refreshToken string) string {
+	if isSyntheticTidalToken(refreshToken) {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(refreshToken))
+	return hex.EncodeToString(sum[:])
+}
+
+// Caller holds authMu.
+func (g *tidalGateway) clearUncertainLocked() {
+	g.uncertainGrant = ""
+	if p := g.uncertainPath(); p != "" {
+		_ = os.Remove(p)
+	}
+}
+
+// markRefreshUncertain persists that this specific rotating refresh grant had an
+// ambiguous/lost outcome so subsequent requests suppress automatic resubmission
+// without modifying tidal-auth.json.
+func (g *tidalGateway) markRefreshUncertain(refreshToken string) {
+	digest := refreshGrantDigest(refreshToken)
+	if digest == "" {
+		return
+	}
+	g.authMu.Lock()
+	defer g.authMu.Unlock()
+	g.uncertainGrant = digest
+	p := g.uncertainPath()
+	if p == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		return
+	}
+	f, err := os.CreateTemp(filepath.Dir(p), ".tidal-refresh-uncertain-*")
+	if err != nil {
+		return
+	}
+	defer os.Remove(f.Name())
+	if _, err = f.WriteString(digest + "\n"); err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return
+	}
+	_ = os.Rename(f.Name(), p)
+}
+
+func (g *tidalGateway) isRefreshUncertain(refreshToken string) bool {
+	want := refreshGrantDigest(refreshToken)
+	if want == "" {
+		return false
+	}
+	g.authMu.Lock()
+	defer g.authMu.Unlock()
+	if g.uncertainGrant == want {
+		return true
+	}
+	p := g.uncertainPath()
+	if p == "" {
+		return false
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) && g.uncertainGrant != "" && g.uncertainGrant != want {
+			g.uncertainGrant = ""
+		}
+		return false
+	}
+	disk := strings.TrimSpace(string(b))
+	if disk == want {
+		g.uncertainGrant = disk
+		return true
+	}
+	if disk != "" {
+		// Active grant generation changed (e.g. external replacement with a fresh
+		// refresh token); drop the stale uncertain marker.
+		g.uncertainGrant = ""
+		_ = os.Remove(p)
+	}
+	return false
+}
+
 // Caller holds authMu. Reuse the cached snapshot while tidal-auth.json is
 // unchanged on disk so healthy bearer requests do not open or decode the file.
-func (g *tidalGateway) readAuth() tidalAuth {
+func (g *tidalGateway) readAuthState() (tidalAuth, authLoadState) {
 	p := g.authPath()
 	if p == "" {
-		return tidalAuth{}
+		return tidalAuth{}, authStoreMissing
 	}
 	st, err := os.Stat(p)
 	if err != nil {
@@ -56,11 +159,12 @@ func (g *tidalGateway) readAuth() tidalAuth {
 			g.authCache = tidalAuth{}
 			g.authInfo = nil
 			g.authLoaded = true
+			return tidalAuth{}, authStoreMissing
 		}
-		return tidalAuth{}
+		return tidalAuth{}, authStoreError
 	}
 	if g.authLoaded && g.authInfo != nil && os.SameFile(g.authInfo, st) && g.authInfo.Size() == st.Size() && g.authInfo.ModTime().Equal(st.ModTime()) {
-		return g.authCache
+		return g.authCache, authStoreLoaded
 	}
 	f, err := os.Open(p)
 	if err != nil {
@@ -68,36 +172,51 @@ func (g *tidalGateway) readAuth() tidalAuth {
 			g.authCache = tidalAuth{}
 			g.authInfo = nil
 			g.authLoaded = true
+			return tidalAuth{}, authStoreMissing
 		}
-		return tidalAuth{}
+		g.authCache = tidalAuth{}
+		g.authInfo = nil
+		g.authLoaded = false
+		return tidalAuth{}, authStoreError
 	}
 	defer f.Close()
 	opened, statErr := f.Stat()
 	b, readErr := io.ReadAll(io.LimitReader(f, 1<<20))
-	var a tidalAuth
-	if readErr == nil {
-		_ = json.Unmarshal(b, &a)
-	}
-	if statErr == nil && readErr == nil {
-		g.authCache = a
-		g.authInfo = opened
-		g.authLoaded = true
-	} else {
+	if statErr != nil || readErr != nil {
 		g.authCache = tidalAuth{}
 		g.authInfo = nil
 		g.authLoaded = false
+		return tidalAuth{}, authStoreError
 	}
-	return a
+	var a tidalAuth
+	if json.Unmarshal(b, &a) != nil {
+		g.authCache = tidalAuth{}
+		g.authInfo = nil
+		g.authLoaded = false
+		return tidalAuth{}, authStoreError
+	}
+	g.authCache = a
+	g.authInfo = opened
+	g.authLoaded = true
+	return a, authStoreLoaded
 }
-func (g *tidalGateway) realAuth() tidalAuth {
+
+func (g *tidalGateway) loadRealAuth() (tidalAuth, authLoadState) {
 	g.authMu.Lock()
 	defer g.authMu.Unlock()
-	return g.readAuth()
+	return g.readAuthState()
 }
+
+func (g *tidalGateway) realAuth() tidalAuth {
+	a, _ := g.loadRealAuth()
+	return a
+}
+
 func (g *tidalGateway) hasRealAuth() bool {
-	a := g.realAuth()
-	return !isSyntheticTidalToken(a.RefreshToken) || !isSyntheticTidalToken(a.AccessToken)
+	a, state := g.loadRealAuth()
+	return state == authStoreLoaded && (!isSyntheticTidalToken(a.RefreshToken) || !isSyntheticTidalToken(a.AccessToken))
 }
+
 func (g *tidalGateway) clearRealAuth() error {
 	g.authMu.Lock()
 	defer g.authMu.Unlock()
@@ -108,8 +227,28 @@ func (g *tidalGateway) clearRealAuth() error {
 	g.authCache = tidalAuth{}
 	g.authInfo = nil
 	g.authLoaded = true
+	g.clearUncertainLocked()
 	return nil
 }
+
+func (g *tidalGateway) clearRealAuthIfRefresh(refresh string) (bool, error) {
+	g.authMu.Lock()
+	defer g.authMu.Unlock()
+	a, state := g.readAuthState()
+	if state != authStoreLoaded || a.RefreshToken != refresh {
+		return false, nil
+	}
+	err := os.Remove(g.authPath())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	g.authCache = tidalAuth{}
+	g.authInfo = nil
+	g.authLoaded = true
+	g.clearUncertainLocked()
+	return true, nil
+}
+
 func (g *tidalGateway) saveRealAuth(in tidalAuth) error {
 	return g.updateRealAuth(in, false)
 }
@@ -119,8 +258,12 @@ func (g *tidalGateway) saveRealAuth(in tidalAuth) error {
 func (g *tidalGateway) updateRealAuth(in tidalAuth, fillOnly bool) error {
 	g.authMu.Lock()
 	defer g.authMu.Unlock()
-	a := g.readAuth()
+	a, state := g.readAuthState()
 	if fillOnly {
+		if state == authStoreError {
+			// Do not clobber an unreadable/transiently failing store with captured tokens.
+			return nil
+		}
 		if !isSyntheticTidalToken(a.AccessToken) {
 			in.AccessToken = ""
 		}
@@ -186,6 +329,10 @@ func (g *tidalGateway) updateRealAuth(in tidalAuth, fillOnly bool) error {
 		g.authInfo = nil
 		g.authLoaded = false
 	}
+	if !fillOnly {
+		// Explicit save (successful rotation or re-pairing) starts a clean grant generation.
+		g.clearUncertainLocked()
+	}
 	return nil
 }
 
@@ -212,8 +359,10 @@ func tidalTemporarilyUnavailable(w http.ResponseWriter) {
 // isTidalSessionLogout401 reports whether a TIDAL 401 response body will drive
 // Engine's TidalAPI::handleErrors into StreamingLogoutEvent -> onLoggedOut ->
 // unloadFromProvider (subStatus 6001, 6002, 11001, 11002, 11003, 11101, or
-// absent/empty). Non-zero subStatuses outside that set (such as 4005 track
-// restrictions) do not log out the session and should pass through untouched.
+// absent/empty). Observable non-zero subStatuses outside that set (such as
+// 4005 track restrictions on GET) do not log out the session and pass through
+// untouched; HTTP HEAD carries no response body (RFC 9110 §9.3.2), so its
+// empty body is conservatively treated as a session error to keep the session.
 func isTidalSessionLogout401(body []byte) bool {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return true
@@ -252,6 +401,10 @@ func isTransientUpstreamStatus(code int) bool {
 		return true
 	}
 	return false
+}
+
+func isAmbiguousRefreshStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
 }
 
 func parseOAuthErrorCode(body []byte) string {
@@ -343,9 +496,20 @@ func (g *tidalGateway) prepareRealAuth(w http.ResponseWriter, r *http.Request, c
 	}
 	if strings.HasSuffix(clean, "/oauth2/token") {
 		if form.Get("grant_type") == "refresh_token" {
-			a := g.realAuth()
+			a, state := g.loadRealAuth()
+			if state == authStoreError {
+				tidalTemporarilyUnavailable(w)
+				return false
+			}
 			if isSyntheticTidalToken(a.RefreshToken) {
+				if state == authStoreLoaded {
+					_ = g.clearRealAuth()
+				}
 				tidalNotLoggedIn(w)
+				return false
+			}
+			if g.isRefreshUncertain(a.RefreshToken) {
+				tidalTemporarilyUnavailable(w)
 				return false
 			}
 			form.Set("refresh_token", a.RefreshToken)
@@ -371,7 +535,14 @@ func (g *tidalGateway) prepareRealAuth(w http.ResponseWriter, r *http.Request, c
 	h := r.Header.Get("Authorization")
 	if strings.HasPrefix(h, "Bearer ") || !strings.HasSuffix(clean, "/oauth2/token") {
 		bearer := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
-		a := g.realAuth()
+		a, state := g.loadRealAuth()
+		if state == authStoreError {
+			if isSyntheticTidalToken(bearer) {
+				tidalTemporarilyUnavailable(w)
+				return false
+			}
+			return true
+		}
 		if isSyntheticTidalToken(bearer) {
 			if isSyntheticTidalToken(a.AccessToken) {
 				var err error
@@ -396,11 +567,11 @@ func (g *tidalGateway) prepareRealAuth(w http.ResponseWriter, r *http.Request, c
 	return true
 }
 
-func (g *tidalGateway) tokenResponse(resp *http.Response, refresh, clientID string) (string, error) {
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 1048577))
+func (g *tidalGateway) tokenResponse(resp *http.Response, refresh, clientID string) (oauthErr string, saved bool, err error) {
+	b, readErr := io.ReadAll(io.LimitReader(resp.Body, 1048577))
 	resp.Body.Close()
-	if err != nil || len(b) > 1048576 {
-		return "", errors.New("invalid TIDAL token response")
+	if readErr != nil || len(b) > 1048576 {
+		return "", false, errors.New("invalid TIDAL token response")
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(b))
 	if resp.StatusCode == http.StatusOK {
@@ -413,18 +584,22 @@ func (g *tidalGateway) tokenResponse(resp *http.Response, refresh, clientID stri
 			} `json:"user"`
 		}
 		if json.Unmarshal(b, &v) == nil && (!isSyntheticTidalToken(v.Access) || !isSyntheticTidalToken(v.Refresh)) {
-			return "", g.saveRealAuth(tidalAuth{AccessToken: v.Access, RefreshToken: v.Refresh, UserID: v.User.ID, CountryCode: v.User.Country, ClientID: clientID})
+			if err := g.saveRealAuth(tidalAuth{AccessToken: v.Access, RefreshToken: v.Refresh, UserID: v.User.ID, CountryCode: v.User.Country, ClientID: clientID}); err != nil {
+				return "", false, err
+			}
+			return "", true, nil
 		}
-		return "", nil
+		return "", false, nil
 	}
 	if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized {
-		oauthErr := parseOAuthErrorCode(b)
-		if oauthErr == "invalid_grant" && !isSyntheticTidalToken(refresh) && refresh == g.realAuth().RefreshToken {
-			return oauthErr, g.clearRealAuth()
+		oauthErr = parseOAuthErrorCode(b)
+		if oauthErr == "invalid_grant" && !isSyntheticTidalToken(refresh) {
+			_, err := g.clearRealAuthIfRefresh(refresh)
+			return oauthErr, false, err
 		}
-		return oauthErr, nil
+		return oauthErr, false, nil
 	}
-	return "", nil
+	return "", false, nil
 }
 
 func (g *tidalGateway) tidalTransport() http.RoundTripper {
@@ -437,18 +612,28 @@ func (g *tidalGateway) tidalTransport() http.RoundTripper {
 func (g *tidalGateway) refreshRealAuth(ctx context.Context, failedAccessToken string) (tidalAuth, error) {
 	g.refreshMu.Lock()
 	defer g.refreshMu.Unlock()
-	a := g.realAuth()
+	a, state := g.loadRealAuth()
+	if state == authStoreError {
+		return tidalAuth{}, fmt.Errorf("TIDAL auth store unreadable: %w", errTidalTransient)
+	}
 	if !isSyntheticTidalToken(a.AccessToken) && a.AccessToken != failedAccessToken {
 		return a, nil // another request already rotated the failed credentials
 	}
 	if isSyntheticTidalToken(a.RefreshToken) {
+		if state == authStoreLoaded {
+			_ = g.clearRealAuth()
+		}
 		return tidalAuth{}, fmt.Errorf("no TIDAL refresh token: %w", errTidalAuthInvalid)
 	}
+	if g.isRefreshUncertain(a.RefreshToken) {
+		return tidalAuth{}, fmt.Errorf("TIDAL refresh outcome uncertain: %w", errTidalTransient)
+	}
+	origRefresh := a.RefreshToken
 	base := g.s.cfg.TidalAuthURL
 	if base == "" {
 		base = "https://auth.tidal.com"
 	}
-	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {a.RefreshToken}}
+	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {origRefresh}}
 	if a.ClientID != "" {
 		form.Set("client_id", a.ClientID)
 	}
@@ -476,20 +661,32 @@ func (g *tidalGateway) refreshRealAuth(ctx context.Context, failedAccessToken st
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		resp, err := client.Do(req)
 		if err != nil {
-			if attempt+1 < maxAttempts && isSafePreConnectError(err) {
-				continue
+			if isSafePreConnectError(err) {
+				if attempt+1 < maxAttempts {
+					continue
+				}
+				return tidalAuth{}, fmt.Errorf("could not refresh TIDAL login: %w", errTidalTransient)
 			}
-			return tidalAuth{}, fmt.Errorf("could not refresh TIDAL login: %w", err)
+			g.markRefreshUncertain(origRefresh)
+			return tidalAuth{}, fmt.Errorf("could not refresh TIDAL login: %w", errTidalTransient)
 		}
-		oauthErr, tokErr := g.tokenResponse(resp, a.RefreshToken, a.ClientID)
+		oauthErr, saved, tokErr := g.tokenResponse(resp, origRefresh, a.ClientID)
 		resp.Body.Close()
 		if tokErr != nil {
-			return tidalAuth{}, tokErr
+			if oauthErr != "invalid_grant" {
+				g.markRefreshUncertain(origRefresh)
+			}
+			return tidalAuth{}, fmt.Errorf("TIDAL token response error: %w", errTidalTransient)
 		}
 		if resp.StatusCode == http.StatusOK {
-			a = g.realAuth()
-			if isSyntheticTidalToken(a.AccessToken) {
-				return tidalAuth{}, errors.New("no TIDAL access token")
+			if !saved {
+				g.markRefreshUncertain(origRefresh)
+				return tidalAuth{}, fmt.Errorf("no TIDAL access token: %w", errTidalTransient)
+			}
+			a, state = g.loadRealAuth()
+			if state != authStoreLoaded || isSyntheticTidalToken(a.AccessToken) {
+				g.markRefreshUncertain(origRefresh)
+				return tidalAuth{}, fmt.Errorf("no TIDAL access token: %w", errTidalTransient)
 			}
 			return a, nil
 		}
@@ -503,6 +700,9 @@ func (g *tidalGateway) refreshRealAuth(ctx context.Context, failedAccessToken st
 			}
 			logNonRevocationOAuthError(resp.StatusCode, oauthErr)
 			return tidalAuth{}, fmt.Errorf("TIDAL auth error HTTP %d: %w", resp.StatusCode, errTidalTransient)
+		}
+		if isAmbiguousRefreshStatus(resp.StatusCode) {
+			g.markRefreshUncertain(origRefresh)
 		}
 		return tidalAuth{}, fmt.Errorf("TIDAL refresh failed with HTTP %d: %w", resp.StatusCode, errTidalTransient)
 	}

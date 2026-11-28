@@ -203,82 +203,210 @@ func TestS10PrepareRealAuthTransientRefreshErrorReturns503Not401(t *testing.T) {
 }
 
 // S10: When upstream TIDAL API returns a session-logout 401 (expired hourly
-// access token) and the gateway's token refresh fails because Wi-Fi/MiFi drops,
-// proxyToTidal must return 503 without retrying HTTP 503 on the rotating grant.
-// Once Wi-Fi recovers, the next request refreshes and succeeds with 200.
+// access token) and the gateway's token refresh fails:
+//  1. A pre-connect Wi-Fi drop (dial/DNS failure) never sends the rotating grant
+//     upstream, keeps tidal-auth.json, returns 503, and transparently rotates and
+//     succeeds with 200 once Wi-Fi recovers.
+//  2. An ambiguous upstream HTTP 503 after reaching /oauth2/token makes a single
+//     submission, keeps tidal-auth.json byte-for-byte, suppresses resubmission on
+//     subsequent requests (503 + keeping-session log), and recovers once a fresh
+//     grant pair arrives via re-pairing.
 func TestS10Proxy401DuringTransientRefreshFailureReturns503Not401(t *testing.T) {
-	var authOnline atomic.Bool
-	var authCalls atomic.Int32
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/v1/oauth2/token" {
-			authCalls.Add(1)
-			if !authOnline.Load() {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				io.WriteString(w, `{"error":"service_unavailable"}`)
+	t.Run("preconnect_wifi_drop_recovers_transparently", func(t *testing.T) {
+		var wifiOnline atomic.Bool
+		var authCalls atomic.Int32
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/v1/oauth2/token" {
+				authCalls.Add(1)
+				io.WriteString(w, `{"access_token":"fresh-access","refresh_token":"fresh-refresh"}`)
 				return
 			}
-			io.WriteString(w, `{"access_token":"fresh-access","refresh_token":"fresh-refresh"}`)
-			return
+			if r.Header.Get("Authorization") != "Bearer fresh-access" {
+				w.WriteHeader(http.StatusUnauthorized)
+				io.WriteString(w, `{"status":401,"subStatus":11003,"userMessage":"Token expired"}`)
+				return
+			}
+			io.WriteString(w, `{"userId":42}`)
+		}))
+		defer up.Close()
+
+		httpClient := &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if strings.HasSuffix(r.URL.Path, "/oauth2/token") && !wifiOnline.Load() {
+					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("network is unreachable")}
+				}
+				return http.DefaultTransport.RoundTrip(r)
+			}),
 		}
-		if r.Header.Get("Authorization") != "Bearer fresh-access" {
-			w.WriteHeader(http.StatusUnauthorized)
-			io.WriteString(w, `{"status":401,"subStatus":11003,"userMessage":"Token expired"}`)
-			return
+
+		dir := t.TempDir()
+		authFile := filepath.Join(dir, "tidal-auth.json")
+		initial := `{"accessToken":"expired-access","refreshToken":"real-refresh","clientId":"cid"}`
+		if err := os.WriteFile(authFile, []byte(initial), 0600); err != nil {
+			t.Fatal(err)
 		}
-		io.WriteString(w, `{"userId":42}`)
-	}))
-	defer up.Close()
+		s := New(Config{
+			AccessToken:  "code",
+			UIDir:        t.TempDir(),
+			StateDir:     dir,
+			TidalAPIURL:  up.URL,
+			TidalAuthURL: up.URL,
+			HTTP:         httpClient,
+		}, nil)
+		defer s.Close()
+		srv := httptest.NewServer(s)
+		defer srv.Close()
+		uiPost(t, srv.URL, "scope=tidal")
 
-	dir := t.TempDir()
-	authFile := filepath.Join(dir, "tidal-auth.json")
-	if err := os.WriteFile(authFile, []byte(`{"accessToken":"expired-access","refreshToken":"real-refresh","clientId":"cid"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	s := New(Config{
-		AccessToken:  "code",
-		UIDir:        t.TempDir(),
-		StateDir:     dir,
-		TidalAPIURL:  up.URL,
-		TidalAuthURL: up.URL,
-	}, nil)
-	defer s.Close()
-	srv := httptest.NewServer(s)
-	defer srv.Close()
-	uiPost(t, srv.URL, "scope=tidal")
+		// Phase 1: pre-connect Wi-Fi outage -> 0 upstream token submissions, 503, store preserved.
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/sessions", nil)
+		req.Header.Set("Authorization", "Bearer expired-access")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("during outage: status = %d, want 503", resp.StatusCode)
+		}
+		if got := authCalls.Load(); got != 0 {
+			t.Fatalf("during pre-connect outage: authCalls = %d, want 0", got)
+		}
+		if got, err := os.ReadFile(authFile); err != nil || string(got) != initial {
+			t.Fatalf("tidal-auth.json modified during pre-connect outage: %q err=%v", got, err)
+		}
 
-	// Phase 1: Wi-Fi / auth upstream returns 503 -> single attempt, 503 to Engine, store kept.
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/sessions", nil)
-	req.Header.Set("Authorization", "Bearer expired-access")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("during outage: status = %d, want 503 (never leak 401 to Engine)", resp.StatusCode)
-	}
-	if got := authCalls.Load(); got != 1 {
-		t.Fatalf("during outage: authCalls = %d, want 1 (must not retry HTTP 503 on rotating grant)", got)
-	}
-	if _, err := os.Stat(authFile); err != nil {
-		t.Fatalf("tidal-auth.json lost during outage: %v", err)
-	}
+		// Phase 2: Wi-Fi recovers -> unspent grant rotates cleanly and succeeds with 200.
+		wifiOnline.Store(true)
+		req2, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/sessions", nil)
+		req2.Header.Set("Authorization", "Bearer expired-access")
+		resp2, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp2.Body)
+		resp2.Body.Close()
+		if resp2.StatusCode != http.StatusOK {
+			t.Fatalf("after recovery: status = %d, want 200", resp2.StatusCode)
+		}
+		if got := authCalls.Load(); got != 1 {
+			t.Fatalf("after recovery: authCalls = %d, want 1", got)
+		}
+	})
 
-	// Phase 2: Wi-Fi recovers -> next request rotates token and succeeds transparently.
-	authOnline.Store(true)
-	req2, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/sessions", nil)
-	req2.Header.Set("Authorization", "Bearer expired-access")
-	resp2, err := http.DefaultClient.Do(req2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	io.Copy(io.Discard, resp2.Body)
-	resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK {
-		t.Fatalf("after recovery: status = %d, want 200", resp2.StatusCode)
-	}
+	t.Run("ambiguous_http_503_suppresses_resubmission_until_fresh_pair", func(t *testing.T) {
+		var authCalls atomic.Int32
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/v1/oauth2/token" {
+				_ = r.ParseForm()
+				if r.Form.Get("grant_type") == "urn:ietf:params:oauth:grant-type:device_code" {
+					io.WriteString(w, `{"access_token":"repaired-access","refresh_token":"repaired-refresh"}`)
+					return
+				}
+				if authCalls.Add(1) == 1 {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					io.WriteString(w, `{"error":"service_unavailable"}`)
+					return
+				}
+				w.WriteHeader(http.StatusBadRequest)
+				io.WriteString(w, `{"error":"invalid_grant"}`)
+				return
+			}
+			if r.Header.Get("Authorization") != "Bearer repaired-access" {
+				w.WriteHeader(http.StatusUnauthorized)
+				io.WriteString(w, `{"status":401,"subStatus":11003,"userMessage":"Token expired"}`)
+				return
+			}
+			io.WriteString(w, `{"userId":42}`)
+		}))
+		defer up.Close()
+
+		var logs lockedLogBuffer
+		prev := log.Writer()
+		log.SetOutput(&logs)
+		defer log.SetOutput(prev)
+
+		dir := t.TempDir()
+		authFile := filepath.Join(dir, "tidal-auth.json")
+		initial := `{"accessToken":"expired-access","refreshToken":"real-refresh","clientId":"cid"}`
+		if err := os.WriteFile(authFile, []byte(initial), 0600); err != nil {
+			t.Fatal(err)
+		}
+		s := New(Config{
+			AccessToken:  "code",
+			UIDir:        t.TempDir(),
+			StateDir:     dir,
+			TidalAPIURL:  up.URL,
+			TidalAuthURL: up.URL,
+		}, nil)
+		defer s.Close()
+		srv := httptest.NewServer(s)
+		defer srv.Close()
+		uiPost(t, srv.URL, "scope=tidal")
+
+		// Phase 1: upstream HTTP 503 on rotating refresh -> 1 submission, 503, store preserved byte-for-byte.
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/sessions", nil)
+		req.Header.Set("Authorization", "Bearer expired-access")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusServiceUnavailable || authCalls.Load() != 1 {
+			t.Fatalf("phase 1: status=%d authCalls=%d, want 503/1", resp.StatusCode, authCalls.Load())
+		}
+		if got, err := os.ReadFile(authFile); err != nil || string(got) != initial {
+			t.Fatalf("phase 1: tidal-auth.json changed: %q err=%v", got, err)
+		}
+
+		// Phase 2: follow-up ordinary API request must NOT resubmit the spent grant -> still 1 submission, 503, store preserved.
+		req2, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/sessions", nil)
+		req2.Header.Set("Authorization", "Bearer expired-access")
+		resp2, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp2.Body)
+		resp2.Body.Close()
+		if resp2.StatusCode != http.StatusServiceUnavailable || authCalls.Load() != 1 {
+			t.Fatalf("phase 2: status=%d authCalls=%d, want 503/1", resp2.StatusCode, authCalls.Load())
+		}
+		if got, err := os.ReadFile(authFile); err != nil || string(got) != initial {
+			t.Fatalf("phase 2: tidal-auth.json changed: %q err=%v", got, err)
+		}
+		if !strings.Contains(logs.String(), "TIDAL refresh temporarily unavailable, keeping session") {
+			t.Fatalf("phase 2: missing keeping-session log: %q", logs.String())
+		}
+
+		// Phase 3: explicit re-pairing stores a fresh grant pair and recovers transparently to 200.
+		pairReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/au/oauth2/token", strings.NewReader("grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=dev-1"))
+		pairReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		pairResp, err := http.DefaultClient.Do(pairReq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, pairResp.Body)
+		pairResp.Body.Close()
+		if pairResp.StatusCode != http.StatusOK {
+			t.Fatalf("re-pair status=%d, want 200", pairResp.StatusCode)
+		}
+
+		req3, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/sessions", nil)
+		req3.Header.Set("Authorization", "Bearer expired-access")
+		resp3, err := http.DefaultClient.Do(req3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp3.Body)
+		resp3.Body.Close()
+		if resp3.StatusCode != http.StatusOK {
+			t.Fatalf("after re-pair: status = %d, want 200", resp3.StatusCode)
+		}
+	})
 }
 
 // S10: A post-send connection drop (EOF) during /oauth2/token must NOT retry
