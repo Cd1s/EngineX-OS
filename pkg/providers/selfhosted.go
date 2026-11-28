@@ -877,6 +877,22 @@ func (p *SelfHostedProvider) filenameSearch(query string) []Track {
 	return out
 }
 
+// webdavSignedDownload fetches the target of a download redirect to another origin with
+// no credential: a server that keeps its files on OneDrive or S3 (Cloudreve) answers every
+// GET with a signed URL there. The login itself still never leaves its origin (#335), and
+// the NAS client's dialer still refuses the addresses it refuses for every request.
+func (p *SelfHostedProvider) webdavSignedDownload(ctx context.Context, redirect *http.Response) (*http.Response, error) {
+	loc, err := redirect.Location()
+	if err != nil || (loc.Scheme != "http" && loc.Scheme != "https") || loc.Host == "" || loc.User != nil {
+		return nil, errors.New("webdav: download redirect has no usable address")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, loc.String(), nil)
+	if err != nil {
+		return nil, redactURLError(err)
+	}
+	return p.httpClient().Do(req)
+}
+
 func (p *SelfHostedProvider) webdavDownloadTrack(ctx context.Context, trackID, destDir string) (string, error) {
 	targetU, err := resolveWebDAVURL(p.cfg.URL, trackID)
 	if err != nil {
@@ -890,6 +906,9 @@ func (p *SelfHostedProvider) webdavDownloadTrack(ctx context.Context, trackID, d
 	p.setWebDAVAuth(req)
 
 	resp, err := p.httpClient().Do(req)
+	if errors.Is(err, ErrRedirectOffOrigin) && resp != nil {
+		resp, err = p.webdavSignedDownload(ctx, resp)
+	}
 	if err != nil {
 		return "", fmt.Errorf("webdav: download %w", redactURLError(err))
 	}
