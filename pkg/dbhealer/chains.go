@@ -73,9 +73,408 @@ func HealPlaylistEntities(db *sql.DB) error {
 		if err := fixSchema(ctx, tx); err != nil {
 			return err
 		}
-		_, err := healChains(ctx, tx, false)
-		return err
+		if _, _, err := healPlaylistEntityIntegrity(ctx, tx); err != nil {
+			return err
+		}
+		if _, err := healChains(ctx, tx, false); err != nil {
+			return err
+		}
+		return syncSqliteSequence(ctx, tx)
 	})
+}
+
+const uuidTrimCutset = " \t\n\r\v\f"
+
+// healPlaylistEntityIntegrity removes orphaned PlaylistEntity rows whose listId
+// no longer exists in Playlist, backfills missing databaseUuid only for provably
+// local tracks, and deduplicates colliding known-source (listId, databaseUuid, trackId)
+// rows while preserving first-occurrence playlist order and direct membership.
+// Healthy mounts exit via indexed pre-checks without materializing playlists.
+func healPlaylistEntityIntegrity(ctx context.Context, tx *sql.Tx) (duplicates, orphans int, err error) {
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+	var hasPlaylist int
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM main.sqlite_master WHERE type='table' AND name='Playlist'").Scan(&hasPlaylist); err != nil {
+		return 0, 0, err
+	}
+	if hasPlaylist > 0 {
+		var hasOrphans int
+		if err := tx.QueryRowContext(ctx, `
+			WITH RECURSIVE distinct_lists(lid) AS (
+				SELECT MIN(listId) FROM PlaylistEntity WHERE listId IS NOT NULL
+				UNION ALL
+				SELECT (SELECT MIN(listId) FROM PlaylistEntity WHERE listId > lid)
+				FROM distinct_lists
+				WHERE lid IS NOT NULL
+			)
+			SELECT EXISTS(SELECT 1 FROM PlaylistEntity WHERE listId IS NULL)
+				OR EXISTS(
+					SELECT 1 FROM distinct_lists d
+					WHERE d.lid IS NOT NULL
+						AND NOT EXISTS (SELECT 1 FROM Playlist p WHERE p.id = d.lid)
+				)`).Scan(&hasOrphans); err != nil {
+			return 0, 0, err
+		}
+		if hasOrphans != 0 {
+			res, err := tx.ExecContext(ctx, "DELETE FROM PlaylistEntity WHERE listId IS NULL OR listId NOT IN (SELECT id FROM Playlist)")
+			if err != nil {
+				return 0, 0, err
+			}
+			if n, err := res.RowsAffected(); err == nil {
+				orphans = int(n)
+			}
+		}
+	}
+
+	var infoUUID string
+	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(uuid,'') FROM Information LIMIT 1").Scan(&infoUUID); err != nil && err != sql.ErrNoRows {
+		return 0, orphans, err
+	}
+	infoUUID = strings.Trim(infoUUID, uuidTrimCutset)
+
+	// Cheap indexed pre-check over distinct listIds using C_NAME_UNIQUE_FOR_LIST
+	// (listId, databaseUuid, trackId). Healthy playlists whose entries already carry
+	// canonical infoUUID require only O(log N) boundary seeks and zero Track probes.
+	dirtyRows, err := tx.QueryContext(ctx, `
+		WITH RECURSIVE distinct_lists(lid) AS (
+			SELECT MIN(listId) FROM PlaylistEntity WHERE listId IS NOT NULL
+			UNION ALL
+			SELECT (SELECT MIN(listId) FROM PlaylistEntity WHERE listId > lid)
+			FROM distinct_lists
+			WHERE lid IS NOT NULL
+		)
+		SELECT d.lid
+		FROM distinct_lists d
+		WHERE d.lid IS NOT NULL
+			AND (
+				(? <> '' AND EXISTS(
+					SELECT 1 FROM PlaylistEntity pe
+					WHERE pe.listId = d.lid AND pe.databaseUuid IS NULL AND pe.trackId > 0
+						AND EXISTS(SELECT 1 FROM Track t WHERE t.id = pe.trackId)
+				))
+				OR EXISTS(
+					SELECT 1 FROM PlaylistEntity pe
+					WHERE pe.listId = d.lid AND pe.databaseUuid < ? AND pe.trackId > 0
+						AND (
+							(? <> '' AND trim(pe.databaseUuid, ' ' || char(9,10,11,12,13)) = '' AND EXISTS(SELECT 1 FROM Track t WHERE t.id = pe.trackId))
+							OR (trim(pe.databaseUuid, ' ' || char(9,10,11,12,13)) <> '' AND pe.databaseUuid <> trim(pe.databaseUuid, ' ' || char(9,10,11,12,13)))
+						)
+				)
+				OR EXISTS(
+					SELECT 1 FROM PlaylistEntity pe
+					WHERE pe.listId = d.lid AND pe.databaseUuid > ? AND pe.trackId > 0
+						AND (
+							(? <> '' AND trim(pe.databaseUuid, ' ' || char(9,10,11,12,13)) = '' AND EXISTS(SELECT 1 FROM Track t WHERE t.id = pe.trackId))
+							OR (trim(pe.databaseUuid, ' ' || char(9,10,11,12,13)) <> '' AND pe.databaseUuid <> trim(pe.databaseUuid, ' ' || char(9,10,11,12,13)))
+						)
+				)
+			)
+		ORDER BY d.lid`, infoUUID, infoUUID, infoUUID, infoUUID, infoUUID)
+	if err != nil {
+		return 0, orphans, err
+	}
+	var dirtyListIDs []int64
+	for dirtyRows.Next() {
+		var lid int64
+		if err := dirtyRows.Scan(&lid); err != nil {
+			dirtyRows.Close()
+			return 0, orphans, err
+		}
+		dirtyListIDs = append(dirtyListIDs, lid)
+	}
+	if err := dirtyRows.Err(); err != nil {
+		dirtyRows.Close()
+		return 0, orphans, err
+	}
+	dirtyRows.Close()
+	if len(dirtyListIDs) == 0 {
+		return 0, orphans, nil
+	}
+
+	type entityRow struct {
+		id         int64
+		trackID    int64
+		dbUUID     string
+		nextID     int64
+		mr         sql.NullInt64
+		localTrack bool
+	}
+	type dedupKey struct {
+		listID  int64
+		uuid    string
+		trackID int64
+	}
+	type keptUpdate struct {
+		id         int64
+		dbUUID     string
+		updateUUID bool
+		mr         sql.NullInt64
+		updateMR   bool
+	}
+
+	var toDelete []int64
+	var toUpdate []keptUpdate
+	for _, lid := range dirtyListIDs {
+		if err := ctx.Err(); err != nil {
+			return 0, orphans, err
+		}
+		rows, err := tx.QueryContext(ctx, `
+			SELECT pe.id, COALESCE(pe.trackId,0), COALESCE(pe.databaseUuid,''),
+				COALESCE(pe.nextEntityId,0), pe.membershipReference,
+				CASE WHEN pe.trackId > 0 AND (pe.databaseUuid IS NULL OR trim(pe.databaseUuid, ' ' || char(9,10,11,12,13)) = '')
+					THEN EXISTS(SELECT 1 FROM Track WHERE id=pe.trackId)
+					ELSE 0 END
+			FROM PlaylistEntity pe
+			WHERE pe.listId = ?
+			ORDER BY pe.id`, lid)
+		if err != nil {
+			return 0, orphans, err
+		}
+		var group []entityRow
+		for rows.Next() {
+			var e entityRow
+			if err := rows.Scan(&e.id, &e.trackID, &e.dbUUID, &e.nextID, &e.mr, &e.localTrack); err != nil {
+				rows.Close()
+				return 0, orphans, err
+			}
+			group = append(group, e)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return 0, orphans, err
+		}
+		rows.Close()
+
+		byID := make(map[int64]entityRow, len(group))
+		links := make([]link, 0, len(group))
+		for _, e := range group {
+			byID[e.id] = e
+			links = append(links, link{id: e.id, group: lid, next: e.nextID})
+		}
+		ordered := order(links)
+		kept := map[dedupKey]int{}
+		updates := make([]keptUpdate, 0, len(ordered))
+		for _, l := range ordered {
+			e := byID[l.id]
+			if e.trackID <= 0 {
+				continue
+			}
+			effUUID := strings.Trim(e.dbUUID, uuidTrimCutset)
+			needsUUID := false
+			if effUUID == "" {
+				if infoUUID != "" && e.localTrack {
+					effUUID = infoUUID
+					needsUUID = true
+				} else {
+					// Unknown source (non-local track or absent Information.uuid):
+					// preserve row, original NULL/blank databaseUuid, and chain position.
+					continue
+				}
+			} else {
+				needsUUID = effUUID != e.dbUUID
+			}
+			k := dedupKey{listID: lid, uuid: effUUID, trackID: e.trackID}
+			if idx, exists := kept[k]; exists {
+				// Always keep the first occurrence in playlist order and drop the later
+				// duplicate before normalizing databaseUuid. Merge nullable membershipReference:
+				// explicit direct (0) beats non-zero and NULL; explicit non-zero beats NULL;
+				// (NULL, NULL) stays NULL.
+				prev := &updates[idx]
+				toDelete = append(toDelete, e.id)
+				if e.mr.Valid {
+					if !prev.mr.Valid || (e.mr.Int64 == 0 && prev.mr.Int64 != 0) {
+						prev.mr = e.mr
+						prev.updateMR = true
+					}
+				}
+				continue
+			}
+			kept[k] = len(updates)
+			updates = append(updates, keptUpdate{
+				id:         e.id,
+				dbUUID:     effUUID,
+				updateUUID: needsUUID,
+				mr:         e.mr,
+			})
+		}
+		for _, u := range updates {
+			if u.updateUUID || u.updateMR {
+				toUpdate = append(toUpdate, u)
+			}
+		}
+	}
+
+	for _, id := range toDelete {
+		if err := ctx.Err(); err != nil {
+			return duplicates, orphans, err
+		}
+		res, err := tx.ExecContext(ctx, "DELETE FROM PlaylistEntity WHERE id=?", id)
+		if err != nil {
+			return duplicates, orphans, err
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			duplicates += int(n)
+		}
+	}
+	for _, u := range toUpdate {
+		if err := ctx.Err(); err != nil {
+			return duplicates, orphans, err
+		}
+		if u.updateUUID && u.updateMR {
+			if _, err := tx.ExecContext(ctx, "UPDATE PlaylistEntity SET databaseUuid=?, membershipReference=? WHERE id=?", u.dbUUID, u.mr, u.id); err != nil {
+				return duplicates, orphans, err
+			}
+		} else if u.updateUUID {
+			if _, err := tx.ExecContext(ctx, "UPDATE PlaylistEntity SET databaseUuid=? WHERE id=?", u.dbUUID, u.id); err != nil {
+				return duplicates, orphans, err
+			}
+		} else if u.updateMR {
+			if _, err := tx.ExecContext(ctx, "UPDATE PlaylistEntity SET membershipReference=? WHERE id=?", u.mr, u.id); err != nil {
+				return duplicates, orphans, err
+			}
+		}
+	}
+	return duplicates, orphans, nil
+}
+
+// syncSqliteSequence advances NULL, non-integer, lagging, or lower conflicting
+// sqlite_sequence entries to at least max(highest_valid_seq, MAX(id)) for Engine's
+// five target AUTOINCREMENT library tables without ever creating sqlite_sequence,
+// touching unrelated tables, or lowering an existing higher counter.
+// Empty tables are skipped only when they have no existing sqlite_sequence row to
+// reconcile, so removing the last orphan never lets conflicting lower counters reuse
+// a previously retired ID while preserving the healthy empty-table fast path.
+func syncSqliteSequence(ctx context.Context, tx *sql.Tx) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	tables := []string{"PlaylistEntity", "Playlist", "Track", "PreparelistEntity", "AlbumArt"}
+	mrows, err := tx.QueryContext(ctx, `
+		SELECT name, upper(COALESCE(sql,''))
+		FROM main.sqlite_master
+		WHERE type='table'
+			AND name IN ('sqlite_sequence', 'PlaylistEntity', 'Playlist', 'Track', 'PreparelistEntity', 'AlbumArt')`)
+	if err != nil {
+		return err
+	}
+	hasSeqTable := false
+	autoTables := map[string]bool{}
+	for mrows.Next() {
+		var name, ddl string
+		if err := mrows.Scan(&name, &ddl); err != nil {
+			mrows.Close()
+			return err
+		}
+		if name == "sqlite_sequence" {
+			hasSeqTable = true
+		} else if strings.Contains(ddl, "AUTOINCREMENT") {
+			autoTables[name] = true
+		}
+	}
+	if err := mrows.Err(); err != nil {
+		mrows.Close()
+		return err
+	}
+	mrows.Close()
+	if !hasSeqTable || len(autoTables) == 0 {
+		return nil
+	}
+
+	activeTables := make([]string, 0, len(tables))
+	placeholders := make([]string, 0, len(tables))
+	args := make([]any, 0, len(tables))
+	for _, table := range tables {
+		if autoTables[table] {
+			activeTables = append(activeTables, table)
+			placeholders = append(placeholders, "?")
+			args = append(args, table)
+		}
+	}
+
+	type seqState struct {
+		present    bool
+		hasInvalid bool
+		hasValid   bool
+		minSeq     int64
+		maxSeq     int64
+	}
+	states := map[string]seqState{}
+	// Filter strictly to the active target tables in SQL before scanning seq so
+	// unrelated tables (e.g. Pack) with non-integer seq values are never touched.
+	srows, err := tx.QueryContext(ctx,
+		"SELECT name, CASE WHEN typeof(seq)='integer' THEN seq ELSE NULL END FROM main.sqlite_sequence WHERE name IN ("+strings.Join(placeholders, ",")+")",
+		args...,
+	)
+	if err != nil {
+		return err
+	}
+	for srows.Next() {
+		var name string
+		var seq sql.NullInt64
+		if err := srows.Scan(&name, &seq); err != nil {
+			srows.Close()
+			return err
+		}
+		st := states[name]
+		st.present = true
+		if !seq.Valid {
+			st.hasInvalid = true
+		} else if !st.hasValid {
+			st.hasValid = true
+			st.minSeq = seq.Int64
+			st.maxSeq = seq.Int64
+		} else {
+			if seq.Int64 < st.minSeq {
+				st.minSeq = seq.Int64
+			}
+			if seq.Int64 > st.maxSeq {
+				st.maxSeq = seq.Int64
+			}
+		}
+		states[name] = st
+	}
+	if err := srows.Err(); err != nil {
+		srows.Close()
+		return err
+	}
+	srows.Close()
+
+	for _, table := range activeTables {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var maxID int64
+		if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(id),0) FROM "+table).Scan(&maxID); err != nil {
+			return err
+		}
+		st := states[table]
+		if maxID <= 0 && !st.present {
+			continue
+		}
+		if !st.present {
+			if _, err := tx.ExecContext(ctx, "INSERT INTO main.sqlite_sequence(name, seq) VALUES(?, ?)", table, maxID); err != nil {
+				return err
+			}
+			continue
+		}
+		target := maxID
+		if target < 0 {
+			target = 0
+		}
+		if st.hasValid && st.maxSeq > target {
+			target = st.maxSeq
+		}
+		if st.hasInvalid || !st.hasValid || st.minSeq < target {
+			if _, err := tx.ExecContext(ctx,
+				"UPDATE main.sqlite_sequence SET seq=? WHERE name=? AND (seq IS NULL OR typeof(seq)<>'integer' OR seq<?)",
+				target, table, target,
+			); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 func HealPlaylistTree(db *sql.DB) error {
 	ctx := context.Background()

@@ -29,26 +29,28 @@ import (
 const DefaultMaxSessions = 50
 
 type Report struct {
-	Mount                string    `json:"mount"`
-	ReadOnly             bool      `json:"read_only"`
-	Healthy              bool      `json:"healthy"`
-	PlaylistEntities     int       `json:"playlist_entities_relinked"`
-	Playlists            int       `json:"playlists_relinked"`
-	Waveforms            int       `json:"waveforms_replaced"`
-	Loops                int       `json:"loops_aligned"`
-	Artwork              int       `json:"artwork_resized"`
-	ArtworkReconciled    int       `json:"artwork_reconciled,omitempty"`
-	OrphanArtwork        int       `json:"orphan_artwork_references"`
-	ReanalysisPending    int       `json:"reanalysis_pending"`
-	PathsNormalized      int       `json:"paths_normalized"`
-	RGBOverviewsMigrated int       `json:"rgb_overviews_migrated,omitempty"`
-	DropboxLocalized     int       `json:"dropbox_localized,omitempty"`
-	HistoryPruned        bool      `json:"history_pruned"`
-	HistoryCleaned       int       `json:"history_cleaned,omitempty"`
-	HistoryCompacted     bool      `json:"history_compacted,omitempty"`
-	ReserveFixed         []string  `json:"reserve_fixed,omitempty"`
-	Warnings             []string  `json:"warnings,omitempty"`
-	CheckedAt            time.Time `json:"checked_at"`
+	Mount                    string    `json:"mount"`
+	ReadOnly                 bool      `json:"read_only"`
+	Healthy                  bool      `json:"healthy"`
+	PlaylistEntities         int       `json:"playlist_entities_relinked"`
+	PlaylistEntityDuplicates int       `json:"playlist_entity_duplicates,omitempty"`
+	PlaylistEntityOrphans    int       `json:"playlist_entity_orphans,omitempty"`
+	Playlists                int       `json:"playlists_relinked"`
+	Waveforms                int       `json:"waveforms_replaced"`
+	Loops                    int       `json:"loops_aligned"`
+	Artwork                  int       `json:"artwork_resized"`
+	ArtworkReconciled        int       `json:"artwork_reconciled,omitempty"`
+	OrphanArtwork            int       `json:"orphan_artwork_references"`
+	ReanalysisPending        int       `json:"reanalysis_pending"`
+	PathsNormalized          int       `json:"paths_normalized"`
+	RGBOverviewsMigrated     int       `json:"rgb_overviews_migrated,omitempty"`
+	DropboxLocalized         int       `json:"dropbox_localized,omitempty"`
+	HistoryPruned            bool      `json:"history_pruned"`
+	HistoryCleaned           int       `json:"history_cleaned,omitempty"`
+	HistoryCompacted         bool      `json:"history_compacted,omitempty"`
+	ReserveFixed             []string  `json:"reserve_fixed,omitempty"`
+	Warnings                 []string  `json:"warnings,omitempty"`
+	CheckedAt                time.Time `json:"checked_at"`
 }
 
 const minDataOnlyProbeTimeout = 500 * time.Millisecond
@@ -417,10 +419,16 @@ func healWithHooksAndResizedContext(
 				return err
 			}
 		}
+		if txReport.PlaylistEntityDuplicates, txReport.PlaylistEntityOrphans, err = healPlaylistEntityIntegrity(ctx, tx); err != nil {
+			return err
+		}
 		if txReport.PlaylistEntities, err = healChains(ctx, tx, false); err != nil {
 			return err
 		}
 		if txReport.Playlists, err = healChains(ctx, tx, true); err != nil {
+			return err
+		}
+		if err = syncSqliteSequence(ctx, tx); err != nil {
 			return err
 		}
 		if !dataOnly {
@@ -1040,6 +1048,8 @@ func finishHistoryHeal(
 			}
 			r.HistoryCleaned = cleaned
 			r.PlaylistEntities += hr.PlaylistEntities
+			r.PlaylistEntityDuplicates += hr.PlaylistEntityDuplicates
+			r.PlaylistEntityOrphans += hr.PlaylistEntityOrphans
 			r.Playlists += hr.Playlists
 			r.Waveforms += hr.Waveforms
 			r.Loops += hr.Loops
@@ -1089,6 +1099,8 @@ func finishHistoryHeal(
 			return r, cerr
 		}
 		r.PlaylistEntities += hr.PlaylistEntities
+		r.PlaylistEntityDuplicates += hr.PlaylistEntityDuplicates
+		r.PlaylistEntityOrphans += hr.PlaylistEntityOrphans
 		r.Playlists += hr.Playlists
 		r.Waveforms += hr.Waveforms
 		r.Loops += hr.Loops
